@@ -628,9 +628,24 @@ static int compile_and_link(const char *in, const char *out)
             fprintf(stderr,
                     "embcc: error: cannot link for %s in one step: the "
                     "driver links x86-64 ELF only\n", target_triple_now());
-        fprintf(stderr,
-                "embcc: compile with -c, then link with embld and the "
-                "board's memory map (-e, -Ttext, -Tdata, -Tstack)\n");
+        /* embld itself links ARMv7-M, RISC-V and AVR images; it reads
+         * no AArch64 object, and Mach-O and COFF are the platform
+         * linker's. Pointing everyone at embld sent those to a tool that
+         * refuses them. */
+        if (target_fmt_get() == TGT_FMT_ELF &&
+            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
+             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64))
+            fprintf(stderr,
+                    "embcc: compile with -c, then link with embld and the "
+                    "board's memory map (-e, -Ttext, -Tdata, -Tstack)\n");
+        else
+            fprintf(stderr,
+                    "embcc: compile with -c, then link with %s\n",
+                    target_fmt_get() == TGT_FMT_ELF
+                        ? "an AArch64 toolchain's linker (embld does not "
+                          "read AArch64 objects)"
+                        : "the platform's linker (ld64 or lld on macOS, "
+                          "link.exe or lld-link on Windows)");
         return 1;
     }
 

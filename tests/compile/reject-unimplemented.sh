@@ -309,8 +309,11 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf; do
         echo "case nolink $t: linked in one step without a memory map"
         exit 1
     fi
+    # embld links the boards, and reads no AArch64 object
+    hint="link with embld"
+    [ "$t" = aarch64-elf ] && hint="embld does not read AArch64 objects"
     echo "$err" | grep -q "cannot link for $t in one step: the driver links x86-64 ELF only" &&
-    echo "$err" | grep -q "link with embld" || {
+    echo "$err" | grep -q "$hint" || {
         echo "case nolink $t: wrong diagnostic:"; echo "$err"; exit 1; }
 done
 echo "case nolink: linking a board image in one step is refused by name"
