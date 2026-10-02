@@ -260,7 +260,11 @@ int target_va_list_is_pointer(void)
 {
     switch (target_get()) {
     case TARGET_X86_64:  return 0;   /* SysV: __va_list_tag, 24 bytes */
-    case TARGET_AARCH64: return 0;   /* AAPCS64: the va_list record, 32 */
+    /* AAPCS64: the va_list record, 32 bytes -- but Apple's arm64 has
+     * none: its va_list is the walking pointer (irg_va_arg_darwin). Read
+     * as a record, va_copy copied 32 bytes OF THE ARGUMENTS, and the
+     * copy walked that snapshot: a fifth argument read garbage. */
+    case TARGET_AARCH64: return g_os == TGT_OS_DARWIN;
     case TARGET_THUMB:   return 1;   /* AAPCS32: void * */
     case TARGET_RISCV32:
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */

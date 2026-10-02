@@ -14,7 +14,9 @@
 #     eight-byte slots (variadic ones keep eight);
 #   * nothing rounds to an even register -- not an __int128, not a
 #     16-aligned struct;
-#   * plain char is signed, wchar_t is int, long double is double.
+#   * plain char is signed, wchar_t is int, long double is double;
+#   * va_list is the walking pointer itself, so va_copy is assignment
+#     (copying 32 bytes as for AAPCS64's record copied the arguments).
 #
 # Each of those made the old compiler's half disagree with clang's.
 set -u
@@ -59,6 +61,7 @@ struct al16 { long x; } __attribute__((aligned(16)));
 struct hf2 { float a, b; };
 struct big24 { long a, b, c; };
 long vstruct(int n, ...);
+long vcopy(int n, ...);
 E
 
 cat > "$out/callee.c" << 'E'
@@ -96,6 +99,15 @@ long vs(int a, int b, int c, int d, int e, int f, int g, int h, char x,
     return r;
 }
 long double ldf(long double a, double b, long double c) { return a * 10 + b * 100 + c * 1000; }
+long vcopy(int n, ...)
+{
+    va_list ap, aq; long a = 0, b = 0;
+    va_start(ap, n); va_copy(aq, ap);
+    for (int i = 0; i < n; i++) a = a * 10 + va_arg(ap, long);
+    for (int i = 0; i < n; i++) b = b * 10 + va_arg(aq, long);
+    va_end(aq); va_end(ap);
+    return a * 100000000 + b;
+}
 long vstruct(int n, ...)
 {
     va_list ap; va_start(ap, n);
@@ -144,6 +156,8 @@ int main(void)
     check(rc(id(5)) + big == -71 + 1000000);
     check(vs(1, 0, 0, 0, 0, 0, 0, 0, 2, 3, 4, 5.0, 6L) == 1 + 20 + 300 + 4000 + 50000 + 600000);
     check(ldf(1.5L, 2, 3.25L) == 15 + 200 + 3250);
+    check(vcopy(8, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L) ==
+          12345678L * 100000000 + 12345678L);
     {
         struct al16 al = { 5 }; struct hf2 h2 = { 1, 2 };
         struct big24 b24 = { 7, 8, 9 };
