@@ -873,7 +873,11 @@ static int *x86_inplace_locals(struct ir_func *fn)
             naddr[i->op == IR_LDVAR ? i->a : i->dst] += 2;   /* named directly */
     }
     char *der = xcalloc((size_t)nv, 1);
-    int busy_until = -1;
+    /* The last call given an in-place argument, and the one before it.
+     * Calls are visited in order, so a window for a LATER call must open
+     * after the last one, and another window for the SAME call (its
+     * arguments sit at different offsets) after the one before that. */
+    int last_call = -1, prev_call = -1;
     for (int c = 0; c < fn->nins; c++) {
         const struct ir_ins *call = &fn->ins[c];
         if (call->op != IR_CALL)
@@ -895,7 +899,10 @@ static int *x86_inplace_locals(struct ir_func *fn)
             /* the address and its constant offsets, and every use */
             memset(der, 0, (size_t)nv);
             der[p] = 1;
-            int ok = 1, first = defn[p];
+            /* `first` is the first access THROUGH it: the `addr` itself
+             * touches nothing, and LICM hoists it to the entry block,
+             * away from the clear and the stores in a loop body. */
+            int ok = 1, first = -1;
             for (int n = 0; n < fn->nins && ok; n++) {
                 const struct ir_ins *i = &fn->ins[n];
                 int ra = i->a >= 0 && i->a < nv && der[i->a];
@@ -923,12 +930,18 @@ static int *x86_inplace_locals(struct ir_func *fn)
                         ok = 0;
                     continue;
                 }
-                if ((ra || rb) && (n < first || n > c))
-                    ok = 0;                     /* used after the call */
+                if (ra || rb) {
+                    if (n > c)
+                        ok = 0;                 /* used after the call */
+                    else if (first < 0 || n < first)
+                        first = n;
+                }
             }
-            if (!ok || first <= busy_until)
+            if (first < 0)
+                first = c;
+            if (!ok || first <= (c == last_call ? prev_call : last_call))
                 continue;
-            /* between the first write and the call: one block, and
+            /* between the first access and the call: one block, and
              * nothing that could write the outgoing area */
             for (int n = first; n < c && ok; n++) {
                 const struct ir_ins *i = &fn->ins[n];
@@ -953,7 +966,10 @@ static int *x86_inplace_locals(struct ir_func *fn)
                     res[v] = -1;
             }
             res[X] = a->stk_off;
-            busy_until = c;
+            if (c != last_call) {
+                prev_call = last_call;
+                last_call = c;
+            }
         }
     }
     free(ndef); free(defn); free(naddr); free(der);
