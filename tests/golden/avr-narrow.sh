@@ -88,7 +88,7 @@ int prog_main(void)
     p16((uint16_t)carry_cmp(0xfff0, 0x20));     /* the carry byte is compared */
     p16((uint16_t)carry_cmp(0x10, 0x20));
     p16((uint16_t)shr_after(-300, 7));          /* shift needs the high byte */
-    p16((uint16_t)shr_after(1000, 90));
+    p16((uint16_t)shr_after(1000, 30));         /* 30000: the high byte, no overflow */
     p16((uint16_t)sext(0x017f));                /* truncate, then sign-extend */
     p16((uint16_t)sext(0x0005));
     p16(wrap8(250));
