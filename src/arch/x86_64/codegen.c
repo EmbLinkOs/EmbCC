@@ -2267,9 +2267,27 @@ static struct afold afold_build(struct ir_func *fn, const int *sd)
             continue;                        /* the offset chain itself */
         if (i->op == IR_ADDR)
             continue;
+        /* A block copy or clear, and a struct argument copied into the
+         * outgoing area, take their addresses as rbp+disp too: building a
+         * compound literal is a memzero and a store per field, all through
+         * an address that otherwise sat in a slot and was reloaded for
+         * each one -- four instructions a field where one does. */
+        if (i->op == IR_MEMZERO || i->op == IR_MEMCPY)
+            continue;
+        if (i->op == IR_CALL) {
+            if (i->indirect)
+                UNFOLD(i->a);                /* the target; a direct call's
+                                              * `a` is not an operand */
+            /* `byref` is AAPCS64's, computed for every target; here
+             * only Win64 copies an aggregate by reference, through the
+             * address's slot. */
+            for (int k = 0; k < i->nargs; k++)
+                if (!(i->argv[k].on_stack && i->argv[k].is_struct &&
+                      !target_win64_abi()))
+                    UNFOLD(i->argv[k].vreg);
+            continue;
+        }
         UNFOLD(i->a); UNFOLD(i->b); UNFOLD(i->c);
-        if (i->op == IR_CALL)
-            for (int k = 0; k < i->nargs; k++) UNFOLD(i->argv[k].vreg);
         /* An asm operand is named nowhere near `a`/`b`/`c`, and the
          * lowering loads every one of them from its slot. Missing these
          * is what crashed asm-clobber.c, asm-inout.c and asm-mem-alu.c
@@ -4136,9 +4154,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * rsp (a slot is rbp-relative, but nothing here needs to know
              * that to be right). */
             if (i->size > X86_REP_MIN) {
-                if (in_reg(i->a)) x86_mov_reg_reg(text, REG_RAX, g_loc[i->a]);
+                if (afolded(i->a)) x86_lea_reg_slot(text, REG_RAX, g_afold.disp[i->a]);
+                else if (in_reg(i->a)) x86_mov_reg_reg(text, REG_RAX, g_loc[i->a]);
                 else              x86_load_slot(text, sd[i->a], 8, 0, 8);
-                if (in_reg(i->b)) x86_mov_reg_reg(text, REG_RCX, g_loc[i->b]);
+                if (afolded(i->b)) x86_lea_reg_slot(text, REG_RCX, g_afold.disp[i->b]);
+                else if (in_reg(i->b)) x86_mov_reg_reg(text, REG_RCX, g_loc[i->b]);
                 else              x86_mov_rcx_slot(text, sd[i->b]);
                 x86_push_reg(text, REG_RSI);
                 x86_push_reg(text, REG_RDI);
@@ -4157,8 +4177,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_pop_reg(text, REG_RSI);
                 break;
             }
-            int dbase, sbase;
-            if (in_reg(i->a)) dbase = g_loc[i->a];
+            int dbase, sbase, ddisp = 0, sdisp = 0;
+            if (afolded(i->a)) { dbase = REG_RBP; ddisp = g_afold.disp[i->a]; }
+            else if (in_reg(i->a)) dbase = g_loc[i->a];
             else { x86_load_slot(text, sd[i->a], 8, 0, 8);
                    x86_mov_reg_reg(text, REG_RCX, REG_RAX); dbase = REG_RCX; }
             /* A source address in memory is read again for each chunk,
@@ -4168,6 +4189,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * rcx are the only registers no pool contains (see the call's
              * struct-argument copy, which re-reads the same way). */
             sbase = in_reg(i->b) ? g_loc[i->b] : -1;
+            if (afolded(i->b)) { sbase = REG_RBP; sdisp = g_afold.disp[i->b]; }
             int off = 0;
             /* sixteen bytes a move where SSE is allowed, through the float
              * scratch, which no pool contains */
@@ -4177,8 +4199,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     x86_load_slot(text, sd[i->b], 8, 0, 8);
                     sb = REG_RAX;
                 }
-                x86_vload_base(text, X86_FSCR, sb, off);
-                x86_vstore_base(text, dbase, off, X86_FSCR);
+                x86_vload_base(text, X86_FSCR, sb, (sb == sbase ? sdisp : 0) + off);
+                x86_vstore_base(text, dbase, ddisp + off, X86_FSCR);
             }
             while (off < i->size) {
                 int chunk = i->size - off;
@@ -4187,9 +4209,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     x86_load_slot(text, sd[i->b], 8, 0, 8);
                     x86_load_reg_mem(text, REG_RAX, REG_RAX, off, chunk);
                 } else {
-                    x86_load_reg_mem(text, REG_RAX, sbase, off, chunk);
+                    x86_load_reg_mem(text, REG_RAX, sbase, sdisp + off, chunk);
                 }
-                x86_store_mem_reg(text, dbase, off, REG_RAX, chunk);
+                x86_store_mem_reg(text, dbase, ddisp + off, REG_RAX, chunk);
                 off += chunk;
             }
             break;
@@ -4197,7 +4219,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_MEMZERO: {
             cg_reset();
             if (i->size > X86_REP_MIN) {        /* see IR_MEMCPY */
-                if (in_reg(i->a)) x86_mov_reg_reg(text, REG_RCX, g_loc[i->a]);
+                if (afolded(i->a)) x86_lea_reg_slot(text, REG_RCX, g_afold.disp[i->a]);
+                else if (in_reg(i->a)) x86_mov_reg_reg(text, REG_RCX, g_loc[i->a]);
                 else              x86_mov_rcx_slot(text, sd[i->a]);
                 x86_push_reg(text, REG_RDI);
                 x86_mov_reg_reg(text, REG_RDI, REG_RCX);
@@ -4213,15 +4236,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_pop_reg(text, REG_RDI);
                 break;
             }
-            int dbase;
-            if (in_reg(i->a)) dbase = g_loc[i->a];
+            int dbase, ddisp = 0;
+            if (afolded(i->a)) { dbase = REG_RBP; ddisp = g_afold.disp[i->a]; }
+            else if (in_reg(i->a)) dbase = g_loc[i->a];
             else { x86_load_slot(text, sd[i->a], 8, 0, 8);
                    x86_mov_reg_reg(text, REG_RCX, REG_RAX); dbase = REG_RCX; }
             int off = 0;
             if (!g_no_sse && i->size >= 16) {           /* as IR_MEMCPY */
                 x86_vzero(text, X86_FSCR);
                 for (; i->size - off >= 16; off += 16)
-                    x86_vstore_base(text, dbase, off, X86_FSCR);
+                    x86_vstore_base(text, dbase, ddisp + off, X86_FSCR);
             }
             if (off < i->size)
                 x86_mov_eax_imm(text, 0, 8);
@@ -4229,7 +4253,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 int chunk = i->size - off;
                 chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4
                       : chunk >= 2 ? 2 : 1;
-                x86_store_mem_reg(text, dbase, off, REG_RAX, chunk);
+                x86_store_mem_reg(text, dbase, ddisp + off, REG_RAX, chunk);
                 off += chunk;
             }
             break;
@@ -4451,7 +4475,10 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * from its slot for every eightbyte, three instructions
                  * where two do: EmbLinkOs's UI passes a 168-byte EmProps
                  * by value to every widget call. */
-                x86_load_reg_mem(text, REG_RCX, REG_RBP, sd[a->vreg], 8);
+                if (afolded(a->vreg))
+                    x86_lea_reg_slot(text, REG_RCX, g_afold.disp[a->vreg]);
+                else
+                    x86_load_reg_mem(text, REG_RCX, REG_RBP, sd[a->vreg], 8);
                 if (sz > X86_REP_MIN) {
                     /* rep movsq, as IR_MEMCPY: the destination is
                      * rsp-relative, so it is computed before the pushes */
