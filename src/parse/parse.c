@@ -621,6 +621,9 @@ static void pcs_not_here(struct parser *ps, const struct attrs *a,
             what);
 }
 
+static struct expr *parse_cond(struct parser *ps);
+static int size_fold(const struct expr *e, long *out);
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
     /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
@@ -719,7 +722,18 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                         }
                     }
                 }
-                if (cur(ps)->kind == TOK_NUM)
+                if (name && attr_is(name, "aligned") &&
+                    cur(ps)->kind != TOK_RPAREN) {
+                    /* A constant EXPRESSION, as for _Alignas: only a
+                     * bare number was read, so aligned(2*32) took the 2,
+                     * aligned((64)) and aligned(sizeof(long long)) the
+                     * no-argument default of 16, and nothing said so. */
+                    struct expr *ae = parse_cond(ps);
+                    if (!size_fold(ae, &arg) || arg <= 0 ||
+                        (arg & (arg - 1)))
+                        parse_error_line(ps, aline,
+                            "aligned wants a constant power of two");
+                } else if (cur(ps)->kind == TOK_NUM)
                     arg = cur(ps)->num;
                 else if (cur(ps)->kind == TOK_STR)
                     sarg = cur(ps)->text;
@@ -1338,9 +1352,12 @@ static void consume_alignas(struct parser *ps)
         } else {
             struct expr *e = parse_cond(ps);
             long v;
-            if (!size_fold(e, &v) || v <= 0)
+            /* C11 6.7.5: zero has no effect; anything else must be a
+             * valid alignment, which is a power of two -- 3 gave .data
+             * an alignment of 3 */
+            if (!size_fold(e, &v) || v < 0 || (v & (v - 1)))
                 parse_error_line(ps, line,
-                           "_Alignas requires a positive constant alignment");
+                           "_Alignas requires a constant power of two");
             a = (int)v;
         }
         expect(ps, TOK_RPAREN, "')' after _Alignas");
