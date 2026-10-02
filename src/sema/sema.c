@@ -1939,6 +1939,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     ty_name(t));
         e->kind = EXPR_NUM;                 /* folds to a size_t constant */
         e->num = ty_align(t);
+        /* Of an OBJECT (GNU __alignof__ of an expression), what the
+         * object was declared with counts too: `int gx aligned(64)` is
+         * 64-aligned, and its type's 4 is what this answered. */
+        if (!e->cast_ty && e->rhs) {
+            const struct expr *x = e->rhs;
+            int ua = 0;
+            if (x->kind == EXPR_VAR && x->gref)
+                ua = x->gref->user_align;
+            else if (x->kind == EXPR_VAR && x->var_index >= 0 &&
+                     x->var_index < sc->n)
+                ua = sc->vars[x->var_index].user_align;
+            else if (x->kind == EXPR_MEMBER && x->memb)
+                ua = x->memb->user_align;
+            if (ua > e->num)
+                e->num = ua;
+        }
         e->rhs = NULL;
         e->ty = ty_base(TY_LONG, 1);
         break;
