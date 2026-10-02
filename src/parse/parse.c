@@ -2060,6 +2060,13 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
             parse_static_assert(ps);
             continue;
         }
+        /* GNU C also takes attributes at the START of a member
+         * declaration -- `__attribute__((aligned(16))) char buf[40];` --
+         * and they apply to every declarator in it, as trailing ones apply
+         * to theirs. gcc and clang accept both; this refused the first. */
+        struct attrs lmat = { 0 };
+        parse_attributes(ps, &lmat);
+        pcs_not_here(ps, &lmat, "a member");
         /* allow_body: nested struct/union definitions are legal C */
         struct type *spec = parse_type_spec(ps, 1);
         if (!spec)
@@ -2140,6 +2147,8 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
             ms[n].bit_width = bit_width;
             ms[n].user_align = mat.aligned > ps->alignas_out
                                ? mat.aligned : ps->alignas_out;
+            if (lmat.aligned > ms[n].user_align)
+                ms[n].user_align = lmat.aligned;
             ps->alignas_out = 0;
             n++;
             if (cur(ps)->kind == TOK_COMMA) {
