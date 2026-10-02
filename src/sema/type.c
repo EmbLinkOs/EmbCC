@@ -80,6 +80,22 @@ struct type *ty_volatile(struct type *t)
     return v;
 }
 
+/* `_Atomic T`: volatile as well (never merged or removed), and every
+ * access goes through the atomic paths in irgen. */
+struct type *ty_atomic(struct type *t)
+{
+    if (!t || t->is_atomic)
+        return t;
+    struct type *a = ty_volatile(t);
+    if (a == t) {                /* already volatile: copy it again */
+        a = xcalloc(1, sizeof *a);
+        *a = *t;
+        a->canon = t->canon ? t->canon : t;
+    }
+    a->is_atomic = 1;
+    return a;
+}
+
 struct type *ty_ptr(struct type *pointee)
 {
     struct type *t = xcalloc(1, sizeof *t);

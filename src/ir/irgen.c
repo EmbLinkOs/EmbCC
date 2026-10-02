@@ -1283,7 +1283,18 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
  * brackets each exclusive-access loop with barriers of its own.
  */
 
-static int atomic_arm(void) { return target_get() == TARGET_AARCH64; }
+/* A target whose memory order is weaker than sequential consistency, so a
+ * seq_cst load needs a barrier after it and a store one before it as well
+ * as after: aarch64, ARMv7-M and RISC-V. (x86-64's stores need only the
+ * one after; AVR is one core that does not reorder.) This was aarch64
+ * alone, which left a seq_cst load or store on the M-profile parts with
+ * two cores, and on harts, unordered. */
+static int atomic_arm(void)
+{
+    int t = target_get();
+    return t == TARGET_AARCH64 || t == TARGET_THUMB ||
+           t == TARGET_RISCV32 || t == TARGET_RISCV64;
+}
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
  * its type says — a signed char object holding -1 must read back as -1 — and
@@ -1302,10 +1313,28 @@ static int atomic_result(struct ir_func *fn, int v, const struct type *t)
     return x->dst;
 }
 
+/* The widest object this target reads or writes in ONE access that an
+ * interrupt or another core cannot split: a pointer's width -- and a byte
+ * on AVR, whose 16-bit loads are two. An atomic load or store wider than
+ * that would be two accesses with a window between them, so it is
+ * refused, as the backends refuse a read-modify-write they cannot do. */
+static void atomic_width_ok(struct ir_func *fn, const struct type *t,
+                            int line)
+{
+    int max = target_get() == TARGET_AVR ? 1 : target_ptr_size();
+    if (ty_size(t) > max)
+        diag_fatal(fn->file, line,
+                   "an atomic access of %d bytes is not one access on this "
+                   "target (it moves %d at once): the halves could be "
+                   "split by an interrupt or another core", ty_size(t), max);
+}
+
 /* An atomic access is never merged with another or removed: vol says so to
  * the optimizer (and changes nothing codegen emits). */
-static int atomic_load(struct ir_func *fn, int addr, const struct type *t)
+static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
+                       int line)
 {
+    atomic_width_ok(fn, t, line);
     int v = emit_load(fn, addr, t);
     fn->ins[fn->nins - 1].vol = 1;
     if (atomic_arm())
@@ -1314,8 +1343,9 @@ static int atomic_load(struct ir_func *fn, int addr, const struct type *t)
 }
 
 static void atomic_store(struct ir_func *fn, int addr, int val,
-                         const struct type *t)
+                         const struct type *t, int line)
 {
+    atomic_width_ok(fn, t, line);
     if (atomic_arm())
         emit(fn)->op = IR_FENCE;          /* release */
     emit_store(fn, addr, val, t);
@@ -1348,6 +1378,167 @@ static int atomic_value(struct ir_func *fn, struct expr *arg,
 {
     return gen_convert(fn, gen_expr(fn, arg), arg->ty, t);
 }
+
+/* An _Atomic lvalue. C11 gives the plain operators on one seq_cst
+ * atomic semantics: a read is an atomic load, `=` an atomic store, and
+ * `++`, `--` and `op=` one atomic read-modify-write. They go through the
+ * helpers above, as the __atomic builtins do; EmbCC used to treat
+ * `_Atomic` as `volatile`, which made `x++` a plain load, add and store
+ * -- an increment another core or an interrupt could lose. */
+static int atomic_lv(const struct expr *e)
+{
+    return e && e->ty && e->ty->is_atomic && !e->undecayed &&
+           e->ty->kind != TY_ARRAY;
+}
+
+static void atomic_scalar_ok(struct ir_func *fn, const struct expr *lv,
+                             const char *what)
+{
+    if ((!ty_is_integer(lv->ty) && lv->ty->kind != TY_PTR) ||
+        expr_is_bitfield(lv))
+        diag_fatal(fn->file, lv->line,
+                   "%s an _Atomic %s is not supported: EmbCC makes the "
+                   "operators atomic for integers and pointers only",
+                   what, ty_name(lv->ty));
+    if (lv->ty->kind == TY_PTR && ty_is_vla(lv->ty->pointee))
+        diag_fatal(fn->file, lv->line,
+                   "%s an _Atomic pointer to a variable-length array is "
+                   "not supported", what);
+    atomic_width_ok(fn, lv->ty, lv->line);
+}
+
+static int atomic_read(struct ir_func *fn, struct expr *e)
+{
+    atomic_scalar_ok(fn, e, "reading");
+    return atomic_load(fn, gen_addr(fn, e), e->ty, e->line);
+}
+
+/* x++, x--, ++x, --x: one fetch-and-add of the step */
+static int atomic_incdec(struct ir_func *fn, struct expr *e)
+{
+    struct type *t = e->lhs->ty;
+    atomic_scalar_ok(fn, e->lhs, "incrementing");
+    int w = ty_w(t);
+    long step = (long)e->delta * (t->kind == TY_PTR ? ty_size(t->pointee) : 1);
+    int addr = gen_addr(fn, e->lhs);
+    int old = atomic_result(fn, atomic_rmw(fn, IR_XADD, 0, addr,
+                                           emit_const(fn, step, w), t), t);
+    int nv = atomic_result(fn, emit_bin(fn, IR_ADD, old,
+                                        emit_const(fn, step, w), w,
+                                        ty_signed_int(t)), t);
+    return e->is_post ? old : nv;
+}
+
+static int compound_value(struct ir_func *fn, struct expr *e, int cur,
+                          int rv);
+
+/* x op= v: one atomic read-modify-write for + - & | ^ (and a pointer's
+ * += -=); for the others, the value is computed as the plain operator
+ * computes it and swapped in only if the object still holds what it was
+ * computed from -- a compare-and-swap loop. */
+static int atomic_compound(struct ir_func *fn, struct expr *e)
+{
+    struct type *lt = e->lhs->ty;
+    atomic_scalar_ok(fn, e->lhs, "a compound assignment to");
+    int addr = gen_addr(fn, e->lhs);
+    int rv = gen_expr(fn, e->rhs);
+    int w = ty_w(lt), sign = ty_signed_int(lt);
+    int opc = e->op == B_AND ? '&' : e->op == B_OR ? '|'
+            : e->op == B_XOR ? '^' : 0;
+    if (lt->kind == TY_PTR || opc || e->op == B_ADD || e->op == B_SUB) {
+        int v;
+        if (lt->kind == TY_PTR) {
+            int esz = ty_size(lt->pointee);
+            v = esz > 1 ? emit_bin(fn, IR_MUL, rv, emit_const(fn, esz, AW),
+                                   AW, 1)
+                        : rv;
+        } else {
+            v = gen_convert(fn, rv, e->cast_ty, lt);
+        }
+        int old;
+        if (opc) {
+            old = atomic_rmw(fn, IR_ARMW, opc, addr, v, lt);
+        } else {
+            int add = e->op == B_SUB
+                ? emit_bin(fn, IR_SUB, emit_const(fn, 0, w), v, w, 1) : v;
+            old = atomic_rmw(fn, IR_XADD, 0, addr, add, lt);
+        }
+        old = atomic_result(fn, old, lt);
+        enum ir_op o = opc == '&' ? IR_AND : opc == '|' ? IR_OR
+                     : opc == '^' ? IR_XOR
+                     : e->op == B_SUB ? IR_SUB : IR_ADD;
+        return atomic_result(fn, emit_bin(fn, o, old, v, w, sign), lt);
+    }
+    int exp = new_temp(fn);
+    struct ir_ins *m = emit(fn);
+    m->op = IR_MOV;
+    m->a = atomic_load(fn, addr, lt, e->line);
+    m->dst = exp;
+    m->w = w;
+    int top = new_label(fn);
+    emit_label(fn, top);
+    int res = compound_value(fn, e, exp, rv);
+    struct ir_ins *c = emit(fn);
+    c->op = IR_CAS;
+    c->a = addr;
+    c->b = exp;
+    c->c = res;
+    c->size = ty_size(lt);
+    c->w = w;
+    c->sign = sign;
+    c->dst = new_temp(fn);
+    int seen = atomic_result(fn, c->dst, lt);
+    int ok = emit_cmp(fn, B_EQ, seen, exp, w, sign);
+    m = emit(fn);
+    m->op = IR_MOV;
+    m->a = seen;
+    m->dst = exp;
+    m->w = w;
+    emit_brz(fn, ok, 4, top);
+    return res;
+}
+
+/* `x op= v`'s new value from x's current one (cur) and v's (rv), as
+ * the plain operator computes it: a pointer steps by elements, anything
+ * else is computed in the operator's type (cast_ty) and converted back. */
+static int compound_value(struct ir_func *fn, struct expr *e, int cur,
+                          int rv)
+{
+    struct type *lt = e->lhs->ty;
+    int res;
+    if (lt->kind == TY_PTR) {
+        int esz = ty_size(lt->pointee);
+        /* At the ADDRESS width, as every other pointer operation
+         * here: this was 8, so `p += n` on a 32-bit target was a
+         * 64-bit add of a four-byte pointer. It came out right only
+         * because the backends read the missing high half from
+         * whatever sat beside the pointer's slot, and the low half of
+         * a sum does not depend on it; once the pointer lived in a
+         * register, there was no beside. */
+        if (ty_is_vla(lt->pointee))
+            rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
+                          AW, 1);
+        else if (esz > 1) {
+            int k = emit_const(fn, esz, AW);
+            rv = emit_bin(fn, IR_MUL, rv, k, AW, 1);
+        }
+        return emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB, cur, rv,
+                        AW, 1);
+    }
+    struct type *ct = e->cast_ty;
+    int cv = gen_convert(fn, cur, lt, ct);
+    static const enum ir_op map[] = {
+        IR_ADD, IR_SUB, IR_MUL, IR_DIV, IR_MOD,
+        IR_AND, IR_OR, IR_XOR, IR_SHL, IR_SHR,
+    };
+    enum ir_op o = map[e->op - B_ADD];
+    if (ty_is_float(ct))
+        res = emit_fbin(fn, o, cv, rv, ty_size(ct));
+    else
+        res = san_bin(fn, o, cv, rv, ty_w(ct), ty_signed_int(ct));
+    return gen_convert(fn, res, ct, lt);
+}
+
 
 /* dst = the value *addr held, *addr = des if it was exp (IR_CAS16) */
 static int cas16(struct ir_func *fn, int addr, int exp, int des)
@@ -1500,12 +1691,13 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
 
     switch (ak) {
     case AK_LOAD_N:
-        return atomic_load(fn, addr, obj);
+        return atomic_load(fn, addr, obj, e->line);
     case AK_STORE_N:
-        atomic_store(fn, addr, atomic_value(fn, e->args[1], obj), obj);
+        atomic_store(fn, addr, atomic_value(fn, e->args[1], obj), obj,
+                     e->line);
         return -1;
     case AK_SYNC_LOCK_RELEASE: case AK_CLEAR:
-        atomic_store(fn, addr, emit_const(fn, 0, w), obj);
+        atomic_store(fn, addr, emit_const(fn, 0, w), obj, e->line);
         return -1;
     case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS: {
         int val = atomic_value(fn, e->args[1], obj);
@@ -1571,12 +1763,12 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
     }
     case AK_LOAD: {                                   /* *ret = atomic *p */
         int ret = gen_expr(fn, e->args[1]);
-        emit_store(fn, ret, atomic_load(fn, addr, obj), obj);
+        emit_store(fn, ret, atomic_load(fn, addr, obj, e->line), obj);
         return -1;
     }
     case AK_STORE: {                                  /* atomic *p = *val */
         int vp = gen_expr(fn, e->args[1]);
-        atomic_store(fn, addr, emit_load(fn, vp, obj), obj);
+        atomic_store(fn, addr, emit_load(fn, vp, obj), obj, e->line);
         return -1;
     }
     case AK_EXCHANGE: {                               /* *ret = xchg(p, *val) */
@@ -1899,6 +2091,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->dst = new_temp(fn);
             return i->dst;
         }
+        if (atomic_lv(e))
+            return atomic_read(fn, e);
         /* arrays and structs are represented by their address */
         if (e->undecayed || e->ty->kind == TY_STRUCT)
             return gen_addr(fn, e);
@@ -1913,6 +2107,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int v;
         if (e->memb->is_bitfield)
             return bf_load(fn, addr, e->memb);
+        if (atomic_lv(e)) {
+            atomic_scalar_ok(fn, e, "reading");
+            return atomic_load(fn, addr, e->ty, e->line);
+        }
         if (e->undecayed || e->ty->kind == TY_STRUCT)
             return addr; /* array member decays; nested struct is addr */
         v = emit_load(fn, addr, e->ty);
@@ -1926,6 +2124,13 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         return emit_load(fn, addr, e->ty);
     }
     case EXPR_ASSIGN: {
+        if (atomic_lv(e->lhs)) {
+            atomic_scalar_ok(fn, e->lhs, "assigning to");
+            int addr = gen_addr(fn, e->lhs);
+            int v = gen_expr(fn, e->rhs);
+            atomic_store(fn, addr, v, e->lhs->ty, e->line);
+            return v;
+        }
         if (e->ty->kind == TY_STRUCT) {
             /* a struct assignment is a copy of its bytes */
             int dst = gen_addr(fn, e->lhs);
@@ -1952,6 +2157,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         return v;
     }
     case EXPR_INCDEC: {
+        if (atomic_lv(e->lhs))
+            return atomic_incdec(fn, e);
         struct type *t = e->ty;
         int scale = t->kind == TY_PTR ? ty_size(t->pointee) : 1;
         int vla_step = t->kind == TY_PTR && ty_is_vla(t->pointee);
@@ -2264,6 +2471,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_GENERIC:
         break; /* sema replaced it with the selected expression */
     case EXPR_COMPOUND: {
+        if (atomic_lv(e->lhs))
+            return atomic_compound(fn, e);
         /* the address is computed ONCE — the whole reason this is not
          * desugared to `x = x op y` */
         struct type *lt = e->lhs->ty;
@@ -2274,40 +2483,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                 : is_bf ? bf_load(fn, addr, e->lhs->memb)
                         : emit_load(fn, addr, lt);
         int rv = gen_expr(fn, e->rhs);
-        int res;
-        if (lt->kind == TY_PTR) {
-            int esz = ty_size(lt->pointee);
-            /* At the ADDRESS width, as every other pointer operation
-             * here: this was 8, so `p += n` on a 32-bit target was a
-             * 64-bit add of a four-byte pointer. It came out right only
-             * because the backends read the missing high half from
-             * whatever sat beside the pointer's slot, and the low half of
-             * a sum does not depend on it; once the pointer lived in a
-             * register, there was no beside. */
-            if (ty_is_vla(lt->pointee))
-                rv = emit_bin(fn, IR_MUL, rv, type_size_val(fn, lt->pointee),
-                              AW, 1);
-            else if (esz > 1) {
-                int k = emit_const(fn, esz, AW);
-                rv = emit_bin(fn, IR_MUL, rv, k, AW, 1);
-            }
-            res = emit_bin(fn, e->op == B_ADD ? IR_ADD : IR_SUB, cur, rv,
-                           AW, 1);
-        } else {
-            struct type *ct = e->cast_ty;
-            int cv = gen_convert(fn, cur, lt, ct);
-            static const enum ir_op map[] = {
-                IR_ADD, IR_SUB, IR_MUL, IR_DIV, IR_MOD,
-                IR_AND, IR_OR, IR_XOR, IR_SHL, IR_SHR,
-            };
-            enum ir_op o = map[e->op - B_ADD];
-            if (ty_is_float(ct))
-                res = emit_fbin(fn, o, cv, rv, ty_size(ct));
-            else
-                res = san_bin(fn, o, cv, rv, ty_w(ct),
-                              ty_signed_int(ct));
-            res = gen_convert(fn, res, ct, lt);
-        }
+        int res = compound_value(fn, e, cur, rv);
         if (local)
             emit_stvar(fn, e->lhs->var_index, res, lt);
         else if (is_bf)
@@ -2317,6 +2493,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         return res;
     }
     case EXPR_COND: {
+
         int dst = new_temp(fn);
         int l_else = new_label(fn);
         int l_end = new_label(fn);

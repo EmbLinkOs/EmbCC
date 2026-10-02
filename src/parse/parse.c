@@ -287,8 +287,9 @@ static int tok_is_type_start(enum tok_kind k)
  * volatile access (MMIO). Returns which were among the qualifiers
  * consumed: Q_VOL for volatile, Q_CONST for const -- the latter decides
  * whether a declared object is read-only (struct parser's q_top). */
-#define Q_VOL   1
-#define Q_CONST 2
+#define Q_VOL    1
+#define Q_CONST  2
+#define Q_ATOMIC 4
 static int skip_quals(struct parser *ps)
 {
     int vol = 0;
@@ -305,7 +306,7 @@ static int skip_quals(struct parser *ps)
             struct lexer save = ps->lx;
             advance(ps);
             if (cur(ps)->kind == TOK_LPAREN) { ps->lx = save; break; }
-            vol |= Q_VOL; continue;
+            vol |= Q_VOL | Q_ATOMIC; continue;
         }
         break;
     }
@@ -1301,6 +1302,8 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
     /* set AFTER the inner parse, which may hold types of its own (a
      * struct body, typeof): these are this declaration's specifiers */
     ps->spec_const = ps->q_top = (q & Q_CONST) != 0;
+    if (t && (q & Q_ATOMIC))
+        return ty_atomic(t);
     return (t && (q & Q_VOL)) ? ty_volatile(t) : t;   /* volatile reaches the type */
 }
 
@@ -1371,7 +1374,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         expect(ps, TOK_LPAREN, "'(' after _Atomic");
         struct type *t = parse_type_name(ps, parse_type_spec(ps, 0));
         expect(ps, TOK_RPAREN, "')' after _Atomic(type)");
-        *vol |= Q_VOL;
+        *vol |= Q_VOL | Q_ATOMIC;
         return t;
     }
     /* struct/union/enum first (cannot mix with other specifiers) */
@@ -1457,7 +1460,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             struct lexer save = ps->lx;
             advance(ps);
             if (cur(ps)->kind == TOK_LPAREN) { ps->lx = save; break; }
-            *vol |= Q_VOL; continue;
+            *vol |= Q_VOL | Q_ATOMIC; continue;
         }
         else break;
         any++;
@@ -1608,7 +1611,9 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * every use. That volatile was dropped, so a loop polling a
          * pointer an interrupt handler advances read it once. */
         int q = skip_quals(ps);
-        if (q & Q_VOL)
+        if (q & Q_ATOMIC)
+            t = ty_atomic(t);
+        else if (q & Q_VOL)
             t = ty_volatile(t);
         if (q & Q_CONST)
             ps->q_top = 1;

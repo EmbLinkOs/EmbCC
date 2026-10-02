@@ -56,6 +56,8 @@ struct type {
                              * must not be CSE'd/removed (MMIO). Set on the
                              * ACCESSED type — the pointee of a volatile pointer,
                              * or a volatile variable. Ignored by ty_equal. */
+    int is_atomic;          /* `_Atomic`: a volatile copy whose reads, writes
+                             * and read-modify-writes are atomic (irgen) */
     struct type *canon;     /* a volatile COPY points at the unqualified original
                              * (structs compare by identity, so equality follows
                              * this); NULL on an original. */
@@ -118,6 +120,7 @@ struct type *ty_int_of_size(int size, int is_unsigned);
  * interned singletons, so this returns a fresh non-interned node — safe because
  * nothing compares types by pointer identity (ty_equal compares fields). */
 struct type *ty_volatile(struct type *t);
+struct type *ty_atomic(struct type *t);
 struct type *ty_ptr(struct type *pointee);
 struct type *ty_array(struct type *elem, int count);
 /* SysV x86-64: a struct that is exactly one long double (X87 + X87UP) —
