@@ -47,6 +47,15 @@ __attribute__((noinline)) long live_across(struct s1000 *d, const struct s1000 *
     return x1 + 2 * x2 + 3 * x3 + 4 * x4 + 5 * x5 + 6 * x6 + 7 * x7 + 8 * x8 + d->b[999];
 }
 
+/* by value: a struct argument goes to the outgoing area, from a source
+ * whose address is loaded once; past 256 bytes with rep movsq, while the
+ * scalar arguments around it are still in the registers it borrows */
+struct props { long v[21]; };                       /* 168 bytes, like EmProps */
+__attribute__((noinline)) long take_props(long a, long b, struct props p, long c)
+{ long s = a * 3 + b * 5 + c * 7; for (int k = 0; k < 21; k++) s += p.v[k] * (k + 1); return s; }
+__attribute__((noinline)) long take_big(long a, struct s1000 p, long b, struct s257 q, long c)
+{ long s = a - b + c; for (int k = 0; k < 1000; k++) s += p.b[k] * (k & 7); for (int k = 0; k < 257; k++) s ^= (long)q.b[k] << (k & 15); return s; }
+
 int main(void)
 {
     int bad = 0;
@@ -65,5 +74,17 @@ int main(void)
     long want = (a * 3 + b) + 2 * (b * 5 + c) + 3 * (c * 7 + e) + 4 * (e * 11 + f) +
                 5 * (f * 13 + g) + 6 * (g * 17 + a) + 7 * (a ^ g) + 8 * (b ^ f) + s.b[999];
     if (live_across(&d, &s, a, b, c, e, f, g) != want || !same(d.b, s.b, 1000)) bad |= 16;
+    {
+        struct props p;
+        long want2 = 11 * 3 + -4 * 5 + 99 * 7;
+        for (int k = 0; k < 21; k++) { p.v[k] = k * k - 50; want2 += p.v[k] * (k + 1); }
+        if (take_props(11, -4, p, 99) != want2) bad |= 32;
+        static struct s1000 bp; static struct s257 bq;
+        fill(bp.b, 1000); fill(bq.b, 257);
+        long w3 = 5 - 6 + 7;
+        for (int k = 0; k < 1000; k++) w3 += bp.b[k] * (k & 7);
+        for (int k = 0; k < 257; k++) w3 ^= (long)bq.b[k] << (k & 15);
+        if (take_big(5, bp, 6, bq, 7) != w3) bad |= 64;
+    }
     return bad ? 100 + bad : 42;
 }

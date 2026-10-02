@@ -4427,21 +4427,40 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     continue;
                 }
                 int sz = a->size;
+                /* The source address in rcx for the whole copy: rax and
+                 * rcx are in no pool, and nothing in this stretch of the
+                 * call sequence -- the Win64 by-reference copy above does
+                 * the same -- has put anything in rcx yet. It was re-read
+                 * from its slot for every eightbyte, three instructions
+                 * where two do: EmbLinkOs's UI passes a 168-byte EmProps
+                 * by value to every widget call. */
+                x86_load_reg_mem(text, REG_RCX, REG_RBP, sd[a->vreg], 8);
+                if (sz > X86_REP_MIN) {
+                    /* rep movsq, as IR_MEMCPY: the destination is
+                     * rsp-relative, so it is computed before the pushes */
+                    x86_lea_reg_basedisp(text, REG_RAX, REG_RSP, a->stk_off, 8);
+                    x86_push_reg(text, REG_RSI);
+                    x86_push_reg(text, REG_RDI);
+                    x86_mov_reg_reg(text, REG_RDI, REG_RAX);
+                    x86_mov_reg_reg(text, REG_RSI, REG_RCX);
+                    x86_mov_reg_imm(text, REG_RCX, sz / 8, 4);
+                    x86_rep_movsq(text);
+                    for (int off = 0; off < sz % 8; ) {
+                        int rest = sz % 8 - off;
+                        int chunk = rest >= 4 ? 4 : rest >= 2 ? 2 : 1;
+                        x86_load_reg_mem(text, REG_RAX, REG_RSI, off, chunk);
+                        x86_store_mem_reg(text, REG_RDI, off, REG_RAX, chunk);
+                        off += chunk;
+                    }
+                    x86_pop_reg(text, REG_RDI);
+                    x86_pop_reg(text, REG_RSI);
+                    continue;
+                }
                 for (int off = 0; off < sz; ) {
                     int chunk = sz - off;
                     chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4
                           : chunk >= 2 ? 2 : 1;
-                    /* The source address is re-read for each chunk
-                     * rather than parked in a second register, because
-                     * there is no second register to park it in: rax is
-                     * the only GPR no pool contains, and rcx is the one
-                     * this backend's shifts, atomics and struct copies
-                     * all reach for. Three instructions an eightbyte
-                     * instead of two, on an argument class the corpus
-                     * uses eleven times -- and never the wrong
-                     * register. */
-                    x86_load_slot(text, sd[a->vreg], 8, 0, 8);
-                    x86_load_reg_mem(text, REG_RAX, REG_RAX, off, chunk);
+                    x86_load_reg_mem(text, REG_RAX, REG_RCX, off, chunk);
                     x86_store_mem_reg(text, REG_RSP,
                                       a->stk_off + off, REG_RAX, chunk);
                     off += chunk;
