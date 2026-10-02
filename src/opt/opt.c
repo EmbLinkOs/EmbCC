@@ -8396,7 +8396,7 @@ static int pass_swthread(struct ir_func *fn)
  * One rebuild handles both: emit each reachable block, replacing a resolved
  * branch with a jump to its live successor (or nothing when that successor is
  * the fall-through), and skip unreachable blocks entirely. */
-static int pass_sccp(struct ir_func *fn)
+static int sccp_core(struct ir_func *fn, int fold_branches)
 {
     if (fn->nins == 0)
         return 0;
@@ -8413,7 +8413,8 @@ static int pass_sccp(struct ir_func *fn)
         if (bb[b].end <= bb[b].start)
             continue;
         struct ir_ins *t = &fn->ins[bb[b].end - 1];
-        if ((t->op != IR_BRZ && t->op != IR_BRNZ) || t->a < 0 ||
+        if (!fold_branches ||
+            (t->op != IR_BRZ && t->op != IR_BRNZ) || t->a < 0 ||
             d.cnt[t->a] != 1 || d.ins[t->a] < 0 ||
             fn->ins[d.ins[t->a]].op != IR_CONST)
             continue;
@@ -8504,6 +8505,24 @@ static int pass_sccp(struct ir_func *fn)
     free(live_only); free(reach); free(wl); free(l2b);
     free_cfg(bb, nbb); free_defs(&d);
     return 1;
+}
+
+static int pass_sccp(struct ir_func *fn)
+{
+    return sccp_core(fn, 1);
+}
+
+/* Only the second half: drop the blocks nothing reaches. mem2reg needs
+ * it -- its dominators are wrong over a block no path enters, so it
+ * refused any function with one -- and irgen leaves them wherever a
+ * statement follows a jump: the `break` after a `return` or `continue`,
+ * the code after a call to a noreturn function, the end of a loop that
+ * never exits. Across lib/libc and EmbLinkOs that was 149 functions --
+ * sin, cos, pow and most of fdlibm among them -- whose every local
+ * stayed in memory through the whole optimizer. */
+static int drop_unreachable(struct ir_func *fn)
+{
+    return sccp_core(fn, 0);
 }
 
 /* ---- local store-forwarding (a lightweight mem2reg) ----
@@ -11572,8 +11591,10 @@ static void opt_func(struct ir_func *fn)
     int sroa_twice = g_sroa && g_mem2reg && cfg_ok && !has_igoto;
     if (g_sroa)
         pass_sroa(fn, !sroa_twice);
-    if (g_mem2reg && cfg_ok && !has_igoto)
+    if (g_mem2reg && cfg_ok && !has_igoto) {
+        drop_unreachable(fn);     /* or mem2reg refuses the function */
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
+    }
     /* And a second look at the aggregates, now that mem2reg has run.
      * `int *p = &s.x; ... *p` hides the object behind a pointer
      * VARIABLE, which is memory like any other, so the first look sees
