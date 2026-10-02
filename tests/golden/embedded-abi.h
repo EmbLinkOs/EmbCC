@@ -59,6 +59,13 @@ int nat_stk(int a, int b, int c, int d, int e, int f, int g, int h, int i,
 
 /* Variadic, where the ABI question is whether the callee's register
  * save area lines up with where the caller left the arguments. */
+/* 32-bit values across the call at RV64, where the psABI has the sender
+ * sign-extend them, unsigned too: a value narrowed from a 64-bit one is
+ * still in its 64-bit form until something extends it. */
+unsigned nar_ret(unsigned long long v);
+int nar_ismax(unsigned u);
+int nar_lt(unsigned a, unsigned b);
+
 int vsum(int n, ...);
 long long vmix(int n, ...);
 int vafter4(int a, int b, int c, int d, ...);

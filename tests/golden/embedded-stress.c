@@ -137,9 +137,29 @@ static long scaled(int i, int j)
     return sh[(i * 5) & 15] + sc[(j * 3) & 15] + uc[(i + j) & 15] + sh[(j * 7) & 15] * sc[i & 15];
 }
 
-/* A select's condition has its own width: 2^32 is true as a 64-bit
- * condition and false as a 32-bit one narrowed from it. */
+/* A 32-bit value narrowed from a 64-bit one is the same register, and at
+ * RV64 a 32-bit value is kept SIGN-EXTENDED -- unsigned too -- so a
+ * compare, a branch, a jump table's bound and a select reading the
+ * narrowed value have to restore that first. A select's condition has its
+ * own width besides: 2^32 is true as a 64-bit condition and false as a
+ * 32-bit one narrowed from it. */
+static volatile unsigned long long nar = 0x12345678fffffffeULL;
 static volatile unsigned long long pow32 = 0x100000000ULL;
+static int narrowed(unsigned long long v)
+{
+    unsigned u = (unsigned)v;
+    int r = (u == 0xfffffffeu) + 2 * (u > 0x7fffffffu) + 4 * ((int)u < 0);
+    if (u) r += 8;
+    return r;
+}
+static int dense(unsigned long long v)
+{
+    switch ((unsigned)v) {
+    case 0: return 10; case 1: return 11; case 2: return 12;
+    case 3: return 13; case 4: return 14; case 5: return 15;
+    default: return 99;
+    }
+}
 static int pick64(unsigned long long c, int a, int b)
 { int r; if (c) r = a; else r = b; return r; }
 static long long pick64w(unsigned long long c, long long a, long long b)
@@ -224,6 +244,8 @@ int main(void)
       for (int v = -1; v <= 5; v++) t = t * 7 + dispatch2(v);
       putn(t); nl(); }
     putn(big_copy(3)); putn(big_copy(200)); nl();
+    putn(narrowed(nar)); putn(narrowed(pow32)); putn(narrowed(pow32 + 2));
+    putn(dense(pow32 + 2)); putn(dense(nar));
     putn(pick64(pow32, 1, 2)); putn((long)pick64w(pow32, 3, 4));
     putn(pick32(pow32, 5, 6)); putn((long)pick32w(pow32, 7, 8)); nl();
 
