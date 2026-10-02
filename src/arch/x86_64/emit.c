@@ -1683,6 +1683,15 @@ void x86_call_r11(struct code *c)
 
 /* movdqu xmm, [base+disp] / movdqu [base+disp], xmm. Unaligned, because
  * the address comes from the program (&a[i] for any i), not from us. */
+/* xmm = 0: pxor xmm, xmm. */
+void x86_vzero(struct code *c, int xmm)
+{
+    code_byte(c, 0x66);
+    if (xmm >= 8) code_byte(c, 0x45);           /* REX.R and REX.B */
+    code_byte(c, 0x0f); code_byte(c, 0xef);
+    code_byte(c, 0xc0 | ((xmm & 7) << 3) | (xmm & 7));
+}
+
 void x86_vload_base(struct code *c, int xmm, int base, int disp)
 {
     code_byte(c, 0xf3);

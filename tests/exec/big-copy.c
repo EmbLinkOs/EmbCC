@@ -1,5 +1,6 @@
 /* Block copies and clears past the size where x86-64 stops unrolling them
- * and uses `rep movsq` / `rep stosq` (256 bytes): struct assignment and
+ * and uses `rep movsq` / `rep stosq` (256 bytes), and below it, where the
+ * chunks are sixteen bytes through an xmm register: struct assignment and
  * zeroing at sizes either side of it and with every tail length 0..7,
  * a whole-array copy loop (which the optimizer turns into one block
  * copy), and copies with many values live across them, so that rsi and
@@ -9,7 +10,7 @@
 // expect-exit: 42
 #define S(N) struct s##N { unsigned char b[N]; }
 S(255); S(256); S(257); S(258); S(259); S(260); S(261); S(262); S(263); S(264);
-S(1000); S(4099);
+S(1000); S(4099); S(17); S(24); S(31); S(32); S(33); S(48); S(100);
 
 static unsigned char seed = 1;
 static void fill(unsigned char *p, int n) { for (int i = 0; i < n; i++) p[i] = (unsigned char)(seed = seed * 33 + 7); }
@@ -31,6 +32,7 @@ static int zero(const unsigned char *a, int n) { for (int i = 0; i < n; i++) if 
     __attribute__((noinline)) void clear_##N(struct s##N *d) { struct s##N z = { { 0 } }; *d = z; }
 FUNCS(255) FUNCS(256) FUNCS(257) FUNCS(258) FUNCS(259) FUNCS(260) FUNCS(261) FUNCS(262)
 FUNCS(263) FUNCS(264) FUNCS(1000) FUNCS(4099)
+FUNCS(17) FUNCS(24) FUNCS(31) FUNCS(32) FUNCS(33) FUNCS(48) FUNCS(100)
 
 /* the idiom shape: a copy loop over a whole array */
 static unsigned a1[30000], a2[30000];
@@ -61,6 +63,7 @@ int main(void)
     int bad = 0;
     CHECK(255); CHECK(256); CHECK(257); CHECK(258); CHECK(259); CHECK(260); CHECK(261);
     CHECK(262); CHECK(263); CHECK(264); CHECK(1000); CHECK(4099);
+    CHECK(17); CHECK(24); CHECK(31); CHECK(32); CHECK(33); CHECK(48); CHECK(100);
 
     for (int i = 0; i < 30000; i++) { a1[i] = (unsigned)i * 2654435761u; a2[i] = 7; }
     copy_arr();

@@ -4169,6 +4169,17 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * struct-argument copy, which re-reads the same way). */
             sbase = in_reg(i->b) ? g_loc[i->b] : -1;
             int off = 0;
+            /* sixteen bytes a move where SSE is allowed, through the float
+             * scratch, which no pool contains */
+            for (; !g_no_sse && i->size - off >= 16; off += 16) {
+                int sb = sbase;
+                if (sb < 0) {
+                    x86_load_slot(text, sd[i->b], 8, 0, 8);
+                    sb = REG_RAX;
+                }
+                x86_vload_base(text, X86_FSCR, sb, off);
+                x86_vstore_base(text, dbase, off, X86_FSCR);
+            }
             while (off < i->size) {
                 int chunk = i->size - off;
                 chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4 : chunk >= 2 ? 2 : 1;
@@ -4206,8 +4217,14 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (in_reg(i->a)) dbase = g_loc[i->a];
             else { x86_load_slot(text, sd[i->a], 8, 0, 8);
                    x86_mov_reg_reg(text, REG_RCX, REG_RAX); dbase = REG_RCX; }
-            x86_mov_eax_imm(text, 0, 8);
             int off = 0;
+            if (!g_no_sse && i->size >= 16) {           /* as IR_MEMCPY */
+                x86_vzero(text, X86_FSCR);
+                for (; i->size - off >= 16; off += 16)
+                    x86_vstore_base(text, dbase, off, X86_FSCR);
+            }
+            if (off < i->size)
+                x86_mov_eax_imm(text, 0, 8);
             while (off < i->size) {
                 int chunk = i->size - off;
                 chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4
@@ -4456,7 +4473,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     x86_pop_reg(text, REG_RSI);
                     continue;
                 }
-                for (int off = 0; off < sz; ) {
+                int off = 0;
+                for (; !g_no_sse && sz - off >= 16; off += 16) {
+                    x86_vload_base(text, X86_FSCR, REG_RCX, off);
+                    x86_vstore_base(text, REG_RSP, a->stk_off + off, X86_FSCR);
+                }
+                for (; off < sz; ) {
                     int chunk = sz - off;
                     chunk = chunk >= 8 ? 8 : chunk >= 4 ? 4
                           : chunk >= 2 ? 2 : 1;
