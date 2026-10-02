@@ -1719,12 +1719,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                        "target yet: the unwind tables go in .pdata and "
                        ".xdata and neither is written");
 
-        /* The object format is right and the CALLING CONVENTION is not
-         * yet: arguments still go in System V's registers. Objects
-         * EmbCC compiles are consistent with each other, so a
-         * self-contained program works -- and the first call into a
-         * Win32 API or MinGW's libc reads its arguments out of the
-         * wrong registers.
+        /* The object format is right and the argument registers are
+         * now Microsoft's (refereed against clang by win-abi.sh), but
+         * the ABI around them is not: the data model is still LP64
+         * where Windows is LLP64, wchar_t is four bytes where it is
+         * two, and rsi, rdi, xmm6 and xmm7 -- which a Windows callee
+         * must preserve -- are used freely. Objects EmbCC compiles
+         * are consistent with each other, so a self-contained program
+         * works -- and a struct holding a `long`, or a caller in
+         * MinGW's libc keeping a double in xmm6, does not.
+         *
+         * (This used to name the argument registers as the gap, which
+         * stopped being true when the convention went in.)
          *
          * D-014 says a capability a triple lacks must be an error
          * naming the triple rather than a silent fallback to another
@@ -1734,11 +1740,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * fires on every Windows compile, so it cannot be mistaken for
          * a finished target. */
         diag_warn_opt(in, 0, 0, "windows-abi",
-                      "%s passes arguments in the System V registers "
-                      "(rdi, rsi, rdx, rcx, r8, r9), not the Microsoft "
-                      "x64 ones (rcx, rdx, r8, r9 with 32 bytes of "
-                      "shadow space): objects EmbCC compiles agree with "
-                      "each other and with nothing else",
+                      "%s is not yet the Microsoft x64 ABI: `long` is "
+                      "8 bytes and wchar_t 4 (Windows has 4 and 2), and "
+                      "rsi, rdi, xmm6 and xmm7 are not preserved across "
+                      "a call: "
+                      "objects EmbCC compiles agree with each other and "
+                      "with nothing else",
                       target_triple_now());
 
         /* 1. the bytes, before any section is handed over. */

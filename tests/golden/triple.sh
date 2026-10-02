@@ -126,12 +126,13 @@ rm -f "$out/o.o"
 writer exists:"; cat "$out/err.txt"; exit 1; }
 [ -s "$out/o.o" ] || { echo "FAIL: it wrote no object"; exit 1; }
 
-#    ...and the convention it does NOT implement is said out loud on
-#    every compile, because emitting System V argument passing under a
-#    Windows triple is exactly the silent fallback this rule forbids.
+#    ...and the parts of the ABI it does NOT implement (LP64 `long`,
+#    rsi, rdi and xmm6-7 not preserved) are said out loud on every
+#    compile, because emitting them under a Windows triple is exactly
+#    the silent fallback this rule forbids.
 grep -q 'Wwindows-abi' "$out/err.txt" || {
-    echo "FAIL: nothing warned that the calling convention is still"
-    echo "      System V:"; cat "$out/err.txt"; exit 1; }
+    echo "FAIL: nothing warned that the ABI is not yet Microsoft's:"
+    cat "$out/err.txt"; exit 1; }
 
 win_refuses() {                   # win_refuses SOURCE EXPECTED-TEXT
     printf '%s\n' "$1" > "$out/w.c"

@@ -107,18 +107,10 @@ static const int LEAF_POOL_RDX[NLEAF_RDX] = { 6 /*rsi*/, 2 /*rdx*/,
 static const int LEAF_POOL_AT[NLEAF_AT] = { 8, 9, 10, 11,
                                             3 /*rbx*/, 12, 13, 14, 15 };
 
-/* The FLOATING-POINT pool: xmm8-15.
- *
- * SysV passes floating-point arguments and returns in xmm0-7 and
- * preserves none of the sixteen, so the eight above the argument file
- * are the ones that are nobody else's: no prologue save, no CFI rule,
- * and no collision with a call's arguments being set up. xmm0 stays the
- * scratch every float site already uses.
- *
- * Win64 is the reason this is not xmm2-15: there xmm6-15 are
- * callee-saved and would each need a sixteen-byte save and an unwind
- * rule, which is work this does not do yet -- so that ABI gets no FP
- * pool at all rather than a wrong one. */
+/* The FLOATING-POINT pool, which was xmm8-15 (see below for why it
+ * moved). Win64 makes xmm6-15 callee-saved, and neither the pool's xmm6
+ * nor the xmm7 scratch is saved under it: one of the gaps the
+ * -Wwindows-abi warning names on every Windows compile. */
 #define X86_FP_ALLOC 1    /* see the note below */
 #define NX86_FPOOL 7
 static const int X86_FPOOL[NX86_FPOOL] = { 0, 1, 2, 3, 4, 5, 6 };
@@ -3003,25 +2995,28 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * language says. The extra copy is redundant (the
                  * caller's is already private) and is the simple thing
                  * that cannot be subtly wrong. */
+                /* The pointer goes in r11, never an argument register:
+                 * this was rcx, and copying a second-place one there
+                 * overwrote the first parameter before the shuffle read
+                 * it -- f(long a, struct big s) used s's address as a. */
                 if (fn->param_abi && fn->param_abi[i].byref) {
-                    int sz = ty_size(pt);
+                    int src = x86_argreg(slot);
                     if (slot >= 4) {
-                        x86_load_reg_mem(text, REG_RCX, REG_RBP, incoming, 8);
+                        x86_load_reg_mem(text, 11 /*r11*/, REG_RBP,
+                                         incoming, 8);
                         incoming += 8;
-                    } else if (x86_argreg(slot) != REG_RCX) {
-                        x86_mov_reg_reg(text, REG_RCX, x86_argreg(slot));
+                        src = 11;
                     }
-                    x86_lea_reg_slot(text, 11 /*r11*/, sd[i]);
-                    for (int off = 0; off < sz; off += 8) {
-                        int chunk = sz - off >= 8 ? 8 : sz - off;
-                        x86_load_reg_mem(text, REG_RAX, REG_RCX, off, chunk);
-                        x86_store_mem_reg(text, 11 /*r11*/, off, REG_RAX,
-                                          chunk);
-                    }
+                    x86_param_copy(text, sd[i], src, 0, ty_size(pt));
                     continue;
                 }
                 if (slot >= 4) {
-                    if (pmove && g_loc[i] >= 0) {       /* as SysV, above */
+                    if (ty_is_float(pt) && in_freg(i)) {
+                        fstk_dst[nfstk] = g_floc[i];
+                        fstk_off[nfstk] = incoming;
+                        fstk_sz[nfstk] = ty_size(pt);
+                        nfstk++;
+                    } else if (pmove && g_loc[i] >= 0) {  /* as SysV, below */
                         pstk_dst[npstk] = g_loc[i];
                         pstk_off[npstk] = incoming;
                         pstk_sz[npstk] = ty_size(pt);
@@ -3031,6 +3026,13 @@ static void gen_func(struct ir_func *fn, struct code *text,
                         x86_store_slot(text, sd[i], 8);
                     }
                     incoming += 8;
+                } else if (ty_is_float(pt) && in_freg(i)) {
+                    /* into the FP permutation, as SysV does: moving it
+                     * here wrote the register a LATER float arrives in,
+                     * and f(double a, double b) returned a in place of b */
+                    fmv_dst[nfmv] = g_floc[i];
+                    fmv_src[nfmv] = slot;
+                    nfmv++;
                 } else if (ty_is_float(pt)) {
                     x86_fst(text, sd, i, slot, ty_size(pt));
                 } else if (pmove && g_loc[i] >= 0) {
