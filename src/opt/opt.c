@@ -3216,6 +3216,14 @@ static int pass_cfgclean(struct ir_func *fn)
      * is left aimed at L1, where the rule below drops it. */
     for (int n = 0; n + 2 < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n], *j = &fn->ins[n + 1];
+        /* Not a branch the rule above already condemned: it is only
+         * MARKED dead, and removed at the end -- inverted first, the
+         * removal took the jump's target with it. `brnz c; brnz c -> L9;
+         * jmp L4; L9:` lost its way to L4 (a switch's case 0, at -Os,
+         * where switches are compare trees) and SCCP then deleted the
+         * case as unreachable. */
+        if (dead[n] || dead[n + 1])
+            continue;
         if ((i->op != IR_BRZ && i->op != IR_BRNZ) || j->op != IR_JMP ||
             j->label == i->label)
             continue;
