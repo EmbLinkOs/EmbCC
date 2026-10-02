@@ -2,7 +2,7 @@
  *
  * Every encoding is refereed against aarch64-elf-as by
  * tests/golden/aarch64/arm64-asm.sh, which assembles the whole vocabulary — every
- * system register in the table, every tlbi operation, and each of the ARM
+ * system register in the table, every tlbi, dc and ic operation, and each of the ARM
  * kernel's own templates — with both and compares the bytes.
  */
 #include "asm.h"
@@ -75,6 +75,19 @@ static const struct { const char *name; int op1, crm, op2, reg; } tlbis[] = {
     { "vaae1",     0, 7, 3, 1 }, { "vaae1is",   0, 3, 3, 1 },
     { "vale1",     0, 7, 5, 1 }, { "vale1is",   0, 3, 5, 1 },
     { "vaale1",    0, 7, 7, 1 }, { "vaale1is",  0, 3, 7, 1 },
+};
+
+/* Cache maintenance: SYS #op1, C7, Cm, #op2, Xt. `dc` cleans or
+ * invalidates data cache lines by address (or by set/way), `ic` the
+ * instruction cache; `reg` as for tlbi. */
+static const struct { const char *mn, *name; int op1, crm, op2, reg; } cmaints[] = {
+    { "dc", "ivac",  0, 6, 1, 1 },  { "dc", "isw",   0, 6, 2, 1 },
+    { "dc", "csw",   0, 10, 2, 1 }, { "dc", "cisw",  0, 14, 2, 1 },
+    { "dc", "zva",   3, 4, 1, 1 },  { "dc", "cvac",  3, 10, 1, 1 },
+    { "dc", "cvau",  3, 11, 1, 1 }, { "dc", "cvap",  3, 12, 1, 1 },
+    { "dc", "civac", 3, 14, 1, 1 },
+    { "ic", "ialluis", 0, 1, 0, 0 }, { "ic", "iallu", 0, 5, 0, 0 },
+    { "ic", "ivau",  3, 5, 1, 1 },
 };
 
 /* Barrier options, in their CRm encoding. */
@@ -347,6 +360,33 @@ static void assemble_stmt(struct actx *a, char *st)
         return;
     }
 
+    if (strcmp(mn, "dc") == 0 || strcmp(mn, "ic") == 0) {
+        if (n < 1) { fail(a, "'%s' needs an operation", mn); return; }
+        for (unsigned i = 0; i < sizeof cmaints / sizeof cmaints[0]; i++)
+            if (strcmp(mn, cmaints[i].mn) == 0 &&
+                ieq(ops[0], cmaints[i].name)) {
+                int rt = 31;
+                if (cmaints[i].reg) {
+                    if (n != 2) {
+                        fail(a, "'%s %s' needs a register", mn, ops[0]);
+                        return;
+                    }
+                    int w = 0;
+                    rt = gpr(a, ops[1], &w);
+                    if (w) { fail(a, "'%s' needs an X register", mn); return; }
+                } else if (n != 1) {
+                    fail(a, "'%s %s' takes no register", mn, ops[0]);
+                    return;
+                }
+                if (!a->failed)
+                    a64_sys(a->out, cmaints[i].op1, 7, cmaints[i].crm,
+                            cmaints[i].op2, rt);
+                return;
+            }
+        fail(a, "unknown %s operation '%s'", mn, ops[0]);
+        return;
+    }
+
     if (strcmp(mn, "brk") == 0 || strcmp(mn, "hvc") == 0 ||
         strcmp(mn, "smc") == 0 || strcmp(mn, "svc") == 0) {
         if (n != 1) { fail(a, "'%s' takes one immediate", mn); return; }
@@ -590,6 +630,9 @@ void a64asm_vocabulary(FILE *f)
         fprintf(f, "mrs x9, %s\n", sysregs[i].name);
     for (unsigned i = 0; i < sizeof tlbis / sizeof tlbis[0]; i++)
         fprintf(f, tlbis[i].reg ? "tlbi %s, x10\n" : "tlbi %s\n", tlbis[i].name);
+    for (unsigned i = 0; i < sizeof cmaints / sizeof cmaints[0]; i++)
+        fprintf(f, cmaints[i].reg ? "%s %s, x11\n" : "%s %s\n",
+                cmaints[i].mn, cmaints[i].name);
     for (unsigned i = 0; i < sizeof barrier_opts / sizeof barrier_opts[0]; i++) {
         fprintf(f, "dsb %s\n", barrier_opts[i].name);
         fprintf(f, "dmb %s\n", barrier_opts[i].name);
