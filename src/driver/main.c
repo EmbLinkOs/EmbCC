@@ -2862,14 +2862,20 @@ int main(int argc, char **argv)
             return 1;
         }
         target_set(a);
-        /* The backend's "this op calls a runtime helper" predicate, for
-         * the optimizer's view of what a value crosses: x86-64 has no
-         * such helpers and AVR's allocator does not model them. */
+        target_os_set(os);
+        target_fmt_set(fmt);
+    }
+    /* The backend's "this op calls a runtime helper" predicate, for the
+     * optimizer's view of what a value crosses: x86-64 has no such
+     * helpers and AVR's allocator does not model them. Set from the
+     * target finally chosen -- it was set only for a --target=, so a
+     * compiler whose DEFAULT is a board made different code from the
+     * same compiler told that board by name. */
+    {
+        enum target_arch a = target_get();
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
-        target_os_set(os);
-        target_fmt_set(fmt);
     }
     /* Scanned across the whole command line, not just argv[1]: these
      * describe the TARGET, so `--target=aarch64-elf --dump-predef` has to
