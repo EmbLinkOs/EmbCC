@@ -3261,6 +3261,56 @@ static void gen_func(struct ir_func *fn, struct code *text,
             cg_store(text, sd, i->dst, i->w);
             break;
         case IR_CONST:
+            /* A constant whose one use is the store right after it, to a
+             * folded frame address or one in a register: `mov $imm, mem`,
+             * one instruction where materialising it and storing it were
+             * two. Every field of a compound literal is one of these. An
+             * eight-byte store takes it only when the value fits the
+             * sign-extended 32-bit immediate; a float-class value has its
+             * own home and keeps its own path. */
+            if (g_regalloc && usecnt && i->dst >= 0 && usecnt[i->dst] == 1 &&
+                n + 1 < fn->nins && !is_flt(i->dst) && !i->flt) {
+                /* past the folded address arithmetic, which emits nothing */
+                int m = n + 1;
+                while (m + 1 < fn->nins &&
+                       (fn->ins[m].op == IR_ADDR ||
+                        (fn->ins[m].op == IR_ADD && fn->ins[m].imm_b)) &&
+                       afolded(fn->ins[m].dst))
+                    m++;
+                /* ...or a field's `add base, #off` that only this store
+                 * reads, which then becomes the displacement */
+                int fbase = -1, fdisp = 0;
+                if (m + 1 < fn->nins && fn->ins[m].op == IR_ADD &&
+                    fn->ins[m].imm_b && fn->ins[m].dst >= 0 &&
+                    usecnt[fn->ins[m].dst] == 1 && in_reg(fn->ins[m].a) &&
+                    !afolded(fn->ins[m].dst) &&
+                    fn->ins[m].imm >= -2147483647L - 1 &&
+                    fn->ins[m].imm <= 2147483647L &&
+                    fn->ins[m + 1].op == IR_STORE &&
+                    fn->ins[m + 1].a == fn->ins[m].dst) {
+                    fbase = g_loc[fn->ins[m].a];
+                    fdisp = (int)fn->ins[m].imm;
+                    m++;
+                }
+                struct ir_ins *st = &fn->ins[m];
+                int sz = st->size;
+                if (st->op == IR_STORE && st->b == i->dst && st->a != i->dst &&
+                    !x87_ins(st) && !i128_ins(st) && addr_fold_ok(st) &&
+                    (sz == 1 || sz == 2 || sz == 4 ||
+                     (sz == 8 && i->w == 8 && i->imm >= -2147483647L - 1 &&
+                      i->imm <= 2147483647L)) &&
+                    (fbase >= 0 || afolded(st->a) || in_reg(st->a))) {
+                    if (fbase >= 0)
+                        x86_store_mem_imm(text, fbase, fdisp, i->imm, sz);
+                    else if (afolded(st->a))
+                        x86_store_mem_imm(text, REG_RBP, g_afold.disp[st->a],
+                                          i->imm, sz);
+                    else
+                        x86_store_mem_imm(text, g_loc[st->a], 0, i->imm, sz);
+                    n = m;                      /* consume the store */
+                    break;
+                }
+            }
             /* A FLOAT constant is an ordinary integer const of the value's
              * bit pattern -- `0.5` is `const.8s 4602678819172646912`, and
              * nothing in the IR says float but the class its destination

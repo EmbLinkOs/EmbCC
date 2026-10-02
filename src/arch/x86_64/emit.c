@@ -458,6 +458,25 @@ void x86_sub_rsp(struct code *c, int bytes)
 }
 
 /* push/pop a 64-bit register: one byte, or two for r8-r15. */
+/* [base+disp] = imm, `size` bytes: mov r/m, imm (c6 /0 ib, 66 c7 /0 iw,
+ * c7 /0 id, and REX.W c7 /0 id sign-extending to 64 -- the caller checks
+ * an 8-byte value fits). */
+void x86_store_mem_imm(struct code *c, int base, int disp, long imm, int size)
+{
+    if (size == 2)
+        code_byte(c, 0x66);
+    rex_rb(c, size == 8, 0, base);
+    code_byte(c, size == 1 ? 0xc6 : 0xc7);
+    modrm_base(c, 0, base, disp);
+    if (size == 1)
+        code_byte(c, (int)(imm & 0xff));
+    else if (size == 2) {
+        code_byte(c, (int)(imm & 0xff));
+        code_byte(c, (int)((imm >> 8) & 0xff));
+    } else
+        code_u32(c, (unsigned long)imm);
+}
+
 /* rep movsq: rcx quadwords from [rsi] to [rdi]; rep stosq: rcx copies of
  * rax to [rdi]. Both advance the pointers, which is forward because both
  * ABIs keep the direction flag clear. */

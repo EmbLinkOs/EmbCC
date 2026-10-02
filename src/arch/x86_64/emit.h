@@ -148,6 +148,8 @@ void x86_movx_rr(struct code *c, int dst, int src, int size, int sign, int w);
                                                     /* dst = extend(src low 1/2 bytes) */
 void x86_alu_rr(struct code *c, int op, int dst, int src, int w); /* dst op= src */
 /* [base+disp] op= src / imm (+ - & | ^): read-modify-write */
+void x86_store_mem_imm(struct code *c, int base, int disp, long imm,
+                       int size);       /* [base+disp] = imm */
 void x86_rep_movsq(struct code *c);      /* rcx qwords [rsi] -> [rdi] */
 void x86_vzero(struct code *c, int xmm);  /* pxor xmm, xmm */
 void x86_rep_stosq(struct code *c);      /* rcx qwords of rax -> [rdi] */
