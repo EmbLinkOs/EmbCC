@@ -2014,8 +2014,14 @@ static int gen_ins64(struct t_fn *F, int n)
         return 1;
 
     case IR_SELECT:
-        rd(F, i->a, B_LO);
-        t_cmp_imm(t, B_LO, 0);
+        if (i->size == 8) {            /* a 64-bit condition: either half */
+            rd64(F, i->a, A_LO, A_HI);
+            t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
+            t_cmp_imm(t, A_LO, 0);
+        } else {
+            rd(F, i->a, B_LO);
+            t_cmp_imm(t, B_LO, 0);
+        }
         {
             int take_c = t_bcond(t, T_EQ);
             rd64(F, i->b, A_LO, A_HI);
@@ -2928,9 +2934,16 @@ static void gen_ins(struct t_fn *F, int n)
         /* dst = a ? b : c. Thumb has conditional execution through an IT
          * block, but both arms here are already-computed VALUES sitting
          * in slots, so this is two loads and a branch over one of them —
-         * which needs no flag-liveness reasoning and is the same size. */
-        rd(F, i->a, T_ACC);
-        t_cmp_imm(t, T_ACC, 0);
+         * which needs no flag-liveness reasoning and is the same size.
+         * The condition is tested at its own width, `size`. */
+        if (i->size == 8) {
+            rd64(F, i->a, A_LO, A_HI);
+            t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
+            t_cmp_imm(t, A_LO, 0);
+        } else {
+            rd(F, i->a, T_ACC);
+            t_cmp_imm(t, T_ACC, 0);
+        }
         {
             int take_c = t_bcond(t, T_EQ);
             rd(F, i->b, T_ACC);

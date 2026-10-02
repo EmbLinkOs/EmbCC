@@ -145,7 +145,13 @@ enum ir_op {
     IR_VSPLAT, /* dst = every lane set to scalar a     (size: element) */
     IR_VREDADD,/* dst = the sum of a's lanes           (size: element;
                 * w: the scalar result's width) */
-    IR_SELECT, /* dst = a ? b : c      (w, sign)
+    IR_SELECT, /* dst = a ? b : c      (w, sign: the arms; size: a's)
+                * `size` is the CONDITION's width, 4 or 8, which is not
+                * the arms': `long c; c ? i : j` picks between ints on a
+                * test of all 64 bits, and `(int)l ? p : q` between
+                * pointers on a test of 32. The branch the select replaced
+                * carried it as its `w`; tested at the arms' width
+                * instead, a condition of 0x100000000 was false.
                 * Both targets have this without a branch -- cmov on
                 * x86-64, csel on aarch64 -- and neither emitted it. The
                 * arms are VALUES, already computed: a select evaluates

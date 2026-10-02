@@ -345,7 +345,7 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         ob_fmt(b, " %s %%%d", i->c ? "hi" : "lo", i->a);
         break;
     case IR_SELECT:
-        ob_fmt(b, "%%%d = select", i->dst); suffix(b, i, 1);
+        ob_fmt(b, "%%%d = select", i->dst); memsuffix(b, i, 1);
         ob_fmt(b, " %%%d ? %%%d : %%%d", i->a, i->b, i->c);
         break;
     case IR_VA_START:

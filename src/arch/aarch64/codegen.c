@@ -2747,11 +2747,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * SCR, and the choice without a branch. Both arms are
              * already values -- the pass that built this refused
              * anything that could fault -- so there is nothing to
-             * guard. NE, because the condition is a 0/1 truth value. */
-            int rc = rd_ext(t, sd, i->a, A64_ACC, 4, 0, 4);
+             * guard. NE against zero, at the CONDITION's width. */
+            int cw = i->size == 8 ? 8 : 4;
+            int rc = rd_ext(t, sd, i->a, A64_ACC, cw, 0, cw);
             int rb = rd_ext(t, sd, i->b, A64_TMP, i->w, i->sign, i->w);
             int rs = rd_ext(t, sd, i->c, A64_SCR, i->w, i->sign, i->w);
-            a64_cmp_reg(t, rc, A64_ZR, 4);
+            a64_cmp_reg(t, rc, A64_ZR, cw);
             int d = wr(i->dst, A64_ACC);
             a64_csel(t, d, rb, rs, A64_NE, i->w);
             wrote_n(t, sd, i->dst, d, i->w);

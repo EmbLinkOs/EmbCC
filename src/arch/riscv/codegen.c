@@ -1730,7 +1730,12 @@ static int gen_ins64(struct rv_fn *F, int n)
         return 1;
     case IR_SELECT: {
         int take_c, done;
-        rd(F, i->a, SCR);
+        if (i->size == 8) {            /* a 64-bit condition: either half */
+            rd64(F, i->a, SCR, SCR2);
+            rv_alu(t, RV_OR, SCR, SCR, SCR2, 0);
+        } else {
+            rd(F, i->a, SCR);
+        }
         take_c = rv_b_placeholder(t, RV_BEQ, SCR, RV_ZERO);
         rd64(F, i->b, A_LO, A_HI);
         done = rv_j_placeholder(t, RV_ZERO);
@@ -2406,8 +2411,17 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_SELECT: {
         /* dst = a ? b : c. Both arms are already-computed VALUES in
          * slots, so this is two loads and a branch over one of them. */
-        int take_c, done;
-        int cond = rdr(F, i->a, SCR);
+        /* The condition is tested at ITS width, `size`, which is not the
+         * arms' `w`: if-convert records the branch's. At RV32 a 64-bit
+         * one is a pair, and zero only if both halves are. */
+        int take_c, done, cond;
+        if (F->xlen == 32 && i->size == 8) {
+            rd64(F, i->a, A_LO, A_HI);
+            rv_alu(t, RV_OR, SCR, A_LO, A_HI, 0);
+            cond = SCR;
+        } else {
+            cond = rdr(F, i->a, SCR);
+        }
         int d = wreg(F, i->dst, ACC);
         take_c = rv_b_placeholder(t, RV_BEQ, cond, RV_ZERO);
         rd(F, i->b, d);

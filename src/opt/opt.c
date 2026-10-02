@@ -2945,6 +2945,8 @@ static int ifconv_one(struct ir_func *fn)
         int wt = sel_width(fn, &d, tm->a), we = sel_width(fn, &d, em->a);
         if (!wt || wt != we)
             continue;
+        if (br->w != 4 && br->w != 8)
+            continue;           /* the select tests its condition at w */
 
         /* Rewrite: the branch becomes the select, and both arms go. */
         int dst = tm->dst;
@@ -2962,6 +2964,7 @@ static int ifconv_one(struct ir_func *fn)
                 sel->op = IR_SELECT; sel->dst = dst;
                 sel->a = br->a; sel->b = vtrue; sel->c = vfalse;
                 sel->w = wt; sel->sign = tm->sign;
+                sel->size = br->w;              /* the condition's own */
                 sel->line = br->line; sel->col = br->col;
                 continue;
             }
