@@ -627,6 +627,15 @@ static int compile(const char *in, const char *out, int pp_only)
         rc = 1;                       /* the diagnostic is already out */
     }
     fatal_set_boundary(NULL);
+    /* A warning made an error (-Werror) leaves the unit compiled and its
+     * file written. The compile has still failed, and the file must not
+     * be left behind: make would take it as up to date and never build
+     * it again. */
+    if (rc == 0 && diag_error_count() > 0) {
+        rc = 1;
+        if (out && strcmp(out, "-") != 0)
+            remove(out);
+    }
     return rc;
 }
 
