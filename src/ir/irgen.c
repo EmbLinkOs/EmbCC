@@ -350,6 +350,13 @@ static void mark_natural(struct ir_func *fn, const struct expr *e)
 }
 
 /* Typed load/store through an address temp. */
+/* Set while a bit-field is read or written through a VOLATILE lvalue:
+ * the storage unit is loaded and stored through an unqualified type of its
+ * width, and those accesses carried no `vol`, so `s->a + s->a` on a device
+ * register was one read at -O1 and up. emit_load and emit_store mark what
+ * they emit while it is set (bf_load_v, bf_store_v). */
+static int g_bf_vol;
+
 int emit_load(struct ir_func *fn, int addr, const struct type *t)
 {
     struct ir_ins *i = emit(fn);
@@ -358,7 +365,7 @@ int emit_load(struct ir_func *fn, int addr, const struct type *t)
     i->size = ty_size(t);
     i->sign = ty_signed_int(t);
     i->w = ty_w(t);
-    i->vol = t->is_volatile;
+    i->vol = t->is_volatile || g_bf_vol;
     i->dst = new_temp(fn);
     return i->dst;
 }
@@ -371,7 +378,7 @@ void emit_store(struct ir_func *fn, int addr, int val,
     i->a = addr;
     i->b = val;
     i->size = ty_size(t);
-    i->vol = t->is_volatile;
+    i->vol = t->is_volatile || g_bf_vol;
 }
 
 void emit_mov(struct ir_func *fn, int dst, int src)
@@ -603,7 +610,42 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
         low = emit_bin(fn, IR_SHL, low, emit_const(fn, m->bit_off, 4), w, 0);
     int merged = emit_bin(fn, IR_OR, cleared, low, w, 0);
     emit_store(fn, addr, merged, ut);
+    if (g_bf_vol) {
+        /* The assignment's value is the stored value converted to the
+         * field, not a second read of a device register -- which may
+         * clear what it reports. Made from `val` with the two shifts a
+         * load would use. */
+        int vb = w * 8, sh = vb - m->bit_width;
+        int v = val;
+        if (sh) {
+            v = emit_bin(fn, IR_SHL, v, emit_const(fn, sh, 4), w, 0);
+            v = emit_bin(fn, IR_SHR, v, emit_const(fn, sh, 4), w,
+                         ty_signed_int(bt));
+        }
+        return v;
+    }
     return bf_load(fn, addr, m);
+}
+
+/* bf_load and bf_store through an lvalue of type `t`, volatile or not. */
+static int bf_load_v(struct ir_func *fn, int addr, const struct member *m,
+                     const struct type *t)
+{
+    int save = g_bf_vol, v;
+    g_bf_vol = t && t->is_volatile;
+    v = bf_load(fn, addr, m);
+    g_bf_vol = save;
+    return v;
+}
+
+static int bf_store_v(struct ir_func *fn, int addr, const struct member *m,
+                      int val, const struct type *t)
+{
+    int save = g_bf_vol, v;
+    g_bf_vol = t && t->is_volatile;
+    v = bf_store(fn, addr, m, val);
+    g_bf_vol = save;
+    return v;
 }
 
 /* Place one flattened initializer leaf `ie` (value already in `v`) at address
@@ -656,6 +698,47 @@ static int san_bin(struct ir_func *fn, enum ir_op op, int a, int b,
                    int w, int sign);
 static void san_trap_if(struct ir_func *fn, int cond, int w);
 static long san_min(int w);
+
+/* An `int` narrower than the class it is computed in: AVR's two bytes in
+ * a four-byte value. Nothing else reads such a value at its own width --
+ * a divide, a right shift, a compare, the free conversion to `long` all
+ * read all four bytes -- so the value has to BE its extension, and an
+ * operation that can carry out of sixteen bits re-extends its result.
+ * Without it (unsigned)0xffff + 1 was 65536 to the divide after it, and
+ * `long f(int x) { return x + 1; }` returned 32768 for 32767: C's
+ * arithmetic modulo 2^16 was arithmetic modulo 2^32 inside an
+ * expression, on every AVR program, with nothing said. And/or/xor and a
+ * right shift of extended values are already extended; a signed
+ * remainder is too, and an unsigned complement is not. */
+static int int_wrap(struct ir_func *fn, int v, const struct type *t,
+                    enum ir_op op)
+{
+    if (!t || ty_is_float(t) || t->kind == TY_BOOL ||
+        ty_size(t) < 2 || ty_size(t) >= ty_w(t))
+        return v;
+    switch (op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_SHL: case IR_NEG:
+        break;
+    case IR_DIV:                       /* INT_MIN / -1 */
+        if (!ty_signed_int(t))
+            return v;
+        break;
+    case IR_BNOT:                      /* ~ of a zero extension */
+        if (ty_signed_int(t))
+            return v;
+        break;
+    default:
+        return v;
+    }
+    struct ir_ins *x = emit(fn);
+    x->op = IR_EXT;
+    x->a = v;
+    x->size = ty_size(t);
+    x->sign = ty_signed_int(t);
+    x->w = ty_w(t);
+    x->dst = new_temp(fn);
+    return x->dst;
+}
 
 
 /* ---- the IEEE-754 bit builtins -----------------------------------------
@@ -749,16 +832,23 @@ static int type_size_val(struct ir_func *fn, const struct type *t)
 /* Compute the byte size of every VLA in a variably modified type, innermost
  * first, into its slot — where the declaration (or type name) is reached, so
  * a declaration in a loop re-reads its lengths each time round. */
-static void vla_eval(struct ir_func *fn, struct type *t)
+static void vla_eval_at(struct ir_func *fn, struct type *t, int typedef_here)
 {
     if (!t || (t->kind != TY_PTR && t->kind != TY_ARRAY))
         return;
-    vla_eval(fn, t->pointee);
+    vla_eval_at(fn, t->pointee, typedef_here);
     if (!ty_is_vla(t))
         return;
+    if (t->vla_at_typedef && t->vla_at_typedef != typedef_here)
+        return;                 /* sized where its typedef was reached */
     int n = gen_expr(fn, t->vla_len);
     int sz = emit_bin(fn, IR_MUL, n, type_size_val(fn, t->pointee), AW, 1);
     emit_stvar(fn, t->vla_size, sz, ty_base(TY_LONG, 1));
+}
+
+static void vla_eval(struct ir_func *fn, struct type *t)
+{
+    vla_eval_at(fn, t, 0);
 }
 
 /* The VLA declarations whose scope encloses the statement being generated,
@@ -798,6 +888,21 @@ static int stmts_define_label(const struct stmt *s, const char *name)
 /* The address of an lvalue (or of a struct-typed expression — struct
  * "values" are represented by their address, since sema bars them from
  * every value context). */
+/* The address of local `v`: its slot -- or, for one aligned beyond what
+ * the stack guarantees (func.var_indirect), the pointer to its storage
+ * that the slot holds. */
+static int local_addr(struct ir_func *fn, int v)
+{
+    struct func *f = fn->src;
+    if (f && f->var_indirect && v < f->nvars && f->var_indirect[v])
+        return emit_ldvar(fn, v, ty_ptr(f->var_indirect[v]));
+    struct ir_ins *i = emit(fn);
+    i->op = IR_ADDR;
+    i->a = v;
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
 int gen_addr(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
@@ -809,13 +914,7 @@ int gen_addr(struct ir_func *fn, struct expr *e)
             return emit_ldvar(fn, e->var_index,
                               ty_ptr(e->undecayed ? e->undecayed->pointee
                                                   : e->ty->pointee));
-        {
-            struct ir_ins *i = emit(fn);
-            i->op = IR_ADDR;
-            i->a = e->var_index;
-            i->dst = new_temp(fn);
-            return i->dst;
-        }
+        return local_addr(fn, e->var_index);
     case EXPR_DEREF:
         return gen_expr(fn, e->rhs);
     case EXPR_MEMBER: {
@@ -840,16 +939,30 @@ int gen_addr(struct ir_func *fn, struct expr *e)
 
 int gen_expr(struct ir_func *fn, struct expr *e);
 
+int irg_va_struct_slot(struct ir_func *fn, struct expr *e)
+{
+    return local_addr(fn, e->var_index);
+}
+
+void irg_va_copy(struct ir_func *fn, int dst, long off, int src, long n)
+{
+    if (n <= 0)
+        return;
+    int at = off ? emit_bin(fn, IR_ADD, dst, emit_const(fn, off, AW), AW, 1)
+                 : dst;
+    struct ir_ins *m = emit(fn);
+    m->op = IR_MEMCPY;
+    m->a = at;
+    m->b = src;
+    m->size = (int)n;
+}
+
 /* A compound literal `(type){ init }`: clear its synthesized slot, place the
  * flattened initializer leaves (zero-fill + last-write-wins, like a declared
  * aggregate), and return the object's address. */
 static int gen_complit(struct ir_func *fn, struct expr *e)
 {
-    struct ir_ins *ad = emit(fn);
-    ad->op = IR_ADDR;
-    ad->a = e->var_index;
-    ad->dst = new_temp(fn);
-    int base = ad->dst;
+    int base = local_addr(fn, e->var_index);
     struct ir_ins *z = emit(fn);
     z->op = IR_MEMZERO;
     z->a = base;
@@ -1535,7 +1648,8 @@ static int compound_value(struct ir_func *fn, struct expr *e, int cur,
     if (ty_is_float(ct))
         res = emit_fbin(fn, o, cv, rv, ty_size(ct));
     else
-        res = san_bin(fn, o, cv, rv, ty_w(ct), ty_signed_int(ct));
+        res = int_wrap(fn, san_bin(fn, o, cv, rv, ty_w(ct),
+                                   ty_signed_int(ct)), ct, o);
     return gen_convert(fn, res, ct, lt);
 }
 
@@ -1818,6 +1932,41 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
 static int bk(struct ir_func *fn, unsigned long v, int w)
 {
     return emit_const(fn, (long)v, w);
+}
+
+/* A byte swap from shifts and masks, for a target with no instruction for
+ * it at this width (ARMv7-M and AVR have no IR_BSWAP lowering; at RV32 a
+ * 64-bit value is a register pair). `v` already holds the unsigned type
+ * of `size` bytes. Eight bytes are two four-byte swaps, crossed. */
+static int bswap_lowered(struct ir_func *fn, int v, int size)
+{
+    if (size == 8) {
+        const struct type *u4 = ty_int_of_size(4, 1), *u8 = ty_int_of_size(8, 1);
+        int lo = gen_convert(fn, v, u8, u4);
+        int hi = gen_convert(fn, emit_bin(fn, IR_SHR, v, bk(fn, 32, 8), 8, 0),
+                             u8, u4);
+        int nlo = gen_convert(fn, bswap_lowered(fn, lo, 4), u4, u8);
+        int nhi = gen_convert(fn, bswap_lowered(fn, hi, 4), u4, u8);
+        return emit_bin(fn, IR_OR,
+                        emit_bin(fn, IR_SHL, nlo, bk(fn, 32, 8), 8, 0),
+                        nhi, 8, 0);
+    }
+    if (size == 2) {
+        int l = emit_bin(fn, IR_SHL, v, bk(fn, 8, 4), 4, 0);
+        int r = emit_bin(fn, IR_SHR, v, bk(fn, 8, 4), 4, 0);
+        return emit_bin(fn, IR_AND, emit_bin(fn, IR_OR, l, r, 4, 0),
+                        bk(fn, 0xffff, 4), 4, 0);
+    }
+    int b0 = emit_bin(fn, IR_SHL, v, bk(fn, 24, 4), 4, 0);
+    int b1 = emit_bin(fn, IR_SHL,
+                      emit_bin(fn, IR_AND, v, bk(fn, 0xff00, 4), 4, 0),
+                      bk(fn, 8, 4), 4, 0);
+    int b2 = emit_bin(fn, IR_AND,
+                      emit_bin(fn, IR_SHR, v, bk(fn, 8, 4), 4, 0),
+                      bk(fn, 0xff00, 4), 4, 0);
+    int b3 = emit_bin(fn, IR_SHR, v, bk(fn, 24, 4), 4, 0);
+    return emit_bin(fn, IR_OR, emit_bin(fn, IR_OR, b0, b1, 4, 0),
+                    emit_bin(fn, IR_OR, b2, b3, 4, 0), 4, 0);
 }
 
 static int bpopcount(struct ir_func *fn, int x, int w)
@@ -2106,7 +2255,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int addr = gen_addr(fn, e);
         int v;
         if (e->memb->is_bitfield)
-            return bf_load(fn, addr, e->memb);
+            return bf_load_v(fn, addr, e->memb, e->ty);
         if (atomic_lv(e)) {
             atomic_scalar_ok(fn, e, "reading");
             return atomic_load(fn, addr, e->ty, e->line);
@@ -2151,7 +2300,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int addr = gen_addr(fn, e->lhs);
         int v = gen_expr(fn, e->rhs);
         if (expr_is_bitfield(e->lhs))
-            return bf_store(fn, addr, e->lhs->memb, v);
+            return bf_store_v(fn, addr, e->lhs->memb, v, e->lhs->ty);
         emit_store(fn, addr, v, e->ty);
         mark_natural(fn, e->lhs);
         return v;
@@ -2167,7 +2316,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int is_bf = expr_is_bitfield(e->lhs);
         int addr = local ? -1 : gen_addr(fn, e->lhs);
         int cur = local ? emit_ldvar(fn, e->lhs->var_index, t)
-                : is_bf ? bf_load(fn, addr, e->lhs->memb)
+                : is_bf ? bf_load_v(fn, addr, e->lhs->memb, e->lhs->ty)
                         : emit_load(fn, addr, t);
         int old = -1;
         if (e->is_post) {
@@ -2207,7 +2356,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         if (local)
             emit_stvar(fn, e->lhs->var_index, sum, t);
         else if (is_bf)
-            sum = bf_store(fn, addr, e->lhs->memb, sum);
+            sum = bf_store_v(fn, addr, e->lhs->memb, sum, e->lhs->ty);
         else
             emit_store(fn, addr, sum, t);
         return e->is_post ? old : sum;
@@ -2254,7 +2403,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         i->a = v;
         i->w = ty_w(e->ty);
         i->dst = new_temp(fn);
-        return i->dst;
+        return int_wrap(fn, i->dst, e->ty, i->op);
     }
     case EXPR_DEREF: {
         int addr = gen_expr(fn, e->rhs);
@@ -2421,8 +2570,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             enum ir_op o = e->op == B_ADD ? IR_ADD : IR_SUB;
             if (ty_is_float(e->ty))
                 return emit_fbin(fn, o, a, b, ty_size(e->ty));
-            return san_bin(fn, o, a, b, ty_w(e->ty),
-                           ty_signed_int(e->ty));
+            return int_wrap(fn, san_bin(fn, o, a, b, ty_w(e->ty),
+                                        ty_signed_int(e->ty)), e->ty, o);
         }
         case B_EQ:
         case B_NE:
@@ -2458,8 +2607,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             if (ty_is_float(e->ty))
                 return emit_fbin(fn, map[e->op - B_ADD], a, b,
                                  ty_size(e->ty));
-            return san_bin(fn, map[e->op - B_ADD], a, b,
-                           ty_w(e->ty), ty_signed_int(e->ty));
+            return int_wrap(fn, san_bin(fn, map[e->op - B_ADD], a, b,
+                                        ty_w(e->ty), ty_signed_int(e->ty)),
+                            e->ty, map[e->op - B_ADD]);
         }
         }
     }
@@ -2480,14 +2630,14 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int is_bf = expr_is_bitfield(e->lhs);
         int addr = local ? -1 : gen_addr(fn, e->lhs);
         int cur = local ? emit_ldvar(fn, e->lhs->var_index, lt)
-                : is_bf ? bf_load(fn, addr, e->lhs->memb)
+                : is_bf ? bf_load_v(fn, addr, e->lhs->memb, e->lhs->ty)
                         : emit_load(fn, addr, lt);
         int rv = gen_expr(fn, e->rhs);
         int res = compound_value(fn, e, cur, rv);
         if (local)
             emit_stvar(fn, e->lhs->var_index, res, lt);
         else if (is_bf)
-            return bf_store(fn, addr, e->lhs->memb, res);
+            return bf_store_v(fn, addr, e->lhs->memb, res, e->lhs->ty);
         else
             emit_store(fn, addr, res, lt);
         return res;
@@ -2652,7 +2802,16 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return i->dst;
         }
         if (e->name && strncmp(e->name, "__builtin_bswap", 15) == 0) {
-            int v = gen_expr(fn, e->args[0]);
+            int v = gen_convert(fn, gen_expr(fn, e->args[0]),
+                                e->args[0]->ty, e->ty);
+            /* One instruction where the backend has it for a value in
+             * one register: x86-64, aarch64 and RV64. Elsewhere -- no
+             * IR_BSWAP on ARMv7-M or AVR, and a 64-bit value is a pair
+             * at RV32 -- shifts and masks, which every backend has. */
+            if (!(target_get() == TARGET_X86_64 ||
+                  target_get() == TARGET_AARCH64 ||
+                  target_get() == TARGET_RISCV64))
+                return bswap_lowered(fn, v, ty_size(e->ty));
             struct ir_ins *i = emit(fn);
             i->op = IR_BSWAP;
             i->a = v;
@@ -3341,6 +3500,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             }
             break;
         case STMT_DECL:
+            if (s->is_vm_typedef) {
+                vla_eval_at(fn, s->dty, s->is_vm_typedef);
+                break;
+            }
             if (s->is_extern)
                 break; /* block-scope extern: a declaration, emits no code */
             if (s->sglob)
@@ -3371,15 +3534,14 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 g_nvla++;
                 break;
             }
-            if (s->ninits) {
+            if (s->ninits || s->has_initlist) {
                 /* C zero-fills whatever the initializer does not
                  * mention, so clear the object first and then place
-                 * the listed values. */
-                struct ir_ins *ad = emit(fn);
-                ad->op = IR_ADDR;
-                ad->a = s->var_index;
-                ad->dst = new_temp(fn);
-                int base = ad->dst;
+                 * the listed values. ALL of it for `= {}`, which lists
+                 * none: keyed on ninits alone, `int a[4] = {}` and
+                 * `struct p s = {}` emitted nothing and kept whatever
+                 * the stack held, on every target at every level. */
+                int base = local_addr(fn, s->var_index);
                 struct ir_ins *z = emit(fn);
                 z->op = IR_MEMZERO;
                 z->a = base;
@@ -3400,13 +3562,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 if (s->dty->kind == TY_STRUCT) {
                     /* initializing a struct is the same byte copy an
                      * assignment is */
-                    struct ir_ins *a = emit(fn);
-                    a->op = IR_ADDR;
-                    a->a = s->var_index;
-                    a->dst = new_temp(fn);
+                    int at = local_addr(fn, s->var_index);
                     struct ir_ins *i = emit(fn);
                     i->op = IR_MEMCPY;
-                    i->a = a->dst;
+                    i->a = at;
                     i->b = v;
                     i->size = ty_size(s->dty);
                 } else {
@@ -3697,7 +3856,7 @@ static void collect_locals(struct ir_func *fn, struct stmt *s)
     for (; s; s = s->next) {
         switch (s->kind) {
         case STMT_DECL:
-            if (s->is_extern)     /* block-scope extern: no local slot at all */
+            if (s->is_extern || s->is_vm_typedef)  /* no local slot at all */
                 break;
             if (!s->sglob)
                 add_dbgvar(fn, s->name, s->var_index, 0,
@@ -3829,12 +3988,49 @@ static void gen_func(struct ir_func *fn, struct func *f)
         for (int i = 0; i < f->nparams; i++)
             vla_eval(fn, f->param_tys[i]);
     g_eh_cur = -1;
+    /* Locals aligned beyond the stack's guarantee (sema's var_indirect):
+     * each is carved off the stack ONCE, here, rounded up to its
+     * alignment, and its slot keeps the address -- for the whole
+     * function, so a goto past its declaration cannot skip the carving
+     * and a loop around it cannot grow the stack. */
+    for (int v = 0; f->var_indirect && v < f->nvars; v++) {
+        if (!f->var_indirect[v])
+            continue;
+        long al = f->var_ind_align[v];
+        int size = emit_const(fn, ty_size(f->var_indirect[v]) + al - 1, AW);
+        struct ir_ins *a = emit(fn);        /* after its operand */
+        a->op = IR_ALLOCA;
+        a->a = size;
+        a->dst = new_temp(fn);
+        int p = emit_bin(fn, IR_AND,
+                         emit_bin(fn, IR_ADD, a->dst,
+                                  emit_const(fn, al - 1, AW), AW, 1),
+                         emit_const(fn, -al, AW), AW, 1);
+        emit_stvar(fn, v, p, ty_ptr(f->var_indirect[v]));
+        fn->has_alloca = 1;
+    }
     gen_stmt(fn, f->body, NULL);
+    /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3). After
+     * a body whose every path returned this is unreachable, and goes. */
+    if (!strcmp(f->name, "main") && ty_is_integer(f->ret_ty)) {
+        int z = emit_const(fn, 0, ty_size(f->ret_ty) > 4 ? 8 : 4);
+        struct ir_ins *r = emit(fn);
+        r->op = IR_RET;
+        r->a = z;
+    }
     if (fn->neh)
         mark_eh_calls(fn);
     for (int i = 0; i < f->nvars; i++)  /* clamp the un-narrowed default */
         if (fn->var_scope_hi[i] == 0x7fffffff)
             fn->var_scope_hi[i] = fn->nins;
+    /* ...and those pointers live from the entry, wherever their names'
+     * blocks are: a slot shared with another block's local would lose
+     * the address */
+    for (int v = 0; f->var_indirect && v < f->nvars; v++)
+        if (f->var_indirect[v]) {
+            fn->var_scope_lo[v] = 0;
+            fn->var_scope_hi[v] = fn->nins;
+        }
     for (int i = 0; i < g_nlabels_used; i++)
         if (!g_labels[i].defined)
             diag_fatal(fn->file, g_labels[i].line,
@@ -3878,4 +4074,17 @@ struct ir_unit *irgen(struct unit *u)
             (!f->is_static || f->used || strcmp(f->name, "main") == 0))
             gen_func(&iu->funcs[n++], f);
     return iu;
+}
+
+int asm_constraint_mem_only(const char *c)
+{
+    int any = 0;
+    for (; *c; c++) {
+        if (*c == '=' || *c == '+' || *c == '&')
+            continue;
+        if (*c != 'm')
+            return 0;
+        any = 1;
+    }
+    return any;
 }

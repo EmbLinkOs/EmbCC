@@ -621,6 +621,9 @@ static void pcs_not_here(struct parser *ps, const struct attrs *a,
             what);
 }
 
+static struct expr *parse_cond(struct parser *ps);
+static int size_fold(const struct expr *e, long *out);
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
     /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
@@ -719,7 +722,18 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                         }
                     }
                 }
-                if (cur(ps)->kind == TOK_NUM)
+                if (name && attr_is(name, "aligned") &&
+                    cur(ps)->kind != TOK_RPAREN) {
+                    /* A constant EXPRESSION, as for _Alignas: only a
+                     * bare number was read, so aligned(2*32) took the 2,
+                     * aligned((64)) and aligned(sizeof(long long)) the
+                     * no-argument default of 16, and nothing said so. */
+                    struct expr *ae = parse_cond(ps);
+                    if (!size_fold(ae, &arg) || arg <= 0 ||
+                        (arg & (arg - 1)))
+                        parse_error_line(ps, aline,
+                            "aligned wants a constant power of two");
+                } else if (cur(ps)->kind == TOK_NUM)
                     arg = cur(ps)->num;
                 else if (cur(ps)->kind == TOK_STR)
                     sarg = cur(ps)->text;
@@ -1179,7 +1193,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
 
 static struct type *parse_struct_body(struct parser *ps, struct type *t,
                                       const struct attrs *lead);
-static void parse_enum_body(struct parser *ps);
+static struct type *parse_enum_body(struct parser *ps, struct type *fixed);
 
 /* struct/union/enum specifier, after the keyword was consumed. */
 static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
@@ -1199,8 +1213,8 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
     }
     if (kind == TAG_ENUM && (lead.packed || lead.aligned))
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                "a packed or aligned enum is not supported (EmbCC's enums "
-                "are always int-sized)");
+                "a packed or aligned enum is not supported (an enum here is "
+                "int, or the type its values need)");
 
     /* C23 `enum e : type` -- a FIXED underlying type, which is the
      * standard's answer to the -fshort-enums question: instead of a
@@ -1219,7 +1233,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             if (!allow_body)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "define enums at file scope");
-            parse_enum_body(ps);
+            parse_enum_body(ps, under);
         }
         if (tag && !find_tag(ps, tag)) {
             struct tagdef *td = xcalloc(1, sizeof *td);
@@ -1245,6 +1259,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                        "definitions are not supported)",
                        kind == TAG_ENUM ? "enums" : "structs/unions");
         struct type *t = NULL;
+        struct tagdef *etd = NULL;
         if (tag) {
             struct tagdef *td = find_tag(ps, tag);
             if (td) {
@@ -1265,12 +1280,18 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                 ps->tags = td;
                 t = td->ty;
             }
+            etd = td;
         } else if (kind != TAG_ENUM) {
             t = ty_struct(NULL, kind == TAG_UNION);
         }
         if (kind == TAG_ENUM) {
-            parse_enum_body(ps);
-            return ty_base(TY_INT, 0);
+            struct type *et = parse_enum_body(ps, NULL);
+            /* `enum G x;` later: the same type -- unsigned int too, which
+             * is TY_INT and was taken for plain int, so a variable of
+             * the enum read 0xffffffff as -1 */
+            if (etd && et != ty_base(TY_INT, 0))
+                etd->ty = et;
+            return et;
         }
         return parse_struct_body(ps, t, &lead);
     }
@@ -1338,9 +1359,12 @@ static void consume_alignas(struct parser *ps)
         } else {
             struct expr *e = parse_cond(ps);
             long v;
-            if (!size_fold(e, &v) || v <= 0)
+            /* C11 6.7.5: zero has no effect; anything else must be a
+             * valid alignment, which is a power of two -- 3 gave .data
+             * an alignment of 3 */
+            if (!size_fold(e, &v) || v < 0 || (v & (v - 1)))
                 parse_error_line(ps, line,
-                           "_Alignas requires a positive constant alignment");
+                           "_Alignas requires a constant power of two");
             a = (int)v;
         }
         expect(ps, TOK_RPAREN, "')' after _Alignas");
@@ -2269,10 +2293,19 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     return t;
 }
 
-static void parse_enum_body(struct parser *ps)
+/* The enumerators, and the enum's type. With a fixed underlying type
+ * (C23 `enum e : T`) that is T, and so is each enumerator's. Without one
+ * it is int while every value fits int, and otherwise the type GCC and
+ * clang choose -- unsigned int, then long, unsigned long, long long --
+ * which the enumerators then have too (C23 6.7.2.2). They were all int
+ * whatever their value, so `enum { G = 0x100000005 }` was truncated in
+ * every expression and sizeof the enum was 4 against their 8. */
+static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
 {
     expect(ps, TOK_LBRACE, "'{'");
-    long val = 0;
+    long val = 0, lo = 0, hi = 0;
+    int any = 0;
+    struct econst **first = ps->econst_tail;
 
     while (cur(ps)->kind != TOK_RBRACE) {
         if (cur(ps)->kind != TOK_IDENT)
@@ -2297,6 +2330,9 @@ static void parse_enum_body(struct parser *ps)
                            "duplicate enumerator '%s'", name);
         struct econst *ec = xcalloc(1, sizeof *ec);
         ec->name = name;
+        if (!any || val < lo) lo = val;
+        if (!any || val > hi) hi = val;
+        any = 1;
         ec->val = val++;
         ec->seq = ps->seq;
         *ps->econst_tail = ec;
@@ -2306,6 +2342,30 @@ static void parse_enum_body(struct parser *ps)
         advance(ps); /* trailing comma before '}' is fine, as in C99 */
     }
     expect(ps, TOK_RBRACE, "'}'");
+
+    struct type *t = fixed;
+    if (!t) {
+        int ib = target_int_size() * 8, lb = target_long_size() * 8;
+        long imax = (1L << (ib - 1)) - 1, imin = -imax - 1;
+        unsigned long umax = ib == 64 ? ~0UL : (1UL << ib) - 1;
+        long lmax = lb == 64 ? 0x7fffffffffffffffL : (1L << (lb - 1)) - 1;
+        long lmin = -lmax - 1;
+        unsigned long ulmax = lb == 64 ? ~0UL : (1UL << lb) - 1;
+        if (lo >= imin && hi <= imax)
+            return ty_base(TY_INT, 0);
+        /* No negative value: the unsigned types, as GCC and clang choose
+         * -- 2^31..2^32-1 is an unsigned long on AVR, four bytes, not a
+         * long long. A negative one: the signed types. */
+        if (lo >= 0)
+            t = (unsigned long)hi <= umax ? ty_base(TY_INT, 1)
+              : (unsigned long)hi <= ulmax ? ty_base(TY_LONG, 1)
+              : ty_llong(1);
+        else
+            t = lo >= lmin && hi <= lmax ? ty_base(TY_LONG, 0) : ty_llong(0);
+    }
+    for (struct econst *ec = *first; ec; ec = ec->next)
+        ec->ty = t;
+    return t;
 }
 
 /* ---- expressions ---- */
@@ -2559,7 +2619,7 @@ static struct expr *parse_primary(struct parser *ps)
             e->name = w ? w : "";
             e->num = (long)strlen(e->name) + 1;
             e->str_width = 1;
-            e->ty = ty_array(ty_base(TY_CHAR, target_char_unsigned()),
+            e->ty = ty_array(ty_plain_char(),
                              (int)e->num);
             return e;
         }
@@ -3574,6 +3634,23 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 struct typedefent *te = xcalloc(1, sizeof *te);
                 te->name = tname; te->ty = tt; te->is_const = tconst;
                 te->next = ps->typedefs; ps->typedefs = te;
+                if (ty_is_vm(tt)) {
+                    static int vm_typedef_id;
+                    int id = ++vm_typedef_id;
+                    /* `typedef int row[n];` fixes row's size HERE: a
+                     * later `n = 10` changes nothing (C11 6.7.8p3). It was
+                     * evaluated wherever the name was used, so `row r;`
+                     * after it had ten elements. */
+                    for (struct type *v = tt; v && (v->kind == TY_ARRAY ||
+                                                    v->kind == TY_PTR);
+                         v = v->pointee)
+                        if (ty_is_vla(v) && !v->vla_at_typedef)
+                            v->vla_at_typedef = id;   /* not an earlier one's */
+                    struct stmt *sd = new_stmt(STMT_DECL, t->line, t->col);
+                    sd->dty = tt; sd->name = tname; sd->is_vm_typedef = id;
+                    sd->var_index = -1;
+                    *etail = sd; etail = &sd->next;
+                }
             } else {
                 ps->attr_carry_on = 0;
                 ps->attr_carry_on = 0;

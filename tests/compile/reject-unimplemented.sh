@@ -267,11 +267,14 @@ check unnamed-param-in-definition \
     'int f(int) { return 1; }
 int main(void) { return f(1); }' \
     "needs a name in a definition"
+# main alone may reach its closing brace (it returns 0, C99 5.1.2.2.3)
 check fallthrough \
-    'int main(void) { int x = 1; }' \
+    'static int f(void) { int x = 1; }
+int main(void) { return f(); }' \
     "must end in a return"
 check fallthrough-if \
-    'int main(void) { if (1) return 1; }' \
+    'static int f(void) { if (1) return 1; }
+int main(void) { return f(); }' \
     "must end in a return"
 check arity \
     'static int f(int a, int b) { return a + b; }
@@ -295,18 +298,66 @@ check assign-to-literal \
 # linker was M3 and had not arrived. It links in-process now, so that
 # case graduated out of this file, which is what the header above says
 # happens. What is left is the part still refused, and it is refused
-# for a reason that will not go away by itself: EmbLD reads x86-64 ELF,
-# and an image for another machine is not something it can quietly
-# approximate.
+# for a reason that will not go away by itself: a board image needs the
+# board's memory map, which embld takes and the driver has no default
+# for. The message once named "aarch64" for every such target -- a Thumb
+# build was told it needed aarch64 -- so each target is named as itself.
 printf 'int main(void) { return 0; }\n' > "$out_dir/nolink.c"
-if err=$("$EMBCC" --target=aarch64-elf "$out_dir/nolink.c" \
-         -o "$out_dir/nolink.bin" 2>&1); then
-    echo "case nolink: linked for a machine the linker cannot read"
-    exit 1
-fi
-echo "$err" | grep -q "integrated linker reads x86-64 ELF" || {
-    echo "case nolink: wrong diagnostic:"; echo "$err"; exit 1; }
-echo "case nolink: linking for another machine is refused by name"
+for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf; do
+    if err=$("$EMBCC" --target=$t "$out_dir/nolink.c" \
+             -o "$out_dir/nolink.bin" 2>&1); then
+        echo "case nolink $t: linked in one step without a memory map"
+        exit 1
+    fi
+    # embld links the boards, and reads no AArch64 object
+    hint="link with embld"
+    [ "$t" = aarch64-elf ] && hint="embld does not read AArch64 objects"
+    echo "$err" | grep -q "cannot link for $t in one step: the driver links x86-64 ELF only" &&
+    echo "$err" | grep -q "$hint" || {
+        echo "case nolink $t: wrong diagnostic:"; echo "$err"; exit 1; }
+done
+echo "case nolink: linking a board image in one step is refused by name"
+
+# C++ is laid out by its own front end for LP64. On a target whose long
+# or pointers are not 8 bytes it compiled anyway, with sizeof(long) 8 on
+# ARMv7-M and sizeof(void *) 8 on AVR, so it is refused there -- except
+# for a check that writes nothing.
+printf 'long f(long x) { return x + (long)sizeof(long); }\n' > "$out_dir/ilp.cpp"
+for t in thumbv7em-none-eabi riscv32-unknown-elf avr; do
+    if err=$("$EMBCC" --target=$t -c "$out_dir/ilp.cpp" \
+             -o "$out_dir/ilp.o" 2>&1); then
+        echo "case cxx-not-lp64 $t: compiled C++ laid out for LP64"; exit 1
+    fi
+    echo "$err" | grep -q "C++ is not yet supported for $t" || {
+        echo "case cxx-not-lp64 $t: wrong diagnostic:"; echo "$err"; exit 1; }
+done
+"$EMBCC" --target=riscv32-unknown-elf -fsyntax-only "$out_dir/ilp.cpp" || {
+    echo "case cxx-not-lp64: -fsyntax-only, which writes nothing, was refused"
+    exit 1; }
+echo "case cxx-not-lp64: C++ for a target that is not LP64 is refused by name"
+
+# File-scope asm: the built-in encoder is x86-64's. An instruction in a
+# block for any other machine is refused by name; it was refused only on
+# aarch64, and `ret` became 0xc3 in a Thumb, RISC-V or AVR object. A block
+# written as data still assembles everywhere.
+printf '__asm__(".globl f\\nf:\\n ret\\n");\nint g(void) { return 1; }\n' \
+    > "$out_dir/topasm.c"
+printf '__asm__(".globl tbl\\ntbl:\\n .long 1\\n");\nint g(void) { return 1; }\n' \
+    > "$out_dir/topdata.c"
+for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf riscv64-unknown-elf avr; do
+    if err=$("$EMBCC" --target=$t -c "$out_dir/topasm.c" \
+             -o "$out_dir/topasm.o" 2>&1); then
+        echo "case topasm $t: an x86-64 instruction went into the object"; exit 1
+    fi
+    echo "$err" | grep -q 'file-scope asm instruction "ret"' || {
+        echo "case topasm $t: wrong diagnostic:"; echo "$err"; exit 1; }
+    "$EMBCC" --target=$t -c "$out_dir/topdata.c" -o "$out_dir/topdata.o" || {
+        echo "case topasm $t: a data-only block was refused"; exit 1; }
+done
+echo "case topasm: an instruction in file-scope asm off x86-64 is refused by name"
+check generic-const-ambiguous \
+    'int main(void) { return _Generic((const char *)0, char *: 1, const char *: 2, default: 3); }' \
+    "more than one _Generic association matches"
 check asm-bad-constraint \
     'int main(void) { int x; __asm__("int $0x80" : "=t"(x)); return x; }' \
     "is not supported"
@@ -329,14 +380,19 @@ check topasm-global-no-label \
     '__asm__(".global ghost\n  ret\n");
 int main(void) { return 0; }' \
     "has no label"
-check va-arg-struct \
+check va-arg-struct-windows \
     'typedef char *va_list;
 struct P { int x; int y; };
 int f(int n, ...) { va_list ap; __builtin_va_start(ap, n);
      struct P p = __builtin_va_arg(ap, struct P); __builtin_va_end(ap);
      return p.x; }
 int main(void) { return 0; }' \
-    "struct passed by value"
+    "va_arg of a struct is not supported for a Windows target" \
+    --target=x86_64-windows-gnu
+check overaligned-scalar-local \
+    'int f(int k) { int x __attribute__((aligned(64))); x = k; return x; }
+int main(void) { return 0; }' \
+    "not yet for a scalar"
 check static-assert-false \
     '_Static_assert(sizeof(int) == 8, "int is not eight bytes");
 int main(void) { return 0; }' \

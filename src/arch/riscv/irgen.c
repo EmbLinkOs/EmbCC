@@ -53,6 +53,20 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e)
     int apa = gen_addr(fn, e->lhs);
     int cur = emit_load(fn, apa, ptr);
 
+    /* A struct of more than two registers came by REFERENCE: its slot is
+     * a pointer to the caller's copy. A smaller one is its own bytes in
+     * whole registers, an aligned pair when its alignment is two
+     * registers' (as below). Either way they are copied into the
+     * expression's slot. */
+    int sdst = -1, sref = 0;
+    if (rt->kind == TY_STRUCT) {
+        sdst = irg_va_struct_slot(fn, e);
+        if (size > 2 * wb) {
+            sref = 1;
+            size = align = wb;
+        }
+    }
+
     /* A variadic `float` arrives promoted to `double`, so it is eight
      * bytes of both size and alignment however it was written. */
     if (flt && rt->kind == TY_FLOAT) {
@@ -75,6 +89,11 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e)
                    emit_bin(fn, IR_ADD, addr, emit_const(fn, step, wb),
                             wb, 1),
                    ptr);
+        if (sdst >= 0) {
+            irg_va_copy(fn, sdst, 0, sref ? emit_load(fn, addr, ptr) : addr,
+                        ty_size(rt));
+            return sdst;
+        }
 
         if (flt) {
             /* Read the double that was passed, then narrow if the
@@ -279,7 +298,7 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
         o->reg = regs[a->nout + i];
         /* An "m" operand names MEMORY: the register carries its ADDRESS
          * and the template dereferences it. */
-        o->mem = strchr(a->in[i].constraint, 'm') != NULL;
+        o->mem = asm_constraint_mem_only(a->in[i].constraint);
         o->temp = o->mem ? gen_addr(fn, a->in[i].expr)
                          : gen_expr(fn, a->in[i].expr);
         o->size = target_ptr_size();  /* a temp holds the promoted value */
@@ -290,7 +309,7 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
         o->temp = gen_addr(fn, a->out[i].expr);
         o->size = sizes[i];
         o->inout = strchr(a->out[i].constraint, '+') != NULL;
-        o->mem = strchr(a->out[i].constraint, 'm') != NULL;
+        o->mem = asm_constraint_mem_only(a->out[i].constraint);
     }
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;

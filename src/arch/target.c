@@ -200,6 +200,14 @@ int target_int_size(void)       { return g_model[g_arch].it; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
+int target_stack_align(void)
+{
+    switch (g_arch) {
+    case TARGET_THUMB: return 8;        /* AAPCS32 at a public interface */
+    case TARGET_AVR:   return 1;
+    default:           return 16;       /* SysV, AAPCS64, RISC-V psABI */
+    }
+}
 /* Apple's arm64 is not AAPCS64's data model in three columns, read off
  * `clang -target arm64-apple-macos -dM`: plain char is SIGNED, wchar_t
  * is `int`, and long double is double. EmbCC gave macOS the Linux model
@@ -247,7 +255,11 @@ int target_anon_bitfield_aligns(void)
 {
     switch (target_get()) {
     case TARGET_X86_64:  return 0;   /* SysV */
-    case TARGET_AARCH64: return 1;   /* AAPCS64 */
+    case TARGET_AARCH64:             /* AAPCS64; Apple's arm64 lays them
+                                      * out as x86-64 does, and a struct
+                                      * { char a; int :0; char b; } was
+                                      * 8 bytes against clang's 5 */
+        return !darwin_a64();
     case TARGET_THUMB:   return 1;   /* AAPCS */
     case TARGET_RISCV32:
     case TARGET_RISCV64: return 0;   /* RISC-V psABI */
@@ -259,8 +271,14 @@ int target_anon_bitfield_aligns(void)
 int target_va_list_is_pointer(void)
 {
     switch (target_get()) {
-    case TARGET_X86_64:  return 0;   /* SysV: __va_list_tag, 24 bytes */
-    case TARGET_AARCH64: return 0;   /* AAPCS64: the va_list record, 32 */
+    /* SysV: __va_list_tag, 24 bytes; Microsoft x64: char *, walking the
+     * caller's slots (the callee spills rcx..r9 into the home area) */
+    case TARGET_X86_64:  return target_win64_abi();
+    /* AAPCS64: the va_list record, 32 bytes -- but Apple's arm64 has
+     * none: its va_list is the walking pointer (irg_va_arg_darwin). Read
+     * as a record, va_copy copied 32 bytes OF THE ARGUMENTS, and the
+     * copy walked that snapshot: a fifth argument read garbage. */
+    case TARGET_AARCH64: return g_os == TGT_OS_DARWIN;
     case TARGET_THUMB:   return 1;   /* AAPCS32: void * */
     case TARGET_RISCV32:
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */

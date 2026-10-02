@@ -90,6 +90,11 @@ void t_mov_imm_dead_flags(struct code *c, int rd, long imm);
 
 /* rd = ~rm. */
 void t_mvn_reg(struct code *c, int rd, int rm, int s);
+/* MOVS, which SETS the flags -- what an asm `movs` asks for. t_mov_imm's
+ * `s` is a preference the wide and movw forms ignore. The immediate form
+ * returns -1, emitting nothing, for a value no flag-setting MOV encodes. */
+void t_movs_reg(struct code *c, int rd, int rm);
+int t_movs_imm(struct code *c, int rd, long imm);
 
 /* ---- data processing ------------------------------------------------ */
 

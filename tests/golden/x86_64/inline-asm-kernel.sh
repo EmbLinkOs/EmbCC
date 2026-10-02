@@ -38,6 +38,11 @@ void f_cr3w(u64 v){ __asm__ volatile("mov %0, %%cr3"::"r"(v):"memory"); }
 void f_outb(u16 p,u8 v){ __asm__ volatile("outb %0, %1"::"a"(v),"Nd"(p)); }
 u8   f_inb(u16 p){ u8 r; __asm__ volatile("inb %1, %0":"=a"(r):"Nd"(p)); return r; }
 void f_outl(u16 p,u32 v){ __asm__ volatile("outl %0, %1"::"a"(v),"Nd"(p)); }
+/* the immediate-port forms: the operands were not read, and every in/out
+ * was the dx form -- `inb $0x60` read whatever port dx named */
+u8   f_inbi(void){ u8 r; __asm__ volatile("inb $0x60, %%al":"=a"(r)); return r; }
+void f_outbi(u8 v){ __asm__ volatile("outb %%al, $0x80"::"a"(v)); }
+u32  f_inli(void){ u32 r; __asm__ volatile("inl $0x10, %%eax":"=a"(r)); return r; }
 void f_invlpg(void*a){ __asm__ volatile("invlpg (%0)"::"r"(a):"memory"); }
 void f_lidt(void*p){ __asm__ volatile("lidt %0"::"m"(*(char*)p)); }
 void f_lgdt(void*p){ __asm__ volatile("lgdt %0"::"m"(*(char*)p)); }
@@ -95,6 +100,7 @@ fi
 # every expected mnemonic must be present, exactly as the reference decodes it
 for want in cli stac clac rdseed sti hlt pause mfence lfence sfence wbinvd rdtsc rdmsr wrmsr \
             pushf 'mov +%rax,%cr0' 'mov +%cr2,%rax' 'out +%al' 'in +.*%al' \
+            'in +\$0x60,%al' 'out +%al,\$0x80' 'in +\$0x10,%eax' \
             invlpg lidt lgdt str ltr movdqa iretq 'mov +\$0x1,%rax' \
             lretq 'lea +0x3\(%rip\)' 'mov +\$0x10,%ax' 'mov +%eax,%ds' \
             'int +\$0x80' 'mov +0x8\(%r..\),%r' 'mov +%r.*,0x10\(%r' \

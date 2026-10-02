@@ -14,7 +14,9 @@
 #     eight-byte slots (variadic ones keep eight);
 #   * nothing rounds to an even register -- not an __int128, not a
 #     16-aligned struct;
-#   * plain char is signed, wchar_t is int, long double is double.
+#   * plain char is signed, wchar_t is int, long double is double;
+#   * va_list is the walking pointer itself, so va_copy is assignment
+#     (copying 32 bytes as for AAPCS64's record copied the arguments).
 #
 # Each of those made the old compiler's half disagree with clang's.
 set -u
@@ -55,6 +57,11 @@ unsigned short rus(int x);
 long double ldf(long double a, double b, long double c);
 long vs(int a, int b, int c, int d, int e, int f, int g, int h, char x,
         short y, ...);
+struct al16 { long x; } __attribute__((aligned(16)));
+struct hf2 { float a, b; };
+struct big24 { long a, b, c; };
+long vstruct(int n, ...);
+long vcopy(int n, ...);
 E
 
 cat > "$out/callee.c" << 'E'
@@ -92,6 +99,28 @@ long vs(int a, int b, int c, int d, int e, int f, int g, int h, char x,
     return r;
 }
 long double ldf(long double a, double b, long double c) { return a * 10 + b * 100 + c * 1000; }
+long vcopy(int n, ...)
+{
+    va_list ap, aq; long a = 0, b = 0;
+    va_start(ap, n); va_copy(aq, ap);
+    for (int i = 0; i < n; i++) a = a * 10 + va_arg(ap, long);
+    for (int i = 0; i < n; i++) b = b * 10 + va_arg(aq, long);
+    va_end(aq); va_end(ap);
+    return a * 100000000 + b;
+}
+long vstruct(int n, ...)
+{
+    va_list ap; va_start(ap, n);
+    struct c3 a = va_arg(ap, struct c3);
+    struct al16 b = va_arg(ap, struct al16);
+    struct s12 c = va_arg(ap, struct s12);
+    struct hf2 d = va_arg(ap, struct hf2);
+    struct hd e = va_arg(ap, struct hd);
+    struct big24 f = va_arg(ap, struct big24);
+    va_end(ap);
+    return n + a.c * 10 + b.x * 100 + c.c * 1000 + (long)d.b * 10000 +
+           (long)e.y * 100000 + f.c * 1000000;
+}
 E
 
 cat > "$out/caller.c" << 'E'
@@ -127,6 +156,14 @@ int main(void)
     check(rc(id(5)) + big == -71 + 1000000);
     check(vs(1, 0, 0, 0, 0, 0, 0, 0, 2, 3, 4, 5.0, 6L) == 1 + 20 + 300 + 4000 + 50000 + 600000);
     check(ldf(1.5L, 2, 3.25L) == 15 + 200 + 3250);
+    check(vcopy(8, 1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L) ==
+          12345678L * 100000000 + 12345678L);
+    {
+        struct al16 al = { 5 }; struct hf2 h2 = { 1, 2 };
+        struct big24 b24 = { 7, 8, 9 };
+        check(vstruct(1, c3, al, s12, h2, hd, b24) ==
+              1 + 30 + 500 + 6000 + 20000 + 200000 + 9000000);
+    }
     check(sizeof(long double) == 8 && (char)-1 < 0);
     char buf[32];
     snprintf(buf, sizeof buf, "%.2Lf %d %hhd", ldf(1.5L, 2, 3.25L), (int)sizeof(__WCHAR_TYPE__) * ((__WCHAR_TYPE__)-1 < 0), (signed char)c);
@@ -161,3 +198,56 @@ done
 [ "$fails" = 0 ] || exit 1
 echo "EmbCC and clang agree on Apple's arm64 convention and data model,"
 echo "both directions, -O0 and -O2, run natively"
+
+# C++ lays its own types out (src/cxx/type.c), and gave long double the
+# 16 bytes it has on LP64 ELF -- here it is a double, so a class holding
+# one was twice clang's size.
+cat > "$out/ld.cpp" <<'EOF2'
+struct S { char c; long double d; };
+static_assert(sizeof(long double) == 8, "long double is a double here");
+static_assert(sizeof(S) == 16, "and a class holding one is laid out so");
+extern "C" int ldsz(void) { S s = { 1, 2.5L }; return (int)sizeof(s) + (int)(s.d * 2); }
+EOF2
+printf 'int ldsz(void);\nint main(void) { return ldsz() == 21 ? 0 : 1; }\n' \
+    > "$out/ldm.c"
+"$EMBCC" --target=aarch64-apple-darwin -c "$out/ld.cpp" -o "$out/ld.o" || {
+    echo "FAIL: C++ does not lay long double out as Apple's 8-byte double"
+    exit 1; }
+cc -o "$out/ldm" "$out/ldm.c" "$out/ld.o" && "$out/ldm" || {
+    echo "FAIL: a C++ class holding a long double disagrees with clang"; exit 1; }
+echo "and C++ lays long double out as Apple's double"
+
+# Unnamed bit-fields: AAPCS64 lets them raise a struct's alignment, and
+# Apple's arm64 does not (as on x86-64). EmbCC used the AAPCS64 rule, so
+# struct { char a; int :0; char b; } was 8 bytes against clang's 5.
+cat > "$out/abf.c" <<'EOF2'
+struct s1 { char a; int :0; char b; };
+struct s2 { char c; unsigned :4; char d; };
+struct s3 { char c; long long :0; char d; };
+struct s4 { char c; int :3; int x : 5; char d; };
+int LAYOUT[] = { sizeof(struct s1), _Alignof(struct s1), sizeof(struct s2),
+                 _Alignof(struct s2), sizeof(struct s3), _Alignof(struct s3),
+                 sizeof(struct s4), _Alignof(struct s4),
+                 __builtin_offsetof(struct s1, b),
+                 __builtin_offsetof(struct s3, d) };
+EOF2
+cat > "$out/abfm.c" <<'EOF2'
+#include <stdio.h>
+extern int layout_e[10], layout_c[10];
+int main(void)
+{
+    for (int i = 0; i < 10; i++)
+        if (layout_e[i] != layout_c[i]) {
+            printf("entry %d: EmbCC %d, clang %d\n", i, layout_e[i], layout_c[i]);
+            return 1;
+        }
+    return 0;
+}
+EOF2
+"$EMBCC" --target=aarch64-apple-darwin -DLAYOUT=layout_e -c "$out/abf.c" \
+    -o "$out/abf-e.o" || { echo "FAIL: abf.c does not compile"; exit 1; }
+cc -DLAYOUT=layout_c -c "$out/abf.c" -o "$out/abf-c.o" &&
+cc -o "$out/abfm" "$out/abfm.c" "$out/abf-e.o" "$out/abf-c.o" &&
+"$out/abfm" || {
+    echo "FAIL: unnamed bit-fields are not laid out as Apple's clang does"; exit 1; }
+echo "and unnamed bit-fields are laid out as Apple's clang does"

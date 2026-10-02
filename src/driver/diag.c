@@ -723,6 +723,32 @@ int diag_enable_warning(const char *name, int on)
     return 1;
 }
 
+/* -Werror=NAME / -Wno-error=NAME: whether THIS warning is an error,
+ * whatever -Werror says -- 1 yes, -1 no, 0 as -Werror decides. Beside
+ * the table rather than in it, so the table's rows stay four columns. */
+static signed char g_werror_for[sizeof g_warns / sizeof g_warns[0]];
+
+/* Returns 1 when `name` is a warning this compiler has. -Werror=NAME
+ * also turns the warning on, as GCC's does; -Wno-error=NAME leaves it
+ * as it was. */
+int diag_set_werror_for(const char *name, int on)
+{
+    struct warn_opt *w = warn_find(name);
+    if (!w)
+        return 0;
+    g_werror_for[w - g_warns] = (signed char)(on ? 1 : -1);
+    if (on)
+        w->on = 1;
+    return 1;
+}
+
+static int warn_is_error(const char *name)
+{
+    struct warn_opt *w = warn_find(name);
+    int f = w ? g_werror_for[w - g_warns] : 0;
+    return f ? f > 0 : g_werror;
+}
+
 /* -Wall / -Wextra: the groups, as GCC draws them. */
 void diag_enable_group(int wall, int wextra)
 {
@@ -901,13 +927,14 @@ void diag_warn_opt(const char *file, int line, int col, const char *name,
     va_start(ap, fmt);
     char *msg = vfmt(fmt, ap);
     va_end(ap);
-    struct diag *d = new_diag(g_werror ? DIAG_ERROR : DIAG_WARNING, file,
+    int err = warn_is_error(name);
+    struct diag *d = new_diag(err ? DIAG_ERROR : DIAG_WARNING, file,
                               line, col, msg);
     /* the option as the reader would type it */
     char *opt = xmalloc(strlen(name) + 4);
     sprintf(opt, "-W%s", name);
     d->option = opt;
-    if (g_werror)
+    if (err)
         check_max_errors();
 }
 

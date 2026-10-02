@@ -98,6 +98,21 @@ static int chain(int a)
 static int bits(unsigned x)
 { unsigned r; __asm__("clz %0, %1" : "=r"(r) : "r"(x)); return (int)r; }
 
+/* An "I" operand is a LITERAL in the template, and a register variable
+ * pins its operand. Both went through x86's constraint letters, where
+ * "I" was refused and a register variable matched x86's names. */
+static int addk(int a)
+{ int r; __asm__("adds %0, %1, %2" : "=r"(r) : "r"(a), "I"(9)); return r; }
+static int pinned(int a)
+{ register int y __asm__("r2") = a; int r;
+  __asm__("adds %0, %1, #2" : "=r"(r) : "r"(y)); return r; }
+
+/* An "m" output: its register holds the ADDRESS the template writes
+ * through, and nothing loaded it -- the store went wherever the register
+ * last pointed. */
+static int memout(int k)
+{ int v = 0; __asm__ volatile("str %1, [%0]" : "=m"(v) : "r"(k)); return v; }
+
 int main(void)
 {
     putn(add3(20, 22));        /* 42 */
@@ -107,6 +122,9 @@ int main(void)
     putn(fenced(41));          /* 42 */
     putn(chain(10));           /* (10+1)<<2 - 3 = 41 */
     putn(bits(1u << 20));      /* 11 leading zeros */
+    putn(addk(33));            /* 42 */
+    putn(pinned(40));          /* 42 */
+    putn(memout(42));          /* 42 */
     puts_("\n==END==\n");
     return 0;
 }
@@ -125,7 +143,7 @@ for opt in -O0 -O1 -O2 -Os; do
         { echo "$opt: could not link"; exit 1; }
     sh tests/harness/thumb/run.sh "$out/a$opt.elf" > "$out/a$opt.txt" 2>&1
     got=$(tr -d '\n' < "$out/a$opt.txt" | sed 's/==END==.*//')
-    want="42 40 42 10 42 41 11 "
+    want="42 40 42 10 42 41 11 42 42 42 "
     [ "$got" = "$want" ] || {
         echo "$opt: inline asm computed '$got', wanted '$want'"; exit 1; }
 done
@@ -149,3 +167,38 @@ fi
 grep -q "callee-saved" "$out/cs.err" || {
     echo "the refusal does not say why:"; cat "$out/cs.err"; exit 1; }
 echo "an unknown instruction and a callee-saved clobber are refused by name"
+
+# x86's constraint letters mean nothing here: "S" pinned the operand to
+# x86 register 6, r6, which is callee-saved and was not saved; and a
+# register variable on r4-r11 would be loaded without being saved.
+printf 'int f(int x){ int r; __asm__("mov %%0, %%1" : "=r"(r) : "S"(x)); return r; }\n' \
+    > "$out/x86c.c"
+if "$EMBCC" --target=$T -c "$out/x86c.c" -o /dev/null 2> "$out/x86c.err"; then
+    echo "x86's \"S\" was accepted on ARMv7-M"; exit 1
+fi
+grep -q 'asm constraint "S" is not valid for ARMv7-M' "$out/x86c.err" || {
+    echo "the \"S\" refusal is not by name:"; cat "$out/x86c.err"; exit 1; }
+printf 'int f(int x){ register int y __asm__("r6") = x; int r; __asm__("mov %%0, %%1" : "=r"(r) : "r"(y)); return r; }\n' \
+    > "$out/r6.c"
+if "$EMBCC" --target=$T -c "$out/r6.c" -o /dev/null 2> "$out/r6.err"; then
+    echo "a register variable on callee-saved r6 was accepted"; exit 1
+fi
+echo "x86's constraint letters and a callee-saved register variable are refused"
+
+# `movs` and `mvns` SET the flags -- a branch after them in the same
+# template reads them -- and were encoded as movw/mov and mvn.w, which do
+# not. A movs immediate no flag-setting MOV can hold is refused.
+printf 'int f(int x){ int r; __asm__("movs %%0, #0\\n mvns %%0, %%1\\n movs %%0, %%1\\n movs %%0, #0x10000" : "=r"(r) : "r"(x)); return r; }\n' \
+    > "$out/flags.c"
+"$EMBCC" --target=$T -c "$out/flags.c" -o "$out/flags.o" || {
+    echo "the flag-setting moves do not assemble"; exit 1; }
+fl=$(llvm-objdump -d --triple=thumbv7em "$out/flags.o" | grep -cE '[[:space:]](movs(\.w)?|mvns)[[:space:]]')
+[ "$fl" = 4 ] || {
+    echo "$fl of 4 flag-setting moves set the flags:"
+    llvm-objdump -d --triple=thumbv7em "$out/flags.o" | grep -E 'mov|mvn'; exit 1; }
+printf 'int f(int x){ int r; __asm__("movs %%0, #0x12345" : "=r"(r) : "r"(x)); return r; }\n' \
+    > "$out/movs-big.c"
+if "$EMBCC" --target=$T -c "$out/movs-big.c" -o /dev/null 2>/dev/null; then
+    echo "movs of an immediate no MOVS encodes was accepted"; exit 1
+fi
+echo "movs and mvns set the flags, or are refused"

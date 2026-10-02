@@ -28,6 +28,11 @@ int gen_addr(struct ir_func *fn, struct expr *e);
 int gen_convert(struct ir_func *fn, int v, const struct type *from,
                 const struct type *to);
 
+/* va_arg(ap, struct T): the slot sema gave the expression (its value),
+ * and `n` bytes copied into it at `off` from the address `src` */
+int irg_va_struct_slot(struct ir_func *fn, struct expr *e);
+void irg_va_copy(struct ir_func *fn, int dst, long off, int src, long n);
+
 /* ---- per-architecture lowering (src/arch/<arch>/irgen.c) ---- */
 /* va_arg(ap, T): SysV's __va_list_tag walk / AAPCS64's va_list record */
 int irg_va_arg_sysv(struct ir_func *fn, struct expr *e);
@@ -48,5 +53,11 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s);
 void irg_asm_riscv(struct ir_func *fn, struct stmt *s);
 void irg_asm_thumb(struct ir_func *fn, struct stmt *s);
 void irg_asm_avr(struct ir_func *fn, struct stmt *s);
+
+/* Whether an asm operand names MEMORY: its constraint, past = + &, allows
+ * nothing but `m`. "rm" and "g" allow a register too, and GCC gives them
+ * one, so the template is written for a VALUE -- reading them as memory
+ * handed it the operand's address instead. */
+int asm_constraint_mem_only(const char *c);
 
 #endif

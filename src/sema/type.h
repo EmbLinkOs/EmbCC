@@ -71,6 +71,11 @@ struct type {
      * the slot. One node per declarator — never interned or shared. */
     struct expr *vla_len;
     int vla_size;
+    int vla_at_typedef;     /* a VLA a block-scope typedef names: sized where
+                             * the typedef is reached, and read -- never
+                             * re-evaluated -- where the name is used. The
+                             * id of that typedef's statement, so a typedef
+                             * built on another evaluates only its own. */
     /* TY_STRUCT (unions too — one type kind, is_union flag): */
     const char *tag;        /* NULL for anonymous */
     int is_union;
@@ -113,6 +118,8 @@ struct type *ty_base(enum ty_kind kind, int is_unsigned);
  * EmbCC does not model plain char as a third type distinct from signed and
  * unsigned char: it IS one of the two, chosen per target. */
 struct type *ty_plain_char(void);
+int ty_is_plain_char(const struct type *t);
+int ty_generic_same(const struct type *a, const struct type *b);
 struct type *ty_wchar(void);
 /* `long long` / `unsigned long long`: eight bytes on every target. */
 struct type *ty_llong(int is_unsigned);

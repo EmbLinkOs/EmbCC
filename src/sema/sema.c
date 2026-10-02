@@ -13,6 +13,8 @@
 
 #include "../arch/aarch64/asm.h"
 #include "../arch/avr/asm.h"
+#include "../arch/riscv/asm.h"
+#include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
 #include "ldfloat.h"
@@ -1639,13 +1641,29 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * node simply becomes the selected expression. */
         check_expr(u, f, sc, e->lhs);
         struct expr *chosen = NULL, *deflt = NULL;
+        /* lvalue conversion drops the operand's own qualifiers */
+        const struct type *ct = e->lhs->ty;
+        if (ct->canon && (ct->is_volatile || ct->is_atomic))
+            ct = ct->canon;
+        int nmatch = 0;
         for (int i = 0; i < e->ngen; i++) {
             if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
-            if (ty_equal(e->lhs->ty, e->gtypes[i])) {
-                chosen = e->gexprs[i];
-                break;
+            /* Strictly: ty_equal lets `long` be `long long` and `char`
+             * be `signed char`, and the first association that matched
+             * that loosely was taken -- _Generic(1L, long long: ...,
+             * long: ...) picked the long long arm. */
+            if (ty_generic_same(ct, e->gtypes[i])) {
+                if (!chosen)
+                    chosen = e->gexprs[i];
+                nmatch++;
             }
         }
+        if (nmatch > 1)
+            sema_error_at(u, e->line, e->col,
+                       "more than one _Generic association matches type %s: "
+                       "their types differ only in const, which EmbCC does "
+                       "not yet keep in a type, or are the same type",
+                       ty_name(e->lhs->ty));
         if (!chosen)
             chosen = deflt;
         if (!chosen)
@@ -1929,10 +1947,23 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         check_expr(u, f, sc, e->lhs);   /* the va_list */
         if (e->cast_ty->kind == TY_VOID)
             sema_error_at(u, e->line, e->col, "va_arg cannot read type 'void'");
-        if (e->cast_ty->kind == TY_STRUCT)
-            sema_error_at(u, e->line, e->col,
-                       "va_arg of a struct passed by value is not "
-                       "supported yet");
+        if (e->cast_ty->kind == TY_STRUCT) {
+            if (!e->cast_ty->complete)
+                sema_error_at(u, e->line, e->col,
+                           "va_arg of incomplete %s", ty_name(e->cast_ty));
+            /* Windows passes a struct of any other size than 1, 2, 4 or
+             * 8 bytes by reference, and its va_list is a bare pointer:
+             * neither is what the walk below does there. */
+            if (target_win64_abi())
+                sema_error_at(u, e->line, e->col,
+                           "va_arg of a struct is not supported for a "
+                           "Windows target yet");
+            /* The value of a struct expression is an object's address:
+             * the argument's bytes, wherever the walk finds them (a
+             * register save area, the stack, behind a pointer), are
+             * copied into this one (irg_va_struct_slot). */
+            e->var_index = scope_add(sc, "<va_arg>", e->cast_ty, NULL);
+        }
         e->ty = e->cast_ty;
         break;
     case EXPR_BINOP: {
@@ -2260,8 +2291,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 check_expr(u, f, sc, e->args[0]);
                 need_integer(u, e->args[0], "__builtin_bswap");
                 e->name = e->lhs->name;
-                e->ty = ty_base(bn[5] == '1' ? TY_SHORT :
-                                bn[5] == '3' ? TY_INT : TY_LONG, 1);
+                /* By SIZE, not by name: `unsigned long` is four bytes
+                 * on a 32-bit target and `unsigned int` two on AVR, and
+                 * bswap64 typed as unsigned long swapped four bytes
+                 * there and called it the answer. */
+                e->ty = ty_int_of_size(bn[5] == '1' ? 2 : bn[5] == '3' ? 4 : 8,
+                                       1);
                 break;
             }
             /* square root -- one instruction on both targets, and the
@@ -3984,6 +4019,60 @@ static int asm_resolve_reg_avr(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* ARMv7-M and RISC-V operand resolution. Both went through the x86 path,
+ * where the letters a/b/c/d/S/D pin x86 register NUMBERS: "=a" on RISC-V
+ * was x0, the zero register, so an output written there was lost, and S/D
+ * on Thumb were r6/r7, callee-saved and not saved. 'i' and 'n' became a
+ * register holding the value, where the template wants a literal, and a
+ * register variable was matched against the x86 names. Their own letters
+ * here, as aarch64 has:
+ *   r/g          a register irgen allocates from its caller-saved pool (-2)
+ *   m            the same, holding the operand's address
+ *   i/n (and on Thumb I/J/K/L/M) a constant, substituted as a literal
+ *   a register variable  its register, which must be one the pool may use
+ * Anything else is ASM_REG_INVALID, refused by irgen with the constraint. */
+static int asm_resolve_reg_ilp32(struct unit *u, struct stmt *s,
+                                 struct asm_operand *op, const char *c,
+                                 int riscv)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int n = (int)strlen(rn);
+        int r = riscv ? rvasm_gpr(rn, n) : tasm_gpr(rn, n);
+        /* the registers irgen's pool hands out: RISC-V t0-t6 and a0-a7
+         * (x5-x7, x10-x17, x28-x31), ARMv7-M r0-r3 and r12 */
+        int ok = riscv ? (r >= 5 && r <= 7) || (r >= 10 && r <= 17) ||
+                         (r >= 28 && r <= 31)
+                       : (r >= 0 && r <= 3) || r == 12;
+        if (!ok)
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "%s asm (use %s)", rn, riscv ? "RISC-V" : "ARMv7-M",
+                    riscv ? "a0-a7 or t0-t6" : "r0-r3 or r12");
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'm') has_r = 1;
+        if (*p == 'i' || *p == 'n' ||
+            (!riscv && (*p == 'I' || *p == 'J' || *p == 'K' || *p == 'L' ||
+                        *p == 'M')))
+            has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;     /* a non-constant "i": gcc refuses too */
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -3998,6 +4087,10 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_arm64(u, s, op, c);
     if (target_get() == TARGET_AVR)
         return asm_resolve_reg_avr(u, s, op, c);
+    if (target_get() == TARGET_THUMB)
+        return asm_resolve_reg_ilp32(u, s, op, c, 0);
+    if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
+        return asm_resolve_reg_ilp32(u, s, op, c, 1);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)
@@ -4104,6 +4197,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 need_scalar(u, s->cond, "'do'/'while'");
             break;
         case STMT_DECL:
+            if (s->is_vm_typedef) {
+                vla_prepare(u, f, sc, s->dty);   /* its size slots */
+                break;
+            }
             if (s->is_extern) {
                 /* block-scope extern: no storage here, external linkage. Register
                  * the unit global/function (safe now -- parsing is done, so the
@@ -4283,6 +4380,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     flatten_init(u, f, sc, s->expr, s->dty, 0, &ib);
                 s->inits = ib.v;
                 s->ninits = ib.n;
+                s->has_initlist = 1;
                 s->expr = NULL;
                 if (!s->is_static) {
                     char what[96];
@@ -4656,7 +4754,11 @@ static void check_func(struct unit *u, struct func *f)
 
     check_stmt(u, f, &sc, f->body, 0, 0, 0);
 
-    if (f->ret_ty->kind != TY_VOID && !list_returns(f->body)) {
+    /* main is the exception the language makes: reaching its closing
+     * brace returns 0 (C99 5.1.2.2.3), and irgen says so. Refusing it
+     * refused `int main(void) { }`. */
+    if (f->ret_ty->kind != TY_VOID && !list_returns(f->body) &&
+        strcmp(f->name, "main") != 0) {
         diag_error_at(f->file ? f->file : u->file, f->line, 0,
                       "control may reach the end of '%s' — every path must "
                       "end in a return statement", f->name);
@@ -4724,6 +4826,41 @@ static void check_func(struct unit *u, struct func *f)
             f->var_tys[i] = ty_ptr(f->var_tys[i]->pointee);
         f->var_aligns[i] = sc.vars[i].g || sc.vars[i].fdecl
                            ? 0 : sc.vars[i].user_align;
+    }
+    /* A local aligned beyond what the stack guarantees. A frame slot's
+     * OFFSET can be rounded to anything, but the address is the stack
+     * pointer plus it, and sp is only ever 16-aligned (8 on AAPCS32):
+     * Thumb and RISC-V put `char buf[64] __attribute__((aligned(64)))`
+     * at whatever sp gave them, silently, and x86-64 and aarch64 refused
+     * it. An aggregate gets storage of its own instead (var_indirect);
+     * a scalar so aligned is refused by name. AVR keeps its own refusal
+     * of any aligned local. */
+    f->var_indirect = NULL;
+    f->var_ind_align = NULL;
+    for (int i = f->nparams; i < sc.n && target_get() != TARGET_AVR; i++) {
+        struct type *t = f->var_tys[i];
+        if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t))
+            continue;
+        int al = ty_align(t);
+        if (f->var_aligns[i] > al)
+            al = f->var_aligns[i];
+        if (al <= target_stack_align())
+            continue;
+        if (t->kind != TY_STRUCT && t->kind != TY_ARRAY)
+            sema_error_at(u, sc.vars[i].line, sc.vars[i].col,
+                          "'%s' needs %d-byte alignment and the stack only "
+                          "guarantees %d: supported for an array or a "
+                          "struct, not yet for a scalar", sc.vars[i].name,
+                          al, target_stack_align());
+        if (!f->var_indirect) {
+            f->var_indirect = xcalloc((size_t)sc.n, sizeof *f->var_indirect);
+            f->var_ind_align = xcalloc((size_t)sc.n,
+                                       sizeof *f->var_ind_align);
+        }
+        f->var_indirect[i] = t;
+        f->var_ind_align[i] = al;
+        f->var_tys[i] = ty_ptr(t);
+        f->var_aligns[i] = 0;
     }
     free(sc.vars);
     g_cx_sc = NULL;

@@ -14,4 +14,7 @@ int main(void){
   { struct ov8 o = { 3 }; struct ll8 l = { 4 }; struct m8 m = { 5 };
     putn(nat_ov8(1, o, 2)); putn(nat_ll8(1, l, 2)); putn(nat_m8(1, m, 2));
     putn(nat_stk(1, 0, 0, 0, 2, 0, 0, 0, 3, o, m, 4)); }
+  { static volatile unsigned long long v = 0x12345678ffffffffULL;
+    putn(nar_ret(v) == 0xffffffffu); putn(nar_ismax(nar_ret(v)));
+    putn(nar_ismax((unsigned)v)); putn(nar_lt((unsigned)v, 3u)); }
   puts_("\n==END==\n"); return 0; }

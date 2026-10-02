@@ -325,7 +325,21 @@ static int one_stmt(const char *stmt, int len, struct code *out,
     /* ---- two-register forms ---- */
     if (n == 3) {
         int rd = tok_reg(&t[1]), rm = tok_reg(&t[2]);
-        if (mnemonic_is(&t[0], "mov") || mnemonic_is(&t[0], "movs")) {
+        /* `movs` and `mvns` SET the flags, which a branch after them in
+         * the same template reads; they were encoded as movw/mov and
+         * mvn.w, which do not. */
+        if (mnemonic_is(&t[0], "movs")) {
+            if (rd < 0) FAIL("movs wants a register destination");
+            if (rm >= 0) { t_movs_reg(out, rd, rm); return 0; }
+            if (!tok_imm(&t[2], &imm))
+                FAIL("\"%.*s\" is neither a register nor an immediate",
+                     t[2].len, t[2].s);
+            if (t_movs_imm(out, rd, imm) < 0)
+                FAIL("movs cannot set the flags with #%ld: no flag-setting "
+                     "MOV encodes it (use mov, then cmp)", imm);
+            return 0;
+        }
+        if (mnemonic_is(&t[0], "mov")) {
             if (rd < 0) FAIL("mov wants a register destination");
             if (rm >= 0) { t_mov_reg(out, rd, rm); return 0; }
             if (!tok_imm(&t[2], &imm))
@@ -336,7 +350,7 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         }
         if (mnemonic_is(&t[0], "mvn") || mnemonic_is(&t[0], "mvns")) {
             if (rd < 0 || rm < 0) FAIL("mvn wants two registers");
-            t_mvn_reg(out, rd, rm, 0);
+            t_mvn_reg(out, rd, rm, mnemonic_is(&t[0], "mvns"));
             return 0;
         }
         if (mnemonic_is(&t[0], "clz")) {

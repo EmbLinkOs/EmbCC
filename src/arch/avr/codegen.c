@@ -3758,8 +3758,10 @@ static void gen_ins(struct a_fn *F, int n)
                 ld_slot(F, RB, F->sret_slot, 2);
                 avr_movw(t, AVR_Z, RA);
                 g_x_hit = 1; avr_movw(t, AVR_X, RB);
+                /* both walk: `ldd` reaches 63, and a struct of 64
+                 * bytes or more stopped the build at the 65th */
                 for (long b = 0; b < n; b++) {
-                    avr_ldd(t, R_TMP, AVR_Z, (int)b);
+                    avr_ld(t, R_TMP, AVR_Z, AVR_PTR_POST_INC);
                     avr_st(t, AVR_X, R_TMP, AVR_PTR_POST_INC);
                 }
                 /* and the pointer itself is the return value */
@@ -3825,7 +3827,22 @@ static void gen_ins(struct a_fn *F, int n)
             place_arg(i->argv[k].size, &cursor, &stk, &pl);
             if (!pl.nstk)
                 continue;
-            if (i->argv[k].is_struct) {
+            if (i->argv[k].is_struct && 1 + pl.stk + pl.nstk > 64) {
+                /* Past std's reach the destination needs a pointer of
+                 * its own, and the one st_slot builds is Z -- which held
+                 * the SOURCE here: every byte after the first was read
+                 * from the frame, not the struct (a sixth 16-byte struct
+                 * argument came out as garbage). The source walks in X,
+                 * the destination in Z. */
+                g_x_hit = 1;
+                ld_slot(F, AVR_X, sslot(F, i->argv[k].vreg), 2);
+                y_to(F, AVR_Z);
+                add_const16(F, AVR_Z, 1 + pl.stk);
+                for (int b = 0; b < pl.nstk; b++) {
+                    avr_ld(t, R_TMP, AVR_X, AVR_PTR_POST_INC);
+                    avr_st(t, AVR_Z, R_TMP, AVR_PTR_POST_INC);
+                }
+            } else if (i->argv[k].is_struct) {
                 /* The vreg holds the struct's ADDRESS; the bytes are what
                  * travels. Copied one at a time through r0 so that no
                  * argument register is disturbed. */
@@ -4107,6 +4124,15 @@ static void gen_ins(struct a_fn *F, int n)
                 if (late != pass)
                     continue;
                 vld(F, o->reg, o->temp, 0, o->size);
+            }
+            /* ...and an "m" output's register its ADDRESS, which nothing
+             * loaded: the template wrote through whatever it held. */
+            for (int k = 0; k < ia->nout; k++) {
+                struct ir_asm_op *o = &ia->out[k];
+                late = o->reg >= AVR_X;
+                if (late != pass || !o->mem)
+                    continue;
+                vld(F, o->reg, o->temp, 0, 2);
             }
         }
         for (int k = 0; k < ia->codelen; k++)

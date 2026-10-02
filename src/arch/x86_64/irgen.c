@@ -11,6 +11,108 @@
 #include "../../driver/util.h"
 #include "../../sema/sema.h"
 #include "../../sema/type.h"
+#include "../target.h"
+
+/* va_arg of a struct (SysV 3.5.7): classified like an argument. When
+ * every eightbyte finds a register of its class still unread, it is
+ * gathered from the register save area -- INTEGER ones from the
+ * gp_offset run, SSE ones from the fp_offset run sixteen bytes apart --
+ * into the expression's own slot; otherwise, and always for a MEMORY
+ * one, it is the next run of the overflow area, aligned as the caller
+ * aligned it. An eightbyte that is only padding is not fetched at all. */
+static int va_struct_sysv(struct ir_func *fn, struct expr *e, int ap,
+                          int a_ova, int a_rsa)
+{
+    struct type *rt = e->ty;
+    struct type *u32 = ty_base(TY_INT, 1);
+    struct type *ptr = ty_base(TY_LONG, 1);
+    long size = ty_size(rt);
+    enum arg_class cls[2];
+    int n = ty_classify(rt, cls), ni = 0, ns = 0;
+    for (int k = 0; k < n; k++) {
+        if (cls[k] == CLASS_SSE)
+            ns++;
+        else if (cls[k] == CLASS_INTEGER)
+            ni++;
+    }
+    int dst = irg_va_struct_slot(fn, e);
+    int l_over = new_label(fn), l_done = new_label(fn);
+    if (n > 0) {
+        int a_fp = emit_bin(fn, IR_ADD, ap, emit_const(fn, 4, 8), 8, 1);
+        int gp = emit_load(fn, ap, u32), fp = emit_load(fn, a_fp, u32);
+        if (ni)     /* registers left for all of them: gp <= 48 - 8*ni */
+            emit_brz(fn, emit_cmp(fn, B_LT, gp,
+                                  emit_const(fn, 49 - 8 * ni, 4), 4, 0),
+                     4, l_over);
+        if (ns)
+            emit_brz(fn, emit_cmp(fn, B_LT, fp,
+                                  emit_const(fn, 177 - 16 * ns, 4), 4, 0),
+                     4, l_over);
+        int rsa = emit_load(fn, a_rsa, ptr);
+        int ki = 0, ks = 0;
+        for (int k = 0; k < n; k++) {
+            long chunk = size - 8 * k < 8 ? size - 8 * k : 8;
+            if (cls[k] == CLASS_NONE)
+                continue;
+            int off = cls[k] == CLASS_SSE
+                ? emit_bin(fn, IR_ADD, fp, emit_const(fn, 16 * ks++, 4), 4, 0)
+                : emit_bin(fn, IR_ADD, gp, emit_const(fn, 8 * ki++, 4), 4, 0);
+            int src = emit_bin(fn, IR_ADD, rsa,
+                               gen_convert(fn, off, u32, ptr), 8, 1);
+            irg_va_copy(fn, dst, 8 * k, src, chunk);
+        }
+        if (ni)
+            emit_store(fn, ap, emit_bin(fn, IR_ADD, gp,
+                                        emit_const(fn, 8 * ni, 4), 4, 0), u32);
+        if (ns)
+            emit_store(fn, a_fp, emit_bin(fn, IR_ADD, fp,
+                                          emit_const(fn, 16 * ns, 4), 4, 0),
+                       u32);
+        emit_jmp(fn, l_done);
+    }
+    emit_label(fn, l_over);
+    int ova = emit_load(fn, a_ova, ptr);
+    if (ty_align(rt) > 8)
+        ova = emit_bin(fn, IR_AND,
+                       emit_bin(fn, IR_ADD, ova, emit_const(fn, 15, 8), 8, 1),
+                       emit_const(fn, -16, 8), 8, 1);
+    irg_va_copy(fn, dst, 0, ova, size);
+    emit_store(fn, a_ova, emit_bin(fn, IR_ADD, ova,
+                                   emit_const(fn, (size + 7) & ~7L, 8), 8, 1),
+               ptr);
+    emit_label(fn, l_done);
+    return dst;
+}
+
+/* va_arg on Microsoft x64: the list is a pointer walking eight-byte
+ * slots -- the home area the prologue filled from rcx..r9, then the
+ * caller's stack arguments. A variadic float is a double there. What
+ * travels by reference on Windows (long double, __int128; structs are
+ * refused in sema) is refused by name rather than read as a value. */
+static int va_arg_win64(struct ir_func *fn, struct expr *e)
+{
+    struct type *rt = e->ty;
+    struct type *ptr = ty_base(TY_LONG, 1);
+    if (rt->kind == TY_LDOUBLE || rt->kind == TY_INT128)
+        diag_fatal(fn->file, e->line,
+                   "va_arg of %s is not supported for a Windows target yet: "
+                   "there it travels by reference", ty_name(rt));
+    int apa = gen_addr(fn, e->lhs);
+    int cur = emit_load(fn, apa, ptr);
+    emit_store(fn, apa, emit_bin(fn, IR_ADD, cur, emit_const(fn, 8, 8), 8, 1),
+               ptr);
+    if (ty_is_float(rt)) {
+        int v = emit_load(fn, cur, ty_base(TY_DOUBLE, 0));
+        if (rt->kind == TY_FLOAT) {
+            struct ir_ins *cv = emit(fn);
+            cv->op = IR_F2F; cv->a = v; cv->size = 8; cv->w = 4;
+            cv->dst = new_temp(fn);
+            return cv->dst;
+        }
+        return v;
+    }
+    return emit_load(fn, cur, rt);
+}
 
 /* va_arg(ap, T) for an INTEGER-class T (SysV). ap's value is a pointer to
  * a __va_list_tag { gp_offset u32, fp_offset u32, overflow_arg_area ptr,
@@ -19,6 +121,8 @@
  * otherwise it is next in the overflow area, which advances by 8. */
 int irg_va_arg_sysv(struct ir_func *fn, struct expr *e)
 {
+    if (target_win64_abi())
+        return va_arg_win64(fn, e);
     struct type *rt = e->ty;
     struct type *u32 = ty_base(TY_INT, 1);
     struct type *ptr = ty_base(TY_LONG, 1); /* an 8-byte slot */
@@ -26,6 +130,9 @@ int irg_va_arg_sysv(struct ir_func *fn, struct expr *e)
 
     int a_ova = emit_bin(fn, IR_ADD, ap, emit_const(fn, 8, 8), 8, 1);
     int a_rsa = emit_bin(fn, IR_ADD, ap, emit_const(fn, 16, 8), 8, 1);
+
+    if (rt->kind == TY_STRUCT)
+        return va_struct_sysv(fn, e, ap, a_ova, a_rsa);
 
     /* long double is X87 class, which SysV passes in memory — always the
      * overflow area, at a 16-aligned slot of 16 bytes. */
@@ -571,16 +678,70 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         } else if (mlen == 5 && strncmp(m, "popfq", 5) == 0) {
             code[n++] = 0x9d;
         }
-        /* ---- port I/O: al/ax/eax with dx, both operands fixed by the
-         * constraints ("a" and "Nd"), so the opcode alone encodes it ---- */
-        else if (mlen == 4 && strncmp(m, "outb", 4) == 0) { code[n++] = 0xee; }
-        else if (mlen == 4 && strncmp(m, "outw", 4) == 0) {
-            code[n++] = 0x66; code[n++] = 0xef;
-        } else if (mlen == 4 && strncmp(m, "outl", 4) == 0) { code[n++] = 0xef; }
-        else if (mlen == 3 && strncmp(m, "inb", 3) == 0) { code[n++] = 0xec; }
-        else if (mlen == 3 && strncmp(m, "inw", 3) == 0) {
-            code[n++] = 0x66; code[n++] = 0xed;
-        } else if (mlen == 3 && strncmp(m, "inl", 3) == 0) { code[n++] = 0xed; }
+        /* ---- port I/O: al/ax/eax with dx or an 8-bit port number. The
+         * operands were not read at all -- the opcode was always the dx
+         * form -- so `inb $0x60, %al` read whatever port dx named. Written
+         * operands are read now: `$N` is the immediate form, dx (by name
+         * or as the operand the "Nd"/"d" constraint put there) the
+         * register form, and the data operand must be al/ax/eax. With no
+         * operands written, the dx form, as before. ---- */
+        else if ((mlen == 4 && (strncmp(m, "outb", 4) == 0 ||
+                                strncmp(m, "outw", 4) == 0 ||
+                                strncmp(m, "outl", 4) == 0)) ||
+                 (mlen == 3 && (strncmp(m, "inb", 3) == 0 ||
+                                strncmp(m, "inw", 3) == 0 ||
+                                strncmp(m, "inl", 3) == 0))) {
+            int out = m[0] == 'o';
+            char sz = m[mlen - 1];
+            long port = -1;
+            a_ws(&p);
+            if (reg >= 0 || (*p && *p != '\n' && *p != ';')) {
+                int port_reg = -1, data_reg = -1;
+                for (int k = 0; k < 2; k++) {
+                    int is_port = out ? k == 1 : k == 0;
+                    a_ws(&p);
+                    if (k == 0 && reg >= 0) {     /* %N, read above */
+                        if (is_port) port_reg = reg; else data_reg = reg;
+                    } else if (*p == '$') {
+                        if (!is_port)
+                            diag_fatal(file, line, "asm: %.*s's data operand "
+                                       "is al/ax/eax, not an immediate, in "
+                                       "\"%s\"", mlen, m, tmpl);
+                        port = a_imm(&p, file, line, tmpl);
+                    } else {
+                        int r = (p[0] == '%' && p[1] == '%')
+                              ? a_reg_any(&p, file, line, tmpl)
+                              : a_opreg(&p, opregs, opnames, nops, file, line,
+                                        tmpl);
+                        if (is_port) port_reg = r; else data_reg = r;
+                    }
+                    a_ws(&p);
+                    if (k == 0) {
+                        if (*p != ',')
+                            diag_fatal(file, line, "asm: %.*s wants two "
+                                       "operands in \"%s\"", mlen, m, tmpl);
+                        p++;
+                    }
+                }
+                if (data_reg != 0)
+                    diag_fatal(file, line, "asm: %.*s moves through "
+                               "al/ax/eax, in \"%s\"", mlen, m, tmpl);
+                if (port < 0 && port_reg != 2)
+                    diag_fatal(file, line, "asm: %.*s's port is dx or an "
+                               "immediate, in \"%s\"", mlen, m, tmpl);
+                if (port > 255)
+                    diag_fatal(file, line, "asm: an immediate port is 0..255, "
+                               "in \"%s\"", tmpl);
+            }
+            if (sz == 'w')
+                code[n++] = 0x66;
+            if (port >= 0) {
+                code[n++] = (unsigned char)((out ? 0xe6 : 0xe4) + (sz != 'b'));
+                code[n++] = (unsigned char)port;
+            } else {
+                code[n++] = (unsigned char)((out ? 0xee : 0xec) + (sz != 'b'));
+            }
+        }
         /* ---- pop/push %N (64-bit; the `q` suffix is the same encoding) ---- */
         else if ((mlen == 3 && strncmp(m, "pop", 3) == 0) ||
                  (mlen == 4 && strncmp(m, "popq", 4) == 0)) {
@@ -1059,7 +1220,7 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
          * happened to work for a struct, whose "value" in this IR is
          * already an address, and silently read from a garbage address
          * for a scalar. */
-        ia->in[i].mem = strchr(a->in[i].constraint, 'm') != NULL;
+        ia->in[i].mem = asm_constraint_mem_only(a->in[i].constraint);
         ia->in[i].temp = ia->in[i].mem ? gen_addr(fn, a->in[i].expr)
                                        : gen_expr(fn, a->in[i].expr);
         ia->in[i].size = ia->in[i].reg >= 16
@@ -1070,7 +1231,7 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s)
         ia->out[i].size = ty_size(a->out[i].expr->ty);
         /* "+": the register must START with the lvalue's value */
         ia->out[i].inout = strchr(a->out[i].constraint, '+') != NULL;
-        ia->out[i].mem = strchr(a->out[i].constraint, 'm') != NULL;
+        ia->out[i].mem = asm_constraint_mem_only(a->out[i].constraint);
     }
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;

@@ -468,7 +468,10 @@ static void a64_place_info(const struct ir_arg *a, struct a64_cursor *cu,
          * struct itself does count here, unlike in AAPCS64 */
         to_stack(cu, p, (p->size + 7) & ~7L, a->align > 8 ? a->align : 8);
     else
-        to_stack(cu, p, p->size, nal);
+        /* ...and on Darwin a VARIADIC one, in an eight-byte slot, is
+         * aligned by its declared alignment too (clang; and va_arg) */
+        to_stack(cu, p, p->size,
+                 target_os_get() == TGT_OS_DARWIN ? a->align : nal);
 }
 
 /* Argument k of a call or function whose argument 0 may be the indirect-
@@ -2744,11 +2747,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * SCR, and the choice without a branch. Both arms are
              * already values -- the pass that built this refused
              * anything that could fault -- so there is nothing to
-             * guard. NE, because the condition is a 0/1 truth value. */
-            int rc = rd_ext(t, sd, i->a, A64_ACC, 4, 0, 4);
+             * guard. NE against zero, at the CONDITION's width. */
+            int cw = i->size == 8 ? 8 : 4;
+            int rc = rd_ext(t, sd, i->a, A64_ACC, cw, 0, cw);
             int rb = rd_ext(t, sd, i->b, A64_TMP, i->w, i->sign, i->w);
             int rs = rd_ext(t, sd, i->c, A64_SCR, i->w, i->sign, i->w);
-            a64_cmp_reg(t, rc, A64_ZR, 4);
+            a64_cmp_reg(t, rc, A64_ZR, cw);
             int d = wr(i->dst, A64_ACC);
             a64_csel(t, d, rb, rs, A64_NE, i->w);
             wrote_n(t, sd, i->dst, d, i->w);

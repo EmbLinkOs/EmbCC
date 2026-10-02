@@ -107,6 +107,8 @@ struct rv_fn {
     int w;               /* a register in bytes: 4 or 8 */
     char *wide;          /* per vreg: needs a register pair (RV32 only) */
     char *nshr;          /* per vreg: a narrow high-word shift (narrow_shr) */
+    char *sx;            /* per vreg, RV64 only: already the sign-extension
+                          * of its low 32 bits (sext_map) */
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
     long frame;          /* total bytes sp moves down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
@@ -963,6 +965,123 @@ static long long imm_val(const struct rv_fn *F, const struct ir_ins *i)
     return (long long)i->imm;
 }
 
+/* ---- 32-bit values at RV64 ------------------------------------------------
+ *
+ * The psABI's invariant is that a register holding a 32-bit value holds
+ * its SIGN-EXTENSION, signed or not: 0xffffffffu is all ones. The `w`
+ * instructions keep it and `lw` establishes it, so arithmetic is free --
+ * but the IR narrows for nothing (`(int)some_long` is the same temp, read
+ * at width 4), `lwu` and a zero-extending local read break it, and the
+ * instructions that read all 64 bits -- a compare, a branch, a jump-table
+ * bound -- then see a value the 32-bit one is not. So does whoever
+ * receives it: a caller comparing a returned `unsigned` against
+ * 0xffffffff, or a callee taking an argument.
+ *
+ * (unsigned)4294967295.75 came back from __fixunsdfsi in its zero-extended
+ * form, which the caller's `li -1` did not equal.
+ *
+ * So the readers that need the invariant ask for it (rd32), and this map
+ * says which values have it already, so that most of them cost nothing.
+ * A value is sign-extended when EVERY definition leaves it so; anything
+ * not listed here is assumed not to. */
+static int sext_def(const struct rv_fn *F, const struct ir_ins *i,
+                    const char *sx)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs;
+#define SX(v) ((v) >= 0 && (v) < nv && sx[v])
+    switch (i->op) {
+    case IR_CONST: {
+        long long v = imm_val(F, i);
+        return v == (long long)(int)v;
+    }
+    case IR_MOV:
+        return SX(i->a);
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+    case IR_SHL: case IR_SHR: case IR_NEG:
+        return !i->flt && i->w == 4;          /* addw, mulw, divw, sllw... */
+    case IR_AND: case IR_OR: case IR_XOR:
+        if (i->flt || !SX(i->a))
+            return 0;
+        if (i->imm_b) {
+            long long v = imm_val(F, i);
+            return v == (long long)(int)v;
+        }
+        return SX(i->b);
+    case IR_BNOT:                             /* xori -1 */
+        return SX(i->a);
+    case IR_CMP:
+        return 1;                             /* 0 or 1 */
+    case IR_LOAD:
+        return i->size < 4 || (i->size == 4 && i->sign);
+    case IR_LDVAR:
+        /* A four-byte local in a register is read with a plain move
+         * (rv_ldvar_plain): it holds what STVAR's sign extension, or the
+         * caller, left there. A wider one read at four does not. */
+        if (i->size < 4)
+            return 1;
+        if (i->size != 4 || !i->sign)
+            return 0;
+        return !in_reg(F, i->a) ||
+               (i->a < fn->nvars && fn->locals[i->a].size == 4);
+    case IR_EXT:
+        return i->w != 16 && (i->size < 4 || (i->size == 4 && i->sign));
+    case IR_SELECT:
+        return SX(i->b) && SX(i->c);
+    case IR_CALL:                             /* the callee's, by the ABI */
+        return !i->flt && !i->retsize && i->ret_tybytes > 0 &&
+               i->ret_tybytes <= 4;
+    case IR_F2I:                              /* __fix*si, by the ABI */
+        return i->w == 4;
+    default:
+        return 0;
+    }
+#undef SX
+}
+
+static char *sext_map(const struct rv_fn *F)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, changed = 1;
+    char *sx = xmalloc((size_t)(nv ? nv : 1));
+    /* Optimistic, then cut down to a fixed point: a loop's accumulator
+     * is sign-extended if its entry value and its update both are. */
+    for (int v = 0; v < nv; v++)
+        sx[v] = v >= fn->nvars;               /* a local is not a value */
+    while (changed) {
+        changed = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_STVAR || i->dst < 0 || i->dst >= nv ||
+                !sx[i->dst])
+                continue;
+            if (!sext_def(F, i, sx)) {
+                sx[i->dst] = 0;
+                changed = 1;
+            }
+        }
+    }
+    return sx;
+}
+
+/* `v`, already in register `r`, as a 32-bit value a 64-bit instruction
+ * may read: `r` itself when it is sign-extended already, else `scratch`
+ * holding the extension. At RV32 every register is 32 bits and there is
+ * nothing to do. */
+static int sext32(struct rv_fn *F, int v, int r, int scratch)
+{
+    if (F->sx && v >= 0 && v < F->fn->nvregs && !F->sx[v]) {
+        rv_alu_imm(F->t, RV_ADD, scratch, r, 0, 1);       /* sext.w */
+        return scratch;
+    }
+    return r;
+}
+
+static int rd32(struct rv_fn *F, int v, int scratch)
+{
+    return sext32(F, v, rdr(F, v, scratch), scratch);
+}
+
 static void operand_b(struct rv_fn *F, const struct ir_ins *i, int reg)
 {
     if (i->imm_b)
@@ -1730,7 +1849,12 @@ static int gen_ins64(struct rv_fn *F, int n)
         return 1;
     case IR_SELECT: {
         int take_c, done;
-        rd(F, i->a, SCR);
+        if (i->size == 8) {            /* a 64-bit condition: either half */
+            rd64(F, i->a, SCR, SCR2);
+            rv_alu(t, RV_OR, SCR, SCR, SCR2, 0);
+        } else {
+            rd(F, i->a, SCR);
+        }
         take_c = rv_b_placeholder(t, RV_BEQ, SCR, RV_ZERO);
         rd64(F, i->b, A_LO, A_HI);
         done = rv_j_placeholder(t, RV_ZERO);
@@ -1903,6 +2027,8 @@ static void gen_call(struct rv_fn *F, int n)
             }
         } else {
             rd(F, a->vreg, SCR);
+            if (a->size == 4 && !a->is_float)
+                sext32(F, a->vreg, SCR, SCR);     /* an int: see rd32 */
             st_out(F, SCR, pl[k].stk, F->w);
         }
     }
@@ -1944,6 +2070,14 @@ static void gen_call(struct rv_fn *F, int n)
         }
         if (ns_)
             set_args_half(F, sd_, sv_, F->xlen == 32 ? sh_ : NULL, ns_);
+        /* ...and an int argument is owed its sign extension (rd32),
+         * made in place now that every register holds its own value. */
+        for (int k = 0; k < i->nargs; k++) {
+            struct ir_arg *a = &i->argv[k];
+            if (pl[k].nreg && !pl[k].byref && !a->is_struct &&
+                a->size == 4 && !a->is_float)
+                sext32(F, a->vreg, argreg(pl[k].reg), argreg(pl[k].reg));
+        }
     }
     for (int k = 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
@@ -2361,7 +2495,7 @@ static void gen_ins(struct rv_fn *F, int n)
             if (nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
                 nx->a == i->dst && !(nx->w == 8 && F->xlen == 32) &&
                 F->usecnt && F->usecnt[i->dst] == 1) {
-                int ra_ = rdr(F, i->a, ACC);
+                int ra_ = wordop ? rd32(F, i->a, ACC) : rdr(F, i->a, ACC);
                 int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
                 int cond, sw = 0;
                 /* against zero: x0 is zero, and only a branch against
@@ -2369,6 +2503,8 @@ static void gen_ins(struct rv_fn *F, int n)
                 if (i->imm_b && imm_val(F, i) == 0)
                     rb_ = RV_ZERO;
                 if (rb_ == TMP) operand_b(F, i, TMP);
+                if (wordop && !i->imm_b)
+                    rb_ = sext32(F, i->b, rb_, TMP);
                 switch (i->pred) {
                 case B_EQ: cond = RV_BEQ; break;
                 case B_NE: cond = RV_BNE; break;
@@ -2393,10 +2529,12 @@ static void gen_ins(struct rv_fn *F, int n)
              * reading -- `xor d, a, b` then `sltu d, d, 1` -- but only
              * the FIRST instruction reads a and b, so d may safely be
              * either of them. */
-            int ra_ = rdr(F, i->a, ACC);
+            int ra_ = wordop ? rd32(F, i->a, ACC) : rdr(F, i->a, ACC);
             int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
             int d;
             if (rb_ == TMP) operand_b(F, i, TMP);
+            if (wordop && !i->imm_b)
+                rb_ = sext32(F, i->b, rb_, TMP);
             d = wreg(F, i->dst, ACC);
             cmp_to_reg(F, i->pred, i->sign, ra_, rb_, d);
             wrote(F, i->dst, d);
@@ -2406,8 +2544,18 @@ static void gen_ins(struct rv_fn *F, int n)
     case IR_SELECT: {
         /* dst = a ? b : c. Both arms are already-computed VALUES in
          * slots, so this is two loads and a branch over one of them. */
-        int take_c, done;
-        int cond = rdr(F, i->a, SCR);
+        /* The condition is tested at ITS width, `size`, which is not the
+         * arms' `w`: if-convert records the branch's. A 32-bit one that
+         * is zero may have bits above 31 (rd32); at RV32 a 64-bit one is
+         * a pair, and zero only if both halves are. */
+        int take_c, done, cond;
+        if (F->xlen == 32 && i->size == 8) {
+            rd64(F, i->a, A_LO, A_HI);
+            rv_alu(t, RV_OR, SCR, A_LO, A_HI, 0);
+            cond = SCR;
+        } else {
+            cond = i->size == 4 ? rd32(F, i->a, SCR) : rdr(F, i->a, SCR);
+        }
         int d = wreg(F, i->dst, ACC);
         take_c = rv_b_placeholder(t, RV_BEQ, cond, RV_ZERO);
         rd(F, i->b, d);
@@ -2426,7 +2574,7 @@ static void gen_ins(struct rv_fn *F, int n)
             rv_alu(t, RV_OR, A_LO, A_LO, A_HI, 0);
             r = A_LO;
         } else {
-            r = rdr(F, i->a, A_LO);
+            r = wordop ? rd32(F, i->a, A_LO) : rdr(F, i->a, A_LO);
         }
         branch_if(F, i->op == IR_BRZ ? RV_BEQ : RV_BNE, r, RV_ZERO,
                   i->label);
@@ -2590,6 +2738,11 @@ static void gen_ins(struct rv_fn *F, int n)
                 }
             } else if (F->xlen == 32 && F->wide[i->a]) {
                 rd64(F, i->a, RV_A0, RV_A1);
+            } else if (F->sx && !fn->ret_abi.is_float &&
+                       fn->ret_abi.size == 4) {
+                /* the caller is owed the sign extension (rd32) */
+                int r = rd32(F, i->a, RV_A0);
+                if (r != RV_A0) rv_mv(t, RV_A0, r);
             } else {
                 rd(F, i->a, RV_A0);
             }
@@ -2693,6 +2846,10 @@ static void gen_ins(struct rv_fn *F, int n)
             else               ext_reg(F, RV_A0, RV_A0, 4, 0);
         } else if (src_w == 8 && F->xlen == 32) {
             rd64(F, i->a, RV_A0, RV_A1);
+        } else if (i->op == IR_I2F && src_w == 4) {
+            /* __floatsidf's argument is an int: sign-extended (rd32) */
+            int r = rd32(F, i->a, RV_A0);
+            if (r != RV_A0) rv_mv(t, RV_A0, r);
         } else {
             rd(F, i->a, RV_A0);
         }
@@ -2743,6 +2900,13 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         for (int k = 0; k < ia->nin; k++)
             rd(F, ia->in[k].temp, ia->in[k].reg);
+        /* An "m" output's register holds the ADDRESS the template writes
+         * through. Nothing put it there: the template wrote through
+         * whatever the register last held, which was the address only
+         * when the code before happened to leave it. */
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].mem)
+                rd(F, ia->out[k].temp, ia->out[k].reg);
         for (int k = 0; k < ia->codelen; k++)
             code_byte(t, ia->code[k]);
         for (int k = 0; k < ia->nout; k++) {
@@ -2852,7 +3016,8 @@ static void gen_ins(struct rv_fn *F, int n)
                                    : "an atomic wider than a register");
         addr = rdr(F, i->a, ADDR);
         if (i->op == IR_CAS) {
-            exp = rdr(F, i->b, TMP);
+            /* compared with what lr.w sign-extended (rd32) */
+            exp = aw == 4 ? rd32(F, i->b, TMP) : rdr(F, i->b, TMP);
         } else {
             /* IR_CMPXCHG's expected value is at *b, not in b. */
             int p = rdr(F, i->b, TMP);
@@ -2923,7 +3088,7 @@ static void gen_ins(struct rv_fn *F, int n)
          * a negative one is a huge unsigned and takes the default like
          * any other value outside the range. */
         int n = fn->jt[i->jt].n;
-        int ri = rdr(F, i->a, ACC);
+        int ri = wordop ? rd32(F, i->a, ACC) : rdr(F, i->a, ACC);
         rv_li(t, RV_T2, n, F->xlen);
         branch_if(F, RV_BGEU, ri, RV_T2, i->label);
         int on = rv_compress_enabled();
@@ -3286,6 +3451,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                     F.tail = xcalloc((size_t)fn->nins, 1);
                 F.tail[i] = 1;
             }
+    F.sx = xlen == 64 ? sext_map(&F) : NULL;
     F.leaf = 1;
     for (i = 0; i < fn->nins; i++)
         if ((fn->ins[i].op == IR_CALL && !(F.tail && F.tail[i])) ||
@@ -3673,6 +3839,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.label_off);
     free(F.fix);
     free(F.wide);
+    free(F.sx);
     free(F.nshr);
     free(F.loc);
 }

@@ -113,6 +113,18 @@ got=$("$b/embcc" --target=x86_64-elf -dumpmachine 2>&1)
     fail "--target= did not override the compiled-in default: '$got'"
 echo "  and the environment and --target= still override it"
 
+# A default reaches the same code as --target= naming it. The optimizer's
+# view of which operations call a runtime helper was set only for a
+# --target=, so a board compiler built with a default made different -O2
+# code (tests/exec/va-copy.c at RV32) from itself told the board by name.
+for t in riscv32-unknown-elf thumbv7em-none-eabi aarch64-elf; do
+    a=$("$EMBCC" --target=$t -O2 -S -o - tests/exec/va-copy.c 2>&1)
+    d=$(EMBCC_DEFAULT_TARGET=$t "$EMBCC" -O2 -S -o - tests/exec/va-copy.c 2>&1)
+    [ "$a" = "$d" ] ||
+        fail "-O2 code for $t differs between EMBCC_DEFAULT_TARGET and --target="
+done
+echo "  and a default makes the code --target= makes"
+
 # ---- 4. the name that is already taken --------------------------------
 # EMBCC_TARGET belongs to the test harness. tests/run.sh exports it right
 # now, around this very script, so if the driver ever reads it the suite

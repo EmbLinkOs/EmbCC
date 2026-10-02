@@ -274,6 +274,11 @@ int irg_va_arg_avr(struct ir_func *fn, struct expr *e)
                         emit_const(fn, size, target_ptr_size()),
                         target_ptr_size(), 1),
                ptr);
+    if (rt->kind == TY_STRUCT) {        /* its bytes, into its own slot */
+        int dst = irg_va_struct_slot(fn, e);
+        irg_va_copy(fn, dst, 0, addr, size);
+        return dst;
+    }
     return emit_load(fn, addr, rt);
 }
 
@@ -384,7 +389,7 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
         o->reg = regs[a->nout + i];
         /* An "m" operand names MEMORY: the register carries its ADDRESS and
          * the template dereferences it. A pointer here is two bytes. */
-        o->mem = strchr(a->in[i].constraint, 'm') != NULL;
+        o->mem = asm_constraint_mem_only(a->in[i].constraint);
         o->temp = o->mem ? gen_addr(fn, a->in[i].expr)
                          : gen_expr(fn, a->in[i].expr);
         o->size = o->mem ? target_ptr_size() : sizes[a->nout + i];
@@ -395,7 +400,7 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
         o->temp = gen_addr(fn, a->out[i].expr);
         o->size = sizes[i];
         o->inout = strchr(a->out[i].constraint, '+') != NULL;
-        o->mem = strchr(a->out[i].constraint, 'm') != NULL;
+        o->mem = asm_constraint_mem_only(a->out[i].constraint);
     }
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;

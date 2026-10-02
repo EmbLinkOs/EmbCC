@@ -39,6 +39,31 @@ static int udbl(struct dbl s){ return (int)(s.d*8.0) + s.i; }
 static int split(int a,int b,int c, struct s8 s, struct s12 t)
 { return a+b+c + s.a*10 + s.b*100 + t.a + t.b*2 + t.c*3; }
 static int sret_then_args(int z, struct s20 s){ return z + s.v[0] + s.v[4]; }
+/* Locals aligned beyond the stack's own guarantee (8 on AAPCS32, 16 on
+ * RISC-V): a frame offset rounded to 64 is not an address that is, and
+ * both backends placed these wherever sp put them. Called at three
+ * depths, since sp itself differs between them; the answer is 1 1 1. */
+#ifdef __AVR__
+/* AVR refuses an aligned local by name (no alloca there yet, and its sp
+ * has no alignment to start from): the line is the host's answer, so the
+ * rest of the program still compares on the part. */
+static int aligned_locals(int k) { (void)k; return 1; }
+#else
+static int al_ok(const void *p, unsigned long a)
+{ return ((unsigned long)p & (a - 1)) == 0; }
+static int aligned_locals(int k)
+{
+    char buf[64] __attribute__((aligned(64)));
+    struct { int x; } __attribute__((aligned(32))) s;
+    struct { long long v; } __attribute__((aligned(16))) w;
+    buf[0] = (char)k; buf[63] = (char)(k + 1); s.x = k; w.v = k;
+    return al_ok(buf, 64) && al_ok(&s, 32) && al_ok(&w, 16) &&
+           buf[0] + buf[63] + s.x + (int)w.v == 4 * k + 1;
+}
+#endif
+static int at_depth(int k, int d)
+{ volatile char pad[20]; pad[0] = (char)d;
+  return d ? at_depth(k, d - 1) + pad[0] * 0 : aligned_locals(k); }
 
 int main(void)
 {
@@ -53,6 +78,8 @@ int main(void)
       putn(a.a); putn(a.b); putn(b.a); putn(b.b); }
     { struct s20 v = m20(0); struct s20 w = v; w.v[2] = 77;
       putn(v.v[2]); putn(w.v[2]); }
+    writec('\n');
+    putn(at_depth(3, 0)); putn(at_depth(4, 1)); putn(at_depth(5, 2));
     puts_("\n==END==\n");
     return 0;
 }

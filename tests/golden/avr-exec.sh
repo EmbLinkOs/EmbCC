@@ -135,6 +135,37 @@ static long sum_through_pointer(const int *p, int n)
  * and lands on a real instruction, so nothing faults. */
 static int twice(int v)  { return v + v; }
 static int thrice(int v) { return v + v + v; }
+
+/* Struct arguments past 64 bytes of outgoing stack, where `std` cannot
+ * reach: the copy built its destination pointer in Z, which held the
+ * source, so the sixth struct here arrived as frame bytes. And a struct
+ * return of 80 bytes, which the 64-byte reach of `ldd` refused. */
+struct big4 { long a, b, c, d; };
+/* int's own width inside an expression. AVR's int is two bytes computed
+ * in a four-byte value, and the value went on carrying bit 16 into the
+ * divide, shift, compare or widening after it. Written with UINT_MAX and
+ * INT_MAX rather than 0xffff and 32767, so the host's 32-bit int gives
+ * the same answers and needs no second expected value. */
+static volatile unsigned v_umax = ~0u;
+static volatile int v_imax = (int)(~0u >> 1);
+__attribute__((noinline)) static unsigned w_half(unsigned x)
+{ return (x + 1) / 2; }
+__attribute__((noinline)) static unsigned w_shr(unsigned x)
+{ return (x + 1) >> 1; }
+__attribute__((noinline)) static long w_widen(int x) { return x + 1; }
+__attribute__((noinline)) static int w_gt(int x) { return x + 1 > x; }
+__attribute__((noinline)) static unsigned long w_uwiden(unsigned x)
+{ return x + 1u; }
+__attribute__((noinline)) static int w_neg(unsigned x) { return ~x == 0; }
+
+__attribute__((noinline)) static long far6(int n, struct big4 a,
+    struct big4 b, struct big4 c, struct big4 d, struct big4 e,
+    struct big4 f)
+{ return n + a.d + b.d * 2 + c.d * 3 + d.d * 4 + e.a * 5 + e.d * 6 +
+         f.a * 7 + f.b * 8 + f.c * 9 + f.d * 10; }
+struct s80 { char b[80]; };
+__attribute__((noinline)) static struct s80 mk80(int k)
+{ struct s80 r; for (int i = 0; i < 80; i++) r.b[i] = (char)(i + k); return r; }
 int (*volatile fp)(int);
 
 void run(void)
@@ -257,6 +288,21 @@ void run(void)
         while (*p) { n += *p - '0'; p++; }
         putn(n);
     }
+    {
+        struct big4 a = { 1, 2, 3, 4 }, b = { 5, 6, 7, 8 },
+                    c = { 9, 10, 11, 12 }, d = { 13, 14, 15, 16 },
+                    e = { 17, 18, 19, 20 }, f = { 21, 22, 23, 24 };
+        struct s80 r = mk80(3);
+        long t = 0;
+        putn(far6(1, a, b, c, d, e, f));
+        for (i = 0; i < 80; i++) t += r.b[i];
+        putn(t);
+    }
+    puts_("| ");
+    putn(w_half(v_umax)); putn(w_shr(v_umax));
+    putn(w_widen(v_imax) < 0);
+    putn(w_gt(v_imax)); putn((long)w_uwiden(v_umax)); putn(w_neg(v_umax));
+    puts_("| ");
     puts_("DONE\n");
 }
 EOF
@@ -300,7 +346,7 @@ EOF
 # Built with the HOST compiler, so `long` is 8 bytes there and 4 on AVR.
 # -DAVR_LONG is not used: every constant in the program fits in 32 bits
 # and every intermediate is written to stay inside it, so the two agree.
-cc -std=c99 -w -o "$out/host" "$out/prog.c" "$out/hostio.c" || {
+cc -std=c99 -w -fwrapv -o "$out/host" "$out/prog.c" "$out/hostio.c" || {
     echo "the host build failed"; exit 1; }
 "$out/host" > "$out/want" || { echo "the host program failed"; exit 1; }
 

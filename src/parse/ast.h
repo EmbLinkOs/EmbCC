@@ -215,6 +215,13 @@ struct stmt {
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
     struct initelem *inits; /* STMT_DECL: flattened aggregate init */
     int ninits;
+    int is_vm_typedef;    /* STMT_DECL: no variable -- a block-scope typedef
+                           * of a variably modified type (dty), whose array
+                           * sizes are evaluated here, as C requires; the id
+                           * its VLA nodes carry (type.h vla_at_typedef) */
+    int has_initlist;     /* STMT_DECL: an initializer list was written, so
+                           * what it leaves out is zero -- all of the object
+                           * when it is `{}`, where ninits is 0 */
     struct global *sglob; /* STMT_DECL: the global a static local became */
     int var_index;        /* STMT_DECL: set by sema */
     const char *asm_reg;  /* STMT_DECL: a register-asm binding, `register T
@@ -347,6 +354,12 @@ struct func {
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per
                                      * var slot (0 = natural); parallels var_tys */
+    /* sema: a local aligned beyond what the stack guarantees -- its real
+     * type, else NULL. Its slot (var_tys) is a POINTER, set at entry to
+     * storage carved off the stack and rounded up (irgen), and each
+     * address of it is that pointer. var_ind_align is the alignment. */
+    struct type **var_indirect;
+    int *var_ind_align;
     struct stmt *body;
     int defined;          /* parse: THIS node syntactically had a body
                            * (may be NULL even so: "{ }" — sema rejects

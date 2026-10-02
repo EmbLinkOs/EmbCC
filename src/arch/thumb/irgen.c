@@ -48,6 +48,10 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
         size = 8;
         align = 8;
     }
+    /* a struct is its own bytes, doubleword-aligned by its NATURAL
+     * alignment as a named one is (place_arg), copied into the slot */
+    if (rt->kind == TY_STRUCT)
+        align = ty_natural_align(rt);
     if (align >= 8)
         cur = emit_bin(fn, IR_AND,
                        emit_bin(fn, IR_ADD, cur, emit_const(fn, 7, 4), 4, 1),
@@ -60,6 +64,11 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
         emit_store(fn, apa,
                    emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 4), 4, 1),
                    ptr);
+        if (rt->kind == TY_STRUCT) {
+            int dst = irg_va_struct_slot(fn, e);
+            irg_va_copy(fn, dst, 0, addr, size);
+            return dst;
+        }
 
         if (flt) {
             /* Read the double that was passed, then narrow if the
@@ -203,7 +212,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         struct asm_operand *op = i < a->nout ? &a->out[i] : &a->in[i - a->nout];
         if (op->reg == ASM_REG_INVALID)
             diag_fatal(file, s->line, "asm constraint \"%s\" is not valid for "
-                                      "RISC-V", op->constraint);
+                                      "ARMv7-M", op->constraint);
         if (op->reg == ASM_REG_IMM && i < a->nout)
             diag_fatal(file, s->line, "an asm output cannot be an immediate");
         regs[i] = op->reg;
@@ -262,7 +271,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         o->reg = regs[a->nout + i];
         /* An "m" operand names MEMORY: the register carries its ADDRESS
          * and the template dereferences it. */
-        o->mem = strchr(a->in[i].constraint, 'm') != NULL;
+        o->mem = asm_constraint_mem_only(a->in[i].constraint);
         o->temp = o->mem ? gen_addr(fn, a->in[i].expr)
                          : gen_expr(fn, a->in[i].expr);
         o->size = 4;                  /* a temp holds the promoted value */
@@ -273,7 +282,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         o->temp = gen_addr(fn, a->out[i].expr);
         o->size = sizes[i];
         o->inout = strchr(a->out[i].constraint, '+') != NULL;
-        o->mem = strchr(a->out[i].constraint, 'm') != NULL;
+        o->mem = asm_constraint_mem_only(a->out[i].constraint);
     }
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;

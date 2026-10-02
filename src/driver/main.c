@@ -498,6 +498,87 @@ static long code_ref(long off, int text_sym, int *sym)
 
 static int compile_unit(const char *in, const char *out, int pp_only);
 
+/* -Wl,... and -Xlinker: options for the link, kept until there is one. A
+ * compile that does not link ignores them, as GCC's does. */
+static const char *g_wl[128];
+static int g_nwl;
+
+/* The value of linker option `opt` at g_wl[*k]: `opt=V`, `optV` where the
+ * option is spelled that way (-Ttext0x8000), or the next word. NULL when
+ * g_wl[*k] is not `opt`, or has no value. */
+static const char *wl_value(const char *opt, int glued, int *k)
+{
+    const char *a = g_wl[*k];
+    size_t n = strlen(opt);
+    if (strncmp(a, opt, n) != 0)
+        return NULL;
+    if (a[n] == '=')
+        return a + n + 1;
+    if (a[n] && glued)
+        return a + n;
+    if (a[n] == '\0' && *k + 1 < g_nwl)
+        return g_wl[++*k];
+    return NULL;
+}
+
+/* Each option is EmbLD's own, or one that changes nothing about a link
+ * EmbLD makes, or refused by name. An option that shapes the image and
+ * were dropped -- a linker script, a section start EmbLD has no idea of
+ * -- would build a different image from the one asked for, and a
+ * firmware image built to the wrong memory map runs, wrongly. */
+static int apply_wl(struct link_opts *lo)
+{
+    for (int k = 0; k < g_nwl; k++) {
+        const char *a = g_wl[k], *v;
+        if ((v = wl_value("-Ttext-segment", 0, &k)) ||
+            (v = wl_value("-Ttext", 1, &k))) {
+            lo->base = strtoul(v, NULL, 0);
+            lo->have_base = 1;
+        } else if ((v = wl_value("-Tdata", 1, &k))) {
+            lo->data_base = strtoul(v, NULL, 0);
+        } else if ((v = wl_value("-Tstack", 1, &k))) {
+            lo->stack_top = strtoul(v, NULL, 0);
+            lo->have_stack = 1;
+        } else if ((v = wl_value("--rom-limit", 0, &k))) {
+            lo->rom_limit = strtoul(v, NULL, 0);
+        } else if ((v = wl_value("--lma-offset", 0, &k))) {
+            lo->lma_offset = strtoull(v, NULL, 0);
+        } else if ((v = wl_value("--entry", 0, &k)) ||
+                   (v = wl_value("-e", 0, &k))) {
+            lo->entry = v;
+        } else if (!strcmp(a, "--gc-sections") ||
+                   !strcmp(a, "--no-gc-sections") ||
+                   !strcmp(a, "--as-needed") || !strcmp(a, "--no-as-needed") ||
+                   !strcmp(a, "-O0") || !strcmp(a, "-O1") || !strcmp(a, "-O2") ||
+                   !strcmp(a, "--build-id") ||
+                   !strncmp(a, "--build-id=", 11) ||
+                   !strcmp(a, "--no-undefined") ||
+                   !strcmp(a, "-s") || !strcmp(a, "--strip-all") ||
+                   !strcmp(a, "-S") || !strcmp(a, "--strip-debug")) {
+            /* nothing the image depends on: EmbLD keeps every section,
+             * has no shared objects to need or not, refuses an
+             * undefined symbol anyway, and the symbols it keeps change
+             * no byte that runs */
+        } else if (!strcmp(a, "-z") && k + 1 < g_nwl &&
+                   (!strcmp(g_wl[k + 1], "noexecstack") ||
+                    !strcmp(g_wl[k + 1], "relro") ||
+                    !strcmp(g_wl[k + 1], "norelro") ||
+                    !strcmp(g_wl[k + 1], "now") ||
+                    !strcmp(g_wl[k + 1], "lazy"))) {
+            k++;    /* dynamic-linking and stack-marking properties of an
+                     * image that has neither */
+        } else {
+            fprintf(stderr, "embcc: error: linker option '%s' is not one "
+                            "EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, "
+                            "--rom-limit and --lma-offset); dropping it could "
+                            "build a different image from the one asked for\n",
+                    a);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* `embcc prog.c -o prog`: compile, then link, in ONE process.
  *
  * A library, not a subprocess. The platform seam has no process API and
@@ -533,15 +614,38 @@ static int compile_and_link(const char *in, const char *out)
      * name rather than by producing an image for the wrong machine:
      * a linker that quietly emitted x86-64 for an aarch64 object would
      * be the exact failure THE RULE exists to prevent. */
+    /* The message named "aarch64" for every ELF target that was not
+     * x86-64, from when those were the only two: a Thumb build was told
+     * it needed aarch64. A board image is linked by embld itself, with
+     * the board's memory map, which the driver has no default for. */
     if (target_get() != TARGET_X86_64 || target_fmt_get() != TGT_FMT_ELF) {
-        fprintf(stderr,
-                "embcc: error: cannot link for %s: the integrated linker "
-                "reads x86-64 ELF, and this needs %s\n",
-                target_triple_now(),
-                target_fmt_get() != TGT_FMT_ELF
-                    ? target_fmt_name(target_fmt_get()) : "aarch64");
-        fprintf(stderr,
-                "embcc: compile with -c and link with a toolchain for it\n");
+        if (target_fmt_get() != TGT_FMT_ELF)
+            fprintf(stderr,
+                    "embcc: error: cannot link for %s: the driver links "
+                    "x86-64 ELF, and this target writes %s\n",
+                    target_triple_now(), target_fmt_name(target_fmt_get()));
+        else
+            fprintf(stderr,
+                    "embcc: error: cannot link for %s in one step: the "
+                    "driver links x86-64 ELF only\n", target_triple_now());
+        /* embld itself links ARMv7-M, RISC-V and AVR images; it reads
+         * no AArch64 object, and Mach-O and COFF are the platform
+         * linker's. Pointing everyone at embld sent those to a tool that
+         * refuses them. */
+        if (target_fmt_get() == TGT_FMT_ELF &&
+            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
+             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64))
+            fprintf(stderr,
+                    "embcc: compile with -c, then link with embld and the "
+                    "board's memory map (-e, -Ttext, -Tdata, -Tstack)\n");
+        else
+            fprintf(stderr,
+                    "embcc: compile with -c, then link with %s\n",
+                    target_fmt_get() == TGT_FMT_ELF
+                        ? "an AArch64 toolchain's linker (embld does not "
+                          "read AArch64 objects)"
+                        : "the platform's linker (ld64 or lld on macOS, "
+                          "link.exe or lld-link on Windows)");
         return 1;
     }
 
@@ -611,6 +715,10 @@ static int compile_and_link(const char *in, const char *out)
 
     struct link_opts lo;
     memset(&lo, 0, sizeof lo);
+    if (apply_wl(&lo)) {
+        remove(obj);
+        return 1;
+    }
     rc = embld_link(inputs, n, exe, &lo);
     remove(obj);
     return rc;
@@ -627,6 +735,15 @@ static int compile(const char *in, const char *out, int pp_only)
         rc = 1;                       /* the diagnostic is already out */
     }
     fatal_set_boundary(NULL);
+    /* A warning made an error (-Werror) leaves the unit compiled and its
+     * file written. The compile has still failed, and the file must not
+     * be left behind: make would take it as up to date and never build
+     * it again. */
+    if (rc == 0 && diag_error_count() > 0) {
+        rc = 1;
+        if (out && strcmp(out, "-") != 0)
+            remove(out);
+    }
     return rc;
 }
 
@@ -660,6 +777,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     if (pp_only) {
         fputs(pp, stdout);
         return 0;
+    }
+    if (lang_cxx && !syntax_only &&
+        (target_ptr_size() != 8 || target_long_size() != 8)) {
+        /* The C++ front end lays types out itself (src/cxx/type.c), for
+         * an LP64 target, and the C it lowers to is laid out by the
+         * target's own rules. Anywhere else the two disagree --
+         * sizeof(long) was 8 on ARMv7-M and sizeof(void *) 8 on AVR --
+         * and every class layout, sizeof and pointer step would be wrong
+         * without a word. A check that writes nothing is still allowed. */
+        fprintf(stderr,
+                "embcc: error: C++ is not yet supported for %s: the C++ "
+                "front end lays out types for 8-byte long and pointers, and "
+                "this target's long is %d bytes and its pointers %d\n",
+                target_triple_now(), target_long_size(), target_ptr_size());
+        return 1;
     }
     if (lang_cxx) {
         cxx_set_exceptions(want_exceptions);
@@ -755,8 +887,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * directives -- labels and .byte/.long/.quad -- are not, so a
          * block written as data assembles on any target, and one written
          * with mnemonics is refused there by name instead of quietly
-         * emitting x86 bytes into an aarch64 image. */
-        topasm_assemble(ta, target_get() != TARGET_AARCH64);
+         * emitting x86 bytes into another machine's image. The test was
+         * "not aarch64", which let `ret` become 0xc3 in a Thumb, RISC-V
+         * or AVR object. */
+        topasm_assemble(ta, target_get() == TARGET_X86_64);
         for (int r = 0; r < ta->nrels; r++)
             for (struct func *f = u->funcs; f; f = f->next)
                 if (!f->absorbed &&
@@ -2745,14 +2879,20 @@ int main(int argc, char **argv)
             return 1;
         }
         target_set(a);
-        /* The backend's "this op calls a runtime helper" predicate, for
-         * the optimizer's view of what a value crosses: x86-64 has no
-         * such helpers and AVR's allocator does not model them. */
+        target_os_set(os);
+        target_fmt_set(fmt);
+    }
+    /* The backend's "this op calls a runtime helper" predicate, for the
+     * optimizer's view of what a value crosses: x86-64 has no such
+     * helpers and AVR's allocator does not model them. Set from the
+     * target finally chosen -- it was set only for a --target=, so a
+     * compiler whose DEFAULT is a board made different code from the
+     * same compiler told that board by name. */
+    {
+        enum target_arch a = target_get();
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
-        target_os_set(os);
-        target_fmt_set(fmt);
     }
     /* Scanned across the whole command line, not just argv[1]: these
      * describe the TARGET, so `--target=aarch64-elf --dump-predef` has to
@@ -2992,12 +3132,66 @@ int main(int argc, char **argv)
             want_rtti = 0;
         } else if (strcmp(argv[i], "-frtti") == 0) {
             want_rtti = 1;
+        } else if (strncmp(argv[i], "-Wl,", 4) == 0 ||
+                   strcmp(argv[i], "-Xlinker") == 0) {
+            /* split at the commas, as GCC does; applied at the link */
+            if (argv[i][1] == 'X') {
+                if (i + 1 == argc) {
+                    fprintf(stderr, "embcc: -Xlinker needs an option\n");
+                    return 1;
+                }
+                if (g_nwl < (int)(sizeof g_wl / sizeof g_wl[0]))
+                    g_wl[g_nwl++] = argv[++i];
+            } else {
+                char *list = xstrndup(argv[i] + 4, strlen(argv[i] + 4));
+                for (char *t = list; t; ) {
+                    char *c = strchr(t, ',');
+                    if (c) *c = '\0';
+                    if (*t && g_nwl < (int)(sizeof g_wl / sizeof g_wl[0]))
+                        g_wl[g_nwl++] = t;
+                    t = c ? c + 1 : NULL;
+                }
+            }
+        } else if (strncmp(argv[i], "-Wa,", 4) == 0) {
+            /* the integrated assembler takes no options; these are the
+             * ones that change nothing it produces */
+            char *list = xstrndup(argv[i] + 4, strlen(argv[i] + 4));
+            for (char *t = list; t; ) {
+                char *c = strchr(t, ',');
+                if (c) *c = '\0';
+                if (*t && strcmp(t, "--noexecstack") && strcmp(t, "-g") &&
+                    strncmp(t, "--gdwarf", 8) && strcmp(t, "-mrelax")) {
+                    fprintf(stderr, "embcc: error: assembler option '%s' is "
+                                    "not one the integrated assembler has\n",
+                            t);
+                    return 1;
+                }
+                t = c ? c + 1 : NULL;
+            }
         } else if (strcmp(argv[i], "-Werror") == 0) {
             diag_set_werror(1);
         } else if (strcmp(argv[i], "-Wno-error") == 0) {
             diag_set_werror(0);
+        } else if (strncmp(argv[i], "-Werror=", 8) == 0 ||
+                   strncmp(argv[i], "-Wno-error=", 11) == 0) {
+            /* one warning made an error, or exempted from -Werror */
+            int on = argv[i][2] == 'e';
+            const char *nm = argv[i] + (on ? 8 : 11);
+            if (!diag_set_werror_for(nm, on))
+                fprintf(stderr, "embcc: warning: %s names no warning EmbCC "
+                                "has (--help-warnings lists them)\n",
+                        argv[i]);
         } else if (strcmp(argv[i], "-w") == 0) {
             diag_set_no_warnings(1);
+        } else if (strcmp(argv[i], "-pedantic") == 0 ||
+                   strcmp(argv[i], "-pedantic-errors") == 0) {
+            /* Said, as an unknown -Wname is: EmbCC has no warnings about
+             * extensions to ISO C, so this turns nothing on. It was
+             * refused as an unknown argument, which stopped builds that
+             * pass it out of habit. */
+            fprintf(stderr, "embcc: warning: %s: EmbCC has no diagnostics "
+                            "for extensions to ISO C, so this turns "
+                            "nothing on\n", argv[i]);
         } else if (strncmp(argv[i], "-fdiagnostics-format=", 21) == 0) {
             const char *f = argv[i] + 21;
             if (strcmp(f, "json") == 0)
