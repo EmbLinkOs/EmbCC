@@ -154,7 +154,7 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
 /* Assigns member offsets and the struct's size/align per SysV, and
  * marks the type complete. Members must already have complete types. */
 void ty_struct_layout(struct type *t, struct member *members, int n,
-                      int packed, int user_align);
+                      int packed, int user_align, int pack);
 struct member *ty_find_member(struct type *t, const char *name);
 
 int ty_size(const struct type *t);          /* bytes; void has none */

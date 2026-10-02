@@ -63,6 +63,10 @@ struct parser {
      * Types do not carry const; this says whether a declared OBJECT is
      * read-only, which decides where it is placed. */
     int spec_const, q_top;
+    /* `#pragma pack`: the maximum member alignment a struct defined now
+     * gets (0: none), and the values `push` saved */
+    int pack_cur, npack;
+    int pack_stack[32];
     /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
      * macro that declares one can be expanded twice in a function
      * without the second `n:` being a duplicate. That is the only
@@ -881,6 +885,8 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t);
 static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
 static void parse_static_assert(struct parser *ps);
+static int at_pack(struct parser *ps);
+static void parse_pack(struct parser *ps);
 static struct expr *parse_initializer(struct parser *ps);
 /* The spelling a label name has in the innermost block that declared
  * it with __label__, or the name itself. */
@@ -2129,6 +2135,12 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
             parse_static_assert(ps);
             continue;
         }
+        /* The pack value is the one at the struct's start; a change in
+         * the middle of its members would mean two layouts in one. */
+        if (at_pack(ps))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "#pragma pack inside a struct body is not supported: "
+                       "put it before the struct");
         /* GNU C also takes attributes at the START of a member
          * declaration -- `__attribute__((aligned(16))) char buf[40];` --
          * and they apply to every declarator in it, as trailing ones apply
@@ -2235,7 +2247,7 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     if (n == 0)
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                    "a struct/union needs at least one member");
-    ty_struct_layout(t, ms, n, at.packed, at.aligned);
+    ty_struct_layout(t, ms, n, at.packed, at.aligned, ps->pack_cur);
     return t;
 }
 
@@ -3916,6 +3928,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         parse_label_decl(ps);
         return new_stmt(STMT_BLOCK, t->line, t->col);   /* declares only */
     }
+    if (at_pack(ps)) {                  /* #pragma pack inside a function */
+        parse_pack(ps);
+        return new_stmt(STMT_BLOCK, t->line, t->col);
+    }
     if (t->kind == TOK_IDENT) {
         const char *lname = t->text;
         int lline = t->line;
@@ -4220,11 +4236,76 @@ static void parse_static_assert(struct parser *ps)
                    msg ? msg : "(no message)");
 }
 
+/* The preprocessor's `__embcc_pack(args)`, from `#pragma pack(args)`:
+ * (n), (), (push), (push, n), (pop), (show). A pack value is 1, 2, 4, 8
+ * or 16 (0 is none, as `()` is); a named push or pop is refused. */
+static int at_pack(struct parser *ps)
+{
+    return cur(ps)->kind == TOK_IDENT &&
+           strcmp(cur(ps)->text, "__embcc_pack") == 0;
+}
+
+static void parse_pack(struct parser *ps)
+{
+    int line = cur(ps)->line;
+    advance(ps);
+    expect(ps, TOK_LPAREN, "'(' after #pragma pack");
+    int push = 0, set = 0, n = 0;
+    if (cur(ps)->kind == TOK_IDENT && (!strcmp(cur(ps)->text, "push") ||
+                                       !strcmp(cur(ps)->text, "pop") ||
+                                       !strcmp(cur(ps)->text, "show"))) {
+        const char *w = cur(ps)->text;
+        advance(ps);
+        if (!strcmp(w, "pop")) {
+            if (cur(ps)->kind != TOK_RPAREN)
+                parse_error_line(ps, line, "#pragma pack(pop, ...) with a "
+                                 "name or count is not supported");
+            if (ps->npack == 0)
+                parse_error_line(ps, line, "#pragma pack(pop) without a "
+                                 "matching push");
+            ps->pack_cur = ps->pack_stack[--ps->npack];
+        } else if (!strcmp(w, "push")) {
+            push = 1;
+            if (cur(ps)->kind == TOK_COMMA) {
+                advance(ps);
+                if (cur(ps)->kind == TOK_IDENT)
+                    parse_error_line(ps, line, "#pragma pack(push, name) "
+                                     "is not supported");
+                set = 1;
+            }
+        }
+    } else if (cur(ps)->kind != TOK_RPAREN) {
+        set = 1;
+    } else {
+        ps->pack_cur = 0;                /* pack(): back to none */
+    }
+    if (set) {
+        long v;
+        struct expr *e = parse_cond(ps);
+        if (!size_fold(e, &v) || (v != 0 && v != 1 && v != 2 && v != 4 &&
+                                  v != 8 && v != 16))
+            parse_error_line(ps, line, "#pragma pack wants 1, 2, 4, 8 or 16");
+        n = (int)v;
+    }
+    if (push) {
+        if (ps->npack == (int)(sizeof ps->pack_stack / sizeof ps->pack_stack[0]))
+            parse_error_line(ps, line, "#pragma pack(push) nested too deeply");
+        ps->pack_stack[ps->npack++] = ps->pack_cur;
+    }
+    if (set)
+        ps->pack_cur = n;
+    expect(ps, TOK_RPAREN, "')' to close #pragma pack");
+}
+
 static void parse_top(struct parser *ps, struct unit *u,
                       struct func ***ftail, struct global ***gtail,
                       int seq)
 {
     g_nfold_locals = 0;   /* a fresh local scope for sizeof(var) folding */
+    if (at_pack(ps)) {
+        parse_pack(ps);
+        return;
+    }
     if (cur(ps)->kind == TOK_KW_STATIC_ASSERT) {
         parse_static_assert(ps);
         return;

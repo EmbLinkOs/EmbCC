@@ -457,3 +457,25 @@ check desig-range-path \
 check scalar-double-braces \
     'int main(void) { int q = { { 4 } }; return q; }' \
     "take one level"
+
+# #pragma pack is honoured; the forms it is not are refused by name: a
+# labelled push or pop (gcc's identifier argument, which a macro there
+# also is -- gcc does not expand them), a change inside a struct body, a
+# pop with no push, and a value that is not 1, 2, 4, 8 or 16.
+check pack-push-label \
+    '#pragma pack(push, hdrs, 1)
+struct s { char c; int i; };' \
+    "pack(push, name) is not supported"
+check pack-in-struct \
+    'struct s { char c;
+#pragma pack(1)
+int i; };' \
+    "inside a struct body is not supported"
+check pack-pop-unmatched \
+    '#pragma pack(pop)
+struct s { char c; int i; };' \
+    "without a matching push"
+check pack-bad-value \
+    '#pragma pack(3)
+struct s { char c; int i; };' \
+    "wants 1, 2, 4, 8 or 16"

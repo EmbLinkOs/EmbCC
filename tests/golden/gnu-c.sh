@@ -105,19 +105,17 @@ printf '_Pragma("GCC diagnostic push")\nint x;\n' > "$out/pr2.c"
     echo "FAIL: a bare _Pragma does not compile"; fail=1; }
 [ "$fail" -eq 0 ] && echo "  _Pragma compiles bare and inside a macro"
 
-# #pragma pack changes LAYOUT and EmbCC does not implement it. It used
-# to be dropped in silence, so a struct the programmer packed came out
-# padded -- differently from every other compiler, with nothing said.
-printf '#pragma pack(1)\nstruct s { char a; int b; };\n' > "$out/pk.c"
+# #pragma pack changes LAYOUT. It used to be dropped in silence, so a
+# struct the programmer packed came out padded -- differently from every
+# other compiler, with nothing said; then it was refused. It is honoured
+# now (tests/exec/pragma-pack.c has the layouts): the size proves it.
+printf '#pragma pack(1)\nstruct s { char a; int b; };\n_Static_assert(sizeof(struct s) == 1 + sizeof(int), "packed");\n' > "$out/pk.c"
 if "$EMBCC" -fsyntax-only "$out/pk.c" 2> "$out/pk.txt"; then
-    echo "FAIL: #pragma pack was accepted; it is ignored, so the layout"
-    echo "      would differ from what was asked for"
-    fail=1
+    echo "  #pragma pack(1) packs the struct after it"
 else
-    grep -q 'packed' "$out/pk.txt" || {
-        echo "FAIL: the refusal does not point at __attribute__((packed))"
-        fail=1; }
-    echo "  #pragma pack is refused and names the spelling that works"
+    echo "FAIL: #pragma pack(1) did not pack the struct:"
+    sed 's/^/     | /' "$out/pk.txt"
+    fail=1
 fi
 
 # A case range that would expand to a million labels is refused with the

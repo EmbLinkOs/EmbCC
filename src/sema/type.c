@@ -145,9 +145,12 @@ struct type *ty_struct(const char *tag, int is_union)
 
 /* `packed` drops every member's alignment to 1 (no inter-member padding,
  * struct align 1); `user_align`, from __attribute__((aligned(N))), raises
- * the struct's alignment to at least N. */
+ * the struct's alignment to at least N. `pack`, from `#pragma pack(N)`
+ * (0 for none), caps every member's alignment at N -- even one a member's
+ * own aligned(M) raised, as gcc's maximum_field_alignment does -- and a
+ * bit-field's alignment unit with it. */
 void ty_struct_layout(struct type *t, struct member *members, int n,
-                      int packed, int user_align)
+                      int packed, int user_align, int pack)
 {
     int align = 1;
     /* Non-bitfields track a byte offset; bitfields a bit position. The two
@@ -166,6 +169,8 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
          * even `packed`, which only lowers the *default* alignment. */
         if (m->user_align > ma)
             ma = m->user_align;
+        if (pack && ma > pack)
+            ma = pack;
 
         if (m->is_bitfield) {
             int unit = 8 * ty_size(m->ty);   /* storage-unit width, bits */
@@ -176,6 +181,8 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
              * of a 16-bit type from straddling a byte boundary as avr-gcc lets
              * it. */
             int abits = packed ? 8 : 8 * ty_align(m->ty);
+            if (pack && abits > 8 * pack)
+                abits = 8 * pack;
             if (t->is_union) {
                 m->off = 0;
                 m->bit_off = 0;
@@ -460,7 +467,7 @@ struct type *ty_complex(struct type *elem)
     ms[0].ty = elem;
     ms[1].name = "__imag__";
     ms[1].ty = elem;
-    ty_struct_layout(t, ms, 2, 0, 0);
+    ty_struct_layout(t, ms, 2, 0, 0, 0);
     t->is_complex = 1;
     t->celem = elem;
     made[k] = t;

@@ -1410,6 +1410,35 @@ static void define_macro(struct src *s, const char *line)
 /* Conditional stack entry state. */
 enum cond_state { COND_LIVE, COND_DEAD, COND_DONE };
 
+/* `#pragma pack(...)` and `_Pragma("pack(...)")` change struct layout,
+ * so they reach the parser: as `__embcc_pack(args)`, a name no program can
+ * declare. The arguments are NOT macro-expanded, as gcc does not expand
+ * them on ELF targets: `pack(push, N)` with N a macro is a push labelled
+ * N there (which the parser refuses), not a pack to N's value. `text`
+ * starts after the word `pack`. C++'s parser has no use for the marker,
+ * and there the pragma is still refused by name. */
+static void emit_pack(struct src *s, const char *text, size_t n,
+                      struct tbuf *out)
+{
+    if (cxx_has_builtin)
+        cerr(s, "#pragma pack is not supported in C++: it would change the "
+                "layout and EmbCC would ignore it. Use "
+                "__attribute__((packed)) on the struct", NULL);
+    size_t i = 0;
+    while (i < n && (text[i] == ' ' || text[i] == '\t'))
+        i++;
+    if (i == n || text[i] != '(')
+        cerr(s, "#pragma pack needs its arguments in parentheses", NULL);
+    size_t b = ++i;
+    while (i < n && text[i] != ')')
+        i++;
+    if (i == n)
+        cerr(s, "#pragma pack is missing its ')'", NULL);
+    tb_puts(out, " __embcc_pack(");
+    tb_putn(out, text + b, i - b);
+    tb_puts(out, ") ");
+}
+
 static void process_file(struct cpp *cpp, const char *path,
                          const char *src, struct tbuf *out, int incdir_idx)
 {
@@ -1551,25 +1580,15 @@ static void process_file(struct cpp *cpp, const char *path,
             } else if (DIR("pragma")) {
                 /* Most pragmas mean nothing here and dropping them is
                  * right. `pack` is not one of those: it changes
-                 * STRUCT LAYOUT, and being ignored meant a struct the
-                 * programmer packed came out padded -- silently, and
-                 * differently from every other compiler. That is the
-                 * failure THE RULE exists for, so it is refused by
-                 * name with the spelling that does work.
-                 *
-                 * Implementing it needs the pragma to reach the
-                 * parser, which means a token for it; the preprocessor
-                 * hands the parser text and a `#` line is not text the
-                 * parser reads. __attribute__((packed)) already goes
-                 * through the same ty_struct_layout flag. */
+                 * STRUCT LAYOUT, and ignoring it would pad a struct the
+                 * programmer packed -- silently. It goes to the parser
+                 * as a marker it reads between declarations
+                 * (emit_pack); the output line stays synced. */
                 const char *pa = arg;
                 while (*pa == ' ' || *pa == '\t') pa++;
                 if (strncmp(pa, "pack", 4) == 0 &&
                     (pa[4] == '(' || pa[4] == ' ' || pa[4] == '\t'))
-                    cerr(&s, "#pragma pack is not supported: it would change "
-                             "the layout and EmbCC would ignore it. Use "
-                             "__attribute__((packed)) on the struct, which "
-                             "this compiler honours", NULL);
+                    emit_pack(&s, pa + 4, strlen(pa + 4), out);
             } else if (DIR("line") || (dn > 0 && lp[0] >= '0' &&
                                         lp[0] <= '9')) {
                 /* #line N ["file"], and GNU's linemarker # N "file" ...
@@ -1682,23 +1701,37 @@ static void process_file(struct cpp *cpp, const char *path,
                             cerr(&s, "unterminated _Pragma string", NULL);
                             break;
                         }
+                        struct tbuf pk = { 0, 0, 0 };
                         {
                             const char *pb = b;
                             while (pb < q && (*pb == ' ' || *pb == '\t')) pb++;
                             if ((size_t)(q - pb) >= 4 &&
                                 strncmp(pb, "pack", 4) == 0)
-                                cerr(&s, "_Pragma(\"pack...\") is not "
-                                         "supported: it would change the "
-                                         "layout and EmbCC would ignore it. "
-                                         "Use __attribute__((packed))", NULL);
+                                emit_pack(&s, pb + 4, (size_t)(q - pb - 4),
+                                          &pk);
                         }
                         close = q + 1;
                         while (*close == ' ' || *close == '\t') close++;
                         if (*close != ')') {
                             cerr(&s, "_Pragma needs a closing ')'", NULL);
+                            free(pk.p);
                             break;
                         }
                         close++;
+                        if (pk.p) {
+                            /* the operator becomes the marker, in place */
+                            size_t at = (size_t)(lp2 - expb.p);
+                            size_t ml = strlen(pk.p);
+                            char *nb = xmalloc(at + ml + strlen(close) + 1);
+                            memcpy(nb, expb.p, at);
+                            memcpy(nb + at, pk.p, ml);
+                            strcpy(nb + at + ml, close);
+                            free(expb.p);
+                            expb.p = nb;
+                            lp2 = nb + at + ml;
+                            free(pk.p);
+                            continue;
+                        }
                         memmove(lp2, close, strlen(close) + 1);
                     }
                 }
