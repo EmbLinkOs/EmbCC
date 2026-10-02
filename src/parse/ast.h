@@ -311,6 +311,8 @@ struct func {
     int is_weak;          /* __attribute__((weak)) */
     const char *alias_of; /* __attribute__((alias("t"))): another name for
                            * function t, defined in this file */
+    const char *section;  /* __attribute__((section("s"))): its code goes
+                           * to section s rather than .text */
     int is_noreturn;      /* __attribute__((noreturn)) / _Noreturn */
     int is_nothrow;       /* __attribute__((nothrow)): no exception leaves it
                            * (a call of it needs no landing pad) */

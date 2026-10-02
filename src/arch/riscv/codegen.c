@@ -1980,12 +1980,12 @@ static void gen_call(struct rv_fn *F, int n)
          * this function's caller, with ra as it came in. t1 carries the
          * far form's address, and nothing is live in it by now. */
         rv_restore(F);
-        if (i->callee->has_defn && g_rv_short_calls) {
+        if (cg_call_local(fn->src, i->callee) && g_rv_short_calls) {
             note_call(F->st, t->len, i->callee);
             F->st->call[F->st->ncall - 1].jal = 1;
             F->st->call[F->st->ncall - 1].tail = 1;
             code_u32(t, rv_enc_j(0x6f, RV_ZERO, 0));
-        } else if (i->callee->has_defn) {
+        } else if (cg_call_local(fn->src, i->callee)) {
             note_call(F->st, rv_tail_placeholder(t), i->callee);
             F->st->call[F->st->ncall - 1].tail = 1;
         } else {
@@ -2001,11 +2001,11 @@ static void gen_call(struct rv_fn *F, int n)
          * in place, and SCR is not one of them. */
         rd(F, i->a, SCR);
         rv_jalr(t, RV_RA, SCR, 0);
-    } else if (i->callee->has_defn && g_rv_short_calls) {
+    } else if (cg_call_local(fn->src, i->callee) && g_rv_short_calls) {
         note_call(F->st, t->len, i->callee);
         F->st->call[F->st->ncall - 1].jal = 1;
         code_u32(t, rv_enc_j(0x6f, RV_RA, 0));  /* raw: a fixed patch site */
-    } else if (i->callee->has_defn) {
+    } else if (cg_call_local(fn->src, i->callee)) {
         note_call(F->st, rv_call_placeholder(t), i->callee);
     } else {
         note_ext(F->st, rv_call_placeholder(t), i->callee);

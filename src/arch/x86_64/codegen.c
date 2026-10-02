@@ -514,6 +514,21 @@ void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
     }
 }
 
+/* Is a call from `caller` to `callee` resolved here, as a displacement
+ * within one section -- or left to the linker, as a relocation? Only a
+ * callee defined in this unit AND placed in the same section can be:
+ * a function with a section attribute is laid out apart from .text, and
+ * the distance between two sections is the linker's to decide. Shared,
+ * like cg_resolve_strsites (AVR relocates every call anyway). */
+int cg_call_local(const struct func *caller, const struct func *callee)
+{
+    if (!callee->has_defn)
+        return 0;
+    const char *a = caller && caller->section ? caller->section : "";
+    const char *b = callee->section ? callee->section : "";
+    return strcmp(a, b) == 0;
+}
+
 /* Can this load, store, ldvar or stvar move its value as a float or a
  * double? (cg_float_vregs) */
 static int flt_width(const struct ir_ins *i)
@@ -4963,7 +4978,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 if (!frameless && !g_pushonly)
                     x86_leave(text);
                 int patch = x86_jmp_rel32(text);
-                if (i->callee->has_defn) {
+                if (cg_call_local(fn->src, i->callee)) {
                     struct callsite cs;
                     cs.patch_off = patch;
                     cs.target = i->callee;
@@ -4983,7 +4998,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_call_r11(text);
             } else {
                 int patch = x86_call_rel32(text);
-                if (i->callee->has_defn) {
+                if (cg_call_local(fn->src, i->callee)) {
                     struct callsite cs;
                     cs.patch_off = patch;
                     cs.target = i->callee;

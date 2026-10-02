@@ -4785,6 +4785,13 @@ static void merge_decls(struct unit *u)
             }
         }
         canon->is_weak |= f->is_weak;  /* weak on any declaration is weak */
+        if (f->section) {
+            if (canon->section && strcmp(canon->section, f->section))
+                sema_error_line(u, f->line, "'%s' is placed in section '%s' "
+                                "here and '%s' before", f->name, f->section,
+                                canon->section);
+            canon->section = f->section;
+        }
         if (f->alias_of)
             canon->alias_of = f->alias_of;
         canon->sret_first |= f->sret_first;

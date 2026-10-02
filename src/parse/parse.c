@@ -4742,10 +4742,7 @@ fn_tail:
     f->attr_deprecated = at.deprecated;
     f->attr_warn_unused_result = at.warn_unused_result;
     f->vis = at.vis;
-    if (at.section)
-        parse_error_line(ps, line,
-                   "section attribute on function '%s' is not supported — "
-                   "every function is emitted into .text", name);
+    f->section = at.section;
     f->alias_of = at.alias;
     if (at.alias && cur(ps)->kind == TOK_LBRACE)
         parse_error_line(ps, line,

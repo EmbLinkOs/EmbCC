@@ -42,7 +42,8 @@ command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 || {
 # letters, which an assembler reads only in quotes. And the symbols and
 # data an object carries beyond its code: a weak function and variable,
 # aliases (CMSIS's weak IRQ handlers), constructors, and tables of
-# function and string pointers, const and not.
+# function and string pointers, const and not, and functions placed in
+# sections of their own.
 cat > "$out/u.c" <<'CEOF'
 extern int helper(int);
 static const char msg[] = "hello, world";
@@ -66,6 +67,9 @@ __attribute__((constructor)) static void ctor2(void) { zähler += 2; }
 void (*const vectors[])(void) = { USART1_IRQHandler, Default_Handler };
 static const char *names[] = { "a", "b" };
 const char *pick(int i) { return names[i] + salias(0) + wfn() - 2; }
+__attribute__((section(".text.hot"))) int hot(int x) { return compute(x) + 1; }
+__attribute__((section(".ramfunc"))) int ram(int x) { return hot(x) * 2; }
+__attribute__((section(".text.hot"))) int hot2(int x) { return ram(x) + hot(x); }
 CEOF
 
 fail=0
@@ -107,8 +111,8 @@ for spec in "x86_64-elf:x86_64:" \
     # keeps a relocation's addend in the bytes (REL), where EmbCC's
     # object keeps it in the relocation (RELA); the relocations below
     # cover both.
-    for sec in .data .rodata .init_array; do
-        [ "$mc" = thumbv7m ] && [ $sec != .init_array ] && continue
+    for sec in .data .rodata .init_array .text.hot .ramfunc; do
+        [ "$mc" = thumbv7m ] && [ $sec = .data -o $sec = .rodata ] && continue
         "$OBJCOPY" -O binary --only-section=$sec "$d/direct.o" "$d/a.bin" 2>/dev/null
         "$OBJCOPY" -O binary --only-section=$sec "$d/reasm.o" "$d/b.bin" 2>/dev/null
         cmp -s "$d/a.bin" "$d/b.bin" || {

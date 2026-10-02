@@ -3285,7 +3285,7 @@ static void gen_ins(struct t_fn *F, int n)
              * would have to put lr back, and `pop.w {..., lr}; b.w` is
              * two bytes more than `bl; pop {..., pc}`; and since every
              * push saves lr, the ordinary call there is sound. */
-            if (i->callee->has_defn) {
+            if (cg_call_local(F->fn->src, i->callee)) {
                 note_call(F->st, t_b(t), i->callee);
                 F->st->call[F->st->ncall - 1].tail = 1;
             } else {
@@ -3299,7 +3299,7 @@ static void gen_ins(struct t_fn *F, int n)
         if (i->indirect) {
             rd(F, i->a, T_ACC);
             t_blx(t, T_ACC);
-        } else if (i->callee->has_defn) {
+        } else if (cg_call_local(F->fn->src, i->callee)) {
             note_call(F->st, t_bl(t), i->callee);
         } else {
             note_ext(F->st, t_bl(t), i->callee);

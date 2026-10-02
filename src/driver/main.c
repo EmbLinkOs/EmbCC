@@ -416,6 +416,33 @@ static void write_deps(const char *in, const char *obj)
  * ARM state on the first indirect call, where the processor faults.
  * Checked against llvm-mc's own output, which gives `f` at offset 0 a
  * st_value of 1. */
+/* Functions with a section attribute: codegen lays them out after every
+ * other function, grouped by section (compile_unit sorts them there), so
+ * the code buffer is [.text's functions][group][group]...[file-scope
+ * asm]. Each group becomes a section of its own, and .text is the two
+ * outer slices. text_at() is the one translation from a code-buffer
+ * offset -- which every site, symbol and table records -- to the section
+ * it lands in and the offset there. */
+#define MAX_TGROUPS 16
+static struct tgroup { const char *name; long start, end; int ndx, sym; }
+    g_tg[MAX_TGROUPS];
+static int g_ntg;
+static long g_plain_end, g_groups_end;
+
+/* The group (1-based) holding code-buffer offset off, or 0 for .text;
+ * *noff gets the offset within that section. */
+static int text_at(long off, long *noff)
+{
+    for (int k = 0; k < g_ntg; k++)
+        if (off >= g_tg[k].start && off < g_tg[k].end) {
+            *noff = off - g_tg[k].start;
+            return k + 1;
+        }
+    *noff = g_ntg && off >= g_groups_end ? off - (g_groups_end - g_plain_end)
+                                         : off;
+    return 0;
+}
+
 /* The function an alias names: the canonical definition, which sema
  * checked is in this file. */
 static const struct func *alias_target(const struct unit *u,
@@ -431,6 +458,42 @@ static const struct func *alias_target(const struct unit *u,
 static long fn_sym_value(enum target_arch a, long code_off)
 {
     return a == TARGET_THUMB ? code_off | 1 : code_off;
+}
+
+/* A function's symbol: its value and section from its code-buffer offset
+ * (text_at), for one in a section of its own as for one in .text. */
+static long code_sym_value(enum target_arch a, long off)
+{
+    long o;
+    text_at(off, &o);
+    return fn_sym_value(a, o);
+}
+
+static int code_sec(long off, int text_ndx)
+{
+    long o;
+    int gi = text_at(off, &o);
+    return gi ? g_tg[gi - 1].ndx : text_ndx;
+}
+
+/* A relocation whose place is code-buffer offset off. */
+static void code_rela(struct elfw *w, int text_ndx, long off, int sym,
+                      int type, long addend)
+{
+    long o;
+    int gi = text_at(off, &o);
+    elfw_add_rela(w, gi ? g_tg[gi - 1].ndx : text_ndx, (Elf64_Addr)o, sym,
+                  type, addend);
+}
+
+/* A reference to code-buffer offset off by section symbol: its section's
+ * symbol in *sym, the offset there returned. */
+static long code_ref(long off, int text_sym, int *sym)
+{
+    long o;
+    int gi = text_at(off, &o);
+    *sym = gi ? g_tg[gi - 1].sym : text_sym;
+    return o;
 }
 
 static int compile_unit(const char *in, const char *out, int pp_only);
@@ -849,6 +912,33 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
 
+    /* Functions placed in a section of their own go last, grouped by
+     * section in first-seen order (see g_tg); the rest keep their order. */
+    g_ntg = 0;
+    {
+        int n = iu->nfuncs, k = 0;
+        struct ir_func *sorted = xmalloc((size_t)(n ? n : 1) * sizeof *sorted);
+        char *placed = xcalloc((size_t)(n ? n : 1), 1);
+        for (int i = 0; i < n; i++)
+            if (!iu->funcs[i].src || !iu->funcs[i].src->section) {
+                sorted[k++] = iu->funcs[i];
+                placed[i] = 1;
+            }
+        for (int i = 0; i < n; i++) {
+            if (placed[i])
+                continue;
+            const char *sec = iu->funcs[i].src->section;
+            for (int j = i; j < n; j++)
+                if (!placed[j] && !strcmp(iu->funcs[j].src->section, sec)) {
+                    sorted[k++] = iu->funcs[j];
+                    placed[j] = 1;
+                }
+        }
+        memcpy(iu->funcs, sorted, (size_t)n * sizeof *sorted);
+        free(sorted);
+        free(placed);
+    }
+
     struct code text = { 0 };
     struct extcall *ext;
     struct strsite *strs;
@@ -879,6 +969,43 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                      &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                      opt_level >= 2);
+
+    /* The groups, as codegen laid them out (the sort above). */
+    g_plain_end = g_groups_end = (long)text.len;
+    for (int i = 0; i < iu->nfuncs; i++) {
+        struct func *f = iu->funcs[i].src;
+        if (!f || !f->section || f->code_len <= 0)
+            continue;
+        if (!g_ntg || strcmp(g_tg[g_ntg - 1].name, f->section)) {
+            if (g_ntg == MAX_TGROUPS)
+                diag_fatal(f->file, f->line, "more than %d function sections",
+                           MAX_TGROUPS);
+            for (int k = 0; k < g_ntg; k++)
+                if (!strcmp(g_tg[k].name, f->section))
+                    internal_error("function section '%s' not contiguous",
+                                   f->section);
+            g_tg[g_ntg].name = f->section;
+            g_tg[g_ntg].start = f->code_off;
+            if (!g_ntg)
+                g_plain_end = f->code_off;
+            g_ntg++;
+        }
+        g_tg[g_ntg - 1].end = f->code_off + f->code_len;
+        g_groups_end = f->code_off + f->code_len;
+    }
+    if (g_ntg && target_fmt_get() != TGT_FMT_ELF)
+        diag_fatal(in, 0, "a function's section attribute is not supported "
+                   "for %s output", target_fmt_name(target_fmt_get()));
+    if (g_ntg && want_debug)
+        diag_fatal(in, 0, "-g with a function in a section of its own ('%s') "
+                   "is not supported yet: the compile unit's address range "
+                   "would span two sections", g_tg[0].name);
+    for (int k = 0; k < g_ntg; k++)
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->section && !strcmp(g->section, g_tg[k].name))
+                diag_fatal(g->file, g->line, "section '%s' holds a function, "
+                           "and '%s' cannot share it: one is code, the other "
+                           "data", g_tg[k].name, g->name);
 
     /* -fstack-usage: the frame each function ended up with, beside the
      * object. Written here, after codegen, because that is when the
@@ -1771,9 +1898,25 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 1;
     struct elfw *w = elfw_new(target_elf_machine(target_get()));
     elfw_set_flags(w, target_elf_flags(target_get()));
+    /* .text is the code buffer less its groups, and each group a section
+     * of its own (g_tg) */
+    unsigned char *tbytes = (unsigned char *)text.p;
+    long tlen = (long)text.len;
+    if (g_ntg) {
+        tlen = g_plain_end + ((long)text.len - g_groups_end);
+        tbytes = xmalloc((size_t)(tlen ? tlen : 1));
+        memcpy(tbytes, text.p, (size_t)g_plain_end);
+        memcpy(tbytes + g_plain_end, (unsigned char *)text.p + g_groups_end,
+               (size_t)((long)text.len - g_groups_end));
+    }
     int text_ndx = elfw_add_section(w, ".text", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_EXECINSTR,
-                                    text.p, (Elf64_Xword)text.len, 16);
+                                    tbytes, (Elf64_Xword)tlen, 16);
+    for (int k = 0; k < g_ntg; k++)
+        g_tg[k].ndx = elfw_add_section(
+            w, g_tg[k].name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
+            (unsigned char *)text.p + g_tg[k].start,
+            (Elf64_Xword)(g_tg[k].end - g_tg[k].start), 16);
     int rodata_ndx = 0;
     if (rodata)
         /* 16, not 1: .rodata holds string literals (which need 1) and
@@ -1885,6 +2028,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     int text_sym = elfw_add_symbol(w, "", 0, 0,
                     ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
                     (Elf64_Half)text_ndx);
+    for (int k = 0; k < g_ntg; k++)
+        g_tg[k].sym = elfw_add_symbol(w, "", 0, 0,
+                                      ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+                                      (Elf64_Half)g_tg[k].ndx);
     /* ARM's MAPPING SYMBOLS. `$t` at an offset says "Thumb instructions
      * start here", `$a` says ARM and `$d` says data; a consumer that
      * finds none assumes ARM state and disassembles Thumb as garbage,
@@ -1900,14 +2047,25 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         elfw_add_symbol(w, codesym, 0, 0,
                         ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                         (Elf64_Half)text_ndx);
-        for (int r = 0; r + 1 < text.ndrange; r += 2) {
-            elfw_add_symbol(w, "$d", (Elf64_Addr)text.drange[r], 0,
+        for (int k = 0; k < g_ntg; k++)
+            elfw_add_symbol(w, codesym, 0, 0,
                             ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
-                            (Elf64_Half)text_ndx);
-            if (text.drange[r + 1] < text.len)
-                elfw_add_symbol(w, codesym, (Elf64_Addr)text.drange[r + 1], 0,
+                            (Elf64_Half)g_tg[k].ndx);
+        for (int r = 0; r + 1 < text.ndrange; r += 2) {
+            long o;
+            int gi = text_at(text.drange[r], &o);
+            int dn = gi ? g_tg[gi - 1].ndx : text_ndx;
+            elfw_add_symbol(w, "$d", (Elf64_Addr)o, 0,
+                            ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
+                            (Elf64_Half)dn);
+            /* the code resumes where the data ends, in the same section,
+             * unless that is the section's end */
+            long e = o + (text.drange[r + 1] - text.drange[r]);
+            long send = gi ? g_tg[gi - 1].end - g_tg[gi - 1].start : tlen;
+            if (e < send)
+                elfw_add_symbol(w, codesym, (Elf64_Addr)e, 0,
                                 ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
-                                (Elf64_Half)text_ndx);
+                                (Elf64_Half)dn);
         }
     }
     if (ta == TARGET_THUMB) {
@@ -1951,10 +2109,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && f->is_static && f->used)
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)fn_sym_value(ta, f->code_off),
+                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off),
                 (Elf64_Xword)f->code_len,
                 ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
-                (Elf64_Half)text_ndx);
+                (Elf64_Half)code_sec(f->code_off, text_ndx));
     /* An alias is one more symbol at its target's address and size (sema
      * checked the target is a function defined here); a call or an
      * address taken goes through the alias's own symbol, so a strong
@@ -1963,9 +2121,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (!f->absorbed && f->alias_of && f->is_static) {
             const struct func *t = alias_target(u, f);
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)fn_sym_value(ta, t->code_off),
+                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off),
                 (Elf64_Xword)t->code_len, ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
-                (Elf64_Half)text_ndx);
+                (Elf64_Half)code_sec(t->code_off, text_ndx));
         }
     for (struct global *g = u->globals; g; g = g->next)
         if (!g->absorbed && g->defined && g->is_static)
@@ -1980,18 +2138,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && !f->is_static)
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)fn_sym_value(ta, f->code_off),
+                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off),
                 (Elf64_Xword)f->code_len,
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
-                (Elf64_Half)text_ndx);
+                (Elf64_Half)code_sec(f->code_off, text_ndx));
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->alias_of && !f->is_static) {
             const struct func *t = alias_target(u, f);
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)fn_sym_value(ta, t->code_off),
+                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off),
                 (Elf64_Xword)t->code_len,
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
-                (Elf64_Half)text_ndx);
+                (Elf64_Half)code_sec(t->code_off, text_ndx));
         }
     for (struct global *g = u->globals; g; g = g->next)
         if (!g->absorbed && g->defined && !g->is_static)
@@ -2020,9 +2178,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct topasm *ta = u->topasm; ta; ta = ta->next)
         for (int k = 0; k < ta->nsyms; k++)
             if (ta->syms[k].is_global) {
+                long toff;
+                text_at(ta->text_off + ta->syms[k].off, &toff);
                 int ndx = elfw_add_symbol(
-                    w, ta->syms[k].name,
-                    (Elf64_Addr)(ta->text_off + ta->syms[k].off), 0,
+                    w, ta->syms[k].name, (Elf64_Addr)toff, 0,
                     ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
                     (Elf64_Half)text_ndx);
                 for (struct func *f = u->funcs; f; f = f->next)
@@ -2055,10 +2214,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                                               : STB_GLOBAL,
                                               STT_NOTYPE),
                                 SHN_UNDEF);
-        elfw_add_rela(w, text_ndx, (Elf64_Addr)ext[i].patch_off,
-                      callee->sym_ndx,
-                      target_reloc_type(ta, ext[i].tail ? RK_TAIL : RK_CALL),
-                      target_reloc_addend(ta, RK_CALL, 0));
+        code_rela(w, text_ndx, ext[i].patch_off, callee->sym_ndx,
+                  target_reloc_type(ta, ext[i].tail ? RK_TAIL : RK_CALL),
+                  target_reloc_addend(ta, RK_CALL, 0));
     }
     free(ext);
 
@@ -2123,10 +2281,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_UNDEF);
             enum reloc_kind rk = ta->rels[r].kind == ASMREL_ABS64
                                      ? RK_ABS64 : RK_CALL;
-            elfw_add_rela(w, text_ndx,
-                          (Elf64_Addr)(ta->text_off + ta->rels[r].off),
-                          sym, target_reloc_type(target_get(), rk),
-                          ta->rels[r].addend);
+            code_rela(w, text_ndx, ta->text_off + ta->rels[r].off,
+                      sym, target_reloc_type(target_get(), rk),
+                      ta->rels[r].addend);
         }
 
     /* RISC-V's low half names the AUIPC, not the target.
@@ -2151,12 +2308,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * the addend, because `jmp` carries an absolute address and nothing
          * in a relocatable object knows where its own .text will land. */
         int tx = strs[i].kind == RK_AVR_TEXT_CALL;
-        elfw_add_rela(w, text_ndx, (Elf64_Addr)strs[i].patch_off,
-                      (lo || tx) ? text_sym : rodata_sym,
-                      target_reloc_type(ta, strs[i].kind),
-                      lo ? strs[i].patch_off - 4
-                         : target_reloc_addend(ta, strs[i].kind,
-                                               strs[i].str_off));
+        /* (the auipc, or the jump's label, is in the same function as
+         * the site, so in the same section) */
+        int ssym = rodata_sym;
+        long sadd = target_reloc_addend(ta, strs[i].kind, strs[i].str_off);
+        if (lo)
+            sadd = code_ref(strs[i].patch_off - 4, text_sym, &ssym);
+        else if (tx)
+            sadd = target_reloc_addend(ta, strs[i].kind,
+                                       code_ref(strs[i].str_off, text_sym,
+                                                &ssym));
+        code_rela(w, text_ndx, strs[i].patch_off, ssym,
+                  target_reloc_type(ta, strs[i].kind), sadd);
     }
     free(strs);
 
@@ -2164,11 +2327,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * (defined or UNDEF alike — the linker fills in either way). */
     for (int i = 0; i < ngs; i++) {
         int lo = riscv && gs[i].kind == RK_RISCV_PCREL_LO12_I;
-        elfw_add_rela(w, text_ndx, (Elf64_Addr)gs[i].patch_off,
-                      lo ? text_sym : gs[i].glob->sym_ndx,
-                      target_reloc_type(ta, gs[i].kind),
-                      lo ? gs[i].patch_off - 4
-                         : target_reloc_addend(ta, gs[i].kind, 0));
+        int gsym = gs[i].glob->sym_ndx;
+        long gadd = target_reloc_addend(ta, gs[i].kind, 0);
+        if (lo)
+            gadd = code_ref(gs[i].patch_off - 4, text_sym, &gsym);
+        code_rela(w, text_ndx, gs[i].patch_off, gsym,
+                  target_reloc_type(ta, gs[i].kind), gadd);
     }
     free(gs);
 
@@ -2232,12 +2396,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 ELF64_ST_INFO(tf->is_weak ? STB_WEAK : STB_GLOBAL,
                               STT_NOTYPE), SHN_UNDEF);
         int lo = riscv && fs[i].kind == RK_RISCV_PCREL_LO12_I;
-        elfw_add_rela(w, text_ndx, (Elf64_Addr)fs[i].patch_off,
-                      lo ? text_sym : tf->sym_ndx,
-                      target_reloc_type(ta, fs[i].kind),
-                      lo ? fs[i].patch_off - 4
-                         : target_reloc_addend(ta, fs[i].kind, 0) +
-                           (fs[i].kind == RK_ABS64 ? fs[i].addend : 0));
+        int fsym = tf->sym_ndx;
+        long fadd = target_reloc_addend(ta, fs[i].kind, 0) +
+                    (fs[i].kind == RK_ABS64 ? fs[i].addend : 0);
+        if (lo)
+            fadd = code_ref(fs[i].patch_off - 4, text_sym, &fsym);
+        code_rela(w, text_ndx, fs[i].patch_off, fsym,
+                  target_reloc_type(ta, fs[i].kind), fadd);
     }
     free(fs);
 
@@ -2266,7 +2431,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         struct eh_reloc *r = &eh.relocs[i];
         int sym;
         switch (r->target) {
-        case EHT_TEXT: sym = text_sym; break;
+        case EHT_TEXT:          /* a function's start: its section's */
+            r->addend = code_ref(r->addend, text_sym, &sym);
+            break;
         case EHT_LSDA: sym = lsda_sym; break;
         case EHT_PERSONALITY:
             if (!personality_sym)

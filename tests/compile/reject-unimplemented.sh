@@ -10,13 +10,14 @@ echo "TEST-MARKER reject-unimplemented"
 out_dir="tests/compile/out"
 mkdir -p "$out_dir"
 
-check() { # name source expected-message-grep
+check() { # name source expected-message-grep [extra flags]
     src="$out_dir/$1.c"
     printf '%s\n' "$2" > "$src"
     # -Werror so that a case whose diagnostic is a WARNING still fails
     # the compile: an attribute EmbCC does not know is warned about,
     # not refused, and this file's whole shape is "it did not compile".
-    if err=$("$EMBCC" -Werror -c "$src" -o "$out_dir/$1.o" 2>&1); then
+    # shellcheck disable=SC2086
+    if err=$("$EMBCC" -Werror ${4:-} -c "$src" -o "$out_dir/$1.o" 2>&1); then
         echo "case $1: compiled instead of failing"
         exit 1
     fi
@@ -488,3 +489,14 @@ check constexpr-not-exact \
 check constexpr-floating \
     'constexpr double d = 1.5;' \
     "takes integer constants"
+
+# A function in a section of its own is laid out apart from .text; -g's
+# compile-unit range cannot span the two yet, and a data object cannot
+# share a section that holds code.
+check fn-section-debug \
+    '__attribute__((section(".ramfunc"))) int f(void) { return 1; }' \
+    "is not supported yet" -g
+check fn-section-shared-with-data \
+    '__attribute__((section(".ramfunc"))) int f(void) { return 1; }
+__attribute__((section(".ramfunc"))) int v = 2;' \
+    "cannot share it"

@@ -28,6 +28,8 @@ char *cg_float_vregs(struct ir_func *fn);
 struct ir_unit;
 struct strsite;
 void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n);
+struct func;
+int cg_call_local(const struct func *caller, const struct func *callee);
 
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */

@@ -277,11 +277,33 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     char hi_label[32] = "";
     int pcrel_n = 0;            /* where the previous function's code ended */
 
+    /* A function with a section attribute is in that section, after
+     * .text's (the driver lays them out last, grouped): the padding before
+     * the first one stays in .text, as in the object, and padding between
+     * two groups is in neither. */
+    const char *cursec = NULL;            /* NULL: .text */
     for (int i = 0; i < iu->nfuncs; i++) {
         struct ir_func *f = &iu->funcs[i];
         if (!f->src || f->src->code_len <= 0)
             continue;
         long lo = f->src->code_off, hi = lo + f->src->code_len;
+        const char *sec = f->src->section;
+        if (sec != cursec && (!sec || !cursec || strcmp(sec, cursec))) {
+            if (!cursec && lo > prev_end) {    /* .text's tail padding */
+                ob_str(b, "\t.byte\t");
+                for (long k = prev_end; k < lo; k++)
+                    ob_fmt(b, "%s0x%02x", k > prev_end ? "," : "",
+                           (unsigned)text[k]);
+                ob_str(b, "\n");
+            }
+            prev_end = lo;
+            if (sec)
+                ob_fmt(b, "\n\t.section\t%s,\"ax\",%sprogbits\n",
+                       asym(sec), type_sigil());
+            else
+                ob_str(b, "\n\t.text\n");
+            cursec = sec;
+        }
         ob_str(b, "\n");
         /* codegen aligns each function to 16 (code_align in codegen.c), and
          * the padding lies BETWEEN functions, so the instruction loop below
@@ -421,7 +443,10 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         ob_fmt(b, "\t.size\t%s, .-%s\n", asym(f->name), asym(f->name));
         prev_end = hi;
     }
-    /* .text may end with padding too. */
+    /* .text may end with padding too, and the file-scope asm after it --
+     * in .text, whatever section the last function was in. */
+    if (cursec)
+        ob_str(b, "\n\t.text\n");
     if (textlen > prev_end) {
         ob_str(b, "\t.byte\t");
         for (long k = prev_end; k < textlen; k++)

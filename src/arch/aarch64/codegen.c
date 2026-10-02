@@ -2896,7 +2896,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 }
                 if (!frameless)
                     a64_teardown(t, fr.size);
-                if (i->callee->has_defn) {
+                if (cg_call_local(fn->src, i->callee)) {
                     struct a64_callsite cs;
                     cs.patch_off = a64_b(t);   /* patched as a bl is: imm26 */
                     cs.target = i->callee;
@@ -2916,7 +2916,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             if (i->indirect) {
                 ld_slot(t, sd, i->a, A64_ADDR, 8, 0, 8);
                 a64_blr(t, A64_ADDR);
-            } else if (i->callee->has_defn) {
+            } else if (cg_call_local(fn->src, i->callee)) {
                 struct a64_callsite cs;
                 cs.patch_off = a64_bl(t);
                 cs.target = i->callee;
