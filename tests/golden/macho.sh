@@ -37,7 +37,7 @@ cat "$out/chk.txt"
 # 2. A minimal object, written by the writer and read by the system.
 cc -o "$out/machogen" "$D/machogen.c" "$SRC/macho/write.c" \
     "$SRC/driver/util.c" "$SRC/driver/diag.c" \
-    "$SRC/platform/platform_posix.c" 2> "$out/gen.log" || {
+    "$SRC/platform/platform_common.c" "$SRC/platform/platform_posix.c" 2> "$out/gen.log" || {
     echo "FAIL: the generator did not build:"; cat "$out/gen.log"; exit 1; }
 
 host=$(uname -m)

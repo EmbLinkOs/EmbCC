@@ -22,7 +22,10 @@ static int  g_done;
  * has no directory to speak of and yields ".". */
 static void dirname_of(const char *p, char *out, size_t cap)
 {
-    const char *slash = strrchr(p, '/');
+    /* either separator: argv[0] on a DOS-shaped host says `bin\embcc` */
+    const char *slash = strrchr(p, '/'), *bs = strrchr(p, '\\');
+    if (bs && (!slash || bs > slash))
+        slash = bs;
     if (!slash) {
         snprintf(out, cap, ".");
         return;
@@ -67,8 +70,22 @@ static void resolve(void)
     }
 
     const char *self = plat_self_path();
-    if (!self)
-        return;                      /* host cannot say; no defaults */
+    if (!self) {
+        /* The host cannot say where this program is. A compiler built
+         * for such a host names its prefix at build time (make
+         * DEFAULT_PREFIX=...); without one there are no defaults, and
+         * the driver relies on what it was told on the command line. */
+#ifdef EMBCC_DEFAULT_PREFIX
+        char cand[MAXP];
+        snprintf(cand, sizeof cand, "%s/lib/embcc/%s", EMBCC_DEFAULT_PREFIX,
+                 EMBCC_VERSION);
+        if (has(cand, "include/stdio.h")) {
+            snprintf(g_lib, sizeof g_lib, "%s", cand);
+            g_kind = 1;
+        }
+#endif
+        return;
+    }
 
     char bin[MAXP], up[MAXP], cand[MAXP];
     dirname_of(self, bin, sizeof bin);

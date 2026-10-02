@@ -31,7 +31,7 @@ cc -std=c99 -Wall -Wextra -o "$out/riscvcheck" \
    tools/riscvcheck/riscvcheck.c src/arch/riscv/emit.c \
    src/arch/code.c src/arch/target.c src/driver/util.c src/driver/diag.c \
    src/sema/type.c src/sema/ldfloat.c \
-   src/platform/platform_posix.c || {
+   src/platform/platform_common.c src/platform/platform_posix.c || {
     echo "riscvcheck did not build"; exit 1; }
 
 # 1. The encodings. llvm-mc --disassemble rather than llvm-objdump: an

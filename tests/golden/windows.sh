@@ -46,7 +46,7 @@ SRC=$EMBCC_ROOT/src
 cc -I"$SRC/coff" -o "$out/coffgen" \
     "$EMBCC_ROOT/tests/golden/windows/coffgen.c" "$SRC/coff/write.c" \
     "$SRC/driver/util.c" "$SRC/driver/diag.c" \
-    "$SRC/platform/platform_posix.c" 2> "$out/gen.log" || {
+    "$SRC/platform/platform_common.c" "$SRC/platform/platform_posix.c" 2> "$out/gen.log" || {
     echo "FAIL: the generator did not build:"; cat "$out/gen.log"; exit 1; }
 "$out/coffgen" "$out/t.obj" || { echo "FAIL: the writer reported failure"
                                  exit 1; }

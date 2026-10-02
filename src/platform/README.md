@@ -3,24 +3,30 @@
 *Vision §16: "Porting EmbCC to a new host means implementing this layer and
 nothing else."*
 
-Above this directory no stage knows what a `FILE*` is, which filesystem backs
-a file, whether the host has an environment, or where bytes go when they are
-written. That is checkable, and it is the point:
+Above this directory no stage asks the host anything ISO C does not have
+words for: no system header beyond the C library is included anywhere else
+in `src/`, and nothing above it tests which host it runs on. (The driver
+writes some outputs with `fopen` itself; that is ISO C, and every host has
+it.) That is checkable:
 
 ```console
-$ grep -rn "fopen(" src/ | grep -v platform
-$                                     # nothing
+$ grep -rln "#include <unistd.h>" src/
+src/platform/platform_posix.c
 ```
 
 ## What is here
 
 | | |
 |---|---|
-| `platform.h` | the whole contract — four file calls, one environment call, and the source provider |
-| `platform_posix.c` | the implementation for hosts with a C standard library: macOS, Linux, and **EmbLinkOS**, whose emlibc provides stdio |
+| `platform.h` | the whole contract — the file calls, the environment, the console, the program's own path, `argv[0]`, and the source provider |
+| `platform_common.c` | what every host shares, in ISO C: files, the environment, `argv[0]`, the source provider |
+| `platform_posix.c` | the console and the program's path for macOS, Linux and **EmbLinkOS** (newlib provides `<unistd.h>`) |
+| `platform_iso.c` | the same two answers in nothing but ISO C, for a hobby or non-POSIX OS: no automatic colour, and the program is where `argv[0]` says |
 
-A second host means a second file beside `platform_posix.c`, chosen by the
-build — not an `#ifdef` inside it.
+`make PLATFORM=iso` builds the last instead of `platform_posix.c`. A host
+with more to say gets its own `platform_NAME.c` beside these, chosen by the
+build (`PLATFORM=NAME`) — not an `#ifdef` inside one of them.
+[docs/internals/porting.md](../../docs/internals/porting.md) is the guide.
 
 ## Why it is this small
 

@@ -15,7 +15,6 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 
 /* ---- registers ---------------------------------------------------------- */
 
@@ -65,11 +64,20 @@ static const struct sysreg sysregs[] = {
     { NULL, 0 }
 };
 
+/* Case-blind, in ISO C: strncasecmp is POSIX's, and the compiler is meant
+ * to build against any hosted C library (src/platform). */
+static int same_nocase(const char *a, const char *b, int len)
+{
+    for (int i = 0; i < len; i++)
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i]))
+            return 0;
+    return 1;
+}
+
 static int sysreg_num(const char *s, int len)
 {
     for (const struct sysreg *r = sysregs; r->name; r++)
-        if ((int)strlen(r->name) == len &&
-            strncasecmp(s, r->name, (size_t)len) == 0)
+        if ((int)strlen(r->name) == len && same_nocase(s, r->name, len))
             return r->sysm;
     return -1;
 }

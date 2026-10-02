@@ -32,12 +32,29 @@ ifneq ($(DEFAULT_TARGET),)
 CFLAGS += -DEMBCC_DEFAULT_TARGET='"$(DEFAULT_TARGET)"'
 endif
 
+# The HOST layer (src/platform): what the compiler asks the machine it runs
+# on. Files and the environment are ISO C and every host shares them
+# (platform_common.c); the console and the program's own path are the
+# host's. `posix` is macOS, Linux and EmbLinkOS; `iso` needs nothing but a
+# hosted C library, for a hobby or non-POSIX OS (docs/internals/porting.md).
+PLATFORM ?= posix
+PLATFORM_SRCS := src/platform/platform_common.c src/platform/platform_$(PLATFORM).c
+
+# The prefix an installed compiler looks under when the host cannot say
+# where the compiler is (no /proc, no _NSGetExecutablePath, argv[0] not a
+# path) and has no EMBCC_PREFIX in its environment -- as on a host with no
+# environment at all.
+DEFAULT_PREFIX ?=
+ifneq ($(DEFAULT_PREFIX),)
+CFLAGS += -DEMBCC_DEFAULT_PREFIX='"$(DEFAULT_PREFIX)"'
+endif
+
 # The target-neutral compiler, then src/arch: what every target shares
 # (selection, the backend contract, the code buffer), then one directory per
 # architecture — everything x86-64-only under x86_64/, aarch64-only under
 # aarch64/ (src/arch/README.md; docs/manual/targets.md for what each supports).
 SRCS := \
-	src/platform/platform_posix.c \
+	$(PLATFORM_SRCS) \
 	src/driver/main.c \
 	src/driver/util.c \
 	src/driver/diag.c \
@@ -144,7 +161,19 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 
 all: embcc embread embld embas embls embidx
 
-embcc: $(OBJS) $(EMBDBG_CORE)
+# Which host layer the last link used. Switching PLATFORM leaves every
+# object up to date, so without this `make PLATFORM=iso` kept the old
+# binary. Compared by NAME, not by time: a stamp touched in the same
+# second as the link looked up to date.
+PLATFORM_STAMP := $(BUILD)/platform.stamp
+ifneq ($(shell cat $(PLATFORM_STAMP) 2>/dev/null),$(PLATFORM))
+PLATFORM_CHANGED := platform-changed
+endif
+.PHONY: platform-changed
+platform-changed:
+	@mkdir -p $(BUILD); echo $(PLATFORM) > $(PLATFORM_STAMP)
+
+embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
 
 # The same compiler, linked INSIDE the object directory rather than at
@@ -170,11 +199,11 @@ $(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
        src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
-       src/platform/platform_posix.c src/platform/platform.h
+       $(PLATFORM_SRCS) src/platform/platform.h
 	$(CC) $(CFLAGS) -o $@ tools/embas/embas.c src/arch/x86_64/as.c \
 	    src/elf/write.c src/driver/util.c src/driver/diag.c \
 	    src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
-	    src/platform/platform_posix.c
+	    $(PLATFORM_SRCS)
 
 # embld — the integrated linker (ARCHITECTURE §6, WORKPLAN stream B), as
 # a standalone tool for host development. The link library also gets
@@ -187,11 +216,11 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/code.c \
        src/link/link.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
-       src/platform/platform_posix.c src/platform/platform.h
+       $(PLATFORM_SRCS) src/platform/platform.h
 	$(CC) $(CFLAGS) -DEMBDBG_NO_MAIN -Wno-unused-function -o $@ \
 	    tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
-	    src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c \
+	    src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS) \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/code.c
 
 # NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
@@ -207,7 +236,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 # the compiler that will compile it; diagnostics it gets by running embcc
 # itself. The parse runs in a forked child, because a front end ends the
 # process where it cannot continue and a server must not.
-EMBLS_SRCS = tools/embls/embls.c src/platform/platform_posix.c src/cpp/cpp.c src/lex/lex.c \
+EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/parse/parse.c src/sema/type.c src/sema/ldfloat.c \
              src/sema/w128.c src/sema/uninit.c src/sema/format.c \
              src/driver/util.c src/driver/diag.c src/driver/remark.c \

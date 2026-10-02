@@ -40,7 +40,7 @@ command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 || {
 cc -std=c99 -Wall -Wextra -o "$out/aas" \
    tools/avrasmcheck/avrasmcheck.c src/arch/avr/asm.c src/arch/avr/emit.c \
    src/arch/code.c src/driver/util.c src/driver/diag.c \
-   src/platform/platform_posix.c src/arch/target.c src/sema/type.c \
+   src/platform/platform_common.c src/platform/platform_posix.c src/arch/target.c src/sema/type.c \
    src/sema/ldfloat.c || { echo "avrasmcheck did not build"; exit 1; }
 
 # ---- the ordinary forms, byte for byte -------------------------------

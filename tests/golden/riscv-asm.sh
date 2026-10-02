@@ -31,7 +31,7 @@ then
     cc -std=c99 -Wall -Wextra -o "$out/rvasmcheck" \
        tools/rvasmcheck/rvasmcheck.c src/arch/riscv/asm.c \
        src/arch/riscv/emit.c src/arch/code.c src/arch/target.c \
-       src/driver/util.c src/driver/diag.c src/platform/platform_posix.c \
+       src/driver/util.c src/driver/diag.c src/platform/platform_common.c src/platform/platform_posix.c \
        src/sema/type.c src/sema/ldfloat.c || {
         echo "rvasmcheck did not build"; exit 1; }
 
