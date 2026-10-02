@@ -2914,7 +2914,17 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * it, so the named-parameter loads that follow still see rdi..r9 and
      * xmm0..7 intact. The SSE slots are 16 apart (SysV) but only their low
      * 8 bytes — a double — are stored, which is all vfprintf reads. */
-    if (f->is_varargs) {
+    if (f->is_varargs && target_win64_abi()) {
+        /* Microsoft x64: the four argument registers go to the home area
+         * the caller reserved above the return address, so that one
+         * pointer walks from them into the stack arguments. A float in
+         * the first four is in its integer register too -- the caller
+         * duplicates it for a variadic call -- so this is all of them.
+         * Before, the SysV save area and record were built here: va_arg
+         * read "r9" twice where the fifth and sixth slots were. */
+        for (int r = 0; r < 4; r++)
+            x86_store_mem_reg(text, REG_RBP, 16 + r * 8, x86_argreg(r), 8);
+    } else if (f->is_varargs) {
         for (int r = 0; r < 6; r++)
             x86_store_mem_reg(text, REG_RBP, va_save + r * 8,
                               x86_argreg(r), 8);
@@ -4950,8 +4960,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
                                          a->size);
                     } else if (a->cls[0] == CLASS_SSE) {
                         x86_fld(text, sd, a->vreg, ireg, a->size);
+                        /* a variadic double goes in the integer register
+                         * too -- copied from the xmm register just loaded,
+                         * since an xmm-homed value has no slot to read */
                         if (i->call_varargs)
-                            x86_load_arg(text, ireg, sd[a->vreg]);
+                            x86_movq_gpr_xmm(text, x86_argreg(ireg), ireg, 8);
                     } else if (!in_reg(a->vreg)) {
                         x86_load_arg(text, ireg, sd[a->vreg]);
                     }
@@ -5196,10 +5209,17 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         }
         case IR_VA_START:
+            cg_reset();
+            if (target_win64_abi()) {
+                /* *ap = the first unnamed slot of the home area */
+                x86_mov_rcx_slot(text, sd[i->a]);
+                x86_lea_reg_slot(text, REG_RAX, 16 + va_named_int * 8);
+                x86_store_mem_reg(text, REG_RCX, 0, REG_RAX, 8);
+                break;
+            }
             /* Build a __va_list_tag on the frame and point the va_list at
              * it. Layout (SysV): gp_offset u32, fp_offset u32,
              * overflow_arg_area ptr, reg_save_area ptr. */
-            cg_reset();
             x86_mov_eax_imm(text, va_named_int * 8, 4);
             x86_store_mem_reg(text, REG_RBP, va_tag + 0, REG_RAX, 4);
             x86_mov_eax_imm(text, 48 + va_named_sse * 16, 4);

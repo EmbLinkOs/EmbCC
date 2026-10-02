@@ -259,7 +259,9 @@ int target_anon_bitfield_aligns(void)
 int target_va_list_is_pointer(void)
 {
     switch (target_get()) {
-    case TARGET_X86_64:  return 0;   /* SysV: __va_list_tag, 24 bytes */
+    /* SysV: __va_list_tag, 24 bytes; Microsoft x64: char *, walking the
+     * caller's slots (the callee spills rcx..r9 into the home area) */
+    case TARGET_X86_64:  return target_win64_abi();
     /* AAPCS64: the va_list record, 32 bytes -- but Apple's arm64 has
      * none: its va_list is the walking pointer (irg_va_arg_darwin). Read
      * as a record, va_copy copied 32 bytes OF THE ARGUMENTS, and the

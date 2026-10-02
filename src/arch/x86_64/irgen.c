@@ -11,6 +11,7 @@
 #include "../../driver/util.h"
 #include "../../sema/sema.h"
 #include "../../sema/type.h"
+#include "../target.h"
 
 /* va_arg of a struct (SysV 3.5.7): classified like an argument. When
  * every eightbyte finds a register of its class still unread, it is
@@ -83,6 +84,36 @@ static int va_struct_sysv(struct ir_func *fn, struct expr *e, int ap,
     return dst;
 }
 
+/* va_arg on Microsoft x64: the list is a pointer walking eight-byte
+ * slots -- the home area the prologue filled from rcx..r9, then the
+ * caller's stack arguments. A variadic float is a double there. What
+ * travels by reference on Windows (long double, __int128; structs are
+ * refused in sema) is refused by name rather than read as a value. */
+static int va_arg_win64(struct ir_func *fn, struct expr *e)
+{
+    struct type *rt = e->ty;
+    struct type *ptr = ty_base(TY_LONG, 1);
+    if (rt->kind == TY_LDOUBLE || rt->kind == TY_INT128)
+        diag_fatal(fn->file, e->line,
+                   "va_arg of %s is not supported for a Windows target yet: "
+                   "there it travels by reference", ty_name(rt));
+    int apa = gen_addr(fn, e->lhs);
+    int cur = emit_load(fn, apa, ptr);
+    emit_store(fn, apa, emit_bin(fn, IR_ADD, cur, emit_const(fn, 8, 8), 8, 1),
+               ptr);
+    if (ty_is_float(rt)) {
+        int v = emit_load(fn, cur, ty_base(TY_DOUBLE, 0));
+        if (rt->kind == TY_FLOAT) {
+            struct ir_ins *cv = emit(fn);
+            cv->op = IR_F2F; cv->a = v; cv->size = 8; cv->w = 4;
+            cv->dst = new_temp(fn);
+            return cv->dst;
+        }
+        return v;
+    }
+    return emit_load(fn, cur, rt);
+}
+
 /* va_arg(ap, T) for an INTEGER-class T (SysV). ap's value is a pointer to
  * a __va_list_tag { gp_offset u32, fp_offset u32, overflow_arg_area ptr,
  * reg_save_area ptr }. If gp_offset < 48 the argument sits in the register
@@ -90,6 +121,8 @@ static int va_struct_sysv(struct ir_func *fn, struct expr *e, int ap,
  * otherwise it is next in the overflow area, which advances by 8. */
 int irg_va_arg_sysv(struct ir_func *fn, struct expr *e)
 {
+    if (target_win64_abi())
+        return va_arg_win64(fn, e);
     struct type *rt = e->ty;
     struct type *u32 = ty_base(TY_INT, 1);
     struct type *ptr = ty_base(TY_LONG, 1); /* an 8-byte slot */
