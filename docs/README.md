@@ -1,110 +1,61 @@
 # EmbCC documentation
 
-Laid out as [design/vision.md](design/vision.md) §31 asks: the tree mirrors
-the libraries, and each subsystem's document says what it is, how it works,
-and which test proves it.
+EmbCC is a C and C++ compiler with its own assembler, linker and debugger. It
+targets EmbLinkOS on x86-64, Linux, macOS, Windows, and bare-metal AArch64,
+ARMv7-M, RISC-V (RV32 and RV64) and AVR. This documentation has two parts:
+the manual is for people who compile code with EmbCC, and the internals
+reference is for people who change it.
 
-## Start here
+## Using EmbCC
 
-| | |
-|---|---|
-| [design/vision.md](design/vision.md) | **The specification.** What EmbCC is, the invariants it never breaks, and the order it gets built in. Everything else is subordinate to it |
-| [architecture/overview.md](architecture/overview.md) | How the compiler is actually put together, phase by phase |
-| [tools/embcc.md](tools/embcc.md) | Using it: the command line |
+Start with the [overview](manual/overview.md) and
+[getting started](manual/getting-started.md).
 
-## architecture/
+| Page | Covers |
+| --- | --- |
+| [Overview](manual/overview.md) | What EmbCC is, its components, the targets at a glance |
+| [Getting started](manual/getting-started.md) | Building and installing, first programs, cross builds |
+| [Invoking EmbCC](manual/invoking.md) | Every command-line option |
+| [Targets](manual/targets.md) | Triples, `-m` options, data models, ABIs, predefined macros, object formats |
+| [C language support](manual/c-language.md) | `-std=`, and the status of each C89–C23 feature |
+| [Implementation-defined behavior](manual/implementation-defined.md) | EmbCC's choices, in C17 Annex J.3 order |
+| [Language extensions](manual/extensions.md) | GNU and Clang extensions, attributes, builtins, pragmas |
+| [Inline assembly](manual/inline-asm.md) | Extended asm, and the constraints and modifiers of each target |
+| [C++ support](manual/cxx.md) | What the C++ front end accepts |
+| [Diagnostics](manual/diagnostics.md) | The diagnostic format, warnings, `--explain`, JSON output |
+| [Optimization](manual/optimization.md) | `-O` levels and `-f` options |
+| [Debugging](manual/debugging.md) | `-g`, DWARF, and debugging programs |
+| [Bare-metal programming](manual/embedded.md) | Freestanding programs on the boards |
+| [Libraries](manual/libraries.md) | The C library, the C++ library, the compiler runtime |
 
-| | |
-|---|---|
-| [overview.md](architecture/overview.md) | one process, the phases, and why each is shaped the way it is |
-| [abi.md](architecture/abi.md) | the target ABIs: SysV AMD64 and AAPCS64, data layout, calling convention |
+### Tools
 
-Per-library detail lives with the library, as a `README.md` beside the code:
-[src/platform](../src/platform/README.md) · [src/lex](../src/lex/README.md) ·
-[src/cpp](../src/cpp/README.md) · [src/parse](../src/parse/README.md) ·
-[src/sema](../src/sema/README.md) · [src/ir](../src/ir/README.md) ·
-[src/opt](../src/opt/README.md) · [src/arch](../src/arch/README.md) ·
-[src/elf](../src/elf/README.md) · [src/link](../src/link/README.md) ·
-[src/driver](../src/driver/README.md)
+| Tool | Page |
+| --- | --- |
+| `embld` | [The linker](manual/tools/embld.md) |
+| `embas` | [The NASM-syntax assembler](manual/tools/embas.md) |
+| `embdbg` | [The debugger](manual/tools/embdbg.md) |
+| `embread` | [The EMBX image reader](manual/tools/embread.md) |
+| `embls` | [The language server](manual/tools/embls.md) |
+| `embidx` | [The cross-unit interface index](manual/tools/embidx.md) |
+| `.ebm` manifests | [EmbBuild manifests](manual/tools/embbuild.md) |
 
-Four libraries have code and no document yet: `src/macho` and `src/coff`
-(the other two object writers — their formats are described where the
-decision was made, [D-014](design/decisions.md)), `src/cxx` (the C++ front
-end, whose shape is in [language/cpp-levels.md](language/cpp-levels.md))
-and `src/debug` (DWARF). They are listed here rather than left out, so the
-gap is visible.
+## EmbCC internals
 
-## language/
+Start with the [architecture](internals/architecture.md) and the
+[contributing guide](internals/contributing.md).
 
-| | |
-|---|---|
-| [compatibility.md](language/compatibility.md) | what C EmbCC accepts, per clause and per extension, per architecture |
-| [cpp-levels.md](language/cpp-levels.md) | C++: the staged milestones CX1–CX9 and how the lowering works |
-| [libc.md](language/libc.md) | our C library: one implementation, one small backend per OS |
-| [libcxx.md](language/libcxx.md) | our C++ runtime (the Itanium ABI on libgcc's unwinder) and the standard library above it |
-
-## ir/
-
-| | |
-|---|---|
-| [specification.md](ir/specification.md) | EmbIR: its form, its textual syntax, and the round-trip that keeps them honest |
-
-## tools/
-
-| | |
-|---|---|
-| [embcc.md](tools/embcc.md) | the driver: options, targets, what it accepts |
-| [diagnostics.md](tools/diagnostics.md) | diagnostics, `--explain`, fix-its, warnings, remarks, the language server, `embld --doctor` |
-| [embedded.md](tools/embedded.md) | building Cortex-M firmware: the target, the startup, the link |
-| [embdbg.md](tools/embdbg.md) | the debugger's requirements and what it consumes |
-
-## developer/
-
-| | |
-|---|---|
-| [selfhost-on-os.md](developer/selfhost-on-os.md) | building EmbCC with EmbCC, on EmbLinkOS |
-| [todo.md](developer/todo.md) | the running list of known gaps |
-| [gaps-vs-gcc-clang.md](developer/gaps-vs-gcc-clang.md) | where EmbCC stands against GCC and Clang, probed rather than guessed |
-
-Testing is documented with the tests: [tests/README.md](../tests/README.md).
-
-## design/
-
-| | |
-|---|---|
-| [vision.md](design/vision.md) | the specification (v0.3) |
-| [decisions.md](design/decisions.md) | the D-NNN decision records — **this project's ADRs** |
-| [roadmap.md](design/roadmap.md) | the delivery track, M0–M4, and what each milestone proved |
-| [workplan.md](design/workplan.md) | the work streams behind the milestones |
-| [vision-first.md](design/vision-first.md), [vision-longterm.md](design/vision-longterm.md) | the earlier vision documents, kept for provenance |
-
-## Where this differs from §31, and why
-
-The vision's §31 sketches a tree this one follows but does not match
-exactly. The differences are deliberate and are listed so the gap stays a
-decision:
-
-- **ADRs are `design/decisions.md`, not `design/decisions/` as separate
-  files.** This project records decisions as numbered D-NNN entries in one
-  document, which is its ADR mechanism; the seed ADRs §31 lists map onto
-  those entries. Splitting them into files is not obviously an improvement
-  and would break every existing citation.
-- **`tools/diagnostics.md` is not split per tool.** §31 asks for
-  `embcc-ls`, `embld` and friends separately. That document is one
-  narrative — the staged T1–T6 work, each stage building on the last — and
-  cutting it into three would lose the thread for no gain. The per-tool
-  split is worth doing when the per-tool content outgrows it.
-- **`architecture/` is thin.** §31 lists chapters for the frontend,
-  preprocessor, semantic model, project graph, optimizer, backend, platform
-  and determinism. Most of that content exists as a `README.md` beside its
-  library, which keeps it next to the code it describes and is where it has
-  stayed accurate. `project-graph` has no chapter because
-  [it does not exist yet](design/vision.md) (§8.2).
-- **No `embstudio` or `embbuild` chapter**: neither program is built here.
-  EmbBuild is the OS's build system, and what this repository holds is the
-  *interface* to it: `build.ebm`, the manifest that lets EmbCC be built by
-  EmbBuild on the metal, generated by `tools/gen-embbuild-manifest.sh`, and
-  `tools/embbuild-run.sh`, a host-side reference walker whose only job is to
-  prove that manifest builds before it ships. Both are described in
-  [developer/selfhost-on-os.md](developer/selfhost-on-os.md), which is the
-  right place for them: they exist for the self-host, not for this compiler.
+| Page | Covers |
+| --- | --- |
+| [Architecture](internals/architecture.md) | The pipeline from command line to object file, and the source tree |
+| [Front end](internals/front-end.md) | Preprocessor, lexer, parser and semantic analysis |
+| [EmbIR](internals/ir.md) | The intermediate representation and its text form |
+| [Optimizer](internals/optimizer.md) | The passes, their order, and what each may assume |
+| [Register allocation](internals/register-allocation.md) | The shared allocator and each target's use of it |
+| [Back ends](internals/backends.md) | Code generation for each target |
+| [Object files](internals/object-formats.md) | ELF, Mach-O, COFF and EMBX writers |
+| [Linker](internals/linker.md) | How `embld` resolves, lays out and relocates |
+| [Testing](internals/testing.md) | The test suites, the boards, and how to add a test |
+| [Contributing](internals/contributing.md) | Conventions, the review checklist, commit style |
+| [Design decisions](internals/decisions.md) | The decision record (D-001 …) |
+| [Status](internals/status.md) | Per-target maturity and known limitations |
