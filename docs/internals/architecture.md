@@ -29,8 +29,11 @@ asking whether a file exists, reading an environment variable
 the running binary (`plat_self_path`), and reading source text through a
 replaceable provider (`src_read`, `src_set_provider`) so that a language
 server can supply unsaved editor buffers. The layer has no process API.
-`src/platform/platform_posix.c` is its only implementation; a new host
-is a second file beside it, chosen by the build.
+What every host shares is `src/platform/platform_common.c`, in ISO C.
+The console and the binary's own path are `platform_posix.c` (macOS,
+Linux, EmbLinkOS) or `platform_iso.c` (any host with a C library, chosen
+with `make PLATFORM=iso`); a new host is another file beside them. See
+[Porting EmbCC to a new host](porting.md).
 
 Nothing reads the host's architecture: an `embcc` running on macOS and
 one running on EmbLinkOS must produce the same object from the same
@@ -73,7 +76,8 @@ In practice this means:
 - No system headers for object formats: `src/elf/elf.h`,
   `src/macho/macho.h` and `src/coff/coff.h` define what the writers
   need. Operating-system headers (`<unistd.h>`, `<mach-o/dyld.h>`)
-  appear only in `src/platform/platform_posix.c`.
+  appear only in `src/platform/platform_posix.c`; the rest of `src/`
+  includes nothing beyond the ISO C library.
 - Deterministic output: no order-of-evaluation dependence between two
   IR-emitting calls passed as arguments to one call, no timestamps, no
   current directory in the output.
