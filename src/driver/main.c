@@ -2139,7 +2139,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                       lo ? text_sym : tf->sym_ndx,
                       target_reloc_type(ta, fs[i].kind),
                       lo ? fs[i].patch_off - 4
-                         : target_reloc_addend(ta, fs[i].kind, 0));
+                         : target_reloc_addend(ta, fs[i].kind, 0) +
+                           (fs[i].kind == RK_ABS64 ? fs[i].addend : 0));
     }
     free(fs);
 

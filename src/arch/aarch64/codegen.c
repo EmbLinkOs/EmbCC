@@ -2538,6 +2538,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                       (i->callee->is_weak ||
                        target_os_get() == TGT_OS_DARWIN);
             struct fsite hi, lo;
+            hi.addend = lo.addend = 0;
             hi.patch_off = a64_adrp(t, A64_ACC);
             hi.target = i->callee;
             hi.kind = got ? RK_GOT_PAGE : RK_ADR_HI21;

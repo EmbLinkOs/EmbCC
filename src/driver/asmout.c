@@ -45,6 +45,7 @@
  * recorded, so this is the same information the ELF writer turns into
  * relocations — not a second derivation of it. */
 struct site {
+    long addend;             /* an RK_ABS64 site's offset into its target */
     int off;                 /* the relocated field's offset in .text */
     const char *name;        /* the symbol, or NULL for a .rodata string */
     int str_off;             /* when name is NULL: offset inside .rodata */
@@ -190,6 +191,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     for (int i = 0; i < nfs; i++) {
         site[ns].off = fs[i].patch_off;
         site[ns].name = fs[i].target ? fs[i].target->name : "?";
+        site[ns].addend = fs[i].kind == RK_ABS64 ? fs[i].addend : 0;
         site[ns++].kind = fs[i].kind;
     }
     for (int i = 0; i < ngs; i++) {
@@ -266,6 +268,17 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             }
             if (len < 1)
                 len = 1;
+            /* An absolute address in .text -- a jump table's entry -- is
+             * data: eight bytes of their own, and what came before it
+             * stops where it starts, so no decode of the bytes around a
+             * table can swallow one of its relocations. */
+            for (int k = 0; k < ns; k++)
+                if (site[k].kind == RK_ABS64 && site[k].off >= pc &&
+                    site[k].off < pc + len) {
+                    len = site[k].off == pc ? 8 : (int)(site[k].off - pc);
+                    have_dis = 0;
+                    break;
+                }
             const struct site *st = site_in(site, ns, (int)pc,
                                             (int)(pc + len));
             /* RISC-V splits an address across auipc + addi, and the LOW
@@ -344,7 +357,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 ob_fmt(b, "\t.reloc\t.-%ld, %s, %s%+ld\n",
                        len - field, rt, sym,
                        st->kind == RK_RISCV_PCREL_LO12_I
-                           ? 0L : addend_for(st->kind));
+                           ? 0L : addend_for(st->kind) + st->addend);
                 (void)tail;
             }
             pc += len;

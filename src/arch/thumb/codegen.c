@@ -1513,6 +1513,7 @@ static void note_fn(struct t_sites *st, int at, struct func *target,
     st->f[st->nf].patch_off = at;
     st->f[st->nf].target = target;
     st->f[st->nf].kind = k;
+    st->f[st->nf].addend = 0;
     st->nf++;
 }
 

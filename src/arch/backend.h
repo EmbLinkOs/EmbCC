@@ -57,6 +57,10 @@ struct fsite {
     int patch_off;
     struct func *target;
     enum reloc_kind kind;
+    /* RK_ABS64 only: added to the target's address -- a label inside
+     * it, for a jump table of absolute entries. Read for no other
+     * kind, and set to 0 by every site that makes one anyway. */
+    long addend;
 };
 
 /* Lowers the unit to x86-64 into one .text image and fills each

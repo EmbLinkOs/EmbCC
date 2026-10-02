@@ -2703,6 +2703,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
         label_off[i] = -1;
     struct brsite *brs = NULL;
     int nbrs = 0, capbrs = 0;
+    /* absolute jump-table entries awaiting their labels (IR_SWITCH) */
+    struct { int off, label; } *jtabs = NULL;
+    int njtabs = 0, capjtabs = 0;
 
     /* -g: expose each source variable's frame slot (rbp-relative) so the
      * DWARF emitter can write DW_OP_fbreg. sd is indexed by vreg; params and
@@ -4148,6 +4151,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                              : x86_lea_rax_rip(text);
             fs.target = i->callee;
             fs.kind = RK_PCREL32;
+            fs.addend = 0;
             PUSH(st->f, st->nf, st->capf, fs);
             if (!D) cg_store(text, sd, i->dst, 8);
             break;
@@ -4612,6 +4616,35 @@ static void gen_func(struct ir_func *fn, struct code *text,
             brs[nbrs].tab = 0;
             nbrs++;
             int lea = x86_lea_reg_rip(text, REG_RCX);
+            /* In an ELF object the entries are absolute addresses --
+             * EmbCC's code is position-dependent (it refuses -fPIC), so
+             * a relocation per entry costs nothing at run time -- and the
+             * dispatch is one indirect jump through the table, where the
+             * 32-bit offsets needed a sign-extending load and an add
+             * first: two instructions on every switch taken, every
+             * opcode an interpreter dispatches. The entries are relocated
+             * against this function's own symbol, at each label's offset
+             * into it (jtabs, resolved with the branches below). Mach-O
+             * and COFF keep the offset table. */
+            if (target_fmt_get() == TGT_FMT_ELF) {
+                x86_jmp_rcx_rax8(text);
+                code_align(text, 8, 0xcc);
+                int tab = text->len;
+                code_patch32(text, lea,
+                             (unsigned long)(unsigned int)(tab - (lea + 4)));
+                for (int k = 0; k < n; k++) {
+                    if (njtabs == capjtabs) {
+                        capjtabs = capjtabs ? capjtabs * 2 : 16;
+                        jtabs = xrealloc(jtabs, (size_t)capjtabs * sizeof *jtabs);
+                    }
+                    jtabs[njtabs].off = text->len;
+                    jtabs[njtabs].label = fn->jt[i->jt].labels[k];
+                    njtabs++;
+                    code_u32(text, 0);
+                    code_u32(text, 0);
+                }
+                break;
+            }
             x86_movsxd_rax_tab(text);
             x86_alu_rr(text, '+', REG_RAX, REG_RCX, 8);
             x86_jmp_reg(text, REG_RAX);
@@ -5245,6 +5278,20 @@ static void gen_func(struct ir_func *fn, struct code *text,
 
     for (int r = 0; r < fn->neh; r++)      /* where each landing pad is */
         fn->eh[r].lp_off = label_off[fn->eh[r].lp_label] - f->code_off;
+    /* the absolute jump-table entries: this function + the label's offset */
+    for (int k = 0; k < njtabs; k++) {
+        int target = label_off[jtabs[k].label];
+        if (target < 0)
+            internal_error("label %d in '%s' was never placed",
+                           jtabs[k].label, f->name);
+        struct fsite js;
+        js.patch_off = jtabs[k].off;
+        js.target = f;
+        js.kind = RK_ABS64;
+        js.addend = target - f->code_off;
+        PUSH(st->f, st->nf, st->capf, js);
+    }
+    free(jtabs);
     for (int n = 0; n < nbrs; n++) {
         int target = label_off[brs[n].label];
         if (target < 0) {

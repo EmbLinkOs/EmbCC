@@ -1638,6 +1638,12 @@ void x86_movsxd_rax_tab(struct code *c)
     code_byte(c, 0x04); code_byte(c, 0x81);
 }
 
+/* jmp *(%rcx,%rax,8): through a table of absolute addresses */
+void x86_jmp_rcx_rax8(struct code *c)
+{
+    code_byte(c, 0xff); code_byte(c, 0x24); code_byte(c, 0xc1);
+}
+
 void x86_jmp_reg(struct code *c, int reg)
 {
     if (reg >= 8) code_byte(c, 0x41);     /* REX.B for r8..r15 */
