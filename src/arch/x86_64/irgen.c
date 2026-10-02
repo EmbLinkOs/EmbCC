@@ -678,16 +678,70 @@ static void asm_assemble(struct ir_func *fn, struct stmt *s,
         } else if (mlen == 5 && strncmp(m, "popfq", 5) == 0) {
             code[n++] = 0x9d;
         }
-        /* ---- port I/O: al/ax/eax with dx, both operands fixed by the
-         * constraints ("a" and "Nd"), so the opcode alone encodes it ---- */
-        else if (mlen == 4 && strncmp(m, "outb", 4) == 0) { code[n++] = 0xee; }
-        else if (mlen == 4 && strncmp(m, "outw", 4) == 0) {
-            code[n++] = 0x66; code[n++] = 0xef;
-        } else if (mlen == 4 && strncmp(m, "outl", 4) == 0) { code[n++] = 0xef; }
-        else if (mlen == 3 && strncmp(m, "inb", 3) == 0) { code[n++] = 0xec; }
-        else if (mlen == 3 && strncmp(m, "inw", 3) == 0) {
-            code[n++] = 0x66; code[n++] = 0xed;
-        } else if (mlen == 3 && strncmp(m, "inl", 3) == 0) { code[n++] = 0xed; }
+        /* ---- port I/O: al/ax/eax with dx or an 8-bit port number. The
+         * operands were not read at all -- the opcode was always the dx
+         * form -- so `inb $0x60, %al` read whatever port dx named. Written
+         * operands are read now: `$N` is the immediate form, dx (by name
+         * or as the operand the "Nd"/"d" constraint put there) the
+         * register form, and the data operand must be al/ax/eax. With no
+         * operands written, the dx form, as before. ---- */
+        else if ((mlen == 4 && (strncmp(m, "outb", 4) == 0 ||
+                                strncmp(m, "outw", 4) == 0 ||
+                                strncmp(m, "outl", 4) == 0)) ||
+                 (mlen == 3 && (strncmp(m, "inb", 3) == 0 ||
+                                strncmp(m, "inw", 3) == 0 ||
+                                strncmp(m, "inl", 3) == 0))) {
+            int out = m[0] == 'o';
+            char sz = m[mlen - 1];
+            long port = -1;
+            a_ws(&p);
+            if (reg >= 0 || (*p && *p != '\n' && *p != ';')) {
+                int port_reg = -1, data_reg = -1;
+                for (int k = 0; k < 2; k++) {
+                    int is_port = out ? k == 1 : k == 0;
+                    a_ws(&p);
+                    if (k == 0 && reg >= 0) {     /* %N, read above */
+                        if (is_port) port_reg = reg; else data_reg = reg;
+                    } else if (*p == '$') {
+                        if (!is_port)
+                            diag_fatal(file, line, "asm: %.*s's data operand "
+                                       "is al/ax/eax, not an immediate, in "
+                                       "\"%s\"", mlen, m, tmpl);
+                        port = a_imm(&p, file, line, tmpl);
+                    } else {
+                        int r = (p[0] == '%' && p[1] == '%')
+                              ? a_reg_any(&p, file, line, tmpl)
+                              : a_opreg(&p, opregs, opnames, nops, file, line,
+                                        tmpl);
+                        if (is_port) port_reg = r; else data_reg = r;
+                    }
+                    a_ws(&p);
+                    if (k == 0) {
+                        if (*p != ',')
+                            diag_fatal(file, line, "asm: %.*s wants two "
+                                       "operands in \"%s\"", mlen, m, tmpl);
+                        p++;
+                    }
+                }
+                if (data_reg != 0)
+                    diag_fatal(file, line, "asm: %.*s moves through "
+                               "al/ax/eax, in \"%s\"", mlen, m, tmpl);
+                if (port < 0 && port_reg != 2)
+                    diag_fatal(file, line, "asm: %.*s's port is dx or an "
+                               "immediate, in \"%s\"", mlen, m, tmpl);
+                if (port > 255)
+                    diag_fatal(file, line, "asm: an immediate port is 0..255, "
+                               "in \"%s\"", tmpl);
+            }
+            if (sz == 'w')
+                code[n++] = 0x66;
+            if (port >= 0) {
+                code[n++] = (unsigned char)((out ? 0xe6 : 0xe4) + (sz != 'b'));
+                code[n++] = (unsigned char)port;
+            } else {
+                code[n++] = (unsigned char)((out ? 0xee : 0xec) + (sz != 'b'));
+            }
+        }
         /* ---- pop/push %N (64-bit; the `q` suffix is the same encoding) ---- */
         else if ((mlen == 3 && strncmp(m, "pop", 3) == 0) ||
                  (mlen == 4 && strncmp(m, "popq", 4) == 0)) {
