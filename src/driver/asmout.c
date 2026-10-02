@@ -425,8 +425,10 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         if (!any_data) { ob_str(b, "\n"); any_data = 1; }
         if (!g->is_static)
             ob_fmt(b, "\t.globl\t%s\n", asym(g->name));
+        /* a const object is read-only data, as in the object (main.c) */
+        const char *sec = g->in_rodata ? "\t.section\t.rodata\n" : "\t.data\n";
         if (g->init_bytes && g->init_len > 0) {
-            ob_str(b, "\t.data\n");
+            ob_str(b, sec);
             ob_fmt(b, "\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n",
                    al, asym(g->name), type_sigil(), asym(g->name));
             /* A pointer slot in an initializer is an ADDRESS the linker
@@ -471,9 +473,10 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                 k = stop;
             }
         } else {
-            ob_fmt(b, "\t.bss\n\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n"
-                      "\t.zero\t%d\n", al, asym(g->name), type_sigil(),
-                   asym(g->name), sz);
+            ob_fmt(b, "%s\t.align\t%d\n\t.type\t%s, %sobject\n%s:\n"
+                      "\t.zero\t%d\n",
+                   g->in_rodata ? "\t.section\t.rodata\n" : "\t.bss\n",
+                   al, asym(g->name), type_sigil(), asym(g->name), sz);
         }
         ob_fmt(b, "\t.size\t%s, %d\n", asym(g->name), sz);
     }

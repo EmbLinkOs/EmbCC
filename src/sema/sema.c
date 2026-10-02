@@ -4228,6 +4228,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->seq = -1;      /* visible from its own function only */
                 g->ty = s->dty;
                 g->is_static = 1;
+                g->is_const = s->obj_const;   /* a lookup table: .rodata */
                 /* `static __thread` inside a function is still one
                  * object per thread -- the scope decides who can NAME
                  * it, not how many there are. */
@@ -4790,6 +4791,11 @@ static void merge_globals(struct unit *u)
             canon->def_seq = g->seq;   /* the initializer's real position */
         }
         canon->defined |= !g->is_extern;
+        /* The object is what its DEFINITION says it is: an `extern
+         * const` seen first does not make a writable definition
+         * read-only, nor the other way round. */
+        if (!g->is_extern)
+            canon->is_const = g->is_const;
         canon->is_weak |= g->is_weak;
         if (g->section) {
             if (canon->section && strcmp(canon->section, g->section) != 0) {

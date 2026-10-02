@@ -929,6 +929,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             align = g->user_align;
         g->in_bss = !g->has_init;
         g->named = 0;
+        /* A const object is read-only data, where gcc puts it: in flash
+         * on a microcontroller rather than copied into RAM at startup,
+         * and write-protected under an MMU. Its place is fixed below,
+         * after the string pool. Not for a volatile one (it may be a
+         * device's), a thread's, one with a section of its own, or an
+         * output format whose writer has no .rodata for it. */
+        const struct type *ot = g->ty;
+        while (ot && ot->kind == TY_ARRAY)
+            ot = ot->pointee;
+        g->in_rodata = g->is_const && !g->is_tls && !g->section &&
+                       ot && !ot->is_volatile &&
+                       target_fmt_get() == TGT_FMT_ELF;
+        if (g->in_rodata) {
+            g->in_bss = 0;
+            continue;
+        }
         int *len = g->in_bss ? &bss_len : &data_len;
         if (g->is_tls) {
             if (g->section)
@@ -992,7 +1008,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         tdata = xcalloc(1, (size_t)tdata_len);
     if (data_len || nnamed || tdata_len) {
         for (struct global *g = u->globals; g; g = g->next) {
-            if (g->absorbed || !g->defined || g->in_bss)
+            if (g->absorbed || !g->defined || g->in_bss || g->in_rodata)
                 continue;
             char *img = g->is_tls ? tdata
                       : g->named  ? named[g->named - 1].buf : data;
@@ -1031,13 +1047,40 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         }
     }
 
-    /* .rodata: the string literals, at the offsets irgen assigned. */
+    /* .rodata: the string literals, at the offsets irgen assigned, then
+     * the const objects, each at its alignment. */
+    int rodata_len = iu->rodata_len, rodata_align = 16;
+    for (struct global *g = u->globals; g; g = g->next) {
+        if (g->absorbed || !g->defined || !g->in_rodata)
+            continue;
+        int align = ty_align(g->ty);
+        if (g->user_align > align)
+            align = g->user_align;
+        if (align > rodata_align)
+            rodata_align = align;
+        rodata_len = (rodata_len + align - 1) & ~(align - 1);
+        g->off = rodata_len;
+        rodata_len += global_size(g);
+    }
     char *rodata = NULL;
-    if (iu->rodata_len) {
-        rodata = xmalloc((size_t)iu->rodata_len);
+    if (rodata_len) {
+        rodata = xcalloc(1, (size_t)rodata_len);
         for (int i = 0; i < iu->nstrs; i++)
             memcpy(rodata + iu->strs[i].off, iu->strs[i].bytes,
                    (size_t)iu->strs[i].len);
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined || !g->in_rodata)
+                continue;
+            if (g->init_bytes) {
+                int n = g->init_len < global_size(g) ? g->init_len
+                                                     : global_size(g);
+                memcpy(rodata + g->off, g->init_bytes, (size_t)n);
+            } else {
+                unsigned long v = (unsigned long)g->init;
+                for (int b = 0; b < global_size(g) && b < 8; b++)
+                    rodata[g->off + b] = (char)((v >> (8 * b)) & 0xff);
+            }
+        }
     }
 
     /* File-scope asm blocks (crt0's _start): place each block's bytes in
@@ -1718,7 +1761,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * also long double and 128-bit constants, which do not. */
         rodata_ndx = elfw_add_section(w, ".rodata", SHT_PROGBITS,
                                       SHF_ALLOC, rodata,
-                                      (Elf64_Xword)iu->rodata_len, 16);
+                                      (Elf64_Xword)rodata_len,
+                                      (Elf64_Xword)rodata_align);
     int data_ndx = 0, bss_ndx = 0;
     if (data_len)
         data_ndx = elfw_add_section(w, ".data", SHT_PROGBITS,
@@ -1893,6 +1937,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 (Elf64_Xword)global_size(g),
                 ELF64_ST_INFO(STB_LOCAL, g->is_tls ? STT_TLS : STT_OBJECT),
                 (Elf64_Half)(g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
+                             : g->in_rodata ? rodata_ndx
                              : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
     for (struct func *f = u->funcs; f; f = f->next)
@@ -1910,6 +1955,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
                               g->is_tls ? STT_TLS : STT_OBJECT),
                 (Elf64_Half)(g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
+                             : g->in_rodata ? rodata_ndx
                              : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
     /* File-scope asm's .global labels (_start): global functions at their
@@ -2119,7 +2165,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 dk = ft ? RK_AVR_ABS16_PM : RK_AVR_ABS16;
             else
                 dk = target_ptr_size() == 8 ? RK_ABS64 : RK_ABS32;
-            elfw_add_rela(w, g->named ? named[g->named - 1].ndx : data_ndx,
+            elfw_add_rela(w, g->in_rodata ? rodata_ndx
+                             : g->named ? named[g->named - 1].ndx : data_ndx,
                           (Elf64_Addr)(g->off + g->relocs[i].off), sym,
                           target_reloc_type(ta, dk), add);
         }

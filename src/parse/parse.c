@@ -57,6 +57,12 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
 };
 
 struct parser {
+    /* const at the top level of the type built so far: set from the
+     * declaration specifiers (spec_const) by parse_type_spec, raised by
+     * a const after a `*` and dropped by the `*` itself (parse_stars).
+     * Types do not carry const; this says whether a declared OBJECT is
+     * read-only, which decides where it is placed. */
+    int spec_const, q_top;
     /* GNU `__label__ n;`: a label LOCAL to the enclosing block, so a
      * macro that declares one can be expanded twice in a function
      * without the second `n:` being a duplicate. That is the only
@@ -271,17 +277,22 @@ static int tok_is_type_start(enum tok_kind k)
            k == TOK_KW_AUTOTYPE || k == TOK_KW_TYPEOF_UNQUAL;
 }
 
-/* const/restrict are accepted and IGNORED (no const-correctness enforcement).
- * VOLATILE is honored for codegen: it must reach the accessed type so the
- * optimizer never CSEs/removes a volatile access (MMIO). Returns 1 if a
- * `volatile` was among the qualifiers consumed. */
+/* restrict is accepted and ignored, and so is const as far as types go
+ * (no const-correctness enforcement). VOLATILE is honored for codegen: it
+ * must reach the accessed type so the optimizer never CSEs/removes a
+ * volatile access (MMIO). Returns which were among the qualifiers
+ * consumed: Q_VOL for volatile, Q_CONST for const -- the latter decides
+ * whether a declared object is read-only (struct parser's q_top). */
+#define Q_VOL   1
+#define Q_CONST 2
 static int skip_quals(struct parser *ps)
 {
     int vol = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
-        if (k == TOK_KW_CONST || k == TOK_KW_RESTRICT) { advance(ps); continue; }
-        if (k == TOK_KW_VOLATILE) { vol = 1; advance(ps); continue; }
+        if (k == TOK_KW_CONST) { vol |= Q_CONST; advance(ps); continue; }
+        if (k == TOK_KW_RESTRICT) { advance(ps); continue; }
+        if (k == TOK_KW_VOLATILE) { vol |= Q_VOL; advance(ps); continue; }
         if (k == TOK_KW_ATOMIC) {
             /* `_Atomic(type)` is a specifier, not a qualifier — leave it for the
              * type-spec handler. Bare `_Atomic` is a qualifier: EmbCC maps atomic
@@ -290,7 +301,7 @@ static int skip_quals(struct parser *ps)
             struct lexer save = ps->lx;
             advance(ps);
             if (cur(ps)->kind == TOK_LPAREN) { ps->lx = save; break; }
-            vol = 1; continue;
+            vol |= Q_VOL; continue;
         }
         break;
     }
@@ -924,9 +935,18 @@ static struct stmt *parse_block(struct parser *ps);
  * ps->fn_pnames. name_out is NULL when no name appeared (legal in
  * prototypes and abstract declarators). */
 static struct type *declarator(struct parser *ps, struct type *base,
-                               const char **name_out, int nested)
+                               const char **name_out, int nested,
+                               int top_in, int *obj_const)
 {
+    /* top_in: whether the type so far is const at its top level; the
+     * stars change that, and what holds when the NAME is read is whether
+     * the declared object is read-only (*obj_const). It is a local, not
+     * ps->q_top, by then: a suffix parsed before a parenthesized
+     * declarator, or an array dimension after the name, parses types of
+     * its own. */
+    ps->q_top = top_in;
     base = parse_stars(ps, base);
+    int top = ps->q_top;
     *name_out = NULL;
     if (cur(ps)->kind == TOK_LPAREN) {
         struct lexer open = ps->lx;
@@ -980,7 +1000,8 @@ static struct type *declarator(struct parser *ps, struct type *base,
             struct lexer after = ps->lx;
             ps->lx = open;
             advance(ps);
-            struct type *t = declarator(ps, outer, name_out, 1);
+            struct type *t = declarator(ps, outer, name_out, 1, top,
+                                        obj_const);
             expect(ps, TOK_RPAREN, "')'");
             ps->lx = after;
             /* Publish them only when the parentheses held a bare name,
@@ -1005,6 +1026,8 @@ static struct type *declarator(struct parser *ps, struct type *base,
     }
     if (cur(ps)->kind == TOK_IDENT) {
         *name_out = cur(ps)->text;
+        if (obj_const)
+            *obj_const = top;
         ps->decl_name_line = cur(ps)->line;
         ps->decl_name_col = cur(ps)->col;
         advance(ps);
@@ -1017,7 +1040,18 @@ static struct type *declarator(struct parser *ps, struct type *base,
 static struct type *parse_declarator(struct parser *ps, struct type *base,
                                      const char **name_out)
 {
-    return declarator(ps, base, name_out, 0);
+    return declarator(ps, base, name_out, 0, 0, NULL);
+}
+
+/* parse_declarator for a declaration whose object may be read-only:
+ * spec_const is its specifiers' const (ps->spec_const, saved right after
+ * parse_type_spec), *obj_const receives whether the object is const. */
+static struct type *parse_declarator_c(struct parser *ps, struct type *base,
+                                       const char **name_out, int spec_const,
+                                       int *obj_const)
+{
+    *obj_const = 0;
+    return declarator(ps, base, name_out, 0, spec_const, obj_const);
 }
 
 /* An abstract type name (a cast target, a sizeof operand): a declarator
@@ -1250,9 +1284,12 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
 
 static struct type *parse_type_spec(struct parser *ps, int allow_body)
 {
-    int vol = 0;
-    struct type *t = parse_type_spec_inner(ps, allow_body, &vol);
-    return (t && vol) ? ty_volatile(t) : t;   /* volatile reaches the type */
+    int q = 0;
+    struct type *t = parse_type_spec_inner(ps, allow_body, &q);
+    /* set AFTER the inner parse, which may hold types of its own (a
+     * struct body, typeof): these are this declaration's specifiers */
+    ps->spec_const = ps->q_top = (q & Q_CONST) != 0;
+    return (t && (q & Q_VOL)) ? ty_volatile(t) : t;   /* volatile reaches the type */
 }
 
 /* `_Alignas(N)` / `_Alignas(type-name)` — a C11 alignment specifier among the
@@ -1322,7 +1359,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         expect(ps, TOK_LPAREN, "'(' after _Atomic");
         struct type *t = parse_type_name(ps, parse_type_spec(ps, 0));
         expect(ps, TOK_RPAREN, "')' after _Atomic(type)");
-        *vol = 1;
+        *vol |= Q_VOL;
         return t;
     }
     /* struct/union/enum first (cannot mix with other specifiers) */
@@ -1367,6 +1404,12 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         }
         if (!td)
             return NULL;
+        for (struct typedefent *te = ps->typedefs; te; te = te->next)
+            if (strcmp(te->name, cur(ps)->text) == 0) {
+                if (te->is_const)        /* typedef const struct cfg cfg_t; */
+                    *vol |= Q_CONST;
+                break;
+            }
         advance(ps);
         return td;
     }
@@ -1393,7 +1436,8 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
         else if (k == TOK_KW_VOID) nvoid++;
         else if (k == TOK_KW_CONST || k == TOK_KW_VOLATILE ||
                  k == TOK_KW_RESTRICT) {
-            if (k == TOK_KW_VOLATILE) *vol = 1;
+            if (k == TOK_KW_VOLATILE) *vol |= Q_VOL;
+            if (k == TOK_KW_CONST) *vol |= Q_CONST;
             advance(ps); continue;
         }
         else if (k == TOK_KW_ALIGNAS) { consume_alignas(ps); continue; }
@@ -1401,7 +1445,7 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             struct lexer save = ps->lx;
             advance(ps);
             if (cur(ps)->kind == TOK_LPAREN) { ps->lx = save; break; }
-            *vol = 1; continue;
+            *vol |= Q_VOL; continue;
         }
         else break;
         any++;
@@ -1551,8 +1595,11 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * pointer -- `int *volatile p` is a volatile OBJECT, read anew at
          * every use. That volatile was dropped, so a loop polling a
          * pointer an interrupt handler advances read it once. */
-        if (skip_quals(ps))
+        int q = skip_quals(ps);
+        if (q & Q_VOL)
             t = ty_volatile(t);
+        if (q & Q_CONST)
+            ps->q_top = 1;
         /* GCC also lets an attribute sit where a qualifier can:
          * `typedef uint64_t __attribute__((may_alias)) word_t;`,
          * `int * __attribute__((unused)) p`. The ones EmbCC ignores everywhere
@@ -1601,6 +1648,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
         if (cur(ps)->kind != TOK_STAR)
             return t;
         t = ty_ptr(t);
+        ps->q_top = 0;          /* a new pointer, unqualified so far */
         advance(ps);
     }
 }
@@ -3371,6 +3419,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         int is_td = t->kind == TOK_KW_TYPEDEF;
         advance(ps);
         struct type *base = parse_type_spec(ps, 1);
+        int spec_const = ps->spec_const;
         if (!base)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after '%s'", is_td ? "typedef" : "extern");
@@ -3382,7 +3431,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         for (;;) {
             if (is_td) {
                 const char *tname;
-                struct type *tt = parse_declarator(ps, base, &tname);
+                int tconst;
+                struct type *tt = parse_declarator_c(ps, base, &tname,
+                                                     spec_const, &tconst);
                 if (!tname)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "typedef needs a name, got %s", tok_describe(cur(ps)));
@@ -3391,7 +3442,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "redefinition of typedef '%s'", tname);
                 struct typedefent *te = xcalloc(1, sizeof *te);
-                te->name = tname; te->ty = tt;
+                te->name = tname; te->ty = tt; te->is_const = tconst;
                 te->next = ps->typedefs; ps->typedefs = te;
             } else {
                 ps->attr_carry_on = 0;
@@ -3619,6 +3670,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * types real code uses here; a same-named tag in two scopes is the
          * documented limitation, not a miscompile. */
         struct type *base = parse_type_spec(ps, 1);
+        int spec_const = ps->spec_const;
         /* No type specifier at all. Implicit int is not C99 and guessing
          * one here would compile a declaration nobody wrote; the old
          * behaviour was worse still, since every use below dereferences
@@ -3638,7 +3690,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         for (;;) {
             s = new_stmt(STMT_DECL, t->line, t->col);
             const char *dname;
-            s->dty = parse_declarator(ps, base, &dname);
+            s->dty = parse_declarator_c(ps, base, &dname, spec_const,
+                                        &s->obj_const);
             /* `int f(int);` in a block declares a function, exactly as
              * `extern int f(int);` does: sema gives the name block scope
              * and the declaration takes no storage. (The declarator stops
@@ -4143,12 +4196,15 @@ static void parse_top(struct parser *ps, struct unit *u,
         if (at_attribute(ps))
             parse_attributes(ps, &tdat);
         struct type *tbase = parse_type_spec(ps, 1);
+        int spec_const = ps->spec_const;
         if (!tbase)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after 'typedef'");
         for (;;) {
             const char *tname;
-            struct type *tt = parse_declarator(ps, tbase, &tname);
+            int tconst;
+            struct type *tt = parse_declarator_c(ps, tbase, &tname,
+                                                 spec_const, &tconst);
             if (!tname)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "typedef needs a name, got %s",
@@ -4180,6 +4236,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             struct typedefent *te = xcalloc(1, sizeof *te);
             te->name = tname;
             te->ty = tt;
+            te->is_const = tconst;
             te->next = ps->typedefs;
             ps->typedefs = te;
             if (cur(ps)->kind == TOK_COMMA) {
@@ -4194,6 +4251,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (cur(ps)->kind == TOK_IDENT)
         reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
     struct type *base = parse_type_spec(ps, 1);
+    int spec_const = ps->spec_const;
     if (!base)
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                    "expected a type before %s", tok_describe(cur(ps)));
@@ -4236,7 +4294,9 @@ static void parse_top(struct parser *ps, struct unit *u,
         for (int first = 1;; first = 0) {
             const char *gname;
             int gline = cur(ps)->line;
-            struct type *gt = parse_declarator(ps, base, &gname);
+            int gconst;
+            struct type *gt = parse_declarator_c(ps, base, &gname,
+                                                 spec_const, &gconst);
             take_carried(ps, &at);
             if (!gname)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -4312,6 +4372,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                             ? at.aligned : ps->alignas_out;
             g->vis = at.vis;
             g->is_tls = is_tls;
+            g->is_const = gconst;
             g->section = at.section;
             g->seq = seq;
             g->def_seq = seq;

@@ -206,6 +206,8 @@ struct stmt {
     const char *name;     /* STMT_DECL */
     struct type *dty;     /* STMT_DECL: declared type */
     int is_static;        /* STMT_DECL: a static local -> its own global */
+    int obj_const;        /* STMT_DECL: the object itself is const (its
+                           * type, arrays aside, is const-qualified) */
     int is_tls;           /* STMT_DECL: `static __thread` -> a TLS global */
     int attr_unused;      /* STMT_DECL: __attribute__((unused)) on it */
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
@@ -271,6 +273,8 @@ struct global {
     int is_tls;
     const char *section;  /* __attribute__((section("name"))), or NULL */
     int has_init;
+    int is_const;         /* the object is const: `const int t[4]`,
+                           * `char *const p` -- not `const char *p` */
     int count_from_init;  /* an unsized array sized by its brace list at
                            * parse time, which sema checks */
     long init;            /* constant initializer value (scalar) */
@@ -289,6 +293,8 @@ struct global {
     int absorbed;         /* sema: merged into an earlier node */
     int used;
     int in_bss;           /* driver: zero-valued -> .bss, else .data */
+    int in_rodata;        /* driver: a const object, placed in .rodata
+                           * after the string literals (ELF) */
     int named;            /* driver: 1 + index into the named sections, or 0 */
     int off;              /* driver: offset inside its section */
     int sym_ndx;          /* driver: symbol index */
@@ -461,6 +467,8 @@ struct tagdef {
 struct typedefent {
     const char *name;
     struct type *ty;
+    int is_const;         /* the type is const at its top level:
+                           * `typedef const struct cfg cfg_t;` */
     struct typedefent *next;
 };
 
