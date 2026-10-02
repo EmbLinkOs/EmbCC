@@ -196,6 +196,8 @@ struct linker {
     unsigned long rom_limit;   /* bytes of flash the image may occupy, 0 = any */
     int elf32;                 /* ELFCLASS32 output, from the inputs */
     int machine;               /* e_machine, one across every input */
+    const char *rel_sym;       /* the symbol the relocation being applied
+                                * names, for need_range's message */
     /* The output's e_flags, from the inputs': RISC-V's EF_RISCV_RVC when
      * any of them has compressed code, AVR's architecture as the first
      * one names it. */
@@ -1505,6 +1507,24 @@ static long long find_pcrel_hi(struct linker *l, struct object *o,
     return 0;
 }
 
+/* A relocated value its field cannot hold. Writing the low bits makes an
+ * address nothing reports -- the field holds SOME address, and the
+ * program goes there -- so it is refused, naming the symbol and the
+ * reach. An x86-64 `mov $sym, %eax` linked above 4GB, or a RISC-V
+ * `lui`/`auipc` pair asked for more than +-2GB, did exactly that. */
+#define I32_MIN (-2147483647LL - 1)
+#define I32_MAX 2147483647LL
+static void need_range(struct linker *l, struct object *o, const char *rel,
+                       long long v, long long lo, long long hi)
+{
+    if (v >= lo && v <= hi)
+        return;
+    die("%s: %s against '%s' needs %lld (0x%llx), and the field holds %lld "
+        "to %lld; the image is laid out beyond what this code can reach",
+        o->name, rel, l->rel_sym ? l->rel_sym : "?", v,
+        (unsigned long long)v, lo, hi);
+}
+
 static void apply_riscv(struct linker *l, struct object *o, unsigned type,
                         unsigned char *loc, Elf64_Addr S, long long A,
                         Elf64_Addr P)
@@ -1512,12 +1532,18 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     long long V = (long long)S + A;
     switch (type) {
     case R_RISCV_32:
+        need_range(l, o, "R_RISCV_32", V, I32_MIN, 0xffffffffLL);
         put32(loc, (unsigned int)V);
         return;
     case R_RISCV_64:
         put64(loc, (unsigned long long)V);
         return;
     case R_RISCV_HI20:
+        /* lui sign-extends at RV64, so the pair reaches a sign-extended
+         * 32-bit address; at RV32 every address is one */
+        if (!l->elf32)
+            need_range(l, o, "R_RISCV_HI20", V, I32_MIN - 0x800,
+                       I32_MAX - 0x800);
         rv_put_u(loc, rv_hi20(V));
         return;
     case R_RISCV_LO12_I:
@@ -1531,6 +1557,9 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
          * has to take the low twelve bits of THIS displacement, not of
          * the address, or the two disagree about the +0x800 rounding
          * and the result is 4096 out for half of all symbols. */
+        if (!l->elf32)
+            need_range(l, o, "R_RISCV_PCREL_HI20", V - (long long)P,
+                       I32_MIN - 0x800, I32_MAX - 0x800);
         note_pcrel_hi(l, P, V - (long long)P);
         rv_put_u(loc, rv_hi20(V - (long long)P));
         return;
@@ -1555,6 +1584,11 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
          * `.L0` label in another section. */
         long long d = V - (long long)P;
         unsigned int keep = get32loc(loc);
+        /* checked here: the encoders take it for a compiler bug */
+        if (type == R_RISCV_BRANCH)
+            need_range(l, o, "R_RISCV_BRANCH", d, -4096, 4094);
+        else
+            need_range(l, o, "R_RISCV_JAL", d, -(1LL << 20), (1LL << 20) - 2);
         if (type == R_RISCV_BRANCH)
             put32(loc, (keep & ~0xfe000f80U) |
                        (unsigned int)rv_enc_b(0, 0, 0, 0, (int)d));
@@ -1566,9 +1600,12 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     case R_RISCV_CALL:
     case R_RISCV_CALL_PLT: {
         long long d = V - (long long)P;
-        if (d < -(1LL << 31) || d >= (1LL << 31))
-            die("%s: a RISC-V call is more than 2GB away; auipc/jalr "
-                "cannot reach it and this linker mints no stubs", o->name);
+        /* At RV32 the pair wraps with the address space, so every
+         * address is in reach. At RV64 it is +-2GB, less the rounding
+         * the low half's sign costs, and this linker mints no stubs. */
+        if (!l->elf32)
+            need_range(l, o, "R_RISCV_CALL", d, I32_MIN - 0x800,
+                       I32_MAX - 0x800);
         rv_put_u(loc, rv_hi20(d));
         rv_put_i(loc + 4, rv_lo12(d));
         return;
@@ -1777,6 +1814,13 @@ static void apply_relocs(struct linker *l, struct object *o)
                 continue;
             int uw;
             Elf64_Addr S = reloc_symval(l, o, symi, &uw);
+            {
+                Elf64_Sym *sy = &o->syms[symi];
+                l->rel_sym = ELF64_ST_TYPE(sy->st_info) == STT_SECTION &&
+                             sy->st_shndx < (unsigned)o->nsh
+                    ? o->shstr + o->shdrs[sy->st_shndx].sh_name
+                    : o->symstr + sy->st_name;
+            }
             /* A debug section has no address; every relocation into
              * one is absolute, so there is no P to compute. */
             Elf64_Addr P = ts ? ts->vaddr + r_offset : 0;
@@ -1878,13 +1922,22 @@ static void apply_relocs(struct linker *l, struct object *o)
                 put64(loc, (unsigned long long)(S + A));
                 break;
             case R_X86_64_32:
+                need_range(l, o, "R_X86_64_32", (long long)S + A, 0,
+                           0xffffffffLL);
+                put32(loc, (unsigned int)(S + A));
+                break;
             case R_X86_64_32S:
+                need_range(l, o, "R_X86_64_32S", (long long)S + A,
+                           I32_MIN, I32_MAX);
                 put32(loc, (unsigned int)(S + A));
                 break;
             case R_X86_64_PC32:
             case R_X86_64_PLT32:
                 /* TARGET_ABI §4a: PLT32 is a plain PC32 in a static
                  * link — no PLT slot is minted. */
+                need_range(l, o, type == R_X86_64_PC32 ? "R_X86_64_PC32"
+                                                       : "R_X86_64_PLT32",
+                           (long long)S + A - (long long)P, I32_MIN, I32_MAX);
                 put32(loc, (unsigned int)(long)((long long)S + A -
                                                 (long long)P));
                 break;
@@ -1908,6 +1961,9 @@ static void apply_relocs(struct linker *l, struct object *o)
                     die("%s: a thread-local relocation, but the image "
                         "has no thread block -- was a __thread object "
                         "linked without its .tdata/.tbss?", o->name);
+                need_range(l, o, "R_X86_64_TPOFF32",
+                           (long long)S + A - (long long)l->tls_start -
+                           (long long)l->tls_size, I32_MIN, I32_MAX);
                 put32(loc, (unsigned int)(long)((long long)S + A -
                                                 (long long)l->tls_start -
                                                 (long long)l->tls_size));
