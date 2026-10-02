@@ -181,11 +181,67 @@ static size_t collect_arg(struct src *s, const char *p, struct tbuf *arg)
 /* Substitutes params/#/## in a function-like macro body. Args are
  * substituted pre-expanded except as # or ## operands (C99 rules,
  * minus the corner cases a compiler earns later). */
+/* C23's __VA_OPT__(content) in a variadic macro's body: the content
+ * when the variable arguments expand to something, nothing when they do
+ * not -- `#define LOG(f, ...) printf(f __VA_OPT__(,) __VA_ARGS__)`. Done
+ * on the body's text before the parameters are substituted, so the
+ * content's own parameters are substituted as any others are. Returns a
+ * new body, or NULL when there is no __VA_OPT__. */
+static char *va_opt_body(struct src *s, struct macro *m, char **exp)
+{
+    if (!m->is_varargs || !strstr(m->body, "__VA_OPT__"))
+        return NULL;
+    const char *va = exp[m->nparams - 1];
+    int empty = 1;
+    for (const char *q = va; *q; q++)
+        if (*q != ' ' && *q != '\t' && *q != '\n')
+            empty = 0;
+    struct tbuf out = { 0, 0, 0 };
+    const char *p = m->body;
+    while (*p) {
+        if (*p == '"' || *p == '\'') {
+            p += copy_literal(p, &out);
+            continue;
+        }
+        if (!strncmp(p, "__VA_OPT__", 10) && !is_idc(p[10]) &&
+            (p == m->body || !is_idc(p[-1]))) {
+            const char *q = p + 10;
+            while (*q == ' ' || *q == '\t')
+                q++;
+            if (*q != '(')
+                cerr(s, "__VA_OPT__ needs its content in parentheses", NULL);
+            int depth = 1;
+            const char *b = ++q;
+            while (*q && depth) {
+                if (*q == '"' || *q == '\'') {
+                    struct tbuf skip = { 0, 0, 0 };
+                    q += copy_literal(q, &skip);
+                    free(skip.p);
+                    continue;
+                }
+                if (*q == '(') depth++;
+                else if (*q == ')') depth--;
+                if (depth)
+                    q++;
+            }
+            if (depth)
+                cerr(s, "__VA_OPT__ is missing its ')'", NULL);
+            if (!empty)
+                tb_putn(&out, b, (size_t)(q - b));
+            p = q + 1;
+            continue;
+        }
+        tb_putc(&out, *p++);
+    }
+    return out.p ? out.p : xstrndup("", 0);
+}
+
 static char *subst_body(struct src *s, struct macro *m,
                         char **raw, char **exp)
 {
     struct tbuf out = { 0, 0, 0 };
-    const char *p = m->body;
+    char *vbody = va_opt_body(s, m, exp);
+    const char *p = vbody ? vbody : m->body;
 
     while (*p) {
         if (*p == '"' || *p == '\'') {
@@ -250,6 +306,7 @@ static char *subst_body(struct src *s, struct macro *m,
         }
         tb_putc(&out, *p++);
     }
+    free(vbody);
     return out.p ? out.p : xstrndup("", 0);
 }
 
