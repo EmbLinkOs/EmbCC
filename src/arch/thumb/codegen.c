@@ -4777,11 +4777,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             shortb[i] = F.fix[i].cond < 0 ? (d >= -2048 && d <= 2046)
                                           : (d >= -256 && d <= 254);
             /* cbz: forward 0..126 from where the cmp stands, since the
-             * two become the one instruction there. */
+             * two become the one instruction there -- and not to the
+             * instruction right after the branch. Measured from the cmp,
+             * a label just past a 4-byte bcond.w is 2 ahead; the cmp and
+             * the branch then shrink to a 2-byte cbz, and the label is
+             * the next instruction, -2 from the pc, which cbz cannot
+             * encode. Code between the two only shrinks, never to
+             * nothing, so one instruction there now is one later. */
             if (F.fix[i].cz_at >= 0) {
                 long dz = (long)F.label_off[F.fix[i].label] -
                           F.fix[i].cz_at - 4;
-                if (dz >= 0 && dz <= 126)
+                long gap = (long)F.label_off[F.fix[i].label] -
+                           (F.fix[i].at + F.fix[i].sz);
+                if (dz >= 0 && dz <= 126 && gap >= 2)
                     shortb[i] = 2;
             }
             any |= shortb[i];

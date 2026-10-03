@@ -130,3 +130,27 @@ if command -v "$OD" >/dev/null 2>&1; then
 fi
 echo "branches on both sides of the 16-bit limits, forward and backward,
 conditional and not, agree with the host at -O2 and -Os ($nrel short)"
+
+# cbz has a LOWER limit too: it branches forward from pc, never to the
+# instruction right after it. A branch around nothing -- `l0 = l0`, a
+# move from a register to itself -- has its label there. The first pass
+# measured it as `cmp; b<c>.w` with the label 2 bytes past the cmp's
+# reach, in range, and the second pass's cbz then could not encode -2:
+# an internal error at -O2 and -Os on both cores (fuzz seed 3085).
+cat > "$out/next.c" <<'EOF'
+volatile double vd = 2.0;
+unsigned f(unsigned l0, double d)
+{
+    if (d == vd)
+        l0 = (unsigned)l0;
+    return l0 * 3u;
+}
+EOF
+for tg in thumbv7m-none-eabi thumbv7em-none-eabi; do
+    for opt in -O1 -O2 -Os; do
+        "$EMBCC" --target=$tg $opt -c "$out/next.c" -o "$out/next.o" || {
+            echo "$tg $opt: a branch to the next instruction does not compile"
+            exit 1; }
+    done
+done
+echo "a conditional branch whose label is the next instruction compiles"
