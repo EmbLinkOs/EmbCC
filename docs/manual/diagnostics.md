@@ -517,6 +517,14 @@ embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on 
 This message is printed immediately, as plain text; `-w` does not
 suppress it and `-Werror` does not make it an error.
 
+#### `#pragma GCC diagnostic`
+
+A file can set warnings for a region of itself with `#pragma GCC
+diagnostic` (or `#pragma clang diagnostic`, or the `_Pragma` operator
+form); see [`#pragma GCC diagnostic`](extensions.md#pragma-gcc-diagnostic).
+A pragma overrides the command line for the warnings it names, from its
+position on.
+
 #### `-Wno-NAME`
 
 Disable the warning `NAME`. A name EmbCC does not have is accepted
@@ -966,7 +974,8 @@ embcc: uninit.c:3:9: note: 'x' is declared here, with no initializer
 Warn about a `static` function that is defined and never called or
 referred to. A non-`static` function is never reported, because another
 translation unit may call it, and neither is `main`. A function declared
-`__attribute__((unused))` or `__attribute__((used))` is exempt. Enabled by
+`__attribute__((unused))` or `__attribute__((used))` is exempt, and so is
+a `static inline` function defined in a header, as with Clang. Enabled by
 `-Wall`. The location has a line but no column.
 
 ```c

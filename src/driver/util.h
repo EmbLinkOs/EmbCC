@@ -58,6 +58,14 @@ void diag_warn_at(const char *file, int line, int col, const char *fmt, ...);
 void diag_warn_opt(const char *file, int line, int col, const char *name,
                    const char *fmt, ...);
 int diag_warning_enabled(const char *name);
+/* #pragma GCC diagnostic, from the preprocessor. `pos` is a position in
+ * its output (bytes written so far), the same scale for both calls:
+ * diag_pragma_line says where a source line starts, diag_pragma_event
+ * records push (0), pop (1), or a warning set ignored (2), warning (3)
+ * or error (4). `name` is without "-W"; one EmbCC does not have is
+ * ignored. */
+void diag_pragma_line(const char *file, int line, long pos);
+void diag_pragma_event(long pos, int kind, const char *name);
 /* Warnings from this file are dropped (a system header), unless
  * -Wsystem-headers. */
 void diag_mark_system(const char *file);

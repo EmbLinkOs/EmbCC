@@ -705,10 +705,121 @@ static struct warn_opt *warn_find(const char *name)
     return NULL;
 }
 
+/* ---- #pragma GCC diagnostic ---------------------------------------------
+ *
+ * A warning is decided by the state at its own place in the preprocessed
+ * stream: the pragmas before it, push and pop applied in order (GCC's
+ * rule). The preprocessor reports each pragma's position in its output
+ * and, once there is one, where each source line starts there; nothing
+ * before the first pragma can be affected, so a file with none costs
+ * nothing. */
+struct pdiag_ev { long pos; int kind; int w; };
+static struct pdiag_ev *g_pev;
+static int g_npev, g_cappev;
+/* a pragma turns this warning on somewhere: the analyses that produce
+ * it must run (diag_warning_enabled) */
+static unsigned char g_pragma_on[sizeof g_warns / sizeof g_warns[0]];
+
+struct pline_file {
+    char *file;
+    int *line;
+    long *pos;
+    int n, cap;
+    struct pline_file *next;
+};
+static struct pline_file *g_plines, *g_plast;
+
+void diag_pragma_line(const char *file, int line, long pos)
+{
+    if (!g_npev || !file)
+        return;
+    struct pline_file *f = g_plast;
+    if (!f || strcmp(f->file, file) != 0) {
+        for (f = g_plines; f && strcmp(f->file, file) != 0; f = f->next)
+            ;
+        if (!f) {
+            f = xcalloc(1, sizeof *f);
+            f->file = xstrndup(file, strlen(file));
+            f->next = g_plines;
+            g_plines = f;
+        }
+        g_plast = f;
+    }
+    if (f->n == f->cap) {
+        f->cap = f->cap ? f->cap * 2 : 256;
+        f->line = xrealloc(f->line, (size_t)f->cap * sizeof *f->line);
+        f->pos = xrealloc(f->pos, (size_t)f->cap * sizeof *f->pos);
+    }
+    f->line[f->n] = line;
+    f->pos[f->n] = pos;
+    f->n++;
+}
+
+void diag_pragma_event(long pos, int kind, const char *name)
+{
+    int w = -1;
+    if (kind >= 2) {
+        struct warn_opt *wo = name ? warn_find(name) : NULL;
+        if (!wo)
+            return;                /* a warning EmbCC does not have */
+        w = (int)(wo - g_warns);
+        if (kind >= 3)
+            g_pragma_on[w] = 1;
+    }
+    if (g_npev == g_cappev) {
+        g_cappev = g_cappev ? g_cappev * 2 : 16;
+        g_pev = xrealloc(g_pev, (size_t)g_cappev * sizeof *g_pev);
+    }
+    g_pev[g_npev].pos = pos;
+    g_pev[g_npev].kind = kind;
+    g_pev[g_npev].w = w;
+    g_npev++;
+}
+
+/* The pragmas' word on warning `w` at file:line: -1 none (the command
+ * line decides), else 2 ignored, 3 warning, 4 error. A file included
+ * twice is taken at its last inclusion. */
+static int pragma_state(const char *file, int line, int w)
+{
+    if (!g_npev || !file || w < 0)
+        return -1;
+    long pos = -1;
+    int best = -1;
+    for (struct pline_file *f = g_plines; f; f = f->next) {
+        if (strcmp(f->file, file) != 0)
+            continue;
+        for (int i = 0; i < f->n; i++)
+            if (f->line[i] <= line && f->line[i] >= best) {
+                best = f->line[i];
+                pos = f->pos[i];
+            }
+    }
+    if (pos < 0)
+        return -1;
+    int cur = -1, sp = 0, cap = 0;
+    int *stack = NULL;
+    for (int i = 0; i < g_npev && g_pev[i].pos <= pos; i++) {
+        const struct pdiag_ev *e = &g_pev[i];
+        if (e->kind == 0) {
+            if (sp == cap) {
+                cap = cap ? cap * 2 : 8;
+                stack = xrealloc(stack, (size_t)cap * sizeof *stack);
+            }
+            stack[sp++] = cur;
+        } else if (e->kind == 1) {
+            cur = sp ? stack[--sp] : -1;   /* an unmatched pop: as given */
+        } else if (e->w == w) {
+            cur = e->kind;
+        }
+    }
+    free(stack);
+    return cur;
+}
+
 int diag_warning_enabled(const char *name)
 {
     struct warn_opt *w = warn_find(name);
-    return w ? w->on : 0;
+    return w ? w->on || g_pragma_on[w - g_warns] : 0;
 }
 
 /* -Wname / -Wno-name. An unknown name is accepted and ignored: a build
@@ -923,14 +1034,18 @@ void diag_warn_opt(const char *file, int line, int col, const char *name,
                    const char *fmt, ...)
 {
     install_flush();
-    if (g_no_warnings || !diag_warning_enabled(name) ||
-        in_system_header(file))
+    struct warn_opt *wo = warn_find(name);
+    int st = wo ? pragma_state(file, line, (int)(wo - g_warns)) : -1;
+    if (g_no_warnings || in_system_header(file) || st == 2 ||
+        (st < 0 && !(wo && wo->on)))
         return;
     va_list ap;
     va_start(ap, fmt);
     char *msg = vfmt(fmt, ap);
     va_end(ap);
-    int err = warn_is_error(name);
+    /* `#pragma GCC diagnostic warning` is a warning even under -Werror:
+     * it is how a file says so */
+    int err = st == 4 ? 1 : st == 3 ? 0 : warn_is_error(name);
     struct diag *d = new_diag(err ? DIAG_ERROR : DIAG_WARNING, file,
                               line, col, msg);
     /* the option as the reader would type it */

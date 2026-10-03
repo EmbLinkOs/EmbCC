@@ -5354,6 +5354,11 @@ void sema_check(struct unit *u)
              * same. Warning anyway would train the reader to ignore
              * the warning. */
             !f->attr_unused && !f->attr_used &&
+            /* A `static inline` in a header is a helper offered to every
+             * unit that includes it, most of which use some of them --
+             * clang does not report one, and GCC no inline one at all. */
+            !(f->def_inline && f->file && u->file &&
+              strcmp(f->file, u->file) != 0) &&
             f->name && strcmp(f->name, "main") != 0)
             diag_warn_opt(f->file ? f->file : u->file, f->line, 0,
                           "unused-function", "unused function '%s'", f->name);
