@@ -33,6 +33,13 @@ struct tm {
     int tm_wday;   /* 0..6, Sunday is 0 */
     int tm_yday;   /* 0..365 */
     int tm_isdst;  /* always 0: no timezone database */
+#if defined(__APPLE__)
+    /* Apple's C library has two more, and its mktime, localtime_r and
+     * gmtime_r fill them in: a 36-byte struct tm on the caller's stack
+     * was overrun by 20 bytes. */
+    long tm_gmtoff;
+    char *tm_zone;
+#endif
 };
 
 struct timespec { time_t tv_sec; long tv_nsec; };

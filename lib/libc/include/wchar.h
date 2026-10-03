@@ -39,12 +39,22 @@ typedef __WINT_TYPE__ wint_t;
 /* A partially decoded multibyte character: the bytes seen so far and
  * how many are still wanted. A zeroed one means "between characters",
  * which is why memset is the documented way to reset it. */
+#if defined(__APPLE__)
+/* Apple's C library's own, which a Darwin program's mbrtowc and the rest
+ * write into: 128 bytes, where this library's is 12 -- so the 12-byte one
+ * was overrun by every conversion that kept state. */
+typedef union {
+    char __mbstate8[128];
+    long long _mbstateL;
+} mbstate_t;
+#else
 typedef struct {
     unsigned int __wch;       /* the code point being assembled */
     unsigned char __want;     /* bytes still needed (0: none pending) */
     unsigned char __have;     /* bytes taken so far */
     unsigned int __lowbound;  /* the smallest value this length may encode */
 } mbstate_t;
+#endif
 
 struct tm;
 
