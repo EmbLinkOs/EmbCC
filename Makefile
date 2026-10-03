@@ -481,6 +481,22 @@ rt-embedded: embcc embar
 	    echo "rt: $(BUILD)/libc/$$t/librt.a"; \
 	done
 
+# lib/libc for the embedded targets, on the bare-metal backend
+# (lib/libc/os/baremetal), beside each one's librt.a. tools/build-libc.sh is
+# the recipe, and tests/golden/libc-embedded.sh runs what it builds on the
+# boards. Not avr: a two-byte atomic is two accesses there, and the library's
+# locks are refused for it. Not riscv32: its long double is binary128 passed
+# by reference, which the backend does not lower yet, so printf does not
+# compile there.
+LIBC_EMBEDDED := thumbv7m-none-eabi thumbv7em-none-eabi \
+                 thumbv7em-none-eabihf thumbv8m.main-none-eabi \
+                 thumbv8m.main-none-eabihf riscv64-unknown-elf
+libc-embedded: embcc embar
+	@for t in $(LIBC_EMBEDDED); do \
+	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \
+	    echo "libc: $(BUILD)/libc/$$t/libc.a"; \
+	done
+
 libc-linux: libc-linux-x86_64 libc-linux-aarch64
 
 # ---- installation ------------------------------------------------------
@@ -511,7 +527,7 @@ LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
 # test that rebuilds the compiler while the rest of the suite is using
 # it, which is the one thing the suite must never do to itself.
 install: all libc libcxx libc-linux libcxx-linux-x86_64 \
-         libcxx-linux-aarch64 rt-embedded install-files
+         libcxx-linux-aarch64 rt-embedded libc-embedded install-files
 
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"

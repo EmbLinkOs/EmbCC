@@ -114,6 +114,7 @@ below builds `embcc` first if it is out of date.
 | `libcxx` | `libcxx-x86_64` and `libcxx-aarch64` | |
 | `libc-linux-all` | `libc-linux` and both Linux C++ runtimes | |
 | `rt-embedded` | `build/libc/TRIPLE/librt.a` for `avr`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` and `riscv32-unknown-elf` | the embedded targets |
+| `libc-embedded` | `build/libc/TRIPLE/libc.a` for `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` and `riscv64-unknown-elf` | the embedded targets, with no operating system |
 | `libc-emblinkos` | `build/libc/emblinkos/libc.a` | EmbLinkOS; needs the EmbLinkOS source tree (`make libc-emblinkos EMBLINKOS=/path/to/EmbLinkOs`, default `$HOME/EmbLinkOs`) |
 
 There is no compiler runtime for `riscv64-unknown-elf`. The libraries and
@@ -173,7 +174,7 @@ PREFIX/lib/embcc/VERSION/
     aarch64-elf/        libc.a, libcxx.a
     x86_64-linux-gnu/   crt1.o, libc.a, librt.a, libcxx.a, link.ld
     aarch64-linux-gnu/  crt1.o, libc.a, librt.a, libcxx.a, link.ld
-    TRIPLE/             librt.a, for each embedded runtime target
+    TRIPLE/             librt.a, and libc.a where libc-embedded builds one
 ```
 
 `VERSION` is the version `embcc --version` prints (`1.0.0-m2.complete`).
@@ -458,6 +459,48 @@ embld: undefined symbol '__muldf3' (referenced by out/m3/prog.o)
 Because the runtime is an archive, only the routines a program calls are
 linked in. For the AVR example above, `rt.o` could be replaced by
 `build/libc/avr/librt.a`.
+
+### The C library on a board
+
+`make libc-embedded` builds EmbCC's C library for the embedded targets,
+on a backend for a part with no operating system
+(`lib/libc/os/baremetal`). It needs nothing from your program to link.
+To see `printf`'s output, define `write`; the library calls it for
+standard output and standard error:
+
+```c
+extern void uart_putc(int c);          /* your board's */
+
+long write(int fd, const void *buf, unsigned long n)
+{
+    const unsigned char *p = buf;
+    for (unsigned long i = 0; i < n; i++)
+        uart_putc(p[i]);
+    return (long)n;
+}
+```
+
+Without it, output is discarded and input is at end of file. `malloc`
+takes memory from the end of the image (`embld`'s `_end`) up to the
+stack, and returns `NULL` rather than reaching it. `exit` stops in a
+loop. There is one thread, no clock and no filesystem: those calls fail
+with `ENOSYS`. A board that has any of them defines the classic function
+(`read`, `sbrk`, `_exit`, `open`, `close`, `lseek`, `isatty`) and the
+library uses it.
+
+Name `libc.a` before `librt.a`, after your objects:
+
+```sh
+make libc-embedded rt-embedded
+./embld -e reset -Ttext 0x0 -Tdata 0x20000000 \
+    out/m3/boot.o out/m3/prog.o \
+    build/libc/thumbv7m-none-eabi/libc.a \
+    build/libc/thumbv7m-none-eabi/librt.a -o out/m3/prog.elf
+```
+
+It is not built for `avr`, where the library's two-byte locks are not
+one access, or for `riscv32-unknown-elf`, whose 128-bit `long double`
+the backend does not lower yet.
 
 ### x86-64 and AArch64 under QEMU
 
