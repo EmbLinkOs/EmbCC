@@ -192,6 +192,14 @@ struct t_fn {
     const char *shortb;
     int nshortb;
     int nfix, capfix;
+    /* Per vreg, when its one definition puts a frame address in it:
+     * fvar the local whose `addr` it is, or fscr the call-scratch offset
+     * a struct-returning call answered with; else both -1. Such a value
+     * is frame base + a constant: when it has no register it is
+     * recomputed where it is read and addressed through directly,
+     * never stored to a slot and loaded back. */
+    int *fvar;
+    long *fscr;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when it did not run (-O0/-O1). */
     int *loc;
@@ -1097,6 +1105,8 @@ static long slot_of(const struct t_fn *F, int v)
     return F->slot[v];
 }
 
+static int faddr(const struct t_fn *F, int v, long *off);
+
 static void rd(struct t_fn *F, int v, int reg)
 {
     if (in_freg(F, v)) {
@@ -1106,6 +1116,11 @@ static void rd(struct t_fn *F, int v, int reg)
     if (in_reg(F, v)) {
         if (F->loc[v] != reg)
             t_mov_reg(F->t, reg, F->loc[v]);
+        return;
+    }
+    long fo;
+    if (faddr(F, v, &fo)) {
+        fb_addr(F, reg, fo);
         return;
     }
     if (!t_ldst_imm(F->t, reg, F->fb, F->slot[v], 4, 0, 0)) {
@@ -1159,7 +1174,8 @@ static void wr(struct t_fn *F, int v, int reg)
             t_mov_reg(F->t, F->loc[v], reg);
         return;
     }
-    if (F->slot[v] < 0)
+    long fo;
+    if (F->slot[v] < 0 || faddr(F, v, &fo))
         return;
     if (!t_ldst_imm(F->t, reg, F->fb, F->slot[v], 4, 0, 1)) {
         /* The offset does not reach: compute the address in a scratch
@@ -1265,6 +1281,74 @@ static void operand_b(struct t_fn *F, const struct ir_ins *i, int reg)
 static void addr_of_slot(struct t_fn *F, int v, int reg)
 {
     fb_addr(F, reg, slot_of(F, v));
+}
+
+/* Is vreg v a frame address that is recomputed rather than kept (see
+ * t_fn.fvar)? Then *off is its offset from the frame base. A value the
+ * allocator put in a register is just that register. */
+static int faddr(const struct t_fn *F, int v, long *off)
+{
+    if (!F->fvar || v < 0 || v >= F->fn->nvregs || in_reg(F, v) ||
+        in_freg(F, v))
+        return 0;
+    if (F->fvar[v] >= 0) {
+        *off = slot_of(F, F->fvar[v]);
+        return 1;
+    }
+    if (F->fscr[v] >= 0) {
+        *off = F->scratch_at + F->fscr[v];
+        return 1;
+    }
+    return 0;
+}
+
+/* rd <- base + off, where base may be the frame base with a frame
+ * offset (which can exceed addw's reach) */
+static void base_plus(struct t_fn *F, int rd, int base, long off)
+{
+    if (base == F->fb)
+        fb_addr(F, rd, off);
+    else
+        t_addw(F->t, rd, base, off);
+}
+
+/* Which temps hold a frame address and nothing else: one definition,
+ * an `addr` of a local or a struct-returning call (whose value is its
+ * result scratch's address), and a four-byte value. Only temps -- a
+ * variable is read and written through its own slot by ldvar and stvar.
+ * Fills F->fvar and F->fscr. */
+static void frame_addr_map(struct t_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int nv = fn->nvregs;
+    F->fvar = NULL;
+    F->fscr = NULL;
+    if (!nv)
+        return;
+    int *fv = xmalloc((size_t)nv * sizeof *fv);
+    long *fs = xmalloc((size_t)nv * sizeof *fs);
+    int *nd = xcalloc((size_t)nv, sizeof *nd);
+    for (int v = 0; v < nv; v++) {
+        fv[v] = -1;
+        fs[v] = -1;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int d = ra_ins_def(i);
+        if (d < 0 || d >= nv)
+            continue;
+        nd[d]++;
+        if (i->op == IR_ADDR && i->a >= 0 && i->a < nv)
+            fv[d] = i->a;
+        else if (i->op == IR_CALL && i->retsize > 0 && i->scratch >= 0)
+            fs[d] = i->scratch;
+    }
+    for (int v = 0; v < nv; v++)
+        if (nd[v] != 1 || v < fn->nvars || (F->wide && F->wide[v]))
+            fv[v] = -1, fs[v] = -1;
+    free(nd);
+    F->fvar = fv;
+    F->fscr = fs;
 }
 
 /* frame base + off, into `rd`: t_add_sp where the frame base is sp. */
@@ -3095,17 +3179,20 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LOAD: {
         /* `ldr rd, [rn]` with rd == rn is legal, so the destination
          * may share the address's register; nothing has to be kept
-         * apart here. */
-        int an = rdr(F, i->a, T_ADDR);
+         * apart here. An address that is a local's is the frame base
+         * plus an offset, used as that. */
+        long fo = 0;
+        int fa = faddr(F, i->a, &fo);
+        int an = fa ? F->fb : rdr(F, i->a, T_ADDR);
         int d;
-        long off = i->memoff;          /* ra_fold_memoff's, or 0 */
+        long off = i->memoff + fo;
         /* A float with an S-register home, read with vldr -- only where
          * the address is KNOWN aligned: vldr faults on a misaligned one
          * where ldr would not, and a packed struct's float member is
          * exactly that. */
         if (in_freg(F, i->dst) && i->size == 4 && i->natural) {
             if (off) {
-                t_addw(t, T_ADDR, an, off);
+                base_plus(F, T_ADDR, an, off);
                 an = T_ADDR;
             }
             t_vldst(t, F->floc[i->dst], an, 0, 0, 0);
@@ -3114,7 +3201,7 @@ static void gen_ins(struct t_fn *F, int n)
         d = wreg(F, i->dst, T_ACC);
         if (i->w > 4) t_refuse(fn, i, "a 64-bit load");
         if (!t_ldst_imm(t, d, an, off, i->size, i->sign, 0)) {
-            t_addw(t, T_ADDR, an, off);
+            base_plus(F, T_ADDR, an, off);
             ldst_must(t, d, T_ADDR, 0, i->size, i->sign, 0);
         }
         wrote(F, i->dst, d);
@@ -3122,11 +3209,17 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_STORE: {
         int an, vr;
+        long off;
         if (i->w > 4) t_refuse(fn, i, "a 64-bit store");
-        an = rdr(F, i->a, T_ADDR);
+        {
+            long fo = 0;
+            int fa = faddr(F, i->a, &fo);
+            an = fa ? F->fb : rdr(F, i->a, T_ADDR);
+            off = i->memoff + fo;
+        }
         if (in_freg(F, i->b) && i->size == 4 && i->natural) {
-            if (i->memoff) {
-                t_addw(t, T_ADDR, an, i->memoff);
+            if (off) {
+                base_plus(F, T_ADDR, an, off);
                 an = T_ADDR;
             }
             t_vldst(t, F->floc[i->b], an, 0, 0, 1);   /* see IR_LOAD */
@@ -3135,8 +3228,8 @@ static void gen_ins(struct t_fn *F, int n)
         /* The value must not land in the register the address is in
          * when that register is the scratch -- rdr would overwrite it. */
         vr = rdr(F, i->b, an == T_ACC ? T_TMP : T_ACC);
-        if (!t_ldst_imm(t, vr, an, i->memoff, i->size, 0, 1)) {
-            t_addw(t, T_ADDR, an, i->memoff);
+        if (!t_ldst_imm(t, vr, an, off, i->size, 0, 1)) {
+            base_plus(F, T_ADDR, an, off);
             ldst_must(t, vr, T_ADDR, 0, i->size, 0, 1);
         }
         return;
@@ -3153,6 +3246,9 @@ static void gen_ins(struct t_fn *F, int n)
     }
 
     case IR_ADDR: {
+        long fo;
+        if (faddr(F, i->dst, &fo))
+            return;                    /* recomputed where it is read */
         int d = wreg(F, i->dst, T_ACC);
         addr_of_slot(F, i->a, d);
         wrote(F, i->dst, d);
@@ -3386,8 +3482,11 @@ static void gen_ins(struct t_fn *F, int n)
                     fb_addr(F, T_ADDR, F->scratch_at + i->scratch);
                     ldst_must(t, T_R0, T_ADDR, 0, i->retsize, 0, 1);
                 }
-                fb_addr(F, T_ACC, F->scratch_at + i->scratch);
-                wr(F, i->dst, T_ACC);
+                long fo;
+                if (!faddr(F, i->dst, &fo)) {   /* else recomputed */
+                    fb_addr(F, T_ACC, F->scratch_at + i->scratch);
+                    wr(F, i->dst, T_ACC);
+                }
             } else if (F->wide[i->dst]) {
                 wr64(F, i->dst, T_R0, T_R1);
             } else {
@@ -3960,6 +4059,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.want_debug = want_debug;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
+    frame_addr_map(&F);
     F.nshr = ra_narrow_hishift(fn);
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
@@ -4599,6 +4699,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.wide);
     free(F.nshr);
     free(F.loc);
+    free(F.fvar);
+    free(F.fscr);
     free(F.floc);
     free(F.lv_in);
     free(F.lv_out);
