@@ -1159,8 +1159,12 @@ static void define_linker_symbol(struct linker *l, const char *name,
 {
     struct symbol *g = sym_intern(l, name);
     /* only define it if something references it (it was interned) and it
-     * is not already defined by a real object — a real definition wins */
-    if (g->defined && g->insec >= 0)
+     * is not already defined by a real object -- a real definition wins,
+     * whether in a section, absolute (`.set _end, ADDR`) or COMMON. The
+     * test was `insec >= 0`, which is a section, so an absolute _end was
+     * replaced by the image's end without a word. The linker's own
+     * definitions have no object, and are updated on each layout pass. */
+    if ((g->defined || g->common) && g->obj)
         return;
     g->defined = 1;
     g->weak = 0;

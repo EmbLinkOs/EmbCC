@@ -178,8 +178,9 @@ memory on the target.
 
 ### Linker-defined symbols
 
-`embld` defines the following symbols. A definition of the same name in
-a section of an input object takes precedence.
+`embld` defines the following symbols. Any definition of the same name
+in an input object takes precedence: one in a section, an absolute one
+(`.set _end, ADDR`), or a common one, which then gets its own storage.
 
 | Symbol | Value |
 |---|---|
