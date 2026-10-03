@@ -653,6 +653,9 @@ static struct warn_opt g_warns[] = {
      * reason: the author of the declaration asked for the warning. */
     { "deprecated-declarations", 1, 0,  0 },
     { "unused-result",        1,  0,    0 },
+    /* On by default in GCC: a pointer that loses its pointee's const
+     * lets the program write a read-only object without a cast. */
+    { "discarded-qualifiers", 1,  0,    0 },
     /* On by default and hard to miss on purpose: a Windows object
      * EmbCC builds today passes arguments the way System V does, and
      * that is wrong against anything EmbCC did not compile. It goes

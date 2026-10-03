@@ -410,6 +410,15 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
     if (ty_is_arith(to) && ty_is_arith(rhs->ty))
         return mk_cast(rhs, to);
     if (to->kind == TY_PTR) {
+        /* `char *s = some_const_char_ptr;` drops the pointee's const, and
+         * a store through s then writes a read-only object: GCC warns
+         * (-Wdiscarded-qualifiers, on by default), and so does this. */
+        if (rhs->ty->kind == TY_PTR && rhs->ty->pointee->is_const &&
+            !to->pointee->is_const)
+            diag_warn_opt(diag_file(u), rhs->line, rhs->col,
+                          "discarded-qualifiers",
+                          "%s discards the 'const' qualifier of %s",
+                          ctx, ty_name(rhs->ty));
         if (rhs->ty->kind == TY_PTR &&
             (ty_equal(rhs->ty, to) || to->pointee->kind == TY_VOID ||
              rhs->ty->pointee->kind == TY_VOID))
@@ -437,6 +446,49 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
     sema_error_at(u, rhs->line, rhs->col, "%s: cannot convert %s to %s",
                ctx, ty_name(rhs->ty), ty_name(to));
     return NULL;
+}
+
+static int is_lvalue(const struct expr *e);
+
+/* A struct or union with a const member, at any depth, which C does
+ * not let be assigned as a whole (C11 6.3.2.1p1). */
+static int has_const_member(const struct type *t)
+{
+    while (t->kind == TY_ARRAY)
+        t = t->pointee;
+    if (t->kind != TY_STRUCT)
+        return 0;
+    for (int i = 0; i < t->nmembers; i++) {
+        const struct type *mt = t->members[i].ty;
+        if (!mt)
+            continue;
+        if (mt->is_const || has_const_member(mt))
+            return 1;
+    }
+    return 0;
+}
+
+/* `what` (an assignment, ++, ...) of e, which must be a MODIFIABLE
+ * lvalue: not const, and not a struct with a const member. const was
+ * not in the type, so every one of these compiled -- and a const object
+ * at file scope is in .rodata, where the store faults (or, in a
+ * Cortex-M's flash, does nothing). */
+static void need_modifiable(struct unit *u, const struct expr *e,
+                            int line, int col, const char *what)
+{
+    const struct type *t = e->undecayed ? e->undecayed : e->ty;
+    if (!t || !(t->is_const || has_const_member(t)))
+        return;
+    const char *nm = e->kind == EXPR_VAR ? e->name
+                   : e->kind == EXPR_MEMBER ? e->name : NULL;
+    if (t->is_const && nm)
+        sema_error_at(u, line, col, "%s of read-only '%s' (its type is %s)",
+                      what, nm, ty_name(t));
+    if (t->is_const)
+        sema_error_at(u, line, col, "%s of a read-only location (its type "
+                      "is %s)", what, ty_name(t));
+    sema_error_at(u, line, col, "%s of %s, which has a const member",
+                  what, ty_name(t));
 }
 
 static int is_lvalue(const struct expr *e)
@@ -1422,6 +1474,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col, "cannot assign to an array");
         if (e->lhs->fref)
             sema_error_at(u, e->line, e->col, "cannot assign to a function");
+        need_modifiable(u, e->lhs, e->line, e->col, "assignment");
         check_expr(u, f, sc, e->rhs);
         if (ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) {
             e->rhs = convert_assign(u, e->rhs, e->lhs->ty, "assignment");
@@ -1434,13 +1487,18 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             need_scalar(u, e->rhs, "assignment");
             e->rhs = convert_assign(u, e->rhs, e->lhs->ty, "assignment");
         }
+        /* The lvalue's own type, qualifiers and all: irgen takes the
+         * store's volatility from it, and an unqualified type here let
+         * DSE delete stores to a volatile object. */
         e->ty = e->lhs->ty;
         break;
     case EXPR_INCDEC: {
         check_expr(u, f, sc, e->lhs);
         if (!is_lvalue(e->lhs) || e->lhs->undecayed || e->lhs->fref)
             sema_error_at(u, e->line, e->col, "++/-- needs an lvalue");
-        e->ty = e->lhs->ty;
+        need_modifiable(u, e->lhs, e->line, e->col,
+                        e->delta > 0 ? "increment" : "decrement");
+        e->ty = e->lhs->ty;      /* qualified: see EXPR_ASSIGN */
         if (ty_is_complex(e->ty) && cx_lowering()) {   /* z += 1 */
             struct expr *one = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
             one->num = 1;
@@ -1665,9 +1723,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         check_expr(u, f, sc, e->lhs);
         struct expr *chosen = NULL, *deflt = NULL;
         /* lvalue conversion drops the operand's own qualifiers */
-        const struct type *ct = e->lhs->ty;
-        if (ct->canon && (ct->is_volatile || ct->is_atomic))
-            ct = ct->canon;
+        const struct type *ct = ty_unqual(e->lhs->ty);
         int nmatch = 0;
         for (int i = 0; i < e->ngen; i++) {
             if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
@@ -1684,9 +1740,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (nmatch > 1)
             sema_error_at(u, e->line, e->col,
                        "more than one _Generic association matches type %s: "
-                       "their types differ only in const, which EmbCC does "
-                       "not yet keep in a type, or are the same type",
-                       ty_name(e->lhs->ty));
+                       "two associations name the same type",
+                       ty_name(ct));
         if (!chosen)
             chosen = deflt;
         if (!chosen)
@@ -1789,6 +1844,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (!is_lvalue(e->lhs) || e->lhs->undecayed || e->lhs->fref)
             sema_error_at(u, e->line, e->col,
                        "compound assignment needs an lvalue");
+        need_modifiable(u, e->lhs, e->line, e->col, "assignment");
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
             *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);
@@ -1901,6 +1957,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * member stays volatile for its own members. */
         if (base->is_volatile && !e->ty->is_volatile)
             e->ty = ty_volatile(e->ty);
+        /* and of a const one const: `cs.a = 1` assigns a const object */
+        if (base->is_const && !e->ty->is_const)
+            e->ty = ty_const(e->ty);
         if (e->ty->kind == TY_ARRAY) {
             e->undecayed = e->ty;
             e->ty = ty_ptr(e->ty->pointee);
@@ -4587,6 +4646,8 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 if (!is_lvalue(a->out[i].expr))
                     sema_error_at(u, s->line, s->col,
                                "an asm output operand must be an lvalue");
+                need_modifiable(u, a->out[i].expr, s->line, s->col,
+                                "an asm output");
                 a->out[i].reg = asm_resolve_reg(u, s, &a->out[i], 1);
             }
             for (int i = 0; i < a->nin; i++) {

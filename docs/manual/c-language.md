@@ -31,9 +31,6 @@ meaning other than the standard's. Check these first when porting code:
 - Struct, union and enum tags, typedef names and enumeration constants
   declared in a block remain visible to the end of the translation unit.
   See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants).
-- `const` is not enforced. See [Const qualification](#const-qualification).
-- `_Generic` does not distinguish types that differ only in `const`. See
-  [Generic selection](#generic-selection).
 - A non-`static` `inline` function is emitted as an external definition
   in every translation unit. See [Inline functions](#inline-functions).
 
@@ -166,7 +163,7 @@ define `__GNUC__` when compiling C.
 | `return;` in a non-`void` function | Not supported | `'g' returns int; 'return' needs a value`. A constraint violation since C99. |
 | `auto` storage class | Supported | `auto int x;` |
 | `register` storage class | Partial | Accepted on block-scope objects. On a parameter or at file scope: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. |
-| `const` | Partial | Not enforced. See [Const qualification](#const-qualification). |
+| `const` | Supported | See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
 | Scopes | Partial | Objects, functions and labels follow the standard's rules. Tags, typedef names and enumeration constants do not. See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants). |
 | Structures, unions, bit-fields | Supported | A structure or union with no members is refused: `a struct/union needs at least one member`. |
@@ -225,7 +222,7 @@ define `__GNUC__` when compiling C.
 | `_Alignas`, `_Alignof`, `<stdalign.h>` | Partial | See [Alignment specifiers](#alignment-specifiers). |
 | `_Noreturn`, `<stdnoreturn.h>` | Supported | The same as `__attribute__((noreturn))`. |
 | `_Static_assert` | Supported | A failed assertion: `static assertion failed: MESSAGE`. A non-constant condition: `_Static_assert needs a constant integer expression`. |
-| `_Generic` | Partial | Types that differ only in `const` are not distinguished. See [Generic selection](#generic-selection). With no matching association and no `default`: `no _Generic association matches type double`. |
+| `_Generic` | Supported | See [Generic selection](#generic-selection). With no matching association and no `default`: `no _Generic association matches type double`. |
 | `_Atomic` qualifier and `_Atomic(T)` specifier | Partial | Integer and pointer types only; sizes depend on the target. See [Atomic types](#atomic-types). |
 | `<stdatomic.h>` | Supported | See [Atomic types](#atomic-types). |
 | `_Thread_local` | Partial | Per-thread storage on the x86-64 and AArch64 ELF, EmbLinkOS and Linux targets; refused on macOS and Windows; one shared instance on Cortex-M, RISC-V and AVR. See [Target-dependent features](#target-dependent-features). At block scope without `static` or `extern`: `a block-scope __thread object must also be static: an automatic one is already private to the call`. |
@@ -445,19 +442,41 @@ int f(void) { int N = 5; int a[N]; return sizeof a; }   /* 20, a VLA of five */
 
 ### Const qualification
 
-`const` is not enforced. None of the following is diagnosed, although
-the standard requires a diagnostic for each:
+`const` is part of a type, at every level: `const char *` and
+`char *const` are different types from `char *` and from each other.
+An lvalue whose type is `const`-qualified, or a structure or union with
+a `const` member at any depth, cannot be modified. Each of these is an
+error, as the standard requires:
 
 ```c
 const int limit = 10;
-void f(void) { limit = 11; }                    /* assignment to a const object */
-void g(const int *p) { *p = 3; }                /* assignment through a pointer to const */
-void h(const char *s) { char *t = s; (void)t; } /* conversion that discards const */
+void f(void) { limit = 11; }        /* assignment of read-only 'limit' */
+void g(const int *p) { *p = 3; }    /* assignment of a read-only location */
+void h(void) { limit++; }           /* increment of read-only 'limit' */
 ```
 
-A `const` object with static storage duration is placed in a read-only
-section (`.rodata`), so a write to it that compiles can fault at run time.
-See also [Diagnostics](diagnostics.md).
+```text
+error: assignment of read-only 'limit' (its type is const int)
+error: assignment of a read-only location (its type is const int)
+error: assignment of struct S, which has a const member
+```
+
+A member of a `const` structure is `const`, and so is an element of a
+`const` array. Initialization is not assignment: a `const` object takes
+its value from its initializer.
+
+Converting a pointer to a `const`-qualified type into a pointer whose
+pointed-to type is not `const`, without a cast, is diagnosed with the
+warning `-Wdiscarded-qualifiers`, which is on by default as in GCC:
+
+```text
+warning: initialization discards the 'const' qualifier of const char * [-Wdiscarded-qualifiers]
+```
+
+A cast removes `const` without a diagnostic. A `const` object with
+static storage duration is placed in a read-only section (`.rodata`).
+`__auto_type` and the value of an expression drop the qualifiers;
+`typeof` keeps them, and `typeof_unqual` drops them.
 
 ### Enumeration constants
 
@@ -572,25 +591,20 @@ controlling expression after lvalue conversion, which removes the
 expression's own qualifiers and `_Atomic`. Types are compared exactly:
 `long` and `long long` are different types even on targets where they
 have the same size, plain `char` is neither `signed char` nor
-`unsigned char`, and `volatile` and `_Atomic` in a pointed-to type
-count.
-
-The comparison differs from the standard's in one way: `const` is
-ignored, at every level. Types that differ only in `const` are the same
-type, so `const int *` and `int *` match each other:
+`unsigned char`, and `const`, `volatile` and `_Atomic` in a pointed-to
+type count:
 
 ```c
-_Generic((const char *)0, char *: 1, default: 2)   /* 1; the standard gives 2 */
-_Generic(1, const int: 1, default: 2)              /* 1; the standard gives 2 */
-_Generic(1L, long long: 1, long: 2)                /* 2, as the standard gives */
+_Generic((const char *)0, char *: 1, default: 2)   /* 2 */
+_Generic(1, const int: 1, default: 2)              /* 2: the operand is an int */
+_Generic(1L, long long: 1, long: 2)                /* 2 */
 ```
 
-A selection in which two associations differ only in `const` is refused,
-and so is one in which two associations have the same type, which the
-standard also forbids:
+A selection in which two associations have the same type is refused, as
+the standard requires:
 
 ```text
-error: more than one _Generic association matches type char *: their types differ only in const, which EmbCC does not yet keep in a type, or are the same type
+error: more than one _Generic association matches type int: two associations name the same type
 ```
 
 ### Atomic types

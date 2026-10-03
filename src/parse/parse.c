@@ -64,8 +64,8 @@ struct parser {
     /* const at the top level of the type built so far: set from the
      * declaration specifiers (spec_const) by parse_type_spec, raised by
      * a const after a `*` and dropped by the `*` itself (parse_stars).
-     * Types do not carry const; this says whether a declared OBJECT is
-     * read-only, which decides where it is placed. */
+     * The type carries const too (ty_const); this says whether a
+     * declared OBJECT is read-only, which decides where it is placed. */
     int spec_const, q_top;
     /* `#pragma pack`: the maximum member alignment a struct defined now
      * gets (0: none), and the values `push` saved */
@@ -1339,6 +1339,8 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
     /* set AFTER the inner parse, which may hold types of its own (a
      * struct body, typeof): these are this declaration's specifiers */
     ps->spec_const = ps->q_top = (q & Q_CONST) != 0;
+    if (t && (q & Q_CONST))
+        t = ty_const(t);      /* so does const: _Generic and sema see it */
     if (t && (q & Q_ATOMIC))
         return ty_atomic(t);
     return (t && (q & Q_VOL)) ? ty_volatile(t) : t;   /* volatile reaches the type */
@@ -1655,8 +1657,10 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
             t = ty_atomic(t);
         else if (q & Q_VOL)
             t = ty_volatile(t);
-        if (q & Q_CONST)
+        if (q & Q_CONST) {
             ps->q_top = 1;
+            t = ty_const(t);
+        }
         /* GCC also lets an attribute sit where a qualifier can:
          * `typedef uint64_t __attribute__((may_alias)) word_t;`,
          * `int * __attribute__((unused)) p`. The ones EmbCC ignores everywhere
@@ -1980,8 +1984,8 @@ static const struct expr *generic_choice(const struct expr *e)
         ct = ty_ptr(ct->pointee);
     else if (ct->kind == TY_FUNC)
         ct = ty_ptr(ct);
-    else if (ct->canon && (ct->is_volatile || ct->is_atomic))
-        ct = ct->canon;
+    else
+        ct = ty_unqual(ct);
     /* The same strict test sema makes: ty_equal lets `long` match
      * `long long`, and a folded _Generic then disagreed with the one
      * sema resolves in the same unit. */
@@ -3998,6 +4002,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * pointer, as they do in any initialization. */
             if (at->kind == TY_ARRAY)
                 at = ty_ptr(at->pointee);
+            /* and the value has no qualifiers: `__auto_type a = x;` with
+             * x a const int declares a plain int, as in GCC */
+            at = ty_unqual(at);
             expect(ps, TOK_SEMI, "';'");
             s = new_stmt(STMT_DECL, aline, 0);
             s->dty = at;

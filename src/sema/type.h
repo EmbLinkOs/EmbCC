@@ -58,6 +58,13 @@ struct type {
                              * or a volatile variable. Ignored by ty_equal. */
     int is_atomic;          /* `_Atomic`: a volatile copy whose reads, writes
                              * and read-modify-writes are atomic (irgen) */
+    int is_const;           /* `const`-qualified: an lvalue of this type may
+                             * not be assigned (sema). A copy, like a
+                             * volatile one. Ignored by ty_equal. */
+    /* A struct's qualified copies, on the original, linked by qnext: a
+     * copy made while the struct was incomplete (`const struct T *p;`
+     * before T's body) is brought up to date when the body arrives. */
+    struct type *qcopies, *qnext;
     struct type *canon;     /* a volatile COPY points at the unqualified original
                              * (structs compare by identity, so equality follows
                              * this); NULL on an original. */
@@ -139,6 +146,11 @@ struct type *ty_ptrdiff_t(void);
  * interned singletons, so this returns a fresh non-interned node — safe because
  * nothing compares types by pointer identity (ty_equal compares fields). */
 struct type *ty_volatile(struct type *t);
+/* A copy of `t` marked `const`, the same way. */
+struct type *ty_const(struct type *t);
+/* `t` without its own qualifiers (const, volatile, _Atomic): the
+ * original a qualified copy points at. A pointee's stay. */
+struct type *ty_unqual(struct type *t);
 struct type *ty_atomic(struct type *t);
 struct type *ty_ptr(struct type *pointee);
 struct type *ty_array(struct type *elem, int count);
