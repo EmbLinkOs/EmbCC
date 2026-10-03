@@ -512,10 +512,15 @@ void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
  * callee defined in this unit AND placed in the same section can be:
  * a function with a section attribute is laid out apart from .text, and
  * the distance between two sections is the linker's to decide. Shared,
- * like cg_resolve_strsites (AVR relocates every call anyway). */
+ * like cg_resolve_strsites (AVR relocates every call anyway).
+ *
+ * Never a WEAK one: the definition here is a default the link may
+ * replace, and a call bound to it now still runs the default after the
+ * program has supplied its own -- libc's bare-metal write() was, and a
+ * program's printf went nowhere. */
 int cg_call_local(const struct func *caller, const struct func *callee)
 {
-    if (!callee->has_defn)
+    if (!callee->has_defn || callee->is_weak)
         return 0;
     const char *a = caller && caller->section ? caller->section : "";
     const char *b = callee->section ? callee->section : "";

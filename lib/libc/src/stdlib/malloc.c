@@ -118,13 +118,21 @@ static int abuts(struct blk *b, struct blk *n)
 
 /* Ask the OS for at least `need` more bytes, in chunks so that a program
  * doing many small allocations does not make one syscall each. The block
- * comes back FREE and on the free list, like any other free block. */
+ * comes back FREE and on the free list, like any other free block.
+ *
+ * A chunk is 64 KB -- more RAM than a Cortex-M3 has, and thirty-two times
+ * an ATmega328P's -- so when the break will not move that far, ask for
+ * just what is needed: on a small part the first malloc(1) used to fail. */
 static struct blk *grow(size_t need)
 {
     size_t chunk = ALIGN_UP(need + HDR);
     if (chunk < 64 * 1024)
         chunk = 64 * 1024;
     void *p = __os_sbrk((long)chunk);
+    if (p == (void *)-1 && chunk > ALIGN_UP(need + HDR)) {
+        chunk = ALIGN_UP(need + HDR);
+        p = __os_sbrk((long)chunk);
+    }
     if (p == (void *)-1) {
         errno = ENOMEM;
         return NULL;

@@ -3595,11 +3595,13 @@ static void infer_attrs(struct ir_unit *iu)
     int nf = iu->nfuncs;
     if (nf <= 0)
         return;
-    /* Start clean and retreat. */
+    /* Start clean and retreat. Not a weak function: the body here is a
+     * default the link may replace with one that does anything. */
     for (int k = 0; k < nf; k++) {
         struct func *f = iu->funcs[k].src;
         if (!f) continue;
-        f->inf_no_write = f->inf_no_read = f->has_defn && !f->absorbed;
+        f->inf_no_write = f->inf_no_read = f->has_defn && !f->absorbed &&
+                                           !f->is_weak;
     }
     for (int round = 0, changed = 1; changed && round < 32; round++) {
         changed = 0;
@@ -9976,6 +9978,8 @@ static void inline_unit(struct ir_unit *iu)
                     why = "callee-computes-in-__int128";
                 else if (in->callee->attr_noinline)
                     why = "callee-is-noinline";
+                else if (in->callee->is_weak)
+                    why = "callee-is-weak";   /* the link may replace it */
                 else
                     ok = inlinable(c, in->callee->attr_always_inline,
                                    sole_static_caller(iu, in->callee),
