@@ -326,6 +326,21 @@ void x86_alu_mem_reg(struct code *c, int op, int base, int disp, int src,
     modrm_base(c, src, base, disp);
 }
 
+/* [base+index*scale] op= src: x86_alu_mem_reg's opcode with the SIB
+ * operand of x86_alu_reg_baseindex -- a read-modify-write whose address
+ * folded into it (rmw_addr_fuse_ok in codegen.c). */
+void x86_alu_mem_reg_bi(struct code *c, int op, int base, int index,
+                        int scale, int src, int w)
+{
+    if (alu_rm_opcode(op) < 0)
+        internal_error("no memory-destination encoding for '%c'", op);
+    int rex = 0x40 | ((w == 8) << 3) | ((src & 8) ? 4 : 0) |
+              ((index & 8) ? 2 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, alu_rm_opcode(op) - 2);
+    modrm_baseindex0(c, src, base, index, scale);
+}
+
 /* group-1 ALU `reg OP= imm` (add/sub/and/or/xor, and cmp via op 'c'): the imm8
  * form (83 /ext ib, sign-extended) when the value fits, else imm32 (81 /ext id).
  * Works for any register including rax — shorter than materialising the constant
@@ -377,6 +392,27 @@ void x86_alu_mem_imm(struct code *c, int op, int base, int disp, long imm,
     } else {
         code_byte(c, 0x81);
         modrm_base(c, ext, base, disp);
+        code_u32(c, (unsigned long)imm);
+    }
+}
+
+/* [base+index*scale] op= imm: x86_alu_mem_imm with the SIB operand. */
+void x86_alu_mem_imm_bi(struct code *c, int op, int base, int index,
+                        int scale, long imm, int w)
+{
+    int ext = alu_group1_ext(op);
+    if (ext < 0)
+        internal_error("no memory-imm encoding for '%c'", op);
+    int rex = 0x40 | ((w == 8) << 3) | ((index & 8) ? 2 : 0) |
+              ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    if (imm >= -128 && imm <= 127) {
+        code_byte(c, 0x83);
+        modrm_baseindex0(c, ext, base, index, scale);
+        code_byte(c, (int)(imm & 0xff));
+    } else {
+        code_byte(c, 0x81);
+        modrm_baseindex0(c, ext, base, index, scale);
         code_u32(c, (unsigned long)imm);
     }
 }

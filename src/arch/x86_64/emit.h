@@ -159,6 +159,10 @@ void x86_alu_reg_baseindex(struct code *c, int op, int dst, int base,
                            int index, int scale, int w);
 void x86_alu_mem_reg(struct code *c, int op, int base, int disp, int src,
                      int w);
+void x86_alu_mem_reg_bi(struct code *c, int op, int base, int index,
+                        int scale, int src, int w);
+void x86_alu_mem_imm_bi(struct code *c, int op, int base, int index,
+                        int scale, long imm, int w);
 void x86_alu_mem_imm(struct code *c, int op, int base, int disp, long imm,
                      int w);
 void x86_cmp_rr(struct code *c, int a, int b, int w);         /* cmp a, b */

@@ -2490,16 +2490,21 @@ static int cmpmem_defer(struct ir_func *fn, int ln, const int *usecnt,
  * the first operand into the destination would overwrite the address
  * before the operation reads it. index < 0: [base + disp].
  *
- * Not when read-modify-write fusion has claimed that operation (rmw_op):
- * it has already dropped the load of the OTHER operand, to be done in
- * memory at the store, and an operation emitted here would read a
- * register nothing loaded. */
+ * Not when read-modify-write fusion has claimed that operation (rmw_op,
+ * or g_rmwf_op when the RMW's address folded too): it has already
+ * dropped the load of the OTHER operand, to be done in memory at the
+ * store, and an operation emitted here would read a register nothing
+ * loaded. */
+static int g_rmwf_ld = -1, g_rmwf_op = -1, g_rmwf_base, g_rmwf_index,
+           g_rmwf_scale, g_rmwf_disp;
+
 static int loadop_fuse(struct code *text, struct ir_func *fn, int ln,
                        const int *usecnt, int base, int index, int scale,
                        int disp, int rmw_op)
 {
     const struct ir_ins *L = &fn->ins[ln], *U;
-    if (!usecnt || ln + 1 >= fn->nins || ln + 1 == rmw_op)
+    if (!usecnt || ln + 1 >= fn->nins || ln + 1 == rmw_op ||
+        ln + 1 == g_rmwf_op)
         return 0;
     U = &fn->ins[ln + 1];
     if (L->op != IR_LOAD || L->vol || L->flt || L->memoff ||
@@ -2701,6 +2706,73 @@ static void rmw_rd_cb(int v, void *ctx)
     struct rmw_rd *r = ctx;
     if (v == r->v)
         r->found = 1;
+}
+
+static int x86_rmw_find(struct ir_func *fn, int n, const int *usecnt);
+
+/* ---- a read-modify-write's address, folded --------------------------------
+ *
+ * An `add base, X` whose result is the ADDRESS of a read-modify-write
+ * folds into the RMW instruction's addressing like any other access, and
+ * the shift scaling its index with it: `stack[sp - 1] += stack[sp]` was
+ * movslq, shl, add and the RMW, and is movslq and `add %x, (%b,%i,4)`.
+ * The address has two uses, the load and the store, where the other
+ * fusions want one; and the source reads the right-hand side BETWEEN
+ * computing the address and loading through it. So the add emits nothing
+ * and leaves the base and the index where they are, and the RMW is
+ * emitted at its operation (g_rmwf) -- provided what runs in between is
+ * one of a few operations that write no memory and touch no fixed
+ * register (a variable shift takes rcx, a divide rax and rdx: the
+ * allocator keeps LIVE values out of those, and to it the base and the
+ * index died at the add), and that none of them is given the base's or
+ * the index's register, which the allocator is free to hand on. The
+ * shift's decision (fold_idx) asks this same question, so the two cannot
+ * disagree about whether the index was ever computed. Returns the RMW's
+ * load, or -1, and its operation through *opp. */
+static int rmw_addr_load(struct ir_func *fn, int n, const int *usecnt,
+                         int ireg, int *opp)
+{
+    const struct ir_ins *i = &fn->ins[n];
+    int breg, ld = -1, op = -1;
+    if (!g_regcache || !usecnt || i->op != IR_ADD || i->flt || i->dst < 0 ||
+        usecnt[i->dst] != 2 || !in_reg(i->a) || g_rmwf_op >= 0 ||
+        getenv("EMBCC_NO_RMW"))
+        return -1;
+    if (!i->imm_b && ireg < 0)
+        return -1;
+    breg = g_loc[i->a];
+    for (int k = n + 1; k + 1 < fn->nins && (ld >= 0 || k <= n + 8); k++) {
+        const struct ir_ins *o = &fn->ins[k];
+        int d;
+        if (k == op) {
+            *opp = op;
+            return ld;
+        }
+        if (ld < 0 && o->op == IR_LOAD && o->a == i->dst) {
+            if (!addr_fold_ok(o) || (op = x86_rmw_find(fn, k, usecnt)) < 0)
+                return -1;
+            ld = k;
+            continue;
+        }
+        switch (o->op) {
+        case IR_LOAD: case IR_LDVAR: case IR_EXT: case IR_MOV:
+        case IR_CONST: case IR_GADDR: case IR_ADDR:
+        case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR:
+            break;
+        case IR_SHL: case IR_SHR:
+            if (o->imm_b)
+                break;
+            return -1;
+        default:
+            return -1;
+        }
+        if (o->flt || o->vol)
+            return -1;
+        d = ra_ins_def(o);
+        if (d >= 0 && in_reg(d) && (g_loc[d] == breg || g_loc[d] == ireg))
+            return -1;
+    }
+    return -1;
 }
 
 static int x86_rmw_find(struct ir_func *fn, int n, const int *usecnt)
@@ -3377,6 +3449,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * one. Optimising builds only, so -O0/-O1 stay byte-identical. */
     int dead = 0, tail_made = 0, rmw_op = -1, rmw_ld = -1;
     g_cmem_ins = NULL;
+    g_rmwf_ld = g_rmwf_op = -1;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (dead) {
@@ -3447,6 +3520,47 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if ((i->op == IR_ADDR || (i->op == IR_ADD && i->imm_b)) &&
             afolded(i->dst))
             continue;
+        /* A read-modify-write whose address folded (rmw_addr_load): the
+         * load emits nothing, the operation is the RMW, with the store. */
+        if (n == g_rmwf_ld)
+            continue;
+        if (n == g_rmwf_op) {
+            const struct ir_ins *o = i;
+            int aop = o->op == IR_ADD ? '+' : o->op == IR_SUB ? '-' :
+                      o->op == IR_AND ? '&' : o->op == IR_OR ? '|' : '^';
+            int t = fn->ins[g_rmwf_ld].dst;
+            int v = o->a == t ? (o->imm_b ? -1 : o->b) : o->a;
+            if (v < 0) {
+                if (g_rmwf_index < 0)
+                    x86_alu_mem_imm(text, aop, g_rmwf_base, g_rmwf_disp,
+                                    o->imm, o->w);
+                else
+                    x86_alu_mem_imm_bi(text, aop, g_rmwf_base, g_rmwf_index,
+                                       g_rmwf_scale, o->imm, o->w);
+            } else {
+                int V = REG_RAX;
+                if (in_reg(v))
+                    V = g_loc[v];
+                else
+                    cg_load(text, sd, v, 8, 0, 8);
+                if (g_rmwf_index < 0)
+                    x86_alu_mem_reg(text, aop, g_rmwf_base, g_rmwf_disp, V,
+                                    o->w);
+                else
+                    x86_alu_mem_reg_bi(text, aop, g_rmwf_base, g_rmwf_index,
+                                       g_rmwf_scale, V, o->w);
+            }
+            cg_reset();
+            g_rmwf_ld = g_rmwf_op = -1;
+            n++;                                /* ...and the store */
+            continue;
+        }
+        /* THE RULE again: a read-modify-write whose address was left
+         * uncomputed and whose operation was never reached would lose
+         * the update. */
+        if (g_rmwf_op >= 0 && n > g_rmwf_op)
+            internal_error("x86: %s: a read-modify-write's folded address "
+                           "was not consumed", fn->name);
         /* Read-modify-write (x86_rmw_find): the load emits nothing... */
         if (n == rmw_op) {
             const struct ir_ins *ld = &fn->ins[rmw_ld];
@@ -3787,6 +3901,23 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 x86_fwrote(text, sd, i->dst, home, i->w);
                 break;
             }
+            /* ...and the address of a read-modify-write (rmw_addr_load):
+             * nothing here, the RMW at its operation. */
+            {
+                int ireg = i->imm_b ? -1 : in_reg(fold_in >= 0 ? fold_in
+                                                               : i->b)
+                           ? g_loc[fold_in >= 0 ? fold_in : i->b] : -1;
+                int op = -1, L = rmw_addr_load(fn, n, usecnt, ireg, &op);
+                if (L >= 0) {
+                    g_rmwf_ld = L;
+                    g_rmwf_op = op;
+                    g_rmwf_base = g_loc[i->a];
+                    g_rmwf_index = ireg;
+                    g_rmwf_scale = fold_in >= 0 ? fold_scale : 1;
+                    g_rmwf_disp = i->imm_b ? (int)i->imm : 0;
+                    break;
+                }
+            }
             /* Address-generation fusion: an `ADD base, X` whose SOLE use is the
              * immediately-following memory access folds into that access's
              * addressing, dropping the address computation. X a constant ->
@@ -4010,11 +4141,14 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 n + 2 < fn->nins) {
                 struct ir_ins *ad = &fn->ins[n + 1];
                 struct ir_ins *mem = &fn->ins[n + 2];
+                int rmw_dummy;
                 if (ad->op == IR_ADD && !ad->flt && !ad->imm_b &&
                     ad->b == i->dst && in_reg(ad->a) && ad->dst >= 0 &&
-                    usecnt[ad->dst] == 1 && addr_fold_ok(mem) &&
-                    ((mem->op == IR_LOAD && mem->a == ad->dst) ||
-                     (mem->op == IR_STORE && mem->a == ad->dst))) {
+                    ((usecnt[ad->dst] == 1 && addr_fold_ok(mem) &&
+                      ((mem->op == IR_LOAD && mem->a == ad->dst) ||
+                       (mem->op == IR_STORE && mem->a == ad->dst))) ||
+                     rmw_addr_load(fn, n + 1, usecnt, g_loc[i->a],
+                                   &rmw_dummy) >= 0)) {
                     fold_idx = i->a;
                     fold_scale = 1 << (int)i->imm;
                     break;              /* emitted as nothing */
