@@ -43,61 +43,36 @@
 
 static void print_version(void)
 {
-    /* Honest: names what exists and what does not. */
-    printf("EmbCC %s — C compiler for EmbLinkOS, target %s\n",
-           EMBCC_VERSION, target_triple_now());
-    printf("Language: C11 on both targets — VLAs, _Complex, long double, "
-           "_Atomic and the atomic builtins, _Generic — plus the GNU "
-           "extensions EmbLinkOS uses (statement expressions, typeof, "
-           "computed goto, attributes, extended inline asm).\n");
-    printf("Targets (--target=): x86_64-elf (System V AMD64, x87 long "
-           "double) and aarch64-elf (AAPCS64, binary128 long double) are "
-           "the freestanding pair; thumbv7m-none-eabi and "
-           "riscv32/riscv64-unknown-elf are the embedded ones (D-015, "
-           "D-016); each architecture also has -emblink, -linux-gnu and "
-           "-apple-darwin, and any unknown --target lists every triple "
-           "(D-014).\n");
-    {
-        const char *dt = target_default_name();
-        printf("With no --target= this compiler emits for %s%s.\n",
-               dt ? dt : "x86_64-elf",
-               dt ? ", the default it was configured with; "
-                    "EMBCC_DEFAULT_TARGET changes that for one shell"
-                  : "; build with `make DEFAULT_TARGET=riscv32-unknown-elf` "
-                    "(or set EMBCC_DEFAULT_TARGET) for a compiler that "
-                    "targets your board by default");
-    }
-    printf("Hosted: Linux builds a STATIC image with no glibc under it "
-           "(lib/libc/os/linux issues syscalls; make libc-linux-x86_64) and "
-           "it has run on a real kernel; macOS emits Mach-O objects the "
-           "system linker accepts. Windows emits COFF objects in the "
-           "Microsoft x64 convention, but nothing has been executed there "
-           "yet and there is no libc for it.\n");
-    printf("C++ (.cc/.cpp/.cxx/.C, or -x c++): in progress toward C++20 "
-           "with libstdc++ (docs/manual/cxx.md) — namespaces, overloading, "
-           "references, classes with constructors and destructors, "
-           "new/delete, lowered through C to either target.\n");
-    printf("Installed or not: EmbCC finds its headers and per-target "
-           "libraries relative to its own binary, so <stdio.h> works with "
-           "no -I from a build tree or an unpacked tarball alike; "
-           "--print-search-dirs says which it found (make install "
-           "PREFIX=...).\n");
-    printf("Also: the preprocessor (-E), -O0..-O2, -g (DWARF), embas "
-           "(NASM-syntax .asm, x86-64) and embld (the linker, x86-64 ELF "
-           "and EMBX). __thread and thread_local work on the ELF targets. "
-           "Not yet: PIE, dynamic linking, embld for aarch64 — "
-           "see docs/internals/status.md.\n");
+    /* What the compiler is and what it targets, in a few lines, in the
+     * layout clang uses -- and only what the tree holds: the long form,
+     * with what is missing, is docs/internals/status.md. */
+    const char *dt = target_default_name();
+    printf("EmbCC %s (a C and C++ compiler for EmbLinkOS and embedded "
+           "boards)\n", EMBCC_VERSION);
+    printf("Target: %s\n", target_triple_now());
+    printf("Default target: %s%s\n", dt ? dt : "x86_64-elf",
+           dt ? " (as configured)" : "");
+    printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
+           "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
+           "ARMv8-M Mainline), RISC-V (RV32, RV64), AVR (ATmega328P)\n");
+    printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
+           "64-bit targets\n");
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32 and AVR images; "
+           "AArch64 and Darwin link with the platform's linker\n");
+    printf("Not yet: position-independent executables, shared libraries, "
+           "dynamic linking. See docs/internals/status.md.\n");
 }
 
 static void print_usage(FILE *out)
 {
     fprintf(out,
-            "usage: embcc [-E] -c FILE.c|FILE.cc|FILE.asm [-o FILE.o]\n"
+            "usage: embcc [-c|-S|-E] FILE.c|FILE.cc|FILE.s|FILE.S|FILE.asm"
+            " [-o FILE]\n"
             "             [--target=TRIPLE] [-x c|c++]\n"
             "             [-std=...] [--emit-c]\n"
             "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
-            "             [-O0|-O1|-O2]\n"
-            "             [-mno-sse] [-mno-red-zone] [-mcmodel=kernel] ...\n"
+            "             [-O0|-O1|-O2|-O3|-Os]\n"
+            "             [-mcpu=CPU] [-mno-sse] [-mno-red-zone] ...\n"
             "       embcc --version | --dump-predef"
             " | --emit-empty-object FILE\n");
 }
@@ -110,7 +85,7 @@ static void print_options(FILE *out)
       "\nwhat to do\n"
       "  -c                     compile to an object\n"
       "  -E                     preprocess only\n"
-      "  -S                     write assembly (.s) instead of an object (x86-64)\n"
+      "  -S                     write assembly (NAME.s) instead of an object\n"
       "  -fsyntax-only          check, write nothing\n"
       "  --emit-c               print the C a C++ unit lowers to\n"
       "  -o FILE                where to write it\n"
@@ -122,6 +97,7 @@ static void print_options(FILE *out)
       "  --print-search-dirs    where EmbCC found its own files\n"
       "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
       "  -include FILE          include it before the file\n"
+      "  -Wp,-D...,-U...,-I...  the same, for the preprocessor\n"
       "  -O0/-O1/-O2/-O3/-Os          optimization level (-Os: no size growth)\n"
       "  -f<pass>, -fno-<pass>        turn one optimizer pass on or off\n"
       "  -fstack-usage                write FILE.su: each function's frame\n"
@@ -129,17 +105,19 @@ static void print_options(FILE *out)
       "  -fno-access-control          do not enforce private/protected\n"
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
-      "                         riscv32/riscv64-unknown-elf, and the -emblink,\n"
-      "                         -linux-gnu, -apple-darwin and -windows-gnu\n"
-      "                         spellings; an unknown one lists them all\n",
+      "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
+      "                         riscv32/riscv64-unknown-elf, avr, and the\n"
+      "                         -emblink, -linux-gnu, -apple-darwin and\n"
+      "                         -windows-gnu spellings; an unknown one lists\n"
+      "                         them all\n",
       out);
     fprintf(out,
       "                         with none, this compiler emits for %s\n",
       target_default_name() ? target_default_name() : "x86_64-elf");
     fputs(
       "  -dumpmachine           print that target\n"
-      "  -O0 -O1 -O2            optimisation\n"
       "  -g                     debug information (DWARF)\n"
+      "  -mcpu=CPU -mfpu=FPU -mfloat-abi=ABI   Cortex-M part and float ABI\n"
       "  -mno-sse -mno-red-zone -mcmodel=kernel -mgeneral-regs-only\n"
       "\ndiagnostics (docs/manual/diagnostics.md)\n"
       "  -fdiagnostics-format=text|json   caret output, or GCC's JSON\n"
@@ -3595,6 +3573,12 @@ int main(int argc, char **argv)
                    strncmp(argv[i], "-mcmodel=", 9) == 0) {
             /* accepted: EmbCC never uses MMX or the red zone, and its default
              * code model already suits the kernel's higher-half link. */
+        } else if (strcmp(argv[i], "-include") == 0) {
+            if (i + 1 == argc) {
+                fprintf(stderr, "embcc: -include needs a file\n");
+                return 1;
+            }
+            cpp_preinclude(argv[++i]);
         } else if (strncmp(argv[i], "-D", 2) == 0 ||
                    strncmp(argv[i], "-U", 2) == 0) {
             int undef = argv[i][1] == 'U';

@@ -63,7 +63,7 @@ the full entry.
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
 | [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-fPASS` `-fno-PASS` `-fremarks` `-fremarks=json` |
 | [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fno-stack-protector` |
-| [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
+| [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-include FILE` `-Wp,ARGS` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
 | [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` |
 | [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-ffunction-sections` `-fdata-sections` |
@@ -245,10 +245,18 @@ each belongs to, then exit with status 0. The list is reproduced under
 
 ### `--version`
 
-Print the version (`EmbCC 1.0.0-m2.complete` for this release), the target
-in effect, and a summary of what the compiler supports, then exit with
-status 0. Recognized anywhere on the command line; a `--target=` on the
-same command line changes the target it reports.
+Print the version, the target in effect, the default target, the
+targets and languages supported, which images `embld` links, and what is
+not supported yet, then exit with status 0. Recognized anywhere on the
+command line; a `--target=` on the same command line changes the target
+it reports:
+
+```text
+EmbCC 1.0.0-m2.complete (a C and C++ compiler for EmbLinkOS and embedded boards)
+Target: x86_64-elf
+Default target: x86_64-elf
+...
+```
 
 ### `-dumpmachine`
 
@@ -844,11 +852,17 @@ once, the last one is used (GCC would list them all).
 Also write an empty rule for each header, so that `make` does not fail
 when a header is deleted.
 
+### `-include FILE`
+
+Read `FILE` as if `#include "FILE"` were the first line of the source
+file. `FILE` is looked for in the working directory first, as GCC does,
+then on the include path. Several are read in the order given. A file
+that cannot be found is refused:
+`cannot find -include file "FILE"`.
+
 ### Preprocessor options that are not accepted
 
-`-include FILE` appears in `embcc --help` but is not accepted by this
-release: it is refused as `embcc: error: unknown argument '-include'`.
-Use `#include` in the source instead. `-imacros`, `-iquote`, `-idirafter`,
+`-imacros`, `-iquote`, `-idirafter`,
 `-iprefix`, `-dM`, `-dD`, `-C`, `-CC`, `-P`, `-H`, `-MG`,
 `-trigraphs` and `-undef` are not accepted either. Use `--dump-predef`
 to list predefined macros.

@@ -874,6 +874,16 @@ static int cxx_char8;
 static struct { const char *text; int undef; } *cmdline_defs;
 static int ncmdline_defs;
 
+static const char **preincludes;
+static int npreincludes;
+
+void cpp_preinclude(const char *file)
+{
+    preincludes = xrealloc(preincludes, (size_t)(npreincludes + 1) *
+                                        sizeof *preincludes);
+    preincludes[npreincludes++] = file;
+}
+
 void cpp_cmdline_define(const char *text, int undef)
 {
     cmdline_defs = xrealloc(cmdline_defs, (size_t)(ncmdline_defs + 1) *
@@ -2350,6 +2360,30 @@ char *cpp_process(const char *path, const char *src,
 
     struct tbuf out = { 0, 0, 0 };
     cpp.base_file = path;
+    /* -include FILE, in order, ahead of the main file: from the working
+     * directory first, as GCC looks for it, then on the include path.
+     * The main file's own line marker follows, so its lines are its. */
+    for (int i = 0; i < npreincludes; i++) {
+        long len;
+        int idx = -1;
+        const char *f = preincludes[i];
+        char *text = read_file_or_null(f, &len);
+        char *ipath = xstrndup(f, strlen(f));
+        for (int d = 0; !text && d < cpp.nincdirs; d++) {
+            size_t n = strlen(cpp.incdirs[d]) + strlen(f) + 2;
+            ipath = xmalloc(n);
+            snprintf(ipath, n, "%s/%s", cpp.incdirs[d], f);
+            text = read_file_or_null(ipath, &len);
+            idx = d;
+        }
+        if (!text)
+            diag_fatal(NULL, 0, "cannot find -include file \"%s\"", f);
+        diag_register_source(ipath, text);
+        record_dep(ipath, idx);
+        cpp.depth++;
+        process_file(&cpp, ipath, text, &out, idx);
+        cpp.depth--;
+    }
     process_file(&cpp, path, src, &out, -1);
     return out.p ? out.p : xstrndup("", 0);
 }
