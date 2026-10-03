@@ -262,23 +262,26 @@ EOF
         exit 1; }
     echo "rv$x weak: an undefined weak reference is 0, a defined one is used"
 
-    # 7. 128 bits, at RV64 only: __int128 and long double (binary128) are
-    #    two doublewords there, kept in sixteen-byte slots and computed
-    #    inline or through lib/rt -- int128.c, fp128.c, softtf.c and
-    #    ldouble.c, which EmbCC builds for this target. RV32 has no
-    #    __int128, and its binary128 is passed by reference and refused.
+    # 7. 128 bits. At RV64 an __int128 and a long double (binary128) are
+    #    two doublewords, kept in sixteen-byte slots and computed inline
+    #    or through lib/rt -- int128.c, fp128.c, softtf.c and ldouble.c,
+    #    which EmbCC builds for both widths. At RV32 there is no __int128,
+    #    and a long double is four words that the psABI passes BY
+    #    REFERENCE and returns through a hidden pointer, helpers included;
+    #    softtf.c computes it there in pairs of 64-bit halves.
     #
     #    Against clang for the same triple, linked against the SAME
-    #    runtime: the program prints every result as bits, so a
+    #    runtime: each program prints every result as bits, so a
     #    difference is in a compiler's own lowering or in how it calls a
-    #    helper. Then the ABI pairs again, for the 2*XLEN rules -- an odd
-    #    register pair, the a7/stack split, a 16-aligned stack slot, a
-    #    variadic even pair. At -O2 as well as -O0: a stack parameter
-    #    the allocator had put in t3 came back as the high word of an
-    #    xor, and only an allocated build could show it.
-    [ "$x" = 64 ] || continue
+    #    helper. Then the ABI pairs, EmbCC and clang calling each other:
+    #    at RV64 the 2*XLEN rules -- an odd register pair, the a7/stack
+    #    split, a 16-aligned stack slot, a variadic even pair; at RV32 the
+    #    pointers, in registers and on the stack, and the hidden result.
+    #    At -O2 as well as -O0: a stack parameter the allocator had put in
+    #    t3 came back as the high word of an xor, and only an allocated
+    #    build could show it.
 
-    #    A long double constant is .rodata that two `ld`s read, and a
+    #    A long double constant is .rodata that `ld`s or `lw`s read, and a
     #    RISC-V part may trap a misaligned one -- QEMU does not, so this
     #    is read off the relocations: after a three-byte string, the
     #    constant is still at a multiple of sixteen.
@@ -286,44 +289,50 @@ EOF
     if command -v "$RE" >/dev/null 2>&1; then
         printf '%s\n' 'const char *s(void) { return "ab"; }' \
             'long double c(long double x) { return x * 1.5L; }' > "$out/al.c"
-        "$EMBCC" --target=$T -O2 -c "$out/al.c" -o "$out/al.o" || {
-            echo "rv64: a long double constant does not compile"; exit 1; }
-        offs=$("$RE" -r "$out/al.o" |
+        "$EMBCC" --target=$T -O2 -c "$out/al.c" -o "$out/al$x.o" || {
+            echo "rv$x: a long double constant does not compile"; exit 1; }
+        offs=$("$RE" -r "$out/al$x.o" |
                awk '/R_RISCV_PCREL_HI20/ && /\.rodata/ { print $NF }')
         [ "$(echo "$offs" | wc -l)" -eq 2 ] || {
-            echo "rv64: expected two .rodata references, got: $offs"; exit 1; }
+            echo "rv$x: expected two .rodata references, got: $offs"; exit 1; }
         for o in $offs; do
             [ $((0x$o % 16)) -eq 0 ] || {
-                echo "rv64: a long double constant at .rodata+0x$o is not" \
+                echo "rv$x: a long double constant at .rodata+0x$o is not" \
                      "16-aligned"; exit 1; }
         done
     fi
     rt128=""
     for f in int64 softfp int128 fp128 softtf ldouble; do
-        "$EMBCC" --target=$T -Os -c "lib/rt/$f.c" -o "$out/rt-$f.o" || {
-            echo "rv64: lib/rt/$f.c does not compile"; exit 1; }
-        rt128="$rt128 $out/rt-$f.o"
+        "$EMBCC" --target=$T -Os -c "lib/rt/$f.c" -o "$out/rt$x-$f.o" || {
+            echo "rv$x: lib/rt/$f.c does not compile"; exit 1; }
+        rt128="$rt128 $out/rt$x-$f.o"
     done
-    src=tests/golden/embedded-wide128.c
-    "$CLANG" -target $T -march=$MARCH -mabi=$MABI -mcmodel=medany \
-             -ffreestanding -O1 -c "$src" -o "$out/w128-ref.o" || {
-        echo "rv64: clang could not compile the 128-bit program"; exit 1; }
-    # shellcheck disable=SC2086
-    run_image w128-ref "$out/w128-ref.o" $rt128 || exit 1
-    for opt in -O0 -O1 -O2 -Os; do
-        "$EMBCC" --target=$T $opt -c "$src" -o "$out/w128$opt.o" || {
-            echo "rv64 $opt: EmbCC could not compile the 128-bit program"
-            exit 1; }
+    against_clang() {       # against_clang PROGRAM TAG WHAT
+        "$CLANG" -target $T -march=$MARCH -mabi=$MABI -mcmodel=medany \
+                 -ffreestanding -O1 -c "$1" -o "$out/$2$x-ref.o" || {
+            echo "rv$x: clang could not compile $1"; return 1; }
         # shellcheck disable=SC2086
-        run_image "w128$opt" "$out/w128$opt.o" $rt128 || exit 1
-        if ! diff -u "$out/w128-ref.txt" "$out/w128$opt.txt" \
-             > "$out/w128$opt.diff"; then
-            echo "rv64: 128-bit values at $opt do not agree with $CLANG:"
-            head -20 "$out/w128$opt.diff"
-            exit 1
-        fi
-    done
-    echo "rv64 128-bit: __int128 and long double agree with $CLANG at four levels"
+        run_image "$2$x-ref" "$out/$2$x-ref.o" $rt128 || return 1
+        for opt in -O0 -O1 -O2 -Os; do
+            "$EMBCC" --target=$T $opt -c "$1" -o "$out/$2$x$opt.o" || {
+                echo "rv$x $opt: EmbCC could not compile $1"; return 1; }
+            # shellcheck disable=SC2086
+            run_image "$2$x$opt" "$out/$2$x$opt.o" $rt128 || return 1
+            if ! diff -u "$out/$2$x-ref.txt" "$out/$2$x$opt.txt" \
+                 > "$out/$2$x$opt.diff"; then
+                echo "rv$x: $3 at $opt do not agree with $CLANG:"
+                head -20 "$out/$2$x$opt.diff"
+                return 1
+            fi
+        done
+        echo "rv$x: $3 agree with $CLANG at four levels"
+    }
+    against_clang tests/golden/embedded-ldouble.c ld "long double values" ||
+        exit 1
+    if [ "$x" = 64 ]; then
+        against_clang tests/golden/embedded-wide128.c w128 \
+            "__int128 and long double values" || exit 1
+    fi
 
     abi128() {              # abi128 CALLER-CC CALLEE-CC OPT TAG
         for side in caller callee; do
@@ -344,19 +353,19 @@ EOF
         # shellcheck disable=SC2086
         run_image "$4" "$out/$4-caller.o" "$out/$4-callee.o" $rt128
     }
-    abi128 clang clang -O1 a128cc || exit 1
+    abi128 clang clang -O1 "a128cc$x" || exit 1
     for opt in -O0 -O2; do
         for pair in "embcc embcc ee" "embcc clang ec" "clang embcc ce"; do
             set -- $pair
-            abi128 "$1" "$2" $opt "a128$3$opt" || exit 1
-            diff -u "$out/a128cc.txt" "$out/a128$3$opt.txt" \
-                > "$out/a128$3$opt.diff" || {
-                echo "rv64: 128-bit arguments, $1 calling $2 at $opt," \
+            abi128 "$1" "$2" $opt "a128$3$x$opt" || exit 1
+            diff -u "$out/a128cc$x.txt" "$out/a128$3$x$opt.txt" \
+                > "$out/a128$3$x$opt.diff" || {
+                echo "rv$x: 128-bit arguments, $1 calling $2 at $opt," \
                      "disagree with clang calling itself:"
-                head -12 "$out/a128$3$opt.diff"; exit 1; }
+                head -12 "$out/a128$3$x$opt.diff"; exit 1; }
         done
     done
-    echo "rv64 abi128: EmbCC and clang pass 128-bit values identically"
+    echo "rv$x abi128: EmbCC and clang pass 128-bit values identically"
 done
 
 [ "$any" = 1 ] || { echo "SKIP: no qemu-system-riscv32/64 found"; exit 0; }
