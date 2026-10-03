@@ -1253,12 +1253,15 @@ static void wr64(struct t_fn *F, int v, int lo, int hi)
     }
 }
 
-/* The second operand of a 64-bit binary operation, immediate or not. */
+/* The second operand of a 64-bit binary operation, immediate or not.
+ * Every caller materialises it before its own first flag-setting
+ * instruction, and no flag survives from the IR instruction before, so
+ * a small half in a low register is a two-byte movs. */
 static void operand_b64(struct t_fn *F, const struct ir_ins *i, int lo, int hi)
 {
     if (i->imm_b) {
-        t_mov_imm(F->t, lo, (long)(i->imm & 0xffffffffL), 0);
-        t_mov_imm(F->t, hi, (long)((i->imm >> 32) & 0xffffffffL), 0);
+        t_mov_imm_dead_flags(F->t, lo, (long)(i->imm & 0xffffffffL));
+        t_mov_imm_dead_flags(F->t, hi, (long)((i->imm >> 32) & 0xffffffffL));
     } else {
         rd64(F, i->b, lo, hi);
     }
@@ -1276,8 +1279,8 @@ static void operand_b64(struct t_fn *F, const struct ir_ins *i, int lo, int hi)
  * asks HERE, and none of them reads i->b directly. */
 static void operand_b(struct t_fn *F, const struct ir_ins *i, int reg)
 {
-    if (i->imm_b)
-        t_mov_imm(F->t, reg, (long)i->imm, 0);
+    if (i->imm_b)     /* flags dead: see operand_b64 */
+        t_mov_imm_dead_flags(F->t, reg, (long)i->imm);
     else
         rd(F, i->b, reg);
 }
@@ -1959,8 +1962,11 @@ static int gen_ins64(struct t_fn *F, int n)
         /* Built where it lives when that is a pair. */
         int lo = in_reg(F, i->dst) ? F->loc[i->dst] : A_LO;
         int hi = in_reg(F, i->dst) ? F->loc[i->dst] + 1 : A_HI;
-        t_mov_imm(t, lo, (long)(i->imm & 0xffffffffL), 0);
-        t_mov_imm(t, hi, (long)((i->imm >> 32) & 0xffffffffL), 0);
+        /* no flag survives from one IR instruction to the next (the
+         * 32-bit IR_CONST says why), so a half that fits eight bits in a
+         * low register is a two-byte movs */
+        t_mov_imm_dead_flags(t, lo, (long)(i->imm & 0xffffffffL));
+        t_mov_imm_dead_flags(t, hi, (long)((i->imm >> 32) & 0xffffffffL));
         wr64(F, i->dst, lo, hi);
         return 1;
     }
@@ -1987,6 +1993,26 @@ static int gen_ins64(struct t_fn *F, int n)
          * low result never lands on a high operand, pairs being whole. */
         int al, ah, bl, bh, dl, dh;
         src64(F, i->a, A_LO, R_TMP, &al, &ah);
+        /* A constant whose two words both encode as immediates is used
+         * as one -- adds/adc, subs/sbc #imm -- instead of being built in
+         * r9/r10 first, which also saves pushing them. Both are checked
+         * before either is emitted: the carry links the pair. */
+        if (i->imm_b) {
+            unsigned long lo = (unsigned long)i->imm & 0xffffffffUL;
+            unsigned long hi = ((unsigned long)i->imm >> 32) & 0xffffffffUL;
+            if (t_imm_ok((long)lo) && t_imm_ok((long)hi)) {
+                int add = i->op == IR_ADD;
+                dst64(F, i->dst, &dl, &dh);
+                if (!t_alu_imm(t, add ? T_OP_ADD : T_OP_SUB, dl, al,
+                               (long)lo, 1) ||
+                    !t_alu_imm(t, add ? T_OP_ADC : T_OP_SBC, dh, ah,
+                               (long)hi, 1))
+                    internal_error("thumb: a 64-bit %s immediate that "
+                                   "encodes did not", add ? "add" : "sub");
+                wr64(F, i->dst, dl, dh);
+                return 1;
+            }
+        }
         srcb64(F, i, &bl, &bh);
         dst64(F, i->dst, &dl, &dh);
         if (i->op == IR_ADD) {
