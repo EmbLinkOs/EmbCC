@@ -190,10 +190,14 @@ Each node's cost is the number of its reads and writes, each weighted by
 the branch.
 
 The simplify phase repeatedly removes a node whose remaining degree is
-less than `NP`. When none remains, it removes the node with the lowest
-`cost / degree^2`. Ties go to the lowest node index, so the result is
-deterministic. `EMBCC_RA_DEGREE_SPILL=1` selects the highest-degree node
-instead, for bisecting a difference to this choice.
+less than the number of registers it may take: `NP`, or for a node that
+crosses a call the number of callee-saved registers in the pool, since
+colouring offers it no others. When none remains, it removes the node
+with the lowest `cost / degree^2`. Ties go to the lowest node index, so
+the result is deterministic. `EMBCC_RA_DEGREE_SPILL=1` selects the
+highest-degree node instead, and `EMBCC_RA_POOL_K=1` counts the whole
+pool for call-crossing nodes too, each for bisecting a difference to
+that choice.
 
 ### 9. Colouring
 
@@ -654,6 +658,7 @@ as unset.
 | `EMBCC_RA_WHY=1` | for each function, print to stderr one line per value left in memory, with the rule that excluded it and how many instructions touch it (`ra-why FUNC RULE COUNT`), and a summary when values were spilled (`ra-spill int\|fp FUNC N of E eligible, pool NP`) |
 | `EMBCC_RA_TRACE=1` | print each function's pool and, for every eligible or allocated vreg, whether it crosses a call, its hint, its register and its live range |
 | `EMBCC_RA_DEGREE_SPILL=1` | choose spill candidates by highest degree instead of lowest cost per degree squared |
+| `EMBCC_RA_POOL_K=1` | treat a call-crossing node as colourable below the whole pool's size, not the callee-saved count |
 
 The rule names `EMBCC_RA_WHY` prints are the IR opcode that made a value
 ineligible, or one of `local-odd-size`, `local-not-scalar`, `16-byte`,

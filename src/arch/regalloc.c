@@ -922,9 +922,23 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * candidate. Colouring then pops the stack
      * (below) — a spill candidate popped early may still find a free colour, so
      * fewer values actually spill than a fixed first-appearance order gives.
-     * Deterministic: ties broken by the lowest eligible index. */
+     * Deterministic: ties broken by the lowest eligible index.
+     *
+     * "Trivially colourable" is a count of the registers the node may
+     * TAKE, and one that crosses a call may take only the callee-saved
+     * ones (colouring below forbids the rest). Counting the whole pool for
+     * it as well -- 20 on RISC-V, 11 of them callee-saved -- passed every
+     * such node as colourable, so the cost above never chose among them:
+     * the stack order did. In a loop of calls that kept the constants and
+     * addresses LICM had hoisted, read once a trip, and spilled the loop's
+     * own counter: `i++; i < 700` was seven instructions through two
+     * stack slots, around two calls a trip. EMBCC_RA_POOL_K=1 counts
+     * the whole pool again, for bisecting a difference to this. */
     int *order = xmalloc((size_t)(E ? E : 1) * sizeof *order);
     int norder = 0;                  /* < E once coalescing absorbed nodes */
+    int NCALLEE = 0, pool_k = getenv("EMBCC_RA_POOL_K") != NULL;
+    for (int k = 0; k < NP; k++)
+        if (callee_saved(POOL[k])) NCALLEE++;
     {
         int *deg = xmalloc((size_t)(E ? E : 1) * sizeof *deg);
         for (int e = 0; e < E; e++) {
@@ -941,7 +955,11 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         for (int cnt = 0; cnt < E; cnt++) {
             int pick = -1;
             for (int e = 0; e < E; e++)          /* a trivially-colourable node */
-                if (!gone[e] && !absorbed[e] && deg[e] < NP) { pick = e; break; }
+                if (!gone[e] && !absorbed[e] &&
+                    deg[e] < (xcross[e] && !pool_k ? NCALLEE : NP)) {
+                    pick = e;
+                    break;
+                }
             if (pick < 0)                        /* else the cheapest to spill */
                 for (int e = 0; e < E; e++)
                     if (!gone[e] && !absorbed[e] &&
