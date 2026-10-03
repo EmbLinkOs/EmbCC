@@ -285,3 +285,22 @@ grep -q "warning: unused variable" "$out/wn.err" || {
 grep -q "names no warning" "$out/wn.err" || {
     echo "FAIL: -Werror=no-such-warning was ignored silently"; exit 1; }
 echo "and -Werror=NAME / -Wno-error=NAME pick out one warning"
+
+# 7. __attribute__((unused)) on a parameter, wherever GCC takes it. After
+# the name it was a syntax error, and in the other two places it was read
+# and dropped, so -Wunused-parameter fired on a parameter marked unused.
+cat > "$out/up.c" <<'SRC'
+int a(__attribute__((unused)) int x) { return 1; }
+int b(int __attribute__((unused)) x) { return 1; }
+int c(int x __attribute__((unused))) { return 1; }
+int d(char *p __attribute__((unused)), int y) { return 1; }
+int e([[maybe_unused]] int x) { return 1; }
+int proto(int x __attribute__((unused)));
+SRC
+"$EMBCC" -Wall -Wextra -c "$out/up.c" -o "$out/up.o" 2> "$out/up.err" || {
+    echo "FAIL: an attribute after a parameter's name was refused:"
+    cat "$out/up.err"; exit 1; }
+[ "$(grep -c 'unused parameter' "$out/up.err")" = 1 ] &&
+grep -q "unused parameter 'y'" "$out/up.err" || {
+    echo "FAIL: -Wunused-parameter should name y alone:"; cat "$out/up.err"; exit 1; }
+echo "and a parameter marked unused, before, inside or after its declarator, is not reported"

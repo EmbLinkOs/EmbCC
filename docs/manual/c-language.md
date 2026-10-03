@@ -252,7 +252,7 @@ C17's value, `201710L`.
 | Attributes `[[...]]` | Partial | Not in every position. See [Attributes](#attributes). |
 | `[[deprecated]]` | Supported | A use warns: `'g' is deprecated [-Wdeprecated-declarations]`. A message argument is accepted and not printed. |
 | `[[fallthrough]]` | Supported | Accepted. EmbCC does not warn about fall-through. |
-| `[[maybe_unused]]` | Partial | Suppresses `-Wunused-variable` and `-Wunused-function` for the declaration. On a parameter it is accepted but does not suppress `-Wunused-parameter`. |
+| `[[maybe_unused]]` | Supported | Suppresses `-Wunused-variable`, `-Wunused-function` and, on a parameter, `-Wunused-parameter` for the declaration. |
 | `[[nodiscard]]` | Supported | Discarding the result warns: `result of 'f' is discarded, and it is declared warn_unused_result [-Wunused-result]`. A message argument is accepted and not printed. |
 | `[[noreturn]]`, `[[_Noreturn]]` | Supported | |
 | `[[unsequenced]]`, `[[reproducible]]` | Not supported | Ignored with a warning: `attribute 'unsequenced' is not one EmbCC knows, and is ignored [-Wattributes]`. |

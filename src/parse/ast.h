@@ -350,6 +350,7 @@ struct func {
     /* where each name was written -- a tool that renames a parameter has
      * to edit the name, not the function's first column */
     int param_lines[MAX_PARAMS], param_cols[MAX_PARAMS];
+    int param_unused[MAX_PARAMS];   /* __attribute__((unused)) on it */
     struct type *param_tys[MAX_PARAMS];
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per

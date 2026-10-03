@@ -4894,6 +4894,7 @@ static void check_func(struct unit *u, struct func *f)
             int pi = scope_add(&sc, f->params[i], f->param_tys[i], NULL);
             sc.vars[pi].is_param = 1;
             sc.vars[pi].line = f->line;
+            sc.vars[pi].unused_ok = f->param_unused[i];
         }
     }
     /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at

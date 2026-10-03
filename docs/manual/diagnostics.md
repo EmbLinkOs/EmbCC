@@ -982,8 +982,10 @@ embcc: func.c:1: warning: unused function 'helper' [-Wunused-function]
 
 Warn about a named parameter that the function body never uses. Enabled
 by `-Wextra`. The location has a line but no column. Writing `(void)name;`
-in the body marks the parameter as used. `__attribute__((unused))` on a
-parameter does not suppress the warning.
+in the body marks the parameter as used, and so does
+`__attribute__((unused))` or `[[maybe_unused]]` on it, written before its
+type, between the type and the name, or after the name
+(`int f(int x __attribute__((unused)))`).
 
 ```c
 int f(int a, int b) { return a; }

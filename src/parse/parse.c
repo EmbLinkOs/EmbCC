@@ -119,6 +119,11 @@ struct parser {
      * one has to edit the name, not the first column of the signature. */
     int decl_name_line, decl_name_col;
     int fn_plines[MAX_PARAMS], fn_pcols[MAX_PARAMS];
+    int fn_punused[MAX_PARAMS]; /* each parameter's __attribute__((unused)) */
+    /* An `unused` met in a declarator's qualifier position
+     * (`int __attribute__((unused)) x`, `char *__attribute__((unused)) p`):
+     * the declaration being parsed takes it. */
+    int stars_unused;
     const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
                            * function declarator inside parentheses
                            * (`(*f(int a))[3]`) */
@@ -1055,6 +1060,7 @@ static struct type *declarator(struct parser *ps, struct type *base,
                     ps->fn_pnames[pi] = pn[pi];
                     ps->fn_plines[pi] = 0;
                     ps->fn_pcols[pi] = 0;
+                    ps->fn_punused[pi] = 0;
                 }
             }
             return t;
@@ -1104,7 +1110,7 @@ static struct type *parse_type_name(struct parser *ps, struct type *base)
 /* Attributes before a parameter's type. Only embcc_sret means anything
  * there — the C++ front-end's mark for the ABI's indirect-result pointer —
  * and only on the first parameter. */
-static int param_sret_attr(struct parser *ps, int index)
+static int param_sret_attr(struct parser *ps, int index, int *unused)
 {
     if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
         return 0;
@@ -1114,6 +1120,7 @@ static int param_sret_attr(struct parser *ps, int index)
     if (a.sret && index != 0)
         parse_error_at(ps, at->line, at->col,
                 "embcc_sret marks the first parameter only");
+    *unused |= a.unused;       /* the list is read here, so is `unused` */
     return a.sret;
 }
 
@@ -1148,14 +1155,23 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                 advance(ps);
                 break;
             }
-            if (param_sret_attr(ps, n))
+            int unused = 0;
+            if (param_sret_attr(ps, n, &unused))
                 sret = 1;
-            /* A parameter may carry attributes too:
-             * `int f([[maybe_unused]] int x)`. */
+            /* A parameter may carry attributes, and GCC takes them in
+             * three places -- before its type, between the type and the
+             * name, and after the name:
+             *   `int f([[maybe_unused]] int x)`,
+             *   `int f(int __attribute__((unused)) x)`,
+             *   `int f(int x __attribute__((unused)))`.
+             * The last was a syntax error, and `unused` was dropped from
+             * all three, so -Wunused-parameter still fired. */
+            ps->stars_unused = 0;
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
+                unused |= pat.unused;
             }
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
@@ -1164,11 +1180,20 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                            tok_describe(cur(ps)));
             const char *pname;
             struct type *t = parse_declarator(ps, spec, &pname);
+            if (at_attribute(ps)) {
+                struct attrs pat = { 0 };
+                parse_attributes(ps, &pat);
+                pcs_not_here(ps, &pat, "a parameter");
+                unused |= pat.unused;
+            }
+            unused |= ps->stars_unused;
+            ps->stars_unused = 0;
             if (names && n < MAX_PARAMS) {
                 names[n] = pname;
                 if (names == ps->fn_pnames) {
                     ps->fn_plines[n] = ps->decl_name_line;
                     ps->fn_pcols[n] = ps->decl_name_col;
+                    ps->fn_punused[n] = unused;
                 }
             }
             if (t->kind == TY_ARRAY)
@@ -1672,6 +1697,8 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
             struct token *at_tok = cur(ps);
             struct attrs a = { 0 };
             parse_attributes(ps, &a);
+            if (a.unused)
+                ps->stars_unused = 1;
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
                 if (a.weak)     ps->attr_slot.weak = 1;
@@ -4918,6 +4945,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                     f->params[i] = ps->fn_pnames[i];
                     f->param_lines[i] = ps->fn_plines[i];
                     f->param_cols[i] = ps->fn_pcols[i];
+                    f->param_unused[i] = ps->fn_punused[i];
                 }
                 f->is_varargs = gt->is_varargs;
                 f->sret_first = gt->sret_first;
@@ -5007,16 +5035,19 @@ static void parse_top(struct parser *ps, struct unit *u,
                 advance(ps);
                 break;
             }
-            if (param_sret_attr(ps, f->nparams))
+            int unused = 0;
+            if (param_sret_attr(ps, f->nparams, &unused))
                 f->sret_first = 1;
             if (cur(ps)->kind == TOK_IDENT)
                 reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
-            /* A parameter may carry attributes too:
-             * `int f([[maybe_unused]] int x)`. */
+            /* Attributes before the type, between it and the name, and
+             * after the name, as in parse_fn_params_named. */
+            ps->stars_unused = 0;
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
+                unused |= pat.unused;
             }
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
@@ -5025,6 +5056,15 @@ static void parse_top(struct parser *ps, struct unit *u,
                            tok_describe(cur(ps)));
             const char *pname;
             struct type *pt = parse_declarator(ps, spec, &pname);
+            if (at_attribute(ps)) {
+                struct attrs pat = { 0 };
+                parse_attributes(ps, &pat);
+                pcs_not_here(ps, &pat, "a parameter");
+                unused |= pat.unused;
+            }
+            unused |= ps->stars_unused;
+            ps->stars_unused = 0;
+            f->param_unused[f->nparams] = unused;
             if (pt->kind == TY_ARRAY)
                 pt = ty_ptr(pt->pointee); /* C's adjustment */
             if (pt->kind == TY_FUNC)
