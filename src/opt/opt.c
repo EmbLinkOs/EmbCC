@@ -9100,6 +9100,13 @@ static int pass_punfwd(struct ir_func *fn)
         if ((i->op == IR_LDVAR && i->a >= 0 && i->a < nvars) ||
             (i->op == IR_STVAR && i->dst >= 0 && i->dst < nvars)) {
             bad[i->op == IR_LDVAR ? i->a : i->dst] = 1;
+            /* ...and an address STORED in a variable has escaped: it can
+             * be read back past a join, where nothing here follows it,
+             * and the local was declared unread and its stores dropped
+             * (`p = &s; if (c) ...; return p->x;` read garbage at -O1). */
+            if (i->op == IR_STVAR && i->a >= 0 && i->a < nv &&
+                base[i->a] >= 0)
+                bad[base[i->a]] = 1;
             continue;
         }
         int *ops[4], nops = 0;
