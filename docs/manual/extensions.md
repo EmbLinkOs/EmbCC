@@ -388,6 +388,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`-Wdeprecated-declarations`](diagnostics.md#-wdeprecated-declarations), on by default. The message text is not printed |
 | `embcc_sret` | EmbCC's own. On the first parameter, before its type, it marks that parameter as the address of the returned aggregate, passed where the target's ABI passes it. EmbCC's C++ lowering writes it; hand-written C has no need of it |
 | `format(archetype, string-index, first-to-check)` | Calls are checked under [`-Wformat`](diagnostics.md#-wformat), which `-Wall` enables. The archetypes checked are `printf`, `gnu_printf`, `scanf` and `gnu_scanf`; any other (`strftime`, `strfmon`) is accepted and not checked. Both indexes are 1-based; `first-to-check` is 0 for a function that takes a `va_list` |
+| `gnu_inline` | GNU89 `inline` semantics for this function: a definition that says `extern inline` is used only for inlining and never emitted, and one that says `inline` alone is an external definition. See [Inline functions](c-language.md#inline-functions) |
 | `noinline` | The function is never inlined |
 | `noreturn`, `_Noreturn`, `[[noreturn]]` | The function does not return. A call to it ends a path for EmbCC's check that every path through a non-`void` function returns a value ([E0008](diagnostics.md#diagnostic-ids)). EmbCC does not check that the function itself never returns |
 | `nothrow` | The function throws no C++ exception: a call to it inside a C++ `try` region gets no landing pad |
@@ -579,7 +580,6 @@ records for each.
 | `designated_init` | It asks for a warning; the layout is unaffected |
 | `fallthrough` | EmbCC does not warn about a `case` falling through |
 | `flatten` | EmbCC's inliner works from the call site |
-| `gnu_inline` | EmbCC emits an `inline` function as an ordinary function |
 | `leaf` | Nothing in EmbCC reasons across a call this way |
 | `malloc` | It says the result aliases nothing, which only an alias analysis could use |
 | `may_alias` | EmbCC does no type-based alias analysis |

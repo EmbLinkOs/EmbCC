@@ -5020,6 +5020,47 @@ static void check_func(struct unit *u, struct func *f)
     g_file = savefile;
 }
 
+static int g_gnu89_inline;
+
+void sema_set_gnu89_inline(int on) { g_gnu89_inline = on; }
+
+/* One declaration's part in whether the definition is an inline
+ * definition (C11 6.7.4p7; see struct func). */
+static void note_inline_decl(struct func *canon, const struct func *f)
+{
+    canon->inl_ext |= !f->decl_inline || f->decl_extern;
+    canon->attr_gnu_inline |= f->attr_gnu_inline;
+    if (f->defined) {
+        canon->def_inline = f->decl_inline;
+        canon->def_extern = f->decl_extern;
+    }
+}
+
+/* Which definitions are inline definitions: never emitted, because
+ * another unit holds the external definition. C99: every file-scope
+ * declaration says `inline` and none says `extern`. GNU89, or the
+ * gnu_inline attribute: the definition says `extern inline`. A function
+ * something outside the C code reaches -- main, a constructor, one that
+ * is `used`, an alias's target -- is always emitted. */
+static void decide_inline_only(struct unit *u)
+{
+    for (struct func *f = u->funcs; f; f = f->next) {
+        f->inline_only = 0;
+        if (f->absorbed || !f->has_defn || f->is_static ||
+            !strcmp(f->name, "main") || f->attr_used || f->is_ctor ||
+            f->is_dtor)
+            continue;
+        int gnu = g_gnu89_inline || f->attr_gnu_inline;
+        int only = gnu ? f->def_inline && f->def_extern : !f->inl_ext;
+        if (!only)
+            continue;
+        for (struct func *a = u->funcs; a && only; a = a->next)
+            if (a->alias_of && !strcmp(a->alias_of, f->name))
+                only = 0;
+        f->inline_only = only;
+    }
+}
+
 /* Merge every later declaration of a name into its first (canonical)
  * node. C's static rule kept exactly: static-then-non-static keeps
  * internal linkage, non-static-then-static is an error (gcc agrees). */
@@ -5031,8 +5072,10 @@ static void merge_decls(struct unit *u)
         struct func *canon = find_func(u, f->name);
         if (canon == f) {
             f->has_defn = f->defined;
+            note_inline_decl(f, f);
             continue;
         }
+        note_inline_decl(canon, f);
         int match = canon->nparams == f->nparams &&
                     canon->is_varargs == f->is_varargs &&
                     ty_equal(canon->ret_ty, f->ret_ty);
@@ -5282,6 +5325,7 @@ void sema_check(struct unit *u)
 {
     apply_pragma_weak(u);
     merge_decls(u);
+    decide_inline_only(u);
     check_aliases(u);
     merge_globals(u);
     check_econst_names(u);

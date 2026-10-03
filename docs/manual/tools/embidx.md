@@ -285,11 +285,6 @@ problem was reported, and 0 otherwise.
   that uses the declaration sorts before the unit that defines it (byte
   order of the paths). With `a_def.c` defining `long shared(long)` and
   `z_use.c` declaring `int shared(int)`, no conflict is reported.
-- A non-`static` C `inline` function defined in a header is reported
-  as `defined twice` for each pair of units that include it. This is
-  accurate: EmbCC emits it as an external definition in every unit (see
-  [Inline functions](../c-language.md#inline-functions)), and the link
-  fails.
 
 ### `who`
 

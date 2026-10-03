@@ -31,8 +31,6 @@ meaning other than the standard's. Check these first when porting code:
 - Struct, union and enum tags, typedef names and enumeration constants
   declared in a block remain visible to the end of the translation unit.
   See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants).
-- A non-`static` `inline` function is emitted as an external definition
-  in every translation unit. See [Inline functions](#inline-functions).
 
 EmbCC is also stricter than the standard in two places that commonly
 affect existing code: a non-`void` function other than `main` that can
@@ -191,7 +189,7 @@ define `__GNUC__` when compiling C.
 | Declarations mixed with statements; declarations in `for` | Supported | |
 | `long long`, `unsigned long long`, `LL` and `ULL` suffixes | Supported | |
 | `_Bool` and `<stdbool.h>` | Supported | |
-| `inline` | Partial | See [Inline functions](#inline-functions). |
+| `inline` | Yes | See [Inline functions](#inline-functions). |
 | `restrict` | Supported | Accepted. EmbCC does not use it for optimization. |
 | Variable length arrays | Partial | See [Variable length arrays](#variable-length-arrays). Not available on AVR. |
 | Variably modified types: pointers to VLAs, VLA parameters `int a[n][m]`, `[*]` | Supported | |
@@ -524,17 +522,42 @@ second is a constant without an initializer that follows `LLONG_MAX`
 
 ### Inline functions
 
-`inline` does not change linkage. A function defined `inline` or
-`extern inline` without `static` is emitted as an ordinary external
-definition in every translation unit that contains it, whether or not
-that unit calls it. Under the standard, a plain `inline` definition
-provides no external definition.
+EmbCC follows C11 6.7.4p7. When every file-scope declaration of a
+function with external linkage in a translation unit says `inline` and
+none says `extern`, its definition there is an *inline definition*:
 
-As a result, a header that defines a non-`static` `inline` function and
-is included by two translation units produces a duplicate definition of
-that symbol when the objects are linked. Define such functions
-`static inline`. Whether a call is inlined is decided by the optimizer;
-see [Optimization](optimization.md).
+- It provides no external definition. No symbol is defined for it in
+  the object.
+- The optimizer may inline its calls. A call that is not inlined, every
+  call at `-O0`, and any use of its address refer to the external
+  definition, which is an undefined symbol in this object.
+- Exactly one translation unit of the program must provide the external
+  definition. The usual way is a declaration with `extern`, or without
+  `inline`, in one `.c` file that includes the header:
+
+```c
+/* twice.h */
+inline int twice(int x) { return 2 * x; }
+
+/* twice.c -- the one external definition */
+#include "twice.h"
+extern inline int twice(int);
+```
+
+A `static inline` function is unaffected: it has internal linkage, and
+each unit that uses it has its own copy. A function that is `main`, a
+constructor or destructor, `__attribute__((used))`, or the target of an
+`alias` is always emitted.
+
+GNU89 semantics apply instead with `-fgnu89-inline`, with `-std=c89`,
+`-std=c90`, `-std=iso9899:1990`, `-std=gnu89` or `-std=gnu90`, and for
+a function with `__attribute__((gnu_inline))`. Under them a definition
+that says `inline` alone is an external definition, and one that says
+`extern inline` is used only for inlining and never emitted. See
+[`-fgnu89-inline`](invoking.md#-fgnu89-inline).
+
+Whether a call is inlined is decided by the optimizer; see
+[Optimization](optimization.md).
 
 ### Variable length arrays
 

@@ -293,8 +293,8 @@ void iface_emit(struct outbuf *b, struct unit *u)
 
     /* what this unit DEFINES */
     for (const struct func *f = u->funcs; f; f = f->next) {
-        if (f->absorbed || !f->has_defn)
-            continue;
+        if (f->absorbed || !f->has_defn || f->inline_only)
+            continue;                    /* an inline definition is not one */
         struct outbuf k = { NULL, 0, 0 };
         usr_func(&k, f);
         /* A weak definition (__attribute__((weak)), and every C++ inline
@@ -318,7 +318,7 @@ void iface_emit(struct outbuf *b, struct unit *u)
      * compiled against. A build system re-runs this unit when one of these
      * hashes changes, and only then. */
     for (const struct func *f = u->funcs; f; f = f->next) {
-        if (f->absorbed || f->has_defn || !f->used)
+        if (f->absorbed || (f->has_defn && !f->inline_only) || !f->used)
             continue;
         struct outbuf k = { NULL, 0, 0 };
         usr_func(&k, f);
