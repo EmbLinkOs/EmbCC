@@ -348,8 +348,11 @@ Instruction selection:
   multiply by a constant is the three-operand `imul`.
 - **Read-modify-write.** A load, an operation and a store back to the
   same address become one instruction with a memory destination
-  (`x86_rmw_find`; `EMBCC_NO_RMW` turns it off). A constant stored to
-  memory is one `mov $imm, mem`.
+  (`x86_rmw_find`; `EMBCC_NO_RMW` turns it off). Its address folds in
+  too (`rmw_addr_load`): `s[sp - 1] += s[sp]` is one
+  `add %x, (%base,%index,4)`, the add and the shift emitting nothing and
+  the base and the index held, not combined, across the loads of the
+  right-hand side. A constant stored to memory is one `mov $imm, mem`.
 - **`IR_SELECT`** is `test` of the condition at its own width (`size`,
   4 or 8) and `cmovne`.
 - **Division** puts the dividend in rax, extends it into rdx (`cqo`,
