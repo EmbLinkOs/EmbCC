@@ -214,4 +214,22 @@ awk '/^func @bits .*\{/,/^}/' "$out/fwd.ir" | grep -qE 'load|store|memzero' && {
     cat "$out/fwd.ir"; exit 1; }
 echo "a stored value is not loaded back, and a punning union leaves no memory"
 
+# 9. A bottom-tested loop's back-edge copies run before its branch, which
+#    then goes to the header: no block of copies and a jump on every
+#    iteration (tests/exec/loop-latch-copies.c holds the execution side).
+cat > "$out/latch.c" <<'EOF'
+int fib(int n)
+{
+    int a = 0, b = 1;
+    do { int t = a + b; a = b; b = t; } while (--n);
+    return a;
+}
+EOF
+"$EMBCC" inspect ir --target="$TARGET" -O2 "$out/latch.c" > "$out/latch.ir" \
+    2>/dev/null || { echo "FAIL: could not dump the latch IR"; exit 1; }
+awk '/^func @fib .*\{/,/^}/' "$out/latch.ir" | grep -q 'jmp' && {
+    echo "FAIL: the loop's back edge is still a block of copies and a jump:"
+    cat "$out/latch.ir"; exit 1; }
+echo "a bottom-tested loop branches straight back to its header"
+
 echo "optimizer acceptance passed"
