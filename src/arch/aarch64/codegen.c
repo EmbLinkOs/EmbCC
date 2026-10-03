@@ -2301,6 +2301,40 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     wrote(t, sd, i->dst, d);
                     break;
                 }
+                /* A product whose one reader is the add or subtract right
+                 * after it: `madd d, a, b, c` is c + a*b and `msub` is
+                 * c - a*b, one instruction for the two -- the inner step
+                 * of every multiply-accumulate loop. Both read all three
+                 * sources before writing, so d may be any of them; and
+                 * `wr` is safe for that reason. `a*b - c` stays two. */
+                if ((i->w == 4 || i->w == 8) && i->dst >= 0 &&
+                    usecnt[i->dst] == 1 && n + 1 < fn->nins &&
+                    !(g_a64_wide && g_a64_wide[i->dst]) &&
+                    !getenv("EMBCC_NO_MLA")) {
+                    struct ir_ins *nx = &fn->ins[n + 1];
+                    int c = -1;
+                    if ((nx->op == IR_ADD || nx->op == IR_SUB) &&
+                        !nx->imm_b && !nx->flt && nx->w == i->w &&
+                        nx->dst >= 0 &&
+                        !(g_a64_wide && g_a64_wide[nx->dst])) {
+                        if (nx->b == i->dst && nx->a != i->dst)
+                            c = nx->a;              /* c + p, c - p */
+                        else if (nx->op == IR_ADD && nx->a == i->dst &&
+                                 nx->b != i->dst)
+                            c = nx->b;              /* p + c */
+                    }
+                    if (c >= 0 && !(g_a64_wide && g_a64_wide[c])) {
+                        int ra = rd(t, sd, i->a, A64_ACC);
+                        int rb = rd_b(t, sd, i);
+                        int rc = rd(t, sd, c, A64_ADDR);
+                        int d = wr(nx->dst, A64_ACC);
+                        if (nx->op == IR_ADD) a64_madd(t, d, ra, rb, rc, i->w);
+                        else                  a64_msub(t, d, ra, rb, rc, i->w);
+                        wrote(t, sd, nx->dst, d);
+                        n++;
+                        break;
+                    }
+                }
                 int ra = rd(t, sd, i->a, A64_ACC), rb = rd_b(t, sd, i);
                 int d = wr(i->dst, A64_ACC);
                 a64_mul(t, d, ra, rb, i->w);

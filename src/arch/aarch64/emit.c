@@ -376,6 +376,13 @@ void a64_mul(struct code *c, int rd, int rn, int rm, int w)
                 ((unsigned long)rn << 5) | (unsigned long)rd);
 }
 
+void a64_madd(struct code *c, int rd, int rn, int rm, int ra, int w)
+{
+    a64_word(c, 0x1B000000UL | sf(w) | ((unsigned long)rm << 16) |
+                ((unsigned long)ra << 10) | ((unsigned long)rn << 5) |
+                (unsigned long)rd);
+}
+
 void a64_msub(struct code *c, int rd, int rn, int rm, int ra, int w)
 {
     a64_word(c, 0x1B008000UL | sf(w) | ((unsigned long)rm << 16) |
