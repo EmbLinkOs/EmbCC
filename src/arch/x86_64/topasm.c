@@ -19,13 +19,15 @@
 #include <string.h>
 
 #include "../../driver/util.h"
+#include "../target.h"
 
 /* Every instruction has a fixed size, so a straight two-pass assembler
  * works: pass 1 fixes each label's offset, pass 2 emits and resolves the
  * jumps. Jumps are always E9 rel32 (5 bytes) — no rel8/rel32 size choice
  * to iterate, and functionally identical. */
 
-struct line { char *text; int off; };
+/* pad: the bytes an alignment directive on this line inserts. */
+struct line { char *text; int off; int pad; };
 
 /* 64-bit register name -> encoding (0-15). The table type is file scope:
  * EmbCC's own subset (which compiles this file) has no block-scope type
@@ -104,6 +106,7 @@ static struct line *split(const char *tmpl, int *nout)
             }
             v[n].text = c;
             v[n].off = 0;
+            v[n].pad = 0;
             n++;
         }
         p = *e ? e + 1 : e;
@@ -149,11 +152,18 @@ static int insn_len(struct topasm *ta, const char *l, int mnemonics_ok)
          * with a global function whose body was zero bytes long. The
          * unwinder's register-capture stub was empty and the first call
          * to it jumped into whatever followed. */
+        /* Each of these is acted on in topasm_assemble, or changes
+         * nothing in the bytes or the symbols: .size, the debug and
+         * CFI directives. .data, .rodata, .bss, another section, and
+         * .hidden were on this list too and did nothing -- data meant
+         * to be written went into .text, and a weak or typed symbol
+         * came out global and untyped -- so they are refused there by
+         * name, or carried out. */
         static const char *const ok[] = {
-            ".text", ".data", ".rodata", ".bss", ".section",
-            ".global", ".globl", ".local", ".weak", ".hidden",
+            ".text", ".section", ".pushsection", ".popsection",
+            ".previous", ".global", ".globl", ".local", ".weak",
             ".type", ".size", ".align", ".balign", ".p2align",
-            ".pushsection", ".popsection", ".previous", ".file", ".loc",
+            ".thumb_func", ".file", ".loc",
             ".cfi_startproc", ".cfi_endproc", ".cfi_def_cfa",
             ".cfi_def_cfa_offset", ".cfi_def_cfa_register",
             ".cfi_offset", ".cfi_restore", ".cfi_sections", NULL
@@ -203,7 +213,103 @@ static void push_sym(struct topasm *ta, const char *name, int off, int glob)
     ta->syms[ta->nsyms].name = name;
     ta->syms[ta->nsyms].off = off;
     ta->syms[ta->nsyms].is_global = glob;
+    ta->syms[ta->nsyms].is_weak = 0;
+    ta->syms[ta->nsyms].type = ASMSYM_UNTYPED;
     ta->nsyms++;
+}
+
+/* The directive's word, and whether the line is it. */
+static int is_dir(const char *l, const char *d)
+{
+    size_t n = strlen(d);
+    return strncmp(l, d, n) == 0 && (l[n] == 0 || l[n] == ' ');
+}
+
+/* Every byte of a block lands in .text, so a directive that names another
+ * section is refused: the data after it would be in .text, where a store
+ * to it faults, or on a Cortex-M in flash, where it is simply lost. */
+static void check_section(struct topasm *ta, const char *l)
+{
+    const char *what = NULL;
+    if (is_dir(l, ".data") || is_dir(l, ".rodata") || is_dir(l, ".bss"))
+        what = l;
+    else if (is_dir(l, ".section") || is_dir(l, ".pushsection")) {
+        const char *nm = rest(l);
+        if (strncmp(nm, ".text", 5) != 0 ||
+            (nm[5] && nm[5] != '.' && nm[5] != ',' && nm[5] != ' '))
+            what = nm;
+    }
+    if (what)
+        diag_fatal(ta->file, ta->line,
+                   "file-scope asm section \"%s\" is not supported: EmbCC "
+                   "places every byte of a block in .text, where this data "
+                   "would not be writable; define it in C", what);
+}
+
+/* An alignment directive's byte boundary, or 0 if `l` is not one. `.align`
+ * counts bytes on x86-64 and a power of two elsewhere, as gas reads it. A
+ * block starts on a 16-byte boundary in .text, so that much can be met
+ * from the block's own offsets and no more. */
+static int align_of(struct topasm *ta, const char *l)
+{
+    long v;
+    int bytes;
+    if (is_dir(l, ".balign"))
+        bytes = 1;
+    else if (is_dir(l, ".p2align"))
+        bytes = 0;
+    else if (is_dir(l, ".align"))
+        bytes = target_get() == TARGET_X86_64;
+    else
+        return 0;
+    v = strtol(rest(l), NULL, 0);
+    if (!bytes)
+        v = v >= 0 && v < 31 ? 1L << v : -1;
+    if (v < 1 || (v & (v - 1)) != 0 || v > 16)
+        diag_fatal(ta->file, ta->line,
+                   "file-scope asm \"%s\": the alignment must be a power of "
+                   "two of at most 16 bytes, which is what a block starts on",
+                   l);
+    return (int)v;
+}
+
+/* Alignment padding: the target's no-op where the gap holds whole ones, so
+ * code that runs into it carries on, and zeroes otherwise. */
+static void put_pad(unsigned char *c, int n)
+{
+    enum target_arch a = target_get();
+    static const unsigned char a64[4] = { 0x1f, 0x20, 0x03, 0xd5 };
+    static const unsigned char rv[4] = { 0x13, 0x00, 0x00, 0x00 };
+    static const unsigned char thumb[2] = { 0x00, 0xbf };
+    for (int i = 0; i < n; i++) {
+        if (a == TARGET_X86_64)
+            c[i] = 0x90;
+        else if (a == TARGET_AARCH64 && n % 4 == 0)
+            c[i] = a64[i % 4];
+        else if ((a == TARGET_RISCV32 || a == TARGET_RISCV64) && n % 4 == 0)
+            c[i] = rv[i % 4];
+        else if (a == TARGET_THUMB && n % 2 == 0)
+            c[i] = thumb[i % 2];
+        else
+            c[i] = 0;                 /* AVR's nop is 0x0000 too */
+    }
+}
+
+/* The label a .global/.weak/.type names: every definition of it. */
+static int mark_syms(struct topasm *ta, const char *nm, int glob, int weak,
+                     int type)
+{
+    int found = 0;
+    size_t n = strcspn(nm, " ,");
+    for (int k = 0; k < ta->nsyms; k++)
+        if (strlen(ta->syms[k].name) == n &&
+            strncmp(ta->syms[k].name, nm, n) == 0) {
+            if (glob) ta->syms[k].is_global = 1;
+            if (weak) ta->syms[k].is_weak = ta->syms[k].is_global = 1;
+            if (type) ta->syms[k].type = type;
+            found = 1;
+        }
+    return found;
 }
 
 /* Resolve a numeric-local (`1b`/`1f`) or named jump target to its .text
@@ -270,12 +376,34 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
     /* Pass 1: assign each instruction an offset; define every label; note
      * which names .global marks. Numeric labels can repeat, so labels are
      * kept as (name, off) pairs, not a map. */
-    int off = 0;
+    int off = 0, thumb_func = 0;
     for (int i = 0; i < nl; i++) {
         const char *l = ls[i].text;
         if (strncmp(l, ".global ", 8) == 0 || strncmp(l, ".globl ", 7) == 0)
             continue; /* matched to its label in the fixup below */
+        if (is_dir(l, ".thumb_func")) {
+            if (target_get() != TARGET_THUMB)
+                diag_fatal(ta->file, ta->line, "file-scope asm .thumb_func "
+                           "is for a Thumb target");
+            thumb_func = 1;            /* the next label is a function */
+            continue;
+        }
+        int nsyms = ta->nsyms;
         l = strip_label(ta, l, off, 1);
+        if (thumb_func && ta->nsyms > nsyms) {
+            ta->syms[nsyms].type = ASMSYM_FUNC;
+            thumb_func = 0;
+        }
+        check_section(ta, l);
+        if (is_dir(l, ".hidden"))
+            diag_fatal(ta->file, ta->line, "file-scope asm .hidden is not "
+                       "supported: the symbol would be emitted with default "
+                       "visibility");
+        int a = align_of(ta, l);
+        if (a) {
+            ls[i].pad = (a - off % a) % a;
+            off += ls[i].pad;
+        }
         ls[i].off = off;
         if (*l)
             off += insn_len(ta, l, mnemonics_ok);
@@ -286,14 +414,37 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
         const char *nm = NULL;
         if (strncmp(l, ".global ", 8) == 0) nm = l + 8;
         else if (strncmp(l, ".globl ", 7) == 0) nm = l + 7;
-        if (!nm) continue;
-        int found = 0;
-        for (int k = 0; k < ta->nsyms; k++)
-            if (strcmp(ta->syms[k].name, nm) == 0) {
-                ta->syms[k].is_global = 1;
-                found = 1;
+        if (is_dir(l, ".weak")) {
+            if (!mark_syms(ta, rest(l), 0, 1, 0))
+                diag_fatal(ta->file, ta->line, "asm .weak names \"%s\", which "
+                           "has no label here; declare a weak reference in C",
+                           rest(l));
+            continue;
+        }
+        if (is_dir(l, ".type")) {
+            /* `.type NAME, %function` (or @function, STT_FUNC, ...). */
+            const char *nm2 = rest(l), *kind = strchr(nm2, ',');
+            int type = 0;
+            if (kind) {
+                kind++;
+                while (*kind == ' ') kind++;
+                if (*kind == '%' || *kind == '@' || *kind == '#') kind++;
+                if (!strcmp(kind, "function") || !strcmp(kind, "STT_FUNC"))
+                    type = ASMSYM_FUNC;
+                else if (!strcmp(kind, "object") ||
+                         !strcmp(kind, "STT_OBJECT"))
+                    type = ASMSYM_OBJECT;
             }
-        if (!found)
+            if (!type)
+                diag_fatal(ta->file, ta->line, "file-scope asm \"%s\": the "
+                           "type must be function or object", l);
+            if (!mark_syms(ta, nm2, 0, 0, type))
+                diag_fatal(ta->file, ta->line, "asm .type names a symbol "
+                           "with no label here: \"%s\"", l);
+            continue;
+        }
+        if (!nm) continue;
+        if (!mark_syms(ta, nm, 1, 0, 0))
             diag_fatal(ta->file, ta->line,
                        "asm .global names \"%s\", which has no label", nm);
     }
@@ -304,6 +455,10 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
     for (int i = 0; i < nl; i++) {
         const char *l = ls[i].text;
         int w = data_width(l);
+        if (ls[i].pad) {
+            put_pad(c, ls[i].pad);
+            c += ls[i].pad;
+        }
         if (!w && l[0] == '.')
             continue;
         l = strip_label(ta, l, 0, 0);   /* labels defined in pass 1 */
@@ -328,11 +483,17 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
                      * branches through it. Only .quad, because an address
                      * is eight bytes and a truncated one would relocate
                      * into whatever followed. */
-                    if (w != 8)
+                    /* An address is a pointer's width: .quad where
+                     * that is eight bytes, .long where it is four. A
+                     * .quad on a 32-bit target had a 64-bit relocation
+                     * kind the object could not carry. */
+                    int pw = target_ptr_size();
+                    if (w != pw)
                         diag_fatal(ta->file, ta->line,
-                                   "asm .byte/.long wants a number: \"%s\" "
-                                   "(a symbol's address is eight bytes, so "
-                                   "name it with .quad)", l);
+                                   "asm data naming a symbol must be the "
+                                   "size of an address, %d bytes here (%s): "
+                                   "\"%s\"", pw, pw == 8 ? ".quad" : ".long",
+                                   l);
                     const char *s = p;
                     while (*end && (is_alnum(*end) || *end == '_' ||
                                     *end == '.' || *end == '$'))
@@ -347,7 +508,8 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
                     ta->rels[ta->nrels].off = here + nth * w;
                     ta->rels[ta->nrels].target = xstrndup(s, (size_t)(end - s));
                     ta->rels[ta->nrels].addend = 0;
-                    ta->rels[ta->nrels].kind = ASMREL_ABS64;
+                    ta->rels[ta->nrels].kind = w == 8 ? ASMREL_ABS64
+                                                      : ASMREL_ABS32;
                     ta->nrels++;
                     v = 0;                    /* the linker fills it in */
                 }

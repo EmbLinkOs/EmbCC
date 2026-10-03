@@ -2352,10 +2352,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         for (int k = 0; k < ta->nsyms; k++)
             if (ta->syms[k].is_global) {
                 long toff;
-                text_at(ta->text_off + ta->syms[k].off, &toff);
+                const struct asmsym *as = &ta->syms[k];
+                text_at(ta->text_off + as->off, &toff);
+                /* Its type is what .type said. Untyped, it stays a
+                 * function, as every label was -- except on Thumb, where
+                 * a function's address carries bit 0 and gas leaves an
+                 * untyped label NOTYPE and even. A typed Thumb function
+                 * was even, so a call through a pointer to it switched
+                 * to the ARM state a Cortex-M does not have. */
+                int thumb = target_get() == TARGET_THUMB;
+                int st = as->type == ASMSYM_OBJECT ? STT_OBJECT
+                       : as->type == ASMSYM_FUNC || !thumb ? STT_FUNC
+                       : STT_NOTYPE;
+                if (thumb && st == STT_FUNC)
+                    toff = fn_sym_value(TARGET_THUMB, toff);
                 int ndx = elfw_add_symbol(
-                    w, ta->syms[k].name, (Elf64_Addr)toff, 0,
-                    ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                    w, as->name, (Elf64_Addr)toff, 0,
+                    ELF64_ST_INFO(as->is_weak ? STB_WEAK : STB_GLOBAL, st),
                     (Elf64_Half)text_ndx);
                 for (struct func *f = u->funcs; f; f = f->next)
                     if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
@@ -2367,9 +2380,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                         g->sym_ndx = ndx;
             }
 
-    /* extern-declared, used, never defined: the linker's problem */
+    /* extern-declared, used, never defined: the linker's problem --
+     * unless a file-scope asm block defines it (sym_ndx, set above),
+     * which gave the object a definition and an undefined symbol of
+     * the same name, and the C code's references went to the second. */
     for (struct global *g = u->globals; g; g = g->next)
-        if (!g->absorbed && !g->defined && g->used)
+        if (!g->absorbed && !g->defined && g->used && !g->sym_ndx)
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, 0, 0,
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
@@ -2441,22 +2457,41 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * be a call. */
     for (struct topasm *ta = u->topasm; ta; ta = ta->next)
         for (int r = 0; r < ta->nrels; r++) {
+            /* The symbol this file already has for the name -- a
+             * function, an object, or a block's own global label -- so
+             * a `.quad x` against an x defined here did not add a
+             * second, undefined x beside it. */
             int sym = 0;
-            for (struct func *f = u->funcs; f; f = f->next)
-                if (!f->absorbed && f->sym_ndx &&
-                    strcmp(f->name, ta->rels[r].target) == 0) {
+            long addend = ta->rels[r].addend;
+            const char *tn = ta->rels[r].target;
+            for (struct func *f = u->funcs; f && !sym; f = f->next)
+                if (!f->absorbed && f->sym_ndx && strcmp(f->name, tn) == 0)
                     sym = f->sym_ndx;
-                    break;
-                }
+            for (struct global *g = u->globals; g && !sym; g = g->next)
+                if (!g->absorbed && g->sym_ndx && strcmp(g->name, tn) == 0)
+                    sym = g->sym_ndx;
+            /* A label of a block, global or not, that C never declared:
+             * its section and offset. (A local one went out as an
+             * undefined symbol of the same name, which another object's
+             * global could satisfy.) */
+            for (struct topasm *lb = u->topasm; lb && !sym; lb = lb->next)
+                for (int k = 0; k < lb->nsyms && !sym; k++)
+                    if (strcmp(lb->syms[k].name, tn) == 0) {
+                        addend += code_ref(lb->text_off + lb->syms[k].off,
+                                           text_sym, &sym);
+                        if (target_get() == TARGET_THUMB &&
+                            lb->syms[k].type == ASMSYM_FUNC)
+                            addend |= 1;
+                    }
             if (!sym)
                 sym = elfw_add_symbol(
-                    w, ta->rels[r].target, 0, 0,
+                    w, tn, 0, 0,
                     ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_UNDEF);
-            enum reloc_kind rk = ta->rels[r].kind == ASMREL_ABS64
-                                     ? RK_ABS64 : RK_CALL;
+            enum reloc_kind rk = ta->rels[r].kind == ASMREL_ABS64 ? RK_ABS64
+                               : ta->rels[r].kind == ASMREL_ABS32 ? RK_ABS32
+                               : RK_CALL;
             code_rela(w, text_ndx, ta->text_off + ta->rels[r].off,
-                      sym, target_reloc_type(target_get(), rk),
-                      ta->rels[r].addend);
+                      sym, target_reloc_type(target_get(), rk), addend);
         }
 
     /* RISC-V's low half names the AUIPC, not the target.

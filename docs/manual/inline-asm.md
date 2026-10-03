@@ -386,25 +386,38 @@ unit's functions, each block starting on a 16-byte boundary.
 
 | Directive | Effect |
 |---|---|
-| `.global NAME`, `.globl NAME` | makes the label `NAME`, defined in the same block, a global function symbol |
+| `.global NAME`, `.globl NAME` | makes the label `NAME`, defined in the same block, a global symbol |
+| `.weak NAME` | makes the label `NAME` a weak global symbol |
+| `.type NAME, %function` (or `@function`) | makes `NAME`'s symbol a function; on Cortex-M its value has bit 0 set, as a Thumb function's must |
+| `.type NAME, %object` (or `@object`) | makes `NAME`'s symbol an object |
+| `.thumb_func` | Cortex-M only: the next label is a Thumb function, as with `.type NAME, %function` |
 | `.byte V, ...` | 1-byte values |
-| `.long V, ...` | 4-byte values |
-| `.quad V, ...` | 8-byte values; a symbol name instead of a number emits an absolute 64-bit relocation |
-| `.text`, `.data`, `.rodata`, `.bss`, `.section`, `.pushsection`, `.popsection`, `.previous` | accepted, no effect: the bytes stay in `.text` |
-| `.align`, `.balign`, `.p2align` | accepted, no effect |
-| `.local`, `.weak`, `.hidden`, `.type`, `.size` | accepted, no effect (`.weak` does not make the symbol weak) |
+| `.long V, ...` | 4-byte values; on a target with 4-byte addresses (Cortex-M, RV32), a symbol name instead of a number emits an absolute 32-bit relocation |
+| `.quad V, ...` | 8-byte values; on a target with 8-byte addresses, a symbol name instead of a number emits an absolute 64-bit relocation |
+| `.align N`, `.balign N`, `.p2align N` | pads to the boundary with the target's no-op instruction; `.align` counts bytes on x86-64 and is a power of two elsewhere, as in GNU as |
+| `.text`, `.section .text...`, `.pushsection .text...`, `.popsection`, `.previous`, `.local`, `.size` | accepted; no effect beyond what is above |
 | `.file`, `.loc`, `.cfi_startproc`, `.cfi_endproc`, `.cfi_def_cfa`, `.cfi_def_cfa_offset`, `.cfi_def_cfa_register`, `.cfi_offset`, `.cfi_restore`, `.cfi_sections` | accepted, no effect |
 
-Values are decimal, hexadecimal (`0x`) or octal (leading `0`). Any other
+A global label without `.type` is a function symbol, except on Cortex-M,
+where it is untyped and its value has no Thumb bit, as with GNU as. Values
+are decimal, hexadecimal (`0x`) or octal (leading `0`). Any other
 directive is refused:
 
 ```text
 file-scope asm directive not supported: ".word". EmbCC's assembler emits data with .byte/.long/.quad; an unknown directive would contribute no bytes and leave the label pointing at whatever came next
 ```
 
-A symbol in `.byte` or `.long` is refused with
-`asm .byte/.long wants a number: ".byte foo" (a symbol's address is eight bytes, so name it with .quad)`.
-A `.global` that names no label in its block is refused with
+These are refused because they would not do what they say:
+
+| Refused | Diagnostic |
+|---|---|
+| Any section other than `.text` | `file-scope asm section ".data" is not supported: EmbCC places every byte of a block in .text, where this data would not be writable; define it in C` |
+| Alignment beyond 16 bytes | `file-scope asm ".balign 32": the alignment must be a power of two of at most 16 bytes, which is what a block starts on` |
+| `.hidden` | `file-scope asm .hidden is not supported: the symbol would be emitted with default visibility` |
+| A symbol in data of another width | `asm data naming a symbol must be the size of an address, 8 bytes here (.quad): ".long main"` |
+| `.type` other than function or object | `file-scope asm ".type f, %gnu_indirect_function": the type must be function or object` |
+
+A `.global` or `.weak` that names no label in its block is refused with
 `asm .global names "ghost", which has no label`.
 
 Labels that no `.global` names are local to the block and produce no
@@ -459,10 +472,7 @@ file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. 
 ```
 
 A block written as data (`.byte`, `.long`, `.quad`, labels and the
-directives above) assembles on these targets. On the 32-bit targets
-(Cortex-M, RV32 and AVR) `.quad SYMBOL` produces a relocation that is not
-valid for the target, and on Cortex-M a `.global` label's symbol value
-does not have bit 0 set, so it is not a valid Thumb function address.
+directives above) assembles on these targets.
 
 On Darwin and Windows targets the bytes of a block would be emitted
 without its symbols and relocations, so a block with any label or symbol
@@ -1275,8 +1285,8 @@ In summary, compared with GCC:
   file scope on any target.
 - Assembler names on C declarations are not supported.
 - File-scope asm accepts data and a few directives on every target, and
-  four instructions on x86-64 only; section and alignment directives
-  have no effect.
+  four instructions on x86-64 only. Every block is in `.text`, so other
+  sections are refused.
 - On x86-64, a callee-saved register that a template changes is saved
   only when it holds an operand and the optimization level is `-O2` or
   `-Os`.

@@ -442,8 +442,11 @@ struct econst {
 struct asmsym {
     const char *name;
     int off;             /* offset within .text (filled at emission) */
-    int is_global;       /* named by .global/.globl */
+    int is_global;       /* named by .global/.globl (or .weak) */
+    int is_weak;         /* named by .weak */
+    int type;            /* ASMSYM_*: what .type (or .thumb_func) said */
 };
+enum { ASMSYM_UNTYPED, ASMSYM_FUNC, ASMSYM_OBJECT };
 /* What the field at `off` is, which decides the relocation the driver
  * emits for it. A call's displacement is relative to the instruction
  * after it and is four bytes wide; a `.quad symbol` is the address
@@ -453,6 +456,8 @@ struct asmsym {
 enum asmrel_kind {
     ASMREL_PC32,         /* the rel32 of a call: R_X86_64_PLT32 */
     ASMREL_ABS64,        /* a .quad naming a symbol: R_*_ABS64 */
+    ASMREL_ABS32,        /* a .long naming one, where an address is four
+                          * bytes: R_*_ABS32 */
 };
 
 struct asmrel {
