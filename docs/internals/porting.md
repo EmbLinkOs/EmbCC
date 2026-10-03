@@ -127,17 +127,55 @@ this from a generated manifest, `build.ebm` (see
 
 ### Building EmbCC for an OS that has no compiler yet
 
-Use EmbCC on another machine to cross-compile EmbCC for the new OS:
+Use EmbCC on another machine. `tools/cross-embcc.sh` compiles every source
+of the compiler with `./embcc --target=TRIPLE`, using the ISO C host layer.
+It then links the objects with `./embld`, the OS's startup object and its
+C library. Nothing from GCC, Clang or binutils takes part.
 
-1. Build `embcc` and `embld` on a machine that has them.
-2. Compile each source file with `embcc --target=ARCH-elf -c`, using the new
-   OS's C headers (`-nostdinc -isystem OS/include`) and `PLATFORM=iso`'s
-   files (`platform_common.c` and `platform_iso.c`).
-3. Link the objects with `embld`, the OS's startup object and its C
-   library, at the address its program loader expects (`-e`, `-Ttext`).
-4. Copy the result and the support files (`lib/libc/include`, `include/`
-   and the target libraries) to the OS, and set `EMBCC_PREFIX` or build
-   with `DEFAULT_PREFIX`.
+```sh
+make embcc embld embar
+CROSS_CFLAGS="-O1 -nostdinc -isystem /path/to/os/include" \
+CROSS_CRT=/path/to/os/lib/crt0.o \
+CROSS_LIBS="/path/to/os/lib/libc.a" \
+CROSS_LDFLAGS="-e _start -Ttext 0x400000" \
+    sh tools/cross-embcc.sh x86_64-elf embcc-myos
+```
 
-EmbLinkOS is built this way: its C library is newlib, and its `embcc.elf`
-comes from `build.ebm`.
+| Variable | What it gives |
+| --- | --- |
+| `CROSS_CFLAGS` | Compile flags, chiefly where the OS's C headers are. The default is `-O1`. |
+| `CROSS_CRT` | The OS's program startup object. |
+| `CROSS_LIBS` | Its C library and anything that needs, in link order. |
+| `CROSS_LDFLAGS` | `embld` options for the OS's program loader: entry point and load address. |
+| `CROSS_OBJ` | Where the objects go. The default is `build/cross-TRIPLE`. |
+
+For `x86_64-linux-gnu` and `aarch64-linux-gnu` the defaults are EmbCC's own
+C library (`make libc-linux-x86_64`), so no variables are needed:
+
+```sh
+sh tools/cross-embcc.sh x86_64-linux-gnu embcc-linux
+```
+
+`tests/golden/cross-embcc.sh` tests this end to end. It builds EmbCC for
+Linux this way and boots it on a Linux kernel under QEMU, with the headers
+in the root file system. There it compiles a program that includes
+`<stdio.h>`, and the assembly must be identical to what the host's EmbCC
+emits.
+
+To use the result on the new OS, copy it there with the support files, in
+the build-tree layout:
+
+```text
+/path/embcc
+/path/lib/libc/include/      from lib/libc/include
+/path/include/               from include (stddef.h, stdarg.h, ...)
+```
+
+The compiler finds them from `argv[0]`. Otherwise, install them as
+`PREFIX/lib/embcc/VERSION` and set `EMBCC_PREFIX`, or build with
+`DEFAULT_PREFIX`. Add the target libraries the same way for the targets
+you link for.
+
+EmbLinkOS is built along the same lines. Its C library is newlib, and its
+`embcc.elf` comes from `build.ebm` (see
+[EmbBuild manifests](../manual/tools/embbuild.md)).
