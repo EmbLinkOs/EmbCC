@@ -1879,6 +1879,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                            "yet: Windows reaches a thread-local through a "
                            "_tls_index and a TLS directory this writer "
                            "does not emit");
+        /* The COFF writer has no named data sections: an object with one
+         * was given offset 0 of .data and laid over whatever was already
+         * there, so a store to either changed both. */
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->defined && g->section)
+                diag_fatal(g->file, g->line,
+                           "'%s': a variable's section attribute is not "
+                           "supported for COFF output", g->name);
         if (unwind)
             diag_fatal(in, 0,
                        "C++ exceptions are not supported for a Windows "

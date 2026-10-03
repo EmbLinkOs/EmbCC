@@ -442,6 +442,7 @@ These are refused:
 | File-scope `asm` with labels or symbol references | `a file-scope asm block with labels or symbol references is not supported for a Windows target yet` |
 | `alias` | `alias attribute on 'h' is not supported for COFF output` |
 | `section` on a function | `a function's section attribute is not supported for COFF output` |
+| `section` on a variable | `'v': a variable's section attribute is not supported for COFF output` |
 
 ### Darwin
 

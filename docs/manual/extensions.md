@@ -642,7 +642,7 @@ Some attributes need support from the object-file writer.
 
 | Attribute | ELF | Mach-O | COFF |
 |---|---|---|---|
-| `section` on a variable | Supported | The object goes in segment `__DATA`, in a section with the name as written. A `"segment,section"` name is not split | Not supported, and not diagnosed: the object is not placed correctly. Do not use it |
+| `section` on a variable | Supported | The object goes in segment `__DATA`, in a section with the name as written. A `"segment,section"` name is not split | `'b': a variable's section attribute is not supported for COFF output` |
 | `section` on a function | Supported | `a function's section attribute is not supported for Mach-O output` | `a function's section attribute is not supported for COFF output` |
 | `alias` | Supported | `alias attribute on 'f' is not supported for Mach-O output` | `alias attribute on 'f' is not supported for COFF output` |
 | `constructor`, `destructor` | `.init_array`, `.fini_array` | `__attribute__((constructor)) is not supported for a Darwin target yet: it needs a __DATA,__mod_init_func section this Mach-O writer does not emit` | `__attribute__((constructor)) is not supported for a Windows target yet: it needs the .ctors/.dtors sections this COFF writer does not emit` |
@@ -1245,5 +1245,3 @@ Each is described in its section above.
 - The payload string of `__builtin_nan`.
 - `weak` and `visibility` on COFF output, and `visibility` on Mach-O
   output.
-- `section` on a variable on COFF output, which also places the object
-  incorrectly.

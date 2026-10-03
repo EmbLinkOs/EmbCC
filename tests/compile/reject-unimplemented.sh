@@ -619,3 +619,10 @@ check const-increment 'void f(void) { const int x = 1; x++; }' "increment of rea
 check const-compound 'void f(void) { const int x = 1; x += 2; }' "read-only 'x'"
 check const-asm-output \
     'void f(void) { const int x = 1; __asm__("" : "=r"(x)); }' "an asm output of read-only"
+
+# The COFF writer has no named data sections. A variable with one was
+# put at offset 0 of .data, on top of the first variable there.
+check coff-section-variable \
+    'int a = 1; int b __attribute__((section(".mydata"))) = 2;' \
+    "variable's section attribute is not supported for COFF" \
+    --target=x86_64-windows-gnu
