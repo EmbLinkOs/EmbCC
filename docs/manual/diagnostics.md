@@ -1164,7 +1164,7 @@ rem.c:12: remark: not-inlined 'variadic' [inline/callee-is-varargs]
 rem.c:6: remark: kept-in-memory 'vol' [mem2reg/declared-volatile]
 rem.c:7: remark: kept-in-memory 'addressed' [mem2reg/address-is-taken]
 rem.c:13: remark: branch-never-jumps 'sum': the condition folded to 1, so one arm is unreachable [sccp/condition-is-a-constant]
-rem.c:11: remark: unrolled 'sum': 4 copies of a 8-instruction body, the original kept for the remainder [unroll/counted-loop]
+rem.c:11: remark: unrolled 'sum': 8 copies of a 8-instruction body, the original kept for the remainder [unroll/counted-loop]
 ```
 
 `REASON` is a stable code meant to be matched by tools and searched for.

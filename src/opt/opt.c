@@ -7371,8 +7371,9 @@ static int pass_ivsr(struct ir_func *fn)
  * goto -- is refused rather than duplicated.
  */
 
-#define UNROLL_MAX_BODY  20   /* instructions in the body worth copying */
-#define UNROLL_MAX_ADDED 64   /* and a ceiling on U * body */
+#define UNROLL_MAX_BODY   20  /* instructions in the body worth copying */
+#define UNROLL_BUDGET     96  /* and a ceiling on U * body */
+#define UNROLL_MAX_COPIES  8
 
 /* One loop's worth of what the recognizer found. */
 struct unrloop {
@@ -7624,12 +7625,23 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
         return 0;
     }
 
-    /* How many copies. A short body pays most of its cost on the test and
-     * the branch, so it gets more of them; a long one already amortises
-     * them and would only grow the function. */
-    int U = nbody <= 4 ? 8 : nbody <= 8 ? 4 : nbody <= 16 ? 2 : 0;
-    while (U > 1 && U * nbody > UNROLL_MAX_ADDED)
-        U /= 2;
+    /* How many copies: the most, a power of two up to eight, that keep
+     * U * body within the budget. A short body pays most of its cost on
+     * the test and the branch, so it gets more of them; a long one
+     * already amortises them and would only grow the function.
+     *
+     * The budget was 32 (a table: 8 copies to 4 instructions, 4 to 8, 2
+     * to 16), which gave a CRC's ten-instruction body two copies and a
+     * test every other byte. At 96 it gets eight: the workload's crc ran
+     * 8% (RV32) to 17% (M4, x86-64) fewer instructions, the matrix 7-8%,
+     * nothing ran more, and -O2 code grew 2.4-3.9%. -Os does not unroll.
+     * More than eight copies is worse, not better: the leftover
+     * iterations, up to U - 1 of them, run in the original loop, and
+     * sixteen copies of the matrix's 24-trip loop left a third of the
+     * work there (+7% to +14%). */
+    int U = 1;
+    while (U * 2 <= UNROLL_MAX_COPIES && U * 2 * nbody <= UNROLL_BUDGET)
+        U *= 2;
     if (U < 2) {
         free_defs(&d); free(order); free(l2b);
         free_cfg(bb, nbb);

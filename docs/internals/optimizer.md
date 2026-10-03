@@ -645,9 +645,10 @@ induction variable steps by a constant and is compared against a
 loop-invariant bound (`lt`, or `ne` after strength reduction), gets an
 unrolled copy in front of it. The copy runs `U` iterations per test
 while at least `U` remain and falls into the original loop, which runs the
-remainder unchanged. `U` is 8, 4 or 2 for bodies of up to 4, 8 or 16
-instructions (`UNROLL_MAX_BODY` is 20), halved until `U * body` is at
-most `UNROLL_MAX_ADDED` (64). The remaining-iteration test is computed
+remainder unchanged. `U` is the largest power of two up to
+`UNROLL_MAX_COPIES` (8) with `U * body` at most `UNROLL_BUDGET` (96): 8
+copies of a body of up to 12 instructions, 4 of one up to 20
+(`UNROLL_MAX_BODY`). The remaining-iteration test is computed
 without signed overflow. Loops containing `alloca`, inline asm, a
 landing pad or a computed `goto` are refused.
 

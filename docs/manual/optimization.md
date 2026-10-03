@@ -460,13 +460,12 @@ rotation), steps its induction variable by 1, compares it with a signed
 
 | Body size (IR instructions) | Copies |
 |---|---|
-| 1 to 4 | 8 |
-| 5 to 8 | 4 |
-| 9 to 16 | 2 |
-| more than 16 | not unrolled |
+| 1 to 12 | 8 |
+| 13 to 20 | 4 |
+| more than 20 | not unrolled |
 
-The number of copies is reduced until copies times body is at most 64.
-The original loop is kept unchanged after the unrolled one and runs the
+The number of copies is the largest power of two, up to 8, for which
+copies times body is at most 96. The original loop is kept unchanged after the unrolled one and runs the
 remaining iterations. Default: on at `-O2`; off at `-Os`.
 
 ### `-fpre`, `-fno-pre`
