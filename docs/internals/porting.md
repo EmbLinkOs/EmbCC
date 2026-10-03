@@ -114,6 +114,10 @@ make install PREFIX=/opt/embcc
 `PREFIX/lib/embcc/VERSION`. `DESTDIR` stages the copy elsewhere, as for
 packaging.
 
+The libraries are packaged with [`embar`](../manual/tools/embar.md),
+EmbCC's own archiver, which is ISO C like the compiler. Building EmbCC and
+its libraries needs a C compiler and nothing else from a toolchain.
+
 On a host with no `make`, compile every file of the `SRCS` list in the
 Makefile (`make -pn | sed -n 's/^SRCS := //p'` prints it on a machine that
 has `make`), plus `build/embdbg_core.o` from `tools/embdbg/embdbg.c` with

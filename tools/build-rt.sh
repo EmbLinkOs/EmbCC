@@ -22,8 +22,11 @@ triple=$1
 out=$2
 here=$(cd "$(dirname "$0")/.." && pwd)
 EMBCC=${EMBCC:-$here/embcc}
-AR=${EMBCC_AR:-llvm-ar}
-command -v "$AR" >/dev/null 2>&1 || AR=ar
+# EmbCC's own archiver, built beside the compiler (make embar), so a host
+# with no binutils or LLVM can package the runtime; EMBCC_AR overrides it.
+AR=${EMBCC_AR:-./embar}
+[ -x "$AR" ] || command -v "$AR" >/dev/null 2>&1 || AR=llvm-ar
+command -v "$AR" >/dev/null 2>&1 || [ -x "$AR" ] || AR=ar
 
 rm -rf "$out/rt"
 mkdir -p "$out/rt"

@@ -159,7 +159,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx
+all: embcc embread embld embas embls embidx embar
 
 # Which host layer the last link used. Switching PLATFORM leaves every
 # object up to date, so without this `make PLATFORM=iso` kept the old
@@ -196,6 +196,11 @@ $(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
 # embdbg and embls, and the assembler is only reached through the
 # kernel build. tests/golden/tools-build.sh now builds every tool in
 # `all`, which is the cheapest guard against the next one.
+# embar -- the static-library archiver (tools/embar). ISO C and standalone,
+# so the libraries below need no binutils `ar` on a host without GCC.
+embar: tools/embar/embar.c
+	$(CC) $(CFLAGS) -o $@ tools/embar/embar.c
+
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
        src/arch/target.c src/sema/type.c src/sema/ldfloat.c \
@@ -354,24 +359,24 @@ LIBC_SRCS_PORTABLE := $(wildcard lib/libc/src/*/*.c) \
 LIBC_SRCS := $(LIBC_SRCS_PORTABLE) lib/libc/os/posixlike/backend.c
 LIBC_INC  := -Ilib/libc/include -Ilib/libc/src/math
 
-libc-x86_64: embcc
+libc-x86_64: embcc embar
 	@mkdir -p $(BUILD)/libc/x86_64
 	@for f in $(LIBC_SRCS); do \
 	    o=$(BUILD)/libc/x86_64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 	    ./embcc --target=x86_64-elf -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/x86_64/libc.a
-	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/x86_64/libc.a $(BUILD)/libc/x86_64/*.o
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/x86_64/libc.a $(BUILD)/libc/x86_64/*.o
 	@echo "libc: $(BUILD)/libc/x86_64/libc.a"
 
-libc-aarch64: embcc
+libc-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libc/aarch64
 	@for f in $(LIBC_SRCS); do \
 	    o=$(BUILD)/libc/aarch64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 	    ./embcc --target=aarch64-elf -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/aarch64/libc.a
-	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs $(BUILD)/libc/aarch64/libc.a $(BUILD)/libc/aarch64/*.o
+	@$${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libc/aarch64/libc.a $(BUILD)/libc/aarch64/*.o
 	@echo "libc: $(BUILD)/libc/aarch64/libc.a"
 
 # EmbLinkOS is a backend, not a second library: same sources, one different
@@ -379,7 +384,7 @@ libc-aarch64: embcc
 #   make libc-emblinkos EMBLINKOS=$HOME/EmbLinkOs
 EMBLINKOS ?= $(HOME)/EmbLinkOs
 
-libc-emblinkos: embcc
+libc-emblinkos: embcc embar
 	@[ -f "$(EMBLINKOS)/user/lib/embk.h" ] || { \
 	    echo "libc-emblinkos: no $(EMBLINKOS)/user/lib/embk.h"; \
 	    echo "  set EMBLINKOS=/path/to/EmbLinkOs"; exit 1; }
@@ -389,7 +394,7 @@ libc-emblinkos: embcc
 	    ./embcc -c -O2 $(LIBC_INC) -I$(EMBLINKOS)/user/lib $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/emblinkos/libc.a
-	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/emblinkos/libc.a \
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/emblinkos/libc.a \
 	    $(BUILD)/libc/emblinkos/*.o
 	@echo "libc: $(BUILD)/libc/emblinkos/libc.a"
 
@@ -417,14 +422,14 @@ LIBC_SRCS_LINUX := $(LIBC_SRCS_PORTABLE) lib/libc/os/linux/backend.c \
 # a 128-bit value) and an archive is searched once.
 RT_SRCS := $(wildcard lib/rt/*.c)
 
-libc-linux-x86_64: embcc
+libc-linux-x86_64: embcc embar
 	@mkdir -p $(BUILD)/libc/linux-x86_64
 	@for f in $(LIBC_SRCS_LINUX); do \
 	    o=$(BUILD)/libc/linux-x86_64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 	    ./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-x86_64/libc.a
-	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/linux-x86_64/libc.a \
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/libc.a \
 	    $(BUILD)/libc/linux-x86_64/*.o
 	@./embcc --target=x86_64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-x86_64/crt1.o
@@ -434,18 +439,18 @@ libc-linux-x86_64: embcc
 	    ./embcc --target=x86_64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-x86_64/librt.a
-	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libc/linux-x86_64/librt.a \
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libc/linux-x86_64/librt.a \
 	    $(BUILD)/libc/linux-x86_64/rt/*.o
 	@echo "libc: $(BUILD)/libc/linux-x86_64/libc.a + librt.a + crt1.o"
 
-libc-linux-aarch64: embcc
+libc-linux-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libc/linux-aarch64
 	@for f in $(LIBC_SRCS_LINUX); do \
 	    o=$(BUILD)/libc/linux-aarch64/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 	    ./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-aarch64/libc.a
-	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs \
+	@$${EMBCC_AARCH64_AR:-./embar} rcs \
 	    $(BUILD)/libc/linux-aarch64/libc.a $(BUILD)/libc/linux-aarch64/*.o
 	@./embcc --target=aarch64-linux-gnu -c -O1 $(LIBC_INC) \
 	    lib/libc/os/linux/start.c -o $(BUILD)/libc/linux-aarch64/crt1.o
@@ -455,7 +460,7 @@ libc-linux-aarch64: embcc
 	    ./embcc --target=aarch64-linux-gnu -c -O1 $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libc/linux-aarch64/librt.a
-	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs \
+	@$${EMBCC_AARCH64_AR:-./embar} rcs \
 	    $(BUILD)/libc/linux-aarch64/librt.a $(BUILD)/libc/linux-aarch64/rt/*.o
 	@echo "libc: $(BUILD)/libc/linux-aarch64/libc.a + librt.a + crt1.o"
 
@@ -472,7 +477,7 @@ libc-linux-aarch64: embcc
 RT_EMBEDDED := avr thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf riscv32-unknown-elf
-rt-embedded: embcc
+rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
 	    echo "rt: $(BUILD)/libc/$$t/librt.a"; \
@@ -513,7 +518,7 @@ install: all libc libcxx libc-linux libcxx-linux-x86_64 \
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
 	@mkdir -p $(DESTDIR)$(PREFIX)/bin
-	@for t in embcc embld embas embread embdbg embls embidx; do \
+	@for t in embcc embld embas embread embdbg embls embidx embar; do \
 	    cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \
 	    chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t; \
 	done
@@ -546,7 +551,7 @@ install-files:
 # Removes exactly what install wrote, and the versioned directory with
 # it -- never $(PREFIX)/lib/embcc itself, which may hold another version.
 uninstall:
-	@for t in embcc embld embas embread embdbg embls embidx; do \
+	@for t in embcc embld embas embread embdbg embls embidx embar; do \
 	    rm -f $(DESTDIR)$(PREFIX)/bin/$$t; \
 	done
 	@rm -rf $(LIBROOT)
@@ -563,18 +568,18 @@ libc: libc-x86_64 libc-aarch64
 LIBCXX_SRCS := $(wildcard lib/libcxx/src/*.cc)
 LIBCXX_INC  := -Ilib/libcxx/include -Ilib/libc/include
 
-libcxx-x86_64: embcc
+libcxx-x86_64: embcc embar
 	@mkdir -p $(BUILD)/libcxx/x86_64
 	@for f in $(LIBCXX_SRCS); do \
 	    o=$(BUILD)/libcxx/x86_64/$$(basename $$f .cc).o; \
 	    ./embcc -c -O2 -x c++ $(LIBCXX_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libcxx/x86_64/libcxx.a
-	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libcxx/x86_64/libcxx.a \
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libcxx/x86_64/libcxx.a \
 	    $(BUILD)/libcxx/x86_64/*.o
 	@echo "libcxx: $(BUILD)/libcxx/x86_64/libcxx.a"
 
-libcxx-aarch64: embcc
+libcxx-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libcxx/aarch64
 	@for f in $(LIBCXX_SRCS); do \
 	    o=$(BUILD)/libcxx/aarch64/$$(basename $$f .cc).o; \
@@ -582,39 +587,39 @@ libcxx-aarch64: embcc
 	        || exit 1; \
 	done
 	@rm -f $(BUILD)/libcxx/aarch64/libcxx.a
-	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs \
+	@$${EMBCC_AARCH64_AR:-./embar} rcs \
 	    $(BUILD)/libcxx/aarch64/libcxx.a $(BUILD)/libcxx/aarch64/*.o
 	@echo "libcxx: $(BUILD)/libcxx/aarch64/libcxx.a"
 
 # The same runtime for the Linux triples, so std::thread, std::mutex and
 # the exception machinery can be exercised on a real kernel rather than
 # only on the freestanding harness.
-libcxx-linux-x86_64: embcc
+libcxx-linux-x86_64: embcc embar
 	@mkdir -p $(BUILD)/libcxx/linux-x86_64
 	@for f in $(LIBCXX_SRCS); do \
 	    o=$(BUILD)/libcxx/linux-x86_64/$$(basename $$f .cc).o; \
 	    ./embcc --target=x86_64-linux-gnu -c -O2 -x c++ $(LIBCXX_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libcxx/linux-x86_64/libcxx.a
-	@$${EMBCC_X86_AR:-x86_64-elf-ar} rcs $(BUILD)/libcxx/linux-x86_64/libcxx.a \
+	@$${EMBCC_X86_AR:-./embar} rcs $(BUILD)/libcxx/linux-x86_64/libcxx.a \
 	    $(BUILD)/libcxx/linux-x86_64/*.o
 	@echo "libcxx: $(BUILD)/libcxx/linux-x86_64/libcxx.a"
 
-libcxx-linux-aarch64: embcc
+libcxx-linux-aarch64: embcc embar
 	@mkdir -p $(BUILD)/libcxx/linux-aarch64
 	@for f in $(LIBCXX_SRCS); do \
 	    o=$(BUILD)/libcxx/linux-aarch64/$$(basename $$f .cc).o; \
 	    ./embcc --target=aarch64-linux-gnu -c -O2 -x c++ $(LIBCXX_INC) $$f -o $$o || exit 1; \
 	done
 	@rm -f $(BUILD)/libcxx/linux-aarch64/libcxx.a
-	@$${EMBCC_AARCH64_AR:-aarch64-elf-ar} rcs $(BUILD)/libcxx/linux-aarch64/libcxx.a \
+	@$${EMBCC_AARCH64_AR:-./embar} rcs $(BUILD)/libcxx/linux-aarch64/libcxx.a \
 	    $(BUILD)/libcxx/linux-aarch64/*.o
 	@echo "libcxx: $(BUILD)/libcxx/linux-aarch64/libcxx.a"
 
 libcxx: libcxx-x86_64 libcxx-aarch64
 
 clean:
-	rm -rf $(BUILD) embcc embread embld embdbg embas embls
+	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar
 
 .PHONY: all check test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
