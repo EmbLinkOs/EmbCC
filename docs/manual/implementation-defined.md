@@ -766,8 +766,10 @@ EmbCC's own directories.
 expansion) in a `#include` directive are combined into a header name
 (C17 6.10.2).*
 
-The operand of `#include` is not macro-expanded. It must begin with `"`
-or `<`; any other form is refused:
+An operand that does not begin with `"` or `<` is macro-replaced, and
+the result is used as the directive's text, which must then have one of
+those two forms; the characters between the delimiters are the header
+name as written. Any other form is refused:
 
 ```text
 embcc: f.c:2: error: malformed #include
@@ -842,16 +844,12 @@ warning EmbCC has.
 *The definitions for `__DATE__` and `__TIME__` when respectively, the
 date and time of translation are not available (C17 6.10.8.1).*
 
-EmbCC does not define `__DATE__` or `__TIME__` at all, nor `__TIMESTAMP__`
-or `__COUNTER__`. A use of one reaches the compiler as an undeclared
-identifier:
-
-```text
-embcc: f.c:1:17: error: '__DATE__' is not declared in '<global initializer>' — for a call, add a prototype or define it first [E0001]
-```
-
-Define them with `-D` if a program needs them, for example
-`-D__DATE__='"Jan  1 1970"'`.
+The date and time of translation are always available. `__DATE__` is
+`"Mmm dd yyyy"`, with the day padded by a space (`"Jan  2 1970"`), and
+`__TIME__` is `"hh:mm:ss"`, in local time, both taken once when the
+compile starts. When the environment variable `SOURCE_DATE_EPOCH` is
+set, they are that many seconds after the epoch, in UTC, as with GCC, so
+that a build can be reproduced. `__TIMESTAMP__` is not defined.
 
 ### Preprocessor limits
 
@@ -859,9 +857,7 @@ Define them with `-D` if a program needs them, for example
 |---|---|---|
 | Nesting of `#include` | 50: `#include nested too deeply` | 15 |
 | Nesting of conditional inclusion | 64: `conditionals nested too deeply` | 63 |
-| Parameters in one macro definition | 16: `too many macro parameters` | 127 |
-
-The limit of 16 macro parameters is below the standard's minimum.
+| Parameters in one macro definition | 127: `more than 127 macro parameters` | 127 |
 
 ### Predefined macros that describe the implementation
 
@@ -1037,7 +1033,5 @@ requires:
 - An enumeration constant outside the range of `int` is accepted
   without a diagnostic, as C23 allows
   ([Structures](#structures-unions-enumerations-and-bit-fields)).
-- `__DATE__` and `__TIME__` are not defined, and a macro may have at most
-  16 parameters ([Preprocessing directives](#preprocessing-directives)).
 - `max_align_t` is not declared in C, `MB_CUR_MAX` is not defined, and
   `MB_LEN_MAX` is 1 ([Library functions](#library-functions)).

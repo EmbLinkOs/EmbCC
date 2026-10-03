@@ -109,7 +109,9 @@ Limits: 16 macro parameters (`MAX_MACRO_PARAMS`), 50 levels of
 | any other `#pragma` | Discarded. |
 
 `do_pragma` handles both the directive and the `_Pragma` operator.
-`__COUNTER__`, `__DATE__` and `__TIME__` are not defined.
+`__COUNTER__`, `__DATE__`, `__TIME__`, `__FILE_NAME__`, `__BASE_FILE__`
+and `__INCLUDE_LEVEL__` are computed at each use (`dynamic_macro`), as
+`__FILE__` and `__LINE__` are.
 
 ### Predefined macros
 

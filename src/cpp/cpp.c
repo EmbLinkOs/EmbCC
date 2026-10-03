@@ -4,13 +4,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../driver/util.h"
 #include "../lex/lex.h"
 #include "../arch/predef.h"
 #include "../sema/sema.h"
 
-#define MAX_MACRO_PARAMS 16
+/* C11 5.2.4.1 requires 127. The list is allocated per macro, so the
+ * limit costs nothing for the thousands with few or none. */
+#define MAX_MACRO_PARAMS 127
 #define MAX_INCLUDE_DEPTH 50
 #define MAX_COND_DEPTH 64
 
@@ -45,7 +48,9 @@ struct macro {
     int is_func;
     int is_varargs;       /* trailing ...; extras become __VA_ARGS__ */
     int nparams;
-    const char *params[MAX_MACRO_PARAMS];
+    const char **params;  /* nparams of them; the last is the variadic
+                           * one when is_varargs (__VA_ARGS__, or GNU's
+                           * named `args...`) */
     const char *body;      /* spliced, comment-stripped replacement text */
     int expanding;         /* self-reference guard */
     int builtin;           /* predefined: a header may redefine it */
@@ -72,6 +77,10 @@ struct cpp {
     const char **incdirs;
     int nincdirs;
     int depth;             /* include nesting */
+    int counter;           /* __COUNTER__'s next value */
+    const char *base_file; /* __BASE_FILE__: the main file */
+    int have_time;         /* tm read, for __DATE__ and __TIME__ */
+    struct tm tm;
     struct once_file *once;
     struct pushed_macro *pushed;
 };
@@ -105,6 +114,13 @@ static void cwarn(struct src *s, const char *msg, const char *arg)
         diag_warn_at(s->file, s->line, 0, msg, arg);
     else
         diag_warn_at(s->file, s->line, 0, "%s", msg);
+}
+
+static void add_param(struct macro *m, const char *name)
+{
+    m->params = xrealloc(m->params,
+                         (size_t)(m->nparams + 1) * sizeof *m->params);
+    m->params[m->nparams++] = name;
 }
 
 static struct macro *find_macro(struct cpp *cpp, const char *name, size_t n)
@@ -318,6 +334,19 @@ static char *subst_body(struct src *s, struct macro *m,
             p += 2;
             while (*p == ' ' || *p == '\t')
                 p++;
+            /* GNU's `, ## __VA_ARGS__`: with no variable arguments the
+             * comma goes too, so `LOG("x")` is `printf("x")` and not
+             * `printf("x", )`. With some, the comma stays and nothing is
+             * pasted -- which dropping the operator already gives. */
+            if (m->is_varargs && out.len && out.p[out.len - 1] == ',') {
+                const char *vn = m->params[m->nparams - 1];
+                size_t vl = strlen(vn);
+                const char *va = raw[m->nparams - 1];
+                while (*va == ' ' || *va == '\t' || *va == '\n')
+                    va++;
+                if (!strncmp(p, vn, vl) && !is_idc(p[vl]) && !*va)
+                    out.p[--out.len] = 0;
+            }
             continue;
         }
         if (p[0] == '#' && (is_id0(p[1]) || p[1] == ' ')) { /* stringize */
@@ -451,6 +480,58 @@ static void expand_funclike(struct src *s, struct macro *m,
     *pp = p;
 }
 
+/* The predefined macros whose value is not fixed, beyond __FILE__ and
+ * __LINE__: GCC's __COUNTER__, __DATE__, __TIME__, __FILE_NAME__,
+ * __BASE_FILE__ and __INCLUDE_LEVEL__. They were left as written, so a
+ * build-stamp string was an undeclared name. The date and time are the
+ * compile's start, or SOURCE_DATE_EPOCH's (in UTC) when that is set, for
+ * a reproducible build. With buf NULL, only whether `name` is one. */
+static int dynamic_macro(struct src *s, const char *name, size_t n,
+                         char *buf, size_t bufsz)
+{
+    static const char *const months[] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    };
+#define IS(w) (n == sizeof w - 1 && !memcmp(name, w, n))
+    int date = IS("__DATE__"), tim = IS("__TIME__");
+    if (!IS("__COUNTER__") && !date && !tim && !IS("__FILE_NAME__") &&
+        !IS("__BASE_FILE__") && !IS("__INCLUDE_LEVEL__"))
+        return 0;
+    if (!buf)
+        return 1;
+    if (IS("__COUNTER__")) {
+        snprintf(buf, bufsz, "%d", s->cpp->counter++);
+    } else if (IS("__INCLUDE_LEVEL__")) {
+        snprintf(buf, bufsz, "%d", s->cpp->depth);
+    } else if (IS("__FILE_NAME__") || IS("__BASE_FILE__")) {
+        const char *f = IS("__BASE_FILE__") ? s->cpp->base_file : s->file;
+        const char *slash = strrchr(f ? f : "", '/');
+        if (IS("__FILE_NAME__") && slash)
+            f = slash + 1;
+        snprintf(buf, bufsz, "\"%s\"", f ? f : "");
+    } else {
+        if (!s->cpp->have_time) {
+            const char *sde = getenv("SOURCE_DATE_EPOCH");
+            time_t now = sde && *sde ? (time_t)strtoll(sde, NULL, 10)
+                                     : time(NULL);
+            struct tm *tm = sde && *sde ? gmtime(&now) : localtime(&now);
+            if (tm)
+                s->cpp->tm = *tm;
+            s->cpp->have_time = 1;
+        }
+        const struct tm *tm = &s->cpp->tm;
+        if (date)
+            snprintf(buf, bufsz, "\"%s %2d %d\"", months[tm->tm_mon % 12],
+                     tm->tm_mday, tm->tm_year + 1900);
+        else
+            snprintf(buf, bufsz, "\"%02d:%02d:%02d\"", tm->tm_hour,
+                     tm->tm_min, tm->tm_sec);
+    }
+    return 1;
+#undef IS
+}
+
 /* Expands `text` (already comment-stripped and spliced) into out. */
 static void expand_text(struct src *s, const char *text, struct tbuf *out)
 {
@@ -489,6 +570,14 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
             tb_puts(out, buf);
             p += n;
             continue;
+        }
+        {
+            char buf[64];
+            if (dynamic_macro(s, p, n, buf, sizeof buf)) {
+                tb_puts(out, buf);
+                p += n;
+                continue;
+            }
         }
 
         struct macro *m = find_macro(s->cpp, p, n);
@@ -1061,6 +1150,7 @@ static long eval_if(struct src *s, const char *line)
                 int have = find_macro(s->cpp, q, idn) != NULL ||
                            (idn == 8 && (!memcmp(q, "__FILE__", 8) ||
                                          !memcmp(q, "__LINE__", 8))) ||
+                           dynamic_macro(s, q, idn, NULL, 0) ||
                            has_operator(q, idn);
                 q += idn;
                 if (paren) {
@@ -1421,6 +1511,16 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
 
     while (*p == ' ' || *p == '\t')
         p++;
+    /* `#include MACRO`: the operand is macro-replaced first, and what it
+     * becomes must be one of the two forms (C11 6.10.2p4). It was
+     * refused, and configuration headers chosen that way are common. */
+    struct tbuf expd = { 0, 0, 0 };
+    if (*p != '"' && *p != '<' && is_id0(*p)) {
+        expand_text(s, p, &expd);
+        p = expd.p ? expd.p : "";
+        while (*p == ' ' || *p == '\t')
+            p++;
+    }
     if (*p == '"' || *p == '<') {
         angle = *p == '<';
         char close = angle ? '>' : '"';
@@ -1527,7 +1627,7 @@ static void define_macro(struct src *s, const char *line)
                     m->is_varargs = 1;
                     if (m->nparams >= MAX_MACRO_PARAMS)
                         cerr(s, "too many macro parameters", NULL);
-                    m->params[m->nparams++] = "__VA_ARGS__";
+                    add_param(m, "__VA_ARGS__");
                     p += 3;
                     while (*p == ' ' || *p == '\t')
                         p++;
@@ -1539,11 +1639,20 @@ static void define_macro(struct src *s, const char *line)
                 while (is_idc(p[pn]))
                     pn++;
                 if (m->nparams >= MAX_MACRO_PARAMS)
-                    cerr(s, "too many macro parameters", NULL);
-                m->params[m->nparams++] = xstrndup(p, pn);
+                    cerr(s, "more than 127 macro parameters", NULL);
+                add_param(m, xstrndup(p, pn));
                 p += pn;
                 while (*p == ' ' || *p == '\t')
                     p++;
+                /* GNU's named variadic parameter, `args...`: the
+                 * variable arguments under that name. */
+                if (p[0] == '.' && p[1] == '.' && p[2] == '.') {
+                    m->is_varargs = 1;
+                    p += 3;
+                    while (*p == ' ' || *p == '\t')
+                        p++;
+                    break;
+                }
                 if (*p == ',') {
                     p++;
                     continue;
@@ -2058,7 +2167,7 @@ static void load_predefined(struct cpp *cpp)
                 }
                 if (p[0] == '.' && p[1] == '.' && p[2] == '.') {
                     m->is_varargs = 1;
-                    m->params[m->nparams++] = "__VA_ARGS__";
+                    add_param(m, "__VA_ARGS__");
                     p += 3;
                     continue;
                 }
@@ -2073,7 +2182,7 @@ static void load_predefined(struct cpp *cpp)
                     p++;
                     continue;
                 }
-                m->params[m->nparams++] = xstrndup(p, n);
+                add_param(m, xstrndup(p, n));
                 p += n;
                 if (*p == ',')
                     p++;
@@ -2240,6 +2349,7 @@ char *cpp_process(const char *path, const char *src,
     }
 
     struct tbuf out = { 0, 0, 0 };
+    cpp.base_file = path;
     process_file(&cpp, path, src, &out, -1);
     return out.p ? out.p : xstrndup("", 0);
 }

@@ -1141,17 +1141,19 @@ In C++ both forms work.
 | `__VA_OPT__(tokens)` | C23; the tokens appear only when the variadic arguments are not empty |
 | `_Pragma("...")` | The operator form of `#pragma`, usable in a macro |
 | GNU line markers, `# 12 "file.c"` | Read as `#line` |
+| Named variadic macro parameters, `#define F(args...)` | GNU; `args` names the variable arguments |
+| GNU comma elision, `, ## __VA_ARGS__` | With no variable arguments the comma is removed, so `LOG("x")` with `#define LOG(f, ...) printf(f, ## __VA_ARGS__)` is `printf("x")` |
+| `__COUNTER__` | GNU; 0, 1, 2, ... at each use in the translation unit |
+| `__FILE_NAME__`, `__BASE_FILE__`, `__INCLUDE_LEVEL__` | GNU; the current file's last path component, the main file's name, and the current `#include` depth (0 in the main file) |
+| `#include MACRO` | The operand is macro-replaced, and must then be `"..."` or `<...>` |
 | `defined` on the feature-test operators | See [Using the operators](#using-the-operators) |
 
 ### Not supported
 
 | Feature | Behavior |
 |---|---|
-| Named variadic macro parameters, `#define F(args...)` | `expected ')' in #define` |
-| GNU comma elision, `, ## __VA_ARGS__` | Not performed: with no variadic arguments the comma remains, and the expansion is usually a syntax error later. Use `__VA_OPT__(,)` |
 | `#ident`, `#sccs`, `#assert`, `#unassert`, `#import` | `unknown directive '#ident'` |
-| `__COUNTER__`, `__BASE_FILE__`, `__FILE_NAME__`, `__INCLUDE_LEVEL__`, `__TIMESTAMP__` | Not defined; the name is left as written |
-| `__DATE__`, `__TIME__` | Not defined; the name is left as written |
+| `__TIMESTAMP__` | Not defined; the name is left as written |
 | `$` in a macro name | Not accepted as part of an identifier |
 
 ## Pragmas

@@ -143,7 +143,7 @@ define `__GNUC__` when compiling C.
 | `__STDC_VERSION__` | `201710L`, for every `-std=` value |
 | `__STDC_HOSTED__` | `1`, also with `-ffreestanding` |
 | `__FILE__`, `__LINE__` | Supported; `#line` changes both |
-| `__DATE__`, `__TIME__` | Not defined. A use is left as an identifier and is then an undeclared name: `'__DATE__' is not declared in 'f' — for a call, add a prototype or define it first [E0001]` |
+| `__DATE__`, `__TIME__` | Supported; `SOURCE_DATE_EPOCH` sets them, as in GCC. See [Implementation-defined behavior](implementation-defined.md#preprocessing-directives). |
 | `__STDC_IEC_559__`, `__STDC_IEC_559_COMPLEX__` | Not defined |
 | `__STDC_ISO_10646__`, `__STDC_MB_MIGHT_NEQ_WC__`, `__STDC_UTF_16__`, `__STDC_UTF_32__` | Not defined |
 | `__STDC_ANALYZABLE__`, `__STDC_LIB_EXT1__` | Not defined |
