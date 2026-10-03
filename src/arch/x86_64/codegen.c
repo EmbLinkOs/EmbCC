@@ -2152,10 +2152,19 @@ static void gen_i128(struct code *text, const int *sd, struct ir_ins *i,
     case IR_EXT:
         if (i->w == 16) {
             /* to 128: the value as its class holds it, then its sign (or
-             * zero) in the high eightbyte */
-            if (g_wide && g_wide[i->a])
+             * zero) in the high eightbyte. A sixteen-byte source is read
+             * at the extension's own width: `(int)x` of an __int128 is no
+             * instruction once copies are propagated, so ext.16:4s reads
+             * the 128-bit value itself, and taking all eight low bytes
+             * made (i128)(int)x of 0x80000000 positive. */
+            if (g_wide && g_wide[i->a]) {
                 ld8(text, REG_RAX, sd[i->a]);
-            else
+                if (i->size < 8) {
+                    x86_shift_reg_imm(text, REG_RAX, '<', 64 - 8 * i->size, 8);
+                    x86_shift_reg_imm(text, REG_RAX, i->sign ? '>' : 'u',
+                                      64 - 8 * i->size, 8);
+                }
+            } else
                 cg_load(text, sd, i->a, i->size, i->sign, 8);
             cg_reset();
             st8(text, d, REG_RAX);

@@ -1623,8 +1623,13 @@ static void gen_a64_i128(struct code *t, const long *sd, struct ir_ins *i,
         break;
     case IR_EXT:
         if (i->w == 16) {
+            /* a sixteen-byte source at the extension's own width: once
+             * copies are propagated, ext.16:4s of `(int)x` reads the
+             * 128-bit value itself, and all eight low bytes made
+             * (i128)(int)x of 0x80000000 positive */
             if (g_a64_wide && g_a64_wide[i->a])
-                a64_ldr(t, X, FB, sd[i->a], 8, 0, 8);
+                a64_ldr(t, X, FB, sd[i->a], i->size < 8 ? i->size : 8,
+                        i->size < 8 && i->sign, 8);
             else
                 ld_slot(t, sd, i->a, X, i->size, i->sign, 8);
             a64_str(t, X, FB, d, 8);
