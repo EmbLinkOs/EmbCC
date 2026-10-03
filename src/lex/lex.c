@@ -732,7 +732,10 @@ void lex_next(struct lexer *lx)
         int w = 0, adv = 0;
         pfx = 0;
         if ((q[0] == 'L' || q[0] == 'U') && (q[1] == '"' || q[1] == '\'')) {
-            w = 4; adv = 1;
+            /* U"" is UTF-32. L"" is wchar_t, which is int-sized: two
+             * bytes on AVR, where four-byte elements made p[1] of an
+             * L"xyz" read the high half of 'x'. */
+            w = q[0] == 'L' ? target_int_size() : 4; adv = 1;
         } else if (q[0] == 'u' && q[1] == '8' && q[2] == '"') {
             w = 1; adv = 2;
         } else if (q[0] == 'u' && (q[1] == '"' || q[1] == '\'')) {

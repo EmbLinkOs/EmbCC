@@ -303,18 +303,10 @@ None of the three macros is defined. `char16_t` holds UTF-16 code units,
 | `char16_t` | `unsigned short` | `unsigned short` | `unsigned short` | `unsigned short` | `unsigned short` | `unsigned short` | `unsigned int` (2 bytes) |
 | `char32_t` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned long` (4 bytes) |
 
-On AVR, `wchar_t` is two bytes but an `L"..."` literal is still emitted
-with four-byte elements, so a `wchar_t` array cannot be initialized from
-one:
-
-```text
-embcc: f.c:2:21: error: 'w1' needs a brace or string initializer to supply its size
-```
-
-<!-- Reported to the lead: src/lex/lex.c gives L"" a hard-coded element
-     width of 4; on AVR sizeof(L"ab") is 6 (2-byte elements) while the
-     bytes emitted are 4 per element, and L'\U0001F600' is not reduced to
-     wchar_t's 16 bits. -->
+A wide string literal's elements have the type its prefix names: `L`
+`wchar_t` (two bytes on AVR), `u` `char16_t` and `U` `char32_t`. A
+character above U+FFFF in a two-byte literal (`u""`, and `L""` on AVR)
+is written as a UTF-16 surrogate pair.
 
 ## Integers
 
@@ -1040,8 +1032,6 @@ requires:
 
 - Universal character names in identifiers are refused
   ([Identifiers](#identifiers)).
-- On AVR, wide string literals have four-byte elements
-  ([Characters](#characters)).
 - On Cortex-M, RISC-V and AVR, `FLT_EVAL_METHOD` cannot be used in an
   expression ([Floating point](#floating-point)).
 - An enumeration constant outside the range of `int` is accepted
