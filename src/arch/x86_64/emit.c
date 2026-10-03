@@ -266,6 +266,7 @@ static int alu_rm_opcode(int op)
     case '&': return 0x23;
     case '|': return 0x0b;
     case '^': return 0x33;
+    case 'c': return 0x3b;          /* cmp r, r/m (39, its r/m-r twin) */
     default:  return -1;
     }
 }
@@ -283,6 +284,34 @@ void x86_alu_rr(struct code *c, int op, int dst, int src, int w)
         internal_error("no reg-reg encoding for '%c'", op);
     }
     code_byte(c, 0xc0 | ((dst & 7) << 3) | (src & 7));
+}
+
+static void modrm_baseindex0(struct code *c, int reg, int base, int index,
+                             int scale);
+
+/* dst op= [base+disp] and dst op= [base+index*scale] (+ - & | ^), w-bit:
+ * the "r, r/m" opcodes of x86_alu_rr with the memory operand in r/m --
+ * a load fused into the operation it feeds. */
+void x86_alu_reg_basedisp(struct code *c, int op, int dst, int base,
+                          int disp, int w)
+{
+    if (alu_rm_opcode(op) < 0)
+        internal_error("no memory-source encoding for '%c'", op);
+    rex_rb(c, w == 8, dst, base);
+    code_byte(c, alu_rm_opcode(op));
+    modrm_base(c, dst, base, disp);
+}
+
+void x86_alu_reg_baseindex(struct code *c, int op, int dst, int base,
+                           int index, int scale, int w)
+{
+    if (alu_rm_opcode(op) < 0)
+        internal_error("no memory-source encoding for '%c'", op);
+    int rex = 0x40 | ((w == 8) << 3) | ((dst & 8) ? 4 : 0) |
+              ((index & 8) ? 2 : 0) | ((base & 8) ? 1 : 0);
+    if (rex != 0x40) code_byte(c, rex);
+    code_byte(c, alu_rm_opcode(op));
+    modrm_baseindex0(c, dst, base, index, scale);
 }
 
 /* [base+disp] op= src (+ - & | ^), w-bit: read-modify-write, the memory

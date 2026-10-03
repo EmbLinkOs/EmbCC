@@ -153,6 +153,10 @@ void x86_store_mem_imm(struct code *c, int base, int disp, long imm,
 void x86_rep_movsq(struct code *c);      /* rcx qwords [rsi] -> [rdi] */
 void x86_vzero(struct code *c, int xmm);  /* pxor xmm, xmm */
 void x86_rep_stosq(struct code *c);      /* rcx qwords of rax -> [rdi] */
+void x86_alu_reg_basedisp(struct code *c, int op, int dst, int base,
+                          int disp, int w);
+void x86_alu_reg_baseindex(struct code *c, int op, int dst, int base,
+                           int index, int scale, int w);
 void x86_alu_mem_reg(struct code *c, int op, int base, int disp, int src,
                      int w);
 void x86_alu_mem_imm(struct code *c, int op, int base, int disp, long imm,
