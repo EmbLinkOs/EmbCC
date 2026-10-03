@@ -1104,8 +1104,20 @@ static int gen_complit(struct ir_func *fn, struct expr *e)
  * once. */
 int ir_intern_string(struct ir_unit *iu, const char *bytes, int len)
 {
+    return ir_intern_aligned(iu, bytes, len, 1);
+}
+
+/* A constant that is LOADED rather than read a byte at a time -- a long
+ * double's sixteen bytes -- wants its natural alignment: RISC-V's `ld`
+ * may trap on a misaligned address, and on a part without a handler for
+ * that trap the program stops. A literal already in the pool is shared
+ * only when it sits on such a boundary; the gap before a new one is
+ * zeros, which the object and assembly writers both emit. */
+int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
+                      int align)
+{
     for (int i = 0; i < iu->nstrs; i++)
-        if (iu->strs[i].len == len &&
+        if (iu->strs[i].len == len && iu->strs[i].off % align == 0 &&
             memcmp(iu->strs[i].bytes, bytes, (size_t)len) == 0)
             return i;
     if (iu->nstrs == iu->capstrs) {
@@ -1116,6 +1128,8 @@ int ir_intern_string(struct ir_unit *iu, const char *bytes, int len)
     struct ir_str *s = &iu->strs[iu->nstrs];
     s->bytes = bytes;
     s->len = len;
+    s->align = align;
+    iu->rodata_len = (iu->rodata_len + align - 1) & ~(align - 1);
     s->off = iu->rodata_len;
     iu->rodata_len += len;
     return iu->nstrs++;
@@ -1150,7 +1164,7 @@ static int emit_ldconst(struct ir_func *fn, const struct ldf *v)
     ldf_encode(v, ldf_target_fmt(), (unsigned char *)b);
     struct ir_ins *i = emit(fn);
     i->op = IR_STRADDR;
-    i->label = intern_str(b, 16);
+    i->label = ir_intern_aligned(cur_unit, b, 16, 16);
     i->dst = new_temp(fn);
     return emit_load(fn, i->dst, ty_base(TY_LDOUBLE, 0));
 }

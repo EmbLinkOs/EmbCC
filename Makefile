@@ -469,14 +469,12 @@ libc-linux-aarch64: embcc embar
 # EmbLinkRTOS requirements name had to compile lib/rt by hand and choose the
 # objects itself. tools/build-rt.sh is the one place the recipe lives, and
 # tests/golden/embedded-runtime.sh uses it too, so the archive the test checks
-# is the archive that ships. RV64 is not here: its table claims __int128 while
-# its backend refuses 128-bit values, so lib/rt/int128.c cannot build for it,
-# and it is not one of the four named targets.
+# is the archive that ships.
 # The -eabihf ones are the hard-float convention: its objects do not link
 # with soft-float ones, so its runtime is a separate archive.
 RT_EMBEDDED := avr thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
-               thumbv8m.main-none-eabihf riscv32-unknown-elf
+               thumbv8m.main-none-eabihf riscv32-unknown-elf riscv64-unknown-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \

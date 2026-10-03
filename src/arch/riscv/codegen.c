@@ -106,6 +106,8 @@ struct rv_fn {
     int xlen;            /* 32 or 64 */
     int w;               /* a register in bytes: 4 or 8 */
     char *wide;          /* per vreg: needs a register pair (RV32 only) */
+    char *w16;           /* per vreg, RV64 only: an __int128 or a long
+                          * double, in a sixteen-byte slot (rv_w16_map) */
     char *nshr;          /* per vreg: a narrow high-word shift (narrow_shr) */
     char *sx;            /* per vreg, RV64 only: already the sign-extension
                           * of its low 32 bits (sext_map) */
@@ -285,8 +287,16 @@ int rv_op_calls_helper(const struct ir_ins *i)
      * RV64 -- the same IR operation, a call on one width and not the
      * other, which is the sort of thing one backend for two machines
      * has to keep asking rather than deciding once. */
-    return target_xlen() == 32 && (i->op == IR_DIV || i->op == IR_MOD) &&
-           i->w == 8;
+    if (target_xlen() == 32 && (i->op == IR_DIV || i->op == IR_MOD) &&
+        i->w == 8)
+        return 1;
+    /* ...and at RV64 a 128-bit divide is __divti3, and a shift may be
+     * __ashlti3 (gen_ins128 does a constant count inline, which this does
+     * not look for: answering yes where no call is made costs a register,
+     * answering no where one is made costs a value). */
+    return target_xlen() == 64 && i->w == 16 && !i->flt &&
+           (i->op == IR_DIV || i->op == IR_MOD || i->op == IR_SHL ||
+            i->op == IR_SHR);
 }
 
 /* Where the psABI would put each value (below place_arg, whose answer
@@ -432,6 +442,30 @@ static char *wide_map(struct ir_func *fn)
         }
     }
     return w;
+}
+
+/* The vregs holding a sixteen-byte value at RV64 -- an __int128 or a long
+ * double: cg_wide_vregs, the map the x86-64 and AArch64 backends share,
+ * less any LOCAL that is not itself sixteen bytes. That map closes over
+ * ldvar and stvar in both directions, so `long y = (long)x;` marks y --
+ * whose slot is laid out from its declared size, eight bytes, which a
+ * sixteen-byte copy would overrun. A narrowing stvar stores its `size`
+ * and needs no mark; the temps such a local is read into stay marked and
+ * only waste eight bytes of slot. */
+static char *rv_w16_map(struct ir_func *fn)
+{
+    char *w = cg_wide_vregs(fn);
+    if (!w)
+        return NULL;
+    for (int v = 0; v < fn->nvars && v < fn->nvregs; v++)
+        if (fn->locals[v].size != 16)
+            w[v] = 0;
+    return w;
+}
+
+static int is16(const struct rv_fn *F, int v)
+{
+    return F->w16 && v >= 0 && v < F->fn->nvregs && F->w16[v];
 }
 
 /* ---- the calling convention --------------------------------------------
@@ -670,7 +704,7 @@ static void layout(struct rv_fn *F)
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
         for (int v = 0; v < nv; v++)
-            loc2[v] = in_reg(F, v) || F->wide[v] ? 0 : -1;
+            loc2[v] = in_reg(F, v) || F->wide[v] || is16(F, v) ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
@@ -688,7 +722,14 @@ static void layout(struct rv_fn *F)
             free(tslot);
         }
         for (int v = fn->nvars; v < nv; v++) {
-            if (!F->wide[v] || in_reg(F, v))
+            if (!is16(F, v))
+                continue;
+            off = (off + 15) & ~15L;
+            F->slot[v] = off;
+            off += 16;
+        }
+        for (int v = fn->nvars; v < nv; v++) {
+            if (!F->wide[v] || in_reg(F, v) || is16(F, v))
                 continue;
             off = (off + 7) & ~7L;
             F->slot[v] = off;
@@ -920,6 +961,10 @@ static void mv2(struct rv_fn *F, int dl, int sl, int dh, int sh)
 
 /* A 64-bit value in a register PAIR (rv_pair_alloc) has its low word in
  * F->loc[v] and its high word in the next register. */
+/* A sixteen-byte value's two doublewords at RV64 (gen_ins128). */
+static void ld128(struct rv_fn *F, int v, int lo, int hi);
+static void st128(struct rv_fn *F, int v, int lo, int hi);
+
 static void rd64(struct rv_fn *F, int v, int lo, int hi)
 {
     if (in_reg(F, v)) {
@@ -2014,7 +2059,10 @@ static void gen_call(struct rv_fn *F, int n)
                 }
             }
         } else if (a->size > F->w) {
-            rd64(F, a->vreg, SCR, SCR2);
+            if (F->xlen == 64)
+                ld128(F, a->vreg, SCR, SCR2);
+            else
+                rd64(F, a->vreg, SCR, SCR2);
             if (pl[k].nreg == 1) {
                 /* THE SPLIT. With exactly one register left, a 2*XLEN
                  * scalar puts its LOW half there and its HIGH half at the
@@ -2106,11 +2154,14 @@ static void gen_call(struct rv_fn *F, int n)
                 }
             }
         } else if (a->size > F->w) {
-            /* At RV32 a pair was placed by the parallel move above. */
+            /* At RV32 a pair was placed by the parallel move above; at
+             * RV64 the value is in its slot, so loading it now can
+             * overwrite nothing the move still had to read. */
             if (pl[k].nreg == 2 && F->xlen != 32)
-                rd64(F, a->vreg, argreg(pl[k].reg), argreg(pl[k].reg + 1));
+                ld128(F, a->vreg, argreg(pl[k].reg), argreg(pl[k].reg + 1));
             else if (pl[k].nreg != 2)
-                ld_sp(F, argreg(pl[k].reg), sslot(F, a->vreg), 4, 1); /* low */
+                ld_sp(F, argreg(pl[k].reg), sslot(F, a->vreg), F->w,
+                      1);                        /* the low word */
         }
         /* a plain scalar: already placed by the parallel move above */
     }
@@ -2182,8 +2233,435 @@ static void gen_call(struct rv_fn *F, int n)
         wr(F, i->dst, ACC);
     } else if (F->xlen == 32 && F->wide[i->dst]) {
         wr64(F, i->dst, RV_A0, RV_A1);
+    } else if (F->xlen == 64 && (i->w == 16 || is16(F, i->dst))) {
+        st128(F, i->dst, RV_A0, RV_A1);
     } else {
         wr(F, i->dst, RV_A0);
+    }
+}
+
+/* ---- 128 bits at RV64 -----------------------------------------------------
+ *
+ * __int128 and long double (IEEE binary128) are two XLEN words. At RV64
+ * each such value lives in a sixteen-byte slot of its own and never in a
+ * register: rv_w16_map marks them, and the allocator is handed that map
+ * as `wide` (ineligible) -- the AArch64 backend's arrangement. An
+ * operation loads the words it needs into t0-t2, t4 and t5, the low word
+ * at the slot and the high one eight bytes above, computes, and stores
+ * both back; t6 stays the far-offset register. Not t3: it is B_HI to the
+ * RV32 pair code, but at RV64 the allocator may give it a value -- a
+ * stack parameter in t3 came back as the high word of an xor. The other
+ * five are never allocated, so an inline operation disturbs no value.
+ *
+ * Division, remainder, a shift by a count not known here, and every
+ * binary128 operation and conversion are calls into lib/rt (int128.c,
+ * fp128.c, softtf.c) under libgcc's names, a 128-bit operand in a0:a1
+ * and a second in a2:a3 -- which rv_op_calls_helper tells the allocator.
+ *
+ * Not RV32: there binary128 is four words, which the psABI passes by
+ * reference, and __int128 does not exist. */
+
+#define W_HI SCR2               /* t5: the second operand's high word */
+
+/* Only a value rv_w16_map marked HAS sixteen bytes of slot: one it
+ * missed has eight, or a register, and reading sixteen there takes the
+ * neighbour's bytes for the high word. */
+static void need16(const struct rv_fn *F, int v)
+{
+    if (!is16(F, v))
+        internal_error("riscv: %s: vreg %d is read or written as sixteen "
+                       "bytes and has no sixteen-byte slot", F->fn->name, v);
+}
+
+static void ld128(struct rv_fn *F, int v, int lo, int hi)
+{
+    need16(F, v);
+    long s = sslot(F, v);
+    ld_sp(F, lo, s, 8, 1);
+    ld_sp(F, hi, s + 8, 8, 1);
+}
+
+static void st128(struct rv_fn *F, int v, int lo, int hi)
+{
+    if (v < 0)
+        return;
+    need16(F, v);
+    if (F->slot[v] < 0)
+        return;                         /* a result nothing reads */
+    st_sp(F, lo, F->slot[v], 8);
+    st_sp(F, hi, F->slot[v] + 8, 8);
+}
+
+/* `v`'s value when its ONLY definition is a constant -- a shift count,
+ * which a shift by a known amount does inline. Every definition is
+ * counted, because a merge temp is written once per arm; a local is
+ * never one. */
+static int rv_const_of(const struct rv_fn *F, int v, long *out)
+{
+    const struct ir_func *fn = F->fn;
+    const struct ir_ins *def = NULL;
+    if (v < fn->nvars || v >= fn->nvregs)
+        return 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].dst == v && fn->ins[n].op != IR_STVAR &&
+            fn->ins[n].op != IR_STORE) {
+            if (def)
+                return 0;
+            def = &fn->ins[n];
+        }
+    if (!def || def->op != IR_CONST)
+        return 0;
+    *out = def->imm;
+    return 1;
+}
+
+/* Does this instruction read or write a sixteen-byte value? The rest of
+ * gen_ins handles everything else -- including a NARROW read of one
+ * (`(long)x`, `(int)x` are the same vreg at a smaller width), which
+ * loads the low word from the slot like any slot read. */
+static int rv_ins128(const struct rv_fn *F, const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_CONST: case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+    case IR_MOD: case IR_AND: case IR_OR: case IR_XOR: case IR_SHL:
+    case IR_SHR: case IR_NEG: case IR_BNOT: case IR_CMP: case IR_EXT:
+        return i->w == 16;
+    case IR_LOAD: case IR_LDVAR: case IR_STORE: case IR_STVAR:
+        return i->size == 16;
+    case IR_I2F: case IR_F2I: case IR_F2F:
+        return i->w == 16 || i->size == 16;
+    /* A copy or a select by its OWN width, not by the map: a temp the
+     * optimizer reuses can hold a four-byte value on one path and be in
+     * the sixteen-byte map through a copy on another, and `select.4` of
+     * it was refused as "a 128-bit select". Such a narrow copy moves its
+     * width like any other; the slot is sixteen bytes either way. A
+     * width-less mov still copies the whole value. */
+    case IR_MOV:
+        return is16(F, i->dst) && is16(F, i->a) && (i->w == 16 || i->w == 0);
+    case IR_SELECT:
+        return i->w == 16;
+    case IR_BRZ: case IR_BRNZ:
+        return i->w == 16 && is16(F, i->a);
+    default:
+        return 0;
+    }
+}
+
+/* A shift by a constant count, 0..127, on the words in A_LO:A_HI. */
+static void shift128_imm(struct rv_fn *F, const struct ir_ins *i, int k)
+{
+    struct code *t = F->t;
+    int left = i->op == IR_SHL, ar = !left && i->sign;
+    if (k == 0)
+        return;
+    if (k >= 64) {
+        /* One word crosses into the other, and the vacated word is zero
+         * -- or, arithmetically, the sign. */
+        if (left) {
+            rv_shift_imm(t, RV_SLL, A_HI, A_LO, k - 64, 0, 64);
+            rv_mv(t, A_LO, RV_ZERO);
+        } else {
+            rv_shift_imm(t, ar ? RV_SRA : RV_SRL, A_LO, A_HI, k - 64, 0, 64);
+            if (ar) rv_shift_imm(t, RV_SRA, A_HI, A_HI, 63, 0, 64);
+            else    rv_mv(t, A_HI, RV_ZERO);
+        }
+        return;
+    }
+    /* 1..63: each word shifts, and the bits leaving one enter the other */
+    if (left) {
+        rv_shift_imm(t, RV_SRL, B_LO, A_LO, 64 - k, 0, 64);
+        rv_shift_imm(t, RV_SLL, A_HI, A_HI, k, 0, 64);
+        rv_alu(t, RV_OR, A_HI, A_HI, B_LO, 0);
+        rv_shift_imm(t, RV_SLL, A_LO, A_LO, k, 0, 64);
+    } else {
+        rv_shift_imm(t, RV_SLL, B_LO, A_HI, 64 - k, 0, 64);
+        rv_shift_imm(t, RV_SRL, A_LO, A_LO, k, 0, 64);
+        rv_alu(t, RV_OR, A_LO, A_LO, B_LO, 0);
+        rv_shift_imm(t, ar ? RV_SRA : RV_SRL, A_HI, A_HI, k, 0, 64);
+    }
+}
+
+/* The binary128 helpers' names. A comparison helper's int stands in the
+ * same relation to 0 as a to b, and unordered makes the relation false
+ * -- except __netf2's, whose nonzero is the right answer for a NaN. */
+static const char *tf_cmp_name(enum binop pred)
+{
+    switch (pred) {
+    case B_EQ: return "__eqtf2";
+    case B_NE: return "__netf2";
+    case B_LT: return "__lttf2";
+    case B_LE: return "__letf2";
+    case B_GT: return "__gttf2";
+    default:   return "__getf2";       /* B_GE */
+    }
+}
+
+static void gen_ins128(struct rv_fn *F, struct ir_ins *i)
+{
+    struct code *t = F->t;
+    long k;
+
+    if (i->imm_b)          /* pass_immfold leaves width 16 alone */
+        rv_refuse(F, i, "a folded immediate on a 128-bit operation");
+
+    switch (i->op) {
+    case IR_CONST:                      /* sign-extended, as irgen made it */
+        rv_li(t, A_LO, i->imm, 64);
+        rv_li(t, A_HI, i->imm < 0 ? -1 : 0, 64);
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+
+    case IR_LDVAR: case IR_STVAR: case IR_MOV:
+        /* slot to slot: the local is `a` of an ldvar and `dst` of an
+         * stvar, and one of sixteen bytes is never in a register */
+        if (!is16(F, i->a) || !is16(F, i->dst))
+            rv_refuse(F, i, "a sixteen-byte copy of a narrower value");
+        if (F->slot[i->dst] < 0 || F->slot[i->dst] == F->slot[i->a])
+            return;
+        ld128(F, i->a, A_LO, A_HI);
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+
+
+    case IR_LOAD: {
+        /* Two doublewords. C has the address 16-aligned (a long double
+         * constant included: irgen places it so); a packed member is
+         * read the way the eight-byte path reads one. */
+        int ra_ = rdr(F, i->a, ADDR);
+        if (!is16(F, i->dst) || i->memoff)
+            rv_refuse(F, i, "a sixteen-byte load into a narrower value");
+        rv_load(t, A_LO, ra_, 0, 8, 0, 64);
+        rv_load(t, A_HI, ra_, 8, 8, 0, 64);
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+    }
+    case IR_STORE: {
+        if (!is16(F, i->b) || i->memoff)
+            rv_refuse(F, i, "a sixteen-byte store of a narrower value");
+        ld128(F, i->b, A_LO, A_HI);
+        int ra_ = rdr(F, i->a, ADDR);
+        rv_store(t, A_LO, ra_, 0, 8, 64);
+        rv_store(t, A_HI, ra_, 8, 8, 64);
+        return;
+    }
+
+    case IR_EXT:
+        /* to 128 bits: the low word extended to 64 as the source asks,
+         * and the high word its sign or zero (a narrowing EXT is an
+         * ordinary slot read, below gen_ins128) */
+        if (is16(F, i->a) && i->size == 16) {
+            ld128(F, i->a, A_LO, A_HI);
+        } else {
+            int r = rdr(F, i->a, A_LO);
+            ext_reg(F, A_LO, r, i->size, i->sign);
+            if (i->sign) rv_shift_imm(t, RV_SRA, A_HI, A_LO, 63, 0, 64);
+            else         rv_mv(t, A_HI, RV_ZERO);
+        }
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+
+    case IR_SELECT:
+        rv_refuse(F, i, "a 128-bit select");
+        return;
+
+    case IR_BRZ: case IR_BRNZ:
+        ld128(F, i->a, A_LO, A_HI);
+        rv_alu(t, RV_OR, A_LO, A_LO, A_HI, 0);
+        branch_if(F, i->op == IR_BRZ ? RV_BEQ : RV_BNE, A_LO, RV_ZERO,
+                  i->label);
+        return;
+
+    default:
+        break;
+    }
+
+    if (i->flt) {
+        switch (i->op) {
+        case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+            ld128(F, i->a, RV_A0, RV_A1);
+            ld128(F, i->b, RV_A2, RV_A3);
+            call_helper(F, i->op == IR_ADD ? "__addtf3"
+                           : i->op == IR_SUB ? "__subtf3"
+                           : i->op == IR_MUL ? "__multf3" : "__divtf3");
+            st128(F, i->dst, RV_A0, RV_A1);
+            return;
+        case IR_NEG:                    /* bit 127: right for -0.0, NaN */
+            ld128(F, i->a, A_LO, A_HI);
+            rv_li(t, B_LO, (long long)(-9223372036854775807LL - 1), 64);
+            rv_alu(t, RV_XOR, A_HI, A_HI, B_LO, 0);
+            st128(F, i->dst, A_LO, A_HI);
+            return;
+        case IR_CMP: {
+            ld128(F, i->a, RV_A0, RV_A1);
+            ld128(F, i->b, RV_A2, RV_A3);
+            call_helper(F, tf_cmp_name(i->pred));
+            int d = wreg(F, i->dst, ACC);
+            cmp_to_reg(F, i->pred, 1, RV_A0, RV_ZERO, d);
+            wrote(F, i->dst, d);
+            return;
+        }
+        default:
+            break;
+        }
+    }
+
+    switch (i->op) {
+    case IR_I2F: case IR_F2I: case IR_F2F: {
+        const char *name;
+        int sw = i->size, dw = i->w;
+        if (i->op == IR_I2F)
+            name = sw == 16
+                 ? (dw == 16 ? (i->sign ? "__floattitf" : "__floatuntitf")
+                    : dw == 8 ? (i->sign ? "__floattidf" : "__floatuntidf")
+                    : (i->sign ? "__floattisf" : "__floatuntisf"))
+                 : sw == 8 ? (i->sign ? "__floatditf" : "__floatunditf")
+                 : (i->sign ? "__floatsitf" : "__floatunsitf");
+        else if (i->op == IR_F2I)
+            name = sw == 16
+                 ? (dw == 16 ? (i->sign ? "__fixtfti" : "__fixunstfti")
+                    : dw == 8 ? (i->sign ? "__fixtfdi" : "__fixunstfdi")
+                    : (i->sign ? "__fixtfsi" : "__fixunstfsi"))
+                 : sw == 8 ? (i->sign ? "__fixdfti" : "__fixunsdfti")
+                 : (i->sign ? "__fixsfti" : "__fixunssfti");
+        else
+            name = dw == 16 ? (sw == 8 ? "__extenddftf2" : "__extendsftf2")
+                 : dw == 8 ? "__trunctfdf2" : "__trunctfsf2";
+        if (sw == 16) {
+            ld128(F, i->a, RV_A0, RV_A1);
+        } else if (i->op == IR_I2F && sw <= 4) {
+            /* an int or unsigned argument: sign-extended either way, the
+             * psABI's rule for every 32-bit value (rd32) */
+            int r = rd32(F, i->a, RV_A0);
+            if (r != RV_A0) rv_mv(t, RV_A0, r);
+        } else {
+            rd(F, i->a, RV_A0);
+        }
+        call_helper(F, name);
+        if (dw == 16)
+            st128(F, i->dst, RV_A0, RV_A1);
+        else if (i->dst >= 0)
+            wr(F, i->dst, RV_A0);
+        return;
+    }
+
+    case IR_ADD: case IR_SUB:
+        /* No carry flag: after lo = a + b, `sltu lo, b` is the carry,
+         * and before a - b, `sltu a, b` is the borrow. */
+        ld128(F, i->a, A_LO, A_HI);
+        ld128(F, i->b, B_LO, W_HI);
+        if (i->op == IR_ADD) {
+            rv_alu(t, RV_ADD, A_LO, A_LO, B_LO, 0);
+            rv_alu(t, RV_SLTU, SCR, A_LO, B_LO, 0);
+            rv_alu(t, RV_ADD, A_HI, A_HI, W_HI, 0);
+            rv_alu(t, RV_ADD, A_HI, A_HI, SCR, 0);
+        } else {
+            rv_alu(t, RV_SLTU, SCR, A_LO, B_LO, 0);
+            rv_alu(t, RV_SUB, A_LO, A_LO, B_LO, 0);
+            rv_alu(t, RV_SUB, A_HI, A_HI, W_HI, 0);
+            rv_alu(t, RV_SUB, A_HI, A_HI, SCR, 0);
+        }
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+
+    case IR_AND: case IR_OR: case IR_XOR: {
+        int op = i->op == IR_AND ? RV_AND : i->op == IR_OR ? RV_OR : RV_XOR;
+        ld128(F, i->a, A_LO, A_HI);
+        ld128(F, i->b, B_LO, W_HI);
+        rv_alu(t, op, A_LO, A_LO, B_LO, 0);
+        rv_alu(t, op, A_HI, A_HI, W_HI, 0);
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+    }
+
+    case IR_BNOT:
+        ld128(F, i->a, A_LO, A_HI);
+        rv_alu_imm(t, RV_XOR, A_LO, A_LO, -1, 0);
+        rv_alu_imm(t, RV_XOR, A_HI, A_HI, -1, 0);
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+
+    case IR_NEG:                        /* 0 - a, the borrow from lo */
+        ld128(F, i->a, A_LO, A_HI);
+        rv_alu(t, RV_SLTU, SCR, RV_ZERO, A_LO, 0);          /* snez */
+        rv_alu(t, RV_SUB, A_LO, RV_ZERO, A_LO, 0);
+        rv_alu(t, RV_SUB, A_HI, RV_ZERO, A_HI, 0);
+        rv_alu(t, RV_SUB, A_HI, A_HI, SCR, 0);
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+
+    case IR_MUL:
+        /* The low 128 bits of the product, which is the same for signed
+         * and unsigned: lo*lo in full (mul, mulhu) plus each cross term's
+         * low word in the high half. */
+        ld128(F, i->a, A_LO, A_HI);
+        ld128(F, i->b, B_LO, W_HI);
+        rv_muldiv(t, RV_MULHU, SCR, A_LO, B_LO, 0);
+        rv_muldiv(t, RV_MUL, A_HI, A_HI, B_LO, 0);
+        rv_muldiv(t, RV_MUL, W_HI, A_LO, W_HI, 0);
+        rv_muldiv(t, RV_MUL, A_LO, A_LO, B_LO, 0);
+        rv_alu(t, RV_ADD, SCR, SCR, A_HI, 0);
+        rv_alu(t, RV_ADD, A_HI, SCR, W_HI, 0);
+        st128(F, i->dst, A_LO, A_HI);
+        return;
+
+    case IR_DIV: case IR_MOD:
+        ld128(F, i->a, RV_A0, RV_A1);
+        ld128(F, i->b, RV_A2, RV_A3);
+        call_helper(F, i->op == IR_DIV
+                       ? (i->sign ? "__divti3" : "__udivti3")
+                       : (i->sign ? "__modti3" : "__umodti3"));
+        st128(F, i->dst, RV_A0, RV_A1);
+        return;
+
+    case IR_SHL: case IR_SHR:
+        if (rv_const_of(F, i->b, &k) && k >= 0 && k < 128) {
+            ld128(F, i->a, A_LO, A_HI);
+            shift128_imm(F, i, (int)k);
+            st128(F, i->dst, A_LO, A_HI);
+            return;
+        }
+        {
+            /* the count first: it may be in a0 or a1, which the value's
+             * words are about to take */
+            int r = rd32(F, i->b, RV_A2);
+            if (r != RV_A2) rv_mv(t, RV_A2, r);
+        }
+        ld128(F, i->a, RV_A0, RV_A1);
+        call_helper(F, i->op == IR_SHL ? "__ashlti3"
+                       : i->sign ? "__ashrti3" : "__lshrti3");
+        st128(F, i->dst, RV_A0, RV_A1);
+        return;
+
+    case IR_CMP: {
+        int d = wreg(F, i->dst, ACC);
+        if (i->pred == B_EQ || i->pred == B_NE) {
+            ld128(F, i->a, A_LO, A_HI);
+            ld128(F, i->b, B_LO, W_HI);
+            rv_alu(t, RV_XOR, A_LO, A_LO, B_LO, 0);
+            rv_alu(t, RV_XOR, A_HI, A_HI, W_HI, 0);
+            rv_alu(t, RV_OR, A_LO, A_LO, A_HI, 0);
+            cmp_to_reg(F, i->pred, 0, A_LO, RV_ZERO, d);
+        } else {
+            /* x < y: the high words decide unless they are equal, and
+             * then the low words do, unsigned. > and <= swap the two. */
+            int swap = i->pred == B_GT || i->pred == B_LE;
+            ld128(F, swap ? i->b : i->a, A_LO, A_HI);
+            ld128(F, swap ? i->a : i->b, B_LO, W_HI);
+            rv_alu(t, i->sign ? RV_SLT : RV_SLTU, SCR, A_HI, W_HI, 0);
+            rv_alu(t, RV_XOR, A_HI, A_HI, W_HI, 0);
+            rv_alu_imm(t, RV_SLTU, A_HI, A_HI, 1, 0);       /* seqz */
+            rv_alu(t, RV_SLTU, A_LO, A_LO, B_LO, 0);
+            rv_alu(t, RV_AND, A_LO, A_LO, A_HI, 0);
+            rv_alu(t, RV_OR, d, A_LO, SCR, 0);
+            if (i->pred == B_GE || i->pred == B_LE)
+                rv_alu_imm(t, RV_XOR, d, d, 1, 0);
+        }
+        wrote(F, i->dst, d);
+        return;
+    }
+
+    default:
+        rv_refuse(F, i, "this operation on a 128-bit value");
     }
 }
 
@@ -2217,6 +2695,11 @@ static void gen_ins(struct rv_fn *F, int n)
         }
     }
     int wordop;
+
+    if (F->w16 && rv_ins128(F, i)) {
+        gen_ins128(F, i);
+        return;
+    }
 
     /* Floating point is a CALL here, not an instruction. Only the
      * ARITHMETIC is flagged: `flt` is set on a return, a move and a call
@@ -2269,7 +2752,9 @@ static void gen_ins(struct rv_fn *F, int n)
         rv_refuse(F, i, "this floating-point operation");
     }
 
-    if (i->w > 8)
+    /* (At RV64 a call or a return of one is gen_call's and IR_RET's.) */
+    if (i->w > 8 &&
+        !(F->w16 && (i->op == IR_CALL || i->op == IR_RET)))
         rv_refuse(F, i, "a 128-bit value");
 
     /* Does this instruction work on a value that needs a register pair?
@@ -2738,6 +3223,8 @@ static void gen_ins(struct rv_fn *F, int n)
                 }
             } else if (F->xlen == 32 && F->wide[i->a]) {
                 rd64(F, i->a, RV_A0, RV_A1);
+            } else if (F->xlen == 64 && fn->ret_abi.size == 16) {
+                ld128(F, i->a, RV_A0, RV_A1);
             } else if (F->sx && !fn->ret_abi.is_float &&
                        fn->ret_abi.size == 4) {
                 /* the caller is owed the sign extension (rd32) */
@@ -2825,7 +3312,12 @@ static void gen_ins(struct rv_fn *F, int n)
         else
             name = dst_w == 8 ? "__extendsfdf2" : "__truncdfsf2";
 
-        if (i->op == IR_I2F && src_w == 8 && i->a >= 0 && !F->wide[i->a]) {
+        /* "Narrow" means 32 bits. A sixteen-byte source is not in the
+         * eight-byte map either, and `(float)(long)x` of an __int128 --
+         * the narrowing is no instruction once copies are propagated --
+         * converted its low 32 bits, zero-extended: -2 came out 2^32. */
+        if (i->op == IR_I2F && src_w == 8 && i->a >= 0 && !F->wide[i->a] &&
+            !is16(F, i->a)) {
             /* irgen USED TO convert an `unsigned int` by asking for a
              * SIGNED 64-bit conversion of it, on the grounds that "a
              * 32-bit operation zero-extends its result into the
@@ -3356,6 +3848,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.relax = NULL; F.nrelax = 0;
     F.wide = wide_map(fn);
+    F.w16 = xlen == 64 ? rv_w16_map(fn) : NULL;
     if (xlen == 32) {
         F.nshr = ra_narrow_hishift(fn);
         for (int v = 0; v < fn->nvregs; v++)
@@ -3379,8 +3872,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
          * pointer and every `long` ineligible, and the backend emitted
          * 294 memory operations where RV32 emitted 41 -- the whole
          * reason RV64 stayed at 3.5x clang while RV32 reached 1.7x. An
-         * eight-byte value fits an eight-byte register: at RV64 nothing
-         * is ineligible on width grounds.
+         * eight-byte value fits an eight-byte register: at RV64 only a
+         * sixteen-byte one is ineligible on width grounds (F.w16).
          *
          * fltmap is NULL, not cg_float_vregs: this target has no
          * floating-point register class, so a float lives in an
@@ -3392,7 +3885,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
         int *pair = xlen == 32 && g_rv_pairs ? rv_pair_alloc(fn, &F, pin)
                                              : NULL;
-        F.loc = ra_allocate(fn, &RISCV_RA, xlen == 32 ? F.wide : NULL, pin,
+        F.loc = ra_allocate(fn, &RISCV_RA, xlen == 32 ? F.wide : F.w16, pin,
                             F.used_callee, &F.nsave);
         g_rv_taken = 0;
         if (pair) {
@@ -3839,6 +4332,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.label_off);
     free(F.fix);
     free(F.wide);
+    free(F.w16);
     free(F.sx);
     free(F.nshr);
     free(F.loc);

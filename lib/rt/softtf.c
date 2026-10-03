@@ -1,7 +1,7 @@
-/* IEEE-754 binary128, in software. aarch64 only.
+/* IEEE-754 binary128, in software. aarch64 and RV64.
  *
- * On aarch64 `long double` is binary128 -- a 113-bit significand -- and
- * the machine has no instruction for any of it. Not the arithmetic, not
+ * On aarch64 and RV64 `long double` is binary128 -- a 113-bit
+ * significand -- and neither machine has an instruction for any of it. Not the arithmetic, not
  * the comparisons, not the conversions: `a + b` on two long doubles is
  * a call to `__addtf3`. x86-64's `long double` is the x87 80-bit format
  * and the hardware does all of it, which is why this file is guarded
@@ -45,7 +45,9 @@
  */
 #include "rt.h"
 
-#ifdef __aarch64__
+/* Built on `unsigned __int128`, so not RV32, whose binary128 is the same
+ * format but has no 128-bit integer to compute it in. */
+#if defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
 
 union tfbits {
     long double f;
@@ -844,7 +846,9 @@ u32 __fixunstfsi(long double x)
 
 #else
 
-/* x86-64: `long double` is x87 and the hardware does all of this. */
-typedef int embcc_rt_softtf_is_aarch64_only;
+/* Elsewhere `long double` is x87, which the x86-64 hardware does; the same
+ * as double (ARMv7-M, ARMv8-M) or float (AVR); or RV32's binary128, which
+ * the backend refuses. */
+typedef int embcc_rt_softtf_is_aarch64_and_rv64_only;
 
 #endif

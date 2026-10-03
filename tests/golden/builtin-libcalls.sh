@@ -47,7 +47,7 @@ check aarch64-elf "" "sqrtl "
 check thumbv7m-none-eabi "" "sqrt sqrtf sqrtl "
 check thumbv7em-none-eabihf "" "sqrt sqrtl "
 check riscv32-unknown-elf -DNO_LDOUBLE "sqrt sqrtf "
-check riscv64-unknown-elf -DNO_LDOUBLE "sqrt sqrtf "
+check riscv64-unknown-elf "" "sqrt sqrtf sqrtl "
 check avr "" "sqrt sqrtf sqrtl "
 echo "builtin-libcalls: sqrt is the instruction where there is one, else the libm call"
 

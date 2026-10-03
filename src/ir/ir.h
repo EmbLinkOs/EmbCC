@@ -460,6 +460,8 @@ struct ir_str {
     const char *bytes;
     int len;                 /* including the terminating NUL */
     int off;                 /* offset inside .rodata */
+    int align;               /* what `off` is a multiple of (0: nothing
+                              * asked); .rodata itself is 16-aligned */
 };
 
 /* A symbol EmbIR refers to, by NAME rather than by a pointer into the AST
@@ -539,5 +541,8 @@ void ir_add_csite(struct ir_func *fn, int start, int end, int region);
  * place a global initializer's string targets). Returns its index; the
  * offset is iu->strs[index].off. */
 int ir_intern_string(struct ir_unit *iu, const char *bytes, int len);
+/* ...at an offset that is a multiple of `align` (a power of two, <= 16). */
+int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
+                      int align);
 
 #endif
