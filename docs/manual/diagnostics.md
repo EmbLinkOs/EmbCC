@@ -619,7 +619,7 @@ nothing on.
 | `-Wlogical-op` | `a && a` or `a \|\| a` with identical operands | `-Wextra` |
 | `-Wmaybe-uninitialized` | A local variable read on a path where only some paths wrote it | `-Wall` |
 | `-Wparentheses` | A comparison as an unparenthesized operand of `&`, `\|` or `^` | `-Wall` |
-| `-Wshadow` | A local declaration that hides a local variable or parameter | none |
+| `-Wshadow` | A local declaration that hides a local variable, a parameter or a file-scope variable | none |
 | `-Wshift-count-overflow` | A constant shift count that is negative or not less than the operand width | `-Wall` |
 | `-Wsign-compare` | A comparison that converts a possibly negative signed operand to unsigned | `-Wextra` |
 | `-Wtype-limits` | An unsigned value compared `< 0` or `>= 0` | `-Wextra` |
@@ -846,9 +846,12 @@ The message always shows `==`, whichever comparison operator was used.
 #### `-Wshadow`
 
 Warn when a declaration in a block hides a local variable or parameter
-that is still in scope, with a note at the hidden declaration. A
-declaration that hides a file-scope name is not reported. Not enabled by
-`-Wall` or `-Wextra`.
+that is still in scope, or when a local variable or a parameter hides a
+file-scope variable declared before the function, with a note at the
+hidden declaration. A local that has the name of a function is not
+reported, as with GCC and Clang. Not enabled by `-Wall` or `-Wextra`.
+The message for a file-scope variable is `declaration of 'NAME' shadows
+a global declaration`.
 
 ```c
 int f(int n)

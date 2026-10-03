@@ -171,6 +171,29 @@ static int scope_add(struct scope *sc, const char *name, struct type *ty,
     return sc->n++;
 }
 
+/* The source position of the function body being checked — a global is
+ * visible inside it only if declared above it (C's rule). */
+static int cur_body_seq;
+
+/* -Wshadow for a local or parameter that hides a file-scope variable
+ * declared before the function (GCC and clang report it; a function of
+ * the same name is not reported, as with both). */
+static void warn_shadow_global(struct unit *u, const char *name, int line,
+                               int col)
+{
+    for (struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && g->seq >= 0 && g->seq < cur_body_seq &&
+            g->name && strcmp(g->name, name) == 0) {
+            diag_warn_opt(diag_file(u), line, col, "shadow",
+                          "declaration of '%s' shadows a global declaration",
+                          name);
+            diag_note_at(g->file ? g->file : u->file,
+                         g->name_col ? g->name_line : g->line, g->name_col,
+                         "the one it hides is here");
+            return;
+        }
+}
+
 /* -Wshadow: a declaration that hides one still in scope. Reported where
  * the new one is, with a note at the one it hides — the pair is the point.
  * A name that shadows nothing costs a scan of the active entries. */
@@ -191,6 +214,7 @@ static void warn_shadow(struct unit *u, struct scope *sc, const char *name,
                              "the one it hides is here");
             return;
         }
+    warn_shadow_global(u, name, line, col);
 }
 
 /* Returns the canonical node for a name: the first declaration, into
@@ -288,10 +312,6 @@ static struct global *find_global(struct unit *u, const char *name)
             return g;
     return NULL;
 }
-
-/* The source position of the function body being checked — a global is
- * visible inside it only if declared above it (C's rule). */
-static int cur_body_seq;
 
 /* ---- conversions ---- */
 
@@ -4891,6 +4911,11 @@ static void check_func(struct unit *u, struct func *f)
                        "duplicate parameter '%s' in '%s'",
                        f->params[i], f->name);
         {
+            if (f->params[i] && diag_warning_enabled("shadow"))
+                warn_shadow_global(u, f->params[i],
+                                   f->param_lines[i] ? f->param_lines[i]
+                                                     : f->line,
+                                   f->param_cols[i]);
             int pi = scope_add(&sc, f->params[i], f->param_tys[i], NULL);
             sc.vars[pi].is_param = 1;
             sc.vars[pi].line = f->line;
