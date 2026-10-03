@@ -112,8 +112,8 @@ The frame base, against which every variable's location is given:
 |---|---|
 | x86-64 | `DW_OP_reg6` (`rbp`) |
 | AArch64 | `DW_OP_reg29` (`x29`) |
-| Thumb | `DW_OP_breg13 0` (`sp`) |
-| RISC-V | `DW_OP_breg2 0` (`sp`) |
+| Thumb | `DW_OP_breg13 0` (`sp`); `DW_OP_breg7 0` (`r7`) in a function with `alloca`, a variable-length array or an over-aligned local, which addresses its frame from `r7` |
+| RISC-V | `DW_OP_breg2 0` (`sp`); `DW_OP_breg8 0` (`s0`) in such a function |
 
 ### Variables
 
@@ -159,7 +159,7 @@ type.
 |---|---|---|
 | x86-64 (ELF) | Yes | Tested with gdb under QEMU. |
 | AArch64 (ELF) | Yes | Tested with gdb under QEMU. |
-| Thumb (Cortex-M) | Yes | See [Known problems](#known-problems): pointer size, `alloca`. |
+| Thumb (Cortex-M) | Yes | |
 | RISC-V, RV32 and RV64 | Yes | Tested with gdb under QEMU (RV32). See [Known problems](#known-problems). |
 | AVR | Accepted, not usable | No line table rows and an unreadable `.debug_info`. |
 | Any Darwin target (Mach-O) | Refused | |
@@ -390,15 +390,6 @@ These are defects in the current implementation, not intended behavior.
   frame base is wrong, and `.debug_info` declares a 2-byte address size
   while writing 8-byte addresses, so debuggers cannot read past the
   compile unit. `-g` also turns off register allocation at `-O2`.
-- **Pointer size on 32-bit targets.** Every pointer type is described as
-  8 bytes, also on Thumb and RV32, where pointers are 4 bytes. A
-  debugger may print a pointer variable with 4 bytes of neighboring
-  memory in its upper half.
-- **`alloca`, variable-length arrays and over-aligned locals on Thumb
-  and RISC-V.** The frame base is `sp`, but such a function addresses its
-  frame from `r7` or `s0`, and `sp` moves when the block is allocated (at
-  function entry for a local aligned beyond the stack's alignment).
-  Variable locations are wrong from that point on.
 - **Unwind tables on Thumb, RISC-V and AVR.** `-funwind-tables` (and C++
   at RV64, the one of these targets that compiles C++) produce an
   `.eh_frame` in the x86-64 layout on these targets, which does not
@@ -406,10 +397,3 @@ These are defects in the current implementation, not intended behavior.
 - **Header files.** Code from a header is attributed to the main source
   file, as described in [Line table](#line-table).
 
-<!-- Reported to the lead: dwarf.c hard-codes pointer byte_size 8
-     (db_u8(b, 8)); db_addr writes 8 bytes when the address size is 2
-     (AVR); AVR codegen fills no fn->lines; dwarf.c:517 claims an sp-moving
-     function is refused at -g by the backend, but nothing refuses it;
-     eh_emit is told only aarch64-or-not, so Thumb/RISC-V/AVR CFI is the
-     x86-64 shape (checked: llvm-dwarfdump --eh-frame on a thumbv7m object
-     shows "DW_CFA_def_cfa: R7 +8", return address column 16). -->

@@ -65,6 +65,8 @@
 #define DW_OP_breg(n)         (0x70 + (n))
 #define DW_REG_SP_ARM         13     /* r13 */
 #define DW_REG_SP_RISCV       2      /* x2  */
+#define DW_REG_FB_ARM         7      /* r7: the frame base under alloca */
+#define DW_REG_FB_RISCV       8      /* x8, s0: the same */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -338,6 +340,9 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
         type_record(m, t, off);
         return off;
     }
+    /* A pointer's byte_size is the target's: it was 8 everywhere, so on
+     * Cortex-M and RV32 a debugger read a pointer variable's four bytes
+     * and the four after them as one address. */
     if (t->kind == TY_PTR) {
         struct type *pt = t->pointee && t->pointee->canon ? t->pointee->canon
                                                           : t->pointee;
@@ -353,7 +358,7 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
             m->fix[m->nfix].to = pt;
             m->nfix++;
             db_u32(b, 0);
-            db_u8(b, 8);
+            db_u8(b, (unsigned char)target_ptr_size());
             type_record(m, t, off);
             return off;
         }
@@ -362,10 +367,10 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
         if (pe >= 0) {
             db_uleb(b, AB_PTR_T);
             db_u32(b, (unsigned long)pe);
-            db_u8(b, 8);
+            db_u8(b, (unsigned char)target_ptr_size());
         } else {
             db_uleb(b, AB_PTR);          /* pointer to a type we can't name yet */
-            db_u8(b, 8);
+            db_u8(b, (unsigned char)target_ptr_size());
         }
         type_record(m, t, off);
         return off;
@@ -514,15 +519,23 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
          * including the outgoing argument area, is addressed from
          * there -- so their frame base is `sp + 0`, which is exact for
          * the same reason: sp does not move for the life of the body.
-         * A function whose sp DOES move (alloca, a VLA) is refused at
-         * -g by the backend rather than described wrongly. */
+         * A function whose sp DOES move (alloca, a VLA, a local aligned
+         * past the stack) copies sp into r7 or s0 once the frame is
+         * built and addresses every slot from that copy, at the same
+         * offsets, so that register is its frame base. It was sp here
+         * too -- the comment claimed the backend refused such a function
+         * at -g, and nothing did -- so every location was wrong from
+         * the first allocation on. */
         {
             enum target_arch a = target_get();
             if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
                 a == TARGET_RISCV64) {
                 struct dbuf e = { 0, 0, 0 };
-                db_u8(&e, DW_OP_breg(a == TARGET_THUMB ? DW_REG_SP_ARM
-                                                       : DW_REG_SP_RISCV));
+                int thumb = a == TARGET_THUMB;
+                db_u8(&e, DW_OP_breg(fn->has_alloca
+                                     ? (thumb ? DW_REG_FB_ARM : DW_REG_FB_RISCV)
+                                     : (thumb ? DW_REG_SP_ARM
+                                              : DW_REG_SP_RISCV)));
                 db_sleb(&e, 0);
                 db_uleb(b, (unsigned long)e.len);
                 for (int k = 0; k < e.len; k++) db_u8(b, e.p[k]);

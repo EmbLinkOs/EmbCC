@@ -553,8 +553,7 @@ asked, without an error. Each is a defect, not intended behavior.
   `#pragma GCC poison` poisons nothing, and `#pragma redefine_extname`
   does not rename the symbol.
 - **Debug information.** On AVR, `-g` produces a compile unit with no
-  functions, variables or line-table rows. On Cortex-M and RV32 every
-  pointer type is described as 8 bytes. Enumerations, `typedef` names
+  functions, variables or line-table rows. Enumerations, `typedef` names
   and lexical blocks are not described on any target. The full list is
   in [Debugging](../manual/debugging.md#known-problems).
 
