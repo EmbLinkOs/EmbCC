@@ -303,18 +303,10 @@ None of the three macros is defined. `char16_t` holds UTF-16 code units,
 | `char16_t` | `unsigned short` | `unsigned short` | `unsigned short` | `unsigned short` | `unsigned short` | `unsigned short` | `unsigned int` (2 bytes) |
 | `char32_t` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned long` (4 bytes) |
 
-On AVR, `wchar_t` is two bytes but an `L"..."` literal is still emitted
-with four-byte elements, so a `wchar_t` array cannot be initialized from
-one:
-
-```text
-embcc: f.c:2:21: error: 'w1' needs a brace or string initializer to supply its size
-```
-
-<!-- Reported to the lead: src/lex/lex.c gives L"" a hard-coded element
-     width of 4; on AVR sizeof(L"ab") is 6 (2-byte elements) while the
-     bytes emitted are 4 per element, and L'\U0001F600' is not reduced to
-     wchar_t's 16 bits. -->
+A wide string literal's elements have the type its prefix names: `L`
+`wchar_t` (two bytes on AVR), `u` `char16_t` and `U` `char32_t`. A
+character above U+FFFF in a two-byte literal (`u""`, and `L""` on AVR)
+is written as a UTF-16 surrogate pair.
 
 ## Integers
 
@@ -446,19 +438,7 @@ and AArch64 only.
 
 There are none. Every operation is evaluated in the type of its operands:
 EmbCC uses SSE2, not the x87 unit, for `float` and `double` on x86-64.
-`FLT_EVAL_METHOD` is 0 on x86-64, Apple arm64 and AArch64.
-
-On Cortex-M, RV32, RV64 and AVR, `<float.h>` defines `FLT_EVAL_METHOD` as
-`__FLT_EVAL_METHOD__`, which is not predefined on those targets. In `#if`
-it evaluates to 0; in an expression it is an error:
-
-```text
-embcc: f.c:4:11: error: '__FLT_EVAL_METHOD__' is not declared in '<global initializer>' — for a call, add a prototype or define it first [E0001]
-```
-
-<!-- Reported to the lead: the generated thumb/riscv/avr predefined-macro
-     tables (from clang -dM, which treats __FLT_EVAL_METHOD__ specially)
-     lack __FLT_EVAL_METHOD__, and include/float.h relies on it. -->
+`FLT_EVAL_METHOD` is 0 on every target.
 
 *The direction of rounding when an integer is converted to a
 floating-point number that cannot exactly represent the original value
@@ -656,43 +636,40 @@ every target:
 |---|---|
 | `int` | every value fits `int` |
 | `unsigned int` | no value is negative, and every value fits `unsigned int` |
-| `long` | every value fits `long` |
+| `unsigned long` | no value is negative, and every value fits `unsigned long` |
 | `unsigned long long` | no value is negative |
+| `long` | every value fits `long` |
 | `long long` | otherwise |
 
 The enumeration constants have the enumerated type, as in C23. An
 enumeration whose values all fit `int` is `int` even when no value is
 negative, where GCC and Clang choose `unsigned int`; so
-`(enum e)-1 < 0` is true under EmbCC. `unsigned long` is never chosen:
-an enumeration with no negative value that needs more than 32 bits is
-`long` on x86-64, Apple arm64, AArch64 and RV64, where Clang chooses
-`unsigned long`. On AVR, such an enumeration that needs more than 16
-bits is `long` while its values fit `long`, and `unsigned long long`
-(8 bytes) above that; Clang chooses `unsigned long` (4 bytes) for any
-whose values fit it.
+`(enum e)-1 < 0` is true under EmbCC. A wider enumeration has the type
+GCC and Clang give it: one with no negative value that needs more than
+32 bits is `unsigned long` on x86-64, Apple arm64, AArch64 and RV64, and
+`unsigned long long` on Cortex-M and RV32. On AVR, one with no negative
+value whose largest value is from 32768 to 65535 is `unsigned int` (2
+bytes), and one that needs more than 16 bits is `unsigned long` (4
+bytes). An enumeration named again by its tag has the same type.
 
-Each value is computed as a 64-bit signed integer, so a value of 2^63 or
-more is negative: `enum { X = 0xffffffffffffffff }` is an `int`
-enumeration in which `X` is −1.
+A value of 2^63 or more is that value, not a negative one:
+`enum { X = 0xffffffffffffffff }` is an `unsigned long` enumeration on
+the 64-bit targets. An enumeration with such a value and a negative one,
+or with a constant that would follow `LLONG_MAX` or `ULLONG_MAX`, has no
+type that holds every value, and is refused, as GCC refuses it:
 
-An enumeration of type `unsigned int` is `int` when it is named again by
-its tag: after `enum u { U = 0xffffffff };`, `enum u x;` declares an
-`int`, so after `x = U;` the comparison `x < 0` is true. An object or
-typedef declared in the defining declaration itself
-(`typedef enum u { ... } T;`) has type `unsigned int`.
-
-<!-- Reported to the lead: parse_enum_body (src/parse/parse.c) holds the
-     values in a signed long, so 2^63..2^64-1 wrap negative and
-     `enum { X = 0xffffffffffffffff }` is a 4-byte int enum (clang: 8-byte
-     unsigned long); parse_tagged records the enum's type on its tag only
-     when its kind is not TY_INT, so an `unsigned int` enum named again by
-     its tag is int; and unsigned long is never chosen (LP64 gives long,
-     AVR gives an 8-byte unsigned long long, where clang gives unsigned
-     long). -->
+```text
+embcc: f.c:1: error: the enumeration's values run from -1 to 9223372036854775808, which no integer type holds
+embcc: f.c:1: error: enumerator 'B' would be one past LLONG_MAX, which no integer type the enum can have holds
+```
 
 A C23 fixed underlying type (`enum e : unsigned char { ... }`) is
 supported: the enumerated type and its enumeration constants have that
-type. A value the type cannot represent is not diagnosed.
+type. A value the type cannot represent is refused:
+
+```text
+embcc: f.c:1: error: enumerator 'B' is 256, which the underlying type unsigned char cannot represent
+```
 
 `-fshort-enums` is refused, and so is a `packed` or `aligned` attribute on
 an enumeration:
@@ -777,8 +754,10 @@ EmbCC's own directories.
 expansion) in a `#include` directive are combined into a header name
 (C17 6.10.2).*
 
-The operand of `#include` is not macro-expanded. It must begin with `"`
-or `<`; any other form is refused:
+An operand that does not begin with `"` or `<` is macro-replaced, and
+the result is used as the directive's text, which must then have one of
+those two forms; the characters between the delimiters are the header
+name as written. Any other form is refused:
 
 ```text
 embcc: f.c:2: error: malformed #include
@@ -811,8 +790,11 @@ It does: `#x` applied to `'é'` produces `"'\\u00e9'"`.
 *The behavior on each recognized non-STDC `#pragma` directive
 (C17 6.10.6).*
 
-`#pragma pack` is the only pragma EmbCC acts on. It sets the maximum
-alignment of the members of structures defined after it:
+EmbCC acts on `#pragma pack`, `#pragma once`, `#pragma push_macro`,
+`#pragma pop_macro` and `#pragma weak`; the last four behave as in GCC
+and are described in [Extensions](extensions.md#pragmas). `#pragma pack`
+sets the maximum alignment of the members of structures defined after
+it:
 
 | Form | Effect |
 |---|---|
@@ -839,10 +821,6 @@ In C++, `#pragma pack` is refused; use `__attribute__((packed))`.
 Every other pragma, in `#pragma` or `_Pragma` form, is discarded without
 a diagnostic. This includes:
 
-- `#pragma once`: the header is included again on each `#include`. Use
-  an include guard.
-- `#pragma weak NAME`: the symbol is not made weak. Use
-  `__attribute__((weak))`.
 - `#pragma GCC ...` and `#pragma clang ...` (diagnostic control,
   visibility, and the rest).
 - `#pragma STDC FP_CONTRACT`, `FENV_ACCESS` and `CX_LIMITED_RANGE`, which
@@ -854,16 +832,12 @@ warning EmbCC has.
 *The definitions for `__DATE__` and `__TIME__` when respectively, the
 date and time of translation are not available (C17 6.10.8.1).*
 
-EmbCC does not define `__DATE__` or `__TIME__` at all, nor `__TIMESTAMP__`
-or `__COUNTER__`. A use of one reaches the compiler as an undeclared
-identifier:
-
-```text
-embcc: f.c:1:17: error: '__DATE__' is not declared in '<global initializer>' — for a call, add a prototype or define it first [E0001]
-```
-
-Define them with `-D` if a program needs them, for example
-`-D__DATE__='"Jan  1 1970"'`.
+The date and time of translation are always available. `__DATE__` is
+`"Mmm dd yyyy"`, with the day padded by a space (`"Jan  2 1970"`), and
+`__TIME__` is `"hh:mm:ss"`, in local time, both taken once when the
+compile starts. When the environment variable `SOURCE_DATE_EPOCH` is
+set, they are that many seconds after the epoch, in UTC, as with GCC, so
+that a build can be reproduced. `__TIMESTAMP__` is not defined.
 
 ### Preprocessor limits
 
@@ -871,9 +845,7 @@ Define them with `-D` if a program needs them, for example
 |---|---|---|
 | Nesting of `#include` | 50: `#include nested too deeply` | 15 |
 | Nesting of conditional inclusion | 64: `conditionals nested too deeply` | 63 |
-| Parameters in one macro definition | 16: `too many macro parameters` | 127 |
-
-The limit of 16 macro parameters is below the standard's minimum.
+| Parameters in one macro definition | 127: `more than 127 macro parameters` | 127 |
 
 ### Predefined macros that describe the implementation
 
@@ -904,7 +876,7 @@ library's scope and the rest of its behavior are in
 | Item | EmbCC's C library |
 |---|---|
 | Null pointer constant `NULL` (7.19) | `((void *)0)` |
-| `max_align_t` (7.19) | not declared in C; declared by `<stddef.h>` in C++ only |
+| `max_align_t` (7.19) | a structure of a `long long` and a `long double`, as GCC's; 16-byte aligned on x86-64, AArch64 and RISC-V, 8 on Cortex-M, 1 on AVR |
 | Output of a failed `assert` (7.2.1.1) | `FILE:LINE: FUNCTION: Assertion `EXPR' failed.` on standard error, then `abort()` |
 | `abort` (7.22.4.1) | flushes open streams and ends the program with status 134; it does not raise `SIGABRT` |
 | `EXIT_SUCCESS`, `EXIT_FAILURE` (7.22.4.4) | 0 and 1 |
@@ -914,17 +886,12 @@ library's scope and the rest of its behavior are in
 | `errno` values (7.5) | the traditional POSIX numbers |
 | Locales (7.11) | one: `"C"`. `setlocale` accepts `"C"`, `"POSIX"` and `""` |
 | Multibyte encoding (7.22.7, 7.29.6) | UTF-8; overlong forms, surrogates and values above U+10FFFF are rejected |
-| `MB_LEN_MAX` (5.2.4.2.1) | 1, although the multibyte encoding is UTF-8 |
-| `MB_CUR_MAX` (7.22) | not defined by `<stdlib.h>` |
+| `MB_LEN_MAX` (5.2.4.2.1) | 4, the longest UTF-8 sequence |
+| `MB_CUR_MAX` (7.22) | 4 |
 | `printf` of a null `%s`, `%p` (7.21.6.1) | `(null)`, `(nil)` |
 | `system` (7.22.4.8) | runs nothing; returns 0 for `system(NULL)` and −1 otherwise |
 | Time zone (7.27) | none: `localtime` is `gmtime` |
 | `fesetround`, floating-point exception flags (7.6) | x86-64 and AArch64 only |
-
-<!-- Reported to the lead: MB_LEN_MAX is 1 in include/limits.h while the
-     library's multibyte encoding is UTF-8 (MB_CUR_MAX must not exceed
-     MB_LEN_MAX), and MB_CUR_MAX is missing from lib/libc/include/stdlib.h
-     (`int a = MB_CUR_MAX;` is error E0001). -->
 
 ## Architecture
 
@@ -948,7 +915,7 @@ targets include:
 | `LDBL_MANT_DIG` | 64 | 53 | 113 | 53 | 113 | 113 | 24 |
 | `DBL_MANT_DIG` | 53 | 53 | 53 | 53 | 53 | 53 | 24 |
 | `WCHAR_MIN` | −2^31 | −2^31 | 0 | 0 | −2^31 | −2^31 | −32768 |
-| `FLT_EVAL_METHOD` | 0 | 0 | 0 | 0 in `#if` only | 0 in `#if` only | 0 in `#if` only | 0 in `#if` only |
+| `FLT_EVAL_METHOD` | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | `FLT_ROUNDS` | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
 
 *The result of attempting to indirectly access an object with automatic
@@ -1044,16 +1011,6 @@ requires:
 
 - Universal character names in identifiers are refused
   ([Identifiers](#identifiers)).
-- On AVR, wide string literals have four-byte elements
-  ([Characters](#characters)).
-- On Cortex-M, RISC-V and AVR, `FLT_EVAL_METHOD` cannot be used in an
-  expression ([Floating point](#floating-point)).
 - An enumeration constant outside the range of `int` is accepted
-  without a diagnostic, as C23 allows; one of 2^63 or more is read as a
-  negative value, and an enumeration of type `unsigned int` that is
-  named again by its tag is `int`
+  without a diagnostic, as C23 allows
   ([Structures](#structures-unions-enumerations-and-bit-fields)).
-- `__DATE__` and `__TIME__` are not defined, and a macro may have at most
-  16 parameters ([Preprocessing directives](#preprocessing-directives)).
-- `max_align_t` is not declared in C, `MB_CUR_MAX` is not defined, and
-  `MB_LEN_MAX` is 1 ([Library functions](#library-functions)).

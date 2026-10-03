@@ -759,12 +759,21 @@ static int int_wrap(struct ir_func *fn, int v, const struct type *t,
  * builtin per target, and adding a tenth predicate there is a change in
  * every backend. Here it is a change in this one function.
  */
+/* AVR has no float registers: a float is four bytes in the general
+ * registers, so its bits are already an integer and the conversion is a
+ * copy. The AVR backend refused IR_BITCAST, which made fabs and the rest
+ * fail there; a copy is what every one of its passes already knows. */
+static enum ir_op fb_op(void)
+{
+    return target_get() == TARGET_AVR ? IR_MOV : IR_BITCAST;
+}
+
 static int fb_bits(struct ir_func *fn, struct expr *arg, int *w)
 {
     *w = ty_size(arg->ty);
     int v = gen_expr(fn, arg);
     struct ir_ins *i = emit(fn);
-    i->op = IR_BITCAST;
+    i->op = fb_op();
     i->a = v;
     i->size = *w;
     i->w = *w;
@@ -776,7 +785,7 @@ static int fb_bits(struct ir_func *fn, struct expr *arg, int *w)
 static int fb_float(struct ir_func *fn, int bits, int w)
 {
     struct ir_ins *i = emit(fn);
-    i->op = IR_BITCAST;
+    i->op = fb_op();
     i->a = bits;
     i->size = w;
     i->w = w;
@@ -792,6 +801,83 @@ static long fb_absmask(int w)  { return w == 4 ? (long)0x7fffffffL
                                                : (long)0x7fffffffffffffffL; }
 static long fb_expmask(int w)  { return w == 4 ? (long)0x7f800000L
                                                : (long)0x7ff0000000000000L; }
+
+/* The same builtins on a 16-byte long double: x87's 80-bit format on
+ * x86-64, IEEE binary128 elsewhere. Neither fits one register, and they
+ * were refused. Both are little-endian with the sign and the 15-bit
+ * exponent together in the format's top sixteen bits -- bytes 8-9 of an
+ * x87 value, 14-15 of a binary128 one -- so the value goes through the
+ * stack slot sema gave the call, and that halfword is read and written
+ * as an integer. The fraction, for the NaN and infinity tests, is the
+ * low 63 bits of x87's explicit-integer-bit significand, and binary128's
+ * low 112 bits. */
+static int local_addr(struct ir_func *fn, int v);
+
+static int fb_wide(struct ir_func *fn, struct expr *e)
+{
+    const char *bn = e->name + 10;
+    const struct type *ld = e->args[0]->ty;
+    const struct type *u16 = ty_base(TY_SHORT, 1);
+    const struct type *u64 = ty_int_of_size(8, 1);
+    int x87 = target_get() == TARGET_X86_64;
+    int x = gen_expr(fn, e->args[0]);
+    int y = strncmp(bn, "copysign", 8) == 0 ? gen_expr(fn, e->args[1]) : -1;
+    int slot = local_addr(fn, e->var_index);
+    int sea = emit_bin(fn, IR_ADD, slot, emit_const(fn, x87 ? 8 : 14, AW),
+                       AW, 1);
+    int ysign = -1;
+    if (y >= 0) {
+        emit_store(fn, slot, y, ld);
+        ysign = emit_bin(fn, IR_AND, emit_load(fn, sea, u16),
+                         emit_const(fn, 0x8000, 4), 4, 0);
+    }
+    emit_store(fn, slot, x, ld);
+    int se = emit_load(fn, sea, u16);
+    if (strncmp(bn, "fabs", 4) == 0 || y >= 0) {
+        int nse = emit_bin(fn, IR_AND, se, emit_const(fn, 0x7fff, 4), 4, 0);
+        if (y >= 0)
+            nse = emit_bin(fn, IR_OR, nse, ysign, 4, 0);
+        emit_store(fn, sea, nse, u16);
+        return emit_load(fn, slot, ld);
+    }
+    int sign = emit_bin(fn, IR_SHR, se, emit_const(fn, 15, 4), 4, 0);
+    if (strncmp(bn, "signbit", 7) == 0)
+        return sign;
+    int ex = emit_bin(fn, IR_AND, se, emit_const(fn, 0x7fff, 4), 4, 0);
+    int top = emit_cmp(fn, B_EQ, ex, emit_const(fn, 0x7fff, 4), 4, 0);
+    if (strcmp(bn, "isfinite") == 0)
+        return emit_cmp(fn, B_NE, ex, emit_const(fn, 0x7fff, 4), 4, 0);
+    if (strcmp(bn, "isnormal") == 0)
+        return emit_bin(fn, IR_AND,
+                        emit_cmp(fn, B_NE, ex, emit_const(fn, 0, 4), 4, 0),
+                        emit_cmp(fn, B_NE, ex, emit_const(fn, 0x7fff, 4), 4, 0),
+                        4, 0);
+    int lo = emit_load(fn, slot, u64);
+    int frac;
+    if (x87) {
+        frac = emit_bin(fn, IR_AND, lo,
+                        emit_const(fn, 0x7fffffffffffffffL, 8), 8, 0);
+    } else {
+        int hi = emit_load(fn, emit_bin(fn, IR_ADD, slot,
+                                        emit_const(fn, 8, AW), AW, 1), u64);
+        frac = emit_bin(fn, IR_OR, lo,
+                        emit_bin(fn, IR_SHL, hi, emit_const(fn, 16, 8), 8, 0),
+                        8, 0);
+    }
+    int fz = emit_cmp(fn, B_EQ, frac, emit_const(fn, 0, 8), 8, 0);
+    if (strcmp(bn, "isnan") == 0)
+        return emit_bin(fn, IR_AND, top,
+                        emit_cmp(fn, B_EQ, fz, emit_const(fn, 0, 4), 4, 0),
+                        4, 0);
+    int inf = emit_bin(fn, IR_AND, top, fz, 4, 0);
+    if (strcmp(bn, "isinf") == 0)
+        return inf;
+    /* isinf_sign: inf - 2 * (inf & sign), which is 1, -1 or 0 */
+    return emit_bin(fn, IR_SUB, inf,
+                    emit_bin(fn, IR_SHL,
+                             emit_bin(fn, IR_AND, inf, sign, 4, 0),
+                             emit_const(fn, 1, 4), 4, 1), 4, 1);
+}
 
 /* The names lowered above. Kept next to them so a name added to one is
  * a compile error in the other rather than a silent call to libm. */
@@ -1938,6 +2024,24 @@ static int bk(struct ir_func *fn, unsigned long v, int w)
  * it at this width (ARMv7-M and AVR have no IR_BSWAP lowering; at RV32 a
  * 64-bit value is a register pair). `v` already holds the unsigned type
  * of `size` bytes. Eight bytes are two four-byte swaps, crossed. */
+static int bswap_emit(struct ir_func *fn, int v, int size, int w);
+
+/* Which byte swaps the backend does as instructions: every width on
+ * x86-64, AArch64, RV64, ARMv7-M (`rev`, `rev16`, and two `rev`s for a
+ * register pair) and AVR (whose swap is a permutation of registers).
+ * RV32 has no byte-reverse instruction, so it keeps shifts and masks. */
+static int bswap_insn(int size)
+{
+    (void)size;
+    switch (target_get()) {
+    case TARGET_X86_64: case TARGET_AARCH64: case TARGET_RISCV64:
+    case TARGET_AVR: case TARGET_THUMB:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int bswap_lowered(struct ir_func *fn, int v, int size)
 {
     if (size == 8) {
@@ -1945,8 +2049,8 @@ static int bswap_lowered(struct ir_func *fn, int v, int size)
         int lo = gen_convert(fn, v, u8, u4);
         int hi = gen_convert(fn, emit_bin(fn, IR_SHR, v, bk(fn, 32, 8), 8, 0),
                              u8, u4);
-        int nlo = gen_convert(fn, bswap_lowered(fn, lo, 4), u4, u8);
-        int nhi = gen_convert(fn, bswap_lowered(fn, hi, 4), u4, u8);
+        int nlo = gen_convert(fn, bswap_emit(fn, lo, 4, ty_w(u4)), u4, u8);
+        int nhi = gen_convert(fn, bswap_emit(fn, hi, 4, ty_w(u4)), u4, u8);
         return emit_bin(fn, IR_OR,
                         emit_bin(fn, IR_SHL, nlo, bk(fn, 32, 8), 8, 0),
                         nhi, 8, 0);
@@ -1967,6 +2071,19 @@ static int bswap_lowered(struct ir_func *fn, int v, int size)
     int b3 = emit_bin(fn, IR_SHR, v, bk(fn, 24, 4), 4, 0);
     return emit_bin(fn, IR_OR, emit_bin(fn, IR_OR, b0, b1, 4, 0),
                     emit_bin(fn, IR_OR, b2, b3, 4, 0), 4, 0);
+}
+
+static int bswap_emit(struct ir_func *fn, int v, int size, int w)
+{
+    if (!bswap_insn(size))
+        return bswap_lowered(fn, v, size);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_BSWAP;
+    i->a = v;
+    i->size = size;
+    i->w = w;
+    i->dst = new_temp(fn);
+    return i->dst;
 }
 
 static int bpopcount(struct ir_func *fn, int x, int w)
@@ -2724,16 +2841,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         if (e->name && fb_is_bit_builtin(e->name)) {
             const char *bn = e->name + 10;
             int w = ty_size(e->args[0]->ty);
+            if (w == 16)
+                return fb_wide(fn, e);
             if (w != 4 && w != 8)
-                /* A 16-byte long double is either x87's 80-bit format or
-                 * IEEE binary128, and its sign bit is in the tenth or the
-                 * sixteenth byte -- past what one register holds. Saying
-                 * so beats answering for the wrong bits. */
-                diag_fatal(fn->file, e->line,
-                           "%s on a %d-byte long double is not supported: its "
-                           "sign and exponent fields do not fit one register, "
-                           "which is how the other widths are done",
-                           e->name, w);
+                diag_fatal(fn->file, e->line, "%s on a %d-byte float is not "
+                           "supported", e->name, w);
             int iw = w;
             int b = fb_bits(fn, e->args[0], &iw);
             long am = fb_absmask(w), sm = fb_signmask(w), em = fb_expmask(w);
@@ -2774,20 +2886,20 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                     ty_w(e->ty), 1);
             }
             /* isinf_sign: 1, -1 or 0, so the caller learns WHICH infinity
-             * without a second test. */
+             * without a second test. inf - 2 * (inf & sign): a multiply
+             * here was a call to __mulsi3 on AVR. */
             {
                 int inf = emit_cmp(fn, B_EQ, mag, emit_const(fn, em, w), w, 0);
-                int neg = emit_bin(fn, IR_SHR, b,
-                                   emit_const(fn, w * 8 - 1, w), w, 0);
-                int sgn = emit_bin(fn, IR_SUB,
-                                   emit_const(fn, 1, 4),
-                                   emit_bin(fn, IR_SHL,
-                                            gen_convert(fn, neg,
-                                                        ty_int_of_size(w, 0),
-                                                        e->ty),
-                                            emit_const(fn, 1, 4), 4, 1),
-                                   4, 1);
-                return emit_bin(fn, IR_MUL, inf, sgn, 4, 1);
+                int neg = gen_convert(fn,
+                                      emit_bin(fn, IR_SHR, b,
+                                               emit_const(fn, w * 8 - 1, w),
+                                               w, 0),
+                                      ty_int_of_size(w, 0), e->ty);
+                return emit_bin(fn, IR_SUB, inf,
+                                emit_bin(fn, IR_SHL,
+                                         emit_bin(fn, IR_AND, inf, neg, 4, 0),
+                                         emit_const(fn, 1, 4), 4, 1),
+                                4, 1);
             }
         }
         if (e->name && strncmp(e->name, "__builtin_sqrt", 14) == 0) {
@@ -2808,17 +2920,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
              * one register: x86-64, aarch64 and RV64. Elsewhere -- no
              * IR_BSWAP on ARMv7-M or AVR, and a 64-bit value is a pair
              * at RV32 -- shifts and masks, which every backend has. */
-            if (!(target_get() == TARGET_X86_64 ||
-                  target_get() == TARGET_AARCH64 ||
-                  target_get() == TARGET_RISCV64))
-                return bswap_lowered(fn, v, ty_size(e->ty));
-            struct ir_ins *i = emit(fn);
-            i->op = IR_BSWAP;
-            i->a = v;
-            i->size = ty_size(e->ty);
-            i->w = ty_w(e->ty);
-            i->dst = new_temp(fn);
-            return i->dst;
+            return bswap_emit(fn, v, ty_size(e->ty), ty_w(e->ty));
         }
         if (e->name && strcmp(e->name, "__sync_synchronize") == 0) {
             emit(fn)->op = IR_FENCE;
@@ -2852,11 +2954,20 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         }
         if (e->name && strcmp(e->name, "__builtin_alloca") == 0) {
             int size = gen_expr(fn, e->args[0]);
+            long over = e->num;  /* alloca_with_align past the stack's */
+            if (over > 0)
+                size = emit_bin(fn, IR_ADD, size,
+                                emit_const(fn, over - 1, AW), AW, 1);
             struct ir_ins *al = emit(fn);
             al->op = IR_ALLOCA;
             al->a = size;
             al->dst = new_temp(fn);
             fn->has_alloca = 1;
+            if (over > 0)
+                return emit_bin(fn, IR_AND,
+                                emit_bin(fn, IR_ADD, al->dst,
+                                         emit_const(fn, over - 1, AW), AW, 1),
+                                emit_const(fn, -over, AW), AW, 1);
             return al->dst;
         }
         if (e->name && (strcmp(e->name, "__builtin_return_address") == 0 ||

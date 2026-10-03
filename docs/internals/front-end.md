@@ -103,11 +103,15 @@ Limits: 16 macro parameters (`MAX_MACRO_PARAMS`), 50 levels of
 | `#error` | Fatal error with the message. |
 | `#warning` | A warning; the compile continues. |
 | `#pragma pack(...)`, `_Pragma("pack(...)")` | Forwarded to the parser as the marker `__embcc_pack(ARGS)`, which no program can declare. Refused in C++. |
+| `#pragma weak NAME [= TARGET]` | Forwarded as `__embcc_weak(NAME[, TARGET])`; the parser records it in `unit->weaks` and sema applies it before merging declarations (`apply_pragma_weak`). Refused in C++. |
+| `#pragma once` | Records the file's path and text in `cpp->once`; `do_include` skips a file that matches either. |
+| `#pragma push_macro`, `pop_macro` | A stack of saved definitions in `cpp->pushed`. |
 | any other `#pragma` | Discarded. |
 
-`#pragma once` is not implemented: it is discarded like any other
-pragma, so a header that relies on it alone is included again.
-`__COUNTER__`, `__DATE__` and `__TIME__` are not defined.
+`do_pragma` handles both the directive and the `_Pragma` operator.
+`__COUNTER__`, `__DATE__`, `__TIME__`, `__FILE_NAME__`, `__BASE_FILE__`
+and `__INCLUDE_LEVEL__` are computed at each use (`dynamic_macro`), as
+`__FILE__` and `__LINE__` are.
 
 ### Predefined macros
 

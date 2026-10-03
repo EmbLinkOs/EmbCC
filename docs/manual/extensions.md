@@ -642,7 +642,7 @@ Some attributes need support from the object-file writer.
 
 | Attribute | ELF | Mach-O | COFF |
 |---|---|---|---|
-| `section` on a variable | Supported | The object goes in segment `__DATA`, in a section with the name as written. A `"segment,section"` name is not split | Not supported, and not diagnosed: the object is not placed correctly. Do not use it |
+| `section` on a variable | Supported | The object goes in segment `__DATA`, in a section with the name as written. A `"segment,section"` name is not split | `'b': a variable's section attribute is not supported for COFF output` |
 | `section` on a function | Supported | `a function's section attribute is not supported for Mach-O output` | `a function's section attribute is not supported for COFF output` |
 | `alias` | Supported | `alias attribute on 'f' is not supported for Mach-O output` | `alias attribute on 'f' is not supported for COFF output` |
 | `constructor`, `destructor` | `.init_array`, `.fini_array` | `__attribute__((constructor)) is not supported for a Darwin target yet: it needs a __DATA,__mod_init_func section this Mach-O writer does not emit` | `__attribute__((constructor)) is not supported for a Windows target yet: it needs the .ctors/.dtors sections this COFF writer does not emit` |
@@ -830,36 +830,36 @@ floating-point argument`). All of them operate on the bits of the value:
 they do not round, raise no floating-point exception, and call no
 library.
 
-They compile on every target except AVR, where they are refused
-(`the AVR backend cannot lower bitcast yet (function f) [bitcast w=4
-size=4]`). On an argument of a 16-byte `long double` (x86-64, AArch64 ELF
-and Linux, RISC-V) they are refused:
-
-```text
-embcc: f.c:1: error: __builtin_fabsl on a 16-byte long double is not supported: its sign and exponent fields do not fit one register, which is how the other widths are done
-```
-
-On Cortex-M and Apple arm64, where `long double` is 8 bytes, the `l`
-forms work.
+They compile on every target. A 16-byte `long double` (x87's 80-bit
+format on x86-64, IEEE binary128 on AArch64 ELF and Linux) is stored to
+a stack slot and its sign and exponent are read and written there; the
+other widths stay in registers. On RISC-V, where every operation on a
+`long double` is refused, so are these.
 
 ### Square root
 
-| Builtin | Result | Targets |
-|---|---|---|
-| `__builtin_sqrt(x)` | Correctly rounded square root, `double` | x86-64, AArch64 |
-| `__builtin_sqrtf(x)` | Correctly rounded square root, `float` | x86-64, AArch64, Cortex-M with the FPU enabled (`-eabihf` triples, or `-mfpu=fpv4-sp-d16` with `-mfloat-abi=softfp` or `hard`) |
-| `__builtin_sqrtl(x)` | See below | x86-64, AArch64 |
+| Builtin | Result |
+|---|---|
+| `__builtin_sqrt(x)` | Square root, `double` |
+| `__builtin_sqrtf(x)` | Square root, `float` |
+| `__builtin_sqrtl(x)` | Square root, `long double` |
 
-Each is one hardware instruction. `__builtin_sqrtl` converts its
-argument to `double` and returns a `double` square root, so its result
-has `double` precision. On the other targets these builtins are refused,
-for example:
+Where the target has a square-root instruction for the type, the builtin
+is that instruction, and its result is correctly rounded:
 
-```text
-embcc: s.c:1: error: the RV32 backend cannot lower __builtin_sqrt (a libm routine here, not an instruction) yet (function f) [sqrt w=8 size=8]
-```
+| Target | Instruction for |
+|---|---|
+| x86-64 | `float`, `double` (`sqrtss`, `sqrtsd`) |
+| AArch64 | `float`, `double` (`fsqrt`) |
+| Cortex-M with the FPU enabled (`-eabihf` triples, or `-mfpu=` with `-mfloat-abi=softfp` or `hard`) | `float` (`vsqrt.f32`) |
 
-Call `sqrt` from a math library there.
+Everywhere else -- a `double` on a Cortex-M FPU, soft-float Cortex-M,
+RISC-V, AVR, and a 16-byte `long double` -- the builtin is a call to
+`sqrt`, `sqrtf` or `sqrtl`, as with GCC, and the program must link a
+math library that defines it. The precision is then that library's;
+EmbCC's own `sqrtl` computes in `double` (see
+[Libraries](libraries.md)). On RISC-V, `__builtin_sqrtl` is refused
+with every other `long double` operation.
 
 ### Memory and string functions
 
@@ -915,7 +915,7 @@ check, as a call to a `noreturn` function does.
 | Builtin | Result | Targets |
 |---|---|---|
 | `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All but AVR |
-| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`; the alignment argument is not applied | All but AVR |
+| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All but AVR |
 | `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | x86-64, AArch64 |
 | `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | x86-64, AArch64 |
 
@@ -1141,17 +1141,19 @@ In C++ both forms work.
 | `__VA_OPT__(tokens)` | C23; the tokens appear only when the variadic arguments are not empty |
 | `_Pragma("...")` | The operator form of `#pragma`, usable in a macro |
 | GNU line markers, `# 12 "file.c"` | Read as `#line` |
+| Named variadic macro parameters, `#define F(args...)` | GNU; `args` names the variable arguments |
+| GNU comma elision, `, ## __VA_ARGS__` | With no variable arguments the comma is removed, so `LOG("x")` with `#define LOG(f, ...) printf(f, ## __VA_ARGS__)` is `printf("x")` |
+| `__COUNTER__` | GNU; 0, 1, 2, ... at each use in the translation unit |
+| `__FILE_NAME__`, `__BASE_FILE__`, `__INCLUDE_LEVEL__` | GNU; the current file's last path component, the main file's name, and the current `#include` depth (0 in the main file) |
+| `#include MACRO` | The operand is macro-replaced, and must then be `"..."` or `<...>` |
 | `defined` on the feature-test operators | See [Using the operators](#using-the-operators) |
 
 ### Not supported
 
 | Feature | Behavior |
 |---|---|
-| Named variadic macro parameters, `#define F(args...)` | `expected ')' in #define` |
-| GNU comma elision, `, ## __VA_ARGS__` | Not performed: with no variadic arguments the comma remains, and the expansion is usually a syntax error later. Use `__VA_OPT__(,)` |
 | `#ident`, `#sccs`, `#assert`, `#unassert`, `#import` | `unknown directive '#ident'` |
-| `__COUNTER__`, `__BASE_FILE__`, `__FILE_NAME__`, `__INCLUDE_LEVEL__`, `__TIMESTAMP__` | Not defined; the name is left as written |
-| `__DATE__`, `__TIME__` | Not defined; the name is left as written |
+| `__TIMESTAMP__` | Not defined; the name is left as written |
 | `$` in a macro name | Not accepted as part of an identifier |
 
 ## Pragmas
@@ -1186,20 +1188,47 @@ in GCC on ELF targets.
 | Without parentheses, `#pragma pack 1` | `#pragma pack needs its arguments in parentheses` |
 | In C++ | `#pragma pack is not supported in C++: it would change the layout and EmbCC would ignore it. Use __attribute__((packed)) on the struct` |
 
+### `#pragma once`
+
+A file containing `#pragma once` is not read again by a later
+`#include`. The same file is recognized by its path, or, when it is
+reached by another spelling of the path, by its contents, as GCC does.
+
+### `#pragma push_macro` and `#pragma pop_macro`
+
+`#pragma push_macro("NAME")` saves the current definition of the macro
+`NAME`, or the fact that it has none. `#pragma pop_macro("NAME")`
+restores the most recently saved one: `NAME` is redefined as it was, or
+undefined if it was undefined then. Saves nest. A `pop_macro` with no
+matching `push_macro` does nothing, as in GCC. Both work as `_Pragma`
+operators, `_Pragma("push_macro(\"NAME\")")`.
+
+### `#pragma weak`
+
+`#pragma weak NAME` makes `NAME` a weak symbol, as
+`__attribute__((weak))` on its declaration does: a weak definition, or
+a weak reference that resolves to 0 when nothing defines it. The pragma
+may come before or after the declaration. `#pragma weak NAME = TARGET`
+also makes the function `NAME` an alias of `TARGET`, which must be
+defined in the same file. Refused forms:
+
+| Refused | Diagnostic |
+|---|---|
+| An alias for a variable | `#pragma weak v = t: an alias is supported for a function, and 'v' is a variable` |
+| An alias for an undeclared name | `#pragma weak f = t: 'f' is not declared in this file, and the alias needs its type` |
+| Inside a structure body | `#pragma weak inside a struct body is not supported: put it before the struct` |
+| In C++ | `#pragma weak is not supported in C++: use __attribute__((weak)) on the declaration` |
+
 ### Every other pragma is ignored
 
-`#pragma pack` is the only pragma EmbCC acts on. Every other `#pragma`
-and `_Pragma` is removed without a diagnostic, and does not appear in
-`-E` output. This includes pragmas that change a program's meaning in
-GCC and Clang:
+Every other `#pragma` and `_Pragma` is removed without a diagnostic, and
+does not appear in `-E` output. This includes pragmas that change a
+program's meaning or its diagnostics in GCC and Clang:
 
 | Pragma | Use instead |
 |---|---|
-| `#pragma once` | Include guards. A header protected only by `#pragma once` is read again on every `#include`, and its definitions are then duplicates |
-| `#pragma weak NAME` | `__attribute__((weak))` on a declaration of `NAME` |
 | `#pragma GCC diagnostic push`, `pop`, `ignored`, `warning`, `error` | `-Wno-NAME` and `-Werror=NAME` on the command line; see [Warning options](diagnostics.md#warning-options) |
 | `#pragma GCC visibility push(...)`, `pop` | `__attribute__((visibility(...)))` on each declaration |
-| `#pragma push_macro`, `#pragma pop_macro` | `#undef` and `#define` |
 | `#pragma GCC poison`, `#pragma GCC system_header`, `#pragma message`, `#pragma GCC optimize`, `#pragma redefine_extname` | None |
 | `#pragma STDC FP_CONTRACT`, `FENV_ACCESS`, `CX_LIMITED_RANGE` | None |
 
@@ -1208,13 +1237,11 @@ GCC and Clang:
 These constructs are accepted, have no effect, and draw no diagnostic.
 Each is described in its section above.
 
-- Every pragma except `pack`, including `#pragma once` and `#pragma weak`.
+- Every pragma except `pack`, `once`, `push_macro`, `pop_macro` and
+  `weak`.
 - `packed` and `section` on a single structure member.
 - `pcs` on a function-pointer parameter.
-- `__builtin_alloca_with_align`'s alignment argument.
 - The memory-order arguments of the atomic builtins.
 - The payload string of `__builtin_nan`.
 - `weak` and `visibility` on COFF output, and `visibility` on Mach-O
   output.
-- `section` on a variable on COFF output, which also places the object
-  incorrectly.

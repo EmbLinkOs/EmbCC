@@ -355,8 +355,8 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf riscv64-unknown-elf
         echo "case topasm $t: a data-only block was refused"; exit 1; }
 done
 echo "case topasm: an instruction in file-scope asm off x86-64 is refused by name"
-check generic-const-ambiguous \
-    'int main(void) { return _Generic((const char *)0, char *: 1, const char *: 2, default: 3); }' \
+check generic-duplicate-type \
+    'int main(void) { return _Generic(1, int: 1, int: 2, default: 3); }' \
     "more than one _Generic association matches"
 check asm-bad-constraint \
     'int main(void) { int x; __asm__("int $0x80" : "=t"(x)); return x; }' \
@@ -556,3 +556,73 @@ check fn-section-shared-with-data \
     '__attribute__((section(".ramfunc"))) int f(void) { return 1; }
 __attribute__((section(".ramfunc"))) int v = 2;' \
     "cannot share it"
+
+# Enumerators past what any integer type holds. gcc refuses these
+# ("overflow in enumeration values"); clang warns and wraps, and EmbCC
+# wrapped without a word.
+check enum-past-llong-max \
+    'enum { A = 0x7fffffffffffffff, B };' \
+    "one past LLONG_MAX"
+check enum-past-ullong-max \
+    'enum { A = ~0ULL, B };' \
+    "one past ULLONG_MAX"
+check enum-negative-and-huge \
+    'enum { A = -1, B = 0x8000000000000000ULL };' \
+    "no integer type holds"
+check enum-fixed-type-range \
+    'enum e : unsigned char { A = 255, B };' \
+    "cannot represent"
+check constexpr-ullong-max-in-long-long \
+    'constexpr long long k = 0xffffffffffffffffULL;' \
+    "does not fit"
+
+# Enumerators and constexprs share one list per unit, which sema reads
+# after the locals and before the globals. Where that would resolve a
+# name to the wrong declaration, the program is refused instead.
+check enum-hides-local \
+    'int f(void) { int N = 5; { enum { N = 3 }; return N; } }' \
+    "would hide the local"
+check block-enum-names-global \
+    'int f(void) { enum { N = 3 }; return N; }
+int N = 7;
+int g(void) { return N; }' \
+    "declared in a function"
+check enum-redeclares-function \
+    'enum { g = 1 };
+int g(void) { return 0; }' \
+    "different kind of symbol"
+check constexpr-shadows-enumerator \
+    'enum { A = 1 };
+int f(void) { constexpr int A = 2; return A; }' \
+    "already a named constant"
+
+# A const object, or one reached through a pointer to const, is not
+# assigned: C11 6.5.16p2 makes each of these a constraint violation.
+# const was not in the type, and every one compiled -- the file-scope
+# ones into a store to .rodata.
+check const-assign 'const int k = 1; void f(void) { k = 2; }' "read-only 'k'"
+check const-through-pointer \
+    'void f(const char *s) { *s = 1; }' "read-only location"
+check const-pointer-itself \
+    'char b[2]; char *const p = b; void f(void) { p = 0; }' "read-only 'p'"
+check const-member \
+    'struct S { const int a; }; void f(struct S *s) { s->a = 1; }' "read-only 'a'"
+check const-struct-member \
+    'struct T { int a; }; const struct T t = { 1 }; void f(void) { t.a = 2; }' \
+    "read-only 'a'"
+check const-member-whole \
+    'struct S { const int a; }; void f(struct S *x, struct S *y) { *x = *y; }' \
+    "has a const member"
+check const-array-element \
+    'const int arr[2] = { 1, 2 }; void f(void) { arr[0] = 3; }' "read-only location"
+check const-increment 'void f(void) { const int x = 1; x++; }' "increment of read-only"
+check const-compound 'void f(void) { const int x = 1; x += 2; }' "read-only 'x'"
+check const-asm-output \
+    'void f(void) { const int x = 1; __asm__("" : "=r"(x)); }' "an asm output of read-only"
+
+# The COFF writer has no named data sections. A variable with one was
+# put at offset 0 of .data, on top of the first variable there.
+check coff-section-variable \
+    'int a = 1; int b __attribute__((section(".mydata"))) = 2;' \
+    "variable's section attribute is not supported for COFF" \
+    --target=x86_64-windows-gnu

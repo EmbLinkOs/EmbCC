@@ -31,12 +31,6 @@ meaning other than the standard's. Check these first when porting code:
 - Struct, union and enum tags, typedef names and enumeration constants
   declared in a block remain visible to the end of the translation unit.
   See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants).
-- An enumeration constant of 2^63 or more is read as a negative value,
-  and an enumeration of type `unsigned int` that is named again by its
-  tag is `int`. See [Enumeration constants](#enumeration-constants).
-- `const` is not enforced. See [Const qualification](#const-qualification).
-- `_Generic` does not distinguish types that differ only in `const`. See
-  [Generic selection](#generic-selection).
 - A non-`static` `inline` function is emitted as an external definition
   in every translation unit. See [Inline functions](#inline-functions).
 
@@ -149,7 +143,7 @@ define `__GNUC__` when compiling C.
 | `__STDC_VERSION__` | `201710L`, for every `-std=` value |
 | `__STDC_HOSTED__` | `1`, also with `-ffreestanding` |
 | `__FILE__`, `__LINE__` | Supported; `#line` changes both |
-| `__DATE__`, `__TIME__` | Not defined. A use is left as an identifier and is then an undeclared name: `'__DATE__' is not declared in 'f' — for a call, add a prototype or define it first [E0001]` |
+| `__DATE__`, `__TIME__` | Supported; `SOURCE_DATE_EPOCH` sets them, as in GCC. See [Implementation-defined behavior](implementation-defined.md#preprocessing-directives). |
 | `__STDC_IEC_559__`, `__STDC_IEC_559_COMPLEX__` | Not defined |
 | `__STDC_ISO_10646__`, `__STDC_MB_MIGHT_NEQ_WC__`, `__STDC_UTF_16__`, `__STDC_UTF_32__` | Not defined |
 | `__STDC_ANALYZABLE__`, `__STDC_LIB_EXT1__` | Not defined |
@@ -169,7 +163,7 @@ define `__GNUC__` when compiling C.
 | `return;` in a non-`void` function | Not supported | `'g' returns int; 'return' needs a value`. A constraint violation since C99. |
 | `auto` storage class | Supported | `auto int x;` |
 | `register` storage class | Partial | Accepted on block-scope objects. On a parameter or at file scope: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. |
-| `const` | Partial | Not enforced. See [Const qualification](#const-qualification). |
+| `const` | Supported | See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
 | Scopes | Partial | Objects, functions and labels follow the standard's rules. Tags, typedef names and enumeration constants do not. See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants). |
 | Structures, unions, bit-fields | Supported | A structure or union with no members is refused: `a struct/union needs at least one member`. |
@@ -228,13 +222,13 @@ define `__GNUC__` when compiling C.
 | `_Alignas`, `_Alignof`, `<stdalign.h>` | Partial | See [Alignment specifiers](#alignment-specifiers). |
 | `_Noreturn`, `<stdnoreturn.h>` | Supported | The same as `__attribute__((noreturn))`. |
 | `_Static_assert` | Supported | A failed assertion: `static assertion failed: MESSAGE`. A non-constant condition: `_Static_assert needs a constant integer expression`. |
-| `_Generic` | Partial | Types that differ only in `const` are not distinguished. See [Generic selection](#generic-selection). With no matching association and no `default`: `no _Generic association matches type double`. |
+| `_Generic` | Supported | See [Generic selection](#generic-selection). With no matching association and no `default`: `no _Generic association matches type double`. |
 | `_Atomic` qualifier and `_Atomic(T)` specifier | Partial | Integer and pointer types only; sizes depend on the target. See [Atomic types](#atomic-types). |
 | `<stdatomic.h>` | Supported | See [Atomic types](#atomic-types). |
 | `_Thread_local` | Partial | Per-thread storage on the x86-64 and AArch64 ELF, EmbLinkOS and Linux targets; refused on macOS and Windows; one shared instance on Cortex-M, RISC-V and AVR. See [Target-dependent features](#target-dependent-features). At block scope without `static` or `extern`: `a block-scope __thread object must also be static: an automatic one is already private to the call`. |
 | Anonymous structures and unions | Supported | |
 | `char16_t`, `char32_t`, `u"..."`, `U"..."`, `u'x'`, `U'x'`, `u8"..."` | Supported | `<uchar.h>` is provided by the C library. |
-| `max_align_t` | Not supported | `<stddef.h>` declares it only for C++: `expected a type before 'max_align_t'`. |
+| `max_align_t` | Supported | Aligned as `long double` or `long long`, whichever is stricter: 16 bytes on x86-64, AArch64 and RISC-V, 8 on Cortex-M, 1 on AVR. |
 | `CMPLX`, `CMPLXF`, `CMPLXL` | Partial | Defined as function calls, so they cannot initialize a static object. See [Complex types](#complex-types). |
 | Extended identifiers (C11 Annex D) | Supported | Written as UTF-8; a universal character name in an identifier is refused (see the [C99](#c99) table). Any other non-ASCII byte outside a literal: `byte 0xc3 is not part of a character C allows here (identifiers take UTF-8 letters, C11 Annex D)`. |
 | Optional features: VLAs, complex types, atomics, threads | Supported | All four are provided, subject to [Target-dependent features](#target-dependent-features). |
@@ -258,7 +252,7 @@ C17's value, `201710L`.
 | Attributes `[[...]]` | Partial | Not in every position. See [Attributes](#attributes). |
 | `[[deprecated]]` | Supported | A use warns: `'g' is deprecated [-Wdeprecated-declarations]`. A message argument is accepted and not printed. |
 | `[[fallthrough]]` | Supported | Accepted. EmbCC does not warn about fall-through. |
-| `[[maybe_unused]]` | Partial | Suppresses `-Wunused-variable` and `-Wunused-function` for the declaration. On a parameter it is accepted but does not suppress `-Wunused-parameter`. |
+| `[[maybe_unused]]` | Supported | Suppresses `-Wunused-variable`, `-Wunused-function` and, on a parameter, `-Wunused-parameter` for the declaration. |
 | `[[nodiscard]]` | Supported | Discarding the result warns: `result of 'f' is discarded, and it is declared warn_unused_result [-Wunused-result]`. A message argument is accepted and not printed. |
 | `[[noreturn]]`, `[[_Noreturn]]` | Supported | |
 | `[[unsequenced]]`, `[[reproducible]]` | Not supported | Ignored with a warning: `attribute 'unsequenced' is not one EmbCC knows, and is ignored [-Wattributes]`. |
@@ -413,6 +407,19 @@ block and at file scope, is refused although the standard allows it:
 | `struct S { int a; };` at file scope, `struct S { double d; } x;` in a function | `redefinition of 'S'` |
 | `typedef int T;` in one function, `typedef double T;` in another | `redefinition of typedef 'T'` |
 | `enum { A = 1 }` in one function, `enum { A = 2 }` in another | `duplicate enumerator 'A'` |
+| `enum { A = 1 };` at file scope, `constexpr int A = 2;` in a function | `'A' is already a named constant (line 1); ...` |
+| `int N;` in a function, then `enum { N = 3 };` in a block inside it | `'N' would hide the local 'N' declared before it in this function; ...` |
+| `enum { N = 3 };` in a function, and a variable or function `N` at file scope | `'N', declared in a function body, has the name of the file-scope variable on line 2; ...` |
+
+The last two would otherwise give the name two meanings in one program
+-- the constant in one place, the variable in another -- so they are
+refused rather than resolved either way. At file scope, an enumeration
+constant and a variable or function of the same name are the
+standard's redeclaration error:
+
+```text
+error: 'g' redeclared as a different kind of symbol: it is also the function on line 2
+```
 
 A tagged structure or union, or any enumeration, cannot be defined
 inside a type name in an expression (a cast, `sizeof`, a compound
@@ -424,30 +431,62 @@ error: define enums at file scope (block-scope type definitions are not supporte
 ```
 
 An untagged structure in a cast, `(struct { int a; } *)p`, is accepted.
-A variable may share its name with a typedef name or an enumeration
-constant; the innermost declaration is used.
+A local variable or a parameter may share its name with a typedef name
+or with an enumeration constant declared before it, and hides it, as the
+standard specifies. That includes an array bound:
+
+```c
+enum { N = 3 };
+int f(void) { int N = 5; int a[N]; return sizeof a; }   /* 20, a VLA of five */
+```
 
 ### Const qualification
 
-`const` is not enforced. None of the following is diagnosed, although
-the standard requires a diagnostic for each:
+`const` is part of a type, at every level: `const char *` and
+`char *const` are different types from `char *` and from each other.
+An lvalue whose type is `const`-qualified, or a structure or union with
+a `const` member at any depth, cannot be modified. Each of these is an
+error, as the standard requires:
 
 ```c
 const int limit = 10;
-void f(void) { limit = 11; }                    /* assignment to a const object */
-void g(const int *p) { *p = 3; }                /* assignment through a pointer to const */
-void h(const char *s) { char *t = s; (void)t; } /* conversion that discards const */
+void f(void) { limit = 11; }        /* assignment of read-only 'limit' */
+void g(const int *p) { *p = 3; }    /* assignment of a read-only location */
+void h(void) { limit++; }           /* increment of read-only 'limit' */
 ```
 
-A `const` object with static storage duration is placed in a read-only
-section (`.rodata`), so a write to it that compiles can fault at run time.
-See also [Diagnostics](diagnostics.md).
+```text
+error: assignment of read-only 'limit' (its type is const int)
+error: assignment of a read-only location (its type is const int)
+error: assignment of struct S, which has a const member
+```
+
+A member of a `const` structure is `const`, and so is an element of a
+`const` array. Initialization is not assignment: a `const` object takes
+its value from its initializer.
+
+Converting a pointer to a `const`-qualified type into a pointer whose
+pointed-to type is not `const`, without a cast, is diagnosed with the
+warning `-Wdiscarded-qualifiers`, which is on by default as in GCC:
+
+```text
+warning: initialization discards the 'const' qualifier of const char * [-Wdiscarded-qualifiers]
+```
+
+A cast removes `const` without a diagnostic. A `const` object with
+static storage duration is placed in a read-only section (`.rodata`).
+`__auto_type` and the value of an expression drop the qualifiers;
+`typeof` keeps them, and `typeof_unqual` drops them.
 
 ### Enumeration constants
 
 An enumeration with a fixed underlying type, `enum E : unsigned char`,
 has that type, and so do its constants. A value that the underlying type
-cannot represent, `enum E : unsigned char { A = 256 }`, is not diagnosed.
+cannot represent is refused:
+
+```text
+error: enumerator 'B' is 256, which the underlying type unsigned char cannot represent
+```
 
 An enumeration without a fixed underlying type is `int` (two bytes on
 AVR) while every value fits `int`, and its constants then have type
@@ -456,12 +495,12 @@ and C23 does, is accepted without a diagnostic. The enumeration then
 takes the first of these types that can represent every value, and, as
 C23 specifies, its constants take that type too:
 
-1. `unsigned int`, if no value is negative;
-2. `long`;
-3. `unsigned long long` if no value is negative, otherwise `long long`.
+1. `unsigned int`, `unsigned long`, then `unsigned long long`, if no
+   value is negative;
+2. `long`, then `long long`, otherwise.
 
 ```c
-enum big { HUGE = 0x100000005 };      /* long on x86-64: sizeof(enum big) is 8 */
+enum big { HUGE = 0x100000005 };      /* unsigned long on x86-64: sizeof(enum big) is 8 */
 long long f(void) { return HUGE; }    /* returns 0x100000005 */
 ```
 
@@ -469,17 +508,19 @@ Where this choice differs from GCC's and Clang's is described in
 [Implementation-defined behavior](implementation-defined.md#structures-unions-enumerations-and-bit-fields).
 `-fshort-enums` is refused (see [Targets](targets.md#data-models)).
 
-Two cases do not follow the standard:
+A value of 2^63 or more, from an `unsigned long long` initializer, is
+that value: `enum { X = 0xffffffffffffffff }` is an `unsigned long`
+enumeration on the 64-bit targets, and `X > 0`. Two enumerations have no
+type that can represent every value, and are refused:
 
-- Each value is computed as a signed 64-bit integer, so a value of 2^63
-  or more becomes negative. In `enum { X = 0xffffffffffffffff }`, `X` is
-  −1 and the enumeration is `int`.
-- An enumeration of type `unsigned int` is `int` when it is named again
-  by its tag. After `enum u { U = 0xffffffff };`, the constant `U` has
-  type `unsigned int`, but `enum u x;` declares an `int`, so after
-  `x = U;` the comparison `x < 0` is true. An object or typedef declared
-  in the defining declaration itself (`enum u { ... } x;`) has type
-  `unsigned int`.
+```text
+error: the enumeration's values run from -1 to 9223372036854775808, which no integer type holds
+error: enumerator 'B' would be one past LLONG_MAX, which no integer type the enum can have holds
+```
+
+The first is a negative value together with one of 2^63 or more. The
+second is a constant without an initializer that follows `LLONG_MAX`
+(or, with `ULLONG_MAX` in the message, follows `ULLONG_MAX`).
 
 ### Inline functions
 
@@ -550,25 +591,20 @@ controlling expression after lvalue conversion, which removes the
 expression's own qualifiers and `_Atomic`. Types are compared exactly:
 `long` and `long long` are different types even on targets where they
 have the same size, plain `char` is neither `signed char` nor
-`unsigned char`, and `volatile` and `_Atomic` in a pointed-to type
-count.
-
-The comparison differs from the standard's in one way: `const` is
-ignored, at every level. Types that differ only in `const` are the same
-type, so `const int *` and `int *` match each other:
+`unsigned char`, and `const`, `volatile` and `_Atomic` in a pointed-to
+type count:
 
 ```c
-_Generic((const char *)0, char *: 1, default: 2)   /* 1; the standard gives 2 */
-_Generic(1, const int: 1, default: 2)              /* 1; the standard gives 2 */
-_Generic(1L, long long: 1, long: 2)                /* 2, as the standard gives */
+_Generic((const char *)0, char *: 1, default: 2)   /* 2 */
+_Generic(1, const int: 1, default: 2)              /* 2: the operand is an int */
+_Generic(1L, long long: 1, long: 2)                /* 2 */
 ```
 
-A selection in which two associations differ only in `const` is refused,
-and so is one in which two associations have the same type, which the
-standard also forbids:
+A selection in which two associations have the same type is refused, as
+the standard requires:
 
 ```text
-error: more than one _Generic association matches type char *: their types differ only in const, which EmbCC does not yet keep in a type, or are the same type
+error: more than one _Generic association matches type int: two associations name the same type
 ```
 
 ### Atomic types
@@ -766,7 +802,6 @@ language-related declarations they do not provide:
 
 | Missing | Standard | Header |
 |---|---|---|
-| `max_align_t` (provided for C++ only) | C11 | `<stddef.h>` |
 | `nullptr_t`, `unreachable()` | C23 | `<stddef.h>` |
 | `char8_t` | C23 | `<uchar.h>` |
 | `INT_WIDTH`, `BOOL_WIDTH`, `LLONG_WIDTH`, ... | C23 | `<limits.h>` |
@@ -816,7 +851,7 @@ error: unknown escape '\
 | `#line DIGITS ["file"]` | Supported | A missing or zero line number: `#line needs a positive line number`. |
 | `#error TEXT` | Supported | An error: `#error: TEXT`. |
 | `#warning TEXT` | Supported | A warning: `#warning: TEXT`. |
-| `#pragma` | Partial | `#pragma pack` is acted on (see [Extensions](extensions.md)). Every other pragma, including the `STDC` pragmas and `#pragma once`, is ignored without a diagnostic. |
+| `#pragma` | Partial | `pack`, `once`, `push_macro`, `pop_macro` and `weak` are acted on (see [Extensions](extensions.md#pragmas)). Every other pragma, including the `STDC` pragmas, is ignored without a diagnostic. |
 | `_Pragma("...")` | Supported | The same as the corresponding `#pragma`. |
 | `#embed` | Partial | See [Embedding binary data](#embedding-binary-data). |
 | `#` alone (null directive) | Supported | |

@@ -148,10 +148,19 @@ exclude_arch() {
     esac
 }
 
+# Macros clang computes in its preprocessor instead of predefining, so
+# `clang -dM` does not list them, but which <float.h> expands to and a
+# program may use in an expression. A gcc reference lists them with these
+# same values, and `sort -u` folds the two.
+computed() {
+    echo '#define __FLT_EVAL_METHOD_TS_18661_3__ 0'
+    echo '#define __FLT_EVAL_METHOD__ 0'
+}
+
 reference() {
     # shellcheck disable=SC2046
-    "$(refgcc "$1")" $(refflags "$1") -dM -E - </dev/null \
-        | LC_ALL=C sort | grep -v -E "$EXCLUDE" \
+    { "$(refgcc "$1")" $(refflags "$1") -dM -E - </dev/null; computed; } \
+        | LC_ALL=C sort -u | grep -v -E "$EXCLUDE" \
         | grep -v -E "$(exclude_arch "$1")"
 }
 
@@ -175,8 +184,9 @@ refgxx() {
 
 reference_cxx() {
     # shellcheck disable=SC2046
-    "$(refgxx "$1")" $(refflags "$1") -std=gnu++20 -x c++ -dM -E - </dev/null \
-        | LC_ALL=C sort | grep -v -E "$EXCLUDE" | grep -v -E "$EXCLUDE_CXX"
+    { "$(refgxx "$1")" $(refflags "$1") -std=gnu++20 -x c++ -dM -E - \
+        </dev/null; computed; } \
+        | LC_ALL=C sort -u | grep -v -E "$EXCLUDE" | grep -v -E "$EXCLUDE_CXX"
 }
 
 if [ "${1:-}" = --reference ]; then

@@ -96,6 +96,50 @@ grep -q "/b\.c:" "$out/stale.txt" && {
     cat "$out/stale.txt"; exit 1; }
 echo "a function body edit: its own unit only"
 
+# 5b. What the interface record does not hold: a macro used only in a
+#     body, an enumerator's value, a static inline body, an initializer
+#     in a header, and a struct named only in a sizeof. Each changes the
+#     code a.c compiles to and no declaration it provides or uses, and
+#     `stale` said "no rebuild" for every one -- an incremental build that
+#     kept the old object. The hash of the preprocessed text catches them.
+base='struct P { int a; long b; };
+int shared(struct P *);
+#define K 1
+enum { E = 2 };
+static inline int inl(void) { return 3; }
+static const int cv = 4;
+struct Q { char c[8]; };'
+cat > "$out/a.c" << 'EOF'
+#include "hdr.h"
+int f(struct P *p) { return shared(p) + K + E + inl() + cv + (int)sizeof(struct Q); }
+EOF
+for change in 's/#define K 1/#define K 5/' 's/E = 2/E = 9/' 's/return 3;/return 7;/' \
+              's/cv = 4;/cv = 6;/' 's/c\[8\]/c[16]/'; do
+    hdr "$base"
+    "$EMBIDX" build -o "$idx" -I"$out" "$out/a.c" "$out/b.c" > /dev/null
+    hdr "$(printf '%s\n' "$base" | sed "$change")"
+    "$EMBIDX" stale "$idx" 2>/dev/null > "$out/stale.txt"
+    grep -q "a.c: rebuild" "$out/stale.txt" || {
+        echo "FAIL: after '$change' in the header, a.c was not rebuilt:"
+        cat "$out/stale.txt"; exit 1; }
+done
+# Back to the state the sections below expect: the index built from the
+# original a.c, and section 5's edit of it on disk.
+hdr 'struct P { int a; long b; };
+int shared(struct P *);'
+cat > "$out/a.c" << 'EOF'
+#include "hdr.h"
+int g;
+int f(struct P *p) { return shared(p) + g; }
+EOF
+"$EMBIDX" build -o "$idx" -I"$out" "$out/a.c" "$out/b.c" > /dev/null
+cat > "$out/a.c" << 'EOF'
+#include "hdr.h"
+int g;
+int f(struct P *p) { return shared(p) + g + 1; }
+EOF
+echo "a macro, an enumerator, an inline body, an initializer, a sizeof: each rebuilds"
+
 # 6. Navigation: where a declaration lives and who observes it.
 "$EMBIDX" who 'c:@F@shared' "$idx" > "$out/who.txt"
 grep -q "^provides $out/b.c" "$out/who.txt" || {

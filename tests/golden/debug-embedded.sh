@@ -114,6 +114,52 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
     done
 fi
 
+# A pointer is the target's width in the type DIEs too. The pointer
+# DIE's byte_size was 8 on every target, so a debugger read a 32-bit
+# target's pointer variable together with the four bytes after it.
+for t in thumbv7m-none-eabi riscv32-unknown-elf riscv64-unknown-elf; do
+    want=4; [ $t = riscv64-unknown-elf ] && want=8
+    "$EMBCC" --target=$t -g -c "$out/p.c" -o "$out/ptr-$t.o" 2>/dev/null || {
+        echo "FAIL $t: p.c with -g"; fail=1; continue; }
+    got=$("$DWDUMP" --debug-info "$out/ptr-$t.o" 2>/dev/null |
+          awk '/DW_TAG_pointer_type/ { p = 1; next }
+               p && /DW_AT_byte_size/ { gsub(/[()]/, "", $2); print $2 + 0; p = 0 }' |
+          sort -u | tr '\n' ' ')
+    [ "$got" = "$want " ] || {
+        echo "FAIL $t: pointer DIEs have byte_size '$got', the target's is $want"
+        fail=1; }
+done
+[ "$fail" -eq 0 ] && echo "  pointer DIEs carry the target's pointer width"
+
+# A function whose sp moves (alloca, a VLA) addresses its frame from the
+# copy of sp the prologue leaves in r7 (Thumb) or s0 (RISC-V), so that is
+# its frame base. It was sp, and every location was off once the block
+# was allocated. The store of `n` is checked against its location.
+cat > "$out/al.c" <<'CEOF'
+int g(int n)
+{
+    char *buf = __builtin_alloca(n);
+    buf[0] = 1;
+    return n + buf[0];
+}
+CEOF
+for t in thumbv7m-none-eabi riscv32-unknown-elf; do
+    reg=r7; dw=breg7; [ $t = riscv32-unknown-elf ] && { reg=s0; dw=breg8; }
+    "$EMBCC" --target=$t -g -O0 -c "$out/al.c" -o "$out/al-$t.o" 2>/dev/null || {
+        echo "FAIL $t: al.c with -g"; fail=1; continue; }
+    "$DWDUMP" --debug-info "$out/al-$t.o" > "$out/al-$t.dw" 2>/dev/null
+    grep -q "DW_AT_frame_base.*DW_OP_$dw" "$out/al-$t.dw" || {
+        echo "FAIL $t: an alloca function's frame base is not $reg:"
+        grep frame_base "$out/al-$t.dw"; fail=1; continue; }
+    off=$(grep -A3 'DW_AT_name.*"n"' "$out/al-$t.dw" |
+          sed -n 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' | head -1)
+    hex=$(printf '0x%x' "$off")
+    "$OBJDUMP" -d "$out/al-$t.o" 2>/dev/null | grep -Eq "(str|sw).*(\[$reg, #$hex\]|$hex\($reg\))" || {
+        echo "FAIL $t: 'n' at fbreg +$off is not where the prologue stores it"
+        fail=1; }
+done
+[ "$fail" -eq 0 ] && echo "  an alloca function's locations are relative to r7 / s0"
+
 # What is NOT claimed. embld drops non-SHF_ALLOC sections and writes
 # its own .embdbg sidecar, so the LINKED image carries no DWARF and a
 # stock gdb cannot open it. The objects are right; carrying DWARF

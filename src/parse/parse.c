@@ -64,8 +64,8 @@ struct parser {
     /* const at the top level of the type built so far: set from the
      * declaration specifiers (spec_const) by parse_type_spec, raised by
      * a const after a `*` and dropped by the `*` itself (parse_stars).
-     * Types do not carry const; this says whether a declared OBJECT is
-     * read-only, which decides where it is placed. */
+     * The type carries const too (ty_const); this says whether a
+     * declared OBJECT is read-only, which decides where it is placed. */
     int spec_const, q_top;
     /* `#pragma pack`: the maximum member alignment a struct defined now
      * gets (0: none), and the values `push` saved */
@@ -119,6 +119,11 @@ struct parser {
      * one has to edit the name, not the first column of the signature. */
     int decl_name_line, decl_name_col;
     int fn_plines[MAX_PARAMS], fn_pcols[MAX_PARAMS];
+    int fn_punused[MAX_PARAMS]; /* each parameter's __attribute__((unused)) */
+    /* An `unused` met in a declarator's qualifier position
+     * (`int __attribute__((unused)) x`, `char *__attribute__((unused)) p`):
+     * the declaration being parsed takes it. */
+    int stars_unused;
     const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
                            * function declarator inside parentheses
                            * (`(*f(int a))[3]`) */
@@ -908,6 +913,7 @@ static long cast_fold_value(const struct type *t, long v)
 
 static int size_fold(const struct expr *e, long *out);
 static struct type *ce_type(const struct expr *e);
+static const struct expr *generic_choice(const struct expr *e);
 static struct type *parse_array_dims(struct parser *ps, struct type *t);
 static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
@@ -915,6 +921,8 @@ static void parse_static_assert(struct parser *ps);
 static int at_pack(struct parser *ps);
 static int parse_constexpr(struct parser *ps);
 static void parse_pack(struct parser *ps);
+static int at_weak(struct parser *ps);
+static void parse_weak(struct parser *ps);
 static struct expr *parse_initializer(struct parser *ps);
 /* The spelling a label name has in the innermost block that declared
  * it with __label__, or the name itself. */
@@ -1052,6 +1060,7 @@ static struct type *declarator(struct parser *ps, struct type *base,
                     ps->fn_pnames[pi] = pn[pi];
                     ps->fn_plines[pi] = 0;
                     ps->fn_pcols[pi] = 0;
+                    ps->fn_punused[pi] = 0;
                 }
             }
             return t;
@@ -1101,7 +1110,7 @@ static struct type *parse_type_name(struct parser *ps, struct type *base)
 /* Attributes before a parameter's type. Only embcc_sret means anything
  * there — the C++ front-end's mark for the ABI's indirect-result pointer —
  * and only on the first parameter. */
-static int param_sret_attr(struct parser *ps, int index)
+static int param_sret_attr(struct parser *ps, int index, int *unused)
 {
     if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
         return 0;
@@ -1111,6 +1120,7 @@ static int param_sret_attr(struct parser *ps, int index)
     if (a.sret && index != 0)
         parse_error_at(ps, at->line, at->col,
                 "embcc_sret marks the first parameter only");
+    *unused |= a.unused;       /* the list is read here, so is `unused` */
     return a.sret;
 }
 
@@ -1126,6 +1136,9 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
 static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                                           const char **names)
 {
+    /* The declarator being parsed has its name already: the parameters'
+     * own declarators must not leave theirs in its place. */
+    int name_line = ps->decl_name_line, name_col = ps->decl_name_col;
     expect(ps, TOK_LPAREN, "'('");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
@@ -1145,14 +1158,23 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                 advance(ps);
                 break;
             }
-            if (param_sret_attr(ps, n))
+            int unused = 0;
+            if (param_sret_attr(ps, n, &unused))
                 sret = 1;
-            /* A parameter may carry attributes too:
-             * `int f([[maybe_unused]] int x)`. */
+            /* A parameter may carry attributes, and GCC takes them in
+             * three places -- before its type, between the type and the
+             * name, and after the name:
+             *   `int f([[maybe_unused]] int x)`,
+             *   `int f(int __attribute__((unused)) x)`,
+             *   `int f(int x __attribute__((unused)))`.
+             * The last was a syntax error, and `unused` was dropped from
+             * all three, so -Wunused-parameter still fired. */
+            ps->stars_unused = 0;
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
+                unused |= pat.unused;
             }
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
@@ -1161,11 +1183,20 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                            tok_describe(cur(ps)));
             const char *pname;
             struct type *t = parse_declarator(ps, spec, &pname);
+            if (at_attribute(ps)) {
+                struct attrs pat = { 0 };
+                parse_attributes(ps, &pat);
+                pcs_not_here(ps, &pat, "a parameter");
+                unused |= pat.unused;
+            }
+            unused |= ps->stars_unused;
+            ps->stars_unused = 0;
             if (names && n < MAX_PARAMS) {
                 names[n] = pname;
                 if (names == ps->fn_pnames) {
                     ps->fn_plines[n] = ps->decl_name_line;
                     ps->fn_pcols[n] = ps->decl_name_col;
+                    ps->fn_punused[n] = unused;
                 }
             }
             if (t->kind == TY_ARRAY)
@@ -1186,6 +1217,8 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     }
     expect(ps, TOK_RPAREN, "')'");
     ps->vla_ok = saved_vla_ok;
+    ps->decl_name_line = name_line;
+    ps->decl_name_col = name_col;
     struct type *ft = ty_func(ret, pt, n, varargs);
     ft->sret_first = sret;
     return ft;
@@ -1336,6 +1369,8 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
     /* set AFTER the inner parse, which may hold types of its own (a
      * struct body, typeof): these are this declaration's specifiers */
     ps->spec_const = ps->q_top = (q & Q_CONST) != 0;
+    if (t && (q & Q_CONST))
+        t = ty_const(t);      /* so does const: _Generic and sema see it */
     if (t && (q & Q_ATOMIC))
         return ty_atomic(t);
     return (t && (q & Q_VOL)) ? ty_volatile(t) : t;   /* volatile reaches the type */
@@ -1652,8 +1687,10 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
             t = ty_atomic(t);
         else if (q & Q_VOL)
             t = ty_volatile(t);
-        if (q & Q_CONST)
+        if (q & Q_CONST) {
             ps->q_top = 1;
+            t = ty_const(t);
+        }
         /* GCC also lets an attribute sit where a qualifier can:
          * `typedef uint64_t __attribute__((may_alias)) word_t;`,
          * `int * __attribute__((unused)) p`. The ones EmbCC ignores everywhere
@@ -1665,6 +1702,8 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
             struct token *at_tok = cur(ps);
             struct attrs a = { 0 };
             parse_attributes(ps, &a);
+            if (a.unused)
+                ps->stars_unused = 1;
             if (ps->attr_carry_on) {
                 /* The enclosing declaration will take them. */
                 if (a.weak)     ps->attr_slot.weak = 1;
@@ -1718,27 +1757,69 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
 static struct unit *g_fold_unit;
 
 /* Locals declared so far in the current function, so `sizeof(var)` in a later
- * array size — `char buf[sizeof payload]` — resolves at parse time. Flat and
- * reset per top-level item, matching EmbCC's flat local scope. */
-static struct { const char *name; struct type *ty; } g_fold_locals[512];
-static int g_nfold_locals;
+ * array size -- `char buf[sizeof payload]` -- resolves at parse time, and so
+ * a local hides an enumerator of its name here as it does in sema. Reset
+ * per top-level item; a block's names leave with the block (parse_block,
+ * and a for statement's with the loop). A C23 constexpr carries its
+ * econst: it is the one local that folds. */
+struct fold_local {
+    const char *name;
+    struct type *ty;
+    const struct econst *ec;
+};
+static struct fold_local *g_fold_locals;
+static int g_nfold_locals, g_capfold_locals;
+
+static void fold_local_add_ec(const char *name, struct type *ty,
+                              const struct econst *ec)
+{
+    if (!name)
+        return;
+    if (g_nfold_locals == g_capfold_locals) {
+        g_capfold_locals = g_capfold_locals ? 2 * g_capfold_locals : 64;
+        g_fold_locals = xrealloc(g_fold_locals, (size_t)g_capfold_locals *
+                                                sizeof *g_fold_locals);
+    }
+    g_fold_locals[g_nfold_locals].name = name;
+    g_fold_locals[g_nfold_locals].ty = ty;
+    g_fold_locals[g_nfold_locals].ec = ec;
+    g_nfold_locals++;
+}
 
 static void fold_local_add(const char *name, struct type *ty)
 {
-    if (name && ty && g_nfold_locals < 512) {
-        g_fold_locals[g_nfold_locals].name = name;
-        g_fold_locals[g_nfold_locals].ty = ty;
-        g_nfold_locals++;
-    }
+    fold_local_add_ec(name, ty, NULL);
 }
 
-/* The type of a named variable for sizeof folding: a local in scope, else a
- * file-scope global. */
-static struct type *fold_var_type(const char *name)
+/* The innermost local of that name in scope, or NULL. */
+static const struct fold_local *fold_local_find(const char *name)
 {
     for (int i = g_nfold_locals - 1; i >= 0; i--)
         if (strcmp(g_fold_locals[i].name, name) == 0)
-            return g_fold_locals[i].ty;
+            return &g_fold_locals[i];
+    return NULL;
+}
+
+/* The enumerator or constexpr of that name in the unit, or NULL. */
+static const struct econst *fold_econst(const char *name)
+{
+    for (const struct econst *ec = g_fold_unit ? g_fold_unit->econsts : NULL;
+         ec; ec = ec->next)
+        if (strcmp(ec->name, name) == 0)
+            return ec;
+    return NULL;
+}
+
+/* The type of a name for sizeof folding: a local in scope, else an
+ * enumerator, else a file-scope global. */
+static struct type *fold_var_type(const char *name)
+{
+    const struct fold_local *fl = fold_local_find(name);
+    if (fl)
+        return fl->ty;
+    const struct econst *ec = fold_econst(name);
+    if (ec)
+        return ec->ty ? ec->ty : ty_base(TY_INT, 0);
     for (struct global *g = g_fold_unit ? g_fold_unit->globals : NULL;
          g; g = g->next)
         if (g->name && strcmp(g->name, name) == 0)
@@ -1785,10 +1866,22 @@ static struct type *ce_type(const struct expr *e)
          * than the NULL this pass already returned for all of them. */
         if (e->str_width > 1 || e->str_prefix)
             return NULL;
-        return ty_array(ty_base(TY_CHAR, 0), (int)e->num);
+        /* Plain char, as sema types it: a folded _Generic matches as
+         * strictly as sema's, and signed char is not `char`. */
+        return ty_array(ty_plain_char(), (int)e->num);
     }
     case EXPR_CAST:
         return e->cast_ty;
+    case EXPR_SIZEOF:
+    case EXPR_ALIGNOF:
+        /* size_t, as sema types them. Unanswered, `-sizeof(int)` folded
+         * as the host's -4 in an enumerator or an array bound. */
+        return ty_size_t();
+    case EXPR_GENERIC: {
+        /* The type of the association size_fold would choose. */
+        const struct expr *ch = generic_choice(e);
+        return ch ? ce_type(ch) : NULL;
+    }
     case EXPR_COND: {
         /* `a ? b : c` -- the two arms, under the usual arithmetic
          * conversions. The `1 ? (p) : (typeof(...)*)0` shape inside
@@ -1841,7 +1934,7 @@ static struct type *ce_type(const struct expr *e)
              * answered `int *` for a difference and the variable
              * declared from `typeof(end - start)` held a pointer. */
             if (e->op == B_SUB && lp && rp)
-                return ty_int_of_size(target_ptr_size(), 0);
+                return ty_ptrdiff_t();
             t = lp ? lt : (e->op == B_ADD && rp) ? rt : NULL;
             if (t)
                 return t->kind == TY_ARRAY ? ty_ptr(t->pointee) : t;
@@ -1906,6 +1999,35 @@ static struct type *ce_type(const struct expr *e)
     }
 }
 
+/* The association a _Generic selects, as far as this pass can type its
+ * controlling expression; NULL when it cannot. ce_type and size_fold
+ * both ask, so the value and the type of one _Generic agree. */
+static const struct expr *generic_choice(const struct expr *e)
+{
+    struct type *ct = ce_type(e->lhs);
+    const struct expr *chosen = NULL, *deflt = NULL;
+    if (!ct)
+        return NULL;
+    /* The controlling expression undergoes lvalue conversion, so an
+     * array matches `char *` and not `char[4]` -- which is the whole
+     * reason `_Generic("s", char *: ...)` works. ce_type answers
+     * with the ARRAY, because its other caller is sizeof and must. */
+    if (ct->kind == TY_ARRAY)
+        ct = ty_ptr(ct->pointee);
+    else if (ct->kind == TY_FUNC)
+        ct = ty_ptr(ct);
+    else
+        ct = ty_unqual(ct);
+    /* The same strict test sema makes: ty_equal lets `long` match
+     * `long long`, and a folded _Generic then disagreed with the one
+     * sema resolves in the same unit. */
+    for (int i = 0; i < e->ngen; i++) {
+        if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
+        if (ty_generic_same(ct, e->gtypes[i])) { chosen = e->gexprs[i]; break; }
+    }
+    return chosen ? chosen : deflt;
+}
+
 static int size_fold(const struct expr *e, long *out)
 {
     long a, b;
@@ -1914,15 +2036,18 @@ static int size_fold(const struct expr *e, long *out)
     case EXPR_NUM:
         *out = e->num;
         return 1;
-    case EXPR_VAR:
-        /* an enumerator is an integer constant expression: `int a[N];` */
-        for (struct econst *ec = g_fold_unit ? g_fold_unit->econsts : NULL;
-             ec; ec = ec->next)
-            if (strcmp(ec->name, e->name) == 0) {
-                *out = ec->val;
-                return 1;
-            }
-        return 0;
+    case EXPR_VAR: {
+        /* An enumerator is an integer constant expression: `int a[N];`.
+         * A local or parameter of the same name hides it -- with `int N =
+         * 5;` in scope, `int a[N]` is a VLA of five, whatever the file's
+         * `enum { N = 3 }` says, and this folded it to three. */
+        const struct fold_local *fl = fold_local_find(e->name);
+        const struct econst *ec = fl ? fl->ec : fold_econst(e->name);
+        if (!ec)
+            return 0;
+        *out = ec->val;
+        return 1;
+    }
     case EXPR_SIZEOF: {
         struct type *t = e->cast_ty ? e->cast_ty : ce_type(e->rhs);
         if (!t || ty_size(t) == 0)
@@ -1982,24 +2107,7 @@ static int size_fold(const struct expr *e, long *out)
          * The controlling expression is not evaluated (C11 6.5.1.1), so
          * only its TYPE is needed and an operand this pass cannot type
          * simply does not fold. */
-        struct type *ct = ce_type(e->lhs);
-        struct expr *chosen = NULL, *deflt = NULL;
-        if (!ct)
-            return 0;
-        /* The controlling expression undergoes lvalue conversion, so an
-         * array matches `char *` and not `char[4]` -- which is the whole
-         * reason `_Generic("s", char *: ...)` works. ce_type answers
-         * with the ARRAY, because its other caller is sizeof and must. */
-        if (ct->kind == TY_ARRAY)
-            ct = ty_ptr(ct->pointee);
-        else if (ct->kind == TY_FUNC)
-            ct = ty_ptr(ct);
-        for (int i = 0; i < e->ngen; i++) {
-            if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
-            if (ty_equal(ct, e->gtypes[i])) { chosen = e->gexprs[i]; break; }
-        }
-        if (!chosen)
-            chosen = deflt;
+        const struct expr *chosen = generic_choice(e);
         return chosen ? size_fold(chosen, out) : 0;
     }
     case EXPR_COND: {
@@ -2183,6 +2291,10 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "#pragma pack inside a struct body is not supported: "
                        "put it before the struct");
+        if (at_weak(ps))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "#pragma weak inside a struct body is not supported: "
+                       "put it before the struct");
         /* GNU C also takes attributes at the START of a member
          * declaration -- `__attribute__((aligned(16))) char buf[40];` --
          * and they apply to every declarator in it, as trailing ones apply
@@ -2293,6 +2405,21 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
     return t;
 }
 
+/* A named constant declared in a function is recorded in the unit's one
+ * list, which sema consults only after the function's own locals. One
+ * that hides a local or a parameter would therefore lose to it in every
+ * expression sema resolves, while size_fold here took the constant: two
+ * answers, both silent. Refused, by name, until econsts are scoped. */
+static void econst_shadow_check(struct parser *ps, const char *name, int line)
+{
+    const struct fold_local *fl = fold_local_find(name);
+    if (fl && !fl->ec)
+        parse_error_line(ps, line, "'%s' would hide the local '%s' declared "
+                         "before it in this function; EmbCC does not yet let "
+                         "an enumerator or a constexpr shadow a local", name,
+                         name);
+}
+
 /* The enumerators, and the enum's type. With a fixed underlying type
  * (C23 `enum e : T`) that is T, and so is each enumerator's. Without one
  * it is int while every value fits int, and otherwise the type GCC and
@@ -2303,8 +2430,19 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
 static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
 {
     expect(ps, TOK_LBRACE, "'{'");
-    long val = 0, lo = 0, hi = 0;
-    int any = 0;
+    int ib = target_int_size() * 8, lb = target_long_size() * 8;
+    long imax = (1L << (ib - 1)) - 1, imin = -imax - 1;
+    struct type *s64 = lb == 64 ? ty_base(TY_LONG, 0) : ty_llong(0);
+    struct type *u64 = lb == 64 ? ty_base(TY_LONG, 1) : ty_llong(1);
+    /* A value is held as the bits of a long. `big` says the bits are
+     * 2^63 or more -- an unsigned long long initializer past LLONG_MAX
+     * -- and not a negative number: read as a long, 1ULL << 63 was
+     * LLONG_MIN, the enum became a signed long long, and `B > 0` was 0.
+     * lo is the least value (0 if none is below it) and hi the greatest
+     * as unsigned (0 if none is above it). */
+    long val = 0, lo = 0;
+    unsigned long hi = 0;
+    int any = 0, big = 0, anybig = 0, anyneg = 0;
     struct econst **first = ps->econst_tail;
 
     while (cur(ps)->kind != TOK_RBRACE) {
@@ -2314,6 +2452,7 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
                        tok_describe(cur(ps)));
         const char *name = cur(ps)->text;
         int line = cur(ps)->line;
+        struct type *vt = NULL;
         advance(ps);
         if (cur(ps)->kind == TOK_ASSIGN) {
             advance(ps);
@@ -2323,17 +2462,82 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
                 parse_error_at(ps, vline, vcol,
                         "an enumerator value must be an integer constant "
                         "expression");
+            vt = ce_type(ve);
+            if (vt && ty_is_integer(vt) && ty_size(vt) > 8)
+                parse_error_at(ps, vline, vcol, "enumerator '%s' has a value "
+                               "of type %s; EmbCC holds enumerator values in "
+                               "64 bits", name, ty_name(vt));
+            if (val < 0 && !(vt && ty_is_integer(vt)))
+                parse_error_at(ps, vline, vcol, "cannot tell whether the "
+                               "value of enumerator '%s' is negative or 2^63 "
+                               "and above; cast it to the type it should have",
+                               name);
+            big = val < 0 && vt->is_unsigned;
+        } else if (any) {
+            /* One more than the last. Past LLONG_MAX, or past
+             * ULLONG_MAX, no type of the enum's choosing holds it (gcc:
+             * "overflow in enumeration values"; clang warns and wraps). */
+            if (big ? val == -1 : val == 0x7fffffffffffffffL)
+                parse_error_line(ps, line, "enumerator '%s' would be one "
+                                 "past %s, which no integer type the enum "
+                                 "can have holds", name,
+                                 big ? "ULLONG_MAX" : "LLONG_MAX");
+            val = (long)((unsigned long)val + 1);
+        } else {
+            val = 0;
+            big = 0;
+        }
+        if (fixed) {
+            /* C23 6.7.2.2: with a fixed underlying type every value must
+             * be representable in it. */
+            int fb = 8 * ty_size(fixed);
+            int ok;
+            if (fixed->kind == TY_BOOL)
+                ok = !big && (val == 0 || val == 1);
+            else if (fixed->is_unsigned)
+                ok = big ? fb >= 64
+                         : val >= 0 && (fb >= 64 || val < (1L << fb));
+            else
+                ok = !big && (fb >= 64 || (val >= -(1L << (fb - 1)) &&
+                                           val < (1L << (fb - 1))));
+            if (!ok && (big || val >= 0))
+                parse_error_line(ps, line, "enumerator '%s' is %lu, which "
+                                 "the underlying type %s cannot represent",
+                                 name, (unsigned long)val, ty_name(fixed));
+            if (!ok)
+                parse_error_line(ps, line, "enumerator '%s' is %ld, which "
+                                 "the underlying type %s cannot represent",
+                                 name, val, ty_name(fixed));
         }
         for (struct econst *ec = ps->unit->econsts; ec; ec = ec->next)
             if (strcmp(ec->name, name) == 0)
                 parse_error_line(ps, line,
                            "duplicate enumerator '%s'", name);
+        econst_shadow_check(ps, name, line);
+        if (big) {
+            anybig = 1;
+            if ((unsigned long)val > hi) hi = (unsigned long)val;
+        } else if (val < 0) {
+            anyneg = 1;
+            if (val < lo) lo = val;
+        } else if ((unsigned long)val > hi) {
+            hi = (unsigned long)val;
+        }
+        any = 1;
         struct econst *ec = xcalloc(1, sizeof *ec);
         ec->name = name;
-        if (!any || val < lo) lo = val;
-        if (!any || val > hi) hi = val;
-        any = 1;
-        ec->val = val++;
+        ec->val = val;
+        ec->line = line;
+        ec->in_block = ps->blkdepth > 0;
+        /* Its type while the list is still open, for a later
+         * initializer that names it (`B = A + 1`): int when the value
+         * fits, else the type of its own initializer, else the 64-bit
+         * type that holds it. The enum's type replaces it below. */
+        ec->ty = fixed ? fixed
+               : !big && val >= imin && val <= imax ? ty_base(TY_INT, 0)
+               : vt && ty_is_integer(vt) && ty_size(vt) * 8 >= ib
+                 ? ty_promote(vt)
+               : big ? u64 : s64;
         ec->seq = ps->seq;
         *ps->econst_tail = ec;
         ps->econst_tail = &ec->next;
@@ -2345,23 +2549,26 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
 
     struct type *t = fixed;
     if (!t) {
-        int ib = target_int_size() * 8, lb = target_long_size() * 8;
-        long imax = (1L << (ib - 1)) - 1, imin = -imax - 1;
         unsigned long umax = ib == 64 ? ~0UL : (1UL << ib) - 1;
         long lmax = lb == 64 ? 0x7fffffffffffffffL : (1L << (lb - 1)) - 1;
         long lmin = -lmax - 1;
         unsigned long ulmax = lb == 64 ? ~0UL : (1UL << lb) - 1;
-        if (lo >= imin && hi <= imax)
-            return ty_base(TY_INT, 0);
+        if (anybig && anyneg)
+            parse_error_line(ps, cur(ps)->line, "the enumeration's values "
+                             "run from %ld to %lu, which no integer type "
+                             "holds", lo, hi);
+        if (lo >= imin && hi <= (unsigned long)imax)
+            t = ty_base(TY_INT, 0);
         /* No negative value: the unsigned types, as GCC and clang choose
          * -- 2^31..2^32-1 is an unsigned long on AVR, four bytes, not a
          * long long. A negative one: the signed types. */
-        if (lo >= 0)
-            t = (unsigned long)hi <= umax ? ty_base(TY_INT, 1)
-              : (unsigned long)hi <= ulmax ? ty_base(TY_LONG, 1)
-              : ty_llong(1);
+        else if (!anyneg)
+            t = hi <= umax ? ty_base(TY_INT, 1)
+              : hi <= ulmax ? ty_base(TY_LONG, 1)
+              : u64;
         else
-            t = lo >= lmin && hi <= lmax ? ty_base(TY_LONG, 0) : ty_llong(0);
+            t = lo >= lmin && hi <= (unsigned long)lmax ? ty_base(TY_LONG, 0)
+              : s64;
     }
     for (struct econst *ec = *first; ec; ec = ec->next)
         ec->ty = t;
@@ -2647,6 +2854,12 @@ static struct expr *parse_primary(struct parser *ps)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "%s has no member '%s'", ty_name(ty),
                                cur(ps)->text);
+                /* A bit-field has no byte offset; C11 7.19p3 makes
+                 * this a constraint, and m2->off is its storage unit's. */
+                if (m2->is_bitfield)
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                               "offsetof cannot name the bit-field '%s'",
+                               cur(ps)->text);
                 off += m2->off;
                 ty = m2->ty;
                 advance(ps);
@@ -2669,7 +2882,7 @@ static struct expr *parse_primary(struct parser *ps)
             expect(ps, TOK_RPAREN, "')' to close __builtin_offsetof");
             e = new_expr(EXPR_NUM, line, 0);
             e->num = off;
-            e->ty = ty_base(TY_LONG, 1);   /* size_t */
+            e->ty = ty_size_t();
             return e;
         }
         reject_reserved(ps, t->text, t->line, t->col);
@@ -3368,6 +3581,7 @@ static struct stmt *parse_block(struct parser *ps)
 {
     struct stmt *s = new_stmt(STMT_BLOCK, cur(ps)->line, cur(ps)->col);
     int lmark = ps->nlmap;
+    int fmark = g_nfold_locals;     /* the block's locals leave with it */
     ps->blkdepth++;
     expect(ps, TOK_LBRACE, "'{'");
     struct stmt **volatile tail = &s->body;
@@ -3379,6 +3593,7 @@ static struct stmt *parse_block(struct parser *ps)
                           "unexpected end of file inside a block");
             ps->nerrors++;
             ps->nlmap = lmark;
+            g_nfold_locals = fmark;
             ps->blkdepth--;
             return s;
         }
@@ -3399,6 +3614,7 @@ static struct stmt *parse_block(struct parser *ps)
     /* The block's __label__ names go out of scope with it, so the same
      * macro expanded again in this function gets fresh ones. */
     ps->nlmap = lmark;
+    g_nfold_locals = fmark;
     ps->blkdepth--;
     return s;
 }
@@ -3818,6 +4034,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
              * pointer, as they do in any initialization. */
             if (at->kind == TY_ARRAY)
                 at = ty_ptr(at->pointee);
+            /* and the value has no qualifiers: `__auto_type a = x;` with
+             * x a const int declares a plain int, as in GCC */
+            at = ty_unqual(at);
             expect(ps, TOK_SEMI, "';'");
             s = new_stmt(STMT_DECL, aline, 0);
             s->dty = at;
@@ -3986,6 +4205,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         parse_pack(ps);
         return new_stmt(STMT_BLOCK, t->line, t->col);
     }
+    if (at_weak(ps)) {        /* #pragma weak means the same here */
+        parse_weak(ps);
+        return new_stmt(STMT_BLOCK, t->line, t->col);
+    }
     if (t->kind == TOK_IDENT) {
         const char *lname = t->text;
         int lline = t->line;
@@ -4056,7 +4279,8 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         expect(ps, TOK_RPAREN, "')'");
         s->body = parse_controlled(ps);
         return s;
-    case TOK_KW_FOR:
+    case TOK_KW_FOR: {
+        int fmark = g_nfold_locals;   /* the loop's own declaration */
         s = new_stmt(STMT_FOR, t->line, t->col);
         advance(ps);
         expect(ps, TOK_LPAREN, "'('");
@@ -4078,7 +4302,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
             s->step = parse_comma(ps);
         expect(ps, TOK_RPAREN, "')'");
         s->body = parse_controlled(ps);
+        g_nfold_locals = fmark;
         return s;
+    }
     case TOK_KW_DO:
         s = new_stmt(STMT_DO, t->line, t->col);
         advance(ps);
@@ -4330,22 +4556,44 @@ static int parse_constexpr(struct parser *ps)
             parse_error_line(ps, kline, "constexpr '%s' needs a constant "
                              "initializer; this one is not one", kname);
         int bits = 8 * ty_size(kt);
+        /* At 64 bits the fold's long holds either reading of the bits,
+         * so the initializer's own type says which it is: ULLONG_MAX
+         * is not a long long, and -1 is not an unsigned long long. */
+        struct type *it = ce_type(kinit);
+        int ibig = kv < 0 && it && ty_is_integer(it) && it->is_unsigned;
         if (kt->kind == TY_BOOL ? (kv != 0 && kv != 1)
-            : bits < 64 && (kt->is_unsigned
+            : bits < 64 ? (kt->is_unsigned
                             ? (kv < 0 || kv >= (1L << bits))
                             : (kv < -(1L << (bits - 1)) ||
-                               kv >= (1L << (bits - 1)))))
+                               kv >= (1L << (bits - 1))))
+            : kv < 0 && (kt->is_unsigned ? !ibig : ibig)) {
+            if (ibig)
+                parse_error_line(ps, kline, "constexpr '%s': %lu does not "
+                                 "fit %s, and C23 wants it exactly", kname,
+                                 (unsigned long)kv, ty_name(kt));
             parse_error_line(ps, kline, "constexpr '%s': %ld does not fit "
                              "%s, and C23 wants it exactly", kname, kv,
                              ty_name(kt));
+        }
+        /* One list holds every named constant, so a second of the same
+         * name would never be found: the first one answers for both. */
+        const struct econst *dup = fold_econst(kname);
+        if (dup)
+            parse_error_line(ps, kline, "'%s' is already a named constant "
+                             "(line %d); EmbCC does not yet let one "
+                             "enumerator or constexpr shadow another", kname,
+                             dup->line);
+        econst_shadow_check(ps, kname, kline);
         struct econst *kc = xcalloc(1, sizeof *kc);
         kc->name = kname;
         kc->val = kv;
         kc->ty = kt;
         kc->seq = ps->seq;
+        kc->line = kline;
+        kc->in_block = ps->blkdepth > 0;
         *ps->econst_tail = kc;
         ps->econst_tail = &kc->next;
-        fold_local_add(kname, kt);
+        fold_local_add_ec(kname, kt, kc);
         if (cur(ps)->kind != TOK_COMMA)
             break;
         advance(ps);
@@ -4415,6 +4663,37 @@ static void parse_pack(struct parser *ps)
     expect(ps, TOK_RPAREN, "')' to close #pragma pack");
 }
 
+/* The preprocessor's `__embcc_weak(NAME)` or `__embcc_weak(NAME,
+ * TARGET)`, from `#pragma weak`: recorded for sema to apply. */
+static int at_weak(struct parser *ps)
+{
+    return cur(ps)->kind == TOK_IDENT &&
+           strcmp(cur(ps)->text, "__embcc_weak") == 0;
+}
+
+static void parse_weak(struct parser *ps)
+{
+    struct pragma_weak *w = xcalloc(1, sizeof *w);
+    w->line = cur(ps)->line;
+    advance(ps);
+    expect(ps, TOK_LPAREN, "'(' after #pragma weak");
+    if (cur(ps)->kind != TOK_IDENT)
+        parse_error_line(ps, w->line, "#pragma weak needs a name");
+    w->name = cur(ps)->text;
+    advance(ps);
+    if (cur(ps)->kind == TOK_COMMA) {
+        advance(ps);
+        if (cur(ps)->kind != TOK_IDENT)
+            parse_error_line(ps, w->line, "#pragma weak NAME = needs the "
+                             "name it aliases");
+        w->target = cur(ps)->text;
+        advance(ps);
+    }
+    expect(ps, TOK_RPAREN, "')' to close #pragma weak");
+    w->next = ps->unit->weaks;
+    ps->unit->weaks = w;
+}
+
 static void parse_top(struct parser *ps, struct unit *u,
                       struct func ***ftail, struct global ***gtail,
                       int seq)
@@ -4422,6 +4701,10 @@ static void parse_top(struct parser *ps, struct unit *u,
     g_nfold_locals = 0;   /* a fresh local scope for sizeof(var) folding */
     if (at_pack(ps)) {
         parse_pack(ps);
+        return;
+    }
+    if (at_weak(ps)) {
+        parse_weak(ps);
         return;
     }
     if (cur(ps)->kind == TOK_KW_STATIC_ASSERT) {
@@ -4600,7 +4883,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     struct type *ty = parse_stars(ps, base);
     take_carried(ps, &at);
     const char *name = NULL;
-    int line = cur(ps)->line;
+    int line = cur(ps)->line, col = cur(ps)->col;
     struct func *f;
     int saved_vla_ok;
     if (cur(ps)->kind == TOK_IDENT) {
@@ -4660,6 +4943,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->name = name = gname;
                 f->file = ps->lx.file;
                 f->line = line = gline;
+                f->name_line = ps->decl_name_line;
+                f->name_col = ps->decl_name_col;
                 f->seq = seq;
                 f->nparams = gt->nptypes;
                 for (int i = 0; i < gt->nptypes; i++) {
@@ -4667,6 +4952,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                     f->params[i] = ps->fn_pnames[i];
                     f->param_lines[i] = ps->fn_plines[i];
                     f->param_cols[i] = ps->fn_pcols[i];
+                    f->param_unused[i] = ps->fn_punused[i];
                 }
                 f->is_varargs = gt->is_varargs;
                 f->sret_first = gt->sret_first;
@@ -4679,8 +4965,11 @@ static void parse_top(struct parser *ps, struct unit *u,
                            "a variable cannot have a function type — "
                            "did you mean a function pointer (*)?");
             parse_attributes(ps, &at); /* int x __attribute__((weak)) = ... */
+            int gnl = ps->decl_name_line, gnc = ps->decl_name_col;
             struct global *g = parse_global(ps, gt, gname, gline,
                                             is_static, is_extern);
+            g->name_line = gnl;
+            g->name_col = gnc;
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
             pcs_not_here(ps, &at, "a variable");
             g->is_weak = at.weak;
@@ -4733,6 +5022,8 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->name = name;
     f->file = ps->lx.file;
     f->line = line;
+    f->name_line = line;
+    f->name_col = col;
     f->seq = seq;
     advance(ps); /* '(' */
     saved_vla_ok = ps->vla_ok;
@@ -4756,16 +5047,19 @@ static void parse_top(struct parser *ps, struct unit *u,
                 advance(ps);
                 break;
             }
-            if (param_sret_attr(ps, f->nparams))
+            int unused = 0;
+            if (param_sret_attr(ps, f->nparams, &unused))
                 f->sret_first = 1;
             if (cur(ps)->kind == TOK_IDENT)
                 reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
-            /* A parameter may carry attributes too:
-             * `int f([[maybe_unused]] int x)`. */
+            /* Attributes before the type, between it and the name, and
+             * after the name, as in parse_fn_params_named. */
+            ps->stars_unused = 0;
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
+                unused |= pat.unused;
             }
             struct type *spec = parse_type_spec(ps, 0);
             if (!spec)
@@ -4774,6 +5068,15 @@ static void parse_top(struct parser *ps, struct unit *u,
                            tok_describe(cur(ps)));
             const char *pname;
             struct type *pt = parse_declarator(ps, spec, &pname);
+            if (at_attribute(ps)) {
+                struct attrs pat = { 0 };
+                parse_attributes(ps, &pat);
+                pcs_not_here(ps, &pat, "a parameter");
+                unused |= pat.unused;
+            }
+            unused |= ps->stars_unused;
+            ps->stars_unused = 0;
+            f->param_unused[f->nparams] = unused;
             if (pt->kind == TY_ARRAY)
                 pt = ty_ptr(pt->pointee); /* C's adjustment */
             if (pt->kind == TY_FUNC)
@@ -4841,7 +5144,7 @@ fn_tail:
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a name before %s", tok_describe(cur(ps)));
             const char *dname = cur(ps)->text;
-            int dline = cur(ps)->line;
+            int dline = cur(ps)->line, dcol = cur(ps)->col;
             advance(ps);
             if (cur(ps)->kind == TOK_LPAREN) {
                 /* a sibling function prototype: `g(double)` */
@@ -4852,6 +5155,8 @@ fn_tail:
                 g->name = dname;
                 g->file = ps->lx.file;
                 g->line = dline;
+                g->name_line = dline;
+                g->name_col = dcol;
                 g->seq = seq;
                 g->nparams = fty->nptypes;
                 for (int i = 0; i < fty->nptypes; i++) {
@@ -4868,6 +5173,8 @@ fn_tail:
                 parse_attributes(ps, &at);
                 struct global *g = parse_global(ps, vty, dname, dline,
                                                 is_static, is_extern);
+                g->name_line = dline;
+                g->name_col = dcol;
                 parse_attributes(ps, &at);
                 pcs_not_here(ps, &at, "a variable");
                 g->is_weak = at.weak;

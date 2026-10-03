@@ -55,13 +55,12 @@ int ty_is_plain_char(const struct type *t)
 
 /* Two types the same for _Generic, which is stricter than ty_equal:
  * `long` is not `long long`, plain `char` is neither signed nor unsigned
- * char, and a pointee's volatile and _Atomic count. (`const` is not in
- * the type here at all, which sema's _Generic says when it matters.) */
+ * char, and a pointee's const, volatile and _Atomic count. */
 int ty_generic_same(const struct type *a, const struct type *b)
 {
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
         a->is_llong != b->is_llong || a->is_volatile != b->is_volatile ||
-        a->is_atomic != b->is_atomic)
+        a->is_atomic != b->is_atomic || a->is_const != b->is_const)
         return 0;
     if (a->kind == TY_CHAR && ty_is_plain_char(a) != ty_is_plain_char(b))
         return 0;
@@ -92,6 +91,16 @@ struct type *ty_llong(int is_unsigned)
     return &llongs[is_unsigned ? 1 : 0];
 }
 
+struct type *ty_size_t(void)
+{
+    return ty_base(target_int_size() == target_ptr_size() ? TY_INT : TY_LONG, 1);
+}
+
+struct type *ty_ptrdiff_t(void)
+{
+    return ty_base(target_int_size() == target_ptr_size() ? TY_INT : TY_LONG, 0);
+}
+
 struct type *ty_int_of_size(int size, int is_unsigned)
 {
     switch (size) {
@@ -113,6 +122,16 @@ struct type *ty_base(enum ty_kind kind, int is_unsigned)
     return &bases[kind][is_unsigned ? 1 : 0];
 }
 
+/* Record a qualified copy of a struct with its original (see qcopies). */
+static void note_qcopy(struct type *c)
+{
+    c->qcopies = NULL;
+    if (c->kind != TY_STRUCT || !c->canon)
+        return;
+    c->qnext = c->canon->qcopies;
+    c->canon->qcopies = c;
+}
+
 struct type *ty_volatile(struct type *t)
 {
     if (!t || t->is_volatile)
@@ -121,7 +140,32 @@ struct type *ty_volatile(struct type *t)
     *v = *t;                 /* a non-interned copy */
     v->is_volatile = 1;
     v->canon = t->canon ? t->canon : t;  /* struct equality follows this */
+    note_qcopy(v);
     return v;
+}
+
+struct type *ty_const(struct type *t)
+{
+    if (!t || t->is_const)
+        return t;
+    struct type *c = xcalloc(1, sizeof *c);
+    *c = *t;                 /* a non-interned copy */
+    c->is_const = 1;
+    c->canon = t->canon ? t->canon : t;
+    note_qcopy(c);
+    /* A qualified array is an array of qualified elements (C11
+     * 6.7.3p9): `const A x` with A an int[3] typedef cannot have x[0]
+     * assigned. */
+    if (t->kind == TY_ARRAY)
+        c->pointee = ty_const(t->pointee);
+    return c;
+}
+
+struct type *ty_unqual(struct type *t)
+{
+    if (t && t->canon && (t->is_const || t->is_volatile || t->is_atomic))
+        return t->canon;
+    return t;
 }
 
 /* `_Atomic T`: volatile as well (never merged or removed), and every
@@ -135,6 +179,7 @@ struct type *ty_atomic(struct type *t)
         a = xcalloc(1, sizeof *a);
         *a = *t;
         a->canon = t->canon ? t->canon : t;
+        note_qcopy(a);
     }
     a->is_atomic = 1;
     return a;
@@ -302,6 +347,19 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
     t->align = align;
     t->size = (bytes + align - 1) & ~(align - 1);
     t->complete = 1;
+    /* Every qualified copy made before this body takes it too, keeping
+     * its own qualifiers: `const struct unit *u` declared ahead of the
+     * struct was otherwise "incomplete here" for ever. */
+    for (struct type *q = t->qcopies; q; q = q->qnext) {
+        struct type keep = *q;
+        *q = *t;
+        q->is_const = keep.is_const;
+        q->is_volatile = keep.is_volatile;
+        q->is_atomic = keep.is_atomic;
+        q->canon = keep.canon;
+        q->qnext = keep.qnext;
+        q->qcopies = NULL;
+    }
 }
 
 struct member *ty_find_member(struct type *t, const char *name)
@@ -607,9 +665,12 @@ const char *ty_name(const struct type *t)
     int stars = 0;
     int dims[4];
     int ndims = 0;
+    int pconst[8];          /* each pointer's own const, outermost first */
 
     while (t->kind == TY_PTR || t->kind == TY_ARRAY) {
         if (t->kind == TY_PTR) {
+            if (stars < 8)
+                pconst[stars] = t->is_const;
             stars++;
         } else {
             if (ndims < 4)
@@ -653,11 +714,15 @@ const char *ty_name(const struct type *t)
         break;
     default: base = "?"; break;
     }
-    int n = snprintf(buf, bufsz, "%s", base);
+    int n = snprintf(buf, bufsz, "%s%s", t->is_const ? "const " : "", base);
     if (stars) {
         buf[n++] = ' ';
-        for (int i = 0; i < stars && n < (int)bufsz - 8; i++)
+        /* innermost pointer first: `const char *const *` */
+        for (int i = stars - 1; i >= 0 && n < (int)bufsz - 16; i--) {
             buf[n++] = '*';
+            if (i < 8 && pconst[i])
+                n += snprintf(buf + n, bufsz - (size_t)n, i ? "const " : "const");
+        }
     }
     for (int i = 0; i < ndims && i < 4 && n < (int)bufsz - 16; i++)
         n += dims[i] < 0 ? snprintf(buf + n, bufsz - (size_t)n, "[*]")
@@ -742,6 +807,9 @@ int ty_aapcs64_byref(const struct type *t)
  * uint16_t-against-an-int pattern of firmware code. */
 struct type *ty_promote(struct type *t)
 {
+    /* The value of an expression has no qualifiers: `x + 1` on a const
+     * long is a long, and typeof of it can be assigned. */
+    t = ty_unqual(t);
     if (t->kind == TY_CHAR || t->kind == TY_SHORT)
         return ty_base(TY_INT, t->is_unsigned &&
                                ty_size(t) >= ty_size(ty_base(TY_INT, 0)));

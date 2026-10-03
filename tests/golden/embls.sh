@@ -83,6 +83,21 @@ int main(void)
 }
 EOF
 
+cat > "$out/shared.h" << 'EOF'
+extern int shared;
+EOF
+cat > "$out/shared.c" << 'EOF'
+#include "shared.h"
+#define BUMP() (counter++)
+int shared;
+static int counter;
+int use(void)
+{
+    BUMP();
+    return shared + counter;
+}
+EOF
+
 mkdir -p "$out/inc/sys"
 : > "$out/inc/alpha.h"; : > "$out/inc/beta.h"
 : > "$out/inc/notaheader.txt"; : > "$out/inc/sys/types.h"
@@ -178,8 +193,13 @@ d = ask("textDocument/definition", uri, 13, 14)
 assert d["range"]["start"]["line"] == 3, d      # 0-based: the definition
 print("hover: the real signature;  definition: its line")
 
-syms = [s["name"] for s in ask("textDocument/documentSymbol", uri, 0, 0)]
+dsyms = ask("textDocument/documentSymbol", uri, 0, 0)
+syms = [s["name"] for s in dsyms]
 assert "distance2" in syms and "main" in syms and "total" in syms, syms
+# The name is what an editor selects: `static int total;` at 11..16.
+sel = [s["selectionRange"] for s in dsyms if s["name"] == "total"][0]
+assert (sel["start"]["line"], sel["start"]["character"],
+        sel["end"]["character"]) == (1, 11, 16), sel
 print("documentSymbol: %s" % ", ".join(syms))
 
 # A file with two mistakes reports both, where they are, with the
@@ -229,10 +249,11 @@ def refs(line, ch, decl=True):
                   for r in recv()["result"])
 
 # The global `total`: both uses on line 7, the one on line 20, its own
-# declaration -- and NOT the parameter of other(), NOT the word in the
-# comment, NOT the word inside the string literal.
+# declaration at its own column (12, after `static int `) -- and NOT the
+# parameter of other(), NOT the word in the comment, NOT the word inside
+# the string literal.
 g = refs(6, 4)
-assert g == [(2, 1), (7, 5), (7, 13), (20, 26)], g
+assert g == [(2, 12), (7, 5), (7, 13), (20, 26)], g
 print("references to the global 'total': %s" % g)
 
 # The parameter of other() has the same spelling and is a different thing.
@@ -261,6 +282,62 @@ for ln, a, b in spans:
     assert src[ln][a:b] == "n", (ln, a, b, src[ln][a:b])
 print("renaming the parameter 'n' edits exactly the two 'n' tokens, "
       "including its declaration")
+
+# A file-scope variable and a function are renamed at their own spelling:
+# an edit at the start of `static int total;` would overwrite the keyword.
+for rid, (ln, ch, old, count) in enumerate(((1, 12, "total", 4),
+                                            (3, 5, "scale", 2))):
+    send({"jsonrpc": "2.0", "id": 20 + rid, "method": "textDocument/rename",
+          "params": {"textDocument": {"uri": uri4},
+                     "position": {"line": ln, "character": ch},
+                     "newName": "renamed"}})
+    edits = list(recv()["result"]["changes"].values())[0]
+    assert len(edits) == count, (old, edits)
+    for e in edits:
+        a, b = e["range"]["start"], e["range"]["end"]
+        assert a["line"] == b["line"], e
+        assert src[a["line"]][a["character"]:b["character"]] == old, \
+            (old, a, src[a["line"]])
+print("renaming the global 'total' and the function 'scale' edits only "
+      "their names, declarations included")
+
+# A rename spans files: each edit is filed under the file it changes, and
+# every declaration of a file-scope name goes with it -- leaving the
+# definition behind would still compile, and link a different object.
+uri6, _ = open_doc(out + "/shared.c")
+
+def rename_at(uri, line, ch, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/rename",
+          "params": {"textDocument": {"uri": uri},
+                     "position": {"line": line, "character": ch},
+                     "newName": "renamed"}})
+    return recv()
+
+ch = rename_at(uri6, 2, 5, 30)["result"]["changes"]
+where = {}
+for u, eds in ch.items():
+    text = open(u[len("file://"):]).read().split("\n")
+    for e in eds:
+        a, b = e["range"]["start"], e["range"]["end"]
+        assert text[a["line"]][a["character"]:b["character"]] == "shared", \
+            (u, e)
+    where[os.path.basename(u)] = sorted(e["range"]["start"]["line"] + 1
+                                        for e in eds)
+assert where == {"shared.h": [1], "shared.c": [3, 8]}, where
+print("renaming 'shared': %s" % where)
+
+# What cannot be placed is refused, not guessed: a use that comes from a
+# macro's body, and any name in a C++ document, where uses are not found.
+r = rename_at(uri6, 3, 12, 31)
+assert "error" in r and "'counter'" in r["error"]["message"], r
+print("renaming 'counter', used inside BUMP(): refused")
+r = rename_at(uri3, 6, 5, 32)
+assert "error" in r and "C++" in r["error"]["message"], r
+print("renaming in a C++ document: refused")
+
+# Each answer comes from the document asked about, not the one opened last.
+assert refs(6, 4) == g, refs(6, 4)
+print("references in refs.c after other files were opened: unchanged")
 
 send({"jsonrpc": "2.0", "id": 10, "method": "textDocument/prepareRename",
       "params": {"textDocument": {"uri": uri4},

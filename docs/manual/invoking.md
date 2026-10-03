@@ -63,7 +63,7 @@ the full entry.
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
 | [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-fPASS` `-fno-PASS` `-fremarks` `-fremarks=json` |
 | [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fno-stack-protector` |
-| [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
+| [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-include FILE` `-Wp,ARGS` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
 | [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` |
 | [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-ffunction-sections` `-fdata-sections` |
@@ -98,14 +98,15 @@ What happens to the input depends on the mode options:
 | Mode | Input | Result | Default output |
 |---|---|---|---|
 | none | C or C++ | compiled and linked (x86-64 ELF targets only) | `a.out` |
-| `-c` | C or C++ | relocatable object | the input path with its suffix replaced by `.o` |
-| `-S` | C or C++ | assembly text | standard output |
+| `-c` | C or C++ | relocatable object | the input's file name with its suffix replaced by `.o` |
+| `-S` | C or C++ | assembly text | the input's file name with its suffix replaced by `.s` |
 | `-E` | C, C++ or `.S` | preprocessed text | standard output |
 | `-fsyntax-only` | C or C++ | nothing; diagnostics only | none |
 | any | `.s` `.S` `.asm` | object | see [Assembler and linker options](#assembler-and-linker-options) |
 
-The default object is written next to the input, not in the current
-directory: `embcc -c src/foo.c` writes `src/foo.o`.
+As with GCC, a default output is written in the current directory, not
+next to the input: `embcc -c src/foo.c` writes `foo.o`, and
+`embcc -S src/foo.c` writes `foo.s`.
 
 A C++ input is compiled only for a target whose `long` and pointers are
 8 bytes. For the Cortex-M targets, RV32 and AVR, every mode but `-E`,
@@ -126,9 +127,9 @@ targets, Mach-O for the `-apple-darwin` targets and COFF for
 ### `-S`
 
 Write the code the backend generated as GNU assembler text instead of an
-object. Supported on every target. The output goes to standard output
-unless `-o` names a file; `-o -` also means standard output. `-S` implies
-`-c`.
+object. Supported on every target. Without `-o` the output is
+`NAME.s` in the current directory; `-o -` writes it to standard output.
+`-S` implies `-c`.
 
 Each instruction is written as its encoded bytes in a `.byte` directive,
 with every relocation attached explicitly through `.reloc`, so that
@@ -244,10 +245,18 @@ each belongs to, then exit with status 0. The list is reproduced under
 
 ### `--version`
 
-Print the version (`EmbCC 1.0.0-m2.complete` for this release), the target
-in effect, and a summary of what the compiler supports, then exit with
-status 0. Recognized anywhere on the command line; a `--target=` on the
-same command line changes the target it reports.
+Print the version, the target in effect, the default target, the
+targets and languages supported, which images `embld` links, and what is
+not supported yet, then exit with status 0. Recognized anywhere on the
+command line; a `--target=` on the same command line changes the target
+it reports:
+
+```text
+EmbCC 1.0.0-m2.complete (a C and C++ compiler for EmbLinkOS and embedded boards)
+Target: x86_64-elf
+Default target: x86_64-elf
+...
+```
 
 ### `-dumpmachine`
 
@@ -475,9 +484,10 @@ embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on 
 ```
 
 Any argument beginning with `-W` that matches nothing else is handled
-this way, including `-Wp,...` and `-Wformat=2`. `-Wa,...` and `-Wl,...`
-are options of their own (see
-[Assembler and linker options](#assembler-and-linker-options)).
+this way, including `-Wformat=2`. `-Wa,...`, `-Wl,...` and `-Wp,...` are
+options of their own (see
+[Assembler and linker options](#assembler-and-linker-options) and
+[`-Wp,ARGS`](#-wpargs)).
 
 ### `-Wno-NAME`
 
@@ -769,6 +779,17 @@ embcc: '-fstack-protector-strong' is not supported (EmbCC emits no stack protect
 The preprocessor itself is described in [C language](c-language.md) and
 [Extensions](extensions.md).
 
+### `-Wp,ARGS`
+
+Pass `ARGS`, split at the commas, to the preprocessor. Each must be `-D`,
+`-U` or `-I` with its value joined to it, and is applied where the
+`-Wp` option stands among the others, so `-DY -Wp,-DX=1,-UY` defines `X`
+and leaves `Y` undefined. Any other preprocessor option is refused:
+
+```text
+embcc: error: preprocessor option '-MD' in -Wp,-MD,dep.d is not supported; pass -D, -U or -I with its value, or give the option directly
+```
+
 ### `-D NAME`, `-D NAME=VALUE`
 
 Define a macro, as `#define NAME 1` or `#define NAME VALUE`. The argument
@@ -831,11 +852,17 @@ once, the last one is used (GCC would list them all).
 Also write an empty rule for each header, so that `make` does not fail
 when a header is deleted.
 
+### `-include FILE`
+
+Read `FILE` as if `#include "FILE"` were the first line of the source
+file. `FILE` is looked for in the working directory first, as GCC does,
+then on the include path. Several are read in the order given. A file
+that cannot be found is refused:
+`cannot find -include file "FILE"`.
+
 ### Preprocessor options that are not accepted
 
-`-include FILE` appears in `embcc --help` but is not accepted by this
-release: it is refused as `embcc: error: unknown argument '-include'`.
-Use `#include` in the source instead. `-imacros`, `-iquote`, `-idirafter`,
+`-imacros`, `-iquote`, `-idirafter`,
 `-iprefix`, `-dM`, `-dD`, `-C`, `-CC`, `-P`, `-H`, `-MG`,
 `-trigraphs` and `-undef` are not accepted either. Use `--dump-predef`
 to list predefined macros.
@@ -934,15 +961,19 @@ embcc: error: no assembly-file support for x86_64-elf yet; its instruction encod
 ```
 
 A `.asm` file is assembled as NASM/Intel-syntax x86-64 into an x86-64
-ELF64 object, whatever `--target=` says. This is the same assembler as
-the standalone [`embas`](tools/embas.md).
+ELF64 object. This is the same assembler as the standalone
+[`embas`](tools/embas.md). For any target other than x86-64 with ELF
+objects, a `.asm` input is refused:
+
+```text
+embcc: error: 'boot.asm' is NASM-syntax x86-64 assembly, which EmbCC assembles to x86-64 ELF only, and the target is thumbv7m-none-eabi
+```
 
 An assembly input always produces an object: `-c` and `-S` make no
 difference, and no link follows. The one other mode is `-E`, which
-preprocesses a `.S` file to standard output. Give `-o` for `.s` and `.S` inputs; the
-default output name is derived correctly only for `.asm`
-(`boot.asm` gives `boot.o`), and for a `.s` file it is not the expected
-`.o` name.
+preprocesses a `.S` file to standard output. Without `-o` the object
+is the input's file name with its suffix replaced by `.o`, in the
+current directory (`boot/start.S` gives `start.o`).
 
 ### `-Wa,ARGS`
 
@@ -1130,19 +1161,18 @@ only Thumb`.
 
 #### `-mcpu=CPU`
 
-Select the processor. `cortex-m4`, `cortex-m7`, `cortex-m23` and
-`cortex-m33` select ARMv7E-M code (with the DSP extension); `cortex-m0`,
-`cortex-m0plus`, `cortex-m1` and `cortex-m3` select ARMv7-M code.
+Select the processor. `cortex-m4`, `cortex-m7` and `cortex-m33` select
+ARMv7E-M code (with the DSP extension); `cortex-m3` selects ARMv7-M code.
 `-mcpu=` does not move between ARMv7-M and ARMv8-M; that level comes from
 the triple (`thumbv8m.main-none-eabi`).
 
-EmbCC has no ARMv6-M code generator. The code generated for
-`cortex-m0`, `cortex-m0plus` and `cortex-m1` uses Thumb-2 instructions
-that those processors do not implement.
+EmbCC has no ARMv6-M or ARMv8-M Baseline code generator, so `cortex-m0`,
+`cortex-m0plus`, `cortex-m1` and `cortex-m23` are refused: `-mcpu=cortex-m0
+is ARMv6-M, and EmbCC emits ARMv7-M Thumb-2: that core does not implement
+its ldr.w or IT blocks`.
 
 Any other `CPU` is refused: `-mcpu=cortex-m55 is not a part EmbCC knows:
-it emits ARMv7-M and ARMv7E-M (cortex-m0, m0plus, m1, m3, m4, m7, m23,
-m33)`.
+it emits ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)`.
 
 #### `-mfpu=FPU`
 

@@ -259,6 +259,8 @@ struct global {
     const char *file;     /* where THIS declaration was written — a
                            * header, usually, and not the unit's name */
     int line;
+    int name_line, name_col;  /* where its NAME is, for a tool that edits
+                               * it (embls rename); 0 when unknown */
     int seq;              /* source order, shared counter with funcs —
                            * enforces declare-before-use across kinds */
     int def_seq;          /* source order of the DEFINING declaration (the
@@ -313,6 +315,7 @@ struct func {
     const char *name;
     const char *file;     /* see struct global */
     int line;
+    int name_line, name_col;  /* see struct global */
     int seq;              /* source order (see struct global) */
     int is_static;
     int is_weak;          /* __attribute__((weak)) */
@@ -350,6 +353,7 @@ struct func {
     /* where each name was written -- a tool that renames a parameter has
      * to edit the name, not the function's first column */
     int param_lines[MAX_PARAMS], param_cols[MAX_PARAMS];
+    int param_unused[MAX_PARAMS];   /* __attribute__((unused)) on it */
     struct type *param_tys[MAX_PARAMS];
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per
@@ -425,13 +429,16 @@ struct func {
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
 };
 
-/* An enumerator: a named int constant at file scope. */
+/* An enumerator, or a C23 constexpr: a named integer constant. The unit
+ * keeps them in one list, whatever block declared them. */
 struct econst {
     const char *name;
-    long val;
+    long val;             /* the value's bits; ty says how to read them */
     struct type *ty;      /* NULL: int, as an enumerator is; a C23
                            * constexpr's own type otherwise */
     int seq;
+    int line;
+    int in_block;         /* declared inside a function body */
     struct econst *next;
 };
 
@@ -439,8 +446,11 @@ struct econst {
 struct asmsym {
     const char *name;
     int off;             /* offset within .text (filled at emission) */
-    int is_global;       /* named by .global/.globl */
+    int is_global;       /* named by .global/.globl (or .weak) */
+    int is_weak;         /* named by .weak */
+    int type;            /* ASMSYM_*: what .type (or .thumb_func) said */
 };
+enum { ASMSYM_UNTYPED, ASMSYM_FUNC, ASMSYM_OBJECT };
 /* What the field at `off` is, which decides the relocation the driver
  * emits for it. A call's displacement is relative to the instruction
  * after it and is four bytes wide; a `.quad symbol` is the address
@@ -450,6 +460,8 @@ struct asmsym {
 enum asmrel_kind {
     ASMREL_PC32,         /* the rel32 of a call: R_X86_64_PLT32 */
     ASMREL_ABS64,        /* a .quad naming a symbol: R_*_ABS64 */
+    ASMREL_ABS32,        /* a .long naming one, where an address is four
+                          * bytes: R_*_ABS32 */
 };
 
 struct asmrel {
@@ -500,12 +512,23 @@ struct typedefent {
     struct typedefent *next;
 };
 
+/* `#pragma weak NAME` or `#pragma weak NAME = TARGET`, applied by sema
+ * once the whole unit is read, since the pragma may come before or after
+ * NAME's declaration. */
+struct pragma_weak {
+    const char *name;
+    const char *target;   /* NULL for plain `#pragma weak NAME` */
+    int line;
+    struct pragma_weak *next;
+};
+
 struct unit {
     const char *file;
     struct func *funcs;
     struct global *globals;
     struct econst *econsts;
     struct topasm *topasm;
+    struct pragma_weak *weaks;
     /* What the parser knew by the end: the struct/union/enum tags and the
      * typedefs. Semantic analysis does not need them (types are resolved
      * in the tree), but a tool that answers "what members does this have?"

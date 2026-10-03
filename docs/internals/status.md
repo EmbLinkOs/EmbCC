@@ -170,7 +170,6 @@ Cortex-M (`ARMv7-M` backend):
 | 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | Computed `goto` and `&&label` | `the ARMv7-M backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| `__builtin_sqrt`, and `__builtin_sqrtf` without an FPU | `the ARMv7-M backend cannot lower __builtin_sqrt (it is a libm routine here, not an instruction) yet (function f) [sqrt w=8 size=8]` |
 | An `asm` output wider than 4 bytes | `the ARMv7-M backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
 | A scalar local with `aligned` above 8 | `'x' needs 32-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 
@@ -185,15 +184,12 @@ RISC-V (RV32 messages shown; RV64 names itself):
 | 8-byte atomic read-modify-write at RV32 | `the RV32 backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | Computed `goto` and `&&label` | `the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| `__builtin_sqrt`, `__builtin_sqrtf` | `the RV32 backend cannot lower __builtin_sqrt (a libm routine here, not an instruction) yet (function f) [sqrt w=8 size=8]` |
 | An `asm` output wider than a register | `the RV32 backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
 | A scalar local with `aligned` above 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 
 `long double` and `__int128` can still be declared and measured with
 `sizeof` on RISC-V, and a static initializer such as
 `long double g = 1.5L * 2;` is computed at compile time.
-`sqrt()` from `<math.h>` is an ordinary library call and compiles on
-every target; only the builtin is refused.
 
 AVR:
 
@@ -203,7 +199,6 @@ AVR:
 | An atomic load or store wider than 1 byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
 | A variable-length array | `the AVR backend cannot lower a variable-length array yet (function f)` |
 | Computed `goto` and `&&label` | `the AVR backend cannot lower labeladdr yet (function f) [labeladdr w=4 size=4]` |
-| `__builtin_sqrt`, `__builtin_sqrtf` | `the AVR backend cannot lower sqrt yet (function f) [sqrt w=4 size=4]` |
 | A local with `__attribute__((aligned))` | `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
 | An 8-byte `asm` operand | `an asm operand of 8 bytes needs 8 consecutive registers, which is more than this backend keeps free across an asm` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
@@ -249,7 +244,6 @@ supported. This section lists what is not.
 | Integer imaginary constant (`2i`) | `an integer imaginary constant (GNU _Complex int) is not supported — write it as a floating one (2.0i)` |
 | `_Atomic` on anything but an integer or a pointer | `reading an _Atomic struct s is not supported: EmbCC makes the operators atomic for integers and pointers only` (the first words name the operation) |
 | C23 `constexpr` of a non-integer type | `constexpr 'd' of type double is not supported: EmbCC takes integer constants` |
-| The sign and classification builtins (`__builtin_fabsl`, `__builtin_copysignl`, `__builtin_signbit`, `__builtin_isnan`, ...) on a 16-byte `long double` | `__builtin_fabsl on a 16-byte long double is not supported: its sign and exponent fields do not fit one register, which is how the other widths are done` (naming the builtin) |
 
 `_Float128` is accepted where `long double` is binary128 (AArch64 ELF,
 RISC-V).
@@ -448,6 +442,7 @@ These are refused:
 | File-scope `asm` with labels or symbol references | `a file-scope asm block with labels or symbol references is not supported for a Windows target yet` |
 | `alias` | `alias attribute on 'h' is not supported for COFF output` |
 | `section` on a function | `a function's section attribute is not supported for COFF output` |
+| `section` on a variable | `'v': a variable's section attribute is not supported for COFF output` |
 
 ### Darwin
 
@@ -552,36 +547,14 @@ embcc: warning: -std=c89 is accepted but not enforced; EmbCC has one C dialect, 
 These are cases where EmbCC accepts something and does not do what was
 asked, without an error. Each is a defect, not intended behavior.
 
-- **Pragmas.** Only `#pragma pack` has an effect. Every other pragma is
-  dropped without a diagnostic, and there is no `-Wunknown-pragmas`.
-  In particular:
-  - `#pragma once` does not prevent a second inclusion; a header guarded
-    only by it is compiled twice (`error: redefinition of ...`).
-  - `#pragma push_macro` and `#pragma pop_macro` do not save or restore
-    anything; after `pop_macro` the macro keeps its latest definition.
-  - `#pragma weak NAME` does not make `NAME` weak.
-  - `#pragma GCC diagnostic` does not change any warning, and
-    `#pragma GCC poison` poisons nothing.
-- **`.asm` input for a non-x86 target.** A NASM-syntax file is assembled
-  as x86-64 whatever `--target=` says. With a 32-bit target the result
-  is an ELF32 file whose machine is x86-64.
-- **`va_arg(ap, long double)` on RISC-V** stops with
-  `internal error: riscv: no 16-byte store` instead of the backend's
-  refusal.
-- **ARMv6-M and ARMv8-M Baseline cores.** `-mcpu=cortex-m0`,
-  `cortex-m0plus`, `cortex-m1` and `cortex-m23` are accepted, but the
-  code uses ARMv7-M Thumb-2 instructions (such as `ldr.w` and `movw`)
-  that those cores do not implement.
-- **`__has_builtin(__builtin_sqrt)`** is 1 on Cortex-M without an FPU,
-  RISC-V and AVR, where the backend refuses the builtin.
-- **A select on a 64-bit condition on AVR.** At `-O2` and `-Os`,
-  if-conversion turns `if (c) r = a; else r = b;` into a select when `r`
-  is a `long` or `long long`. The AVR backend tests only the low four
-  bytes of the condition, so a `long long` condition whose low 32 bits
-  are zero (such as `1LL << 32`) takes the false arm.
+- **Pragmas.** `pack`, `once`, `push_macro`, `pop_macro` and `weak`
+  have an effect. Every other pragma is dropped without a diagnostic,
+  and there is no `-Wunknown-pragmas`. In particular,
+  `#pragma GCC diagnostic` does not change any warning,
+  `#pragma GCC poison` poisons nothing, and `#pragma redefine_extname`
+  does not rename the symbol.
 - **Debug information.** On AVR, `-g` produces a compile unit with no
-  functions, variables or line-table rows. On Cortex-M and RV32 every
-  pointer type is described as 8 bytes. Enumerations, `typedef` names
+  functions, variables or line-table rows. Enumerations, `typedef` names
   and lexical blocks are not described on any target. The full list is
   in [Debugging](../manual/debugging.md#known-problems).
 

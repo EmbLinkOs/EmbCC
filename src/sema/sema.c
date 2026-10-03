@@ -258,6 +258,29 @@ static void implicit_mem_decl(struct unit *u, const char *name)
     *pp = fd;
 }
 
+/* A libm function a __builtin_ became a call to, declared as C declares
+ * it -- `nargs` arguments of type t, returning t -- unless the program
+ * already has a declaration in sight. */
+static void implicit_float_decl(struct unit *u, const char *name,
+                                struct type *t, int nargs)
+{
+    if (find_func(u, name))
+        return;
+    struct func *fd = xcalloc(1, sizeof *fd);
+    fd->name = name;
+    fd->file = u->file;
+    fd->seq = -1;
+    fd->declared = 1;
+    fd->ret_ty = t;
+    fd->nparams = nargs;
+    for (int k = 0; k < nargs; k++)
+        fd->param_tys[k] = t;
+    struct func **pp = &u->funcs;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = fd;
+}
+
 static struct global *find_global(struct unit *u, const char *name)
 {
     for (struct global *g = u->globals; g; g = g->next)
@@ -387,6 +410,15 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
     if (ty_is_arith(to) && ty_is_arith(rhs->ty))
         return mk_cast(rhs, to);
     if (to->kind == TY_PTR) {
+        /* `char *s = some_const_char_ptr;` drops the pointee's const, and
+         * a store through s then writes a read-only object: GCC warns
+         * (-Wdiscarded-qualifiers, on by default), and so does this. */
+        if (rhs->ty->kind == TY_PTR && rhs->ty->pointee->is_const &&
+            !to->pointee->is_const)
+            diag_warn_opt(diag_file(u), rhs->line, rhs->col,
+                          "discarded-qualifiers",
+                          "%s discards the 'const' qualifier of %s",
+                          ctx, ty_name(rhs->ty));
         if (rhs->ty->kind == TY_PTR &&
             (ty_equal(rhs->ty, to) || to->pointee->kind == TY_VOID ||
              rhs->ty->pointee->kind == TY_VOID))
@@ -414,6 +446,49 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
     sema_error_at(u, rhs->line, rhs->col, "%s: cannot convert %s to %s",
                ctx, ty_name(rhs->ty), ty_name(to));
     return NULL;
+}
+
+static int is_lvalue(const struct expr *e);
+
+/* A struct or union with a const member, at any depth, which C does
+ * not let be assigned as a whole (C11 6.3.2.1p1). */
+static int has_const_member(const struct type *t)
+{
+    while (t->kind == TY_ARRAY)
+        t = t->pointee;
+    if (t->kind != TY_STRUCT)
+        return 0;
+    for (int i = 0; i < t->nmembers; i++) {
+        const struct type *mt = t->members[i].ty;
+        if (!mt)
+            continue;
+        if (mt->is_const || has_const_member(mt))
+            return 1;
+    }
+    return 0;
+}
+
+/* `what` (an assignment, ++, ...) of e, which must be a MODIFIABLE
+ * lvalue: not const, and not a struct with a const member. const was
+ * not in the type, so every one of these compiled -- and a const object
+ * at file scope is in .rodata, where the store faults (or, in a
+ * Cortex-M's flash, does nothing). */
+static void need_modifiable(struct unit *u, const struct expr *e,
+                            int line, int col, const char *what)
+{
+    const struct type *t = e->undecayed ? e->undecayed : e->ty;
+    if (!t || !(t->is_const || has_const_member(t)))
+        return;
+    const char *nm = e->kind == EXPR_VAR ? e->name
+                   : e->kind == EXPR_MEMBER ? e->name : NULL;
+    if (t->is_const && nm)
+        sema_error_at(u, line, col, "%s of read-only '%s' (its type is %s)",
+                      what, nm, ty_name(t));
+    if (t->is_const)
+        sema_error_at(u, line, col, "%s of a read-only location (its type "
+                      "is %s)", what, ty_name(t));
+    sema_error_at(u, line, col, "%s of %s, which has a const member",
+                  what, ty_name(t));
 }
 
 static int is_lvalue(const struct expr *e)
@@ -1225,10 +1300,16 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* char[N] (or wchar_t/char16_t/char32_t[N] for a wide literal),
          * decaying to a pointer like any array (sizeof sees the array through
          * `undecayed`). e->num is the element count including the NUL. */
-        struct type *elem = e->str_width == 4
-                              ? (e->str_prefix == 'U' ? ty_base(TY_INT, 1)  /* char32_t */
-                                                      : ty_wchar())
-                          : e->str_width == 2 ? ty_base(TY_SHORT, 1)        /* char16_t */
+        /* By the PREFIX: L is wchar_t whatever its width (two bytes on
+         * AVR), U is char32_t and u char16_t, as __CHAR32_TYPE__ and
+         * __CHAR16_TYPE__ spell them -- on AVR unsigned long and
+         * unsigned int, where U"" was the two-byte unsigned int. */
+        int i16 = target_int_size() == 2;
+        struct type *elem = e->str_prefix == 'L' ? ty_wchar()
+                          : e->str_prefix == 'U'
+                            ? ty_base(i16 ? TY_LONG : TY_INT, 1)
+                          : e->str_prefix == 'u'
+                            ? ty_base(i16 ? TY_INT : TY_SHORT, 1)
                           : ty_plain_char();
         e->undecayed = ty_array(elem, (int)e->num);
         e->ty = ty_ptr(elem);
@@ -1399,6 +1480,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col, "cannot assign to an array");
         if (e->lhs->fref)
             sema_error_at(u, e->line, e->col, "cannot assign to a function");
+        need_modifiable(u, e->lhs, e->line, e->col, "assignment");
         check_expr(u, f, sc, e->rhs);
         if (ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) {
             e->rhs = convert_assign(u, e->rhs, e->lhs->ty, "assignment");
@@ -1411,13 +1493,18 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             need_scalar(u, e->rhs, "assignment");
             e->rhs = convert_assign(u, e->rhs, e->lhs->ty, "assignment");
         }
+        /* The lvalue's own type, qualifiers and all: irgen takes the
+         * store's volatility from it, and an unqualified type here let
+         * DSE delete stores to a volatile object. */
         e->ty = e->lhs->ty;
         break;
     case EXPR_INCDEC: {
         check_expr(u, f, sc, e->lhs);
         if (!is_lvalue(e->lhs) || e->lhs->undecayed || e->lhs->fref)
             sema_error_at(u, e->line, e->col, "++/-- needs an lvalue");
-        e->ty = e->lhs->ty;
+        need_modifiable(u, e->lhs, e->line, e->col,
+                        e->delta > 0 ? "increment" : "decrement");
+        e->ty = e->lhs->ty;      /* qualified: see EXPR_ASSIGN */
         if (ty_is_complex(e->ty) && cx_lowering()) {   /* z += 1 */
             struct expr *one = cx_node(EXPR_NUM, e->line, ty_base(TY_INT, 0));
             one->num = 1;
@@ -1642,9 +1729,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         check_expr(u, f, sc, e->lhs);
         struct expr *chosen = NULL, *deflt = NULL;
         /* lvalue conversion drops the operand's own qualifiers */
-        const struct type *ct = e->lhs->ty;
-        if (ct->canon && (ct->is_volatile || ct->is_atomic))
-            ct = ct->canon;
+        const struct type *ct = ty_unqual(e->lhs->ty);
         int nmatch = 0;
         for (int i = 0; i < e->ngen; i++) {
             if (!e->gtypes[i]) { deflt = e->gexprs[i]; continue; }
@@ -1661,9 +1746,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (nmatch > 1)
             sema_error_at(u, e->line, e->col,
                        "more than one _Generic association matches type %s: "
-                       "their types differ only in const, which EmbCC does "
-                       "not yet keep in a type, or are the same type",
-                       ty_name(e->lhs->ty));
+                       "two associations name the same type",
+                       ty_name(ct));
         if (!chosen)
             chosen = deflt;
         if (!chosen)
@@ -1766,6 +1850,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (!is_lvalue(e->lhs) || e->lhs->undecayed || e->lhs->fref)
             sema_error_at(u, e->line, e->col,
                        "compound assignment needs an lvalue");
+        need_modifiable(u, e->lhs, e->line, e->col, "assignment");
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
             *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);
@@ -1878,6 +1963,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
          * member stays volatile for its own members. */
         if (base->is_volatile && !e->ty->is_volatile)
             e->ty = ty_volatile(e->ty);
+        /* and of a const one const: `cs.a = 1` assigns a const object */
+        if (base->is_const && !e->ty->is_const)
+            e->ty = ty_const(e->ty);
         if (e->ty->kind == TY_ARRAY) {
             e->undecayed = e->ty;
             e->ty = ty_ptr(e->ty->pointee);
@@ -1893,7 +1981,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->cast_ty && ty_is_vm(e->cast_ty)) {
             vla_prepare(u, f, sc, e->cast_ty);
             if (ty_is_vla(e->cast_ty)) {
-                e->ty = ty_base(TY_LONG, 1);
+                e->ty = ty_size_t();
                 break;
             }
         }
@@ -1902,7 +1990,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             struct type *rt = e->rhs->undecayed ? e->rhs->undecayed
                                                 : e->rhs->ty;
             if (ty_is_vla(rt)) {
-                e->ty = ty_base(TY_LONG, 1);
+                e->ty = ty_size_t();
                 break;
             }
         }
@@ -1921,11 +2009,15 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                              : e->rhs->ty);
         }
         /* Folded to a constant here; the operand is never evaluated,
-         * exactly as C specifies. size_t is unsigned long in LP64. */
+         * exactly as C specifies. Its type is the target's size_t:
+         * unsigned long in LP64, unsigned int on ILP32 and AVR. On AVR
+         * that is two bytes, so `-sizeof(int)` is 65534 there, as
+         * avr-gcc and clang have it, and not the -2 a four-byte
+         * unsigned long gave. */
         e->kind = EXPR_NUM;
         e->num = size;
         e->rhs = NULL;
-        e->ty = ty_base(TY_LONG, 1);
+        e->ty = ty_size_t();
         break;
     }
     case EXPR_ALIGNOF: {
@@ -1956,7 +2048,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->num = ua;
         }
         e->rhs = NULL;
-        e->ty = ty_base(TY_LONG, 1);
+        e->ty = ty_size_t();
         break;
     }
     case EXPR_VA_ARG:
@@ -2014,7 +2106,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     lt->pointee->kind == TY_FUNC)
                     sema_error_at(u, e->line, e->col, "arithmetic on %s",
                                ty_name(lt));
-                e->ty = ty_base(TY_LONG, 0); /* ptrdiff_t */
+                e->ty = ty_ptrdiff_t();
             } else if (lp || rp) {
                 if (rp && e->op == B_SUB)
                     sema_error_at(u, e->line, e->col,
@@ -2193,6 +2285,23 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                             e->lhs->name);
                 for (int i = 0; i < e->nargs; i++)
                     check_expr(u, f, sc, e->args[i]);
+                /* The alignment is in BITS, a constant power of two from
+                 * 8 up, as gcc requires. One beyond the stack's own is
+                 * met in irgen by asking for align - 1 more bytes and
+                 * rounding the address up; it was dropped, and the
+                 * memory came back merely stack-aligned. */
+                e->num = 0;
+                if (strcmp(bn, "alloca_with_align") == 0) {
+                    long abits;
+                    if (e->nargs != 2 || !const_fold(e->args[1], &abits) ||
+                        abits < 8 || (abits & (abits - 1)) != 0)
+                        sema_error_at(u, e->line, e->col,
+                                "__builtin_alloca_with_align takes a size and "
+                                "an alignment in bits: a constant power of "
+                                "two, 8 or more");
+                    else if (abits / 8 > target_stack_align())
+                        e->num = abits / 8;
+                }
                 e->args[0] = mk_cast(e->args[0], ty_base(TY_LONG, 1));
                 e->nargs = 1;
                 e->name = "__builtin_alloca";
@@ -2315,19 +2424,37 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                        1);
                 break;
             }
-            /* square root -- one instruction on both targets, and the
-             * hardware's result is correctly rounded. */
+            /* Square root: one instruction where the machine has one,
+             * and its result is correctly rounded. Where it has none --
+             * soft float, a Cortex-M FPU and a double, any 16-byte long
+             * double -- it is the libm function of the same name, as
+             * gcc makes it: the backends refused it there, and sqrtl was
+             * typed double everywhere, so a long double lost its low
+             * bits to a double square root without a word. */
             else if (strcmp(bn, "sqrt") == 0 || strcmp(bn, "sqrtf") == 0 ||
                      strcmp(bn, "sqrtl") == 0) {
+                struct type *ft = ty_base(bn[4] == 'f' ? TY_FLOAT :
+                                          bn[4] == 'l' ? TY_LDOUBLE :
+                                          TY_DOUBLE, 0);
                 if (e->nargs != 1)
                     sema_error_at(u, e->line, e->col, "%s takes one argument",
                                e->lhs->name);
-                check_expr(u, f, sc, e->args[0]);
-                e->name = e->lhs->name;
-                e->ty = ty_base(bn[4] == 'f' ? TY_FLOAT : TY_DOUBLE, 0);
-                e->args[0] = convert_assign(u, e->args[0], e->ty,
-                                            "__builtin_sqrt");
-                break;
+                if (!target_has_sqrt(ty_size(ft))) {
+                    /* The ordinary call path below. e->name too: the
+                     * parser copied the callee's name there, and irgen
+                     * turns a call still named __builtin_sqrt into the
+                     * instruction. */
+                    e->lhs->name = bn;
+                    e->name = bn;
+                    implicit_float_decl(u, bn, ft, 1);
+                } else {
+                    check_expr(u, f, sc, e->args[0]);
+                    e->name = e->lhs->name;
+                    e->ty = ft;
+                    e->args[0] = convert_assign(u, e->args[0], e->ty,
+                                                "__builtin_sqrt");
+                    break;
+                }
             }
             /* fabs and copysign: same float type in, same out. The
              * sign bit is the only thing either touches, so neither
@@ -2353,6 +2480,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 for (int k = 0; k < e->nargs; k++)
                     e->args[k] = convert_assign(u, e->args[k], e->ty,
                                                 e->lhs->name);
+                /* A 16-byte long double's sign is reached in memory
+                 * (irgen fb_wide): the slot it goes through. */
+                if (ty_size(e->ty) > 8)
+                    e->var_index = scope_add(sc, "<fp bits>", e->ty, NULL);
                 break;
             }
             /* The classification predicates. Each returns `int` and takes
@@ -2382,6 +2513,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                  * infinity, and an unsigned type turned that into
                  * 4294967295 the moment it widened to a long. */
                 e->ty = ty_base(TY_INT, 0);
+                if (e->nargs == 1 && ty_size(e->args[0]->ty) > 8)
+                    e->var_index = scope_add(sc, "<fp bits>",
+                                             e->args[0]->ty, NULL);
                 break;
             }
             /* the value IS the first argument; the hint is discarded */
@@ -4518,6 +4652,8 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 if (!is_lvalue(a->out[i].expr))
                     sema_error_at(u, s->line, s->col,
                                "an asm output operand must be an lvalue");
+                need_modifiable(u, a->out[i].expr, s->line, s->col,
+                                "an asm output");
                 a->out[i].reg = asm_resolve_reg(u, s, &a->out[i], 1);
             }
             for (int i = 0; i < a->nin; i++) {
@@ -4758,6 +4894,7 @@ static void check_func(struct unit *u, struct func *f)
             int pi = scope_add(&sc, f->params[i], f->param_tys[i], NULL);
             sc.vars[pi].is_param = 1;
             sc.vars[pi].line = f->line;
+            sc.vars[pi].unused_ok = f->param_unused[i];
         }
     }
     /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at
@@ -5080,11 +5217,74 @@ static void check_aliases(struct unit *u)
     }
 }
 
+/* Enumerators and constexprs live in the unit's one list, and EXPR_VAR
+ * consults it before the globals and functions. A file-scope variable or
+ * function of the same name was therefore replaced by the constant in
+ * every later function -- `int N = 7;` read as 3 everywhere after a
+ * function that declared `enum { N = 3 }` in its body. At file scope the
+ * two are C's redeclaration error; in a block they are valid C that
+ * EmbCC cannot yet scope. Either way the program is refused. */
+static void check_econst_names(struct unit *u)
+{
+    for (const struct econst *ec = u->econsts; ec; ec = ec->next) {
+        const struct global *g = find_global(u, ec->name);
+        const struct func *fn = g ? NULL : find_func(u, ec->name);
+        int line = g ? g->line : fn ? fn->line : 0;
+        const char *what = g ? "variable" : "function";
+        if (!g && !fn)
+            continue;
+        if (ec->in_block)
+            sema_error_line(u, ec->line, "'%s', declared in a function "
+                            "body, has the name of the file-scope %s on "
+                            "line %d; EmbCC does not yet give enumerators "
+                            "and constexprs block scope, and would read it "
+                            "as the constant everywhere after", ec->name,
+                            what, line);
+        else
+            sema_error_line(u, ec->line, "'%s' redeclared as a different "
+                            "kind of symbol: it is also the %s on line %d",
+                            ec->name, what, line);
+    }
+}
+
+/* `#pragma weak NAME` makes every declaration of NAME weak, as the
+ * attribute would; `#pragma weak NAME = TARGET` also makes the function
+ * NAME an alias of TARGET. Before the merges, which carry both to the
+ * declaration that stands for the rest. A NAME the unit never declares
+ * is never referenced either, so nothing in the object changes. */
+static void apply_pragma_weak(struct unit *u)
+{
+    for (const struct pragma_weak *w = u->weaks; w; w = w->next) {
+        int fn = 0, var = 0;
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (f->name && strcmp(f->name, w->name) == 0) {
+                f->is_weak = 1;
+                if (w->target)
+                    f->alias_of = w->target;
+                fn = 1;
+            }
+        for (struct global *g = u->globals; g; g = g->next)
+            if (g->name && strcmp(g->name, w->name) == 0) {
+                g->is_weak = 1;
+                var = 1;
+            }
+        if (w->target && !fn)
+            sema_error_line(u, w->line, var
+                            ? "#pragma weak %s = %s: an alias is supported "
+                              "for a function, and '%s' is a variable"
+                            : "#pragma weak %s = %s: '%s' is not declared in "
+                              "this file, and the alias needs its type",
+                            w->name, w->target, w->name);
+    }
+}
+
 void sema_check(struct unit *u)
 {
+    apply_pragma_weak(u);
     merge_decls(u);
     check_aliases(u);
     merge_globals(u);
+    check_econst_names(u);
     lower_globals(u);
 
     /* Walk in source order so `declared` mirrors C's rule exactly: a

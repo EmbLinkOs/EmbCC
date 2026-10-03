@@ -50,6 +50,14 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e)
     long align = ty_align(rt);
     long step;
 
+    /* A long double is binary128 here, which the backend does not lower
+     * anywhere yet. Refused in the backend's words: without this the
+     * walk below read it as a double, and a 16-byte store further on
+     * stopped the compile with an internal error. */
+    if (flt && size > 8)
+        diag_fatal(fn->file, e->line, "the RV%d backend cannot lower a "
+                   "128-bit value yet: va_arg of %s", 8 * wb, ty_name(rt));
+
     int apa = gen_addr(fn, e->lhs);
     int cur = emit_load(fn, apa, ptr);
 

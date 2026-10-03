@@ -399,6 +399,35 @@ void run(void)
 }
 EOF
 
+# The sign and classification builtins. They read and write the bits and
+# call nothing, so this image links no runtime at all. AVR refused every
+# one of them ("cannot lower bitcast"): a float is four bytes in the
+# general registers there, and the conversion to its bits is a copy.
+cat > "$out/fbits.c" <<'EOF'
+#include "pr.h"
+static float fab(float v)           { return __builtin_fabsf(v); }
+static double fabd(double v)        { return __builtin_fabs(v); }
+static float cps(float a, float b)  { return __builtin_copysignf(a, b); }
+void run(void)
+{
+    p32(fab(K(K_NEGZERO))); p32(fab(K(K_NEG12345))); p32(fab(K(K_NEGINF)));
+    p32(fab(K(K_NEGSMALL))); p32((float)fabd((double)K(K_NEGONEP9)));
+    p32(cps(K(K_12345), K(K_NEGZERO))); p32(cps(K(K_NEG12345), K(K_ZERO)));
+    p32(cps(K(K_NAN), K(K_NEGONE)));
+    puts_("| ");
+    pd(__builtin_signbit(K(K_NEGZERO))); pd(__builtin_signbit(K(K_ZERO)));
+    pd(__builtin_signbit(K(K_NEGINF)));
+    pd(__builtin_isnan(K(K_NAN))); pd(__builtin_isnan(K(K_INF)));
+    pd(__builtin_isinf(K(K_NEGINF))); pd(__builtin_isinf(K(K_BIG)));
+    pd(__builtin_isfinite(K(K_BIG))); pd(__builtin_isfinite(K(K_NAN)));
+    pd(__builtin_isnormal(K(K_ONE))); pd(__builtin_isnormal(K(K_SMALL)));
+    pd(__builtin_isnormal(K(K_ZERO)));
+    pd(__builtin_isinf_sign(K(K_NEGINF)) < 0);
+    pd(__builtin_isinf_sign(K(K_INF)) > 0);
+    puts_("DONE\n");
+}
+EOF
+
 cat > "$out/hostio.c" <<'EOF'
 /* The same two routines on the host, so the comparison is textual. */
 #include <stdio.h>
@@ -421,7 +450,8 @@ EOF
 # others want avrfp.o for __avrfp_unpack and __avrfp_round, and only fadd
 # wants avrfpadd.o. If any list were wrong, the link would say so by name --
 # which is how the multiply's dependency on __mulsi3 was found.
-progs="fadd fmul fdiv fcmp fcvt fcvt64 ffix64"
+progs="fadd fmul fdiv fcmp fcvt fcvt64 ffix64 fbits"
+fbits_rt=""
 fadd_rt="avrfp avrfpadd"
 # fmul also needs lib/rt/avr.c: mul24 splits its operands into 12-bit halves
 # and multiplies them with `*`, which on this target is a call to __mulsi3.
@@ -503,7 +533,7 @@ PY
 done
 
 echo "software binary32 agrees with the host BIT FOR BIT on a real
-ATmega328P, seven images at four optimisation levels:
+ATmega328P, eight images at four optimisation levels:
   add and subtract -- exact cancellation (which must give +0, never -0), a
   subnormal sum and a subnormal difference, an operand that vanishes
   entirely, overflow to inf, NaN from inf - inf, and NaN propagation
@@ -522,4 +552,7 @@ ATmega328P, seven images at four optimisation levels:
   a 64-bit integer to a float -- long long and unsigned long long, LLONG_MAX
   and LLONG_MIN, 2^64 - 1 which rounds up to 2^64, and 9007199254740993
   a float to a 64-bit integer -- truncation toward zero on both signs, a
-  subnormal and a value below 1 (both zero), and past LLONG_MAX unsigned"
+  subnormal and a value below 1 (both zero), and past LLONG_MAX unsigned
+  the sign and classification builtins -- fabs of -0, -inf and a negative
+  subnormal, copysign onto a NaN, signbit, isnan, isinf, isfinite,
+  isnormal and isinf_sign on the special values"

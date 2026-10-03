@@ -468,12 +468,9 @@ message (`[E0004]`) and carry it in the JSON `id` member.
 | `E0008` | control reaches the end of a function that must return a value | `control may reach the end of 'F' — every path must end in a return statement` |
 
 `E0006` and `E0007` have explanation entries but are not attached to any
-diagnostic. EmbCC does not diagnose an assignment to a `const`-qualified
-object, although the `E0007` entry gives one as an example.
-<!-- Checked at this commit: `const int limit = 10; void g(void) { limit = 11; }`
-     and `void h(const int *p) { *p = 3; }` compile with no diagnostic. This
-     is a constraint violation (C99 6.5.16p2) that a conforming compiler must
-     diagnose. Reported to the lead. -->
+diagnostic. An assignment to a `const`-qualified object, the example in
+the `E0007` entry, is the error `assignment of read-only 'NAME' (its
+type is TYPE)`; see [Const qualification](c-language.md#const-qualification).
 
 `E0008` is an error, not a warning, and it ends the compile. It applies
 to every function with a non-`void` return type except `main`. Reaching
@@ -608,6 +605,7 @@ nothing on.
 | `-Waddress` | A function name tested in an `if` condition, or compared with a null pointer constant | `-Wall` |
 | `-Wattributes` | An attribute EmbCC does not know, or one it accepts but does not implement | default |
 | `-Wdeprecated-declarations` | A use of a function or variable declared `deprecated` | default |
+| `-Wdiscarded-qualifiers` | A pointer conversion that drops the pointed-to type's `const` | default |
 | `-Wdiv-by-zero` | Integer division or remainder by a constant zero | default |
 | `-Wformat` | A `printf`- or `scanf`-style format that disagrees with its arguments | `-Wall` |
 | `-Wlogical-op` | `a && a` or `a \|\| a` with identical operands | `-Wextra` |
@@ -690,6 +688,24 @@ int f(void) { return old(); }
 embcc: dep.c:2:22: warning: 'old' is deprecated [-Wdeprecated-declarations]
   int f(void) { return old(); }
                        ^~~
+```
+
+#### `-Wdiscarded-qualifiers`
+
+Warn when a pointer to a `const`-qualified type is converted, without a
+cast, to a pointer whose pointed-to type is not `const`: in an
+initialization, an assignment, an argument or a `return`. A store through
+the result would modify a read-only object. On by default, as in GCC.
+
+```c
+void take(char *p);
+void f(const char *s) { take(s); }
+```
+
+```text
+embcc: q.c:2:30: warning: argument discards the 'const' qualifier of const char * [-Wdiscarded-qualifiers]
+  void f(const char *s) { take(s); }
+                               ^
 ```
 
 #### `-Wdiv-by-zero`
@@ -966,8 +982,10 @@ embcc: func.c:1: warning: unused function 'helper' [-Wunused-function]
 
 Warn about a named parameter that the function body never uses. Enabled
 by `-Wextra`. The location has a line but no column. Writing `(void)name;`
-in the body marks the parameter as used. `__attribute__((unused))` on a
-parameter does not suppress the warning.
+in the body marks the parameter as used, and so does
+`__attribute__((unused))` or `[[maybe_unused]]` on it, written before its
+type, between the type and the name, or after the name
+(`int f(int x __attribute__((unused)))`).
 
 ```c
 int f(int a, int b) { return a; }

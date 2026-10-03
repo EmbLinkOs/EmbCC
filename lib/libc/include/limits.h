@@ -24,6 +24,12 @@
 #define WCHAR_MIN  __WCHAR_MIN__
 #define WCHAR_MAX  __WCHAR_MAX__
 
+/* The longest multibyte character this library writes: a UTF-8 sequence
+ * is at most four bytes. The compiler's half says 1, for a library with
+ * no multibyte encoding; with that, `char buf[MB_LEN_MAX]` handed to
+ * wctomb was overrun by the first character past U+007F. */
+#define MB_LEN_MAX 4
+
 /* the compiler's half: CHAR_BIT, INT_MAX and the rest, from the target */
 #include_next <limits.h>
 

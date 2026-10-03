@@ -43,61 +43,36 @@
 
 static void print_version(void)
 {
-    /* Honest: names what exists and what does not. */
-    printf("EmbCC %s — C compiler for EmbLinkOS, target %s\n",
-           EMBCC_VERSION, target_triple_now());
-    printf("Language: C11 on both targets — VLAs, _Complex, long double, "
-           "_Atomic and the atomic builtins, _Generic — plus the GNU "
-           "extensions EmbLinkOS uses (statement expressions, typeof, "
-           "computed goto, attributes, extended inline asm).\n");
-    printf("Targets (--target=): x86_64-elf (System V AMD64, x87 long "
-           "double) and aarch64-elf (AAPCS64, binary128 long double) are "
-           "the freestanding pair; thumbv7m-none-eabi and "
-           "riscv32/riscv64-unknown-elf are the embedded ones (D-015, "
-           "D-016); each architecture also has -emblink, -linux-gnu and "
-           "-apple-darwin, and any unknown --target lists every triple "
-           "(D-014).\n");
-    {
-        const char *dt = target_default_name();
-        printf("With no --target= this compiler emits for %s%s.\n",
-               dt ? dt : "x86_64-elf",
-               dt ? ", the default it was configured with; "
-                    "EMBCC_DEFAULT_TARGET changes that for one shell"
-                  : "; build with `make DEFAULT_TARGET=riscv32-unknown-elf` "
-                    "(or set EMBCC_DEFAULT_TARGET) for a compiler that "
-                    "targets your board by default");
-    }
-    printf("Hosted: Linux builds a STATIC image with no glibc under it "
-           "(lib/libc/os/linux issues syscalls; make libc-linux-x86_64) and "
-           "it has run on a real kernel; macOS emits Mach-O objects the "
-           "system linker accepts. Windows emits COFF objects in the "
-           "Microsoft x64 convention, but nothing has been executed there "
-           "yet and there is no libc for it.\n");
-    printf("C++ (.cc/.cpp/.cxx/.C, or -x c++): in progress toward C++20 "
-           "with libstdc++ (docs/manual/cxx.md) — namespaces, overloading, "
-           "references, classes with constructors and destructors, "
-           "new/delete, lowered through C to either target.\n");
-    printf("Installed or not: EmbCC finds its headers and per-target "
-           "libraries relative to its own binary, so <stdio.h> works with "
-           "no -I from a build tree or an unpacked tarball alike; "
-           "--print-search-dirs says which it found (make install "
-           "PREFIX=...).\n");
-    printf("Also: the preprocessor (-E), -O0..-O2, -g (DWARF), embas "
-           "(NASM-syntax .asm, x86-64) and embld (the linker, x86-64 ELF "
-           "and EMBX). __thread and thread_local work on the ELF targets. "
-           "Not yet: PIE, dynamic linking, embld for aarch64 — "
-           "see docs/internals/status.md.\n");
+    /* What the compiler is and what it targets, in a few lines, in the
+     * layout clang uses -- and only what the tree holds: the long form,
+     * with what is missing, is docs/internals/status.md. */
+    const char *dt = target_default_name();
+    printf("EmbCC %s (a C and C++ compiler for EmbLinkOS and embedded "
+           "boards)\n", EMBCC_VERSION);
+    printf("Target: %s\n", target_triple_now());
+    printf("Default target: %s%s\n", dt ? dt : "x86_64-elf",
+           dt ? " (as configured)" : "");
+    printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
+           "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
+           "ARMv8-M Mainline), RISC-V (RV32, RV64), AVR (ATmega328P)\n");
+    printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
+           "64-bit targets\n");
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32 and AVR images; "
+           "AArch64 and Darwin link with the platform's linker\n");
+    printf("Not yet: position-independent executables, shared libraries, "
+           "dynamic linking. See docs/internals/status.md.\n");
 }
 
 static void print_usage(FILE *out)
 {
     fprintf(out,
-            "usage: embcc [-E] -c FILE.c|FILE.cc|FILE.asm [-o FILE.o]\n"
+            "usage: embcc [-c|-S|-E] FILE.c|FILE.cc|FILE.s|FILE.S|FILE.asm"
+            " [-o FILE]\n"
             "             [--target=TRIPLE] [-x c|c++]\n"
             "             [-std=...] [--emit-c]\n"
             "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
-            "             [-O0|-O1|-O2]\n"
-            "             [-mno-sse] [-mno-red-zone] [-mcmodel=kernel] ...\n"
+            "             [-O0|-O1|-O2|-O3|-Os]\n"
+            "             [-mcpu=CPU] [-mno-sse] [-mno-red-zone] ...\n"
             "       embcc --version | --dump-predef"
             " | --emit-empty-object FILE\n");
 }
@@ -110,7 +85,7 @@ static void print_options(FILE *out)
       "\nwhat to do\n"
       "  -c                     compile to an object\n"
       "  -E                     preprocess only\n"
-      "  -S                     write assembly (.s) instead of an object (x86-64)\n"
+      "  -S                     write assembly (NAME.s) instead of an object\n"
       "  -fsyntax-only          check, write nothing\n"
       "  --emit-c               print the C a C++ unit lowers to\n"
       "  -o FILE                where to write it\n"
@@ -122,6 +97,7 @@ static void print_options(FILE *out)
       "  --print-search-dirs    where EmbCC found its own files\n"
       "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
       "  -include FILE          include it before the file\n"
+      "  -Wp,-D...,-U...,-I...  the same, for the preprocessor\n"
       "  -O0/-O1/-O2/-O3/-Os          optimization level (-Os: no size growth)\n"
       "  -f<pass>, -fno-<pass>        turn one optimizer pass on or off\n"
       "  -fstack-usage                write FILE.su: each function's frame\n"
@@ -129,17 +105,19 @@ static void print_options(FILE *out)
       "  -fno-access-control          do not enforce private/protected\n"
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
-      "                         riscv32/riscv64-unknown-elf, and the -emblink,\n"
-      "                         -linux-gnu, -apple-darwin and -windows-gnu\n"
-      "                         spellings; an unknown one lists them all\n",
+      "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
+      "                         riscv32/riscv64-unknown-elf, avr, and the\n"
+      "                         -emblink, -linux-gnu, -apple-darwin and\n"
+      "                         -windows-gnu spellings; an unknown one lists\n"
+      "                         them all\n",
       out);
     fprintf(out,
       "                         with none, this compiler emits for %s\n",
       target_default_name() ? target_default_name() : "x86_64-elf");
     fputs(
       "  -dumpmachine           print that target\n"
-      "  -O0 -O1 -O2            optimisation\n"
       "  -g                     debug information (DWARF)\n"
+      "  -mcpu=CPU -mfpu=FPU -mfloat-abi=ABI   Cortex-M part and float ABI\n"
       "  -mno-sse -mno-red-zone -mcmodel=kernel -mgeneral-regs-only\n"
       "\ndiagnostics (docs/manual/diagnostics.md)\n"
       "  -fdiagnostics-format=text|json   caret output, or GCC's JSON\n"
@@ -245,14 +223,26 @@ static int has_ir_suffix(const char *p)
 }
 
 /* The input with its suffix (.c, .cc, .cpp ...) swapped for .o. */
+/* The output name GCC gives a compile with no -o: the input's last
+ * path component, its suffix replaced by `sfx` (".o", ".s"), in the
+ * current directory. The directory was kept, so `-c src/a.c` wrote
+ * src/a.o where GCC writes ./a.o, and a dot in a directory name
+ * (`v1.2/main`) was taken for the suffix. */
+static const char *default_output_sfx(const char *in, const char *sfx)
+{
+    const char *base = strrchr(in, '/');
+    base = base ? base + 1 : in;
+    const char *dot = strrchr(base, '.');
+    size_t n = dot && dot != base ? (size_t)(dot - base) : strlen(base);
+    char *out = xmalloc(n + strlen(sfx) + 1);
+    memcpy(out, base, n);
+    strcpy(out + n, sfx);
+    return out;
+}
+
 static const char *default_output(const char *in)
 {
-    const char *dot = strrchr(in, '.');
-    size_t n = dot ? (size_t)(dot - in) : strlen(in);
-    char *out = xmalloc(n + 3);
-    memcpy(out, in, n);
-    memcpy(out + n, ".o", 3);
-    return out;
+    return default_output_sfx(in, ".o");
 }
 
 /* The final path component. The STT_FILE symbol uses this rather than the
@@ -1867,6 +1857,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                            "yet: Windows reaches a thread-local through a "
                            "_tls_index and a TLS directory this writer "
                            "does not emit");
+        /* The COFF writer has no named data sections: an object with one
+         * was given offset 0 of .data and laid over whatever was already
+         * there, so a store to either changed both. */
+        for (struct global *g = u->globals; g; g = g->next)
+            if (!g->absorbed && g->defined && g->section)
+                diag_fatal(g->file, g->line,
+                           "'%s': a variable's section attribute is not "
+                           "supported for COFF output", g->name);
         if (unwind)
             diag_fatal(in, 0,
                        "C++ exceptions are not supported for a Windows "
@@ -2340,10 +2338,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         for (int k = 0; k < ta->nsyms; k++)
             if (ta->syms[k].is_global) {
                 long toff;
-                text_at(ta->text_off + ta->syms[k].off, &toff);
+                const struct asmsym *as = &ta->syms[k];
+                text_at(ta->text_off + as->off, &toff);
+                /* Its type is what .type said. Untyped, it stays a
+                 * function, as every label was -- except on Thumb, where
+                 * a function's address carries bit 0 and gas leaves an
+                 * untyped label NOTYPE and even. A typed Thumb function
+                 * was even, so a call through a pointer to it switched
+                 * to the ARM state a Cortex-M does not have. */
+                int thumb = target_get() == TARGET_THUMB;
+                int st = as->type == ASMSYM_OBJECT ? STT_OBJECT
+                       : as->type == ASMSYM_FUNC || !thumb ? STT_FUNC
+                       : STT_NOTYPE;
+                if (thumb && st == STT_FUNC)
+                    toff = fn_sym_value(TARGET_THUMB, toff);
                 int ndx = elfw_add_symbol(
-                    w, ta->syms[k].name, (Elf64_Addr)toff, 0,
-                    ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                    w, as->name, (Elf64_Addr)toff, 0,
+                    ELF64_ST_INFO(as->is_weak ? STB_WEAK : STB_GLOBAL, st),
                     (Elf64_Half)text_ndx);
                 for (struct func *f = u->funcs; f; f = f->next)
                     if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
@@ -2355,9 +2366,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                         g->sym_ndx = ndx;
             }
 
-    /* extern-declared, used, never defined: the linker's problem */
+    /* extern-declared, used, never defined: the linker's problem --
+     * unless a file-scope asm block defines it (sym_ndx, set above),
+     * which gave the object a definition and an undefined symbol of
+     * the same name, and the C code's references went to the second. */
     for (struct global *g = u->globals; g; g = g->next)
-        if (!g->absorbed && !g->defined && g->used)
+        if (!g->absorbed && !g->defined && g->used && !g->sym_ndx)
             g->sym_ndx = elfw_add_symbol(
                 w, g->name, 0, 0,
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
@@ -2429,22 +2443,41 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * be a call. */
     for (struct topasm *ta = u->topasm; ta; ta = ta->next)
         for (int r = 0; r < ta->nrels; r++) {
+            /* The symbol this file already has for the name -- a
+             * function, an object, or a block's own global label -- so
+             * a `.quad x` against an x defined here did not add a
+             * second, undefined x beside it. */
             int sym = 0;
-            for (struct func *f = u->funcs; f; f = f->next)
-                if (!f->absorbed && f->sym_ndx &&
-                    strcmp(f->name, ta->rels[r].target) == 0) {
+            long addend = ta->rels[r].addend;
+            const char *tn = ta->rels[r].target;
+            for (struct func *f = u->funcs; f && !sym; f = f->next)
+                if (!f->absorbed && f->sym_ndx && strcmp(f->name, tn) == 0)
                     sym = f->sym_ndx;
-                    break;
-                }
+            for (struct global *g = u->globals; g && !sym; g = g->next)
+                if (!g->absorbed && g->sym_ndx && strcmp(g->name, tn) == 0)
+                    sym = g->sym_ndx;
+            /* A label of a block, global or not, that C never declared:
+             * its section and offset. (A local one went out as an
+             * undefined symbol of the same name, which another object's
+             * global could satisfy.) */
+            for (struct topasm *lb = u->topasm; lb && !sym; lb = lb->next)
+                for (int k = 0; k < lb->nsyms && !sym; k++)
+                    if (strcmp(lb->syms[k].name, tn) == 0) {
+                        addend += code_ref(lb->text_off + lb->syms[k].off,
+                                           text_sym, &sym);
+                        if (target_get() == TARGET_THUMB &&
+                            lb->syms[k].type == ASMSYM_FUNC)
+                            addend |= 1;
+                    }
             if (!sym)
                 sym = elfw_add_symbol(
-                    w, ta->rels[r].target, 0, 0,
+                    w, tn, 0, 0,
                     ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_UNDEF);
-            enum reloc_kind rk = ta->rels[r].kind == ASMREL_ABS64
-                                     ? RK_ABS64 : RK_CALL;
+            enum reloc_kind rk = ta->rels[r].kind == ASMREL_ABS64 ? RK_ABS64
+                               : ta->rels[r].kind == ASMREL_ABS32 ? RK_ABS32
+                               : RK_CALL;
             code_rela(w, text_ndx, ta->text_off + ta->rels[r].off,
-                      sym, target_reloc_type(target_get(), rk),
-                      ta->rels[r].addend);
+                      sym, target_reloc_type(target_get(), rk), addend);
         }
 
     /* RISC-V's low half names the AUIPC, not the target.
@@ -2685,15 +2718,6 @@ static int has_gas_suffix(const char *s)
     return s[n - 1] == 's' ? 1 : s[n - 1] == 'S' ? 2 : 0;
 }
 
-/* Swap `.asm` for `.o`, the default assembler output name. */
-static const char *default_asm_output(const char *in)
-{
-    size_t n = strlen(in);
-    char *out = xstrndup(in, n);        /* room for the full name + NUL */
-    out[n - 3] = 'o';                   /* "....asm" -> "....o" */
-    out[n - 2] = '\0';
-    return out;
-}
 
 static int g_want_dump_predef, g_want_dumpmachine;
 
@@ -2768,9 +2792,50 @@ static void arm_float_resolve(void)
     target_set_thumb_fpu(1);
 }
 
+/* -Wp,A,B,...: options for the preprocessor, split at the commas and put
+ * back in the argument list for the ordinary parse. Only the ones whose
+ * meaning is the same there -- -D, -U, -I with their values joined -- are
+ * taken; any other is refused by name. Each was the warning "is not a
+ * warning EmbCC has", and the -D it carried was simply lost. */
+static int expand_wp(int *argcp, char ***argvp)
+{
+    int argc = *argcp, n = 0, cap = argc + 1;
+    char **argv = *argvp;
+    char **out = xcalloc((size_t)cap, sizeof *out);
+    for (int i = 0; i < argc; i++) {
+        char *list = strncmp(argv[i], "-Wp,", 4) == 0
+                   ? xstrndup(argv[i] + 4, strlen(argv[i] + 4)) : NULL;
+        for (char *t = list ? list : argv[i]; t; ) {
+            char *c = list ? strchr(t, ',') : NULL;
+            if (c) *c = '\0';
+            if (list && *t && (t[0] != '-' || (t[1] != 'D' && t[1] != 'U' &&
+                                               t[1] != 'I') || !t[2])) {
+                fprintf(stderr, "embcc: error: preprocessor option '%s' in "
+                        "%s is not supported; pass -D, -U or -I with its "
+                        "value, or give the option directly\n", t, argv[i]);
+                return 1;
+            }
+            if (*t || !list) {
+                if (n + 1 >= cap) {
+                    cap *= 2;
+                    out = xrealloc(out, (size_t)cap * sizeof *out);
+                }
+                out[n++] = t;
+            }
+            t = c ? c + 1 : NULL;
+        }
+    }
+    out[n] = NULL;
+    *argcp = n;
+    *argvp = out;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
+    if (expand_wp(&argc, &argv))
+        return 1;
 
     /* -fsanitize state: which checks, and whether trap mode was
      * asked for by name (it is the only mode, so this only has to be
@@ -3368,16 +3433,28 @@ int main(int argc, char **argv)
                  * built soft-float: its ABI passes floats in s0-s15 and
                  * an object built the other way links and then reads its
                  * arguments from the wrong registers. */
-                if (!strcmp(v, "cortex-m3") || !strcmp(v, "cortex-m0") ||
-                    !strcmp(v, "cortex-m0plus") || !strcmp(v, "cortex-m1"))
+                /* The ARMv6-M and ARMv8-M Baseline parts are refused too:
+                 * they were taken as ARMv7-M (the M23 as ARMv7E-M, DSP and
+                 * all), and the code that came out used ldr.w and IT
+                 * blocks, which those cores do not implement -- a
+                 * HardFault at the first one, from an image that built
+                 * and linked without a word. */
+                if (!strcmp(v, "cortex-m0") || !strcmp(v, "cortex-m0plus") ||
+                    !strcmp(v, "cortex-m1") || !strcmp(v, "cortex-m23"))
+                    diag_fatal(NULL, 0, "-mcpu=%s is %s, and EmbCC emits "
+                               "ARMv7-M Thumb-2: that core does not "
+                               "implement its ldr.w or IT blocks", v,
+                               strcmp(v, "cortex-m23") ? "ARMv6-M"
+                                                       : "ARMv8-M Baseline");
+                if (!strcmp(v, "cortex-m3"))
                     target_set_thumb_em(0);
                 else if (!strcmp(v, "cortex-m4") || !strcmp(v, "cortex-m7") ||
-                         !strcmp(v, "cortex-m33") || !strcmp(v, "cortex-m23"))
+                         !strcmp(v, "cortex-m33"))
                     target_set_thumb_em(1);
                 else
                     diag_fatal(NULL, 0, "-mcpu=%s is not a part EmbCC knows: "
-                               "it emits ARMv7-M and ARMv7E-M (cortex-m0, "
-                               "m0plus, m1, m3, m4, m7, m23, m33)", v);
+                               "it emits ARMv7-M and ARMv7E-M (cortex-m3, "
+                               "m4, m7, m33)", v);
                 continue;
             }
             /* The FPU and the float ABI are RECORDED here and resolved
@@ -3496,6 +3573,12 @@ int main(int argc, char **argv)
                    strncmp(argv[i], "-mcmodel=", 9) == 0) {
             /* accepted: EmbCC never uses MMX or the red zone, and its default
              * code model already suits the kernel's higher-half link. */
+        } else if (strcmp(argv[i], "-include") == 0) {
+            if (i + 1 == argc) {
+                fprintf(stderr, "embcc: -include needs a file\n");
+                return 1;
+            }
+            cpp_preinclude(argv[++i]);
         } else if (strncmp(argv[i], "-D", 2) == 0 ||
                    strncmp(argv[i], "-U", 2) == 0) {
             int undef = argv[i][1] == 'U';
@@ -3665,7 +3748,7 @@ int main(int argc, char **argv)
         if (pp_only)
             return done(compile(input, NULL, 1));
         return gas_assemble(input,
-                            output ? output : default_asm_output(input),
+                            output ? output : default_output(input),
                             has_gas_suffix(input) == 2);
     }
     if (has_asm_suffix(input)) {
@@ -3673,7 +3756,17 @@ int main(int argc, char **argv)
             fprintf(stderr, "embcc: error: -E does not apply to assembly\n");
             return 1;
         }
-        return as_assemble(input, output ? output : default_asm_output(input),
+        /* NASM syntax is x86-64 assembly, and the assembler writes ELF.
+         * For any other target it wrote an x86-64 object anyway -- an
+         * ELF32 one whose machine was x86-64 on a 32-bit target -- and
+         * the error, if any, came from the linker. */
+        if (target_get() != TARGET_X86_64 || target_fmt_get() != TGT_FMT_ELF) {
+            fprintf(stderr, "embcc: error: '%s' is NASM-syntax x86-64 "
+                    "assembly, which EmbCC assembles to x86-64 ELF only, "
+                    "and the target is %s\n", input, target_triple_now());
+            return 1;
+        }
+        return as_assemble(input, output ? output : default_output(input),
                            AS_ELF64);
     }
     if (pp_only)
@@ -3692,8 +3785,12 @@ int main(int argc, char **argv)
         compile_mode = 1;
     if (!compile_mode)
         return done(compile_and_link(input, output));
-    /* A report goes to stdout unless the caller named a file; an object
-     * gets the default name. */
+    /* An interface report goes to stdout unless the caller named a file.
+     * -S writes NAME.s, as GCC does -- it went to stdout, and a build
+     * that ran `cc -S x.c` found no x.s -- and `-o -` still means
+     * stdout. */
+    if (want_asm && !output && !out_is_stdout)
+        output = default_output_sfx(input, ".s");
     if ((want_iface || want_asm) && !output)
         return done(compile(input, NULL, 0));
     /* `-o -` reached here with output == NULL, which for an OBJECT means

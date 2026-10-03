@@ -9,11 +9,13 @@ echo "TEST-MARKER version"
 out=$("$EMBCC" --version) || { echo "--version exited nonzero"; exit 1; }
 echo "$out"
 
-echo "$out" | grep -q "EmbCC"       || { echo "missing project name"; exit 1; }
-echo "$out" | grep -q "target x86_64-elf" || { echo "missing the selected target"; exit 1; }
-echo "$out" | grep -q "aarch64-elf" || { echo "does not list the aarch64 target"; exit 1; }
+echo "$out" | grep -q "^EmbCC "     || { echo "missing project name"; exit 1; }
+echo "$out" | grep -q "^Target: x86_64-elf$" || { echo "missing the selected target"; exit 1; }
+for a in AArch64 Cortex-M RISC-V AVR; do
+    echo "$out" | grep -q "$a" || { echo "does not list $a"; exit 1; }
+done
 echo "$out" | grep -q "C11"         || { echo "does not name the language"; exit 1; }
 echo "$out" | grep -qi "not yet"    || { echo "does not admit what is missing"; exit 1; }
 a64=$("$EMBCC" --target=aarch64-elf --version) || { echo "--version exited nonzero"; exit 1; }
-echo "$a64" | grep -q "target aarch64-elf" || {
+echo "$a64" | grep -q "^Target: aarch64-elf$" || {
     echo "--target=aarch64-elf --version does not name aarch64"; exit 1; }

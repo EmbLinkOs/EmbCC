@@ -515,20 +515,23 @@ only Thumb`.
 
 #### `-mcpu=CPU`
 
-Select the architecture variant by core. `cortex-m3`, `cortex-m0`,
-`cortex-m0plus` and `cortex-m1` select ARMv7-M; `cortex-m4`, `cortex-m7`,
-`cortex-m23` and `cortex-m33` select ARMv7E-M. The option does not change
+Select the architecture variant by core. `cortex-m3` selects ARMv7-M;
+`cortex-m4`, `cortex-m7` and `cortex-m33` select ARMv7E-M. The option does not change
 the architecture level: `--target=thumbv7m-none-eabi -mcpu=cortex-m33`
 is `thumbv7em-none-eabi`, and ARMv8-M is selected only by a
 `thumbv8m.main` triple. Any other value is an error:
 
 ```text
-embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv7-M and ARMv7E-M (cortex-m0, m0plus, m1, m3, m4, m7, m23, m33)
+embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)
 ```
 
-The Cortex-M0, M0+, M1 (ARMv6-M) and M23 (ARMv8-M Baseline) are
-accepted, but EmbCC emits ARMv7-M Thumb-2 instructions, such as `ldr.w`
-and `movw`, which those cores do not implement.
+The Cortex-M0, M0+, M1 (ARMv6-M) and M23 (ARMv8-M Baseline) are refused
+by name, because EmbCC emits ARMv7-M Thumb-2 and those cores would fault
+on it:
+
+```text
+embcc: error: -mcpu=cortex-m0 is ARMv6-M, and EmbCC emits ARMv7-M Thumb-2: that core does not implement its ldr.w or IT blocks
+```
 
 #### `-mfpu=FPU`
 
