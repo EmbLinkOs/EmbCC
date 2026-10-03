@@ -2867,6 +2867,37 @@ static void gen_ins(struct t_fn *F, int n)
          * and IR_MOD sit between IR_MUL and IR_AND, so a six-entry table
          * turns `and` into `eor` and reads past its end for `or` and
          * `xor`. It compiled, it ran, and `v & 1` came back as v & ~1. */
+        /* A product whose one reader is the add or subtract right after
+         * it: `mla d, a, b, c` is c + a*b and `mls d, a, b, c` is c - a*b,
+         * one instruction for the two, which every multiply-accumulate
+         * loop is -- a dot product, a filter tap, a matrix row. Both read
+         * all three sources before writing, so d may be any of them.
+         * `a*b - c` has no such instruction and stays two. */
+        if (i->op == IR_MUL && !i->imm_b && !i->flt && i->w == 4 &&
+            i->dst >= 0 && F->usecnt && F->usecnt[i->dst] == 1 &&
+            n + 1 < fn->nins && !getenv("EMBCC_NO_MLA")) {
+            const struct ir_ins *nx = &fn->ins[n + 1];
+            int c = -1;
+            if ((nx->op == IR_ADD || nx->op == IR_SUB) && !nx->imm_b &&
+                !nx->flt && nx->w == 4 && nx->dst >= 0) {
+                if (nx->b == i->dst && nx->a != i->dst)
+                    c = nx->a;                  /* c + p, c - p */
+                else if (nx->op == IR_ADD && nx->a == i->dst &&
+                         nx->b != i->dst)
+                    c = nx->b;                  /* p + c */
+            }
+            if (c >= 0) {
+                int ra_ = rdr(F, i->a, T_ACC);
+                int rb_ = rdr(F, i->b, T_TMP);
+                int rc_ = rdr(F, c, T_ADDR);
+                int d = wreg(F, nx->dst, T_ACC);
+                if (nx->op == IR_ADD) t_mla(t, d, ra_, rb_, rc_);
+                else                  t_mls(t, d, ra_, rb_, rc_);
+                wrote(F, nx->dst, d);
+                F->skip_next = 1;
+                return;
+            }
+        }
         int op = i->op == IR_ADD ? T_OP_ADD
                : i->op == IR_SUB ? T_OP_SUB
                : i->op == IR_AND ? T_OP_AND
