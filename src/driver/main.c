@@ -245,14 +245,26 @@ static int has_ir_suffix(const char *p)
 }
 
 /* The input with its suffix (.c, .cc, .cpp ...) swapped for .o. */
+/* The output name GCC gives a compile with no -o: the input's last
+ * path component, its suffix replaced by `sfx` (".o", ".s"), in the
+ * current directory. The directory was kept, so `-c src/a.c` wrote
+ * src/a.o where GCC writes ./a.o, and a dot in a directory name
+ * (`v1.2/main`) was taken for the suffix. */
+static const char *default_output_sfx(const char *in, const char *sfx)
+{
+    const char *base = strrchr(in, '/');
+    base = base ? base + 1 : in;
+    const char *dot = strrchr(base, '.');
+    size_t n = dot && dot != base ? (size_t)(dot - base) : strlen(base);
+    char *out = xmalloc(n + strlen(sfx) + 1);
+    memcpy(out, base, n);
+    strcpy(out + n, sfx);
+    return out;
+}
+
 static const char *default_output(const char *in)
 {
-    const char *dot = strrchr(in, '.');
-    size_t n = dot ? (size_t)(dot - in) : strlen(in);
-    char *out = xmalloc(n + 3);
-    memcpy(out, in, n);
-    memcpy(out + n, ".o", 3);
-    return out;
+    return default_output_sfx(in, ".o");
 }
 
 /* The final path component. The STT_FILE symbol uses this rather than the
@@ -2685,15 +2697,6 @@ static int has_gas_suffix(const char *s)
     return s[n - 1] == 's' ? 1 : s[n - 1] == 'S' ? 2 : 0;
 }
 
-/* Swap `.asm` for `.o`, the default assembler output name. */
-static const char *default_asm_output(const char *in)
-{
-    size_t n = strlen(in);
-    char *out = xstrndup(in, n);        /* room for the full name + NUL */
-    out[n - 3] = 'o';                   /* "....asm" -> "....o" */
-    out[n - 2] = '\0';
-    return out;
-}
 
 static int g_want_dump_predef, g_want_dumpmachine;
 
@@ -3677,7 +3680,7 @@ int main(int argc, char **argv)
         if (pp_only)
             return done(compile(input, NULL, 1));
         return gas_assemble(input,
-                            output ? output : default_asm_output(input),
+                            output ? output : default_output(input),
                             has_gas_suffix(input) == 2);
     }
     if (has_asm_suffix(input)) {
@@ -3695,7 +3698,7 @@ int main(int argc, char **argv)
                     "and the target is %s\n", input, target_triple_now());
             return 1;
         }
-        return as_assemble(input, output ? output : default_asm_output(input),
+        return as_assemble(input, output ? output : default_output(input),
                            AS_ELF64);
     }
     if (pp_only)
@@ -3714,8 +3717,12 @@ int main(int argc, char **argv)
         compile_mode = 1;
     if (!compile_mode)
         return done(compile_and_link(input, output));
-    /* A report goes to stdout unless the caller named a file; an object
-     * gets the default name. */
+    /* An interface report goes to stdout unless the caller named a file.
+     * -S writes NAME.s, as GCC does -- it went to stdout, and a build
+     * that ran `cc -S x.c` found no x.s -- and `-o -` still means
+     * stdout. */
+    if (want_asm && !output && !out_is_stdout)
+        output = default_output_sfx(input, ".s");
     if ((want_iface || want_asm) && !output)
         return done(compile(input, NULL, 0));
     /* `-o -` reached here with output == NULL, which for an OBJECT means

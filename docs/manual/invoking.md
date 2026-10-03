@@ -98,14 +98,15 @@ What happens to the input depends on the mode options:
 | Mode | Input | Result | Default output |
 |---|---|---|---|
 | none | C or C++ | compiled and linked (x86-64 ELF targets only) | `a.out` |
-| `-c` | C or C++ | relocatable object | the input path with its suffix replaced by `.o` |
-| `-S` | C or C++ | assembly text | standard output |
+| `-c` | C or C++ | relocatable object | the input's file name with its suffix replaced by `.o` |
+| `-S` | C or C++ | assembly text | the input's file name with its suffix replaced by `.s` |
 | `-E` | C, C++ or `.S` | preprocessed text | standard output |
 | `-fsyntax-only` | C or C++ | nothing; diagnostics only | none |
 | any | `.s` `.S` `.asm` | object | see [Assembler and linker options](#assembler-and-linker-options) |
 
-The default object is written next to the input, not in the current
-directory: `embcc -c src/foo.c` writes `src/foo.o`.
+As with GCC, a default output is written in the current directory, not
+next to the input: `embcc -c src/foo.c` writes `foo.o`, and
+`embcc -S src/foo.c` writes `foo.s`.
 
 A C++ input is compiled only for a target whose `long` and pointers are
 8 bytes. For the Cortex-M targets, RV32 and AVR, every mode but `-E`,
@@ -126,9 +127,9 @@ targets, Mach-O for the `-apple-darwin` targets and COFF for
 ### `-S`
 
 Write the code the backend generated as GNU assembler text instead of an
-object. Supported on every target. The output goes to standard output
-unless `-o` names a file; `-o -` also means standard output. `-S` implies
-`-c`.
+object. Supported on every target. Without `-o` the output is
+`NAME.s` in the current directory; `-o -` writes it to standard output.
+`-S` implies `-c`.
 
 Each instruction is written as its encoded bytes in a `.byte` directive,
 with every relocation attached explicitly through `.reloc`, so that
@@ -944,10 +945,9 @@ embcc: error: 'boot.asm' is NASM-syntax x86-64 assembly, which EmbCC assembles t
 
 An assembly input always produces an object: `-c` and `-S` make no
 difference, and no link follows. The one other mode is `-E`, which
-preprocesses a `.S` file to standard output. Give `-o` for `.s` and `.S` inputs; the
-default output name is derived correctly only for `.asm`
-(`boot.asm` gives `boot.o`), and for a `.s` file it is not the expected
-`.o` name.
+preprocesses a `.S` file to standard output. Without `-o` the object
+is the input's file name with its suffix replaced by `.o`, in the
+current directory (`boot/start.S` gives `start.o`).
 
 ### `-Wa,ARGS`
 
