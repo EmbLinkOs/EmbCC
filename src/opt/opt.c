@@ -6222,6 +6222,13 @@ static int vectorize_one(struct ir_func *fn)
                 if (!any)
                     continue;               /* wholly scalar: it may stay */
                 int t = def_target(i);
+                /* Floating-point arithmetic has no lane form here: the
+                 * lane operations are INTEGER ones (paddd, psll...), and
+                 * `a[i] = b[i] + c[i]` over floats was added as integers
+                 * -- wrong answers at -O2 on x86-64. The reduction below
+                 * already refused a float sum; a copy, being only loads
+                 * and stores, is still vectorized. */
+                if (i->flt) { ok = 0; break; }
                 /* A multiply by a constant becomes shifts and adds; any
                  * other multiply, and anything not lane-wise, stops us. */
                 int c = vec_op_char(i->op);

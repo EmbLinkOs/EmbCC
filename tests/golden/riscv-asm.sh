@@ -195,3 +195,20 @@ if "$EMBCC" --target=riscv32-unknown-elf -c "$out/s0.c" -o /dev/null \
     echo "a register variable on callee-saved s0 was accepted"; exit 1
 fi
 echo "x86's constraint letters and a callee-saved register variable are refused"
+
+# RV64-only instructions are refused at RV32 rather than encoded: negw
+# and sext.w were emitted with their RV64 encodings, illegal instructions
+# on an RV32 part, and lwu was quietly assembled as lw.
+for ins in "negw %%0, %%1" "sext.w %%0, %%1" "lwu %%0, 0(%%1)"; do
+    printf 'int f(int *x){ int r; __asm__("'"$ins"'" : "=r"(r) : "r"(x)); return r; }\n' \
+        > "$out/rv64only.c"
+    if "$EMBCC" --target=riscv32-unknown-elf -c "$out/rv64only.c" -o /dev/null \
+         2> "$out/rv64only.err"; then
+        echo "RV32 accepted the RV64 instruction in: $ins"; exit 1
+    fi
+    grep -q "is an RV64 instruction and this is RV32" "$out/rv64only.err" || {
+        echo "the refusal does not say why:"; cat "$out/rv64only.err"; exit 1; }
+    "$EMBCC" --target=riscv64-unknown-elf -c "$out/rv64only.c" -o /dev/null || {
+        echo "RV64 refused its own instruction in: $ins"; exit 1; }
+done
+echo "and RV64-only instructions are refused at RV32"

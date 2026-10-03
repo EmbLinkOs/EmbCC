@@ -474,7 +474,9 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             FAIL("\"%.*s\" is not an `off(reg)` address", t[2].len, t[2].s);
         if (!rv_fits(off, 12))
             FAIL("%s offset %lld does not fit a 12-bit field", e->name, off);
-        if (e->size == 8 && xlen != 64)
+        /* lwu is RV64's too: at RV32 it was quietly assembled as lw */
+        if ((e->size == 8 || (e->size == 4 && !e->sign && !e->store)) &&
+            xlen != 64)
             FAIL("%s is an RV64 instruction and this is RV32", e->name);
         if (e->store) rv_store(out, r, base, (int)off, e->size, xlen);
         else          rv_load(out, r, base, (int)off, e->size, e->sign, xlen);
@@ -679,6 +681,13 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                         { rv_alu_imm(out, RV_XOR, rd, rs, -1, 0); return 0; }
                     if (tok_is(&t[0], "neg"))
                         { rv_alu(out, RV_SUB, rd, RV_ZERO, rs, 0); return 0; }
+                    /* negw and sext.w are RV64's: their encodings are
+                     * illegal instructions on an RV32 part, and they were
+                     * emitted there all the same */
+                    if ((tok_is(&t[0], "negw") || tok_is(&t[0], "sext.w")) &&
+                        target_xlen() != 64)
+                        FAIL("%.*s is an RV64 instruction and this is RV32",
+                             t[0].len, t[0].s);
                     if (tok_is(&t[0], "negw"))
                         { rv_alu(out, RV_SUB, rd, RV_ZERO, rs, 1); return 0; }
                     if (tok_is(&t[0], "seqz"))

@@ -186,3 +186,16 @@ if grep -q "'p'" "$out/good.txt"; then
     echo "FAIL: an address-taken variable is supposed to be untracked"; exit 1
 fi
 echo "the gap is deliberate: &x hands the slot to code the walk cannot see"
+
+# `(void)x` is how C says "unused on purpose", and GCC and clang do not
+# call it a read: it warned here. A real read of the same variable still
+# does.
+printf 'void f(void) { int x; (void)x; }\nint g(void) { int z; int r = z + 1; (void)z; return r; }\n' \
+    > "$out/voidcast.c"
+"$EMBCC" -Wuninitialized -c "$out/voidcast.c" -o /dev/null 2> "$out/voidcast.txt" || true
+if grep -q "'x' is used uninitialized" "$out/voidcast.txt"; then
+    echo "FAIL: (void)x was reported as a use of an uninitialized variable"; exit 1
+fi
+grep -q "'z' is used uninitialized" "$out/voidcast.txt" || {
+    echo "FAIL: a real read next to a (void) cast was not reported"; exit 1; }
+echo "and (void)x is not a read, while z + 1 still is"

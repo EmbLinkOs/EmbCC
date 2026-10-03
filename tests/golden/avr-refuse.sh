@@ -50,10 +50,11 @@ refuses() {                       # refuses <name> <expected phrase> <source>
 # tests/golden/avr-wide.sh runs all three. That is what a case leaving this
 # file is supposed to look like.
 #
-# What remains is the handful of builtins below, each named rather than
-# lumped under "unsupported".
-refuses "a byte swap" "bswap" \
-    'unsigned long f(unsigned long a) { return __builtin_bswap32(a); }'
+# Byte swaps were here, and are lowered to shifts and masks now; avr-exec.sh
+# runs them against the host. What remains is named rather than lumped
+# under "unsupported".
+refuses "a variable-length array" "variable-length array" \
+    'int f(int n) { char a[n]; a[0] = 1; return a[0]; }'
 
 echo "all $n unsupported constructs are refused, and each diagnostic names
 which one -- so nothing here can be mistaken for code that works"

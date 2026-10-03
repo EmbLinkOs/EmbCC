@@ -719,7 +719,19 @@ static int compile_and_link(const char *in, const char *out)
         remove(obj);
         return 1;
     }
-    rc = embld_link(inputs, n, exe, &lo);
+    /* Inside a boundary: embld's refusals unwind to here (util.h), where
+     * with none they ended the process and left OUT.embcc-tmp.o behind
+     * for every undefined symbol or --rom-limit overflow. */
+    {
+        jmp_buf lb;
+        volatile int lrc = 1;
+        if (setjmp(lb) == 0) {
+            fatal_set_boundary(&lb);
+            lrc = embld_link(inputs, n, exe, &lo);
+        }
+        fatal_set_boundary(NULL);
+        rc = lrc;
+    }
     remove(obj);
     return rc;
 }
@@ -1147,7 +1159,15 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * the outgoing-argument area have been laid out. */
     if (want_stack_usage) {
         struct outbuf sub = { NULL, 0, 0 };
-        char *sup = xmalloc(strlen(out) + 4);
+        /* Beside the output, or with no -o (`-S` to stdout, say) named
+         * after the source in the current directory, as GCC does: this
+         * took strlen(NULL) and crashed. */
+        const char *base = out;
+        if (!base) {
+            const char *sl = strrchr(in, '/');
+            base = sl ? sl + 1 : in;
+        }
+        char *sup = xmalloc(strlen(base) + 4);
         const char *dot;
         /* Only functions that got code. One the inliner absorbed, or
          * that reachability dropped, still has a definition in the AST
@@ -1157,7 +1177,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (!fn->absorbed && fn->has_defn && fn->code_len > 0)
                 ob_fmt(&sub, "%s:%d:%s\t%d\tstatic\n",
                        in, fn->line, fn->name, fn->stack_bytes);
-        strcpy(sup, out);
+        strcpy(sup, base);
         dot = strrchr(sup, '.');
         strcpy((char *)(dot && !strchr(dot, '/') ? dot : sup + strlen(sup)),
                ".su");
@@ -3236,13 +3256,15 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-O", 2) == 0) {
             /* -O/-O1, -O2, -O3 and -Os. -O0 turns the optimizer off,
              * which is what keeps the self-host fixed point. */
+            /* The LAST -O wins, size mode included: `-Os -O0` kept
+             * optimizing for size at -O0, and `-Os -O2` was still -Os. */
             const char *lvl = argv[i] + 2;
             if (lvl[0] == '\0')
-                opt_level = 1;
+                { opt_level = 1; opt_for_size = 0; }
             else if (lvl[0] == 's' && lvl[1] == '\0')
                 { opt_level = 2; opt_for_size = 1; }
             else if (lvl[1] == '\0' && lvl[0] >= '0' && lvl[0] <= '3')
-                opt_level = lvl[0] - '0';
+                { opt_level = lvl[0] - '0'; opt_for_size = 0; }
             else if (lvl[0] == 'z' && lvl[1] == '\0')
                 { opt_level = 2; opt_for_size = 1; }   /* -Oz is -Os here */
             else {

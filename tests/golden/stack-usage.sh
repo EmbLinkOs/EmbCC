@@ -11,6 +11,7 @@ echo "TEST-MARKER stack-usage"
 . "$(dirname "$0")/../lib.sh"
 
 out=tests/golden/out/stack-usage
+E0=${EMBCC:-./embcc}; case $E0 in /*) EMBCC_ABS=$E0 ;; *) EMBCC_ABS=$PWD/$E0 ;; esac
 rm -rf "$out"; mkdir -p "$out"
 
 cat > "$out/f.c" <<'EOF'
@@ -51,3 +52,14 @@ for t in x86_64-elf aarch64-elf thumbv7m-none-eabi; do
     echo "$t: leaf $l bytes, deep $d bytes"
 done
 echo "-fstack-usage reports a frame per function on every target"
+
+# With no -o -- `-S` to standard output -- the report is named after the
+# source, in the current directory, as GCC names it. The name was built
+# from the missing output path and the compiler crashed.
+mkdir -p "$out/noo"
+printf 'int g(int x) { int a[10]; a[x & 7] = 1; return a[0]; }\n' > "$out/noo/n.c"
+(cd "$out/noo" && "$EMBCC_ABS" -fstack-usage -S n.c > /dev/null) || {
+    echo "-fstack-usage -S with no -o failed"; exit 1; }
+grep -q "n.c:1:g" "$out/noo/n.su" || {
+    echo "-fstack-usage with no -o wrote no n.su"; exit 1; }
+echo "and with no -o the report is named after the source"

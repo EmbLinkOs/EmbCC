@@ -158,6 +158,22 @@ __attribute__((noinline)) static unsigned long w_uwiden(unsigned x)
 { return x + 1u; }
 __attribute__((noinline)) static int w_neg(unsigned x) { return ~x == 0; }
 
+/* A select's condition at its own width: if-conversion turns these into
+ * selects, and AVR read four bytes of the eight-byte condition, so 2^32
+ * was false. */
+static volatile long long v_pow32 = 0x100000000LL;
+__attribute__((noinline)) static long s_pick(long long c, long a, long b)
+{ long r; if (c) r = a; else r = b; return r; }
+__attribute__((noinline)) static int s_picki(long long c)
+{ int r; if (c) r = 7; else r = 9; return r; }
+
+/* Byte swaps, lowered to shifts and masks on this target; the result is
+ * the unsigned type of the builtin's size here and on the host alike.
+ * (bswap64's lowering through 64-bit shifts does not fit the part at -O0
+ * beside everything else here.) */
+static volatile unsigned long v_sw32 = 0x01020304UL;
+static volatile unsigned short v_sw16 = 0x0102;
+
 __attribute__((noinline)) static long far6(int n, struct big4 a,
     struct big4 b, struct big4 c, struct big4 d, struct big4 e,
     struct big4 f)
@@ -302,6 +318,10 @@ void run(void)
     putn(w_half(v_umax)); putn(w_shr(v_umax));
     putn(w_widen(v_imax) < 0);
     putn(w_gt(v_imax)); putn((long)w_uwiden(v_umax)); putn(w_neg(v_umax));
+    puts_("| ");
+    putn(s_pick(v_pow32, 1, 2)); putn(s_picki(v_pow32)); putn(s_pick(0, 1, 2));
+    putn((long)(__builtin_bswap32(v_sw32) >> 8));
+    putn((long)__builtin_bswap16(v_sw16));
     puts_("| ");
     puts_("DONE\n");
 }

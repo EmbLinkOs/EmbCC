@@ -301,6 +301,14 @@ static void ex(struct ctx *c, struct state *st, struct expr *e)
         return;
     case EXPR_SIZEOF: case EXPR_ALIGNOF:
         return;                         /* unevaluated */
+    case EXPR_CAST:
+        /* `(void)x` is how C says "unused on purpose", and GCC and clang
+         * take it so: it reads nothing worth a -Wuninitialized. Anything
+         * more than a bare variable is still walked. */
+        if (e->cast_ty && e->cast_ty->kind == TY_VOID && e->rhs &&
+            e->rhs->kind == EXPR_VAR)
+            return;
+        break;
     case EXPR_ADDR:
         return;                         /* the slot is untracked already */
     case EXPR_ASSIGN:
