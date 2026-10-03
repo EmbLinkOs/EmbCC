@@ -419,6 +419,15 @@ void t_rev(struct code *c, int rd, int rm)
     hw2(c, 0xfa90u | (unsigned)rm, 0xf080u | (unsigned)(rd << 8) | (unsigned)rm);
 }
 
+void t_rev16(struct code *c, int rd, int rm)
+{
+    if (low(rd) && low(rm)) {
+        hw(c, 0xba40u | (unsigned)(rm << 3) | (unsigned)rd);
+        return;
+    }
+    hw2(c, 0xfa90u | (unsigned)rm, 0xf090u | (unsigned)(rd << 8) | (unsigned)rm);
+}
+
 /* ---- memory --------------------------------------------------------- */
 
 /* The 16-bit register-offset block, 0101 opc rm rn rt, indexed by

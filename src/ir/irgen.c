@@ -2024,6 +2024,24 @@ static int bk(struct ir_func *fn, unsigned long v, int w)
  * it at this width (ARMv7-M and AVR have no IR_BSWAP lowering; at RV32 a
  * 64-bit value is a register pair). `v` already holds the unsigned type
  * of `size` bytes. Eight bytes are two four-byte swaps, crossed. */
+static int bswap_emit(struct ir_func *fn, int v, int size, int w);
+
+/* Which byte swaps the backend does as instructions: every width on
+ * x86-64, AArch64, RV64, ARMv7-M (`rev`, `rev16`, and two `rev`s for a
+ * register pair) and AVR (whose swap is a permutation of registers).
+ * RV32 has no byte-reverse instruction, so it keeps shifts and masks. */
+static int bswap_insn(int size)
+{
+    (void)size;
+    switch (target_get()) {
+    case TARGET_X86_64: case TARGET_AARCH64: case TARGET_RISCV64:
+    case TARGET_AVR: case TARGET_THUMB:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int bswap_lowered(struct ir_func *fn, int v, int size)
 {
     if (size == 8) {
@@ -2031,8 +2049,8 @@ static int bswap_lowered(struct ir_func *fn, int v, int size)
         int lo = gen_convert(fn, v, u8, u4);
         int hi = gen_convert(fn, emit_bin(fn, IR_SHR, v, bk(fn, 32, 8), 8, 0),
                              u8, u4);
-        int nlo = gen_convert(fn, bswap_lowered(fn, lo, 4), u4, u8);
-        int nhi = gen_convert(fn, bswap_lowered(fn, hi, 4), u4, u8);
+        int nlo = gen_convert(fn, bswap_emit(fn, lo, 4, ty_w(u4)), u4, u8);
+        int nhi = gen_convert(fn, bswap_emit(fn, hi, 4, ty_w(u4)), u4, u8);
         return emit_bin(fn, IR_OR,
                         emit_bin(fn, IR_SHL, nlo, bk(fn, 32, 8), 8, 0),
                         nhi, 8, 0);
@@ -2053,6 +2071,19 @@ static int bswap_lowered(struct ir_func *fn, int v, int size)
     int b3 = emit_bin(fn, IR_SHR, v, bk(fn, 24, 4), 4, 0);
     return emit_bin(fn, IR_OR, emit_bin(fn, IR_OR, b0, b1, 4, 0),
                     emit_bin(fn, IR_OR, b2, b3, 4, 0), 4, 0);
+}
+
+static int bswap_emit(struct ir_func *fn, int v, int size, int w)
+{
+    if (!bswap_insn(size))
+        return bswap_lowered(fn, v, size);
+    struct ir_ins *i = emit(fn);
+    i->op = IR_BSWAP;
+    i->a = v;
+    i->size = size;
+    i->w = w;
+    i->dst = new_temp(fn);
+    return i->dst;
 }
 
 static int bpopcount(struct ir_func *fn, int x, int w)
@@ -2889,17 +2920,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
              * one register: x86-64, aarch64 and RV64. Elsewhere -- no
              * IR_BSWAP on ARMv7-M or AVR, and a 64-bit value is a pair
              * at RV32 -- shifts and masks, which every backend has. */
-            if (!(target_get() == TARGET_X86_64 ||
-                  target_get() == TARGET_AARCH64 ||
-                  target_get() == TARGET_RISCV64))
-                return bswap_lowered(fn, v, ty_size(e->ty));
-            struct ir_ins *i = emit(fn);
-            i->op = IR_BSWAP;
-            i->a = v;
-            i->size = ty_size(e->ty);
-            i->w = ty_w(e->ty);
-            i->dst = new_temp(fn);
-            return i->dst;
+            return bswap_emit(fn, v, ty_size(e->ty), ty_w(e->ty));
         }
         if (e->name && strcmp(e->name, "__sync_synchronize") == 0) {
             emit(fn)->op = IR_FENCE;

@@ -466,7 +466,7 @@ static char *wide64_map(struct ir_func *fn)
         case IR_CONST: case IR_MOV:
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
         case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
-        case IR_NEG: case IR_BNOT:
+        case IR_NEG: case IR_BNOT: case IR_BSWAP:
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT:
         /* The conversions' `w` is their RESULT's width too: a double
@@ -1901,6 +1901,24 @@ static int gen_ins64(struct t_fn *F, int n)
         return 1;
     }
 
+    case IR_BSWAP: {
+        /* Each word reversed, and the two words exchanged. The low word's
+         * reversal goes through B first: the result may share the
+         * operand's registers, and its low word would overwrite the
+         * operand's before it was read. */
+        int al, ah, dl, dh, tmp;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        dst64(F, i->dst, &dl, &dh);
+        /* r12 when neither pair is in A (it needs no saving); B else */
+        tmp = al != A_LO && ah != A_LO && dl != A_LO && dh != A_LO
+            ? A_LO : B_LO;
+        t_rev(t, tmp, al);
+        t_rev(t, dl, ah);
+        t_mov_reg(t, dh, tmp);
+        wr64(F, i->dst, dl, dh);
+        return 1;
+    }
+
     case IR_NEG: {
         /* 0 - a. `rsbs` leaves C clear exactly when the low word
          * borrowed, and `sbc` from zero is the high half. */
@@ -2875,6 +2893,22 @@ static void gen_ins(struct t_fn *F, int n)
         int sa = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
         t_mvn_reg(t, d, sa, 0);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_BSWAP: {
+        /* One `rev`; a halfword is `rev16` and the zero-extension the
+         * result's type wants. irgen splits a 64-bit swap into two of
+         * these. It was shifts and masks: 24 bytes for a bswap32 where
+         * clang's is 4. */
+        int sa = rdr(F, i->a, T_ACC);
+        int d = wreg(F, i->dst, T_ACC);
+        if (i->size == 2) {
+            t_rev16(t, d, sa);
+            t_ext(t, d, d, 2, 0);
+        } else {
+            t_rev(t, d, sa);
+        }
         wrote(F, i->dst, d);
         return;
     }

@@ -2741,6 +2741,19 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_AND: wide_bin(F, i, n, AVR_AND, AVR_AND); return;
         case IR_OR:  wide_bin(F, i, n, AVR_OR,  AVR_OR);  return;
         case IR_XOR: wide_bin(F, i, n, AVR_EOR, AVR_EOR); return;
+        case IR_BSWAP: {
+            /* In pairs, both bytes read before either is written: the
+             * result may have been given the operand's own home. Eight
+             * byte moves where 64-bit shifts made two kilobytes. */
+            int sc = w_scr(F, i);
+            for (int k = 0; k < n / 2; k++) {
+                vld(F, sc, i->a, k, 1);
+                vld(F, sc + 1, i->a, n - 1 - k, 1);
+                vst(F, i->dst, k, sc + 1, 1);
+                vst(F, i->dst, n - 1 - k, sc, 1);
+            }
+            return;
+        }
         case IR_BNOT:
             if (in_pair(F, i->dst)) {
                 int d = F->loc[i->dst];
@@ -2998,6 +3011,44 @@ static void gen_ins(struct a_fn *F, int n)
                                    (int)((t->len - (exitj + 2)) / 2));
                 }
                 return;
+            }
+            /* Whole bytes first: a count of 8*B + r is B byte moves and
+             * then r passes of the bit chain, where it was 8*B + r passes
+             * -- forty of them, two kilobytes, for an -O0 `x >> 40`. A
+             * left shift moves bytes up from the top down, a right shift
+             * down from the bottom up, so each byte is read before it is
+             * overwritten; an arithmetic one fills with the sign of the
+             * top byte, taken (in r19, which the chain never touches)
+             * before that byte moves. */
+            if (k >= 8) {
+                long bytes = k / 8;
+                k %= 8;
+                if (i->op == IR_SHL) {
+                    for (long b = n - 1; b >= 0; b--) {
+                        if (b >= bytes) {
+                            ld_slot_cc(F, RA, sd + b - bytes, 1);
+                            st_slot_cc(F, sd + b, RA, 1);
+                        } else {
+                            st_slot_cc(F, sd + b, R_ZERO, 1);
+                        }
+                    }
+                } else {
+                    int fill = R_ZERO;
+                    if (i->sign) {
+                        ld_slot_cc(F, RA + 1, sd + n - 1, 1);
+                        avr_rr(t, AVR_ADD, RA + 1, RA + 1);
+                        avr_rr(t, AVR_SBC, RA + 1, RA + 1);
+                        fill = RA + 1;
+                    }
+                    for (long b = 0; b < n; b++) {
+                        if (b + bytes < n) {
+                            ld_slot_cc(F, RA, sd + b + bytes, 1);
+                            st_slot_cc(F, sd + b, RA, 1);
+                        } else {
+                            st_slot_cc(F, sd + b, fill, 1);
+                        }
+                    }
+                }
             }
             for (long q = 0; q < k; q++) {
                 if (i->op == IR_SHL) {
@@ -3460,6 +3511,24 @@ static void gen_ins(struct a_fn *F, int n)
             return;
         rd4(F, i->a, RA);
         for (int k = 0; k < nb; k++) avr_r1(t, AVR_COM, RA + k);
+        wr4(F, i->dst, RA);
+        return;
+    }
+
+    case IR_BSWAP: {
+        /* A byte swap is a permutation of the registers the value is in:
+         * byte k of the result is byte size-1-k of the operand, and a
+         * halfword's upper bytes are zero. It was 32-bit shifts and
+         * masks -- 142 bytes for a bswap32 where clang's is 32. */
+        int sz = i->size;
+        rd4(F, i->a, RA);
+        for (int k = 0; k < sz / 2; k++) {
+            avr_rr(t, AVR_MOV, R_TMP, RA + k);
+            avr_rr(t, AVR_MOV, RA + k, RA + sz - 1 - k);
+            avr_rr(t, AVR_MOV, RA + sz - 1 - k, R_TMP);
+        }
+        for (int k = sz; k < 4; k++)
+            avr_rr(t, AVR_MOV, RA + k, R_ZERO);
         wr4(F, i->dst, RA);
         return;
     }

@@ -167,12 +167,13 @@ __attribute__((noinline)) static long s_pick(long long c, long a, long b)
 __attribute__((noinline)) static int s_picki(long long c)
 { int r; if (c) r = 7; else r = 9; return r; }
 
-/* Byte swaps, lowered to shifts and masks on this target; the result is
- * the unsigned type of the builtin's size here and on the host alike.
- * (bswap64's lowering through 64-bit shifts does not fit the part at -O0
- * beside everything else here.) */
+/* Byte swaps, a permutation of the value's registers on this target; the
+ * result is the unsigned type of the builtin's size here and on the host
+ * alike. (bswap64 was left out while its lowering went through 64-bit
+ * shifts, which did not fit the part at -O0 beside everything else.) */
 static volatile unsigned long v_sw32 = 0x01020304UL;
 static volatile unsigned short v_sw16 = 0x0102;
+static volatile unsigned long long v_sw64 = 0x0102030405060708ULL;
 
 __attribute__((noinline)) static long far6(int n, struct big4 a,
     struct big4 b, struct big4 c, struct big4 d, struct big4 e,
@@ -322,6 +323,8 @@ void run(void)
     putn(s_pick(v_pow32, 1, 2)); putn(s_picki(v_pow32)); putn(s_pick(0, 1, 2));
     putn((long)(__builtin_bswap32(v_sw32) >> 8));
     putn((long)__builtin_bswap16(v_sw16));
+    putn((long)(__builtin_bswap64(v_sw64) >> 40));
+    putn((long)(__builtin_bswap64(v_sw64) & 0xffffff));
     puts_("| ");
     puts_("DONE\n");
 }

@@ -141,6 +141,8 @@ void t_ext(struct code *c, int rd, int rm, int size, int sign);
 void t_clz(struct code *c, int rd, int rm);
 /* rd = rm with its bytes reversed (byte order, not bit order). */
 void t_rev(struct code *c, int rd, int rm);
+/* rd = rm with the bytes of each halfword swapped. */
+void t_rev16(struct code *c, int rd, int rm);
 
 /* ---- memory --------------------------------------------------------- */
 

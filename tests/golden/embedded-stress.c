@@ -144,6 +144,16 @@ static long scaled(int i, int j)
  * own width besides: 2^32 is true as a 64-bit condition and false as a
  * 32-bit one narrowed from it. */
 static volatile unsigned long long nar = 0x12345678fffffffeULL;
+
+/* A swap whose result is given the operand's own registers: the pair's
+ * words cross, and the first written must not be read again after. */
+__attribute__((noinline)) static unsigned long long
+swap_loop(unsigned long long x, int n)
+{
+    for (int i = 0; i < n; i++)
+        x = __builtin_bswap64(x) + 1;
+    return x;
+}
 static volatile unsigned long long pow32 = 0x100000000ULL;
 static int narrowed(unsigned long long v)
 {
@@ -254,7 +264,9 @@ int main(void)
     putn((long)(__builtin_bswap64(nar) >> 40));
     putn((long)(__builtin_bswap32((unsigned)nar) >> 8));
     putn((long)__builtin_bswap16((unsigned short)nar));
-    putn((long)sizeof __builtin_bswap64(nar)); nl();
+    putn((long)sizeof __builtin_bswap64(nar));
+    putn((long)(swap_loop(nar, 3) >> 40));
+    putn((long)(swap_loop(nar, 5) & 0xffffff)); nl();
 
     puts_("==END==\n");
     return 0;
