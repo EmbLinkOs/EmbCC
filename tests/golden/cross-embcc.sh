@@ -38,7 +38,7 @@ static const char *names[] = { "alpha", "beta" };
 int f(int x) { return x * K + (int)sizeof(FILE *); }
 const char *g(int i) { return names[i & 1]; }
 CEOF
-EMBCC_LINUX_ROOT=$R EMBCC_LINUX_INIT_ARGS="--target=x86_64-elf -O2 -S /src/t.c" \
+EMBCC_LINUX_ROOT=$R EMBCC_LINUX_INIT_ARGS="--target=x86_64-elf -O2 -S /src/t.c -o -" \
     "$EMBCC_ROOT/tests/harness/linux/run.sh" x86_64 "$out/embcc-linux" \
     > "$out/guest.s" 2>&1
 rc=$?
