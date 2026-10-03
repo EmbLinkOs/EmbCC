@@ -37,8 +37,11 @@ things, in this order:
 3. It runs `embcc` over the document and publishes the diagnostics (see
    [Diagnostics](#diagnostics)).
 
-All other requests are answered from the index built at the document's
-last open or change. `embls` handles one message at a time. A request that
+All other requests are answered from the index of the document they
+name. `embls` holds one index at a time: a request about a document
+other than the one indexed last first reloads that document's flags and
+rebuilds its index from its current text. `embls` handles one message at
+a time. A request that
 arrives while a document is being reindexed is answered after the
 reindex. Cancellation (`$/cancelRequest`) is not implemented.
 
@@ -342,17 +345,19 @@ KIND — FILE:LINE
 #### `textDocument/definition`
 
 The result is one location, a zero-length range at the declaration found
-by the lookup. A function or a file-scope variable is located at the
-start of its line. So is every local and parameter in a C++ document. A
-local or parameter in a C document is located at its name. The result is
-`null` when no position is recorded; see `textDocument/hover`.
+by the lookup. A declaration is located at its name. The exception is a
+parameter in a C++ document, which is located at the start of its
+function's line. The result is `null` when no position is recorded; see
+`textDocument/hover`.
 
 #### `textDocument/references`
 
 The result is a list of locations, one for each use of the declaration
 found by the lookup. When `context.includeDeclaration` is true or absent,
-the list starts with the declaration itself. A use is counted under
-these rules:
+the list starts with the declaration itself, followed by every other
+file-scope declaration of the same name: a prototype, an `extern`
+declaration in a header, the definition. A use is counted under these
+rules:
 
 - For a local variable or a parameter, a use counts only in the same
   function. Another function's local of the same spelling is a different
@@ -376,13 +381,34 @@ cursor's line, when the lookup finds a declaration; otherwise it is
 
 #### `textDocument/rename`
 
-The result is a workspace edit with a `changes` map. The map holds the
-declaration found by the lookup and every use that
-`textDocument/references` finds, each replaced by `newName`. All the
-edits are listed under a single URI: that of the file that holds the
-declaration. `newName` is not checked; an empty `newName` gives `null`.
-The edits are exact only for local variables and parameters in a C
-document; see [Limitations](#limitations).
+The result is a workspace edit with a `changes` map. The map holds every
+declaration and every use that `textDocument/references` finds with
+`includeDeclaration` true, each replaced by `newName`. Each edit is
+listed under the URI of the file it changes, so a rename of a name
+declared in a header edits the header and the document.
+
+Before it answers, `embls` checks every edit against the text it would
+change: the document's own text, the text of another open document, or
+the file on disk. If any range does not hold the name, the rename is
+refused and nothing is edited. A refusal is an error response with code
+`-32803` (RequestFailed) and a message that starts
+`cannot rename 'NAME':`. It is given for:
+
+- a use that comes from the body of a macro (`... is not spelled there in
+  the source (a macro expansion, or a declaration located only by its
+  line)`);
+- any name in a C++ document (`in a C++ document embls records
+  declarations but not uses`);
+- a structure or union member (`cannot rename member 'NAME': embls does
+  not tell members of different structures apart`);
+- a name whose declaration has no recorded position, such as an
+  enumeration constant or a type (`where it is declared is not
+  recorded`);
+- a name that occurs in a header found through a relative `-I` path
+  (`it occurs in FILE, a header found through a relative include
+  path`).
+
+`newName` is not checked; an empty `newName` gives `null`.
 
 #### `textDocument/signatureHelp`
 
@@ -402,27 +428,24 @@ The result is a flat list of the functions (kind 12) and file-scope
 variables (kind 13) declared in the document itself. Declarations from
 headers are not listed. In a C++ document, member functions are listed
 too. Each entry has `name`, `kind`, a `detail` holding the signature or
-type, and a `range` and `selectionRange`. Both ranges are zero-length at
-the start of the declaration's line.
+type, and a `range` and `selectionRange`. `selectionRange` covers the
+name. `range` runs from the start of the name's line to the end of the
+name.
 
 ### Limitations
 
 - Go-to-definition and hover find the first declaration recorded. When a
   header declares a function and the document defines it, they go to the
   header's prototype.
-- Functions and file-scope variables are located at the start of their
-  line, not at their name. So are locals and parameters in C++. The range
-  that `textDocument/references` reports for such a declaration covers
-  the first bytes of its line, and `textDocument/rename` replaces those
-  bytes rather than the name.
-- `textDocument/rename` files every edit under the URI of the
-  declaration's file. A rename of a name declared in a header therefore
-  places the edits for uses in the document under the header's URI.
-- Taken together, rename is correct only for local variables and
-  parameters in a C document.
+- Parameters in a C++ document are located at the start of their
+  function's line, not at their name.
+- `textDocument/rename` works in C documents only, and not for members,
+  enumeration constants or types; see `textDocument/rename` for the
+  refusals.
 - A header found through a relative `-I` path is recorded under that
-  relative path. Definitions, references and rename edits in such a
-  header are reported under the document's own URI instead.
+  relative path. Definitions and references in such a header are
+  reported under the document's own URI instead, and a rename that would
+  edit one is refused.
 - A diagnostic located in an included header is shown in the document,
   at the header's line and column.
 - The scope of a local variable is the whole function, not the block

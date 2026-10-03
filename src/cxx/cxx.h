@@ -261,7 +261,7 @@ struct cvar {
     int ntargs;
     int disc;                 /* a local static's number among its
                                * function's same-named ones */
-    int line;
+    int line, col;            /* the name's position; col is 1-based */
     const char *file;
 };
 
@@ -691,7 +691,7 @@ struct cfunc {
     struct cstmt *fn_try;     /* a function-try-block: its handlers (S_TRY;
                                * its body is the function's) */
     struct cscope *def_scope; /* where a delayed body is parsed */
-    int line;
+    int line, col;            /* the name's position; col is 1-based */
     const char *file;
     struct cfunc *next;       /* the overload set */
     struct cfunc *all_next;   /* every function (emit order) */

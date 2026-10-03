@@ -277,16 +277,33 @@ static void send_raw(const char *body)
     fflush(stdout);
 }
 
+static void sb_reply_head(struct sb *b, struct jv *id)
+{
+    sb_str(b, "{\"jsonrpc\":\"2.0\",\"id\":");
+    if (id && id->kind == JSTR) sb_json_str(b, id->str);
+    else if (id && id->kind == JNUM) sb_fmt(b, "%d", (int)id->num);
+    else sb_str(b, "null");
+}
+
 static void send_result(struct jv *id, const char *result_json)
 {
     struct sb b = { 0, 0, 0 };
-    sb_str(&b, "{\"jsonrpc\":\"2.0\",\"id\":");
-    if (id && id->kind == JSTR) sb_json_str(&b, id->str);
-    else if (id && id->kind == JNUM) sb_fmt(&b, "%d", (int)id->num);
-    else sb_str(&b, "null");
+    sb_reply_head(&b, id);
     sb_str(&b, ",\"result\":");
     sb_str(&b, result_json && *result_json ? result_json : "null");
     sb_str(&b, "}");
+    send_raw(b.p);
+    free(b.p);
+}
+
+/* A refused request: the editor shows `msg` and changes nothing. */
+static void send_error(struct jv *id, int code, const char *msg)
+{
+    struct sb b = { 0, 0, 0 };
+    sb_reply_head(&b, id);
+    sb_fmt(&b, ",\"error\":{\"code\":%d,\"message\":", code);
+    sb_json_str(&b, msg);
+    sb_str(&b, "}}");
     send_raw(b.p);
     free(b.p);
 }
@@ -601,7 +618,11 @@ static void emit_index(FILE *f, struct unit *u)
             sb_fmt(&sig, "%s%s%s%s", i ? ", " : "", ty_name(fn->param_tys[i]),
                    fn->params[i] ? " " : "", fn->params[i] ? fn->params[i] : "");
         sb_fmt(&sig, "%s)", fn->is_varargs ? ", ..." : "");
-        emit_rec(f, SYM_FUNC, fn->name, sig.p, "", fn->file, fn->line, 1, 0, 0);
+        /* At the name, which the parser records: a rename edits the
+         * recorded column, and column 1 is the declaration's type. */
+        emit_rec(f, SYM_FUNC, fn->name, sig.p, "", fn->file,
+                 fn->name_col ? fn->name_line : fn->line,
+                 fn->name_col ? fn->name_col : 1, 0, 0);
         free(sig.p);
         if (!fn->body)
             continue;
@@ -619,7 +640,8 @@ static void emit_index(FILE *f, struct unit *u)
     for (struct global *g = u->globals; g; g = g->next)
         if (!g->absorbed)
             emit_rec(f, SYM_VAR, g->name, ty_name(g->ty), "", g->file,
-                     g->line, 1, 0, 0);
+                     g->name_col ? g->name_line : g->line,
+                     g->name_col ? g->name_col : 1, 0, 0);
     for (struct econst *e = u->econsts; e; e = e->next) {
         char v[32];
         snprintf(v, sizeof v, "= %ld", e->val);
@@ -656,7 +678,8 @@ static void emit_cxx_locals(FILE *f, struct cstmt *s, const char *fn,
             for (struct cstmt *d = s; d; d = d->more)
                 if (d->var && d->var->name)
                     emit_rec(f, SYM_LOCAL, d->var->name, ct_name(d->var->type),
-                             fn, file, d->var->line, 1, s0, s1);
+                             fn, file, d->var->line,
+                             d->var->col ? d->var->col : 1, s0, s1);
         emit_cxx_locals(f, s->body, fn, file, s0, s1);
         emit_cxx_locals(f, s->els, fn, file, s0, s1);
     }
@@ -688,7 +711,7 @@ static void emit_cxx_index(FILE *f)
                    fn->pnames && fn->pnames[i] ? fn->pnames[i] : "");
         sb_fmt(&sig, "%s)", t && t->variadic ? ", ..." : "");
         emit_rec(f, SYM_FUNC, fn->name, sig.p, fn->cls ? fn->cls->name : "",
-                 fn->file, fn->line, 1, 0, 0);
+                 fn->file, fn->line, fn->col ? fn->col : 1, 0, 0);
         free(sig.p);
         if (!fn->body)
             continue;
@@ -719,20 +742,27 @@ static void emit_cxx_index(FILE *f)
                 !m->is_dtor && !m->is_implicit && !m->is_deleted)
                 emit_rec(f, SYM_MEMBER, m->name,
                          m->type && m->type->to ? ct_name(m->type->to) : "auto",
-                         c->name, m->file, m->line, 1, 0, 0);
+                         c->name, m->file, m->line, m->col ? m->col : 1, 0, 0);
     }
     for (int i = 0; i < cx_ngvars; i++)
         if (cx_gvars[i] && cx_gvars[i]->name && !cx_gvars[i]->is_local)
             emit_rec(f, SYM_VAR, cx_gvars[i]->name, ct_name(cx_gvars[i]->type),
-                     "", cx_gvars[i]->file, cx_gvars[i]->line, 1, 0, 0);
+                     "", cx_gvars[i]->file, cx_gvars[i]->line,
+                     cx_gvars[i]->col ? cx_gvars[i]->col : 1, 0, 0);
 }
 
 /* The parent's side: fork, let the child parse, read what it wrote. The
  * child's stderr goes nowhere — its diagnostics are the compiler's job, and
  * this run is only for the index. */
+/* The document the index was built from. The index holds one document's
+ * names; a question about another rebuilds it first, or it would be
+ * answered -- and a rename edited -- from the wrong file's names. */
+static char g_indexed[4096];
+
 static void index_build(struct doc *d)
 {
     index_clear();
+    snprintf(g_indexed, sizeof g_indexed, "%s", d->path);
     /* the buffer as a file, so the preprocessor can read it (and so the
      * diagnostics run below sees exactly the same bytes) */
     char tmp[4096];
@@ -1347,6 +1377,28 @@ static int collect_refs(struct sym *target, int **out)
     return n;
 }
 
+/* The other declarations of what `t` declares: at file scope one name is
+ * one entity, so a prototype, an `extern` in a header and the definition
+ * are all the same thing. Returns indices into g_syms. */
+static int collect_decls(struct sym *t, int **out)
+{
+    int n = 0;
+    int *v = xmalloc((size_t)(g_nsyms + 1) * sizeof *v);
+    if (t->kind == SYM_FUNC || t->kind == SYM_VAR)
+        for (int i = 0; i < g_nsyms; i++) {
+            struct sym *s = &g_syms[i];
+            if (s == t || (s->kind != SYM_FUNC && s->kind != SYM_VAR) ||
+                s->line <= 0 || strcmp(s->name, t->name) != 0)
+                continue;
+            if (s->line == t->line && s->col == t->col &&
+                !strcmp(s->file, t->file))
+                continue;
+            v[n++] = i;
+        }
+    *out = v;
+    return n;
+}
+
 /* The URI a symbol's file belongs to: the document itself unless the parse
  * placed it in a header it could name outright. */
 static void sym_uri(struct sb *b, struct sym *s, struct doc *d)
@@ -1386,6 +1438,14 @@ static void references(struct jv *id, struct doc *d, int line, int ch,
         one_location(&b, t, d, len);
         any = 1;
     }
+    int *dv = NULL;
+    int nd = want_decl ? collect_decls(t, &dv) : 0;
+    for (int i = 0; i < nd; i++) {
+        if (any) sb_str(&b, ",");
+        one_location(&b, &g_syms[dv[i]], d, len);
+        any = 1;
+    }
+    free(dv);
     for (int i = 0; i < n; i++) {
         struct sym *s = &g_syms[v[i]];
         if (want_decl && t->line == s->line && t->col == s->col)
@@ -1424,50 +1484,166 @@ static void prepare_rename(struct jv *id, struct doc *d, int line, int ch)
     free(b.p);
 }
 
+/* The text a location filed under `uri` refers to: the document's when
+ * the URI is the document's, else an open document of that path, else
+ * the file on disk (returned in *owned, for the caller to free). */
+static const char *uri_text(const char *uri, struct doc *d, char **owned)
+{
+    *owned = NULL;
+    if (!strcmp(uri, d->uri))
+        return d->text;
+    const char *path = !strncmp(uri, "file://", 7) ? uri + 7 : uri;
+    for (int i = 0; i < g_ndocs; i++)
+        if (g_docs[i].path && !strcmp(g_docs[i].path, path))
+            return g_docs[i].text;
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return NULL;
+    struct sb b = { 0, 0, 0 };
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, fp)) > 0)
+        sb_add(&b, buf, n);
+    fclose(fp);
+    sb_add(&b, "", 0);
+    *owned = b.p ? b.p : xstrndup("", 0);
+    return *owned;
+}
+
+/* Does `text` hold the identifier `name` at line/col (1-based), and
+ * nothing longer that merely starts or ends with it? */
+static int spells_at(const char *text, int line, int col, const char *name)
+{
+    if (!text || line <= 0 || col <= 0)
+        return 0;
+    const char *p = text;
+    for (int i = 1; i < line && p; i++) {
+        p = strchr(p, '\n');
+        if (p) p++;
+    }
+    if (!p)
+        return 0;
+    const char *e = strchr(p, '\n');
+    size_t llen = e ? (size_t)(e - p) : strlen(p);
+    size_t n = strlen(name), c0 = (size_t)col - 1;
+    if (c0 + n > llen || memcmp(p + c0, name, n) != 0)
+        return 0;
+    if (c0 > 0 && ident_char((unsigned char)p[c0 - 1]))
+        return 0;
+    return c0 + n == llen || !ident_char((unsigned char)p[c0 + n]);
+}
+
+struct edit { char *uri; int line, col; };
+
+static int edit_cmp(const void *a, const void *b)
+{
+    const struct edit *x = a, *y = b;
+    int c = strcmp(x->uri, y->uri);
+    if (c) return c;
+    return x->line != y->line ? x->line - y->line : x->col - y->col;
+}
+
+/* Every edit is checked against the text it would change before any is
+ * sent. A location the parse could not pin to the name -- a use that
+ * comes from a macro's body, a declaration recorded at its line rather
+ * than its name -- refuses the whole rename: a partial or misplaced
+ * rename corrupts the file it edits. */
 static void rename_sym(struct jv *id, struct doc *d, int line, int ch,
                        const char *newname)
 {
     char word[256];
     struct sym *t = lookup_at(d, line, ch, word, sizeof word);
     if (!t || !newname || !*newname) { send_result(id, "null"); return; }
-    int *v = NULL;
+    char why[512];
+    why[0] = 0;
+    if (is_cxx_path(d->path))
+        snprintf(why, sizeof why, "cannot rename '%s': in a C++ document "
+                 "embls records declarations but not uses", t->name);
+    else if (t->kind == SYM_MEMBER)
+        snprintf(why, sizeof why, "cannot rename member '%s': embls does not "
+                 "tell members of different structures apart", t->name);
+    else if (t->line <= 0)
+        snprintf(why, sizeof why, "cannot rename '%s': where it is declared "
+                 "is not recorded", t->name);
+    if (why[0]) { send_error(id, -32803, why); return; }
+    int *v = NULL, *dv = NULL;
     int n = collect_refs(t, &v);
-    int len = (int)strlen(t->name);
-    struct sb uri = { 0, 0, 0 };
-    sym_uri(&uri, t, d);
-    struct sb b = { 0, 0, 0 };
-    sb_str(&b, "{\"changes\":{");
-    sb_json_str(&b, uri.p);
-    sb_str(&b, ":[");
-    int any = 0;
-    /* The declaration too: a rename that leaves it behind does not compile. */
-    if (t->line > 0) {
-        sb_fmt(&b, "{\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
-                   "\"end\":{\"line\":%d,\"character\":%d}},\"newText\":",
-               t->line - 1, t->col > 0 ? t->col - 1 : 0,
-               t->line - 1, (t->col > 0 ? t->col - 1 : 0) + len);
-        sb_json_str(&b, newname);
-        sb_str(&b, "}");
-        any = 1;
-    }
-    for (int i = 0; i < n; i++) {
-        struct sym *s = &g_syms[v[i]];
-        if (t->line == s->line && t->col == s->col)
+    int nd = collect_decls(t, &dv);
+    struct edit *ed = xmalloc((size_t)(n + nd + 1) * sizeof *ed);
+    int ne = 0;
+    /* The declarations too: a rename that leaves one behind does not
+     * compile, or worse, links a different object. */
+    for (int i = -1 - nd; i < n; i++) {
+        struct sym *s = i == -1 - nd ? t : i < 0 ? &g_syms[dv[i + nd]]
+                                                : &g_syms[v[i]];
+        if (s->line <= 0)
             continue;
-        if (any) sb_str(&b, ",");
-        int c0 = s->col > 0 ? s->col - 1 : 0;
-        sb_fmt(&b, "{\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
-                   "\"end\":{\"line\":%d,\"character\":%d}},\"newText\":",
-               s->line - 1, c0, s->line - 1, c0 + len);
-        sb_json_str(&b, newname);
-        sb_str(&b, "}");
-        any = 1;
+        if (s->file[0] != '/' && !why[0])
+            snprintf(why, sizeof why, "cannot rename '%s': it occurs in %s, "
+                     "a header found through a relative include path",
+                     t->name, s->file);
+        struct sb uri = { 0, 0, 0 };
+        sym_uri(&uri, s, d);
+        ed[ne].uri = uri.p;
+        ed[ne].line = s->line;
+        ed[ne].col = s->col;
+        ne++;
     }
-    sb_str(&b, "]}}");
-    send_result(id, b.p);
-    free(b.p);
-    free(uri.p);
     free(v);
+    free(dv);
+    /* A use at a declaration's own position is listed once. */
+    qsort(ed, (size_t)ne, sizeof *ed, edit_cmp);
+    int k = 0;
+    for (int i = 0; i < ne; i++) {
+        if (k && !edit_cmp(&ed[k - 1], &ed[i])) {
+            free(ed[i].uri);
+            continue;
+        }
+        ed[k++] = ed[i];
+    }
+    ne = k;
+    char msg[512];
+    snprintf(msg, sizeof msg, "%s", why);
+    for (int i = 0; i < ne && !msg[0]; i++) {
+        char *owned;
+        const char *text = uri_text(ed[i].uri, d, &owned);
+        if (!spells_at(text, ed[i].line, ed[i].col, t->name))
+            snprintf(msg, sizeof msg,
+                     "cannot rename '%s': the occurrence at %s:%d:%d is not "
+                     "spelled there in the source (a macro expansion, or a "
+                     "declaration located only by its line)",
+                     t->name, ed[i].uri, ed[i].line, ed[i].col);
+        free(owned);
+    }
+    if (msg[0]) {
+        send_error(id, -32803, msg);     /* RequestFailed */
+    } else {
+        int len = (int)strlen(t->name);
+        struct sb b = { 0, 0, 0 };
+        sb_str(&b, "{\"changes\":{");
+        for (int i = 0; i < ne; i++) {
+            int first = i == 0 || strcmp(ed[i].uri, ed[i - 1].uri) != 0;
+            if (first) {
+                if (i) sb_str(&b, "],");
+                sb_json_str(&b, ed[i].uri);
+                sb_str(&b, ":[");
+            } else {
+                sb_str(&b, ",");
+            }
+            sb_fmt(&b, "{\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
+                       "\"end\":{\"line\":%d,\"character\":%d}},\"newText\":",
+                   ed[i].line - 1, ed[i].col - 1, ed[i].line - 1,
+                   ed[i].col - 1 + len);
+            sb_json_str(&b, newname);
+            sb_str(&b, "}");
+        }
+        sb_str(&b, ne ? "]}}" : "}}");
+        send_result(id, b.p);
+        free(b.p);
+    }
+    for (int i = 0; i < ne; i++)
+        free(ed[i].uri);
+    free(ed);
 }
 
 /* ---- signature help ------------------------------------------------------
@@ -1567,12 +1743,16 @@ static void document_symbols(struct jv *id, struct doc *d)
             continue;                        /* this file's own, not headers' */
         sb_fmt(&b, "%s{\"name\":", any ? "," : "");
         sb_json_str(&b, s->name);
+        /* selectionRange is the name; range runs from the start of its
+         * line to the end of the name, so that it contains it. */
+        int c0 = s->col > 0 ? s->col - 1 : 0;
+        int c1 = c0 + (int)strlen(s->name);
         sb_fmt(&b, ",\"kind\":%d,\"range\":{\"start\":{\"line\":%d,"
-                   "\"character\":0},\"end\":{\"line\":%d,\"character\":0}},"
-                   "\"selectionRange\":{\"start\":{\"line\":%d,\"character\":0},"
-                   "\"end\":{\"line\":%d,\"character\":0}},\"detail\":",
-               s->kind == SYM_FUNC ? 12 : 13, s->line - 1, s->line - 1,
-               s->line - 1, s->line - 1);
+                   "\"character\":0},\"end\":{\"line\":%d,\"character\":%d}},"
+                   "\"selectionRange\":{\"start\":{\"line\":%d,\"character\":%d},"
+                   "\"end\":{\"line\":%d,\"character\":%d}},\"detail\":",
+               s->kind == SYM_FUNC ? 12 : 13, s->line - 1, s->line - 1, c1,
+               s->line - 1, c0, s->line - 1, c1);
         sb_json_str(&b, s->detail);
         sb_str(&b, "}");
         any = 1;
@@ -1678,6 +1858,10 @@ int main(void)
             struct jv *td = jget(params, "textDocument");
             const char *uri = jstr(td, "uri");
             struct doc *d = uri ? doc_find(uri) : NULL;
+            if (d && strcmp(g_indexed, d->path) != 0) {
+                flags_load(d->path);
+                index_build(d);
+            }
             if (!d) {
                 send_result(id, "null");
             } else if (!strcmp(method, "textDocument/documentSymbol")) {

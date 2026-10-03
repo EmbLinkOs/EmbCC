@@ -259,6 +259,8 @@ struct global {
     const char *file;     /* where THIS declaration was written — a
                            * header, usually, and not the unit's name */
     int line;
+    int name_line, name_col;  /* where its NAME is, for a tool that edits
+                               * it (embls rename); 0 when unknown */
     int seq;              /* source order, shared counter with funcs —
                            * enforces declare-before-use across kinds */
     int def_seq;          /* source order of the DEFINING declaration (the
@@ -313,6 +315,7 @@ struct func {
     const char *name;
     const char *file;     /* see struct global */
     int line;
+    int name_line, name_col;  /* see struct global */
     int seq;              /* source order (see struct global) */
     int is_static;
     int is_weak;          /* __attribute__((weak)) */

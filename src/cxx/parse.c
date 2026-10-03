@@ -2121,6 +2121,7 @@ static struct cfunc *declare_function(struct dspec *ds, struct declarator *d,
     f->owner = target;
     f->cls = cls;
     f->line = d->at ? d->at->t.line : 0;
+    f->col = d->at ? d->at->t.col : 0;
     f->file = d->at ? d->at->file : NULL;
     f->is_ctor = d->kind == DN_CTOR;
     f->is_dtor = d->kind == DN_DTOR;
@@ -2291,6 +2292,7 @@ static struct cvar *new_local(const char *name, struct cty *t,
     v->is_local = 1;
     v->fn = cx_curfn;
     v->line = at ? at->t.line : 0;
+    v->col = at ? at->t.col : 0;
     v->file = at ? at->file : NULL;
     return v;
 }
@@ -3321,6 +3323,7 @@ static void declare_global_var(struct dspec *ds, struct declarator *d,
         v->owner = target;
         v->c_linkage = cx_extern_c;
         v->line = d->at->t.line;
+        v->col = d->at->t.col;
         v->file = d->at->file;
         v->is_extern = 1;
         /* internal linkage: static, const without extern, unnamed ns */
@@ -4078,6 +4081,7 @@ static void parse_member(struct cclass *c, int *access)
             v->is_constexpr = ds.is_constexpr;
             v->is_inline = ds.is_inline || ds.is_constexpr;
             v->line = d.at->t.line;
+            v->col = d.at->t.col;
             v->file = d.at->file;
             v->cname = mangle_var(v, c->scope);
             struct csym *y = scope_add(c->scope, CS_VAR, d.name);
@@ -4203,6 +4207,7 @@ struct cfunc *inherited_ctor(struct cclass *c, struct cfunc *bf)
     f->vslot = -1;
     f->body_tok = f->mi_tok = -1;
     f->line = bf->line;
+    f->col = bf->col;
     f->file = bf->file;
     if (!bf->tmpl)
         func_register(f);
@@ -5540,7 +5545,7 @@ static struct cexpr *parse_condition(struct cstmt **decl)
         struct declarator d;
         memset(&d, 0, sizeof d);
         struct cty *t = parse_declarator(ds.type, &d, DK_NAMED);
-        struct cvar *v = new_local(d.name, t, at);
+        struct cvar *v = new_local(d.name, t, d.at ? d.at : at);
         struct cstmt *s = st_new(S_DECL);
         s->var = v;
         struct csym *y = scope_add(cx_scope, CS_VAR, d.name);
@@ -7905,6 +7910,7 @@ static void template_decl_rest(struct cclass *cls, int access,
         f->vslot = -1;
         f->body_tok = f->mi_tok = -1;
         f->line = d.at ? d.at->t.line : 0;
+        f->col = d.at ? d.at->t.col : 0;
         f->file = d.at ? d.at->file : NULL;
         tags_from(&f->abi_tags, &f->nabi_tags, &ds.a);
         tags_from(&f->abi_tags, &f->nabi_tags, &d.a);
@@ -8234,6 +8240,7 @@ static void parse_explicit_specialization(struct cclass *cls, int access)
         v->is_constexpr = ds.is_constexpr;
         v->defined = 1;
         v->line = d.at ? d.at->t.line : 0;
+        v->col = d.at ? d.at->t.col : 0;
         v->file = d.at ? d.at->file : NULL;
         var_explicit_spec(t, d.targs, d.ntargs, v, at);
         init_variable(v, d.at ? d.at : at);
@@ -8430,6 +8437,7 @@ struct cfunc *func_decl_replay(struct ctemplate *t, struct cscope *ps)
     f->access = pat->access;
     f->vslot = -1;
     f->line = pat->line;
+    f->col = pat->col;
     f->file = pat->file;
     f->body_tok = f->mi_tok = -1;
     if (ft->defargs) {
@@ -8926,6 +8934,7 @@ struct cvar *var_define_from(struct ctemplate *t, int pos, struct ctarg *args,
     v->is_constexpr = ds.is_constexpr;
     v->defined = 1;
     v->line = d.at ? d.at->t.line : 0;
+    v->col = d.at ? d.at->t.col : 0;
     v->file = d.at ? d.at->file : NULL;
     v->targs = args;
     v->ntargs = t->nparams;
@@ -9517,6 +9526,7 @@ static struct cfunc *lambda_call_replay(struct ctemplate *t)
     f->access = pat->access;
     f->vslot = -1;
     f->line = pat->line;
+    f->col = pat->col;
     f->file = pat->file;
     f->lambda = t->lambda;
     f->body_tok = f->mi_tok = -1;
@@ -9787,6 +9797,7 @@ struct cexpr *parse_lambda(void)
         f->vslot = -1;
         f->body_tok = f->mi_tok = -1;
         f->line = at->t.line;
+        f->col = at->t.col;
         f->file = at->file;
         f->lambda = L;
         tm->pattern = f;

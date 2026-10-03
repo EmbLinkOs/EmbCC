@@ -1136,6 +1136,9 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
 static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                                           const char **names)
 {
+    /* The declarator being parsed has its name already: the parameters'
+     * own declarators must not leave theirs in its place. */
+    int name_line = ps->decl_name_line, name_col = ps->decl_name_col;
     expect(ps, TOK_LPAREN, "'('");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
@@ -1214,6 +1217,8 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     }
     expect(ps, TOK_RPAREN, "')'");
     ps->vla_ok = saved_vla_ok;
+    ps->decl_name_line = name_line;
+    ps->decl_name_col = name_col;
     struct type *ft = ty_func(ret, pt, n, varargs);
     ft->sret_first = sret;
     return ft;
@@ -4878,7 +4883,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     struct type *ty = parse_stars(ps, base);
     take_carried(ps, &at);
     const char *name = NULL;
-    int line = cur(ps)->line;
+    int line = cur(ps)->line, col = cur(ps)->col;
     struct func *f;
     int saved_vla_ok;
     if (cur(ps)->kind == TOK_IDENT) {
@@ -4938,6 +4943,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->name = name = gname;
                 f->file = ps->lx.file;
                 f->line = line = gline;
+                f->name_line = ps->decl_name_line;
+                f->name_col = ps->decl_name_col;
                 f->seq = seq;
                 f->nparams = gt->nptypes;
                 for (int i = 0; i < gt->nptypes; i++) {
@@ -4958,8 +4965,11 @@ static void parse_top(struct parser *ps, struct unit *u,
                            "a variable cannot have a function type — "
                            "did you mean a function pointer (*)?");
             parse_attributes(ps, &at); /* int x __attribute__((weak)) = ... */
+            int gnl = ps->decl_name_line, gnc = ps->decl_name_col;
             struct global *g = parse_global(ps, gt, gname, gline,
                                             is_static, is_extern);
+            g->name_line = gnl;
+            g->name_col = gnc;
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
             pcs_not_here(ps, &at, "a variable");
             g->is_weak = at.weak;
@@ -5012,6 +5022,8 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->name = name;
     f->file = ps->lx.file;
     f->line = line;
+    f->name_line = line;
+    f->name_col = col;
     f->seq = seq;
     advance(ps); /* '(' */
     saved_vla_ok = ps->vla_ok;
@@ -5132,7 +5144,7 @@ fn_tail:
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a name before %s", tok_describe(cur(ps)));
             const char *dname = cur(ps)->text;
-            int dline = cur(ps)->line;
+            int dline = cur(ps)->line, dcol = cur(ps)->col;
             advance(ps);
             if (cur(ps)->kind == TOK_LPAREN) {
                 /* a sibling function prototype: `g(double)` */
@@ -5143,6 +5155,8 @@ fn_tail:
                 g->name = dname;
                 g->file = ps->lx.file;
                 g->line = dline;
+                g->name_line = dline;
+                g->name_col = dcol;
                 g->seq = seq;
                 g->nparams = fty->nptypes;
                 for (int i = 0; i < fty->nptypes; i++) {
@@ -5159,6 +5173,8 @@ fn_tail:
                 parse_attributes(ps, &at);
                 struct global *g = parse_global(ps, vty, dname, dline,
                                                 is_static, is_extern);
+                g->name_line = dline;
+                g->name_col = dcol;
                 parse_attributes(ps, &at);
                 pcs_not_here(ps, &at, "a variable");
                 g->is_weak = at.weak;
