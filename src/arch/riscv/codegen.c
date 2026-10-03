@@ -543,6 +543,17 @@ static void place_arg(int wb, int size, int align, int is_struct,
  * second parameter. */
 static int argreg(int n) { return rv_argreg[n]; }
 
+/* A by-reference copy's step: both ends are objects of the argument's
+ * type -- the caller's object or slot and its copy, the copy and the
+ * callee's local -- so it moves a word at a time where the type's
+ * alignment allows, and a byte at a time only for a packed one. It went
+ * a byte at a time always: a long double at RV32 was 32 instructions. */
+static int byref_step(int wb, const struct ir_arg *a)
+{
+    int al = a->align ? a->align : a->is_struct ? 1 : a->size;
+    return al >= wb ? wb : al >= 4 ? 4 : al >= 2 ? 2 : 1;
+}
+
 static int arg_align(int wb, const struct ir_arg *a)
 {
     if (a->is_struct)
@@ -2055,10 +2066,8 @@ static void gen_call(struct rv_fn *F, int n)
             need16(F, a->vreg);          /* RV32's long double: its slot */
             addr_sp(F, TMP, sslot(F, a->vreg));
         }
-        for (long b = 0; b < a->size; b++) {
-            rv_load(t, SCR, TMP, (int)b, 1, 0, F->xlen);
-            st_sp(F, SCR, copy_at + b, 1);
-        }
+        addr_sp(F, ADDR, copy_at);
+        copy_block(F, 1, a->size, byref_step(F->w, a));
         copy_at += a->size;
     }
 
@@ -4318,12 +4327,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                  * would make a struct parameter's slot sometimes hold an
                  * object and sometimes an address, which is how u20()
                  * came to print a stack address where it meant 190. */
-                if (pl.nreg) rv_mv(t, ADDR, param_reg(&F, &pl, 0));
-                else         ld_sp(&F, ADDR, base + pl.stk, F.w, 1);
-                for (long b = 0; b < a->size; b++) {
-                    rv_load(t, SCR2, ADDR, (int)b, 1, 0, xlen);
-                    st_sp(&F, SCR2, sslot(&F, i) + b, 1);
-                }
+                if (pl.nreg) rv_mv(t, TMP, param_reg(&F, &pl, 0));
+                else         ld_sp(&F, TMP, base + pl.stk, F.w, 1);
+                addr_sp(&F, ADDR, sslot(&F, i));
+                copy_block(&F, 1, a->size, byref_step(F.w, a));
                 continue;
             }
             /* A SCALAR occupies whole registers and a whole slot: store
