@@ -180,6 +180,54 @@ echo "check: two units disagreeing about one struct, which links and lies"
 grep -q "0 problems" "$out/clean.txt" || {
     echo "FAIL: expected no problems:"; cat "$out/clean.txt"; exit 1; }
 
+# 8b. What may be defined in every unit is not "defined twice": a static
+#     in a header and a static local (each unit's own), a weak
+#     definition next to a strong one (the linker keeps the strong), and
+#     C++ inline functions, template instances and in-class members. Two
+#     strong definitions of one external name still are.
+mkdir -p "$out/many"
+cat > "$out/many/s.h" << 'EOF'
+static inline int sq(int x) { return x * x; }
+static const int tbl[3] = { 1, 2, 3 };
+static int counter;
+EOF
+cat > "$out/many/s1.c" << 'EOF'
+#include "s.h"
+__attribute__((weak)) int hook(void) { return 0; }
+int both = 1;
+int f1(void) { return sq(tbl[0]) + counter + hook(); }
+static int tick(void) { static int n; return ++n; }
+int t1(void) { return tick(); }
+EOF
+cat > "$out/many/s2.c" << 'EOF'
+#include "s.h"
+int hook(void) { return 1; }
+int both = 2;
+int f2(void) { return sq(tbl[1]) + counter; }
+static int tick(void) { static int n; return n += 2; }
+int t2(void) { return tick(); }
+EOF
+cat > "$out/many/p.hpp" << 'EOF'
+inline int tri(int x) { return 3 * x; }
+template <class T> T idt(T v) { return v; }
+struct K { int get() const { return 7; } };
+EOF
+printf '#include "p.hpp"\nint pa() { return tri(1) + idt(2) + K().get(); }\n' \
+    > "$out/many/pa.cc"
+printf '#include "p.hpp"\nint pb() { return tri(2) + idt(3) + K().get(); }\n' \
+    > "$out/many/pb.cc"
+"$EMBIDX" build -o "$out/many.embidx" "$out/many/s1.c" "$out/many/s2.c" \
+    "$out/many/pa.cc" "$out/many/pb.cc" > /dev/null
+"$EMBIDX" check "$out/many.embidx" > "$out/many.txt" 2>&1 || :
+grep '^defined twice' "$out/many.txt" > "$out/many-twice.txt" || :
+[ "$(cat "$out/many-twice.txt")" = "defined twice c:@V@both" ] || {
+    echo "FAIL: expected exactly 'both' defined twice:"; cat "$out/many.txt"
+    exit 1; }
+grep -q '^1 problem\|, 1 problem,' "$out/many.txt" || {
+    echo "FAIL: expected one problem:"; cat "$out/many.txt"; exit 1; }
+echo "check: header statics, static locals, weak and C++ inline" \
+     "definitions are not 'defined twice'; two strong ones are"
+
 # 9. Discardable and deterministic (§8.2, R4): rebuilt from the sources
 #    it must be byte-identical, or two builds cannot be compared.
 cp "$idx" "$out/first.embidx"

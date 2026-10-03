@@ -220,6 +220,9 @@ file     21c568a73b4612ce t.c
 provides c:@F@add                                 5336311b8eae8c73
 ```
 
+A weak definition's `provides` line ends in ` weak` (see
+[`embidx`](tools/embidx.md#units-usrs-and-hashes)).
+
 ### `--emit-empty-object FILE`
 
 Write a valid relocatable ELF object with an empty `.text` section to
