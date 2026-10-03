@@ -12309,6 +12309,85 @@ static int pass_latch_copies(struct ir_func *fn)
     return changed;
 }
 
+/* ---- a jump to a block of copies takes the copies with it --------------
+ *
+ * A loop whose body ends in several places -- a switch's cases, an
+ * interpreter's opcodes -- sends each end to one block that copies the
+ * loop's carried values and jumps to the header: two jumps per trip
+ * where one would do. A `jmp` to such a block (copies and a jump,
+ * nothing else) can do the copies itself and jump on to the block's
+ * target: the same instructions on the same path, so nothing about
+ * liveness changes. The block goes once nothing reaches it. Not at
+ * -Os, where it trades a jump executed for copies stored once per
+ * predecessor. */
+#define THREAD_MAX_COPIES 4
+
+static int pass_thread_copies(struct ir_func *fn)
+{
+    int N = fn->nins, nl = fn->nlabels;
+    if (g_opt_size || N < 3 || !nl)
+        return 0;
+    int *lpos = xmalloc((size_t)nl * sizeof *lpos);
+    int *refs = xcalloc((size_t)nl, sizeof *refs);
+    struct lc_ref r = { refs };
+    for (int k = 0; k < nl; k++)
+        lpos[k] = -1;
+    for (int n = 0; n < N; n++) {
+        each_label(fn, &fn->ins[n], lc_ref_cb, &r);
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < nl)
+            lpos[fn->ins[n].label] = n;
+    }
+    /* copies[l]: the number of copies in label l's block when it is a
+     * copy block ending in a jump elsewhere, else -1 */
+    int *copies = xmalloc((size_t)nl * sizeof *copies);
+    for (int l = 0; l < nl; l++) {
+        copies[l] = -1;
+        int b = lpos[l];
+        if (b < 0)
+            continue;
+        int e = b + 1;
+        while (e < N && fn->ins[e].op == IR_MOV && !fn->ins[e].vol)
+            e++;
+        if (e - b - 1 <= THREAD_MAX_COPIES && e < N &&
+            fn->ins[e].op == IR_JMP && fn->ins[e].label != l &&
+            e > b + 1)
+            copies[l] = e - b - 1;
+    }
+    int changed = 0, *threaded = xcalloc((size_t)nl, sizeof *threaded);
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = xmalloc((size_t)(N + 1) * sizeof *newpos);
+    for (int n = 0; n < N; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        newpos[n] = nb.n;
+        if (in->op == IR_JMP && in->label >= 0 && in->label < nl &&
+            copies[in->label] > 0 && lpos[in->label] != n + 1) {
+            int b = lpos[in->label];
+            for (int k = 1; k <= copies[in->label]; k++)
+                *ib_push(&nb) = fn->ins[b + k];
+            struct ir_ins *j = ib_push(&nb);
+            *j = *in;
+            j->label = fn->ins[b + 1 + copies[in->label]].label;
+            threaded[in->label]++;
+            changed = 1;
+            continue;
+        }
+        *ib_push(&nb) = *in;
+    }
+    newpos[N] = nb.n;
+    if (changed) {
+        remap_scopes(fn, newpos, N);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        /* a copy block every reference to which went: unreachable now
+         * unless something falls into it, and DCE of blocks takes it */
+    } else {
+        free(nb.p);
+    }
+    free(newpos); free(threaded); free(copies); free(lpos); free(refs);
+    return changed;
+}
+
 /* ---- x86-64: a load moved down to the operation it feeds ---------------
  *
  * x86 can take one operand of an add, sub, and, or or xor straight from
@@ -12520,6 +12599,8 @@ void opt_run(struct ir_unit *iu, int level)
     for (int f = 0; f < iu->nfuncs; f++) {
         opt_func(&iu->funcs[f]);
         pass_latch_copies(&iu->funcs[f]);
+        if (pass_thread_copies(&iu->funcs[f]))
+            pass_cfgclean(&iu->funcs[f]);   /* the copy blocks left behind */
         pass_x86_loadop(&iu->funcs[f]);     /* last: nothing reorders after */
     }
 }
