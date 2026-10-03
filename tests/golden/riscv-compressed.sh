@@ -41,7 +41,7 @@ cc -std=c99 -Wall -Wextra -o "$out/riscvcheck" \
    "$EMBCC_ROOT/src/arch/target.c" "$EMBCC_ROOT/src/driver/util.c" \
    "$EMBCC_ROOT/src/driver/diag.c" "$EMBCC_ROOT/src/sema/type.c" \
    "$EMBCC_ROOT/src/sema/ldfloat.c" \
-   "$EMBCC_ROOT/src/platform/platform_posix.c" || {
+   "$EMBCC_ROOT/src/platform/platform_common.c" "$EMBCC_ROOT/src/platform/platform_posix.c" || {
     echo "riscvcheck did not build"; exit 1; }
 
 fail=0

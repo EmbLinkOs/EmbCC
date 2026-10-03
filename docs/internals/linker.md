@@ -39,7 +39,7 @@ command, with `-DEMBDBG_NO_MAIN -Wno-unused-function`:
 ```text
 tools/embld/embld.c tools/embld/doctor.c src/link/link.c
 src/driver/util.c src/driver/diag.c src/driver/explain.c
-src/embx/embx.c tools/embdbg/embdbg.c src/platform/platform_posix.c
+src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS)
 src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/code.c
 ```
 

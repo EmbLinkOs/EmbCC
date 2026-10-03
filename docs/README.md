@@ -34,6 +34,7 @@ Start with the [overview](manual/overview.md) and
 | --- | --- |
 | `embld` | [The linker](manual/tools/embld.md) |
 | `embas` | [The NASM-syntax assembler](manual/tools/embas.md) |
+| `embar` | [The archiver](manual/tools/embar.md) |
 | `embdbg` | [The debugger](manual/tools/embdbg.md) |
 | `embread` | [The EMBX image reader](manual/tools/embread.md) |
 | `embls` | [The language server](manual/tools/embls.md) |
@@ -59,3 +60,4 @@ Start with the [architecture](internals/architecture.md) and the
 | [Contributing](internals/contributing.md) | Conventions, the review checklist, commit style |
 | [Design decisions](internals/decisions.md) | The decision record (D-001 …) |
 | [Status](internals/status.md) | Per-target maturity and known limitations |
+| [Porting to a new host](internals/porting.md) | Running EmbCC on another OS: the platform layer, `PLATFORM=iso`, building it |

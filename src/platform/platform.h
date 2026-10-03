@@ -83,6 +83,13 @@ int plat_stderr_is_terminal(void);
  */
 const char *plat_self_path(void);
 
+/* argv[0], handed over by the driver before anything asks where the
+ * program is: the answer every C host can give. plat_argv0_path returns it
+ * when it names a path (has a '/' or '\\'), else NULL. Both are in
+ * platform_common.c, which every host builds. */
+void plat_set_argv0(const char *argv0);
+const char *plat_argv0_path(void);
+
 /* ---- the source provider (§7) ----
  *
  * `src_read` is how the frontend — and only the frontend — obtains source

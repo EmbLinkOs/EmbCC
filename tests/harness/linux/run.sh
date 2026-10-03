@@ -82,6 +82,10 @@ work=${TMPDIR:-/tmp}/embcc-linux-$$
 rm -rf "$work"; mkdir -p "$work/root"
 cp "$image" "$work/root/init"
 chmod 755 "$work/root/init"
+# Optional: more files for the program to read (EMBCC_LINUX_ROOT, copied
+# into the root as they are), and arguments for it (EMBCC_LINUX_INIT_ARGS,
+# which the kernel hands to init from after `--` on its command line).
+[ -n "${EMBCC_LINUX_ROOT:-}" ] && cp -R "$EMBCC_LINUX_ROOT"/. "$work/root/"
 (cd "$work/root" && find . | cpio -o -H newc) > "$work/initramfs.cpio" 2>/dev/null
 
 # panic=-1 reboots the instant init dies, and -no-reboot turns that
@@ -90,7 +94,8 @@ chmod 755 "$work/root/init"
 out=$("$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-60}" "$qemu" \
         $machine $accel -m 256 -nographic -no-reboot \
         -kernel "$kernel" -initrd "$work/initramfs.cpio" \
-        -append "console=$console panic=-1 rdinit=/init" 2>/dev/null)
+        -append "console=$console panic=-1 rdinit=/init${EMBCC_LINUX_INIT_ARGS:+ -- $EMBCC_LINUX_INIT_ARGS}" \
+        2>/dev/null)
 qs=$?
 rm -rf "$work"
 

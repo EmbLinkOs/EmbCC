@@ -2770,6 +2770,7 @@ static void arm_float_resolve(void)
 
 int main(int argc, char **argv)
 {
+    plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
 
     /* -fsanitize state: which checks, and whether trap mode was
      * asked for by name (it is the only mode, so this only has to be

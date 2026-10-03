@@ -23,7 +23,7 @@ rm -rf "$out"; mkdir -p "$out"
 
 cc -std=c99 -Wall -Wextra -o "$out/pmovecheck" \
    tools/pmovecheck/pmovecheck.c src/arch/regalloc.c src/driver/util.c \
-   src/driver/diag.c src/driver/remark.c src/platform/platform_posix.c \
+   src/driver/diag.c src/driver/remark.c src/platform/platform_common.c src/platform/platform_posix.c \
    src/ir/irprint.c src/sema/type.c src/sema/ldfloat.c src/arch/target.c || {
     echo "pmovecheck did not build"; exit 1; }
 
