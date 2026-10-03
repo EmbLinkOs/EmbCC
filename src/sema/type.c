@@ -92,6 +92,16 @@ struct type *ty_llong(int is_unsigned)
     return &llongs[is_unsigned ? 1 : 0];
 }
 
+struct type *ty_size_t(void)
+{
+    return ty_base(target_int_size() == target_ptr_size() ? TY_INT : TY_LONG, 1);
+}
+
+struct type *ty_ptrdiff_t(void)
+{
+    return ty_base(target_int_size() == target_ptr_size() ? TY_INT : TY_LONG, 0);
+}
+
 struct type *ty_int_of_size(int size, int is_unsigned)
 {
     switch (size) {

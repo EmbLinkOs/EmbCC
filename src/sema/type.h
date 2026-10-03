@@ -129,6 +129,12 @@ struct type *ty_llong(int is_unsigned);
  * means long long, and on a target without __int128 there is no
  * answer at 16 and the caller has to cope with NULL. */
 struct type *ty_int_of_size(int size, int is_unsigned);
+/* size_t and ptrdiff_t as the target's <stddef.h> spells them
+ * (__SIZE_TYPE__, __PTRDIFF_TYPE__): the int types where an int is as
+ * wide as a pointer -- ILP32 and AVR -- and the long ones elsewhere. The
+ * type of sizeof, _Alignof and offsetof, and of a pointer difference. */
+struct type *ty_size_t(void);
+struct type *ty_ptrdiff_t(void);
 /* A copy of `t` marked `volatile` (or t itself if already). Base types are
  * interned singletons, so this returns a fresh non-interned node — safe because
  * nothing compares types by pointer identity (ty_equal compares fields). */

@@ -31,9 +31,6 @@ meaning other than the standard's. Check these first when porting code:
 - Struct, union and enum tags, typedef names and enumeration constants
   declared in a block remain visible to the end of the translation unit.
   See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants).
-- An enumeration constant of 2^63 or more is read as a negative value,
-  and an enumeration of type `unsigned int` that is named again by its
-  tag is `int`. See [Enumeration constants](#enumeration-constants).
 - `const` is not enforced. See [Const qualification](#const-qualification).
 - `_Generic` does not distinguish types that differ only in `const`. See
   [Generic selection](#generic-selection).
@@ -413,6 +410,19 @@ block and at file scope, is refused although the standard allows it:
 | `struct S { int a; };` at file scope, `struct S { double d; } x;` in a function | `redefinition of 'S'` |
 | `typedef int T;` in one function, `typedef double T;` in another | `redefinition of typedef 'T'` |
 | `enum { A = 1 }` in one function, `enum { A = 2 }` in another | `duplicate enumerator 'A'` |
+| `enum { A = 1 };` at file scope, `constexpr int A = 2;` in a function | `'A' is already a named constant (line 1); ...` |
+| `int N;` in a function, then `enum { N = 3 };` in a block inside it | `'N' would hide the local 'N' declared before it in this function; ...` |
+| `enum { N = 3 };` in a function, and a variable or function `N` at file scope | `'N', declared in a function body, has the name of the file-scope variable on line 2; ...` |
+
+The last two would otherwise give the name two meanings in one program
+-- the constant in one place, the variable in another -- so they are
+refused rather than resolved either way. At file scope, an enumeration
+constant and a variable or function of the same name are the
+standard's redeclaration error:
+
+```text
+error: 'g' redeclared as a different kind of symbol: it is also the function on line 2
+```
 
 A tagged structure or union, or any enumeration, cannot be defined
 inside a type name in an expression (a cast, `sizeof`, a compound
@@ -424,8 +434,14 @@ error: define enums at file scope (block-scope type definitions are not supporte
 ```
 
 An untagged structure in a cast, `(struct { int a; } *)p`, is accepted.
-A variable may share its name with a typedef name or an enumeration
-constant; the innermost declaration is used.
+A local variable or a parameter may share its name with a typedef name
+or with an enumeration constant declared before it, and hides it, as the
+standard specifies. That includes an array bound:
+
+```c
+enum { N = 3 };
+int f(void) { int N = 5; int a[N]; return sizeof a; }   /* 20, a VLA of five */
+```
 
 ### Const qualification
 
@@ -447,7 +463,11 @@ See also [Diagnostics](diagnostics.md).
 
 An enumeration with a fixed underlying type, `enum E : unsigned char`,
 has that type, and so do its constants. A value that the underlying type
-cannot represent, `enum E : unsigned char { A = 256 }`, is not diagnosed.
+cannot represent is refused:
+
+```text
+error: enumerator 'B' is 256, which the underlying type unsigned char cannot represent
+```
 
 An enumeration without a fixed underlying type is `int` (two bytes on
 AVR) while every value fits `int`, and its constants then have type
@@ -456,12 +476,12 @@ and C23 does, is accepted without a diagnostic. The enumeration then
 takes the first of these types that can represent every value, and, as
 C23 specifies, its constants take that type too:
 
-1. `unsigned int`, if no value is negative;
-2. `long`;
-3. `unsigned long long` if no value is negative, otherwise `long long`.
+1. `unsigned int`, `unsigned long`, then `unsigned long long`, if no
+   value is negative;
+2. `long`, then `long long`, otherwise.
 
 ```c
-enum big { HUGE = 0x100000005 };      /* long on x86-64: sizeof(enum big) is 8 */
+enum big { HUGE = 0x100000005 };      /* unsigned long on x86-64: sizeof(enum big) is 8 */
 long long f(void) { return HUGE; }    /* returns 0x100000005 */
 ```
 
@@ -469,17 +489,19 @@ Where this choice differs from GCC's and Clang's is described in
 [Implementation-defined behavior](implementation-defined.md#structures-unions-enumerations-and-bit-fields).
 `-fshort-enums` is refused (see [Targets](targets.md#data-models)).
 
-Two cases do not follow the standard:
+A value of 2^63 or more, from an `unsigned long long` initializer, is
+that value: `enum { X = 0xffffffffffffffff }` is an `unsigned long`
+enumeration on the 64-bit targets, and `X > 0`. Two enumerations have no
+type that can represent every value, and are refused:
 
-- Each value is computed as a signed 64-bit integer, so a value of 2^63
-  or more becomes negative. In `enum { X = 0xffffffffffffffff }`, `X` is
-  −1 and the enumeration is `int`.
-- An enumeration of type `unsigned int` is `int` when it is named again
-  by its tag. After `enum u { U = 0xffffffff };`, the constant `U` has
-  type `unsigned int`, but `enum u x;` declares an `int`, so after
-  `x = U;` the comparison `x < 0` is true. An object or typedef declared
-  in the defining declaration itself (`enum u { ... } x;`) has type
-  `unsigned int`.
+```text
+error: the enumeration's values run from -1 to 9223372036854775808, which no integer type holds
+error: enumerator 'B' would be one past LLONG_MAX, which no integer type the enum can have holds
+```
+
+The first is a negative value together with one of 2^63 or more. The
+second is a constant without an initializer that follows `LLONG_MAX`
+(or, with `ULLONG_MAX` in the message, follows `ULLONG_MAX`).
 
 ### Inline functions
 

@@ -556,3 +556,42 @@ check fn-section-shared-with-data \
     '__attribute__((section(".ramfunc"))) int f(void) { return 1; }
 __attribute__((section(".ramfunc"))) int v = 2;' \
     "cannot share it"
+
+# Enumerators past what any integer type holds. gcc refuses these
+# ("overflow in enumeration values"); clang warns and wraps, and EmbCC
+# wrapped without a word.
+check enum-past-llong-max \
+    'enum { A = 0x7fffffffffffffff, B };' \
+    "one past LLONG_MAX"
+check enum-past-ullong-max \
+    'enum { A = ~0ULL, B };' \
+    "one past ULLONG_MAX"
+check enum-negative-and-huge \
+    'enum { A = -1, B = 0x8000000000000000ULL };' \
+    "no integer type holds"
+check enum-fixed-type-range \
+    'enum e : unsigned char { A = 255, B };' \
+    "cannot represent"
+check constexpr-ullong-max-in-long-long \
+    'constexpr long long k = 0xffffffffffffffffULL;' \
+    "does not fit"
+
+# Enumerators and constexprs share one list per unit, which sema reads
+# after the locals and before the globals. Where that would resolve a
+# name to the wrong declaration, the program is refused instead.
+check enum-hides-local \
+    'int f(void) { int N = 5; { enum { N = 3 }; return N; } }' \
+    "would hide the local"
+check block-enum-names-global \
+    'int f(void) { enum { N = 3 }; return N; }
+int N = 7;
+int g(void) { return N; }' \
+    "declared in a function"
+check enum-redeclares-function \
+    'enum { g = 1 };
+int g(void) { return 0; }' \
+    "different kind of symbol"
+check constexpr-shadows-enumerator \
+    'enum { A = 1 };
+int f(void) { constexpr int A = 2; return A; }' \
+    "already a named constant"

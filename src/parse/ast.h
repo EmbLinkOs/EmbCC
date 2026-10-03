@@ -425,13 +425,16 @@ struct func {
     int sym_ndx;          /* driver: symbol index (defined or UNDEF) */
 };
 
-/* An enumerator: a named int constant at file scope. */
+/* An enumerator, or a C23 constexpr: a named integer constant. The unit
+ * keeps them in one list, whatever block declared them. */
 struct econst {
     const char *name;
-    long val;
+    long val;             /* the value's bits; ty says how to read them */
     struct type *ty;      /* NULL: int, as an enumerator is; a C23
                            * constexpr's own type otherwise */
     int seq;
+    int line;
+    int in_block;         /* declared inside a function body */
     struct econst *next;
 };
 

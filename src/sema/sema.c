@@ -1893,7 +1893,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->cast_ty && ty_is_vm(e->cast_ty)) {
             vla_prepare(u, f, sc, e->cast_ty);
             if (ty_is_vla(e->cast_ty)) {
-                e->ty = ty_base(TY_LONG, 1);
+                e->ty = ty_size_t();
                 break;
             }
         }
@@ -1902,7 +1902,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             struct type *rt = e->rhs->undecayed ? e->rhs->undecayed
                                                 : e->rhs->ty;
             if (ty_is_vla(rt)) {
-                e->ty = ty_base(TY_LONG, 1);
+                e->ty = ty_size_t();
                 break;
             }
         }
@@ -1921,11 +1921,15 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                              : e->rhs->ty);
         }
         /* Folded to a constant here; the operand is never evaluated,
-         * exactly as C specifies. size_t is unsigned long in LP64. */
+         * exactly as C specifies. Its type is the target's size_t:
+         * unsigned long in LP64, unsigned int on ILP32 and AVR. On AVR
+         * that is two bytes, so `-sizeof(int)` is 65534 there, as
+         * avr-gcc and clang have it, and not the -2 a four-byte
+         * unsigned long gave. */
         e->kind = EXPR_NUM;
         e->num = size;
         e->rhs = NULL;
-        e->ty = ty_base(TY_LONG, 1);
+        e->ty = ty_size_t();
         break;
     }
     case EXPR_ALIGNOF: {
@@ -1956,7 +1960,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 e->num = ua;
         }
         e->rhs = NULL;
-        e->ty = ty_base(TY_LONG, 1);
+        e->ty = ty_size_t();
         break;
     }
     case EXPR_VA_ARG:
@@ -2014,7 +2018,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     lt->pointee->kind == TY_FUNC)
                     sema_error_at(u, e->line, e->col, "arithmetic on %s",
                                ty_name(lt));
-                e->ty = ty_base(TY_LONG, 0); /* ptrdiff_t */
+                e->ty = ty_ptrdiff_t();
             } else if (lp || rp) {
                 if (rp && e->op == B_SUB)
                     sema_error_at(u, e->line, e->col,
@@ -5080,11 +5084,42 @@ static void check_aliases(struct unit *u)
     }
 }
 
+/* Enumerators and constexprs live in the unit's one list, and EXPR_VAR
+ * consults it before the globals and functions. A file-scope variable or
+ * function of the same name was therefore replaced by the constant in
+ * every later function -- `int N = 7;` read as 3 everywhere after a
+ * function that declared `enum { N = 3 }` in its body. At file scope the
+ * two are C's redeclaration error; in a block they are valid C that
+ * EmbCC cannot yet scope. Either way the program is refused. */
+static void check_econst_names(struct unit *u)
+{
+    for (const struct econst *ec = u->econsts; ec; ec = ec->next) {
+        const struct global *g = find_global(u, ec->name);
+        const struct func *fn = g ? NULL : find_func(u, ec->name);
+        int line = g ? g->line : fn ? fn->line : 0;
+        const char *what = g ? "variable" : "function";
+        if (!g && !fn)
+            continue;
+        if (ec->in_block)
+            sema_error_line(u, ec->line, "'%s', declared in a function "
+                            "body, has the name of the file-scope %s on "
+                            "line %d; EmbCC does not yet give enumerators "
+                            "and constexprs block scope, and would read it "
+                            "as the constant everywhere after", ec->name,
+                            what, line);
+        else
+            sema_error_line(u, ec->line, "'%s' redeclared as a different "
+                            "kind of symbol: it is also the %s on line %d",
+                            ec->name, what, line);
+    }
+}
+
 void sema_check(struct unit *u)
 {
     merge_decls(u);
     check_aliases(u);
     merge_globals(u);
+    check_econst_names(u);
     lower_globals(u);
 
     /* Walk in source order so `declared` mirrors C's rule exactly: a

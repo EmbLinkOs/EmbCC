@@ -656,43 +656,40 @@ every target:
 |---|---|
 | `int` | every value fits `int` |
 | `unsigned int` | no value is negative, and every value fits `unsigned int` |
-| `long` | every value fits `long` |
+| `unsigned long` | no value is negative, and every value fits `unsigned long` |
 | `unsigned long long` | no value is negative |
+| `long` | every value fits `long` |
 | `long long` | otherwise |
 
 The enumeration constants have the enumerated type, as in C23. An
 enumeration whose values all fit `int` is `int` even when no value is
 negative, where GCC and Clang choose `unsigned int`; so
-`(enum e)-1 < 0` is true under EmbCC. `unsigned long` is never chosen:
-an enumeration with no negative value that needs more than 32 bits is
-`long` on x86-64, Apple arm64, AArch64 and RV64, where Clang chooses
-`unsigned long`. On AVR, such an enumeration that needs more than 16
-bits is `long` while its values fit `long`, and `unsigned long long`
-(8 bytes) above that; Clang chooses `unsigned long` (4 bytes) for any
-whose values fit it.
+`(enum e)-1 < 0` is true under EmbCC. A wider enumeration has the type
+GCC and Clang give it: one with no negative value that needs more than
+32 bits is `unsigned long` on x86-64, Apple arm64, AArch64 and RV64, and
+`unsigned long long` on Cortex-M and RV32. On AVR, one with no negative
+value whose largest value is from 32768 to 65535 is `unsigned int` (2
+bytes), and one that needs more than 16 bits is `unsigned long` (4
+bytes). An enumeration named again by its tag has the same type.
 
-Each value is computed as a 64-bit signed integer, so a value of 2^63 or
-more is negative: `enum { X = 0xffffffffffffffff }` is an `int`
-enumeration in which `X` is −1.
+A value of 2^63 or more is that value, not a negative one:
+`enum { X = 0xffffffffffffffff }` is an `unsigned long` enumeration on
+the 64-bit targets. An enumeration with such a value and a negative one,
+or with a constant that would follow `LLONG_MAX` or `ULLONG_MAX`, has no
+type that holds every value, and is refused, as GCC refuses it:
 
-An enumeration of type `unsigned int` is `int` when it is named again by
-its tag: after `enum u { U = 0xffffffff };`, `enum u x;` declares an
-`int`, so after `x = U;` the comparison `x < 0` is true. An object or
-typedef declared in the defining declaration itself
-(`typedef enum u { ... } T;`) has type `unsigned int`.
-
-<!-- Reported to the lead: parse_enum_body (src/parse/parse.c) holds the
-     values in a signed long, so 2^63..2^64-1 wrap negative and
-     `enum { X = 0xffffffffffffffff }` is a 4-byte int enum (clang: 8-byte
-     unsigned long); parse_tagged records the enum's type on its tag only
-     when its kind is not TY_INT, so an `unsigned int` enum named again by
-     its tag is int; and unsigned long is never chosen (LP64 gives long,
-     AVR gives an 8-byte unsigned long long, where clang gives unsigned
-     long). -->
+```text
+embcc: f.c:1: error: the enumeration's values run from -1 to 9223372036854775808, which no integer type holds
+embcc: f.c:1: error: enumerator 'B' would be one past LLONG_MAX, which no integer type the enum can have holds
+```
 
 A C23 fixed underlying type (`enum e : unsigned char { ... }`) is
 supported: the enumerated type and its enumeration constants have that
-type. A value the type cannot represent is not diagnosed.
+type. A value the type cannot represent is refused:
+
+```text
+embcc: f.c:1: error: enumerator 'B' is 256, which the underlying type unsigned char cannot represent
+```
 
 `-fshort-enums` is refused, and so is a `packed` or `aligned` attribute on
 an enumeration:
@@ -1049,9 +1046,7 @@ requires:
 - On Cortex-M, RISC-V and AVR, `FLT_EVAL_METHOD` cannot be used in an
   expression ([Floating point](#floating-point)).
 - An enumeration constant outside the range of `int` is accepted
-  without a diagnostic, as C23 allows; one of 2^63 or more is read as a
-  negative value, and an enumeration of type `unsigned int` that is
-  named again by its tag is `int`
+  without a diagnostic, as C23 allows
   ([Structures](#structures-unions-enumerations-and-bit-fields)).
 - `__DATE__` and `__TIME__` are not defined, and a macro may have at most
   16 parameters ([Preprocessing directives](#preprocessing-directives)).
