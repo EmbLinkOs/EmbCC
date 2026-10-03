@@ -3865,6 +3865,29 @@ static void lcse_kill(int *s, int nk, const char *is_mem,
     }
 }
 
+/* A store of v makes a later load of the same address read v: the key
+ * becomes available with v as its value, as a load would have made it.
+ * Only when nothing can change v meanwhile -- one definition: a temp
+ * written once, or a parameter never reassigned -- and when the load
+ * reads exactly what was stored: the same 4 or 8 bytes, no extension.
+ * (A float stored and its bits loaded as an integer is the same value:
+ * the forwarded copy ties the two to one register class, which is what
+ * every backend's class analysis already does with a copy.) */
+static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
+                           const struct ir_ins *ins,
+                           const struct ir_func *fn, const struct defs *d)
+{
+    int v = ins->b;
+    if (ins->vol || ins->imm_b || v < 0 || v >= fn->nvregs ||
+        d->cnt[v] != 1 || (v >= fn->nparams && v < fn->nvars) ||
+        (ins->size != 4 && ins->size != 8))
+        return;
+    for (int k = 0; k < nk; k++)
+        if (keys[k].op == IR_LOAD && keys[k].a == ins->a &&
+            keys[k].size == ins->size && keys[k].w == ins->size)
+            s[k] = v;
+}
+
 static int pass_loadcse(struct ir_func *fn)
 {
     int nvars = fn->nvars;
@@ -3971,6 +3994,8 @@ static int pass_loadcse(struct ir_func *fn)
                             s[k] = -1;
                 } else if (lcse_kills_mem(ins->op)) {
                     lcse_kill(s, nk, is_mem, kbase, ins, fn, &d, taken, nvars);
+                    if (ins->op == IR_STORE)
+                        lcse_store_gen(s, nk, keys, ins, fn, &d);
                 }
                 int k = keyidx[i];
                 if (k >= 0 && s[k] < 0) s[k] = ins->dst;   /* first def of the value */
@@ -3995,6 +4020,8 @@ static int pass_loadcse(struct ir_func *fn)
                         s[k] = -1;
             } else if (lcse_kills_mem(ins->op)) {
                 lcse_kill(s, nk, is_mem, kbase, ins, fn, &d, taken, nvars);
+                if (ins->op == IR_STORE)
+                    lcse_store_gen(s, nk, keys, ins, fn, &d);
             }
             int k = keyidx[i];
             if (k < 0) continue;
@@ -9051,8 +9078,9 @@ static int pass_roload(struct ir_func *fn)
  * taken.
  *
  * Here a local is PRIVATE when every use of its address is a load or
- * store address, directly or at a constant offset -- nothing can see it
- * but these accesses. In a block, a load that one earlier store covers
+ * store address, or a memzero's (`union { ... } v = { x }` zeroes v before
+ * storing x), directly or at a constant offset -- nothing can see it but
+ * these accesses. In a block, a load that one earlier store covers
  * becomes that store's value: a copy or a bit-reinterpret at the same
  * width and offset, and at half the width the low or high word
  * (reinterpret, shift by 32, truncate). A private local left with no load
@@ -9117,6 +9145,7 @@ static int pass_punfwd(struct ir_func *fn)
         for (int k = 0; k < nops; k++) {
             int ok = ops[k] == &i->a &&
                      (i->op == IR_LOAD || i->op == IR_STORE ||
+                      i->op == IR_MEMZERO ||
                       (i->op == IR_ADD && i->dst >= 0 && base[i->dst] >= 0));
             if (!ok)
                 bad[base[*ops[k]]] = 1;
@@ -9143,6 +9172,18 @@ static int pass_punfwd(struct ir_func *fn)
              * longjmp-style return into the middle is not worth reasoning
              * about -- start again either way */
             memset(nrec, 0, (size_t)nvars * sizeof *nrec);
+            continue;
+        }
+        if (i->op == IR_MEMZERO && i->a >= 0 && i->a < nv &&
+            base[i->a] >= 0 && !bad[base[i->a]]) {
+            /* zeroes: whatever it overlaps no longer holds a value */
+            int L = base[i->a], off = (int)boff[i->a], wid = i->size, k = 0;
+            for (int j = 0; j < nrec[L]; j++) {
+                struct pun_rec *r = &rec[L][j];
+                if (r->off + r->width <= off || off + wid <= r->off)
+                    rec[L][k++] = *r;
+            }
+            nrec[L] = k;
             continue;
         }
         if ((i->op != IR_LOAD && i->op != IR_STORE) || i->a < 0 ||
@@ -9252,8 +9293,8 @@ static int pass_punfwd(struct ir_func *fn)
         for (int n = 0; n < fn->nins; n++) {
             const struct ir_ins *i = &fn->ins[n];
             newpos[n] = k;
-            if (i->op == IR_STORE && i->a >= 0 && i->a < nv &&
-                base[i->a] >= 0 && !bad[base[i->a]] &&
+            if ((i->op == IR_STORE || i->op == IR_MEMZERO) && i->a >= 0 &&
+                i->a < nv && base[i->a] >= 0 && !bad[base[i->a]] &&
                 !loaded[base[i->a]] && !i->vol) {
                 changed = 1;
                 continue;
