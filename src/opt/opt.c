@@ -13,6 +13,7 @@
 #include <stdio.h>
 
 #include "../arch/target.h"
+#include "../arch/regalloc.h"
 
 /* The width of a POINTER as an IR operation's `w`. Strength reduction
  * rewrites an indexed access into a walking pointer and increments it
@@ -32,7 +33,7 @@
  * anyone actually asks -- "did anything happen, and what" -- and is
  * comparable between two builds. */
 static struct { long lvn, gcse, dce, copy, loadcse, dse, divmagic,
-                ifconv, cfgclean, tailrec, idiom, sroa, pre; } g_did;
+                ifconv, cfgclean, tailrec, idiom, sroa, pre, latch; } g_did;
 
 /* ---- op classification ---- */
 
@@ -12156,6 +12157,387 @@ static void opt_func(struct ir_func *fn)
  * Everything else -- folding, value numbering, dead code, loop
  * invariants, strength reduction -- makes code smaller as well as
  * faster, which is why -Os is level 2 and not level 1. */
+/* ---- a loop's back-edge copies, before the branch ----------------------
+ *
+ * Out of SSA, the values a loop carries are copied on its back edge, and
+ * a bottom-tested loop gets them as a block of its own:
+ *
+ *        brnz %c -> L5        ...falls through to the exit
+ *     L5: %62 = mov %52
+ *        %64 = mov %11
+ *        jmp L0              the header
+ *
+ * -- one jump on every iteration (417 such blocks in a sample of
+ * EmbLinkOs). When nothing on the exit path reads what the copies write,
+ * they can run before the branch whichever way it goes, and the branch
+ * can go to the header itself: the copies execute once more on the way
+ * out and write values nobody reads. Only for a copy block nothing else
+ * enters -- one branch to its label, no fall-through into it -- and
+ * never when a copy writes the branch's own condition.
+ *
+ * The copies go above the COMPARE that feeds the branch, not between the
+ * two: every backend fuses a compare into the branch right after it, and
+ * copies in between turned `cmp; jl` into `setl; test; jne` -- a loss on
+ * every loop of the x86 workload. A copy that writes the compare's own
+ * operand cannot go above it, and that loop is left alone. */
+struct lc_ref { int *n; };
+static void lc_ref_cb(int *p, void *ctx)
+{
+    struct lc_ref *r = ctx;
+    if (*p >= 0)
+        r->n[*p]++;
+}
+
+static int lc_falls_through(enum ir_op op)
+{
+    return !(op == IR_JMP || op == IR_RET || op == IR_UD2 ||
+             op == IR_IGOTO || op == IR_SWITCH);
+}
+
+static int pass_latch_copies(struct ir_func *fn)
+{
+    int N = fn->nins, nl = fn->nlabels, nv = fn->nvregs;
+    if (N < 4 || !nl || !nv)
+        return 0;
+    int *refs = xcalloc((size_t)nl, sizeof *refs);
+    int *lpos = xmalloc((size_t)nl * sizeof *lpos);
+    struct lc_ref r = { refs };
+    for (int k = 0; k < nl; k++)
+        lpos[k] = -1;
+    for (int n = 0; n < N; n++) {
+        each_label(fn, &fn->ins[n], lc_ref_cb, &r);
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < nl)
+            lpos[fn->ins[n].label] = n;
+    }
+    /* candidates: br[p] -> copy block [b0, b1) ending in jmp at b1 */
+    int *cand_br = xmalloc((size_t)N * sizeof *cand_br);
+    int ncand = 0;
+    char *in_cand = xcalloc((size_t)N, 1);
+    for (int p = 0; p + 1 < N; p++) {
+        const struct ir_ins *br = &fn->ins[p];
+        if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->label < 0 ||
+            br->label >= nl || refs[br->label] != 1)
+            continue;
+        int b = lpos[br->label];
+        if (b <= 0 || b == p + 1 || lc_falls_through(fn->ins[b - 1].op))
+            continue;
+        int e = b + 1;
+        while (e < N && fn->ins[e].op == IR_MOV && !fn->ins[e].vol &&
+               fn->ins[e].dst >= fn->nvars && fn->ins[e].dst < nv &&
+               fn->ins[e].dst != br->a)
+            e++;
+        if (e == b + 1 || e >= N || fn->ins[e].op != IR_JMP)
+            continue;
+        if (in_cand[p] || in_cand[b])
+            continue;
+        cand_br[ncand++] = p;
+        in_cand[p] = 1;
+        for (int k = b; k <= e; k++)
+            in_cand[k] = 1;
+    }
+    int changed = 0;
+    if (ncand) {
+        int *first = xmalloc((size_t)nv * sizeof *first);
+        int *last = xmalloc((size_t)nv * sizeof *last);
+        unsigned long *livein = NULL;
+        int *defv = NULL, words = 0;
+        unsigned long *liveout = ra_live_intervals(fn, first, last, &livein,
+                                                   &defv, &words);
+        char *take = xcalloc((size_t)N, 1);    /* br index: rewrite it */
+        char *above = xcalloc((size_t)N, 1);   /* ...with copies above p-1 */
+        char *drop = xcalloc((size_t)N, 1);    /* the copy block's ins */
+        for (int c = 0; c < ncand && livein; c++) {
+            int p = cand_br[c], b = lpos[fn->ins[p].label], e = b + 1;
+            const struct ir_ins *cmp = p > 0 ? &fn->ins[p - 1] : NULL;
+            int fused = cmp && cmp->op == IR_CMP &&
+                        cmp->dst == fn->ins[p].a && !in_cand[p - 1];
+            int ok = 1;
+            while (fn->ins[e].op == IR_MOV) {
+                int d = fn->ins[e].dst;
+                if (livein[(size_t)(p + 1) * words + (d >> 6)] &
+                    (1UL << (d & 63)))
+                    ok = 0;
+                if (fused && (d == cmp->a || (!cmp->imm_b && d == cmp->b)))
+                    ok = 0;
+                e++;
+            }
+            if (!ok)
+                continue;
+            take[p] = 1;
+            above[p] = (char)fused;
+            for (int k = b; k <= e; k++)
+                drop[k] = 1;
+        }
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = xmalloc((size_t)(N + 1) * sizeof *newpos);
+        for (int n = 0; n < N; n++) {
+            newpos[n] = nb.n;
+            if (drop[n])
+                continue;
+            /* the compare of a branch whose copies go above it: they
+             * first, then the compare, then (next n) the branch */
+            int brn = n + 1 < N && take[n + 1] && above[n + 1] ? n + 1 :
+                      take[n] && !above[n] ? n : -1;
+            if (brn >= 0) {
+                int k = lpos[fn->ins[brn].label] + 1;
+                for (; fn->ins[k].op == IR_MOV; k++)
+                    *ib_push(&nb) = fn->ins[k];
+                changed = 1;
+                g_did.latch++;
+            }
+            *ib_push(&nb) = fn->ins[n];
+            if (take[n]) {
+                int k = lpos[fn->ins[n].label] + 1;
+                while (fn->ins[k].op == IR_MOV)
+                    k++;
+                nb.p[nb.n - 1].label = fn->ins[k].label;   /* the header */
+            }
+        }
+        newpos[N] = nb.n;
+        if (changed) {
+            remap_scopes(fn, newpos, N);
+            free(fn->ins);
+            fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        } else {
+            free(nb.p);
+        }
+        free(newpos); free(take); free(above); free(drop);
+        free(first); free(last); free(liveout); free(livein); free(defv);
+    }
+    free(refs); free(lpos); free(cand_br); free(in_cand);
+    return changed;
+}
+
+/* ---- a jump to a block of copies takes the copies with it --------------
+ *
+ * A loop whose body ends in several places -- a switch's cases, an
+ * interpreter's opcodes -- sends each end to one block that copies the
+ * loop's carried values and jumps to the header: two jumps per trip
+ * where one would do. A `jmp` to such a block (copies and a jump,
+ * nothing else) can do the copies itself and jump on to the block's
+ * target: the same instructions on the same path, so nothing about
+ * liveness changes. The block goes once nothing reaches it. Not at
+ * -Os, where it trades a jump executed for copies stored once per
+ * predecessor. */
+#define THREAD_MAX_COPIES 4
+
+static int pass_thread_copies(struct ir_func *fn)
+{
+    int N = fn->nins, nl = fn->nlabels;
+    if (g_opt_size || N < 3 || !nl)
+        return 0;
+    int *lpos = xmalloc((size_t)nl * sizeof *lpos);
+    int *refs = xcalloc((size_t)nl, sizeof *refs);
+    struct lc_ref r = { refs };
+    for (int k = 0; k < nl; k++)
+        lpos[k] = -1;
+    for (int n = 0; n < N; n++) {
+        each_label(fn, &fn->ins[n], lc_ref_cb, &r);
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < nl)
+            lpos[fn->ins[n].label] = n;
+    }
+    /* copies[l]: the number of copies in label l's block when it is a
+     * copy block ending in a jump elsewhere, else -1 */
+    int *copies = xmalloc((size_t)nl * sizeof *copies);
+    for (int l = 0; l < nl; l++) {
+        copies[l] = -1;
+        int b = lpos[l];
+        if (b < 0)
+            continue;
+        int e = b + 1;
+        while (e < N && fn->ins[e].op == IR_MOV && !fn->ins[e].vol)
+            e++;
+        if (e - b - 1 <= THREAD_MAX_COPIES && e < N &&
+            fn->ins[e].op == IR_JMP && fn->ins[e].label != l &&
+            e > b + 1)
+            copies[l] = e - b - 1;
+    }
+    int changed = 0, *threaded = xcalloc((size_t)nl, sizeof *threaded);
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = xmalloc((size_t)(N + 1) * sizeof *newpos);
+    for (int n = 0; n < N; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        newpos[n] = nb.n;
+        if (in->op == IR_JMP && in->label >= 0 && in->label < nl &&
+            copies[in->label] > 0 && lpos[in->label] != n + 1) {
+            int b = lpos[in->label];
+            for (int k = 1; k <= copies[in->label]; k++)
+                *ib_push(&nb) = fn->ins[b + k];
+            struct ir_ins *j = ib_push(&nb);
+            *j = *in;
+            j->label = fn->ins[b + 1 + copies[in->label]].label;
+            threaded[in->label]++;
+            changed = 1;
+            continue;
+        }
+        *ib_push(&nb) = *in;
+    }
+    newpos[N] = nb.n;
+    if (changed) {
+        remap_scopes(fn, newpos, N);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        /* a copy block every reference to which went: unreachable now
+         * unless something falls into it, and DCE of blocks takes it */
+    } else {
+        free(nb.p);
+    }
+    free(newpos); free(threaded); free(copies); free(lpos); free(refs);
+    return changed;
+}
+
+/* ---- x86-64: a load moved down to the operation it feeds ---------------
+ *
+ * x86 can take one operand of an add, sub, and, or or xor straight from
+ * memory -- `xor (%r10,%rsi,4), %eax` is the table step of every CRC --
+ * but only when the load sits next to its use, and only into a register
+ * that already holds the other operand. irgen puts the load where the
+ * source reads it, often several instructions earlier, and the register
+ * allocator has decided everything by the time codegen could notice.
+ *
+ * So, before allocation: a load whose value is read once, by such an
+ * operation later in the same block, is moved down to just before it,
+ * together with the address add only it uses -- when nothing between can
+ * write memory (it would change what the load reads) or redefine the
+ * address. A commutative operation gets the loaded value as its SECOND
+ * operand, which is the one x86 takes from memory, and the allocator's
+ * two-address bias then puts the result in the other operand's register.
+ * Codegen fuses what it finds adjacent. */
+struct lop_cnt { int *n; int nv; };
+static void lop_cnt_cb(int *p, void *ctx)
+{
+    struct lop_cnt *c = ctx;
+    if (*p >= 0 && *p < c->nv)
+        c->n[*p]++;
+}
+struct lop_find { int v, hit; };
+static void lop_find_cb(int *p, void *ctx)
+{
+    struct lop_find *f = ctx;
+    if (*p == f->v)
+        f->hit = 1;
+}
+
+static int lop_user_ok(const struct ir_ins *u, int v, int size)
+{
+    if (u->flt || u->imm_b || u->w != size || u->a == u->b)
+        return 0;
+    switch (u->op) {
+    case IR_ADD: case IR_AND: case IR_OR: case IR_XOR:
+        return u->a == v || u->b == v;
+    case IR_SUB:
+        return u->b == v;          /* a - [mem]; [mem] - b gains nothing */
+    default:
+        return 0;
+    }
+}
+
+/* A compare takes its memory operand second (`cmp reg, [mem]`), or first
+ * against an immediate (`cmp [mem], imm`). */
+static int lop_cmp_ok(const struct ir_ins *u, int v, int size)
+{
+    if (u->op != IR_CMP || u->flt || u->w != size || u->a == u->b)
+        return 0;
+    return u->imm_b ? u->a == v : u->a == v || u->b == v;
+}
+
+static int pass_x86_loadop(struct ir_func *fn)
+{
+    int nv = fn->nvregs, changed = 0;
+    if (target_get() != TARGET_X86_64 || fn->nins < 2 || !nv)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int *nuse = xcalloc((size_t)nv, sizeof *nuse);
+    struct lop_cnt c = { nuse, nv };
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op != IR_LDVAR && fn->ins[n].op != IR_ADDR)
+            each_read(&fn->ins[n], lop_cnt_cb, &c);
+    for (int p = 0; p < fn->nins; p++) {
+        struct ir_ins *L = &fn->ins[p];
+        if (L->op != IR_LOAD || L->vol || L->flt || L->memoff ||
+            L->dst < fn->nvars || L->dst >= nv || nuse[L->dst] != 1 ||
+            d.cnt[L->dst] != 1 || (L->size != 4 && L->size != 8) ||
+            L->w != L->size)
+            continue;
+        int a0 = p;                    /* first instruction that moves */
+        if (p > 0) {
+            const struct ir_ins *ad = &fn->ins[p - 1];
+            if (ad->op == IR_ADD && !ad->flt && ad->dst == L->a &&
+                L->a >= fn->nvars && L->a < nv && nuse[L->a] == 1 &&
+                d.cnt[L->a] == 1) {
+                a0 = p - 1;
+                /* ...and the shift scaling its index, which codegen folds
+                 * into the address only when it is adjacent too */
+                const struct ir_ins *sh = p > 1 ? &fn->ins[p - 2] : NULL;
+                if (sh && sh->op == IR_SHL && sh->imm_b && !ad->imm_b &&
+                    sh->dst == ad->b && sh->dst >= fn->nvars &&
+                    sh->dst < nv && nuse[sh->dst] == 1 &&
+                    d.cnt[sh->dst] == 1)
+                    a0 = p - 2;
+            }
+        }
+        int q = -1;
+        for (int k = p + 1; k < fn->nins; k++) {
+            const struct ir_ins *x = &fn->ins[k];
+            enum ir_op op = x->op;
+            struct lop_find f = { L->dst, 0 };
+            if (op != IR_LDVAR && op != IR_ADDR)
+                each_read((struct ir_ins *)x, lop_find_cb, &f);
+            if (f.hit) {
+                if (lop_user_ok(x, L->dst, L->size) ||
+                    lop_cmp_ok(x, L->dst, L->size))
+                    q = k;
+                break;
+            }
+            if (op == IR_LABEL || op == IR_JMP || op == IR_BRZ ||
+                op == IR_BRNZ || op == IR_RET || op == IR_UD2 ||
+                op == IR_IGOTO || op == IR_SWITCH || writes_memory(op))
+                break;
+            int t = def_target(x), clash = t >= 0 && t == L->a;
+            for (int m = a0; m < p && t >= 0 && !clash; m++)
+                clash = t == fn->ins[m].a ||
+                        (!fn->ins[m].imm_b && t == fn->ins[m].b);
+            if (clash)
+                break;
+        }
+        if (q < 0)
+            continue;
+        struct ir_ins *U = &fn->ins[q];
+        if (U->a == L->dst && !U->imm_b) {   /* memory goes second */
+            int t = U->a; U->a = U->b; U->b = t;
+            if (U->op == IR_CMP)
+                U->pred = swap_pred(U->pred);
+        }
+        if (q > p + 1) {
+            int nm = p - a0 + 1, N = fn->nins;
+            struct ir_ins mv[3];
+            for (int k = 0; k < nm; k++)
+                mv[k] = fn->ins[a0 + k];
+            memmove(&fn->ins[a0], &fn->ins[p + 1],
+                    (size_t)(q - p - 1) * sizeof *fn->ins);
+            for (int k = 0; k < nm; k++)
+                fn->ins[q - nm + k] = mv[k];
+            if (fn->var_scope_lo) {
+                int *newpos = xmalloc((size_t)(N + 1) * sizeof *newpos);
+                for (int k = 0; k <= N; k++)
+                    newpos[k] = k < a0 || k >= q ? k
+                              : k <= p ? q - 1 - (p - k)
+                              : k - nm;
+                remap_scopes(fn, newpos, N);
+                free(newpos);
+            }
+        }
+        changed = 1;
+        p = q;
+    }
+    free(nuse);
+    free_defs(&d);
+    return changed;
+}
+
 void opt_run(struct ir_unit *iu, int level)
 {
     int size = level == OPT_SIZE;
@@ -12214,6 +12596,11 @@ void opt_run(struct ir_unit *iu, int level)
      * pass_fold), which is a great deal narrower than refusing the
      * function: everything else -- value numbering, copy propagation,
      * dead code, and all of the loop passes -- works on it unchanged. */
-    for (int f = 0; f < iu->nfuncs; f++)
+    for (int f = 0; f < iu->nfuncs; f++) {
         opt_func(&iu->funcs[f]);
+        pass_latch_copies(&iu->funcs[f]);
+        if (pass_thread_copies(&iu->funcs[f]))
+            pass_cfgclean(&iu->funcs[f]);   /* the copy blocks left behind */
+        pass_x86_loadop(&iu->funcs[f]);     /* last: nothing reorders after */
+    }
 }

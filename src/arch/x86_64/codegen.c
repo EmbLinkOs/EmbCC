@@ -1726,8 +1726,36 @@ static int cg_reg_move(struct code *text, int dst, int a, int w)
  * Cache: on the register-direct paths RAX is untouched, but the caller's
  * following setcc/jcc clobbers or resets it, so this leaves the residency cache
  * alone and relies on the caller (cg_store after setcc, cg_reset after jcc). */
+/* A load deferred into the compare right after it (cmpmem_defer): that
+ * compare reads its operand from memory instead. One instruction only --
+ * the dispatch loop refuses a deferral nothing consumed. */
+static const struct ir_ins *g_cmem_ins;
+static int g_cmem_base, g_cmem_index, g_cmem_scale, g_cmem_disp;
+
 static void cg_icmp_flags(struct code *text, const int *sd, struct ir_ins *i)
 {
+    if (g_cmem_ins == i) {
+        g_cmem_ins = NULL;
+        if (i->imm_b) {                   /* the load was `a`: cmp [mem], imm */
+            x86_alu_mem_imm(text, 'c', g_cmem_base, g_cmem_disp, i->imm,
+                            i->w);
+            return;
+        }
+        int areg;
+        if (in_reg(i->a)) {
+            areg = g_loc[i->a];
+        } else {
+            cg_load(text, sd, i->a, i->w, 0, i->w);
+            areg = REG_RAX;
+        }
+        if (g_cmem_index >= 0)
+            x86_alu_reg_baseindex(text, 'c', areg, g_cmem_base, g_cmem_index,
+                                  g_cmem_scale, i->w);
+        else
+            x86_alu_reg_basedisp(text, 'c', areg, g_cmem_base, g_cmem_disp,
+                                 i->w);
+        return;
+    }
     int b_mem = !i->imm_b && !in_reg(i->b);
     int areg;
     if (in_reg(i->a) && !b_mem) {
@@ -2404,6 +2432,84 @@ static int tail_call_ok(struct ir_func *fn, int n)
 struct afold { char *ok; int *disp; };
 static struct afold g_afold;
 static int afolded(int v) { return g_afold.ok && v >= 0 && g_afold.ok[v]; }
+
+/* A load whose one reader is the integer compare right after it, as its
+ * second operand (pass_x86_loadop put it there) or as its first against
+ * an immediate: emit nothing now and let cg_icmp_flags read memory. The
+ * base and index must not be RAX, which the compare may stage its other
+ * operand in. index < 0: [base + disp]. */
+static int cmpmem_defer(struct ir_func *fn, int ln, const int *usecnt,
+                        int base, int index, int scale, int disp)
+{
+    const struct ir_ins *L = &fn->ins[ln], *U;
+    if (!usecnt || ln + 1 >= fn->nins)
+        return 0;
+    U = &fn->ins[ln + 1];
+    if (L->op != IR_LOAD || L->vol || L->flt || L->memoff ||
+        L->size != L->w || (L->size != 4 && L->size != 8) ||
+        L->dst < 0 || usecnt[L->dst] != 1 || U->op != IR_CMP || U->flt ||
+        U->w != L->size || U->a == U->b || base == REG_RAX ||
+        index == REG_RAX)
+        return 0;
+    if (U->imm_b) {
+        if (U->a != L->dst || index >= 0)
+            return 0;
+        if (U->w == 8 ? U->imm < -2147483647L - 1 || U->imm > 2147483647L
+                      : U->imm < -2147483647L - 1 || U->imm > 4294967295L)
+            return 0;
+    } else if (U->b != L->dst) {
+        return 0;
+    }
+    g_cmem_ins = U;
+    g_cmem_base = base;
+    g_cmem_index = index;
+    g_cmem_scale = scale;
+    g_cmem_disp = disp;
+    return 1;
+}
+
+/* A load at fn->ins[ln] whose one reader is the operation right after it,
+ * taking it as its SECOND operand -- pass_x86_loadop arranged both: that
+ * operation is emitted as `op dst, [mem]` and the loaded value never
+ * exists in a register. Only with the destination and the first operand
+ * in registers, a full-width load (no extension), and never when copying
+ * the first operand into the destination would overwrite the address
+ * before the operation reads it. index < 0: [base + disp].
+ *
+ * Not when read-modify-write fusion has claimed that operation (rmw_op):
+ * it has already dropped the load of the OTHER operand, to be done in
+ * memory at the store, and an operation emitted here would read a
+ * register nothing loaded. */
+static int loadop_fuse(struct code *text, struct ir_func *fn, int ln,
+                       const int *usecnt, int base, int index, int scale,
+                       int disp, int rmw_op)
+{
+    const struct ir_ins *L = &fn->ins[ln], *U;
+    if (!usecnt || ln + 1 >= fn->nins || ln + 1 == rmw_op)
+        return 0;
+    U = &fn->ins[ln + 1];
+    if (L->op != IR_LOAD || L->vol || L->flt || L->memoff ||
+        L->size != L->w || (L->size != 4 && L->size != 8) ||
+        L->dst < 0 || usecnt[L->dst] != 1 || U->imm_b || U->flt ||
+        U->b != L->dst || U->a == L->dst || U->w != L->size)
+        return 0;
+    int aop = U->op == IR_ADD ? '+' : U->op == IR_SUB ? '-' :
+              U->op == IR_AND ? '&' : U->op == IR_OR ? '|' :
+              U->op == IR_XOR ? '^' : 0;
+    if (!aop || !in_reg(U->dst) || !in_reg(U->a))
+        return 0;
+    int D = g_loc[U->dst], A = g_loc[U->a];
+    if (D != A && (D == base || D == index))
+        return 0;
+    if (D != A)
+        x86_mov_rr_w(text, D, A, U->w);
+    if (index >= 0)
+        x86_alu_reg_baseindex(text, aop, D, base, index, scale, U->w);
+    else
+        x86_alu_reg_basedisp(text, aop, D, base, disp, U->w);
+    cg_reset();
+    return 1;
+}
 
 static void afold_free(struct afold *a) { free(a->ok); free(a->disp); }
 
@@ -3256,6 +3362,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * leave; ret` that nothing could reach, in every function ending in
      * one. Optimising builds only, so -O0/-O1 stay byte-identical. */
     int dead = 0, tail_made = 0, rmw_op = -1, rmw_ld = -1;
+    g_cmem_ins = NULL;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (dead) {
@@ -3269,6 +3376,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
         int vrc_in = vrc_vreg;
         int vw_in = vw_src;
         int fold_in = fold_idx;
+        /* THE RULE: a load handed to the next instruction's compare and
+         * not taken by it would vanish from the program. */
+        if (g_cmem_ins && g_cmem_ins != i)
+            internal_error("x86: %s: a load deferred into a compare was not "
+                           "consumed", fn->name);
         vrc_vreg = -1;
         vw_src = -1;
         fold_idx = -1;      /* only the instruction right after may use it */
@@ -3686,6 +3798,19 @@ static void gen_func(struct ir_func *fn, struct code *text,
                  * was still in xmm8, which was the real part's product. */
                 if (!addr_fold_ok(nx)) {
                     /* fall through to materialise the address */
+                } else if (nx->op == IR_LOAD && nx->a == i->dst &&
+                           cmpmem_defer(fn, n + 1, usecnt, base,
+                                        i->imm_b ? -1 : index, scale,
+                                        i->imm_b ? (int)i->imm : 0)) {
+                    n++;              /* the add and the load: the compare
+                                       * next reads the memory itself */
+                    break;
+                } else if (nx->op == IR_LOAD && nx->a == i->dst &&
+                           loadop_fuse(text, fn, n + 1, usecnt, base,
+                                       i->imm_b ? -1 : index, scale,
+                                       i->imm_b ? (int)i->imm : 0, rmw_op)) {
+                    n += 2;           /* the add, the load and their user */
+                    break;
                 } else if (nx->op == IR_LOAD && nx->a == i->dst) {
                     /* Straight into the value's own register when it has
                      * one. Landing in RAX and moving from there was a
@@ -4241,6 +4366,23 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * wholly untouched — cache preserved) or staged into RAX as the base
              * (RAX still holds that address afterward, so its cache entry stays
              * valid — the load reads [rax], it does not overwrite rax). */
+            /* Its one reader right after it, taking it as a memory operand
+             * (pass_x86_loadop): one instruction for the two. */
+            if (afolded(i->a)
+                    ? loadop_fuse(text, fn, n, usecnt, REG_RBP, -1, 1,
+                                  g_afold.disp[i->a], rmw_op)
+                    : in_reg(i->a) &&
+                      loadop_fuse(text, fn, n, usecnt, g_loc[i->a], -1, 1,
+                                  0, rmw_op)) {
+                n++;
+                break;
+            }
+            if (afolded(i->a)
+                    ? cmpmem_defer(fn, n, usecnt, REG_RBP, -1, 1,
+                                   g_afold.disp[i->a])
+                    : in_reg(i->a) &&
+                      cmpmem_defer(fn, n, usecnt, g_loc[i->a], -1, 1, 0))
+                break;                     /* the compare reads it */
             /* The address folded into rbp+disp: no base register at all. */
             if (afolded(i->a)) {
                 int D = in_reg(i->dst) ? g_loc[i->dst] : REG_RAX;
