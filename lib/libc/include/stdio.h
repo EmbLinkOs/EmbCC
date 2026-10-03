@@ -15,11 +15,22 @@ extern "C" {
 #endif
 
 #define EOF (-1)
+#if defined(__APPLE__)
+/* Apple's C library's, which a Darwin program links against: L_tmpnam
+ * above all, since its tmpnam() writes up to that many bytes into the
+ * caller's buffer -- 32 here was 992 short. */
+#define BUFSIZ 1024
+#define FOPEN_MAX 20
+#define FILENAME_MAX 1024
+#define L_tmpnam 1024
+#define TMP_MAX 308915776
+#else
 #define BUFSIZ 4096
 #define FOPEN_MAX 32
 #define FILENAME_MAX 4096
 #define L_tmpnam 32
 #define TMP_MAX 26
+#endif
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
@@ -32,9 +43,20 @@ extern "C" {
 typedef struct _FILE FILE;
 typedef long fpos_t;
 
+#if defined(__APPLE__)
+/* Apple's C library names its streams __stdinp, __stdoutp and __stderrp;
+ * `stderr` alone did not link there. */
+extern FILE *__stdinp;
+extern FILE *__stdoutp;
+extern FILE *__stderrp;
+#define stdin  __stdinp
+#define stdout __stdoutp
+#define stderr __stderrp
+#else
 extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *stderr;
+#endif
 
 FILE *fopen(const char *__restrict path, const char *__restrict mode);
 FILE *freopen(const char *__restrict path, const char *__restrict mode,

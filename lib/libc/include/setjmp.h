@@ -23,7 +23,17 @@
 extern "C" {
 #endif
 
+#if defined(__APPLE__)
+/* Apple's C library's setjmp, which a Darwin program calls: its size, so
+ * a struct holding one is laid out as clang lays it out. */
+#if defined(__aarch64__)
+typedef int jmp_buf[(14 + 8 + 2) * 2];
+#else
+typedef int jmp_buf[(9 * 2) + 3 + 16];
+#endif
+#else
 typedef long jmp_buf[32];
+#endif
 
 int  setjmp(jmp_buf env);
 void longjmp(jmp_buf env, int val);

@@ -16,11 +16,22 @@ extern "C" {
 #define INFINITY  (__builtin_inff())
 #define NAN       (__builtin_nanf(""))
 
+#if defined(__APPLE__)
+/* Apple's numbering, which its __fpclassifyd returns: with this
+ * library's, a Darwin program's isnan() asked whether the answer was 0
+ * and Apple's NaN is 1. isfinite's `> FP_INFINITE` holds for both. */
+#define FP_NAN       1
+#define FP_INFINITE  2
+#define FP_ZERO      3
+#define FP_NORMAL    4
+#define FP_SUBNORMAL 5
+#else
 #define FP_NAN       0
 #define FP_INFINITE  1
 #define FP_ZERO      2
 #define FP_SUBNORMAL 3
 #define FP_NORMAL    4
+#endif
 
 #define MATH_ERRNO     1
 #define MATH_ERREXCEPT 2

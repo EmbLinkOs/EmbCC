@@ -25,6 +25,51 @@
 extern "C" {
 #endif
 
+#if defined(__APPLE__)
+/* A Darwin program links Apple's C library, whose fegetenv and the rest
+ * read and write Apple's types with Apple's flag values -- a 16-byte
+ * fenv_t, where this library's is 8, and rounding modes that are FPCR or
+ * x87 control-word bits rather than 0..3. Taken from the SDK's <fenv.h>. */
+#if defined(__aarch64__)
+typedef struct {
+    unsigned long long __fpsr;
+    unsigned long long __fpcr;
+} fenv_t;
+typedef unsigned short fexcept_t;
+#define FE_INEXACT     0x0010
+#define FE_UNDERFLOW   0x0008
+#define FE_OVERFLOW    0x0004
+#define FE_DIVBYZERO   0x0002
+#define FE_INVALID     0x0001
+#define FE_FLUSHTOZERO 0x0080
+#define FE_ALL_EXCEPT  0x009f
+#define FE_TONEAREST   0x00000000
+#define FE_UPWARD      0x00400000
+#define FE_DOWNWARD    0x00800000
+#define FE_TOWARDZERO  0x00C00000
+#else
+typedef struct {
+    unsigned short __control;
+    unsigned short __status;
+    unsigned int   __mxcsr;
+    char           __reserved[8];
+} fenv_t;
+typedef unsigned short fexcept_t;
+#define FE_INEXACT         0x0020
+#define FE_UNDERFLOW       0x0010
+#define FE_OVERFLOW        0x0008
+#define FE_DIVBYZERO       0x0004
+#define FE_INVALID         0x0001
+#define FE_DENORMALOPERAND 0x0002
+#define FE_ALL_EXCEPT      0x003f
+#define FE_TONEAREST       0x0000
+#define FE_DOWNWARD        0x0400
+#define FE_UPWARD          0x0800
+#define FE_TOWARDZERO      0x0c00
+#endif
+extern const fenv_t _FE_DFL_ENV;
+#define FE_DFL_ENV (&_FE_DFL_ENV)
+#else
 /* The exception flags, as the hardware numbers them. On x86-64 these
  * are the MXCSR bits directly, which is what makes the accessors a
  * couple of instructions rather than a translation table. */
@@ -54,6 +99,8 @@ typedef struct {
 
 extern const fenv_t __fe_dfl_env;
 #define FE_DFL_ENV (&__fe_dfl_env)
+
+#endif
 
 int feclearexcept(int excepts);
 int fetestexcept(int excepts);
