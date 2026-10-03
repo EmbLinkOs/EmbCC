@@ -388,6 +388,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`-Wdeprecated-declarations`](diagnostics.md#-wdeprecated-declarations), on by default. The message text is not printed |
 | `embcc_sret` | EmbCC's own. On the first parameter, before its type, it marks that parameter as the address of the returned aggregate, passed where the target's ABI passes it. EmbCC's C++ lowering writes it; hand-written C has no need of it |
 | `format(archetype, string-index, first-to-check)` | Calls are checked under [`-Wformat`](diagnostics.md#-wformat), which `-Wall` enables. The archetypes checked are `printf`, `gnu_printf`, `scanf` and `gnu_scanf`; any other (`strftime`, `strfmon`) is accepted and not checked. Both indexes are 1-based; `first-to-check` is 0 for a function that takes a `va_list` |
+| `gnu_inline` | GNU89 `inline` semantics for this function: a definition that says `extern inline` is used only for inlining and never emitted, and one that says `inline` alone is an external definition. See [Inline functions](c-language.md#inline-functions) |
 | `noinline` | The function is never inlined |
 | `noreturn`, `_Noreturn`, `[[noreturn]]` | The function does not return. A call to it ends a path for EmbCC's check that every path through a non-`void` function returns a value ([E0008](diagnostics.md#diagnostic-ids)). EmbCC does not check that the function itself never returns |
 | `nothrow` | The function throws no C++ exception: a call to it inside a C++ `try` region gets no landing pad |
@@ -579,7 +580,6 @@ records for each.
 | `designated_init` | It asks for a warning; the layout is unaffected |
 | `fallthrough` | EmbCC does not warn about a `case` falling through |
 | `flatten` | EmbCC's inliner works from the call site |
-| `gnu_inline` | EmbCC emits an `inline` function as an ordinary function |
 | `leaf` | Nothing in EmbCC reasons across a call this way |
 | `malloc` | It says the result aliases nothing, which only an alias analysis could use |
 | `may_alias` | EmbCC does no type-based alias analysis |
@@ -1219,6 +1219,29 @@ defined in the same file. Refused forms:
 | Inside a structure body | `#pragma weak inside a struct body is not supported: put it before the struct` |
 | In C++ | `#pragma weak is not supported in C++: use __attribute__((weak)) on the declaration` |
 
+### `#pragma GCC diagnostic`
+
+`#pragma GCC diagnostic KIND "-WNAME"` sets the warning `NAME` from the
+pragma's position on; `#pragma clang diagnostic` and the `_Pragma`
+operator form are the same. Each warning is decided by the pragmas
+before it in the preprocessed text, so a pragma in a header applies
+after the `#include` unless the header pops it.
+
+| Form | Effect |
+|---|---|
+| `#pragma GCC diagnostic ignored "-WNAME"` | `NAME` is not reported |
+| `#pragma GCC diagnostic warning "-WNAME"` | `NAME` is reported as a warning, even when the command line does not enable it, and even under `-Werror` |
+| `#pragma GCC diagnostic error "-WNAME"` | `NAME` is reported as an error |
+| `#pragma GCC diagnostic push` | Saves the state of every warning |
+| `#pragma GCC diagnostic pop` | Restores the state last saved; with nothing saved, returns every warning to the command line's setting |
+
+A pragma that names a warning EmbCC does not have is ignored without a
+diagnostic; EmbCC never reports that warning, so the pragma would change
+nothing. Other kinds, such as `ignored_attributes`, are ignored. `-w`
+and the suppression of warnings in system headers apply whatever the
+pragmas say. A warning located in a header that is included more than
+once is decided at the header's last inclusion.
+
 ### Every other pragma is ignored
 
 Every other `#pragma` and `_Pragma` is removed without a diagnostic, and
@@ -1227,7 +1250,6 @@ program's meaning or its diagnostics in GCC and Clang:
 
 | Pragma | Use instead |
 |---|---|
-| `#pragma GCC diagnostic push`, `pop`, `ignored`, `warning`, `error` | `-Wno-NAME` and `-Werror=NAME` on the command line; see [Warning options](diagnostics.md#warning-options) |
 | `#pragma GCC visibility push(...)`, `pop` | `__attribute__((visibility(...)))` on each declaration |
 | `#pragma GCC poison`, `#pragma GCC system_header`, `#pragma message`, `#pragma GCC optimize`, `#pragma redefine_extname` | None |
 | `#pragma STDC FP_CONTRACT`, `FENV_ACCESS`, `CX_LIMITED_RANGE` | None |
@@ -1237,8 +1259,8 @@ program's meaning or its diagnostics in GCC and Clang:
 These constructs are accepted, have no effect, and draw no diagnostic.
 Each is described in its section above.
 
-- Every pragma except `pack`, `once`, `push_macro`, `pop_macro` and
-  `weak`.
+- Every pragma except `pack`, `once`, `push_macro`, `pop_macro`, `weak`
+  and `GCC diagnostic`.
 - `packed` and `section` on a single structure member.
 - `pcs` on a function-pointer parameter.
 - The memory-order arguments of the atomic builtins.

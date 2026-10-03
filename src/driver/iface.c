@@ -134,10 +134,14 @@ static void usr_func(struct outbuf *b, const struct func *f)
         ob_fmt(b, "c:@F@%s", f->name);
 }
 
-static void usr_global(struct outbuf *b, const struct global *g)
+/* `unit` stands in for a static local's file, which is not recorded: an
+ * internal-linkage USR must name a file, or `c:@V@tick.n` reads as an
+ * external name that two units both define. */
+static void usr_global(struct outbuf *b, const struct global *g,
+                       const char *unit)
 {
     if (g->is_static)
-        ob_fmt(b, "c:%s@V@%s", g->file ? g->file : "", g->name);
+        ob_fmt(b, "c:%s@V@%s", g->file ? g->file : unit ? unit : "", g->name);
     else
         ob_fmt(b, "c:@V@%s", g->name);
 }
@@ -289,19 +293,24 @@ void iface_emit(struct outbuf *b, struct unit *u)
 
     /* what this unit DEFINES */
     for (const struct func *f = u->funcs; f; f = f->next) {
-        if (f->absorbed || !f->has_defn)
-            continue;
+        if (f->absorbed || !f->has_defn || f->inline_only)
+            continue;                    /* an inline definition is not one */
         struct outbuf k = { NULL, 0, 0 };
         usr_func(&k, f);
-        ob_fmt(b, "provides %-40s %016lx\n", k.p, hash_func(f));
+        /* A weak definition (__attribute__((weak)), and every C++ inline
+         * function, template instance and in-class member, which lower to
+         * one) may be in every unit: the linker keeps one. */
+        ob_fmt(b, "provides %-40s %016lx%s\n", k.p, hash_func(f),
+               f->is_weak ? " weak" : "");
         ob_free(&k);
     }
     for (const struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed || !g->defined)
             continue;
         struct outbuf k = { NULL, 0, 0 };
-        usr_global(&k, g);
-        ob_fmt(b, "provides %-40s %016lx\n", k.p, hash_global(g));
+        usr_global(&k, g, u->file);
+        ob_fmt(b, "provides %-40s %016lx%s\n", k.p, hash_global(g),
+               g->is_weak ? " weak" : "");
         ob_free(&k);
     }
 
@@ -309,7 +318,7 @@ void iface_emit(struct outbuf *b, struct unit *u)
      * compiled against. A build system re-runs this unit when one of these
      * hashes changes, and only then. */
     for (const struct func *f = u->funcs; f; f = f->next) {
-        if (f->absorbed || f->has_defn || !f->used)
+        if (f->absorbed || (f->has_defn && !f->inline_only) || !f->used)
             continue;
         struct outbuf k = { NULL, 0, 0 };
         usr_func(&k, f);
@@ -320,7 +329,7 @@ void iface_emit(struct outbuf *b, struct unit *u)
         if (g->absorbed || g->defined || !g->used)
             continue;
         struct outbuf k = { NULL, 0, 0 };
-        usr_global(&k, g);
+        usr_global(&k, g, u->file);
         ob_fmt(b, "uses     %-40s %016lx\n", k.p, hash_global(g));
         ob_free(&k);
     }

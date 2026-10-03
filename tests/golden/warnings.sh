@@ -74,6 +74,27 @@ echo "each names its option; -Werror fails the build"
     echo "-Wshadow does not point at the declaration it hides"; exit 1; }
 echo "-Wshadow points at what is hidden"
 
+# 5b. A local or parameter hiding a file-scope variable, as GCC and clang
+#     report it -- but not one declared after the function, and not a
+#     function's name.
+cat > "$out/g.c" << 'EOF'
+int level;
+int set(int level) { return level; }
+int get(void) { int level = 2; return level; }
+int early(void) { int later = 1; return later; }
+int later;
+int fn(void);
+int name_of_fn(void) { int fn = 3; return fn; }
+EOF
+"$EMBCC" --target="$TARGET" -Wshadow -c "$out/g.c" -o "$out/g.o" \
+    > "$out/g.txt" 2>&1
+lines=$(sed -n "s|.*g\.c:\([0-9]*\):[0-9]*: warning: declaration of '\([a-z]*\)' shadows a global declaration.*|\1 \2|p" \
+        "$out/g.txt" | tr '\n' ' ')
+[ "$lines" = "2 level 3 level " ] || {
+    echo "-Wshadow on globals: expected lines 2 and 3, got:"; cat "$out/g.txt"
+    exit 1; }
+echo "-Wshadow: a local or parameter hiding a global, not a later one"
+
 # 6. The judge: gcc, on the same file, with the same flags.
 GCC=$([ "$ARCH" = aarch64 ] && echo aarch64-elf-gcc || echo x86_64-elf-gcc)
 if command -v "$GCC" >/dev/null 2>&1; then

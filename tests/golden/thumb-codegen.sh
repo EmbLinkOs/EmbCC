@@ -259,6 +259,59 @@ grep -qE '(ldr|str)[a-z.]*[[:space:]].*\[sp' "$out/at.s" || {
     cat "$out/at.s"; exit 1; }
 echo "a local whose address is taken keeps its slot"
 
+# A local's address is the frame base plus a constant: recomputed where it
+# is needed and addressed through directly, never computed into a
+# register, stored to a slot of its own and loaded back. Two struct
+# returns copied out of their call slots made it four times here.
+cat > "$out/fa.c" <<'EOF'
+struct S { int a, b, c, d; };
+struct S mk(int);
+int use(void) { struct S s = mk(1), t = mk(2); return s.a + t.d; }
+EOF
+for o in -O0 -Os; do
+    "$EMBCC" --target=$T $o -c "$out/fa.c" -o "$out/fa.o" || {
+        echo "the frame-address file does not compile at $o"; exit 1; }
+    "$OD" -d --triple=thumbv7m --no-show-raw-insn "$out/fa.o" > "$out/fa.s" 2>&1
+    n=$(awk '
+        { reg = ""; if (match($0, /add(w|\.w)?[[:space:]]+r[0-9]+, sp,/)) {
+              split(substr($0, RSTART), f, /[[:space:],]+/); reg = f[2] } }
+        prev != "" && $0 ~ ("str(\\.w)?[[:space:]]+" prev ", \\[sp") { n++ }
+        { prev = reg }
+        END { print n + 0 }' "$out/fa.s")
+    [ "$n" = 0 ] || {
+        echo "$o: a frame address was stored to a slot $n time(s):"
+        cat "$out/fa.s"; exit 1; }
+done
+echo "a local's address is recomputed, not spilled to a slot and reloaded"
+
+# A 64-bit value moves as one ldrd/strd -- but only where the address is
+# known word-aligned: ARMv7-M faults on an unaligned ldrd or strd where
+# two ldr or str would not, and a packed struct's member is exactly that.
+cat > "$out/pk.c" <<'EOF'
+struct __attribute__((packed)) P { char c; long long v; double d; };
+struct A { char c; long long v; double d; };
+long long getp(struct P *p) { return p->v; }
+void setp(struct P *p, long long x) { p->v = x; }
+double getpd(struct P *p) { return p->d; }
+long long geta(struct A *a) { return a->v; }
+void seta(struct A *a, long long x) { a->v = x; }
+EOF
+for o in -O0 -Os; do
+    "$EMBCC" --target=$T $o -c "$out/pk.c" -o "$out/pk.o" || {
+        echo "the packed-access file does not compile at $o"; exit 1; }
+    "$OD" -d --triple=thumbv7m --no-show-raw-insn "$out/pk.o" |
+        awk '/^[0-9a-f]+ </ { f = $2 } /(ldr|str)d/ { print f, $0 }' \
+        > "$out/pk.s"
+    # through a pointer (anything but sp) in a packed function: a fault
+    if grep -E '^<(getp|setp|getpd)>:.*(ldr|str)d.*\[r[0-9]+' "$out/pk.s"; then
+        echo "$o: ldrd/strd on a packed (unaligned) member"; exit 1
+    fi
+done
+grep -q '^<geta>:.*ldrd' "$out/pk.s" && grep -q '^<seta>:.*strd' "$out/pk.s" || {
+    echo "an aligned 64-bit member is not one ldrd/strd at -Os:"
+    cat "$out/pk.s"; exit 1; }
+echo "a 64-bit value moves as one ldrd/strd, never on a packed member"
+
 # Under -g every local is pinned to a slot, which is what makes
 # DW_AT_location naming that slot true. If the skip ever fires here, the
 # debugger is told where a variable is not.

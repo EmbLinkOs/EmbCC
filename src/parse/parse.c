@@ -37,7 +37,7 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * inliner's two overrides; deprecated and
                 * warn_unused_result are diagnostics the DECLARATION
                 * asks for. */
-               int used, unused, always_inline, noinline;
+               int used, unused, always_inline, noinline, gnu_inline;
                int deprecated, warn_unused_result;
                const char *vis;      /* visibility("...") */
                /* __attribute__((signal)) / ((interrupt)): this function is
@@ -432,6 +432,7 @@ static const struct attr_entry attr_table[] = {
      * a thing it chose against. `-fremarks` names whichever applied. */
     { "always_inline", ATTR_HONOURED, NULL },
     { "noinline",      ATTR_HONOURED, NULL },
+    { "gnu_inline",    ATTR_HONOURED, NULL },
     { "deprecated",    ATTR_HONOURED, NULL },
     { "warn_unused_result", ATTR_HONOURED, NULL },
     { "embcc_sret",    ATTR_HONOURED, NULL },   /* EmbCC's own */
@@ -498,7 +499,6 @@ static const struct attr_entry attr_table[] = {
       "could use" },
     { "leaf",      ATTR_NOOP, "nothing here reasons across a call" },
     { "artificial", ATTR_NOOP, "it marks a line for a debugger's stepping" },
-    { "gnu_inline", ATTR_NOOP, "EmbCC emits an inline function as an ordinary one" },
     { "nonnull",   ATTR_NOOP, "EmbCC does not check argument values" },
     { "returns_nonnull", ATTR_NOOP, "EmbCC does not track null-ness" },
     { "alloc_size", ATTR_NOOP, "EmbCC has no object-size checking" },
@@ -804,6 +804,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "unused")) out->unused = 1;
                 else if (attr_is(name, "always_inline")) out->always_inline = 1;
                 else if (attr_is(name, "noinline")) out->noinline = 1;
+                else if (attr_is(name, "gnu_inline")) out->gnu_inline = 1;
                 else if (attr_is(name, "deprecated")) out->deprecated = 1;
                 else if (attr_is(name, "warn_unused_result"))
                     out->warn_unused_result = 1;
@@ -4712,7 +4713,7 @@ static void parse_top(struct parser *ps, struct unit *u,
         return;
     }
 
-    int is_static = 0, is_extern = 0, is_tls = 0;
+    int is_static = 0, is_extern = 0, is_tls = 0, is_inline = 0;
     struct attrs at = { 0 };
     ps->seq = seq;
 
@@ -4735,8 +4736,8 @@ static void parse_top(struct parser *ps, struct unit *u,
         return;
     }
 
-    /* Storage/function specifiers in any order; `inline` is accepted and
-     * ignored — EmbCC emits an inline function as an ordinary one. */
+    /* Storage/function specifiers in any order. `inline` decides, with
+     * `extern`, whether a definition is an inline definition (sema). */
     for (;;) {
         if (cur(ps)->kind == TOK_KW_STATIC) {
             is_static = 1;
@@ -4745,6 +4746,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             is_extern = 1;
             advance(ps);
         } else if (cur(ps)->kind == TOK_KW_INLINE) {
+            is_inline = 1;
             advance(ps);
         } else if (cur(ps)->kind == TOK_KW_NORETURN) {
             /* C11 §6.7.4: _Noreturn is a function specifier, and means
@@ -4910,6 +4912,8 @@ static void parse_top(struct parser *ps, struct unit *u,
                  * (`void (*signal(int, void (*)(int)))(int)`) */
                 f = xcalloc(1, sizeof *f);
                 f->is_static = is_static;
+                f->decl_inline = is_inline;
+                f->decl_extern = is_extern;
                 f->is_weak = at.weak;
                 f->is_noreturn = at.noreturn;
     f->fmt_kind = at.fmt_kind;
@@ -4923,6 +4927,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
     f->attr_warn_unused_result = at.warn_unused_result;
@@ -4934,6 +4939,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->attr_unused = at.unused;
                 f->attr_always_inline = at.always_inline;
                 f->attr_noinline = at.noinline;
+                f->attr_gnu_inline = at.gnu_inline;
                 f->pcs = at.pcs;
     f->pcs = at.pcs;
                 f->attr_deprecated = at.deprecated;
@@ -5001,6 +5007,8 @@ static void parse_top(struct parser *ps, struct unit *u,
     f = xcalloc(1, sizeof *f);
     /* 'extern' on a function is the default linkage — accept, ignore */
     f->is_static = is_static;
+    f->decl_inline = is_inline;
+    f->decl_extern = is_extern;
     f->is_weak = at.weak;   /* leading __attribute__((weak)) */
     f->is_noreturn = at.noreturn;
     f->fmt_kind = at.fmt_kind;
@@ -5014,6 +5022,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
     f->attr_warn_unused_result = at.warn_unused_result;
@@ -5118,6 +5127,7 @@ fn_tail:
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
     f->attr_warn_unused_result = at.warn_unused_result;
@@ -5151,6 +5161,8 @@ fn_tail:
                 struct type *fty = parse_fn_params(ps, dty);
                 struct func *g = xcalloc(1, sizeof *g);
                 g->is_static = is_static;
+                g->decl_inline = is_inline;
+                g->decl_extern = is_extern;
                 g->ret_ty = fty->ret;
                 g->name = dname;
                 g->file = ps->lx.file;

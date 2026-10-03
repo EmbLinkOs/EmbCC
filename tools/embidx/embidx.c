@@ -97,6 +97,8 @@ struct fact {
     char *key;                   /* a file path, or a USR */
     char *hash;                  /* 16 hex digits, as text: never compared
                                   * as a number, only for equality */
+    int weak;                    /* provides: a weak definition, which any
+                                  * number of units may hold */
 };
 
 struct unit {
@@ -117,7 +119,24 @@ static void fact_add(struct fact **v, int *n, const char *k, const char *h)
     *v = xrealloc(*v, (size_t)(*n + 1) * sizeof **v);
     (*v)[*n].key = xstrdup(k);
     (*v)[*n].hash = xstrdup(h);
+    (*v)[*n].weak = 0;
     (*n)++;
+}
+
+static const struct fact *fact_get(const struct fact *v, int n, const char *k)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(v[i].key, k) == 0)
+            return &v[i];
+    return NULL;
+}
+
+/* An internal-linkage name: its USR carries the file that declares it
+ * (`c:h.h@F@sq`), where an external one has none (`c:@F@f`). Each unit
+ * that includes the file has its own, so two of them never collide. */
+static int usr_internal(const char *usr)
+{
+    return !strncmp(usr, "c:", 2) && usr[2] != '@';
 }
 
 static const char *fact_find(const struct fact *v, int n, const char *k)
@@ -241,14 +260,17 @@ static void unit_load(struct unit *u, const char *text)
         p = e ? e + 1 : p + strlen(p);
         if (line[0] == ';' || !line[0])
             continue;
-        char kind[16], hash[64], key[4096];
+        char kind[16], hash[64], key[4096], flag[16];
+        int nf;
         if (sscanf(line, "%15s %63s %4095s", kind, hash, key) == 3 &&
             strcmp(kind, "file") == 0) {
             fact_add(&u->files, &u->nfiles, key, hash);
-        } else if (sscanf(line, "%15s %4095s %63s", kind, key, hash) == 3) {
-            if (strcmp(kind, "provides") == 0)
+        } else if ((nf = sscanf(line, "%15s %4095s %63s %15s", kind, key,
+                                hash, flag)) >= 3) {
+            if (strcmp(kind, "provides") == 0) {
                 fact_add(&u->prov, &u->nprov, key, hash);
-            else if (strcmp(kind, "uses") == 0)
+                u->prov[u->nprov - 1].weak = nf == 4 && !strcmp(flag, "weak");
+            } else if (strcmp(kind, "uses") == 0)
                 fact_add(&u->uses, &u->nuses, key, hash);
         }
     }
@@ -277,7 +299,8 @@ static void idx_write(const struct index *ix, const char *path)
         for (int k = 0; k < u->nfiles; k++)
             fprintf(f, "  file %s %s\n", u->files[k].hash, u->files[k].key);
         for (int k = 0; k < u->nprov; k++)
-            fprintf(f, "  provides %s %s\n", u->prov[k].hash, u->prov[k].key);
+            fprintf(f, "  provides %s %s%s\n", u->prov[k].hash, u->prov[k].key,
+                    u->prov[k].weak ? " weak" : "");
         for (int k = 0; k < u->nuses; k++)
             fprintf(f, "  uses %s %s\n", u->uses[k].hash, u->uses[k].key);
     }
@@ -317,14 +340,16 @@ static void idx_read(struct index *ix, const char *path)
         } else if (strncmp(q, "text ", 5) == 0) {
             cur->text = xstrdup(q + 5);
         } else {
-            char kind[16], hash[64], key[4096];
-            if (sscanf(q, "%15s %63s %4095s", kind, hash, key) != 3)
+            char kind[16], hash[64], key[4096], flag[16];
+            int nf = sscanf(q, "%15s %63s %4095s %15s", kind, hash, key, flag);
+            if (nf < 3)
                 continue;
             if (strcmp(kind, "file") == 0)
                 fact_add(&cur->files, &cur->nfiles, key, hash);
-            else if (strcmp(kind, "provides") == 0)
+            else if (strcmp(kind, "provides") == 0) {
                 fact_add(&cur->prov, &cur->nprov, key, hash);
-            else if (strcmp(kind, "uses") == 0)
+                cur->prov[cur->nprov - 1].weak = nf == 4 && !strcmp(flag, "weak");
+            } else if (strcmp(kind, "uses") == 0)
                 fact_add(&cur->uses, &cur->nuses, key, hash);
         }
     }
@@ -490,6 +515,8 @@ static int cmd_check(int argc, char **argv)
         for (int k = 0; k < ix.u[i].nuses; k++) {
             const char *usr = ix.u[i].uses[k].key;
             const char *h = ix.u[i].uses[k].hash;
+            if (usr_internal(usr))
+                continue;                /* each unit's own */
             for (int j = i + 1; j < ix.n; j++) {
                 const char *h2 = fact_find(ix.u[j].uses, ix.u[j].nuses, usr);
                 if (h2 && strcmp(h, h2) != 0) {
@@ -508,15 +535,24 @@ static int cmd_check(int argc, char **argv)
         }
     }
     /* Defined in two places: the link fails, but it fails with a symbol
-     * name and no source position. This says where both are. */
+     * name and no source position. This says where both are. Not for an
+     * internal-linkage name (a `static` in a header is one per unit) or
+     * a weak definition (the linker keeps one). */
     for (int i = 0; i < ix.n; i++)
-        for (int k = 0; k < ix.u[i].nprov; k++)
-            for (int j = i + 1; j < ix.n; j++)
-                if (fact_find(ix.u[j].prov, ix.u[j].nprov, ix.u[i].prov[k].key)) {
+        for (int k = 0; k < ix.u[i].nprov; k++) {
+            const struct fact *a = &ix.u[i].prov[k];
+            if (a->weak || usr_internal(a->key))
+                continue;
+            for (int j = i + 1; j < ix.n; j++) {
+                const struct fact *b = fact_get(ix.u[j].prov, ix.u[j].nprov,
+                                                a->key);
+                if (b && !b->weak) {
                     printf("defined twice %s\n  %s\n  %s\n",
-                           ix.u[i].prov[k].key, ix.u[i].path, ix.u[j].path);
+                           a->key, ix.u[i].path, ix.u[j].path);
                     problems++;
                 }
+            }
+        }
     /* Named by some unit and defined by none: either it comes from
      * outside (a library) or it is a link error waiting to happen. Said
      * as a note rather than a problem, because an index need not be

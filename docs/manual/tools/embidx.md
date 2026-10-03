@@ -66,7 +66,9 @@ A unit's record lists three kinds of fact:
   included, with a hash of the file's bytes.
 - `provides`: every function and variable the unit defines, with an
   interface hash. This includes `static` functions and variables, and
-  tentative definitions such as `int g;`.
+  tentative definitions such as `int g;`. A weak definition is marked
+  `weak`: one declared `__attribute__((weak))`, and every C++ inline
+  function, template instance and member function defined in its class.
 - `uses`: every function and variable the unit declares, does not
   define, and refers to; and every struct or union that the unit's
   declarations reach. A declaration reaches a struct or union when it is
@@ -84,13 +86,16 @@ unrelated code changes:
 | variable with external linkage | `c:@V@NAME` | `c:@V@g` |
 | `static` function | `c:FILE@F@NAME` | `c:cfg.h@F@sq` |
 | `static` variable at file scope | `c:FILE@V@NAME` | `c:cfg.h@V@LIMIT` |
-| `static` variable inside a function | `c:@V@FUNCTION.NAME` | `c:@V@tick.n` |
+| `static` variable inside a function | `c:UNIT@V@FUNCTION.NAME` | `c:t1.c@V@tick.n` |
 | struct | `c:@S@TAG` | `c:@S@P` |
 | union | `c:@U@TAG` | `c:@U@U` |
 
 `FILE` is the file that contains the definition, as the compiler named
-it: for a `static` function defined in a header, the header. In a C++
-unit, a function's USR carries its mangled name (`c:@F@_Z4cxxfP1S`).
+it: for a `static` function defined in a header, the header. `UNIT` is
+the unit's source file. A USR that names a file is one of an
+internal-linkage entity: each unit has its own, so `check` never
+compares two of them. In a C++ unit, a function's USR carries its
+mangled name (`c:@F@_Z4cxxfP1S`).
 Enumerations and typedefs never appear in the index.
 
 Two hashes are recorded, and they answer different questions:
@@ -251,8 +256,9 @@ conflict c:@F@shared
   z_def.c provides 4cec7e075c64d934
 ```
 
-A `defined twice` problem is a function or variable that two units both
-define, whatever their hashes:
+A `defined twice` problem is a function or variable with external
+linkage that two units both define, neither of them weakly, whatever
+their hashes:
 
 ```text
 defined twice c:@V@g
@@ -279,14 +285,6 @@ problem was reported, and 0 otherwise.
   that uses the declaration sorts before the unit that defines it (byte
   order of the paths). With `a_def.c` defining `long shared(long)` and
   `z_use.c` declaring `int shared(int)`, no conflict is reported.
-- A `static` function or variable defined in a header has a USR that
-  names the header, so a header included by two units is reported as
-  `defined twice` for each such definition (`c:cfg.h@F@sq`).
-- A `static` variable inside a function has a USR that names the
-  function but not the file. Two units that each define a function of
-  the same name with a `static` variable of the same name are reported
-  as `defined twice` (`c:@V@tick.n`), even when both functions are
-  `static`.
 
 ### `who`
 
@@ -377,7 +375,8 @@ unit b.c
   rebuilt when re-examined.
 - `file HASH PATH`, `provides HASH USR` and `uses HASH USR` are the facts
   of [Units, USRs and hashes](#units-usrs-and-hashes). The hash comes
-  first, unlike in the `--emit-interfaces` record.
+  first, unlike in the `--emit-interfaces` record. A weak definition's
+  `provides` line ends in ` weak`.
 - A hash is 16 lowercase hexadecimal digits and is only ever compared
   for equality. A file hash is the 64-bit FNV-1a hash of the file's
   bytes, or `0000000000000000` when the file could not be read.

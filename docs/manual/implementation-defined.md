@@ -537,11 +537,9 @@ at `-O2` and `-Os`; the `inline` keyword has no influence. Use
 `__attribute__((always_inline))` or `__attribute__((noinline))` to
 direct it (see [Optimization](optimization.md#inlining)).
 
-A function defined `inline` without `static` or `extern` is emitted as an
-ordinary external definition, as GNU C89 `inline` was, and not as a C99
-inline definition. Two translation units that each define the same such
-function therefore both define its symbol. Use `static inline` for
-functions defined in headers.
+A function defined `inline` without `static`, whose declarations in the
+unit all say `inline` and none says `extern`, is an inline definition
+and is not emitted (see [Inline functions](c-language.md#inline-functions)).
 
 ## Structures, unions, enumerations, and bit-fields
 

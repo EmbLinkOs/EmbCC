@@ -457,6 +457,21 @@ static unsigned wide_ldst_op(int size, int sign, int store)
     return 0xf8d0u;
 }
 
+int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
+{
+    /* LDRD/STRD (immediate) T1, offset addressing: 1110 100 P U 1 W L Rn,
+     * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. */
+    if (rt >= T_SP || rt2 >= T_SP || rn == T_PC || (!store && rt == rt2))
+        return 0;
+    if (off % 4 != 0 || off < -1020 || off > 1020)
+        return 0;
+    unsigned u = off >= 0 ? 1u : 0u;
+    unsigned mag = (unsigned)(off >= 0 ? off : -off);
+    hw2(c, 0xe940u | (u << 7) | (store ? 0u : 0x10u) | (unsigned)rn,
+           (unsigned)(rt << 12) | (unsigned)(rt2 << 8) | (mag / 4));
+    return 1;
+}
+
 int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
                int store)
 {

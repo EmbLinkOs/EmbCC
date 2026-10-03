@@ -8,6 +8,11 @@
  * EXPR_CALL a callee, and every func its nvars. */
 void sema_check(struct unit *u);
 
+/* GNU89 inline semantics (-fgnu89-inline, -std=gnu89): `inline` alone
+ * is an external definition and `extern inline` an inline-only one --
+ * the opposite of C99, which is the default. */
+void sema_set_gnu89_inline(int on);
+
 /* Semantic errors the last sema_check reported: the driver stops before
  * generating code when there were any (docs/manual/diagnostics.md T2). */
 int sema_error_count(void);

@@ -153,6 +153,13 @@ void t_rev16(struct code *c, int rd, int rm);
 int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
                int store);
 
+/* ldrd / strd: rt = [rn + off], rt2 = [rn + off + 4], in one four-byte
+ * instruction. `off` a multiple of 4 within +-1020; rt and rt2 neither sp
+ * nor pc, and different for a load. Returns 0, writing nothing, when the
+ * form cannot say it. The address must be word-aligned: ARMv7-M faults on
+ * an unaligned ldrd/strd where two ldr would not. */
+int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store);
+
 /* rt = [rn + (rm << shift)], shift in 0..3. */
 void t_ldst_reg(struct code *c, int rt, int rn, int rm, int shift, int size,
                 int sign, int store);
