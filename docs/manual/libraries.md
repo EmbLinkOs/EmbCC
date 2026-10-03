@@ -221,7 +221,10 @@ double` forms of the functions that compute a new value (`sinl`, `expl`,
 `powl`, ...) compute in `double`, so on x86-64 they deliver 53 of the 64
 significand bits; the functions that only move or inspect a value
 (`fabsl`, `truncl`, `floorl`, `frexpl`, `ldexpl`, `fmodl`, `copysignl`,
-...) are exact at full width. `nearbyint` and `rint` follow the current
+...) are exact at full width. The classification macros (`fpclassify`,
+`isnan`, `isinf`, `isfinite`, `isnormal`, `signbit`) read a `long double`
+in its own format, so `isinf(LDBL_MAX)` is 0 and a `long double`
+subnormal is `FP_SUBNORMAL`. `nearbyint` and `rint` follow the current
 rounding mode; `remainder` rounds the quotient to nearest, ties to even.
 
 **Locale.** There is one locale, `"C"`. `setlocale` accepts `"C"`,

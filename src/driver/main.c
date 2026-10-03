@@ -3368,16 +3368,28 @@ int main(int argc, char **argv)
                  * built soft-float: its ABI passes floats in s0-s15 and
                  * an object built the other way links and then reads its
                  * arguments from the wrong registers. */
-                if (!strcmp(v, "cortex-m3") || !strcmp(v, "cortex-m0") ||
-                    !strcmp(v, "cortex-m0plus") || !strcmp(v, "cortex-m1"))
+                /* The ARMv6-M and ARMv8-M Baseline parts are refused too:
+                 * they were taken as ARMv7-M (the M23 as ARMv7E-M, DSP and
+                 * all), and the code that came out used ldr.w and IT
+                 * blocks, which those cores do not implement -- a
+                 * HardFault at the first one, from an image that built
+                 * and linked without a word. */
+                if (!strcmp(v, "cortex-m0") || !strcmp(v, "cortex-m0plus") ||
+                    !strcmp(v, "cortex-m1") || !strcmp(v, "cortex-m23"))
+                    diag_fatal(NULL, 0, "-mcpu=%s is %s, and EmbCC emits "
+                               "ARMv7-M Thumb-2: that core does not "
+                               "implement its ldr.w or IT blocks", v,
+                               strcmp(v, "cortex-m23") ? "ARMv6-M"
+                                                       : "ARMv8-M Baseline");
+                if (!strcmp(v, "cortex-m3"))
                     target_set_thumb_em(0);
                 else if (!strcmp(v, "cortex-m4") || !strcmp(v, "cortex-m7") ||
-                         !strcmp(v, "cortex-m33") || !strcmp(v, "cortex-m23"))
+                         !strcmp(v, "cortex-m33"))
                     target_set_thumb_em(1);
                 else
                     diag_fatal(NULL, 0, "-mcpu=%s is not a part EmbCC knows: "
-                               "it emits ARMv7-M and ARMv7E-M (cortex-m0, "
-                               "m0plus, m1, m3, m4, m7, m23, m33)", v);
+                               "it emits ARMv7-M and ARMv7E-M (cortex-m3, "
+                               "m4, m7, m33)", v);
                 continue;
             }
             /* The FPU and the float ABI are RECORDED here and resolved
@@ -3671,6 +3683,16 @@ int main(int argc, char **argv)
     if (has_asm_suffix(input)) {
         if (pp_only) {
             fprintf(stderr, "embcc: error: -E does not apply to assembly\n");
+            return 1;
+        }
+        /* NASM syntax is x86-64 assembly, and the assembler writes ELF.
+         * For any other target it wrote an x86-64 object anyway -- an
+         * ELF32 one whose machine was x86-64 on a 32-bit target -- and
+         * the error, if any, came from the linker. */
+        if (target_get() != TARGET_X86_64 || target_fmt_get() != TGT_FMT_ELF) {
+            fprintf(stderr, "embcc: error: '%s' is NASM-syntax x86-64 "
+                    "assembly, which EmbCC assembles to x86-64 ELF only, "
+                    "and the target is %s\n", input, target_triple_now());
             return 1;
         }
         return as_assemble(input, output ? output : default_asm_output(input),

@@ -319,9 +319,9 @@ level, more with an active FPU context).
 
 `-mcpu=cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
 sub-architecture as GCC's options do. `-mcpu=cortex-m0`, `cortex-m0plus`,
-`cortex-m1` and `cortex-m23` are also accepted, but EmbCC emits ARMv7-M
-or ARMv7E-M Thumb-2 for them, which an ARMv6-M or ARMv8-M Baseline part
-cannot execute. `-mthumb` is accepted and has no effect; `-marm` is
+`cortex-m1` and `cortex-m23` are refused: EmbCC emits ARMv7-M Thumb-2,
+which an ARMv6-M or ARMv8-M Baseline part cannot execute. `-mthumb` is
+accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
 `enum` is `int`-sized unless its values need a wider type

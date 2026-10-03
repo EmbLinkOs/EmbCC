@@ -258,6 +258,29 @@ static void implicit_mem_decl(struct unit *u, const char *name)
     *pp = fd;
 }
 
+/* A libm function a __builtin_ became a call to, declared as C declares
+ * it -- `nargs` arguments of type t, returning t -- unless the program
+ * already has a declaration in sight. */
+static void implicit_float_decl(struct unit *u, const char *name,
+                                struct type *t, int nargs)
+{
+    if (find_func(u, name))
+        return;
+    struct func *fd = xcalloc(1, sizeof *fd);
+    fd->name = name;
+    fd->file = u->file;
+    fd->seq = -1;
+    fd->declared = 1;
+    fd->ret_ty = t;
+    fd->nparams = nargs;
+    for (int k = 0; k < nargs; k++)
+        fd->param_tys[k] = t;
+    struct func **pp = &u->funcs;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = fd;
+}
+
 static struct global *find_global(struct unit *u, const char *name)
 {
     for (struct global *g = u->globals; g; g = g->next)
@@ -2197,6 +2220,23 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                             e->lhs->name);
                 for (int i = 0; i < e->nargs; i++)
                     check_expr(u, f, sc, e->args[i]);
+                /* The alignment is in BITS, a constant power of two from
+                 * 8 up, as gcc requires. One beyond the stack's own is
+                 * met in irgen by asking for align - 1 more bytes and
+                 * rounding the address up; it was dropped, and the
+                 * memory came back merely stack-aligned. */
+                e->num = 0;
+                if (strcmp(bn, "alloca_with_align") == 0) {
+                    long abits;
+                    if (e->nargs != 2 || !const_fold(e->args[1], &abits) ||
+                        abits < 8 || (abits & (abits - 1)) != 0)
+                        sema_error_at(u, e->line, e->col,
+                                "__builtin_alloca_with_align takes a size and "
+                                "an alignment in bits: a constant power of "
+                                "two, 8 or more");
+                    else if (abits / 8 > target_stack_align())
+                        e->num = abits / 8;
+                }
                 e->args[0] = mk_cast(e->args[0], ty_base(TY_LONG, 1));
                 e->nargs = 1;
                 e->name = "__builtin_alloca";
@@ -2319,19 +2359,37 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                                        1);
                 break;
             }
-            /* square root -- one instruction on both targets, and the
-             * hardware's result is correctly rounded. */
+            /* Square root: one instruction where the machine has one,
+             * and its result is correctly rounded. Where it has none --
+             * soft float, a Cortex-M FPU and a double, any 16-byte long
+             * double -- it is the libm function of the same name, as
+             * gcc makes it: the backends refused it there, and sqrtl was
+             * typed double everywhere, so a long double lost its low
+             * bits to a double square root without a word. */
             else if (strcmp(bn, "sqrt") == 0 || strcmp(bn, "sqrtf") == 0 ||
                      strcmp(bn, "sqrtl") == 0) {
+                struct type *ft = ty_base(bn[4] == 'f' ? TY_FLOAT :
+                                          bn[4] == 'l' ? TY_LDOUBLE :
+                                          TY_DOUBLE, 0);
                 if (e->nargs != 1)
                     sema_error_at(u, e->line, e->col, "%s takes one argument",
                                e->lhs->name);
-                check_expr(u, f, sc, e->args[0]);
-                e->name = e->lhs->name;
-                e->ty = ty_base(bn[4] == 'f' ? TY_FLOAT : TY_DOUBLE, 0);
-                e->args[0] = convert_assign(u, e->args[0], e->ty,
-                                            "__builtin_sqrt");
-                break;
+                if (!target_has_sqrt(ty_size(ft))) {
+                    /* The ordinary call path below. e->name too: the
+                     * parser copied the callee's name there, and irgen
+                     * turns a call still named __builtin_sqrt into the
+                     * instruction. */
+                    e->lhs->name = bn;
+                    e->name = bn;
+                    implicit_float_decl(u, bn, ft, 1);
+                } else {
+                    check_expr(u, f, sc, e->args[0]);
+                    e->name = e->lhs->name;
+                    e->ty = ft;
+                    e->args[0] = convert_assign(u, e->args[0], e->ty,
+                                                "__builtin_sqrt");
+                    break;
+                }
             }
             /* fabs and copysign: same float type in, same out. The
              * sign bit is the only thing either touches, so neither
@@ -2357,6 +2415,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 for (int k = 0; k < e->nargs; k++)
                     e->args[k] = convert_assign(u, e->args[k], e->ty,
                                                 e->lhs->name);
+                /* A 16-byte long double's sign is reached in memory
+                 * (irgen fb_wide): the slot it goes through. */
+                if (ty_size(e->ty) > 8)
+                    e->var_index = scope_add(sc, "<fp bits>", e->ty, NULL);
                 break;
             }
             /* The classification predicates. Each returns `int` and takes
@@ -2386,6 +2448,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                  * infinity, and an unsigned type turned that into
                  * 4294967295 the moment it widened to a long. */
                 e->ty = ty_base(TY_INT, 0);
+                if (e->nargs == 1 && ty_size(e->args[0]->ty) > 8)
+                    e->var_index = scope_add(sc, "<fp bits>",
+                                             e->args[0]->ty, NULL);
                 break;
             }
             /* the value IS the first argument; the hint is discarded */

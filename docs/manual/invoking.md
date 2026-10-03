@@ -934,8 +934,13 @@ embcc: error: no assembly-file support for x86_64-elf yet; its instruction encod
 ```
 
 A `.asm` file is assembled as NASM/Intel-syntax x86-64 into an x86-64
-ELF64 object, whatever `--target=` says. This is the same assembler as
-the standalone [`embas`](tools/embas.md).
+ELF64 object. This is the same assembler as the standalone
+[`embas`](tools/embas.md). For any target other than x86-64 with ELF
+objects, a `.asm` input is refused:
+
+```text
+embcc: error: 'boot.asm' is NASM-syntax x86-64 assembly, which EmbCC assembles to x86-64 ELF only, and the target is thumbv7m-none-eabi
+```
 
 An assembly input always produces an object: `-c` and `-S` make no
 difference, and no link follows. The one other mode is `-E`, which
@@ -1130,19 +1135,18 @@ only Thumb`.
 
 #### `-mcpu=CPU`
 
-Select the processor. `cortex-m4`, `cortex-m7`, `cortex-m23` and
-`cortex-m33` select ARMv7E-M code (with the DSP extension); `cortex-m0`,
-`cortex-m0plus`, `cortex-m1` and `cortex-m3` select ARMv7-M code.
+Select the processor. `cortex-m4`, `cortex-m7` and `cortex-m33` select
+ARMv7E-M code (with the DSP extension); `cortex-m3` selects ARMv7-M code.
 `-mcpu=` does not move between ARMv7-M and ARMv8-M; that level comes from
 the triple (`thumbv8m.main-none-eabi`).
 
-EmbCC has no ARMv6-M code generator. The code generated for
-`cortex-m0`, `cortex-m0plus` and `cortex-m1` uses Thumb-2 instructions
-that those processors do not implement.
+EmbCC has no ARMv6-M or ARMv8-M Baseline code generator, so `cortex-m0`,
+`cortex-m0plus`, `cortex-m1` and `cortex-m23` are refused: `-mcpu=cortex-m0
+is ARMv6-M, and EmbCC emits ARMv7-M Thumb-2: that core does not implement
+its ldr.w or IT blocks`.
 
 Any other `CPU` is refused: `-mcpu=cortex-m55 is not a part EmbCC knows:
-it emits ARMv7-M and ARMv7E-M (cortex-m0, m0plus, m1, m3, m4, m7, m23,
-m33)`.
+it emits ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)`.
 
 #### `-mfpu=FPU`
 

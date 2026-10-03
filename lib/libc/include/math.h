@@ -39,17 +39,24 @@ extern "C" {
 
 int __fpclassifyd(double x);
 int __fpclassifyf(float x);
+int __fpclassifyl(long double x);
 int __signbitd(double x);
 int __signbitf(float x);
+int __signbitl(long double x);
 
+/* By the argument's size, and a long double by its own function where
+ * it is wider than a double: converted to double, 1e400L was an
+ * infinity and a long double subnormal was zero. */
 #define fpclassify(x) (sizeof(x) == sizeof(float) ? __fpclassifyf((float)(x)) \
-                                                  : __fpclassifyd((double)(x)))
+                       : sizeof(x) == sizeof(double) ? __fpclassifyd((double)(x)) \
+                       : __fpclassifyl((long double)(x)))
 #define isfinite(x)   (fpclassify(x) > FP_INFINITE)
 #define isnan(x)      (fpclassify(x) == FP_NAN)
 #define isinf(x)      (fpclassify(x) == FP_INFINITE)
 #define isnormal(x)   (fpclassify(x) == FP_NORMAL)
 #define signbit(x)    (sizeof(x) == sizeof(float) ? __signbitf((float)(x)) \
-                                                  : __signbitd((double)(x)))
+                       : sizeof(x) == sizeof(double) ? __signbitd((double)(x)) \
+                       : __signbitl((long double)(x)))
 #define isgreater(a, b)      ((a) > (b))
 #define isgreaterequal(a, b) ((a) >= (b))
 #define isless(a, b)         ((a) < (b))

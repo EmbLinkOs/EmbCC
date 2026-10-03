@@ -830,36 +830,36 @@ floating-point argument`). All of them operate on the bits of the value:
 they do not round, raise no floating-point exception, and call no
 library.
 
-They compile on every target except AVR, where they are refused
-(`the AVR backend cannot lower bitcast yet (function f) [bitcast w=4
-size=4]`). On an argument of a 16-byte `long double` (x86-64, AArch64 ELF
-and Linux, RISC-V) they are refused:
-
-```text
-embcc: f.c:1: error: __builtin_fabsl on a 16-byte long double is not supported: its sign and exponent fields do not fit one register, which is how the other widths are done
-```
-
-On Cortex-M and Apple arm64, where `long double` is 8 bytes, the `l`
-forms work.
+They compile on every target. A 16-byte `long double` (x87's 80-bit
+format on x86-64, IEEE binary128 on AArch64 ELF and Linux) is stored to
+a stack slot and its sign and exponent are read and written there; the
+other widths stay in registers. On RISC-V, where every operation on a
+`long double` is refused, so are these.
 
 ### Square root
 
-| Builtin | Result | Targets |
-|---|---|---|
-| `__builtin_sqrt(x)` | Correctly rounded square root, `double` | x86-64, AArch64 |
-| `__builtin_sqrtf(x)` | Correctly rounded square root, `float` | x86-64, AArch64, Cortex-M with the FPU enabled (`-eabihf` triples, or `-mfpu=fpv4-sp-d16` with `-mfloat-abi=softfp` or `hard`) |
-| `__builtin_sqrtl(x)` | See below | x86-64, AArch64 |
+| Builtin | Result |
+|---|---|
+| `__builtin_sqrt(x)` | Square root, `double` |
+| `__builtin_sqrtf(x)` | Square root, `float` |
+| `__builtin_sqrtl(x)` | Square root, `long double` |
 
-Each is one hardware instruction. `__builtin_sqrtl` converts its
-argument to `double` and returns a `double` square root, so its result
-has `double` precision. On the other targets these builtins are refused,
-for example:
+Where the target has a square-root instruction for the type, the builtin
+is that instruction, and its result is correctly rounded:
 
-```text
-embcc: s.c:1: error: the RV32 backend cannot lower __builtin_sqrt (a libm routine here, not an instruction) yet (function f) [sqrt w=8 size=8]
-```
+| Target | Instruction for |
+|---|---|
+| x86-64 | `float`, `double` (`sqrtss`, `sqrtsd`) |
+| AArch64 | `float`, `double` (`fsqrt`) |
+| Cortex-M with the FPU enabled (`-eabihf` triples, or `-mfpu=` with `-mfloat-abi=softfp` or `hard`) | `float` (`vsqrt.f32`) |
 
-Call `sqrt` from a math library there.
+Everywhere else -- a `double` on a Cortex-M FPU, soft-float Cortex-M,
+RISC-V, AVR, and a 16-byte `long double` -- the builtin is a call to
+`sqrt`, `sqrtf` or `sqrtl`, as with GCC, and the program must link a
+math library that defines it. The precision is then that library's;
+EmbCC's own `sqrtl` computes in `double` (see
+[Libraries](libraries.md)). On RISC-V, `__builtin_sqrtl` is refused
+with every other `long double` operation.
 
 ### Memory and string functions
 
@@ -915,7 +915,7 @@ check, as a call to a `noreturn` function does.
 | Builtin | Result | Targets |
 |---|---|---|
 | `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All but AVR |
-| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`; the alignment argument is not applied | All but AVR |
+| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All but AVR |
 | `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | x86-64, AArch64 |
 | `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | x86-64, AArch64 |
 
@@ -1211,7 +1211,6 @@ Each is described in its section above.
 - Every pragma except `pack`, including `#pragma once` and `#pragma weak`.
 - `packed` and `section` on a single structure member.
 - `pcs` on a function-pointer parameter.
-- `__builtin_alloca_with_align`'s alignment argument.
 - The memory-order arguments of the atomic builtins.
 - The payload string of `__builtin_nan`.
 - `weak` and `visibility` on COFF output, and `visibility` on Mach-O

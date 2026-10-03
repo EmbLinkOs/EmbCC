@@ -173,19 +173,16 @@ fi
 [ "$ran" -gt 0 ] || echo "SKIP the bare-metal half: no qemu"
 
 # ---- what it REFUSES --------------------------------------------------
-# A 16-byte long double's sign bit is in its tenth or sixteenth byte,
-# past what one register holds, so the bit lowering says so by name
-# rather than answering for the wrong bits (THE RULE).
+# A 16-byte long double's sign and exponent are past one register; they
+# go through memory (irgen fb_wide), which tests/exec/fp-bits-long-double.c
+# runs. Here only that it compiles where it was once refused.
 printf 'int f(long double x){ return __builtin_signbit(x); }\n' > "$out/ld.c"
-if "$EMBCC" -c "$out/ld.c" -o /dev/null 2> "$out/ld.err"; then
-    echo "signbit on a 16-byte long double was accepted"; exit 1
-fi
-grep -q 'long double' "$out/ld.err" || {
-    echo "the refusal does not say what is unsupported:"; cat "$out/ld.err"
+"$EMBCC" -c "$out/ld.c" -o /dev/null 2> "$out/ld.err" || {
+    echo "signbit on a 16-byte long double was refused:"; cat "$out/ld.err"
     exit 1; }
 # An integer argument to a predicate is a missing cast, not a question.
 printf 'int f(int x){ return __builtin_isnan(x); }\n' > "$out/int.c"
 if "$EMBCC" -fsyntax-only "$out/int.c" 2> "$out/int.err"; then
     echo "isnan of an int was accepted"; exit 1
 fi
-echo "a 16-byte long double and an integer argument are each refused by name"
+echo "a 16-byte long double compiles, and an integer argument is refused by name"

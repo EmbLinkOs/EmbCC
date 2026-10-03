@@ -99,15 +99,14 @@ long long llroundf(float x) { return llround((double)x); }
 
 /* ---- long double: exact where it can be ------------------------------- */
 
-long double fabsl(long double x) { return x < 0 ? -x : x; }
+/* The sign bit itself, through the compiler: `x < 0 ? -x : x` left
+ * fabsl(-0.0L) negative, and copysignl kept a negative zero's sign when
+ * it was asked for a positive one. */
+long double fabsl(long double x) { return __builtin_fabsl(x); }
 
 long double copysignl(long double x, long double y)
 {
-    long double a = x < 0 ? -x : x;
-    /* The sign of a zero matters and `y < 0` does not see it, so the
-     * negative-zero case is asked separately. */
-    int neg = y < 0 || (y == 0 && copysign(1.0, (double)y) < 0);
-    return neg ? -a : a;
+    return __builtin_copysignl(x, y);
 }
 
 /* Truncation toward zero, in long double throughout: narrowing would

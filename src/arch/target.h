@@ -117,6 +117,10 @@ int target_max_scalar_align(void);         /* 4, or 2 on AVR */
 /* What the stack pointer is aligned to at every call -- and so the most a
  * frame slot's offset alone can promise an address. */
 int target_stack_align(void);
+/* Whether the backend lowers IR_SQRT of a `bytes`-wide float to an
+ * instruction: SSE and A64 for float and double, a Cortex-M FPU for
+ * float. Elsewhere __builtin_sqrt is a call to the libm function. */
+int target_has_sqrt(int bytes);
 int target_ldouble_size(void);    /* 16, or 8 where it is just a double */
 int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
 

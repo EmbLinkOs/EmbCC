@@ -238,6 +238,19 @@ int __fpclassifyf(float x)
     if (e == 0xff) return m ? FP_NAN : FP_INFINITE;
     return FP_NORMAL;
 }
+/* A long double through the compiler's bit builtins, which read the
+ * format's own sign and exponent: x87's 80 bits on x86-64, binary128 on
+ * AArch64, a double where it is one. */
+int __fpclassifyl(long double x)
+{
+    if (__builtin_isnan(x))    return FP_NAN;
+    if (__builtin_isinf(x))    return FP_INFINITE;
+    if (x == 0)                return FP_ZERO;
+    if (__builtin_isnormal(x)) return FP_NORMAL;
+    return FP_SUBNORMAL;
+}
+int __signbitl(long double x) { return __builtin_signbit(x); }
+
 int __signbitd(double x)
 {
     union { double d; uint64_t u; } v = { x };

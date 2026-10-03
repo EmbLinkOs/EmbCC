@@ -200,6 +200,16 @@ int target_int_size(void)       { return g_model[g_arch].it; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
+int target_has_sqrt(int bytes)
+{
+    switch (g_arch) {
+    case TARGET_X86_64:
+    case TARGET_AARCH64: return bytes == 4 || bytes == 8;
+    case TARGET_THUMB:   return bytes == 4 && target_thumb_fpu();
+    default:             return 0;
+    }
+}
+
 int target_stack_align(void)
 {
     switch (g_arch) {

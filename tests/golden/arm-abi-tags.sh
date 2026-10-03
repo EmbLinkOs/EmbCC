@@ -84,15 +84,17 @@ do
                              exit 1; }
 done
 # -mfloat-abi=softfp and =hard with no FPU named, and an FPU the part
-# does not have (FPv5 is the Cortex-M33's).
+# does not have (FPv5 is the Cortex-M33's). The ARMv6-M and ARMv8-M
+# Baseline cores were accepted and given ARMv7-M code they fault on.
 for fl in -mfloat-abi=hard -mfloat-abi=softfp -mfpu=fpv5-sp-d16 \
-          -marm -mcpu=cortex-m9
+          -marm -mcpu=cortex-m9 -mcpu=cortex-m0 -mcpu=cortex-m0plus \
+          -mcpu=cortex-m1 -mcpu=cortex-m23
 do
     if "$EMBCC" --target=thumbv7em-none-eabi $fl -c "$out/t.c" -o /dev/null \
          2> "$out/f.err"; then
         echo "$fl was accepted, and EmbCC does not do it"; exit 1
     fi
-    grep -q 'not supported\|not a part\|needs an FPU\|has no\|is not' "$out/f.err" || {
+    grep -q 'not supported\|not a part\|needs an FPU\|has no\|is not\|does not implement' "$out/f.err" || {
         echo "$fl's refusal does not say why:"; cat "$out/f.err"; exit 1; }
 done
 echo "the ARM machine flags are accepted where they match and refused by
