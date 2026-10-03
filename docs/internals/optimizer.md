@@ -380,7 +380,8 @@ shared exit label. Budgets, in IR instructions:
 else; `__attribute__((noinline))` refuses. A refusal is recorded as an
 `inline/not-inlined` remark with one of these reasons:
 `callee-not-defined-here`, `would-be-recursive`,
-`callee-computes-in-__int128`, `callee-is-noinline`, `callee-is-varargs`,
+`callee-computes-in-__int128`, `callee-is-noinline`, `callee-is-weak`,
+`callee-is-varargs`,
 `callee-too-large`, `callee-has-exception-regions`, `returns-a-struct`,
 `parameter-is-not-a-simple-scalar`, `returns-a-value-wider-than-a-vreg`,
 `callee-has-inline-asm`, `callee-uses-va_start`, `callee-has-a-vla`,
