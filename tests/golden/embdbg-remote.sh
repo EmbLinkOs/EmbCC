@@ -28,11 +28,13 @@ out=tests/golden/out/embdbg-remote
 rm -rf "$out"; mkdir -p "$out"
 
 # A program with a function whose first two arguments are known at the
-# first call, and a loop so `continue` has somewhere to go.
+# first call, and a loop so `continue` has somewhere to go. The function
+# is STATIC: a local symbol, which embld once left out of the image, so
+# a debugger had no name for most of a firmware's code.
 cat > "$out/fw.c" <<'CEOF'
 void puts_(const char *s); void putn(long v);
 static int acc;
-int compute(int a, int b) { int t = a * b; acc += t; return t + 1; }
+static int compute(int a, int b) { int t = a * b; acc += t; return t + 1; }
 int main(void)
 {
     for (int i = 0; i < 3; i++) putn(compute(i, i + 2));
@@ -62,9 +64,9 @@ try_one() {                 # try_one TAG TRIPLE QEMU MACHINE-ARGS HARNESS ARG1 
         sh "tests/harness/$harness/link.sh" "$d/fw.elf" "$d/fw.o" ||
         { echo "$tag: embld could not link"; return 1; }
 
-    # The symbol table embld now keeps in the executable is what makes
-    # `break compute` resolvable at all; check it before blaming the
-    # protocol for a breakpoint that cannot be placed.
+    # The symbol table embld keeps in the executable -- its locals too --
+    # is what makes `break compute` resolvable at all; check it before
+    # blaming the protocol for a breakpoint that cannot be placed.
     "$EMBDBG" "$d/fw.elf" funcs > "$d/funcs.txt" 2>&1
     grep -q '^compute ' "$d/funcs.txt" || {
         echo "$tag: the linked image has no 'compute' symbol:"

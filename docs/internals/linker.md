@@ -869,14 +869,21 @@ the data segment (omitted when it is empty), the merged `.debug_*`
 sections, `.symtab`, `.strtab` and `.shstrtab`. `.text` and `.data` have
 `sh_addralign` 4.
 
-The symbol table holds the null entry and every defined global, all with
-`STB_GLOBAL` binding (a weak definition is written as global). The type
-is the input's `STT_*` type; a symbol with none is `STT_FUNC` if it lies in
-the text segment and `STT_OBJECT` otherwise. The section index is
-`.text` for a symbol in the text segment and `.data` (or `.text`, when
-there is no `.data`) for everything else, including absolute and
-linker-defined symbols. Input local symbols are not copied. None of this
-lies inside a `PT_LOAD`, so it costs file size and no target memory.
+The symbol table holds the null entry, then the inputs' local functions
+and objects (`STB_LOCAL`, `STT_FUNC` or `STT_OBJECT`, with a name, in a
+section that was laid out), then every defined global with `STB_GLOBAL`
+binding (a weak definition is written as global). `sh_info` is one past
+the last local, as ELF requires. A local keeps its input type and size,
+and its value is where its section landed, as a relocation against it
+would resolve; section symbols, file symbols and unnamed labels are not
+copied. A global's type is the input's `STT_*` type; a symbol with none
+is `STT_FUNC` if it lies in the text segment and `STT_OBJECT`
+otherwise. The section index is `.text` for a symbol in the text segment
+and `.data` (or `.text`, when there is no `.data`) for everything else,
+including absolute and linker-defined symbols. The locals are what let
+a debugger or a profiler name a static function in an image. None of
+this lies inside a `PT_LOAD`, so it costs file size and no target
+memory.
 
 The file is written with `plat_write_file`.
 

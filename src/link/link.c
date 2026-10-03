@@ -2075,8 +2075,36 @@ static void write_exec(struct linker *l, const char *out,
      */
     struct { const char *name; Elf64_Addr val; Elf64_Xword size;
              int text; int type; } *sy;
-    int nsy = 0;
-    sy = xmalloc((size_t)(l->nsym + 1) * sizeof *sy);
+    int nsy = 0, nloc = 0, cap = l->nsym + 1;
+    for (int i = 0; i < l->nobj; i++)
+        cap += l->objs[i]->local_syms;
+    sy = xmalloc((size_t)cap * sizeof *sy);
+    /* The objects' LOCAL functions and objects too, first, as ELF wants
+     * every local ahead of the first global (sh_info says where that
+     * is). A static function is most of a firmware image, and without
+     * its name a debugger stopped inside one reports the global before
+     * it plus an offset, and a profile charges its time to that global.
+     * Each is where its section landed, as a relocation against it
+     * would resolve; one whose section was not laid out is dropped. */
+    for (int i = 0; i < l->nobj; i++) {
+        struct object *o = l->objs[i];
+        for (int k = 1; k < o->local_syms && k < o->nsym; k++) {
+            Elf64_Sym *s = &o->syms[k];
+            int t = ELF64_ST_TYPE(s->st_info), out;
+            const char *name = o->symstr + s->st_name;
+            if ((t != STT_FUNC && t != STT_OBJECT) || !*name ||
+                s->st_shndx == SHN_UNDEF || s->st_shndx >= o->nsh ||
+                (out = o->sec_out[s->st_shndx]) < 0)    /* also ABS, COMMON */
+                continue;
+            sy[nsy].name = name;
+            sy[nsy].val = l->insecs[out].vaddr + s->st_value;
+            sy[nsy].size = s->st_size;
+            sy[nsy].text = l->insecs[out].seg == SEG_TEXT;
+            sy[nsy].type = t;
+            nsy++;
+        }
+    }
+    nloc = nsy;
     for (int i = 0; i < l->nsym; i++) {
         struct symbol *sm = &l->syms[i];
         if (!sm->defined || !sm->name || !*sm->name)
@@ -2275,8 +2303,8 @@ static void write_exec(struct linker *l, const char *out,
         /* Index 0 is the reserved null entry, already zeroed. */
         Elf64_Half shndx = (Elf64_Half)(sy[i].text ? sh_text
                                         : (have_data ? sh_data : sh_text));
-        unsigned char info = (unsigned char)ELF64_ST_INFO(STB_GLOBAL,
-                                                          sy[i].type);
+        unsigned char info = (unsigned char)ELF64_ST_INFO(
+            i < nloc ? STB_LOCAL : STB_GLOBAL, sy[i].type);
         if (l->elf32) {
             Elf32_Sym e;
             memset(&e, 0, sizeof e);
@@ -2338,7 +2366,8 @@ static void write_exec(struct linker *l, const char *out,
         sh[sh_symtab].sh_offset = sym_off;
         sh[sh_symtab].sh_size = symsz;
         sh[sh_symtab].sh_link = (Elf64_Word)sh_strtab;
-        sh[sh_symtab].sh_info = 1;     /* one local: the null entry */
+        sh[sh_symtab].sh_info = (Elf64_Word)(1 + nloc);  /* the null entry
+                                                          * and the locals */
         sh[sh_symtab].sh_addralign = 8;
         sh[sh_symtab].sh_entsize = symentsz;
         sh[sh_strtab].sh_name = n_strtab;
