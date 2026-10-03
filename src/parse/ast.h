@@ -508,12 +508,23 @@ struct typedefent {
     struct typedefent *next;
 };
 
+/* `#pragma weak NAME` or `#pragma weak NAME = TARGET`, applied by sema
+ * once the whole unit is read, since the pragma may come before or after
+ * NAME's declaration. */
+struct pragma_weak {
+    const char *name;
+    const char *target;   /* NULL for plain `#pragma weak NAME` */
+    int line;
+    struct pragma_weak *next;
+};
+
 struct unit {
     const char *file;
     struct func *funcs;
     struct global *globals;
     struct econst *econsts;
     struct topasm *topasm;
+    struct pragma_weak *weaks;
     /* What the parser knew by the end: the struct/union/enum tags and the
      * typedefs. Semantic analysis does not need them (types are resolved
      * in the tree), but a tool that answers "what members does this have?"

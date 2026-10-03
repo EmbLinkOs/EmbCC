@@ -838,7 +838,7 @@ error: unknown escape '\
 | `#line DIGITS ["file"]` | Supported | A missing or zero line number: `#line needs a positive line number`. |
 | `#error TEXT` | Supported | An error: `#error: TEXT`. |
 | `#warning TEXT` | Supported | A warning: `#warning: TEXT`. |
-| `#pragma` | Partial | `#pragma pack` is acted on (see [Extensions](extensions.md)). Every other pragma, including the `STDC` pragmas and `#pragma once`, is ignored without a diagnostic. |
+| `#pragma` | Partial | `pack`, `once`, `push_macro`, `pop_macro` and `weak` are acted on (see [Extensions](extensions.md#pragmas)). Every other pragma, including the `STDC` pragmas, is ignored without a diagnostic. |
 | `_Pragma("...")` | Supported | The same as the corresponding `#pragma`. |
 | `#embed` | Partial | See [Embedding binary data](#embedding-binary-data). |
 | `#` alone (null directive) | Supported | |

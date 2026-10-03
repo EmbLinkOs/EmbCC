@@ -5179,8 +5179,40 @@ static void check_econst_names(struct unit *u)
     }
 }
 
+/* `#pragma weak NAME` makes every declaration of NAME weak, as the
+ * attribute would; `#pragma weak NAME = TARGET` also makes the function
+ * NAME an alias of TARGET. Before the merges, which carry both to the
+ * declaration that stands for the rest. A NAME the unit never declares
+ * is never referenced either, so nothing in the object changes. */
+static void apply_pragma_weak(struct unit *u)
+{
+    for (const struct pragma_weak *w = u->weaks; w; w = w->next) {
+        int fn = 0, var = 0;
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (f->name && strcmp(f->name, w->name) == 0) {
+                f->is_weak = 1;
+                if (w->target)
+                    f->alias_of = w->target;
+                fn = 1;
+            }
+        for (struct global *g = u->globals; g; g = g->next)
+            if (g->name && strcmp(g->name, w->name) == 0) {
+                g->is_weak = 1;
+                var = 1;
+            }
+        if (w->target && !fn)
+            sema_error_line(u, w->line, var
+                            ? "#pragma weak %s = %s: an alias is supported "
+                              "for a function, and '%s' is a variable"
+                            : "#pragma weak %s = %s: '%s' is not declared in "
+                              "this file, and the alias needs its type",
+                            w->name, w->target, w->name);
+    }
+}
+
 void sema_check(struct unit *u)
 {
+    apply_pragma_weak(u);
     merge_decls(u);
     check_aliases(u);
     merge_globals(u);

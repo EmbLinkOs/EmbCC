@@ -52,11 +52,28 @@ struct macro {
     struct macro *next;
 };
 
+/* A file that said `#pragma once`: its path, and its text, so the same
+ * file reached by another spelling of the path is recognised too. */
+struct once_file {
+    const char *path;
+    const char *text;
+    struct once_file *next;
+};
+
+/* `#pragma push_macro("X")`: X's definition then, or NULL if it had none. */
+struct pushed_macro {
+    const char *name;
+    struct macro *def;
+    struct pushed_macro *next;
+};
+
 struct cpp {
     struct macro *macros;
     const char **incdirs;
     int nincdirs;
     int depth;             /* include nesting */
+    struct once_file *once;
+    struct pushed_macro *pushed;
 };
 
 /* One input file being scanned. */
@@ -70,6 +87,7 @@ struct src {
      * the search AFTER it — that is the whole mechanism, and it is how
      * a header can wrap the system one of the same name. */
     int incdir_idx;
+    const char *base;      /* the file's whole text, for #pragma once */
 };
 
 static void cerr(struct src *s, const char *msg, const char *arg)
@@ -1452,6 +1470,16 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
                         : "cannot find include file \"%s\"", fname);
     }
 
+    /* A header that said `#pragma once` is not read again, whichever
+     * path reaches it: the same text is the same file, as gcc decides
+     * when the paths differ. It was compiled twice, so a guarded
+     * header's definitions were redefinitions. */
+    for (const struct once_file *o = s->cpp->once; o; o = o->next)
+        if (strcmp(o->path, path) == 0 || strcmp(o->text, text) == 0) {
+            free(text);
+            return;
+        }
+
     s->cpp->depth++;
     {
         char *ipath = xstrndup(path, strlen(path));
@@ -1584,6 +1612,132 @@ static void emit_pack(struct src *s, const char *text, size_t n,
     tb_puts(out, ") ");
 }
 
+/* `#pragma weak NAME` and `#pragma weak NAME = TARGET` reach the parser
+ * as `__embcc_weak(NAME)` and `__embcc_weak(NAME, TARGET)`: whether NAME
+ * is a function or an object, and whether it is defined here, is the
+ * unit's to decide. Dropped, a weak definition stayed strong and the
+ * link failed on the one meant to replace it. */
+static void emit_weak(struct src *s, const char *text, size_t n,
+                      struct tbuf *out)
+{
+    size_t i = 0, a, an, b = 0, bn = 0;
+    if (cxx_has_builtin)
+        cerr(s, "#pragma weak is not supported in C++: use "
+                "__attribute__((weak)) on the declaration", NULL);
+    while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+    a = i;
+    while (i < n && is_idc(text[i])) i++;
+    an = i - a;
+    if (an == 0)
+        cerr(s, "#pragma weak needs a name", NULL);
+    while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+    if (i < n && text[i] == '=') {
+        i++;
+        while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+        b = i;
+        while (i < n && is_idc(text[i])) i++;
+        bn = i - b;
+        if (bn == 0)
+            cerr(s, "#pragma weak NAME = needs the name it aliases", NULL);
+        while (i < n && (text[i] == ' ' || text[i] == '\t')) i++;
+    }
+    if (i < n)
+        cerr(s, "#pragma weak takes NAME or NAME = TARGET", NULL);
+    tb_puts(out, " __embcc_weak(");
+    tb_putn(out, text + a, an);
+    if (bn) {
+        tb_puts(out, ", ");
+        tb_putn(out, text + b, bn);
+    }
+    tb_puts(out, ") ");
+}
+
+/* The macro name in `("X")` after push_macro or pop_macro. From
+ * _Pragma the quotes are still escaped, `(\"X\")`, so a backslash
+ * before one is skipped. */
+static const char *pragma_macro_name(struct src *s, const char *t, size_t n,
+                                     const char *what)
+{
+    size_t i = 0, b;
+    while (i < n && (t[i] == ' ' || t[i] == '\t')) i++;
+    if (i < n && t[i] == '(') i++;
+    else cerr(s, "#pragma %s needs (\"NAME\")", what);
+    while (i < n && (t[i] == ' ' || t[i] == '\t')) i++;
+    if (i < n && t[i] == '\\') i++;
+    if (i < n && t[i] == '"') i++;
+    else cerr(s, "#pragma %s needs (\"NAME\")", what);
+    b = i;
+    while (i < n && is_idc(t[i])) i++;
+    if (i == b)
+        cerr(s, "#pragma %s needs (\"NAME\")", what);
+    return xstrndup(t + b, i - b);
+}
+
+/* A pragma, from the directive or from the _Pragma operator, `text`
+ * being what follows the word. Most mean nothing here and dropping them
+ * is right; these are the ones that change the program:
+ *
+ *   pack            changes struct layout: a marker for the parser
+ *                   (emit_pack). Ignoring it padded a packed struct.
+ *   weak            makes a symbol weak: a marker for the parser too.
+ *   once            the file is not read again (do_include).
+ *   push_macro      saves a macro's definition, and pop_macro restores
+ *   pop_macro       it. They did nothing, so a header that redefined a
+ *                   macro around its own text left the new definition in
+ *                   force for the program that included it. */
+static void do_pragma(struct src *s, const char *text, size_t n,
+                      struct tbuf *out)
+{
+    size_t i = 0;
+    while (i < n && (text[i] == ' ' || text[i] == '\t'))
+        i++;
+    text += i;
+    n -= i;
+#define PRAGMA_IS(w) (n >= sizeof w - 1 && strncmp(text, w, sizeof w - 1) == 0 \
+                      && (n == sizeof w - 1 || !is_idc(text[sizeof w - 1])))
+    if (PRAGMA_IS("pack")) {
+        emit_pack(s, text + 4, n - 4, out);
+    } else if (PRAGMA_IS("once")) {
+        struct once_file *o = xcalloc(1, sizeof *o);
+        o->path = s->file;
+        o->text = s->base;
+        o->next = s->cpp->once;
+        s->cpp->once = o;
+    } else if (PRAGMA_IS("push_macro")) {
+        const char *name = pragma_macro_name(s, text + 10, n - 10,
+                                             "push_macro");
+        struct pushed_macro *pm = xcalloc(1, sizeof *pm);
+        struct macro *m = find_macro(s->cpp, name, strlen(name));
+        pm->name = name;
+        if (m) {
+            pm->def = xmalloc(sizeof *m);
+            *pm->def = *m;
+            pm->def->expanding = 0;
+        }
+        pm->next = s->cpp->pushed;
+        s->cpp->pushed = pm;
+    } else if (PRAGMA_IS("pop_macro")) {
+        const char *name = pragma_macro_name(s, text + 9, n - 9, "pop_macro");
+        for (struct pushed_macro **pp = &s->cpp->pushed; *pp;
+             pp = &(*pp)->next) {
+            struct pushed_macro *pm = *pp;
+            if (strcmp(pm->name, name) != 0)
+                continue;
+            *pp = pm->next;
+            undef_macro(s->cpp, name, strlen(name));
+            if (pm->def) {
+                pm->def->next = s->cpp->macros;
+                s->cpp->macros = pm->def;
+            }
+            free(pm);
+            break;          /* with no push to match, gcc does nothing */
+        }
+    } else if (PRAGMA_IS("weak")) {
+        emit_weak(s, text + 4, n - 4, out);
+    }
+#undef PRAGMA_IS
+}
+
 static void process_file(struct cpp *cpp, const char *path,
                          const char *src, struct tbuf *out, int incdir_idx)
 {
@@ -1595,6 +1749,7 @@ static void process_file(struct cpp *cpp, const char *path,
         (unsigned char)src[2] == 0xBF)
         src += 3;
     s.p = src;
+    s.base = src;
     s.line = 1;
     s.incdir_idx = incdir_idx;
 
@@ -1723,17 +1878,10 @@ static void process_file(struct cpp *cpp, const char *path,
             } else if (DIR("warning")) {
                 diag_warn_at(s.file, startline, 0, "#warning: %s", arg);
             } else if (DIR("pragma")) {
-                /* Most pragmas mean nothing here and dropping them is
-                 * right. `pack` is not one of those: it changes
-                 * STRUCT LAYOUT, and ignoring it would pad a struct the
-                 * programmer packed -- silently. It goes to the parser
-                 * as a marker it reads between declarations
-                 * (emit_pack); the output line stays synced. */
-                const char *pa = arg;
-                while (*pa == ' ' || *pa == '\t') pa++;
-                if (strncmp(pa, "pack", 4) == 0 &&
-                    (pa[4] == '(' || pa[4] == ' ' || pa[4] == '\t'))
-                    emit_pack(&s, pa + 4, strlen(pa + 4), out);
+                /* The ones that change the program are acted on
+                 * (do_pragma), the rest dropped; a marker for the
+                 * parser keeps the output line synced. */
+                do_pragma(&s, arg, strlen(arg), out);
             } else if (DIR("line") || (dn > 0 && lp[0] >= '0' &&
                                         lp[0] <= '9')) {
                 /* #line N ["file"], and GNU's linemarker # N "file" ...
@@ -1847,14 +1995,7 @@ static void process_file(struct cpp *cpp, const char *path,
                             break;
                         }
                         struct tbuf pk = { 0, 0, 0 };
-                        {
-                            const char *pb = b;
-                            while (pb < q && (*pb == ' ' || *pb == '\t')) pb++;
-                            if ((size_t)(q - pb) >= 4 &&
-                                strncmp(pb, "pack", 4) == 0)
-                                emit_pack(&s, pb + 4, (size_t)(q - pb - 4),
-                                          &pk);
-                        }
+                        do_pragma(&s, b, (size_t)(q - b), &pk);
                         close = q + 1;
                         while (*close == ' ' || *close == '\t') close++;
                         if (*close != ')') {
@@ -1964,6 +2105,7 @@ char *cpp_process(const char *path, const char *src,
     boot.p = "";
     boot.line = 0;
     boot.incdir_idx = -1;
+    boot.base = "";
     define_macro(&boot, "__EMBCC__ 1");
     /* gcc-isms real headers use unconditionally; semantically no-ops */
     define_macro(&boot, "__extension__");

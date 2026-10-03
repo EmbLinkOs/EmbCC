@@ -916,6 +916,8 @@ static void parse_static_assert(struct parser *ps);
 static int at_pack(struct parser *ps);
 static int parse_constexpr(struct parser *ps);
 static void parse_pack(struct parser *ps);
+static int at_weak(struct parser *ps);
+static void parse_weak(struct parser *ps);
 static struct expr *parse_initializer(struct parser *ps);
 /* The spelling a label name has in the innermost block that declared
  * it with __label__, or the name itself. */
@@ -2252,6 +2254,10 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
         if (at_pack(ps))
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "#pragma pack inside a struct body is not supported: "
+                       "put it before the struct");
+        if (at_weak(ps))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "#pragma weak inside a struct body is not supported: "
                        "put it before the struct");
         /* GNU C also takes attributes at the START of a member
          * declaration -- `__attribute__((aligned(16))) char buf[40];` --
@@ -4160,6 +4166,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         parse_pack(ps);
         return new_stmt(STMT_BLOCK, t->line, t->col);
     }
+    if (at_weak(ps)) {        /* #pragma weak means the same here */
+        parse_weak(ps);
+        return new_stmt(STMT_BLOCK, t->line, t->col);
+    }
     if (t->kind == TOK_IDENT) {
         const char *lname = t->text;
         int lline = t->line;
@@ -4614,6 +4624,37 @@ static void parse_pack(struct parser *ps)
     expect(ps, TOK_RPAREN, "')' to close #pragma pack");
 }
 
+/* The preprocessor's `__embcc_weak(NAME)` or `__embcc_weak(NAME,
+ * TARGET)`, from `#pragma weak`: recorded for sema to apply. */
+static int at_weak(struct parser *ps)
+{
+    return cur(ps)->kind == TOK_IDENT &&
+           strcmp(cur(ps)->text, "__embcc_weak") == 0;
+}
+
+static void parse_weak(struct parser *ps)
+{
+    struct pragma_weak *w = xcalloc(1, sizeof *w);
+    w->line = cur(ps)->line;
+    advance(ps);
+    expect(ps, TOK_LPAREN, "'(' after #pragma weak");
+    if (cur(ps)->kind != TOK_IDENT)
+        parse_error_line(ps, w->line, "#pragma weak needs a name");
+    w->name = cur(ps)->text;
+    advance(ps);
+    if (cur(ps)->kind == TOK_COMMA) {
+        advance(ps);
+        if (cur(ps)->kind != TOK_IDENT)
+            parse_error_line(ps, w->line, "#pragma weak NAME = needs the "
+                             "name it aliases");
+        w->target = cur(ps)->text;
+        advance(ps);
+    }
+    expect(ps, TOK_RPAREN, "')' to close #pragma weak");
+    w->next = ps->unit->weaks;
+    ps->unit->weaks = w;
+}
+
 static void parse_top(struct parser *ps, struct unit *u,
                       struct func ***ftail, struct global ***gtail,
                       int seq)
@@ -4621,6 +4662,10 @@ static void parse_top(struct parser *ps, struct unit *u,
     g_nfold_locals = 0;   /* a fresh local scope for sizeof(var) folding */
     if (at_pack(ps)) {
         parse_pack(ps);
+        return;
+    }
+    if (at_weak(ps)) {
+        parse_weak(ps);
         return;
     }
     if (cur(ps)->kind == TOK_KW_STATIC_ASSERT) {

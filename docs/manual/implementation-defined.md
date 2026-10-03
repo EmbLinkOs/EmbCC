@@ -808,8 +808,11 @@ It does: `#x` applied to `'é'` produces `"'\\u00e9'"`.
 *The behavior on each recognized non-STDC `#pragma` directive
 (C17 6.10.6).*
 
-`#pragma pack` is the only pragma EmbCC acts on. It sets the maximum
-alignment of the members of structures defined after it:
+EmbCC acts on `#pragma pack`, `#pragma once`, `#pragma push_macro`,
+`#pragma pop_macro` and `#pragma weak`; the last four behave as in GCC
+and are described in [Extensions](extensions.md#pragmas). `#pragma pack`
+sets the maximum alignment of the members of structures defined after
+it:
 
 | Form | Effect |
 |---|---|
@@ -836,10 +839,6 @@ In C++, `#pragma pack` is refused; use `__attribute__((packed))`.
 Every other pragma, in `#pragma` or `_Pragma` form, is discarded without
 a diagnostic. This includes:
 
-- `#pragma once`: the header is included again on each `#include`. Use
-  an include guard.
-- `#pragma weak NAME`: the symbol is not made weak. Use
-  `__attribute__((weak))`.
 - `#pragma GCC ...` and `#pragma clang ...` (diagnostic control,
   visibility, and the rest).
 - `#pragma STDC FP_CONTRACT`, `FENV_ACCESS` and `CX_LIMITED_RANGE`, which

@@ -1186,20 +1186,47 @@ in GCC on ELF targets.
 | Without parentheses, `#pragma pack 1` | `#pragma pack needs its arguments in parentheses` |
 | In C++ | `#pragma pack is not supported in C++: it would change the layout and EmbCC would ignore it. Use __attribute__((packed)) on the struct` |
 
+### `#pragma once`
+
+A file containing `#pragma once` is not read again by a later
+`#include`. The same file is recognized by its path, or, when it is
+reached by another spelling of the path, by its contents, as GCC does.
+
+### `#pragma push_macro` and `#pragma pop_macro`
+
+`#pragma push_macro("NAME")` saves the current definition of the macro
+`NAME`, or the fact that it has none. `#pragma pop_macro("NAME")`
+restores the most recently saved one: `NAME` is redefined as it was, or
+undefined if it was undefined then. Saves nest. A `pop_macro` with no
+matching `push_macro` does nothing, as in GCC. Both work as `_Pragma`
+operators, `_Pragma("push_macro(\"NAME\")")`.
+
+### `#pragma weak`
+
+`#pragma weak NAME` makes `NAME` a weak symbol, as
+`__attribute__((weak))` on its declaration does: a weak definition, or
+a weak reference that resolves to 0 when nothing defines it. The pragma
+may come before or after the declaration. `#pragma weak NAME = TARGET`
+also makes the function `NAME` an alias of `TARGET`, which must be
+defined in the same file. Refused forms:
+
+| Refused | Diagnostic |
+|---|---|
+| An alias for a variable | `#pragma weak v = t: an alias is supported for a function, and 'v' is a variable` |
+| An alias for an undeclared name | `#pragma weak f = t: 'f' is not declared in this file, and the alias needs its type` |
+| Inside a structure body | `#pragma weak inside a struct body is not supported: put it before the struct` |
+| In C++ | `#pragma weak is not supported in C++: use __attribute__((weak)) on the declaration` |
+
 ### Every other pragma is ignored
 
-`#pragma pack` is the only pragma EmbCC acts on. Every other `#pragma`
-and `_Pragma` is removed without a diagnostic, and does not appear in
-`-E` output. This includes pragmas that change a program's meaning in
-GCC and Clang:
+Every other `#pragma` and `_Pragma` is removed without a diagnostic, and
+does not appear in `-E` output. This includes pragmas that change a
+program's meaning or its diagnostics in GCC and Clang:
 
 | Pragma | Use instead |
 |---|---|
-| `#pragma once` | Include guards. A header protected only by `#pragma once` is read again on every `#include`, and its definitions are then duplicates |
-| `#pragma weak NAME` | `__attribute__((weak))` on a declaration of `NAME` |
 | `#pragma GCC diagnostic push`, `pop`, `ignored`, `warning`, `error` | `-Wno-NAME` and `-Werror=NAME` on the command line; see [Warning options](diagnostics.md#warning-options) |
 | `#pragma GCC visibility push(...)`, `pop` | `__attribute__((visibility(...)))` on each declaration |
-| `#pragma push_macro`, `#pragma pop_macro` | `#undef` and `#define` |
 | `#pragma GCC poison`, `#pragma GCC system_header`, `#pragma message`, `#pragma GCC optimize`, `#pragma redefine_extname` | None |
 | `#pragma STDC FP_CONTRACT`, `FENV_ACCESS`, `CX_LIMITED_RANGE` | None |
 
@@ -1208,7 +1235,8 @@ GCC and Clang:
 These constructs are accepted, have no effect, and draw no diagnostic.
 Each is described in its section above.
 
-- Every pragma except `pack`, including `#pragma once` and `#pragma weak`.
+- Every pragma except `pack`, `once`, `push_macro`, `pop_macro` and
+  `weak`.
 - `packed` and `section` on a single structure member.
 - `pcs` on a function-pointer parameter.
 - The memory-order arguments of the atomic builtins.

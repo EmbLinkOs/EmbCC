@@ -546,16 +546,12 @@ embcc: warning: -std=c89 is accepted but not enforced; EmbCC has one C dialect, 
 These are cases where EmbCC accepts something and does not do what was
 asked, without an error. Each is a defect, not intended behavior.
 
-- **Pragmas.** Only `#pragma pack` has an effect. Every other pragma is
-  dropped without a diagnostic, and there is no `-Wunknown-pragmas`.
-  In particular:
-  - `#pragma once` does not prevent a second inclusion; a header guarded
-    only by it is compiled twice (`error: redefinition of ...`).
-  - `#pragma push_macro` and `#pragma pop_macro` do not save or restore
-    anything; after `pop_macro` the macro keeps its latest definition.
-  - `#pragma weak NAME` does not make `NAME` weak.
-  - `#pragma GCC diagnostic` does not change any warning, and
-    `#pragma GCC poison` poisons nothing.
+- **Pragmas.** `pack`, `once`, `push_macro`, `pop_macro` and `weak`
+  have an effect. Every other pragma is dropped without a diagnostic,
+  and there is no `-Wunknown-pragmas`. In particular,
+  `#pragma GCC diagnostic` does not change any warning,
+  `#pragma GCC poison` poisons nothing, and `#pragma redefine_extname`
+  does not rename the symbol.
 - **Debug information.** On AVR, `-g` produces a compile unit with no
   functions, variables or line-table rows. On Cortex-M and RV32 every
   pointer type is described as 8 bytes. Enumerations, `typedef` names
