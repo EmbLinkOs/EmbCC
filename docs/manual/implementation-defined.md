@@ -438,19 +438,7 @@ and AArch64 only.
 
 There are none. Every operation is evaluated in the type of its operands:
 EmbCC uses SSE2, not the x87 unit, for `float` and `double` on x86-64.
-`FLT_EVAL_METHOD` is 0 on x86-64, Apple arm64 and AArch64.
-
-On Cortex-M, RV32, RV64 and AVR, `<float.h>` defines `FLT_EVAL_METHOD` as
-`__FLT_EVAL_METHOD__`, which is not predefined on those targets. In `#if`
-it evaluates to 0; in an expression it is an error:
-
-```text
-embcc: f.c:4:11: error: '__FLT_EVAL_METHOD__' is not declared in '<global initializer>' — for a call, add a prototype or define it first [E0001]
-```
-
-<!-- Reported to the lead: the generated thumb/riscv/avr predefined-macro
-     tables (from clang -dM, which treats __FLT_EVAL_METHOD__ specially)
-     lack __FLT_EVAL_METHOD__, and include/float.h relies on it. -->
+`FLT_EVAL_METHOD` is 0 on every target.
 
 *The direction of rounding when an integer is converted to a
 floating-point number that cannot exactly represent the original value
@@ -927,7 +915,7 @@ targets include:
 | `LDBL_MANT_DIG` | 64 | 53 | 113 | 53 | 113 | 113 | 24 |
 | `DBL_MANT_DIG` | 53 | 53 | 53 | 53 | 53 | 53 | 24 |
 | `WCHAR_MIN` | −2^31 | −2^31 | 0 | 0 | −2^31 | −2^31 | −32768 |
-| `FLT_EVAL_METHOD` | 0 | 0 | 0 | 0 in `#if` only | 0 in `#if` only | 0 in `#if` only | 0 in `#if` only |
+| `FLT_EVAL_METHOD` | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | `FLT_ROUNDS` | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
 
 *The result of attempting to indirectly access an object with automatic
@@ -1023,8 +1011,6 @@ requires:
 
 - Universal character names in identifiers are refused
   ([Identifiers](#identifiers)).
-- On Cortex-M, RISC-V and AVR, `FLT_EVAL_METHOD` cannot be used in an
-  expression ([Floating point](#floating-point)).
 - An enumeration constant outside the range of `int` is accepted
   without a diagnostic, as C23 allows
   ([Structures](#structures-unions-enumerations-and-bit-fields)).

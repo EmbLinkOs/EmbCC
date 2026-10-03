@@ -65,6 +65,10 @@ const struct predef_macro predef_macros_avr[] = {
     { "__FLT_DENORM_MIN__", "1.40129846e-45F" },
     { "__FLT_DIG__", "6" },
     { "__FLT_EPSILON__", "1.19209290e-7F" },
+    /* float is evaluated as float, as on every target: <float.h>'s
+     * FLT_EVAL_METHOD is this, and without it was an undefined name */
+    { "__FLT_EVAL_METHOD_TS_18661_3__", "0" },
+    { "__FLT_EVAL_METHOD__", "0" },
     { "__FLT_HAS_DENORM__", "1" },
     { "__FLT_HAS_INFINITY__", "1" },
     { "__FLT_HAS_QUIET_NAN__", "1" },
