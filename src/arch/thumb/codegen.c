@@ -1222,6 +1222,9 @@ static void rd64(struct t_fn *F, int v, int lo, int hi)
         return;
     }
     (void)slot_of(F, v);
+    /* a frame slot is word-aligned, which ldrd needs */
+    if (t_ldst_pair(F->t, lo, hi, F->fb, F->slot[v], 0))
+        return;
     if (!t_ldst_imm(F->t, lo, F->fb, F->slot[v], 4, 0, 0) ||
         !t_ldst_imm(F->t, hi, F->fb, F->slot[v] + 4, 4, 0, 0)) {
         fb_addr(F, hi, F->slot[v]);
@@ -1238,6 +1241,8 @@ static void wr64(struct t_fn *F, int v, int lo, int hi)
     }
     (void)slot_of(F, v);
     if (F->slot[v] < 0)
+        return;
+    if (t_ldst_pair(F->t, lo, hi, F->fb, F->slot[v], 1))
         return;
     if (!t_ldst_imm(F->t, lo, F->fb, F->slot[v], 4, 0, 1) ||
         !t_ldst_imm(F->t, hi, F->fb, F->slot[v] + 4, 4, 0, 1)) {
@@ -1886,6 +1891,32 @@ static void shift64_imm(struct t_fn *F, int op, int sign, long n)
  * macros, r9-r11 counted as used by every 64-bit operation whether its
  * operands were in registers or not, and every 64-bit leaf function
  * pushed and popped all three for nothing. */
+/* The base register for a 64-bit access through vreg `a`, with *off
+ * (memoff on entry) adjusted: the frame base when `a` is a recomputed
+ * frame address, else wherever `a` is (B_LO when nothing holds it).
+ * Every word of the access is within one ldr's reach of the result. */
+static int mem64_base(struct t_fn *F, int a, long *off)
+{
+    long fo;
+    if (faddr(F, a, &fo)) {
+        *off += fo;
+        if (*off >= -255 && *off <= 4091)
+            return F->fb;
+        fb_addr(F, B_LO, *off);
+        *off = 0;
+        return B_LO;
+    }
+    if (*off < -255 || *off > 4091) {
+        /* not reached today: a wide access gets no memoff */
+        rd(F, a, B_LO);
+        t_mov_imm(F->t, B_HI, *off, 0);
+        t_alu_reg(F->t, T_OP_ADD, B_LO, B_LO, B_HI, 0);
+        *off = 0;
+        return B_LO;
+    }
+    return rdr(F, a, B_LO);
+}
+
 static void src64(struct t_fn *F, int v, int slo, int shi, int *lo, int *hi)
 {
     if (in_reg(F, v)) {
@@ -2102,25 +2133,47 @@ static int gen_ins64(struct t_fn *F, int n)
             }
         }
         return 1;
-    case IR_LOAD:
-        rd(F, i->a, B_LO);
+    case IR_LOAD: {
+        /* Straight into the destination's pair, and through a local's
+         * address as the frame base plus its offset. One ldrd where the
+         * address is known aligned (a packed member is not, and ldrd
+         * faults on one); else two loads, ordered so the base is read
+         * before a destination register that is the base overwrites it. */
+        int base, dl, dh;
+        long off = i->memoff;
+        base = mem64_base(F, i->a, &off);
+        dst64(F, i->dst, &dl, &dh);
         if (i->size == 8) {
-            ldst_must(t, A_LO, B_LO, 0, 4, 0, 0);
-            ldst_must(t, A_HI, B_LO, 4, 4, 0, 0);
+            if (!(i->natural && t_ldst_pair(t, dl, dh, base, off, 0))) {
+                int first = dl == base ? dh : dl;
+                ldst_must(t, first, base, first == dl ? off : off + 4,
+                          4, 0, 0);
+                if (first == dl) ldst_must(t, dh, base, off + 4, 4, 0, 0);
+                else             ldst_must(t, dl, base, off, 4, 0, 0);
+            }
         } else {
-            ldst_must(t, A_LO, B_LO, 0, i->size, i->sign, 0);
-            if (i->sign) t_shift_imm(t, T_SH_ASR, A_HI, A_LO, 31, 0);
-            else         t_mov_imm(t, A_HI, 0, 0);
+            ldst_must(t, dl, base, off, i->size, i->sign, 0);
+            if (i->sign) t_shift_imm(t, T_SH_ASR, dh, dl, 31, 0);
+            else         t_mov_imm(t, dh, 0, 0);
         }
-        wr64(F, i->dst, A_LO, A_HI);
+        wr64(F, i->dst, dl, dh);
         return 1;
-    case IR_STORE:
-        rd(F, i->a, B_LO);
-        rd64(F, i->b, A_LO, A_HI);
-        ldst_must(t, A_LO, B_LO, 0, i->size == 8 ? 4 : i->size, 0, 1);
-        if (i->size == 8)
-            ldst_must(t, A_HI, B_LO, 4, 4, 0, 1);
+    }
+    case IR_STORE: {
+        int base, sl, sh;
+        long off = i->memoff;
+        base = mem64_base(F, i->a, &off);
+        src64(F, i->b, A_LO, A_HI, &sl, &sh);
+        if (i->size == 8) {
+            if (!(i->natural && t_ldst_pair(t, sl, sh, base, off, 1))) {
+                ldst_must(t, sl, base, off, 4, 0, 1);
+                ldst_must(t, sh, base, off + 4, 4, 0, 1);
+            }
+        } else {
+            ldst_must(t, sl, base, off, i->size, 0, 1);
+        }
         return 1;
+    }
 
     case IR_SELECT:
         if (i->size == 8) {            /* a 64-bit condition: either half */
