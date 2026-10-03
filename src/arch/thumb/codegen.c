@@ -1797,6 +1797,11 @@ static void shift64_imm(struct t_fn *F, int op, int sign, long n)
  * or A. Pairs are whole and never partly overlap (t_pair_alloc), so an
  * operation that reads each half before writing the same half is safe
  * with its result in an operand's pair. */
+/* slo and shi are register NUMBERS (R_TMP, not T_TMP): they are recorded
+ * as used only when the value is loaded into them. Passed as the marking
+ * macros, r9-r11 counted as used by every 64-bit operation whether its
+ * operands were in registers or not, and every 64-bit leaf function
+ * pushed and popped all three for nothing. */
 static void src64(struct t_fn *F, int v, int slo, int shi, int *lo, int *hi)
 {
     if (in_reg(F, v)) {
@@ -1804,6 +1809,8 @@ static void src64(struct t_fn *F, int v, int slo, int shi, int *lo, int *hi)
         *hi = F->loc[v] + 1;
         return;
     }
+    if (slo >= R_SCR && slo <= R_TMP) t_scr(slo);
+    if (shi >= R_SCR && shi <= R_TMP) t_scr(shi);
     rd64(F, v, slo, shi);
     *lo = slo;
     *hi = shi;
@@ -1822,7 +1829,7 @@ static void srcb64(struct t_fn *F, const struct ir_ins *i, int *lo, int *hi)
         *hi = B_HI;
         return;
     }
-    src64(F, i->b, B_LO, B_HI, lo, hi);
+    src64(F, i->b, R_ADDR, R_SCR, lo, hi);
 }
 
 static int gen_ins64(struct t_fn *F, int n)
@@ -1864,7 +1871,7 @@ static int gen_ins64(struct t_fn *F, int n)
          * are fully in registers before either is emitted. In place: the
          * low result never lands on a high operand, pairs being whole. */
         int al, ah, bl, bh, dl, dh;
-        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
         srcb64(F, i, &bl, &bh);
         dst64(F, i->dst, &dl, &dh);
         if (i->op == IR_ADD) {
@@ -1882,7 +1889,7 @@ static int gen_ins64(struct t_fn *F, int n)
         int op = i->op == IR_AND ? T_OP_AND
                : i->op == IR_OR  ? T_OP_ORR : T_OP_EOR;
         int al, ah, bl, bh, dl, dh;
-        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
         srcb64(F, i, &bl, &bh);
         dst64(F, i->dst, &dl, &dh);
         t_alu_reg(t, op, dl, al, bl, 0);
@@ -1893,7 +1900,7 @@ static int gen_ins64(struct t_fn *F, int n)
 
     case IR_BNOT: {
         int al, ah, dl, dh;
-        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
         dst64(F, i->dst, &dl, &dh);
         t_mvn_reg(t, dl, al, 0);
         t_mvn_reg(t, dh, ah, 0);
@@ -1907,7 +1914,7 @@ static int gen_ins64(struct t_fn *F, int n)
          * operand's registers, and its low word would overwrite the
          * operand's before it was read. */
         int al, ah, dl, dh, tmp;
-        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
         dst64(F, i->dst, &dl, &dh);
         /* r12 when neither pair is in A (it needs no saving); B else */
         tmp = al != A_LO && ah != A_LO && dl != A_LO && dh != A_LO
@@ -1923,7 +1930,7 @@ static int gen_ins64(struct t_fn *F, int n)
         /* 0 - a. `rsbs` leaves C clear exactly when the low word
          * borrowed, and `sbc` from zero is the high half. */
         int al, ah, dl, dh;
-        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
         dst64(F, i->dst, &dl, &dh);
         t_mov_imm(t, B_LO, 0, 0);
         t_alu_imm(t, T_OP_RSB, dl, al, 0, 1);
@@ -2075,7 +2082,7 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
     if (i->imm_b && i->imm == 0 &&
         (pred == B_EQ || pred == B_NE ||
          (sign && (pred == B_LT || pred == B_GE)))) {
-        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
         if (pred == B_EQ || pred == B_NE) {
             t_alu_reg(t, T_OP_ORR, T_ACC, al, ah, 1);
             return pred == B_EQ ? T_EQ : T_NE;
@@ -2089,7 +2096,7 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
         pred = pred == B_GT ? B_LT : B_GE;
         al = A_LO; ah = A_HI; bl = B_LO; bh = B_HI;
     } else {
-        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
         srcb64(F, i, &bl, &bh);
     }
     if (pred == B_EQ || pred == B_NE) {
@@ -2102,10 +2109,13 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
         t_cmp_imm(t, A_LO, 0);
         return pred == B_EQ ? T_EQ : T_NE;
     }
-    /* Only the flags are wanted: the differences go to scratch, leaving
-     * the operands where they live. */
+    /* Only the flags are wanted: both differences go to r12, leaving the
+     * operands where they live. (The high one went to r11, which is
+     * callee-saved, so every function comparing two 64-bit values pushed
+     * it. The low difference is dead before the high one is written, and
+     * neither ah nor bh can be r12.) */
     t_alu_reg(t, T_OP_SUB, A_LO, al, bl, 1);
-    t_alu_reg(t, T_OP_SBC, A_HI, ah, bh, 1);
+    t_alu_reg(t, T_OP_SBC, A_LO, ah, bh, 1);
     if (pred == B_LT) return sign ? T_LT : T_CC;
     return sign ? T_GE : T_CS;             /* B_GE */
 }
