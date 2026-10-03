@@ -428,6 +428,31 @@ void run(void)
 }
 EOF
 
+# libc's sqrt (lib/libc/src/math/sqrt.c). There is no instruction for it
+# here, and it used to be `return __builtin_sqrt(x);` -- a call to itself.
+# Its own image: it is integer arithmetic and links no float group at all.
+# On the host `double` is wider, and the root of a float rounded first to a
+# double and then to a float is still the correctly rounded one.
+cat > "$out/fsqrt.c" <<'EOF'
+#include "pr.h"
+double sqrt(double);
+static float sq(float v) { return (float)sqrt(v); }
+void run(void)
+{
+    p32(sq(K(K_ZERO))); p32(sq(K(K_NEGZERO))); p32(sq(K(K_ONE)));
+    p32(sq(K(K_TWO))); p32(sq(K(K_THREE))); p32(sq(K(K_FOUR)));
+    p32(sq(K(K_TEN))); p32(sq(K(K_HALF))); p32(sq(K(K_P1)));
+    p32(sq(K(K_P2))); p32(sq(K(K_ONEP9))); p32(sq(K(K_E30)));
+    p32(sq(K(K_EM30))); p32(sq(K(K_BIG))); p32(sq(K(K_SMALL)));
+    p32(sq(K(K_EM10))); p32(sq(K(K_EM40))); p32(sq(K(K_SUBMIN)));
+    p32(sq(K(K_12345))); p32(sq(K(K_E12))); p32(sq(K(K_SEVEN)));
+    p32(sq(K(K_INF)));
+    pd(__builtin_isnan(sq(K(K_NEGONE)))); pd(__builtin_isnan(sq(K(K_NAN))));
+    pd(__builtin_isnan(sq(K(K_NEGINF))));
+    puts_("DONE\n");
+}
+EOF
+
 cat > "$out/hostio.c" <<'EOF'
 /* The same two routines on the host, so the comparison is textual. */
 #include <stdio.h>
@@ -450,8 +475,9 @@ EOF
 # others want avrfp.o for __avrfp_unpack and __avrfp_round, and only fadd
 # wants avrfpadd.o. If any list were wrong, the link would say so by name --
 # which is how the multiply's dependency on __mulsi3 was found.
-progs="fadd fmul fdiv fcmp fcvt fcvt64 ffix64 fbits"
+progs="fadd fmul fdiv fcmp fcvt fcvt64 ffix64 fbits fsqrt"
 fbits_rt=""
+fsqrt_rt=""
 fadd_rt="avrfp avrfpadd"
 # fmul also needs lib/rt/avr.c: mul24 splits its operands into 12-bit halves
 # and multiplies them with `*`, which on this target is a call to __mulsi3.
@@ -466,7 +492,7 @@ ffix64_rt="avrfp avrfpfix64"
 
 for which in $progs; do
     cc -std=c99 -w -I"$out" -o "$out/host.$which" "$out/$which.c" \
-        "$out/hostio.c" || { echo "$which: the host build failed"; exit 1; }
+        "$out/hostio.c" -lm || { echo "$which: the host build failed"; exit 1; }
     "$out/host.$which" > "$out/want.$which" || {
         echo "$which: the host program failed"; exit 1; }
 done
@@ -481,6 +507,11 @@ for O in -O0 -O1 -O2 -Os; do
             "$EMBCC" --target=avr $O -c "lib/rt/$f.c" -o "$H/rtfp_$f.o" || {
                 echo "$O: lib/rt/$f.c did not compile"; exit 1; }
         done
+        if [ "$which" = fsqrt ]; then
+            "$EMBCC" --target=avr $O -Ilib/libc/include \
+                -c lib/libc/src/math/sqrt.c -o "$H/rtfp_sqrt.o" || {
+                echo "$O: lib/libc/src/math/sqrt.c did not compile"; exit 1; }
+        fi
         "$EMBCC" --target=avr $O -I"$out" -c "$out/$which.c" -o "$H/run.o" \
             2> "$out/c.err" || {
             echo "$O $which: did not compile:"; head -6 "$out/c.err"; exit 1; }
@@ -533,7 +564,7 @@ PY
 done
 
 echo "software binary32 agrees with the host BIT FOR BIT on a real
-ATmega328P, eight images at four optimisation levels:
+ATmega328P, nine images at four optimisation levels:
   add and subtract -- exact cancellation (which must give +0, never -0), a
   subnormal sum and a subnormal difference, an operand that vanishes
   entirely, overflow to inf, NaN from inf - inf, and NaN propagation
@@ -555,4 +586,7 @@ ATmega328P, eight images at four optimisation levels:
   subnormal and a value below 1 (both zero), and past LLONG_MAX unsigned
   the sign and classification builtins -- fabs of -0, -inf and a negative
   subnormal, copysign onto a NaN, signbit, isnan, isinf, isfinite,
-  isnormal and isinf_sign on the special values"
+  isnormal and isinf_sign on the special values
+  libc's sqrt -- integer only, correctly rounded: zeros of both signs,
+  subnormals down to the smallest, the top of the range, inf, and a NaN
+  for a negative operand, -inf and a NaN"

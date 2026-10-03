@@ -130,8 +130,11 @@ for x in 32 64; do
     #    one ulp fails.
     "$EMBCC" --target=$T -Os -c lib/rt/softfp.c -o "$out/softfp$x.o" || {
         echo "rv$x: the soft-float runtime does not compile"; exit 1; }
+    "$EMBCC" --target=$T -Os -Ilib/libc/include -c lib/libc/src/math/sqrt.c \
+             -o "$out/sqrt$x.o" || {
+        echo "rv$x: libc's sqrt does not compile"; exit 1; }
     cc -std=c99 -w -o "$out/hostfp" tests/golden/embedded-float.c \
-       "$H/hostio.c" || {
+       "$H/hostio.c" -lm || {
         echo "the float program does not compile for the host"; exit 1; }
     "$out/hostfp" > "$out/float-ref.txt" || {
         echo "the float program failed on the host"; exit 1; }
@@ -140,7 +143,7 @@ for x in 32 64; do
                  -o "$out/fp$x$opt.o" || {
             echo "rv$x $opt: the float program does not compile"; exit 1; }
         run_image "fp$x$opt" "$out/fp$x$opt.o" "$out/softfp$x.o" \
-                  "$out/int64$x.o" || exit 1
+                  "$out/int64$x.o" "$out/sqrt$x.o" || exit 1
         if ! diff -u "$out/float-ref.txt" "$out/fp$x$opt.txt" \
              > "$out/fp$x$opt.diff"; then
             echo "rv$x: IEEE results at $opt are not the host's bit patterns:"

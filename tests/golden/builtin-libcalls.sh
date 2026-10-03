@@ -51,6 +51,28 @@ check riscv64-unknown-elf -DNO_LDOUBLE "sqrt sqrtf "
 check avr "" "sqrt sqrtf sqrtl "
 echo "builtin-libcalls: sqrt is the instruction where there is one, else the libm call"
 
+# ...which, inside that libm function, is a call to ITSELF. lib/libc's sqrt
+# was `return __builtin_sqrt(x);`, and on every embedded target sqrt,
+# hypot and cabs never returned. The shape is refused by name, and libc's
+# own sqrt.c has to compile everywhere.
+printf 'double sqrt(double x) { return __builtin_sqrt(x); }\n' > "$out/self.c"
+for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf \
+         riscv64-unknown-elf avr; do
+    if "$EMBCC" --target=$t -c "$out/self.c" -o "$out/self.o" \
+         2> "$out/self.err"; then
+        echo "FAIL $t: a sqrt that calls itself compiled"; exit 1
+    fi
+    grep -q 'calls sqrt itself' "$out/self.err" || {
+        echo "FAIL $t: the refusal does not say why:"; cat "$out/self.err"
+        exit 1; }
+    "$EMBCC" --target=$t -Os -Ilib/libc/include \
+        -c lib/libc/src/math/sqrt.c -o "$out/sqrt.o" || {
+        echo "FAIL $t: lib/libc/src/math/sqrt.c does not compile"; exit 1; }
+done
+"$EMBCC" --target=x86_64-elf -c "$out/self.c" -o "$out/self.o" || {
+    echo "FAIL: x86-64 has sqrtsd, and refused the builtin"; exit 1; }
+echo "builtin-libcalls: a sqrt whose builtin would call itself is refused"
+
 printf 'section .text\nglobal f\nf: ret\n' > "$out/a.asm"
 for t in thumbv7m-none-eabi riscv32-unknown-elf aarch64-elf x86_64-apple-darwin; do
     if "$EMBCC" --target=$t -c "$out/a.asm" -o "$out/a.o" 2> "$out/a.err"; then

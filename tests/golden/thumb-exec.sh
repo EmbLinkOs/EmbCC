@@ -121,8 +121,11 @@ echo "thumb-int64: 64-bit arithmetic agrees with the host at four levels"
 # compared as BIT PATTERNS, so a rounding that is off by one ulp fails.
 "$EMBCC" --target=$T -Os -c lib/rt/softfp.c -o "$out/softfp.o" || {
     echo "the soft-float runtime does not compile for $T"; exit 1; }
+"$EMBCC" --target=$T -Os -Ilib/libc/include -c lib/libc/src/math/sqrt.c \
+         -o "$out/sqrt.o" || {
+    echo "libc's sqrt does not compile for $T"; exit 1; }
 cc -std=c99 -w -o "$out/hostfp" tests/golden/embedded-float.c \
-   tests/harness/thumb/hostio.c || {
+   tests/harness/thumb/hostio.c -lm || {
     echo "the float program does not compile for the host"; exit 1; }
 "$out/hostfp" > "$out/float-ref.txt" || {
     echo "the float program failed on the host"; exit 1; }
@@ -132,7 +135,7 @@ for opt in -O0 -O1 -O2 -Os; do
              -o "$out/fp$opt.o" || {
         echo "$opt: the float program does not compile"; exit 1; }
     sh "$H/link.sh" "$out/fp$opt.elf" "$out/fp$opt.o" "$out/softfp.o" \
-       "$out/int64.o" || {
+       "$out/int64.o" "$out/sqrt.o" || {
         echo "$opt: embld could not link the float image"; exit 1; }
     sh "$H/run.sh" "$out/fp$opt.elf" > "$out/fp$opt.txt" 2>&1
     grep -q '==END==' "$out/fp$opt.txt" || {

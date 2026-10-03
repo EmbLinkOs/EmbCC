@@ -220,6 +220,10 @@ int prog_main(void)
     return 0;
 }
 EOF
+# embedded-float.c takes square roots: libc's sqrt, which has no
+# instruction to be on this core either.
+"$EMBCC" --target=$T -Os -Ilib/libc/include -c lib/libc/src/math/sqrt.c \
+    -o "$out/sqrt.o" || { echo "libc's sqrt does not compile"; exit 1; }
 for prog in float int64 aggregate varargs cx; do
     src=tests/golden/embedded-$prog.c; extra=
     [ "$prog" = cx ] && { src=$out/cx.c; extra=lib/rt/complex.c; }
@@ -229,7 +233,7 @@ for prog in float int64 aggregate varargs cx; do
     cc -std=c99 -w -ffp-contract=off -Dmain=prog_main -c "$src" \
        -o "$out/host-$prog.o" &&
     cc -std=c99 -w -ffp-contract=off -o "$out/host-$prog" \
-       "$out/host-$prog.o" "$out/hostio.c" $extra || {
+       "$out/host-$prog.o" "$out/hostio.c" $extra -lm || {
         echo "$prog: the host build failed"; exit 1; }
     "$out/host-$prog" > "$out/want-$prog" || {
         echo "$prog: the host program failed"; exit 1; }
@@ -243,7 +247,7 @@ for prog in float int64 aggregate varargs cx; do
             2> "$out/p.err" || {
             echo "$prog $O: did not compile:"; head -4 "$out/p.err"; exit 1; }
         EMBCC_M33_HARNESS="$H" sh tests/harness/thumb-m33/link.sh \
-            "$H/p.elf" "$H/p.o" "$H/wrap.o" "$out/rt/librt.a" \
+            "$H/p.elf" "$H/p.o" "$H/wrap.o" "$out/sqrt.o" "$out/rt/librt.a" \
             2> "$out/l.err" || {
             echo "$prog $O: link failed:"; head -4 "$out/l.err"; exit 1; }
         EMBCC_QEMU_UNTIL='<<END>>' EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-20} \
