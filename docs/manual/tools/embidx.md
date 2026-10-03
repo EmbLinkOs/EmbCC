@@ -171,9 +171,13 @@ stored one:
 2. A unit whose `file` entries all match (same files, same hashes) is
    unchanged and is not reported.
 3. Otherwise the unit is re-examined. It must be rebuilt if its own
-   source file's hash changed, or if its `provides` or `uses` entries
-   differ from the stored ones in any USR or hash. If only other files
-   changed and every interface hash is the same, it is not rebuilt.
+   source file's hash changed, if its `provides` or `uses` entries
+   differ from the stored ones in any USR or hash, or if the hash of its
+   preprocessed text differs. That last is every token the compiler
+   sees, from the unit and every header, without line markers and blank
+   lines; a comment, which the preprocessor removes, does not change it.
+   If only other files changed and none of these did, it is not
+   rebuilt.
 
 Each unit to rebuild is printed on standard output with the reason, and
 a count follows on standard error. After an edit to a function body in
@@ -187,8 +191,12 @@ c.c: rebuild (it no longer compiles, or is gone)
 2 units re-examined, 3 need rebuilding
 ```
 
-When a unit's own source changed, that reason is given even if an
-interface changed too. `an interface it observes changed` is printed for
+A unit rebuilt for its text alone is reported as
+`rebuild (the text it compiles changed)`: a macro used inside a body, the
+value of an enumeration constant, the body of a `static inline` function
+or the initializer of a variable in a header, or a struct named only in
+a `sizeof` or a cast. When a unit's own source changed, that reason is
+given even if an interface changed too. `an interface it observes changed` is printed for
 a change to the unit's `provides` entries as well as to its `uses`
 entries. Units in the third category are counted as re-examined; units
 in the first are not.
@@ -205,25 +213,14 @@ status 0 whether or not anything needs rebuilding.
 
 #### What `stale` does not detect
 
-`stale` sees only what the interface record holds. The following edits
-change the code a unit compiles to without changing its record, so the
-unit is re-examined and not reported for rebuilding:
+A change to the compiler flags: `stale` reuses the flags recorded by
+`build`. To change them, run `build` again. An index written before the
+text hash was recorded has none, and every re-examined unit in it is
+rebuilt until `build` is run again.
 
-- a change to a macro that the unit uses only inside function bodies
-  (a macro used in a declaration, such as an array size, changes that
-  declaration's hash and is detected);
-- a change to the value of an enumeration constant;
-- a change to the body of a `static` or `inline` function defined in a
-  header;
-- a change to the initializer of a variable defined in a header, such as
-  a `static const int`;
-- a change to the layout of a struct or union that the unit names only
-  inside an expression (a cast, `sizeof`) and in no declaration;
-- a change to the compiler flags: `stale` reuses the flags recorded by
-  `build`. To change them, run `build` again.
-
-When every header edit must be followed by a rebuild, use the dependency
-files written by [`-MD`](../invoking.md#-md--mmd) instead.
+A change to a declaration in a header that a unit includes but never
+uses rebuilds the unit too, because its preprocessed text changed: the
+text hash cannot tell an unused declaration from a used one.
 
 ### `check`
 
@@ -348,6 +345,7 @@ The index is line-oriented text. `embidx build` writes:
 ; everything here is rebuilt from the sources by 'embidx build'.
 unit a.c
   args -Iinclude 
+  text 6ea31017449bd3c5
   file 3d2d8cb47f5c17d9 a.c
   file e3acb06fe74e21f6 include/hdr.h
   provides d45ae76166fc1e58 c:@F@f
@@ -356,6 +354,7 @@ unit a.c
   uses 523ff34061e7bbcf c:@S@P
 unit b.c
   args -Iinclude 
+  text 0f1d4fb4ef267d4f
   file 2eb669e3815a0f37 b.c
   file e3acb06fe74e21f6 include/hdr.h
   provides d45ae76166fc1e58 c:@F@shared
@@ -372,6 +371,10 @@ unit b.c
   `embidx: FILE: a fact before any unit`.
 - `args FLAGS` holds the compiler flags, each followed by one space. A
   unit indexed with no flags has `args` followed by a single space.
+- `text HASH` is the hash of the unit's preprocessed text, line markers
+  and blank lines left out, which `stale` compares (see
+  [`stale`](#stale)). An index without it is read, and its units are
+  rebuilt when re-examined.
 - `file HASH PATH`, `provides HASH USR` and `uses HASH USR` are the facts
   of [Units, USRs and hashes](#units-usrs-and-hashes). The hash comes
   first, unlike in the `--emit-interfaces` record.

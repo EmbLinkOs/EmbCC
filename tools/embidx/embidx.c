@@ -102,6 +102,7 @@ struct fact {
 struct unit {
     char *path;
     char *args;                  /* the flags it was indexed with */
+    char *text;                  /* hash of its preprocessed text, or NULL */
     struct fact *files; int nfiles;
     struct fact *prov;  int nprov;
     struct fact *uses;  int nuses;
@@ -184,6 +185,47 @@ static char *run_iface(const char *embcc, const char *args, const char *unit)
     return b.p ? b.p : xstrdup("");
 }
 
+/* A hash of the unit's preprocessed text -- every token the compiler
+ * will see, from the unit and from every header -- with the line markers
+ * and blank lines left out, so that a comment, which the preprocessor
+ * removes, changes nothing, and a line moving does not either. 16 hex
+ * digits (FNV-1a), or NULL when the unit does not preprocess.
+ *
+ * It is what makes `stale` safe. The interface record holds the
+ * declarations a unit provides and uses; a macro used inside a body, an
+ * enumerator's value, a static inline body or an initializer in a header
+ * change the code without changing any of them, and `stale` said "no
+ * rebuild" for each -- an incremental build that kept the old object. */
+static char *run_pphash(const char *embcc, const char *args, const char *unit)
+{
+    char *cmd = xmalloc(strlen(embcc) + strlen(args) + strlen(unit) + 64);
+    sprintf(cmd, "%s -E %s %s 2>/dev/null", embcc, args, unit);
+    FILE *f = popen(cmd, "r");
+    free(cmd);
+    if (!f)
+        return NULL;
+    unsigned long long h = 1469598103934665603ULL;
+    char line[8192];
+    while (fgets(line, sizeof line, f)) {
+        const char *q = line;
+        if (q[0] == '#' && q[1] == ' ' && q[2] >= '0' && q[2] <= '9')
+            continue;                      /* a line marker */
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r')
+            q++;
+        if (!*q)
+            continue;                      /* a blank line */
+        for (; *q; q++) {
+            h ^= (unsigned char)*q;
+            h *= 1099511628211ULL;
+        }
+    }
+    if (pclose(f) != 0)
+        return NULL;
+    char *out = xmalloc(17);
+    sprintf(out, "%016llx", h);
+    return out;
+}
+
 /* Fill a unit from one --emit-interfaces output. */
 static void unit_load(struct unit *u, const char *text)
 {
@@ -230,6 +272,8 @@ static void idx_write(const struct index *ix, const char *path)
         const struct unit *u = &ix->u[i];
         fprintf(f, "unit %s\n", u->path);
         fprintf(f, "  args %s\n", u->args ? u->args : "");
+        if (u->text)
+            fprintf(f, "  text %s\n", u->text);
         for (int k = 0; k < u->nfiles; k++)
             fprintf(f, "  file %s %s\n", u->files[k].hash, u->files[k].key);
         for (int k = 0; k < u->nprov; k++)
@@ -270,6 +314,8 @@ static void idx_read(struct index *ix, const char *path)
             cur->args = xstrdup(q + 5);
         } else if (strcmp(q, "args") == 0) {
             cur->args = xstrdup("");
+        } else if (strncmp(q, "text ", 5) == 0) {
+            cur->text = xstrdup(q + 5);
         } else {
             char kind[16], hash[64], key[4096];
             if (sscanf(q, "%15s %63s %4095s", kind, hash, key) != 3)
@@ -330,6 +376,7 @@ static int cmd_build(int argc, char **argv)
         u->args = xstrdup(args);
         unit_load(u, text);
         free(text);
+        u->text = run_pphash(cc, args, units[i]);
     }
     qsort(ix.u, (size_t)ix.n, sizeof *ix.u, unit_cmp);
     idx_write(&ix, outp);
@@ -403,10 +450,20 @@ static int cmd_stale(int argc, char **argv)
             if (!old || strcmp(old, fresh.prov[k].hash) != 0)
                 iface_changed = 1;
         }
-        if (own_changed || iface_changed) {
+        /* And whatever the record holds, the text the compiler sees: a
+         * macro used only in a body, an enumerator, an inline body or an
+         * initializer in a header change it and nothing else. An index
+         * with no text hash (an older one) cannot say, so it rebuilds. */
+        char *ntext = own_changed || iface_changed
+                    ? NULL : run_pphash(cc, u->args ? u->args : "", u->path);
+        int text_changed = !own_changed && !iface_changed &&
+                           (!u->text || !ntext || strcmp(u->text, ntext) != 0);
+        free(ntext);
+        if (own_changed || iface_changed || text_changed) {
             printf("%s: rebuild (%s)\n", u->path,
                    own_changed ? "its own source changed"
-                               : "an interface it observes changed");
+                   : iface_changed ? "an interface it observes changed"
+                   : "the text it compiles changed");
             n_rebuild++;
         }
     }
