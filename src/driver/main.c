@@ -2814,9 +2814,50 @@ static void arm_float_resolve(void)
     target_set_thumb_fpu(1);
 }
 
+/* -Wp,A,B,...: options for the preprocessor, split at the commas and put
+ * back in the argument list for the ordinary parse. Only the ones whose
+ * meaning is the same there -- -D, -U, -I with their values joined -- are
+ * taken; any other is refused by name. Each was the warning "is not a
+ * warning EmbCC has", and the -D it carried was simply lost. */
+static int expand_wp(int *argcp, char ***argvp)
+{
+    int argc = *argcp, n = 0, cap = argc + 1;
+    char **argv = *argvp;
+    char **out = xcalloc((size_t)cap, sizeof *out);
+    for (int i = 0; i < argc; i++) {
+        char *list = strncmp(argv[i], "-Wp,", 4) == 0
+                   ? xstrndup(argv[i] + 4, strlen(argv[i] + 4)) : NULL;
+        for (char *t = list ? list : argv[i]; t; ) {
+            char *c = list ? strchr(t, ',') : NULL;
+            if (c) *c = '\0';
+            if (list && *t && (t[0] != '-' || (t[1] != 'D' && t[1] != 'U' &&
+                                               t[1] != 'I') || !t[2])) {
+                fprintf(stderr, "embcc: error: preprocessor option '%s' in "
+                        "%s is not supported; pass -D, -U or -I with its "
+                        "value, or give the option directly\n", t, argv[i]);
+                return 1;
+            }
+            if (*t || !list) {
+                if (n + 1 >= cap) {
+                    cap *= 2;
+                    out = xrealloc(out, (size_t)cap * sizeof *out);
+                }
+                out[n++] = t;
+            }
+            t = c ? c + 1 : NULL;
+        }
+    }
+    out[n] = NULL;
+    *argcp = n;
+    *argvp = out;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
+    if (expand_wp(&argc, &argv))
+        return 1;
 
     /* -fsanitize state: which checks, and whether trap mode was
      * asked for by name (it is the only mode, so this only has to be

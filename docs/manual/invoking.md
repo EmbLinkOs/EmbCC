@@ -476,9 +476,10 @@ embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on 
 ```
 
 Any argument beginning with `-W` that matches nothing else is handled
-this way, including `-Wp,...` and `-Wformat=2`. `-Wa,...` and `-Wl,...`
-are options of their own (see
-[Assembler and linker options](#assembler-and-linker-options)).
+this way, including `-Wformat=2`. `-Wa,...`, `-Wl,...` and `-Wp,...` are
+options of their own (see
+[Assembler and linker options](#assembler-and-linker-options) and
+[`-Wp,ARGS`](#-wpargs)).
 
 ### `-Wno-NAME`
 
@@ -769,6 +770,17 @@ embcc: '-fstack-protector-strong' is not supported (EmbCC emits no stack protect
 
 The preprocessor itself is described in [C language](c-language.md) and
 [Extensions](extensions.md).
+
+### `-Wp,ARGS`
+
+Pass `ARGS`, split at the commas, to the preprocessor. Each must be `-D`,
+`-U` or `-I` with its value joined to it, and is applied where the
+`-Wp` option stands among the others, so `-DY -Wp,-DX=1,-UY` defines `X`
+and leaves `Y` undefined. Any other preprocessor option is refused:
+
+```text
+embcc: error: preprocessor option '-MD' in -Wp,-MD,dep.d is not supported; pass -D, -U or -I with its value, or give the option directly
+```
 
 ### `-D NAME`, `-D NAME=VALUE`
 
