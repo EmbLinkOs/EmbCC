@@ -1,6 +1,7 @@
 /* Floating point on a machine with no FPU (D-015): every operation the
  * Thumb backend turns into a call, and the lib/rt/softfp.c routines
- * behind them.
+ * behind them -- and libc's sqrt (lib/libc/src/math/sqrt.c), which has
+ * no instruction to be either and once called itself forever.
  *
  * Results are printed as BIT PATTERNS, because that is what "correct"
  * means for IEEE arithmetic — a value that prints the same to fifteen
@@ -14,6 +15,7 @@
 extern void writec(int c);
 extern void puts_(const char *s);
 extern void putn(long v);
+double sqrt(double);
 
 static void hx(unsigned long long v, int n)
 {
@@ -93,6 +95,19 @@ int main(void)
         hd((double)(long long)k * 1.5); pid((double)k * 1.5);
         nl();
     }
+    /* The square root, correctly rounded, of each magnitude -- of -0.0
+     * itself, which is -0.0; a negative operand's NaN is a bit pattern
+     * the two machines need not share -- and of the perfect squares and
+     * their neighbours, where a root that is off by one ulp shows. */
+    for (int i = 0; i < nd; i++)
+        hd(sqrt(dv[i] < 0 ? -dv[i] : dv[i]));
+    nl();
+    for (int k = 1; k < 40000; k += 997) {
+        double q = (double)k * (double)k;
+        hd(sqrt(q)); hd(sqrt(q * (1.0 + 1e-16))); hd(sqrt(q - 0.5));
+        nl();
+    }
+
     /* Accumulation, where a wrong rounding shows up as drift. */
     { double s = 0.0; float t = 0.0f;
       for (int k = 1; k <= 400; k++) { s = s + 1.0 / (double)k;

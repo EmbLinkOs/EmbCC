@@ -2460,6 +2460,15 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                     sema_error_at(u, e->line, e->col, "%s takes one argument",
                                e->lhs->name);
                 if (!target_has_sqrt(ty_size(ft))) {
+                    /* ...except inside that function, where the call is
+                     * to itself and never returns. lib/libc's sqrt was
+                     * `return __builtin_sqrt(x);`, and on every embedded
+                     * target sqrt, hypot and cabs hung. */
+                    if (f && f->name && strcmp(f->name, bn) == 0)
+                        sema_error_at(u, e->line, e->col,
+                                      "__builtin_%s in %s calls %s itself: "
+                                      "this target has no square-root "
+                                      "instruction for it", bn, bn, bn);
                     /* The ordinary call path below. e->name too: the
                      * parser copied the callee's name there, and irgen
                      * turns a call still named __builtin_sqrt into the

@@ -70,3 +70,27 @@ fi
     -I "$out_dir/second" 2>&1 | grep -q "NEXT include file" || {
     echo "unsatisfiable #include_next: wrong diagnostic"; exit 1; }
 echo "unsatisfiable #include_next: refused"
+
+# A name from the root is that one file, wherever the including file is:
+# joined to the includer's directory (or a search directory) it named
+# nothing, so `#include "/abs/x.h"` worked only from a file given without
+# a directory. Both #include forms, and #embed, from a file elsewhere.
+abs=$(cd "$out_dir" && pwd)
+mkdir -p "$out_dir/elsewhere"
+printf '#define ABS_VAL 40\n' > "$out_dir/second/abs.h"
+printf '\002' > "$out_dir/second/two.bin"
+cat > "$out_dir/elsewhere/abs.c" << EOF
+#include "$abs/second/abs.h"
+#include <$abs/second/abs.h>
+static const unsigned char two[] = {
+#embed "$abs/second/two.bin"
+};
+int main(void) { return ABS_VAL + two[0]; }
+EOF
+"$EMBCC" --target="$TARGET" -c "$out_dir/elsewhere/abs.c" \
+    -o "$out_dir/abs.o" || { echo "an absolute #include was not found"; exit 1; }
+t_link "$out_dir/abs" "$out_dir/abs.o" || { echo "link failed"; exit 1; }
+t_run "$out_dir/abs" >/dev/null
+got=$?
+[ "$got" -eq 42 ] || { echo "absolute include: exit $got, expected 42"; exit 1; }
+echo "an absolute #include or #embed names that file, from any directory"

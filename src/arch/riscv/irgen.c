@@ -50,11 +50,12 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e)
     long align = ty_align(rt);
     long step;
 
-    /* A long double is binary128 here, which the backend does not lower
-     * anywhere yet. Refused in the backend's words: without this the
-     * walk below read it as a double, and a 16-byte store further on
-     * stopped the compile with an internal error. */
-    if (flt && size > 8)
+    /* A long double is binary128 here. At RV64 that is two registers, an
+     * aligned pair when variadic like any 2*XLEN scalar, and read below
+     * as itself. At RV32 it is four, which the psABI passes BY
+     * REFERENCE, and the backend does not lower it yet: refused in the
+     * backend's words, as the double read below would take half of it. */
+    if (flt && size > 2 * wb)
         diag_fatal(fn->file, e->line, "the RV%d backend cannot lower a "
                    "128-bit value yet: va_arg of %s", 8 * wb, ty_name(rt));
 
@@ -103,7 +104,7 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e)
             return sdst;
         }
 
-        if (flt) {
+        if (flt && size <= 8) {
             /* Read the double that was passed, then narrow if the
              * program asked for a float. */
             int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));

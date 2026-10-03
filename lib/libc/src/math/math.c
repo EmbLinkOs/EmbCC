@@ -30,19 +30,8 @@ double pow(double x, double y)    { return __ieee754_pow(x, y); }
 double fmod(double x, double y)   { return __ieee754_fmod(x, y); }
 double hypot(double x, double y)  { return __ieee754_hypot(x, y); }
 
-/* sqrt is one instruction on both targets: using it is both faster and
- * more accurate than any software core, and fdlibm's asin/acos/hypot call
- * through here too. */
-double sqrt(double x)
-{
-    /* __builtin_sqrt, so EmbCC emits the machine's own instruction --
-     * sqrtsd on x86-64, fsqrt on aarch64. Both are correctly rounded,
-     * which no software core matches, and it is one instruction rather
-     * than a call. Inline asm would have done it for one target; the
-     * builtin does it for every target that has the instruction, which is
-     * why it belongs in the compiler and not here. */
-    return __builtin_sqrt(x);
-}
+/* sqrt is sqrt.c's: an instruction where the machine has one, and
+ * integer arithmetic where it does not. */
 
 /* fdlibm's own cores call these two names: its asin/acos/hypot reach the
  * square root through __ieee754_sqrt, and several files test finiteness

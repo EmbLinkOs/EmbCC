@@ -1448,6 +1448,19 @@ static void process_file(struct cpp *cpp, const char *path,
  * if_empty) are refused by name rather than ignored: ignoring `limit`
  * would embed the whole file where a prefix of it was asked for.
  */
+/* A name from the root -- `/opt/x.h`, and on a DOS-like host `C:/x.h`,
+ * `C:\x.h` or `\x.h` -- is one file, opened as written. Joined to the
+ * including file's directory or to a search directory it named nothing,
+ * so `#include "/abs/x.h"` worked only from a file given without a
+ * directory, and failed from every other. */
+static int path_is_absolute(const char *f)
+{
+    int c = f[0] | 32;
+    return f[0] == '/' || f[0] == '\\' ||
+           (c >= 'a' && c <= 'z' && f[1] == ':' &&
+            (f[2] == '/' || f[2] == '\\'));
+}
+
 static void do_embed(struct src *s, const char *arg, struct tbuf *out)
 {
     char fname[256];
@@ -1485,7 +1498,10 @@ static void do_embed(struct src *s, const char *arg, struct tbuf *out)
                 "not supported; ignoring one would embed the wrong bytes",
              NULL);
 
-    if (!angle) {
+    if (path_is_absolute(fname)) {
+        snprintf(path, sizeof path, "%s", fname);
+        data = read_file_or_null(path, &len);
+    } else if (!angle) {
         const char *slash = strrchr(s->file, '/');
         if (slash)
             snprintf(path, sizeof path, "%.*s/%s",
@@ -1494,7 +1510,8 @@ static void do_embed(struct src *s, const char *arg, struct tbuf *out)
             snprintf(path, sizeof path, "%s", fname);
         data = read_file_or_null(path, &len);
     }
-    for (int i = 0; !data && i < s->cpp->nincdirs; i++) {
+    for (int i = 0; !data && !path_is_absolute(fname) &&
+                    i < s->cpp->nincdirs; i++) {
         snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], fname);
         data = read_file_or_null(path, &len);
     }
@@ -1557,7 +1574,10 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
      * a plain #include starts at the beginning. */
     int start = is_next ? s->incdir_idx + 1 : 0;
 
-    if (!angle && !is_next) {
+    if (path_is_absolute(fname)) {
+        snprintf(path, sizeof path, "%s", fname);
+        text = read_file_or_null(path, &len);
+    } else if (!angle && !is_next) {
         /* relative to the including file's directory first */
         const char *slash = strrchr(s->file, '/');
         if (slash)
@@ -1567,7 +1587,8 @@ static void do_include(struct src *s, const char *arg, struct tbuf *out,
             snprintf(path, sizeof path, "%s", fname);
         text = read_file_or_null(path, &len);
     }
-    for (int i = start; !text && i < s->cpp->nincdirs; i++) {
+    for (int i = start; !text && !path_is_absolute(fname) &&
+                        i < s->cpp->nincdirs; i++) {
         snprintf(path, sizeof path, "%s/%s", s->cpp->incdirs[i], fname);
         text = read_file_or_null(path, &len);
         if (text)

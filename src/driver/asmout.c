@@ -473,6 +473,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     if (rodata && iu->rodata_len > 0) {
         ob_str(b, "\n\t.section\t.rodata\n");
         for (int i = 0; i < iu->nstrs; i++) {
+            if (iu->strs[i].align > 1)       /* the same gap irgen left */
+                ob_fmt(b, "\t.balign\t%d\n", iu->strs[i].align);
             ob_fmt(b, ".LC%d:\n", i);
             ob_str(b, "\t.byte\t");
             for (int k = 0; k < iu->strs[i].len; k++)

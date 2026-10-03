@@ -21,9 +21,11 @@
 # in src/arch/<backend>/*.c that is spelled like a libgcc helper, plus the
 # complex helpers src/sema/sema.c emits. So a new call site in a backend is
 # checked the day it is written, without anyone remembering to add it here.
-# The long-double complex pair (__multc3/__mulxc3 and their divides) is left
-# out: `long double` is no wider than `double` on any of these targets, or is
-# refused outright (RV32's binary128), so nothing here can call them.
+# Only a target with __int128 reaches the 128-bit helpers -- the `ti` and `tf`
+# routines, and the long-double complex pair __multc3/__divtc3 -- because only
+# there is a 128-bit value two registers (RV64). Elsewhere `long double` is no
+# wider than `double`, or is binary128 the backend refuses (RV32, which will
+# want a by-reference runtime of its own when it is lowered).
 set -u
 echo "TEST-MARKER embedded-runtime"
 . "$(dirname "$0")/../lib.sh"
@@ -41,7 +43,7 @@ shared=$(grep -ohE '"__(mul|div)(sc|dc)3"' src/sema/sema.c | tr -d '"' | sort -u
 fail=0
 checked=0
 for triple in avr thumbv7m-none-eabi thumbv7em-none-eabi thumbv8m.main-none-eabi \
-              riscv32-unknown-elf; do
+              riscv32-unknown-elf riscv64-unknown-elf; do
     case $triple in
         avr)     be=avr ;;
         thumb*)  be=thumb ;;
@@ -66,8 +68,14 @@ for triple in avr thumbv7m-none-eabi thumbv7em-none-eabi thumbv8m.main-none-eabi
         fail=1
     fi
 
+    # (and a 64-bit divide is a call only where a register is 32 bits)
+    if "$EMBCC" --target="$triple" --dump-predef | grep -q __SIZEOF_INT128__
+    then wide="__multc3 __divtc3"; drop='^__u?(div|mod)di3$'
+    else wide=""; drop='^__[a-z]*(tf|ti)'
+    fi
     names=$( { grep -ohE '"__[a-z0-9]+"' src/arch/$be/*.c | tr -d '"' \
-                 | grep -E "$pat"; echo "$shared"; } | sort -u)
+                 | grep -E "$pat" | grep -vE "$drop"; echo "$shared"
+               for w in $wide; do echo "$w"; done; } | sort -u)
     missing=
     for nm in $names; do
         checked=$((checked + 1))
