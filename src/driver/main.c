@@ -917,6 +917,32 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
     target_set_opt_size(opt_for_size);
 
+    /* An inline definition (C11 6.7.4p7, decided by sema) has done its
+     * job once the optimizer has had the chance to inline it: it is
+     * not emitted, at any level. From here on it is a declaration, so a
+     * call that remains -- every call at -O0 -- and its address name
+     * the external definition another unit provides, as with gcc and
+     * clang. */
+    {
+        int keep = 0;
+        for (int k = 0; k < iu->nfuncs; k++) {
+            struct func *f = iu->funcs[k].src;
+            if (f && f->inline_only)
+                continue;
+            if (keep != k) iu->funcs[keep] = iu->funcs[k];
+            keep++;
+        }
+        iu->nfuncs = keep;
+        for (struct func *f = u->funcs; f; f = f->next)
+            if (!f->absorbed && f->inline_only) {
+                f->has_defn = 0;
+                for (int k = 0; k < iu->nsyms; k++)
+                    if (iu->syms[k].is_func &&
+                        !strcmp(iu->syms[k].name, f->name))
+                        iu->syms[k].defined = 0;
+            }
+    }
+
     /* ---- what is still reachable -------------------------------------
      *
      * A `static` function nothing calls is already dropped, but `used`
@@ -2847,6 +2873,9 @@ int main(int argc, char **argv)
     int out_is_stdout = 0;          /* `-o -` */
     int compile_mode = 0, pp_only = 0;
     int lang = -1;                  /* -x: 0 C, 1 C++; -1 by suffix */
+    /* GNU89 inline semantics: -fgnu89-inline, or -std=c89/gnu89, where
+     * C99's are not available (clang ignores -fno-gnu89-inline there) */
+    int gnu89_inline = 0, std_gnu89 = 0;
 
     if (argc < 2) {
         print_usage(stderr);
@@ -3107,6 +3136,9 @@ int main(int argc, char **argv)
                             argv[i]);
                     return 1;
                 }
+                std_gnu89 = !strcmp(v, "c89") || !strcmp(v, "c90") ||
+                            !strcmp(v, "iso9899:1990") ||
+                            !strcmp(v, "gnu89") || !strcmp(v, "gnu90");
                 if (strncmp(v, "c1", 2) != 0 && strncmp(v, "gnu1", 4) != 0 &&
                     strcmp(v, "iso9899:2011") != 0 &&
                     strcmp(v, "iso9899:2017") != 0 &&
@@ -3392,6 +3424,9 @@ int main(int argc, char **argv)
              * has nothing to collect -- and refusing would stop builds
              * that pass it out of habit. Said in --help rather than
              * silently. */
+        } else if (strcmp(argv[i], "-fgnu89-inline") == 0 ||
+                   strcmp(argv[i], "-fno-gnu89-inline") == 0) {
+            gnu89_inline = argv[i][2] != 'n';
         } else if (strncmp(argv[i], "-fno-", 5) == 0 &&
                    opt_set_pass(argv[i] + 5, 0)) {
             /* a named pass, off */
@@ -3655,6 +3690,7 @@ int main(int argc, char **argv)
     }
 
     arm_float_resolve();
+    sema_set_gnu89_inline(gnu89_inline || std_gnu89);
 
     if (g_want_dumpmachine) {
         printf("%s\n", target_triple_now());

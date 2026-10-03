@@ -181,7 +181,12 @@ void t_mov_imm(struct code *c, int rd, long imm, int s)
             return;
         }
     }
-    movw(c, rd, (unsigned)(v & 0xffff), 0);
+    /* movw then movt; with the flags dead, a low half of eight bits
+     * into r0-r7 is the two-byte movs (a double's low half is often 0) */
+    if (s && low(rd) && (v & 0xffff) <= 0xff)
+        hw(c, 0x2000u | (unsigned)(rd << 8) | (unsigned)(v & 0xff));
+    else
+        movw(c, rd, (unsigned)(v & 0xffff), 0);
     movw(c, rd, (unsigned)(v >> 16), 1);
 }
 
@@ -455,6 +460,21 @@ static unsigned wide_ldst_op(int size, int sign, int store)
     if (size == 1) return sign ? 0xf990u : 0xf890u;
     if (size == 2) return sign ? 0xf9b0u : 0xf8b0u;
     return 0xf8d0u;
+}
+
+int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
+{
+    /* LDRD/STRD (immediate) T1, offset addressing: 1110 100 P U 1 W L Rn,
+     * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. */
+    if (rt >= T_SP || rt2 >= T_SP || rn == T_PC || (!store && rt == rt2))
+        return 0;
+    if (off % 4 != 0 || off < -1020 || off > 1020)
+        return 0;
+    unsigned u = off >= 0 ? 1u : 0u;
+    unsigned mag = (unsigned)(off >= 0 ? off : -off);
+    hw2(c, 0xe940u | (u << 7) | (store ? 0u : 0x10u) | (unsigned)rn,
+           (unsigned)(rt << 12) | (unsigned)(rt2 << 8) | (mag / 4));
+    return 1;
 }
 
 int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,

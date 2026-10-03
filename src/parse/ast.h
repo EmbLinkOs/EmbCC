@@ -338,6 +338,20 @@ struct func {
      * caller throws the result away. `vis` is an ELF visibility. */
     int attr_used, attr_unused, attr_always_inline, attr_noinline;
     int attr_deprecated, attr_warn_unused_result;
+    /* C11 6.7.4p7. This declaration said `inline` / `extern`, and the
+     * function carries __attribute__((gnu_inline)). Sema folds every
+     * file-scope declaration into inline_only on the canonical node: an
+     * INLINE DEFINITION, which the optimizer may inline and which is
+     * never emitted -- a call that remains, and the function's address,
+     * name the external definition another unit provides. */
+    int decl_inline, decl_extern, attr_gnu_inline;
+    int inline_only;
+    /* sema's running answers while it merges declarations into this
+     * canonical node: some declaration lacks `inline` or says `extern`
+     * (C99: an external definition), and the defining declaration's
+     * own `inline` and `extern` (gnu_inline: `extern inline` is the
+     * inline-only form) */
+    int inl_ext, def_inline, def_extern;
     const char *vis;
     /* __attribute__((format(printf|scanf, idx, first))): 1 printf,
      * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */

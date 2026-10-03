@@ -193,4 +193,25 @@ if grep -qE 'ldvar|stvar' "$out/unreach.ir"; then
 fi
 echo "a function with an unreachable block still has its locals promoted"
 
+# 8. A load that reads back what was just stored is that value. Through a
+#    pointer (`*p = x; return *p;`) it was loaded again; and a union that
+#    reinterprets a double -- the shape fdlibm and every classification
+#    function uses -- stayed a stack object whenever it was initialized,
+#    because `= { x }` zeroes it first and the zeroing made it look
+#    shared. tests/exec/store-forward.c holds the cases where forwarding
+#    would be wrong.
+cat > "$out/fwd.c" <<'EOF'
+typedef unsigned long long u64;
+double keep(double *p, double x) { *p = x; return *p; }
+u64 bits(double x) { union { double d; u64 u; } v = { x }; return v.u; }
+EOF
+"$EMBCC" inspect ir --target="$TARGET" -O2 "$out/fwd.c" > "$out/fwd.ir" \
+    2>/dev/null || { echo "FAIL: could not dump the forwarding IR"; exit 1; }
+awk '/^func @keep .*\{/,/^}/' "$out/fwd.ir" | grep -q 'load' && {
+    echo "FAIL: a stored value is loaded back:"; cat "$out/fwd.ir"; exit 1; }
+awk '/^func @bits .*\{/,/^}/' "$out/fwd.ir" | grep -qE 'load|store|memzero' && {
+    echo "FAIL: an initialized punning union stayed in memory:"
+    cat "$out/fwd.ir"; exit 1; }
+echo "a stored value is not loaded back, and a punning union leaves no memory"
+
 echo "optimizer acceptance passed"

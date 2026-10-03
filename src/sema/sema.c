@@ -171,6 +171,29 @@ static int scope_add(struct scope *sc, const char *name, struct type *ty,
     return sc->n++;
 }
 
+/* The source position of the function body being checked — a global is
+ * visible inside it only if declared above it (C's rule). */
+static int cur_body_seq;
+
+/* -Wshadow for a local or parameter that hides a file-scope variable
+ * declared before the function (GCC and clang report it; a function of
+ * the same name is not reported, as with both). */
+static void warn_shadow_global(struct unit *u, const char *name, int line,
+                               int col)
+{
+    for (struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && g->seq >= 0 && g->seq < cur_body_seq &&
+            g->name && strcmp(g->name, name) == 0) {
+            diag_warn_opt(diag_file(u), line, col, "shadow",
+                          "declaration of '%s' shadows a global declaration",
+                          name);
+            diag_note_at(g->file ? g->file : u->file,
+                         g->name_col ? g->name_line : g->line, g->name_col,
+                         "the one it hides is here");
+            return;
+        }
+}
+
 /* -Wshadow: a declaration that hides one still in scope. Reported where
  * the new one is, with a note at the one it hides — the pair is the point.
  * A name that shadows nothing costs a scan of the active entries. */
@@ -191,6 +214,7 @@ static void warn_shadow(struct unit *u, struct scope *sc, const char *name,
                              "the one it hides is here");
             return;
         }
+    warn_shadow_global(u, name, line, col);
 }
 
 /* Returns the canonical node for a name: the first declaration, into
@@ -288,10 +312,6 @@ static struct global *find_global(struct unit *u, const char *name)
             return g;
     return NULL;
 }
-
-/* The source position of the function body being checked — a global is
- * visible inside it only if declared above it (C's rule). */
-static int cur_body_seq;
 
 /* ---- conversions ---- */
 
@@ -4891,6 +4911,11 @@ static void check_func(struct unit *u, struct func *f)
                        "duplicate parameter '%s' in '%s'",
                        f->params[i], f->name);
         {
+            if (f->params[i] && diag_warning_enabled("shadow"))
+                warn_shadow_global(u, f->params[i],
+                                   f->param_lines[i] ? f->param_lines[i]
+                                                     : f->line,
+                                   f->param_cols[i]);
             int pi = scope_add(&sc, f->params[i], f->param_tys[i], NULL);
             sc.vars[pi].is_param = 1;
             sc.vars[pi].line = f->line;
@@ -5020,6 +5045,47 @@ static void check_func(struct unit *u, struct func *f)
     g_file = savefile;
 }
 
+static int g_gnu89_inline;
+
+void sema_set_gnu89_inline(int on) { g_gnu89_inline = on; }
+
+/* One declaration's part in whether the definition is an inline
+ * definition (C11 6.7.4p7; see struct func). */
+static void note_inline_decl(struct func *canon, const struct func *f)
+{
+    canon->inl_ext |= !f->decl_inline || f->decl_extern;
+    canon->attr_gnu_inline |= f->attr_gnu_inline;
+    if (f->defined) {
+        canon->def_inline = f->decl_inline;
+        canon->def_extern = f->decl_extern;
+    }
+}
+
+/* Which definitions are inline definitions: never emitted, because
+ * another unit holds the external definition. C99: every file-scope
+ * declaration says `inline` and none says `extern`. GNU89, or the
+ * gnu_inline attribute: the definition says `extern inline`. A function
+ * something outside the C code reaches -- main, a constructor, one that
+ * is `used`, an alias's target -- is always emitted. */
+static void decide_inline_only(struct unit *u)
+{
+    for (struct func *f = u->funcs; f; f = f->next) {
+        f->inline_only = 0;
+        if (f->absorbed || !f->has_defn || f->is_static ||
+            !strcmp(f->name, "main") || f->attr_used || f->is_ctor ||
+            f->is_dtor)
+            continue;
+        int gnu = g_gnu89_inline || f->attr_gnu_inline;
+        int only = gnu ? f->def_inline && f->def_extern : !f->inl_ext;
+        if (!only)
+            continue;
+        for (struct func *a = u->funcs; a && only; a = a->next)
+            if (a->alias_of && !strcmp(a->alias_of, f->name))
+                only = 0;
+        f->inline_only = only;
+    }
+}
+
 /* Merge every later declaration of a name into its first (canonical)
  * node. C's static rule kept exactly: static-then-non-static keeps
  * internal linkage, non-static-then-static is an error (gcc agrees). */
@@ -5031,8 +5097,10 @@ static void merge_decls(struct unit *u)
         struct func *canon = find_func(u, f->name);
         if (canon == f) {
             f->has_defn = f->defined;
+            note_inline_decl(f, f);
             continue;
         }
+        note_inline_decl(canon, f);
         int match = canon->nparams == f->nparams &&
                     canon->is_varargs == f->is_varargs &&
                     ty_equal(canon->ret_ty, f->ret_ty);
@@ -5282,6 +5350,7 @@ void sema_check(struct unit *u)
 {
     apply_pragma_weak(u);
     merge_decls(u);
+    decide_inline_only(u);
     check_aliases(u);
     merge_globals(u);
     check_econst_names(u);
@@ -5310,6 +5379,11 @@ void sema_check(struct unit *u)
              * same. Warning anyway would train the reader to ignore
              * the warning. */
             !f->attr_unused && !f->attr_used &&
+            /* A `static inline` in a header is a helper offered to every
+             * unit that includes it, most of which use some of them --
+             * clang does not report one, and GCC no inline one at all. */
+            !(f->def_inline && f->file && u->file &&
+              strcmp(f->file, u->file) != 0) &&
             f->name && strcmp(f->name, "main") != 0)
             diag_warn_opt(f->file ? f->file : u->file, f->line, 0,
                           "unused-function", "unused function '%s'", f->name);

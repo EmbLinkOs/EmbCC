@@ -220,6 +220,9 @@ file     21c568a73b4612ce t.c
 provides c:@F@add                                 5336311b8eae8c73
 ```
 
+A weak definition's `provides` line ends in ` weak` (see
+[`embidx`](tools/embidx.md#units-usrs-and-hashes)).
+
 ### `--emit-empty-object FILE`
 
 Write a valid relocatable ELF object with an empty `.text` section to
@@ -354,6 +357,23 @@ embcc: warning: -std=c++17 sets the standard macros but is not enforced; EmbCC p
 
 The default for C++ is equivalent to `-std=gnu++20`.
 
+One C standard changes code generation: `c89`, `c90`, `iso9899:1990`,
+`gnu89` and `gnu90` select GNU89 `inline` semantics, as
+[`-fgnu89-inline`](#-fgnu89-inline) does.
+
+### `-fgnu89-inline`, `-fno-gnu89-inline`
+
+Select the meaning of `inline` on a function with external linkage.
+The default, `-fno-gnu89-inline`, is C99's: a definition whose
+declarations all say `inline` and none `extern` is an inline definition,
+which is never emitted. `-fgnu89-inline` selects GNU89's: `inline` alone
+is an external definition, and `extern inline` is never emitted. See
+[Inline functions](c-language.md#inline-functions).
+
+With `-std=c89`, `c90`, `iso9899:1990`, `gnu89` or `gnu90`, GNU89
+semantics apply and `-fno-gnu89-inline` does not change them, as with
+Clang.
+
 Any other name is refused: `embcc: error: unknown standard '-std=NAME'`,
 or `embcc: error: unknown C++ standard '-std=NAME'` for a malformed
 `c++`/`gnu++` name.
@@ -427,8 +447,8 @@ as GCC's option does. `-faccess-control` restores the default.
 enumeration is `int`-sized unless its values need a wider type (see
 [Targets](targets.md#data-models)), and a structure containing one would
 be laid out differently. `-fshort-wchar`, `-fms-extensions`, `-fno-asm`,
-`-fgnu89-inline`, `-fvisibility=...` and `-fno-builtin-NAME` are not
-accepted (unknown argument).
+`-fvisibility=...` and `-fno-builtin-NAME` are not accepted (unknown
+argument).
 
 ## Warning and diagnostic options
 

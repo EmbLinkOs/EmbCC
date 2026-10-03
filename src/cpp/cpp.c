@@ -1804,8 +1804,55 @@ static const char *pragma_macro_name(struct src *s, const char *t, size_t n,
  *   pop_macro       it. They did nothing, so a header that redefined a
  *                   macro around its own text left the new definition in
  *                   force for the program that included it. */
+/* `#pragma GCC diagnostic KIND ["-Wname"]`, and clang's spelling: told
+ * to the diagnostics with where in the output it stands, so that each
+ * warning is decided by the pragmas before it (diag.c). From _Pragma the
+ * name's quotes arrive escaped, `\"-Wname\"`. */
+static void do_diag_pragma(const char *t, size_t n, long pos)
+{
+    size_t i = 0, k;
+    while (i < n && (t[i] == ' ' || t[i] == '\t'))
+        i++;
+    for (k = i; i < n && is_idc(t[i]); i++)
+        ;
+    if (i - k != 10 || strncmp(t + k, "diagnostic", 10) != 0)
+        return;
+    while (i < n && (t[i] == ' ' || t[i] == '\t'))
+        i++;
+    for (k = i; i < n && is_idc(t[i]); i++)
+        ;
+    static const char *const kinds[] = { "push", "pop", "ignored",
+                                         "warning", "error" };
+    int kind = -1;
+    for (int j = 0; j < 5; j++)
+        if (i - k == strlen(kinds[j]) && !strncmp(t + k, kinds[j], i - k))
+            kind = j;
+    if (kind < 0)
+        return;                  /* ignored_attributes and the like */
+    if (kind <= 1) {
+        diag_pragma_event(pos, kind, NULL);
+        return;
+    }
+    while (i < n && (t[i] == ' ' || t[i] == '\t'))
+        i++;
+    if (i < n && t[i] == '\\')
+        i++;
+    if (i >= n || t[i] != '"')
+        return;
+    for (k = ++i; i < n && t[i] != '"' && t[i] != '\\'; i++)
+        ;
+    if (i - k < 3 || t[k] != '-' || t[k + 1] != 'W' || i - k > 120)
+        return;
+    char name[128];
+    memcpy(name, t + k + 2, i - k - 2);
+    name[i - k - 2] = 0;
+    diag_pragma_event(pos, kind, name);
+}
+
+/* `pos` is where the pragma stands in the unit's output; `out` may be a
+ * scratch buffer (for _Pragma), so it cannot say. */
 static void do_pragma(struct src *s, const char *text, size_t n,
-                      struct tbuf *out)
+                      struct tbuf *out, long pos)
 {
     size_t i = 0;
     while (i < n && (text[i] == ' ' || text[i] == '\t'))
@@ -1853,6 +1900,9 @@ static void do_pragma(struct src *s, const char *text, size_t n,
         }
     } else if (PRAGMA_IS("weak")) {
         emit_weak(s, text + 4, n - 4, out);
+    } else if (PRAGMA_IS("GCC") || PRAGMA_IS("clang")) {
+        size_t w = text[0] == 'G' ? 3 : 5;
+        do_diag_pragma(text + w, n - w, pos);
     }
 #undef PRAGMA_IS
 }
@@ -1886,6 +1936,7 @@ static void process_file(struct cpp *cpp, const char *path,
         if (lineb.p)
             lineb.p[0] = 0;
         int startline = s.line;
+        diag_pragma_line(path, startline, (long)out->len);
         if (!read_logical_line(&s, &lineb, &nl))
             break;
         const char *lp = lineb.p ? lineb.p : "";
@@ -2000,7 +2051,7 @@ static void process_file(struct cpp *cpp, const char *path,
                 /* The ones that change the program are acted on
                  * (do_pragma), the rest dropped; a marker for the
                  * parser keeps the output line synced. */
-                do_pragma(&s, arg, strlen(arg), out);
+                do_pragma(&s, arg, strlen(arg), out, (long)out->len);
             } else if (DIR("line") || (dn > 0 && lp[0] >= '0' &&
                                         lp[0] <= '9')) {
                 /* #line N ["file"], and GNU's linemarker # N "file" ...
@@ -2114,7 +2165,8 @@ static void process_file(struct cpp *cpp, const char *path,
                             break;
                         }
                         struct tbuf pk = { 0, 0, 0 };
-                        do_pragma(&s, b, (size_t)(q - b), &pk);
+                        do_pragma(&s, b, (size_t)(q - b), &pk,
+                                  (long)out->len);
                         close = q + 1;
                         while (*close == ' ' || *close == '\t') close++;
                         if (*close != ')') {
@@ -2226,12 +2278,12 @@ char *cpp_process(const char *path, const char *src,
     boot.incdir_idx = -1;
     boot.base = "";
     define_macro(&boot, "__EMBCC__ 1");
-    /* gcc-isms real headers use unconditionally; semantically no-ops */
+    /* gcc-isms real headers use unconditionally; semantically no-ops.
+     * (Not __inline and __inline__: they are `inline`, which decides
+     * linkage, and the lexer reads them as that keyword.) */
     define_macro(&boot, "__extension__");
     define_macro(&boot, "__restrict");
     define_macro(&boot, "__restrict__");
-    define_macro(&boot, "__inline");
-    define_macro(&boot, "__inline__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
     /* C17: the language EmbCC compiles is C11's (with C17's fixes),
