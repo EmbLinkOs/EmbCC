@@ -59,6 +59,11 @@ extern inline __attribute__((gnu_inline)) int g_only(int x) { return x + 1; }
 inline __attribute__((gnu_inline)) int g_ext(int x) { return x + 2; }
 int gu(void) { return g_only(1) + g_ext(1); }
 CEOF
+cat > "$out/spell.c" <<'CEOF'
+__inline__ int dbl(int x) { return 2 * x; }
+extern __inline __attribute__((__gnu_inline__)) int inc(int x) { return x + 1; }
+int sp(void) { return dbl(1) + inc(1); }
+CEOF
 cat > "$out/statics.c" <<'CEOF'
 static inline int sq(int x) { return x * x; }
 int s(void) { return sq(4); }
@@ -79,6 +84,9 @@ expect "$out/use.c"   twice D -O0 -std=gnu89
 expect "$out/def.c"   twice D -O0 -fgnu89-inline  # the definition says inline only
 expect "$out/use.c"   twice U -O0 -fgnu89-inline -fno-gnu89-inline
 expect "$out/use.c"   twice D -O0 -std=gnu89 -fno-gnu89-inline  # as clang
+# The GNU spellings are the same keyword (glibc's headers use these).
+expect "$out/spell.c" dbl U -O0
+expect "$out/spell.c" inc U -O0
 # static inline is not affected: a local copy, or none.
 expect "$out/statics.c" sq "D-" -O0
 [ $fail = 0 ] && echo "inline definitions: never emitted; extern inline," \

@@ -2226,12 +2226,12 @@ char *cpp_process(const char *path, const char *src,
     boot.incdir_idx = -1;
     boot.base = "";
     define_macro(&boot, "__EMBCC__ 1");
-    /* gcc-isms real headers use unconditionally; semantically no-ops */
+    /* gcc-isms real headers use unconditionally; semantically no-ops.
+     * (Not __inline and __inline__: they are `inline`, which decides
+     * linkage, and the lexer reads them as that keyword.) */
     define_macro(&boot, "__extension__");
     define_macro(&boot, "__restrict");
     define_macro(&boot, "__restrict__");
-    define_macro(&boot, "__inline");
-    define_macro(&boot, "__inline__");
     defining_builtins = 0;
     define_macro(&boot, "__STDC__ 1");
     /* C17: the language EmbCC compiles is C11's (with C17's fixes),
