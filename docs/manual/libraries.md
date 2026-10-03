@@ -295,13 +295,14 @@ implements them:
 C++'s `<thread>`, `<mutex>` and the other synchronization headers are
 built on the thread group, and `<filesystem>` on the filesystem group.
 
-Three backends exist:
+Four backends exist:
 
 | Backend | Used by | What it does |
 |---|---|---|
 | `os/posixlike/backend.c` | `libc-x86_64` and `libc-aarch64` (`x86_64-elf`, `aarch64-elf`) | forwards to `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty`, which the program or its environment must define. The thread functions (`thread_create`, `futex_wait`, ...) and filesystem functions (`fs_stat`, ...) are weak references: defined, they are used; absent, the group reports `ENOSYS`. `remove`, `rename`, `time`, `clock` and entropy report `ENOSYS`. |
 | `os/linux/` | `libc-linux-x86_64`, `libc-linux-aarch64` | issues Linux system calls directly, so a program needs no other C library and no dynamic loader. Provides `crt1.o` (the `_start` that calls `main` and `exit`), threads through `clone`, thread-local storage (per-thread `errno`), and the filesystem group. Static images only. |
 | `os/emblinkos/backend.c` | `libc-emblinkos` | EmbLinkOS's system calls, including threads and the filesystem group. `clock` reports failure. |
+| `os/baremetal/backend.c` | `libc-embedded` (the embedded targets) | for a part with no operating system, and needs nothing from the program: `write`, `read`, `open`, `close`, `lseek`, `sbrk`, `_exit` and `isatty` are defined WEAKLY with defaults (output discarded, input at end of file, a heap from the end of the image to the stack, `_exit` stops), and a program's own definition of any of them replaces the default. One thread, no clock, no filesystem: those report `ENOSYS`. |
 
 A new operating system needs one new backend file and nothing else.
 
@@ -446,6 +447,7 @@ scratch.
 | `make libc-linux-x86_64` | C library with the Linux backend, `crt1.o`, and `librt.a`, for `x86_64-linux-gnu` | `build/libc/linux-x86_64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux-aarch64` | the same for `aarch64-linux-gnu` | `build/libc/linux-aarch64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux` | both Linux C libraries | |
+| `make libc-embedded` | C library with the bare-metal backend, `-Os`, for each embedded target it builds on (all but `avr` and `riscv32-unknown-elf`) | `build/libc/TRIPLE/libc.a` |
 | `make libc-emblinkos EMBLINKOS=DIR` | C library with the EmbLinkOS backend, `-O2`; needs `DIR/user/lib/embk.h` (default `DIR` is `$HOME/EmbLinkOs`) | `build/libc/emblinkos/libc.a` |
 | `make libcxx-x86_64`, `make libcxx-aarch64` | C++ library for `x86_64-elf`, `aarch64-elf`, `-O2` | `build/libcxx/x86_64/libcxx.a`, `build/libcxx/aarch64/libcxx.a` |
 | `make libcxx` | both of the above | |

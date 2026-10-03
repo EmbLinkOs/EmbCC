@@ -223,7 +223,46 @@ for x in 32 64; do
     done
     echo "rv$x abi: EmbCC and clang call each other's aggregates identically"
 
-    # 6. 128 bits, at RV64 only: __int128 and long double (binary128) are
+    # 6. A weak REFERENCE that nothing defines is address 0 -- which an
+    #    auipc in this image, at 0x80000000, cannot name at RV64. So
+    #    `if (&f) f();` with no f failed to link; embld now makes the pair
+    #    an absolute zero. Linked once without the definitions and once
+    #    with them, at both widths -- and after a few KB of other code, as
+    #    an auipc within 2 KB of the image's start still reaches 0.
+    cat > "$out/wref.c" <<'EOF'
+extern void puts_(const char *s);
+extern int maybe(int) __attribute__((weak));
+extern int counter __attribute__((weak));
+int main(void)
+{
+    if (&maybe)
+        puts_(maybe(41) == 42 ? "present " : "WRONG ");
+    else
+        puts_("absent ");
+    puts_(&counter ? (counter == 7 ? "seven\n" : "WRONG\n") : "none\n");
+    puts_("==END==\n");
+    return 0;
+}
+EOF
+    printf 'int maybe(int x) { return x + 1; }\nint counter = 7;\n' \
+        > "$out/wdef.c"
+    { echo 'volatile int sink;'; echo 'void pad(void) {'
+      i=0; while [ $i -lt 600 ]; do echo ' sink++;'; i=$((i + 1)); done
+      echo '}'; } > "$out/wpad.c"
+    "$EMBCC" --target=$T -O2 -c "$out/wpad.c" -o "$out/wpad$x.o" &&
+    "$EMBCC" --target=$T -O2 -c "$out/wref.c" -o "$out/wref$x.o" &&
+    "$EMBCC" --target=$T -O2 -c "$out/wdef.c" -o "$out/wdef$x.o" || {
+        echo "rv$x: the weak-reference program does not compile"; exit 1; }
+    run_image "wref$x" "$out/wpad$x.o" "$out/wref$x.o" || exit 1
+    run_image "wdef$x" "$out/wpad$x.o" "$out/wref$x.o" "$out/wdef$x.o" ||
+        exit 1
+    grep -q '^absent none$' "$out/wref$x.txt" &&
+    grep -q '^present seven$' "$out/wdef$x.txt" || {
+        echo "rv$x: weak references:"; head -2 "$out/wref$x.txt" "$out/wdef$x.txt"
+        exit 1; }
+    echo "rv$x weak: an undefined weak reference is 0, a defined one is used"
+
+    # 7. 128 bits, at RV64 only: __int128 and long double (binary128) are
     #    two doublewords there, kept in sixteen-byte slots and computed
     #    inline or through lib/rt -- int128.c, fp128.c, softtf.c and
     #    ldouble.c, which EmbCC builds for this target. RV32 has no

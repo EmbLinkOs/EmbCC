@@ -198,6 +198,9 @@ struct linker {
     int machine;               /* e_machine, one across every input */
     const char *rel_sym;       /* the symbol the relocation being applied
                                 * names, for need_range's message */
+    int rel_uw;                /* ...and it is an undefined weak one, so
+                                * its value is 0 by the link, not by its
+                                * definition (apply_riscv) */
     /* The output's e_flags, from the inputs': RISC-V's EF_RISCV_RVC when
      * any of them has compressed code, AVR's architecture as the first
      * one names it. */
@@ -1557,6 +1560,18 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
         rv_put_s(loc, rv_lo12(V));
         return;
     case R_RISCV_PCREL_HI20:
+        /* An undefined weak symbol is 0, and an auipc in an image at
+         * 0x80000000 cannot name 0: `&f == 0` for a weak f the program
+         * does not define failed to link. The auipc becomes `lui rd, 0`
+         * and its low half adds 0 -- an absolute zero, as GNU ld makes it.
+         * (At RV32 the pair wraps with the address space and reaches.) */
+        if (!l->elf32 && l->rel_uw && V == 0 &&
+            (V - (long long)P < I32_MIN - 0x800 ||
+             V - (long long)P > I32_MAX - 0x800)) {
+            put32(loc, (get32loc(loc) & 0xf80U) | 0x37U);
+            note_pcrel_hi(l, P, 0);
+            return;
+        }
         /* Recorded as well as written: the low half that pairs with it
          * has to take the low twelve bits of THIS displacement, not of
          * the address, or the two disagree about the +0x800 rounding
@@ -1604,6 +1619,16 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     case R_RISCV_CALL:
     case R_RISCV_CALL_PLT: {
         long long d = V - (long long)P;
+        /* A call to an undefined weak function -- one `if (f) f();`
+         * never makes -- goes to address 0 as a call through a null
+         * pointer would: `lui ra, 0; jalr ra, 0(ra)`, where the auipc
+         * could not reach (the PCREL_HI20 case above). */
+        if (!l->elf32 && l->rel_uw && V == 0 &&
+            (d < I32_MIN - 0x800 || d > I32_MAX - 0x800)) {
+            put32(loc, (get32loc(loc) & 0xf80U) | 0x37U);
+            rv_put_i(loc + 4, 0);
+            return;
+        }
         /* At RV32 the pair wraps with the address space, so every
          * address is in reach. At RV64 it is +-2GB, less the rounding
          * the low half's sign costs, and this linker mints no stubs. */
@@ -1818,6 +1843,7 @@ static void apply_relocs(struct linker *l, struct object *o)
                 continue;
             int uw;
             Elf64_Addr S = reloc_symval(l, o, symi, &uw);
+            l->rel_uw = uw;
             {
                 Elf64_Sym *sy = &o->syms[symi];
                 l->rel_sym = ELF64_ST_TYPE(sy->st_info) == STT_SECTION &&
