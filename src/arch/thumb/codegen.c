@@ -1253,12 +1253,15 @@ static void wr64(struct t_fn *F, int v, int lo, int hi)
     }
 }
 
-/* The second operand of a 64-bit binary operation, immediate or not. */
+/* The second operand of a 64-bit binary operation, immediate or not.
+ * Every caller materialises it before its own first flag-setting
+ * instruction, and no flag survives from the IR instruction before, so
+ * a small half in a low register is a two-byte movs. */
 static void operand_b64(struct t_fn *F, const struct ir_ins *i, int lo, int hi)
 {
     if (i->imm_b) {
-        t_mov_imm(F->t, lo, (long)(i->imm & 0xffffffffL), 0);
-        t_mov_imm(F->t, hi, (long)((i->imm >> 32) & 0xffffffffL), 0);
+        t_mov_imm_dead_flags(F->t, lo, (long)(i->imm & 0xffffffffL));
+        t_mov_imm_dead_flags(F->t, hi, (long)((i->imm >> 32) & 0xffffffffL));
     } else {
         rd64(F, i->b, lo, hi);
     }
@@ -1276,8 +1279,8 @@ static void operand_b64(struct t_fn *F, const struct ir_ins *i, int lo, int hi)
  * asks HERE, and none of them reads i->b directly. */
 static void operand_b(struct t_fn *F, const struct ir_ins *i, int reg)
 {
-    if (i->imm_b)
-        t_mov_imm(F->t, reg, (long)i->imm, 0);
+    if (i->imm_b)     /* flags dead: see operand_b64 */
+        t_mov_imm_dead_flags(F->t, reg, (long)i->imm);
     else
         rd(F, i->b, reg);
 }
@@ -1959,8 +1962,11 @@ static int gen_ins64(struct t_fn *F, int n)
         /* Built where it lives when that is a pair. */
         int lo = in_reg(F, i->dst) ? F->loc[i->dst] : A_LO;
         int hi = in_reg(F, i->dst) ? F->loc[i->dst] + 1 : A_HI;
-        t_mov_imm(t, lo, (long)(i->imm & 0xffffffffL), 0);
-        t_mov_imm(t, hi, (long)((i->imm >> 32) & 0xffffffffL), 0);
+        /* no flag survives from one IR instruction to the next (the
+         * 32-bit IR_CONST says why), so a half that fits eight bits in a
+         * low register is a two-byte movs */
+        t_mov_imm_dead_flags(t, lo, (long)(i->imm & 0xffffffffL));
+        t_mov_imm_dead_flags(t, hi, (long)((i->imm >> 32) & 0xffffffffL));
         wr64(F, i->dst, lo, hi);
         return 1;
     }
@@ -1987,6 +1993,26 @@ static int gen_ins64(struct t_fn *F, int n)
          * low result never lands on a high operand, pairs being whole. */
         int al, ah, bl, bh, dl, dh;
         src64(F, i->a, A_LO, R_TMP, &al, &ah);
+        /* A constant whose two words both encode as immediates is used
+         * as one -- adds/adc, subs/sbc #imm -- instead of being built in
+         * r9/r10 first, which also saves pushing them. Both are checked
+         * before either is emitted: the carry links the pair. */
+        if (i->imm_b) {
+            unsigned long lo = (unsigned long)i->imm & 0xffffffffUL;
+            unsigned long hi = ((unsigned long)i->imm >> 32) & 0xffffffffUL;
+            if (t_imm_ok((long)lo) && t_imm_ok((long)hi)) {
+                int add = i->op == IR_ADD;
+                dst64(F, i->dst, &dl, &dh);
+                if (!t_alu_imm(t, add ? T_OP_ADD : T_OP_SUB, dl, al,
+                               (long)lo, 1) ||
+                    !t_alu_imm(t, add ? T_OP_ADC : T_OP_SBC, dh, ah,
+                               (long)hi, 1))
+                    internal_error("thumb: a 64-bit %s immediate that "
+                                   "encodes did not", add ? "add" : "sub");
+                wr64(F, i->dst, dl, dh);
+                return 1;
+            }
+        }
         srcb64(F, i, &bl, &bh);
         dst64(F, i->dst, &dl, &dh);
         if (i->op == IR_ADD) {
@@ -3329,13 +3355,60 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
 
-    case IR_MEMCPY: case IR_MEMZERO:
-        /* A word loop, unrolled while the offsets fit (t_copy_block). */
-        rd(F, i->a, T_ADDR);
-        if (i->op == IR_MEMCPY)
-            rd(F, i->b, T_TMP);
-        t_copy_block(t, T_ADDR, T_TMP, i->op == IR_MEMCPY, i->size);
+    case IR_MEMCPY: case IR_MEMZERO: {
+        /* Straight-line where every offset reaches: each side through
+         * the frame base when it is a local's address (no register
+         * for it at all), the words through a free low register (the
+         * two-byte ldr/str), and eight bytes at a time with ldrd/strd
+         * where both sides are frame slots at word offsets -- which
+         * are aligned, as ldrd needs. Else the word loop
+         * (t_copy_block). */
+        int copy = i->op == IR_MEMCPY;
+        long doff = 0, soff = 0;
+        int dfa = faddr(F, i->a, &doff);
+        int sfa = copy && faddr(F, i->b, &soff);
+        long size = i->size, k = 0;
+        int reach = size <= 1020 &&
+                    (!dfa || (doff >= 0 && doff + size <= 1020)) &&
+                    (!sfa || (soff >= 0 && soff + size <= 1020));
+        if (!reach) {
+            if (dfa) fb_addr(F, T_ADDR, doff); else rd(F, i->a, T_ADDR);
+            if (copy) {
+                if (sfa) fb_addr(F, T_TMP, soff); else rd(F, i->b, T_TMP);
+            }
+            t_copy_block(t, T_ADDR, T_TMP, copy, size);
+            return;
+        }
+        {
+            int dst = dfa ? F->fb : rdr(F, i->a, T_ADDR);
+            int src = !copy ? -1 : sfa ? F->fb : rdr(F, i->b, T_TMP);
+            int d0 = LO(F, T_ACC), d1 = -1;
+            int pairs = dfa && (sfa || !copy) && doff % 4 == 0 &&
+                        (!copy || soff % 4 == 0) && size >= 8;
+            if (pairs)
+                d1 = LO(F, T_SCR);
+            if (!copy) {
+                t_mov_imm_dead_flags(t, d0, 0);
+                if (pairs)
+                    t_mov_imm_dead_flags(t, d1, 0);
+            }
+            for (; pairs && k + 8 <= size; k += 8) {
+                if (copy && !t_ldst_pair(t, d0, d1, src, soff + k, 0))
+                    internal_error("thumb: an ldrd that reaches did not");
+                if (!t_ldst_pair(t, d0, d1, dst, doff + k, 1))
+                    internal_error("thumb: an strd that reaches did not");
+            }
+            for (; k + 4 <= size; k += 4) {
+                if (copy) ldst_must(t, d0, src, soff + k, 4, 0, 0);
+                ldst_must(t, d0, dst, doff + k, 4, 0, 1);
+            }
+            for (; k < size; k++) {
+                if (copy) ldst_must(t, d0, src, soff + k, 1, 0, 0);
+                ldst_must(t, d0, dst, doff + k, 1, 0, 1);
+            }
+        }
         return;
+    }
 
     case IR_CALL: {
         /* AAPCS32, the scalar half: r0-r3 in order, then four-byte stack
@@ -4041,6 +4114,9 @@ static int lo_op_ok(const struct t_fn *F, const struct ir_ins *i)
     case IR_ADDR: case IR_STRADDR: case IR_GADDR: case IR_FADDR:
     case IR_BRZ: case IR_BRNZ:
         break;
+    case IR_MEMCPY: case IR_MEMZERO:
+        return 1;              /* its own registers are r9-r12; `size` is
+                                * a byte count, not a width */
     default:
         return 0;
     }

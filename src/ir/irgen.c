@@ -1043,18 +1043,47 @@ void irg_va_copy(struct ir_func *fn, int dst, long off, int src, long n)
     m->size = (int)n;
 }
 
+/* Do the initializer's leaves write every byte of a `size`-byte object?
+ * Then zero-filling it first is a store nothing reads -- `struct s v =
+ * f();` zeroed v before copying f's result over all of it. Only whole
+ * leaves count (a bit-field shares its bytes), and padding no leaf covers
+ * leaves the answer no, so the zero fill C asks for is never skipped. */
+static int init_covers(const struct initelem *in, int n, long size)
+{
+    if (size <= 0 || size > 65536 || n <= 0)
+        return 0;
+    unsigned char *w = xcalloc((size_t)size, 1);
+    for (int k = 0; k < n; k++) {
+        long sz = in[k].ty ? ty_size(in[k].ty) : 0;
+        if (in[k].bit_width || sz <= 0 || in[k].off < 0 ||
+            in[k].off + sz > size) {
+            free(w);
+            return 0;
+        }
+        memset(w + in[k].off, 1, (size_t)sz);
+    }
+    long k = 0;
+    while (k < size && w[k])
+        k++;
+    free(w);
+    return k == size;
+}
+
 /* A compound literal `(type){ init }`: clear its synthesized slot, place the
  * flattened initializer leaves (zero-fill + last-write-wins, like a declared
  * aggregate), and return the object's address. */
 static int gen_complit(struct ir_func *fn, struct expr *e)
 {
     int base = local_addr(fn, e->var_index);
-    struct ir_ins *z = emit(fn);
-    z->op = IR_MEMZERO;
-    z->a = base;
     /* e->ty is the decayed pointer for an array literal; the OBJECT's size
      * is the undecayed array (or the type itself for struct/scalar). */
-    z->size = ty_size(e->undecayed ? e->undecayed : e->ty);
+    long osize = ty_size(e->undecayed ? e->undecayed : e->ty);
+    if (!init_covers(e->inits, e->ninits, osize)) {
+        struct ir_ins *z = emit(fn);
+        z->op = IR_MEMZERO;
+        z->a = base;
+        z->size = (int)osize;
+    }
     for (int k = 0; k < e->ninits; k++) {
         int v = gen_expr(fn, e->inits[k].e);
         int at = base;
@@ -3653,10 +3682,12 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                  * `struct p s = {}` emitted nothing and kept whatever
                  * the stack held, on every target at every level. */
                 int base = local_addr(fn, s->var_index);
-                struct ir_ins *z = emit(fn);
-                z->op = IR_MEMZERO;
-                z->a = base;
-                z->size = ty_size(s->dty);
+                if (!init_covers(s->inits, s->ninits, ty_size(s->dty))) {
+                    struct ir_ins *z = emit(fn);
+                    z->op = IR_MEMZERO;
+                    z->a = base;
+                    z->size = ty_size(s->dty);
+                }
                 for (int k = 0; k < s->ninits; k++) {
                     int v = gen_expr(fn, s->inits[k].e);
                     int at = base;
