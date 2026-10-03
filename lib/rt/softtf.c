@@ -45,9 +45,51 @@
  */
 #include "rt.h"
 
-/* Built on `unsigned __int128`, so not RV32, whose binary128 is the same
- * format but has no 128-bit integer to compute it in. */
-#if defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
+/* aarch64, RV64 and RV32. A 128-bit significand needs a 128-bit integer
+ * to compute in, and RV32 has none -- GCC and clang give it no __int128
+ * either -- so every operation on one goes through the few functions
+ * below: the machine's own operators where __int128 exists, and a pair of
+ * 64-bit halves where it does not. The arithmetic above them is the same
+ * text either way, which is what lets the halves be checked against the
+ * operators (an RV64 runtime can be built both ways). SOFTTF_PAIRS forces
+ * the halves. */
+#if defined(__aarch64__) || defined(__riscv)
+
+#if defined(__SIZEOF_INT128__) && !defined(SOFTTF_PAIRS)
+static inline u128 u_or(u128 a, u128 b)  { return a | b; }
+static inline u128 u_and(u128 a, u128 b) { return a & b; }
+static inline u128 u_add(u128 a, u128 b) { return a + b; }
+static inline u128 u_sub(u128 a, u128 b) { return a - b; }
+static inline int  u_eq(u128 a, u128 b)  { return a == b; }
+static inline int  u_gt(u128 a, u128 b)  { return a > b; }
+#else
+/* The pair. `lo` first, so that it overlays a binary128 in memory the way
+ * the integer does on these little-endian machines (union tfbits). */
+typedef struct { u64 lo, hi; } tf_u128;
+#define u128 tf_u128            /* (rt.h's, where it has one, is not used) */
+#define mk   tf_mk
+#define hi64 tf_hi64
+#define lo64 tf_lo64
+static inline u128 mk(u64 hi, u64 lo) { u128 r; r.lo = lo; r.hi = hi; return r; }
+static inline u64 hi64(u128 x) { return x.hi; }
+static inline u64 lo64(u128 x) { return x.lo; }
+static inline u128 u_or(u128 a, u128 b)  { return mk(a.hi | b.hi, a.lo | b.lo); }
+static inline u128 u_and(u128 a, u128 b) { return mk(a.hi & b.hi, a.lo & b.lo); }
+static inline u128 u_add(u128 a, u128 b)
+{
+    u64 lo = a.lo + b.lo;
+    return mk(a.hi + b.hi + (lo < a.lo), lo);
+}
+static inline u128 u_sub(u128 a, u128 b)
+{
+    return mk(a.hi - b.hi - (a.lo < b.lo), a.lo - b.lo);
+}
+static inline int u_eq(u128 a, u128 b) { return a.hi == b.hi && a.lo == b.lo; }
+static inline int u_gt(u128 a, u128 b)
+{
+    return a.hi > b.hi || (a.hi == b.hi && a.lo > b.lo);
+}
+#endif
 
 union tfbits {
     long double f;
@@ -106,7 +148,7 @@ static u128 shr_sticky(u128 a, int n)
     if (n == 0) return a;
     if (n >= 128) return mk(0, (lo64(a) | hi64(a)) != 0);
     out = shl128(a, 128 - n);
-    return shr128(a, n) | (u128)((lo64(out) | hi64(out)) != 0);
+    return u_or(shr128(a, n), mk(0, (lo64(out) | hi64(out)) != 0));
 }
 
 static int clz128(u128 a)
@@ -166,7 +208,7 @@ static struct tf unpack(long double x)
         return r;
     }
     r.cls = TF_NORMAL;
-    r.sig = frac | shl128(mk(0, 1), TF_SIGBITS);   /* the implicit bit */
+    r.sig = u_or(frac, shl128(mk(0, 1), TF_SIGBITS));   /* the implicit bit */
     r.exp = e - TF_BIAS - TF_SIGBITS;
     return r;
 }
@@ -197,7 +239,7 @@ static long double tf_nan(void)
 static long double propagate(struct tf a, struct tf b)
 {
     struct tf *n = a.cls == TF_NAN ? &a : &b;
-    u128 quiet = n->sig | shl128(mk(0, 1), TF_SIGBITS - 1);
+    u128 quiet = u_or(n->sig, shl128(mk(0, 1), TF_SIGBITS - 1));
     return from_bits(n->sign, TF_EXPMAX, quiet);
 }
 
@@ -248,22 +290,22 @@ static long double round_pack(int sign, int exp, u128 sig)
     /* Round to nearest, ties to even. The three extra bits are exactly
      * half when they read 100, and then the tie goes to the even
      * significand. */
-    lsb = shr128(sig, 3) & mk(0, 1);
-    half = sig & mk(0, 7);
+    lsb = u_and(shr128(sig, 3), mk(0, 1));
+    half = u_and(sig, mk(0, 7));
     if (hi64(half) == 0 && lo64(half) > 4)
-        sig = sig + mk(0, 8);
+        sig = u_add(sig, mk(0, 8));
     else if (hi64(half) == 0 && lo64(half) == 4 && !is_zero128(lsb))
-        sig = sig + mk(0, 8);
+        sig = u_add(sig, mk(0, 8));
     sig = shr128(sig, 3);
 
     /* The rounding may have carried into a new leading bit. */
-    if (!is_zero128(sig & shl128(mk(0, 1), TF_SIGBITS + 1))) {
+    if (!is_zero128(u_and(sig, shl128(mk(0, 1), TF_SIGBITS + 1)))) {
         sig = shr128(sig, 1);
         biased++;
         if (biased >= TF_EXPMAX)
             return tf_inf(sign);
     } else if (biased == 0 &&
-               !is_zero128(sig & shl128(mk(0, 1), TF_SIGBITS))) {
+               !is_zero128(u_and(sig, shl128(mk(0, 1), TF_SIGBITS)))) {
         /* A subnormal that rounded up into the smallest normal. Its
          * stored significand is already right; only the exponent
          * changes, which is what makes gradual underflow continuous. */
@@ -273,7 +315,7 @@ static long double round_pack(int sign, int exp, u128 sig)
     if (biased == 0)
         return from_bits(sign, 0, sig);
     return from_bits(sign, biased,
-                     sig & (shl128(mk(0, 1), TF_SIGBITS) - mk(0, 1)));
+                     u_and(sig, u_sub(shl128(mk(0, 1), TF_SIGBITS), mk(0, 1))));
 }
 
 /* ---- add and subtract --------------------------------------------------- */
@@ -326,17 +368,17 @@ static long double addsub(long double x, long double y, int negate_y)
     }
 
     if (a.sign == b.sign)
-        return round_pack(a.sign, a.exp, a.sig + b.sig);
+        return round_pack(a.sign, a.exp, u_add(a.sig, b.sig));
 
     /* Opposite signs: subtract the smaller magnitude from the larger,
      * and the result takes the larger's sign. An exact cancellation is
      * +0, which is the one case where the sign is decided by the
      * rounding mode rather than by the operands. */
-    if (a.sig == b.sig)
+    if (u_eq(a.sig, b.sig))
         return tf_zero(0);
-    if (a.sig > b.sig)
-        return round_pack(a.sign, a.exp, a.sig - b.sig);
-    return round_pack(b.sign, b.exp, b.sig - a.sig);
+    if (u_gt(a.sig, b.sig))
+        return round_pack(a.sign, a.exp, u_sub(a.sig, b.sig));
+    return round_pack(b.sign, b.exp, u_sub(b.sig, a.sig));
 }
 
 long double __addtf3(long double a, long double b) { return addsub(a, b, 0); }
@@ -411,10 +453,11 @@ long double __multf3(long double x, long double y)
      * BEFORE the rounding that was supposed to use it, which is why the
      * exponent still looked right. */
     {
-        u128 folded = shl128(hi, 19) | shr128(lo, 109);
-        int sticky = !is_zero128(lo & (shl128(mk(0, 1), 109) - mk(0, 1)));
+        u128 folded = u_or(shl128(hi, 19), shr128(lo, 109));
+        int sticky = !is_zero128(u_and(lo, u_sub(shl128(mk(0, 1), 109),
+                                                 mk(0, 1))));
         return round_pack(sign, a.exp + b.exp + 109,
-                          folded | (u128)(unsigned)sticky);
+                          u_or(folded, mk(0, (unsigned)sticky)));
     }
 }
 
@@ -457,16 +500,16 @@ long double __divtf3(long double x, long double y)
     quo = mk(0, 0);
     for (i = 0; i < TF_SIGBITS + 4; i++) {
         quo = shl128(quo, 1);
-        if (rem >= den) {
-            rem = rem - den;
-            quo = quo | mk(0, 1);
+        if (!u_gt(den, rem)) {
+            rem = u_sub(rem, den);
+            quo = u_or(quo, mk(0, 1));
         }
         rem = shl128(rem, 1);
     }
     /* Anything left over means the quotient was not exact, which the
      * sticky bit has to say or a tie rounds the wrong way. */
     if (!is_zero128(rem))
-        quo = quo | mk(0, 1);
+        quo = u_or(quo, mk(0, 1));
 
     /* The loop produced 116 bits of quotient with the FIRST one at the
      * top, so quo = (a.sig / b.sig) * 2^115 -- 115 and not 116, because
@@ -505,7 +548,7 @@ static int compare(long double x, long double y, int nan_result)
         else if (a.cls == TF_ZERO)              m = b.cls == TF_ZERO ? 0 : -1;
         else if (b.cls == TF_ZERO)              m = 1;
         else if (a.exp != b.exp)                m = a.exp > b.exp ? 1 : -1;
-        else if (a.sig != b.sig)                m = a.sig > b.sig ? 1 : -1;
+        else if (!u_eq(a.sig, b.sig))           m = u_gt(a.sig, b.sig) ? 1 : -1;
         else                                    m = 0;
         return a.sign ? -m : m;
     }
@@ -724,6 +767,8 @@ long double __floatditf(s64 a)
 long double __floatsitf(int a)  { return __floatditf((s64)a); }
 long double __floatunsitf(u32 a) { return __floatunditf((u64)a); }
 
+/* The conversions to and from __int128, where there is one. */
+#if defined(__SIZEOF_INT128__) && !defined(SOFTTF_PAIRS)
 long double __floatuntitf(u128 a)
 {
     if (is_zero128(a)) return tf_zero(0);
@@ -756,6 +801,8 @@ long double __floattitf(s128 a)
 /* Truncation toward zero, as a cast requires. Out of range saturates,
  * for the reason fp128.c gives: it is undefined in C, and an answer
  * that grows with its input is one a reader can follow. */
+#endif
+
 static u128 to_u128(long double x, int *neg_out)
 {
     struct tf a = unpack(x);
@@ -777,6 +824,7 @@ static u128 to_u128(long double x, int *neg_out)
     return shl128(a.sig, shift);
 }
 
+#if defined(__SIZEOF_INT128__) && !defined(SOFTTF_PAIRS)
 u128 __fixunstfti(long double x)
 {
     int neg;
@@ -811,6 +859,8 @@ s128 __fixtfti(long double x)
         return w.s;
     }
 }
+
+#endif
 
 u64 __fixunstfdi(long double x)
 {

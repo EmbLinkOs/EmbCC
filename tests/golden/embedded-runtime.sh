@@ -21,11 +21,12 @@
 # in src/arch/<backend>/*.c that is spelled like a libgcc helper, plus the
 # complex helpers src/sema/sema.c emits. So a new call site in a backend is
 # checked the day it is written, without anyone remembering to add it here.
-# Only a target with __int128 reaches the 128-bit helpers -- the `ti` and `tf`
-# routines, and the long-double complex pair __multc3/__divtc3 -- because only
-# there is a 128-bit value two registers (RV64). Elsewhere `long double` is no
-# wider than `double`, or is binary128 the backend refuses (RV32, which will
-# want a by-reference runtime of its own when it is lowered).
+# The 128-bit helpers are asked of the targets that can reach them, by what
+# the target's own predefined macros say it has: the `ti` routines where
+# there is an __int128 (RV64), the `tf` routines and the long-double complex
+# pair __multc3/__divtc3 where `long double` is binary128 (RV32 and RV64;
+# elsewhere it is no wider than `double`), and the 64-bit divides only where
+# a register is 32 bits.
 set -u
 echo "TEST-MARKER embedded-runtime"
 . "$(dirname "$0")/../lib.sh"
@@ -68,11 +69,16 @@ for triple in avr thumbv7m-none-eabi thumbv7em-none-eabi thumbv8m.main-none-eabi
         fail=1
     fi
 
-    # (and a 64-bit divide is a call only where a register is 32 bits)
-    if "$EMBCC" --target="$triple" --dump-predef | grep -q __SIZEOF_INT128__
-    then wide="__multc3 __divtc3"; drop='^__u?(div|mod)di3$'
-    else wide=""; drop='^__[a-z]*(tf|ti)'
+    pd=$("$EMBCC" --target="$triple" --dump-predef)
+    drop='^$'; wide=""
+    echo "$pd" | grep -q __SIZEOF_INT128__ ||
+        drop="$drop|^__([a-z]*ti[0-9]|float(un)?ti[a-z]+|fix(uns)?[a-z]+ti)\$"
+    if echo "$pd" | grep -q '__LDBL_MANT_DIG__ 113'
+    then wide="__multc3 __divtc3"
+    else drop="$drop|tf"
     fi
+    echo "$pd" | grep -q '__SIZEOF_POINTER__ 8' &&
+        drop="$drop|^__u?(div|mod)di3\$"
     names=$( { grep -ohE '"__[a-z0-9]+"' src/arch/$be/*.c | tr -d '"' \
                  | grep -E "$pat" | grep -vE "$drop"; echo "$shared"
                for w in $wide; do echo "$w"; done; } | sort -u)

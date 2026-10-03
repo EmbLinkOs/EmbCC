@@ -25,14 +25,12 @@
 #include "rt.h"
 
 /* Only the targets whose long double is a type of its own: x86-64, aarch64,
- * and RV64, whose binary128 is softtf.c's as aarch64's is. On the other
- * embedded targets `long double` is the same eight bytes as `double`
- * (ARMv7-M, ARMv8-M), the same FOUR as `float` (AVR), or binary128 that
- * the backend refuses by name (RV32) -- so there is no wider type for the
- * complex half below to be arithmetic on. It was built unconditionally
- * and failed on all four. */
-#if defined(__x86_64__) || defined(__aarch64__) || \
-    (defined(__riscv) && __riscv_xlen == 64)
+ * and RISC-V at both widths, whose binary128 is softtf.c's as aarch64's
+ * is. On the other embedded targets `long double` is the same eight bytes
+ * as `double` (ARMv7-M, ARMv8-M) or the same FOUR as `float` (AVR), so
+ * there is no wider type for the complex half below to be arithmetic on.
+ * It was built unconditionally and failed on all of them. */
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__riscv)
 
 #ifdef __x86_64__
 

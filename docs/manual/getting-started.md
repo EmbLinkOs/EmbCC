@@ -114,7 +114,7 @@ below builds `embcc` first if it is out of date.
 | `libcxx` | `libcxx-x86_64` and `libcxx-aarch64` | |
 | `libc-linux-all` | `libc-linux` and both Linux C++ runtimes | |
 | `rt-embedded` | `build/libc/TRIPLE/librt.a` for `avr`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` and `riscv32-unknown-elf` | the embedded targets |
-| `libc-embedded` | `build/libc/TRIPLE/libc.a` for `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` and `riscv64-unknown-elf` | the embedded targets, with no operating system |
+| `libc-embedded` | `build/libc/TRIPLE/libc.a` for `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf`, `riscv32-unknown-elf` and `riscv64-unknown-elf` | the embedded targets, with no operating system |
 | `libc-emblinkos` | `build/libc/emblinkos/libc.a` | EmbLinkOS; needs the EmbLinkOS source tree (`make libc-emblinkos EMBLINKOS=/path/to/EmbLinkOs`, default `$HOME/EmbLinkOs`) |
 
 There is no compiler runtime for `riscv64-unknown-elf`. The libraries and
@@ -499,8 +499,7 @@ make libc-embedded rt-embedded
 ```
 
 It is not built for `avr`, where the library's two-byte locks are not
-one access, or for `riscv32-unknown-elf`, whose 128-bit `long double`
-the backend does not lower yet.
+one access.
 
 ### x86-64 and AArch64 under QEMU
 
