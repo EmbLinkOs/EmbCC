@@ -11,6 +11,9 @@ extern "C" {
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 #define RAND_MAX 2147483647
+/* The locale's longest multibyte character. There is one locale, and
+ * its encoding is UTF-8. */
+#define MB_CUR_MAX ((size_t)4)
 
 typedef struct { int quot, rem; } div_t;
 typedef struct { long quot, rem; } ldiv_t;

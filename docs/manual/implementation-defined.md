@@ -888,7 +888,7 @@ library's scope and the rest of its behavior are in
 | Item | EmbCC's C library |
 |---|---|
 | Null pointer constant `NULL` (7.19) | `((void *)0)` |
-| `max_align_t` (7.19) | not declared in C; declared by `<stddef.h>` in C++ only |
+| `max_align_t` (7.19) | a structure of a `long long` and a `long double`, as GCC's; 16-byte aligned on x86-64, AArch64 and RISC-V, 8 on Cortex-M, 1 on AVR |
 | Output of a failed `assert` (7.2.1.1) | `FILE:LINE: FUNCTION: Assertion `EXPR' failed.` on standard error, then `abort()` |
 | `abort` (7.22.4.1) | flushes open streams and ends the program with status 134; it does not raise `SIGABRT` |
 | `EXIT_SUCCESS`, `EXIT_FAILURE` (7.22.4.4) | 0 and 1 |
@@ -898,17 +898,12 @@ library's scope and the rest of its behavior are in
 | `errno` values (7.5) | the traditional POSIX numbers |
 | Locales (7.11) | one: `"C"`. `setlocale` accepts `"C"`, `"POSIX"` and `""` |
 | Multibyte encoding (7.22.7, 7.29.6) | UTF-8; overlong forms, surrogates and values above U+10FFFF are rejected |
-| `MB_LEN_MAX` (5.2.4.2.1) | 1, although the multibyte encoding is UTF-8 |
-| `MB_CUR_MAX` (7.22) | not defined by `<stdlib.h>` |
+| `MB_LEN_MAX` (5.2.4.2.1) | 4, the longest UTF-8 sequence |
+| `MB_CUR_MAX` (7.22) | 4 |
 | `printf` of a null `%s`, `%p` (7.21.6.1) | `(null)`, `(nil)` |
 | `system` (7.22.4.8) | runs nothing; returns 0 for `system(NULL)` and −1 otherwise |
 | Time zone (7.27) | none: `localtime` is `gmtime` |
 | `fesetround`, floating-point exception flags (7.6) | x86-64 and AArch64 only |
-
-<!-- Reported to the lead: MB_LEN_MAX is 1 in include/limits.h while the
-     library's multibyte encoding is UTF-8 (MB_CUR_MAX must not exceed
-     MB_LEN_MAX), and MB_CUR_MAX is missing from lib/libc/include/stdlib.h
-     (`int a = MB_CUR_MAX;` is error E0001). -->
 
 ## Architecture
 
@@ -1033,5 +1028,3 @@ requires:
 - An enumeration constant outside the range of `int` is accepted
   without a diagnostic, as C23 allows
   ([Structures](#structures-unions-enumerations-and-bit-fields)).
-- `max_align_t` is not declared in C, `MB_CUR_MAX` is not defined, and
-  `MB_LEN_MAX` is 1 ([Library functions](#library-functions)).
