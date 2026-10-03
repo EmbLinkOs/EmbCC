@@ -74,6 +74,11 @@ static void formatting(void)
     }
     printf("%f %e %g %F\n", (double)INFINITY, -(double)INFINITY,
            (double)NAN, (double)INFINITY);
+    /* long double through the varargs: x87 on the reference, binary128
+     * on RISC-V, a double on Cortex-M -- so only values all three hold
+     * exactly, which print the same in decimal */
+    printf("%Lf %.3Le %Lg %.1Lf\n", 1.5L, 1234.5L, 0.25L,
+           strtold("-6.125", NULL) * 2);
     n = snprintf(b, 8, "%d-%s", 123456, "xyz");
     printf("snprintf %d [%s]\n", n, b);
     n = snprintf(NULL, 0, "%.20f", 1.0 / 3.0);

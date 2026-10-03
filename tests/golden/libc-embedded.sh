@@ -1,6 +1,6 @@
 #!/bin/sh
-# EmbCC's C library on the boards: RV64, a Cortex-M3, a Cortex-M4F with the
-# hard-float calling convention and a Cortex-M33 (ARMv8-M), each image
+# EmbCC's C library on the boards: RV32, RV64, a Cortex-M3, a Cortex-M4F
+# with the hard-float calling convention and a Cortex-M33 (ARMv8-M), each image
 # built with lib/libc on its bare-metal backend (tools/build-libc.sh) and
 # run under QEMU -- against the SAME library built for x86-64.
 #
@@ -48,14 +48,14 @@ grep -q '==END==' "$out/ref.txt" || {
     exit 1; }
 
 # ---- the boards ---------------------------------------------------------
-# Not RV32 yet: its long double is binary128 passed by reference, which the
-# backend refuses, so printf (format.c) and the long double math do not
-# compile there. Not AVR: a two-byte atomic is two accesses on that part,
-# and lib/libc's locks are refused for it.
+# Not AVR: a two-byte atomic is two accesses on that part, and lib/libc's
+# locks are refused for it.
 fail=0
-for t in riscv64-unknown-elf thumbv7m-none-eabi thumbv7em-none-eabihf \
-         thumbv8m.main-none-eabi; do
+for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
+         thumbv7em-none-eabihf thumbv8m.main-none-eabi; do
     case $t in
+        riscv32*) H=tests/harness/riscv
+                  Q="qemu-system-riscv32 -M virt -bios none -nographic -m 8" ;;
         riscv64*) H=tests/harness/riscv
                   Q="qemu-system-riscv64 -M virt -bios none -nographic -m 8" ;;
         thumbv7m*) H=tests/harness/thumb

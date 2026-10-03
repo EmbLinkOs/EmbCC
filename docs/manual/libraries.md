@@ -447,7 +447,7 @@ scratch.
 | `make libc-linux-x86_64` | C library with the Linux backend, `crt1.o`, and `librt.a`, for `x86_64-linux-gnu` | `build/libc/linux-x86_64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux-aarch64` | the same for `aarch64-linux-gnu` | `build/libc/linux-aarch64/{libc.a,crt1.o,librt.a}` |
 | `make libc-linux` | both Linux C libraries | |
-| `make libc-embedded` | C library with the bare-metal backend, `-Os`, for each embedded target it builds on (all but `avr` and `riscv32-unknown-elf`) | `build/libc/TRIPLE/libc.a` |
+| `make libc-embedded` | C library with the bare-metal backend, `-Os`, for each embedded target it builds on (all but `avr`) | `build/libc/TRIPLE/libc.a` |
 | `make libc-emblinkos EMBLINKOS=DIR` | C library with the EmbLinkOS backend, `-O2`; needs `DIR/user/lib/embk.h` (default `DIR` is `$HOME/EmbLinkOs`) | `build/libc/emblinkos/libc.a` |
 | `make libcxx-x86_64`, `make libcxx-aarch64` | C++ library for `x86_64-elf`, `aarch64-elf`, `-O2` | `build/libcxx/x86_64/libcxx.a`, `build/libcxx/aarch64/libcxx.a` |
 | `make libcxx` | both of the above | |

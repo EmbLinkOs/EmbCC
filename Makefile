@@ -485,12 +485,11 @@ rt-embedded: embcc embar
 # (lib/libc/os/baremetal), beside each one's librt.a. tools/build-libc.sh is
 # the recipe, and tests/golden/libc-embedded.sh runs what it builds on the
 # boards. Not avr: a two-byte atomic is two accesses there, and the library's
-# locks are refused for it. Not riscv32: its long double is binary128 passed
-# by reference, which the backend does not lower yet, so printf does not
-# compile there.
+# locks are refused for it.
 LIBC_EMBEDDED := thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
-                 thumbv8m.main-none-eabihf riscv64-unknown-elf
+                 thumbv8m.main-none-eabihf riscv32-unknown-elf \
+                 riscv64-unknown-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \
