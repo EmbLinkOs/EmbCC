@@ -226,7 +226,7 @@ Options are parsed in the argument loop of `main` in
 |---|---|
 | EmbCC can honour it | implement it, and list it in `print_options` (the `--help` text) |
 | EmbCC already behaves this way | accept it in the block that accepts such flags, and add the reason to that block's comment |
-| accepting it unimplemented costs nothing (the objects are still correct) | accept it, and say in `--help` that it does nothing yet (`-ffunction-sections` is the model) |
+| accepting it unimplemented costs nothing (the objects are still correct) | accept it, and say in `--help` that it does nothing yet (`-fstrict-aliasing` is the model) |
 | it promises something EmbCC does not do | refuse it by name with the reason, in the refusal block |
 
 An unknown argument is already an error (`unknown argument '...'`); never

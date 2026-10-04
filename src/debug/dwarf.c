@@ -28,6 +28,7 @@
 #define DW_AT_language        0x13
 #define DW_AT_comp_dir        0x1b
 #define DW_AT_producer        0x25
+#define DW_AT_ranges          0x55
 #define DW_AT_encoding        0x3e
 #define DW_AT_frame_base      0x40
 #define DW_AT_type            0x49
@@ -92,6 +93,7 @@
 #define AB_ARRAY        17   /* array_type; one subrange child */
 #define AB_SUBRANGE     18   /* subrange_type with its upper bound */
 #define AB_SUBRANGE_NB  19   /* subrange_type, no bound ([] / a VLA) */
+#define AB_CU_RANGES    20   /* compile_unit whose code is in several sections */
 
 /* Line-program standard opcodes */
 #define DW_LNS_copy           0x01
@@ -183,6 +185,15 @@ static void reloc(struct dwarf_out *out, int in_sec, int at_off, int width,
     r->width = width;
     r->target = target;
     r->addend = addend;
+    r->end = 0;
+}
+
+/* The same for the address one past a function's code (dwarf.h). */
+static void reloc_end(struct dwarf_out *out, int in_sec, int at_off,
+                      int width, long addend)
+{
+    reloc(out, in_sec, at_off, width, DWTGT_TEXT, addend);
+    out->relocs[out->nrelocs - 1].end = 1;
 }
 
 /* One abbreviation: code, tag, has-children, then (attr, form) pairs ended by
@@ -208,6 +219,13 @@ static void emit_abbrev(struct dbuf *b)
         DW_AT_producer,  DW_FORM_string, DW_AT_language, DW_FORM_data2,
         DW_AT_name,      DW_FORM_string, DW_AT_comp_dir, DW_FORM_string,
         DW_AT_low_pc,    DW_FORM_addr,   DW_AT_high_pc,  DW_FORM_addr,
+        DW_AT_stmt_list, DW_FORM_sec_offset };
+    /* the base address 0 and the list: DWARF 4's way of saying a unit's
+     * code is in more than one place (2.17.3) */
+    static const unsigned char cu_ranges[] = {
+        DW_AT_producer,  DW_FORM_string, DW_AT_language, DW_FORM_data2,
+        DW_AT_name,      DW_FORM_string, DW_AT_comp_dir, DW_FORM_string,
+        DW_AT_low_pc,    DW_FORM_addr,   DW_AT_ranges,   DW_FORM_sec_offset,
         DW_AT_stmt_list, DW_FORM_sec_offset };
     static const unsigned char sub[] = {
         DW_AT_name,       DW_FORM_string, DW_AT_low_pc,     DW_FORM_addr,
@@ -260,6 +278,7 @@ static void emit_abbrev(struct dbuf *b)
     one_abbrev(b, AB_ARRAY,       DW_TAG_array_type,     DW_CHILDREN_yes, array, 1);
     one_abbrev(b, AB_SUBRANGE,    DW_TAG_subrange_type,  DW_CHILDREN_no, subrange, 1);
     one_abbrev(b, AB_SUBRANGE_NB, DW_TAG_subrange_type,  DW_CHILDREN_no, subrange, 0);
+    one_abbrev(b, AB_CU_RANGES,   DW_TAG_compile_unit,   DW_CHILDREN_yes, cu_ranges, 7);
     db_uleb(b, 0);                       /* end of the abbrev table */
 }
 
@@ -465,7 +484,7 @@ static void loc_fbreg(struct dbuf *b, long off)
  * subprogram DIE per function carrying its parameters and locals. --- */
 static void emit_info(struct dwarf_out *out, struct dbuf *b,
                       struct ir_unit *iu, const char *filename,
-                      long text_lo, long text_hi)
+                      long text_lo, long text_hi, int split)
 {
     int len_at = b->len;
     db_u32(b, 0);                        /* unit_length — backpatched */
@@ -475,15 +494,21 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     db_u32(b, 0);                        /* debug_abbrev_offset (reloc) */
     db_u8(b, (unsigned char)addr_bytes());   /* address_size */
 
-    db_uleb(b, AB_CU);
+    db_uleb(b, split ? AB_CU_RANGES : AB_CU);
     db_str(b, "EmbCC");                  /* DW_AT_producer */
     db_u16(b, DW_LANG_C99);              /* DW_AT_language */
     db_str(b, filename);                 /* DW_AT_name */
     db_str(b, ".");                      /* DW_AT_comp_dir (deterministic) */
-    reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, text_lo);
-    db_addr(b, 0);                        /* DW_AT_low_pc (reloc) */
-    reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, text_hi);
-    db_addr(b, 0);                        /* DW_AT_high_pc (reloc) */
+    if (split) {
+        db_addr(b, 0);                    /* DW_AT_low_pc: base 0 */
+        reloc(out, DWSEC_INFO, b->len, 4, DWTGT_RANGES, 0);
+        db_u32(b, 0);                     /* DW_AT_ranges (reloc) */
+    } else {
+        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, text_lo);
+        db_addr(b, 0);                    /* DW_AT_low_pc (reloc) */
+        reloc_end(out, DWSEC_INFO, b->len, addr_bytes(), text_hi);
+        db_addr(b, 0);                    /* DW_AT_high_pc (reloc) */
+    }
     reloc(out, DWSEC_INFO, b->len, 4, DWTGT_LINE, 0);
     db_u32(b, 0);                        /* DW_AT_stmt_list (reloc) */
 
@@ -509,7 +534,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         if (rtoff >= 0) db_u32(b, (unsigned long)rtoff);  /* return type */
         reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, lo);
         db_addr(b, 0);                   /* low_pc */
-        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_TEXT, hi);
+        reloc_end(out, DWSEC_INFO, b->len, addr_bytes(), hi);
         db_addr(b, 0);                   /* high_pc */
         /* frame_base. x86-64 and aarch64 set a frame pointer in the
          * prologue and never move it, so it is one byte and no offset.
@@ -653,8 +678,8 @@ static void emit_line(struct dwarf_out *out, struct dbuf *b,
     b->p[len_at + 3] = (unsigned char)(ulen >> 24);
 }
 
-void dwarf_emit(struct ir_unit *iu, const char *filename,
-                struct dwarf_out *out)
+static void emit_all(struct ir_unit *iu, const char *filename,
+                     struct dwarf_out *out, int split)
 {
     /* Bound the code: low = first function's offset (0 in practice),
      * high = the end of the last function. Covers exactly the code that can
@@ -671,14 +696,43 @@ void dwarf_emit(struct ir_unit *iu, const char *filename,
         seen = 1;
     }
 
-    struct dbuf ab = { 0, 0, 0 }, in = { 0, 0, 0 }, ln = { 0, 0, 0 };
+    struct dbuf ab = { 0, 0, 0 }, in = { 0, 0, 0 }, ln = { 0, 0, 0 },
+                rg = { 0, 0, 0 };
     emit_abbrev(&ab);
-    emit_info(out, &in, iu, filename, lo, hi);
+    emit_info(out, &in, iu, filename, lo, hi, split);
     emit_line(out, &ln, iu, filename);
+    if (split) {
+        /* .debug_ranges: [begin, end) per function, each relocated into
+         * the function's own section; a pair of zeros ends the list */
+        for (int n = 0; n < iu->nfuncs; n++) {
+            if (iu->funcs[n].src->code_len <= 0) continue;
+            long f_lo = iu->funcs[n].src->code_off;
+            reloc(out, DWSEC_RANGES, rg.len, addr_bytes(), DWTGT_TEXT, f_lo);
+            db_addr(&rg, 0);
+            reloc_end(out, DWSEC_RANGES, rg.len, addr_bytes(),
+                      f_lo + iu->funcs[n].src->code_len);
+            db_addr(&rg, 0);
+        }
+        db_addr(&rg, 0);
+        db_addr(&rg, 0);
+    }
 
     out->sec[DWSEC_ABBREV] = ab.p; out->seclen[DWSEC_ABBREV] = ab.len;
     out->sec[DWSEC_INFO]   = in.p; out->seclen[DWSEC_INFO]   = in.len;
     out->sec[DWSEC_LINE]   = ln.p; out->seclen[DWSEC_LINE]   = ln.len;
+    out->sec[DWSEC_RANGES] = rg.p; out->seclen[DWSEC_RANGES] = rg.len;
+}
+
+void dwarf_emit(struct ir_unit *iu, const char *filename,
+                struct dwarf_out *out)
+{
+    emit_all(iu, filename, out, 0);
+}
+
+void dwarf_emit_split(struct ir_unit *iu, const char *filename,
+                      struct dwarf_out *out)
+{
+    emit_all(iu, filename, out, 1);
 }
 
 void dwarf_free(struct dwarf_out *out)

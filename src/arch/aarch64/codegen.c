@@ -1963,6 +1963,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     if (!target_opt_size())
         align16(t);
     f->code_off = t->len;
+    f->code_align = target_opt_size() ? 4 : 16;
 
     /* A leaf with nothing on the stack needs no frame record: no call
      * overwrites x30, and x29 is only ever the frame base of a function

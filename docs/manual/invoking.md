@@ -40,9 +40,9 @@ embcc --print-search-dirs | --explain [ID]
 embcc --emit-empty-object FILE
 ```
 
-EmbCC compiles at most one source file per invocation, and links any
-number of objects, archives and `-l` libraries with it. A second source
-is refused with `embcc: error: more than one source file`. A command line with no input file and none of the query options
+EmbCC compiles any number of source files in one command, and links them
+with any number of objects, archives and `-l` libraries (see
+[Several source files](#several-source-files)). A command line with no input file and none of the query options
 ends with `embcc: error: no input file`. Running `embcc` with no arguments
 prints the usage line and exits with status 1.
 
@@ -59,7 +59,7 @@ the full entry.
 
 | Section | Options |
 |---|---|
-| [Overall](#overall-options) | `-c` `-S` `-E` `-o FILE` `-x LANG` `-fsyntax-only` `--emit-c` `--emit-interfaces` `--emit-empty-object FILE` `--help` `-h` `--help-warnings` `--version` `-dumpmachine` `--dump-predef` `--print-search-dirs` `--explain[=ID]` |
+| [Overall](#overall-options) | `-c` `-S` `-E` `-o FILE` `-j N` `-x LANG` `-fsyntax-only` `--emit-c` `--emit-interfaces` `--emit-empty-object FILE` `--help` `-h` `--help-warnings` `--version` `-dumpmachine` `--dump-predef` `--print-search-dirs` `--explain[=ID]` |
 | [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-ffreestanding` `-fno-builtin` `-fwrapv` `-fstrict-aliasing` `-fno-strict-aliasing` `-fno-common` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
 | [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fdiagnostics-parseable-fixits` `--fix` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
@@ -91,10 +91,34 @@ The driver decides what to do with the input file from its suffix, unless
 | `.ir` | EmbIR text; meaningful only to [`embcc inspect ir`](#embcc-inspect-stage-file-option) |
 | `.o` `.obj` `.a` | an object or an archive, handed to the link as it is |
 
-One command compiles at most one source; any number of objects, archives
-and `-l` libraries may go with it to the link. Two sources are refused
-with `embcc: error: more than one source file ('a.c' and 'b.c'): one
-command compiles one; compile each with -c and link the objects`.
+### Several source files
+
+```sh
+embcc -O2 main.c uart.c timer.c -lm -o prog      # compile all three, link
+embcc -O2 -j4 -c *.c                             # main.o uart.o timer.o ...
+```
+
+Each source is compiled by a run of `embcc` of its own, with the same
+options, as GCC's driver runs its compiler proper. Without `-c`, `-S` or
+`-E` the objects are temporaries beside the output (`OUT.embcc-tmp-N.o`),
+linked in command-line order among the other inputs and then removed;
+with `-c` or `-S` each source gets its own `NAME.o` or `NAME.s` in the
+working directory, and `-o` is refused, since it names one file; with
+`-E` they are printed one after the other. If any source fails, nothing
+is linked and the temporaries are removed. `-fsyntax-only` and `--fix`
+check each one. `embcc inspect`, `--why`, `--emit-c` and
+`--emit-interfaces` take one source.
+
+`-j N` (or `-jN`) compiles N sources at once; `-j` alone, one per
+processor. The default is one at a time, so the diagnostics come out in
+command-line order. The image does not depend on `-j`.
+
+This needs a host that can run a program. EmbCC built with
+`PROCESS=none` -- as it is for EmbLinkOS, which has no fork/exec --
+compiles one source per command, and refuses a second with
+`embcc: error: more than one source file ('a.c' and 'b.c'), and this
+host cannot run a compiler for each (EmbCC was built with
+PROCESS=none): compile each with -c and link the objects`.
 
 Anything else, including `.i` and `.h`, is not an input file to EmbCC.
 Without `-x` such an argument is refused as
@@ -181,6 +205,13 @@ output, and `-c -o -` is refused:
 ```text
 embcc: error: `-o -` writes to stdout, which -E, -S and --emit-interfaces support but an object file does not; name a file
 ```
+
+### `-j N`, `-jN`, `-j`
+
+With several source files, compile `N` of them at once; `-j` alone, one
+per processor. The default is one at a time. The objects and the image
+are the same whatever `N` is; only the order the diagnostics come out in
+can differ. See [Several source files](#several-source-files).
 
 ### `-x LANGUAGE`
 
@@ -987,10 +1018,15 @@ found). The inline-assembly vocabulary of each target is listed in
 
 The assembler follows GNU as for each target:
 
-- **Comments.** `#` starts a comment, except on ARM and AArch64, where it
-  is an immediate's prefix (`mov r0, #1`) and starts a comment only as a
-  line's first character. `@` is ARM's comment character and `;` AVR's;
-  `//` works everywhere.
+- **Comments.** `/* ... */` anywhere; `#` starts a comment, except on
+  ARM and AArch64, where it is an immediate's prefix (`mov r0, #1`) and
+  starts a comment only as a line's first character. `@` is ARM's comment
+  character and `;` AVR's (elsewhere `;` separates statements); `//`
+  works everywhere.
+- **Macros and expressions.** `.macro`, `.rept`, `.irp`, the `.if`
+  family, `.include`, `.equ`/`.set`/`.thumb_set`, named sections with
+  flags, and GNU as's expressions; the full list is in
+  [embas](tools/embas.md#gnu-syntax-assembly).
 - **Alignment.** `.align N` and `.p2align N` align to 2^N bytes, and
   `.balign N` to N bytes. Padding in code is the target's no-op
   instruction, and zero bytes in data.
@@ -998,9 +1034,8 @@ The assembler follows GNU as for each target:
   barrier option or floating-point register on ARM, and a CSR name or a
   fence set on RISC-V, is an operand and never a symbol.
 - **Symbols.** On ARM, a symbol is reached by `bl sym`, `b sym`,
-  `ldr rd, =sym` (assembled as `movw`/`movt` with `R_ARM_THM_MOVW_ABS_NC`
-  and `R_ARM_THM_MOVT_ABS`), `movw rd, #:lower16:sym`,
-  `movt rd, #:upper16:sym` and `.word sym`. `ldr rd, label` loads a word
+  `ldr rd, =sym` (a load from the literal pool, as GNU as makes it),
+  `movw rd, #:lower16:sym`, `movt rd, #:upper16:sym` and `.word sym`. `ldr rd, label` loads a word
   from a label defined in the same file. `.thumb_func`, or
   `.type sym, %function`, makes a label a Thumb function: its symbol
   carries the interworking bit, which a vector table entry needs. A symbol
@@ -1124,11 +1159,14 @@ option of the same name:
 | `-L DIR` | a directory for `-l` and for the script's `INPUT`/`GROUP`/`INCLUDE` |
 | `-u SYM`, `--undefined=SYM` | treat `SYM` as referenced, so that an archive supplies it |
 | `--orphan-handling=place\|warn\|error` | what to do with a section the script places nowhere |
+| `--gc-sections`, `--no-gc-sections` | drop the sections nothing kept refers to (see [`-ffunction-sections`](#-ffunction-sections--fdata-sections)) |
+| `--print-gc-sections` | name each section dropped, on standard error |
+| `-Map FILE`, `-Map=FILE`, `--Map=FILE` | write a map of where every input went, in GNU ld's format |
+| `--print-memory-usage` | print how full each `MEMORY` region of the script is, as ld does |
 | `-Tstack ADDR`, `-Tstack=ADDR` | passed on, and refused by `embld` for x86-64: `embld: -Tstack is a RISC-V option: ...` |
 
 These are accepted and change nothing, because nothing in an image
-`embld` makes depends on them: `--gc-sections`, `--no-gc-sections`,
-`--as-needed`, `--no-as-needed`, `-O0`, `-O1`, `-O2`, `--build-id`,
+`embld` makes depends on them: `--as-needed`, `--no-as-needed`, `-O0`, `-O1`, `-O2`, `--build-id`,
 `--build-id=STYLE`, `--no-undefined`, `-s`, `--strip-all`, `-S`,
 `--strip-debug`, and `-z` followed by `noexecstack`, `relro`, `norelro`,
 `now` or `lazy` as a separate word (`-Wl,-z,now`). The image keeps its
@@ -1137,11 +1175,11 @@ symbol table under `-s` and `--strip-all`.
 Any other linker option is refused, and nothing is linked:
 
 ```text
-embcc: error: linker option '-T' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for
+embcc: error: linker option '--section-start=.text=0' is not one EmbLD has (it takes -T, -L, -u, -e, -Ttext, -Tdata, -Tstack, --rom-limit, --lma-offset, --orphan-handling, --gc-sections, --print-gc-sections, -Map and --print-memory-usage); dropping it could build a different image from the one asked for
 ```
 
-This covers linker scripts (`-T`), `--section-start`, `-Map`, `-zKEYWORD`
-written as one word, and `-z` with any other keyword.
+This covers `--section-start`, `-zKEYWORD` written as one word, and `-z`
+with any other keyword.
 
 ### Linker options
 
@@ -1189,13 +1227,38 @@ a frame pointer; the ARM, RISC-V and AVR backends never use one.
 Accepted. EmbCC does not generate code that calls through a procedure
 linkage table.
 
+### `-fgnuc-version=MAJOR[.MINOR[.PATCH]]`
+
+Define `__GNUC__`, `__GNUC_MINOR__`, `__GNUC_PATCHLEVEL__` and
+`__GNUC_STDC_INLINE__` in a C unit, as that version of GCC, the way clang
+does by default. EmbCC does not by default, because a header that sees
+`__GNUC__` may take paths that need GCC itself. Vendor headers that pick
+their compiler support by it need it: CMSIS's `cmsis_compiler.h` stops at
+`#error Unknown compiler` without it, and compiles with
+`-fgnuc-version=4.2.1` (see [Embedded programming](embedded.md#cmsis-and-vendor-files)).
+`0` leaves the macros undefined. A C++ unit always presents itself as
+g++ (see [C++](cxx.md#compiler-identity)).
+
 ### `-ffunction-sections`, `-fdata-sections`
 
-Accepted and not implemented: functions and data are not placed in
-sections of their own, so a linker's section garbage collection has
-nothing to remove. The objects are correct either way. A function or
-variable can be placed in a named section with
-`__attribute__((section("NAME")))`.
+Put each function in a section of its own, `.text.NAME`, and each object
+in `.data.NAME`, `.rodata.NAME` or `.bss.NAME`, as GCC names them, so that
+the linker's `--gc-sections` can drop whatever the program never reaches:
+
+```sh
+embcc --target=thumbv7em-none-eabi -O2 -ffunction-sections -fdata-sections -c main.c
+embcc --target=thumbv7em-none-eabi -T board.ld -Wl,--gc-sections startup.o main.o -o fw.elf
+```
+
+A function or object that names its own section keeps it, and so does a
+thread-local object (`.tdata`/`.tbss`). String literals stay in the
+unit's `.rodata`. A call from one function to another in the same unit
+becomes a relocation, as it is between units; on RISC-V that is the
+eight-byte `call` instead of a four-byte `jal`, because `embld` does not
+relax. `-g` works with either option: the unit's code is described by
+`DW_AT_ranges`. ELF output only; for Mach-O and COFF the options change
+nothing. `-fno-function-sections` and `-fno-data-sections` turn them off.
+What the linker keeps is in [`embld`](tools/embld.md#garbage-collection).
 
 ## Machine-dependent options
 

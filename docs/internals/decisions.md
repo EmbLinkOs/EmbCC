@@ -2,7 +2,7 @@
 
 This page records the standing design decisions of EmbCC: what was decided,
 why, and where a decision has since been revised or superseded. Each has a
-permanent identifier, `D-001` to `D-018`, which source comments and tests
+permanent identifier, `D-001` to `D-019`, which source comments and tests
 cite; identifiers are never reused or renumbered. The page is for
 contributors who need to know why the compiler is shaped as it is before
 they change it. A new decision is added at the end with the next free
@@ -32,6 +32,7 @@ decision was revised, the entry says so in its **Status** line.
 | [D-016](#d-016) | RISC-V as two targets and one backend | current |
 | [D-017](#d-017) | A configured default target, compiled in | current |
 | [D-018](#d-018) | AVR, the first 8-bit target | current |
+| [D-019](#d-019) | Running a program is an optional host capability | current |
 
 <a id="d-001"></a>
 ## D-001: EmbCC is a separate, parallel project, not OS work
@@ -454,3 +455,36 @@ byte; dense switches are not lowered to jump tables on this target. The
 ignored with a `-Wattributes` warning. Plain `char` is signed, following
 clang; whether avr-gcc's default agrees has not been checked against
 avr-gcc.
+
+<a id="d-019"></a>
+## D-019: Running a program is an optional host capability
+
+**Decision.** The platform layer gains one optional capability: running
+a program and waiting for it (`plat_can_run`, `plat_run_start`,
+`plat_run_wait`, `plat_ncpus`). The build chooses the implementation --
+`process_spawn.c` (POSIX `posix_spawn`, the default on macOS and Linux)
+or `process_none.c` (`PROCESS=none`: EmbLinkOS, and the default with
+`PLATFORM=iso`). The driver uses it for one thing: several sources in one
+command, each compiled by a run of the driver of its own, `-j N` at a
+time. Nothing else may use it, and where it is absent the driver does
+what it always did -- one source per command, the second refused with
+the way round it.
+
+**Why.** Every Makefile and CMake build hands the compiler several
+sources, and refusing them made EmbCC the one compiler a build had to be
+rewritten for. Compiling them in one process would mean resetting every
+global the front end, the optimizer and the backends keep -- hundreds,
+in every stage -- and a reset that missed one would carry one unit's
+state into the next silently. A process per source has no such state to
+leak, is what GCC's driver does (it runs cc1 per file), and gives
+parallel compiles for free. Threads were considered and rejected for the
+same reason: the stages are not reentrant, and making them so is a much
+larger change than this one. The rule that EmbLinkOS cannot spawn stays
+true and stays respected: the assembler and the linker remain libraries
+in the driver's process, and a host without the capability loses only
+the convenience.
+
+**Status.** Current. `posix_spawn` is the only implementation that runs
+anything; Windows (`CreateProcess`) and EmbLinkOS (should it gain a spawn
+call -- EmbBuild already runs one program per recipe) would each be a
+`process_NAME.c`.

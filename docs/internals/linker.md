@@ -442,10 +442,10 @@ counted.
 
 ### What the linker does not do
 
-- **No garbage collection.** There is no `--gc-sections`. Every allocated
-  section of every object in the link reaches the image. The unit of
-  exclusion is the archive member: a member that is never pulled
-  contributes nothing.
+- **Garbage collection only when asked.** Without `--gc-sections` every
+  allocated section of every object in the link reaches the image, and
+  the unit of exclusion is the archive member. With it, see
+  [Garbage collection](#garbage-collection).
 - **No relaxation.** `R_RISCV_RELAX` and `R_RISCV_ALIGN` are skipped, and
   no instruction sequence is shortened. Alignment padding the assembler
   inserted stays as it is, which is correct because nothing moves.
@@ -453,6 +453,53 @@ counted.
   target is an error naming the limit.
 - **No section sorting** by name, priority or alignment, except where a
   script's `SORT` asks for it.
+
+## Garbage collection
+
+`gc_sections` runs after every input is loaded and every archive member
+pulled, and before layout -- in a script link, after `ls_claim`, because
+that is what knows which sections a `KEEP()` claimed (`insec.keep`). It
+is a mark from roots over a worklist:
+
+1. Each object gets `relsec[]`: the REL/RELA section for each of its
+   sections.
+2. Roots are marked `live`: the entry symbol's section, `-u` and
+   `EXTERN` symbols' sections, `keep` sections, the constructor and
+   destructor arrays by name and by type, notes, `SHF_GNU_RETAIN`,
+   `.eh_frame`, sections named by a referenced `__start_`/`__stop_`
+   symbol, synthetic sections (the RISC-V entry stub), and without a
+   script the vector table group.
+3. A live section's relocations mark the section each symbol is in
+   (`gc_target_insec`: a local symbol's own section, a global's
+   definition). In `.eh_frame`, a relocation at an FDE's `pc_begin`
+   (`eh_is_fde_pc`) is not followed.
+4. When the worklist empties, a section with `SHF_LINK_ORDER` whose
+   `sh_link` section is live is marked, and the loop continues.
+5. Every section not live is `discarded` with `gc` set; in a script
+   link it is taken out of every rule's list. Then each live
+   `.eh_frame` has the FDEs of dropped functions neutralized
+   (`eh_neutralize`): the CIE's FDE pointer encoding is read to find
+   `pc_range`, which is zeroed, and `apply_relocs` skips their
+   `pc_begin` relocation.
+
+Everything downstream already skipped `discarded` sections for
+`/DISCARD/`: layout (`place_osec`, `ls_layout_osec`), the copy into the
+image, the symbol tables (`sym_in_image`), and `apply_relocs`, which
+resolves a DWARF reference into one to 0. A relocation from a live
+section into a collected one cannot happen by construction, and is an
+internal error if it does.
+
+The map file (`write_map`) and `--print-memory-usage` read the final
+layout: for a script, each output section's `vma`, `lma` and claimed
+inputs, and each region's `cur - origin`, which advances for load
+addresses as well as run addresses; without one, the fixed groups'
+bounds. An archive member records the symbol it was pulled for
+(`pulled_for`) and the first object that referred to that symbol
+(`symbol.ref`).
+
+The symbol table is hashed (`sym_find`: FNV-1a, open addressing over
+indices into `syms[]`). It was a linear scan, called per relocation and
+per member symbol on every archive pass.
 
 ## Linker scripts
 
@@ -698,7 +745,8 @@ an object that uses them fails with the unsupported-type error.
 
 | Type | Value written | Field |
 |---|---|---|
-| `R_ARM_ABS32` | `V` (the Thumb bit comes with `S`) | word |
+| `R_ARM_NONE` | nothing: a dependency (`.ARM.exidx` on its personality routine) | none |
+| `R_ARM_ABS32`, `R_ARM_TARGET1` | `V` (the Thumb bit comes with `S`) | word |
 | `R_ARM_REL32` | `V - P` | word |
 | `R_ARM_PREL31` | `(V - P) & 0x7fffffff` | word, bit 31 kept |
 | `R_ARM_THM_CALL`, `R_ARM_THM_JUMP24` | `(S & ~1) + A - (P + 4)` | `bl`/`b.w`, ±16 MiB |
@@ -728,7 +776,8 @@ of the field:
 
 | Type | Addend |
 |---|---|
-| `R_ARM_ABS32`, `R_ARM_REL32`, `R_ARM_PREL31` | the word, as a signed 32-bit value |
+| `R_ARM_ABS32`, `R_ARM_TARGET1`, `R_ARM_REL32` | the word, as a signed 32-bit value |
+| `R_ARM_PREL31` | bits 30:0 of the word, sign-extended |
 | `R_ARM_THM_CALL`, `R_ARM_THM_JUMP24` | the decoded displacement plus 4 (`read_thm_b24`) |
 | `R_ARM_THM_MOVW_ABS_NC`, `R_ARM_THM_MOVT_ABS` | the 16-bit immediate, sign-extended (`read_thm_mov`) |
 | any other | 0 |
@@ -962,11 +1011,12 @@ does not read those objects.
 The driver compiles to `OUT.embcc-tmp.o` beside the output and calls
 `embld_link` with a `struct link_opts` that is zero except for what
 `apply_wl` sets from the `-Wl,` and `-Xlinker` words: `-e`/`--entry`,
-`-Ttext` (and `-Ttext-segment`), `-Tdata`, `-Tstack`, `--rom-limit` and
-`--lma-offset`. Without them the entry is `_start` and the text starts
+`-Ttext` (and `-Ttext-segment`), `-Tdata`, `-Tstack`, `--rom-limit`,
+`--lma-offset`, `-T`, `-L`, `-u`, `--orphan-handling`, `--gc-sections`,
+`--print-gc-sections`, `-Map` and `--print-memory-usage`. Without them the entry is `_start` and the text starts
 at `0x400000`. `apply_wl` accepts the options that change nothing about
-an image EmbLD makes (`--gc-sections`, `-s`, `--build-id`, `-z now` and
-the others listed in
+an image EmbLD makes (`-s`, `--build-id`, `-z now` and the others
+listed in
 [Invoking EmbCC](../manual/invoking.md#-wlargs--xlinker-arg)) and refuses
 any other (`embcc: error: linker option 'OPT' is not one EmbLD has ...`);
 the driver then removes the temporary object and links nothing.

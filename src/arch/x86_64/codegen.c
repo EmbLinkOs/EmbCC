@@ -3075,6 +3075,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     if (!target_opt_size())
         code_align(text, 16, 0x90);
     f->code_off = text->len;
+    f->code_align = target_opt_size() ? 1 : 16;
 
     /* The frame record, then the callee-saved registers, then the rest
      * of the frame. They go out as PUSHES: the save area is the top of

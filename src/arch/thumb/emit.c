@@ -946,6 +946,46 @@ int t_ldr_lit(struct code *c, int rt, long off)
     return 1;
 }
 
+/* LDR (literal) T1: `ldr rt, [pc, #off]`, two bytes, for r0-r7 and a
+ * FORWARD word offset of 0..1020 from Align(pc, 4). 0 when it does not
+ * fit, and the caller takes the four-byte t_ldr_lit. */
+int t_ldr_lit16(struct code *c, int rt, long off)
+{
+    if (rt < 0 || rt > 7 || off < 0 || off > 1020 || (off & 3))
+        return 0;
+    hw(c, 0x4800u | (unsigned)(rt << 8) | (unsigned)(off >> 2));
+    return 1;
+}
+
+/* An assembly file's `ldr rd, =VALUE`, the way GNU as and LLVM's
+ * assembler choose for a constant: MOV.W when it is a modified immediate,
+ * MVN.W when its complement is, MOVW when it fits sixteen bits, and
+ * otherwise a literal -- this returns 0 and the file assembler places
+ * one. None of these sets the flags (an `ldr` does not), which is why the
+ * two-byte `movs` is never one of them. sp and pc take the literal. */
+int t_ldr_const(struct code *c, int rd, unsigned long v)
+{
+    int e;
+    v &= 0xffffffffUL;
+    if (rd == 13 || rd == 15)
+        return 0;
+    if ((e = encode_imm(v)) >= 0) {                     /* MOV.W, S=0 */
+        hw2(c, 0xf04fu | (imm_i(e) << 10),
+               (imm_hi3(e) << 12) | (unsigned)(rd << 8) | imm_lo8(e));
+        return 1;
+    }
+    if ((e = encode_imm(~v & 0xffffffffUL)) >= 0) {     /* MVN.W, S=0 */
+        hw2(c, 0xf06fu | (imm_i(e) << 10),
+               (imm_hi3(e) << 12) | (unsigned)(rd << 8) | imm_lo8(e));
+        return 1;
+    }
+    if (v <= 0xffff) {
+        movw(c, rd, (unsigned)v, 0);
+        return 1;
+    }
+    return 0;
+}
+
 /* RBIT <Rd>, <Rm>: the operand appears TWICE, in both halfwords, which
  * is the encoding and not a typo. */
 void t_rbit(struct code *c, int rd, int rm)

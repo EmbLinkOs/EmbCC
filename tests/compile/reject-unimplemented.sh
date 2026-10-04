@@ -547,12 +547,9 @@ check constexpr-floating \
     'constexpr double d = 1.5;' \
     "takes integer constants"
 
-# A function in a section of its own is laid out apart from .text; -g's
-# compile-unit range cannot span the two yet, and a data object cannot
-# share a section that holds code.
-check fn-section-debug \
-    '__attribute__((section(".ramfunc"))) int f(void) { return 1; }' \
-    "is not supported yet" -g
+# A function in a section of its own is laid out apart from .text, and a
+# data object cannot share a section that holds code. (-g with one is
+# supported: tests/golden/gc-sections.sh.)
 check fn-section-shared-with-data \
     '__attribute__((section(".ramfunc"))) int f(void) { return 1; }
 __attribute__((section(".ramfunc"))) int v = 2;' \

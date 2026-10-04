@@ -172,11 +172,13 @@ if "$EMBCC" --target=thumbv7m-none-eabi -c "$out/start.S" -o "$out/start.o" \
     if command -v llvm-objdump > /dev/null 2>&1; then
         llvm-objdump -d --triple=thumbv7m "$out/start.o" > "$out/t.dis" 2>/dev/null
         # A backward branch and a forward one, each resolved to its
-        # label -- the two directions the two passes exist for.
-        grep -q 'b.w.*<loop>' "$out/t.dis" || {
+        # label -- the two directions the passes exist for. Narrow or
+        # wide: the file assembler relaxes, so these short ones are the
+        # two-byte forms, as GNU as makes them.
+        grep -qE '[[:space:]]b(\.w)?[[:space:]].*<loop>' "$out/t.dis" || {
             echo "FAIL thumb: the backward branch does not reach loop"
             fail=1; }
-        grep -q 'bge.w.*<done>' "$out/t.dis" || {
+        grep -qE 'bge(\.w)?[[:space:]].*<done>' "$out/t.dis" || {
             echo "FAIL thumb: the forward branch does not reach done"
             fail=1; }
     fi

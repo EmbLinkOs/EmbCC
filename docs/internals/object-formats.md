@@ -56,15 +56,24 @@ default for a hosted ELF target (`*-linux-gnu`).
 
 ### Functions in their own section
 
-A function with `__attribute__((section("NAME")))` is placed after every
-other function in the code buffer, grouped by section name in first-seen
-order. The ELF writer gives each group its own executable section;
-`text_at` maps a code-buffer offset to its section and offset there.
-This is supported only for ELF output, and not together with `-g`:
+A function with `__attribute__((section("NAME")))` -- or, with
+`-ffunction-sections`, every function, in `.text.NAME` -- is placed after
+every other function in the code buffer, grouped by section name in
+first-seen order. The ELF writer gives each group its own executable
+section; `text_at` maps a code-buffer offset to its section and offset
+there, and every reference into code (a symbol, a call's relocation, an
+unwind table's, DWARF's) goes through it. DWARF's END addresses -- a
+`high_pc`, the end of a range -- are mapped as the byte before, plus one,
+since the byte after a function's last one is where the next section
+begins in the buffer (`dwarf_reloc.end`). A unit whose code is split
+gets `DW_AT_ranges` (`dwarf_emit_split`, `.debug_ranges`). ELF output
+only.
 
-```text
-embcc: x.c: error: -g with a function in a section of its own ('NAME') is not supported yet: the compile unit's address range would span two sections
-```
+The writer (`src/elf/write.c`) grows its section and relocation-group
+tables as needed; a unit with thousands of functions gets thousands of
+sections. The one limit left is ELF's: a section index at or above
+`SHN_LORESERVE` (0xff00) needs extended numbering, which it refuses by
+name.
 
 A data object may not share a section name with a function.
 

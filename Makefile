@@ -38,7 +38,17 @@ endif
 # host's. `posix` is macOS, Linux and EmbLinkOS; `iso` needs nothing but a
 # hosted C library, for a hobby or non-POSIX OS (docs/internals/porting.md).
 PLATFORM ?= posix
-PLATFORM_SRCS := src/platform/platform_common.c src/platform/platform_$(PLATFORM).c
+# Whether the host can run a program (src/platform/platform.h): `spawn` is
+# POSIX's posix_spawn, macOS and Linux; `none` is EmbLinkOS (no fork/exec)
+# and any host with only a C library, and the default with PLATFORM=iso.
+# Only the driver's several-sources-in-one-command uses it.
+ifeq ($(PLATFORM),iso)
+PROCESS ?= none
+else
+PROCESS ?= spawn
+endif
+PLATFORM_SRCS := src/platform/platform_common.c src/platform/platform_$(PLATFORM).c \
+	src/platform/process_$(PROCESS).c
 
 # The prefix an installed compiler looks under when the host cannot say
 # where the compiler is (no /proc, no _NSGetExecutablePath, argv[0] not a
@@ -159,19 +169,19 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar
+all: embcc embread embld embas embls embidx embar embsvd
 
-# Which host layer the last link used. Switching PLATFORM leaves every
-# object up to date, so without this `make PLATFORM=iso` kept the old
-# binary. Compared by NAME, not by time: a stamp touched in the same
-# second as the link looked up to date.
+# Which host layer the last link used (PLATFORM and PROCESS). Switching
+# either leaves every object up to date, so without this `make
+# PLATFORM=iso` kept the old binary. Compared by NAME, not by time: a
+# stamp touched in the same second as the link looked up to date.
 PLATFORM_STAMP := $(BUILD)/platform.stamp
-ifneq ($(shell cat $(PLATFORM_STAMP) 2>/dev/null),$(PLATFORM))
+ifneq ($(shell cat $(PLATFORM_STAMP) 2>/dev/null),$(PLATFORM)-$(PROCESS))
 PLATFORM_CHANGED := platform-changed
 endif
 .PHONY: platform-changed
 platform-changed:
-	@mkdir -p $(BUILD); echo $(PLATFORM) > $(PLATFORM_STAMP)
+	@mkdir -p $(BUILD); echo $(PLATFORM)-$(PROCESS) > $(PLATFORM_STAMP)
 
 embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)
@@ -200,6 +210,12 @@ $(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
 # so the libraries below need no binutils `ar` on a host without GCC.
 embar: tools/embar/embar.c
 	$(CC) $(CFLAGS) -o $@ tools/embar/embar.c
+
+# embsvd -- a device's register database from its CMSIS-SVD file: the
+# device header, a startup file and a linker script (tools/embsvd). ISO C
+# and standalone, like embar.
+embsvd: tools/embsvd/embsvd.c
+	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
@@ -327,8 +343,8 @@ check: embcc libc-x86_64 libcxx-x86_64
 # embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
-test: embcc embread embld embdbg embls embas libc-x86_64 libcxx-x86_64 \
-      libc-linux-x86_64 libcxx-linux-x86_64
+test: embcc embread embld embdbg embls embas embar embsvd libc-x86_64 \
+      libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
 # The aarch64 suite: compile for the second architecture and RUN the result
@@ -632,7 +648,7 @@ libcxx-linux-aarch64: embcc embar
 libcxx: libcxx-x86_64 libcxx-aarch64
 
 clean:
-	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar
+	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar embsvd
 
 .PHONY: all check test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \

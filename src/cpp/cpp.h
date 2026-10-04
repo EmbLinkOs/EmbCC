@@ -25,6 +25,8 @@ char *cpp_process(const char *path, const char *src,
 void cpp_set_cxx(int (*has_builtin)(const char *name), int exceptions);
 /* C++'s -std=: the year (1998, 2011, 2014, 2017, 2020, 2023, 2026) and
  * whether c++NN rather than gnu++NN (__STRICT_ANSI__) */
+/* -fgnuc-version=: define __GNUC__ and its family in C units (0: not). */
+void cpp_set_gnuc_version(int major, int minor, int patch);
 void cpp_set_cxx_std(int year, int strict);
 void cpp_set_cxx_char8(int on);             /* -fchar8_t */
 /* -DNAME[=VALUE] (undef 0) or -UNAME (undef 1), before cpp_process */
