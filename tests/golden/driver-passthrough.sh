@@ -5,11 +5,11 @@
 # argument, which stopped those builds before they began.
 #
 # The linker's are applied when they are EmbLD's own (-e, -Ttext, -Tdata,
-# -Tstack, --rom-limit, --lma-offset), accepted when they change nothing
-# about an image EmbLD makes (--gc-sections, -z noexecstack, ...), and
-# refused by name otherwise: a linker script or a section start that was
-# quietly dropped would build a different image from the one asked for,
-# and a firmware image linked to the wrong memory map runs, wrongly.
+# -Tstack, --rom-limit, --lma-offset, -T, -L, -u, ...), accepted when they
+# change nothing about an image EmbLD makes (--gc-sections, -z
+# noexecstack, ...), and refused by name otherwise: a section start that
+# was quietly dropped would build a different image from the one asked
+# for, and a firmware image linked to the wrong memory map runs, wrongly.
 set -u
 echo "TEST-MARKER driver-passthrough"
 . "$(dirname "$0")/../lib.sh"
@@ -40,7 +40,7 @@ entry() { "$READELF" -h "$1" | sed -n 's/.*Entry point address: *//p'; }
 echo "-Wl, and -Xlinker options reach the link"
 
 # 3. One EmbLD does not have is refused by name, and nothing is written.
-for opt in -Wl,-T,link.ld -Wl,-Map=out.map -Wl,-z,execstack; do
+for opt in -Wl,--section-start=.text=0 -Wl,-Map=out.map -Wl,-z,execstack; do
     rm -f "$out/c.elf"
     if err=$("$EMBCC" $T "$out/s.c" -o "$out/c.elf" "$opt" 2>&1); then
         echo "FAIL: $opt was accepted and dropped"; exit 1
@@ -49,6 +49,15 @@ for opt in -Wl,-T,link.ld -Wl,-Map=out.map -Wl,-z,execstack; do
         echo "FAIL: $opt refused without naming why:"; echo "$err"; exit 1; }
     [ ! -e "$out/c.elf" ] || { echo "FAIL: $opt refused but $out/c.elf written"; exit 1; }
 done
+# A linker script is EmbLD's, for a firmware image; an x86-64 one is laid
+# out without, and says so rather than dropping it.
+rm -f "$out/c.elf"
+if err=$("$EMBCC" $T "$out/s.c" -o "$out/c.elf" -Wl,-T,link.ld 2>&1); then
+    echo "FAIL: -Wl,-T for x86-64 was accepted"; exit 1
+fi
+echo "$err" | grep -q "a linker script (-T) is for an ARM or RISC-V image" || {
+    echo "FAIL: -Wl,-T for x86-64 refused without naming why:"; echo "$err"; exit 1; }
+[ ! -e "$out/c.elf" ] || { echo "FAIL: -Wl,-T refused but $out/c.elf written"; exit 1; }
 # ...but a compile that does not link ignores them, as GCC's does.
 "$EMBCC" $T -c "$out/s.c" -o "$out/s.o" -Wl,-T,link.ld || {
     echo "FAIL: -c refused a linker option it never uses"; exit 1; }

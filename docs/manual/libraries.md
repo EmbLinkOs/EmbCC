@@ -27,15 +27,13 @@ the system's libraries, and the Windows triple has no C library.
 
 ### When the driver links at all
 
-`embcc FILE -o OUT` (no `-c`, `-S`, `-E` or `-fsyntax-only`) compiles and
-then links in the same process with [EmbLD](tools/embld.md). The driver
-links only for x86-64 ELF targets (`x86_64-elf`, `x86_64-emblink`,
-`x86_64-linux-gnu`); for every other target it stops before compiling
-with `embcc: error: cannot link for TRIPLE in one step: the driver links
-x86-64 ELF only` (or, for a Mach-O or COFF target, `embcc: error: cannot
-link for TRIPLE: the driver links x86-64 ELF, and this target writes
-Mach-O`), and the object has to be compiled with `-c` and linked with
-`embld` or the platform's linker. The details are in
+`embcc [FILE] [OBJECTS...] -o OUT` (no `-c`, `-S`, `-E` or
+`-fsyntax-only`) compiles the source, if there is one, and links in the
+same process with [EmbLD](tools/embld.md). The driver links the x86-64 ELF
+targets (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) and, given a
+memory map (`-T board.ld`, or `-Wl,-Ttext`/`-Tdata`), the ARM, RISC-V and
+AVR firmware targets; for AArch64 ELF, Mach-O and COFF targets it stops
+with `embcc: error: cannot link for TRIPLE`. The details are in
 [Invoking](invoking.md#linking).
 
 ### The link line

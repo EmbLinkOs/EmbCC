@@ -81,34 +81,23 @@ listed under [ABI limitations](#abi-limitations).
 
 ### Linking
 
-`embcc FILE -o OUT` links in the same process only for the x86-64 ELF
-triples. For every other target it stops before compiling:
-
-```text
-embcc: error: cannot link for aarch64-linux-gnu in one step: the driver links x86-64 ELF only
-embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
-```
-
-For a Mach-O or COFF target the first line is
-`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and this target writes Mach-O`
-(or `COFF`), followed by the same second line.
-
-For Cortex-M, RISC-V and AVR, compile with `-c` and run
-[`embld`](../manual/tools/embld.md), which links those machines. The
-second line names `embld` for every target, but `embld` does not link
-AArch64, Mach-O or COFF objects; link those with the platform's linker.
-An AArch64 object is refused with:
+The driver links x86-64 ELF programs and, for the firmware targets
+(ARMv7-M, ARMv8-M, RV32, RV64, AVR), images whose memory map the build
+gives: a linker script (`-T`, ARM and RISC-V) or `-Wl,-Ttext`/`-Tdata`.
+A firmware link without one stops with `embcc: error: linking a TRIPLE
+image needs its memory map`. Every other target (AArch64 ELF, Mach-O,
+COFF) stops with `embcc: error: cannot link for TRIPLE`, because embld
+does not read those objects. AArch64 objects are refused by embld with:
 
 ```text
 embld: FILE: a 64-bit object for machine 183; only x86-64 and RV64 (EM_RISCV) are supported
 ```
 
-The driver takes one source file per invocation and no object files or
-archives:
+The driver compiles one source per invocation, and links any number of
+objects and archives with it:
 
 ```text
-embcc: error: more than one input file (M1: one file at a time)
-embcc: error: unknown argument 'main.o'
+embcc: error: more than one source file ('a.c' and 'b.c'): one command compiles one; compile each with -c and link the objects (embcc a.o b.o -o OUT)
 ```
 
 EmbCC has no archiver. The library builds use `x86_64-elf-ar`,
@@ -117,8 +106,8 @@ EmbCC has no archiver. The library builds use `x86_64-elf-ar`,
 There is no position-independent code, no shared library and no dynamic
 linking. `-fPIC`, `-shared` and the related options are refused (see
 [Options](#options)). EmbLD reads GNU ld linker scripts (`embld -T`) for
-ARM and RISC-V images, not for x86-64 or AVR, and the driver does not
-take `-T` because it does not link firmware.
+ARM and RISC-V images, not for x86-64 or AVR; the driver links firmware
+with them (`embcc -T board.ld a.o b.o -o fw.elf`).
 
 ### Assembly
 

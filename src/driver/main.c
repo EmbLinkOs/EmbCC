@@ -73,6 +73,9 @@ static void print_usage(FILE *out)
             "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
             "             [-O0|-O1|-O2|-O3|-Os]\n"
             "             [-mcpu=CPU] [-mno-sse] [-mno-red-zone] ...\n"
+            "       embcc [FILE] OBJ.o|LIB.a|-lLIB... [-L DIR] [-T SCRIPT.ld]\n"
+            "             [-nostdlib|-nodefaultlibs|-nostartfiles] -o OUT"
+            "   (link)\n"
             "       embcc --version | --dump-predef"
             " | --emit-empty-object FILE\n");
 }
@@ -125,6 +128,13 @@ static void print_options(FILE *out)
       "  -fmax-errors=N         stop after N\n"
       "  -w                     no warnings;  -Werror  warnings are errors\n"
       "  -Wall, -Wextra, -Wname, -Wno-name (see --help-warnings)\n"
+      "\nthe link (docs/manual/invoking.md#linking)\n"
+      "  OBJ.o, LIB.a           linked as they are, with the source if any\n"
+      "  -lNAME, -L DIR         libNAME.a from the -L directories\n"
+      "  -T SCRIPT.ld           GNU ld linker script (ARM and RISC-V firmware)\n"
+      "  -nostdlib, -nodefaultlibs, -nostartfiles   leave out crt1/libc/librt\n"
+      "  -e SYM, -u SYM         entry symbol; a symbol to pull from archives\n"
+      "  -Wl,ARGS, -Xlinker ARG options for EmbLD (-Ttext, -Tdata, ...)\n"
       "\ndependencies\n"
       "  -M, -MM                write the make rule instead of compiling\n"
       "  -MD, -MMD              write it beside the object\n"
@@ -493,6 +503,20 @@ static int compile_unit(const char *in, const char *out, int pp_only);
 static const char *g_wl[128];
 static int g_nwl;
 
+/* What the link takes besides the compiled source, in command-line order:
+ * objects, archives and -lNAME (kept as written, found at the link). A
+ * build's link step is `$(CC) $(LDFLAGS) a.o b.o -lfoo -o fw.elf`, with no
+ * source at all, and that is the line this serves. */
+static const char *g_link_in[256];
+static int g_nlink_in;
+static const char *g_libdirs[64];        /* -L */
+static int g_nlibdirs;
+static const char *g_undefs[64];         /* -u */
+static int g_nundefs;
+static const char *g_script;             /* -T */
+static const char *g_entry;              /* -e */
+static int g_nostdlib, g_nostartfiles, g_nodefaultlibs;
+
 /* The value of linker option `opt` at g_wl[*k]: `opt=V`, `optV` where the
  * option is spelled that way (-Ttext0x8000), or the next word. NULL when
  * g_wl[*k] is not `opt`, or has no value. */
@@ -536,6 +560,33 @@ static int apply_wl(struct link_opts *lo)
         } else if ((v = wl_value("--entry", 0, &k)) ||
                    (v = wl_value("-e", 0, &k))) {
             lo->entry = v;
+        } else if (!strncmp(a, "-Tbss", 5)) {
+            fprintf(stderr, "embcc: error: -Tbss is not an EmbLD option; a "
+                            "linker script (-T FILE) places .bss\n");
+            return 1;
+        } else if ((v = wl_value("--script", 0, &k)) ||
+                   (v = wl_value("-T", 1, &k))) {
+            if (g_script && strcmp(g_script, v)) {
+                fprintf(stderr, "embcc: error: two linker scripts (-T)\n");
+                return 1;
+            }
+            g_script = v;
+        } else if ((v = wl_value("-L", 1, &k))) {
+            if (g_nlibdirs < 64)
+                g_libdirs[g_nlibdirs++] = v;
+        } else if ((v = wl_value("--undefined", 0, &k)) ||
+                   (v = wl_value("-u", 0, &k))) {
+            if (g_nundefs < 64)
+                g_undefs[g_nundefs++] = v;
+        } else if ((v = wl_value("--orphan-handling", 0, &k))) {
+            if (!strcmp(v, "place")) lo->orphan_mode = 0;
+            else if (!strcmp(v, "warn")) lo->orphan_mode = 1;
+            else if (!strcmp(v, "error")) lo->orphan_mode = 2;
+            else {
+                fprintf(stderr, "embcc: error: --orphan-handling is place, "
+                                "warn or error\n");
+                return 1;
+            }
         } else if (!strcmp(a, "--gc-sections") ||
                    !strcmp(a, "--no-gc-sections") ||
                    !strcmp(a, "--as-needed") || !strcmp(a, "--no-as-needed") ||
@@ -559,9 +610,10 @@ static int apply_wl(struct link_opts *lo)
                      * image that has neither */
         } else {
             fprintf(stderr, "embcc: error: linker option '%s' is not one "
-                            "EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, "
-                            "--rom-limit and --lma-offset); dropping it could "
-                            "build a different image from the one asked for\n",
+                            "EmbLD has (it takes -T, -L, -u, -e, -Ttext, "
+                            "-Tdata, -Tstack, --rom-limit, --lma-offset and "
+                            "--orphan-handling); dropping it could build a "
+                            "different image from the one asked for\n",
                     a);
             return 1;
         }
@@ -569,73 +621,121 @@ static int apply_wl(struct link_opts *lo)
     return 0;
 }
 
-/* `embcc prog.c -o prog`: compile, then link, in ONE process.
+static int compile(const char *in, const char *out, int pp_only);
+static int has_gas_suffix(const char *s);
+
+/* An object or an archive, which goes to the link as it is. */
+static int has_link_input_suffix(const char *p)
+{
+    size_t n = strlen(p);
+    return (n > 2 && !strcmp(p + n - 2, ".o")) ||
+           (n > 2 && !strcmp(p + n - 2, ".a")) ||
+           (n > 4 && !strcmp(p + n - 4, ".obj"));
+}
+
+/* -lNAME, as a linker finds it: libNAME.a in each -L directory in order.
+ * Three names are this toolchain's own, because a Makefile written for
+ * arm-none-eabi-gcc says them: -lc and -lm are EmbCC's libc (its math is
+ * in it), -lgcc is the compiler runtime, librt.a. Those return 1 having
+ * found nothing to add, when the driver adds them itself anyway. */
+static int find_lib(const char *name, char *out, size_t cap, int *own)
+{
+    *own = 0;
+    for (int k = 0; k < g_nlibdirs; k++) {
+        snprintf(out, cap, "%s/lib%s.a", g_libdirs[k], name);
+        if (plat_file_exists(out))
+            return 1;
+    }
+    if (!strcmp(name, "c") || !strcmp(name, "m") || !strcmp(name, "gcc")) {
+        *own = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Is this a target the driver links firmware for: one embld links, whose
+ * memory map the build supplies (-T, or -Wl,-Ttext...). */
+static int firmware_target(void)
+{
+    return target_fmt_get() == TGT_FMT_ELF &&
+           (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
+            target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64);
+}
+
+/* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
+ * is one, then link it with everything else, in ONE process.
  *
  * A library, not a subprocess. The platform seam has no process API and
- * must never grow one -- EmbLinkOS has no fork/exec, and a driver that
- * spawned `ld` could not be hosted on the target at all
+ * the compile and link never need one -- EmbLinkOS has no fork/exec, and
+ * a driver that spawned `ld` could not be hosted on the target at all
  * (ARCHITECTURE §1). src/link/link.c has always been written as a
  * library for exactly this, and this is where it gets used.
  *
  * What goes into the link, in the order a linker resolves:
  *
- *   crt1.o      the entry point, which calls main and leaves through
- *               exit() -- found beside the compiler by paths.c
+ *   crt1.o      a hosted target's entry point, which calls main and
+ *               leaves through exit() -- found beside the compiler
  *   the object  just compiled, into a temporary next to the output
- *   libc.a      an ARCHIVE, so only the members actually referenced
- *               are pulled in
- *   libcxx.a    the C++ runtime, for a C++ source: operator new, the
- *               __cxa_* layer, the personality routine and the type
- *               information a `catch` matches against
- *   librt.a     the compiler runtime (lib/rt) where the target has one:
- *               the routines the BACKEND calls for operations the
- *               machine has no instruction for. After libc, because an
- *               archive is searched once and libc calls into it
+ *   the inputs  the objects, archives and -l libraries on the command
+ *               line, in their order
+ *   libcxx.a    the C++ runtime, for a C++ source
+ *   libc.a      an ARCHIVE, so only the members referenced are pulled
+ *   librt.a     the compiler runtime (lib/rt): the routines the backend
+ *               calls for operations the machine has no instruction for.
+ *               After libc, because an archive is searched once and libc
+ *               calls into it
  *
- * A hosted target needs all three; a freestanding one has no crt1 and
- * no libc to offer and links only what it was given, which is what
- * `--target=x86_64-elf` has always meant.
- */
-static int compile(const char *in, const char *out, int pp_only);
-
+ * A FIRMWARE target (ARMv7-M, ARMv8-M, RISC-V, AVR) has no crt1 -- the
+ * startup is the program's own, it is where the vector table is -- and
+ * its memory map comes from the build: a linker script (-T) or
+ * -Wl,-Ttext/-Tdata. There is no default, because a firmware image
+ * linked to a guessed map runs, wrongly. -nostdlib leaves out libc and
+ * librt, -nodefaultlibs too, and -nostartfiles crt1. */
 static int compile_and_link(const char *in, const char *out)
 {
-    /* EmbLD reads x86-64 ELF. Every other combination is refused by
-     * name rather than by producing an image for the wrong machine:
-     * a linker that quietly emitted x86-64 for an aarch64 object would
-     * be the exact failure THE RULE exists to prevent. */
-    /* The message named "aarch64" for every ELF target that was not
-     * x86-64, from when those were the only two: a Thumb build was told
-     * it needed aarch64. A board image is linked by embld itself, with
-     * the board's memory map, which the driver has no default for. */
-    if (target_get() != TARGET_X86_64 || target_fmt_get() != TGT_FMT_ELF) {
+    int fw = firmware_target();
+    if (!fw && (target_get() != TARGET_X86_64 ||
+                target_fmt_get() != TGT_FMT_ELF)) {
         if (target_fmt_get() != TGT_FMT_ELF)
             fprintf(stderr,
                     "embcc: error: cannot link for %s: the driver links "
-                    "x86-64 ELF, and this target writes %s\n",
+                    "ELF, and this target writes %s\n",
                     target_triple_now(), target_fmt_name(target_fmt_get()));
         else
             fprintf(stderr,
-                    "embcc: error: cannot link for %s in one step: the "
-                    "driver links x86-64 ELF only\n", target_triple_now());
-        /* embld itself links ARMv7-M, RISC-V and AVR images; it reads
-         * no AArch64 object, and Mach-O and COFF are the platform
-         * linker's. Pointing everyone at embld sent those to a tool that
-         * refuses them. */
-        if (target_fmt_get() == TGT_FMT_ELF &&
-            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
-             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64))
-            fprintf(stderr,
-                    "embcc: compile with -c, then link with embld and the "
-                    "board's memory map (-e, -Ttext, -Tdata, -Tstack)\n");
-        else
-            fprintf(stderr,
-                    "embcc: compile with -c, then link with %s\n",
-                    target_fmt_get() == TGT_FMT_ELF
-                        ? "an AArch64 toolchain's linker (embld does not "
-                          "read AArch64 objects)"
-                        : "the platform's linker (ld64 or lld on macOS, "
-                          "link.exe or lld-link on Windows)");
+                    "embcc: error: cannot link for %s: embld does not read "
+                    "AArch64 objects\n", target_triple_now());
+        fprintf(stderr,
+                "embcc: compile with -c, then link with %s\n",
+                target_fmt_get() == TGT_FMT_ELF
+                    ? "an AArch64 toolchain's linker"
+                    : "the platform's linker (ld64 or lld on macOS, "
+                      "link.exe or lld-link on Windows)");
+        return 1;
+    }
+
+    struct link_opts lo;
+    memset(&lo, 0, sizeof lo);
+    if (apply_wl(&lo))
+        return 1;
+    if (g_entry)
+        lo.entry = g_entry;
+    lo.script = g_script;
+    lo.libdirs = g_libdirs;
+    lo.nlibdirs = g_nlibdirs;
+    lo.undefs = g_undefs;
+    lo.nundefs = g_nundefs;
+    if (fw && !lo.script && !lo.have_base) {
+        fprintf(stderr,
+                "embcc: error: linking a %s image needs its memory map: a "
+                "linker script (-T FILE.ld), or -Wl,-Ttext=FLASH and "
+                "-Wl,-Tdata=RAM\n", target_triple_now());
+        return 1;
+    }
+    if (!fw && lo.script) {
+        fprintf(stderr, "embcc: error: a linker script (-T) is for an ARM or "
+                        "RISC-V image; %s links without one\n",
+                target_triple_now());
         return 1;
     }
 
@@ -645,31 +745,39 @@ static int compile_and_link(const char *in, const char *out)
      * and this keeps the whole operation inside one directory. */
     char obj[1024];
     snprintf(obj, sizeof obj, "%s.embcc-tmp.o", exe);
+    int rc;
+    if (in) {
+        rc = has_gas_suffix(in)
+            ? gas_assemble(in, obj, has_gas_suffix(in) == 2)
+            : compile(in, obj, 0);
+        if (rc != 0)
+            return rc;
+    }
 
-    int rc = compile(in, obj, 0);
-    if (rc != 0)
-        return rc;
-
-    const char *inputs[8];
-    int n = 0;
+    const char *inputs[300];
+    char *found[256];
+    int n = 0, nfound = 0, want_libc = 0, want_rt = 0;
     const char *triple = target_triple_now();
     char crt1[1024], libc[1024], librt[1024], libcxx[1024];
-    int have_crt1 = paths_target_file(triple, "crt1.o", crt1, sizeof crt1);
+    int std = !g_nostdlib && !g_nodefaultlibs;
+    int have_crt1 = !fw && !g_nostdlib && !g_nostartfiles &&
+                    paths_target_file(triple, "crt1.o", crt1, sizeof crt1);
     int have_libc = paths_target_file(triple, "libc.a", libc, sizeof libc);
     /* The C++ runtime, for a C++ source. Before libc, because it calls
      * into it -- operator new is malloc, and a thrown std::string
      * formats through the C library -- and an archive is searched
      * once. */
-    int have_cxx = lang_cxx &&
+    int have_cxx = in && lang_cxx && std &&
                    paths_target_file(triple, "libcxx.a", libcxx,
                                      sizeof libcxx);
-    if (lang_cxx && !have_cxx) {
+    if (in && lang_cxx && std && !have_cxx) {
         fprintf(stderr,
                 "embcc: error: no libcxx.a for %s -- a C++ program needs "
                 "the C++ runtime, and this target's is not built or not "
                 "installed\n", triple);
         fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
-        remove(obj);
+        if (in)
+            remove(obj);
         return 1;
     }
     /* The compiler runtime, if this target has one. Not an error when
@@ -681,34 +789,58 @@ static int compile_and_link(const char *in, const char *out)
     /* A hosted target whose library is not installed cannot be linked,
      * and saying which file is missing is the difference between a
      * fixable message and fifty undefined symbols. */
-    if (target_is_hosted() && (!have_crt1 || !have_libc)) {
+    if (!fw && std && target_is_hosted() && (!have_crt1 || !have_libc) &&
+        !g_nostartfiles) {
         fprintf(stderr,
                 "embcc: error: no %s for %s -- the target's library is "
                 "not built or not installed\n",
                 !have_crt1 ? "crt1.o" : "libc.a", triple);
         fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
-        remove(obj);
+        if (in)
+            remove(obj);
         return 1;
     }
     if (have_crt1)
         inputs[n++] = crt1;
-    inputs[n++] = obj;
+    if (in)
+        inputs[n++] = obj;
+    for (int k = 0; k < g_nlink_in; k++) {
+        const char *a = g_link_in[k];
+        if (a[0] == '-' && a[1] == 'l') {
+            char path[1024];
+            int own;
+            if (!find_lib(a + 2, path, sizeof path, &own)) {
+                fprintf(stderr, "embcc: error: cannot find lib%s.a for %s "
+                                "in any -L directory\n", a + 2, a);
+                if (in)
+                    remove(obj);
+                return 1;
+            }
+            if (own) {              /* -lc -lm -lgcc: EmbCC's own, added below */
+                if (!strcmp(a + 2, "gcc")) want_rt = 1;
+                else want_libc = 1;
+                continue;
+            }
+            if (nfound < 256)
+                inputs[n++] = found[nfound++] = xstrndup(path, strlen(path));
+        } else if (n < 290) {
+            inputs[n++] = a;
+        }
+    }
     if (have_cxx)
         inputs[n++] = libcxx;
-    if (have_libc)
+    if (have_libc && (std || want_libc))
         inputs[n++] = libc;
     /* librt AFTER libc: an archive is searched once, in order, and a
      * libc routine can call into the runtime -- printing a 128-bit
      * value divides by ten -- while nothing in the runtime calls libc. */
-    if (have_rt)
+    if (have_rt && (std || want_rt))
         inputs[n++] = librt;
-
-    struct link_opts lo;
-    memset(&lo, 0, sizeof lo);
-    if (apply_wl(&lo)) {
-        remove(obj);
+    if (!n) {
+        fprintf(stderr, "embcc: error: nothing to link\n");
         return 1;
     }
+
     /* Inside a boundary: embld's refusals unwind to here (util.h), where
      * with none they ended the process and left OUT.embcc-tmp.o behind
      * for every undefined symbol or --rom-limit overflow. */
@@ -722,7 +854,10 @@ static int compile_and_link(const char *in, const char *out)
         fatal_set_boundary(NULL);
         rc = lrc;
     }
-    remove(obj);
+    if (in)
+        remove(obj);
+    for (int k = 0; k < nfound; k++)
+        free(found[k]);
     return rc;
 }
 
@@ -3664,6 +3799,49 @@ int main(int argc, char **argv)
             }
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = dir;
+        } else if ((argv[i][0] == '-' && argv[i][1] == 'l') ||
+                   (argv[i][0] == '-' && argv[i][1] == 'L') ||
+                   !strcmp(argv[i], "-T") || !strcmp(argv[i], "-e") ||
+                   !strcmp(argv[i], "-u")) {
+            /* the link's own options, as gcc takes them: -lNAME and
+             * -L DIR (attached or not), -T SCRIPT, -e SYM, -u SYM */
+            char opt = argv[i][1];
+            const char *v = (opt == 'l' || opt == 'L') && argv[i][2]
+                ? argv[i] + 2 : (i + 1 < argc ? argv[++i] : NULL);
+            if (!v || !*v) {
+                fprintf(stderr, "embcc: -%c needs a%s\n", opt,
+                        opt == 'l' ? " library name" : opt == 'L' ? " directory"
+                        : opt == 'T' ? " linker script" : " symbol");
+                return 1;
+            }
+            if (opt == 'l') {
+                /* kept in command-line order, as one -lNAME word */
+                size_t ln = strlen(v) + 3;
+                char *w = xmalloc(ln);
+                snprintf(w, ln, "-l%s", v);
+                if (g_nlink_in < 256)
+                    g_link_in[g_nlink_in++] = w;
+            } else if (opt == 'L') {
+                if (g_nlibdirs < 64)
+                    g_libdirs[g_nlibdirs++] = v;
+            } else if (opt == 'T') {
+                g_script = v;
+            } else if (opt == 'e') {
+                g_entry = v;
+            } else if (g_nundefs < 64) {
+                g_undefs[g_nundefs++] = v;
+            }
+        } else if (!strcmp(argv[i], "-nostdlib")) {
+            g_nostdlib = 1;
+        } else if (!strcmp(argv[i], "-nostartfiles")) {
+            g_nostartfiles = 1;
+        } else if (!strcmp(argv[i], "-nodefaultlibs")) {
+            g_nodefaultlibs = 1;
+        } else if (!strcmp(argv[i], "-static")) {
+            /* every image EmbLD writes is static */
+        } else if (argv[i][0] != '-' && has_link_input_suffix(argv[i])) {
+            if (g_nlink_in < 256)
+                g_link_in[g_nlink_in++] = argv[i];
         } else if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 == argc) {
                 fprintf(stderr, "embcc: -o needs a FILE\n");
@@ -3683,8 +3861,10 @@ int main(int argc, char **argv)
                    has_cxx_suffix(argv[i]) || has_ir_suffix(argv[i]) ||
                    (lang >= 0 && argv[i][0] != '-')) {
             if (input) {
-                fprintf(stderr, "embcc: error: more than one input file "
-                                "(M1: one file at a time)\n");
+                fprintf(stderr, "embcc: error: more than one source file "
+                                "('%s' and '%s'): one command compiles one; "
+                                "compile each with -c and link the objects "
+                                "(embcc a.o b.o -o OUT)\n", input, argv[i]);
                 return 1;
             }
             input = argv[i];
@@ -3708,10 +3888,19 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* Objects and archives with no source: the link step of a build. */
+    if (!input && g_nlink_in && !compile_mode && !pp_only &&
+        !inspect_stage && !why_decision && !syntax_only) {
+        lang_cxx = 0;
+        return done(compile_and_link(NULL, output));
+    }
     if (!input) {
         fprintf(stderr, "embcc: error: no input file\n");
         return 1;
     }
+    if (g_nlink_in && (compile_mode || pp_only))
+        fprintf(stderr, "embcc: warning: %s: linker input unused because "
+                        "the link is not done\n", g_link_in[0]);
     /* The checks are inserted by irgen, as ordinary IR, so at -O2 the
      * optimizer folds away the ones whose operands it knows -- a
      * constant non-zero divisor leaves nothing behind. */
@@ -3806,6 +3995,11 @@ int main(int argc, char **argv)
     if (has_gas_suffix(input)) {
         if (pp_only)
             return done(compile(input, NULL, 1));
+        /* Without -c a .s/.S is assembled AND linked, as gcc does it:
+         * `embcc start.S main.o -T fw.ld -o fw.elf`. It used to write the
+         * object under the output's name, an "image" no loader reads. */
+        if (!compile_mode && !syntax_only && !want_asm && !want_iface)
+            return done(compile_and_link(input, output));
         return gas_assemble(input,
                             output ? output : default_output(input),
                             has_gas_suffix(input) == 2);

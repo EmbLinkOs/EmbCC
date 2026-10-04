@@ -950,19 +950,14 @@ by [embread](../manual/tools/embread.md).
 
 ## The driver's link
 
-`embcc FILE -o OUT` links in-process through `compile_and_link` in
-`src/driver/main.c`. It links only when the target is x86-64 and the
-object format is ELF; otherwise it stops before compiling. For another
-ELF target:
-
-```text
-embcc: error: cannot link for TRIPLE in one step: the driver links x86-64 ELF only
-embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
-```
-
-For a Mach-O or COFF target the first line is
-`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and this target writes FORMAT`,
-with `FORMAT` `Mach-O` or `COFF`, and the second line is the same.
+`embcc [FILE] [OBJECTS...] -o OUT` links in-process through
+`compile_and_link` in `src/driver/main.c`. The driver links x86-64 ELF programs and, for the firmware targets
+(ARMv7-M, ARMv8-M, RV32, RV64, AVR), images whose memory map the build
+gives: a linker script (`-T`, ARM and RISC-V) or `-Wl,-Ttext`/`-Tdata`.
+A firmware link without one stops with `embcc: error: linking a TRIPLE
+image needs its memory map`. Every other target (AArch64 ELF, Mach-O,
+COFF) stops with `embcc: error: cannot link for TRIPLE`, because embld
+does not read those objects.
 
 The driver compiles to `OUT.embcc-tmp.o` beside the output and calls
 `embld_link` with a `struct link_opts` that is zero except for what

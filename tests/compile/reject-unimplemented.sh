@@ -309,14 +309,15 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf; do
         echo "case nolink $t: linked in one step without a memory map"
         exit 1
     fi
-    # embld links the boards, and reads no AArch64 object
-    hint="link with embld"
-    [ "$t" = aarch64-elf ] && hint="embld does not read AArch64 objects"
-    echo "$err" | grep -q "cannot link for $t in one step: the driver links x86-64 ELF only" &&
-    echo "$err" | grep -q "$hint" || {
+    # a board image needs the board's memory map, which has no default;
+    # an AArch64 object is one embld does not read
+    want="linking a $t image needs its memory map"
+    [ "$t" = aarch64-elf ] &&
+        want="cannot link for $t: embld does not read AArch64 objects"
+    echo "$err" | grep -q "$want" || {
         echo "case nolink $t: wrong diagnostic:"; echo "$err"; exit 1; }
 done
-echo "case nolink: linking a board image in one step is refused by name"
+echo "case nolink: a board image with no memory map, or an AArch64 one, is refused by name"
 
 # C++ is laid out by its own front end for LP64. On a target whose long
 # or pointers are not 8 bytes it compiled anyway, with sizeof(long) 8 on
