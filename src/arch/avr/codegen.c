@@ -4506,7 +4506,8 @@ static const struct ra_target AVR_RA = {
                        * and every float lowering reads through vld/rd4 */
     a_saved_only,
     a_ext_plain,
-    0  /* atomic_in_reg */
+    0, /* atomic_in_reg */
+    0  /* fp_reads_gpr */
 };
 
 /* The lowest register any call this function makes -- the IR's, and the

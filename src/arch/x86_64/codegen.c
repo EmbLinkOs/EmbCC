@@ -385,7 +385,8 @@ static const struct ra_target X86_RA = {
     x86_fp_pool_for, x86_fp_callee_saved,
     0,            /* float_in_gpr: floats have their own class (SSE) */
     NULL, NULL,
-    0  /* atomic_in_reg */
+    0, /* atomic_in_reg */
+    0  /* fp_reads_gpr */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----
@@ -538,6 +539,14 @@ static int flt_width(const struct ir_ins *i)
     return 1;
 }
 
+struct flt_bad { char *bad; int nv; };
+static void flt_bad_cb(int v, void *ctx)
+{
+    struct flt_bad *b = ctx;
+    if (v >= 0 && v < b->nv)
+        b->bad[v] = 1;
+}
+
 char *cg_float_vregs(struct ir_func *fn)
 {
     int nv = fn->nvregs ? fn->nvregs : 1;
@@ -600,6 +609,8 @@ char *cg_float_vregs(struct ir_func *fn)
      * marking did -- both ends of a `mov` are one value and cannot be in
      * two classes. */
     char *bad = xcalloc((size_t)nv, 1);
+    struct flt_bad fb = { bad, nv };
+    void *bad_ctx = &fb;
 #define BAD(v) do { int _v=(v); if (_v>=0 && _v<nv) bad[_v]=1; } while (0)
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -660,8 +671,14 @@ char *cg_float_vregs(struct ir_func *fn)
             if (!i->flt) BAD(i->dst);
             break;
         default:
-            /* every other op is integer in and integer out */
-            BAD(i->dst); BAD(i->a); BAD(i->b); BAD(i->c);
+            /* every other op is integer in and integer out -- in the
+             * operands it has, which ra_each_use knows. The fields
+             * themselves do not say: a two-operand op's `c` is 0, not
+             * -1, so `and.4 %x, #1` or an `ext` anywhere in a function
+             * took vreg 0 -- the first parameter -- out of the float
+             * class, and a double argument went through memory. */
+            BAD(i->dst);
+            ra_each_use(i, flt_bad_cb, bad_ctx);
             break;
         }
     }

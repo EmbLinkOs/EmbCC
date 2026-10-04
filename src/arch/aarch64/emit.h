@@ -169,6 +169,9 @@ void a64_patch_adr(struct code *c, int at, int target);
 /* `w` is 4 (single, S registers) or 8 (double, D registers) throughout,
  * matching the IR's float width. */
 void a64_fldr(struct code *c, int vt, int rn, long off, int w);
+/* ldr vt, <literal>: returns where, for a64_patch_fldr_lit */
+int  a64_fldr_lit(struct code *c, int vt, int w);
+void a64_patch_fldr_lit(struct code *c, int at, int target);
 void a64_fstr(struct code *c, int vt, int rn, long off, int w);
 /* op: '+' '-' '*' '/' */
 void a64_falu(struct code *c, int op, int vd, int vn, int vm, int w);

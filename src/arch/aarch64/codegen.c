@@ -254,7 +254,9 @@ static const struct ra_target A64_RA = {
     a64_fp_pool_for, a64_fp_callee_saved,
     0,             /* float_in_gpr: floats have their own class (SIMD) */
     NULL, NULL,
-    0  /* atomic_in_reg */
+    0, /* atomic_in_reg */
+    1  /* fp_reads_gpr: fld_slot, fst_slot, frd, fwrote and fmove fmov a
+        * general-register home across */
 };
 
 
@@ -509,6 +511,12 @@ static void a64_place_arg(const struct ir_arg *a, int k, int sret_first,
  * and when that is the function's ONLY return: this machine always builds
  * a frame record, so a tail call pays for its own copy of the epilogue,
  * which is only a saving when the shared one then goes. */
+/* Set before the tail-call questions are asked: the frame is only the
+ * frame record (no locals, no callee-saved registers), so a tail call's
+ * own teardown is one ldp -- or nothing, when every call is one and the
+ * function needs no frame at all. */
+static int g_a64_cheap_teardown;
+
 static int a64_tail_ok(const struct ir_func *fn, int n)
 {
     const struct ir_ins *i = &fn->ins[n];
@@ -540,7 +548,12 @@ static int a64_tail_ok(const struct ir_func *fn, int n)
             return 0;
         nret += op == IR_RET;
     }
-    if (nret > 1)
+    /* Several returns: each tail call carries its own copy of the
+     * epilogue, which is a size bet. It is not one when the teardown is
+     * the frame record alone -- `ldp; b f` against `bl f; b epilogue` --
+     * and when every call is a tail call the function is frameless and
+     * each is a bare `b`: `switch (t) { case 1: return f(c); ... }`. */
+    if (nret > 1 && !g_a64_cheap_teardown)
         return 0;
     for (int k = 0; k < i->nargs; k++) {
         a64_place_arg(&i->argv[k], k, i->sret_first, &cu, &pl, 0, 0);
@@ -772,6 +785,92 @@ static void align16(struct code *t)
  * last store put there. A plain-width move (a64_ldvar_plain's question,
  * asked here of the same size/sign/width) needs no extension at all,
  * and a move to the register it already occupies needs nothing. */
+/* ---- a function's literal pool ------------------------------------
+ *
+ * A double constant fdlibm multiplies by -- a polynomial coefficient --
+ * was built in a general register a halfword at a time and moved across:
+ * mov, movk, movk, movk, fmov, twenty bytes, at every use. `ldr dN,
+ * literal` is four, with the eight bytes of the value once per function,
+ * after the epilogue, where each such load reaches it pc-relative. A
+ * float, or a double two halfwords build, is not worth it, and an fmov
+ * immediate needs neither. The pool is data in .text, marked so for the
+ * disassemblers ($d), as a jump table is. */
+struct a64_lit { unsigned long long v; int size; };
+static struct a64_lit *g_lit;
+static int g_nlit, g_caplit;
+struct a64_litfix { int at, lit; };
+static struct a64_litfix *g_litfix;
+static int g_nlitfix, g_caplitfix;
+
+/* How many instructions a64_mov_imm takes for this value: asked of the
+ * encoder itself, in a buffer of its own, not restated. */
+static int a64_mov_imm_len(long imm, int w)
+{
+    struct code c;
+    memset(&c, 0, sizeof c);
+    a64_mov_imm(&c, A64_ACC, imm, w);
+    int n = c.len / 4;
+    free(c.p);
+    free(c.drange);
+    return n;
+}
+
+/* `ldr vd, <the value in the pool>`, if that is shorter than building it */
+static int a64_lit_load(struct code *t, int vd, long imm, int w)
+{
+    int n = a64_mov_imm_len(imm, w);
+    if (w == 8 ? n < 3 : n < 2)
+        return 0;
+    unsigned long long v = w == 8 ? (unsigned long long)imm
+                                  : (unsigned long long)(unsigned int)imm;
+    int k = 0;
+    while (k < g_nlit && !(g_lit[k].v == v && g_lit[k].size == w))
+        k++;
+    if (k == g_nlit) {
+        if (g_nlit == g_caplit) {
+            g_caplit = g_caplit ? 2 * g_caplit : 16;
+            g_lit = xrealloc(g_lit, (size_t)g_caplit * sizeof *g_lit);
+        }
+        g_lit[g_nlit].v = v;
+        g_lit[g_nlit].size = w;
+        g_nlit++;
+    }
+    if (g_nlitfix == g_caplitfix) {
+        g_caplitfix = g_caplitfix ? 2 * g_caplitfix : 32;
+        g_litfix = xrealloc(g_litfix, (size_t)g_caplitfix * sizeof *g_litfix);
+    }
+    g_litfix[g_nlitfix].at = a64_fldr_lit(t, vd, w);
+    g_litfix[g_nlitfix].lit = k;
+    g_nlitfix++;
+    return 1;
+}
+
+/* The pool, after the function's last instruction, and each load
+ * pointed at its value. Eight-aligned, so a double never straddles. */
+static void a64_lit_flush(struct code *t)
+{
+    if (!g_nlit)
+        return;
+    int start = t->len;
+    while (t->len & 7)
+        code_u32(t, 0);
+    int *at = xmalloc((size_t)g_nlit * sizeof *at);
+    for (int pass = 8; pass >= 4; pass -= 4)     /* doubles first: aligned */
+        for (int k = 0; k < g_nlit; k++) {
+            if (g_lit[k].size != pass)
+                continue;
+            at[k] = t->len;
+            code_u32(t, (unsigned long)(g_lit[k].v & 0xffffffffULL));
+            if (pass == 8)
+                code_u32(t, (unsigned long)(g_lit[k].v >> 32));
+        }
+    code_mark_data(t, start, t->len);
+    for (int k = 0; k < g_nlitfix; k++)
+        a64_patch_fldr_lit(t, g_litfix[k].at, at[g_litfix[k].lit]);
+    free(at);
+    g_nlit = g_nlitfix = 0;
+}
+
 static void ld_slot(struct code *t, const long *sd, int vreg, int reg,
                     int size, int sign, int w)
 {
@@ -810,6 +909,14 @@ static void fld_slot(struct code *t, const long *sd, int vreg, int reg, int w)
             a64_fmov_reg(t, reg, g_a64_floc[vreg], w);
         return;
     }
+    /* A value an integer op also touches is in the general class
+     * (cg_float_vregs), and the double fdlibm returns after building it
+     * from words is one: its home is an x register, and its slot holds
+     * nothing. One fmov across, where it went through memory. */
+    if (!a64_is_flt(vreg) && a64_in_reg(vreg)) {
+        a64_fmov_from_gpr(t, reg, g_a64_loc[vreg], w);
+        return;
+    }
     a64_fldr(t, reg, FB, sd[vreg], w);
 }
 
@@ -818,6 +925,12 @@ static void fst_slot(struct code *t, const long *sd, int vreg, int reg, int w)
     if (a64_in_freg(vreg)) {
         if (g_a64_floc[vreg] != reg)
             a64_fmov_reg(t, g_a64_floc[vreg], reg, w);
+        return;
+    }
+    /* ...and the other way: a double parameter whose bits fdlibm takes
+     * apart arrives in a v register and lives in an x one */
+    if (!a64_is_flt(vreg) && a64_in_reg(vreg)) {
+        a64_fmov_to_gpr(t, g_a64_loc[vreg], reg, w);
         return;
     }
     a64_fstr(t, reg, FB, sd[vreg], w);
@@ -831,6 +944,10 @@ static int frd(struct code *t, const long *sd, int v, int scratch, int w)
 {
     if (a64_in_freg(v))
         return g_a64_floc[v];
+    if (!a64_is_flt(v) && a64_in_reg(v)) {      /* fp_reads_gpr */
+        a64_fmov_from_gpr(t, scratch, g_a64_loc[v], w);
+        return scratch;
+    }
     a64_fldr(t, scratch, FB, sd[v], w);
     return scratch;
 }
@@ -842,8 +959,13 @@ static int fwr(int v, int scratch)
 
 static void fwrote(struct code *t, const long *sd, int v, int reg, int w)
 {
-    if (!a64_in_freg(v))
-        a64_fstr(t, reg, FB, sd[v], w);
+    if (a64_in_freg(v))
+        return;
+    if (!a64_is_flt(v) && a64_in_reg(v)) {      /* fp_reads_gpr */
+        a64_fmov_to_gpr(t, g_a64_loc[v], reg, w);
+        return;
+    }
+    a64_fstr(t, reg, FB, sd[v], w);
 }
 
 /* A float value copied from one place to another: one fmov when both
@@ -856,7 +978,7 @@ static void fmove(struct code *t, const long *sd, int dst, int src, int w)
             a64_fmov_reg(t, g_a64_floc[dst], r, w);
         return;
     }
-    a64_fstr(t, r, FB, sd[dst], w);
+    fwrote(t, sd, dst, r, w);
 }
 
 /* Store `reg`'s low `size` bytes into vreg. */
@@ -1850,6 +1972,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * instructions each. Not with a parameter on the caller's stack, which
      * is found through x29, and not where anything could read the frame:
      * -g, a VLA, va_start, EH, asm, the frame-address builtins. */
+    g_a64_cheap_teardown = fr.size == 0 && !nsave;
     int frameless = g_a64_regalloc && !want_debug && fr.size == 0 &&
                     !nsave && !fn->has_alloca && !f->is_varargs && !fn->neh;
     /* A TAIL call is not a call here: `b` leaves x30 and sp as they were
@@ -1946,6 +2069,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
          * disturb the rest. */
         int pmv_dst[MAX_PARAMS], pmv_src[MAX_PARAMS], npmv = 0;
         int pfmv_dst[MAX_PARAMS], pfmv_src[MAX_PARAMS], npfmv = 0;
+        int pgfmv_dst[MAX_PARAMS], pgfmv_src[MAX_PARAMS],
+            pgfmv_w[MAX_PARAMS], npgfmv = 0;
         int pext_reg[MAX_PARAMS], pext_size[MAX_PARAMS], npext = 0;
         if (fr.sret >= 0)
             a64_str(t, A64_SRET, FB, fr.sret, 8);
@@ -1983,6 +2108,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                     pfmv_dst[npfmv] = g_a64_floc[p];
                     pfmv_src[npfmv] = pl.reg;
                     npfmv++;
+                } else if (pl.nreg == 1 && !a64_is_flt(p) && a64_in_reg(p)) {
+                    /* Its home is an x register (fp_reads_gpr), which may
+                     * be where an integer parameter arrived: the fmov
+                     * waits for the integer move below, and goes before
+                     * the v-register one, which may overwrite this
+                     * parameter's own register. */
+                    pgfmv_dst[npgfmv] = g_a64_loc[p];
+                    pgfmv_src[npgfmv] = pl.reg;
+                    pgfmv_w[npgfmv] = pl.esz;
+                    npgfmv++;
                 } else if (pl.nreg == 1) {
                     fst_slot(t, sd, p, pl.reg, pl.esz);
                 } else {
@@ -2051,6 +2186,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         if (pass == 0) {
             if (npmv)
                 a64_parallel_move(t, pmv_dst, pmv_src, npmv, A64_SCR);
+            for (int k = 0; k < npgfmv; k++)
+                a64_fmov_to_gpr(t, pgfmv_dst[k], pgfmv_src[k], pgfmv_w[k]);
             if (npfmv)
                 a64_fp_parallel_move(t, pfmv_dst, pfmv_src, npfmv);
             for (int k = 0; k < npext; k++)
@@ -2174,6 +2311,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                 if (a64_fmov_imm(t, fd, (unsigned long)i->imm,
                                  i->w == 8 ? 8 : 4))
                     break;
+                if (a64_lit_load(t, fd, i->imm, i->w == 8 ? 8 : 4))
+                    break;
+                if ((i->w == 8 ? i->imm : (long)(unsigned int)i->imm) == 0) {
+                    /* +0.0: fmov from xzr (register 31 in this encoding) */
+                    a64_fmov_from_gpr(t, fd, 31, i->w == 8 ? 8 : 4);
+                    break;
+                }
                 a64_mov_imm(t, A64_ACC, i->imm, i->w);
                 a64_fmov_from_gpr(t, fd, A64_ACC, i->w == 8 ? 8 : 4);
                 break;
@@ -3451,6 +3595,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         a64_epilogue(t, fr.size);
     }
     }
+    a64_lit_flush(t);
     g_fb = A64_SP;
     a64_frame_base = A64_SP;
     free(g_a64_wide);

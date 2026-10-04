@@ -53,6 +53,11 @@ int main(void)
          * one place the two differ, so it is checked in the same block. */
         int ad = a64_adr(&C, 9);  a64_patch_adr(&C, ad, ad + 12);
         expect("adr\tx9, 20");
+        /* the literal pool's loads: words, like a branch, either way */
+        int ld = a64_fldr_lit(&C, 18, 8); a64_patch_fldr_lit(&C, ld, ld + 16);
+        expect("ldr\td18, 28");
+        int ls = a64_fldr_lit(&C, 17, 4); a64_patch_fldr_lit(&C, ls, ls - 8);
+        expect("ldr\ts17, 14");
     }
 
     a64_mov_reg(&C, 9, 10, 8);          expect("mov\tx9, x10");

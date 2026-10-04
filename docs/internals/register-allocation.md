@@ -95,7 +95,7 @@ to this set for its own reasons.
 
 A temp is eligible. A local (including a parameter) is eligible when it
 is a scalar integer or pointer, or a scalar float on a backend with
-`float_in_gpr`, of 1, 2, 4 or 8 bytes. In the floating-point class,
+`float_in_gpr` or `fp_reads_gpr`, of 1, 2, 4 or 8 bytes. In the floating-point class,
 exactly the vregs in `fltmap` (from `cg_float_vregs`) are eligible.
 
 A vreg is then made ineligible, and stays in memory, when:
@@ -107,7 +107,7 @@ A vreg is then made ineligible, and stays in memory, when:
   class only);
 - in the integer class, it is an operand or result of a floating-point
   operation, including the integer side of a conversion, unless the
-  backend sets `float_in_gpr`;
+  backend sets `float_in_gpr` or `fp_reads_gpr`;
 - it is the operand of `IR_ADDR` or `IR_VA_START`, the result of
   `IR_FRAMEADDR`, or an operand of `IR_CAS16`;
 - it is an operand of `IR_XCHG`, `IR_XADD`, `IR_ARMW`, `IR_CMPXCHG` or
@@ -248,6 +248,26 @@ A soft-float backend sets `float_in_gpr` instead: a float is then bits
 in an integer register, eligible in the integer class like an int, and
 its arithmetic is helper calls that `op_calls_helper` reports.
 
+A value that floating-point and integer operations both touch is in the
+integer class (`cg_float_vregs` takes it back at the first integer use),
+and fdlibm's are: the double whose words `EXTRACT_WORDS` reads, the one
+`INSERT_WORDS` builds. A backend that sets `fp_reads_gpr` (AArch64) can
+reach such a value's general-register home from its floating-point
+lowering -- `fld_slot`, `fst_slot`, `frd`, `fwrote` and `fmove` move it
+across with one `fmov` -- so the integer class allocates it like an int,
+where without the flag it stays in memory and every crossing is a store
+and a load. A float argument of a call and a call's float result stay
+in memory even so: the argument setup writes x0-x7, which may be such a
+value's home. A double parameter whose home is a general register is
+moved there after the integer parameters, and before the v registers
+are permuted (the prologue's `pgfmv` list).
+
+`cg_float_vregs` decides the classes from each instruction's operands as
+`ra_each_use` lists them. It read the `a`, `b` and `c` fields of every
+op, and a two-operand op leaves `c` at 0, so one `and #imm` or `ext`
+anywhere in a function took vreg 0 -- the first parameter -- out of the
+float class.
+
 ## Stack slots
 
 The allocator decides which values need no slot; the backends lay out
@@ -359,6 +379,7 @@ whose pair passes use a second one).
 | `atomic_in_reg` | 0 | 0 | 1 | 1 | 0 |
 | `alu_dst_is_lhs` | 1 | 0 | 0 | 0 | 0 |
 | `float_in_gpr` | 0 | 0 | 1 | 1 | 1 |
+| `fp_reads_gpr` | 0 | 1 | 0 | 0 | 0 |
 | `ldvar_plain` | size 8, or size 4 not sign-extended to 8 | as x86-64 | size 4 at width 4 | full register width; also a sign-extending 4-byte read at RV64 | size equals width, or size at most 2 |
 | `op_calls_helper` | `__int128` operations | binary128 `long double` and `__int128` operations | floating-point arithmetic, comparisons and conversions not executed by the FPU; 64-bit divide and remainder | floating-point arithmetic, comparisons and conversions; 64-bit divide and remainder at RV32 | float operations, conversions, divide, remainder, multiply except by a small constant |
 | FP class | xmm0-xmm6 | v18-v31, v0-v7 | s16-s31, with an FPU | none | none |
