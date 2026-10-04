@@ -35,6 +35,7 @@ Start with the [overview](manual/overview.md) and
 | `embld` | [The linker](manual/tools/embld.md) |
 | `embas` | [The NASM-syntax assembler](manual/tools/embas.md) |
 | `embar` | [The archiver](manual/tools/embar.md) |
+| `embsvd` | [A device's header, startup and linker script from its SVD file](manual/tools/embsvd.md) |
 | `embdbg` | [The debugger](manual/tools/embdbg.md) |
 | `embread` | [The EMBX image reader](manual/tools/embread.md) |
 | `embls` | [The language server](manual/tools/embls.md) |
