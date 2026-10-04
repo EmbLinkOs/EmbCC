@@ -3559,6 +3559,28 @@ int main(int argc, char **argv)
              *
              * The opposite spellings are NOT accepted, because those
              * would be promises: see the refusals below. */
+        } else if (strncmp(argv[i], "-fgnuc-version=", 15) == 0) {
+            /* clang's spelling: present a C unit as this GCC, so a vendor
+             * header that picks its compiler support by __GNUC__ (CMSIS)
+             * takes the GNU one. 0 leaves it undefined, the default. */
+            int v[3] = { 0, 0, 0 }, k = 0;
+            const char *q = argv[i] + 15;
+            char *e;
+            for (; k < 3; k++) {
+                long n = strtol(q, &e, 10);
+                if (e == q || n < 0 || n > 999) break;
+                v[k] = (int)n;
+                q = e;
+                if (*q != '.') { k++; break; }
+                q++;
+            }
+            if (k == 0 || *q) {
+                fprintf(stderr, "embcc: error: -fgnuc-version wants "
+                                "MAJOR[.MINOR[.PATCH]], not '%s'\n",
+                        argv[i] + 15);
+                return 1;
+            }
+            cpp_set_gnuc_version(v[0], v[1], v[2]);
         } else if (strcmp(argv[i], "-ffunction-sections") == 0 ||
                    strcmp(argv[i], "-fdata-sections") == 0) {
             /* Accepted and not yet done. It costs nothing to be wrong

@@ -3885,6 +3885,25 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 struct stmt *sd = new_stmt(STMT_DECL, dline, 0);
                 sd->dty = ety; sd->name = dname; sd->is_extern = 1;
                 *etail = sd; etail = &sd->next;
+                /* `extern void _start(void) __attribute__((noreturn));`,
+                 * as CMSIS's __cmsis_start declares it: what a trailing
+                 * attribute says of a name declared, not defined, here is
+                 * a promise about the definition elsewhere, and declining
+                 * it costs only an optimization (or, for `weak`, makes a
+                 * missing definition a link error) */
+                struct attrs xat = { 0 };
+                parse_attributes(ps, &xat);
+            }
+            if (is_td) {
+                /* a trailing attribute on a block-scope typedef: one
+                 * that changes the layout is refused, not dropped */
+                struct attrs tat = { 0 };
+                parse_attributes(ps, &tat);
+                if (tat.aligned || tat.packed)
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                               "an aligned or packed attribute on a "
+                               "block-scope typedef is not supported; "
+                               "declare the typedef at file scope");
             }
             if (cur(ps)->kind == TOK_COMMA) { advance(ps); continue; }
             break;

@@ -1193,6 +1193,18 @@ a frame pointer; the ARM, RISC-V and AVR backends never use one.
 Accepted. EmbCC does not generate code that calls through a procedure
 linkage table.
 
+### `-fgnuc-version=MAJOR[.MINOR[.PATCH]]`
+
+Define `__GNUC__`, `__GNUC_MINOR__`, `__GNUC_PATCHLEVEL__` and
+`__GNUC_STDC_INLINE__` in a C unit, as that version of GCC, the way clang
+does by default. EmbCC does not by default, because a header that sees
+`__GNUC__` may take paths that need GCC itself. Vendor headers that pick
+their compiler support by it need it: CMSIS's `cmsis_compiler.h` stops at
+`#error Unknown compiler` without it, and compiles with
+`-fgnuc-version=4.2.1` (see [Embedded programming](embedded.md#cmsis-and-vendor-files)).
+`0` leaves the macros undefined. A C++ unit always presents itself as
+g++ (see [C++](cxx.md#compiler-identity)).
+
 ### `-ffunction-sections`, `-fdata-sections`
 
 Accepted and not implemented: functions and data are not placed in
