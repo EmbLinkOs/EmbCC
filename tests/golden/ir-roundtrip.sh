@@ -140,6 +140,6 @@ printf '; EmbIR\nfunc @f nparams=0 nvars=0 vregs=3 labels=0 {\n  %%0 = const.4 2
     { cat "$out/opt0.txt" "$out/opt2.txt"; echo "FAIL: could not read opt.ir"; exit 1; }
 grep -q "add\." "$out/opt0.txt" ||
     { cat "$out/opt0.txt"; echo "FAIL: without -O the IR should come back as written"; exit 1; }
-! grep -q "add\." "$out/opt2.txt" && grep -qE "const\.4s? 5$" "$out/opt2.txt" ||
+! grep -q "add\." "$out/opt2.txt" && grep -qE "const\.4s? 5(\s*;.*)?$" "$out/opt2.txt" ||
     { cat "$out/opt2.txt"; echo "FAIL: -O2 should have folded 2 + 3 in the parsed IR"; exit 1; }
 echo "with -O2, parsed IR goes through the optimizer: 2 + 3 comes back as 5"
