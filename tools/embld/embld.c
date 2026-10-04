@@ -6,6 +6,7 @@
  * the way `embread` gives the ELF writer a testable front door.
  *
  * usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]
+ *              [-T SCRIPT [-L DIR]... [--orphan-handling=MODE]] [-u SYM]...
  *              [--embx [--cap NAME]...] INPUT.o|INPUT.a ...
  *        embld --doctor INPUT.o|INPUT.a ...
  *
@@ -26,7 +27,8 @@ int main(int argc, char **argv)
     const char *out = "a.out";
     struct link_opts opts;
     const char *inputs[256];
-    int ninputs = 0;
+    const char *libdirs[64], *undefs[64];
+    int ninputs = 0, nlibdirs = 0, nundefs = 0;
     int doctor = 0;
 
     memset(&opts, 0, sizeof opts);
@@ -81,6 +83,39 @@ int main(int argc, char **argv)
             if (!v) { fprintf(stderr, "embld: -Tstack needs an address\n"); return 2; }
             opts.stack_top = strtoul(v, NULL, 0);
             opts.have_stack = 1;
+        } else if ((strncmp(argv[i], "-T", 2) == 0 &&
+                    strncmp(argv[i], "-Tbss", 5) != 0) ||
+                   strncmp(argv[i], "--script", 8) == 0) {
+            /* -T SCRIPT, -TSCRIPT, --script=SCRIPT, --script SCRIPT; the
+             * -Ttext/-Tdata/-Tstack spellings were taken above */
+            const char *v = argv[i][1] == 'T'
+                ? (argv[i][2] ? argv[i] + 2 : (++i < argc ? argv[i] : NULL))
+                : (argv[i][8] == '=' ? argv[i] + 9
+                                     : (++i < argc ? argv[i] : NULL));
+            if (!v) { fprintf(stderr, "embld: -T needs a linker script\n"); return 2; }
+            if (opts.script) { fprintf(stderr, "embld: only one linker script (-T) per link\n"); return 2; }
+            opts.script = v;
+        } else if (strncmp(argv[i], "-L", 2) == 0) {
+            const char *v = argv[i][2] ? argv[i] + 2
+                                       : (++i < argc ? argv[i] : NULL);
+            if (!v) { fprintf(stderr, "embld: -L needs a directory\n"); return 2; }
+            if (nlibdirs == 64) { fprintf(stderr, "embld: too many -L\n"); return 2; }
+            libdirs[nlibdirs++] = v;
+        } else if (strcmp(argv[i], "-u") == 0 ||
+                   strncmp(argv[i], "--undefined", 11) == 0) {
+            const char *v = argv[i][1] == 'u'
+                ? (++i < argc ? argv[i] : NULL)
+                : (argv[i][11] == '=' ? argv[i] + 12
+                                      : (++i < argc ? argv[i] : NULL));
+            if (!v) { fprintf(stderr, "embld: -u needs a symbol\n"); return 2; }
+            if (nundefs == 64) { fprintf(stderr, "embld: too many -u\n"); return 2; }
+            undefs[nundefs++] = v;
+        } else if (strncmp(argv[i], "--orphan-handling=", 18) == 0) {
+            const char *v = argv[i] + 18;
+            if (!strcmp(v, "place")) opts.orphan_mode = 0;
+            else if (!strcmp(v, "warn")) opts.orphan_mode = 1;
+            else if (!strcmp(v, "error")) opts.orphan_mode = 2;
+            else { fprintf(stderr, "embld: --orphan-handling is place, warn or error\n"); return 2; }
         } else if (strcmp(argv[i], "--embx") == 0) {
             opts.emit_embx = 1;            /* write a native EMBX, not ELF */
         } else if (strcmp(argv[i], "--cap") == 0) {
@@ -100,11 +135,16 @@ int main(int argc, char **argv)
     }
     if (!ninputs) {
         fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]\n"
+                        "             [-T SCRIPT [-L DIR]... [--orphan-handling=place|warn|error]]\n"
                         "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n"
                         "       embld --doctor INPUT.o|INPUT.a ...   "
                         "(why the link fails)\n");
         return 2;
     }
+    opts.libdirs = libdirs;
+    opts.nlibdirs = nlibdirs;
+    opts.undefs = undefs;
+    opts.nundefs = nundefs;
     if (doctor)
         return doctor_run((char **)inputs, ninputs);
     return embld_link(inputs, ninputs, out, &opts);

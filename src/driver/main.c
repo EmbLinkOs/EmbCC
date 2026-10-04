@@ -1208,9 +1208,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * each aligned to its (element) size. A section("name") global goes to
      * its named section instead, in declaration order, zero-filled when it
      * has no initializer — PROGBITS like gcc's, NOBITS only for a .bss*
-     * name. With no const tracking a named section is writable unless its
-     * name says .rodata/.text; gcc would make a const-only one read-only,
-     * which changes its segment and nothing the program can observe. */
+     * name. It is writable when anything in it is (or its name is .data or
+     * .bss), and read-only when everything in it is const, as gcc makes
+     * it. That is observable: a linker script places a writable orphan in
+     * RAM, where the startup copies only .data, so a const table in a
+     * section of its own (a command table, a driver list) read as zeros
+     * until it was read-only and went to flash after .rodata. */
     struct named { const char *name; int len, align, nobits, flags, ndx;
                    char *buf; } named[64];
     int nnamed = 0;
@@ -1282,7 +1285,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 named[k].flags = SHF_ALLOC;
                 if (strncmp(n, ".text", 5) == 0)
                     named[k].flags |= SHF_EXECINSTR;
-                else if (strncmp(n, ".rodata", 7) != 0)
+                else if (strncmp(n, ".data", 5) == 0 || named[k].nobits)
                     named[k].flags |= SHF_WRITE;
                 named[k].buf = NULL;
                 nnamed++;
@@ -1291,6 +1294,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 diag_fatal(g->file, g->line,
                            "'%s' has an initializer but is placed in "
                            "NOBITS section '%s'", g->name, g->section);
+            if (!(g->is_const && ot && !ot->is_volatile) &&
+                !(named[k].flags & SHF_EXECINSTR) &&
+                strncmp(g->section, ".rodata", 7) != 0)
+                named[k].flags |= SHF_WRITE;
             g->named = k + 1;
             g->in_bss = named[k].nobits;
             len = &named[k].len;

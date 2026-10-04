@@ -66,6 +66,18 @@ struct link_opts {
      * symbol as before. */
     unsigned long stack_top;
     int have_stack;
+    /* -T SCRIPT: a GNU ld linker script lays the image out (ARM and
+     * RISC-V; src/link/ldscript.h has what it supports). The directories
+     * its INPUT/GROUP/INCLUDE names are looked up in (-L), symbols to
+     * treat as undefined so an archive supplies them (-u), and what to
+     * do with an input no rule places: 0 place it as ld does, 1 warn,
+     * 2 refuse (--orphan-handling). */
+    const char *script;
+    const char **libdirs;
+    int nlibdirs;
+    const char **undefs;
+    int nundefs;
+    int orphan_mode;
 };
 
 /* Links inputs[0..n) into an ET_EXEC at `out`. Inputs are object files

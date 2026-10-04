@@ -19,6 +19,9 @@ embld [-o FILE] [-e SYMBOL] [-Ttext ADDR] [-Tdata ADDR] [-Tstack ADDR]
       [--embx [--cap NAME]...]
       INPUT...
 
+embld -T SCRIPT [-L DIR]... [-u SYMBOL]... [--orphan-handling=MODE]
+      [-o FILE] [-e SYMBOL] INPUT...
+
 embld --doctor INPUT...
 ```
 
@@ -249,6 +252,71 @@ If the entry symbol is more than 2 GB from the stub, the link fails with
 
 On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 
+### Linker scripts
+
+`-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM
+and RISC-V images: the script a CMSIS, STM32CubeMX, vendor SDK or RTOS
+project already has. It replaces `-Ttext`, `-Tdata`, `-Tstack`,
+`--rom-limit` and `--lma-offset`, which are refused with it, and the
+linker defines no bracket symbols of its own except `__start_NAME` and
+`__stop_NAME` for an output section whose name is a C identifier.
+
+```sh
+embld -T STM32F407VGTx_FLASH.ld startup.o main.o librt.a -o fw.elf
+```
+
+The layout follows ld's rules:
+
+- An input section is claimed by the first input description that
+  matches it, in script order. Within one description, inputs are taken
+  in command-line order and each object's sections in their own order,
+  unless `SORT`, `SORT_BY_NAME`, `SORT_BY_ALIGNMENT` or
+  `SORT_BY_INIT_PRIORITY` says otherwise.
+- An output section starts at its address if it gives one, else at the
+  next free byte of its `> REGION`, else at `.`. Its load address is
+  `AT(ADDR)`, or the next free byte of its `AT> REGION`, or its run
+  address shifted by as much as the previous section in the same region,
+  or its run address. One free-byte pointer per region serves both, which
+  is how `.data` is stored right after the code in flash.
+- A section that names a region must fit in it. Otherwise the link stops
+  with `region RAM overflowed by N bytes`, as ld words it.
+- An allocated input section that nothing claims is an orphan. It gets an
+  output section of its own name after the last one of its kind (code,
+  read-only data, data, zero-initialised).
+  `--orphan-handling=warn` reports each one; `=error` refuses the link.
+- A section with no bytes of its own, `.bss` or one made only of `.`
+  moves such as `._user_heap_stack`, takes no file space and no flash.
+- Symbol assignments are evaluated where they stand. A forward reference
+  (`_sidata = LOADADDR(.data)` above `.data`) uses the previous pass, and
+  the layout is repeated until nothing moves.
+
+The output has one `PT_LOAD` per output section, whose physical address
+is the section's load address, and a section header per output section
+under the script's names. `llvm-objcopy -O binary`, a flash programmer and
+QEMU's `-kernel` therefore put every byte where the script says.
+
+Supported: `ENTRY`, `MEMORY`, `SECTIONS`, `REGION_ALIAS`, `INCLUDE`,
+`INPUT`, `GROUP`, `STARTUP`, `SEARCH_DIR`, `EXTERN`, `ASSERT`, `PROVIDE`,
+`PROVIDE_HIDDEN`, `HIDDEN`; output sections with an address, `(NOLOAD)`,
+`AT()`, `ALIGN()`, `SUBALIGN()`, `> REGION`, `AT> REGION`, `=FILL` and
+`/DISCARD/`; `KEEP`, `EXCLUDE_FILE`, `archive:member` patterns, `COMMON`,
+`BYTE`/`SHORT`/`LONG`/`QUAD`/`SQUAD`, `FILL`, and assignments to `.`
+(an absolute value inside an output section is an offset into it, as in
+ld); expressions with C's operators and `ALIGN`, `ORIGIN`, `LENGTH`,
+`ADDR`, `LOADADDR`, `SIZEOF`, `ALIGNOF`, `DEFINED`, `MIN`, `MAX`,
+`ABSOLUTE`, `LOG2CEIL`, `CONSTANT` and `SIZEOF_HEADERS`.
+`OUTPUT_FORMAT`, `OUTPUT_ARCH` and `TARGET` are read and ignored: the
+machine comes from the objects.
+
+Refused by name: `PHDRS`, `OVERLAY`, `INSERT`, `NOCROSSREFS`,
+`ONLY_IF_RO`/`ONLY_IF_RW`, `INPUT_SECTION_FLAGS`, output section types
+other than `NOLOAD`, and `DATA_SEGMENT_*`. A script that uses `/DISCARD/`
+on a section the program still refers to is refused with both sections
+named. COMMON symbols (tentative definitions from an object built with
+`-fcommon`; EmbCC emits none) are refused unless the script places
+`*(COMMON)`, because anywhere else is outside the range the startup
+zeroes. AVR images do not take a script yet.
+
 ### Debug information
 
 The `.debug_*` sections of every input object, archive members included,
@@ -415,6 +483,29 @@ and `OFFSET` does not apply to it.
 
 Refuse an image that needs more than `BYTES` bytes of flash. The default
 is no limit. See [Firmware layout](#firmware-layout).
+
+### `-T SCRIPT`, `-TSCRIPT`, `--script=SCRIPT`
+
+Lay the image out by the GNU ld linker script `SCRIPT`. See
+[Linker scripts](#linker-scripts). ARM and RISC-V only; refused with
+`-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit`, `--lma-offset` and `--embx`.
+
+### `-L DIR`, `-LDIR`
+
+Look for the files a script names in `INPUT`, `GROUP`, `STARTUP` and
+`INCLUDE` in `DIR`, after the script's own `SEARCH_DIR`s and before the
+script's directory. `-lNAME` in a script is `libNAME.a` there.
+
+### `-u SYMBOL`, `--undefined=SYMBOL`
+
+Treat `SYMBOL` as referenced, so that the archive member defining it is
+linked in. A script's `EXTERN` and `ENTRY` do the same.
+
+### `--orphan-handling=place|warn|error`
+
+What to do with an allocated input section no rule of the script places:
+`place` it as ld does (the default), place it and `warn`, or refuse the
+link with an `error`.
 
 ### `--embx`
 

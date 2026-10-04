@@ -114,9 +114,11 @@ embcc: error: unknown argument 'main.o'
 EmbCC has no archiver. The library builds use `x86_64-elf-ar`,
 `aarch64-elf-ar` or `llvm-ar`.
 
-There is no position-independent code, no shared library, no dynamic
-linking and no linker script. `-fPIC`, `-shared` and the related options
-are refused (see [Options](#options)).
+There is no position-independent code, no shared library and no dynamic
+linking. `-fPIC`, `-shared` and the related options are refused (see
+[Options](#options)). EmbLD reads GNU ld linker scripts (`embld -T`) for
+ARM and RISC-V images, not for x86-64 or AVR, and the driver does not
+take `-T` because it does not link firmware.
 
 ### Assembly
 
