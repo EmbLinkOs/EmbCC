@@ -455,7 +455,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             /* any scalar int/pointer that fits a GPR — char/short included: a
              * narrow write keeps the low bytes, a read movsx/movzx-extends. */
             elig[v] = (L->is_int_or_ptr ||
-                       (t->float_in_gpr && !fp && L->is_scalar_float)) &&
+                       ((t->float_in_gpr || t->fp_reads_gpr) && !fp &&
+                        L->is_scalar_float)) &&
                       (sz == 1 || sz == 2 || sz == 4 || sz == 8);
             if (!elig[v] && g_ra_why && v < g_ra_why_n)
                 g_ra_why[v] = L->is_int_or_ptr ? "local-odd-size"
@@ -499,7 +500,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                        in->op == IR_F2F;
         /* On the integer pass a float operand is somebody else's: it has
          * no GPR home. On the float pass it is the whole point. */
-        if (is_float && !fp && !t->float_in_gpr) {
+        if (is_float && !fp && !t->float_in_gpr && !t->fp_reads_gpr) {
             OPAQUE(in->dst); OPAQUE(in->a); OPAQUE(in->b);
         }
         switch (in->op) {
@@ -532,7 +533,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * backend; a scalar one only where the backend can take it
              * from a register. */
             if (fn->ret_abi.is_struct ||
-                (in->flt && !t->float_in_gpr ? !fp : !t->ret_scalar_in_reg))
+                (in->flt && !t->float_in_gpr && !t->fp_reads_gpr
+                     ? !fp : !t->ret_scalar_in_reg))
                 OPAQUE(in->a);
             break;
         case IR_CALL:

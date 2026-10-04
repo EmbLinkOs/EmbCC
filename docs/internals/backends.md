@@ -565,7 +565,12 @@ Instruction selection:
   whichever is shorter; `add`/`sub`/`cmp` take a 12-bit immediate,
   optionally shifted by 12 (a negative one flips the operation); logical
   operations take bitmask immediates; float constants use `fmov` where
-  the 8-bit form fits.
+  the 8-bit form fits, `fmov d, xzr` for +0.0, and otherwise -- when
+  `movz`/`movk` would take three or more instructions for a double, two
+  for a float -- `ldr dN, <literal>` from the function's literal pool:
+  each distinct value once, eight-aligned after the epilogue, marked as
+  data (`$d`), and the loads patched once it is laid out
+  (`a64_lit_load`, `a64_lit_flush`, `a64_fldr_lit`).
 - **Compare and branch.** An `==`/`!=` compare with zero whose only use
   is the next branch is `cbz`/`cbnz`; any other such compare is `b.cond`.
 - **`IR_SELECT`** is `cmp` of the condition with zero at its own width
@@ -659,9 +664,12 @@ frameless function's FDE has no instructions. Mach-O gets
 **Tail calls** (at `-O2` without `-g`) require a direct, non-variadic
 call with no struct or float result, a caller that returns no struct or
 float, is not variadic, has no `alloca` and no exception regions, takes
-no local's address, does not use `va_start` and has at most one return,
-and every argument in a register. The call becomes the callee-saved
-restores, the frame teardown and `b`.
+no local's address, does not use `va_start`, and every argument in a
+register; and the caller has at most one return, unless its frame is the
+frame record alone (no locals, no callee-saved registers), when each
+tail call's own teardown is one `ldp` -- or nothing, when every call is
+a tail call and the function needs no frame. The call becomes the
+callee-saved restores, the frame teardown and `b`.
 
 ### Calling conventions
 

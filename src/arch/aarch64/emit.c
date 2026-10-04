@@ -775,6 +775,26 @@ void a64_patch_adr(struct code *c, int at, int target)
     code_patch32(c, at, w);
 }
 
+/* LDR (literal, SIMD&FP): vt from a word pc-relative, imm19 words either
+ * way, opc 00 for an s register and 01 for a d register. The literal's
+ * place is patched in once the function's pool is laid out. */
+int a64_fldr_lit(struct code *c, int vt, int w)
+{
+    int o = c->len;
+    a64_word(c, (w == 8 ? 0x5C000000UL : 0x1C000000UL) | (unsigned long)vt);
+    return o;
+}
+
+void a64_patch_fldr_lit(struct code *c, int at, int target)
+{
+    long delta = (long)target - (long)at;
+    if ((delta & 3) || delta < -(1L << 20) || delta >= (1L << 20))
+        bad("ldr literal displacement", delta);
+    unsigned long w = word_at(c, at);
+    w = (w & 0xFF00001FUL) | ((((unsigned long)delta >> 2) & 0x7FFFFUL) << 5);
+    code_patch32(c, at, w);
+}
+
 int a64_add_lo12(struct code *c, int rd, int rn)
 {
     int o = c->len;

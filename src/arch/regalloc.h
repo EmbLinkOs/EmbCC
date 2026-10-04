@@ -181,6 +181,18 @@ struct ra_target {
      * and a lock's fast path there was a store and a reload of the lock
      * pointer, the desired value and the expected value's address. */
     int atomic_in_reg;
+
+    /* Can this backend's floating-point lowering reach a value whose home
+     * is a GENERAL register -- fmov it across where it is read as a float
+     * and back where it is written as one? A value that both kinds of op
+     * touch is in the integer class (cg_float_vregs), and fdlibm's are:
+     * the double whose words EXTRACT_WORDS reads, the one INSERT_WORDS
+     * builds. Without this every such value is kept in memory, and each
+     * crossing of the register files is a store and a load; with it the
+     * value takes an x register and each crossing is one fmov. Scalar
+     * float arguments of a call and a call's float result stay in memory
+     * still: the argument setup writes x0-x7. */
+    int fp_reads_gpr;
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that
