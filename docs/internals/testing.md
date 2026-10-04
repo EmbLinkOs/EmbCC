@@ -610,6 +610,7 @@ finding a miscompile; none of them is needed to use EmbCC.
 |---|---|
 | `EMBCC_VERIFY` | when set, the IR verifier runs after IR generation and after the passes of every optimizing compile, and stops the compile with an `internal:` error if a pass dropped a live value, left a stale scope index, or built an instruction without a source location; an optimizer that fails to converge is an error instead of a warning. The runner always sets it. |
 | `EMBCC_RA_MAXPOOL=N` | the shared register allocator hands out only the first `N` registers of each pool. Run the exec goldens with small `N` (3, 1, 0) to reach the spilled-operand paths that a full pool reaches only in rare functions. |
+| `EMBCC_NO_IDXOFF` | turn off moving a constant out of an array index into the access's displacement on RISC-V, for bisecting |
 | `EMBCC_RA_WHY=1` | one line per function on stderr accounting for every value that did not get a register |
 | `EMBCC_RA_TRACE=1` | every allocated or eligible value, with its live range, hint and location |
 | `EMBCC_RA_DEGREE_SPILL=1` | the previous spill choice (highest degree first), for bisecting a difference to it |

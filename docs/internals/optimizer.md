@@ -201,7 +201,7 @@ reports `embcc: error: unknown argument '-fno-NAME'`.
 The remaining passes have no flag. They run at `-O1` and above:
 `pass_storefwd`, `pass_roload` (it has work only at `-O2`, where
 `ro_globals` runs), `pass_fold`, `pass_reassoc`, `pass_lvn`,
-`pass_divmod`, `pass_copyprop`, `pass_copyprop_local`, `pass_dce`,
+`pass_idxoff` (RISC-V only), `pass_divmod`, `pass_copyprop`, `pass_copyprop_local`, `pass_dce`,
 `pass_rangecheck`, `pass_punfwd`, `pass_immfold`, `pass_joincopies`,
 `pass_sinkconst` and `pass_sinkaddr`.
 
@@ -255,6 +255,7 @@ repeat (outer round, at most 100 times):
         pass_fold
         pass_reassoc
         pass_lvn
+        pass_idxoff                           RISC-V only
         pass_divmod
         pass_gcse                             gcse, cfg_ok
         pass_sccp                             sccp, cfg_ok
@@ -493,6 +494,18 @@ produces, and how a payload propagates, differ between machines.
 operations are the same kind and both other operands are constants. Only
 constants are moved. The inner operation stays if something else reads
 it.
+
+**`pass_idxoff`** (RISC-V only; `EMBCC_NO_IDXOFF=1` turns it off). An
+address `base + ((x ± c) << k)` used only by loads and stores becomes
+`(base + (x << k)) ± (c << k)`, so the backend folds the constant into
+the access's displacement (`ra_fold_memoff`) and value numbering shares
+`base + (x << k)` between `a[i - 1]`, `a[i]` and `a[i + 1]`. Every step is
+modular at one width, so it holds for every `x`; it needs no extension
+between the add and the shift, which leaves `int` indices on 32-bit
+targets and `long` ones anywhere. Only when `x ± c` and the shift have
+no other use, the displacement is at most 255 bytes, and `k` is at most
+3. Thumb, AArch64 and x86-64 scale a register inside the access, where
+the rewrite measured slower, so it is not run there.
 
 **`pass_lvn`**. Local value numbering within a block (the table is reset
 at every label). Loads and `IR_LDVAR` are keyed with a memory version
