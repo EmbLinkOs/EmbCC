@@ -792,18 +792,21 @@ void t_bx(struct code *c, int rm)  { hw(c, 0x4700u | (unsigned)(rm << 3)); }
 void t_blx(struct code *c, int rm) { hw(c, 0x4780u | (unsigned)(rm << 3)); }
 void t_nop(struct code *c)         { hw(c, 0xbf00u); }
 
-void t_it(struct code *c, int cond, int nthen, unsigned pattern)
+void t_it(struct code *c, int cond, const char *te)
 {
-    /* The mask is the then/else pattern followed by a 1 and then zeros;
-     * for one instruction that is 0b1000. */
+    /* firstcond, then for each further instruction one mask bit: the
+     * condition's own low bit for 't', its inverse for 'e' -- so the
+     * instruction runs under firstcond[3:1]:bit, which is cond or its
+     * inverse. Then a 1 to end the block, and zeros. */
     unsigned mask = 0;
-    for (int k = 0; k < nthen; k++) {
-        unsigned bit = (pattern >> (nthen - 1 - k)) & 1;
-        /* Bit 0 of the pattern means "same condition as the first". */
-        mask |= (bit ^ ((unsigned)cond & 1) ^ ((unsigned)cond & 1)) << (3 - k);
+    int k = 0;
+    for (; te[k] && k < 3; k++) {
+        unsigned bit = te[k] == 't' ? ((unsigned)cond & 1u)
+                                    : (~(unsigned)cond & 1u);
+        mask |= bit << (3 - k);
     }
-    mask |= 1u << (3 - nthen);
-    hw(c, 0xbf00u | (unsigned)(cond << 4) | mask);
+    mask |= 1u << (3 - k);
+    hw(c, 0xbf00u | ((unsigned)cond << 4) | mask);
 }
 
 int t_cond_invert(int cond) { return cond ^ 1; }
@@ -869,6 +872,78 @@ void t_hint(struct code *c, int op)
 void t_bkpt(struct code *c, int imm8)
 {
     hw(c, 0xBE00u | ((unsigned)imm8 & 0xff));
+}
+
+/* SVC: 1101 1111 imm8, B<c> T1's encoding with the condition `1111`. */
+void t_svc(struct code *c, int imm8)
+{
+    hw(c, 0xDF00u | ((unsigned)imm8 & 0xff));
+}
+
+int t_tst_imm(struct code *c, int rn, long imm)
+{
+    int e;
+    if (!t_imm_ok(imm))
+        return 0;
+    e = encode_imm((unsigned long)imm);
+    /* TST is AND with S set and rd = PC, as t_cmp_imm's CMP is SUB. */
+    hw2(c, 0xf010u | (imm_i(e) << 10) | (unsigned)rn,
+           (imm_hi3(e) << 12) | 0x0f00u | imm_lo8(e));
+    return 1;
+}
+
+/* T2 STM (IA): 1110 1000 10W0 Rn | 0 M 0 list   T1 STMDB: 1110 1001 00W0 Rn
+ * T2 LDM (IA): 1110 1000 10W1 Rn | P M 0 list   T1 LDMDB: 1110 1001 00W1 Rn
+ * -- the same words t_push (STMDB sp!) and t_pop (LDMIA sp!) write with
+ * Rn = sp and W = 1. */
+int t_ldm_stm(struct code *c, int rn, unsigned mask, int wback, int before,
+              int load)
+{
+    int n = 0;
+    for (unsigned m = mask; m; m &= m - 1)
+        n++;
+    if (n < 2 || rn < 0 || rn > 14 || (mask & ~0xffffu) ||
+        (mask & (1u << 13)) || (!load && (mask & (1u << 15))) ||
+        (load && (mask & (1u << 15)) && (mask & (1u << 14))) ||
+        (wback && (mask & (1u << rn))))
+        return 0;
+    hw2(c, (before ? 0xe900u : 0xe880u) | ((unsigned)wback << 5) |
+           ((unsigned)load << 4) | (unsigned)rn,
+        mask & 0xffffu);
+    return 1;
+}
+
+static void vsplit(int r, int dbl, unsigned *field, unsigned *flag);
+
+/* VLDM/VSTM, single precision (T2): 1110 110P UDWL Rn | Vd 1010 imm8,
+ * the words t_vpush_s writes with Rn = sp. DB is P=1 U=0 and must write
+ * back (P=1 W=0 is VSTR/VLDR); IA is P=0 U=1. */
+int t_vldm_vstm(struct code *c, int rn, int first, int n, int wback,
+                int before, int load)
+{
+    unsigned f, fl;
+    if (n < 1 || first < 0 || first + n > 32 || rn < 0 || rn > 14 ||
+        (before && !wback))
+        return 0;
+    vsplit(first, 0, &f, &fl);
+    hw2(c, 0xec00u | ((unsigned)before << 8) | ((unsigned)!before << 7) |
+           (fl << 6) | ((unsigned)wback << 5) | ((unsigned)load << 4) |
+           (unsigned)rn,
+        (f << 12) | 0x0a00u | ((unsigned)n & 0xffu));
+    return 1;
+}
+
+/* LDR (literal) T2: 1111 1000 U101 1111 | Rt imm12 -- the 32-bit form
+ * t_ldst_imm writes for a positive offset with Rn = pc, with U for the
+ * sign. */
+int t_ldr_lit(struct code *c, int rt, long off)
+{
+    long mag = off < 0 ? -off : off;
+    if (mag > 4095)
+        return 0;
+    hw2(c, (off < 0 ? 0xf85fu : 0xf8dfu),
+        ((unsigned)rt << 12) | (unsigned)mag);
+    return 1;
 }
 
 /* RBIT <Rd>, <Rm>: the operand appears TWICE, in both halfwords, which

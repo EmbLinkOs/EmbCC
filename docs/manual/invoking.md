@@ -974,6 +974,29 @@ directories are not searched (a `#include "file"` beside the source is
 found). The inline-assembly vocabulary of each target is listed in
 [Inline assembly](inline-asm.md).
 
+The assembler follows GNU as for each target:
+
+- **Comments.** `#` starts a comment, except on ARM and AArch64, where it
+  is an immediate's prefix (`mov r0, #1`) and starts a comment only as a
+  line's first character. `@` is ARM's comment character and `;` AVR's;
+  `//` works everywhere.
+- **Alignment.** `.align N` and `.p2align N` align to 2^N bytes, and
+  `.balign N` to N bytes. Padding in code is the target's no-op
+  instruction, and zero bytes in data.
+- **Operand words.** A special register, interrupt mask, IT condition,
+  barrier option or floating-point register on ARM, and a CSR name or a
+  fence set on RISC-V, is an operand and never a symbol.
+- **Symbols.** On ARM, a symbol is reached by `bl sym`, `b sym`,
+  `ldr rd, =sym` (assembled as `movw`/`movt` with `R_ARM_THM_MOVW_ABS_NC`
+  and `R_ARM_THM_MOVT_ABS`), `movw rd, #:lower16:sym`,
+  `movt rd, #:upper16:sym` and `.word sym`. `ldr rd, label` loads a word
+  from a label defined in the same file. `.thumb_func`, or
+  `.type sym, %function`, makes a label a Thumb function: its symbol
+  carries the interworking bit, which a vector table entry needs. A symbol
+  the file uses but does not define is an external reference.
+- **Sizes.** `.size sym, .-sym` records a function's size, which a
+  debugger uses to attribute addresses to it.
+
 For x86-64 targets, GNU-syntax assembly files are refused:
 
 ```text

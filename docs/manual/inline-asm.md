@@ -873,33 +873,44 @@ reported as an unknown instruction).
 | `movw`, `movt` `Rd, #IMM` | 0 to 0xffff |
 | `mvn`, `mvns` `Rd, Rm` | |
 | `clz`, `rbit`, `rev` `Rd, Rm` | |
-| `cmp Rn, Rm` or `Rn, #IMM`; `tst Rn, Rm` | |
+| `cmp`, `tst` `Rn, Rm` or `Rn, #IMM` | |
 | `add`, `adds`, `sub`, `subs`, `and`, `ands`, `orr`, `orrs`, `eor`, `eors`, `bic`, `bics`, `adc`, `adcs`, `sbc`, `sbcs`, `rsb`, `rsbs` | `Rd, Rn, Rm` or `Rd, Rn, #IMM` (three operands) |
 | `lsl`, `lsls`, `lsr`, `lsrs`, `asr`, `asrs`, `ror`, `rors` | `Rd, Rn, Rm` or `Rd, Rn, #0..31` |
 | `mul Rd, Rn, Rm`, `udiv`, `sdiv` | |
 | `ldr`, `ldrb`, `ldrsb`, `ldrh`, `ldrsh`, `str`, `strb`, `strh` | `Rt, [Rn]` or `Rt, [Rn, #OFF]` |
+| `ldr Rt, [pc, #OFF]` | a literal, `OFF` from the word-aligned pc, -4095 to 4095 |
+| `ldr Rt, =IMM` | any 32-bit constant, assembled as `movw` and `movt` |
 | `ldrex Rt, [Rn{, #OFF}]` | `OFF` a multiple of 4, 0 to 1020 |
 | `strex Rd, Rt, [Rn{, #OFF}]` | `OFF` a multiple of 4, 0 to 1020 |
 | `b`, `bl`, `beq`, `bne`, `bcs`, `bhs`, `bcc`, `blo`, `bmi`, `bpl`, `bvs`, `bvc`, `bhi`, `bls`, `bge`, `blt`, `bgt`, `ble` | `OFFSET` (even) |
-| `push`, `pop` | a register list written **without braces**: `push r0, r1` |
+| `push`, `pop` | a register list, `{r4-r7, lr}` or without braces, `r4, lr` |
+| `ldm`, `ldmia`, `ldmfd`, `ldmdb`, `ldmea`, `stm`, `stmia`, `stmea`, `stmdb`, `stmfd` | `Rn{!}, {LIST}`: two or more registers, never `sp`; no `pc` in a store; not `pc` and `lr` together in a load; not `Rn` with writeback |
+| `svc #IMM` | 0 to 255 |
+| `it`, `itt`, `ite`, ... (up to four instructions) | a condition; each instruction in the block carries its condition suffix (`moveq`) |
+| `vmov Sn, Rt`, `vmov Rt, Sn` | |
+| `vldm`, `vldmia`, `vldmdb`, `vstm`, `vstmia`, `vstmdb` | `Rn{!}, {Sm-Sn}`: consecutive single-precision registers; `db` needs writeback |
+| `vpush`, `vpop` | `{Sm-Sn}` |
 
 Points that differ from the GNU assembler:
 
-- `movs` and `mvns` are encoded as `mov` and `mvn`: they do not set the
-  flags.
-- `push` and `pop` with a braced list (`push {r4, lr}`) are refused with
-  `push wants a register list`.
+- `ldm`, `stm`, the branches and `ldr Rt, [pc, #OFF]` always use the
+  32-bit encoding, and `ldr Rt, =IMM` is `movw`/`movt` rather than a load
+  from a literal pool.
+- Inside an IT block, a flag-setting instruction (`adds`, `movs`, ...)
+  is refused, because its 16-bit encoding sets no flags there, and so is
+  a branch other than a final `bx` or `blx`. A block left open at the end
+  of an asm statement is refused, since it would make the compiler's next
+  instructions conditional.
 - The arithmetic instructions need all three operands; the two-operand
   form `add r0, #1` is refused.
 - A barrier option other than `sy` is refused with
   ``only the `sy` barrier option is supported; "ish" is not``.
 
-There is no `svc`, no `it` block or conditional execution, no `cbz` or
-`cbnz`, no `ldm`, `stm`, `ldrd` or `strd`, no `clrex`, no byte or
+There is no `cbz` or `cbnz`, no `ldrd` or `strd`, no `clrex`, no byte or
 halfword exclusives, no extend, bit-field, multiply-accumulate or
-long-multiply instruction,
-and no floating-point instruction (`vmrs`, `vmsr`, `vldr`, ...). The
-ARMv8-M registers `msplim` and `psplim` and the ARMv8-M security
+long-multiply instruction, and no floating-point instruction beyond
+`vmov`, `vldm`/`vstm` and `vpush`/`vpop` (`vmrs`, `vmsr`, `vldr`, ...).
+The ARMv8-M registers `msplim` and `psplim` and the ARMv8-M security
 instructions are not available on the `thumbv8m.main` triples either.
 
 ### Callee-saved registers on ARM Cortex-M

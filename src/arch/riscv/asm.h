@@ -38,6 +38,11 @@ int rvasm_assemble(const char *text, struct code *out, char *err, int errlen);
  * for `register T v __asm__("a0")` variables and for clobber lists. */
 int rvasm_gpr(const char *name, int len);
 
+/* For the file assembler: is `w` an operand word of this statement -- a
+ * CSR name after a csr instruction, a fence's iorw set -- rather than a
+ * symbol? */
+int rvasm_is_word(const char *stmt, const char *w, int wlen);
+
 /* The inverse: the ABI name of a register number, for irgen to substitute
  * into a template. One name per register at one width -- RISC-V has no
  * w0/x0 question -- so this is the whole of operand rendering. */

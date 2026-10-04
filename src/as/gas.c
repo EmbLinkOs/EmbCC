@@ -64,6 +64,7 @@ struct gas {
     int npcrel;             /* .Lpcrel_hiN counter */
     int line;               /* for diagnostics */
     int errors;
+    int thumb_func_next;    /* .thumb_func: the next label is a function */
 };
 
 static void gerr(struct gas *g, const char *fmt, ...)
@@ -125,10 +126,13 @@ static int is_sym0(int c) { return isalpha(c) || c == '_' || c == '.' || c == '$
 static int is_symc(int c) { return isalnum(c) || c == '_' || c == '.' || c == '$'; }
 
 /* Strips comments and trailing space, in place. `#` and `//` start one;
- * a `#` inside a string does not. */
-static void strip_comment(char *s, char extra)
+ * a `#` inside a string does not, and with `hash_imm` (ARM, aarch64) a
+ * `#` that is not the line's first character does not either. */
+static void strip_comment(char *s, char extra, int hash_imm)
 {
     int q = 0;
+    char *first = s;
+    while (*first && isspace((unsigned char)*first)) first++;
     for (char *p = s; *p; p++) {
         if (q) {
             if (*p == '\\' && p[1]) { p++; continue; }
@@ -136,7 +140,8 @@ static void strip_comment(char *s, char extra)
             continue;
         }
         if (*p == '"' || *p == '\'') { q = *p; continue; }
-        if (*p == '#' || (*p == '/' && p[1] == '/') ||
+        if ((*p == '#' && (!hash_imm || p == first)) ||
+            (*p == '/' && p[1] == '/') ||
             (extra && *p == extra)) { *p = '\0'; break; }
     }
     size_t n = strlen(s);
@@ -199,6 +204,38 @@ static void advance(struct gas *g, long n)
 static void do_align(struct gas *g, long boundary)
 {
     long off = cur_off(g);
+    if (boundary <= 1)
+        return;
+    /* In code the padding may be EXECUTED -- straight-line code that runs
+     * into an alignment -- so it is the machine's nop there, as GNU as
+     * pads it. Zero bytes are an illegal instruction on RISC-V and
+     * `movs r0, r0`, which writes the flags, on Thumb. Data gets zeros. */
+    if (g->cur == SEC_TEXT) {
+        int m = g->tgt->machine;
+        struct code *c = &g->sec[SEC_TEXT];
+        while (off % boundary) {
+            long left = boundary - off % boundary;
+            if (m == EM_ARM && !(off & 1) && left >= 2) {
+                code_byte(c, 0x00); code_byte(c, 0xbf);          /* nop */
+                off += 2;
+            } else if (m == EM_RISCV && !(off & 3) && left >= 4) {
+                code_byte(c, 0x13); code_byte(c, 0); code_byte(c, 0);
+                code_byte(c, 0);                                 /* nop */
+                off += 4;
+            } else if (m == EM_RISCV && !(off & 1) && left >= 2) {
+                code_byte(c, 0x01); code_byte(c, 0x00);          /* c.nop */
+                off += 2;
+            } else if (m == EM_AARCH64 && !(off & 3) && left >= 4) {
+                code_byte(c, 0x1f); code_byte(c, 0x20); code_byte(c, 0x03);
+                code_byte(c, 0xd5);                              /* nop */
+                off += 4;
+            } else {
+                code_byte(c, 0);     /* AVR's nop is 0x0000; an odd byte */
+                off++;
+            }
+        }
+        return;
+    }
     while (off % boundary) { advance(g, 1); off++; }
 }
 
@@ -289,10 +326,44 @@ static int directive(struct gas *g, char *p, int pass)
             sym_get(g, arg, (size_t)(e - arg))->is_func = 1;
         return 1;
     }
-    if (DIR(".size") || DIR(".file") || DIR(".ident") || DIR(".cfi_startproc") ||
+    /* .thumb_func: the next label is a Thumb FUNCTION, whose symbol
+     * carries the interworking bit -- what makes `.word handler` in a
+     * vector table, or a C call through a pointer to it, enter Thumb
+     * state instead of faulting. GNU as does the same for a label typed
+     * %function in Thumb code, and so does write_object below. */
+    if (DIR(".thumb_func")) {
+        if (g->tgt->machine == EM_ARM)
+            g->thumb_func_next = 1;
+        return 1;
+    }
+    /* .size sym, .-sym (or a number): what a debugger reads as the
+     * function's extent, and skips the symbol without. */
+    if (DIR(".size")) {
+        char *e = arg, *v;
+        long n;
+        while (*e && is_symc((unsigned char)*e)) e++;
+        v = skip_ws(e);
+        if (e == arg || *v != ',') return 1;
+        v = skip_ws(v + 1);
+        struct sym *sy = sym_get(g, arg, (size_t)(e - arg));
+        if (v[0] == '.' && v[1] == '-') {
+            char *w = skip_ws(v + 2), *we = w;
+            while (*we && is_symc((unsigned char)*we)) we++;
+            if (we - w == e - arg && strncmp(w, arg, (size_t)(e - arg)) == 0 &&
+                sy->sec == g->cur)
+                sy->size = cur_off(g) - sy->value;
+        } else {
+            char *ve = v + strlen(v);
+            while (ve > v && isspace((unsigned char)ve[-1])) ve--;
+            if (parse_num(v, ve, &n))
+                sy->size = n;
+        }
+        return 1;
+    }
+    if (DIR(".file") || DIR(".ident") || DIR(".cfi_startproc") ||
         DIR(".cfi_endproc") || DIR(".syntax") || DIR(".thumb") ||
         DIR(".arch") || DIR(".attribute") || DIR(".option") ||
-        DIR(".thumb_func") || DIR(".code") || DIR(".fpu") || DIR(".eabi_attribute"))
+        DIR(".code") || DIR(".fpu") || DIR(".eabi_attribute"))
         return 1;      /* accepted and carried no further */
     if (DIR(".byte") || DIR(".short") || DIR(".half") || DIR(".word") ||
         DIR(".long") || DIR(".quad") || DIR(".dword")) {
@@ -331,6 +402,11 @@ static int directive(struct gas *g, char *p, int pass)
                     char *se = arg;
                     while (se < e && is_symc((unsigned char)*se)) se++;
                     char save = *se; *se = '\0';
+                    /* One this file never defines is an EXTERNAL
+                     * reference, as in any assembler: a vector table's
+                     * handler, an RTOS's current-task pointer. It needs
+                     * an entry to become UNDEF in the symbol table. */
+                    (void)sym_get(g, arg, (size_t)(se - arg));
                     fix_add(g, g->cur, cur_off(g), arg, rt, 0);
                     *se = save;
                 }
@@ -369,12 +445,25 @@ static int directive(struct gas *g, char *p, int pass)
         while (e > arg && isspace((unsigned char)e[-1])) e--;
         if (!parse_num(arg, e, &v)) { gerr(g, "%.*s needs a number",
                                            (int)nlen, name); return 1; }
-        /* .p2align takes an exponent; .align takes one on ARM and a byte
-         * count on RISC-V, and GNU as resolves that per target. Both
-         * spellings here mean what the target's own assembler means:
-         * .p2align is always 2^n, .align/.balign a byte count. */
-        if (DIR(".p2align")) { long b = 1; while (v-- > 0) b *= 2; do_align(g, b); }
-        else if (v > 0) do_align(g, v);
+        /* .balign takes a byte count. .p2align takes an exponent, and so
+         * does .align on every machine this assembles for: GNU as reads
+         * `.align n` as 2^n bytes on ARM, aarch64, RISC-V and AVR (it is
+         * a byte count only on x86 and a few others). Read as bytes,
+         * `.align 2` before a RISC-V trap vector gave two-byte alignment
+         * where mtvec needs four, and a Cortex-M vector table's `.align 7`
+         * asked for a multiple of seven. */
+        if (DIR(".balign")) {
+            if (v > 0) do_align(g, v);
+        } else {
+            long b = 1;
+            if (v < 0 || v > 16) {
+                gerr(g, "%.*s %ld: the exponent must be 0..16", (int)nlen,
+                     name, v);
+                return 1;
+            }
+            while (v-- > 0) b *= 2;
+            do_align(g, b);
+        }
         return 1;
     }
     gerr(g, "directive \"%.*s\" is not one this assembler knows",
@@ -479,7 +568,8 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
          * needs no register table of its own. Everything else that is
          * an identifier IS a symbol reference. */
         int first = s == skip_ws((char *)stmt);
-        int reg = g->tgt->is_reg && g->tgt->is_reg(s, (int)n) >= 0;
+        int reg = (g->tgt->is_reg && g->tgt->is_reg(s, (int)n) >= 0) ||
+                  (g->tgt->is_word && g->tgt->is_word(stmt, s, (int)n));
         /* `1f` / `1b`: the next or previous definition of numeric local 1.
          * Rewritten to the generated name and then treated as any other
          * label, so nothing downstream needs to know about them. `1f` is the
@@ -595,6 +685,23 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
     }
     int is_call = strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
     int is_la = strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
+    /* ARM's jump to a symbol defined elsewhere -- a tail call, an RTOS's
+     * branch into its C half -- is `b sym`: one wide branch and one
+     * R_ARM_THM_JUMP24, as a call is `bl` and R_ARM_THM_CALL. */
+    if (g->tgt->machine == EM_ARM &&
+        ((p[0] == 'b' && isspace((unsigned char)p[1])) ||
+         (strncmp(p, "b.w", 3) == 0 && isspace((unsigned char)p[3])))) {
+        struct code tmp = { 0 };
+        char err[256];
+        if (pass == 2)
+            fix_add(g, g->cur, pc, ext, R_ARM_THM_JUMP24, 0);
+        if (g->tgt->encode("b .+0", &tmp, err, sizeof err) != 0)
+            gerr(g, "%s", err);
+        else
+            emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
+        free(tmp.p);
+        return 1;
+    }
     /* ARM writes a call to a symbol as `bl sym`, one instruction
      * carrying one relocation -- there is no auipc pair to build. */
     if ((g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) &&
@@ -682,9 +789,13 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
     const char *p = skip_ws((char *)stmt);
     const char *q;
     size_t n;
-    if ((g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) &&
-        strncmp(p, "bl", 2) == 0 && isspace((unsigned char)p[2])) {
-        const char *b = skip_ws((char *)(p + 2));
+    int arm_b = g->tgt->machine == EM_ARM &&
+                ((p[0] == 'b' && isspace((unsigned char)p[1])) ||
+                 (strncmp(p, "b.w", 3) == 0 && isspace((unsigned char)p[3])));
+    if (((g->tgt->machine == EM_ARM || g->tgt->machine == EM_AARCH64) &&
+         strncmp(p, "bl", 2) == 0 && isspace((unsigned char)p[2])) || arm_b) {
+        const char *b = skip_ws((char *)(p + (p[1] == '.' ? 3 :
+                                              p[1] == 'l' ? 2 : 1)));
         size_t bn = 0;
         while (b[bn] && is_symc((unsigned char)b[bn])) bn++;
         /* Only when it names a SYMBOL: `bl .+8` is an ordinary
@@ -751,6 +862,34 @@ static void instruction(struct gas *g, char *stmt, int pass)
     struct code tmp = { 0 };
     char err[256];
 
+    /* ARM's `ldr rd, label`: a word loaded from a literal this file
+     * defines, PC-relative from Align(pc, 4) -- which only this layer can
+     * compute, since only it knows where the instruction is. The label
+     * has become `.+N`; it becomes `[pc, #off]`. Always the 32-bit form,
+     * so the length is the same in both passes. */
+    if (g->tgt->machine == EM_ARM && !ext) {
+        const char *q = skip_ws(text);
+        int wide = strncmp(q, "ldr.w", 5) == 0 && isspace((unsigned char)q[5]);
+        if (wide || (strncmp(q, "ldr", 3) == 0 && isspace((unsigned char)q[3]))) {
+            const char *r = skip_ws((char *)(q + (wide ? 5 : 3)));
+            const char *c = strchr(r, ',');
+            const char *d = c ? skip_ws((char *)(c + 1)) : NULL;
+            long disp = 0;
+            char *e = NULL;
+            if (d && d[0] == '.' && (d[1] == '+' || d[1] == '-'))
+                disp = strtol(d + 1, &e, 10);
+            if (e && *skip_ws(e) == 0) {
+                char buf[96];
+                long off = (pc + disp) - ((pc + 4) & ~3L);
+                snprintf(buf, sizeof buf, "ldr %.*s, [pc, #%ld]",
+                         (int)(c - r), r, off);
+                free(text);
+                text = xmalloc(strlen(buf) + 1);
+                memcpy(text, buf, strlen(buf) + 1);
+            }
+        }
+    }
+
     if (ext) {
         if (!extern_form(g, text, pc, pass, ext))
             gerr(g, "\"%s\" names the undefined symbol '%s' in a form this "
@@ -787,6 +926,8 @@ static void pass_over(struct gas *g, char *src, int pass)
      * makes every forward reference in pass two pick the instance after the
      * last one in the file, which is a jump to nowhere. */
     memset(g->local_n, 0, sizeof g->local_n);
+    if (g->tgt->reset)
+        g->tgt->reset();
     char *p = src;
     g->cur = SEC_TEXT;
     g->line = 0;
@@ -800,7 +941,7 @@ static void pass_over(struct gas *g, char *src, int pass)
         memcpy(line, p, n);
         line[n] = '\0';
         g->line++;
-        strip_comment(line, g->tgt->comment_char);
+        strip_comment(line, g->tgt->comment_char, g->tgt->hash_is_imm);
 
         char *q = skip_ws(line);
         /* Any number of `label:` may precede a statement on one line. */
@@ -841,6 +982,10 @@ static void pass_over(struct gas *g, char *src, int pass)
                     gerr(g, "label '%s' is defined twice", s->name);
                 s->sec = g->cur;
                 s->value = cur_off(g);
+                if (g->thumb_func_next) {
+                    s->is_func = 1;
+                    g->thumb_func_next = 0;
+                }
             }
             q = skip_ws(c + 1);
         }
@@ -853,6 +998,9 @@ static void pass_over(struct gas *g, char *src, int pass)
         if (!nl) break;
         p = nl + 1;
     }
+    if (g->tgt->open && g->tgt->open())
+        gerr(g, "an IT block is still owed instructions at the end of the "
+                "file");
 }
 
 /* ---- the object ------------------------------------------------------ */
@@ -898,8 +1046,12 @@ static int write_object(struct gas *g, const char *out_path)
             unsigned char bind = s->is_weak ? STB_WEAK
                                : s->is_global ? STB_GLOBAL : STB_LOCAL;
             unsigned char type = s->is_func ? STT_FUNC : STT_NOTYPE;
+            /* A function in Thumb code: the interworking bit. */
+            long thumb = g->tgt->machine == EM_ARM && s->is_func &&
+                         s->sec == SEC_TEXT;
             s->elf_ndx = elfw_add_symbol(w, s->name,
-                                         (Elf64_Addr)(s->sec >= 0 ? s->value : 0),
+                                         (Elf64_Addr)(s->sec >= 0 ?
+                                                      (s->value | thumb) : 0),
                                          (Elf64_Xword)s->size,
                                          (Elf64_Uchar)((bind << 4) | type),
                                          (Elf64_Half)(s->sec >= 0 ? ndx[s->sec]
@@ -941,7 +1093,8 @@ static const struct gas_target RISCV_GAS = {
     R_RISCV_32, R_RISCV_64,
     /* no 16-bit pointer, `.word` is four bytes, and no symbol
      * forms beyond the ones above. */
-    0, 0, NULL, 0
+    0, 0, NULL, 0,
+    0, rvasm_is_word, NULL, NULL
 };
 
 /* ARMv7-M. `call` and `la` are RISC-V pseudos and have no ARM
@@ -952,9 +1105,11 @@ static const struct gas_target THUMB_GAS = {
     EM_ARM, 1, tasm_assemble, tasm_gpr,
     R_ARM_THM_CALL, 0, 0,
     R_ARM_ABS32, 0,
-    /* no 16-bit pointer, `.word` is four bytes, and no symbol
-     * forms beyond the ones above. */
-    0, 0, NULL, 0
+    /* no 16-bit pointer, `.word` is four bytes; `ldr rd, =sym` and the
+     * :lower16:/:upper16: movw/movt are tasm_symform's. `@` is ARM's line
+     * comment and `#` an immediate's prefix. */
+    0, 0, tasm_symform, '@',
+    1, tasm_is_word, tasm_reset, tasm_open
 };
 
 /* aarch64. `bl sym` carries R_AARCH64_CALL26, one instruction and one
@@ -965,8 +1120,9 @@ static const struct gas_target A64_GAS = {
     R_AARCH64_CALL26, 0, 0,
     R_AARCH64_ABS32, R_AARCH64_ABS64,
     /* no 16-bit pointer, `.word` is four bytes, and no symbol
-     * forms beyond the ones above. */
-    0, 0, NULL, 0
+     * forms beyond the ones above; `#` is an immediate's prefix. */
+    0, 0, NULL, 0,
+    1, NULL, NULL, NULL
 };
 
 /* AVR. Its symbol-bearing forms are its own -- eight of them, because a
@@ -979,7 +1135,8 @@ static const struct gas_target AVR_GAS = {
     0, 0, 0,
     R_AVR_32, 0,
     R_AVR_16, 2, avrasm_symform,
-    ';'          /* AVR's line comment, as GNU as sets it for this port */
+    ';',         /* AVR's line comment, as GNU as sets it for this port */
+    0, NULL, NULL, NULL
 };
 
 static const struct gas_target *target_for(void)

@@ -14,7 +14,10 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "../../elf/elf.h"
 
 /* ---- registers ---------------------------------------------------------- */
 
@@ -191,6 +194,138 @@ static int tok_mem(const struct tok *t, int *reg, long *off)
     return 1;
 }
 
+/* A register list, `{r4-r11, lr}` -- one token, since `split` keeps a
+ * braced group together -- as a mask. Ranges and single registers, in any
+ * order; 0 when anything in it is not a core register. */
+static int tok_reglist(const struct tok *t, unsigned *mask)
+{
+    const char *p = t->s, *end = t->s + t->len;
+    *mask = 0;
+    while (p < end && isspace((unsigned char)*p)) p++;
+    if (p >= end || *p != '{') return 0;
+    p++;
+    while (end > p && isspace((unsigned char)end[-1])) end--;
+    if (end <= p || end[-1] != '}') return 0;
+    end--;
+    while (p < end) {
+        const char *a, *b;
+        int r1, r2;
+        while (p < end && (isspace((unsigned char)*p) || *p == ',')) p++;
+        if (p >= end) break;
+        a = p;
+        while (p < end && !isspace((unsigned char)*p) && *p != ',' && *p != '-')
+            p++;
+        r1 = tasm_gpr(a, (int)(p - a));
+        if (r1 < 0) return 0;
+        while (p < end && isspace((unsigned char)*p)) p++;
+        r2 = r1;
+        if (p < end && *p == '-') {
+            p++;
+            while (p < end && isspace((unsigned char)*p)) p++;
+            b = p;
+            while (p < end && !isspace((unsigned char)*p) && *p != ',') p++;
+            r2 = tasm_gpr(b, (int)(p - b));
+            if (r2 < r1) return 0;
+        }
+        for (int r = r1; r <= r2; r++) *mask |= 1u << r;
+    }
+    return *mask != 0;
+}
+
+/* `s7` -> 7, single-precision registers only. */
+static int sreg(const char *s, int len)
+{
+    int v = 0;
+    if (len < 2 || len > 3 || (s[0] != 's' && s[0] != 'S')) return -1;
+    for (int i = 1; i < len; i++) {
+        if (!isdigit((unsigned char)s[i])) return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    return v <= 31 ? v : -1;
+}
+
+/* `{s16-s31}` or `{s0, s1, s2}` -- consecutive single-precision registers,
+ * which is all VLDM/VSTM/VPUSH/VPOP can name -- as its first and count. */
+static int tok_sreglist(const struct tok *t, int *first, int *count)
+{
+    const char *p = t->s, *end = t->s + t->len;
+    int next = -1;
+    *first = -1; *count = 0;
+    if (t->len < 3 || p[0] != '{' || end[-1] != '}') return 0;
+    p++; end--;
+    while (p < end) {
+        const char *a;
+        int r1, r2;
+        while (p < end && (isspace((unsigned char)*p) || *p == ',')) p++;
+        if (p >= end) break;
+        a = p;
+        while (p < end && !isspace((unsigned char)*p) && *p != ',' && *p != '-')
+            p++;
+        r1 = sreg(a, (int)(p - a));
+        if (r1 < 0) return 0;
+        r2 = r1;
+        while (p < end && isspace((unsigned char)*p)) p++;
+        if (p < end && *p == '-') {
+            p++;
+            while (p < end && isspace((unsigned char)*p)) p++;
+            a = p;
+            while (p < end && !isspace((unsigned char)*p) && *p != ',') p++;
+            r2 = sreg(a, (int)(p - a));
+            if (r2 < r1) return 0;
+        }
+        if (next >= 0 && r1 != next) return 0;      /* not consecutive */
+        if (*first < 0) *first = r1;
+        next = r2 + 1;
+        *count += r2 - r1 + 1;
+    }
+    return *count > 0;
+}
+
+/* ---- conditions and IT blocks ------------------------------------------
+ *
+ * An IT block makes up to four following instructions conditional, and
+ * unified syntax writes the condition on each of them: `it eq` then
+ * `vstmdbeq r0!, {s16-s31}`. The block outlives one statement -- the file
+ * assembler hands this layer a statement at a time -- so what it still
+ * owes is kept here, reset by tasm_reset() and checked by tasm_open().
+ *
+ * Inside a block the instruction is encoded as it would be outside, with
+ * the suffix removed, because a Thumb instruction's encoding does not
+ * carry the condition -- the IT does. That is right for everything this
+ * assembler emits EXCEPT a flag-setting form: a 16-bit `adds` inside an
+ * IT block is an `add` that sets nothing, so `addseq` would assemble and
+ * not set the flags. Those are refused there by name, and so are
+ * branches, whose conditional encodings are not allowed inside a block.
+ */
+static const struct { const char *name; int cond; } conds[] = {
+    { "eq", 0 }, { "ne", 1 }, { "cs", 2 }, { "hs", 2 }, { "cc", 3 },
+    { "lo", 3 }, { "mi", 4 }, { "pl", 5 }, { "vs", 6 }, { "vc", 7 },
+    { "hi", 8 }, { "ls", 9 }, { "ge", 10 }, { "lt", 11 }, { "gt", 12 },
+    { "le", 13 }, { "al", 14 }
+};
+
+static int cond_num(const char *s, int len)
+{
+    for (unsigned k = 0; k < sizeof conds / sizeof conds[0]; k++)
+        if ((int)strlen(conds[k].name) == len &&
+            same_nocase(s, conds[k].name, len))
+            return conds[k].cond;
+    return -1;
+}
+
+static const char *cond_name(int c)
+{
+    for (unsigned k = 0; k < sizeof conds / sizeof conds[0]; k++)
+        if (conds[k].cond == c)
+            return conds[k].name;
+    return "?";
+}
+
+static struct { int cond[4]; int n, at; } g_it;
+
+void tasm_reset(void) { g_it.n = g_it.at = 0; }
+int tasm_open(void) { return g_it.at < g_it.n; }
+
 /* ---- the instruction table ---------------------------------------------- */
 
 /* `s` is the flag-setting suffix, and it is a separate column rather
@@ -243,6 +378,75 @@ static int one_stmt(const char *stmt, int len, struct code *out,
 
     if (n == 0)
         return 0;
+
+    /* ---- an IT block, and the instructions it makes conditional ---- */
+    if (t[0].len >= 2 && t[0].len <= 5 && t[0].s[0] == 'i' &&
+        t[0].s[1] == 't') {
+        int ok = 1, cond;
+        char te[4];
+        for (int k = 2; k < t[0].len; k++)
+            if (t[0].s[k] != 't' && t[0].s[k] != 'e') ok = 0;
+        if (ok) {
+            if (tasm_open())
+                FAIL("an IT block cannot begin inside another");
+            cond = n == 2 ? cond_num(t[1].s, t[1].len) : -1;
+            if (cond < 0)
+                FAIL("%.*s wants a condition", t[0].len, t[0].s);
+            memcpy(te, t[0].s + 2, (size_t)(t[0].len - 2));
+            te[t[0].len - 2] = 0;
+            if (cond == 14 && strchr(te, 'e'))
+                FAIL("an `al` IT block has no else");
+            t_it(out, cond, te);
+            g_it.cond[0] = cond;
+            for (int k = 0; te[k]; k++)
+                g_it.cond[k + 1] = te[k] == 't' ? cond : (cond ^ 1);
+            g_it.n = t[0].len - 1;
+            g_it.at = 0;
+            return 0;
+        }
+    }
+    if (tasm_open()) {
+        int want = g_it.cond[g_it.at], mlen = t[0].len, wlen = 0, c, r;
+        char buf[256];
+        /* the width suffix follows the condition: `addeq.w` */
+        if (mlen > 2 && t[0].s[mlen - 2] == '.') { wlen = 2; mlen -= 2; }
+        c = mlen > 2 ? cond_num(t[0].s + mlen - 2, 2) : -1;
+        if (c != want)
+            FAIL("inside an IT block, \"%.*s\" must carry the condition `%s`",
+                 t[0].len, t[0].s, cond_name(want));
+        mlen -= 2;
+        {
+            static const char *const refused[] = {
+                "adds", "subs", "ands", "orrs", "eors", "bics", "adcs",
+                "sbcs", "rsbs", "lsls", "lsrs", "asrs", "rors", "movs",
+                "mvns", "muls", "b", "bl", "cbz", "cbnz", NULL
+            };
+            for (int k = 0; refused[k]; k++)
+                if ((int)strlen(refused[k]) == mlen &&
+                    strncmp(t[0].s, refused[k], (size_t)mlen) == 0)
+                    FAIL("\"%.*s\" is not supported inside an IT block: "
+                         "%s", t[0].len, t[0].s,
+                         refused[k][0] == 'b' || refused[k][0] == 'c'
+                         ? "a branch there needs the unconditional encoding"
+                         : "its 16-bit encoding sets no flags there");
+            if (g_it.at + 1 < g_it.n &&
+                ((mlen == 2 && strncmp(t[0].s, "bx", 2) == 0) ||
+                 (mlen == 3 && strncmp(t[0].s, "blx", 3) == 0)))
+                FAIL("a branch must be the last instruction of its IT block");
+        }
+        snprintf(buf, sizeof buf, "%.*s%.*s%.*s", mlen, t[0].s, wlen,
+                 t[0].s + t[0].len - wlen,
+                 (int)(stmt + len - (t[0].s + t[0].len)), t[0].s + t[0].len);
+        g_it.at++;
+        {
+            int save_n = g_it.n, save_at = g_it.at;
+            g_it.n = g_it.at = 0;       /* the inner call is outside it */
+            r = one_stmt(buf, (int)strlen(buf), out, err, errlen);
+            g_it.n = save_n;
+            g_it.at = save_at;
+        }
+        return r;
+    }
 
     /* ---- no operands ---- */
     if (n == 1) {
@@ -311,6 +515,12 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         return 0;
     }
 
+    if (mnemonic_is(&t[0], "svc") && n == 2) {
+        if (!tok_imm(&t[1], &imm) || imm < 0 || imm > 255)
+            FAIL("svc takes a 0..255 immediate");
+        t_svc(out, (int)imm);
+        return 0;
+    }
     if (mnemonic_is(&t[0], "bkpt") && n == 2) {
         if (!tok_imm(&t[1], &imm) || imm < 0 || imm > 255)
             FAIL("bkpt takes a 0..255 immediate");
@@ -385,8 +595,12 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             return 0;
         }
         if (mnemonic_is(&t[0], "tst")) {
-            if (rd < 0 || rm < 0) FAIL("tst wants two registers");
-            t_tst_reg(out, rd, rm);
+            if (rd < 0) FAIL("tst wants a register");
+            if (rm >= 0) { t_tst_reg(out, rd, rm); return 0; }
+            if (!tok_imm(&t[2], &imm))
+                FAIL("tst wants a register or an immediate");
+            if (!t_tst_imm(out, rd, imm))
+                FAIL("tst cannot encode the immediate %ld", imm);
             return 0;
         }
         /* The exclusive load, and the ordinary ones. */
@@ -396,9 +610,31 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             if (!mnemonic_is(&t[0], e->name))
                 continue;
             if (rd < 0) FAIL("\"%.*s\" is not a register", t[1].len, t[1].s);
+            /* `ldr rd, =value`: GNU as loads it from a literal pool; here
+             * it is movw/movt, the same eight bytes for every value, so
+             * a statement's length never depends on what it loads. A
+             * SYMBOL there is the file assembler's to relocate. */
+            if (t[2].len > 1 && t[2].s[0] == '=') {
+                struct tok v = { t[2].s + 1, t[2].len - 1 };
+                if (e->size != 4 || e->store || !tok_imm(&v, &imm))
+                    FAIL("\"%.*s %.*s\" wants `ldr rd, =constant`",
+                         t[0].len, t[0].s, t[2].len, t[2].s);
+                t_movw_movt(out, rd, (unsigned)imm & 0xffffu, 0);
+                t_movw_movt(out, rd, ((unsigned long)imm >> 16) & 0xffffu, 1);
+                return 0;
+            }
             if (!tok_mem(&t[2], &base, &off))
                 FAIL("\"%.*s\" is not a [reg] or [reg, #off] address",
                      t[2].len, t[2].s);
+            /* [pc, #off]: a literal, from Align(pc, 4) as the
+             * architecture reads it. Words only. */
+            if (base == 15) {
+                if (e->size != 4 || e->store)
+                    FAIL("only ldr reads a pc-relative literal");
+                if (!t_ldr_lit(out, rd, off))
+                    FAIL("literal offset %ld is out of reach", off);
+                return 0;
+            }
             if (!t_ldst_imm(out, rd, base, off, e->size, e->sign, e->store))
                 FAIL("%s offset %ld does not fit its encoding", e->name, off);
             return 0;
@@ -544,18 +780,98 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         else                          t_blx(out, r);
         return 0;
     }
+    /* vmov between a core register and a single-precision one. */
+    if (mnemonic_is(&t[0], "vmov") && n == 3) {
+        int r1 = tok_reg(&t[1]), r2 = tok_reg(&t[2]);
+        int s1 = sreg(t[1].s, t[1].len), s2 = sreg(t[2].s, t[2].len);
+        if (s1 >= 0 && r2 >= 0 && r2 < 13) { t_vmov_core(out, s1, r2, 1); return 0; }
+        if (r1 >= 0 && r1 < 13 && s2 >= 0) { t_vmov_core(out, s2, r1, 0); return 0; }
+        FAIL("vmov takes a core register and a single-precision register");
+    }
     if ((mnemonic_is(&t[0], "push") || mnemonic_is(&t[0], "pop")) && n >= 2) {
-        /* `{r4, r5, lr}` arrives as one token per register, because
-         * the splitter treats the braces as punctuation. */
+        /* `{r4-r7, lr}` is one token: the splitter keeps a braced group
+         * together, and ranges count. The braces were once refused and a
+         * bare `push r4, lr` was the documented spelling, so it stays. */
         unsigned mask = 0;
-        for (int k = 1; k < n; k++) {
-            int r = tok_reg(&t[k]);
-            if (r < 0) FAIL("%.*s wants a register list", t[0].len, t[0].s);
-            mask |= 1u << r;
+        int push = mnemonic_is(&t[0], "push");
+        if (t[1].s[0] == '{') {
+            if (n != 2 || !tok_reglist(&t[1], &mask))
+                FAIL("%.*s wants a register list", t[0].len, t[0].s);
+        } else {
+            for (int k = 1; k < n; k++) {
+                int r = tok_reg(&t[k]);
+                if (r < 0)
+                    FAIL("%.*s wants a register list", t[0].len, t[0].s);
+                mask |= 1u << r;
+            }
         }
-        if (mnemonic_is(&t[0], "push")) (void)t_push(out, mask);
-        else                            (void)t_pop(out, mask);
+        if ((mask & (1u << 13)) || (push && (mask & (1u << 15))) ||
+            (!push && (mask & (1u << 14)) && (mask & (1u << 15))))
+            FAIL("%.*s cannot transfer that register list",
+                 t[0].len, t[0].s);
+        if (push) (void)t_push(out, mask);
+        else      (void)t_pop(out, mask);
         return 0;
+    }
+    /* The multiple loads and stores an RTOS saves a context with:
+     * `stmdb r0!, {r4-r11, lr}` onto a task's own stack. */
+    {
+        static const struct { const char *name; int load, before; } lm[] = {
+            { "ldm", 1, 0 }, { "ldmia", 1, 0 }, { "ldmfd", 1, 0 },
+            { "ldmdb", 1, 1 }, { "ldmea", 1, 1 },
+            { "stm", 0, 0 }, { "stmia", 0, 0 }, { "stmea", 0, 0 },
+            { "stmdb", 0, 1 }, { "stmfd", 0, 1 }
+        };
+        for (unsigned k = 0; k < sizeof lm / sizeof lm[0]; k++) {
+            unsigned mask;
+            int rn, wb;
+            if (!mnemonic_is(&t[0], lm[k].name))
+                continue;
+            if (n != 3) FAIL("%s wants a base register and a list", lm[k].name);
+            wb = t[1].len > 1 && t[1].s[t[1].len - 1] == '!';
+            rn = tasm_gpr(t[1].s, t[1].len - wb);
+            if (rn < 0 || !tok_reglist(&t[2], &mask))
+                FAIL("%s wants a base register and a list", lm[k].name);
+            if (!t_ldm_stm(out, rn, mask, wb, lm[k].before, lm[k].load))
+                FAIL("%s cannot transfer that list: two or more registers, "
+                     "never sp, no pc in a store, not pc and lr together in "
+                     "a load, and not the base when it is written back",
+                     lm[k].name);
+            return 0;
+        }
+    }
+    /* ...and the floating-point half of a context, on a part with an FPU:
+     * `vstmdb r0!, {s16-s31}`. Single-precision registers only. */
+    {
+        static const struct { const char *name; int load, before; } vm[] = {
+            { "vldm", 1, 0 }, { "vldmia", 1, 0 }, { "vldmdb", 1, 1 },
+            { "vstm", 0, 0 }, { "vstmia", 0, 0 }, { "vstmdb", 0, 1 }
+        };
+        int first, count;
+        if ((mnemonic_is(&t[0], "vpush") || mnemonic_is(&t[0], "vpop")) &&
+            n == 2) {
+            if (!tok_sreglist(&t[1], &first, &count))
+                FAIL("%.*s wants consecutive single-precision registers, "
+                     "{s16-s31}", t[0].len, t[0].s);
+            t_vpush_s(out, first, count, mnemonic_is(&t[0], "vpop"));
+            return 0;
+        }
+        for (unsigned k = 0; k < sizeof vm / sizeof vm[0]; k++) {
+            int rn, wb;
+            if (!mnemonic_is(&t[0], vm[k].name))
+                continue;
+            if (n != 3) FAIL("%s wants a base register and a list", vm[k].name);
+            wb = t[1].len > 1 && t[1].s[t[1].len - 1] == '!';
+            rn = tasm_gpr(t[1].s, t[1].len - wb);
+            if (rn < 0 || !tok_sreglist(&t[2], &first, &count))
+                FAIL("%s wants a base register and consecutive "
+                     "single-precision registers", vm[k].name);
+            if (!t_vldm_vstm(out, rn, first, count, wb, vm[k].before,
+                             vm[k].load))
+                FAIL("%s cannot transfer that list%s", vm[k].name,
+                     vm[k].before && !wb ? ": DB needs writeback (rn!)" : "");
+            return 0;
+        }
     }
     if (mnemonic_is(&t[0], "mov") && n == 3) {
         int rd = tok_reg(&t[1]), rm = tok_reg(&t[2]);
@@ -607,6 +923,119 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
     return 0;
 }
 
+/* ---- what the file assembler must not take for a symbol ----------------
+ *
+ * src/as/gas.c resolves every identifier in an operand as a symbol unless
+ * the target says otherwise, and these are not symbols: the special
+ * registers after mrs/msr, the masks after cpsid/cpsie, the condition
+ * after it, the barrier option, and the floating-point registers. Asked
+ * per statement, so a label that happens to be called `i` is still a
+ * label in any other instruction. */
+int tasm_is_word(const char *stmt, const char *w, int wlen)
+{
+    const char *m = stmt;
+    int mlen;
+    while (isspace((unsigned char)*m)) m++;
+    for (mlen = 0; m[mlen] && !isspace((unsigned char)m[mlen]); mlen++) {}
+    if (sreg(w, wlen) >= 0 || (wlen == 5 && same_nocase(w, "fpscr", 5)))
+        return 1;
+    if ((mlen >= 3 && (strncmp(m, "mrs", 3) == 0 || strncmp(m, "msr", 3) == 0))
+        && sysreg_num(w, wlen) >= 0)
+        return 1;
+    if (mlen >= 5 && strncmp(m, "cps", 3) == 0) {
+        int ok = wlen > 0 && wlen <= 2;
+        for (int k = 0; k < wlen; k++)
+            if (w[k] != 'i' && w[k] != 'f') ok = 0;
+        if (ok) return 1;
+    }
+    if (mlen >= 2 && mlen <= 5 && m[0] == 'i' && m[1] == 't' &&
+        cond_num(w, wlen) >= 0)
+        return 1;
+    if (mlen == 3 && (strncmp(m, "dsb", 3) == 0 || strncmp(m, "dmb", 3) == 0 ||
+                      strncmp(m, "isb", 3) == 0) &&
+        wlen == 2 && strncmp(w, "sy", 2) == 0)
+        return 1;
+    return 0;
+}
+
+/* The forms whose operand is a SYMBOL, rewritten with a zero in its place
+ * and the relocations that fill it:
+ *   ldr rd, =sym[+n]          movw rd, #0; movt rd, #0  (MOVW_ABS_NC, MOVT_ABS)
+ *   movw rd, #:lower16:sym    movw rd, #0               (MOVW_ABS_NC)
+ *   movt rd, #:upper16:sym    movt rd, #0               (MOVT_ABS)
+ * `ldr rd, =sym` is GNU as's literal-pool load; movw/movt reaches the same
+ * value in the same register on every ARMv7-M part, in eight bytes. */
+static int sym_operand(const char *p, long *addend, const char **end)
+{
+    int n = 0;
+    *addend = 0;
+    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.'))
+        return 0;
+    while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.' ||
+           p[n] == '$')
+        n++;
+    *end = p + n;
+    while (isspace((unsigned char)**end)) (*end)++;
+    if (**end == '+' || **end == '-') {
+        int neg = **end == '-';
+        char *q;
+        long v = strtol(*end + 1, &q, 0);
+        if (q == *end + 1) return 0;
+        *addend = neg ? -v : v;
+        *end = q;
+        while (isspace((unsigned char)**end)) (*end)++;
+    }
+    return n;
+}
+
+int tasm_symform(const char *stmt, struct asm_symform *f)
+{
+    const char *p = stmt, *mn, *rd, *q, *end;
+    int mnlen, rdlen, n;
+    memset(f, 0, sizeof *f);
+    while (isspace((unsigned char)*p)) p++;
+    mn = p;
+    for (mnlen = 0; isalnum((unsigned char)mn[mnlen]) || mn[mnlen] == '.';
+         mnlen++) {}
+    q = mn + mnlen;
+    while (isspace((unsigned char)*q)) q++;
+    rd = q;
+    for (rdlen = 0; isalnum((unsigned char)rd[rdlen]); rdlen++) {}
+    if (!rdlen || tasm_gpr(rd, rdlen) < 0) return 0;
+    q = rd + rdlen;
+    while (isspace((unsigned char)*q)) q++;
+    if (*q != ',') return 0;
+    q++;
+    while (isspace((unsigned char)*q)) q++;
+    if ((mnlen == 3 || (mnlen == 5 && mn[3] == '.')) &&
+        strncmp(mn, "ldr", 3) == 0 && *q == '=') {
+        q++;
+        while (isspace((unsigned char)*q)) q++;
+        if (!(n = sym_operand(q, &f->addend, &end)) || *end) return 0;
+        f->sym_at = (int)(q - stmt); f->sym_len = n;
+        snprintf(f->encode, sizeof f->encode, "movw %.*s, #0; movt %.*s, #0",
+                 rdlen, rd, rdlen, rd);
+        f->site[0].off = 0; f->site[0].reloc = R_ARM_THM_MOVW_ABS_NC;
+        f->site[1].off = 4; f->site[1].reloc = R_ARM_THM_MOVT_ABS;
+        f->nsites = 2;
+        return 1;
+    }
+    if (mnlen == 4 && (strncmp(mn, "movw", 4) == 0 || strncmp(mn, "movt", 4) == 0)) {
+        int top = mn[3] == 't';
+        const char *want = top ? "#:upper16:" : "#:lower16:";
+        if (strncmp(q, want, 10) != 0) return 0;
+        q += 10;
+        if (!(n = sym_operand(q, &f->addend, &end)) || *end) return 0;
+        f->sym_at = (int)(q - stmt); f->sym_len = n;
+        snprintf(f->encode, sizeof f->encode, "%.4s %.*s, #0", mn, rdlen, rd);
+        f->site[0].off = 0;
+        f->site[0].reloc = top ? R_ARM_THM_MOVT_ABS : R_ARM_THM_MOVW_ABS_NC;
+        f->nsites = 1;
+        return 1;
+    }
+    return 0;
+}
+
 /* ---- the referee's input ------------------------------------------------ */
 
 void tasm_vocabulary(FILE *f)
@@ -645,4 +1074,29 @@ void tasm_vocabulary(FILE *f)
         fprintf(f, "\t%s r0, [r1, #8]\n", e->name);
     fprintf(f, "\tldrex r0, [r1]\n\tldrex r2, [r3, #16]\n");
     fprintf(f, "\tstrex r0, r1, [r2]\n\tstrex r3, r4, [r5, #8]\n");
+    /* What an RTOS's context switch is made of. The multiple transfers
+     * name high registers or the forms with no 16-bit encoding, which is
+     * the only case where llvm-mc and this assembler (always 32-bit) pick
+     * the same bytes. `ldr rd, =value` is left out for the reason `mov
+     * rd, #imm` is: llvm-mc loads it from a literal pool, this assembler
+     * with movw/movt, and both are right. */
+    fprintf(f, "\tsvc #0\n\tsvc #171\n\ttst lr, #16\n\ttst r3, #0xff00\n");
+    fprintf(f, "\tpush {r4-r7, lr}\n\tpop {r4-r7, pc}\n");
+    fprintf(f, "\tpush {r4-r11, lr}\n\tpop {r4-r11, pc}\n");
+    fprintf(f, "\tstmdb r0!, {r4-r11, lr}\n\tldmia r0!, {r4-r11, lr}\n");
+    fprintf(f, "\tstmfd r1!, {r2, r3}\n\tldmfd r9!, {r2, r3}\n");
+    fprintf(f, "\tstmia r2, {r8-r11}\n\tstm r6, {r8, r9}\n");
+    fprintf(f, "\tldmdb r5, {r8, pc}\n\tldm r7, {r0, r10}\n");
+    fprintf(f, "\tvstmdb r0!, {s16-s31}\n\tvldmia r0!, {s16-s31}\n");
+    fprintf(f, "\tvstmia r3, {s0-s7}\n\tvldmdb r9!, {s1-s3}\n");
+    fprintf(f, "\tvpush {s16-s31}\n\tvpop {s16-s31}\n");
+    fprintf(f, "\tldr r8, [pc, #8]\n\tldr r3, [pc, #-12]\n");
+    fprintf(f, "\tvmov s20, r1\n\tvmov r2, s3\n\tvmov s31, r12\n");
+    /* IT blocks, each instruction under its own condition: */
+    fprintf(f, "\tit eq\n\tmoveq r0, r1\n");
+    fprintf(f, "\tite ne\n\tmovne r2, r3\n\tmoveq r2, r4\n");
+    fprintf(f, "\titte gt\n\tmovgt r0, r9\n\tmovgt r1, r9\n"
+               "\tmovle r0, r8\n");
+    fprintf(f, "\tit eq\n\tvstmdbeq r0!, {s16-s31}\n");
+    fprintf(f, "\tit ne\n\tbxne lr\n");
 }
