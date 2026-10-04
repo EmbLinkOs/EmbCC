@@ -1315,8 +1315,16 @@ static int rc_vreg = -1;      /* the temp whose value RAX holds, or -1 */
 static int rc_size, rc_sign, rc_w;   /* the exact shape RAX holds it in */
 /* -O2 relaxation: when rc_zx, RAX holds the value ZERO-extended above its low
  * rc_vw bytes, so any zero-extending read of at least rc_vw bytes reproduces it
- * (e.g. a 4-byte store then an 8-byte reload — the IR_MOV round-trip). */
-static int rc_vw, rc_zx;
+ * (e.g. a 4-byte store then an 8-byte reload — the IR_MOV round-trip).
+ *
+ * That needs the VALUE to be rc_vw bytes wide, which a store knows (it wrote
+ * RAX zero-extended, so the slot's upper bytes are zero) and a load does not:
+ * `movl slot, %eax` of an eight-byte value holds its low half, and the full
+ * value is still in the slot. So after a LOAD (rc_ld) only a zero-extending
+ * read of exactly rc_vw bytes may reuse RAX. Allowing more truncated a 64-bit
+ * loop variable copied right after `(unsigned)v == 0` read it -- `v = mov.8 v`
+ * became `movq %rax` of the 32-bit load -- in a fuzzed program at -O2. */
+static int rc_vw, rc_zx, rc_ld;
 
 /* ---- register allocation (the -O2 codegen step) ----
  *
@@ -1622,7 +1630,8 @@ static void cg_load(struct code *text, const int *sd, int vreg,
             return;                               /* exact: RAX already holds it */
         /* -O2: RAX holds the value zero-extended above rc_vw bytes; a
          * zero-extending read of at least that many bytes reproduces it. */
-        if (g_regalloc && rc_zx && sign == 0 && size >= rc_vw)
+        if (g_regalloc && rc_zx && sign == 0 &&
+            (rc_ld ? size == rc_vw : size >= rc_vw))
             return;
     }
     if (in_reg(vreg)) {
@@ -1645,6 +1654,7 @@ static void cg_load(struct code *text, const int *sd, int vreg,
     if (g_regcache && cacheable(vreg)) {
         rc_vreg = vreg; rc_size = size; rc_sign = sign; rc_w = w;
         rc_zx = (sign == 0); rc_vw = size;        /* zero-ext read: low `size` valid */
+        rc_ld = 1;                                /* ...and only those bytes */
     } else {
         cg_reset();               /* a memory local (or cache off): don't cache */
     }
@@ -1663,6 +1673,7 @@ static void cg_store(struct code *text, const int *sd, int vreg, int valw)
     if (g_regcache && cacheable(vreg)) {
         rc_vreg = vreg; rc_size = valw; rc_sign = 0; rc_w = valw;
         rc_zx = 1; rc_vw = valw;   /* the result is zero-extended to 8 in RAX */
+        rc_ld = 0;                 /* and it is the whole value: wider reads too */
     }
 }
 
