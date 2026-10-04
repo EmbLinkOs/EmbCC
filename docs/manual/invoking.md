@@ -690,7 +690,10 @@ What each level and pass does is described in
 ### `-O0`
 
 No optimization. This is the default. The optimizer does not run, so the
-[per-pass options](#-fpass--fno-pass) have no effect at `-O0`.
+[per-pass options](#-fpass--fno-pass) have no effect at `-O0`. Every
+source variable stays in its stack slot; on ARM Cortex-M and RISC-V the
+temporaries of expressions get registers (see
+[Optimization](optimization.md#-o0)).
 
 ### `-O`, `-O1`
 

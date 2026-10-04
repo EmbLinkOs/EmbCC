@@ -336,6 +336,10 @@ static const struct ra_target RISCV_RA = {
 
 /* -O2 and -Os: the allocator is on. */
 static int g_rv_regalloc;
+/* -O0: the allocator runs for the temporaries of each expression only,
+ * every source variable pinned to its slot as under -g; see thumb's
+ * g_t_o0. */
+static int g_rv_o0;
 
 /* ---- refusal ---------------------------------------------------------- */
 
@@ -4425,7 +4429,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
          * both classes and leave it with nowhere to live. */
         /* Under -g a source variable stays in its frame slot, so the
          * DW_AT_location naming that slot is true (see regalloc.h). */
-        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        char *pin = want_debug || g_rv_o0 ? ra_debug_pin_vars(fn)
+                                          : (char *)0;
         int *pair = xlen == 32 && g_rv_pairs ? rv_pair_alloc(fn, &F, pin)
                                              : NULL;
         {
@@ -4495,7 +4500,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* A tail call leaves ra alone -- it is the caller's, and the callee
      * returns with it -- so it does not make this function a non-leaf. */
     F.tail = NULL;
-    if (g_rv_regalloc && !want_debug)
+    if (g_rv_regalloc && !want_debug && !g_rv_o0)
         for (i = 0; i < fn->nins; i++)
             if (rv_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -4920,13 +4925,15 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
 
     /* A field's constant offset into its load or store (lw r, k(rn)) --
      * once, before any attempt, and before allocation. */
-    if (g_rv_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+    if (g_rv_regalloc && !want_debug && !g_rv_o0 &&
+        !getenv("EMBCC_NO_MEMOFF")) {
         char *w = xlen == 32 ? wide_map(fn) : NULL;
         ra_fold_memoff(fn, -2048, 2047, xlen / 8, xlen / 8, w);
         free(w);
     }
     g_rv_pairs = 1;
-    if (xlen != 32 || !g_rv_regalloc || want_debug || (knob && *knob) ||
+    if (xlen != 32 || !g_rv_regalloc || want_debug || g_rv_o0 ||
+        (knob && *knob) ||
         (only && *only)) {
         if (knob && *knob) g_rv_pairs = atoi(knob);
         if (only && *only) g_rv_pairs = strcmp(only, fn->name) == 0;
@@ -5016,7 +5023,8 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     struct rv_sites st;
     int xlen = target_xlen();
 
-    (void)optimize; (void)no_sse;
+    (void)no_sse;
+    g_rv_o0 = !optimize;
     /* The C extension: target_riscv_rvc, which the object's e_flags
      * read as well. */
     rv_set_compress(target_riscv_rvc(), xlen);

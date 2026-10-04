@@ -30,8 +30,12 @@ splitting is done before allocation, in the IR, by `pass_splitloops`
 ### When it runs
 
 The driver passes each backend a `regalloc` flag that is true at `-O1`
-and above, `-Os` and `-Oz` included (`opt_level >= 1`). At `-O0` every
-vreg lives in a stack slot. Within an allocating build a backend may still
+and above, `-Os` and `-Oz` included (`opt_level >= 1`), and on Thumb and
+RISC-V at `-O0` as well. There the backend pins every source variable to
+its slot as under `-g` (`g_t_o0`, `g_rv_o0`: `ra_debug_pin_vars`) and
+turns off what `-g` turns off, so only the temporaries of expressions
+get registers. `EMBCC_O0_NORA=1` restores the old `-O0`. On the other
+targets at `-O0` every vreg lives in a stack slot. Within an allocating build a backend may still
 leave a particular function unallocated; the conditions are listed per
 backend under [Backend hooks](#backend-hooks).
 

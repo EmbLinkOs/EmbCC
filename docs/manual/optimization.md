@@ -22,7 +22,8 @@ Optimization happens in two places.
   frameless functions and function alignment are decided there. These
   have no individual switches.
 
-The default is `-O0`: no IR optimization and no register allocation.
+The default is `-O0`: no IR optimization, and every source variable in
+its stack slot.
 
 ## Optimization levels
 
@@ -40,10 +41,20 @@ The default is `-O0`: no IR optimization and no register allocation.
 Do not optimize. This is the default.
 
 The IR optimizer does not run at all, so `-f` pass options have no effect
-at this level. Every local variable and every temporary lives in a stack
-slot, and every C operation is a separate load, operation and store. Code
-is large and slow, and each source variable is in memory at all times,
-which is what a debugger wants (see [Debugging](debugging.md)).
+at this level. Every source variable -- every local and parameter --
+lives in its stack slot and is stored there by every assignment, so it
+is in memory at all times, which is what a debugger wants (see
+[Debugging](debugging.md)).
+
+The temporaries of an expression, which no debugger names, are where the
+targets differ. On ARM Cortex-M and RISC-V the register allocator runs
+for them, as GCC's and Clang's `-O0` keep them in registers: `a + b * c`
+loads `a`, `b` and `c` and computes in registers. On x86-64, AArch64 and
+AVR every temporary has a stack slot too, and every C operation is a
+separate load, operation and store. (FreeRTOS's kernel at `-O0` on a
+Cortex-M3: 106678 bytes of code before, 25670 now; Clang's `-O0` is
+18870.) `EMBCC_O0_NORA=1` gives the old `-O0` on Cortex-M and RISC-V, for
+bisecting a difference.
 
 Some decisions are made at every level, `-O0` included, because they are
 taken when the IR is first generated or when code is emitted:
@@ -55,8 +66,8 @@ taken when the IR is first generated or when code is emitted:
   [Function alignment](#function-alignment)).
 - On x86-64, temporaries that are not live at the same time share stack
   slots within a basic block.
-- On x86-64 and AVR, branches are shortened to their smallest encoding.
-  Thumb and RISC-V use their 16-bit branch forms from `-O1`.
+- Branches are shortened to their smallest encoding (on Thumb and
+  RISC-V, with the allocator, which `-O0` runs there).
 
 ### `-O`, `-O1`
 
