@@ -525,6 +525,26 @@ int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
     return 0;
 }
 
+/* The T4 form with writeback: W set, and P saying whether the offset
+ * is added before the access ([rn, #off]!) or after it ([rn], #off,
+ * P clear -- which with W clear would be the unprivileged access, see
+ * above). A load or store that writes back into its own data register
+ * is UNPREDICTABLE, and so refused. */
+int t_ldst_wb(struct code *c, int rt, int rn, long off, int size, int sign,
+              int store, int pre)
+{
+    if (store || size >= 4)
+        sign = 0;
+    if (rn == T_PC || rn == rt || off < -255 || off > 255)
+        return 0;
+    unsigned u = off >= 0 ? 1u : 0u;
+    unsigned mag = (unsigned)(off >= 0 ? off : -off);
+    hw2(c, (wide_ldst_op(size, sign, store) & ~WIDE_ALT_MASK) | (unsigned)rn,
+           (unsigned)(rt << 12) | 0x0900u | (pre ? 0x0400u : 0u) | (u << 9) |
+           mag);
+    return 1;
+}
+
 void t_ldst_reg(struct code *c, int rt, int rn, int rm, int shift, int size,
                 int sign, int store)
 {

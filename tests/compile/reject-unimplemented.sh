@@ -337,25 +337,45 @@ done
     exit 1; }
 echo "case cxx-not-lp64: C++ for a target that is not LP64 is refused by name"
 
-# File-scope asm: the built-in encoder is x86-64's. An instruction in a
-# block for any other machine is refused by name; it was refused only on
-# aarch64, and `ret` became 0xc3 in a Thumb, RISC-V or AVR object. A block
-# written as data still assembles everywhere.
+# File-scope asm: AArch64's blocks are read by the x86-64 vocabulary's
+# assembler (src/arch/x86_64/topasm.c), so an instruction in one is
+# refused by name; `ret` once became 0xc3 there. The embedded targets'
+# blocks are read by their own assembler (src/as/gas.c), so `ret` is
+# THEIR ret -- RISC-V's and AVR's -- and on Thumb, which spells it
+# `bx lr`, it is refused by that assembler. A block written as data
+# assembles everywhere.
 printf '__asm__(".globl f\\nf:\\n ret\\n");\nint g(void) { return 1; }\n' \
     > "$out_dir/topasm.c"
 printf '__asm__(".globl tbl\\ntbl:\\n .long 1\\n");\nint g(void) { return 1; }\n' \
     > "$out_dir/topdata.c"
 for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf riscv64-unknown-elf avr; do
-    if err=$("$EMBCC" --target=$t -c "$out_dir/topasm.c" \
-             -o "$out_dir/topasm.o" 2>&1); then
-        echo "case topasm $t: an x86-64 instruction went into the object"; exit 1
+    case $t in
+    aarch64*) want='file-scope asm instruction "ret"' ;;
+    thumb*) want='"ret" is not in the ARMv7-M vocabulary' ;;
+    *) want= ;;
+    esac
+    if [ -n "$want" ]; then
+        if err=$("$EMBCC" --target=$t -c "$out_dir/topasm.c" \
+                 -o "$out_dir/topasm.o" 2>&1); then
+            echo "case topasm $t: an instruction of another machine went into the object"
+            exit 1
+        fi
+        echo "$err" | grep -q "$want" || {
+            echo "case topasm $t: wrong diagnostic:"; echo "$err"; exit 1; }
+    else
+        "$EMBCC" --target=$t -c "$out_dir/topasm.c" -o "$out_dir/topasm.o" || {
+            echo "case topasm $t: the target's own ret was refused"; exit 1; }
+        # the bytes at f: RISC-V's ret (jalr x0, 0(ra), or c.jr ra with
+        # the C extension), AVR's ret
+        b=$(llvm-objdump -d --no-show-raw-insn "$out_dir/topasm.o" 2>/dev/null |
+            sed -n '/<f>:/,$p' | sed -n 2p)
+        echo "$b" | grep -Eq '(ret|jr[[:space:]]+ra)$' || {
+            echo "case topasm $t: f is not the target's ret: $b"; exit 1; }
     fi
-    echo "$err" | grep -q 'file-scope asm instruction "ret"' || {
-        echo "case topasm $t: wrong diagnostic:"; echo "$err"; exit 1; }
     "$EMBCC" --target=$t -c "$out_dir/topdata.c" -o "$out_dir/topdata.o" || {
         echo "case topasm $t: a data-only block was refused"; exit 1; }
 done
-echo "case topasm: an instruction in file-scope asm off x86-64 is refused by name"
+echo "case topasm: a block's instructions are the target's, or refused by name"
 check generic-duplicate-type \
     'int main(void) { return _Generic(1, int: 1, int: 2, default: 3); }' \
     "more than one _Generic association matches"

@@ -4956,9 +4956,10 @@ static void check_func(struct unit *u, struct func *f)
 
     /* main is the exception the language makes: reaching its closing
      * brace returns 0 (C99 5.1.2.2.3), and irgen says so. Refusing it
-     * refused `int main(void) { }`. */
+     * refused `int main(void) { }`. A naked function's asm returns, with
+     * its value where the ABI puts it. */
     if (f->ret_ty->kind != TY_VOID && !list_returns(f->body) &&
-        strcmp(f->name, "main") != 0) {
+        strcmp(f->name, "main") != 0 && !f->is_naked) {
         diag_error_at(f->file ? f->file : u->file, f->line, 0,
                       "control may reach the end of '%s' — every path must "
                       "end in a return statement", f->name);
@@ -4985,6 +4986,10 @@ static void check_func(struct unit *u, struct func *f)
          * whose use depends on a configuration. Warning anyway would
          * make the warning useless where it matters. */
         if (v->unused_ok)
+            continue;
+        /* a naked function's parameters are read by its asm, in the
+         * registers they arrive in */
+        if (v->is_param && f->is_naked)
             continue;
         if (v->is_param)
             diag_warn_opt(diag_file(u), v->line, v->col, "unused-parameter",
@@ -5185,6 +5190,9 @@ static void merge_decls(struct unit *u)
             canon->pcs = f->pcs;
         canon->is_noreturn |= f->is_noreturn;  /* noreturn on any wins */
         canon->is_nothrow |= f->is_nothrow;
+        /* naked on the prototype and not on the definition is how
+         * FreeRTOS's ports write it */
+        canon->is_naked |= f->is_naked;
         f->absorbed = 1;
     }
 }

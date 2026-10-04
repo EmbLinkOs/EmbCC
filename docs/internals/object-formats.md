@@ -40,8 +40,11 @@ The driver (`compile_unit` in `src/driver/main.c`) then:
    `.rodata` after the string literals;
 2. builds the `.rodata` image from the IR string pool (`ir_unit::strs`)
    and the `const` objects;
-3. appends each file-scope `asm` block's bytes to the code buffer,
-   16-byte aligned and padded with `0x90`;
+3. appends each file-scope `asm` block's bytes to the code buffer:
+   on x86-64 and AArch64 16-byte aligned and padded with `0x90`; on the
+   embedded targets aligned as the block asks (at least 4 bytes, 2 on
+   AVR), padded with zeros, with the block's data ranges marked for
+   `$d` mapping symbols;
 4. runs the DWARF emitter (`dwarf_emit`) for `-g` and the unwind-table
    emitter (`eh_emit`) when unwind tables are wanted;
 5. hands everything to the writer for the target's object format
@@ -220,7 +223,11 @@ every global:
    then `static` objects as `STT_OBJECT` or `STT_TLS`;
 6. global functions and aliases (`STB_GLOBAL`, or `STB_WEAK` for a weak
    definition), then global objects;
-7. the `.global` labels of file-scope `asm` blocks, as global `STT_FUNC`;
+7. the `.global` labels of file-scope `asm` blocks, as global `STT_FUNC`
+   (typed and sized by `.type` and `.size`); a block label that is not
+   global but names a function or object the C code declares and does
+   not define (a `static` naked function) is a local symbol, among the
+   locals of step 5;
 8. undefined symbols (`SHN_UNDEF`, `STT_NOTYPE`) for referenced external
    objects and, as their sites are processed, for called or
    address-taken external functions; a weak declaration gives a weak
@@ -236,7 +243,7 @@ Every defined function and object has its size in `st_size`. An
 |---|---|---|---|
 | `ext` sites | the code section | the callee's symbol | `RK_CALL`, or `RK_TAIL` for a tail call |
 | constructor and destructor slots | `.init_array`, `.fini_array` | the function | pointer width |
-| file-scope `asm` | `.text` | the named function, or a new undefined symbol | `RK_CALL` for `call sym`, `RK_ABS64` for `.quad sym` |
+| file-scope `asm` | `.text` | the named function, or a new undefined symbol (one per name); `.text`'s section symbol, addend the label's offset, for a field naming a local `.L` label | the ELF type the block's assembler chose (embedded targets), else `RK_CALL` for `call sym`, `RK_ABS64` for `.quad sym` |
 | `strs` sites | the code section | `.rodata`'s section symbol, addend the string's offset | the site's kind |
 | `gs` sites | the code section | the object's symbol | the site's kind |
 | pointer initializers | `.data`, `.rodata` or the named section | the target's symbol, or `.rodata`'s section symbol for a string | pointer width |

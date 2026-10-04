@@ -97,4 +97,12 @@ struct gas_target {
  * distinguishes `.S` from `.s`. */
 int gas_assemble(const char *in_path, const char *out_path, int preprocess);
 
+/* Assembles one block of GNU-syntax text -- a file-scope __asm__, a naked
+ * function's body -- from ta->tmpl (diagnostics at ta->file, ta->line
+ * onwards) into ta->code, syms, rels and drange, for the driver to place
+ * in the unit's .text. Returns 0, or 1 with diagnostics. A block that
+ * switches sections is refused. */
+struct topasm;
+int gas_assemble_block(struct topasm *ta);
+
 #endif

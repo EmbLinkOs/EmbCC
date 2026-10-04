@@ -159,6 +159,10 @@ int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
  * form cannot say it. The address must be word-aligned: ARMv7-M faults on
  * an unaligned ldrd/strd where two ldr would not. */
 int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store);
+/* With writeback: pre != 0 is [rn, #off]!, 0 is [rn], #off. 0 when it
+ * cannot be encoded (|off| > 255, rn pc or rt). */
+int t_ldst_wb(struct code *c, int rt, int rn, long off, int size, int sign,
+              int store, int pre);
 
 /* rt = [rn + (rm << shift)], shift in 0..3. */
 void t_ldst_reg(struct code *c, int rt, int rn, int rm, int shift, int size,

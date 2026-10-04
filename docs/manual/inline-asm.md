@@ -376,11 +376,21 @@ asm ( "TEMPLATE" ) ;
 
 An `asm` block outside any function takes no qualifier and no operands.
 Each line of the template is one statement, optionally preceded by a
-label (`name:`). `#`, `;` and `/*` start a comment that runs to the end
-of the line. Registers are written with a single `%`.
+label (`name:`).
+
+How a block is assembled depends on the target:
+
+- **ARM Cortex-M, RISC-V and AVR.** The block is read by the assembler
+  that reads a `.s` file, so it holds the target's own instructions; see
+  [On Cortex-M, RISC-V and AVR](#on-cortex-m-risc-v-and-avr).
+- **x86-64 and AArch64.** The block is read by a small fixed vocabulary
+  of directives, data and (on x86-64) four instructions, described in the
+  rest of this section. `#`, `;` and `/*` start a comment that runs to
+  the end of the line. Registers are written with a single `%`.
 
 The assembled bytes of every block are placed in `.text` after the
-unit's functions, each block starting on a 16-byte boundary.
+unit's functions. On x86-64 and AArch64 each block starts on a 16-byte
+boundary.
 
 ### Directives
 
@@ -458,21 +468,22 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| AArch64 ELF, ARM Cortex-M, RISC-V, AVR | directives and data only; an instruction is refused (below) |
+| ARM Cortex-M, RISC-V, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V and AVR](#on-cortex-m-risc-v-and-avr) |
+| AArch64 ELF | directives and data only; an instruction is refused (below) |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
 | `x86_64-windows-gnu` | a block with a label or a symbol reference is refused (below) |
 | C++ (any target) | refused: `file-scope asm in C++ is not supported yet` |
 
-On every target except x86-64, an instruction in a file-scope block is
-refused, whatever its mnemonic:
+On AArch64, an instruction in a file-scope block is refused, whatever
+its mnemonic:
 
 ```text
 file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
 ```
 
 A block written as data (`.byte`, `.long`, `.quad`, labels and the
-directives above) assembles on these targets.
+directives above) assembles there.
 
 On Darwin and Windows targets the bytes of a block would be emitted
 without its symbols and relocations, so a block with any label or symbol
@@ -482,6 +493,129 @@ reference is refused:
 a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped
 a file-scope asm block with labels or symbol references is not supported for a Windows target yet
 ```
+
+### On Cortex-M, RISC-V and AVR
+
+On these targets a block is assembled by EmbCC's GNU-syntax assembler,
+the one that assembles a `.s` or `.S` file (see
+[embas](tools/embas.md#gnu-syntax-assembly)). A block may hold the
+target's instructions, labels (named, `.L` local and numeric `1:`/`1b`),
+literal pools (`ldr rd, =sym` with `.ltorg` on ARM), the assembler's
+expressions and macros, and references to C functions and objects:
+
+```c
+/* sum_table(n): the first n words of a table, on a Cortex-M */
+__asm__(".text\n"
+        ".global sum_table\n"
+        ".type sum_table, %function\n"
+        ".thumb_func\n"
+        "sum_table:\n"
+        "  ldr r1, .Ladr\n"
+        "  movs r2, #0\n"
+        "1: cbz r0, 2f\n"
+        "  ldr r3, [r1], #4\n"
+        "  add r2, r2, r3\n"
+        "  subs r0, #1\n"
+        "  b 1b\n"
+        "2: mov r0, r2\n"
+        "  bx lr\n"
+        "  .p2align 2\n"
+        ".Ladr: .word .Ldata\n"
+        ".Ldata: .word 10, 20, 30\n");
+```
+
+The block's bytes go into the unit's `.text`, aligned as the block's own
+alignment directives ask and at least to 4 bytes (2 on AVR). Its symbols:
+
+- A label named by `.global` or `.weak` is a global symbol, typed by
+  `.type` or `.thumb_func`, with the size `.size` gives. A Thumb function
+  has bit 0 set.
+- A label that is not global, with the name of a function or object the
+  C code declares and does not define, is a local symbol, and the C
+  code's calls and references go to it. That is how a `static` function
+  written in assembly is called from C.
+- Other labels produce no symbol.
+
+A call or a data word naming a C function or object is a relocation
+against it, and a function called only from a block is still emitted.
+A data word naming a local label (`.word .Ldata`) is a relocation
+against `.text`. The block's data (its literal pools and data words) is
+marked with `$d` mapping symbols on ARM, so disassemblers show it as
+data.
+
+These are refused by name:
+
+| Refused | Diagnostic |
+|---|---|
+| Bytes in any section but `.text` | `assembly in a C file that switches to section .data is not supported yet: a block's bytes go in .text` |
+| A relocation outside `.text` | `a relocation outside .text in an asm block` |
+| `.set` naming something the block does not define | `'a' is set to 'b', which this block does not define` |
+
+Everything the assembler itself refuses (an instruction it does not
+encode, an out-of-range branch) is refused with the file and line of the
+block.
+
+## Naked functions
+
+```c
+void xPortPendSVHandler(void) __attribute__((naked));
+```
+
+A naked function has no prologue and no epilogue: its body is the asm in
+it, which must return by itself. It is how a Cortex-M RTOS writes its
+context switch, which runs on a task's stack and saves registers the
+code generator's frame would otherwise own. EmbCC supports `naked` on
+ARM Cortex-M, RISC-V and AVR, and does what GCC does: the function's
+body is assembled where the function would be, starting with its label.
+It is assembled as a [file-scope block](#on-cortex-m-risc-v-and-avr), so
+it may hold labels, literal pools and calls into C.
+
+The attribute may be on any declaration of the function; FreeRTOS's
+ports put it on the prototype only.
+
+```c
+static void prvPortStartFirstTask(void) __attribute__((naked));
+
+static void prvPortStartFirstTask(void)
+{
+    __asm volatile(" ldr r0, =0xE000ED08 \n"
+                   " ldr r0, [r0]        \n"
+                   " ldr r0, [r0]        \n"
+                   " msr msp, r0         \n"
+                   " cpsie i             \n"
+                   " svc 0               \n"
+                   " .ltorg              \n");
+}
+```
+
+The body may contain:
+
+- **asm statements.** Basic asm is assembled as written. Extended asm
+  may have input operands that are constants (`"i"` or `"n"`), written
+  into the template as numbers: `%0`, `%c0` and `%[name]` all give `80`
+  for `"i"(80)`. `%%` is `%`.
+- **calls with no arguments,** `vTaskSwitchContext();`, assembled as the
+  target's call instruction (`bl` on ARM, `call` on RISC-V and AVR).
+  AVR's FreeRTOS port calls the scheduler this way from its naked yield.
+
+A naked function's parameters arrive in the registers the calling
+convention puts them in, for the asm to read. There is no warning for an
+unused parameter, and no error for a non-`void` function without a
+`return`: the asm leaves the value in the return register.
+
+These are refused, because a naked function has no frame for them:
+
+| Refused | Diagnostic |
+|---|---|
+| any other statement | `naked function 'f' holds a statement that is not an asm or a call with no arguments; with no prologue there is no frame for it to run in` |
+| an operand that is not a constant | `operand 0 of the asm in naked function 'f' is not a constant ("i"); a naked function has no frame to load one from` |
+| an output operand | `the asm in naked function 'f' has an output; a naked function has no frame to put it in` |
+| a `section` attribute | `naked function 'f' in section '.ramfunc' is not supported yet: its body is assembled into .text` |
+| x86-64 and AArch64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V and AVR targets` |
+
+`tests/golden/freertos-cm3.sh` builds the FreeRTOS kernel and its GCC
+ARM_CM3 port, unmodified, and runs three tasks, a queue, a mutex and a
+software timer on QEMU's lm3s6965evb.
 
 ## x86-64
 
@@ -877,12 +1011,13 @@ reported as an unknown instruction).
 | `add`, `adds`, `sub`, `subs`, `and`, `ands`, `orr`, `orrs`, `eor`, `eors`, `bic`, `bics`, `adc`, `adcs`, `sbc`, `sbcs`, `rsb`, `rsbs` | `Rd, Rn, Rm` or `Rd, Rn, #IMM` (three operands) |
 | `lsl`, `lsls`, `lsr`, `lsrs`, `asr`, `asrs`, `ror`, `rors` | `Rd, Rn, Rm` or `Rd, Rn, #0..31` |
 | `mul Rd, Rn, Rm`, `udiv`, `sdiv` | |
-| `ldr`, `ldrb`, `ldrsb`, `ldrh`, `ldrsh`, `str`, `strb`, `strh` | `Rt, [Rn]` or `Rt, [Rn, #OFF]` |
+| `ldr`, `ldrb`, `ldrsb`, `ldrh`, `ldrsh`, `str`, `strb`, `strh` | `Rt, [Rn]` or `Rt, [Rn, #OFF]`; with writeback, `Rt, [Rn, #OFF]!` (pre-indexed) or `Rt, [Rn], #OFF` (post-indexed), `OFF` -255 to 255 and `Rn` neither `pc` nor `Rt` |
 | `ldr Rt, [pc, #OFF]` | a literal, `OFF` from the word-aligned pc, -4095 to 4095 |
 | `ldr Rt, =IMM` | any 32-bit constant, assembled as `movw` and `movt` |
 | `ldrex Rt, [Rn{, #OFF}]` | `OFF` a multiple of 4, 0 to 1020 |
 | `strex Rd, Rt, [Rn{, #OFF}]` | `OFF` a multiple of 4, 0 to 1020 |
 | `b`, `bl`, `beq`, `bne`, `bcs`, `bhs`, `bcc`, `blo`, `bmi`, `bpl`, `bvs`, `bvc`, `bhi`, `bls`, `bge`, `blt`, `bgt`, `ble` | `OFFSET` (even) |
+| `cbz`, `cbnz` | `Rn, OFFSET`: `Rn` r0 to r7, `OFFSET` 4 to 130, forward |
 | `push`, `pop` | a register list, `{r4-r7, lr}` or without braces, `r4, lr` |
 | `ldm`, `ldmia`, `ldmfd`, `ldmdb`, `ldmea`, `stm`, `stmia`, `stmea`, `stmdb`, `stmfd` | `Rn{!}, {LIST}`: two or more registers, never `sp`; no `pc` in a store; not `pc` and `lr` together in a load; not `Rn` with writeback |
 | `svc #IMM` | 0 to 255 |
@@ -912,7 +1047,7 @@ file is assembled as GNU as does it, see [embas](tools/embas.md#gnu-syntax-assem
 - A barrier option other than `sy` is refused with
   ``only the `sy` barrier option is supported; "ish" is not``.
 
-There is no `cbz` or `cbnz`, no `ldrd` or `strd`, no `clrex`, no byte or
+There is no `ldrd` or `strd`, no `clrex`, no byte or
 halfword exclusives, no extend, bit-field, multiply-accumulate or
 long-multiply instruction, and no floating-point instruction beyond
 `vmov`, `vldm`/`vstm` and `vpush`/`vpop` (`vmrs`, `vmsr`, `vldr`, ...).

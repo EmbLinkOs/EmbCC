@@ -199,6 +199,9 @@ struct asm_stmt {
     const char **clob;
     int nclob;
     int is_volatile;
+    /* `asm("...")` with no colon: GCC's basic asm, whose template is
+     * not scanned for %-operands (a RISC-V `%hi(sym)` is the text) */
+    int is_basic;
 };
 
 struct stmt {
@@ -333,6 +336,9 @@ struct func {
      * 1 signal, 2 interrupt (which re-enables interrupts on entry), 0 an
      * ordinary function. Only AVR acts on it; see the attribute table. */
     int is_isr;
+    /* __attribute__((naked)): no prologue, no epilogue -- the body is asm
+     * statements, assembled as a block of its own (src/driver/main.c). */
+    int is_naked;
     /* The hints EmbCC acts on: keep the symbol, do not warn that it is
      * unused, force or forbid inlining, warn at each call, warn when a
      * caller throws the result away. `vis` is an ELF visibility. */
@@ -467,6 +473,7 @@ struct asmsym {
     int is_global;       /* named by .global/.globl (or .weak) */
     int is_weak;         /* named by .weak */
     int type;            /* ASMSYM_*: what .type (or .thumb_func) said */
+    long size;           /* what .size said, 0 if nothing (gas blocks) */
 };
 enum { ASMSYM_UNTYPED, ASMSYM_FUNC, ASMSYM_OBJECT };
 /* What the field at `off` is, which decides the relocation the driver
@@ -484,9 +491,14 @@ enum asmrel_kind {
 
 struct asmrel {
     int off;             /* offset within .text of the field to fill */
-    const char *target;  /* symbol the call/jmp/.quad resolves to */
+    const char *target;  /* symbol the call/jmp/.quad resolves to; NULL:
+                          * this block's own start (src/as/gas.c, for a
+                          * field against an assembler-local label) */
     long addend;
     enum asmrel_kind kind;
+    int elf_type;        /* the ELF relocation type, when the block's
+                          * assembler chose it (gas_assemble_block); 0
+                          * means `kind` decides */
 };
 
 /* A file-scope `__asm__("...")` block (crt0's _start stub, and its kind).
@@ -503,6 +515,9 @@ struct topasm {
     struct asmrel *rels;
     int nrels;
     int text_off;        /* where the bytes landed in .text (driver) */
+    int align;           /* what its start must be aligned to, 0 = any */
+    int *drange;         /* data in it, as [start, end) pairs ($d) */
+    int ndrange;
     struct topasm *next;
 };
 

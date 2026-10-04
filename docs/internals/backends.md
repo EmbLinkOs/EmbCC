@@ -536,9 +536,16 @@ Clobbered registers and registers the template names are not used for
 operands. A callee-saved register an operand names is marked used, so
 the prologue saves it.
 
-File-scope `__asm__` is assembled by `topasm.c`: the directives
-(`.global`, labels, `.byte`, `.long`, `.quad`) work on every target; the
-mnemonic half (`and`, `call`, `jmp`, `ret`) is x86-64 only.
+File-scope `__asm__` is assembled by `topasm.c` on x86-64 and AArch64:
+the directives (`.global`, labels, `.byte`, `.long`, `.quad`) work on
+both; the mnemonic half (`and`, `call`, `jmp`, `ret`) is x86-64 only. On
+Cortex-M, RISC-V and AVR the driver hands each block to the GNU-syntax
+assembler instead (`gas_assemble_block` in `src/as/gas.c`), which
+returns its bytes, labels, relocations with their ELF types, alignment
+and data ranges in the same `struct topasm`. A naked function becomes
+such a block before code generation (`naked_to_blocks` in
+`src/driver/main.c`): its label, then its asm statements with their
+constant operands written in.
 
 `as.c` is EmbAS, the NASM-syntax assembler behind `embas` and
 `embcc -c FILE.asm`; see [embas](../manual/tools/embas.md).

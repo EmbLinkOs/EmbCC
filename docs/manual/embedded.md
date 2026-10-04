@@ -424,11 +424,14 @@ void Reset_Handler(void)
 the Thumb bit in every function address it writes into the table. CMSIS's
 section name `.isr_vector` is placed the same way as `.vectors`.
 
-`__attribute__((naked))` is refused on every target
-(`__attribute__((naked)) is not supported: the prologue the function says
-it must not have would be emitted anyway, and its own asm would run on a
-frame it did not set up`), so a reset handler that must run before the
-stack exists cannot be written in C; on a Cortex-M none is needed.
+A function that must run with no prologue -- a context switch, or a
+reset handler that sets up the stack itself -- is written as
+`__attribute__((naked))`, whose body is its asm (see
+[Naked functions](inline-asm.md#naked-functions)); on a Cortex-M a reset
+handler needs none, since the processor loads the stack pointer from the
+table. FreeRTOS's Cortex-M3 port, whose PendSV and SVC handlers are
+naked functions, builds unmodified and runs
+(`tests/golden/freertos-cm3.sh`).
 
 ### Interrupt handlers
 

@@ -215,6 +215,7 @@ static void push_sym(struct topasm *ta, const char *name, int off, int glob)
     ta->syms[ta->nsyms].is_global = glob;
     ta->syms[ta->nsyms].is_weak = 0;
     ta->syms[ta->nsyms].type = ASMSYM_UNTYPED;
+    ta->syms[ta->nsyms].size = 0;
     ta->nsyms++;
 }
 
@@ -508,6 +509,7 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
                     ta->rels[ta->nrels].off = here + nth * w;
                     ta->rels[ta->nrels].target = xstrndup(s, (size_t)(end - s));
                     ta->rels[ta->nrels].addend = 0;
+                    ta->rels[ta->nrels].elf_type = 0;
                     ta->rels[ta->nrels].kind = w == 8 ? ASMREL_ABS64
                                                       : ASMREL_ABS32;
                     ta->nrels++;
@@ -553,6 +555,7 @@ void topasm_assemble(struct topasm *ta, int mnemonics_ok)
             ta->rels[ta->nrels].off = here + 1; /* the rel32 field */
             ta->rels[ta->nrels].target = xstrndup(tgt, strlen(tgt));
             ta->rels[ta->nrels].addend = -4;
+            ta->rels[ta->nrels].elf_type = 0;
             ta->rels[ta->nrels].kind = ASMREL_PC32;
             ta->nrels++;
         } else if (strncmp(l, "jmp ", 4) == 0) {
