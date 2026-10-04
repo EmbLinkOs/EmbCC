@@ -701,7 +701,10 @@ later in the instruction stream moves to just before that use. It moves
 only forward. It moves into a deeper loop only when the value costs one
 instruction on the target (always on x86-64 and AVR; on AArch64,
 Thumb and RISC-V according to the encodable-immediate rules) or under
-`-Os`.
+`-Os`. On RISC-V a nonzero constant whose use is a compare stays out of
+a deeper loop whatever it costs: a branch there compares two registers,
+so the constant would be rebuilt every iteration, where x86-64 and Arm
+have already made it an immediate.
 
 **`pass_splitloops`** (`licm`; `edge_ok`; not `-Os`; disabled by
 `EMBCC_NO_SPLITLOOPS=1`). A temp that is live through a loop, crosses a

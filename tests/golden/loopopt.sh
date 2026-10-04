@@ -238,6 +238,34 @@ ncmp_in() {                     # ncmp_in FUNC -> compares in that function
     cat "$out/lk.txt"; exit 1; }
 echo "and only inside the block, until the temp is written again"
 
+# ---- 4d. RISC-V keeps a loop's bound out of the loop --------------------
+#
+# A RISC-V branch compares two registers, so a bound that is not zero has
+# to be in one. Moved next to the compare it is a `li` every trip; x86
+# and Arm compare against an immediate and never have the constant at
+# all. It stayed out of the loop only while the guard above read it too.
+cat > "$out/rvbound.c" <<'EOF'
+int a[1024];
+int h(int s)
+{
+    for (int i = 1; i < 1024; i++)
+        if (a[i - 1] > a[i])
+            s ^= 1;
+    return s;
+}
+EOF
+for t in riscv32-unknown-elf riscv64-unknown-elf; do
+    "$EMBCC" inspect ir --target=$t -O2 -c "$out/rvbound.c" -o /dev/null \
+        > "$out/rvbound.txt" 2>&1 || {
+        echo "FAIL: could not compile for $t"; cat "$out/rvbound.txt"; exit 1; }
+    where=$(awk '/const\.4s? 1024/ { print (inloop ? "inside" : "before"); exit }
+                 /^L[0-9]+:/ { inloop = 1 }' "$out/rvbound.txt")
+    [ "$where" = before ] || {
+        echo "FAIL: $t builds the loop bound ${where:-nowhere} rather than"
+        echo "      once before the loop:"; cat "$out/rvbound.txt"; exit 1; }
+done
+echo "RISC-V: the loop's bound is built once, before the loop"
+
 # ---- 5. and it all still runs ------------------------------------------
 #
 # The IR checks above say a transform fired; this says it was right. The

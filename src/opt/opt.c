@@ -9578,9 +9578,18 @@ static int pass_sinkconst(struct ir_func *fn)
             continue;
         if (use[i->dst] != 1 || d.cnt[i->dst] != 1)
             continue;
+        /* A RISC-V branch compares two registers: a loop's bound is a
+         * `li` every trip once it sits beside the compare, where x86 and
+         * Arm have taken it as an immediate before this runs. It used to
+         * stay out by accident -- the guard in front of the loop read it
+         * too -- until the guard could be decided at compile time. */
+        int rv_cmp = (target_get() == TARGET_RISCV32 ||
+                      target_get() == TARGET_RISCV64) &&
+                     i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
+                     fn->ins[at[i->dst]].op == IR_CMP;
         if (at[i->dst] > n + 1 &&
             (depth[at[i->dst]] <= depth[n] || g_opt_size ||
-             !const_is_expensive(i))) {
+             (!const_is_expensive(i) && !rv_cmp))) {
             to[n] = at[i->dst];
             any = 1;
         }
