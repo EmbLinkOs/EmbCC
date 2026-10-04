@@ -744,8 +744,10 @@ written with `wreg`/`wr`/`wrote`; `rd64`/`wr64` handle register pairs.
   followed by an add, subtract or logical operation is its shifted
   operand (`rsb` for `(a<<k)-b`); with LSL up to 3 and an add used only
   as the next access's address it becomes `ldr/str rt, [rn, rm, lsl
-  #k]`. Multiply by `(2^k ± 1) << j` uses `add`/`rsb` with a shifted
-  operand.
+  #k]`. An add of two registers used only as the next access's address,
+  with no folded constant offset, is `ldr/str rt, [rn, rm]` (16-bit in
+  low registers). Multiply by `(2^k ± 1) << j` uses `add`/`rsb` with a
+  shifted operand.
 - **Compare and branch** fuse when the compare's only use is the next
   branch. `IR_BRZ`/`IR_BRNZ` on a low register whose target is 0 to 126
   bytes ahead is `cbz`/`cbnz`.
@@ -1258,6 +1260,7 @@ with `lo8`, `hi8`, `pm_lo8`, `pm_hi8` and `gs()` symbol operands.
 | `EMBCC_NO_RMW` | x86-64 | no read-modify-write fusion |
 | `EMBCC_NO_MLA` | AArch64, Thumb | no multiply-accumulate fusion |
 | `EMBCC_T_NOLO` | Thumb | no low-register scratch |
+| `EMBCC_T_NOREGOFF` | Thumb | no `[rn, rm]` register-offset addressing |
 | `EMBCC_T_FPU` | Thumb | override the FPU setting |
 | `EMBCC_RV_LONG_CALLS` | RISC-V | never use `jal` for calls |
 | `EMBCC_RV_JAL_RANGE` | RISC-V | assume a shorter `jal` reach |

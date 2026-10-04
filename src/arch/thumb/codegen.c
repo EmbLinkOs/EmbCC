@@ -2904,6 +2904,44 @@ static void gen_ins(struct t_fn *F, int n)
                : i->op == IR_OR  ? T_OP_ORR
                : i->op == IR_XOR ? T_OP_EOR
                : 0;                          /* IR_MUL: not an ALU op */
+        /* An add of two registers whose only reader is the next access's
+         * ADDRESS is that access's register offset: `ldrb rt, [rn, rm]`,
+         * two bytes in low registers, where the add and `ldrb rt, [rd]`
+         * were two instructions. `p[i]` on bytes and every pointer plus
+         * offset is this shape; the shifted form above covers the wider
+         * elements. Not when the access carries an immediate offset
+         * (ra_fold_memoff's): the register form has no field for it. */
+        if (i->op == IR_ADD && !i->imm_b && !i->flt && i->w == 4 &&
+            i->dst >= 0 && !F->wide[i->dst] && F->usecnt &&
+            F->usecnt[i->dst] == 1 && n + 1 < fn->nins &&
+            !F->wide[i->a] && !F->wide[i->b] &&
+            !in_freg(F, i->a) && !in_freg(F, i->b)) {
+            const struct ir_ins *ax = &fn->ins[n + 1];
+            int isld = ax->op == IR_LOAD && ax->a == i->dst &&
+                       ax->memoff == 0 && ax->w <= 4 && !ax->flt &&
+                       ax->dst >= 0 && !F->wide[ax->dst] &&
+                       !in_freg(F, ax->dst);
+            int isst = ax->op == IR_STORE && ax->a == i->dst &&
+                       ax->memoff == 0 && ax->size <= 4 && !ax->flt &&
+                       ax->b >= 0 && ax->b != i->dst &&
+                       !F->wide[ax->b] && !in_freg(F, ax->b);
+            if ((isld || isst) && !getenv("EMBCC_T_NOREGOFF")) {
+                F->lofree = 0;      /* the pool was computed for this
+                                     * instruction alone */
+                int rn = rdr(F, i->a, T_ADDR);
+                int rm = rdr(F, i->b, T_TMP);
+                if (isld) {
+                    int d = wreg(F, ax->dst, T_ACC);
+                    t_ldst_reg(t, d, rn, rm, 0, ax->size, ax->sign, 0);
+                    wrote(F, ax->dst, d);
+                } else {
+                    int v = rdr(F, ax->b, T_ACC);
+                    t_ldst_reg(t, v, rn, rm, 0, ax->size, 0, 1);
+                }
+                F->skip_next = 1;
+                return;
+            }
+        }
         int ra_ = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
         /* The flags are dead here -- no flag value survives from one IR

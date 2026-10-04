@@ -179,8 +179,48 @@ static int pick32(unsigned long long c, int a, int b)
 static long long pick32w(unsigned long long c, long long a, long long b)
 { int t = (int)c; long long r; if (t) r = a; else r = b; return r; }
 
+/* A base plus a register offset, every access size and sign: on ARMv7-M
+ * `ldrsb rt, [rn, rm]` and its kin, one instruction where the add and the
+ * access were two. Through a byte offset so no shift is involved, which
+ * is the other form. The copy loop is a string table's insert. */
+static unsigned char rbuf[64];
+/* ...and a base plus a register PLUS a constant, which the register form
+ * cannot hold: the constant must not be dropped. */
+__attribute__((noinline)) static int off3(const unsigned char *p, int i)
+{
+    return (p + i)[3];
+}
+__attribute__((noinline)) static void st5(unsigned char *p, int i, int v)
+{
+    (p + i)[5] = (unsigned char)v;
+}
+__attribute__((noinline)) static long regoff(int off, int n)
+{
+    long t = 0;
+    for (int k = 0; k < 64; k++) rbuf[k] = (unsigned char)(k * 37 + 200);
+    t += *(signed char *)(rbuf + off) * 3 + *(unsigned char *)(rbuf + off + n);
+    t += *(short *)((char *)rbuf + off + n * 2) +
+         *(unsigned short *)((char *)rbuf + off + n * 4) * 5;
+    t += (long)(*(unsigned *)((char *)rbuf + off + n * 8) >> 3);
+    *(char *)(rbuf + off + 1) = (char)-7;
+    *(short *)((char *)rbuf + off + n * 6) = (short)-12345;
+    *(unsigned *)((char *)rbuf + off + n * 12) = 0xdeadbeefu;
+    for (int k = 0; k < 64; k++) t = t * 3 + rbuf[k];
+    {
+        char d[16];
+        const char *src = "regoff!";
+        int m = 0;
+        while ((d[m] = src[m]) != 0) m++;
+        t += m * 1000 + d[2] + d[6];
+    }
+    st5(rbuf, off, 99);
+    t = t * 7 + off3(rbuf, off) + off3(rbuf, off + 2) * 3;
+    return t;
+}
+
 int main(void)
 {
+    putn(regoff(4, 4)); putn(regoff(8, 2)); nl();
     for (int i = 0; i < 4; i++) {
         pts[i].x = i; pts[i].y = 10 - i;
         pts[i].tag = (short)(i * 1000 - 1500);
