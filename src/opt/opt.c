@@ -1661,6 +1661,149 @@ static int pass_reassoc(struct ir_func *fn)
     return 1;
 }
 
+/* ---- a constant in an index, moved into the address ----
+ *
+ * `a[i - 1]` is `a + ((i - 1) << 2)`: an add, a shift and another add
+ * before the load. In the machine's arithmetic `(i - 1) << 2` IS
+ * `(i << 2) - 4`, so the address is `(a + (i << 2)) - 4`, and the -4 is
+ * the load's displacement once the backend folds it (ra_fold_memoff): a
+ * shift, an add and the load. `a[i - 1]`, `a[i]` and `a[i + 1]` then share
+ * one `a + (i << 2)`, which value numbering finds -- an interpreter's
+ * `stack[sp - 1] += stack[sp]` and a filter's `x[n - 1]` are this.
+ *
+ * Every step is modular at one width, so the rewrite holds for every
+ * value of i and assumes nothing about overflow. That is also why it
+ * needs no extension in the chain: an `int` index on a 64-bit target is
+ * sign-extended AFTER the add, and `(long)(i - 1)` is not `(long)i - 1`
+ * when `i - 1` wraps, which -fwrapv says it may. So it is the 32-bit
+ * targets' `int` index and anyone's `long` one.
+ *
+ * Only where it pays, which is narrower than where it is true. RISC-V
+ * has no indexed addressing, so `a[i - 1]` there is an add, a shift, an
+ * add and the load, and becomes three. Thumb, aarch64 and x86-64 scale a
+ * register inside the access (`ldr r0, [r1, r2, lsl #2]`), so the old
+ * form was already two and the rewrite only moved work around: the
+ * workload's interpreter ran 2.7% more instructions on the M4 and its
+ * sort 1.0%. So RISC-V only. There the address must be used by loads and
+ * stores and nothing else, so the constant does become a displacement;
+ * the scaled index must have no other use, so the old shift dies; and so
+ * must `i - 1`. When it is wanted anyway -- `prog[pc++]` reads at the
+ * new pc -- the rewrite keeps it and adds the shared base besides, and
+ * the interpreter ran 1.2% slower than with no rewrite at all. The
+ * displacement is kept within 255 bytes either way. */
+static int pass_idxoff(struct ir_func *fn)
+{
+    if (fn->nins == 0 || getenv("EMBCC_NO_IDXOFF") ||
+        (target_get() != TARGET_RISCV32 && target_get() != TARGET_RISCV64))
+        return 0;
+    int nv = fn->nvregs;
+    struct defs d;
+    compute_defs(fn, &d);
+    int *use = xcalloc((size_t)nv, sizeof *use);
+    int *ause = xcalloc((size_t)nv, sizeof *ause);
+    struct ucount uc = { use, nv };
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        each_read(i, count_cb, &uc);
+        if ((i->op == IR_LOAD || i->op == IR_STORE) && !i->memoff &&
+            i->a >= 0 && i->a < nv && !(i->op == IR_STORE && i->b == i->a))
+            ause[i->a]++;
+    }
+    /* per address: the base, the unscaled index, the shift and the
+     * displacement */
+    int *rb = xmalloc((size_t)fn->nins * sizeof *rb);
+    int *rx = xmalloc((size_t)fn->nins * sizeof *rx);
+    long *rk = xmalloc((size_t)fn->nins * sizeof *rk);
+    long *rc = xmalloc((size_t)fn->nins * sizeof *rc);
+    char *doit = xcalloc((size_t)fn->nins, 1);
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_ADD || i->flt || i->imm_b || (i->w != 4 && i->w != 8))
+            continue;
+        if (i->dst < 0 || i->dst >= nv || d.cnt[i->dst] != 1 ||
+            !use[i->dst] || use[i->dst] != ause[i->dst])
+            continue;
+        for (int side = 0; side < 2 && !doit[n]; side++) {
+            int base = side ? i->b : i->a, sv = side ? i->a : i->b;
+            if (base < 0 || base >= nv || sv < 0 || sv >= nv ||
+                d.cnt[sv] != 1 || use[sv] != 1 || d.ins[sv] < 0)
+                continue;
+            struct ir_ins *sh = &fn->ins[d.ins[sv]];
+            int y; long k;
+            if (sh->op != IR_SHL || sh->w != i->w ||
+                !as_op_const(fn, &d, sh, &y, &k) || k < 0 || k > 3)
+                continue;
+            if (y < 0 || y >= nv || d.cnt[y] != 1 || d.ins[y] < 0 ||
+                use[y] != 1)
+                continue;
+            struct ir_ins *ad = &fn->ins[d.ins[y]];
+            int x; long c;
+            if ((ad->op != IR_ADD && ad->op != IR_SUB) || ad->w != i->w ||
+                !as_op_const(fn, &d, ad, &x, &c) || x < 0 || x >= nv)
+                continue;
+            unsigned long uc2 = (unsigned long)c;
+            if (ad->op == IR_SUB) uc2 = -uc2;
+            long disp = norm((long)(uc2 << k), i->w);
+            if (disp == 0 || disp < -255 || disp > 255)
+                continue;
+            rb[n] = base; rx[n] = x; rk[n] = k; rc[n] = disp;
+            doit[n] = 1;
+            any = 1;
+        }
+    }
+    free(use); free(ause);
+    if (!any) {
+        free(rb); free(rx); free(rk); free(rc); free(doit); free_defs(&d);
+        return 0;
+    }
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        if (!doit[n]) {
+            *ib_push(&nb) = fn->ins[n];
+            continue;
+        }
+        struct ir_ins o = fn->ins[n];
+        int w = o.w, kk = fn->nvregs++, t = fn->nvregs++;
+        int q = fn->nvregs++, cc = fn->nvregs++;
+        struct ir_ins *e = ib_push(&nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_CONST; e->dst = kk; e->imm = rk[n]; e->w = w;
+        e->a = e->b = -1; e->line = o.line; e->col = o.col; e->synth = 1;
+        e = ib_push(&nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_SHL; e->dst = t; e->a = rx[n]; e->b = kk; e->w = w;
+        e->line = o.line; e->col = o.col; e->synth = 1;
+        e = ib_push(&nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_ADD; e->dst = q; e->a = rb[n]; e->b = t; e->w = w;
+        e->line = o.line; e->col = o.col; e->synth = 1;
+        e = ib_push(&nb);
+        memset(e, 0, sizeof *e);
+        e->op = IR_CONST; e->dst = cc; e->imm = rc[n]; e->w = w;
+        e->a = e->b = -1; e->line = o.line; e->col = o.col; e->synth = 1;
+        e = ib_push(&nb);
+        *e = o;
+        e->a = q; e->b = cc; e->imm_b = 0; e->imm = 0;
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free(rb); free(rx); free(rk); free(rc); free(doit); free_defs(&d);
+    return 1;
+}
+
 static void bb_add_succ(struct bb *b, int t)
 {
     for (int k = 0; k < b->nsucc; k++)
@@ -12001,6 +12144,9 @@ static void opt_func(struct ir_func *fn)
              * leaves is what CSE sees. */
             changed |= pass_reassoc(fn);
             changed |= pass_lvn(fn);      /* CSE: reuse identical computations */
+            /* After value numbering, whose merges are what make an
+             * index's use count true. */
+            changed |= pass_idxoff(fn);   /* a[i - 1]: the -1 into the address */
             changed |= pass_divmod(fn);   /* a % b from the a / b beside it */
             if (g_gcse && cfg_ok)
                 changed |= pass_gcse(fn); /* CSE across the dominator tree */
