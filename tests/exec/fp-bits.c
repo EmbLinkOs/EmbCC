@@ -52,6 +52,17 @@ __attribute__((noinline)) static double mix(double x)
     return y + (double)(hi & 1);
 }
 
+/* x has many float uses and one integer one: it may live in a d
+ * register, and its high word is then read out of it */
+__attribute__((noinline)) static double kt(double x)
+{
+    int hx;
+    { shape u; u.value = x; hx = (int)u.parts.msw; }
+    if (hx > 0x3fe00000)
+        return x * x * x + x * 0.5 + x;
+    return x * x - x;
+}
+
 __attribute__((noinline)) static double poly(double z)
 {
     return 1.66666666666666019037e-01 + z * (-2.77777777770155933842e-03 +
@@ -89,6 +100,9 @@ int main(void)
     if (bits(poly(h)) != 0x3fc5285b7a370ef1ULL) {
         printf("poly %llx\n", bits(poly(h))); bad++;
     }
+    volatile double q3 = 0.75, q1 = 0.25;
+    if (kt(q3) != 1.546875) { printf("kt(0.75)\n"); bad++; }
+    if (kt(q1) != -0.1875) { printf("kt(0.25)\n"); bad++; }
     if (bits(zero()) != 0) { printf("+0.0\n"); bad++; }
     if (bits(negzero()) != 0x8000000000000000ULL) { printf("-0.0\n"); bad++; }
     return bad ? 1 : 42;
