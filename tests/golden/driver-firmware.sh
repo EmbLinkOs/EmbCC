@@ -7,7 +7,8 @@
 # firmware tests/golden/ldscript.sh links with embld directly; the point
 # here is that the driver hands embld the same link. Then gcc's link
 # options -- -Wl,-T, -nostdlib, -lgcc, -L/-l with a real archive -- and
-# the refusals: no memory map, a library not found, two sources.
+# the refusals: no memory map (for objects, and for two sources, which
+# compile and then need it too), a library not found.
 set -u
 echo "TEST-MARKER driver-firmware"
 . "$(dirname "$0")/../lib.sh"
@@ -80,5 +81,7 @@ refuse() {      # refuse TAG PATTERN ARGS...
 }
 refuse nomap "needs its memory map" $T "$out/startup.o" "$out/prog.o" -o "$out/x.elf"
 refuse nolib "cannot find libnosys.a" $T -T "$d/stm32.ld" "$out/prog.o" -lnosys -o "$out/x.elf"
-refuse twosrc "one command compiles one" $T "$d/prog.c" "$d/startup.c" -o "$out/x.elf"
-echo "refused: no memory map, a missing library, two sources"
+# two sources compile (driver-multi.sh), and their link needs the map too
+refuse twosrc "needs its memory map" $T "$d/prog.c" "$d/startup.c" -o "$out/x.elf"
+ls "$out" | grep -q 'embcc-tmp' && fail "twosrc: temporary objects left behind"
+echo "refused: no memory map (from objects, and from two sources), a missing library"

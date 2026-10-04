@@ -40,9 +40,9 @@ embcc --print-search-dirs | --explain [ID]
 embcc --emit-empty-object FILE
 ```
 
-EmbCC compiles at most one source file per invocation, and links any
-number of objects, archives and `-l` libraries with it. A second source
-is refused with `embcc: error: more than one source file`. A command line with no input file and none of the query options
+EmbCC compiles any number of source files in one command, and links them
+with any number of objects, archives and `-l` libraries (see
+[Several source files](#several-source-files)). A command line with no input file and none of the query options
 ends with `embcc: error: no input file`. Running `embcc` with no arguments
 prints the usage line and exits with status 1.
 
@@ -59,7 +59,7 @@ the full entry.
 
 | Section | Options |
 |---|---|
-| [Overall](#overall-options) | `-c` `-S` `-E` `-o FILE` `-x LANG` `-fsyntax-only` `--emit-c` `--emit-interfaces` `--emit-empty-object FILE` `--help` `-h` `--help-warnings` `--version` `-dumpmachine` `--dump-predef` `--print-search-dirs` `--explain[=ID]` |
+| [Overall](#overall-options) | `-c` `-S` `-E` `-o FILE` `-j N` `-x LANG` `-fsyntax-only` `--emit-c` `--emit-interfaces` `--emit-empty-object FILE` `--help` `-h` `--help-warnings` `--version` `-dumpmachine` `--dump-predef` `--print-search-dirs` `--explain[=ID]` |
 | [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-ffreestanding` `-fno-builtin` `-fwrapv` `-fstrict-aliasing` `-fno-strict-aliasing` `-fno-common` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
 | [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fdiagnostics-parseable-fixits` `--fix` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
@@ -91,10 +91,34 @@ The driver decides what to do with the input file from its suffix, unless
 | `.ir` | EmbIR text; meaningful only to [`embcc inspect ir`](#embcc-inspect-stage-file-option) |
 | `.o` `.obj` `.a` | an object or an archive, handed to the link as it is |
 
-One command compiles at most one source; any number of objects, archives
-and `-l` libraries may go with it to the link. Two sources are refused
-with `embcc: error: more than one source file ('a.c' and 'b.c'): one
-command compiles one; compile each with -c and link the objects`.
+### Several source files
+
+```sh
+embcc -O2 main.c uart.c timer.c -lm -o prog      # compile all three, link
+embcc -O2 -j4 -c *.c                             # main.o uart.o timer.o ...
+```
+
+Each source is compiled by a run of `embcc` of its own, with the same
+options, as GCC's driver runs its compiler proper. Without `-c`, `-S` or
+`-E` the objects are temporaries beside the output (`OUT.embcc-tmp-N.o`),
+linked in command-line order among the other inputs and then removed;
+with `-c` or `-S` each source gets its own `NAME.o` or `NAME.s` in the
+working directory, and `-o` is refused, since it names one file; with
+`-E` they are printed one after the other. If any source fails, nothing
+is linked and the temporaries are removed. `-fsyntax-only` and `--fix`
+check each one. `embcc inspect`, `--why`, `--emit-c` and
+`--emit-interfaces` take one source.
+
+`-j N` (or `-jN`) compiles N sources at once; `-j` alone, one per
+processor. The default is one at a time, so the diagnostics come out in
+command-line order. The image does not depend on `-j`.
+
+This needs a host that can run a program. EmbCC built with
+`PROCESS=none` -- as it is for EmbLinkOS, which has no fork/exec --
+compiles one source per command, and refuses a second with
+`embcc: error: more than one source file ('a.c' and 'b.c'), and this
+host cannot run a compiler for each (EmbCC was built with
+PROCESS=none): compile each with -c and link the objects`.
 
 Anything else, including `.i` and `.h`, is not an input file to EmbCC.
 Without `-x` such an argument is refused as
@@ -181,6 +205,13 @@ output, and `-c -o -` is refused:
 ```text
 embcc: error: `-o -` writes to stdout, which -E, -S and --emit-interfaces support but an object file does not; name a file
 ```
+
+### `-j N`, `-jN`, `-j`
+
+With several source files, compile `N` of them at once; `-j` alone, one
+per processor. The default is one at a time. The objects and the image
+are the same whatever `N` is; only the order the diagnostics come out in
+can differ. See [Several source files](#several-source-files).
 
 ### `-x LANGUAGE`
 
