@@ -2093,8 +2093,10 @@ static void write_exec(struct linker *l, const char *out,
             int t = ELF64_ST_TYPE(s->st_info), out;
             const char *name = o->symstr + s->st_name;
             if ((t != STT_FUNC && t != STT_OBJECT) || !*name ||
-                s->st_shndx == SHN_UNDEF || s->st_shndx >= o->nsh ||
-                (out = o->sec_out[s->st_shndx]) < 0)    /* also ABS, COMMON */
+                s->st_shndx == SHN_UNDEF || s->st_shndx >= o->nsh)
+                continue;                               /* also ABS, COMMON */
+            out = o->sec_out[s->st_shndx];
+            if (out < 0)
                 continue;
             sy[nsy].name = name;
             sy[nsy].val = l->insecs[out].vaddr + s->st_value;
