@@ -334,7 +334,11 @@ lowering (`gen_x87`), and the read-modify-write fusion. At `-O0` every
 value lives in an `rbp`-relative slot and operations go through rax and
 rcx. At `-O1` the backend keeps a residency cache: a value just computed
 into rax is not reloaded. At `-O2` values live in their allocated
-registers.
+registers, and a zero-extended value in rax also serves a wider
+zero-extending read of the same temp -- but only when rax holds the whole
+value, as after a store of a 4-byte result, whose slot's upper bytes are
+then zero. After a narrow load of a wider value rax holds only its low
+bytes, and only a read of exactly that width may reuse it.
 
 Instruction selection:
 
