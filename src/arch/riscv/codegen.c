@@ -106,8 +106,10 @@ struct rv_fn {
     int xlen;            /* 32 or 64 */
     int w;               /* a register in bytes: 4 or 8 */
     char *wide;          /* per vreg: needs a register pair (RV32 only) */
-    char *w16;           /* per vreg, RV64 only: an __int128 or a long
-                          * double, in a sixteen-byte slot (rv_w16_map) */
+    char *w16;           /* per vreg: an __int128 or a long double, in a
+                          * sixteen-byte slot (rv_w16_map) */
+    long tfa;            /* RV32: 48 bytes for a long double helper's
+                          * by-reference operands (gen_ld32), or -1 */
     char *nshr;          /* per vreg: a narrow high-word shift (narrow_shr) */
     char *sx;            /* per vreg, RV64 only: already the sign-extension
                           * of its low 32 bits (sext_map) */
@@ -500,7 +502,11 @@ static void place_arg(int wb, int size, int align, int is_struct,
 
     p->byref = 0;
     p->copy = 0;
-    if (is_struct && size > 2 * wb) {
+    /* (Not only an aggregate: RV32's long double is a scalar of four
+     * words, and the psABI passes every argument wider than two
+     * registers by reference.) */
+    (void)is_struct;
+    if (size > 2 * wb) {
         p->byref = 1;
         words = 1;                       /* just the pointer */
     }
@@ -537,6 +543,17 @@ static void place_arg(int wb, int size, int align, int is_struct,
  * second parameter. */
 static int argreg(int n) { return rv_argreg[n]; }
 
+/* A by-reference copy's step: both ends are objects of the argument's
+ * type -- the caller's object or slot and its copy, the copy and the
+ * callee's local -- so it moves a word at a time where the type's
+ * alignment allows, and a byte at a time only for a packed one. It went
+ * a byte at a time always: a long double at RV32 was 32 instructions. */
+static int byref_step(int wb, const struct ir_arg *a)
+{
+    int al = a->align ? a->align : a->is_struct ? 1 : a->size;
+    return al >= wb ? wb : al >= 4 ? 4 : al >= 2 ? 2 : 1;
+}
+
 static int arg_align(int wb, const struct ir_arg *a)
 {
     if (a->is_struct)
@@ -555,9 +572,21 @@ static long sret_bytes(int wb, int retsize)
     return retsize > 2 * wb ? retsize : 0;
 }
 
+/* ...and so does a SCALAR wider than two registers, of which there is
+ * one: RV32's long double, binary128 in four words. The psABI returns it
+ * the way it would pass it as a first argument -- by reference -- so the
+ * caller hands over the address in a0 as for a large struct. At RV64 it
+ * is two registers and comes back in a0:a1. (`long long` at RV32 is two,
+ * not more, and stays out.) A struct-returning call says retsize; any
+ * other says the C type's size in ret_tybytes. */
 static long fn_sret_bytes(int wb, const struct ir_func *fn)
 {
-    return fn->ret_abi.is_struct ? sret_bytes(wb, fn->ret_abi.size) : 0;
+    return sret_bytes(wb, fn->ret_abi.size);
+}
+
+static long call_sret_bytes(int wb, const struct ir_ins *i)
+{
+    return sret_bytes(wb, i->retsize ? i->retsize : i->ret_tybytes);
 }
 
 /* Where the psABI would put each value if it had the choice: a parameter
@@ -609,7 +638,7 @@ static void rv_abi_hints(const struct ir_func *fn, int *hint)
             continue;
         if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w <= wb)
             hint[i->dst] = RV_A0;
-        narg = sret_bytes(wb, i->retsize) ? 1 : 0;
+        narg = call_sret_bytes(wb, i) ? 1 : 0;
         stk = 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
@@ -638,7 +667,7 @@ static long outgoing_area(const struct rv_fn *F)
         long stk = 0;
         if (i->op != IR_CALL)
             continue;
-        if (sret_bytes(F->w, i->retsize))
+        if (call_sret_bytes(F->w, i))
             narg = 1;
         for (int k = 0; k < i->nargs; k++)
             place_arg(F->w, i->argv[k].size, arg_align(F->w, &i->argv[k]),
@@ -663,7 +692,7 @@ static long byref_area(const struct rv_fn *F)
             continue;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            if (a->is_struct && a->size > 2 * F->w)
+            if (a->size > 2 * F->w)
                 need = ((need + 15) & ~15L) + a->size;
         }
         if (need > most)
@@ -755,6 +784,13 @@ static void layout(struct rv_fn *F)
                 off += size;
             }
         free(lref);
+    }
+    /* RV32's long double helpers' by-reference operands (gen_ld32) */
+    F->tfa = -1;
+    if (F->xlen == 32 && F->w16) {
+        off = (off + 15) & ~15L;
+        F->tfa = off;
+        off += 48;
     }
     F->scratch_at = (off + 15) & ~15L;
     off = F->scratch_at + fn->scratch_bytes;
@@ -964,6 +1000,7 @@ static void mv2(struct rv_fn *F, int dl, int sl, int dh, int sh)
 /* A sixteen-byte value's two doublewords at RV64 (gen_ins128). */
 static void ld128(struct rv_fn *F, int v, int lo, int hi);
 static void st128(struct rv_fn *F, int v, int lo, int hi);
+static void need16(const struct rv_fn *F, int v);
 
 static void rd64(struct rv_fn *F, int v, int lo, int hi)
 {
@@ -2003,7 +2040,7 @@ static void gen_call(struct rv_fn *F, int n)
     struct argplace pl[MAX_PARAMS];
     int narg = 0;
     long stk = 0, copy_at = F->byref_at;
-    long sret = sret_bytes(F->w, i->retsize);
+    long sret = call_sret_bytes(F->w, i);
 
     if (sret)
         narg = 1;                          /* a0 holds the result's address */
@@ -2023,11 +2060,14 @@ static void gen_call(struct rv_fn *F, int n)
             continue;
         copy_at = (copy_at + 15) & ~15L;
         pl[k].copy = copy_at;
-        rd(F, a->vreg, TMP);
-        for (long b = 0; b < a->size; b++) {
-            rv_load(t, SCR, TMP, (int)b, 1, 0, F->xlen);
-            st_sp(F, SCR, copy_at + b, 1);
+        if (a->is_struct) {
+            rd(F, a->vreg, TMP);         /* its address */
+        } else {
+            need16(F, a->vreg);          /* RV32's long double: its slot */
+            addr_sp(F, TMP, sslot(F, a->vreg));
         }
+        addr_sp(F, ADDR, copy_at);
+        copy_block(F, 1, a->size, byref_step(F->w, a));
         copy_at += a->size;
     }
 
@@ -2167,8 +2207,16 @@ static void gen_call(struct rv_fn *F, int n)
     }
     /* The hidden result pointer goes in LAST, so nothing above can have
      * used a0 as a scratch after it was set. */
-    if (sret)
+    if (sret && i->retsize) {
         addr_sp(F, RV_A0, F->scratch_at + i->scratch);
+    } else if (sret) {
+        /* RV32's long double: straight into the result's slot, or the tf
+         * area's spare sixteen bytes when nothing reads it */
+        if (i->dst >= 0)
+            need16(F, i->dst);
+        addr_sp(F, RV_A0, i->dst >= 0 && F->slot[i->dst] >= 0
+                          ? F->slot[i->dst] : F->tfa + 32);
+    }
 
     if (F->tail && F->tail[n]) {
         /* The frame down, then a JUMP: the callee returns straight to
@@ -2231,6 +2279,8 @@ static void gen_call(struct rv_fn *F, int n)
         }
         addr_sp(F, ACC, F->scratch_at + i->scratch);
         wr(F, i->dst, ACC);
+    } else if (sret) {
+        /* the callee wrote it through a0 */
     } else if (F->xlen == 32 && F->wide[i->dst]) {
         wr64(F, i->dst, RV_A0, RV_A1);
     } else if (F->xlen == 64 && (i->w == 16 || is16(F, i->dst))) {
@@ -2396,8 +2446,182 @@ static const char *tf_cmp_name(enum binop pred)
     }
 }
 
+/* ---- long double at RV32 ---------------------------------------------------
+ *
+ * binary128 is four words at RV32, and the psABI passes it BY REFERENCE
+ * and returns it through a hidden pointer in a0 -- to the runtime's
+ * helpers as to any function: `__addtf3(&r, &a, &b)` is what clang
+ * emits. A value lives in its sixteen-byte slot (rv_w16_map, as at
+ * RV64); a copy is four words through t0 and t1; an operation hands the
+ * helper the address of its result's own slot, and of a COPY of each
+ * operand in this function's tf area (F->tfa). A copy, because the
+ * callee owns a by-reference argument and may write it, as the psABI
+ * allows. There is no __int128 at RV32, so nothing here is integer
+ * arithmetic. */
+
+static void copy16(struct rv_fn *F, long to, long from)
+{
+    if (to == from)
+        return;
+    for (int q = 0; q < 16; q += 8) {
+        ld_sp(F, A_LO, from + q, 4, 1);
+        ld_sp(F, A_HI, from + q + 4, 4, 1);
+        st_sp(F, A_LO, to + q, 4);
+        st_sp(F, A_HI, to + q + 4, 4);
+    }
+}
+
+/* Where a long double result goes: its slot, or the tf area's spare
+ * sixteen bytes when nothing reads it (the helper writes it regardless). */
+static long tf_result(struct rv_fn *F, int v)
+{
+    if (v < 0)
+        return F->tfa + 32;
+    need16(F, v);
+    return F->slot[v] >= 0 ? F->slot[v] : F->tfa + 32;
+}
+
+/* An operand into the tf area at `at`, and a1/a2 pointing there. */
+static void tf_operand(struct rv_fn *F, int v, long at, int reg)
+{
+    need16(F, v);
+    copy16(F, F->tfa + at, sslot(F, v));
+    addr_sp(F, reg, F->tfa + at);
+}
+
+static void gen_ld32(struct rv_fn *F, struct ir_ins *i)
+{
+    struct code *t = F->t;
+    const char *name;
+
+    if (i->imm_b || i->memoff)
+        rv_refuse(F, i, "a folded operand on a long double at RV32");
+    switch (i->op) {
+    case IR_LDVAR: case IR_STVAR: case IR_MOV:
+        need16(F, i->a);
+        need16(F, i->dst);
+        if (F->slot[i->dst] >= 0)
+            copy16(F, F->slot[i->dst], sslot(F, i->a));
+        return;
+    case IR_LOAD: {
+        int ra_ = rdr(F, i->a, ADDR);
+        long d = tf_result(F, i->dst);
+        for (int q = 0; q < 16; q += 4) {
+            rv_load(t, A_LO, ra_, q, 4, 0, 32);
+            st_sp(F, A_LO, d + q, 4);
+        }
+        return;
+    }
+    case IR_STORE: {
+        long s;
+        need16(F, i->b);
+        s = sslot(F, i->b);
+        int ra_ = rdr(F, i->a, ADDR);
+        for (int q = 0; q < 16; q += 4) {
+            ld_sp(F, A_LO, s + q, 4, 1);
+            rv_store(t, A_LO, ra_, q, 4, 32);
+        }
+        return;
+    }
+    case IR_CONST: {                    /* sign-extended, as irgen made it */
+        long d = tf_result(F, i->dst);
+        long long v = (long long)i->imm;
+        for (int q = 0; q < 4; q++) {
+            long long word = q < 2 ? (long long)(int)(v >> (32 * q))
+                                   : (v < 0 ? -1 : 0);
+            rv_li(t, A_LO, word, 32);
+            st_sp(F, A_LO, d + 4 * q, 4);
+        }
+        return;
+    }
+    default:
+        break;
+    }
+
+    if (i->flt && i->op == IR_NEG) {    /* bit 127: right for -0.0, NaN */
+        long d = tf_result(F, i->dst);
+        need16(F, i->a);
+        copy16(F, d, sslot(F, i->a));
+        ld_sp(F, A_LO, d + 12, 4, 1);
+        rv_li(t, A_HI, (long long)0x80000000LL, 32);
+        rv_alu(t, RV_XOR, A_LO, A_LO, A_HI, 0);
+        st_sp(F, A_LO, d + 12, 4);
+        return;
+    }
+    if (i->flt && (i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+                   i->op == IR_DIV)) {
+        tf_operand(F, i->a, 0, RV_A1);
+        tf_operand(F, i->b, 16, RV_A2);
+        addr_sp(F, RV_A0, tf_result(F, i->dst));
+        call_helper(F, i->op == IR_ADD ? "__addtf3"
+                       : i->op == IR_SUB ? "__subtf3"
+                       : i->op == IR_MUL ? "__multf3" : "__divtf3");
+        return;
+    }
+    if (i->flt && i->op == IR_CMP) {
+        tf_operand(F, i->a, 0, RV_A0);
+        tf_operand(F, i->b, 16, RV_A1);
+        call_helper(F, tf_cmp_name(i->pred));
+        {
+            int d = wreg(F, i->dst, ACC);
+            cmp_to_reg(F, i->pred, 1, RV_A0, RV_ZERO, d);
+            wrote(F, i->dst, d);
+        }
+        return;
+    }
+    if (i->op == IR_I2F || i->op == IR_F2F || i->op == IR_F2I) {
+        int sw = i->size, dw = i->w;
+        if (dw == 16) {
+            /* to long double: the source into a1 (a pair into a1:a2, as
+             * one parallel move -- it may be in a0:a1), then the result's
+             * address into a0, which nothing is still reading */
+            if (sw == 8 && F->wide[i->a]) {
+                int dr[2] = { RV_A1, RV_A2 }, vr[2], hf[2] = { 0, 1 };
+                vr[0] = vr[1] = i->a;
+                set_args_half(F, dr, vr, hf, 2);
+            } else if (sw == 8 && i->op == IR_I2F) {
+                rd(F, i->a, RV_A1);     /* a narrow source asked as 64 */
+                rv_mv(t, RV_A2, RV_ZERO);
+            } else {
+                rd(F, i->a, RV_A1);
+            }
+            if (i->op == IR_I2F)
+                name = sw == 8 ? (i->sign ? "__floatditf" : "__floatunditf")
+                               : (i->sign ? "__floatsitf" : "__floatunsitf");
+            else
+                name = sw == 8 ? "__extenddftf2" : "__extendsftf2";
+            addr_sp(F, RV_A0, tf_result(F, i->dst));
+            call_helper(F, name);
+            return;
+        }
+        if (sw == 16) {
+            /* from long double: the operand by reference in a0, the
+             * result in a0 (a pair at eight bytes) */
+            tf_operand(F, i->a, 0, RV_A0);
+            if (i->op == IR_F2F)
+                name = dw == 8 ? "__trunctfdf2" : "__trunctfsf2";
+            else
+                name = dw == 8 ? (i->sign ? "__fixtfdi" : "__fixunstfdi")
+                               : (i->sign ? "__fixtfsi" : "__fixunstfsi");
+            call_helper(F, name);
+            if (i->dst >= 0) {
+                if (dw == 8 && F->wide[i->dst])
+                    wr64(F, i->dst, RV_A0, RV_A1);
+                else
+                    wr(F, i->dst, RV_A0);
+            }
+            return;
+        }
+    }
+    rv_refuse(F, i, "this operation on a long double at RV32");
+}
+
 static void gen_ins128(struct rv_fn *F, struct ir_ins *i)
 {
+    if (F->xlen == 32) {
+        gen_ld32(F, i);
+        return;
+    }
     struct code *t = F->t;
     long k;
 
@@ -3221,6 +3445,18 @@ static void gen_ins(struct rv_fn *F, int n)
                         }
                     }
                 }
+            } else if (fn_sret_bytes(F->w, fn)) {
+                /* RV32's long double, through the caller's buffer: the
+                 * prologue kept its address on the frame */
+                long s;
+                need16(F, i->a);
+                s = sslot(F, i->a);
+                ld_sp(F, ADDR, F->sret_slot, 4, 1);
+                for (int q = 0; q < 16; q += 4) {
+                    ld_sp(F, A_LO, s + q, 4, 1);
+                    rv_store(t, A_LO, ADDR, q, 4, 32);
+                }
+                rv_mv(t, RV_A0, ADDR);
             } else if (F->xlen == 32 && F->wide[i->a]) {
                 rd64(F, i->a, RV_A0, RV_A1);
             } else if (F->xlen == 64 && fn->ret_abi.size == 16) {
@@ -3731,7 +3967,7 @@ static void rv_pair_hints(const struct ir_func *fn, int *hint)
             continue;
         if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w == 8)
             hint[i->dst] = RV_A0;
-        narg = sret_bytes(wb, i->retsize) ? 1 : 0;
+        narg = call_sret_bytes(wb, i) ? 1 : 0;
         stk = 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
@@ -3797,7 +4033,7 @@ static int *rv_pair_alloc(struct ir_func *fn, struct rv_fn *F,
             x[i->op == IR_LDVAR ? i->a : i->dst] = 1;
         }
         if (i->op == IR_CALL) {
-            int narg = sret_bytes(wb, i->retsize) ? 1 : 0;
+            int narg = call_sret_bytes(wb, i) ? 1 : 0;
             long stk = 0;
             struct argplace pl;
             for (int k = 0; k < i->nargs; k++) {
@@ -3848,7 +4084,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.relax = NULL; F.nrelax = 0;
     F.wide = wide_map(fn);
-    F.w16 = xlen == 64 ? rv_w16_map(fn) : NULL;
+    F.w16 = rv_w16_map(fn);
     if (xlen == 32) {
         F.nshr = ra_narrow_hishift(fn);
         for (int v = 0; v < fn->nvregs; v++)
@@ -3885,8 +4121,23 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
         int *pair = xlen == 32 && g_rv_pairs ? rv_pair_alloc(fn, &F, pin)
                                              : NULL;
-        F.loc = ra_allocate(fn, &RISCV_RA, xlen == 32 ? F.wide : F.w16, pin,
-                            F.used_callee, &F.nsave);
+        {
+            /* At RV32 the eight-byte map (pairs, rv_pair_alloc) and the
+             * sixteen-byte one are both "not for a single register". */
+            char *ineligible = F.w16;
+            if (xlen == 32) {
+                ineligible = F.wide;
+                if (F.w16) {
+                    ineligible = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1));
+                    for (int v = 0; v < fn->nvregs; v++)
+                        ineligible[v] = F.wide[v] | F.w16[v];
+                }
+            }
+            F.loc = ra_allocate(fn, &RISCV_RA, ineligible, pin,
+                                F.used_callee, &F.nsave);
+            if (ineligible != F.wide && ineligible != F.w16)
+                free(ineligible);
+        }
         g_rv_taken = 0;
         if (pair) {
             for (int v = 0; v < fn->nvregs; v++)
@@ -4076,12 +4327,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                  * would make a struct parameter's slot sometimes hold an
                  * object and sometimes an address, which is how u20()
                  * came to print a stack address where it meant 190. */
-                if (pl.nreg) rv_mv(t, ADDR, param_reg(&F, &pl, 0));
-                else         ld_sp(&F, ADDR, base + pl.stk, F.w, 1);
-                for (long b = 0; b < a->size; b++) {
-                    rv_load(t, SCR2, ADDR, (int)b, 1, 0, xlen);
-                    st_sp(&F, SCR2, sslot(&F, i) + b, 1);
-                }
+                if (pl.nreg) rv_mv(t, TMP, param_reg(&F, &pl, 0));
+                else         ld_sp(&F, TMP, base + pl.stk, F.w, 1);
+                addr_sp(&F, ADDR, sslot(&F, i));
+                copy_block(&F, 1, a->size, byref_step(F.w, a));
                 continue;
             }
             /* A SCALAR occupies whole registers and a whole slot: store

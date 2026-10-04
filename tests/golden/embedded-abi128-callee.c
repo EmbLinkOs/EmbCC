@@ -1,6 +1,7 @@
 #include "embedded-abi128.h"
 #include <stdarg.h>
 
+#ifdef __SIZEOF_INT128__
 s128 r_ret(long k)
 {
     unsigned __int128 u = (unsigned __int128)k;  /* no signed overflow */
@@ -20,6 +21,8 @@ s128 p_stack(int a, int b, int c, int d, int e, int f, int g, int h,
     return (x ^ y) + (a + b + c + d + e + f + g + h) * (s128)i;
 }
 
+#endif
+
 long double l_odd(int a, long double x, long double y)
 {
     return x * (long double)a - y;
@@ -31,6 +34,15 @@ long double l_split(int a, int b, int c, int d, int e, int f, int g,
     return (x + (long double)(a + b + c + d + e + f + g)) / y;
 }
 
+struct wld s_ld(int a, struct wld y, int b)
+{
+    struct wld r;
+    r.d = y.d * (long double)a - (long double)b;
+    y.d = 0;                            /* the callee's copy, not the caller's */
+    return r;
+}
+
+#ifdef __SIZEOF_INT128__
 s128 v128(int n, ...)
 {
     va_list ap;
@@ -43,6 +55,8 @@ s128 v128(int n, ...)
     va_end(ap);
     return r;
 }
+
+#endif
 
 long double vld(int n, ...)
 {
@@ -57,9 +71,11 @@ long double vld(int n, ...)
     return r;
 }
 
+#ifdef __SIZEOF_INT128__
 struct w128 s_odd(int a, struct w128 x, struct wld y)
 {
     struct w128 r;
     r.v = x.v + a + (s128)(y.d * 4);
     return r;
 }
+#endif
