@@ -242,10 +242,16 @@ static void implicit_mem_decl(struct unit *u, const char *name)
     /* The real prototype, per function. One shape for all of them --
      * which is what this was when only memcpy/memmove/memset used it --
      * gives memcmp and strlen a `void *` return, and `int c = memcmp(..)`
-     * then fails to convert. The signatures are C's. */
+     * then fails to convert. The signatures are C's, `const` included:
+     * without it, `__builtin_memcpy(d, p, n)` with a `const char *p` --
+     * the ordinary way to call it -- warned that the argument discarded
+     * the qualifier, which under -Werror is a build that fails. */
     {
         struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+        struct type *cvp = ty_ptr(ty_const(ty_base(TY_VOID, 0)));
         struct type *cp = ty_ptr(ty_base(TY_CHAR, target_char_unsigned()));
+        struct type *ccp = ty_ptr(ty_const(ty_base(TY_CHAR,
+                                                   target_char_unsigned())));
         struct type *sz = ty_int_of_size(target_ptr_size(), 1);
         struct type *in = ty_base(TY_INT, 0);
         int cmp = strcmp(name, "memcmp") == 0 || strcmp(name, "strcmp") == 0 ||
@@ -256,23 +262,30 @@ static void implicit_mem_decl(struct unit *u, const char *name)
                    : str ? cp : vp;
         if (strcmp(name, "strlen") == 0) {
             fd->nparams = 1;
-            fd->param_tys[0] = cp;
-        } else if (strcmp(name, "strcmp") == 0 ||
-                   strcmp(name, "strcpy") == 0 ||
+            fd->param_tys[0] = ccp;
+        } else if (strcmp(name, "strcmp") == 0) {
+            fd->nparams = 2;
+            fd->param_tys[0] = ccp;
+            fd->param_tys[1] = ccp;
+        } else if (strcmp(name, "strcpy") == 0 ||
                    strcmp(name, "strcat") == 0) {
             fd->nparams = 2;
             fd->param_tys[0] = cp;
-            fd->param_tys[1] = cp;
+            fd->param_tys[1] = ccp;
         } else if (strcmp(name, "strchr") == 0) {
             fd->nparams = 2;
-            fd->param_tys[0] = cp;
+            fd->param_tys[0] = ccp;
             fd->param_tys[1] = in;
         } else {
+            /* memcpy, memmove, memset, memcmp, memchr, strncmp, strncpy,
+             * strncat: the destination writable, everything read const. */
+            int reads_first = cmp || strcmp(name, "memchr") == 0;
             fd->nparams = 3;
-            fd->param_tys[0] = str ? cp : vp;
+            fd->param_tys[0] = str ? (reads_first ? ccp : cp)
+                                   : (reads_first ? cvp : vp);
             fd->param_tys[1] = (strcmp(name, "memset") == 0 ||
                                 strcmp(name, "memchr") == 0) ? in
-                             : str ? cp : vp;
+                             : str ? ccp : cvp;
             fd->param_tys[2] = sz;
         }
     }

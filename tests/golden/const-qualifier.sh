@@ -71,3 +71,28 @@ SRC
 "$EMBCC" -Wall -Werror -c "$out/keep.c" -o "$out/keep.o" 2> "$out/keep.err" || {
     echo "FAIL: code that keeps its const was diagnosed:"; cat "$out/keep.err"; exit 1; }
 echo "const-qualifier: const objects, pointers to const and const members compile cleanly"
+
+# The builtins' own prototypes, with no <string.h> in sight: the read-only
+# parameters are const, as in C. They were not, and passing a `const char
+# *` to __builtin_memcpy -- the usual call -- warned that the argument
+# discarded the qualifier, which -Werror turned into a failed build.
+cat > "$out/builtins.c" <<'SRC'
+unsigned long f(char *d, const char *p, const void *q, int *w)
+{
+    __builtin_memcpy(w, p, 4);
+    __builtin_memmove(d, q, 2);
+    __builtin_memset(d, 0, 2);
+    __builtin_strcpy(d, p);
+    __builtin_strcat(d, p);
+    __builtin_strncpy(d, p, 3);
+    char *c = __builtin_strchr(p, 'a');
+    return __builtin_strlen(p) + (unsigned long)__builtin_memcmp(q, p, 2) +
+           (unsigned long)__builtin_strcmp(p, d) +
+           (unsigned long)__builtin_strncmp(p, d, 2) +
+           (unsigned long)(__builtin_memchr(q, 1, 2) != 0) + (c != 0);
+}
+SRC
+"$EMBCC" -Wall -Werror -c "$out/builtins.c" -o "$out/builtins.o" \
+    2> "$out/builtins.err" || {
+    echo "FAIL: the builtins' prototypes discard const:"; cat "$out/builtins.err"; exit 1; }
+echo "const-qualifier: __builtin_memcpy and its kin take const sources, as C declares them"
