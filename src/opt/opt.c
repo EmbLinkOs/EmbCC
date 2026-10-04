@@ -7139,6 +7139,16 @@ static int ivsr_one(struct ir_func *fn)
             if (t < 0 || fn->ins[n].op != IR_ADD || fn->ins[n].w != PTRW ||
                 fn->ins[n].flt)
                 continue;
+            /* Computed AFTER the induction variable's own update, it is
+             * the address for the NEXT value of the index -- and the
+             * pointer moves only at inc_at, further on, so it would
+             * still hold this iteration's. Rotation puts exactly such an
+             * address in the latch: the copy of the header's test goes
+             * after `i = mov i1`, and `while (s[n]) n++;` read s[n - 1]
+             * there on every trip -- strlen by index was one short of
+             * its answer at -O2 and -Os on every target. */
+            if (n > copy_ins)
+                continue;
             if (!linear_in_iv(fn, &d, lo, hi, t, iv, &base, &scale) &&
                 !linear_in_iv2(fn, &d, lo, hi, t, iv, &base, &base2, &scale))
                 continue;
