@@ -1432,6 +1432,7 @@ traces, and they are not a stable interface. See
 | `EMBCC_NO_MEMOFF` | Disable folding constant offsets into loads and stores (ARM, RISC-V, AVR). |
 | `EMBCC_RV_RA_MAX`, `EMBCC_RV_PAIRS`, `EMBCC_RV_PAIRS_ONLY`, `EMBCC_RV_JAL_RANGE`, `EMBCC_RV_LONG_CALLS` | RISC-V allocator, register-pair and call-range knobs. |
 | `EMBCC_T_RA_MAX`, `EMBCC_T_PAIRS`, `EMBCC_T_PAIRS_ONLY`, `EMBCC_T_NOLO`, `EMBCC_T_FPU` | ARM allocator, register-pair and FPU knobs. |
+| `EMBCC_T_NOWIDEIMM`, `EMBCC_NO_SIGNTEST` | Build a 64-bit constant whole on Thumb instead of using it half by half; keep `x >> 63` as a shift before a branch. |
 | `EMBCC_AVR_RA`, `EMBCC_AVR_RA_MODE`, `EMBCC_AVR_RA_ONLY`, `EMBCC_AVR_RA_LIMIT`, `EMBCC_AVR_RA_CAP`, `EMBCC_AVR_REMAT_MAX`, `EMBCC_AVR_NO_VOL`, `EMBCC_AVR_NO_OCT`, `EMBCC_AVR_NO_XHOME` | AVR register-allocation mode and bisection knobs. |
 
 The build and test scripts read further variables (`EMBCC_TARGET`,

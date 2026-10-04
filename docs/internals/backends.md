@@ -763,7 +763,17 @@ written with `wreg`/`wr`/`wrote`; `rd64`/`wr64` handle register pairs.
 - **64-bit integers** use register pairs: `adds`/`adc`,
   `subs`/`sbc`, per-half logic, `umull`/`mla` for multiply, shifts by a
   constant or (branching on count ≥ 32) by a variable. A 64-bit divide
-  calls `__divdi3`, `__udivdi3`, `__moddi3` or `__umoddi3`.
+  calls `__divdi3`, `__udivdi3`, `__moddi3` or `__umoddi3`. An AND, OR or
+  XOR with a constant takes each half on its own (`logic_half`): all
+  ones or zero is a copy, a zero or a `mvn`; a modified immediate or its
+  complement is `and`/`orr`/`eor` or `bic`/`orn`; a mask of low bits is
+  `ubfx`; anything else is built in r10. A shift by a constant goes from
+  the operand's pair straight into the result's, the bits crossing
+  between the words being an `orr`'s shifted operand. A 64-bit shift
+  right by 32 or more whose only reader is a 32-bit AND with a low mask
+  is one `ubfx` of the high word, and so is a 32-bit shift right followed
+  by such a mask. A branch on a 64-bit value is one `orrs` of the halves
+  where they live. `EMBCC_T_NOWIDEIMM=1` turns these off.
 - **Soft float** calls the libgcc names (not `__aeabi_*`):
   `__addsf3`/`__adddf3` and the rest of the arithmetic, the
   `__eqsf2`/`__eqdf2` family followed by a compare of r0 with 0, and the

@@ -254,6 +254,7 @@ int target_thumb_hf_name(void);
  * the standalone encoding checkers, which carry no backend, so it must
  * not name one. */
 int thumb_imm_foldable(int op, long imm);
+int thumb_imm_foldable64(int op, long imm);   /* a 64-bit AND/OR/XOR, half by half */
 /* Is c == ((1 << k) + 1) << j or ((1 << k) - 1) << j, with k >= 1? Then a
  * multiply by c is an add or a reverse-subtract with a shifted operand,
  * and a shift: one or two instructions on a machine with shifted

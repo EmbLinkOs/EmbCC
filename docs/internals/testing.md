@@ -618,6 +618,7 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_T_RA_MAX=N`, `EMBCC_RV_RA_MAX=N` | keep only the first `N` values in registers on Thumb or RISC-V; bisecting `N` names the one value whose register breaks a program |
 | `EMBCC_AVR_RA_MODE=n` | force one AVR allocation mode; each mode is otherwise generated and the shortest kept, so a mode that never wins is still tested |
 | `EMBCC_AVR_RA=1`, `EMBCC_AVR_RA_ONLY=FN`, `EMBCC_AVR_RA_LIMIT=K` | AVR allocation report, one function only, first `K` homes only |
+| `EMBCC_T_NOWIDEIMM`, `EMBCC_NO_SIGNTEST` | build a 64-bit constant whole on Thumb, and keep `x >> 63` a shift before a branch, for bisecting |
 | `EMBCC_NO_MEMOFF`, `EMBCC_NO_RMW`, `EMBCC_NO_MLA`, `EMBCC_NO_SPLITLOOPS`, `EMBCC_NO_TAILCALL` | turn off one transformation (constant offsets folded into loads and stores on Thumb and RISC-V; x86-64 read-modify-write fusion; multiply-accumulate fusion on aarch64 and Thumb; loop live-range splitting; tail calls on aarch64, Thumb and RISC-V) for bisecting |
 | `EMBCC_RV_JAL_RANGE=BYTES`, `EMBCC_RV_LONG_CALLS` | shrink the reach the RISC-V backend assumes for `jal`, or (when set) call functions in the same unit with `auipc`+`jalr` instead of `jal`, to test the long-call path without a megabyte of code |
 | `EMBCC_T_FPU` | `1` or `0` overrides whether the Thumb backend uses the FPU |

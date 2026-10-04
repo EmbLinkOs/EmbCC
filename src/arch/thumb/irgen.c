@@ -299,6 +299,31 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
  *
  * HERE rather than beside them because the optimizer asks it, and embls
  * links the optimizer without the code generator. */
+/* ...and for a 64-bit AND, OR or XOR, which the code generator does half
+ * by half (logic_half): a half it takes without building it is all ones
+ * or zero (a copy, a zero, a mvn), a modified immediate or the
+ * complement of one (bic, orn), or a mask of low bits (ubfx). Both halves
+ * must be one of those, or the constant stays in a register pair, built
+ * once and hoistable, rather than half of it being rebuilt at each use. */
+static int thumb_half_ok(int op, unsigned long c)
+{
+    unsigned long nc = ~c & 0xffffffffUL;
+    if (c == 0 || c == 0xffffffffUL)
+        return 1;
+    if (t_imm_ok((long)c))
+        return 1;
+    if ((op == IR_AND || op == IR_OR) && t_imm_ok((long)nc))
+        return 1;
+    return op == IR_AND && (c & (c + 1)) == 0;
+}
+int thumb_imm_foldable64(int op, long imm)
+{
+    unsigned long u = (unsigned long)imm;
+    if (op != IR_AND && op != IR_OR && op != IR_XOR)
+        return 0;
+    return thumb_half_ok(op, u & 0xffffffffUL) &&
+           thumb_half_ok(op, (u >> 32) & 0xffffffffUL);
+}
 int thumb_imm_foldable(int op, long imm)
 {
     switch (op) {

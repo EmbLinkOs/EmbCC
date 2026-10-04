@@ -1882,6 +1882,111 @@ static void shift64_imm(struct t_fn *F, int op, int sign, long n)
     t_shift_imm(t, op, A_HI, A_HI, (int)n, 0);
 }
 
+/* ---- a 64-bit operation with a constant, half by half ----------------
+ *
+ * Each half of `x & 0x000fffffffffffff` is its own question: the low word
+ * is ANDed with all ones, which is a copy, and the high one with 0xfffff,
+ * which is a ubfx. Building both halves in r9/r10 and ANDing each was four
+ * instructions and two pushed registers where one does -- and fdlibm and
+ * every soft-float routine are made of exactly these masks on the two
+ * words of a double. EMBCC_T_NOWIDEIMM=1 goes back to building them. */
+static int g_t_nowideimm = -1;
+static int t_wide_imm(void)
+{
+    if (g_t_nowideimm < 0)
+        g_t_nowideimm = getenv("EMBCC_T_NOWIDEIMM") != NULL;
+    return !g_t_nowideimm;
+}
+
+/* d = s OP c for one 32-bit half, d and s possibly the same register. */
+static void logic_half(struct t_fn *F, int op, int d, int s, unsigned long c)
+{
+    struct code *t = F->t;
+    unsigned long nc;
+    c &= 0xffffffffUL;
+    nc = ~c & 0xffffffffUL;
+    if ((op == T_OP_AND && c == 0xffffffffUL) || (op != T_OP_AND && c == 0)) {
+        if (d != s)
+            t_mov_reg(t, d, s);
+        return;
+    }
+    if (op == T_OP_AND && c == 0) {
+        t_mov_imm_dead_flags(t, d, 0);
+        return;
+    }
+    if (op == T_OP_ORR && c == 0xffffffffUL) {
+        t_mov_imm_dead_flags(t, d, -1);
+        return;
+    }
+    if (op == T_OP_EOR && c == 0xffffffffUL) {
+        t_mvn_reg(t, d, s, 0);
+        return;
+    }
+    if (t_imm_ok((long)c) && t_alu_imm(t, op, d, s, (long)c, 0))
+        return;
+    if (op == T_OP_AND && t_imm_ok((long)nc) &&
+        t_alu_imm(t, T_OP_BIC, d, s, (long)nc, 0))
+        return;
+    if (op == T_OP_ORR && t_imm_ok((long)nc) &&
+        t_alu_imm(t, T_OP_ORN, d, s, (long)nc, 0))
+        return;
+    if (op == T_OP_AND && (c & (c + 1)) == 0) {      /* the low k bits */
+        int k = 0;
+        while (c >> k & 1)
+            k++;
+        t_bfx(t, d, s, 0, k, 0);
+        return;
+    }
+    {
+        int tmp = B_LO;
+        t_mov_imm_dead_flags(t, tmp, (long)c);
+        t_alu_reg(t, op, d, s, tmp, 0);
+    }
+}
+
+/* A 64-bit shift by a constant from the pair (al, ah) into (dl, dh),
+ * which is either the same pair or one sharing no register with it.
+ * Each half is written after the last read of the source half it would
+ * overwrite, so the in-place case needs nothing in between -- and the
+ * bits crossing from one word to the other are the shifted operand of
+ * an orr, one instruction where a shift, an orr and r9 were three. */
+static void shift64_imm_to(struct t_fn *F, int op, int sign, long n,
+                           int al, int ah, int dl, int dh)
+{
+    struct code *t = F->t;
+    if (n <= 0) {
+        if (dl != al) t_mov_reg(t, dl, al);
+        if (dh != ah) t_mov_reg(t, dh, ah);
+        return;
+    }
+    if (n >= 64)
+        n = op == T_SH_ASR ? 63 : 64;
+    if (op == T_SH_LSL) {
+        if (n >= 32) {
+            if (n == 64)     t_mov_imm_dead_flags(t, dh, 0);
+            else if (n > 32) t_shift_imm(t, T_SH_LSL, dh, al, (int)(n - 32), 0);
+            else if (dh != al) t_mov_reg(t, dh, al);
+            t_mov_imm_dead_flags(t, dl, 0);
+        } else {
+            t_shift_imm(t, T_SH_LSL, dh, ah, (int)n, 0);
+            t_alu_reg_shift(t, T_OP_ORR, dh, dh, al, T_SH_LSR, (int)(32 - n), 0);
+            t_shift_imm(t, T_SH_LSL, dl, al, (int)n, 0);
+        }
+        return;
+    }
+    if (n >= 32) {
+        if (n == 64)     t_mov_imm_dead_flags(t, dl, 0);
+        else if (n > 32) t_shift_imm(t, op, dl, ah, (int)(n - 32), 0);
+        else if (dl != ah) t_mov_reg(t, dl, ah);
+        if (sign) t_shift_imm(t, T_SH_ASR, dh, ah, 31, 0);
+        else      t_mov_imm_dead_flags(t, dh, 0);
+        return;
+    }
+    t_shift_imm(t, T_SH_LSR, dl, al, (int)n, 0);       /* always logical */
+    t_alu_reg_shift(t, T_OP_ORR, dl, dl, ah, T_SH_LSL, (int)(32 - n), 0);
+    t_shift_imm(t, op, dh, ah, (int)n, 0);
+}
+
 /* Lower one 64-bit instruction. Returns 0 for one this does not handle,
  * which the caller then refuses by name. */
 /* Where a 64-bit operand's halves ARE -- its pair, or the given scratch
@@ -2031,6 +2136,13 @@ static int gen_ins64(struct t_fn *F, int n)
                : i->op == IR_OR  ? T_OP_ORR : T_OP_EOR;
         int al, ah, bl, bh, dl, dh;
         src64(F, i->a, A_LO, R_TMP, &al, &ah);
+        if (i->imm_b && t_wide_imm()) {
+            dst64(F, i->dst, &dl, &dh);
+            logic_half(F, op, dl, al, (unsigned long)i->imm);
+            logic_half(F, op, dh, ah, (unsigned long)i->imm >> 32);
+            wr64(F, i->dst, dl, dh);
+            return 1;
+        }
         srcb64(F, i, &bl, &bh);
         dst64(F, i->dst, &dl, &dh);
         t_alu_reg(t, op, dl, al, bl, 0);
@@ -2096,6 +2208,14 @@ static int gen_ins64(struct t_fn *F, int n)
     case IR_SHL: case IR_SHR: {
         int op = i->op == IR_SHL ? T_SH_LSL
                : i->sign ? T_SH_ASR : T_SH_LSR;
+        if (i->imm_b && t_wide_imm()) {
+            int al, ah, dl, dh;
+            src64(F, i->a, A_LO, R_TMP, &al, &ah);
+            dst64(F, i->dst, &dl, &dh);
+            shift64_imm_to(F, op, i->sign, (long)i->imm, al, ah, dl, dh);
+            wr64(F, i->dst, dl, dh);
+            return 1;
+        }
         rd64(F, i->a, A_LO, A_HI);
         if (i->imm_b)
             shift64_imm(F, op, i->sign, (long)i->imm);
@@ -2748,12 +2868,33 @@ static void gen_ins(struct t_fn *F, int n)
     /* The high word of a 64-bit value, shifted: one register
      * (ra_narrow_hishift). */
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {
-        int k = (int)i->imm - 32, d = wreg(F, i->dst, T_ACC), hi;
+        int k = (int)i->imm - 32, d, hi, fw = 0;
+        struct ir_ins *nx = n + 1 < fn->nins ? &fn->ins[n + 1] : NULL;
+        /* ...and when its one reader is the mask after it, a field of
+         * that word: `(int)(x >> 52) & 0x7ff`, a double's exponent, is
+         * one ubfx (see the 32-bit shift below). */
+        if (nx && t_wide_imm() && F->usecnt && F->usecnt[i->dst] == 1 &&
+            nx->op == IR_AND && nx->imm_b && nx->a == i->dst && !nx->flt &&
+            nx->w == 4 && nx->dst >= 0 && !F->wide[nx->dst] &&
+            !in_freg(F, nx->dst) && nx->imm > 0 && nx->imm <= 0xffffffffL &&
+            ((nx->imm + 1) & nx->imm) == 0) {
+            while (fw < 32 && (nx->imm >> fw & 1))
+                fw++;
+            if (k + fw > 32)
+                fw = 0;
+        }
+        d = wreg(F, fw ? nx->dst : i->dst, T_ACC);
         if (in_reg(F, i->a)) {
             hi = F->loc[i->a] + 1;             /* the pair's high register */
         } else {
             rd64(F, i->a, T_ACC, T_TMP);
             hi = T_TMP;
+        }
+        if (fw) {
+            t_bfx(t, d, hi, k, fw, 0);
+            wrote(F, nx->dst, d);
+            F->skip_next = 1;
+            return;
         }
         if (k)
             t_shift_imm(t, i->sign ? T_SH_ASR : T_SH_LSR, d, hi, k, 0);
@@ -3044,6 +3185,32 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_SHL: case IR_SHR: {
         int sh = i->op == IR_SHL ? T_SH_LSL : i->sign ? T_SH_ASR : T_SH_LSR;
+        /* `(x >> s) & (2^k - 1)` with s + k <= 32 is the bitfield
+         * x[s, s+k): one ubfx where the shift and the mask were two. The
+         * bits taken are x's own, so the shift's kind does not matter.
+         * Every exponent field in soft-float code is this. */
+        if (i->op == IR_SHR && i->imm_b && i->imm >= 1 && i->imm <= 31 &&
+            i->w == 4 && i->dst >= 0 && !F->wide[i->dst] && F->usecnt &&
+            F->usecnt[i->dst] == 1 && n + 1 < fn->nins && t_wide_imm()) {
+            struct ir_ins *nx = &fn->ins[n + 1];
+            long m = nx->imm;
+            if (nx->op == IR_AND && nx->imm_b && nx->a == i->dst && !nx->flt &&
+                nx->w == 4 && nx->dst >= 0 && !F->wide[nx->dst] &&
+                !in_freg(F, nx->dst) && m > 0 && m <= 0xffffffffL &&
+                ((m + 1) & m) == 0) {
+                int k = 0;
+                while (k < 32 && (m >> k & 1))
+                    k++;
+                if (i->imm + k <= 32) {
+                    int ra_ = rdr(F, i->a, T_ACC);
+                    int d = wreg(F, nx->dst, T_ACC);
+                    t_bfx(t, d, ra_, (int)i->imm, k, 0);
+                    wrote(F, nx->dst, d);
+                    F->skip_next = 1;
+                    return;
+                }
+            }
+        }
         /* A shift by a constant whose only reader is the next instruction's
          * operand is that instruction's SHIFTED OPERAND: `add.w rd, rn, rm,
          * lsl #k` is one instruction where the shift and the add were two
@@ -3212,7 +3379,11 @@ static void gen_ins(struct t_fn *F, int n)
          * in slots, so this is two loads and a branch over one of them —
          * which needs no flag-liveness reasoning and is the same size.
          * The condition is tested at its own width, `size`. */
-        if (i->size == 8) {
+        if (i->size == 8 && t_wide_imm()) {
+            int al, ah;
+            src64(F, i->a, A_LO, R_TMP, &al, &ah);
+            t_alu_reg(t, T_OP_ORR, T_ACC, al, ah, 1);
+        } else if (i->size == 8) {
             rd64(F, i->a, A_LO, A_HI);
             t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
             t_cmp_imm(t, A_LO, 0);
@@ -3234,7 +3405,12 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_BRZ: case IR_BRNZ:
-        if (i->w == 8) {
+        if (i->w == 8 && t_wide_imm()) {
+            /* where the halves are, and one orrs: Z is "both zero" */
+            int al, ah;
+            src64(F, i->a, A_LO, R_TMP, &al, &ah);
+            t_alu_reg(t, T_OP_ORR, T_ACC, al, ah, 1);
+        } else if (i->w == 8) {
             rd64(F, i->a, A_LO, A_HI);
             t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
             t_cmp_imm(t, A_LO, 0);
