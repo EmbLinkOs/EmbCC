@@ -1706,7 +1706,16 @@ void x86_movsxd_rax_tab(struct code *c)
 /* jmp *(%rcx,%rax,8): through a table of absolute addresses */
 void x86_jmp_rcx_rax8(struct code *c)
 {
-    code_byte(c, 0xff); code_byte(c, 0x24); code_byte(c, 0xc1);
+    x86_jmp_rcx_reg8(c, REG_RAX);
+}
+
+/* jmp *(%rcx,%reg,8): FF /4 with a SIB byte, scale 8, base rcx and the
+ * index `reg` (REX.X for r8-r15). rsp cannot be an index. */
+void x86_jmp_rcx_reg8(struct code *c, int reg)
+{
+    if (reg >= 8) code_byte(c, 0x42);
+    code_byte(c, 0xff); code_byte(c, 0x24);
+    code_byte(c, 0xc0 | ((reg & 7) << 3) | 1);
 }
 
 void x86_jmp_reg(struct code *c, int reg)

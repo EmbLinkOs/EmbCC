@@ -4959,10 +4959,32 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * terminator keeps nothing live in either. The entries go on
              * the branch list with `tab` set, and are patched to
              * target - table. */
+            /* The index is used where it is when its register is known
+             * to hold it zero-extended: always at width 8, and at width 4
+             * when the instruction just before is the 32-bit load that
+             * wrote it, which zeroes the upper half as every 32-bit
+             * write does. That is an interpreter's `op = prog[pc++];
+             * switch (op)`, where copying the opcode into rax was an
+             * instruction on every dispatch. Not when the index lives in
+             * rcx, which the table's address takes, and only for ELF,
+             * whose dispatch indexes the table directly. */
+            int idx = REG_RAX;
+            {
+                const struct ir_ins *pv = i > fn->ins ? i - 1 : NULL;
+                if (in_reg(i->a) && g_loc[i->a] != REG_RCX &&
+                    target_fmt_get() == TGT_FMT_ELF &&
+                    !getenv("EMBCC_NO_SWIDX") &&
+                    (i->w == 8 ||
+                     (i->w == 4 && pv && pv->op == IR_LOAD &&
+                      pv->dst == i->a && pv->w == 4 && pv->size <= 4 &&
+                      !pv->flt)))
+                    idx = g_loc[i->a];
+            }
             int n = fn->jt[i->jt].n;
-            cg_load(text, sd, i->a, i->w, 0, i->w);
+            if (idx == REG_RAX)
+                cg_load(text, sd, i->a, i->w, 0, i->w);
             cg_reset();
-            x86_alu_reg_imm(text, 'c', REG_RAX, n, i->w);
+            x86_alu_reg_imm(text, 'c', idx, n, i->w);
             int patch = x86_jcc_rel32(text, 0x93);      /* jae: unsigned >= n */
             if (nbrs == capbrs) {
                 capbrs = capbrs ? capbrs * 2 : 16;
@@ -4986,7 +5008,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * into it (jtabs, resolved with the branches below). Mach-O
              * and COFF keep the offset table. */
             if (target_fmt_get() == TGT_FMT_ELF) {
-                x86_jmp_rcx_rax8(text);
+                x86_jmp_rcx_reg8(text, idx);
                 code_align(text, 8, 0xcc);
                 int tab = text->len;
                 code_patch32(text, lea,

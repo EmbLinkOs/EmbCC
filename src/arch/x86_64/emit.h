@@ -199,6 +199,7 @@ int x86_jmp_rel8(struct code *c);
 int x86_jcc_rel8(struct code *c, int setcc);
 void x86_jmp_reg(struct code *c, int reg);        /* jmp *reg (computed goto) */
 void x86_jmp_rcx_rax8(struct code *c);   /* jmp *(%rcx,%rax,8) */
+void x86_jmp_rcx_reg8(struct code *c, int reg);   /* jmp *(%rcx,%reg,8) */
 void x86_movsxd_rax_tab(struct code *c);          /* movsxd rax, dword [rcx + rax*4] */
 int x86_jcc_rel32(struct code *c, int setcc); /* setcc cond byte (0x9x) -> Jcc rel32 */
 void x86_alu_reg_imm(struct code *c, int op, int reg, long imm, int w); /* reg OP= imm ('c'=cmp) */
