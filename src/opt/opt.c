@@ -2750,8 +2750,16 @@ static int pass_divmagic(struct ir_func *fn)
             int xe = dm_op(&nb, fn, IR_EXT, x, -1, 8, 1, 4, src);
             int hi = dm_op(&nb, fn, IR_MUL, xe,
                            dm_const(&nb, fn, mg.m, 8, src), 8, 1, 0, src);
+            /* With no correction between them, the two arithmetic shifts
+             * -- the high half, then mg.s -- are one: |q| < 2^31, so its
+             * low 32 bits are the quotient whichever width reads them. */
+            int fold = !(D > 0 && mg.m < 0) && !(D < 0 && mg.m > 0) &&
+                       mg.s > 0 && !getenv("EMBCC_NO_DIVSHIFT");
             int t3 = dm_op(&nb, fn, IR_SHR, hi,
-                           dm_const(&nb, fn, 32, 8, src), 8, 1, 0, src);
+                           dm_const(&nb, fn, 32 + (fold ? mg.s : 0), 8, src),
+                           8, 1, 0, src);
+            if (fold)
+                mg.s = 0;
             if (D > 0 && mg.m < 0)
                 t3 = dm_op(&nb, fn, IR_ADD, t3, x, 4, 1, 0, src);
             else if (D < 0 && mg.m > 0)
@@ -2767,8 +2775,18 @@ static int pass_divmagic(struct ir_func *fn)
             int xe = dm_op(&nb, fn, IR_EXT, x, -1, 8, 0, 4, src);
             int hi = dm_op(&nb, fn, IR_MUL, xe,
                            dm_const(&nb, fn, (long)mg.m, 8, src), 8, 0, 0, src);
+            /* The high half and the final shift are one shift when no
+             * correction comes between them: `shr #32; shr #3` was two
+             * instructions on x86-64 and aarch64 for every x / 10. The
+             * quotient is below 2^31, so it reads the same at 32 bits on
+             * every 64-bit target, RV64's sign-extended registers
+             * included. */
+            int fold = !mg.add && mg.s > 0 && !getenv("EMBCC_NO_DIVSHIFT");
             int t3 = dm_op(&nb, fn, IR_SHR, hi,
-                           dm_const(&nb, fn, 32, 8, src), 8, 0, 0, src);
+                           dm_const(&nb, fn, 32 + (fold ? mg.s : 0), 8, src),
+                           8, 0, 0, src);
+            if (fold)
+                mg.s = 0;
             if (!mg.add) {
                 q = mg.s ? dm_op(&nb, fn, IR_SHR, t3,
                                  dm_const(&nb, fn, mg.s, 4, src), 4, 0, 0, src)
