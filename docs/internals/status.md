@@ -113,7 +113,7 @@ with them (`embcc -T board.ld a.o b.o -o fw.elf`).
 
 | Input or output | x86-64 | AArch64, Cortex-M, RISC-V, AVR |
 |---|---|---|
-| `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled |
+| `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled, with GNU as's directives, macros, conditionals, sections, expressions, literal pools and branch relaxation; ARM's CMSIS and ST's startup files assemble to clang's object ([embas](../manual/tools/embas.md#gnu-syntax-assembly)) |
 | `.asm` files (NASM syntax) | Assembled | Assembled as x86-64; see [Known defects](#known-defects) |
 | `-S` | `.byte` directives with the disassembly in comments | `.byte` directives without mnemonics |
 | File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | Labels, `.globl` and data directives; no instruction |

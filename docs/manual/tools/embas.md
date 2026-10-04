@@ -272,30 +272,90 @@ inline-assembly vocabulary listed in [Inline assembly](../inline-asm.md);
 driver behavior and output naming are described in
 [Invoking EmbCC](../invoking.md#assembly-input).
 
-The directives this assembler accepts:
+The assembler reads what a CMSIS or vendor startup file and an RTOS port
+are written in. Each Cortex-M startup file in ARM's CMSIS_5 and every
+STM32F4 one in ST's cmsis-device-f4 assembles to the object clang's
+assembler makes from it -- the same sections, instructions, symbols and
+relocations -- which `tests/golden/gas-gnu.sh` checks.
+
+### Source
+
+- **Comments.** `/* ... */` anywhere, also across lines; `#` and `//`;
+  `@` on ARM and `;` on AVR. On ARM and AArch64, `#` is an immediate's
+  prefix and starts a comment only as a line's first character.
+- **Statements.** `;` separates two statements on one line (not on AVR,
+  where it is the comment). Any number of `label:` may precede one.
+  Numeric local labels `0:` to `9:` are referred to as `1b` and `1f`.
+- **Letter case.** Mnemonics, register names, conditions and operand
+  keywords are case-insensitive (`MRS r0, PRIMASK`); symbols are not.
+
+### Expressions
+
+Wherever a directive takes a value: numbers in C's notation and `0b`
+binary, `'c'` characters, symbols, `.` (here), and GNU as's operators with
+GNU as's precedence -- `*` `/` `%` `<<` `>>` bind tightest, then `|` `&`
+`^` `!`, then `+` `-` and the comparisons, then `&&` `||`. A label minus a
+label in the same section is a plain value, a label plus a value stays an
+address, and an address in a data word becomes a relocation (a label in
+this file or an external symbol, with any addend). Anything that mixes
+addresses otherwise is refused.
+
+### Directives
 
 | Directive | Effect |
 |---|---|
-| `.text`, `.data`, `.rodata`, `.bss`, `.section NAME` | switch section; `NAME` must be one of those four, otherwise: `.section "NAME" is not one of .text/.data/.rodata/.bss` |
-| `.global NAME`, `.globl NAME` | export a symbol |
-| `.weak NAME`, `.weakref NAME` | declare a weak symbol; an undefined weak reference resolves to 0 at link time |
-| `.type NAME, %function` (or `@function`) | mark a symbol as a function |
-| `.byte`, `.short`, `.half`, `.word`, `.long`, `.quad`, `.dword` | data of 1, 2, 2, 4 (2 on AVR), 4, 8 and 8 bytes; a symbol name becomes an absolute relocation |
-| `.ascii`, `.asciz`, `.string` | string data; `.asciz` and `.string` add a terminating zero; escapes `\n \t \r \0 \b \f \\ \"` |
-| `.space N`, `.zero N`, `.skip N` | `N` zero bytes, or reserved space in `.bss` |
-| `.align N`, `.balign N` | align to `N` bytes |
-| `.p2align N` | align to 2^`N` bytes |
-| `.size`, `.file`, `.ident`, `.cfi_startproc`, `.cfi_endproc`, `.syntax`, `.thumb`, `.thumb_func`, `.code`, `.arch`, `.fpu`, `.eabi_attribute`, `.attribute`, `.option` | accepted and ignored |
+| `.text`, `.data`, `.rodata`, `.bss` | switch to that section |
+| `.section NAME[, "FLAGS"[, @TYPE[, ENTSIZE]]]` | switch to `NAME`, creating it. With no flags, a name GNU as knows gets its flags (`.text.*` code, `.data.*` and `.bss.*` writable, `.rodata.*` read-only, `.init_array` and friends, `.tdata`/`.tbss`) and any other name none at all (not allocated), as in GNU as. `FLAGS` from `a w x M S T R y`; `TYPE` `progbits`, `nobits`, `note`, `init_array`, `fini_array`, `preinit_array`. Declaring a section again with other flags or type is refused |
+| `.pushsection ...`, `.popsection`, `.previous` | switch, and switch back |
+| `.byte`, `.short`/`.half`/`.hword`/`.2byte`, `.word`, `.long`/`.int`/`.4byte`, `.quad`/`.dword`/`.8byte` | values of 1, 2, 4 (2 on AVR for `.word`), 4 and 8 bytes; each an expression |
+| `.ascii`, `.asciz`, `.string` | string data; `.asciz` and `.string` add a terminating zero |
+| `.space N[, FILL]`, `.zero N`, `.skip N[, FILL]` | `N` bytes of `FILL` (0), or reserved space in a NOBITS section |
+| `.fill REPEAT[, SIZE[, VALUE]]` | `REPEAT` values of `SIZE` bytes |
+| `.org OFFSET` | advance to `OFFSET` in this section |
+| `.align N`, `.p2align N` (and `w`/`l` variants) | align to 2^`N` bytes; code is padded with the target's no-op |
+| `.balign N` (and `w`/`l` variants) | align to `N` bytes |
+| `.equ NAME, EXPR`, `.set NAME, EXPR`, `NAME = EXPR`, `.equiv NAME, EXPR` | define `NAME`: absolute for a value, an alias for an address; it may name a label further down |
+| `.thumb_set NAME, EXPR` | as `.set`, and `NAME` is a Thumb function (how a startup file aliases weak handlers to its default one) |
+| `.global`/`.globl`, `.weak`, `.local`, `.hidden`, `.internal`, `.protected` | a comma-separated list of names |
+| `.type NAME, %function`/`%object`/`%notype` (also `@...`) | the symbol's type |
+| `.size NAME, EXPR` | the symbol's size, usually `. - NAME` |
+| `.lcomm NAME, SIZE[, ALIGN]`, `.comm ...` | reserve space in `.bss` (`.comm` makes it global) |
+| `.inst`, `.inst.n`, `.inst.w` | an instruction by its encoding |
+| `.ltorg`, `.pool` | place the literal pool here (ARM) |
+| `.macro NAME [PARAMS]` ... `.endm`, `.purgem`, `.exitm` | a macro: parameters with `=default`, `:req` or `:vararg`, used as `\name`; `\@` counts expansions and `\()` separates |
+| `.rept N`, `.irp SYM, A, B...`, `.irpc SYM, CHARS` ... `.endr` | repetition |
+| `.if EXPR`, `.ifdef`, `.ifndef`, `.ifeq`, `.ifne`, `.ifgt`, `.ifge`, `.iflt`, `.ifle`, `.ifb`, `.ifnb`, `.ifc`, `.ifnc`, `.ifeqs`, `.ifnes`, `.else`, `.elseif`, `.endif` | conditional assembly, decided from values known where the `.if` stands (numbers and earlier `.equ`/`.set`; not a label's address) |
+| `.include "FILE"` | the file, found as given or beside this one |
+| `.end` | the rest of the file is not assembled |
+| `.error "MSG"`, `.warning "MSG"`, `.print "MSG"` | a diagnostic |
+| `.cpu`, `.arch`, `.arch_extension`, `.fpu`, `.syntax`, `.thumb`, `.code 16`, `.eabi_attribute`, `.object_arch`, `.file`, `.ident`, `.loc`, `.cfi_*`, `.attribute`, `.option` | accepted; the target comes from `--target`/`-mcpu` |
+| `.fnstart`, `.fnend`, `.cantunwind`, `.save`, `.vsave`, `.setfp`, `.pad`, `.movsp`, `.personality`, `.personalityindex`, `.handlerdata`, `.unwind_raw` | accepted; no unwind table is written (an exception unwinding through this code stops) |
 
-Any other directive is refused with
-`directive ".NAME" is not one this assembler knows` (this includes `.equ`
-and `.set`). Comments begin with `#` or `//`, and also with `;` on AVR.
-Because `#` begins a comment anywhere on a line, write ARM and AArch64
-immediates without it: `movs r0, 5`, not `movs r0, #5`. The latter loses
-its operand and is reported as an unknown instruction, for example
-`asm instruction "movs" is not in the ARMv7-M vocabulary`. Numeric local
-labels (`1:`, referenced as `1b` and `1f`) are supported,
-for the digits 0 to 9.
+Refused by name: `.arm` and `.code 32` (an M-profile core has no ARM
+state), subsections (`.text 1`), `.weakref`, and any other directive
+(`directive ".NAME" is not one this assembler knows`).
+
+### ARM specifics
+
+- **`ldr rd, =EXPR`.** A constant a move can make is that move -- `mov.w`
+  for a modified immediate, `mvn.w` for its complement, `movw` up to
+  0xffff -- and anything else, an address included, is a word in the
+  literal pool, loaded pc-relative. The pool is placed at the next
+  `.ltorg`/`.pool` or at the end of the section; identical entries share
+  a word. None of these sets the flags, as `ldr` does not.
+- **Relaxation.** A branch and a literal load are assembled in their
+  two-byte form when the target is in reach, and in the four-byte form
+  otherwise; `.w` and `.n` force one. The passes repeat until no label
+  moves, so the layout is the one GNU as and clang produce.
+- **Symbols.** A branch to an external symbol, to a label in another
+  section or to a weak symbol is relocated (`R_ARM_THM_CALL`,
+  `R_ARM_THM_JUMP24`), since the linker decides where those end up.
+  `.thumb_func`, `.type NAME, %function` and `.thumb_set` make a symbol a
+  Thumb function, which carries the interworking bit. `.L` labels stay
+  out of the symbol table.
+- **The object** has `$t`/`$d` mapping symbols in sections that contain
+  code, and the same `.ARM.attributes` the compiler writes for the target,
+  so a disassembler decodes it and the linker can check it.
 
 A symbol that the file does not define may be named only in the
 instruction forms that carry a relocation:
@@ -303,11 +363,12 @@ instruction forms that carry a relocation:
 | Target | Forms |
 |---|---|
 | RISC-V | `call SYMBOL`, `la REG, SYMBOL` |
-| ARM, AArch64 | `bl SYMBOL` |
+| ARM | `bl SYMBOL`, `b SYMBOL`, `ldr REG, =SYMBOL`, `movw`/`movt` with `#:lower16:`/`#:upper16:` |
+| AArch64 | `bl SYMBOL` |
 | AVR | `call`, `jmp`, `rcall`, `rjmp` and conditional branches to a symbol; `lds`/`sts` with a symbol address; `ldi REG, lo8(SYMBOL)`, `hi8(...)`, `pm_lo8(...)`, `pm_hi8(...)`, and `lo8(gs(SYMBOL))`, `hi8(gs(SYMBOL))` |
 
-Any other use is refused with
-`"STATEMENT" names the undefined symbol 'NAME' in a form this target's assembler cannot relocate`.
+Any other use is refused, for example
+`"STATEMENT" names 'NAME', which is not defined in this file, in a form this target's assembler cannot relocate`.
 Errors have the form `FILE:LINE: error: MESSAGE`.
 
 ## SEE ALSO

@@ -385,12 +385,16 @@ typedef struct {
  * be laid out as ordinary data and never run. */
 #define SHT_INIT_ARRAY 14
 #define SHT_FINI_ARRAY 15
+#define SHT_PREINIT_ARRAY 16
+#define SHT_NOTE      7      /* .note.*: notes, never loaded */
 #define SHT_X86_64_UNWIND 0x70000001   /* x86-64 psABI: .eh_frame's type */
 
 /* sh_flags */
 #define SHF_WRITE     0x1
 #define SHF_ALLOC     0x2
 #define SHF_EXECINSTR 0x4
+#define SHF_MERGE     0x10   /* .section ..., "aM": identical entries may merge */
+#define SHF_STRINGS   0x20   /* ...and they are NUL-terminated strings */
 #define SHF_INFO_LINK 0x40
 /* Thread-local storage. A section with this flag is not part of the
  * image every thread shares: it is the TEMPLATE from which each
