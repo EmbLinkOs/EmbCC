@@ -1083,6 +1083,12 @@ static int sext_def(const struct rv_fn *F, const struct ir_ins *i,
     case IR_SHL: case IR_SHR: case IR_NEG:
         return !i->flt && i->w == 4;          /* addw, mulw, divw, sllw... */
     case IR_AND: case IR_OR: case IR_XOR:
+        /* x & k with 0 <= k < 2^31 is below 2^31 whatever x was:
+         * pass_signtest narrows `if (m & 0xff0)` to an and.4 on a wide
+         * m, which is then read by a 64-bit branch. */
+        if (i->op == IR_AND && !i->flt && i->imm_b &&
+            imm_val(F, i) >= 0 && imm_val(F, i) <= 0x7fffffffLL)
+            return 1;
         if (i->flt || !SX(i->a))
             return 0;
         if (i->imm_b) {
@@ -1561,6 +1567,43 @@ static void cmp_to_reg(struct rv_fn *F, enum binop pred, int sign,
     }
 }
 
+/* The same against a constant k, when it fits an I-type immediate: slti
+ * and sltiu take it as it is (sign-extended to XLEN, which is the form
+ * imm_val gives and rd32 reads), `x <= k` is `x < k + 1` and `x > k` its
+ * inverse, `==` an xori and a seqz -- against zero the seqz, snez or slt
+ * alone. Where k does not fit, 0 and the caller loads it. */
+static int cmp_imm_to_reg(struct rv_fn *F, enum binop pred, int sign,
+                          int ra, long long k, int dst)
+{
+    struct code *t = F->t;
+    int inv = pred == B_GE || pred == B_GT;
+    if (pred == B_LE || pred == B_GT) {
+        if (!sign && k == -1)
+            return 0;               /* k + 1 wraps: x <=u max */
+        k++;
+    }
+    if (k < -2048 || k > 2047)
+        return 0;
+    switch (pred) {
+    case B_EQ: case B_NE:
+        if (k) {
+            rv_alu_imm(t, RV_XOR, dst, ra, k, 0);
+            ra = dst;
+        }
+        if (pred == B_EQ) rv_alu_imm(t, RV_SLTU, dst, ra, 1, 0);  /* seqz */
+        else              rv_alu(t, RV_SLTU, dst, RV_ZERO, ra, 0); /* snez */
+        return 1;
+    default:
+        if (k == 0 && sign)
+            rv_alu(t, RV_SLT, dst, ra, RV_ZERO, 0);                /* sltz */
+        else
+            rv_alu_imm(t, sign ? RV_SLT : RV_SLTU, dst, ra, k, 0);
+        if (inv)
+            rv_alu_imm(t, RV_XOR, dst, dst, 1, 0);
+        return 1;
+    }
+}
+
 /* ---- 64-bit integers at RV32 ---------------------------------------------
  *
  * A 32-bit machine carries one in a REGISTER PAIR and an eight-byte slot,
@@ -1688,6 +1731,106 @@ static void shift64_var(struct rv_fn *F, int op, int sign)
 /* A 64-bit comparison at RV32, into ACC as a 0 or a 1. The high words
  * decide unless they are equal, in which case the low words do -- and the
  * low comparison is always UNSIGNED however the value itself is signed. */
+/* ---- a 64-bit operation with a constant, half by half (RV32) ---------
+ *
+ * Each half of `x & 0x000fffffffffffff` is its own question: the low word
+ * ANDed with all ones is a copy, the high one with 0xfffff two shifts --
+ * where building both words and ANDing each was five instructions. Every
+ * soft-float routine is these masks on the two words of a double.
+ * EMBCC_RV_NOWIDEIMM=1 goes back to building them. */
+static int g_rv_nowideimm = -1;
+static int rv_wide_imm(void)
+{
+    if (g_rv_nowideimm < 0)
+        g_rv_nowideimm = getenv("EMBCC_RV_NOWIDEIMM") != NULL;
+    return !g_rv_nowideimm;
+}
+
+/* d = s OP c for one 32-bit half; d and s may be the same register,
+ * neither is SCR. */
+static void logic_half(struct rv_fn *F, int op, int d, int s, unsigned long c)
+{
+    struct code *t = F->t;
+    unsigned long nc;
+    long sc;
+    c &= 0xffffffffUL;
+    nc = ~c & 0xffffffffUL;
+    sc = (long)(int)(unsigned int)c;
+    if ((op == RV_AND && c == 0xffffffffUL) || (op != RV_AND && c == 0)) {
+        if (d != s) rv_mv(t, d, s);
+        return;
+    }
+    if (op == RV_AND && c == 0) {
+        rv_mv(t, d, RV_ZERO);
+        return;
+    }
+    if (op == RV_OR && c == 0xffffffffUL) {
+        rv_li(t, d, -1, 32);
+        return;
+    }
+    if (sc >= -2048 && sc <= 2047) {            /* andi, ori, xori (not) */
+        rv_alu_imm(t, op, d, s, (int)sc, 0);
+        return;
+    }
+    if (op == RV_AND && (c & (c + 1)) == 0) {   /* the low k bits */
+        int k = 0;
+        while (c >> k & 1) k++;
+        rv_shift_imm(t, RV_SLL, d, s, 32 - k, 0, 32);
+        rv_shift_imm(t, RV_SRL, d, d, 32 - k, 0, 32);
+        return;
+    }
+    if (op == RV_AND && (nc & (nc + 1)) == 0) { /* all but the low j bits */
+        int j = 0;
+        while (nc >> j & 1) j++;
+        rv_shift_imm(t, RV_SRL, d, s, j, 0, 32);
+        rv_shift_imm(t, RV_SLL, d, d, j, 0, 32);
+        return;
+    }
+    rv_li(t, SCR, sc, 32);
+    rv_alu(t, op, d, s, SCR, 0);
+}
+
+/* A 64-bit shift by a constant from the pair (al, ah) into (dl, dh): the
+ * same pair, or one sharing no register with it. Each half is written
+ * after the last read of the source half it overwrites, so in place needs
+ * nothing between, and nothing goes through A first. */
+static void shift64_imm_to(struct rv_fn *F, int op, int sign, long n,
+                           int al, int ah, int dl, int dh)
+{
+    struct code *t = F->t;
+    n &= 63;
+    if (n == 0) {
+        if (dl != al) rv_mv(t, dl, al);
+        if (dh != ah) rv_mv(t, dh, ah);
+        return;
+    }
+    if (n >= 32) {
+        int k = (int)(n - 32);
+        if (op == RV_SLL) {
+            if (k) rv_shift_imm(t, RV_SLL, dh, al, k, 0, 32);
+            else if (dh != al) rv_mv(t, dh, al);
+            rv_mv(t, dl, RV_ZERO);
+        } else {
+            if (k) rv_shift_imm(t, sign ? RV_SRA : RV_SRL, dl, ah, k, 0, 32);
+            else if (dl != ah) rv_mv(t, dl, ah);
+            if (sign) rv_shift_imm(t, RV_SRA, dh, ah, 31, 0, 32);
+            else      rv_mv(t, dh, RV_ZERO);
+        }
+        return;
+    }
+    if (op == RV_SLL) {
+        rv_shift_imm(t, RV_SRL, SCR, al, (int)(32 - n), 0, 32);
+        rv_shift_imm(t, RV_SLL, dh, ah, (int)n, 0, 32);
+        rv_alu(t, RV_OR, dh, dh, SCR, 0);
+        rv_shift_imm(t, RV_SLL, dl, al, (int)n, 0, 32);
+    } else {
+        rv_shift_imm(t, RV_SLL, SCR, ah, (int)(32 - n), 0, 32);
+        rv_shift_imm(t, RV_SRL, dl, al, (int)n, 0, 32);
+        rv_alu(t, RV_OR, dl, dl, SCR, 0);
+        rv_shift_imm(t, sign ? RV_SRA : RV_SRL, dh, ah, (int)n, 0, 32);
+    }
+}
+
 /* Where a 64-bit operand's halves ARE: its pair, or the given scratch
  * registers after a load -- so an operation reads it in place. And where
  * to compute a 64-bit result: its pair, or A. Pairs never partly overlap
@@ -1812,6 +1955,13 @@ static int gen_ins64(struct rv_fn *F, int n)
         int op = i->op == IR_AND ? RV_AND : i->op == IR_OR ? RV_OR : RV_XOR;
         int al, ah, bl, bh, dl, dh;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
+        if (i->imm_b && rv_wide_imm()) {
+            dst64(F, i->dst, &dl, &dh);
+            logic_half(F, op, dl, al, (unsigned long)i->imm);
+            logic_half(F, op, dh, ah, (unsigned long)i->imm >> 32);
+            wr64(F, i->dst, dl, dh);
+            return 1;
+        }
         if (i->imm_b) {
             operand_b64(F, i, B_LO, B_HI);
             bl = B_LO; bh = B_HI;
@@ -1859,6 +2009,14 @@ static int gen_ins64(struct rv_fn *F, int n)
     case IR_SHL: case IR_SHR: {
         int op = i->op == IR_SHL ? RV_SLL : RV_SRL;
         int sign = i->op == IR_SHR && i->sign;
+        if (i->imm_b && rv_wide_imm()) {
+            int al, ah, dl, dh;
+            src64(F, i->a, A_LO, A_HI, &al, &ah);
+            dst64(F, i->dst, &dl, &dh);
+            shift64_imm_to(F, op, sign, (long)i->imm, al, ah, dl, dh);
+            wr64(F, i->dst, dl, dh);
+            return 1;
+        }
         rd64(F, i->a, A_LO, A_HI);
         if (i->imm_b) {
             shift64_imm(F, op, sign, (long)i->imm);
@@ -1931,7 +2089,11 @@ static int gen_ins64(struct rv_fn *F, int n)
         return 1;
     case IR_SELECT: {
         int take_c, done;
-        if (i->size == 8) {            /* a 64-bit condition: either half */
+        if (i->size == 8 && rv_wide_imm()) {   /* either half, in place */
+            int al, ah;
+            src64(F, i->a, SCR, SCR2, &al, &ah);
+            rv_alu(t, RV_OR, SCR, al, ah, 0);
+        } else if (i->size == 8) {     /* a 64-bit condition: either half */
             rd64(F, i->a, SCR, SCR2);
             rv_alu(t, RV_OR, SCR, SCR, SCR2, 0);
         } else {
@@ -3184,6 +3346,34 @@ static void gen_ins(struct rv_fn *F, int n)
     }
 
     case IR_CMP:
+        if (i->w == 8 && F->xlen == 32 && rv_wide_imm() && i->imm_b &&
+            i->imm == 0 && n + 1 < F->fn->nins && F->usecnt &&
+            F->usecnt[i->dst] == 1 &&
+            (i->pred == B_EQ || i->pred == B_NE ||
+             (i->sign && (i->pred == B_LT || i->pred == B_GE)))) {
+            /* A 64-bit value against zero, read only by the branch after
+             * it: `== 0` is an or of the halves and a beqz, signed `< 0`
+             * the high word's sign and a bltz -- where the compare made
+             * its 0 or 1 first and the branch tested that. */
+            struct ir_ins *nx = &F->fn->ins[n + 1];
+            if ((nx->op == IR_BRZ || nx->op == IR_BRNZ) && nx->a == i->dst) {
+                int al, ah, cond, r;
+                src64(F, i->a, A_LO, A_HI, &al, &ah);
+                if (i->pred == B_EQ || i->pred == B_NE) {
+                    rv_alu(t, RV_OR, SCR, al, ah, 0);
+                    r = SCR;
+                    cond = i->pred == B_EQ ? RV_BEQ : RV_BNE;
+                } else {
+                    r = ah;
+                    cond = i->pred == B_LT ? RV_BLT : RV_BGE;
+                }
+                if (nx->op == IR_BRZ)
+                    cond = invert_branch(cond);
+                branch_if(F, cond, r, RV_ZERO, nx->label);
+                F->skip_next = 1;
+                return;
+            }
+        }
         if (i->w == 8 && F->xlen == 32) {
             cmp64(F, i, i->pred, i->sign);
             wr(F, i->dst, ACC);
@@ -3241,6 +3431,14 @@ static void gen_ins(struct rv_fn *F, int n)
             int ra_ = wordop ? rd32(F, i->a, ACC) : rdr(F, i->a, ACC);
             int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
             int d;
+            if (i->imm_b && !getenv("EMBCC_RV_NOCMPIMM")) {
+                d = wreg(F, i->dst, ACC);
+                if (cmp_imm_to_reg(F, i->pred, i->sign, ra_, imm_val(F, i),
+                                   d)) {
+                    wrote(F, i->dst, d);
+                    return;
+                }
+            }
             if (rb_ == TMP) operand_b(F, i, TMP);
             if (wordop && !i->imm_b)
                 rb_ = sext32(F, i->b, rb_, TMP);
@@ -3278,7 +3476,12 @@ static void gen_ins(struct rv_fn *F, int n)
 
     case IR_BRZ: case IR_BRNZ: {
         int r;
-        if (i->w == 8 && F->xlen == 32) {
+        if (i->w == 8 && F->xlen == 32 && rv_wide_imm()) {
+            int al, ah;
+            src64(F, i->a, A_LO, A_HI, &al, &ah);
+            rv_alu(t, RV_OR, SCR, al, ah, 0);
+            r = SCR;
+        } else if (i->w == 8 && F->xlen == 32) {
             rd64(F, i->a, A_LO, A_HI);
             rv_alu(t, RV_OR, A_LO, A_LO, A_HI, 0);
             r = A_LO;

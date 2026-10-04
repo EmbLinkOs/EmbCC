@@ -767,7 +767,17 @@ written with `wreg`/`wr`/`wrote`; `rd64`/`wr64` handle register pairs.
 - **64-bit integers** use register pairs: `adds`/`adc`,
   `subs`/`sbc`, per-half logic, `umull`/`mla` for multiply, shifts by a
   constant or (branching on count ≥ 32) by a variable. A 64-bit divide
-  calls `__divdi3`, `__udivdi3`, `__moddi3` or `__umoddi3`.
+  calls `__divdi3`, `__udivdi3`, `__moddi3` or `__umoddi3`. An AND, OR or
+  XOR with a constant takes each half on its own (`logic_half`): all
+  ones or zero is a copy, a zero or a `mvn`; a modified immediate or its
+  complement is `and`/`orr`/`eor` or `bic`/`orn`; a mask of low bits is
+  `ubfx`; anything else is built in r10. A shift by a constant goes from
+  the operand's pair straight into the result's, the bits crossing
+  between the words being an `orr`'s shifted operand. A 64-bit shift
+  right by 32 or more whose only reader is a 32-bit AND with a low mask
+  is one `ubfx` of the high word, and so is a 32-bit shift right followed
+  by such a mask. A branch on a 64-bit value is one `orrs` of the halves
+  where they live. `EMBCC_T_NOWIDEIMM=1` turns these off.
 - **Soft float** calls the libgcc names (not `__aeabi_*`):
   `__addsf3`/`__adddf3` and the rest of the arithmetic, the
   `__eqsf2`/`__eqdf2` family followed by a compare of r0 with 0, and the
@@ -945,7 +955,22 @@ Operands are read with `rdr` and written with `wreg`/`wrote`;
   `R_RISCV_CALL_PLT`. `EMBCC_RV_LONG_CALLS` always uses `auipc`+`jalr`,
   and `EMBCC_RV_JAL_RANGE` reduces the assumed `jal` reach, for testing.
 - **Compare and branch** fuse when the compare's only use is the next
-  branch; a compare with 0 uses x0.
+  branch; a compare with 0 uses x0. A compare whose result is kept as a
+  value takes a folded constant that fits 12 bits as an immediate
+  (`cmp_imm_to_reg`): `slti`/`sltiu`, `x <= k` as `x < k + 1` and `x > k`
+  its inverse, `==` and `!=` an `xori` and a `seqz`/`snez`. Against zero
+  that is the `seqz`, `snez` or `slt` alone. `EMBCC_RV_NOCMPIMM=1` loads
+  the constant into a register instead.
+- **64-bit operations with a constant** at RV32 take each half on its
+  own (`logic_half`): all ones or zero is a copy, a zero or an `li -1`; a
+  12-bit immediate is `andi`/`ori`/`xori`; a mask of low bits is
+  `slli`+`srli`, and one of high bits `srli`+`slli`; anything else is
+  built in t4. A shift by a constant goes from the operand's pair
+  straight into the result's (`shift64_imm_to`). A branch or select on a
+  64-bit value ORs the halves where they live. A 64-bit compare with
+  zero whose only reader is the next branch is that OR and a
+  `beqz`/`bnez`, or, for a signed `<` or `>=`, a `bltz`/`bgez` of the
+  high word. `EMBCC_RV_NOWIDEIMM=1` turns these off.
 - **Multiply and divide** use the M extension (`mul`, `div`, `rem` and
   the `W` forms). At RV32 a 64-bit multiply is `mul`/`mulhu`; a 64-bit
   divide calls `__divdi3`, `__udivdi3`, `__moddi3` or `__umoddi3`.
@@ -982,7 +1007,8 @@ the stack, as clang and gcc pass them. `sext_map` decides which values
 are already sign-extended, to a fixed point: the `W` arithmetic,
 compares, constants that fit 32 bits signed, signed 4-byte and all
 narrower loads and extensions, a call returning an integer of at most 4
-bytes, `__fix*si` results, and `and`/`or`/`xor`/`not`, copies and
+bytes, `__fix*si` results, an `and` with a constant from 0 to 2^31-1
+(whatever its other operand), and `and`/`or`/`xor`/`not`, copies and
 selects of such values.
 
 ### Frame layout
@@ -1266,6 +1292,9 @@ with `lo8`, `hi8`, `pm_lo8`, `pm_hi8` and `gs()` symbol operands.
 | `EMBCC_T_NOLO` | Thumb | no low-register scratch |
 | `EMBCC_T_NOREGOFF` | Thumb | no `[rn, rm]` register-offset addressing |
 | `EMBCC_T_FPU` | Thumb | override the FPU setting |
+| `EMBCC_T_NOWIDEIMM` | Thumb | build a 64-bit AND/OR/XOR constant whole |
+| `EMBCC_RV_NOWIDEIMM` | RISC-V | the same at RV32 |
+| `EMBCC_RV_NOCMPIMM` | RISC-V | load a value compare's constant into a register |
 | `EMBCC_RV_LONG_CALLS` | RISC-V | never use `jal` for calls |
 | `EMBCC_RV_JAL_RANGE` | RISC-V | assume a shorter `jal` reach |
 

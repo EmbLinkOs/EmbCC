@@ -621,6 +621,7 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_NO_MEMOFF`, `EMBCC_NO_RMW`, `EMBCC_NO_MLA`, `EMBCC_NO_SPLITLOOPS`, `EMBCC_NO_TAILCALL` | turn off one transformation (constant offsets folded into loads and stores on Thumb and RISC-V; x86-64 read-modify-write fusion; multiply-accumulate fusion on aarch64 and Thumb; loop live-range splitting; tail calls on aarch64, Thumb and RISC-V) for bisecting |
 | `EMBCC_RV_JAL_RANGE=BYTES`, `EMBCC_RV_LONG_CALLS` | shrink the reach the RISC-V backend assumes for `jal`, or (when set) call functions in the same unit with `auipc`+`jalr` instead of `jal`, to test the long-call path without a megabyte of code |
 | `EMBCC_T_FPU` | `1` or `0` overrides whether the Thumb backend uses the FPU |
+| `EMBCC_T_NOWIDEIMM`, `EMBCC_RV_NOWIDEIMM`, `EMBCC_NO_SIGNTEST`, `EMBCC_RV_NOCMPIMM` | build a 64-bit constant whole on Thumb or RV32; keep `x >> 63` a shift, and `x & K` eight bytes wide, before a branch; load a RISC-V value compare's constant into a register; for bisecting |
 | `EMBCC_VECDEBUG` | the vectorizer prints, on stderr, each loop it considers and why it rejected it |
 
 `EMBCC_DEFAULT_TARGET` and `EMBCC_PREFIX` are user-facing and documented in

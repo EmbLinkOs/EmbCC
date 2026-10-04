@@ -671,9 +671,25 @@ or a compare is swapped into place (a compare flips its predicate). The
 constant must fit in 32 bits signed and the target must accept it:
 `thumb_imm_foldable`, `riscv_imm_foldable` and `a64_imm_foldable` answer
 for Thumb, RISC-V and AArch64; x86-64 and AVR accept every 32-bit value.
+A 64-bit AND, OR or XOR on Thumb or RV32, which the backend does half by
+half, takes any constant whose two halves `thumb_imm_foldable64` or
+`riscv_imm_foldable64` accepts. On RV32 that is also any constant one of
+whose halves is the identity, because the other half is then at most a
+constant built in a register and one instruction.
 A constant the target cannot encode stays in a register, where it is
 built once and can be hoisted, instead of being rebuilt at every use.
 128-bit operations are not folded.
+
+**`pass_signtest`** (after `pass_immfold`; disabled by
+`EMBCC_NO_SIGNTEST=1`). A 64-bit unsigned shift right by 63 whose only
+reader is the branch right after it becomes a signed compare with zero:
+`if (x >> 63)` is `if (x < 0)`, which a 32-bit target answers from the
+high word alone. The branch then tests the compare's result at four
+bytes. A 64-bit AND with a constant below 2^32 whose only reader is the
+next branch, or an `== 0`/`!= 0` compare, is narrowed to four bytes
+along with that reader, because only the low word can be nonzero. So
+`if (m & 0x10)` is one `and` and one branch on a 32-bit target, and
+`((m >> 52) & 1) == 0` reads only the high word.
 
 **`pass_joincopies`** (`cfg_ok`). Coalesces `%b = mov %a` at a join when
 `%a` is a temp read only by that copy, the two have the same width and

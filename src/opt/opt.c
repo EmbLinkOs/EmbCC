@@ -9566,6 +9566,12 @@ static enum binop swap_pred(enum binop p)
  * a register is built once and can be hoisted out of a loop. */
 static int target_imm_foldable(int op, long imm, int w)
 {
+    if (target_get() == TARGET_THUMB && w == 8 &&
+        (op == IR_AND || op == IR_OR || op == IR_XOR) && !getenv("EMBCC_T_NOWIDEIMM"))
+        return thumb_imm_foldable64(op, imm);
+    if (target_get() == TARGET_RISCV32 && w == 8 &&
+        (op == IR_AND || op == IR_OR || op == IR_XOR) && !getenv("EMBCC_RV_NOWIDEIMM"))
+        return riscv_imm_foldable64(op, imm);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
@@ -9573,6 +9579,69 @@ static int target_imm_foldable(int op, long imm, int w)
     if (target_get() == TARGET_AARCH64)
         return a64_imm_foldable(op, imm, w);
     return 1;
+}
+
+/* `if (x >> 63)` for a 64-bit x is `if (x < 0)`: the shift's 0 or 1 is the
+ * sign bit, which a signed compare with zero reads straight off the high
+ * word. On a 32-bit target the shift is two instructions (the bit moved
+ * down, the high word zeroed) and the branch an orrs of both halves; the
+ * compare is one `cmp hi, #0` fused into the branch. Only for a shift by
+ * the width less one, unsigned, whose one reader is a branch -- which
+ * then tests the compare's 0 or 1 at four bytes, a compare's result being
+ * an int. After immfold, so the zero can be an immediate. */
+static int pass_signtest(struct ir_func *fn)
+{
+    int nv = fn->nvregs, changed = 0;
+    if (fn->nins == 0 || nv == 0 || getenv("EMBCC_NO_SIGNTEST"))
+        return 0;
+    int *use = xcalloc((size_t)nv, sizeof *use);
+    struct ucount uc = { use, nv };
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
+    for (int n = 0; n + 1 < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n], *br = &fn->ins[n + 1];
+        /* ...and the same AND read by `== 0` or `!= 0`, which is how C
+         * spells `while (!(m >> 52 & 1))`: both at four bytes. */
+        if (i->op == IR_AND && i->imm_b && !i->flt && i->w == 8 &&
+            i->imm >= 0 && i->imm <= 0xffffffffL && i->dst >= 0 &&
+            i->dst < nv && use[i->dst] == 1 && br->op == IR_CMP &&
+            br->a == i->dst && br->imm_b && br->imm == 0 && br->w == 8 &&
+            (br->pred == B_EQ || br->pred == B_NE) &&
+            !getenv("EMBCC_NO_SIGNTEST")) {
+            i->w = 4;
+            i->sign = 0;
+            br->w = 4;
+            changed = 1;
+            continue;
+        }
+        if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->a != i->dst ||
+            i->flt || !i->imm_b || i->w != 8 || i->dst < 0 ||
+            i->dst >= nv || use[i->dst] != 1)
+            continue;
+        /* `if (x & K)` with K below 2^32 tests only bits of the low word:
+         * the AND and the branch at four bytes, which on a 32-bit target is
+         * one and and one branch instead of a pair and an or -- and leaves
+         * whatever x is read narrow, `(m >> 52) & 1` a shift of the high
+         * word alone. */
+        if (i->op == IR_AND && i->imm >= 0 && i->imm <= 0xffffffffL &&
+            !getenv("EMBCC_NO_SIGNTEST")) {
+            i->w = 4;
+            i->sign = 0;
+            br->w = 4;
+            changed = 1;
+            continue;
+        }
+        if (i->op != IR_SHR || i->sign || i->imm != 63)
+            continue;
+        i->op = IR_CMP;
+        i->pred = B_LT;
+        i->sign = 1;
+        i->imm = 0;                     /* x <s 0, still imm_b */
+        br->w = 4;
+        changed = 1;
+    }
+    free(use);
+    return changed;
 }
 
 /* A store of N bytes writes the low N bytes of its value, and an
@@ -9638,12 +9707,17 @@ static int pass_immfold(struct ir_func *fn)
         default:
             continue;
         }
-        if (get_const(fn, &d, i->b, &B) && fits_imm32(B) &&
+        /* Thumb and RV32 take a 64-bit AND/OR/XOR constant half by half,
+         * so its width is not x86's imm32 question (*_imm_foldable64). */
+        int wide_ok = (target_get() == TARGET_THUMB ||
+                       target_get() == TARGET_RISCV32) && i->w == 8 &&
+                      (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
+        if (get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
             target_imm_foldable(i->op, B, i->w)) {
             i->imm = B; i->imm_b = 1; i->b = -1;    /* op a, imm */
             changed = 1;
         } else if ((commutative || i->op == IR_CMP) &&
-                   get_const(fn, &d, i->a, &A) && fits_imm32(A) &&
+                   get_const(fn, &d, i->a, &A) && (fits_imm32(A) || wide_ok) &&
                    target_imm_foldable(i->op, A, i->w)) {
             /* Constant in the first operand: move it to the immediate, keeping
              * a valid instruction — commutative ops just swap, a compare swaps
@@ -12177,6 +12251,7 @@ static void opt_func(struct ir_func *fn)
      * passes never reason about the imm_b form. */
     if (pass_immfold(fn))
         pass_dce(fn);
+    pass_signtest(fn);       /* `if (x >> 63)` is `if (x < 0)` */
     if (pass_storenarrow(fn))
         pass_dce(fn);
     /* ...and only now put each surviving literal where it is wanted.
