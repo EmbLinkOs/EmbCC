@@ -257,6 +257,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
      * the compiler's code after the asm, whose first instructions would
      * then run conditionally. */
     tasm_reset();
+    tasm_set_arch(target_thumb_arch());
     if (tasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     if (tasm_open())

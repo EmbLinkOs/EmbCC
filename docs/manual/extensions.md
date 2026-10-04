@@ -57,7 +57,8 @@ lowered.
 EmbCC predefines `__EMBCC__` as `1`. A C translation unit does not define
 `__GNUC__`, `__GNUC_MINOR__` or `__clang__`, so a header that enables GNU
 features under `#ifdef __GNUC__` takes its other path when compiled by
-EmbCC. A C++ translation unit presents itself as g++ 16.2; see
+EmbCC, unless `-fgnuc-version=` asks for them (CMSIS needs that; see
+[Invoking](invoking.md#-fgnuc-versionmajorminorpatch)). A C++ translation unit presents itself as g++ 16.2; see
 [C++](cxx.md#compiler-identity).
 
 To test for a feature, use the [feature-test

@@ -987,10 +987,15 @@ found). The inline-assembly vocabulary of each target is listed in
 
 The assembler follows GNU as for each target:
 
-- **Comments.** `#` starts a comment, except on ARM and AArch64, where it
-  is an immediate's prefix (`mov r0, #1`) and starts a comment only as a
-  line's first character. `@` is ARM's comment character and `;` AVR's;
-  `//` works everywhere.
+- **Comments.** `/* ... */` anywhere; `#` starts a comment, except on
+  ARM and AArch64, where it is an immediate's prefix (`mov r0, #1`) and
+  starts a comment only as a line's first character. `@` is ARM's comment
+  character and `;` AVR's (elsewhere `;` separates statements); `//`
+  works everywhere.
+- **Macros and expressions.** `.macro`, `.rept`, `.irp`, the `.if`
+  family, `.include`, `.equ`/`.set`/`.thumb_set`, named sections with
+  flags, and GNU as's expressions; the full list is in
+  [embas](tools/embas.md#gnu-syntax-assembly).
 - **Alignment.** `.align N` and `.p2align N` align to 2^N bytes, and
   `.balign N` to N bytes. Padding in code is the target's no-op
   instruction, and zero bytes in data.
@@ -998,9 +1003,8 @@ The assembler follows GNU as for each target:
   barrier option or floating-point register on ARM, and a CSR name or a
   fence set on RISC-V, is an operand and never a symbol.
 - **Symbols.** On ARM, a symbol is reached by `bl sym`, `b sym`,
-  `ldr rd, =sym` (assembled as `movw`/`movt` with `R_ARM_THM_MOVW_ABS_NC`
-  and `R_ARM_THM_MOVT_ABS`), `movw rd, #:lower16:sym`,
-  `movt rd, #:upper16:sym` and `.word sym`. `ldr rd, label` loads a word
+  `ldr rd, =sym` (a load from the literal pool, as GNU as makes it),
+  `movw rd, #:lower16:sym`, `movt rd, #:upper16:sym` and `.word sym`. `ldr rd, label` loads a word
   from a label defined in the same file. `.thumb_func`, or
   `.type sym, %function`, makes a label a Thumb function: its symbol
   carries the interworking bit, which a vector table entry needs. A symbol
@@ -1188,6 +1192,18 @@ a frame pointer; the ARM, RISC-V and AVR backends never use one.
 
 Accepted. EmbCC does not generate code that calls through a procedure
 linkage table.
+
+### `-fgnuc-version=MAJOR[.MINOR[.PATCH]]`
+
+Define `__GNUC__`, `__GNUC_MINOR__`, `__GNUC_PATCHLEVEL__` and
+`__GNUC_STDC_INLINE__` in a C unit, as that version of GCC, the way clang
+does by default. EmbCC does not by default, because a header that sees
+`__GNUC__` may take paths that need GCC itself. Vendor headers that pick
+their compiler support by it need it: CMSIS's `cmsis_compiler.h` stops at
+`#error Unknown compiler` without it, and compiles with
+`-fgnuc-version=4.2.1` (see [Embedded programming](embedded.md#cmsis-and-vendor-files)).
+`0` leaves the macros undefined. A C++ unit always presents itself as
+g++ (see [C++](cxx.md#compiler-identity)).
 
 ### `-ffunction-sections`, `-fdata-sections`
 

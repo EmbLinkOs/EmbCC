@@ -66,4 +66,13 @@ int tasm_symform(const char *stmt, struct asm_symform *f);
  * themselves: an entry added here cannot escape the referee. */
 void tasm_vocabulary(FILE *f);
 
+/* Branch relaxation for the file assembler: force the wide form for the
+ * next statement, and ask whether a branch went wide on its own. */
+void tasm_set_wide(int wide);
+int tasm_took_wide(void);
+
+/* The architecture level the next statements are for: 7 (ARMv7-M) or 8
+ * (ARMv8-M Mainline), which adds the stack-limit registers. */
+void tasm_set_arch(int level);
+
 #endif

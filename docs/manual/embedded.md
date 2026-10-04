@@ -514,6 +514,29 @@ RISC-V option and is refused here:
 embld: -Tstack is a RISC-V option: every other target here starts with a stack pointer already set (a Cortex-M reads its own from the vector table)
 ```
 
+### CMSIS and vendor files
+
+A Cortex-M project's vendor files build unmodified: ARM's CMSIS-Core
+headers (`core_cm4.h`, `cmsis_gcc.h` and their intrinsics), a vendor's
+device header and `system_*.c`, its GNU-syntax startup file, and a
+CubeMX-style linker script. CMSIS chooses its compiler support by
+`__GNUC__`, so compile the C with `-fgnuc-version=4.2.1`:
+
+```sh
+CF="-O2 -ICMSIS/Core/Include -Icmsis-device-f4/Include -DSTM32F405xx -fgnuc-version=4.2.1"
+embcc --target=thumbv7em-none-eabi $CF -c system_stm32f4xx.c -o system.o
+embcc --target=thumbv7em-none-eabi $CF -c main.c -o main.o
+embcc --target=thumbv7em-none-eabi -c startup_stm32f405xx.s -o startup.o
+embcc --target=thumbv7em-none-eabi -T STM32F405RGTx_FLASH.ld \
+      startup.o system.o main.o -o fw.elf
+qemu-system-arm -M netduinoplus2 -nographic -kernel fw.elf
+```
+
+`tests/golden/cmsis-stm32f4.sh` builds that from ST's startup and system
+files as they ship, with a linker script in CubeMX's shape, and runs it
+on QEMU's netduinoplus2 (an STM32F405) with SysTick interrupts, when ARM's
+CMSIS_5 and ST's cmsis-device-f4 are cloned under `~/EmbRef`.
+
 ### Stopping and printing under a debugger or emulator
 
 `bkpt` is in the inline-assembly vocabulary, so ARM semihosting works.

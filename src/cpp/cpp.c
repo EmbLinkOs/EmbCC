@@ -893,6 +893,20 @@ void cpp_cmdline_define(const char *text, int undef)
     ncmdline_defs++;
 }
 
+/* -fgnuc-version=MAJOR[.MINOR[.PATCH]]: a C unit presents itself as that
+ * GCC, as clang does by default and EmbCC only when asked. Vendor headers
+ * choose their compiler-support file by __GNUC__ -- CMSIS's
+ * cmsis_compiler.h stops at `#error Unknown compiler` without it -- and
+ * the build that passes this is saying the GNU paths in those headers
+ * are ones EmbCC can take. 0 (the default) defines nothing. */
+static int g_gnuc[3];
+void cpp_set_gnuc_version(int major, int minor, int patch)
+{
+    g_gnuc[0] = major;
+    g_gnuc[1] = minor;
+    g_gnuc[2] = patch;
+}
+
 void cpp_set_cxx_std(int year, int strict)
 {
     cxx_std = year;
@@ -2314,6 +2328,16 @@ char *cpp_process(const char *path, const char *src,
      * (FLT_TRUE_MIN) from its own <float.h>. */
     if (!predef_is_cxx())      /* C++ has __cplusplus instead */
         define_macro(&boot, "__STDC_VERSION__ 201710L");
+    if (!predef_is_cxx() && g_gnuc[0] > 0) {
+        char m[64];
+        snprintf(m, sizeof m, "__GNUC__ %d", g_gnuc[0]);
+        define_macro(&boot, m);
+        snprintf(m, sizeof m, "__GNUC_MINOR__ %d", g_gnuc[1]);
+        define_macro(&boot, m);
+        snprintf(m, sizeof m, "__GNUC_PATCHLEVEL__ %d", g_gnuc[2]);
+        define_macro(&boot, m);
+        define_macro(&boot, "__GNUC_STDC_INLINE__ 1");
+    }
     define_macro(&boot, "__STDC_HOSTED__ 1");
     if (predef_is_cxx()) {
         /* the C++ features EmbCC implements (docs/manual/cxx.md): each one

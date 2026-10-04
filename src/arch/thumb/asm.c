@@ -26,20 +26,23 @@ static const char *const reg_name[16] = {
     "r8", "r9", "r10", "r11", "r12", "sp", "lr", "pc"
 };
 
+static int same_nocase(const char *a, const char *b, int len);
+
 int tasm_gpr(const char *name, int len)
 {
     if (len <= 0)
         return -1;
+    /* (in either case, as GNU as reads them: `R0`, `SP`, `LR`) */
     for (int i = 0; i < 16; i++)
         if ((int)strlen(reg_name[i]) == len &&
-            strncmp(name, reg_name[i], (size_t)len) == 0)
+            same_nocase(name, reg_name[i], len))
             return i;
     /* The alternate spellings hand-written asm uses. */
-    if (len == 2 && strncmp(name, "ip", 2) == 0) return 12;
-    if (len == 2 && strncmp(name, "fp", 2) == 0) return 11;
-    if (len == 3 && strncmp(name, "r13", 3) == 0) return 13;
-    if (len == 3 && strncmp(name, "r14", 3) == 0) return 14;
-    if (len == 3 && strncmp(name, "r15", 3) == 0) return 15;
+    if (len == 2 && same_nocase(name, "ip", 2)) return 12;
+    if (len == 2 && same_nocase(name, "fp", 2)) return 11;
+    if (len == 3 && same_nocase(name, "r13", 3)) return 13;
+    if (len == 3 && same_nocase(name, "r14", 3)) return 14;
+    if (len == 3 && same_nocase(name, "r15", 3)) return 15;
     return -1;
 }
 
@@ -77,11 +80,33 @@ static int same_nocase(const char *a, const char *b, int len)
     return 1;
 }
 
+/* ARMv8-M's: the stack limits, and with the Security Extension the
+ * Non-secure copies a Secure handler reaches across (SYSm bit 7). An
+ * ARMv7-M part has none of them, so they are names only there. */
+static const struct sysreg sysregs_v8m[] = {
+    { "msplim", 10 }, { "psplim", 11 },
+    { "msp_ns", 0x88 }, { "psp_ns", 0x89 },
+    { "msplim_ns", 0x8a }, { "psplim_ns", 0x8b },
+    { "primask_ns", 0x90 }, { "basepri_ns", 0x91 },
+    { "faultmask_ns", 0x93 }, { "control_ns", 0x94 }, { "sp_ns", 0x98 },
+    { NULL, 0 }
+};
+
+/* The architecture level the statements are for, 7 or 8: told by the
+ * caller (the file assembler, inline asm in irgen) rather than asked of
+ * the target, so the encoder links on its own (tools/tasmcheck). */
+static int g_arch = 7;
+void tasm_set_arch(int level) { g_arch = level; }
+
 static int sysreg_num(const char *s, int len)
 {
     for (const struct sysreg *r = sysregs; r->name; r++)
         if ((int)strlen(r->name) == len && same_nocase(s, r->name, len))
             return r->sysm;
+    if (g_arch >= 8)
+        for (const struct sysreg *r = sysregs_v8m; r->name; r++)
+            if ((int)strlen(r->name) == len && same_nocase(s, r->name, len))
+                return r->sysm;
     return -1;
 }
 
@@ -131,7 +156,7 @@ static int mnemonic_is(const struct tok *t, const char *name)
 
 static int tok_is(const struct tok *t, const char *s)
 {
-    return (int)strlen(s) == t->len && strncmp(t->s, s, (size_t)t->len) == 0;
+    return (int)strlen(s) == t->len && same_nocase(t->s, s, t->len);
 }
 
 static int tok_reg(const struct tok *t) { return tasm_gpr(t->s, t->len); }
@@ -191,6 +216,44 @@ static int tok_mem(const struct tok *t, int *reg, long *off)
         return 0;
     if (n >= 2 && !tok_imm(&inner[1], off))
         return 0;
+    return 1;
+}
+
+/* `[rn, rm]` or `[rn, rm, lsl #k]`, k 0..3: a register offset. */
+static int tok_mem_reg(const struct tok *t, int *rn, int *rm, int *shift)
+{
+    struct tok inner[4];
+    int n;
+    long k = 0;
+    if (t->len < 3 || t->s[0] != '[' || t->s[t->len - 1] != ']')
+        return 0;
+    n = split(t->s + 1, t->len - 2, inner, 4);
+    if (n < 2 || n > 4)
+        return 0;
+    *rn = tok_reg(&inner[0]);
+    *rm = tok_reg(&inner[1]);
+    if (*rn < 0 || *rm < 0)
+        return 0;
+    if (n >= 3) {
+        /* `lsl #k`, as one token or as two */
+        struct tok sh = inner[2], amt;
+        if (sh.len < 3 || strncmp(sh.s, "lsl", 3))
+            return 0;
+        if (n == 4) {
+            if (sh.len != 3)
+                return 0;
+            amt = inner[3];
+        } else {
+            if (sh.len < 5 || !isspace((unsigned char)sh.s[3]))
+                return 0;
+            amt.s = sh.s + 4;
+            amt.len = sh.len - 4;
+            while (amt.len && isspace((unsigned char)*amt.s)) { amt.s++; amt.len--; }
+        }
+        if (!tok_imm(&amt, &k) || k < 0 || k > 3)
+            return 0;
+    }
+    *shift = (int)k;
     return 1;
 }
 
@@ -326,6 +389,53 @@ static struct { int cond[4]; int n, at; } g_it;
 void tasm_reset(void) { g_it.n = g_it.at = 0; }
 int tasm_open(void) { return g_it.at < g_it.n; }
 
+/* Branch relaxation, driven by the file assembler (src/as/gas.c): a
+ * branch is assembled narrow when its displacement fits, unless the file
+ * assembler has said this statement must be wide; and it reports when a
+ * branch went wide on its own, so that statement stays wide in every
+ * later pass and the layout settles. Inline asm never sets either. */
+static int g_force_wide = 1, g_went_wide;   /* wide unless gas.c relaxes */
+void tasm_set_wide(int wide) { g_force_wide = wide; }
+int tasm_took_wide(void) { int w = g_went_wide; g_went_wide = 0; return w; }
+
+/* A branch to `at + v`: narrow if allowed and it fits, else wide. `cond`
+ * is -1 for an unconditional one. `want` is 'w' or 'n' for an explicit
+ * `.w`/`.n` suffix, else 0. */
+static int t_branch_relaxed(struct code *out, int cond, long v, int want,
+                            char *err, int errlen)
+{
+    int at;
+    if (want != 'w' && !g_force_wide) {
+        struct code probe = { 0 };
+        int ok;
+        at = cond < 0 ? t_b16(&probe) : t_bcond16(&probe, cond);
+        ok = cond < 0 ? t_patch_b16(&probe, at, at + (int)v)
+                      : t_patch_bcond16(&probe, at, at + (int)v);
+        if (ok) {
+            for (int k = 0; k < probe.len; k++)
+                code_byte(out, probe.p[k]);
+            free(probe.p);
+            return 0;
+        }
+        free(probe.p);
+        if (want == 'n') {
+            snprintf(err, (size_t)errlen, "the branch is %ld bytes away, "
+                     "beyond the narrow form's reach", v);
+            return -1;
+        }
+    }
+    if (want != 'w' && !g_force_wide)
+        g_went_wide = 1;
+    if (cond < 0) {
+        at = t_b(out);
+        t_patch_b(out, at, at + (int)v);
+    } else {
+        at = t_bcond(out, cond);
+        t_patch_bcond(out, at, at + (int)v);
+    }
+    return 0;
+}
+
 /* ---- the instruction table ---------------------------------------------- */
 
 /* `s` is the flag-setting suffix, and it is a separate column rather
@@ -406,7 +516,11 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         }
     }
     if (tasm_open()) {
-        int want = g_it.cond[g_it.at], mlen = t[0].len, wlen = 0, c, r;
+        /* the slot is taken whatever happens below, so one bad
+         * instruction is reported once and not again, as the wrong
+         * condition, on every instruction after it */
+        int slot = g_it.at++;
+        int want = g_it.cond[slot], mlen = t[0].len, wlen = 0, c, r;
         char buf[256];
         /* the width suffix follows the condition: `addeq.w` */
         if (mlen > 2 && t[0].s[mlen - 2] == '.') { wlen = 2; mlen -= 2; }
@@ -421,15 +535,21 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                 "sbcs", "rsbs", "lsls", "lsrs", "asrs", "rors", "movs",
                 "mvns", "muls", "b", "bl", "cbz", "cbnz", NULL
             };
+            /* B<c> and BL<c> may END an IT block: the condition is the
+             * block's, and the branch takes its unconditional encoding --
+             * the shape of a copy loop's `bge` after `ittt ge`. */
+            int last = slot + 1 == g_it.n;
             for (int k = 0; refused[k]; k++)
                 if ((int)strlen(refused[k]) == mlen &&
-                    strncmp(t[0].s, refused[k], (size_t)mlen) == 0)
+                    strncmp(t[0].s, refused[k], (size_t)mlen) == 0 &&
+                    !(last && (!strcmp(refused[k], "b") ||
+                               !strcmp(refused[k], "bl"))))
                     FAIL("\"%.*s\" is not supported inside an IT block: "
                          "%s", t[0].len, t[0].s,
                          refused[k][0] == 'b' || refused[k][0] == 'c'
                          ? "a branch there needs the unconditional encoding"
                          : "its 16-bit encoding sets no flags there");
-            if (g_it.at + 1 < g_it.n &&
+            if (slot + 1 < g_it.n &&
                 ((mlen == 2 && strncmp(t[0].s, "bx", 2) == 0) ||
                  (mlen == 3 && strncmp(t[0].s, "blx", 3) == 0)))
                 FAIL("a branch must be the last instruction of its IT block");
@@ -437,10 +557,12 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         snprintf(buf, sizeof buf, "%.*s%.*s%.*s", mlen, t[0].s, wlen,
                  t[0].s + t[0].len - wlen,
                  (int)(stmt + len - (t[0].s + t[0].len)), t[0].s + t[0].len);
-        g_it.at++;
         {
             int save_n = g_it.n, save_at = g_it.at;
             g_it.n = g_it.at = 0;       /* the inner call is outside it */
+            /* (the block has moved on whether this one assembled or not,
+             * so one bad instruction is reported once, not again as the
+             * wrong condition on every instruction after it) */
             r = one_stmt(buf, (int)strlen(buf), out, err, errlen);
             g_it.n = save_n;
             g_it.at = save_at;
@@ -470,7 +592,11 @@ static int one_stmt(const char *stmt, int len, struct code *out,
      * silently. */
     if (mnemonic_is(&t[0], "dsb") || mnemonic_is(&t[0], "dmb") ||
         mnemonic_is(&t[0], "isb")) {
-        if (n != 2 || !tok_is(&t[1], "sy"))
+        long opt = -1;
+        /* `sy` by name, or its number 0xF, as CMSIS's __ISB writes it */
+        if (n == 2 && !tok_is(&t[1], "sy") && !tok_imm(&t[1], &opt))
+            opt = -1;
+        if (n != 2 || (!tok_is(&t[1], "sy") && opt != 15))
             FAIL("only the `sy` barrier option is supported; \"%.*s\" is not",
                  t[1].len, t[1].s);
         t_barrier(out, mnemonic_is(&t[0], "dsb") ? T_BAR_DSB :
@@ -623,9 +749,17 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                 t_movw_movt(out, rd, ((unsigned long)imm >> 16) & 0xffffu, 1);
                 return 0;
             }
-            if (!tok_mem(&t[2], &base, &off))
-                FAIL("\"%.*s\" is not a [reg] or [reg, #off] address",
-                     t[2].len, t[2].s);
+            if (!tok_mem(&t[2], &base, &off)) {
+                int rn, rm, sh;
+                if (!tok_mem_reg(&t[2], &rn, &rm, &sh))
+                    FAIL("\"%.*s\" is not a [reg], [reg, #off] or [reg, "
+                         "reg{, lsl #n}] address", t[2].len, t[2].s);
+                if (rm == 13 || rm == 15 || rn == 15)
+                    FAIL("\"%.*s\": sp and pc cannot be the offset register",
+                         t[2].len, t[2].s);
+                t_ldst_reg(out, rd, rn, rm, sh, e->size, e->sign, e->store);
+                return 0;
+            }
             /* [pc, #off]: a literal, from Align(pc, 4) as the
              * architecture reads it. Words only. */
             if (base == 15) {
@@ -741,28 +875,28 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             { "bge", T_GE }, { "blt", T_LT }, { "bgt", T_GT },
             { "ble", T_LE }
         };
-        for (unsigned k = 0; k < sizeof bc / sizeof bc[0]; k++)
-            if (mnemonic_is(&t[0], bc[k].name)) {
-                long v;
-                int at;
-                if (n != 2 || !tok_imm(&t[1], &v))
-                    FAIL("%s wants a branch offset", bc[k].name);
-                if (v & 1) FAIL("%s offset %ld is odd", bc[k].name, v);
-                at = t_bcond(out, bc[k].cond);
-                /* t_patch_bcond takes a TARGET offset within the code
-                 * buffer; `at + v` is where the displacement points. */
-                t_patch_bcond(out, at, at + (int)v);
-                return 0;
-            }
+        for (unsigned k = 0; k < sizeof bc / sizeof bc[0]; k++) {
+            size_t bl = strlen(bc[k].name);
+            int want = 0;
+            if ((size_t)t[0].len == bl + 2 && !strncmp(t[0].s, bc[k].name, bl) &&
+                t[0].s[bl] == '.' && (t[0].s[bl + 1] == 'w' || t[0].s[bl + 1] == 'n'))
+                want = t[0].s[bl + 1];
+            else if (!mnemonic_is(&t[0], bc[k].name))
+                continue;
+            long v;
+            if (n != 2 || !tok_imm(&t[1], &v))
+                FAIL("%s wants a branch offset", bc[k].name);
+            if (v & 1) FAIL("%s offset %ld is odd", bc[k].name, v);
+            return t_branch_relaxed(out, bc[k].cond, v, want, err, errlen);
+        }
     }
-    if (mnemonic_is(&t[0], "b") && n == 2) {
+    if ((mnemonic_is(&t[0], "b") || mnemonic_is(&t[0], "b.w") ||
+         mnemonic_is(&t[0], "b.n")) && n == 2) {
         long v;
-        int at;
         if (!tok_imm(&t[1], &v)) FAIL("b wants a branch offset");
         if (v & 1) FAIL("b offset %ld is odd", v);
-        at = t_b(out);
-        t_patch_b(out, at, at + (int)v);
-        return 0;
+        return t_branch_relaxed(out, -1, v,
+                                t[0].len == 3 ? t[0].s[2] : 0, err, errlen);
     }
     if (mnemonic_is(&t[0], "bl") && n == 2) {
         long v;
@@ -895,6 +1029,35 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         return 0;
     }
 
+    /* `subs r3, #4`, `adds r4, #12`, `lsls r2, #2`, `orr r0, r1`: GNU
+     * as's two-operand forms, the destination doubling as the first
+     * source. Rewritten to three operands and assembled as those. */
+    if (n == 3) {
+        int is_alu = 0;
+        for (const struct alu_ent *e = alu_tab; e->name && !is_alu; e++)
+            if (mnemonic_is(&t[0], e->name)) is_alu = 1;
+        for (const struct sh_ent *e = sh_tab; e->name && !is_alu; e++)
+            if (mnemonic_is(&t[0], e->name)) is_alu = 1;
+        /* `adds rdn, #imm8` / `subs rdn, #imm8`: the two-byte form with
+         * an eight-bit immediate, which is what GNU as picks for this
+         * spelling (the three-operand one takes only three bits) */
+        if (is_alu && tok_reg(&t[1]) >= 0 && tok_reg(&t[1]) <= 7 &&
+            (mnemonic_is(&t[0], "adds") || mnemonic_is(&t[0], "subs")) &&
+            tok_imm(&t[2], &imm) && imm >= 0 && imm <= 255) {
+            unsigned h = (mnemonic_is(&t[0], "adds") ? 0x3000u : 0x3800u) |
+                         (unsigned)(tok_reg(&t[1]) << 8) | (unsigned)imm;
+            code_byte(out, (unsigned char)(h & 0xff));
+            code_byte(out, (unsigned char)(h >> 8));
+            return 0;
+        }
+        if (is_alu && tok_reg(&t[1]) >= 0) {
+            char buf[256];
+            snprintf(buf, sizeof buf, "%.*s %.*s, %.*s, %.*s", t[0].len,
+                     t[0].s, t[1].len, t[1].s, t[1].len, t[1].s, t[2].len,
+                     t[2].s);
+            return one_stmt(buf, (int)strlen(buf), out, err, errlen);
+        }
+    }
     FAIL("asm instruction \"%.*s\" is not in the ARMv7-M vocabulary",
          t[0].len, t[0].s);
 }
@@ -915,8 +1078,26 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
                 len = i;
                 break;
             }
-        if (one_stmt(start, len, out, err, errlen) != 0)
-            return -1;
+        /* Mnemonics are not case-sensitive in GNU as -- CMSIS writes
+         * `MRS %0, primask` -- so the statement's first word is taken in
+         * lower case; operands keep theirs (a symbol's case matters). */
+        {
+            char buf[512];
+            int k = 0, r;
+            if (len >= (int)sizeof buf) {
+                r = one_stmt(start, len, out, err, errlen);
+            } else {
+                memcpy(buf, start, (size_t)len);
+                while (k < len && isspace((unsigned char)buf[k])) k++;
+                while (k < len && !isspace((unsigned char)buf[k])) {
+                    buf[k] = (char)tolower((unsigned char)buf[k]);
+                    k++;
+                }
+                r = one_stmt(buf, len, out, err, errlen);
+            }
+            if (r != 0)
+                return -1;
+        }
         if (*p)
             p++;
     }
@@ -938,6 +1119,11 @@ int tasm_is_word(const char *stmt, const char *w, int wlen)
     while (isspace((unsigned char)*m)) m++;
     for (mlen = 0; m[mlen] && !isspace((unsigned char)m[mlen]); mlen++) {}
     if (sreg(w, wlen) >= 0 || (wlen == 5 && same_nocase(w, "fpscr", 5)))
+        return 1;
+    /* a shift inside an operand: `[r1, r2, lsl #2]`, `r3, lsr #4` */
+    if ((wlen == 3 && (same_nocase(w, "lsl", 3) || same_nocase(w, "lsr", 3) ||
+                       same_nocase(w, "asr", 3) || same_nocase(w, "ror", 3) ||
+                       same_nocase(w, "rrx", 3))))
         return 1;
     if ((mlen >= 3 && (strncmp(m, "mrs", 3) == 0 || strncmp(m, "msr", 3) == 0))
         && sysreg_num(w, wlen) >= 0)

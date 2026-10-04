@@ -313,6 +313,11 @@ int t_cbz(struct code *c, int nonzero, int rn);
 int t_patch_cbz(struct code *c, int at, int target);
 int t_patch_bcond16(struct code *c, int at, int target);
 int t_patch_b16(struct code *c, int at, int target);
+/* LDR (literal) T1, two bytes; 0 when rt or off does not fit it. */
+int t_ldr_lit16(struct code *c, int rt, long off);
+/* An assembly file's `ldr rd, =v` without a literal (mov.w, mvn.w,
+ * movw); 0 when it needs one. */
+int t_ldr_const(struct code *c, int rd, unsigned long v);
 void t_vcvt_f_from_i(struct code *c, int d, int m, int sgn, int dbl);
 void t_vcvt_i_from_f(struct code *c, int d, int m, int sgn, int dbl);
 void t_vldst(struct code *c, int sd, int rn, int off, int dbl, int store);
