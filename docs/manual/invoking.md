@@ -26,7 +26,9 @@ An option that is in none of these lists stops the driver with
 ## Synopsis
 
 ```text
-embcc [OPTION...] FILE                     compile and link (x86-64 ELF only)
+embcc [OPTION...] [FILE] [OBJECT|ARCHIVE|-lLIB...]
+                                           compile and link (x86-64 ELF; ARM,
+                                           RISC-V and AVR firmware with -T)
 embcc -c [OPTION...] FILE [-o OBJECT]      compile or assemble to an object
 embcc -S [OPTION...] FILE [-o FILE.s]      write assembly
 embcc -E [OPTION...] FILE                  preprocess to standard output
@@ -38,9 +40,9 @@ embcc --print-search-dirs | --explain [ID]
 embcc --emit-empty-object FILE
 ```
 
-EmbCC compiles exactly one input file per invocation. A second input file
-is refused with `embcc: error: more than one input file (M1: one file at a
-time)`. A command line with no input file and none of the query options
+EmbCC compiles at most one source file per invocation, and links any
+number of objects, archives and `-l` libraries with it. A second source
+is refused with `embcc: error: more than one source file`. A command line with no input file and none of the query options
 ends with `embcc: error: no input file`. Running `embcc` with no arguments
 prints the usage line and exits with status 1.
 
@@ -87,9 +89,15 @@ The driver decides what to do with the input file from its suffix, unless
 | `.S` | GNU-syntax assembly, preprocessed first |
 | `.asm` | NASM/Intel-syntax x86-64 assembly (the [`embas`](tools/embas.md) assembler) |
 | `.ir` | EmbIR text; meaningful only to [`embcc inspect ir`](#embcc-inspect-stage-file-option) |
+| `.o` `.obj` `.a` | an object or an archive, handed to the link as it is |
 
-Anything else, including `.i`, `.h`, `.o` and `.a`, is not an input file
-to EmbCC. Without `-x` such an argument is refused as
+One command compiles at most one source; any number of objects, archives
+and `-l` libraries may go with it to the link. Two sources are refused
+with `embcc: error: more than one source file ('a.c' and 'b.c'): one
+command compiles one; compile each with -c and link the objects`.
+
+Anything else, including `.i` and `.h`, is not an input file to EmbCC.
+Without `-x` such an argument is refused as
 `embcc: error: unknown argument 'NAME'`. EmbCC does not read source from
 standard input; `-` is not accepted as a file name.
 
@@ -97,12 +105,15 @@ What happens to the input depends on the mode options:
 
 | Mode | Input | Result | Default output |
 |---|---|---|---|
-| none | C or C++ | compiled and linked (x86-64 ELF targets only) | `a.out` |
+| none | C or C++ | compiled and linked (x86-64 ELF, and ARM, RISC-V and AVR firmware with a memory map) | `a.out` |
+| none | `.s` `.S` | assembled and linked, as above | `a.out` |
+| none | only objects, archives and `-l` | linked | `a.out` |
 | `-c` | C or C++ | relocatable object | the input's file name with its suffix replaced by `.o` |
 | `-S` | C or C++ | assembly text | the input's file name with its suffix replaced by `.s` |
 | `-E` | C, C++ or `.S` | preprocessed text | standard output |
 | `-fsyntax-only` | C or C++ | nothing; diagnostics only | none |
-| any | `.s` `.S` `.asm` | object | see [Assembler and linker options](#assembler-and-linker-options) |
+| `-c` | `.s` `.S` `.asm` | object | see [Assembler and linker options](#assembler-and-linker-options) |
+| any | `.asm` | object (NASM syntax is never linked by the driver) | see [Assembler and linker options](#assembler-and-linker-options) |
 
 As with GCC, a default output is written in the current directory, not
 next to the input: `embcc -c src/foo.c` writes `foo.o`, and
@@ -1037,32 +1048,47 @@ Without `-c`, `-S`, `-E` or `-fsyntax-only`, `embcc FILE -o OUT` compiles
 the file and links it in the same process with EmbCC's linker,
 [`embld`](tools/embld.md). This is available only for x86-64 ELF targets
 (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` and their aliases).
-For every other target the driver stops before compiling:
+For the firmware targets (ARMv7-M, ARMv8-M, RV32, RV64 and AVR) the
+driver links too, and the build supplies the memory map: a linker script
+with `-T FILE.ld` (ARM and RISC-V), or `-Wl,-Ttext=FLASH` and
+`-Wl,-Tdata=RAM`. There is no default map, because an image linked to a
+guessed one runs, wrongly:
 
 ```text
-embcc: error: cannot link for thumbv7m-none-eabi in one step: the driver links x86-64 ELF only
-embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
+embcc: error: linking a thumbv7em-none-eabi image needs its memory map: a linker script (-T FILE.ld), or -Wl,-Ttext=FLASH and -Wl,-Tdata=RAM
 ```
 
-For a target whose objects are Mach-O or COFF, the first line is
-`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and
-this target writes Mach-O` (or `COFF`), followed by the same second line.
+```sh
+embcc --target=thumbv7em-none-eabi -Os -c main.c -o main.o
+embcc --target=thumbv7em-none-eabi -T STM32F407VGTx_FLASH.ld \
+      startup.o main.o -o fw.elf
+```
 
-Compile with `-c`, then link the objects with `embld`, which links the ARM,
-RISC-V and AVR targets (see [Embedded programming](embedded.md)). `embld`
-does not read AArch64, Mach-O or COFF objects; link those with the
-platform's linker.
+`embld` does not read AArch64, Mach-O or COFF objects, and for those
+targets the driver stops with `embcc: error: cannot link for TRIPLE`; link
+them with the platform's linker.
 
-The link line is fixed. In order, it contains:
+The link line, in order:
 
-1. `crt1.o` from the target's library directory, if there is one;
+1. `crt1.o` from the target's library directory, for a hosted target
+   (not with `-nostdlib` or `-nostartfiles`; a firmware target has none,
+   because its startup is the program's own);
 2. the object just compiled (written to `OUT.embcc-tmp.o` beside the
    output and removed afterwards; when `embld` itself refuses the link,
    for an undefined symbol or an image over `--rom-limit`, the temporary
    object is left in place);
-3. `libcxx.a`, for a C++ input;
-4. `libc.a`, if the target has one;
-5. `librt.a`, the compiler runtime, if the target has one.
+3. the objects, archives and `-l` libraries of the command line, in
+   their order;
+4. `libcxx.a`, for a C++ input;
+5. `libc.a`, if the target has one (not with `-nostdlib` or
+   `-nodefaultlibs`);
+6. `librt.a`, the compiler runtime, if the target has one (likewise).
+
+`-lNAME` is `libNAME.a` in the first `-L` directory that has it. `-lc` and
+`-lm` name EmbCC's own `libc.a` (its math is in it) and `-lgcc` its
+`librt.a`, so a link line written for `arm-none-eabi-gcc` that says
+`-nostdlib ... -lc -lgcc` gets them. A library found nowhere is refused:
+`embcc: error: cannot find libnosys.a for -lnosys in any -L directory`.
 
 For `x86_64-linux-gnu` the result is a static executable with no
 dependence on another C library. A missing `crt1.o` or `libc.a` for that
@@ -1094,6 +1120,10 @@ option of the same name:
 | `--rom-limit N`, `--rom-limit=N` | refuse an image whose stored bytes exceed `N` |
 | `--lma-offset N`, `--lma-offset=N` | load each segment at its address minus `N` |
 | `-e SYM`, `--entry SYM`, `--entry=SYM` | the entry symbol (default `_start`) |
+| `-T FILE`, `-TFILE`, `--script=FILE` | the GNU ld linker script that lays the image out (ARM and RISC-V) |
+| `-L DIR` | a directory for `-l` and for the script's `INPUT`/`GROUP`/`INCLUDE` |
+| `-u SYM`, `--undefined=SYM` | treat `SYM` as referenced, so that an archive supplies it |
+| `--orphan-handling=place\|warn\|error` | what to do with a section the script places nowhere |
 | `-Tstack ADDR`, `-Tstack=ADDR` | passed on, and refused by `embld` for x86-64: `embld: -Tstack is a RISC-V option: ...` |
 
 These are accepted and change nothing, because nothing in an image
@@ -1113,19 +1143,23 @@ embcc: error: linker option '-T' is not one EmbLD has (it takes -e, -Ttext, -Tda
 This covers linker scripts (`-T`), `--section-start`, `-Map`, `-zKEYWORD`
 written as one word, and `-z` with any other keyword.
 
-### Linker options that are not accepted
+### Linker options
 
-Apart from [`-Wl,` and `-Xlinker`](#-wlargs--xlinker-arg), the driver
-takes no linker options:
+Besides [`-Wl,` and `-Xlinker`](#-wlargs--xlinker-arg), the driver takes
+gcc's own link options:
 
 | Option | What happens |
 |---|---|
-| `-l LIB`, `-L DIR`, `-nostdlib`, `-nostartfiles`, `-nodefaultlibs`, `-static`, `-pthread`, `-T SCRIPT`, `-e SYM`, `-rdynamic`, `-no-pie` | unknown argument |
+| `-lNAME`, `-l NAME` | link `libNAME.a` from the `-L` directories, at its place on the line |
+| `-LDIR`, `-L DIR` | search `DIR` for `-l` libraries |
+| `-T FILE` | link with the GNU ld linker script `FILE` (ARM and RISC-V) |
+| `-e SYM`, `-u SYM` | the entry symbol; a symbol to treat as referenced |
+| `-nostdlib` | no `crt1.o`, `libc.a` or `librt.a` |
+| `-nodefaultlibs` | no `libc.a` or `librt.a` |
+| `-nostartfiles` | no `crt1.o` |
+| `-static` | accepted: every image EmbLD writes is static |
+| `-pthread`, `-rdynamic`, `-no-pie` | unknown argument |
 | `-shared`, `-static-pie` | refused: `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
-| object files and archives as inputs | unknown argument |
-
-`-e` reaches the linker as `-Wl,-e,SYM`. To link several objects or add
-libraries, run [`embld`](tools/embld.md) directly.
 
 ## Code generation options
 

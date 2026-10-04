@@ -46,7 +46,7 @@ EmbCC 1.0.0-m2.complete — C compiler for EmbLinkOS, target x86_64-elf
 
 | Program | What it does | Reference |
 |---|---|---|
-| `embcc` | The compiler driver. Preprocesses, compiles C and C++, assembles `.s`, `.S` and `.asm` files, writes ELF, Mach-O or COFF objects with DWARF debug information, and links x86-64 ELF programs with the linker built into it. | [Invoking EmbCC](invoking.md) |
+| `embcc` | The compiler driver. Preprocesses, compiles C and C++, assembles `.s`, `.S` and `.asm` files, writes ELF, Mach-O or COFF objects with DWARF debug information, and links x86-64 ELF programs and ARM, RISC-V and AVR firmware with the linker built into it. | [Invoking EmbCC](invoking.md) |
 | `embas` | The standalone assembler for x86-64 in NASM (Intel) syntax. Writes ELF64 objects. `embcc -c FILE.asm` runs the same assembler. | [embas](tools/embas.md) |
 | `embld` | The static linker. Links ELF objects and archives for x86-64, Cortex-M, RV32, RV64 and AVR into an ELF executable, or, with `--embx`, into an EMBX image for EmbLinkOS. `embld --doctor` explains why a link fails. | [embld](tools/embld.md) |
 | `embread` | Prints an EMBX image and checks it against the rules the EmbLinkOS loader applies. | [embread](tools/embread.md) |
@@ -96,20 +96,17 @@ the file depends on the file name suffix (see
 
 Without `-c`, `-S` or `-E`, `embcc` compiles the file and then links it
 in the same process, adding the target's start-up file and libraries.
-The driver links only for the x86-64 ELF targets (`x86_64-elf`,
-`x86_64-emblink`, `x86_64-linux-gnu`). For any other ELF target it
-stops:
+The driver links the x86-64 ELF targets, and ARM, RISC-V and AVR
+firmware given its memory map (`-T board.ld`, or `-Wl,-Ttext`/`-Tdata`):
 
 ```text
-embcc: error: cannot link for thumbv7m-none-eabi in one step: the driver links x86-64 ELF only
-embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
+embcc --target=thumbv7em-none-eabi -T board.ld startup.o main.o -o fw.elf
 ```
 
-For macOS and Windows the first line reads
-`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and this target writes Mach-O`
-(or `COFF`). Compile with `-c` and link separately: with `embld` for
-Cortex-M, RISC-V and AVR, and with another toolchain's linker for
-AArch64, macOS and Windows, which `embld` does not link.
+For AArch64 ELF, macOS and Windows targets it stops with
+`embcc: error: cannot link for TRIPLE`; compile those with `-c` and link
+with another toolchain's linker, because `embld` does not read their
+objects.
 
 `embcc inspect STAGE FILE` prints one stage of this pipeline (tokens,
 preprocessed source, syntax tree, symbols, struct layout, EmbIR, control

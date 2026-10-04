@@ -362,11 +362,10 @@ libc-linux-x86_64` and linked automatically. On `x86_64-elf`, link
 
 ### Limitations
 
-- `embcc` without `-c` can link only for the ELF x86-64 triples. For
-  every other target it stops with `embcc: error: cannot link for TRIPLE
-  in one step: the driver links x86-64 ELF only` (for macOS and Windows,
-  `embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and
-  this target writes Mach-O` or `COFF`); compile with `-c` and link
+- `embcc` without `-c` links the ELF x86-64 triples, and the ARM, RISC-V
+  and AVR firmware targets given a memory map (`-T` or
+  `-Wl,-Ttext`/`-Tdata`). For AArch64 ELF, macOS and Windows it stops with
+  `embcc: error: cannot link for TRIPLE`; compile with `-c` and link
   separately. See [Linking](invoking.md#linking).
 - `__thread` uses the local-exec model only (`R_X86_64_TPOFF32`), which
   is correct in a statically linked executable.

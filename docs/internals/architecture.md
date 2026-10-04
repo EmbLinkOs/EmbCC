@@ -248,18 +248,21 @@ The driver dispatches on the input's suffix before the C pipeline runs:
 | `FILE.asm` | `as_assemble` in `src/arch/x86_64/as.c` | NASM syntax, x86-64 only; the same code as `embas` |
 | `FILE.ir` | `ir_parse` in `src/ir/irparse.c` | with `embcc inspect ir` only |
 
-`embcc` takes one input file per invocation. A second one is refused
-with `embcc: error: more than one input file (M1: one file at a time)`,
-and an object file is not an input (`embcc: error: unknown argument
-'a.o'`). A program of several files is compiled one file at a time with
-`-c` and linked with `embld`.
+`embcc` compiles one source per invocation; a second is refused (`embcc:
+error: more than one source file`), because the compiler's state is
+per-process and a second compile in the same process is not supported.
+Objects, archives and `-l` libraries go to the link as they are, so a
+program of several files is compiled one file at a time with `-c` and
+linked with `embcc a.o b.o -o OUT` (or `embld`).
 
 ### Linking
 
 Without `-c`, `compile_and_link` compiles the input to a temporary
 object beside the output (`OUT.embcc-tmp.o`) and calls `embld_link` in
-the same process with, in order: `crt1.o`, the object, `libcxx.a` for a
-C++ input, `libc.a`, and `librt.a`. The files are found through
+the same process with, in order: `crt1.o` (hosted targets), the object,
+the command line's objects, archives and `-l` libraries, `libcxx.a` for a
+C++ input, `libc.a`, and `librt.a` (`-nostdlib`, `-nodefaultlibs` and
+`-nostartfiles` leave them out). The files are found through
 `paths_target_file` (`src/driver/paths.c`), relative to the `embcc`
 binary. A hosted target refuses to link without its `crt1.o` and
 `libc.a`; a C++ input refuses to link without `libcxx.a`. The link
@@ -268,18 +271,13 @@ options are those `-Wl,` and `-Xlinker` gave (`apply_wl`): EmbLD's own
 are applied, options that change nothing about the image are accepted,
 and any other is refused ([EmbLD](linker.md#the-drivers-link)).
 
-The in-process link is done only for x86-64 targets with ELF output
-(`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` and their aliases).
-Every other target is refused by name, before anything is compiled:
-
-```text
-embcc: error: cannot link for aarch64-elf in one step: the driver links x86-64 ELF only
-embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
-```
-
-A Mach-O or COFF target gets
-`embcc: error: cannot link for TRIPLE: the driver links x86-64 ELF, and this target writes Mach-O`
-(or `COFF`) as the first line.
+The driver links x86-64 ELF programs and, for the firmware targets
+(ARMv7-M, ARMv8-M, RV32, RV64, AVR), images whose memory map the build
+gives: a linker script (`-T`, ARM and RISC-V) or `-Wl,-Ttext`/`-Tdata`.
+A firmware link without one stops with `embcc: error: linking a TRIPLE
+image needs its memory map`. Every other target (AArch64 ELF, Mach-O,
+COFF) stops with `embcc: error: cannot link for TRIPLE`, because embld
+does not read those objects.
 
 The standalone `embld` links more than the driver uses: it accepts
 x86-64, ARMv7-M and ARMv8-M, RV32, RV64 and AVR objects, and refuses

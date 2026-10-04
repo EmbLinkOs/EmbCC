@@ -22,36 +22,38 @@ rather than repeating them.
 
 The aliases each triple accepts are listed in [Targets](targets.md).
 
-### The build is always compile, then link
+### Compile, then link
 
-The `embcc` driver links in-process only for x86-64 ELF targets. For every
-embedded target it stops with:
-
-```text
-embcc: error: cannot link for thumbv7m-none-eabi in one step: the driver links x86-64 ELF only
-embcc: compile with -c, then link with embld and the board's memory map (-e, -Ttext, -Tdata, -Tstack)
-```
-
-So a firmware build compiles each file with `-c` and links the objects
-with `embld`, naming every input explicitly, the runtime archive included:
+A firmware build compiles each file with `-c` and links the objects, as
+a Makefile written for `arm-none-eabi-gcc` does. The driver links them,
+adding the target's `librt.a` (and `libc.a`, if built) itself; the memory
+map is a linker script (`-T`) or `-Wl,-Ttext`/`-Wl,-Tdata`:
 
 ```sh
 embcc --target=thumbv7m-none-eabi -Os -c startup.c -o startup.o
 embcc --target=thumbv7m-none-eabi -Os -c main.c    -o main.o
+embcc --target=thumbv7m-none-eabi -T board.ld startup.o main.o -o fw.elf
+```
+
+or, naming every input to `embld` explicitly:
+
+```sh
 embld -e Reset_Handler -Ttext 0x0 -Tdata 0x20000000 --rom-limit 262144 \
       startup.o main.o build/libc/thumbv7m-none-eabi/librt.a -o fw.elf
 ```
+
+Without a memory map the driver refuses the link
+(`embcc: error: linking a thumbv7m-none-eabi image needs its memory
+map`).
 
 `embld` reads ARM, RV32, RV64, AVR and x86-64 objects. It does not read
 AArch64 objects; a bare-metal AArch64 image is linked with another
 toolchain's linker (see [Running images under QEMU](#running-images-under-qemu)).
 
-There is no `-nostdlib`, `-nostartfiles` or `-nodefaultlibs`; the driver
-rejects each as `embcc: error: unknown argument '-nostdlib'`. They are not
-needed, because nothing is linked that the `embld` command line does not
-name. `-Wl,` options are ignored by a compile with `-c`, so a build system
-that passes them to every command still compiles; the memory map goes on
-the `embld` command line. See [Libraries](libraries.md#how-the-driver-links-the-libraries).
+`-nostdlib`, `-nodefaultlibs` and `-nostartfiles` mean what they mean to
+gcc, and `-lc`, `-lm` and `-lgcc` name EmbCC's own `libc.a` and
+`librt.a`. `-Wl,` options are ignored by a compile with `-c`, so a build
+system that passes them to every command still compiles. See [Libraries](libraries.md#how-the-driver-links-the-libraries).
 
 ## Freestanding compilation
 
