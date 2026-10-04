@@ -293,7 +293,9 @@ The loop passes:
 
 - **Rotation.** A loop is turned from top-tested into bottom-tested, so
   each iteration runs one conditional branch instead of a branch and a
-  jump. The test is duplicated as a guard before the loop.
+  jump. The test is duplicated as a guard before the loop. When the
+  loop's start and bound are both constants, the guard is decided at
+  compile time and does not appear in the output.
 - **Loop-invariant code motion.** A computation whose operands do not
   change in the loop is moved in front of it. Only operations that
   cannot fault are moved, so a load through a pointer, a division and a

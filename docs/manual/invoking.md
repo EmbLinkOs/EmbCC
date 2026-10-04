@@ -1429,6 +1429,7 @@ traces, and they are not a stable interface. See
 | `EMBCC_RA_DEGREE_SPILL` | Choose spill candidates by interference degree instead of by cost. |
 | `EMBCC_NO_TAILCALL` | Disable tail calls in the AArch64, ARM, RISC-V and AVR backends. |
 | `EMBCC_NO_SPLITLOOPS` | Disable the optimizer's loop-splitting step. |
+| `EMBCC_NO_LKCONST` | Stop deciding compares and branches from a constant the same block has just written. |
 | `EMBCC_VECDEBUG` | Trace the vectorizer's decisions. |
 | `EMBCC_NO_RMW` | Disable x86-64 read-modify-write instruction fusion. |
 | `EMBCC_NO_MEMOFF` | Disable folding constant offsets into loads and stores (ARM, RISC-V, AVR). |

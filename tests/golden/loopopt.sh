@@ -142,6 +142,102 @@ nadd1=$(grep -cE 'add\.[0-9]+s? %[0-9]+, #1([^0-9]|$)' "$out/ir.txt" || true)
     echo "      cycle was not removed:"; cat "$out/ir.txt"; exit 1; }
 echo "and the counter it kept -- a dead cycle -- is gone"
 
+# ---- 4c. a guard with constant operands is decided, not run -------------
+#
+# Rotation puts a copy of the test in front of the loop, and for
+# `for (i = 0; i < 12; i++)` that copy compares the counter the block has
+# just set to 0. The counter has a definition on every edge into the loop,
+# so folding by "the one definition" never knew it, and every entry to the
+# inner loop of a nest ran `cmp; brz` on two constants. Decided in the
+# block, a nest of two constant loops is its two latches and nothing else:
+# no forward branch, two compares. The inner loop starts at 1, which is
+# also what its guard folds to: value numbering then gives the folded
+# result the counter's name, and the branch has to be decided from the
+# block as well. Unrolling stays off here, because its own entry tests
+# are a different question.
+cat > "$out/guard.c" <<'EOF'
+int m[8][12];
+int g(void)
+{
+    int s = 0;
+    for (int i = 1; i < 8; i++)
+        for (int j = 1; j < 12; j++)
+            s += m[i][j] ^ j;
+    return s;
+}
+EOF
+"$EMBCC" inspect ir --target=x86_64-linux-gnu -O2 -fno-unroll -c "$out/guard.c" \
+    -o /dev/null > "$out/guard.txt" 2>&1 || {
+    echo "FAIL: could not compile"; cat "$out/guard.txt"; exit 1; }
+nbrz=$(grep -c ' brz' "$out/guard.txt" || true)
+ncmp=$(grep -c 'cmp\.' "$out/guard.txt" || true)
+[ "$nbrz" = 0 ] && [ "$ncmp" = 2 ] || {
+    echo "FAIL: $nbrz guard branch(es) and $ncmp compares in a nest of two"
+    echo "      constant loops; the guards should be decided, leaving the"
+    echo "      two latches:"; cat "$out/guard.txt"; exit 1; }
+echo "a guard on constants is decided at compile time: two latches, no guards"
+
+# The same decision from IR written to provoke it, which C reaches only
+# by luck: inside one block a temp is the constant last written to it,
+# and nothing else. @fires compares a temp the block has just set, and
+# the compare and its branch go. @over writes the temp again before the
+# compare, and @join falls into a label that another path reaches with a
+# different value: both compares stay.
+cat > "$out/lk.ir" <<'EOF'
+; EmbIR
+
+func @fires nparams=1 nvars=0 vregs=8 labels=2 {
+  %2 = const.4 5
+  %3 = const.4 0
+  %4 = cmp.4s lt %3, %2
+  brz.4s %4 -> L1
+  %3 = add.4s %0, %2
+L1:
+  ret %3
+}
+
+func @over nparams=1 nvars=0 vregs=8 labels=2 {
+  %1 = const.4 0
+  %2 = const.4 5
+  %3 = mov.4 %1
+  %3 = add.4s %0, %2
+  %4 = cmp.4s lt %3, %2
+  brz.4s %4 -> L1
+  %3 = const.4 7
+L1:
+  ret %3
+}
+
+func @join nparams=1 nvars=0 vregs=8 labels=4 {
+  %2 = const.4 5
+  %5 = cmp.4s lt %0, %2
+  brz.4s %5 -> L1
+  %3 = add.4s %0, %2
+  jmp L2
+L1:
+  %3 = const.4 0
+L2:
+  %4 = cmp.4s lt %3, %2
+  brz.4s %4 -> L3
+  %3 = const.4 7
+L3:
+  ret %3
+}
+EOF
+"$EMBCC" inspect ir -O2 "$out/lk.ir" > "$out/lk.txt" 2>&1 || {
+    echo "FAIL: could not optimize the IR"; cat "$out/lk.txt"; exit 1; }
+ncmp_in() {                     # ncmp_in FUNC -> compares in that function
+    awk -v f="func @$1 " 'index($0, f) == 1 { on = 1; next }
+                         /^}/ { on = 0 } on && /cmp\./ { n++ }
+                         END { print n + 0 }' "$out/lk.txt"
+}
+[ "$(ncmp_in fires)" = 0 ] && [ "$(ncmp_in over)" = 1 ] &&
+    [ "$(ncmp_in join)" = 2 ] || {
+    echo "FAIL: compares in @fires/@over/@join are $(ncmp_in fires)/"
+    echo "      $(ncmp_in over)/$(ncmp_in join), not 0/1/2:"
+    cat "$out/lk.txt"; exit 1; }
+echo "and only inside the block, until the temp is written again"
+
 # ---- 5. and it all still runs ------------------------------------------
 #
 # The IR checks above say a transform fired; this says it was right. The
