@@ -290,6 +290,7 @@ bytes, with an LLVM or GNU tool.
 | AArch64 `asm.c` | `tests/golden/aarch64/arm64-asm.sh` | `tools/a64check/a64asmcheck.c` | `aarch64-elf-as -march=armv8.2-a` | bytes, for the kernel's templates and every vocabulary entry |
 | Thumb `emit.c` | `tests/golden/thumb-encoding.sh` | `tools/thumbcheck` | `llvm-objdump` | disassembly text; `--immediates` sweeps every modified immediate |
 | Thumb VFP | `tests/golden/thumb-vfp.sh` | `tools/vfpcheck` | `llvm-mc -triple=thumbv7em-none-eabihf`, with `-mattr=+vfp4` and again with `-mattr=+fp-armv8d16` | bytes |
+| Thumb-1 (ARMv6-M) `t1_*` forms | `tests/golden/thumb-v6m-encoding.sh` | `tools/t1check` (`--refuse`) | `llvm-mc -triple=thumbv6m-none-eabi -mcpu=cortex-m0` | bytes of every operand combination, including the ARMv7-M encoders ARMv6-M code reuses (16-bit branches, `mov`, `ldr` literal, BL, system); `--refuse` checks out-of-field operands write nothing |
 | Thumb `asm.c` | `tests/golden/thumb-asm.sh` | `tools/tasmcheck` | `llvm-mc` | bytes, for every entry of the assembler's own tables |
 | RISC-V `emit.c` | `tests/golden/riscv-encoding.sh` | `tools/riscvcheck` (`--rv32`, `--rv64`) | `llvm-mc --disassemble -mattr=+m` | disassembly text; `--li32`/`--li64` execute `rv_li` sequences in an interpreter; `--refuse` checks the range checks fire |
 | RISC-V compression | `tests/golden/riscv-compressed.sh` | `tools/riscvcheck` (`--csweep32`, `--csweep64`) | `llvm-mc -mattr=+m,+c` | bytes of `rv_compress` against llvm-mc's compression of the same instruction |
@@ -302,9 +303,10 @@ tables where possible, so a new form cannot escape the check. Comparing
 disassembly text, not only bytes, is what catches a condition code or
 register field that encodes cleanly but means something else. A form
 the driver program does not list is not checked; add each new
-instruction form to it. On Thumb the 16-bit branch forms, `cbz`, the IT
-form and their patchers are covered only by execution tests
-(`thumb-relax.sh`, `thumb-exec.sh`).
+instruction form to it. On Thumb, `cbz`, the IT form and the wide
+patchers are covered only by execution tests (`thumb-relax.sh`,
+`thumb-exec.sh`); the 16-bit branches and their patchers are checked by
+`thumb-v6m-encoding.sh` at every offset they can hold.
 
 x86-64's `emit.c` has no per-instruction referee. Its coverage is the
 execution tests, `tools/x86-identity.sh` (byte-identical objects against
@@ -740,7 +742,9 @@ Labels in inline asm are refused.
 `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv8m.main-none-eabi`
 and their `-eabihf` forms. Code generation is the same at both
 architecture levels; ARMv8-M differs in its build attributes, its
-predefined-macro table and its FPU (`fpv5-sp-d16`).
+predefined-macro table and its FPU (`fpv5-sp-d16`). ARMv6-M (Cortex-M0)
+is not a target yet: its encoders exist (`t1_*` in `emit.c`), and
+[armv6m-plan.md](armv6m-plan.md) describes the rest.
 
 ### Lowering
 

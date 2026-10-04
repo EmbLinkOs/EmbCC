@@ -460,6 +460,7 @@ golden tests that use them, not by the Makefile.
 |---|---|---|
 | `tools/a64check/a64check.c`, `a64asmcheck.c` | the AArch64 encoder and inline-asm assembler | `tests/golden/aarch64/arm64-encoding.sh`, `arm64-asm.sh` |
 | `tools/thumbcheck`, `tools/tasmcheck`, `tools/vfpcheck` | the Thumb encoder, the Thumb inline-asm assembler, the VFP instructions | `thumb-encoding.sh`, `thumb-asm.sh`, `thumb-vfp.sh` |
+| `tools/t1check` | the ARMv6-M (Thumb-1) encoders, `t1_*` in `src/arch/thumb/emit.c` | `thumb-v6m-encoding.sh` |
 | `tools/riscvcheck`, `tools/rvasmcheck` | the RISC-V encoder and inline-asm assembler | `riscv-encoding.sh`, `riscv-compressed.sh`, `riscv-asm.sh` |
 | `tools/avrcheck`, `tools/avrasmcheck` | the AVR encoder and inline-asm assembler | `avr-encoding.sh`, `avr-asm.sh` |
 | `tools/pmovecheck` | `ra_parallel_move`, by executing every small case against a model register file | `parallel-move.sh` |
