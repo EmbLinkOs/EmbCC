@@ -389,7 +389,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         if (ok) {
             if (tasm_open())
                 FAIL("an IT block cannot begin inside another");
-            if (n != 2 || (cond = cond_num(t[1].s, t[1].len)) < 0)
+            cond = n == 2 ? cond_num(t[1].s, t[1].len) : -1;
+            if (cond < 0)
                 FAIL("%.*s wants a condition", t[0].len, t[0].s);
             memcpy(te, t[0].s + 2, (size_t)(t[0].len - 2));
             te[t[0].len - 2] = 0;

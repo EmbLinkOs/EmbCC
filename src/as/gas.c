@@ -874,10 +874,11 @@ static void instruction(struct gas *g, char *stmt, int pass)
             const char *r = skip_ws((char *)(q + (wide ? 5 : 3)));
             const char *c = strchr(r, ',');
             const char *d = c ? skip_ws((char *)(c + 1)) : NULL;
-            long disp;
-            char *e;
-            if (d && d[0] == '.' && (d[1] == '+' || d[1] == '-') &&
-                (disp = strtol(d + 1, &e, 10), *skip_ws(e) == 0)) {
+            long disp = 0;
+            char *e = NULL;
+            if (d && d[0] == '.' && (d[1] == '+' || d[1] == '-'))
+                disp = strtol(d + 1, &e, 10);
+            if (e && *skip_ws(e) == 0) {
                 char buf[96];
                 long off = (pc + disp) - ((pc + 4) & ~3L);
                 snprintf(buf, sizeof buf, "ldr %.*s, [pc, #%ld]",
