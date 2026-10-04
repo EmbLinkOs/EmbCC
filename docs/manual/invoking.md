@@ -1426,6 +1426,7 @@ traces, and they are not a stable interface. See
 | `EMBCC_RA_TRACE` | Print the register allocator's pool and each value's assignment to standard error. |
 | `EMBCC_RA_DEGREE_SPILL` | Choose spill candidates by interference degree instead of by cost. |
 | `EMBCC_NO_TAILCALL` | Disable tail calls in the AArch64, ARM, RISC-V and AVR backends. |
+| `EMBCC_NO_DIVMOD_CONST`, `EMBCC_NO_MLAKEEP` | On Thumb, stop sharing one divide between a quotient and a remainder by the same constant, or stop keeping a multiply's constant in a register for `mla`/`mls`. |
 | `EMBCC_NO_SPLITLOOPS` | Disable the optimizer's loop-splitting step. |
 | `EMBCC_VECDEBUG` | Trace the vectorizer's decisions. |
 | `EMBCC_NO_RMW` | Disable x86-64 read-modify-write instruction fusion. |

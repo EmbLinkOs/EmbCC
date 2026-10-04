@@ -616,6 +616,7 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_RA_POOL_K=1` | the previous colourability test for a value that crosses a call (the whole pool, not the callee-saved registers), for bisecting a difference to it |
 | `EMBCC_T_PAIRS`, `EMBCC_RV_PAIRS` | `1` forces the 64-bit register-pair allocation on, `0` forces it off, on Thumb and on RISC-V; unset, the backend generates each function both ways and keeps the shorter. `EMBCC_T_PAIRS_ONLY=FN` and `EMBCC_RV_PAIRS_ONLY=FN` turn pairs on in function `FN` only. |
 | `EMBCC_T_RA_MAX=N`, `EMBCC_RV_RA_MAX=N` | keep only the first `N` values in registers on Thumb or RISC-V; bisecting `N` names the one value whose register breaks a program |
+| `EMBCC_NO_DIVMOD_CONST`, `EMBCC_NO_MLAKEEP` | on Thumb, stop pairing a quotient and remainder by one constant, or stop keeping a multiply's constant in a register for `mla`/`mls`, for bisecting |
 | `EMBCC_AVR_RA_MODE=n` | force one AVR allocation mode; each mode is otherwise generated and the shortest kept, so a mode that never wins is still tested |
 | `EMBCC_AVR_RA=1`, `EMBCC_AVR_RA_ONLY=FN`, `EMBCC_AVR_RA_LIMIT=K` | AVR allocation report, one function only, first `K` homes only |
 | `EMBCC_NO_MEMOFF`, `EMBCC_NO_RMW`, `EMBCC_NO_MLA`, `EMBCC_NO_SPLITLOOPS`, `EMBCC_NO_TAILCALL` | turn off one transformation (constant offsets folded into loads and stores on Thumb and RISC-V; x86-64 read-modify-write fusion; multiply-accumulate fusion on aarch64 and Thumb; loop live-range splitting; tail calls on aarch64, Thumb and RISC-V) for bisecting |
