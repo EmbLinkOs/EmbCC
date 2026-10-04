@@ -115,9 +115,10 @@ Optimize for size. Enables everything in `-O2` except:
 - `vectorize`, `unroll` and `switch-thread` are off, and so is live-range
   splitting around loops. Each of these adds code.
 - The inlining budget for a callee that is copied is 6 IR instructions
-  instead of 24. A `static` function with a single caller is still
-  inlined up to 2000 IR instructions, because moving it deletes the
-  original (see [Inlining](#inlining)).
+  instead of 24, and a `static` function with two callers gets no larger
+  budget (200 at `-O2`). A `static` function with a single caller is
+  still inlined up to 2000 IR instructions, because moving it deletes
+  the original (see [Inlining](#inlining)).
 - A `switch` needs at least six cases and a value range of at most twice
   the number of cases to get a jump table (see
   [Switch lowering](#switch-lowering)).
@@ -553,6 +554,7 @@ the per-function passes. Sizes are counted in EmbIR instructions, as
 | Largest callee copied into a caller, `-O2` | 24 IR instructions |
 | Largest callee copied into a caller, `-Os` | 6 IR instructions |
 | Largest `static` callee with exactly one call site and its address never taken (it is moved, not copied) | 2000 IR instructions, at every level that inlines |
+| Largest `static` callee with exactly two call sites and its address never taken, `-O2` | 200 IR instructions |
 | A caller stops growing at | 800 IR instructions |
 | Inlined calls per caller, at most | 64 |
 
