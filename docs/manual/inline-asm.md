@@ -269,16 +269,33 @@ without `volatile` and whatever its clobbers say:
   contains one is not unrolled.
 - It may read and write any memory. Values that the code read from memory
   before the statement are read again after it.
-- A function that contains an `asm` statement is never inlined into its
-  callers.
-- No value is kept in a register across it. Every value that is live
-  across an `asm` statement stays in memory, so the template may change
-  any caller-saved register without listing it, provided no operand is
-  placed there (see [Clobbers](#clobbers)).
+- A function that contains an `asm` statement may be inlined like any
+  other, so an `always_inline` intrinsic around one disappears into its
+  caller.
+- On ARM Cortex-M and RISC-V, a value live across the statement is kept
+  out of the registers it may change: its operands' registers, the
+  registers in its clobber list, the registers its template names, the
+  one EmbCC stores outputs through, and every caller-saved register
+  (r0 to r3, r12 and lr; ra, t0 to t6 and a0 to a7) when the template
+  calls (`bl`, `blx` or `svc` on ARM; `call`, `tail`, `jal`, `jalr` or
+  `ecall` on RISC-V). Any other register may hold a value across it, so
+  the template must list every register it changes and does not name,
+  as GCC requires. On x86-64, AArch64 and AVR no value is kept in a
+  register across it: every value live across an `asm` statement stays
+  in memory, so the template may change any caller-saved register
+  without listing it, provided no operand is placed there (see
+  [Clobbers](#clobbers)).
 
-The operands are moved between memory and their registers around the
-template: inputs and `+` outputs are loaded immediately before it, and
-outputs are stored immediately after it.
+The operands are moved into their registers immediately before the
+template and out of them immediately after it. On ARM Cortex-M and
+RISC-V they are values like any other: an input is moved from wherever it is (a
+register or memory), several at once as one parallel move, and an
+`"=r"` output of an integer or pointer type is a value that its variable
+receives afterwards, so a local written by an `asm` can live in a
+register. Other outputs, and every operand on the other targets, go
+through memory: inputs and `+` outputs are loaded immediately before the
+template, and outputs are stored through their addresses immediately
+after it.
 
 ### Callee-saved registers
 
@@ -289,7 +306,7 @@ Each target handles a template that would change one as follows:
 |---|---|---|
 | x86-64 | accepted; not saved | saved by the prologue at `-O2` and `-Os` only |
 | AArch64 | refused (x19 to x30) | cannot happen: neither the allocator nor a register variable uses one |
-| ARM Cortex-M | refused (r4 to r11) | never chosen by the allocator; possible through the letters `S` and `D` or a register variable (see [ARM Cortex-M](#arm-cortex-m) and [Register variables](#register-variables)); not saved |
+| ARM Cortex-M | refused (r4 to r11) | never chosen by the allocator; possible through the letters `S` and `D` (see [ARM Cortex-M](#arm-cortex-m)), and then saved by the prologue and given no other value in that function |
 | RISC-V | refused (s0 to s11) | never chosen by the allocator; see [Register variables](#register-variables) |
 | AVR | refused (r2 to r17, and r28 and r29) | refused |
 
@@ -950,8 +967,10 @@ instruction set for inline assembly.
 
 Constraints are read by the same rules as on x86-64. As a result the
 x86-64 letters `a`, `b`, `c`, `d`, `S` and `D` are accepted and select
-r0, r3, r1, r2, r6 and r7 respectively; r6 and r7 are callee-saved and
-are not saved. Do not use these letters. `x` is accepted and produces a
+r0, r3, r1, r2, r6 and r7 respectively; r6 and r7 are callee-saved, so a
+function that uses `S` or `D` saves them and keeps no other value there
+(and `D` is refused in a function with a variable-length array, whose
+frame r7 addresses). Do not use these letters. `x` is accepted and produces a
 template that does not assemble. ARM letters such as `l`, `h`, `I`, `J`,
 `K`, `L`, `M`, `Q`, `t` and `w`, alone, are refused:
 

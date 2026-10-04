@@ -1633,6 +1633,44 @@ static int atomic_lv(const struct expr *e)
            e->ty->kind != TY_ARRAY;
 }
 
+/* ---- an asm output as a VALUE (ir_asm_op.val) ----------------------
+ *
+ * An output used to be written through its lvalue's ADDRESS, so a local
+ * an asm writes -- `__get_PRIMASK`'s result, a critical section's saved
+ * BASEPRI -- was address-taken and lived in memory, and the function had
+ * a frame for it. Where the backend can (ra_target.asm_in_reg), the
+ * output is instead the asm's dst, and these store it: a local by STVAR,
+ * which takes no address, anything else through an address evaluated
+ * BEFORE the asm, as gcc evaluates it. */
+int irg_asm_val_ok(const struct expr *lv, int maxsize)
+{
+    const struct type *t = lv->ty;
+    return !atomic_lv(lv) && (ty_is_integer(t) || t->kind == TY_PTR) &&
+           ty_size(t) >= 1 && ty_size(t) <= maxsize;
+}
+
+int irg_asm_out_addr(struct ir_func *fn, struct expr *lv)
+{
+    if (lv->kind == EXPR_VAR && !lv->gref)
+        return -1;
+    return gen_addr(fn, lv);
+}
+
+/* The register holds the type's value in its low bytes and nothing
+ * certain above them; a narrow store keeps the low bytes and every read of
+ * a narrow object extends, so no extension is needed here. */
+void irg_asm_out_store(struct ir_func *fn, struct expr *lv, int addr,
+                       int val)
+{
+    const struct type *t = lv->ty;
+    if (addr < 0)
+        emit_stvar(fn, lv->var_index, val, t);
+    else if (expr_is_bitfield(lv))
+        bf_store_v(fn, addr, lv->memb, val, t);
+    else
+        emit_store(fn, addr, val, t);
+}
+
 static void atomic_scalar_ok(struct ir_func *fn, const struct expr *lv,
                              const char *what)
 {

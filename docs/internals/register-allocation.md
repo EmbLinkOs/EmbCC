@@ -120,8 +120,15 @@ A vreg is then made ineligible, and stays in memory, when:
   it), a struct argument or result, an integer argument the backend
   cannot read from a register (`call_int_arg_in_reg`), or, in the integer
   class, a float argument or result (unless `float_in_gpr`);
-- it is an operand of inline asm, or is live across an `IR_ASM` (the
-  asm's clobbers are not visible here);
+- it is an operand or the result of inline asm, or is live across an
+  `IR_ASM` (the asm's clobbers are not visible here) -- unless the
+  backend sets `asm_in_reg`, which says its asm operands are values it
+  moves itself and its asm cannot touch a callee-saved register. Then,
+  in the integer class only, its operands and result are ordinary
+  values, and a value live across it (or an output's address, read after
+  the template) may not take a register in the asm's `clob` mask -- or,
+  when the mask is 0, is treated as crossing a call. A continuation
+  (`ir_asm.cont`) constrains nothing itself;
 - it is never live.
 
 The three `..._in_reg` flags and `atomic_in_reg` say what a backend has
@@ -380,6 +387,7 @@ whose pair passes use a second one).
 | `alu_dst_is_lhs` | 1 | 0 | 0 | 0 | 0 |
 | `float_in_gpr` | 0 | 0 | 1 | 1 | 1 |
 | `fp_reads_gpr` | 0 | 1 | 0 | 0 | 0 |
+| `asm_in_reg` | 0 | 0 | 1 (not the pair pass) | 1 (not the pair pass) | 0 |
 | `ldvar_plain` | size 8, or size 4 not sign-extended to 8 | as x86-64 | size 4 at width 4 | full register width; also a sign-extending 4-byte read at RV64 | size equals width, or size at most 2 |
 | `op_calls_helper` | `__int128` operations | binary128 `long double` and `__int128` operations | floating-point arithmetic, comparisons and conversions not executed by the FPU; 64-bit divide and remainder | floating-point arithmetic, comparisons and conversions; 64-bit divide and remainder at RV32 | float operations, conversions, divide, remainder, multiply except by a small constant |
 | FP class | xmm0-xmm6 | v18-v31, v0-v7 | s16-s31, with an FPU | none | none |
@@ -529,6 +537,18 @@ it compiles once, with pairs, when the allocator is off, under `-g`, or
 with an FPU. `EMBCC_T_PAIRS` forces the choice and
 `EMBCC_T_PAIRS_ONLY=FUNC` uses pairs only in the named function.
 
+**Inline asm** (`asm_in_reg`). Its operands come from r0-r3 and r12, and
+irgen refuses a template or clobber naming r4-r11. irgen records in
+`ir_asm.clob` what each asm may change -- its operand registers, its
+clobber list, the registers its template names, the scratch its outputs
+are stored through (`ir_asm.scr`), and r0-r3, r12 and lr when the
+template contains `bl`, `blx` or `svc` -- and a value live across it
+keeps out of exactly those. An operand pinned to r6 or r7 by the letters `S`
+and `D` takes that register out of the function's pool and is saved by
+the prologue (`t_asm_saved_regs`). The lowering moves register-resident
+inputs into place as one parallel move, and its value outputs -- the
+instruction's `dst` and any continuations after it -- out the same way.
+
 **Debug.** Under `-g` the source variables are pinned to their slots
 (`ra_debug_pin_vars`, merged with the FP map), and there is no memory
 offset folding and no tail call.
@@ -570,6 +590,13 @@ compiles each function with and without pairs and keeps the shorter
 (without on a tie). `EMBCC_RV_PAIRS` forces the choice and
 `EMBCC_RV_PAIRS_ONLY=FUNC` limits pairs to one function. At RV64 the
 integer pass allocates 64-bit values directly.
+
+**Inline asm** (`asm_in_reg`), as on Thumb: operands come from t0-t6 and
+a0-a7, irgen refuses s0-s11 in a template or clobber list and records
+each asm's `clob` (adding ra, t0-t6 and a0-a7 when the template calls),
+and the lowering moves operands in and value outputs out as parallel
+moves whose cycle breaker is a backend scratch (t4, t2, t1, t0 or t5) no
+operand of that asm uses.
 
 **Debug.** Under `-g` source variables are pinned to their slots, and
 there is no memory-offset folding and no tail call.

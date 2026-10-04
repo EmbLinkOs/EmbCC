@@ -97,6 +97,11 @@ static int def_target(const struct ir_ins *i)
         return i->dst;
     if (writes_temp(i->op))
         return i->dst;
+    /* An asm's value output (ir_asm_op.val), as a call's result. Not in
+     * writes_temp: two asms are never the same computation, however
+     * alike they look, so nothing may value-number one. */
+    if (i->op == IR_ASM)
+        return i->dst;
     return -1;
 }
 
@@ -211,8 +216,10 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     case IR_ASM:
         for (int k = 0; k < i->asm_ir->nin; k++)
             cb(&i->asm_ir->in[k].temp, ctx);
+        /* an output's lvalue ADDRESS is read; a `val` one is the dst */
         for (int k = 0; k < i->asm_ir->nout; k++)
-            cb(&i->asm_ir->out[k].temp, ctx);
+            if (!i->asm_ir->out[k].val)
+                cb(&i->asm_ir->out[k].temp, ctx);
         break;
     default:
         break;   /* CONST, STRADDR, GADDR, FADDR, LABEL, JMP: no reads */
@@ -10455,7 +10462,11 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
     }
     for (int i = 0; i < cf->nins; i++) {
         const struct ir_ins *in = &cf->ins[i];
-        if (in->op == IR_ASM)      { *why = "callee-has-inline-asm"; return 0; }
+        /* Inline asm used to be refused here, which left every
+         * always_inline CMSIS intrinsic and RTOS critical section a call.
+         * An asm comes across with its operands renamed (inline_call);
+         * its registers were chosen when it was assembled, and the
+         * caller's allocator treats it exactly as the callee's did. */
         if (in->op == IR_VA_START) { *why = "callee-uses-va_start"; return 0; }
         /* `in->flt` used to refuse the callee outright. Floating-point
          * arithmetic is ordinary arithmetic to this pass -- it renames
@@ -10515,6 +10526,19 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     struct rmp cm = { 1, V, N, v, L };
     for (int i = 0; i < cf->nins; i++) {
         struct ir_ins in = cf->ins[i];
+        /* An asm's operands are renamed in place through each_read, and
+         * the callee keeps its own: the copy gets operand arrays of its
+         * own (the assembled bytes are never written, and are shared). */
+        if (in.op == IR_ASM && in.asm_ir) {
+            struct ir_asm *ca = xmalloc(sizeof *ca);
+            *ca = *in.asm_ir;
+            ca->in = xmalloc((size_t)(ca->nin ? ca->nin : 1) * sizeof *ca->in);
+            ca->out = xmalloc((size_t)(ca->nout ? ca->nout : 1) *
+                              sizeof *ca->out);
+            memcpy(ca->in, in.asm_ir->in, (size_t)ca->nin * sizeof *ca->in);
+            memcpy(ca->out, in.asm_ir->out, (size_t)ca->nout * sizeof *ca->out);
+            in.asm_ir = ca;
+        }
         remap_ins(&in, &cm);
         if (in.op == IR_SWITCH)          /* its table, renumbered like its default */
             in.jt = ir_jt_clone(fn, cf, in.jt, L);

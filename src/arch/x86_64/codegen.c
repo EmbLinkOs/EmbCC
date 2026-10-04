@@ -386,7 +386,8 @@ static const struct ra_target X86_RA = {
     0,            /* float_in_gpr: floats have their own class (SSE) */
     NULL, NULL,
     0, /* atomic_in_reg */
-    0  /* fp_reads_gpr */
+    0, /* fp_reads_gpr */
+    0  /* asm_in_reg: a template may name a callee-saved register */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----

@@ -255,8 +255,9 @@ static const struct ra_target A64_RA = {
     0,             /* float_in_gpr: floats have their own class (SIMD) */
     NULL, NULL,
     0, /* atomic_in_reg */
-    1  /* fp_reads_gpr: fld_slot, fst_slot, frd, fwrote and fmove fmov a
+    1, /* fp_reads_gpr: fld_slot, fst_slot, frd, fwrote and fmove fmov a
         * general-register home across */
+    0  /* asm_in_reg */
 };
 
 

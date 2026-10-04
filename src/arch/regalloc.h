@@ -193,6 +193,21 @@ struct ra_target {
      * float arguments of a call and a call's float result stay in memory
      * still: the argument setup writes x0-x7. */
     int fp_reads_gpr;
+
+    /* Does this backend's inline asm read its inputs and write its value
+     * outputs (ir_asm_op.val) wherever they live -- register or slot, as
+     * one parallel move into and out of the operand registers -- and is
+     * an asm unable to touch a callee-saved general register (its irgen
+     * refuses a template or clobber that names one)? Then an asm is, to
+     * this class, at most a call: a value live across one keeps out of
+     * the registers it may change (ir_asm.clob; a callee-saved register
+     * when that is unknown), and its operands are ordinary values. 0
+     * keeps every
+     * operand in memory and every value live across an asm out of the
+     * registers, which is what a target whose asm may write any register
+     * by name needs. The floating-point class keeps that rule always: a
+     * template may name a callee-saved FP register. */
+    int asm_in_reg;
 };
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that

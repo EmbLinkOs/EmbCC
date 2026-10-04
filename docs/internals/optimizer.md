@@ -387,7 +387,7 @@ callee with one caller and an `always_inline` one; `g_inline_o1`),
 `callee-is-varargs`,
 `callee-too-large`, `callee-has-exception-regions`, `returns-a-struct`,
 `parameter-is-not-a-simple-scalar`, `returns-a-value-wider-than-a-vreg`,
-`callee-has-inline-asm`, `callee-uses-va_start`, `callee-has-a-vla`,
+`callee-uses-va_start`, `callee-has-a-vla`,
 `callee-uses-a-computed-goto` and
 `callee-calls-a-struct-returning-function`. A caller with exception
 regions or `__int128` arithmetic is not inlined into.

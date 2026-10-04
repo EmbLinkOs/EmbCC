@@ -60,4 +60,12 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s);
  * handed it the operand's address instead. */
 int asm_constraint_mem_only(const char *c);
 
+/* An asm output written as a value (ir_asm_op.val): may lv be one, where
+ * its value is evaluated before the asm (-1: a local, by STVAR), and the
+ * store of the asm's result into it afterwards (irgen.c). */
+int irg_asm_val_ok(const struct expr *lv, int maxsize);
+int irg_asm_out_addr(struct ir_func *fn, struct expr *lv);
+void irg_asm_out_store(struct ir_func *fn, struct expr *lv, int addr,
+                       int val);
+
 #endif
