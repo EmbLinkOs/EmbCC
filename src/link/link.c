@@ -109,6 +109,13 @@ struct insec {
     enum seg seg;
     int osec;
     Elf64_Addr vaddr;          /* assigned in layout */
+    /* A linker script's placement (-T): the index of the script output
+     * section that claimed this input, -1 before any did, -2 for
+     * /DISCARD/. The section's own flags decide where an unclaimed one
+     * goes, as ld places an orphan. */
+    int sosec;
+    Elf64_Xword shflags;
+    int discarded;
 };
 
 /* The final [start,end) vaddr span of each output section — the source
@@ -135,6 +142,10 @@ struct symbol {
     int type;                  /* STT_FUNC/STT_OBJECT/..., from the input */
     Elf64_Xword size;          /* for COMMON: the size to reserve */
     Elf64_Xword align;         /* for COMMON */
+    /* Defined by a linker script assignment rather than an object, and
+     * then the script output section it was assigned in (-1: absolute). */
+    int scripted;
+    int sosec;
 };
 
 /* A static archive (.a) is a pool of member objects; a member is pulled
@@ -213,6 +224,7 @@ struct linker {
     int harvard;
     struct orphan orphans[MAX_ORPHANS];
     int norphan;
+    struct ls_script *sc;      /* -T: the layout comes from here */
 };
 
 static void die(const char *fmt, ...)
@@ -249,8 +261,11 @@ static struct symbol *sym_intern(struct linker *l, const char *name)
     memset(s, 0, sizeof *s);
     s->name = name;
     s->insec = -1;
+    s->sosec = -1;
     return s;
 }
+
+#include "ldscript.h"
 
 /* ---- object parsing ---- */
 
@@ -643,6 +658,8 @@ static void collect_sections(struct linker *l, struct object *o)
         s->align = sh->sh_addralign ? sh->sh_addralign : 1;
         s->is_bss = sh->sh_type == SHT_NOBITS;
         s->data = s->is_bss ? NULL : o->buf + sh->sh_offset;
+        s->sosec = -1;
+        s->shflags = sh->sh_flags;
         /* SHF_TLS decides this, not the name. A .tbss is SHT_NOBITS,
          * so classifying by name and type alone would file it under
          * .bss -- where every thread would SHARE it, which is the
@@ -1799,7 +1816,7 @@ static void apply_relocs(struct linker *l, struct object *o)
             continue; /* a non-allocated section nothing kept */
         struct insec *ts = dtgt >= 0 ? (struct insec *)0
                                      : &l->insecs[o->sec_out[target]];
-        if (ts && ts->is_bss)
+        if (ts && (ts->is_bss || ts->discarded))
             continue;
         /* the output bytes to patch live in the object's own buffer; we
          * patch there, then copy the section into the image at write. */
@@ -1843,6 +1860,36 @@ static void apply_relocs(struct linker *l, struct object *o)
                 continue;
             int uw;
             Elf64_Addr S = reloc_symval(l, o, symi, &uw);
+            {
+                /* /DISCARD/ took the section this symbol is in. DWARF
+                 * describing a discarded function gets address 0, as ld
+                 * gives it; anything that RUNS cannot point there. */
+                Elf64_Sym *dsy = &o->syms[symi];
+                const struct insec *dis = NULL;
+                if (ELF64_ST_BIND(dsy->st_info) == STB_LOCAL) {
+                    if (dsy->st_shndx != SHN_ABS && dsy->st_shndx < (unsigned)o->nsh &&
+                        o->sec_out[dsy->st_shndx] >= 0)
+                        dis = &l->insecs[o->sec_out[dsy->st_shndx]];
+                } else {
+                    const char *dn = o->symstr + dsy->st_name;
+                    struct symbol *dg = *dn ? sym_find(l, dn) : NULL;
+                    if (dg && dg->defined && !dg->scripted && dg->insec >= 0)
+                        dis = &l->insecs[dg->insec];
+                }
+                if (dis && dis->discarded) {
+                    if (dtgt >= 0) {
+                        S = 0;
+                    } else {
+                        const char *dn = ELF64_ST_TYPE(dsy->st_info) == STT_SECTION
+                            ? dis->name : o->symstr + dsy->st_name;
+                        die("%s: section %s refers to '%s', which is in section "
+                            "%s of %s, and the linker script discards that "
+                            "section (/DISCARD/)", o->name,
+                            o->shstr + o->shdrs[target].sh_name, dn,
+                            dis->name, dis->obj ? dis->obj->name : "?");
+                    }
+                }
+            }
             l->rel_uw = uw;
             {
                 Elf64_Sym *sy = &o->syms[symi];
@@ -2611,6 +2658,1134 @@ static unsigned char *read_file(const char *path, long *len)
     return buf;
 }
 
+/* ---- linker scripts: the layout ----------------------------------------
+ *
+ * ldscript.h parsed the script into a list of commands; this lays the
+ * image out by them, the way GNU ld does:
+ *
+ *   - Each input section is claimed by the FIRST input description that
+ *     matches it, in script order; a claimed section is not matched again.
+ *     Within one description, inputs go in command-line order and each
+ *     file's sections in their own order, unless a SORT says otherwise.
+ *   - An allocated input nothing claims is an ORPHAN, and gets an output
+ *     section of its own name after the last one of its kind (code,
+ *     read-only data, data, zero-initialised).
+ *   - An output section starts at its address if it has one, else at its
+ *     region's next free byte if it names one (`> RAM`), else at `.`. Its
+ *     load address is AT(), or the next free byte of its AT> region, or
+ *     its run address shifted the way the previous section in the same
+ *     region was, or its run address. One `cur` per region serves both
+ *     uses, which is how `.data`'s initial bytes land right after the
+ *     code in flash.
+ *   - Symbol assignments are evaluated where they stand, so `_sdata = .`
+ *     inside .data is .data's address there. A forward reference
+ *     (`LOADADDR(.data)` above .data) reads the previous pass; the layout
+ *     is repeated until nothing moves.
+ */
+
+#define LS_MAX_PASSES 8
+
+struct ls_state {
+    struct linker *l;
+    struct ls_script *sc;
+    long long dot;
+    int in_sections;            /* `.` exists */
+    int cur;                    /* the output section being laid, or -1 */
+    int final;                  /* errors are reported only in the last pass */
+    const char *file;           /* for messages: the statement's place */
+    int line;
+};
+
+static void ls_die(struct ls_state *st, const char *fmt, ...)
+{
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    die("%s:%d: %s", st->file ? st->file : "<script>", st->line, msg);
+}
+
+static int ls_region_idx(const struct ls_script *sc, const char *name)
+{
+    for (int k = 0; k < sc->nalias; k++)
+        if (!strcmp(sc->alias[k].alias, name)) {
+            name = sc->alias[k].region;
+            break;
+        }
+    for (int k = 0; k < sc->nreg; k++)
+        if (!strcmp(sc->reg[k].name, name))
+            return k;
+    return -1;
+}
+
+static int ls_osec_idx(const struct ls_script *sc, const char *name)
+{
+    for (int k = 0; k < sc->nosec; k++)
+        if (!sc->osecs[k].discard && !strcmp(sc->osecs[k].name, name))
+            return k;
+    return -1;
+}
+
+/* A symbol's address as it stands mid-layout: an object's symbol is its
+ * section's address so far plus its offset (finalize_symbols has not run
+ * yet), a script's or a COMMON's is already absolute. */
+static int ls_symval(struct linker *l, const char *name, long long *v,
+                     int *rel)
+{
+    struct symbol *g = sym_find(l, name);
+    if (!g || !g->defined)
+        return 0;
+    if (g->scripted || g->common || g->insec < 0) {
+        *v = (long long)g->value;
+        *rel = g->scripted ? g->sosec >= 0 : g->insec >= 0 || g->common;
+        return 1;
+    }
+    *v = (long long)(l->insecs[g->insec].vaddr + g->value);
+    *rel = 1;
+    return 1;
+}
+
+static long long ls_align_up(struct ls_state *st, long long v, long long a)
+{
+    if (a <= 1)
+        return v;
+    if (a & (a - 1))
+        ls_die(st, "an alignment of %lld is not a power of two", a);
+    return (v + a - 1) & ~(a - 1);
+}
+
+static long long ls_eval(struct ls_state *st, const struct lx *e, int *rel);
+
+static long long ls_eval_abs(struct ls_state *st, const struct lx *e)
+{
+    int rel;
+    return ls_eval(st, e, &rel);
+}
+
+static long long ls_eval(struct ls_state *st, const struct lx *e, int *rel)
+{
+    struct ls_script *sc = st->sc;
+    long long a, b;
+    int ra = 0, rb = 0;
+    *rel = 0;
+    switch (e->kind) {
+    case LX_NUM:
+        return e->num;
+    case LX_DOT:
+        if (!st->in_sections)
+            ls_die(st, "'.' is the location counter, which exists only "
+                   "inside SECTIONS");
+        *rel = 1;
+        return st->dot;
+    case LX_SYM: {
+        long long v;
+        if (ls_symval(st->l, e->name, &v, rel))
+            return v;
+        if (st->final)
+            ls_die(st, "the script uses '%s', which nothing defines", e->name);
+        return 0;
+    }
+    case LX_UN:
+        a = ls_eval(st, e->a, &ra);
+        return e->op == LO_NEG ? -a : e->op == LO_NOT ? !a : ~a;
+    case LX_COND:
+        a = ls_eval(st, e->a, &ra);
+        return ls_eval(st, a ? e->b : e->c, rel);
+    case LX_BIN:
+        if (e->op == LO_LAND || e->op == LO_LOR) {
+            a = ls_eval(st, e->a, &ra);
+            if (e->op == LO_LAND ? !a : a)
+                return e->op == LO_LOR;
+            return ls_eval(st, e->b, &rb) != 0;
+        }
+        a = ls_eval(st, e->a, &ra);
+        b = ls_eval(st, e->b, &rb);
+        switch (e->op) {
+        case LO_ADD: *rel = ra || rb; return a + b;
+        case LO_SUB: *rel = ra && !rb; return a - b;
+        case LO_MUL: return a * b;
+        case LO_DIV:
+        case LO_MOD:
+            if (!b)
+                ls_die(st, "division by zero");
+            return e->op == LO_DIV ? a / b : a % b;
+        case LO_SHL: return (long long)((unsigned long long)a << (b & 63));
+        case LO_SHR: return (long long)((unsigned long long)a >> (b & 63));
+        case LO_AND: return a & b;
+        case LO_OR:  return a | b;
+        case LO_XOR: return a ^ b;
+        case LO_EQ:  return a == b;
+        case LO_NE:  return a != b;
+        case LO_LT:  return a < b;
+        case LO_LE:  return a <= b;
+        case LO_GT:  return a > b;
+        default:     return a >= b;
+        }
+    case LX_FN:
+        break;
+    default:
+        ls_die(st, "a malformed expression");
+    }
+    switch (e->op) {
+    case LF_ALIGN:
+        if (!st->in_sections)
+            ls_die(st, "ALIGN(n) aligns '.', which exists only inside "
+                   "SECTIONS; ALIGN(expr, n) aligns a value");
+        *rel = 1;
+        return ls_align_up(st, st->dot, ls_eval_abs(st, e->a));
+    case LF_ALIGN2:
+        a = ls_eval(st, e->a, rel);
+        return ls_align_up(st, a, ls_eval_abs(st, e->b));
+    case LF_ORIGIN:
+    case LF_LENGTH: {
+        int r = ls_region_idx(sc, e->name);
+        if (r < 0)
+            ls_die(st, "there is no memory region %s", e->name);
+        return e->op == LF_ORIGIN ? sc->reg[r].origin : sc->reg[r].length;
+    }
+    case LF_ADDR: case LF_LOADADDR: case LF_SIZEOF: case LF_ALIGNOF: {
+        int k = ls_osec_idx(sc, e->name);
+        if (k < 0)
+            ls_die(st, "there is no output section %s", e->name);
+        const struct ls_osec *o = &sc->osecs[k];
+        if (e->op == LF_ADDR) {
+            *rel = 1;
+            return o->vma;
+        }
+        return e->op == LF_LOADADDR ? o->lma
+             : e->op == LF_SIZEOF ? o->size : o->al;
+    }
+    case LF_DEFINED: {
+        struct symbol *g = sym_find(st->l, e->name);
+        return g && g->defined;
+    }
+    case LF_MAX:
+    case LF_MIN:
+        a = ls_eval(st, e->a, &ra);
+        b = ls_eval(st, e->b, &rb);
+        if ((e->op == LF_MAX) == (a >= b)) {
+            *rel = ra;
+            return a;
+        }
+        *rel = rb;
+        return b;
+    case LF_ABSOLUTE:
+        return ls_eval_abs(st, e->a);
+    case LF_LOG2CEIL: {
+        unsigned long long v = (unsigned long long)ls_eval_abs(st, e->a);
+        int k = 0;
+        while (k < 64 && (1ULL << k) < v)
+            k++;
+        return k;
+    }
+    case LF_CONSTANT:
+        if (!strcmp(e->name, "MAXPAGESIZE") ||
+            !strcmp(e->name, "COMMONPAGESIZE"))
+            return 0x1000;
+        ls_die(st, "CONSTANT(%s) is not a constant embld knows", e->name);
+        return 0;
+    default:                        /* SIZEOF_HEADERS: none are loaded */
+        return 0;
+    }
+}
+
+static void ls_assign(struct ls_state *st, const struct ls_stmt *s)
+{
+    struct linker *l = st->l;
+    int rel;
+    long long v = ls_eval(st, s->e, &rel);
+    st->file = s->file;
+    st->line = s->line;
+    if (!strcmp(s->sym, ".")) {
+        if (!st->in_sections)
+            ls_die(st, "'.' can be assigned only inside SECTIONS");
+        if (s->aop) {
+            long long old = st->dot;
+            rel = 1;
+            v = s->aop == LO_ADD ? old + v : s->aop == LO_SUB ? old - v
+              : s->aop == LO_MUL ? old * v : s->aop == LO_DIV && v ? old / v
+              : s->aop == LO_AND ? (old & v) : s->aop == LO_OR ? (old | v)
+              : s->aop == LO_SHL ? (long long)((unsigned long long)old << (v & 63))
+              : (long long)((unsigned long long)old >> (v & 63));
+        }
+        if (st->cur >= 0) {
+            /* inside an output section an absolute value is an offset
+             * into it: `. = 0x100;` is 0x100 bytes in, as ld has it */
+            if (!rel)
+                v += st->sc->osecs[st->cur].vma;
+            if (v < st->dot)
+                ls_die(st, "the location counter cannot move backwards "
+                       "inside %s (from 0x%llx to 0x%llx)",
+                       st->sc->osecs[st->cur].name,
+                       (unsigned long long)st->dot, (unsigned long long)v);
+        }
+        st->dot = v;
+        return;
+    }
+    struct symbol *g = sym_intern(l, s->sym);
+    if (s->aop) {
+        long long old;
+        int r2;
+        if (!ls_symval(l, s->sym, &old, &r2)) {
+            if (st->final)
+                ls_die(st, "a compound assignment to '%s', which is not "
+                       "defined", s->sym);
+            old = 0;
+        }
+        v = s->aop == LO_ADD ? old + v : s->aop == LO_SUB ? old - v
+          : s->aop == LO_MUL ? old * v : s->aop == LO_DIV && v ? old / v
+          : s->aop == LO_AND ? (old & v) : s->aop == LO_OR ? (old | v)
+          : s->aop == LO_SHL ? (long long)((unsigned long long)old << (v & 63))
+          : (long long)((unsigned long long)old >> (v & 63));
+    }
+    /* PROVIDE: only when no object defines it. A plain assignment wins
+     * over an object's definition, as it does in ld. */
+    if (s->provide && g->defined && !g->scripted)
+        return;
+    g->defined = 1;
+    g->weak = 0;
+    g->common = 0;
+    g->obj = NULL;
+    g->insec = -1;
+    g->scripted = 1;
+    g->value = (Elf64_Addr)v;
+    g->sosec = rel ? (st->cur >= 0 ? st->cur : -2) : -1;
+}
+
+static int ls_class(Elf64_Xword flags, int bss)
+{
+    if (flags & SHF_EXECINSTR) return 0;          /* code */
+    if (bss) return 3;                            /* zero-initialised */
+    if (flags & SHF_WRITE) return 2;              /* data */
+    return 1;                                     /* read-only data */
+}
+
+static struct linker *g_ls_sort_l;
+static int g_ls_sort_kind;
+
+static unsigned long ls_init_priority(const char *name)
+{
+    const char *d = strrchr(name, '.');
+    if (!d || !d[1])
+        return 65536;               /* no priority: after every numbered one */
+    for (const char *q = d + 1; *q; q++)
+        if (*q < '0' || *q > '9')
+            return 65536;
+    return strtoul(d + 1, NULL, 10);
+}
+
+static int ls_sort_cmp(const void *pa, const void *pb)
+{
+    const struct insec *a = &g_ls_sort_l->insecs[*(const int *)pa];
+    const struct insec *b = &g_ls_sort_l->insecs[*(const int *)pb];
+    int c = 0;
+    if (g_ls_sort_kind == LSORT_NAME) {
+        c = strcmp(a->name, b->name);
+    } else if (g_ls_sort_kind == LSORT_ALIGN) {
+        c = a->align > b->align ? -1 : a->align < b->align;
+    } else {
+        unsigned long pa2 = ls_init_priority(a->name);
+        unsigned long pb2 = ls_init_priority(b->name);
+        c = pa2 < pb2 ? -1 : pa2 > pb2;
+    }
+    /* stable: fall back on the order they were claimed in */
+    return c ? c : (*(const int *)pa > *(const int *)pb) -
+                   (*(const int *)pa < *(const int *)pb);
+}
+
+static void ls_push_list(struct ls_stmt *s, int v)
+{
+    LS_PUSH(s->list, s->nlist, s->caplist);
+    s->list[s->nlist++] = v;
+}
+
+/* Every input description claims what it matches, once, in order. */
+static void ls_claim(struct linker *l, struct ls_script *sc)
+{
+    for (int k = 0; k < sc->nosec; k++) {
+        struct ls_osec *o = &sc->osecs[k];
+        for (int b = 0; b < o->nbody; b++) {
+            struct ls_stmt *s = &o->body[b];
+            int sort = 0;
+            if (s->kind != LS_INPUT)
+                continue;
+            for (int ob = 0; ob < l->nobj; ob++) {
+                struct object *obj = l->objs[ob];
+                if (!ls_file_match(s->in.file, obj->name) ||
+                    ls_file_excluded(s->in.fexcl, s->in.nfexcl, obj->name))
+                    continue;
+                for (int i = 0; i < obj->nsh; i++) {
+                    int si = obj->sec_out[i];
+                    if (si < 0 || l->insecs[si].sosec != -1)
+                        continue;
+                    struct insec *is = &l->insecs[si];
+                    for (int j = 0; j < s->in.nsec; j++) {
+                        if (!strcmp(s->in.sec[j], "COMMON") ||
+                            ls_file_excluded(s->in.sexcl[j], s->in.nsexcl[j],
+                                             obj->name) ||
+                            !ls_glob(s->in.sec[j], is->name))
+                            continue;
+                        is->sosec = o->discard ? -2 : k;
+                        is->discarded = o->discard;
+                        if (s->in.sort[j])
+                            sort = s->in.sort[j];
+                        ls_push_list(s, si);
+                        break;
+                    }
+                }
+            }
+            if (sort && s->nlist > 1) {
+                g_ls_sort_l = l;
+                g_ls_sort_kind = sort;
+                qsort(s->list, (size_t)s->nlist, sizeof *s->list, ls_sort_cmp);
+            }
+        }
+    }
+}
+
+/* What kind of output section a script one is, from what it claimed: the
+ * orphan rule needs it. -1 when it claimed nothing. */
+static int ls_osec_class(struct linker *l, const struct ls_osec *o)
+{
+    int cls = -1;
+    for (int b = 0; b < o->nbody; b++) {
+        const struct ls_stmt *s = &o->body[b];
+        for (int k = 0; k < s->nlist; k++) {
+            const struct insec *is = &l->insecs[s->list[k]];
+            int c = ls_class(is->shflags, is->is_bss);
+            if (cls < 0 || c < cls || (cls == 3 && c != 3))
+                cls = c;
+        }
+        if (s->kind == LS_INPUT && s->in.common && cls < 0)
+            cls = 3;
+    }
+    return cls;
+}
+
+/* Unclaimed allocated inputs: an output section per name, placed after
+ * the last script section of the same kind, as ld places orphans. */
+static void ls_orphans(struct linker *l, struct ls_script *sc, int mode)
+{
+    for (int si = 0; si < l->nsec; si++) {
+        struct insec *is = &l->insecs[si];
+        if (is->sosec != -1)
+            continue;
+        if (is->osec == OSEC_TDATA || is->osec == OSEC_TBSS)
+            die("%s: thread-local section %s in a linker-script link is "
+                "not supported", is->obj ? is->obj->name : "?", is->name);
+        int k = -1;
+        for (int j = 0; j < sc->nosec; j++)
+            if (sc->osecs[j].orphan && !strcmp(sc->osecs[j].name, is->name))
+                k = j;
+        if (k < 0) {
+            if (mode == 2)
+                die("%s: section %s is placed by no rule of the linker "
+                    "script (--orphan-handling=error)",
+                    is->obj ? is->obj->name : "?", is->name);
+            if (mode == 1)
+                fprintf(stderr, "embld: warning: %s: section %s is placed by "
+                        "no rule of the linker script; it gets an output "
+                        "section of its own\n",
+                        is->obj ? is->obj->name : "?", is->name);
+            int cls = ls_class(is->shflags, is->is_bss);
+            /* after the last LS_OSEC command of this kind (or of the
+             * nearest kind before it), and after orphans already put
+             * there */
+            int at = -1;
+            for (int want = cls; want >= 0 && at < 0; want--)
+                for (int c = 0; c < sc->ncmd; c++) {
+                    if (sc->cmds[c].kind != LS_OSEC)
+                        continue;
+                    struct ls_osec *o = &sc->osecs[sc->cmds[c].osec];
+                    if (o->discard)
+                        continue;
+                    if (ls_osec_class(l, o) == want)
+                        at = c;
+                }
+            while (at >= 0 && at + 1 < sc->ncmd &&
+                   sc->cmds[at + 1].kind == LS_OSEC &&
+                   sc->osecs[sc->cmds[at + 1].osec].orphan)
+                at++;
+            struct ls_osec *o = lp_new_osec(sc, is->name);
+            o->orphan = 1;
+            o->file = "<orphan>";
+            k = sc->nosec - 1;
+            LS_PUSH(o->body, o->nbody, o->capbody);
+            memset(&o->body[0], 0, sizeof o->body[0]);
+            o->body[0].kind = LS_INPUT;
+            o->nbody = 1;
+            /* insert the command */
+            LS_PUSH(sc->cmds, sc->ncmd, sc->capcmd);
+            int pos = at < 0 ? sc->ncmd : at + 1;
+            memmove(&sc->cmds[pos + 1], &sc->cmds[pos],
+                    (size_t)(sc->ncmd - pos) * sizeof *sc->cmds);
+            memset(&sc->cmds[pos], 0, sizeof sc->cmds[pos]);
+            sc->cmds[pos].kind = LS_OSEC;
+            sc->cmds[pos].osec = k;
+            sc->cmds[pos].in_sections = 1;
+            sc->ncmd++;
+        }
+        is->sosec = k;
+        ls_push_list(&sc->osecs[k].body[0], si);
+    }
+}
+
+static void ls_region_check(struct ls_state *st, const struct ls_osec *o,
+                            int r, long long start, long long end)
+{
+    const struct ls_region *rg = &st->sc->reg[r];
+    if (!st->final)
+        return;
+    if (start < rg->origin || start > rg->origin + rg->length)
+        ls_die(st, "section %s at 0x%llx is not within region %s "
+               "(0x%llx to 0x%llx)", o->name, (unsigned long long)start,
+               rg->name, (unsigned long long)rg->origin,
+               (unsigned long long)(rg->origin + rg->length));
+    if (end > rg->origin + rg->length)
+        ls_die(st, "region %s overflowed by %lld bytes (section %s ends "
+               "at 0x%llx; the region ends at 0x%llx)", rg->name,
+               end - (rg->origin + rg->length), o->name,
+               (unsigned long long)end,
+               (unsigned long long)(rg->origin + rg->length));
+}
+
+static void ls_layout_osec(struct ls_state *st, int k)
+{
+    struct linker *l = st->l;
+    struct ls_script *sc = st->sc;
+    struct ls_osec *o = &sc->osecs[k];
+    long long start, lma, align = 1;
+    int vr = -1, lr = -1;
+
+    st->file = o->file;
+    st->line = o->line;
+    if (o->discard)
+        return;
+    o->has_input = 0;
+    o->exec = o->write = 0;
+    int has_bytes = 0, has_assign = 0;
+    for (int b = 0; b < o->nbody; b++) {
+        const struct ls_stmt *s = &o->body[b];
+        if (s->kind == LS_ASSIGN)
+            has_assign = 1;
+        if (s->kind == LS_DATA)
+            has_bytes = 1, o->has_input = 1;
+        for (int j = 0; j < s->nlist; j++) {
+            const struct insec *is = &l->insecs[s->list[j]];
+            o->has_input = 1;
+            if (is->align > (Elf64_Xword)align)
+                align = (long long)is->align;
+            if (is->shflags & SHF_EXECINSTR) o->exec = 1;
+            if (is->shflags & SHF_WRITE) o->write = 1;
+            if (!is->is_bss) has_bytes = 1;
+        }
+        if (s->kind == LS_INPUT && s->in.common)
+            for (int i = 0; i < l->nsym; i++)
+                if (l->syms[i].common) {
+                    o->has_input = 1;
+                    o->write = 1;
+                    if ((long long)l->syms[i].align > align)
+                        align = (long long)l->syms[i].align;
+                }
+    }
+    /* ld drops an output section with nothing in it, even one with an
+     * address (`.ARM.attributes 0 : { ... }` claims no allocated input);
+     * one with assignments is kept where it stands, and occupies only
+     * what its `.` moves cover */
+    if (!o->has_input && !has_assign) {
+        o->laid = 0;
+        o->size = 0;
+        o->vma = o->lma = st->dot;
+        return;
+    }
+    if (o->align)
+    {
+        long long a2 = ls_eval_abs(st, o->align);
+        if (a2 > align)
+            align = a2;
+    }
+    if (o->vregion) {
+        vr = ls_region_idx(sc, o->vregion);
+        if (vr < 0)
+            ls_die(st, "section %s: there is no memory region %s", o->name,
+                   o->vregion);
+    }
+    if (o->lregion) {
+        lr = ls_region_idx(sc, o->lregion);
+        if (lr < 0)
+            ls_die(st, "section %s: there is no memory region %s", o->name,
+                   o->lregion);
+    }
+    if (o->addr) {
+        int rel;
+        start = ls_eval(st, o->addr, &rel);
+    } else {
+        start = ls_align_up(st, vr >= 0 ? sc->reg[vr].cur : st->dot, align);
+    }
+    /* No region named: the one the address falls in, if any, so that
+     * its free byte and its load-address shift follow along. */
+    if (vr < 0)
+        for (int r = 0; r < sc->nreg; r++)
+            if (start >= sc->reg[r].origin &&
+                start < sc->reg[r].origin + sc->reg[r].length) {
+                vr = r;
+                break;
+            }
+    if (o->at)
+        lma = ls_eval_abs(st, o->at);
+    else if (lr >= 0)
+        lma = ls_align_up(st, sc->reg[lr].cur, align);
+    else if (vr >= 0 && sc->reg[vr].has_delta && !o->addr)
+        lma = start + sc->reg[vr].delta;
+    else
+        lma = start;
+    o->vma = start;
+    o->lma = lma;
+    o->al = align;
+    st->cur = k;
+    st->dot = start;
+    for (int b = 0; b < o->nbody; b++) {
+        struct ls_stmt *s = &o->body[b];
+        st->file = s->file;
+        st->line = s->line;
+        switch (s->kind) {
+        case LS_ASSIGN:
+            ls_assign(st, s);
+            break;
+        case LS_INPUT: {
+            long long sub = o->subalign ? ls_eval_abs(st, o->subalign) : 0;
+            for (int j = 0; j < s->nlist; j++) {
+                struct insec *is = &l->insecs[s->list[j]];
+                st->dot = ls_align_up(st, st->dot,
+                                      sub ? sub : (long long)is->align);
+                is->vaddr = (Elf64_Addr)st->dot;
+                st->dot += (long long)is->size;
+            }
+            if (s->in.common)
+                for (int i = 0; i < l->nsym; i++) {
+                    struct symbol *g = &l->syms[i];
+                    if (!g->common)
+                        continue;
+                    st->dot = ls_align_up(st, st->dot,
+                                          g->align ? (long long)g->align : 1);
+                    g->value = (Elf64_Addr)st->dot;
+                    st->dot += (long long)g->size;
+                }
+            break;
+        }
+        case LS_DATA:
+            s->doff = st->dot - start;
+            s->dval = ls_eval_abs(st, s->e);
+            st->dot += s->dsize;
+            break;
+        case LS_FILL:
+            o->fillv = ls_eval_abs(st, s->e);
+            break;
+        case LS_ASSERT:
+            if (st->final && !ls_eval_abs(st, s->e))
+                ls_die(st, "%s", s->msg);
+            break;
+        default:
+            break;
+        }
+    }
+    if (o->fill)
+        o->fillv = ls_eval_abs(st, o->fill);
+    o->size = st->dot - start;
+    /* No bytes of its own -- .bss, or a section made only of `.` moves
+     * like STM32's ._user_heap_stack -- takes no file space and no flash */
+    o->nobits = o->noload || !has_bytes;
+    o->laid = 1;
+    st->cur = -1;
+    if (vr >= 0) {
+        ls_region_check(st, o, vr, start, start + o->size);
+        if (start + o->size > sc->reg[vr].cur || o->vregion)
+            sc->reg[vr].cur = start + o->size;
+        sc->reg[vr].delta = lma - start;
+        sc->reg[vr].has_delta = 1;
+    }
+    if (lr >= 0 && !o->nobits) {
+        ls_region_check(st, o, lr, lma, lma + o->size);
+        sc->reg[lr].cur = lma + o->size;
+    }
+    st->dot = start + o->size;
+}
+
+static void ls_layout_pass(struct linker *l, struct ls_script *sc, int final)
+{
+    struct ls_state st;
+    memset(&st, 0, sizeof st);
+    st.l = l;
+    st.sc = sc;
+    st.cur = -1;
+    st.final = final;
+    for (int r = 0; r < sc->nreg; r++) {
+        struct ls_region *rg = &sc->reg[r];
+        rg->origin = ls_eval_abs(&st, rg->org);
+        rg->length = ls_eval_abs(&st, rg->len);
+        rg->cur = rg->origin;
+        rg->has_delta = 0;
+        rg->delta = 0;
+    }
+    for (int c = 0; c < sc->ncmd; c++) {
+        struct ls_stmt *s = &sc->cmds[c];
+        st.in_sections = s->in_sections;
+        st.file = s->file;
+        st.line = s->line;
+        if (s->kind == LS_OSEC)
+            ls_layout_osec(&st, s->osec);
+        else if (s->kind == LS_ASSIGN)
+            ls_assign(&st, s);
+        else if (s->kind == LS_ASSERT && final && !ls_eval_abs(&st, s->e))
+            ls_die(&st, "%s", s->msg);
+    }
+}
+
+/* Everything the layout decides, to compare one pass with the next. */
+static unsigned long long ls_signature(struct linker *l, struct ls_script *sc)
+{
+    unsigned long long h = 1469598103934665603ULL;
+#define MIX(x) (h = (h ^ (unsigned long long)(x)) * 1099511628211ULL)
+    for (int k = 0; k < sc->nosec; k++) {
+        MIX(sc->osecs[k].vma); MIX(sc->osecs[k].lma); MIX(sc->osecs[k].size);
+    }
+    for (int i = 0; i < l->nsym; i++)
+        if (l->syms[i].scripted)
+            MIX(l->syms[i].value);
+    for (int i = 0; i < l->nsec; i++)
+        MIX(l->insecs[i].vaddr);
+#undef MIX
+    return h;
+}
+
+static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
+{
+    if (l->harvard)
+        die("a linker script for an AVR image is not supported yet; AVR "
+            "links with -Ttext/-Tdata");
+    if (l->machine != EM_ARM && l->machine != EM_RISCV)
+        die("-T: a linker script is supported for ARM and RISC-V images "
+            "only (this one is machine %u)", (unsigned)l->machine);
+    /* A region every output section names must exist, whether or not
+     * anything ends up in the section: a typo in `> RAM` is a typo. */
+    for (int k = 0; k < sc->nosec; k++) {
+        const struct ls_osec *o = &sc->osecs[k];
+        const char *r[2] = { o->vregion, o->lregion };
+        for (int j = 0; j < 2; j++)
+            if (r[j] && ls_region_idx(sc, r[j]) < 0)
+                die("%s:%d: section %s: there is no memory region %s",
+                    o->file, o->line, o->name, r[j]);
+    }
+    ls_claim(l, sc);
+    {
+        int ncommon = 0;
+        for (int i = 0; i < l->nsym; i++)
+            ncommon += l->syms[i].common;
+        if (ncommon && !sc->has_common)
+            die("%d COMMON symbol%s (tentative definitions from an object "
+                "built with -fcommon) and the linker script places no "
+                "*(COMMON): add it to the .bss output section, where the "
+                "startup code zeroes it", ncommon, ncommon == 1 ? "" : "s");
+    }
+    ls_orphans(l, sc, orphan_mode);
+    unsigned long long prev = 0;
+    int pass;
+    for (pass = 0; pass < LS_MAX_PASSES; pass++) {
+        ls_layout_pass(l, sc, 0);
+        unsigned long long sig = ls_signature(l, sc);
+        if (pass > 0 && sig == prev)
+            break;
+        prev = sig;
+    }
+    if (pass == LS_MAX_PASSES)
+        die("the linker script's layout does not settle: an address depends "
+            "on itself (a section placed by a symbol defined after it?)");
+    ls_layout_pass(l, sc, 1);        /* the same again, now reporting */
+    for (int i = 0; i < l->nsym; i++)
+        if (l->syms[i].common) {     /* placed by *(COMMON): absolute now */
+            l->syms[i].common = 0;
+            l->syms[i].insec = -1;
+        }
+}
+
+/* ---- writing a scripted image -------------------------------------------
+ *
+ * One PT_LOAD per output section that has bytes or size, with p_paddr
+ * the section's LOAD address: that is what a flash programmer, objcopy
+ * -O binary and QEMU's -kernel loader read to know where the bytes go,
+ * and how .data's initial values end up in flash while its symbols say
+ * RAM. One section header each, under the script's names, so size(1),
+ * objdump and a debugger see the layout the script describes. */
+
+static void ls_put_ehdr(unsigned char *img, const struct linker *l,
+                        Elf64_Ehdr *eh)
+{
+    if (!l->elf32) {
+        memcpy(img, eh, sizeof *eh);
+        return;
+    }
+    Elf32_Ehdr e;
+    memset(&e, 0, sizeof e);
+    memcpy(e.e_ident, eh->e_ident, EI_NIDENT);
+    e.e_type = eh->e_type;
+    e.e_machine = eh->e_machine;
+    e.e_version = eh->e_version;
+    e.e_entry = (Elf32_Addr)eh->e_entry;
+    e.e_phoff = (Elf32_Off)eh->e_phoff;
+    e.e_shoff = (Elf32_Off)eh->e_shoff;
+    e.e_flags = eh->e_flags;
+    e.e_ehsize = eh->e_ehsize;
+    e.e_phentsize = eh->e_phentsize;
+    e.e_phnum = eh->e_phnum;
+    e.e_shentsize = eh->e_shentsize;
+    e.e_shnum = eh->e_shnum;
+    e.e_shstrndx = eh->e_shstrndx;
+    memcpy(img, &e, sizeof e);
+}
+
+static void ls_put_phdr(unsigned char *at, const struct linker *l,
+                        const Elf64_Phdr *ph)
+{
+    if (!l->elf32) {
+        memcpy(at, ph, sizeof *ph);
+        return;
+    }
+    Elf32_Phdr p;
+    p.p_type = ph->p_type;
+    p.p_offset = (Elf32_Off)ph->p_offset;
+    p.p_vaddr = (Elf32_Addr)ph->p_vaddr;
+    p.p_paddr = (Elf32_Addr)ph->p_paddr;
+    p.p_filesz = (Elf32_Word)ph->p_filesz;
+    p.p_memsz = (Elf32_Word)ph->p_memsz;
+    p.p_flags = ph->p_flags;
+    p.p_align = (Elf32_Word)ph->p_align;
+    memcpy(at, &p, sizeof p);
+}
+
+static void ls_put_shdr(unsigned char *at, const struct linker *l,
+                        const Elf64_Shdr *sh)
+{
+    if (!l->elf32) {
+        memcpy(at, sh, sizeof *sh);
+        return;
+    }
+    Elf32_Shdr s;
+    memset(&s, 0, sizeof s);
+    s.sh_name = sh->sh_name;
+    s.sh_type = sh->sh_type;
+    s.sh_flags = (Elf32_Word)sh->sh_flags;
+    s.sh_addr = (Elf32_Addr)sh->sh_addr;
+    s.sh_offset = (Elf32_Off)sh->sh_offset;
+    s.sh_size = (Elf32_Word)sh->sh_size;
+    s.sh_link = sh->sh_link;
+    s.sh_info = sh->sh_info;
+    s.sh_addralign = (Elf32_Word)sh->sh_addralign;
+    s.sh_entsize = (Elf32_Word)sh->sh_entsize;
+    memcpy(at, &s, sizeof s);
+}
+
+static void ls_put_sym(unsigned char *at, const struct linker *l,
+                       Elf64_Word name, Elf64_Addr val, Elf64_Xword size,
+                       unsigned char info, Elf64_Half shndx)
+{
+    if (l->elf32) {
+        Elf32_Sym e;
+        memset(&e, 0, sizeof e);
+        e.st_name = name;
+        e.st_value = (Elf32_Addr)val;
+        e.st_size = (Elf32_Word)size;
+        e.st_info = info;
+        e.st_shndx = shndx;
+        memcpy(at, &e, sizeof e);
+    } else {
+        Elf64_Sym e;
+        memset(&e, 0, sizeof e);
+        e.st_name = name;
+        e.st_value = val;
+        e.st_size = size;
+        e.st_info = info;
+        e.st_shndx = shndx;
+        memcpy(at, &e, sizeof e);
+    }
+}
+
+static void write_exec_script(struct linker *l, struct ls_script *sc,
+                              const char *out, Elf64_Addr entry)
+{
+    int *em = xmalloc((size_t)(sc->nosec + 1) * sizeof *em), nem = 0;
+    for (int c = 0; c < sc->ncmd; c++) {
+        if (sc->cmds[c].kind != LS_OSEC)
+            continue;
+        struct ls_osec *o = &sc->osecs[sc->cmds[c].osec];
+        o->shndx = 0;
+        if (!o->discard && o->laid && o->size > 0)
+            em[nem++] = sc->cmds[c].osec;
+    }
+    Elf64_Off ehsz = l->elf32 ? sizeof(Elf32_Ehdr) : sizeof(Elf64_Ehdr);
+    Elf64_Off phsz = l->elf32 ? sizeof(Elf32_Phdr) : sizeof(Elf64_Phdr);
+    Elf64_Xword shentsz = l->elf32 ? sizeof(Elf32_Shdr) : sizeof(Elf64_Shdr);
+    Elf64_Xword symentsz = l->elf32 ? sizeof(Elf32_Sym) : sizeof(Elf64_Sym);
+    Elf64_Off off = ehsz + (Elf64_Off)nem * phsz;
+    Elf64_Off *fo = xmalloc((size_t)(nem + 1) * sizeof *fo);
+    for (int k = 0; k < nem; k++) {
+        struct ls_osec *o = &sc->osecs[em[k]];
+        /* the file offset congruent to the address modulo 4, which is
+         * all a PT_LOAD aligned to 4 asks */
+        off = align_up(off, 4) + ((Elf64_Off)o->vma & 3);
+        fo[k] = off;
+        o->shndx = 1 + k;
+        if (!o->nobits)
+            off += (Elf64_Off)o->size;
+    }
+    /* section headers: [0] null, the output sections, the DWARF, then
+     * .symtab .strtab .shstrtab */
+    int sh_dbg0 = 1 + nem, sh_symtab = sh_dbg0 + l->ndbg;
+    int sh_strtab = sh_symtab + 1, sh_shstr = sh_symtab + 2;
+    int nsh = sh_shstr + 1;
+
+    struct ltab symstr, shstr;
+    memset(&symstr, 0, sizeof symstr);
+    memset(&shstr, 0, sizeof shstr);
+    ltab_add(&symstr, "");
+    ltab_add(&shstr, "");
+    Elf64_Word *n_osec = xmalloc((size_t)(nem + 1) * sizeof *n_osec);
+    for (int k = 0; k < nem; k++)
+        n_osec[k] = (Elf64_Word)ltab_add(&shstr, sc->osecs[em[k]].name);
+    Elf64_Word *n_dbg = xmalloc((size_t)(l->ndbg + 1) * sizeof *n_dbg);
+    for (int i = 0; i < l->ndbg; i++)
+        n_dbg[i] = (Elf64_Word)ltab_add(&shstr, l->dbgsecs[i].name);
+    Elf64_Word n_symtab = (Elf64_Word)ltab_add(&shstr, ".symtab");
+    Elf64_Word n_strtab = (Elf64_Word)ltab_add(&shstr, ".strtab");
+    Elf64_Word n_shstr = (Elf64_Word)ltab_add(&shstr, ".shstrtab");
+
+    int nsy = 0;
+    Elf64_Word *symname = xmalloc((size_t)(l->nsym + 1) * sizeof *symname);
+    for (int i = 0; i < l->nsym; i++) {
+        struct symbol *g = &l->syms[i];
+        if (g->defined && g->name && *g->name)
+            symname[nsy++] = (Elf64_Word)ltab_add(&symstr, g->name);
+    }
+
+    Elf64_Off dbg_off0 = align_up(off, 8), dbg_total = 0;
+    Elf64_Off *dbg_at = xmalloc((size_t)(l->ndbg + 1) * sizeof *dbg_at);
+    for (int i = 0; i < l->ndbg; i++) {
+        dbg_at[i] = dbg_off0 + dbg_total;
+        dbg_total += (Elf64_Off)l->dbgsecs[i].len;
+    }
+    Elf64_Off sym_off = align_up(dbg_off0 + dbg_total, 8);
+    Elf64_Off symsz = (Elf64_Off)(nsy + 1) * symentsz;
+    Elf64_Off str_off = sym_off + symsz;
+    Elf64_Off shstr_off = str_off + symstr.len;
+    Elf64_Off sh_off = align_up(shstr_off + shstr.len, 8);
+    Elf64_Off total = sh_off + (Elf64_Off)nsh * shentsz;
+    unsigned char *img = xcalloc(1, (size_t)total);
+
+    /* the bytes: fill, then each input where the layout put it, then the
+     * BYTE/SHORT/LONG/QUAD statements */
+    for (int k = 0; k < nem; k++) {
+        struct ls_osec *o = &sc->osecs[em[k]];
+        if (o->nobits)
+            continue;
+        unsigned char pat[4];
+        int plen;
+        unsigned long fv = (unsigned long)o->fillv;
+        if (fv <= 0xff) {
+            pat[0] = (unsigned char)fv;
+            plen = 1;
+        } else {                        /* big-endian, as ld writes it */
+            pat[0] = (unsigned char)(fv >> 24); pat[1] = (unsigned char)(fv >> 16);
+            pat[2] = (unsigned char)(fv >> 8);  pat[3] = (unsigned char)fv;
+            plen = 4;
+        }
+        if (fv)
+            for (long long b = 0; b < o->size; b++)
+                img[fo[k] + (Elf64_Off)b] = pat[b % plen];
+        for (int bb = 0; bb < o->nbody; bb++) {
+            struct ls_stmt *s = &o->body[bb];
+            for (int j = 0; j < s->nlist; j++) {
+                struct insec *is = &l->insecs[s->list[j]];
+                if (is->is_bss || !is->data || !is->size)
+                    continue;
+                memcpy(img + fo[k] + (is->vaddr - (Elf64_Addr)o->vma),
+                       is->data, (size_t)is->size);
+                /* NOBITS inputs inside a PROGBITS output section are
+                 * its zeros, already there */
+            }
+            if (s->kind == LS_DATA) {
+                unsigned long long v = (unsigned long long)s->dval;
+                for (int b = 0; b < s->dsize; b++)    /* little-endian */
+                    img[fo[k] + (Elf64_Off)s->doff + (Elf64_Off)b] =
+                        (unsigned char)(v >> (8 * b));
+            }
+        }
+        /* a NOBITS input claimed into a section with bytes is zeros */
+        for (int bb = 0; bb < o->nbody; bb++)
+            for (int j = 0; j < o->body[bb].nlist; j++) {
+                struct insec *is = &l->insecs[o->body[bb].list[j]];
+                if (is->is_bss && is->size)
+                    memset(img + fo[k] + (is->vaddr - (Elf64_Addr)o->vma), 0,
+                           (size_t)is->size);
+            }
+    }
+
+    Elf64_Ehdr eh;
+    memset(&eh, 0, sizeof eh);
+    eh.e_ident[EI_MAG0] = ELFMAG0;
+    eh.e_ident[EI_MAG1] = ELFMAG1;
+    eh.e_ident[EI_MAG2] = ELFMAG2;
+    eh.e_ident[EI_MAG3] = ELFMAG3;
+    eh.e_ident[EI_CLASS] = l->elf32 ? ELFCLASS32 : ELFCLASS64;
+    eh.e_ident[EI_DATA] = ELFDATA2LSB;
+    eh.e_ident[EI_VERSION] = EV_CURRENT;
+    eh.e_type = ET_EXEC;
+    eh.e_machine = (Elf64_Half)l->machine;
+    eh.e_version = EV_CURRENT;
+    eh.e_entry = entry;
+    eh.e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5 : l->eflags;
+    eh.e_phoff = nem ? ehsz : 0;
+    eh.e_shoff = sh_off;
+    eh.e_ehsize = (Elf64_Half)ehsz;
+    eh.e_phentsize = (Elf64_Half)phsz;
+    eh.e_phnum = (Elf64_Half)nem;
+    eh.e_shentsize = (Elf64_Half)shentsz;
+    eh.e_shnum = (Elf64_Half)nsh;
+    eh.e_shstrndx = (Elf64_Half)sh_shstr;
+    ls_put_ehdr(img, l, &eh);
+
+    for (int k = 0; k < nem; k++) {
+        struct ls_osec *o = &sc->osecs[em[k]];
+        Elf64_Phdr ph;
+        memset(&ph, 0, sizeof ph);
+        ph.p_type = PT_LOAD;
+        ph.p_flags = PF_R | (o->exec ? PF_X : 0) | (o->write ? PF_W : 0);
+        ph.p_offset = fo[k];
+        ph.p_vaddr = (Elf64_Addr)o->vma;
+        /* A NOBITS section has nothing to load. A loader still zeroes
+         * its p_memsz at p_paddr -- QEMU's does -- so that is its run
+         * address, where zeroing is harmless, and not a load address in
+         * flash that it could overlap. */
+        ph.p_paddr = (Elf64_Addr)(o->nobits ? o->vma : o->lma);
+        ph.p_filesz = o->nobits ? 0 : (Elf64_Xword)o->size;
+        ph.p_memsz = (Elf64_Xword)o->size;
+        ph.p_align = 4;
+        ls_put_phdr(img + ehsz + (Elf64_Off)k * phsz, l, &ph);
+    }
+
+    Elf64_Shdr sh;
+    for (int k = 0; k < nem; k++) {
+        struct ls_osec *o = &sc->osecs[em[k]];
+        memset(&sh, 0, sizeof sh);
+        sh.sh_name = n_osec[k];
+        sh.sh_type = o->nobits ? SHT_NOBITS : SHT_PROGBITS;
+        sh.sh_flags = SHF_ALLOC | (o->exec ? SHF_EXECINSTR : 0) |
+                      (o->write ? SHF_WRITE : 0);
+        sh.sh_addr = (Elf64_Addr)o->vma;
+        sh.sh_offset = fo[k];
+        sh.sh_size = (Elf64_Xword)o->size;
+        sh.sh_addralign = (Elf64_Xword)(o->al > 0 ? o->al : 1);
+        ls_put_shdr(img + sh_off + (Elf64_Off)(1 + k) * shentsz, l, &sh);
+    }
+    for (int i = 0; i < l->ndbg; i++) {
+        memset(&sh, 0, sizeof sh);
+        sh.sh_name = n_dbg[i];
+        sh.sh_type = SHT_PROGBITS;
+        sh.sh_offset = dbg_at[i];
+        sh.sh_size = (Elf64_Xword)l->dbgsecs[i].len;
+        sh.sh_addralign = 1;
+        memcpy(img + dbg_at[i], l->dbgsecs[i].data, (size_t)l->dbgsecs[i].len);
+        ls_put_shdr(img + sh_off + (Elf64_Off)(sh_dbg0 + i) * shentsz, l, &sh);
+    }
+    memset(&sh, 0, sizeof sh);
+    sh.sh_name = n_symtab;
+    sh.sh_type = SHT_SYMTAB;
+    sh.sh_offset = sym_off;
+    sh.sh_size = symsz;
+    sh.sh_link = (Elf64_Word)sh_strtab;
+    sh.sh_info = 1;
+    sh.sh_addralign = 8;
+    sh.sh_entsize = symentsz;
+    ls_put_shdr(img + sh_off + (Elf64_Off)sh_symtab * shentsz, l, &sh);
+    memset(&sh, 0, sizeof sh);
+    sh.sh_name = n_strtab;
+    sh.sh_type = SHT_STRTAB;
+    sh.sh_offset = str_off;
+    sh.sh_size = (Elf64_Xword)symstr.len;
+    sh.sh_addralign = 1;
+    ls_put_shdr(img + sh_off + (Elf64_Off)sh_strtab * shentsz, l, &sh);
+    memset(&sh, 0, sizeof sh);
+    sh.sh_name = n_shstr;
+    sh.sh_type = SHT_STRTAB;
+    sh.sh_offset = shstr_off;
+    sh.sh_size = (Elf64_Xword)shstr.len;
+    sh.sh_addralign = 1;
+    ls_put_shdr(img + sh_off + (Elf64_Off)sh_shstr * shentsz, l, &sh);
+    memcpy(img + str_off, symstr.p, (size_t)symstr.len);
+    memcpy(img + shstr_off, shstr.p, (size_t)shstr.len);
+
+    int j = 0;
+    for (int i = 0; i < l->nsym; i++) {
+        struct symbol *g = &l->syms[i];
+        if (!g->defined || !g->name || !*g->name)
+            continue;
+        Elf64_Half shndx = SHN_ABS;
+        int exec = 0;
+        if (g->scripted) {
+            if (g->sosec >= 0 && sc->osecs[g->sosec].shndx)
+                shndx = (Elf64_Half)sc->osecs[g->sosec].shndx;
+        } else if (g->insec >= 0) {
+            int so = l->insecs[g->insec].sosec;
+            if (so >= 0 && sc->osecs[so].shndx) {
+                shndx = (Elf64_Half)sc->osecs[so].shndx;
+                exec = sc->osecs[so].exec;
+            }
+        }
+        int type = g->scripted ? STT_NOTYPE
+                 : g->type ? g->type : exec ? STT_FUNC : STT_OBJECT;
+        ls_put_sym(img + sym_off + (Elf64_Off)(j + 1) * symentsz, l,
+                   symname[j], g->value, g->size,
+                   (unsigned char)ELF64_ST_INFO(STB_GLOBAL, type), shndx);
+        j++;
+    }
+    if (plat_write_file(out, img, (size_t)total) != 0)
+        die("cannot write '%s'", out);
+    free(img); free(em); free(fo); free(n_osec); free(n_dbg); free(dbg_at);
+    free(symname); free(symstr.p); free(shstr.p);
+}
+
+/* A file a script names (INPUT, GROUP, STARTUP): `-lNAME` is libNAME.a
+ * in the search directories; anything else is found as given, or there. */
+static const char *ls_find_input(const char *name, const char **dirs,
+                                 int ndirs)
+{
+    char buf[4096];
+    FILE *f;
+    if (!strncmp(name, "-l", 2)) {
+        for (int k = 0; k < ndirs; k++) {
+            snprintf(buf, sizeof buf, "%s/lib%s.a", dirs[k], name + 2);
+            if ((f = fopen(buf, "rb")) != NULL) {
+                fclose(f);
+                return xstrndup(buf, strlen(buf));
+            }
+        }
+        die("cannot find lib%s.a (from %s in the linker script) in any "
+            "search directory", name + 2, name);
+    }
+    if ((f = fopen(name, "rb")) != NULL) {
+        fclose(f);
+        return name;
+    }
+    for (int k = 0; k < ndirs; k++) {
+        snprintf(buf, sizeof buf, "%s/%s", dirs[k], name);
+        if ((f = fopen(buf, "rb")) != NULL) {
+            fclose(f);
+            return xstrndup(buf, strlen(buf));
+        }
+    }
+    die("cannot find '%s', which the linker script names as an input", name);
+    return NULL;
+}
+
 int embld_link(const char **inputs, int ninputs, const char *out,
                const struct link_opts *opts)
 {
@@ -2629,23 +3804,106 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     l.stack_top = (opts && opts->have_stack) ? opts->stack_top : 0;
     l.stub_sec = -1;
 
+    /* -T: the script is read before any input, because it can name
+     * inputs of its own and symbols an archive has to supply. */
+    struct ls_script *sc = NULL;
+    const char **all = inputs;
+    int nall = ninputs;
+    if (opts && opts->script) {
+        if (opts->have_base || opts->data_base || opts->rom_limit ||
+            opts->lma_offset || opts->have_stack || opts->emit_embx)
+            die("-T %s lays the image out, so -Ttext, -Tdata, -Tstack, "
+                "--rom-limit, --lma-offset and --embx cannot be given with "
+                "it", opts->script);
+        sc = ls_parse_file(opts->script);
+        l.sc = sc;
+        for (int k = 0; k < opts->nlibdirs; k++)
+            lp_push_str(&sc->dirs, &sc->ndirs, &sc->capdirs, opts->libdirs[k]);
+        lp_push_str(&sc->dirs, &sc->ndirs, &sc->capdirs,
+                    ls_dirname(opts->script));
+        if (!opts->entry && sc->entry)
+            l.entry = sc->entry;
+        /* An entry the link was told about is a reference: the archive
+         * member that defines Reset_Handler is pulled for it, as ld does. */
+        if (opts->entry || sc->entry)
+            sym_intern(&l, l.entry);
+        for (int k = 0; k < sc->nextern; k++)
+            sym_intern(&l, sc->externs[k]);
+        if (sc->ninputs) {
+            all = xmalloc((size_t)(ninputs + sc->ninputs) * sizeof *all);
+            for (int k = 0; k < ninputs; k++)
+                all[k] = inputs[k];
+            for (int k = 0; k < sc->ninputs; k++)
+                all[nall++] = ls_find_input(sc->inputs[k], sc->dirs, sc->ndirs);
+        }
+    }
+    for (int k = 0; opts && k < opts->nundefs; k++)
+        sym_intern(&l, opts->undefs[k]);
+
     /* Explicit objects are always linked; archives are stashed and their
      * members pulled on demand (left-to-right, as a linker does — so an
      * archive satisfies references that appear before it on the line). */
-    for (int i = 0; i < ninputs; i++) {
+    for (int i = 0; i < nall; i++) {
         long len;
-        unsigned char *buf = read_file(inputs[i], &len);
+        unsigned char *buf = read_file(all[i], &len);
         if (is_archive(buf, len)) {
-            parse_archive(&l, inputs[i], buf, len);
+            parse_archive(&l, all[i], buf, len);
             pull_archives(&l); /* satisfy what is undefined so far */
         } else {
-            add_object(&l, parse_object(inputs[i], buf, len));
+            add_object(&l, parse_object(all[i], buf, len));
         }
     }
     /* A final fixed-point pass, so a later object's references can still
      * reach back into an earlier archive (the --start-group behaviour,
      * always on: correct over order-sensitive). */
     pull_archives(&l);
+
+    if (sc) {
+        ls_layout(&l, sc, opts->orphan_mode);
+        finalize_symbols(&l);
+        /* ld's bounds for an output section whose name is a C
+         * identifier, which is how a program walks a table it put in a
+         * section of its own */
+        for (int k = 0; k < sc->nosec; k++) {
+            const struct ls_osec *o = &sc->osecs[k];
+            char sym[256];
+            if (o->discard || !o->laid || !is_c_ident(o->name) ||
+                strlen(o->name) > 200)
+                continue;
+            snprintf(sym, sizeof sym, "__start_%s", o->name);
+            define_linker_symbol(&l, xstrndup(sym, strlen(sym)),
+                                 (Elf64_Addr)o->vma);
+            snprintf(sym, sizeof sym, "__stop_%s", o->name);
+            define_linker_symbol(&l, xstrndup(sym, strlen(sym)),
+                                 (Elf64_Addr)(o->vma + o->size));
+        }
+        arm_attrs_check(&l);
+        Elf64_Addr ev = 0;
+        struct symbol *e = sym_find(&l, l.entry);
+        if (e && e->defined) {
+            ev = e->value;
+        } else if (opts->entry || sc->entry) {
+            die("entry symbol '%s' is undefined", l.entry);
+        } else {
+            /* ld's default: no ENTRY and no _start is a warning, and the
+             * entry is where the code starts. A Cortex-M ignores it (the
+             * vector table says where to start); a loader may not. */
+            for (int c = 0; c < sc->ncmd && !ev; c++)
+                if (sc->cmds[c].kind == LS_OSEC) {
+                    const struct ls_osec *o = &sc->osecs[sc->cmds[c].osec];
+                    if (!o->discard && o->laid && o->exec && o->size)
+                        ev = (Elf64_Addr)o->vma;
+                }
+            fprintf(stderr, "embld: warning: no ENTRY in the script and no "
+                    "_start; the entry is 0x%llx, where the code starts\n",
+                    (unsigned long long)ev);
+        }
+        for (int i = 0; i < l.nobj; i++)
+            apply_relocs(&l, l.objs[i]);
+        write_exec_script(&l, sc, out, ev);
+        emit_embdbg(&l, out);
+        return 0;
+    }
 
     /* The entry stub goes in before layout so it gets an address like
      * any other section, and is FILLED after, when the entry symbol has

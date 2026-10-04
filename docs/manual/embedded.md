@@ -219,7 +219,15 @@ with `.text`, `.data.*` with `.data`); a section with any other name is
 kept as a group of its own, after `.rodata` if it is read-only and after
 `.data` if it is writable, and is bracketed by `__start_NAME`/`__stop_NAME`
 (for a C-identifier name) or `__NAME_start`/`__NAME_end` (for `.NAME`).
-There is no linker script and no garbage collection of unused sections.
+There is no garbage collection of unused sections.
+
+A project that comes with a GNU ld linker script links with it instead:
+`embld -T SCRIPT` replaces all of the options above, and the startup uses
+whatever symbols the script defines (`_sidata`, `_sdata`, `_ebss` in
+STM32CubeMX's, for example). See [Linker scripts](tools/embld.md#linker-scripts).
+A section of your own that holds only `const` objects (a command table, a
+list of drivers) is read-only, as gcc makes it, so a script's orphan rule
+stores it in flash after `.rodata`.
 
 An image too large for `--rom-limit` is refused:
 
@@ -486,9 +494,18 @@ embld -e Reset_Handler -Ttext 0x08000000 -Tdata 0x20000000 --rom-limit 524288 \
       startup.o main.o librt.a -o fw.elf
 ```
 
-The vector table's stack-pointer entry is the top of RAM; EmbLD has no
-RAM-size check, so keep `.data`, `.bss` and the stack inside the part's
-SRAM yourself (`llvm-size fw.elf` gives `data` and `bss`). `-Tstack` is a
+Or with the linker script the part's project template provides, which
+also checks RAM: a script's `MEMORY` regions are enforced, and an image
+that does not fit stops with `region RAM overflowed by N bytes`.
+
+```sh
+embld -T STM32F407VGTx_FLASH.ld startup.o main.o librt.a -o fw.elf
+```
+
+The vector table's stack-pointer entry is the top of RAM. Without a
+script EmbLD has no RAM-size check, so keep `.data`, `.bss` and the stack
+inside the part's SRAM yourself (`llvm-size fw.elf` gives `data` and
+`bss`). `-Tstack` is a
 RISC-V option and is refused here:
 
 ```text

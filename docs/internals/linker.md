@@ -60,8 +60,10 @@ keeps its own list (`SRCS=`) and does not read the `Makefile`'s.
 - **Static output only.** The output is always `ET_EXEC`. There is no PLT,
   no GOT, no dynamic section and no position-independent output.
   `R_X86_64_PLT32` is applied as a plain PC-relative reference.
-- **No linker script.** The layout is fixed in code (`enum osec` and
-  `layout`). The only inputs to it are the options in `struct link_opts`.
+- **A fixed layout, or a GNU ld script.** Without `-T` the layout is fixed
+  in code (`enum osec` and `layout`), and the only inputs to it are the
+  options in `struct link_opts`. With `-T` (ARM and RISC-V), the script
+  decides it: see [Linker scripts](#linker-scripts).
 - **One machine per link**, decided by the first object added.
 - **One 64-bit representation.** ELF32 inputs are converted into the
   `Elf64_*` structures at parse time. Only the relocation reader (whose
@@ -449,7 +451,44 @@ counted.
   inserted stays as it is, which is correct because nothing moves.
 - **No veneers, stubs or trampolines.** A branch that cannot reach its
   target is an error naming the limit.
-- **No section sorting** by name, priority or alignment.
+- **No section sorting** by name, priority or alignment, except where a
+  script's `SORT` asks for it.
+
+## Linker scripts
+
+`src/link/ldscript.h`, included once by `link.c`, parses a script into a
+tree (`struct ls_script`): the top-level commands in order, the output
+sections (`struct ls_osec`) with their bodies, the memory regions and
+their aliases, and the `INPUT`/`GROUP`/`EXTERN` names. A header rather
+than a unit of its own, so that the hand-maintained source lists in
+`Makefile`, `tools/os-build-embld.sh` and `build.ebm` did not change
+beyond the header closure. The layout code is in `link.c`, under
+"linker scripts: the layout":
+
+1. `ls_claim`: each `LS_INPUT` description, in script order, claims the
+   unclaimed allocated input sections it matches (`ls_file_match`,
+   `ls_glob`), recording their `insecs` indices in its `list`, sorted if
+   it says `SORT*`. `/DISCARD/` marks what it claims `discarded`.
+2. `ls_orphans`: an unclaimed input gets an `orphan` output section of its
+   own name, inserted after the last command whose section is of the same
+   kind (`ls_class`: code, read-only, data, zero-initialised).
+3. `ls_layout_pass`, repeated until `ls_signature` (every section's
+   addresses and size, every script symbol, every input's address) stops
+   changing, then once more with `final` set, which is the pass that
+   reports region overflow and `ASSERT` failures. A forward reference reads
+   the previous pass. Eight passes without settling is an error.
+4. `finalize_symbols`, `__start_`/`__stop_` for C-identifier sections,
+   relocation, and `write_exec_script`: one `PT_LOAD` per output section
+   with `p_paddr` its load address (its run address if it is NOBITS,
+   because a loader zeroes `p_memsz` there), one section header each.
+
+An expression value carries whether it is relative to a section (derived
+from `.` or from a symbol in a section). Inside an output section, `. =`
+an absolute value is an offset into the section, as in ld. A script
+symbol (`struct symbol.scripted`) remembers the output section it was
+assigned in, which becomes its `st_shndx`; otherwise it is `SHN_ABS`. A
+reference from kept code to a symbol in a discarded section is refused in
+`apply_relocs`; DWARF that describes discarded code gets address 0.
 
 ## Per-target images
 
