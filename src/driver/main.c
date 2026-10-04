@@ -3769,6 +3769,11 @@ int main(int argc, char **argv)
             if (!txt)
                 diag_fatal(input, 0, "cannot open file");
             struct ir_unit *pu = ir_parse(input, txt);
+            /* With -O, the optimizer runs on what was parsed first. A
+             * pass can then be tested on IR written to provoke it -- a
+             * shape C reaches only by luck, if at all. */
+            if (opt_level > 0 || opt_for_size)
+                opt_run(pu, opt_for_size ? OPT_SIZE : opt_level);
             struct outbuf ob = { NULL, 0, 0 };
             ir_print_unit(&ob, pu);
             fwrite(ob.p, 1, ob.n, stdout);
