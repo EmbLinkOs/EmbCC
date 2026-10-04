@@ -245,8 +245,14 @@ typedef struct {
  * bit reused twice (J1/J2). R_ARM_CALL names the ARM-state instruction
  * at the same address, and a linker handed it would rewrite four bytes
  * that mean something else entirely. */
+#define R_ARM_NONE       0    /* a dependency only: .ARM.exidx on its
+                                 * personality routine */
 #define R_ARM_ABS32      2
 #define R_ARM_REL32      3
+/* What gcc's arm-none-eabi puts in .init_array/.fini_array: ABS32 or
+ * REL32 by the platform's choice, and ABS32 on bare metal (ld's
+ * --target1-abs default there). */
+#define R_ARM_TARGET1   38
 #define R_ARM_THM_CALL  10
 /* The movw/movt pair that materialises a symbol's address in Thumb
  * state. _NC on the low half: it drops the bits movt carries, so the
@@ -385,13 +391,18 @@ typedef struct {
  * be laid out as ordinary data and never run. */
 #define SHT_INIT_ARRAY 14
 #define SHT_FINI_ARRAY 15
+#define SHT_PREINIT_ARRAY 16
+#define SHT_NOTE      7      /* .note.*: notes, never loaded */
 #define SHT_X86_64_UNWIND 0x70000001   /* x86-64 psABI: .eh_frame's type */
 
 /* sh_flags */
 #define SHF_WRITE     0x1
 #define SHF_ALLOC     0x2
 #define SHF_EXECINSTR 0x4
+#define SHF_MERGE     0x10   /* .section ..., "aM": identical entries may merge */
+#define SHF_STRINGS   0x20   /* ...and they are NUL-terminated strings */
 #define SHF_INFO_LINK 0x40
+#define SHF_LINK_ORDER 0x80   /* .ARM.exidx: belongs to its sh_link */
 /* Thread-local storage. A section with this flag is not part of the
  * image every thread shares: it is the TEMPLATE from which each
  * thread's own block is made, and the linker gathers such sections
@@ -401,6 +412,7 @@ typedef struct {
 
 /* special section indices */
 #define SHN_UNDEF     0
+#define SHN_LORESERVE 0xff00   /* indices from here are special */
 #define SHN_ABS       0xfff1
 #define SHN_COMMON    0xfff2
 

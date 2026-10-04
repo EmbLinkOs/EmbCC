@@ -4881,6 +4881,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         F.label_off[i] = -1;
 
     f->code_off = t->len;
+    f->code_align = 2;                  /* a word of flash */
     if (want_debug) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);

@@ -30,7 +30,9 @@ done
 # EmbCC's own source list, taken from the Makefile rather than restated: a
 # hand-kept copy here went stale the moment the predefined-macro table was split per
 # target, and nothing noticed because the test was skipping.
-SRCS=$(make -pn 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
+# PROCESS=none: the self-hosted compiler is EmbLinkOS's, which has no
+# fork/exec (src/platform/platform.h), as its build manifest says.
+SRCS=$(make -pn PROCESS=none 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
 [ -n "$SRCS" ] || { echo "could not read SRCS from the Makefile"; exit 1; }
 # The one unit that is not under src/: the EMBX hash and .embdbg writer
 # src/link/link.c calls, which the driver needs now that it links

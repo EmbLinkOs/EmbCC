@@ -28,7 +28,11 @@ asking whether a file exists, reading an environment variable
 (`plat_getenv`), asking whether standard error is a terminal, finding
 the running binary (`plat_self_path`), and reading source text through a
 replaceable provider (`src_read`, `src_set_provider`) so that a language
-server can supply unsaved editor buffers. The layer has no process API.
+server can supply unsaved editor buffers. Running a program is optional
+(`plat_can_run`, `plat_run_start`, `plat_run_wait`): `process_spawn.c` on
+macOS and Linux, `process_none.c` on EmbLinkOS, which has no fork/exec,
+and nothing may depend on it -- only the driver's several sources in one
+command use it.
 What every host shares is `src/platform/platform_common.c`, in ISO C.
 The console and the binary's own path are `platform_posix.c` (macOS,
 Linux, EmbLinkOS) or `platform_iso.c` (any host with a C library, chosen
@@ -248,12 +252,15 @@ The driver dispatches on the input's suffix before the C pipeline runs:
 | `FILE.asm` | `as_assemble` in `src/arch/x86_64/as.c` | NASM syntax, x86-64 only; the same code as `embas` |
 | `FILE.ir` | `ir_parse` in `src/ir/irparse.c` | with `embcc inspect ir` only |
 
-`embcc` compiles one source per invocation; a second is refused (`embcc:
-error: more than one source file`), because the compiler's state is
-per-process and a second compile in the same process is not supported.
-Objects, archives and `-l` libraries go to the link as they are, so a
-program of several files is compiled one file at a time with `-c` and
-linked with `embcc a.o b.o -o OUT` (or `embld`).
+The compiler's state is per process, so one process compiles one
+source. Given several (`embcc a.c b.c -o OUT`), the driver runs itself
+once per source with `-c` and a temporary object (`multi_source`), up to
+`-j N` at a time, then links the objects in command-line order among the
+other inputs and removes them. That needs a host that can run a program
+(`plat_can_run`); on one that cannot (EmbLinkOS), a second source is
+refused with the way round it: compile each with `-c` and link the
+objects. Objects, archives and `-l` libraries go to the link as they
+are.
 
 ### Linking
 

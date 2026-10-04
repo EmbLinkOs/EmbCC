@@ -316,6 +316,50 @@ optimizer sees at the same `-O` level. Add the hardware's own exception
 frame for each level of interrupt nesting (on Cortex-M, 32 bytes per
 level, more with an active FPU context).
 
+### Leaving out what is never called: `--gc-sections`
+
+Flash is the limit a firmware build meets first. Compile with
+`-ffunction-sections -fdata-sections`, so each function and object is a
+section of its own, and link with `--gc-sections`: the linker keeps what
+the program can reach and drops the rest -- a driver's functions the
+program never calls, a table nothing reads.
+
+```sh
+CF="--target=thumbv7em-none-eabi -O2 -ffunction-sections -fdata-sections"
+embcc $CF -c main.c -o main.o
+embcc $CF -c drivers.c -o drivers.o
+embcc --target=thumbv7em-none-eabi -T board.ld \
+      -Wl,--gc-sections,--print-memory-usage,-Map=fw.map \
+      startup.o main.o drivers.o -o fw.elf
+```
+
+```text
+Memory region         Used Size  Region Size  %age Used
+             RAM:       1968 B        64 KB      3.00%
+           FLASH:        844 B       256 KB      0.32%
+```
+
+What is kept is what the entry symbol, `-u` and the script's `KEEP()`
+reach, through every relocation of everything kept. Some things are
+reached without a reference, and are kept too:
+
+- the constructor and destructor arrays (`.init_array`, `.fini_array`,
+  `.preinit_array`, `.ctors`, `.dtors`) and `.init`/`.fini`;
+- a section the program walks with `__start_NAME`/`__stop_NAME`;
+- without a linker script, the vector table (`.vectors`, `.isr_vector`);
+  with one, keep it with `KEEP(*(.isr_vector))`, as every vendor script
+  does;
+- notes, and a section marked `SHF_GNU_RETAIN`.
+
+An interrupt handler is reached from the vector table, and a function
+from a table of pointers, so nothing else is needed for them. A
+function that is entered only from outside the image -- by a debugger
+script, say -- needs `-Wl,-u,NAME`. `--print-gc-sections` lists what was
+dropped; the map file (`-Map`) lists it too, with every section that was
+kept, its address, and the symbols in it; `--print-memory-usage` is the
+table above, region by region. The details are in
+[`embld`](tools/embld.md#garbage-collection).
+
 ## ARM Cortex-M
 
 ### Choosing the target
@@ -513,6 +557,29 @@ RISC-V option and is refused here:
 ```text
 embld: -Tstack is a RISC-V option: every other target here starts with a stack pointer already set (a Cortex-M reads its own from the vector table)
 ```
+
+### CMSIS and vendor files
+
+A Cortex-M project's vendor files build unmodified: ARM's CMSIS-Core
+headers (`core_cm4.h`, `cmsis_gcc.h` and their intrinsics), a vendor's
+device header and `system_*.c`, its GNU-syntax startup file, and a
+CubeMX-style linker script. CMSIS chooses its compiler support by
+`__GNUC__`, so compile the C with `-fgnuc-version=4.2.1`:
+
+```sh
+CF="-O2 -ICMSIS/Core/Include -Icmsis-device-f4/Include -DSTM32F405xx -fgnuc-version=4.2.1"
+embcc --target=thumbv7em-none-eabi $CF -c system_stm32f4xx.c -o system.o
+embcc --target=thumbv7em-none-eabi $CF -c main.c -o main.o
+embcc --target=thumbv7em-none-eabi -c startup_stm32f405xx.s -o startup.o
+embcc --target=thumbv7em-none-eabi -T STM32F405RGTx_FLASH.ld \
+      startup.o system.o main.o -o fw.elf
+qemu-system-arm -M netduinoplus2 -nographic -kernel fw.elf
+```
+
+`tests/golden/cmsis-stm32f4.sh` builds that from ST's startup and system
+files as they ship, with a linker script in CubeMX's shape, and runs it
+on QEMU's netduinoplus2 (an STM32F405) with SysTick interrupts, when ARM's
+CMSIS_5 and ST's cmsis-device-f4 are cloned under `~/EmbRef`.
 
 ### Stopping and printing under a debugger or emulator
 

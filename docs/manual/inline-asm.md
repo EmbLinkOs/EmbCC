@@ -891,18 +891,24 @@ reported as an unknown instruction).
 | `vldm`, `vldmia`, `vldmdb`, `vstm`, `vstmia`, `vstmdb` | `Rn{!}, {Sm-Sn}`: consecutive single-precision registers; `db` needs writeback |
 | `vpush`, `vpop` | `{Sm-Sn}` |
 
-Points that differ from the GNU assembler:
+Mnemonics, register names and conditions are case-insensitive, as in
+GNU as (`MRS %0, primask`). The two-operand forms (`adds r0, #1`,
+`lsls r2, #2`) are the three-operand ones with the destination repeated.
+Loads and stores take `[Rn, Rm]` and `[Rn, Rm, lsl #N]` (N 0 to 3) too.
+The barriers take `sy` or its number `0xF`; on ARMv8-M, `mrs`/`msr` also
+name `msplim`, `psplim` and the TrustZone `_ns` registers.
+
+Points that differ from the GNU assembler (in inline asm; a `.s`/`.S`
+file is assembled as GNU as does it, see [embas](tools/embas.md#gnu-syntax-assembly)):
 
 - `ldm`, `stm`, the branches and `ldr Rt, [pc, #OFF]` always use the
   32-bit encoding, and `ldr Rt, =IMM` is `movw`/`movt` rather than a load
   from a literal pool.
 - Inside an IT block, a flag-setting instruction (`adds`, `movs`, ...)
   is refused, because its 16-bit encoding sets no flags there, and so is
-  a branch other than a final `bx` or `blx`. A block left open at the end
-  of an asm statement is refused, since it would make the compiler's next
-  instructions conditional.
-- The arithmetic instructions need all three operands; the two-operand
-  form `add r0, #1` is refused.
+  a branch that is not the block's last instruction. A block left open at
+  the end of an asm statement is refused, since it would make the
+  compiler's next instructions conditional.
 - A barrier option other than `sy` is refused with
   ``only the `sy` barrier option is supported; "ish" is not``.
 

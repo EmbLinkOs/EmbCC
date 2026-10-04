@@ -4463,6 +4463,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         while (t->len & 3)
             rv_unimp(t);
     }
+    f->code_align = rv_compress_enabled() ? 2 : 4;
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame
      * pointer (src/debug/dwarf.c). */

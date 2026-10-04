@@ -22,6 +22,9 @@ embld [-o FILE] [-e SYMBOL] [-Ttext ADDR] [-Tdata ADDR] [-Tstack ADDR]
 embld -T SCRIPT [-L DIR]... [-u SYMBOL]... [--orphan-handling=MODE]
       [-o FILE] [-e SYMBOL] INPUT...
 
+embld ... [--gc-sections [--print-gc-sections]] [-Map FILE]
+      [--print-memory-usage] INPUT...
+
 embld --doctor INPUT...
 ```
 
@@ -39,9 +42,10 @@ runs in-process when it links a program itself; see
 
 `embld` produces static executables only. It does not create or read
 shared libraries, does not produce position-independent executables, and
-emits no PLT and no dynamic sections. It reads no linker script: the
-layout is fixed (see [Image layout](#image-layout)), and the options below
-are the only way to influence it.
+emits no PLT and no dynamic sections. Without a linker script the layout
+is fixed (see [Image layout](#image-layout)) and the options below adjust
+it; with one (`-T`, ARM and RISC-V) the script lays the image out (see
+[Linker scripts](#linker-scripts)).
 
 ### Supported machines
 
@@ -306,7 +310,11 @@ ld); expressions with C's operators and `ALIGN`, `ORIGIN`, `LENGTH`,
 `ADDR`, `LOADADDR`, `SIZEOF`, `ALIGNOF`, `DEFINED`, `MIN`, `MAX`,
 `ABSOLUTE`, `LOG2CEIL`, `CONSTANT` and `SIZEOF_HEADERS`.
 `OUTPUT_FORMAT`, `OUTPUT_ARCH` and `TARGET` are read and ignored: the
-machine comes from the objects.
+machine comes from the objects. An output section whose inputs all have
+one special type (`INIT_ARRAY`, `ARM_EXIDX`, a note) has that type in the
+image, and an `.ARM.exidx` output section links to the section its
+functions went to, as ld writes them, so `llvm-readelf -u` and a
+debugger find the unwind index.
 
 Refused by name: `PHDRS`, `OVERLAY`, `INSERT`, `NOCROSSREFS`,
 `ONLY_IF_RO`/`ONLY_IF_RW`, `INPUT_SECTION_FLAGS`, output section types
@@ -316,6 +324,78 @@ named. COMMON symbols (tentative definitions from an object built with
 `-fcommon`; EmbCC emits none) are refused unless the script places
 `*(COMMON)`, because anywhere else is outside the range the startup
 zeroes. AVR images do not take a script yet.
+
+### Garbage collection
+
+With `--gc-sections`, an allocated input section that nothing kept
+refers to is left out of the image, as GNU ld does it. It is meant for
+objects built with `-ffunction-sections -fdata-sections`, where each
+function and object is a section of its own; with one `.text` per object,
+an object is all kept or all dropped.
+
+The link marks from these roots, and then from every relocation of every
+section marked, to the section its symbol is in:
+
+- the entry symbol, each `-u` symbol, and a script's `EXTERN` names;
+- a section a script claims with `KEEP()`;
+- the constructor and destructor arrays (by name, `.init_array*`,
+  `.fini_array*`, `.preinit_array*`, `.ctors*`, `.dtors*`, `.init`,
+  `.fini`, or by section type), notes, and sections marked
+  `SHF_GNU_RETAIN`;
+- every section named `NAME` when `__start_NAME` or `__stop_NAME` is
+  referred to;
+- without a script, the vector table (`.vectors`, `.isr_vector`).
+
+A section with `SHF_LINK_ORDER` -- ARM's `.ARM.exidx.text.F` -- is kept
+exactly when the section it belongs to is. `.eh_frame` is kept, but its
+FDEs do not keep the functions they describe: an FDE for a function that
+was dropped is left with a range of 0, so it describes no address, and
+its personality routine and LSDA are still reached through the CIE and
+the FDEs that remain. DWARF is never collected; its references to a
+dropped function resolve to 0. A dropped section's symbols are left out
+of the image's symbol table.
+
+`--print-gc-sections` names each dropped section on standard error, in
+ld's words:
+
+```text
+embld: removing unused section '.text.unused_fn' in file 'extra.o'
+```
+
+### Map file and memory usage
+
+`-Map FILE` writes GNU ld's map: the archive members pulled in and the
+object and symbol each was pulled for, the input sections dropped, the
+memory regions, and each output section with its address, size and load
+address, the input sections in it, and the global symbols each defines.
+
+```text
+.text           0x00000040      0x2a4
+ .text.Reset_Handler
+                0x00000040       0x78 startup.o
+                0x00000041                Reset_Handler
+ .text.Default_Handler
+                0x000000b8        0x4 startup.o
+                0x000000b9                Default_Handler
+ .text.init_first
+                0x000000bc       0x10 prog.o
+ .text.main     0x000000cc      0x198 prog.o
+                0x000000cd                main
+```
+
+`--print-memory-usage` prints, after the layout, ld's table of how much
+of each `MEMORY` region of the script the image uses -- its run
+addresses and the load addresses stored there, so `FLASH` counts
+`.data`'s initial values:
+
+```text
+Memory region         Used Size  Region Size  %age Used
+             RAM:       1968 B        64 KB      3.00%
+           FLASH:        844 B       256 KB      0.32%
+```
+
+Without a script there are no regions, and the table has only its
+header.
 
 ### Debug information
 
@@ -358,7 +438,7 @@ An object without an attributes section takes no part in the comparison.
 | Machine | Relocation types applied |
 |---|---|
 | x86-64 | `R_X86_64_64`, `R_X86_64_32`, `R_X86_64_32S`, `R_X86_64_PC32`, `R_X86_64_PLT32` (as `PC32`; no PLT is created), `R_X86_64_PC64`, `R_X86_64_TPOFF32` (local-exec thread-local storage) |
-| ARM | `R_ARM_ABS32`, `R_ARM_REL32`, `R_ARM_PREL31`, `R_ARM_THM_CALL`, `R_ARM_THM_JUMP24`, `R_ARM_THM_MOVW_ABS_NC`, `R_ARM_THM_MOVT_ABS` |
+| ARM | `R_ARM_NONE`, `R_ARM_ABS32`, `R_ARM_TARGET1` (as `R_ARM_ABS32`), `R_ARM_REL32`, `R_ARM_PREL31`, `R_ARM_THM_CALL`, `R_ARM_THM_JUMP24`, `R_ARM_THM_MOVW_ABS_NC`, `R_ARM_THM_MOVT_ABS` |
 | RISC-V | `R_RISCV_32`, `R_RISCV_64`, `R_RISCV_HI20`, `R_RISCV_LO12_I`, `R_RISCV_LO12_S`, `R_RISCV_PCREL_HI20`, `R_RISCV_PCREL_LO12_I`, `R_RISCV_PCREL_LO12_S`, `R_RISCV_BRANCH`, `R_RISCV_JAL`, `R_RISCV_CALL`, `R_RISCV_CALL_PLT`; `R_RISCV_RELAX` and `R_RISCV_ALIGN` are accepted and ignored |
 | AVR | `R_AVR_NONE`, `R_AVR_32`, `R_AVR_16`, `R_AVR_16_PM`, `R_AVR_LO8_LDI`, `R_AVR_HI8_LDI`, `R_AVR_LO8_LDI_GS`, `R_AVR_HI8_LDI_GS`, `R_AVR_CALL`, `R_AVR_13_PCREL`, `R_AVR_7_PCREL` |
 
@@ -506,6 +586,25 @@ linked in. A script's `EXTERN` and `ENTRY` do the same.
 What to do with an allocated input section no rule of the script places:
 `place` it as ld does (the default), place it and `warn`, or refuse the
 link with an `error`.
+
+### `--gc-sections`, `--no-gc-sections`
+
+Leave out the sections nothing kept refers to. See
+[Garbage collection](#garbage-collection).
+
+### `--print-gc-sections`, `--no-print-gc-sections`
+
+Name each section `--gc-sections` leaves out, on standard error. Given
+without `--gc-sections`, the link is refused, since there is nothing to
+print.
+
+### `-Map FILE`, `-Map=FILE`, `--Map FILE`, `--Map=FILE`
+
+Write the map file. See [Map file and memory usage](#map-file-and-memory-usage).
+
+### `--print-memory-usage`
+
+Print the region usage table on standard output.
 
 ### `--embx`
 
