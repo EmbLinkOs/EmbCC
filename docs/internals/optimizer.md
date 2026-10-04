@@ -709,6 +709,17 @@ which look only at the immediately preceding instructions, find it. A
 chain moves only when no instruction it passes writes one of its
 operands.
 
+**`pass_sinkupd`** (`-O2` and `-Os`; disabled by `EMBCC_NO_SINKUPD=1`).
+Run per function after `opt_func`, once `pass_latch_copies` and
+`pass_thread_copies` have put a loop's back-edge copies into its latch.
+An update `d = x OP c` (add, subtract, and, or, xor or a shift by a
+constant) whose first reader is the copy `x = mov d` later in the same
+block moves down to sit directly before that copy, provided nothing in
+between writes `x` or the constant. `b[m++] = c` otherwise leaves `m` and
+`m + 1` alive together from the add to the store, so they cannot share a
+register and the latch keeps a `mov`; after the move, `m + 1` is born
+where `m` dies.
+
 ## Target-dependent behaviour
 
 The optimizer is target-neutral except where it asks `src/arch/target.h`:

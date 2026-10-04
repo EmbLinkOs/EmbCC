@@ -11707,6 +11707,119 @@ out0:
     return changed;
 }
 
+/* ==== an update next to the copy that ends it ============================
+ *
+ * `t[n++] = c` computes n + 1 before the store reads n: phi destruction
+ * leaves `n1 = n + 1; ...; t[n] = c; ...; n = mov n1`, and n and n1 are
+ * both live from the add to the store. They cannot share a register, so
+ * the latch keeps its copy -- a `mov` every trip of the loop, the same in
+ * `*p++ = x` and in `b[m++] = t[--n]`. Clang has none.
+ *
+ * So `d = x OP c`, whose first reader is the copy `x = mov d` later in
+ * the same block, moves down to sit right before that copy. Then d is
+ * born where x dies, the two are one register, and the copy is a move
+ * to itself. Nothing in between may write x or read d; the operation is
+ * pure and reads only x and a constant, so moving it changes no value,
+ * and x lives until the new position, where d no longer does -- the
+ * same pressure, one register for one. */
+static int sinkupd_op(const struct ir_ins *i)
+{
+    if (i->flt || i->vol || i->w == 16)
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR:
+    case IR_SHL: case IR_SHR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+static int pass_sinkupd(struct ir_func *fn)
+{
+    int N = fn->nins, nv = fn->nvregs;
+    if (N < 3 || nv == 0 || getenv("EMBCC_NO_SINKUPD"))
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int *to = xmalloc((size_t)N * sizeof *to);    /* move n to before to[n] */
+    char *dest = xcalloc((size_t)N, 1);
+    int changed = 0;
+    for (int n = 0; n < N; n++)
+        to[n] = -1;
+    for (int n = 0; n < N; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (!sinkupd_op(i))
+            continue;
+        int t = i->dst, x = i->a;
+        long c;
+        if (t < fn->nvars || t >= nv || d.cnt[t] != 1 || x < 0 || x >= nv ||
+            x == t || !const_b(fn, &d, (struct ir_ins *)i, &c))
+            continue;
+        /* the first reader of t, in this block */
+        int u = -1;
+        for (int m = n + 1; m < N && u < 0; m++) {
+            const struct ir_ins *q = &fn->ins[m];
+            if (q->op == IR_LABEL)
+                break;
+            if (ins_reads((struct ir_ins *)q, t)) {
+                u = m;
+                break;
+            }
+            if (q->op == IR_JMP || q->op == IR_BRZ || q->op == IR_BRNZ ||
+                q->op == IR_RET || q->op == IR_UD2 || q->op == IR_IGOTO ||
+                q->op == IR_SWITCH)
+                break;
+        }
+        if (u < 0 || u == n + 1 || dest[u] || to[u] >= 0)
+            continue;
+        const struct ir_ins *cp = &fn->ins[u];
+        if (cp->op != IR_MOV || cp->a != t || cp->dst != x || cp->vol)
+            continue;
+        /* nothing between writes x, the constant, or anything it reads */
+        int ok = 1;
+        for (int m = n + 1; m < u && ok; m++) {
+            const struct ir_ins *q = &fn->ins[m];
+            int w = q->op == IR_STVAR ? q->dst : def_target(q);
+            if (q->op == IR_ASM || q->op == IR_LANDING || w == x ||
+                (!i->imm_b && w == i->b) || to[m] >= 0 || dest[m])
+                ok = 0;
+        }
+        if (!ok)
+            continue;
+        to[n] = u;
+        dest[u] = 1;
+        changed = 1;
+    }
+    if (changed) {
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(N + 1) * sizeof *newpos) : NULL;
+        int *at = xmalloc((size_t)N * sizeof *at);  /* who goes before m */
+        for (int m = 0; m < N; m++)
+            at[m] = -1;
+        for (int n = 0; n < N; n++)
+            if (to[n] >= 0)
+                at[to[n]] = n;
+        for (int n = 0; n < N; n++) {
+            if (newpos) newpos[n] = nb.n;
+            if (at[n] >= 0)
+                *ib_push(&nb) = fn->ins[at[n]];
+            if (to[n] < 0)
+                *ib_push(&nb) = fn->ins[n];
+        }
+        if (newpos) newpos[N] = nb.n;
+        if (newpos) {
+            remap_scopes(fn, newpos, N);
+            free(newpos);
+        }
+        free(at);
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    }
+    free(to); free(dest); free_defs(&d);
+    return changed;
+}
+
 /* ==== an address next to its access ======================================
  *
  * Every backend fuses an address computation into the access it feeds --
@@ -12642,6 +12755,10 @@ void opt_run(struct ir_unit *iu, int level)
         pass_latch_copies(&iu->funcs[f]);
         if (pass_thread_copies(&iu->funcs[f]))
             pass_cfgclean(&iu->funcs[f]);   /* the copy blocks left behind */
+        /* After both: they are what put the back-edge copies into the
+         * block whose update this moves next to them. */
+        if (level >= 2)
+            pass_sinkupd(&iu->funcs[f]);
         pass_x86_loadop(&iu->funcs[f]);     /* last: nothing reorders after */
     }
 }
