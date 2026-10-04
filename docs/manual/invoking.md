@@ -718,7 +718,7 @@ written to standard error after the compile, one line per decision:
 ```text
 w.c:3: remark: inlined 'sq': 4 instructions into f, budget 24 [inline/small-enough]
 w.c:1: remark: promoted-to-register 's' [mem2reg/scalar-and-never-addressed]
-w.c:1: remark: unrolled 'big': 4 copies of a 5-instruction body, the original kept for the remainder [unroll/counted-loop]
+w.c:1: remark: unrolled 'big': 8 copies of a 5-instruction body, the original kept for the remainder [unroll/counted-loop]
 ```
 
 `-fremarks=json` writes the same records as a JSON array of objects with
