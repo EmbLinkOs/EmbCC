@@ -475,6 +475,14 @@ The number of copies is the largest power of two, up to 8, for which
 copies times body is at most 96. The original loop is kept unchanged after the unrolled one and runs the
 remaining iterations. Default: on at `-O2`; off at `-Os`.
 
+A loop whose trip count is a constant is copied whole instead, and no
+loop is left, when the count is at most 32 and the copies come to at
+most 200 IR instructions. The count is known when the loop counts from
+one constant to another (`for (i = 3; i < 11; i++)`), or walks a pointer
+from one constant offset of a base to another. A body that calls a
+runtime helper (soft-float arithmetic, for example) is not copied
+whole.
+
 ### `-fpre`, `-fno-pre`
 
 Partial redundancy elimination. When an expression is computed on some

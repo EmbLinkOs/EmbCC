@@ -624,6 +624,7 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_T_FPU` | `1` or `0` overrides whether the Thumb backend uses the FPU |
 | `EMBCC_T_NOWIDEIMM`, `EMBCC_RV_NOWIDEIMM`, `EMBCC_NO_SIGNTEST`, `EMBCC_RV_NOCMPIMM` | build a 64-bit constant whole on Thumb or RV32; keep `x >> 63` a shift, and `x & K` eight bytes wide, before a branch; load a RISC-V value compare's constant into a register; for bisecting |
 | `EMBCC_VECDEBUG` | the vectorizer prints, on stderr, each loop it considers and why it rejected it |
+| `EMBCC_NO_FULLUNROLL` | a loop with a constant trip count is unrolled like any other instead of being copied whole, for bisecting |
 
 `EMBCC_DEFAULT_TARGET` and `EMBCC_PREFIX` are user-facing and documented in
 [Invoking EmbCC](../manual/invoking.md).

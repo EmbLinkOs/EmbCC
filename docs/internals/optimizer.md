@@ -679,6 +679,21 @@ copies of a body of up to 12 instructions, 4 of one up to 20
 without signed overflow. Loops containing `alloca`, inline asm, a
 landing pad or a computed `goto` are refused.
 
+When `unr_trip` proves the trip count constant, the loop is replaced by
+that many copies instead, with no test, no branch and no remainder, if
+the count is at most `UNROLL_FULL_TRIP` (32) and the copies total at
+most `UNROLL_FULL_BODY` (200) instructions. The count is proved from the
+induction variable's single definition outside the loop, which must sit
+in the block that falls into the header with nothing but the back edge
+jumping to the header: `iv = c0` against a constant bound `B` gives
+`B - c0`; `iv = X + c1` against a bound `X + c2` (strength reduction's
+pointer walk; either side may reach `X` through one more constant add)
+gives `(c2 - c1) / step`, when it divides. A body with an operation for
+which `target_op_calls_helper()` is true is not copied whole, and
+neither is a loop whose test is read after it. Scopes that began or
+ended inside the loop are widened to cover all the copies.
+`EMBCC_NO_FULLUNROLL=1` turns this off.
+
 **`pass_swthread`** (`switch-thread`; `edge_ok`; off at `-Os`). For a
 loop around `switch (state)` whose arms set `state` to known values, the
 path from the latch to the switch is copied once per case the state can

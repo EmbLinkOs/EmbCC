@@ -7683,6 +7683,8 @@ static int pass_ivsr(struct ir_func *fn)
 #define UNROLL_MAX_BODY   20  /* instructions in the body worth copying */
 #define UNROLL_BUDGET     96  /* and a ceiling on U * body */
 #define UNROLL_MAX_COPIES  8
+#define UNROLL_FULL_TRIP  32  /* a constant trip count copied whole: at most */
+#define UNROLL_FULL_BODY 200  /* ...and at most this many instructions in all */
 
 /* One loop's worth of what the recognizer found. */
 struct unrloop {
@@ -7894,6 +7896,108 @@ static int unr_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
     return 0;
 }
 
+/* each_label's callback for "does anything name this label". */
+struct unr_lblctx { int label, hit; };
+static void unr_lbl_cb(int *p, void *ctx)
+{
+    struct unr_lblctx *c = ctx;
+    if (*p == c->label) c->hit = 1;
+}
+
+/* The loop's trip count when it is a constant, else 0.
+ *
+ * Constant means the induction variable's ONE definition outside the
+ * loop sits in the block that falls into the header, nothing but the
+ * back edge jumps to the header -- so every entry passes that definition
+ * -- and it and the bound are a pair whose distance is known:
+ *
+ *   iv = const c0;  ...  iv < const B       B - c0 iterations (step 1)
+ *   iv = X;         ...  iv != X + C        C / step  (strength reduction's
+ *   iv = X + c1;    ...  iv != X + c2       (c2 - c1) / step   pointer walk)
+ *
+ * A rotated loop runs its body before its first test, so the count is
+ * exactly how many times the body runs on every entry. */
+static long unr_trip(struct ir_func *fn, struct defs *d, const struct unrloop *L)
+{
+    for (int m = 0; m < fn->nins; m++) {
+        if (m == L->hi - 1)
+            continue;                       /* the back edge itself */
+        struct unr_lblctx lc = { L->Lh, 0 };
+        if (fn->ins[m].op == IR_LABELADDR && fn->ins[m].label == L->Lh)
+            return 0;
+        each_label(fn, &fn->ins[m], unr_lbl_cb, &lc);
+        if (lc.hit)
+            return 0;
+    }
+    int od = -1, nout = 0;
+    for (int m = 0; m < fn->nins; m++)
+        if ((m < L->lo || m >= L->hi) && def_target(&fn->ins[m]) == L->iv) {
+            od = m;
+            nout++;
+        }
+    if (nout != 1 || od < 0 || od >= L->lo)
+        return 0;
+    /* od falls into the header: no label between them, and nothing that
+     * leaves except a branch that skips the loop altogether */
+    for (int m = od + 1; m < L->lo; m++) {
+        enum ir_op o = fn->ins[m].op;
+        if (o == IR_LABEL || o == IR_JMP || o == IR_SWITCH || o == IR_RET ||
+            o == IR_IGOTO || o == IR_UD2 || o == IR_ASM || o == IR_LANDING)
+            return 0;
+    }
+    const struct ir_ins *e = &fn->ins[od];
+    int bn = d->cnt[L->bound] == 1 ? d->ins[L->bound] : -1;
+    if (bn < 0 || e->w != L->w)
+        return 0;
+    const struct ir_ins *b = &fn->ins[bn];
+    const struct ir_ins *cmp = &fn->ins[L->cmp_ins];
+    long t = 0;
+    if (cmp->pred == B_LT) {
+        long c0, B;
+        if (e->op == IR_CONST && !e->flt) c0 = e->imm;
+        else if (!(e->op == IR_MOV && get_const(fn, d, e->a, &c0))) return 0;
+        if (!get_const(fn, d, L->bound, &B))
+            return 0;
+        if (L->w == 4) { c0 = (long)(int)c0; B = (long)(int)B; }
+        t = B - c0;                          /* step is 1 for `<` */
+    } else {
+        /* the start and the bound off one base X */
+        int x0; long c1 = 0, c2;
+        if (e->op == IR_MOV) x0 = e->a;
+        else if (!(e->op == IR_ADD && as_op_const(fn, d, (struct ir_ins *)e, &x0, &c1)))
+            return 0;
+        int x1;
+        if (b->op != IR_ADD || b->w != L->w ||
+            !as_op_const(fn, d, (struct ir_ins *)b, &x1, &c2))
+            return 0;
+        /* Either side may name its base through one more constant
+         * add -- the preheader's `iv = mov X` with `X = a + 8` against a
+         * bound of `a + 40` -- so each is followed back a step. */
+        for (int k = 0; k < 2 && x0 != x1; k++) {
+            int *xs = k ? &x1 : &x0;
+            long *cs = k ? &c2 : &c1;
+            int y; long cy;
+            if (*xs < 0 || *xs >= fn->nvregs || d->cnt[*xs] != 1 ||
+                d->ins[*xs] < 0)
+                continue;
+            struct ir_ins *a = &fn->ins[d->ins[*xs]];
+            if (a->op == IR_ADD && a->w == L->w &&
+                as_op_const(fn, d, a, &y, &cy)) {
+                *xs = y;
+                *cs += cy;
+            }
+        }
+        if (x0 < 0 || x0 != x1 || x0 >= fn->nvregs || d->cnt[x0] != 1)
+            return 0;
+        long dist = c2 - c1;
+        if (L->w == 4) dist = (long)(int)dist;
+        if (dist <= 0 || dist % L->step)
+            return 0;
+        t = dist / L->step;
+    }
+    return t > 0 ? t : 0;
+}
+
 /* unr_local_cb: a read of v at instruction `at`. v stays the body's own
  * only while every read of it is inside the body and after its def. */
 struct unr_local { char *local; const struct defs *d; int at, end, nv; };
@@ -7905,6 +8009,43 @@ static void unr_local_cb(int *p, void *ctx)
         return;
     if (!(c->at > c->d->ins[v] && c->at < c->end))
         c->local[v] = 0;
+}
+
+/* The U copies of the body, appended to nb. cur[v] is the name v
+ * currently goes by inside this block, or -1 for "still itself". One
+ * running map across every copy, so copy c reads what copy c-1 wrote --
+ * and the LAST copy writes the original names, so the block leaves every
+ * value exactly where the loop's own body would have, with no restoring
+ * moves at the end. */
+static void unr_copies(struct ir_func *fn, struct ibuf *nb,
+                       const struct unrloop *L, long U, const char *local,
+                       int nvr)
+{
+    int *cur = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *cur);
+    for (int v = 0; v < nvr; v++)
+        cur[v] = -1;
+    for (long c = 0; c < U; c++)
+        for (int n2 = L->body_lo; n2 < L->cmp_ins; n2++) {
+            if (fn->ins[n2].op == IR_LABEL)
+                continue;             /* unreachable; see unr_find */
+            int t = def_target(&fn->ins[n2]);
+            struct ir_ins *q = ib_push(nb);
+            *q = fn->ins[n2];
+            struct lcopy lc = { cur, nvr, 0 };
+            each_read(q, lcopy_cb, &lc);
+            /* A TEMP is renamed. A frame slot -- the dst of an stvar, a
+             * local that stays in memory because its address is taken --
+             * is not a value to rename but a place: every copy has to
+             * write that one place, or a read of it through its address
+             * sees none of the copies' stores. Renamed, `stvar v2` became
+             * `stvar v98`, a slot that does not exist, and loading `*ps`
+             * where ps = &s gave the value from before the loop. */
+            if (t >= fn->nvars && t < nvr) {
+                if (c == U - 1 && !local[t]) { q->dst = t; cur[t] = -1; }
+                else { q->dst = fn->nvregs++; cur[t] = q->dst; }
+            }
+        }
+    free(cur);
 }
 
 static int unroll_one(struct ir_func *fn, char *seen, int nseen)
@@ -7934,6 +8075,24 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
         return 0;
     }
 
+    /* A constant trip count small enough to copy whole: the loop goes,
+     * its test, its branch and the remainder machinery with it (see
+     * unr_trip). The compare must have no reader past the loop, since it
+     * goes too. */
+    long T = getenv("EMBCC_NO_FULLUNROLL") ? 0 : unr_trip(fn, &d, &L);
+    if (T < 2 || T > UNROLL_FULL_TRIP || T * nbody > UNROLL_FULL_BODY)
+        T = 0;
+    for (int m = 0; T && m < fn->nins; m++)
+        if ((m < L.lo || m >= L.hi) &&
+            ins_reads(&fn->ins[m], fn->ins[L.cmp_ins].dst))
+            T = 0;
+    /* Nor a body that calls the runtime -- a soft-float `double`, a
+     * 64-bit divide -- which unr_find's IR_CALL test does not see. The
+     * test and the branch saved are nothing beside the calls, and
+     * lgamma's eight Lanczos terms grew by 288 bytes on Thumb for it. */
+    for (int m = L.body_lo; T && m < L.cmp_ins; m++)
+        if (target_op_calls_helper(&fn->ins[m]))
+            T = 0;
     /* How many copies: the most, a power of two up to eight, that keep
      * U * body within the budget. A short body pays most of its cost on
      * the test and the branch, so it gets more of them; a long one
@@ -7949,8 +8108,11 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
      * sixteen copies of the matrix's 24-trip loop left a third of the
      * work there (+7% to +14%). */
     int U = 1;
-    while (U * 2 <= UNROLL_MAX_COPIES && U * 2 * nbody <= UNROLL_BUDGET)
-        U *= 2;
+    if (T)
+        U = (int)T;
+    else
+        while (U * 2 <= UNROLL_MAX_COPIES && U * 2 * nbody <= UNROLL_BUDGET)
+            U *= 2;
     if (U < 2) {
         free_defs(&d); free(order); free(l2b);
         free_cfg(bb, nbb);
@@ -7988,11 +8150,26 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
     struct ibuf nb = { 0, 0, 0 };
     int *newpos = fn->var_scope_lo
         ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    int cstart = 0, cend = 0;           /* where a full unroll's copies are */
     for (int n = 0; n < fn->nins; n++) {
         /* Recorded BEFORE the insertions: a local whose scope began at
          * the header must cover the copies too, or coalesce_locals is
          * free to give its slot to something that overlaps them. */
         if (newpos) newpos[n] = nb.n;
+        if (T) {
+            /* the header's label, then the copies in place of the loop:
+             * its body, its compare and its back edge */
+            if (n > L.lo && n < L.hi)
+                continue;
+            *ib_push(&nb) = fn->ins[n];
+            if (n == L.lo) {
+                cstart = nb.n;
+                unr_copies(fn, &nb, &L, U, local, nvr);
+                cend = nb.n;
+                free(local);
+            }
+            continue;
+        }
         if (n == L.lo) {
             struct ir_ins *p;
             int kU = fn->nvregs++;
@@ -8036,38 +8213,7 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
             /* ---- the copies ---- */
             p = unr_emit(&nb, IR_LABEL, lineh, colh);
             p->label = Lunroll;
-            /* cur[v] is the name v currently goes by inside this block,
-             * or -1 for "still itself". One running map across every
-             * copy, so copy c reads what copy c-1 wrote -- and the LAST
-             * copy writes the original names, so the block leaves every
-             * value exactly where the loop's own body would have, with
-             * no restoring moves at the end. */
-            int *cur = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *cur);
-            for (int v = 0; v < nvr; v++)
-                cur[v] = -1;
-            for (int c = 0; c < U; c++)
-                for (int n2 = L.body_lo; n2 < L.cmp_ins; n2++) {
-                    if (fn->ins[n2].op == IR_LABEL)
-                        continue;             /* unreachable; see unr_find */
-                    int t = def_target(&fn->ins[n2]);
-                    struct ir_ins *q = ib_push(&nb);
-                    *q = fn->ins[n2];
-                    struct lcopy lc = { cur, nvr, 0 };
-                    each_read(q, lcopy_cb, &lc);
-                    /* A TEMP is renamed. A frame slot -- the dst of an
-                     * stvar, a local that stays in memory because its
-                     * address is taken -- is not a value to rename but a
-                     * place: every copy has to write that one place, or a
-                     * read of it through its address sees none of the
-                     * copies' stores. Renamed, `stvar v2` became `stvar
-                     * v98`, a slot that does not exist, and loading `*ps`
-                     * where ps = &s gave the value from before the loop. */
-                    if (t >= fn->nvars && t < nvr) {
-                        if (c == U - 1 && !local[t]) { q->dst = t; cur[t] = -1; }
-                        else { q->dst = fn->nvregs++; cur[t] = q->dst; }
-                    }
-                }
-            free(cur);
+            unr_copies(fn, &nb, &L, U, local, nvr);
             free(local);
 
             /* ---- the back edge: a compare and a branch per U iterations ----
@@ -8099,7 +8245,7 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
         }
         *ib_push(&nb) = fn->ins[n];
     }
-    if (L.hi == fn->nins) {            /* the loop ends the function */
+    if (!T && L.hi == fn->nins) {      /* the loop ends the function */
         struct ir_ins *p = ib_push(&nb);
         p->op = IR_LABEL; p->label = Lexit;
         p->line = lineh; p->col = colh; p->synth = 1;
@@ -8108,8 +8254,14 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
         newpos[fn->nins] = nb.n;
         for (int v = 0; v < fn->nvars; v++) {
             int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
-            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
-            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+            /* A full unroll deleted the loop's own instructions, and a
+             * scope that began or ended among them now covers all of the
+             * copies that replaced them: from the first to past the
+             * last. */
+            if (T && lo > L.lo && lo < L.hi) fn->var_scope_lo[v] = cstart;
+            else if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (T && hi > L.lo && hi < L.hi) fn->var_scope_hi[v] = cend;
+            else if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
         }
         free(newpos);
     }
@@ -8119,7 +8271,12 @@ static int unroll_one(struct ir_func *fn, char *seen, int nseen)
     free_cfg(bb, nbb);
     if (L.Lh >= 0 && L.Lh < nseen)
         seen[L.Lh] = 1;
-    if (remarks_on() && fn->src)
+    if (remarks_on() && fn->src && T)
+        remark_add("unroll", "unrolled", fn->name, "constant-trip-count",
+                   fn->file, lineh ? lineh : fn->line,
+                   "all %d iterations of a %d-instruction body, no loop "
+                   "left", U, nbody);
+    else if (remarks_on() && fn->src)
         remark_add("unroll", "unrolled", fn->name, "counted-loop",
                    fn->file, lineh ? lineh : fn->line,
                    "%d copies of a %d-instruction body, the original kept "
