@@ -128,3 +128,18 @@ fi
 grep -q "bad.ir:3" "$out/berr.txt" ||
     { cat "$out/berr.txt"; echo "FAIL: the error does not name the line"; exit 1; }
 echo "a malformed line is refused at its own line number"
+
+# ---- and with -O, parsed IR is optimized before it is printed ---------------
+# That is what makes a pass testable on IR written to provoke it. Without
+# an -O level the file comes back as written, which the round-trips above
+# depend on.
+printf '; EmbIR\nfunc @f nparams=0 nvars=0 vregs=3 labels=0 {\n  %%0 = const.4 2\n  %%1 = const.4 3\n  %%2 = add.4s %%0, %%1\n  ret %%2\n}\n' \
+    > "$out/opt.ir"
+"$EMBCC" inspect ir "$out/opt.ir" > "$out/opt0.txt" 2>&1 &&
+    "$EMBCC" inspect ir -O2 "$out/opt.ir" > "$out/opt2.txt" 2>&1 ||
+    { cat "$out/opt0.txt" "$out/opt2.txt"; echo "FAIL: could not read opt.ir"; exit 1; }
+grep -q "add\." "$out/opt0.txt" ||
+    { cat "$out/opt0.txt"; echo "FAIL: without -O the IR should come back as written"; exit 1; }
+! grep -q "add\." "$out/opt2.txt" && grep -qE "const\.4s? 5(\s*;.*)?$" "$out/opt2.txt" ||
+    { cat "$out/opt2.txt"; echo "FAIL: -O2 should have folded 2 + 3 in the parsed IR"; exit 1; }
+echo "with -O2, parsed IR goes through the optimizer: 2 + 3 comes back as 5"

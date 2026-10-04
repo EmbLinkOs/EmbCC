@@ -3769,6 +3769,22 @@ int main(int argc, char **argv)
             if (!txt)
                 diag_fatal(input, 0, "cannot open file");
             struct ir_unit *pu = ir_parse(input, txt);
+            /* With -O, the optimizer runs on what was parsed first. A
+             * pass can then be tested on IR written to provoke it -- a
+             * shape C reaches only by luck, if at all. */
+            if (opt_level > 0 || opt_for_size) {
+                /* IR written by hand has no source to point at, and the
+                 * verifier (EMBCC_VERIFY, which the test suite sets) takes
+                 * an instruction with no location for one a pass built
+                 * carelessly. To the optimizer such an instruction IS
+                 * synthesized, so it says so -- only here, so that without
+                 * -O the file still comes back exactly as written. */
+                for (int f = 0; f < pu->nfuncs; f++)
+                    for (int k = 0; k < pu->funcs[f].nins; k++)
+                        if (!pu->funcs[f].ins[k].line)
+                            pu->funcs[f].ins[k].synth = 1;
+                opt_run(pu, opt_for_size ? OPT_SIZE : opt_level);
+            }
             struct outbuf ob = { NULL, 0, 0 };
             ir_print_unit(&ob, pu);
             fwrite(ob.p, 1, ob.n, stdout);

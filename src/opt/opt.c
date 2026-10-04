@@ -737,6 +737,57 @@ static int defined_in_block(struct ir_func *fn, struct defs *d, int v, int n)
     return 1;
 }
 
+/* ---- block-local constants ----
+ *
+ * get_const knows a temp only when it has ONE definition, and the temps a
+ * loop carries have one per incoming edge: phi destruction assigns an
+ * induction variable before the loop and again at the latch. Inside one
+ * block that does not matter. After `i = const 0`, and until something
+ * else writes i, i is 0. That is exactly where a rotated loop's guard
+ * sits -- `i = 0; if (!(i < 24)) skip the loop` -- and the guard stayed
+ * a compare and a branch, run on every entry to every counted loop.
+ *
+ * lk_gen[v] == gen says v is known to hold lk_val[v] at width lk_w[v].
+ * A new generation starts at every label and after every control
+ * transfer, so nothing is believed across a block boundary; a definition
+ * of v by anything but a constant, or a copy of a known value, forgets
+ * it; and an instruction that writes temps def_target does not report
+ * (inline asm, a landing pad) starts a new generation too. */
+struct lkconst { int *gen_of; long *val; int *w; int gen, nv; };
+
+static void lk_note(struct lkconst *k, const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_LABEL: case IR_JMP: case IR_BRZ: case IR_BRNZ: case IR_SWITCH:
+    case IR_RET: case IR_IGOTO: case IR_UD2: case IR_ASM: case IR_LANDING:
+        k->gen++;
+        return;
+    default:
+        break;
+    }
+    int t = def_target(i);
+    if (t < 0 || t >= k->nv)
+        return;
+    if (i->op == IR_CONST && !i->flt && (i->w == 4 || i->w == 8)) {
+        k->gen_of[t] = k->gen; k->val[t] = i->imm; k->w[t] = i->w;
+    } else if (i->op == IR_MOV && !i->vol && !i->flt && i->a >= 0 &&
+               i->a < k->nv && i->a != t && k->gen_of[i->a] == k->gen &&
+               k->w[i->a] == i->w) {
+        k->gen_of[t] = k->gen; k->val[t] = k->val[i->a]; k->w[t] = i->w;
+    } else {
+        k->gen_of[t] = 0;
+    }
+}
+
+/* Is v known here, at width w? */
+static int lk_get(const struct lkconst *k, int v, int w, long *out)
+{
+    if (v < 0 || v >= k->nv || k->gen_of[v] != k->gen || k->w[v] != w)
+        return 0;
+    *out = k->val[v];
+    return 1;
+}
+
 static int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -747,8 +798,19 @@ static int pass_fold(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], count_cb, &uc);
     int changed = 0;
+    struct lkconst lk = {
+        xcalloc((size_t)fn->nvregs, sizeof(int)),
+        xmalloc((size_t)fn->nvregs * sizeof(long)),
+        xmalloc((size_t)fn->nvregs * sizeof(int)), 1, fn->nvregs
+    };
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
+        /* What the previous instruction left, in its final form: one
+         * this loop has just folded to a constant is a constant. */
+        if (n > 0)
+            lk_note(&lk, &fn->ins[n - 1]);
+        if (i->op == IR_LABEL)
+            lk.gen++;
         if (i->flt) {
             /* never as an integer -- as a float, from bit patterns */
             long A, B = 0, r;
@@ -900,6 +962,24 @@ static int pass_fold(struct ir_func *fn)
             break;
         default:
             continue;
+        }
+        /* A compare of a loop-carried temp against what the block has
+         * just assigned it: see lk_note. Only a compare, and only at the
+         * width the constant was written at. */
+        if (i->op == IR_CMP && !i->imm_b && (i->w == 4 || i->w == 8) &&
+            !(ka && kb) && !getenv("EMBCC_NO_LKCONST")) {
+            long la, lb;
+            int ja = ka || lk_get(&lk, i->a, i->w, &la);
+            int jb = kb || lk_get(&lk, i->b, i->w, &lb);
+            if (ja && jb) {
+                if (!ka) A = la;
+                if (!kb) B = lb;
+                if (fold_bin(i->op, A, B, i->w, i->sign, i->pred, &r)) {
+                    to_const(i, r);
+                    changed = 1;
+                    continue;
+                }
+            }
         }
         if (ka && kb) {
             if (fold_bin(i->op, A, B, i->w, i->sign, i->pred, &r)) {
@@ -1069,6 +1149,7 @@ static int pass_fold(struct ir_func *fn)
             break;
         }
     }
+    free(lk.gen_of); free(lk.val); free(lk.w);
     free(use);
     free_defs(&d);
     return changed;
@@ -3295,12 +3376,55 @@ static int pass_cfgclean(struct ir_func *fn)
      * back edge and the guard runs once. Threading a jump makes them
      * too. */
     char *dead = xcalloc((size_t)fn->nins, 1);
+    /* A branch on a temp the same block has just set to a constant.
+     * pass_fold decides a rotated loop's guard, `i = 0; c = i < 24`, from
+     * the block's own `i = 0` (lk_note), and value numbering then gives
+     * the constant it made the name it already had in the block -- the
+     * loop-carried i -- so the branch reads a temp with two definitions
+     * and nothing else here can decide it. The same table decides it
+     * here. */
+    if (!getenv("EMBCC_NO_LKCONST")) {
+        struct lkconst lk = {
+            xcalloc((size_t)fn->nvregs, sizeof(int)),
+            xmalloc((size_t)fn->nvregs * sizeof(long)),
+            xmalloc((size_t)fn->nvregs * sizeof(int)), 1, fn->nvregs
+        };
+        /* Only for a name with more than one definition. One defined
+         * once by a constant is SCCP's to decide, and SCCP says so in a
+         * remark (`if (DEBUG)` with `const int DEBUG = 0`: the branch
+         * always goes one way, which is as often a bug as an
+         * optimization). Deciding it here first took that remark away. */
+        struct defs dd;
+        compute_defs(fn, &dd);
+        for (int n = 0; n < fn->nins; n++) {
+            if (n > 0)
+                lk_note(&lk, &fn->ins[n - 1]);
+            struct ir_ins *i = &fn->ins[n];
+            long v;
+            if ((i->op != IR_BRZ && i->op != IR_BRNZ) ||
+                !lk_get(&lk, i->a, i->w, &v))
+                continue;
+            if (i->a >= 0 && i->a < fn->nvregs && dd.cnt[i->a] == 1 &&
+                dd.ins[i->a] >= 0 && fn->ins[dd.ins[i->a]].op == IR_CONST)
+                continue;
+            if ((i->op == IR_BRZ) == (norm(v, i->w) == 0)) {
+                i->op = IR_JMP; i->a = -1;      /* it is always taken */
+            } else {
+                dead[n] = 1;                    /* it is never taken */
+            }
+            changed = 1;
+        }
+        free(lk.gen_of); free(lk.val); free(lk.w);
+        free_defs(&dd);
+    }
     {
         int last_cond = -1;
         enum ir_op last_op = IR_JMP;
         for (int n = 0; n < fn->nins; n++) {
             struct ir_ins *i = &fn->ins[n];
             if (i->op == IR_LABEL) { last_cond = -1; continue; }
+            if (dead[n])
+                continue;                       /* decided above */
             int t = def_target(i);
             if (t >= 0 && t == last_cond)
                 last_cond = -1;                 /* a different value now */
@@ -9517,9 +9641,18 @@ static int pass_sinkconst(struct ir_func *fn)
             continue;
         if (use[i->dst] != 1 || d.cnt[i->dst] != 1)
             continue;
+        /* A RISC-V branch compares two registers: a loop's bound is a
+         * `li` every trip once it sits beside the compare, where x86 and
+         * Arm have taken it as an immediate before this runs. It used to
+         * stay out by accident -- the guard in front of the loop read it
+         * too -- until the guard could be decided at compile time. */
+        int rv_cmp = (target_get() == TARGET_RISCV32 ||
+                      target_get() == TARGET_RISCV64) &&
+                     i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
+                     fn->ins[at[i->dst]].op == IR_CMP;
         if (at[i->dst] > n + 1 &&
             (depth[at[i->dst]] <= depth[n] || g_opt_size ||
-             !const_is_expensive(i))) {
+             (!const_is_expensive(i) && !rv_cmp))) {
             to[n] = at[i->dst];
             any = 1;
         }

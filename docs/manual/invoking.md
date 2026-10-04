@@ -1356,7 +1356,9 @@ output.
 | `callgraph` | which function calls which, from the IR |
 
 `embcc inspect ir FILE.ir` reads EmbIR text instead of C and prints it
-back, which is the IR's round-trip test. `embcc inspect mir` explains that
+back, which is the IR's round-trip test. With `-O1`, `-O2` or `-Os`, the
+optimizer runs on the parsed IR before it is printed, so a pass can be
+tried on IR written by hand. `embcc inspect mir` explains that
 EmbCC has no machine-IR level. An unknown stage is refused with
 `embcc: inspect: unknown stage 'STAGE'`. With fewer than two arguments
 after `inspect`, the stage list is printed and the status is 1.
@@ -1450,6 +1452,7 @@ traces, and they are not a stable interface. See
 | `EMBCC_RA_DEGREE_SPILL` | Choose spill candidates by interference degree instead of by cost. |
 | `EMBCC_NO_TAILCALL` | Disable tail calls in the AArch64, ARM, RISC-V and AVR backends. |
 | `EMBCC_NO_SPLITLOOPS` | Disable the optimizer's loop-splitting step. |
+| `EMBCC_NO_LKCONST` | Stop deciding compares and branches from a constant the same block has just written. |
 | `EMBCC_VECDEBUG` | Trace the vectorizer's decisions. |
 | `EMBCC_NO_RMW` | Disable x86-64 read-modify-write instruction fusion. |
 | `EMBCC_NO_MEMOFF` | Disable folding constant offsets into loads and stores (ARM, RISC-V, AVR). |

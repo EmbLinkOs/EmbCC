@@ -232,7 +232,8 @@ two stages.
 
 `embcc inspect ir FILE.ir` reads EmbIR's textual form with `ir_parse`
 and prints it back, so a pass can be studied with no C source and no
-backend; printing, parsing and printing again gives the same bytes. The
+backend; printing, parsing and printing again gives the same bytes.
+Given an `-O` level, it runs `opt_run` on the parsed unit first. The
 option reference is [Invoking EmbCC](../manual/invoking.md).
 
 ### Other inputs

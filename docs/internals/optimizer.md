@@ -466,6 +466,17 @@ proves zero becomes zero. A copy of a constant defined in another block
 becomes the constant (not on AVR). Folds that assume 64-bit arithmetic
 refuse a 128-bit (`w == 16`) operation individually.
 
+Inside one block, a temp is also known to hold the constant last written
+to it, even when it has other definitions elsewhere (`lk_note`): a
+loop-carried temp has one on every edge into its loop, so the
+single-definition rule never knows it. Only a 32- or 64-bit compare uses
+that knowledge, and only when the constant was written at the compare's
+width. The table is forgotten at every label and control transfer, after
+inline `asm` or a landing pad, and for a temp written by anything but a
+constant or a copy of a known value. This is what decides a rotated
+loop's guard when the loop's start and bound are constants.
+`EMBCC_NO_LKCONST=1` turns it off, here and in `pass_cfgclean`.
+
 Floating-point operations on constants are folded by `fold_fp`: `+`,
 `-`, `*`, `/`, negation and the six comparisons on `float` (`w` 4) and
 `double` (`w` 8) operands, which arrive as bit patterns. Each is
@@ -536,7 +547,9 @@ is the branch after the join, each arm jumps directly to its outcome.
 hops), turns a conditional branch whose target is its fall-through, or
 whose two edges reach the same label, into a jump, resolves a second
 branch on a condition that the branch just above it already decided
-(marking it for removal), rewrites a branch around a jump as one
+(marking it for removal), decides a branch on a temp that the same block
+has just set to a constant (the table `pass_fold` uses; value numbering
+gives a guard folded to `1` the name of a counter that starts at 1), rewrites a branch around a jump as one
 inverted branch unless the branch or the jump is already marked for
 removal, deletes a jump to the label that immediately follows it,
 deletes instructions after an unconditional transfer up to the next
@@ -705,7 +718,10 @@ later in the instruction stream moves to just before that use. It moves
 only forward. It moves into a deeper loop only when the value costs one
 instruction on the target (always on x86-64 and AVR; on AArch64,
 Thumb and RISC-V according to the encodable-immediate rules) or under
-`-Os`.
+`-Os`. On RISC-V a nonzero constant whose use is a compare stays out of
+a deeper loop whatever it costs: a branch there compares two registers,
+so the constant would be rebuilt every iteration, where x86-64 and Arm
+have already made it an immediate.
 
 **`pass_splitloops`** (`licm`; `edge_ok`; not `-Os`; disabled by
 `EMBCC_NO_SPLITLOOPS=1`). A temp that is live through a loop, crosses a

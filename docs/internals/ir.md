@@ -481,12 +481,15 @@ command shows IR generation's output at `-O0` and the optimizer's at
 command line (`--target=`, `-I`, `-D`, `-O`, `-f<pass>`).
 
 `embcc inspect ir FILE.ir` reads a file in the textual form with
-`ir_parse` and prints it again. A `.ir` file is accepted only by
-`inspect ir`; other modes treat it as C source.
+`ir_parse` and prints it again. With an `-O` level, the optimizer runs on
+the parsed unit before it is printed, which tests a pass on IR written to
+provoke it. A `.ir` file is accepted only by `inspect ir`; other modes
+treat it as C source.
 
 ```sh
 embcc inspect ir sum.c -O2 -fno-vectorize -fno-unroll > sum.ir
 embcc inspect ir sum.ir | cmp - sum.ir
+embcc inspect ir -O2 case.ir
 ```
 
 ### Example
