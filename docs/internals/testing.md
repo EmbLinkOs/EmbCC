@@ -613,6 +613,7 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_NO_IDXOFF` | turn off moving a constant out of an array index into the access's displacement on RISC-V, for bisecting |
 | `EMBCC_RA_WHY=1` | one line per function on stderr accounting for every value that did not get a register |
 | `EMBCC_RA_TRACE=1` | every allocated or eligible value, with its live range, hint and location |
+| `EMBCC_NO_SINKUPD` | leave a loop counter's update where it was instead of moving it next to the copy that ends it, for bisecting |
 | `EMBCC_RA_DEGREE_SPILL=1` | the previous spill choice (highest degree first), for bisecting a difference to it |
 | `EMBCC_RA_POOL_K=1` | the previous colourability test for a value that crosses a call (the whole pool, not the callee-saved registers), for bisecting a difference to it |
 | `EMBCC_T_PAIRS`, `EMBCC_RV_PAIRS` | `1` forces the 64-bit register-pair allocation on, `0` forces it off, on Thumb and on RISC-V; unset, the backend generates each function both ways and keeps the shorter. `EMBCC_T_PAIRS_ONLY=FN` and `EMBCC_RV_PAIRS_ONLY=FN` turn pairs on in function `FN` only. |

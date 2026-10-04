@@ -1456,6 +1456,7 @@ traces, and they are not a stable interface. See
 | `EMBCC_VECDEBUG` | Trace the vectorizer's decisions. |
 | `EMBCC_NO_FULLUNROLL` | Unroll a loop with a constant trip count like any other, instead of copying it whole. |
 | `EMBCC_NO_RMW` | Disable x86-64 read-modify-write instruction fusion. |
+| `EMBCC_NO_SINKUPD` | Leave a loop counter's update where it was instead of moving it next to the copy that ends it. |
 | `EMBCC_NO_MEMOFF` | Disable folding constant offsets into loads and stores (ARM, RISC-V, AVR). |
 | `EMBCC_NO_IDXOFF` | On RISC-V, stop moving a constant out of an array index into the access's displacement. |
 | `EMBCC_RV_RA_MAX`, `EMBCC_RV_PAIRS`, `EMBCC_RV_PAIRS_ONLY`, `EMBCC_RV_JAL_RANGE`, `EMBCC_RV_LONG_CALLS` | RISC-V allocator, register-pair and call-range knobs. |
