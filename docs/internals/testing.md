@@ -622,6 +622,7 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_RV_JAL_RANGE=BYTES`, `EMBCC_RV_LONG_CALLS` | shrink the reach the RISC-V backend assumes for `jal`, or (when set) call functions in the same unit with `auipc`+`jalr` instead of `jal`, to test the long-call path without a megabyte of code |
 | `EMBCC_T_FPU` | `1` or `0` overrides whether the Thumb backend uses the FPU |
 | `EMBCC_VECDEBUG` | the vectorizer prints, on stderr, each loop it considers and why it rejected it |
+| `EMBCC_NO_FULLUNROLL` | a loop with a constant trip count is unrolled like any other instead of being copied whole, for bisecting |
 
 `EMBCC_DEFAULT_TARGET` and `EMBCC_PREFIX` are user-facing and documented in
 [Invoking EmbCC](../manual/invoking.md).

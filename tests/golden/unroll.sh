@@ -215,3 +215,54 @@ then
                         cat "$out/rr.txt"; exit 1; }
     cat "$out/rr.txt"
 fi
+
+# ---- 5. a constant trip count is copied whole --------------------------
+#
+# When the count is known -- a counter from one constant to another, or
+# strength reduction's pointer walked from `X + c1` to `X + c2` -- and the
+# copies come to at most 200 instructions over at most 32 trips, the loop
+# goes altogether: no test, no branch, no remainder. The matrix kernel's
+# 24-trip inner loop is the case it was built for. tests/exec/full-unroll.c
+# checks the answers on every board; this checks which loops it took, from
+# that same source, so the two stay one program.
+fsrc=$EMBCC_ROOT/tests/exec/full-unroll.c
+"$EMBCC" --target=x86_64-linux-gnu -O2 -fremarks -c "$fsrc" -o /dev/null \
+    > "$out/full.txt" 2>&1 || { echo "FAIL: could not compile $fsrc"
+                                cat "$out/full.txt"; exit 1; }
+whole() { grep -q "unrolled '$1'.*constant-trip-count" "$out/full.txt"; }
+for f in from3 mid two t32 wide nest slot; do
+    whole "$f" || {
+        echo "FAIL: '$f' has a constant trip count within the limits and"
+        echo "      should have been copied whole:"
+        grep "unrolled '$f'" "$out/full.txt" | sed 's/^/      /'; exit 1; }
+done
+echo "seven loops with a constant count were copied whole, a nest's inner one,"
+echo "a pointer walk starting inside its array and a counter read afterwards included"
+# 33 trips is past the limit, and tn's count is a parameter
+for f in t33 tn; do
+    if whole "$f"; then
+        echo "FAIL: '$f' was copied whole, but its count is $([ "$f" = tn ] &&
+              echo "not known" || echo "over the limit of 32")"; exit 1
+    fi
+done
+echo "a count of 33, and a count that is a parameter, were not"
+
+# Nor a body that calls the runtime: on a soft-float target every
+# `double` operation is a call, and copying eight of them saves only the
+# loop's test.
+cat > "$out/soft.c" <<'EOF'
+double gd[8];
+double soft(void) { double s = 0; for (int i = 0; i < 8; i++) s += gd[i] * 0.5; return s; }
+EOF
+for t in thumbv7em-none-eabi x86_64-linux-gnu; do
+    "$EMBCC" --target=$t -O2 -fremarks -c "$out/soft.c" -o /dev/null \
+        > "$out/soft-$t.txt" 2>&1 || { echo "FAIL: could not compile soft.c"
+                                       cat "$out/soft-$t.txt"; exit 1; }
+done
+if grep -q "constant-trip-count" "$out/soft-thumbv7em-none-eabi.txt"; then
+    echo "FAIL: on Thumb, eight soft-float calls were copied whole"; exit 1
+fi
+grep -q "unrolled 'soft'.*constant-trip-count" "$out/soft-x86_64-linux-gnu.txt" || {
+    echo "FAIL: on x86-64 the same loop is SSE arithmetic and should have"
+    echo "      been copied whole:"; cat "$out/soft-x86_64-linux-gnu.txt"; exit 1; }
+echo "a body of soft-float calls on Thumb was left a loop; the same body in SSE was not"
