@@ -60,6 +60,37 @@ __attribute__((noinline)) static int shifts(u64 x)
     return 0;
 }
 
+/* `if (x & K)` with K below 2^32 tests the low word only; with K at or
+ * above 2^32 it must not. And `x & K == 0` likewise. */
+__attribute__((noinline)) static int tests(u64 x)
+{
+    int r = 0;
+    if (x & 1ULL) r |= 1;
+    if (x & 0x80000000ULL) r |= 2;
+    if (x & 0x100000000ULL) r |= 4;
+    if (x & 0xffffffff00000000ULL) r |= 8;
+    if ((x & 0x00ff0000ULL) == 0) r |= 16;
+    if ((x & 0x8000000000000000ULL) != 0) r |= 32;
+    if (((x >> 52) & 1) == 0) r |= 64;
+    if (x & 0xfffff800ULL) r |= 128;
+    if ((unsigned)x & ~0x7ffu) r |= 256;      /* andi -2048 at RV64 */
+    return r;
+}
+static int tests_ref(u64 x)
+{
+    int r = 0;
+    if (shr_ref(x, 0) % 2) r |= 1;
+    if (shr_ref(x, 31) % 2) r |= 2;
+    if (shr_ref(x, 32) % 2) r |= 4;
+    if (shr_ref(x, 32)) r |= 8;
+    if (shr_ref(x, 16) % 256 == 0) r |= 16;
+    if (shr_ref(x, 63)) r |= 32;
+    if (shr_ref(x, 52) % 2 == 0) r |= 64;
+    if (shr_ref(x, 11) % 2097152) r |= 128;
+    if (shr_ref(x, 11) % 2097152) r |= 256;
+    return r;
+}
+
 __attribute__((noinline)) static int exponent(u64 x) { return (int)(x >> 52) & 0x7ff; }
 __attribute__((noinline)) static int sign(u64 x)
 {
@@ -78,6 +109,7 @@ int main(void)
         if (r) return r;
         if (exponent(x) != (int)(shr_ref(x, 52) & 0x7ff)) return 4;
         if (sign(x) != (int)shr_ref(x, 63)) return 5;
+        if (tests(x) != tests_ref(x)) return 7;
     }
     if (exponent(0x3ff0000000000000ULL + vz) != 1023) return 6;
     return 42;

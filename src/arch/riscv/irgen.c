@@ -342,6 +342,34 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
  * form -- so a compare's constant is free only when it is zero, which is
  * x0. mul has no immediate at all. HERE rather than beside the lowerings
  * because embls links the optimizer without the code generator. */
+/* ...and for a 64-bit AND, OR or XOR at RV32, which the code generator
+ * does half by half (logic_half): a half it takes without building it is
+ * zero or all ones, a 12-bit immediate (andi/ori/xori), or for an AND a
+ * mask of the low or of the high bits (two shifts). Both halves must be,
+ * or the constant stays in a register pair, built once. */
+static int riscv_half_ok(int op, unsigned long c)
+{
+    unsigned long nc = ~c & 0xffffffffUL;
+    long sc = (long)(int)(unsigned int)c;
+    if (c == 0 || c == 0xffffffffUL || (sc >= -2048 && sc <= 2047))
+        return 1;
+    return op == IR_AND && ((c & (c + 1)) == 0 || (nc & (nc + 1)) == 0);
+}
+int riscv_imm_foldable64(int op, long imm)
+{
+    unsigned long u = (unsigned long)imm;
+    unsigned long lo = u & 0xffffffffUL, hi = (u >> 32) & 0xffffffffUL;
+    unsigned long idn = op == IR_AND ? 0xffffffffUL : 0;
+    if (op != IR_AND && op != IR_OR && op != IR_XOR)
+        return 0;
+    /* One half that is the identity costs nothing, so the other half may
+     * be anything: built in t4 and applied, it is one or two instructions
+     * against a whole pair built and applied -- `v |= 1ULL << 51` is a lui
+     * and an or. */
+    if (lo == idn || hi == idn)
+        return 1;
+    return riscv_half_ok(op, lo) && riscv_half_ok(op, hi);
+}
 int riscv_imm_foldable(int op, long imm)
 {
     switch (op) {

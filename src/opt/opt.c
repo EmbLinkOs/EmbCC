@@ -9541,6 +9541,9 @@ static int target_imm_foldable(int op, long imm, int w)
     if (target_get() == TARGET_THUMB && w == 8 &&
         (op == IR_AND || op == IR_OR || op == IR_XOR) && !getenv("EMBCC_T_NOWIDEIMM"))
         return thumb_imm_foldable64(op, imm);
+    if (target_get() == TARGET_RISCV32 && w == 8 &&
+        (op == IR_AND || op == IR_OR || op == IR_XOR) && !getenv("EMBCC_RV_NOWIDEIMM"))
+        return riscv_imm_foldable64(op, imm);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
@@ -9569,10 +9572,38 @@ static int pass_signtest(struct ir_func *fn)
         each_read(&fn->ins[n], count_cb, &uc);
     for (int n = 0; n + 1 < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n], *br = &fn->ins[n + 1];
-        if (i->op != IR_SHR || i->sign || !i->imm_b || i->flt || i->w != 8 ||
-            i->imm != 63 || i->dst < 0 || i->dst >= nv || use[i->dst] != 1)
+        /* ...and the same AND read by `== 0` or `!= 0`, which is how C
+         * spells `while (!(m >> 52 & 1))`: both at four bytes. */
+        if (i->op == IR_AND && i->imm_b && !i->flt && i->w == 8 &&
+            i->imm >= 0 && i->imm <= 0xffffffffL && i->dst >= 0 &&
+            i->dst < nv && use[i->dst] == 1 && br->op == IR_CMP &&
+            br->a == i->dst && br->imm_b && br->imm == 0 && br->w == 8 &&
+            (br->pred == B_EQ || br->pred == B_NE) &&
+            !getenv("EMBCC_NO_SIGNTEST")) {
+            i->w = 4;
+            i->sign = 0;
+            br->w = 4;
+            changed = 1;
             continue;
-        if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->a != i->dst)
+        }
+        if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->a != i->dst ||
+            i->flt || !i->imm_b || i->w != 8 || i->dst < 0 ||
+            i->dst >= nv || use[i->dst] != 1)
+            continue;
+        /* `if (x & K)` with K below 2^32 tests only bits of the low word:
+         * the AND and the branch at four bytes, which on a 32-bit target is
+         * one and and one branch instead of a pair and an or -- and leaves
+         * whatever x is read narrow, `(m >> 52) & 1` a shift of the high
+         * word alone. */
+        if (i->op == IR_AND && i->imm >= 0 && i->imm <= 0xffffffffL &&
+            !getenv("EMBCC_NO_SIGNTEST")) {
+            i->w = 4;
+            i->sign = 0;
+            br->w = 4;
+            changed = 1;
+            continue;
+        }
+        if (i->op != IR_SHR || i->sign || i->imm != 63)
             continue;
         i->op = IR_CMP;
         i->pred = B_LT;
@@ -9648,9 +9679,10 @@ static int pass_immfold(struct ir_func *fn)
         default:
             continue;
         }
-        /* Thumb takes a 64-bit AND/OR/XOR constant half by half, so its
-         * width is not x86's imm32 question (thumb_imm_foldable64). */
-        int wide_ok = target_get() == TARGET_THUMB && i->w == 8 &&
+        /* Thumb and RV32 take a 64-bit AND/OR/XOR constant half by half,
+         * so its width is not x86's imm32 question (*_imm_foldable64). */
+        int wide_ok = (target_get() == TARGET_THUMB ||
+                       target_get() == TARGET_RISCV32) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
         if (get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
             target_imm_foldable(i->op, B, i->w)) {
