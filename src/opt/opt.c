@@ -10558,6 +10558,16 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
     /* 4. Grow vreg/label space and the caller's var metadata. */
     fn->nvregs = N + n;
     fn->nlabels = L + cf->nlabels + 1;
+    /* ...and the stack-argument area: the callee's calls are the
+     * caller's now. x86-64 sizes the frame from it, and a caller that
+     * passed nothing on the stack itself had none -- so a printf of four
+     * long doubles, inlined into main, wrote its arguments over main's
+     * own slots (embedded-libc.c at -O1: the fourth printed as the
+     * first). */
+    if (cf->outgoing_bytes > fn->outgoing_bytes)
+        fn->outgoing_bytes = cf->outgoing_bytes;
+    if (cf->scratch_bytes > fn->scratch_bytes)
+        fn->scratch_bytes = cf->scratch_bytes;
     int nv = V + v;
     struct type **vt = xmalloc((size_t)(nv ? nv : 1) * sizeof *vt);
     int *va = xmalloc((size_t)(nv ? nv : 1) * sizeof *va);
