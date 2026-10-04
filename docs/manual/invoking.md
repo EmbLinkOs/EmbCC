@@ -694,18 +694,20 @@ No optimization. This is the default. The optimizer does not run, so the
 
 ### `-O`, `-O1`
 
-Run the optimizer's per-function local passes (constant folding, value
-numbering, copy propagation, dead-code elimination) and the `cfg-clean`
-pass. Static functions that are unreachable after optimization are not
-emitted. The x86-64 and AArch64 backends also lay out smaller frames, and
-the x86-64 backend reuses values it already holds in a register. No
-backend allocates registers at this level.
+Optimize without making the code larger, as GCC's and Clang's `-O1` do.
+Every backend allocates registers, with tail calls where its conditions
+allow them, and the optimizer runs the passes that only remove work:
+the local passes, `cfg-clean`, `mem2reg`, `sroa`, `sccp`, `dse`,
+`load-cse`, `licm`, `if-convert` and `div-magic`, and inlines a `static`
+function with a single caller and an `always_inline` function. Static
+functions that are unreachable after optimization are not emitted.
 
 ### `-O2`
 
-Everything in `-O1`, plus every pass in the [pass table](#-fpass--fno-pass)
-(the vectorizer on x86-64 only), and register allocation in the backends,
-with tail calls where the backend's conditions allow them.
+Everything in `-O1`, plus every other pass in the
+[pass table](#-fpass--fno-pass) (the vectorizer on x86-64 only): full
+inlining, `gcse`, `pre`, `unroll`, `switch-thread`, `tail-recursion` and
+`idiom`.
 
 ### `-O3`
 
@@ -729,20 +731,20 @@ on its own. The pass names are:
 
 | Pass | Default at | What it does |
 |---|---|---|
-| `mem2reg` | `-O2` | promotes local variables to SSA values |
+| `mem2reg` | `-O1` | promotes local variables to SSA values |
 | `gcse` | `-O2` | dominator-scoped global common-subexpression elimination |
-| `load-cse` | `-O2` | global redundant-load elimination |
-| `sccp` | `-O2` | resolves constant branches and drops dead blocks |
-| `licm` | `-O2` | loop-invariant code motion, loop rotation and strength reduction |
+| `load-cse` | `-O1` | global redundant-load elimination |
+| `sccp` | `-O1` | resolves constant branches and drops dead blocks |
+| `licm` | `-O1` | loop-invariant code motion, loop rotation and strength reduction |
 | `vectorize` | `-O2`, x86-64 only, not `-Os` | lane-wise loops |
-| `inline` | `-O2` | inlines small callees into their callers |
-| `dse` | `-O2` | removes a store a later store overwrites |
-| `div-magic` | `-O2` | divides by a constant without a divide instruction |
-| `if-convert` | `-O2` | replaces a two-way branch with a select |
+| `inline` | `-O1` (a single caller or `always_inline` only), `-O2` | inlines small callees into their callers |
+| `dse` | `-O1` | removes a store a later store overwrites |
+| `div-magic` | `-O1` | divides by a constant without a divide instruction |
+| `if-convert` | `-O1` | replaces a two-way branch with a select |
 | `cfg-clean` | `-O1` | threads jumps and removes unreachable code |
 | `tail-recursion` | `-O2` | turns a self tail call into a loop |
 | `idiom` | `-O2` | turns a copy or clear loop into `memcpy`/memory clear |
-| `sroa` | `-O2` | splits a private aggregate into scalars |
+| `sroa` | `-O1` | splits a private aggregate into scalars |
 | `unroll` | `-O2`, not `-Os` | unrolls counted loops |
 | `pre` | `-O2` | partial-redundancy elimination |
 | `switch-thread` | `-O2`, not `-Os` | jumps from a known state straight to its `switch` case |

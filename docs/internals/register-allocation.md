@@ -29,9 +29,9 @@ splitting is done before allocation, in the IR, by `pass_splitloops`
 
 ### When it runs
 
-The driver passes each backend a `regalloc` flag that is true at `-O2`,
-`-O3`, `-Os` and `-Oz` (`opt_level >= 2`). At `-O0` and `-O1` every vreg
-lives in a stack slot. Within an allocating build a backend may still
+The driver passes each backend a `regalloc` flag that is true at `-O1`
+and above, `-Os` and `-Oz` included (`opt_level >= 1`). At `-O0` every
+vreg lives in a stack slot. Within an allocating build a backend may still
 leave a particular function unallocated; the conditions are listed per
 backend under [Backend hooks](#backend-hooks).
 
@@ -647,7 +647,7 @@ is an internal error: `avr: FUNC: values kept being overwritten in their
 homes after N attempts`. An attempt that gave X to a value and then used
 X as scratch is redone without X as a home.
 
-**Not allocated.** At `-O0` and `-O1`, under `-g`, in an interrupt
+**Not allocated.** At `-O0`, under `-g`, in an interrupt
 handler, and in every function but the one named by
 `EMBCC_AVR_RA_ONLY` when that is set.
 

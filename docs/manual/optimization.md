@@ -29,8 +29,8 @@ The default is `-O0`: no IR optimization and no register allocation.
 | Option | Effect |
 |---|---|
 | `-O0` | No optimization. The default. |
-| `-O`, `-O1` | The local passes, CFG cleanup, removal of unreachable `static` functions, a few code-generation improvements on x86-64 and AArch64. |
-| `-O2` | Everything in `-O1`, the global, loop and interprocedural passes, inlining, register allocation and tail calls. |
+| `-O`, `-O1` | Register allocation, and the passes that only remove work: promotion of locals to registers, constant propagation, dead stores, redundant loads, loop invariants, if-conversion, division by constants. |
+| `-O2` | Everything in `-O1`, plus inlining, global CSE, partial redundancy elimination, unrolling, vectorizing, and the other passes that trade size or compile time for speed. |
 | `-O3` | Identical to `-O2`. |
 | `-Os` | `-O2` without the passes that trade size for speed, a smaller inlining budget, denser jump tables, and no function alignment padding. |
 | `-Oz` | Identical to `-Os`. |
@@ -56,19 +56,26 @@ taken when the IR is first generated or when code is emitted:
 - On x86-64, temporaries that are not live at the same time share stack
   slots within a basic block.
 - On x86-64 and AVR, branches are shortened to their smallest encoding.
-  Thumb and RISC-V use their 16-bit branch forms only at `-O2`.
+  Thumb and RISC-V use their 16-bit branch forms from `-O1`.
 
 ### `-O`, `-O1`
 
-Optimize within basic blocks, without the global, loop and
-interprocedural passes. `-O` is the same as `-O1`.
+Optimize without making the code larger. This is the level of GCC's and
+Clang's `-O1`. `-O` is the same as `-O1`.
 
-The IR optimizer runs the local passes listed in
-[Passes with no switch](#passes-with-no-switch) and the
-[`cfg-clean`](#-fcfg-clean--fno-cfg-clean) pass. Local variables stay in
-memory (mem2reg is an `-O2` pass), but a value stored to a local and
-read back in the same basic block is forwarded without the reload, unless
-the local is `volatile`.
+Values live in registers: every code generator allocates registers, and
+`mem2reg` and `sroa` take local variables out of memory. The passes that
+only remove work run: the local passes listed in
+[Passes with no switch](#passes-with-no-switch), `cfg-clean`, `sccp`,
+`dse`, `load-cse`, `licm`, `if-convert` and `div-magic`, with attribute
+inference and constant propagation from read-only `static` variables.
+
+Inlining at `-O1` is limited to what makes code smaller or was asked
+for: a `static` function with a single caller (whose original is then
+deleted) and an `always_inline` function. The other passes that trade
+size or compile time for speed wait for `-O2`: `gcse`, `pre`, `unroll`,
+`vectorize`, `switch-thread`, `tail-recursion` and `idiom`. Code at
+`-O1` is usually a little smaller than at `-O2`.
 
 After optimization, a `static` function that no longer has a reachable
 caller is not emitted. This is decided by reachability from the
@@ -76,31 +83,16 @@ functions visible outside the unit, constructors, destructors and
 functions marked `__attribute__((used))`, so a `static` function called
 only from another dead `static` function is dropped as well.
 
-The code generators do the following at `-O1`:
-
-| Target | Additional code generation at `-O1` |
-|---|---|
-| x86-64 | Skips reloading a value `rax` already holds; folds an address computation into the memory access, a shift into a scaled index, and a compare into the following branch; a temporary that is never referenced gets no stack slot. |
-| AArch64 | A temporary that is never referenced gets no stack slot. |
-| Thumb, RISC-V, AVR | Nothing. Code generation is the same as at `-O0`; only the IR differs. |
+The code generators do at `-O1` everything they do at `-O2`; see
+[Code generation by level](#code-generation-by-level).
 
 ### `-O2`
 
 Optimize for speed. Enables everything in `-O1`, and:
 
-- every pass in the [pass table](#controlling-individual-passes), except
-  `vectorize` on targets other than x86-64;
-- function inlining, with the budgets in [Inlining](#inlining);
-- attribute inference: a function found to read or write no memory, or
-  only to read it, no longer forces the optimizer to forget loaded values
-  at a call to it;
-- constant propagation from read-only `static` variables (see
-  [Passes with no switch](#passes-with-no-switch));
-- splitting a value's live range around a loop that contains no call
-  (part of `licm`);
-- in the code generators: register allocation, tail calls, constant
-  offsets folded into loads and stores, frameless functions, and the
-  per-target choices in [Code generation by level](#code-generation-by-level).
+- every other pass in the [pass table](#controlling-individual-passes),
+  except `vectorize` on targets other than x86-64;
+- function inlining, with the budgets in [Inlining](#inlining).
 
 ### `-O3`
 
@@ -161,15 +153,16 @@ the command line: `-fno-sccp -O2` and `-O2 -fno-sccp` are the same.
 | Local passes ([no switch](#passes-with-no-switch)) | | yes | yes | yes |
 | `cfg-clean` | | yes | yes | yes |
 | Unreachable `static` functions dropped after optimization | | yes | yes | yes |
-| `mem2reg`, `sroa`, `gcse`, `load-cse`, `pre`, `sccp`, `dse` | | | yes | yes |
-| `licm` (rotation, invariant motion, strength reduction) | | | yes | yes |
-| Live-range splitting around loops (part of `licm`) | | | yes | |
-| `inline` | | | yes | yes, budget 6 |
-| `div-magic`, `if-convert`, `tail-recursion`, `idiom` | | | yes | yes |
+| `mem2reg`, `sroa`, `load-cse`, `sccp`, `dse` | | yes | yes | yes |
+| `licm` (rotation, invariant motion, strength reduction) | | yes | yes | yes |
+| Live-range splitting around loops (part of `licm`) | | yes | yes | |
+| `div-magic`, `if-convert` | | yes | yes | yes |
+| Attribute inference, read-only `static` propagation | | yes | yes | yes |
+| Register allocation, tail calls (code generator) | | yes | yes | yes |
+| `gcse`, `pre`, `tail-recursion`, `idiom` | | | yes | yes |
+| `inline` | | single caller or `always_inline` | yes | yes, budget 6 |
 | `vectorize` | | | x86-64 only | |
 | `unroll`, `switch-thread` | | | yes | |
-| Attribute inference, read-only `static` propagation | | | yes | yes |
-| Register allocation, tail calls (code generator) | | | yes | yes |
 | 16-byte function alignment (x86-64, AArch64) | yes | yes | yes | |
 
 ## Controlling individual passes
@@ -183,15 +176,14 @@ line.
 
 ```sh
 embcc -O2 -fno-inline -c foo.c        # -O2 without inlining
-embcc -O1 -fmem2reg -c foo.c          # -O1 plus one -O2 pass
+embcc -O1 -fgcse -c foo.c             # -O1 plus one -O2 pass
 ```
 
 A pass option takes effect only when the IR optimizer runs, which is at
 `-O1` and above. At `-O0` it is accepted and does nothing.
 
-`-fNAME` at `-O1` runs that pass, but not the other `-O2`-only work that
-happens around it (attribute inference, read-only `static` propagation
-and register allocation stay off).
+`-fNAME` at `-O1` runs that pass at `-O1`. Nothing else changes: the
+inlining budgets stay `-O1`'s.
 
 A name that is not a pass, and not another option EmbCC knows, is
 refused:
@@ -218,20 +210,20 @@ The table lists every pass. The entries that follow describe each one.
 
 | Pass | Default | What it does |
 |---|---|---|
-| `mem2reg` | `-O2`, `-Os` | Promote scalar locals out of memory |
+| `mem2reg` | `-O1`, `-O2`, `-Os` | Promote scalar locals out of memory |
 | `gcse` | `-O2`, `-Os` | Common subexpressions across blocks |
-| `load-cse` | `-O2`, `-Os` | Redundant loads across blocks |
-| `sccp` | `-O2`, `-Os` | Constant branches and unreachable blocks |
-| `licm` | `-O2`, `-Os` | Loop rotation, invariant motion, induction-variable strength reduction |
+| `load-cse` | `-O1`, `-O2`, `-Os` | Redundant loads across blocks |
+| `sccp` | `-O1`, `-O2`, `-Os` | Constant branches and unreachable blocks |
+| `licm` | `-O1`, `-O2`, `-Os` | Loop rotation, invariant motion, induction-variable strength reduction |
 | `vectorize` | `-O2`, x86-64 only | Lane-wise loops (SSE2) |
-| `inline` | `-O2`, `-Os` | Function inlining |
-| `dse` | `-O2`, `-Os` | Stores overwritten before they are read |
-| `div-magic` | `-O2`, `-Os` | Division by a constant without a divide |
-| `if-convert` | `-O2`, `-Os` | A two-way choice without a branch |
+| `inline` | `-O1` (limited), `-O2`, `-Os` | Function inlining |
+| `dse` | `-O1`, `-O2`, `-Os` | Stores overwritten before they are read |
+| `div-magic` | `-O1`, `-O2`, `-Os` | Division by a constant without a divide |
+| `if-convert` | `-O1`, `-O2`, `-Os` | A two-way choice without a branch |
 | `cfg-clean` | `-O1`, `-O2`, `-Os` | Jump threading and dead jumps |
 | `tail-recursion` | `-O2`, `-Os` | A self tail call becomes a loop |
 | `idiom` | `-O2`, `-Os` | Copy and clear loops become block operations |
-| `sroa` | `-O2`, `-Os` | Split a local aggregate into scalars |
+| `sroa` | `-O1`, `-O2`, `-Os` | Split a local aggregate into scalars |
 | `unroll` | `-O2` | Loop unrolling |
 | `pre` | `-O2`, `-Os` | Partial redundancy elimination |
 | `switch-thread` | `-O2` | State machines jump straight to the next case |
@@ -260,9 +252,9 @@ A `volatile` local is never promoted. A local whose address is taken
 stays in memory, unless `sroa` first shows that the address is used only
 for loads and stores at constant offsets.
 
-This pass is what makes most of `-O2` effective. With `-fno-mem2reg`,
+This pass is what makes most of the optimizer effective. With `-fno-mem2reg`,
 locals stay in memory and the other global passes see little. Default:
-on at `-O2` and `-Os`.
+on at `-O1`, `-O2` and `-Os`.
 
 ### `-fgcse`, `-fno-gcse`
 
@@ -283,14 +275,14 @@ Remove a load that repeats an earlier load of the same address on
 every path to it, with no store, call, atomic operation, fence or inline
 `asm` in between that could change the value. The second load becomes a
 copy of the first. `volatile` loads are never removed. Default: on at
-`-O2` and `-Os`.
+`-O1`, `-O2` and `-Os`.
 
 ### `-fsccp`, `-fno-sccp`
 
 Resolve a conditional branch whose condition is a known constant into a
 jump, and delete every block that is then unreachable. The constants
 typically come from inlining a call with a constant argument, or from a
-configuration macro. Default: on at `-O2` and `-Os`.
+configuration macro. Default: on at `-O1`, `-O2` and `-Os`.
 
 ### `-flicm`, `-fno-licm`
 
@@ -314,7 +306,7 @@ The loop passes:
   name inside the loop, so the loop does not keep it in a callee-saved
   register.
 
-Default: on at `-O2` and `-Os` (live-range splitting at `-O2` only).
+Default: on at `-O1`, `-O2` and `-Os` (live-range splitting at `-O1` and `-O2` only).
 
 ### `-fvectorize`, `-fno-vectorize`
 
@@ -363,7 +355,8 @@ this is fixed. `-fremarks` reports each loop it vectorizes.
 Replace a call to a small function defined in the same translation unit
 with the function's body. See [Inlining](#inlining) for the budgets and
 for what is never inlined. Default: on at `-O2` and `-Os`, with a smaller
-budget at `-Os`.
+budget at `-Os`; at `-O1`, only for a `static` function with a single
+caller and for an `always_inline` function.
 
 ### `-fdse`, `-fno-dse`
 
@@ -378,8 +371,8 @@ p->x = 2;
 
 Only stores through the same address value are matched. A `volatile`
 store is never removed. (A store to a local that is never read at all is
-removed by dead-code elimination at `-O1`.) Default: on at `-O2` and
-`-Os`.
+removed by dead-code elimination at `-O1`.) Default: on at `-O1`, `-O2`
+and `-Os`.
 
 ### `-fdiv-magic`, `-fno-div-magic`
 
@@ -387,7 +380,7 @@ Replace a 32-bit division or remainder by a constant with a
 multiplication by a "magic" constant and shifts, signed or unsigned.
 64-bit divisions are left alone, because the 128-bit product they would
 need is a library call on most targets. Unsigned division by a power of
-two is already a shift at `-O1`. Default: on at `-O2` and `-Os`, because
+two is already a shift at `-O1`. Default: on at `-O1`, `-O2` and `-Os`, because
 the multiply sequence is also smaller than a divide on these targets.
 
 ### `-fif-convert`, `-fno-if-convert`
@@ -402,8 +395,8 @@ x = c ? a : b;      /* no branch */
 A select evaluates both arms, so only arms that are plain values are
 converted; an arm with a load, a call or anything that can fault keeps
 its branch. On x86-64 a select is a `cmov`, on AArch64 a `csel`; the other
-code generators lower it in their own way. Default: on at `-O2` and
-`-Os`.
+code generators lower it in their own way. Default: on at `-O1`, `-O2`
+and `-Os`.
 
 ### `-fcfg-clean`, `-fno-cfg-clean`
 
@@ -455,7 +448,7 @@ split into at most 16 pieces.
 It is not split when it is `volatile`, when any access is `volatile`,
 when it is indexed by a variable, when its address is passed to a
 function or stored, or when two accesses overlap with different widths
-(a union used to reinterpret bytes). Default: on at `-O2` and `-Os`.
+(a union used to reinterpret bytes). Default: on at `-O1`, `-O2` and `-Os`.
 
 ### `-funroll`, `-fno-unroll`
 
@@ -559,8 +552,10 @@ At `-O2` and `-Os` these also run:
 
 ## Inlining
 
-The inliner runs at `-O2` and `-Os` (or with `-finline` at `-O1`), before
-the per-function passes. Sizes are counted in EmbIR instructions, as
+The inliner runs at `-O1` and above, before the per-function passes. At
+`-O1` it inlines only a `static` function with a single caller and an
+`always_inline` function (the reason code for any other call is
+`not-a-sole-callee-at-O1`). Sizes are counted in EmbIR instructions, as
 `embcc inspect ir` prints them, before the callee is optimized.
 
 | Limit | Value |
@@ -623,11 +618,11 @@ on the case values, ending in a chain of up to four equality tests.
 
 ## Code generation by level
 
-The code generators read only two facts: whether the level is at least
-1, and whether it is at least 2. `-Os` and `-Oz` are level 2 for them;
-only function alignment checks for `-Os`.
+The code generators read one fact: whether the level is at least 1.
+`-O1` to `-O3`, `-Os` and `-Oz` generate code the same way; only function
+alignment checks for `-Os`.
 
-At `-O2` and `-Os`, every code generator:
+At `-O1` and above, every code generator:
 
 - **allocates registers** to values, including callee-saved registers,
   which are then saved and restored. On x86-64 and AArch64, a function
@@ -637,7 +632,7 @@ At `-O2` and `-Os`, every code generator:
 - **makes tail calls**: a call immediately followed by a return of its
   value becomes a jump, under the conditions in the table below.
 
-| Target | `-O2` / `-Os` specifics | Tail calls (`-O2`, `-Os`) |
+| Target | Specifics at `-O1` and above | Tail calls (`-O1` and above) |
 |---|---|---|
 | x86-64 | A leaf function with no stack frame omits `push rbp`; an ELF function that only saves registers uses pushes and no frame pointer; a shared epilogue for functions with several returns. Frameless and push-only functions are not made with `-g`. | Direct calls; no structure return; caller not variadic, no `alloca`, no computed `goto`, no exception region, no address of a local taken; all arguments in registers; not for the Windows convention. |
 | AArch64 | A leaf function with no stack frame omits the `x29`/`x30` frame record (not with `-g`). | Direct, non-variadic calls; result at most 8 bytes, not a structure or floating point; function has a single return; no `alloca`, no exception region, no address of a local taken; all arguments in registers. Not with `-g`. |
@@ -645,7 +640,7 @@ At `-O2` and `-Os`, every code generator:
 | RISC-V | RV32: each function is generated with and without register pairs and the shorter is kept; compressed branches and jumps. | As AArch64, result at most XLEN. Not with `-g`. |
 | AVR | Nine allocation strategies are tried and the shortest code is kept. Not with `-g`, and not in an interrupt handler. | Not in an interrupt handler, not with `-g`; result at most 8 bytes; no argument in a register the epilogue restores. |
 
-On AVR, `-g` at `-O2` turns register allocation off entirely. See
+On AVR, `-g` at `-O1` and above turns register allocation off entirely. See
 [Debugging](debugging.md#how--g-changes-the-generated-code) for every way
 `-g` changes code.
 
@@ -666,8 +661,8 @@ have no effect. What each target does:
 
 | Target | Frame pointer |
 |---|---|
-| x86-64 | `rbp` at `-O0` and `-O1`. At `-O2`, omitted in frameless leaf functions and push-only frames, unless `-g`. |
-| AArch64 | `x29` frame record at `-O0` and `-O1`. At `-O2`, omitted in frameless leaf functions, unless `-g`. |
+| x86-64 | `rbp` at `-O0`. From `-O1`, omitted in frameless leaf functions and push-only frames, unless `-g`. |
+| AArch64 | `x29` frame record at `-O0`. From `-O1`, omitted in frameless leaf functions, unless `-g`. |
 | Thumb | None. `r7` is set up only in a function with a variable-length array or `alloca`. |
 | RISC-V | None. `s0` is set up only in a function with a variable-length array or `alloca`. |
 | AVR | `Y` (`r28:r29`), only when the function has a stack frame, stack arguments, variable arguments, a structure return, or is an interrupt handler. |

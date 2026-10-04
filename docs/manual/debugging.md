@@ -209,8 +209,8 @@ have no effect.
 
 | Target | Without `-g` | With `-g` |
 |---|---|---|
-| x86-64 | `rbp` frame in every function at `-O0` and `-O1`; at `-O2`, frameless leaf functions and push-only frames have none | `rbp` frame in every function |
-| AArch64 | `x29`/`x30` frame record at `-O0` and `-O1`; at `-O2`, frameless leaf functions have none | Frame record in every function |
+| x86-64 | `rbp` frame in every function at `-O0`; from `-O1`, frameless leaf functions and push-only frames have none | `rbp` frame in every function |
+| AArch64 | `x29`/`x30` frame record at `-O0`; from `-O1`, frameless leaf functions have none | Frame record in every function |
 | Thumb | None (`r7` only in a function with `alloca`, a variable-length array, or a local aligned beyond 8 bytes) | Same |
 | RISC-V | None (`s0` only in a function with `alloca`, a variable-length array, or a local aligned beyond 16 bytes) | Same |
 
@@ -224,11 +224,11 @@ following:
 
 | Target | Turned off by `-g` |
 |---|---|
-| x86-64 | Sharing one stack slot between variables that are not live at the same time (all levels); frameless and push-only functions; moving parameters straight into allocated registers (`-O2`). |
-| AArch64 | Frameless leaf functions and tail calls (`-O2`). |
-| Thumb | Choosing between register-pair and no-pair allocation, folding constant offsets into loads and stores, and tail calls (`-O2`). Variables the optimizer leaves in memory are not given registers. |
-| RISC-V | Tail calls (`-O2`). Variables the optimizer leaves in memory are not given registers. |
-| AVR | Register allocation, entirely (`-O2`). |
+| x86-64 | Sharing one stack slot between variables that are not live at the same time (all levels); frameless and push-only functions; moving parameters straight into allocated registers (`-O1` and above). |
+| AArch64 | Frameless leaf functions and tail calls (`-O1` and above). |
+| Thumb | Choosing between register-pair and no-pair allocation, folding constant offsets into loads and stores, and tail calls (`-O1` and above). Variables the optimizer leaves in memory are not given registers. |
+| RISC-V | Tail calls (`-O1` and above). Variables the optimizer leaves in memory are not given registers. |
+| AVR | Register allocation, entirely (`-O1` and above). |
 
 On every target, a variable that is never referenced still gets a stack
 slot under `-g`.
@@ -248,23 +248,20 @@ At `-O1` and above, the debug information still describes every
 variable at its stack slot, but the optimizer no longer keeps every
 value there:
 
-- At `-O2` and `-Os`, `mem2reg` moves local variables into registers.
-  The variable's slot is then never written, and the debugger shows
-  whatever the slot holds: usually a stale or uninitialized value.
-  There is no "optimized out" marker.
+- `mem2reg` moves local variables into registers. The variable's slot is
+  then never written, and the debugger shows whatever the slot holds:
+  usually a stale or uninitialized value. There is no "optimized out"
+  marker.
 - Parameters are stored to their slots on entry to the function, so the
   debugger shows each parameter's value at entry, even after the
   function has changed it.
-- At `-O1`, a value stored to a local variable and read back in the same
-  basic block is forwarded without the reload, and the store is then
-  usually removed, so the slot can hold an old value.
 - A `volatile` local is the exception at every level: it is never
   promoted, forwarded or given a register, so its slot always holds its
   current value.
 - Inlined functions have no frame of their own: a backtrace shows the
   caller, and the line table moves between the caller's lines and the
   inlined function's lines.
-- Tail calls (x86-64 at `-O2`, even with `-g`) replace the caller's frame
+- Tail calls (x86-64 from `-O1`, even with `-g`) replace the caller's frame
   with the callee's, so the caller is missing from a backtrace.
 - Loops may be rotated, unrolled or vectorized, so stepping visits the
   loop's lines in an order that does not match the source.
@@ -390,7 +387,7 @@ These are defects in the current implementation, not intended behavior.
 - **AVR.** `-g` is accepted, but no line-table rows are emitted, the
   frame base is wrong, and `.debug_info` declares a 2-byte address size
   while writing 8-byte addresses, so debuggers cannot read past the
-  compile unit. `-g` also turns off register allocation at `-O2`.
+  compile unit. `-g` also turns off register allocation at `-O1` and above.
 - **Unwind tables on Thumb, RISC-V and AVR.** `-funwind-tables` (and C++
   at RV64, the one of these targets that compiles C++) produce an
   `.eh_frame` in the x86-64 layout on these targets, which does not

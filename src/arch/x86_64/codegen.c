@@ -1159,6 +1159,19 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
             if (taken[a] || taken[d]) continue;
             if (disp[a] == DEAD_SLOT_OFF || disp[d] == DEAD_SLOT_OFF)
                 continue;
+            /* ...and the source's SLOT must not change either. A local
+             * shares its slot with any other whose life does not overlap
+             * its own (coalesce_locals), and its own life ends at its last
+             * read -- which may be this very copy. The copy reading that
+             * slot then lives on in a slot the next local writes:
+             * roundl's x went into `a`'s and `t`'s, and roundl(-2.5L)
+             * returned +3. */
+            if (a < fn->nvars) {
+                int shared = 0;
+                for (int b = 0; b < fn->nvars && !shared; b++)
+                    shared = b != a && disp[b] == disp[a];
+                if (shared) continue;
+            }
             if (g_want_debug && d < fn->nvars) continue;  /* its DWARF home */
             disp[d] = disp[a];
         }
