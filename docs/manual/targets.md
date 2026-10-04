@@ -890,7 +890,7 @@ rt-embedded` builds `librt.a` for `avr`.
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for avr: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 2` |
 
 Code compiled at `-O0` is large; an ordinary program may not fit the
-part's 32 KB of flash unless built with `-O2` or `-Os`.
+part's 32 KB of flash unless built with `-O1` or above.
 
 <!-- UNVERIFIED: the -O0 size remark comes from a commit message ("-O0 does not fit the part" for one test), not from a measurement made for this page. -->
 

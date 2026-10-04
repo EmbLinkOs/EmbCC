@@ -42,10 +42,10 @@ sh tools/build-rt.sh thumbv7m-none-eabi "$out/rt" > "$out/rt.log" 2>&1 ||
 printf '%s\n' "FreeRTOS $(sed -n 's/^#define tskKERNEL_VERSION_NUMBER *"\(.*\)"/\1/p' \
     "$K/include/task.h") on EmbCC" 'got 1' 'got 2' 'got 3' 'got 4' 'got 5' \
     'sum 15' 'waited enough 1' 'timer 1' 'done' > "$out/want.txt"
-# -O1 is not here: it keeps every value in a stack slot on this target,
-# and the timer task's 512-byte stack overflows (which the kernel's own
-# check reports). Not a miscompile, and a measure of what -O1 lacks.
-for O in -O0 -O2 -Os; do
+# -O1 too: it once kept every value in a stack slot, and with inlining
+# the timer task's 512-byte stack overflowed there alone (the kernel's
+# own check said so).
+for O in -O0 -O1 -O2 -Os; do
     o=$out/o${O#-O}; mkdir -p "$o"
     objs=
     for f in "$d/startup.c" "$d/main.c" "$K/tasks.c" "$K/queue.c" \

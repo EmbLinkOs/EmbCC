@@ -10619,6 +10619,12 @@ static int sole_static_caller(struct ir_unit *iu, struct func *c)
     return calls;      /* 1: the sole caller; 2: one of two; 0: neither */
 }
 
+/* -O1: inline only what makes the code smaller or was asked for -- an
+ * always_inline callee, and a static function with a single caller,
+ * whose original is then deleted. gcc's -O1 does the same (always_inline
+ * at every level, -finline-functions-called-once). */
+static int g_inline_o1;
+
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
 static void inline_unit(struct ir_unit *iu)
 {
@@ -10652,8 +10658,12 @@ static void inline_unit(struct ir_unit *iu)
                     why = "callee-is-weak";   /* the link may replace it */
                 else {
                     sole = sole_static_caller(iu, in->callee);
-                    ok = inlinable(c, in->callee->attr_always_inline, sole,
-                                   &why, detail, sizeof detail);
+                    if (g_inline_o1 && !in->callee->attr_always_inline &&
+                        sole != 1)
+                        why = "not-a-sole-callee-at-O1";
+                    else
+                        ok = inlinable(c, in->callee->attr_always_inline,
+                                       sole, &why, detail, sizeof detail);
                 }
                 if (!ok) {
                     remark_add("inline", "not-inlined", in->callee->name, why,
@@ -13351,30 +13361,39 @@ void opt_run(struct ir_unit *iu, int level)
         level = 2;
     if (level < 1)
         return;
-    pass_default(P_MEM2REG, level >= 2);
+    /* -O1 is gcc's -O1: every value that can be is a register, and the
+     * passes that only remove work run -- constants, dead stores, loop
+     * invariants, branches made selects -- while the ones that trade
+     * size or compile time for speed (inlining beyond a sole callee,
+     * global CSE, PRE, unrolling, vectorizing) wait for -O2. It used to
+     * be folding and copies over values that all lived in memory, and
+     * with the sole-callee inlining that made frames LARGER than -O0's:
+     * FreeRTOS's timer task overflowed its stack at -O1 alone. */
+    pass_default(P_MEM2REG, level >= 1);
     pass_default(P_GCSE,    level >= 2);
-    pass_default(P_LICM,    level >= 2);
+    pass_default(P_LICM,    level >= 1);
     /* Vectorization is x86-64 for now: the aarch64 backend refuses the
      * vector opcodes loudly (diag_fatal) rather than emitting something
      * it has not been taught, so the pass must not hand it any. */
     pass_default(P_VEC,     level >= 2 && !size &&
                             target_get() == TARGET_X86_64);
-    pass_default(P_LOADCSE, level >= 2);
-    pass_default(P_SCCP,    level >= 2);
-    pass_default(P_INLINE,  level >= 2);
-    pass_default(P_DSE,     level >= 2);
+    pass_default(P_LOADCSE, level >= 1);
+    pass_default(P_SCCP,    level >= 1);
+    pass_default(P_INLINE,  level >= 1);   /* -O1: see g_inline_o1 */
+    g_inline_o1 = level == 1;
+    pass_default(P_DSE,     level >= 1);
     /* A multiply and two shifts in place of a divide is smaller than
      * the divide's setup on these targets as well as faster, so -Os
      * keeps it. */
-    pass_default(P_DIVMAGIC, level >= 2);
-    pass_default(P_IFCONV, level >= 2);   /* cmov on x86-64, csel on aarch64 */
+    pass_default(P_DIVMAGIC, level >= 1);
+    pass_default(P_IFCONV, level >= 1);   /* cmov on x86-64, csel on aarch64 */
     pass_default(P_CFGCLEAN, level >= 1);  /* smaller and simpler at any level */
     pass_default(P_TAILREC, level >= 2);
     pass_default(P_IDIOM, level >= 2);
     /* Splitting a struct into the scalars it is made of makes the code
      * smaller as well as faster -- a field in a register is not loaded --
      * so -Os keeps it too. */
-    pass_default(P_SROA, level >= 2);
+    pass_default(P_SROA, level >= 1);
     /* Unrolling is the one pass besides vectorization that reliably adds
      * code -- U copies of a body, plus the original kept whole for the
      * remainder -- so -Os leaves it off. */
@@ -13388,11 +13407,11 @@ void opt_run(struct ir_unit *iu, int level)
     /* After inlining, so the bodies are the ones that will be compiled,
      * and before the per-function passes, which consult the result at
      * every call site. */
-    if (level >= 2)
+    if (level >= 1)
         infer_attrs(iu);
     /* After inlining too: it is every function's final body that has to
      * leave the global alone. */
-    if (level >= 2)
+    if (level >= 1)
         ro_globals(iu);
     else
         g_nro = 0;
@@ -13408,7 +13427,7 @@ void opt_run(struct ir_unit *iu, int level)
             pass_cfgclean(&iu->funcs[f]);   /* the copy blocks left behind */
         /* After both: they are what put the back-edge copies into the
          * block whose update this moves next to them. */
-        if (level >= 2)
+        if (level >= 1)
             pass_sinkupd(&iu->funcs[f]);
         pass_x86_loadop(&iu->funcs[f]);     /* last: nothing reorders after */
     }

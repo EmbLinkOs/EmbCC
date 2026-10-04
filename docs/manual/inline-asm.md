@@ -773,11 +773,11 @@ static inline long syscall6(long n, long a1, long a2, long a3,
 
 ### Callee-saved registers on x86-64
 
-At `-O2` and `-Os` the prologue saves `rbx` and `r12` to `r15` when an
+From `-O1` the prologue saves `rbx` and `r12` to `r15` when an
 operand is placed in one of them, whether by a constraint (`"=b"` for
 `cpuid`), a register variable, or the allocator (the fourth `r` operand
-gets `rbx` when `rax`, `rcx` and `rdx` are taken). At `-O0` and `-O1`
-nothing is saved.
+gets `rbx` when `rax`, `rcx` and `rdx` are taken). At `-O0` nothing is
+saved.
 
 A callee-saved register that the template writes by name or that the
 clobber list names is not saved at any level, and EmbCC gives no

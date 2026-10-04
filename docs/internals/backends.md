@@ -217,7 +217,7 @@ Nothing downstream knows which backend produced the image.
 
 The flags passed in are `want_debug` (`-g`: collect line tables and
 variable locations), `optimize` (`-O1` and above), `no_sse` (x86-64
-`-mno-sse`) and `regalloc` (`-O2` and above).
+`-mno-sse`) and `regalloc` (also `-O1` and above).
 
 Shared helpers:
 
@@ -256,7 +256,7 @@ All five backends share a shape:
   address arithmetic next to its access so these fire.
 - **No code after an unconditional transfer** up to the next label, and
   no jump to the label that immediately follows.
-- **Tail calls** at `-O2` when the call is direct, every argument is in a
+- **Tail calls** from `-O1` when the call is direct, every argument is in a
   register, and nothing in the frame outlives the call. Each backend adds
   its own conditions. `EMBCC_NO_TAILCALL` turns them off on AArch64,
   Thumb, RISC-V and AVR.
@@ -333,7 +333,7 @@ preceded by the `__int128` lowering (`gen_i128`), the x87 `long double`
 lowering (`gen_x87`), and the read-modify-write fusion. At `-O0` every
 value lives in an `rbp`-relative slot and operations go through rax and
 rcx. At `-O1` the backend keeps a residency cache: a value just computed
-into rax is not reloaded. At `-O2` values live in their allocated
+into rax is not reloaded. With the allocator on, values live in their allocated
 registers, and a zero-extended value in rax also serves a wider
 zero-extending read of the same temp -- but only when rax holds the whole
 value, as after a store of a 4-byte result, whose slot's upper bytes are
@@ -411,7 +411,7 @@ on a slot needing more than 16-byte alignment (`a local in 'NAME' needs
 N-byte alignment, exceeding the 16-byte stack alignment EmbCC can
 guarantee`) as a guard.
 
-**Frameless and push-only functions** (at `-O2`, not under `-g`). A
+**Frameless and push-only functions** (from `-O1`, not under `-g`). A
 function with an empty frame, no saved registers, no calls other than
 tail calls, at most four scalar parameters, and none of `alloca`,
 varargs, sret, inline asm, `va_start` or frame-address operations has
@@ -643,7 +643,7 @@ covers field offsets within the dead slot):
 internal error: aarch64: a value was read or written at a stack slot it does not have -- it lives in a register, and some lowering path does not know that
 ```
 
-**Frameless leaves.** At `-O2` without `-g`, a function with an empty
+**Frameless leaves.** From `-O1` without `-g`, a function with an empty
 frame, no saved registers, no `alloca`, no varargs, no exception
 regions, no calls other than tail calls, no helper calls, no inline asm
 and no stack or by-reference parameters gets no frame record: no
@@ -668,7 +668,7 @@ CFI (`.eh_frame`) describes the frame record and each saved register; a
 frameless function's FDE has no instructions. Mach-O gets
 `__compact_unwind` entries instead.
 
-**Tail calls** (at `-O2` without `-g`) require a direct, non-variadic
+**Tail calls** (from `-O1`, without `-g`) require a direct, non-variadic
 call with no struct or float result, a caller that returns no struct or
 float, is not variadic, has no `alloca` and no exception regions, takes
 no local's address, does not use `va_start`, and every argument in a
@@ -847,7 +847,7 @@ variadic function).
 A leaf that saves nothing, has no frame, is not variadic and has no
 `alloca` emits no `push` at all and returns with `bx lr`.
 
-**Tail calls** (at `-O2` without `-g`) require a direct, non-variadic
+**Tail calls** (from `-O1`, without `-g`) require a direct, non-variadic
 call with no struct, float or VFP result, a caller with no struct or
 float result, not variadic, no `alloca`, no exception regions, no
 `IR_ADDR` and no `va_start`, every argument in registers, and the result
@@ -904,7 +904,7 @@ checks these when it links Thumb objects.
 
 ### Branches and jump tables
 
-Relaxation (at `-O2` only) runs up to three passes. Pass 0 emits every
+Relaxation (from `-O1`) runs up to three passes. Pass 0 emits every
 branch in its 32-bit form and saves all of r9-r11; it records which
 branches would fit 16 bits (`b`: -2048 to +2046; `b<c>`: -256 to +254)
 or a `cbz`. Pass 1 emits those short and saves only the scratch
@@ -1054,7 +1054,7 @@ is omitted when the function ends in a tail call and nothing jumps to it.
 Functions are not padded when the C extension is on (always, at
 present).
 
-**Tail calls** (at `-O2` without `-g`) require a direct, non-variadic
+**Tail calls** (from `-O1`, without `-g`) require a direct, non-variadic
 call with no struct or float result, a caller that returns no struct or
 float, has at most one return, no `alloca`, no varargs, no exception
 regions, no `IR_ADDR` and no `va_start`, and every argument in

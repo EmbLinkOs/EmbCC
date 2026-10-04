@@ -82,10 +82,12 @@ want caller 'movsd .*%xmm3'    'put the fourth argument in xmm3 (slot 3)'
 want caller 'mov .*0x20\(%rsp\)' \
      'place the fifth argument above the 32 bytes of shadow space'
 
-want callee 'mov .*%rcx,'      'read the first integer from rcx'
-want callee 'movsd .*%xmm1,'   'read the second argument from xmm1'
-want callee 'mov .*%r8,'       'read the third integer from r8'
-want callee 'movsd .*%xmm3,'   'read the fourth argument from xmm3'
+# (read: any instruction that takes the register as its SOURCE -- a move
+# to a slot, or with the allocator on, a conversion straight from it)
+want callee '%rcx,'            'read the first integer from rcx'
+want callee '%xmm1,'           'read the second argument from xmm1'
+want callee '%r8,'             'read the third integer from r8'
+want callee '%xmm3,'           'read the fourth argument from xmm3'
 want callee 'mov .*0x30\(%rbp\)' \
      'read the fifth argument from above its own shadow space'
 echo "the slot is the argument's position on both sides: rcx, xmm1, r8,

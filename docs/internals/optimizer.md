@@ -380,6 +380,8 @@ shared exit label. Budgets, in IR instructions:
 `__attribute__((always_inline))` overrides the size budget and nothing
 else; `__attribute__((noinline))` refuses. A refusal is recorded as an
 `inline/not-inlined` remark with one of these reasons:
+`not-a-sole-callee-at-O1` (at `-O1` the inliner takes only a `static`
+callee with one caller and an `always_inline` one; `g_inline_o1`),
 `callee-not-defined-here`, `would-be-recursive`,
 `callee-computes-in-__int128`, `callee-is-noinline`, `callee-is-weak`,
 `callee-is-varargs`,
