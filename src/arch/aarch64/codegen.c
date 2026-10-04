@@ -2529,16 +2529,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_STRADDR: {
+            /* Straight into the value's home when it has one: built in
+             * x9 and moved, every address was three instructions where
+             * adrp and add are two. */
             struct strsite hi, lo;
-            hi.patch_off = a64_adrp(t, A64_ACC);
+            int d = wr(i->dst, A64_ACC);
+            hi.patch_off = a64_adrp(t, d);
             hi.str_off = i->label;          /* resolved to an offset below */
             hi.kind = RK_ADR_HI21;
             PUSH(st->str, st->nstr, st->capstr, hi);
-            lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+            lo.patch_off = a64_add_lo12(t, d, d);
             lo.str_off = i->label;
             lo.kind = RK_ADD_LO12;
             PUSH(st->str, st->nstr, st->capstr, lo);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+            wrote(t, sd, i->dst, d);
             break;
         }
 
@@ -2555,16 +2559,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * have address". So the indirection is the rule there and
              * the exception elsewhere. */
             struct gsite hi, lo;
+            int d = wr(i->dst, A64_ACC);      /* the home, as STRADDR */
             if (i->glob->is_tls) {
                 /* Not an address in this image: an offset into a block
                  * that is different for every thread. adrp names a page
                  * of the program; this names the running thread. */
-                a64_mrs_tpidr(t, A64_ACC);
-                hi.patch_off = a64_add_hi12(t, A64_ACC, A64_ACC);
+                a64_mrs_tpidr(t, d);
+                hi.patch_off = a64_add_hi12(t, d, d);
                 hi.glob = i->glob;
                 hi.kind = RK_TPREL_HI12;
                 PUSH(st->g, st->ng, st->capg, hi);
-                lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+                lo.patch_off = a64_add_lo12(t, d, d);
                 lo.glob = i->glob;
                 lo.kind = RK_TPREL_LO12;
                 PUSH(st->g, st->ng, st->capg, lo);
@@ -2572,21 +2577,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             }
             int got = !i->glob->defined &&
                       (i->glob->is_weak || target_os_get() == TGT_OS_DARWIN);
-            hi.patch_off = a64_adrp(t, A64_ACC);
+            hi.patch_off = a64_adrp(t, d);
             hi.glob = i->glob;
             hi.kind = got ? RK_GOT_PAGE : RK_ADR_HI21;
             PUSH(st->g, st->ng, st->capg, hi);
             if (got) {
                 lo.patch_off = t->len;
-                a64_ldr(t, A64_ACC, A64_ACC, 0, 8, 0, 8);
+                a64_ldr(t, d, d, 0, 8, 0, 8);
             } else {
-                lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+                lo.patch_off = a64_add_lo12(t, d, d);
             }
             lo.glob = i->glob;
             lo.kind = got ? RK_GOT_LO12 : RK_ADD_LO12;
             PUSH(st->g, st->ng, st->capg, lo);
         gaddr_done:;
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+            wrote(t, sd, i->dst, d);
             break;
         }
 
@@ -2597,21 +2602,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
                       (i->callee->is_weak ||
                        target_os_get() == TGT_OS_DARWIN);
             struct fsite hi, lo;
+            int d = wr(i->dst, A64_ACC);      /* the home, as STRADDR */
             hi.addend = lo.addend = 0;
-            hi.patch_off = a64_adrp(t, A64_ACC);
+            hi.patch_off = a64_adrp(t, d);
             hi.target = i->callee;
             hi.kind = got ? RK_GOT_PAGE : RK_ADR_HI21;
             PUSH(st->f, st->nf, st->capf, hi);
             if (got) {
                 lo.patch_off = t->len;
-                a64_ldr(t, A64_ACC, A64_ACC, 0, 8, 0, 8);
+                a64_ldr(t, d, d, 0, 8, 0, 8);
             } else {
-                lo.patch_off = a64_add_lo12(t, A64_ACC, A64_ACC);
+                lo.patch_off = a64_add_lo12(t, d, d);
             }
             lo.target = i->callee;
             lo.kind = got ? RK_GOT_LO12 : RK_ADD_LO12;
             PUSH(st->f, st->nf, st->capf, lo);
-            st_slot(t, sd, i->dst, A64_ACC, 8);
+            wrote(t, sd, i->dst, d);
             break;
         }
 
