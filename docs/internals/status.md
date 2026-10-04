@@ -107,7 +107,10 @@ There is no position-independent code, no shared library and no dynamic
 linking. `-fPIC`, `-shared` and the related options are refused (see
 [Options](#options)). EmbLD reads GNU ld linker scripts (`embld -T`) for
 ARM and RISC-V images, not for x86-64 or AVR; the driver links firmware
-with them (`embcc -T board.ld a.o b.o -o fw.elf`).
+with them (`embcc -T board.ld a.o b.o -o fw.elf`). `--gc-sections` drops
+the sections nothing reaches, on every machine, for objects built with
+`-ffunction-sections -fdata-sections`; `-Map` and
+`--print-memory-usage` report the layout as ld does.
 
 ### Assembly
 
@@ -363,8 +366,6 @@ that are missing:
 
 | Construct | Diagnostic |
 |---|---|
-| `-g` in a unit that places a function in a section of its own | `-g with a function in a section of its own ('.ramfunc') is not supported yet: the compile unit's address range would span two sections` |
-| `-ffunction-sections`, `-fdata-sections` | Accepted; every function and object still goes in the one `.text`, `.data` or `.bss` section |
 
 ## C++
 
@@ -498,10 +499,11 @@ followed by the usage summary): `-march=`, `-mtune=`, `-m32`, `-m64`,
 `--help` lists `-include FILE`, but the option is refused.
 
 `-Wl,OPTION` and `-Xlinker OPTION` reach the driver's link. EmbLD's own
-options (`-e`, `-Ttext`, `-Tdata`, `-Tstack`, `--rom-limit`,
-`--lma-offset`) are applied, a set that changes nothing about the image
-(`--gc-sections`, `-s`, `-z now` and others) is accepted, and any other
-is refused before anything is linked:
+options (`-T`, `-L`, `-u`, `-e`, `-Ttext`, `-Tdata`, `-Tstack`,
+`--rom-limit`, `--lma-offset`, `--orphan-handling`, `--gc-sections`,
+`--print-gc-sections`, `-Map`, `--print-memory-usage`) are applied, a
+set that changes nothing about the image (`-s`, `-z now` and others) is
+accepted, and any other is refused before anything is linked:
 
 ```text
 embcc: error: linker option '-T' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for
@@ -628,8 +630,8 @@ dates.
 - Computed `goto` on Cortex-M, RISC-V and AVR; atomic read-modify-write,
   variable-length arrays and aligned locals on AVR.
 - Scalar locals aligned beyond the stack alignment.
-- `-ffunction-sections` and `-fdata-sections`.
-- `-g` for a unit with a function in a section of its own.
+- Linker relaxation: on RISC-V a call between sections stays an
+  eight-byte `auipc`/`jalr`.
 - A machine-level IR below EmbIR.
 - SSA as the form of EmbIR between passes.
 - Alias information on memory references (types, `restrict`, fields).

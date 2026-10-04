@@ -7,6 +7,8 @@
  *
  * usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]
  *              [-T SCRIPT [-L DIR]... [--orphan-handling=MODE]] [-u SYM]...
+ *              [--gc-sections [--print-gc-sections]] [-Map FILE]
+ *              [--print-memory-usage]
  *              [--embx [--cap NAME]...] INPUT.o|INPUT.a ...
  *        embld --doctor INPUT.o|INPUT.a ...
  *
@@ -116,6 +118,24 @@ int main(int argc, char **argv)
             else if (!strcmp(v, "warn")) opts.orphan_mode = 1;
             else if (!strcmp(v, "error")) opts.orphan_mode = 2;
             else { fprintf(stderr, "embld: --orphan-handling is place, warn or error\n"); return 2; }
+        } else if (strcmp(argv[i], "--gc-sections") == 0) {
+            opts.gc_sections = 1;
+        } else if (strcmp(argv[i], "--no-gc-sections") == 0) {
+            opts.gc_sections = 0;
+        } else if (strcmp(argv[i], "--print-gc-sections") == 0) {
+            opts.print_gc_sections = 1;
+        } else if (strcmp(argv[i], "--no-print-gc-sections") == 0) {
+            opts.print_gc_sections = 0;
+        } else if (strcmp(argv[i], "--print-memory-usage") == 0) {
+            opts.print_memory_usage = 1;
+        } else if (strcmp(argv[i], "-Map") == 0 || strcmp(argv[i], "--Map") == 0 ||
+                   strncmp(argv[i], "-Map=", 5) == 0 ||
+                   strncmp(argv[i], "--Map=", 6) == 0) {
+            /* -Map FILE, -Map=FILE, --Map FILE, --Map=FILE, as ld takes it */
+            const char *eq = strchr(argv[i], '=');
+            const char *v = eq ? eq + 1 : (++i < argc ? argv[i] : NULL);
+            if (!v || !*v) { fprintf(stderr, "embld: -Map needs a file\n"); return 2; }
+            opts.map_file = v;
         } else if (strcmp(argv[i], "--embx") == 0) {
             opts.emit_embx = 1;            /* write a native EMBX, not ELF */
         } else if (strcmp(argv[i], "--cap") == 0) {
@@ -136,6 +156,8 @@ int main(int argc, char **argv)
     if (!ninputs) {
         fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]\n"
                         "             [-T SCRIPT [-L DIR]... [--orphan-handling=place|warn|error]]\n"
+                        "             [--gc-sections [--print-gc-sections]] [-Map FILE]\n"
+                        "             [--print-memory-usage]\n"
                         "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n"
                         "       embld --doctor INPUT.o|INPUT.a ...   "
                         "(why the link fails)\n");

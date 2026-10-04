@@ -40,7 +40,7 @@ entry() { "$READELF" -h "$1" | sed -n 's/.*Entry point address: *//p'; }
 echo "-Wl, and -Xlinker options reach the link"
 
 # 3. One EmbLD does not have is refused by name, and nothing is written.
-for opt in -Wl,--section-start=.text=0 -Wl,-Map=out.map -Wl,-z,execstack; do
+for opt in -Wl,--section-start=.text=0 -Wl,--emit-relocs -Wl,-z,execstack; do
     rm -f "$out/c.elf"
     if err=$("$EMBCC" $T "$out/s.c" -o "$out/c.elf" "$opt" 2>&1); then
         echo "FAIL: $opt was accepted and dropped"; exit 1

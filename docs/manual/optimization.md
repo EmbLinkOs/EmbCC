@@ -913,7 +913,7 @@ Write the generated code as an assembly file. See
 | `-fno-wrapv`, `-ftrapv` | Not accepted. |
 | `-fstrict-aliasing`, `-fno-strict-aliasing` | Accepted, no effect; there is no type-based aliasing. |
 | `-fomit-frame-pointer`, `-fno-omit-frame-pointer` | Accepted, no effect. See [Frame pointer](#frame-pointer). |
-| `-ffunction-sections`, `-fdata-sections` | Accepted, not implemented: the functions of a unit share one `.text` section and its data one data section. |
+| `-ffunction-sections`, `-fdata-sections` | Same: a section per function and per object, for the linker's `--gc-sections`. See [Invoking](invoking.md#-ffunction-sections--fdata-sections). |
 | `-ffast-math`, `-ffp-contract=...` | Not accepted. |
 | `-flto` | Refused: `embcc: error: -flto is not supported; EmbCC would emit ordinary code and the flag's promise would not hold` |
 | `__attribute__((optimize(...)))`, `hot`, `cold`, `flatten` | Accepted, no effect. The level applies to the whole compilation. |

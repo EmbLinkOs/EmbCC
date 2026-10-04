@@ -4639,6 +4639,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 al = 3;
         while (t->len & al)
             t_nop(t);
+        f->code_align = al + 1;
     }
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame

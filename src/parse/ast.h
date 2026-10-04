@@ -415,6 +415,10 @@ struct func {
                            * and that call may itself be dead. */
     /* codegen bookkeeping: position inside .text (defined funcs only) */
     int code_off, code_len;
+    /* ...and the alignment codegen gave that start, in bytes: what the
+     * function's section has to claim when it is a section of its own
+     * (-ffunction-sections). 0 is "not said", taken as 16. */
+    int code_align;
     /* How many bytes of stack this function's own frame takes — the
      * prologue's saved registers plus its locals, temporaries and
      * outgoing-argument area, and NOT what it calls. `-fstack-usage`

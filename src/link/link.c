@@ -65,6 +65,12 @@ struct object {
      * attributes section must not be read as claiming the base
      * standard. */
     int arm_vfp, arm_enum, arm_arch;
+    /* An archive member: the symbol it was pulled in to define, and the
+     * object that referred to it (the map file's first table). */
+    const char *pulled_for;
+    struct object *pulled_by;
+    int *relsec;              /* --gc-sections: the REL/RELA section for
+                               * each section, or -1 */
 };
 
 /* An allocated input section placed into the output. */
@@ -116,6 +122,10 @@ struct insec {
     int sosec;
     Elf64_Xword shflags;
     int discarded;
+    /* --gc-sections: claimed by a KEEP() in the script (a root), and
+     * reached by the mark. One the mark did not reach is `discarded`
+     * like a /DISCARD/ one, and `gc` says that is why. */
+    int keep, live, gc;
 };
 
 /* The final [start,end) vaddr span of each output section — the source
@@ -146,6 +156,9 @@ struct symbol {
      * then the script output section it was assigned in (-1: absolute). */
     int scripted;
     int sosec;
+    /* The first object that referred to it: what an archive member was
+     * pulled for, as the map file reports. */
+    struct object *ref;
 };
 
 /* A static archive (.a) is a pool of member objects; a member is pulled
@@ -189,6 +202,8 @@ struct linker {
     int nsec, capsec;
     struct symbol *syms;
     int nsym, capsym;
+    int *symhash;              /* sym_find's index: syms[] slot + 1 */
+    int symhcap;
     struct archive **archives;
     int narch, caparch;
     Elf64_Addr base;
@@ -225,6 +240,10 @@ struct linker {
     struct orphan orphans[MAX_ORPHANS];
     int norphan;
     struct ls_script *sc;      /* -T: the layout comes from here */
+    int gc_sections;           /* --gc-sections */
+    int print_gc;              /* --print-gc-sections */
+    const char *const *gc_undefs;  /* -u: roots too */
+    int gc_nundefs;
 };
 
 static void die(const char *fmt, ...)
@@ -238,14 +257,41 @@ static void die(const char *fmt, ...)
     fatal_unwind();
 }
 
-/* ---- symbol table (linear; §3 correct-and-slow) ---- */
+/* ---- symbol table ----
+ *
+ * Hashed. It was a linear scan, called for every relocation and, while
+ * archives are searched, for every symbol of every member on every pass:
+ * quadratic in the size of the link, which a firmware image built with
+ * -ffunction-sections (a section and a relocation per call) feels first.
+ * Open addressing over indices into syms[], so the table survives the
+ * array being reallocated; a slot holds index+1, 0 being empty. */
+
+static unsigned sym_hash(const char *s)
+{
+    unsigned h = 2166136261u;
+    while (*s)
+        h = (h ^ (unsigned char)*s++) * 16777619u;
+    return h;
+}
 
 static struct symbol *sym_find(struct linker *l, const char *name)
 {
-    for (int i = 0; i < l->nsym; i++)
-        if (strcmp(l->syms[i].name, name) == 0)
-            return &l->syms[i];
+    if (!l->symhcap)
+        return NULL;
+    unsigned m = (unsigned)l->symhcap - 1, h = sym_hash(name) & m;
+    for (int x; (x = l->symhash[h]) != 0; h = (h + 1) & m)
+        if (strcmp(l->syms[x - 1].name, name) == 0)
+            return &l->syms[x - 1];
     return NULL;
+}
+
+static void sym_hash_put(struct linker *l, int idx)
+{
+    unsigned m = (unsigned)l->symhcap - 1,
+             h = sym_hash(l->syms[idx].name) & m;
+    while (l->symhash[h])
+        h = (h + 1) & m;
+    l->symhash[h] = idx + 1;
 }
 
 static struct symbol *sym_intern(struct linker *l, const char *name)
@@ -262,6 +308,15 @@ static struct symbol *sym_intern(struct linker *l, const char *name)
     s->name = name;
     s->insec = -1;
     s->sosec = -1;
+    if (2 * l->nsym > l->symhcap) {     /* at most half full */
+        free(l->symhash);
+        l->symhcap = l->symhcap ? 2 * l->symhcap : 256;
+        l->symhash = xcalloc((size_t)l->symhcap, sizeof *l->symhash);
+        for (int i = 0; i < l->nsym; i++)
+            sym_hash_put(l, i);
+    } else {
+        sym_hash_put(l, l->nsym - 1);
+    }
     return s;
 }
 
@@ -896,7 +951,7 @@ static void parse_archive(struct linker *l, const char *name,
 /* Does this parsed object define a symbol that is currently referenced
  * but undefined? That is exactly the condition to pull an archive
  * member. */
-static int defines_needed(struct linker *l, struct object *o)
+static struct symbol *defines_needed(struct linker *l, struct object *o)
 {
     for (int i = o->local_syms; i < o->nsym; i++) {
         Elf64_Sym *sy = &o->syms[i];
@@ -907,9 +962,9 @@ static int defines_needed(struct linker *l, struct object *o)
             continue;
         struct symbol *g = sym_find(l, nm);
         if (g && !g->defined)
-            return 1;
+            return g;
     }
-    return 0;
+    return NULL;
 }
 
 /* Pull members to a fixed point: repeatedly, any not-yet-pulled member
@@ -931,8 +986,11 @@ static void pull_archives(struct linker *l)
                     continue;
                 if (!mem->obj)
                     mem->obj = parse_object(mem->name, mem->buf, mem->len);
-                if (!defines_needed(l, mem->obj))
+                struct symbol *need = defines_needed(l, mem->obj);
+                if (!need)
                     continue;
+                mem->obj->pulled_for = need->name;
+                mem->obj->pulled_by = need->ref;
                 mem->pulled = 1;
                 add_object(l, mem->obj);
                 progress = 1;
@@ -957,8 +1015,11 @@ static void add_symbols(struct linker *l, struct object *o)
         int weak = bind == STB_WEAK;
         struct symbol *g = sym_intern(l, name);
 
-        if (sy->st_shndx == SHN_UNDEF)
+        if (sy->st_shndx == SHN_UNDEF) {
+            if (!g->ref)
+                g->ref = o;
             continue; /* a reference; may be satisfied by a later object */
+        }
 
         if (sy->st_shndx == SHN_COMMON) {
             /* tentative definition: reserve space unless something real
@@ -1002,6 +1063,340 @@ static void add_symbols(struct linker *l, struct object *o)
     }
 }
 
+/* Whether a symbol goes in the image's symbol table: defined, named,
+ * and not in a section the link removed (/DISCARD/ or --gc-sections),
+ * which has no address -- written out, it would name a place where
+ * other code now lies. */
+static int sym_in_image(const struct linker *l, const struct symbol *g)
+{
+    return g->defined && g->name && *g->name &&
+           !(g->insec >= 0 && !g->scripted && l->insecs[g->insec].discarded);
+}
+
+/* ---- --gc-sections ----------------------------------------------------
+ *
+ * Every allocated input section that nothing kept refers to is dropped,
+ * as GNU ld does it: mark from the roots, follow each marked section's
+ * relocations to the sections their symbols are in, and discard what the
+ * mark never reached. With -ffunction-sections and -fdata-sections each
+ * function and object is a section of its own, so what goes is exactly
+ * the code and data the program cannot reach.
+ *
+ * The roots: the entry symbol, every -u and EXTERN name, what a script
+ * KEEP()s, and the sections a program is entitled to have kept without
+ * naming them -- the vector table (without a script; with one, it is
+ * KEEP's job, as in every vendor script), the constructor and destructor
+ * arrays and .init/.fini, notes, a section marked SHF_GNU_RETAIN, and any
+ * section whose __start_/__stop_ bounds the program refers to. A section
+ * with SHF_LINK_ORDER (ARM's .ARM.exidx) lives exactly when the section
+ * it describes does. Non-allocated sections (DWARF) are never collected;
+ * their references to a collected function resolve to 0, as ld's do. */
+
+#define SHF_GNU_RETAIN_ 0x200000u
+
+/* .eh_frame is a root, but an FDE's pc_begin is not a reference: every
+ * function has one, and following them would keep everything. So the
+ * record a relocation lands in is looked up -- an FDE's pc_begin field,
+ * 8 bytes in, is skipped -- and after the sweep an FDE whose function
+ * went gets a pc_range of 0 (eh_neutralize), which no pc falls in. */
+static int eh_is_fde_pc(const unsigned char *p, Elf64_Xword size,
+                        Elf64_Addr off)
+{
+    Elf64_Xword at = 0;
+    while (at + 8 <= size) {
+        unsigned len = (unsigned)p[at] | (unsigned)p[at + 1] << 8 |
+                       (unsigned)p[at + 2] << 16 | (unsigned)p[at + 3] << 24;
+        if (len == 0 || len == 0xffffffffu)
+            return 0;               /* the terminator, or 64-bit DWARF */
+        if (off < at + 4 + len) {
+            unsigned id = (unsigned)p[at + 4] | (unsigned)p[at + 5] << 8 |
+                          (unsigned)p[at + 6] << 16 |
+                          (unsigned)p[at + 7] << 24;
+            return id != 0 && off == at + 8;
+        }
+        at += 4 + len;
+    }
+    return 0;
+}
+
+static unsigned long eh_uleb(const unsigned char **q, const unsigned char *e)
+{
+    unsigned long v = 0;
+    int sh = 0;
+    while (*q < e) {
+        unsigned char b = *(*q)++;
+        if (sh < 64)
+            v |= (unsigned long)(b & 0x7f) << sh;
+        sh += 7;
+        if (!(b & 0x80))
+            break;
+    }
+    return v;
+}
+
+/* The size of a value in pointer encoding `enc`, 0 if unknown. */
+static int eh_enc_size(int enc, int addr)
+{
+    switch (enc & 0x0f) {
+    case 0x00: return addr;                 /* absptr */
+    case 0x02: case 0x0a: return 2;
+    case 0x03: case 0x0b: return 4;
+    case 0x04: case 0x0c: return 8;
+    default:   return 0;                    /* uleb/sleb: not in an FDE */
+    }
+}
+
+/* The FDE pointer encoding of the CIE at p (its length field), or -1. */
+static int eh_cie_fde_enc(const unsigned char *p, const unsigned char *end,
+                          int addr)
+{
+    const unsigned char *q = p + 8;
+    if (q >= end)
+        return -1;
+    int version = *q++;
+    const char *aug = (const char *)q;
+    while (q < end && *q)
+        q++;
+    if (q >= end)
+        return -1;
+    q++;
+    if (aug[0] && aug[0] != 'z')
+        return aug[0] == 0 ? 0 : -1;
+    eh_uleb(&q, end);                       /* code alignment */
+    eh_uleb(&q, end);                       /* data alignment (sleb) */
+    if (version == 1) q++; else eh_uleb(&q, end);   /* return register */
+    if (!aug[0])
+        return 0;                           /* absptr */
+    eh_uleb(&q, end);                       /* augmentation length */
+    for (const char *a = aug + 1; *a && q < end; a++) {
+        if (*a == 'R')
+            return *q;
+        if (*a == 'L')
+            q++;
+        else if (*a == 'P') {
+            int pe = *q++, n = eh_enc_size(pe, addr);
+            if (!n)
+                return -1;
+            q += n;
+        } else if (*a != 'S' && *a != 'B')
+            return -1;
+    }
+    return 0;
+}
+
+static int gc_target_insec(struct linker *l, struct object *o,
+                           Elf64_Word symi);
+
+static void eh_neutralize(struct linker *l, struct insec *s)
+{
+    struct object *o = s->obj;
+    int rs = o->relsec[s->shndx];
+    if (rs < 0)
+        return;
+    unsigned char *p = o->buf + sh_at(o, s->shndx)->sh_offset;
+    const unsigned char *end = p + s->size;
+    Elf64_Shdr *rsh = sh_at(o, rs);
+    int isrel = rsh->sh_type == SHT_REL;
+    int relsz = o->elf32 ? (isrel ? (int)sizeof(Elf32_Rel)
+                                  : (int)sizeof(Elf32_Rela))
+                         : (isrel ? (int)sizeof(Elf64_Rel)
+                                  : (int)sizeof(Elf64_Rela));
+    const unsigned char *rb = o->buf + rsh->sh_offset;
+    int n = (int)(rsh->sh_size / (Elf64_Xword)relsz), addr = o->elf32 ? 4 : 8;
+    for (int j = 0; j < n; j++) {
+        Elf64_Addr off;
+        Elf64_Word symi;
+        if (o->elf32) {
+            const Elf32_Rel *r = (const Elf32_Rel *)(rb + (long)j * relsz);
+            off = r->r_offset;
+            symi = r->r_info >> 8;
+        } else {
+            const Elf64_Rel *r = (const Elf64_Rel *)(rb + (long)j * relsz);
+            off = r->r_offset;
+            symi = (Elf64_Word)ELF64_R_SYM(r->r_info);
+        }
+        if (!eh_is_fde_pc(p, s->size, off))
+            continue;
+        int t = gc_target_insec(l, o, symi);
+        if (t < 0 || !l->insecs[t].gc)
+            continue;
+        /* the CIE: the backward pointer at the FDE's offset 4 */
+        const unsigned char *fid = p + off - 4;
+        unsigned back = (unsigned)fid[0] | (unsigned)fid[1] << 8 |
+                        (unsigned)fid[2] << 16 | (unsigned)fid[3] << 24;
+        if ((Elf64_Addr)back > off - 4)
+            die("%s: .eh_frame: an FDE whose CIE is outside the section",
+                o->name);
+        int enc = eh_cie_fde_enc(p + (off - 4 - back), end, addr);
+        int sz = enc < 0 ? 0 : eh_enc_size(enc, addr);
+        if (!sz || off + 2 * (Elf64_Addr)sz > s->size)
+            die("%s: .eh_frame: an FDE for a function --gc-sections "
+                "removed, in an encoding this linker cannot read", o->name);
+        memset(p + off + sz, 0, (size_t)sz);       /* pc_range = 0 */
+    }
+}
+
+static void gc_mark(struct linker *l, int si, int *work, int *nw)
+{
+    if (si < 0 || l->insecs[si].live)
+        return;
+    l->insecs[si].live = 1;
+    work[(*nw)++] = si;
+}
+
+static void gc_mark_sym(struct linker *l, const char *name, int *work,
+                        int *nw)
+{
+    struct symbol *g = sym_find(l, name);
+    if (g && g->defined && !g->scripted && !g->common)
+        gc_mark(l, g->insec, work, nw);
+}
+
+static int gc_root_name(const char *n)
+{
+    static const char *const pfx[] = {
+        ".init_array", ".fini_array", ".preinit_array", ".ctors", ".dtors",
+        ".init", ".fini", ".jcr",
+    };
+    for (size_t i = 0; i < sizeof pfx / sizeof pfx[0]; i++) {
+        size_t k = strlen(pfx[i]);
+        if (!strncmp(n, pfx[i], k) && (n[k] == 0 || n[k] == '.'))
+            return 1;
+    }
+    return 0;
+}
+
+/* The input section relocation symbol symi of o is in, or -1. */
+static int gc_target_insec(struct linker *l, struct object *o,
+                           Elf64_Word symi)
+{
+    if (!symi || symi >= (Elf64_Word)o->nsym)
+        return -1;
+    Elf64_Sym *sy = &o->syms[symi];
+    if (ELF64_ST_BIND(sy->st_info) == STB_LOCAL) {
+        if (sy->st_shndx != SHN_UNDEF && sy->st_shndx < (unsigned)o->nsh)
+            return o->sec_out[sy->st_shndx];
+        return -1;
+    }
+    const char *nm = o->symstr + sy->st_name;
+    struct symbol *g = *nm ? sym_find(l, nm) : NULL;
+    if (g && g->defined && !g->scripted && !g->common)
+        return g->insec;
+    return -1;
+}
+
+static void gc_sections(struct linker *l, const char *const *undefs,
+                        int nundefs)
+{
+    int *work = xmalloc((size_t)(l->nsec ? l->nsec : 1) * sizeof *work);
+    int nw = 0;
+    /* each object's relocation section for each of its sections */
+    for (int i = 0; i < l->nobj; i++) {
+        struct object *o = l->objs[i];
+        o->relsec = xmalloc((size_t)(o->nsh ? o->nsh : 1) * sizeof *o->relsec);
+        for (int k = 0; k < o->nsh; k++)
+            o->relsec[k] = -1;
+        for (int k = 0; k < o->nsh; k++) {
+            Elf64_Shdr *sh = sh_at(o, k);
+            if ((sh->sh_type == SHT_REL || sh->sh_type == SHT_RELA) &&
+                sh->sh_info < (Elf64_Word)o->nsh)
+                o->relsec[sh->sh_info] = k;
+        }
+    }
+
+    gc_mark_sym(l, l->entry, work, &nw);
+    for (int k = 0; k < nundefs; k++)
+        gc_mark_sym(l, undefs[k], work, &nw);
+    if (l->sc)
+        for (int k = 0; k < l->sc->nextern; k++)
+            gc_mark_sym(l, l->sc->externs[k], work, &nw);
+    for (int i = 0; i < l->nsec; i++) {
+        struct insec *s = &l->insecs[i];
+        Elf64_Shdr *sh = s->obj ? sh_at(s->obj, s->shndx) : NULL;
+        if (!s->obj || s->keep || (!l->sc && s->osec == OSEC_VECTORS) ||
+            gc_root_name(s->name) || !strcmp(s->name, ".eh_frame") ||
+            (sh && (sh->sh_type == SHT_INIT_ARRAY ||
+                    sh->sh_type == SHT_FINI_ARRAY ||
+                    sh->sh_type == SHT_PREINIT_ARRAY ||
+                    sh->sh_type == SHT_NOTE ||
+                    (sh->sh_flags & SHF_GNU_RETAIN_))))
+            gc_mark(l, i, work, &nw);
+    }
+    /* __start_NAME / __stop_NAME referred to: every NAME section */
+    for (int i = 0; i < l->nsym; i++) {
+        const char *n = l->syms[i].name, *sec = NULL;
+        if (!strncmp(n, "__start_", 8)) sec = n + 8;
+        else if (!strncmp(n, "__stop_", 7)) sec = n + 7;
+        if (!sec || !*sec)
+            continue;
+        for (int k = 0; k < l->nsec; k++)
+            if (!strcmp(l->insecs[k].name, sec))
+                gc_mark(l, k, work, &nw);
+    }
+
+    for (;;) {
+        while (nw) {
+            struct insec *s = &l->insecs[work[--nw]];
+            struct object *o = s->obj;
+            int rs = o ? o->relsec[s->shndx] : -1;
+            if (rs < 0)
+                continue;
+            Elf64_Shdr *rsh = sh_at(o, rs);
+            int isrel = rsh->sh_type == SHT_REL;
+            int relsz = o->elf32 ? (isrel ? (int)sizeof(Elf32_Rel)
+                                          : (int)sizeof(Elf32_Rela))
+                                 : (isrel ? (int)sizeof(Elf64_Rel)
+                                          : (int)sizeof(Elf64_Rela));
+            const unsigned char *rb = o->buf + rsh->sh_offset;
+            int n = (int)(rsh->sh_size / (Elf64_Xword)relsz);
+            int eh = !strcmp(s->name, ".eh_frame") && s->data;
+            for (int j = 0; j < n; j++) {
+                Elf64_Word symi;
+                Elf64_Addr off;
+                if (o->elf32) {
+                    const Elf32_Rel *r = (const Elf32_Rel *)(rb + (long)j * relsz);
+                    symi = r->r_info >> 8;
+                    off = r->r_offset;
+                } else {
+                    const Elf64_Rel *r = (const Elf64_Rel *)(rb + (long)j * relsz);
+                    symi = (Elf64_Word)ELF64_R_SYM(r->r_info);
+                    off = r->r_offset;
+                }
+                if (eh && eh_is_fde_pc(s->data, s->size, off))
+                    continue;
+                gc_mark(l, gc_target_insec(l, o, symi), work, &nw);
+            }
+        }
+        /* SHF_LINK_ORDER: kept with the section it is about */
+        for (int i = 0; i < l->nsec; i++) {
+            struct insec *s = &l->insecs[i];
+            if (s->live || !s->obj || !(s->shflags & SHF_LINK_ORDER))
+                continue;
+            Elf64_Word ln = sh_at(s->obj, s->shndx)->sh_link;
+            if (ln < (Elf64_Word)s->obj->nsh && s->obj->sec_out[ln] >= 0 &&
+                l->insecs[s->obj->sec_out[ln]].live)
+                gc_mark(l, i, work, &nw);
+        }
+        if (!nw)
+            break;
+    }
+
+    for (int i = 0; i < l->nsec; i++) {
+        struct insec *s = &l->insecs[i];
+        if (s->live || s->discarded)
+            continue;
+        s->discarded = s->gc = 1;
+        if (l->print_gc)
+            fprintf(stderr, "embld: removing unused section '%s' in file "
+                    "'%s'\n", s->name, s->obj ? s->obj->name : "?");
+    }
+    for (int i = 0; i < l->nsec; i++)
+        if (l->insecs[i].live && l->insecs[i].obj &&
+            !strcmp(l->insecs[i].name, ".eh_frame") && l->insecs[i].data)
+            eh_neutralize(l, &l->insecs[i]);
+    free(work);
+}
+
 /* ---- layout ---- */
 
 static Elf64_Addr align_up(Elf64_Addr v, Elf64_Xword a)
@@ -1020,14 +1415,14 @@ static void place_osec(struct linker *l, int os, Elf64_Addr *va,
      * that member is not part of the group, or a bracket-walked table
      * would begin with it */
     for (int i = 0; i < l->nsec; i++)
-        if (l->insecs[i].osec == os) {
+        if (l->insecs[i].osec == os && !l->insecs[i].discarded) {
             *va = align_up(*va, l->insecs[i].align);
             break;
         }
     b[os].start = *va;
     for (int i = 0; i < l->nsec; i++) {
         struct insec *s = &l->insecs[i];
-        if (s->osec != os)
+        if (s->osec != os || s->discarded)
             continue;
         *va = align_up(*va, s->align);
         s->vaddr = *va;
@@ -1095,7 +1490,7 @@ static void layout(struct linker *l, struct osec_bound *b,
     *tls_align = 1;
     for (int i = 0; i < l->nsec; i++)
         if ((l->insecs[i].osec == OSEC_TDATA ||
-             l->insecs[i].osec == OSEC_TBSS) &&
+             l->insecs[i].osec == OSEC_TBSS) && !l->insecs[i].discarded &&
             l->insecs[i].align > *tls_align)
             *tls_align = l->insecs[i].align;
     va = align_up(va, *tls_align);
@@ -1177,7 +1572,13 @@ static void finalize_symbols(struct linker *l)
 static void define_linker_symbol(struct linker *l, const char *name,
                                  Elf64_Addr value)
 {
-    struct symbol *g = sym_intern(l, name);
+    /* Interned under a COPY of the name: callers build it in a buffer
+     * they reuse, and the table keeps the pointer -- so __eh_frame_start,
+     * which nothing referred to, was renamed __eh_frame_end when the
+     * buffer was rewritten for the next one, and the image had two. */
+    struct symbol *g = sym_find(l, name);
+    if (!g)
+        g = sym_intern(l, xstrndup(name, strlen(name)));
     /* only define it if something references it (it was interned) and it
      * is not already defined by a real object -- a real definition wins,
      * whether in a section, absolute (`.set _end, ADDR`) or COMMON. The
@@ -1879,6 +2280,17 @@ static void apply_relocs(struct linker *l, struct object *o)
                 if (dis && dis->discarded) {
                     if (dtgt >= 0) {
                         S = 0;
+                    } else if (dis->gc && ts &&
+                               !strcmp(ts->name, ".eh_frame") &&
+                               eh_is_fde_pc(ts->data, ts->size, r_offset)) {
+                        continue;   /* left as it was: eh_neutralize */
+                    } else if (dis->gc) {
+                        internal_error("%s: section %s refers to a section "
+                                       "--gc-sections removed (%s of %s)",
+                                       o->name,
+                                       o->shstr + o->shdrs[target].sh_name,
+                                       dis->name,
+                                       dis->obj ? dis->obj->name : "?");
                     } else {
                         const char *dn = ELF64_ST_TYPE(dsy->st_info) == STT_SECTION
                             ? dis->name : o->symstr + dsy->st_name;
@@ -1920,9 +2332,13 @@ static void apply_relocs(struct linker *l, struct object *o)
                 if (isrel) {
                     switch (type) {
                     case R_ARM_ABS32:
+                    case R_ARM_TARGET1:
                     case R_ARM_REL32:
-                    case R_ARM_PREL31:
                         A = (int)get32loc(loc);
+                        break;
+                    case R_ARM_PREL31:
+                        /* 31 bits, signed; bit 31 is not the addend's */
+                        A = (int)(get32loc(loc) << 1) >> 1;
                         break;
                     case R_ARM_THM_CALL:
                     case R_ARM_THM_JUMP24:
@@ -1958,6 +2374,9 @@ static void apply_relocs(struct linker *l, struct object *o)
                                 A - (long long)P) & 0x7fffffffUL) |
                                 (get32loc(loc) & 0x80000000UL)));
                     break;
+                case R_ARM_NONE:
+                    break;
+                case R_ARM_TARGET1:
                 case R_ARM_ABS32:
                     /* S already carries the Thumb bit for a function
                      * symbol: the compiler and the assembler both put it
@@ -2169,7 +2588,7 @@ static void write_exec(struct linker *l, const char *out,
                 s->st_shndx == SHN_UNDEF || s->st_shndx >= o->nsh)
                 continue;                               /* also ABS, COMMON */
             out = o->sec_out[s->st_shndx];
-            if (out < 0)
+            if (out < 0 || l->insecs[out].discarded)
                 continue;
             sy[nsy].name = name;
             sy[nsy].val = l->insecs[out].vaddr + s->st_value;
@@ -2182,7 +2601,7 @@ static void write_exec(struct linker *l, const char *out,
     nloc = nsy;
     for (int i = 0; i < l->nsym; i++) {
         struct symbol *sm = &l->syms[i];
-        if (!sm->defined || !sm->name || !*sm->name)
+        if (!sym_in_image(l, sm))
             continue;
         sy[nsy].name = sm->name;
         sy[nsy].val = sm->value;
@@ -2364,7 +2783,7 @@ static void write_exec(struct linker *l, const char *out,
     /* copy each allocated, file-backed section to its place */
     for (int i = 0; i < l->nsec; i++) {
         struct insec *s = &l->insecs[i];
-        if (s->is_bss || !s->data)
+        if (s->is_bss || !s->data || s->discarded)
             continue;
         Elf64_Off base = (s->seg == SEG_TEXT) ? text_off : data_off;
         Elf64_Addr segva = (s->seg == SEG_TEXT) ? text_start : data_start;
@@ -2531,7 +2950,7 @@ static void emit_embx(struct linker *l, const char *out, unsigned long long caps
     /* --- section payloads: the same copy loop write_exec uses --- */
     for (int i = 0; i < l->nsec; i++) {
         struct insec *s = &l->insecs[i];
-        if (s->is_bss || !s->data) continue;
+        if (s->is_bss || !s->data || s->discarded) continue;
         embx_u64 base  = (s->seg == SEG_TEXT) ? text_fo : data_fo;
         Elf64_Addr segva = (s->seg == SEG_TEXT) ? text_start : data_start;
         memcpy(img + base + (s->vaddr - segva), s->data, (size_t)s->size);
@@ -3028,6 +3447,7 @@ static void ls_claim(struct linker *l, struct ls_script *sc)
                             continue;
                         is->sosec = o->discard ? -2 : k;
                         is->discarded = o->discard;
+                        is->keep = s->in.keep;
                         if (s->in.sort[j])
                             sort = s->in.sort[j];
                         ls_push_list(s, si);
@@ -3069,7 +3489,7 @@ static void ls_orphans(struct linker *l, struct ls_script *sc, int mode)
 {
     for (int si = 0; si < l->nsec; si++) {
         struct insec *is = &l->insecs[si];
-        if (is->sosec != -1)
+        if (is->sosec != -1 || is->discarded)
             continue;
         if (is->osec == OSEC_TDATA || is->osec == OSEC_TBSS)
             die("%s: thread-local section %s in a linker-script link is "
@@ -3378,6 +3798,20 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
                     o->file, o->line, o->name, r[j]);
     }
     ls_claim(l, sc);
+    if (l->gc_sections) {
+        /* after the claim, which is what knows the KEEP()s; and out of
+         * every rule's list, so the layout never sees what went */
+        gc_sections(l, l->gc_undefs, l->gc_nundefs);
+        for (int k = 0; k < sc->nosec; k++)
+            for (int b = 0; b < sc->osecs[k].nbody; b++) {
+                struct ls_stmt *st = &sc->osecs[k].body[b];
+                int n = 0;
+                for (int j = 0; j < st->nlist; j++)
+                    if (!l->insecs[st->list[j]].discarded)
+                        st->list[n++] = st->list[j];
+                st->nlist = n;
+            }
+    }
     {
         int ncommon = 0;
         for (int i = 0; i < l->nsym; i++)
@@ -3563,7 +3997,7 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     Elf64_Word *symname = xmalloc((size_t)(l->nsym + 1) * sizeof *symname);
     for (int i = 0; i < l->nsym; i++) {
         struct symbol *g = &l->syms[i];
-        if (g->defined && g->name && *g->name)
+        if (sym_in_image(l, g))
             symname[nsy++] = (Elf64_Word)ltab_add(&symstr, g->name);
     }
 
@@ -3680,6 +4114,36 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
         sh.sh_type = o->nobits ? SHT_NOBITS : SHT_PROGBITS;
         sh.sh_flags = SHF_ALLOC | (o->exec ? SHF_EXECINSTR : 0) |
                       (o->write ? SHF_WRITE : 0);
+        /* The inputs' own type when they all have one, as ld keeps it:
+         * .init_array stays INIT_ARRAY, and .ARM.exidx stays ARM_EXIDX
+         * and links to where its functions went -- which is what
+         * llvm-readelf -u and a debugger look for. */
+        {
+            Elf64_Word ty = 0;
+            int same = 1, first = -1;
+            for (int b = 0; b < o->nbody && same; b++)
+                for (int j = 0; j < o->body[b].nlist && same; j++) {
+                    const struct insec *is = &l->insecs[o->body[b].list[j]];
+                    Elf64_Word t = is->obj
+                        ? sh_at(is->obj, is->shndx)->sh_type : SHT_PROGBITS;
+                    if (first < 0) { ty = t; first = o->body[b].list[j]; }
+                    else if (t != ty) same = 0;
+                }
+            if (same && first >= 0 && ty != SHT_PROGBITS && ty != SHT_NOBITS) {
+                sh.sh_type = ty;
+                const struct insec *is = &l->insecs[first];
+                Elf64_Shdr *ish = sh_at(is->obj, is->shndx);
+                if (ish->sh_flags & SHF_LINK_ORDER) {
+                    sh.sh_flags |= SHF_LINK_ORDER;
+                    int ln = ish->sh_link < (Elf64_Word)is->obj->nsh
+                           ? is->obj->sec_out[ish->sh_link] : -1;
+                    int so = ln >= 0 ? l->insecs[ln].sosec : -1;
+                    for (int j = 0; j < nem && so >= 0; j++)
+                        if (em[j] == so)
+                            sh.sh_link = (Elf64_Word)(1 + j);
+                }
+            }
+        }
         sh.sh_addr = (Elf64_Addr)o->vma;
         sh.sh_offset = fo[k];
         sh.sh_size = (Elf64_Xword)o->size;
@@ -3726,7 +4190,7 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
     int j = 0;
     for (int i = 0; i < l->nsym; i++) {
         struct symbol *g = &l->syms[i];
-        if (!g->defined || !g->name || !*g->name)
+        if (!sym_in_image(l, g))
             continue;
         Elf64_Half shndx = SHN_ABS;
         int exec = 0;
@@ -3755,6 +4219,212 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
 
 /* A file a script names (INPUT, GROUP, STARTUP): `-lNAME` is libNAME.a
  * in the search directories; anything else is found as given, or there. */
+/* ---- -Map and --print-memory-usage -----------------------------------
+ *
+ * The map is GNU ld's, in its sections and their shape, so that what a
+ * firmware developer reads -- and what tools written for ld's maps parse
+ * -- is where it always is: which archive members were pulled and for
+ * whom, what --gc-sections removed, the memory regions, then each output
+ * section with its address and size, the input sections in it, and the
+ * global symbols each defines. */
+
+struct mapw { FILE *f; int w; };    /* w: hex digits of an address */
+
+static void map_addr(struct mapw *m, unsigned long long v)
+{
+    fprintf(m->f, "0x%0*llx", m->w, v);
+}
+
+static void map_size(struct mapw *m, unsigned long long v)
+{
+    char b[32];
+    snprintf(b, sizeof b, "0x%llx", v);
+    fprintf(m->f, "%*s", 10, b);
+}
+
+/* " NAME" padded to ld's 16 columns, or on a line of its own if longer */
+static void map_name(struct mapw *m, const char *lead, const char *name)
+{
+    int len = fprintf(m->f, "%s%s", lead, name);
+    if (len >= 15) {
+        fputc('\n', m->f);
+        len = 0;
+    }
+    fprintf(m->f, "%*s", 16 - len, "");
+}
+
+static int map_sym_cmp(const void *a, const void *b)
+{
+    const struct symbol *x = *(const struct symbol *const *)a,
+                        *y = *(const struct symbol *const *)b;
+    return x->value < y->value ? -1 : x->value > y->value;
+}
+
+static void map_input(struct linker *l, struct mapw *m,
+                      struct symbol **byaddr, int nby, int si)
+{
+    const struct insec *is = &l->insecs[si];
+    map_name(m, " ", is->name);
+    map_addr(m, is->vaddr);
+    fputc(' ', m->f);
+    map_size(m, is->size);
+    fprintf(m->f, " %s\n", is->obj ? is->obj->name : "*linker stub*");
+    for (int k = 0; k < nby; k++)
+        if (byaddr[k]->insec == si) {
+            fprintf(m->f, "%16s", "");
+            map_addr(m, byaddr[k]->value);
+            fprintf(m->f, "%16s%s\n", "", byaddr[k]->name);
+        }
+}
+
+static const char *const osec_names[OSEC_COUNT] = {
+    ".vectors", ".text", ".rodata", ".tdata", ".tbss", ".init_array",
+    ".fini_array", ".ctors", ".dtors", ".data", ".bss",
+};
+
+static void write_map(struct linker *l, struct ls_script *sc,
+                      const struct osec_bound *b, const char *path)
+{
+    struct mapw m;
+    m.f = fopen(path, "w");
+    if (!m.f)
+        die("cannot write the map file '%s'", path);
+    m.w = l->elf32 ? 8 : 16;
+
+    int hdr = 0;
+    for (int i = 0; i < l->nobj; i++) {
+        struct object *o = l->objs[i];
+        if (!o->pulled_for)
+            continue;
+        if (!hdr++)
+            fprintf(m.f, "Archive member included to satisfy reference by "
+                    "file (symbol)\n\n");
+        int len = fprintf(m.f, "%s", o->name);
+        if (len >= 29) {
+            fputc('\n', m.f);
+            len = 0;
+        }
+        fprintf(m.f, "%*s%s (%s)\n", 30 - len, "",
+                o->pulled_by ? o->pulled_by->name : "(command line)",
+                o->pulled_for);
+    }
+    if (hdr)
+        fputc('\n', m.f);
+
+    hdr = 0;
+    for (int i = 0; i < l->nsec; i++) {
+        const struct insec *is = &l->insecs[i];
+        if (!is->discarded)
+            continue;
+        if (!hdr++)
+            fprintf(m.f, "Discarded input sections\n\n");
+        map_name(&m, " ", is->name);
+        map_addr(&m, 0);
+        fputc(' ', m.f);
+        map_size(&m, is->size);
+        fprintf(m.f, " %s\n", is->obj ? is->obj->name : "?");
+    }
+    if (hdr)
+        fputc('\n', m.f);
+
+    fprintf(m.f, "Memory Configuration\n\nName             Origin             "
+            "Length             Attributes\n");
+    for (int r = 0; sc && r < sc->nreg; r++) {
+        const struct ls_region *rg = &sc->reg[r];
+        fprintf(m.f, "%-16s ", rg->name);
+        map_addr(&m, (unsigned long long)rg->origin);
+        fprintf(m.f, "%*s", 18 - m.w - 2 + 1, "");
+        map_addr(&m, (unsigned long long)rg->length);
+        fprintf(m.f, "%*s%s\n", 18 - m.w - 2 + 1, "", rg->attrs ? rg->attrs : "");
+    }
+    fprintf(m.f, "%-16s ", "*default*");
+    map_addr(&m, 0);
+    fprintf(m.f, "%*s", 18 - m.w - 2 + 1, "");
+    map_addr(&m, l->elf32 ? 0xffffffffULL : ~0ULL);
+    fprintf(m.f, "\n\nLinker script and memory map\n\n");
+
+    /* global symbols by address, for the lines under each input */
+    struct symbol **byaddr = xmalloc((size_t)(l->nsym ? l->nsym : 1) *
+                                     sizeof *byaddr);
+    int nby = 0;
+    for (int i = 0; i < l->nsym; i++)
+        if (sym_in_image(l, &l->syms[i]) && l->syms[i].insec >= 0 &&
+            !l->syms[i].scripted)
+            byaddr[nby++] = &l->syms[i];
+    qsort(byaddr, (size_t)nby, sizeof *byaddr, map_sym_cmp);
+
+    if (sc) {
+        for (int c = 0; c < sc->ncmd; c++) {
+            if (sc->cmds[c].kind != LS_OSEC)
+                continue;
+            const struct ls_osec *o = &sc->osecs[sc->cmds[c].osec];
+            if (o->discard || !o->laid)
+                continue;
+            map_name(&m, "", o->name);
+            map_addr(&m, (unsigned long long)o->vma);
+            fputc(' ', m.f);
+            map_size(&m, (unsigned long long)o->size);
+            if (o->lma != o->vma) {
+                fprintf(m.f, " load address ");
+                map_addr(&m, (unsigned long long)o->lma);
+            }
+            fputc('\n', m.f);
+            for (int bb = 0; bb < o->nbody; bb++)
+                for (int j = 0; j < o->body[bb].nlist; j++)
+                    map_input(l, &m, byaddr, nby, o->body[bb].list[j]);
+            fputc('\n', m.f);
+        }
+    } else {
+        for (int os = 0; os < OSEC_COUNT + l->norphan; os++) {
+            int any = 0;
+            for (int i = 0; i < l->nsec && !any; i++)
+                any = l->insecs[i].osec == os && !l->insecs[i].discarded;
+            if (!any)
+                continue;
+            map_name(&m, "", os < OSEC_COUNT ? osec_names[os]
+                                             : l->orphans[os - OSEC_COUNT].name);
+            map_addr(&m, b[os].start);
+            fputc(' ', m.f);
+            map_size(&m, b[os].end - b[os].start);
+            fputc('\n', m.f);
+            for (int i = 0; i < l->nsec; i++)
+                if (l->insecs[i].osec == os && !l->insecs[i].discarded)
+                    map_input(l, &m, byaddr, nby, i);
+            fputc('\n', m.f);
+        }
+    }
+    free(byaddr);
+    if (fclose(m.f) != 0)
+        die("cannot write the map file '%s'", path);
+}
+
+/* ld's own table and number format, so a build log reads the same */
+static void mem_size(unsigned long long v)
+{
+    if (v && (v & 0x3fffffffULL) == 0)
+        printf("%10llu GB", v >> 30);
+    else if (v && (v & 0xfffffULL) == 0)
+        printf("%10llu MB", v >> 20);
+    else if (v && (v & 0x3ffULL) == 0)
+        printf("%10llu KB", v >> 10);
+    else
+        printf("%10llu B", v);
+}
+
+static void print_memory_usage(const struct ls_script *sc)
+{
+    printf("Memory region         Used Size  Region Size  %%age Used\n");
+    for (int r = 0; sc && r < sc->nreg; r++) {
+        const struct ls_region *rg = &sc->reg[r];
+        unsigned long long used = (unsigned long long)(rg->cur - rg->origin);
+        printf("%16s: ", rg->name);
+        mem_size(used);
+        mem_size((unsigned long long)rg->length);
+        printf("    %6.2f%%\n",
+               rg->length ? 100.0 * (double)used / (double)rg->length : 0.0);
+    }
+}
+
 static const char *ls_find_input(const char *name, const char **dirs,
                                  int ndirs)
 {
@@ -3803,6 +4473,12 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     l.rom_limit = (opts) ? opts->rom_limit : 0;
     l.stack_top = (opts && opts->have_stack) ? opts->stack_top : 0;
     l.stub_sec = -1;
+    l.gc_sections = opts && opts->gc_sections;
+    l.print_gc = opts && opts->print_gc_sections;
+    if (opts) {
+        l.gc_undefs = opts->undefs;
+        l.gc_nundefs = opts->nundefs;
+    }
 
     /* -T: the script is read before any input, because it can name
      * inputs of its own and symbols an archive has to supply. */
@@ -3857,6 +4533,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
      * reach back into an earlier archive (the --start-group behaviour,
      * always on: correct over order-sensitive). */
     pull_archives(&l);
+    if (l.print_gc && !l.gc_sections)
+        die("--print-gc-sections without --gc-sections: nothing is "
+            "collected to print");
 
     if (sc) {
         ls_layout(&l, sc, opts->orphan_mode);
@@ -3900,6 +4579,10 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         }
         for (int i = 0; i < l.nobj; i++)
             apply_relocs(&l, l.objs[i]);
+        if (opts->map_file)
+            write_map(&l, sc, NULL, opts->map_file);
+        if (opts->print_memory_usage)
+            print_memory_usage(sc);
         write_exec_script(&l, sc, out, ev);
         emit_embdbg(&l, out);
         return 0;
@@ -3910,6 +4593,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
      * one. Refused on a machine that does not need it rather than
      * silently ignored: -Tstack on ARM would mean the caller believes
      * something about the image that is not true. */
+    if (l.gc_sections)
+        gc_sections(&l, l.gc_undefs, l.gc_nundefs);
     if (opts && opts->have_stack) {
         if (l.machine != EM_RISCV)
             die("-Tstack is a RISC-V option: every other target here "
@@ -3955,6 +4640,10 @@ int embld_link(const char **inputs, int ninputs, const char *out,
 
     for (int i = 0; i < l.nobj; i++)
         apply_relocs(&l, l.objs[i]);
+    if (opts && opts->map_file)
+        write_map(&l, NULL, bounds, opts->map_file);
+    if (opts && opts->print_memory_usage)
+        print_memory_usage(NULL);
 
     if (opts && opts->emit_embx) {
         emit_embx(&l, out, opts->caps, e->value, text_start, text_size,

@@ -78,6 +78,16 @@ struct link_opts {
     const char **undefs;
     int nundefs;
     int orphan_mode;
+    /* --gc-sections: drop every allocated input section that nothing
+     * kept refers to (gc_sections in link.c says what is kept);
+     * --print-gc-sections names each one on stderr. */
+    int gc_sections;
+    int print_gc_sections;
+    /* -Map FILE: where every input went, what was pulled from an
+     * archive and why, and what was removed. --print-memory-usage: how
+     * full each MEMORY region of the script is, in ld's table. */
+    const char *map_file;
+    int print_memory_usage;
 };
 
 /* Links inputs[0..n) into an ET_EXEC at `out`. Inputs are object files

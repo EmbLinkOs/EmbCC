@@ -316,6 +316,50 @@ optimizer sees at the same `-O` level. Add the hardware's own exception
 frame for each level of interrupt nesting (on Cortex-M, 32 bytes per
 level, more with an active FPU context).
 
+### Leaving out what is never called: `--gc-sections`
+
+Flash is the limit a firmware build meets first. Compile with
+`-ffunction-sections -fdata-sections`, so each function and object is a
+section of its own, and link with `--gc-sections`: the linker keeps what
+the program can reach and drops the rest -- a driver's functions the
+program never calls, a table nothing reads.
+
+```sh
+CF="--target=thumbv7em-none-eabi -O2 -ffunction-sections -fdata-sections"
+embcc $CF -c main.c -o main.o
+embcc $CF -c drivers.c -o drivers.o
+embcc --target=thumbv7em-none-eabi -T board.ld \
+      -Wl,--gc-sections,--print-memory-usage,-Map=fw.map \
+      startup.o main.o drivers.o -o fw.elf
+```
+
+```text
+Memory region         Used Size  Region Size  %age Used
+             RAM:       1968 B        64 KB      3.00%
+           FLASH:        844 B       256 KB      0.32%
+```
+
+What is kept is what the entry symbol, `-u` and the script's `KEEP()`
+reach, through every relocation of everything kept. Some things are
+reached without a reference, and are kept too:
+
+- the constructor and destructor arrays (`.init_array`, `.fini_array`,
+  `.preinit_array`, `.ctors`, `.dtors`) and `.init`/`.fini`;
+- a section the program walks with `__start_NAME`/`__stop_NAME`;
+- without a linker script, the vector table (`.vectors`, `.isr_vector`);
+  with one, keep it with `KEEP(*(.isr_vector))`, as every vendor script
+  does;
+- notes, and a section marked `SHF_GNU_RETAIN`.
+
+An interrupt handler is reached from the vector table, and a function
+from a table of pointers, so nothing else is needed for them. A
+function that is entered only from outside the image -- by a debugger
+script, say -- needs `-Wl,-u,NAME`. `--print-gc-sections` lists what was
+dropped; the map file (`-Map`) lists it too, with every section that was
+kept, its address, and the symbols in it; `--print-memory-usage` is the
+table above, region by region. The details are in
+[`embld`](tools/embld.md#garbage-collection).
+
 ## ARM Cortex-M
 
 ### Choosing the target
