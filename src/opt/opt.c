@@ -9213,11 +9213,18 @@ static int pass_divmod(struct ir_func *fn)
             continue;
         }
         long kb;
+        /* ...except on Thumb, where nothing makes a constant divide a
+         * multiply (pass_divmagic needs 64-bit registers) and a
+         * remainder is `udiv; mls` either way: paired, the quotient's
+         * udiv is shared and `a - q*b` is one mls, because the multiply
+         * keeps its constant in a register for it (mla_keeps_reg). */
+        int kok = target_get() == TARGET_THUMB && i->w == 4 &&
+                  !getenv("EMBCC_NO_DIVMOD_CONST");
         int pairable = (i->op == IR_MOD || i->op == IR_DIV) && !i->flt &&
                        !i->imm_b && (i->w == 4 || i->w == 8) &&
                        i->a >= 0 && i->b >= 0 && i->dst >= 0 &&
                        i->dst != i->a && i->dst != i->b &&
-                       !get_const(fn, &dd, i->b, &kb);
+                       (kok || !get_const(fn, &dd, i->b, &kb));
         int matched = 0;
         if (pairable) {
             for (int k = 0; k < ntab; k++) {
@@ -10124,15 +10131,44 @@ static int pass_storenarrow(struct ir_func *fn)
     return changed;
 }
 
+/* Thumb's mla and mls take the product's operands in registers -- the
+ * backend fuses `p = a * b; d = c +- p` into one when p's only reader is
+ * the instruction right after it. A constant folded into the multiply
+ * turns that into a shifted add and an add, two or three instructions,
+ * where `mla d, a, rK, c` is one and rK is built once (and outside the
+ * loop, often). So such a multiply keeps its constant. `use` is each
+ * vreg's read count. */
+static int mla_keeps_reg(const struct ir_func *fn, int n, const int *use)
+{
+    const struct ir_ins *i = &fn->ins[n];
+    if (target_get() != TARGET_THUMB || i->op != IR_MUL || i->w != 4 ||
+        i->dst < 0 || i->dst >= fn->nvregs || use[i->dst] != 1 ||
+        n + 1 >= fn->nins || getenv("EMBCC_NO_MLA") ||
+        getenv("EMBCC_NO_MLAKEEP"))
+        return 0;
+    const struct ir_ins *nx = &fn->ins[n + 1];
+    if ((nx->op != IR_ADD && nx->op != IR_SUB) || nx->flt || nx->w != 4 ||
+        nx->dst < 0)
+        return 0;
+    return (nx->b == i->dst && nx->a != i->dst) ||
+           (nx->op == IR_ADD && nx->a == i->dst && nx->b != i->dst);
+}
+
 static int pass_immfold(struct ir_func *fn)
 {
     struct defs d;
     compute_defs(fn, &d);
     int changed = 0;
+    int *use = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), sizeof *use);
+    struct ucount uc = { use, fn->nvregs };
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->flt || i->imm_b || i->w == 16)
             continue;           /* see pass_fold on the 128-bit width */
+        if (mla_keeps_reg(fn, n, use))
+            continue;
         long A, B;
         int commutative;
         /* Shifts fold only their count (b), and only a valid small one — the
@@ -10173,6 +10209,7 @@ static int pass_immfold(struct ir_func *fn)
             changed = 1;
         }
     }
+    free(use);
     free_defs(&d);
     return changed;
 }

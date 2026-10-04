@@ -516,7 +516,10 @@ numbered.
 operands, width and signedness) both appear, the remainder becomes
 `a - q*b`. If the remainder comes first, the quotient is computed there
 and the later division becomes a copy. A constant divisor is left to
-`pass_divmagic`.
+`pass_divmagic`, except on Thumb (32-bit operations), where nothing turns
+a constant divide into a multiply and a remainder is `udiv; mls` either
+way: there the pair shares one divide and the remainder is one `mls`
+(see `pass_immfold`). `EMBCC_NO_DIVMOD_CONST=1` turns that off.
 
 **`pass_gcse`** (`gcse`; `cfg_ok`). Global value numbering over the
 dominator tree: a value computed in a block is available in every block
@@ -719,6 +722,10 @@ whose halves is the identity, because the other half is then at most a
 constant built in a register and one instruction.
 A constant the target cannot encode stays in a register, where it is
 built once and can be hoisted, instead of being rebuilt at every use.
+On Thumb, a 32-bit multiply whose only reader is the add or subtract
+right after it keeps its constant in a register too (`mla_keeps_reg`),
+so the backend fuses the two into `mla` or `mls` rather than lowering the
+multiply as shifted adds. `EMBCC_NO_MLAKEEP=1` turns that off.
 128-bit operations are not folded.
 
 **`pass_signtest`** (after `pass_immfold`; disabled by
