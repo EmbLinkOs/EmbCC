@@ -5439,6 +5439,7 @@ static int pass_licm(struct ir_func *fn)
  * temps, and the values it computes must not be read anywhere but the
  * header -- otherwise the body would read the guard's copy on every
  * iteration and see a stale test. */
+static int g_opt_size;                  /* -Os, set by opt_run (below) */
 static int rotate_one(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -5523,6 +5524,18 @@ static int rotate_one(struct ir_func *fn)
         char *outside = xcalloc((size_t)(ncopy ? ncopy : 1), 1);
         for (int n = bb[h].start + 1; n < bb[h].end - 1 && ok; n++) {
             struct ir_ins *i = &fn->ins[n];
+            /* A STORE may appear twice too, by the argument the load
+             * makes: it runs once in the guard and once per latch, the
+             * N+1 times the header ran, in the same order against the
+             * body. `while ((d[n] = s[n]) != 0) n++;` -- strcpy, and
+             * the hash table's key copy -- has its test after the
+             * store, and stayed a jump and an index re-extended every
+             * iteration. It defines nothing, so nothing is renamed. Not
+             * at -Os: the guard is a second copy of the store, and the
+             * jump it saves is the same two bytes. */
+            if (i->op == IR_STORE && !i->vol && !g_opt_size &&
+                !getenv("EMBCC_NO_ROTSTORE"))
+                continue;
             if (!(is_pure(i->op) || i->op == IR_LOAD) || i->vol)
                 { ok = 0; break; }
             int t = def_target(i);
@@ -5550,7 +5563,8 @@ static int rotate_one(struct ir_func *fn)
             enum ir_op op = fn->ins[bb[h].start + 1 + k].op;
             int fixed = op == IR_CONST || op == IR_GADDR || op == IR_ADDR ||
                         op == IR_STRADDR || op == IR_FADDR;
-            map[k] = fixed ? -1
+            map[k] = op == IR_STORE ? -2     /* copied, and names nothing */
+                   : fixed ? -1
                    : outside[k] ? def_target(&fn->ins[bb[h].start + 1 + k])
                    : fn->nvregs++;
         }
@@ -5585,13 +5599,14 @@ static int rotate_one(struct ir_func *fn)
                         tbl[old] = map[q];
                 }
                 for (int k = 0; k < ncopy; k++) {
-                    if (map[k] < 0)
+                    if (map[k] == -1)
                         continue;            /* the guard's value stands */
                     struct ir_ins *c = ib_push(&nb);
                     *c = fn->ins[bb[h].start + 1 + k];
                     struct lcopy lc = { tbl, fn->nvregs, 0 };
                     each_read(c, lcopy_cb, &lc);
-                    c->dst = map[k];
+                    if (map[k] >= 0)
+                        c->dst = map[k];
                 }
                 struct ir_ins *nbr = ib_push(&nb);
                 *nbr = *br;
