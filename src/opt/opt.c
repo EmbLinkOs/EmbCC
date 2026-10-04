@@ -9535,6 +9535,41 @@ static int target_imm_foldable(int op, long imm, int w)
     return 1;
 }
 
+/* A store of N bytes writes the low N bytes of its value, and an
+ * extension from S >= N bytes leaves those bytes as they were -- so the
+ * store may take the extension's SOURCE, and the extension, read by
+ * nothing else, goes with the DCE after. `k[n] = (char)(v + 'a')` was
+ * ext.4:1s and store:1: a movsbl before every byte store on x86-64, a
+ * shift pair on RV32. 45 of the 555 stores across lib/libc.
+ *
+ * Both values must be defined exactly once: a merge temp is written on
+ * each path into it, and a source written again between
+ * the extension and the store would be read at its new value. */
+static int pass_storenarrow(struct ir_func *fn)
+{
+    struct defs d;
+    int changed = 0;
+    compute_defs(fn, &d);
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        const struct ir_ins *e;
+        int v = i->b, x;
+        if (i->op != IR_STORE || i->flt || v < 0 || v >= fn->nvregs ||
+            i->size <= 0 || d.cnt[v] != 1 || d.ins[v] < 0)
+            continue;
+        e = &fn->ins[d.ins[v]];
+        if (e->op != IR_EXT || e->flt || e->size < i->size || e->size > 8)
+            continue;
+        x = e->a;
+        if (x < 0 || x >= fn->nvregs || d.cnt[x] != 1)
+            continue;
+        i->b = x;
+        changed = 1;
+    }
+    free_defs(&d);
+    return changed;
+}
+
 static int pass_immfold(struct ir_func *fn)
 {
     struct defs d;
@@ -12101,6 +12136,8 @@ static void opt_func(struct ir_func *fn)
      * CONSTs that leaves unreferenced. Kept out of the fixpoint so the earlier
      * passes never reason about the imm_b form. */
     if (pass_immfold(fn))
+        pass_dce(fn);
+    if (pass_storenarrow(fn))
         pass_dce(fn);
     /* ...and only now put each surviving literal where it is wanted.
      *
