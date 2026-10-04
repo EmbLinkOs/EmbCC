@@ -9667,6 +9667,19 @@ static int pass_immfold(struct ir_func *fn)
  * at 64 the hash table's probe and key builder were copied into their
  * callers and ran 1-4% SLOWER on every board.
  *
+ * One count between the two did pay, measured 2026-10-04: a static
+ * function called from exactly TWO places, its address never taken, may
+ * be 200 instructions. Inlining both calls removes the original, so the
+ * unit pays one extra copy, not one per caller. That was the hash
+ * table's probe, key builder and insert again, but after the allocator
+ * stopped spilling a loop's counters around calls (ra-callee-k): against
+ * 24, the text kernel ran 5.9% (RV32), 8.6% (x86-64) and 10.0% (aarch64)
+ * fewer instructions, M4's +0.4%, and hash 9.6-20.9% fewer on all four.
+ * -O2 code over lib/libc and the workload grew 1.0-1.6%; -Os is
+ * unchanged. The insert is 167 instructions, so a two-caller budget of
+ * 64 or 100 bought text and a fraction of hash (0.6-5.4%) for 0.2-1.1%.
+ * A flat budget of 64 bought text's speed for 6-9% more code.
+ *
  * So the number stays, and this is what it is doing there. A cost model
  * that beats it wants something these three did not have -- how HOT the
  * call is (section 4's profile work), or a real estimate of what the
@@ -9674,6 +9687,7 @@ static int pass_immfold(struct ir_func *fn)
  * already available here. */
 #define INLINE_MAX_CALLEE 24     /* instruction budget for an inline candidate */
 #define INLINE_SOLE_CALLEE 2000  /* ...and for a body that MOVES (sole_static_caller) */
+#define INLINE_TWO_CALLEE  200   /* ...and for one of two calls to a static (-O2) */
 #define INLINE_MAX_CALLER 800    /* stop expanding a caller past this many ins */
 #define INLINE_MAX_PER_FUNC 64   /* and cap inlines per caller, for termination */
 
@@ -9771,8 +9785,15 @@ static int inlinable(struct ir_func *cf, int force, int sole, const char **why,
      * always_inline that was not inlined says why. */
     int budget = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
     if (!force && cf->nins > budget &&
-        !(sole && cf->nins <= INLINE_SOLE_CALLEE)) {
+        !(sole == 1 && cf->nins <= INLINE_SOLE_CALLEE) &&
+        !(sole == 2 && !g_opt_size && cf->nins <= INLINE_TWO_CALLEE)) {
         *why = "callee-too-large";
+        /* Name the budget that applied: a sole or one-of-two caller's
+         * is larger than the copied one. */
+        if (sole == 1)
+            budget = INLINE_SOLE_CALLEE;
+        else if (sole == 2 && !g_opt_size)
+            budget = INLINE_TWO_CALLEE;
         if (detail)
             snprintf(detail, dcap, "%d instructions, budget %d%s",
                      cf->nins, budget, g_opt_size ? " (-Os)" : "");
@@ -9964,7 +9985,10 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
  * exactly one call names is a body that will be MOVED rather than
  * copied: once the call is gone, dead-function elimination takes the
  * original, so the unit cannot grow by more than the call it removed.
- * The size budget is the wrong question for that one. */
+ * The size budget is the wrong question for that one. Exactly two calls
+ * is the next case (INLINE_TWO_CALLEE): both inlined, one copy extra.
+ * Returns the count, 1 or 2, and 0 for any other count, a non-static
+ * function, or one whose address is taken. */
 static int sole_static_caller(struct ir_unit *iu, struct func *c)
 {
     if (!c || !c->is_static)
@@ -9977,11 +10001,11 @@ static int sole_static_caller(struct ir_unit *iu, struct func *c)
             if (in->op == IR_FADDR && in->callee == c)
                 return 0;                 /* the address escapes */
             if (in->op == IR_CALL && !in->indirect && in->callee == c &&
-                ++calls > 1)
+                ++calls > 2)
                 return 0;
         }
     }
-    return calls == 1;
+    return calls;      /* 1: the sole caller; 2: one of two; 0: neither */
 }
 
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
@@ -9994,7 +10018,7 @@ static void inline_unit(struct ir_unit *iu)
             if (done >= INLINE_MAX_PER_FUNC || fn->nins > INLINE_MAX_CALLER ||
                 fn->neh || fn->has_i128)
                 break;
-            int ci = -1;
+            int ci = -1, csole = 0;
             struct ir_func *cf = NULL;
             for (int i = 0; i < fn->nins; i++) {
                 struct ir_ins *in = &fn->ins[i];
@@ -10004,7 +10028,7 @@ static void inline_unit(struct ir_unit *iu)
                 struct ir_func *c = func_ir(iu, in->callee);
                 const char *why = NULL;
                 char detail[160] = "";
-                int ok = 0;
+                int ok = 0, sole = 0;
                 if (!c)
                     why = "callee-not-defined-here";
                 else if (c == fn)
@@ -10015,10 +10039,11 @@ static void inline_unit(struct ir_unit *iu)
                     why = "callee-is-noinline";
                 else if (in->callee->is_weak)
                     why = "callee-is-weak";   /* the link may replace it */
-                else
-                    ok = inlinable(c, in->callee->attr_always_inline,
-                                   sole_static_caller(iu, in->callee),
+                else {
+                    sole = sole_static_caller(iu, in->callee);
+                    ok = inlinable(c, in->callee->attr_always_inline, sole,
                                    &why, detail, sizeof detail);
+                }
                 if (!ok) {
                     remark_add("inline", "not-inlined", in->callee->name, why,
                                fn->src ? fn->file : NULL, in->line,
@@ -10027,16 +10052,27 @@ static void inline_unit(struct ir_unit *iu)
                 }
                 ci = i;
                 cf = c;
+                csole = sole;
                 break;
             }
             if (ci < 0)
                 break;
-            remark_add("inline", "inlined", cf->name,
-                       fn->ins[ci].callee->attr_always_inline
-                           ? "always_inline" : "small-enough",
-                       fn->src ? fn->file : NULL, fn->ins[ci].line,
-                       "%d instructions into %s, budget %d", cf->nins,
-                       fn->src ? fn->name : "?", INLINE_MAX_CALLEE);
+            {
+                /* The budget that admitted it, not always the copied
+                 * one: a sole caller's or one of two calls' is larger,
+                 * and -Os's is smaller. */
+                int bud = g_opt_size ? INLINE_SIZE_CALLEE : INLINE_MAX_CALLEE;
+                if (cf->nins > bud && csole == 1)
+                    bud = INLINE_SOLE_CALLEE;
+                else if (cf->nins > bud && csole == 2 && !g_opt_size)
+                    bud = INLINE_TWO_CALLEE;
+                remark_add("inline", "inlined", cf->name,
+                           fn->ins[ci].callee->attr_always_inline
+                               ? "always_inline" : "small-enough",
+                           fn->src ? fn->file : NULL, fn->ins[ci].line,
+                           "%d instructions into %s, budget %d", cf->nins,
+                           fn->src ? fn->name : "?", bud);
+            }
             inline_call(fn, ci, cf);
             done++;
         }

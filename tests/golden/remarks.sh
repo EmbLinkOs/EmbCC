@@ -76,6 +76,47 @@ grep -q "^small " "$out/yes.txt" || { cat "$out/yes.txt"
 grep -q "because small-enough" "$out/yes.txt" || { echo "FAIL: reason"; exit 1; }
 echo "the decisions that succeeded are recorded too, not only the refusals"
 
+# ---- a static function with two callers -----------------------------------
+# Called from exactly two places, address never taken: both calls inlined
+# leave one extra copy, not one per caller, so the budget is 200 at -O2.
+# mid() is about 124 instructions, over the 64 this budget first was, and
+# big2() about 224, over 200. Three callers, or -Os, and the copied budget
+# applies again.
+two() { # name statements callers
+    echo "static int $1(int n)"
+    echo '{'
+    echo '    int t = 0;'
+    i=1
+    while [ "$i" -le "$2" ]; do
+        echo "    t += n * $i ^ (t >> 3);"
+        i=$((i + 1))
+    done
+    echo '    return t;'
+    echo '}'
+    echo "int c1(int n) { return $1(n) + 1; }"
+    echo "int c2(int n) { return $1(n + 1) * 2; }"
+    if [ "$3" = 3 ]; then echo "int c3(int n) { return $1(n - 1) - 3; }"; fi
+}
+two mid 12 2 > "$out/two2.c"
+two mid 12 3 > "$out/two3.c"
+two big2 22 2 > "$out/big2.c"
+"$EMBCC" why inlined mid "$out/two2.c" -O2 > "$out/two2.txt" 2>&1
+grep -q "^mid .*" "$out/two2.txt" && grep -q "budget 200\$" "$out/two2.txt" ||
+    { cat "$out/two2.txt"; echo "FAIL: mid() with two callers should be inlined, budget 200"; exit 1; }
+n=$(sed -n 's/.*— \([0-9]*\) instructions into.*/\1/p' "$out/two2.txt" | head -1)
+[ "${n:-0}" -gt 64 ] ||
+    { cat "$out/two2.txt"; echo "FAIL: mid() should be over 64 instructions, is ${n:-?}"; exit 1; }
+"$EMBCC" why not-inlined mid "$out/two3.c" -O2 > "$out/two3.txt" 2>&1
+grep -q "because callee-too-large .*budget 24\$" "$out/two3.txt" ||
+    { cat "$out/two3.txt"; echo "FAIL: mid() with three callers should keep budget 24"; exit 1; }
+"$EMBCC" why not-inlined mid "$out/two2.c" -Os > "$out/two2s.txt" 2>&1
+grep -q "because callee-too-large .*budget 6" "$out/two2s.txt" ||
+    { cat "$out/two2s.txt"; echo "FAIL: -Os should not inline mid() for two callers"; exit 1; }
+"$EMBCC" why not-inlined big2 "$out/big2.c" -O2 > "$out/big2.txt" 2>&1
+grep -q "because callee-too-large .*budget 200\$" "$out/big2.txt" ||
+    { cat "$out/big2.txt"; echo "FAIL: big2() over 200 should be refused, naming budget 200"; exit 1; }
+echo "a static function with two callers is inlined up to 200 at -O2 ($n here), and not past it, with three or at -Os"
+
 # ---- the subject filter ---------------------------------------------------
 "$EMBCC" why not-inlined big "$out/p.c" -O2 > "$out/one.txt" 2>&1
 [ "$(grep -c "^  because " "$out/one.txt")" = 1 ] ||
