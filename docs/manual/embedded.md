@@ -581,6 +581,23 @@ files as they ship, with a linker script in CubeMX's shape, and runs it
 on QEMU's netduinoplus2 (an STM32F405) with SysTick interrupts, when ARM's
 CMSIS_5 and ST's cmsis-device-f4 are cloned under `~/EmbRef`.
 
+### Starting from the vendor's SVD
+
+A vendor that ships no CMSIS device pack still publishes an SVD file for
+its part. [`embsvd`](tools/embsvd.md) writes the device header, a startup
+file and a linker script from it:
+
+```sh
+embsvd STM32F405.svd --header STM32F405.h --startup startup.c \
+       --ld STM32F405.ld --flash 0x08000000:1M --ram 0x20000000:128K
+```
+
+The header has CMSIS's shape -- `USART1->CR1`, `USART1_IRQn`,
+`RCC_APB2ENR_USART1EN_Msk` -- and includes CMSIS-Core for the SVD's
+core. `embsvd --show USART1` prints the registers and their fields.
+`tests/golden/svd-stm32f405.sh` checks the generated layout against ST's
+own header, and runs a firmware built from the generated files.
+
 ### Stopping and printing under a debugger or emulator
 
 `bkpt` is in the inline-assembly vocabulary, so ARM semihosting works.

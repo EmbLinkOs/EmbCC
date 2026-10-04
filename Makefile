@@ -159,7 +159,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar
+all: embcc embread embld embas embls embidx embar embsvd
 
 # Which host layer the last link used. Switching PLATFORM leaves every
 # object up to date, so without this `make PLATFORM=iso` kept the old
@@ -200,6 +200,12 @@ $(BUILD)/embcc: $(OBJS) $(EMBDBG_CORE)
 # so the libraries below need no binutils `ar` on a host without GCC.
 embar: tools/embar/embar.c
 	$(CC) $(CFLAGS) -o $@ tools/embar/embar.c
+
+# embsvd -- a device's register database from its CMSIS-SVD file: the
+# device header, a startup file and a linker script (tools/embsvd). ISO C
+# and standalone, like embar.
+embsvd: tools/embsvd/embsvd.c
+	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
@@ -327,8 +333,8 @@ check: embcc libc-x86_64 libcxx-x86_64
 # embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
-test: embcc embread embld embdbg embls embas libc-x86_64 libcxx-x86_64 \
-      libc-linux-x86_64 libcxx-linux-x86_64
+test: embcc embread embld embdbg embls embas embar embsvd libc-x86_64 \
+      libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
 # The aarch64 suite: compile for the second architecture and RUN the result
@@ -632,7 +638,7 @@ libcxx-linux-aarch64: embcc embar
 libcxx: libcxx-x86_64 libcxx-aarch64
 
 clean:
-	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar
+	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar embsvd
 
 .PHONY: all check test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
