@@ -578,6 +578,9 @@ Instruction selection:
   `ldur`/`stur`.
 - **Division** is `sdiv`/`udiv`; the remainder is the quotient in x11
   followed by `msub`.
+- **Multiply-accumulate.** A product whose only reader is the add or
+  subtract right after it is one `madd` (`c + a*b`) or `msub`
+  (`c - a*b`), at 4 or 8 bytes; `a*b - c` stays two instructions.
 - **binary128 `long double`** calls libgcc (`__addtf3`, `__subtf3`,
   `__multf3`, `__divtf3`, the `__eqtf2` family, `__floatditf`,
   `__fixtfdi`, the extend and truncate helpers), with values in q0/q1.
@@ -752,6 +755,9 @@ written with `wreg`/`wr`/`wrote`; `rd64`/`wr64` handle register pairs.
   own width (`size`): an 8-byte condition is the OR of its two halves.
 - **Divide** is `sdiv`/`udiv`; the remainder is the quotient followed by
   `mls`.
+- **Multiply-accumulate.** A 32-bit product whose only reader is the add
+  or subtract right after it is one `mla` (`c + a*b`) or `mls`
+  (`c - a*b`); `a*b - c` stays two instructions.
 - **64-bit integers** use register pairs: `adds`/`adc`,
   `subs`/`sbc`, per-half logic, `umull`/`mla` for multiply, shifts by a
   constant or (branching on count ≥ 32) by a variable. A 64-bit divide
@@ -1250,6 +1256,7 @@ with `lo8`, `hi8`, `pm_lo8`, `pm_hi8` and `gs()` symbol operands.
 | `EMBCC_NO_TAILCALL` | AArch64, Thumb, RISC-V, AVR | no tail calls |
 | `EMBCC_NO_MEMOFF` | Thumb, RISC-V, AVR | no constant-offset folding into accesses |
 | `EMBCC_NO_RMW` | x86-64 | no read-modify-write fusion |
+| `EMBCC_NO_MLA` | AArch64, Thumb | no multiply-accumulate fusion |
 | `EMBCC_T_NOLO` | Thumb | no low-register scratch |
 | `EMBCC_T_FPU` | Thumb | override the FPU setting |
 | `EMBCC_RV_LONG_CALLS` | RISC-V | never use `jal` for calls |

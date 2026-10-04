@@ -82,6 +82,7 @@ void a64_alu_reg_shifted(struct code *c, int op, int rd, int rn, int rm,
 void a64_mul(struct code *c, int rd, int rn, int rm, int w);
 void a64_div(struct code *c, int rd, int rn, int rm, int sign, int w);
 /* rd = ra - rn*rm — the second half of a remainder. */
+void a64_madd(struct code *c, int rd, int rn, int rm, int ra, int w);
 void a64_msub(struct code *c, int rd, int rn, int rm, int ra, int w);
 /* kind: '<' lsl, '>' asr, 'u' lsr */
 void a64_shift_reg(struct code *c, int kind, int rd, int rn, int rm, int w);
