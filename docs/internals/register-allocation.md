@@ -262,6 +262,18 @@ value's home. A double parameter whose home is a general register is
 moved there after the integer parameters, and before the v registers
 are permuted (the prologue's `pgfmv` list).
 
+AArch64 decides such a value's class by its uses instead
+(`cg_float_vregs_by_cost`), because its integer lowering can also reach
+an FP-register home: `ld_slot`, `rd`, `rd_ext`, `st_slot`, `wrote` and
+`wrote_n` fmov to and from one. An integer use an fmov cannot serve -- an
+address, a narrow access, an integer result narrower than eight bytes --
+still decides for the integer class; every other integer use is a vote,
+each floating-point use is a vote the other way, the votes are pooled
+over the copies (one value), and the float class wins ties. fdlibm's
+`x`, read by a dozen float operations and by the shift that takes its
+high word, lives in a d register and crosses once. x86-64 keeps the
+rule above: any integer use decides.
+
 `cg_float_vregs` decides the classes from each instruction's operands as
 `ra_each_use` lists them. It read the `a`, `b` and `c` fields of every
 op, and a two-operand op leaves `c` at 0, so one `and #imm` or `ext`

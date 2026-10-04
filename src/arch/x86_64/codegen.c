@@ -539,21 +539,52 @@ static int flt_width(const struct ir_ins *i)
     return 1;
 }
 
-struct flt_bad { char *bad; int nv; };
+struct flt_bad { char *bad; int *soft; int nv; };
 static void flt_bad_cb(int v, void *ctx)
 {
     struct flt_bad *b = ctx;
-    if (v >= 0 && v < b->nv)
-        b->bad[v] = 1;
+    if (v >= 0 && v < b->nv) {
+        if (b->soft) b->soft[v]++;
+        else b->bad[v] = 1;
+    }
 }
 
+static int flt_find(int *uf, int x)
+{
+    while (uf[x] != x) { uf[x] = uf[uf[x]]; x = uf[x]; }
+    return x;
+}
+
+static char *float_vregs(struct ir_func *fn, int by_cost);
+
 char *cg_float_vregs(struct ir_func *fn)
+{
+    return float_vregs(fn, 0);
+}
+
+/* The same classes, decided by cost where a value is touched both ways:
+ * for a backend whose integer lowering can also reach a value at home in
+ * an FP register (one fmov) -- AArch64. An integer use that can only be
+ * made from a general register (an address, a narrow access, a narrow
+ * result) still decides for the integer class; one that an fmov serves
+ * is a vote, and the floating-point uses are the other votes. fdlibm's
+ * `x` is read by a dozen float operations and by the one shift that
+ * takes its high word: it belongs in a d register, with one fmov out. */
+char *cg_float_vregs_by_cost(struct ir_func *fn)
+{
+    return float_vregs(fn, 1);
+}
+
+static char *float_vregs(struct ir_func *fn, int by_cost)
 {
     int nv = fn->nvregs ? fn->nvregs : 1;
     char *w = xcalloc((size_t)nv, 1);
     char *wide = cg_wide_vregs(fn);
     int any = 0;
-#define MARK(v) do { int _v=(v); if (_v>=0 && _v<nv && !w[_v]) { w[_v]=1; any=1; } } while (0)
+    /* by_cost: each value's floating-point uses, the votes for its class */
+    int *fcnt = by_cost ? xcalloc((size_t)nv, sizeof *fcnt) : NULL;
+#define MARK(v) do { int _v=(v); if (_v>=0 && _v<nv) { if (fcnt) fcnt[_v]++; \
+                     if (!w[_v]) { w[_v]=1; any=1; } } } while (0)
     for (int v = 0; v < fn->nvars; v++)
         if (fn->locals[v].is_scalar_float) MARK(v);
     for (int n = 0; n < fn->nins; n++) {
@@ -609,9 +640,13 @@ char *cg_float_vregs(struct ir_func *fn)
      * marking did -- both ends of a `mov` are one value and cannot be in
      * two classes. */
     char *bad = xcalloc((size_t)nv, 1);
-    struct flt_bad fb = { bad, nv };
+    /* by_cost: the integer uses an fmov can serve, counted, not decided */
+    int *soft = by_cost ? xcalloc((size_t)nv, sizeof *soft) : NULL;
+    struct flt_bad fb = { bad, soft, nv };
     void *bad_ctx = &fb;
 #define BAD(v) do { int _v=(v); if (_v>=0 && _v<nv) bad[_v]=1; } while (0)
+#define SOFT(v) do { int _v=(v); if (_v>=0 && _v<nv) { \
+                     if (soft) soft[_v]++; else bad[_v]=1; } } while (0)
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->flt) {
@@ -628,10 +663,12 @@ char *cg_float_vregs(struct ir_func *fn)
              * BOTH classes. An op that wants it as an integer still
              * BADs it by its own rule, so the whitelist stays sound. */
             break;
-        case IR_I2F:  BAD(i->a);   break;         /* integer in */
-        case IR_F2I:  BAD(i->dst); break;         /* integer out */
+        case IR_I2F:  SOFT(i->a);   break;        /* integer in */
+        case IR_F2I:                              /* integer out */
+            if (i->w == 8) SOFT(i->dst); else BAD(i->dst);
+            break;
         case IR_BITCAST:
-            if (i->sign) BAD(i->dst); else BAD(i->a);
+            if (i->sign) SOFT(i->dst); else SOFT(i->a);
             break;
         case IR_F2F:
             /* A conversion with a LONG DOUBLE on either side goes
@@ -663,12 +700,14 @@ char *cg_float_vregs(struct ir_func *fn)
         /* A floating-point return is `flt` and never reaches here; this
          * one hands its value back in rax (x0), so the value has to be
          * in a general register. */
-        case IR_RET:   BAD(i->a); break;
+        case IR_RET:   SOFT(i->a); break;
         case IR_CALL:
             if (i->indirect) BAD(i->a);
             for (int k = 0; k < i->nargs; k++)
-                if (i->argv[k].cls[0] != CLASS_SSE) BAD(i->argv[k].vreg);
-            if (!i->flt) BAD(i->dst);
+                if (i->argv[k].cls[0] != CLASS_SSE) SOFT(i->argv[k].vreg);
+            if (!i->flt) {
+                if (i->w == 8 && !i->retsize) SOFT(i->dst); else BAD(i->dst);
+            }
             break;
         default:
             /* every other op is integer in and integer out -- in the
@@ -677,12 +716,44 @@ char *cg_float_vregs(struct ir_func *fn)
              * -1, so `and.4 %x, #1` or an `ext` anywhere in a function
              * took vreg 0 -- the first parameter -- out of the float
              * class, and a double argument went through memory. */
-            BAD(i->dst);
+            /* a result narrower than eight bytes is not something an
+             * fmov puts in a d register whole */
+            if (i->w == 8) SOFT(i->dst); else BAD(i->dst);
             ra_each_use(i, flt_bad_cb, bad_ctx);
             break;
         }
     }
 #undef BAD
+#undef SOFT
+    if (by_cost) {
+        /* A copy's two ends are one value: the votes are pooled over the
+         * copies, and a hard integer use anywhere decides for all. */
+        int *uf = xmalloc((size_t)nv * sizeof *uf);
+        for (int v = 0; v < nv; v++) uf[v] = v;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if ((i->op == IR_MOV || i->op == IR_LDVAR || i->op == IR_STVAR) &&
+                i->a >= 0 && i->a < nv && i->dst >= 0 && i->dst < nv) {
+                int x = flt_find(uf, i->a), y = flt_find(uf, i->dst);
+                if (x != y) uf[x] = y;
+            }
+        }
+        long *fs = xcalloc((size_t)nv, sizeof *fs);
+        long *is = xcalloc((size_t)nv, sizeof *is);
+        char *hard = xcalloc((size_t)nv, 1);
+        for (int v = 0; v < nv; v++) {
+            int r = flt_find(uf, v);
+            fs[r] += fcnt[v];
+            is[r] += soft[v];
+            hard[r] |= bad[v];
+        }
+        for (int v = 0; v < nv; v++) {
+            int r = flt_find(uf, v);
+            bad[v] = hard[r] || (is[r] > 0 && fs[r] < is[r]);
+        }
+        free(uf); free(fs); free(is); free(hard);
+        free(fcnt); free(soft);
+    }
     for (int changed = 1; changed; ) {
         changed = 0;
         for (int n = 0; n < fn->nins; n++) {
