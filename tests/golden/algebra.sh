@@ -107,6 +107,29 @@ n=$("$EMBCC" --target=x86_64-linux-gnu -O2 -fno-pre -fremarks -c "$out/gcse.c" \
     exit 1; }
 echo "an expression with a literal operand is one value across blocks"
 
+# A global's address is a value too, and costs two instructions on Thumb,
+# RISC-V and aarch64 and a seven-byte lea on x86-64: a probe loop and the
+# store after it name `used` once between them, not once each. AVR, where
+# a long live range is dearer, keeps rebuilding it.
+cat > "$out/gaddr.c" <<'EOF'
+unsigned char used[64];
+int probe(unsigned i)
+{
+    while (used[i & 63])
+        i++;
+    used[i & 63] = 1;
+    return (int)i;
+}
+EOF
+for t in x86_64-linux-gnu thumbv7em-none-eabi riscv32-unknown-elf aarch64-elf; do
+    n=$("$EMBCC" inspect ir "$out/gaddr.c" --target=$t -O2 2>/dev/null |
+        grep -c 'gaddr @used')
+    [ "$n" = 1 ] || {
+        echo "FAIL: $t materialises the address of 'used' $n times, not once"
+        exit 1; }
+done
+echo "a global's address named in two blocks is one value across them"
+
 # ---- 4. and all of it still computes the same thing --------------------
 #
 # The IR checks above say a rewrite fired. This says it was right, at

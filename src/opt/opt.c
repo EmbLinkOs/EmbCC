@@ -2360,16 +2360,28 @@ static int gcse_numberable(enum ir_op op)
 {
     switch (op) {
     /* Only genuinely COMPUTED values. A cheap single-instruction
-     * materialization (CONST, a lea for &local/&global/string/func, a
-     * sign/zero-extend, a bswap) costs less to recompute than to keep live
-     * across the dominated region — global-CSEing those only lengthens a live
-     * range (forcing a spill or a callee-saved reg) for no win. Redundant
-     * arithmetic/compares are the profitable case. Memory reads (LDVAR/LOAD)
-     * stay with the memory-versioned pass_lvn. */
+     * materialization (CONST, a lea for &local, a sign/zero-extend, a
+     * bswap) costs less to recompute than to keep live across the
+     * dominated region — global-CSEing those only lengthens a live range
+     * (forcing a spill or a callee-saved reg) for no win. Redundant
+     * arithmetic/compares are the profitable case. Memory reads
+     * (LDVAR/LOAD) stay with the memory-versioned pass_lvn. */
     case IR_ADD: case IR_SUB: case IR_MUL:
     case IR_DIV: case IR_MOD: case IR_AND: case IR_OR: case IR_XOR:
     case IR_SHL: case IR_SHR: case IR_CMP: case IR_NEG: case IR_BNOT:
         return 1;
+    /* A global's or a string's address is not that cheap. It is two
+     * instructions on Thumb (movw/movt), RISC-V (auipc/addi) and aarch64
+     * (adrp/add), and a seven-byte lea on x86-64. A function that names
+     * the same global in three blocks rebuilt it in each: the hash
+     * table's insert, `hused` three times. Measured 2026-10-04: the hash
+     * kernel ran 2.4-2.6% fewer instructions on RV32, M4 and aarch64 and
+     * 1.2% fewer on x86-64, nothing else moved, and code over lib/libc
+     * and the workload shrank 0.2-0.6% on all four. AVR, whose few
+     * registers make a long live range dearer, came out even and is left
+     * as it was. EMBCC_NO_GCSE_ADDR=1 turns it off, for bisecting. */
+    case IR_GADDR: case IR_STRADDR:
+        return target_get() != TARGET_AVR && !getenv("EMBCC_NO_GCSE_ADDR");
     default:
         return 0;
     }

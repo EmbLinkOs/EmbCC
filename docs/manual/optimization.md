@@ -268,10 +268,14 @@ on at `-O2` and `-Os`.
 
 Global common-subexpression elimination. An integer computation already
 made in a block that dominates the current one is reused instead of
-being computed again. Only arithmetic, shifts and comparisons are
-reused; a constant or an address is cheaper to recompute than to keep
-live, and memory reads are left to `load-cse`. Floating-point
-operations are never reused. Default: on at `-O2` and `-Os`.
+being computed again. Arithmetic, shifts and comparisons are reused, and
+so is the address of a global variable or a string literal, which takes
+two instructions on Thumb, RISC-V and AArch64 (except on AVR, where
+keeping it live costs more than rebuilding it). A constant or a local's
+address is cheaper to recompute than to keep live, and memory reads are
+left to `load-cse`. Floating-point operations are never reused.
+`EMBCC_NO_GCSE_ADDR=1` stops the reuse of addresses. Default: on at
+`-O2` and `-Os`.
 
 ### `-fload-cse`, `-fno-load-cse`
 
