@@ -66,8 +66,8 @@ static void print_version(void)
 static void print_usage(FILE *out)
 {
     fprintf(out,
-            "usage: embcc [-c|-S|-E] FILE.c|FILE.cc|FILE.s|FILE.S|FILE.asm"
-            " [-o FILE]\n"
+            "usage: embcc [-c|-S|-E] FILE.c|FILE.cc|FILE.s|FILE.S|FILE.asm..."
+            " [-o FILE] [-j N]\n"
             "             [--target=TRIPLE] [-x c|c++]\n"
             "             [-std=...] [--emit-c]\n"
             "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
@@ -90,6 +90,8 @@ static void print_options(FILE *out)
       "  -E                     preprocess only\n"
       "  -S                     write assembly (NAME.s) instead of an object\n"
       "  -fsyntax-only          check, write nothing\n"
+      "  -j N, -jN, -j          several sources: compile N at once (-j: one\n"
+      "                         per processor); one at a time by default\n"
       "  --emit-c               print the C a C++ unit lowers to\n"
       "  -o FILE                where to write it\n"
       "\nthe language\n"
@@ -129,7 +131,7 @@ static void print_options(FILE *out)
       "  -w                     no warnings;  -Werror  warnings are errors\n"
       "  -Wall, -Wextra, -Wname, -Wno-name (see --help-warnings)\n"
       "\nthe link (docs/manual/invoking.md#linking)\n"
-      "  OBJ.o, LIB.a           linked as they are, with the source if any\n"
+      "  OBJ.o, LIB.a           linked as they are, with the sources if any\n"
       "  -lNAME, -L DIR         libNAME.a from the -L directories\n"
       "  -T SCRIPT.ld           GNU ld linker script (ARM and RISC-V firmware)\n"
       "  -nostdlib, -nodefaultlibs, -nostartfiles   leave out crt1/libc/librt\n"
@@ -525,6 +527,21 @@ static int g_nwl;
  * source at all, and that is the line this serves. */
 static const char *g_link_in[256];
 static int g_nlink_in;
+/* Each link input's place on the command line (argv index): the order
+ * objects compiled from several sources are linked in (multi_source). */
+static int g_link_argi[256];
+/* Several sources (multi_source): each, and its place on the command
+ * line. g_child_skip marks the argv words a child compile does not get:
+ * the sources, the link inputs, -o and -j, with their values. */
+#define MAX_SRCS 256
+static const char *g_srcs[MAX_SRCS];
+static int g_src_argi[MAX_SRCS];
+static int g_nsrc;
+static char *g_child_skip;
+static int g_jobs = 1;
+/* A C++ source is among them: the link needs libcxx.a (compile_and_link
+ * asks this rather than lang_cxx, which is about one source). */
+static int g_link_cxx;
 static const char *g_libdirs[64];        /* -L */
 static int g_nlibdirs;
 static const char *g_undefs[64];         /* -u */
@@ -793,10 +810,11 @@ static int compile_and_link(const char *in, const char *out)
      * into it -- operator new is malloc, and a thrown std::string
      * formats through the C library -- and an archive is searched
      * once. */
-    int have_cxx = in && lang_cxx && std &&
+    int cxx = (in && lang_cxx) || g_link_cxx;
+    int have_cxx = cxx && std &&
                    paths_target_file(triple, "libcxx.a", libcxx,
                                      sizeof libcxx);
-    if (in && lang_cxx && std && !have_cxx) {
+    if (cxx && std && !have_cxx) {
         fprintf(stderr,
                 "embcc: error: no libcxx.a for %s -- a C++ program needs "
                 "the C++ runtime, and this target's is not built or not "
@@ -884,6 +902,129 @@ static int compile_and_link(const char *in, const char *out)
         remove(obj);
     for (int k = 0; k < nfound; k++)
         free(found[k]);
+    return rc;
+}
+
+/* ---- several sources in one command --------------------------------------
+ *
+ * `embcc a.c b.c -o prog`, `embcc -c a.c b.c`: what GCC and Clang take
+ * from every Makefile and CMake. The compiler's state is per process -- a
+ * unit's types, symbols and IR live in globals -- so a source is compiled
+ * by a process of its own: this driver, run again with that one source
+ * (plat_run_start), as gcc runs cc1. -j N runs N at once. Then the
+ * objects are linked here, in command-line order with the other inputs,
+ * and the temporaries removed.
+ *
+ * A host that cannot run a program (platform.h: EmbLinkOS) gets the
+ * refusal it always had, with the way round it. */
+static int has_cxx_suffix(const char *path);
+
+static int multi_source(int argc, char **argv, const char *output,
+                        int compile_mode, int want_s, int pp)
+{
+    if (!plat_can_run()) {
+        fprintf(stderr, "embcc: error: more than one source file ('%s' and "
+                "'%s'), and this host cannot run a compiler for each (EmbCC "
+                "was built with PROCESS=none): compile each with -c and link "
+                "the objects (embcc a.o b.o -o OUT)\n", g_srcs[0], g_srcs[1]);
+        return 1;
+    }
+    if (output && (compile_mode || want_s || pp)) {
+        fprintf(stderr, "embcc: error: -o names one output, and -%s with "
+                "%d sources writes one each: leave -o out, or compile them "
+                "one at a time\n", pp ? "E" : want_s ? "S" : "c", g_nsrc);
+        return 1;
+    }
+    int link = !compile_mode && !want_s && !pp;
+    const char *self = plat_self_path();
+    if (!self)
+        self = argv[0];
+    const char *exe = output ? output : "a.out";
+
+    /* the child's command line: ours, less what is not its business */
+    const char **cargv = xmalloc((size_t)(argc + 8) * sizeof *cargv);
+    int base = 0;
+    cargv[base++] = self;
+    for (int i = 1; i < argc; i++)
+        if (!g_child_skip[i])
+            cargv[base++] = argv[i];
+
+    char **tmp = xcalloc((size_t)g_nsrc, sizeof *tmp);
+    int next = 0, running = 0, failed = 0;
+    /* -E writes to standard output, in order: one at a time */
+    int jobs = pp ? 1 : g_jobs;
+    while (next < g_nsrc || running) {
+        while (next < g_nsrc && running < jobs && !failed) {
+            int n = base;
+            const char **av = xmalloc((size_t)(base + 6) * sizeof *av);
+            memcpy(av, cargv, (size_t)base * sizeof *av);
+            if (link) {
+                size_t ln = strlen(exe) + 32;
+                tmp[next] = xmalloc(ln);
+                snprintf(tmp[next], ln, "%s.embcc-tmp-%d.o", exe, next + 1);
+                av[n++] = "-c";
+                av[n++] = g_srcs[next];
+                av[n++] = "-o";
+                av[n++] = tmp[next];
+            } else {
+                av[n++] = g_srcs[next];
+            }
+            av[n] = NULL;
+            int h = plat_run_start(av);
+            free(av);
+            if (h < 0) {
+                fprintf(stderr, "embcc: error: could not run %s for '%s'\n",
+                        self, g_srcs[next]);
+                failed = 1;
+                break;
+            }
+            next++;
+            running++;
+        }
+        if (!running)
+            break;
+        int which = -1;
+        int st = plat_run_wait(&which);
+        if (st < 0)
+            break;
+        running--;
+        if (st != 0)            /* its diagnostics are already out */
+            failed = 1;
+    }
+    if (!failed && next < g_nsrc)
+        failed = 1;
+    free(cargv);
+
+    int rc = failed;
+    if (link && !failed) {
+        /* the objects where their sources were, among the other inputs */
+        const char *in[256 + MAX_SRCS];
+        int n = 0, a = 0, b = 0;
+        while (a < g_nsrc || b < g_nlink_in) {
+            if (b >= g_nlink_in ||
+                (a < g_nsrc && g_src_argi[a] < g_link_argi[b]))
+                in[n++] = tmp[a++];
+            else
+                in[n++] = g_link_in[b++];
+        }
+        if (n > 256) {
+            fprintf(stderr, "embcc: error: more than 256 link inputs\n");
+            rc = 1;
+        } else {
+            for (int k = 0; k < n; k++)
+                g_link_in[k] = in[k];
+            g_nlink_in = n;
+            for (int k = 0; k < g_nsrc && !g_link_cxx; k++)
+                g_link_cxx = has_cxx_suffix(g_srcs[k]);
+            rc = compile_and_link(NULL, output);
+        }
+    }
+    for (int k = 0; k < g_nsrc; k++)
+        if (tmp[k]) {
+            remove(tmp[k]);
+            free(tmp[k]);
+        }
+    free(tmp);
     return rc;
 }
 
@@ -3083,6 +3224,7 @@ int main(int argc, char **argv)
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
     if (expand_wp(&argc, &argv))
         return 1;
+    g_child_skip = xcalloc((size_t)(argc > 0 ? argc : 1), 1);
 
     /* -fsanitize state: which checks, and whether trap mode was
      * asked for by name (it is the only mode, so this only has to be
@@ -3908,6 +4050,7 @@ int main(int argc, char **argv)
             /* the link's own options, as gcc takes them: -lNAME and
              * -L DIR (attached or not), -T SCRIPT, -e SYM, -u SYM */
             char opt = argv[i][1];
+            int at = i;
             const char *v = (opt == 'l' || opt == 'L') && argv[i][2]
                 ? argv[i] + 2 : (i + 1 < argc ? argv[++i] : NULL);
             if (!v || !*v) {
@@ -3921,8 +4064,11 @@ int main(int argc, char **argv)
                 size_t ln = strlen(v) + 3;
                 char *w = xmalloc(ln);
                 snprintf(w, ln, "-l%s", v);
-                if (g_nlink_in < 256)
+                g_child_skip[at] = g_child_skip[i] = 1;
+                if (g_nlink_in < 256) {
+                    g_link_argi[g_nlink_in] = at;
                     g_link_in[g_nlink_in++] = w;
+                }
             } else if (opt == 'L') {
                 if (g_nlibdirs < 64)
                     g_libdirs[g_nlibdirs++] = v;
@@ -3942,13 +4088,32 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "-static")) {
             /* every image EmbLD writes is static */
         } else if (argv[i][0] != '-' && has_link_input_suffix(argv[i])) {
-            if (g_nlink_in < 256)
+            g_child_skip[i] = 1;
+            if (g_nlink_in < 256) {
+                g_link_argi[g_nlink_in] = i;
                 g_link_in[g_nlink_in++] = argv[i];
+            }
+        } else if (!strncmp(argv[i], "-j", 2) &&
+                   (!argv[i][2] || (argv[i][2] >= '0' && argv[i][2] <= '9'))) {
+            /* -j N, -jN; -j alone (or before an option) is one per
+             * processor */
+            g_child_skip[i] = 1;
+            const char *v = argv[i][2] ? argv[i] + 2
+                : (i + 1 < argc && argv[i + 1][0] >= '0' &&
+                   argv[i + 1][0] <= '9') ? argv[++i] : NULL;
+            g_child_skip[i] = 1;
+            g_jobs = v ? atoi(v) : plat_ncpus();
+            if (g_jobs < 1 || g_jobs > 256) {
+                fprintf(stderr, "embcc: error: -j wants 1 to 256 jobs, not "
+                                "'%s'\n", v ? v : "?");
+                return 1;
+            }
         } else if (strcmp(argv[i], "-o") == 0) {
             if (i + 1 == argc) {
                 fprintf(stderr, "embcc: -o needs a FILE\n");
                 return 1;
             }
+            g_child_skip[i] = g_child_skip[i + 1] = 1;
             output = argv[++i];
             /* `-o -` means stdout, as it does in every other compiler.
              * Every text-producing mode here already writes to stdout
@@ -3962,14 +4127,16 @@ int main(int argc, char **argv)
                    has_gas_suffix(argv[i]) ||
                    has_cxx_suffix(argv[i]) || has_ir_suffix(argv[i]) ||
                    (lang >= 0 && argv[i][0] != '-')) {
-            if (input) {
-                fprintf(stderr, "embcc: error: more than one source file "
-                                "('%s' and '%s'): one command compiles one; "
-                                "compile each with -c and link the objects "
-                                "(embcc a.o b.o -o OUT)\n", input, argv[i]);
+            if (g_nsrc == MAX_SRCS) {
+                fprintf(stderr, "embcc: error: more than %d source files\n",
+                        MAX_SRCS);
                 return 1;
             }
-            input = argv[i];
+            g_child_skip[i] = 1;
+            g_src_argi[g_nsrc] = i;
+            g_srcs[g_nsrc++] = argv[i];
+            if (!input)
+                input = argv[i];
         } else {
             fprintf(stderr, "embcc: error: unknown argument '%s'\n",
                     argv[i]);
@@ -3990,6 +4157,18 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (g_nsrc > 1) {
+        if (inspect_stage || why_decision || emit_c_only || want_iface) {
+            fprintf(stderr, "embcc: error: %d source files: this mode reads "
+                    "one\n", g_nsrc);
+            return 1;
+        }
+        /* -fsyntax-only and --fix write no object: each source is
+         * checked, and nothing is linked */
+        return done(multi_source(argc, argv, output,
+                                 compile_mode || syntax_only || want_fix,
+                                 want_asm, pp_only));
+    }
     /* Objects and archives with no source: the link step of a build. */
     if (!input && g_nlink_in && !compile_mode && !pp_only &&
         !inspect_stage && !why_decision && !syntax_only) {

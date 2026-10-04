@@ -93,11 +93,13 @@ does not read those objects. AArch64 objects are refused by embld with:
 embld: FILE: a 64-bit object for machine 183; only x86-64 and RV64 (EM_RISCV) are supported
 ```
 
-The driver compiles one source per invocation, and links any number of
-objects and archives with it:
+The driver compiles several sources in one command by running itself
+once for each (`-j N` at a time), on a host that can run a program
+(macOS, Linux). A build with `PROCESS=none` -- EmbLinkOS, which has no
+fork/exec -- compiles one source per command and refuses a second:
 
 ```text
-embcc: error: more than one source file ('a.c' and 'b.c'): one command compiles one; compile each with -c and link the objects (embcc a.o b.o -o OUT)
+embcc: error: more than one source file ('a.c' and 'b.c'), and this host cannot run a compiler for each (EmbCC was built with PROCESS=none): compile each with -c and link the objects (embcc a.o b.o -o OUT)
 ```
 
 EmbCC has no archiver. The library builds use `x86_64-elf-ar`,

@@ -7,9 +7,12 @@
  *
  * The layer is deliberately tiny, because EmbCC's host needs are: read a
  * file, write a file, ask the environment a question, write to the console.
- * EmbLinkOS has no fork/exec (ARCHITECTURE §1), so there is no process API
- * here and there must never be one — a design that spawned `as` or `ld`
- * could not be hosted on the target at all.
+ * EmbLinkOS has no fork/exec (ARCHITECTURE §1), so nothing may NEED a
+ * process: a design that spawned `as` or `ld` could not be hosted on the
+ * target at all. A host that can run a program says so (plat_can_run,
+ * below, optional), and the driver uses it only to do in one command what
+ * one command per file also does -- compile several sources, in parallel
+ * with -j. Where it cannot, everything works as before.
  *
  * ---- Sources are different ----
  *
@@ -89,6 +92,31 @@ const char *plat_self_path(void);
  * platform_common.c, which every host builds. */
 void plat_set_argv0(const char *argv0);
 const char *plat_argv0_path(void);
+
+/* ---- running a program: optional ----
+ *
+ * A host that can start a program and wait for it answers plat_can_run()
+ * with 1; one that cannot -- EmbLinkOS, a hobby OS with only a C library
+ * -- with 0, and the other three calls then fail. Which a build gets is
+ * the build's choice, not an #ifdef above this line: process_spawn.c
+ * (POSIX posix_spawn) or process_none.c (`make PROCESS=none`).
+ *
+ * Nothing in EmbCC may depend on it. The driver runs itself once per
+ * source when it is given several (`embcc a.c b.c -o prog`, `-j N` to
+ * run N at once), which is what the user could do with one command per
+ * file; without it, it asks for exactly that.
+ *
+ * plat_run_start starts argv[0] with argv (NULL-terminated), sharing this
+ * process's standard streams, and returns a handle >= 0, or -1 if it
+ * could not. plat_run_wait waits until one started program ends, stores
+ * its handle in *which, and returns its exit status -- 0 for success,
+ * 128 + N if signal N ended it, as a shell reports it -- or -1 when none
+ * is running. plat_ncpus is how many the host can run at once, 1 where
+ * it cannot say. */
+int plat_can_run(void);
+int plat_run_start(const char *const argv[]);
+int plat_run_wait(int *which);
+int plat_ncpus(void);
 
 /* ---- the source provider (§7) ----
  *

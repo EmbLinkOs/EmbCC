@@ -38,7 +38,17 @@ endif
 # host's. `posix` is macOS, Linux and EmbLinkOS; `iso` needs nothing but a
 # hosted C library, for a hobby or non-POSIX OS (docs/internals/porting.md).
 PLATFORM ?= posix
-PLATFORM_SRCS := src/platform/platform_common.c src/platform/platform_$(PLATFORM).c
+# Whether the host can run a program (src/platform/platform.h): `spawn` is
+# POSIX's posix_spawn, macOS and Linux; `none` is EmbLinkOS (no fork/exec)
+# and any host with only a C library, and the default with PLATFORM=iso.
+# Only the driver's several-sources-in-one-command uses it.
+ifeq ($(PLATFORM),iso)
+PROCESS ?= none
+else
+PROCESS ?= spawn
+endif
+PLATFORM_SRCS := src/platform/platform_common.c src/platform/platform_$(PLATFORM).c \
+	src/platform/process_$(PROCESS).c
 
 # The prefix an installed compiler looks under when the host cannot say
 # where the compiler is (no /proc, no _NSGetExecutablePath, argv[0] not a
@@ -161,17 +171,17 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 
 all: embcc embread embld embas embls embidx embar
 
-# Which host layer the last link used. Switching PLATFORM leaves every
-# object up to date, so without this `make PLATFORM=iso` kept the old
-# binary. Compared by NAME, not by time: a stamp touched in the same
-# second as the link looked up to date.
+# Which host layer the last link used (PLATFORM and PROCESS). Switching
+# either leaves every object up to date, so without this `make
+# PLATFORM=iso` kept the old binary. Compared by NAME, not by time: a
+# stamp touched in the same second as the link looked up to date.
 PLATFORM_STAMP := $(BUILD)/platform.stamp
-ifneq ($(shell cat $(PLATFORM_STAMP) 2>/dev/null),$(PLATFORM))
+ifneq ($(shell cat $(PLATFORM_STAMP) 2>/dev/null),$(PLATFORM)-$(PROCESS))
 PLATFORM_CHANGED := platform-changed
 endif
 .PHONY: platform-changed
 platform-changed:
-	@mkdir -p $(BUILD); echo $(PLATFORM) > $(PLATFORM_STAMP)
+	@mkdir -p $(BUILD); echo $(PLATFORM)-$(PROCESS) > $(PLATFORM_STAMP)
 
 embcc: $(OBJS) $(EMBDBG_CORE) $(PLATFORM_CHANGED)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(EMBDBG_CORE)

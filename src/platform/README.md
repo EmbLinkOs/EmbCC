@@ -31,10 +31,25 @@ build (`PLATFORM=NAME`) — not an `#ifdef` inside one of them.
 ## Why it is this small
 
 EmbCC's host needs are: read a file, write a file, ask the environment a
-question. Nothing else. In particular there is **no process API here and
-there must never be one**: EmbLinkOS has no `fork`/`exec` (ARCHITECTURE §1),
-so a driver that spawned `as` or `ld` could not be hosted on the target at
-all. The absence is load-bearing.
+question. Nothing else is NEEDED. EmbLinkOS has no `fork`/`exec`
+(ARCHITECTURE §1), so a driver that spawned `as` or `ld` could not be
+hosted on the target at all: the assembler and the linker are libraries
+in the same process, and stay that way.
+
+Running a program is the one optional capability. A host that can says
+so through `plat_can_run`, and `plat_run_start`/`plat_run_wait` start a
+program and wait for one to end; the driver uses them only to compile
+several sources in one command, which on a host that cannot it refuses
+with the way round it. The build chooses the implementation, as it
+chooses the platform:
+
+| `PROCESS` | file | hosts |
+|---|---|---|
+| `spawn` (default) | `process_spawn.c` | POSIX `posix_spawn`: macOS, Linux |
+| `none` (default with `PLATFORM=iso`) | `process_none.c` | EmbLinkOS (its manifest, `tools/gen-embbuild-manifest.sh`), any host with only a C library |
+
+A host with another way to start a program (Windows' `CreateProcess`,
+EmbLinkOS's own spawn if it gains one) is another `process_NAME.c`.
 
 There is no `mkdir`, no `stat`, no directory iteration either, because no
 stage needs them. `plat_file_exists` is the one query, used to pick between

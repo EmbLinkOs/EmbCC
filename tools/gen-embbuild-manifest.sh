@@ -34,7 +34,8 @@ ABI=/system/abi
 # EmbCC's own translation units — the self-host source set (tests/golden/
 # self-host.sh). Taken from the Makefile's SRCS, not restated: a hand-kept
 # copy went stale the moment the aarch64 backend added sources.
-SRCS=$(make -pn 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
+# PROCESS=none: EmbLinkOS has no fork/exec (src/platform/platform.h).
+SRCS=$(make -pn PROCESS=none 2>/dev/null | sed -n 's/^SRCS := //p' | head -1)
 [ -n "$SRCS" ] || { echo "gen-embbuild-manifest: cannot read SRCS from the Makefile" >&2; exit 1; }
 # ...and the one unit that is not under src/ (see the Makefile), read
 # the same way rather than restated, for the same reason.
