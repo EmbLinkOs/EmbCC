@@ -602,6 +602,18 @@ static void ldst(struct code *c, int rt, int rn, long off, int size,
 int a64_ldst_reg(struct code *c, int store, int rt, int rn, int rm,
                  int scaled, int size, int sign, int w)
 {
+    return a64_ldst_reg_ext(c, store, rt, rn, rm, 0, scaled, size, sign, w);
+}
+
+/* ...with the index a W register extended to 64 bits on the way: `ext`
+ * 's' is SXTW, 'u' UXTW, 0 the plain X register (LSL). The option field
+ * is the only difference -- 011 LSL, 010 UXTW, 110 SXTW -- which is what
+ * lets `a[i]` with an int i be one instruction: `ldr w0, [x1, w2, sxtw
+ * #2]` where the sign extension was an instruction of its own. */
+int a64_ldst_reg_ext(struct code *c, int store, int rt, int rn, int rm,
+                     int ext, int scaled, int size, int sign, int w)
+{
+    unsigned long opt = ext == 's' ? 6UL : ext == 'u' ? 2UL : 3UL;
     if (size != 1 && size != 2 && size != 4 && size != 8)
         return 0;
     /* The size and opc fields are ldst_base's, not a second copy of the
@@ -612,7 +624,7 @@ int a64_ldst_reg(struct code *c, int store, int rt, int rn, int rm,
     unsigned long b = ldst_base(size, !store, sign, w);
     unsigned long sz = (b >> 30) & 3, opc = (b >> 22) & 3;
     a64_word(c, (sz << 30) | 0x38200800UL | (opc << 22) |
-                ((unsigned long)rm << 16) | (3UL << 13) |
+                ((unsigned long)rm << 16) | (opt << 13) |
                 ((unsigned long)(scaled != 0) << 12) |
                 ((unsigned long)rn << 5) | (unsigned long)rt);
     return 1;
