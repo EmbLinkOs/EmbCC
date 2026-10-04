@@ -67,6 +67,8 @@ int  a64_bitmask_ok(long imm, int w);   /* a64_logical_imm would accept it */
 int  a64_shift_imm(struct code *c, int op, int rd, int rn, int shift, int w);
 int  a64_ldst_reg(struct code *c, int store, int rt, int rn, int rm,
                   int scaled, int size, int sign, int w);
+int  a64_ldst_reg_ext(struct code *c, int store, int rt, int rn, int rm,
+                      int ext, int scaled, int size, int sign, int w);
 int  a64_fmov_imm(struct code *c, int vd, unsigned long bits, int w);
 int  a64_stp(struct code *c, int rt, int rt2, int rn, long off);
 int  a64_ldp(struct code *c, int rt, int rt2, int rn, long off);

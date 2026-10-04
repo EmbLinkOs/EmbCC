@@ -2683,6 +2683,61 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         }
 
         case IR_EXT: {
+            /* An int index, extended to 64 bits, scaled or not, added to
+             * a base that the next access uses as its address -- `a[i]`
+             * with an int i, which is most array indexing in C -- is that
+             * access's register-offset operand with the extension in it:
+             * `ldr w0, [x1, w2, sxtw #2]` where `sxtw; ldr [x1, x2, lsl
+             * #2]` was two, and `strb w3, [x0, w2, sxtw]` where `add x4,
+             * x0, w2, sxtw; strb w3, [x4]` was two. The scale must be the
+             * access size's log2 or nothing: that is the S bit. */
+            if (i->size == 4 && i->w == 8 && i->dst >= 0 &&
+                i->dst < fn->nvregs && usecnt[i->dst] == 1 &&
+                n + 2 < fn->nins && !a64_is_flt(i->dst) &&
+                !getenv("EMBCC_NO_EXTIDX")) {
+                struct ir_ins *nx = &fn->ins[n + 1];
+                int at = n + 1, k = 0, idx = i->dst;
+                if (nx->op == IR_SHL && nx->imm_b && nx->a == i->dst &&
+                    nx->w == 8 && nx->imm >= 1 && nx->imm <= 3 &&
+                    nx->dst >= 0 && usecnt[nx->dst] == 1 &&
+                    n + 3 < fn->nins) {
+                    k = (int)nx->imm;
+                    idx = nx->dst;
+                    at = n + 2;
+                }
+                struct ir_ins *ad = &fn->ins[at];
+                if (ad->op == IR_ADD && !ad->flt && !ad->imm_b && ad->w == 8 &&
+                    ad->dst >= 0 && usecnt[ad->dst] == 1 && ad->a != ad->b &&
+                    (ad->a == idx || ad->b == idx) && !a64_ld_ins(ad) &&
+                    !a64_i128_ins(ad)) {
+                    struct ir_ins *ax = &fn->ins[at + 1];
+                    int base = ad->a == idx ? ad->b : ad->a;
+                    int isld = ax->op == IR_LOAD && ax->a == ad->dst &&
+                               ax->memoff == 0 && !a64_is_flt(ax->dst);
+                    int isst = ax->op == IR_STORE && ax->a == ad->dst &&
+                               ax->memoff == 0 && !a64_is_flt(ax->b);
+                    if ((isld || isst) && !a64_ld_ins(ax) &&
+                        !a64_i128_ins(ax) && !a64_is_flt(base) &&
+                        (k == 0 || (1 << k) == ax->size) &&
+                        !(g_a64_wide && ax->dst >= 0 &&
+                          ax->dst < fn->nvregs && g_a64_wide[ax->dst])) {
+                        int rm = rd(t, sd, i->a, A64_TMP);
+                        int rn = rd(t, sd, base, A64_ADDR);
+                        int ok, e = i->sign ? 's' : 'u';
+                        if (isld) {
+                            int d = wr(ax->dst, A64_ACC);
+                            ok = a64_ldst_reg_ext(t, 0, d, rn, rm, e, k != 0,
+                                                  ax->size, ax->sign, ax->w);
+                            if (ok) wrote(t, sd, ax->dst, d);
+                        } else {
+                            int v = rd(t, sd, ax->b, A64_ACC);
+                            ok = a64_ldst_reg_ext(t, 1, v, rn, rm, e, k != 0,
+                                                  ax->size, 0, ax->w);
+                        }
+                        if (ok) { n = at + 1; break; }
+                    }
+                }
+            }
             /* An extension whose only reader is the next add or subtract
              * is that instruction's EXTENDED operand: `add x6, x6, w13,
              * sxtw` where `sxtw x13, w13; add x6, x6, x13` was two. It is
