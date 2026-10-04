@@ -1128,11 +1128,14 @@ option of the same name:
 | `-L DIR` | a directory for `-l` and for the script's `INPUT`/`GROUP`/`INCLUDE` |
 | `-u SYM`, `--undefined=SYM` | treat `SYM` as referenced, so that an archive supplies it |
 | `--orphan-handling=place\|warn\|error` | what to do with a section the script places nowhere |
+| `--gc-sections`, `--no-gc-sections` | drop the sections nothing kept refers to (see [`-ffunction-sections`](#-ffunction-sections--fdata-sections)) |
+| `--print-gc-sections` | name each section dropped, on standard error |
+| `-Map FILE`, `-Map=FILE`, `--Map=FILE` | write a map of where every input went, in GNU ld's format |
+| `--print-memory-usage` | print how full each `MEMORY` region of the script is, as ld does |
 | `-Tstack ADDR`, `-Tstack=ADDR` | passed on, and refused by `embld` for x86-64: `embld: -Tstack is a RISC-V option: ...` |
 
 These are accepted and change nothing, because nothing in an image
-`embld` makes depends on them: `--gc-sections`, `--no-gc-sections`,
-`--as-needed`, `--no-as-needed`, `-O0`, `-O1`, `-O2`, `--build-id`,
+`embld` makes depends on them: `--as-needed`, `--no-as-needed`, `-O0`, `-O1`, `-O2`, `--build-id`,
 `--build-id=STYLE`, `--no-undefined`, `-s`, `--strip-all`, `-S`,
 `--strip-debug`, and `-z` followed by `noexecstack`, `relro`, `norelro`,
 `now` or `lazy` as a separate word (`-Wl,-z,now`). The image keeps its
@@ -1141,11 +1144,11 @@ symbol table under `-s` and `--strip-all`.
 Any other linker option is refused, and nothing is linked:
 
 ```text
-embcc: error: linker option '-T' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for
+embcc: error: linker option '--section-start=.text=0' is not one EmbLD has (it takes -T, -L, -u, -e, -Ttext, -Tdata, -Tstack, --rom-limit, --lma-offset, --orphan-handling, --gc-sections, --print-gc-sections, -Map and --print-memory-usage); dropping it could build a different image from the one asked for
 ```
 
-This covers linker scripts (`-T`), `--section-start`, `-Map`, `-zKEYWORD`
-written as one word, and `-z` with any other keyword.
+This covers `--section-start`, `-zKEYWORD` written as one word, and `-z`
+with any other keyword.
 
 ### Linker options
 
@@ -1207,11 +1210,24 @@ g++ (see [C++](cxx.md#compiler-identity)).
 
 ### `-ffunction-sections`, `-fdata-sections`
 
-Accepted and not implemented: functions and data are not placed in
-sections of their own, so a linker's section garbage collection has
-nothing to remove. The objects are correct either way. A function or
-variable can be placed in a named section with
-`__attribute__((section("NAME")))`.
+Put each function in a section of its own, `.text.NAME`, and each object
+in `.data.NAME`, `.rodata.NAME` or `.bss.NAME`, as GCC names them, so that
+the linker's `--gc-sections` can drop whatever the program never reaches:
+
+```sh
+embcc --target=thumbv7em-none-eabi -O2 -ffunction-sections -fdata-sections -c main.c
+embcc --target=thumbv7em-none-eabi -T board.ld -Wl,--gc-sections startup.o main.o -o fw.elf
+```
+
+A function or object that names its own section keeps it, and so does a
+thread-local object (`.tdata`/`.tbss`). String literals stay in the
+unit's `.rodata`. A call from one function to another in the same unit
+becomes a relocation, as it is between units; on RISC-V that is the
+eight-byte `call` instead of a four-byte `jal`, because `embld` does not
+relax. `-g` works with either option: the unit's code is described by
+`DW_AT_ranges`. ELF output only; for Mach-O and COFF the options change
+nothing. `-fno-function-sections` and `-fno-data-sections` turn them off.
+What the linker keeps is in [`embld`](tools/embld.md#garbage-collection).
 
 ## Machine-dependent options
 

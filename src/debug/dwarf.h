@@ -26,13 +26,13 @@
  * is a macro, not an enum terminator: EmbCC's own subset (which must compile
  * this file for self-hosting) folds only integer literals, not enum
  * constants, in an array bound. */
-#define DWARF_NSEC 3
-enum { DWSEC_ABBREV, DWSEC_INFO, DWSEC_LINE };
+#define DWARF_NSEC 4
+enum { DWSEC_ABBREV, DWSEC_INFO, DWSEC_LINE, DWSEC_RANGES };
 
 /* What a relocation binds against — the driver resolves each to the matching
  * section symbol (STT_SECTION). DWTGT_TEXT is the code the addresses point
  * into; the rest are self-references between debug sections. */
-enum { DWTGT_TEXT, DWTGT_ABBREV, DWTGT_LINE };
+enum { DWTGT_TEXT, DWTGT_ABBREV, DWTGT_LINE, DWTGT_RANGES };
 
 struct dwarf_reloc {
     int in_sec;      /* DWSEC_* the field lives in */
@@ -40,6 +40,11 @@ struct dwarf_reloc {
     int width;       /* 4 or 8 — selects R_X86_64_32 vs R_X86_64_64 */
     int target;      /* DWTGT_* — which section symbol to bind against */
     long addend;
+    /* DWTGT_TEXT: the address is an END, one past a function's last
+     * byte. In a unit whose functions are in sections of their own that
+     * is where the NEXT section's code begins in the code buffer, so the
+     * driver resolves it as the byte before, plus one. */
+    int end;
 };
 
 struct dwarf_out {
@@ -56,6 +61,13 @@ struct dwarf_out {
  * reproducibility rule debug output must not break. */
 void dwarf_emit(struct ir_unit *iu, const char *filename,
                 struct dwarf_out *out);
+/* The same, for code the object splits over several sections
+ * (-ffunction-sections, a section attribute): the unit's extent is then
+ * not one low_pc..high_pc span but a DW_AT_ranges list, one range per
+ * function, in .debug_ranges (DWSEC_RANGES). dwarf_emit leaves that
+ * section empty. */
+void dwarf_emit_split(struct ir_unit *iu, const char *filename,
+                      struct dwarf_out *out);
 void dwarf_free(struct dwarf_out *out);
 
 #endif

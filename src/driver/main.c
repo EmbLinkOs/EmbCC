@@ -282,6 +282,22 @@ static int want_debug;
  * page to catch an overflow and nothing to grow into. */
 static int want_stack_usage;
 
+/* -ffunction-sections / -fdata-sections: each function in .text.NAME,
+ * each object in .data.NAME, .rodata.NAME or .bss.NAME, as GCC names
+ * them, so a linker's --gc-sections can drop what nothing reaches. ELF
+ * output only; the others have no sections to split into. */
+static int func_sections, data_sections;
+
+/* PFX followed by NAME, allocated */
+static char *sec_named(const char *pfx, const char *name)
+{
+    size_t a = strlen(pfx), b = strlen(name);
+    char *r = xmalloc(a + b + 1);
+    memcpy(r, pfx, a);
+    memcpy(r + a, name, b + 1);
+    return r;
+}
+
 /* -nostdinc: do not add EmbCC's own header directories. A freestanding
  * build that supplies its own headers needs to be able to say so. */
 static int no_stdinc;
@@ -423,10 +439,10 @@ static void write_deps(const char *in, const char *obj)
  * outer slices. text_at() is the one translation from a code-buffer
  * offset -- which every site, symbol and table records -- to the section
  * it lands in and the offset there. */
-#define MAX_TGROUPS 16
-static struct tgroup { const char *name; long start, end; int ndx, sym; }
-    g_tg[MAX_TGROUPS];
-static int g_ntg;
+static struct tgroup { const char *name; long start, end; int ndx, sym,
+                       align; }
+    *g_tg;
+static int g_ntg, g_captg;
 static long g_plain_end, g_groups_end;
 
 /* The group (1-based) holding code-buffer offset off, or 0 for .text;
@@ -588,16 +604,24 @@ static int apply_wl(struct link_opts *lo)
                 return 1;
             }
         } else if (!strcmp(a, "--gc-sections") ||
-                   !strcmp(a, "--no-gc-sections") ||
-                   !strcmp(a, "--as-needed") || !strcmp(a, "--no-as-needed") ||
+                   !strcmp(a, "--no-gc-sections")) {
+            lo->gc_sections = a[2] == 'g';
+        } else if (!strcmp(a, "--print-gc-sections")) {
+            lo->print_gc_sections = 1;
+        } else if (!strcmp(a, "--print-memory-usage")) {
+            lo->print_memory_usage = 1;
+        } else if ((v = wl_value("-Map", 0, &k)) ||
+                   (v = wl_value("--Map", 0, &k))) {
+            lo->map_file = v;
+        } else if (!strcmp(a, "--as-needed") || !strcmp(a, "--no-as-needed") ||
                    !strcmp(a, "-O0") || !strcmp(a, "-O1") || !strcmp(a, "-O2") ||
                    !strcmp(a, "--build-id") ||
                    !strncmp(a, "--build-id=", 11) ||
                    !strcmp(a, "--no-undefined") ||
                    !strcmp(a, "-s") || !strcmp(a, "--strip-all") ||
                    !strcmp(a, "-S") || !strcmp(a, "--strip-debug")) {
-            /* nothing the image depends on: EmbLD keeps every section,
-             * has no shared objects to need or not, refuses an
+            /* nothing the image depends on: EmbLD has no shared
+             * objects to need or not, refuses an
              * undefined symbol anyway, and the symbols it keeps change
              * no byte that runs */
         } else if (!strcmp(a, "-z") && k + 1 < g_nwl &&
@@ -611,8 +635,10 @@ static int apply_wl(struct link_opts *lo)
         } else {
             fprintf(stderr, "embcc: error: linker option '%s' is not one "
                             "EmbLD has (it takes -T, -L, -u, -e, -Ttext, "
-                            "-Tdata, -Tstack, --rom-limit, --lma-offset and "
-                            "--orphan-handling); dropping it could build a "
+                            "-Tdata, -Tstack, --rom-limit, --lma-offset, "
+                            "--orphan-handling, --gc-sections, "
+                            "--print-gc-sections, -Map and "
+                            "--print-memory-usage); dropping it could build a "
                             "different image from the one asked for\n",
                     a);
             return 1;
@@ -1209,6 +1235,17 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
 
+    /* -ffunction-sections: a section of its own for each function that
+     * did not ask for one. Named here, after the optimizer, which has
+     * no business with sections, and before the backend, for which a
+     * callee in another section is a relocation (cg_call_local). */
+    if (func_sections && target_fmt_get() == TGT_FMT_ELF)
+        for (int i = 0; i < iu->nfuncs; i++) {
+            struct func *f = iu->funcs[i].src;
+            if (f && !f->section)
+                f->section = sec_named(".text.", f->name);
+        }
+
     /* Functions placed in a section of their own go last, grouped by
      * section in first-seen order (see g_tg); the rest keep their order. */
     g_ntg = 0;
@@ -1274,29 +1311,35 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (!f || !f->section || f->code_len <= 0)
             continue;
         if (!g_ntg || strcmp(g_tg[g_ntg - 1].name, f->section)) {
-            if (g_ntg == MAX_TGROUPS)
-                diag_fatal(f->file, f->line, "more than %d function sections",
-                           MAX_TGROUPS);
-            for (int k = 0; k < g_ntg; k++)
-                if (!strcmp(g_tg[k].name, f->section))
-                    internal_error("function section '%s' not contiguous",
-                                   f->section);
+            if (g_ntg == g_captg) {
+                g_captg = g_captg ? 2 * g_captg : 16;
+                g_tg = xrealloc(g_tg, (size_t)g_captg * sizeof *g_tg);
+            }
+            /* (the sort above made each section's functions adjacent;
+             * with -ffunction-sections every name is distinct, so this
+             * is checked only where it can fail) */
+            if (!func_sections)
+                for (int k = 0; k < g_ntg; k++)
+                    if (!strcmp(g_tg[k].name, f->section))
+                        internal_error("function section '%s' not "
+                                       "contiguous", f->section);
             g_tg[g_ntg].name = f->section;
             g_tg[g_ntg].start = f->code_off;
+            g_tg[g_ntg].align = 1;
             if (!g_ntg)
                 g_plain_end = f->code_off;
             g_ntg++;
         }
         g_tg[g_ntg - 1].end = f->code_off + f->code_len;
+        /* the strictest start in the group; one codegen did not say is
+         * given the sixteen every section had */
+        if ((f->code_align ? f->code_align : 16) > g_tg[g_ntg - 1].align)
+            g_tg[g_ntg - 1].align = f->code_align ? f->code_align : 16;
         g_groups_end = f->code_off + f->code_len;
     }
     if (g_ntg && target_fmt_get() != TGT_FMT_ELF)
         diag_fatal(in, 0, "a function's section attribute is not supported "
                    "for %s output", target_fmt_name(target_fmt_get()));
-    if (g_ntg && want_debug)
-        diag_fatal(in, 0, "-g with a function in a section of its own ('%s') "
-                   "is not supported yet: the compile unit's address range "
-                   "would span two sections", g_tg[0].name);
     for (int k = 0; k < g_ntg; k++)
         for (struct global *g = u->globals; g; g = g->next)
             if (!g->absorbed && g->section && !strcmp(g->section, g_tg[k].name))
@@ -1350,8 +1393,24 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * section of its own (a command table, a driver list) read as zeros
      * until it was read-only and went to flash after .rodata. */
     struct named { const char *name; int len, align, nobits, flags, ndx;
-                   char *buf; } named[64];
-    int nnamed = 0;
+                   char *buf; } *named = NULL;
+    int nnamed = 0, capnamed = 0;
+    /* -fdata-sections: the section each object would have gone to, as
+     * one of its own. Decided as the layout below decides it: read-only
+     * where it would be in .rodata, initialized data, or zeros. A
+     * thread-local keeps .tdata/.tbss, which is what makes it one. */
+    if (data_sections && target_fmt_get() == TGT_FMT_ELF)
+        for (struct global *g = u->globals; g; g = g->next) {
+            if (g->absorbed || !g->defined || g->section || g->is_tls)
+                continue;
+            const struct type *ot = g->ty;
+            while (ot && ot->kind == TY_ARRAY)
+                ot = ot->pointee;
+            int ro = g->is_const && ot && !ot->is_volatile;
+            g->section = sec_named(ro ? ".rodata." : g->has_init ? ".data."
+                                                                 : ".bss.",
+                                   g->name);
+        }
     int data_len = 0, bss_len = 0;
     /* The alignment each output section must claim: the strictest of
      * anything placed in it. Emitting a fixed number here was silent
@@ -1409,8 +1468,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             while (k < nnamed && strcmp(named[k].name, g->section) != 0)
                 k++;
             if (k == nnamed) {
-                if (nnamed == 64)
-                    diag_fatal(in, 0, "more than 64 named sections");
+                if (nnamed == capnamed) {
+                    capnamed = capnamed ? 2 * capnamed : 16;
+                    named = xrealloc(named, (size_t)capnamed * sizeof *named);
+                }
                 const char *n = g->section;
                 named[k].name = n;
                 named[k].len = 0;
@@ -1548,8 +1609,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: build the DWARF line sections now (needs each func's code_off/len,
      * set by codegen). Off, dw stays empty and nothing below fires. */
     struct dwarf_out dw = { { 0 }, { 0 }, 0, 0, 0 };
-    if (want_debug)
-        dwarf_emit(iu, in, &dw);
+    if (want_debug) {
+        int split = 0;
+        for (int i = 0; i < iu->nfuncs && !split; i++)
+            split = iu->funcs[i].src && iu->funcs[i].src->section &&
+                    iu->funcs[i].src->code_len > 0;
+        if (split)
+            dwarf_emit_split(iu, in, &dw);
+        else
+            dwarf_emit(iu, in, &dw);
+    }
     struct eh_out eh;
     memset(&eh, 0, sizeof eh);
     /* Unwind tables: asked for, or C++, or a HOSTED target.
@@ -2243,7 +2312,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         g_tg[k].ndx = elfw_add_section(
             w, g_tg[k].name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR,
             (unsigned char *)text.p + g_tg[k].start,
-            (Elf64_Xword)(g_tg[k].end - g_tg[k].start), 16);
+            (Elf64_Xword)(g_tg[k].end - g_tg[k].start),
+            (Elf64_Xword)g_tg[k].align);
     int rodata_ndx = 0;
     if (rodata)
         /* 16, not 1: .rodata holds string literals (which need 1) and
@@ -2325,13 +2395,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * from a shipped image without touching the code). Their indices feed
      * the relocation-target lookup below. */
     static const char *const dwsec_name[DWARF_NSEC] =
-        { ".debug_abbrev", ".debug_info", ".debug_line" };
-    int dwsec_ndx[DWARF_NSEC] = { 0, 0, 0 };
+        { ".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges" };
+    int dwsec_ndx[DWARF_NSEC] = { 0, 0, 0, 0 };
     if (want_debug)
         for (int s = 0; s < DWARF_NSEC; s++)
-            dwsec_ndx[s] = elfw_add_section(w, dwsec_name[s], SHT_PROGBITS, 0,
-                                            dw.sec[s], (Elf64_Xword)dw.seclen[s],
-                                            1);
+            if (dw.seclen[s])     /* .debug_ranges only when split */
+                dwsec_ndx[s] = elfw_add_section(
+                    w, dwsec_name[s], SHT_PROGBITS, 0, dw.sec[s],
+                    (Elf64_Xword)dw.seclen[s], 1);
     /* the unwind tables (x86-64 gives .eh_frame its own section type) and
      * the exception tables */
     int eh_ndx = 0, lsda_ndx = 0;
@@ -2425,12 +2496,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: STT_SECTION symbols for the debug sections, so the line/info
      * fields can relocate against them (DWTGT_ABBREV/DWTGT_LINE). Added here
      * in the local block — the writer refuses a local after any global. */
-    int dwsym[DWARF_NSEC] = { 0, 0, 0 };
+    int dwsym[DWARF_NSEC] = { 0, 0, 0, 0 };
     if (want_debug)
         for (int s = 0; s < DWARF_NSEC; s++)
-            dwsym[s] = elfw_add_symbol(w, "", 0, 0,
-                          ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
-                          (Elf64_Half)dwsec_ndx[s]);
+            if (dwsec_ndx[s])
+                dwsym[s] = elfw_add_symbol(w, "", 0, 0,
+                              ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+                              (Elf64_Half)dwsec_ndx[s]);
     /* Locals before globals — the writer enforces the gABI ordering.
      * Only canonical, defined functions own code. */
     for (struct func *f = u->funcs; f; f = f->next)
@@ -2774,13 +2846,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     if (want_debug) {
         for (int i = 0; i < dw.nrelocs; i++) {
             struct dwarf_reloc *r = &dw.relocs[i];
-            int sym = r->target == DWTGT_TEXT   ? text_sym
-                    : r->target == DWTGT_ABBREV ? dwsym[DWSEC_ABBREV]
+            int sym = r->target == DWTGT_ABBREV ? dwsym[DWSEC_ABBREV]
+                    : r->target == DWTGT_RANGES ? dwsym[DWSEC_RANGES]
                     :                             dwsym[DWSEC_LINE];
+            long add = r->addend;
+            /* A code address is in whichever section its function is
+             * (code_ref); an END is the byte after the function, which
+             * the code buffer may give to the next section. */
+            if (r->target == DWTGT_TEXT)
+                add = r->end ? code_ref(r->addend - 1, text_sym, &sym) + 1
+                             : code_ref(r->addend, text_sym, &sym);
             elfw_add_rela(w, dwsec_ndx[r->in_sec], (Elf64_Addr)r->off, sym,
                           target_reloc_type(ta, r->width == 8 ? RK_ABS64
                                                               : RK_ABS32),
-                          r->addend);
+                          add);
         }
         dwarf_free(&dw);
     }
@@ -3581,13 +3660,14 @@ int main(int argc, char **argv)
                 return 1;
             }
             cpp_set_gnuc_version(v[0], v[1], v[2]);
-        } else if (strcmp(argv[i], "-ffunction-sections") == 0 ||
-                   strcmp(argv[i], "-fdata-sections") == 0) {
-            /* Accepted and not yet done. It costs nothing to be wrong
-             * about -- the objects are correct, --gc-sections simply
-             * has nothing to collect -- and refusing would stop builds
-             * that pass it out of habit. Said in --help rather than
-             * silently. */
+        } else if (strcmp(argv[i], "-ffunction-sections") == 0) {
+            func_sections = 1;
+        } else if (strcmp(argv[i], "-fno-function-sections") == 0) {
+            func_sections = 0;
+        } else if (strcmp(argv[i], "-fdata-sections") == 0) {
+            data_sections = 1;
+        } else if (strcmp(argv[i], "-fno-data-sections") == 0) {
+            data_sections = 0;
         } else if (strcmp(argv[i], "-fgnu89-inline") == 0 ||
                    strcmp(argv[i], "-fno-gnu89-inline") == 0) {
             gnu89_inline = argv[i][2] != 'n';

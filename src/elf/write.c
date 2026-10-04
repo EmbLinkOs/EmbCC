@@ -44,8 +44,11 @@ struct section {
     struct buf data;
 };
 
-#define ELFW_MAX_SECTIONS 32
-#define ELFW_MAX_RELA 6      /* .text, .data, and -g's .debug_info/.debug_line */
+/* Sections and relocation groups grow as needed: -ffunction-sections
+ * makes a section and a relocation group per function, where a fixed 32
+ * and 6 held one .text and one .data. The limit that remains is ELF's
+ * own: a section index at or above SHN_LORESERVE needs the extended
+ * numbering (SHN_XINDEX), which this writer does not produce. */
 
 /* Relocations are grouped by the section they apply to; each group emits
  * its own .rela.<name> section. One group (.text) is the common case; a
@@ -58,16 +61,17 @@ struct rela_group {
 };
 
 struct elfw {
-    struct section sec[ELFW_MAX_SECTIONS];
-    int nsec;
+    struct section *sec;
+    int nsec, capsec;
+    int *grp_of;         /* per section: its relocation group + 1, or 0 */
     struct buf symtab;   /* array of Elf64_Sym */
     int nsym;
     int nlocal;          /* symbols [0, nlocal) are STB_LOCAL */
     int globals_started; /* set once a non-local is added */
     struct buf strtab;   /* symbol names */
     struct buf shstrtab; /* section names */
-    struct rela_group relagrp[ELFW_MAX_RELA];
-    int nrelagrp;
+    struct rela_group *relagrp;
+    int nrelagrp, caprelagrp;
     int machine;         /* e_machine, fixed at elfw_new */
     /* ELFCLASS32 rather than 64. Decided here once and never passed in.
      * It used to be read off the MACHINE alone -- ARMv7-M is 32-bit and
@@ -96,6 +100,9 @@ struct elfw *elfw_new(int machine)
     /* RISC-V's and AVR's come from the target (elfw_set_flags): whether
      * the C extension is on, and which AVR architecture. */
     /* Index 0 is reserved in every table it manages. */
+    w->capsec = 16;
+    w->sec = xcalloc((size_t)w->capsec, sizeof *w->sec);
+    w->grp_of = xcalloc((size_t)w->capsec, sizeof *w->grp_of);
     w->nsec = 1; /* SHT_NULL section */
     strtab_add(&w->strtab, "");
     strtab_add(&w->shstrtab, "");
@@ -123,19 +130,37 @@ void elfw_free(struct elfw *w)
     free(w->shstrtab.p);
     for (int i = 0; i < w->nrelagrp; i++)
         free(w->relagrp[i].rela.p);
+    free(w->relagrp);
+    free(w->sec);
+    free(w->grp_of);
     free(w);
+}
+
+/* A new section slot, zeroed; its index is w->nsec before the call. */
+static struct section *sec_slot(struct elfw *w)
+{
+    if (w->nsec >= SHN_LORESERVE) {
+        fprintf(stderr, "embcc: elf writer: more than %d sections, which "
+                "needs ELF's extended section numbering\n", SHN_LORESERVE);
+        fatal_unwind();
+    }
+    if (w->nsec == w->capsec) {
+        w->capsec *= 2;
+        w->sec = xrealloc(w->sec, (size_t)w->capsec * sizeof *w->sec);
+        w->grp_of = xrealloc(w->grp_of, (size_t)w->capsec * sizeof *w->grp_of);
+        memset(w->grp_of + w->nsec, 0,
+               (size_t)(w->capsec - w->nsec) * sizeof *w->grp_of);
+    }
+    struct section *s = &w->sec[w->nsec];
+    memset(s, 0, sizeof *s);
+    return s;
 }
 
 int elfw_add_section(struct elfw *w, const char *name, Elf64_Word type,
                      Elf64_Xword flags, const void *data, Elf64_Xword size,
                      Elf64_Xword addralign)
 {
-    if (w->nsec >= ELFW_MAX_SECTIONS) {
-        fprintf(stderr, "embcc: elf writer: section limit (%d) reached\n",
-                ELFW_MAX_SECTIONS);
-        fatal_unwind();
-    }
-    struct section *s = &w->sec[w->nsec];
+    struct section *s = sec_slot(w);
     memset(s, 0, sizeof *s);
     s->hdr.sh_name = strtab_add(&w->shstrtab, name);
     s->hdr.sh_type = type;
@@ -200,20 +225,23 @@ void elfw_add_rela(struct elfw *w, int target_ndx, Elf64_Addr offset,
      * use. Grouping keeps each .rela.<name> pointing at exactly one
      * section, as the gABI requires. */
     struct rela_group *gp = NULL;
-    for (int i = 0; i < w->nrelagrp; i++)
-        if (w->relagrp[i].target == target_ndx) {
-            gp = &w->relagrp[i];
-            break;
-        }
-    if (!gp) {
-        if (w->nrelagrp >= ELFW_MAX_RELA) {
-            fprintf(stderr, "embcc: elf writer: too many relocation "
-                            "target sections (max %d)\n", ELFW_MAX_RELA);
-            fatal_unwind();
+    if (target_ndx <= 0 || target_ndx >= w->nsec) {
+        fprintf(stderr, "embcc: elf writer: a relocation for section %d, "
+                "which does not exist\n", target_ndx);
+        fatal_unwind();
+    }
+    if (w->grp_of[target_ndx]) {
+        gp = &w->relagrp[w->grp_of[target_ndx] - 1];
+    } else {
+        if (w->nrelagrp == w->caprelagrp) {
+            w->caprelagrp = w->caprelagrp ? 2 * w->caprelagrp : 8;
+            w->relagrp = xrealloc(w->relagrp, (size_t)w->caprelagrp *
+                                              sizeof *w->relagrp);
         }
         gp = &w->relagrp[w->nrelagrp++];
         memset(gp, 0, sizeof *gp);
         gp->target = target_ndx;
+        w->grp_of[target_ndx] = w->nrelagrp;
     }
     Elf64_Rela r;
     r.r_offset = offset;
@@ -233,10 +261,14 @@ int elfw_write(struct elfw *w, const char *path)
         struct rela_group *gp = &w->relagrp[i];
         const char *tname = (const char *)w->shstrtab.p +
                             w->sec[gp->target].hdr.sh_name;
-        char rname[64];
-        snprintf(rname, sizeof rname, ".rela%s", tname);
+        /* copied before the add, which may move the string table */
+        size_t tl = strlen(tname);
+        char *rname = xmalloc(tl + 6);
+        memcpy(rname, ".rela", 5);
+        memcpy(rname + 5, tname, tl + 1);
         gp->sec_ndx = elfw_add_section(w, rname, SHT_RELA, SHF_INFO_LINK,
                                        gp->rela.p, gp->rela.len, 8);
+        free(rname);
     }
     int symtab_ndx = elfw_add_section(w, ".symtab", SHT_SYMTAB, 0,
                                       w->symtab.p, w->symtab.len, 8);
@@ -246,8 +278,8 @@ int elfw_write(struct elfw *w, const char *path)
      * strtab_add has run for it. */
     int shstr_ndx = w->nsec;
     Elf64_Word shstr_name = strtab_add(&w->shstrtab, ".shstrtab");
-    struct section *shstr = &w->sec[w->nsec++];
-    memset(shstr, 0, sizeof *shstr);
+    struct section *shstr = sec_slot(w);
+    w->nsec++;
     shstr->hdr.sh_name = shstr_name;
     shstr->hdr.sh_type = SHT_STRTAB;
     shstr->hdr.sh_size = w->shstrtab.len;

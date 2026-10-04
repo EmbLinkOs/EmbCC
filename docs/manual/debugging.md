@@ -172,12 +172,13 @@ embcc: d.c: error: -g is not supported for a Darwin target yet: its DWARF goes i
 embcc: d.c: error: -g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing
 ```
 
-`-g` is also refused for a unit that places a function in a section of
-its own with `__attribute__((section("NAME")))`:
-
-```text
-embcc: sec.c: error: -g with a function in a section of its own ('.fast') is not supported yet: the compile unit's address range would span two sections
-```
+A unit whose code is in more than one section, by
+`-ffunction-sections` or `__attribute__((section("NAME")))`, gives its
+compile unit a `DW_AT_ranges` list (in `.debug_ranges`) instead of one
+`DW_AT_low_pc`..`DW_AT_high_pc` span, and each function's addresses are
+relocated in its own section, so the debug information stays right
+wherever the linker puts each one -- and when `--gc-sections` drops one,
+its addresses resolve to 0, as with GNU ld.
 
 With `-S`, the assembly output contains no debug information, with or
 without `-g`.

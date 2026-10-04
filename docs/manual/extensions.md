@@ -524,14 +524,11 @@ For a variable:
 - A thread-local object cannot have a section: `'z' is __thread and
   also names a section: a thread-local object has to be in .tdata or
   .tbss, which is what makes it per-thread`.
-- One translation unit can use at most 64 named data sections.
 
 For a function, the code is placed in the named section, and the
-functions that share a section are emitted together. A function section
-cannot be used with `-g` (`-g with a function in a section of its own
-('.ramfunc') is not supported yet: the compile unit's address range
-would span two sections`), and a function and a variable cannot share a
-section name (`section '.shared' holds a function, and 'd' cannot share
+functions that share a section are emitted together. With `-g`, a unit
+whose code is in more than one section describes it with
+`DW_AT_ranges`. A function and a variable cannot share a section name (`section '.shared' holds a function, and 'd' cannot share
 it: one is code, the other data`).
 
 `section` on a block-scope variable is refused:

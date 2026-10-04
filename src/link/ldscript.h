@@ -110,6 +110,7 @@ struct ls_osec {
 
 struct ls_region {
     const char *name;
+    const char *attrs;          /* "rx", "xrw", "!w": for the map file */
     struct lx *org, *len;
     long long origin, length, cur, delta;
     int has_delta;
@@ -979,9 +980,12 @@ static void lp_memory(struct lp *p)
         if (!name)
             lp_die(p, "a memory region name was expected, found '%.12s'",
                    p->p);
+        const char *attrs = "";
         if (lp_accept(p, '(')) {        /* (rx), (xrw), (!w): attributes */
+            const char *a0 = p->p;
             while (*p->p && *p->p != ')')
                 p->p++;
+            attrs = xstrndup(a0, (size_t)(p->p - a0));
             lp_expect(p, ')');
         }
         lp_expect(p, ':');
@@ -989,6 +993,7 @@ static void lp_memory(struct lp *p)
         struct ls_region *r = &sc->reg[sc->nreg++];
         memset(r, 0, sizeof *r);
         r->name = name;
+        r->attrs = attrs;
         for (int k = 0; k < 2; k++) {
             const char *kw = lp_ident(p);
             if (!kw)
