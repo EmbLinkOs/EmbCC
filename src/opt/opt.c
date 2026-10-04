@@ -3359,6 +3359,13 @@ static int pass_cfgclean(struct ir_func *fn)
             xmalloc((size_t)fn->nvregs * sizeof(long)),
             xmalloc((size_t)fn->nvregs * sizeof(int)), 1, fn->nvregs
         };
+        /* Only for a name with more than one definition. One defined
+         * once by a constant is SCCP's to decide, and SCCP says so in a
+         * remark (`if (DEBUG)` with `const int DEBUG = 0`: the branch
+         * always goes one way, which is as often a bug as an
+         * optimization). Deciding it here first took that remark away. */
+        struct defs dd;
+        compute_defs(fn, &dd);
         for (int n = 0; n < fn->nins; n++) {
             if (n > 0)
                 lk_note(&lk, &fn->ins[n - 1]);
@@ -3366,6 +3373,9 @@ static int pass_cfgclean(struct ir_func *fn)
             long v;
             if ((i->op != IR_BRZ && i->op != IR_BRNZ) ||
                 !lk_get(&lk, i->a, i->w, &v))
+                continue;
+            if (i->a >= 0 && i->a < fn->nvregs && dd.cnt[i->a] == 1 &&
+                dd.ins[i->a] >= 0 && fn->ins[dd.ins[i->a]].op == IR_CONST)
                 continue;
             if ((i->op == IR_BRZ) == (norm(v, i->w) == 0)) {
                 i->op = IR_JMP; i->a = -1;      /* it is always taken */
@@ -3375,6 +3385,7 @@ static int pass_cfgclean(struct ir_func *fn)
             changed = 1;
         }
         free(lk.gen_of); free(lk.val); free(lk.w);
+        free_defs(&dd);
     }
     {
         int last_cond = -1;
