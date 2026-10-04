@@ -285,7 +285,7 @@ implement, so they are errors:
 
 | Attribute | Diagnostic |
 |---|---|
-| `naked` | `__attribute__((naked)) is not supported: the prologue the function says it must not have would be emitted anyway, and its own asm would run on a frame it did not set up` |
+| `naked` (x86-64 and AArch64; supported on Cortex-M, RISC-V and AVR) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V and AVR targets` |
 | `interrupt` (except on Cortex-M and AVR) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR it is implemented)` |
 | `signal` (except on AVR) | `__attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does` |
 | `cleanup` | `__attribute__((cleanup)) is not supported: the cleanup function would never run` |

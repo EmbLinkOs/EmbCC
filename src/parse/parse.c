@@ -58,6 +58,10 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * target, defined in the same file (CMSIS's weak IRQ
                 * handlers). Last, for the reason isr gives. */
                const char *alias;
+               /* naked: no prologue and no epilogue, the body asm alone
+                * (src/driver: it is assembled as a block). Last, for the
+                * reason isr gives. */
+               int naked;
 };
 
 struct parser {
@@ -442,9 +446,14 @@ static const struct attr_entry attr_table[] = {
     { "pcs",           ATTR_HONOURED, NULL },
 
     /* ---- refused ---- */
+    /* Honoured on the embedded targets, whose assembler reads the body as
+     * a block (src/as/gas.c); refused on x86-64 and AArch64, whose
+     * file-scope asm is a fixed vocabulary of a few instructions and of
+     * data directives (src/arch/x86_64/topasm.c). */
     { "naked",     ATTR_REFUSED,
-      "the prologue the function says it must not have would be emitted "
-      "anyway, and its own asm would run on a frame it did not set up" },
+      "on this target the body could only be assembled by the file-scope "
+      "assembler's few instructions; it is supported on the ARM, RISC-V "
+      "and AVR targets" },
     /* Refused on x86-64 and aarch64, and a NO-OP on ARMv7-M, which is
      * the one machine where an interrupt handler is an ordinary
      * function. The Cortex-M stacks r0-r3, r12, lr, pc and xPSR itself
@@ -758,6 +767,9 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (ae->disp == ATTR_REFUSED &&
                          !(attr_is(name, "interrupt") &&
                            target_get() == TARGET_THUMB) &&
+                         !(attr_is(name, "naked") &&
+                           target_get() != TARGET_X86_64 &&
+                           target_get() != TARGET_AARCH64) &&
                          !((attr_is(name, "interrupt") ||
                             attr_is(name, "signal")) &&
                            target_get() == TARGET_AVR))
@@ -796,6 +808,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 if (attr_is(name, "packed")) out->packed = 1;
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "signal")) out->isr = 1;
+                else if (attr_is(name, "naked")) out->naked = 1;
                 else if (attr_is(name, "interrupt")) out->isr = 2;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
                 else if (attr_is(name, "nothrow")) out->nothrow = 1;
@@ -3712,6 +3725,7 @@ static struct stmt *parse_asm_stmt(struct parser *ps)
                    "on that");
     expect(ps, TOK_LPAREN, "'(' after asm");
     a->tmpl = parse_str_literal(ps, "an asm template string");
+    a->is_basic = cur(ps)->kind != TOK_COLON;
     if (cur(ps)->kind == TOK_COLON) {
         advance(ps);
         parse_asm_operands(ps, &a->out, &a->nout);
@@ -4941,6 +4955,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
     if (at.isr) f->is_isr = at.isr;
+    if (at.naked) f->is_naked = 1;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
@@ -4953,6 +4968,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->vis = at.vis;
                 f->is_ctor = at.ctor;
                 if (at.isr) f->is_isr = at.isr;
+                if (at.naked) f->is_naked = 1;
                 f->is_dtor = at.dtor;
                 f->attr_used = at.used;
                 f->attr_unused = at.unused;
@@ -5036,6 +5052,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
     if (at.isr) f->is_isr = at.isr;
+    if (at.naked) f->is_naked = 1;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
@@ -5141,6 +5158,7 @@ fn_tail:
     f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
     if (at.isr) f->is_isr = at.isr;
+    if (at.naked) f->is_naked = 1;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;

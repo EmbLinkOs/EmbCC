@@ -623,7 +623,7 @@ supported: REASON`:
 | `interrupt` | On x86-64, AArch64 and RISC-V; see [Interrupt handlers](#interrupt-handlers) |
 | `mode` | `the declaration would keep its written type, so a typedef that asks for a specific width would silently get another` |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
-| `naked` | `the prologue the function says it must not have would be emitted anyway, and its own asm would run on a frame it did not set up` |
+| `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
 | `sysv_abi` | `the arguments would be passed in the other convention's registers` |
 | `target` | `EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
@@ -672,9 +672,11 @@ On RISC-V, write the trap entry in assembly and call a C function from
 it; see [Trap handlers](embedded.md#trap-handlers). For the AVR vector
 names (`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
 
-`naked` is refused on every target, so a function that must run without
-a prologue (a reset handler that sets up the stack) is written in
-assembly.
+`naked` is supported on ARM Cortex-M, RISC-V and AVR, where the body is
+assembled as a block of the target's assembly; see
+[Naked functions](inline-asm.md#naked-functions). On x86-64 and AArch64
+it is refused, and a function that must run without a prologue is
+written in assembly.
 
 ### Placing code and data
 

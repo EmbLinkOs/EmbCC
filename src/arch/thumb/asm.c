@@ -749,6 +749,19 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                 t_movw_movt(out, rd, ((unsigned long)imm >> 16) & 0xffffu, 1);
                 return 0;
             }
+            /* [rn, #off]!: the offset added first, and written back */
+            if (t[2].len > 1 && t[2].s[t[2].len - 1] == '!') {
+                struct tok m = { t[2].s, t[2].len - 1 };
+                if (!tok_mem(&m, &base, &off))
+                    FAIL("\"%.*s\" is not a [reg, #off]! address",
+                         t[2].len, t[2].s);
+                if (!t_ldst_wb(out, rd, base, off, e->size, e->sign,
+                               e->store, 1))
+                    FAIL("%s %.*s: the offset must be -255..255 and the "
+                         "base neither pc nor the data register", e->name,
+                         t[2].len, t[2].s);
+                return 0;
+            }
             if (!tok_mem(&t[2], &base, &off)) {
                 int rn, rm, sh;
                 if (!tok_mem_reg(&t[2], &rn, &rm, &sh))
@@ -789,6 +802,22 @@ static int one_stmt(const char *stmt, int len, struct code *out,
     /* ---- three-operand forms ---- */
     if (n == 4) {
         int rd = tok_reg(&t[1]), rn = tok_reg(&t[2]), rm = tok_reg(&t[3]);
+        /* `ldr rd, [rn], #off`: the access at rn, then rn += off */
+        for (const struct ls_ent *e = ls_tab; e->name; e++) {
+            int base;
+            long off, post;
+            if (!mnemonic_is(&t[0], e->name))
+                continue;
+            if (rd < 0 || !tok_mem(&t[2], &base, &off) || off != 0 ||
+                !tok_imm(&t[3], &post))
+                FAIL("\"%.*s\" wants a register, a [reg] address and an "
+                     "#offset", t[0].len, t[0].s);
+            if (!t_ldst_wb(out, rd, base, post, e->size, e->sign, e->store,
+                           0))
+                FAIL("%s post-indexed: the offset must be -255..255 and the "
+                     "base neither pc nor the data register", e->name);
+            return 0;
+        }
         for (const struct alu_ent *e = alu_tab; e->name; e++) {
             if (!mnemonic_is(&t[0], e->name))
                 continue;
@@ -905,6 +934,19 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         if (v & 1) FAIL("bl offset %ld is odd", v);
         at = t_bl(out);
         t_patch_bl(out, at, at + (int)v);
+        return 0;
+    }
+    if ((mnemonic_is(&t[0], "cbz") || mnemonic_is(&t[0], "cbnz")) && n == 3) {
+        long v;
+        int r = tok_reg(&t[1]);
+        if (r < 0 || r > 7 || !tok_imm(&t[2], &v))
+            FAIL("%.*s wants a register r0-r7 and a branch offset",
+                 t[0].len, t[0].s);
+        /* forward only, 4..130 bytes: there is no wider form to take */
+        int at = t_cbz(out, mnemonic_is(&t[0], "cbnz"), r);
+        if (!t_patch_cbz(out, at, at + (int)v))
+            FAIL("%.*s reaches 4..130 bytes forward; this target is %ld "
+                 "bytes away", t[0].len, t[0].s, v);
         return 0;
     }
     if ((mnemonic_is(&t[0], "bx") || mnemonic_is(&t[0], "blx")) && n == 2) {

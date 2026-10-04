@@ -239,7 +239,7 @@ The tree is defined in `src/parse/ast.h`.
 | `struct expr` | An expression (`enum expr_kind`). Semantic analysis sets `ty` on every node. |
 | `struct initelem` | One leaf of an aggregate initializer, flattened by semantic analysis to (offset, type, value), with bit-field position. |
 | `struct asm_stmt`, `struct asm_operand` | Extended `asm`: template, outputs, inputs and clobbers. Semantic analysis resolves each operand's register. |
-| `struct topasm` | A file-scope `__asm__` block, assembled by `src/arch/x86_64/topasm.c`. |
+| `struct topasm` | A file-scope `__asm__` block (or a naked function's body), assembled by `src/arch/x86_64/topasm.c` on x86-64 and AArch64 and by `src/as/gas.c` on the embedded targets. |
 | `struct econst`, `struct tagdef`, `struct typedefent` | Enumerators, tags and typedefs. |
 
 Every node carries `line` and `col`; `struct func` and `struct global`

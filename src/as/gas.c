@@ -19,6 +19,7 @@
 #include "../arch/thumb/emit.h"
 #include "../arch/thumb/attrs.h"
 #include "../arch/aarch64/asm.h"
+#include "../parse/ast.h"
 
 /* ---- the pieces of a file ------------------------------------------ */
 
@@ -92,6 +93,8 @@ struct gas {
     int cur;                /* current section */
     int npcrel;             /* .Lpcrel_hiN counter */
     int line;               /* for diagnostics */
+    int line_base;          /* a block's own first line, less one: its
+                             * statements are numbered from 1 within it */
     int errors;
     int thumb_func_next;    /* .thumb_func: the next label is a function */
     int errors_muted;       /* the expander's own look at an .equ */
@@ -120,7 +123,7 @@ static void gerr(struct gas *g, const char *fmt, ...)
     va_list ap;
     if (g->errors_muted)
         return;
-    fprintf(stderr, "%s:%d: error: ", g->path, g->line);
+    fprintf(stderr, "%s:%d: error: ", g->path, g->line + g->line_base);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -3044,9 +3047,85 @@ static const struct gas_target *target_for(void)
     }
 }
 
+/* The macro language, then passes until nothing moves: the whole of
+ * assembling, for a file or for a block. */
+static void gas_run(struct gas *g, struct gexp *gx, const char *text,
+                    const char *path)
+{
+    if (g->tgt->machine == EM_ARM)
+        tasm_set_arch(target_thumb_arch());
+    /* The macro language first, then pass 1 places the labels and pass 2
+     * encodes with the displacements they give. Two passes and not one
+     * because a branch forward names a label the assembler has not
+     * reached. */
+    memset(gx, 0, sizeof *gx);
+    gx->g = g;
+    {
+        char *copy = xstrndup(text, strlen(text));
+        gx_text(gx, copy, path, 0);
+        free(copy);
+    }
+    g->wide = xcalloc((size_t)gx->nout + 1, 1);
+    g->nwide = gx->nout;
+    /* Then passes until nothing moves: a branch or a literal load is
+     * tried in its two-byte form and, if it does not reach, widened for
+     * good; each pass uses the label positions the one before found. The
+     * output is from a pass whose layout matched the one before it. */
+    if (!g->errors)
+        pass_over(g, gx->out, gx->nout, 1);
+    {
+        unsigned long long prev = 0;
+        int it;
+        for (it = 0; it < 40 && !g->errors; it++) {
+            g->grew = 0;
+            pass_over(g, gx->out, gx->nout, 2);
+            unsigned long long h = 1469598103934665603ULL;
+            for (int i = 0; i < g->nsyms; i++) {
+                h = (h ^ (unsigned long long)(g->syms[i].sec + 3)) * 1099511628211ULL;
+                h = (h ^ (unsigned long long)g->syms[i].value) * 1099511628211ULL;
+            }
+            for (int i = 0; i < g->npools; i++)
+                h = (h ^ (unsigned long long)g->pools[i].base) * 1099511628211ULL;
+            if (it > 0 && !g->grew && h == prev)
+                break;
+            prev = h;
+        }
+        if (it == 40 && !g->errors)
+            gerr(g, "the layout does not settle after 40 passes");
+    }
+}
+
+static void gas_free(struct gas *g, struct gexp *gx)
+{
+    for (int i = 0; i < gx->nout; i++)
+        free(gx->out[i].text);
+    free(gx->out);
+    for (int i = 0; i < gx->nmac; i++) {
+        struct gmacro *m = &gx->mac[i];
+        for (int k = 0; k < m->nparam; k++) {
+            free(m->param[k]);
+            free(m->dflt[k]);
+        }
+        for (int k = 0; k < m->nbody; k++)
+            free(m->body[k].text);
+        free(m->param); free(m->dflt); free(m->req); free(m->body);
+        free(m->name);
+    }
+    free(gx->mac);
+    for (int i = 0; i < g->nsecs; i++) {
+        free(g->secs[i].c.p);
+        free(g->secs[i].name);
+    }
+    free(g->secs);
+    for (int i = 0; i < g->nsyms; i++) free(g->syms[i].name);
+    for (int i = 0; i < g->nfix; i++) free(g->fix[i].sym);
+    free(g->syms); free(g->fix);
+}
+
 int gas_assemble(const char *in_path, const char *out_path, int preprocess)
 {
     struct gas g;
+    struct gexp gx;
     char *src, *text;
     long len;
     int rc;
@@ -3073,75 +3152,130 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess)
     g.path = in_path;
     g.tgt = t;
     sec_init(&g);
-    if (t->machine == EM_ARM)
-        tasm_set_arch(target_thumb_arch());
-
-    /* The macro language first, then pass 1 places the labels and pass 2
-     * encodes with the displacements they give. Two passes and not one
-     * because a branch forward names a label the assembler has not
-     * reached. */
-    struct gexp gx;
-    memset(&gx, 0, sizeof gx);
-    gx.g = &g;
-    {
-        char *copy = xstrndup(text, strlen(text));
-        gx_text(&gx, copy, in_path, 0);
-        free(copy);
-    }
-    g.wide = xcalloc((size_t)gx.nout + 1, 1);
-    g.nwide = gx.nout;
-    /* Then passes until nothing moves: a branch or a literal load is
-     * tried in its two-byte form and, if it does not reach, widened for
-     * good; each pass uses the label positions the one before found. The
-     * output is from a pass whose layout matched the one before it. */
-    if (!g.errors)
-        pass_over(&g, gx.out, gx.nout, 1);
-    {
-        unsigned long long prev = 0;
-        int it;
-        for (it = 0; it < 40 && !g.errors; it++) {
-            g.grew = 0;
-            pass_over(&g, gx.out, gx.nout, 2);
-            unsigned long long h = 1469598103934665603ULL;
-            for (int i = 0; i < g.nsyms; i++) {
-                h = (h ^ (unsigned long long)(g.syms[i].sec + 3)) * 1099511628211ULL;
-                h = (h ^ (unsigned long long)g.syms[i].value) * 1099511628211ULL;
-            }
-            for (int i = 0; i < g.npools; i++)
-                h = (h ^ (unsigned long long)g.pools[i].base) * 1099511628211ULL;
-            if (it > 0 && !g.grew && h == prev)
-                break;
-            prev = h;
-        }
-        if (it == 40 && !g.errors)
-            gerr(&g, "the layout does not settle after 40 passes");
-    }
+    gas_run(&g, &gx, text, in_path);
     rc = g.errors ? 1 : write_object(&g, out_path);
-    for (int i = 0; i < gx.nout; i++)
-        free(gx.out[i].text);
-    free(gx.out);
-    for (int i = 0; i < gx.nmac; i++) {
-        struct gmacro *m = &gx.mac[i];
-        for (int k = 0; k < m->nparam; k++) {
-            free(m->param[k]);
-            free(m->dflt[k]);
-        }
-        for (int k = 0; k < m->nbody; k++)
-            free(m->body[k].text);
-        free(m->param); free(m->dflt); free(m->req); free(m->body);
-        free(m->name);
-    }
-    free(gx.mac);
-
-    for (int i = 0; i < g.nsecs; i++) {
-        free(g.secs[i].c.p);
-        free(g.secs[i].name);
-    }
-    free(g.secs);
-    for (int i = 0; i < g.nsyms; i++) free(g.syms[i].name);
-    for (int i = 0; i < g.nfix; i++) free(g.fix[i].sym);
-    free(g.syms); free(g.fix);
+    gas_free(&g, &gx);
     if (text != src) free(text);
     free(src);
+    return rc;
+}
+
+/* ---- a block for the compiler ----------------------------------------
+ *
+ * A file-scope __asm__ and a naked function's body are assembly in a C
+ * file, and on an embedded target they are what a context switch or a
+ * reset handler is written in: labels, a literal word naming a global, a
+ * `bl` to C. The compiler's inline assembler encodes one instruction at a
+ * time with its operands already in registers; this is the whole
+ * assembler, run over the block, and the driver places the result in the
+ * unit's .text as it places x86-64's file-scope asm (struct topasm). */
+int gas_assemble_block(struct topasm *ta)
+{
+    struct gas g;
+    struct gexp gx;
+    const struct gas_target *t = target_for();
+    if (!t) {
+        fprintf(stderr, "%s:%d: error: assembly in a C file is not supported "
+                        "for %s\n", ta->file, ta->line, target_triple_now());
+        return 1;
+    }
+    memset(&g, 0, sizeof g);
+    g.path = ta->file;
+    g.line_base = ta->line > 0 ? ta->line - 1 : 0;
+    g.tgt = t;
+    sec_init(&g);
+    gas_run(&g, &gx, ta->tmpl, ta->file);
+
+    /* One section: the block's bytes go into the unit's .text, between
+     * its functions. */
+    for (int i = 0; i < g.nsecs && !g.errors; i++)
+        if (i != SEC_TEXT && (g.secs[i].c.len || g.secs[i].size))
+            gerr(&g, "assembly in a C file that switches to section %s is "
+                     "not supported yet: a block's bytes go in .text",
+                 g.secs[i].name);
+    for (int i = 0; i < g.nfix && !g.errors; i++)
+        if (g.fix[i].sec != SEC_TEXT)
+            gerr(&g, "a relocation outside .text in an asm block");
+    /* .set aliases, resolved as the object writer does */
+    for (int i = 0; i < g.nsyms && !g.errors; i++) {
+        struct sym *s = &g.syms[i], *a = s;
+        long add = 0;
+        int hops = 0;
+        if (!s->alias)
+            continue;
+        while (a->alias && hops++ < 64) {
+            add += a->alias_add;
+            a = a->alias;
+        }
+        if (a->alias || a->sec == SEC_UNDEF) {
+            gerr(&g, "'%s' is set to '%s', which this block does not define",
+                 s->name, a->name);
+            break;
+        }
+        s->sec = a->sec;
+        s->value = a->value + add;
+        s->is_func |= a->is_func;
+    }
+    if (!g.errors) {
+        struct gsec *tx = &g.secs[SEC_TEXT];
+        ta->codelen = (int)tx->c.len;
+        ta->code = xmalloc((size_t)(ta->codelen ? ta->codelen : 1));
+        memcpy(ta->code, tx->c.p, (size_t)ta->codelen);
+        ta->align = (int)(tx->align > 1 ? tx->align : 1);
+        /* its labels: the ones C may name, and any a relocation names */
+        ta->syms = xcalloc((size_t)(g.nsyms ? g.nsyms : 1), sizeof *ta->syms);
+        for (int i = 0; i < g.nsyms; i++) {
+            const struct sym *s = &g.syms[i];
+            if (s->sec != SEC_TEXT)
+                continue;
+            if (!s->is_global && !strncmp(s->name, ".L", 2))
+                continue;
+            struct asmsym *as = &ta->syms[ta->nsyms++];
+            as->name = xstrndup(s->name, strlen(s->name));
+            as->off = (int)s->value;
+            as->is_global = s->is_global;
+            as->is_weak = s->is_weak;
+            as->type = s->is_func ? ASMSYM_FUNC
+                     : s->is_object ? ASMSYM_OBJECT : ASMSYM_UNTYPED;
+            as->size = s->size;
+        }
+        /* its relocations, with the ELF type the assembler chose; a
+         * field against an assembler-local label names the label's
+         * offset in this block instead, which the driver turns into one
+         * against .text */
+        ta->rels = xcalloc((size_t)(g.nfix ? g.nfix : 1), sizeof *ta->rels);
+        for (int i = 0; i < g.nfix; i++) {
+            const struct fixup *f = &g.fix[i];
+            const struct sym *s = sym_find(&g, f->sym, strlen(f->sym));
+            struct asmrel *r = &ta->rels[ta->nrels++];
+            r->off = (int)f->off;
+            r->addend = f->addend;
+            r->elf_type = f->type;
+            r->kind = ASMREL_ABS32;
+            if (s && !s->is_global && s->sec == SEC_TEXT &&
+                !strncmp(s->name, ".L", 2)) {
+                r->target = NULL;                 /* the block itself */
+                r->addend += s->value;
+            } else {
+                r->target = xstrndup(f->sym, strlen(f->sym));
+            }
+        }
+        /* where the data in it is ($d), for the disassemblers */
+        ta->drange = xcalloc((size_t)(2 * g.nmaps + 2), sizeof *ta->drange);
+        for (int i = 0; i < g.nmaps; i++) {
+            if (g.maps[i].sec != SEC_TEXT || g.maps[i].kind != 'd')
+                continue;
+            long end = tx->c.len;
+            for (int k = i + 1; k < g.nmaps; k++)
+                if (g.maps[k].sec == SEC_TEXT && g.maps[k].off > g.maps[i].off) {
+                    end = g.maps[k].off;
+                    break;
+                }
+            ta->drange[ta->ndrange++] = (int)g.maps[i].off;
+            ta->drange[ta->ndrange++] = (int)end;
+        }
+    }
+    int rc = g.errors ? 1 : 0;
+    gas_free(&g, &gx);
     return rc;
 }

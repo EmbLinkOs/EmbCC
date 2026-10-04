@@ -1051,6 +1051,171 @@ static int compile(const char *in, const char *out, int pp_only)
     return rc;
 }
 
+/* ---- assembly in a C file, on the embedded targets ------------------
+ *
+ * A file-scope asm block there is read by the assembler that reads a .s
+ * file (src/as/gas.c, gas_assemble_block), so it may hold the target's
+ * own instructions, labels, literal pools and references to C. x86-64's
+ * blocks keep their fixed vocabulary (src/arch/x86_64/topasm.c), and so
+ * do AArch64's, which are data words today. */
+static int blocks_by_gas(void)
+{
+    enum target_arch a = target_get();
+    return a == TARGET_THUMB || a == TARGET_RISCV32 ||
+           a == TARGET_RISCV64 || a == TARGET_AVR;
+}
+
+/* One asm statement of a naked function, its operands written in: only
+ * constants, as gcc's documentation says is all a naked function's asm
+ * may dependably take -- there is no frame to put anything else in. */
+static void naked_asm_text(struct outbuf *b, const struct func *f,
+                           const struct stmt *s)
+{
+    const struct asm_stmt *a = s->asm_s;
+    if (a->is_basic) {
+        ob_str(b, a->tmpl);
+        ob_ch(b, '\n');
+        return;
+    }
+    if (a->nout)
+        diag_fatal(f->file, s->line,
+                   "the asm in naked function '%s' has an output; a naked "
+                   "function has no frame to put it in", f->name);
+    for (int i = 0; i < a->nin; i++)
+        if (!a->in[i].is_imm)
+            diag_fatal(f->file, s->line,
+                       "operand %d of the asm in naked function '%s' is not "
+                       "a constant (\"i\"); a naked function has no frame "
+                       "to load one from", i, f->name);
+    for (const char *p = a->tmpl; *p; ) {
+        if (*p != '%') {
+            ob_ch(b, *p++);
+            continue;
+        }
+        p++;
+        if (*p == '%') {
+            ob_ch(b, '%');
+            p++;
+            continue;
+        }
+        if (*p == 'c')            /* %c0: the constant without a prefix,
+                                   * which is how every operand here is
+                                   * written anyway */
+            p++;
+        int k = -1;
+        if (*p == '[') {
+            const char *e = strchr(p, ']');
+            if (!e)
+                diag_fatal(f->file, s->line,
+                           "unterminated %%[name] in asm template");
+            for (int i = 0; i < a->nin; i++)
+                if (a->in[i].name &&
+                    strlen(a->in[i].name) == (size_t)(e - p - 1) &&
+                    !strncmp(a->in[i].name, p + 1, (size_t)(e - p - 1)))
+                    k = i;
+            if (k < 0)
+                diag_fatal(f->file, s->line, "asm template names an unknown "
+                           "operand '%.*s'", (int)(e - p - 1), p + 1);
+            p = e + 1;
+        } else if (*p >= '0' && *p <= '9') {
+            k = 0;
+            while (*p >= '0' && *p <= '9')
+                k = k * 10 + (*p++ - '0');
+            if (k >= a->nin)
+                diag_fatal(f->file, s->line, "asm template refers to operand "
+                           "%%%d, but there are only %d", k, a->nin);
+        } else {
+            diag_fatal(f->file, s->line, "asm template modifier '%%%c' is "
+                       "not supported in a naked function", *p ? *p : ' ');
+        }
+        ob_fmt(b, "%ld", a->in[k].imm);
+    }
+    ob_ch(b, '\n');
+}
+
+/* The statements of a naked function's body, as assembly. */
+static void naked_body_text(struct outbuf *b, const struct func *f,
+                            const struct stmt *s)
+{
+    for (; s; s = s->next) {
+        if (s->kind == STMT_ASM) {
+            naked_asm_text(b, f, s);
+            continue;
+        }
+        if (s->kind == STMT_BLOCK) {
+            naked_body_text(b, f, s->body);
+            continue;
+        }
+        if (s->kind == STMT_EXPR && !s->expr)
+            continue;                         /* `;` */
+        /* A call with no arguments is its call instruction: AVR's
+         * FreeRTOS port calls the scheduler from its naked yield between
+         * the asm that saves and restores the context. */
+        const struct expr *e = s->kind == STMT_EXPR ? s->expr : NULL;
+        if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
+            enum target_arch t = target_get();
+            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ? "bl" : "call",
+                   e->callee->name);
+            continue;
+        }
+        diag_fatal(f->file, s->line,
+                   "naked function '%s' holds a statement that is not an asm "
+                   "or a call with no arguments; with no prologue there is "
+                   "no frame for it to run in", f->name);
+    }
+}
+
+/* __attribute__((naked)): no prologue and no epilogue; the body is the
+ * function. How a Cortex-M RTOS writes its context switch -- FreeRTOS's
+ * xPortPendSVHandler runs on the task's stack and owns every register
+ * it saves, so any frame the code generator built would be wrong by
+ * construction.
+ *
+ * gcc emits the body's asm where the function would be. So does this:
+ * the function becomes a file-scope block that starts with its label,
+ * and the block assembler reads it like any other. A static one's label
+ * is local, and the C code's references to it go to that label. */
+static void naked_to_blocks(struct unit *u)
+{
+    struct topasm **tail = &u->topasm;
+    while (*tail)
+        tail = &(*tail)->next;
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || !f->is_naked || !f->has_defn)
+            continue;
+        if (f->section)
+            diag_fatal(f->file, f->line, "naked function '%s' in section "
+                       "'%s' is not supported yet: its body is assembled "
+                       "into .text", f->name, f->section);
+        struct outbuf b = { NULL, 0, 0 };
+        enum target_arch t = target_get();
+        ob_fmt(&b, ".text\n.p2align %d\n", t == TARGET_AVR ? 1 : 2);
+        if (f->is_weak)
+            ob_fmt(&b, ".weak %s\n", f->name);
+        else if (!f->is_static)
+            ob_fmt(&b, ".global %s\n", f->name);
+        ob_fmt(&b, ".type %s, %%function\n", f->name);
+        if (t == TARGET_THUMB)
+            ob_str(&b, ".thumb_func\n");
+        ob_fmt(&b, "%s:\n", f->name);
+        /* a diagnostic in the body names the line of its first asm */
+        int head = 0;
+        for (size_t k = 0; k < b.n; k++)
+            head += b.p[k] == '\n';
+        const struct stmt *first = f->body;     /* the statement list */
+        naked_body_text(&b, f, first);
+        ob_fmt(&b, ".size %s, .-%s\n", f->name, f->name);
+        ob_ch(&b, '\0');
+        struct topasm *ta = xcalloc(1, sizeof *ta);
+        ta->tmpl = b.p;
+        ta->file = f->file;
+        ta->line = (first ? first->line : f->line) - head;
+        *tail = ta;
+        tail = &ta->next;
+        f->has_defn = 0;        /* its code is the block's */
+    }
+}
+
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
@@ -1186,20 +1351,33 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * sits at .text offset 0. Assemble each block now — it depends only on
      * its own template, not on code layout — and mark its call targets used.
      * The placement pass further down reuses these already-assembled bytes. */
+    if (blocks_by_gas())
+        naked_to_blocks(u);
     for (struct topasm *ta = u->topasm; ta; ta = ta->next) {
-        /* The mnemonics the built-in assembler encodes are x86-64. The
-         * directives -- labels and .byte/.long/.quad -- are not, so a
-         * block written as data assembles on any target, and one written
-         * with mnemonics is refused there by name instead of quietly
-         * emitting x86 bytes into another machine's image. The test was
-         * "not aarch64", which let `ret` become 0xc3 in a Thumb, RISC-V
-         * or AVR object. */
-        topasm_assemble(ta, target_get() == TARGET_X86_64);
-        for (int r = 0; r < ta->nrels; r++)
+        /* x86-64's mnemonics are what topasm.c encodes; the directives --
+         * labels and .byte/.long/.quad -- are not, so on AArch64 a block
+         * written as data assembles, and one written with mnemonics is
+         * refused by name instead of quietly emitting x86 bytes. The
+         * embedded targets have an assembler of their own. */
+        if (blocks_by_gas()) {
+            if (gas_assemble_block(ta))
+                return 1;
+        } else {
+            topasm_assemble(ta, target_get() == TARGET_X86_64);
+        }
+        for (int r = 0; r < ta->nrels; r++) {
+            if (!ta->rels[r].target)
+                continue;                 /* the block's own label */
             for (struct func *f = u->funcs; f; f = f->next)
                 if (!f->absorbed &&
                     strcmp(f->name, ta->rels[r].target) == 0)
                     f->used = f->is_root = 1;
+            /* and an object only the asm names (`ldr r0, =counter`) */
+            for (struct global *g = u->globals; g; g = g->next)
+                if (!g->absorbed &&
+                    strcmp(g->name, ta->rels[r].target) == 0)
+                    g->used = 1;
+        }
     }
 
     /* A constructor is called by the startup code, not by this unit, so
@@ -1741,10 +1919,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * and relocations land at the right offset. The blocks were already
      * assembled above (before irgen) and their call targets marked used. */
     for (struct topasm *ta = u->topasm; ta; ta = ta->next) {
-        code_align(&text, 16, 0x90);
+        if (blocks_by_gas()) {
+            /* what the block's own alignment directives asked for, at
+             * least the target's instruction alignment; the padding is
+             * never executed (the code before it ends in a return) */
+            int al = target_get() == TARGET_AVR ? 2 : 4;
+            code_align(&text, ta->align > al ? ta->align : al, 0);
+        } else {
+            code_align(&text, 16, 0x90);
+        }
         ta->text_off = text.len;
         for (int k = 0; k < ta->codelen; k++)
             code_byte(&text, ta->code[k]);
+        /* its literal pools and data words are data, for the mapping
+         * symbols ($d) a disassembler and a linker read */
+        for (int k = 0; k + 1 < ta->ndrange; k += 2)
+            code_mark_data(&text, ta->text_off + ta->drange[k],
+                           ta->text_off + ta->drange[k + 1]);
     }
 
     /* -g: build the DWARF line sections now (needs each func's code_off/len,
@@ -2675,6 +2866,40 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                              : g->in_rodata ? rodata_ndx
                              : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
+    /* A block's label that is not .global, with the name of a function
+     * or an object this unit declares and does not define -- a static
+     * naked function's, chiefly: the C code's references go to it, as
+     * they do when gcc's assembler reads both from one file. */
+    for (struct topasm *ta = u->topasm; ta; ta = ta->next)
+        for (int k = 0; k < ta->nsyms; k++) {
+            const struct asmsym *as = &ta->syms[k];
+            struct func *lf = NULL;
+            struct global *lg = NULL;
+            if (as->is_global)
+                continue;
+            for (struct func *f = u->funcs; f && !lf; f = f->next)
+                if (!f->absorbed && !f->has_defn && !f->sym_ndx &&
+                    !f->alias_of && strcmp(f->name, as->name) == 0)
+                    lf = f;
+            for (struct global *g = u->globals; g && !lf && !lg; g = g->next)
+                if (!g->absorbed && !g->defined && !g->sym_ndx &&
+                    strcmp(g->name, as->name) == 0)
+                    lg = g;
+            if (!lf && !lg)
+                continue;
+            long loff = ta->text_off + as->off, lval;
+            text_at(loff, &lval);
+            if (lf)
+                lval = fn_sym_value(target_get(), lval);
+            int lndx = elfw_add_symbol(
+                w, as->name, (Elf64_Addr)lval, (Elf64_Xword)as->size,
+                ELF64_ST_INFO(STB_LOCAL, lf ? STT_FUNC : STT_OBJECT),
+                (Elf64_Half)code_sec(loff, text_ndx));
+            if (lf)
+                lf->sym_ndx = lndx;
+            else
+                lg->sym_ndx = lndx;
+        }
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && !f->is_static)
             f->sym_ndx = elfw_add_symbol(
@@ -2734,7 +2959,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 if (thumb && st == STT_FUNC)
                     toff = fn_sym_value(TARGET_THUMB, toff);
                 int ndx = elfw_add_symbol(
-                    w, as->name, (Elf64_Addr)toff, 0,
+                    w, as->name, (Elf64_Addr)toff, (Elf64_Xword)as->size,
                     ELF64_ST_INFO(as->is_weak ? STB_WEAK : STB_GLOBAL, st),
                     (Elf64_Half)text_ndx);
                 for (struct func *f = u->funcs; f; f = f->next)
@@ -2822,6 +3047,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * assembler encodes no aarch64 instructions. So the relocation is
      * chosen from the kind and the architecture rather than assumed to
      * be a call. */
+    const char **undef_name = NULL;
+    int *undef_sym = NULL, nundef = 0;
     for (struct topasm *ta = u->topasm; ta; ta = ta->next)
         for (int r = 0; r < ta->nrels; r++) {
             /* The symbol this file already has for the name -- a
@@ -2831,6 +3058,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             int sym = 0;
             long addend = ta->rels[r].addend;
             const char *tn = ta->rels[r].target;
+            int etype = ta->rels[r].elf_type;
+            /* gas_assemble_block's field against an assembler-local
+             * label: the block's start plus the label's offset, against
+             * the section */
+            if (!tn) {
+                addend = code_ref(ta->text_off + addend, text_sym, &sym);
+                code_rela(w, text_ndx, ta->text_off + ta->rels[r].off,
+                          sym, etype, addend);
+                continue;
+            }
             for (struct func *f = u->funcs; f && !sym; f = f->next)
                 if (!f->absorbed && f->sym_ndx && strcmp(f->name, tn) == 0)
                     sym = f->sym_ndx;
@@ -2846,20 +3083,37 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                     if (strcmp(lb->syms[k].name, tn) == 0) {
                         addend += code_ref(lb->text_off + lb->syms[k].off,
                                            text_sym, &sym);
+                        /* a Thumb function's ADDRESS carries bit 0; a
+                         * branch to it does not */
                         if (target_get() == TARGET_THUMB &&
-                            lb->syms[k].type == ASMSYM_FUNC)
+                            lb->syms[k].type == ASMSYM_FUNC &&
+                            (!etype || etype == R_ARM_ABS32))
                             addend |= 1;
                     }
-            if (!sym)
+            /* one undefined symbol per name, however many fields name it */
+            for (int k = 0; k < nundef && !sym; k++)
+                if (strcmp(undef_name[k], tn) == 0)
+                    sym = undef_sym[k];
+            if (!sym) {
                 sym = elfw_add_symbol(
                     w, tn, 0, 0,
                     ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), SHN_UNDEF);
+                undef_name = xrealloc(undef_name, (size_t)(nundef + 1) *
+                                      sizeof *undef_name);
+                undef_sym = xrealloc(undef_sym, (size_t)(nundef + 1) *
+                                     sizeof *undef_sym);
+                undef_name[nundef] = tn;
+                undef_sym[nundef++] = sym;
+            }
             enum reloc_kind rk = ta->rels[r].kind == ASMREL_ABS64 ? RK_ABS64
                                : ta->rels[r].kind == ASMREL_ABS32 ? RK_ABS32
                                : RK_CALL;
-            code_rela(w, text_ndx, ta->text_off + ta->rels[r].off,
-                      sym, target_reloc_type(target_get(), rk), addend);
+            code_rela(w, text_ndx, ta->text_off + ta->rels[r].off, sym,
+                      etype ? etype : target_reloc_type(target_get(), rk),
+                      addend);
         }
+    free(undef_name);
+    free(undef_sym);
 
     /* RISC-V's low half names the AUIPC, not the target.
      *
