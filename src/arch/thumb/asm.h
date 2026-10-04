@@ -45,6 +45,22 @@ int tasm_gpr(const char *name, int len);
 /* The inverse, for irgen to substitute into a template. */
 const char *t_reg_name(int reg);
 
+/* An IT block outlives the statement that opens it: tasm_reset() forgets
+ * one, and tasm_open() says whether the last block is still owed
+ * instructions -- an error at the end of a template or a file. */
+void tasm_reset(void);
+int tasm_open(void);
+
+/* For the file assembler: is `w` an operand word of this statement --
+ * a special register, an interrupt mask, an IT condition, a barrier
+ * option, a floating-point register -- rather than a symbol? */
+int tasm_is_word(const char *stmt, const char *w, int wlen);
+
+/* The statements whose operand is a symbol (`ldr rd, =sym`,
+ * `movw rd, #:lower16:sym`), rewritten for relocation. */
+struct asm_symform;
+int tasm_symform(const char *stmt, struct asm_symform *f);
+
 /* Writes one assembly line per vocabulary entry, so the golden test can
  * hand the SAME lines to llvm-mc and compare. Generated from the tables
  * themselves: an entry added here cannot escape the referee. */

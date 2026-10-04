@@ -253,8 +253,15 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
                           names, nops);
     struct code c = { 0 };
     char err[512];
+    /* An IT block is one template's own business: it may not reach into
+     * the compiler's code after the asm, whose first instructions would
+     * then run conditionally. */
+    tasm_reset();
     if (tasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
+    if (tasm_open())
+        diag_fatal(file, s->line, "the asm ends inside an IT block, which "
+                   "would make the compiler's next instructions conditional");
     free(text);
 
     /* Immediates were consumed by the template and carry no run-time

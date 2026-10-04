@@ -209,9 +209,10 @@ void t_movw_movt(struct code *c, int rd, unsigned v, int top);
  * immediately, so a caller that relocates both knows where each is. */
 int t_mov_addr(struct code *c, int rd, unsigned long value);
 
-/* An `it` block header: `cond` and a mask of up to three following
- * instructions. mask bit i (from the top) is 1 for "then". */
-void t_it(struct code *c, int cond, int nthen, unsigned pattern);
+/* An `it` block header: `cond` for the first instruction, then `te`, one
+ * letter per further instruction ("" for `it`, "e" for `ite`, "tt" for
+ * `ittt`): 't' runs under cond, 'e' under its inverse. At most three. */
+void t_it(struct code *c, int cond, const char *te);
 void t_setcc_low(struct code *c, int cond, int rd);
 
 /* The condition that inverts this one. */
@@ -257,6 +258,29 @@ enum { T_HINT_NOP = 0, T_HINT_YIELD = 1, T_HINT_WFE = 2,
 void t_hint(struct code *c, int op);
 
 void t_bkpt(struct code *c, int imm8);
+
+/* SVC #imm8: the supervisor call an RTOS enters its kernel through. */
+void t_svc(struct code *c, int imm8);
+
+/* TST rn, #imm: AND setting the flags into nothing. 0 when imm is not a
+ * modified immediate. */
+int t_tst_imm(struct code *c, int rn, long imm);
+
+/* LDM/STM rn{!}, {list}, always the 32-bit form: `before` is DB (else IA),
+ * `load` LDM (else STM). 0 when the list is one the architecture forbids:
+ * fewer than two registers, sp in it, pc in a store's, pc and lr both in a
+ * load's, or rn in it with writeback. */
+int t_ldm_stm(struct code *c, int rn, unsigned mask, int wback, int before,
+              int load);
+
+/* VLDM/VSTM rn{!}, {s<first>-s<first+n-1>}: `before` is DB (which needs
+ * writeback), else IA. 0 when it is not encodable. */
+int t_vldm_vstm(struct code *c, int rn, int first, int n, int wback,
+                int before, int load);
+
+/* LDR rt, [pc, #off], `off` from Align(pc, 4), always the 32-bit form so
+ * its length never depends on the offset. 0 when |off| > 4095. */
+int t_ldr_lit(struct code *c, int rt, long off);
 
 /* ---- VFP (FPv4-SP-D16, the Cortex-M4F unit) ----
  *

@@ -591,9 +591,8 @@ embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler 
 
 Write the trap entry in assembly: save the caller-saved registers, call a
 C function, restore them and return with `mret`. EmbCC assembles `.S`
-files for RISC-V itself. Its assembler does not know CSR names, so the
-`.S` file uses CSR numbers (`0x342` is `mcause`, `0x341` is `mepc`);
-inline assembly in C does accept the names.
+files for RISC-V itself, and CSRs may be named (`csrr a0, mcause`) or
+numbered (`csrr a0, 0x342`), in a `.S` file as in inline assembly.
 
 ```asm
 /* trap.S -- machine-mode trap entry, RV32 */
@@ -642,8 +641,9 @@ trap_entry:
 ```
 
 `.p2align 2` asks for 4-byte alignment, which `mtvec`'s direct mode
-requires. Use `.p2align` rather than `.align`: EmbCC's assembler reads
-`.align N` as a byte count on every target. For RV64, store and load with
+requires; `.align 2` means the same, since EmbCC's assembler reads
+`.align N` as 2^N bytes on every target it assembles files for, as GNU as
+does (`.balign N` is a byte count). For RV64, store and load with
 `sd`/`ld` in 8-byte slots.
 
 The C side installs the entry in `mtvec` and enables interrupts with

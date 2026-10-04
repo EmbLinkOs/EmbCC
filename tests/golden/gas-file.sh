@@ -265,4 +265,49 @@ else
 fi
 [ "$fail" -eq 0 ] && echo "  unknown symbols and directives are each refused"
 
+# ---- operand words that are not symbols -----------------------------------
+# A CSR's name after a csr instruction, and a fence's iorw set, are
+# operands: this driver took `mcause` in `csrr a0, mcause` for an
+# undefined symbol, so no RISC-V trap handler assembled. A label that
+# happens to share such a name is still a label anywhere else.
+cat > "$out/csr.s" <<'CEOF'
+    csrr  a0, mcause
+    csrr  t0, mepc
+    csrw  mscratch, sp
+    csrrw a0, mscratch, a0
+    csrs  mstatus, t0
+    csrc  mie, t1
+    csrsi mstatus, 8
+    csrci mstatus, 8
+    csrwi mie, 0
+    csrr  t1, mhartid
+    csrw  mtvec, t0
+    fence rw, rw
+    fence iorw, iorw
+    mret
+    ecall
+    ebreak
+    wfi
+mie:
+    j     mie
+CEOF
+if "$EMBCC" --target=riscv32-unknown-elf -c "$out/csr.s" -o "$out/csr.o" \
+     2> "$out/csr.err"; then
+    if command -v llvm-mc > /dev/null 2>&1 &&
+       command -v llvm-objcopy > /dev/null 2>&1; then
+        llvm-mc -triple=riscv32 -mattr=+zicsr,+zifencei -filetype=obj \
+            "$out/csr.s" -o "$out/csr-ref.o" 2>/dev/null &&
+        llvm-objcopy -O binary --only-section=.text "$out/csr.o" "$out/csr.bin" &&
+        llvm-objcopy -O binary --only-section=.text "$out/csr-ref.o" "$out/csr-ref.bin"
+        cmp -s "$out/csr.bin" "$out/csr-ref.bin" || {
+            echo "FAIL: the CSR statements do not encode as llvm-mc's"
+            od -An -tx1 "$out/csr.bin" | head -3; od -An -tx1 "$out/csr-ref.bin" | head -3
+            fail=1; }
+    fi
+    [ "$fail" -eq 0 ] && echo "  CSR names and fence sets are operands, not symbols, and a label named mie is still a label"
+else
+    echo "FAIL: a RISC-V file naming CSRs does not assemble:"
+    head -2 "$out/csr.err" | sed 's/^/     | /'; fail=1
+fi
+
 [ "$fail" -eq 0 ] || exit 1

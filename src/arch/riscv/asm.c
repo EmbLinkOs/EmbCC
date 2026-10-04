@@ -705,6 +705,28 @@ static int one_stmt(const char *stmt, int len, struct code *out,
          t[0].len, t[0].s);
 }
 
+/* src/as/gas.c takes every identifier in an operand for a symbol unless
+ * the target says otherwise. A CSR's name is not one -- `csrr a0, mcause`
+ * named an undefined symbol `mcause` -- and neither is a fence's `rw`.
+ * Asked per statement, so a label called `mie` is still a label in a
+ * `j mie`. */
+int rvasm_is_word(const char *stmt, const char *w, int wlen)
+{
+    const char *m = stmt;
+    int mlen;
+    while (*m == ' ' || *m == '\t') m++;
+    for (mlen = 0; m[mlen] && m[mlen] != ' ' && m[mlen] != '\t'; mlen++) {}
+    if (mlen >= 4 && strncmp(m, "csr", 3) == 0 && csr_num(w, wlen) >= 0)
+        return 1;
+    if (mlen == 5 && strncmp(m, "fence", 5) == 0) {
+        int ok = wlen > 0 && wlen <= 4;
+        for (int k = 0; k < wlen; k++)
+            if (!strchr("iorw", w[k])) ok = 0;
+        return ok;
+    }
+    return 0;
+}
+
 int rvasm_assemble(const char *text, struct code *out, char *err, int errlen)
 {
     const char *p = text;

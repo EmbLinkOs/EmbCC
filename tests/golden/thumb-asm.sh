@@ -38,7 +38,7 @@ then
     "$out/tasmcheck" bytes > "$out/v.bin" 2> "$out/v.err" || {
         echo "the assembler refused its own vocabulary:"
         head -3 "$out/v.err"; exit 1; }
-    "$MC" -triple=thumbv7m-none-eabi -filetype=obj "$out/v.s" \
+    "$MC" -triple=thumbv7em-none-eabi -mattr=+vfp4d16sp -filetype=obj "$out/v.s" \
         -o "$out/v.o" 2> "$out/v.mc" || {
         echo "llvm-mc rejected the vocabulary -- an entry claims an"
         echo "        instruction that does not exist:"

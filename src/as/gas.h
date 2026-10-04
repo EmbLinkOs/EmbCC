@@ -75,6 +75,20 @@ struct gas_target {
      * ("the harness's startup") opens a quote that swallows the rest of the
      * line. 0 when the target has none. */
     char comment_char;
+    /* `#` is an immediate's prefix (`mov r0, #1`) on ARM and aarch64, and
+     * starts a comment there only at the beginning of a line -- where the
+     * preprocessor's own `# 12 "file"` markers sit. Everywhere else `#` is
+     * a comment, as GNU as has it for RISC-V and AVR. Treating it as one
+     * on ARM cut `tst lr, #0x10` down to `tst lr,`. */
+    int hash_is_imm;
+    /* Is `w`, in this statement, an operand word -- a special register, a
+     * condition, an interrupt mask -- rather than a symbol? NULL when the
+     * registers (is_reg) are the only such words. */
+    int (*is_word)(const char *stmt, const char *w, int len);
+    /* State a statement leaves for the next (ARM's IT block): forgotten at
+     * the start of each pass, and refused if still owed at its end. */
+    void (*reset)(void);
+    int (*open)(void);
 };
 
 /* Assembles `in_path` into an ET_REL object at `out_path`, for the
