@@ -1306,18 +1306,21 @@ only Thumb`.
 
 #### `-mcpu=CPU`
 
-Select the processor. `cortex-m4`, `cortex-m7` and `cortex-m33` select
-ARMv7E-M code (with the DSP extension); `cortex-m3` selects ARMv7-M code.
-`-mcpu=` does not move between ARMv7-M and ARMv8-M; that level comes from
-the triple (`thumbv8m.main-none-eabi`).
+Select the processor. `cortex-m0`, `cortex-m0plus` and `cortex-m1`
+select ARMv6-M (Thumb-1) code on any ARM triple. `cortex-m4`,
+`cortex-m7` and `cortex-m33` select ARMv7E-M code (with the DSP
+extension); `cortex-m3` selects ARMv7-M code. `-mcpu=` does not move
+between ARMv7-M and ARMv8-M; that level comes from the triple
+(`thumbv8m.main-none-eabi`).
 
-EmbCC has no ARMv6-M or ARMv8-M Baseline code generator, so `cortex-m0`,
-`cortex-m0plus`, `cortex-m1` and `cortex-m23` are refused: `-mcpu=cortex-m0
-is ARMv6-M, and EmbCC emits ARMv7-M Thumb-2: that core does not implement
-its ldr.w or IT blocks`.
+EmbCC has no ARMv8-M Baseline code generator, so `cortex-m23` is refused:
+`-mcpu=cortex-m23 is ARMv8-M Baseline, and EmbCC emits ARMv6-M (cortex-m0,
+m0plus, m1) or ARMv7-M Thumb-2: the second faults on that core and the
+first is not what it is`.
 
 Any other `CPU` is refused: `-mcpu=cortex-m55 is not a part EmbCC knows:
-it emits ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)`.
+it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv7-M and ARMv7E-M
+(cortex-m3, m4, m7, m33)`.
 
 #### `-mfpu=FPU`
 
@@ -1326,12 +1329,15 @@ single-precision `fpv4-sp-d16` (Cortex-M4F, ARMv7E-M) and `fpv5-sp-d16`
 (Cortex-M33, ARMv8-M Mainline), and the double-precision `fpv5-d16`
 (Cortex-M7, ARMv7E-M). `none`, `soft` and `auto` mean no FPU. The unit
 must match the architecture, on ARMv7 the architecture must be ARMv7E-M,
-and `fpv5-d16` is refused with an `-mcpu=` other than `cortex-m7`:
+and `fpv5-d16` is refused with an `-mcpu=` other than `cortex-m7`. An
+ARMv6-M part has no FPU, so every unit, and `-mfloat-abi=softfp` or
+`hard`, is refused there:
 
 ```text
 -mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4
 -mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16
 -mfpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (-mfpu=fpv5-sp-d16) and nothing else: ...
+-mfpu=fpv5-d16 on thumbv6m-none-eabi: an ARMv6-M core (Cortex-M0, M0+, M1) has no FPU, so floating point is soft and travels in the core registers
 ```
 
 With a single-precision unit, `float` arithmetic is VFP instructions and

@@ -22,8 +22,8 @@ changing EmbCC. Register allocation, which all five share, is in
 | `regalloc.c`, `regalloc.h` | the shared register allocator |
 | `x86_64/` | x86-64: `codegen.c`, `emit.c`, `irgen.c` (`va_arg`, extended asm), `topasm.c` (file-scope asm), `as.c` (EmbAS), `disasm.c`, `predef*.c` |
 | `aarch64/` | AArch64: `codegen.c`, `emit.c`, `asm.c` (inline-asm assembler), `irgen.c`, `predef*.c` |
-| `thumb/` | ARMv7-M and ARMv8-M Mainline: `codegen.c`, `emit.c`, `asm.c`, `attrs.c` (build attributes), `irgen.c`, `predef*.c` |
-| `thumbv8m/` | the ARMv8-M predefined-macro tables only |
+| `thumb/` | ARMv6-M, ARMv7-M and ARMv8-M Mainline: `codegen.c` (ARMv7-M/ARMv8-M selection, and the ABI, frame and allocator code all three share), `v6m.c` (ARMv6-M selection), `cg.h` (what the two share), `emit.c`, `asm.c`, `attrs.c` (build attributes), `irgen.c`, `predef*.c` |
+| `thumbv6m/`, `thumbv8m/` | the ARMv6-M and ARMv8-M predefined-macro tables only |
 | `riscv/` | RV32 and RV64, one backend: `codegen.c`, `emit.c`, `asm.c`, `irgen.c` |
 | `riscv32/`, `riscv64/` | the two RISC-V predefined-macro tables only |
 | `avr/` | AVR (ATmega328P): `codegen.c`, `emit.c`, `asm.c`, `irgen.c`, `predef*.c` |
@@ -742,9 +742,10 @@ Labels in inline asm are refused.
 `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv8m.main-none-eabi`
 and their `-eabihf` forms. Code generation is the same at both
 architecture levels; ARMv8-M differs in its build attributes, its
-predefined-macro table and its FPU (`fpv5-sp-d16`). ARMv6-M (Cortex-M0)
-is not a target yet: its encoders exist (`t1_*` in `emit.c`), and
-[armv6m-plan.md](armv6m-plan.md) describes the rest.
+predefined-macro table and its FPU (`fpv5-sp-d16`). ARMv6-M
+(`thumbv6m-none-eabi`, Cortex-M0/M0+/M1) is a third level with its own
+instruction selection, `src/arch/thumb/v6m.c`: see [ARMv6-M](#armv6-m)
+below and [armv6m-plan.md](armv6m-plan.md).
 
 ### Lowering
 
@@ -951,6 +952,85 @@ jump becomes `b<!c>` over an unconditional `b` (far mode).
 
 Tables are marked with `code_mark_data`, and the object carries `$t` and
 `$d` mapping symbols around them.
+
+### ARMv6-M
+
+`src/arch/thumb/v6m.c`, entered from `gen_func_best` (`v6_gen_func`) when
+`target_thumb_arch()` is 6. ARMv6-M is Thumb-1 plus BL, MRS, MSR and the
+barriers, so it has its own instruction selection, which emits only
+through the `t1_*` encoders and the ARMv7-M encoders `emit.h` lists as
+already Thumb-1. It shares with `codegen.c`, through `cg.h`, AAPCS32
+(`place_one`), the frame layout (`layout`), the site lists and the
+allocator setup; codegen.c's ARMv7-M lowering is unchanged by it.
+
+- **Registers.** r0-r5 are the allocator's (`T6_POOL`; pairs r0:r1, r2:r3,
+  r4:r5); r6 and r7 are the two scratch registers, saved by the prologue
+  when a pass used them, as r9-r11 are on ARMv7-M. A lowering that needs
+  a third register calls `tmp_get`, which pushes one of r0-r5 the
+  instruction does not touch and pops it after (`F->spb` corrects every
+  sp-relative offset meanwhile). r12 breaks parallel-move cycles and
+  holds an indirect call's target. r5 is the frame base of a function
+  with a VLA.
+- **Flags.** Every low-register ALU instruction sets them; the reads
+  (`v_rd`, `fr_ld`, `fr_addr`) never do, building an offset from a
+  literal, so a lowering may read operands between a compare and the
+  branch, and between ADDS and ADCS.
+- **Constants** are MOVS, MOVS+MVNS, MOVS+LSLS, MOVS+ADDS or MOVS+NEGS
+  (`k32`), else a literal-pool word; every symbol address is a pool word
+  with an `R_ARM_ABS32` site.
+- **Literal pools.** A load is `ldr rX, [pc, #off]`, forward and within
+  1020 bytes. The pool is dumped at *pool points*: each IR instruction's
+  start, each word of a long struct copy, before a switch table. The
+  first pass of a layout decides at each point whether the code to come
+  could carry the first pending load out of reach (an island with a
+  branch around it) or, after an unconditional transfer, whether the
+  pool is half way there (an island without one); later passes replay
+  the decisions by point. Code between a load and its island only
+  shrinks from pass to pass, and literals only drop out.
+- **Branches** have three sizes: `b<c>` (±256), `b<!c>` over `b` (±2 KB),
+  `b<!c>` over `bl` (±16 MB; lr is then saved). The first pass uses the
+  middle form (a far form everywhere, restarted, when a target is past
+  2 KB); later passes shrink each branch by its measured distance, with
+  two bytes of slack per alignment pad between, until nothing changes.
+- **Switch**: `adr rB, table; ldrb rT, [rB, rI]; lsls rT, #1; add pc, rT`
+  with byte entries, halfword entries (`lsls rT, rI, #1; ldrh`), or, for a
+  backward case or one too far, a word table taken with `bx`.
+- **Calls the lowering makes**: 32-bit `/` and `%` (`__aeabi_idiv`,
+  `__aeabi_idivmod` and the unsigned pair), 64-bit `*` (`__aeabi_lmul`)
+  and variable shifts (`__aeabi_llsl`, `llsr`, `lasr`), block copies and
+  clears over 8 bytes (`__aeabi_memcpy`, `__aeabi_memclr`), and every
+  atomic read-modify-write (`__atomic_*_N`, with a compare-exchange's two
+  memory orders pushed as stack arguments). `v6_op_calls_helper` tells the
+  allocator and the optimizer which instructions these are. 64-bit add,
+  subtract, logic, compare, negate and constant shifts are inline.
+- **Alignment.** Nothing here makes an unaligned access: a load or store
+  whose address is not `natural` is done a byte at a time, an inline
+  block copy uses words only between frame slots, and a struct argument
+  or a small struct result is read by its alignment. Wide string literals
+  are aligned to their element (`target_string_align`) and static arrays
+  of four bytes or more to a word (`target_object_align`), on ARMv6-M
+  only.
+- **Inline asm** is ARMv7-M's (`ra_target.asm_in_reg`): an `"=r"` output
+  is a value (`ir_asm_op.val`, a second one a continuation), the inputs
+  and the `"m"` and `"+"` addresses move into r0-r3 and r12 as one
+  parallel move and the values out as another, and an output through an
+  address is stored after the template. r12, which only MOV and ADD
+  reach, goes through a low register; a cycle is broken through r12, or
+  r6 when r12 is an operand. A value live across the asm keeps out of
+  `ir_asm.clob`, and the asm makes its function a non-leaf only when the
+  template calls or names lr. `thumbv6m-asm-values.sh` runs it.
+- **-O0** runs the allocator for the temporaries, with every source
+  variable pinned to its slot (`tcg_o0`, codegen.c's `g_t_o0`), as on
+  ARMv7-M, and a function past `ra_o0_too_big` compiles with every
+  temporary in a slot, as there.
+- **No low-register rename.** `gen_func_best` tries pairs on and off as
+  for ARMv7-M, but not `t_lowregs`: every register ARMv6-M computes in is
+  a low one, so there is no 16-bit form to win.
+- **The scan.** `v6_scan` decodes every finished function and refuses it,
+  by name, if anything but an ARMv6-M instruction is in it -- an inline
+  asm template included.
+- **Not yet**: tail calls, `IR_IGOTO`, exception landing pads, 8-byte
+  atomics and 128-bit values are refused by name.
 
 ### Inline asm
 

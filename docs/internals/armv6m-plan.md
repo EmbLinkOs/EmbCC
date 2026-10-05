@@ -1,15 +1,66 @@
 # ARMv6-M: plan for a Cortex-M0 code generator
 
 This page is for EmbCC developers. It surveys what the Thumb backend
-(`src/arch/thumb/`) does today and states what an ARMv6-M mode needs:
-Cortex-M0, M0+ and M1, triple `thumbv6m-none-eabi` (to be added). Function
-names are given rather than line numbers, which move.
+(`src/arch/thumb/`) does and states what an ARMv6-M mode needs:
+Cortex-M0, M0+ and M1, triple `thumbv6m-none-eabi`. Function names are
+given rather than line numbers, which move. The survey below was written
+before the work; the status section says what was built and where it
+departs from the plan.
 
-The encoder half has started. `src/arch/thumb/emit.c` has the `t1_*`
-encoders, which emit only ARMv6-M forms, and `tests/golden/thumb-v6m-encoding.sh`
-checks them against `llvm-mc -triple=thumbv6m-none-eabi`
-([The encoders](#the-encoders)). No code generation or target plumbing for
-ARMv6-M exists yet.
+## Status
+
+Done (steps 1-7 of [the order](#order-of-implementation)):
+
+- **Encoders**: the `t1_*` functions in `src/arch/thumb/emit.c`, checked
+  by `tests/golden/thumb-v6m-encoding.sh`.
+- **Target**: `thumbv6m-none-eabi` (aliases `thumbv6m`,
+  `armv6m-none-eabi`), and `-mcpu=cortex-m0`, `cortex-m0plus`,
+  `cortex-m1` on any ARM triple; the predefined macros are clang's
+  (`src/arch/thumbv6m/predef*.c`, `tools/gen-predef.sh thumbv6m`);
+  `.ARM.attributes` says v6S-M, Thumb-1 and no unaligned access; `-mfpu`
+  and a non-soft float ABI are refused. `-mcpu=cortex-m23` stays refused.
+- **Code generation**: `src/arch/thumb/v6m.c`, the separate instruction
+  selection the plan recommends, sharing AAPCS32, the frame and the
+  allocator setup with `codegen.c` through `src/arch/thumb/cg.h`.
+  [backends.md](backends.md#armv6-m) describes it. Every finished
+  function is decoded by `v6_scan`, which refuses one containing anything
+  but ARMv6-M instructions. Inline asm operands are values in registers
+  and `-O0` keeps its temporaries in registers, both as on ARMv7-M.
+- **Runtime**: `lib/rt/armv6m.c` (the `__aeabi_*` routines and the
+  `__atomic_*` calls, all weak); `make rt-embedded` and
+  `make libc-embedded` build `librt.a` and `libc.a` for the triple.
+- **Tests**: `thumbv6m-target.sh`, `thumbv6m-asm-values.sh`, and
+  `thumb-v6m-exec.sh`, which runs the `tests/exec` corpus at four
+  optimisation levels on QEMU's micro:bit (`tests/harness/thumb-m0`).
+  That test scans every object it builds for ARMv6-M instructions.
+
+Where the implementation departs from the plan:
+
+- **Scratch registers are reserved, not borrowed.** r6 and r7 are the
+  lowering's two scratch registers and the allocator gets r0-r5. A third
+  register comes from `tmp_get`, which pushes one the instruction does not
+  touch. Borrowing (lo_free plus parking in r8-r12) would give the
+  allocator all eight; it is the first code-quality step left.
+- **Pool points, not islands per IR instruction.** A long struct copy can
+  outrun a literal's reach inside one instruction, so the pool may also
+  go at each word of a copy and before a switch table. The decisions are
+  replayed by the points' order (`pool_point`).
+- **Unaligned accesses are fixed in the ARMv6-M lowering**, not in the
+  IR. `IR_MEMCPY`/`IR_MEMZERO` still carry no alignment; ARMv6-M copies
+  of up to 8 bytes use words only between frame slots and bytes
+  otherwise, and longer ones call `__aeabi_memcpy`/`__aeabi_memclr`, which
+  check alignment at run time. Two layout rules apply to ARMv6-M only, so
+  that the other targets' objects are unchanged: wide string literals
+  are aligned to their element (`target_string_align`), and static
+  arrays of four bytes or more to a word (`target_object_align`, as GCC's
+  ARM port does).
+- **Atomics are library calls**, as recommended.
+
+Left to do: borrowing for a full allocation pool, the code-size work of
+step 10 (the branch-free `set_cc` idioms, CMN/CMP fusions, LDM/STM block
+copies, shifted-index addressing), tail calls through `bx`, the optimizer
+gates of step 9, the inline assembler's ARMv6-M vocabulary, `embas`
+literal pools for ARMv6-M, and EmbLD's `Tag_CPU_arch` check.
 
 ## What ARMv6-M takes away
 
@@ -601,7 +652,8 @@ alignment allows. Split every non-`natural` access into bytes. Write
 ## Order of implementation
 
 1. **Encoders and their referee.** Done: the `t1_*` functions,
-   `tools/t1check`, `thumb-v6m-encoding.sh`.
+   `tools/t1check`, `thumb-v6m-encoding.sh`. Steps 2-7 are done too (see
+   [Status](#status)); 8 is done with r0-r5 as the pool.
 2. **Target plumbing.** Triple, `g_thumb_arch` = 6, attributes, predefined
    macros, `-mfpu` refusal, and the EmbLD architecture check. Codegen
    refuses every function by name ("the ARMv6-M backend cannot lower …").

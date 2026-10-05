@@ -279,6 +279,7 @@ make embcc embld
 
 | QEMU board | Processor | `--target=` | Harness | `embld` options |
 |---|---|---|---|---|
+| `microbit` | Cortex-M0 | `thumbv6m-none-eabi` | `tests/harness/thumb-m0` | `-e reset -Ttext 0x0 -Tdata 0x20000000` |
 | `lm3s6965evb` | Cortex-M3 | `thumbv7m-none-eabi` | `tests/harness/thumb` | `-e reset -Ttext 0x0 -Tdata 0x20000000` |
 | `mps2-an386` | Cortex-M4F | `thumbv7em-none-eabihf` | `tests/harness/thumb-m4f` | `-e reset -Ttext 0x0 -Tdata 0x20000000` |
 | `mps2-an505` | Cortex-M33 | `thumbv8m.main-none-eabi` | `tests/harness/thumb-m33` | `-e reset -Ttext 0x10000000 -Tdata 0x10100000` |
