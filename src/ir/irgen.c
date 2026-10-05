@@ -2514,10 +2514,17 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                         : emit_load(fn, addr, t);
         int old = -1;
         if (e->is_post) {
+            /* The old value, at its own width, as a `?:` arm's copy is.
+             * emit() makes every instruction four bytes wide, and a
+             * four-byte copy of a long long or a double is its low word:
+             * on a 32-bit machine that was x++'s value wherever the
+             * optimizer had not folded the copy away (-O0). */
             struct ir_ins *save = emit(fn);
             save->op = IR_MOV;
             save->a = cur;
             save->dst = old = new_temp(fn);
+            save->w = ty_is_float(t) ? ty_size(t) : w;
+            save->flt = ty_is_float(t) && !ty_is_xldouble(t);
         }
         int sum;
         if (ty_is_float(t))   /* x++ adds 1.0 — not 1 to the bit pattern */

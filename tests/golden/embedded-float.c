@@ -114,6 +114,21 @@ int main(void)
                                        t = t + 1.0f / (float)k; }
       hd(s); hf(t); nl(); }
 
+    /* x++ and x-- are worth x's OLD value, the whole double of it:
+     * through a local, a volatile one, a pointer and an array element. */
+    { volatile double vd = 3.5;
+      double d0 = vd--;
+      double arr[2] = { 0.25, 1e10 };
+      double *pd = &arr[0];
+      double a0 = arr[1]++;
+      double p0 = (*pd)--;
+      double l = -0.5;
+      double l0 = l++;
+      float f = 7.25f;
+      float f0 = f--;
+      hd(d0); hd(vd); hd(a0); hd(arr[1]); nl();
+      hd(p0); hd(arr[0]); hd(l0); hd(l); hf(f0); hf(f); nl(); }
+
     puts_("==END==\n");
     return 0;
 }
