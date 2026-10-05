@@ -1672,20 +1672,30 @@ static int mips_tail_ok(const struct mips_fn *F, int n)
 /* The epilogue's restores: the callee-saved registers, ra, the frame.
  * Shared by the epilogue and a tail call. Touches nothing but the saved
  * registers, ra, sp and t0, so v0:v1 and a0-a3 survive it. */
-static void mips_restore(struct mips_fn *F)
+/* The epilogue's restores, and with `ret` the return too: `jr ra` with
+ * the frame's release in its delay slot -- the slot runs before the
+ * jump lands, so the caller sees sp restored, and the slot is never a
+ * nop when there is a frame to release. */
+static void mips_restore(struct mips_fn *F, int ret)
 {
     struct code *t = F->t;
     for (int k = 0; k < F->nsave; k++)
         ld_sp(F, F->used_callee[k], F->save_at + (long)k * 4, 4, 1);
     if (!F->leaf)
         ld_sp(F, MIPS_RA, F->ra_slot, 4, 1);
+    if (F->frame && fits16(F->frame)) {
+        if (ret)
+            mips_jr(t, MIPS_RA);
+        mips_alu_imm(t, MIPS_ADDIU, MIPS_SP, MIPS_SP, F->frame);
+        return;
+    }
     if (F->frame) {
-        if (fits16(F->frame)) {
-            mips_alu_imm(t, MIPS_ADDIU, MIPS_SP, MIPS_SP, F->frame);
-        } else {
-            mips_li(t, MIPS_T0, F->frame);
-            mips_alu(t, MIPS_ADDU, MIPS_SP, MIPS_SP, MIPS_T0);
-        }
+        mips_li(t, MIPS_T0, F->frame);
+        mips_alu(t, MIPS_ADDU, MIPS_SP, MIPS_SP, MIPS_T0);
+    }
+    if (ret) {
+        mips_jr(t, MIPS_RA);
+        mips_nop(t);
     }
 }
 
@@ -1793,7 +1803,7 @@ static void gen_call(struct mips_fn *F, int n)
         addr_sp(F, MIPS_A0, F->scratch_at + i->scratch);
 
     if (F->tail && F->tail[n]) {
-        mips_restore(F);
+        mips_restore(F, 0);
         call_sym(F, i->callee, 1);
         if (n + 1 < fn->nins)
             F->skip_next = 1;         /* the IR_RET: not reached */
@@ -3069,9 +3079,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                 mips_mv(t, MIPS_SP, MIPS_FP);
                 F.fb = MIPS_SP;
             }
-            mips_restore(&F);
-            mips_jr(t, MIPS_RA);
-            mips_nop(t);
+            mips_restore(&F, 1);
         }
     }
 
