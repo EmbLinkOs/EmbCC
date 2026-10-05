@@ -2520,6 +2520,60 @@ static int directive(struct gas *g, char *p, int pass)
         g->cur = save;
         return 1;
     }
+    /* .reloc OFFSET, TYPE, SYMBOL[+ADDEND]: a relocation of the given
+     * ELF type at a place in this section, with the bytes there left as
+     * they are. It is how `embcc -S` attaches every relocated field
+     * (src/driver/asmout.c), so the compiler's own assembly output
+     * reassembles here into the object -c writes. */
+    if (DIR(".reloc")) {
+        const char *v = arg, *tn;
+        int bad, type;
+        struct gval at = gx_eval(g, &v, pass, &bad);
+        if (bad)
+            return 1;
+        v = skip_ws((char *)v);
+        if (*v != ',') {
+            gerr(g, ".reloc wants OFFSET, TYPE, SYMBOL");
+            return 1;
+        }
+        tn = v = skip_ws((char *)v + 1);
+        while (is_symc((unsigned char)*v))
+            v++;
+        type = target_reloc_by_name(target_get(), tn, (int)(v - tn));
+        if (type < 0) {
+            gerr(g, ".reloc: '%.*s' is not a relocation this assembler "
+                    "knows for %s", (int)(v - tn), tn, target_triple_now());
+            return 1;
+        }
+        v = skip_ws((char *)v);
+        if (*v != ',') {
+            gerr(g, ".reloc with no symbol is not supported: it wants "
+                    "OFFSET, TYPE, SYMBOL");
+            return 1;
+        }
+        v++;
+        struct gval sv = gx_eval(g, &v, pass, &bad);
+        if (bad)
+            return 1;
+        if (*skip_ws((char *)v)) {
+            gerr(g, ".reloc: \"%s\" is not one expression", arg);
+            return 1;
+        }
+        if (pass != 2)
+            return 1;
+        if (at.sec != g->cur && at.sec != SEC_ABS) {
+            gerr(g, ".reloc needs an offset in this section");
+            return 1;
+        }
+        if (sv.sec == SEC_ABS) {
+            gerr(g, ".reloc against a plain number is not supported: "
+                    "it needs a symbol");
+            return 1;
+        }
+        fix_add(g, g->cur, at.v, sv.base->name, type,
+                sv.sec >= 0 ? sv.v - sv.base->value : sv.v);
+        return 1;
+    }
     if (DIR(".org")) {
         const char *v = arg;
         int bad;
@@ -2549,12 +2603,34 @@ static int directive(struct gas *g, char *p, int pass)
             const char *e = gx_operand_end(q);
             char *one = xstrndup(q, (size_t)(e - q));
             const char *v = one;
-            int bad;
+            int bad, pm = 0;
+            /* AVR's pm(sym) and gs(sym): a function's WORD address, which
+             * is what a function pointer in data holds there -- and what
+             * `embcc -S` writes one as (R_AVR_16_PM). The parentheses are
+             * left to the expression. */
+            if (g->tgt->machine == EM_AVR) {
+                const char *w = skip_ws((char *)v);
+                if ((!strncmp(w, "pm", 2) || !strncmp(w, "gs", 2)) &&
+                    *skip_ws((char *)w + 2) == '(') {
+                    pm = 1;
+                    v = skip_ws((char *)w + 2);
+                }
+            }
             struct gval gv = gx_eval(g, &v, pass, &bad);
             if (!bad && *skip_ws((char *)v))
                 gerr(g, "\"%s\" is not one expression", one), bad = 1;
-            if (bad || gv.sec == SEC_ABS || gv.unknown) {
+            if (!bad && pm && width != 2)
+                gerr(g, "\"%s\": a program-memory address is two bytes",
+                     one), bad = 1;
+            if (!bad && pm && gv.sec == SEC_ABS) {
+                emit_int(g, gv.v >> 1, width);
+            } else if (bad || gv.sec == SEC_ABS || gv.unknown) {
                 emit_int(g, bad || gv.unknown ? 0 : gv.v, width);
+            } else if (pm) {
+                if (pass == 2)
+                    fix_add(g, g->cur, cur_off(g), gv.base->name, R_AVR_16_PM,
+                            gv.sec >= 0 ? gv.v - gv.base->value : gv.v);
+                emit_int(g, 0, width);
             } else {
                 /* An ADDRESS in a data word: a relocation, against the
                  * label it is relative to or the external symbol. */
@@ -2976,10 +3052,14 @@ static int write_object(struct gas *g, const char *out_path)
                                                       : s->sec == SEC_ABS
                                                       ? SHN_ABS : SHN_UNDEF));
         }
-    /* Anything a relocation names and nothing defined becomes UNDEF. */
+    /* Anything a relocation names and nothing defined becomes UNDEF --
+     * but not a label defined here that no symbol was written for: a
+     * data word naming a `.L` label is relocated against its section
+     * (above), and an undefined `.Lx` beside that was a symbol no other
+     * object can define. */
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
-        if (s && !s->elf_ndx)
+        if (s && !s->elf_ndx && s->sec < 0)
             s->elf_ndx = elfw_add_symbol(w, s->name, 0, 0,
                                          (Elf64_Uchar)(((s->is_weak ? STB_WEAK
                                                        : STB_GLOBAL) << 4) |
