@@ -33,8 +33,10 @@ resolved by the backend and leave no site.
 
 The driver (`compile_unit` in `src/driver/main.c`) then:
 
-1. lays out the defined globals: initialized objects in `.data`,
-   zero-initialized ones in `.bss`, thread-locals in `.tdata` and
+1. lays out the defined globals: initialized objects in `.data` (an
+   explicit `= 0` included), ones with no initializer in `.bss` -- or,
+   under `-fcommon`, a C tentative definition as an `SHN_COMMON` symbol
+   with no section, which the linker places -- thread-locals in `.tdata` and
    `.tbss`, objects with a `section` attribute in their named section,
    and, for ELF output, `const` objects that are not `volatile` in
    `.rodata` after the string literals;
@@ -183,7 +185,7 @@ limit.
 | a function section `NAME` | `PROGBITS` | `AX` | 16 | a function has `section("NAME")` |
 | `.rodata` | `PROGBITS` | `A` | at least 16 | string literals or `const` objects |
 | `.data` | `PROGBITS` | `WA` | the strictest object's | initialized writable objects |
-| `.bss` | `NOBITS` | `WA` | the strictest object's | zero-initialized objects |
+| `.bss` | `NOBITS` | `WA` | the strictest object's | objects with no initializer (`int x = 0;` is `.data`) |
 | `.tdata`, `.tbss` | `PROGBITS`, `NOBITS` | `WAT` | the strictest object's | thread-local objects |
 | a data section `NAME` | `NOBITS` for `.bss` and `.bss.*`, otherwise `PROGBITS` | `A`, plus `X` for `.text*`, plus `W` unless `.rodata*` | the strictest object's | an object has `section("NAME")` |
 | `.init_array`, `.fini_array` | `INIT_ARRAY`, `FINI_ARRAY` | `WA` | pointer size | `constructor`, `destructor` functions |

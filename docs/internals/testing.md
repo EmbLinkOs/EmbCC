@@ -411,6 +411,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `install` | the compiler finds its headers and libraries relative to its own binary |
 | `version` | `--version` names the target and the language and admits what is missing |
 | `driver-deps` | `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MP` and `-fsyntax-only` |
+| `gcc-flags` | the flags an arm-none-eabi-gcc build passes: each accepted one compiles silently on every target it applies to, each refused one names itself, and each promise holds in the object -- no jump table under `-fno-jump-tables` on any backend (and the same answers on QEMU's Cortex-M3 and RV32), `-fcommon`'s COMMON symbols merged by `embld` and run, `-fno-inline-functions`, `-fsingle-precision-constant`, `-save-temps`, `= 0` in `.data`, volatile bit-fields at their declared width |
 | `stack-usage` | `-fstack-usage` output in gcc's format |
 | `sanitize` | `-fsanitize=undefined` in trap mode on every target |
 | `tools-build` | every tool in `make all` links |
@@ -629,6 +630,7 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_RV_JAL_RANGE=BYTES`, `EMBCC_RV_LONG_CALLS` | shrink the reach the RISC-V backend assumes for `jal`, or (when set) call functions in the same unit with `auipc`+`jalr` instead of `jal`, to test the long-call path without a megabyte of code |
 | `EMBCC_T_FPU` | `1` or `0` overrides whether the Thumb backend uses the FPU |
 | `EMBCC_T_NOWIDEIMM`, `EMBCC_RV_NOWIDEIMM`, `EMBCC_NO_SIGNTEST`, `EMBCC_RV_NOCMPIMM` | build a 64-bit constant whole on Thumb or RV32; keep `x >> 63` a shift, and `x & K` eight bytes wide, before a branch; load a RISC-V value compare's constant into a register; for bisecting |
+| `EMBCC_NO_JUMP_TABLES` | compile as with `-fno-jump-tables` whatever the command line says: run an exec golden with it set to take every dense switch through the compare tree |
 | `EMBCC_VECDEBUG` | the vectorizer prints, on stderr, each loop it considers and why it rejected it |
 | `EMBCC_NO_FULLUNROLL` | a loop with a constant trip count is unrolled like any other instead of being copied whole, for bisecting |
 
