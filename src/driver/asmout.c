@@ -496,6 +496,11 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         if (!sz)
             continue;
         if (!any_data) { ob_str(b, "\n"); any_data = 1; }
+        if (g->is_common) {           /* -fcommon: the linker places it */
+            ob_fmt(b, "\t.comm\t%s,%d,%d\n", asym(g->name), sz,
+                   g->user_align > al ? g->user_align : al);
+            continue;
+        }
         if (!g->is_static)
             ob_fmt(b, "\t.%s\t%s\n", g->is_weak ? "weak" : "globl",
                    asym(g->name));

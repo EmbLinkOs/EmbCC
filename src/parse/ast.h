@@ -306,7 +306,10 @@ struct global {
     int defined;          /* sema, canonical: some declaration defines it */
     int absorbed;         /* sema: merged into an earlier node */
     int used;
-    int in_bss;           /* driver: zero-valued -> .bss, else .data */
+    int in_bss;           /* driver: no initializer -> .bss, else .data */
+    int is_common;        /* driver: -fcommon made this tentative
+                           * definition a COMMON symbol: no section, no
+                           * offset; the linker reserves it */
     int in_rodata;        /* driver: a const object, placed in .rodata
                            * after the string literals (ELF) */
     int named;            /* driver: 1 + index into the named sections, or 0 */

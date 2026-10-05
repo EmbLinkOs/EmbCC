@@ -110,6 +110,7 @@ static void print_options(FILE *out)
       "  -fno-access-control          do not enforce private/protected\n"
       "  -fno-jump-tables             no switch through a table of addresses\n"
       "  -fno-inline-functions        inline only what is declared inline\n"
+      "  -fcommon                     tentative definitions are COMMON (C, ELF)\n"
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
@@ -368,6 +369,10 @@ static const char *why_decision, *why_subject;
 static int dep_mode, dep_only, dep_phony;
 static const char *dep_file, *dep_target;
 
+/* -fcommon: a C tentative definition (`int x;` at file scope, nothing
+ * else saying where it goes) is a COMMON symbol, which the linker merges
+ * with the others of its name, instead of a .bss definition. ELF only. */
+static int g_fcommon;
 /* -specs=FILE / --specs=FILE: a GCC driver specs file, named so the link
  * can say once that EmbCC's own libraries are linked instead. */
 static const char *g_specs;
@@ -1758,9 +1763,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * one of its own. Decided as the layout below decides it: read-only
      * where it would be in .rodata, initialized data, or zeros. A
      * thread-local keeps .tdata/.tbss, which is what makes it one. */
+    /* -fcommon (C, ELF): a TENTATIVE definition -- external, no
+     * initializer, nothing saying where it goes -- is a COMMON symbol,
+     * as GCC makes it: the linker merges every unit's `int x;` into one
+     * object, the largest size and strictest alignment, and a real
+     * definition elsewhere wins. A static, a thread-local, a weak one or
+     * one with a section of its own stays a definition, as in GCC; a
+     * const one is COMMON as GCC's is (it is zeros either way). */
+    for (struct global *g = u->globals; g; g = g->next)
+        g->is_common = g_fcommon && !lang_cxx &&
+                       target_fmt_get() == TGT_FMT_ELF &&
+                       !g->absorbed && g->defined && !g->has_init &&
+                       !g->is_static && !g->is_tls && !g->section &&
+                       !g->is_weak;
     if (data_sections && target_fmt_get() == TGT_FMT_ELF)
         for (struct global *g = u->globals; g; g = g->next) {
-            if (g->absorbed || !g->defined || g->section || g->is_tls)
+            if (g->absorbed || !g->defined || g->section || g->is_tls ||
+                g->is_common)
                 continue;
             const struct type *ot = g->ty;
             while (ot && ot->kind == TY_ARRAY)
@@ -1794,6 +1813,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             align = g->user_align;
         g->in_bss = !g->has_init;
         g->named = 0;
+        if (g->is_common) {    /* the linker places it (symbol below) */
+            g->in_rodata = 0;
+            g->off = align;    /* SHN_COMMON's st_value is the alignment */
+            continue;
+        }
         /* A const object is read-only data, where gcc puts it: in flash
          * on a microcontroller rather than copied into RAM at startup,
          * and write-protected under an MMU. Its place is fixed below,
@@ -2963,7 +2987,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 (Elf64_Xword)global_size(g),
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
                               g->is_tls ? STT_TLS : STT_OBJECT),
-                (Elf64_Half)(g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
+                (Elf64_Half)(g->is_common ? SHN_COMMON
+                             : g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
                              : g->in_rodata ? rodata_ndx
                              : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
@@ -4092,7 +4117,6 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-fno-strict-aliasing") == 0 ||
                    strcmp(argv[i], "-fstrict-aliasing") == 0 ||
                    strcmp(argv[i], "-fwrapv") == 0 ||
-                   strcmp(argv[i], "-fno-common") == 0 ||
                    strcmp(argv[i], "-fno-plt") == 0 ||
                    strcmp(argv[i], "-fomit-frame-pointer") == 0 ||
                    strcmp(argv[i], "-fno-omit-frame-pointer") == 0) {
@@ -4108,13 +4132,17 @@ int main(int argc, char **argv)
              *                       it gives
              *   -fwrapv             signed overflow wraps; nothing here
              *                       optimises on the assumption it cannot
-             *   -fno-common         a tentative definition is already
-             *                       emitted into .bss, not a common block
              *   -f[no-]omit-frame-pointer  x86-64 and aarch64 always keep
              *                       one, ARMv7-M and RISC-V never do
              *
              * The opposite spellings are NOT accepted, because those
              * would be promises: see the refusals below. */
+        } else if (strcmp(argv[i], "-fcommon") == 0 ||
+                   strcmp(argv[i], "-fno-common") == 0) {
+            /* -fno-common is the default: a tentative definition is a
+             * .bss definition. -fcommon makes it a COMMON symbol (C, ELF;
+             * checked after the arguments), which embld merges. */
+            g_fcommon = argv[i][2] == 'c';
         } else if (strcmp(argv[i], "-fno-jump-tables") == 0 ||
                    strcmp(argv[i], "-fjump-tables") == 0) {
             /* A PROMISE, kept: no switch is lowered through a table of
@@ -4691,6 +4719,17 @@ int main(int argc, char **argv)
      * own command lines: every dense switch takes the compare tree. */
     if (plat_getenv("EMBCC_NO_JUMP_TABLES"))
         target_set_jump_tables(0);
+    /* COMMON is an ELF symbol kind (SHN_COMMON); the Mach-O and COFF
+     * writers emit every tentative definition as a definition, and a
+     * build that needs two of them merged would be told so only by its
+     * linker. */
+    if (g_fcommon && target_fmt_get() != TGT_FMT_ELF) {
+        fprintf(stderr, "embcc: error: -fcommon is not supported for %s: "
+                        "EmbCC writes COMMON symbols into ELF objects only, "
+                        "and this target's are %s\n", target_triple_now(),
+                target_fmt_name(target_fmt_get()));
+        return 1;
+    }
 
     if (g_want_dumpmachine) {
         printf("%s\n", target_triple_now());
