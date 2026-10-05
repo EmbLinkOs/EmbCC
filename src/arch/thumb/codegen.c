@@ -5862,7 +5862,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         !getenv("EMBCC_NO_MEMOFF")) {
         int dp = target_thumb_fpu_dp();
         char *w = dp ? (char *)0 : wide64_map(fn);
-        ra_fold_memoff(fn, 0, 4095, 4, dp ? 8 : 4, w);
+        ra_fold_memoff(fn, 0, 4095, 4, dp ? 8 : 4, w, 1, 31);
         free(w);
     }
     const char *lr = getenv("EMBCC_T_LOWREGS");

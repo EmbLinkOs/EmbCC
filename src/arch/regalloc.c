@@ -1643,7 +1643,7 @@ char *ra_narrow_hishift(const struct ir_func *fn)
  * aarch64); and only offsets the target says it can encode for that
  * access, [lo, hi - size]. */
 int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
-                   int max_size, const char *wide)
+                   int max_size, const char *wide, int regoff, int short_k)
 {
     int nv = fn->nvregs, changed = 0;
     if (!nv)
@@ -1672,13 +1672,79 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
               wide[i->dst]))
             addr_uses[i->a]++;
     }
+    /* `(base + K) + i` is `(base + i) + K`, and then K is the accesses'
+     * offset: `p->a[i]` with the array 0x44 into the struct was
+     * `addw r0, r4, #0x44; add.w r1, r0, r7, lsl #2; ldr r0, [r1]`
+     * where `add.w r1, r4, r7, lsl #2; ldr r0, [r1, #0x44]` does. When
+     * the sum is only ever an address, and the constant ADD has one use
+     * (this one) and a base with one definition -- so the base holds
+     * the same value here -- the sum takes the base and the accesses
+     * the constant; the constant ADD is left dead.
+     *
+     * Where an access can add a register itself (Thumb's and aarch64's
+     * [rn, rm, lsl #s]), one access is as short either way, so only an
+     * address two or more accesses share is rewritten -- `t->a[i] |= v`
+     * -- and on Thumb only where the offset stays in the two-byte
+     * ldr/str's reach: `t->state[i]` 84 bytes in was `adds; ldrb [r1,
+     * r0]` and would be `adds; ldrb.w [r0, #84]`. */
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        int q = i->dst;
+        if (i->op != IR_ADD || i->imm_b || i->flt || i->w != w_addr ||
+            q < fn->nvars || q >= nv || defs[q] != 1 || !uses[q] ||
+            uses[q] != addr_uses[q] || (regoff && uses[q] < 2))
+            continue;
+        for (int side = 0; side < 2; side++) {
+            int x = side ? i->b : i->a, y = side ? i->a : i->b;
+            if (x < fn->nvars || x >= nv || defs[x] != 1 || uses[x] != 1 ||
+                y < 0 || y >= nv || x == y)
+                continue;
+            int dx = -1;
+            for (int m = 0; m < n; m++)
+                if (fn->ins[m].dst == x && ra_ins_def(&fn->ins[m]) == x) {
+                    dx = m;
+                    break;
+                }
+            if (dx < 0)
+                continue;
+            const struct ir_ins *a = &fn->ins[dx];
+            int base = a->a;
+            long k = a->imm;
+            if (a->op != IR_ADD || !a->imm_b || a->flt || a->w != w_addr ||
+                base < 0 || base >= nv || defs[base] != 1 || base == q)
+                continue;
+            int ok = 1;
+            for (int m = 0; m < fn->nins && ok; m++) {
+                const struct ir_ins *u = &fn->ins[m];
+                if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == q) {
+                    long off = (long)u->memoff + k;
+                    if (off < lo || off > hi - u->size ||
+                        (short_k && off > (long)short_k * u->size))
+                        ok = 0;
+                }
+            }
+            if (!ok)
+                continue;
+            for (int m = 0; m < fn->nins; m++) {
+                struct ir_ins *u = &fn->ins[m];
+                if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == q)
+                    u->memoff += (int)k;
+            }
+            if (side) i->b = base; else i->a = base;
+            uses[x]--;
+            uses[base]++;
+            drop[dx] = 1;
+            changed = 1;
+            break;
+        }
+    }
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
         int p = i->dst, s = i->a;
         long k = i->imm;
-        if (i->op != IR_ADD || !i->imm_b || i->flt || i->w != w_addr ||
-            p < fn->nvars || p >= nv || s < 0 || s >= nv || s == p ||
-            defs[p] != 1 || uses[p] != addr_uses[p] || !uses[p])
+        if (drop[n] || i->op != IR_ADD || !i->imm_b || i->flt ||
+            i->w != w_addr || p < fn->nvars || p >= nv || s < 0 || s >= nv ||
+            s == p || defs[p] != 1 || uses[p] != addr_uses[p] || !uses[p])
             continue;
         int ok = 1;
         for (int m = 0; m < fn->nins && ok; m++) {
