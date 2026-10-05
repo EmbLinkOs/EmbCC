@@ -1571,9 +1571,30 @@ static void ins_blank(struct ir_ins *i)
 
 /* Growable instruction buffer, for rebuilding fn->ins out of SSA. */
 struct ibuf { struct ir_ins *p; int n, cap; };
+/* EMBCC_IBUF_MOVE=1: every push MOVES the buffer and scribbles over the
+ * old one. A pointer an earlier push returned is valid only until the
+ * next, and holding one across it reads freed memory -- but only when
+ * that push happens to grow the buffer, which is how such reads survive
+ * ordinary testing. With this every one of them reads garbage at once
+ * (tests/golden/ibuf-move.sh). Each push copies the whole buffer, so a
+ * compile is many times slower: for testing only. */
+static int g_ib_move = -1;
+
 static struct ir_ins *ib_push(struct ibuf *b)
 {
-    if (b->n == b->cap) {
+    if (g_ib_move < 0)
+        g_ib_move = getenv("EMBCC_IBUF_MOVE") != NULL;
+    if (g_ib_move) {
+        struct ir_ins *np = xmalloc((size_t)(b->n + 1) * sizeof *np);
+        if (b->n)
+            memcpy(np, b->p, (size_t)b->n * sizeof *np);
+        if (b->p) {
+            memset(b->p, 0xa5, (size_t)b->cap * sizeof *b->p);
+            free(b->p);
+        }
+        b->p = np;
+        b->cap = b->n + 1;
+    } else if (b->n == b->cap) {
         b->cap = b->cap ? b->cap * 2 : 64;
         b->p = xrealloc(b->p, (size_t)b->cap * sizeof *b->p);
     }
