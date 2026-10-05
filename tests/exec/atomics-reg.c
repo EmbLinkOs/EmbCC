@@ -83,6 +83,27 @@ NI static int trylock(int *l)
     return c + 10;
 }
 
+/* ...narrow and signed: the value seen comes back sign-extended */
+NI static int trylock8(signed char *l, signed char want)
+{
+    signed char c = -1;
+    if (__atomic_compare_exchange_n(l, &c, want, 0, SEQ, SEQ))
+        return 100;
+    return c;
+}
+
+/* the classic retry loop: a miss refreshes `old`, and the loop goes
+ * round with the value it saw */
+NI static long add_loop(long *p, long by, int *tries)
+{
+    long old = __atomic_load_n(p, __ATOMIC_RELAXED) - 3;   /* stale */
+    *tries = 1;
+    while (!__atomic_compare_exchange_n(p, &old, old + by, 1, SEQ,
+                                        __ATOMIC_RELAXED))
+        ++*tries;
+    return old;
+}
+
 /* Many values live across the atomics, each one used after them: some
  * operands do not get a register. */
 NI static unsigned long busy(long *obj, int n, unsigned long seed)
@@ -189,6 +210,15 @@ int main(void)
     if (trylock(&lk) != 11 || lk != 1) return 33;
     lk = 2;
     if (trylock(&lk) != 12) return 34;
+
+    signed char b8 = -1;
+    if (trylock8(&b8, -128) != 100 || b8 != -128) return 36;
+    if (trylock8(&b8, 5) != -128 || b8 != -128) return 37;
+    b8 = 127;
+    if (trylock8(&b8, 0) != 127) return 38;
+    long acc = 40;
+    int tries;
+    if (add_loop(&acc, 2, &tries) != 40 || acc != 42 || tries < 2) return 39;
 
     long obj[4] = { 1, -2, 3, -4 };
     unsigned long h = busy(obj, 40, 12345);

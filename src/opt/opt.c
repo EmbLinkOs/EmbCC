@@ -11373,6 +11373,150 @@ static void sroa_report(struct ir_func *fn, int nparams, int nvars,
  * refusal from the first is provisional: the whole point of the second
  * is that some of them stop being true. Only the last one has anything
  * worth telling a person. */
+/* ---- a compare-exchange's `expected`, by value --------------------------
+ *
+ * __atomic_compare_exchange_n(obj, &expected, desired, ...) takes
+ * `expected` by ADDRESS, and the address is all that keeps it in memory.
+ * A lock's fast path is exactly this --
+ *
+ *     int c = 0;
+ *     if (__atomic_compare_exchange_n(&l->v, &c, 1, 0, ACQ, RLX)) return;
+ *
+ * -- and mem2reg refuses `c` for having its address taken, so the lock
+ * stored a zero to the frame, took its address, loaded it back for the
+ * compare-exchange and stored the value seen through it again, where a
+ * register would have done (lib/libc's __lock, mtx_lock, call_once).
+ *
+ * When every address of a scalar local feeds compare-exchanges as their
+ * `expected` and nothing else, the local is private: nobody else can see
+ * it, so reading it before and writing the value seen after is the same
+ * program. That is IR_CAS, the by-value form the __sync builtins use:
+ *
+ *     e = ldvar v ; s = cas [obj], e, desired ; stvar v, s ; r = (s == e)
+ *
+ * (s re-extended first when the object is narrower than four bytes, as
+ * irgen does for __sync_bool_compare_and_swap). Then nothing takes v's
+ * address and mem2reg promotes it. Writing v on a match as well stores
+ * the value it already holds, which a private local cannot show. */
+struct cx_read { struct ir_ins *i; const int *of; int nv; signed char *st; };
+static void cx_read_cb(int *p, void *ctx)
+{
+    struct cx_read *r = ctx;
+    int t = *p;
+    if (t < 0 || t >= r->nv || r->of[t] < 0)
+        return;
+    /* the expected operand of a compare-exchange as wide as the local,
+     * and not also its object or its desired value */
+    if (r->i->op == IR_CMPXCHG && p == &r->i->b && r->i->a != t &&
+        r->i->c != t)
+        return;
+    r->st[r->of[t]] = -1;
+}
+
+static int pass_cxlocal(struct ir_func *fn)
+{
+    int nv = fn->nvregs, nvars = fn->nvars;
+    if (nvars == 0 || fn->nins == 0 || fn->neh)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    /* per local: 0 untouched, 1 a candidate, -1 refused */
+    signed char *st = xcalloc((size_t)nvars, 1);
+    int *of = xmalloc((size_t)nv * sizeof *of);   /* temp -> its local */
+    for (int v = 0; v < nv; v++)
+        of[v] = -1;
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_ADDR || i->a < 0 || i->a >= nvars)
+            continue;
+        if (i->dst < nvars || i->dst >= nv || d.cnt[i->dst] != 1) {
+            st[i->a] = -1;
+            continue;
+        }
+        of[i->dst] = i->a;
+        if (st[i->a] == 0)
+            st[i->a] = 1;
+    }
+    for (int L = 0; L < nvars; L++) {
+        const struct ir_local *Li = &fn->locals[L];
+        if (st[L] == 1 &&
+            (!Li->is_int_or_ptr || Li->is_int128 || Li->is_volatile ||
+             (Li->size != 1 && Li->size != 2 && Li->size != 4 &&
+              Li->size != 8)))
+            st[L] = -1;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        struct cx_read r = { i, of, nv, st };
+        if (i->op == IR_ADDR)
+            continue;                     /* its `a` is the slot itself */
+        each_read(i, cx_read_cb, &r);
+        if (i->op == IR_CMPXCHG && i->b >= 0 && i->b < nv && of[i->b] >= 0 &&
+            (i->size != fn->locals[of[i->b]].size || i->flt))
+            st[of[i->b]] = -1;
+    }
+    for (int L = 0; L < nvars; L++)
+        if (st[L] == 1)
+            any = 1;
+    if (!any) {
+        free(st); free(of); free_defs(&d);
+        return 0;
+    }
+
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins o = fn->ins[n];
+        if (newpos) newpos[n] = nb.n;
+        if (o.op == IR_ADDR && o.a >= 0 && o.a < nvars && st[o.a] == 1)
+            continue;                     /* read by nothing now */
+        if (o.op != IR_CMPXCHG || o.b < 0 || o.b >= nv || of[o.b] < 0 ||
+            st[of[o.b]] != 1) {
+            *ib_push(&nb) = o;
+            continue;
+        }
+        int L = of[o.b];
+        int e = fn->nvregs++, sv = fn->nvregs++, x = sv;
+        struct ir_ins *p = ib_push(&nb);
+        p->op = IR_LDVAR; p->a = L; p->dst = e;
+        p->size = o.size; p->sign = o.sign; p->w = o.w;
+        p->line = o.line; p->col = o.col; p->synth = o.synth;
+        p = ib_push(&nb);
+        p->op = IR_CAS; p->a = o.a; p->b = e; p->c = o.c; p->dst = sv;
+        p->size = o.size; p->sign = o.sign; p->w = o.w;
+        p->line = o.line; p->col = o.col; p->synth = o.synth;
+        if (o.size < 4) {
+            x = fn->nvregs++;
+            p = ib_push(&nb);
+            p->op = IR_EXT; p->a = sv; p->dst = x;
+            p->size = o.size; p->sign = o.sign; p->w = o.w;
+            p->line = o.line; p->col = o.col; p->synth = o.synth;
+        }
+        p = ib_push(&nb);
+        p->op = IR_STVAR; p->dst = L; p->a = x; p->size = o.size;
+        p->line = o.line; p->col = o.col; p->synth = o.synth;
+        p = ib_push(&nb);
+        p->op = IR_CMP; p->pred = B_EQ; p->a = x; p->b = e; p->dst = o.dst;
+        p->w = o.w; p->sign = o.sign;
+        p->line = o.line; p->col = o.col; p->synth = o.synth;
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free(st); free(of); free_defs(&d);
+    return 1;
+}
+
 static int pass_sroa(struct ir_func *fn, int report_refusals)
 {
     int nvars = fn->nvars, nparams = fn->nparams, nvr = fn->nvregs;
@@ -13222,6 +13366,8 @@ static void opt_func(struct ir_func *fn)
     /* Before mem2reg, and needing no CFG of its own: it only renames
      * memory, and what it renames is what mem2reg then finds. */
     int sroa_twice = g_sroa && g_mem2reg && cfg_ok && !has_igoto;
+    if (g_mem2reg && cfg_ok && !has_igoto)
+        pass_cxlocal(fn);         /* a private `expected`: by value */
     if (g_sroa)
         pass_sroa(fn, !sroa_twice);
     if (g_mem2reg && cfg_ok && !has_igoto) {

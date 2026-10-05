@@ -16,7 +16,11 @@
 #     of rsi and rdi need a REX prefix (`%sil`, not `%dh`), and objdump is
 #     the referee for that;
 #  3. a compare-exchange writes `expected` back only when it MISSED, so
-#     the store sits behind a `je` -- C11 says a match leaves it alone.
+#     the store sits behind a `je` -- C11 says a match leaves it alone;
+#  4. a lock's fast path -- `int c = 0; cmpxchg(l, &c, 1)` -- keeps `c`
+#     in a register: its address goes nowhere but the compare-exchange,
+#     so it is private, and the optimizer passes it by value (IR_CAS),
+#     which leaves mem2reg nothing to refuse it for.
 #
 # What they compute is tests/exec/atomics-reg.c's business, which runs
 # the same shapes against gcc at -O0, -O2 and -Os.
@@ -44,6 +48,14 @@ int cx64(long *p, long *e, long d)
 { return __atomic_compare_exchange_n(p, e, d, 0, SEQ, SEQ); }
 unsigned and32(unsigned *p, unsigned v) { return __atomic_fetch_and(p, v, SEQ); }
 long nand64(long *p, long v) { return __atomic_fetch_nand(p, v, SEQ); }
+int trylock(int *l)
+{
+    int c = 0;
+    if (__atomic_compare_exchange_n(l, &c, 1, 0, __ATOMIC_ACQUIRE,
+                                    __ATOMIC_RELAXED))
+        return 0;
+    return c + 10;
+}
 EOF
 # function -> the instruction it must contain
 want='xchg8 xchg
@@ -55,7 +67,8 @@ cas32 cmpxchg
 cx16 cmpxchg
 cx64 cmpxchg
 and32 cmpxchg
-nand64 cmpxchg'
+nand64 cmpxchg
+trylock cmpxchg'
 
 for O in -O2 -Os; do
     "$EMBCC" --target=x86_64-elf $O -c "$out/a.c" -o "$out/a$O.o" \
@@ -107,5 +120,6 @@ for O in -O2 -Os; do
             sed -n "/<$f>:/,/^\$/p" "$out/a$O.dis"; exit 1; }
     done
 done
-echo "ten atomics with their operands in registers make no frame access,"
-echo "at -O2 and -Os, and objdump reads each one's locked instruction"
+echo "ten atomics with their operands in registers, and a lock's private"
+echo "expected value, make no frame access at -O2 and -Os, and objdump reads"
+echo "each one's locked instruction"
