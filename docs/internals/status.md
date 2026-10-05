@@ -72,7 +72,7 @@ ignored (see [Attributes](#attributes)).
 | Cortex-M: `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | Thumb-2 for ARMv7-M, ARMv7E-M and ARMv8-M Mainline. Soft float, or a single-precision FPU with `double` in software. No DSP instructions. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values; `s16`-`s31` with an FPU. | DWARF 4, with [known problems](../manual/debugging.md#known-problems). | `embld`. | `librt.a`, one per triple. No C library. |
 | RV32: `riscv32-unknown-elf` | RV32IMAC, soft float. No operation on `long double`. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`. | `librt.a`. No C library. |
 | RV64: `riscv64-unknown-elf` | RV64IMAC, soft float. No operation on `long double` or `__int128`. C only. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | None built (see below). No C library. |
-| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Every branch and call delay slot holds a `nop` (a return's releases the frame). No jump tables, computed goto or narrow atomics. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
+| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. No computed goto or narrow atomics. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
 | AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. No atomic read-modify-write, variable-length arrays or computed goto. C only. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
 
 The register allocator is described in
@@ -665,8 +665,9 @@ dates.
   read-modify-write, variable-length arrays and aligned locals on AVR;
   narrow and 8-byte atomic read-modify-write, unwind tables and
   `__attribute__((interrupt))` on MIPS32.
-- Branch and call delay slots holding useful instructions on MIPS32
-  (only a return's does: the frame release).
+- On MIPS32, a delay slot filled from anywhere but the instruction just
+  before the transfer (the branch target's first instruction, or one
+  from before the `slt` a compare-and-branch needs).
 - Scalar locals aligned beyond the stack alignment.
 - Linker relaxation: on RISC-V a call between sections stays an
   eight-byte `auipc`/`jalr`.

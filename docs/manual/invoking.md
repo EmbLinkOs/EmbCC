@@ -1609,6 +1609,7 @@ traces, and they are not a stable interface. See
 | `EMBCC_RA_DEGREE_SPILL` | Choose spill candidates by interference degree instead of by cost. |
 | `EMBCC_MIPS_RA_MAX=N` | On MIPS, leave only the first `N` vregs of each function in registers (a bisection handle; always correct). |
 | `EMBCC_MIPS_PAIRS=0` | On MIPS, do not give 64-bit values register pairs. |
+| `EMBCC_MIPS_NO_FILL` | On MIPS, leave every branch's and call's delay slot a `nop` (a return's still releases the frame). |
 | `EMBCC_NO_TAILCALL` | Disable tail calls in the AArch64, ARM, RISC-V, MIPS and AVR backends. |
 | `EMBCC_NO_DIVMOD_CONST`, `EMBCC_NO_MLAKEEP` | On Thumb, stop sharing one divide between a quotient and a remainder by the same constant, or stop keeping a multiply's constant in a register for `mla`/`mls`. |
 | `EMBCC_NO_SPLITLOOPS` | Disable the optimizer's loop-splitting step. |

@@ -890,9 +890,12 @@ Addresses are absolute: `lui` and `addiu` with `R_MIPS_HI16` and
 `R_MIPS_26`, so caller and callee must share a 256 MiB region, as they
 always do in a PIC32 or a KSEG0 image. Branches reach ±128 KiB; a branch
 in a function larger than that becomes an inverted branch over a `j`.
-Every branch and call delay slot holds a `nop`; a return's holds the
-release of the function's frame (`jr $ra` then `addiu $sp, $sp, N`), as
-clang's does. A load or store the compiler
+A delay slot holds the instruction before the branch, call or return
+when that keeps the program -- the classic fill -- and otherwise a `nop`;
+a return's holds the release of the function's frame (`jr $ra` then
+`addiu $sp, $sp, N`), as clang's does. Under `-g` every slot but the
+return's is a `nop`. A dense `switch` dispatches through a jump table of
+offsets from the address a `bal` returns, so it needs no relocation. A load or store the compiler
 cannot prove aligned (a packed structure's member) uses `lwl`/`lwr` and
 `swl`/`swr`, because a misaligned word access traps.
 
@@ -961,9 +964,6 @@ exception prints its cause and address.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
 | a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
-
-A dense `switch` is compiled as a tree of comparisons, never a jump
-table.
 
 ## AVR
 

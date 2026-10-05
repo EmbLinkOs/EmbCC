@@ -153,10 +153,11 @@ hard-float code. EmbLD drops `.MIPS.abiflags`, `.reginfo`, `.pdr` and
 By name, with the IR instruction: computed `goto`; atomics narrower or
 wider than a word (`ll`/`sc` are word-sized); `__builtin_frame_address`
 and `__builtin_return_address` (no frame-pointer chain); jump tables (a
-dense `switch` stays a decision tree, `target_jump_tables()`); `__int128`
-(it does not exist on ILP32); naked and interrupt functions, file-scope
-assembly with instructions and `.s` files (there is no MIPS file
-assembler yet); a scalar local aligned beyond the 8-byte stack; C++ (the
+dense `switch` stayed a decision tree until the table of `bal`-relative
+offsets came, `target_jump_tables()`); `__int128` (it does not exist on
+ILP32); interrupt functions (naked functions, file-scope assembly with
+instructions and `.s` files came with the GNU-syntax assembler); a
+scalar local aligned beyond the 8-byte stack; C++ (the
 C++ front end lays out LP64 only). Every MIPS flag other than the one
 configuration emitted (MIPS32r2, little-endian, o32, soft float,
 `-mno-abicalls`, `-G0`) is refused by the driver.
