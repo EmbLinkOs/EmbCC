@@ -41,8 +41,10 @@ void putn(long v)
 }
 
 /* lib/libc's output, when the program is linked with it: its write() is
- * weak, and this one puts stdout and stderr on the UART. */
-long write(int fd, const void *buf, unsigned long n)
+ * weak, and this one puts stdout and stderr on the UART. Weak itself, so
+ * a program that brings its own write() (tests/golden/embedded-libc.c)
+ * links with this harness too. */
+__attribute__((weak)) long write(int fd, const void *buf, unsigned long n)
 {
     const unsigned char *p = buf;
     (void)fd;
