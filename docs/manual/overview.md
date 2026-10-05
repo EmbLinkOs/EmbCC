@@ -46,9 +46,9 @@ EmbCC 1.0.0-m2.complete — C compiler for EmbLinkOS, target x86_64-elf
 
 | Program | What it does | Reference |
 |---|---|---|
-| `embcc` | The compiler driver. Preprocesses, compiles C and C++, assembles `.s`, `.S` and `.asm` files, writes ELF, Mach-O or COFF objects with DWARF debug information, and links x86-64 ELF programs and ARM, RISC-V and AVR firmware with the linker built into it. | [Invoking EmbCC](invoking.md) |
+| `embcc` | The compiler driver. Preprocesses, compiles C and C++, assembles `.s`, `.S` and `.asm` files, writes ELF, Mach-O or COFF objects with DWARF debug information, and links x86-64 ELF programs and ARM, RISC-V, MIPS32 and AVR firmware with the linker built into it. | [Invoking EmbCC](invoking.md) |
 | `embas` | The standalone assembler for x86-64 in NASM (Intel) syntax. Writes ELF64 objects. `embcc -c FILE.asm` runs the same assembler. | [embas](tools/embas.md) |
-| `embld` | The static linker. Links ELF objects and archives for x86-64, Cortex-M, RV32, RV64 and AVR into an ELF executable, or, with `--embx`, into an EMBX image for EmbLinkOS. `embld --doctor` explains why a link fails. | [embld](tools/embld.md) |
+| `embld` | The static linker. Links ELF objects and archives for x86-64, Cortex-M, RV32, RV64, MIPS32 and AVR into an ELF executable, or, with `--embx`, into an EMBX image for EmbLinkOS. `embld --doctor` explains why a link fails. | [embld](tools/embld.md) |
 | `embread` | Prints an EMBX image and checks it against the rules the EmbLinkOS loader applies. | [embread](tools/embread.md) |
 | `embdbg` | The debugger. Symbolizes addresses, lists functions, lines and variables, analyzes crash reports, disassembles, and debugs a running target through the GDB remote protocol. Reads DWARF and EmbCC's `.embdbg` files; does not need `gdb`. | [embdbg](tools/embdbg.md) |
 | `embls` | A language server (LSP over standard input and output). Diagnostics come from running `embcc`; completion, hover, go-to-definition and document symbols come from EmbCC's own preprocessor and parser. | [embls](tools/embls.md) |
@@ -96,8 +96,8 @@ the file depends on the file name suffix (see
 
 Without `-c`, `-S` or `-E`, `embcc` compiles the file and then links it
 in the same process, adding the target's start-up file and libraries.
-The driver links the x86-64 ELF targets, and ARM, RISC-V and AVR
-firmware given its memory map (`-T board.ld`, or `-Wl,-Ttext`/`-Tdata`):
+The driver links the x86-64 ELF targets, and ARM, RISC-V, MIPS32 and
+AVR firmware given its memory map (`-T board.ld`, or `-Wl,-Ttext`/`-Tdata`):
 
 ```text
 embcc --target=thumbv7em-none-eabi -T board.ld startup.o main.o -o fw.elf

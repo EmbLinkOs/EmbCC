@@ -28,7 +28,8 @@ An option that is in none of these lists stops the driver with
 ```text
 embcc [OPTION...] [FILE] [OBJECT|ARCHIVE|-lLIB...]
                                            compile and link (x86-64 ELF; ARM,
-                                           RISC-V and AVR firmware with -T)
+                                           RISC-V, MIPS and AVR firmware given
+                                           its memory map)
 embcc -c [OPTION...] FILE [-o OBJECT]      compile or assemble to an object
 embcc -S [OPTION...] FILE [-o FILE.s]      write assembly
 embcc -E [OPTION...] FILE                  preprocess to standard output
@@ -69,7 +70,7 @@ the full entry.
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
 | [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` |
 | [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-ffunction-sections` `-fdata-sections` |
-| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mfpu=FPU` `-mfloat-abi=ABI` |
+| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mfpu=FPU` `-mfloat-abi=ABI`; on MIPS `-mcpu=CPU` `-march=CPU` `-mabi=32` `-msoft-float` `-EL` `-mno-abicalls` `-G0` |
 | [Target](#target-selection) | `--target=TRIPLE` |
 | [Developer](#developer-and-inspection-options) | `inspect` `why` `-fremarks` `--emit-interfaces` `--explain` |
 | [Refused](#refused-options) | `-fPIC` `-fpic` `-fPIE` `-fpie` `-shared` `-static-pie` `-flto` `-fshort-enums` `-fprofile*` `--coverage` `-fcoverage-mapping` `-pg` `-fstack-protector*` `-fstack-clash-protection` `-fcf-protection*` `-fsanitize*` (other than the forms above) `-gdwarf-N` (N not 2 to 4) `-gsplit-dwarf` `-gz` |
@@ -129,7 +130,7 @@ What happens to the input depends on the mode options:
 
 | Mode | Input | Result | Default output |
 |---|---|---|---|
-| none | C or C++ | compiled and linked (x86-64 ELF, and ARM, RISC-V and AVR firmware with a memory map) | `a.out` |
+| none | C or C++ | compiled and linked (x86-64 ELF, and ARM, RISC-V, MIPS and AVR firmware with a memory map) | `a.out` |
 | none | `.s` `.S` | assembled and linked, as above | `a.out` |
 | none | only objects, archives and `-l` | linked | `a.out` |
 | `-c` | C or C++ | relocatable object | the input's file name with its suffix replaced by `.o` |
@@ -1085,10 +1086,10 @@ Without `-c`, `-S`, `-E` or `-fsyntax-only`, `embcc FILE -o OUT` compiles
 the file and links it in the same process with EmbCC's linker,
 [`embld`](tools/embld.md). This is available only for x86-64 ELF targets
 (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` and their aliases).
-For the firmware targets (ARMv7-M, ARMv8-M, RV32, RV64 and AVR) the
-driver links too, and the build supplies the memory map: a linker script
-with `-T FILE.ld` (ARM and RISC-V), or `-Wl,-Ttext=FLASH` and
-`-Wl,-Tdata=RAM`. There is no default map, because an image linked to a
+For the firmware targets (ARMv7-M, ARMv8-M, RV32, RV64, MIPS32 and AVR)
+the driver links too, and the build supplies the memory map: a linker
+script with `-T FILE.ld` (ARM and RISC-V), or `-Wl,-Ttext=FLASH` and
+`-Wl,-Tdata=RAM` (on MIPS32 and AVR the message offers only these). There is no default map, because an image linked to a
 guessed one runs, wrongly:
 
 ```text
@@ -1165,7 +1166,7 @@ option of the same name:
 | `--print-gc-sections` | name each section dropped, on standard error |
 | `-Map FILE`, `-Map=FILE`, `--Map=FILE` | write a map of where every input went, in GNU ld's format |
 | `--print-memory-usage` | print how full each `MEMORY` region of the script is, as ld does |
-| `-Tstack ADDR`, `-Tstack=ADDR` | passed on, and refused by `embld` for x86-64: `embld: -Tstack is a RISC-V option: ...` |
+| `-Tstack ADDR`, `-Tstack=ADDR` | passed on: `embld` emits an entry stub that sets `sp` (RISC-V and MIPS), and refuses it elsewhere: `embld: -Tstack is a RISC-V and MIPS option: ...` |
 
 These are accepted and change nothing, because nothing in an image
 `embld` makes depends on them: `--as-needed`, `--no-as-needed`, `-O0`, `-O1`, `-O2`, `--build-id`,
@@ -1222,7 +1223,7 @@ enabled, tables are emitted regardless.
 ### `-fomit-frame-pointer`, `-fno-omit-frame-pointer`
 
 Accepted and without effect. The x86-64 and AArch64 backends always keep
-a frame pointer; the ARM, RISC-V and AVR backends never use one.
+a frame pointer; the ARM, RISC-V, MIPS and AVR backends never use one.
 
 ### `-fno-plt`
 
@@ -1352,11 +1353,40 @@ The choice is recorded in the object's `.ARM.attributes`, in the
 predefined macros (`__ARM_FP`, `__ARM_PCS_VFP`, `__SOFTFP__`), and in the
 triple `-dumpmachine` prints.
 
+### MIPS options
+
+These options apply to `mipsel-none-elf`; on any other target they are
+unknown arguments (and `-mcpu=` is an ARM option). EmbCC emits one MIPS
+configuration -- MIPS32 Release 2, little-endian, o32, soft float, no
+abicalls, no small data -- so each option is accepted when it asks for
+that and refused by name when it asks for anything else.
+
+#### `-mcpu=CPU`, `-march=CPU`
+
+Accepted for a MIPS32 Release 2 core: `mips32r2`, `m4k`, `m14k`,
+`m14kc`, `24kc`, `24kf`, `24kec`, `24kef`, `34kc` and `74kc`. The code is
+the same for every one. Any other value, Release 6 and the pre-Release 2
+ISAs included, is refused: `-mcpu=mips32r6 is not a MIPS32 Release 2 core:
+EmbCC emits MIPS32r2 (mips32r2, m4k, m14k, m14kc, 24kc, 24kf, 24kec,
+24kef, 34kc, 74kc)`.
+
+#### `-mabi=32`, `-msoft-float`, `-EL`, `-mno-abicalls`, `-G0`
+
+Accepted; each names what EmbCC does anyway. Their opposites are refused:
+
+```text
+-mabi=n32 is not supported: EmbCC emits the o32 ABI (-mabi=32) only
+-mhard-float is not supported: EmbCC emits soft-float o32, which passes floating point in the integer registers
+-EB is not supported: the MIPS target is little-endian (mipsel) only
+-mabicalls is not supported: EmbCC's MIPS code takes addresses absolutely (lui/addiu) and keeps no $gp; it is -mno-abicalls code
+-G8 is not supported: EmbCC puts no data in .sdata and addresses nothing through $gp (-G0)
+```
+
 ### Machine options that are not accepted
 
-`-march=`, `-mtune=`, `-mabi=`, `-mmcu=`, `-msoft-float`, `-mhard-float`,
-`-mcmse`, `-mbig-endian`, `-mlittle-endian`, `-masm=`, `-m32` and `-m64`
-are unknown arguments. The architecture, ABI and part are selected by the
+`-mtune=`, `-mmcu=`, `-mcmse`, `-mbig-endian`, `-mlittle-endian`,
+`-masm=`, `-m32` and `-m64` are unknown arguments, and so are `-march=`,
+`-mabi=`, `-msoft-float` and `-mhard-float` on every target but MIPS. The architecture, ABI and part are selected by the
 [target triple](#target-selection) (and on ARM by `-mcpu=`, `-mfpu=` and
 `-mfloat-abi=`). The RISC-V targets generate the C (compressed) extension
 and the integer multiply/divide instructions; the AVR target generates
@@ -1396,6 +1426,7 @@ name is what `-dumpmachine`, `--version` and diagnostics print.
 | `riscv32-unknown-elf` | `riscv32`, `riscv32-elf`, `rv32` | RV32 | bare metal | ELF32 |
 | `riscv64-unknown-elf` | `riscv64`, `riscv64-elf`, `rv64` | RV64 | bare metal | ELF64 |
 | `avr` | `avr-none-elf`, `avr-elf`, `avr-unknown-none` | AVR (ATmega328P) | bare metal | ELF32 |
+| `mipsel-none-elf` | `mipsel-unknown-elf`, `mipsel-elf`, `mipsel` | MIPS32r2, little-endian, o32 soft float | bare metal | ELF32 |
 | `x86_64-emblink` | | x86-64 | EmbLinkOS | ELF64 |
 | `aarch64-emblink` | | AArch64 | EmbLinkOS | ELF64 |
 | `x86_64-linux-gnu` | `x86_64-linux` | x86-64 | Linux, static | ELF64 |
@@ -1549,7 +1580,9 @@ traces, and they are not a stable interface. See
 | `EMBCC_RA_WHY` | Print a line to standard error for each function in which values were spilled. |
 | `EMBCC_RA_TRACE` | Print the register allocator's pool and each value's assignment to standard error. |
 | `EMBCC_RA_DEGREE_SPILL` | Choose spill candidates by interference degree instead of by cost. |
-| `EMBCC_NO_TAILCALL` | Disable tail calls in the AArch64, ARM, RISC-V and AVR backends. |
+| `EMBCC_MIPS_RA_MAX=N` | On MIPS, leave only the first `N` vregs of each function in registers (a bisection handle; always correct). |
+| `EMBCC_MIPS_PAIRS=0` | On MIPS, do not give 64-bit values register pairs. |
+| `EMBCC_NO_TAILCALL` | Disable tail calls in the AArch64, ARM, RISC-V, MIPS and AVR backends. |
 | `EMBCC_NO_DIVMOD_CONST`, `EMBCC_NO_MLAKEEP` | On Thumb, stop sharing one divide between a quotient and a remainder by the same constant, or stop keeping a multiply's constant in a register for `mla`/`mls`. |
 | `EMBCC_NO_SPLITLOOPS` | Disable the optimizer's loop-splitting step. |
 | `EMBCC_NO_LKCONST` | Stop deciding compares and branches from a constant the same block has just written. |

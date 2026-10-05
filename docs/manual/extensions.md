@@ -674,8 +674,8 @@ names (`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
 
 `naked` is supported on ARM Cortex-M, RISC-V and AVR, where the body is
 assembled as a block of the target's assembly; see
-[Naked functions](inline-asm.md#naked-functions). On x86-64 and AArch64
-it is refused, and a function that must run without a prologue is
+[Naked functions](inline-asm.md#naked-functions). On x86-64, AArch64 and
+MIPS32 it is refused, and a function that must run without a prologue is
 written in assembly.
 
 ### Placing code and data
@@ -905,8 +905,8 @@ and 3. A `_FORTIFY_SOURCE` header reads that value as "do not check".
 | `__builtin_trap()` | Emits the target's trap instruction |
 | `__builtin_prefetch(addr, ...)` | Evaluates its arguments and emits nothing |
 
-The trap is `ud2` on x86-64, `udf` on AArch64 and Cortex-M, and `unimp`
-on RISC-V. AVR has no trapping instruction, and the trap is a jump to
+The trap is `ud2` on x86-64, `udf` on AArch64 and Cortex-M, `unimp`
+on RISC-V and `break` on MIPS32. AVR has no trapping instruction, and the trap is a jump to
 itself. A call to either builtin ends a path for the missing-return
 check, as a call to a `noreturn` function does.
 
@@ -922,8 +922,8 @@ check, as a call to a `noreturn` function does.
 `level` must be a non-negative integer constant (`__builtin_frame_address
 needs a non-negative constant level`). On AVR, `alloca` is refused as a
 variable-length array is (`the AVR backend cannot lower a variable-length
-array yet (function f)`). On Cortex-M, RISC-V and AVR the frame builtins
-are refused:
+array yet (function f)`). On Cortex-M, RISC-V, MIPS32 and AVR the frame
+builtins are refused:
 
 ```text
 embcc: r.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [frameaddr w=8 size=4]

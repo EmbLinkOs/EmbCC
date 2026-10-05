@@ -907,7 +907,7 @@ printer and `irparse.c`, so that the textual round-trip
 (`tests/golden/ir-roundtrip.sh`) still holds.
 
 In every backend: the main lowering switch (`gen_func` on x86-64 and
-AArch64, `gen_ins` on Thumb, RISC-V and AVR), and any helper that scans
+AArch64, `gen_ins` on Thumb, RISC-V, MIPS32 and AVR), and any helper that scans
 for the operations it fuses or must not cross. A backend that does not
 lower an operation must refuse it loudly rather than emit nothing.
 

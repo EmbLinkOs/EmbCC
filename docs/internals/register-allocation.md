@@ -312,8 +312,8 @@ frames. Three shared helpers connect the two:
 
 ## Pairs on 32-bit and 8-bit targets
 
-On Thumb and RV32 a 64-bit value (a `long long`, or a `double` on a
-soft-float target) needs two registers. Those backends run a separate
+On Thumb, RV32 and MIPS32 a 64-bit value (a `long long`, or a `double`
+on a soft-float target) needs two registers. Those backends run a separate
 **pair pass** before the integer pass: `ra_allocate` with a pool whose
 entries are the low registers of aligned pairs, over only the 64-bit
 vregs. Each allocated pair is then registered with `ra_reserve(ranges,
@@ -342,7 +342,7 @@ Moves with `dst == src` are dropped. It returns the number of moves, or
 `n + 1` output entries are always enough. `scratch` must be a register
 that is no destination and holds nothing live.
 
-The Thumb, RISC-V and AVR backends use it for a call's argument setup,
+The Thumb, RISC-V, MIPS32 and AVR backends use it for a call's argument setup,
 for placing incoming parameters in their allocated registers, for the
 operands of runtime-helper calls, and (on AVR) for moving an indirect
 call's target into Z. x86-64 (`emit_reg_parallel_move`,
@@ -371,14 +371,15 @@ and loads are excluded.
 | AArch64 | `ra_fold_memoff(fn, -256, 4095, 8, 8, wide)` |
 | Thumb | `ra_fold_memoff(fn, 0, 4095, 4, 4, wide)` |
 | RISC-V | `ra_fold_memoff(fn, -2048, 2047, XLEN/8, XLEN/8, wide)` |
+| MIPS32 | `ra_fold_memoff(fn, -32768, 32759, 4, 4, wide)` |
 | AVR | `ra_fold_memoff(fn, 0, 64, 2, 4, wide)` |
 
-`EMBCC_NO_MEMOFF` turns it off on RISC-V and AVR (and on Thumb; see its
+`EMBCC_NO_MEMOFF` turns it off on RISC-V, MIPS32 and AVR (and on Thumb; see its
 section). x86-64 folds addresses during instruction selection instead.
 
 ## Debug information
 
-Under `-g`, the Thumb and RISC-V backends pass `ra_debug_pin_vars(fn)` as
+Under `-g`, the Thumb, RISC-V and MIPS32 backends pass `ra_debug_pin_vars(fn)` as
 the `fltmap` argument of `ra_allocate`, which keeps every source variable
 in its frame slot so that the `DW_AT_location` naming the slot is
 correct. Temporaries are still allocated. AVR does not allocate under
@@ -387,25 +388,25 @@ local's slot (`ra_slot_dead` is false).
 
 ## Backend hooks
 
-Each backend defines one `struct ra_target` (two on Thumb and RISC-V,
-whose pair passes use a second one).
+Each backend defines one `struct ra_target` (two on Thumb, RISC-V and
+MIPS32, whose pair passes use a second one).
 
-| Field | x86-64 `X86_RA` | AArch64 `A64_RA` | Thumb `THUMB_RA` | RISC-V `RISCV_RA` | AVR `AVR_RA` |
-|---|---|---|---|---|---|
-| `call_int_arg_in_reg` | 1 | 1 | 1 | 1 | 1 |
-| `ret_scalar_in_reg` | 1 | 1 | 1 | 1 | 1 |
-| `memcpy_addr_in_reg` | 1 | 0 | 0 | 1 | 0 |
-| `atomic_in_reg` | 0 | 0 | 1 | 1 | 0 |
-| `alu_dst_is_lhs` | 1 | 0 | 0 | 0 | 0 |
-| `float_in_gpr` | 0 | 0 | 1 | 1 | 1 |
-| `fp_reads_gpr` | 0 | 1 | 0 | 0 | 0 |
-| `asm_in_reg` | 0 | 0 | 1 (not the pair pass) | 1 (not the pair pass) | 0 |
-| `ldvar_plain` | size 8, or size 4 not sign-extended to 8 | as x86-64 | size 4 at width 4 | full register width; also a sign-extending 4-byte read at RV64 | size equals width, or size at most 2 |
-| `op_calls_helper` | `__int128` operations | binary128 `long double` and `__int128` operations | floating-point arithmetic, comparisons and conversions not executed by the FPU; 64-bit divide and remainder | floating-point arithmetic, comparisons and conversions; 64-bit divide and remainder at RV32 | float operations, conversions, divide, remainder, multiply except by a small constant |
-| FP class | xmm0-xmm6 | v18-v31, v0-v7 | s16-s31, with an FPU | none | none |
-| FP callee-saved | none | none | all | no FP class | no FP class |
-| `saved_only` | none | none | none | none | `a_saved_only` |
-| `ext_plain` | none | none | none | none | `a_ext_plain` |
+| Field | x86-64 `X86_RA` | AArch64 `A64_RA` | Thumb `THUMB_RA` | RISC-V `RISCV_RA` | MIPS32 `MIPS_RATGT` | AVR `AVR_RA` |
+|---|---|---|---|---|---|---|
+| `call_int_arg_in_reg` | 1 | 1 | 1 | 1 | 1 | 1 |
+| `ret_scalar_in_reg` | 1 | 1 | 1 | 1 | 1 | 1 |
+| `memcpy_addr_in_reg` | 1 | 0 | 0 | 1 | 1 | 0 |
+| `atomic_in_reg` | 0 | 0 | 1 | 1 | 1 | 0 |
+| `alu_dst_is_lhs` | 1 | 0 | 0 | 0 | 0 | 0 |
+| `float_in_gpr` | 0 | 0 | 1 | 1 | 1 | 1 |
+| `fp_reads_gpr` | 0 | 1 | 0 | 0 | 0 | 0 |
+| `asm_in_reg` | 0 | 0 | 1 (not the pair pass) | 1 (not the pair pass) | 0 | 0 |
+| `ldvar_plain` | size 8, or size 4 not sign-extended to 8 | as x86-64 | size 4 at width 4 | full register width; also a sign-extending 4-byte read at RV64 | size 4 at width 4 | size equals width, or size at most 2 |
+| `op_calls_helper` | `__int128` operations | binary128 `long double` and `__int128` operations | floating-point arithmetic, comparisons and conversions not executed by the FPU; 64-bit divide and remainder | floating-point arithmetic, comparisons and conversions; 64-bit divide and remainder at RV32 | floating-point arithmetic, comparisons and conversions; 64-bit divide and remainder | float operations, conversions, divide, remainder, multiply except by a small constant |
+| FP class | xmm0-xmm6 | v18-v31, v0-v7 | s16-s31, with an FPU | none | none | none |
+| FP callee-saved | none | none | all | no FP class | no FP class | no FP class |
+| `saved_only` | none | none | none | none | none | `a_saved_only` |
+| `ext_plain` | none | none | none | none | none | `a_ext_plain` |
 
 ### x86-64
 
@@ -617,6 +618,46 @@ there is no memory-offset folding and no tail call.
 before allocation (`EMBCC_NO_MEMOFF` turns it off). `EMBCC_RV_RA_MAX=N`
 sends every vreg numbered `N` or higher back to memory.
 
+### MIPS32
+
+**Pool** (`mips_pool_for`): v0, v1, a0-a3, t7, t8, s0-s7, sixteen
+registers. A variadic function's pool leaves out a0-a3 (the prologue
+spills them into the caller's home area, where `va_arg` walks them).
+Callee-saved: s0-s7, and fp, which is never in the pool: it is the frame
+base in a function with `alloca`, saved like any callee-saved register.
+t9 is the register an indirect call goes through and `$at` holds a
+comparison's result for the branch after it; neither is allocated.
+
+**Floating point.** The backend is soft-float, as RISC-V: no FP class,
+`float_in_gpr`, and `mips_op_calls_helper` reports the arithmetic,
+comparisons and conversions as helper calls, with 64-bit divide and
+remainder.
+
+**Scratch.** t0 and t1 (first operand, low and high word), t2 and t3
+(second operand), t4 (`SCR`, the parallel-move cycle breaker), t5
+(`SCR2`), and t6 (`FAR`), which builds `sp` plus an offset too large for
+a 16-bit immediate.
+
+**Hints** (`mips_abi_hints`): a single-register scalar parameter its
+argument register, a returned value and a call's result v0, a helper
+operation's operands a0 and a1 and its result v0, and each call argument
+its argument register.
+
+**Pairs.** 64-bit values get register pairs from a pair pass
+(`MIPS_PAIR_RA`, `mips_pair_pool_for`) before the integer pass: a0:a1,
+a2:a3, v0:v1, s0:s1, s2:s3, s4:s5, s6:s7 (a variadic function starts at
+v0:v1), with o32's 64-bit arguments hinted to their pair. `gen_func_best`
+compiles each function with and without pairs and keeps the shorter
+(without on a tie). `EMBCC_MIPS_PAIRS=0` or `=1` forces the choice.
+
+**Debug.** Under `-g` source variables are pinned to their slots, and
+there is no memory-offset folding and no tail call.
+
+**Other.** `ra_fold_memoff(fn, -32768, 32759, 4, 4, wide)` runs before
+allocation, leaving room under the 16-bit limit for an `lwl`/`lwr`
+pair's `+3` (`EMBCC_NO_MEMOFF` turns it off). `EMBCC_MIPS_RA_MAX=N` sends
+every vreg numbered `N` or higher back to memory.
+
 ### AVR
 
 AVR's registers are 8 bits wide, an `int` is 2 bytes and the IR computes
@@ -753,6 +794,7 @@ EMBCC_RA_MAXPOOL=2 tests/run.sh --target=aarch64-elf --exec-only
 # the embedded targets: their execution goldens, from the repository root
 EMBCC=$PWD/embcc EMBCC_VERIFY=1 EMBCC_RA_MAXPOOL=2 sh tests/golden/thumb-exec.sh
 EMBCC=$PWD/embcc EMBCC_VERIFY=1 EMBCC_RA_MAXPOOL=2 sh tests/golden/riscv-exec.sh
+EMBCC=$PWD/embcc EMBCC_VERIFY=1 EMBCC_RA_MAXPOOL=2 sh tests/golden/mips-exec.sh
 ```
 
 The variable affects the shared integer pool only. AVR's run widths and
@@ -782,6 +824,6 @@ backend sections.
 - A new opaque use (a lowering that reads a vreg from its slot) must make
   the vreg ineligible here, or be gated by a flag in `struct ra_target`
   so each backend can say what it supports.
-- Measure the effect on code size for all five targets, not one; the
+- Measure the effect on code size for all six targets, not one; the
   heuristics (spill choice, coalescing test, hint order) trade against
   each other differently on two-operand and three-operand machines.

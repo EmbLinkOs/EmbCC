@@ -263,7 +263,7 @@ it lacks becomes a table, instead of something found by searching.
 
 **Status.** Current. The reorganization was a pure move, verified by
 byte-identical output on both targets. The shared register allocator
-(Chaitin-Briggs colouring, used by all five backends, each through a
+(Chaitin-Briggs colouring, used by all six backends, each through a
 `struct ra_target`) was lifted out of the x86-64 backend afterwards, as
 [D-011](#d-011) foresaw.
 

@@ -391,7 +391,8 @@ These are defects in the current implementation, not intended behavior.
 - **Unwind tables on Thumb, RISC-V and AVR.** `-funwind-tables` (and C++
   at RV64, the one of these targets that compiles C++) produce an
   `.eh_frame` in the x86-64 layout on these targets, which does not
-  describe their frames. Do not rely on it for unwinding.
+  describe their frames. Do not rely on it for unwinding. On MIPS32 the
+  options are refused by name instead.
 - **Header files.** Code from a header is attributed to the main source
   file, as described in [Line table](#line-table).
 
