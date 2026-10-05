@@ -19,6 +19,10 @@ char *cg_wide_vregs(struct ir_func *fn);
 /* The vregs holding a float or a double (never a long double), for a
  * backend that gives them their own register class. NULL when none. */
 char *cg_float_vregs(struct ir_func *fn);
+/* The same, deciding a value both kinds of op touch by its uses, for a
+ * backend whose integer lowering can read and write an FP register home
+ * (AArch64): see the definition. */
+char *cg_float_vregs_by_cost(struct ir_func *fn);
 
 /* Turn each string site's INDEX into its offset in .rodata. A backend
  * records the index while lowering (that is what IR_STRADDR carries) and
