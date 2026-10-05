@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include "emit.h"
+#include "cg.h"
 #include "../backend.h"
 #include "../regalloc.h"
 #include "../target.h"
@@ -130,114 +131,8 @@ static long save_bytes_for(int nsave, const int *used, unsigned scr)
     return n * 4;
 }
 
-struct t_sites {
-    struct { int patch_off; struct func *target; int tail; } *call;
-    int ncall, capcall;
-    struct extcall *ext;   int next, capext;
-    struct strsite *str;   int nstr, capstr;
-    struct gsite *g;       int ng, capg;
-    struct fsite *f;       int nf, capf;
-};
-
-/* Per-function state. A struct rather than a pile of globals so that the
- * one thing a reader has to know about a function's lowering — where its
- * slots are and what is still unpatched — is in one place. */
-struct t_fn {
-    struct ir_func *fn;
-    /* Comparison/branch fusion: how many times each vreg is READ, so a
-     * comparison whose only reader is the branch after it can become
-     * one `cmp` and one conditional branch instead of materialising 0
-     * or 1 and testing that. `skip_next` tells the dispatch loop the
-     * branch has already been emitted. The x86-64 backend has done
-     * this from the start (usecnt there); ARMv7-M paid seven
-     * instructions for every `if` without it. */
-    int *usecnt;
-    int skip_next;
-    int want_debug;
-    /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit
-     * machine is an eight-byte slot and a REGISTER PAIR. Built from the
-     * width of each value's DEFINING instruction, which is not the same
-     * as i->w everywhere -- a compare of two 64-bit values has w == 8
-     * and produces a one-or-zero that is four bytes wide. */
-    char *wide;
-    char *nshr;          /* per vreg: a narrow high-word shift
-                          * (ra_narrow_hishift) */
-    struct code *t;
-    struct t_sites *st;
-    long *slot;          /* per-vreg byte offset from sp, -1 for none */
-    long frame;          /* total bytes sp moves down by */
-    long scratch_at;     /* where fn->scratch_bytes begins */
-    long sret_slot;      /* where the hidden result pointer is kept, or -1 */
-    /* A variadic function's REGISTER SAVE AREA: where the prologue
-     * spilled r0-r3 so that one pointer walks from them into the
-     * caller's stack arguments. -1 when the function is not variadic. */
-    long va_regsave;
-    long va_first;       /* ... and the offset of the first UNNAMED one */
-    int *label_off;      /* per label id, or -1 while unseen */
-    /* cond >= T_CBZ is a cbz (T_CBZ) or cbnz (T_CBZ + 1). cz_at is where
-     * a zero test's `cmp` began when it could become one (r0-r7), else -1:
-     * what the first pass measures cbz's reach from. */
-    struct { int at; int label; int cond; int sz; int cz_at; int ins; } *fix;
-    /* Per IR instruction: a switch whose `tbh` table could not reach a
-     * case on the first pass, and so takes the word table. */
-    char *no_tbh;
-    /* A function with a conditional branch past B<c>.W's +-1 MB: every
-     * conditional jump to a label is then `b<!c> .+n; b label`, and none
-     * is merged with the jump after it -- so the passes still make the
-     * same branches in the same order. */
-    int far_mode;
-    /* Branch relaxation: per branch, in emission order, whether the
-     * first pass found its target within the 16-bit form's reach. NULL
-     * on the first pass, which emits every branch 32-bit. */
-    const char *shortb;
-    int nshortb;
-    int nfix, capfix;
-    /* Per vreg, when its one definition puts a frame address in it:
-     * fvar the local whose `addr` it is, or fscr the call-scratch offset
-     * a struct-returning call answered with; else both -1. Such a value
-     * is frame base + a constant: when it has no register it is
-     * recomputed where it is read and addressed through directly,
-     * never stored to a slot and loaded back. */
-    int *fvar;
-    long *fscr;
-    /* Per vreg: the register the allocator gave it, or -1 for one that
-     * stays in memory. NULL when it did not run (-O0/-O1). */
-    int *loc;
-    /* Per vreg: the S register (s16-s31) a single-precision float lives
-     * in, or -1. NULL without an FPU or without the allocator. A value
-     * has at most one of loc and floc, and one with an floc has NO slot:
-     * rd/wr/vfp_load/vfp_store cross to it with vmov, and every other
-     * reader of a slot goes through slot_of(), which refuses it. */
-    int *floc;
-    /* The register every frame slot is addressed from: sp, except in a
-     * function with a variable-length array, where sp moves at run time
-     * and r7 -- the Thumb frame pointer -- holds the frame base. */
-    int fb;
-    long out_bytes;      /* the outgoing-argument area, at the live sp */
-    int nfsave;          /* s16.. that the prologue vpushes (even) */
-    /* The last conditional branch: where its code ended and its fixup,
-     * or bc_end -1 once a label has been placed since. See
-     * invert_last_bcond. */
-    int bc_end, bc_fix;
-    /* Which of the scratch registers r9-r11 the prologue saves: all of
-     * them until a pass has shown which the body uses. */
-    unsigned scr_save;
-    /* A leaf that saves nothing at all: no push, no pop, `bx lr`. Decided
-     * per pass, once scr_save is known (see the pass loop). */
-    int leaf, nopush;
-    /* Per instruction: an IR_CALL made as a TAIL call (t_tail_ok). NULL
-     * when there are none. */
-    char *tail;
-    int used_callee[RA_MAXPOOL];
-    int nsave;           /* how many of those it took */
-    long save_at;        /* where the prologue spilled them */
-    /* LOW SCRATCH (lo_free): which of r0-r7 the instruction being
-     * emitted may use in place of a high scratch -- bit r for rr, 0 when
-     * none may -- and the liveness it is computed from. */
-    unsigned lofree;
-    unsigned long *lv_in, *lv_out;
-    int lv_words;
-};
+/* struct t_sites and struct t_fn, the per-function state: see cg.h, which
+ * v6m.c (the ARMv6-M instruction selection) shares. */
 
 /* ---- the register allocator's view of this machine ---------------------
  *
@@ -797,7 +692,7 @@ static char *wide64_map(struct ir_func *fn)
  * `nstk` words at `stk` in the outgoing area -- or, under the hard-float
  * convention, `nvfp` SINGLE registers from s`vfp` (a double takes two,
  * and `vdbl` says the elements are doubles, so d(vfp/2) is the name). */
-struct argplace { int reg, nreg, nstk; long stk; int vfp, nvfp, vdbl; };
+/* struct argplace: see cg.h */
 
 static void place_arg(int size, int align, int *ncrn, long *stk,
                       struct argplace *p)
@@ -876,7 +771,7 @@ static int vfp_cprc(const struct ir_arg *a, int *esz)
 
 /* One walk over an argument list: the core registers, the stack and the
  * VFP registers, with the state all three share. */
-struct abi_walk { int ncrn; long stk; unsigned vfree; int vfp; };
+/* struct abi_walk: see cg.h */
 
 static void walk_init(struct abi_walk *w, int sret, int varargs, int pcs)
 {
@@ -5975,3 +5870,64 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
     *gs = st.g;      *ngs = st.ng;
     *fs = st.f;      *nfs = st.nf;
 }
+
+/* ---- for v6m.c (cg.h) ------------------------------------------------------
+ *
+ * The ARMv6-M lowering shares AAPCS32, the frame layout, the site lists and
+ * the allocator setup with this file. These hand them over unchanged, so
+ * there is one copy of each. */
+char *tcg_wide64_map(struct ir_func *fn) { return wide64_map(fn); }
+void tcg_frame_addr_map(struct t_fn *F) { frame_addr_map(F); }
+void tcg_layout(struct t_fn *F) { layout(F); }
+void tcg_walk_init(struct abi_walk *w, int sret, int varargs, int pcs)
+{
+    walk_init(w, sret, varargs, pcs);
+}
+void tcg_place_one(struct abi_walk *w, const struct ir_arg *a,
+                   struct argplace *p)
+{
+    place_one(w, a, p);
+}
+int tcg_call_sret_bytes(const struct ir_ins *i) { return call_sret_bytes(i); }
+int tcg_fn_sret_bytes(const struct ir_func *fn) { return fn_sret_bytes(fn); }
+long tcg_slot_of(const struct t_fn *F, int v) { return slot_of(F, v); }
+int tcg_faddr(const struct t_fn *F, int v, long *off) { return faddr(F, v, off); }
+void tcg_want_label(struct t_fn *F, int at, int label, int cond)
+{
+    want_label(F, at, label, cond);
+}
+void tcg_note_call(struct t_sites *st, int at, struct func *target)
+{
+    note_call(st, at, target);
+}
+void tcg_note_ext(struct t_sites *st, int at, struct func *callee)
+{
+    note_ext(st, at, callee);
+}
+void tcg_note_str(struct t_sites *st, int at, int idx, enum reloc_kind k)
+{
+    note_str(st, at, idx, k);
+}
+void tcg_note_glob(struct t_sites *st, int at, struct global *g,
+                   enum reloc_kind k)
+{
+    note_glob(st, at, g, k);
+}
+void tcg_note_fn(struct t_sites *st, int at, struct func *target,
+                 enum reloc_kind k)
+{
+    note_fn(st, at, target, k);
+}
+void tcg_call_helper(struct t_fn *F, const char *name) { call_helper(F, name); }
+const char *tcg_fp_binop_name(enum ir_op op, int w) { return fp_binop_name(op, w); }
+const char *tcg_fp_cmp_name(enum binop pred, int w) { return fp_cmp_name(pred, w); }
+int tcg_cond_for(enum binop pred, int sign) { return cond_for(pred, sign); }
+int *tcg_pair_alloc(struct ir_func *fn, const char *wide, const char *excl,
+                    int *used, int *nused)
+{
+    return g_t_pairs ? t_pair_alloc(fn, wide, excl, used, nused) : NULL;
+}
+const struct ra_target *tcg_ra(void) { return &THUMB_RA; }
+int tcg_regalloc(void) { return g_t_regalloc; }
+int tcg_pairs(void) { return g_t_pairs; }
+void tcg_reset_taken(void) { g_t_taken = 0; }
