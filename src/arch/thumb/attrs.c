@@ -114,9 +114,11 @@ unsigned char *arm_build_attributes(size_t *len)
      * hard. FPv4-SP-D16 on v7E-M and FPv5-SP-D16 (FP-ARMv8, D16) on v8-M,
      * clang's values for those units. It used to be absent even when the
      * EMBCC_T_FPU hook had emitted VFP instructions -- an object claiming no
-     * FPU while containing FPU code. */
+     * FPU while containing FPU code. The Cortex-M7's FPv5-D16 is the same
+     * architecture as the M33's unit, 8, with double precision too -- which
+     * is Tag_ABI_HardFP_use's to say, below. */
     if (target_thumb_fpu())
-        btag(&attrs, Tag_FP_arch, v8 ? 8 : 6);
+        btag(&attrs, Tag_FP_arch, v8 || target_thumb_fpu_dp() ? 8 : 6);
     btag(&attrs, Tag_ABI_PCS_R9_use, 0);         /* r9 is an ordinary reg */
     btag(&attrs, Tag_ABI_PCS_GOT_use, 1);        /* direct: no GOT, no PIC */
     btag(&attrs, Tag_ABI_PCS_wchar_t, 4);
@@ -129,9 +131,11 @@ unsigned char *arm_build_attributes(size_t *len)
      * 2. An object built the other way disagrees on every struct that
      * holds an enum, and this tag is what makes the linker say so. */
     btag(&attrs, Tag_ABI_enum_size, 2);
-    /* Single precision only: both units are -SP-. A double still goes
-     * through __adddf3, and this is what says so. */
-    if (target_thumb_fpu())
+    /* Single precision only on the two -SP- units: a double still goes
+     * through __adddf3, and this is what says so. On FPv5-D16 the code uses
+     * both precisions, which is the tag's default -- "as Tag_FP_arch
+     * says" -- so it is left out, as clang leaves it out for that unit. */
+    if (target_thumb_fpu() && !target_thumb_fpu_dp())
         btag(&attrs, Tag_ABI_HardFP_use, 1);
     /* THE one that matters: 0 is the base standard -- floating point
      * travels in the CORE registers. Emitted explicitly rather than left

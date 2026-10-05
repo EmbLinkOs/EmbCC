@@ -490,7 +490,7 @@ Cortex-M target is freestanding.
 |---|---|---|---|---|
 | `thumbv7m-none-eabi` | `thumbv7m`, `armv7m-none-eabi`, `arm-none-eabi` | ARMv7-M | soft | Cortex-M3 |
 | `thumbv7em-none-eabi` | `thumbv7em`, `armv7em-none-eabi` | ARMv7E-M | soft | Cortex-M4, M7 |
-| `thumbv7em-none-eabihf` | | ARMv7E-M | hard, FPv4-SP-D16 | Cortex-M4F |
+| `thumbv7em-none-eabihf` | | ARMv7E-M | hard, FPv4-SP-D16; FPv5-D16 with `-mcpu=cortex-m7` | Cortex-M4F; Cortex-M7 |
 | `thumbv8m.main-none-eabi` | `thumbv8m.main`, `thumbv8m-none-eabi`, `armv8m.main-none-eabi` | ARMv8-M Mainline | soft | Cortex-M33 |
 | `thumbv8m.main-none-eabihf` | | ARMv8-M Mainline | hard, FPv5-SP-D16 | Cortex-M33 with FPU |
 
@@ -534,16 +534,22 @@ embcc: error: -mcpu=cortex-m0 is ARMv6-M, and EmbCC emits ARMv7-M Thumb-2: that 
 
 #### `-mfpu=FPU`
 
-Name the floating-point unit. EmbCC knows two: `fpv4-sp-d16`, the
+Name the floating-point unit. EmbCC knows three: `fpv4-sp-d16`, the
 Cortex-M4F's unit, which requires ARMv7E-M (a `thumbv7em` triple, or
-`-mcpu=cortex-m4`, `m7` or `m33`), and `fpv5-sp-d16`, the Cortex-M33's,
-which requires a `thumbv8m.main` triple. `none`, `soft` and `auto` name
-no unit. The FPU only takes effect with `-mfloat-abi=softfp` or `hard`.
+`-mcpu=cortex-m4`, `m7` or `m33`); `fpv5-d16`, the Cortex-M7's
+double-precision unit, which requires ARMv7E-M and, when `-mcpu=` is
+given, `-mcpu=cortex-m7`; and `fpv5-sp-d16`, the Cortex-M33's, which
+requires a `thumbv8m.main` triple. `none`, `soft` and `auto` name no
+unit. The FPU only takes effect with `-mfloat-abi=softfp` or `hard`.
+`-mcpu=cortex-m7` with `thumbv7em-none-eabihf` and no `-mfpu=` means
+`fpv5-d16`.
 
 | Mistake | Diagnostic |
 |---|---|
-| any other unit | `-mfpu=fpv5-d16 is not supported on thumbv7em-none-eabi: EmbCC emits VFP for the Cortex-M4F's unit (-mfpu=fpv4-sp-d16) and nothing else: another unit's instruction set and attributes are unchecked here, and a double-precision one (fpv5-d16) would promise hardware `double` this backend does not emit` |
-| `fpv4-sp-d16` on ARMv7-M | `-mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4` |
+| any other unit | `-mfpu=fpv5-sp-d16 is not supported on thumbv7em-none-eabi: EmbCC emits VFP for the Cortex-M4F's unit (-mfpu=fpv4-sp-d16) and the Cortex-M7's (-mfpu=fpv5-d16) and nothing else: another unit's instruction set and attributes are unchecked here` |
+| `fpv5-d16` on ARMv8-M | `-mfpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (-mfpu=fpv5-sp-d16) and nothing else: another unit's instruction set and attributes are unchecked here` |
+| `fpv4-sp-d16` or `fpv5-d16` on ARMv7-M | `-mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4` |
+| `fpv5-d16` on another part | `-mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16` |
 
 #### `-mfloat-abi=ABI`
 
@@ -556,16 +562,39 @@ their order does not matter, and an explicit value overrides what an
 | `-mfloat-abi=` | Arithmetic | Floating-point arguments and results | `-dumpmachine` |
 |---|---|---|---|
 | `soft` | Library calls, even if an FPU is named | Core registers | `-eabi` |
-| `softfp` | `float` on the FPU; `double` by library call | Core registers; links with `soft` objects | `-eabi` |
-| `hard` | `float` on the FPU; `double` by library call | VFP registers (AAPCS-VFP) | `-eabihf` |
+| `softfp` | `float` on the FPU; `double` on the FPU with `fpv5-d16`, else by library call | Core registers; links with `soft` objects | `-eabi` |
+| `hard` | `float` on the FPU; `double` on the FPU with `fpv5-d16`, else by library call | VFP registers (AAPCS-VFP) | `-eabihf` |
 
-The FPUs are single-precision, so `double` arithmetic is always a call
-to the soft-float helpers, under every float ABI.
+`fpv4-sp-d16` and `fpv5-sp-d16` are single-precision, so with them
+`double` arithmetic is a call to the soft-float helpers under every float
+ABI. `fpv5-d16` computes in double precision as well:
+
+- `double` `+`, `-`, `*`, `/`, negation, `fabs`, `__builtin_sqrt`, the
+  comparisons, and the conversions to and from `float`, `int` and
+  `unsigned` are `vadd.f64`, `vsub.f64`, `vmul.f64`, `vdiv.f64`,
+  `vneg.f64`, `vabs.f64`, `vsqrt.f64`, `vcmp.f64`/`vcmpe.f64` and
+  `vcvt`. libc's `sqrt` is `vsqrt.f64` too.
+- The conversions between `double` or `float` and `long long` or
+  `unsigned long long` stay calls (`__fixdfdi`, `__fixunsdfdi`,
+  `__floatdidf`, `__floatundidf` and the four `float` ones): VFP has no
+  instruction for a 64-bit integer. Built for this unit,
+  `lib/rt/softfp.c` contains those eight routines only.
+- With the register allocator on (`-O1` and up), a double gets one of
+  `d8`-`d15`, the callee-saved half of the file, which a function saves
+  with `vpush {d8-...}`. `d0` and `d1` are scratch, and `d0`-`d7` carry
+  the hard-float arguments and results. A double the allocator cannot
+  place stays in an eight-byte stack slot.
+- `__ARM_FP` is `0xc` and `__ARM_FPV5__` is defined. clang says `0xe`
+  and defines `__ARM_FEATURE_FMA`; EmbCC emits neither half-precision
+  conversions nor fused multiply-add, so it promises neither.
+- The object's attributes are clang's for the unit: `Tag_FP_arch` is
+  FPv5-D16 (`ARMv8-a FP-D16`), and `Tag_ABI_HardFP_use` is left at its
+  default, both precisions.
 
 | Mistake | Diagnostic |
 |---|---|
 | an unknown value | `-mfloat-abi=foo is not an ARM float ABI: it is one of soft, softfp and hard` |
-| `softfp` or `hard` with no FPU | `-mfloat-abi=hard needs an FPU to use: add -mfpu=fpv4-sp-d16 (Cortex-M4F) or -mfpu=fpv5-sp-d16 (Cortex-M33)` |
+| `softfp` or `hard` with no FPU | `-mfloat-abi=hard needs an FPU to use: add -mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 (Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)` |
 | any ARM option on another target | `-mcpu=cortex-m3 is an ARM option, and the target is riscv32-unknown-elf` |
 
 ARMv8-M's security extension (TrustZone-M) is not supported. `-mcmse`

@@ -227,6 +227,13 @@ void target_set_thumb_em(int on);
  * refused until both halves are right. */
 int target_thumb_fpu(void);
 void target_set_thumb_fpu(int on);
+/* ...and whether that unit computes in DOUBLE precision as well:
+ * FPv5-D16, the Cortex-M7's (-mfpu=fpv5-d16). Then `double` arithmetic,
+ * comparisons, square roots and its 32-bit conversions are VFP .f64
+ * instructions on d registers, and only the 64-bit integer conversions
+ * are still calls. Never true without target_thumb_fpu(). */
+int target_thumb_fpu_dp(void);
+void target_set_thumb_fpu_dp(int on);
 
 /* The float ABI, which -mfloat-abi= selects and which is independent of the
  * FPU above:

@@ -1154,6 +1154,44 @@ void t_vcvt_f_from_i(struct code *c, int d, int m, int sgn, int dbl)
     { vfp(c, 0xB0, 8, (unsigned)!!sgn, 1, d, dbl, m, 0, dbl); }
 void t_vcvt_i_from_f(struct code *c, int d, int m, int sgn, int dbl)
     { vfp(c, 0xB0, sgn ? 13u : 12u, 1, 1, d, 0, m, dbl, dbl); }
+/* Between the two float widths: vcvt.f64.f32 widens (exactly) and
+ * vcvt.f32.f64 narrows (rounding as FPSCR says, nearest-even at reset).
+ * The same group and sub-opcode both ways; `sz` is the SOURCE's width,
+ * and the destination is the other one -- the third place in this file
+ * where one instruction's two registers are split by different rules. */
+void t_vcvt_f_f(struct code *c, int d, int m, int to_dbl)
+    { vfp(c, 0xB0, 7, 1, 1, d, to_dbl, m, !to_dbl, !to_dbl); }
+
+/* The floating-point constants an instruction can carry: VFPExpandImm's
+ * eight bits, a sign, a three-bit exponent and a four-bit fraction --
+ * +-(16..31)/16 times 2^-3..2^4, so 0.5, 1.0, 2.0, 10.0 and their kin but
+ * never 0.0. Found by expanding every one of the 256 and comparing, which
+ * is the definition itself rather than a restatement of its bit rules.
+ * -1 when `bits` (a double's pattern when `dbl`, else a float's in the
+ * low 32) is not one of them. */
+int t_vfp_imm8(unsigned long long bits, int dbl)
+{
+    for (unsigned k = 0; k < 256; k++) {
+        unsigned b = (k >> 6) & 1u;
+        unsigned long long sign = (unsigned long long)(k >> 7);
+        unsigned long long cd = (k >> 4) & 3u, frac = k & 15u, v;
+        if (dbl)
+            v = sign << 63 | (unsigned long long)!b << 62 |
+                (b ? 0xffULL : 0ULL) << 54 | cd << 52 | frac << 48;
+        else
+            v = sign << 31 | (unsigned long long)!b << 30 |
+                (b ? 0x1fULL : 0ULL) << 25 | cd << 23 | frac << 19;
+        if (v == bits)
+            return (int)k;
+    }
+    return -1;
+}
+
+/* vmov.f32/.f64 <reg>, #<imm>: VFPExpandImm's byte split across the two
+ * places a source register would go -- its top four bits where Vn is and
+ * its low four where Vm is, with N and M zero. */
+void t_vmov_imm(struct code *c, int d, int imm8, int dbl)
+    { vfp(c, 0xB0, (unsigned)imm8 >> 4, 0, 0, d, dbl, imm8 & 15, 1, dbl); }
 
 /* vldr/vstr: hw2's 0x0A00/0x0B00 selects the width exactly as it does
  * above, and the offset is in WORDS, so it reaches four times as far as
@@ -1190,16 +1228,23 @@ void t_vmov_core_pair(struct code *c, int dm, int rt, int rt2, int to_fp)
            ((unsigned)rt << 12) | 0x0B00u | (fl << 5) | 0x10u | f);
 }
 
-/* vpush / vpop of `n` consecutive single registers from s`first`: the
- * callee-saved half of the VFP file, s16-s31, which a function that keeps
- * floats in it must restore. `n` is the register COUNT, in the low byte. */
-void t_vpush_s(struct code *c, int first, int n, int pop)
+/* vpush / vpop of `n` consecutive registers from s`first` or d`first`:
+ * the callee-saved half of the VFP file, s16-s31 or d8-d15, which a
+ * function that keeps values in it must restore. The low byte counts
+ * WORDS, which is the register count for singles and twice it for
+ * doubles -- the .64 form saves the same memory with the D names. */
+static void vpushpop(struct code *c, int first, int n, int pop, int dbl)
 {
     unsigned f, fl;
-    vsplit(first, 0, &f, &fl);
+    vsplit(first, dbl, &f, &fl);
     hw2(c, (pop ? 0xECBDu : 0xED2Du) | (fl << 6),
-           (f << 12) | 0x0A00u | ((unsigned)n & 0xffu));
+           (f << 12) | 0x0A00u | ((unsigned)!!dbl << 8) |
+           ((unsigned)(dbl ? 2 * n : n) & 0xffu));
 }
+void t_vpush_s(struct code *c, int first, int n, int pop)
+    { vpushpop(c, first, n, pop, 0); }
+void t_vpush_d(struct code *c, int first, int n, int pop)
+    { vpushpop(c, first, n, pop, 1); }
 
 /* vmrs APSR_nzcv, FPSCR -- the only way a float comparison's result
  * reaches the condition flags. */

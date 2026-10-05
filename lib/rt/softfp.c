@@ -47,6 +47,21 @@
  * -- which works until the objects must agree about the float ABI. */
 #if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
     (defined(__arm__) && (!defined(__ARM_FP) || !(__ARM_FP & 8)))
+#define SOFTFP_ALL 1
+#endif
+/* A DOUBLE-precision ARM FPU (bit 3 set: FPv5-D16, the Cortex-M7's) does
+ * every binary64 and binary32 operation here in one instruction, the
+ * conversions to and from a 32-bit integer and between the two widths
+ * included. What no VFP unit has, at either width, is a conversion to or
+ * from a 64-bit integer -- so those eight routines are still calls on that
+ * part and are still this file's, and the rest is not compiled. Without
+ * them `(long long)d` would not link there; with the rest, every M7 image
+ * that converted one long long would carry the whole of binary64 too. */
+#if defined(SOFTFP_ALL) || defined(__arm__)
+#define SOFTFP_INT64 1
+#endif
+
+#if defined(SOFTFP_INT64)
 
 /* The run-time ABI: these routines take and return their operands in the
  * CORE registers under every ARM float ABI, -mfloat-abi=hard included --
@@ -69,7 +84,9 @@ union fbits { float f; u32 u; };
 
 static u64 d2u(double d) { union dbits x; x.d = d; return x.u; }
 static double u2d(u64 u) { union dbits x; x.u = u; return x.d; }
+#if defined(SOFTFP_ALL)
 static u32 f2u(float f) { union fbits x; x.f = f; return x.u; }
+#endif
 static float u2f(u32 u) { union fbits x; x.u = u; return x.f; }
 
 /* A value taken apart. `sig` carries the significand with its implicit
@@ -132,7 +149,9 @@ static double pack_raw(int sign, u64 e, u64 frac)
 
 static double d_zero(int s) { return pack_raw(s, 0, 0); }
 static double d_inf(int s)  { return pack_raw(s, EXPMAX, 0); }
+#if defined(SOFTFP_ALL)
 static double d_nan(void)   { return pack_raw(0, EXPMAX, 0x8000000000000ULL); }
+#endif
 
 /* Round to nearest, ties to even, and assemble. `sig` has the leading
  * bit at SIGBIT or one above it (a carry out of an addition); `exp` is
@@ -195,6 +214,8 @@ static double round_pack(int sign, int exp, u64 sig)
         return pack_raw(sign, (u64)(exp + BIAS), frac & 0xfffffffffffffULL);
     }
 }
+
+#if defined(SOFTFP_ALL)            /* the arithmetic and the comparisons */
 
 /* A NaN out of an operation, keeping one operand's payload where there
  * is one — quieted, as IEEE asks. */
@@ -401,6 +422,8 @@ RT_ABI int __unorddf2(double a, double b)
     return x.cls == CLS_NAN || y.cls == CLS_NAN;
 }
 
+#endif                             /* SOFTFP_ALL: arithmetic */
+
 /* ---- conversions: integer to floating ------------------------------ */
 
 static double from_u64(u64 v, int sign)
@@ -424,11 +447,13 @@ static double from_u64(u64 v, int sign)
     return round_pack(sign, exp, sig);
 }
 
+#if defined(SOFTFP_ALL)
 RT_ABI double __floatsidf(int v)
 {
     return v < 0 ? from_u64((u64)-(s64)v, 1) : from_u64((u64)v, 0);
 }
 RT_ABI double __floatunsidf(unsigned v) { return from_u64((u64)v, 0); }
+#endif
 RT_ABI double __floatdidf(s64 v)
 {
     return v < 0 ? from_u64((u64)-v, 1) : from_u64((u64)v, 0);
@@ -478,6 +503,7 @@ RT_ABI u64 __fixunsdfdi(double x)
     u64 v = to_u64(x, &sign);
     return sign ? 0 : v;
 }
+#if defined(SOFTFP_ALL)            /* the 32-bit ones, and binary32 */
 RT_ABI int __fixdfsi(double x)
 {
     s64 v = __fixdfdi(x);
@@ -600,6 +626,7 @@ RT_ABI int __unordsf2(float a, float b)
 
 RT_ABI float __floatsisf(int v)        { return __truncdfsf2(__floatsidf(v)); }
 RT_ABI float __floatunsisf(unsigned v) { return __truncdfsf2(__floatunsidf(v)); }
+#endif                             /* SOFTFP_ALL: 32-bit and binary32 */
 /* 64-bit integer to float, rounded ONCE. These went through double
  * (__truncdfsf2(__floatdidf(v))), which rounds twice: a value just above
  * the halfway point between two floats rounds to double exactly ON it,
@@ -638,10 +665,17 @@ RT_ABI float __floatdisf(s64 v)
 }
 RT_ABI float __floatundisf(u64 v)      { return u64_to_f(v, 0); }
 
+#if defined(SOFTFP_ALL)
 RT_ABI int __fixsfsi(float f)        { return __fixdfsi(__extendsfdf2(f)); }
 RT_ABI unsigned __fixunssfsi(float f) { return __fixunsdfsi(__extendsfdf2(f)); }
 RT_ABI s64 __fixsfdi(float f)        { return __fixdfdi(__extendsfdf2(f)); }
 RT_ABI u64 __fixunssfdi(float f)     { return __fixunsdfdi(__extendsfdf2(f)); }
+#else
+/* The widening is exact and the FPU does it (vcvt.f64.f32) -- which is no
+ * breach of the rule above: this build does not implement it. */
+RT_ABI s64 __fixsfdi(float f)        { return __fixdfdi((double)f); }
+RT_ABI u64 __fixunssfdi(float f)     { return __fixunsdfdi((double)f); }
+#endif
 
 #else
 /* A translation unit needs a declaration, and this one has none to make
