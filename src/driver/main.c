@@ -54,10 +54,11 @@ static void print_version(void)
            dt ? " (as configured)" : "");
     printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
-           "ARMv8-M Mainline), RISC-V (RV32, RV64), AVR (ATmega328P)\n");
+           "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (little-endian "
+           "o32), AVR (ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32 and AVR images; "
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32 and AVR images; "
            "AArch64 and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
@@ -771,10 +772,15 @@ static int compile_and_link(const char *in, const char *out)
     lo.undefs = g_undefs;
     lo.nundefs = g_nundefs;
     if (fw && !lo.script && !lo.have_base) {
+        /* embld lays a script out for ARM and RISC-V only: an AVR or
+         * MIPS build is not sent looking for one */
+        int scripts = target_get() == TARGET_THUMB ||
+                      target_get() == TARGET_RISCV32 ||
+                      target_get() == TARGET_RISCV64;
         fprintf(stderr,
-                "embcc: error: linking a %s image needs its memory map: a "
-                "linker script (-T FILE.ld), or -Wl,-Ttext=FLASH and "
-                "-Wl,-Tdata=RAM\n", target_triple_now());
+                "embcc: error: linking a %s image needs its memory map: %s"
+                "-Wl,-Ttext=FLASH and -Wl,-Tdata=RAM\n", target_triple_now(),
+                scripts ? "a linker script (-T FILE.ld), or " : "");
         return 1;
     }
     if (!fw && lo.script) {
