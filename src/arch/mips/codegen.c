@@ -209,7 +209,9 @@ static const struct ra_target MIPS_RATGT = {
     1,              /* ...allocated with them (float_in_gpr) */
     NULL, NULL,
     1,              /* atomic_in_reg: the ll/sc loops read through rdr */
-    0
+    0,
+    0               /* asm_in_reg: an asm's operands go through memory, as
+                     * on x86-64, AArch64 and AVR (regalloc.h) */
 };
 
 static int g_mips_regalloc;
@@ -2696,7 +2698,8 @@ static const struct ra_target MIPS_PAIR_RA = {
     1,
     NULL, NULL,
     1,
-    0
+    0,
+    0               /* asm_in_reg */
 };
 
 static void mips_pair_hints(const struct ir_func *fn, int *hint)
