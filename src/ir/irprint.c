@@ -354,8 +354,12 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
     case IR_ASM:
         /* The template is already assembled to bytes by this point, so
          * what there is to show is its shape, not its text. */
+        if (i->dst >= 0)
+            ob_fmt(b, "%%%d = ", i->dst);
         ob_str(b, "asm");
-        if (i->asm_ir)
+        if (i->asm_ir && i->asm_ir->cont)
+            ob_str(b, " continued");
+        else if (i->asm_ir)
             ob_fmt(b, " %d bytes, %d in, %d out", i->asm_ir->codelen,
                    i->asm_ir->nin, i->asm_ir->nout);
         break;

@@ -86,7 +86,8 @@ enum ir_op {
                  * dst = matched?1:0, and *(b) updated to the seen value.
                  * (lock cmpxchg; size) */
     IR_ASM,   /* extended asm: load inputs to fixed registers, assemble the
-               * template, store outputs. Detail in ir_ins.asm_ir */
+               * template, store outputs. Detail in ir_ins.asm_ir; dst is
+               * its `val` output's value, or -1 */
     IR_LABELADDR, /* dst = &&label  (GNU label address; id in `label`) */
     IR_IGOTO, /* goto *a  (GNU computed goto: jump to the address in temp a) */
     IR_SWITCH, /* a dense switch as ONE multi-way terminator: if (unsigned)a
@@ -184,6 +185,13 @@ struct ir_asm_op {
                   * it afterwards -- the asm IS the access. Without this an
                   * "=m" output had the register stored over what the
                   * template had just written there. */
+    int val;     /* an output whose VALUE is the instruction's dst, as a
+                  * call's result is: the asm leaves it in reg, and the
+                  * code generator moves it to dst's home. temp is -1.
+                  * irgen stores dst to the lvalue afterwards, so a local
+                  * written by an asm is no longer address-taken and can
+                  * live in a register. At most one per instruction; see
+                  * `cont`. Thumb only (ra_target.asm_in_reg). */
 };
 
 struct ir_asm {
@@ -193,6 +201,20 @@ struct ir_asm {
     int nin;
     struct ir_asm_op *out;
     int nout;
+    /* A continuation: no bytes, no inputs, and one `val` output -- a
+     * further value output of the asm just before it, which can have
+     * only one dst. It follows that asm immediately (the code generator
+     * refuses one that does not), and the asm's own lowering writes it;
+     * the continuation itself emits nothing. */
+    int cont;
+    /* What the asm may change, bit r for register r: its operands'
+     * registers, the clobber list, the registers the template names, the
+     * scratch its lowering uses (`scr`), and everything a call changes if
+     * the template calls. A value live across the asm keeps out of these
+     * and only these (regalloc.c, asm_in_reg); 0 means unknown, and the
+     * asm is then treated as a call. */
+    unsigned long clob;
+    int scr;     /* the scratch the lowering stores outputs through, or -1 */
 };
 
 /* A jump table: the targets of one IR_SWITCH, for index values 0..n-1; a

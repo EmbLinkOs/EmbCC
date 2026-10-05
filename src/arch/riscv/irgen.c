@@ -237,6 +237,36 @@ static char *rv_subst(const char *file, int line, const char *tmpl,
     return out;
 }
 
+/* The scratch an output stored through its address is written with, as
+ * the code generator chooses it. Not t6: a far slot access borrows it. */
+static const int rv_scr_pool[] = {
+    RV_T0, RV_T1, RV_T2, RV_T3, RV_T4, RV_T5,
+    RV_A0, RV_A1, RV_A2, RV_A3, RV_A4, RV_A5, RV_A6, RV_A7
+};
+
+/* Does the template call or trap -- `call`, `tail`, `jal`, `jalr`,
+ * `ecall` -- so that it changes what a call changes, whatever its
+ * clobber list says? */
+static int rv_template_calls(const char *text)
+{
+    for (const char *p = text; *p; p++) {
+        if (!isalpha((unsigned char)*p) ||
+            (p > text && (isalnum((unsigned char)p[-1]) || p[-1] == '_' ||
+                          p[-1] == '.')))
+            continue;
+        int n = 0;
+        while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.')
+            n++;
+        if ((n == 4 && (!strncmp(p, "call", 4) || !strncmp(p, "tail", 4) ||
+                        !strncmp(p, "jalr", 4))) ||
+            (n == 3 && !strncmp(p, "jal", 3)) ||
+            (n == 5 && !strncmp(p, "ecall", 5)))
+            return 1;
+        p += n - 1;
+    }
+    return 0;
+}
+
 void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
 {
     struct asm_stmt *a = s->asm_s;
@@ -295,6 +325,7 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
     char err[512];
     if (rvasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
+    int calls = rv_template_calls(text);
     free(text);
 
     /* Immediates were consumed by the template and carry no run-time
@@ -316,19 +347,86 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
                          : gen_expr(fn, a->in[i].expr);
         o->size = target_ptr_size();  /* a temp holds the promoted value */
     }
+    /* An "=r" output of an integer or a pointer is a VALUE: the asm's
+     * dst, stored to its lvalue afterwards (irg_asm_out_store), so a
+     * local it writes is not address-taken. The first is this asm's own
+     * dst; each further one is a continuation right after it
+     * (ir_asm.cont). Anything else -- "+", "m", another type -- is
+     * written through the lvalue's address, as before. Thumb's
+     * irg_asm_thumb is the same. */
+    int vk[2 * MAX_PARAMS], vaddr[2 * MAX_PARAMS], nv = 0;
     for (int i = 0; i < a->nout; i++) {
+        struct expr *lv = a->out[i].expr;
+        int inout = strchr(a->out[i].constraint, '+') != NULL;
+        int mem = asm_constraint_mem_only(a->out[i].constraint);
+        if (!inout && !mem && irg_asm_val_ok(lv, target_ptr_size())) {
+            vaddr[nv] = irg_asm_out_addr(fn, lv);
+            vk[nv++] = i;
+            if (nv > 1)
+                continue;                /* a continuation's */
+        }
         struct ir_asm_op *o = &ia->out[ia->nout++];
         o->reg = regs[i];
-        o->temp = gen_addr(fn, a->out[i].expr);
         o->size = sizes[i];
-        o->inout = strchr(a->out[i].constraint, '+') != NULL;
-        o->mem = asm_constraint_mem_only(a->out[i].constraint);
+        o->inout = inout;
+        o->mem = mem;
+        if (nv && vk[nv - 1] == i) {
+            o->val = 1;
+            o->temp = -1;
+        } else {
+            o->temp = gen_addr(fn, lv);
+        }
     }
+    /* What the asm may change: every register used[] holds (the
+     * operands', the clobbers', the template's), the scratch an output
+     * through an address is stored with, and, if the template calls,
+     * everything a call changes -- ra, t0-t6 and a0-a7. A value live
+     * across the asm keeps out of exactly these (regalloc.c). */
+    ia->scr = -1;
+    for (int k = 0; k < ia->nout; k++)
+        if (!ia->out[k].val && !ia->out[k].mem && ia->scr < 0)
+            for (unsigned q = 0; q < sizeof rv_scr_pool / sizeof rv_scr_pool[0];
+                 q++)
+                if (!used[rv_scr_pool[q]]) {
+                    ia->scr = rv_scr_pool[q];
+                    break;
+                }
+    if (ia->scr >= 0)
+        used[ia->scr] = 1;
+    if (calls)
+        for (int r = 0; r < 32; r++)
+            if (r == 1 || (r >= 5 && r <= 7) || (r >= 10 && r <= 17) ||
+                r >= 28)
+                used[r] = 1;
+    for (int r = 0; r < 32; r++)
+        if (used[r])
+            ia->clob |= 1UL << r;
     struct ir_ins *ins = emit(fn);
     ins->op = IR_ASM;
     ins->asm_ir = ia;
-    ins->dst = -1;
+    ins->dst = nv ? new_temp(fn) : -1;
     ins->a = ins->b = -1;
+    int vdst[2 * MAX_PARAMS];
+    if (nv)
+        vdst[0] = ins->dst;
+    for (int k = 1; k < nv; k++) {
+        struct ir_asm *c = xcalloc(1, sizeof *c);
+        c->cont = 1;
+        c->in = xcalloc(1, sizeof *c->in);
+        c->out = xcalloc(1, sizeof *c->out);
+        c->nout = 1;
+        c->out[0].reg = regs[vk[k]];
+        c->out[0].size = sizes[vk[k]];
+        c->out[0].val = 1;
+        c->out[0].temp = -1;
+        struct ir_ins *ci = emit(fn);
+        ci->op = IR_ASM;
+        ci->asm_ir = c;
+        ci->dst = vdst[k] = new_temp(fn);
+        ci->a = ci->b = -1;
+    }
+    for (int k = 0; k < nv; k++)
+        irg_asm_out_store(fn, a->out[vk[k]].expr, vaddr[k], vdst[k]);
 }
 
 /* What the IR_ADD..IR_CMP lowerings in codegen.c take as an immediate

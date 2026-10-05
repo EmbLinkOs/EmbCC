@@ -46,6 +46,8 @@ int ra_ins_def(const struct ir_ins *in)
     case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
     case IR_VWIDEN: case IR_SELECT:
         return in->dst;
+    case IR_ASM:              /* its `val` output's value, or -1 */
+        return in->dst;
     default:
         return -1;            /* STORE, RET, LABEL, JMP, branches, MEMCPY, ... */
     }
@@ -101,7 +103,9 @@ void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
     case IR_ASM:
         if (s->asm_ir) {
             for (int k = 0; k < s->asm_ir->nin; k++) U(s->asm_ir->in[k].temp);
-            for (int k = 0; k < s->asm_ir->nout; k++) U(s->asm_ir->out[k].temp);
+            /* an output's ADDRESS is read; a `val` one is the dst */
+            for (int k = 0; k < s->asm_ir->nout; k++)
+                if (!s->asm_ir->out[k].val) U(s->asm_ir->out[k].temp);
         }
         break;
     default: break;   /* CONST/STRADDR/GADDR/FADDR/LABEL/JMP/FENCE/UD2 */
@@ -417,13 +421,24 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * r8/r9: the parallel move in case IR_CALL shuffles arguments already held
      * in r8/r9 without clobbering. A leaf has no calls, so `crosses` stays 0. */
     char *crosses = xcalloc((size_t)(nvr ? nvr : 1), 1);
+    /* Registers a value may not take because an asm it lives across may
+     * change them (ir_asm.clob), bit r for register r. */
+    unsigned long *forbid = xcalloc((size_t)(nvr ? nvr : 1), sizeof *forbid);
     for (int i = 0; i < nins; i++) {
         /* ...and a call the IR does not spell IR_CALL: a backend that
          * lowers some op to a runtime helper says so here, or its
          * caller-saved registers are not safe (regalloc.h). */
+        /* ...and inline asm where it may be one (regalloc.h asm_in_reg):
+         * when what it changes is known, a value live across it keeps
+         * out of exactly that; a continuation changes nothing itself. */
+        const struct ir_asm *ia = fn->ins[i].op == IR_ASM ? fn->ins[i].asm_ir
+                                                           : NULL;
+        int asm_here = ia && t->asm_in_reg && !fp && !ia->cont;
         if (fn->ins[i].op != IR_CALL &&
-            !(t->op_calls_helper && t->op_calls_helper(&fn->ins[i])))
+            !(t->op_calls_helper && t->op_calls_helper(&fn->ins[i])) &&
+            !asm_here)
             continue;
+        unsigned long clob = asm_here ? ia->clob : 0;
         unsigned long *lo = liveout + (size_t)i * lwords;
         for (int w = 0; w < lwords; w++) {
             unsigned long bits = lo[w];
@@ -431,10 +446,24 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                 int b = 0; unsigned long t = bits;
                 while (!(t & 1)) { t >>= 1; b++; }
                 int v = w * 64 + b;
-                if (v < nvr && v != defv[i]) crosses[v] = 1;
+                if (v < nvr && v != defv[i]) {
+                    if (clob) forbid[v] |= clob;
+                    else      crosses[v] = 1;
+                }
                 bits &= bits - 1;
             }
         }
+        /* An asm output written through an address reads that address
+         * AFTER the template has run, inside the same instruction: it has
+         * to survive the asm as a value live across it does. */
+        if (asm_here)
+            for (int k = 0; k < ia->nout; k++) {
+                const struct ir_asm_op *o = &ia->out[k];
+                if (o->val || o->mem || o->temp < 0 || o->temp >= nvr)
+                    continue;
+                if (clob) forbid[o->temp] |= clob;
+                else      crosses[o->temp] = 1;
+            }
     }
     if (!fp && t->saved_only) {
         const char *so = t->saved_only(fn);
@@ -562,11 +591,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                 OPAQUE(in->dst);                     /* float/struct result */
             break;
         case IR_ASM:
-            if (in->asm_ir) {
+            if (in->asm_ir && !t->asm_in_reg) {
                 for (int k = 0; k < in->asm_ir->nin; k++)
                     OPAQUE(in->asm_ir->in[k].temp);
                 for (int k = 0; k < in->asm_ir->nout; k++)
                     OPAQUE(in->asm_ir->out[k].temp);
+                OPAQUE(in->dst);
             }
             break;
         default: break;
@@ -577,7 +607,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * clobber (the clobber set is not visible here), so exclude it. And a vreg
      * that never appears has nothing to allocate. */
     for (int i = 0; i < nins; i++)
-        if (fn->ins[i].op == IR_ASM)
+        if (fn->ins[i].op == IR_ASM && !(t->asm_in_reg && !fp))
             for (int v = 0; v < nvr; v++)
                 if (elig[v] && first[v] >= 0 && first[v] <= i && i <= last[v]) {
                     if (g_ra_why && v < g_ra_why_n)
@@ -766,6 +796,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * if any of them crosses a call the register must survive one, and
      * any ABI wish one of them had is the node's. */
     char *xcross = xcalloc((size_t)(E ? E : 1), 1);
+    unsigned long *xforbid = xcalloc((size_t)(E ? E : 1), sizeof *xforbid);
     int *ehint = xmalloc((size_t)(E ? E : 1) * sizeof *ehint);
     /* ...and how deep in a loop a node's members live, for the one
      * merge that is refused below. */
@@ -786,6 +817,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     for (int e = 0; e < E; e++) {
         alias[e] = e;
         xcross[e] = crosses[eidx[e]];
+        xforbid[e] = forbid[eidx[e]];
         ehint[e] = hint[eidx[e]];
     }
     if (adj) {
@@ -885,6 +917,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             alias[y] = x;
             absorbed[y] = 1;
             xcross[x] |= xcross[y];
+            xforbid[x] |= xforbid[y];
             if (ndep[y] > ndep[x]) ndep[x] = ndep[y];
             if (ehint[x] < 0) ehint[x] = ehint[y];
             int d2 = 0;
@@ -1036,6 +1069,11 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         if (xcross[e])
             for (int k = 0; k < NP; k++)
                 if (!callee_saved(POOL[k])) taken |= 1 << k;
+        /* ...nor one an asm it lives across may change */
+        if (xforbid[e])
+            for (int k = 0; k < NP; k++)
+                if (POOL[k] >= 0 && POOL[k] < 64 && (xforbid[e] >> POOL[k] & 1))
+                    taken |= 1 << k;
         /* preferred colours: registers a colored, non-interfering move-partner
          * already holds (and that are still free) */
         int want = 0;
@@ -1175,11 +1213,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             if (elig[v] || loc[v] >= 0)
                 fprintf(stderr, "ra %s v%d cross=%d hint=%d loc=%d [%d,%d]\n",
                         fn->name, v, crosses[v], hint[v], loc[v], first[v], last[v]);
-    free(hint); free(alias); free(absorbed); free(xcross); free(ehint);
+    free(hint); free(alias); free(absorbed); free(xcross); free(xforbid);
+    free(ehint);
     free(ndep); free(idepth); free(nfirst); free(nlast);
     g_ra_res = NULL; g_ra_nres = 0;          /* consumed */
     free(cost);
-    free(first); free(last); free(elig); free(crosses);
+    free(first); free(last); free(elig); free(crosses); free(forbid);
     free(eof); free(eidx); free(adj); free(pref);
     free(members); free(order);
     free(liveout); free(livein); free(defv);

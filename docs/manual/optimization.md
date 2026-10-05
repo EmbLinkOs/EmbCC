@@ -584,9 +584,8 @@ A call is never inlined when:
 - the callee returns a structure, `_Complex`, `long double` or
   `__int128`, or uses `__int128`;
 - a parameter is not a scalar of at most 8 bytes;
-- the callee contains inline `asm`, `va_start`, `alloca` or a
-  variable-length array, computed `goto`, or a call to a function that
-  returns a structure;
+- the callee contains `va_start`, `alloca` or a variable-length array,
+  computed `goto`, or a call to a function that returns a structure;
 - the caller has a C++ exception region or uses `__int128`.
 
 `-fremarks` reports every decision with its reason, for example:
