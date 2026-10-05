@@ -323,6 +323,131 @@ static const int *t_pool_for(const struct ir_func *fn, int *n)
     return g_t_pool;
 }
 
+/* Per register, how many instructions name its values (t_lowregs). */
+struct t_lowreg_w {
+    const int *loc;
+    long w[16];
+    long f;                    /* this instruction's loop weight */
+};
+
+static void t_lowreg_count(int v, void *ctx)
+{
+    struct t_lowreg_w *c = ctx;
+    if (v >= 0 && c->loc[v] >= 0 && c->loc[v] < 16)
+        c->w[c->loc[v]] += c->f;
+}
+
+/* ---- LOW REGISTERS FOR THE BUSIEST VALUES ----------------------------
+ *
+ * Thumb-2's 16-bit encodings reach r0-r7 only: `ldr r0, [r4, #8]` is two
+ * bytes and `ldr.w r0, [r8, #8]` four, and the same holds for str, adds,
+ * subs, cmp, mov and most of the rest. The colourer hands the callee-saved
+ * registers out in pool order to whichever value it reaches first, which
+ * says nothing about how often each is used: in FreeRTOS's
+ * xTaskGenericNotifyFromISR the task pointer, the base of nearly every
+ * access in the function, got r8, and every one of those accesses was a
+ * four-byte instruction.
+ *
+ * The callee-saved registers are interchangeable: the prologue saves a
+ * set, and nothing in the ABI names one of them. So once allocation is
+ * done, the ones it used are renamed among themselves: the register whose
+ * values appear most where a low register shortens the instruction --
+ * loads and stores twice, moves, calls and returns not at all, a loop
+ * body's counting eight times per level -- becomes the lowest, the next
+ * the one after. The set, and with it the push and the pop, is
+ * unchanged.
+ *
+ * Left alone: a register a 64-bit value uses (its two halves are rN and
+ * rN+1, a shape a rename would break), and the asm-pinned ones, which are
+ * not in the pool. r9 and above never come from the pool. */
+static void t_lowregs(const struct ir_func *fn, int *loc, const char *wide)
+{
+    int np;
+    const int *pool = t_pool_base(fn, &np);
+    unsigned cand = 0, fixed = t_asm_saved_regs(fn);
+    for (int j = 0; j < np; j++)
+        if (pool[j] >= 4 && pool[j] <= 8)    /* the callee-saved ones */
+            cand |= 1u << pool[j];
+    unsigned seen = 0;
+    for (int v = 0; v < fn->nvregs; v++) {
+        int r = loc[v];
+        if (r < 0)
+            continue;
+        if (wide && wide[v]) {
+            fixed |= 1u << r | 1u << (r + 1);
+            continue;
+        }
+        seen |= 1u << r;
+    }
+    cand &= seen & ~fixed;
+    if (!cand || !(cand & (cand - 1)))
+        return;                         /* nothing to choose between */
+
+    /* Loop depth by back edge: a branch to a label at or above it closes
+     * a loop over everything in between. */
+    int *depth = xcalloc((size_t)fn->nins + 1, sizeof *depth);
+    int nl = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= nl)
+            nl = fn->ins[n].label + 1;
+    int *lpos = xmalloc((size_t)(nl ? nl : 1) * sizeof *lpos);
+    for (int k = 0; k < nl; k++)
+        lpos[k] = -1;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0)
+            lpos[fn->ins[n].label] = n;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ) &&
+            i->label >= 0 && i->label < nl && lpos[i->label] >= 0 &&
+            lpos[i->label] <= n) {
+            depth[lpos[i->label]]++;
+            depth[n + 1]--;
+        }
+    }
+    struct t_lowreg_w c;
+    c.loc = loc;
+    for (int r = 0; r < 16; r++)
+        c.w[r] = 0;
+    int d = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        d += depth[n];
+        const struct ir_ins *i = &fn->ins[n];
+        /* What a low register buys here: a load or store's base and
+         * value are what the 16-bit forms are mostly about; a move is
+         * two bytes from any register to any, and a call's arguments
+         * and a return value arrive by moves. */
+        int k = i->op == IR_LOAD || i->op == IR_STORE ? 2 :
+                i->op == IR_MOV || i->op == IR_CALL || i->op == IR_RET ? 0 : 1;
+        c.f = (long)k * (d <= 0 ? 1 : d == 1 ? 8 : 64);
+        int def = ra_ins_def(i);
+        if (def >= 0 && def < fn->nvregs && loc[def] >= 0 && loc[def] < 16)
+            c.w[loc[def]] += c.f;
+        ra_each_use(i, t_lowreg_count, &c);
+    }
+    free(depth);
+    free(lpos);
+
+    /* Heaviest first onto the lowest; ties keep their order. */
+    int from[16], to[16], n = 0;
+    for (int r = 0; r < 16; r++)
+        if (cand >> r & 1)
+            to[n] = from[n] = r, n++;
+    for (int a = 1; a < n; a++)
+        for (int b = a; b > 0 && c.w[from[b]] > c.w[from[b - 1]]; b--) {
+            int t = from[b]; from[b] = from[b - 1]; from[b - 1] = t;
+        }
+    int map[16];
+    for (int r = 0; r < 16; r++)
+        map[r] = r;
+    for (int k = 0; k < n; k++)
+        map[from[k]] = to[k];
+    for (int v = 0; v < fn->nvregs; v++)
+        if (loc[v] >= 0 && loc[v] < 16 && (cand >> loc[v] & 1) &&
+            !(wide && wide[v]))
+            loc[v] = map[loc[v]];
+}
+
 /* The PAIR pool for 64-bit values, each named by its low register: the
  * argument pairs r0:r1 and r2:r3, where AAPCS32 passes a double or a long
  * long and every helper takes one, then r4:r5 and r6:r7 for one that
@@ -4326,6 +4451,8 @@ static void gen_ins(struct t_fn *F, int n)
  * narrower than itself, or anything pinned for -g. slot_of() refuses a
  * path this misses. */
 static int g_t_pairs = 1;
+/* t_lowregs on or off for this attempt (gen_func_best). */
+static int g_t_lowregs = 1;
 
 static void t_pair_hints(const struct ir_func *fn, int *hint)
 {
@@ -4619,6 +4746,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             }
             free(pair);
         }
+        if (g_t_lowregs)
+            t_lowregs(fn, F.loc, F.wide);
         if (flt) {
             int fused[32], nfused = 0, top = 15;
             F.floc = ra_allocate_fp(fn, &THUMB_RA, F.wide, flt,
@@ -5244,7 +5373,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
  * attempt is undone by truncating the code and the five site lists.
  * EMBCC_T_PAIRS=0/1 forces the choice, EMBCC_T_PAIRS_ONLY=fn limits the
  * pairs to one function -- so a pair path wrong only where it loses can
- * still be tested and bisected. */
+ * still be tested and bisected.
+ *
+ * Each of those is tried with the callee-saved registers renamed for the
+ * 16-bit encodings (t_lowregs) and without. The rename's weights are an
+ * estimate made before any code exists, and a few functions came out
+ * larger by it (strtod's parse_hex by 36 bytes); trying both makes it a
+ * choice the bytes decide. EMBCC_T_LOWREGS=0/1 forces it. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
                           struct t_sites *st, int want_debug)
 {
@@ -5262,28 +5397,56 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         ra_fold_memoff(fn, 0, 4095, 4, 4, w);
         free(w);
     }
+    const char *lr = getenv("EMBCC_T_LOWREGS");
+    int lr_forced = lr && *lr;
     g_t_pairs = 1;
-    if (!g_t_regalloc || want_debug || g_t_o0 || target_thumb_fpu() ||
-        (knob && *knob) || (only && *only)) {
-        if (knob && *knob) g_t_pairs = atoi(knob);
-        if (only && *only) g_t_pairs = strcmp(only, fn->name) == 0;
+    g_t_lowregs = lr_forced ? atoi(lr) != 0 : 1;
+    if (!g_t_regalloc || want_debug || g_t_o0) {
         gen_func(fn, t, st, want_debug);
-        g_t_pairs = 1;
+        g_t_lowregs = 1;
         return;
     }
-    gen_func(fn, t, st, want_debug);
-    with = t->len - at;
-    t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next; st->nstr = nstr;
-    st->ng = ng; st->nf = nf;
-    g_t_pairs = 0;
-    gen_func(fn, t, st, want_debug);
-    if (t->len - at > with) {
-        t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next; st->nstr = nstr;
-        st->ng = ng; st->nf = nf;
-        g_t_pairs = 1;
+    /* The attempts: pairs on and off (only without an FPU, and unless a
+     * knob fixes them), each with the rename on and off (unless
+     * EMBCC_T_LOWREGS fixes it). The first of equal sizes wins. */
+    int fixed_pairs = target_thumb_fpu() || (knob && *knob) || (only && *only);
+    int pv[2], np = 0, lv[2], nl = 0;
+    if (fixed_pairs) {
+        pv[np++] = !(knob && *knob) || atoi(knob);
+        if (only && *only)
+            pv[0] = strcmp(only, fn->name) == 0;
+    } else {
+        pv[np++] = 1;
+        pv[np++] = 0;
+    }
+    lv[nl++] = g_t_lowregs;
+    if (!lr_forced)
+        lv[nl++] = 0;
+    int best = -1, bestlen = 0, last = -1;
+    for (int a = 0; a < np * nl; a++) {
+        if (a) {
+            t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next;
+            st->nstr = nstr; st->ng = ng; st->nf = nf;
+        }
+        g_t_pairs = pv[a / nl];
+        g_t_lowregs = lv[a % nl];
+        gen_func(fn, t, st, want_debug);
+        with = t->len - at;
+        last = a;
+        if (best < 0 || with < bestlen) {
+            best = a;
+            bestlen = with;
+        }
+    }
+    if (best != last) {
+        t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next;
+        st->nstr = nstr; st->ng = ng; st->nf = nf;
+        g_t_pairs = pv[best / nl];
+        g_t_lowregs = lv[best % nl];
         gen_func(fn, t, st, want_debug);
     }
     g_t_pairs = 1;
+    g_t_lowregs = 1;
 }
 
 void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
