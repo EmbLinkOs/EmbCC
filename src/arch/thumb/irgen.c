@@ -38,8 +38,8 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
     long align = ty_align(rt);
     long step;
 
-    int apa = gen_addr(fn, e->lhs);
-    int cur = emit_load(fn, apa, ptr);
+    int apa;
+    int cur = irg_va_ptr_read(fn, e->lhs, ptr, &apa);
 
     /* An eight-byte argument is eight-ALIGNED in the argument area, and
      * the caller aligned it the same way. A variadic `float` arrives
@@ -61,7 +61,7 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
         int addr = new_temp(fn);
         emit_mov(fn, addr, cur);
         step = (size + 3) & ~3L;
-        emit_store(fn, apa,
+        irg_va_ptr_write(fn, e->lhs, apa,
                    emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 4), 4, 1),
                    ptr);
         if (rt->kind == TY_STRUCT) {

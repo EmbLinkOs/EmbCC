@@ -42,6 +42,12 @@ int irg_va_arg_aapcs(struct ir_func *fn, struct expr *e);
 int irg_va_arg_darwin(struct ir_func *fn, struct expr *e);
 /* AAPCS32, where a va_list is a bare pointer at the next argument. */
 int irg_va_arg_thumb(struct ir_func *fn, struct expr *e);
+/* A pointer va_list's read and write-back in va_arg: by variable when it
+ * is a local, through its address otherwise (irgen.c). */
+int irg_va_ptr_read(struct ir_func *fn, struct expr *lv,
+                    const struct type *ptr, int *slot);
+void irg_va_ptr_write(struct ir_func *fn, struct expr *lv, int slot,
+                      int val, const struct type *ptr);
 int irg_va_arg_riscv(struct ir_func *fn, struct expr *e);
 /* AVR, where a variadic call puts EVERY argument on the stack -- the named
  * ones too -- so the list is a bare pointer and there is no split point. */
