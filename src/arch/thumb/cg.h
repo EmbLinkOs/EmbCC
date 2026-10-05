@@ -105,6 +105,14 @@ struct t_fn {
      * or bc_end -1 once a label has been placed since. See
      * invert_last_bcond. */
     int bc_end, bc_fix;
+    /* The last compare of a register with an immediate that went
+     * straight into a branch: where that branch's code ended, the
+     * register and the immediate. A compare of the same two, with
+     * nothing emitted since and no label placed, has those flags
+     * already -- a switch's decision tree asks `== k` and then `> k` of
+     * one value. fl_end is -1 when there is none. */
+    int fl_end, fl_reg;
+    long fl_imm;
     /* Which of the scratch registers r9-r11 the prologue saves: all of
      * them until a pass has shown which the body uses. */
     unsigned scr_save;

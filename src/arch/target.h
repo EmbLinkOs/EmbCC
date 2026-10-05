@@ -137,6 +137,10 @@ int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
  * rather than lowering something no backend can carry. */
 int target_has_int128(void);
 int target_jump_tables(void);     /* a dense switch may be a table: not AVR */
+/* Under -Os, the fewest cases a dense switch needs to be a table rather
+ * than a tree of compares: 4 where the dispatch is ARMv7-M's cmp, bhs,
+ * tbh and two bytes an entry; 6 elsewhere. */
+int target_switch_table_min_os(void);
 /* Does the current backend lower this op to a CALL of a runtime helper
  * (soft-float arithmetic, a 64-bit divide, an __int128 op)? The
  * allocator already knows -- it is the backend's own predicate, handed

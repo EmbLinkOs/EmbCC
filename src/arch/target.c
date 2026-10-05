@@ -260,6 +260,10 @@ int target_has_int128(void)     { return g_model[g_arch].int128; }
  * with a word address read from flash, and the backend has no lowering
  * for the table yet -- it refuses the op by name if it ever sees one. */
 int target_jump_tables(void)    { return target_get() != TARGET_AVR; }
+int target_switch_table_min_os(void)
+{
+    return target_get() == TARGET_THUMB && target_thumb_arch() >= 7 ? 4 : 6;
+}
 
 static int (*g_calls_helper)(const struct ir_ins *i);
 void target_set_calls_helper(int (*pred)(const struct ir_ins *i)) { g_calls_helper = pred; }
