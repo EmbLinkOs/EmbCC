@@ -53,14 +53,6 @@ int ra_ins_def(const struct ir_ins *in)
     }
 }
 
-/* Backward liveness dataflow. Fills first[v]/last[v] with the min/max
- * instruction index at which vreg v is live — a sound over-approximation of its
- * live range that spans loop back-edges (a naive first/last-appearance interval
- * does NOT, and would let a loop-carried value's register be clobbered mid-loop).
- * -1 for a vreg that is never live. ALSO returns, for the interference graph,
- * the per-instruction live-IN and live-OUT bitsets (each nins*words) and the def
- * vreg per instruction (all malloc'd, caller frees), and *words_out. Returns
- * NULL bitsets (and leaves the outputs NULL) for an empty function. */
 /* Every vreg this instruction READS, once each.
  *
  * There were two copies of this switch -- the liveness scan below and
@@ -128,115 +120,347 @@ void ra_count_vreg_uses(const struct ir_func *fn, int *cnt)
         ra_each_use(&fn->ins[i], ra_ucnt_cb, &u);
 }
 
-/* The liveness scan's use of ra_each_use: set this instruction's bit. */
-struct ra_useset { unsigned long *use; int words, nvr, i; };
-static void ra_useset_cb(int v, void *ctx)
+
+/* ---- liveness, by block -----------------------------------------------
+ *
+ * What the old ra_live_intervals computed, without its per-instruction
+ * sets. It kept three bit sets of every vreg at every instruction, so its
+ * time and its memory were the square of a function's size: 4000 plain
+ * statements are 16000 instructions and 28000 vregs at -O2, 56 MB per
+ * set, and the fixpoint swept all of it until nothing changed. Once the
+ * optimizer was linear, that and what read the sets were most of an -O2
+ * compile of such a function on Cortex-M.
+ *
+ * Here only the BLOCKS' live-in and live-out sets are kept, as sorted
+ * lists, and found one vreg at a time: from each block that reads the
+ * vreg before writing it, backwards through predecessors until a block
+ * that writes it -- the least solution of the same equations, so the same
+ * sets. Inside a block liveness is a straight backward scan from the
+ * block's live-out set, and every consumer walks it that way
+ * (ra_lset_out / ra_lset_step). The blocks are those of the
+ * instruction-level graph the old fixpoint used: a successor is the next
+ * instruction unless the op is JMP, RET, UD2 or SWITCH, plus a jump's or
+ * a switch's labels -- so `goto *p` falls through here as it did there. */
+struct ra_live {
+    int nins, nvr, nbb;
+    int *bstart;                    /* block b is [bstart[b], bstart[b+1]) */
+    int *blk;                       /* instruction -> block */
+    int *in_off, *in_v;             /* live-in of b: in_v[in_off[b]..in_off[b+1]) */
+    int *out_off, *out_v;           /* live-out, likewise; both ascending */
+};
+
+struct ra_pairs { int *v, *b; int n, cap; };
+static void ra_pairs_add(struct ra_pairs *p, int v, int b)
 {
-    struct ra_useset *u = ctx;
-    if (v < u->nvr)
-        u->use[(size_t)u->i * u->words + (v >> 6)] |= 1UL << (v & 63);
+    if (p->n == p->cap) {
+        p->cap = p->cap ? p->cap * 2 : 256;
+        p->v = xrealloc(p->v, (size_t)p->cap * sizeof *p->v);
+        p->b = xrealloc(p->b, (size_t)p->cap * sizeof *p->b);
+    }
+    p->v[p->n] = v;
+    p->b[p->n] = b;
+    p->n++;
 }
 
-unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
-                                             int *last, unsigned long **livein_out,
-                                             int **defv_out, int *words_out)
+/* Sort pairs into CSR by `key` (0: by v, 1: by b), stably, so a list
+ * keeps the order the pairs were made in. */
+static void ra_pairs_csr(const struct ra_pairs *p, int key, int nkey,
+                         int **off_out, int **val_out)
+{
+    int *off = xcalloc((size_t)nkey + 1, sizeof *off);
+    int *val = xmalloc((size_t)(p->n ? p->n : 1) * sizeof *val);
+    const int *k = key ? p->b : p->v, *x = key ? p->v : p->b;
+    for (int j = 0; j < p->n; j++) off[k[j] + 1]++;
+    for (int j = 0; j < nkey; j++) off[j + 1] += off[j];
+    int *fill = xmalloc((size_t)(nkey ? nkey : 1) * sizeof *fill);
+    for (int j = 0; j < nkey; j++) fill[j] = off[j];
+    for (int j = 0; j < p->n; j++) val[fill[k[j]]++] = x[j];
+    free(fill);
+    *off_out = off;
+    *val_out = val;
+}
+
+struct ra_ue { struct ra_pairs *ue; int *ustamp; const int *dstamp; int b, nvr; };
+static void ra_ue_cb(int v, void *ctx)
+{
+    struct ra_ue *u = ctx;
+    if (v >= u->nvr || u->dstamp[v] == u->b + 1 || u->ustamp[v] == u->b + 1)
+        return;
+    u->ustamp[v] = u->b + 1;
+    ra_pairs_add(u->ue, v, u->b);
+}
+
+struct ra_fl { int *first, *last, nvr, i; };
+static void ra_fl_upd(struct ra_fl *f, int v, int i)
+{
+    if (f->first[v] < 0 || i < f->first[v]) f->first[v] = i;
+    if (i > f->last[v]) f->last[v] = i;
+}
+static void ra_fl_cb(int v, void *ctx)
+{
+    struct ra_fl *f = ctx;
+    if (v < f->nvr)
+        ra_fl_upd(f, v, f->i);
+}
+
+struct ra_live *ra_live_compute(const struct ir_func *fn, int *first, int *last)
 {
     int nins = fn->nins, nvr = fn->nvregs;
     for (int v = 0; v < nvr; v++) { first[v] = -1; last[v] = -1; }
-    *defv_out = NULL; *livein_out = NULL; *words_out = 0;
-    if (nins == 0 || nvr == 0) return NULL;
-    int words = (nvr + 63) / 64;
+    struct ra_live *lv = xcalloc(1, sizeof *lv);
+    lv->nins = nins;
+    lv->nvr = nvr;
+    if (nins == 0 || nvr == 0)
+        return lv;
 
-    unsigned long *use = xcalloc((size_t)nins * words, sizeof *use);
-    unsigned long *in  = xcalloc((size_t)nins * words, sizeof *in);
-    unsigned long *out = xcalloc((size_t)nins * words, sizeof *out);
-    int *defv = xmalloc((size_t)nins * sizeof *defv);
+    /* blocks: a label starts one, and so does whatever follows an op
+     * whose successor is not simply the next instruction */
+    char *lead = xcalloc((size_t)nins, 1);
+    lead[0] = 1;
+    for (int i = 0; i < nins; i++) {
+        enum ir_op op = fn->ins[i].op;
+        if (op == IR_LABEL) lead[i] = 1;
+        if ((op == IR_JMP || op == IR_BRZ || op == IR_BRNZ || op == IR_RET ||
+             op == IR_UD2 || op == IR_SWITCH) && i + 1 < nins)
+            lead[i + 1] = 1;
+    }
+    int nbb = 0;
+    for (int i = 0; i < nins; i++) nbb += lead[i];
+    lv->nbb = nbb;
+    lv->bstart = xmalloc((size_t)(nbb + 1) * sizeof *lv->bstart);
+    lv->blk = xmalloc((size_t)nins * sizeof *lv->blk);
+    for (int i = 0, b = -1; i < nins; i++) {
+        if (lead[i]) lv->bstart[++b] = i;
+        lv->blk[i] = b;
+    }
+    lv->bstart[nbb] = nins;
+    free(lead);
+
+    /* successors and predecessors, in CSR */
     int *labelidx = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) *
                             sizeof *labelidx);
     for (int l = 0; l < fn->nlabels; l++) labelidx[l] = -1;
     for (int i = 0; i < nins; i++)
-        if (fn->ins[i].op == IR_LABEL) labelidx[fn->ins[i].label] = i;
-
-    struct ra_useset us = { use, words, nvr, 0 };
-    for (int i = 0; i < nins; i++) {
-        struct ir_ins *s = &fn->ins[i];
-        defv[i] = ra_ins_def(s);
-        us.i = i;
-        ra_each_use(s, ra_useset_cb, &us);
-    }
-#undef USE
-
-    /* iterate to a fixpoint: in[i] = use[i] ∪ (out[i] − def[i]);
-     * out[i] = ∪ in[succ]. */
-    int changed = 1;
-    while (changed) {
-        changed = 0;
-        for (int i = nins - 1; i >= 0; i--) {
-            struct ir_ins *s = &fn->ins[i];
-            unsigned long *oi = out + (size_t)i * words;
-            for (int w = 0; w < words; w++) oi[w] = 0;
-            /* successors */
-            if (s->op != IR_JMP && s->op != IR_RET && s->op != IR_UD2 &&
-                s->op != IR_SWITCH && i + 1 < nins) {
-                unsigned long *si = in + (size_t)(i + 1) * words;
-                for (int w = 0; w < words; w++) oi[w] |= si[w];
+        if (fn->ins[i].op == IR_LABEL && fn->ins[i].label >= 0 &&
+            fn->ins[i].label < fn->nlabels)
+            labelidx[fn->ins[i].label] = i;
+    struct ra_pairs edge = { NULL, NULL, 0, 0 };     /* (succ, pred) */
+    for (int b = 0; b < nbb; b++) {
+        int i = lv->bstart[b + 1] - 1;
+        const struct ir_ins *s = &fn->ins[i];
+        if (s->op != IR_JMP && s->op != IR_RET && s->op != IR_UD2 &&
+            s->op != IR_SWITCH && i + 1 < nins)
+            ra_pairs_add(&edge, b + 1, b);
+        if ((s->op == IR_JMP || s->op == IR_BRZ || s->op == IR_BRNZ) &&
+            s->label >= 0 && s->label < fn->nlabels &&
+            labelidx[s->label] >= 0)
+            ra_pairs_add(&edge, lv->blk[labelidx[s->label]], b);
+        if (s->op == IR_SWITCH)
+            for (int k = -1; k < fn->jt[s->jt].n; k++) {
+                int l = k < 0 ? s->label : fn->jt[s->jt].labels[k];
+                int t = l >= 0 && l < fn->nlabels ? labelidx[l] : -1;
+                if (t >= 0)
+                    ra_pairs_add(&edge, lv->blk[t], b);
             }
-            if (s->op == IR_JMP || s->op == IR_BRZ || s->op == IR_BRNZ) {
-                int t = labelidx[s->label];
-                if (t >= 0) {
-                    unsigned long *si = in + (size_t)t * words;
-                    for (int w = 0; w < words; w++) oi[w] |= si[w];
+    }
+    free(labelidx);
+    int *poff, *pred;                 /* predecessors of each block */
+    ra_pairs_csr(&edge, 0, nbb, &poff, &pred);
+    free(edge.v); free(edge.b);
+
+    /* Per block, the vregs read before any write in it (upward-exposed)
+     * and the vregs written. */
+    struct ra_pairs ue = { NULL, NULL, 0, 0 }, df = { NULL, NULL, 0, 0 };
+    int *ustamp = xcalloc((size_t)nvr, sizeof *ustamp);
+    int *dstamp = xcalloc((size_t)nvr, sizeof *dstamp);
+    struct ra_ue uc = { &ue, ustamp, dstamp, 0, nvr };
+    for (int b = 0; b < nbb; b++) {
+        uc.b = b;
+        for (int i = lv->bstart[b]; i < lv->bstart[b + 1]; i++) {
+            ra_each_use(&fn->ins[i], ra_ue_cb, &uc);
+            int d = ra_ins_def(&fn->ins[i]);
+            if (d >= 0 && d < nvr && dstamp[d] != b + 1) {
+                dstamp[d] = b + 1;
+                ra_pairs_add(&df, d, b);
+            }
+        }
+    }
+    free(ustamp); free(dstamp);
+    int *ueoff, *ueb, *dfoff, *dfb;   /* by vreg: its blocks */
+    ra_pairs_csr(&ue, 0, nvr, &ueoff, &ueb);
+    ra_pairs_csr(&df, 0, nvr, &dfoff, &dfb);
+    free(ue.v); free(ue.b); free(df.v); free(df.b);
+
+    /* One vreg at a time, in increasing order, so that each block's lists
+     * come out sorted (the sort by block below is stable). A stamp of
+     * v + 1 means "this block, for this vreg". */
+    struct ra_pairs lin = { NULL, NULL, 0, 0 }, lout = { NULL, NULL, 0, 0 };
+    int *inmk = xcalloc((size_t)nbb, sizeof *inmk);
+    int *outmk = xcalloc((size_t)nbb, sizeof *outmk);
+    int *defmk = xcalloc((size_t)nbb, sizeof *defmk);
+    int *work = xmalloc((size_t)nbb * sizeof *work);
+    for (int v = 0; v < nvr; v++) {
+        if (ueoff[v] == ueoff[v + 1])
+            continue;                   /* never read: never live */
+        for (int k = dfoff[v]; k < dfoff[v + 1]; k++) defmk[dfb[k]] = v + 1;
+        int nw = 0;
+        for (int k = ueoff[v]; k < ueoff[v + 1]; k++) {
+            int b = ueb[k];
+            inmk[b] = v + 1;
+            ra_pairs_add(&lin, v, b);
+            work[nw++] = b;
+        }
+        while (nw > 0) {
+            int b = work[--nw];
+            for (int k = poff[b]; k < poff[b + 1]; k++) {
+                int p = pred[k];
+                if (outmk[p] != v + 1) {
+                    outmk[p] = v + 1;
+                    ra_pairs_add(&lout, v, p);
+                }
+                if (defmk[p] != v + 1 && inmk[p] != v + 1) {
+                    inmk[p] = v + 1;
+                    ra_pairs_add(&lin, v, p);
+                    work[nw++] = p;
                 }
             }
-            if (s->op == IR_SWITCH) {       /* the default and every entry */
-                for (int k = -1; k < fn->jt[s->jt].n; k++) {
-                    int l = k < 0 ? s->label : fn->jt[s->jt].labels[k];
-                    int t = l >= 0 && l < fn->nlabels ? labelidx[l] : -1;
-                    if (t < 0) continue;
-                    unsigned long *si = in + (size_t)t * words;
-                    for (int w = 0; w < words; w++) oi[w] |= si[w];
-                }
-            }
-            /* in = use ∪ (out − def) */
-            unsigned long *ii = in + (size_t)i * words;
-            unsigned long *ui = use + (size_t)i * words;
-            int dv = defv[i];
-            for (int w = 0; w < words; w++) {
-                unsigned long nv = oi[w];
-                if (dv >= 0 && (dv >> 6) == w) nv &= ~(1UL << (dv & 63));
-                nv |= ui[w];
-                if (nv != ii[w]) { ii[w] = nv; changed = 1; }
-            }
         }
     }
+    free(inmk); free(outmk); free(defmk); free(work);
+    free(ueoff); free(ueb); free(dfoff); free(dfb);
+    free(poff); free(pred);
+    ra_pairs_csr(&lin, 1, nbb, &lv->in_off, &lv->in_v);
+    ra_pairs_csr(&lout, 1, nbb, &lv->out_off, &lv->out_v);
+    free(lin.v); free(lin.b); free(lout.v); free(lout.b);
 
-    /* occupied(v,i) = v ∈ in[i] ∪ out[i] ∪ {def[i]} -> update first/last */
-    for (int i = 0; i < nins; i++) {
-        unsigned long *ii = in + (size_t)i * words;
-        unsigned long *oi = out + (size_t)i * words;
-        for (int w = 0; w < words; w++) {
-            unsigned long bits = ii[w] | oi[w];
-            while (bits) {
-                int b = 0; unsigned long t = bits;
-                while (!(t & 1)) { t >>= 1; b++; }
-                int v = w * 64 + b;
-                if (first[v] < 0) first[v] = i;
-                last[v] = i;
-                bits &= bits - 1;
-            }
-        }
-        int dv = defv[i];
-        if (dv >= 0) {
-            if (first[dv] < 0) first[dv] = i;
-            if (i > last[dv]) last[dv] = i;
+    /* first[v]/last[v]: the earliest and latest instruction where v is
+     * live in, live out or written. Within a block the earliest is its
+     * start if v is live into it and else v's first write there; the
+     * latest is its end if v is live out of it and else v's last read or
+     * write -- so those, and every read and write (each one a point where
+     * v is live or written), are all the candidates there are. */
+    struct ra_fl fl = { first, last, nvr, 0 };
+    for (int b = 0; b < nbb; b++) {
+        int s = lv->bstart[b], e = lv->bstart[b + 1];
+        for (int k = lv->in_off[b]; k < lv->in_off[b + 1]; k++)
+            ra_fl_upd(&fl, lv->in_v[k], s);
+        for (int k = lv->out_off[b]; k < lv->out_off[b + 1]; k++)
+            ra_fl_upd(&fl, lv->out_v[k], e - 1);
+        for (int i = s; i < e; i++) {
+            fl.i = i;
+            ra_each_use(&fn->ins[i], ra_fl_cb, &fl);
+            int d = ra_ins_def(&fn->ins[i]);
+            if (d >= 0 && d < nvr)
+                ra_fl_upd(&fl, d, i);
         }
     }
+    return lv;
+}
 
-    free(use); free(labelidx);
-    *livein_out = in;
-    *defv_out = defv;
-    *words_out = words;
-    return out;
+/* Only first[] and last[]: the slot coalescers and the pair passes. */
+void ra_live_ranges(const struct ir_func *fn, int *first, int *last)
+{
+    ra_live_free(ra_live_compute(fn, first, last));
+}
+
+void ra_live_free(struct ra_live *lv)
+{
+    if (!lv)
+        return;
+    free(lv->bstart); free(lv->blk);
+    free(lv->in_off); free(lv->in_v); free(lv->out_off); free(lv->out_v);
+    free(lv);
+}
+
+int ra_live_nblocks(const struct ra_live *lv) { return lv->nbb; }
+int ra_live_block_start(const struct ra_live *lv, int b) { return lv->bstart[b]; }
+
+/* The live set as a sparse set: members in any order, and each vreg's
+ * place among them (or -1), so adding, removing and asking are O(1) and
+ * visiting the members costs only as many as there are. */
+void ra_lset_init(struct ra_lset *s, int nvr)
+{
+    s->nvr = nvr;
+    s->n = 0;
+    s->chg = NULL;
+    s->chg_ctx = NULL;
+    s->mem = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *s->mem);
+    s->pos = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *s->pos);
+    for (int v = 0; v < nvr; v++) s->pos[v] = -1;
+}
+
+void ra_lset_free(struct ra_lset *s)
+{
+    free(s->mem); free(s->pos);
+}
+
+void ra_lset_add(struct ra_lset *s, int v)
+{
+    if (v < 0 || v >= s->nvr || s->pos[v] >= 0)
+        return;
+    s->pos[v] = s->n;
+    s->mem[s->n++] = v;
+    if (s->chg)
+        s->chg(v, 1, s->chg_ctx);
+}
+
+void ra_lset_del(struct ra_lset *s, int v)
+{
+    if (v < 0 || v >= s->nvr || s->pos[v] < 0)
+        return;
+    int p = s->pos[v], last = s->mem[--s->n];
+    s->mem[p] = last;
+    s->pos[last] = p;
+    s->pos[v] = -1;
+    if (s->chg)
+        s->chg(v, 0, s->chg_ctx);
+}
+
+/* Make s the set live out of block b: live after its last instruction. */
+void ra_lset_out(struct ra_lset *s, const struct ra_live *lv, int b)
+{
+    while (s->n > 0)
+        ra_lset_del(s, s->mem[s->n - 1]);
+    for (int k = lv->out_off[b]; k < lv->out_off[b + 1]; k++)
+        ra_lset_add(s, lv->out_v[k]);
+}
+
+static void ra_lset_use_cb(int v, void *ctx) { ra_lset_add(ctx, v); }
+
+/* Step back over instruction `in`: s goes from the set live after it to
+ * the set live before it -- its write removed, its reads added. */
+void ra_lset_step(struct ra_lset *s, const struct ir_ins *in)
+{
+    int d = ra_ins_def(in);
+    if (d >= 0)
+        ra_lset_del(s, d);
+    ra_each_use(in, ra_lset_use_cb, s);
+}
+
+struct ra_isuse { int v, found; };
+static void ra_isuse_cb(int v, void *ctx)
+{
+    struct ra_isuse *u = ctx;
+    if (v == u->v) u->found = 1;
+}
+
+/* Is v live INTO instruction i? A scan back from the end of i's block,
+ * for the few questions that want one answer and not a walk. */
+int ra_live_in_at(const struct ra_live *lv, const struct ir_func *fn,
+                  int i, int v)
+{
+    if (i < 0 || i >= lv->nins || v < 0 || v >= lv->nvr)
+        return 0;
+    int b = lv->blk[i], live = 0;
+    for (int k = lv->out_off[b]; k < lv->out_off[b + 1]; k++)
+        if (lv->out_v[k] == v) { live = 1; break; }
+    for (int k = lv->bstart[b + 1] - 1; k >= i; k--) {
+        struct ra_isuse u = { v, 0 };
+        if (ra_ins_def(&fn->ins[k]) == v) live = 0;
+        ra_each_use(&fn->ins[k], ra_isuse_cb, &u);
+        if (u.found) live = 1;
+    }
+    return live;
 }
 
 /* 4M words: 32 MB for each of liveness's three sets. A function of 2000
@@ -451,12 +675,13 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     int *last  = xmalloc((size_t)nvr * sizeof *last);
     char *elig = xmalloc((size_t)nvr);
     /* live ranges from real dataflow (spans loops); appearance intervals would
-     * be unsound across a back-edge. `liveout`/`defv` drive the interference
+     * be unsound across a back-edge. The blocks' live sets, walked
+     * backwards (ra_lset_step), drive the crossings and the interference
      * graph below. */
-    int *defv = NULL, lwords = 0;
-    unsigned long *livein = NULL;
-    unsigned long *liveout = ra_live_intervals(fn, first, last,
-                                                    &livein, &defv, &lwords);
+    struct ra_live *lv = ra_live_compute(fn, first, last);
+    int nlb = ra_live_nblocks(lv);
+    struct ra_lset ls;
+    ra_lset_init(&ls, nvr);
 
     /* A value LIVE-OUT of a call survives it, so it cannot sit in a caller-saved
      * register (the call clobbers all of them) — it takes a callee-saved reg or
@@ -468,6 +693,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     /* Registers a value may not take because an asm it lives across may
      * change them (ir_asm.clob), bit r for register r. */
     unsigned long *forbid = xcalloc((size_t)(nvr ? nvr : 1), sizeof *forbid);
+    char *atcall = xcalloc((size_t)(nins ? nins : 1), 1);
     for (int i = 0; i < nins; i++) {
         /* ...and a call the IR does not spell IR_CALL: a backend that
          * lowers some op to a runtime helper says so here, or its
@@ -482,33 +708,42 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             !(t->op_calls_helper && t->op_calls_helper(&fn->ins[i])) &&
             !asm_here)
             continue;
-        unsigned long clob = asm_here ? ia->clob : 0;
-        unsigned long *lo = liveout + (size_t)i * lwords;
-        for (int w = 0; w < lwords; w++) {
-            unsigned long bits = lo[w];
-            while (bits) {
-                int b = 0; unsigned long t = bits;
-                while (!(t & 1)) { t >>= 1; b++; }
-                int v = w * 64 + b;
-                if (v < nvr && v != defv[i]) {
-                    if (clob) forbid[v] |= clob;
-                    else      crosses[v] = 1;
-                }
-                bits &= bits - 1;
-            }
-        }
-        /* An asm output written through an address reads that address
-         * AFTER the template has run, inside the same instruction: it has
-         * to survive the asm as a value live across it does. */
-        if (asm_here)
-            for (int k = 0; k < ia->nout; k++) {
-                const struct ir_asm_op *o = &ia->out[k];
-                if (o->val || o->mem || o->temp < 0 || o->temp >= nvr)
-                    continue;
-                if (clob) forbid[o->temp] |= clob;
-                else      crosses[o->temp] = 1;
-            }
+        atcall[i] = 1;
     }
+    for (int b = nlb - 1; b >= 0; b--) {
+        ra_lset_out(&ls, lv, b);
+        for (int i = ra_live_block_start(lv, b + 1) - 1;
+             i >= ra_live_block_start(lv, b); i--) {
+            if (atcall[i]) {
+                const struct ir_asm *ia = fn->ins[i].op == IR_ASM
+                                          ? fn->ins[i].asm_ir : NULL;
+                int asm_here = ia && t->asm_in_reg && !fp && !ia->cont;
+                unsigned long clob = asm_here ? ia->clob : 0;
+                int dv = ra_ins_def(&fn->ins[i]);
+                for (int k = 0; k < ls.n; k++) {   /* live after the call */
+                    int v = ls.mem[k];
+                    if (v != dv) {
+                        if (clob) forbid[v] |= clob;
+                        else      crosses[v] = 1;
+                    }
+                }
+                /* An asm output written through an address reads that
+                 * address AFTER the template has run, inside the same
+                 * instruction: it has to survive the asm as a value live
+                 * across it does. */
+                if (asm_here)
+                    for (int k = 0; k < ia->nout; k++) {
+                        const struct ir_asm_op *o = &ia->out[k];
+                        if (o->val || o->mem || o->temp < 0 || o->temp >= nvr)
+                            continue;
+                        if (clob) forbid[o->temp] |= clob;
+                        else      crosses[o->temp] = 1;
+                    }
+            }
+            ra_lset_step(&ls, &fn->ins[i]);
+        }
+    }
+    free(atcall);
     if (!fp && t->saved_only) {
         const char *so = t->saved_only(fn);
         for (int v = 0; so && v < nvr; v++)
@@ -716,47 +951,38 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * if something did, THAT definition would add the edge. A value dying
      * at an instruction still shares a register with one born there, as
      * before: the def is only tied to what is live after it. */
-    for (int i = 0; adj && i <= nins; i++) {
-        int m = 0, dv = -1, src = -1;
-        unsigned long *grp;
-        if (i == nins) {                       /* the entry clique */
-            if (!nins) break;
-            grp = livein;
-        } else {
+    for (int b = adj ? nlb - 1 : -1; b >= 0; b--) {
+        ra_lset_out(&ls, lv, b);
+        for (int i = ra_live_block_start(lv, b + 1) - 1;
+             i >= ra_live_block_start(lv, b); i--) {
             struct ir_ins *in = &fn->ins[i];
-            dv = defv[i];
-            if (dv < 0 || dv >= nvr || eof[dv] < 0)
-                continue;
-            if (RA_COPY(in))
-                src = in->a;
-            grp = liveout + (size_t)i * lwords;
-        }
-        for (int w = 0; w < lwords; w++) {
-            unsigned long bits = grp[w];
-            while (bits) {
-                int b = 0; unsigned long tt = bits;
-                while (!(tt & 1)) { tt >>= 1; b++; }
-                int v = w * 64 + b;
-                if (v < nvr && eof[v] >= 0 && v != src && v != dv)
-                    members[m++] = eof[v];
-                bits &= bits - 1;
+            int dv = ra_ins_def(in);
+            if (dv >= 0 && dv < nvr && eof[dv] >= 0) {
+                int src = RA_COPY(in) ? in->a : -1;
+                int a = eof[dv];
+                for (int k = 0; k < ls.n; k++) {   /* live after the def */
+                    int v = ls.mem[k];
+                    if (eof[v] < 0 || v == src || v == dv)
+                        continue;
+                    int bb = eof[v];
+                    adj[(size_t)a * ew + (bb >> 6)] |= 1UL << (bb & 63);
+                    adj[(size_t)bb * ew + (a >> 6)] |= 1UL << (a & 63);
+                }
             }
+            ra_lset_step(&ls, in);
         }
-        if (i < nins) {
-            int a = eof[dv];
-            for (int q = 0; q < m; q++) {
-                int b = members[q];
+    }
+    if (adj && nlb > 0) {                      /* the entry clique */
+        int m = 0;
+        for (int k = 0; k < ls.n; k++)         /* live into instruction 0 */
+            if (eof[ls.mem[k]] >= 0)
+                members[m++] = eof[ls.mem[k]];
+        for (int p = 0; p < m; p++)
+            for (int q = p + 1; q < m; q++) {
+                int a = members[p], b = members[q];
                 adj[(size_t)a * ew + (b >> 6)] |= 1UL << (b & 63);
                 adj[(size_t)b * ew + (a >> 6)] |= 1UL << (a & 63);
             }
-        } else {
-            for (int p = 0; p < m; p++)
-                for (int q = p + 1; q < m; q++) {
-                    int a = members[p], b = members[q];
-                    adj[(size_t)a * ew + (b >> 6)] |= 1UL << (b & 63);
-                    adj[(size_t)b * ew + (a >> 6)] |= 1UL << (a & 63);
-                }
-        }
     }
 
     /* Move-preference (coalescing) graph: two vregs that share a register let
@@ -1035,7 +1261,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
          * is (degrees only fall), so they wait in a min-heap: entered when
          * their degree drops under the bound, taken smallest first. Finding
          * each by scanning every node was nodes x nodes -- a function of
-         * 4000 statements has some 30000 of them. The spill choice keeps
+         * 4000 statements has 8000 to 25000 of them. The spill choice keeps
          * its scan, in index order over the nodes still in the graph, so
          * its ties go where they always went. */
         int *heap = xmalloc((size_t)(E ? E : 1) * sizeof *heap), nheap = 0;
@@ -1295,7 +1521,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     free(first); free(last); free(elig); free(crosses); free(forbid);
     free(eof); free(eidx); free(adj); free(pref);
     free(members); free(order);
-    free(liveout); free(livein); free(defv);
+    ra_live_free(lv);
+    ra_lset_free(&ls);
     return loc;
 }
 

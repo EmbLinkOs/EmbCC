@@ -14027,14 +14027,12 @@ static int pass_latch_copies(struct ir_func *fn)
     if (ncand) {
         int *first = xmalloc((size_t)nv * sizeof *first);
         int *last = xmalloc((size_t)nv * sizeof *last);
-        unsigned long *livein = NULL;
-        int *defv = NULL, words = 0;
-        unsigned long *liveout = ra_live_intervals(fn, first, last, &livein,
-                                                   &defv, &words);
+        struct ra_live *lv = ra_live_compute(fn, first, last);
+        int any_live = fn->nins > 0 && nv > 0;
         char *take = xcalloc((size_t)N, 1);    /* br index: rewrite it */
         char *above = xcalloc((size_t)N, 1);   /* ...with copies above p-1 */
         char *drop = xcalloc((size_t)N, 1);    /* the copy block's ins */
-        for (int c = 0; c < ncand && livein; c++) {
+        for (int c = 0; c < ncand && any_live; c++) {
             int p = cand_br[c], b = lpos[fn->ins[p].label], e = b + 1;
             const struct ir_ins *cmp = p > 0 ? &fn->ins[p - 1] : NULL;
             int fused = cmp && cmp->op == IR_CMP &&
@@ -14042,8 +14040,7 @@ static int pass_latch_copies(struct ir_func *fn)
             int ok = 1;
             while (fn->ins[e].op == IR_MOV) {
                 int d = fn->ins[e].dst;
-                if (livein[(size_t)(p + 1) * words + (d >> 6)] &
-                    (1UL << (d & 63)))
+                if (ra_live_in_at(lv, fn, p + 1, d))
                     ok = 0;
                 if (fused && (d == cmp->a || (!cmp->imm_b && d == cmp->b)))
                     ok = 0;
@@ -14090,7 +14087,7 @@ static int pass_latch_copies(struct ir_func *fn)
             free(nb.p);
         }
         free(newpos); free(take); free(above); free(drop);
-        free(first); free(last); free(liveout); free(livein); free(defv);
+        free(first); free(last); ra_live_free(lv);
     }
     free(refs); free(lpos); free(cand_br); free(in_cand);
     return changed;

@@ -241,22 +241,55 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *wide, const char *fltmap,
                  int *used_out, int *nused_out);
 
-/* Backward liveness over the IR: fills first[v]/last[v] with the range
- * vreg v is live over -- a sound over-approximation that SPANS loop
- * back-edges, where a naive first/last-appearance interval does not and
- * would let a loop-carried value's register be clobbered mid-loop. Also
- * returns the per-instruction live-in and live-out bitsets and the def
- * vreg per instruction, which the interference graph needs.
+/* Liveness kept per basic block (regalloc.c says how): ra_live_compute
+ * fills first[v]/last[v] -- the earliest and latest instruction where v
+ * is live in, live out or written, -1 for a vreg never live -- and
+ * returns the blocks' live sets, which a walk turns back into any
+ * instruction's:
  *
- * Shared because slot coalescing wants the same ranges the allocator
- * does, and two copies of a dataflow are two chances to disagree about
- * a back-edge. Everything is malloc'd; the caller frees. */
-unsigned long *ra_live_intervals(struct ir_func *fn, int *first, int *last,
-                                 unsigned long **livein_out, int **defv_out,
-                                 int *words_out);
+ *     for (int b = ra_live_nblocks(lv) - 1; b >= 0; b--) {
+ *         ra_lset_out(&s, lv, b);
+ *         for (int i = ra_live_block_start(lv, b + 1) - 1;
+ *              i >= ra_live_block_start(lv, b); i--) {
+ *             ... s is the set live after instruction i ...
+ *             ra_lset_step(&s, &fn->ins[i]);
+ *             ... and now the set live before it ...
+ *         }
+ *     }
+ *
+ * (block nblocks starts at nins). After block 0, s is the set live into
+ * the function. Its cost is the size of the sets, not nins x nvregs. */
+struct ra_live;
+struct ra_live *ra_live_compute(const struct ir_func *fn, int *first, int *last);
+void ra_live_free(struct ra_live *lv);
+int ra_live_nblocks(const struct ra_live *lv);
+int ra_live_block_start(const struct ra_live *lv, int b);
+/* Is v live into instruction i? One scan of i's block. */
+int ra_live_in_at(const struct ra_live *lv, const struct ir_func *fn,
+                  int i, int v);
+
+/* ra_live_compute's first[] and last[] alone. */
+void ra_live_ranges(const struct ir_func *fn, int *first, int *last);
+
+/* A set of vregs: its members in mem[0..n), in no order. `chg`, when
+ * set, hears of every vreg added (1) or removed (0) -- for a walk that
+ * keeps a summary of the set, such as which registers its members hold,
+ * without visiting all of them at every instruction. */
+struct ra_lset {
+    int *mem, *pos;
+    int n, nvr;
+    void (*chg)(int v, int added, void *ctx);
+    void *chg_ctx;
+};
+void ra_lset_init(struct ra_lset *s, int nvr);
+void ra_lset_free(struct ra_lset *s);
+void ra_lset_add(struct ra_lset *s, int v);
+void ra_lset_del(struct ra_lset *s, int v);
+void ra_lset_out(struct ra_lset *s, const struct ra_live *lv, int b);
+void ra_lset_step(struct ra_lset *s, const struct ir_ins *in);
 
 /* A register a PAIR pass gave a 64-bit value, over the instructions
- * [first, last] that value is live (ra_live_intervals' numbering): the
+ * [first, last] that value is live (ra_live_compute's numbering): the
  * next allocation treats the register as taken there, and only there.
  * Withholding a pair's registers from the whole function -- the old
  * rule -- cost a Cortex-M4 loop its r0 for three doubles that lived

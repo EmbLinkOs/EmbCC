@@ -858,8 +858,7 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
         }
     int *lf = xmalloc((size_t)fn->nvregs * sizeof *lf);
     int *ll = xmalloc((size_t)fn->nvregs * sizeof *ll);
-    unsigned long *lin = NULL, *lout = NULL; int *dv = NULL, lw = 0;
-    lout = ra_live_intervals(fn, lf, ll, &lin, &dv, &lw);
+    ra_live_ranges(fn, lf, ll);
 
     int *rlo = xmalloc((size_t)n * sizeof *rlo);
     int *rhi = xmalloc((size_t)n * sizeof *rhi);
@@ -880,7 +879,7 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
         if (i < fn->nparams)
             rlo[i] = 0;
     }
-    free(at); free(lf); free(ll); free(lout); free(lin); free(dv);
+    free(at); free(lf); free(ll);
 
     /* interval-graph colouring in range-start order (optimal for intervals):
      * reuse a slot once its occupant's range ends at or before this one starts. */
