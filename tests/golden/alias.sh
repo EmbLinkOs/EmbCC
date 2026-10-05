@@ -164,13 +164,22 @@ n=$("$EMBCC" --target=x86_64-linux-gnu -O2 -fremarks -c "$out/d.c" \
 above is not measuring anything"; exit 1; }
 echo "dead store elimination removed $n"
 
+# The store is in a branch so that the second load is in another block:
+# within one block, value numbering consults the same analysis and
+# reuses the load before load CSE ever sees it (lvn_mem_kill), and that
+# is counted as cse, not as load reuse.
 cat > "$out/l.c" <<'EOF'
 int g1[64], g2[64];
 int f(int i, int n)
 {
     int s = 0;
     /* the store to g2 must not evict the cached load from g1 */
-    for (int k = 0; k < n; k++) { s += g1[i]; g2[k] = s; s += g1[i]; }
+    for (int k = 0; k < n; k++) {
+        s += g1[i];
+        if (s & 1)
+            g2[k] = s;
+        s += g1[i];
+    }
     return s;
 }
 EOF
