@@ -104,11 +104,78 @@ int main(int argc, char **argv)
         P("vmov r%d, r%d, d%d", rt, rt2, dm);
         E(t_vmov_core_pair(&c, dm, rt, rt2, 0));
     }
+    /* Into a d register, one core register may supply both words -- how a
+     * double whose halves are equal (0.0) is built. The other way round
+     * the architecture makes that UNPREDICTABLE, so it is not offered. */
+    P("vmov d%d, r12, r12", 9);  E(t_vmov_core_pair(&c, 9, 12, 12, 1));
     P("vmrs apsr_nzcv, fpscr%s", "");  E(t_vmrs_apsr(&c));
     /* the callee-saved block, at the counts a prologue uses */
     for (int n = 2; n <= 16; n += 2) {
         P("vpush {s16-s%d}", 15 + n);  E(t_vpush_s(&c, 16, n, 0));
         P("vpop {s16-s%d}", 15 + n);   E(t_vpush_s(&c, 16, n, 1));
+    }
+    /* ...and the same block by its D names, one register to all eight,
+     * which is what a function keeping doubles in d8-d15 saves */
+    for (int n = 1; n <= 8; n++) {
+        if (n == 1) { P("vpush {d8}%s", ""); P("vpop {d8}%s", ""); }
+        else { P("vpush {d8-d%d}", 7 + n); P("vpop {d8-d%d}", 7 + n); }
+        E(t_vpush_d(&c, 8, n, 0)); E(t_vpush_d(&c, 8, n, 1));
+    }
+    /* Between the widths, both ways, every parity on each side: the
+     * double and the single are split by different rules in the SAME
+     * instruction, as in the integer conversions above. */
+    for (int k = 0; k < 6; k++) {
+        int dd = (k * 5) % 16, ss = (k * 7 + 1) % 32;
+        P("vcvt.f64.f32 d%d, s%d", dd, ss);  E(t_vcvt_f_f(&c, dd, ss, 1));
+        P("vcvt.f32.f64 s%d, d%d", ss, dd);  E(t_vcvt_f_f(&c, ss, dd, 0));
+    }
+    /* The immediate moves: all 256 constants at both widths, printed as
+     * the DECIMAL value llvm-mc must turn back into the same byte -- so
+     * t_vfp_imm8's expansion is checked as well as the packing. */
+    for (int dbl = 0; dbl < 2; dbl++)
+        for (int k = 0; k < 256; k++) {
+            union { double d; unsigned long long u; } x;
+            union { float f; unsigned u; } y;
+            int reg = (k * 3) % (dbl ? 16 : 32), back;
+            /* VFPExpandImm written out again here, so that llvm-mc, which
+             * reads the decimal and finds its own byte, is the referee of
+             * both this and t_vfp_imm8 */
+            unsigned long long bits = 0;
+            if (dbl) {
+                unsigned b = (k >> 6) & 1u;
+                bits = (unsigned long long)(k >> 7) << 63 |
+                       (unsigned long long)!b << 62 |
+                       (b ? 0xffULL : 0ULL) << 54 |
+                       (unsigned long long)((k >> 4) & 3) << 52 |
+                       (unsigned long long)(k & 15) << 48;
+                x.u = bits;
+                /* with a point: `#2` would be read as the encoded byte */
+                snprintf(buf, sizeof buf, "%.17g", x.d);
+                P("vmov.f64 d%d, #%s%s", reg, buf,
+                  strpbrk(buf, ".e") ? "" : ".0");
+            } else {
+                unsigned b = (k >> 6) & 1u;
+                bits = (unsigned long long)(k >> 7) << 31 |
+                       (unsigned long long)!b << 30 |
+                       (b ? 0x1fULL : 0ULL) << 25 |
+                       (unsigned long long)((k >> 4) & 3) << 23 |
+                       (unsigned long long)(k & 15) << 19;
+                y.u = (unsigned)bits;
+                snprintf(buf, sizeof buf, "%.9g", (double)y.f);
+                P("vmov.f32 s%d, #%s%s", reg, buf,
+                  strpbrk(buf, ".e") ? "" : ".0");
+            }
+            back = t_vfp_imm8(bits, dbl);
+            if (back != k) {
+                fprintf(stderr, "t_vfp_imm8 finds %d for constant %d\n",
+                        back, k);
+                return 1;
+            }
+            E(t_vmov_imm(&c, reg, back, dbl));
+        }
+    if (t_vfp_imm8(0, 1) != -1 || t_vfp_imm8(0x3fb999999999999aULL, 1) != -1) {
+        fprintf(stderr, "t_vfp_imm8 claims 0.0 or 0.1 is an immediate\n");
+        return 1;
     }
 #undef P
 #undef E

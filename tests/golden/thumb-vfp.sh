@@ -23,6 +23,11 @@
 #
 # None of those three is a malformed encoding. Only a byte comparison
 # against something that already gets it right finds them.
+#
+# The vocabulary is assembled twice: for the Cortex-M4F's unit (+vfp4) and
+# for the Cortex-M7's (+fp-armv8d16, FPv5-D16), which is where the .f64
+# arithmetic, the conversions between the widths and the D-named vpush are
+# actually executed. Every form must be the same bytes under both.
 set -u
 echo "TEST-MARKER thumb-vfp"
 . "$(dirname "$0")/../lib.sh"
@@ -51,15 +56,17 @@ n=$(wc -l < "$out/v.s" | tr -d ' ')
     echo "the vocabulary is only $n instructions -- it no longer covers
 both widths and both register parities"; exit 1; }
 
-"$MC" -triple=thumbv7em-none-eabihf -mattr=+vfp4 -filetype=obj "$out/v.s" \
+for attr in +vfp4 +fp-armv8d16; do
+rm -f "$out/v.o" "$out/v.ref"
+"$MC" -triple=thumbv7em-none-eabihf -mattr=$attr -filetype=obj "$out/v.s" \
     -o "$out/v.o" 2> "$out/mc.err" || {
-    echo "llvm-mc rejected the vocabulary -- an entry claims an"
+    echo "llvm-mc ($attr) rejected the vocabulary -- an entry claims an"
     echo "        instruction that does not exist:"
     head -4 "$out/mc.err"; exit 1; }
 "$OBJCOPY" -O binary --only-section=.text "$out/v.o" "$out/v.ref" 2>/dev/null
 
 cmp -s "$out/v.bin" "$out/v.ref" || {
-    echo "an encoding differs from llvm-mc's:"
+    echo "an encoding differs from llvm-mc's ($attr):"
     # Name the instruction rather than the byte offset: every form here
     # is four bytes, so the offset divides straight into a line number,
     # and "vcvt.f64.s32 d0, s1" is the thing to go and look at.
@@ -70,5 +77,6 @@ cmp -s "$out/v.bin" "$out/v.ref" || {
                "$(sed -n "${ln}p" "$out/v.s")" "$ours" "$theirs"
     done
     exit 1; }
+done
 echo "all $n VFP instructions encode as llvm-mc does, at both widths and
-both register parities"
+both register parities, for the Cortex-M4F's unit and the Cortex-M7's"

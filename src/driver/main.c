@@ -3367,18 +3367,24 @@ static int has_gas_suffix(const char *s)
 
 static int g_want_dump_predef, g_want_dumpmachine;
 
-/* -mfpu= and -mfloat-abi=, as recorded while parsing. */
+/* -mfpu=, -mfloat-abi= and -mcpu=, as recorded while parsing. */
 static const char *g_arm_fpu;
 static const char *g_arm_float_abi;
+static const char *g_arm_cpu;
 
 /* What the two ARM float flags mean together, decided once every argument has
  * been seen.
  *
- * The FPUs EmbCC knows are the two single-precision units its parts carry:
- * FPv4-SP-D16 on a Cortex-M4F (ARMv7E-M) and FPv5-SP-D16 on a Cortex-M33
- * (ARMv8-M Mainline). Anything else is refused BY NAME -- a double-precision
- * unit would be a promise about `double` this backend does not keep, and an
- * unknown name is not a thing to guess at.
+ * The FPUs EmbCC knows are the units its parts carry: FPv4-SP-D16 on a
+ * Cortex-M4F and FPv5-D16 on a Cortex-M7 (both ARMv7E-M), and FPv5-SP-D16
+ * on a Cortex-M33 (ARMv8-M Mainline). The first and the last are single
+ * precision, so `double` stays in software there; FPv5-D16 computes
+ * `double` too, and the backend emits .f64 arithmetic for it. Anything
+ * else is refused BY NAME -- an unknown name is not a thing to guess at.
+ *
+ * The part's own unit, which an -eabihf triple implies, follows -mcpu=:
+ * thumbv7em-none-eabihf alone is a Cortex-M4F, as it is to clang, and
+ * with -mcpu=cortex-m7 it is the M7 and its double-precision unit.
  *
  *   soft (the default, as for arm-none-eabi-gcc): no FPU instructions, even
  *       with an -mfpu= -- which is GCC's reading of the pair.
@@ -3397,8 +3403,9 @@ static void arm_float_resolve(void)
     /* An -eabihf triple is shorthand for the part's FPU and the hard
      * convention; a flag that says otherwise wins, as with clang. */
     int hf = target_thumb_hf_name();
+    int m7 = g_arm_cpu && strcmp(g_arm_cpu, "cortex-m7") == 0;
     const char *hf_fpu = target_thumb_arch() >= 8 ? "fpv5-sp-d16"
-                                                   : "fpv4-sp-d16";
+                       : m7 ? "fpv5-d16" : "fpv4-sp-d16";
     const char *abi = g_arm_float_abi ? g_arm_float_abi : hf ? "hard" : "soft";
     if (!g_arm_fpu && hf)
         g_arm_fpu = hf_fpu;
@@ -3411,31 +3418,45 @@ static void arm_float_resolve(void)
                    "one of soft, softfp and hard", abi);
     if (fpu_named) {
         int v8 = target_thumb_arch() >= 8;
-        const char *want = v8 ? "fpv5-sp-d16" : "fpv4-sp-d16";
-        if (strcmp(g_arm_fpu, want) != 0)
+        int dp = strcmp(g_arm_fpu, "fpv5-d16") == 0;
+        /* FPv5-D16 on ARMv8-M is refused with the others: the Mainline
+         * part this backend knows, the Cortex-M33, has the single-precision
+         * FPv5, and its attributes and tables are the only ones checked. */
+        if (v8 ? strcmp(g_arm_fpu, "fpv5-sp-d16") != 0
+               : strcmp(g_arm_fpu, "fpv4-sp-d16") != 0 && !dp)
             diag_fatal(NULL, 0, "-mfpu=%s is not supported on %s: EmbCC "
-                       "emits VFP for the %s unit (-mfpu=%s) and nothing else: "
-                       "another unit's instruction set and attributes are "
-                       "unchecked here, and a double-precision one (fpv5-d16) "
-                       "would promise hardware `double` this backend does not emit", g_arm_fpu,
-                       target_triple_now(), v8 ? "Cortex-M33's" : "Cortex-M4F's",
-                       want);
+                       "emits VFP for %s and nothing else: another unit's "
+                       "instruction set and attributes are unchecked here",
+                       g_arm_fpu, target_triple_now(),
+                       v8 ? "the Cortex-M33's unit (-mfpu=fpv5-sp-d16)"
+                          : "the Cortex-M4F's unit (-mfpu=fpv4-sp-d16) and "
+                            "the Cortex-M7's (-mfpu=fpv5-d16)");
         if (!v8 && !target_thumb_em())
             diag_fatal(NULL, 0, "-mfpu=%s is an ARMv7E-M unit, and the part "
-                       "is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4",
-                       g_arm_fpu);
+                       "is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=%s",
+                       g_arm_fpu, dp ? "cortex-m7" : "cortex-m4");
+        /* The double-precision unit is the M7's and no other part's: an
+         * M4 told it has one would run .f64 instructions it does not
+         * implement, which is a UsageFault at the first double. */
+        if (dp && g_arm_cpu && !m7)
+            diag_fatal(NULL, 0, "-mfpu=fpv5-d16 is the Cortex-M7's "
+                       "double-precision unit, and -mcpu=%s does not have "
+                       "it; the Cortex-M4F's is -mfpu=fpv4-sp-d16", g_arm_cpu);
     }
     if (!strcmp(abi, "soft"))
         return;                        /* no FPU instructions, as GCC reads it */
     if (!fpu_named)
         diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
-                   "-mfpu=fpv4-sp-d16 (Cortex-M4F) or -mfpu=fpv5-sp-d16 "
-                   "(Cortex-M33)", abi);
+                   "-mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 "
+                   "(Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)", abi);
     /* hard: the FPU's arithmetic, and floating point passed and
      * returned in s0-s15 / d0-d7 (AAPCS-VFP). The runtime helpers keep the
-     * base convention either way, as the RTABI requires. */
+     * base convention either way, as the RTABI requires. The convention
+     * is the same for every unit: a double travels in a d register on an
+     * M4F too, which only cannot compute with it. */
     target_set_thumb_hard_abi(!strcmp(abi, "hard"));
     target_set_thumb_fpu(1);
+    target_set_thumb_fpu_dp(strcmp(g_arm_fpu, "fpv5-d16") == 0);
 }
 
 /* -Wp,A,B,...: options for the preprocessor, split at the commas and put
@@ -4134,6 +4155,9 @@ int main(int argc, char **argv)
                     diag_fatal(NULL, 0, "-mcpu=%s is not a part EmbCC knows: "
                                "it emits ARMv7-M and ARMv7E-M (cortex-m3, "
                                "m4, m7, m33)", v);
+                /* Kept for arm_float_resolve: which unit the part's
+                 * -eabihf name implies depends on which part it is. */
+                g_arm_cpu = v;
                 continue;
             }
             /* The FPU and the float ABI are RECORDED here and resolved
