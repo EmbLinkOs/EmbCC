@@ -1332,6 +1332,166 @@ static int vn_stable(struct ir_func *fn, const struct defs *d, struct ir_ins *i)
     return 1;
 }
 
+/* The value table, hashed.
+ *
+ * Both value-numbering passes looked an instruction's key up by walking
+ * every entry, and LVN also forgot what a definition replaced by walking
+ * every entry again: on one block of 8000 plain statements that was
+ * O(n^2) twice over, and vn_eq and vn_kill were the second and third
+ * hottest functions of the -O2 compile. Now a key is found through its
+ * hash, and the entries that name a vreg (as an operand or as the result)
+ * are filed under it, so a definition reaches exactly the entries it
+ * makes stale.
+ *
+ * What makes this give the same answers is that a key is in the table
+ * at most once: an entry is only ever added after a lookup of its key
+ * found nothing. So "the first matching entry", which is what the walk
+ * returned, is "the matching entry", and the order of the entries --
+ * which the hash does not keep -- never mattered. */
+struct vnent {
+    struct vn k;
+    unsigned h;                /* its bucket */
+    int prev, next;            /* the bucket's chain; -1 ends it */
+    char live;
+};
+struct vnref { int ent, next; };
+struct vntab {
+    struct vnent *e;
+    int ne, cape;
+    int *head;
+    unsigned mask;
+    /* LVN only (byv != NULL): per vreg, the entries naming it, for
+     * vn_kill; and the loads keyed at the current memory version, the
+     * only entries a store can make stale (lvn_mem_kill). */
+    struct vnref *r;
+    int nr, capr;
+    int *byv, nv;
+    int *ld;
+    int nld, capld;
+};
+
+static unsigned vn_mix(unsigned h, unsigned long x)
+{
+    h ^= (unsigned)x;
+    h *= 0x9E3779B1u;
+    h ^= (unsigned)(x >> 16 >> 16);
+    h *= 0x85EBCA77u;
+    return h ^ (h >> 15);
+}
+
+/* A hash of exactly the fields vn_eq compares, so equal keys always
+ * meet in one bucket. */
+static unsigned vn_hash(const struct vn *k)
+{
+    unsigned char pb[sizeof k->ptr];
+    unsigned long pv = 0;
+    memcpy(pb, &k->ptr, sizeof pb);
+    for (size_t j = 0; j < sizeof pb; j++)
+        pv = pv * 257 + pb[j];
+    unsigned h = vn_mix(0, (unsigned long)k->op);
+    h = vn_mix(h, (unsigned long)(long)k->a);
+    h = vn_mix(h, (unsigned long)(long)k->b);
+    h = vn_mix(h, (unsigned long)(long)k->w * 64 + (unsigned long)(long)k->size);
+    h = vn_mix(h, (unsigned long)(long)k->sign * 4 + (unsigned long)(long)k->flt);
+    h = vn_mix(h, (unsigned long)k->pred);
+    h = vn_mix(h, (unsigned long)k->imm);
+    h = vn_mix(h, pv);
+    h = vn_mix(h, (unsigned long)(long)k->label);
+    h = vn_mix(h, (unsigned long)(long)k->memver);
+    h = vn_mix(h, (unsigned long)(k->has_ca * 2 + k->has_cb));
+    if (k->has_ca) h = vn_mix(h, (unsigned long)k->ca);
+    if (k->has_cb) h = vn_mix(h, (unsigned long)k->cb);
+    return h;
+}
+
+/* `nins` bounds how many entries one walk can make; the buckets are
+ * twice that, so a chain is short. */
+static void vntab_init(struct vntab *t, int nins, int nv, int index)
+{
+    memset(t, 0, sizeof *t);
+    unsigned nb = 16;
+    while (nb < (unsigned)nins * 2u && nb < (1u << 30))
+        nb *= 2;
+    t->mask = nb - 1;
+    t->head = xmalloc((size_t)nb * sizeof *t->head);
+    for (unsigned b = 0; b < nb; b++)
+        t->head[b] = -1;
+    if (index) {
+        t->nv = nv;
+        t->byv = xmalloc((size_t)(nv ? nv : 1) * sizeof *t->byv);
+        for (int v = 0; v < nv; v++)
+            t->byv[v] = -1;
+    }
+}
+
+static void vntab_free(struct vntab *t)
+{
+    free(t->e); free(t->head); free(t->r); free(t->byv); free(t->ld);
+}
+
+/* The result of the entry whose key equals k, or -1. */
+static int vntab_find(const struct vntab *t, const struct vn *k)
+{
+    for (int x = t->head[vn_hash(k) & t->mask]; x >= 0; x = t->e[x].next)
+        if (vn_eq(&t->e[x].k, k))
+            return t->e[x].k.result;
+    return -1;
+}
+
+static void vntab_file(struct vntab *t, int v, int ent)
+{
+    if (v < 0 || v >= t->nv)
+        return;
+    if (t->nr == t->capr) {
+        t->capr = t->capr ? t->capr * 2 : 64;
+        t->r = xrealloc(t->r, (size_t)t->capr * sizeof *t->r);
+    }
+    t->r[t->nr].ent = ent;
+    t->r[t->nr].next = t->byv[v];
+    t->byv[v] = t->nr++;
+}
+
+static void vntab_add(struct vntab *t, const struct vn *k)
+{
+    if (t->ne == t->cape) {
+        t->cape = t->cape ? t->cape * 2 : 64;
+        t->e = xrealloc(t->e, (size_t)t->cape * sizeof *t->e);
+    }
+    int x = t->ne++;
+    struct vnent *e = &t->e[x];
+    e->k = *k;
+    e->h = vn_hash(k) & t->mask;
+    e->prev = -1;
+    e->next = t->head[e->h];
+    if (e->next >= 0)
+        t->e[e->next].prev = x;
+    t->head[e->h] = x;
+    e->live = 1;
+    if (t->byv) {
+        vntab_file(t, k->a, x);
+        vntab_file(t, k->b, x);
+        vntab_file(t, k->result, x);
+        if (k->op == IR_LOAD || k->op == IR_LDVAR) {
+            if (t->nld == t->capld) {
+                t->capld = t->capld ? t->capld * 2 : 64;
+                t->ld = xrealloc(t->ld, (size_t)t->capld * sizeof *t->ld);
+            }
+            t->ld[t->nld++] = x;
+        }
+    }
+}
+
+static void vntab_unlink(struct vntab *t, int x)
+{
+    struct vnent *e = &t->e[x];
+    if (!e->live)
+        return;
+    if (e->prev >= 0) t->e[e->prev].next = e->next;
+    else              t->head[e->h] = e->next;
+    if (e->next >= 0) t->e[e->next].prev = e->prev;
+    e->live = 0;
+}
+
 /* Drop every entry that mentions vreg `t`, because something just gave
  * `t` a new value and the entries naming it describe the old one.
  *
@@ -1341,26 +1501,47 @@ static int vn_stable(struct ir_func *fn, const struct defs *d, struct ir_ins *i)
  * does not need vn_stable's blanket refusal of multiply-assigned vregs,
  * which would throw away most of a loop body -- `arr[i]` reads `i`, and
  * an induction variable is assigned on every incoming edge. */
-static int vn_kill(struct vn *tab, int ntab, int t)
+static void vn_kill(struct vntab *t, int v)
 {
-    int j = 0;
-    for (int x = 0; x < ntab; x++)
-        if (tab[x].a != t && tab[x].b != t && tab[x].result != t)
-            tab[j++] = tab[x];
-    return j;
+    if (v < 0 || v >= t->nv) {           /* not filed: look at them all */
+        for (int x = 0; x < t->ne; x++)
+            if (t->e[x].k.a == v || t->e[x].k.b == v || t->e[x].k.result == v)
+                vntab_unlink(t, x);
+        return;
+    }
+    for (int r = t->byv[v]; r >= 0; r = t->r[r].next)
+        vntab_unlink(t, t->r[r].ent);
+    t->byv[v] = -1;
+}
+
+/* Forget everything: a block boundary. Only what was filed is undone,
+ * so a function of many small blocks pays for its entries, not for its
+ * vregs at every label. */
+static void vntab_clear(struct vntab *t)
+{
+    for (int x = 0; x < t->ne; x++) {
+        struct vnent *e = &t->e[x];
+        t->head[e->h] = -1;
+        if (t->byv) {
+            if (e->k.a >= 0 && e->k.a < t->nv) t->byv[e->k.a] = -1;
+            if (e->k.b >= 0 && e->k.b < t->nv) t->byv[e->k.b] = -1;
+            if (e->k.result >= 0 && e->k.result < t->nv)
+                t->byv[e->k.result] = -1;
+        }
+    }
+    t->ne = t->nr = t->nld = 0;
 }
 
 /* Defined with the alias analysis further down. */
 static char *slots_taken(struct ir_func *fn);
 static int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
-                        struct vn *tab, int *ntab, int memver,
-                        const struct ir_ins *ins);
+                        struct vntab *tb, const struct ir_ins *ins);
 
 static int pass_lvn(struct ir_func *fn)
 {
     int changed = 0, memver = 0;
-    struct vn *tab = NULL;
-    int ntab = 0, cap = 0;
+    struct vntab tb;
+    vntab_init(&tb, fn->nins, fn->nvregs, 1);
     /* What a store can reach, so it forgets only those loads
      * (lvn_mem_kill). The definitions are counted once, before the walk
      * turns any instruction into a copy: a copy keeps its destination,
@@ -1372,28 +1553,24 @@ static int pass_lvn(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         enum ir_op op0 = i->op;
-        if (op0 == IR_LABEL) { ntab = 0; continue; }   /* block boundary */
+        if (op0 == IR_LABEL) { vntab_clear(&tb); continue; } /* block boundary */
         struct vn k;
         if (i->dst >= 0 && vn_key(i, memver, &k)) {
-            int hit = -1;
-            for (int t = 0; t < ntab; t++)
-                if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }
+            int hit = vntab_find(&tb, &k);
             if (hit >= 0 && hit != i->dst) {
                 vn_to_mov(i, hit);
                 changed = 1;
                 g_did.lvn++;
                 op0 = IR_MOV;      /* what it is NOW, for the kill below */
             } else if (hit < 0) {
-                ntab = vn_kill(tab, ntab, i->dst);
-                if (ntab == cap) {
-                    cap = cap ? cap * 2 : 32;
-                    tab = xrealloc(tab, (size_t)cap * sizeof *tab);
-                }
+                vn_kill(&tb, i->dst);
                 k.result = i->dst;
-                tab[ntab++] = k;
+                vntab_add(&tb, &k);
                 if (writes_memory(op0) &&
-                    !lvn_mem_kill(fn, &d, taken, tab, &ntab, memver, i))
+                    !lvn_mem_kill(fn, &d, taken, &tb, i)) {
                     memver++;
+                    tb.nld = 0;    /* every load keyed so far is stale */
+                }
                 continue;
             }
         }
@@ -1402,19 +1579,21 @@ static int pass_lvn(struct ir_func *fn)
          * what named it. Inline asm and a landing pad write temps that
          * def_target cannot report, so they clear the table outright. */
         if (op0 == IR_ASM || op0 == IR_LANDING) {
-            ntab = 0;
+            vntab_clear(&tb);
         } else {
             int t = def_target(i);
             if (t >= 0)
-                ntab = vn_kill(tab, ntab, t);
+                vn_kill(&tb, t);
         }
         /* A store forgets only the reads it could reach; everything
          * else that writes memory forgets them all. */
         if (writes_memory(op0) &&
-            !lvn_mem_kill(fn, &d, taken, tab, &ntab, memver, i))
+            !lvn_mem_kill(fn, &d, taken, &tb, i)) {
             memver++;
+            tb.nld = 0;
+        }
     }
-    free(tab);
+    vntab_free(&tb);
     free(taken);
     free_defs(&d);
     return changed;
@@ -2839,17 +3018,40 @@ static int pass_gcse(struct ir_func *fn)
 
     /* An active table holding the current block's and its dominators' values,
      * pushed on enter and truncated back on leave — an explicit dom-tree DFS so
-     * siblings never see each other's values (they do not dominate each other). */
-    struct vn *tab = NULL; int ntab = 0, captab = 0, changed = 0;
+     * siblings never see each other's values (they do not dominate each other).
+     * A key is entered only when it is not there, so the table holds each
+     * once and is hashed (vntab); leaving a block unlinks what it entered,
+     * newest first. */
+    struct vntab tb;
+    vntab_init(&tb, fn->nins, fn->nvregs, 0);
+    int changed = 0;
     int *dstk = xmalloc((size_t)nbb * sizeof *dstk);
     int *mark = xmalloc((size_t)nbb * sizeof *mark);
     char *entered = xcalloc((size_t)nbb, 1);
+    /* Each block's dominator-tree children, in block order: finding them
+     * by asking every block for its idom was blocks x blocks, and a
+     * switch of 4000 cases is 8000 blocks. Pushed in that order, so the
+     * walk visits them in the order it always has. */
+    int *kid = xmalloc((size_t)(nbb + 1) * sizeof *kid);
+    int *kids = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *kids);
+    for (int b = 0; b <= nbb; b++) kid[b] = 0;
+    for (int c = 1; c < nbb; c++)
+        if (bb[c].idom >= 0 && bb[c].idom < nbb) kid[bb[c].idom + 1]++;
+    for (int b = 0; b < nbb; b++) kid[b + 1] += kid[b];
+    {
+        int *fill = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *fill);
+        for (int b = 0; b < nbb; b++) fill[b] = kid[b];
+        for (int c = 1; c < nbb; c++)
+            if (bb[c].idom >= 0 && bb[c].idom < nbb)
+                kids[fill[bb[c].idom]++] = c;
+        free(fill);
+    }
     int dsp = 0; dstk[dsp++] = 0;
     while (dsp) {
         int b = dstk[dsp - 1];
         if (!entered[b]) {
             entered[b] = 1;
-            mark[b] = ntab;
+            mark[b] = tb.ne;
             for (int n = bb[b].start; n < bb[b].end; n++) {
                 struct ir_ins *i = &fn->ins[n];
                 struct vn k;
@@ -2862,25 +3064,25 @@ static int pass_gcse(struct ir_func *fn)
                     !vn_stable(fn, &dfs, i) || !vn_key(i, 0, &k))
                     continue;
                 gcse_key_consts(fn, &dfs, &k);
-                int hit = -1;
-                for (int t = 0; t < ntab; t++)
-                    if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }
+                int hit = vntab_find(&tb, &k);
                 if (hit >= 0 && hit != i->dst) {
                     vn_to_mov(i, hit); changed = 1; g_did.gcse++;
                 } else if (hit < 0) {
-                    if (ntab == captab) { captab = captab ? captab * 2 : 64;
-                        tab = xrealloc(tab, (size_t)captab * sizeof *tab); }
-                    k.result = i->dst; tab[ntab++] = k;
+                    k.result = i->dst;
+                    vntab_add(&tb, &k);
                 }
             }
-            for (int c = 0; c < nbb; c++)
-                if (c != 0 && bb[c].idom == b && !entered[c]) dstk[dsp++] = c;
+            for (int q = kid[b]; q < kid[b + 1]; q++)
+                if (!entered[kids[q]]) dstk[dsp++] = kids[q];
         } else {
-            ntab = mark[b];    /* leaving b: drop its (and its subtree's) values */
+            /* leaving b: drop its (and its subtree's) values */
+            while (tb.ne > mark[b])
+                vntab_unlink(&tb, --tb.ne);
             dsp--;
         }
     }
-    free(tab); free(dstk); free(mark); free(entered);
+    vntab_free(&tb); free(kid); free(kids);
+    free(dstk); free(mark); free(entered);
     free_defs(&dfs);
     free(order); free(l2b);
     free_cfg(bb, nbb);
@@ -3228,8 +3430,7 @@ static char *slots_taken(struct ir_func *fn)
  * under an older memver can never match again and are dropped here
  * too. */
 static int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
-                        struct vn *tab, int *ntab, int memver,
-                        const struct ir_ins *ins)
+                        struct vntab *tb, const struct ir_ins *ins)
 {
     struct maccess w;
     if (ins->vol)
@@ -3240,20 +3441,23 @@ static int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
         w = slot_access(ins->dst);
     else
         return 0;
+    /* Only the loads keyed at the current version can be reached: an
+     * older one's key will never be asked for again. */
     int j = 0;
-    for (int x = 0; x < *ntab; x++) {
-        struct vn *e = &tab[x];
-        if (e->op == IR_LOAD || e->op == IR_LDVAR) {
-            if (e->memver != memver)
-                continue;
-            struct maccess r = e->op == IR_LOAD
-                ? mem_access(fn, d, e->a, e->size) : slot_access(e->a);
-            if (acc_overlap(w, r, taken, fn->nvars))
-                continue;
+    for (int x = 0; x < tb->nld; x++) {
+        int ei = tb->ld[x];
+        struct vnent *e = &tb->e[ei];
+        if (!e->live)
+            continue;
+        struct maccess r = e->k.op == IR_LOAD
+            ? mem_access(fn, d, e->k.a, e->k.size) : slot_access(e->k.a);
+        if (acc_overlap(w, r, taken, fn->nvars)) {
+            vntab_unlink(tb, ei);
+            continue;
         }
-        tab[j++] = *e;
+        tb->ld[j++] = ei;
     }
-    *ntab = j;
+    tb->nld = j;
     return 1;
 }
 
