@@ -112,6 +112,7 @@ static void print_options(FILE *out)
       "  -fno-inline-functions        inline only what is declared inline\n"
       "  -fcommon                     tentative definitions are COMMON (C, ELF)\n"
       "  -fsingle-precision-constant  1.0 is a float (C)\n"
+      "  -save-temps[=cwd|obj]        keep the .i and the .s\n"
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
@@ -380,6 +381,11 @@ static int g_single_prec;
 /* -specs=FILE / --specs=FILE: a GCC driver specs file, named so the link
  * can say once that EmbCC's own libraries are linked instead. */
 static const char *g_specs;
+/* -save-temps[=cwd|obj]: 1 beside the output, 2 in the current
+ * directory. -dumpbase NAME names the files outright (multi_source passes
+ * it to the compiler it runs for each source of a link). */
+static int g_save_temps;
+static const char *g_dumpbase;
 
 /* The make rule: "target: source header...", wrapped as GCC wraps it, and
  * with -MP a bare rule per header so a deleted header does not break the
@@ -927,6 +933,122 @@ static int compile_and_link(const char *in, const char *out)
     return rc;
 }
 
+/* ---- -save-temps ---------------------------------------------------------
+ *
+ * GCC keeps what its passes hand each other -- the preprocessed source
+ * and the assembly -- and names them after the output, as GCC 11 and
+ * later do: `-c x.c -o build/x.o` keeps build/x.i and build/x.s, a link
+ * `x.c -o fw.elf` keeps fw-x.i and fw-x.s beside fw.elf, and with no -o
+ * the input's name is used in the current directory. -save-temps=cwd
+ * puts them in the current directory whatever the output; -dumpbase
+ * NAME names them NAME.i and NAME.s.
+ *
+ * EmbCC has no files between its stages, so each is produced by running
+ * this compiler again over the same source with -E and with -S -- the
+ * compile is deterministic, so that .s is the assembly of the object
+ * this command writes. A unit's state lives in globals (multi_source),
+ * so the second and third runs are processes of their own. */
+static char *strip_ext(const char *p)
+{
+    const char *sl = strrchr(p, '/'), *dot = strrchr(p, '.');
+    size_t n = dot && (!sl || dot > sl) && dot != (sl ? sl + 1 : p)
+             ? (size_t)(dot - p) : strlen(p);
+    return xstrndup(p, n);
+}
+
+static const char *base_name(const char *p)
+{
+    const char *sl = strrchr(p, '/');
+    return sl ? sl + 1 : p;
+}
+
+static int save_temps(int argc, char **argv, const char *in, const char *out,
+                      int compile_mode, int want_s)
+{
+    char *base;
+    if (g_dumpbase) {
+        base = xstrndup(g_dumpbase, strlen(g_dumpbase));
+    } else if (compile_mode) {
+        base = strip_ext(out ? out : base_name(in));
+    } else {
+        char *o = strip_ext(out ? out : "a.out");
+        char *s = strip_ext(base_name(in));
+        size_t n = strlen(o) + strlen(s) + 2;
+        base = xmalloc(n);
+        snprintf(base, n, "%s-%s", o, s);
+        free(o);
+        free(s);
+    }
+    if (g_save_temps == 2) {            /* =cwd */
+        char *b = xstrndup(base_name(base), strlen(base_name(base)));
+        free(base);
+        base = b;
+    }
+    if (!plat_can_run()) {
+        fprintf(stderr, "embcc: error: -save-temps runs the compiler again "
+                "for %s.i and %s.s, and this host cannot run a program "
+                "(EmbCC was built with PROCESS=none): use -E and -S\n",
+                base, base);
+        free(base);
+        return 1;
+    }
+    const char *self = plat_self_path();
+    if (!self)
+        self = argv[0];
+    const char **av = xmalloc((size_t)(argc + 8) * sizeof *av);
+    int rc = 0;
+    for (int pass = 0; pass < 2 && !rc; pass++) {
+        if (pass == 1 && want_s)
+            break;                  /* the .s is this command's own output */
+        size_t n = strlen(base) + 4;
+        char *path = xmalloc(n);
+        snprintf(path, n, "%s.%s", base,
+                 pass ? "s" : lang_cxx ? "ii" : "i");
+        if (strcmp(path, in) == 0 || (out && strcmp(path, out) == 0)) {
+            free(path);             /* never over the input or the output */
+            continue;
+        }
+        int k = 0;
+        av[k++] = self;
+        for (int i = 1; i < argc; i++) {
+            const char *a = argv[i];
+            if (g_child_skip[i])
+                continue;           /* sources, link inputs, -o, -j */
+            if (!strcmp(a, "-dumpbase") || !strcmp(a, "-MF") ||
+                !strcmp(a, "-MT") || !strcmp(a, "-MQ")) {
+                i++;
+                continue;
+            }
+            if (!strcmp(a, "-c") || !strcmp(a, "-S") || !strcmp(a, "-E") ||
+                !strncmp(a, "-save-temps", 11) ||
+                !strcmp(a, "--save-temps") || !strcmp(a, "-M") ||
+                !strcmp(a, "-MM") || !strcmp(a, "-MD") ||
+                !strcmp(a, "-MMD") || !strcmp(a, "-MP") ||
+                !strcmp(a, "-fstack-usage") || !strcmp(a, "-fremarks") ||
+                !strcmp(a, "-fremarks=json"))
+                continue;           /* this command's own outputs */
+            av[k++] = a;
+        }
+        av[k++] = pass ? "-S" : "-E";
+        av[k++] = "-o";
+        av[k++] = path;
+        av[k++] = in;
+        av[k] = NULL;
+        int which = -1;
+        if (plat_run_start(av) < 0) {
+            fprintf(stderr, "embcc: error: could not run %s for %s\n", self,
+                    path);
+            rc = 1;
+        } else if (plat_run_wait(&which) != 0) {
+            rc = 1;                 /* its diagnostics are already out */
+        }
+        free(path);
+    }
+    free(av);
+    free(base);
+    return rc;
+}
+
 /* ---- several sources in one command --------------------------------------
  *
  * `embcc a.c b.c -o prog`, `embcc -c a.c b.c`: what GCC and Clang take
@@ -978,12 +1100,25 @@ static int multi_source(int argc, char **argv, const char *output,
     while (next < g_nsrc || running) {
         while (next < g_nsrc && running < jobs && !failed) {
             int n = base;
-            const char **av = xmalloc((size_t)(base + 6) * sizeof *av);
+            const char **av = xmalloc((size_t)(base + 8) * sizeof *av);
             memcpy(av, cargv, (size_t)base * sizeof *av);
             if (link) {
                 size_t ln = strlen(exe) + 32;
                 tmp[next] = xmalloc(ln);
                 snprintf(tmp[next], ln, "%s.embcc-tmp-%d.o", exe, next + 1);
+                /* -save-temps: named after the image and the source, as
+                 * for one source (save_temps), not after the temporary */
+                if (g_save_temps && !g_dumpbase) {
+                    char *o = strip_ext(exe), *sb = strip_ext(base_name(
+                                                         g_srcs[next]));
+                    size_t bn = strlen(o) + strlen(sb) + 2;
+                    char *db = xmalloc(bn);
+                    snprintf(db, bn, "%s-%s", o, sb);
+                    free(o);
+                    free(sb);
+                    av[n++] = "-dumpbase";
+                    av[n++] = db;   /* (freed with the process) */
+                }
                 av[n++] = "-c";
                 av[n++] = g_srcs[next];
                 av[n++] = "-o";
@@ -1289,7 +1424,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
     if (pp_only) {
-        fputs(pp, stdout);
+        /* -E -o FILE writes FILE, as GCC's does (the output used to go
+         * to standard output whatever -o said, and `cc -E x.c -o x.i`
+         * left no x.i). */
+        if (out && plat_write_file(out, pp, strlen(pp)) != 0)
+            diag_fatal(out, 0, "cannot write the file");
+        if (!out)
+            fputs(pp, stdout);
         return 0;
     }
     if (lang_cxx && !syntax_only &&
@@ -4263,6 +4404,18 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-fanalyzer") == 0) {
             fprintf(stderr, "embcc: warning: -fanalyzer: EmbCC has no "
                             "static analyzer, so this checks nothing\n");
+        } else if (strcmp(argv[i], "-save-temps") == 0 ||
+                   strcmp(argv[i], "-save-temps=obj") == 0 ||
+                   strcmp(argv[i], "--save-temps") == 0) {
+            g_save_temps = 1;
+        } else if (strcmp(argv[i], "-save-temps=cwd") == 0) {
+            g_save_temps = 2;
+        } else if (strcmp(argv[i], "-dumpbase") == 0) {
+            if (i + 1 == argc) {
+                fprintf(stderr, "embcc: -dumpbase needs a name\n");
+                return 1;
+            }
+            g_dumpbase = argv[++i];
         } else if (strncmp(argv[i], "-fdump-", 7) == 0 ||
                    strncmp(argv[i], "-fcallgraph-info", 16) == 0) {
             /* GCC's own internals -- its RTL, its trees, its call graph
@@ -4879,7 +5032,7 @@ int main(int argc, char **argv)
      * `embcc -c foo.asm -o foo.o` replaces `nasm -f elf64`. */
     if (has_gas_suffix(input)) {
         if (pp_only)
-            return done(compile(input, NULL, 1));
+            return done(compile(input, dep_only ? NULL : output, 1));
         /* Without -c a .s/.S is assembled AND linked, as gcc does it:
          * `embcc start.S main.o -T fw.ld -o fw.elf`. It used to write the
          * object under the output's name, an "image" no loader reads. */
@@ -4906,7 +5059,7 @@ int main(int argc, char **argv)
                            AS_ELF64);
     }
     if (pp_only)
-        return done(compile(input, NULL, 1));
+        return done(compile(input, dep_only ? NULL : output, 1));
     if (emit_c_only) {
         if (!lang_cxx) {
             fprintf(stderr, "embcc: error: --emit-c lowers C++; '%s' is C\n",
@@ -4919,6 +5072,12 @@ int main(int argc, char **argv)
      * is nothing to link: they imply -c, as they do in GCC. */
     if (syntax_only)
         compile_mode = 1;
+    if (g_save_temps && !syntax_only && !want_iface) {
+        int src = has_c_suffix(input) || has_cxx_suffix(input) || lang >= 0;
+        if (src && save_temps(argc, argv, input, output, compile_mode,
+                              want_asm))
+            return done(1);
+    }
     if (!compile_mode)
         return done(compile_and_link(input, output));
     /* An interface report goes to stdout unless the caller named a file.
