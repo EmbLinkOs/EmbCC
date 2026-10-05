@@ -528,7 +528,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
  * long switch. Measured against cost/degree and against no loop weight:
  * this is the smallest on all five targets together (-1411 bytes of code,
  * math included), AVR and x86-64 most. */
-struct ra_costacc { const int *eof; const int *alias; unsigned long *cost;
+struct ra_costacc { const int *eof; int *alias; unsigned long *cost;
                     unsigned long w; int nvr; };
 /* Loop depth per instruction: a loop being the span of a backward
  * branch, which is what the IR has for one (a switch never closes a
@@ -567,10 +567,10 @@ static void ra_cost_cb(int v, void *ctx)
     struct ra_costacc *c = ctx;
     if (v < 0 || v >= c->nvr || c->eof[v] < 0)
         return;
-    int e = c->eof[v];
-    while (c->alias[e] != e)
-        e = c->alias[e];
-    c->cost[e] += c->w;
+    /* ra_find, which compresses the path: a value AVR copies into each
+     * of 4000 cases is merged into each copy in turn, and walking that
+     * chain at every use of it was quadratic. The root is the same. */
+    c->cost[ra_find(c->alias, c->eof[v])] += c->w;
 }
 
 /* A min-heap of node numbers, for the simplify order. */
@@ -630,6 +630,269 @@ int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
     return ra_allocate_class(fn, t, g_wide, fltmap, 1, used_out, nused_out);
 }
 
+/* ---- the interference graph, sparse ----------------------------------
+ *
+ * It was a bit matrix, nodes x nodes, and everything that walked a node's
+ * neighbours scanned its whole row: a function of 8000 statements has
+ * 24000 to 50000 nodes, up to 300 MB a matrix (twice, with the
+ * preferences), and a row of up to 780 words however few neighbours the
+ * node has -- and most nodes of a big function have a handful.
+ *
+ * So a node with at most RG_ROW neighbours keeps them in a list, and only
+ * one with more keeps a bit row, as in the matrix. "Do these two
+ * interfere" is then a bit, or a scan of at most RG_ROW entries; walking
+ * a node's neighbours costs its list, or its row; and the graph is never
+ * bigger than the matrix was. (Lists for every node, rows on top, were
+ * tried first: a function storing 8000 struct fields has 18 million
+ * edges, and that took 1.3 GB.)
+ *
+ * Coalescing merges nodes, and a merge must leave each neighbour naming
+ * the survivor once, as the matrix's rows did once a merge had cleared
+ * the absorbed node's bits. That is a rename in every neighbour of the
+ * absorbed node -- and on AVR, where each read of a two-byte int is a
+ * copy that coalesces, a value live across a long function is absorbed
+ * into its next copy again and again, thousands of neighbours each time:
+ * 160 million renames in one 1000-statement compile. So lists and rows
+ * belong to STORAGE slots, and a node to one slot (slot[]); entries and
+ * bits name slots, and owner[] says which node a slot is. A merge keeps
+ * the slot with more neighbours for the survivor and folds the other one
+ * in, so only the smaller side's neighbours are touched. A list entry
+ * also holds where the reverse entry is (`back`) while the neighbour has
+ * a list, so a rename or removal there is direct; a neighbour that
+ * outgrew its list is a bit to flip. An edge between two live nodes is
+ * never removed, so the answer about two live nodes is always the
+ * matrix's; the order of a list is never relied on. */
+#define RG_ROW 32
+struct rg_ent { int v, back; };    /* a neighbour slot; this slot's index
+                                     * in its list, while it has one */
+struct ra_graph {
+    int n, words;
+    int *slot, *owner;              /* node -> its slot; slot -> its node */
+    struct rg_ent **nb;             /* per slot: its list, NULL once a row */
+    int *nnb;
+    unsigned long long **row;       /* per slot: its row, NULL while a list */
+    int *deg;                       /* per NODE: live neighbours */
+    int *buf;                       /* rg_merge's copy of a neighbourhood */
+};
+
+static void rg_init(struct ra_graph *g, int n)
+{
+    g->n = n;
+    g->words = (n + 63) / 64;
+    g->slot = xmalloc((size_t)(n ? n : 1) * sizeof *g->slot);
+    g->owner = xmalloc((size_t)(n ? n : 1) * sizeof *g->owner);
+    g->nb = xmalloc((size_t)(n ? n : 1) * sizeof *g->nb);
+    for (int e = 0; e < n; e++) {
+        g->slot[e] = g->owner[e] = e;
+        g->nb[e] = xmalloc(RG_ROW * sizeof *g->nb[e]);
+    }
+    g->nnb = xcalloc((size_t)(n ? n : 1), sizeof *g->nnb);
+    g->row = xcalloc((size_t)(n ? n : 1), sizeof *g->row);
+    g->deg = xcalloc((size_t)(n ? n : 1), sizeof *g->deg);
+    g->buf = xmalloc((size_t)(n ? n : 1) * 2 * sizeof *g->buf);
+}
+
+static void rg_free(struct ra_graph *g)
+{
+    for (int e = 0; e < g->n; e++) {
+        free(g->nb[e]); free(g->row[e]);
+    }
+    free(g->slot); free(g->owner); free(g->nb); free(g->nnb); free(g->row);
+    free(g->deg); free(g->buf);
+}
+
+/* Are slots a and b neighbours? */
+static int rg_slot_has(const struct ra_graph *g, int a, int b)
+{
+    if (g->row[a])
+        return (int)(g->row[a][b >> 6] >> (b & 63) & 1u);
+    if (g->row[b])
+        return (int)(g->row[b][a >> 6] >> (a & 63) & 1u);
+    const struct rg_ent *l = g->nb[a];
+    int n = g->nnb[a], x = b;
+    if (g->nnb[b] < n) { l = g->nb[b]; n = g->nnb[b]; x = a; }
+    for (int k = 0; k < n; k++)
+        if (l[k].v == x)
+            return 1;
+    return 0;
+}
+
+/* Do nodes a and b interfere? */
+static int rg_has(const struct ra_graph *g, int a, int b)
+{
+    return rg_slot_has(g, g->slot[a], g->slot[b]);
+}
+
+/* The index of the lowest set bit of a nonzero word (de Bruijn). */
+static const unsigned char rg_db[64] = {
+    0, 1, 48, 2, 57, 49, 28, 3, 61, 58, 50, 42, 38, 29, 17, 4, 62, 55, 59,
+    36, 53, 51, 43, 22, 45, 39, 33, 30, 24, 18, 12, 5, 63, 47, 56, 27, 60,
+    41, 37, 16, 54, 35, 52, 21, 44, 32, 23, 11, 46, 26, 40, 15, 34, 20, 31,
+    10, 25, 14, 19, 9, 13, 8, 7, 6
+};
+#define RG_LOW(bits) \
+    (rg_db[(((bits) & (0ULL - (bits))) * 0x03f79d71b4cb0a89ULL) >> 58])
+
+/* The slots of a row, into out[]; how many. */
+static int rg_row_slots(const struct ra_graph *g, const unsigned long long *r,
+                        int *out)
+{
+    int n = 0;
+    for (int w = 0; w < g->words; w++)
+        for (unsigned long long bits = r[w]; bits; bits &= bits - 1)
+            out[n++] = w * 64 + RG_LOW(bits);
+    return n;
+}
+
+static int rg_popcount(unsigned long long x)
+{
+    x = x - ((x >> 1) & 0x5555555555555555ULL);
+    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
+    return (int)((x * 0x0101010101010101ULL) >> 56);
+}
+
+/* Node u's neighbours, as nodes, into out[]; how many. */
+static int rg_nbrs(const struct ra_graph *g, int u, int *out)
+{
+    int s = g->slot[u], n;
+    if (!g->row[s]) {
+        const struct rg_ent *l = g->nb[s];
+        for (n = 0; n < g->nnb[s]; n++)
+            out[n] = g->owner[l[n].v];
+        return n;
+    }
+    n = rg_row_slots(g, g->row[s], out);
+    for (int k = 0; k < n; k++)
+        out[k] = g->owner[out[k]];
+    return n;
+}
+
+/* Slot a gains neighbour slot v, whose list holds a at index `back` (or
+ * none). Returns the new entry's index in a's list, or -1 when a has a
+ * row -- already, or now, because the list was full. */
+static int rg_put(struct ra_graph *g, int a, int v, int back)
+{
+    if (!g->row[a] && g->nnb[a] == RG_ROW) {
+        g->row[a] = xcalloc((size_t)(g->words ? g->words : 1), sizeof *g->row[a]);
+        for (int k = 0; k < g->nnb[a]; k++)
+            g->row[a][g->nb[a][k].v >> 6] |= 1ULL << (g->nb[a][k].v & 63);
+        free(g->nb[a]);
+        g->nb[a] = NULL;
+        g->nnb[a] = 0;
+    }
+    if (g->row[a]) {
+        g->row[a][v >> 6] |= 1ULL << (v & 63);
+        return -1;
+    }
+    int k = g->nnb[a]++;
+    g->nb[a][k].v = v;
+    g->nb[a][k].back = back;
+    return k;
+}
+
+/* Where slot a's list names slot v: `hint` when it is the place, else a
+ * scan. -1 when a has a row. */
+static int rg_find(const struct ra_graph *g, int a, int v, int hint)
+{
+    if (g->row[a])
+        return -1;
+    if (hint >= 0 && hint < g->nnb[a] && g->nb[a][hint].v == v)
+        return hint;
+    for (int k = 0; k < g->nnb[a]; k++)
+        if (g->nb[a][k].v == v)
+            return k;
+    return -1;
+}
+
+/* Make nodes a and b interfere; nothing if they already do. */
+static void rg_add(struct ra_graph *g, int a, int b)
+{
+    if (a == b)
+        return;
+    int sa = g->slot[a], sb = g->slot[b];
+    if (rg_slot_has(g, sa, sb))
+        return;
+    int kb = g->row[sb] || g->nnb[sb] == RG_ROW ? -1 : g->nnb[sb];
+    int ka = rg_put(g, sa, sb, kb);
+    rg_put(g, sb, sa, ka);
+    g->deg[a]++;
+    g->deg[b]++;
+}
+
+/* Slot a no longer has neighbour slot v, named at index k of its list. */
+static void rg_drop(struct ra_graph *g, int a, int v, int k)
+{
+    if (g->row[a]) {
+        g->row[a][v >> 6] &= ~(1ULL << (v & 63));
+        return;
+    }
+    int last = --g->nnb[a];
+    if (k != last) {
+        struct rg_ent m = g->nb[a][last];
+        g->nb[a][k] = m;
+        if (!g->row[m.v])                   /* m's reverse entry moved too */
+            g->nb[m.v][m.back].back = k;
+    }
+}
+
+/* Merge node y into node x, which do not interfere. A neighbour of both
+ * loses one edge; one of either now has x. */
+static void rg_merge(struct ra_graph *g, int x, int y)
+{
+    int big = g->slot[x], small = g->slot[y];
+    int dbig = g->deg[x];
+    if (g->deg[y] > g->deg[x]) {
+        big = g->slot[y]; small = g->slot[x]; dbig = g->deg[y];
+    }
+    /* small's neighbours, with where small is in each one's list */
+    int n = 0, *ns = g->buf, *at = g->buf + g->n;
+    if (g->row[small]) {
+        n = rg_row_slots(g, g->row[small], ns);
+        for (int q = 0; q < n; q++)
+            at[q] = -1;
+    } else {
+        for (int k = 0; k < g->nnb[small]; k++) {
+            ns[n] = g->nb[small][k].v;
+            at[n++] = g->nb[small][k].back;
+        }
+    }
+    int renamed = 0;
+    for (int q = 0; q < n; q++) {
+        int v = ns[q];
+        int j = rg_find(g, v, small, at[q]);
+        if (rg_slot_has(g, big, v)) {          /* had both: one edge goes */
+            rg_drop(g, v, small, j);
+            g->deg[g->owner[v]]--;
+            continue;
+        }
+        renamed++;
+        if (g->row[v]) {                       /* v names big instead */
+            g->row[v][small >> 6] &= ~(1ULL << (small & 63));
+            g->row[v][big >> 6] |= 1ULL << (big & 63);
+            rg_put(g, big, v, -1);
+        } else {
+            g->nb[v][j].v = big;
+            g->nb[v][j].back = rg_put(g, big, v, j);
+        }
+    }
+    free(g->nb[small]); free(g->row[small]);
+    g->nb[small] = NULL; g->row[small] = NULL; g->nnb[small] = 0;
+    g->slot[x] = big;
+    g->owner[big] = x;
+    g->owner[small] = -1;
+    g->deg[x] = dbig + renamed;
+    g->deg[y] = 0;
+}
+
+/* The pool positions a register occupies, as a mask of 1 << k for each
+ * POOL[k] == r: what the colouring loops computed by walking the pool for
+ * every neighbour. */
+static int ra_poolmask(const int *pm, int npm, int r)
+{
+    return r >= 0 && r < npm ? pm[r] : 0;
+}
+
 static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                               const char *g_wide, const char *fltmap, int fp,
                               int *used_out, int *nused_out)
@@ -654,6 +917,13 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     }
     int (*callee_saved)(int) = fp && t->is_fp_callee_saved
                              ? t->is_fp_callee_saved : t->is_callee_saved;
+    /* pmask[r]: the pool positions holding register r (ra_poolmask) */
+    int npmask = 0;
+    for (int k = 0; k < NP; k++)
+        if (POOL[k] + 1 > npmask) npmask = POOL[k] + 1;
+    int *pmask = xcalloc((size_t)(npmask ? npmask : 1), sizeof *pmask);
+    for (int k = 0; k < NP; k++)
+        if (POOL[k] >= 0) pmask[POOL[k]] |= 1 << k;
 
     int *hint = xmalloc((size_t)nvr * sizeof *hint);
     for (int v = 0; v < nvr; v++) hint[v] = -1;
@@ -925,8 +1195,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     int *eidx = xmalloc((size_t)(E ? E : 1) * sizeof *eidx);
     for (int v = 0; v < nvr; v++) if (eof[v] >= 0) eidx[eof[v]] = v;
 
-    int ew = (E + 63) / 64;
-    unsigned long *adj = E ? xcalloc((size_t)E * ew, sizeof *adj) : NULL;
+    struct ra_graph g;
+    rg_init(&g, E);
+    int *nbuf = xmalloc((size_t)(E ? E : 1) * sizeof *nbuf);   /* rg_nbrs */
     int *members = xmalloc((size_t)(E ? E : 1) * sizeof *members);
     /* Which instructions are COPIES the colourer may give one register:
      * the same test the coalescer below applies, since both are asking
@@ -951,7 +1222,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * if something did, THAT definition would add the edge. A value dying
      * at an instruction still shares a register with one born there, as
      * before: the def is only tied to what is live after it. */
-    for (int b = adj ? nlb - 1 : -1; b >= 0; b--) {
+    for (int b = E ? nlb - 1 : -1; b >= 0; b--) {
         ra_lset_out(&ls, lv, b);
         for (int i = ra_live_block_start(lv, b + 1) - 1;
              i >= ra_live_block_start(lv, b); i--) {
@@ -964,25 +1235,20 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                     int v = ls.mem[k];
                     if (eof[v] < 0 || v == src || v == dv)
                         continue;
-                    int bb = eof[v];
-                    adj[(size_t)a * ew + (bb >> 6)] |= 1UL << (bb & 63);
-                    adj[(size_t)bb * ew + (a >> 6)] |= 1UL << (a & 63);
+                    rg_add(&g, a, eof[v]);
                 }
             }
             ra_lset_step(&ls, in);
         }
     }
-    if (adj && nlb > 0) {                      /* the entry clique */
+    if (E && nlb > 0) {                        /* the entry clique */
         int m = 0;
         for (int k = 0; k < ls.n; k++)         /* live into instruction 0 */
             if (eof[ls.mem[k]] >= 0)
                 members[m++] = eof[ls.mem[k]];
         for (int p = 0; p < m; p++)
-            for (int q = p + 1; q < m; q++) {
-                int a = members[p], b = members[q];
-                adj[(size_t)a * ew + (b >> 6)] |= 1UL << (b & 63);
-                adj[(size_t)b * ew + (a >> 6)] |= 1UL << (a & 63);
-            }
+            for (int q = p + 1; q < m; q++)
+                rg_add(&g, members[p], members[q]);
     }
 
     /* Move-preference (coalescing) graph: two vregs that share a register let
@@ -999,8 +1265,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
      * Each edge is a BIAS, not a constraint, and is dropped when the pair
      * interferes — which is exactly when operand a is still live after the op, so
      * a genuinely reusable (dying) operand is the only one ever coalesced. */
-    unsigned long *pref = E ? xcalloc((size_t)E * ew, sizeof *pref) : NULL;
-    for (int i = 0; pref && i < nins; i++) {
+    /* A list per node, read only as "which partners", so a pair met twice
+     * may be listed twice. */
+    int **pref = xcalloc((size_t)(E ? E : 1), sizeof *pref);
+    int *npref = xcalloc((size_t)(E ? E : 1), sizeof *npref);
+    int *cappref = xcalloc((size_t)(E ? E : 1), sizeof *cappref);
+    for (int i = 0; E && i < nins; i++) {
         struct ir_ins *in = &fn->ins[i];
         enum ir_op op = in->op;
         int d = in->dst, partner[2], np = 0;
@@ -1027,9 +1297,15 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             if (d < 0 || d >= nvr || a < 0 || a >= nvr) continue;
             int ed = eof[d], ea = eof[a];
             if (ed < 0 || ea < 0 || ed == ea) continue;
-            if (adj[(size_t)ed * ew + (ea >> 6)] & (1UL << (ea & 63))) continue;
-            pref[(size_t)ed * ew + (ea >> 6)] |= 1UL << (ea & 63);
-            pref[(size_t)ea * ew + (ed >> 6)] |= 1UL << (ed & 63);
+            if (rg_has(&g, ed, ea)) continue;
+            for (int s2 = 0; s2 < 2; s2++) {
+                int u = s2 ? ea : ed, w = s2 ? ed : ea;
+                if (npref[u] == cappref[u]) {
+                    cappref[u] = cappref[u] ? cappref[u] * 2 : 2;
+                    pref[u] = xrealloc(pref[u], (size_t)cappref[u] * sizeof *pref[u]);
+                }
+                pref[u][npref[u]++] = w;
+            }
         }
     }
 
@@ -1090,16 +1366,41 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         xforbid[e] = forbid[eidx[e]];
         ehint[e] = hint[eidx[e]];
     }
-    if (adj) {
+    if (E) {
+        /* The degrees the Briggs test reads: as they stood before any
+         * merge, and after one only the merged node's is brought up to
+         * date -- its neighbours keep theirs. */
         int *deg = xmalloc((size_t)E * sizeof *deg);
-        for (int e = 0; e < E; e++) {
-            int d = 0;
-            unsigned long *row = adj + (size_t)e * ew;
-            for (int w = 0; w < ew; w++) {
-                unsigned long b = row[w];
-                while (b) { d++; b &= b - 1; }
+        for (int e = 0; e < E; e++)
+            deg[e] = g.deg[e];
+        /* hs[u]: how many of u's neighbours have significant degree
+         * (deg >= NP) -- what the test counts, kept as merges change it,
+         * so that a node with thousands of neighbours of low degree is
+         * not walked at every copy it is a candidate for. A union has at
+         * least as many as either side and at most their sum, so only
+         * when neither bound decides is it counted out. */
+        int *hs = xcalloc((size_t)E, sizeof *hs);
+        int *hmark = xcalloc((size_t)E, sizeof *hmark), hstamp = 0;
+        int *hn = xmalloc((size_t)E * sizeof *hn);
+        char *hc = xmalloc((size_t)E);
+        {   /* no merges yet, so slot e is node e: a row is counted
+             * against the significant ones a word at a time */
+            unsigned long long *sig = xcalloc((size_t)(g.words ? g.words : 1),
+                                              sizeof *sig);
+            for (int e = 0; e < E; e++)
+                if (deg[e] >= NP)
+                    sig[e >> 6] |= 1ULL << (e & 63);
+            for (int e = 0; e < E; e++) {
+                if (g.row[e]) {
+                    for (int w = 0; w < g.words; w++)
+                        hs[e] += rg_popcount(g.row[e][w] & sig[w]);
+                    continue;
+                }
+                for (int q = 0; q < g.nnb[e]; q++)
+                    if (deg[g.nb[e][q].v] >= NP)
+                        hs[e]++;
             }
-            deg[e] = d;
+            free(sig);
         }
         for (int i = 0; i < nins; i++) {
             struct ir_ins *in = &fn->ins[i];
@@ -1136,20 +1437,24 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             if (eof[d] < 0 || eof[a] < 0) continue;
             int x = ra_find(alias, eof[d]), y = ra_find(alias, eof[a]);
             if (x == y) continue;
-            if (adj[(size_t)x * ew + (y >> 6)] & (1UL << (y & 63))) continue;
+            if (rg_has(&g, x, y)) continue;
             /* Briggs: the union's neighbours of degree >= NP must be
-             * fewer than NP. */
-            int high = 0;
-            for (int w = 0; w < ew && high < NP; w++) {
-                unsigned long b = adj[(size_t)x * ew + w] |
-                                  adj[(size_t)y * ew + w];
-                while (b) {
-                    int bit = 0; unsigned long tt = b;
-                    while (!(tt & 1)) { tt >>= 1; bit++; }
-                    int ne = w * 64 + bit;
-                    if (ne != x && ne != y && !absorbed[ne] && deg[ne] >= NP)
-                        high++;
-                    b &= b - 1;
+             * fewer than NP -- each counted once, so y's are counted
+             * only where x does not have them too. */
+            int high = hs[x] > hs[y] ? hs[x] : hs[y];
+            if (high < NP && hs[x] + hs[y] >= NP) {
+                high = 0;
+                for (int s2 = 0; s2 < 2 && high < NP; s2++) {
+                    int u = s2 ? y : x, n = rg_nbrs(&g, u, nbuf);
+                    for (int q = 0; q < n && high < NP; q++) {
+                        int ne = nbuf[q];
+                        if (absorbed[ne] || ne == x || ne == y)
+                            continue;
+                        if (s2 && rg_has(&g, x, ne))
+                            continue;
+                        if (deg[ne] >= NP)
+                            high++;
+                    }
                 }
             }
             if (high >= NP) continue;
@@ -1168,21 +1473,36 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                 int dn = xcross[x] ? ndep[y] : ndep[x];
                 if (dn > dc) continue;
             }
-            /* merge y into x */
-            for (int w = 0; w < ew; w++) {
-                unsigned long b = adj[(size_t)y * ew + w];
-                while (b) {
-                    int bit = 0; unsigned long tt = b;
-                    while (!(tt & 1)) { tt >>= 1; bit++; }
-                    int ne = w * 64 + bit;
-                    adj[(size_t)ne * ew + (y >> 6)] &= ~(1UL << (y & 63));
-                    if (ne != x) {
-                        adj[(size_t)x * ew + (ne >> 6)] |= 1UL << (ne & 63);
-                        adj[(size_t)ne * ew + (x >> 6)] |= 1UL << (x & 63);
-                    }
-                    b &= b - 1;
+            /* merge y into x: y's neighbours lose it and gain x. The
+             * neighbours of the side whose list rg_merge walks are noted
+             * first, with whether they are common to both. */
+            int sm = g.deg[y] > g.deg[x] ? x : y;
+            int bg = sm == x ? y : x, nh = 0, inter = 0;
+            int ox = deg[x] >= NP, oy = deg[y] >= NP;
+            hstamp++;
+            int nsm = rg_nbrs(&g, sm, nbuf);
+            for (int q = 0; q < nsm; q++) {
+                int ne = nbuf[q];
+                hn[nh] = ne;
+                hc[nh] = (char)rg_has(&g, bg, ne);
+                if (hc[nh] && deg[ne] >= NP)
+                    inter++;
+                hmark[ne] = hstamp;
+                nh++;
+            }
+            rg_merge(&g, x, y);
+            int nx = g.deg[x] >= NP;
+            hs[x] = hs[x] + hs[y] - inter;
+            hs[y] = 0;
+            for (int k = 0; k < nh; k++)
+                hs[hn[k]] += nx - (hc[k] ? ox + oy : (sm == x ? ox : oy));
+            if (nx != (bg == x ? ox : oy)) {     /* the other side's, at once */
+                int nxn = rg_nbrs(&g, x, nbuf);
+                for (int q = 0; q < nxn; q++) {
+                    int ne = nbuf[q];
+                    if (hmark[ne] != hstamp)
+                        hs[ne] += nx - (bg == x ? ox : oy);
                 }
-                adj[(size_t)y * ew + w] = 0;
             }
             alias[y] = x;
             absorbed[y] = 1;
@@ -1190,15 +1510,10 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             xforbid[x] |= xforbid[y];
             if (ndep[y] > ndep[x]) ndep[x] = ndep[y];
             if (ehint[x] < 0) ehint[x] = ehint[y];
-            int d2 = 0;
-            for (int w = 0; w < ew; w++) {
-                unsigned long b = adj[(size_t)x * ew + w];
-                while (b) { d2++; b &= b - 1; }
-            }
-            deg[x] = d2;
+            deg[x] = g.deg[x];
             deg[y] = 0;
         }
-        free(deg);
+        free(deg); free(hs); free(hmark); free(hn); free(hc);
     }
 
     /* Each node's spill cost (ra_cost_cb): its reads and writes, a loop
@@ -1246,15 +1561,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         if (callee_saved(POOL[k])) NCALLEE++;
     {
         int *deg = xmalloc((size_t)(E ? E : 1) * sizeof *deg);
-        for (int e = 0; e < E; e++) {
-            int d = 0;
-            unsigned long *row = adj + (size_t)e * ew;
-            for (int w = 0; w < ew; w++) {
-                unsigned long b = row[w];
-                while (b) { d++; b &= b - 1; }
-            }
-            deg[e] = d;
-        }
+        for (int e = 0; e < E; e++)
+            deg[e] = g.deg[e];
         char *gone = xcalloc((size_t)(E ? E : 1), 1);
         /* The node the scan wants is the LOWEST-numbered trivially
          * colourable one, and a node stays trivially colourable once it
@@ -1299,22 +1607,16 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             if (pick < 0) break;                 /* only absorbed nodes left */
             gone[pick] = 1;
             order[sp++] = pick;                  /* push */
-            unsigned long *row = adj + (size_t)pick * ew;
-            for (int w = 0; w < ew; w++) {
-                unsigned long b = row[w];
-                while (b) {
-                    int bit = 0; unsigned long t = b;
-                    while (!(t & 1)) { t >>= 1; bit++; }
-                    int ne = w * 64 + bit;
-                    if (!gone[ne]) {
-                        deg[ne]--;
-                        if (!inheap[ne] && !absorbed[ne] &&
-                            deg[ne] < (xcross[ne] && !pool_k ? NCALLEE : NP)) {
-                            ra_heap_push(heap, &nheap, ne);
-                            inheap[ne] = 1;
-                        }
-                    }
-                    b &= b - 1;
+            int npk = rg_nbrs(&g, pick, nbuf);
+            for (int q = 0; q < npk; q++) {
+                int ne = nbuf[q];
+                if (absorbed[ne] || gone[ne])
+                    continue;
+                deg[ne]--;
+                if (!inheap[ne] &&
+                    deg[ne] < (xcross[ne] && !pool_k ? NCALLEE : NP)) {
+                    ra_heap_push(heap, &nheap, ne);
+                    inheap[ne] = 1;
                 }
             }
         }
@@ -1350,19 +1652,14 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             if (g_ra_res[r].last >= nfirst[e] && g_ra_res[r].first <= nlast[e])
                 for (int k = 0; k < NP; k++)
                     if (POOL[k] == g_ra_res[r].reg) taken |= 1 << k;
-        unsigned long *row = adj + (size_t)e * ew;
-        for (int w = 0; w < ew; w++) {
-            unsigned long bits = row[w];
-            while (bits) {
-                int b = 0; unsigned long t = bits;
-                while (!(t & 1)) { t >>= 1; b++; }
-                int ne = w * 64 + b;
-                int nl = loc[eidx[ne]];
-                if (nl >= 0)
-                    for (int k = 0; k < NP; k++)
-                        if (POOL[k] == nl) taken |= 1 << k;
-                bits &= bits - 1;
-            }
+        int ne_n = rg_nbrs(&g, e, nbuf);
+        for (int q = 0; q < ne_n; q++) {
+            int ne = nbuf[q];
+            if (absorbed[ne])
+                continue;
+            int nl = loc[eidx[ne]];
+            if (nl >= 0)
+                taken |= ra_poolmask(pmask, npmask, nl);
         }
         /* A value that crosses a call may not take a caller-saved register: the
          * call clobbers them, so forbid them here (leaving callee-saved/spill). */
@@ -1377,20 +1674,10 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         /* preferred colours: registers a colored, non-interfering move-partner
          * already holds (and that are still free) */
         int want = 0;
-        unsigned long *prow = pref + (size_t)e * ew;
-        for (int w = 0; w < ew; w++) {
-            unsigned long bits = prow[w];
-            while (bits) {
-                int b = 0; unsigned long t = bits;
-                while (!(t & 1)) { t >>= 1; b++; }
-                int pe = w * 64 + b;
-                int pl = loc[eidx[pe]];
-                if (pl >= 0)
-                    for (int k = 0; k < NP; k++)
-                        if (POOL[k] == pl && !(taken & (1 << k)))
-                            want |= 1 << k;
-                bits &= bits - 1;
-            }
+        for (int q = 0; q < npref[e]; q++) {
+            int pl = loc[eidx[pref[e][q]]];
+            if (pl >= 0)
+                want |= ra_poolmask(pmask, npmask, pl) & ~taken;
         }
         /* ...and the one the ABI would like, on the same terms */
         if (ehint[e] >= 0)
@@ -1420,17 +1707,10 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
          * call, around nothing. */
         if (pick < 0) {
             int avoid = 0;
-            for (int w = 0; w < ew; w++) {
-                unsigned long bits = row[w];
-                while (bits) {
-                    int b = 0; unsigned long tt = bits;
-                    while (!(tt & 1)) { tt >>= 1; b++; }
-                    int ne = w * 64 + b;
-                    if (!absorbed[ne] && loc[eidx[ne]] < 0 && ehint[ne] >= 0)
-                        for (int k = 0; k < NP; k++)
-                            if (POOL[k] == ehint[ne]) avoid |= 1 << k;
-                    bits &= bits - 1;
-                }
+            for (int q = 0; q < ne_n; q++) {     /* nbuf still holds them */
+                int ne = nbuf[q];
+                if (!absorbed[ne] && loc[eidx[ne]] < 0 && ehint[ne] >= 0)
+                    avoid |= ra_poolmask(pmask, npmask, ehint[ne]);
             }
             /* ...but not at the price of a save: a register the ABI
              * wants for someone else is still better than a callee-saved
@@ -1519,7 +1799,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
     g_ra_res = NULL; g_ra_nres = 0;          /* consumed */
     free(cost);
     free(first); free(last); free(elig); free(crosses); free(forbid);
-    free(eof); free(eidx); free(adj); free(pref);
+    free(eof); free(eidx);
+    rg_free(&g);
+    free(nbuf);
+    for (int e = 0; e < E; e++) free(pref[e]);
+    free(pref); free(npref); free(cappref);
+    free(pmask);
     free(members); free(order);
     ra_live_free(lv);
     ra_lset_free(&ls);
@@ -1949,6 +2234,23 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
         if (d >= 0 && d < nv) defs[d]++;
     }
     ra_count_vreg_uses(fn, uses);
+    /* The loads and stores whose address each vreg is, in a list per
+     * vreg: what the checks and the rewrite below look at for one ADD,
+     * found once instead of by a pass over the function per ADD -- which
+     * a function storing 8000 struct fields paid 8000 times. A list is
+     * read only for an ADD whose result nothing else reads, and no fold
+     * moves an access onto such a result, so the lists stay true. */
+    int *ahead = xmalloc((size_t)nv * sizeof *ahead);
+    int *anext = xmalloc((size_t)(fn->nins ? fn->nins : 1) * sizeof *anext);
+    for (int v = 0; v < nv; v++) ahead[v] = -1;
+    for (int n = fn->nins - 1; n >= 0; n--) {
+        const struct ir_ins *u = &fn->ins[n];
+        anext[n] = -1;
+        if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a >= 0 && u->a < nv) {
+            anext[n] = ahead[u->a];
+            ahead[u->a] = n;
+        }
+    }
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
         /* ...and not a store of a WIDE value, even a four-byte one: that
@@ -1971,12 +2273,10 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
             defs[p] != 1 || uses[p] != addr_uses[p] || !uses[p])
             continue;
         int ok = 1;
-        for (int m = 0; m < fn->nins && ok; m++) {
+        for (int m = ahead[p]; m >= 0 && ok; m = anext[m]) {
             const struct ir_ins *u = &fn->ins[m];
-            if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == p) {
-                long off = (long)u->memoff + k;
-                if (off < lo || off > hi - u->size) ok = 0;
-            }
+            long off = (long)u->memoff + k;
+            if (off < lo || off > hi - u->size) ok = 0;
         }
         if (ok && defs[s] != 1) {
             /* A base written more than once -- a pointer a loop walks --
@@ -2005,12 +2305,10 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
         }
         if (!ok)
             continue;
-        for (int m = 0; m < fn->nins; m++) {
+        for (int m = ahead[p]; m >= 0; m = anext[m]) {
             struct ir_ins *u = &fn->ins[m];
-            if ((u->op == IR_LOAD || u->op == IR_STORE) && u->a == p) {
-                u->a = s;
-                u->memoff += (int)k;
-            }
+            u->a = s;
+            u->memoff += (int)k;
         }
         drop[n] = 1;
         changed = 1;
@@ -2022,5 +2320,6 @@ int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
         fn->nins = j;
     }
     free(defs); free(uses); free(addr_uses); free(drop);
+    free(ahead); free(anext);
     return changed;
 }
