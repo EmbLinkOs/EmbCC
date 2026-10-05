@@ -350,19 +350,29 @@ static int t_ldvar_plain(int size, int sign, int w)
 
 /* Is this floating-point instruction executed on the FPU, rather than by
  * a runtime helper? FPv4-SP-D16 and FPv5-SP-D16 are SINGLE precision: a
- * double, a 64-bit integer conversion and fmodf are still calls. */
+ * double, a 64-bit integer conversion and fmodf are still calls.
+ * FPv5-D16, the Cortex-M7's, computes in double precision too, so there
+ * a double's arithmetic, comparisons, square root, its 32-bit
+ * conversions and the conversions between the two widths are all
+ * instructions -- and the 64-bit integer conversions are still calls,
+ * because VFP has no instruction for them at either width. */
 static int fp_on_vfp(const struct ir_ins *i)
 {
+    int dp;
     if (!target_thumb_fpu())
         return 0;
+    dp = target_thumb_fpu_dp();
     switch (i->op) {
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_NEG:
     case IR_CMP: case IR_SQRT:
-        return i->flt && i->w == 4;
-    case IR_I2F:                       /* int32 -> float */
-        return i->w == 4 && i->size != 8;
-    case IR_F2I:                       /* float -> int32 */
-        return i->size == 4 && i->w != 8;
+        return i->flt && (i->w == 4 || (dp && i->w == 8));
+    case IR_I2F:                       /* int32 -> float (or double) */
+        return (i->w == 4 || (dp && i->w == 8)) && i->size != 8;
+    case IR_F2I:                       /* float (or double) -> int32 */
+        return (i->size == 4 || (dp && i->size == 8)) && i->w != 8;
+    case IR_F2F:                       /* float <-> double, both ways */
+        return dp && (i->size == 4 || i->size == 8) &&
+               (i->w == 4 || i->w == 8);
     default:
         return 0;
     }
@@ -406,6 +416,35 @@ static const int *t_fp_pool_for(const struct ir_func *fn, int *n)
 }
 static int t_fp_callee_saved(int reg) { return reg >= 16; }
 
+/* The DOUBLE class, on a unit that computes with doubles (FPv5-D16):
+ * d8-d15, the same callee-saved half of the file, each named by the
+ * single register that is its low word -- d8 is s16:s17 -- so that one
+ * per-vreg map (t_fn.floc) says where every FP value lives, and every
+ * check that a value has no slot because it has an FP home covers
+ * doubles too. The D number is the S number halved (t_dreg).
+ *
+ * The allocator hands out one register per value, so doubles get a pass
+ * of their own over this pool, before the floats, exactly as 64-bit
+ * integers get one over core PAIRS (t_pair_alloc): the floats' pass is
+ * then told which s16-s31 each double holds, over that double's live
+ * range only (ra_reserve). d0-d7 are not in it, for the reason s0-s15 are
+ * not in the float pool: they carry the hard-float arguments and results,
+ * and d0/d1 are this file's scratch for every double operation. */
+static const int T_DPOOL[8] = { 16, 18, 20, 22, 24, 26, 28, 30 };
+static const int *t_dp_pool_for(const struct ir_func *fn, int *n)
+{
+    (void)fn;
+    *n = target_thumb_fpu_dp() ? 8 : 0;
+    return T_DPOOL;
+}
+/* A copy of a double local into a temporary is a plain move in the D
+ * class: both are the whole eight bytes. */
+static int t_dldvar_plain(int size, int sign, int w)
+{
+    (void)sign;
+    return size == 8 && w == 8;
+}
+
 /* Where AAPCS32 would put each value if it had the choice. Defined
  * below place_arg, whose answer it uses rather than restating. */
 static void t_abi_hints(const struct ir_func *fn, int *hint);
@@ -444,6 +483,28 @@ static const struct ra_target THUMB_RA = {
                    * writes through wr/wreg */
     0,            /* fp_reads_gpr */
     1             /* asm_in_reg: see IR_ASM */
+};
+
+/* The D class's view of the same machine. Only the FP fields matter to
+ * ra_allocate_fp; the rest say what THUMB_RA says. No ABI hints: the
+ * ones that exist name core registers, and a d register home for a
+ * double argument is moved into d0-d7 at the call regardless. */
+static const struct ra_target THUMB_DRA = {
+    t_pool_for,
+    t_callee_saved,
+    t_dldvar_plain,
+    1, 1, 0,
+    t_op_calls_helper,
+    0,
+    NULL,         /* abi_hints */
+    t_dp_pool_for,
+    t_fp_callee_saved,
+    1,            /* float_in_gpr: as THUMB_RA, so a double argument or
+                   * result is not made opaque for being one */
+    NULL, NULL,
+    1,            /* atomic_in_reg */
+    0,            /* fp_reads_gpr */
+    1             /* asm_in_reg: the FP class keeps out of asm regardless */
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -956,8 +1017,9 @@ static int in_freg(const struct t_fn *F, int v);
  * decides only what is worth an S register.
  *
  * A double is not here: FPv4-SP-D16 cannot compute with one, so it is a
- * pair of core words handed to the runtime. Under -g a source variable
- * stays in its slot, as the integer class keeps them. */
+ * pair of core words handed to the runtime -- and on FPv5-D16, which
+ * can, it is t_double_map's. Under -g a source variable stays in its
+ * slot, as the integer class keeps them. */
 static char *t_float_map(const struct ir_func *fn, const char *wide,
                          int debug)
 {
@@ -975,6 +1037,9 @@ static char *t_float_map(const struct ir_func *fn, const char *wide,
             case IR_I2F: MARK(i->dst); break;
             case IR_F2I: MARK(i->a); break;
             case IR_CMP: MARK(i->a); if (!i->imm_b) MARK(i->b); break;
+            /* a conversion between the widths: its float side (MARK
+             * passes over the double, which is t_double_map's) */
+            case IR_F2F: MARK(i->dst); MARK(i->a); break;
             default:
                 MARK(i->dst); MARK(i->a);
                 if (!i->imm_b && i->op != IR_NEG && i->op != IR_SQRT)
@@ -999,6 +1064,96 @@ static char *t_float_map(const struct ir_func *fn, const char *wide,
         if (debug || !fn->locals[v].is_scalar_float ||
             fn->locals[v].size != 4)
             m[v] = 0;
+    return m;
+}
+
+/* A 64-bit AND that clears, or XOR that flips, the sign bit and nothing
+ * else: what fabs and negation of a double are by the time they reach
+ * this backend (irgen's fb_* builtins, and the optimizer's -x). On a d
+ * register they are vabs.f64 and vneg.f64, which are exactly those bit
+ * operations -- no rounding, no NaN quieted, no exception raised. */
+static int t_sign_mask_op(const struct ir_ins *i)
+{
+    return i->w == 8 && i->imm_b &&
+           ((i->op == IR_AND && i->imm == (long)0x7fffffffffffffffL) ||
+            (i->op == IR_XOR && i->imm == (long)0x8000000000000000UL));
+}
+
+/* The doubles worth a d register, on a unit that computes with them: the
+ * same question t_float_map asks, of the 64-bit values. Operands and
+ * results of what fp_on_vfp() runs at eight bytes, doubles passed to and
+ * returned from calls (in d0-d7 or r0-r3, one vmov from a d register
+ * either way), and double locals -- but not a local any instruction reads
+ * or writes narrower than itself, whose bytes are then addressed one word
+ * at a time. As with floats, nothing here is needed for correctness:
+ * every 64-bit path reaches a d register through rd64/wr64, which cross
+ * with one vmov. NULL without the double-precision unit. */
+static char *t_double_map(const struct ir_func *fn, const char *wide,
+                          int debug)
+{
+    int nv = fn->nvregs;
+    char *m;
+    if (!target_thumb_fpu_dp() || nv <= 0)
+        return NULL;
+    m = xcalloc((size_t)nv, 1);
+#define DMARK(v) do { int v_ = (v); \
+        if (v_ >= 0 && v_ < nv && wide[v_]) m[v_] = 1; } while (0)
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (fp_on_vfp(i)) {
+            switch (i->op) {
+            case IR_I2F: DMARK(i->dst); break;
+            case IR_F2I: DMARK(i->a); break;
+            case IR_CMP: DMARK(i->a); if (!i->imm_b) DMARK(i->b); break;
+            case IR_F2F: DMARK(i->dst); DMARK(i->a); break;
+            default:
+                DMARK(i->dst); DMARK(i->a);
+                if (!i->imm_b && i->op != IR_NEG && i->op != IR_SQRT)
+                    DMARK(i->b);
+                break;
+            }
+        } else if (i->op == IR_CALL) {
+            if (i->flt && i->w == 8 && !i->retsize)
+                DMARK(i->dst);
+            for (int k = 0; k < i->nargs; k++)
+                if (!i->argv[k].is_struct && i->argv[k].is_float &&
+                    i->argv[k].size == 8)
+                    DMARK(i->argv[k].vreg);
+        } else if (i->op == IR_RET && i->a >= 0 &&
+                   fn->ret_abi.is_float && !fn->ret_abi.is_struct &&
+                   fn->ret_abi.size == 8) {
+            DMARK(i->a);
+        } else if (t_sign_mask_op(i)) {
+            DMARK(i->dst); DMARK(i->a);
+        }
+    }
+    /* ...and the bit casts that join a double to those: fabs is
+     * bitcast-and-bitcast, and leaving the integer in the middle in a slot
+     * would cost a store and a load each side of the one vabs. */
+    for (int again = 1; again; ) {
+        again = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            int d = i->dst, a = i->a;
+            if (i->op != IR_BITCAST || i->w != 8 || d < 0 || d >= nv ||
+                a < 0 || a >= nv || !wide[d] || !wide[a] || m[d] == m[a])
+                continue;
+            m[d] = m[a] = 1;
+            again = 1;
+        }
+    }
+#undef DMARK
+    for (int v = 0; v < fn->nvars && v < nv; v++)
+        if (debug || !fn->locals[v].is_scalar_float ||
+            fn->locals[v].size != 8)
+            m[v] = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_LDVAR && i->a >= 0 && i->a < nv && i->size != 8)
+            m[i->a] = 0;
+        if (i->op == IR_STVAR && i->dst >= 0 && i->dst < nv && i->size != 8)
+            m[i->dst] = 0;
+    }
     return m;
 }
 
@@ -1046,7 +1201,9 @@ static void layout(struct t_fn *F)
             free(tslot);
         }
         for (int v = fn->nvars; v < nv; v++) {
-            if (!F->wide[v] || (F->loc && F->loc[v] >= 0))
+            /* ...and none for one in a d register (t_double_map): it
+             * touches memory no more than a pair does. */
+            if (!F->wide[v] || (F->loc && F->loc[v] >= 0) || in_freg(F, v))
                 continue;
             /* Eight-aligned as well as eight wide: AAPCS32 aligns `long
              * long` to 8, and ldrd would need it. */
@@ -1119,6 +1276,13 @@ static void fb_addr(struct t_fn *F, int rd, long off);
 static int in_freg(const struct t_fn *F, int v)
 {
     return F->floc && v >= 0 && F->floc[v] >= 0;
+}
+
+/* The d register a double with an FP home lives in: floc names its low
+ * single (T_DPOOL), and d<n> is s<2n>:s<2n+1>. */
+static int t_dreg(const struct t_fn *F, int v)
+{
+    return F->floc[v] >> 1;
 }
 
 /* A slot, for code that addresses one directly. A value with an S
@@ -1252,6 +1416,12 @@ static void rd64(struct t_fn *F, int v, int lo, int hi)
         mv2(F, lo, F->loc[v], hi, F->loc[v] + 1);
         return;
     }
+    /* A double in a d register: both words in one vmov, low word first,
+     * which is how d<n> is laid over s<2n> and s<2n+1>. */
+    if (in_freg(F, v)) {
+        t_vmov_core_pair(F->t, t_dreg(F, v), lo, hi, 0);
+        return;
+    }
     (void)slot_of(F, v);
     /* a frame slot is word-aligned, which ldrd needs */
     if (t_ldst_pair(F->t, lo, hi, F->fb, F->slot[v], 0))
@@ -1268,6 +1438,10 @@ static void wr64(struct t_fn *F, int v, int lo, int hi)
 {
     if (in_reg(F, v)) {
         mv2(F, F->loc[v], lo, F->loc[v] + 1, hi);
+        return;
+    }
+    if (in_freg(F, v)) {
+        t_vmov_core_pair(F->t, t_dreg(F, v), lo, hi, 1);
         return;
     }
     (void)slot_of(F, v);
@@ -2086,6 +2260,45 @@ static void srcb64(struct t_fn *F, const struct ir_ins *i, int *lo, int *hi)
     src64(F, i->b, R_ADDR, R_SCR, lo, hi);
 }
 
+/* A double between a vreg and a d register, defined with the FPU below;
+ * gen_ins64 asks them whenever one end of a copy is a d register. */
+static void vfp_load_d(struct t_fn *F, int v, int d);
+static void vfp_store_d(struct t_fn *F, int v, int d);
+static void vfp_const_d(struct t_fn *F, int d, unsigned long long bits);
+static int vfp_src_d(struct t_fn *F, int v, int scratch);
+static int vfp_dst_d(struct t_fn *F, int v, int scratch);
+static void vfp_done_d(struct t_fn *F, int v, int d);
+/* d0 and d1: the double-precision scratch pair (see vfp_src_d). */
+#define T_FD0 0
+#define T_FD1 1
+
+/* vldr/vstr of d register `d` at [base, #off]: 0 when the offset is not
+ * one the word-scaled eight-bit field holds, for the caller's core path. */
+static int vfp_mem_d(struct t_fn *F, int d, int base, long off, int store)
+{
+    if (off < -1020 || off > 1020 || (off & 3))
+        return 0;
+    t_vldst(F->t, d, base, (int)off, 1, store);
+    return 1;
+}
+
+/* A copy whose one end is a double in a d register (t_double_map): a
+ * vmov.f64, or the other end loaded into or stored from it -- one vldr or
+ * vstr where that end is a slot. Without this every such copy crossed
+ * through two core registers both ways. 0 when neither end is one. */
+static int copy64_d(struct t_fn *F, int dst, int src)
+{
+    if (in_freg(F, dst)) {
+        vfp_load_d(F, src, t_dreg(F, dst));
+        return 1;
+    }
+    if (in_freg(F, src)) {
+        vfp_store_d(F, dst, t_dreg(F, src));
+        return 1;
+    }
+    return 0;
+}
+
 static int gen_ins64(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -2094,6 +2307,12 @@ static int gen_ins64(struct t_fn *F, int n)
 
     switch (i->op) {
     case IR_CONST:
+        /* A double constant in a d register: vmov.f64 #imm when it is one
+         * of VFP's, else its words through a core register. */
+        if (in_freg(F, i->dst)) {
+            vfp_const_d(F, t_dreg(F, i->dst), (unsigned long long)i->imm);
+            return 1;
+        }
     {
         /* Built where it lives when that is a pair. */
         int lo = in_reg(F, i->dst) ? F->loc[i->dst] : A_LO;
@@ -2111,6 +2330,8 @@ static int gen_ins64(struct t_fn *F, int n)
      * its bits is a copy and nothing else. */
     case IR_BITCAST:
     case IR_MOV:
+        if (copy64_d(F, i->dst, i->a))
+            return 1;
         /* Straight between the two homes; within one pair, nothing. */
         if (in_reg(F, i->dst)) {
             rd64(F, i->a, F->loc[i->dst], F->loc[i->dst] + 1);
@@ -2166,6 +2387,17 @@ static int gen_ins64(struct t_fn *F, int n)
         int op = i->op == IR_AND ? T_OP_AND
                : i->op == IR_OR  ? T_OP_ORR : T_OP_EOR;
         int al, ah, bl, bh, dl, dh;
+        /* fabs and negation of a double in a d register: one VFP
+         * instruction where the core path is two vmovs around a bic or
+         * an eor (t_sign_mask_op says why it is the same thing). */
+        if (t_sign_mask_op(i) && (in_freg(F, i->dst) || in_freg(F, i->a))) {
+            int a = vfp_src_d(F, i->a, T_FD0);
+            int d = vfp_dst_d(F, i->dst, T_FD0);
+            if (i->op == IR_AND) t_vabs(t, d, a, 1);
+            else                 t_vneg(t, d, a, 1);
+            vfp_done_d(F, i->dst, d);
+            return 1;
+        }
         src64(F, i->a, A_LO, R_TMP, &al, &ah);
         if (i->imm_b && t_wide_imm()) {
             dst64(F, i->dst, &dl, &dh);
@@ -2277,6 +2509,8 @@ static int gen_ins64(struct t_fn *F, int n)
      * the high word from the sign. rd64 on a four-byte slot would read
      * the neighbouring temp as the high half. */
     case IR_LDVAR:
+        if (i->size == 8 && copy64_d(F, i->dst, i->a))
+            return 1;
         if (i->size == 8) {
             rd64(F, i->a, A_LO, A_HI);
         } else {
@@ -2297,6 +2531,8 @@ static int gen_ins64(struct t_fn *F, int n)
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_STVAR:
+        if (i->size == 8 && copy64_d(F, i->dst, i->a))
+            return 1;
         rd64(F, i->a, A_LO, A_HI);
         if (i->size == 8) {
             wr64(F, i->dst, A_LO, A_HI);
@@ -2319,6 +2555,12 @@ static int gen_ins64(struct t_fn *F, int n)
         int base, dl, dh;
         long off = i->memoff;
         base = mem64_base(F, i->a, &off);
+        /* Into a d register with one vldr -- only where the address is
+         * KNOWN aligned: vldr faults on a misaligned one where ldr would
+         * not, as for a float in an S register. */
+        if (i->size == 8 && in_freg(F, i->dst) && i->natural &&
+            vfp_mem_d(F, t_dreg(F, i->dst), base, off, 0))
+            return 1;
         dst64(F, i->dst, &dl, &dh);
         if (i->size == 8) {
             if (!(i->natural && t_ldst_pair(t, dl, dh, base, off, 0))) {
@@ -2340,6 +2582,9 @@ static int gen_ins64(struct t_fn *F, int n)
         int base, sl, sh;
         long off = i->memoff;
         base = mem64_base(F, i->a, &off);
+        if (i->size == 8 && in_freg(F, i->b) && i->natural &&
+            vfp_mem_d(F, t_dreg(F, i->b), base, off, 1))
+            return 1;                    /* see IR_LOAD */
         src64(F, i->b, A_LO, A_HI, &sl, &sh);
         if (i->size == 8) {
             if (!(i->natural && t_ldst_pair(t, sl, sh, base, off, 1))) {
@@ -2353,6 +2598,32 @@ static int gen_ins64(struct t_fn *F, int n)
     }
 
     case IR_SELECT:
+        /* A double either of whose arms, or whose result, is in a d
+         * register: the arm is moved straight into the result's d
+         * register (or d0, then stored). Nothing after the test sets the
+         * flags -- vmov.f64, vldr and the core loads of rd64 do not. */
+        if (in_freg(F, i->dst) || in_freg(F, i->b) || in_freg(F, i->c)) {
+            int d = vfp_dst_d(F, i->dst, T_FD0);
+            if (i->size == 8) {
+                rd64(F, i->a, A_LO, A_HI);
+                t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
+                t_cmp_imm(t, A_LO, 0);
+            } else {
+                t_cmp_imm(t, rdr(F, i->a, B_LO), 0);
+            }
+            {
+                int take_c = t_bcond(t, T_EQ);
+                vfp_load_d(F, i->b, d);
+                {
+                    int done = t_b(t);
+                    t_patch_bcond(t, take_c, t->len);
+                    vfp_load_d(F, i->c, d);
+                    t_patch_b(t, done, t->len);
+                }
+            }
+            vfp_done_d(F, i->dst, d);
+            return 1;
+        }
         if (i->size == 8) {            /* a 64-bit condition: either half */
             rd64(F, i->a, A_LO, A_HI);
             t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
@@ -2490,19 +2761,28 @@ static void vfp_store(struct t_fn *F, int v, int sreg)
     wr(F, v, T_ACC);
 }
 
-/* A DOUBLE between its vreg -- a pair of words on the frame, since a
- * 64-bit value is never in a register here -- and d register `d`.
- * FPv4-SP-D16 cannot compute in double precision, but it can hold, load,
- * store and move one, which is all the hard-float convention asks of it
- * at a call. */
+/* A DOUBLE between its vreg and d register `d`. Without a double-precision
+ * unit the vreg is a pair of words on the frame; FPv4-SP-D16 cannot
+ * compute in double precision, but it can hold, load, store and move one,
+ * which is all the hard-float convention asks of it at a call. With
+ * FPv5-D16 it may live in a d register of its own (t_double_map), and
+ * then this is a vmov.f64 or nothing.
+ *
+ * A pair in core registers is reached through rd64/wr64, which know it;
+ * vfp_slot_ok() is asked only of a value that has neither kind of home. */
 static int vfp_slot_ok(const struct t_fn *F, int v)
 {
-    return F->slot[v] >= 0 && F->slot[v] <= 1020 && !(F->slot[v] & 3);
+    return !in_reg(F, v) &&
+           F->slot[v] >= 0 && F->slot[v] <= 1020 && !(F->slot[v] & 3);
 }
 
 static void vfp_load_d(struct t_fn *F, int v, int d)
 {
-    (void)slot_of(F, v);
+    if (in_freg(F, v)) {
+        if (t_dreg(F, v) != d)
+            t_vmov_reg(F->t, d, t_dreg(F, v), 1);
+        return;
+    }
     if (vfp_slot_ok(F, v)) {
         t_vldst(F->t, d, F->fb, (int)F->slot[v], 1, 0);
         return;
@@ -2513,7 +2793,14 @@ static void vfp_load_d(struct t_fn *F, int v, int d)
 
 static void vfp_store_d(struct t_fn *F, int v, int d)
 {
-    if (v < 0 || F->slot[v] < 0)
+    if (v < 0)
+        return;
+    if (in_freg(F, v)) {
+        if (t_dreg(F, v) != d)
+            t_vmov_reg(F->t, t_dreg(F, v), d, 1);
+        return;
+    }
+    if (!in_reg(F, v) && F->slot[v] < 0)
         return;
     if (vfp_slot_ok(F, v)) {
         t_vldst(F->t, d, F->fb, (int)F->slot[v], 1, 1);
@@ -2588,38 +2875,104 @@ static int fp_cond_for(enum binop pred)
     }
 }
 
+/* ---- the FPU, for double precision (FPv5-D16) ---------------------------
+ *
+ * The same shape as the single-precision trio above, on d registers: an
+ * operand's home when it has one, else d0 or d1 loaded with it, and the
+ * result computed straight into its home or into d0 and stored. d0 and
+ * d1 are s0-s3, caller-saved like the singles' scratch pair and holding
+ * nothing between instructions (T_FD0 and T_FD1, defined with the 64-bit
+ * paths, which reach them too).
+ */
+static int vfp_src_d(struct t_fn *F, int v, int scratch)
+{
+    if (in_freg(F, v))
+        return t_dreg(F, v);
+    vfp_load_d(F, v, scratch);
+    return scratch;
+}
+static int vfp_dst_d(struct t_fn *F, int v, int scratch)
+{
+    return in_freg(F, v) ? t_dreg(F, v) : scratch;
+}
+static void vfp_done_d(struct t_fn *F, int v, int d)
+{
+    if (!in_freg(F, v))
+        vfp_store_d(F, v, d);
+}
+
+/* A double constant into d register `d`: one vmov.f64 when VFPExpandImm
+ * reaches it (1.0, 0.5, 10.0...), else its words built in core registers
+ * and moved across -- one register for both when they are the same, which
+ * 0.0 is. */
+static void vfp_const_d(struct t_fn *F, int d, unsigned long long bits)
+{
+    int k = t_vfp_imm8(bits, 1);
+    long lo = (long)(bits & 0xffffffffULL), hi = (long)(bits >> 32);
+    if (k >= 0) {
+        t_vmov_imm(F->t, d, k, 1);
+        return;
+    }
+    t_mov_imm(F->t, T_ACC, lo, 0);
+    if (hi == lo) {
+        t_vmov_core_pair(F->t, d, T_ACC, T_ACC, 1);
+        return;
+    }
+    t_mov_imm(F->t, T_TMP, hi, 0);
+    t_vmov_core_pair(F->t, d, T_ACC, T_TMP, 1);
+}
+
+/* The second operand into d register `d`: a vreg, or a folded constant,
+ * which for a double operation is its bit pattern. */
+static int vfp_operand_b_d(struct t_fn *F, const struct ir_ins *i, int d)
+{
+    if (i->imm_b) {
+        vfp_const_d(F, d, (unsigned long long)i->imm);
+        return d;
+    }
+    return vfp_src_d(F, i->b, d);
+}
+
 static void fp_vfp_cmp(struct t_fn *F, const struct ir_ins *i)
 {
-    int a = vfp_src(F, i->a, T_FS0);
-    int b = vfp_operand_b(F, i, T_FS1);
+    int dbl = i->w == 8;
+    int a = dbl ? vfp_src_d(F, i->a, T_FD0) : vfp_src(F, i->a, T_FS0);
+    int b = dbl ? vfp_operand_b_d(F, i, T_FD1) : vfp_operand_b(F, i, T_FS1);
     if (i->pred == B_EQ || i->pred == B_NE)
-        t_vcmp(F->t, a, b, 0);
+        t_vcmp(F->t, a, b, dbl);
     else
-        t_vcmpe(F->t, a, b, 0);
+        t_vcmpe(F->t, a, b, dbl);
     t_vmrs_apsr(F->t);
 }
 
 static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
 {
     struct code *t = F->t;
+    /* A double here only on FPv5-D16, which fp_on_vfp() checked. */
+    int dbl = i->w == 8;
     switch (i->op) {
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: {
-        int a = vfp_src(F, i->a, T_FS0);
-        int b = vfp_operand_b(F, i, T_FS1);
-        int d = vfp_dst(F, i->dst, T_FS0);
-        if (i->op == IR_ADD)      t_vadd(t, d, a, b, 0);
-        else if (i->op == IR_SUB) t_vsub(t, d, a, b, 0);
-        else if (i->op == IR_MUL) t_vmul(t, d, a, b, 0);
-        else                      t_vdiv(t, d, a, b, 0);
-        vfp_done(F, i->dst, d);
+        int a = dbl ? vfp_src_d(F, i->a, T_FD0) : vfp_src(F, i->a, T_FS0);
+        int b = dbl ? vfp_operand_b_d(F, i, T_FD1)
+                    : vfp_operand_b(F, i, T_FS1);
+        int d = dbl ? vfp_dst_d(F, i->dst, T_FD0)
+                    : vfp_dst(F, i->dst, T_FS0);
+        if (i->op == IR_ADD)      t_vadd(t, d, a, b, dbl);
+        else if (i->op == IR_SUB) t_vsub(t, d, a, b, dbl);
+        else if (i->op == IR_MUL) t_vmul(t, d, a, b, dbl);
+        else                      t_vdiv(t, d, a, b, dbl);
+        if (dbl) vfp_done_d(F, i->dst, d);
+        else     vfp_done(F, i->dst, d);
         return 1;
     }
     case IR_NEG: case IR_SQRT: {
-        int a = vfp_src(F, i->a, T_FS0);
-        int d = vfp_dst(F, i->dst, T_FS0);
-        if (i->op == IR_NEG) t_vneg(t, d, a, 0);
-        else                 t_vsqrt(t, d, a, 0);
-        vfp_done(F, i->dst, d);
+        int a = dbl ? vfp_src_d(F, i->a, T_FD0) : vfp_src(F, i->a, T_FS0);
+        int d = dbl ? vfp_dst_d(F, i->dst, T_FD0)
+                    : vfp_dst(F, i->dst, T_FS0);
+        if (i->op == IR_NEG) t_vneg(t, d, a, dbl);
+        else                 t_vsqrt(t, d, a, dbl);
+        if (dbl) vfp_done_d(F, i->dst, d);
+        else     vfp_done(F, i->dst, d);
         return 1;
     }
     /* IR_CMP is deliberately NOT here yet. vcmp writes FPSCR and only
@@ -2817,7 +3170,8 @@ static void gen_ins(struct t_fn *F, int n)
             t_refuse(fn, i, "a long double (ARMv7-M has no 16-byte float)");
         /* THE FPU, where there is one. FPv4-SP-D16 computes SINGLE
          * precision only, so this is `float` and nothing else -- a
-         * double still goes to __adddf3 below, on the same part.
+         * double still goes to __adddf3 below, on the same part. On the
+         * Cortex-M7's FPv5-D16 it is the double too (fp_on_vfp).
          *
          * The values go through their slots rather than staying in FP
          * registers: there is no floating-point register class on this
@@ -2917,6 +3271,12 @@ static void gen_ins(struct t_fn *F, int n)
         d = wreg(F, fw ? nx->dst : i->dst, T_ACC);
         if (in_reg(F, i->a)) {
             hi = F->loc[i->a] + 1;             /* the pair's high register */
+        } else if (in_freg(F, i->a)) {
+            /* A double in a d register: its high word is the high single,
+             * one vmov straight into the result -- fdlibm's GET_HIGH_WORD,
+             * which otherwise moved both words out to keep one. */
+            hi = d;
+            t_vmov_core(t, F->floc[i->a] + 1, d, 0);
         } else {
             rd64(F, i->a, T_ACC, T_TMP);
             hi = T_TMP;
@@ -3986,11 +4346,16 @@ static void gen_ins(struct t_fn *F, int n)
          * stays because `size == 8` with a narrow source vreg is still a
          * representable shape, and zero-extending it is still right. */
         if (fp_on_vfp(i)) {
-            /* vcvt reads its integer from an S register. */
-            int d = vfp_dst(F, i->dst, T_FS0);
+            /* vcvt reads its integer from an S register -- s0 for a
+             * double result too, which may be d0 itself: the conversion
+             * reads its source before it writes. */
+            int dbl = i->w == 8;
+            int d = dbl ? vfp_dst_d(F, i->dst, T_FD0)
+                        : vfp_dst(F, i->dst, T_FS0);
             t_vmov_core(t, T_FS0, rdr(F, i->a, T_ACC), 1);
-            t_vcvt_f_from_i(t, d, T_FS0, i->sign, 0);
-            vfp_done(F, i->dst, d);
+            t_vcvt_f_from_i(t, d, T_FS0, i->sign, dbl);
+            if (dbl) vfp_done_d(F, i->dst, d);
+            else     vfp_done(F, i->dst, d);
             return;
         }
         if (i->size == 8) {
@@ -4015,9 +4380,13 @@ static void gen_ins(struct t_fn *F, int n)
         /* size is the float source's width, w/sign the integer result. */
         if (fp_on_vfp(i)) {
             /* Round toward zero, which is C's conversion and what
-             * t_vcvt_i_from_f encodes. */
+             * t_vcvt_i_from_f encodes. The integer lands in s0 whichever
+             * width the source is. */
+            int dbl = i->size == 8;
             int r = wreg(F, i->dst, T_ACC);
-            t_vcvt_i_from_f(t, T_FS0, vfp_src(F, i->a, T_FS0), i->sign, 0);
+            t_vcvt_i_from_f(t, T_FS0, dbl ? vfp_src_d(F, i->a, T_FD0)
+                                          : vfp_src(F, i->a, T_FS0),
+                            i->sign, dbl);
             t_vmov_core(t, T_FS0, r, 0);
             wrote(F, i->dst, r);
             return;
@@ -4034,9 +4403,26 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_F2F:
         if (i->size == i->w) {          /* nothing to convert */
-            if (i->w == 8) { rd64(F, i->a, A_LO, A_HI);
-                             wr64(F, i->dst, A_LO, A_HI); }
+            if (i->w == 8 && (in_freg(F, i->a) || in_freg(F, i->dst)))
+                vfp_store_d(F, i->dst, vfp_src_d(F, i->a, T_FD0));
+            else if (i->w == 8) { rd64(F, i->a, A_LO, A_HI);
+                                  wr64(F, i->dst, A_LO, A_HI); }
             else           { rd(F, i->a, T_ACC); wr(F, i->dst, T_ACC); }
+            return;
+        }
+        if (fp_on_vfp(i)) {
+            /* One vcvt: widening is exact, and narrowing rounds as
+             * FPSCR says -- to nearest, ties to even, from reset, which
+             * is what __truncdfsf2 does and C's default mode. */
+            if (i->w == 8) {
+                int d = vfp_dst_d(F, i->dst, T_FD0);
+                t_vcvt_f_f(t, d, vfp_src(F, i->a, T_FS0), 1);
+                vfp_done_d(F, i->dst, d);
+            } else {
+                int d = vfp_dst(F, i->dst, T_FS0);
+                t_vcvt_f_f(t, d, vfp_src_d(F, i->a, T_FD0), 0);
+                vfp_done(F, i->dst, d);
+            }
             return;
         }
         fp_arg(F, i->a, i->size, T_R0);
@@ -4321,10 +4707,13 @@ static void gen_ins(struct t_fn *F, int n)
  * over the halves.
  *
  * Not with an FPU: the hard-float paths pass doubles in d registers
- * through vfp_load_d/vfp_store_d, which address slots. And not for a
- * variadic function's 64-bit parameters, a wide local read or written
- * narrower than itself, or anything pinned for -g. slot_of() refuses a
- * path this misses. */
+ * through vfp_load_d/vfp_store_d, which were written for slots -- they
+ * reach a pair through rd64/wr64 now, as they reach a d register, but
+ * the pair pass has not been run beside the FP passes, and on the
+ * double-precision unit the doubles have d registers of their own. And
+ * not for a variadic function's 64-bit parameters, a wide local read or
+ * written narrower than itself, or anything pinned for -g. slot_of()
+ * refuses a path this misses. */
 static int g_t_pairs = 1;
 
 static void t_pair_hints(const struct ir_func *fn, int *hint)
@@ -4546,6 +4935,18 @@ static unsigned lo_free(const struct t_fn *F, int n)
     return avail & ~b.busy;
 }
 
+/* The callee-saved VFP registers a function uses, s16 up, `n` of them
+ * (always even). On a double-precision unit by their D names, d8 up, as
+ * clang and GCC write it for a Cortex-M7: the same words saved to the
+ * same places, and a disassembly that says d8 where a double lives. */
+static void t_vsave(struct code *t, int n, int pop)
+{
+    if (target_thumb_fpu_dp())
+        t_vpush_d(t, 8, n / 2, pop);
+    else
+        t_vpush_s(t, 16, n, pop);
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                      int want_debug)
 {
@@ -4595,6 +4996,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         char *pin = want_debug || g_t_o0 ? ra_debug_pin_vars(fn)
                                          : (char *)0;
         char *flt = t_float_map(fn, F.wide, want_debug || g_t_o0);
+        char *dbl = t_double_map(fn, F.wide, want_debug || g_t_o0);
         /* The integer pass must not give a GPR to a value the FP pass
          * owns, and the -g pins are the same kind of "not here" -- so it
          * takes the union of the two. */
@@ -4602,7 +5004,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (flt) {
             excl = xcalloc((size_t)fn->nvregs, 1);
             for (int v = 0; v < fn->nvregs; v++)
-                excl[v] = (char)(flt[v] || (pin && pin[v]));
+                excl[v] = (char)(flt[v] || (dbl && dbl[v]) ||
+                                 (pin && pin[v]));
         }
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = g_t_pairs ? t_pair_alloc(fn, F.wide, excl, pused, &npused)
@@ -4621,17 +5024,47 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         }
         if (flt) {
             int fused[32], nfused = 0, top = 15;
+            int *dloc = NULL;
+            /* The doubles first, on d8-d15 (T_DPOOL), and then the floats
+             * on whatever of s16-s31 those leave free over each float's
+             * own life: g_t_reserve_pairs hands the float pass both halves
+             * of every d register a double took, over that double's live
+             * range, which is the same thing the core pairs tell the
+             * integer pass. `wide` is NULL here because a double is
+             * exactly what this pass is for. */
+            if (dbl) {
+                int dused[16], ndused = 0;
+                dloc = ra_allocate_fp(fn, &THUMB_DRA, NULL, dbl,
+                                      dused, &ndused);
+                for (int k = 0; k < ndused; k++)
+                    if (dused[k] + 1 > top)
+                        top = dused[k] + 1;
+                if (dloc)
+                    g_t_reserve_pairs(fn, dloc);
+            }
             F.floc = ra_allocate_fp(fn, &THUMB_RA, F.wide, flt,
                                     fused, &nfused);
             for (int k = 0; k < nfused; k++)
                 if (fused[k] > top)
                     top = fused[k];
+            if (dloc) {
+                if (!F.floc) {
+                    F.floc = xmalloc((size_t)fn->nvregs * sizeof *F.floc);
+                    for (int v = 0; v < fn->nvregs; v++)
+                        F.floc[v] = -1;
+                }
+                for (int v = 0; v < fn->nvregs; v++)
+                    if (dloc[v] >= 0)
+                        F.floc[v] = dloc[v];
+                free(dloc);
+            }
             /* vpush takes a RANGE, so s16 up to the highest one used,
              * rounded to an even count to keep sp eight-aligned. */
             F.nfsave = (top - 15 + 1) & ~1;
             free(excl);
             free(flt);
         }
+        free(dbl);
         free(pin);
         /* Read counts for comparison/branch fusion. Only with the
          * allocator on: without it every value round-trips through a
@@ -4823,7 +5256,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     push_at = F.nopush ? -1
             : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
     if (F.nfsave)
-        t_vpush_s(t, 16, F.nfsave, 0);
+        t_vsave(t, F.nfsave, 0);
     /* The mask is PATCHED at the end with whatever callee-saved
      * registers the allocator turned out to take: a `push` encodes them
      * as a bitmask, so growing the set costs no extra instruction, and
@@ -4874,6 +5307,31 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
             place_one(&w, a, &pl);
+            /* A double with a d register home goes straight there, from
+             * d0-d7, from a core pair (softfp, or a variadic function's
+             * named one), or from its two stack words -- as a float with
+             * an S register home does, below, and for the same reason. A
+             * double is eight-aligned, so AAPCS32 never splits one between
+             * r3 and the stack. */
+            if (in_freg(&F, i) && F.wide[i]) {
+                int dd = t_dreg(&F, i);
+                if (pl.nvfp == 2 && pl.vdbl) {
+                    t_vmov_reg(t, dd, pl.vfp / 2, 1);
+                } else if (pl.nreg == 2 && !pl.nstk) {
+                    t_vmov_core_pair(t, dd, pl.reg, pl.reg + 1, 1);
+                } else if (!pl.nreg && pl.nstk == 2 && !pl.nvfp) {
+                    long off = base + pl.stk;
+                    if (!vfp_mem_d(&F, dd, F.fb, off, 0)) {
+                        fb_addr(&F, T_ADDR, off);
+                        t_vldst(t, dd, T_ADDR, 0, 1, 0);
+                    }
+                } else {
+                    internal_error("thumb: %s: double parameter %d arrives "
+                                   "in a shape a D register cannot take",
+                                   fn->name, i);
+                }
+                continue;
+            }
             /* A float parameter with an S-register home goes straight
              * there, from wherever it arrived. Nothing here writes a core
              * or an argument VFP register, so it cannot disturb another
@@ -5066,7 +5524,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     if (F.frame)
         t_sp_adjust(t, F.frame, 0);
     if (F.nfsave)
-        t_vpush_s(t, 16, F.nfsave, 1);
+        t_vsave(t, F.nfsave, 1);
     {
         /* The same set the prologue pushed: SAVE_MASK plus whatever
          * callee-saved registers the allocator took. Built here and
@@ -5255,11 +5713,21 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
 
     /* A field's constant offset into its load or store (ldr r, [rn, #k])
      * -- once, before any attempt, and before allocation since the base's
-     * live range grows. */
+     * live range grows.
+     *
+     * With FPv5-D16, the eight-byte accesses too: a double's vldr and
+     * vstr take a word-scaled offset of up to 1020, and an array of
+     * doubles walked in an unrolled loop was an addw before every one of
+     * them. gen_ins64's LOAD and STORE read memoff (mem64_base), and one
+     * whose offset vldr cannot hold goes the core way, ldrd or two ldr --
+     * which reach the 4095 - 8 this allows. Only there, where the d
+     * registers are what gains: elsewhere a 64-bit access keeps its
+     * add, as it always has. */
     if (g_t_regalloc && !want_debug && !g_t_o0 &&
         !getenv("EMBCC_NO_MEMOFF")) {
-        char *w = wide64_map(fn);
-        ra_fold_memoff(fn, 0, 4095, 4, 4, w);
+        int dp = target_thumb_fpu_dp();
+        char *w = dp ? (char *)0 : wide64_map(fn);
+        ra_fold_memoff(fn, 0, 4095, 4, dp ? 8 : 4, w);
         free(w);
     }
     g_t_pairs = 1;
