@@ -463,15 +463,18 @@ int ra_live_in_at(const struct ra_live *lv, const struct ir_func *fn,
     return live;
 }
 
-/* 4M words: 32 MB for each of liveness's three sets. A function of 2000
- * plain statements is 3M (14000 instructions by 14000 vregs) and
- * allocates in 0.4 s; one of 4000 is 12M. */
-#define RA_O0_DENSE_WORDS (4L << 20)
+/* 100000 instructions: a function of some 12000 plain statements on
+ * Cortex-M or RISC-V, 10000 on AVR. Allocating one of 6000 at -O0 takes
+ * 0.1 s on Cortex-M and about 1 s on AVR, which generates every function
+ * several times over to keep the shortest; at the limit AVR takes about
+ * 2 s (on an idle machine; three times that on a loaded one). The limit
+ * was nins x nvregs bits when that was what liveness cost, which
+ * stopped at about 2000 statements. */
+#define RA_O0_MAX_INS 100000
 
 int ra_o0_too_big(const struct ir_func *fn)
 {
-    long words = ((long)fn->nvregs + 63) / 64;
-    return (long)fn->nins * words > RA_O0_DENSE_WORDS;
+    return fn->nins > RA_O0_MAX_INS;
 }
 
 /* mark vreg v ineligible (used at an opaque site) */
