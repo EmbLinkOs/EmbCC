@@ -95,7 +95,10 @@ struct gas_target {
  * currently selected target. Returns 0, or 1 with diagnostics on
  * stderr. `preprocess` runs the C preprocessor first, which is what
  * distinguishes `.S` from `.s`. */
-int gas_assemble(const char *in_path, const char *out_path, int preprocess);
+/* `incdirs` are the -I directories (and EmbCC's own), searched by a
+ * `.S` file's #include as by C's; NULL with 0 for none. */
+int gas_assemble(const char *in_path, const char *out_path, int preprocess,
+                 const char **incdirs, int nincdirs);
 
 /* Assembles one block of GNU-syntax text -- a file-scope __asm__, a naked
  * function's body -- from ta->tmpl (diagnostics at ta->file, ta->line

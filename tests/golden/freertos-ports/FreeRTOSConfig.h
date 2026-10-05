@@ -49,6 +49,14 @@
 #define configENABLE_MVE                        0
 #endif
 
+/* RISC-V: the CLINT's timer, which counts at BOARD_CLOCK_HZ (10 MHz on
+ * QEMU's virt), and a stack of the port's own for interrupts. */
+#if BOARD_RISCV
+#define configMTIME_BASE_ADDRESS                0x0200BFF8UL
+#define configMTIMECMP_BASE_ADDRESS             0x02004000UL
+#define configISR_STACK_SIZE_WORDS              256
+#endif
+
 void vAssertCalled(const char *file, int line);
 #define configASSERT(x) do { if (!(x)) vAssertCalled(__FILE__, __LINE__); } while (0)
 

@@ -656,6 +656,7 @@ floating-point arithmetic through every switch):
 | `ARM_CM4F` | `thumbv7em-none-eabihf -mfpu=fpv4-sp-d16` | `mps2-an386` | `freertos-ports.sh` |
 | `ARM_CM7/r0p1` | `thumbv7em-none-eabihf -mfpu=fpv4-sp-d16` | `mps2-an500` | `freertos-ports.sh` |
 | `ARM_CM33_NTZ/non_secure` | `thumbv8m.main-none-eabihf` | `mps2-an505` | `freertos-ports.sh` |
+| `RISC-V` (CLINT timer) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | `virt` | `freertos-ports.sh` |
 
 The files the Cortex-M3 test uses, in `tests/golden/freertos-cm3/`, are a
 starting point for a board of your own (`tests/golden/freertos-ports/`
@@ -688,6 +689,15 @@ before the scheduler may use it. The ARMv8-M ports name their handlers
 as CMSIS does (`SVC_Handler`, `PendSV_Handler`, `SysTick_Handler`), and
 want `configENABLE_FPU`, `configENABLE_MPU`, `configENABLE_TRUSTZONE` and
 `configRUN_FREERTOS_SECURE_ONLY` set in `FreeRTOSConfig.h`.
+
+The RISC-V port is `port.c` and `portASM.S`, compiled with `-I` naming its
+chip-specific directory (`chip_specific_extensions/RISCV_MTIME_CLINT_no_extensions`
+for a CLINT timer). Its `FreeRTOSConfig.h` gives the timer's addresses
+(`configMTIME_BASE_ADDRESS`, `configMTIMECMP_BASE_ADDRESS`; on QEMU's
+`virt` `0x0200BFF8` and `0x02004000`), and `configCPU_CLOCK_HZ` is the
+timer's rate, 10 MHz there. The startup points `mtvec` at
+`freertos_risc_v_trap_handler` before calling `main` (see
+`tests/golden/freertos-ports/riscv-start.S`).
 
 Under QEMU, add `-icount shift=2` when the program measures time:
 without it SysTick follows the host's clock, and a loaded host delivers

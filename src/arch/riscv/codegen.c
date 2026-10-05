@@ -728,14 +728,20 @@ static void layout(struct rv_fn *F)
      * Temporaries share a pool (ra_coalesce_temps, as the other backends
      * use): two whose live ranges do not overlap take one slot. A 64-bit
      * temp at RV32 keeps a slot of its own, eight-aligned, and so is shown
-     * to the coalescer as if it had a register. Then locals, small ones
+     * to the coalescer as if it had a register. At RV64 a 64-bit temp is
+     * one register and shares the pool like any other: `wide` marks it
+     * there too (wide_map), and reading the map without asking the XLEN
+     * gave each one a slot of its own -- xTaskIncrementTick's -O0 frame
+     * was 2384 bytes at RV64 against 128 at RV32, and FreeRTOS's timer
+     * task overflowed a 2 KB stack. Then locals, small ones
      * first; one nothing names needs none (ra_locals_referenced), nor one
      * in a register (ra_slot_dead; under -g every local keeps its slot). */
     {
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
         for (int v = 0; v < nv; v++)
-            loc2[v] = in_reg(F, v) || F->wide[v] || is16(F, v) ? 0 : -1;
+            loc2[v] = in_reg(F, v) || (F->xlen == 32 && F->wide[v]) ||
+                      is16(F, v) ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
@@ -760,7 +766,7 @@ static void layout(struct rv_fn *F)
             off += 16;
         }
         for (int v = fn->nvars; v < nv; v++) {
-            if (!F->wide[v] || in_reg(F, v) || is16(F, v))
+            if (F->xlen != 32 || !F->wide[v] || in_reg(F, v) || is16(F, v))
                 continue;
             off = (off + 7) & ~7L;
             F->slot[v] = off;

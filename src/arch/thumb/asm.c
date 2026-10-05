@@ -171,142 +171,7 @@ static int tok_is(const struct tok *t, const char *s)
 
 static int tok_reg(const struct tok *t) { return tasm_gpr(t->s, t->len); }
 
-/* ---- an immediate's constant expression ----
- *
- * GNU as evaluates `#( 0xf << 20 )` where an immediate goes, and an RTOS
- * port written for it uses that: FreeRTOS's ARM_CM4F and ARM_CM7 ports
- * enable the FPU with `orr r1, r1, #( 0xf << 20 )`. C's integer
- * operators over C's integer literals, with parentheses, in long; a
- * name or anything else makes it not an expression, and the caller says
- * so. Division by zero is not a value. */
-struct cx { const char *p, *e; int bad; };
-
-static void cx_sp(struct cx *x)
-{
-    while (x->p < x->e && isspace((unsigned char)*x->p))
-        x->p++;
-}
-
-static int cx_is(struct cx *x, const char *op)
-{
-    size_t n = strlen(op);
-    cx_sp(x);
-    if ((size_t)(x->e - x->p) < n || strncmp(x->p, op, n) != 0)
-        return 0;
-    /* `<` is not `<<`, `&` not `&&`: those are not in this grammar */
-    if (n == 1 && x->p + 1 < x->e && x->p[1] == x->p[0] &&
-        (op[0] == '<' || op[0] == '>' || op[0] == '&' || op[0] == '|'))
-        return 0;
-    x->p += n;
-    return 1;
-}
-
-static long cx_or(struct cx *x);
-
-static long cx_unary(struct cx *x)
-{
-    cx_sp(x);
-    if (x->p >= x->e) { x->bad = 1; return 0; }
-    if (*x->p == '-') { x->p++; return (long)(0UL - (unsigned long)cx_unary(x)); }
-    if (*x->p == '+') { x->p++; return cx_unary(x); }
-    if (*x->p == '~') { x->p++; return ~cx_unary(x); }
-    if (*x->p == '(') {
-        x->p++;
-        long v = cx_or(x);
-        if (!cx_is(x, ")")) x->bad = 1;
-        return v;
-    }
-    if (!isdigit((unsigned char)*x->p)) { x->bad = 1; return 0; }
-    {
-        int base = 10;
-        unsigned long v = 0;
-        if (*x->p == '0' && x->p + 1 < x->e &&
-            (x->p[1] == 'x' || x->p[1] == 'X')) {
-            base = 16;
-            x->p += 2;
-        } else if (*x->p == '0' && x->p + 1 < x->e &&
-                   (x->p[1] == 'b' || x->p[1] == 'B')) {
-            base = 2;
-            x->p += 2;
-        } else if (*x->p == '0') {
-            base = 8;
-        }
-        int any = base == 8;
-        while (x->p < x->e && isxdigit((unsigned char)*x->p)) {
-            int d = isdigit((unsigned char)*x->p) ? *x->p - '0'
-                  : tolower((unsigned char)*x->p) - 'a' + 10;
-            if (d >= base) { x->bad = 1; return 0; }
-            v = v * (unsigned long)base + (unsigned long)d;
-            any = 1;
-            x->p++;
-        }
-        /* C's suffixes: 20UL is 20 */
-        while (x->p < x->e && (*x->p == 'u' || *x->p == 'U' ||
-                               *x->p == 'l' || *x->p == 'L'))
-            x->p++;
-        if (!any) x->bad = 1;
-        return (long)v;
-    }
-}
-
-static long cx_mul(struct cx *x)
-{
-    long v = cx_unary(x);
-    for (;;) {
-        if (cx_is(x, "*")) v = (long)((unsigned long)v * (unsigned long)cx_unary(x));
-        else if (cx_is(x, "/") || cx_is(x, "%")) {
-            int div = x->p[-1] == '/';
-            long r = cx_unary(x);
-            if (r == 0) { x->bad = 1; return 0; }
-            v = div ? v / r : v % r;
-        } else return v;
-    }
-}
-
-static long cx_add(struct cx *x)
-{
-    long v = cx_mul(x);
-    for (;;) {
-        if (cx_is(x, "+")) v = (long)((unsigned long)v + (unsigned long)cx_mul(x));
-        else if (cx_is(x, "-")) v = (long)((unsigned long)v - (unsigned long)cx_mul(x));
-        else return v;
-    }
-}
-
-static long cx_shift(struct cx *x)
-{
-    long v = cx_add(x);
-    for (;;) {
-        if (cx_is(x, "<<")) {
-            long n = cx_add(x);
-            v = n >= 0 && n < 64 ? (long)((unsigned long)v << n) : 0;
-        } else if (cx_is(x, ">>")) {
-            long n = cx_add(x);
-            v = n >= 0 && n < 64 ? v >> n : v < 0 ? -1 : 0;
-        } else return v;
-    }
-}
-
-static long cx_and(struct cx *x)
-{
-    long v = cx_shift(x);
-    while (cx_is(x, "&")) v &= cx_shift(x);
-    return v;
-}
-
-static long cx_xor(struct cx *x)
-{
-    long v = cx_and(x);
-    while (cx_is(x, "^")) v ^= cx_and(x);
-    return v;
-}
-
-static long cx_or(struct cx *x)
-{
-    long v = cx_xor(x);
-    while (cx_is(x, "|")) v |= cx_xor(x);
-    return v;
-}
+#include "../asmexpr.h"
 
 /* `#imm`, or a bare number, or `#(` a constant expression `)`. */
 static int tok_imm(const struct tok *t, long *out)
@@ -323,12 +188,10 @@ static int tok_imm(const struct tok *t, long *out)
             (j > i && (t->s[j] == '+' || t->s[j] == '-')))
             ex = 1;
     if (ex) {
-        struct cx x = { t->s + i, t->s + t->len, 0 };
-        v = cx_or(&x);
-        cx_sp(&x);
-        if (x.bad || x.p != x.e)
+        long long ev;
+        if (!asm_const_expr(t->s + i, t->len - i, &ev))
             return 0;
-        *out = v;
+        *out = (long)ev;
         return 1;
     }
     /* `.+8` / `.-12`: a displacement from this instruction. The file

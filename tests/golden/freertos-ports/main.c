@@ -11,15 +11,21 @@
 #include "semphr.h"
 #include "timers.h"
 
+#if BOARD_RISCV
+/* virt's 16550: bytes to THR, nothing to enable. */
+#define UART0_DR   (*(volatile unsigned char *)BOARD_UART)
+#define UART_ON()  ((void)0)
+#else
 /* The CMSDK UART: CTRL's bit 0 enables the transmitter, off at reset. */
 #define UART0_DR   (*(volatile unsigned *)BOARD_UART)
-#define UART0_CTRL (*(volatile unsigned *)(BOARD_UART + 8))
+#define UART_ON()  (*(volatile unsigned *)(BOARD_UART + 8) = 1u)
+#endif
 
 static void puts_(const char *s)
 {
-    UART0_CTRL = 1u;
+    UART_ON();
     while (*s)
-        UART0_DR = (unsigned)*s++;
+        UART0_DR = (unsigned char)*s++;
 }
 
 static void putn(unsigned long v)
@@ -28,7 +34,7 @@ static void putn(unsigned long v)
     int n = 0;
     do { b[n++] = (char)('0' + v % 10); v /= 10; } while (v);
     while (n)
-        UART0_DR = (unsigned)b[--n];
+        UART0_DR = (unsigned char)b[--n];
 }
 
 void vAssertCalled(const char *file, int line)
