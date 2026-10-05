@@ -1190,6 +1190,7 @@ static int writes_memory(enum ir_op op)
 struct vn {
     enum ir_op op;
     int a, b, w, sign, size;
+    int flt;                   /* a float or double operation */
     enum binop pred;
     long imm;
     void *ptr;                 /* GADDR glob / FADDR callee */
@@ -1206,6 +1207,7 @@ struct vn {
 static int vn_eq(const struct vn *x, const struct vn *y)
 {
     return x->op == y->op && x->a == y->a && x->b == y->b && x->w == y->w &&
+           x->flt == y->flt &&
            x->sign == y->sign && x->size == y->size && x->pred == y->pred &&
            x->imm == y->imm && x->ptr == y->ptr && x->label == y->label &&
            x->memver == y->memver &&
@@ -1214,14 +1216,23 @@ static int vn_eq(const struct vn *x, const struct vn *y)
 }
 
 /* Build the value key for a CSE-able instruction; returns 0 if it is not one
- * (float ops, VOLATILE loads/ldvars, calls, stores — anything with an effect or
- * that we don't number). */
+ * (VOLATILE loads/ldvars, calls, stores — anything with an effect or that we
+ * don't number).
+ *
+ * A float or double operation is numbered like an integer one. EmbCC
+ * compiles every program as if FENV_ACCESS were off (the rounding mode is
+ * the default one, and no flag is ever tested), and then the same operation
+ * on the same operands gives the same bits every time -- a NaN included,
+ * since the machine that makes it is the same -- so computing it once is
+ * computing it. `(x*y)/(x*y)` in fdlibm was two multiplies, two calls on a
+ * Cortex-M3, with x and y kept live across the first. `flt` is part of the
+ * key: an integer and a floating add of the same temps are different
+ * values. Long double is not numbered (w == 16, below). */
 static int vn_key(struct ir_ins *i, int memver, struct vn *k)
 {
     memset(k, 0, sizeof *k);
     k->op = i->op; k->a = -1; k->b = -1;
-    if (i->flt)
-        return 0;
+    k->flt = i->flt;
     /* An __int128 constant's key would be its low half only, so two
      * different ones would number the same. */
     if (i->w == 16)
@@ -1259,6 +1270,25 @@ static int vn_key(struct ir_ins *i, int memver, struct vn *k)
     default:
         return 0;
     }
+}
+
+/* A numbered instruction becomes a copy of the earlier result. The copy
+ * moves the RESULT, so it takes the result's form rather than the
+ * operation's: a float comparison's result is an int 0/1 (its `w` and
+ * `flt` describe the operands), and a float value is copied the way
+ * irgen's own merges copy one, with `flt` clear. (A comparison's copy
+ * has not been seen to survive: its destination is written once, so
+ * copy propagation removes it. This keeps the form right if it does.) */
+static void vn_to_mov(struct ir_ins *i, int src)
+{
+    if (i->flt) {
+        if (i->op == IR_CMP) {
+            i->w = 4;
+            i->sign = 0;
+        }
+        i->flt = 0;
+    }
+    to_mov(i, src);
 }
 
 /* Replace a computation that reproduces an earlier one in the same block with a
@@ -1332,7 +1362,7 @@ static int pass_lvn(struct ir_func *fn)
             for (int t = 0; t < ntab; t++)
                 if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }
             if (hit >= 0 && hit != i->dst) {
-                to_mov(i, hit);
+                vn_to_mov(i, hit);
                 changed = 1;
                 g_did.lvn++;
                 op0 = IR_MOV;      /* what it is NOW, for the kill below */
@@ -2685,7 +2715,7 @@ static int pass_gcse(struct ir_func *fn)
                 for (int t = 0; t < ntab; t++)
                     if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }
                 if (hit >= 0 && hit != i->dst) {
-                    to_mov(i, hit); changed = 1; g_did.gcse++;
+                    vn_to_mov(i, hit); changed = 1; g_did.gcse++;
                 } else if (hit < 0) {
                     if (ntab == captab) { captab = captab ? captab * 2 : 64;
                         tab = xrealloc(tab, (size_t)captab * sizeof *tab); }
@@ -4817,7 +4847,11 @@ static int pre_one(struct ir_func *fn)
         keyidx[i] = -1;
         struct ir_ins *in = &fn->ins[i];
         struct vn k;
-        if (in->dst < 0 || !gcse_numberable(in->op) ||
+        /* Not a float operation. It would be sound (nothing here
+         * speculates, and FENV_ACCESS is off), but allowing them changed
+         * no function in lib/libc for Cortex-M, so the merge temps stay
+         * as they were: written by integer operations and moves only. */
+        if (in->dst < 0 || !gcse_numberable(in->op) || in->flt ||
             in->op == IR_DIV || in->op == IR_MOD ||
             !vn_stable(fn, &d, in) || !vn_key(in, 0, &k))
             continue;
