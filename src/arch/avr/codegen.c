@@ -5426,8 +5426,13 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
     g_a_regalloc = regalloc;           /* -O1 and up, and -O0 */
     g_a_o0 = !optimize;
 
-    for (int n = 0; n < iu->nfuncs; n++)
+    for (int n = 0; n < iu->nfuncs; n++) {
+        int ra = g_a_regalloc;
+        if (g_a_o0 && ra_o0_too_big(&iu->funcs[n]))
+            g_a_regalloc = 0;          /* see ra_o0_too_big */
         gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        g_a_regalloc = ra;
+    }
 
     /* The sites still carry string INDICES; the driver's relocations want
      * .rodata offsets. */

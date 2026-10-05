@@ -5039,8 +5039,13 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     g_rv_short_calls = !getenv("EMBCC_RV_LONG_CALLS");
     for (;;) {
         int far = 0;
-        for (int n = 0; n < iu->nfuncs; n++)
+        for (int n = 0; n < iu->nfuncs; n++) {
+            int ra = g_rv_regalloc;
+            if (g_rv_o0 && ra_o0_too_big(&iu->funcs[n]))
+                g_rv_regalloc = 0;     /* see ra_o0_too_big */
             gen_func_best(&iu->funcs[n], text, &st, xlen, want_debug);
+            g_rv_regalloc = ra;
+        }
         for (int k = 0; k < st.ncall; k++) {
             long disp = st.call[k].target->code_off - st.call[k].patch_off;
             if (st.call[k].jal && (disp < -reach || disp >= reach))

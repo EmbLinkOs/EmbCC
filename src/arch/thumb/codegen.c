@@ -5321,8 +5321,13 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
     st.g = NULL;    st.ng = st.capg = 0;
     st.f = NULL;    st.nf = st.capf = 0;
 
-    for (int n = 0; n < iu->nfuncs; n++)
+    for (int n = 0; n < iu->nfuncs; n++) {
+        int ra = g_t_regalloc;
+        if (g_t_o0 && ra_o0_too_big(&iu->funcs[n]))
+            g_t_regalloc = 0;          /* see ra_o0_too_big */
         gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        g_t_regalloc = ra;
+    }
 
     for (int n = 0; n < st.ncall; n++) {
         if (st.call[n].tail)          /* b.w, not bl: see t_tail_ok */
