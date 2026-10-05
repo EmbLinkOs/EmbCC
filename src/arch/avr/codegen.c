@@ -1000,7 +1000,11 @@ static int dw(const struct a_fn *F, const struct ir_ins *i)
 }
 
 static int in_pair(const struct a_fn *F, int v);
-static int g_a_regalloc;           /* -O2 and -Os (defined below) */
+static int g_a_regalloc;           /* -O1 and up, and -O0 (defined below) */
+/* -O0: the allocator runs for the temporaries of expressions only, every
+ * source variable pinned to its slot (ra_debug_pin_vars), with no tail
+ * call and no folded offset -- as thumb's g_t_o0. */
+static int g_a_o0;
 
 static void layout(struct a_fn *F)
 {
@@ -3936,9 +3940,31 @@ static void gen_ins(struct a_fn *F, int n)
                     st_slot(F, 1 + pl.stk + b, R_TMP, 1);
                 }
             } else {
-                int n = vw(F, i->argv[k].vreg);
-                vld(F, RA, i->argv[k].vreg, 0, pl.nstk < n ? pl.nstk : n);
-                st_slot(F, 1 + pl.stk, RA, pl.nstk);
+                int n = vw(F, i->argv[k].vreg), m = pl.nstk < n ? pl.nstk : n;
+                /* r18 up is this store's scratch, and may be where another
+                 * argument already lives -- in its home, before the
+                 * parallel move below. -O0's `-5`, computed into r18-r25
+                 * for the first argument, was overwritten so by the
+                 * bytes of an eight-byte stack argument. Then the bytes
+                 * go one at a time through r0, which nothing holds. */
+                int busy = 0;
+                for (int q = 0; q < i->nargs && !busy; q++) {
+                    int v = i->argv[q].vreg;
+                    if (q == k || i->argv[q].is_struct || !in_pair(F, v))
+                        continue;
+                    busy = F->loc[v] < RA + m && F->loc[v] + F->hw[v] > RA;
+                }
+                if (busy) {
+                    for (int b = 0; b < pl.nstk; b++) {
+                        if (b < m)
+                            vld(F, R_TMP, i->argv[k].vreg, b, 1);
+                        st_slot(F, 1 + pl.stk + b, b < m ? R_TMP : R_ZERO,
+                                1);
+                    }
+                } else {
+                    vld(F, RA, i->argv[k].vreg, 0, m);
+                    st_slot(F, 1 + pl.stk, RA, pl.nstk);
+                }
             }
         }
         /* Then the register ones: first every argument that lives in a
@@ -4705,6 +4731,12 @@ static void avr_ra_pass(struct a_fn *F, int hw, int low, int *taken,
     x = avr_excl(F, hw);
     for (int v = 0; v < nv; v++)
         if (also[v]) x[v] = 1;
+    if (g_a_o0) {
+        char *pin = ra_debug_pin_vars(fn);
+        for (int v = 0; pin && v < nv; v++)
+            if (pin[v]) x[v] = 1;
+        free(pin);
+    }
     g_a_quadpass = hw != 2;
     /* `wide` tells the allocator which values no register can hold, and
      * for the eight-byte pass that is none of them: its registers are
@@ -5049,7 +5081,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     /* Which calls may be tail calls (a_tail_ok); whether each is made
      * waits for the argument registers it uses. */
     F.tail = NULL;
-    if (F.loc)
+    if (F.loc && !g_a_o0)
         for (i = 0; i < fn->nins; i++)
             if (a_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -5300,7 +5332,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * since the base's live range grows. `f->flags` was the pointer into
      * X, subi/sbci, into Z and a load: six instructions for clang's
      * three. EMBCC_NO_MEMOFF turns it off, as on Thumb and RISC-V. */
-    if (!avr_knob("EMBCC_NO_MEMOFF")) {
+    if (!avr_knob("EMBCC_NO_MEMOFF") && !g_a_o0) {
         char *w = avr_wide_map(fn);
         ra_fold_memoff(fn, 0, 64, 2, 4, w);
         free(w);
@@ -5390,11 +5422,17 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
 {
     struct a_sites st;
     memset(&st, 0, sizeof st);
-    (void)optimize; (void)no_sse;
-    g_a_regalloc = regalloc;           /* -O2 and -Os */
+    (void)no_sse;
+    g_a_regalloc = regalloc;           /* -O1 and up, and -O0 */
+    g_a_o0 = !optimize;
 
-    for (int n = 0; n < iu->nfuncs; n++)
+    for (int n = 0; n < iu->nfuncs; n++) {
+        int ra = g_a_regalloc;
+        if (g_a_o0 && ra_o0_too_big(&iu->funcs[n]))
+            g_a_regalloc = 0;          /* see ra_o0_too_big */
         gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        g_a_regalloc = ra;
+    }
 
     /* The sites still carry string INDICES; the driver's relocations want
      * .rodata offsets. */

@@ -336,6 +336,17 @@ int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
  * and one copy is how it stays agreed. */
 int ra_ins_def(const struct ir_ins *in);
 
+/* At -O0, is fn too big to allocate? Liveness here is a bit set of every
+ * vreg at every instruction -- three of them, nins x nvregs bits each --
+ * and colouring scans a bit matrix of the eligible ones, so the cost grows
+ * with the SQUARE of a function's size. At -O2 that has always been so; at
+ * -O0, which is meant to be quick and once allocated nothing, a generated
+ * function of 8000 statements went from 0.1 s to 5.5 s, and one of 84000
+ * did not finish in ten minutes. Over the budget, -O0 compiles the
+ * function the way it did before it allocated (what EMBCC_O0_NORA=1 does
+ * to every function): its temporaries in slots, and its size linear. */
+int ra_o0_too_big(const struct ir_func *fn);
+
 /* ---- a PARALLEL MOVE ------------------------------------------------------
  *
  * "Put these values in these registers, all at once." Three places in a
