@@ -1584,6 +1584,14 @@ static void layout(struct linker *l, struct osec_bound *b,
     for (int i = 0; i < l->norphan; i++)
         if (l->orphans[i].writable)
             place_osec(l, OSEC_COUNT + i, &va, b);
+    /* MIPS: a word store to an address that is not a multiple of four
+     * traps, and a startup's word loops (define_firmware_symbols) run
+     * from __data_end and __bss_start to __bss_end. A .data that ended
+     * two bytes into a word sent the harness's .bss loop to the reset
+     * vector. Both ends are kept on word boundaries, the padding inside
+     * the image, as a GNU script's ALIGN(4) puts it. */
+    if (l->machine == EM_MIPS)
+        va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
     /* The part's flash is finite, and an image past its end does not fail
@@ -1616,6 +1624,8 @@ static void layout(struct linker *l, struct osec_bound *b,
         g->common = 0;
         va += g->size;
     }
+    if (l->machine == EM_MIPS)
+        va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
 }

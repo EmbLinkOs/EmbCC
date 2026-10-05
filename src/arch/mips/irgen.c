@@ -33,8 +33,12 @@ int irg_va_arg_mips(struct ir_func *fn, struct expr *e)
     long align = ty_align(rt);
     long step;
 
+    /* Every access here is natural (ir_ins.natural), so no lwl/lwr: the
+     * va_list is a pointer object, as aligned as its lvalue is, and each
+     * argument slot is a whole word, or eight bytes rounded to 8. */
     int apa = gen_addr(fn, e->lhs);
     int cur = emit_load(fn, apa, ptr);
+    irg_mark_natural(fn, e->lhs);
     int sdst = rt->kind == TY_STRUCT ? irg_va_struct_slot(fn, e) : -1;
 
     if (flt && rt->kind == TY_FLOAT) {          /* promoted to double */
@@ -54,12 +58,14 @@ int irg_va_arg_mips(struct ir_func *fn, struct expr *e)
         emit_store(fn, apa,
                    emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 4), 4, 1),
                    ptr);
+        irg_mark_natural(fn, e->lhs);
         if (sdst >= 0) {
             irg_va_copy(fn, sdst, 0, addr, ty_size(rt));
             return sdst;
         }
         if (flt) {
             int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
+            fn->ins[fn->nins - 1].natural = 1;
             if (rt->kind == TY_FLOAT) {
                 struct ir_ins *cv = emit(fn);
                 cv->op = IR_F2F;
@@ -71,7 +77,11 @@ int irg_va_arg_mips(struct ir_func *fn, struct expr *e)
             }
             return v;
         }
-        return emit_load(fn, addr, rt);
+        {
+            int v = emit_load(fn, addr, rt);
+            fn->ins[fn->nins - 1].natural = 1;
+            return v;
+        }
     }
 }
 
