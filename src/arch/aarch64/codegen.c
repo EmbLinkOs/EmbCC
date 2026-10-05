@@ -872,9 +872,25 @@ static void a64_lit_flush(struct code *t)
     g_nlit = g_nlitfix = 0;
 }
 
+/* An integer read of a value whose home is a v register: the cost rule
+ * (cg_float_vregs_by_cost) put a double that integer ops also read in the
+ * float class. fmov from d (eight bytes) or from s (its low four), then
+ * extended as a slot read would have been. */
+static void a64_int_from_freg(struct code *t, int reg, int vreg, int size,
+                              int sign, int w)
+{
+    a64_fmov_to_gpr(t, reg, g_a64_floc[vreg], size >= 8 ? 8 : 4);
+    if (!a64_ldvar_plain(size, sign, w))
+        a64_extend(t, reg, reg, size, sign, w);
+}
+
 static void ld_slot(struct code *t, const long *sd, int vreg, int reg,
                     int size, int sign, int w)
 {
+    if (a64_in_freg(vreg)) {
+        a64_int_from_freg(t, reg, vreg, size, sign, w);
+        return;
+    }
     if (a64_in_reg(vreg)) {
         int src = g_a64_loc[vreg];
         /* a64_ldvar_plain is the allocator's own question -- "is this
@@ -986,6 +1002,13 @@ static void fmove(struct code *t, const long *sd, int dst, int src, int w)
 static void st_slot(struct code *t, const long *sd, int vreg, int reg,
                     int size)
 {
+    if (a64_in_freg(vreg)) {
+        if (size < 8)
+            internal_error("aarch64: a %d-byte integer result for a value "
+                           "at home in a v register", size);
+        a64_fmov_from_gpr(t, g_a64_floc[vreg], reg, 8);
+        return;
+    }
     if (a64_in_reg(vreg)) {
         int dst = g_a64_loc[vreg];
         /* The register keeps the value at its natural width; a narrower
@@ -1065,6 +1088,10 @@ static int rd(struct code *t, const long *sd, int vreg, int scratch)
 {
     if (a64_in_reg(vreg))
         return g_a64_loc[vreg];
+    if (a64_in_freg(vreg)) {             /* a double read as its bits */
+        a64_fmov_to_gpr(t, scratch, g_a64_floc[vreg], 8);
+        return scratch;
+    }
     a64_ldr(t, scratch, FB, sd[vreg], 8, 0, 8);
     return scratch;
 }
@@ -1076,8 +1103,13 @@ static int wr(int vreg, int scratch)
 
 static void wrote(struct code *t, const long *sd, int vreg, int reg)
 {
-    if (!a64_in_reg(vreg))
-        a64_str(t, reg, FB, sd[vreg], 8);
+    if (a64_in_reg(vreg))
+        return;
+    if (a64_in_freg(vreg)) {             /* bits made into a double */
+        a64_fmov_from_gpr(t, g_a64_floc[vreg], reg, 8);
+        return;
+    }
+    a64_str(t, reg, FB, sd[vreg], 8);
 }
 
 /* `rd` at a requested width. A resident vreg whose register already
@@ -1095,6 +1127,10 @@ static int rd_ext(struct code *t, const long *sd, int vreg, int scratch,
         a64_extend(t, scratch, src, size, sign, w);
         return scratch;
     }
+    if (a64_in_freg(vreg)) {
+        a64_int_from_freg(t, scratch, vreg, size, sign, w);
+        return scratch;
+    }
     a64_ldr(t, scratch, FB, sd[vreg], size, sign, w);
     return scratch;
 }
@@ -1105,8 +1141,18 @@ static int rd_ext(struct code *t, const long *sd, int vreg, int scratch,
 static void wrote_n(struct code *t, const long *sd, int vreg, int reg,
                     int size)
 {
-    if (!a64_in_reg(vreg))
-        a64_str(t, reg, FB, sd[vreg], size);
+    if (a64_in_reg(vreg))
+        return;
+    if (a64_in_freg(vreg)) {
+        /* the cost rule gives a v-register home only to a value no
+         * narrow integer result is written to (cg_float_vregs_by_cost) */
+        if (size < 8)
+            internal_error("aarch64: a %d-byte integer result for a value "
+                           "at home in a v register", size);
+        a64_fmov_from_gpr(t, g_a64_floc[vreg], reg, 8);
+        return;
+    }
+    a64_str(t, reg, FB, sd[vreg], size);
 }
 
 /* The optimizer's folded constant, at this instruction's width. It is
@@ -1930,7 +1976,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * throughout, so it reports no registers to save and
              * `nfsave` is always 0 -- passed only because
              * ra_allocate_class wants somewhere to put an answer. */
-            g_a64_flt = cg_float_vregs(fn);
+            g_a64_flt = cg_float_vregs_by_cost(fn);
             g_a64_loc = ra_allocate(fn, rt, g_a64_wide, g_a64_flt,
                                     used_callee, &nsave);
             int fsave[A64_NFPOOL], nfsave = 0;

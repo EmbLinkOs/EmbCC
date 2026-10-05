@@ -666,6 +666,7 @@ static int apply_wl(struct link_opts *lo)
 
 static int compile(const char *in, const char *out, int pp_only);
 static int has_gas_suffix(const char *s);
+static int assemble_file(const char *in, const char *out);
 
 /* An object or an archive, which goes to the link as it is. */
 static int has_link_input_suffix(const char *p)
@@ -791,7 +792,7 @@ static int compile_and_link(const char *in, const char *out)
     int rc;
     if (in) {
         rc = has_gas_suffix(in)
-            ? gas_assemble(in, obj, has_gas_suffix(in) == 2)
+            ? assemble_file(in, obj)
             : compile(in, obj, 0);
         if (rc != 0)
             return rc;
@@ -1216,6 +1217,37 @@ static void naked_to_blocks(struct unit *u)
     }
 }
 
+/* EmbCC's own headers after every -I the caller gave, once, and marked
+ * system (compile_unit says why). */
+static int g_incdirs_done;
+static void incdirs_with_defaults(void)
+{
+    if (g_incdirs_done)
+        return;
+    g_incdirs_done = 1;
+    if (!no_stdinc) {
+        int ndef = 0;
+        const char *const *def = paths_default_includes(&ndef);
+        for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = def[k];
+        }
+    }
+    cpp_set_system_dirs(incdir_sys, nincdirs);
+}
+
+/* A `.s` or `.S` file. A `.S` is preprocessed with the same search path
+ * as C: the -I directories reached a C file's #include and not an
+ * assembly file's, so FreeRTOS's RISC-V portASM.S could not find the
+ * chip-specific header its build names with -I. */
+static int assemble_file(const char *in, const char *out)
+{
+    int kind = has_gas_suffix(in);
+    if (kind == 2)
+        incdirs_with_defaults();
+    return gas_assemble(in, out, kind == 2, incdirs, nincdirs);
+}
+
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
@@ -1229,15 +1261,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * parsing so that -nostdinc and the -I order both stay simple, and
      * they are marked system so a warning inside them is not the
      * caller's problem. */
-    if (!no_stdinc) {
-        int ndef = 0;
-        const char *const *def = paths_default_includes(&ndef);
-        for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
-            incdir_sys[nincdirs] = 1;
-            incdirs[nincdirs++] = def[k];
-        }
-    }
-    cpp_set_system_dirs(incdir_sys, nincdirs);
+    incdirs_with_defaults();
     char *pp = cpp_process(in, src, incdirs, nincdirs);
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
         write_deps(in, out);
@@ -4596,9 +4620,7 @@ int main(int argc, char **argv)
          * object under the output's name, an "image" no loader reads. */
         if (!compile_mode && !syntax_only && !want_asm && !want_iface)
             return done(compile_and_link(input, output));
-        return gas_assemble(input,
-                            output ? output : default_output(input),
-                            has_gas_suffix(input) == 2);
+        return assemble_file(input, output ? output : default_output(input));
     }
     if (has_asm_suffix(input)) {
         if (pp_only) {

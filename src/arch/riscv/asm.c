@@ -12,6 +12,7 @@
 
 #include "emit.h"
 #include "../target.h"
+#include "../asmexpr.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -140,17 +141,22 @@ static int split(const char *stmt, int len, struct tok *t, int max)
             break;
         t[n].s = stmt + i;
         /* An operand may be `off(reg)`, so a parenthesis is part of the
-         * token rather than a separator. */
+         * token rather than a separator. And past the mnemonic an operand
+         * runs to the next comma, spaces and all, as in GNU as: FreeRTOS's
+         * port writes `-( portCONTEXT_SIZE )` and `1 * 4( sp )`. */
         {
-            int depth = 0;
+            int depth = 0, operand = n > 0;
             while (i < len && (depth > 0 ||
-                   (!isspace((unsigned char)stmt[i]) && stmt[i] != ','))) {
+                   ((operand || !isspace((unsigned char)stmt[i])) &&
+                    stmt[i] != ','))) {
                 if (stmt[i] == '(') depth++;
                 else if (stmt[i] == ')') depth--;
                 i++;
             }
         }
         t[n].len = (int)(stmt + i - t[n].s);
+        while (t[n].len > 0 && isspace((unsigned char)t[n].s[t[n].len - 1]))
+            t[n].len--;
         if (t[n].len > 0)
             n++;
     }
@@ -164,11 +170,20 @@ static int tok_is(const struct tok *t, const char *s)
 
 static int tok_reg(const struct tok *t) { return rvasm_gpr(t->s, t->len); }
 
-/* A signed immediate. Accepts decimal and 0x, with an optional sign. */
+/* A signed immediate: decimal or 0x with an optional sign, or a constant
+ * expression (asmexpr.h). */
 static int tok_imm(const struct tok *t, long long *out)
 {
     int i = 0, neg = 0, base = 10, any = 0;
     long long v = 0;
+    /* An expression: anything past a leading sign that is not a digit of
+     * one number (`.+8`, a displacement, is the plain path below). */
+    if (t->len > 0 && t->s[0] != '.') {
+        for (int j = 0; j < t->len; j++)
+            if (strchr("()~<>|&^*/% ", t->s[j]) ||
+                (j > 0 && (t->s[j] == '+' || t->s[j] == '-')))
+                return asm_const_expr(t->s, t->len, out);
+    }
     /* `.+8` / `.-12`: a displacement from this instruction, which is
      * the standard spelling and the ONLY meaning a branch operand can
      * have here. This assembler sees no labels and does not know its
@@ -203,15 +218,31 @@ static int tok_imm(const struct tok *t, long long *out)
     return 1;
 }
 
-/* `off(reg)` or `(reg)`, as a load or store writes its address. */
+/* `off(reg)` or `(reg)`, as a load or store writes its address. The
+ * register is the LAST parenthesised group -- the offset may have its
+ * own parentheses, `(2 * 4)(sp)` -- and spaces may surround it. */
 static int tok_mem(const struct tok *t, int *reg, long long *off)
 {
-    const char *open = memchr(t->s, '(', (size_t)t->len);
+    const char *open = NULL;
     struct tok o, r;
-    if (!open || t->s[t->len - 1] != ')')
+    if (t->len < 3 || t->s[t->len - 1] != ')')
+        return 0;
+    {
+        int depth = 0;
+        for (const char *q = t->s + t->len - 1; q >= t->s; q--) {
+            if (*q == ')') depth++;
+            else if (*q == '(' && --depth == 0) { open = q; break; }
+        }
+    }
+    if (!open)
         return 0;
     o.s = t->s; o.len = (int)(open - t->s);
+    while (o.len > 0 && isspace((unsigned char)o.s[o.len - 1]))
+        o.len--;
     r.s = open + 1; r.len = (int)(t->s + t->len - 1 - (open + 1));
+    while (r.len > 0 && isspace((unsigned char)*r.s)) { r.s++; r.len--; }
+    while (r.len > 0 && isspace((unsigned char)r.s[r.len - 1]))
+        r.len--;
     *off = 0;
     if (o.len > 0 && !tok_imm(&o, off))
         return 0;
@@ -390,6 +421,12 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                                 t[1].len, t[1].s);
             if (csr < 0) FAIL("\"%.*s\" is not a CSR this assembler knows",
                               t[1].len, t[1].s);
+            /* An immediate makes it the immediate form, as GNU as reads
+             * it: FreeRTOS masks interrupts with `csrc mstatus, 8`. */
+            if (rs < 0 && tok_imm(&t[2], &imm) && imm >= 0 && imm < 32) {
+                emit_csr(out, e->f3 + 4, 0, (int)imm, (unsigned)csr);
+                return 0;
+            }
             if (rs < 0) FAIL("\"%.*s\" is not a register", t[2].len, t[2].s);
             /* rd = x0: the old value is discarded, which is what the
              * pseudo-instruction means. */
@@ -401,9 +438,14 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             rd = tok_reg(&t[1]);
             csr = csr_num(t[2].s, t[2].len);
             rs = tok_reg(&t[3]);
-            if (rd < 0 || rs < 0) FAIL("%s wants two registers", e->name);
             if (csr < 0) FAIL("\"%.*s\" is not a CSR this assembler knows",
                               t[2].len, t[2].s);
+            if (rd >= 0 && rs < 0 && tok_imm(&t[3], &imm) && imm >= 0 &&
+                imm < 32) {                       /* as csrw above */
+                emit_csr(out, e->f3 + 4, rd, (int)imm, (unsigned)csr);
+                return 0;
+            }
+            if (rd < 0 || rs < 0) FAIL("%s wants two registers", e->name);
             emit_csr(out, e->f3, rd, rs, (unsigned)csr);
             return 0;
         case 3:                                   /* csrwi csr, imm */
