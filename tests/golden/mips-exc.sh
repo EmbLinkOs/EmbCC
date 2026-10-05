@@ -43,14 +43,14 @@ for opt in -O0 -O1 -O2 -Os; do
         "$out/vector.o" || { echo "$opt: the image does not link"; exit 1; }
     # -icount: the timer counts instructions, not the host's time, so the
     # interrupts arrive at the same places however busy the machine is
-    tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" --until "==EXIT" \
+    tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" --until "==EXIT [0-9]* ==" \
         "$QEMU" -M malta -cpu 24Kc -m 64 -display none -monitor none \
         -serial null -serial null -serial stdio -no-reboot -icount shift=0 \
         -kernel "$out/t$opt.elf" > "$out/t$opt.out" 2>/dev/null
     got=$(head -1 "$out/t$opt.out" | sed 's/ *$//')
     if [ "$got" != "$want" ] || ! grep -q '==EXIT 42 ==' "$out/t$opt.out"; then
         echo "$opt: wanted \"$want\" and ==EXIT 42, got:"
-        cat "$out/t$opt.out"; exit 1
+        head -c 300 "$out/t$opt.out"; echo; exit 1
     fi
 done
 echo "a .S exception handler returns from syscall and the timer interrupt"
