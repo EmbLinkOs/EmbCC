@@ -861,7 +861,9 @@ Addresses are absolute: `lui` and `addiu` with `R_MIPS_HI16` and
 `R_MIPS_26`, so caller and callee must share a 256 MiB region, as they
 always do in a PIC32 or a KSEG0 image. Branches reach ±128 KiB; a branch
 in a function larger than that becomes an inverted branch over a `j`.
-Every branch delay slot holds a `nop`. A load or store the compiler
+Every branch and call delay slot holds a `nop`; a return's holds the
+release of the function's frame (`jr $ra` then `addiu $sp, $sp, N`), as
+clang's does. A load or store the compiler
 cannot prove aligned (a packed structure's member) uses `lwl`/`lwr` and
 `swl`/`swr`, because a misaligned word access traps.
 

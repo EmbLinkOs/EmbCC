@@ -49,10 +49,10 @@ reference, as there is no MIPS gcc here.
 Every branch and jump executes the instruction after it, the delay slot,
 before the transfer happens. The first backend fills every delay slot with
 a `nop` (`sll $0, $0, 0`), so the code is correct by construction and
-each transfer costs 8 bytes. Filling the slot -- moving an independent
-instruction from before the branch into it, or the epilogue's `addiu sp`
-into the `jr ra` slot as clang does -- is an optimization for after the
-exec corpus passes, and needs its own proof that the moved instruction
+each transfer costs 8 bytes. The epilogue's `addiu sp` now fills the
+`jr ra` slot, as clang's does (after the exec corpus passed). Filling the
+other slots -- moving an independent instruction from before the branch
+into it -- is an optimization still to do, and needs its own proof that the moved instruction
 neither feeds the branch condition nor is a branch itself. MIPS32 has no
 load delay slots, and Release 1 removed the HI/LO hazards, so there is
 nothing else to schedule around.

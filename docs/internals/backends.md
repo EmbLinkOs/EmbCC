@@ -1148,9 +1148,12 @@ differences below.
 
 ### Lowering
 
-- **Delay slots.** Every branch, jump, call and return is followed by a
-  `nop` (`br_place`, `branch_to`, `call_sym`), so nothing scheduled into a
-  slot can be wrong. MIPS32 has no load delay slots and no HI/LO hazards.
+- **Delay slots.** Every branch, jump and call is followed by a `nop`
+  (`br_place`, `branch_to`, `call_sym`), so nothing scheduled into a
+  slot can be wrong. The one filled slot is the return's: `mips_restore`
+  emits `jr $ra` before the frame's `addiu $sp, $sp, N`, which then runs
+  in the slot (a frame too large for 16 bits keeps `li`/`addu` before the
+  `jr` and a `nop` after). MIPS32 has no load delay slots and no HI/LO hazards.
 - **Branches** compare two registers only for `==` and `!=`; an ordered
   comparison against zero has `bltz`/`bgez`/`blez`/`bgtz`, and anything
   else is `slt`/`sltu` into `$at` and a `beq`/`bne` of it (`branch_if`).
