@@ -49,6 +49,8 @@
 
 struct rv_fn;
 static void copy_block(struct rv_fn *F, int copy, long size, int step);
+static void copy_block_at(struct rv_fn *F, int copy, long size, int step,
+                          int sreg, long soff, int dreg, long doff);
 
 /* The scratch registers. Four named ones, because a 64-bit value at RV32
  * is a pair and a binary operation on two of them needs four; t5 and t6
@@ -1633,25 +1635,6 @@ static int cmp_imm_to_reg(struct rv_fn *F, enum binop pred, int sign,
  * addition wrapped. That is the whole trick, and it is why these
  * sequences are a little longer than ARM's adds/adcs.
  */
-static void add64(struct rv_fn *F)
-{
-    struct code *t = F->t;
-    rv_alu(t, RV_ADD, SCR, A_LO, B_LO, 0);
-    rv_alu(t, RV_SLTU, SCR2, SCR, B_LO, 0);      /* did it wrap? */
-    rv_mv(t, A_LO, SCR);
-    rv_alu(t, RV_ADD, A_HI, A_HI, B_HI, 0);
-    rv_alu(t, RV_ADD, A_HI, A_HI, SCR2, 0);
-}
-
-static void sub64(struct rv_fn *F)
-{
-    struct code *t = F->t;
-    rv_alu(t, RV_SLTU, SCR2, A_LO, B_LO, 0);     /* will it borrow? */
-    rv_alu(t, RV_SUB, A_LO, A_LO, B_LO, 0);
-    rv_alu(t, RV_SUB, A_HI, A_HI, B_HI, 0);
-    rv_alu(t, RV_SUB, A_HI, A_HI, SCR2, 0);
-}
-
 /* A shift of a 64-bit value by a CONSTANT amount. */
 static void shift64_imm(struct rv_fn *F, int op, int sign, long n)
 {
@@ -1953,18 +1936,40 @@ static int gen_ins64(struct rv_fn *F, int n)
             wr64(F, i->dst, A_LO, A_HI);
         }
         return 1;
-    case IR_ADD:
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
-        add64(F);
-        wr64(F, i->dst, A_LO, A_HI);
+    case IR_ADD: case IR_SUB: {
+        /* Operands where they live and the result where it lives, as
+         * the logic operations below: through A and B a pair-to-pair add
+         * was eight moves around five instructions. The carry (borrow)
+         * is computed from the low words before the low result can
+         * overwrite one of them; the low result waits in SCR only when
+         * its register is still to be read. */
+        int al, ah, bl, bh, dl, dh;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        if (i->imm_b) {
+            operand_b64(F, i, B_LO, B_HI);
+            bl = B_LO; bh = B_HI;
+        } else {
+            src64(F, i->b, B_LO, B_HI, &bl, &bh);
+        }
+        dst64(F, i->dst, &dl, &dh);
+        int lo = dl == ah || dl == bh || (i->op == IR_ADD && dl == bl)
+                     ? SCR : dl;
+        if (i->op == IR_ADD) {
+            rv_alu(t, RV_ADD, lo, al, bl, 0);
+            rv_alu(t, RV_SLTU, SCR2, lo, bl, 0);     /* did it wrap? */
+            rv_alu(t, RV_ADD, dh, ah, bh, 0);
+            rv_alu(t, RV_ADD, dh, dh, SCR2, 0);
+        } else {
+            rv_alu(t, RV_SLTU, SCR2, al, bl, 0);     /* will it borrow? */
+            rv_alu(t, RV_SUB, lo, al, bl, 0);
+            rv_alu(t, RV_SUB, dh, ah, bh, 0);
+            rv_alu(t, RV_SUB, dh, dh, SCR2, 0);
+        }
+        if (lo != dl)
+            rv_mv(t, dl, lo);
+        wr64(F, i->dst, dl, dh);
         return 1;
-    case IR_SUB:
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
-        sub64(F);
-        wr64(F, i->dst, A_LO, A_HI);
-        return 1;
+    }
     case IR_AND: case IR_OR: case IR_XOR: {
         /* Each half on its own: operands where they live, result where it
          * lives. */
@@ -2046,12 +2051,18 @@ static int gen_ins64(struct rv_fn *F, int n)
     case IR_EXT:
         /* Widening TO 64 bits: the low word is the value, the high word
          * is its sign or zero. */
-        rd(F, i->a, A_LO);
-        if (i->size < 4)
-            ext_reg(F, A_LO, A_LO, i->size, i->sign);
-        if (i->sign) rv_shift_imm(t, RV_SRA, A_HI, A_LO, 31, 0, 32);
-        else         rv_mv(t, A_HI, RV_ZERO);
-        wr64(F, i->dst, A_LO, A_HI);
+        {
+            /* From where it lives into the destination's own pair. */
+            int s = rdr(F, i->a, A_LO), dl, dh;
+            dst64(F, i->dst, &dl, &dh);
+            if (i->size < 4)
+                ext_reg(F, dl, s, i->size, i->sign);
+            else if (dl != s)
+                rv_mv(t, dl, s);
+            if (i->sign) rv_shift_imm(t, RV_SRA, dh, dl, 31, 0, 32);
+            else         rv_mv(t, dh, RV_ZERO);
+            wr64(F, i->dst, dl, dh);
+        }
         return 1;
     /* These four reach here when EITHER side is 64 bits, and only one
      * of them has to be: `*(unsigned *)p = (unsigned)(v >> i)` is a
@@ -2064,6 +2075,16 @@ static int gen_ins64(struct rv_fn *F, int n)
      * low word, and a narrower read extends into the high one. */
     case IR_LDVAR:
         if (i->size == 8) {
+            /* Straight between the two homes, as IR_MOV does: through
+             * A, a pair-to-pair read was four moves. */
+            if (in_reg(F, i->dst)) {
+                rd64(F, i->a, F->loc[i->dst], F->loc[i->dst] + 1);
+                return 1;
+            }
+            if (in_reg(F, i->a)) {
+                wr64(F, i->dst, F->loc[i->a], F->loc[i->a] + 1);
+                return 1;
+            }
             rd64(F, i->a, A_LO, A_HI);       /* the local, slot or pair */
         } else {
             if (in_reg(F, i->a))
@@ -2076,6 +2097,14 @@ static int gen_ins64(struct rv_fn *F, int n)
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_STVAR:
+        if (i->size == 8 && in_reg(F, i->dst)) {     /* as IR_LDVAR */
+            rd64(F, i->a, F->loc[i->dst], F->loc[i->dst] + 1);
+            return 1;
+        }
+        if (i->size == 8 && in_reg(F, i->a)) {
+            wr64(F, i->dst, F->loc[i->a], F->loc[i->a] + 1);
+            return 1;
+        }
         rd64(F, i->a, A_LO, A_HI);
         if (i->size == 8)
             wr64(F, i->dst, A_LO, A_HI);
@@ -2084,25 +2113,38 @@ static int gen_ins64(struct rv_fn *F, int n)
         else if (F->slot[i->dst] >= 0)
             st_sp(F, A_LO, sslot(F, i->dst), i->size);
         return 1;
-    case IR_LOAD:
-        rd(F, i->a, ADDR);
+    case IR_LOAD: {
+        /* The address where it lives, and the words straight into the
+         * destination's pair: through ADDR and A, a 64-bit load from a
+         * pointer in a register was two moves and the loads and two
+         * moves more. A destination whose low register IS the address
+         * takes the high word first. */
+        int ra_ = rdr(F, i->a, ADDR), dl, dh;
+        dst64(F, i->dst, &dl, &dh);
         if (i->size == 8) {
-            rv_load(t, A_LO, ADDR, 0, 4, 1, F->xlen);
-            rv_load(t, A_HI, ADDR, 4, 4, 1, F->xlen);
+            if (dl == ra_) {
+                rv_load(t, dh, ra_, 4, 4, 1, F->xlen);
+                rv_load(t, dl, ra_, 0, 4, 1, F->xlen);
+            } else {
+                rv_load(t, dl, ra_, 0, 4, 1, F->xlen);
+                rv_load(t, dh, ra_, 4, 4, 1, F->xlen);
+            }
         } else {
-            rv_load(t, A_LO, ADDR, 0, i->size, i->sign, F->xlen);
-            if (i->sign) rv_shift_imm(t, RV_SRA, A_HI, A_LO, 31, 0, 32);
-            else         rv_mv(t, A_HI, RV_ZERO);
+            rv_load(t, dl, ra_, 0, i->size, i->sign, F->xlen);
+            if (i->sign) rv_shift_imm(t, RV_SRA, dh, dl, 31, 0, 32);
+            else         rv_mv(t, dh, RV_ZERO);
         }
-        wr64(F, i->dst, A_LO, A_HI);
+        wr64(F, i->dst, dl, dh);
         return 1;
-    case IR_STORE:
-        rd(F, i->a, ADDR);
-        rd64(F, i->b, A_LO, A_HI);
-        rv_store(t, A_LO, ADDR, 0, i->size == 8 ? 4 : i->size, F->xlen);
+    }
+    case IR_STORE: {
+        int ra_ = rdr(F, i->a, ADDR), vl, vh;
+        src64(F, i->b, A_LO, A_HI, &vl, &vh);
+        rv_store(t, vl, ra_, 0, i->size == 8 ? 4 : i->size, F->xlen);
         if (i->size == 8)
-            rv_store(t, A_HI, ADDR, 4, 4, F->xlen);
+            rv_store(t, vh, ra_, 4, 4, F->xlen);
         return 1;
+    }
     case IR_SELECT: {
         int take_c, done;
         if (i->size == 8 && rv_wide_imm()) {   /* either half, in place */
@@ -2239,13 +2281,14 @@ static void gen_call(struct rv_fn *F, int n)
         copy_at = (copy_at + 15) & ~15L;
         pl[k].copy = copy_at;
         if (a->is_struct) {
-            rd(F, a->vreg, TMP);         /* its address */
+            int s = rdr(F, a->vreg, TMP);    /* its address */
+            copy_block_at(F, 1, a->size, byref_step(F->w, a), s, 0,
+                          F->fb, copy_at);
         } else {
             need16(F, a->vreg);          /* RV32's long double: its slot */
-            addr_sp(F, TMP, sslot(F, a->vreg));
+            copy_block_at(F, 1, a->size, byref_step(F->w, a), F->fb,
+                          sslot(F, a->vreg), F->fb, copy_at);
         }
-        addr_sp(F, ADDR, copy_at);
-        copy_block(F, 1, a->size, byref_step(F->w, a));
         copy_at += a->size;
     }
 
@@ -3143,9 +3186,38 @@ static void gen_ins(struct rv_fn *F, int n)
         if (i->op == IR_CMP) {
             fp_args2(F, i);
             call_helper(F, fp_cmp_name(i->pred, i->w));
-            rv_mv(t, TMP, RV_A0);
-            cmp_to_reg(F, i->pred, 1, TMP, RV_ZERO, ACC);
-            wr(F, i->dst, ACC);
+            /* The helper's int is the answer's sign (fp_cmp_name). Read
+             * only by the branch after it, it IS the branch: `bltz a0`
+             * where the 0 or 1 was built in t0, moved home and tested. */
+            if (n + 1 < F->fn->nins && F->usecnt && i->dst >= 0 &&
+                F->usecnt[i->dst] == 1) {
+                struct ir_ins *nx = &F->fn->ins[n + 1];
+                if ((nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
+                    nx->a == i->dst) {
+                    int cond, r1 = RV_A0, r2 = RV_ZERO;
+                    switch (i->pred) {
+                    case B_EQ: cond = RV_BEQ; break;
+                    case B_NE: cond = RV_BNE; break;
+                    case B_LT: cond = RV_BLT; break;
+                    case B_GE: cond = RV_BGE; break;
+                    case B_GT: cond = RV_BLT; r1 = RV_ZERO; r2 = RV_A0; break;
+                    default:   cond = RV_BGE; r1 = RV_ZERO; r2 = RV_A0; break;
+                    }
+                    if (nx->op == IR_BRZ)
+                        cond = invert_branch(cond);
+                    branch_if(F, cond, r1, r2, nx->label);
+                    F->skip_next = 1;
+                    return;
+                }
+            }
+            /* Otherwise from a0 straight into the destination: each
+             * cmp_to_reg form reads its operands in its first
+             * instruction, so the destination may be a0 itself. */
+            {
+                int d = wreg(F, i->dst, ACC);
+                cmp_to_reg(F, i->pred, 1, RV_A0, RV_ZERO, d);
+                wrote(F, i->dst, d);
+            }
             return;
         }
         if (i->op == IR_SQRT)
@@ -3613,12 +3685,12 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
 
-    case IR_MEMCPY: case IR_MEMZERO:
-        rd(F, i->a, ADDR);
-        if (i->op == IR_MEMCPY)
-            rd(F, i->b, TMP);
-        copy_block(F, i->op == IR_MEMCPY, i->size, F->w);
+    case IR_MEMCPY: case IR_MEMZERO: {
+        int d = rdr(F, i->a, ADDR);
+        int s = i->op == IR_MEMCPY ? rdr(F, i->b, TMP) : RV_ZERO;
+        copy_block_at(F, i->op == IR_MEMCPY, i->size, F->w, s, 0, d, 0);
         return;
+    }
 
     case IR_CALL:
         gen_call(F, n);
@@ -4209,6 +4281,51 @@ static void copy_block(struct rv_fn *F, int copy, long size, int step)
     }
 }
 
+/* copy_block from [sreg + soff] to [dreg + doff] with those registers as
+ * the bases, when every offset fits a load's or store's immediate: a
+ * struct or long double whose address is already in a register, or whose
+ * home is a frame slot, was first moved into TMP and ADDR -- a by-value
+ * parameter's copy into its slot was `mv t1, a1; addi t2, sp, 48` before
+ * its first word. Otherwise the addresses go to TMP and ADDR, and
+ * copy_block does the rest. sreg and dreg are left as they were. */
+static void copy_block_at(struct rv_fn *F, int copy, long size, int step,
+                          int sreg, long soff, int dreg, long doff)
+{
+    struct code *t = F->t;
+    if (size <= 2040 && rv_fits(doff, 12) && rv_fits(doff + size, 12) &&
+        (!copy || (rv_fits(soff, 12) && rv_fits(soff + size, 12)))) {
+        /* the data register: SCR, unless a base is (param_reg's is) */
+        int dr = sreg == SCR || dreg == SCR ? SCR2 : SCR;
+        long k;
+        for (k = 0; k + step <= size; k += step) {
+            if (copy) rv_load(t, dr, sreg, (int)(soff + k), step, 0, F->xlen);
+            rv_store(t, copy ? dr : RV_ZERO, dreg, (int)(doff + k), step,
+                     F->xlen);
+        }
+        for (; k < size; k++) {
+            if (copy) rv_load(t, dr, sreg, (int)(soff + k), 1, 0, F->xlen);
+            rv_store(t, copy ? dr : RV_ZERO, dreg, (int)(doff + k), 1,
+                     F->xlen);
+        }
+        return;
+    }
+    if (copy) {
+        if (rv_fits(soff, 12)) {
+            rv_alu_imm(t, RV_ADD, TMP, sreg, (int)soff, 0);
+        } else {
+            rv_li(t, TMP, soff, F->xlen);
+            rv_alu(t, RV_ADD, TMP, sreg, TMP, 0);
+        }
+    }
+    if (rv_fits(doff, 12)) {
+        rv_alu_imm(t, RV_ADD, ADDR, dreg, (int)doff, 0);
+    } else {
+        rv_li(t, ADDR, doff, F->xlen);
+        rv_alu(t, RV_ADD, ADDR, dreg, ADDR, 0);
+    }
+    copy_block(F, copy, size, step);
+}
+
 /* A parameter's qth incoming word, in a register ready to store.
  *
  * Normally that is the argument register itself. In a VARIADIC function
@@ -4668,10 +4785,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                  * would make a struct parameter's slot sometimes hold an
                  * object and sometimes an address, which is how u20()
                  * came to print a stack address where it meant 190. */
-                if (pl.nreg) rv_mv(t, TMP, param_reg(&F, &pl, 0));
-                else         ld_sp(&F, TMP, base + pl.stk, F.w, 1);
-                addr_sp(&F, ADDR, sslot(&F, i));
-                copy_block(&F, 1, a->size, byref_step(F.w, a));
+                {
+                    int src = TMP;
+                    if (pl.nreg) src = param_reg(&F, &pl, 0);
+                    else         ld_sp(&F, TMP, base + pl.stk, F.w, 1);
+                    copy_block_at(&F, 1, a->size, byref_step(F.w, a),
+                                  src, 0, F.fb, sslot(&F, i));
+                }
                 continue;
             }
             /* A SCALAR occupies whole registers and a whole slot: store
