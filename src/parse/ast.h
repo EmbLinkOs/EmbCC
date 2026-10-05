@@ -358,6 +358,10 @@ struct func {
      * own `inline` and `extern` (gnu_inline: `extern inline` is the
      * inline-only form) */
     int inl_ext, def_inline, def_extern;
+    /* sema, canonical node: SOME declaration said `inline` -- what
+     * makes it an inline function (C11 6.7.4p7), whichever declaration
+     * defines it; -fno-inline-functions inlines only these */
+    int any_inline;
     const char *vis;
     /* __attribute__((format(printf|scanf, idx, first))): 1 printf,
      * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */

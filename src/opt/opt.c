@@ -11122,6 +11122,15 @@ static int sole_static_caller(struct ir_unit *iu, struct func *c)
  * at every level, -finline-functions-called-once). */
 static int g_inline_o1;
 
+/* -fno-inline-functions: only a function its author declared `inline`
+ * (or always_inline) is a candidate, at any level -- the sole-caller and
+ * small-function cases included, which GCC's flag leaves to two others.
+ * One flag that means "what I did not mark stays a call" is the one a
+ * build can rely on: for a breakpoint, a stack-usage figure, a symbol
+ * in the map file. */
+static int g_inline_declared_only;
+void opt_set_inline_declared_only(int on) { g_inline_declared_only = on; }
+
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
 static void inline_unit(struct ir_unit *iu)
 {
@@ -11153,6 +11162,10 @@ static void inline_unit(struct ir_unit *iu)
                     why = "callee-is-noinline";
                 else if (in->callee->is_weak)
                     why = "callee-is-weak";   /* the link may replace it */
+                else if (g_inline_declared_only &&
+                         !in->callee->attr_always_inline &&
+                         !in->callee->any_inline)
+                    why = "not-declared-inline";  /* -fno-inline-functions */
                 else {
                     sole = sole_static_caller(iu, in->callee);
                     if (g_inline_o1 && !in->callee->attr_always_inline &&

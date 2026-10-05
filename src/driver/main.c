@@ -109,6 +109,7 @@ static void print_options(FILE *out)
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
       "  -fno-access-control          do not enforce private/protected\n"
       "  -fno-jump-tables             no switch through a table of addresses\n"
+      "  -fno-inline-functions        inline only what is declared inline\n"
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
@@ -4123,6 +4124,16 @@ int main(int argc, char **argv)
              * backend -- each lowers only the IR_SWITCH irgen made --
              * keeps it; a dense switch becomes the compare tree. */
             target_set_jump_tables(argv[i][2] == 'j');
+        } else if (strcmp(argv[i], "-fno-inline-functions") == 0 ||
+                   strcmp(argv[i], "-finline-functions") == 0) {
+            /* GCC's "consider every function for inlining, not only
+             * those declared inline": the -O2 default here too. The
+             * negative is honoured -- the inliner then takes only
+             * functions declared `inline` (or always_inline), at any
+             * level -- because a build asking for it usually wants
+             * each function it wrote to stay a function it can find
+             * in the image. */
+            opt_set_inline_declared_only(argv[i][2] == 'n');
         } else if (strcmp(argv[i], "-finline-small-functions") == 0 ||
                    strcmp(argv[i], "-fno-inline-small-functions") == 0 ||
                    strncmp(argv[i], "-finline-limit=", 15) == 0 ||
