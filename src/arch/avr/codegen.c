@@ -219,6 +219,7 @@ struct a_fn {
      * can change through a pointer to it. -1 when nothing. */
     int zv;
     long zat;
+    long zscan;          /* z_holds has seen [zat, zscan) leave Z alone */
     /* Per instruction: an IR_CALL that may be a TAIL call (a_tail_ok) --
      * made one when, too, no argument register is one the epilogue pops.
      * NULL when there are none. */
@@ -1455,12 +1456,24 @@ static int is_remat(const struct a_fn *F, int v)
 
 static void vld_raw(struct a_fn *F, int r, int v, long off, int n);
 
+/* Does Z still hold v, nothing emitted since it was loaded having written
+ * it? Each question decodes only what was emitted since the last one:
+ * re-reading everything from the load made a pointer kept in Z across a
+ * long function -- a global read at every statement -- quadratic, and an
+ * -O2 function of 2000 statements spent most of its time here. What was
+ * already read stays read: nothing rewrites an instruction in place but
+ * to patch a branch's distance or an ldi's constant, which leaves the
+ * register it writes as it was; and a rewind of the code below what was
+ * read starts the reading over. */
 static int z_holds(struct a_fn *F, int v)
 {
     struct code *t = F->t;
     if (F->zv < 0 || F->zv != v)
         return 0;
-    for (long p = F->zat; p < t->len; ) {
+    long p = F->zscan;
+    if (p < F->zat || p > t->len)
+        p = F->zat;
+    while (p < t->len) {
         int len;
         if (avr_insn_writes(t->p + p, t->len - p, &len) & (3UL << AVR_Z)) {
             F->zv = -1;
@@ -1468,6 +1481,7 @@ static int z_holds(struct a_fn *F, int v)
         }
         p += len;
     }
+    F->zscan = p;
     return 1;
 }
 
@@ -1479,7 +1493,7 @@ static void vld(struct a_fn *F, int r, int v, long off, int n)
     vld_raw(F, r, v, off, n);
     if (zc) {
         F->zv = v;
-        F->zat = F->t->len;
+        F->zat = F->zscan = F->t->len;
     }
 }
 
