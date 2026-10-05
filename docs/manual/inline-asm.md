@@ -1012,6 +1012,14 @@ the start of the instruction, written `.+N`, `.-N` or as a bare number;
 every branch uses the 32-bit encoding. Labels are not accepted (`1:` is
 reported as an unknown instruction).
 
+An immediate (`#...`), including a memory operand's offset, may be a
+constant expression, as in GNU as: C's integer literals (decimal, `0x`,
+`0b`, octal, with `u`/`l` suffixes) and operators (`~ * / % + - << >> &
+^ |`) with parentheses. It runs to the next comma, so spaces are allowed:
+FreeRTOS's Cortex-M4F port enables the FPU with
+`orr r1, r1, #( 0xf << 20 )`. A symbol in an immediate is not evaluated
+and is refused, as is a value the instruction cannot encode.
+
 ### Instructions
 
 | Instruction | Operands |

@@ -655,6 +655,110 @@ void exit_qemu(int code)
 On real hardware a `bkpt` with no debugger attached escalates to a
 HardFault; remove semihosting calls from production images.
 
+### An RTOS kernel
+
+What a preemptive kernel on Cortex-M asks of its compiler, and where
+EmbCC provides it:
+
+| The kernel needs | EmbCC |
+|---|---|
+| A context switch with no prologue (PendSV) | `__attribute__((naked))` with a basic `asm` body, or file-scope `asm`; see [Naked functions](inline-asm.md#naked-functions) |
+| Critical sections on `BASEPRI` or `PRIMASK` | extended `asm` with `msr`/`mrs`; an `always_inline` wrapper inlines, and its operands live in registers |
+| Handlers for SysTick, PendSV and SVC | ordinary functions (see [Interrupt handlers](#interrupt-handlers)) in the vector table |
+| The vector table at the reset address | a `const` array with `__attribute__((section(".isr_vector"), used))` and a linker script (`-T`) |
+| 64-bit division (tick conversions) | the compiler runtime, `librt.a`, which the driver links |
+| A stack size for each task | `-fstack-usage` (see [Sizing the stack](#sizing-the-stack--fstack-usage)) |
+
+#### FreeRTOS as the worked example
+
+FreeRTOS's kernel and its GCC Cortex-M ports compile unmodified, and run
+on QEMU at `-O0`, `-O1`, `-O2` and `-Os` (tasks, a queue, a mutex, a
+software timer and time slicing; on the FPU parts, two tasks doing
+floating-point arithmetic through every switch):
+
+| Port | Target | QEMU board | Test |
+|---|---|---|---|
+| `ARM_CM3` | `thumbv7m-none-eabi` | `lm3s6965evb` | `freertos-cm3.sh` |
+| `ARM_CM4F` | `thumbv7em-none-eabihf -mfpu=fpv4-sp-d16` | `mps2-an386` | `freertos-ports.sh` |
+| `ARM_CM7/r0p1` | `thumbv7em-none-eabihf -mfpu=fpv4-sp-d16` | `mps2-an500` | `freertos-ports.sh` |
+| `ARM_CM33_NTZ/non_secure` | `thumbv8m.main-none-eabihf` | `mps2-an505` | `freertos-ports.sh` |
+| `RISC-V` (CLINT timer) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | `virt` | `freertos-ports.sh` |
+
+The files the Cortex-M3 test uses, in `tests/golden/freertos-cm3/`, are a
+starting point for a board of your own (`tests/golden/freertos-ports/`
+has the same for the MPS2 boards):
+
+- `FreeRTOSConfig.h`, whose interrupt priorities must match the part:
+  `configPRIO_BITS` is 3 on the LM3S6965 and 4 on most STM32 parts, and
+  `configMAX_SYSCALL_INTERRUPT_PRIORITY` is shifted by `8 - configPRIO_BITS`;
+- `startup.c`, whose vector table sends SVC to `vPortSVCHandler`, PendSV
+  to `xPortPendSVHandler` and SysTick to `xPortSysTickHandler`;
+- `lm3s.ld`, the memory map.
+
+With `K` the FreeRTOS-Kernel directory and the three files above in
+`board/`:
+
+```sh
+CF="--target=thumbv7m-none-eabi -Os -Iboard -I$K/include -I$K/portable/GCC/ARM_CM3"
+for f in board/startup.c main.c $K/tasks.c $K/queue.c $K/list.c $K/timers.c \
+         $K/portable/MemMang/heap_4.c $K/portable/GCC/ARM_CM3/port.c; do
+    embcc $CF -c "$f" -o "$(basename "$f" .c).o"
+done
+embcc --target=thumbv7m-none-eabi -T board/lm3s.ld *.o -o fw.elf
+qemu-system-arm -M lm3s6965evb -cpu cortex-m3 -nographic -kernel fw.elf
+```
+
+For a Cortex-M4F, use `--target=thumbv7em-none-eabihf -mfpu=fpv4-sp-d16`
+and the `ARM_CM4F` port, whose PendSV handler also saves `s16`-`s31`; the
+startup code must enable the FPU (`CPACR`) before `main` when anything
+before the scheduler may use it. The ARMv8-M ports name their handlers
+as CMSIS does (`SVC_Handler`, `PendSV_Handler`, `SysTick_Handler`), and
+want `configENABLE_FPU`, `configENABLE_MPU`, `configENABLE_TRUSTZONE` and
+`configRUN_FREERTOS_SECURE_ONLY` set in `FreeRTOSConfig.h`.
+
+The RISC-V port is `port.c` and `portASM.S`, compiled with `-I` naming its
+chip-specific directory (`chip_specific_extensions/RISCV_MTIME_CLINT_no_extensions`
+for a CLINT timer). Its `FreeRTOSConfig.h` gives the timer's addresses
+(`configMTIME_BASE_ADDRESS`, `configMTIMECMP_BASE_ADDRESS`; on QEMU's
+`virt` `0x0200BFF8` and `0x02004000`), and `configCPU_CLOCK_HZ` is the
+timer's rate, 10 MHz there. The startup points `mtvec` at
+`freertos_risc_v_trap_handler` before calling `main` (see
+`tests/golden/freertos-ports/riscv-start.S`).
+
+Under QEMU, add `-icount shift=2` when the program measures time:
+without it SysTick follows the host's clock, and a loaded host delivers
+fewer ticks than the guest's code expects.
+
+#### Writing your own
+
+The port's three hard parts are the same for any kernel:
+
+- **The context switch.** A naked PendSV handler saves `r4`-`r11` (and,
+  with an FPU, `s16`-`s31` when `lr` says the task used it) on the
+  process stack, stores the stack pointer in the current task's control
+  block, calls the scheduler with interrupts masked, and restores the
+  next task the same way. Nothing in a naked function may need a frame:
+  only basic `asm` is allowed in its body, and EmbCC refuses anything
+  else by name.
+- **Critical sections.** Raise `BASEPRI` rather than masking everything,
+  so that interrupts above the kernel's priority still run:
+
+  ```c
+  static inline __attribute__((always_inline)) unsigned raise_basepri(void)
+  {
+      unsigned old, pri = 5 << (8 - 3);
+      __asm__ volatile("mrs %0, basepri\n\tmsr basepri, %1\n\tisb\n\tdsb"
+                       : "=r"(old) : "r"(pri) : "memory");
+      return old;
+  }
+  ```
+
+  The `"memory"` clobber is what keeps the compiler from moving loads
+  and stores of shared data across the boundary.
+- **Shared data.** A flag or counter an interrupt writes is `volatile`;
+  a structure the kernel protects with a critical section is not, and
+  must not need to be.
+
 ## RISC-V
 
 ### The target
