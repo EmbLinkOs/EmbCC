@@ -632,7 +632,8 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_NO_MEMOFF`, `EMBCC_NO_RMW`, `EMBCC_NO_MLA`, `EMBCC_NO_SPLITLOOPS`, `EMBCC_NO_TAILCALL`, `EMBCC_NO_LKCONST` | turn off one transformation (constant offsets folded into loads and stores on Thumb and RISC-V; x86-64 read-modify-write fusion; multiply-accumulate fusion on aarch64 and Thumb; loop live-range splitting; tail calls on aarch64, Thumb and RISC-V; compares decided from a constant the block has just written) for bisecting |
 | `EMBCC_RV_JAL_RANGE=BYTES`, `EMBCC_RV_LONG_CALLS` | shrink the reach the RISC-V backend assumes for `jal`, or (when set) call functions in the same unit with `auipc`+`jalr` instead of `jal`, to test the long-call path without a megabyte of code |
 | `EMBCC_T_FPU` | `1` or `0` overrides whether the Thumb backend uses the FPU |
-| `EMBCC_T_NOWIDEIMM`, `EMBCC_RV_NOWIDEIMM`, `EMBCC_NO_SIGNTEST`, `EMBCC_RV_NOCMPIMM` | build a 64-bit constant whole on Thumb or RV32; keep `x >> 63` a shift, and `x & K` eight bytes wide, before a branch; load a RISC-V value compare's constant into a register; for bisecting |
+| `EMBCC_T_EXT` | `1` keeps a Thumb attempt with r9-r11 in the pool whenever its scratch roles found registers, `0` never tries one; unset, it competes on size with the others. tests/golden/thumb-ext-pool.sh runs the exec programs with `1`. |
+| `EMBCC_T_NOWIDEIMM`, `EMBCC_T_NOCMP64IMM`, `EMBCC_RV_NOWIDEIMM`, `EMBCC_NO_SIGNTEST`, `EMBCC_RV_NOCMPIMM` | build a 64-bit constant whole on Thumb or RV32; keep `x >> 63` a shift, and `x & K` eight bytes wide, before a branch; load a RISC-V value compare's constant into a register; for bisecting |
 | `EMBCC_VECDEBUG` | the vectorizer prints, on stderr, each loop it considers and why it rejected it |
 | `EMBCC_NO_FULLUNROLL` | a loop with a constant trip count is unrolled like any other instead of being copied whole, for bisecting |
 
