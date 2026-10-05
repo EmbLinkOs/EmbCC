@@ -852,8 +852,9 @@ is that instruction, and its result is correctly rounded:
 | x86-64 | `float`, `double` (`sqrtss`, `sqrtsd`) |
 | AArch64 | `float`, `double` (`fsqrt`) |
 | Cortex-M with the FPU enabled (`-eabihf` triples, or `-mfpu=` with `-mfloat-abi=softfp` or `hard`) | `float` (`vsqrt.f32`) |
+| Cortex-M7 with `-mfpu=fpv5-d16` (or `-mcpu=cortex-m7` with an `-eabihf` triple) | `float`, `double` (`vsqrt.f32`, `vsqrt.f64`) |
 
-Everywhere else -- a `double` on a Cortex-M FPU, soft-float Cortex-M,
+Everywhere else -- a `double` on a single-precision Cortex-M FPU, soft-float Cortex-M,
 RISC-V, AVR, and a 16-byte `long double` -- the builtin is a call to
 `sqrt`, `sqrtf` or `sqrtl`, as with GCC, and the program must link a
 math library that defines it. The precision is then that library's;

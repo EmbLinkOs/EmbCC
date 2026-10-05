@@ -324,6 +324,14 @@ int t_ldr_lit16(struct code *c, int rt, long off);
 int t_ldr_const(struct code *c, int rd, unsigned long v);
 void t_vcvt_f_from_i(struct code *c, int d, int m, int sgn, int dbl);
 void t_vcvt_i_from_f(struct code *c, int d, int m, int sgn, int dbl);
+/* vcvt.f64.f32 d, s (to_dbl) or vcvt.f32.f64 s, d. */
+void t_vcvt_f_f(struct code *c, int d, int m, int to_dbl);
+/* The VFPExpandImm byte for a float's (or, `dbl`, a double's) bit
+ * pattern, or -1 when no vmov immediate holds it; and that vmov. */
+int t_vfp_imm8(unsigned long long bits, int dbl);
+void t_vmov_imm(struct code *c, int d, int imm8, int dbl);
+/* vpush/vpop {d<first>-d<first+n-1>}: t_vpush_s's memory, D names. */
+void t_vpush_d(struct code *c, int first, int n, int pop);
 void t_vldst(struct code *c, int sd, int rn, int off, int dbl, int store);
 void t_vmov_core(struct code *c, int sn, int rt, int to_fp);
 void t_vmov_core_pair(struct code *c, int dm, int rt, int rt2, int to_fp);

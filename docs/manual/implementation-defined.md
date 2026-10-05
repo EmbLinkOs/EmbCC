@@ -399,7 +399,7 @@ EmbCC's floating types use the IEEE 754 binary formats:
 | `float` | binary32 | binary32 | binary32 | binary32 | binary32 | binary32 | binary32 |
 | `double` | binary64 | binary64 | binary64 | binary64 | binary64 | binary64 | binary32 |
 | `long double` | x87 80-bit extended | binary64 | binary128 | binary64 | binary128 | binary128 | binary32 |
-| Arithmetic | SSE2; x87 for `long double` | FP/SIMD | FP/SIMD; `long double` in software | software, or single-precision VFP with `-mfpu=` | software | software | software |
+| Arithmetic | SSE2; x87 for `long double` | FP/SIMD | FP/SIMD; `long double` in software | software; single-precision VFP with `-mfpu=fpv4-sp-d16` or `fpv5-sp-d16`; single- and double-precision VFP with `-mfpu=fpv5-d16` | software | software | software |
 
 On RV32 and RV64, `long double` has the binary128 size and format, and
 constant expressions of that type are evaluated during translation, but

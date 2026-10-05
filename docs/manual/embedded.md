@@ -369,6 +369,7 @@ table above, region by region. The details are in
 | Cortex-M3 | `thumbv7m-none-eabi` | no FPU |
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
 | Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi -mfpu=fpv4-sp-d16 -mfloat-abi=hard` | single-precision FPU, hard-float convention |
+| Cortex-M7 | `thumbv7em-none-eabihf -mcpu=cortex-m7`, or `thumbv7em-none-eabi -mfpu=fpv5-d16 -mfloat-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
 | Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16 |
 
 `-mcpu=cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
@@ -502,35 +503,60 @@ line, in either order:
 | `-mfloat-abi=softfp` | FPU instructions; floating-point arguments and results in core registers, so the objects link with soft-float ones |
 | `-mfloat-abi=hard` | FPU instructions; floating-point arguments and results in `s0`-`s15`/`d0`-`d7` (AAPCS-VFP) |
 | `-mfpu=fpv4-sp-d16` | the Cortex-M4F unit; needs an ARMv7E-M target or `-mcpu=cortex-m4` |
+| `-mfpu=fpv5-d16` | the Cortex-M7 unit, with double precision; needs an ARMv7E-M target, and `-mcpu=` other than `cortex-m7` is refused |
 | `-mfpu=fpv5-sp-d16` | the Cortex-M33 unit; needs `thumbv8m.main` |
 | `-mfpu=none`, `-mfpu=auto`, `-mfpu=soft` | no unit named |
 
-The `-eabihf` triples mean the part's unit with `-mfloat-abi=hard`; an
-explicit `-mfloat-abi=` overrides that, and `-dumpmachine` reports the
-result (`thumbv7em-none-eabihf -mfloat-abi=soft` prints
-`thumbv7em-none-eabi`). Both units are single-precision: `float`
-arithmetic becomes VFP instructions and `double` arithmetic stays a call
-into `librt.a`. The runtime helpers use the base (core-register)
-convention under every float ABI.
+The `-eabihf` triples mean the part's unit with `-mfloat-abi=hard`: the
+Cortex-M4F's for `thumbv7em-none-eabihf`, or the Cortex-M7's when
+`-mcpu=cortex-m7` is given too. An explicit `-mfloat-abi=` overrides
+that, and `-dumpmachine` reports the result
+(`thumbv7em-none-eabihf -mfloat-abi=soft` prints `thumbv7em-none-eabi`).
+
+The Cortex-M4F and M33 units are single-precision: `float` arithmetic
+becomes VFP instructions and `double` arithmetic stays a call into
+`librt.a`. The Cortex-M7's computes both. With `-mfpu=fpv5-d16`,
+`double` addition, subtraction, multiplication, division, negation,
+`fabs`, `__builtin_sqrt`, comparisons, and conversions to and from
+`float` and 32-bit integers are VFP `.f64` instructions, and a double
+that needs a register lives in `d8`-`d15`, which a function that uses
+them saves with `vpush`. Only the conversions between `double` or
+`float` and a 64-bit integer remain calls (`__fixdfdi`, `__floatdidf`
+and their kin); `lib/rt/softfp.c` built for that unit keeps those eight
+routines and nothing else. The runtime helpers use the base
+(core-register) convention under every float ABI.
+
+The FPU's predefined macros follow: `__ARM_FP` is `0x4` for the
+single-precision units and `0xc` for FPv5-D16, which also defines
+`__ARM_FPV5__`. (clang says `0x6` and `0xe`; EmbCC leaves out bit 1,
+hardware half-precision conversion, which it does not emit.)
 
 Invalid combinations are refused:
 
 ```text
-embcc: <embcc>: error: -mfloat-abi=hard needs an FPU to use: add -mfpu=fpv4-sp-d16 (Cortex-M4F) or -mfpu=fpv5-sp-d16 (Cortex-M33)
+embcc: <embcc>: error: -mfloat-abi=hard needs an FPU to use: add -mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 (Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)
 embcc: <embcc>: error: -mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4
+embcc: <embcc>: error: -mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16
 embcc: <embcc>: error: -mfloat-abi=bogus is not an ARM float ABI: it is one of soft, softfp and hard
 ```
 
-A double-precision unit (`-mfpu=fpv5-d16`) is refused by name. Each
-object records its float ABI and enum size in its ARM attributes, and
-EmbLD refuses to link objects that disagree:
+Each object records its FPU (`Tag_FP_arch`: VFPv4-D16 for the M4F's
+unit, FPv5-D16 for the M7's and the M33's, with `Tag_ABI_HardFP_use`
+saying single precision on the two `-sp-` units), its float ABI and its
+enum size in its ARM attributes, and EmbLD refuses to link objects that
+disagree about the float ABI or the enum size:
 
 ```text
 embld: 'startup.o' and 'main-hf.o' disagree about where floating-point arguments go: one passes them in the core registers (-mfloat-abi=soft) and the other in s0-s15 (-mfloat-abi=hard). Linking them would leave every float argument read from a register the caller never wrote
 ```
 
 That includes the runtime archive: link `-eabihf` objects with the
-`-eabihf` `librt.a`.
+`-eabihf` `librt.a`. The one built for `thumbv7em-none-eabihf` is the
+Cortex-M4F's, and links with Cortex-M7 objects -- the convention is the
+same, and the M7 runs every M4F instruction -- but an image for the M7
+that converts a 64-bit integer then carries the whole of software
+binary64. `lib/rt/softfp.c` compiled with `-mcpu=cortex-m7` is the eight
+conversion routines alone.
 
 ### Linking for a memory map
 

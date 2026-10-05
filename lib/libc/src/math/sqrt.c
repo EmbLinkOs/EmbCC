@@ -6,6 +6,9 @@
  * core, and fdlibm's asin/acos/hypot reach the square root through here
  * too.
  *
+ * A Cortex-M7 with its double-precision unit (FPv5-D16, bit 3 of
+ * __ARM_FP) has vsqrt.f64, which is correctly rounded too.
+ *
  * Every other target EmbCC has lacks one for a double -- RISC-V without
  * the D extension, a Cortex-M whose FPU is single precision or absent,
  * AVR -- and there the compiler turns __builtin_sqrt into a CALL to
@@ -19,7 +22,8 @@
  */
 #include <math.h>
 
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || \
+    (defined(__arm__) && defined(__ARM_FP) && (__ARM_FP & 8))
 
 double sqrt(double x)
 {
