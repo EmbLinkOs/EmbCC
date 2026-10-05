@@ -509,6 +509,14 @@ static const struct ra_target THUMB_DRA = {
 
 /* -O2 and -Os: the allocator is on. */
 static int g_t_regalloc;
+/* -O0: the allocator runs, for the temporaries of each expression only.
+ * Every source variable keeps its stack slot, pinned there as under -g,
+ * so a debugger sees each one at every statement; and nothing the -O1
+ * code generator does beyond that -- tail calls, folded offsets, the
+ * second pair-allocation attempt -- happens. Before, every temporary
+ * was stored to a slot and loaded back, and FreeRTOS at -O0 was 5.7
+ * times clang's -O0. */
+static int g_t_o0;
 
 /* ---- refusal -------------------------------------------------------- */
 
@@ -4985,9 +4993,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * the DW_AT_location naming that slot is true. A variable in a
          * register needs a location list to describe, which is the
          * larger feature; this is exact. */
-        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
-        char *flt = t_float_map(fn, F.wide, want_debug);
-        char *dbl = t_double_map(fn, F.wide, want_debug);
+        char *pin = want_debug || g_t_o0 ? ra_debug_pin_vars(fn)
+                                         : (char *)0;
+        char *flt = t_float_map(fn, F.wide, want_debug || g_t_o0);
+        char *dbl = t_double_map(fn, F.wide, want_debug || g_t_o0);
         /* The integer pass must not give a GPR to a value the FP pass
          * owns, and the -g pins are the same kind of "not here" -- so it
          * takes the union of the two. */
@@ -5117,7 +5126,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     /* A tail call leaves lr alone -- it is the caller's, and the callee
      * returns with it -- so it does not make this function a non-leaf. */
     F.tail = NULL;
-    if (g_t_regalloc && !want_debug)
+    if (g_t_regalloc && !want_debug && !g_t_o0)
         for (i = 0; i < fn->nins; i++)
             if (t_tail_ok(fn, i)) {
                 if (!F.tail)
@@ -5714,14 +5723,15 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * which reach the 4095 - 8 this allows. Only there, where the d
      * registers are what gains: elsewhere a 64-bit access keeps its
      * add, as it always has. */
-    if (g_t_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+    if (g_t_regalloc && !want_debug && !g_t_o0 &&
+        !getenv("EMBCC_NO_MEMOFF")) {
         int dp = target_thumb_fpu_dp();
         char *w = dp ? (char *)0 : wide64_map(fn);
         ra_fold_memoff(fn, 0, 4095, 4, dp ? 8 : 4, w);
         free(w);
     }
     g_t_pairs = 1;
-    if (!g_t_regalloc || want_debug || target_thumb_fpu() ||
+    if (!g_t_regalloc || want_debug || g_t_o0 || target_thumb_fpu() ||
         (knob && *knob) || (only && *only)) {
         if (knob && *knob) g_t_pairs = atoi(knob);
         if (only && *only) g_t_pairs = strcmp(only, fn->name) == 0;
@@ -5751,8 +5761,9 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
                         struct fsite **fs, int *nfs, int want_debug,
                         int optimize, int no_sse, int regalloc)
 {
-    (void)optimize; (void)no_sse;
+    (void)no_sse;
     g_t_regalloc = regalloc;
+    g_t_o0 = !optimize;
     /* EMBCC_T_FPU=1: emit VFP for single-precision arithmetic.
      *
      * An environment variable and not -mfpu=, because -mfpu= is a
@@ -5778,8 +5789,13 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
     st.g = NULL;    st.ng = st.capg = 0;
     st.f = NULL;    st.nf = st.capf = 0;
 
-    for (int n = 0; n < iu->nfuncs; n++)
+    for (int n = 0; n < iu->nfuncs; n++) {
+        int ra = g_t_regalloc;
+        if (g_t_o0 && ra_o0_too_big(&iu->funcs[n]))
+            g_t_regalloc = 0;          /* see ra_o0_too_big */
         gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        g_t_regalloc = ra;
+    }
 
     for (int n = 0; n < st.ncall; n++) {
         if (st.call[n].tail)          /* b.w, not bl: see t_tail_ok */

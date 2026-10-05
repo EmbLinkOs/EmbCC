@@ -239,6 +239,17 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first,
     return out;
 }
 
+/* 4M words: 32 MB for each of liveness's three sets. A function of 2000
+ * plain statements is 3M (14000 instructions by 14000 vregs) and
+ * allocates in 0.4 s; one of 4000 is 12M. */
+#define RA_O0_DENSE_WORDS (4L << 20)
+
+int ra_o0_too_big(const struct ir_func *fn)
+{
+    long words = ((long)fn->nvregs + 63) / 64;
+    return (long)fn->nins * words > RA_O0_DENSE_WORDS;
+}
+
 /* mark vreg v ineligible (used at an opaque site) */
 /* Why a value is not eligible, for the -fremarks-style accounting that
  * EMBCC_RA_WHY prints: "which values are in memory, and on whose rule"
