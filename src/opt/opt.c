@@ -1624,9 +1624,30 @@ static void ins_blank(struct ir_ins *i)
 
 /* Growable instruction buffer, for rebuilding fn->ins out of SSA. */
 struct ibuf { struct ir_ins *p; int n, cap; };
+/* EMBCC_IBUF_MOVE=1: every push MOVES the buffer and scribbles over the
+ * old one. A pointer an earlier push returned is valid only until the
+ * next, and holding one across it reads freed memory -- but only when
+ * that push happens to grow the buffer, which is how such reads survive
+ * ordinary testing. With this every one of them reads garbage at once
+ * (tests/golden/ibuf-move.sh). Each push copies the whole buffer, so a
+ * compile is many times slower: for testing only. */
+static int g_ib_move = -1;
+
 static struct ir_ins *ib_push(struct ibuf *b)
 {
-    if (b->n == b->cap) {
+    if (g_ib_move < 0)
+        g_ib_move = getenv("EMBCC_IBUF_MOVE") != NULL;
+    if (g_ib_move) {
+        struct ir_ins *np = xmalloc((size_t)(b->n + 1) * sizeof *np);
+        if (b->n)
+            memcpy(np, b->p, (size_t)b->n * sizeof *np);
+        if (b->p) {
+            memset(b->p, 0xa5, (size_t)b->cap * sizeof *b->p);
+            free(b->p);
+        }
+        b->p = np;
+        b->cap = b->n + 1;
+    } else if (b->n == b->cap) {
         b->cap = b->cap ? b->cap * 2 : 64;
         b->p = xrealloc(b->p, (size_t)b->cap * sizeof *b->p);
     }
@@ -3645,9 +3666,31 @@ static int thread_arm(const struct ir_func *fn, int k, int t, int L,
         return 0;
     if (def->op == IR_CONST)
         return 1;
-    return def->op == IR_MOV && jumps && def->a >= 0 &&
-           def->a < fn->nvregs && d->cnt[def->a] == 1 &&
-           d->ins[def->a] >= 0 && fn->ins[d->ins[def->a]].op == IR_CMP;
+    if (def->op != IR_MOV || def->a < 0 || def->a >= fn->nvregs ||
+        d->cnt[def->a] != 1 || d->ins[def->a] < 0)
+        return 0;
+    /* a copy of a constant is a constant arm (the merge temp is written
+     * twice, so copy propagation leaves `%t = mov %k` where %k = const) */
+    if (fn->ins[d->ins[def->a]].op == IR_CONST && !fn->ins[d->ins[def->a]].flt)
+        return 1;
+    return jumps && fn->ins[d->ins[def->a]].op == IR_CMP;
+}
+
+/* The constant an arm sets, when thread_arm accepted it as one. */
+static int thread_arm_const(const struct ir_func *fn, const struct ir_ins *def,
+                            const struct defs *d, long *v)
+{
+    if (def->op == IR_CONST) {
+        *v = def->imm;
+        return 1;
+    }
+    if (def->op == IR_MOV && def->a >= 0 && def->a < fn->nvregs &&
+        d->cnt[def->a] == 1 && d->ins[def->a] >= 0 &&
+        fn->ins[d->ins[def->a]].op == IR_CONST) {
+        *v = fn->ins[d->ins[def->a]].imm;
+        return 1;
+    }
+    return 0;
 }
 
 static int thread_site(const struct ir_func *fn, int n, const int *use)
@@ -3657,6 +3700,40 @@ static int thread_site(const struct ir_func *fn, int n, const int *use)
     return n + 2 < fn->nins && lab->op == IR_LABEL &&
            (br->op == IR_BRZ || br->op == IR_BRNZ) &&
            t >= fn->nvars && t < fn->nvregs && use[t] == 1 && br->w <= 8;
+}
+
+/* A branch on `%u = cmp ne %t, 0` is a branch on %t, and one on
+ * `cmp eq %t, 0` the opposite branch on %t, when nothing else reads %u.
+ * C writes the first wherever a truth value is compared with pdFALSE or
+ * 0 -- FreeRTOS's `listLIST_IS_EMPTY(l) == pdFALSE` is a 1/0 merged from
+ * two arms and then tested -- and the compare in between hid the merge
+ * from the threading below. The compare is left for DCE. */
+static int branch_on_cmp0(struct ir_func *fn, const int *use,
+                          const struct defs *d)
+{
+    int changed = 0;
+    for (int n = 0; n + 1 < fn->nins; n++) {
+        const struct ir_ins *c = &fn->ins[n];
+        struct ir_ins *br = &fn->ins[n + 1];
+        if (c->op != IR_CMP || c->flt || c->w > 8 ||
+            (c->pred != B_EQ && c->pred != B_NE) ||
+            (br->op != IR_BRZ && br->op != IR_BRNZ) || br->a != c->dst ||
+            c->dst < 0 || c->dst >= fn->nvregs || use[c->dst] != 1 ||
+            c->a < 0 || c->a >= fn->nvregs)
+            continue;
+        int zero = c->imm_b ? c->imm == 0
+                 : c->b >= 0 && c->b < fn->nvregs && d->cnt[c->b] == 1 &&
+                   d->ins[c->b] >= 0 && fn->ins[d->ins[c->b]].op == IR_CONST &&
+                   fn->ins[d->ins[c->b]].imm == 0;
+        if (!zero)
+            continue;
+        br->a = c->a;
+        br->w = c->w;
+        if (c->pred == B_EQ)
+            br->op = br->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+        changed = 1;
+    }
+    return changed;
 }
 
 static int pass_thread(struct ir_func *fn)
@@ -3669,6 +3746,13 @@ static int pass_thread(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], count_cb, &uc);
     compute_defs(fn, &d);
+    /* the branch now reads %t, and the uses counted are stale: the next
+     * round, after DCE, threads it */
+    if (branch_on_cmp0(fn, use, &d)) {
+        free(use);
+        free(d.cnt); free(d.ins);
+        return 1;
+    }
     /* A label after each branch that will be threaded and has none. */
     {
         int need = 0;
@@ -3722,12 +3806,13 @@ static int pass_thread(struct ir_func *fn)
         else                        continue;
         for (int k = 0; k + 1 < fn->nins; k++) {
             struct ir_ins *def = &fn->ins[k], *go = &fn->ins[k + 1];
+            long kv;
             if (!thread_arm(fn, k, t, L, &d))
                 continue;
-            if (def->op == IR_CONST) {
+            if (thread_arm_const(fn, def, &d, &kv)) {
                 unsigned long mask = br->w >= 8 ? ~0UL
                                    : (1UL << (8 * (br->w > 0 ? br->w : 4))) - 1;
-                int zero = ((unsigned long)def->imm & mask) == 0;
+                int zero = ((unsigned long)kv & mask) == 0;
                 int taken = br->op == IR_BRZ ? zero : !zero;
                 int line = def->line, col = def->col;
                 memset(def, 0, sizeof *def);
@@ -5447,6 +5532,9 @@ static int pre_one(struct ir_func *fn)
         } else {
             out = ib_push(&nb); *out = fn->ins[n];
         }
+        /* By index from here: a jump pushed below may move the buffer,
+         * and `out` would then point into freed memory. */
+        int out_at = nb.n - 1;
         /* the two forms a split edge takes */
         for (int b = 0; b < nbb; b++) {
             if (pnew[b] < 0 || pins[b] != n) continue;
@@ -5456,11 +5544,11 @@ static int pre_one(struct ir_func *fn)
                 j->op = IR_JMP; j->dst = -1; j->a = -1; j->b = -1;
                 j->label = pnew[b]; j->line = line; j->col = col;
                 j->synth = line ? 0 : 1;
-            } else if (out->op == IR_SWITCH) {
+            } else if (nb.p[out_at].op == IR_SWITCH) {
                 struct retarget rt = { cblab, pnew[b] };
-                each_label(fn, out, retarget_cb, &rt);  /* every entry that was cb */
+                each_label(fn, &nb.p[out_at], retarget_cb, &rt);  /* every entry that was cb */
             } else {
-                out->label = pnew[b];           /* branch now enters the split */
+                nb.p[out_at].label = pnew[b];   /* branch now enters the split */
             }
         }
     }
@@ -7248,20 +7336,23 @@ static int vectorize_one(struct ir_func *fn)
                      * entered, so a loop that runs zero times leaves the
                      * scalar accumulator alone -- and an inner loop is
                      * re-zeroed on every pass of the outer one. */
+                    /* (the location by value: each ib_push may move the
+                     * buffer the previous one returned a pointer into) */
+                    int zl = fn->ins[L.red_add].line, zc = fn->ins[L.red_add].col;
                     struct ir_ins *z = ib_push(&nb);
                     z->op = IR_CONST; z->dst = vzero;
                     z->w = wsize; z->imm = 0;
-                    z->line = fn->ins[L.red_add].line;
-                    z->col = fn->ins[L.red_add].col;
+                    z->line = zl;
+                    z->col = zc;
                     struct ir_ins *sp = ib_push(&nb);
                     sp->op = IR_VSPLAT; sp->dst = vacc; sp->a = vzero;
                     sp->size = wsize; sp->w = 8;
-                    sp->line = z->line; sp->col = z->col;
+                    sp->line = zl; sp->col = zc;
                     if (vacc2 >= 0) {
                         struct ir_ins *s2 = ib_push(&nb);
                         s2->op = IR_VSPLAT; s2->dst = vacc2; s2->a = vzero;
                         s2->size = wsize; s2->w = 8;
-                        s2->line = z->line; s2->col = z->col;
+                        s2->line = zl; s2->col = zc;
                     }
                 }
                 /* Before the header label: broadcast every constant the
@@ -7915,15 +8006,19 @@ static int ivsr_one(struct ir_func *fn)
                     cbase[k] = bsum[k];
                 }
                 for (int k = 0; k < nc; k++) {
+                    /* the line by value: `c` is not valid after the next
+                     * ib_push, which may move the buffer -- reading it
+                     * there faulted once the push landed on a growth */
+                    int ln = fn->ins[cand[k] >= 0 ? d.ins[cand[k]] : n].line;
                     struct ir_ins *c = ib_push(&nb);
                     c->op = IR_CONST; c->dst = delta[k];
                     c->w = PTRW; c->imm = cscale[k] * step;
-                    c->line = fn->ins[cand[k] >= 0 ? d.ins[cand[k]] : n].line;
+                    c->line = ln;
                     c->synth = 1;
                     struct ir_ins *m = ib_push(&nb);
                     m->op = IR_MOV; m->dst = ptr[k]; m->a = cbase[k];
                     m->w = PTRW;
-                    m->line = c->line; m->synth = 1;
+                    m->line = ln; m->synth = 1;
                 }
                 if (lftr_lim >= 0) {
                     struct ir_ins *c = ib_push(&nb);
@@ -10131,10 +10226,11 @@ static int pass_punfwd(struct ir_func *fn)
                 k->op = IR_CONST; k->imm = 32; k->w = 8;
                 k->a = k->b = k->c = -1;
                 k->line = in.line; k->col = in.col;
-                k->dst = fn->nvregs++;
+                int kdst = k->dst = fn->nvregs++;   /* (k dangles after the
+                                                       * next ib_push) */
                 struct ir_ins *sh = ib_push(&nb);
                 memset(sh, 0, sizeof *sh);
-                sh->op = IR_SHR; sh->a = x; sh->b = k->dst; sh->w = 8;
+                sh->op = IR_SHR; sh->a = x; sh->b = kdst; sh->w = 8;
                 sh->sign = 0; sh->c = -1;
                 sh->line = in.line; sh->col = in.col;
                 sh->dst = x = fn->nvregs++;
