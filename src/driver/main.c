@@ -1978,6 +1978,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                  (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
                  (want_unwind < 0 && target_is_hosted() &&
                   target_fmt_get() == TGT_FMT_ELF);
+    /* The tables eh_emit writes are x86-64's and AArch64's layout, with a
+     * PC-relative relocation MIPS's REL objects have no type for. */
+    if (unwind && ta == TARGET_MIPS32)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "mipsel-none-elf yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no MIPS .eh_frame");
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 

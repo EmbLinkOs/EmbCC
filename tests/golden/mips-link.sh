@@ -18,7 +18,8 @@
 #  2. EmbCC's own addends: a string literal more than 32 KB into .rodata,
 #     whose LO16 field the object writer stored sign-extended.
 #  3. What is refused, by name: gp-relative small data, a hard-float
-#     object linked with soft-float ones, and a HI16 with no LO16.
+#     object linked with soft-float ones, a HI16 with no LO16, and a
+#     linker script (-T), which EmbLD lays out for ARM and RISC-V only.
 set -u
 echo "TEST-MARKER mips-link"
 . "$(dirname "$0")/../lib.sh"
@@ -167,4 +168,16 @@ printf '.text\n.globl h\nh: lui $2, %%hi(x)\njr $ra\nnop\n.data\nx: .word 1\n' \
 mc "$out/lone.s" -o "$out/lone.o" || { echo "llvm-mc rejected lone.s"; exit 1; }
 refuse "an R_MIPS_HI16 with no R_MIPS_LO16" "no R_MIPS_LO16" \
     "$out/boot.o" "$out/io.o" "$out/far.o" "$out/lone.o"
-echo "gp-relative data, a hard-float object and a lone HI16 are refused by name"
+# a GNU ld script: laid out for ARM and RISC-V only, so a MIPS image is
+# refused rather than laid out by rules nobody checked for it
+printf 'SECTIONS { .text 0x80100000 : { *(.text*) } .data : { *(.data*) } }\n' \
+    > "$out/s.ld"
+if "$EMBLD" -T "$out/s.ld" -e _start "$out/boot.o" "$out/io.o" "$out/far.o" \
+       -o "$out/s.elf" > "$out/s.txt" 2>&1; then
+    echo "embld linked a MIPS image by a linker script"; exit 1
+fi
+grep -q 'a linker script is supported for ARM and RISC-V images only' \
+    "$out/s.txt" || {
+    echo "embld refused a MIPS linker script, but not by name:"
+    cat "$out/s.txt"; exit 1; }
+echo "gp-relative data, a hard-float object, a lone HI16 and a linker script are refused by name"

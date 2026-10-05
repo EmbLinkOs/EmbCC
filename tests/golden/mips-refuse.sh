@@ -66,6 +66,11 @@ refopt -EB 'little-endian'
 refopt -mabicalls '-mabicalls is not supported'
 refopt -G8 'no data in .sdata'
 refopt -mfpu=fpv4-sp-d16 'ARM option'
+for o in -funwind-tables -fasynchronous-unwind-tables -fexceptions; do
+    refopt $o 'unwind tables are not supported for mipsel-none-elf yet'
+done
+"$EMBCC" --target=$T -fno-asynchronous-unwind-tables -c "$out/f.c" -o /dev/null || {
+    echo "-fno-asynchronous-unwind-tables was refused"; exit 1; }
 echo "the MIPS32r2/o32/soft-float/-mno-abicalls/-G0 flags are accepted, others refused"
 
 # ---- the constructs ----------------------------------------------------------
