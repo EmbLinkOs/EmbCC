@@ -5080,6 +5080,9 @@ static int pre_one(struct ir_func *fn)
         } else {
             out = ib_push(&nb); *out = fn->ins[n];
         }
+        /* By index from here: a jump pushed below may move the buffer,
+         * and `out` would then point into freed memory. */
+        int out_at = nb.n - 1;
         /* the two forms a split edge takes */
         for (int b = 0; b < nbb; b++) {
             if (pnew[b] < 0 || pins[b] != n) continue;
@@ -5089,11 +5092,11 @@ static int pre_one(struct ir_func *fn)
                 j->op = IR_JMP; j->dst = -1; j->a = -1; j->b = -1;
                 j->label = pnew[b]; j->line = line; j->col = col;
                 j->synth = line ? 0 : 1;
-            } else if (out->op == IR_SWITCH) {
+            } else if (nb.p[out_at].op == IR_SWITCH) {
                 struct retarget rt = { cblab, pnew[b] };
-                each_label(fn, out, retarget_cb, &rt);  /* every entry that was cb */
+                each_label(fn, &nb.p[out_at], retarget_cb, &rt);  /* every entry that was cb */
             } else {
-                out->label = pnew[b];           /* branch now enters the split */
+                nb.p[out_at].label = pnew[b];   /* branch now enters the split */
             }
         }
     }
@@ -6881,20 +6884,23 @@ static int vectorize_one(struct ir_func *fn)
                      * entered, so a loop that runs zero times leaves the
                      * scalar accumulator alone -- and an inner loop is
                      * re-zeroed on every pass of the outer one. */
+                    /* (the location by value: each ib_push may move the
+                     * buffer the previous one returned a pointer into) */
+                    int zl = fn->ins[L.red_add].line, zc = fn->ins[L.red_add].col;
                     struct ir_ins *z = ib_push(&nb);
                     z->op = IR_CONST; z->dst = vzero;
                     z->w = wsize; z->imm = 0;
-                    z->line = fn->ins[L.red_add].line;
-                    z->col = fn->ins[L.red_add].col;
+                    z->line = zl;
+                    z->col = zc;
                     struct ir_ins *sp = ib_push(&nb);
                     sp->op = IR_VSPLAT; sp->dst = vacc; sp->a = vzero;
                     sp->size = wsize; sp->w = 8;
-                    sp->line = z->line; sp->col = z->col;
+                    sp->line = zl; sp->col = zc;
                     if (vacc2 >= 0) {
                         struct ir_ins *s2 = ib_push(&nb);
                         s2->op = IR_VSPLAT; s2->dst = vacc2; s2->a = vzero;
                         s2->size = wsize; s2->w = 8;
-                        s2->line = z->line; s2->col = z->col;
+                        s2->line = zl; s2->col = zc;
                     }
                 }
                 /* Before the header label: broadcast every constant the
@@ -7548,15 +7554,19 @@ static int ivsr_one(struct ir_func *fn)
                     cbase[k] = bsum[k];
                 }
                 for (int k = 0; k < nc; k++) {
+                    /* the line by value: `c` is not valid after the next
+                     * ib_push, which may move the buffer -- reading it
+                     * there faulted once the push landed on a growth */
+                    int ln = fn->ins[cand[k] >= 0 ? d.ins[cand[k]] : n].line;
                     struct ir_ins *c = ib_push(&nb);
                     c->op = IR_CONST; c->dst = delta[k];
                     c->w = PTRW; c->imm = cscale[k] * step;
-                    c->line = fn->ins[cand[k] >= 0 ? d.ins[cand[k]] : n].line;
+                    c->line = ln;
                     c->synth = 1;
                     struct ir_ins *m = ib_push(&nb);
                     m->op = IR_MOV; m->dst = ptr[k]; m->a = cbase[k];
                     m->w = PTRW;
-                    m->line = c->line; m->synth = 1;
+                    m->line = ln; m->synth = 1;
                 }
                 if (lftr_lim >= 0) {
                     struct ir_ins *c = ib_push(&nb);
@@ -9764,10 +9774,11 @@ static int pass_punfwd(struct ir_func *fn)
                 k->op = IR_CONST; k->imm = 32; k->w = 8;
                 k->a = k->b = k->c = -1;
                 k->line = in.line; k->col = in.col;
-                k->dst = fn->nvregs++;
+                int kdst = k->dst = fn->nvregs++;   /* (k dangles after the
+                                                       * next ib_push) */
                 struct ir_ins *sh = ib_push(&nb);
                 memset(sh, 0, sizeof *sh);
-                sh->op = IR_SHR; sh->a = x; sh->b = k->dst; sh->w = 8;
+                sh->op = IR_SHR; sh->a = x; sh->b = kdst; sh->w = 8;
                 sh->sign = 0; sh->c = -1;
                 sh->line = in.line; sh->col = in.col;
                 sh->dst = x = fn->nvregs++;
