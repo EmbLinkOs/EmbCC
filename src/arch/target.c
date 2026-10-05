@@ -21,6 +21,7 @@ static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
  * second enum value would duplicate a data model to express none of that. */
 static int g_thumb_arch = 7;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
+static int g_thumb_fpu_dp;  /* see target_thumb_fpu_dp */
 static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
 static enum target_os   g_os   = TGT_OS_NONE;
@@ -205,7 +206,11 @@ int target_has_sqrt(int bytes)
     switch (g_arch) {
     case TARGET_X86_64:
     case TARGET_AARCH64: return bytes == 4 || bytes == 8;
-    case TARGET_THUMB:   return bytes == 4 && target_thumb_fpu();
+    /* FPv5-D16 has vsqrt.f64 as well; the single-precision units do not,
+     * and a double's square root there is libm's. */
+    case TARGET_THUMB:   return target_thumb_fpu() &&
+                                (bytes == 4 ||
+                                 (bytes == 8 && target_thumb_fpu_dp()));
     default:             return 0;
     }
 }
@@ -520,6 +525,8 @@ int target_thumb_arch(void) { return g_thumb_arch; }
 void target_set_thumb_arch(int lvl) { g_thumb_arch = lvl; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
+int target_thumb_fpu_dp(void) { return g_thumb_fpu && g_thumb_fpu_dp; }
+void target_set_thumb_fpu_dp(int on) { g_thumb_fpu_dp = on ? 1 : 0; }
 int target_thumb_hard_abi(void) { return g_thumb_hard; }
 int target_thumb_hf_name(void) { return g_thumb_hf_name; }
 
