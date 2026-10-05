@@ -182,6 +182,9 @@ int *tcg_pair_alloc(struct ir_func *fn, const char *wide, const char *excl,
                     int *used, int *nused);
 const struct ra_target *tcg_ra(void);
 int tcg_regalloc(void);
+/* -O0: the allocator runs for the temporaries, every source variable kept
+ * in its slot (codegen.c's g_t_o0). */
+int tcg_o0(void);
 int tcg_pairs(void);
 void tcg_reset_taken(void);
 

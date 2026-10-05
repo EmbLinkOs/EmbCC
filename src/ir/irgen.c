@@ -1135,11 +1135,6 @@ int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
     return iu->nstrs++;
 }
 
-static int intern_str(const char *bytes, int len)
-{
-    return ir_intern_string(cur_unit, bytes, len);
-}
-
 /* Microsoft x64: an aggregate rides in its register slot only at
  * exactly 1, 2, 4 or 8 bytes; every other size travels BY REFERENCE,
  * with a copy the caller makes. Asked once here so the caller's
@@ -2422,7 +2417,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         /* The literal arrives encoded at its real width (lit_encode): num
          * elements of str_width bytes each, NUL included. */
         int w = e->str_width ? e->str_width : 1;
-        e->str_index = intern_str(e->name, (int)e->num * w);
+        e->str_index = ir_intern_aligned(cur_unit, e->name, (int)e->num * w,
+                                         target_string_align(w));
         struct ir_ins *i = emit(fn);
         i->op = IR_STRADDR;
         i->label = e->str_index;

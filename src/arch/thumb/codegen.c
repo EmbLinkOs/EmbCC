@@ -168,8 +168,24 @@ static const int T_POOL_VA_FB[] = { 4, 5, 6, 8 };
 static unsigned g_t_taken;
 static int g_t_pool[T_NPOOL];
 
+/* ARMv6-M (v6m.c): r0-r5. Only r0-r7 compute there, and r6/r7 are that
+ * lowering's two scratch registers; r5 is the frame base of a function with
+ * a variable-length array, where r7 is on ARMv7-M. */
+static const int T6_POOL[6] = { 0, 1, 2, 3, 4, 5 };
+static const int T6_POOL_VA[2] = { 4, 5 };
+static const int T6_POOL_FB[5] = { 0, 1, 2, 3, 4 };
+static const int T6_POOL_VA_FB[1] = { 4 };
+
 static const int *t_pool_base(const struct ir_func *fn, int *n)
 {
+    if (target_thumb_arch() == 6) {
+        if (fn->has_alloca) {
+            *n = fn->is_varargs ? 1 : 5;
+            return fn->is_varargs ? T6_POOL_VA_FB : T6_POOL_FB;
+        }
+        *n = fn->is_varargs ? 2 : 6;
+        return fn->is_varargs ? T6_POOL_VA : T6_POOL;
+    }
     if (fn->has_alloca) {
         *n = fn->is_varargs ? 4 : 8;
         return fn->is_varargs ? T_POOL_VA_FB : T_POOL_FB;
@@ -353,6 +369,12 @@ static const int T_PAIRS[4] = { 0, 2, 4, 6 };
 static const int *t_pair_pool_for(const struct ir_func *fn, int *n)
 {
     int lo = fn->is_varargs ? 2 : 0, hi = fn->has_alloca ? 3 : 4;
+    /* ARMv6-M: r0:r1, r2:r3 and r4:r5 -- not r6:r7, the scratch, and not
+     * r4:r5 either where r5 is a VLA's frame base. */
+    if (target_thumb_arch() == 6)
+        hi = fn->has_alloca ? 2 : 3;
+    if (hi < lo)
+        hi = lo;
     *n = hi - lo;
     return T_PAIRS + lo;
 }
@@ -404,6 +426,10 @@ static int fp_on_vfp(const struct ir_ins *i)
  * caller-saved register. */
 int t_op_calls_helper(const struct ir_ins *i)
 {
+    /* ARMv6-M has no divide, no 64-bit multiply and no exclusives: those
+     * are calls there (v6m.c says which). */
+    if (target_thumb_arch() == 6 && v6_op_calls_helper(i))
+        return 1;
     /* With the FPU, the single-precision arithmetic, comparisons and
      * 32-bit conversions are instructions. This must say exactly what
      * fp_on_vfp() says, since it is the same question: a value live
@@ -5753,11 +5779,16 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * which reach the 4095 - 8 this allows. Only there, where the d
      * registers are what gains: elsewhere a 64-bit access keeps its
      * add, as it always has. */
+    void (*gen)(struct ir_func *, struct code *, struct t_sites *, int) =
+        target_thumb_arch() == 6 ? v6_gen_func : gen_func;
     if (g_t_regalloc && !want_debug && !g_t_o0 &&
         !getenv("EMBCC_NO_MEMOFF")) {
         int dp = target_thumb_fpu_dp();
         char *w = dp ? (char *)0 : wide64_map(fn);
-        ra_fold_memoff(fn, 0, 4095, 4, dp ? 8 : 4, w);
+        /* ARMv6-M's immediate offsets are five bits of the access size:
+         * 124 for a word is the most any of them reaches. */
+        ra_fold_memoff(fn, 0, target_thumb_arch() == 6 ? 124 : 4095, 4,
+                       dp ? 8 : 4, w);
         free(w);
     }
     const char *lr = getenv("EMBCC_T_LOWREGS");
@@ -5765,13 +5796,17 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     g_t_pairs = 1;
     g_t_lowregs = lr_forced ? atoi(lr) != 0 : 1;
     if (!g_t_regalloc || want_debug || g_t_o0) {
-        gen_func(fn, t, st, want_debug);
+        gen(fn, t, st, want_debug);
         g_t_lowregs = 1;
         return;
     }
     /* The attempts: pairs on and off (only without an FPU, and unless a
      * knob fixes them), each with the rename on and off (unless
-     * EMBCC_T_LOWREGS fixes it). The first of equal sizes wins. */
+     * EMBCC_T_LOWREGS fixes it). The first of equal sizes wins.
+     *
+     * ARMv6-M has no rename to try: every register it computes in is a
+     * low one already, so there is no 16-bit form to win (v6m.c does not
+     * call t_lowregs), and a second attempt would make the same bytes. */
     int fixed_pairs = target_thumb_fpu() || (knob && *knob) || (only && *only);
     int pv[2], np = 0, lv[2], nl = 0;
     if (fixed_pairs) {
@@ -5783,7 +5818,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         pv[np++] = 0;
     }
     lv[nl++] = g_t_lowregs;
-    if (!lr_forced)
+    if (!lr_forced && target_thumb_arch() != 6)
         lv[nl++] = 0;
     int best = -1, bestlen = 0, last = -1;
     for (int a = 0; a < np * nl; a++) {
@@ -5793,7 +5828,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         }
         g_t_pairs = pv[a / nl];
         g_t_lowregs = lv[a % nl];
-        gen_func(fn, t, st, want_debug);
+        gen(fn, t, st, want_debug);
         with = t->len - at;
         last = a;
         if (best < 0 || with < bestlen) {
@@ -5806,7 +5841,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         st->nstr = nstr; st->ng = ng; st->nf = nf;
         g_t_pairs = pv[best / nl];
         g_t_lowregs = lv[best % nl];
-        gen_func(fn, t, st, want_debug);
+        gen(fn, t, st, want_debug);
     }
     g_t_pairs = 1;
     g_t_lowregs = 1;
@@ -5929,5 +5964,6 @@ int *tcg_pair_alloc(struct ir_func *fn, const char *wide, const char *excl,
 }
 const struct ra_target *tcg_ra(void) { return &THUMB_RA; }
 int tcg_regalloc(void) { return g_t_regalloc; }
+int tcg_o0(void) { return g_t_o0; }
 int tcg_pairs(void) { return g_t_pairs; }
 void tcg_reset_taken(void) { g_t_taken = 0; }
