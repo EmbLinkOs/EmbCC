@@ -59,20 +59,40 @@
  * Recording a register that is merely compared against is harmless -- it
  * only saves one more -- and nothing may name r9-r11 by number instead. */
 static unsigned g_t_scr_used;
-static int t_scr(int r) { g_t_scr_used |= 1u << r; return r; }
-#define T_SCR  t_scr(9)
-#define T_ADDR t_scr(10)
+/* ...by default. When r9-r11 are in the allocator's pool as well
+ * (g_t_ext, one of gen_func_best's attempts), each instruction maps the
+ * three roles onto whichever of r9-r11 hold nothing live there
+ * (t_roles), and a role that has none is -1. Using it fails the attempt
+ * (g_t_role_fail) -- the code it made is thrown away and the function
+ * made again with the fixed roles -- so a scratch never lands on a value,
+ * and a function that never runs short keeps three more registers for its
+ * values: on a Cortex-M those are three more that survive a call. */
+static int g_t_ext;
+static int g_r_scr = 9, g_r_addr = 10, g_r_tmp = 11;
+static int g_t_role_fail;
+static int t_scr(int r)
+{
+    if (r < 0) {
+        g_t_role_fail = 1;
+        return 9;              /* what it emits is discarded */
+    }
+    g_t_scr_used |= 1u << r;
+    return r;
+}
+#define T_SCR  t_scr(g_r_scr)
+#define T_ADDR t_scr(g_r_addr)
 #undef T_TMP
-#define T_TMP  t_scr(11)
+#define T_TMP  t_scr(g_r_tmp)
 #define T_SCR_ALL ((1u << 9) | (1u << 10) | (1u << 11))
 static void ldst_must(struct code *c, int rt, int rn, long off, int size,
                       int sign, int store);
 static void t_copy_block(struct code *t, int dst, int src, int copy, long size);
 /* The numbers, for COMPARING a register against one: evaluating the
- * marker would record a use that is not one. */
-#define R_SCR  9
-#define R_ADDR 10
-#define R_TMP  11
+ * marker would record a use that is not one. -1 when the role has no
+ * register at this instruction (g_t_ext). */
+#define R_SCR  g_r_scr
+#define R_ADDR g_r_addr
+#define R_TMP  g_r_tmp
 /* A parallel move is given R_SCR as the register that breaks a cycle,
  * and only a move that USES it touches r9. */
 static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
@@ -163,10 +183,20 @@ static const int T_POOL_VA[5] = { 4, 5, 6, 7, 8 };
 static const int T_POOL_FB[] = { 0, 1, 2, 3, 4, 5, 6, 8 };
 static const int T_POOL_VA_FB[] = { 4, 5, 6, 8 };
 
+/* With r9-r11 as well (g_t_ext): three more callee-saved registers,
+ * last, so a value takes one only once r4-r8 are gone. */
+#define T_NPOOL_EXT 12
+static const int T_POOL_EXT[T_NPOOL_EXT] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+};
+static const int T_POOL_VA_EXT[8] = { 4, 5, 6, 7, 8, 9, 10, 11 };
+static const int T_POOL_FB_EXT[] = { 0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11 };
+static const int T_POOL_VA_FB_EXT[] = { 4, 5, 6, 8, 9, 10, 11 };
+
 /* Registers the pair pass (t_pair_alloc) took for the whole function,
  * withheld from the ordinary pool; bit r for rr. */
 static unsigned g_t_taken;
-static int g_t_pool[T_NPOOL];
+static int g_t_pool[T_NPOOL_EXT];
 
 /* ARMv6-M (v6m.c): r0-r5. Only r0-r7 compute there, and r6/r7 are that
  * lowering's two scratch registers; r5 is the frame base of a function with
@@ -185,6 +215,14 @@ static const int *t_pool_base(const struct ir_func *fn, int *n)
         }
         *n = fn->is_varargs ? 2 : 6;
         return fn->is_varargs ? T6_POOL_VA : T6_POOL;
+    }
+    if (g_t_ext) {
+        if (fn->has_alloca) {
+            *n = fn->is_varargs ? 7 : 11;
+            return fn->is_varargs ? T_POOL_VA_FB_EXT : T_POOL_FB_EXT;
+        }
+        *n = fn->is_varargs ? 8 : T_NPOOL_EXT;
+        return fn->is_varargs ? T_POOL_VA_EXT : T_POOL_EXT;
     }
     if (fn->has_alloca) {
         *n = fn->is_varargs ? 4 : 8;
@@ -366,8 +404,20 @@ static void t_lowregs(const struct ir_func *fn, int *loc, const char *wide)
  * without the argument file in a variadic function, whose prologue owns
  * it. Even-aligned, as AAPCS32 wants a 64-bit value passed. */
 static const int T_PAIRS[4] = { 0, 2, 4, 6 };
+/* With r9-r11 in the pool (g_t_ext), r8:r9 and r10:r11 as well: two more
+ * pairs that live across a call. strtoull's accumulators, which a call
+ * per digit separates, had r4:r5 and r6:r7 to share with every 32-bit
+ * value that crossed one, and went to the stack. */
+static const int T_PAIRS_EXT[6] = { 0, 2, 4, 6, 8, 10 };
+static const int T_PAIRS_EXT_FB[5] = { 0, 2, 4, 8, 10 };
 static const int *t_pair_pool_for(const struct ir_func *fn, int *n)
 {
+    if (g_t_ext && target_thumb_arch() != 6) {
+        const int *p = fn->has_alloca ? T_PAIRS_EXT_FB : T_PAIRS_EXT;
+        int np = fn->has_alloca ? 5 : 6, lo = fn->is_varargs ? 2 : 0;
+        *n = np - lo;
+        return p + lo;
+    }
     int lo = fn->is_varargs ? 2 : 0, hi = fn->has_alloca ? 3 : 4;
     /* ARMv6-M: r0:r1, r2:r3 and r4:r5 -- not r6:r7, the scratch, and not
      * r4:r5 either where r5 is a VLA's frame base. */
@@ -2283,8 +2333,10 @@ static void src64(struct t_fn *F, int v, int slo, int shi, int *lo, int *hi)
         *hi = F->loc[v] + 1;
         return;
     }
-    if (slo >= R_SCR && slo <= R_TMP) t_scr(slo);
-    if (shi >= R_SCR && shi <= R_TMP) t_scr(shi);
+    /* (a role with no register fails the attempt; one that has one is
+     * recorded, as the marking macros would) */
+    if (slo < 0 || (slo >= 9 && slo <= 11)) slo = t_scr(slo);
+    if (shi < 0 || (shi >= 9 && shi <= 11)) shi = t_scr(shi);
     rd64(F, v, slo, shi);
     *lo = slo;
     *hi = shi;
@@ -4983,6 +5035,55 @@ static unsigned lo_free(const struct t_fn *F, int n)
     return avail & ~b.busy;
 }
 
+/* ---- SCRATCH ROLES WHERE r9-r11 ARE ALSO HOMES (g_t_ext) ---------------
+ *
+ * The registers holding something across instructions n..n+span: every
+ * value live into or out of one of them, and every one they read or
+ * write -- lo_free's question, asked of all sixteen. span 2 covers the
+ * furthest an instruction's lowering emits ahead (skip_next). */
+static unsigned t_busy(const struct t_fn *F, int n, int span)
+{
+    const struct ir_func *fn = F->fn;
+    struct lo_busy b;
+    b.F = F;
+    b.busy = 0;
+    if (!F->loc)
+        return 0;
+    for (int m = n; m < fn->nins && m <= n + span; m++) {
+        if (F->lv_out) {
+            const unsigned long *li = F->lv_in + (size_t)m * F->lv_words;
+            const unsigned long *lo = F->lv_out + (size_t)m * F->lv_words;
+            for (int w = 0; w < F->lv_words; w++) {
+                unsigned long bits = li[w] | lo[w];
+                for (int k = 0; bits && k < 64; k++, bits >>= 1)
+                    if (bits & 1)
+                        lo_mark(w * 64 + k, &b);
+            }
+        }
+        ra_each_use(&fn->ins[m], lo_mark, &b);
+        lo_mark(fn->ins[m].dst, &b);
+    }
+    return b.busy;
+}
+
+/* The roles from what `busy` leaves of r9-r11: TMP first, then ADDR,
+ * then SCR, each its usual register when that is free; -1 for a role
+ * with none left. Without g_t_ext, the fixed r11, r10 and r9. */
+static void t_roles_from(unsigned busy)
+{
+    int fr[3], nf = 0;
+    if (!g_t_ext) {
+        g_r_tmp = 11; g_r_addr = 10; g_r_scr = 9;
+        return;
+    }
+    for (int r = 11; r >= 9; r--)
+        if (!(busy >> r & 1))
+            fr[nf++] = r;
+    g_r_tmp = nf > 0 ? fr[0] : -1;
+    g_r_addr = nf > 1 ? fr[1] : -1;
+    g_r_scr = nf > 2 ? fr[2] : -1;
+}
+
 /* The callee-saved VFP registers a function uses, s16 up, `n` of them
  * (always even). On a double-precision unit by their D names, d8 up, as
  * clang and GCC write it for a Cortex-M7: the same words saved to the
@@ -5234,6 +5335,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     for (int pass = 0; pass < 3; pass++) {
     int redo0 = 0;
     g_t_scr_used = 0;
+    t_roles_from(0);            /* r9-r11, or all three free */
     F.fb = T_SP;                 /* until the prologue sets r7 */
     if (pass || restarted) {
         t->len = len0;
@@ -5285,6 +5387,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             fn->var_off[v] = (int)F.slot[v];
     }
     f->code_off = t->len;
+    /* The prologue's scratch: not where a parameter arrives at or is
+     * moved to, nor anything live into the body. */
+    if (g_t_ext) {
+        unsigned busy = t_busy(&F, 0, 0);
+        for (int v = 0; v < fn->nparams && v < fn->nvregs; v++)
+            if (F.loc && F.loc[v] >= 0) {
+                busy |= 1u << F.loc[v];
+                if (F.wide[v])
+                    busy |= 2u << F.loc[v];
+            }
+        t_roles_from(busy);
+    }
 
     /* The register save area goes down FIRST, so it lands immediately
      * below the caller's stack arguments and a single pointer walks
@@ -5543,6 +5657,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     int tail_end = 0;        /* the body's last act is a tail call */
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i] && F.nopush;
+        if (g_t_ext) {
+            if (!F.lv_out)
+                g_t_role_fail = 1;     /* no liveness: nothing is known
+                                        * free, so this attempt cannot be */
+            t_roles_from(t_busy(&F, i, 2));
+        }
         F.lofree = lo_free(&F, i);
         gen_ins(&F, i);
         F.lofree = 0;
@@ -5554,6 +5674,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         tail_end = i == fn->nins - 1 && was_tail;
     }
 
+    t_roles_from(0);            /* nothing is live past the body */
     /* The epilogue -- its code only if something reaches it: not when the
      * body ended in a tail call and no IR_RET jumps here. The push mask
      * is patched either way. */
@@ -5804,6 +5925,12 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * knob fixes them), each with the rename on and off (unless
      * EMBCC_T_LOWREGS fixes it). The first of equal sizes wins.
      *
+     * Before those, on ARMv7-M and ARMv8-M, the same pair choices with
+     * r9-r11 in the pool too (g_t_ext; EMBCC_T_EXT=0/1 forces it), the
+     * rename on. An attempt where some instruction needed a scratch role
+     * that every one of r9-r11 was holding a value at (g_t_role_fail) is
+     * not a candidate; the attempts without r9-r11 never fail that way.
+     *
      * ARMv6-M has no rename to try: every register it computes in is a
      * low one already, so there is no 16-bit form to win (v6m.c does not
      * call t_lowregs), and a second attempt would make the same bytes. */
@@ -5820,31 +5947,56 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     lv[nl++] = g_t_lowregs;
     if (!lr_forced && target_thumb_arch() != 6)
         lv[nl++] = 0;
-    int best = -1, bestlen = 0, last = -1;
+    const char *ek = getenv("EMBCC_T_EXT");
+    int ext_ok = target_thumb_arch() != 6 && !(ek && *ek && atoi(ek) == 0);
+    /* EMBCC_T_EXT=1: an attempt with r9-r11 wins whenever one succeeds,
+     * whatever its size, so tests can drive the path. */
+    int ext_pref = ext_ok && ek && *ek && atoi(ek) != 0;
+    /* (pairs, rename, r9-r11) for each attempt */
+    int tp[12], tl[12], te[12], na = 0;
+    if (ext_ok)
+        for (int a = 0; a < np; a++) {
+            tp[na] = pv[a]; tl[na] = lv[0]; te[na] = 1; na++;
+        }
     for (int a = 0; a < np * nl; a++) {
+        tp[na] = pv[a / nl]; tl[na] = lv[a % nl]; te[na] = 0; na++;
+    }
+    int best = -1, bestlen = 0, last = -1;
+    for (int a = 0; a < na; a++) {
         if (a) {
             t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next;
             st->nstr = nstr; st->ng = ng; st->nf = nf;
         }
-        g_t_pairs = pv[a / nl];
-        g_t_lowregs = lv[a % nl];
+        g_t_pairs = tp[a];
+        g_t_lowregs = tl[a];
+        g_t_ext = te[a];
+        g_t_role_fail = 0;
         gen(fn, t, st, want_debug);
         with = t->len - at;
         last = a;
-        if (best < 0 || with < bestlen) {
+        if (g_t_role_fail)
+            continue;
+        if (ext_pref && !te[a] && best >= 0 && te[best])
+            continue;
+        if (best < 0 || with < bestlen ||
+            (ext_pref && te[a] && !te[best])) {
             best = a;
             bestlen = with;
         }
     }
-    if (best != last) {
+    if (best != last || g_t_role_fail) {
         t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next;
         st->nstr = nstr; st->ng = ng; st->nf = nf;
-        g_t_pairs = pv[best / nl];
-        g_t_lowregs = lv[best % nl];
+        g_t_pairs = tp[best];
+        g_t_lowregs = tl[best];
+        g_t_ext = te[best];
+        g_t_role_fail = 0;
         gen(fn, t, st, want_debug);
     }
     g_t_pairs = 1;
     g_t_lowregs = 1;
+    g_t_ext = 0;
+    t_roles_from(0);
 }
 
 void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
