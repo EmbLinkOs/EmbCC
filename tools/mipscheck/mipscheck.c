@@ -163,6 +163,10 @@ static void vocab(void)
     for (j = 0; j < (int)(sizeof offs / sizeof offs[0]); j++) {
         int t = R[(j + 6) % NR], b = R[(j + 1) % NR];
         V(mips_ll(&C, t, b, (int)offs[j]), "ll $%d, %lld($%d)", t, offs[j], b);
+        V(mips_lwl(&C, t, b, (int)offs[j]), "lwl $%d, %lld($%d)", t, offs[j], b);
+        V(mips_lwr(&C, t, b, (int)offs[j]), "lwr $%d, %lld($%d)", t, offs[j], b);
+        V(mips_swl(&C, t, b, (int)offs[j]), "swl $%d, %lld($%d)", t, offs[j], b);
+        V(mips_swr(&C, t, b, (int)offs[j]), "swr $%d, %lld($%d)", t, offs[j], b);
         V(mips_sc(&C, t, b, (int)offs[j]), "sc $%d, %lld($%d)", t, offs[j], b);
     }
     V(mips_sync(&C, 0), "sync");
@@ -281,7 +285,7 @@ static int check_li(void)
  * type the caller passes, and a truncated value is a real instruction that
  * does something else. Each is provoked here by number, and the golden
  * test checks the process stops rather than emits. */
-#define NREFUSE 20
+#define NREFUSE 21
 static void refuse(int n)
 {
     struct code c = { 0 };
@@ -306,6 +310,7 @@ static void refuse(int n)
     case 17: mips_w(&c, mips_enc_j(3, 0x4000000UL)); break;
     case 18: mips_lui(&c, 2, 0x10000); break;
     case 19: mips_store(&c, 2, 29, 0, 3); break;
+    case 20: mips_lwl(&c, 2, 29, 32768); break;
     default: printf("no refusal %d\n", n); exit(2);
     }
     printf("refusal %d did not fire; %d bytes were emitted\n", n, c.len);

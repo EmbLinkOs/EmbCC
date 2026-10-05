@@ -189,6 +189,15 @@ static const char *reloc_name(int kind)
         case RK_RISCV_PCREL_LO12_I: return "R_RISCV_PCREL_LO12_I";
         default:                  return NULL;
         }
+    case TARGET_MIPS32:
+        switch (kind) {
+        case RK_CALL:        return "R_MIPS_26";       /* jal and j alike */
+        case RK_MIPS_TEXT26: return "R_MIPS_26";
+        case RK_MIPS_HI16:   return "R_MIPS_HI16";
+        case RK_MIPS_LO16:   return "R_MIPS_LO16";
+        case RK_ABS32:       return "R_MIPS_32";
+        default:             return NULL;
+        }
     case TARGET_AVR:
         /* (without this case AVR fell through to x86-64's names) */
         switch (kind) {
@@ -270,6 +279,11 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * default in some assemblers. */
     if (target_get() == TARGET_THUMB)
         ob_str(b, "\t.syntax unified\n\t.thumb\n");
+    /* MIPS: the code is already scheduled -- its delay slots are filled --
+     * and uses $at itself, so the assembler may neither reorder, nor fill
+     * a slot, nor expand a macro through $at. */
+    if (target_get() == TARGET_MIPS32)
+        ob_str(b, "\t.set\tnoreorder\n\t.set\tnoat\n\t.set\tnomacro\n");
     ob_str(b, "\t.text\n");
     long prev_end = 0;
     /* The most recent auipc's local label, for the addi that pairs with
@@ -384,6 +398,45 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
              * relocation cannot be spelled in a .byte -- and those forms
              * (a call, a rip-relative lea, an absolute imm32) have one
              * encoding each, so the assembler has nothing to choose. */
+            /* MIPS: a relocated instruction is written symbolically --
+             * `jal f`, `lui $2, %hi(g)`, `addiu $2, $2, %lo(g)` -- because
+             * llvm-mc's MIPS .reloc knows none of R_MIPS_26, HI16 or LO16.
+             * Each of these has exactly one encoding, so the assembler has
+             * nothing to choose, and a REL assembler stores the addend in
+             * the field as EmbCC's object writer does. */
+            if (st && target_get() == TARGET_MIPS32 && len == 4) {
+                unsigned long w = (unsigned long)text[pc] |
+                                  ((unsigned long)text[pc + 1] << 8) |
+                                  ((unsigned long)text[pc + 2] << 16) |
+                                  ((unsigned long)text[pc + 3] << 24);
+                int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
+                    rt = (int)(w >> 16) & 31;
+                char sym[200];
+                long add = st->addend;
+                if (st->kind == RK_MIPS_TEXT26) {
+                    snprintf(sym, sizeof sym, "%s", asym(f->name));
+                    add = (long)st->str_off - lo;
+                } else if (st->name) {
+                    snprintf(sym, sizeof sym, "%s", st->name);
+                } else {
+                    str_label(sym, sizeof sym, iu, st->str_off);
+                }
+                if ((st->kind == RK_CALL || st->kind == RK_TAIL ||
+                     st->kind == RK_MIPS_TEXT26) && (op == 2 || op == 3))
+                    ob_fmt(b, "\t%s\t%s%+ld\n", op == 3 ? "jal" : "j",
+                           sym, add);
+                else if (st->kind == RK_MIPS_HI16 && op == 0x0f)
+                    ob_fmt(b, "\tlui\t$%d, %%hi(%s%+ld)\n", rt, sym, add);
+                else if (st->kind == RK_MIPS_LO16 && op == 0x09)
+                    ob_fmt(b, "\taddiu\t$%d, $%d, %%lo(%s%+ld)\n", rt, rs,
+                           sym, add);
+                else
+                    diag_fatal(srcname, 0, "-S cannot spell a MIPS "
+                               "relocation of kind %d on instruction "
+                               "0x%08lx", st->kind, w);
+                pc += len;
+                continue;
+            }
             ob_str(b, "\t.byte\t");
             for (int k = 0; k < len; k++)
                 ob_fmt(b, "%s0x%02x", k ? "," : "",

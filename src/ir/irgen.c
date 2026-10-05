@@ -1135,11 +1135,6 @@ int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
     return iu->nstrs++;
 }
 
-static int intern_str(const char *bytes, int len)
-{
-    return ir_intern_string(cur_unit, bytes, len);
-}
-
 /* Microsoft x64: an aggregate rides in its register slot only at
  * exactly 1, 2, 4 or 8 bytes; every other size travels BY REFERENCE,
  * with a copy the caller makes. Asked once here so the caller's
@@ -1535,7 +1530,8 @@ static int atomic_arm(void)
 {
     int t = target_get();
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
-           t == TARGET_RISCV32 || t == TARGET_RISCV64;
+           t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
+           t == TARGET_MIPS32;        /* MIPS32 is weakly ordered: sync */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -2421,8 +2417,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_STR: {
         /* The literal arrives encoded at its real width (lit_encode): num
          * elements of str_width bytes each, NUL included. */
+        /* ...and aligned to that width: an array of wchar_t is as
+         * aligned as a wchar_t, and a target whose word loads trap on a
+         * misaligned address (MIPS) read L"..."[0] with one. */
         int w = e->str_width ? e->str_width : 1;
-        e->str_index = intern_str(e->name, (int)e->num * w);
+        e->str_index = ir_intern_aligned(cur_unit, e->name, (int)e->num * w,
+                                         w);
         struct ir_ins *i = emit(fn);
         i->op = IR_STRADDR;
         i->label = e->str_index;
@@ -2518,9 +2518,13 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
                         : emit_load(fn, addr, t);
         int old = -1;
         if (e->is_post) {
+            /* At the value's own width: a MOV that says four bytes
+             * copies four on a 32-bit target, and `e = d--` of a double
+             * kept half of the old value (MIPS and RV32 at -O0). */
             struct ir_ins *save = emit(fn);
             save->op = IR_MOV;
             save->a = cur;
+            save->w = w;
             save->dst = old = new_temp(fn);
         }
         int sum;
@@ -2657,6 +2661,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_riscv(fn, e);
         if (target_get() == TARGET_AVR)
             return irg_va_arg_avr(fn, e);
+        if (target_get() == TARGET_MIPS32)
+            return irg_va_arg_mips(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -3781,6 +3787,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_riscv(fn, s);
             else if (target_get() == TARGET_AVR)
                 irg_asm_avr(fn, s);
+            else if (target_get() == TARGET_MIPS32)
+                irg_asm_mips(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;

@@ -126,6 +126,14 @@ void mips_ins(struct code *c, int rt, int rs, int pos, int size);
  * lbu/lhu; the offset is a signed 16-bit field. */
 void mips_load(struct code *c, int rt, int base, int off, int size, int sign);
 void mips_store(struct code *c, int rt, int base, int off, int size);
+/* The unaligned halves (Release 2 has them; Release 6 removed them).
+ * Little-endian: a word at any address is `lwl rt, off+3(b)` then
+ * `lwr rt, off(b)`, and stored the same way with swl/swr. rt must not be
+ * the base for the load pair -- the first half writes it. */
+void mips_lwl(struct code *c, int rt, int base, int off);
+void mips_lwr(struct code *c, int rt, int base, int off);
+void mips_swl(struct code *c, int rt, int base, int off);
+void mips_swr(struct code *c, int rt, int base, int off);
 /* The load-linked / store-conditional pair. sc writes 1 to rt on success
  * and 0 on failure. */
 void mips_ll(struct code *c, int rt, int base, int off);

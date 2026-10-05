@@ -26,7 +26,8 @@ enum {
     OP_ORI = 0x0d, OP_XORI = 0x0e, OP_LUI = 0x0f, OP_COP0 = 0x10,
     OP_SPECIAL2 = 0x1c, OP_SPECIAL3 = 0x1f,
     OP_LB = 0x20, OP_LH = 0x21, OP_LW = 0x23, OP_LBU = 0x24, OP_LHU = 0x25,
-    OP_SB = 0x28, OP_SH = 0x29, OP_SW = 0x2b, OP_LL = 0x30, OP_SC = 0x38
+    OP_SB = 0x28, OP_SH = 0x29, OP_SW = 0x2b, OP_LL = 0x30, OP_SC = 0x38,
+    OP_LWL = 0x22, OP_LWR = 0x26, OP_SWL = 0x2a, OP_SWR = 0x2e
 };
 enum {                                              /* SPECIAL's funct */
     F_SLL = 0x00, F_SRL = 0x02, F_SRA = 0x03, F_SLLV = 0x04, F_SRLV = 0x06,
@@ -300,6 +301,23 @@ void mips_store(struct code *c, int rt, int base, int off, int size)
         internal_error("mips: a %d-byte store", size);
     }
     mips_w(c, mips_enc_i(op, base, rt, imm16(off, 1, "store offset")));
+}
+
+void mips_lwl(struct code *c, int rt, int base, int off)
+{
+    mips_w(c, mips_enc_i(OP_LWL, base, rt, imm16(off, 1, "lwl offset")));
+}
+void mips_lwr(struct code *c, int rt, int base, int off)
+{
+    mips_w(c, mips_enc_i(OP_LWR, base, rt, imm16(off, 1, "lwr offset")));
+}
+void mips_swl(struct code *c, int rt, int base, int off)
+{
+    mips_w(c, mips_enc_i(OP_SWL, base, rt, imm16(off, 1, "swl offset")));
+}
+void mips_swr(struct code *c, int rt, int base, int off)
+{
+    mips_w(c, mips_enc_i(OP_SWR, base, rt, imm16(off, 1, "swr offset")));
 }
 
 void mips_ll(struct code *c, int rt, int base, int off)

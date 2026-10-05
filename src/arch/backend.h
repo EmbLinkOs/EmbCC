@@ -112,6 +112,17 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
  * mul, div and lr/sc as <unknown>. A malloc'd buffer the caller frees. */
 unsigned char *riscv_build_attributes(size_t *len);
 
+/* And for MIPS32r2, little-endian o32 soft-float (PIC32's core). */
+void codegen_unit_mips(struct ir_unit *iu, struct code *text,
+                       struct extcall **ext, int *next,
+                       struct strsite **strs, int *nstrs,
+                       struct gsite **gs, int *ngs,
+                       struct fsite **fs, int *nfs, int want_debug,
+                       int optimize, int no_sse, int regalloc);
+/* The 24-byte .MIPS.abiflags payload EmbCC's objects carry: MIPS32r2,
+ * 32-bit GPRs, no FPU, the soft-float ABI -- clang's for the same flags. */
+void mips_build_abiflags(unsigned char out[24]);
+
 /* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
  * a register and every value is a run of them. Same signature all the
  * same, so the driver still picks one on --target= and nothing downstream

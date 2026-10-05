@@ -59,9 +59,23 @@ nothing else to schedule around.
 
 Branches are PC-relative from the delay slot (target = PC + 4 + off16*4,
 +-128 KiB). Inside a function every branch is resolved by the compiler,
-with no relocation; a function larger than that range is refused by name.
-`j`/`jal` carry 26 bits of an absolute word address within the current
-256 MiB region and always take a relocation.
+with no relocation. One that does not reach takes the long form -- the
+inverse branch over a `j` relocated against the function's own section
+(`R_MIPS_26`, addend the label's offset) -- and the function is generated
+again until nothing new fails. `j`/`jal` carry 26 bits of an absolute word
+address within the current 256 MiB region and always take a relocation;
+calls within the unit are `jal`s relocated like any other.
+
+## Misaligned accesses
+
+A word or halfword access to an unaligned address traps (Address Error),
+where x86, ARMv7-M and QEMU's RISC-V read it. C guarantees alignment
+except for a packed structure's member, and irgen marks the accesses it
+can promise (`ir_ins.natural`); every other load or store of 2 or 4 bytes
+goes through `lwl`/`lwr` (`swl`/`swr`) or two byte accesses, and block
+copies whose ends are not known to be word-aligned likewise. Wide string
+literals are interned aligned to their element, which the other targets
+had never needed.
 
 ## HI/LO and `mul`
 
@@ -136,8 +150,24 @@ hard-float code. EmbLD drops `.MIPS.abiflags`, `.reginfo`, `.pdr` and
 
 ## What the first backend refuses
 
-By name, with the IR instruction: computed `goto`, `__int128` (it does
-not exist on ILP32), atomics narrower than four bytes, jump tables (dense
-switches stay decision trees until `IR_SWITCH` is lowered), a function
-whose branches exceed +-128 KiB, file-scope and naked-function assembly,
-and interrupt attributes.
+By name, with the IR instruction: computed `goto`; atomics narrower or
+wider than a word (`ll`/`sc` are word-sized); `__builtin_frame_address`
+and `__builtin_return_address` (no frame-pointer chain); jump tables (a
+dense `switch` stays a decision tree, `target_jump_tables()`); `__int128`
+(it does not exist on ILP32); naked and interrupt functions, file-scope
+assembly with instructions and `.s` files (there is no MIPS file
+assembler yet); a scalar local aligned beyond the 8-byte stack; C++ (the
+C++ front end lays out LP64 only). Every MIPS flag other than the one
+configuration emitted (MIPS32r2, little-endian, o32, soft float,
+`-mno-abicalls`, `-G0`) is refused by the driver.
+
+## Tests
+
+| Test | What it checks |
+| --- | --- |
+| `tests/golden/mips-encoding.sh` | every encoder form against `llvm-mc -show-encoding`; `mips_li` executed; every range check |
+| `tests/golden/mips-exec.sh` | `tests/exec/*.c` on the malta board at -O0, -O1, -O2 and -Os; the LP64-dependent programs against clang's result on the same board |
+| `tests/golden/mips-abi.sh` | calls in both directions against clang, with the shared embedded ABI programs and the o32-specific ones |
+| `tests/golden/mips-link.sh` | EmbLD's REL relocations, the AHL rule over every carry case, EmbCC's own far addends, and the link refusals |
+| `tests/golden/mips-asm.sh` | the inline-asm vocabulary against llvm-mc, asm programs on the board, `-S` reassembled by llvm-mc |
+| `tests/golden/mips-refuse.sh` | the object's header and flags, the accepted and refused options and constructs |
