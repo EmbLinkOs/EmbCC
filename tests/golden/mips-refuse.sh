@@ -99,21 +99,10 @@ refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_addr
     'void *f(void){ return __builtin_frame_address(0); }'
 refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
-refc "a naked function" '__attribute__((naked)) is not supported' \
-    'void __attribute__((naked)) f(void){ __asm__("jr $ra; nop"); }'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
 refc "a 16-aligned scalar local" 'needs 16-byte alignment and the stack only guarantees 8' \
     'int f(void){ _Alignas(16) int x = 1; return x; }'
-refc "file-scope asm with an instruction" 'file-scope asm instruction' \
-    '__asm__(".globl g\ng: jr $ra\nnop\n");'
-printf '.text\n.globl f\nf: jr $ra\nnop\n' > "$out/a.s"
-if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err"; then
-    echo "an assembly file was accepted"; exit 1
-fi
-grep -q 'no assembly-file support for mipsel-none-elf' "$out/as.err" || {
-    echo "an assembly file was refused, but not by name:"; cat "$out/as.err"
-    exit 1; }
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
     echo "C++ was accepted"; exit 1
@@ -121,5 +110,5 @@ fi
 grep -q 'C++ is not yet supported for mipsel-none-elf' "$out/cxx.err" || {
     echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
 echo "narrow and 8-byte atomics, computed goto, the frame and return address,"
-echo "__int128, naked and interrupt functions, an over-aligned scalar, file-scope"
-echo "and file assembly and C++ are each refused by name"
+echo "__int128, interrupt functions, an over-aligned scalar and C++ are each"
+echo "refused by name (assembly is mips-gas.sh's and mips-exc.sh's)"

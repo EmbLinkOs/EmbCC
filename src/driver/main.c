@@ -1070,7 +1070,7 @@ static int blocks_by_gas(void)
 {
     enum target_arch a = target_get();
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR;
+           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1162,7 +1162,8 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         const struct expr *e = s->kind == STMT_EXPR ? s->expr : NULL;
         if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
             enum target_arch t = target_get();
-            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ? "bl" : "call",
+            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ? "bl"
+                                 : t == TARGET_MIPS32 ? "jal" : "call",
                    e->callee->name);
             continue;
         }
@@ -2678,6 +2679,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                       (Elf64_Xword)rodata_len,
                                       (Elf64_Xword)rodata_align);
     int data_ndx = 0, bss_ndx = 0;
+    /* MIPS: .data and .bss at 16 at least, as clang's and GNU as's MIPS
+     * objects have them -- so an object -S reassembled lays out as -c's */
+    if (ta == TARGET_MIPS32) {
+        if (data_align < 16) data_align = 16;
+        if (bss_align < 16) bss_align = 16;
+    }
     if (data_len)
         data_ndx = elfw_add_section(w, ".data", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_WRITE, data,
