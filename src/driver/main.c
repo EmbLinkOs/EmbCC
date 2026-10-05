@@ -111,6 +111,7 @@ static void print_options(FILE *out)
       "  -fno-jump-tables             no switch through a table of addresses\n"
       "  -fno-inline-functions        inline only what is declared inline\n"
       "  -fcommon                     tentative definitions are COMMON (C, ELF)\n"
+      "  -fsingle-precision-constant  1.0 is a float (C)\n"
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
@@ -373,6 +374,9 @@ static const char *dep_file, *dep_target;
  * else saying where it goes) is a COMMON symbol, which the linker merges
  * with the others of its name, instead of a .bss definition. ELF only. */
 static int g_fcommon;
+/* -fsingle-precision-constant: an unsuffixed floating constant is a
+ * float (C only; see the check after the arguments). */
+static int g_single_prec;
 /* -specs=FILE / --specs=FILE: a GCC driver specs file, named so the link
  * can say once that EmbCC's own libraries are linked instead. */
 static const char *g_specs;
@@ -4162,6 +4166,11 @@ int main(int argc, char **argv)
              * each function it wrote to stay a function it can find
              * in the image. */
             opt_set_inline_declared_only(argv[i][2] == 'n');
+        } else if (strcmp(argv[i], "-fsingle-precision-constant") == 0 ||
+                   strcmp(argv[i], "-fno-single-precision-constant") == 0) {
+            /* Changes TYPES -- sizeof(1.0) is 4, 0.1 is 0.1f -- so it
+             * is implemented (src/parse/parse.c), not nodded at. */
+            g_single_prec = argv[i][2] == 's';
         } else if (strcmp(argv[i], "-finline-small-functions") == 0 ||
                    strcmp(argv[i], "-fno-inline-small-functions") == 0 ||
                    strncmp(argv[i], "-finline-limit=", 15) == 0 ||
@@ -4771,6 +4780,18 @@ int main(int argc, char **argv)
     irgen_set_sanitize(san_mask);
     irgen_set_opt_size(opt_for_size);
     lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
+    /* The C parser types the constants (parse.c); the C++ front end
+     * types its own, and resolves overloads by them before lowering to
+     * C, so the flag would reach one and not the other. */
+    if (g_single_prec) {
+        if (lang_cxx) {
+            fprintf(stderr, "embcc: error: -fsingle-precision-constant is "
+                            "supported for C, not C++: the C++ front end "
+                            "would still type 1.0 as double\n");
+            return 1;
+        }
+        parse_set_single_precision_constant(1);
+    }
     if (lang_cxx) {
         /* These analyses run in the C front end, over the C that C++ lowers
          * to — where a template instantiated from a header is attributed to
