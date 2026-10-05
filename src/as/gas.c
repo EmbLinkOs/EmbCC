@@ -3364,10 +3364,15 @@ int gas_assemble_block(struct topasm *ta)
                      : s->is_object ? ASMSYM_OBJECT : ASMSYM_UNTYPED;
             as->size = s->size;
         }
-        /* its relocations, with the ELF type the assembler chose; a
-         * field against an assembler-local label names the label's
-         * offset in this block instead, which the driver turns into one
-         * against .text */
+        /* its relocations, with the ELF type the assembler chose. A
+         * field against a label this block defines and does not export
+         * names the label's offset in this block instead, which the
+         * driver turns into one against .text: the block's own label,
+         * whatever C or another block calls by the same name. Handed
+         * over by name, `loop` in a second naked function reached the
+         * first one's, and a label named like a C function reached the
+         * function. A Thumb function's address carries its bit, as the
+         * driver gives it to a named one. */
         ta->rels = xcalloc((size_t)(g.nfix ? g.nfix : 1), sizeof *ta->rels);
         for (int i = 0; i < g.nfix; i++) {
             const struct fixup *f = &g.fix[i];
@@ -3377,10 +3382,12 @@ int gas_assemble_block(struct topasm *ta)
             r->addend = f->addend;
             r->elf_type = f->type;
             r->kind = ASMREL_ABS32;
-            if (s && !s->is_global && s->sec == SEC_TEXT &&
-                !strncmp(s->name, ".L", 2)) {
+            if (s && !s->is_global && s->sec == SEC_TEXT) {
                 r->target = NULL;                 /* the block itself */
                 r->addend += s->value;
+                if (t->machine == EM_ARM && s->is_func &&
+                    f->type == R_ARM_ABS32)
+                    r->addend |= 1;
             } else {
                 r->target = xstrndup(f->sym, strlen(f->sym));
             }

@@ -619,8 +619,9 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
  * it is written as a .L label of its block's own, `.Lasm<N>.<name>`,
  * which keeps it out of the reassembled symbol table too and cannot
  * clash with a label of another block or of C. A field the object
- * relocates against some other place in a block -- an assembler-local
- * label -- names the block's start, `.Lasm<N>`, plus the distance; or,
+ * relocates against a place in its own block (src/as/gas.c hands those
+ * over as offsets) names the nearest of the block's labels before the
+ * place -- its start, `.Lasm<N>`, at least -- plus the distance; or,
  * where it must name a label AT the place (bexact: an ARM .reloc, and
  * the auipc a RISC-V low half names), a label made there,
  * `.Lasm<N>_<offset>`.
@@ -759,8 +760,14 @@ static void bplace(struct bstate *s, int blk, long x, long bit, int exact,
             return;
         }
     }
-    r->sym = bname(".Lasm%d", blk, NULL, 0);
-    r->addend = x + bit;
+    /* the nearest of the block's own labels before it, for the reader */
+    const struct blabel *near = NULL;
+    for (int i = 0; i < s->nlab && x >= 0 && x <= ta->codelen; i++)
+        if (s->lab[i].blk == blk && !s->lab[i].sym && s->lab[i].off <= x &&
+            (!near || s->lab[i].off > near->off))
+            near = &s->lab[i];
+    r->sym = near ? near->name : bname(".Lasm%d", blk, NULL, 0);
+    r->addend = x - (near ? near->off : 0) + bit;
 }
 
 /* What a block's field names, resolved as src/driver/main.c resolves it
