@@ -298,13 +298,15 @@ clang's AVR struct convention is not avr-gcc's.
 | `thumbv8m-target` | ARMv8-M Mainline (Cortex-M33) as a level of the Thumb target: triples, macros, object attributes, an image run on the M33 board |
 | `thumb-codegen` | objects are ELF32 ARM, every `.text` instruction decodes, relocations are ARM ones, refusals fire by name |
 | `thumb-encoding` | every Thumb-2 encoder, disassembled by `llvm-objdump` and compared with what it was meant to be |
-| `thumb-vfp` | the VFP instruction vocabulary against `llvm-mc` |
+| `thumb-vfp` | the VFP instruction vocabulary against `llvm-mc`, for the Cortex-M4F's unit and the Cortex-M7's |
 | `thumb-asm` | the inline-assembly vocabulary against `llvm-mc`, operand handling, refusals |
 | `thumb-exec` | programs compiled by EmbCC and by clang, linked by `embld`, run on the Cortex-M3 board at `-O0`, `-O1`, `-O2`, `-Os`; 64-bit, float, aggregate, varargs and ABI programs against the host |
 | `thumb-relax` | 16-bit branch forms at both sides of every reach limit |
 | `thumb-far` | conditional branches beyond the 1 MB reach of `B<c>.W` |
 | `thumb-fpu` | single-precision arithmetic on the Cortex-M4F FPU, run on an M4 board |
 | `thumb-hardfp` | `-mfloat-abi=hard` against clang in both directions on the M4F and M33 boards |
+| `thumb-m7-dp` | `-mfpu=fpv5-d16`: the flags, macros and attributes against clang's, the `.f64` code shape, double programs against the host at four levels on the Cortex-M7 board, AAPCS-VFP against clang both ways, softfp against soft-float objects |
+| `thumb-m7-exec` | `tests/exec` at `-O2` on the Cortex-M7 board with doubles in hardware and lib/libc built for it, against the same corpus with doubles in software |
 | `thumb-atomic` | C11 atomics and `__sync` builtins under a SysTick interrupt updating the same variables |
 | `thumb-calleesave` | every function preserves r4-r11 and sp, checked by an assembly probe |
 | `arm-abi-tags` | `.ARM.attributes` contents and `embld`'s refusal to link mismatched float ABIs |
@@ -535,6 +537,7 @@ scaffolding.
 | `thumb` | `qemu-system-arm -M lm3s6965evb -cpu cortex-m3` | UART | output sentinel | EmbCC and `embld` |
 | `thumb-m4f` | `qemu-system-arm -M mps2-an386 -cpu cortex-m4` (with FPU) | UART | output sentinel | EmbCC and `embld` |
 | `thumb-m33` | `qemu-system-arm -M mps2-an505 -cpu cortex-m33` | UART | output sentinel | EmbCC and `embld` |
+| `thumb-m7` | `qemu-system-arm -M mps2-an500 -cpu cortex-m7` (double-precision FPU) | UART | output sentinel; `main`'s value printed as `==EXIT n ==`, through `exit()` when `exec.c` links lib/libc | EmbCC and `embld` |
 | `riscv` | `qemu-system-riscv32` or `-riscv64 -M virt -bios none -m 8` | UART | output sentinel; `boot.c` stops QEMU through the SiFive test device | EmbCC and `embld` |
 | `avr` | `qemu-system-avr -M uno` (ATmega328P), image loaded with `-bios` | USART0 | output sentinel | EmbCC (including `boot.S`) and `embld` |
 | `linux` | a real Linux kernel under QEMU, the program as `/init` | the console | the kernel's panic message for PID 1 carries the exit status | the program is a static `*-linux-gnu` image |
@@ -545,7 +548,7 @@ Exit statuses from `run.sh`:
   run timed out, and `125` when the guest crashed or reset. Address zero is
   unmapped in both, so a null dereference faults; on aarch64 the vector
   table prints `ESR`, `FAR` and `ELR` before exiting 125.
-- `thumb`, `thumb-m4f`, `thumb-m33`, `riscv` and `avr` always exit 0. A
+- `thumb`, `thumb-m4f`, `thumb-m7`, `thumb-m33`, `riscv` and `avr` always exit 0. A
   bare-metal image on these boards has nowhere to return to, so the run is
   judged by its output: each test program prints a sentinel when `main`
   finishes (`==END==` in the shared embedded programs), and the test fails
@@ -565,7 +568,8 @@ QEMU's exit.
 hard timeout. With `--until TEXT` it polls the guest's output and kills
 QEMU as soon as `TEXT` appears, which turns a run that would cost the full
 timeout into one that ends when the program does. The `thumb-m33` and
-`avr` run scripts pass `EMBCC_QEMU_UNTIL` through as `--until`.
+`avr` run scripts pass `EMBCC_QEMU_UNTIL` through as `--until`; the
+`thumb-m7` one does too, and stops at its own `==EXIT` line without it.
 
 `tests/harness/crt.c` is the start-up shared by the `x86_64` and `aarch64`
 harnesses: it registers the unwind tables, runs `.ctors` and
@@ -578,7 +582,7 @@ handlers and stdio flushing run.
 |---|---|---|
 | the target's gcc (`x86_64-elf-gcc` or host `cc`, `aarch64-elf-gcc`) | what a C program computes; half of each SysV/AAPCS64 ABI pairing; warnings that must agree | `agrees-with-gcc`, `optimizer`, `regalloc-O2`, `exec-Os`, `sysv-abi`, `struct-abi-edges`, `cross-varargs`, `complex-abi`, `int128-abi`, `ldouble-abi`, `format-check`, `warnings` |
 | the reference g++ and libstdc++ (`tools/build-ref-gxx.sh`) | what a C++ program computes; mangling, layout and EH interoperability | `cxx-agrees-with-gxx`, `cxx-abi`, `cxx-libstdcxx`, `cxx-std`, `cxx-format-check`, `eh-regions`, `unwind-through` |
-| clang | the embedded targets' reference compiler; Win64 and Apple arm64 conventions; predefined macros and data models for the targets gcc is not installed for | `thumb-exec`, `riscv-exec`, `mips-abi`, `mips-exec`, `thumb-hardfp`, `win-abi`, `darwin-abi`, `predef`, `stdint`, `struct-layout` |
+| clang | the embedded targets' reference compiler; Win64 and Apple arm64 conventions; predefined macros and data models for the targets gcc is not installed for | `thumb-exec`, `riscv-exec`, `mips-abi`, `mips-exec`, `thumb-hardfp`, `thumb-m7-dp`, `win-abi`, `darwin-abi`, `predef`, `stdint`, `struct-layout` |
 | `llvm-mc` | the bytes of every instruction form the assemblers and encoders produce | `thumb-asm`, `thumb-vfp`, `riscv-asm`, `riscv-compressed`, `riscv-encoding`, `mips-encoding`, `mips-asm`, `mips-link`, `avr-encoding`, `avr-asm` |
 | `llvm-objdump`, `aarch64-elf-objdump`, `objdump` | what the emitted bytes decode to | `thumb-encoding`, `thumb-codegen`, `arm64-encoding`, `inline-asm-kernel`, `embdbg-disasm` |
 | `aarch64-elf-as`, the GNU assembler | assembling the same text EmbCC assembles; reassembling `-S` output | `arm64-asm`, `asm-S` |
@@ -609,7 +613,7 @@ comparison runs the other way: the reference disassembles EmbCC's bytes.
 | `EMBCC_TARGET` | the target the suite runs for; read by `tests/lib.sh`. Not read by the compiler (see `EMBCC_DEFAULT_TARGET`) |
 | `EMBCC_JOBS` | how many shell tests run at once |
 | `EMBCC_QEMU_TIMEOUT` | seconds a guest may run (runner default 20; the embedded `run.sh` scripts default to 10 when run alone) |
-| `EMBCC_QEMU_UNTIL` | a sentinel that ends a `thumb-m33` or `avr` run as soon as the guest prints it |
+| `EMBCC_QEMU_UNTIL` | a sentinel that ends a `thumb-m33`, `thumb-m7` or `avr` run as soon as the guest prints it |
 | `EMBCC_X86_RUNNER` | `host` or `qemu`: where x86-64 programs run |
 | `EMBCC_KM1` | `1` enables `embbuild-kernel` |
 | `EMBCC_LIBSTDCXX` | `1` enables `cxx-libstdcxx-embcc`; `EMBCC_LIBSTDCXX_LIB` names a library already built |

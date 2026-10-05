@@ -60,8 +60,13 @@ for O in -O0 -O1 -O2 -Os; do
     "$EMBCC" $T -nostdlib -T "$d/lm3s.ld" $objs "$out/rt/librt.a" \
         -o "$o/fw.elf" 2> "$o/link.err" ||
         { cat "$o/link.err"; fail "$O: the link"; }
+    # -icount: SysTick counts executed instructions rather than following
+    # the host's clock. Without it the 80 ticks the receiver must wait
+    # were measured against host time, and under load the run printed
+    # "waited enough 0" (seen at -O0 during a full test matrix).
     sh tests/harness/qrun.sh 20 --until done "$QARM" -M lm3s6965evb \
-        -cpu cortex-m3 -nographic -kernel "$o/fw.elf" > "$o/run.txt" 2>&1
+        -cpu cortex-m3 -nographic -icount shift=2 -kernel "$o/fw.elf" \
+        > "$o/run.txt" 2>&1
     tr -d '\r' < "$o/run.txt" | sed -n '1,/^done$/p' > "$o/got.txt"
     cmp -s "$o/got.txt" "$out/want.txt" || {
         echo "--- got"; cat "$o/run.txt"; echo "--- want"; cat "$out/want.txt"

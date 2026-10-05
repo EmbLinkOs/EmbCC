@@ -295,7 +295,7 @@ bytes, with an LLVM or GNU tool.
 | AArch64 `emit.c` | `tests/golden/aarch64/arm64-encoding.sh` | `tools/a64check/a64check.c` | `aarch64-elf-objdump` | disassembly text of each word against the intended instruction |
 | AArch64 `asm.c` | `tests/golden/aarch64/arm64-asm.sh` | `tools/a64check/a64asmcheck.c` | `aarch64-elf-as -march=armv8.2-a` | bytes, for the kernel's templates and every vocabulary entry |
 | Thumb `emit.c` | `tests/golden/thumb-encoding.sh` | `tools/thumbcheck` | `llvm-objdump` | disassembly text; `--immediates` sweeps every modified immediate |
-| Thumb VFP | `tests/golden/thumb-vfp.sh` | `tools/vfpcheck` | `llvm-mc -triple=thumbv7em-none-eabihf -mattr=+vfp4` | bytes |
+| Thumb VFP | `tests/golden/thumb-vfp.sh` | `tools/vfpcheck` | `llvm-mc -triple=thumbv7em-none-eabihf`, with `-mattr=+vfp4` and again with `-mattr=+fp-armv8d16` | bytes |
 | Thumb `asm.c` | `tests/golden/thumb-asm.sh` | `tools/tasmcheck` | `llvm-mc` | bytes, for every entry of the assembler's own tables |
 | RISC-V `emit.c` | `tests/golden/riscv-encoding.sh` | `tools/riscvcheck` (`--rv32`, `--rv64`) | `llvm-mc --disassemble -mattr=+m` | disassembly text; `--li32`/`--li64` execute `rv_li` sequences in an interpreter; `--refuse` checks the range checks fire |
 | RISC-V compression | `tests/golden/riscv-compressed.sh` | `tools/riscvcheck` (`--csweep32`, `--csweep64`) | `llvm-mc -mattr=+m,+c` | bytes of `rv_compress` against llvm-mc's compression of the same instruction |
@@ -815,6 +815,25 @@ written with `wreg`/`wr`/`wrote`; `rd64`/`wr64` handle register pairs.
   single-precision arithmetic, negation, square root, comparisons
   (`vcmp`/`vcmpe` and `vmrs APSR_nzcv`) and int32 conversions run on the
   FPU, on values in s16-s31. Doubles still use the soft-float helpers.
+- **With the double-precision unit** (`-mfpu=fpv5-d16`, the Cortex-M7's;
+  `target_thumb_fpu_dp()`), `fp_on_vfp` also takes the eight-byte
+  arithmetic, comparisons, `IR_SQRT`, the int32 conversions and
+  `IR_F2F`, as `.f64` instructions with d0/d1 as scratch. A double the
+  FPU computes with gets a d register of its own: `t_double_map` picks
+  them (operands and results of those, call arguments and results, double
+  locals, and the bit casts and `and`/`xor` of the sign bit that fabs and
+  negation become, which are `vabs.f64`/`vneg.f64` there), and an
+  allocation pass over d8-d15 (`T_DPOOL`, `THUMB_DRA`) runs before the
+  floats' pass, which `ra_reserve` keeps off the s registers each double
+  holds over its live range. `floc` names a double's low single, so
+  `t_dreg` is `floc >> 1`, and every slot check covers doubles too.
+  `rd64`/`wr64` reach a d register with one `vmov r, r, d`, so every
+  64-bit integer path works on one; copies, `IR_SELECT`, loads and stores
+  (`vldr`/`vstr`, with `memoff` folded for eight-byte accesses), constants
+  (`vmov.f64 #imm` where VFPExpandImm reaches) and the prologue's
+  parameters go to and from d registers directly. The 64-bit integer
+  conversions are still helper calls. The prologue saves d8 up as
+  `vpush {d8-...}`.
 - **Atomics** are `dmb`, an `ldrex`/`strex` loop (status in lr), `dmb`;
   compare-and-swap adds `clrex` on failure. Atomics wider than four bytes
   are refused (`an atomic wider than four bytes (ARMv7-M has no doubleword exclusive; GCC calls libatomic for these)`).
@@ -846,7 +865,8 @@ copies are straight-line up to 4092 bytes and a loop beyond.
 
 Functions are halfword-aligned (4-byte aligned when they contain inline
 asm), padded with `nop`. The prologue is `push {r0-r3}` in a variadic
-function, `push {mask}`, `vpush {s16-...}` with an FPU, `sub sp, #N`,
+function, `push {mask}`, `vpush {s16-...}` with an FPU (`vpush {d8-...}`
+with the double-precision one), `sub sp, #N`,
 `mov r7, sp` with `alloca`, the sret pointer stored, and the parameters
 placed. The push mask contains the used scratch registers among r9-r11,
 the allocator's callee-saved registers, and lr; when the register count
@@ -890,8 +910,9 @@ an aggregate). A variadic call always uses the base convention.
 **Float ABI selection** (`arm_float_resolve` in the driver):
 `-mfloat-abi=soft` (the default) emits no FPU instructions;
 `softfp` uses the FPU with the base convention; `hard` uses the FPU and
-AAPCS-VFP. `-mfpu=` accepts `fpv4-sp-d16` (ARMv7E-M) and `fpv5-sp-d16`
-(ARMv8-M).
+AAPCS-VFP. `-mfpu=` accepts `fpv4-sp-d16` and `fpv5-d16` (ARMv7E-M; the
+latter only with `-mcpu=cortex-m7` when a CPU is named, and implied by
+`-mcpu=cortex-m7` with an `-eabihf` triple) and `fpv5-sp-d16` (ARMv8-M).
 
 Register arguments, pair halves, and the operands of 64-bit and
 soft-float helper calls are placed with `ra_parallel_move` (r9 breaks

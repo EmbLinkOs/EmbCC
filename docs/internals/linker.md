@@ -548,7 +548,7 @@ only what `-Wl,` and `-Xlinker` give it: see
 |---|---|---|
 | `embcc FILE -o OUT` | none, unless given with `-Wl,` | x86-64 program at `0x400000` |
 | `tools/gen-kernel-manifest.sh` | `-e _start -Ttext 0xFFFFFFFF80100000 --lma-offset 0xFFFFFFFF80000000` | the higher-half EmbLinkOS kernel |
-| `tests/harness/thumb/link.sh`, `thumb-m4f/link.sh` | `-e reset -Ttext 0x0 -Tdata 0x20000000` | ARMv7-M firmware: flash at 0, SRAM at `0x20000000` |
+| `tests/harness/thumb/link.sh`, `thumb-m4f/link.sh`, `thumb-m7/link.sh` | `-e reset -Ttext 0x0 -Tdata 0x20000000` | ARMv7-M firmware: flash at 0, SRAM at `0x20000000` |
 | `tests/harness/thumb-m33/link.sh` | `-e reset -Ttext 0x10000000 -Tdata 0x10100000` | ARMv8-M firmware in the secure alias of the MPS2-AN505's SSRAM |
 | `tests/harness/riscv/link.sh` | `-e _start -Ttext 0x80000000 -Tstack 0x80800000` | RISC-V image loaded into RAM on QEMU `virt` |
 | `tests/harness/avr/link.sh` | `-e __vectors -Ttext 0x0 -Tdata 0x100 --rom-limit 32768` | ATmega328P firmware |

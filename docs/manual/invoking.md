@@ -691,7 +691,10 @@ What each level and pass does is described in
 ### `-O0`
 
 No optimization. This is the default. The optimizer does not run, so the
-[per-pass options](#-fpass--fno-pass) have no effect at `-O0`.
+[per-pass options](#-fpass--fno-pass) have no effect at `-O0`. Every
+source variable stays in its stack slot; on ARM Cortex-M and RISC-V the
+temporaries of expressions get registers (see
+[Optimization](optimization.md#-o0)).
 
 ### `-O`, `-O1`
 
@@ -1319,16 +1322,26 @@ it emits ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)`.
 
 #### `-mfpu=FPU`
 
-Name the floating-point unit. EmbCC generates code for two single-precision
-units: `fpv4-sp-d16` (Cortex-M4F, ARMv7E-M) and `fpv5-sp-d16`
-(Cortex-M33, ARMv8-M Mainline). `none`, `soft` and `auto` mean no FPU.
-The unit must match the architecture, and on ARMv7 the architecture must
-be ARMv7E-M:
+Name the floating-point unit. EmbCC generates code for three units: the
+single-precision `fpv4-sp-d16` (Cortex-M4F, ARMv7E-M) and `fpv5-sp-d16`
+(Cortex-M33, ARMv8-M Mainline), and the double-precision `fpv5-d16`
+(Cortex-M7, ARMv7E-M). `none`, `soft` and `auto` mean no FPU. The unit
+must match the architecture, on ARMv7 the architecture must be ARMv7E-M,
+and `fpv5-d16` is refused with an `-mcpu=` other than `cortex-m7`:
 
 ```text
 -mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4
--mfpu=fpv5-d16 is not supported on thumbv7em-none-eabi: EmbCC emits VFP for the Cortex-M4F's unit (-mfpu=fpv4-sp-d16) and nothing else: ...
+-mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16
+-mfpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (-mfpu=fpv5-sp-d16) and nothing else: ...
 ```
+
+With a single-precision unit, `float` arithmetic is VFP instructions and
+`double` arithmetic is runtime calls. With `fpv5-d16` both are VFP
+instructions: `double` arithmetic, comparisons, `fabs`, negation,
+`__builtin_sqrt` and the conversions to and from `float` and 32-bit
+integers are `.f64` instructions, and only the conversions between a
+floating type and a 64-bit integer are still calls. `__ARM_FP` is
+`0x4` for the single-precision units and `0xc` for `fpv5-d16`.
 
 `-mfpu=` alone generates no FPU instructions; `-mfloat-abi=` decides
 that, as in GCC.
@@ -1342,13 +1355,16 @@ that, as in GCC.
 | `hard` | FPU instructions; floating-point arguments and results passed in `s0`-`s15`/`d0`-`d7` (AAPCS-VFP). Does not link with `soft` objects. |
 
 `softfp` and `hard` need an FPU (`-mfloat-abi=hard needs an FPU to use:
-add -mfpu=fpv4-sp-d16 (Cortex-M4F) or -mfpu=fpv5-sp-d16 (Cortex-M33)`).
-Any other value is refused: `-mfloat-abi=ABI is not an ARM float ABI: it
-is one of soft, softfp and hard`.
+add -mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 (Cortex-M7) or
+-mfpu=fpv5-sp-d16 (Cortex-M33)`). Any other value is refused:
+`-mfloat-abi=ABI is not an ARM float ABI: it is one of soft, softfp and
+hard`.
 
 `-mfpu=` and `-mfloat-abi=` are resolved together after the whole command
 line is read, so their order does not matter. An `-eabihf` triple implies
-the part's FPU and `-mfloat-abi=hard`; an explicit option overrides it.
+the part's FPU and `-mfloat-abi=hard` -- `fpv4-sp-d16` for
+`thumbv7em-none-eabihf`, or `fpv5-d16` with `-mcpu=cortex-m7` -- and an
+explicit option overrides it.
 The choice is recorded in the object's `.ARM.attributes`, in the
 predefined macros (`__ARM_FP`, `__ARM_PCS_VFP`, `__SOFTFP__`), and in the
 triple `-dumpmachine` prints.
@@ -1420,7 +1436,7 @@ name is what `-dumpmachine`, `--version` and diagnostics print.
 | `aarch64-elf` | `aarch64`, `arm64`, `aarch64-none-elf` | AArch64 | bare metal | ELF64 |
 | `thumbv7m-none-eabi` | `thumbv7m`, `armv7m-none-eabi`, `arm-none-eabi` | ARMv7-M (Cortex-M3) | bare metal | ELF32 |
 | `thumbv7em-none-eabi` | `thumbv7em`, `armv7em-none-eabi` | ARMv7E-M (Cortex-M4/M7), soft float | bare metal | ELF32 |
-| `thumbv7em-none-eabihf` | | ARMv7E-M with FPv4-SP-D16, hard float | bare metal | ELF32 |
+| `thumbv7em-none-eabihf` | | ARMv7E-M with FPv4-SP-D16 (FPv5-D16 with `-mcpu=cortex-m7`), hard float | bare metal | ELF32 |
 | `thumbv8m.main-none-eabi` | `thumbv8m.main`, `thumbv8m-none-eabi`, `armv8m.main-none-eabi` | ARMv8-M Mainline (Cortex-M33), soft float | bare metal | ELF32 |
 | `thumbv8m.main-none-eabihf` | | ARMv8-M Mainline with FPv5-SP-D16, hard float | bare metal | ELF32 |
 | `riscv32-unknown-elf` | `riscv32`, `riscv32-elf`, `rv32` | RV32 | bare metal | ELF32 |

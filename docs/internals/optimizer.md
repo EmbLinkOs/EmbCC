@@ -129,7 +129,7 @@ breaks one of them breaks passes far away from the change.
 | Dominators | `compute_idom` (Cooper-Harvey-Kennedy), `bb_dominates` | mem2reg, global CSE, PRE, the loop passes, live-range splitting |
 | Dominance frontiers | `compute_df` | mem2reg |
 | Natural loops | a back edge is an edge whose target dominates its source; `loop_body` collects the blocks | rotation, LICM, idiom recognition, vectorization, strength reduction, unrolling, live-range splitting |
-| Alias analysis | `mem_base`, `may_alias` | dead-store elimination, load CSE |
+| Alias analysis | `mem_base`, `may_alias`; `mem_access`, `acc_overlap`, `acc_covers` | value numbering, dead-store elimination, load CSE |
 | Available expressions | inside `pass_loadcse` and `pre_one` | load CSE, PRE |
 | Liveness | instruction liveness by marking (`pass_dce`); block liveness inside `pass_splitloops` and `pass_joincopies` | those passes |
 | Function attributes | `infer_attrs` (unit-wide, `-O2`) | DCE, DSE, load CSE |
@@ -148,8 +148,29 @@ the object an address is based on: a named global, a numbered frame slot,
 or unknown. `may_alias` answers no for two different globals, two
 different slots, a global and a slot, and an unknown pointer against a
 slot whose address is never taken in the function. Everything else may
-alias. There is no type-based aliasing (EmbIR loads carry no type), no
-`restrict`, and no field sensitivity.
+alias. There is no type-based aliasing (EmbIR loads carry no type) and
+no `restrict`.
+
+Within one object, `mem_access` describes an access as a base value, a
+constant offset from it and a size. It walks back from the address
+through copies and through adds and subtracts of a constant at the
+pointer width, while each step is a temp written once or a parameter
+never reassigned; where it stops is the base. The address of a global is
+keyed by its symbol and the address of a frame slot by the slot, whichever
+temps hold them. Offsets are kept modulo the address width, as the
+machine adds them, so a negative or wrapping offset is compared as the
+bytes it reaches. `acc_overlap` says two accesses from the same base
+overlap only when their byte ranges meet on that ring; accesses from
+different bases (or with no base, or no known size: `IR_LDVAR`,
+`IR_STVAR`, `memcpy`, `memzero`) fall back to `may_alias`. `acc_covers`
+is the must-alias form dead-store elimination deletes a store on: the
+same base, and the earlier range inside the later one, decided only when
+the host's `unsigned long` holds a whole address. A base is the same value
+at the load and at the store because a single-assignment temp's
+definition dominates its uses: both address computations follow the
+base's latest definition, and a load from before that definition is no
+longer remembered (load CSE's meet forgets it at the top of the block
+that defines the base, and value numbering keeps nothing across a block).
 
 **Function attributes.** `infer_attrs` starts by assuming every defined
 function writes and reads no caller-visible memory, then retracts the
@@ -510,9 +531,14 @@ no other use, the displacement is at most 255 bytes, and `k` is at most
 the rewrite measured slower, so it is not run there.
 
 **`pass_lvn`**. Local value numbering within a block (the table is reset
-at every label). Loads and `IR_LDVAR` are keyed with a memory version
-that every store and call increments. Volatile accesses are never
-numbered.
+at every label). Loads and `IR_LDVAR` are keyed with a memory version.
+A non-volatile store or `IR_STVAR` removes from the table only the reads
+it may overlap (`lvn_mem_kill`, `acc_overlap`): a store to `p->wr`
+keeps `p->len`, and a store to a local whose address is never taken
+keeps every load through a pointer. Anything else that writes memory -- a
+call, `memcpy`, `memzero`, an atomic, a fence, inline asm, a vector store
+or a volatile store -- increments the version, which forgets every read.
+Volatile accesses are never numbered.
 
 **`pass_divmod`**. Within a block, when `a / b` and `a % b` (same
 operands, width and signedness) both appear, the remainder becomes
@@ -575,10 +601,13 @@ label, and removes labels that nothing names, so that the block-local
 passes see longer blocks.
 
 **`pass_dse`** (`dse`; `cfg_ok`). Dead-store elimination within a block,
-walking backward: a store is removed when a later store to the same
-address temp at the same width comes first and no intervening read may
-alias it (`may_alias`). Calls to functions inferred to read and write no
-memory do not count as reads.
+walking backward: a store is removed when a later store writes every byte
+of it -- the same address temp at the same width, or the same base with
+the earlier range inside the later one (`acc_covers`) -- and no
+intervening read may overlap it (`acc_overlap`, so a read of another
+field between the two does not keep it). Calls to functions inferred to
+read and write no memory do not count as reads; a vector load counts as
+a read of everything.
 
 **`pass_rangecheck`**. Not on AVR. Two consecutive compares of the same
 value against constants that together test an interval, such as
@@ -599,11 +628,14 @@ elimination by an available-expressions dataflow. A load is replaced when
 an identical load reaches it on every path with no intervening write
 that may alias it. The meet requires the same representative temp from
 every predecessor, so the reused value has one dominating definition. A
-`LOAD` is keyed only when its address temp is single-definition. A store,
-`memcpy` or `memzero` with a known base kills only the keys that may
-alias it; a call kills everything unless its callee is inferred not to
-write memory; inline asm, atomics, `va_start` and fences kill
-everything.
+`LOAD` is keyed only when its address temp is single-definition, and then
+by where it points -- base, offset, size, signedness and width -- so two
+`add %p, #16` temps (which `-O1`, without global CSE, leaves apart) are
+one key. A non-volatile store kills only the keys whose bytes it may
+overlap (`acc_overlap`); a volatile store, `memcpy` or `memzero` with a
+known object kills the keys that may alias that object; a call kills
+everything unless its callee is inferred not to write memory; inline
+asm, atomics, `va_start`, fences and vector stores kill everything.
 
 **`pass_pre`** (`pre`; `edge_ok`). Partial redundancy elimination for
 multiplies. When an expression is computed on some paths into a block and

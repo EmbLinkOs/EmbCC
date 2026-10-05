@@ -30,8 +30,14 @@ splitting is done before allocation, in the IR, by `pass_splitloops`
 ### When it runs
 
 The driver passes each backend a `regalloc` flag that is true at `-O1`
-and above, `-Os` and `-Oz` included (`opt_level >= 1`). At `-O0` every
-vreg lives in a stack slot. Within an allocating build a backend may still
+and above, `-Os` and `-Oz` included (`opt_level >= 1`), and on Thumb,
+RISC-V and AVR at `-O0` as well. There the backend pins every source
+variable to its slot as under `-g` (`g_t_o0`, `g_rv_o0`, `g_a_o0`:
+`ra_debug_pin_vars`; AVR ORs it into `avr_excl`'s map) and turns off
+what `-g` turns off -- tail calls, folded offsets, and on Thumb and RV32
+the second pair-allocation attempt -- so only the temporaries of
+expressions get registers. `EMBCC_O0_NORA=1` restores the old `-O0`. On
+x86-64 and AArch64 at `-O0` every vreg lives in a stack slot. Within an allocating build a backend may still
 leave a particular function unallocated; the conditions are listed per
 backend under [Backend hooks](#backend-hooks).
 
@@ -727,7 +733,7 @@ is an internal error: `avr: FUNC: values kept being overwritten in their
 homes after N attempts`. An attempt that gave X to a value and then used
 X as scratch is redone without X as a home.
 
-**Not allocated.** At `-O0`, under `-g`, in an interrupt
+**Not allocated.** Under `-g`, in an interrupt
 handler, and in every function but the one named by
 `EMBCC_AVR_RA_ONLY` when that is set.
 

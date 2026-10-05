@@ -169,7 +169,10 @@ for t in thumbv7m-none-eabi riscv32-unknown-elf mipsel-none-elf; do
     off=$(grep -A3 'DW_AT_name.*"n"' "$out/al-$t.dw" |
           sed -n 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' | head -1)
     hex=$(printf '0x%x' "$off")
-    "$OBJDUMP" -d "$out/al-$t.o" 2>/dev/null | grep -Eq "(str|sw).*(\[$reg, #$hex\]|$hex\($reg\))" || {
+    # (a zero offset disassembles as `[r7]` and `0(s0)`)
+    zero=; [ "$off" = 0 ] && zero="|\\[$reg\\]|[( ]0\\($reg\\)"
+    "$OBJDUMP" -d "$out/al-$t.o" 2>/dev/null |
+        grep -Eq "(str|sw).*(\[$reg, #$hex\]|$hex\($reg\)$zero)" || {
         echo "FAIL $t: 'n' at fbreg +$off is not where the prologue stores it"
         fail=1; }
 done

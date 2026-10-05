@@ -172,13 +172,20 @@ static const struct predef_macro os_windows[] = {
  * __ARM_FEATURE_FMA is left out: DSP code reads it to choose fused
  * multiply-add, which EmbCC does not emit. A predefined macro is a promise
  * to the program; the first one this table got wrong, __ARM_FP 0xe on v8-M,
- * compiled lib/rt/softfp.c to nothing. */
+ * compiled lib/rt/softfp.c to nothing.
+ *
+ * The Cortex-M7's FPv5-D16 adds bit 3, double precision, which that unit
+ * HAS and which the backend now emits: 0xc where clang says 0xe, for the
+ * same half-precision reason. It is also an FPv5 unit, so __ARM_FPV5__ as
+ * on the M33. lib/rt/softfp.c reads the bit to keep only the 64-bit
+ * integer conversions, which VFP has no instruction for. */
 static const struct predef_macro thumb_fpu_add[] = {
     { "__ARM_FP", "0x4" },
     { "__ARM_VFPV2__", "1" },
     { "__ARM_VFPV3__", "1" },
     { "__ARM_VFPV4__", "1" },
 };
+static const struct predef_macro thumb_fp_dp[] = { { "__ARM_FP", "0xc" } };
 static const struct predef_macro thumb_fpv5_add[] = { { "__ARM_FPV5__", "1" } };
 static const struct predef_macro thumb_hard_add[] = { { "__ARM_PCS_VFP", "1" } };
 
@@ -259,9 +266,13 @@ const struct predef_macro *predef_table(int *count)
             for (int i = 0; i < ndarwin_a64_model; i++)
                 merged[nmerged++] = darwin_a64_model[i];
         if (fpu) {
-            for (size_t i = 0; i < sizeof thumb_fpu_add / sizeof *thumb_fpu_add; i++)
-                merged[nmerged++] = thumb_fpu_add[i];
-            if (target_thumb_arch() >= 8)
+            for (size_t i = 0; i < sizeof thumb_fpu_add / sizeof *thumb_fpu_add; i++) {
+                if (i == 0 && target_thumb_fpu_dp())
+                    merged[nmerged++] = thumb_fp_dp[0];
+                else
+                    merged[nmerged++] = thumb_fpu_add[i];
+            }
+            if (target_thumb_arch() >= 8 || target_thumb_fpu_dp())
                 merged[nmerged++] = thumb_fpv5_add[0];
             if (target_thumb_hard_abi())
                 merged[nmerged++] = thumb_hard_add[0];

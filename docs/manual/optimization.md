@@ -22,7 +22,8 @@ Optimization happens in two places.
   frameless functions and function alignment are decided there. These
   have no individual switches.
 
-The default is `-O0`: no IR optimization and no register allocation.
+The default is `-O0`: no IR optimization, and every source variable in
+its stack slot.
 
 ## Optimization levels
 
@@ -40,10 +41,26 @@ The default is `-O0`: no IR optimization and no register allocation.
 Do not optimize. This is the default.
 
 The IR optimizer does not run at all, so `-f` pass options have no effect
-at this level. Every local variable and every temporary lives in a stack
-slot, and every C operation is a separate load, operation and store. Code
-is large and slow, and each source variable is in memory at all times,
-which is what a debugger wants (see [Debugging](debugging.md)).
+at this level. Every source variable -- every local and parameter --
+lives in its stack slot and is stored there by every assignment, so it
+is in memory at all times, which is what a debugger wants (see
+[Debugging](debugging.md)).
+
+The temporaries of an expression, which no debugger names, are where the
+targets differ. On ARM Cortex-M, RISC-V and AVR the register allocator
+runs for them, as GCC's and Clang's `-O0` keep them in registers:
+`a + b * c` loads `a`, `b` and `c` and computes in registers. On x86-64
+and AArch64 every temporary has a stack slot too, and every C operation
+is a separate load, operation and store. (FreeRTOS's kernel at `-O0` on a
+Cortex-M3: 106678 bytes of code before, 25670 now; Clang's `-O0` is
+18870; lib/libc's string, stdlib and ctype on AVR, 68428 bytes before
+and 33330 now.) `EMBCC_O0_NORA=1` gives the old `-O0` on these targets,
+for bisecting a difference. On AVR, `-g` still turns the allocator off.
+A function too big for the allocator is compiled the old way as well:
+its liveness sets grow with the square of the function's size, and a
+generated function of 8000 statements took 5.5 seconds where the old
+`-O0` takes 0.1. The limit is a few thousand statements of straight-line
+code (`ra_o0_too_big` in `src/arch/regalloc.c`).
 
 Some decisions are made at every level, `-O0` included, because they are
 taken when the IR is first generated or when code is emitted:
@@ -55,8 +72,7 @@ taken when the IR is first generated or when code is emitted:
   [Function alignment](#function-alignment)).
 - On x86-64, temporaries that are not live at the same time share stack
   slots within a basic block.
-- On x86-64 and AVR, branches are shortened to their smallest encoding.
-  Thumb and RISC-V use their 16-bit branch forms from `-O1`.
+- Branches are shortened to their smallest encoding.
 
 ### `-O`, `-O1`
 
@@ -274,8 +290,18 @@ left to `load-cse`. Floating-point operations are never reused.
 Remove a load that repeats an earlier load of the same address on
 every path to it, with no store, call, atomic operation, fence or inline
 `asm` in between that could change the value. The second load becomes a
-copy of the first. `volatile` loads are never removed. Default: on at
-`-O1`, `-O2` and `-Os`.
+copy of the first. A store counts only if it can reach the bytes the load
+read: one through the same pointer at a constant offset whose bytes do
+not overlap them does not.
+
+```c
+unsigned n = q->len;
+q->wr = q->head;      /* other bytes of *q: q->len is not reloaded */
+return n + q->len;
+```
+
+`volatile` loads are never removed, and a `volatile` store still counts
+for anything in the same object. Default: on at `-O1`, `-O2` and `-Os`.
 
 ### `-fsccp`, `-fno-sccp`
 
@@ -369,10 +395,13 @@ p->x = 1;   /* removed */
 p->x = 2;
 ```
 
-Only stores through the same address value are matched. A `volatile`
-store is never removed. (A store to a local that is never read at all is
-removed by dead-code elimination at `-O1`.) Default: on at `-O1`, `-O2`
-and `-Os`.
+The later store must write every byte of the earlier one through the
+same pointer value: the same field, or a wider store over a narrower one
+(`((char *)p)[1] = 5; *p = 7;` loses the byte store). A read in between
+keeps the earlier store unless it reads other bytes of the same pointer
+or a different object. A `volatile` store is never removed. (A store to a
+local that is never read at all is removed by dead-code elimination at
+`-O1`.) Default: on at `-O1`, `-O2` and `-Os`.
 
 ### `-fdiv-magic`, `-fno-div-magic`
 
@@ -518,8 +547,11 @@ be turned off individually:
   Integer only.
 - **Local value numbering**: an integer computation, or a load with no
   store, call, fence or `asm` since the identical one, is reused within
-  a basic block. `volatile` accesses and floating-point operations are
-  never reused.
+  a basic block. A store to other bytes of the same pointer (another
+  field, at a constant offset), to another object, or to a local whose
+  address is never taken does not count. `volatile` accesses and
+  floating-point operations are never reused, and a `volatile` store
+  counts for every load.
 - **Quotient and remainder**: `a / b` and `a % b` with the same operands
   in one block divide once; the remainder is `a - q * b`.
 - **Copy propagation** and **dead-code elimination**. A read of a local
@@ -702,6 +734,13 @@ objects, or on different local variables, are assumed not to overlap,
 and a pointer of unknown origin is assumed not to reach a local variable
 whose address was never taken. Code that reaches one object by pointer
 arithmetic from another is outside this assumption.
+
+Within one object, two accesses through the same pointer value at
+constant offsets (`p->a` and `p->b`, `p[1]` and `p[3]`) are assumed not
+to overlap only when their byte ranges do not; the offsets are taken
+modulo the address width, so this holds for any value of `p`. Two
+different pointers into the same object are always treated as possibly
+overlapping, whatever their types.
 
 `restrict` is accepted and not used by the optimizer.
 `__attribute__((may_alias))` is accepted and has no effect, because
