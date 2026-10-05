@@ -160,15 +160,22 @@ struct rv_fn {
  * asks for: a short-lived value takes one and the prologue never has to
  * save it.
  */
-#define RV_NPOOL 20
+#define RV_NPOOL 21
 static const int RV_POOL[RV_NPOOL] = {
     /* caller-saved: a0-a7, then the one spare temporary */
     RV_A0, RV_A1, RV_A2, RV_A3, RV_A4, RV_A5, RV_A6, RV_A7, RV_T3,
-    /* callee-saved: s1, s2-s11. s0 is left out -- it is the frame
-     * pointer by convention and DWARF names it as the frame base, and
-     * a register the debugger believes in is not one to hand out. */
-    RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4, RV_S2 + 5,
-    RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
+    /* callee-saved: s0, s1, s2-s11. s0 and s1 first: they are x8 and
+     * x9, the only callee-saved registers the compressed loads, stores
+     * and ALU forms reach.
+     *
+     * s0 was left out as "the frame pointer", which this backend does not
+     * keep: every slot is addressed from sp, and DWARF's frame base is sp
+     * too (src/debug/dwarf.c), except in a function with a variable-
+     * length array, where s0 holds the frame base and rv_pool_for takes it
+     * out. Everywhere else it sat unused -- not one access in lib/libc
+     * went through it -- while clang hands it out like s1. */
+    RV_FP, RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4,
+    RV_S2 + 5, RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
 };
 /* The same list with the argument file removed, for a variadic
  * function: its prologue spills a0-a7 into the register save area and
@@ -176,8 +183,8 @@ static const int RV_POOL[RV_NPOOL] = {
  */
 static const int RV_POOL_VA[RV_NPOOL - 8] = {
     RV_T3,
-    RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4, RV_S2 + 5,
-    RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
+    RV_FP, RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4,
+    RV_S2 + 5, RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
 };
 
 /* Registers the RV32 pair pass (rv_pair_alloc) took for the whole
@@ -203,6 +210,9 @@ static const int *rv_pool_for(const struct ir_func *fn, int *n)
                 out |= 1UL << RV_T3;
                 break;
             }
+    /* A VLA's function addresses its frame from s0 (IR_ALLOCA). */
+    if (fn->has_alloca)
+        out |= 1UL << RV_FP;
     if (!out) {
         *n = np;
         return p;
@@ -4377,6 +4387,11 @@ static int *rv_pair_alloc(struct ir_func *fn, struct rv_fn *F,
 
 /* ---- one function --------------------------------------------------------- */
 
+/* The callee-saved renaming (defined with gen_func_best), and whether this
+ * attempt at a function makes it. */
+static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed);
+static int g_rv_lowregs = 1;
+
 static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                      int xlen, int want_debug)
 {
@@ -4451,15 +4466,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 free(ineligible);
         }
         g_rv_taken = 0;
+        unsigned long pair_regs = 0;
         if (pair) {
             for (int v = 0; v < fn->nvregs; v++)
-                if (pair[v] >= 0) F.loc[v] = pair[v];
+                if (pair[v] >= 0) {
+                    F.loc[v] = pair[v];
+                    pair_regs |= 3UL << pair[v];
+                }
             for (int k = 0; k < F.npair; k++) {
                 F.used_callee[F.nsave++] = F.pair_used[k];
                 F.used_callee[F.nsave++] = F.pair_used[k] + 1;
             }
             free(pair);
         }
+        if (g_rv_lowregs && F.loc && rv_compress_enabled())
+            rv_lowregs(fn, F.loc, pair_regs);
         free(pin);
         /* Read counts for comparison/branch fusion, with the allocator
          * on: without it every value goes through a slot and the
@@ -4489,8 +4510,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
     /* A variable-length array moves sp at run time, so the frame is
      * addressed from s0 instead, which the prologue sets once the frame
-     * is in place. s0 is callee-saved and never in the allocator's pool,
-     * so it only has to be saved like any other callee-saved register. */
+     * is in place. s0 is callee-saved and, in such a function, out of the
+     * allocator's pool (rv_pool_for), so it only has to be saved like any
+     * other callee-saved register. */
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = RV_FP;
     /* A leaf: no call in the IR and none the lowering makes -- the same
@@ -4906,6 +4928,111 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.loc);
 }
 
+/* ---- s0 AND s1 FOR THE BUSIEST VALUES ----------------------------------
+ *
+ * The compressed forms reach x8-x15 only for most of what they do --
+ * c.lw and c.sw (base and value), c.and/or/xor/sub, c.andi, c.srli,
+ * c.srai, c.beqz/c.bnez -- and of the callee-saved registers just s0 and
+ * s1 are in that range. The colourer gives callee-saved registers out in
+ * pool order to whichever value it reaches first, so a pointer every load
+ * in a loop goes through could land in s4 and make each of them four
+ * bytes instead of two.
+ *
+ * The callee-saved registers are interchangeable (the prologue saves a
+ * set), so once allocation is done the ones the function used are renamed
+ * among themselves, the busiest by that measure first into s0, then s1,
+ * then on in pool order: loads and stores count twice, a move, call or
+ * return not at all (c.mv and c.add take any register), a loop body
+ * eight times per level. The set, and the saves, are unchanged. A
+ * register a 64-bit pair uses is left alone. As on Cortex-M, the weights
+ * are an estimate, so gen_func_best tries the function both ways. */
+struct rv_lowreg_w {
+    const int *loc;
+    long w[32];
+    long f;                    /* this instruction's weight */
+};
+
+static void rv_lowreg_count(int v, void *ctx)
+{
+    struct rv_lowreg_w *c = ctx;
+    if (v >= 0 && c->loc[v] >= 0 && c->loc[v] < 32)
+        c->w[c->loc[v]] += c->f;
+}
+
+static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed)
+{
+    int np;
+    const int *pool = rv_pool_for(fn, &np);
+    unsigned long cand = 0, seen = 0;
+    for (int j = 0; j < np; j++)
+        if (rv_callee_saved(pool[j]))
+            cand |= 1UL << pool[j];
+    for (int v = 0; v < fn->nvregs; v++)
+        if (loc[v] >= 0 && loc[v] < 32)
+            seen |= 1UL << loc[v];
+    cand &= seen & ~fixed;
+    if (!cand || !(cand & (cand - 1)))
+        return;
+
+    /* Loop depth by back edge, as t_lowregs does. */
+    int *depth = xcalloc((size_t)fn->nins + 1, sizeof *depth);
+    int nl = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= nl)
+            nl = fn->ins[n].label + 1;
+    int *lpos = xmalloc((size_t)(nl ? nl : 1) * sizeof *lpos);
+    for (int k = 0; k < nl; k++)
+        lpos[k] = -1;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0)
+            lpos[fn->ins[n].label] = n;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ) &&
+            i->label >= 0 && i->label < nl && lpos[i->label] >= 0 &&
+            lpos[i->label] <= n) {
+            depth[lpos[i->label]]++;
+            depth[n + 1]--;
+        }
+    }
+    struct rv_lowreg_w c;
+    c.loc = loc;
+    for (int r = 0; r < 32; r++)
+        c.w[r] = 0;
+    int d = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        d += depth[n];
+        const struct ir_ins *i = &fn->ins[n];
+        int k = i->op == IR_LOAD || i->op == IR_STORE ? 2 :
+                i->op == IR_MOV || i->op == IR_CALL || i->op == IR_RET ? 0 : 1;
+        c.f = (long)k * (d <= 0 ? 1 : d == 1 ? 8 : 64);
+        int def = ra_ins_def(i);
+        if (def >= 0 && def < fn->nvregs && loc[def] >= 0 && loc[def] < 32)
+            c.w[loc[def]] += c.f;
+        ra_each_use(i, rv_lowreg_count, &c);
+    }
+    free(depth);
+    free(lpos);
+
+    /* Heaviest first onto the earliest in pool order (s0, s1, s2, ...). */
+    int from[32], to[32], n = 0;
+    for (int j = 0; j < np; j++)
+        if (cand >> pool[j] & 1)
+            to[n] = from[n] = pool[j], n++;
+    for (int a = 1; a < n; a++)
+        for (int b = a; b > 0 && c.w[from[b]] > c.w[from[b - 1]]; b--) {
+            int t = from[b]; from[b] = from[b - 1]; from[b - 1] = t;
+        }
+    int map[32];
+    for (int r = 0; r < 32; r++)
+        map[r] = r;
+    for (int k = 0; k < n; k++)
+        map[from[k]] = to[k];
+    for (int v = 0; v < fn->nvregs; v++)
+        if (loc[v] >= 0 && loc[v] < 32 && (cand >> loc[v] & 1))
+            loc[v] = map[loc[v]];
+}
+
 /* At RV32 with the allocator on, a function is generated with the pair
  * pass and without it, and the shorter is kept. A pair the pass takes is
  * withheld from the ordinary pool for the whole function, which costs a
@@ -4913,7 +5040,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
  * doubles did: over tests/ and lib/libc, eight files came out larger by
  * up to 60 bytes while the total fell 12.8%. A discarded attempt is
  * undone by truncating what it appended -- the code and the five site
- * lists, which only ever grow. */
+ * lists, which only ever grow.
+ *
+ * Each attempt is also made with the callee-saved registers renamed for
+ * the compressed forms (rv_lowregs) and without, at RV32 and RV64 alike,
+ * and the shortest kept; the first of equal sizes wins.
+ * EMBCC_RV_LOWREGS=0/1 forces that choice. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
                           struct rv_sites *st, int xlen, int want_debug)
 {
@@ -4931,29 +5063,55 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         ra_fold_memoff(fn, -2048, 2047, xlen / 8, xlen / 8, w);
         free(w);
     }
+    const char *lr = getenv("EMBCC_RV_LOWREGS");
+    int lr_forced = lr && *lr;
     g_rv_pairs = 1;
-    if (xlen != 32 || !g_rv_regalloc || want_debug || g_rv_o0 ||
-        (knob && *knob) ||
-        (only && *only)) {
-        if (knob && *knob) g_rv_pairs = atoi(knob);
-        if (only && *only) g_rv_pairs = strcmp(only, fn->name) == 0;
+    g_rv_lowregs = lr_forced ? atoi(lr) != 0 : 1;
+    if (!g_rv_regalloc || want_debug || g_rv_o0) {
         gen_func(fn, t, st, xlen, want_debug);
-        g_rv_pairs = 1;
+        g_rv_lowregs = 1;
         return;
     }
-    gen_func(fn, t, st, xlen, want_debug);
-    with = t->len - at;
-    t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
-    st->ng = ng; st->nf = nf;
-    g_rv_pairs = 0;
-    gen_func(fn, t, st, xlen, want_debug);
-    if (t->len - at > with) {
+    /* The attempts: pairs on and off (RV32 only, unless a knob fixes
+     * them), each with the rename on and off (unless EMBCC_RV_LOWREGS
+     * fixes it). */
+    int pv[2], np = 0, lv[2], nl = 0;
+    if (xlen != 32 || (knob && *knob) || (only && *only)) {
+        pv[np++] = !(knob && *knob) || atoi(knob);
+        if (only && *only)
+            pv[0] = strcmp(only, fn->name) == 0;
+    } else {
+        pv[np++] = 1;
+        pv[np++] = 0;
+    }
+    lv[nl++] = g_rv_lowregs;
+    if (!lr_forced && rv_compress_enabled())
+        lv[nl++] = 0;
+    int best = -1, bestlen = 0, last = -1;
+    for (int a = 0; a < np * nl; a++) {
+        if (a) {
+            t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
+            st->ng = ng; st->nf = nf;
+        }
+        g_rv_pairs = pv[a / nl];
+        g_rv_lowregs = lv[a % nl];
+        gen_func(fn, t, st, xlen, want_debug);
+        with = t->len - at;
+        last = a;
+        if (best < 0 || with < bestlen) {
+            best = a;
+            bestlen = with;
+        }
+    }
+    if (best != last) {
         t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
         st->ng = ng; st->nf = nf;
-        g_rv_pairs = 1;
+        g_rv_pairs = pv[best / nl];
+        g_rv_lowregs = lv[best % nl];
         gen_func(fn, t, st, xlen, want_debug);
     }
     g_rv_pairs = 1;
+    g_rv_lowregs = 1;
 }
 
 /* ---- .riscv.attributes ------------------------------------------------
