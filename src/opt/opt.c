@@ -3326,9 +3326,31 @@ static int thread_arm(const struct ir_func *fn, int k, int t, int L,
         return 0;
     if (def->op == IR_CONST)
         return 1;
-    return def->op == IR_MOV && jumps && def->a >= 0 &&
-           def->a < fn->nvregs && d->cnt[def->a] == 1 &&
-           d->ins[def->a] >= 0 && fn->ins[d->ins[def->a]].op == IR_CMP;
+    if (def->op != IR_MOV || def->a < 0 || def->a >= fn->nvregs ||
+        d->cnt[def->a] != 1 || d->ins[def->a] < 0)
+        return 0;
+    /* a copy of a constant is a constant arm (the merge temp is written
+     * twice, so copy propagation leaves `%t = mov %k` where %k = const) */
+    if (fn->ins[d->ins[def->a]].op == IR_CONST && !fn->ins[d->ins[def->a]].flt)
+        return 1;
+    return jumps && fn->ins[d->ins[def->a]].op == IR_CMP;
+}
+
+/* The constant an arm sets, when thread_arm accepted it as one. */
+static int thread_arm_const(const struct ir_func *fn, const struct ir_ins *def,
+                            const struct defs *d, long *v)
+{
+    if (def->op == IR_CONST) {
+        *v = def->imm;
+        return 1;
+    }
+    if (def->op == IR_MOV && def->a >= 0 && def->a < fn->nvregs &&
+        d->cnt[def->a] == 1 && d->ins[def->a] >= 0 &&
+        fn->ins[d->ins[def->a]].op == IR_CONST) {
+        *v = fn->ins[d->ins[def->a]].imm;
+        return 1;
+    }
+    return 0;
 }
 
 static int thread_site(const struct ir_func *fn, int n, const int *use)
@@ -3338,6 +3360,40 @@ static int thread_site(const struct ir_func *fn, int n, const int *use)
     return n + 2 < fn->nins && lab->op == IR_LABEL &&
            (br->op == IR_BRZ || br->op == IR_BRNZ) &&
            t >= fn->nvars && t < fn->nvregs && use[t] == 1 && br->w <= 8;
+}
+
+/* A branch on `%u = cmp ne %t, 0` is a branch on %t, and one on
+ * `cmp eq %t, 0` the opposite branch on %t, when nothing else reads %u.
+ * C writes the first wherever a truth value is compared with pdFALSE or
+ * 0 -- FreeRTOS's `listLIST_IS_EMPTY(l) == pdFALSE` is a 1/0 merged from
+ * two arms and then tested -- and the compare in between hid the merge
+ * from the threading below. The compare is left for DCE. */
+static int branch_on_cmp0(struct ir_func *fn, const int *use,
+                          const struct defs *d)
+{
+    int changed = 0;
+    for (int n = 0; n + 1 < fn->nins; n++) {
+        const struct ir_ins *c = &fn->ins[n];
+        struct ir_ins *br = &fn->ins[n + 1];
+        if (c->op != IR_CMP || c->flt || c->w > 8 ||
+            (c->pred != B_EQ && c->pred != B_NE) ||
+            (br->op != IR_BRZ && br->op != IR_BRNZ) || br->a != c->dst ||
+            c->dst < 0 || c->dst >= fn->nvregs || use[c->dst] != 1 ||
+            c->a < 0 || c->a >= fn->nvregs)
+            continue;
+        int zero = c->imm_b ? c->imm == 0
+                 : c->b >= 0 && c->b < fn->nvregs && d->cnt[c->b] == 1 &&
+                   d->ins[c->b] >= 0 && fn->ins[d->ins[c->b]].op == IR_CONST &&
+                   fn->ins[d->ins[c->b]].imm == 0;
+        if (!zero)
+            continue;
+        br->a = c->a;
+        br->w = c->w;
+        if (c->pred == B_EQ)
+            br->op = br->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
+        changed = 1;
+    }
+    return changed;
 }
 
 static int pass_thread(struct ir_func *fn)
@@ -3350,6 +3406,13 @@ static int pass_thread(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++)
         each_read(&fn->ins[n], count_cb, &uc);
     compute_defs(fn, &d);
+    /* the branch now reads %t, and the uses counted are stale: the next
+     * round, after DCE, threads it */
+    if (branch_on_cmp0(fn, use, &d)) {
+        free(use);
+        free(d.cnt); free(d.ins);
+        return 1;
+    }
     /* A label after each branch that will be threaded and has none. */
     {
         int need = 0;
@@ -3403,12 +3466,13 @@ static int pass_thread(struct ir_func *fn)
         else                        continue;
         for (int k = 0; k + 1 < fn->nins; k++) {
             struct ir_ins *def = &fn->ins[k], *go = &fn->ins[k + 1];
+            long kv;
             if (!thread_arm(fn, k, t, L, &d))
                 continue;
-            if (def->op == IR_CONST) {
+            if (thread_arm_const(fn, def, &d, &kv)) {
                 unsigned long mask = br->w >= 8 ? ~0UL
                                    : (1UL << (8 * (br->w > 0 ? br->w : 4))) - 1;
-                int zero = ((unsigned long)def->imm & mask) == 0;
+                int zero = ((unsigned long)kv & mask) == 0;
                 int taken = br->op == IR_BRZ ? zero : !zero;
                 int line = def->line, col = def->col;
                 memset(def, 0, sizeof *def);
