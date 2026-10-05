@@ -349,6 +349,39 @@ static void ra_cost_cb(int v, void *ctx)
     c->cost[e] += c->w;
 }
 
+/* A min-heap of node numbers, for the simplify order. */
+static void ra_heap_push(int *h, int *n, int x)
+{
+    int i = (*n)++;
+    while (i > 0) {
+        int p = (i - 1) / 2;
+        if (h[p] <= x)
+            break;
+        h[i] = h[p];
+        i = p;
+    }
+    h[i] = x;
+}
+
+static int ra_heap_pop(int *h, int *n)
+{
+    int top = h[0], x = h[--*n], i = 0;
+    for (;;) {
+        int c = 2 * i + 1;
+        if (c >= *n)
+            break;
+        if (c + 1 < *n && h[c + 1] < h[c])
+            c++;
+        if (x <= h[c])
+            break;
+        h[i] = h[c];
+        i = c;
+    }
+    if (*n > 0)
+        h[i] = x;
+    return top;
+}
+
 static const struct ra_range *g_ra_res;
 static int g_ra_nres;
 void ra_reserve(const struct ra_range *r, int n) { g_ra_res = r; g_ra_nres = n; }
@@ -997,24 +1030,46 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             deg[e] = d;
         }
         char *gone = xcalloc((size_t)(E ? E : 1), 1);
+        /* The node the scan wants is the LOWEST-numbered trivially
+         * colourable one, and a node stays trivially colourable once it
+         * is (degrees only fall), so they wait in a min-heap: entered when
+         * their degree drops under the bound, taken smallest first. Finding
+         * each by scanning every node was nodes x nodes -- a function of
+         * 4000 statements has some 30000 of them. The spill choice keeps
+         * its scan, in index order over the nodes still in the graph, so
+         * its ties go where they always went. */
+        int *heap = xmalloc((size_t)(E ? E : 1) * sizeof *heap), nheap = 0;
+        char *inheap = xcalloc((size_t)(E ? E : 1), 1);
+        int *rest = xmalloc((size_t)(E ? E : 1) * sizeof *rest), nrest = 0;
+        for (int e = 0; e < E; e++)
+            if (!absorbed[e]) {
+                rest[nrest++] = e;
+                if (deg[e] < (xcross[e] && !pool_k ? NCALLEE : NP)) {
+                    ra_heap_push(heap, &nheap, e);
+                    inheap[e] = 1;
+                }
+            }
         int sp = 0;
         for (int cnt = 0; cnt < E; cnt++) {
             int pick = -1;
-            for (int e = 0; e < E; e++)          /* a trivially-colourable node */
-                if (!gone[e] && !absorbed[e] &&
-                    deg[e] < (xcross[e] && !pool_k ? NCALLEE : NP)) {
-                    pick = e;
-                    break;
-                }
-            if (pick < 0)                        /* else the cheapest to spill */
-                for (int e = 0; e < E; e++)
-                    if (!gone[e] && !absorbed[e] &&
-                        (pick < 0 ||
-                         (by_degree
-                              ? deg[e] > deg[pick]
-                              : (unsigned long long)cost[e] * deg[pick] * deg[pick] <
-                                (unsigned long long)cost[pick] * deg[e] * deg[e])))
+            if (nheap > 0)                       /* a trivially-colourable node */
+                pick = ra_heap_pop(heap, &nheap);
+            if (pick < 0) {                      /* else the cheapest to spill */
+                int j = 0;
+                for (int r = 0; r < nrest; r++) {
+                    int e = rest[r];
+                    if (gone[e])
+                        continue;
+                    rest[j++] = e;
+                    if (pick < 0 ||
+                        (by_degree
+                             ? deg[e] > deg[pick]
+                             : (unsigned long long)cost[e] * deg[pick] * deg[pick] <
+                               (unsigned long long)cost[pick] * deg[e] * deg[e]))
                         pick = e;
+                }
+                nrest = j;
+            }
             if (pick < 0) break;                 /* only absorbed nodes left */
             gone[pick] = 1;
             order[sp++] = pick;                  /* push */
@@ -1025,11 +1080,19 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                     int bit = 0; unsigned long t = b;
                     while (!(t & 1)) { t >>= 1; bit++; }
                     int ne = w * 64 + bit;
-                    if (!gone[ne]) deg[ne]--;
+                    if (!gone[ne]) {
+                        deg[ne]--;
+                        if (!inheap[ne] && !absorbed[ne] &&
+                            deg[ne] < (xcross[ne] && !pool_k ? NCALLEE : NP)) {
+                            ra_heap_push(heap, &nheap, ne);
+                            inheap[ne] = 1;
+                        }
+                    }
                     b &= b - 1;
                 }
             }
         }
+        free(heap); free(inheap); free(rest);
         norder = sp;
         for (int i = 0; i < sp / 2; i++) {       /* pop order = reverse of push */
             int t = order[i]; order[i] = order[sp - 1 - i]; order[sp - 1 - i] = t;
