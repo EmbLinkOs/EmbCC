@@ -47,14 +47,15 @@ is in memory at all times, which is what a debugger wants (see
 [Debugging](debugging.md)).
 
 The temporaries of an expression, which no debugger names, are where the
-targets differ. On ARM Cortex-M and RISC-V the register allocator runs
-for them, as GCC's and Clang's `-O0` keep them in registers: `a + b * c`
-loads `a`, `b` and `c` and computes in registers. On x86-64, AArch64 and
-AVR every temporary has a stack slot too, and every C operation is a
-separate load, operation and store. (FreeRTOS's kernel at `-O0` on a
+targets differ. On ARM Cortex-M, RISC-V and AVR the register allocator
+runs for them, as GCC's and Clang's `-O0` keep them in registers:
+`a + b * c` loads `a`, `b` and `c` and computes in registers. On x86-64
+and AArch64 every temporary has a stack slot too, and every C operation
+is a separate load, operation and store. (FreeRTOS's kernel at `-O0` on a
 Cortex-M3: 106678 bytes of code before, 25670 now; Clang's `-O0` is
-18870.) `EMBCC_O0_NORA=1` gives the old `-O0` on Cortex-M and RISC-V, for
-bisecting a difference.
+18870; lib/libc's string, stdlib and ctype on AVR, 68428 bytes before
+and 33330 now.) `EMBCC_O0_NORA=1` gives the old `-O0` on these targets,
+for bisecting a difference. On AVR, `-g` still turns the allocator off.
 
 Some decisions are made at every level, `-O0` included, because they are
 taken when the IR is first generated or when code is emitted:
@@ -66,8 +67,7 @@ taken when the IR is first generated or when code is emitted:
   [Function alignment](#function-alignment)).
 - On x86-64, temporaries that are not live at the same time share stack
   slots within a basic block.
-- Branches are shortened to their smallest encoding (on Thumb and
-  RISC-V, with the allocator, which `-O0` runs there).
+- Branches are shortened to their smallest encoding.
 
 ### `-O`, `-O1`
 

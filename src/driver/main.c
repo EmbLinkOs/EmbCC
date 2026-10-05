@@ -1605,11 +1605,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     if (ta == TARGET_AVR)
         codegen_unit_avr(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                          &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                         opt_level >= 1);
-    /* Thumb and RISC-V allocate at -O0 too, for the temporaries of
+                         opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
+    /* AVR, Thumb and RISC-V allocate at -O0 too, for the temporaries of
      * each expression, every source variable pinned to its slot (the
-     * backends' g_t_o0 / g_rv_o0). EMBCC_O0_NORA=1 is the old -O0, for
-     * bisecting a difference. */
+     * backends' g_a_o0 / g_t_o0 / g_rv_o0). EMBCC_O0_NORA=1 is the old
+     * -O0, for bisecting a difference. */
     else if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64)
         codegen_unit_riscv(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
