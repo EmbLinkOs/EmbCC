@@ -2503,19 +2503,44 @@ static void compute_idom(struct bb *bb, int *order, int norder)
 /* Dominance frontiers. df[b] holds the blocks on b's frontier. */
 static void compute_df(struct bb *bb, int nbb, int **df, int *ndf)
 {
+    /* b only ever joins a frontier while b is the block being looked at,
+     * so a repeat of b can only be the last entry: that is the whole
+     * duplicate test, where a scan of the frontier so far was one per
+     * step -- and each list grows by doubling, not by one. */
+    int *cap = xcalloc((size_t)(nbb ? nbb : 1), sizeof *cap);
     for (int b = 0; b < nbb; b++) {
         if (bb[b].npred < 2) continue;
         for (int k = 0; k < bb[b].npred; k++) {
             int r = bb[b].pred[k];
             while (r >= 0 && r != bb[b].idom) {
-                int dup = 0;
-                for (int j = 0; j < ndf[r]; j++) if (df[r][j] == b) dup = 1;
-                if (!dup) { df[r] = xrealloc(df[r], (size_t)(ndf[r]+1)*sizeof(int));
-                            df[r][ndf[r]++] = b; }
+                if (!(ndf[r] > 0 && df[r][ndf[r] - 1] == b)) {
+                    if (ndf[r] == cap[r]) {
+                        cap[r] = cap[r] ? cap[r] * 2 : 4;
+                        df[r] = xrealloc(df[r], (size_t)cap[r] * sizeof(int));
+                    }
+                    df[r][ndf[r]++] = b;
+                }
                 r = bb[r].idom;
             }
         }
     }
+    free(cap);
+}
+
+/* Where p is in b's predecessor list, or -1. build_cfg lists them in
+ * increasing block order, once each, so a binary search finds the one
+ * index a scan from the front would: a join after a 4000-case switch has
+ * 4000 predecessors, and mem2reg asked this once per incoming edge. */
+static int bb_pred_index(const struct bb *b, int p)
+{
+    int lo = 0, hi = b->npred - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (b->pred[mid] == p) return mid;
+        if (b->pred[mid] < p) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return -1;
 }
 
 /* A full-width plain access (no truncation/extension mismatch between a store
@@ -2533,8 +2558,7 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
 {
     struct bb *S = &bb[s];
     if (S->nphi == 0) return;
-    int pi = -1;
-    for (int k = 0; k < S->npred; k++) if (S->pred[k] == p) { pi = k; break; }
+    int pi = bb_pred_index(S, p);
     if (pi < 0) return;
     /* A phi copy runs on the EDGE from p, so it belongs to whatever ends p
      * -- the branch or the fall-through's last instruction (R3). Going out
@@ -2768,34 +2792,61 @@ static int pass_mem2reg(struct ir_func *fn)
     int *ndf = xcalloc((size_t)nbb, sizeof *ndf);
     compute_df(bb, nbb, df, ndf);
 
-    /* 3. Phi insertion at the iterated dominance frontier of each var's defs. */
-    char *hasphi = xcalloc((size_t)nbb * (size_t)nprom, 1);
+    /* 3. Phi insertion at the iterated dominance frontier of each var's defs.
+     *
+     * The blocks that store each variable are found in one pass, in block
+     * order, rather than by a pass over the function per variable; and
+     * "this block has its phi / is on the list" is a stamp of the
+     * variable's number per block rather than a flag per (block,
+     * variable) -- 4000 locals in a function were 4000 passes. */
+    int *dcnt = xcalloc((size_t)nprom + 1, sizeof *dcnt), *work0 = NULL;
+    int *dlast = xcalloc((size_t)(nprom ? nprom : 1), sizeof *dlast);
+    for (int pass = 0; pass < 2; pass++) {
+        for (int pidx = 0; pidx < nprom; pidx++) dlast[pidx] = 0;
+        for (int bI = 0; bI < nbb; bI++)
+            for (int i = bb[bI].start; i < bb[bI].end; i++) {
+                const struct ir_ins *in = &fn->ins[i];
+                if (in->op != IR_STVAR || in->dst < 0 || in->dst >= nvars ||
+                    prom[in->dst] < 0 || dlast[prom[in->dst]] == bI + 1)
+                    continue;
+                int pidx = prom[in->dst];
+                dlast[pidx] = bI + 1;
+                if (pass) work0[dcnt[pidx]++] = bI;
+                else dcnt[pidx + 1]++;
+            }
+        if (!pass) {
+            for (int pidx = 0; pidx < nprom; pidx++) dcnt[pidx + 1] += dcnt[pidx];
+            work0 = xmalloc((size_t)(dcnt[nprom] ? dcnt[nprom] : 1) * sizeof *work0);
+        }
+    }
+    /* the second pass filled each list from its start, so dcnt[pidx] is
+     * now the end of pidx's list, and it starts where the one before ends */
+    int *hasphi = xcalloc((size_t)(nbb ? nbb : 1), sizeof *hasphi);
+    int *ondef = xcalloc((size_t)(nbb ? nbb : 1), sizeof *ondef);
     int *work = xmalloc((size_t)nbb * sizeof *work);
     for (int pidx = 0; pidx < nprom; pidx++) {
         int L = ploc[pidx], nw = 0;
-        char *ondef = xcalloc((size_t)nbb, 1);
-        for (int bI = 0; bI < nbb; bI++)
-            for (int i = bb[bI].start; i < bb[bI].end; i++)
-                if (fn->ins[i].op == IR_STVAR && fn->ins[i].dst == L) {
-                    if (!ondef[bI]) { ondef[bI] = 1; work[nw++] = bI; }
-                    break;
-                }
+        for (int k = pidx ? dcnt[pidx - 1] : 0; k < dcnt[pidx]; k++) {
+            int bI = work0[k];
+            ondef[bI] = pidx + 1;
+            work[nw++] = bI;
+        }
         while (nw) {
             int x = work[--nw];
             for (int j = 0; j < ndf[x]; j++) {
                 int d = df[x][j];
-                if (hasphi[d * nprom + pidx]) continue;
-                hasphi[d * nprom + pidx] = 1;
+                if (hasphi[d] == pidx + 1) continue;
+                hasphi[d] = pidx + 1;
                 bb[d].phi_local = xrealloc(bb[d].phi_local, (size_t)(bb[d].nphi+1)*sizeof(int));
                 bb[d].phi_res   = xrealloc(bb[d].phi_res,   (size_t)(bb[d].nphi+1)*sizeof(int));
                 bb[d].phi_local[bb[d].nphi] = L;
                 bb[d].phi_res[bb[d].nphi] = fn->nvregs++;
                 bb[d].nphi++;
-                if (!ondef[d]) { ondef[d] = 1; work[nw++] = d; }
+                if (ondef[d] != pidx + 1) { ondef[d] = pidx + 1; work[nw++] = d; }
             }
         }
-        free(ondef);
     }
+    free(ondef); free(dcnt); free(dlast); free(work0);
     for (int b = 0; b < nbb; b++) if (bb[b].nphi) {
         bb[b].phi_inc = xcalloc((size_t)bb[b].npred, sizeof *bb[b].phi_inc);
         for (int k = 0; k < bb[b].npred; k++)
@@ -2817,21 +2868,42 @@ static int pass_mem2reg(struct ir_func *fn)
         stk[p] = xmalloc(sizeof(int) * 8); scap[p] = 8;
         stk[p][sp[p]++] = undef[p];
     }
-    /* explicit dominator-tree DFS (children = blocks whose idom is this block) */
+    /* explicit dominator-tree DFS (children = blocks whose idom is this block).
+     * Each block's children are listed once, in block order, and pushed in
+     * that order; what a block pushes onto the version stacks is logged,
+     * and leaving it pops back to where the log stood on entry. Both used
+     * to cost blocks x blocks and blocks x variables. */
     int *dstk = xmalloc((size_t)nbb * sizeof *dstk);
-    int *dpushed = xcalloc((size_t)nbb * nprom, sizeof *dpushed); /* per (block,prom) */
+    int *mark = xmalloc((size_t)nbb * sizeof *mark);
+    int *plog = NULL, nplog = 0, cplog = 0;     /* pidx of each push */
     char *entered = xcalloc((size_t)nbb, 1);
+    int *kid = xcalloc((size_t)nbb + 1, sizeof *kid);
+    int *kids = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *kids);
+    for (int c = 1; c < nbb; c++)
+        if (bb[c].idom >= 0 && bb[c].idom < nbb) kid[bb[c].idom + 1]++;
+    for (int c = 0; c < nbb; c++) kid[c + 1] += kid[c];
+    {
+        int *fill = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *fill);
+        for (int c = 0; c < nbb; c++) fill[c] = kid[c];
+        for (int c = 1; c < nbb; c++)
+            if (bb[c].idom >= 0 && bb[c].idom < nbb)
+                kids[fill[bb[c].idom]++] = c;
+        free(fill);
+    }
     int dsp = 0; dstk[dsp++] = 0;
     while (dsp) {
         int b = dstk[dsp - 1];
         if (!entered[b]) {
             entered[b] = 1;
+            mark[b] = nplog;
             /* phi defs become the current version */
             for (int k = 0; k < bb[b].nphi; k++) {
                 int pidx = prom[bb[b].phi_local[k]];
                 if (sp[pidx] == scap[pidx]) { scap[pidx]*=2; stk[pidx]=xrealloc(stk[pidx],(size_t)scap[pidx]*sizeof(int)); }
                 stk[pidx][sp[pidx]++] = bb[b].phi_res[k];
-                dpushed[b * nprom + pidx]++;
+                if (nplog == cplog) { cplog = cplog ? cplog * 2 : 64;
+                    plog = xrealloc(plog, (size_t)cplog * sizeof *plog); }
+                plog[nplog++] = pidx;
             }
             for (int i = bb[b].start; i < bb[b].end; i++) {
                 struct ir_ins *in = &fn->ins[i];
@@ -2859,7 +2931,9 @@ static int pass_mem2reg(struct ir_func *fn)
                     int pidx = prom[in->dst];
                     if (sp[pidx] == scap[pidx]) { scap[pidx]*=2; stk[pidx]=xrealloc(stk[pidx],(size_t)scap[pidx]*sizeof(int)); }
                     stk[pidx][sp[pidx]++] = in->a;   /* the stored temp is the new version */
-                    dpushed[b * nprom + pidx]++;
+                    if (nplog == cplog) { cplog = cplog ? cplog * 2 : 64;
+                        plog = xrealloc(plog, (size_t)cplog * sizeof *plog); }
+                    plog[nplog++] = pidx;
                     in->op = IR_MOV; in->dst = -1; in->a = -1;  /* mark: drop in rebuild */
                 }
             }
@@ -2867,22 +2941,23 @@ static int pass_mem2reg(struct ir_func *fn)
             for (int s = 0; s < bb[b].nsucc; s++) {
                 int sb = bb[b].succ[s];
                 if (!bb[sb].nphi) continue;
-                int pk = -1;
-                for (int k = 0; k < bb[sb].npred; k++) if (bb[sb].pred[k]==b){pk=k;break;}
+                int pk = bb_pred_index(&bb[sb], b);
                 for (int k = 0; k < bb[sb].nphi; k++) {
                     int pidx = prom[bb[sb].phi_local[k]];
                     bb[sb].phi_inc[pk][k] = stk[pidx][sp[pidx]-1];
                 }
             }
             /* push dom-tree children */
-            for (int c = 0; c < nbb; c++)
-                if (c != 0 && bb[c].idom == b && !entered[c]) dstk[dsp++] = c;
+            for (int q = kid[b]; q < kid[b + 1]; q++)
+                if (!entered[kids[q]]) dstk[dsp++] = kids[q];
         } else {
             /* leaving b: pop its versions */
-            for (int p = 0; p < nprom; p++) sp[p] -= dpushed[b * nprom + p];
+            while (nplog > mark[b])
+                sp[plog[--nplog]]--;
             dsp--;
         }
     }
+    free(mark); free(plog); free(kid); free(kids);
 
     /* 5. Rebuild the linear IR out of SSA. */
     struct ibuf nb = { 0, 0, 0 };
@@ -3022,7 +3097,7 @@ static int pass_mem2reg(struct ir_func *fn)
 
     for (int p = 0; p < nprom; p++) free(stk[p]);
     free(undef); free(stk); free(sp); free(scap);
-    free(dstk); free(dpushed); free(entered);
+    free(dstk); free(entered);
     free(hasphi); free(work); free(prom); free(ploc);
     mem2reg_free(bb, nbb, df, ndf, l2b, order);
     return 1;
@@ -12459,6 +12534,22 @@ static int pass_splitloops(struct ir_func *fn)
     if (norder != nbb)
         goto out;
     compute_idom(bb, order, norder);
+    /* Nothing to split without a loop, and the liveness below is blocks x
+     * vregs bits: a 4000-case switch, which has no loop at all, built and
+     * swept 200 MB of it here. The headers looked for are the ones the
+     * walk below would take. */
+    {
+        int any_loop = 0;
+        for (int h = 1; h < nbb && !any_loop; h++) {
+            if (bb[h].end <= bb[h].start || fn->ins[bb[h].start].op != IR_LABEL)
+                continue;
+            for (int q = 0; q < bb[h].npred && !any_loop; q++)
+                if (bb_dominates(bb, h, bb[h].pred[q]))
+                    any_loop = 1;
+        }
+        if (!any_loop)
+            goto out;
+    }
     int nv = fn->nvregs, words = (nv + 63) / 64;
 
     /* The width and class of each temp, from any definition. */
@@ -13144,8 +13235,178 @@ static int pass_rangecheck(struct ir_func *fn)
  * merge; each question about one point is a walk to the end of its
  * block. Functions with inline asm (whose outputs are not definitions to
  * the rest of this file) or exception edges are left alone. */
+/* Block liveness as a list per vreg of the blocks it is live out of,
+ * ascending -- the least solution of the usual equations over build_cfg's
+ * blocks, found one vreg at a time from the blocks that read it before
+ * writing it, back through predecessors to the blocks that write it.
+ * `slots` says whether an LDVAR's or ADDR's slot operand counts as a read.
+ *
+ * What it replaces was a bit set per block of every vreg, iterated to a
+ * fixpoint: blocks x vregs, which for a function of 4000 if statements
+ * is 12000 blocks by 36000 vregs, 54 MB a set and four sets. */
+struct vblk { int **b, *n, nv; };
+
+struct vblk_ue { int *ust, *dst, b, nv; int *pv, *pb, np, cap; };
+static void vblk_pair(struct vblk_ue *u, int v, int b)
+{
+    if (u->np == u->cap) {
+        u->cap = u->cap ? u->cap * 2 : 256;
+        u->pv = xrealloc(u->pv, (size_t)u->cap * sizeof *u->pv);
+        u->pb = xrealloc(u->pb, (size_t)u->cap * sizeof *u->pb);
+    }
+    u->pv[u->np] = v;
+    u->pb[u->np] = b;
+    u->np++;
+}
+static void vblk_ue_cb(int *p, void *ctx)
+{
+    struct vblk_ue *u = ctx;
+    int v = *p;
+    if (v < 0 || v >= u->nv || u->dst[v] == u->b + 1 || u->ust[v] == u->b + 1)
+        return;
+    u->ust[v] = u->b + 1;
+    vblk_pair(u, v, u->b);
+}
+
+/* (v, b) pairs -> per key, the other side, stably */
+static void vblk_csr(const int *key, const int *val, int np, int nkey,
+                     int **off_out, int **val_out)
+{
+    int *off = xcalloc((size_t)nkey + 1, sizeof *off);
+    int *out = xmalloc((size_t)(np ? np : 1) * sizeof *out);
+    for (int j = 0; j < np; j++) off[key[j] + 1]++;
+    for (int k = 0; k < nkey; k++) off[k + 1] += off[k];
+    int *fill = xmalloc((size_t)(nkey ? nkey : 1) * sizeof *fill);
+    for (int k = 0; k < nkey; k++) fill[k] = off[k];
+    for (int j = 0; j < np; j++) out[fill[key[j]]++] = val[j];
+    free(fill);
+    *off_out = off;
+    *val_out = out;
+}
+
+static void vblk_build(struct ir_func *fn, const struct bb *bb, int nbb,
+                       int slots, struct vblk *lv)
+{
+    int nv = fn->nvregs;
+    lv->nv = nv;
+    lv->b = xcalloc((size_t)(nv ? nv : 1), sizeof *lv->b);
+    lv->n = xcalloc((size_t)(nv ? nv : 1), sizeof *lv->n);
+    struct vblk_ue ue = { NULL, NULL, 0, nv, NULL, NULL, 0, 0 };
+    struct vblk_ue df = { NULL, NULL, 0, nv, NULL, NULL, 0, 0 };
+    ue.ust = xcalloc((size_t)(nv ? nv : 1), sizeof *ue.ust);
+    ue.dst = xcalloc((size_t)(nv ? nv : 1), sizeof *ue.dst);
+    for (int b = 0; b < nbb; b++) {
+        ue.b = b;
+        for (int n = bb[b].start; n < bb[b].end; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (slots || (i->op != IR_LDVAR && i->op != IR_ADDR))
+                each_read(i, vblk_ue_cb, &ue);
+            int t = def_target(i);
+            if (t >= 0 && t < nv && ue.dst[t] != b + 1) {
+                ue.dst[t] = b + 1;
+                vblk_pair(&df, t, b);
+            }
+        }
+    }
+    free(ue.ust); free(ue.dst);
+    int *ueoff, *ueb, *dfoff, *dfb;
+    vblk_csr(ue.pv, ue.pb, ue.np, nv, &ueoff, &ueb);
+    vblk_csr(df.pv, df.pb, df.np, nv, &dfoff, &dfb);
+    free(ue.pv); free(ue.pb); free(df.pv); free(df.pb);
+    int *inmk = xcalloc((size_t)(nbb ? nbb : 1), sizeof *inmk);
+    int *outmk = xcalloc((size_t)(nbb ? nbb : 1), sizeof *outmk);
+    int *defmk = xcalloc((size_t)(nbb ? nbb : 1), sizeof *defmk);
+    int *work = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *work);
+    int *tmp = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *tmp);
+    for (int v = 0; v < nv; v++) {
+        if (ueoff[v] == ueoff[v + 1])
+            continue;
+        for (int k = dfoff[v]; k < dfoff[v + 1]; k++) defmk[dfb[k]] = v + 1;
+        int nw = 0, nt = 0;
+        for (int k = ueoff[v]; k < ueoff[v + 1]; k++) {
+            inmk[ueb[k]] = v + 1;
+            work[nw++] = ueb[k];
+        }
+        while (nw > 0) {
+            int b = work[--nw];
+            for (int k = 0; k < bb[b].npred; k++) {
+                int p = bb[b].pred[k];
+                if (outmk[p] != v + 1) {
+                    outmk[p] = v + 1;
+                    tmp[nt++] = p;
+                }
+                if (defmk[p] != v + 1 && inmk[p] != v + 1) {
+                    inmk[p] = v + 1;
+                    work[nw++] = p;
+                }
+            }
+        }
+        if (nt == 0)
+            continue;
+        /* ascending: an insertion sort is fine for the short lists, and a
+         * marked pass over the blocks for a long one */
+        int *l = xmalloc((size_t)nt * sizeof *l);
+        if (nt <= 32) {
+            for (int k = 0; k < nt; k++) {
+                int x = tmp[k], j = k;
+                while (j > 0 && l[j - 1] > x) { l[j] = l[j - 1]; j--; }
+                l[j] = x;
+            }
+        } else {
+            int m = 0;
+            for (int b = 0; b < nbb; b++)
+                if (outmk[b] == v + 1) l[m++] = b;
+        }
+        lv->b[v] = l;
+        lv->n[v] = nt;
+    }
+    free(inmk); free(outmk); free(defmk); free(work); free(tmp);
+    free(ueoff); free(ueb); free(dfoff); free(dfb);
+}
+
+static int vblk_has(const struct vblk *lv, int v, int b)
+{
+    if (v < 0 || v >= lv->nv)
+        return 0;
+    const int *l = lv->b[v];
+    int lo = 0, hi = lv->n[v] - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (l[mid] == b) return 1;
+        if (l[mid] < b) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return 0;
+}
+
+/* b is now live wherever a was, and a nowhere */
+static void vblk_merge(struct vblk *lv, int a, int b)
+{
+    int na = lv->n[a], nb2 = lv->n[b], m = 0, i = 0, j = 0;
+    if (na == 0)
+        return;
+    int *l = xmalloc((size_t)(na + nb2) * sizeof *l);
+    const int *x = lv->b[a], *y = lv->b[b];
+    while (i < na || j < nb2) {
+        int c;
+        if (j >= nb2 || (i < na && x[i] < y[j])) c = x[i++];
+        else if (i >= na || y[j] < x[i]) c = y[j++];
+        else { c = x[i]; i++; j++; }
+        l[m++] = c;
+    }
+    free(lv->b[a]); free(lv->b[b]);
+    lv->b[a] = NULL; lv->n[a] = 0;
+    lv->b[b] = l; lv->n[b] = m;
+}
+
+static void vblk_free(struct vblk *lv)
+{
+    for (int v = 0; v < lv->nv; v++) free(lv->b[v]);
+    free(lv->b); free(lv->n);
+}
+
 static int jc_live_after(struct ir_func *fn, const char *gone, int n, int end,
-                         int v, const unsigned long *lout)
+                         int v, const struct vblk *lout, int blk)
 {
     for (int k = n + 1; k < end; k++) {
         if (gone[k])
@@ -13155,7 +13416,7 @@ static int jc_live_after(struct ir_func *fn, const char *gone, int n, int end,
         if (def_target(&fn->ins[k]) == v)
             return 0;
     }
-    return (lout[v >> 6] & (1UL << (v & 63))) != 0;
+    return vblk_has(lout, v, blk);
 }
 struct jc_cnt { int *use; int nv; };
 static void jc_cnt_cb(int *p, void *ctx)
@@ -13199,41 +13460,12 @@ static int pass_joincopies(struct ir_func *fn)
     if (!any)
         goto out0;
     bb = build_cfg(fn, &nbb, &l2b);
-    int words = (nv + 63) / 64;
     int *blk = xmalloc((size_t)nins * sizeof *blk);
     for (int n = 0; n < nins; n++) blk[n] = -1;
     for (int b = 0; b < nbb; b++)
         for (int n = bb[b].start; n < bb[b].end; n++) blk[n] = b;
-    unsigned long *use = xcalloc((size_t)nbb * words, sizeof *use);
-    unsigned long *def = xcalloc((size_t)nbb * words, sizeof *def);
-    unsigned long *lin = xcalloc((size_t)nbb * words, sizeof *lin);
-    unsigned long *lout = xcalloc((size_t)nbb * words, sizeof *lout);
-    for (int b = 0; b < nbb; b++) {
-        struct splituse su = { use + (size_t)b * words, def + (size_t)b * words, nv };
-        for (int n = bb[b].start; n < bb[b].end; n++) {
-            if (fn->ins[n].op != IR_LDVAR && fn->ins[n].op != IR_ADDR)
-                each_read(&fn->ins[n], split_use_cb, &su);
-            int t = def_target(&fn->ins[n]);
-            if (t >= 0 && t < nv) su.def[t >> 6] |= 1UL << (t & 63);
-        }
-    }
-    for (int again = 1; again; ) {
-        again = 0;
-        for (int b = nbb - 1; b >= 0; b--) {
-            unsigned long *o = lout + (size_t)b * words;
-            for (int w = 0; w < words; w++) o[w] = 0;
-            for (int k = 0; k < bb[b].nsucc; k++) {
-                unsigned long *si = lin + (size_t)bb[b].succ[k] * words;
-                for (int w = 0; w < words; w++) o[w] |= si[w];
-            }
-            unsigned long *ii = lin + (size_t)b * words;
-            for (int w = 0; w < words; w++) {
-                unsigned long nvl = use[(size_t)b * words + w] |
-                                    (o[w] & ~def[(size_t)b * words + w]);
-                if (nvl != ii[w]) { ii[w] = nvl; again = 1; }
-            }
-        }
-    }
+    struct vblk lout;
+    vblk_build(fn, bb, nbb, 0, &lout);
     char *gone = xcalloc((size_t)nins, 1);
     /* The instructions defining each vreg, in a list per vreg, kept true
      * as names merge: the questions below are about the definitions of
@@ -13273,11 +13505,11 @@ static int pass_joincopies(struct ir_func *fn)
                 if (ins_reads(&fn->ins[d], b))
                     ok = 0;
                 if (jc_live_after(fn, gone, d, bb[blk[d]].end, b,
-                                  lout + (size_t)blk[d] * words))
+                                  &lout, blk[d]))
                     ok = 0;
             } else if (t == b) {
                 if (jc_live_after(fn, gone, d, bb[blk[d]].end, a,
-                                  lout + (size_t)blk[d] * words))
+                                  &lout, blk[d]))
                     ok = 0;
             }
         }
@@ -13301,13 +13533,7 @@ static int pass_joincopies(struct ir_func *fn)
         dfirst[a] = keep;
         gone[m] = 1;
         nuse[a] = 0;
-        for (int bl = 0; bl < nbb; bl++) {
-            unsigned long *li = lin + (size_t)bl * words, *lo = lout + (size_t)bl * words;
-            if (li[a >> 6] & (1UL << (a & 63))) li[b >> 6] |= 1UL << (b & 63);
-            if (lo[a >> 6] & (1UL << (a & 63))) lo[b >> 6] |= 1UL << (b & 63);
-            li[a >> 6] &= ~(1UL << (a & 63));
-            lo[a >> 6] &= ~(1UL << (a & 63));
-        }
+        vblk_merge(&lout, a, b);
         changed = 1;
     }
     if (changed) {
@@ -13327,7 +13553,8 @@ static int pass_joincopies(struct ir_func *fn)
         free(fn->ins);
         fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
     }
-    free(gone); free(use); free(def); free(lin); free(lout); free(blk);
+    free(gone); free(blk);
+    vblk_free(&lout);
     free(dfirst); free(dnext);
     free(l2b);
     free_cfg(bb, nbb);
