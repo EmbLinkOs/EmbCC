@@ -274,6 +274,9 @@ int target_thumb_hf_name(void);
  * not name one. */
 int thumb_imm_foldable(int op, long imm);
 int thumb_imm_foldable64(int op, long imm);   /* a 64-bit AND/OR/XOR, half by half */
+/* A 64-bit compare with a constant, as codegen.c's cmp64 takes it. */
+int thumb_cmp64_imm(int pred, int sign, long imm, int *pout, long *lo,
+                    long *hi);
 int riscv_imm_foldable64(int op, long imm);   /* the same at RV32 */
 /* Is c == ((1 << k) + 1) << j or ((1 << k) - 1) << j, with k >= 1? Then a
  * multiply by c is an add or a reverse-subtract with a shifted operand,

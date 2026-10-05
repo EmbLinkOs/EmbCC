@@ -10678,13 +10678,28 @@ static int pass_immfold(struct ir_func *fn)
         int wide_ok = (target_get() == TARGET_THUMB ||
                        target_get() == TARGET_RISCV32) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
-        if (get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
-            target_imm_foldable(i->op, B, i->w)) {
+        /* ...and a 64-bit compare with any constant whose halves its
+         * subs/sbcs or cmp/cmpeq take (thumb_cmp64_imm): strtol's
+         * `v > LONG_MAX` kept 0x7fffffff in a register pair. Not on
+         * ARMv6-M, which builds a constant from a literal pool. */
+        int cmp64 = target_get() == TARGET_THUMB && i->op == IR_CMP &&
+                    i->w == 8 && target_thumb_arch() >= 7 &&
+                    !getenv("EMBCC_T_NOCMP64IMM");
+        int p64;
+        long lo64, hi64;
+        if (cmp64 ? get_const(fn, &d, i->b, &B) &&
+                    thumb_cmp64_imm(i->pred, i->sign, B, &p64, &lo64, &hi64)
+                  : get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
+                    target_imm_foldable(i->op, B, i->w)) {
             i->imm = B; i->imm_b = 1; i->b = -1;    /* op a, imm */
             changed = 1;
-        } else if ((commutative || i->op == IR_CMP) &&
-                   get_const(fn, &d, i->a, &A) && (fits_imm32(A) || wide_ok) &&
-                   target_imm_foldable(i->op, A, i->w)) {
+        } else if (cmp64 ? get_const(fn, &d, i->a, &A) &&
+                           thumb_cmp64_imm(swap_pred(i->pred), i->sign, A,
+                                           &p64, &lo64, &hi64)
+                         : (commutative || i->op == IR_CMP) &&
+                           get_const(fn, &d, i->a, &A) &&
+                           (fits_imm32(A) || wide_ok) &&
+                           target_imm_foldable(i->op, A, i->w)) {
             /* Constant in the first operand: move it to the immediate, keeping
              * a valid instruction — commutative ops just swap, a compare swaps
              * and flips its predicate. */

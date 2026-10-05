@@ -85,25 +85,26 @@ agree() {                       # agree REF TAG
         head -20 "$out/$2.diff"; exit 1; }
 }
 
-# embedded-stress against clang; the 64-bit and float programs against
-# the host.
+# embedded-stress against clang; the 64-bit, comparison and float
+# programs against the host.
 "$CLANG" -target $T -ffreestanding -Os -c tests/golden/embedded-stress.c \
          -o "$out/stress-ref.o" || { echo "FAIL: clang could not compile"; exit 1; }
 run stress-ref "$out/stress-ref.o"
-for p in int64 float; do
+for p in int64 cmp64 float; do
     cc -std=c99 -w -o "$out/host-$p" tests/golden/embedded-$p.c "$H/hostio.c" -lm || {
         echo "FAIL: embedded-$p.c does not compile for the host"; exit 1; }
     "$out/host-$p" > "$out/$p-ref.txt" || { echo "FAIL: host $p failed"; exit 1; }
 done
 for opt in -O1 -O2 -Os; do
-    for p in stress int64 float; do
+    for p in stress int64 cmp64 float; do
         EMBCC_T_EXT=1 "$EMBCC" --target=$T $opt -c tests/golden/embedded-$p.c \
                  -o "$out/$p$opt.o" || {
             echo "FAIL: embedded-$p.c at $opt does not compile"; exit 1; }
     done
     run stress$opt "$out/stress$opt.o"; agree stress-ref stress$opt
     run int64$opt "$out/int64$opt.o" "$out/int64.o"; agree int64-ref int64$opt
+    run cmp64$opt "$out/cmp64$opt.o"; agree cmp64-ref cmp64$opt
     run float$opt "$out/float$opt.o" "$out/softfp.o" "$out/int64.o" "$out/sqrt.o"
     agree float-ref float$opt
 done
-echo "stress, int64, float with r9-r11 allocatable: agree at -O1, -O2, -Os"
+echo "stress, int64, cmp64, float with r9-r11 allocatable: agree at -O1, -O2, -Os"

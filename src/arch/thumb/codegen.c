@@ -2773,23 +2773,58 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
         t_cmp_imm(t, ah, 0);
         return pred == B_LT ? T_LT : T_GE;
     }
+    /* Against any other constant K, K's halves are immediates when
+     * thumb_cmp64_imm says they encode, and nothing is swapped into the
+     * scratch registers: the operand stays where it lives and only r12
+     * is written. strtol's range checks (`v > LONG_MAX`) moved the
+     * constant into r2:r3, it and the value into r9-r12, and pushed
+     * r9-r11 to do it: 170 bytes where clang has 76. */
+    if (i->imm_b) {
+        int p, form;
+        long lo, hi;
+        form = thumb_cmp64_imm(pred, sign, i->imm, &p, &lo, &hi);
+        if (form) {
+            src64(F, i->a, A_LO, R_TMP, &al, &ah);
+            if (form == 3) {
+                /* Z only when both halves are equal */
+                t_cmp_imm(t, al, lo);
+                t_it(t, T_EQ, "");
+                t_cmp_imm(t, ah, hi);
+                return p == B_EQ ? T_EQ : T_NE;
+            }
+            if (form == 1) {
+                t_alu_imm(t, T_OP_SUB, A_LO, al, lo, 1);
+                t_alu_imm(t, T_OP_SBC, A_LO, ah, hi, 1);
+            } else {
+                /* K - a: the low half, then ~ah + K's high half + C,
+                 * which is SBC's AddWithCarry with its operands in the
+                 * other order. The mvn sets no flags. */
+                t_alu_imm(t, T_OP_RSB, A_LO, al, lo, 1);
+                t_mvn_reg(t, A_LO, ah, 0);
+                t_alu_imm(t, T_OP_ADC, A_LO, A_LO, hi, 1);
+            }
+            if (p == B_LT) return sign ? T_LT : T_CC;
+            return sign ? T_GE : T_CS;
+        }
+    }
+    /* Swapped, the operands are read where they live as well: copying
+     * both into r9-r12 first pushed three callee-saved registers in a
+     * leaf function whose operands were already in r0-r3. */
+    src64(F, i->a, A_LO, R_TMP, &al, &ah);
+    srcb64(F, i, &bl, &bh);
     if (swap) {
-        operand_b64(F, i, A_LO, A_HI);
-        rd64(F, i->a, B_LO, B_HI);
+        int x = al, y = ah;
+        al = bl; ah = bh; bl = x; bh = y;
         pred = pred == B_GT ? B_LT : B_GE;
-        al = A_LO; ah = A_HI; bl = B_LO; bh = B_HI;
-    } else {
-        src64(F, i->a, A_LO, R_TMP, &al, &ah);
-        srcb64(F, i, &bl, &bh);
     }
     if (pred == B_EQ || pred == B_NE) {
         /* Equality needs both halves, and `sbcs` only reports Z for the
-         * high one -- so the difference of each half is folded together
-         * and tested against zero. */
-        t_alu_reg(t, T_OP_EOR, A_LO, al, bl, 0);
-        t_alu_reg(t, T_OP_EOR, A_HI, ah, bh, 0);
-        t_alu_reg(t, T_OP_ORR, A_LO, A_LO, A_HI, 0);
-        t_cmp_imm(t, A_LO, 0);
+         * high one: `cmp lo; it eq; cmpeq hi` sets Z only when both
+         * are equal. (An eor of each half and an orr wanted r11 for the
+         * high one, and pushed it.) */
+        t_cmp_reg(t, al, bl);
+        t_it(t, T_EQ, "");
+        t_cmp_reg(t, ah, bh);
         return pred == B_EQ ? T_EQ : T_NE;
     }
     /* Only the flags are wanted: both differences go to r12, leaving the
@@ -4890,22 +4925,35 @@ static void g_t_reserve_pairs(struct ir_func *fn, const int *loc)
     unsigned long *li = NULL, *lo;
     int *dv = NULL, wds = 0;
     lo = ra_live_intervals(fn, first, last, &li, &dv, &wds);
-    free(lo); free(li); free(dv);
     g_t_nres = 0;
     for (int v = 0; v < nv; v++) {
+        int born = 0;
         if (loc[v] < 0 || first[v] < 0) continue;
         if (g_t_nres + 2 > g_t_capres) {
             g_t_capres = g_t_capres ? g_t_capres * 2 : 16;
             g_t_res = xrealloc(g_t_res, (size_t)g_t_capres * sizeof *g_t_res);
         }
+        /* A pair dying at a 64-bit compare leaves its registers to the
+         * 0 or 1 born there: cmp64 reads both operands and writes only
+         * r12, and set_cc writes the result after. Reserved through the
+         * compare, `return a < b` built the result in r4, pushed it,
+         * and moved it to r0. */
+        if (last[v] < fn->nins && lo &&
+            !(lo[(size_t)last[v] * wds + v / 64] >> (v % 64) & 1)) {
+            const struct ir_ins *c = &fn->ins[last[v]];
+            born = c->op == IR_CMP && c->w == 8 && !c->flt &&
+                   (c->a == v || (!c->imm_b && c->b == v));
+        }
         for (int h = 0; h < 2; h++) {
             g_t_res[g_t_nres].reg = loc[v] + h;
             g_t_res[g_t_nres].first = first[v];
             g_t_res[g_t_nres].last = last[v];
+            g_t_res[g_t_nres].born = born;
             g_t_nres++;
         }
     }
     ra_reserve(g_t_res, g_t_nres);
+    free(lo); free(li); free(dv);
     free(first); free(last);
 }
 static int *t_pair_alloc(struct ir_func *fn, const char *wide,
