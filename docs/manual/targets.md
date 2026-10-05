@@ -914,6 +914,19 @@ drops `.MIPS.abiflags`, `.reginfo` and `.pdr` from the image.
 `-Tstack ADDR` makes it emit an entry stub that sets `sp` and jumps to
 the entry symbol.
 
+### Assembly
+
+`embcc -c` assembles `.s` and `.S` files for MIPS32, and file-scope
+`asm` blocks and `__attribute__((naked))` functions are assembled the
+same way, in GNU as's syntax: `$`-spelt registers, `jal sym`, `%hi(sym)`
+and `%lo(sym)`, `la`, `.word sym`, labels and numeric locals, `.set
+reorder`/`noreorder`/`push`/`pop`, and the `.ent`/`.end`/`.frame` markers.
+A file starts in `.set reorder`, where the assembler fills each delay
+slot with a `nop`, as GNU as does; so does an inline-asm template, as
+GCC's and clang's do. PIC and small-data code (`.abicalls`, `.cpload`,
+`%got`, `%call16`, `%gp_rel`) is refused. The vocabulary and its rules
+are in [Inline assembly](inline-asm.md#mips32).
+
 ### Predefined macros
 
 From `clang --target=mipsel-unknown-elf -mcpu=mips32r2 -msoft-float
@@ -944,11 +957,8 @@ exception prints its cause and address.
 | a computed `goto` | `the MIPS32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| `__attribute__((naked))` | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V and AVR targets (MIPS has no file-scope assembler yet)` |
-| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
-| an instruction in a file-scope `asm` | `file-scope asm instruction "jr $ra": ...` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function; see [Bare metal](embedded.md#mips32)) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
-| a `.s` or `.S` file | `no assembly-file support for mipsel-none-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` |
 | a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
 

@@ -547,16 +547,13 @@ the prologue saves it.
 File-scope `__asm__` is assembled by `topasm.c` on x86-64 and AArch64:
 the directives (`.global`, labels, `.byte`, `.long`, `.quad`) work on
 both; the mnemonic half (`and`, `call`, `jmp`, `ret`) is x86-64 only. On
-Cortex-M, RISC-V and AVR the driver hands each block to the GNU-syntax
+Cortex-M, RISC-V, MIPS32 and AVR the driver hands each block to the GNU-syntax
 assembler instead (`gas_assemble_block` in `src/as/gas.c`), which
 returns its bytes, labels, relocations with their ELF types, alignment
 and data ranges in the same `struct topasm`. A naked function becomes
 such a block before code generation (`naked_to_blocks` in
 `src/driver/main.c`): its label, then its asm statements with their
-constant operands written in. MIPS32 has no GNU-syntax block assembler
-yet: its file-scope blocks go through `topasm.c`, so data directives
-assemble and an instruction is refused by name, and a naked function is
-refused.
+constant operands written in.
 
 `as.c` is EmbAS, the NASM-syntax assembler behind `embas` and
 `embcc -c FILE.asm`; see [embas](../manual/tools/embas.md).

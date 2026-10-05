@@ -449,10 +449,11 @@ offset within the missing section, and its initializer is not written.
   (`src/arch/x86_64/as.c`) into ELF64 objects with the same writer.
   `embas -f bin` is not implemented and says so.
 - `embcc -c FILE.s` and `FILE.S` assemble GNU-syntax source for
-  AArch64, ARMv7-M, RISC-V and AVR (`src/as/gas.c`), encoding each
+  AArch64, ARMv7-M, RISC-V, MIPS32 and AVR (`src/as/gas.c`), encoding each
   statement with the same per-target assembler the compiler uses for
-  inline `asm`. `.S` is preprocessed first. x86-64 and MIPS32 are
-  refused: `no assembly-file support for x86_64-elf yet`.
+  inline `asm`. `.S` is preprocessed first. x86-64 is refused:
+  `no assembly-file support for x86_64-elf yet`. A MIPS32 object from
+  a `.S` file has the compiler's `e_flags` and `.MIPS.abiflags`.
 - `embcc --emit-empty-object FILE` writes an empty ELF object for the
   selected target, with a `.text` section and two local symbols.
 

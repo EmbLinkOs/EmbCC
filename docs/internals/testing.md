@@ -331,8 +331,10 @@ clang's AVR struct convention is not avr-gcc's.
 | `mips-exec` | `tests/exec/*.c` on QEMU `malta` at `-O0`, `-O1`, `-O2`, `-Os`, linked with lib/libc and lib/rt built for mipsel; the programs whose expected value assumes LP64 against clang's result on the same board |
 | `mips-abi` | EmbCC and clang (`mipsel-unknown-elf -msoft-float`) calling each other: the shared embedded ABI pairing and the o32-specific one (`mips-abi-*.c`) |
 | `mips-link` | EmbLD's REL relocations: the HI16/LO16 AHL rule against absolute symbols over every carry case, EmbCC's own far addends, the link refusals (gp-relative, hard float, a lone HI16, a linker script) |
-| `mips-asm` | the inline-assembly vocabulary against `llvm-mc`, asm programs on the board, refusals, and `-S` reassembled by `llvm-mc` against `-c`'s object |
-| `mips-refuse` | the object header and flags, the MIPS options accepted and refused, the constructs refused by name |
+| `mips-asm` | the inline-assembly vocabulary against `llvm-mc`, asm programs on the board (in `.set reorder` and `noreorder`), refusals, and `-S` reassembled by `llvm-mc` and linked to the same image as `-c`'s object, asm blocks included |
+| `mips-gas` | a `.S` file of every form (modes, labels, `jal`/`%hi`/`%lo`/`la`, expressions, data) assembled by EmbCC and by clang and linked to the same image; the `.S` refusals |
+| `mips-exc` | a general exception handler in a `.S` file on `malta`: syscalls from a naked function return the handler's values, the CP0 timer interrupts a register-heavy loop under `-icount` without changing its result, a file-scope asm function calls C; at `-O0` to `-Os` |
+| `mips-refuse` | the object header and flags, the MIPS options accepted and refused, the constructs refused by name (atomics, computed goto, frame builtins, `__int128`, `interrupt`, unwind tables, C++) |
 | `mips-access` | atomic, volatile, `op=`, `++` and `va_arg` accesses are single `lw`/`sw`/`lhu`/`sh` (disassembled at `-O0` and `-O2`); packed members are still split, and run right at a misaligned address on the board, in an image whose `.data` ends mid-word |
 
 `libc-embedded` and `debug-embedded` include `mipsel-none-elf` too.

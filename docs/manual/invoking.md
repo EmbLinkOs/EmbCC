@@ -1016,7 +1016,7 @@ result. The installed layout is described in
 ### Assembly input
 
 A `.s` or `.S` file is assembled by EmbCC's built-in GNU-syntax assembler
-for the selected target: AArch64, ARM (Thumb), RISC-V or AVR. A `.S` file
+for the selected target: AArch64, ARM (Thumb), RISC-V, MIPS32 or AVR. A `.S` file
 is preprocessed first; `-D` and `-U` apply, but the `-I` and `-isystem`
 directories are not searched (a `#include "file"` beside the source is
 found). The inline-assembly vocabulary of each target is listed in
@@ -1046,6 +1046,17 @@ The assembler follows GNU as for each target:
   `.type sym, %function`, makes a label a Thumb function: its symbol
   carries the interworking bit, which a vector table entry needs. A symbol
   the file uses but does not define is an external reference.
+  On MIPS32, `jal sym` and `j sym`, `lui rt, %hi(sym)`, `addiu rt, rs,
+  %lo(sym)`, a load or store at `%lo(sym)(rs)`, `la rt, sym` and `.word
+  sym`; a branch reaches only labels in the same section.
+- **MIPS32's modes.** A file starts in `.set reorder`, GNU as's default:
+  the assembler puts a `nop` in every delay slot. `.set noreorder` makes
+  the instruction after a transfer its slot; `.set push`/`.set pop` save
+  and restore the mode. `.ent`, `.end NAME`, `.frame`, `.mask`, `.fmask`
+  and `.insn` are accepted as markers (`.end` with a name does not end the
+  file there, as it does elsewhere). `.abicalls`, `.cpload`, `.cprestore`,
+  `.gpword`, `.option pic2` and the `%got`/`%call16`/`%gp_rel` operators
+  are refused: EmbCC builds neither PIC nor small-data code.
 - **Sizes.** `.size sym, .-sym` records a function's size, which a
   debugger uses to attribute addresses to it.
 

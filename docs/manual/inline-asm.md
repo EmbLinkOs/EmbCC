@@ -45,9 +45,8 @@ same assembler that handles `.s` and `.S` files for that target (see
 AT&T syntax and is read by a separate encoder that resolves each operand
 reference as it encodes the instruction; it is unrelated to the
 NASM-syntax assembler used for `.asm` files ([embas](tools/embas.md)).
-On MIPS32 the operands are substituted the same way and the text is
-assembled by the MIPS32 inline-asm assembler, which reads templates only:
-there is no `.s` input for MIPS32 yet.
+On MIPS32 the operands are substituted the same way, and the text is
+assembled by the same MIPS32 assembler that reads `.s` and `.S` files.
 
 A template is assembled only when its function is emitted. An `asm`
 statement in a function that is never emitted, such as an unused
@@ -406,10 +405,10 @@ label (`name:`).
 
 How a block is assembled depends on the target:
 
-- **ARM Cortex-M, RISC-V and AVR.** The block is read by the assembler
+- **ARM Cortex-M, RISC-V, MIPS32 and AVR.** The block is read by the assembler
   that reads a `.s` file, so it holds the target's own instructions; see
-  [On Cortex-M, RISC-V and AVR](#on-cortex-m-risc-v-and-avr).
-- **x86-64, AArch64 and MIPS32.** The block is read by a small fixed vocabulary
+  [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr).
+- **x86-64 and AArch64.** The block is read by a small fixed vocabulary
   of directives, data and (on x86-64) four instructions, described in the
   rest of this section. `#`, `;` and `/*` start a comment that runs to
   the end of the line. Registers are written with a single `%`.
@@ -494,15 +493,15 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| ARM Cortex-M, RISC-V, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V and AVR](#on-cortex-m-risc-v-and-avr) |
-| AArch64 ELF, MIPS32 | directives and data only; an instruction is refused (below) |
+| ARM Cortex-M, RISC-V, MIPS32, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
+| AArch64 ELF | directives and data only; an instruction is refused (below) |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
 | `x86_64-windows-gnu` | a block with a label or a symbol reference is refused (below) |
 | C++ (any target) | refused: `file-scope asm in C++ is not supported yet` |
 
-On AArch64 and MIPS32, an instruction in a file-scope block is refused,
-whatever its mnemonic:
+On AArch64, an instruction in a file-scope block is refused, whatever
+its mnemonic:
 
 ```text
 file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
@@ -520,7 +519,7 @@ a file-scope asm block with labels or symbol references is not supported for a D
 a file-scope asm block with labels or symbol references is not supported for a Windows target yet
 ```
 
-### On Cortex-M, RISC-V and AVR
+### On Cortex-M, RISC-V, MIPS32 and AVR
 
 On these targets a block is assembled by EmbCC's GNU-syntax assembler,
 the one that assembles a `.s` or `.S` file (see
@@ -591,9 +590,9 @@ A naked function has no prologue and no epilogue: its body is the asm in
 it, which must return by itself. It is how a Cortex-M RTOS writes its
 context switch, which runs on a task's stack and saves registers the
 code generator's frame would otherwise own. EmbCC supports `naked` on
-ARM Cortex-M, RISC-V and AVR, and does what GCC does: the function's
+ARM Cortex-M, RISC-V, MIPS32 and AVR, and does what GCC does: the function's
 body is assembled where the function would be, starting with its label.
-It is assembled as a [file-scope block](#on-cortex-m-risc-v-and-avr), so
+It is assembled as a [file-scope block](#on-cortex-m-risc-v-mips32-and-avr), so
 it may hold labels, literal pools and calls into C.
 
 The attribute may be on any declaration of the function; FreeRTOS's
@@ -621,7 +620,8 @@ The body may contain:
   into the template as numbers: `%0`, `%c0` and `%[name]` all give `80`
   for `"i"(80)`. `%%` is `%`.
 - **calls with no arguments,** `vTaskSwitchContext();`, assembled as the
-  target's call instruction (`bl` on ARM, `call` on RISC-V and AVR).
+  target's call instruction (`bl` on ARM, `jal` on MIPS32, `call` on
+  RISC-V and AVR).
   AVR's FreeRTOS port calls the scheduler this way from its naked yield.
 
 A naked function's parameters arrive in the registers the calling
@@ -637,8 +637,7 @@ These are refused, because a naked function has no frame for them:
 | an operand that is not a constant | `operand 0 of the asm in naked function 'f' is not a constant ("i"); a naked function has no frame to load one from` |
 | an output operand | `the asm in naked function 'f' has an output; a naked function has no frame to put it in` |
 | a `section` attribute | `naked function 'f' in section '.ramfunc' is not supported yet: its body is assembled into .text` |
-| x86-64 and AArch64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V and AVR targets` |
-| MIPS32 | the same, followed by `(MIPS has no file-scope assembler yet)` |
+| x86-64 and AArch64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
 
 `tests/golden/freertos-cm3.sh` builds the FreeRTOS kernel and its GCC
 ARM_CM3 port, unmodified, and runs three tasks, a queue, a mutex and a
@@ -1298,23 +1297,34 @@ constant. Any modifier is refused with
 
 ### Template syntax
 
-GNU MIPS syntax, as in `.set noreorder` mode: a branch's or jump's delay
-slot is the next instruction of the template, which the template writes
-itself (`nop` if nothing else). `.set` lines are accepted and ignored.
-Statements are separated by `;` or newlines; `#` and `//` start a
-comment. Mnemonics are lower case. Registers are `$0` to `$31` and the
+GNU MIPS syntax. A template starts in `.set reorder` mode, as GCC's and
+clang's do: the assembler puts a `nop` in the delay slot of every branch
+and jump, so the instruction written after a transfer runs after it, not
+in its slot. A template that schedules its own delay slots says `.set
+noreorder` (and may `.set push` and `.set pop` around it); a template
+written for GCC with an explicit slot but without `.set noreorder` gets
+an extra `nop`, as it would from GNU as. The other `.set` options that
+name what EmbCC emits anyway (`at`, `noat`, `macro`, `nomacro`,
+`mips32r2`, ...) are accepted; `.set mips16`, `micromips`, `mips32r6`
+and the 64-bit ISAs are refused. Statements are separated by `;` or
+newlines; `#` and `//` start a comment. Mnemonics are lower case. Registers are `$0` to `$31` and the
 ABI names with `$` (`$zero`, `$at`, `$v0`, `$v1`, `$a0`-`$a3`,
 `$t0`-`$t9`, `$s0`-`$s7`, `$k0`, `$k1`, `$gp`, `$sp`, `$fp` or `$s8`,
 `$ra`). Memory operands are `OFF(REG)` or `(REG)` with a 16-bit signed
-offset. A branch target is a byte displacement from the delay slot, a
-multiple of 4 written as a number (`b 8` skips the delay slot and the
-instruction after it). Labels are not accepted.
+offset; an offset or immediate may be a constant expression (`(16 + 4 *
+3)($sp)`), and `%hi(N)` and `%lo(N)` of a number give the halves a
+`lui`/`addiu` pair adds up to. A branch target is a byte displacement
+from the delay slot, a multiple of 4 written as a number (`b 8` skips the
+slot and the instruction after it), or `.+N` / `.-N` from the branch
+itself. Labels are not accepted in a template; they are in a
+[file-scope block](#on-cortex-m-risc-v-mips32-and-avr) and a `.S` file,
+where `jal sym`, `%hi(sym)`, `%lo(sym)` and `la` also take symbols.
 
 ### Instructions
 
 | Instruction | Operands |
 |---|---|
-| `nop`, `ehb`, `eret`, `wait`, `syscall` | none |
+| `nop`, `ssnop`, `ehb`, `eret`, `wait`, `syscall` | none |
 | `break [CODE]` | 0 to 1023 |
 | `sync [STYPE]` | 0 to 31 |
 | `di [Rt]`, `ei [Rt]` | |
@@ -1323,7 +1333,7 @@ instruction after it). Labels are not accepted.
 | `addiu`, `slti`, `sltiu` `Rt, Rs, IMM` | 16-bit signed |
 | `andi`, `ori`, `xori` `Rt, Rs, IMM` | 0 to 0xffff |
 | `sll`, `srl`, `sra`, `rotr` `Rd, Rt, SA` | 0 to 31 |
-| `lui Rt, IMM` | 0 to 65535 |
+| `lui Rt, IMM` | 0 to 65535, or `%hi(N)` |
 | `lb`, `lbu`, `lh`, `lhu`, `lw`, `sb`, `sh`, `sw`, `ll`, `sc`, `lwl`, `lwr`, `swl`, `swr` | `Rt, OFF(Rs)` |
 | `mult`, `multu` `Rs, Rt` | |
 | `div`, `divu` | `$zero, Rs, Rt` only (below) |
@@ -1334,6 +1344,8 @@ instruction after it). Labels are not accepted.
 | `teq Rs, Rt[, CODE]` | 0 to 1023 |
 | `beq`, `bne` `Rs, Rt, OFFSET`; `blez`, `bgtz`, `bltz`, `bgez`, `beqz`, `bnez` `Rs, OFFSET`; `b`, `bal` `OFFSET` | a multiple of 4 from -131072 to 131068 |
 | `jr Rs`, `jalr Rs`, `jalr Rd, Rs` | `Rd` and `Rs` different |
+| `j TARGET`, `jal TARGET` | a register (`j $ra` is `jr`, `jal $t9` is `jalr`); `.+N` from the jump, encoded as `b`/`bal` within 128 KiB; or a number, the target's place in its 256 MiB region |
+| `jal SYM`, `j SYM`, `lui Rt, %hi(SYM)`, `addiu Rt, Rs, %lo(SYM)`, `lw Rt, %lo(SYM)(Rs)` (and the other loads and stores), `la Rt, SYM` | a `.S` file or a file-scope block only: `R_MIPS_26`, `R_MIPS_HI16`, `R_MIPS_LO16`; `SYM` may have a `+K` or `-K` |
 | `move Rd, Rs` | `or Rd, Rs, $zero` |
 | `li Rd, IMM` | any 32-bit constant; the code generator's sequence (one or two instructions) |
 | `not Rd, Rs`, `negu Rd, Rs` | `nor Rd, Rs, $zero`; `subu Rd, $zero, Rs` |
@@ -1345,9 +1357,18 @@ which add a divide-by-zero trap, and are refused:
 write `negu`. An immediate out of its field is refused with, for example,
 `addiu immediate 70000 does not fit its signed 16-bit field`.
 
-There are no `j` or `jal` (they need a relocation), no `la`, no
-floating-point or coprocessor 1 instructions, no trapping `add`, `addi`
-or `sub`, no DSP or MIPS16 instructions, and no `madd` or `msub`.
+`%lo` is only an `addiu`'s or a load's or store's offset, and `%hi`
+only a `lui`'s operand: `%hi` is rounded for the sign extension those
+instructions give `%lo`, so `ori $t0, $t0, %lo(sym)` would compute a
+wrong address for half of all symbols, and is refused (`%lo(symbol) is an
+addiu's or a load's or store's offset: %hi is rounded for its sign
+extension`). The operators of position-independent, small-data and TLS
+code (`%got`, `%call16`, `%gp_rel`, ...) are refused, and so is a branch
+to a symbol the block or file does not define.
+
+There are no floating-point or coprocessor 1 instructions, no trapping
+`add`, `addi` or `sub`, no DSP, MIPS16 or microMIPS instructions, no
+`cache`, `pref` or `rdhwr`, and no `madd` or `msub`.
 
 ### Callee-saved registers on MIPS32
 
@@ -1585,8 +1606,6 @@ In summary, compared with GCC:
   address rather than a memory reference.
 - On x86-64, ARM Cortex-M and RISC-V, `i` and `n` give a register, not
   an immediate.
-- On MIPS32 there is no `.s` input, no naked function and no instruction
-  in a file-scope block.
 - Labels inside a function template are supported only for the x86-64
   `leaq Nf(%%rip)` form; elsewhere branches use numeric displacements.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are

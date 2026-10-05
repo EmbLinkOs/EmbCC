@@ -248,7 +248,7 @@ The driver dispatches on the input's suffix before the C pipeline runs:
 |---|---|---|
 | `FILE.c`, or any file with `-x c` | the pipeline above | |
 | `FILE.cc`, `.cpp`, `.cxx`, `.C`, `.c++`, `.cp`, `.CPP`, `.ii`, or `-x c++` | the pipeline, through `cxx_translate` | |
-| `FILE.s`, `FILE.S` | `gas_assemble` in `src/as/gas.c` | GNU syntax for AArch64, ARMv7-M, RISC-V and AVR, encoded by each target's own inline-asm assembler; `.S` is preprocessed first |
+| `FILE.s`, `FILE.S` | `gas_assemble` in `src/as/gas.c` | GNU syntax for AArch64, ARMv7-M, RISC-V, MIPS32 and AVR, encoded by each target's own inline-asm assembler; `.S` is preprocessed first |
 | `FILE.asm` | `as_assemble` in `src/arch/x86_64/as.c` | NASM syntax, x86-64 only; the same code as `embas` |
 | `FILE.ir` | `ir_parse` in `src/ir/irparse.c` | with `embcc inspect ir` only |
 
