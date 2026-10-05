@@ -113,3 +113,44 @@ if command -v "$RE" >/dev/null 2>&1 && command -v clang >/dev/null 2>&1; then
         exit 1; }
     echo "the object's tags are clang's: $(tr '\n' ',' < "$out/o2.txt")"
 fi
+
+# ---- the mapping symbols ---------------------------------------------------
+# A literal pool can follow a switch table with no instruction between them
+# (v6m.c places a pool after an unconditional transfer, and a table's `add
+# pc` is one). Both are data: one `$d`, and no `$t` where the table ends,
+# or a disassembler is left to choose between two mapping symbols at one
+# address and decodes the pool as instructions. The program puts the pool
+# right after a four-entry table at -O1 and -O2.
+OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
+if command -v "$OD" >/dev/null 2>&1; then
+    cat > "$out/tp.c" <<'CEOF'
+volatile int v;
+int f(int x)
+{
+    int k = v * 0x12345;          /* a literal: the pool's first word */
+#define S v = v * 3 + k;
+#define S8 S S S S S S S S
+    S8 S8 S8 S8 S8 S8 S8 S8 S8
+    switch (x) {
+    case 0: return k + 1;
+    case 1: return v + 7;
+    case 2: return k ^ 3;
+    case 3: return v - 9;
+    }
+    return 0;
+}
+CEOF
+    for O in -O1 -O2 -Os; do
+        "$EMBCC" --target=thumbv6m-none-eabi $O -c "$out/tp.c" \
+            -o "$out/tp.o" || { echo "tp.c $O does not compile"; exit 1; }
+        dup=$("$OD" -t "$out/tp.o" |
+              awk '$NF ~ /^\$[td]$/ { k = $1; if (n[k]++) print k }')
+        [ -z "$dup" ] || {
+            echo "$O: two mapping symbols at $dup:"
+            "$OD" -t "$out/tp.o" | grep -E '\$[td]$'; exit 1; }
+        "$OD" -d "$out/tp.o" | grep -q '\.word	0x00012345' || {
+            echo "$O: the literal pool is decoded as instructions:"
+            "$OD" -d "$out/tp.o" | tail -30; exit 1; }
+    done
+    echo "a literal pool right after a switch table is one run of data"
+fi

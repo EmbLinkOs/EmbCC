@@ -17,7 +17,8 @@
 #  3. A scan of every object built -- the programs at every level, lib/libc,
 #     lib/rt and the harness -- disassembled by llvm-objdump for thumbv6m:
 #     any 32-bit encoding but BL, MRS, MSR, DMB, DSB and ISB, or anything it
-#     cannot decode, is an instruction a Cortex-M0 faults on.
+#     cannot decode, is an instruction a Cortex-M0 faults on; and two
+#     mapping symbols at one address make the data there read as code.
 #
 # The SoC's SRAM is raised to 64 KiB for the corpus, as the Cortex-M3 board
 # has (the micro:bit's own 16 KiB would turn a large test's stack into a
@@ -196,9 +197,15 @@ if command -v "$OD" >/dev/null 2>&1; then
             }
             END { print "COUNT " n > "/dev/stderr" }' >> "$out/scan.txt" \
             2>> "$out/count.txt"
+        # ...and one mapping symbol per address: a `$t` and a `$d` at one
+        # place leave the disassembler to pick, and data is decoded as code
+        "$OD" -t "$o" 2>/dev/null |
+        awk -v obj="$o" '$NF ~ /^\$[td]$/ { k = $3 ":" $1
+            if (n[k]++) print obj ": two mapping symbols at " k }' \
+            >> "$out/scan.txt"
     done < "$out/objs.txt"
     if [ -s "$out/scan.txt" ]; then
-        echo "an instruction a Cortex-M0 does not have:"
+        echo "an instruction a Cortex-M0 does not have, or data read as code:"
         head -10 "$out/scan.txt"
         fail=1
     else

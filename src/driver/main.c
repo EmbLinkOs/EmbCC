@@ -2798,10 +2798,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                             (Elf64_Half)dn);
             /* the code resumes where the data ends, in the same section,
-             * unless that is the section's end */
+             * unless that is the section's end -- or more data starts
+             * right there: an ARMv6-M literal pool can follow a switch
+             * table with no instruction between, and a `$t` and a `$d` at
+             * one address leave a disassembler to pick one, which it did,
+             * decoding the pool as instructions. */
             long e = o + (text.drange[r + 1] - text.drange[r]);
             long send = gi ? g_tg[gi - 1].end - g_tg[gi - 1].start : tlen;
-            if (e < send)
+            if (e < send &&
+                !(r + 3 < text.ndrange &&
+                  text.drange[r + 2] == text.drange[r + 1]))
                 elfw_add_symbol(w, codesym, (Elf64_Addr)e, 0,
                                 ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                                 (Elf64_Half)dn);
