@@ -1185,8 +1185,10 @@ static int writes_memory(enum ir_op op)
 
 /* One value-number entry: the discriminating fields of a computation plus the
  * temp that first produced it. Two instructions with equal keys in the same
- * block compute the same value. Loads carry `memver` so a store between two
- * loads gives them different keys (no stale reuse). */
+ * block compute the same value. Loads carry `memver`, which a write that
+ * names no bytes (a call, asm, a fence, any volatile store) bumps so that
+ * every load before it has a different key; a plain store instead removes
+ * the entries it may overlap (lvn_mem_kill). */
 struct vn {
     enum ir_op op;
     int a, b, w, sign, size;
@@ -1263,8 +1265,9 @@ static int vn_key(struct ir_ins *i, int memver, struct vn *k)
 
 /* Replace a computation that reproduces an earlier one in the same block with a
  * copy of that earlier result; fold/copyprop/dce then remove the redundancy.
- * The block is the run between labels; a memory write bumps `memver` (part of a
- * load's key), so a load after a store is never reused. Sound: temps are
+ * The block is the run between labels; a store removes the loads whose bytes it
+ * may overlap, and any other memory write bumps `memver` (part of a load's
+ * key), so no load is reused across a write that could have changed it. Sound: temps are
  * single-assignment, so equal operand temps => equal value; VOLATILE accesses
  * are never numbered (vn_key rejects them), preserving every MMIO access. */
 /* Does this instruction's key actually NAME a value?
@@ -1317,11 +1320,25 @@ static int vn_kill(struct vn *tab, int ntab, int t)
     return j;
 }
 
+/* Defined with the alias analysis further down. */
+static char *slots_taken(struct ir_func *fn);
+static int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
+                        struct vn *tab, int *ntab, int memver,
+                        const struct ir_ins *ins);
+
 static int pass_lvn(struct ir_func *fn)
 {
     int changed = 0, memver = 0;
     struct vn *tab = NULL;
     int ntab = 0, cap = 0;
+    /* What a store can reach, so it forgets only those loads
+     * (lvn_mem_kill). The definitions are counted once, before the walk
+     * turns any instruction into a copy: a copy keeps its destination,
+     * so the counts stay true, and the walk to a base follows the copy
+     * to the same value. */
+    struct defs d;
+    compute_defs(fn, &d);
+    char *taken = slots_taken(fn);
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         enum ir_op op0 = i->op;
@@ -1344,7 +1361,8 @@ static int pass_lvn(struct ir_func *fn)
                 }
                 k.result = i->dst;
                 tab[ntab++] = k;
-                if (writes_memory(op0))
+                if (writes_memory(op0) &&
+                    !lvn_mem_kill(fn, &d, taken, tab, &ntab, memver, i))
                     memver++;
                 continue;
             }
@@ -1360,10 +1378,15 @@ static int pass_lvn(struct ir_func *fn)
             if (t >= 0)
                 ntab = vn_kill(tab, ntab, t);
         }
-        if (writes_memory(op0))
+        /* A store forgets only the reads it could reach; everything
+         * else that writes memory forgets them all. */
+        if (writes_memory(op0) &&
+            !lvn_mem_kill(fn, &d, taken, tab, &ntab, memver, i))
             memver++;
     }
     free(tab);
+    free(taken);
+    free_defs(&d);
     return changed;
 }
 
@@ -2831,6 +2854,272 @@ static int may_alias(struct memref a, struct memref b, const char *taken,
     return 1;
 }
 
+/* ==== which bytes of the object ============================================
+ *
+ * may_alias answers by OBJECT, and one object is where most of the
+ * traffic is. A function handed `Queue_t *q` reads and writes q's fields
+ * through that one pointer, so every store is to the same unknown object
+ * as every load, and each store to one field made the optimizer forget
+ * every other field and load it again: FreeRTOS's xQueueGenericReset
+ * read pxQueue->pcHead a second time after storing pxQueue->pcWriteTo,
+ * which clang does not.
+ *
+ * The finer question is which BYTES. An address that is a base value
+ * plus a constant names a range of bytes from that value:
+ *
+ *      %8 = add %0, #60          (%0, 60, 4 bytes)
+ *      %9 = load.4 [%8]
+ *      %3 = add %0, #4           (%0, 4, 4 bytes)
+ *      store:4 [%3], %15
+ *
+ * and two ranges from the SAME value that do not overlap are different
+ * bytes, whatever the value is. Nothing else is assumed. Not the type of
+ * either access: EmbCC does not do type-based aliasing, because the
+ * kernels it compiles pun through casts. And not that pointer arithmetic
+ * stays inside its object: the offsets are kept modulo the address width,
+ * exactly as the machine adds them, so a negative offset, or one that
+ * wraps, is compared as the bytes it really reaches (-fwrapv).
+ *
+ * "The same value" is what needs care, because a vreg is a name, not a
+ * value. The base must be a temp written once, or a parameter never
+ * reassigned -- and such a temp's definition dominates its uses, which
+ * makes the name good enough: on any path, the address temps of a load
+ * and of a later store were both computed after the base's LAST
+ * definition, so they were computed from the same value of it. A load
+ * whose address predates that definition is not remembered there at all:
+ * load CSE's meet forgets it at the top of the block that defines the
+ * base (the path from the entry into that block never loaded it), and
+ * value numbering never carries anything across a block.
+ *
+ * The address of a global or of a frame slot is the same value wherever
+ * it is computed, so the walk keys `gaddr @g` by the symbol and `addr v3`
+ * by the slot, whichever temps hold them. Anything the walk cannot see
+ * through -- a load, a call's result, an add of a variable -- is a base of
+ * its own. Two different bases say nothing about each other, and the
+ * question goes back to may_alias. */
+
+enum { BASE_NONE, BASE_VREG, BASE_GLOBAL, BASE_SLOT };
+
+struct maccess {
+    struct memref obj;       /* the object, for may_alias */
+    int bkind, bid;          /* the base value; BASE_NONE: not known */
+    unsigned long off;       /* bytes past the base, modulo addr_mask */
+    int size;                /* bytes accessed; 0: not known */
+};
+
+/* The modulus addresses are computed in: the target's pointer width,
+ * or the host's unsigned long when that is narrower. Narrower is still
+ * sound for disjointness -- two byte addresses equal modulo 2^64 are
+ * equal modulo 2^32 too, so ranges disjoint at 32 bits are disjoint at
+ * 64 -- but not for containment, which pass_dse asks only when the
+ * modulus is exact. */
+static unsigned long addr_mask(int *exact)
+{
+    int bits = 8 * PTRW;
+    if (bits <= 0 || bits >= (int)(8 * sizeof(unsigned long))) {
+        *exact = bits == (int)(8 * sizeof(unsigned long));
+        return ~0UL;
+    }
+    *exact = 1;
+    return (1UL << bits) - 1;
+}
+
+/* A vreg that names one value for the whole function: a temp written
+ * once, or a parameter nothing reassigns. A local's slot is not one --
+ * its vreg number is read through IR_LDVAR, not as a value. */
+static int one_value(const struct ir_func *fn, const struct defs *d, int v)
+{
+    return v >= 0 && v < fn->nvregs && d->cnt[v] == 1 &&
+           (v < fn->nparams || v >= fn->nvars);
+}
+
+/* The value of `v` when it is a constant of width `w`, the width of the
+ * add that uses it: a constant of another width leaves the bits the add
+ * reads above it to the backend, and they are not guessed here. */
+static int addr_const(const struct ir_func *fn, const struct defs *d, int v,
+                      int w, long *out)
+{
+    if (!one_value(fn, d, v) || d->ins[v] < 0)
+        return 0;
+    const struct ir_ins *c = &fn->ins[d->ins[v]];
+    if (c->op != IR_CONST || c->flt || c->w != w)
+        return 0;
+    *out = c->imm;
+    return 1;
+}
+
+/* Base, offset and extent of the `size` bytes at address temp `addr`.
+ * The walk goes back through copies and through adds and subtracts of a
+ * constant at the address width, while each step is one value; where it
+ * stops is the base. The walk from any temp is the same walk, so two
+ * addresses built on one base -- at whatever depth -- end at that base
+ * with their offsets from it, unless the hop limit cuts one short, which
+ * only makes the bases differ and the answer conservative. */
+static struct maccess mem_access(struct ir_func *fn, struct defs *d,
+                                 int addr, int size)
+{
+    struct maccess m;
+    m.obj = mem_base(fn, d, addr);
+    m.bkind = BASE_NONE; m.bid = -1; m.off = 0;
+    m.size = size > 0 ? size : 0;
+    int exact;
+    unsigned long mask = addr_mask(&exact), off = 0;
+    if (!one_value(fn, d, addr))
+        return m;
+    for (int hop = 0; hop < 16; hop++) {
+        int n = d->ins[addr], next = -1;
+        if (n >= 0) {
+            const struct ir_ins *i = &fn->ins[n];
+            long c = 0;
+            if (i->op == IR_GADDR && i->glob_sym >= 0) {
+                m.bkind = BASE_GLOBAL; m.bid = i->glob_sym;
+                m.off = off & mask;
+                return m;
+            }
+            if (i->op == IR_ADDR) {
+                m.bkind = BASE_SLOT; m.bid = i->a;
+                m.off = off & mask;
+                return m;
+            }
+            if (i->op == IR_MOV) {
+                next = i->a;
+            } else if ((i->op == IR_ADD || i->op == IR_SUB) && !i->flt &&
+                       i->w == PTRW) {
+                int other = -1;
+                if (i->imm_b) {
+                    c = i->imm; other = i->a;
+                } else if (addr_const(fn, d, i->b, i->w, &c)) {
+                    other = i->a;
+                } else if (i->op == IR_ADD &&
+                           addr_const(fn, d, i->a, i->w, &c)) {
+                    other = i->b;
+                }
+                if (other >= 0 && one_value(fn, d, other)) {
+                    off = i->op == IR_SUB ? off - (unsigned long)c
+                                          : off + (unsigned long)c;
+                    next = other;
+                }
+            }
+        }
+        if (next < 0 || !one_value(fn, d, next))
+            break;                      /* `addr` is the base */
+        addr = next;
+    }
+    m.bkind = BASE_VREG; m.bid = addr;
+    m.off = off & mask;
+    return m;
+}
+
+/* A frame slot as a whole, as IR_LDVAR and IR_STVAR reach it: the object
+ * is known, the bytes are not described. */
+static struct maccess slot_access(int var)
+{
+    struct maccess m;
+    m.obj.kind = MEM_SLOT; m.obj.id = var;
+    m.bkind = BASE_NONE; m.bid = -1; m.off = 0; m.size = 0;
+    return m;
+}
+
+/* The object alone, for an access whose bytes are not described: a
+ * memcpy, a memzero, a volatile store (whose existing rules stay as
+ * they were). */
+static struct maccess obj_access(struct ir_func *fn, struct defs *d, int addr)
+{
+    struct maccess m;
+    m.obj = mem_base(fn, d, addr);
+    m.bkind = BASE_NONE; m.bid = -1; m.off = 0; m.size = 0;
+    return m;
+}
+
+static int same_base(struct maccess a, struct maccess b)
+{
+    return a.bkind != BASE_NONE && a.bkind == b.bkind && a.bid == b.bid &&
+           a.size > 0 && b.size > 0;
+}
+
+/* Can these two accesses touch a common byte? From one base: only when
+ * the ranges overlap on the ring of addresses -- b starts fewer than
+ * a.size bytes past a, or a fewer than b.size bytes past b, modulo the
+ * address width. Otherwise by object. */
+static int acc_overlap(struct maccess a, struct maccess b, const char *taken,
+                       int nvars)
+{
+    if (same_base(a, b)) {
+        int exact;
+        unsigned long mask = addr_mask(&exact);
+        unsigned long ab = (b.off - a.off) & mask;   /* b past a */
+        unsigned long ba = (a.off - b.off) & mask;   /* a past b */
+        return ab < (unsigned long)a.size || ba < (unsigned long)b.size;
+    }
+    return may_alias(a.obj, b.obj, taken, nvars);
+}
+
+/* Does `later` write every byte `early` does? Only from one base, and
+ * only when the modulus is the machine's own: this is the must-alias
+ * answer dead-store elimination deletes a write on. */
+static int acc_covers(struct maccess later, struct maccess early)
+{
+    if (!same_base(later, early))
+        return 0;
+    int exact;
+    unsigned long mask = addr_mask(&exact);
+    if (!exact)
+        return 0;
+    unsigned long d = (early.off - later.off) & mask;  /* early past later */
+    return d < (unsigned long)later.size &&
+           (unsigned long)later.size - d >= (unsigned long)early.size;
+}
+
+/* The slots whose address is taken anywhere in the function: the only
+ * locals a pointer can reach (may_alias). Freed by the caller. */
+static char *slots_taken(struct ir_func *fn)
+{
+    int nvars = fn->nvars;
+    char *taken = xcalloc((size_t)(nvars ? nvars : 1), 1);
+    for (int i = 0; i < fn->nins; i++)
+        if (fn->ins[i].op == IR_ADDR && fn->ins[i].a >= 0 &&
+            fn->ins[i].a < nvars)
+            taken[fn->ins[i].a] = 1;
+    return taken;
+}
+
+/* pass_lvn's memory kill. A store need not forget every remembered
+ * read, only those it could reach: drop exactly those from the table and
+ * return 1. Anything else that writes memory -- a call, a memcpy, an
+ * atomic, a fence, asm, a vector store, any volatile write -- returns 0,
+ * and the caller forgets every read as before (memver). Entries made
+ * under an older memver can never match again and are dropped here
+ * too. */
+static int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
+                        struct vn *tab, int *ntab, int memver,
+                        const struct ir_ins *ins)
+{
+    struct maccess w;
+    if (ins->vol)
+        return 0;
+    if (ins->op == IR_STORE)
+        w = mem_access(fn, d, ins->a, ins->size);
+    else if (ins->op == IR_STVAR && ins->dst >= 0 && ins->dst < fn->nvars)
+        w = slot_access(ins->dst);
+    else
+        return 0;
+    int j = 0;
+    for (int x = 0; x < *ntab; x++) {
+        struct vn *e = &tab[x];
+        if (e->op == IR_LOAD || e->op == IR_LDVAR) {
+            if (e->memver != memver)
+                continue;
+            struct maccess r = e->op == IR_LOAD
+                ? mem_access(fn, d, e->a, e->size) : slot_access(e->a);
+            if (acc_overlap(w, r, taken, fn->nvars))
+                continue;
+        }
+        tab[j++] = *e;
+    }
+    *ntab = j;
+    return 1;
+}
+
 
 
 /* ---- division by a constant ----------------------------------------
@@ -4077,9 +4366,13 @@ static void infer_attrs(struct ir_unit *iu)
  * is the question, and walking backward makes it "have I already seen
  * one".
  *
- * Two stores kill each other only when they are to the SAME address
- * temp at the same width. That is must-alias, not may-alias: a wrong
- * answer here deletes a write the program made. */
+ * Two stores kill each other only when the later one writes every byte
+ * of the earlier: the SAME address temp at the same width, or the same
+ * base value with the earlier's range inside the later's (acc_covers).
+ * That is must-alias, not may-alias: a wrong answer here deletes a write
+ * the program made. A read in between keeps the earlier store when it
+ * may overlap it (acc_overlap), so a load of p->y does not keep alive a
+ * store to p->x that p->x = 2 overwrites. */
 static int pass_dse(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -4090,18 +4383,15 @@ static int pass_dse(struct ir_func *fn)
     int nbb, *l2b;
     struct bb *bb = build_cfg(fn, &nbb, &l2b);
 
-    char *taken = xcalloc((size_t)(nvars ? nvars : 1), 1);
-    for (int i = 0; i < fn->nins; i++)
-        if (fn->ins[i].op == IR_ADDR && fn->ins[i].a >= 0 &&
-            fn->ins[i].a < nvars)
-            taken[fn->ins[i].a] = 1;
+    char *taken = slots_taken(fn);
 
     char *dead = xcalloc((size_t)fn->nins, 1);
-    /* Stores seen later in this block, as (address temp, width). A slot
-     * store records its var with a negative marker so the two kinds
-     * share one list. */
+    /* Stores seen later in this block, as (address temp, width) and the
+     * bytes they write. A slot store records its var with a negative
+     * marker so the two kinds share one list. */
     int *sa = xmalloc((size_t)fn->nins * sizeof *sa);
     int *ssz = xmalloc((size_t)fn->nins * sizeof *ssz);
+    struct maccess *sacc = xmalloc((size_t)fn->nins * sizeof *sacc);
     int changed = 0;
 
     for (int b = 0; b < nbb; b++) {
@@ -4110,11 +4400,13 @@ static int pass_dse(struct ir_func *fn)
             struct ir_ins *ins = &fn->ins[i];
             if (ins->op == IR_STORE && !ins->vol && ins->a >= 0 &&
                 ins->a < fn->nvregs && d.cnt[ins->a] == 1) {
+                struct maccess w = mem_access(fn, &d, ins->a, ins->size);
                 int killed = 0;
                 for (int k = 0; k < ns; k++)
-                    if (sa[k] == ins->a && ssz[k] == ins->size) { killed = 1; break; }
+                    if ((sa[k] == ins->a && ssz[k] == ins->size) ||
+                        acc_covers(sacc[k], w)) { killed = 1; break; }
                 if (killed) { dead[i] = 1; changed = 1; continue; }
-                sa[ns] = ins->a; ssz[ns] = ins->size; ns++;
+                sa[ns] = ins->a; ssz[ns] = ins->size; sacc[ns] = w; ns++;
                 continue;
             }
             if (ins->op == IR_STVAR && !ins->vol && ins->dst >= 0 &&
@@ -4123,20 +4415,21 @@ static int pass_dse(struct ir_func *fn)
                 for (int k = 0; k < ns; k++)
                     if (sa[k] == -1 - ins->dst && ssz[k] == ins->size) { killed = 1; break; }
                 if (killed) { dead[i] = 1; changed = 1; continue; }
-                sa[ns] = -1 - ins->dst; ssz[ns] = ins->size; ns++;
+                sa[ns] = -1 - ins->dst; ssz[ns] = ins->size;
+                sacc[ns] = slot_access(ins->dst); ns++;
                 continue;
             }
             /* A read that could see one of them un-kills it. A call,
              * inline asm, an atomic or a fence could see anything. */
-            struct memref r = { MEM_UNKNOWN, -1 };
+            struct maccess r = slot_access(-1);
             int reads = 0, everything = 0;
             switch (ins->op) {
             case IR_LOAD:
-                r = mem_base(fn, &d, ins->a); reads = 1; break;
+                r = mem_access(fn, &d, ins->a, ins->size); reads = 1; break;
             case IR_LDVAR:
-                r.kind = MEM_SLOT; r.id = ins->a; reads = 1; break;
+                r = slot_access(ins->a); reads = 1; break;
             case IR_MEMCPY:
-                r = mem_base(fn, &d, ins->b); reads = 1; break;
+                r = obj_access(fn, &d, ins->b); reads = 1; break;
             case IR_STORE: case IR_STVAR:
                 reads = 0; everything = 1; break;   /* volatile or unkeyed */
             case IR_CALL:
@@ -4150,6 +4443,7 @@ static int pass_dse(struct ir_func *fn)
             case IR_ASM: case IR_VA_START: case IR_FENCE:
             case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ARMW:
             case IR_CAS: case IR_CAS16: case IR_MEMZERO: case IR_ALLOCA:
+            case IR_VLOAD:          /* sixteen bytes nothing here describes */
                 everything = 1; break;
             default:
                 break;
@@ -4158,12 +4452,10 @@ static int pass_dse(struct ir_func *fn)
             if (!reads)
                 continue;
             int j = 0;
-            for (int k = 0; k < ns; k++) {
-                struct memref w;
-                if (sa[k] < 0) { w.kind = MEM_SLOT; w.id = -1 - sa[k]; }
-                else w = mem_base(fn, &d, sa[k]);
-                if (!may_alias(w, r, taken, nvars)) { sa[j] = sa[k]; ssz[j] = ssz[k]; j++; }
-            }
+            for (int k = 0; k < ns; k++)
+                if (!acc_overlap(sacc[k], r, taken, nvars)) {
+                    sa[j] = sa[k]; ssz[j] = ssz[k]; sacc[j] = sacc[k]; j++;
+                }
             ns = j;
         }
     }
@@ -4191,7 +4483,7 @@ static int pass_dse(struct ir_func *fn)
         fn->nins = j;
     }
 
-    free(dead); free(sa); free(ssz); free(taken); free(l2b);
+    free(dead); free(sa); free(ssz); free(sacc); free(taken); free(l2b);
     free_cfg(bb, nbb); free_defs(&d);
     return changed;
 }
@@ -4210,12 +4502,33 @@ static int pass_dse(struct ir_func *fn)
  *     value is one dominating definition (loads produce single-def temps), never
  *     a per-path phi;
  *   - a LOAD is keyed only when its address temp is single-def, so the address
- *     cannot change between the two loads;
+ *     cannot change between the two loads -- and it is keyed by where that
+ *     address points, base value and offset (mem_access), so `p->len` read
+ *     through two different `add %p, #16` temps is one key. That is what -O1,
+ *     which has no global CSE to merge the two adds, needs;
  *   - the kill model separates a store to a non-address-taken local (kills only
- *     that local's LDVARs) from a real memory write / call / asm (kills every
- *     LOAD and every address-taken local's LDVAR — no finer alias analysis).
+ *     that local's LDVARs) from a real memory write. A plain store kills the
+ *     keys whose bytes it may overlap (acc_overlap); a volatile store, a memcpy
+ *     or a memzero the keys on an object it may alias; a call, asm, an atomic,
+ *     a fence or a vector store every LOAD and every address-taken local's
+ *     LDVAR.
  */
-struct lkey { enum ir_op op; int a, size, sign, w; };
+struct lkey {
+    enum ir_op op;
+    int a, size, sign, w;
+    /* A LOAD whose address has a base (mem_access) is keyed by the base
+     * and the offset, and `a` is -1; `rep` is one address temp of it,
+     * for the object it reads. */
+    int bkind, bid, rep;
+    unsigned long off;
+};
+
+static int lkey_eq(const struct lkey *x, const struct lkey *y)
+{
+    return x->op == y->op && x->a == y->a && x->size == y->size &&
+           x->sign == y->sign && x->w == y->w && x->bkind == y->bkind &&
+           x->bid == y->bid && x->off == y->off;
+}
 
 static int lcse_kills_mem(enum ir_op op)
 {
@@ -4224,26 +4537,37 @@ static int lcse_kills_mem(enum ir_op op)
     case IR_XCHG: case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS:
     case IR_CAS16: case IR_ASM: case IR_VA_START:
     case IR_FENCE:           /* a barrier: see writes_memory */
+    /* A vectorized loop's stores. Missing here, a scalar load from
+     * before such a loop was reused after it: `x = a[0]; for (...)
+     * a[i] = b[i] + 1; return x + a[0];` returned 2 * x at -O2 on
+     * x86-64, where the loop vectorizes. */
+    case IR_VSTORE:
         return 1;
     default:
         return 0;
     }
 }
 
-/* Drop the cached loads a write could reach. A store names an object,
- * so only the keys that may alias it go; a call, inline asm, an atomic
- * or a fence names nothing, so everything reachable goes. */
+/* Drop the cached loads a write could reach. A plain store names its
+ * bytes, so only the keys that may overlap them go (acc_overlap): a
+ * store to q->wr keeps q->len. A volatile store, a memcpy and a memzero
+ * keep their older rule and name only an object. A call, inline asm, an
+ * atomic, a fence or a vector store names nothing, so everything
+ * reachable goes. */
 static void lcse_kill(int *s, int nk, const char *is_mem,
-                      const struct memref *kbase, struct ir_ins *ins,
+                      const struct maccess *kacc, struct ir_ins *ins,
                       struct ir_func *fn, struct defs *d, const char *taken,
                       int nvars)
 {
-    struct memref w = { MEM_UNKNOWN, -1 };
+    struct maccess w = slot_access(-1);
     int named = 0;
-    if (ins->op == IR_STORE || ins->op == IR_MEMCPY ||
-        ins->op == IR_MEMZERO) {
-        w = mem_base(fn, d, ins->a);
-        named = w.kind != MEM_UNKNOWN;
+    if (ins->op == IR_STORE && !ins->vol) {
+        w = mem_access(fn, d, ins->a, ins->size);
+        named = 1;      /* an unknown object still has its base */
+    } else if (ins->op == IR_STORE || ins->op == IR_MEMCPY ||
+               ins->op == IR_MEMZERO) {
+        w = obj_access(fn, d, ins->a);
+        named = w.obj.kind != MEM_UNKNOWN;
     } else if (ins->op == IR_CALL && !ins->indirect && ins->callee &&
                ins->callee->inf_no_write) {
         return;         /* it writes nothing the caller can see */
@@ -4251,7 +4575,7 @@ static void lcse_kill(int *s, int nk, const char *is_mem,
     for (int k = 0; k < nk; k++) {
         if (!is_mem[k])
             continue;
-        if (named && !may_alias(w, kbase[k], taken, nvars))
+        if (named && !acc_overlap(w, kacc[k], taken, nvars))
             continue;
         s[k] = -1;
     }
@@ -4267,17 +4591,22 @@ static void lcse_kill(int *s, int nk, const char *is_mem,
  * every backend's class analysis already does with a copy.) */
 static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
                            const struct ir_ins *ins,
-                           const struct ir_func *fn, const struct defs *d)
+                           struct ir_func *fn, struct defs *d)
 {
     int v = ins->b;
     if (ins->vol || ins->imm_b || v < 0 || v >= fn->nvregs ||
         d->cnt[v] != 1 || (v >= fn->nparams && v < fn->nvars) ||
         (ins->size != 4 && ins->size != 8))
         return;
-    for (int k = 0; k < nk; k++)
-        if (keys[k].op == IR_LOAD && keys[k].a == ins->a &&
-            keys[k].size == ins->size && keys[k].w == ins->size)
+    struct maccess m = mem_access(fn, d, ins->a, ins->size);
+    for (int k = 0; k < nk; k++) {
+        if (keys[k].op != IR_LOAD || keys[k].size != ins->size ||
+            keys[k].w != ins->size || keys[k].bkind != m.bkind)
+            continue;
+        if (m.bkind == BASE_NONE ? keys[k].a == ins->a
+                                 : keys[k].bid == m.bid && keys[k].off == m.off)
             s[k] = v;
+    }
 }
 
 static int pass_loadcse(struct ir_func *fn)
@@ -4296,10 +4625,7 @@ static int pass_loadcse(struct ir_func *fn)
         free_cfg(bb, nbb); free_defs(&d); return 0;
     }
 
-    char *taken = xcalloc((size_t)(nvars ? nvars : 1), 1);
-    for (int i = 0; i < fn->nins; i++)
-        if (fn->ins[i].op == IR_ADDR && fn->ins[i].a >= 0 && fn->ins[i].a < nvars)
-            taken[fn->ins[i].a] = 1;
+    char *taken = slots_taken(fn);
 
     /* Enumerate distinct load keys; keyidx[i] maps a load instruction to one. */
     struct lkey *keys = NULL; int nk = 0, capk = 0;
@@ -4308,18 +4634,26 @@ static int pass_loadcse(struct ir_func *fn)
         keyidx[i] = -1;
         struct ir_ins *in = &fn->ins[i];
         struct lkey k;
+        memset(&k, 0, sizeof k);
+        k.bkind = BASE_NONE; k.bid = -1;
         if (in->op == IR_LDVAR && !in->vol && in->a >= 0 && in->a < nvars) {
-            k = (struct lkey){ IR_LDVAR, in->a, in->size, in->sign, in->w };
+            k.op = IR_LDVAR;
         } else if (in->op == IR_LOAD && !in->vol && in->a >= 0 &&
                    in->a < fn->nvregs && d.cnt[in->a] == 1) {
-            k = (struct lkey){ IR_LOAD, in->a, in->size, in->sign, in->w };
+            k.op = IR_LOAD;
         } else {
             continue;
         }
+        k.a = k.rep = in->a; k.size = in->size; k.sign = in->sign; k.w = in->w;
+        if (k.op == IR_LOAD) {
+            struct maccess m = mem_access(fn, &d, in->a, in->size);
+            if (m.bkind != BASE_NONE) {
+                k.a = -1; k.bkind = m.bkind; k.bid = m.bid; k.off = m.off;
+            }
+        }
         int found = -1;
         for (int j = 0; j < nk; j++)
-            if (keys[j].op == k.op && keys[j].a == k.a && keys[j].size == k.size &&
-                keys[j].sign == k.sign && keys[j].w == k.w) { found = j; break; }
+            if (lkey_eq(&keys[j], &k)) { found = j; break; }
         if (found < 0) {
             if (nk == capk) { capk = capk ? capk * 2 : 32;
                 keys = xrealloc(keys, (size_t)capk * sizeof *keys); }
@@ -4338,16 +4672,15 @@ static int pass_loadcse(struct ir_func *fn)
         is_mem[k] = keys[k].op == IR_LOAD ||
                     (keys[k].op == IR_LDVAR && taken[keys[k].a]);
 
-    /* What object each cached load reads, so a write can kill only the
+    /* What bytes each cached load reads, so a write can kill only the
      * ones it could actually reach. Without this a single store through
      * a pointer dropped every cached load in the function. */
-    struct memref *kbase = xmalloc((size_t)(nk ? nk : 1) * sizeof *kbase);
+    struct maccess *kacc = xmalloc((size_t)(nk ? nk : 1) * sizeof *kacc);
     for (int k = 0; k < nk; k++) {
-        if (keys[k].op == IR_LDVAR) {
-            kbase[k].kind = MEM_SLOT; kbase[k].id = keys[k].a;
-        } else {
-            kbase[k] = mem_base(fn, &d, keys[k].a);
-        }
+        if (keys[k].op == IR_LDVAR)
+            kacc[k] = slot_access(keys[k].a);
+        else
+            kacc[k] = mem_access(fn, &d, keys[k].rep, keys[k].size);
     }
 
     /* Dataflow. avail[b][k]: -2 top (init), -1 not available, >=0 the temp. */
@@ -4385,7 +4718,7 @@ static int pass_loadcse(struct ir_func *fn)
                             (taken[ins->dst] && is_mem[k]))
                             s[k] = -1;
                 } else if (lcse_kills_mem(ins->op)) {
-                    lcse_kill(s, nk, is_mem, kbase, ins, fn, &d, taken, nvars);
+                    lcse_kill(s, nk, is_mem, kacc, ins, fn, &d, taken, nvars);
                     if (ins->op == IR_STORE)
                         lcse_store_gen(s, nk, keys, ins, fn, &d);
                 }
@@ -4411,7 +4744,7 @@ static int pass_loadcse(struct ir_func *fn)
                         (taken[ins->dst] && is_mem[k]))
                         s[k] = -1;
             } else if (lcse_kills_mem(ins->op)) {
-                lcse_kill(s, nk, is_mem, kbase, ins, fn, &d, taken, nvars);
+                lcse_kill(s, nk, is_mem, kacc, ins, fn, &d, taken, nvars);
                 if (ins->op == IR_STORE)
                     lcse_store_gen(s, nk, keys, ins, fn, &d);
             }
@@ -4426,7 +4759,7 @@ static int pass_loadcse(struct ir_func *fn)
     }
 
     free(order); free(l2b); free(taken); free(keyidx); free(keys);
-    free(is_mem); free(kbase); free(aout); free(ain); free(s);
+    free(is_mem); free(kacc); free(aout); free(ain); free(s);
     free_cfg(bb, nbb); free_defs(&d);
     return changed;
 }
