@@ -401,7 +401,7 @@ whose pair passes use a second one).
 | `call_int_arg_in_reg` | 1 | 1 | 1 | 1 | 1 |
 | `ret_scalar_in_reg` | 1 | 1 | 1 | 1 | 1 |
 | `memcpy_addr_in_reg` | 1 | 0 | 0 | 1 | 0 |
-| `atomic_in_reg` | 0 | 0 | 1 | 1 | 0 |
+| `atomic_in_reg` | 1 | 0 | 1 | 1 | 0 |
 | `alu_dst_is_lhs` | 1 | 0 | 0 | 0 | 0 |
 | `float_in_gpr` | 0 | 0 | 1 | 1 | 1 |
 | `fp_reads_gpr` | 0 | 1 | 0 | 0 | 0 |
@@ -421,11 +421,11 @@ caller-saved registers come first:
 | Function | Pool |
 |---|---|
 | variadic | r10, r11, rbx, r12-r15 |
-| contains an atomic | r8-r11, rbx, r12-r15 (rsi holds `&expected` and rdx the desired value in `cmpxchg`) |
-| contains an integer divide or remainder | rsi, r8-r11, rbx, r12-r15 (`idiv` writes rdx:rax) |
+| contains an `IR_ARMW` or `IR_CAS16` | r8-r11, rbx, r12-r15 (the `lock cmpxchg` loop builds the new value in rdx, and an operand without a register is loaded into rsi) |
+| contains an integer divide or remainder, or an `IR_CAS` or `IR_CMPXCHG` | rsi, r8-r11, rbx, r12-r15 (`idiv` writes rdx:rax; a desired value without a register is loaded into rdx) |
 | otherwise | rsi, rdx, r8-r11, rbx, r12-r15 |
 
-rdi is added after the leading rsi/rdx (or first, in the atomic pool)
+rdi is added after the leading rsi/rdx (or first, in the `IR_ARMW` pool)
 when the function is not variadic, does not return a struct, makes no
 call that returns one, and has no `__int128` operation. The largest pool
 is twelve registers. Callee-saved: rbx and r12-r15.

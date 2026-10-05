@@ -83,11 +83,12 @@ static const char *GRP2[8] = {"rol","ror","rcl","rcr","shl","shr","sal","sar"};
 int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
                       char *out)
 {
-    int i = 0, rex = 0, opsz = 4, pfx66 = 0, rep = 0;
+    int i = 0, rex = 0, opsz = 4, pfx66 = 0, rep = 0, lock = 0;
     /* prefixes */
     while (i < n) {
         unsigned char b = code[i];
         if (b == 0x66) { pfx66 = 1; opsz = 2; i++; }
+        else if (b == 0xf0) { lock = 1; i++; }
         else if (b == 0xf2 || b == 0xf3) { rep = b; i++; }
         else if (b == 0x67 || b == 0x2e || b == 0x3e || b == 0x26
                  || b == 0x64 || b == 0x65 || b == 0x36) { i++; }
@@ -121,6 +122,16 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
         sprintf(reg, "%%%s", regname(sz, r));
         if (dir) sprintf(out, "mov    %s,%s", rm, reg);
         else     sprintf(out, "mov    %s,%s", reg, rm);
+        return i;
+    }
+    /* The atomics: xchg (locked by its memory operand alone), and the
+     * LOCK-prefixed xadd and cmpxchg below. The register is the source,
+     * so it comes first, as objdump prints them. */
+    if (op == 0x86 || op == 0x87) {                              /* xchg */
+        int sz = (op & 1) ? opsz : 1;
+        int r = modrm(code, &i, rex, sz, 0, rm);
+        sprintf(out, "%sxchg   %%%s,%s", lock ? "lock " : "", regname(sz, r),
+                rm);
         return i;
     }
     if (op == 0x84 || op == 0x85) {                              /* test */
@@ -248,6 +259,18 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
         if (o2 == 0x1f) { int r = modrm(code, &i, rex, opsz, 0, rm); (void)r;
             sprintf(out, "nop    %s", rm); return i; }
         if (o2 == 0xa2) { sprintf(out, "cpuid"); return i; }
+        if (o2 == 0xb0 || o2 == 0xb1 || o2 == 0xc0 || o2 == 0xc1) {
+            int sz = (o2 & 1) ? opsz : 1;           /* cmpxchg / xadd */
+            int r = modrm(code, &i, rex, sz, 0, rm);
+            sprintf(out, "%s%s %%%s,%s", lock ? "lock " : "",
+                    o2 < 0xc0 ? "cmpxchg" : "xadd   ", regname(sz, r), rm);
+            return i;
+        }
+        if (o2 == 0xae && i < n && code[i] == 0xf0) {
+            i++;
+            sprintf(out, "mfence");
+            return i;
+        }
         if (o2 == 0xc7) { int r = modrm(code, &i, rex, opsz, 0, rm); (void)r;
             sprintf(out, "rdrand %s", rm); return i; }
         /* SSE scalar/packed — reg is xmm; rm is xmm or memory */
