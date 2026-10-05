@@ -644,10 +644,11 @@ int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
  * So a node with at most RG_ROW neighbours keeps them in a list, and only
  * one with more keeps a bit row, as in the matrix. "Do these two
  * interfere" is then a bit, or a scan of at most RG_ROW entries; walking
- * a node's neighbours costs its list, or its row; and the graph is never
- * bigger than the matrix was. (Lists for every node, rows on top, were
- * tried first: a function storing 8000 struct fields has 18 million
- * edges, and that took 1.3 GB.)
+ * a node's neighbours costs its list, or its row; and past a few
+ * thousand nodes the graph is never bigger than the matrix was -- a list
+ * is RG_ROW entries, a row a bit per node. (Lists for every node, rows
+ * on top, were tried first: a function storing 8000 struct fields has 18
+ * million edges, and that took 1.3 GB.)
  *
  * Coalescing merges nodes, and a merge must leave each neighbour naming
  * the survivor once, as the matrix's rows did once a merge had cleared
