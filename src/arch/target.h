@@ -136,7 +136,9 @@ int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
  * not in the 32-bit multilib, so the front-end refuses it by name
  * rather than lowering something no backend can carry. */
 int target_has_int128(void);
-int target_jump_tables(void);     /* a dense switch may be a table: not AVR */
+int target_jump_tables(void);     /* a dense switch may be a table: not AVR,
+                                   * not under -fno-jump-tables */
+void target_set_jump_tables(int on);   /* -f[no-]jump-tables */
 /* Does the current backend lower this op to a CALL of a runtime helper
  * (soft-float arithmetic, a 64-bit divide, an __int128 op)? The
  * allocator already knows -- it is the backend's own predicate, handed

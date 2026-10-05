@@ -108,6 +108,7 @@ static void print_options(FILE *out)
       "  -fstack-usage                write FILE.su: each function's frame\n"
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
       "  -fno-access-control          do not enforce private/protected\n"
+      "  -fno-jump-tables             no switch through a table of addresses\n"
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
@@ -4113,6 +4114,15 @@ int main(int argc, char **argv)
              *
              * The opposite spellings are NOT accepted, because those
              * would be promises: see the refusals below. */
+        } else if (strcmp(argv[i], "-fno-jump-tables") == 0 ||
+                   strcmp(argv[i], "-fjump-tables") == 0) {
+            /* A PROMISE, kept: no switch is lowered through a table of
+             * addresses. Code that runs before it is relocated, or from
+             * an address other than its link address, cannot index one.
+             * The decision is irgen's alone (switch_dense), so every
+             * backend -- each lowers only the IR_SWITCH irgen made --
+             * keeps it; a dense switch becomes the compare tree. */
+            target_set_jump_tables(argv[i][2] == 'j');
         } else if (strcmp(argv[i], "-finline-small-functions") == 0 ||
                    strcmp(argv[i], "-fno-inline-small-functions") == 0 ||
                    strncmp(argv[i], "-finline-limit=", 15) == 0 ||
@@ -4666,6 +4676,10 @@ int main(int argc, char **argv)
 
     arm_float_resolve();
     sema_set_gnu89_inline(gnu89_inline || std_gnu89);
+    /* -fno-jump-tables for a whole test suite, whose scripts spell their
+     * own command lines: every dense switch takes the compare tree. */
+    if (plat_getenv("EMBCC_NO_JUMP_TABLES"))
+        target_set_jump_tables(0);
 
     if (g_want_dumpmachine) {
         printf("%s\n", target_triple_now());

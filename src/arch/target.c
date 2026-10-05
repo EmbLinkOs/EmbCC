@@ -257,7 +257,18 @@ int target_has_int128(void)     { return g_model[g_arch].int128; }
 /* AVR keeps the decision tree: an indirect jump there goes through Z
  * with a word address read from flash, and the backend has no lowering
  * for the table yet -- it refuses the op by name if it ever sees one. */
-int target_jump_tables(void)    { return target_get() != TARGET_AVR; }
+/* -fno-jump-tables. AVR never has a table (its indirect jump wants a
+ * word address in Z, and the compare tree is as small); everywhere else
+ * a dense switch gets one unless this says not. irgen's switch_dense is
+ * the only reader, and IR_SWITCH -- which every backend lowers to its
+ * table -- comes from nowhere else, so this one answer is the whole of
+ * the promise. */
+static int g_no_jump_tables;
+void target_set_jump_tables(int on) { g_no_jump_tables = !on; }
+int target_jump_tables(void)
+{
+    return !g_no_jump_tables && target_get() != TARGET_AVR;
+}
 
 static int (*g_calls_helper)(const struct ir_ins *i);
 void target_set_calls_helper(int (*pred)(const struct ir_ins *i)) { g_calls_helper = pred; }
