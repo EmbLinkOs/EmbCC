@@ -1253,6 +1253,32 @@ static char *t_double_map(const struct ir_func *fn, const char *wide,
     return m;
 }
 
+/* Does any instruction name local v -- read it, write it or take its
+ * address? A parameter nothing names after optimisation (`(void)
+ * pvParameters;` in every RTOS task) needs neither a slot nor the
+ * prologue's store into one. */
+struct t_named { int v, hit; };
+static void t_named_cb(int u, void *ctx)
+{
+    struct t_named *c = ctx;
+    if (u == c->v)
+        c->hit = 1;
+}
+static int t_var_named(const struct ir_func *fn, int v)
+{
+    struct t_named c = { v, 0 };
+    for (int n = 0; n < fn->nins && !c.hit; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        /* after mem2reg a parameter is read as an operand like any vreg
+         * (`mov %t, %0`), not only through LDVAR */
+        if (((in->op == IR_LDVAR || in->op == IR_ADDR) && in->a == v) ||
+            (in->op == IR_STVAR && in->dst == v) || ra_ins_def(in) == v)
+            return 1;
+        ra_each_use(in, t_named_cb, &c);
+    }
+    return c.hit;
+}
+
 static void layout(struct t_fn *F)
 {
     struct ir_func *fn = F->fn;
@@ -1296,16 +1322,31 @@ static void layout(struct t_fn *F)
             off = base + (long)npool * 4;
             free(tslot);
         }
-        for (int v = fn->nvars; v < nv; v++) {
-            /* ...and none for one in a d register (t_double_map): it
-             * touches memory no more than a pair does. */
-            if (!F->wide[v] || (F->loc && F->loc[v] >= 0) || in_freg(F, v))
-                continue;
-            /* Eight-aligned as well as eight wide: AAPCS32 aligns `long
-             * long` to 8, and ldrd would need it. */
-            off = (off + 7) & ~7L;
-            F->slot[v] = off;
-            off += 8;
+        /* The 64-bit temporaries the same way, in a pool of their own
+         * eight-byte slots: two whose live ranges do not overlap share
+         * one, and one never live gets none. Each used to have a slot of
+         * its own, so strtol's conv, a function of `unsigned long long`
+         * temporaries, reserved 96 bytes of frame and used 16 of them.
+         * None for one in a d register (t_double_map): it touches
+         * memory no more than a pair does. Eight-aligned as well as eight
+         * wide: AAPCS32 aligns `long long` to 8, and ldrd would need it. */
+        {
+            int nw = 0;
+            for (int v = 0; v < nv; v++)
+                loc2[v] = !F->wide[v] || (F->loc && F->loc[v] >= 0) ||
+                          in_freg(F, v) ? 0 : -1;
+            struct ra_slots sw = { loc2, F->floc, g_t_regalloc, has_cgoto };
+            int *wslot = ra_coalesce_temps(fn, fn->nvars, &sw, &nw);
+            long base = (off + 7) & ~7L;
+            for (int v = fn->nvars; v < nv; v++) {
+                int k = v - fn->nvars;
+                if (loc2[v] >= 0 || !wslot || wslot[k] < 0)
+                    continue;
+                F->slot[v] = base + (long)wslot[k] * 8;
+            }
+            if (nw)
+                off = base + (long)nw * 8;
+            free(wslot);
         }
         free(loc2);
     }
@@ -1322,6 +1363,11 @@ static void layout(struct t_fn *F)
                     continue;
                 if (!lref[v] ||
                     ra_slot_dead(fn, F->loc, F->floc, v, F->want_debug))
+                    continue;
+                /* (ARMv6-M's prologue, in v6m.c, stores every one) */
+                if (v < fn->nparams && !F->want_debug && !fn->is_varargs &&
+                    !fn->has_alloca && target_thumb_arch() != 6 &&
+                    !t_var_named(fn, v))
                     continue;
                 size = fn->locals[v].size ? fn->locals[v].size : 4;
                 if ((size > 8) != pass)
@@ -5510,9 +5556,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.nopush = F.leaf && !F.nsave && !F.nfsave && !F.frame &&
                !fn->is_varargs && !fn->has_alloca &&
                !(F.scr_save & T_SCR_ALL);
-    push_at = F.nopush ? -1
+    /* No IR_RET and no tail call is not enough: a void function's body
+     * falls off its end into the epilogue, so its last instruction must
+     * be a jump or a trap too. */
+    F.noret = !F.nopush && !want_debug && !fn->is_varargs && fn->nins &&
+              (fn->ins[fn->nins - 1].op == IR_JMP ||
+               fn->ins[fn->nins - 1].op == IR_UD2);
+    for (i = 0; F.noret && i < fn->nins; i++)
+        if (fn->ins[i].op == IR_RET || (F.tail && F.tail[i]))
+            F.noret = 0;
+    push_at = F.nopush || F.noret ? -1
             : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
-    if (F.nfsave)
+    if (F.nfsave && !F.noret)
         t_vsave(t, F.nfsave, 0);
     /* The mask is PATCHED at the end with whatever callee-saved
      * registers the allocator turned out to take: a `push` encodes them
@@ -5545,7 +5600,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * which is a miscompile in any function with more arguments
          * than the register file holds -- and the pad is exactly the
          * term that was missing. */
-        long base = F.nopush ? 0 : F.frame + save_bytes_for(F.nsave, F.used_callee,
+        long base = F.nopush ? 0 : F.noret ? F.frame
+                  : F.frame + save_bytes_for(F.nsave, F.used_callee,
                                              F.scr_save) +
                     (long)F.nfsave * 4;
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
@@ -5570,6 +5626,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
              * an S register home does, below, and for the same reason. A
              * double is eight-aligned, so AAPCS32 never splits one between
              * r3 and the stack. */
+            /* nothing names it: no slot (layout) and nothing to store */
+            if (F.slot[i] < 0 && !in_reg(&F, i) && !in_freg(&F, i))
+                continue;
             if (in_freg(&F, i) && F.wide[i]) {
                 int dd = t_dreg(&F, i);
                 if (pl.nvfp == 2 && pl.vdbl) {
@@ -5775,7 +5834,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     for (i = 0; tail_end && i < F.nfix; i++)
         if (F.fix[i].label == fn->nlabels)
             tail_end = 0;
-    if (tail_end) {
+    if (F.noret) {
+        /* nothing reaches an epilogue, and nothing was pushed */
+    } else if (tail_end) {
         if (!F.nopush)
             t_patch_push(t, push_at, save_mask_for(F.nsave, F.used_callee,
                                                    F.scr_save));
@@ -5942,7 +6003,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     f->code_len = t->len - f->code_off;
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved. */
-    f->stack_bytes = F.nopush ? 0 : (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
+    f->stack_bytes = F.nopush ? 0 : F.noret ? (int)F.frame : (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
                                                     F.scr_save) +
                            (long)F.nfsave * 4);
     free(F.usecnt);

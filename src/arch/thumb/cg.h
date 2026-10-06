@@ -119,6 +119,13 @@ struct t_fn {
     /* A leaf that saves nothing at all: no push, no pop, `bx lr`. Decided
      * per pass, once scr_save is known (see the pass loop). */
     int leaf, nopush;
+    /* A function that cannot return -- no IR_RET, no tail call: an RTOS
+     * task's for (;;), a scheduler's start, a reset handler. No caller
+     * is ever resumed, so nothing it would restore is saved: no push, no
+     * vpush, no epilogue -- only the frame. Not under -g, where a
+     * debugger's backtrace reads the saved lr, and not for a variadic
+     * function, whose register save area is a push. */
+    int noret;
     /* Per instruction: an IR_CALL made as a TAIL call (t_tail_ok). NULL
      * when there are none. */
     char *tail;
