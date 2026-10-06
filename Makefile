@@ -129,6 +129,7 @@ SRCS := \
 	src/arch/aarch64/predef.c \
 	src/arch/aarch64/predef_cxx.c \
 	src/arch/thumb/emit.c \
+	src/arch/thumb/a32.c \
 	src/arch/thumb/attrs.c \
 	src/arch/thumb/irgen.c \
 	src/arch/thumb/codegen.c \
@@ -292,7 +293,8 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
-             src/arch/thumb/emit.c src/arch/thumb/attrs.c src/arch/riscv/irgen.c \
+             src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \
+             src/arch/riscv/irgen.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
              src/arch/mips/irgen.c src/arch/mips/asm.c src/arch/mips/emit.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c

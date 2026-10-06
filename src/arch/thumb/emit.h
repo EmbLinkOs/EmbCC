@@ -30,6 +30,13 @@
 
 #include "../code.h"
 
+/* Set for armv7a-none-eabi: every encoder below then writes the A32 (ARM
+ * state) instruction with the same meaning, through src/arch/thumb/a32.c.
+ * The meaning is the contract; where A32 lacks a form, the int-returning
+ * encoders answer 0 as they do for an operand out of reach. See
+ * docs/internals/arm-a32-plan.md. */
+extern int t_isa_a32;
+
 /* Register roles. AAPCS32: r0-r3 argument and caller-saved, r4-r11
  * callee-saved, r12 (IP) caller-saved and the ABI's own scratch, r13 sp,
  * r14 lr, r15 pc.
@@ -167,6 +174,9 @@ int t_ldst_wb(struct code *c, int rt, int rn, long off, int size, int sign,
 /* rt = [rn + (rm << shift)], shift in 0..3. */
 void t_ldst_reg(struct code *c, int rt, int rn, int rm, int shift, int size,
                 int sign, int store);
+/* Can t_ldst_reg say this access? Always in Thumb state; in ARM state a
+ * halfword or a signed access has no shifted-register form. */
+int t_ldst_reg_ok(int shift, int size, int sign, int store);
 
 /* rd = sp + off, for taking a frame slot's address. */
 void t_add_sp(struct code *c, int rd, long off);
