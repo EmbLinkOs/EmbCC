@@ -2608,6 +2608,37 @@ static struct expr *parse_unary(struct parser *ps);
 static struct expr *binop(enum binop op, struct expr *lhs,
                           struct expr *rhs);
 
+static int g_single_prec;
+void parse_set_single_precision_constant(int on) { g_single_prec = on; }
+
+/* What an unsuffixed constant is worth as a float, under
+ * -fsingle-precision-constant: the nearest float, as a double. Past
+ * float's range that is an infinity, built from its bits because the
+ * conversion itself is undefined there; GCC warns for that and for a
+ * constant that becomes zero, and so does this. */
+static double single_value(struct parser *ps, const struct token *t)
+{
+    double d = t->fnum;
+    /* the midpoint between FLT_MAX and 2^128, which rounds to infinity */
+    const double lim = 3.4028235677973366e38;
+    if (d >= lim || d <= -lim) {
+        unsigned long long bits = d > 0 ? 0x7ff0000000000000ULL
+                                        : 0xfff0000000000000ULL;
+        if (d - d == 0)        /* finite as a double: the flag made it inf */
+            diag_warn_at(ps->lx.file, t->line, t->col,
+                         "floating constant exceeds the range of 'float' "
+                         "(-fsingle-precision-constant)");
+        memcpy(&d, &bits, sizeof d);
+        return d;
+    }
+    float f = (float)d;
+    if (f == 0 && d != 0)
+        diag_warn_at(ps->lx.file, t->line, t->col,
+                     "floating constant truncated to zero "
+                     "(-fsingle-precision-constant)");
+    return (double)f;
+}
+
 static struct expr *parse_primary(struct parser *ps)
 {
     struct token *t = cur(ps);
@@ -2664,13 +2695,20 @@ static struct expr *parse_primary(struct parser *ps)
         np->ty = ty_ptr(ty_base(TY_VOID, 0));
         return np;
     }
-    case TOK_FNUM:
+    case TOK_FNUM: {
+        /* -fsingle-precision-constant: no suffix means float, as an
+         * `f` would -- the type AND the value, so `double d = 0.1;`
+         * holds 0.1f widened, which is what GCC's flag gives. */
+        int as_float = t->fnum_is_float ||
+                       (g_single_prec && !t->fnum_is_ld);
         e = new_expr(EXPR_FNUM, t->line, t->col);
         e->fnum = t->fnum;
-        e->ty = ty_base(t->fnum_is_float ? TY_FLOAT : TY_DOUBLE, 0);
+        if (as_float && !t->fnum_is_float)
+            e->fnum = single_value(ps, t);
+        e->ty = ty_base(as_float ? TY_FLOAT : TY_DOUBLE, 0);
         if (t->fnum_is_imag) {
             e->imag = 1;
-            e->ty = ty_complex(ty_base(t->fnum_is_float ? TY_FLOAT
+            e->ty = ty_complex(ty_base(as_float ? TY_FLOAT
                                        : t->fnum_is_ld ? TY_LDOUBLE
                                                        : TY_DOUBLE, 0));
         }
@@ -2684,6 +2722,7 @@ static struct expr *parse_primary(struct parser *ps)
         }
         advance(ps);
         return e;
+    }
     case TOK_STR: {
         /* Adjacent string literals concatenate (C translation phase 6):
          * "foo" "bar" is one literal "foobar". The DECODED elements are

@@ -142,7 +142,9 @@ int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
  * not in the 32-bit multilib, so the front-end refuses it by name
  * rather than lowering something no backend can carry. */
 int target_has_int128(void);
-int target_jump_tables(void);     /* a dense switch may be a table: not AVR */
+int target_jump_tables(void);     /* a dense switch may be a table: not AVR,
+                                   * not under -fno-jump-tables */
+void target_set_jump_tables(int on);   /* -f[no-]jump-tables */
 /* Under -Os, the fewest cases a dense switch needs to be a table rather
  * than a tree of compares: 4 where the dispatch is ARMv7-M's cmp, bhs,
  * tbh and two bytes an entry; 6 elsewhere. */

@@ -521,16 +521,21 @@ list, with the options that are accepted and have no effect, is in
 | `-fsanitize=` with a check other than `undefined`, `signed-integer-overflow`, `integer-divide-by-zero`, `shift`, `shift-exponent` | `-fsanitize=address is not supported: EmbCC's sanitizer inserts checks that TRAP, and this one needs a runtime library to report through. The ones it has are undefined, signed-integer-overflow, integer-divide-by-zero and shift` |
 | `-fstack-protector`, `-fstack-protector-strong`, ... | `embcc: '-fstack-protector' is not supported (EmbCC emits no stack protection); -fno-stack-protector is` |
 | `-gdwarf-5`, `-gsplit-dwarf`, `-gz` | `embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece` |
-| `-Og`, `-Ofast`, `-O4` and up | `embcc: unknown optimization flag '-Og'` |
+| `-O4` and up | `embcc: unknown optimization flag '-O4'` |
+| `-mno-unaligned-access` (ARM) | `-mno-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses (packed struct members; copies and by-value passing of structs aligned below 4), which the architecture allows and this flag forbids` |
+| `-mabi=` other than `aapcs`, `aapcs-linux` (ARM) or `ilp32`/`lp64` (RISC-V), `-mbig-endian` | `-mabi=apcs-gnu is not supported: EmbCC emits the AAPCS ...`; `embcc: error: -mbig-endian is not supported: every target EmbCC emits for is little-endian` |
+| `-fdump-*`, `-fcallgraph-info` | `embcc: error: -fdump-rtl-expand is not supported: it dumps GCC's internal representation, which EmbCC does not have; ...` |
+| `-fcommon` (Mach-O, COFF), `-fsingle-precision-constant` (C++) | `embcc: error: -fcommon is not supported for x86_64-apple-darwin: EmbCC writes COMMON symbols into ELF objects only, ...` |
 
 These are unknown arguments (`embcc: error: unknown argument '-march=native'`,
 followed by the usage summary): `-march=`, `-mtune=`, `-m32`, `-m64`,
-`-mabi=`, `-mmcu=`, `-mavx2` and the other x86 feature flags; `-include`,
-`-imacros`, `-iquote`, `-idirafter`, `-undef`; `-ansi`; `-ffast-math`,
-`-ffp-contract=`, `-funroll-loops`, `-ftrapv`, `-fcommon`,
-`-fvisibility=`, `-fopenmp`; `-l`, `-L`, `-static`, `-nostdlib`,
-`-nostartfiles`; `-v`, `-save-temps`, `-pipe`.
-`--help` lists `-include FILE`, but the option is refused.
+`-mabi=` on x86-64, AArch64 and AVR, `-mmcu=`, `-mavx2` and the other x86
+feature flags; `-imacros`, `-iquote`, `-idirafter`, `-undef`; `-ansi`;
+`-ffp-contract=`, `-funroll-loops`, `-ftrapv`, `-fvisibility=`,
+`-fopenmp`; `-v`. The flags GCC builds for Cortex-M pass (`-ffast-math`,
+`-fcommon`, `-fno-jump-tables`, `-save-temps`, `-specs=`, `-mabi=aapcs`
+and the rest) are accepted, implemented or refused as
+[Invoking EmbCC](../manual/invoking.md) lists.
 
 `-Wl,OPTION` and `-Xlinker OPTION` reach the driver's link. EmbLD's own
 options (`-T`, `-L`, `-u`, `-e`, `-Ttext`, `-Tdata`, `-Tstack`,

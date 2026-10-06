@@ -5,4 +5,8 @@
 
 struct unit *parse_unit(const char *file, const char *src);
 
+/* -fsingle-precision-constant: an unsuffixed floating constant has type
+ * float, and the value it would have as a float (GCC's rule). */
+void parse_set_single_precision_constant(int on);
+
 #endif
