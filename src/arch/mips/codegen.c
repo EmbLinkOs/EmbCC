@@ -3358,7 +3358,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * allocation; room is left for the +3 of an lwl. */
     if (g_mips_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
         char *w = wide_map(fn);
-        ra_fold_memoff(fn, -32768, 32767 - 8, 4, 4, w);
+        ra_fold_memoff(fn, -32768, 32767 - 8, 4, 4, w, 0, 0);
         free(w);
     }
     g_mips_pairs = 1;

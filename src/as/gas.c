@@ -1096,9 +1096,12 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             return 1;
         }
     }
-    int is_call = strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
-    int is_la = strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
-    int ld_len = rv_load_sym(g, p);           /* `lw rd, sym` */
+    int is_call = g->tgt->machine == EM_RISCV &&
+                  strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
+    int is_la = g->tgt->machine == EM_RISCV &&
+                strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
+    /* `lw rd, sym` is RISC-V's pair too; MIPS's is its own symform's */
+    int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
     if (ld_len)
         is_la = 1;                            /* the same pair, but a load */
     /* ARM's jump to a symbol defined elsewhere -- a tail call, an RTOS's
@@ -1252,8 +1255,11 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
                 return sym_get(g, stmt + f.sym_at, (size_t)f.sym_len)->name;
         }
     }
-    int ld_len = rv_load_sym(g, p);
-    if (!((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
+    /* RISC-V's pair pseudos; another machine's `la` or `lw rd, sym`
+     * (MIPS's) is its own symform's */
+    int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
+    if (g->tgt->machine != EM_RISCV ||
+        !((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
           (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2])) ||
           ld_len))
         return NULL;

@@ -3707,7 +3707,13 @@ static int thread_site(const struct ir_func *fn, int n, const int *use)
  * C writes the first wherever a truth value is compared with pdFALSE or
  * 0 -- FreeRTOS's `listLIST_IS_EMPTY(l) == pdFALSE` is a 1/0 merged from
  * two arms and then tested -- and the compare in between hid the merge
- * from the threading below. The compare is left for DCE. */
+ * from the threading below. The compare is left for DCE.
+ *
+ * Unsigned, `%t < 1` and `%t <= 0` are `%t == 0`, and `%t >= 1` and
+ * `%t > 0` are `%t != 0`: FreeRTOS asserts `uxIndexToNotify <
+ * configTASK_NOTIFICATION_ARRAY_ENTRIES`, which is 1 by default, and the
+ * compare-and-branch it made was a `cmp #1; blo` where a test of the
+ * value is one cbz. */
 static int branch_on_cmp0(struct ir_func *fn, const int *use,
                           const struct defs *d)
 {
@@ -3715,21 +3721,31 @@ static int branch_on_cmp0(struct ir_func *fn, const int *use,
     for (int n = 0; n + 1 < fn->nins; n++) {
         const struct ir_ins *c = &fn->ins[n];
         struct ir_ins *br = &fn->ins[n + 1];
+        long k;
+        int eq;
         if (c->op != IR_CMP || c->flt || c->w > 8 ||
-            (c->pred != B_EQ && c->pred != B_NE) ||
             (br->op != IR_BRZ && br->op != IR_BRNZ) || br->a != c->dst ||
             c->dst < 0 || c->dst >= fn->nvregs || use[c->dst] != 1 ||
             c->a < 0 || c->a >= fn->nvregs)
             continue;
-        int zero = c->imm_b ? c->imm == 0
-                 : c->b >= 0 && c->b < fn->nvregs && d->cnt[c->b] == 1 &&
-                   d->ins[c->b] >= 0 && fn->ins[d->ins[c->b]].op == IR_CONST &&
-                   fn->ins[d->ins[c->b]].imm == 0;
-        if (!zero)
+        if (c->imm_b)
+            k = c->imm;
+        else if (c->b >= 0 && c->b < fn->nvregs && d->cnt[c->b] == 1 &&
+                 d->ins[c->b] >= 0 && fn->ins[d->ins[c->b]].op == IR_CONST)
+            k = fn->ins[d->ins[c->b]].imm;
+        else
+            continue;
+        if (k == 0 && (c->pred == B_EQ || c->pred == B_NE))
+            eq = c->pred == B_EQ;
+        else if (!c->sign && k == 1 && (c->pred == B_LT || c->pred == B_GE))
+            eq = c->pred == B_LT;
+        else if (!c->sign && k == 0 && (c->pred == B_LE || c->pred == B_GT))
+            eq = c->pred == B_LE;
+        else
             continue;
         br->a = c->a;
         br->w = c->w;
-        if (c->pred == B_EQ)
+        if (eq)
             br->op = br->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
         changed = 1;
     }

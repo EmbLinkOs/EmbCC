@@ -5977,7 +5977,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         /* ARMv6-M's immediate offsets are five bits of the access size:
          * 124 for a word is the most any of them reaches. */
         ra_fold_memoff(fn, 0, target_thumb_arch() == 6 ? 124 : 4095, 4,
-                       dp ? 8 : 4, w);
+                       dp ? 8 : 4, w, 1, 31);
         free(w);
     }
     const char *lr = getenv("EMBCC_T_LOWREGS");
