@@ -276,6 +276,10 @@ int target_jump_tables(void)
 {
     return target_get() != TARGET_AVR && target_get() != TARGET_MIPS32;
 }
+int target_switch_table_min_os(void)
+{
+    return target_get() == TARGET_THUMB && target_thumb_arch() >= 7 ? 4 : 6;
+}
 
 static int (*g_calls_helper)(const struct ir_ins *i);
 void target_set_calls_helper(int (*pred)(const struct ir_ins *i)) { g_calls_helper = pred; }

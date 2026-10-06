@@ -3580,7 +3580,9 @@ void irgen_set_opt_size(int on) { g_opt_size = on; }
  * Which switches get one: at least four cases, and the span of values
  * from the lowest to the highest at most 4n + 4; under -Os, where an
  * entry is bytes and a compare is bytes too, at least six cases spanning
- * at most 2n; capped at 4096 entries either way.
+ * at most 2n -- four on ARMv7-M, whose tbh dispatch is eight bytes and an
+ * entry two (target_switch_table_min_os); capped at 4096 entries either
+ * way.
  * The index is the value less the lowest case, so a value below the
  * range wraps above it and one unsigned compare in the backend sends
  * both to the default. Every target but AVR has one (target_jump_tables):
@@ -3625,7 +3627,8 @@ static int switch_dense(int n, int w, long lo, long hi)
         w > target_ptr_size())
         return 0;
     if (g_opt_size)
-        return n >= 6 && range <= 2UL * (unsigned long)n;
+        return n >= target_switch_table_min_os() &&
+               range <= 2UL * (unsigned long)n;
     return range <= 4UL * (unsigned long)n + 4;
 }
 

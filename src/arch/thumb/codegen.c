@@ -224,6 +224,14 @@ static const int *t_pool_base(const struct ir_func *fn, int *n)
         *n = fn->is_varargs ? 2 : 6;
         return fn->is_varargs ? T6_POOL_VA : T6_POOL;
     }
+    if (g_t_ext) {
+        if (fn->has_alloca) {
+            *n = fn->is_varargs ? 7 : 11;
+            return fn->is_varargs ? T_POOL_VA_FB_EXT : T_POOL_FB_EXT;
+        }
+        *n = fn->is_varargs ? 8 : T_NPOOL_EXT;
+        return fn->is_varargs ? T_POOL_VA_EXT : T_POOL_EXT;
+    }
     if (fn->has_alloca) {
         *n = fn->is_varargs ? 4 : 8;
         return fn->is_varargs ? T_POOL_VA_FB : T_POOL_FB;
@@ -3485,6 +3493,7 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LABEL:
         F->label_off[i->label] = t->len;
         F->bc_end = -1;          /* something may branch here */
+        F->fl_end = -1;          /* ...with other flags */
         return;
     case IR_JMP:
         /* A jump to the label that follows it is not an instruction.
@@ -3870,7 +3879,10 @@ static void gen_ins(struct t_fn *F, int n)
             set_cc(F, i->dst, cond);
             return;
         }
-        {
+        if (fuse && i->imm_b && in_reg(F, i->a) && F->fl_end == t->len &&
+            F->fl_reg == F->loc[i->a] && F->fl_imm == i->imm) {
+            /* the flags of the compare just made (fl_end) */
+        } else {
         /* The comparison reads its left operand where it already is;
          * only the 0/1 result needs a register of its own. */
         int sa = rdr(F, i->a, T_ACC);
@@ -3889,6 +3901,12 @@ static void gen_ins(struct t_fn *F, int n)
         if (fuse) {
             jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
             F->skip_next = 1;
+            F->fl_end = -1;
+            if (i->imm_b && in_reg(F, i->a)) {
+                F->fl_end = t->len;
+                F->fl_reg = F->loc[i->a];
+                F->fl_imm = i->imm;
+            }
             return;
         }
         /* 0 or 1, without an IT block: set it, then jump over the
@@ -5168,6 +5186,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.loc = NULL; F.nsave = 0; F.save_at = 0;
     F.floc = NULL; F.nfsave = 0;
     F.bc_end = F.bc_fix = -1;
+    F.fl_end = -1;
     F.shortb = NULL; F.nshortb = 0;
     F.scr_save = T_SCR_ALL;
     F.fb = T_SP;
@@ -5398,6 +5417,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.label_off[i] = -1;
         F.skip_next = 0;
         F.bc_end = F.bc_fix = -1;
+        F.fl_end = -1;
         F.va_regsave = F.va_first = -1;
         F.shortb = shortb;
         F.nshortb = nshortb;
@@ -5973,6 +5993,12 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * knob fixes them), each with the rename on and off (unless
      * EMBCC_T_LOWREGS fixes it). The first of equal sizes wins.
      *
+     * Before those, on ARMv7-M and ARMv8-M, the same pair choices with
+     * r9-r11 in the pool too (g_t_ext; EMBCC_T_EXT=0/1 forces it), the
+     * rename on. An attempt where some instruction needed a scratch role
+     * that every one of r9-r11 was holding a value at (g_t_role_fail) is
+     * not a candidate; the attempts without r9-r11 never fail that way.
+     *
      * ARMv6-M has no rename to try: every register it computes in is a
      * low one already, so there is no 16-bit form to win (v6m.c does not
      * call t_lowregs), and a second attempt would make the same bytes. */
@@ -6009,8 +6035,10 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
             t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next;
             st->nstr = nstr; st->ng = ng; st->nf = nf;
         }
-        g_t_pairs = pv[a / nl];
-        g_t_lowregs = lv[a % nl];
+        g_t_pairs = tp[a];
+        g_t_lowregs = tl[a];
+        g_t_ext = te[a];
+        g_t_role_fail = 0;
         gen(fn, t, st, want_debug);
         with = t->len - at;
         last = a;
@@ -6027,8 +6055,10 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     if (best != last || g_t_role_fail) {
         t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next;
         st->nstr = nstr; st->ng = ng; st->nf = nf;
-        g_t_pairs = pv[best / nl];
-        g_t_lowregs = lv[best % nl];
+        g_t_pairs = tp[best];
+        g_t_lowregs = tl[best];
+        g_t_ext = te[best];
+        g_t_role_fail = 0;
         gen(fn, t, st, want_debug);
     }
     g_t_pairs = 1;
