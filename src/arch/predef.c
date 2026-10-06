@@ -29,6 +29,10 @@ static const struct predef_macro *arch_table(int *count)
                 *count = predef_macro_count_cxx_thumbv8m;
                 return predef_macros_cxx_thumbv8m;
             }
+            if (target_thumb_arch() == 6) {
+                *count = predef_macro_count_cxx_thumbv6m;
+                return predef_macros_cxx_thumbv6m;
+            }
             *count = predef_macro_count_cxx_thumb;
             return predef_macros_cxx_thumb;
         case TARGET_RISCV32:
@@ -56,6 +60,10 @@ static const struct predef_macro *arch_table(int *count)
         if (target_thumb_arch() >= 8) {
             *count = predef_macro_count_thumbv8m;
             return predef_macros_thumbv8m;
+        }
+        if (target_thumb_arch() == 6) {
+            *count = predef_macro_count_thumbv6m;
+            return predef_macros_thumbv6m;
         }
         *count = predef_macro_count_thumb;
         return predef_macros_thumb;

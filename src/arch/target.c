@@ -11,7 +11,9 @@
 static enum target_arch g_arch = TARGET_X86_64;
 static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
 /* The Thumb architecture LEVEL: 7 for ARMv7-M and 8 for ARMv8-M Mainline
- * (Cortex-M33, which the RTOS requirements name as its third target).
+ * (Cortex-M33, which the RTOS requirements name as its third target), and
+ * 6 for ARMv6-M (Cortex-M0, M0+, M1), whose instruction set is a SUBSET:
+ * Thumb-1 and six 32-bit instructions, selected by codegen.c (v6m.c).
  *
  * A level and not a new enum target_arch value, because that enum keys the
  * DATA MODEL -- D-016's reasoning for RISC-V being two targets -- and
@@ -378,8 +380,10 @@ static const struct triple {
     enum target_os os;
     enum target_fmt fmt;
     int canon;         /* 1 the canonical name; 2 the v7E-M one; 3 the v8-M
-                        * Mainline one -- see target_triple_of */
-    int thumb_em;      /* 1 ARMv7E-M rather than ARMv7-M; 3 ARMv8-M Mainline */
+                        * Mainline one; 6 the ARMv6-M one -- see
+                        * target_triple_of */
+    int thumb_em;      /* 1 ARMv7E-M rather than ARMv7-M; 3 ARMv8-M Mainline;
+                        * 6 ARMv6-M */
 } g_triples[] = {
     /* freestanding: bare metal and EmbLinkOS (the default) */
     { "x86_64-elf",        TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
@@ -407,6 +411,16 @@ static const struct triple {
     { "armv7em-none-eabi",  TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 1 },
     { "armv7m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
     { "arm-none-eabi",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
+
+    /* ARMv6-M: Cortex-M0, M0+ and M1. The same data model and AAPCS32
+     * again, so a level on this target (6); what changes is that the
+     * instruction set is Thumb-1 plus BL, MRS, MSR and the barriers, and
+     * that an unaligned access faults. ARMv8-M Baseline (Cortex-M23) is a
+     * different subset -- it has CBZ, MOVW and the divides -- and stays
+     * refused until it is selected for. */
+    { "thumbv6m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   6, 6 },
+    { "thumbv6m",           TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 6 },
+    { "armv6m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 6 },
 
     /* ARMv8-M Mainline: Cortex-M33, the RTOS requirements' third target,
      * and the RP2350's core. The same data model and the same AAPCS32 as
@@ -511,6 +525,9 @@ int target_from_triple(const char *triple, enum target_arch *out,
                 if (g_triples[i].thumb_em == 3) {
                     g_thumb_arch = 8;
                     g_thumb_em = 1;
+                } else if (g_triples[i].thumb_em == 6) {
+                    g_thumb_arch = 6;
+                    g_thumb_em = 0;
                 } else {
                     g_thumb_arch = 7;
                     g_thumb_em = g_triples[i].thumb_em;
@@ -529,6 +546,7 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
     int want = 1;
     if (a == TARGET_THUMB)
         want = g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
+             : g_thumb_arch == 6 ? 6
              : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
     for (int i = 0; i < g_ntriples; i++)
         if (g_triples[i].canon == want && g_triples[i].arch == a &&
@@ -547,6 +565,17 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
  * believe. */
 int target_thumb_em(void) { return g_thumb_em; }
 int target_thumb_arch(void) { return g_thumb_arch; }
+int target_object_align(int is_array, long size, int align)
+{
+    if (g_arch == TARGET_THUMB && g_thumb_arch == 6 && is_array &&
+        size >= 4 && align < 4)
+        return 4;
+    return align;
+}
+int target_string_align(int width)
+{
+    return width > 1 ? width : 1;
+}
 void target_set_thumb_arch(int lvl) { g_thumb_arch = lvl; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }

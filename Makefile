@@ -132,11 +132,14 @@ SRCS := \
 	src/arch/thumb/attrs.c \
 	src/arch/thumb/irgen.c \
 	src/arch/thumb/codegen.c \
+	src/arch/thumb/v6m.c \
 	src/arch/thumb/asm.c \
 	src/arch/thumb/predef.c \
 	src/arch/thumb/predef_cxx.c \
 	src/arch/thumbv8m/predef.c \
 	src/arch/thumbv8m/predef_cxx.c \
+	src/arch/thumbv6m/predef.c \
+	src/arch/thumbv6m/predef_cxx.c \
 	src/arch/riscv/emit.c \
 	src/arch/riscv/codegen.c \
 	src/arch/riscv/irgen.c \
@@ -279,6 +282,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/mips32/predef.c src/arch/mips32/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
+             src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
@@ -497,7 +501,7 @@ libc-linux-aarch64: embcc embar
 # is the archive that ships.
 # The -eabihf ones are the hard-float convention: its objects do not link
 # with soft-float ones, so its runtime is a separate archive.
-RT_EMBEDDED := avr thumbv7m-none-eabi thumbv7em-none-eabi \
+RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf riscv32-unknown-elf riscv64-unknown-elf \
                mipsel-none-elf
@@ -512,7 +516,7 @@ rt-embedded: embcc embar
 # the recipe, and tests/golden/libc-embedded.sh runs what it builds on the
 # boards. Not avr: a two-byte atomic is two accesses there, and the library's
 # locks are refused for it.
-LIBC_EMBEDDED := thumbv7m-none-eabi thumbv7em-none-eabi \
+LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf riscv32-unknown-elf \
                  riscv64-unknown-elf mipsel-none-elf

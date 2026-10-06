@@ -1793,6 +1793,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         int align = ty_align(g->ty);
         if (g->user_align > align)
             align = g->user_align;
+        align = target_object_align(g->ty && g->ty->kind == TY_ARRAY,
+                                    global_size(g), align);
         g->in_bss = !g->has_init;
         g->named = 0;
         /* A const object is read-only data, where gcc puts it: in flash
@@ -1914,7 +1916,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
              * str_width bytes (lit_encode). */
             int w = g->relocs[i].str_width ? g->relocs[i].str_width : 1;
             int si = ir_intern_aligned(iu, g->relocs[i].str,
-                                       g->relocs[i].str_len * w, w);
+                                       g->relocs[i].str_len * w,
+                                       target_string_align(w));
             g->relocs[i].str_off = iu->strs[si].off;
         }
     }
@@ -1928,6 +1931,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         int align = ty_align(g->ty);
         if (g->user_align > align)
             align = g->user_align;
+        align = target_object_align(g->ty && g->ty->kind == TY_ARRAY,
+                                    global_size(g), align);
         if (align > rodata_align)
             rodata_align = align;
         rodata_len = (rodata_len + align - 1) & ~(align - 1);
@@ -2843,10 +2848,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                             (Elf64_Half)dn);
             /* the code resumes where the data ends, in the same section,
-             * unless that is the section's end */
+             * unless that is the section's end -- or more data starts
+             * right there: an ARMv6-M literal pool can follow a switch
+             * table with no instruction between, and a `$t` and a `$d` at
+             * one address leave a disassembler to pick one, which it did,
+             * decoding the pool as instructions. */
             long e = o + (text.drange[r + 1] - text.drange[r]);
             long send = gi ? g_tg[gi - 1].end - g_tg[gi - 1].start : tlen;
-            if (e < send)
+            if (e < send &&
+                !(r + 3 < text.ndrange &&
+                  text.drange[r + 2] == text.drange[r + 1]))
                 elfw_add_symbol(w, codesym, (Elf64_Addr)e, 0,
                                 ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                                 (Elf64_Half)dn);
@@ -3477,6 +3488,12 @@ static void arm_float_resolve(void)
     if (strcmp(abi, "soft") && strcmp(abi, "softfp") && strcmp(abi, "hard"))
         diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it is "
                    "one of soft, softfp and hard", abi);
+    /* No ARMv6-M part has an FPU: only the base standard means anything. */
+    if (target_thumb_arch() == 6 && (fpu_named || strcmp(abi, "soft")))
+        diag_fatal(NULL, 0, "%s%s on %s: an ARMv6-M core (Cortex-M0, M0+, "
+                   "M1) has no FPU, so floating point is soft and travels in "
+                   "the core registers", fpu_named ? "-mfpu=" : "-mfloat-abi=",
+                   fpu_named ? g_arm_fpu : abi, target_triple_now());
     if (fpu_named) {
         int v8 = target_thumb_arch() >= 8;
         int dp = strcmp(g_arm_fpu, "fpv5-d16") == 0;
@@ -4251,19 +4268,34 @@ int main(int argc, char **argv)
                  * built soft-float: its ABI passes floats in s0-s15 and
                  * an object built the other way links and then reads its
                  * arguments from the wrong registers. */
-                /* The ARMv6-M and ARMv8-M Baseline parts are refused too:
-                 * they were taken as ARMv7-M (the M23 as ARMv7E-M, DSP and
-                 * all), and the code that came out used ldr.w and IT
-                 * blocks, which those cores do not implement -- a
-                 * HardFault at the first one, from an image that built
-                 * and linked without a word. */
+                /* The ARMv6-M parts select that level: Thumb-1, which the
+                 * backend emits for them (src/arch/thumb/v6m.c). They used
+                 * to be taken as ARMv7-M, and the code that came out used
+                 * ldr.w and IT blocks -- a HardFault at the first one.
+                 *
+                 * ARMv8-M Baseline (Cortex-M23) is still refused: it is a
+                 * different subset (CBZ, MOVW, the divides), and neither
+                 * the ARMv6-M code nor the ARMv7-M code is right for it. */
+                if (!strcmp(v, "cortex-m23"))
+                    diag_fatal(NULL, 0, "-mcpu=%s is ARMv8-M Baseline, and "
+                               "EmbCC emits ARMv6-M (cortex-m0, m0plus, m1) "
+                               "or ARMv7-M Thumb-2: the second faults on that "
+                               "core and the first is not what it is", v);
                 if (!strcmp(v, "cortex-m0") || !strcmp(v, "cortex-m0plus") ||
-                    !strcmp(v, "cortex-m1") || !strcmp(v, "cortex-m23"))
-                    diag_fatal(NULL, 0, "-mcpu=%s is %s, and EmbCC emits "
-                               "ARMv7-M Thumb-2: that core does not "
-                               "implement its ldr.w or IT blocks", v,
-                               strcmp(v, "cortex-m23") ? "ARMv6-M"
-                                                       : "ARMv8-M Baseline");
+                    !strcmp(v, "cortex-m1")) {
+                    target_set_thumb_arch(6);
+                    target_set_thumb_em(0);
+                    g_arm_cpu = v;
+                    continue;
+                }
+                /* An ARMv7-M part named on an ARMv6-M triple raises the
+                 * level, as -mcpu= on the others selects the DSP set. */
+                if (target_thumb_arch() == 6 &&
+                    (!strcmp(v, "cortex-m3") || !strcmp(v, "cortex-m4") ||
+                     !strcmp(v, "cortex-m7")))
+                    target_set_thumb_arch(7);
+                if (target_thumb_arch() == 6 && !strcmp(v, "cortex-m33"))
+                    target_set_thumb_arch(8);
                 if (!strcmp(v, "cortex-m3"))
                     target_set_thumb_em(0);
                 else if (!strcmp(v, "cortex-m4") || !strcmp(v, "cortex-m7") ||
@@ -4271,8 +4303,9 @@ int main(int argc, char **argv)
                     target_set_thumb_em(1);
                 else
                     diag_fatal(NULL, 0, "-mcpu=%s is not a part EmbCC knows: "
-                               "it emits ARMv7-M and ARMv7E-M (cortex-m3, "
-                               "m4, m7, m33)", v);
+                               "it emits ARMv6-M (cortex-m0, m0plus, m1), "
+                               "ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)",
+                               v);
                 /* Kept for arm_float_resolve: which unit the part's
                  * -eabihf name implies depends on which part it is. */
                 g_arm_cpu = v;

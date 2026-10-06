@@ -43,8 +43,8 @@ shared=$(grep -ohE '"__(mul|div)(sc|dc)3"' src/sema/sema.c | tr -d '"' | sort -u
 
 fail=0
 checked=0
-for triple in avr thumbv7m-none-eabi thumbv7em-none-eabi thumbv8m.main-none-eabi \
-              riscv32-unknown-elf riscv64-unknown-elf; do
+for triple in avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+              thumbv8m.main-none-eabi riscv32-unknown-elf riscv64-unknown-elf; do
     case $triple in
         avr)     be=avr ;;
         thumb*)  be=thumb ;;
@@ -57,6 +57,9 @@ for triple in avr thumbv7m-none-eabi thumbv7em-none-eabi thumbv8m.main-none-eabi
 
     llvm-nm --defined-only "$d/librt.a" 2>/dev/null \
         | awk '$2 == "T" { print $3 }' | sort > "$d/defined"
+    # ARMv6-M's routines are weak (a program's own wins), and count as there.
+    llvm-nm --defined-only "$d/librt.a" 2>/dev/null \
+        | awk '$2 == "T" || $2 == "W" { print $3 }' | sort -u > "$d/present"
 
     # Defined twice is a failure too: in an archive the first member wins, so
     # a duplicate means the routine a program gets depends on build order.
@@ -79,13 +82,19 @@ for triple in avr thumbv7m-none-eabi thumbv7em-none-eabi thumbv8m.main-none-eabi
     fi
     echo "$pd" | grep -q '__SIZEOF_POINTER__ 8' &&
         drop="$drop|^__u?(div|mod)di3\$"
+    # ARMv6-M's lowering also calls the RTABI and libatomic names
+    # (src/arch/thumb/v6m.c), which only that level's runtime defines.
+    v6=
+    [ "$triple" = thumbv6m-none-eabi ] &&
+        v6=$(grep -ohE '"__(aeabi|atomic|sync)_[a-z0-9_]+"' src/arch/thumb/v6m.c |
+             tr -d '"')
     names=$( { grep -ohE '"__[a-z0-9]+"' src/arch/$be/*.c | tr -d '"' \
                  | grep -E "$pat" | grep -vE "$drop"; echo "$shared"
-               for w in $wide; do echo "$w"; done; } | sort -u)
+               for w in $wide $v6; do echo "$w"; done; } | sort -u)
     missing=
     for nm in $names; do
         checked=$((checked + 1))
-        grep -qx "$nm" "$d/defined" || missing="$missing $nm"
+        grep -qx "$nm" "$d/present" || missing="$missing $nm"
     done
     if [ -n "$missing" ]; then
         echo "$triple: the $be backend can call these and librt.a does not define them:"

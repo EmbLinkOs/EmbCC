@@ -216,11 +216,23 @@ int target_anon_bitfield_aligns(void);
  * for both; this changes what the object SAYS it was built for, which
  * is what a linker and a debugger read. */
 int target_thumb_em(void);
-/* The Thumb architecture level: 7 (ARMv7-M) or 8 (ARMv8-M Mainline). A
+/* The Thumb architecture level: 6 (ARMv6-M), 7 (ARMv7-M) or 8 (ARMv8-M
+ * Mainline). A
  * level rather than a separate enum target_arch value, because that enum
  * keys the data model and these two share one; see g_thumb_arch. */
 int target_thumb_arch(void);
 void target_set_thumb_arch(int lvl);
+/* The alignment a string literal of `width`-byte elements gets in .rodata.
+ * Its element width: ARMv6-M reads L"..."[0] with LDR and MIPS with lw,
+ * and a wide literal at an odd offset faults on both (a HardFault, an
+ * address error); the other targets read it with aligned loads too, as
+ * clang lays it out. */
+int target_string_align(int width);
+/* A static object's alignment, given its type's (`align`): on ARMv6-M an
+ * array of four bytes or more gets a word, as GCC's ARM port gives its
+ * char arrays (DATA_ALIGNMENT) -- code that reads a byte buffer a word at
+ * a time is common there, and ARMv6-M faults where ARMv7-M did not. */
+int target_object_align(int is_array, long size, int align);
 void target_set_thumb_em(int on);
 
 /* Hardware floating point on ARMv7E-M (FPv4-SP-D16, the Cortex-M4F
@@ -269,6 +281,9 @@ int target_thumb_hf_name(void);
  * not name one. */
 int thumb_imm_foldable(int op, long imm);
 int thumb_imm_foldable64(int op, long imm);   /* a 64-bit AND/OR/XOR, half by half */
+/* A 64-bit compare with a constant, as codegen.c's cmp64 takes it. */
+int thumb_cmp64_imm(int pred, int sign, long imm, int *pout, long *lo,
+                    long *hi);
 int riscv_imm_foldable64(int op, long imm);   /* the same at RV32 */
 /* Is c == ((1 << k) + 1) << j or ((1 << k) - 1) << j, with k >= 1? Then a
  * multiply by c is an add or a reverse-subtract with a shifted operand,

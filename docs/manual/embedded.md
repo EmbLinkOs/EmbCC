@@ -15,7 +15,7 @@ rather than repeating them.
 
 | Board family | Triples | Startup written in | Interrupt handlers | Runtime archive |
 |---|---|---|---|---|
-| ARM Cortex-M (ARMv7-M, ARMv7E-M, ARMv8-M Mainline) | `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | C | `__attribute__((interrupt))` or a plain function | `librt.a` per triple |
+| ARM Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M Mainline) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | C | `__attribute__((interrupt))` or a plain function | `librt.a` per triple |
 | RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | C, with a stack stub from EmbLD | assembly entry, C body | `librt.a` for RV32 only |
 | MIPS32 (MIPS32r2, little-endian, a PIC32's core) | `mipsel-none-elf` | C, with a stack stub from EmbLD | assembly entry (`.S` or naked), C body | `librt.a` and `libc.a` |
 | AVR (ATmega328P) | `avr` | assembly | `__attribute__((signal))`, `__attribute__((interrupt))` | `librt.a` |
@@ -135,7 +135,7 @@ from another ARM compiler that calls them must bring its own.
 
 `make rt-embedded` builds one `librt.a` per embedded triple with
 `tools/build-rt.sh`, at `-Os`, into `build/libc/TRIPLE/librt.a`:
-`avr`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`,
+`avr`, `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`,
 `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`,
 `thumbv8m.main-none-eabihf`, `riscv32-unknown-elf` and
 `mipsel-none-elf`. `make install`
@@ -368,16 +368,18 @@ table above, region by region. The details are in
 
 | Part | Triple | Notes |
 |---|---|---|
+| Cortex-M0, M0+, M1 | `thumbv6m-none-eabi`, or `-mcpu=cortex-m0` (`m0plus`, `m1`) on any ARM triple | Thumb-1; divide, 64-bit multiply and atomics are `librt.a` calls |
 | Cortex-M3 | `thumbv7m-none-eabi` | no FPU |
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
 | Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi -mfpu=fpv4-sp-d16 -mfloat-abi=hard` | single-precision FPU, hard-float convention |
 | Cortex-M7 | `thumbv7em-none-eabihf -mcpu=cortex-m7`, or `thumbv7em-none-eabi -mfpu=fpv5-d16 -mfloat-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
 | Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16 |
 
-`-mcpu=cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
-sub-architecture as GCC's options do. `-mcpu=cortex-m0`, `cortex-m0plus`,
-`cortex-m1` and `cortex-m23` are refused: EmbCC emits ARMv7-M Thumb-2,
-which an ARMv6-M or ARMv8-M Baseline part cannot execute. `-mthumb` is
+`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m3`,
+`cortex-m4`, `cortex-m7` and `cortex-m33` select the sub-architecture as
+GCC's options do. `-mcpu=cortex-m23` is refused: an ARMv8-M Baseline part
+is a different subset, and EmbCC emits neither ARMv6-M nor ARMv7-M code
+it can run. `-mthumb` is
 accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
@@ -1349,6 +1351,7 @@ link line for each board:
 
 | Harness | QEMU command | Output | How the run ends |
 |---|---|---|---|
+| `thumb-m0/` (Cortex-M0) | `qemu-system-arm -M microbit -nographic -kernel IMAGE`; `-global nrf51-soc.sram-size=65536` for more than the part's 16 KiB | nRF51 UART0 at `0x40002000`: `ENABLE` (`+0x500`) = 4, trigger `TASKS_STARTTX` (`+0x008`), then each byte to `TXD` (`+0x51C`) and wait for `EVENTS_TXDRDY` (`+0x11C`) | `_exit` prints `==EXIT n==`, and `run.sh` stops QEMU there and exits with `n` (125 for a fault, reported with the faulting pc) |
 | `thumb/` (Cortex-M3) | `qemu-system-arm -M lm3s6965evb -cpu cortex-m3 -nographic -kernel IMAGE` | UART0 data register at `0x4000C000` | the startup executes `__builtin_trap()` after `main`; with no HardFault handler the core locks up and QEMU exits |
 | `thumb-m4f/` (Cortex-M4F) | `qemu-system-arm -M mps2-an386 -cpu cortex-m4 -nographic -kernel IMAGE` | CMSDK UART at `0x40004000`; set `CTRL` (`0x40004008`) to 1 first | killed at the timeout |
 | `thumb-m33/` (Cortex-M33) | `qemu-system-arm -M mps2-an505 -cpu cortex-m33 -nographic -kernel IMAGE` | CMSDK UART at `0x40200000` | killed after the sentinel or the timeout |

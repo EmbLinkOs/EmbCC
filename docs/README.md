@@ -55,6 +55,7 @@ Start with the [architecture](internals/architecture.md) and the
 | [Optimizer](internals/optimizer.md) | The passes, their order, and what each may assume |
 | [Register allocation](internals/register-allocation.md) | The shared allocator and each target's use of it |
 | [Back ends](internals/backends.md) | Code generation for each target |
+| [ARMv6-M plan](internals/armv6m-plan.md) | What a Cortex-M0 code generator needs from the Thumb backend, and the order to build it in |
 | [Object files](internals/object-formats.md) | ELF, Mach-O, COFF and EMBX writers |
 | [Linker](internals/linker.md) | How `embld` resolves, lays out and relocates |
 | [Testing](internals/testing.md) | The test suites, the boards, and how to add a test |

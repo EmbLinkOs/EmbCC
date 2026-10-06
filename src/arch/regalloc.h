@@ -261,8 +261,15 @@ unsigned long *ra_live_intervals(struct ir_func *fn, int *first, int *last,
  * Withholding a pair's registers from the whole function -- the old
  * rule -- cost a Cortex-M4 loop its r0 for three doubles that lived
  * briefly after it. The list is read by the next ra_allocate and then
- * dropped. */
-struct ra_range { int reg, first, last; };
+ * dropped.
+ *
+ * `born`: the value the instruction at `last` defines may have the
+ * register as well, because the backend's lowering of that instruction
+ * reads the pair before it writes its result (a 64-bit compare's 0 or 1
+ * on Thumb). Only that value: another one live into `last` still may
+ * not, which is why this is a flag and not `last - 1` -- at instruction
+ * 0 that would hand a parameter's registers to the other parameters. */
+struct ra_range { int reg, first, last, born; };
 void ra_reserve(const struct ra_range *r, int n);
 
 /* A map of the function's source variables, for the -g pinning above.
