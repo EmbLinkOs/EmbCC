@@ -1648,6 +1648,38 @@ static int atomic_lv(const struct expr *e)
  * output is instead the asm's dst, and these store it: a local by STVAR,
  * which takes no address, anything else through an address evaluated
  * BEFORE the asm, as gcc evaluates it. */
+/* ---- a va_list that is a bare pointer ------------------------------
+ *
+ * AAPCS32, RISC-V, AVR and Apple's arm64 pass a variadic argument as a
+ * named one, so their va_list is a pointer at the next one and va_arg
+ * reads it and writes back the advanced pointer. A local list is read
+ * and written AS a variable -- LDVAR and STVAR -- rather than through
+ * its address: taking the address for va_arg kept the list in memory for
+ * the whole function, and each va_arg in __vformat was a load of the
+ * list, an add, a store of it and the load it was for, where clang's is
+ * one post-indexed ldr. `*slot` is -1 for a local, its address
+ * otherwise. (A local aligned beyond the stack's guarantee is indirect,
+ * but only an aggregate is, and the list is a pointer.) */
+int irg_va_ptr_read(struct ir_func *fn, struct expr *lv,
+                    const struct type *ptr, int *slot)
+{
+    if (lv->kind == EXPR_VAR && !lv->gref && !lv->ty->is_volatile) {
+        *slot = -1;
+        return emit_ldvar(fn, lv->var_index, ptr);
+    }
+    *slot = gen_addr(fn, lv);
+    return emit_load(fn, *slot, ptr);
+}
+
+void irg_va_ptr_write(struct ir_func *fn, struct expr *lv, int slot,
+                      int val, const struct type *ptr)
+{
+    if (slot < 0)
+        emit_stvar(fn, lv->var_index, val, ptr);
+    else
+        emit_store(fn, slot, val, ptr);
+}
+
 int irg_asm_val_ok(const struct expr *lv, int maxsize)
 {
     const struct type *t = lv->ty;
