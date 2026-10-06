@@ -4362,6 +4362,13 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
  * shadowing is rejected outright. C gives inner blocks their own scope;
  * refusing shadowed names accepts strictly fewer programs than C does,
  * so the subset stays a subset. */
+/* qsort's order for case values */
+static int case_cmp(const void *x, const void *y)
+{
+    long a = *(const long *)x, b = *(const long *)y;
+    return a < b ? -1 : a > b;
+}
+
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                        struct stmt *s_in, int in_loop, int in_switch,
                        int at_sw_level)
@@ -4412,13 +4419,31 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             struct stmt *list = switch_stmts(s->body);
             check_stmt(u, f, sc, list, in_loop, 1, 1);
             /* duplicate labels and a second default are parse-time
-             * errors, not a runtime coin flip about which one wins */
-            int ndefault = 0;
+             * errors, not a runtime coin flip about which one wins.
+             * Whether there is any duplicate is asked of the sorted
+             * values first: comparing every label with every later one
+             * was the slowest thing in compiling a switch of 8000 cases.
+             * Only when there is one does the pairwise walk run, so the
+             * errors come out as they always did. */
+            int ndefault = 0, ncase = 0, dup = 0;
+            for (struct stmt *a = list; a; a = a->next)
+                ncase += a->kind == STMT_CASE;
+            if (ncase > 1) {
+                long *cv = xmalloc((size_t)ncase * sizeof *cv);
+                int k = 0;
+                for (struct stmt *a = list; a; a = a->next)
+                    if (a->kind == STMT_CASE)
+                        cv[k++] = a->cval;
+                qsort(cv, (size_t)ncase, sizeof *cv, case_cmp);
+                for (k = 1; k < ncase && !dup; k++)
+                    dup = cv[k] == cv[k - 1];
+                free(cv);
+            }
             for (struct stmt *a = list; a; a = a->next) {
                 if (a->kind == STMT_DEFAULT && ++ndefault > 1)
                     sema_error_line(u, a->line,
                                "a switch can have only one 'default'");
-                if (a->kind != STMT_CASE)
+                if (a->kind != STMT_CASE || !dup)
                     continue;
                 for (struct stmt *b = a->next; b; b = b->next)
                     if (b->kind == STMT_CASE && b->cval == a->cval)

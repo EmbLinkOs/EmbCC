@@ -126,12 +126,12 @@ breaks one of them breaks passes far away from the change.
 | Use visitors | `each_read` (every vreg operand read), `each_label` (every label operand, including a switch's table), `value_opnds`, `ins_reads` | every pass that counts uses or rewrites operands |
 | Known zero bits | `known_zero` (follows up to four single-definition steps through MOV, SHL, SHR, AND, OR, XOR, MUL by a constant and zero-extension) | `pass_fold` (an AND whose mask covers only bits the other operand can never set) |
 | Control-flow graph | `build_cfg`, `compute_rpo` | every global and loop pass, `opt_cfg_dump` |
-| Dominators | `compute_idom` (Cooper-Harvey-Kennedy), `bb_dominates` | mem2reg, global CSE, PRE, the loop passes, live-range splitting |
+| Dominators | `compute_idom` (Cooper-Harvey-Kennedy, then a depth-first numbering of the tree, so `bb_dominates` is two comparisons) | mem2reg, global CSE, PRE, the loop passes, live-range splitting |
 | Dominance frontiers | `compute_df` | mem2reg |
 | Natural loops | a back edge is an edge whose target dominates its source; `loop_body` collects the blocks | rotation, LICM, idiom recognition, vectorization, strength reduction, unrolling, live-range splitting |
 | Alias analysis | `mem_base`, `may_alias`; `mem_access`, `acc_overlap`, `acc_covers` | value numbering, dead-store elimination, load CSE |
 | Available expressions | inside `pass_loadcse` and `pre_one` | load CSE, PRE |
-| Liveness | instruction liveness by marking (`pass_dce`); block liveness inside `pass_splitloops` and `pass_joincopies` | those passes |
+| Liveness | instruction liveness by marking (`pass_dce`); block liveness inside `pass_splitloops`, and per vreg, as the ascending list of blocks it is live out of, in `pass_joincopies` (`vblk_build`) | those passes |
 | Function attributes | `infer_attrs` (unit-wide, `-O2`) | DCE, DSE, load CSE |
 | Read-only globals | `ro_globals` (unit-wide, `-O2`) | `pass_roload` |
 
@@ -538,7 +538,11 @@ keeps `p->len`, and a store to a local whose address is never taken
 keeps every load through a pointer. Anything else that writes memory -- a
 call, `memcpy`, `memzero`, an atomic, a fence, inline asm, a vector store
 or a volatile store -- increments the version, which forgets every read.
-Volatile accesses are never numbered.
+Volatile accesses are never numbered. The table (`struct vntab`) is
+hashed on the key's fields, and each entry is filed under the vregs it
+names, so a lookup and the entries a definition makes stale are found
+directly; a key is in the table at most once, which is what lets a hash
+give the answers the old linear search did.
 
 **`pass_divmod`**. Within a block, when `a / b` and `a % b` (same
 operands, width and signedness) both appear, the remainder becomes
@@ -556,7 +560,8 @@ constants, address materialisations, extensions and memory reads are
 not, because recomputing them is cheaper than keeping the result live.
 A constant operand is keyed by its value. Every operand must be
 single-assignment (`vn_stable`). The pass does nothing in a function
-with unreachable blocks.
+with unreachable blocks. It uses the same hashed table as `pass_lvn`; a
+block's entries are unlinked, newest first, when the walk leaves it.
 
 **`pass_sccp`** (`sccp`; `cfg_ok`). Resolves a conditional branch whose
 condition is a single-definition `IR_CONST` to a jump (or a
@@ -568,12 +573,18 @@ same fixpoint. Each resolved branch is reported as
 looks unreachable.
 
 **`pass_copyprop`**. Replaces uses of the destination of a
-single-assignment `MOV` with its source.
+single-assignment `MOV` with its source. The eligible moves form chains
+(each destination has one definition), and every read on a chain is
+rewritten to the chain's root in one walk; a cycle of moves, which no
+program computes, falls back to rewriting one move at a time
+(`copyprop_by_move`), whose answer then depends on the order.
 
 **`pass_copyprop_local`**. Copy propagation within one block for copies
 whose destination has several definitions, which is what phi destruction
 leaves for loop counters and accumulators. The table of current copies is
-cleared on every definition and at every block boundary.
+cleared on every definition and at every block boundary; each copy is
+also filed under its source, so a definition clears only the copies made
+from what it redefines.
 
 **`pass_dce`**. Dead-code elimination by marking. An instruction is live
 when it has an effect (a store, branch, label, return, observable call,
@@ -581,7 +592,9 @@ volatile `IR_STVAR`, volatile `IR_LDVAR` even when its value is unused,
 as in `(void)v;`) or when a live instruction reads what it defines;
 everything else is removed, including cycles. A call to a function
 inferred to read and write no memory, that cannot throw, whose result is
-unused, is removed. DCE remaps `var_scope_lo/hi` as it compacts.
+unused, is removed. DCE remaps `var_scope_lo/hi` as it compacts. The
+marking is a work list through each temp's defining instructions, not
+sweeps to a fixpoint.
 
 **`pass_thread`** and **`pass_cfgclean`** (`cfg-clean`). `pass_thread`
 threads jumps through a merged boolean: when each arm of `a && b` or
@@ -930,7 +943,7 @@ In `src/opt/opt.c`:
 - `verify_func`.
 
 In `src/arch/regalloc.c`: `ra_ins_def`, `ra_each_use`, the successor
-computation in `ra_live_intervals` (a terminator has no fall-through
+computation in `ra_live_compute` (a terminator has no fall-through
 edge), the block numbering in `ra_coalesce_temps`, and the block-end list
 in `ra_fold_memoff`.
 

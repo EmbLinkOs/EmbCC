@@ -2952,10 +2952,7 @@ static void reserve_pairs(struct ir_func *fn, const int *loc)
     int nv = fn->nvregs;
     int *first = xmalloc((size_t)(nv ? nv : 1) * sizeof *first);
     int *last = xmalloc((size_t)(nv ? nv : 1) * sizeof *last);
-    unsigned long *li = NULL, *lo;
-    int *dv = NULL, wds = 0;
-    lo = ra_live_intervals(fn, first, last, &li, &dv, &wds);
-    free(lo); free(li); free(dv);
+    ra_live_ranges(fn, first, last);
     g_mips_nres = 0;
     for (int v = 0; v < nv; v++) {
         if (loc[v] < 0 || first[v] < 0) continue;
@@ -2968,6 +2965,7 @@ static void reserve_pairs(struct ir_func *fn, const int *loc)
             g_mips_res[g_mips_nres].reg = loc[v] + h;
             g_mips_res[g_mips_nres].first = first[v];
             g_mips_res[g_mips_nres].last = last[v];
+            g_mips_res[g_mips_nres].born = 0;
             g_mips_nres++;
         }
     }

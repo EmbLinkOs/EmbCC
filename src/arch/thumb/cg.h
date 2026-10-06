@@ -127,10 +127,10 @@ struct t_fn {
     long save_at;        /* where the prologue spilled them */
     /* LOW SCRATCH (lo_free): which of r0-r7 the instruction being
      * emitted may use in place of a high scratch -- bit r for rr, 0 when
-     * none may -- and the liveness it is computed from. */
+     * none may -- and, per instruction, the registers holding a value
+     * live into or out of it, which it is computed from (lo_busy_map). */
     unsigned lofree;
-    unsigned long *lv_in, *lv_out;
-    int lv_words;
+    unsigned *lv_busy;
 
     /* ---- ARMv6-M only (v6m.c); zero at the other levels ---------------- */
     /* The literal pool being collected, and the LDRs waiting for it. */
