@@ -282,12 +282,17 @@ static int ins_reads(struct ir_ins *i, int v)
 struct defs {
     int *cnt;    /* number of definitions of each vreg */
     int *ins;    /* index of the sole defining instruction when cnt == 1 */
+    /* Every definition of each vreg, when defs_lists has built them:
+     * first[v] is the first instruction defining v and next[n] the one
+     * after instruction n, -1 at the end. NULL until asked for. */
+    int *first, *next;
 };
 
 static void compute_defs(struct ir_func *fn, struct defs *d)
 {
     d->cnt = xcalloc((size_t)fn->nvregs, sizeof *d->cnt);
     d->ins = xmalloc((size_t)fn->nvregs * sizeof *d->ins);
+    d->first = d->next = NULL;
     for (int v = 0; v < fn->nvregs; v++)
         d->ins[v] = -1;
     /* a parameter is bound once at entry — count that as its definition */
@@ -331,6 +336,29 @@ static void free_defs(struct defs *d)
 {
     free(d->cnt);
     free(d->ins);
+    free(d->first);
+    free(d->next);
+}
+
+/* The definition lists (struct defs' first/next), by def_target. A
+ * landing pad's two destinations are not among them, which is why a
+ * reader counts what it walks against cnt. */
+static void defs_lists(struct ir_func *fn, struct defs *d)
+{
+    if (d->first)
+        return;
+    d->first = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *d->first);
+    d->next = xmalloc((size_t)(fn->nins ? fn->nins : 1) * sizeof *d->next);
+    for (int v = 0; v < fn->nvregs; v++)
+        d->first[v] = -1;
+    for (int n = fn->nins - 1; n >= 0; n--) {
+        int t = def_target(&fn->ins[n]);
+        d->next[n] = -1;
+        if (t >= 0 && t < fn->nvregs && fn->ins[n].op != IR_LANDING) {
+            d->next[n] = d->first[t];
+            d->first[t] = n;
+        }
+    }
 }
 
 /* Operand b as a constant, whether it has been folded into the
@@ -683,13 +711,39 @@ static int fold_cvt(const struct ir_ins *i, long A, long *out)
  * leave. Bits above the width are reported zero, which is what the
  * caller's own width mask discards. Conservative: a bit not proven
  * zero is not claimed, and the walk stops a few definitions up. */
+static unsigned long known_zero_ins(struct ir_func *fn, struct defs *d,
+                                    const struct ir_ins *i, int w, int depth);
+
 static unsigned long known_zero(struct ir_func *fn, struct defs *d, int v,
                                 int w, int depth)
 {
     unsigned long wm = w == 8 ? ~0UL : 0xffffffffUL, hi = ~wm;
-    if (v < 0 || depth > 4 || d->cnt[v] != 1 || d->ins[v] < 0)
+    if (v < 0 || v >= fn->nvregs || depth > 4)
         return hi;
-    const struct ir_ins *i = &fn->ins[d->ins[v]];
+    /* A temp with several definitions -- a join's, after phi
+     * destruction: `b = (u8)x` on one path and `b = 0x7e` on the other
+     * -- has the zeros all of them have. Only with the lists built, only
+     * a temp (a variable has its parameter binding too), and only when
+     * the lists hold every definition (not a landing pad's). */
+    if (d->cnt[v] > 1) {
+        if (!d->first || v < fn->nvars || depth > 2)
+            return hi;
+        unsigned long kz = ~0UL;
+        int seen = 0;
+        for (int n = d->first[v]; n >= 0; n = d->next[n], seen++)
+            kz &= known_zero_ins(fn, d, &fn->ins[n], w, depth + 1);
+        return seen == d->cnt[v] ? kz | hi : hi;
+    }
+    if (d->cnt[v] != 1 || d->ins[v] < 0)
+        return hi;
+    return known_zero_ins(fn, d, &fn->ins[d->ins[v]], w, depth);
+}
+
+/* known_zero of what one instruction writes. */
+static unsigned long known_zero_ins(struct ir_func *fn, struct defs *d,
+                                    const struct ir_ins *i, int w, int depth)
+{
+    unsigned long wm = w == 8 ? ~0UL : 0xffffffffUL, hi = ~wm;
     if (i->flt || i->w == 16 || (i->w != w && i->op != IR_EXT))
         return hi;
     long B = 0;
@@ -724,6 +778,10 @@ static unsigned long known_zero(struct ir_func *fn, struct defs *d, int v,
         return hi | ((1UL << tz) - 1);   /* a multiple of 2^tz ends in tz zeros */
     }
     case IR_EXT:
+        if (i->sign || i->size <= 0 || i->size >= w)
+            return hi;
+        return hi | (~((1UL << (8 * i->size)) - 1) & wm);
+    case IR_LOAD:               /* `load.4:1` zero-extends the byte it reads */
         if (i->sign || i->size <= 0 || i->size >= w)
             return hi;
         return hi | (~((1UL << (8 * i->size)) - 1) & wm);
@@ -953,6 +1011,25 @@ static int pass_fold(struct ir_func *fn)
                 const struct ir_ins *in = &fn->ins[d.ins[i->a]];
                 if ((i->size > in->size && (i->sign || !in->sign)) ||
                     (i->size == in->size && i->sign == in->sign)) {
+                    to_mov(i, i->a);
+                    changed = 1;
+                }
+            } else if (i->a >= 0 && i->a < fn->nvregs && i->size > 0 &&
+                       (i->w == 4 || i->w == 8) &&
+                       !getenv("EMBCC_NO_KZEXT")) {
+                /* An extension of a value whose high bits are already
+                 * zero (known_zero) -- `(u8)(x >> 24)`, `(u8)(x & 0x7f)`,
+                 * and a join of such values, `b = c ? (u8)x : 0x7e` --
+                 * is a copy: zero-extending changes nothing above the
+                 * size, and sign-extending copies a sign bit that is 0.
+                 * The state machine of tools/bench extended its input
+                 * byte once where it was made and again in every case
+                 * that read it. */
+                defs_lists(fn, &d);
+                unsigned long wm = i->w == 8 ? ~0UL : 0xffffffffUL;
+                unsigned long keep =
+                    (1UL << (8 * i->size - (i->sign ? 1 : 0))) - 1;
+                if ((wm & ~keep & ~known_zero(fn, &d, i->a, i->w, 0)) == 0) {
                     to_mov(i, i->a);
                     changed = 1;
                 }
