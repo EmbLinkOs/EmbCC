@@ -519,6 +519,18 @@ v17).
 
 Callee-saved: r4-r11.
 
+**Extended pool** (`g_t_ext`). Each function is also generated with
+r9-r11 added to the pool (r0-r11, and r4-r11 when variadic) and with
+the pairs r8:r9 and r10:r11 added to the pair pool. The three scratch
+roles below are then not fixed: `t_roles_from` gives TMP, ADDR and SCR
+the registers of r11, r10, r9 (in that order of preference) that
+`t_busy` finds free -- not live into or out of the instruction or the
+two after it, not read or written by them, and in the prologue not a
+parameter's home. An attempt in which a role finds no register sets
+`g_t_role_fail` and is dropped. `EMBCC_T_EXT=0` turns the extended
+attempts off; `EMBCC_T_EXT=1` keeps one whenever it succeeds (the exec
+tests run that way, tests/golden/thumb-ext-pool.sh).
+
 **Floating point.** With an FPU (`target_thumb_fpu()`), s16-s31, all
 callee-saved and saved with `vpush`/`vpop`. Without one the FP pool is
 empty and floats are bits in core registers (`float_in_gpr`). Only
@@ -527,7 +539,8 @@ results, and float locals are in the FP class (`t_float_map`); doubles
 are never in it. s0 and s1 are the VFP scratch.
 
 **Scratch.** r9 (`T_SCR`, also the parallel-move cycle breaker), r10
-(`T_ADDR`), r11 (`T_TMP`) and r12 (`T_ACC`). Four are needed because a
+(`T_ADDR`), r11 (`T_TMP`) and r12 (`T_ACC`) -- the first three per
+instruction in the extended pool above. Four are needed because a
 64-bit operation holds both halves of both operands. r9-r11 are
 callee-saved, so every use is recorded through `t_scr()` and the prologue
 saves only the ones the body used. lr holds the `strex` status in atomic
@@ -548,12 +561,15 @@ call argument its argument register.
 pairs from a pair pass (`THUMB_PAIR_RA`) before the integer pass. The
 pairs are r0:r1, r2:r3, r4:r5 and r6:r7 (a variadic function uses only
 r4:r5 and r6:r7; a function with `alloca` loses r6:r7). Each pair is
-reserved by live range with `ra_reserve`. Wide locals accessed at a size
+reserved by live range with `ra_reserve`; a pair that dies at a 64-bit
+compare marks its range `born`, so the compare's 0 or 1 may take its
+registers (cmp64 reads both operands before set_cc writes the result),
+and `return a < b` computes the result in r0. Wide locals accessed at a size
 other than 8 and a variadic function's parameters stay in memory.
-`gen_func_best` compiles each function both with and without the pair
-pass and keeps the shorter result (the version without pairs on a tie);
-it compiles once, with pairs, when the allocator is off, under `-g`, or
-with an FPU. `EMBCC_T_PAIRS` forces the choice and
+`gen_func_best` compiles each function with and without the pair pass,
+with and without `t_lowregs`, and in the extended pool, and keeps the
+shortest result (the earlier attempt on a tie); it compiles once, with
+pairs, when the allocator is off, under `-g`, or with an FPU. `EMBCC_T_PAIRS` forces the choice and
 `EMBCC_T_PAIRS_ONLY=FUNC` uses pairs only in the named function.
 
 **Inline asm** (`asm_in_reg`). Its operands come from r0-r3 and r12, and

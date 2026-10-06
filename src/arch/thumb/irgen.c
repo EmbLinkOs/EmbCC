@@ -422,6 +422,59 @@ int thumb_imm_foldable64(int op, long imm)
     return thumb_half_ok(op, u & 0xffffffffUL) &&
            thumb_half_ok(op, (u >> 32) & 0xffffffffUL);
 }
+/* A 64-bit compare with constant K, as cmp64 in codegen.c lowers it
+ * without building K in a register pair. Three forms, each half of the
+ * constant a modified immediate:
+ *
+ *   1  `subs; sbcs` of a - K, for `<` and `>=` -- and for `>` and `<=`
+ *      as `>= K + 1` and `< K + 1`, unless K is the type's maximum;
+ *   2  `rsbs; mvn; adcs` of K - a, for `>` (K - a borrows) and `<=` --
+ *      and for `<` and `>=` as `<= K - 1` and `> K - 1`. Thumb-2 has no
+ *      reverse subtract with carry, but SBC is AddWithCarry(x, ~y, C),
+ *      so `adcs` of ~a's high half and K's leaves the same flags;
+ *   3  `cmp lo; it eq; cmpeq hi`, for `==` and `!=`.
+ *
+ * Returns the form, 0 when K must be in registers; the predicate to read
+ * off the flags of the subtraction made and K's halves (K + 1's, K - 1's)
+ * come back through the pointers. The optimizer folds K into the compare
+ * exactly when this says yes, and cmp64 asks again, so the two cannot
+ * disagree. */
+int thumb_cmp64_imm(int pred, int sign, long imm, int *pout, long *lo,
+                    long *hi)
+{
+    unsigned long long k = (unsigned long long)imm, k2;
+    unsigned long long max = sign ? 0x7fffffffffffffffULL : ~0ULL;
+    unsigned long long min = sign ? 0x8000000000000000ULL : 0;
+    int strict = pred == B_GT || pred == B_LE, p2;
+    if (pred == B_EQ || pred == B_NE) {
+        *lo = (long)(unsigned)k;
+        *hi = (long)(unsigned)(k >> 32);
+        *pout = pred;
+        return t_imm_ok(*lo) && t_imm_ok(*hi) ? 3 : 0;
+    }
+    if (pred != B_LT && pred != B_GE && !strict)
+        return 0;
+    /* form 1: a - K', read as `<` or `>=` */
+    if (!strict || k != max) {
+        k2 = strict ? k + 1 : k;
+        *lo = (long)(unsigned)k2;
+        *hi = (long)(unsigned)(k2 >> 32);
+        *pout = pred == B_GT || pred == B_GE ? B_GE : B_LT;
+        if (t_imm_ok(*lo) && t_imm_ok(*hi))
+            return 1;
+    }
+    /* form 2: K' - a, `a > K'` being `K' - a < 0` */
+    if (strict || k != min) {
+        k2 = strict ? k : k - 1;
+        p2 = pred == B_GT || pred == B_GE ? B_LT : B_GE;
+        *lo = (long)(unsigned)k2;
+        *hi = (long)(unsigned)(k2 >> 32);
+        *pout = p2;
+        if (t_imm_ok(*lo) && t_imm_ok(*hi))
+            return 2;
+    }
+    return 0;
+}
 int thumb_imm_foldable(int op, long imm)
 {
     switch (op) {

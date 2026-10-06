@@ -808,7 +808,16 @@ written with `wreg`/`wr`/`wrote`; `rd64`/`wr64` handle register pairs.
   right by 32 or more whose only reader is a 32-bit AND with a low mask
   is one `ubfx` of the high word, and so is a 32-bit shift right followed
   by such a mask. A branch on a 64-bit value is one `orrs` of the halves
-  where they live. `EMBCC_T_NOWIDEIMM=1` turns these off.
+  where they live. `EMBCC_T_NOWIDEIMM=1` turns these off. A 64-bit
+  compare with a constant K keeps K in the instructions when its halves
+  are modified immediates (`thumb_cmp64_imm`, which the optimizer's
+  immediate fold asks too): `subs; sbcs` of x - K for `<` and `>=`, and
+  of x - (K + 1) for `>` and `<=`; `rsbs; mvn; adcs` of K - x when K + 1
+  does not encode (SBC is AddWithCarry(x, ~y, C), so `adcs` of ~x's high
+  half leaves the flags `sbcs` would); `cmp lo; it eq; cmpeq hi` for
+  equality. Two values in registers are compared where they live, `>`
+  and `<=` by swapping the register names. `EMBCC_T_NOCMP64IMM=1` keeps
+  the constant in a register pair.
 - **Soft float** calls the libgcc names (not `__aeabi_*`):
   `__addsf3`/`__adddf3` and the rest of the arithmetic, the
   `__eqsf2`/`__eqdf2` family followed by a compare of r0 with 0, and the
@@ -1524,6 +1533,8 @@ with `lo8`, `hi8`, `pm_lo8`, `pm_hi8` and `gs()` symbol operands.
 | `EMBCC_T_NOREGOFF` | Thumb | no `[rn, rm]` register-offset addressing |
 | `EMBCC_T_FPU` | Thumb | override the FPU setting |
 | `EMBCC_T_NOWIDEIMM` | Thumb | build a 64-bit AND/OR/XOR constant whole |
+| `EMBCC_T_NOCMP64IMM` | Thumb | keep a 64-bit compare's constant in a register pair |
+| `EMBCC_T_EXT` | Thumb | `0`: no attempts with r9-r11 allocatable; `1`: keep one when it succeeds |
 | `EMBCC_RV_NOWIDEIMM` | RISC-V | the same at RV32 |
 | `EMBCC_RV_NOCMPIMM` | RISC-V | load a value compare's constant into a register |
 | `EMBCC_RV_LONG_CALLS` | RISC-V | never use `jal` for calls |
