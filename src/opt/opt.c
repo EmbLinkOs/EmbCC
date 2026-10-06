@@ -4087,8 +4087,27 @@ static int target_cheap_select(void)
  * the block it continues to (*cont). *mi is the move's index, *jmp the
  * jump's, or -1. The move may follow constants into temps defined only
  * there -- irgen's `%3 = const 2; %1 = mov %3`, which copy propagation
- * folds only after if-conversion has run -- and *hs is the first of
- * them: a constant costs nothing to compute on both paths. */
+ * folds only after if-conversion has run -- and up to two ALU
+ * instructions (arm_alu): phi destruction's `%t = add %u, 1; %u = mov
+ * %t`, the arm of `if (c) u++`. *hs is the first of them; they move
+ * ahead of the branch unchanged, their temps being theirs alone. */
+/* An instruction if-conversion may run on both paths: one that cannot
+ * trap and touches nothing but registers -- integer add, sub, the
+ * bitwise ops and the shifts (EmbCC's signed arithmetic wraps; a shift
+ * past the width traps on no target, and its value is discarded when
+ * the arm would not have run). Not a multiply or a division. */
+static int arm_alu(const struct ir_ins *m)
+{
+    switch (m->op) {
+    case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR:
+    case IR_SHL: case IR_SHR:
+        return !m->flt && !m->vol && (m->w == 4 || m->w == 8) &&
+               m->a >= 0 && (m->imm_b || m->b >= 0);
+    default:
+        return 0;
+    }
+}
+
 static int arm_one(const struct ir_func *fn, const struct defs *d,
                    const struct bb *bb, int nbb, const int *l2b, int arm,
                    int b, int *hs, int *mi, int *jmp, int *cont)
@@ -4104,8 +4123,11 @@ static int arm_one(const struct ir_func *fn, const struct defs *d,
         e--;
     }
     *hs = s;
-    while (s + 1 < e && fn->ins[s].op == IR_CONST && !fn->ins[s].flt &&
-           fn->ins[s].dst >= fn->nvars && d->cnt[fn->ins[s].dst] == 1)
+    int nalu = 0;
+    while (s + 1 < e && !fn->ins[s].flt && fn->ins[s].dst >= fn->nvars &&
+           fn->ins[s].dst < fn->nvregs && d->cnt[fn->ins[s].dst] == 1 &&
+           (fn->ins[s].op == IR_CONST ||
+            (arm_alu(&fn->ins[s]) && nalu++ < 2)))
         s++;
     if (e - s != 1)
         return 0;
@@ -4120,8 +4142,10 @@ static int arm_one(const struct ir_func *fn, const struct defs *d,
 
 /* The diamonds ifconv_one leaves, where a select is cheap
  * (target_cheap_select): arms that are constants as well as moves
- * (`st = len ? 2 : 0`), and an else arm that block layout put out of
- * line and that jumps back. Each was a branch where clang has an IT
+ * (`st = len ? 2 : 0`), arms that compute a sum or a mask first (`if (c
+ * >= 'A' && c <= 'Z') upper++` -- tools/bench's text loop took six
+ * branches a character where clang takes none), and an else arm that
+ * block layout put out of line and that jumps back. Each was a branch where clang has an IT
  * block or a cmov. A constant arm becomes a fresh temp, defined -- with
  * any constants the arms computed first -- ahead of the compare that
  * makes the condition, so the backend still finds the compare right
@@ -4160,8 +4184,16 @@ static int ifconv_any(struct ir_func *fn)
             continue;
         const struct ir_ins *mt = &fn->ins[tm];
         const struct ir_ins *me = &fn->ins[em];
+        /* A move's width is its source's, from its definition; a source
+         * with several -- the loop-carried value the other arm keeps, `u`
+         * of `if (c) u++` -- has none sel_width can name, and then the
+         * move's own width, which is what it copies. */
         int wt = mt->op == IR_CONST ? mt->w : sel_width(fn, &d, mt->a);
         int we = me->op == IR_CONST ? me->w : sel_width(fn, &d, me->a);
+        if (!wt && mt->op == IR_MOV && d.cnt[mt->a] > 1)
+            wt = mt->w;
+        if (!we && me->op == IR_MOV && d.cnt[me->a] > 1)
+            we = me->w;
         if ((wt != 4 && wt != 8) || wt != we)
             continue;
         int dst = mt->dst;
