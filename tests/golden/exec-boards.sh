@@ -6,6 +6,8 @@
 # runtime, run on QEMU, and must exit N -- at -O0, -O1, -O2 and -Os, on:
 #
 #   m4     thumbv7em-none-eabi on the Cortex-M4F board (mps2-an386)
+#   m4hf   thumbv7em-none-eabihf, the same board with the FPU and the
+#          hard-float calling convention -- what an RTOS build ships
 #   rv32   riscv32-unknown-elf on virt
 #   rv64   riscv64-unknown-elf on virt
 #
@@ -40,7 +42,7 @@ EMBLD=${EMBLD:-$PWD/embld}
 export EMBCC EMBLD
 
 boards=
-command -v "$QA" >/dev/null 2>&1 && boards="$boards m4"
+command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf"
 command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32"
 command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64"
 [ -n "$boards" ] || { echo "SKIP: no qemu-system-arm or -riscv32/64"; exit 0; }
@@ -48,6 +50,7 @@ command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64"
 triple() {
     case $1 in
         m4) echo thumbv7em-none-eabi ;;
+        m4hf) echo thumbv7em-none-eabihf ;;
         rv32) echo riscv32-unknown-elf ;;
         rv64) echo riscv64-unknown-elf ;;
     esac
@@ -97,7 +100,7 @@ for b in $boards; do
         echo "FAIL: lib/rt or lib/libc does not build for $T:"
         tail -3 "$L/build.log"; exit 1; }
     case $b in
-        m4) for f in boot io; do
+        m4|m4hf) for f in boot io; do
                 "$EMBCC" --target=$T -DSRAM_TOP=0x20400000u \
                     -c tests/harness/thumb-m4f/$f.c -o "$L/$f.o" || {
                     echo "FAIL: the M4 harness"; exit 1; }
@@ -132,15 +135,16 @@ cat > "$out/one.sh" <<'EOT'
 c=$1; opt=$2; b=$3; out=$4
 name=$(basename "$c" .c)
 case $b in
-    m4|rv32) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
+    m4|m4hf|rv32) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
 esac
 case $b in
-    m4) case "$SKIPM4" in *" $name "*) exit 0 ;; esac ;;
+    m4|m4hf) case "$SKIPM4" in *" $name "*) exit 0 ;; esac ;;
 esac
 expect=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$c" | head -1)
 [ -n "$expect" ] || exit 0
 case $b in
-    m4) T=thumbv7em-none-eabi ;; rv32) T=riscv32-unknown-elf ;;
+    m4) T=thumbv7em-none-eabi ;; m4hf) T=thumbv7em-none-eabihf ;;
+    rv32) T=riscv32-unknown-elf ;;
     rv64) T=riscv64-unknown-elf ;;
 esac
 L=$out/$b; o=$out/p/$name-$b$opt
@@ -150,13 +154,13 @@ if ! "$EMBCC" --target=$T $opt -Dmain=prog_main -Ilib/libc/include \
     exit 0
 fi
 case $b in
-    m4) EMBCC_THUMB_HARNESS=$L sh tests/harness/thumb-m4f/link.sh $o.elf \
+    m4|m4hf) EMBCC_THUMB_HARNESS=$L sh tests/harness/thumb-m4f/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
     rv*) EMBCC_RISCV_HARNESS=$L sh tests/harness/riscv/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
 esac || { echo "NA $name $b $opt: does not link: $(head -1 $o.lerr)"; exit 0; }
 case $b in
-    m4) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
+    m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
             -M mps2-an386 -cpu cortex-m4 -semihosting -nographic \
             -kernel $o.elf > $o.txt 2>&1 ;;
     rv32) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
