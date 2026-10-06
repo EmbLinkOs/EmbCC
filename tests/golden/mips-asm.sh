@@ -104,9 +104,17 @@ static int pinned(int a)
 static int memout(int k)
 { int v = 0; __asm__ volatile("sw %1, 0(%0)" : "=m"(v) : "r"(k)); return v; }
 
-/* A branch over one instruction, its delay slot the template's own. */
+/* A branch over one instruction, its delay slot the template's own
+ * (.set noreorder)... */
 static int skip(int a)
-{ int r; __asm__("move %0, %1; b 8; nop; addiu %0, %0, 100; addiu %0, %0, 2"
+{ int r; __asm__(".set noreorder; move %0, %1; b 8; nop; addiu %0, %0, 100;"
+                 " addiu %0, %0, 2" : "=r"(r) : "r"(a)); return r; }
+
+/* ...and in the mode a template starts in, GCC's and clang's .set
+ * reorder: the assembler's nop is the slot, so the addiu after the branch
+ * is skipped, not executed in it. */
+static int reorder(int a)
+{ int r; __asm__("move %0, %1; b 8; addiu %0, %0, 100; addiu %0, %0, 2"
                  : "=r"(r) : "r"(a)); return r; }
 
 int main(void)
@@ -122,6 +130,7 @@ int main(void)
     putn(pinned(40));          /* 42 */
     putn(memout(42));          /* 42 */
     putn(skip(40));            /* 42 */
+    putn(reorder(40));         /* 42 */
     puts_("\n==END==\n");
     return 0;
 }
@@ -141,7 +150,7 @@ if command -v "$QEMU" >/dev/null 2>&1; then
             { echo "$opt: could not link"; exit 1; }
         sh tests/harness/mips/run.sh "$out/a$opt.elf" > "$out/a$opt.txt" 2>&1
         got=$(head -1 "$out/a$opt.txt")
-        want="42 40 42 1 42 41 42 42 42 42 42 "
+        want="42 40 42 1 42 41 42 42 42 42 42 42 "
         [ "$got" = "$want" ] || {
             echo "$opt: inline asm computed '$got', wanted '$want'"; exit 1; }
     done
@@ -179,28 +188,25 @@ echo "an unknown instruction, gas's neg and two-operand div, x86 constraints,"
 echo "callee-saved registers and an oversized immediate are refused by name"
 
 # ---- 4. -S ---------------------------------------------------------------
-# The assembly -S writes must be the object -c writes. EmbCC has no MIPS
-# file assembler, so llvm-mc assembles it and the two objects are
-# compared: every section's bytes (REL keeps the addends there), and every
-# relocation's place, type and target -- the target as section+offset,
-# because llvm-mc relocates against a local symbol's section where EmbCC
-# names the symbol, which is the same address spelled two ways. The
-# programs: one with calls, globals, strings and data pointers, and
+# The assembly -S writes must be the object -c writes. llvm-mc assembles
+# it, and the two objects are compared as PROGRAMS: each is linked at the
+# same addresses with the same harness, and the images' bytes must be
+# equal. Not the objects' bytes: an o32 REL relocation keeps its addend
+# in the field, and llvm-mc relocates a static symbol against its section
+# (the offset in the field) where EmbCC names the symbol (zero there) --
+# the same address spelled two ways, which the images see through. The
+# relocations are compared too: the same fields must carry the same
+# types (their targets are what the images check). The
+# programs: one with calls, globals, strings and data pointers;
 # tests/exec/far-switch.c at -O0, whose branches reach past 128 KiB and
-# become a `j` relocated against the function's own section.
+# become a `j` relocated against the function's own section; and
+# tests/golden/mips-exc/main.c, with a file-scope asm function and a
+# naked one, whose labels and relocations -S writes as the blocks'.
 OBJDUMP_L=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
-canon() {           # canon OBJ -> one line per relocation, targets resolved
-    "$OBJDUMP_L" -t "$1" > "$1.t" && "$OBJDUMP_L" -r "$1" > "$1.r" || return 1
-    awk 'FNR == NR {
-             if ($0 ~ /^[0-9a-f]+ /) { n = $NF; sec[n] = $(NF - 2);
-                                       val[n] = $1 }
-             next }
-         /^RELOCATION RECORDS FOR/ { rs = $4; next }
-         /^[0-9a-f]+ R_MIPS/ {
-             t = $3
-             if (t in sec && sec[t] != "*UND*")
-                 t = sec[t] "+" val[t]
-             print rs, $1, $2, t }' "$1.t" "$1.r" 2>/dev/null | sort
+canon() {           # canon OBJ -> one line per relocation: section, place, type
+    "$OBJDUMP_L" -r "$1" > "$1.r" || return 1
+    awk '/^RELOCATION RECORDS FOR/ { rs = $4; next }
+         /^[0-9a-f]+ R_MIPS/ { print rs, $1, $2 }' "$1.r" | sort
 }
 if command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 &&
    "$MC" -triple=mipsel-unknown-elf -mcpu=mips32r2 /dev/null -o /dev/null \
@@ -213,9 +219,18 @@ static const char *msg(int k) { return k ? "far" : "near"; }
 int f(int x) { sg[x & 7] = x; return g + sg[x & 7] + *pg; }
 int main(void) { puts_(msg(1)); putn(f(3)); puts_("\n==END==\n"); return 0; }
 CEOF
-    for src in "$out/s.c -O2" "tests/exec/far-switch.c -O0"; do
+    for f in boot io; do       # the harness, for the links (built above too)
+        "$EMBCC" --target=$T -O1 -c "tests/harness/mips/$f.c" -o "$out/$f.o" ||
+            { echo "the harness does not compile"; exit 1; }
+    done
+    "$EMBCC" --target=$T -c tests/golden/mips-exc/vector.S -o "$out/vector.o" ||
+        { echo "-S: vector.S does not assemble"; exit 1; }
+    for src in "$out/s.c -O2" "tests/exec/far-switch.c -O0" \
+               "tests/golden/mips-exc/main.c -O2"; do
         set -- $src
         n=$(basename "$1" .c)
+        extra=
+        [ "$n" = main ] && extra="$out/vector.o"
         "$EMBCC" --target=$T "$2" -c "$1" -o "$out/$n-c.o" &&
         "$EMBCC" --target=$T "$2" -S "$1" -o "$out/$n.s" || {
             echo "-S: $1 does not compile"; exit 1; }
@@ -223,14 +238,16 @@ CEOF
             -filetype=obj "$out/$n.s" -o "$out/$n-s.o" 2> "$out/$n.mcerr" || {
             echo "-S: llvm-mc rejects the assembly for $1:"
             head -4 "$out/$n.mcerr"; exit 1; }
-        for sec in .text .rodata .data; do
-            "$OBJCOPY" -O binary --only-section=$sec "$out/$n-c.o" \
-                "$out/$n-c$sec" 2>/dev/null
-            "$OBJCOPY" -O binary --only-section=$sec "$out/$n-s.o" \
-                "$out/$n-s$sec" 2>/dev/null
-            cmp -s "$out/$n-c$sec" "$out/$n-s$sec" || {
-                echo "-S: $1's $sec reassembles to different bytes"; exit 1; }
+        for k in c s; do
+            EMBCC_MIPS_HARNESS="$PWD/$out" sh tests/harness/mips/link.sh \
+                "$out/$n-$k.elf" "$out/$n-$k.o" $extra || {
+                echo "-S: $1's -$k object does not link"; exit 1; }
+            "$OBJDUMP_L" -s -j .text -j .data -j .rodata -j .bss \
+                "$out/$n-$k.elf" | tail -n +4 > "$out/$n-$k.img"
         done
+        cmp -s "$out/$n-c.img" "$out/$n-s.img" || {
+            echo "-S: $1 reassembles to a different program (-c, then -S):"
+            diff "$out/$n-c.img" "$out/$n-s.img" | head -6; exit 1; }
         canon "$out/$n-c.o" > "$out/$n-c.rel" &&
         canon "$out/$n-s.o" > "$out/$n-s.rel" || {
             echo "-S: could not read $1's relocations"; exit 1; }
@@ -239,7 +256,8 @@ CEOF
             echo "-S: $1's relocations differ (-c, then -S):"
             head -8 "$out/$n.reldiff"; exit 1; }
     done
-    echo "-S reassembles with llvm-mc to -c's bytes and relocations, far jumps included"
+    echo "-S reassembles with llvm-mc to -c's program and relocations, far jumps"
+    echo "and asm blocks included"
 else
     echo "SKIP the -S half: no llvm-mc with a MIPS target"
 fi

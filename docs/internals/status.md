@@ -72,7 +72,7 @@ ignored (see [Attributes](#attributes)).
 | Cortex-M: `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | Thumb-2 for ARMv7-M, ARMv7E-M and ARMv8-M Mainline. Soft float, or a single-precision FPU with `double` in software. No DSP instructions. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values; `s16`-`s31` with an FPU. | DWARF 4, with [known problems](../manual/debugging.md#known-problems). | `embld`. | `librt.a`, one per triple. No C library. |
 | RV32: `riscv32-unknown-elf` | RV32IMAC, soft float. No operation on `long double`. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`. | `librt.a`. No C library. |
 | RV64: `riscv64-unknown-elf` | RV64IMAC, soft float. No operation on `long double` or `__int128`. C only. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | None built (see below). No C library. |
-| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Every branch and call delay slot holds a `nop` (a return's releases the frame). No jump tables, computed goto or narrow atomics. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
+| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. No computed goto or narrow atomics. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
 | AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. No atomic read-modify-write, variable-length arrays or computed goto. C only. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
 
 The register allocator is described in
@@ -120,12 +120,12 @@ the sections nothing reaches, on every machine, for objects built with
 
 ### Assembly
 
-| Input or output | x86-64 | AArch64, Cortex-M, RISC-V, AVR |
+| Input or output | x86-64 | AArch64, Cortex-M, RISC-V, MIPS32, AVR |
 |---|---|---|
 | `.s` and `.S` files (GNU syntax) | Refused: `no assembly-file support for x86_64-elf yet; its instruction encoder exists (inline __asm__ works) but this driver has not been wired to it` | Assembled, with GNU as's directives, macros, conditionals, sections, expressions, literal pools and branch relaxation; ARM's CMSIS and ST's startup files assemble to clang's object ([embas](../manual/tools/embas.md#gnu-syntax-assembly)) |
 | `.asm` files (NASM syntax) | Assembled | Assembled as x86-64; see [Known defects](#known-defects) |
 | `-S` | `.byte` directives with the disassembly in comments | `.byte` directives without mnemonics; on MIPS a relocated instruction is written symbolically (`jal f`, `lui $2, %hi(g)`), because llvm-mc's MIPS `.reloc` knows none of those relocations |
-| File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | Labels, `.globl` and data directives; no instruction |
+| File-scope `__asm__` | Labels, `.globl`, `.byte`/`.long`/`.quad` and the instructions `and`, `call`, `jmp`, `ret` | AArch64: labels, `.globl` and data directives, no instruction. Cortex-M, RISC-V, MIPS32 and AVR: the GNU-syntax assembler's whole language, as in a `.S` file, into `.text` |
 
 Any other instruction in a file-scope `asm` block is refused. On x86-64:
 
@@ -133,8 +133,8 @@ Any other instruction in a file-scope `asm` block is refused. On x86-64:
 file-scope asm instruction not supported: "movq %rdi, %rax" (EmbCC assembles .global/labels/.byte/.long/.quad and and/call/jmp/ret)
 ```
 
-On every other target, every instruction is refused, including the four
-that x86-64 accepts:
+On AArch64, every instruction is refused, including the four that
+x86-64 accepts:
 
 ```text
 file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. On this target write the block as .byte/.long data (see lib/libc/src/setjmp).
@@ -143,10 +143,10 @@ file-scope asm instruction "ret": EmbCC assembles instructions for x86-64 only. 
 Inline `asm` inside a function is assembled on every target; its
 vocabulary is in [Inline assembly](../manual/inline-asm.md).
 
-MIPS32 has no file assembler yet: a `.s` or `.S` file is refused with
-`no assembly-file support for mipsel-none-elf yet; its instruction encoder
-exists (inline __asm__ works) but this driver has not been wired to it`,
-and so is `__attribute__((naked))`.
+On MIPS32 a `.S` file, a file-scope block, a naked function and an
+inline-asm template start in `.set reorder` mode, as with GNU as, GCC and
+clang: the assembler puts a `nop` in each delay slot unless the code says
+`.set noreorder`.
 
 ### Thread-local storage
 
@@ -206,7 +206,6 @@ MIPS32:
 | Computed `goto` and `&&label` | `the MIPS32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| `__attribute__((naked))` | `__attribute__((naked)) is not supported: ... (MIPS has no file-scope assembler yet)` |
 | A scalar local with `aligned` above 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | `-mhard-float`, `-EB`, `-mabicalls`, `-mabi=n32`, `-G8`, a core that is not MIPS32r2 | each refused by name; see [Invoking EmbCC](../manual/invoking.md#mips-options) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
@@ -311,7 +310,7 @@ implement, so they are errors:
 
 | Attribute | Diagnostic |
 |---|---|
-| `naked` (x86-64 and AArch64; supported on Cortex-M, RISC-V and AVR) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V and AVR targets` |
+| `naked` (x86-64 and AArch64; supported on Cortex-M, RISC-V, MIPS32 and AVR) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
 | `interrupt` (except on Cortex-M and AVR) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR it is implemented)` |
 | `signal` (except on AVR) | `__attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does` |
 | `cleanup` | `__attribute__((cleanup)) is not supported: the cleanup function would never run` |
@@ -664,10 +663,11 @@ dates.
 - binary128 `long double` arithmetic on RISC-V, and `__int128` at RV64.
 - Computed `goto` on Cortex-M, RISC-V, MIPS32 and AVR; atomic
   read-modify-write, variable-length arrays and aligned locals on AVR;
-  narrow and 8-byte atomic read-modify-write, unwind tables, `naked`
-  functions and assembly files on MIPS32.
-- Branch and call delay slots holding useful instructions on MIPS32
-  (only a return's does: the frame release).
+  narrow and 8-byte atomic read-modify-write, unwind tables and
+  `__attribute__((interrupt))` on MIPS32.
+- On MIPS32, a delay slot filled from anywhere but the instruction just
+  before the transfer (the branch target's first instruction, or one
+  from before the `slt` a compare-and-branch needs).
 - Scalar locals aligned beyond the stack alignment.
 - Linker relaxation: on RISC-V a call between sections stays an
   eight-byte `auipc`/`jalr`.

@@ -17,8 +17,10 @@
  *
  * The input is GNU MIPS syntax with the operands already substituted:
  * registers are `$` and a number or an o32 name. Statements separate on
- * ';' and newlines; '#' and "//" start a comment. A transfer's delay slot
- * is the template's own business (`.set noreorder` semantics), as in GCC.
+ * ';' and newlines; '#' and "//" start a comment. A template starts in
+ * `.set reorder` mode, as GCC's and clang's do: a nop follows every
+ * branch and jump, unless `.set noreorder` makes the delay slots the
+ * template's own.
  */
 #ifndef EMBCC_ARCH_MIPS_ASM_H
 #define EMBCC_ARCH_MIPS_ASM_H
@@ -27,9 +29,24 @@
 
 #include "../code.h"
 
-/* Appends the encoded template to `out`. Returns 0, or -1 with a message
+/* Appends the encoded template to `out`, starting in `.set reorder` mode
+ * as GCC's and clang's inline asm does. Returns 0, or -1 with a message
  * in err[0..errlen). */
 int mipsasm_assemble(const char *text, struct code *out, char *err, int errlen);
+
+/* The same, in whatever mode the statements before left (`.set
+ * noreorder`, `.set push`): the file assembler's entry point, one
+ * statement at a time. mipsasm_reset starts a pass over in reorder
+ * mode. */
+int mipsasm_encode(const char *text, struct code *out, char *err, int errlen);
+void mipsasm_reset(void);
+
+/* For src/as/gas.c: a `$`-register (a bare `sp` in a .S file is a
+ * symbol), the word after a `%` operator, and the statements that take a
+ * symbol (jal/j, %hi/%lo, la) with the relocations they carry. */
+int mipsasm_is_reg(const char *name, int len);
+int mipsasm_is_word(const char *stmt, const char *w, int len);
+int mipsasm_symform(const char *stmt, struct asm_symform *f);
 
 /* The register a name denotes -- "$4", "$a0", "a0", "$sp", "$s8"... -- or
  * -1. For register variables and clobber lists. */

@@ -549,16 +549,13 @@ the prologue saves it.
 File-scope `__asm__` is assembled by `topasm.c` on x86-64 and AArch64:
 the directives (`.global`, labels, `.byte`, `.long`, `.quad`) work on
 both; the mnemonic half (`and`, `call`, `jmp`, `ret`) is x86-64 only. On
-Cortex-M, RISC-V and AVR the driver hands each block to the GNU-syntax
+Cortex-M, RISC-V, MIPS32 and AVR the driver hands each block to the GNU-syntax
 assembler instead (`gas_assemble_block` in `src/as/gas.c`), which
 returns its bytes, labels, relocations with their ELF types, alignment
 and data ranges in the same `struct topasm`. A naked function becomes
 such a block before code generation (`naked_to_blocks` in
 `src/driver/main.c`): its label, then its asm statements with their
-constant operands written in. MIPS32 has no GNU-syntax block assembler
-yet: its file-scope blocks go through `topasm.c`, so data directives
-assemble and an instruction is refused by name, and a naked function is
-refused.
+constant operands written in.
 
 `as.c` is EmbAS, the NASM-syntax assembler behind `embas` and
 `embcc -c FILE.asm`; see [embas](../manual/tools/embas.md).
@@ -1262,12 +1259,28 @@ differences below.
 
 ### Lowering
 
-- **Delay slots.** Every branch, jump and call is followed by a `nop`
-  (`br_place`, `branch_to`, `call_sym`), so nothing scheduled into a
-  slot can be wrong. The one filled slot is the return's: `mips_restore`
-  emits `jr $ra` before the frame's `addiu $sp, $sp, N`, which then runs
-  in the slot (a frame too large for 16 bits keeps `li`/`addu` before the
-  `jr` and a `nop` after). MIPS32 has no load delay slots and no HI/LO hazards.
+- **Delay slots.** A return's slot holds the frame's release:
+  `mips_restore` emits `jr $ra` before `addiu $sp, $sp, N`. Every other
+  transfer to a label (`branch_to`), call (`call_sym`, the indirect
+  `jalr`) and frameless return takes the instruction emitted just before
+  it into its slot when `take_slot` allows: the instruction decodes as an
+  ordinary computation, load or store (`slot_decode`; never a transfer,
+  trap, `sync`, `ll`/`sc` or a nop), the transfer does not read what it
+  writes, a linking transfer (`jal`, `jalr`) finds it neither reading
+  nor writing `$ra`, it carries no relocation site, and nothing lies
+  between it and the transfer that something could jump to --
+  `F->barrier` is raised past every label, landing, transfer, asm block
+  and the prologue, and past the epilogue's label when a branch goes
+  there. Otherwise the slot is a `nop` (`put_slot`); the branches inside
+  one lowering (`br_place`) always take a `nop`. Under `-g` nothing moves
+  (the line rows name offsets), and `EMBCC_MIPS_NO_FILL` turns the filling
+  off. MIPS32 has no load delay slots and no HI/LO hazards.
+- **Jump tables.** `IR_SWITCH` is `sltiu $at, rI, n` and a branch to the
+  default, then `bal` to the next-but-one instruction with `sll t2, rI,
+  2` in its slot, `addu`/`lw`/`addu` of the entry against `$ra`, and `jr
+  t2`: the table follows, of 32-bit offsets from the address `bal`
+  returns (`FX_TAB` fixes, patched when the function ends), so it carries
+  no relocation. A leaf keeps its live `$ra` in t6 around the `bal`.
 - **Branches** compare two registers only for `==` and `!=`; an ordered
   comparison against zero has `bltz`/`bgez`/`blez`/`bgtz`, and anything
   else is `slt`/`sltu` into `$at` and a `beq`/`bne` of it (`branch_if`).

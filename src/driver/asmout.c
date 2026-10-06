@@ -36,6 +36,7 @@
 
 #include "../arch/backend.h"
 #include "../arch/target.h"
+#include "../elf/elf.h"
 #include "../ir/ir.h"
 #include "../parse/ast.h"
 #include "../sema/type.h"
@@ -234,6 +235,130 @@ static long addend_for(int kind)
     if (kind == RK_ABS64 || kind == RK_ABS32)
         return 0;
     return target_get() == TARGET_X86_64 ? -4 : 0;
+}
+
+/* MIPS: a load or store's mnemonic, from its major opcode, for a LO16
+ * relocation on one; NULL for anything else. */
+static const char *mips_ls_name(int op)
+{
+    switch (op) {
+    case 0x20: return "lb";   case 0x21: return "lh";   case 0x22: return "lwl";
+    case 0x23: return "lw";   case 0x24: return "lbu";  case 0x25: return "lhu";
+    case 0x26: return "lwr";  case 0x28: return "sb";   case 0x29: return "sh";
+    case 0x2a: return "swl";  case 0x2b: return "sw";   case 0x2e: return "swr";
+    case 0x30: return "ll";   case 0x38: return "sc";
+    default:   return NULL;
+    }
+}
+
+/* MIPS: the file-scope blocks and naked functions in .text, from `from`
+ * to the end, with their labels and relocations -- written symbolically,
+ * as the functions' are (llvm-mc's MIPS .reloc knows none of R_MIPS_26,
+ * HI16 or LO16). A field against the block's own assembler-local label
+ * is spelt from a label at the block's start. Bytes between blocks are
+ * bytes. */
+static void mips_emit_blocks(struct outbuf *b, const char *srcname,
+                             struct unit *u, const unsigned char *text,
+                             long from, long textlen)
+{
+    long pc = from;
+    int nb = 0;
+    for (;;) {
+        const struct topasm *ta = NULL;
+        for (const struct topasm *t = u->topasm; t; t = t->next)
+            if (t->codelen > 0 && t->text_off >= pc &&
+                (!ta || t->text_off < ta->text_off))
+                ta = t;
+        long stop = ta ? ta->text_off : textlen;
+        if (stop > pc) {
+            ob_str(b, "\t.byte\t");
+            for (long k = pc; k < stop; k++)
+                ob_fmt(b, "%s0x%02x", k > pc ? "," : "", (unsigned)text[k]);
+            ob_str(b, "\n");
+            pc = stop;
+        }
+        if (!ta)
+            break;
+        ob_fmt(b, ".Ltopasm%d:\n", nb);
+        for (long k = 0; k <= ta->codelen; k++) {
+            for (int j = 0; j < ta->nsyms; j++) {
+                const struct asmsym *as = &ta->syms[j];
+                if (as->off != k)
+                    continue;
+                if (as->is_global)
+                    ob_fmt(b, "\t.%s\t%s\n", as->is_weak ? "weak" : "globl",
+                           asym(as->name));
+                if (as->type == ASMSYM_FUNC || as->type == ASMSYM_OBJECT)
+                    ob_fmt(b, "\t.type\t%s, @%s\n", asym(as->name),
+                           as->type == ASMSYM_FUNC ? "function" : "object");
+                ob_fmt(b, "%s:\n", asym(as->name));
+            }
+            if (k == ta->codelen)
+                break;
+            const struct asmrel *r = NULL;
+            for (int j = 0; j < ta->nrels; j++)
+                if (ta->rels[j].off == k)
+                    r = &ta->rels[j];
+            if (r && k + 4 <= ta->codelen) {
+                const unsigned char *q = text + ta->text_off + k;
+                unsigned long w = (unsigned long)q[0] |
+                                  ((unsigned long)q[1] << 8) |
+                                  ((unsigned long)q[2] << 16) |
+                                  ((unsigned long)q[3] << 24);
+                int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
+                    rt = (int)(w >> 16) & 31;
+                char sym[200];
+                if (r->target)
+                    snprintf(sym, sizeof sym, "%s%+ld", asym(r->target),
+                             r->addend);
+                else
+                    snprintf(sym, sizeof sym, ".Ltopasm%d%+ld", nb, r->addend);
+                if (r->elf_type == R_MIPS_26 && (op == 2 || op == 3))
+                    ob_fmt(b, "\t%s\t%s\n", op == 3 ? "jal" : "j", sym);
+                else if (r->elf_type == R_MIPS_HI16 && op == 0x0f)
+                    ob_fmt(b, "\tlui\t$%d, %%hi(%s)\n", rt, sym);
+                else if (r->elf_type == R_MIPS_LO16 && op == 0x09)
+                    ob_fmt(b, "\taddiu\t$%d, $%d, %%lo(%s)\n", rt, rs, sym);
+                else if (r->elf_type == R_MIPS_LO16 && mips_ls_name(op))
+                    ob_fmt(b, "\t%s\t$%d, %%lo(%s)($%d)\n", mips_ls_name(op),
+                           rt, sym, rs);
+                else if (r->elf_type == R_MIPS_32)
+                    ob_fmt(b, "\t.4byte\t%s\n", sym);
+                else
+                    diag_fatal(srcname, 0, "-S cannot spell a MIPS asm "
+                               "block's relocation of type %d on 0x%08lx",
+                               r->elf_type, w);
+                k += 3;
+                continue;
+            }
+            /* bytes up to the next label or relocation, four a line */
+            {
+                long e = k + 1;
+                while (e < ta->codelen && e - k < 4) {
+                    int stop = 0;
+                    for (int j = 0; j < ta->nsyms; j++)
+                        stop |= ta->syms[j].off == e;
+                    for (int j = 0; j < ta->nrels; j++)
+                        stop |= ta->rels[j].off == e;
+                    if (stop)
+                        break;
+                    e++;
+                }
+                ob_str(b, "\t.byte\t");
+                for (long x = k; x < e; x++)
+                    ob_fmt(b, "%s0x%02x", x > k ? "," : "",
+                           (unsigned)text[ta->text_off + x]);
+                ob_str(b, "\n");
+                k = e - 1;
+            }
+        }
+        for (int j = 0; j < ta->nsyms; j++)
+            if (ta->syms[j].size)
+                ob_fmt(b, "\t.size\t%s, %ld\n", asym(ta->syms[j].name),
+                       ta->syms[j].size);
+        pc = ta->text_off + ta->codelen;
+        nb++;
+    }
 }
 
 void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
@@ -500,6 +625,10 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * in .text, whatever section the last function was in. */
     if (cursec)
         ob_str(b, "\n\t.text\n");
+    if (target_get() == TARGET_MIPS32 && u->topasm) {
+        mips_emit_blocks(b, srcname, u, text, prev_end, textlen);
+        prev_end = textlen;
+    }
     if (textlen > prev_end) {
         ob_str(b, "\t.byte\t");
         for (long k = prev_end; k < textlen; k++)
@@ -525,6 +654,10 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * to. Emitted as bytes, because a string may hold anything. */
     if (rodata && iu->rodata_len > 0) {
         ob_str(b, "\n\t.section\t.rodata\n");
+        /* the object's .rodata is 16-aligned (main.c); an assembler's
+         * starts at 1 unless told */
+        if (target_get() == TARGET_MIPS32)
+            ob_str(b, "\t.p2align\t4\n");
         for (int i = 0; i < iu->nstrs; i++) {
             if (iu->strs[i].align > 1)       /* the same gap irgen left */
                 ob_fmt(b, "\t.balign\t%d\n", iu->strs[i].align);

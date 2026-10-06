@@ -8,7 +8,10 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "../../elf/elf.h"
 
 /* ---- registers ---------------------------------------------------------- */
 
@@ -42,29 +45,49 @@ int mipsasm_gpr(const char *name, int len)
 
 /* ---- a tiny tokeniser --------------------------------------------------- */
 
+struct tok;
+static int tok_num(const struct tok *t, long long *out);
+
 #define MAXTOK 8
 
 struct tok { const char *s; int len; };
 
+/* The mnemonic, up to the first blank, then the operands, separated by
+ * the commas outside parentheses -- so an operand may be an expression
+ * with blanks in it, `(4 * 8) - 1`. Each token is trimmed. */
 static int split(const char *stmt, int len, struct tok *t, int max)
 {
     int n = 0, i = 0;
+    while (i < len && isspace((unsigned char)stmt[i]))
+        i++;
+    if (i >= len)
+        return 0;
+    t[0].s = stmt + i;
+    while (i < len && !isspace((unsigned char)stmt[i]) && stmt[i] != ',')
+        i++;
+    t[0].len = (int)(stmt + i - t[0].s);
+    n = 1;
     while (i < len && n < max) {
-        while (i < len && (isspace((unsigned char)stmt[i]) || stmt[i] == ','))
+        int depth = 0, b, e;
+        while (i < len && isspace((unsigned char)stmt[i]))
+            i++;
+        if (i < len && stmt[i] == ',' && n > 1)
+            i++;
+        while (i < len && isspace((unsigned char)stmt[i]))
             i++;
         if (i >= len)
             break;
-        t[n].s = stmt + i;
-        {
-            int depth = 0;
-            while (i < len && (depth > 0 ||
-                   (!isspace((unsigned char)stmt[i]) && stmt[i] != ','))) {
-                if (stmt[i] == '(') depth++;
-                else if (stmt[i] == ')') depth--;
-                i++;
-            }
+        b = i;
+        while (i < len && (depth > 0 || stmt[i] != ',')) {
+            if (stmt[i] == '(') depth++;
+            else if (stmt[i] == ')') depth--;
+            i++;
         }
-        t[n].len = (int)(stmt + i - t[n].s);
+        e = i;
+        while (e > b && isspace((unsigned char)stmt[e - 1]))
+            e--;
+        t[n].s = stmt + b;
+        t[n].len = e - b;
         if (t[n].len > 0)
             n++;
     }
@@ -78,8 +101,159 @@ static int tok_is(const struct tok *t, const char *s)
 
 static int tok_reg(const struct tok *t) { return mipsasm_gpr(t->s, t->len); }
 
-/* A signed integer: decimal or 0x, with an optional sign. */
+/* A constant expression -- what a .S file's macros leave in an operand,
+ * `(16 + 4 * (3))` or `-(16 + 4 * 24)` -- over numbers only (a symbol has
+ * been replaced by its value, or a label by `.+N`, before this sees it):
+ * + - * / % << >> & | ^ ~, unary minus and parentheses, at C's
+ * precedence. */
+struct xp { const char *p, *e; int bad; };
+
+static long long xp_or(struct xp *x);
+
+static void xp_ws(struct xp *x)
+{
+    while (x->p < x->e && (*x->p == ' ' || *x->p == '\t'))
+        x->p++;
+}
+
+static long long xp_prim(struct xp *x)
+{
+    long long v = 0;
+    int base = 10, any = 0;
+    xp_ws(x);
+    if (x->p >= x->e) { x->bad = 1; return 0; }
+    if (*x->p == '(') {
+        x->p++;
+        v = xp_or(x);
+        xp_ws(x);
+        if (x->p >= x->e || *x->p != ')') { x->bad = 1; return 0; }
+        x->p++;
+        return v;
+    }
+    if (*x->p == '-') { x->p++; return -xp_prim(x); }
+    if (*x->p == '+') { x->p++; return xp_prim(x); }
+    if (*x->p == '~') { x->p++; return ~xp_prim(x); }
+    if (x->e - x->p > 1 && x->p[0] == '0' && (x->p[1] == 'x' || x->p[1] == 'X')) {
+        base = 16;
+        x->p += 2;
+    }
+    while (x->p < x->e) {
+        int d;
+        if (isdigit((unsigned char)*x->p)) d = *x->p - '0';
+        else if (base == 16 && isxdigit((unsigned char)*x->p))
+            d = tolower((unsigned char)*x->p) - 'a' + 10;
+        else break;
+        if (v > 0x7fffffffffffLL) { x->bad = 1; return 0; }
+        v = v * base + d;
+        x->p++;
+        any = 1;
+    }
+    if (!any) x->bad = 1;
+    return v;
+}
+
+static long long xp_mul(struct xp *x)
+{
+    long long v = xp_prim(x);
+    for (;;) {
+        char op;
+        long long r;
+        xp_ws(x);
+        if (x->p >= x->e || (*x->p != '*' && *x->p != '/' && *x->p != '%'))
+            return v;
+        op = *x->p++;
+        r = xp_prim(x);
+        if (op != '*' && r == 0) { x->bad = 1; return 0; }
+        v = op == '*' ? v * r : op == '/' ? v / r : v % r;
+    }
+}
+
+static long long xp_add(struct xp *x)
+{
+    long long v = xp_mul(x);
+    for (;;) {
+        char op;
+        xp_ws(x);
+        if (x->p >= x->e || (*x->p != '+' && *x->p != '-'))
+            return v;
+        op = *x->p++;
+        v = op == '+' ? v + xp_mul(x) : v - xp_mul(x);
+    }
+}
+
+static long long xp_shift(struct xp *x)
+{
+    long long v = xp_add(x);
+    for (;;) {
+        int left;
+        long long r;
+        xp_ws(x);
+        if (x->e - x->p < 2 || !((x->p[0] == '<' && x->p[1] == '<') ||
+                                 (x->p[0] == '>' && x->p[1] == '>')))
+            return v;
+        left = x->p[0] == '<';
+        x->p += 2;
+        r = xp_add(x);
+        if (r < 0 || r > 62) { x->bad = 1; return 0; }
+        v = left ? (long long)((unsigned long long)v << r) : v >> r;
+    }
+}
+
+static long long xp_and(struct xp *x)
+{
+    long long v = xp_shift(x);
+    for (;;) {
+        xp_ws(x);
+        if (x->p >= x->e || *x->p != '&') return v;
+        x->p++;
+        v &= xp_shift(x);
+    }
+}
+
+static long long xp_xor(struct xp *x)
+{
+    long long v = xp_and(x);
+    for (;;) {
+        xp_ws(x);
+        if (x->p >= x->e || *x->p != '^') return v;
+        x->p++;
+        v ^= xp_and(x);
+    }
+}
+
+static long long xp_or(struct xp *x)
+{
+    long long v = xp_xor(x);
+    for (;;) {
+        xp_ws(x);
+        if (x->p >= x->e || *x->p != '|') return v;
+        x->p++;
+        v |= xp_xor(x);
+    }
+}
+
+static int tok_expr(const char *s, int len, long long *out)
+{
+    struct xp x;
+    long long v;
+    x.p = s; x.e = s + len; x.bad = 0;
+    v = xp_or(&x);
+    xp_ws(&x);
+    if (x.bad || x.p != x.e)
+        return 0;
+    *out = v;
+    return 1;
+}
+
+/* A signed integer: decimal or 0x, with an optional sign -- or a
+ * constant expression of them. */
 static int tok_imm(const struct tok *t, long long *out)
+{
+    return tok_num(t, out) || tok_expr(t->s, t->len, out);
+}
+
+/* A plain number: decimal or 0x, with an optional sign. */
+static int tok_num(const struct tok *t, long long *out)
 {
     int i = 0, neg = 0, base = 10, any = 0;
     long long v = 0;
@@ -109,20 +283,96 @@ static int tok_imm(const struct tok *t, long long *out)
     return 1;
 }
 
-/* `off(reg)`, `(reg)`, as a load or store writes its address. */
+/* `%hi(N)` and `%lo(N)` of a NUMBER, which a .S file writes for a
+ * constant address (`lui $t0, %hi(0xbf000900)` after the preprocessor):
+ * the halves the AHL rule pairs -- %hi rounded by 0x8000 because the
+ * addiu or load that adds %lo sign-extends it. 1 = %hi, 2 = %lo, 0 when
+ * the token is neither. A SYMBOL's halves are relocations
+ * (mipsasm_symform). */
+static int tok_half(const struct tok *t, long long *out)
+{
+    struct tok in;
+    long long v;
+    int which;
+    if (t->len < 5 || t->s[0] != '%' || t->s[t->len - 1] != ')')
+        return 0;
+    if (!strncmp(t->s, "%hi(", 4)) which = 1;
+    else if (!strncmp(t->s, "%lo(", 4)) which = 2;
+    else return 0;
+    in.s = t->s + 4;
+    in.len = t->len - 5;
+    if (!tok_imm(&in, &v))
+        return -1;
+    if (which == 1)
+        *out = ((v + 0x8000) >> 16) & 0xffff;
+    else
+        *out = (long long)(short)(v & 0xffff);
+    return which;
+}
+
+/* `off(reg)`, `(reg)`, as a load or store writes its address; `off` may
+ * be `%lo(N)`. */
 static int tok_mem(const struct tok *t, int *reg, long long *off)
 {
-    const char *open = memchr(t->s, '(', (size_t)t->len);
+    const char *open = NULL;
     struct tok o, r;
-    if (!open || t->s[t->len - 1] != ')')
+    /* the base is the LAST parenthesised group: the offset before it may
+     * have its own, `%lo(N)` or `(16 + 4 * 3)` */
+    if (t->len < 3 || t->s[t->len - 1] != ')')
+        return 0;
+    {
+        int depth = 0;
+        for (const char *c = t->s + t->len - 1; c >= t->s; c--) {
+            if (*c == ')') depth++;
+            else if (*c == '(' && --depth == 0) { open = c; break; }
+        }
+    }
+    if (!open)
         return 0;
     o.s = t->s; o.len = (int)(open - t->s);
     r.s = open + 1; r.len = (int)(t->s + t->len - 1 - (open + 1));
     *off = 0;
-    if (o.len > 0 && !tok_imm(&o, off))
+    if (o.len > 0 && !tok_imm(&o, off) && tok_half(&o, off) != 2)
         return 0;
     *reg = tok_reg(&r);
     return *reg >= 0;
+}
+
+/* A transfer's target, from the delay slot (the encoding's own zero):
+ * a bare number is that already; `.+N` / `.-N` -- which the file
+ * assembler writes for a label -- is from the branch itself, four
+ * bytes earlier. */
+static int tok_disp(const struct tok *t, long long *out)
+{
+    if (t->len >= 2 && t->s[0] == '.' && (t->s[1] == '+' || t->s[1] == '-')) {
+        struct tok n;
+        n.s = t->s + 1;
+        n.len = t->len - 1;
+        if (!tok_imm(&n, out))
+            return 0;
+        *out -= 4;
+        return 1;
+    }
+    return tok_imm(t, out);
+}
+
+/* ---- the assembler's mode ----------------------------------------------
+ *
+ * GNU as starts in `.set reorder`: the programmer writes no delay slots,
+ * and the assembler puts a nop after every branch and jump (gas may fill
+ * the slot instead; the nop means the same). GCC's and clang's inline
+ * asm starts there too -- clang wraps each template in `.set push; .set
+ * reorder` -- so a template written for them behaves the same here.
+ * `.set noreorder` hands the delay slots to the programmer: the
+ * instruction after a transfer is its slot, as Linux's and an RTOS's
+ * hand-scheduled code writes it. */
+static int g_noreorder;
+static int g_pushed[8], g_npushed;
+
+void mipsasm_reset(void)
+{
+    g_noreorder = 0;
+    g_npushed = 0;
 }
 
 /* ---- the instruction tables --------------------------------------------- */
@@ -177,8 +427,46 @@ static const struct br_ent br_tab[] = {
 #define FAIL(...)  do { snprintf(err, (size_t)errlen, __VA_ARGS__); \
                         return -1; } while (0)
 
-static int one_stmt(const char *stmt, int len, struct code *out,
-                    char *err, int errlen)
+/* `.set OPTION`. The mode options change what follows; the ones that
+ * name what EmbCC already is, or allow instructions this assembler then
+ * refuses one by one, are accepted; the ones that change how
+ * instructions are ENCODED -- MIPS16, microMIPS, Release 6, 64-bit -- are
+ * refused, because the bytes would be another ISA's. */
+static int set_option(const struct tok *o, char *err, int errlen)
+{
+    static const char *const ok[] = {
+        "at", "noat", "macro", "nomacro", "mips32r2", "mips32", "mips0",
+        "arch=mips32r2", "nomips16", "nomicromips", "volatile",
+        "novolatile", "move", "nomove", "bopt", "nobopt", "softfloat",
+        "nodsp", "nodspr2", "nomt", "novirt", "noeva", "nomsa", "oddspreg",
+        "nooddspreg", "nosym32", "sym32", "dsp", "dspr2", "mt", "virt",
+        "mcu", "nomcu", NULL
+    };
+    if (tok_is(o, "reorder"))   { g_noreorder = 0; return 0; }
+    if (tok_is(o, "noreorder")) { g_noreorder = 1; return 0; }
+    if (tok_is(o, "push")) {
+        if (g_npushed == (int)(sizeof g_pushed / sizeof g_pushed[0]))
+            FAIL(".set push nests deeper than %d",
+                 (int)(sizeof g_pushed / sizeof g_pushed[0]));
+        g_pushed[g_npushed++] = g_noreorder;
+        return 0;
+    }
+    if (tok_is(o, "pop")) {
+        if (!g_npushed)
+            FAIL(".set pop with no .set push before it");
+        g_noreorder = g_pushed[--g_npushed];
+        return 0;
+    }
+    for (int k = 0; ok[k]; k++)
+        if (tok_is(o, ok[k]))
+            return 0;
+    FAIL(".set %.*s is not supported: this assembler emits MIPS32r2 "
+         "(no MIPS16, microMIPS, Release 6, 64-bit or floating-point "
+         "instructions)", o->len, o->s);
+}
+
+static int stmt_body(const char *stmt, int len, struct code *out,
+                     char *err, int errlen, int *xfer)
 {
     struct tok t[MAXTOK];
     int n = split(stmt, len, t, MAXTOK);
@@ -186,13 +474,20 @@ static int one_stmt(const char *stmt, int len, struct code *out,
 
     if (n == 0)
         return 0;
-    /* `.set noreorder` and the rest: the template's delay slots are its
-     * own (GCC's asm is in noreorder mode too), so these say nothing */
-    if (tok_is(&t[0], ".set"))
-        return 0;
+    /* a refusal mipsasm_symform wrote for a form it recognised */
+    if (stmt[0] == '\001')
+        FAIL("%.*s", len - 1, stmt + 1);
+    if (tok_is(&t[0], ".set")) {
+        if (n != 2)
+            FAIL(".set takes one option here (.set NAME, VALUE belongs to "
+                 "a .S file)");
+        return set_option(&t[1], err, errlen);
+    }
 
     if (n == 1) {
         if (tok_is(&t[0], "nop"))     { mips_nop(out); return 0; }
+        if (tok_is(&t[0], "ssnop"))   { mips_shift_imm(out, MIPS_SLL, 0, 0, 1);
+                                        return 0; }
         if (tok_is(&t[0], "ehb"))     { mips_ehb(out); return 0; }
         if (tok_is(&t[0], "eret"))    { mips_eret(out); return 0; }
         if (tok_is(&t[0], "wait"))    { mips_wait(out); return 0; }
@@ -221,8 +516,14 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             continue;
         if (n != 4) FAIL("%s takes two registers and an immediate", e->name);
         d = tok_reg(&t[1]); a = tok_reg(&t[2]);
-        if (d < 0 || a < 0 || !tok_imm(&t[3], &v))
-            FAIL("%s wants two registers and an immediate", e->name);
+        {
+            int h = tok_half(&t[3], &v);
+            if (h && e->op != MIPS_ADDIU)
+                FAIL("%s cannot take %%hi or %%lo: %%hi is rounded for an "
+                     "addiu's sign-extended %%lo, so write addiu", e->name);
+            if (d < 0 || a < 0 || (h != 2 && !tok_imm(&t[3], &v)))
+                FAIL("%s wants two registers and an immediate", e->name);
+        }
         if (!mips_alu_imm_ok(e->op, v))
             FAIL("%s immediate %lld does not fit its %s 16-bit field",
                  e->name, v, e->op <= MIPS_SLTIU ? "signed" : "unsigned");
@@ -242,7 +543,10 @@ static int one_stmt(const char *stmt, int len, struct code *out,
     }
     if (tok_is(&t[0], "lui")) {
         int d = n == 3 ? tok_reg(&t[1]) : -1;
-        if (d < 0 || !tok_imm(&t[2], &v) || v < 0 || v > 0xffff)
+        int h = n == 3 ? tok_half(&t[2], &v) : 0;
+        if (h == 2)
+            FAIL("lui takes %%hi, not %%lo");
+        if (d < 0 || (h != 1 && !tok_imm(&t[2], &v)) || v < 0 || v > 0xffff)
             FAIL("lui wants a register and a 0..65535 immediate");
         mips_lui(out, d, (unsigned)v);
         return 0;
@@ -313,8 +617,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         else if (tok_is(&t[0], "mflo")) mips_mflo(out, r);
         else if (tok_is(&t[0], "mthi")) mips_mthi(out, r);
         else if (tok_is(&t[0], "mtlo")) mips_mtlo(out, r);
-        else if (tok_is(&t[0], "jr")) mips_jr(out, r);
-        else if (tok_is(&t[0], "jalr")) mips_jalr(out, MIPS_RA, r);
+        else if (tok_is(&t[0], "jr")) { mips_jr(out, r); *xfer = 1; }
+        else if (tok_is(&t[0], "jalr")) { mips_jalr(out, MIPS_RA, r); *xfer = 1; }
         else if (tok_is(&t[0], "di")) mips_di(out, r);
         else mips_ei(out, r);
         return 0;
@@ -324,6 +628,7 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         if (d < 0 || s < 0 || d == s)
             FAIL("jalr wants two different registers");
         mips_jalr(out, d, s);
+        *xfer = 1;
         return 0;
     }
 
@@ -394,14 +699,67 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                                               ? "" : "s");
         if (e->nregs != 0) { a = tok_reg(&t[k++]); if (a < 0) FAIL("%s wants a register", e->name); }
         if (e->nregs == 2) { b = tok_reg(&t[k++]); if (b < 0) FAIL("%s wants a register", e->name); }
-        if (!tok_imm(&t[k], &v) || (v & 3) || v < -131072 || v > 131068)
-            FAIL("%s's displacement must be a multiple of 4 in "
-                 "-131072..131068 bytes from the delay slot", e->name);
+        if (!tok_disp(&t[k], &v) || (v & 3) || v < -131072 || v > 131068)
+            FAIL("%s's target must be a multiple of 4 bytes away, within "
+                 "-131072..131068 of the delay slot", e->name);
         mips_w(out, mips_enc_branch(e->cond, a, b, (long)v));
+        *xfer = 1;
+        return 0;
+    }
+
+    /* ---- j and jal ---- */
+    if (tok_is(&t[0], "j") || tok_is(&t[0], "jal")) {
+        int link = tok_is(&t[0], "jal");
+        /* a register only `$`-spelt: `jal 0` is an address */
+        int r = n == 2 && t[1].s[0] == '$' ? tok_reg(&t[1]) : -1;
+        /* `j $ra` is gas's jr, `jal $t9` its jalr, `jal $rd, $rs` too */
+        if (n == 3 && link) {
+            int d = t[1].s[0] == '$' ? tok_reg(&t[1]) : -1;
+            int s = t[2].s[0] == '$' ? tok_reg(&t[2]) : -1;
+            if (d < 0 || s < 0 || d == s)
+                FAIL("jal $rd, $rs wants two different registers");
+            mips_jalr(out, d, s);
+            *xfer = 1;
+            return 0;
+        }
+        if (n != 2)
+            FAIL("%.*s takes one target", t[0].len, t[0].s);
+        if (r >= 0) {
+            if (link) mips_jalr(out, MIPS_RA, r);
+            else      mips_jr(out, r);
+            *xfer = 1;
+            return 0;
+        }
+        /* A label this file placed (`.+N`): PC-relative, as b and bal --
+         * the j field is region-ABSOLUTE, which an object does not know
+         * for its own code. */
+        if (t[1].len >= 2 && t[1].s[0] == '.') {
+            if (!tok_disp(&t[1], &v) || (v & 3) || v < -131072 ||
+                v > 131068)
+                FAIL("%.*s to a label here must reach within 128 KiB (it "
+                     "is encoded as %s); name a symbol for a longer one",
+                     t[0].len, t[0].s, link ? "bal" : "b");
+            mips_w(out, mips_enc_branch(link ? MIPS_BAL : MIPS_BEQ,
+                                        MIPS_ZERO, MIPS_ZERO, (long)v));
+            *xfer = 1;
+            return 0;
+        }
+        /* a number: the target's place in the 256 MiB region of the
+         * delay slot -- the field itself */
+        if (!tok_imm(&t[1], &v) || (v & 3) || v < 0 || v > 0x0ffffffcLL)
+            FAIL("%.*s wants a register, a label, or a multiple of 4 below "
+                 "0x10000000 (the target's place in its 256 MiB region)",
+                 t[0].len, t[0].s);
+        mips_w(out, mips_enc_j(link ? 3 : 2, (unsigned long)v >> 2));
+        *xfer = 1;
         return 0;
     }
 
     /* ---- the pseudo-instructions ---- */
+    if (tok_is(&t[0], "la"))
+        FAIL("la takes a symbol (a lui/addiu pair relocated against it), "
+             "not a numeric local label or a number: name the label, or "
+             "use li");
     if (tok_is(&t[0], "move") && n == 3) {
         int d = tok_reg(&t[1]), s = tok_reg(&t[2]);
         if (d < 0 || s < 0) FAIL("move wants two registers");
@@ -428,7 +786,28 @@ static int one_stmt(const char *stmt, int len, struct code *out,
          (int)(t[n - 1].s + t[n - 1].len - t[0].s), t[0].s);
 }
 
+/* One statement, and in `.set reorder` mode the delay slot after a
+ * transfer: a nop, so the instruction written next runs after the
+ * transfer and not in its slot. */
+static int one_stmt(const char *stmt, int len, struct code *out,
+                    char *err, int errlen)
+{
+    int xfer = 0;
+    int rc = stmt_body(stmt, len, out, err, errlen, &xfer);
+    if (rc == 0 && xfer && !g_noreorder)
+        mips_nop(out);
+    return rc;
+}
+
+/* An inline-asm template starts in `.set reorder`, as GCC's and
+ * clang's do (each template is assembled on its own). */
 int mipsasm_assemble(const char *text, struct code *out, char *err, int errlen)
+{
+    mipsasm_reset();
+    return mipsasm_encode(text, out, err, errlen);
+}
+
+int mipsasm_encode(const char *text, struct code *out, char *err, int errlen)
 {
     const char *p = text;
     while (*p) {
@@ -451,6 +830,197 @@ int mipsasm_assemble(const char *text, struct code *out, char *err, int errlen)
     return 0;
 }
 
+/* ---- for the file assembler (src/as/gas.c) ---------------------------- */
+
+/* In a .S file a register is always written with its `$`: a bare `ra` or
+ * `sp` there is a symbol. */
+int mipsasm_is_reg(const char *name, int len)
+{
+    if (len < 2 || name[0] != '$')
+        return -1;
+    /* a floating-point register is a register too, not a symbol -- its
+     * instructions are then refused by name, as instructions */
+    if (len >= 3 && len <= 4 && name[1] == 'f' && isdigit((unsigned char)name[2]) &&
+        (len == 3 || isdigit((unsigned char)name[3])))
+        return 32;
+    return mipsasm_gpr(name, len);
+}
+
+/* `%hi`, `%lo`, `%got`...: the word after a `%` is an operator, not a
+ * symbol the file defines. */
+int mipsasm_is_word(const char *stmt, const char *w, int len)
+{
+    (void)len;
+    return w > stmt && w[-1] == '%';
+}
+
+/* The symbol at p (an identifier, not a register, not a numeric local
+ * `1f`), then an optional `+K` / `-K`. Returns the length consumed, 0
+ * when there is no symbol there. */
+static int sym_operand(const char *p, int *slen, long *add)
+{
+    int n = 0;
+    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' || p[0] == '.' ||
+          p[0] == '$'))
+        return 0;
+    if (p[0] == '$' || (p[0] == '.' && (p[1] == '+' || p[1] == '-' ||
+                                        !p[1] || p[1] == ')')))
+        return 0;                         /* a register, or `.` itself */
+    while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.' ||
+           p[n] == '$')
+        n++;
+    *slen = n;
+    *add = 0;
+    if (p[n] == '+' || p[n] == '-') {
+        char *e;
+        long k = strtol(p + n + 1, &e, 0);
+        if (e == p + n + 1)
+            return 0;
+        *add = p[n] == '-' ? -k : k;
+        n = (int)(e - p);
+    }
+    return n;
+}
+
+static const char *skip_sp(const char *p)
+{
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
+static int refuse_form(struct asm_symform *f, const char *stmt,
+                       const char *word, int wlen, const char *why)
+{
+    f->sym_at = (int)(word - stmt);
+    f->sym_len = wlen;
+    f->addend = 0;
+    f->nsites = 0;
+    snprintf(f->encode, sizeof f->encode, "\001%s", why);
+    return 1;
+}
+
+/* The statements whose operand is a SYMBOL: `jal sym` and `j sym`
+ * (R_MIPS_26, the target's place in its 256 MiB region), `lui rt,
+ * %hi(sym)` (R_MIPS_HI16), `addiu rt, rs, %lo(sym)` and a load or store
+ * at `%lo(sym)(rs)` (R_MIPS_LO16), and gas's `la rt, sym`, which is the
+ * lui and the addiu. The statement is rewritten with a zero operand for
+ * mipsasm_encode, and the linker pairs each HI16 with the LO16 after it
+ * (the AHL rule). The position-independent and small-data operators are
+ * recognised in order to refuse them by name. */
+int mipsasm_symform(const char *stmt, struct asm_symform *f)
+{
+    const char *p = skip_sp(stmt), *m = p, *q;
+    int mlen = 0, slen;
+    long add;
+
+    while (isalpha((unsigned char)p[mlen]))
+        mlen++;
+    if (!mlen || (p[mlen] != ' ' && p[mlen] != '\t'))
+        return 0;
+    q = skip_sp(p + mlen);
+    memset(f, 0, sizeof *f);
+
+    /* the operators this assembler does not relocate */
+    {
+        static const char *const pic[] = {
+            "%got", "%call16", "%gp_rel", "%got_disp", "%got_page",
+            "%got_ofst", "%call_hi", "%call_lo", "%got_hi", "%got_lo",
+            "%gottprel", "%tlsgd", "%tlsldm", "%dtprel_hi", "%dtprel_lo",
+            "%tprel_hi", "%tprel_lo", "%higher", "%highest", "%neg",
+            "%pcrel_hi", "%pcrel_lo", NULL
+        };
+        const char *pc = strchr(q, '%');
+        for (int k = 0; pc && pic[k]; k++) {
+            size_t l = strlen(pic[k]);
+            if (!strncmp(pc, pic[k], l) && pc[l] == '(')
+                return refuse_form(f, stmt, pc + 1, (int)l - 1,
+                                   "this operator is for PIC, small-data or "
+                                   "TLS code, and this assembler emits "
+                                   "-mno-abicalls code (%hi and %lo)");
+        }
+    }
+
+    if ((mlen == 1 && *m == 'j') || (mlen == 3 && !strncmp(m, "jal", 3))) {
+        int n = sym_operand(q, &slen, &add);
+        if (!n || *skip_sp(q + n))
+            return 0;
+        f->sym_at = (int)(q - stmt);
+        f->sym_len = slen;
+        f->addend = add;
+        snprintf(f->encode, sizeof f->encode, "%.*s 0", mlen, m);
+        f->site[0].off = 0;
+        f->site[0].reloc = R_MIPS_26;
+        f->nsites = 1;
+        return 1;
+    }
+    if (mlen == 2 && !strncmp(m, "la", 2)) {
+        const char *c = strchr(q, ',');
+        const char *o;
+        int n;
+        if (!c)
+            return 0;
+        o = skip_sp(c + 1);
+        n = sym_operand(o, &slen, &add);
+        if (!n || *skip_sp(o + n))
+            return 0;
+        f->sym_at = (int)(o - stmt);
+        f->sym_len = slen;
+        f->addend = add;
+        snprintf(f->encode, sizeof f->encode, "lui %.*s, 0\naddiu %.*s, %.*s, 0",
+                 (int)(c - q), q, (int)(c - q), q, (int)(c - q), q);
+        f->site[0].off = 0;
+        f->site[0].reloc = R_MIPS_HI16;
+        f->site[1].off = 4;
+        f->site[1].reloc = R_MIPS_LO16;
+        f->nsites = 2;
+        return 1;
+    }
+
+    /* %hi(sym) and %lo(sym): which instruction may carry each */
+    {
+        const char *h = strstr(q, "%hi(");
+        const char *l = strstr(q, "%lo(");
+        const char *at = h ? h : l;
+        int n;
+        if (!at)
+            return 0;
+        n = sym_operand(at + 4, &slen, &add);
+        if (!n || at[4 + n] != ')')
+            return 0;                     /* %hi(NUMBER): mipsasm_encode's */
+        f->sym_at = (int)(at + 4 - stmt);
+        f->sym_len = slen;
+        f->addend = add;
+        if (h) {
+            if (!(mlen == 3 && !strncmp(m, "lui", 3)))
+                return refuse_form(f, stmt, at + 4, slen,
+                                   "%hi(symbol) is a lui's operand");
+            snprintf(f->encode, sizeof f->encode, "%.*s0%s",
+                     (int)(at - stmt), stmt, at + 5 + n);
+            f->site[0].reloc = R_MIPS_HI16;
+        } else {
+            static const char *const ls[] = {
+                "lb", "lbu", "lh", "lhu", "lw", "sb", "sh", "sw", "ll", "sc",
+                "lwl", "lwr", "swl", "swr", NULL
+            };
+            int okm = mlen == 5 && !strncmp(m, "addiu", 5);
+            for (int k = 0; !okm && ls[k]; k++)
+                okm = (int)strlen(ls[k]) == mlen && !strncmp(m, ls[k], (size_t)mlen);
+            if (!okm)
+                return refuse_form(f, stmt, at + 4, slen,
+                                   "%lo(symbol) is an addiu's or a load's or "
+                                   "store's offset: %hi is rounded for its "
+                                   "sign extension");
+            snprintf(f->encode, sizeof f->encode, "%.*s0%s",
+                     (int)(at - stmt), stmt, at + 5 + n);
+            f->site[0].reloc = R_MIPS_LO16;
+        }
+        f->site[0].off = 0;
+        f->nsites = 1;
+        return 1;
+    }
+}
+
 /* ---- the referee's input -------------------------------------------------- */
 
 void mipsasm_vocabulary(FILE *f)
@@ -461,6 +1031,13 @@ void mipsasm_vocabulary(FILE *f)
     fprintf(f, "\tli $t0, 305419896\n\tli $s7, -1\n\tnot $s2, $a3\n");
     fprintf(f, "\tnegu $t1, $t2\n\tjr $ra\n\tjalr $t9\n");
     fprintf(f, "\tjalr $s0, $t9\n\tlui $a0, 4660\n\tlui $1, 0\n");
+    fprintf(f, "\tssnop\n\tj 0x100\n\tjal 0x0ffffffc\n\tj $ra\n\tjal $t9\n");
+    fprintf(f, "\tjal $s1, $t9\n");
+    fprintf(f, "\tlui $t0, %%hi(0x12348000)\n\taddiu $t0, $t0, %%lo(0x12348000)\n");
+    fprintf(f, "\tlw $t1, %%lo(0x10008004)($t2)\n\tsb $a0, %%lo(-1)($sp)\n");
+    fprintf(f, "\taddiu $a0, $a1, (4 * 8) - 1\n\tlw $a0, (16 + 4 * 3)($sp)\n");
+    fprintf(f, "\tsw $ra, -(2 * 8)($sp)\n\tandi $v0, $v1, (1 << 12) | 0xf\n");
+    fprintf(f, "\tb .+8\n\tbeq $a0, $a1, .-16\n");
     for (const struct r3_ent *e = r3_tab; e->name; e++)
         fprintf(f, "\t%s $v0, $a1, $t7\n\t%s $s8, $zero, $31\n",
                 e->name, e->name);

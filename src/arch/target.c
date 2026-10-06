@@ -268,13 +268,9 @@ int target_has_int128(void)     { return g_model[g_arch].int128; }
 /* AVR keeps the decision tree: an indirect jump there goes through Z
  * with a word address read from flash, and the backend has no lowering
  * for the table yet -- it refuses the op by name if it ever sees one. */
-/* MIPS too, for now: IR_SWITCH there needs the table's address as a
- * lui/addiu pair against the code's own section, which is not written
- * yet, so a dense switch stays a decision tree (refused by name if one
- * ever arrives). */
 int target_jump_tables(void)
 {
-    return target_get() != TARGET_AVR && target_get() != TARGET_MIPS32;
+    return target_get() != TARGET_AVR;
 }
 int target_switch_table_min_os(void)
 {
