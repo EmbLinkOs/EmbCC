@@ -39,6 +39,9 @@ struct t_fn {
      * instructions for every `if` without it. */
     int *usecnt;
     int skip_next;
+    /* A `tst` already made for the branch at instruction tst_br - 1
+     * (0: none), with copies between the two: the branch only jumps. */
+    int tst_br;
     int want_debug;
     /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit
      * machine is an eight-byte slot and a REGISTER PAIR. Built from the

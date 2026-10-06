@@ -3610,6 +3610,44 @@ static void gen_ins(struct t_fn *F, int n)
                 return;
             }
         }
+        /* A mask whose only reader is a branch: `tst a, #k; bne` sets the
+         * flags from a & k and keeps nothing, where `and r, a, #k; cmp r,
+         * #0; bne` was three instructions and a register -- every `if (x
+         * & FLAG)` and `(i & 31) == 0`. Copies may come between the two
+         * (phi destruction puts the join's there): a register move, a
+         * load or a store of one sets no flags, so they are made as
+         * usual and the branch takes the flags after them. */
+        if (i->op == IR_AND && !i->flt && i->w == 4 && i->dst >= 0 &&
+            !F->wide[i->dst] && F->usecnt && F->usecnt[i->dst] == 1 &&
+            n + 1 < fn->nins && !F->wide[i->a] &&
+            (i->imm_b || !F->wide[i->b]) && !getenv("EMBCC_T_NOTST")) {
+            int k = n + 1;
+            while (k < fn->nins && k - n <= 4 && fn->ins[k].op == IR_MOV &&
+                   !fn->ins[k].flt && fn->ins[k].dst != i->dst &&
+                   fn->ins[k].dst >= 0 && fn->ins[k].a >= 0 &&
+                   !F->wide[fn->ins[k].dst] && !F->wide[fn->ins[k].a] &&
+                   !in_freg(F, fn->ins[k].dst) && !in_freg(F, fn->ins[k].a))
+                k++;
+            const struct ir_ins *bx = k < fn->nins ? &fn->ins[k] : i;
+            if ((bx->op == IR_BRZ || bx->op == IR_BRNZ) &&
+                bx->a == i->dst && bx->w == 4) {
+                int ra_ = rdr(F, i->a, T_ACC);
+                if (!i->imm_b) {
+                    t_tst_reg(t, ra_, rdr(F, i->b, T_TMP));
+                } else if (!t_tst_imm(t, ra_, i->imm)) {
+                    int sb = LO(F, T_TMP);
+                    operand_b(F, i, sb);
+                    t_tst_reg(t, ra_, sb);
+                }
+                if (k == n + 1) {
+                    jump_if(F, bx->op == IR_BRZ ? T_EQ : T_NE, bx->label);
+                    F->skip_next = 1;
+                } else {
+                    F->tst_br = k + 1;
+                }
+                return;
+            }
+        }
         int op = i->op == IR_ADD ? T_OP_ADD
                : i->op == IR_SUB ? T_OP_SUB
                : i->op == IR_AND ? T_OP_AND
@@ -3985,6 +4023,11 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_BRZ: case IR_BRNZ:
+        if (F->tst_br == n + 1) {       /* the mask's tst, made above */
+            F->tst_br = 0;
+            jump_if(F, i->op == IR_BRZ ? T_EQ : T_NE, i->label);
+            return;
+        }
         if (i->w == 8 && t_wide_imm()) {
             /* where the halves are, and one orrs: Z is "both zero" */
             int al, ah;
