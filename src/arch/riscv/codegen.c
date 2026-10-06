@@ -4450,6 +4450,7 @@ static void g_rv_reserve_pairs(struct ir_func *fn, const int *loc)
             g_rv_res[g_rv_nres].reg = loc[v] + h;
             g_rv_res[g_rv_nres].first = first[v];
             g_rv_res[g_rv_nres].last = last[v];
+            g_rv_res[g_rv_nres].born = 0;
             g_rv_nres++;
         }
     }

@@ -1049,6 +1049,23 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             if (first[v] < nfirst[e]) nfirst[e] = first[v];
             if (last[v] > nlast[e]) nlast[e] = last[v];
         }
+    /* ...and the instruction a node is BORN at, when it begins with the
+     * definition there and nothing else of it is live into that
+     * instruction: a reserved range marked `born` that ends there does
+     * not take its register from it. -1 for every other node. */
+    int *nborn = xmalloc((size_t)(E ? E : 1) * sizeof *nborn);
+    for (int e = 0; e < E; e++) {
+        int at = nfirst[e], d = at < nins ? defv[at] : -1;
+        nborn[e] = g_ra_nres && d >= 0 && d < nvr && eof[d] >= 0 &&
+                   ra_find(alias, eof[d]) == e ? at : -1;
+    }
+    if (g_ra_nres)
+        for (int v = 0; v < nvr; v++) {
+            if (eof[v] < 0 || first[v] < 0) continue;
+            int e = ra_find(alias, eof[v]);
+            if (nborn[e] >= 0 && first[v] == nborn[e] && v != defv[nborn[e]])
+                nborn[e] = -1;
+        }
     int reg_used[RA_MAXPOOL];
     int nspill = 0;
     for (int k = 0; k < NP; k++) reg_used[k] = 0;
@@ -1058,7 +1075,8 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         int taken = 0;                        /* bitmask of neighbour registers */
         /* ...and the registers a pair holds while this node lives */
         for (int r = 0; r < g_ra_nres; r++)
-            if (g_ra_res[r].last >= nfirst[e] && g_ra_res[r].first <= nlast[e])
+            if (g_ra_res[r].last >= nfirst[e] && g_ra_res[r].first <= nlast[e] &&
+                !(g_ra_res[r].born && nborn[e] == g_ra_res[r].last))
                 for (int k = 0; k < NP; k++)
                     if (POOL[k] == g_ra_res[r].reg) taken |= 1 << k;
         unsigned long *row = adj + (size_t)e * ew;
@@ -1226,7 +1244,7 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
                         fn->name, v, crosses[v], hint[v], loc[v], first[v], last[v]);
     free(hint); free(alias); free(absorbed); free(xcross); free(xforbid);
     free(ehint);
-    free(ndep); free(idepth); free(nfirst); free(nlast);
+    free(ndep); free(idepth); free(nfirst); free(nlast); free(nborn);
     g_ra_res = NULL; g_ra_nres = 0;          /* consumed */
     free(cost);
     free(first); free(last); free(elig); free(crosses); free(forbid);
