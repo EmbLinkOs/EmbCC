@@ -38,6 +38,11 @@ struct t_fn {
      * this from the start (usecnt there); ARMv7-M paid seven
      * instructions for every `if` without it. */
     int *usecnt;
+    /* Per vreg: 1 for a constant whose one reader is an IT-block select
+     * that moves it as an immediate (t_select_imms); IR_CONST emits
+     * nothing for it. */
+    char *selimm;
+    long *selimm_v;
     int skip_next;
     int want_debug;
     /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit

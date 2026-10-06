@@ -70,6 +70,11 @@ static unsigned g_t_scr_used;
 static int g_t_ext;
 static int g_r_scr = 9, g_r_addr = 10, g_r_tmp = 11;
 static int g_t_role_fail;
+/* What gen_func's body emitted inside loops, weighted by how much more
+ * often it runs (t_depth_weight - 1): with the function's bytes, the
+ * -O2 measure gen_func_best compares attempts by. 0 at -Os and from
+ * v6_gen_func, where the bytes alone decide. */
+static long g_t_loop_bytes;
 static int t_scr(int r)
 {
     if (r < 0) {
@@ -279,6 +284,44 @@ struct t_lowreg_w {
     long f;                    /* this instruction's loop weight */
 };
 
+/* Each instruction's loop depth, by back edge: a branch to a label at
+ * or above it closes a loop over everything in between. fn->nins + 1
+ * entries, the last 0. */
+static int *t_loop_depth(const struct ir_func *fn)
+{
+    int *depth = xcalloc((size_t)fn->nins + 1, sizeof *depth);
+    int nl = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= nl)
+            nl = fn->ins[n].label + 1;
+    int *lpos = xmalloc((size_t)(nl ? nl : 1) * sizeof *lpos);
+    for (int k = 0; k < nl; k++)
+        lpos[k] = -1;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0)
+            lpos[fn->ins[n].label] = n;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ) &&
+            i->label >= 0 && i->label < nl && lpos[i->label] >= 0 &&
+            lpos[i->label] <= n) {
+            depth[lpos[i->label]]++;
+            depth[n + 1]--;
+        }
+    }
+    free(lpos);
+    for (int n = 1; n <= fn->nins; n++)
+        depth[n] += depth[n - 1];
+    return depth;
+}
+
+/* How often code at a loop depth runs, relative to straight-line code:
+ * a guess, and the same one the low-register weighting makes. */
+static long t_depth_weight(int d)
+{
+    return d <= 0 ? 1 : d == 1 ? 8 : 64;
+}
+
 static void t_lowreg_count(int v, void *ctx)
 {
     struct t_lowreg_w *c = ctx;
@@ -332,35 +375,12 @@ static void t_lowregs(const struct ir_func *fn, int *loc, const char *wide)
     if (!cand || !(cand & (cand - 1)))
         return;                         /* nothing to choose between */
 
-    /* Loop depth by back edge: a branch to a label at or above it closes
-     * a loop over everything in between. */
-    int *depth = xcalloc((size_t)fn->nins + 1, sizeof *depth);
-    int nl = 0;
-    for (int n = 0; n < fn->nins; n++)
-        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= nl)
-            nl = fn->ins[n].label + 1;
-    int *lpos = xmalloc((size_t)(nl ? nl : 1) * sizeof *lpos);
-    for (int k = 0; k < nl; k++)
-        lpos[k] = -1;
-    for (int n = 0; n < fn->nins; n++)
-        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0)
-            lpos[fn->ins[n].label] = n;
-    for (int n = 0; n < fn->nins; n++) {
-        const struct ir_ins *i = &fn->ins[n];
-        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ) &&
-            i->label >= 0 && i->label < nl && lpos[i->label] >= 0 &&
-            lpos[i->label] <= n) {
-            depth[lpos[i->label]]++;
-            depth[n + 1]--;
-        }
-    }
+    int *depth = t_loop_depth(fn);
     struct t_lowreg_w c;
     c.loc = loc;
     for (int r = 0; r < 16; r++)
         c.w[r] = 0;
-    int d = 0;
     for (int n = 0; n < fn->nins; n++) {
-        d += depth[n];
         const struct ir_ins *i = &fn->ins[n];
         /* What a low register buys here: a load or store's base and
          * value are what the 16-bit forms are mostly about; a move is
@@ -368,14 +388,13 @@ static void t_lowregs(const struct ir_func *fn, int *loc, const char *wide)
          * and a return value arrive by moves. */
         int k = i->op == IR_LOAD || i->op == IR_STORE ? 2 :
                 i->op == IR_MOV || i->op == IR_CALL || i->op == IR_RET ? 0 : 1;
-        c.f = (long)k * (d <= 0 ? 1 : d == 1 ? 8 : 64);
+        c.f = (long)k * t_depth_weight(depth[n]);
         int def = ra_ins_def(i);
         if (def >= 0 && def < fn->nvregs && loc[def] >= 0 && loc[def] < 16)
             c.w[loc[def]] += c.f;
         ra_each_use(i, t_lowreg_count, &c);
     }
     free(depth);
-    free(lpos);
 
     /* Heaviest first onto the lowest; ties keep their order. */
     int from[16], to[16], n = 0;
@@ -1305,7 +1324,8 @@ static void layout(struct t_fn *F)
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
         for (int v = 0; v < nv; v++)
-            loc2[v] = (F->loc && F->loc[v] >= 0) || F->wide[v] ? 0 : -1;
+            loc2[v] = (F->loc && F->loc[v] >= 0) || F->wide[v] ||
+                      (F->selimm && F->selimm[v]) ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
@@ -3307,6 +3327,131 @@ static void set_cc(struct t_fn *F, int dst, int cond)
     wr(F, dst, T_ACC);
 }
 
+/* A select the IT block takes: a 32-bit value, its condition 32 bits. */
+static int t_select_it_ok(const struct t_fn *F, const struct ir_ins *i)
+{
+    return i->op == IR_SELECT && !i->flt && i->w <= 4 && i->size == 4 &&
+           i->dst >= 0 && !F->wide[i->dst] && !getenv("EMBCC_T_NOITSEL");
+}
+
+/* The select operands an IT block takes as immediates: a temp defined
+ * once, by a constant one instruction moves (t_it_imm_ok), read by
+ * nothing but the select. clang's `it eq; moveq r6, #0x7e`: the
+ * constant costs neither its own instruction nor a register. */
+static void t_select_imms(struct t_fn *F)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, *ndef, *at;
+    if (!F->usecnt || !nv)
+        return;
+    ndef = xcalloc((size_t)nv, sizeof *ndef);
+    at = xmalloc((size_t)nv * sizeof *at);
+    for (int n = 0; n < fn->nins; n++) {
+        int d = ra_ins_def(&fn->ins[n]);
+        if (d >= 0 && d < nv) {
+            ndef[d]++;
+            at[d] = n;
+        }
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (!t_select_it_ok(F, i))
+            continue;
+        int ops[2] = { i->b, i->c };
+        for (int k = 0; k < 2; k++) {
+            int v = ops[k];
+            if (v < fn->nvars || v >= nv || v == i->a || ndef[v] != 1 ||
+                F->usecnt[v] != 1)
+                continue;
+            const struct ir_ins *c = &fn->ins[at[v]];
+            if (c->op != IR_CONST || c->flt || F->wide[v] ||
+                !t_it_imm_ok((long)c->imm))
+                continue;
+            if (!F->selimm) {
+                F->selimm = xcalloc((size_t)nv, 1);
+                F->selimm_v = xcalloc((size_t)nv, sizeof *F->selimm_v);
+            }
+            F->selimm[v] = 1;
+            F->selimm_v[v] = (long)c->imm;
+        }
+    }
+    free(ndef);
+    free(at);
+}
+
+static int t_sel_imm(const struct t_fn *F, int v)
+{
+    return F->selimm && v >= 0 && F->selimm[v];
+}
+
+/* Keep only the callee-saved registers some value still lives in, after
+ * values have been taken out of them. */
+static void t_drop_unused_saves(struct t_fn *F)
+{
+    struct ir_func *fn = F->fn;
+    int keep = 0;
+    for (int k = 0; k < F->nsave; k++) {
+        int used = 0;
+        for (int v = 0; v < fn->nvregs; v++)
+            if (F->loc[v] == F->used_callee[k] ||
+                (F->loc[v] >= 0 && F->wide[v] &&
+                 F->loc[v] + 1 == F->used_callee[k])) {
+                used = 1;
+                break;
+            }
+        if (used) F->used_callee[keep++] = F->used_callee[k];
+    }
+    F->nsave = keep;
+}
+
+/* One of an IT block's moves: from a register, or (rs < 0) the
+ * operand's immediate. */
+static void t_sel_mov(struct t_fn *F, int d, int rs, int v)
+{
+    if (rs < 0)
+        t_mov_imm_it(F->t, d, F->selimm_v[v]);
+    else
+        t_mov_reg(F->t, d, rs);
+}
+
+/* dst = cond ? b : c, the flags already set and b and c in rb and rc:
+ * one IT block -- `ite cond; mov d, b; mov d, c`, or one move when d
+ * already holds one of them. A Cortex-M pays one to three cycles for
+ * every taken branch, and the if-converted diamonds (a state machine's
+ * `st = len ? 2 : 0`, a saturation) were branches. The moves are the
+ * 16-bit `mov` (T1), which sets no flags inside or outside an IT block;
+ * t_mov_reg emits nothing for a move to itself, so those are never asked
+ * of it inside one. Nothing that sets flags may come between the compare
+ * and this. Reading a value from its slot sets none today (rd: ldr, an
+ * add from sp or the frame base, movw), but nothing promises that, so the
+ * callers do not lean on it: IR_SELECT reads b and c before its own
+ * compare, and a fused compare hands over only operands already in
+ * registers -- the case the fusion is worth having for anyway. */
+static void t_select_cc(struct t_fn *F, const struct ir_ins *i, int cond,
+                        int rb, int rc)
+{
+    struct code *t = F->t;
+    int d = wreg(F, i->dst, T_ACC);
+    if (rb == rc && rb >= 0) {
+        t_mov_reg(t, d, rb);
+    } else if (d == rb) {
+        t_it(t, cond ^ 1, "");
+        t_sel_mov(F, d, rc, i->c);
+    } else if (d == rc) {
+        t_it(t, cond, "");
+        t_sel_mov(F, d, rb, i->b);
+    } else {
+        t_it(t, cond, "e");
+        t_sel_mov(F, d, rb, i->b);
+        t_sel_mov(F, d, rc, i->c);
+    }
+    wrote(F, i->dst, d);
+}
+
+/* Where an operand of an IT-block select is: its register, or -1 for an
+ * immediate (t_select_imms). */
+#define SEL_OPR(F, v, scratch) (t_sel_imm((F), (v)) ? -1 : rdr((F), (v), scratch))
+
 static void gen_ins(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -3544,6 +3689,8 @@ static void gen_ins(struct t_fn *F, int n)
             jump_to(F, i->label);
         return;
     case IR_CONST: {
+        if (t_sel_imm(F, i->dst))
+            return;             /* the select moves it (t_select_imms) */
         /* Build the constant in the destination's OWN register when it
          * has one. Going through T_ACC and copying cost two extra
          * instructions on the commonest operation there is, and the
@@ -3907,10 +4054,21 @@ static void gen_ins(struct t_fn *F, int n)
         int fuse = nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
                    nx->a == i->dst && nx->w != 8 &&
                    F->usecnt && F->usecnt[i->dst] == 1;
+        /* ...or selects on it: the select reads the compare's flags */
+        int selfuse = nx && t_select_it_ok(F, nx) && nx->a == i->dst &&
+                      (in_reg(F, nx->b) || t_sel_imm(F, nx->b)) &&
+                      (in_reg(F, nx->c) || t_sel_imm(F, nx->c)) &&
+                      F->usecnt && F->usecnt[i->dst] == 1;
         if (i->w == 8) {
             cond = cmp64(F, i, i->pred, i->sign);
             if (fuse) {
                 jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
+                F->skip_next = 1;
+                return;
+            }
+            if (selfuse) {
+                t_select_cc(F, nx, cond, SEL_OPR(F, nx->b, T_TMP),
+                            SEL_OPR(F, nx->c, T_ADDR));
                 F->skip_next = 1;
                 return;
             }
@@ -3936,6 +4094,12 @@ static void gen_ins(struct t_fn *F, int n)
             t_cmp_reg(t, sa, sb);
         }
         }
+        if (selfuse) {
+            t_select_cc(F, nx, cond, SEL_OPR(F, nx->b, T_TMP),
+                        SEL_OPR(F, nx->c, T_ADDR));
+            F->skip_next = 1;
+            return;
+        }
         if (fuse) {
             jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
             F->skip_next = 1;
@@ -3954,11 +4118,18 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_SELECT: {
-        /* dst = a ? b : c. Thumb has conditional execution through an IT
-         * block, but both arms here are already-computed VALUES sitting
-         * in slots, so this is two loads and a branch over one of them —
-         * which needs no flag-liveness reasoning and is the same size.
-         * The condition is tested at its own width, `size`. */
+        /* dst = a ? b : c, 32 bits: `cmp a, #0` and an IT block
+         * (t_select_cc), with b and c read before the compare. */
+        if (t_select_it_ok(F, i)) {
+            int rb = SEL_OPR(F, i->b, T_TMP);
+            int rc = SEL_OPR(F, i->c, T_ADDR);
+            int ra = rdr(F, i->a, T_ACC);
+            t_cmp_imm(t, ra, 0);
+            t_select_cc(F, i, T_NE, rb, rc);
+            return;
+        }
+        /* Otherwise two loads and a branch over one of them. The
+         * condition is tested at its own width, `size`. */
         if (i->size == 8 && t_wide_imm()) {
             int al, ah;
             src64(F, i->a, A_LO, R_TMP, &al, &ah);
@@ -5368,29 +5539,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (fn->nvregs) {
             F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
             ra_count_vreg_uses(fn, F.usecnt);
+            t_select_imms(&F);
+            if (F.selimm) {
+                /* an immediate needs no register (nor a slot: layout) */
+                for (int v = 0; v < fn->nvregs; v++)
+                    if (F.selimm[v])
+                        F.loc[v] = -1;
+                t_drop_unused_saves(&F);
+            }
         }
         {
             const char *lim = getenv("EMBCC_T_RA_MAX");
             if (lim) {
                 int n = atoi(lim);
-                int keep = 0;
                 for (int v = n; v < fn->nvregs; v++)
                     F.loc[v] = -1;
-                /* Keep only the saved registers still in use, so the
-                 * gate really is "allocate less" and not "push registers
-                 * for nothing". */
-                for (int k = 0; k < F.nsave; k++) {
-                    int used = 0;
-                    for (int v = 0; v < fn->nvregs; v++)
-                        if (F.loc[v] == F.used_callee[k] ||
-                            (F.loc[v] >= 0 && F.wide[v] &&
-                             F.loc[v] + 1 == F.used_callee[k])) {
-                            used = 1;
-                            break;
-                        }
-                    if (used) F.used_callee[keep++] = F.used_callee[k];
-                }
-                F.nsave = keep;
+                /* so the gate really is "allocate less" and not "push
+                 * registers for nothing" */
+                t_drop_unused_saves(&F);
             }
         }
     }
@@ -5807,8 +5973,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
 
     int tail_end = 0;        /* the body's last act is a tail call */
+    int *ldepth = target_opt_size() ? (int *)0 : t_loop_depth(fn);
+    g_t_loop_bytes = 0;
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i] && F.nopush;
+        int len0 = t->len, i0 = i;
         if (g_t_ext) {
             if (!F.lv_busy)
                 g_t_role_fail = 1;     /* no liveness: nothing is known
@@ -5824,7 +5993,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.skip_next = 0;
         }
         tail_end = i == fn->nins - 1 && was_tail;
+        if (ldepth)
+            g_t_loop_bytes += (long)(t->len - len0) *
+                              (t_depth_weight(ldepth[i0]) - 1);
     }
+    free(ldepth);
 
     t_roles_from(0);            /* nothing is live past the body */
     /* The epilogue -- its code only if something reaches it: not when the
@@ -6007,6 +6180,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                                                     F.scr_save) +
                            (long)F.nfsave * 4);
     free(F.usecnt);
+    free(F.selimm);
+    free(F.selimm_v);
     free(F.tail);
     free(F.slot);
     free(F.label_off);
@@ -6076,7 +6251,12 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     }
     /* The attempts: pairs on and off (only without an FPU, and unless a
      * knob fixes them), each with the rename on and off (unless
-     * EMBCC_T_LOWREGS fixes it). The first of equal sizes wins.
+     * EMBCC_T_LOWREGS fixes it). The smallest wins, the first of equal
+     * ones -- at -Os by bytes, and otherwise by bytes plus the loop
+     * bytes' extra weight (g_t_loop_bytes): a reload in a loop is two
+     * bytes and runs every trip, while the push that saves r9-r11 for
+     * it runs once, and choosing by bytes alone kept the loop's
+     * constants in the frame where clang keeps them in r8 and r9.
      *
      * Before those, on ARMv7-M and ARMv8-M, the same pair choices with
      * r9-r11 in the pool too (g_t_ext; EMBCC_T_EXT=0/1 forces it), the
@@ -6114,7 +6294,8 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     for (int a = 0; a < np * nl; a++) {
         tp[na] = pv[a / nl]; tl[na] = lv[a % nl]; te[na] = 0; na++;
     }
-    int best = -1, bestlen = 0, last = -1;
+    long best_score = 0;
+    int best = -1, last = -1;
     for (int a = 0; a < na; a++) {
         if (a) {
             t->len = at; t->ndrange = nd; st->ncall = ncall; st->next = next;
@@ -6124,17 +6305,19 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         g_t_lowregs = tl[a];
         g_t_ext = te[a];
         g_t_role_fail = 0;
+        g_t_loop_bytes = 0;
         gen(fn, t, st, want_debug);
         with = t->len - at;
+        long score = with + g_t_loop_bytes;
         last = a;
         if (g_t_role_fail)
             continue;
         if (ext_pref && !te[a] && best >= 0 && te[best])
             continue;
-        if (best < 0 || with < bestlen ||
+        if (best < 0 || score < best_score ||
             (ext_pref && te[a] && !te[best])) {
             best = a;
-            bestlen = with;
+            best_score = score;
         }
     }
     if (best != last || g_t_role_fail) {
