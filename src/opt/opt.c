@@ -3752,6 +3752,144 @@ static int dm_op(struct ibuf *nb, struct ir_func *fn, enum ir_op o,
     return t;
 }
 
+/* ---- divisibility by a multiply ----------------------------------------
+ *
+ * `x % C == 0` asks only whether C divides x, and that needs no division
+ * (Granlund and Montgomery; LLVM's prepareUREMEqFold/prepareSREMEqFold).
+ * With C = D0 * 2^K, D0 odd, and P the inverse of D0 modulo 2^32:
+ *
+ *   unsigned:  C divides x  <=>  rotr(x * P, K)      <=u (2^32 - 1) / C
+ *   signed:    C divides x  <=>  rotr(x * P + A, K)  <=u Q
+ *              A = ((2^31 - 1) / D0) with the low K bits cleared,
+ *              Q = 2A / 2^K
+ *
+ * Only the low half of the product is needed, so it is a multiply on
+ * every target -- where `x % C` was sdiv and mls on a Cortex-M (2 to 12
+ * cycles), a library call on ARMv6-M and AVR, and a high multiply, shifts
+ * and a multiply-subtract where divmagic runs. The remainder's only
+ * reader must test it against zero (cmp eq/ne 0, brz, brnz); the
+ * remainder is then replaced by `rotr(...) >u Q`, which is zero exactly
+ * when C divides x, so that reader is left as it was. A power of two
+ * (1 and INT_MIN among them) divides x exactly when x's low bits are
+ * zero, signed or not: that remainder becomes `x & (C - 1)`, where a
+ * signed one was a sign-bias sequence or sdiv. 32 bits only. */
+static int pass_divtest(struct ir_func *fn)
+{
+    if (fn->nins == 0 || getenv("EMBCC_NO_DIVTEST"))
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int *use = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), sizeof *use);
+    int *rdr = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *rdr);
+    struct ucount uc = { use, fn->nvregs };
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], count_cb, &uc);
+    /* the one reader of each single-use vreg */
+    for (int v = 0; v < fn->nvregs; v++)
+        rdr[v] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        struct opnds o = { { 0 }, 0, 0 };
+        each_read(&fn->ins[n], opnd_cb, &o);
+        for (int k = 0; k < o.n; k++)
+            if (o.v[k] >= 0 && o.v[k] < fn->nvregs)
+                rdr[o.v[k]] = n;
+    }
+    struct ibuf nb = { 0, 0, 0 };
+    int changed = 0;
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *src = &fn->ins[n];
+        long C;
+        if (newpos) newpos[n] = nb.n;
+        int ok = src->op == IR_MOD && !src->flt && src->w == 4 &&
+                 src->dst >= fn->nvars && src->dst < fn->nvregs &&
+                 d.cnt[src->dst] == 1 && use[src->dst] == 1 &&
+                 src->a >= 0 && !src->imm_b && get_const(fn, &d, src->b, &C);
+        if (ok) {
+            long D = src->sign ? (long)(int)C : (long)(unsigned)C;
+            unsigned long ud = (unsigned long)(D < 0 ? -D : D) & 0xffffffffUL;
+            const struct ir_ins *r = rdr[src->dst] >= 0 ? &fn->ins[rdr[src->dst]] : NULL;
+            long Z = 1;
+            ok = ud != 0 && r &&
+                 (((r->op == IR_BRZ || r->op == IR_BRNZ) && r->w == 4 &&
+                   r->a == src->dst) ||
+                  (r->op == IR_CMP && !r->flt && r->w == 4 &&
+                   (r->pred == B_EQ || r->pred == B_NE) && r->a == src->dst &&
+                   (r->imm_b ? r->imm == 0 : get_const(fn, &d, r->b, &Z) && Z == 0)));
+        }
+        if (!ok) {
+            *ib_push(&nb) = *src;
+            continue;
+        }
+        long Dl = src->sign ? (long)(int)C : (long)(unsigned)C;
+        unsigned long D = (unsigned long)(Dl < 0 ? -Dl : Dl) & 0xffffffffUL;
+        struct ir_ins at = *src;
+        if ((D & (D - 1)) == 0) {
+            struct ir_ins *m = ib_push(&nb);
+            *m = at;
+            m->op = IR_AND; m->sign = 0;
+            m->b = dm_const(&nb, fn, (long)(int)(D - 1), 4, &at);
+            /* the constant was pushed after m: put it first */
+            struct ir_ins k = nb.p[nb.n - 1];
+            nb.p[nb.n - 1] = nb.p[nb.n - 2];
+            nb.p[nb.n - 2] = k;
+            changed = 1;
+            continue;
+        }
+        int K = 0;
+        while (!((D >> K) & 1))
+            K++;
+        unsigned long D0 = D >> K, P = D0;
+        for (int it = 0; it < 5; it++)          /* Newton: P = 1/D0 mod 2^32 */
+            P = (P * (2 - D0 * P)) & 0xffffffffUL;
+        unsigned long A = 0, Q;
+        if (src->sign) {
+            A = (0x7fffffffUL / D0) & ~((1UL << K) - 1);
+            Q = (2 * A) >> K;
+        } else {
+            Q = 0xffffffffUL / D;
+        }
+        int t = dm_op(&nb, fn, IR_MUL, src->a,
+                      dm_const(&nb, fn, (long)(int)P, 4, &at), 4, 0, 4, &at);
+        if (src->sign)
+            t = dm_op(&nb, fn, IR_ADD, t,
+                      dm_const(&nb, fn, (long)(int)A, 4, &at), 4, 0, 4, &at);
+        if (K) {
+            int lo = dm_op(&nb, fn, IR_SHR, t, dm_const(&nb, fn, K, 4, &at),
+                           4, 0, 4, &at);
+            int hi = dm_op(&nb, fn, IR_SHL, t,
+                           dm_const(&nb, fn, 32 - K, 4, &at), 4, 0, 4, &at);
+            t = dm_op(&nb, fn, IR_OR, lo, hi, 4, 0, 4, &at);
+        }
+        int q = dm_const(&nb, fn, (long)(int)Q, 4, &at);
+        struct ir_ins *c = ib_push(&nb);
+        memset(c, 0, sizeof *c);
+        c->op = IR_CMP; c->dst = at.dst; c->a = t; c->b = q;
+        c->pred = B_GT; c->sign = 0; c->w = 4; c->size = 4;
+        c->line = at.line; c->col = at.col;
+        changed = 1;
+    }
+    free(use); free(rdr); free_defs(&d);
+    if (!changed) {
+        free(nb.p);
+        free(newpos);
+        return 0;
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    return 1;
+}
+
 /* Replace 32-bit `x / C` and `x % C` with a multiply and shifts. */
 static int pass_divmagic(struct ir_func *fn)
 {
@@ -14117,8 +14255,10 @@ static void opt_func(struct ir_func *fn)
      * why it is worth doing at all. */
     if (g_tailrec && edge_ok)
         pass_tailrec(fn);
-    if (g_divmagic)
+    if (g_divmagic) {
+        pass_divtest(fn);               /* before divmagic takes the % */
         pass_divmagic(fn);
+    }
     /* Before mem2reg, and needing no CFG of its own: it only renames
      * memory, and what it renames is what mem2reg then finds. */
     int sroa_twice = g_sroa && g_mem2reg && cfg_ok && !has_igoto;
@@ -14174,6 +14314,8 @@ static void opt_func(struct ir_func *fn)
              * index's use count true. */
             changed |= pass_idxoff(fn);   /* a[i - 1]: the -1 into the address */
             changed |= pass_divmod(fn);   /* a % b from the a / b beside it */
+            if (g_divmagic)               /* and `x % C == 0` folding found */
+                changed |= pass_divtest(fn);
             if (g_gcse && cfg_ok)
                 changed |= pass_gcse(fn); /* CSE across the dominator tree */
             /* SCCP is the one that must stay off without a trustworthy
