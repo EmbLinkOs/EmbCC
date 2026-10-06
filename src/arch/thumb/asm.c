@@ -126,14 +126,24 @@ static int split(const char *stmt, int len, struct tok *t, int max)
         t[n].s = stmt + i;
         {
             int depth = 0;
+            /* An immediate runs to the next comma, spaces and all, as in
+             * GNU as: `#(1 << 2) - 1` and `#0x3f0 >> 4` are one operand. */
+            int imm = stmt[i] == '#';
             while (i < len && (depth > 0 ||
-                   (!isspace((unsigned char)stmt[i]) && stmt[i] != ','))) {
-                if (stmt[i] == '[' || stmt[i] == '{') depth++;
-                else if (stmt[i] == ']' || stmt[i] == '}') depth--;
+                   ((imm || !isspace((unsigned char)stmt[i])) &&
+                    stmt[i] != ','))) {
+                /* (and an immediate's expression, which may have spaces:
+                 * FreeRTOS's ARM_CM4F port writes `#( 0xf << 20 )`) */
+                if (stmt[i] == '[' || stmt[i] == '{' || stmt[i] == '(')
+                    depth++;
+                else if (stmt[i] == ']' || stmt[i] == '}' || stmt[i] == ')')
+                    depth--;
                 i++;
             }
         }
         t[n].len = (int)(stmt + i - t[n].s);
+        while (t[n].len > 0 && isspace((unsigned char)t[n].s[t[n].len - 1]))
+            t[n].len--;
         if (t[n].len > 0)
             n++;
     }
@@ -161,13 +171,29 @@ static int tok_is(const struct tok *t, const char *s)
 
 static int tok_reg(const struct tok *t) { return tasm_gpr(t->s, t->len); }
 
-/* `#imm`, or a bare number. */
+#include "../asmexpr.h"
+
+/* `#imm`, or a bare number, or `#(` a constant expression `)`. */
 static int tok_imm(const struct tok *t, long *out)
 {
     int i = 0, neg = 0, base = 10, any = 0;
     long v = 0;
     if (i < t->len && t->s[i] == '#')
         i++;
+    /* An expression: anything past a leading sign that is not a digit
+     * of one number (`.+8`, a displacement, is the plain path below). */
+    int ex = 0;
+    for (int j = i; j < t->len && t->s[i] != '.'; j++)
+        if (strchr("()~<>|&^*/% ", t->s[j]) ||
+            (j > i && (t->s[j] == '+' || t->s[j] == '-')))
+            ex = 1;
+    if (ex) {
+        long long ev;
+        if (!asm_const_expr(t->s + i, t->len - i, &ev))
+            return 0;
+        *out = (long)ev;
+        return 1;
+    }
     /* `.+8` / `.-12`: a displacement from this instruction. The file
      * assembler (src/as/gas.c) turns a label into exactly this before
      * calling, and a branch operand can mean nothing else here --

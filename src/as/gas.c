@@ -1031,6 +1031,37 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
     return out;
 }
 
+/* RISC-V's `lw rd, sym` (and lb, lbu, lh, lhu, lwu, ld): a load from a
+ * symbol, which GNU as makes `auipc rd, %pcrel_hi(sym)` and
+ * `lw rd, %pcrel_lo(.L)(rd)` -- the `la` pair with a load where the add
+ * is. FreeRTOS's RISC-V port reads pxCurrentTCB and the critical-nesting
+ * count this way. Returns the mnemonic's length when the statement is one:
+ * a load, a register, and a bare symbol (an address, `0(sp)`, is not). */
+static int rv_load_sym(const struct gas *g, const char *p)
+{
+    static const char *const ld[] = { "lbu", "lhu", "lwu", "lb", "lh",
+                                      "lw", "ld" };
+    if (g->tgt->machine != EM_RISCV)
+        return 0;
+    for (unsigned k = 0; k < sizeof ld / sizeof ld[0]; k++) {
+        size_t n = strlen(ld[k]);
+        if (strncmp(p, ld[k], n) != 0 || !isspace((unsigned char)p[n]))
+            continue;
+        const char *q = skip_ws((char *)p + n);
+        while (*q && is_symc((unsigned char)*q)) q++;          /* rd */
+        q = skip_ws((char *)q);
+        if (*q != ',')
+            return 0;
+        q = skip_ws((char *)q + 1);
+        if (!is_sym0((unsigned char)*q))
+            return 0;
+        while (*q && is_symc((unsigned char)*q)) q++;
+        q = skip_ws((char *)q);
+        return *q == '\0' || *q == '#' ? (int)n : 0;
+    }
+    return 0;
+}
+
 /* `call sym` and `la rd, sym`: the two forms that may name a symbol
  * this file does not define. Both are an auipc paired with a second
  * instruction, eight bytes, and both carry their relocation on the
@@ -1069,6 +1100,10 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
                   strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
     int is_la = g->tgt->machine == EM_RISCV &&
                 strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
+    /* `lw rd, sym` is RISC-V's pair too; MIPS's is its own symform's */
+    int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
+    if (ld_len)
+        is_la = 1;                            /* the same pair, but a load */
     /* ARM's jump to a symbol defined elsewhere -- a tail call, an RTOS's
      * branch into its C half -- is `b sym`: one wide branch and one
      * R_ARM_THM_JUMP24, as a call is `bl` and R_ARM_THM_CALL. */
@@ -1142,7 +1177,7 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         const char *rd = "ra";
         char rdbuf[16];
         if (is_la) {
-            const char *q = skip_ws((char *)p + 2);
+            const char *q = skip_ws((char *)p + (ld_len ? ld_len : 2));
             size_t n = 0;
             while (q[n] && is_symc((unsigned char)q[n]) && n < sizeof rdbuf - 1)
                 n++;
@@ -1153,8 +1188,11 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
         }
-        snprintf(buf, sizeof buf, is_call ? "jalr ra, 0(ra)" : "addi %s, %s, 0",
-                 rd, rd);
+        if (ld_len)
+            snprintf(buf, sizeof buf, "%.*s %s, 0(%s)", ld_len, p, rd, rd);
+        else
+            snprintf(buf, sizeof buf, is_call ? "jalr ra, 0(ra)"
+                                              : "addi %s, %s, 0", rd, rd);
         if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
         }
@@ -1217,15 +1255,17 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
                 return sym_get(g, stmt + f.sym_at, (size_t)f.sym_len)->name;
         }
     }
-    /* RISC-V's pair pseudos; another machine's `la` (MIPS's) is its own
-     * symform's */
+    /* RISC-V's pair pseudos; another machine's `la` or `lw rd, sym`
+     * (MIPS's) is its own symform's */
+    int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
     if (g->tgt->machine != EM_RISCV ||
         !((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
-          (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]))))
+          (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2])) ||
+          ld_len))
         return NULL;
-    q = p + (p[1] == 'a' && p[2] != 'l' ? 2 : 4);
+    q = p + (ld_len ? ld_len : p[1] == 'a' && p[2] != 'l' ? 2 : 4);
     q = skip_ws((char *)q);
-    if (*p == 'l') {                       /* la rd, sym -- skip rd */
+    if (*p == 'l') {                /* la/lw rd, sym -- skip rd */
         while (*q && is_symc((unsigned char)*q)) q++;
         q = skip_ws((char *)q);
         if (*q == ',') q = skip_ws((char *)(q + 1));
@@ -2281,6 +2321,11 @@ static int directive(struct gas *g, char *p, int pass)
         g->cur = k;
         return 1;
     }
+    /* .extern: GNU as accepts and ignores it -- every symbol a file uses
+     * and does not define is external already. FreeRTOS's RISC-V
+     * portASM.S declares the kernel's variables with it. */
+    if (DIR(".extern"))
+        return 1;
     /* .global/.globl/.weak/.hidden/.internal/.protected/.local take a
      * comma-separated list of names. .weak: a kernel's vector table names
      * a handler for every interrupt the part has, and a program that uses
@@ -3194,7 +3239,8 @@ static void gas_free(struct gas *g, struct gexp *gx)
     free(g->syms); free(g->fix);
 }
 
-int gas_assemble(const char *in_path, const char *out_path, int preprocess)
+int gas_assemble(const char *in_path, const char *out_path, int preprocess,
+                 const char **incdirs, int nincdirs)
 {
     struct gas g;
     struct gexp gx;
@@ -3218,7 +3264,7 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess)
     }
     /* `.S` is preprocessed and `.s` is not, which is the whole of the
      * difference between them. */
-    text = preprocess ? cpp_process(in_path, src, NULL, 0) : src;
+    text = preprocess ? cpp_process(in_path, src, incdirs, nincdirs) : src;
 
     memset(&g, 0, sizeof g);
     g.path = in_path;
