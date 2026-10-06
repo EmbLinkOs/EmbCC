@@ -31,7 +31,7 @@ point stable):
   registers (rbx, r12–r15), plus caller-saved r8–r11 where no call intervenes:
   backward-liveness dataflow, a precise interference graph, Chaitin-Briggs
   colouring with move-coalescing bias. Anything touching an opaque raw-slot
-  site (a float op, address-of, an atomic, `va_start`, a struct/float call
+  site (a float op, address-of, `va_start`, a struct/float call
   argument, inline asm, a long double) stays in memory. An `ADD` whose sole
   use is the next load or store folds into its addressing.
 

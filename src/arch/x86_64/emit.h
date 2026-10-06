@@ -180,6 +180,11 @@ void x86_ud2(struct code *c);
 void x86_xchg_rax_mem_rcx(struct code *c, int size);
 void x86_lock_xadd_rcx(struct code *c, int size);
 void x86_lock_cmpxchg_rcx(struct code *c, int size);
+/* ...and with any register and base: xchg %reg,(base); lock xadd
+ * %reg,(base); lock cmpxchg %reg,(base) (rax the compared value) */
+void x86_xchg_reg_mem(struct code *c, int reg, int base, int size);
+void x86_lock_xadd_reg_mem(struct code *c, int reg, int base, int size);
+void x86_lock_cmpxchg_reg_mem(struct code *c, int reg, int base, int size);
 
 /* cmp eax/rax with a slot, then set al by condition and zero-extend.
  * cc is the setcc opcode byte (0x92..0x9f), chosen by codegen. */
