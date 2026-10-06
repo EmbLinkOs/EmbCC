@@ -452,8 +452,8 @@ static const struct attr_entry attr_table[] = {
      * data directives (src/arch/x86_64/topasm.c). */
     { "naked",     ATTR_REFUSED,
       "on this target the body could only be assembled by the file-scope "
-      "assembler's few instructions; it is supported on the ARM, RISC-V "
-      "and AVR targets (MIPS has no file-scope assembler yet)" },
+      "assembler's few instructions; it is supported on the ARM, RISC-V, "
+      "MIPS and AVR targets" },
     /* Refused on x86-64 and aarch64, and a NO-OP on ARMv7-M, which is
      * the one machine where an interrupt handler is an ordinary
      * function. The Cortex-M stacks r0-r3, r12, lr, pc and xPSR itself
@@ -769,8 +769,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                            target_get() == TARGET_THUMB) &&
                          !(attr_is(name, "naked") &&
                            target_get() != TARGET_X86_64 &&
-                           target_get() != TARGET_AARCH64 &&
-                           target_get() != TARGET_MIPS32) &&
+                           target_get() != TARGET_AARCH64) &&
                          !((attr_is(name, "interrupt") ||
                             attr_is(name, "signal")) &&
                            target_get() == TARGET_AVR))

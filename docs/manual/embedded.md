@@ -17,7 +17,7 @@ rather than repeating them.
 |---|---|---|---|---|
 | ARM Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M Mainline) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | C | `__attribute__((interrupt))` or a plain function | `librt.a` per triple |
 | RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | C, with a stack stub from EmbLD | assembly entry, C body | `librt.a` for RV32 only |
-| MIPS32 (MIPS32r2, little-endian, a PIC32's core) | `mipsel-none-elf` | C, with a stack stub from EmbLD | a fatal-exception entry only (see [MIPS32](#mips32)) | `librt.a` and `libc.a` |
+| MIPS32 (MIPS32r2, little-endian, a PIC32's core) | `mipsel-none-elf` | C, with a stack stub from EmbLD | assembly entry (`.S` or naked), C body | `librt.a` and `libc.a` |
 | AVR (ATmega328P) | `avr` | assembly | `__attribute__((signal))`, `__attribute__((interrupt))` | `librt.a` |
 | x86-64 kernel | `x86_64-elf`, `x86_64-emblink` | assembly | assembly entry, C body | none built; libgcc's names (see [below](#x86-64-kernels-and-emblinkos)) |
 
@@ -980,25 +980,95 @@ board: it copies `.data`, zeroes `.bss`, runs the static constructors and
 calls `main`. Its image is linked in KSEG0 (cached, unmapped), so
 `.data` needs no `-Tdata`. A PIC32 runs from flash in KSEG1 or KSEG0 and
 keeps its data in RAM: link it with `-Ttext` at the flash address and
-`-Tdata` at the RAM address, as on Cortex-M. Every function an image
-calls must be in the same 256 MiB region as its caller, because a `jal`
-keeps the caller's top four address bits; on every PIC32 the code is.
+`-Tdata` at the RAM address, as on Cortex-M. A `jal` keeps the caller's
+top four address bits, so a call must stay in its 256 MiB region: code in
+the boot flash (KSEG1, `0xbfc00000`) calling program flash in KSEG0
+(`0x9d000000`) must go through a function pointer, and EmbLD refuses a
+`jal` that does not reach (`a jal or j at ADDR to 'f' at ADDR, which is
+in another 256 MiB region`).
 
 ### Exceptions and interrupts
 
-An exception handler that returns needs an entry that saves the
-registers and ends in `eret`. That entry cannot be written for MIPS32
-yet: `__attribute__((interrupt))`, `naked` functions, assembly files and
-instructions in file-scope `asm` are all refused. An exception that ends
-the program can be handled in C: write the four words of a jump to a C
-function into the exception vector, as `tests/harness/mips/boot.c` does
-at `0x80000180` with `lui`/`ori`/`jr` through `$k0`, and clear
-`Status.BEV`, `ERL` and `EXL` with `mtc0`. Its handler reads `Cause`,
-`EPC` and `BadVAddr` with `mfc0` and reports them.
+`__attribute__((interrupt))` is refused on MIPS32. An exception or
+interrupt handler is an entry written in a `.S` file (or a naked
+function, or a file-scope `asm` block) that saves the registers C may
+change, calls a C function, restores them and returns with `eret`.
+`tests/golden/mips-exc/vector.S` is a complete one, run on `malta` by
+`tests/golden/mips-exc.sh`, and its shape is:
 
-Interrupts can be enabled and disabled with inline `ei`, `di` and `ehb`,
-and CP0 registers read and written with `mfc0` and `mtc0`; see
-[MIPS32](inline-asm.md#mips32) in Inline Assembly.
+```asm
+/* vector.S */
+#define FRAME (16 + 4 * 24)
+    .text
+    .set noat                       /* $at is saved by hand */
+
+    .globl exc_stub, exc_stub_end   /* copied to EBase + 0x180 */
+    .set push
+    .set noreorder
+exc_stub:
+    lui     $k0, %hi(exc_entry)
+    addiu   $k0, $k0, %lo(exc_entry)
+    jr      $k0
+    nop
+exc_stub_end:
+    .set pop
+
+exc_entry:
+    addiu   $sp, $sp, -FRAME
+    sw      $at, 16($sp)            /* ...and v0-v1, a0-a3, t0-t9, ra */
+    mfhi    $t0                     /* ...and HI, LO */
+    sw      $t0, 88($sp)
+    mfc0    $a0, $13                /* Cause */
+    mfc0    $a1, $14                /* EPC */
+    addiu   $a2, $sp, 16            /* the saved words, for C to edit */
+    jal     exc_c                   /* returns where to resume */
+    mtc0    $v0, $14
+    ehb
+    lw      $t0, 88($sp)            /* restore in reverse */
+    mthi    $t0
+    lw      $at, 16($sp)
+    addiu   $sp, $sp, FRAME
+    eret
+```
+
+The file is in `.set reorder` mode outside the stub, so the assembler
+puts a `nop` after `jal` and `jr`; the stub is in `.set noreorder` so it
+is exactly four words. The C side copies the stub to the vector and
+clears `Status.BEV`, `ERL` and `EXL` (`tests/harness/mips/boot.c` does
+the same for its fault report):
+
+```c
+extern char exc_stub[], exc_stub_end[];
+
+unsigned exc_c(unsigned cause, unsigned epc, unsigned *frame)
+{
+    switch ((cause >> 2) & 31) {
+    case 8:                                 /* syscall: resume after it */
+        frame[1] = handle_syscall(frame[3]);    /* v0 from a0 */
+        return epc + 4;
+    case 0:                                 /* an interrupt: resume at it */
+        if (cause & (1u << 15))             /* IP7, the CP0 timer */
+            timer_tick();                   /* writes Compare: the ack */
+        return epc;
+    }
+    return epc + 4;
+}
+
+void install(void)
+{
+    volatile unsigned *vec = (volatile unsigned *)0x80000180u;
+    for (unsigned k = 0; k < (unsigned)(exc_stub_end - exc_stub) / 4; k++)
+        vec[k] = ((unsigned *)exc_stub)[k];
+}
+```
+
+A real core caches the vector's words: write them back from the data
+cache and invalidate the instruction cache (`cache`, or `synci`) before
+the first exception; QEMU models no caches. Interrupts are enabled and
+disabled with inline `ei`, `di` and `ehb`, and CP0 registers are read and
+written with `mfc0` and `mtc0`; see [MIPS32](inline-asm.md#mips32) in
+Inline Assembly. `cache` and `synci` are not in the assembler's
+vocabulary yet.
 
 ### Atomics
 

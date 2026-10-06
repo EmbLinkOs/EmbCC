@@ -104,12 +104,18 @@ struct mips_fn {
     /* A branch or jump to a label: `kind` FX_B for the 16-bit form the
      * function patches itself, FX_J for a `j` relocated against .text
      * (the long form, branch_if's beyond 128 KiB). */
-    struct { int at; int label; int kind; } *fix;
+    struct { int at; int label; int kind; int base; } *fix;
     int nfix, capfix;
     /* Per branch, in emission order: take the long form. NULL on the
      * first attempt, which tries every one short (gen_func). */
     const char *longb;
     int nlongb;
+    /* Delay-slot filling (take_slot): the lowest offset an instruction may
+     * be moved from -- raised past every label, relocated instruction,
+     * transfer, asm block and the prologue -- and whether this function
+     * fills at all (not under -g, whose line rows name offsets). */
+    int barrier;
+    int fill;
 };
 
 /* ---- the allocator's view of this machine ------------------------------
@@ -779,6 +785,135 @@ static void st_any(struct mips_fn *F, int rt, int base, int off, int size,
     mips_store(t, SCR2, base, off + 1, 1);
 }
 
+/* ---- delay slots -----------------------------------------------------------
+ *
+ * A transfer's delay slot holds the instruction before it, when that is
+ * safe, rather than a nop: the classic fill. The slot runs after the
+ * transfer is decided and before its target, on both paths of a branch,
+ * so moving X from just before a transfer B into B's slot keeps the
+ * program when
+ *
+ *   - X is an ordinary computation, load or store (decoded below; a
+ *     transfer, trap, sync, ll/sc, or anything not decoded stays),
+ *   - B does not read what X writes (a branch's operands, jalr's target),
+ *   - B links (jal, jalr) and X neither reads nor writes $ra, which B has
+ *     already written when the slot runs,
+ *   - nothing may jump to B itself: no label, no landing, no other
+ *     transfer, prologue or asm block lies between X and B (F->barrier),
+ *   - X is not a relocated field (its site would move), and is not a nop.
+ *
+ * A label AT X is fine: a jump there now runs B and then X, and B does
+ * not depend on X. */
+
+/* What a word reads and writes, as register bitmasks; 0 when it may not
+ * be moved. */
+static int slot_decode(unsigned long w, unsigned long *rd_mask,
+                       unsigned long *wr_mask)
+{
+    int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
+        rt = (int)(w >> 16) & 31, rd = (int)(w >> 11) & 31,
+        fn = (int)(w & 63);
+    unsigned long R = 0, W = 0;
+    if (w == 0)
+        return 0;                                   /* a nop: no gain */
+    switch (op) {
+    case 0x00:                                      /* SPECIAL */
+        switch (fn) {
+        case 0x00: case 0x02: case 0x03:            /* sll srl/rotr sra */
+            R = 1UL << rt; W = 1UL << rd; break;
+        case 0x04: case 0x06: case 0x07:            /* sllv srlv/rotrv srav */
+            R = (1UL << rs) | (1UL << rt); W = 1UL << rd; break;
+        case 0x0a: case 0x0b:                       /* movz movn */
+            R = (1UL << rs) | (1UL << rt) | (1UL << rd); W = 1UL << rd; break;
+        case 0x10: case 0x12:                       /* mfhi mflo */
+            W = 1UL << rd; break;
+        case 0x11: case 0x13:                       /* mthi mtlo */
+            R = 1UL << rs; break;
+        case 0x18: case 0x19: case 0x1a: case 0x1b: /* mult(u) div(u) */
+            R = (1UL << rs) | (1UL << rt); break;
+        case 0x21: case 0x23: case 0x24: case 0x25: case 0x26: case 0x27:
+        case 0x2a: case 0x2b:                       /* addu .. sltu */
+            R = (1UL << rs) | (1UL << rt); W = 1UL << rd; break;
+        default:
+            return 0;
+        }
+        break;
+    case 0x1c:                                      /* SPECIAL2 */
+        if (fn == 0x02) { R = (1UL << rs) | (1UL << rt); W = 1UL << rd; }
+        else if (fn == 0x20 || fn == 0x21) { R = 1UL << rs; W = 1UL << rd; }
+        else return 0;
+        break;
+    case 0x1f:                                      /* SPECIAL3 */
+        if (fn == 0x00) { R = 1UL << rs; W = 1UL << rt; }            /* ext */
+        else if (fn == 0x04) { R = (1UL << rs) | (1UL << rt); W = 1UL << rt; }
+        else if (fn == 0x20) { R = 1UL << rt; W = 1UL << rd; }       /* bshfl */
+        else return 0;
+        break;
+    case 0x09: case 0x0a: case 0x0b: case 0x0c: case 0x0d: case 0x0e:
+        R = 1UL << rs; W = 1UL << rt; break;        /* addiu .. xori */
+    case 0x0f:
+        W = 1UL << rt; break;                       /* lui */
+    case 0x20: case 0x21: case 0x23: case 0x24: case 0x25:
+        R = 1UL << rs; W = 1UL << rt; break;        /* loads */
+    case 0x22: case 0x26:                           /* lwl lwr: merge */
+        R = (1UL << rs) | (1UL << rt); W = 1UL << rt; break;
+    case 0x28: case 0x29: case 0x2a: case 0x2b: case 0x2e:
+        R = (1UL << rs) | (1UL << rt); break;       /* stores */
+    default:
+        return 0;
+    }
+    *rd_mask = R & ~1UL;
+    *wr_mask = W & ~1UL;
+    return 1;
+}
+
+/* Is the unit's last relocation site, of any kind, at `off`? Sites are
+ * noted in offset order, so the last of each list is the latest. */
+static int site_at(const struct mips_fn *F, int off)
+{
+    const struct mips_sites *st = F->st;
+    return (st->next && st->ext[st->next - 1].patch_off == off) ||
+           (st->nstr && st->str[st->nstr - 1].patch_off == off) ||
+           (st->ng && st->g[st->ng - 1].patch_off == off) ||
+           (st->nf && st->f[st->nf - 1].patch_off == off) ||
+           (F->nfix && F->fix[F->nfix - 1].at == off);
+}
+
+/* Before a transfer that reads `reads` (and writes $ra when `links`):
+ * take the instruction just emitted out of the stream, if it may go in
+ * the slot. Returns it, or -1 for a nop slot. */
+static long take_slot(struct mips_fn *F, unsigned long reads, int links)
+{
+    struct code *t = F->t;
+    int at = t->len - 4;
+    unsigned long w, r, wr;
+    if (!F->fill || at < F->barrier || site_at(F, at))
+        return -1;
+    w = (unsigned long)(unsigned char)t->p[at] |
+        ((unsigned long)(unsigned char)t->p[at + 1] << 8) |
+        ((unsigned long)(unsigned char)t->p[at + 2] << 16) |
+        ((unsigned long)(unsigned char)t->p[at + 3] << 24);
+    if (!slot_decode(w, &r, &wr))
+        return -1;
+    if (wr & reads)
+        return -1;
+    if (links && ((r | wr) & (1UL << MIPS_RA)))
+        return -1;
+    t->len = at;
+    return (long)w;
+}
+
+/* The slot after a transfer: what take_slot took, or a nop; and nothing
+ * before this point may be moved again. */
+static void put_slot(struct mips_fn *F, long w)
+{
+    if (w >= 0)
+        mips_w(F->t, (unsigned long)w);
+    else
+        mips_nop(F->t);
+    F->barrier = F->t->len;
+}
+
 /* ---- branches, with their delay slots ------------------------------------
  *
  * Every transfer is followed by a nop in its delay slot, here and
@@ -790,13 +925,14 @@ static void st_any(struct mips_fn *F, int rt, int base, int off, int size,
 static int br_place(struct mips_fn *F, int cond, int rs, int rt)
 {
     int at = mips_b_placeholder(F->t, cond, rs, rt);
-    mips_nop(F->t);
+    put_slot(F, -1);
     return at;
 }
 
 /* ...pointed here, for a branch within one lowering. */
 static void br_land(struct mips_fn *F, int at)
 {
+    F->barrier = F->t->len;          /* a landing: a target */
     if (!mips_patch_b(F->t, at, F->t->len))
         internal_error("mips: %s: a branch inside one operation does not "
                        "reach", F->fn->name);
@@ -810,7 +946,8 @@ static void br_back(struct mips_fn *F, int at, int target)
                        "reach", F->fn->name);
 }
 
-enum { FX_B, FX_J };
+/* FX_TAB: a jump table's word, the label's offset from `base` */
+enum { FX_B, FX_J, FX_TAB };
 
 static void want_label(struct mips_fn *F, int at, int label, int kind)
 {
@@ -821,6 +958,7 @@ static void want_label(struct mips_fn *F, int at, int label, int kind)
     F->fix[F->nfix].at = at;
     F->fix[F->nfix].label = label;
     F->fix[F->nfix].kind = kind;
+    F->fix[F->nfix].base = 0;
     F->nfix++;
 }
 
@@ -859,7 +997,13 @@ static void branch_to(struct mips_fn *F, int cond, int rs, int rt, int label)
         want_label(F, at, label, FX_J);
         return;
     }
-    want_label(F, br_place(F, cond, rs, rt), label, FX_B);
+    {
+        unsigned long reads = (1UL << rs) | (1UL << rt);
+        long slot = take_slot(F, reads, cond == MIPS_BAL);
+        int at = mips_b_placeholder(F->t, cond, rs, rt);
+        put_slot(F, slot);
+        want_label(F, at, label, FX_B);
+    }
 }
 
 static void jump_to(struct mips_fn *F, int label)
@@ -994,11 +1138,12 @@ static int abs_pair(struct mips_fn *F, int rd)
  * ABSOLUTE word index that only the linker knows. */
 static void call_sym(struct mips_fn *F, struct func *callee, int tail)
 {
+    long slot = take_slot(F, 0, !tail);
     int at = F->t->len;
     if (tail) mips_j(F->t);
     else      mips_jal(F->t);
-    mips_nop(F->t);
     note_ext(F->st, at, callee, tail);
+    put_slot(F, slot);
 }
 
 /* The runtime helpers, interned by name. */
@@ -1696,8 +1841,12 @@ static void mips_restore(struct mips_fn *F, int ret)
         mips_alu(t, MIPS_ADDU, MIPS_SP, MIPS_SP, MIPS_T0);
     }
     if (ret) {
+        /* no frame (or one too big for addiu): the instruction before
+         * may fill the slot, as before any transfer -- not one that
+         * writes $ra, which jr reads */
+        long slot = take_slot(F, 1UL << MIPS_RA, 0);
         mips_jr(t, MIPS_RA);
-        mips_nop(t);
+        put_slot(F, slot);
     }
 }
 
@@ -1815,9 +1964,11 @@ static void gen_call(struct mips_fn *F, int n)
         /* t9, as an abicalls callee expects to find its own address; the
          * target is in memory (regalloc keeps it there), so reading it
          * now disturbs no argument */
+        long slot;
         rd(F, i->a, CALLREG);
+        slot = take_slot(F, 1UL << CALLREG, 1);
         mips_jalr(t, MIPS_RA, CALLREG);
-        mips_nop(t);
+        put_slot(F, slot);
     } else {
         call_sym(F, i->callee, 0);
     }
@@ -2038,6 +2189,7 @@ static void gen_ins(struct mips_fn *F, int n)
     switch (i->op) {
     case IR_LABEL:
         F->label_off[i->label] = t->len;
+        F->barrier = t->len;
         return;
     case IR_JMP:
         if (n + 1 < fn->nins && fn->ins[n + 1].op == IR_LABEL &&
@@ -2501,6 +2653,7 @@ static void gen_ins(struct mips_fn *F, int n)
                 rd(F, ia->out[k].temp, ia->out[k].reg);
         for (int k = 0; k < ia->codelen; k++)
             code_byte(t, ia->code[k]);
+        F->barrier = t->len;          /* the template's own: never moved */
         for (int k = 0; k < ia->nout; k++) {
             if (ia->out[k].mem)
                 continue;
@@ -2619,9 +2772,60 @@ static void gen_ins(struct mips_fn *F, int n)
     case IR_SPRESTORE:
         mips_mv(t, MIPS_SP, rdr(F, i->a, SCR));
         return;
-    case IR_SWITCH:
-        mips_refuse(F, i, "a jump table");
+    case IR_SWITCH: {
+        /* A jump table in .text right after its dispatch, of 32-bit
+         * offsets from the instruction `bal` returns to -- so it needs no
+         * relocation, and the code is the same wherever it is linked:
+         *
+         *     sltiu $at, rI, n ; beqz $at, default   (li + sltu past 32767)
+         *     move  t6, $ra                          (a leaf: $ra is live)
+         *     bal   1f ; sll t2, rI, 2               (in the slot)
+         *  1: addu  t2, t2, $ra ; lw t2, tab-1b(t2) ; addu t2, t2, $ra
+         *     move  $ra, t6
+         *     jr    t2 ; nop
+         *   tab: .word L0-1b, L1-1b, ...
+         *
+         * The index is the value less the lowest case (irgen), so one
+         * unsigned compare sends both sides of the range to the default.
+         * A function that calls has saved $ra and reloads it, so only a
+         * leaf keeps it in t6 around the bal. */
+        int n = fn->jt[i->jt].n;
+        int ri = rdr(F, i->a, ACC);
+        int leaf = F->leaf;
+        int anchor, lw_at, tab;
+        if (n <= 32767) {
+            mips_alu_imm(t, MIPS_SLTIU, CC, ri, n);
+        } else {
+            mips_li(t, B_LO, n);
+            mips_alu(t, MIPS_SLTU, CC, ri, B_LO);
+        }
+        branch_to(F, MIPS_BEQ, CC, MIPS_ZERO, i->label);
+        if (leaf)
+            mips_mv(t, FAR, MIPS_RA);
+        mips_w(t, mips_enc_branch(MIPS_BAL, MIPS_ZERO, MIPS_ZERO, 4));
+        mips_shift_imm(t, MIPS_SLL, B_LO, ri, 2);
+        anchor = t->len;
+        mips_alu(t, MIPS_ADDU, B_LO, B_LO, MIPS_RA);
+        lw_at = t->len;
+        tab = lw_at + 4 + 4 + (leaf ? 4 : 0) + 4 + 4;
+        mips_load(t, B_LO, B_LO, tab - anchor, 4, 1);
+        mips_alu(t, MIPS_ADDU, B_LO, B_LO, MIPS_RA);
+        if (leaf)
+            mips_mv(t, MIPS_RA, FAR);
+        mips_jr(t, B_LO);
+        put_slot(F, -1);
+        if (t->len != tab)
+            internal_error("mips: %s: the jump table is not where its "
+                           "load says", fn->name);
+        for (int k = 0; k < n; k++) {
+            want_label(F, t->len, fn->jt[i->jt].labels[k], FX_TAB);
+            F->fix[F->nfix - 1].base = anchor;
+            code_u32(t, 0);
+        }
+        code_mark_data(t, tab, t->len);
+        F->barrier = t->len;
         return;
+    }
     case IR_LABELADDR: case IR_IGOTO:
         mips_refuse(F, i, "a computed goto");
         return;
@@ -2919,6 +3123,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     F.longb = longb;
     F.nlongb = nlongb;
     f->code_off = t->len;
+    F.barrier = t->len;
+    F.fill = !want_debug && !getenv("EMBCC_MIPS_NO_FILL");
 
     /* The prologue. t0 builds a large frame's size: no argument has been
      * touched yet. */
@@ -3072,6 +3278,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
         /* The epilogue -- unless the body ended in a tail call and no
          * IR_RET jumps here. */
         F.label_off[fn->nlabels] = t->len;
+        /* every IR_RET's branch lands here -- a barrier for the slot of
+         * the jr below, unless no branch does (they are all behind) */
+        for (i = 0; i < F.nfix; i++)
+            if (F.fix[i].label == fn->nlabels)
+                F.barrier = t->len;
         for (i = 0; tail_end && i < F.nfix; i++)
             if (F.fix[i].label == fn->nlabels)
                 tail_end = 0;
@@ -3083,6 +3294,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                 F.fb = MIPS_SP;
             }
             mips_restore(&F, 1);
+            F.barrier = t->len;
         }
     }
 
@@ -3093,6 +3305,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                            F.fix[i].label, fn->name);
         if (F.fix[i].kind == FX_J) {
             note_str(F.st, F.fix[i].at, target, RK_MIPS_TEXT26);
+            continue;
+        }
+        if (F.fix[i].kind == FX_TAB) {
+            code_patch32(t, F.fix[i].at,
+                         (unsigned long)(target - F.fix[i].base) &
+                         0xffffffffUL);
             continue;
         }
         if (!mips_patch_b(t, F.fix[i].at, target)) {

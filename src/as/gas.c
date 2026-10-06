@@ -19,6 +19,8 @@
 #include "../arch/thumb/emit.h"
 #include "../arch/thumb/attrs.h"
 #include "../arch/aarch64/asm.h"
+#include "../arch/mips/asm.h"
+#include "../arch/backend.h"
 #include "../parse/ast.h"
 
 /* ---- the pieces of a file ------------------------------------------ */
@@ -1094,9 +1096,12 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             return 1;
         }
     }
-    int is_call = strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
-    int is_la = strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
-    int ld_len = rv_load_sym(g, p);           /* `lw rd, sym` */
+    int is_call = g->tgt->machine == EM_RISCV &&
+                  strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
+    int is_la = g->tgt->machine == EM_RISCV &&
+                strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
+    /* `lw rd, sym` is RISC-V's pair too; MIPS's is its own symform's */
+    int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
     if (ld_len)
         is_la = 1;                            /* the same pair, but a load */
     /* ARM's jump to a symbol defined elsewhere -- a tail call, an RTOS's
@@ -1250,8 +1255,11 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
                 return sym_get(g, stmt + f.sym_at, (size_t)f.sym_len)->name;
         }
     }
-    int ld_len = rv_load_sym(g, p);
-    if (!((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
+    /* RISC-V's pair pseudos; another machine's `la` or `lw rd, sym`
+     * (MIPS's) is its own symform's */
+    int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
+    if (g->tgt->machine != EM_RISCV ||
+        !((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
           (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2])) ||
           ld_len))
         return NULL;
@@ -2403,6 +2411,44 @@ static int directive(struct gas *g, char *p, int pass)
      * file, is an alias resolved when the object is written. .thumb_set
      * also makes NAME a Thumb function -- how a startup file points every
      * weak handler at Default_Handler. */
+    /* MIPS's `.set noreorder`, `.set push`, `.set at`...: an option of
+     * the instruction assembler, which keeps the mode (mips/asm.c) --
+     * told apart from `.set NAME, VALUE` by having no comma. */
+    if (g->tgt->machine == EM_MIPS && DIR(".set") && !strchr(arg, ',')) {
+        struct code tmp = { 0 };
+        char err[256], buf[160];
+        snprintf(buf, sizeof buf, ".set %s", arg);
+        if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0)
+            gerr(g, "%s", err);
+        free(tmp.p);
+        return 1;
+    }
+    /* MIPS's function markers and module options say nothing an object
+     * here needs; the ones that ask for PIC or $gp-relative code are
+     * refused, because this assembler and EmbLD build neither. */
+    if (g->tgt->machine == EM_MIPS) {
+        if (DIR(".ent") || DIR(".end") || DIR(".frame") || DIR(".mask") ||
+            DIR(".fmask") || DIR(".insn") || DIR(".nan") ||
+            (DIR(".module") && strncmp(arg, "hardfloat", 9) &&
+             strncmp(arg, "fp=64", 5) && strncmp(arg, "mips16", 6) &&
+             strncmp(arg, "micromips", 9)))
+            return 1;
+        if (DIR(".abicalls") || DIR(".cpload") || DIR(".cprestore") ||
+            DIR(".cpsetup") || DIR(".cpreturn") || DIR(".gpword") ||
+            DIR(".gpvalue") || DIR(".cplocal") || DIR(".cpadd") ||
+            (DIR(".option") && strncmp(skip_ws(arg), "pic0", 4))) {
+            gerr(g, "%.*s%s%s: this is position-independent (abicalls) or "
+                    "$gp-relative code, which this assembler and EmbLD do "
+                    "not build; write -mno-abicalls code (%%hi/%%lo, jal)",
+                 (int)nlen, name, *arg ? " " : "", arg);
+            return 1;
+        }
+        if (DIR(".module")) {
+            gerr(g, ".module %s is not supported: EmbCC's MIPS objects are "
+                    "MIPS32r2, soft float", arg);
+            return 1;
+        }
+    }
     if (DIR(".equ") || DIR(".set") || DIR(".thumb_set") || DIR(".equiv")) {
         char *e = arg;
         const char *v;
@@ -2809,7 +2855,10 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
             }
         }
         if (*q == '.' && !strncmp(q, ".end", 4) &&
-            (!q[4] || isspace((unsigned char)q[4]))) {
+            (!q[4] || isspace((unsigned char)q[4])) &&
+            /* MIPS writes `.end f` after each function (with `.ent f`):
+             * a marker, not the end of the file */
+            !(g->tgt->machine == EM_MIPS && *skip_ws(q + 4))) {
             free(line);
             break;                        /* the rest of the file is ignored */
         }
@@ -3011,6 +3060,16 @@ static int write_object(struct gas *g, const char *out_path)
      * assembled object says what it was built for as a compiled one does:
      * the linker checks them across objects, and a disassembler decodes
      * Thumb-2 only when told the core has it. */
+    /* MIPS: the header's MIPS32r2 | o32 | noreorder and the soft-float
+     * .MIPS.abiflags a compiled object carries, which EmbLD checks
+     * across the objects it links */
+    if (g->tgt->machine == EM_MIPS) {
+        unsigned char af[24];
+        elfw_set_flags(w, target_elf_flags(target_get()));
+        mips_build_abiflags(af);
+        elfw_add_section(w, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC,
+                         af, (Elf64_Xword)sizeof af, 8);
+    }
     if (g->tgt->machine == EM_ARM) {
         size_t alen = 0;
         unsigned char *ab = arm_build_attributes(&alen);
@@ -3080,9 +3139,23 @@ static const struct gas_target AVR_GAS = {
     0, NULL, NULL, NULL
 };
 
+/* MIPS32r2, o32. Its symbol forms -- `jal sym`, `%hi`/`%lo`, `la` -- are
+ * mipsasm_symform's, carrying R_MIPS_26, R_MIPS_HI16 and R_MIPS_LO16;
+ * `.word sym` is R_MIPS_32. A register is always `$`-spelt (is_reg),
+ * the word after a `%` is an operator (is_word), and the reorder mode is
+ * the instruction assembler's, reset at each pass. */
+static const struct gas_target MIPS_GAS = {
+    EM_MIPS, 1, mipsasm_encode, mipsasm_is_reg,
+    0, 0, 0,
+    R_MIPS_32, 0,
+    0, 0, mipsasm_symform, 0,
+    0, mipsasm_is_word, mipsasm_reset, NULL
+};
+
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+    case TARGET_MIPS32: return &MIPS_GAS;
     case TARGET_AVR: return &AVR_GAS;
     case TARGET_RISCV32: case TARGET_RISCV64: return &RISCV_GAS;
     case TARGET_THUMB: return &THUMB_GAS;
