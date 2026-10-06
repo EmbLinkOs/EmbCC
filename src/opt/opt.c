@@ -3752,6 +3752,8 @@ static int dm_op(struct ibuf *nb, struct ir_func *fn, enum ir_op o,
     return t;
 }
 
+static int g_opt_size;                  /* -Os, set by opt_run (below) */
+
 /* Replace 32-bit `x / C` and `x % C` with a multiply and shifts. */
 static int pass_divmagic(struct ir_func *fn)
 {
@@ -3765,8 +3767,19 @@ static int pass_divmagic(struct ir_func *fn)
      * each, where the magic sequence is a multiply, a shift and a
      * correction. So it is off where a pointer is four bytes, and the
      * divide stays a divide. */
-    if (target_ptr_size() < 8)
-        return 0;
+    /* ...but a SIGNED power of two is shifts and an add at 32 bits on any
+     * machine: `x / 2048` and `x % 2048` took sdiv (2 to 12 cycles on a
+     * Cortex-M4, 30-odd on many RISC-V cores) where clang and GCC shift.
+     * At -Os only where the divide is a library call (ARMv6-M, AVR): with
+     * a divide instruction the shifts are a few bytes longer than it. */
+    int pow2_only = target_ptr_size() < 8;
+    if (pow2_only && g_opt_size) {
+        struct ir_ins probe;
+        memset(&probe, 0, sizeof probe);
+        probe.op = IR_DIV; probe.w = 4; probe.sign = 1;
+        if (!target_op_calls_helper(&probe))
+            return 0;
+    }
     struct defs d;
     compute_defs(fn, &d);
     struct ibuf nb = { 0, 0, 0 };
@@ -3782,6 +3795,11 @@ static int pass_divmagic(struct ir_func *fn)
         if ((src->op != IR_DIV && src->op != IR_MOD) || src->flt ||
             src->w != 4 || src->dst < 0 || !const_b(fn, &d, src, &D) ||
             D == 0 || D == 1 || D == -1) {
+            *ib_push(&nb) = *src;
+            continue;
+        }
+        if (pow2_only && !(src->sign &&
+                           log2_pow2_l((unsigned long)(D < 0 ? -D : D)) >= 0)) {
             *ib_push(&nb) = *src;
             continue;
         }
@@ -14165,6 +14183,11 @@ static void opt_func(struct ir_func *fn)
             changed |= pass_storefwd(fn); /* forward local stores to loads (mem2reg-lite) */
             changed |= pass_roload(fn);   /* a global nothing writes */
             changed |= pass_fold(fn);
+            /* ...and the divisors folding has just made constants:
+             * `x / (1 << k)`, a const local, an inlined parameter. The
+             * run before the rounds sees only literals. */
+            if (g_divmagic)
+                changed |= pass_divmagic(fn);
             /* After folding, so the constants it just exposed are the
              * ones this moves, and before value numbering, so what it
              * leaves is what CSE sees. */
