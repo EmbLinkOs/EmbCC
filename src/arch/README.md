@@ -20,6 +20,8 @@ src/arch/
   riscv/           RV32IM and RV64IM, one backend       -> D-016
   riscv32/         RV32's macro tables only             -> D-016
   riscv64/         RV64's macro tables only             -> D-016
+  mips/            MIPS32r2, o32 soft float, ILP32      -> docs/internals/mips32-plan.md
+  mips32/          its macro tables only (as riscv32/)
 ```
 
 Each architecture directory holds the same kinds of file:

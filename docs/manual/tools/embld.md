@@ -1,8 +1,8 @@
 # embld — the EmbCC linker
 
 This page is the reference for `embld`, EmbCC's static linker. It is for
-anyone who links objects by hand: firmware for the ARM, RISC-V and AVR
-boards, programs with several objects or extra libraries, the EmbLinkOS
+anyone who links objects by hand: firmware for the ARM, RISC-V, MIPS32
+and AVR boards, programs with several objects or extra libraries, the EmbLinkOS
 kernel, and EMBX application images. It covers every option, the image
 layout `embld` produces, the symbols it defines, and its diagnostics.
 
@@ -59,6 +59,7 @@ decides which.
 | RISC-V 64 (`EM_RISCV`) | ELF64 | `riscv64-unknown-elf` | ELF64 executable |
 | RISC-V 32 (`EM_RISCV`) | ELF32 | `riscv32-unknown-elf` | ELF32 executable |
 | ARM, Thumb (`EM_ARM`) | ELF32 | `thumbv7m-none-eabi`, `thumbv7em-*`, `thumbv8m.*` | ELF32 executable |
+| MIPS32, little-endian o32 (`EM_MIPS`) | ELF32 | `mipsel-none-elf`; clang's `mipsel-unknown-elf` without `-fPIC` | ELF32 executable |
 | AVR (`EM_AVR`) | ELF32 | `avr` | ELF32 executable |
 
 AArch64 objects are not supported. Such an input is refused with:
@@ -74,7 +75,16 @@ ARM inputs may carry their relocations in `SHT_REL` (implicit addend, as
 other ARM toolchains emit) or `SHT_RELA` sections; both are applied. The
 output `e_flags` are `EF_ARM_EABI_VER5` on ARM; on RISC-V, `EF_RISCV_RVC`
 is set when any input has it; on AVR the architecture is taken from the
-first input that names one.
+first input that names one; on MIPS the architecture and ABI bits are the
+first input's.
+
+MIPS inputs must be little-endian o32 (`embld: FILE: a MIPS object that
+is not little-endian o32; this linker links mipsel o32 only`), with REL
+or RELA relocations. Each input's `.MIPS.abiflags` must agree on the
+floating-point ABI: a soft-float object and one built for an FPU are
+refused together (`embld: FILE: its floating-point ABI (an FPU) is not
+that of FIRST (soft float); ...`). `.MIPS.abiflags`, `.reginfo` and
+`.pdr` are not copied to the image.
 
 ### Symbol resolution
 
@@ -131,8 +141,8 @@ The **text segment** (read and execute) starts at the text address
 
 1. `.vectors` and `.isr_vector` — an interrupt vector table, placed first
    because a Cortex-M reads its initial stack pointer and reset address
-   from the start of the image. With `-Tstack`, the RISC-V entry stub is
-   placed here as well.
+   from the start of the image. With `-Tstack`, the RISC-V or MIPS entry
+   stub is placed here as well.
 2. `.text`
 3. `.rodata` (except on AVR; see below)
 4. read-only orphan sections
@@ -240,16 +250,23 @@ fit is refused:
 embld: the image needs 1504 bytes of flash and the part has 1000 (--rom-limit): 1498 of text, 4 of initial data
 ```
 
-On RISC-V, every register is zero at reset, so something must set the
-stack pointer before the first C function runs. `-Tstack ADDR` makes
+On RISC-V and MIPS, nothing sets the stack pointer at reset, so
+something must before the first C function runs. `-Tstack ADDR` makes
 `embld` place an entry stub in the vector group at the start of the text
-segment; the stub loads `ADDR` into `sp` and jumps to the entry symbol (`auipc t0` and
-`jalr zero` through `t0`, which reaches ±2 GB). The ELF entry point
-becomes the stub's address. The option is refused on every other machine:
+segment; the stub loads `ADDR` into `sp` and jumps to the entry symbol
+(on RISC-V `auipc t0` and `jalr zero` through `t0`, which reaches ±2 GB;
+on MIPS `lui`/`ori` of the entry's absolute address into `t9` and `jr
+t9`, which reaches anywhere). The ELF entry point becomes the stub's
+address. The option is refused on every other machine:
 
 ```text
-embld: -Tstack is a RISC-V option: every other target here starts with a stack pointer already set (a Cortex-M reads its own from the vector table)
+embld: -Tstack is a RISC-V and MIPS option: every other target here starts with a stack pointer already set (a Cortex-M reads its own from the vector table)
 ```
+
+On MIPS, `__data_end`, `__bss_start` and `__bss_end` are kept on word
+boundaries (the data segment's stored bytes and its size are padded to
+a multiple of 4), because the startup's word loops would trap on a
+misaligned address.
 
 If the entry symbol is more than 2 GB from the stub, the link fails with
 `embld: the entry symbol is more than 2GB from the image base`.
@@ -259,7 +276,9 @@ On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 ### Linker scripts
 
 `-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM
-and RISC-V images: the script a CMSIS, STM32CubeMX, vendor SDK or RTOS
+and RISC-V images (a MIPS or AVR image is refused: `embld: -T: a linker
+script is supported for ARM and RISC-V images only (this one is machine
+8)`): the script a CMSIS, STM32CubeMX, vendor SDK or RTOS
 project already has. It replaces `-Ttext`, `-Tdata`, `-Tstack`,
 `--rom-limit` and `--lma-offset`, which are refused with it, and the
 linker defines no bracket symbols of its own except `__start_NAME` and
@@ -440,6 +459,7 @@ An object without an attributes section takes no part in the comparison.
 | x86-64 | `R_X86_64_64`, `R_X86_64_32`, `R_X86_64_32S`, `R_X86_64_PC32`, `R_X86_64_PLT32` (as `PC32`; no PLT is created), `R_X86_64_PC64`, `R_X86_64_TPOFF32` (local-exec thread-local storage) |
 | ARM | `R_ARM_NONE`, `R_ARM_ABS32`, `R_ARM_TARGET1` (as `R_ARM_ABS32`), `R_ARM_REL32`, `R_ARM_PREL31`, `R_ARM_THM_CALL`, `R_ARM_THM_JUMP24`, `R_ARM_THM_MOVW_ABS_NC`, `R_ARM_THM_MOVT_ABS` |
 | RISC-V | `R_RISCV_32`, `R_RISCV_64`, `R_RISCV_HI20`, `R_RISCV_LO12_I`, `R_RISCV_LO12_S`, `R_RISCV_PCREL_HI20`, `R_RISCV_PCREL_LO12_I`, `R_RISCV_PCREL_LO12_S`, `R_RISCV_BRANCH`, `R_RISCV_JAL`, `R_RISCV_CALL`, `R_RISCV_CALL_PLT`; `R_RISCV_RELAX` and `R_RISCV_ALIGN` are accepted and ignored |
+| MIPS | `R_MIPS_NONE`, `R_MIPS_32`, `R_MIPS_26`, `R_MIPS_HI16`, `R_MIPS_LO16`, `R_MIPS_PC16`; `R_MIPS_JALR` is accepted and ignored |
 | AVR | `R_AVR_NONE`, `R_AVR_32`, `R_AVR_16`, `R_AVR_16_PM`, `R_AVR_LO8_LDI`, `R_AVR_HI8_LDI`, `R_AVR_LO8_LDI_GS`, `R_AVR_HI8_LDI_GS`, `R_AVR_CALL`, `R_AVR_13_PCREL`, `R_AVR_7_PCREL` |
 
 Any other type stops the link with a message of this form (the machine
@@ -448,6 +468,13 @@ name is omitted for x86-64):
 ```text
 embld: FILE: unsupported RISC-V relocation type N (this is the next linker increment, not a bug in your program)
 ```
+
+In a MIPS REL object an `R_MIPS_HI16` takes its addend's low half from
+the `R_MIPS_LO16` that follows it against the same symbol (the o32
+rule), and one without such a `R_MIPS_LO16` is refused. The relocations
+of small-data and position-independent code are refused by name:
+`R_MIPS_GPREL16`, `R_MIPS_GPREL32` and `R_MIPS_LITERAL` (compile with
+`-G0`), `R_MIPS_GOT16` and `R_MIPS_CALL16` (compile without `-fPIC`).
 
 `embld` performs no linker relaxation and creates no veneers,
 trampolines or stubs. A relocated value that its field cannot hold is an
@@ -458,6 +485,7 @@ the symbol, the value and the range the field holds:
 |---|---|
 | x86-64 | `R_X86_64_32` (0 to 2^32 - 1), `R_X86_64_32S`, `R_X86_64_PC32`, `R_X86_64_PLT32` and `R_X86_64_TPOFF32` (-2^31 to 2^31 - 1) |
 | RISC-V | `R_RISCV_32` (-2^31 to 2^32 - 1), `R_RISCV_BRANCH` (±4 KiB), `R_RISCV_JAL` (±1 MiB); at RV64 only, `R_RISCV_HI20`, `R_RISCV_PCREL_HI20`, `R_RISCV_CALL` and `R_RISCV_CALL_PLT` (about ±2 GiB) |
+| MIPS | `R_MIPS_32` (-2^31 to 2^32 - 1), `R_MIPS_PC16` (-131072 to 131068), `R_MIPS_26` (a multiple of 4, in the 256 MiB region of the instruction after the jump; refused with `a jal or j at ADDR to 'SYM' at ADDR, which is in another 256 MiB region; jal reaches only its own`) |
 
 ```text
 embld: far.o: R_X86_64_PC32 against 'g' needs 12880707577 (0x2ffbffff9), and the field holds -2147483648 to 2147483647; the image is laid out beyond what this code can reach
@@ -546,8 +574,8 @@ address of 0 is the same as not giving the option.
 
 ### `-Tstack ADDR`, `-TstackADDR`
 
-RISC-V only. Emit an entry stub that sets the stack pointer to `ADDR` and
-jumps to the entry symbol, and make the stub the ELF entry point. See
+RISC-V and MIPS only. Emit an entry stub that sets the stack pointer to
+`ADDR` and jumps to the entry symbol, and make the stub the ELF entry point. See
 [Firmware layout](#firmware-layout). On any other machine the link fails.
 
 ### `--lma-offset OFFSET`, `--lma-offset=OFFSET`

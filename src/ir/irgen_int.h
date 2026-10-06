@@ -31,6 +31,9 @@ int gen_convert(struct ir_func *fn, int v, const struct type *from,
 /* va_arg(ap, struct T): the slot sema gave the expression (its value),
  * and `n` bytes copied into it at `off` from the address `src` */
 int irg_va_struct_slot(struct ir_func *fn, struct expr *e);
+/* Mark the IR_LOAD/IR_STORE just emitted as naturally aligned when the
+ * lvalue `e` is (ir_ins.natural): anything but a packed member. */
+void irg_mark_natural(struct ir_func *fn, const struct expr *e);
 void irg_va_copy(struct ir_func *fn, int dst, long off, int src, long n);
 
 /* ---- per-architecture lowering (src/arch/<arch>/irgen.c) ---- */
@@ -43,6 +46,7 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e);
 /* AAPCS32, where a va_list is a bare pointer at the next argument. */
 int irg_va_arg_thumb(struct ir_func *fn, struct expr *e);
 int irg_va_arg_riscv(struct ir_func *fn, struct expr *e);
+int irg_va_arg_mips(struct ir_func *fn, struct expr *e);
 /* AVR, where a variadic call puts EVERY argument on the stack -- the named
  * ones too -- so the list is a bare pointer and there is no split point. */
 int irg_va_arg_avr(struct ir_func *fn, struct expr *e);
@@ -51,6 +55,7 @@ int irg_va_arg_avr(struct ir_func *fn, struct expr *e);
 void irg_asm_x86(struct ir_func *fn, struct stmt *s);
 void irg_asm_arm64(struct ir_func *fn, struct stmt *s);
 void irg_asm_riscv(struct ir_func *fn, struct stmt *s);
+void irg_asm_mips(struct ir_func *fn, struct stmt *s);
 void irg_asm_thumb(struct ir_func *fn, struct stmt *s);
 void irg_asm_avr(struct ir_func *fn, struct stmt *s);
 
