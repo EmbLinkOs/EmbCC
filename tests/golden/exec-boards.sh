@@ -119,8 +119,10 @@ done
 # On the 32-bit machines, programs written for a 64-bit `long`: they
 # shift a long by 32 or more, store 0x1122334455667788L in one, or
 # compare sizeof(long) with 8.
-SKIP32=" attr-layout bit-builtins c-extras2 enum-wide-values ext-add
- global-aggregates globals gnu-attr-positions long-double longs
+# atomics-reg.c checks its 64-bit forms on `long` (0x123456789abcdef0L);
+# the M4's own atomics are thumb-atomic.sh's.
+SKIP32=" atomics-reg attr-layout bit-builtins c-extras2 enum-wide-values
+ ext-add global-aggregates globals gnu-attr-positions long-double longs
  sizeof-cast static-local-init strings structs u64-float "
 # On the M4 only: complex.c, which clang's build fails there too.
 SKIPM4=" complex "
