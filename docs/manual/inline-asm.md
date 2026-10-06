@@ -561,6 +561,11 @@ alignment directives ask and at least to 4 bytes (2 on AVR). Its symbols:
   written in assembly is called from C.
 - Other labels produce no symbol.
 
+A reference to a label the block itself defines and does not make global
+reaches that label, whatever C or another block calls by the same name:
+two naked functions may each have a `loop:`, and a block's own `cfunc:`
+is not the C function `cfunc`.
+
 A call or a data word naming a C function or object is a relocation
 against it, and a function called only from a block is still emitted.
 A data word naming a local label (`.word .Ldata`) is a relocation

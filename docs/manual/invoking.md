@@ -182,6 +182,15 @@ add:
 	.size	add, .-add
 ```
 
+File-scope `asm` blocks and naked functions are written the same way on
+Cortex-M, RISC-V and AVR: their bytes, their `.globl` and `.weak` labels
+typed as the object types them, and a `.reloc` for every field they
+relocate. A label the object does not export is written as a local label
+of its block, `.Lasm<N>.<name>`. On Cortex-M a relocated data word is
+written `.long sym+N` instead, because an ARM assembler keeps a
+relocation's addend in the word, where `.reloc` does not put it. EmbCC
+reads the file back (`embcc -c FILE.s`), and so does llvm-mc.
+
 ### `-E`
 
 Preprocess the input and write the result to standard output. `-o` is

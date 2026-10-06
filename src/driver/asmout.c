@@ -109,6 +109,12 @@ static const struct site *site_in(const struct site *s, int n, int lo, int hi)
     return NULL;
 }
 
+/* Thumb, RISC-V and AVR: the file-scope asm blocks and naked functions,
+ * with their labels and relocations (at the end of this file). */
+static int blocks_by_reloc(void);
+static void blocks_emit(struct outbuf *b, struct unit *u,
+                        const unsigned char *text, long from, long textlen);
+
 /* `.LC<n>` for the string at that .rodata offset — the label the data
  * section below defines. */
 static void str_label(char *out, size_t cap, const struct ir_unit *iu, int off)
@@ -621,6 +627,16 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         ob_fmt(b, "\t.size\t%s, .-%s\n", asym(f->name), asym(f->name));
         prev_end = hi;
     }
+    /* The asm blocks and naked functions, in .text after the functions:
+     * their labels and relocations, where the targets below have them. */
+    if (blocks_by_reloc() && u->topasm) {
+        if (cursec) {
+            ob_str(b, "\n\t.text\n");
+            cursec = NULL;
+        }
+        blocks_emit(b, u, text, prev_end, textlen);
+        prev_end = textlen;
+    }
     /* .text may end with padding too, and the file-scope asm after it --
      * in .text, whatever section the last function was in. */
     if (cursec)
@@ -769,4 +785,441 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
             ptr_slot(b, asym(f->name), 0, 1);
         }
     }
+}
+
+/* ---- asm blocks and naked functions: Thumb, RISC-V and AVR ------------
+ *
+ * There a file-scope __asm__ block and a naked function's body are
+ * assembled by src/as/gas.c into bytes, labels and relocations (struct
+ * topasm), and the object carries all three. -S writes them as it writes
+ * a function: the bytes, with every relocated field attached by .reloc.
+ * They used to be one run of .byte, which reassembled into an object
+ * with none of the block's symbols and none of its relocations.
+ *
+ * The labels are written as the object has them. A .globl/.weak label is
+ * itself, typed as the object types it; so is a local one that names a
+ * function or an object C declares and does not define -- a static
+ * naked function, chiefly -- since the object gives that one a local
+ * symbol. Any other label is not in the object's symbol table at all, so
+ * it is written as a .L label of its block's own, `.Lasm<N>.<name>`,
+ * which keeps it out of the reassembled symbol table too and cannot
+ * clash with a label of another block or of C. A field the object
+ * relocates against a place in its own block (src/as/gas.c hands those
+ * over as offsets) names the nearest of the block's labels before the
+ * place -- its start, `.Lasm<N>`, at least -- plus the distance; or,
+ * where it must name a label AT the place (bexact: an ARM .reloc, and
+ * the auipc a RISC-V low half names), a label made there,
+ * `.Lasm<N>_<offset>`.
+ *
+ * The first of those is ARM's. An ARM assembler writes REL relocations,
+ * whose addend lives in the relocated field, and .reloc leaves the field
+ * alone: `.reloc ..., sym+8` silently becomes sym+0 there. So on Thumb
+ * no .reloc carries an addend: a data word is written `.long sym+N`,
+ * which every assembler relocates whole, a movw/movt of a symbol plus an
+ * offset is written as the instruction, and anything else with an addend
+ * is refused by name. RISC-V and AVR are RELA, and .reloc's addend is
+ * the relocation's. */
+
+/* A label -S writes in a block. */
+struct blabel {
+    int blk;                    /* its block, numbered in u->topasm order */
+    long off;                   /* within the block */
+    const char *name;           /* as written */
+    const struct asmsym *as;    /* the block's own label, or NULL: a place
+                                 * a field is relocated against */
+    int sym;                    /* a symbol of the object: global, or local
+                                 * and declared by C */
+    int ctype;                  /* ASMSYM_*: the symbol's type there */
+};
+
+/* What one relocated field of a block is written against. */
+struct bref {
+    const char *sym;
+    long addend;
+};
+
+struct bstate {
+    const struct topasm **blk;
+    int nblk;
+    struct blabel *lab;
+    int nlab, caplab;
+};
+
+static int blocks_by_reloc(void)
+{
+    enum target_arch a = target_get();
+    return a == TARGET_THUMB || a == TARGET_RISCV32 ||
+           a == TARGET_RISCV64 || a == TARGET_AVR;
+}
+
+static struct blabel *blabel_add(struct bstate *s, int blk, long off)
+{
+    if (s->nlab == s->caplab) {
+        s->caplab = s->caplab ? 2 * s->caplab : 16;
+        s->lab = xrealloc(s->lab, (size_t)s->caplab * sizeof *s->lab);
+    }
+    struct blabel *l = &s->lab[s->nlab++];
+    memset(l, 0, sizeof *l);
+    l->blk = blk;
+    l->off = off;
+    return l;
+}
+
+static const char *bname(const char *fmt, int blk, const char *name, long off)
+{
+    char buf[300];
+    if (name)
+        snprintf(buf, sizeof buf, fmt, blk, name);
+    else
+        snprintf(buf, sizeof buf, fmt, blk, off);
+    return asym(xstrndup(buf, strlen(buf)));
+}
+
+/* How the object types a block's LOCAL label: ASMSYM_FUNC or
+ * ASMSYM_OBJECT when it is the one that gives a function or an object C
+ * declared and did not define its symbol, else 0 (src/driver/main.c's
+ * local labels, which take the first such label in block order). */
+static int blabel_claim(const struct unit *u, const struct bstate *s,
+                        const char *name)
+{
+    int ct = 0;
+    for (const struct func *f = u->funcs; f && !ct; f = f->next)
+        if (!f->absorbed && !f->has_defn && !f->alias_of &&
+            strcmp(f->name, name) == 0)
+            ct = ASMSYM_FUNC;
+    for (const struct global *g = u->globals; g && !ct; g = g->next)
+        if (!g->absorbed && !g->defined && strcmp(g->name, name) == 0)
+            ct = ASMSYM_OBJECT;
+    for (int i = 0; i < s->nlab && ct; i++)
+        if (s->lab[i].sym && s->lab[i].as && !s->lab[i].as->is_global &&
+            strcmp(s->lab[i].as->name, name) == 0)
+            ct = 0;                         /* an earlier block's has it */
+    return ct;
+}
+
+/* Whether a field must name a label AT its target, with nothing added:
+ * an ARM .reloc, whose addend an ARM assembler loses (see above), and a
+ * RISC-V low half, which names its auipc. */
+static int bexact(int type)
+{
+    switch (target_get()) {
+    case TARGET_THUMB:
+        return type != R_ARM_ABS32;
+    case TARGET_RISCV32:
+    case TARGET_RISCV64:
+        return type == R_RISCV_PCREL_LO12_I || type == R_RISCV_PCREL_LO12_S;
+    default:
+        return 0;
+    }
+}
+
+/* A place in a block, as a label plus an addend: the block's own .L-named
+ * label there, or one made for the place -- but not inside a Thumb word
+ * that is written as a statement (bspelled), where no label can go, nor
+ * outside the block. Those are the block's start plus the distance. */
+static void bplace(struct bstate *s, int blk, long x, long bit, int exact,
+                   struct bref *r)
+{
+    const struct topasm *ta = s->blk[blk];
+    int room = x >= 0 && x <= ta->codelen;
+    for (int j = 0; j < ta->nrels && room; j++) {
+        int t = ta->rels[j].elf_type;
+        if (target_get() == TARGET_THUMB && x > ta->rels[j].off &&
+            x < ta->rels[j].off + 4 &&
+            (t == R_ARM_ABS32 || t == R_ARM_THM_MOVW_ABS_NC ||
+             t == R_ARM_THM_MOVT_ABS))
+            room = 0;
+    }
+    if (room) {
+        for (int i = 0; i < s->nlab; i++)
+            if (s->lab[i].blk == blk && s->lab[i].off == x && !s->lab[i].sym) {
+                r->sym = s->lab[i].name;
+                r->addend = bit;
+                return;
+            }
+        if (exact) {
+            struct blabel *l = blabel_add(s, blk, x);
+            l->name = bname(".Lasm%d_%ld", blk, NULL, x);
+            r->sym = l->name;
+            r->addend = bit;
+            return;
+        }
+    }
+    /* the nearest of the block's own labels before it, for the reader */
+    const struct blabel *near = NULL;
+    for (int i = 0; i < s->nlab && x >= 0 && x <= ta->codelen; i++)
+        if (s->lab[i].blk == blk && !s->lab[i].sym && s->lab[i].off <= x &&
+            (!near || s->lab[i].off > near->off))
+            near = &s->lab[i];
+    r->sym = near ? near->name : bname(".Lasm%d", blk, NULL, 0);
+    r->addend = x - (near ? near->off : 0) + bit;
+}
+
+/* What a block's field names, resolved as src/driver/main.c resolves it
+ * for the object: a field against the block's own assembler-local label
+ * is its block's start plus the addend; a name is a block's global label,
+ * else a function or object of C's, else the first block's local label
+ * of that name (a Thumb function's address carrying its bit), else an
+ * undefined symbol. */
+static void bresolve(const struct unit *u, struct bstate *s, int blk,
+                     const struct asmrel *r, struct bref *out)
+{
+    int exact = bexact(r->elf_type);
+    if (!r->target) {
+        bplace(s, blk, r->addend, 0, exact, out);
+        return;
+    }
+    out->sym = asym(r->target);
+    out->addend = r->addend;
+    for (int i = 0; i < s->nlab; i++)
+        if (s->lab[i].as && s->lab[i].as->is_global &&
+            strcmp(s->lab[i].as->name, r->target) == 0)
+            return;
+    for (const struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && strcmp(f->name, r->target) == 0)
+            return;
+    for (const struct global *g = u->globals; g; g = g->next)
+        if (!g->absorbed && strcmp(g->name, r->target) == 0)
+            return;
+    for (int i = 0; i < s->nlab; i++) {
+        const struct asmsym *as = s->lab[i].as;
+        if (!as || strcmp(as->name, r->target) != 0)
+            continue;
+        long x = as->off + r->addend;
+        /* the object ORs the bit in, so an odd place keeps its value */
+        long bit = target_get() == TARGET_THUMB &&
+                   as->type == ASMSYM_FUNC &&
+                   (!r->elf_type || r->elf_type == R_ARM_ABS32) &&
+                   !((s->blk[s->lab[i].blk]->text_off + x) & 1);
+        if (!r->addend || !exact) {        /* the label, plus the addend */
+            out->sym = s->lab[i].name;
+            out->addend = r->addend + bit;
+            return;
+        }
+        bplace(s, s->lab[i].blk, x, bit, 1, out);
+        return;
+    }
+}
+
+/* Thumb: a field written as its own statement rather than as bytes and
+ * a .reloc -- a data word, and a movw/movt whose addend is not 0. */
+static int bspelled(const struct asmrel *r, const struct bref *ref)
+{
+    if (target_get() != TARGET_THUMB)
+        return 0;
+    return r->elf_type == R_ARM_ABS32 ||
+           ((r->elf_type == R_ARM_THM_MOVW_ABS_NC ||
+             r->elf_type == R_ARM_THM_MOVT_ABS) && ref->addend);
+}
+
+/* A data word's width, by the relocation on it; 0 for an instruction's. */
+static long bdata_width(int type)
+{
+    switch (target_get()) {
+    case TARGET_THUMB:
+        return type == R_ARM_ABS32 ? 4 : 0;
+    case TARGET_RISCV32:
+    case TARGET_RISCV64:
+        return type == R_RISCV_32 ? 4 : type == R_RISCV_64 ? 8 : 0;
+    case TARGET_AVR:
+        return type == R_AVR_16 || type == R_AVR_16_PM ? 2
+             : type == R_AVR_32 ? 4 : 0;
+    default:
+        return 0;
+    }
+}
+
+static void bsym_ref(struct outbuf *b, const struct bref *ref)
+{
+    if (ref->addend)
+        ob_fmt(b, "%s%+ld", ref->sym, ref->addend);
+    else
+        ob_str(b, ref->sym);
+}
+
+static void bytes_line(struct outbuf *b, const unsigned char *p, long n)
+{
+    ob_str(b, "\t.byte\t");
+    for (long k = 0; k < n; k++)
+        ob_fmt(b, "%s0x%02x", k ? "," : "", (unsigned)p[k]);
+    ob_str(b, "\n");
+}
+
+/* The file-scope blocks and naked functions, which follow the functions
+ * in .text, from `from` to the end. */
+static void blocks_emit(struct outbuf *b, struct unit *u,
+                        const unsigned char *text, long from, long textlen)
+{
+    struct bstate s;
+    int thumb = target_get() == TARGET_THUMB;
+    memset(&s, 0, sizeof s);
+    for (const struct topasm *t = u->topasm; t; t = t->next)
+        s.nblk++;
+    s.blk = xcalloc((size_t)(s.nblk ? s.nblk : 1), sizeof *s.blk);
+    {
+        int i = 0;
+        for (const struct topasm *t = u->topasm; t; t = t->next)
+            s.blk[i++] = t;
+    }
+    /* the blocks' own labels, first all of them, for the references */
+    for (int i = 0; i < s.nblk; i++)
+        for (int j = 0; j < s.blk[i]->nsyms; j++) {
+            const struct asmsym *as = &s.blk[i]->syms[j];
+            int ct = as->is_global ? 0 : blabel_claim(u, &s, as->name);
+            struct blabel *l = blabel_add(&s, i, as->off);
+            l->as = as;
+            if (as->is_global) {
+                /* untyped, the object makes it a function -- but on
+                 * Thumb, where a function's address carries a bit */
+                l->sym = 1;
+                l->ctype = as->type != ASMSYM_UNTYPED ? as->type
+                         : thumb ? ASMSYM_UNTYPED : ASMSYM_FUNC;
+                l->name = asym(as->name);
+            } else if (ct) {
+                l->sym = 1;
+                l->ctype = ct;
+                l->name = asym(as->name);
+            } else {
+                l->name = bname(".Lasm%d.%s", i, as->name, 0);
+            }
+        }
+    /* what each relocated field names, which adds the places */
+    struct bref **ref = xcalloc((size_t)(s.nblk ? s.nblk : 1), sizeof *ref);
+    for (int i = 0; i < s.nblk; i++) {
+        const struct topasm *ta = s.blk[i];
+        ref[i] = xcalloc((size_t)(ta->nrels ? ta->nrels : 1), sizeof *ref[i]);
+        for (int j = 0; j < ta->nrels; j++)
+            bresolve(u, &s, i, &ta->rels[j], &ref[i][j]);
+    }
+
+    long pc = from;
+    for (int i = 0; i < s.nblk; i++) {
+        const struct topasm *ta = s.blk[i];
+        const unsigned char *code = text + ta->text_off;
+        ob_str(b, "\n");
+        if (ta->text_off > pc)                 /* the padding before it */
+            bytes_line(b, text + pc, ta->text_off - pc);
+        ob_fmt(b, "%s:\n", bname(".Lasm%d", i, NULL, 0));
+        for (long k = 0; k <= ta->codelen; ) {
+            /* the labels here, a block's own first */
+            for (int pass = 0; pass < 2; pass++)
+                for (int j = 0; j < s.nlab; j++) {
+                    const struct blabel *l = &s.lab[j];
+                    if (l->blk != i || l->off != k || (pass == 0) != !!l->as)
+                        continue;
+                    if (l->sym && l->as->is_global)
+                        ob_fmt(b, "\t.%s\t%s\n",
+                               l->as->is_weak ? "weak" : "globl", l->name);
+                    if (l->sym && l->ctype == ASMSYM_FUNC) {
+                        if (thumb)
+                            ob_str(b, "\t.thumb_func\n");
+                        ob_fmt(b, "\t.type\t%s, %sfunction\n", l->name,
+                               type_sigil());
+                    } else if (l->sym && l->ctype == ASMSYM_OBJECT) {
+                        ob_fmt(b, "\t.type\t%s, %sobject\n", l->name,
+                               type_sigil());
+                    }
+                    ob_fmt(b, "%s:\n", l->name);
+                }
+            if (k == ta->codelen)
+                break;
+            /* a field written as a statement of its own */
+            int done = 0;
+            for (int j = 0; j < ta->nrels && !done; j++) {
+                const struct asmrel *r = &ta->rels[j];
+                if (r->off != k || !bspelled(r, &ref[i][j]))
+                    continue;
+                for (int q = 0; q < s.nlab; q++)
+                    if (s.lab[q].blk == i && s.lab[q].off > k &&
+                        s.lab[q].off < k + 4)
+                        diag_fatal(ta->file, ta->line, "-S cannot write the "
+                                   "asm block's label %s inside a relocated "
+                                   "word", s.lab[q].name);
+                if (k + 4 > ta->codelen)
+                    diag_fatal(ta->file, ta->line, "-S cannot write the asm "
+                               "block's relocated word at its end");
+                if (r->elf_type == R_ARM_ABS32) {
+                    ob_str(b, "\t.long\t");
+                } else {
+                    unsigned h1 = (unsigned)code[k] | (unsigned)code[k + 1] << 8;
+                    unsigned h2 = (unsigned)code[k + 2] |
+                                  (unsigned)code[k + 3] << 8;
+                    int top = r->elf_type == R_ARM_THM_MOVT_ABS;
+                    if ((h1 & 0xfbf0u) != (top ? 0xf2c0u : 0xf240u))
+                        diag_fatal(ta->file, ta->line, "-S cannot write the "
+                                   "asm block's %s relocation on %04x %04x, "
+                                   "which is not a %s", top ? "movt" : "movw",
+                                   h1, h2, top ? "movt" : "movw");
+                    ob_fmt(b, "\t%s\tr%u, #:%s16:", top ? "movt" : "movw",
+                           (h2 >> 8) & 15u, top ? "upper" : "lower");
+                }
+                bsym_ref(b, &ref[i][j]);
+                ob_str(b, "\n");
+                k += 4;
+                done = 1;
+            }
+            if (done)
+                continue;
+            /* an instruction, or a data word -- up to the next label or
+             * spelled field, whichever is first */
+            long len = 0;
+            for (int j = 0; j < ta->nrels && !len; j++)
+                if (ta->rels[j].off == k)
+                    len = bdata_width(ta->rels[j].elf_type);
+            for (int d = 0; d + 1 < ta->ndrange && !len; d += 2)
+                if (k >= ta->drange[d] && k < ta->drange[d + 1])
+                    len = ta->drange[d + 1] - k < 4 ? ta->drange[d + 1] - k : 4;
+            if (!len)
+                len = target_insn_len(code + k, (int)(ta->codelen - k));
+            if (len < 1)
+                len = 1;
+            long e = k + len > ta->codelen ? ta->codelen : k + len;
+            for (int j = 0; j < s.nlab; j++)
+                if (s.lab[j].blk == i && s.lab[j].off > k && s.lab[j].off < e)
+                    e = s.lab[j].off;
+            for (int j = 0; j < ta->nrels; j++)
+                if (ta->rels[j].off > k && ta->rels[j].off < e &&
+                    bspelled(&ta->rels[j], &ref[i][j]))
+                    e = ta->rels[j].off;
+            bytes_line(b, code + k, e - k);
+            for (int j = 0; j < ta->nrels; j++) {
+                const struct asmrel *r = &ta->rels[j];
+                const char *rt;
+                if (r->off < k || r->off >= e)
+                    continue;
+                rt = target_reloc_name(target_get(), r->elf_type);
+                if (!rt)
+                    diag_fatal(ta->file, ta->line, "-S cannot write the asm "
+                               "block's relocation of ELF type %d for %s",
+                               r->elf_type, target_triple_now());
+                /* An ARM .reloc keeps no addend (REL), and a RISC-V low
+                 * half names its auipc; see above. */
+                if (bexact(r->elf_type) && ref[i][j].addend)
+                    diag_fatal(ta->file, ta->line, "-S cannot write the asm "
+                               "block's %s against %s%+ld: %s", rt,
+                               ref[i][j].sym, ref[i][j].addend,
+                               thumb ? "an ARM assembler takes the addend "
+                                       "from the instruction, which .reloc "
+                                       "leaves as it is"
+                                     : "it must name the auipc it pairs "
+                                       "with");
+                ob_fmt(b, "\t.reloc\t.-%ld, %s, ", e - r->off, rt);
+                bsym_ref(b, &ref[i][j]);
+                ob_str(b, "\n");
+            }
+            k = e;
+        }
+        for (int j = 0; j < s.nlab; j++)
+            if (s.lab[j].blk == i && s.lab[j].sym && s.lab[j].as->size)
+                ob_fmt(b, "\t.size\t%s, %ld\n", s.lab[j].name,
+                       s.lab[j].as->size);
+        pc = ta->text_off + ta->codelen;
+    }
+    if (textlen > pc)
+        bytes_line(b, text + pc, textlen - pc);
+    for (int i = 0; i < s.nblk; i++)
+        free(ref[i]);
+    free(ref);
+    free(s.lab);
+    free(s.blk);
 }
