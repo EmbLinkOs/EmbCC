@@ -4940,9 +4940,7 @@ static void g_t_reserve_pairs(struct ir_func *fn, const int *loc)
     int nv = fn->nvregs;
     int *first = xmalloc((size_t)(nv ? nv : 1) * sizeof *first);
     int *last = xmalloc((size_t)(nv ? nv : 1) * sizeof *last);
-    unsigned long *li = NULL, *lo;
-    int *dv = NULL, wds = 0;
-    lo = ra_live_intervals(fn, first, last, &li, &dv, &wds);
+    ra_live_ranges(fn, first, last);
     g_t_nres = 0;
     for (int v = 0; v < nv; v++) {
         int born = 0;
@@ -4955,9 +4953,10 @@ static void g_t_reserve_pairs(struct ir_func *fn, const int *loc)
          * 0 or 1 born there: cmp64 reads both operands and writes only
          * r12, and set_cc writes the result after. Reserved through the
          * compare, `return a < b` built the result in r4, pushed it,
-         * and moved it to r0. */
-        if (last[v] < fn->nins && lo &&
-            !(lo[(size_t)last[v] * wds + v / 64] >> (v % 64) & 1)) {
+         * and moved it to r0. A compare falls through to the next
+         * instruction, so a value still live after it would be live
+         * there too: last[v] at the compare is a value that dies there. */
+        if (last[v] < fn->nins) {
             const struct ir_ins *c = &fn->ins[last[v]];
             born = c->op == IR_CMP && c->w == 8 && !c->flt &&
                    (c->a == v || (!c->imm_b && c->b == v));
@@ -4971,7 +4970,6 @@ static void g_t_reserve_pairs(struct ir_func *fn, const int *loc)
         }
     }
     ra_reserve(g_t_res, g_t_nres);
-    free(lo); free(li); free(dv);
     free(first); free(last);
 }
 static int *t_pair_alloc(struct ir_func *fn, const char *wide,
@@ -5076,8 +5074,8 @@ static unsigned lo_free(const struct t_fn *F, int n)
     const struct ir_func *fn = F->fn;
     struct lo_busy b;
     unsigned avail = 0xfu;
-    int m, w, k;
-    if (!F->lv_out || !lo_op_ok(F, &fn->ins[n]))
+    int m, k;
+    if (!F->lv_busy || !lo_op_ok(F, &fn->ins[n]))
         return 0;
     for (k = 0; k < F->nsave; k++)
         if (F->used_callee[k] < 8)
@@ -5087,14 +5085,7 @@ static unsigned lo_free(const struct t_fn *F, int n)
     b.F = F;
     b.busy = 0;
     for (m = n; m < fn->nins && m <= n + 1; m++) {
-        const unsigned long *li = F->lv_in + (size_t)m * F->lv_words;
-        const unsigned long *lo = F->lv_out + (size_t)m * F->lv_words;
-        for (w = 0; w < F->lv_words; w++) {
-            unsigned long bits = li[w] | lo[w];
-            for (k = 0; bits && k < 64; k++, bits >>= 1)
-                if (bits & 1)
-                    lo_mark(w * 64 + k, &b);
-        }
+        b.busy |= F->lv_busy[m];
         ra_each_use(&fn->ins[m], lo_mark, &b);
         lo_mark(fn->ins[m].dst, &b);
     }
@@ -5116,16 +5107,8 @@ static unsigned t_busy(const struct t_fn *F, int n, int span)
     if (!F->loc)
         return 0;
     for (int m = n; m < fn->nins && m <= n + span; m++) {
-        if (F->lv_out) {
-            const unsigned long *li = F->lv_in + (size_t)m * F->lv_words;
-            const unsigned long *lo = F->lv_out + (size_t)m * F->lv_words;
-            for (int w = 0; w < F->lv_words; w++) {
-                unsigned long bits = li[w] | lo[w];
-                for (int k = 0; bits && k < 64; k++, bits >>= 1)
-                    if (bits & 1)
-                        lo_mark(w * 64 + k, &b);
-            }
-        }
+        if (F->lv_busy)
+            b.busy |= F->lv_busy[m];
         ra_each_use(&fn->ins[m], lo_mark, &b);
         lo_mark(fn->ins[m].dst, &b);
     }
@@ -5148,6 +5131,62 @@ static void t_roles_from(unsigned busy)
     g_r_tmp = nf > 0 ? fr[0] : -1;
     g_r_addr = nf > 1 ? fr[1] : -1;
     g_r_scr = nf > 2 ? fr[2] : -1;
+}
+
+/* lo_free's liveness, as registers: for each instruction, lo_mark of
+ * every value live into it or out of it. It read those values out of
+ * the per-instruction live sets, one bit per vreg, at every instruction
+ * -- most of a 4000-statement Cortex-M compile once the optimizer was
+ * linear. A walk back through each block (ra_lset_step) keeps a count
+ * of the live values in each register instead, so an instruction costs
+ * what changes at it. */
+struct lo_cnt { const struct t_fn *F; int cnt[32]; unsigned mask; };
+static void lo_cnt_chg(int v, int added, void *ctx)
+{
+    struct lo_cnt *c = ctx;
+    struct lo_busy b;
+    b.F = c->F;
+    b.busy = 0;
+    lo_mark(v, &b);
+    for (int r = 0; r < 32; r++) {
+        if (!(b.busy >> r & 1))
+            continue;
+        if (added) {
+            if (c->cnt[r]++ == 0) c->mask |= 1u << r;
+        } else {
+            if (--c->cnt[r] == 0) c->mask &= ~(1u << r);
+        }
+    }
+}
+
+static unsigned *lo_busy_map(const struct t_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int nv = fn->nvregs;
+    int *lf = xmalloc((size_t)nv * sizeof *lf);
+    int *ll = xmalloc((size_t)nv * sizeof *ll);
+    struct ra_live *lv = ra_live_compute(fn, lf, ll);
+    unsigned *busy = xcalloc((size_t)fn->nins, sizeof *busy);
+    struct lo_cnt c;
+    struct ra_lset s;
+    memset(&c, 0, sizeof c);
+    c.F = F;
+    ra_lset_init(&s, nv);
+    s.chg = lo_cnt_chg;
+    s.chg_ctx = &c;
+    for (int b = ra_live_nblocks(lv) - 1; b >= 0; b--) {
+        ra_lset_out(&s, lv, b);
+        for (int i = ra_live_block_start(lv, b + 1) - 1;
+             i >= ra_live_block_start(lv, b); i--) {
+            unsigned out = c.mask;
+            ra_lset_step(&s, &fn->ins[i]);
+            busy[i] = out | c.mask;
+        }
+    }
+    ra_lset_free(&s);
+    ra_live_free(lv);
+    free(lf); free(ll);
+    return busy;
 }
 
 /* The callee-saved VFP registers a function uses, s16 up, `n` of them
@@ -5369,14 +5408,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             fn->ins[i].op == IR_CMPXCHG)
             F.leaf = 0;
     layout(&F);
-    if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO")) {
-        int *lf = xmalloc((size_t)fn->nvregs * sizeof *lf);
-        int *ll = xmalloc((size_t)fn->nvregs * sizeof *ll);
-        int *dv = NULL;
-        F.lv_out = ra_live_intervals(fn, lf, ll, &F.lv_in, &dv,
-                                     &F.lv_words);
-        free(lf); free(ll); free(dv);
-    }
+    if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO"))
+        F.lv_busy = lo_busy_map(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
      * jumps to so the frame size is written down once. */
@@ -5726,7 +5759,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i] && F.nopush;
         if (g_t_ext) {
-            if (!F.lv_out)
+            if (!F.lv_busy)
                 g_t_role_fail = 1;     /* no liveness: nothing is known
                                         * free, so this attempt cannot be */
             t_roles_from(t_busy(&F, i, 2));
@@ -5931,8 +5964,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.fvar);
     free(F.fscr);
     free(F.floc);
-    free(F.lv_in);
-    free(F.lv_out);
+    free(F.lv_busy);
 }
 
 /* With the allocator on and no FPU, a function is generated with the pair

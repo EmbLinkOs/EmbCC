@@ -68,19 +68,30 @@ leaves no registers). See [Stress testing](#stress-testing-with-embcc_ra_maxpool
 
 ### 2. Liveness
 
-`ra_live_intervals` computes per-instruction live-in and live-out sets
-by backward dataflow to a fixpoint. An instruction's successors are the
-next instruction (except after `IR_JMP`, `IR_RET`, `IR_UD2` and
-`IR_SWITCH`), the target of `IR_JMP`, `IR_BRZ` and `IR_BRNZ`, and the
-default and every table entry of `IR_SWITCH`. What an instruction reads
-comes from `ra_each_use` and what it defines from `ra_ins_def`; these
-are the shared operand switches, and they must agree with what the
-backends actually load and store.
+`ra_live_compute` computes the live-in and live-out sets of each basic
+block by backward dataflow: for each vreg, from the blocks that read it
+before writing it, back through predecessors to the blocks that write
+it. An instruction's successors are the next instruction (except after
+`IR_JMP`, `IR_RET`, `IR_UD2` and `IR_SWITCH`), the target of `IR_JMP`,
+`IR_BRZ` and `IR_BRNZ`, and the default and every table entry of
+`IR_SWITCH`; a block ends after each of those and starts at each label.
+What an instruction reads comes from `ra_each_use` and what it defines
+from `ra_ins_def`; these are the shared operand switches, and they must
+agree with what the backends actually load and store.
+
+Only the blocks' sets are kept. A consumer that wants the set live at an
+instruction walks back through the block from its live-out set:
+`ra_lset_out` starts the walk and `ra_lset_step` steps back over one
+instruction, and a walk can be told of every vreg that enters or leaves
+the set (`ra_lset.chg`). `ra_live_in_at` answers one question by one scan
+of a block. (Per-instruction sets, every vreg at every instruction, made
+liveness quadratic in the size of a function.)
 
 It also returns `first[v]` and `last[v]`, the lowest and highest
-instruction index at which `v` is live. Because they come from the
-dataflow and not from where `v` appears, a value carried around a loop
-is live over the whole loop body.
+instruction index at which `v` is live or written; `ra_live_ranges`
+returns only those. Because they come from the dataflow and not from
+where `v` appears, a value carried around a loop is live over the whole
+loop body.
 
 The results are shared: slot coalescing, the pair passes and
 `ra_reserve` use the same numbering.
@@ -161,6 +172,14 @@ after the instruction, including when the definition itself is dead
 A value dying at an instruction can share a register with the value
 defined there.
 
+The graph (`struct ra_graph`) keeps a node's neighbours in a list while
+it has at most 32 and in a bit row once it has more, so for a big
+function it is no larger than a bit matrix of the nodes and far smaller
+when the graph is sparse. Lists and rows belong to storage slots; a merge keeps the slot
+with more neighbours and renames the other side's neighbours to it
+(`rg_merge`), so a node merged again and again does not have its whole
+neighbourhood rewritten each time. Nothing reads the order of a list.
+
 ### 6. Preferences
 
 A preference edge joins two vregs that do not interfere and would save
@@ -187,7 +206,9 @@ narrowing copy must still be emitted.
 
 The test is Briggs's: merge only when the combined node has fewer than
 `NP` (the pool size) neighbours of significant degree. It is one pass
-over the instructions, not iterated. A merged node crosses a call if any
+over the instructions, not iterated. Each node's count of significant
+neighbours is kept through the merges, and the neighbours are counted
+out only when the two counts alone do not decide. A merged node crosses a call if any
 member does, and takes the first hint any member has.
 
 One merge is refused: when one node crosses a call and the other does
@@ -207,7 +228,9 @@ less than the number of registers it may take: `NP`, or for a node that
 crosses a call the number of callee-saved registers in the pool, since
 colouring offers it no others. When none remains, it removes the node
 with the lowest `cost / degree^2`. Ties go to the lowest node index, so
-the result is deterministic. `EMBCC_RA_DEGREE_SPILL=1` selects the
+the result is deterministic. The trivially colourable nodes wait in a
+min-heap, entered when their degree falls under the bound, which takes
+the lowest index first as a scan from the start did. `EMBCC_RA_DEGREE_SPILL=1` selects the
 highest-degree node instead, and `EMBCC_RA_POOL_K=1` counts the whole
 pool for call-crossing nodes too, each for bisecting a difference to
 that choice.
@@ -549,7 +572,9 @@ loops.
 **Low scratch.** Many 16-bit Thumb encodings take only r0-r7.
 `lo_free` finds a low register that holds no live value at the current
 instruction and the next (r0-r3, and r4-r7 when the function already
-saves them), and the operand accessors compute in it.
+saves them), and the operand accessors compute in it. The registers live
+values hold at each instruction are worked out once per function, by a
+walk through the liveness (`lo_busy_map`).
 `EMBCC_T_NOLO` turns this off.
 
 **Hints** (`t_abi_hints`): a scalar parameter of at most 4 bytes its
@@ -839,9 +864,9 @@ backend sections.
 ## Changing the allocator
 
 - An IR operation that reads or defines a vreg must be in `ra_each_use`
-  and `ra_ins_def`; a terminator must also be in the successor logic of
-  `ra_live_intervals` and the block-end lists of `ra_coalesce_temps` and
-  `ra_fold_memoff`. See
+  and `ra_ins_def`; a terminator must also be in the successor and
+  block-end logic of `ra_live_compute` and the block-end lists of
+  `ra_coalesce_temps` and `ra_fold_memoff`. See
   [Adding an IR operation](optimizer.md#adding-an-ir-operation).
 - A new opaque use (a lowering that reads a vreg from its slot) must make
   the vreg ineligible here, or be gated by a flag in `struct ra_target`
