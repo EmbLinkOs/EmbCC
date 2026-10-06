@@ -1,6 +1,7 @@
 #!/bin/sh
 # tools/bench/run.sh [-O2|-Os] [m4|rv32 ...] -- EmbCC against clang on the
-# boards, by guest instructions executed (tools/bench/icount.c).
+# boards, by guest instructions executed and by estimated cycles
+# (tools/bench/icount.c says how they are estimated).
 #
 # Every kernel of tools/bench/workload.c is built twice per compiler, with
 # N=2 and N=6 units of work, and run on QEMU (mps2-an386 for the
@@ -74,7 +75,7 @@ EOT
             ;;
     esac
     "$EMBCC" --target=$T -O1 -c "$L/drv.c" -o "$L/drv.o"
-    echo "== $b $opt: guest instructions, EmbCC / clang"
+    echo "== $b $opt: EmbCC / clang, by instructions executed and by estimated cycles"
     k=1
     for name in $names; do
         for c in embcc clang; do
@@ -105,12 +106,16 @@ EOT
         done
         k=$((k + 1))
         [ $ok = 1 ] || continue
-        de=$(( $(cat $L/$name-embcc-6.n) - $(cat $L/$name-embcc-2.n) ))
-        dc=$(( $(cat $L/$name-clang-6.n) - $(cat $L/$name-clang-2.n) ))
+        # line 1 of a .n file is instructions, line 2 estimated cycles
+        de=$(( $(sed -n 1p $L/$name-embcc-6.n) - $(sed -n 1p $L/$name-embcc-2.n) ))
+        dc=$(( $(sed -n 1p $L/$name-clang-6.n) - $(sed -n 1p $L/$name-clang-2.n) ))
+        ce=$(( $(sed -n 2p $L/$name-embcc-6.n) - $(sed -n 2p $L/$name-embcc-2.n) ))
+        cc=$(( $(sed -n 2p $L/$name-clang-6.n) - $(sed -n 2p $L/$name-clang-2.n) ))
         r=$(echo "$de $dc" | awk '{ printf "%.3f", $1 / $2 }')
-        printf '  %-8s %10d %10d  %s\n' $name $de $dc $r
-        echo "$r" >> $L/ratios.$$
+        rc=$(echo "$ce $cc" | awk '{ printf "%.3f", $1 / $2 }')
+        printf '  %-8s %10d %10d  %s   %10d %10d  %s\n' $name $de $dc $r $ce $cc $rc
+        echo "$r $rc" >> $L/ratios.$$
     done
-    [ -f $L/ratios.$$ ] && awk '{ s += log($1); n++ } END { if (n) printf "  geomean  %.3f over %d kernels\n", exp(s / n), n }' $L/ratios.$$
+    [ -f $L/ratios.$$ ] && awk '{ s += log($1); c += log($2); n++ } END { if (n) printf "  geomean  %.3f instructions, %.3f cycles, over %d kernels\n", exp(s / n), exp(c / n), n }' $L/ratios.$$
     rm -f $L/ratios.$$
 done
