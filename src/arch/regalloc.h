@@ -406,8 +406,13 @@ char *ra_narrow_hishift(const struct ir_func *fn);
 /* Fold an ADD of a constant into the loads and stores that are its only
  * uses (ir_ins.memoff), for a target with base+offset addressing whose
  * encodable range is [lo, hi - size]. Run before allocation. */
-/* `max_size`: the widest access whose lowering reads memoff. */
+/* `max_size`: the widest access whose lowering reads memoff.
+ * `regoff`: the target's accesses can add a register themselves
+ * ([rn, rm, lsl #s]), so `(base + K) + i` is reassociated only for an
+ * address two or more accesses share; `short_k`, when not 0, the largest
+ * multiple of an access's size its short encoding reaches (31 on Thumb),
+ * beyond which the constant stays out of the access. */
 int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
-                   int max_size, const char *wide);
+                   int max_size, const char *wide, int regoff, int short_k);
 
 #endif
