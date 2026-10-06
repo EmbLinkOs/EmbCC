@@ -3662,8 +3662,16 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         long addend = 0;
         if (core && core->kind != EXPR_STR)
             resolve_addr(core, &gt, &ft, &addend);
-        if ((core && core->kind == EXPR_STR && v[k].ty->kind == TY_PTR) ||
-            ((gt || ft) && v[k].ty->kind == TY_PTR)) {
+        /* An integer exactly as wide as a pointer holds an address as
+         * well as a pointer does: `(uintptr_t)&stack[N]` is a constant
+         * address the linker computes, and GCC and Clang take it. FreeRTOS's
+         * RISC-V port starts its interrupt stack that way. A narrower
+         * integer cannot hold one, and is still refused below. */
+        int addr_slot = v[k].ty->kind == TY_PTR ||
+                        (ty_is_integer(v[k].ty) && !v[k].bit_width &&
+                         ty_size(v[k].ty) == target_ptr_size());
+        if ((core && core->kind == EXPR_STR && addr_slot) ||
+            ((gt || ft) && addr_slot)) {
             /* a pointer slot: zero bytes stay, the linker writes the address
              * of a string literal, a global (+addend), or a function. */
             if (nrel == caprel) {
