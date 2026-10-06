@@ -908,3 +908,68 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
         return bias;
     }
 }
+
+/* ELF relocation types by name, as an assembler's `.reloc` spells them:
+ * the ones `embcc -S` writes for Cortex-M, RISC-V and AVR, and the ones
+ * an object from these targets may carry beside them. One table read
+ * both ways -- -S writes a name from a number (src/driver/asmout.c) and
+ * the assembler reads it back (src/as/gas.c) -- so the two cannot
+ * disagree about what a name means. */
+static const struct reloc_spelling {
+    int machine;
+    int type;
+    const char *name;
+} reloc_names[] = {
+    { EM_ARM,   R_ARM_NONE,            "R_ARM_NONE" },
+    { EM_ARM,   R_ARM_ABS32,           "R_ARM_ABS32" },
+    { EM_ARM,   R_ARM_REL32,           "R_ARM_REL32" },
+    { EM_ARM,   R_ARM_THM_CALL,        "R_ARM_THM_CALL" },
+    { EM_ARM,   R_ARM_THM_JUMP24,      "R_ARM_THM_JUMP24" },
+    { EM_ARM,   R_ARM_TARGET1,         "R_ARM_TARGET1" },
+    { EM_ARM,   R_ARM_PREL31,          "R_ARM_PREL31" },
+    { EM_ARM,   R_ARM_THM_MOVW_ABS_NC, "R_ARM_THM_MOVW_ABS_NC" },
+    { EM_ARM,   R_ARM_THM_MOVT_ABS,    "R_ARM_THM_MOVT_ABS" },
+    { EM_RISCV, R_RISCV_32,            "R_RISCV_32" },
+    { EM_RISCV, R_RISCV_64,            "R_RISCV_64" },
+    { EM_RISCV, R_RISCV_BRANCH,        "R_RISCV_BRANCH" },
+    { EM_RISCV, R_RISCV_JAL,           "R_RISCV_JAL" },
+    { EM_RISCV, R_RISCV_CALL,          "R_RISCV_CALL" },
+    { EM_RISCV, R_RISCV_CALL_PLT,      "R_RISCV_CALL_PLT" },
+    { EM_RISCV, R_RISCV_PCREL_HI20,    "R_RISCV_PCREL_HI20" },
+    { EM_RISCV, R_RISCV_PCREL_LO12_I,  "R_RISCV_PCREL_LO12_I" },
+    { EM_RISCV, R_RISCV_PCREL_LO12_S,  "R_RISCV_PCREL_LO12_S" },
+    { EM_RISCV, R_RISCV_HI20,          "R_RISCV_HI20" },
+    { EM_RISCV, R_RISCV_LO12_I,        "R_RISCV_LO12_I" },
+    { EM_RISCV, R_RISCV_LO12_S,        "R_RISCV_LO12_S" },
+    { EM_AVR,   R_AVR_NONE,            "R_AVR_NONE" },
+    { EM_AVR,   R_AVR_32,              "R_AVR_32" },
+    { EM_AVR,   R_AVR_7_PCREL,         "R_AVR_7_PCREL" },
+    { EM_AVR,   R_AVR_13_PCREL,        "R_AVR_13_PCREL" },
+    { EM_AVR,   R_AVR_16,              "R_AVR_16" },
+    { EM_AVR,   R_AVR_16_PM,           "R_AVR_16_PM" },
+    { EM_AVR,   R_AVR_LO8_LDI,         "R_AVR_LO8_LDI" },
+    { EM_AVR,   R_AVR_HI8_LDI,         "R_AVR_HI8_LDI" },
+    { EM_AVR,   R_AVR_CALL,            "R_AVR_CALL" },
+    { EM_AVR,   R_AVR_LO8_LDI_GS,      "R_AVR_LO8_LDI_GS" },
+    { EM_AVR,   R_AVR_HI8_LDI_GS,      "R_AVR_HI8_LDI_GS" },
+};
+
+const char *target_reloc_name(enum target_arch a, int type)
+{
+    int m = target_elf_machine(a);
+    for (size_t i = 0; i < sizeof reloc_names / sizeof reloc_names[0]; i++)
+        if (reloc_names[i].machine == m && reloc_names[i].type == type)
+            return reloc_names[i].name;
+    return NULL;
+}
+
+int target_reloc_by_name(enum target_arch a, const char *name, int n)
+{
+    int m = target_elf_machine(a);
+    for (size_t i = 0; i < sizeof reloc_names / sizeof reloc_names[0]; i++)
+        if (reloc_names[i].machine == m &&
+            strlen(reloc_names[i].name) == (size_t)n &&
+            memcmp(reloc_names[i].name, name, (size_t)n) == 0)
+            return reloc_names[i].type;
+    return -1;
+}

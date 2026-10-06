@@ -605,6 +605,12 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
  * site-specific part (a string's offset into .rodata, say). */
 long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias);
 
+/* An ELF relocation type's name on this target's machine, as `.reloc`
+ * spells it ("R_ARM_THM_CALL"), or NULL where the table has none; and
+ * the type a name means, or -1. */
+const char *target_reloc_name(enum target_arch a, int type);
+int target_reloc_by_name(enum target_arch a, const char *name, int n);
+
 /* ELF e_machine. */
 int target_elf_machine(enum target_arch a);
 /* ...and its e_flags: ARM's EABI version, RISC-V's EF_RISCV_RVC when the
