@@ -2526,8 +2526,16 @@ static void write_exec(struct linker *l, const char *out,
      * offset 0, covering the headers. An image without one keeps the
      * layout it has always had, because EmbLinkOS's loader has been
      * reading that layout since before this existed and nothing here
-     * needs to change for it. */
+     * needs to change for it.
+     *
+     * Not a FIRMWARE image (-Tdata): nothing hands it AT_PHDR -- it is
+     * copied into flash and its startup finds the template by the
+     * linker's symbols -- and covering the headers started its text
+     * segment that many bytes below the text, which at -Ttext 0 is
+     * 0xffffff6c: QEMU loaded no vector table and the Cortex-M locked
+     * up at reset, for any program with a thread_local in it. */
     int ntls = tls_memsz ? 1 : 0;
+    int hdrs_in_text = ntls && !l->data_base;
     int nph = 2 + ntls;
     /* File layout: ehdr, 2 phdrs, then the text bytes at a file offset
      * congruent to their vaddr mod PAGE, then the data bytes likewise.
@@ -2701,7 +2709,7 @@ static void write_exec(struct linker *l, const char *out,
     Elf64_Phdr *ph = phbuf;
     ph[0].p_type = PT_LOAD;
     ph[0].p_flags = PF_R | PF_X;
-    if (ntls) {
+    if (hdrs_in_text) {
         /* From file offset 0, so the headers are mapped and AT_PHDR is
          * real. The segment therefore begins text_off bytes before the
          * text does. */
