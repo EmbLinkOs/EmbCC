@@ -871,6 +871,18 @@ void diag_enable_group(int wall, int wextra)
             g_warns[i].on = 1;
 }
 
+/* GCC warnings that are errors here, always. An implicit function
+ * declaration stops the compile (E0001: a call needs a prototype), as
+ * C99 says and GCC 14 agrees, so -Wimplicit-function-declaration and
+ * -Werror=implicit-function-declaration -- which every
+ * arm-none-eabi-gcc Makefile of a certain age passes -- ask for what
+ * already happens. Neither is a warning EmbCC "has", and saying so made
+ * the build log claim the check was missing when it is stricter. */
+int diag_always_error(const char *name)
+{
+    return !strcmp(name, "implicit-function-declaration");
+}
+
 /* The names, for --help. */
 int diag_warning_count(void) { return g_nwarns; }
 const char *diag_warning_name(int i) { return g_warns[i].name; }

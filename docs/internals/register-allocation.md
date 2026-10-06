@@ -68,19 +68,30 @@ leaves no registers). See [Stress testing](#stress-testing-with-embcc_ra_maxpool
 
 ### 2. Liveness
 
-`ra_live_intervals` computes per-instruction live-in and live-out sets
-by backward dataflow to a fixpoint. An instruction's successors are the
-next instruction (except after `IR_JMP`, `IR_RET`, `IR_UD2` and
-`IR_SWITCH`), the target of `IR_JMP`, `IR_BRZ` and `IR_BRNZ`, and the
-default and every table entry of `IR_SWITCH`. What an instruction reads
-comes from `ra_each_use` and what it defines from `ra_ins_def`; these
-are the shared operand switches, and they must agree with what the
-backends actually load and store.
+`ra_live_compute` computes the live-in and live-out sets of each basic
+block by backward dataflow: for each vreg, from the blocks that read it
+before writing it, back through predecessors to the blocks that write
+it. An instruction's successors are the next instruction (except after
+`IR_JMP`, `IR_RET`, `IR_UD2` and `IR_SWITCH`), the target of `IR_JMP`,
+`IR_BRZ` and `IR_BRNZ`, and the default and every table entry of
+`IR_SWITCH`; a block ends after each of those and starts at each label.
+What an instruction reads comes from `ra_each_use` and what it defines
+from `ra_ins_def`; these are the shared operand switches, and they must
+agree with what the backends actually load and store.
+
+Only the blocks' sets are kept. A consumer that wants the set live at an
+instruction walks back through the block from its live-out set:
+`ra_lset_out` starts the walk and `ra_lset_step` steps back over one
+instruction, and a walk can be told of every vreg that enters or leaves
+the set (`ra_lset.chg`). `ra_live_in_at` answers one question by one scan
+of a block. (Per-instruction sets, every vreg at every instruction, made
+liveness quadratic in the size of a function.)
 
 It also returns `first[v]` and `last[v]`, the lowest and highest
-instruction index at which `v` is live. Because they come from the
-dataflow and not from where `v` appears, a value carried around a loop
-is live over the whole loop body.
+instruction index at which `v` is live or written; `ra_live_ranges`
+returns only those. Because they come from the dataflow and not from
+where `v` appears, a value carried around a loop is live over the whole
+loop body.
 
 The results are shared: slot coalescing, the pair passes and
 `ra_reserve` use the same numbering.
@@ -161,6 +172,14 @@ after the instruction, including when the definition itself is dead
 A value dying at an instruction can share a register with the value
 defined there.
 
+The graph (`struct ra_graph`) keeps a node's neighbours in a list while
+it has at most 32 and in a bit row once it has more, so for a big
+function it is no larger than a bit matrix of the nodes and far smaller
+when the graph is sparse. Lists and rows belong to storage slots; a merge keeps the slot
+with more neighbours and renames the other side's neighbours to it
+(`rg_merge`), so a node merged again and again does not have its whole
+neighbourhood rewritten each time. Nothing reads the order of a list.
+
 ### 6. Preferences
 
 A preference edge joins two vregs that do not interfere and would save
@@ -187,7 +206,9 @@ narrowing copy must still be emitted.
 
 The test is Briggs's: merge only when the combined node has fewer than
 `NP` (the pool size) neighbours of significant degree. It is one pass
-over the instructions, not iterated. A merged node crosses a call if any
+over the instructions, not iterated. Each node's count of significant
+neighbours is kept through the merges, and the neighbours are counted
+out only when the two counts alone do not decide. A merged node crosses a call if any
 member does, and takes the first hint any member has.
 
 One merge is refused: when one node crosses a call and the other does
@@ -207,7 +228,9 @@ less than the number of registers it may take: `NP`, or for a node that
 crosses a call the number of callee-saved registers in the pool, since
 colouring offers it no others. When none remains, it removes the node
 with the lowest `cost / degree^2`. Ties go to the lowest node index, so
-the result is deterministic. `EMBCC_RA_DEGREE_SPILL=1` selects the
+the result is deterministic. The trivially colourable nodes wait in a
+min-heap, entered when their degree falls under the bound, which takes
+the lowest index first as a scan from the start did. `EMBCC_RA_DEGREE_SPILL=1` selects the
 highest-degree node instead, and `EMBCC_RA_POOL_K=1` counts the whole
 pool for call-crossing nodes too, each for bisecting a difference to
 that choice.
@@ -318,8 +341,8 @@ frames. Three shared helpers connect the two:
 
 ## Pairs on 32-bit and 8-bit targets
 
-On Thumb and RV32 a 64-bit value (a `long long`, or a `double` on a
-soft-float target) needs two registers. Those backends run a separate
+On Thumb, RV32 and MIPS32 a 64-bit value (a `long long`, or a `double`
+on a soft-float target) needs two registers. Those backends run a separate
 **pair pass** before the integer pass: `ra_allocate` with a pool whose
 entries are the low registers of aligned pairs, over only the 64-bit
 vregs. Each allocated pair is then registered with `ra_reserve(ranges,
@@ -348,7 +371,7 @@ Moves with `dst == src` are dropped. It returns the number of moves, or
 `n + 1` output entries are always enough. `scratch` must be a register
 that is no destination and holds nothing live.
 
-The Thumb, RISC-V and AVR backends use it for a call's argument setup,
+The Thumb, RISC-V, MIPS32 and AVR backends use it for a call's argument setup,
 for placing incoming parameters in their allocated registers, for the
 operands of runtime-helper calls, and (on AVR) for moving an indirect
 call's target into Z. x86-64 (`emit_reg_parallel_move`,
@@ -377,14 +400,15 @@ and loads are excluded.
 | AArch64 | `ra_fold_memoff(fn, -256, 4095, 8, 8, wide)` |
 | Thumb | `ra_fold_memoff(fn, 0, 4095, 4, 4, wide)` |
 | RISC-V | `ra_fold_memoff(fn, -2048, 2047, XLEN/8, XLEN/8, wide)` |
+| MIPS32 | `ra_fold_memoff(fn, -32768, 32759, 4, 4, wide)` |
 | AVR | `ra_fold_memoff(fn, 0, 64, 2, 4, wide)` |
 
-`EMBCC_NO_MEMOFF` turns it off on RISC-V and AVR (and on Thumb; see its
+`EMBCC_NO_MEMOFF` turns it off on RISC-V, MIPS32 and AVR (and on Thumb; see its
 section). x86-64 folds addresses during instruction selection instead.
 
 ## Debug information
 
-Under `-g`, the Thumb and RISC-V backends pass `ra_debug_pin_vars(fn)` as
+Under `-g`, the Thumb, RISC-V and MIPS32 backends pass `ra_debug_pin_vars(fn)` as
 the `fltmap` argument of `ra_allocate`, which keeps every source variable
 in its frame slot so that the `DW_AT_location` naming the slot is
 correct. Temporaries are still allocated. AVR does not allocate under
@@ -393,25 +417,25 @@ local's slot (`ra_slot_dead` is false).
 
 ## Backend hooks
 
-Each backend defines one `struct ra_target` (two on Thumb and RISC-V,
-whose pair passes use a second one).
+Each backend defines one `struct ra_target` (two on Thumb, RISC-V and
+MIPS32, whose pair passes use a second one).
 
-| Field | x86-64 `X86_RA` | AArch64 `A64_RA` | Thumb `THUMB_RA` | RISC-V `RISCV_RA` | AVR `AVR_RA` |
-|---|---|---|---|---|---|
-| `call_int_arg_in_reg` | 1 | 1 | 1 | 1 | 1 |
-| `ret_scalar_in_reg` | 1 | 1 | 1 | 1 | 1 |
-| `memcpy_addr_in_reg` | 1 | 0 | 0 | 1 | 0 |
-| `atomic_in_reg` | 0 | 0 | 1 | 1 | 0 |
-| `alu_dst_is_lhs` | 1 | 0 | 0 | 0 | 0 |
-| `float_in_gpr` | 0 | 0 | 1 | 1 | 1 |
-| `fp_reads_gpr` | 0 | 1 | 0 | 0 | 0 |
-| `asm_in_reg` | 0 | 0 | 1 (not the pair pass) | 1 (not the pair pass) | 0 |
-| `ldvar_plain` | size 8, or size 4 not sign-extended to 8 | as x86-64 | size 4 at width 4 | full register width; also a sign-extending 4-byte read at RV64 | size equals width, or size at most 2 |
-| `op_calls_helper` | `__int128` operations | binary128 `long double` and `__int128` operations | floating-point arithmetic, comparisons and conversions not executed by the FPU; 64-bit divide and remainder | floating-point arithmetic, comparisons and conversions; 64-bit divide and remainder at RV32 | float operations, conversions, divide, remainder, multiply except by a small constant |
-| FP class | xmm0-xmm6 | v18-v31, v0-v7 | s16-s31, with an FPU | none | none |
-| FP callee-saved | none | none | all | no FP class | no FP class |
-| `saved_only` | none | none | none | none | `a_saved_only` |
-| `ext_plain` | none | none | none | none | `a_ext_plain` |
+| Field | x86-64 `X86_RA` | AArch64 `A64_RA` | Thumb `THUMB_RA` | RISC-V `RISCV_RA` | MIPS32 `MIPS_RATGT` | AVR `AVR_RA` |
+|---|---|---|---|---|---|---|
+| `call_int_arg_in_reg` | 1 | 1 | 1 | 1 | 1 | 1 |
+| `ret_scalar_in_reg` | 1 | 1 | 1 | 1 | 1 | 1 |
+| `memcpy_addr_in_reg` | 1 | 0 | 0 | 1 | 1 | 0 |
+| `atomic_in_reg` | 1 | 0 | 1 | 1 | 1 | 0 |
+| `alu_dst_is_lhs` | 1 | 0 | 0 | 0 | 0 | 0 |
+| `float_in_gpr` | 0 | 0 | 1 | 1 | 1 | 1 |
+| `fp_reads_gpr` | 0 | 1 | 0 | 0 | 0 | 0 |
+| `asm_in_reg` | 0 | 0 | 1 (not the pair pass) | 1 (not the pair pass) | 0 | 0 |
+| `ldvar_plain` | size 8, or size 4 not sign-extended to 8 | as x86-64 | size 4 at width 4 | full register width; also a sign-extending 4-byte read at RV64 | size 4 at width 4 | size equals width, or size at most 2 |
+| `op_calls_helper` | `__int128` operations | binary128 `long double` and `__int128` operations | floating-point arithmetic, comparisons and conversions not executed by the FPU; 64-bit divide and remainder | floating-point arithmetic, comparisons and conversions; 64-bit divide and remainder at RV32 | floating-point arithmetic, comparisons and conversions; 64-bit divide and remainder | float operations, conversions, divide, remainder, multiply except by a small constant |
+| FP class | xmm0-xmm6 | v18-v31, v0-v7 | s16-s31, with an FPU | none | none | none |
+| FP callee-saved | none | none | all | no FP class | no FP class | no FP class |
+| `saved_only` | none | none | none | none | none | `a_saved_only` |
+| `ext_plain` | none | none | none | none | none | `a_ext_plain` |
 
 ### x86-64
 
@@ -421,11 +445,11 @@ caller-saved registers come first:
 | Function | Pool |
 |---|---|
 | variadic | r10, r11, rbx, r12-r15 |
-| contains an atomic | r8-r11, rbx, r12-r15 (rsi holds `&expected` and rdx the desired value in `cmpxchg`) |
-| contains an integer divide or remainder | rsi, r8-r11, rbx, r12-r15 (`idiv` writes rdx:rax) |
+| contains an `IR_ARMW` or `IR_CAS16` | r8-r11, rbx, r12-r15 (the `lock cmpxchg` loop builds the new value in rdx, and an operand without a register is loaded into rsi) |
+| contains an integer divide or remainder, or an `IR_CAS` or `IR_CMPXCHG` | rsi, r8-r11, rbx, r12-r15 (`idiv` writes rdx:rax; a desired value without a register is loaded into rdx) |
 | otherwise | rsi, rdx, r8-r11, rbx, r12-r15 |
 
-rdi is added after the leading rsi/rdx (or first, in the atomic pool)
+rdi is added after the leading rsi/rdx (or first, in the `IR_ARMW` pool)
 when the function is not variadic, does not return a struct, makes no
 call that returns one, and has no `__int128` operation. The largest pool
 is twelve registers. Callee-saved: rbx and r12-r15.
@@ -518,6 +542,18 @@ v17).
 
 Callee-saved: r4-r11.
 
+**Extended pool** (`g_t_ext`). Each function is also generated with
+r9-r11 added to the pool (r0-r11, and r4-r11 when variadic) and with
+the pairs r8:r9 and r10:r11 added to the pair pool. The three scratch
+roles below are then not fixed: `t_roles_from` gives TMP, ADDR and SCR
+the registers of r11, r10, r9 (in that order of preference) that
+`t_busy` finds free -- not live into or out of the instruction or the
+two after it, not read or written by them, and in the prologue not a
+parameter's home. An attempt in which a role finds no register sets
+`g_t_role_fail` and is dropped. `EMBCC_T_EXT=0` turns the extended
+attempts off; `EMBCC_T_EXT=1` keeps one whenever it succeeds (the exec
+tests run that way, tests/golden/thumb-ext-pool.sh).
+
 **Floating point.** With an FPU (`target_thumb_fpu()`), s16-s31, all
 callee-saved and saved with `vpush`/`vpop`. Without one the FP pool is
 empty and floats are bits in core registers (`float_in_gpr`). Only
@@ -526,7 +562,8 @@ results, and float locals are in the FP class (`t_float_map`); doubles
 are never in it. s0 and s1 are the VFP scratch.
 
 **Scratch.** r9 (`T_SCR`, also the parallel-move cycle breaker), r10
-(`T_ADDR`), r11 (`T_TMP`) and r12 (`T_ACC`). Four are needed because a
+(`T_ADDR`), r11 (`T_TMP`) and r12 (`T_ACC`) -- the first three per
+instruction in the extended pool above. Four are needed because a
 64-bit operation holds both halves of both operands. r9-r11 are
 callee-saved, so every use is recorded through `t_scr()` and the prologue
 saves only the ones the body used. lr holds the `strex` status in atomic
@@ -535,7 +572,9 @@ loops.
 **Low scratch.** Many 16-bit Thumb encodings take only r0-r7.
 `lo_free` finds a low register that holds no live value at the current
 instruction and the next (r0-r3, and r4-r7 when the function already
-saves them), and the operand accessors compute in it.
+saves them), and the operand accessors compute in it. The registers live
+values hold at each instruction are worked out once per function, by a
+walk through the liveness (`lo_busy_map`).
 `EMBCC_T_NOLO` turns this off.
 
 **Hints** (`t_abi_hints`): a scalar parameter of at most 4 bytes its
@@ -547,12 +586,15 @@ call argument its argument register.
 pairs from a pair pass (`THUMB_PAIR_RA`) before the integer pass. The
 pairs are r0:r1, r2:r3, r4:r5 and r6:r7 (a variadic function uses only
 r4:r5 and r6:r7; a function with `alloca` loses r6:r7). Each pair is
-reserved by live range with `ra_reserve`. Wide locals accessed at a size
+reserved by live range with `ra_reserve`; a pair that dies at a 64-bit
+compare marks its range `born`, so the compare's 0 or 1 may take its
+registers (cmp64 reads both operands before set_cc writes the result),
+and `return a < b` computes the result in r0. Wide locals accessed at a size
 other than 8 and a variadic function's parameters stay in memory.
-`gen_func_best` compiles each function both with and without the pair
-pass and keeps the shorter result (the version without pairs on a tie);
-it compiles once, with pairs, when the allocator is off, under `-g`, or
-with an FPU. `EMBCC_T_PAIRS` forces the choice and
+`gen_func_best` compiles each function with and without the pair pass,
+with and without `t_lowregs`, and in the extended pool, and keeps the
+shortest result (the earlier attempt on a tie); it compiles once, with
+pairs, when the allocator is off, under `-g`, or with an FPU. `EMBCC_T_PAIRS` forces the choice and
 `EMBCC_T_PAIRS_ONLY=FUNC` uses pairs only in the named function.
 
 **Inline asm** (`asm_in_reg`). Its operands come from r0-r3 and r12, and
@@ -622,6 +664,46 @@ there is no memory-offset folding and no tail call.
 **Other.** `ra_fold_memoff(fn, -2048, 2047, XLEN/8, XLEN/8, wide)` runs
 before allocation (`EMBCC_NO_MEMOFF` turns it off). `EMBCC_RV_RA_MAX=N`
 sends every vreg numbered `N` or higher back to memory.
+
+### MIPS32
+
+**Pool** (`mips_pool_for`): v0, v1, a0-a3, t7, t8, s0-s7, sixteen
+registers. A variadic function's pool leaves out a0-a3 (the prologue
+spills them into the caller's home area, where `va_arg` walks them).
+Callee-saved: s0-s7, and fp, which is never in the pool: it is the frame
+base in a function with `alloca`, saved like any callee-saved register.
+t9 is the register an indirect call goes through and `$at` holds a
+comparison's result for the branch after it; neither is allocated.
+
+**Floating point.** The backend is soft-float, as RISC-V: no FP class,
+`float_in_gpr`, and `mips_op_calls_helper` reports the arithmetic,
+comparisons and conversions as helper calls, with 64-bit divide and
+remainder.
+
+**Scratch.** t0 and t1 (first operand, low and high word), t2 and t3
+(second operand), t4 (`SCR`, the parallel-move cycle breaker), t5
+(`SCR2`), and t6 (`FAR`), which builds `sp` plus an offset too large for
+a 16-bit immediate.
+
+**Hints** (`mips_abi_hints`): a single-register scalar parameter its
+argument register, a returned value and a call's result v0, a helper
+operation's operands a0 and a1 and its result v0, and each call argument
+its argument register.
+
+**Pairs.** 64-bit values get register pairs from a pair pass
+(`MIPS_PAIR_RA`, `mips_pair_pool_for`) before the integer pass: a0:a1,
+a2:a3, v0:v1, s0:s1, s2:s3, s4:s5, s6:s7 (a variadic function starts at
+v0:v1), with o32's 64-bit arguments hinted to their pair. `gen_func_best`
+compiles each function with and without pairs and keeps the shorter
+(without on a tie). `EMBCC_MIPS_PAIRS=0` or `=1` forces the choice.
+
+**Debug.** Under `-g` source variables are pinned to their slots, and
+there is no memory-offset folding and no tail call.
+
+**Other.** `ra_fold_memoff(fn, -32768, 32759, 4, 4, wide)` runs before
+allocation, leaving room under the 16-bit limit for an `lwl`/`lwr`
+pair's `+3` (`EMBCC_NO_MEMOFF` turns it off). `EMBCC_MIPS_RA_MAX=N` sends
+every vreg numbered `N` or higher back to memory.
 
 ### AVR
 
@@ -759,6 +841,7 @@ EMBCC_RA_MAXPOOL=2 tests/run.sh --target=aarch64-elf --exec-only
 # the embedded targets: their execution goldens, from the repository root
 EMBCC=$PWD/embcc EMBCC_VERIFY=1 EMBCC_RA_MAXPOOL=2 sh tests/golden/thumb-exec.sh
 EMBCC=$PWD/embcc EMBCC_VERIFY=1 EMBCC_RA_MAXPOOL=2 sh tests/golden/riscv-exec.sh
+EMBCC=$PWD/embcc EMBCC_VERIFY=1 EMBCC_RA_MAXPOOL=2 sh tests/golden/mips-exec.sh
 ```
 
 The variable affects the shared integer pool only. AVR's run widths and
@@ -781,13 +864,13 @@ backend sections.
 ## Changing the allocator
 
 - An IR operation that reads or defines a vreg must be in `ra_each_use`
-  and `ra_ins_def`; a terminator must also be in the successor logic of
-  `ra_live_intervals` and the block-end lists of `ra_coalesce_temps` and
-  `ra_fold_memoff`. See
+  and `ra_ins_def`; a terminator must also be in the successor and
+  block-end logic of `ra_live_compute` and the block-end lists of
+  `ra_coalesce_temps` and `ra_fold_memoff`. See
   [Adding an IR operation](optimizer.md#adding-an-ir-operation).
 - A new opaque use (a lowering that reads a vreg from its slot) must make
   the vreg ineligible here, or be gated by a flag in `struct ra_target`
   so each backend can say what it supports.
-- Measure the effect on code size for all five targets, not one; the
+- Measure the effect on code size for all six targets, not one; the
   heuristics (spill choice, coalescing test, hint order) trade against
   each other differently on two-operand and three-operand machines.

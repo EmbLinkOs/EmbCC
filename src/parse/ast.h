@@ -306,7 +306,10 @@ struct global {
     int defined;          /* sema, canonical: some declaration defines it */
     int absorbed;         /* sema: merged into an earlier node */
     int used;
-    int in_bss;           /* driver: zero-valued -> .bss, else .data */
+    int in_bss;           /* driver: no initializer -> .bss, else .data */
+    int is_common;        /* driver: -fcommon made this tentative
+                           * definition a COMMON symbol: no section, no
+                           * offset; the linker reserves it */
     int in_rodata;        /* driver: a const object, placed in .rodata
                            * after the string literals (ELF) */
     int named;            /* driver: 1 + index into the named sections, or 0 */
@@ -358,6 +361,10 @@ struct func {
      * own `inline` and `extern` (gnu_inline: `extern inline` is the
      * inline-only form) */
     int inl_ext, def_inline, def_extern;
+    /* sema, canonical node: SOME declaration said `inline` -- what
+     * makes it an inline function (C11 6.7.4p7), whichever declaration
+     * defines it; -fno-inline-functions inlines only these */
+    int any_inline;
     const char *vis;
     /* __attribute__((format(printf|scanf, idx, first))): 1 printf,
      * 2 scanf, 0 none. Both indices are 1-based, as GCC defines them. */

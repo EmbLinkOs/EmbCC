@@ -56,11 +56,13 @@ Cortex-M3: 106678 bytes of code before, 25670 now; Clang's `-O0` is
 18870; lib/libc's string, stdlib and ctype on AVR, 68428 bytes before
 and 33330 now.) `EMBCC_O0_NORA=1` gives the old `-O0` on these targets,
 for bisecting a difference. On AVR, `-g` still turns the allocator off.
-A function too big for the allocator is compiled the old way as well:
-its liveness sets grow with the square of the function's size, and a
-generated function of 8000 statements took 5.5 seconds where the old
-`-O0` takes 0.1. The limit is a few thousand statements of straight-line
-code (`ra_o0_too_big` in `src/arch/regalloc.c`).
+A very big function is compiled the old way as well: one of more than
+100000 IR instructions, some 12000 statements of straight-line code on
+Cortex-M and RISC-V and 10000 on AVR (`ra_o0_too_big` in
+`src/arch/regalloc.c`). Allocating costs time in proportion to the
+function; AVR, which generates each function several times to keep the
+shortest, takes about a second for 6000 statements, where Cortex-M
+takes a tenth of one.
 
 Some decisions are made at every level, `-O0` included, because they are
 taken when the IR is first generated or when code is emitted:

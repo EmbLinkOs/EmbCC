@@ -1970,7 +1970,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
              * scaled offsets reach 4095 bytes at any size, the unscaled
              * ones -256..255 (ldst in emit.c). Before allocation, because
              * %p then needs no register. 171 such adds in lib/libc. */
-            ra_fold_memoff(fn, -256, 4095, 8, 8, g_a64_wide);
+            ra_fold_memoff(fn, -256, 4095, 8, 8, g_a64_wide, 1, 0);
             /* The float map first: the integer allocation needs it to
              * leave those values alone. Its own pool is caller-saved
              * throughout, so it reports no registers to save and

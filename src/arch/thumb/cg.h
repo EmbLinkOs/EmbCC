@@ -105,6 +105,14 @@ struct t_fn {
      * or bc_end -1 once a label has been placed since. See
      * invert_last_bcond. */
     int bc_end, bc_fix;
+    /* The last compare of a register with an immediate that went
+     * straight into a branch: where that branch's code ended, the
+     * register and the immediate. A compare of the same two, with
+     * nothing emitted since and no label placed, has those flags
+     * already -- a switch's decision tree asks `== k` and then `> k` of
+     * one value. fl_end is -1 when there is none. */
+    int fl_end, fl_reg;
+    long fl_imm;
     /* Which of the scratch registers r9-r11 the prologue saves: all of
      * them until a pass has shown which the body uses. */
     unsigned scr_save;
@@ -119,10 +127,10 @@ struct t_fn {
     long save_at;        /* where the prologue spilled them */
     /* LOW SCRATCH (lo_free): which of r0-r7 the instruction being
      * emitted may use in place of a high scratch -- bit r for rr, 0 when
-     * none may -- and the liveness it is computed from. */
+     * none may -- and, per instruction, the registers holding a value
+     * live into or out of it, which it is computed from (lo_busy_map). */
     unsigned lofree;
-    unsigned long *lv_in, *lv_out;
-    int lv_words;
+    unsigned *lv_busy;
 
     /* ---- ARMv6-M only (v6m.c); zero at the other levels ---------------- */
     /* The literal pool being collected, and the LDRs waiting for it. */

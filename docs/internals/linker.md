@@ -174,6 +174,7 @@ of these classes and machines:
 | ELF64 | `EM_RISCV` (243) | RV64 |
 | ELF32 | `EM_ARM` (40) | ARMv7-M, ARMv8-M Mainline |
 | ELF32 | `EM_RISCV` (243) | RV32 |
+| ELF32 | `EM_MIPS` (8) | MIPS32, little-endian o32 only (checked from `EI_DATA` and the ABI bits of `e_flags`) |
 | ELF32 | `EM_AVR` (83) | AVR |
 
 From an object it reads the section headers, the section-name string
@@ -650,6 +651,30 @@ RV32                                      RV64
 The output `e_flags` is the OR of the inputs' `EF_RISCV_RVC` bits and
 nothing else, so the float-ABI field is 0 (soft float).
 
+### MIPS32
+
+The `malta` harness loads the whole image into RAM at `0x80100000`
+(KSEG0), so as on RISC-V there is no `-Tdata` and the copy loop moves
+nothing.
+
+`-Tstack ADDR` adds the same `.start` section, `mips_li_len(ADDR) + 16`
+bytes long, which `fill_entry_stub` fills with `li sp, ADDR`, then `lui
+t9, hi(entry)`, `ori t9, t9, lo(entry)`, `jr t9` and the delay slot's
+`nop`. The jump is absolute, so it reaches the entry from anywhere; the
+stub is 20 bytes for the harness's `0x80800000`.
+
+The layout keeps the data segment's stored size and the end of `.bss` on
+word boundaries on MIPS, so `__data_end`, `__bss_start` and `__bss_end`
+are multiples of 4: a startup's word loops store with `sw`, which traps
+at a misaligned address. (A `.data` 14 bytes long once sent the
+harness's `.bss` loop to the boot ROM's exception vector.)
+
+Each input's `.MIPS.abiflags` (`mips_abiflags_check`) must name the same
+floating-point ABI as the first input's, so soft-float and FPU objects
+are never linked together; `.MIPS.abiflags` and `.reginfo` are then
+dropped, and the output `e_flags` keeps the first input's architecture
+and ABI bits.
+
 ### AVR
 
 The ATmega328P has separate program and data address spaces: `ld` and
@@ -855,6 +880,33 @@ example, a clang object built with
 embld: c_main.o: unsupported RISC-V relocation type 35 (this is the next linker increment, not a bug in your program)
 ```
 
+### MIPS relocations
+
+`apply_mips` reads both REL and RELA sections (`struct mips_relctx`
+says which and carries the section's entries). In a REL section the
+addend is the field's own bits, read per type as the o32 ABI defines:
+
+| Type | Addend from the field (REL) | Value written |
+|---|---|---|
+| `R_MIPS_NONE`, `R_MIPS_JALR` | | nothing |
+| `R_MIPS_32` | the word | `V`, range-checked to 32 bits |
+| `R_MIPS_HI16` | AHL: `(field << 16)` plus the sign-extended field of the next `R_MIPS_LO16` against the same symbol (`mips_lo_of`) | `(V + 0x8000) >> 16` |
+| `R_MIPS_LO16` | the sign-extended field | `V & 0xffff` |
+| `R_MIPS_26` | `field << 2`, sign-extended from 28 bits for an external symbol | `V >> 2` in the low 26 bits; `V` must be a multiple of 4 and in the 256 MiB region of `P + 4` |
+| `R_MIPS_PC16` | `field << 2`, sign-extended | `(V - P) >> 2`, -131072..131068 |
+
+The `+ 0x8000` in the HI16 is the same rounding as RISC-V's `+ 0x800`:
+the `addiu` that adds the low half sign-extends it. Several HI16s may
+share one LO16; a HI16 with none after it is refused, because its
+addend cannot be known. `R_MIPS_GPREL16`, `R_MIPS_GPREL32`,
+`R_MIPS_LITERAL`, `R_MIPS_GOT16` and `R_MIPS_CALL16` are refused by name
+(small data and PIC), and anything else as an unsupported MIPS type.
+
+EmbCC's own objects use `R_MIPS_32`, `R_MIPS_26` (every call, and a long
+branch's `j` against its function's section) and the HI16/LO16 pair.
+`tests/golden/mips-link.sh` links llvm-mc objects whose addends straddle
+every carry of the AHL rule.
+
 ### AVR relocations
 
 `apply_avr` patches every split field through the AVR encoder's patchers
@@ -886,13 +938,14 @@ flash.
 ### Unsupported types
 
 Any type not listed above stops the link. The message names the machine
-for ARM, RISC-V and AVR, and omits it for x86-64:
+for ARM, RISC-V, MIPS and AVR, and omits it for x86-64:
 
 ```text
 embld: FILE: unsupported relocation type N (this is the next linker increment, not a bug in your program)
 embld: FILE: unsupported ARM relocation type N (this is the next linker increment, not a bug in your program)
 embld: FILE: unsupported RISC-V relocation type N (this is the next linker increment, not a bug in your program)
 embld: FILE: unsupported AVR relocation type N (this is the next linker increment, not a bug in your program)
+embld: FILE: unsupported MIPS relocation type N (this is the next linker increment, not a bug in your program)
 ```
 
 ## Debug information
@@ -1001,7 +1054,7 @@ by [embread](../manual/tools/embread.md).
 
 `embcc [FILE] [OBJECTS...] -o OUT` links in-process through
 `compile_and_link` in `src/driver/main.c`. The driver links x86-64 ELF programs and, for the firmware targets
-(ARMv7-M, ARMv8-M, RV32, RV64, AVR), images whose memory map the build
+(ARMv7-M, ARMv8-M, RV32, RV64, MIPS32, AVR), images whose memory map the build
 gives: a linker script (`-T`, ARM and RISC-V) or `-Wl,-Ttext`/`-Tdata`.
 A firmware link without one stops with `embcc: error: linking a TRIPLE
 image needs its memory map`. Every other target (AArch64 ELF, Mach-O,
@@ -1309,7 +1362,9 @@ bracket symbols in `define_brackets`. `bounds[]` is sized by
 | `tests/golden/embld-reloc-range.sh` | the range refusals: x86-64 data 8 GB from RIP-relative code, and a clang RV64 `lui` (medlow) object linked at `0x80000000` |
 | `tests/golden/link-dwarf.sh` | DWARF carried through a link, checked by a `gdb` session against a QEMU guest |
 | `tests/golden/arm-abi-tags.sh` | the build-attribute refusals, against clang objects with hard-float arguments and short enums |
-| `tests/golden/thumb-exec.sh`, `riscv-exec.sh`, `avr-exec.sh` and the other embedded execution tests | every program linked with the harness `link.sh` scripts and run on QEMU, which exercises the firmware layout, the entry stub, a passing `--rom-limit` and the relocations EmbCC emits for those targets |
+| `tests/golden/mips-link.sh` | the o32 AHL rule over addends on both sides of every carry, a string literal more than 32 KB into `.rodata`, and the MIPS refusals (gp-relative relocations, a hard-float object, a HI16 without its LO16) |
+| `tests/golden/mips-access.sh` | the MIPS word-aligned `__data_end`/`__bss_start`/`__bss_end`, by a board run whose `.data` ends mid-word |
+| `tests/golden/thumb-exec.sh`, `riscv-exec.sh`, `mips-exec.sh`, `avr-exec.sh` and the other embedded execution tests | every program linked with the harness `link.sh` scripts and run on QEMU, which exercises the firmware layout, the entry stub, a passing `--rom-limit` and the relocations EmbCC emits for those targets |
 
 See [Testing](testing.md) for running them. A test that changes the
 linker should also be run with an object from another toolchain, as

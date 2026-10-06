@@ -14,6 +14,7 @@
 #include "../arch/aarch64/asm.h"
 #include "../arch/avr/asm.h"
 #include "../arch/riscv/asm.h"
+#include "../arch/mips/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
@@ -4273,6 +4274,42 @@ static int asm_resolve_reg_ilp32(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* MIPS: the same three kinds of operand. A register variable must name a
+ * register irgen's pool hands out -- the caller-saved v0-v1, a0-a3, t0-t9
+ * ($2-$15, $24, $25) -- and the constant letters are gcc's MIPS ones
+ * (I J K L M N O P) as well as i and n. */
+static int asm_resolve_reg_mips(struct unit *u, struct stmt *s,
+                                struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = mipsasm_gpr(rn, (int)strlen(rn));
+        if (!((r >= 2 && r <= 15) || r == 24 || r == 25))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "MIPS asm (use v0-v1, a0-a3 or t0-t9)", rn);
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'm' || *p == 'd') has_r = 1;
+        if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+            has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -4291,6 +4328,8 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 0);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
+    if (target_get() == TARGET_MIPS32)
+        return asm_resolve_reg_mips(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)
@@ -4323,6 +4362,13 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
  * shadowing is rejected outright. C gives inner blocks their own scope;
  * refusing shadowed names accepts strictly fewer programs than C does,
  * so the subset stays a subset. */
+/* qsort's order for case values */
+static int case_cmp(const void *x, const void *y)
+{
+    long a = *(const long *)x, b = *(const long *)y;
+    return a < b ? -1 : a > b;
+}
+
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                        struct stmt *s_in, int in_loop, int in_switch,
                        int at_sw_level)
@@ -4373,13 +4419,31 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             struct stmt *list = switch_stmts(s->body);
             check_stmt(u, f, sc, list, in_loop, 1, 1);
             /* duplicate labels and a second default are parse-time
-             * errors, not a runtime coin flip about which one wins */
-            int ndefault = 0;
+             * errors, not a runtime coin flip about which one wins.
+             * Whether there is any duplicate is asked of the sorted
+             * values first: comparing every label with every later one
+             * was the slowest thing in compiling a switch of 8000 cases.
+             * Only when there is one does the pairwise walk run, so the
+             * errors come out as they always did. */
+            int ndefault = 0, ncase = 0, dup = 0;
+            for (struct stmt *a = list; a; a = a->next)
+                ncase += a->kind == STMT_CASE;
+            if (ncase > 1) {
+                long *cv = xmalloc((size_t)ncase * sizeof *cv);
+                int k = 0;
+                for (struct stmt *a = list; a; a = a->next)
+                    if (a->kind == STMT_CASE)
+                        cv[k++] = a->cval;
+                qsort(cv, (size_t)ncase, sizeof *cv, case_cmp);
+                for (k = 1; k < ncase && !dup; k++)
+                    dup = cv[k] == cv[k - 1];
+                free(cv);
+            }
             for (struct stmt *a = list; a; a = a->next) {
                 if (a->kind == STMT_DEFAULT && ++ndefault > 1)
                     sema_error_line(u, a->line,
                                "a switch can have only one 'default'");
-                if (a->kind != STMT_CASE)
+                if (a->kind != STMT_CASE || !dup)
                     continue;
                 for (struct stmt *b = a->next; b; b = b->next)
                     if (b->kind == STMT_CASE && b->cval == a->cval)
@@ -5089,6 +5153,7 @@ void sema_set_gnu89_inline(int on) { g_gnu89_inline = on; }
 static void note_inline_decl(struct func *canon, const struct func *f)
 {
     canon->inl_ext |= !f->decl_inline || f->decl_extern;
+    canon->any_inline |= f->decl_inline;
     canon->attr_gnu_inline |= f->attr_gnu_inline;
     if (f->defined) {
         canon->def_inline = f->decl_inline;

@@ -1332,6 +1332,166 @@ static int vn_stable(struct ir_func *fn, const struct defs *d, struct ir_ins *i)
     return 1;
 }
 
+/* The value table, hashed.
+ *
+ * Both value-numbering passes looked an instruction's key up by walking
+ * every entry, and LVN also forgot what a definition replaced by walking
+ * every entry again: on one block of 8000 plain statements that was
+ * O(n^2) twice over, and vn_eq and vn_kill were the second and third
+ * hottest functions of the -O2 compile. Now a key is found through its
+ * hash, and the entries that name a vreg (as an operand or as the result)
+ * are filed under it, so a definition reaches exactly the entries it
+ * makes stale.
+ *
+ * What makes this give the same answers is that a key is in the table
+ * at most once: an entry is only ever added after a lookup of its key
+ * found nothing. So "the first matching entry", which is what the walk
+ * returned, is "the matching entry", and the order of the entries --
+ * which the hash does not keep -- never mattered. */
+struct vnent {
+    struct vn k;
+    unsigned h;                /* its bucket */
+    int prev, next;            /* the bucket's chain; -1 ends it */
+    char live;
+};
+struct vnref { int ent, next; };
+struct vntab {
+    struct vnent *e;
+    int ne, cape;
+    int *head;
+    unsigned mask;
+    /* LVN only (byv != NULL): per vreg, the entries naming it, for
+     * vn_kill; and the loads keyed at the current memory version, the
+     * only entries a store can make stale (lvn_mem_kill). */
+    struct vnref *r;
+    int nr, capr;
+    int *byv, nv;
+    int *ld;
+    int nld, capld;
+};
+
+static unsigned vn_mix(unsigned h, unsigned long x)
+{
+    h ^= (unsigned)x;
+    h *= 0x9E3779B1u;
+    h ^= (unsigned)(x >> 16 >> 16);
+    h *= 0x85EBCA77u;
+    return h ^ (h >> 15);
+}
+
+/* A hash of exactly the fields vn_eq compares, so equal keys always
+ * meet in one bucket. */
+static unsigned vn_hash(const struct vn *k)
+{
+    unsigned char pb[sizeof k->ptr];
+    unsigned long pv = 0;
+    memcpy(pb, &k->ptr, sizeof pb);
+    for (size_t j = 0; j < sizeof pb; j++)
+        pv = pv * 257 + pb[j];
+    unsigned h = vn_mix(0, (unsigned long)k->op);
+    h = vn_mix(h, (unsigned long)(long)k->a);
+    h = vn_mix(h, (unsigned long)(long)k->b);
+    h = vn_mix(h, (unsigned long)(long)k->w * 64 + (unsigned long)(long)k->size);
+    h = vn_mix(h, (unsigned long)(long)k->sign * 4 + (unsigned long)(long)k->flt);
+    h = vn_mix(h, (unsigned long)k->pred);
+    h = vn_mix(h, (unsigned long)k->imm);
+    h = vn_mix(h, pv);
+    h = vn_mix(h, (unsigned long)(long)k->label);
+    h = vn_mix(h, (unsigned long)(long)k->memver);
+    h = vn_mix(h, (unsigned long)(k->has_ca * 2 + k->has_cb));
+    if (k->has_ca) h = vn_mix(h, (unsigned long)k->ca);
+    if (k->has_cb) h = vn_mix(h, (unsigned long)k->cb);
+    return h;
+}
+
+/* `nins` bounds how many entries one walk can make; the buckets are
+ * twice that, so a chain is short. */
+static void vntab_init(struct vntab *t, int nins, int nv, int index)
+{
+    memset(t, 0, sizeof *t);
+    unsigned nb = 16;
+    while (nb < (unsigned)nins * 2u && nb < (1u << 30))
+        nb *= 2;
+    t->mask = nb - 1;
+    t->head = xmalloc((size_t)nb * sizeof *t->head);
+    for (unsigned b = 0; b < nb; b++)
+        t->head[b] = -1;
+    if (index) {
+        t->nv = nv;
+        t->byv = xmalloc((size_t)(nv ? nv : 1) * sizeof *t->byv);
+        for (int v = 0; v < nv; v++)
+            t->byv[v] = -1;
+    }
+}
+
+static void vntab_free(struct vntab *t)
+{
+    free(t->e); free(t->head); free(t->r); free(t->byv); free(t->ld);
+}
+
+/* The result of the entry whose key equals k, or -1. */
+static int vntab_find(const struct vntab *t, const struct vn *k)
+{
+    for (int x = t->head[vn_hash(k) & t->mask]; x >= 0; x = t->e[x].next)
+        if (vn_eq(&t->e[x].k, k))
+            return t->e[x].k.result;
+    return -1;
+}
+
+static void vntab_file(struct vntab *t, int v, int ent)
+{
+    if (v < 0 || v >= t->nv)
+        return;
+    if (t->nr == t->capr) {
+        t->capr = t->capr ? t->capr * 2 : 64;
+        t->r = xrealloc(t->r, (size_t)t->capr * sizeof *t->r);
+    }
+    t->r[t->nr].ent = ent;
+    t->r[t->nr].next = t->byv[v];
+    t->byv[v] = t->nr++;
+}
+
+static void vntab_add(struct vntab *t, const struct vn *k)
+{
+    if (t->ne == t->cape) {
+        t->cape = t->cape ? t->cape * 2 : 64;
+        t->e = xrealloc(t->e, (size_t)t->cape * sizeof *t->e);
+    }
+    int x = t->ne++;
+    struct vnent *e = &t->e[x];
+    e->k = *k;
+    e->h = vn_hash(k) & t->mask;
+    e->prev = -1;
+    e->next = t->head[e->h];
+    if (e->next >= 0)
+        t->e[e->next].prev = x;
+    t->head[e->h] = x;
+    e->live = 1;
+    if (t->byv) {
+        vntab_file(t, k->a, x);
+        vntab_file(t, k->b, x);
+        vntab_file(t, k->result, x);
+        if (k->op == IR_LOAD || k->op == IR_LDVAR) {
+            if (t->nld == t->capld) {
+                t->capld = t->capld ? t->capld * 2 : 64;
+                t->ld = xrealloc(t->ld, (size_t)t->capld * sizeof *t->ld);
+            }
+            t->ld[t->nld++] = x;
+        }
+    }
+}
+
+static void vntab_unlink(struct vntab *t, int x)
+{
+    struct vnent *e = &t->e[x];
+    if (!e->live)
+        return;
+    if (e->prev >= 0) t->e[e->prev].next = e->next;
+    else              t->head[e->h] = e->next;
+    if (e->next >= 0) t->e[e->next].prev = e->prev;
+    e->live = 0;
+}
+
 /* Drop every entry that mentions vreg `t`, because something just gave
  * `t` a new value and the entries naming it describe the old one.
  *
@@ -1341,26 +1501,47 @@ static int vn_stable(struct ir_func *fn, const struct defs *d, struct ir_ins *i)
  * does not need vn_stable's blanket refusal of multiply-assigned vregs,
  * which would throw away most of a loop body -- `arr[i]` reads `i`, and
  * an induction variable is assigned on every incoming edge. */
-static int vn_kill(struct vn *tab, int ntab, int t)
+static void vn_kill(struct vntab *t, int v)
 {
-    int j = 0;
-    for (int x = 0; x < ntab; x++)
-        if (tab[x].a != t && tab[x].b != t && tab[x].result != t)
-            tab[j++] = tab[x];
-    return j;
+    if (v < 0 || v >= t->nv) {           /* not filed: look at them all */
+        for (int x = 0; x < t->ne; x++)
+            if (t->e[x].k.a == v || t->e[x].k.b == v || t->e[x].k.result == v)
+                vntab_unlink(t, x);
+        return;
+    }
+    for (int r = t->byv[v]; r >= 0; r = t->r[r].next)
+        vntab_unlink(t, t->r[r].ent);
+    t->byv[v] = -1;
+}
+
+/* Forget everything: a block boundary. Only what was filed is undone,
+ * so a function of many small blocks pays for its entries, not for its
+ * vregs at every label. */
+static void vntab_clear(struct vntab *t)
+{
+    for (int x = 0; x < t->ne; x++) {
+        struct vnent *e = &t->e[x];
+        t->head[e->h] = -1;
+        if (t->byv) {
+            if (e->k.a >= 0 && e->k.a < t->nv) t->byv[e->k.a] = -1;
+            if (e->k.b >= 0 && e->k.b < t->nv) t->byv[e->k.b] = -1;
+            if (e->k.result >= 0 && e->k.result < t->nv)
+                t->byv[e->k.result] = -1;
+        }
+    }
+    t->ne = t->nr = t->nld = 0;
 }
 
 /* Defined with the alias analysis further down. */
 static char *slots_taken(struct ir_func *fn);
 static int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
-                        struct vn *tab, int *ntab, int memver,
-                        const struct ir_ins *ins);
+                        struct vntab *tb, const struct ir_ins *ins);
 
 static int pass_lvn(struct ir_func *fn)
 {
     int changed = 0, memver = 0;
-    struct vn *tab = NULL;
-    int ntab = 0, cap = 0;
+    struct vntab tb;
+    vntab_init(&tb, fn->nins, fn->nvregs, 1);
     /* What a store can reach, so it forgets only those loads
      * (lvn_mem_kill). The definitions are counted once, before the walk
      * turns any instruction into a copy: a copy keeps its destination,
@@ -1372,28 +1553,24 @@ static int pass_lvn(struct ir_func *fn)
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         enum ir_op op0 = i->op;
-        if (op0 == IR_LABEL) { ntab = 0; continue; }   /* block boundary */
+        if (op0 == IR_LABEL) { vntab_clear(&tb); continue; } /* block boundary */
         struct vn k;
         if (i->dst >= 0 && vn_key(i, memver, &k)) {
-            int hit = -1;
-            for (int t = 0; t < ntab; t++)
-                if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }
+            int hit = vntab_find(&tb, &k);
             if (hit >= 0 && hit != i->dst) {
                 vn_to_mov(i, hit);
                 changed = 1;
                 g_did.lvn++;
                 op0 = IR_MOV;      /* what it is NOW, for the kill below */
             } else if (hit < 0) {
-                ntab = vn_kill(tab, ntab, i->dst);
-                if (ntab == cap) {
-                    cap = cap ? cap * 2 : 32;
-                    tab = xrealloc(tab, (size_t)cap * sizeof *tab);
-                }
+                vn_kill(&tb, i->dst);
                 k.result = i->dst;
-                tab[ntab++] = k;
+                vntab_add(&tb, &k);
                 if (writes_memory(op0) &&
-                    !lvn_mem_kill(fn, &d, taken, tab, &ntab, memver, i))
+                    !lvn_mem_kill(fn, &d, taken, &tb, i)) {
                     memver++;
+                    tb.nld = 0;    /* every load keyed so far is stale */
+                }
                 continue;
             }
         }
@@ -1402,19 +1579,21 @@ static int pass_lvn(struct ir_func *fn)
          * what named it. Inline asm and a landing pad write temps that
          * def_target cannot report, so they clear the table outright. */
         if (op0 == IR_ASM || op0 == IR_LANDING) {
-            ntab = 0;
+            vntab_clear(&tb);
         } else {
             int t = def_target(i);
             if (t >= 0)
-                ntab = vn_kill(tab, ntab, t);
+                vn_kill(&tb, t);
         }
         /* A store forgets only the reads it could reach; everything
          * else that writes memory forgets them all. */
         if (writes_memory(op0) &&
-            !lvn_mem_kill(fn, &d, taken, tab, &ntab, memver, i))
+            !lvn_mem_kill(fn, &d, taken, &tb, i)) {
             memver++;
+            tb.nld = 0;
+        }
     }
-    free(tab);
+    vntab_free(&tb);
     free(taken);
     free_defs(&d);
     return changed;
@@ -1433,10 +1612,20 @@ static void repl_cb(int *p, void *ctx)
     }
 }
 
-static int pass_copyprop(struct ir_func *fn)
+/* The rule, one move at a time: walking the function in order, each
+ * eligible `dst = mov a` rewrites every read of dst, everywhere, to
+ * whatever its `a` holds at that moment. That is a walk over the whole
+ * function per move, and a function of 8000 statements spent most of
+ * its -O2 compile there (each_read and repl_cb on top of the profile,
+ * 30 s for the thumb compile).
+ *
+ * pass_copyprop computes the same rewrite in one walk. It is used when
+ * the eligible moves make no cycle (`x = mov y` and `y = mov x`, each
+ * the only definition: values nothing ever computes), which is every
+ * function in practice; a cycle falls back to this, whose answer then
+ * depends on the order in a way not worth reproducing. */
+static int copyprop_by_move(struct ir_func *fn, struct defs *d)
 {
-    struct defs d;
-    compute_defs(fn, &d);
     int changed = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
@@ -1447,7 +1636,7 @@ static int pass_copyprop(struct ir_func *fn)
          * A dest written in two branches (irgen's phi-style merge, e.g. the
          * va_arg result address) has cnt > 1 — propagating it would wrongly
          * force one branch's value onto the other's uses. */
-        if (d.cnt[i->a] != 1 || d.cnt[i->dst] != 1)
+        if (d->cnt[i->a] != 1 || d->cnt[i->dst] != 1)
             continue;
         struct repl r = { i->dst, i->a, 0 };
         for (int m = 0; m < fn->nins; m++)
@@ -1457,6 +1646,103 @@ static int pass_copyprop(struct ir_func *fn)
             g_did.copy += r.n;
         }
     }
+    return changed;
+}
+
+/* What the one-at-a-time rule comes to. Each eligible move is an edge
+ * dst -> a, and a dst has at most one (it has one definition), so the
+ * edges form chains, and every read of a vreg on a chain ends up naming
+ * the chain's last vreg, its root -- in whatever order the moves are
+ * met, because a move met later than the one that copied FROM it
+ * rewrites that copy's readers again. Which is also why the order shows
+ * in one place: how many rewrites a read took, which the remark counts.
+ * A read of u is rewritten when u's move is met, and lands on the
+ * vreg the move's own operand holds by then -- so it takes one rewrite
+ * for every step down the chain where the next move comes LATER in the
+ * function than the one before it, with the root counting as last of
+ * all. nrw[] is that number. */
+struct cpmap { const int *root, *nrw; int nv; long n; };
+static void cpmap_cb(int *p, void *ctx)
+{
+    struct cpmap *c = ctx;
+    int v = *p;
+    if (v >= 0 && v < c->nv && c->root[v] >= 0) {
+        *p = c->root[v];
+        c->n += c->nrw[v];
+    }
+}
+
+static int pass_copyprop(struct ir_func *fn)
+{
+    struct defs d;
+    compute_defs(fn, &d);
+    int nv = fn->nvregs;
+    /* src[v]/pos[v]: v's eligible move, by the same test as
+     * copyprop_by_move's, and where it is; -1 for none. */
+    int *src = xmalloc((size_t)(nv ? nv : 1) * sizeof *src);
+    int *pos = xmalloc((size_t)(nv ? nv : 1) * sizeof *pos);
+    int nmov = 0;
+    for (int v = 0; v < nv; v++)
+        src[v] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_MOV || i->a < 0 || i->dst < 0 || i->a == i->dst)
+            continue;
+        if (d.cnt[i->a] != 1 || d.cnt[i->dst] != 1)
+            continue;
+        src[i->dst] = i->a;
+        pos[i->dst] = n;
+        nmov++;
+    }
+    if (nmov == 0) {
+        free(src); free(pos); free_defs(&d);
+        return 0;
+    }
+    /* root[v]: where a read of v ends up (-1: v has no move). state: 0
+     * not yet seen, 1 on the chain being walked, 2 resolved. */
+    int *root = xmalloc((size_t)nv * sizeof *root);
+    int *nrw = xmalloc((size_t)nv * sizeof *nrw);
+    int *stk = xmalloc((size_t)nv * sizeof *stk);
+    char *state = xcalloc((size_t)nv, 1);
+    int cycle = 0;
+    for (int v = 0; v < nv && !cycle; v++) {
+        if (src[v] < 0 || state[v] == 2)
+            continue;
+        int sp = 0, u = v;
+        while (src[u] >= 0 && state[u] == 0) {
+            state[u] = 1;
+            stk[sp++] = u;
+            u = src[u];
+        }
+        if (src[u] >= 0 && state[u] == 1) {
+            cycle = 1;
+            break;
+        }
+        /* u is a root, or a vreg already resolved */
+        int r = src[u] < 0 ? u : root[u];
+        while (sp > 0) {
+            int w = stk[--sp];
+            int s = src[w];
+            int later = src[s] < 0 || pos[s] > pos[w];
+            root[w] = r;
+            nrw[w] = (src[s] < 0 ? 0 : nrw[s]) + later;
+            state[w] = 2;
+        }
+    }
+    int changed;
+    if (cycle) {
+        changed = copyprop_by_move(fn, &d);
+    } else {
+        for (int v = 0; v < nv; v++)
+            if (src[v] < 0)
+                root[v] = -1;
+        struct cpmap c = { root, nrw, nv, 0 };
+        for (int n = 0; n < fn->nins; n++)
+            each_read(&fn->ins[n], cpmap_cb, &c);
+        changed = c.n > 0;   /* the MOVs are now dead; DCE removes them */
+        g_did.copy += c.n;
+    }
+    free(src); free(pos); free(root); free(nrw); free(stk); free(state);
     free_defs(&d);
     return changed;
 }
@@ -1470,12 +1756,24 @@ static void count_cb(int *p, void *ctx)
         u->use[*p]++;
 }
 
-/* Mark a temp live, counting how many were newly so. */
-struct mark { char *live; int n, added; };
+/* Mark a temp live, and queue the instructions that define it for the
+ * same treatment. */
+struct mark { char *live; int n, nins; const int *dhead, *dnext;
+              char *live_ins; int *work, nwork; };
 static void mark_cb(int *p, void *ctx)
 {
     struct mark *m = ctx;
-    if (*p >= 0 && *p < m->n && !m->live[*p]) { m->live[*p] = 1; m->added++; }
+    int v = *p;
+    if (v < 0 || v >= m->n || m->live[v])
+        return;
+    m->live[v] = 1;
+    for (int k = m->dhead[v]; k >= 0; k = m->dnext[k]) {
+        int x = k < m->nins ? k : k - m->nins;
+        if (!m->live_ins[x]) {
+            m->live_ins[x] = 1;
+            m->work[m->nwork++] = x;
+        }
+    }
 }
 
 /* ---- dead code, by marking what is live rather than counting uses ----
@@ -1497,7 +1795,14 @@ static void mark_cb(int *p, void *ctx)
  * IR_STVAR's "result" is a frame slot, and a slot is read by an LDVAR
  * or an ADDR, both of which each_read reports -- so the same rule
  * covers dead stores to a local with no remaining readers. A volatile
- * one is live regardless: the access itself is the effect. */
+ * one is live regardless: the access itself is the effect.
+ *
+ * The marking is a worklist: a temp found live queues the instructions
+ * that define it, found through a list per temp. It used to sweep the
+ * function until a sweep changed nothing, and a sweep carries liveness
+ * one step backwards through code that runs forwards -- a chain of 4000
+ * joins, each copy read by the next, took 4000 sweeps. Both compute the
+ * least set closed under the two rules, so they mark the same set. */
 static int pass_dce(struct ir_func *fn)
 {
     int nins = fn->nins, nvr = fn->nvregs;
@@ -1505,6 +1810,29 @@ static int pass_dce(struct ir_func *fn)
         return 0;
     char *live_ins = xcalloc((size_t)nins, 1);
     char *live_t = xcalloc((size_t)(nvr ? nvr : 1), 1);
+    /* the instructions defining each temp: def_target, and a landing
+     * pad's second temp in `b` */
+    int *dhead = xmalloc((size_t)(nvr ? nvr : 1) * sizeof *dhead);
+    int *dnext = xmalloc((size_t)nins * 2 * sizeof *dnext);
+    int *work = xmalloc((size_t)nins * sizeof *work);
+    for (int v = 0; v < nvr; v++)
+        dhead[v] = -1;
+    for (int n = nins - 1; n >= 0; n--) {
+        struct ir_ins *i = &fn->ins[n];
+        int t = def_target(i);
+        dnext[n] = dnext[nins + n] = -1;
+        if (t >= 0 && t < nvr) {
+            dnext[n] = dhead[t];
+            dhead[t] = n;
+        }
+        int second = i->op == IR_LANDING ? i->b : -1;
+        if (second >= 0 && second < nvr && second != t) {
+            /* filed as nins + n, which names instruction n again */
+            dnext[nins + n] = dhead[second];
+            dhead[second] = nins + n;
+        }
+    }
+    struct mark m = { live_t, nvr, nins, dhead, dnext, live_ins, work, 0 };
     for (int n = 0; n < nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->op == IR_STVAR) {
@@ -1524,26 +1852,12 @@ static int pass_dce(struct ir_func *fn)
             continue;
         live_ins[n] = 1;
     }
-    for (int again = 1; again; ) {
-        again = 0;
-        for (int n = 0; n < nins; n++) {
-            struct ir_ins *i = &fn->ins[n];
-            if (!live_ins[n]) {
-                int t = def_target(i);
-                /* IR_LANDING writes a second temp, in `b`: either one
-                 * being live keeps the pad. */
-                int second = i->op == IR_LANDING ? i->b : -1;
-                if (!((t >= 0 && t < nvr && live_t[t]) ||
-                      (second >= 0 && second < nvr && live_t[second])))
-                    continue;
-                live_ins[n] = 1;
-                again = 1;
-            }
-            struct mark m = { live_t, nvr, 0 };
-            each_read(i, mark_cb, &m);
-            if (m.added)
-                again = 1;
-        }
+    for (int n = 0; n < nins; n++)
+        if (live_ins[n])
+            work[m.nwork++] = n;
+    while (m.nwork > 0) {
+        int n = work[--m.nwork];
+        each_read(&fn->ins[n], mark_cb, &m);
     }
     /* Removing instructions renumbers the ones that follow. fn->var_scope_lo/hi
      * (irgen-stamped instruction indices, read by codegen's coalesce_locals to
@@ -1578,6 +1892,7 @@ static int pass_dce(struct ir_func *fn)
     }
     fn->nins = j;
     free(live_ins); free(live_t);
+    free(dhead); free(dnext); free(work);
     return changed;
 }
 
@@ -1604,6 +1919,8 @@ struct bb {
     int *succ, nsucc, capsucc;
     int *pred, npred;
     int idom, rpo;                  /* immediate dominator; reverse-postorder # */
+    int dpre, dpost;                /* dominator-tree DFS numbers (bb_dominates);
+                                     * -1 off the tree */
     int *phi_local, *phi_res, nphi; /* phi(local) -> result temp, per block */
     int **phi_inc;                  /* phi_inc[p][k] = value on edge from pred p */
 };
@@ -1966,30 +2283,27 @@ static int pass_idxoff(struct ir_func *fn)
     return 1;
 }
 
-static void bb_add_succ(struct bb *b, int t)
-{
-    for (int k = 0; k < b->nsucc; k++)
-        if (b->succ[k] == t)
-            return;                 /* an edge once is an edge */
-    if (b->nsucc == b->capsucc) {
-        b->capsucc = b->capsucc ? b->capsucc * 2 : 2;
-        b->succ = xrealloc(b->succ, (size_t)b->capsucc * sizeof *b->succ);
-    }
-    b->succ[b->nsucc++] = t;
-}
-
 static void free_cfg(struct bb *bb, int nbb)
 {
     for (int i = 0; i < nbb; i++) { free(bb[i].pred); free(bb[i].succ); }
     free(bb);
 }
 
-static void bb_add_pred(struct bb *b, int p)
+/* Add t to block i's successors, once. build_cfg adds every successor
+ * of block i before moving on to i + 1, so whether t is already there is
+ * a stamp to ask, not a list to walk -- a switch of 4000 cases has 4000
+ * successors. */
+static void cfg_succ(struct bb *bb, int *seen, int i, int t)
 {
-    for (int i = 0; i < b->npred; i++)
-        if (b->pred[i] == p) return;
-    b->pred = xrealloc(b->pred, (size_t)(b->npred + 1) * sizeof *b->pred);
-    b->pred[b->npred++] = p;
+    if (seen[t] == i + 1)
+        return;                     /* an edge once is an edge */
+    seen[t] = i + 1;
+    struct bb *b = &bb[i];
+    if (b->nsucc == b->capsucc) {
+        b->capsucc = b->capsucc ? b->capsucc * 2 : 2;
+        b->succ = xrealloc(b->succ, (size_t)b->capsucc * sizeof *b->succ);
+    }
+    b->succ[b->nsucc++] = t;
 }
 
 /* Build basic blocks + succ/pred + a label->block map. */
@@ -2013,7 +2327,10 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
     int b = 0, prev = 0;
     for (int i = 1; i <= N; i++)
         if (i == N || lead[i]) { bb[b].start = prev; bb[b].end = i; prev = i; b++; }
-    for (int i = 0; i < nbb; i++) { bb[i].idom = -1; bb[i].rpo = -1; }
+    for (int i = 0; i < nbb; i++) {
+        bb[i].idom = -1; bb[i].rpo = -1;
+        bb[i].dpre = bb[i].dpost = -1;
+    }
 
     int *l2b = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *l2b);
     for (int l = 0; l < fn->nlabels; l++) l2b[l] = -1;
@@ -2034,25 +2351,27 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
             taken_lbl[fn->ins[i].label] = 1;
         }
 
+    /* seen[t] == i + 1: t is already a successor of i (cfg_succ) */
+    int *seen = xcalloc((size_t)nbb, sizeof *seen);
     for (int i = 0; i < nbb; i++) {
         enum ir_op op = bb[i].end > bb[i].start ? fn->ins[bb[i].end - 1].op : IR_UD2;
         int L = bb[i].end > bb[i].start ? fn->ins[bb[i].end - 1].label : -1;
         if (op == IR_RET || op == IR_UD2) {
             /* no successors */
         } else if (op == IR_JMP) {
-            if (l2b[L] >= 0) bb_add_succ(&bb[i], l2b[L]);
+            if (l2b[L] >= 0) cfg_succ(bb, seen, i, l2b[L]);
         } else if (op == IR_BRZ || op == IR_BRNZ) {
-            if (l2b[L] >= 0) bb_add_succ(&bb[i], l2b[L]);
-            if (i + 1 < nbb) bb_add_succ(&bb[i], i + 1);
+            if (l2b[L] >= 0) cfg_succ(bb, seen, i, l2b[L]);
+            if (i + 1 < nbb) cfg_succ(bb, seen, i, i + 1);
         } else if (op == IR_SWITCH) {
             /* the default, and every entry of the table */
             const struct ir_ins *sw = &fn->ins[bb[i].end - 1];
             if (L >= 0 && L < fn->nlabels && l2b[L] >= 0)
-                bb_add_succ(&bb[i], l2b[L]);
+                cfg_succ(bb, seen, i, l2b[L]);
             for (int k = 0; k < fn->jt[sw->jt].n; k++) {
                 int tl = fn->jt[sw->jt].labels[k];
                 if (tl >= 0 && tl < fn->nlabels && l2b[tl] >= 0)
-                    bb_add_succ(&bb[i], l2b[tl]);
+                    cfg_succ(bb, seen, i, l2b[tl]);
             }
         } else if (op == IR_IGOTO) {
             /* An edge to every address-taken label. Without these the
@@ -2060,15 +2379,31 @@ static struct bb *build_cfg(struct ir_func *fn, int *nbb_out, int **l2b_out)
              * DELETE unreachable code delete the program. */
             for (int l = 0; taken_lbl && l < fn->nlabels; l++)
                 if (taken_lbl[l] && l2b[l] >= 0)
-                    bb_add_succ(&bb[i], l2b[l]);
+                    cfg_succ(bb, seen, i, l2b[l]);
         } else if (i + 1 < nbb) {
-            bb_add_succ(&bb[i], i + 1);
+            cfg_succ(bb, seen, i, i + 1);
         }
     }
     free(taken_lbl);
+    free(seen);
+    /* Predecessors by source block, then by successor. A block's
+     * successors are distinct, so none is a duplicate, and each list is
+     * allocated once at its size: added one at a time, each checked every
+     * earlier one and grew the array by one, and for the block after a
+     * 4000-case switch that was the hottest thing in the -O2 compile. */
     for (int i = 0; i < nbb; i++)
         for (int k = 0; k < bb[i].nsucc; k++)
-            bb_add_pred(&bb[bb[i].succ[k]], i);
+            bb[bb[i].succ[k]].npred++;
+    for (int i = 0; i < nbb; i++) {
+        if (bb[i].npred)
+            bb[i].pred = xmalloc((size_t)bb[i].npred * sizeof *bb[i].pred);
+        bb[i].npred = 0;
+    }
+    for (int i = 0; i < nbb; i++)
+        for (int k = 0; k < bb[i].nsucc; k++) {
+            struct bb *t = &bb[bb[i].succ[k]];
+            t->pred[t->npred++] = i;
+        }
     free(lead);
     *nbb_out = nbb;
     *l2b_out = l2b;
@@ -2121,24 +2456,91 @@ static void compute_idom(struct bb *bb, int *order, int norder)
             if (nd >= 0 && bb[b].idom != nd) { bb[b].idom = nd; changed = 1; }
         }
     }
+    /* Number the dominator tree depth-first, so that "does s dominate b"
+     * is two comparisons (bb_dominates) rather than a walk up b's
+     * dominators -- which on a chain of 4000 else-ifs is a walk of
+     * thousands, asked of every edge by every loop pass. */
+    int nbb = 0;
+    for (int i = 0; i < norder; i++)
+        if (order[i] + 1 > nbb) nbb = order[i] + 1;
+    int *kid = xcalloc((size_t)nbb + 1, sizeof *kid);
+    int *kids = xmalloc((size_t)(norder ? norder : 1) * sizeof *kids);
+    int *stk = xmalloc((size_t)(norder ? norder : 1) * sizeof *stk);
+    int *it = xmalloc((size_t)(norder ? norder : 1) * sizeof *it);
+    for (int i = 0; i < norder; i++) {
+        int b = order[i];
+        bb[b].dpre = bb[b].dpost = -1;
+        if (b != 0 && bb[b].idom >= 0 && bb[b].idom < nbb) kid[bb[b].idom + 1]++;
+    }
+    for (int b = 0; b < nbb; b++) kid[b + 1] += kid[b];
+    {
+        int *fill = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *fill);
+        for (int b = 0; b < nbb; b++) fill[b] = kid[b];
+        for (int i = 0; i < norder; i++) {
+            int b = order[i];
+            if (b != 0 && bb[b].idom >= 0 && bb[b].idom < nbb)
+                kids[fill[bb[b].idom]++] = b;
+        }
+        free(fill);
+    }
+    int pre = 0, post = 0, sp = 0;
+    if (norder > 0) { stk[sp] = 0; it[sp] = kid[0]; sp++; bb[0].dpre = pre++; }
+    while (sp > 0) {
+        int u = stk[sp - 1];
+        if (it[sp - 1] < kid[u + 1]) {
+            int c = kids[it[sp - 1]++];
+            if (bb[c].dpre >= 0) continue;
+            bb[c].dpre = pre++;
+            stk[sp] = c; it[sp] = kid[c]; sp++;
+        } else {
+            bb[u].dpost = post++;
+            sp--;
+        }
+    }
+    free(kid); free(kids); free(stk); free(it);
 }
 
 /* Dominance frontiers. df[b] holds the blocks on b's frontier. */
 static void compute_df(struct bb *bb, int nbb, int **df, int *ndf)
 {
+    /* b only ever joins a frontier while b is the block being looked at,
+     * so a repeat of b can only be the last entry: that is the whole
+     * duplicate test, where a scan of the frontier so far was one per
+     * step -- and each list grows by doubling, not by one. */
+    int *cap = xcalloc((size_t)(nbb ? nbb : 1), sizeof *cap);
     for (int b = 0; b < nbb; b++) {
         if (bb[b].npred < 2) continue;
         for (int k = 0; k < bb[b].npred; k++) {
             int r = bb[b].pred[k];
             while (r >= 0 && r != bb[b].idom) {
-                int dup = 0;
-                for (int j = 0; j < ndf[r]; j++) if (df[r][j] == b) dup = 1;
-                if (!dup) { df[r] = xrealloc(df[r], (size_t)(ndf[r]+1)*sizeof(int));
-                            df[r][ndf[r]++] = b; }
+                if (!(ndf[r] > 0 && df[r][ndf[r] - 1] == b)) {
+                    if (ndf[r] == cap[r]) {
+                        cap[r] = cap[r] ? cap[r] * 2 : 4;
+                        df[r] = xrealloc(df[r], (size_t)cap[r] * sizeof(int));
+                    }
+                    df[r][ndf[r]++] = b;
+                }
                 r = bb[r].idom;
             }
         }
     }
+    free(cap);
+}
+
+/* Where p is in b's predecessor list, or -1. build_cfg lists them in
+ * increasing block order, once each, so a binary search finds the one
+ * index a scan from the front would: a join after a 4000-case switch has
+ * 4000 predecessors, and mem2reg asked this once per incoming edge. */
+static int bb_pred_index(const struct bb *b, int p)
+{
+    int lo = 0, hi = b->npred - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (b->pred[mid] == p) return mid;
+        if (b->pred[mid] < p) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return -1;
 }
 
 /* A full-width plain access (no truncation/extension mismatch between a store
@@ -2156,8 +2558,7 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
 {
     struct bb *S = &bb[s];
     if (S->nphi == 0) return;
-    int pi = -1;
-    for (int k = 0; k < S->npred; k++) if (S->pred[k] == p) { pi = k; break; }
+    int pi = bb_pred_index(S, p);
     if (pi < 0) return;
     /* A phi copy runs on the EDGE from p, so it belongs to whatever ends p
      * -- the branch or the fall-through's last instruction (R3). Going out
@@ -2391,34 +2792,61 @@ static int pass_mem2reg(struct ir_func *fn)
     int *ndf = xcalloc((size_t)nbb, sizeof *ndf);
     compute_df(bb, nbb, df, ndf);
 
-    /* 3. Phi insertion at the iterated dominance frontier of each var's defs. */
-    char *hasphi = xcalloc((size_t)nbb * (size_t)nprom, 1);
+    /* 3. Phi insertion at the iterated dominance frontier of each var's defs.
+     *
+     * The blocks that store each variable are found in one pass, in block
+     * order, rather than by a pass over the function per variable; and
+     * "this block has its phi / is on the list" is a stamp of the
+     * variable's number per block rather than a flag per (block,
+     * variable) -- 4000 locals in a function were 4000 passes. */
+    int *dcnt = xcalloc((size_t)nprom + 1, sizeof *dcnt), *work0 = NULL;
+    int *dlast = xcalloc((size_t)(nprom ? nprom : 1), sizeof *dlast);
+    for (int pass = 0; pass < 2; pass++) {
+        for (int pidx = 0; pidx < nprom; pidx++) dlast[pidx] = 0;
+        for (int bI = 0; bI < nbb; bI++)
+            for (int i = bb[bI].start; i < bb[bI].end; i++) {
+                const struct ir_ins *in = &fn->ins[i];
+                if (in->op != IR_STVAR || in->dst < 0 || in->dst >= nvars ||
+                    prom[in->dst] < 0 || dlast[prom[in->dst]] == bI + 1)
+                    continue;
+                int pidx = prom[in->dst];
+                dlast[pidx] = bI + 1;
+                if (pass) work0[dcnt[pidx]++] = bI;
+                else dcnt[pidx + 1]++;
+            }
+        if (!pass) {
+            for (int pidx = 0; pidx < nprom; pidx++) dcnt[pidx + 1] += dcnt[pidx];
+            work0 = xmalloc((size_t)(dcnt[nprom] ? dcnt[nprom] : 1) * sizeof *work0);
+        }
+    }
+    /* the second pass filled each list from its start, so dcnt[pidx] is
+     * now the end of pidx's list, and it starts where the one before ends */
+    int *hasphi = xcalloc((size_t)(nbb ? nbb : 1), sizeof *hasphi);
+    int *ondef = xcalloc((size_t)(nbb ? nbb : 1), sizeof *ondef);
     int *work = xmalloc((size_t)nbb * sizeof *work);
     for (int pidx = 0; pidx < nprom; pidx++) {
         int L = ploc[pidx], nw = 0;
-        char *ondef = xcalloc((size_t)nbb, 1);
-        for (int bI = 0; bI < nbb; bI++)
-            for (int i = bb[bI].start; i < bb[bI].end; i++)
-                if (fn->ins[i].op == IR_STVAR && fn->ins[i].dst == L) {
-                    if (!ondef[bI]) { ondef[bI] = 1; work[nw++] = bI; }
-                    break;
-                }
+        for (int k = pidx ? dcnt[pidx - 1] : 0; k < dcnt[pidx]; k++) {
+            int bI = work0[k];
+            ondef[bI] = pidx + 1;
+            work[nw++] = bI;
+        }
         while (nw) {
             int x = work[--nw];
             for (int j = 0; j < ndf[x]; j++) {
                 int d = df[x][j];
-                if (hasphi[d * nprom + pidx]) continue;
-                hasphi[d * nprom + pidx] = 1;
+                if (hasphi[d] == pidx + 1) continue;
+                hasphi[d] = pidx + 1;
                 bb[d].phi_local = xrealloc(bb[d].phi_local, (size_t)(bb[d].nphi+1)*sizeof(int));
                 bb[d].phi_res   = xrealloc(bb[d].phi_res,   (size_t)(bb[d].nphi+1)*sizeof(int));
                 bb[d].phi_local[bb[d].nphi] = L;
                 bb[d].phi_res[bb[d].nphi] = fn->nvregs++;
                 bb[d].nphi++;
-                if (!ondef[d]) { ondef[d] = 1; work[nw++] = d; }
+                if (ondef[d] != pidx + 1) { ondef[d] = pidx + 1; work[nw++] = d; }
             }
         }
-        free(ondef);
     }
+    free(ondef); free(dcnt); free(dlast); free(work0);
     for (int b = 0; b < nbb; b++) if (bb[b].nphi) {
         bb[b].phi_inc = xcalloc((size_t)bb[b].npred, sizeof *bb[b].phi_inc);
         for (int k = 0; k < bb[b].npred; k++)
@@ -2440,21 +2868,42 @@ static int pass_mem2reg(struct ir_func *fn)
         stk[p] = xmalloc(sizeof(int) * 8); scap[p] = 8;
         stk[p][sp[p]++] = undef[p];
     }
-    /* explicit dominator-tree DFS (children = blocks whose idom is this block) */
+    /* explicit dominator-tree DFS (children = blocks whose idom is this block).
+     * Each block's children are listed once, in block order, and pushed in
+     * that order; what a block pushes onto the version stacks is logged,
+     * and leaving it pops back to where the log stood on entry. Both used
+     * to cost blocks x blocks and blocks x variables. */
     int *dstk = xmalloc((size_t)nbb * sizeof *dstk);
-    int *dpushed = xcalloc((size_t)nbb * nprom, sizeof *dpushed); /* per (block,prom) */
+    int *mark = xmalloc((size_t)nbb * sizeof *mark);
+    int *plog = NULL, nplog = 0, cplog = 0;     /* pidx of each push */
     char *entered = xcalloc((size_t)nbb, 1);
+    int *kid = xcalloc((size_t)nbb + 1, sizeof *kid);
+    int *kids = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *kids);
+    for (int c = 1; c < nbb; c++)
+        if (bb[c].idom >= 0 && bb[c].idom < nbb) kid[bb[c].idom + 1]++;
+    for (int c = 0; c < nbb; c++) kid[c + 1] += kid[c];
+    {
+        int *fill = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *fill);
+        for (int c = 0; c < nbb; c++) fill[c] = kid[c];
+        for (int c = 1; c < nbb; c++)
+            if (bb[c].idom >= 0 && bb[c].idom < nbb)
+                kids[fill[bb[c].idom]++] = c;
+        free(fill);
+    }
     int dsp = 0; dstk[dsp++] = 0;
     while (dsp) {
         int b = dstk[dsp - 1];
         if (!entered[b]) {
             entered[b] = 1;
+            mark[b] = nplog;
             /* phi defs become the current version */
             for (int k = 0; k < bb[b].nphi; k++) {
                 int pidx = prom[bb[b].phi_local[k]];
                 if (sp[pidx] == scap[pidx]) { scap[pidx]*=2; stk[pidx]=xrealloc(stk[pidx],(size_t)scap[pidx]*sizeof(int)); }
                 stk[pidx][sp[pidx]++] = bb[b].phi_res[k];
-                dpushed[b * nprom + pidx]++;
+                if (nplog == cplog) { cplog = cplog ? cplog * 2 : 64;
+                    plog = xrealloc(plog, (size_t)cplog * sizeof *plog); }
+                plog[nplog++] = pidx;
             }
             for (int i = bb[b].start; i < bb[b].end; i++) {
                 struct ir_ins *in = &fn->ins[i];
@@ -2482,7 +2931,9 @@ static int pass_mem2reg(struct ir_func *fn)
                     int pidx = prom[in->dst];
                     if (sp[pidx] == scap[pidx]) { scap[pidx]*=2; stk[pidx]=xrealloc(stk[pidx],(size_t)scap[pidx]*sizeof(int)); }
                     stk[pidx][sp[pidx]++] = in->a;   /* the stored temp is the new version */
-                    dpushed[b * nprom + pidx]++;
+                    if (nplog == cplog) { cplog = cplog ? cplog * 2 : 64;
+                        plog = xrealloc(plog, (size_t)cplog * sizeof *plog); }
+                    plog[nplog++] = pidx;
                     in->op = IR_MOV; in->dst = -1; in->a = -1;  /* mark: drop in rebuild */
                 }
             }
@@ -2490,22 +2941,23 @@ static int pass_mem2reg(struct ir_func *fn)
             for (int s = 0; s < bb[b].nsucc; s++) {
                 int sb = bb[b].succ[s];
                 if (!bb[sb].nphi) continue;
-                int pk = -1;
-                for (int k = 0; k < bb[sb].npred; k++) if (bb[sb].pred[k]==b){pk=k;break;}
+                int pk = bb_pred_index(&bb[sb], b);
                 for (int k = 0; k < bb[sb].nphi; k++) {
                     int pidx = prom[bb[sb].phi_local[k]];
                     bb[sb].phi_inc[pk][k] = stk[pidx][sp[pidx]-1];
                 }
             }
             /* push dom-tree children */
-            for (int c = 0; c < nbb; c++)
-                if (c != 0 && bb[c].idom == b && !entered[c]) dstk[dsp++] = c;
+            for (int q = kid[b]; q < kid[b + 1]; q++)
+                if (!entered[kids[q]]) dstk[dsp++] = kids[q];
         } else {
             /* leaving b: pop its versions */
-            for (int p = 0; p < nprom; p++) sp[p] -= dpushed[b * nprom + p];
+            while (nplog > mark[b])
+                sp[plog[--nplog]]--;
             dsp--;
         }
     }
+    free(mark); free(plog); free(kid); free(kids);
 
     /* 5. Rebuild the linear IR out of SSA. */
     struct ibuf nb = { 0, 0, 0 };
@@ -2645,7 +3097,7 @@ static int pass_mem2reg(struct ir_func *fn)
 
     for (int p = 0; p < nprom; p++) free(stk[p]);
     free(undef); free(stk); free(sp); free(scap);
-    free(dstk); free(dpushed); free(entered);
+    free(dstk); free(entered);
     free(hasphi); free(work); free(prom); free(ploc);
     mem2reg_free(bb, nbb, df, ndf, l2b, order);
     return 1;
@@ -2732,17 +3184,40 @@ static int pass_gcse(struct ir_func *fn)
 
     /* An active table holding the current block's and its dominators' values,
      * pushed on enter and truncated back on leave — an explicit dom-tree DFS so
-     * siblings never see each other's values (they do not dominate each other). */
-    struct vn *tab = NULL; int ntab = 0, captab = 0, changed = 0;
+     * siblings never see each other's values (they do not dominate each other).
+     * A key is entered only when it is not there, so the table holds each
+     * once and is hashed (vntab); leaving a block unlinks what it entered,
+     * newest first. */
+    struct vntab tb;
+    vntab_init(&tb, fn->nins, fn->nvregs, 0);
+    int changed = 0;
     int *dstk = xmalloc((size_t)nbb * sizeof *dstk);
     int *mark = xmalloc((size_t)nbb * sizeof *mark);
     char *entered = xcalloc((size_t)nbb, 1);
+    /* Each block's dominator-tree children, in block order: finding them
+     * by asking every block for its idom was blocks x blocks, and a
+     * switch of 4000 cases is 8000 blocks. Pushed in that order, so the
+     * walk visits them in the order it always has. */
+    int *kid = xmalloc((size_t)(nbb + 1) * sizeof *kid);
+    int *kids = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *kids);
+    for (int b = 0; b <= nbb; b++) kid[b] = 0;
+    for (int c = 1; c < nbb; c++)
+        if (bb[c].idom >= 0 && bb[c].idom < nbb) kid[bb[c].idom + 1]++;
+    for (int b = 0; b < nbb; b++) kid[b + 1] += kid[b];
+    {
+        int *fill = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *fill);
+        for (int b = 0; b < nbb; b++) fill[b] = kid[b];
+        for (int c = 1; c < nbb; c++)
+            if (bb[c].idom >= 0 && bb[c].idom < nbb)
+                kids[fill[bb[c].idom]++] = c;
+        free(fill);
+    }
     int dsp = 0; dstk[dsp++] = 0;
     while (dsp) {
         int b = dstk[dsp - 1];
         if (!entered[b]) {
             entered[b] = 1;
-            mark[b] = ntab;
+            mark[b] = tb.ne;
             for (int n = bb[b].start; n < bb[b].end; n++) {
                 struct ir_ins *i = &fn->ins[n];
                 struct vn k;
@@ -2755,25 +3230,25 @@ static int pass_gcse(struct ir_func *fn)
                     !vn_stable(fn, &dfs, i) || !vn_key(i, 0, &k))
                     continue;
                 gcse_key_consts(fn, &dfs, &k);
-                int hit = -1;
-                for (int t = 0; t < ntab; t++)
-                    if (vn_eq(&tab[t], &k)) { hit = tab[t].result; break; }
+                int hit = vntab_find(&tb, &k);
                 if (hit >= 0 && hit != i->dst) {
                     vn_to_mov(i, hit); changed = 1; g_did.gcse++;
                 } else if (hit < 0) {
-                    if (ntab == captab) { captab = captab ? captab * 2 : 64;
-                        tab = xrealloc(tab, (size_t)captab * sizeof *tab); }
-                    k.result = i->dst; tab[ntab++] = k;
+                    k.result = i->dst;
+                    vntab_add(&tb, &k);
                 }
             }
-            for (int c = 0; c < nbb; c++)
-                if (c != 0 && bb[c].idom == b && !entered[c]) dstk[dsp++] = c;
+            for (int q = kid[b]; q < kid[b + 1]; q++)
+                if (!entered[kids[q]]) dstk[dsp++] = kids[q];
         } else {
-            ntab = mark[b];    /* leaving b: drop its (and its subtree's) values */
+            /* leaving b: drop its (and its subtree's) values */
+            while (tb.ne > mark[b])
+                vntab_unlink(&tb, --tb.ne);
             dsp--;
         }
     }
-    free(tab); free(dstk); free(mark); free(entered);
+    vntab_free(&tb); free(kid); free(kids);
+    free(dstk); free(mark); free(entered);
     free_defs(&dfs);
     free(order); free(l2b);
     free_cfg(bb, nbb);
@@ -3121,8 +3596,7 @@ static char *slots_taken(struct ir_func *fn)
  * under an older memver can never match again and are dropped here
  * too. */
 static int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
-                        struct vn *tab, int *ntab, int memver,
-                        const struct ir_ins *ins)
+                        struct vntab *tb, const struct ir_ins *ins)
 {
     struct maccess w;
     if (ins->vol)
@@ -3133,20 +3607,23 @@ static int lvn_mem_kill(struct ir_func *fn, struct defs *d, const char *taken,
         w = slot_access(ins->dst);
     else
         return 0;
+    /* Only the loads keyed at the current version can be reached: an
+     * older one's key will never be asked for again. */
     int j = 0;
-    for (int x = 0; x < *ntab; x++) {
-        struct vn *e = &tab[x];
-        if (e->op == IR_LOAD || e->op == IR_LDVAR) {
-            if (e->memver != memver)
-                continue;
-            struct maccess r = e->op == IR_LOAD
-                ? mem_access(fn, d, e->a, e->size) : slot_access(e->a);
-            if (acc_overlap(w, r, taken, fn->nvars))
-                continue;
+    for (int x = 0; x < tb->nld; x++) {
+        int ei = tb->ld[x];
+        struct vnent *e = &tb->e[ei];
+        if (!e->live)
+            continue;
+        struct maccess r = e->k.op == IR_LOAD
+            ? mem_access(fn, d, e->k.a, e->k.size) : slot_access(e->k.a);
+        if (acc_overlap(w, r, taken, fn->nvars)) {
+            vntab_unlink(tb, ei);
+            continue;
         }
-        tab[j++] = *e;
+        tb->ld[j++] = ei;
     }
-    *ntab = j;
+    tb->nld = j;
     return 1;
 }
 
@@ -3707,7 +4184,13 @@ static int thread_site(const struct ir_func *fn, int n, const int *use)
  * C writes the first wherever a truth value is compared with pdFALSE or
  * 0 -- FreeRTOS's `listLIST_IS_EMPTY(l) == pdFALSE` is a 1/0 merged from
  * two arms and then tested -- and the compare in between hid the merge
- * from the threading below. The compare is left for DCE. */
+ * from the threading below. The compare is left for DCE.
+ *
+ * Unsigned, `%t < 1` and `%t <= 0` are `%t == 0`, and `%t >= 1` and
+ * `%t > 0` are `%t != 0`: FreeRTOS asserts `uxIndexToNotify <
+ * configTASK_NOTIFICATION_ARRAY_ENTRIES`, which is 1 by default, and the
+ * compare-and-branch it made was a `cmp #1; blo` where a test of the
+ * value is one cbz. */
 static int branch_on_cmp0(struct ir_func *fn, const int *use,
                           const struct defs *d)
 {
@@ -3715,21 +4198,31 @@ static int branch_on_cmp0(struct ir_func *fn, const int *use,
     for (int n = 0; n + 1 < fn->nins; n++) {
         const struct ir_ins *c = &fn->ins[n];
         struct ir_ins *br = &fn->ins[n + 1];
+        long k;
+        int eq;
         if (c->op != IR_CMP || c->flt || c->w > 8 ||
-            (c->pred != B_EQ && c->pred != B_NE) ||
             (br->op != IR_BRZ && br->op != IR_BRNZ) || br->a != c->dst ||
             c->dst < 0 || c->dst >= fn->nvregs || use[c->dst] != 1 ||
             c->a < 0 || c->a >= fn->nvregs)
             continue;
-        int zero = c->imm_b ? c->imm == 0
-                 : c->b >= 0 && c->b < fn->nvregs && d->cnt[c->b] == 1 &&
-                   d->ins[c->b] >= 0 && fn->ins[d->ins[c->b]].op == IR_CONST &&
-                   fn->ins[d->ins[c->b]].imm == 0;
-        if (!zero)
+        if (c->imm_b)
+            k = c->imm;
+        else if (c->b >= 0 && c->b < fn->nvregs && d->cnt[c->b] == 1 &&
+                 d->ins[c->b] >= 0 && fn->ins[d->ins[c->b]].op == IR_CONST)
+            k = fn->ins[d->ins[c->b]].imm;
+        else
+            continue;
+        if (k == 0 && (c->pred == B_EQ || c->pred == B_NE))
+            eq = c->pred == B_EQ;
+        else if (!c->sign && k == 1 && (c->pred == B_LT || c->pred == B_GE))
+            eq = c->pred == B_LT;
+        else if (!c->sign && k == 0 && (c->pred == B_LE || c->pred == B_GT))
+            eq = c->pred == B_LE;
+        else
             continue;
         br->a = c->a;
         br->w = c->w;
-        if (c->pred == B_EQ)
+        if (eq)
             br->op = br->op == IR_BRZ ? IR_BRNZ : IR_BRZ;
         changed = 1;
     }
@@ -4825,6 +5318,40 @@ static void lcopy_cb(int *p, void *ctx)
     if (*p >= 0 && *p < c->nv && c->cp[*p] >= 0) { *p = c->cp[*p]; c->n++; }
 }
 
+/* The table is cleared at every block and every definition clears the
+ * entries copied FROM what it defines, and both used to be a sweep over
+ * every vreg: blocks x vregs plus definitions x vregs, which on one
+ * function of 4000 plain statements was most of an -O2 compile once
+ * pass_copyprop stopped being. So each entry is also filed under its
+ * source (`by`), and a block's entries are remembered in the order they
+ * were made, to be undone one by one. A filing goes stale when its entry
+ * is cleared or replaced; it is checked against cp[] when used, not
+ * removed. */
+struct lcfile { int v, src, next; };
+struct lctab { int *cp, *by; struct lcfile *f; int nf, capf; };
+
+static void lctab_reset(struct lctab *t)
+{
+    for (int k = 0; k < t->nf; k++) {
+        t->cp[t->f[k].v] = -1;
+        t->by[t->f[k].src] = -1;
+    }
+    t->nf = 0;
+}
+
+static void lctab_set(struct lctab *t, int v, int src)
+{
+    if (t->nf == t->capf) {
+        t->capf = t->capf ? t->capf * 2 : 64;
+        t->f = xrealloc(t->f, (size_t)t->capf * sizeof *t->f);
+    }
+    t->f[t->nf].v = v;
+    t->f[t->nf].src = src;
+    t->f[t->nf].next = t->by[src];
+    t->by[src] = t->nf++;
+    t->cp[v] = src;
+}
+
 static int pass_copyprop_local(struct ir_func *fn)
 {
     if (fn->nins == 0 || fn->nvregs == 0)
@@ -4833,11 +5360,15 @@ static int pass_copyprop_local(struct ir_func *fn)
     struct bb *bb = build_cfg(fn, &nbb, &l2b);
     struct defs d;
     compute_defs(fn, &d);
-    int *cp = xmalloc((size_t)fn->nvregs * sizeof *cp);
+    struct lctab tb = { NULL, NULL, NULL, 0, 0 };
+    tb.cp = xmalloc((size_t)fn->nvregs * sizeof *tb.cp);
+    tb.by = xmalloc((size_t)fn->nvregs * sizeof *tb.by);
+    for (int v = 0; v < fn->nvregs; v++)
+        tb.cp[v] = tb.by[v] = -1;
+    int *cp = tb.cp;
     int changed = 0;
     for (int b = 0; b < nbb; b++) {
-        for (int v = 0; v < fn->nvregs; v++)
-            cp[v] = -1;
+        lctab_reset(&tb);
         for (int n = bb[b].start; n < bb[b].end; n++) {
             struct ir_ins *i = &fn->ins[n];
             /* Inline asm names its OUTPUT temps through each_read, and a
@@ -4845,8 +5376,7 @@ static int pass_copyprop_local(struct ir_func *fn)
              * report. Neither is worth modelling for a copy table: drop
              * it and carry on from here. */
             if (i->op == IR_ASM || i->op == IR_LANDING) {
-                for (int v = 0; v < fn->nvregs; v++)
-                    cp[v] = -1;
+                lctab_reset(&tb);
                 continue;
             }
             struct lcopy c = { cp, fn->nvregs, 0 };
@@ -4858,10 +5388,11 @@ static int pass_copyprop_local(struct ir_func *fn)
             int t = def_target(i);
             if (t >= 0 && t < fn->nvregs) {
                 cp[t] = -1;                  /* it is a new value now */
-                for (int v = 0; v < fn->nvregs; v++)
-                    if (cp[v] == t)          /* and so is anything copied
+                for (int k = tb.by[t]; k >= 0; k = tb.f[k].next)
+                    if (cp[tb.f[k].v] == t)  /* and so is anything copied
                                               * from what it just replaced */
-                        cp[v] = -1;
+                        cp[tb.f[k].v] = -1;
+                tb.by[t] = -1;
             }
             /* Only a single-assignment dst becomes a copy. The reverse --
              * rewriting reads of a PHI temp to the value moved into it --
@@ -4874,11 +5405,11 @@ static int pass_copyprop_local(struct ir_func *fn)
             if (i->op == IR_MOV && !i->vol && i->dst >= 0 && i->a >= 0 &&
                 i->dst != i->a && i->dst < fn->nvregs && i->a < fn->nvregs &&
                 d.cnt[i->dst] == 1)
-                cp[i->dst] = cp[i->a] >= 0 ? cp[i->a] : i->a;
+                lctab_set(&tb, i->dst, cp[i->a] >= 0 ? cp[i->a] : i->a);
         }
     }
     free_defs(&d);
-    free(cp); free(l2b);
+    free(tb.cp); free(tb.by); free(tb.f); free(l2b);
     free_cfg(bb, nbb);
     return changed;
 }
@@ -4941,13 +5472,14 @@ static int pass_copyprop_local(struct ir_func *fn)
  * the entry is its own idom, which is where the walk stops. */
 static int bb_dominates(struct bb *bb, int s, int b)
 {
-    for (int x = b;;) {
-        if (x == s)
-            return 1;
-        if (x == 0 || bb[x].idom < 0 || bb[x].idom == x)
-            return 0;
-        x = bb[x].idom;
-    }
+    if (b == s)
+        return 1;
+    /* s is an ancestor of b in the dominator tree (compute_idom's
+     * numbering). Off the tree -- unreachable, or no dominators
+     * computed -- nothing dominates but the block itself. */
+    if (bb[b].dpre < 0 || bb[s].dpre < 0)
+        return 0;
+    return bb[s].dpre <= bb[b].dpre && bb[b].dpost <= bb[s].dpost;
 }
 
 /* The natural loop of the back edge tail -> h: h, plus every block that
@@ -5639,12 +6171,13 @@ static int licm_one(struct ir_func *fn)
 
         memset(in, 0, (size_t)nbb);
         int any_back = 0;
-        for (int p = 0; p < nbb; p++)
-            for (int k = 0; k < bb[p].nsucc; k++)
-                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
-                    loop_body(bb, nbb, h, p, in);
-                    any_back = 1;
-                }
+        for (int q = 0; q < bb[h].npred; q++) {   /* back edges into h */
+            int p = bb[h].pred[q];
+            if (bb_dominates(bb, h, p)) {
+                loop_body(bb, nbb, h, p, in);
+                any_back = 1;
+            }
+        }
         if (!any_back)
             continue;
 
@@ -5942,11 +6475,12 @@ static int rotate_one(struct ir_func *fn)
          * an unconditional jump -- which is the shape irgen emits, and
          * the only one where the jump can simply become the new test. */
         int latch = -1, nback = 0;
-        for (int p = 0; p < nbb; p++)
-            for (int k = 0; k < bb[p].nsucc; k++)
-                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
-                    latch = p; nback++;
-                }
+        for (int q = 0; q < bb[h].npred; q++) {   /* back edges into h */
+            int p = bb[h].pred[q];
+            if (bb_dominates(bb, h, p)) {
+                latch = p; nback++;
+            }
+        }
         if (nback != 1 || latch == h || bb[latch].end <= bb[latch].start)
             continue;
         if (fn->ins[bb[latch].end - 1].op != IR_JMP ||
@@ -6598,11 +7132,12 @@ static int idiom_one(struct ir_func *fn)
             continue;
         int Lh = fn->ins[bb[h].start].label;
         int latch = -1, nback = 0;
-        for (int p = 0; p < nbb; p++)
-            for (int k = 0; k < bb[p].nsucc; k++)
-                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
-                    latch = p; nback++;
-                }
+        for (int q = 0; q < bb[h].npred; q++) {   /* back edges into h */
+            int p = bb[h].pred[q];
+            if (bb_dominates(bb, h, p)) {
+                latch = p; nback++;
+            }
+        }
         if (nback != 1 || bb[latch].end <= bb[latch].start)
             continue;
         struct ir_ins *br = &fn->ins[bb[latch].end - 1];
@@ -6819,11 +7354,12 @@ static int vectorize_one(struct ir_func *fn)
          * the rotated shape, which is the only one whose test is at the
          * bottom where the step is. */
         int latch = -1, nback = 0;
-        for (int p = 0; p < nbb; p++)
-            for (int k = 0; k < bb[p].nsucc; k++)
-                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
-                    latch = p; nback++;
-                }
+        for (int q = 0; q < bb[h].npred; q++) {   /* back edges into h */
+            int p = bb[h].pred[q];
+            if (bb_dominates(bb, h, p)) {
+                latch = p; nback++;
+            }
+        }
         if (nback != 1 || bb[latch].end <= bb[latch].start)
             continue;
         struct ir_ins *br = &fn->ins[bb[latch].end - 1];
@@ -7767,11 +8303,12 @@ static int ivsr_one(struct ir_func *fn)
             continue;
         int Lh = fn->ins[bb[h].start].label;
         int latch = -1, nback = 0;
-        for (int p = 0; p < nbb; p++)
-            for (int k = 0; k < bb[p].nsucc; k++)
-                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
-                    latch = p; nback++;
-                }
+        for (int q = 0; q < bb[h].npred; q++) {   /* back edges into h */
+            int p = bb[h].pred[q];
+            if (bb_dominates(bb, h, p)) {
+                latch = p; nback++;
+            }
+        }
         if (nback != 1 || bb[latch].end <= bb[latch].start)
             continue;
         struct ir_ins *br = &fn->ins[bb[latch].end - 1];
@@ -8235,11 +8772,12 @@ static int unr_find(struct ir_func *fn, struct bb *bb, int nbb, int *order,
         if (Lh >= 0 && Lh < nseen && seen[Lh])
             continue;
         int latch = -1, nback = 0;
-        for (int p = 0; p < nbb; p++)
-            for (int k = 0; k < bb[p].nsucc; k++)
-                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
-                    latch = p; nback++;
-                }
+        for (int q = 0; q < bb[h].npred; q++) {   /* back edges into h */
+            int p = bb[h].pred[q];
+            if (bb_dominates(bb, h, p)) {
+                latch = p; nback++;
+            }
+        }
         if (nback != 1 || bb[latch].end <= bb[latch].start)
             continue;
         struct ir_ins *br = &fn->ins[bb[latch].end - 1];
@@ -10351,6 +10889,8 @@ static int const_is_expensive(const struct ir_ins *i)
         }
         if (ta == TARGET_THUMB)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
+        if (ta == TARGET_MIPS32)                /* addiu, or ori from $0 */
+            return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
         return !(v >= -2048 && v <= 2047);                     /* RISC-V */
     }
     default:
@@ -10438,8 +10978,10 @@ static int pass_sinkconst(struct ir_func *fn)
          * Arm have taken it as an immediate before this runs. It used to
          * stay out by accident -- the guard in front of the loop read it
          * too -- until the guard could be decided at compile time. */
+        /* (MIPS's beq/bne compare two registers too.) */
         int rv_cmp = (target_get() == TARGET_RISCV32 ||
-                      target_get() == TARGET_RISCV64) &&
+                      target_get() == TARGET_RISCV64 ||
+                      target_get() == TARGET_MIPS32) &&
                      i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
                      fn->ins[at[i->dst]].op == IR_CMP;
         if (at[i->dst] > n + 1 &&
@@ -10509,6 +11051,11 @@ static int target_imm_foldable(int op, long imm, int w)
     if (target_get() == TARGET_RISCV32 && w == 8 &&
         (op == IR_AND || op == IR_OR || op == IR_XOR) && !getenv("EMBCC_RV_NOWIDEIMM"))
         return riscv_imm_foldable64(op, imm);
+    if (target_get() == TARGET_MIPS32 && w == 8 &&
+        (op == IR_AND || op == IR_OR || op == IR_XOR))
+        return mips_imm_foldable64(op, imm);
+    if (target_get() == TARGET_MIPS32)
+        return mips_imm_foldable(op, imm);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
@@ -10676,15 +11223,31 @@ static int pass_immfold(struct ir_func *fn)
         /* Thumb and RV32 take a 64-bit AND/OR/XOR constant half by half,
          * so its width is not x86's imm32 question (*_imm_foldable64). */
         int wide_ok = (target_get() == TARGET_THUMB ||
-                       target_get() == TARGET_RISCV32) && i->w == 8 &&
+                       target_get() == TARGET_RISCV32 ||
+                       target_get() == TARGET_MIPS32) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
-        if (get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
-            target_imm_foldable(i->op, B, i->w)) {
+        /* ...and a 64-bit compare with any constant whose halves its
+         * subs/sbcs or cmp/cmpeq take (thumb_cmp64_imm): strtol's
+         * `v > LONG_MAX` kept 0x7fffffff in a register pair. Not on
+         * ARMv6-M, which builds a constant from a literal pool. */
+        int cmp64 = target_get() == TARGET_THUMB && i->op == IR_CMP &&
+                    i->w == 8 && target_thumb_arch() >= 7 &&
+                    !getenv("EMBCC_T_NOCMP64IMM");
+        int p64;
+        long lo64, hi64;
+        if (cmp64 ? get_const(fn, &d, i->b, &B) &&
+                    thumb_cmp64_imm(i->pred, i->sign, B, &p64, &lo64, &hi64)
+                  : get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
+                    target_imm_foldable(i->op, B, i->w)) {
             i->imm = B; i->imm_b = 1; i->b = -1;    /* op a, imm */
             changed = 1;
-        } else if ((commutative || i->op == IR_CMP) &&
-                   get_const(fn, &d, i->a, &A) && (fits_imm32(A) || wide_ok) &&
-                   target_imm_foldable(i->op, A, i->w)) {
+        } else if (cmp64 ? get_const(fn, &d, i->a, &A) &&
+                           thumb_cmp64_imm(swap_pred(i->pred), i->sign, A,
+                                           &p64, &lo64, &hi64)
+                         : (commutative || i->op == IR_CMP) &&
+                           get_const(fn, &d, i->a, &A) &&
+                           (fits_imm32(A) || wide_ok) &&
+                           target_imm_foldable(i->op, A, i->w)) {
             /* Constant in the first operand: move it to the immediate, keeping
              * a valid instruction — commutative ops just swap, a compare swaps
              * and flips its predicate. */
@@ -11122,6 +11685,15 @@ static int sole_static_caller(struct ir_unit *iu, struct func *c)
  * at every level, -finline-functions-called-once). */
 static int g_inline_o1;
 
+/* -fno-inline-functions: only a function its author declared `inline`
+ * (or always_inline) is a candidate, at any level -- the sole-caller and
+ * small-function cases included, which GCC's flag leaves to two others.
+ * One flag that means "what I did not mark stays a call" is the one a
+ * build can rely on: for a breakpoint, a stack-usage figure, a symbol
+ * in the map file. */
+static int g_inline_declared_only;
+void opt_set_inline_declared_only(int on) { g_inline_declared_only = on; }
+
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
 static void inline_unit(struct ir_unit *iu)
 {
@@ -11153,6 +11725,10 @@ static void inline_unit(struct ir_unit *iu)
                     why = "callee-is-noinline";
                 else if (in->callee->is_weak)
                     why = "callee-is-weak";   /* the link may replace it */
+                else if (g_inline_declared_only &&
+                         !in->callee->attr_always_inline &&
+                         !in->callee->any_inline)
+                    why = "not-declared-inline";  /* -fno-inline-functions */
                 else {
                     sole = sole_static_caller(iu, in->callee);
                     if (g_inline_o1 && !in->callee->attr_always_inline &&
@@ -11373,6 +11949,150 @@ static void sroa_report(struct ir_func *fn, int nparams, int nvars,
  * refusal from the first is provisional: the whole point of the second
  * is that some of them stop being true. Only the last one has anything
  * worth telling a person. */
+/* ---- a compare-exchange's `expected`, by value --------------------------
+ *
+ * __atomic_compare_exchange_n(obj, &expected, desired, ...) takes
+ * `expected` by ADDRESS, and the address is all that keeps it in memory.
+ * A lock's fast path is exactly this --
+ *
+ *     int c = 0;
+ *     if (__atomic_compare_exchange_n(&l->v, &c, 1, 0, ACQ, RLX)) return;
+ *
+ * -- and mem2reg refuses `c` for having its address taken, so the lock
+ * stored a zero to the frame, took its address, loaded it back for the
+ * compare-exchange and stored the value seen through it again, where a
+ * register would have done (lib/libc's __lock, mtx_lock, call_once).
+ *
+ * When every address of a scalar local feeds compare-exchanges as their
+ * `expected` and nothing else, the local is private: nobody else can see
+ * it, so reading it before and writing the value seen after is the same
+ * program. That is IR_CAS, the by-value form the __sync builtins use:
+ *
+ *     e = ldvar v ; s = cas [obj], e, desired ; stvar v, s ; r = (s == e)
+ *
+ * (s re-extended first when the object is narrower than four bytes, as
+ * irgen does for __sync_bool_compare_and_swap). Then nothing takes v's
+ * address and mem2reg promotes it. Writing v on a match as well stores
+ * the value it already holds, which a private local cannot show. */
+struct cx_read { struct ir_ins *i; const int *of; int nv; signed char *st; };
+static void cx_read_cb(int *p, void *ctx)
+{
+    struct cx_read *r = ctx;
+    int t = *p;
+    if (t < 0 || t >= r->nv || r->of[t] < 0)
+        return;
+    /* the expected operand of a compare-exchange as wide as the local,
+     * and not also its object or its desired value */
+    if (r->i->op == IR_CMPXCHG && p == &r->i->b && r->i->a != t &&
+        r->i->c != t)
+        return;
+    r->st[r->of[t]] = -1;
+}
+
+static int pass_cxlocal(struct ir_func *fn)
+{
+    int nv = fn->nvregs, nvars = fn->nvars;
+    if (nvars == 0 || fn->nins == 0 || fn->neh)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    /* per local: 0 untouched, 1 a candidate, -1 refused */
+    signed char *st = xcalloc((size_t)nvars, 1);
+    int *of = xmalloc((size_t)nv * sizeof *of);   /* temp -> its local */
+    for (int v = 0; v < nv; v++)
+        of[v] = -1;
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_ADDR || i->a < 0 || i->a >= nvars)
+            continue;
+        if (i->dst < nvars || i->dst >= nv || d.cnt[i->dst] != 1) {
+            st[i->a] = -1;
+            continue;
+        }
+        of[i->dst] = i->a;
+        if (st[i->a] == 0)
+            st[i->a] = 1;
+    }
+    for (int L = 0; L < nvars; L++) {
+        const struct ir_local *Li = &fn->locals[L];
+        if (st[L] == 1 &&
+            (!Li->is_int_or_ptr || Li->is_int128 || Li->is_volatile ||
+             (Li->size != 1 && Li->size != 2 && Li->size != 4 &&
+              Li->size != 8)))
+            st[L] = -1;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        struct cx_read r = { i, of, nv, st };
+        if (i->op == IR_ADDR)
+            continue;                     /* its `a` is the slot itself */
+        each_read(i, cx_read_cb, &r);
+        if (i->op == IR_CMPXCHG && i->b >= 0 && i->b < nv && of[i->b] >= 0 &&
+            (i->size != fn->locals[of[i->b]].size || i->flt))
+            st[of[i->b]] = -1;
+    }
+    for (int L = 0; L < nvars; L++)
+        if (st[L] == 1)
+            any = 1;
+    if (!any) {
+        free(st); free(of); free_defs(&d);
+        return 0;
+    }
+
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins o = fn->ins[n];
+        if (newpos) newpos[n] = nb.n;
+        if (o.op == IR_ADDR && o.a >= 0 && o.a < nvars && st[o.a] == 1)
+            continue;                     /* read by nothing now */
+        if (o.op != IR_CMPXCHG || o.b < 0 || o.b >= nv || of[o.b] < 0 ||
+            st[of[o.b]] != 1) {
+            *ib_push(&nb) = o;
+            continue;
+        }
+        int L = of[o.b];
+        int e = fn->nvregs++, sv = fn->nvregs++, x = sv;
+        struct ir_ins *p = ib_push(&nb);
+        p->op = IR_LDVAR; p->a = L; p->dst = e;
+        p->size = o.size; p->sign = o.sign; p->w = o.w;
+        p->line = o.line; p->col = o.col; p->synth = o.synth;
+        p = ib_push(&nb);
+        p->op = IR_CAS; p->a = o.a; p->b = e; p->c = o.c; p->dst = sv;
+        p->size = o.size; p->sign = o.sign; p->w = o.w;
+        p->line = o.line; p->col = o.col; p->synth = o.synth;
+        if (o.size < 4) {
+            x = fn->nvregs++;
+            p = ib_push(&nb);
+            p->op = IR_EXT; p->a = sv; p->dst = x;
+            p->size = o.size; p->sign = o.sign; p->w = o.w;
+            p->line = o.line; p->col = o.col; p->synth = o.synth;
+        }
+        p = ib_push(&nb);
+        p->op = IR_STVAR; p->dst = L; p->a = x; p->size = o.size;
+        p->line = o.line; p->col = o.col; p->synth = o.synth;
+        p = ib_push(&nb);
+        p->op = IR_CMP; p->pred = B_EQ; p->a = x; p->b = e; p->dst = o.dst;
+        p->w = o.w; p->sign = o.sign;
+        p->line = o.line; p->col = o.col; p->synth = o.synth;
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free(st); free(of); free_defs(&d);
+    return 1;
+}
+
 static int pass_sroa(struct ir_func *fn, int report_refusals)
 {
     int nvars = fn->nvars, nparams = fn->nparams, nvr = fn->nvregs;
@@ -12012,6 +12732,22 @@ static int pass_splitloops(struct ir_func *fn)
     if (norder != nbb)
         goto out;
     compute_idom(bb, order, norder);
+    /* Nothing to split without a loop, and the liveness below is blocks x
+     * vregs bits: a 4000-case switch, which has no loop at all, built and
+     * swept 200 MB of it here. The headers looked for are the ones the
+     * walk below would take. */
+    {
+        int any_loop = 0;
+        for (int h = 1; h < nbb && !any_loop; h++) {
+            if (bb[h].end <= bb[h].start || fn->ins[bb[h].start].op != IR_LABEL)
+                continue;
+            for (int q = 0; q < bb[h].npred && !any_loop; q++)
+                if (bb_dominates(bb, h, bb[h].pred[q]))
+                    any_loop = 1;
+        }
+        if (!any_loop)
+            goto out;
+    }
     int nv = fn->nvregs, words = (nv + 63) / 64;
 
     /* The width and class of each temp, from any definition. */
@@ -12093,12 +12829,13 @@ static int pass_splitloops(struct ir_func *fn)
         int Lh = fn->ins[bb[h].start].label;
         memset(in, 0, (size_t)nbb);
         int any_back = 0;
-        for (int p = 0; p < nbb; p++)
-            for (int k = 0; k < bb[p].nsucc; k++)
-                if (bb[p].succ[k] == h && bb_dominates(bb, h, p)) {
-                    loop_body(bb, nbb, h, p, in);
-                    any_back = 1;
-                }
+        for (int q = 0; q < bb[h].npred; q++) {   /* back edges into h */
+            int p = bb[h].pred[q];
+            if (bb_dominates(bb, h, p)) {
+                loop_body(bb, nbb, h, p, in);
+                any_back = 1;
+            }
+        }
         if (!any_back)
             continue;
         /* One entry, from the block that falls into the header. */
@@ -12696,8 +13433,178 @@ static int pass_rangecheck(struct ir_func *fn)
  * merge; each question about one point is a walk to the end of its
  * block. Functions with inline asm (whose outputs are not definitions to
  * the rest of this file) or exception edges are left alone. */
+/* Block liveness as a list per vreg of the blocks it is live out of,
+ * ascending -- the least solution of the usual equations over build_cfg's
+ * blocks, found one vreg at a time from the blocks that read it before
+ * writing it, back through predecessors to the blocks that write it.
+ * `slots` says whether an LDVAR's or ADDR's slot operand counts as a read.
+ *
+ * What it replaces was a bit set per block of every vreg, iterated to a
+ * fixpoint: blocks x vregs, which for a function of 4000 if statements
+ * is 12000 blocks by 36000 vregs, 54 MB a set and four sets. */
+struct vblk { int **b, *n, nv; };
+
+struct vblk_ue { int *ust, *dst, b, nv; int *pv, *pb, np, cap; };
+static void vblk_pair(struct vblk_ue *u, int v, int b)
+{
+    if (u->np == u->cap) {
+        u->cap = u->cap ? u->cap * 2 : 256;
+        u->pv = xrealloc(u->pv, (size_t)u->cap * sizeof *u->pv);
+        u->pb = xrealloc(u->pb, (size_t)u->cap * sizeof *u->pb);
+    }
+    u->pv[u->np] = v;
+    u->pb[u->np] = b;
+    u->np++;
+}
+static void vblk_ue_cb(int *p, void *ctx)
+{
+    struct vblk_ue *u = ctx;
+    int v = *p;
+    if (v < 0 || v >= u->nv || u->dst[v] == u->b + 1 || u->ust[v] == u->b + 1)
+        return;
+    u->ust[v] = u->b + 1;
+    vblk_pair(u, v, u->b);
+}
+
+/* (v, b) pairs -> per key, the other side, stably */
+static void vblk_csr(const int *key, const int *val, int np, int nkey,
+                     int **off_out, int **val_out)
+{
+    int *off = xcalloc((size_t)nkey + 1, sizeof *off);
+    int *out = xmalloc((size_t)(np ? np : 1) * sizeof *out);
+    for (int j = 0; j < np; j++) off[key[j] + 1]++;
+    for (int k = 0; k < nkey; k++) off[k + 1] += off[k];
+    int *fill = xmalloc((size_t)(nkey ? nkey : 1) * sizeof *fill);
+    for (int k = 0; k < nkey; k++) fill[k] = off[k];
+    for (int j = 0; j < np; j++) out[fill[key[j]]++] = val[j];
+    free(fill);
+    *off_out = off;
+    *val_out = out;
+}
+
+static void vblk_build(struct ir_func *fn, const struct bb *bb, int nbb,
+                       int slots, struct vblk *lv)
+{
+    int nv = fn->nvregs;
+    lv->nv = nv;
+    lv->b = xcalloc((size_t)(nv ? nv : 1), sizeof *lv->b);
+    lv->n = xcalloc((size_t)(nv ? nv : 1), sizeof *lv->n);
+    struct vblk_ue ue = { NULL, NULL, 0, nv, NULL, NULL, 0, 0 };
+    struct vblk_ue df = { NULL, NULL, 0, nv, NULL, NULL, 0, 0 };
+    ue.ust = xcalloc((size_t)(nv ? nv : 1), sizeof *ue.ust);
+    ue.dst = xcalloc((size_t)(nv ? nv : 1), sizeof *ue.dst);
+    for (int b = 0; b < nbb; b++) {
+        ue.b = b;
+        for (int n = bb[b].start; n < bb[b].end; n++) {
+            struct ir_ins *i = &fn->ins[n];
+            if (slots || (i->op != IR_LDVAR && i->op != IR_ADDR))
+                each_read(i, vblk_ue_cb, &ue);
+            int t = def_target(i);
+            if (t >= 0 && t < nv && ue.dst[t] != b + 1) {
+                ue.dst[t] = b + 1;
+                vblk_pair(&df, t, b);
+            }
+        }
+    }
+    free(ue.ust); free(ue.dst);
+    int *ueoff, *ueb, *dfoff, *dfb;
+    vblk_csr(ue.pv, ue.pb, ue.np, nv, &ueoff, &ueb);
+    vblk_csr(df.pv, df.pb, df.np, nv, &dfoff, &dfb);
+    free(ue.pv); free(ue.pb); free(df.pv); free(df.pb);
+    int *inmk = xcalloc((size_t)(nbb ? nbb : 1), sizeof *inmk);
+    int *outmk = xcalloc((size_t)(nbb ? nbb : 1), sizeof *outmk);
+    int *defmk = xcalloc((size_t)(nbb ? nbb : 1), sizeof *defmk);
+    int *work = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *work);
+    int *tmp = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *tmp);
+    for (int v = 0; v < nv; v++) {
+        if (ueoff[v] == ueoff[v + 1])
+            continue;
+        for (int k = dfoff[v]; k < dfoff[v + 1]; k++) defmk[dfb[k]] = v + 1;
+        int nw = 0, nt = 0;
+        for (int k = ueoff[v]; k < ueoff[v + 1]; k++) {
+            inmk[ueb[k]] = v + 1;
+            work[nw++] = ueb[k];
+        }
+        while (nw > 0) {
+            int b = work[--nw];
+            for (int k = 0; k < bb[b].npred; k++) {
+                int p = bb[b].pred[k];
+                if (outmk[p] != v + 1) {
+                    outmk[p] = v + 1;
+                    tmp[nt++] = p;
+                }
+                if (defmk[p] != v + 1 && inmk[p] != v + 1) {
+                    inmk[p] = v + 1;
+                    work[nw++] = p;
+                }
+            }
+        }
+        if (nt == 0)
+            continue;
+        /* ascending: an insertion sort is fine for the short lists, and a
+         * marked pass over the blocks for a long one */
+        int *l = xmalloc((size_t)nt * sizeof *l);
+        if (nt <= 32) {
+            for (int k = 0; k < nt; k++) {
+                int x = tmp[k], j = k;
+                while (j > 0 && l[j - 1] > x) { l[j] = l[j - 1]; j--; }
+                l[j] = x;
+            }
+        } else {
+            int m = 0;
+            for (int b = 0; b < nbb; b++)
+                if (outmk[b] == v + 1) l[m++] = b;
+        }
+        lv->b[v] = l;
+        lv->n[v] = nt;
+    }
+    free(inmk); free(outmk); free(defmk); free(work); free(tmp);
+    free(ueoff); free(ueb); free(dfoff); free(dfb);
+}
+
+static int vblk_has(const struct vblk *lv, int v, int b)
+{
+    if (v < 0 || v >= lv->nv)
+        return 0;
+    const int *l = lv->b[v];
+    int lo = 0, hi = lv->n[v] - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (l[mid] == b) return 1;
+        if (l[mid] < b) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return 0;
+}
+
+/* b is now live wherever a was, and a nowhere */
+static void vblk_merge(struct vblk *lv, int a, int b)
+{
+    int na = lv->n[a], nb2 = lv->n[b], m = 0, i = 0, j = 0;
+    if (na == 0)
+        return;
+    int *l = xmalloc((size_t)(na + nb2) * sizeof *l);
+    const int *x = lv->b[a], *y = lv->b[b];
+    while (i < na || j < nb2) {
+        int c;
+        if (j >= nb2 || (i < na && x[i] < y[j])) c = x[i++];
+        else if (i >= na || y[j] < x[i]) c = y[j++];
+        else { c = x[i]; i++; j++; }
+        l[m++] = c;
+    }
+    free(lv->b[a]); free(lv->b[b]);
+    lv->b[a] = NULL; lv->n[a] = 0;
+    lv->b[b] = l; lv->n[b] = m;
+}
+
+static void vblk_free(struct vblk *lv)
+{
+    for (int v = 0; v < lv->nv; v++) free(lv->b[v]);
+    free(lv->b); free(lv->n);
+}
+
 static int jc_live_after(struct ir_func *fn, const char *gone, int n, int end,
-                         int v, const unsigned long *lout)
+                         int v, const struct vblk *lout, int blk)
 {
     for (int k = n + 1; k < end; k++) {
         if (gone[k])
@@ -12707,7 +13614,7 @@ static int jc_live_after(struct ir_func *fn, const char *gone, int n, int end,
         if (def_target(&fn->ins[k]) == v)
             return 0;
     }
-    return (lout[v >> 6] & (1UL << (v & 63))) != 0;
+    return vblk_has(lout, v, blk);
 }
 struct jc_cnt { int *use; int nv; };
 static void jc_cnt_cb(int *p, void *ctx)
@@ -12751,42 +13658,26 @@ static int pass_joincopies(struct ir_func *fn)
     if (!any)
         goto out0;
     bb = build_cfg(fn, &nbb, &l2b);
-    int words = (nv + 63) / 64;
     int *blk = xmalloc((size_t)nins * sizeof *blk);
     for (int n = 0; n < nins; n++) blk[n] = -1;
     for (int b = 0; b < nbb; b++)
         for (int n = bb[b].start; n < bb[b].end; n++) blk[n] = b;
-    unsigned long *use = xcalloc((size_t)nbb * words, sizeof *use);
-    unsigned long *def = xcalloc((size_t)nbb * words, sizeof *def);
-    unsigned long *lin = xcalloc((size_t)nbb * words, sizeof *lin);
-    unsigned long *lout = xcalloc((size_t)nbb * words, sizeof *lout);
-    for (int b = 0; b < nbb; b++) {
-        struct splituse su = { use + (size_t)b * words, def + (size_t)b * words, nv };
-        for (int n = bb[b].start; n < bb[b].end; n++) {
-            if (fn->ins[n].op != IR_LDVAR && fn->ins[n].op != IR_ADDR)
-                each_read(&fn->ins[n], split_use_cb, &su);
-            int t = def_target(&fn->ins[n]);
-            if (t >= 0 && t < nv) su.def[t >> 6] |= 1UL << (t & 63);
-        }
-    }
-    for (int again = 1; again; ) {
-        again = 0;
-        for (int b = nbb - 1; b >= 0; b--) {
-            unsigned long *o = lout + (size_t)b * words;
-            for (int w = 0; w < words; w++) o[w] = 0;
-            for (int k = 0; k < bb[b].nsucc; k++) {
-                unsigned long *si = lin + (size_t)bb[b].succ[k] * words;
-                for (int w = 0; w < words; w++) o[w] |= si[w];
-            }
-            unsigned long *ii = lin + (size_t)b * words;
-            for (int w = 0; w < words; w++) {
-                unsigned long nvl = use[(size_t)b * words + w] |
-                                    (o[w] & ~def[(size_t)b * words + w]);
-                if (nvl != ii[w]) { ii[w] = nvl; again = 1; }
-            }
-        }
-    }
+    struct vblk lout;
+    vblk_build(fn, bb, nbb, 0, &lout);
     char *gone = xcalloc((size_t)nins, 1);
+    /* The instructions defining each vreg, in a list per vreg, kept true
+     * as names merge: the questions below are about the definitions of
+     * two vregs, and finding them by asking every instruction was
+     * instructions x copies -- on a chain of 4000 joins, most of the
+     * -O2 compile once the passes before it were linear. */
+    int *dfirst = xmalloc((size_t)nv * sizeof *dfirst);
+    int *dnext = xmalloc((size_t)nins * sizeof *dnext);
+    for (int v = 0; v < nv; v++) dfirst[v] = -1;
+    for (int n = nins - 1; n >= 0; n--) {
+        int t = def_target(&fn->ins[n]);
+        dnext[n] = -1;
+        if (t >= 0 && t < nv) { dnext[n] = dfirst[t]; dfirst[t] = n; }
+    }
     for (int m = 0; m < nins; m++) {
         struct ir_ins *i = &fn->ins[m];
         if (gone[m] || i->op != IR_MOV || blk[m] < 0)
@@ -12797,7 +13688,8 @@ static int pass_joincopies(struct ir_func *fn)
             vw[a] != i->w || vflt[a] != vflt[b] || vflt[a] != (char)i->flt)
             continue;
         int ok = 1, nd = 0;
-        for (int d = 0; d < nins && ok; d++) {
+        for (int pass = 0; pass < 2 && ok; pass++)
+        for (int d = dfirst[pass ? b : a]; d >= 0 && ok; d = dnext[d]) {
             if (gone[d] || d == m || blk[d] < 0)
                 continue;
             int t = def_target(&fn->ins[d]);
@@ -12811,29 +13703,35 @@ static int pass_joincopies(struct ir_func *fn)
                 if (ins_reads(&fn->ins[d], b))
                     ok = 0;
                 if (jc_live_after(fn, gone, d, bb[blk[d]].end, b,
-                                  lout + (size_t)blk[d] * words))
+                                  &lout, blk[d]))
                     ok = 0;
             } else if (t == b) {
                 if (jc_live_after(fn, gone, d, bb[blk[d]].end, a,
-                                  lout + (size_t)blk[d] * words))
+                                  &lout, blk[d]))
                     ok = 0;
             }
         }
         if (!ok || nd == 0)
             continue;
-        for (int d = 0; d < nins; d++)
-            if (!gone[d] && d != m && def_target(&fn->ins[d]) == a &&
-                fn->ins[d].op != IR_STVAR)
+        /* a's definitions become b's, and move to b's list (in order,
+         * though nothing asks for one) */
+        int keep = -1, *kt = &keep;
+        for (int d = dfirst[a], nx; d >= 0; d = nx) {
+            nx = dnext[d];
+            if (!gone[d] && d != m && fn->ins[d].op != IR_STVAR) {
                 fn->ins[d].dst = b;
+                dnext[d] = dfirst[b];
+                dfirst[b] = d;
+            } else {
+                *kt = d;
+                kt = &dnext[d];
+            }
+        }
+        *kt = -1;
+        dfirst[a] = keep;
         gone[m] = 1;
         nuse[a] = 0;
-        for (int bl = 0; bl < nbb; bl++) {
-            unsigned long *li = lin + (size_t)bl * words, *lo = lout + (size_t)bl * words;
-            if (li[a >> 6] & (1UL << (a & 63))) li[b >> 6] |= 1UL << (b & 63);
-            if (lo[a >> 6] & (1UL << (a & 63))) lo[b >> 6] |= 1UL << (b & 63);
-            li[a >> 6] &= ~(1UL << (a & 63));
-            lo[a >> 6] &= ~(1UL << (a & 63));
-        }
+        vblk_merge(&lout, a, b);
         changed = 1;
     }
     if (changed) {
@@ -12853,7 +13751,9 @@ static int pass_joincopies(struct ir_func *fn)
         free(fn->ins);
         fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
     }
-    free(gone); free(use); free(def); free(lin); free(lout); free(blk);
+    free(gone); free(blk);
+    vblk_free(&lout);
+    free(dfirst); free(dnext);
     free(l2b);
     free_cfg(bb, nbb);
 out0:
@@ -13222,6 +14122,8 @@ static void opt_func(struct ir_func *fn)
     /* Before mem2reg, and needing no CFG of its own: it only renames
      * memory, and what it renames is what mem2reg then finds. */
     int sroa_twice = g_sroa && g_mem2reg && cfg_ok && !has_igoto;
+    if (g_mem2reg && cfg_ok && !has_igoto)
+        pass_cxlocal(fn);         /* a private `expected`: by value */
     if (g_sroa)
         pass_sroa(fn, !sroa_twice);
     if (g_mem2reg && cfg_ok && !has_igoto) {
@@ -13552,14 +14454,12 @@ static int pass_latch_copies(struct ir_func *fn)
     if (ncand) {
         int *first = xmalloc((size_t)nv * sizeof *first);
         int *last = xmalloc((size_t)nv * sizeof *last);
-        unsigned long *livein = NULL;
-        int *defv = NULL, words = 0;
-        unsigned long *liveout = ra_live_intervals(fn, first, last, &livein,
-                                                   &defv, &words);
+        struct ra_live *lv = ra_live_compute(fn, first, last);
+        int any_live = fn->nins > 0 && nv > 0;
         char *take = xcalloc((size_t)N, 1);    /* br index: rewrite it */
         char *above = xcalloc((size_t)N, 1);   /* ...with copies above p-1 */
         char *drop = xcalloc((size_t)N, 1);    /* the copy block's ins */
-        for (int c = 0; c < ncand && livein; c++) {
+        for (int c = 0; c < ncand && any_live; c++) {
             int p = cand_br[c], b = lpos[fn->ins[p].label], e = b + 1;
             const struct ir_ins *cmp = p > 0 ? &fn->ins[p - 1] : NULL;
             int fused = cmp && cmp->op == IR_CMP &&
@@ -13567,8 +14467,7 @@ static int pass_latch_copies(struct ir_func *fn)
             int ok = 1;
             while (fn->ins[e].op == IR_MOV) {
                 int d = fn->ins[e].dst;
-                if (livein[(size_t)(p + 1) * words + (d >> 6)] &
-                    (1UL << (d & 63)))
+                if (ra_live_in_at(lv, fn, p + 1, d))
                     ok = 0;
                 if (fused && (d == cmp->a || (!cmp->imm_b && d == cmp->b)))
                     ok = 0;
@@ -13615,7 +14514,7 @@ static int pass_latch_copies(struct ir_func *fn)
             free(nb.p);
         }
         free(newpos); free(take); free(above); free(drop);
-        free(first); free(last); free(liveout); free(livein); free(defv);
+        free(first); free(last); ra_live_free(lv);
     }
     free(refs); free(lpos); free(cand_br); free(in_cand);
     return changed;

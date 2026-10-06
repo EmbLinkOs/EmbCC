@@ -65,14 +65,44 @@ static unsigned expand_imm(unsigned e)
     }
 }
 
-/* The 12-bit field that expands to `v`, or -1. */
+/* Every encoding, ordered by the value it expands to and then by the
+ * encoding itself: built once, from expand_imm, so it is still the search
+ * that decides -- but a lookup in it is a dozen steps where a walk of all
+ * 4096 for every immediate the backend emitted or asked about was one of
+ * the larger costs of compiling a big function. */
+static unsigned g_imm_val[4096];
+static int g_imm_enc[4096];
+static int g_imm_ready;
+
+static int imm_order(const void *x, const void *y)
+{
+    int a = *(const int *)x, b = *(const int *)y;
+    unsigned va = expand_imm((unsigned)a), vb = expand_imm((unsigned)b);
+    if (va != vb)
+        return va < vb ? -1 : 1;
+    return a < b ? -1 : a > b;
+}
+
+/* The 12-bit field that expands to `v`, or -1: the lowest one, as a walk
+ * from 0 found. */
 static int encode_imm(unsigned long v)
 {
     unsigned want = (unsigned)(v & 0xffffffffUL);
-    for (unsigned e = 0; e < 4096; e++)
-        if (expand_imm(e) == want)
-            return (int)e;
-    return -1;
+    if (!g_imm_ready) {
+        for (int e = 0; e < 4096; e++)
+            g_imm_enc[e] = e;
+        qsort(g_imm_enc, 4096, sizeof g_imm_enc[0], imm_order);
+        for (int k = 0; k < 4096; k++)
+            g_imm_val[k] = expand_imm((unsigned)g_imm_enc[k]);
+        g_imm_ready = 1;
+    }
+    int lo = 0, hi = 4095;
+    while (lo < hi) {                     /* the first entry >= want */
+        int mid = lo + (hi - lo) / 2;
+        if (g_imm_val[mid] < want) lo = mid + 1;
+        else hi = mid;
+    }
+    return g_imm_val[lo] == want ? g_imm_enc[lo] : -1;
 }
 
 int t_imm_ok(long imm) { return encode_imm((unsigned long)imm) >= 0; }

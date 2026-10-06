@@ -172,8 +172,8 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
     int flt = ty_is_float(rt);
     struct type *ptr = ty_base(TY_LONG, 1);
 
-    int apa = gen_addr(fn, e->lhs);
-    int cur = emit_load(fn, apa, ptr);
+    int apa;
+    int cur = irg_va_ptr_read(fn, e->lhs, ptr, &apa);
 
     /* A struct: whole doublewords of the stack, sixteen-aligned when its
      * type is (Darwin counts a struct's own aligned attribute here, as
@@ -188,7 +188,7 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
                                     8, 1),
                            emit_const(fn, -16, 8), 8, 1);
         irg_va_copy(fn, dst, 0, byref ? emit_load(fn, cur, ptr) : cur, sz);
-        emit_store(fn, apa, emit_bin(fn, IR_ADD, cur,
+        irg_va_ptr_write(fn, e->lhs, apa, emit_bin(fn, IR_ADD, cur,
                                      emit_const(fn, byref ? 8 : (sz + 7) & ~7L,
                                                 8), 8, 1), ptr);
         return dst;
@@ -208,7 +208,7 @@ int irg_va_arg_darwin(struct ir_func *fn, struct expr *e)
     /* A variadic float arrives promoted to double, so it occupies eight
      * bytes and is read as one. */
     long step = wide ? 16 : (flt ? 8 : ((size + 7) & ~7L));
-    emit_store(fn, apa,
+    irg_va_ptr_write(fn, e->lhs, apa,
                emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 8), 8, 1), ptr);
 
     if (ty_is_xldouble(rt))

@@ -28,7 +28,8 @@ An option that is in none of these lists stops the driver with
 ```text
 embcc [OPTION...] [FILE] [OBJECT|ARCHIVE|-lLIB...]
                                            compile and link (x86-64 ELF; ARM,
-                                           RISC-V and AVR firmware with -T)
+                                           RISC-V, MIPS and AVR firmware given
+                                           its memory map)
 embcc -c [OPTION...] FILE [-o OBJECT]      compile or assemble to an object
 embcc -S [OPTION...] FILE [-o FILE.s]      write assembly
 embcc -E [OPTION...] FILE                  preprocess to standard output
@@ -59,20 +60,20 @@ the full entry.
 
 | Section | Options |
 |---|---|
-| [Overall](#overall-options) | `-c` `-S` `-E` `-o FILE` `-j N` `-x LANG` `-fsyntax-only` `--emit-c` `--emit-interfaces` `--emit-empty-object FILE` `--help` `-h` `--help-warnings` `--version` `-dumpmachine` `--dump-predef` `--print-search-dirs` `--explain[=ID]` |
-| [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-ffreestanding` `-fno-builtin` `-fwrapv` `-fstrict-aliasing` `-fno-strict-aliasing` `-fno-common` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
-| [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fdiagnostics-parseable-fixits` `--fix` |
+| [Overall](#overall-options) | `-c` `-S` `-E` `-o FILE` `-j N` `-x LANG` `-fsyntax-only` `-save-temps[=cwd\|obj]` `-dumpbase NAME` `-pipe` `--emit-c` `--emit-interfaces` `--emit-empty-object FILE` `--help` `-h` `--help-warnings` `--version` `-dumpmachine` `--dump-predef` `--print-search-dirs` `--explain[=ID]` |
+| [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-ffreestanding` `-fno-builtin` `-fno-builtin-NAME` `-fwrapv` `-fno-strict-overflow` `-fstrict-aliasing` `-fno-strict-aliasing` `-fcommon` `-fno-common` `-fno-short-enums` `-fsingle-precision-constant` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
+| [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fmessage-length=N` `-fdiagnostics-parseable-fixits` `--fix` `-fanalyzer` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
-| [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-fPASS` `-fno-PASS` `-fremarks` `-fremarks=json` |
+| [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-fremarks` `-fremarks=json` |
 | [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fno-stack-protector` |
 | [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-include FILE` `-Wp,ARGS` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
-| [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` |
-| [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-ffunction-sections` `-fdata-sections` |
-| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mfpu=FPU` `-mfloat-abi=ABI` |
+| [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` `-specs=FILE` |
+| [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-fno-pic` `-fno-pie` `-fno-jump-tables` `-fjump-tables` `-fno-zero-initialized-in-bss` `-fstrict-volatile-bitfields` `-fno-strict-volatile-bitfields` `-fverbose-asm` `-ffunction-sections` `-fdata-sections` |
+| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mfpu=FPU` `-mfloat-abi=ABI` `-mabi=ABI` `-mthumb-interwork` `-mno-thumb-interwork` `-munaligned-access` `-mslow-flash-data` `-mlittle-endian`; on MIPS `-mcpu=CPU` `-march=CPU` `-mabi=32` `-msoft-float` `-EL` `-mno-abicalls` `-G0` |
 | [Target](#target-selection) | `--target=TRIPLE` |
 | [Developer](#developer-and-inspection-options) | `inspect` `why` `-fremarks` `--emit-interfaces` `--explain` |
-| [Refused](#refused-options) | `-fPIC` `-fpic` `-fPIE` `-fpie` `-shared` `-static-pie` `-flto` `-fshort-enums` `-fprofile*` `--coverage` `-fcoverage-mapping` `-pg` `-fstack-protector*` `-fstack-clash-protection` `-fcf-protection*` `-fsanitize*` (other than the forms above) `-gdwarf-N` (N not 2 to 4) `-gsplit-dwarf` `-gz` |
+| [Refused](#refused-options) | `-fPIC` `-fpic` `-fPIE` `-fpie` `-shared` `-static-pie` `-flto` `-fshort-enums` `-fprofile*` `--coverage` `-fcoverage-mapping` `-pg` `-fstack-protector*` `-fstack-clash-protection` `-fcf-protection*` `-fsanitize*` (other than the forms above) `-gdwarf-N` (N not 2 to 4) `-gsplit-dwarf` `-gz` `-mno-unaligned-access` `-mbig-endian` `-mabi=` (other values) `-fdump-*` `-fcallgraph-info*` |
 
 ## Overall options
 
@@ -129,7 +130,7 @@ What happens to the input depends on the mode options:
 
 | Mode | Input | Result | Default output |
 |---|---|---|---|
-| none | C or C++ | compiled and linked (x86-64 ELF, and ARM, RISC-V and AVR firmware with a memory map) | `a.out` |
+| none | C or C++ | compiled and linked (x86-64 ELF, and ARM, RISC-V, MIPS and AVR firmware with a memory map) | `a.out` |
 | none | `.s` `.S` | assembled and linked, as above | `a.out` |
 | none | only objects, archives and `-l` | linked | `a.out` |
 | `-c` | C or C++ | relocatable object | the input's file name with its suffix replaced by `.o` |
@@ -181,15 +182,50 @@ add:
 	.size	add, .-add
 ```
 
+File-scope `asm` blocks and naked functions are written the same way on
+Cortex-M, RISC-V and AVR: their bytes, their `.globl` and `.weak` labels
+typed as the object types them, and a `.reloc` for every field they
+relocate. A label the object does not export is written as a local label
+of its block, `.Lasm<N>.<name>`. On Cortex-M a relocated data word is
+written `.long sym+N` instead, because an ARM assembler keeps a
+relocation's addend in the word, where `.reloc` does not put it. EmbCC
+reads the file back (`embcc -c FILE.s`), and so does llvm-mc.
+
 ### `-E`
 
-Preprocess the input and write the result to standard output. `-o` is
-ignored in this mode; redirect standard output to keep the result. `-E`
-applies to C, C++ and `.S` files. For a `.asm` file it is refused with
+Preprocess the input and write the result to standard output, or to
+`FILE` with `-o FILE`, as GCC does. `-E` applies to C, C++ and `.S`
+files. For a `.asm` file it is refused with
 `embcc: error: -E does not apply to assembly`.
 
 Combined with `-M` or `-MM`, `-E` prints only the dependency rule (see
 [`-M`](#-m)).
+
+### `-save-temps`, `-save-temps=cwd`, `-save-temps=obj`
+
+Honoured. Keep the preprocessed source (`.i`, or `.ii` for C++) and the
+assembly (`.s`) of each C or C++ source, named as GCC 11 and later name
+them:
+
+| Command | Files kept |
+|---|---|
+| `embcc -save-temps -c x.c -o build/x.o` | `build/x.i`, `build/x.s` |
+| `embcc -save-temps -c x.c` | `x.i`, `x.s` |
+| `embcc -save-temps -S x.c -o build/y.s` | `build/y.i` (the `.s` is the output) |
+| `embcc -save-temps x.c y.c -o fw.elf` | `fw-x.i`, `fw-x.s`, `fw-y.i`, `fw-y.s` |
+
+`-save-temps=obj` is the same as `-save-temps`. `-save-temps=cwd` puts
+the files in the current directory, named as above without the
+directory. `-dumpbase NAME` names them `NAME.i` and `NAME.s`. EmbCC
+passes nothing between its stages through files, so each is produced by
+running the compiler again on the same source with `-E` and with `-S`;
+the `.s` is the assembly of the object the command writes. A host that
+cannot run a program (EmbCC built with `PROCESS=none`) refuses the
+option. Nothing is kept for assembly inputs.
+
+### `-pipe`
+
+Accepted. EmbCC uses no temporary files between its stages.
 
 ### `-o FILE`
 
@@ -198,7 +234,7 @@ line; `-oFILE` is not accepted. If `-o` is the last argument the driver
 stops with `embcc: -o needs a FILE`. When `-o` appears more than once, the
 last one wins.
 
-`-o -` means standard output for the text-producing modes (`-S`,
+`-o -` means standard output for the text-producing modes (`-E`, `-S`,
 `--emit-interfaces`, `--emit-c`). An object cannot be written to standard
 output, and `-c -o -` is refused:
 
@@ -439,27 +475,61 @@ Accepted. EmbCC makes no hosted assumptions to turn off: it treats no
 library function name as a builtin. `__STDC_HOSTED__` stays defined as 1
 on every target, with or without this option.
 
-### `-fno-builtin`
+### `-fno-builtin`, `-fno-builtin-NAME`
 
 Accepted. EmbCC recognizes no library function name (`memcpy`, `printf`)
-as a builtin; only the `__builtin_` spellings are builtins. The per-name
-form `-fno-builtin-NAME` is not accepted.
+as a builtin; only the `__builtin_` spellings are builtins. A call to
+`memcpy` is a call, so the per-name form asks for nothing more.
 
 ### `-fwrapv`
 
 Accepted. Signed integer overflow wraps in two's complement on every
-target, and no optimization assumes it cannot happen. `-fno-wrapv`,
-`-ftrapv` and `-fstrict-overflow` are not accepted.
+target, and no optimization assumes it cannot happen. `-fno-strict-overflow`
+says the same and is accepted too. `-fno-wrapv`, `-ftrapv` and
+`-fstrict-overflow` are not accepted.
 
 ### `-fstrict-aliasing`, `-fno-strict-aliasing`
 
 Accepted. EmbCC's alias analysis is not type-based, so code is compiled
 as `-fno-strict-aliasing` would compile it in either case.
 
-### `-fno-common`
+### `-fcommon`, `-fno-common`
 
-Accepted. A tentative definition is always emitted into `.bss`, never as
-a common symbol. `-fcommon` is not accepted.
+`-fno-common` is the default: a tentative definition (`int x;` at file
+scope, with no initializer) is a definition in `.bss`, and two units
+that both have one do not link (`embld: multiple definition of 'x'`).
+
+`-fcommon` is honoured for C on the ELF targets. A tentative definition
+is emitted as a COMMON symbol (`SHN_COMMON`, its value the alignment),
+as GCC emits it, and `embld` merges every unit's COMMON symbols of one
+name into one object with the largest size and the strictest alignment,
+or drops them for a real definition elsewhere. A `static`, thread-local
+or weak tentative definition, or one with a `section` attribute, stays a
+definition, as in GCC. A linker script must place `*(COMMON)` (in
+`.bss`, where the startup code zeroes it); `embld` says so if it does
+not. `-S` writes `.comm NAME,SIZE,ALIGN`. C++ has no tentative
+definitions, so the option changes nothing there. For a Mach-O or COFF
+target it is refused: `embcc: error: -fcommon is not supported for
+x86_64-apple-darwin: EmbCC writes COMMON symbols into ELF objects only,
+and this target's are Mach-O`.
+
+### `-fno-short-enums`
+
+Accepted. An enumeration is `int`-sized on every target unless its values
+need a wider type; this is the layout the option asks for.
+`-fshort-enums` is [refused](#refused-options).
+
+### `-fsingle-precision-constant`
+
+Honoured, for C. A floating constant without a suffix has type `float`
+and the value it has as a `float`, as with GCC's option:
+`sizeof(1.0)` is 4, `x * 0.1` with `float x` is a `float` multiply, and
+`double d = 0.1;` holds `0.1f` widened. A constant beyond the range of
+`float` becomes an infinity, and one too small becomes zero, with a
+warning (`floating constant exceeds the range of 'float'`). `L`-suffixed
+constants are unchanged. For a C++ input it is refused (`supported for
+C, not C++`), because the C++ front end types its own constants.
+`-fno-single-precision-constant` is the default.
 
 ### `-fchar8_t`
 
@@ -488,9 +558,8 @@ as GCC's option does. `-faccess-control` restores the default.
 `-fshort-enums` is [refused](#refused-options): on every target an
 enumeration is `int`-sized unless its values need a wider type (see
 [Targets](targets.md#data-models)), and a structure containing one would
-be laid out differently. `-fshort-wchar`, `-fms-extensions`, `-fno-asm`,
-`-fvisibility=...` and `-fno-builtin-NAME` are not accepted (unknown
-argument).
+be laid out differently. `-fshort-wchar`, `-fms-extensions`, `-fno-asm`
+and `-fvisibility=...` are not accepted (unknown argument).
 
 ## Warning and diagnostic options
 
@@ -550,6 +619,13 @@ this way, including `-Wformat=2`. `-Wa,...`, `-Wl,...` and `-Wp,...` are
 options of their own (see
 [Assembler and linker options](#assembler-and-linker-options) and
 [`-Wp,ARGS`](#-wpargs)).
+
+`-Wimplicit-function-declaration`, `-Werror=implicit-function-declaration`
+and GCC's older `-Werror-implicit-function-declaration` are accepted
+without a word: in EmbCC a call to an undeclared function is always an
+error (`'g' is not declared in 'f'`, E0001), which is what they ask for.
+`-Wno-error=implicit-function-declaration` cannot make it a warning, and
+says so.
 
 ### `-Wno-NAME`
 
@@ -616,6 +692,16 @@ Control color in text diagnostics. `-fdiagnostics-color` and
 `-fno-diagnostics-color` turn it off. Any other value, including `auto`,
 selects the default: color when standard error is a terminal. Clang's
 `-fcolor-diagnostics` spelling is not accepted.
+
+### `-fmessage-length=N`
+
+Accepted. EmbCC does not wrap diagnostics, which is what
+`-fmessage-length=0` asks for; other values change nothing.
+
+### `-fanalyzer`
+
+Accepted with a warning: `embcc: warning: -fanalyzer: EmbCC has no
+static analyzer, so this checks nothing`.
 
 ### `-fmax-errors=N`
 
@@ -723,8 +809,19 @@ Optimize for size: `-O2` with the `vectorize`, `unroll` and
 choices in IR generation and in the backends. `-Oz` is the same as
 `-Os`.
 
-Any other `-O` spelling (`-Og`, `-Ofast`, `-O4`) is refused with
-`embcc: unknown optimization flag '-Og'`.
+### `-Og`
+
+The same as `-O1`: the level that removes work without reorganizing the
+program.
+
+### `-Ofast`
+
+The same as `-O3` (and so `-O2`). GCC's `-Ofast` adds `-ffast-math`,
+which EmbCC does not do (see [`-ffast-math`](#-ffast-math--fno-math-errno)),
+so no result differs from `-O3`'s.
+
+Any other `-O` spelling (`-O4`, `-Ox`) is refused with
+`embcc: unknown optimization flag '-O4'`.
 
 ### `-fPASS`, `-fno-PASS`
 
@@ -753,9 +850,64 @@ on its own. The pass names are:
 | `switch-thread` | `-O2`, not `-Os` | jumps from a known state straight to its `switch` case |
 
 An `-f` or `-fno-` option that is not a pass name and not listed elsewhere
-on this page is an unknown argument. GCC's pass options (`-finline-functions`,
-`-funroll-loops`, `-ftree-vectorize`, `-fno-inline-functions`) are not
-accepted under those names.
+on this page is an unknown argument. GCC's pass options are accepted only
+where this page lists them (below); `-funroll-loops` and
+`-ftree-vectorize`, for example, are not.
+
+### `-fno-inline-functions`, `-finline-functions`
+
+`-fno-inline-functions` is honoured: the inliner takes only functions
+declared `inline` in some declaration, or marked `always_inline`, at
+every level. A function its author did not mark stays a call (and a
+symbol in the image) at `-O2` and `-Os` as at `-O1`, including a static
+function with a single caller, which GCC's option would still inline
+(`-finline-functions-called-once`). `embcc why not-inlined` reports
+`not-declared-inline` for such a call. C++ member functions defined in
+their class are not marked `inline` in the C the C++ front end lowers to,
+so under this option they are not inlined. `-finline-functions`, GCC's
+`-O2` default, restores the default.
+
+### `-finline-small-functions`, `-fno-inline-small-functions`, `-finline-limit=N`
+
+Accepted and without effect. They are hints to GCC's inliner, whose
+budgets EmbCC's does not share (see [Optimization](optimization.md)).
+
+### `-ffast-math`, `-fno-math-errno`
+
+Accepted and without effect. Both give the compiler permission to relax
+IEEE arithmetic or to assume the math library sets no `errno`; EmbCC
+uses neither permission. `__FAST_MATH__` is not defined, so a header
+that tests it takes its careful path, as it should for code that is not
+compiled fast-math.
+
+### `-fno-delete-null-pointer-checks`
+
+Accepted. EmbCC already keeps the promise: no pass infers that a pointer
+is non-null -- not from a dereference before the check, not from the
+`nonnull` and `returns_nonnull` attributes (which are ignored), not from
+its being an object's address -- so no comparison with a null pointer is
+removed, and a load from address 0 stays a load.
+
+### `-fno-tree-loop-distribute-patterns`
+
+Accepted. No loop ever becomes a call. The `idiom` pass turns a copy or
+clear loop with a constant trip count into a block copy or clear, and
+every backend expands those inline, as it does structure copies, so a
+hand-written `memset` or `memcpy` cannot become a call to itself. No
+EmbCC object refers to `memset`, `memcpy` or `memmove` unless the source
+calls them.
+
+### `-fmerge-constants`
+
+Accepted and without effect: it permits merging identical constants
+across units, and EmbCC does not.
+
+### `-fno-isolate-erroneous-paths-dereference`, `-fno-move-loop-invariants`, `-fno-ipa-sra`, `-fno-lto`
+
+Accepted and without effect. EmbCC turns no null dereference into a
+trap, and has no passes under the other three names; `-fno-lto` is the
+default (`-flto` is [refused](#refused-options)). EmbCC's loop-invariant
+motion is the `licm` pass, turned off with `-fno-licm`.
 
 ### `-fremarks`, `-fremarks=json`
 
@@ -1015,7 +1167,7 @@ result. The installed layout is described in
 ### Assembly input
 
 A `.s` or `.S` file is assembled by EmbCC's built-in GNU-syntax assembler
-for the selected target: AArch64, ARM (Thumb), RISC-V or AVR. A `.S` file
+for the selected target: AArch64, ARM (Thumb), RISC-V, MIPS32 or AVR. A `.S` file
 is preprocessed first; `-D` and `-U` apply, but the `-I` and `-isystem`
 directories are not searched (a `#include "file"` beside the source is
 found). The inline-assembly vocabulary of each target is listed in
@@ -1045,6 +1197,17 @@ The assembler follows GNU as for each target:
   `.type sym, %function`, makes a label a Thumb function: its symbol
   carries the interworking bit, which a vector table entry needs. A symbol
   the file uses but does not define is an external reference.
+  On MIPS32, `jal sym` and `j sym`, `lui rt, %hi(sym)`, `addiu rt, rs,
+  %lo(sym)`, a load or store at `%lo(sym)(rs)`, `la rt, sym` and `.word
+  sym`; a branch reaches only labels in the same section.
+- **MIPS32's modes.** A file starts in `.set reorder`, GNU as's default:
+  the assembler puts a `nop` in every delay slot. `.set noreorder` makes
+  the instruction after a transfer its slot; `.set push`/`.set pop` save
+  and restore the mode. `.ent`, `.end NAME`, `.frame`, `.mask`, `.fmask`
+  and `.insn` are accepted as markers (`.end` with a name does not end the
+  file there, as it does elsewhere). `.abicalls`, `.cpload`, `.cprestore`,
+  `.gpword`, `.option pic2` and the `%got`/`%call16`/`%gp_rel` operators
+  are refused: EmbCC builds neither PIC nor small-data code.
 - **Sizes.** `.size sym, .-sym` records a function's size, which a
   debugger uses to attribute addresses to it.
 
@@ -1088,10 +1251,10 @@ Without `-c`, `-S`, `-E` or `-fsyntax-only`, `embcc FILE -o OUT` compiles
 the file and links it in the same process with EmbCC's linker,
 [`embld`](tools/embld.md). This is available only for x86-64 ELF targets
 (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` and their aliases).
-For the firmware targets (ARMv7-M, ARMv8-M, RV32, RV64 and AVR) the
-driver links too, and the build supplies the memory map: a linker script
-with `-T FILE.ld` (ARM and RISC-V), or `-Wl,-Ttext=FLASH` and
-`-Wl,-Tdata=RAM`. There is no default map, because an image linked to a
+For the firmware targets (ARMv7-M, ARMv8-M, RV32, RV64, MIPS32 and AVR)
+the driver links too, and the build supplies the memory map: a linker
+script with `-T FILE.ld` (ARM and RISC-V), or `-Wl,-Ttext=FLASH` and
+`-Wl,-Tdata=RAM` (on MIPS32 and AVR the message offers only these). There is no default map, because an image linked to a
 guessed one runs, wrongly:
 
 ```text
@@ -1168,7 +1331,7 @@ option of the same name:
 | `--print-gc-sections` | name each section dropped, on standard error |
 | `-Map FILE`, `-Map=FILE`, `--Map=FILE` | write a map of where every input went, in GNU ld's format |
 | `--print-memory-usage` | print how full each `MEMORY` region of the script is, as ld does |
-| `-Tstack ADDR`, `-Tstack=ADDR` | passed on, and refused by `embld` for x86-64: `embld: -Tstack is a RISC-V option: ...` |
+| `-Tstack ADDR`, `-Tstack=ADDR` | passed on: `embld` emits an entry stub that sets `sp` (RISC-V and MIPS), and refuses it elsewhere: `embld: -Tstack is a RISC-V and MIPS option: ...` |
 
 These are accepted and change nothing, because nothing in an image
 `embld` makes depends on them: `--as-needed`, `--no-as-needed`, `-O0`, `-O1`, `-O2`, `--build-id`,
@@ -1201,6 +1364,7 @@ gcc's own link options:
 | `-nodefaultlibs` | no `libc.a` or `librt.a` |
 | `-nostartfiles` | no `crt1.o` |
 | `-static` | accepted: every image EmbLD writes is static |
+| `-specs=FILE`, `--specs=FILE` | accepted: `nano.specs` and `nosys.specs` choose GCC's newlib and its system-call stubs, and EmbCC links its own C library and runtime; a link notes once `embcc: note: -specs=nano.specs is ignored: EmbCC links its own C library and runtime, not newlib`, and a compile says nothing |
 | `-pthread`, `-rdynamic`, `-no-pie` | unknown argument |
 | `-shared`, `-static-pie` | refused: `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
 
@@ -1225,12 +1389,58 @@ enabled, tables are emitted regardless.
 ### `-fomit-frame-pointer`, `-fno-omit-frame-pointer`
 
 Accepted and without effect. The x86-64 and AArch64 backends always keep
-a frame pointer; the ARM, RISC-V and AVR backends never use one.
+a frame pointer; the ARM, RISC-V, MIPS and AVR backends never use one.
 
 ### `-fno-plt`
 
 Accepted. EmbCC does not generate code that calls through a procedure
 linkage table.
+
+### `-fno-pic`, `-fno-pie`
+
+Accepted, with `-fno-PIC` and `-fno-PIE`. EmbCC's code is not position
+independent (`-fPIC` is [refused](#refused-options)): an x86-64 jump
+table holds absolute addresses, a Cortex-M address is a `movw`/`movt`
+pair, and `embld` links no position-independent executable. The Darwin
+targets' code is PC-relative because Mach-O requires it, and links the
+same way either way.
+
+### `-fno-jump-tables`, `-fjump-tables`
+
+`-fno-jump-tables` is honoured on every target: no `switch` is lowered
+through a table of addresses, which code that runs before it is
+relocated, or from an address other than the one it was linked at,
+cannot use. A switch dense enough for a table (`n` cases, at least
+four, whose values span at most `4n + 4`; at `-Os` at least six,
+spanning at most `2n`) becomes the balanced compare tree that sparse
+switches always get. The tables this removes are x86-64's indirect `jmp`,
+AArch64's `br`, ARM's `tbb`/`tbh` and RISC-V's `jr` through a table;
+the AVR target never uses one. `-fjump-tables`, the default, turns them
+back on.
+
+### `-fno-zero-initialized-in-bss`
+
+Accepted. EmbCC already places every object with an initializer in
+`.data`, zeros included: `int x = 0;` and `static char buf[64] = {0};`
+are in `.data`, so a bootloader that does not clear `.bss` still finds
+them zero. Only an object with no initializer at all (`int y;`) is in
+`.bss`, as with GCC's option. `-fzero-initialized-in-bss`, which permits
+the other placement, is accepted and changes nothing.
+
+### `-fstrict-volatile-bitfields`, `-fno-strict-volatile-bitfields`
+
+Accepted. EmbCC already reads and writes a volatile bit-field with one
+access of its declared type's width, as the AAPCS requires and
+`-fstrict-volatile-bitfields` asks: a `volatile uint32_t f : 8` is an
+`ldr` (and an `ldr`/`str` pair to write it), never an `ldrb`, even when
+the field lies in one byte. The access is to the field's container at
+the type's alignment, so it can include neighbouring members. The
+negative form permits narrower accesses, and EmbCC does not use the
+permission.
+
+### `-fverbose-asm`
+
+Accepted and without effect on what `-S` writes.
 
 ### `-fgnuc-version=MAJOR[.MINOR[.PATCH]]`
 
@@ -1293,7 +1503,8 @@ upper 2 GiB of the address space.
 ### ARM options
 
 These options apply to the Thumb targets. On any other target each one is
-refused: `-mcpu=cortex-m4 is an ARM option, and the target is x86_64-elf`.
+refused: `-mcpu=cortex-m4 is an ARM option, and the target is x86_64-elf`
+(`-mabi=` is the RISC-V option of that name on RISC-V, below).
 
 #### `-mthumb`
 
@@ -1374,11 +1585,92 @@ The choice is recorded in the object's `.ARM.attributes`, in the
 predefined macros (`__ARM_FP`, `__ARM_PCS_VFP`, `__SOFTFP__`), and in the
 triple `-dumpmachine` prints.
 
+#### `-mabi=ABI`
+
+`aapcs` and `aapcs-linux` are accepted: EmbCC emits the AAPCS (the
+AAPCS-VFP variant under `-mfloat-abi=hard`), and `aapcs-linux` differs
+from it only in making every enumeration `int`-sized, which EmbCC's are.
+The other values (`apcs-gnu`, `atpcs`, `iwmmxt`) are refused:
+`-mabi=apcs-gnu is not supported: EmbCC emits the AAPCS ...`.
+
+#### `-mthumb-interwork`, `-mno-thumb-interwork`
+
+Accepted. Interworking is between ARM and Thumb code, and a Cortex-M
+runs only Thumb: every call and return is already one a `bx` or `blx`
+would make.
+
+#### `-munaligned-access`, `-mno-unaligned-access`
+
+`-munaligned-access` is accepted: it is the ARMv7-M and ARMv8-M default,
+and what EmbCC's code relies on. `-mno-unaligned-access` is refused,
+because EmbCC cannot keep it: a packed structure's `int` member is one
+`ldr` at its odd address, and a structure aligned below 4 (packed, or
+`struct { char c[5]; }`) is copied and passed by value a word at a time
+from wherever it lies.
+
+```text
+-mno-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses (packed struct members; copies and by-value passing of structs aligned below 4), which the architecture allows and this flag forbids
+```
+
+#### `-mslow-flash-data`
+
+Accepted. It asks the compiler to keep constants out of literal pools
+in flash, and EmbCC's compiled Thumb code has none: it builds constants
+and addresses with `movw`/`movt`. (An assembly file's `ldr rd, =VALUE`
+still gets a pool entry where it needs one.)
+
+### RISC-V options
+
+#### `-mabi=ABI`
+
+`ilp32` for RV32 and `lp64` for RV64 are accepted: EmbCC passes floating
+point in the integer registers (`__riscv_float_abi_soft`). Any other
+value -- the F and D conventions `ilp32f`, `ilp32d`, `lp64f`, `lp64d`,
+the embedded `ilp32e`, or the other width's -- is refused:
+`embcc: error: -mabi=ilp32d is not supported for riscv32-unknown-elf:
+EmbCC emits the soft-float -mabi=ilp32 convention`.
+
+### MIPS options
+
+These options apply to `mipsel-none-elf`; on any other target they are
+unknown arguments (and `-mcpu=` is an ARM option). EmbCC emits one MIPS
+configuration -- MIPS32 Release 2, little-endian, o32, soft float, no
+abicalls, no small data -- so each option is accepted when it asks for
+that and refused by name when it asks for anything else.
+
+#### `-mcpu=CPU`, `-march=CPU`
+
+Accepted for a MIPS32 Release 2 core: `mips32r2`, `m4k`, `m14k`,
+`m14kc`, `24kc`, `24kf`, `24kec`, `24kef`, `34kc` and `74kc`. The code is
+the same for every one. Any other value, Release 6 and the pre-Release 2
+ISAs included, is refused: `-mcpu=mips32r6 is not a MIPS32 Release 2 core:
+EmbCC emits MIPS32r2 (mips32r2, m4k, m14k, m14kc, 24kc, 24kf, 24kec,
+24kef, 34kc, 74kc)`.
+
+#### `-mabi=32`, `-msoft-float`, `-EL`, `-mno-abicalls`, `-G0`
+
+Accepted; each names what EmbCC does anyway. Their opposites are refused:
+
+```text
+-mabi=n32 is not supported: EmbCC emits the o32 ABI (-mabi=32) only
+-mhard-float is not supported: EmbCC emits soft-float o32, which passes floating point in the integer registers
+-EB is not supported: the MIPS target is little-endian (mipsel) only
+-mabicalls is not supported: EmbCC's MIPS code takes addresses absolutely (lui/addiu) and keeps no $gp; it is -mno-abicalls code
+-G8 is not supported: EmbCC puts no data in .sdata and addresses nothing through $gp (-G0)
+```
+
+### Options for every target
+
+#### `-mlittle-endian`
+
+Accepted: every target EmbCC emits for is little-endian.
+`-mbig-endian` is [refused](#refused-options).
+
 ### Machine options that are not accepted
 
-`-march=`, `-mtune=`, `-mabi=`, `-mmcu=`, `-msoft-float`, `-mhard-float`,
-`-mcmse`, `-mbig-endian`, `-mlittle-endian`, `-masm=`, `-m32` and `-m64`
-are unknown arguments. The architecture, ABI and part are selected by the
+`-mtune=`, `-mmcu=`, `-mcmse`, `-masm=`, `-m32` and `-m64` are unknown
+arguments, and so are `-march=`, `-msoft-float` and `-mhard-float` on
+every target but MIPS, and `-mabi=` on x86-64, AArch64 and AVR. The architecture, ABI and part are selected by the
 [target triple](#target-selection) (and on ARM by `-mcpu=`, `-mfpu=` and
 `-mfloat-abi=`). The RISC-V targets generate the C (compressed) extension
 and the integer multiply/divide instructions; the AVR target generates
@@ -1418,6 +1710,7 @@ name is what `-dumpmachine`, `--version` and diagnostics print.
 | `riscv32-unknown-elf` | `riscv32`, `riscv32-elf`, `rv32` | RV32 | bare metal | ELF32 |
 | `riscv64-unknown-elf` | `riscv64`, `riscv64-elf`, `rv64` | RV64 | bare metal | ELF64 |
 | `avr` | `avr-none-elf`, `avr-elf`, `avr-unknown-none` | AVR (ATmega328P) | bare metal | ELF32 |
+| `mipsel-none-elf` | `mipsel-unknown-elf`, `mipsel-elf`, `mipsel` | MIPS32r2, little-endian, o32 soft float | bare metal | ELF32 |
 | `x86_64-emblink` | | x86-64 | EmbLinkOS | ELF64 |
 | `aarch64-emblink` | | AArch64 | EmbLinkOS | ELF64 |
 | `x86_64-linux-gnu` | `x86_64-linux` | x86-64 | Linux, static | ELF64 |
@@ -1536,7 +1829,14 @@ message that names the option.
 | `-shared`, `-static-pie` | `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
 | `-gdwarf-5` (any version but 2 to 4), `-gsplit-dwarf`, `-gz` | `embcc: error: -gdwarf-5 is not supported; EmbCC emits DWARF 4, uncompressed and in one piece` |
 | `-marm` | `-marm is not supported: a Cortex-M has no ARM instruction set, only Thumb` |
-| `-Og`, `-Ofast`, `-O4` and other `-O` forms | `embcc: unknown optimization flag '-Og'` |
+| `-mno-unaligned-access` (ARM) | `-mno-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses ...` |
+| `-mabi=apcs-gnu`, `-mabi=atpcs`, `-mabi=iwmmxt` (ARM) | `-mabi=apcs-gnu is not supported: EmbCC emits the AAPCS ...` |
+| `-mabi=ilp32f`, `ilp32d`, `ilp32e`, `lp64f`, `lp64d` (RISC-V) | `embcc: error: -mabi=ilp32d is not supported for riscv32-unknown-elf: EmbCC emits the soft-float -mabi=ilp32 convention` |
+| `-mbig-endian` | `embcc: error: -mbig-endian is not supported: every target EmbCC emits for is little-endian` |
+| `-fdump-rtl-*`, `-fdump-tree-*` and every other `-fdump-`, `-fcallgraph-info[=...]` | `embcc: error: -fdump-rtl-expand is not supported: it dumps GCC's internal representation, which EmbCC does not have; ...` |
+| `-fcommon` for a Mach-O or COFF target | `embcc: error: -fcommon is not supported for x86_64-apple-darwin: ...` |
+| `-fsingle-precision-constant` for C++ | `embcc: error: -fsingle-precision-constant is supported for C, not C++: ...` |
+| `-O4` and other `-O` forms not listed | `embcc: unknown optimization flag '-O4'` |
 | `-Wl,OPTION` or `-Xlinker OPTION`, for a linker option not listed under [`-Wl,`](#-wlargs--xlinker-arg) | `embcc: error: linker option 'OPTION' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for` |
 | `-Wa,OPTION`, for an option not listed under [`-Wa,`](#-waargs) | `embcc: error: assembler option 'OPTION' is not one the integrated assembler has` |
 
@@ -1571,7 +1871,11 @@ traces, and they are not a stable interface. See
 | `EMBCC_RA_WHY` | Print a line to standard error for each function in which values were spilled. |
 | `EMBCC_RA_TRACE` | Print the register allocator's pool and each value's assignment to standard error. |
 | `EMBCC_RA_DEGREE_SPILL` | Choose spill candidates by interference degree instead of by cost. |
-| `EMBCC_NO_TAILCALL` | Disable tail calls in the AArch64, ARM, RISC-V and AVR backends. |
+| `EMBCC_MIPS_RA_MAX=N` | On MIPS, leave only the first `N` vregs of each function in registers (a bisection handle; always correct). |
+| `EMBCC_MIPS_PAIRS=0` | On MIPS, do not give 64-bit values register pairs. |
+| `EMBCC_MIPS_NO_FILL` | On MIPS, leave every branch's and call's delay slot a `nop` (a return's still releases the frame). |
+| `EMBCC_NO_TAILCALL` | Disable tail calls in the AArch64, ARM, RISC-V, MIPS and AVR backends. |
+| `EMBCC_NO_JUMP_TABLES` | Compile as with `-fno-jump-tables`, whatever the command line says, so a test suite's own command lines can be run without tables. |
 | `EMBCC_NO_DIVMOD_CONST`, `EMBCC_NO_MLAKEEP` | On Thumb, stop sharing one divide between a quotient and a remainder by the same constant, or stop keeping a multiply's constant in a register for `mla`/`mls`. |
 | `EMBCC_NO_SPLITLOOPS` | Disable the optimizer's loop-splitting step. |
 | `EMBCC_NO_LKCONST` | Stop deciding compares and branches from a constant the same block has just written. |
@@ -1582,8 +1886,8 @@ traces, and they are not a stable interface. See
 | `EMBCC_NO_MEMOFF` | Disable folding constant offsets into loads and stores (ARM, RISC-V, AVR). |
 | `EMBCC_NO_IDXOFF` | On RISC-V, stop moving a constant out of an array index into the access's displacement. |
 | `EMBCC_RV_RA_MAX`, `EMBCC_RV_PAIRS`, `EMBCC_RV_PAIRS_ONLY`, `EMBCC_RV_JAL_RANGE`, `EMBCC_RV_LONG_CALLS` | RISC-V allocator, register-pair and call-range knobs. |
-| `EMBCC_T_RA_MAX`, `EMBCC_T_PAIRS`, `EMBCC_T_PAIRS_ONLY`, `EMBCC_T_NOLO`, `EMBCC_T_FPU` | ARM allocator, register-pair and FPU knobs. |
-| `EMBCC_T_NOWIDEIMM`, `EMBCC_NO_SIGNTEST` | Build a 64-bit constant whole on Thumb instead of using it half by half; keep `x >> 63` as a shift before a branch. |
+| `EMBCC_T_RA_MAX`, `EMBCC_T_PAIRS`, `EMBCC_T_PAIRS_ONLY`, `EMBCC_T_NOLO`, `EMBCC_T_FPU`, `EMBCC_T_EXT` | ARM allocator, register-pair and FPU knobs; `EMBCC_T_EXT=0` keeps r9-r11 out of the allocator's pool. |
+| `EMBCC_T_NOWIDEIMM`, `EMBCC_T_NOCMP64IMM`, `EMBCC_NO_SIGNTEST` | Build a 64-bit constant whole on Thumb instead of using it half by half (a compare's constant too); keep `x >> 63` as a shift before a branch. |
 | `EMBCC_AVR_RA`, `EMBCC_AVR_RA_MODE`, `EMBCC_AVR_RA_ONLY`, `EMBCC_AVR_RA_LIMIT`, `EMBCC_AVR_RA_CAP`, `EMBCC_AVR_REMAT_MAX`, `EMBCC_AVR_NO_VOL`, `EMBCC_AVR_NO_OCT`, `EMBCC_AVR_NO_XHOME` | AVR register-allocation mode and bisection knobs. |
 
 The build and test scripts read further variables (`EMBCC_TARGET`,
