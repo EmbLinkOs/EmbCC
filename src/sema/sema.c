@@ -5128,6 +5128,7 @@ void sema_set_gnu89_inline(int on) { g_gnu89_inline = on; }
 static void note_inline_decl(struct func *canon, const struct func *f)
 {
     canon->inl_ext |= !f->decl_inline || f->decl_extern;
+    canon->any_inline |= f->decl_inline;
     canon->attr_gnu_inline |= f->attr_gnu_inline;
     if (f->defined) {
         canon->def_inline = f->decl_inline;
