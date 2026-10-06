@@ -389,9 +389,14 @@ Instruction selection:
   are never in registers; each operation loads onto the x87 stack and
   stores back (`fld`/`fstp`, `faddp` and the others, `fucomip`), and
   conversions to integers use `fistp` under a truncating control word.
-- **Atomics** work on slots: `xchg`, `lock xadd`, `lock cmpxchg`, and a
-  compare-and-swap loop for the other read-modify-write operations.
-  `mfence` is the fence.
+- **Atomics** are `xchg`, `lock xadd`, `lock cmpxchg`, and a
+  compare-and-swap loop for the other read-modify-write operations,
+  reading their operands where the allocator put them
+  (`atomic_in_reg`): rax is the one fixed register, and an operand left
+  in a slot is loaded into rcx (an address), rdx (a desired value) or
+  rsi (an `IR_ARMW` operand). `__atomic_compare_exchange` writes the
+  value seen back through `expected` only on a miss. `mfence` is the
+  fence.
 - **Thread-local storage** is local-exec: `mov %fs:0, reg` and an add of
   an `RK_TPOFF32` offset.
 

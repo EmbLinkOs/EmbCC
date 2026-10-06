@@ -91,11 +91,10 @@ static const int LEAF_POOL[NLEAF] = { 6 /*rsi*/, 8, 9, 10, 11,
  * Emitting the sret `lea` after the parallel move (below) fixes one of
  * those writes and is kept for when the rest are found; it is not
  * enough on its own. */
-/* ...without rsi, for a function that has an atomic in it: IR_CMPXCHG
- * parks `&expected` there across the compare-exchange. rdi stays,
- * because nothing outside the __int128 lowering uses it -- and a
- * function containing an __int128 is kept out of the allocator
- * entirely. */
+/* ...without rsi, for a function with an ARMW (whose loop holds its
+ * operand there when it has no register) or a CAS16 (gen_i128's). rdi
+ * stays, because nothing outside the __int128 lowering uses it, and
+ * x86_wants_rdi keeps it from a function that has one. */
 /* ...and with rdx, for a function that neither divides nor has an
  * atomic in it. */
 #define NLEAF_RDX 11
@@ -142,23 +141,31 @@ static int x86_fp_callee_saved(int reg) { (void)reg; return 0; }
 
 /* What this function reserves, beyond what the machine does.
  *
- *   an atomic  -- IR_CMPXCHG parks `&expected` in rsi across the
- *                 compare-exchange, and rdx holds `desired`;
+ *   an atomic  -- each reads its operands where they live (atomic_in_reg),
+ *                 and loads only one left in a slot: a compare-exchange's
+ *                 desired value into rdx, ARMW's operand into rsi while
+ *                 its loop builds the new value in rdx. An exchange or
+ *                 fetch-add needs nothing beyond rax and rcx, which no
+ *                 pool holds. CAS16 is gen_i128's, and keeps both out;
  *   a divide   -- idiv writes the rdx:rax pair, whatever the operands;
  *   variadic   -- the prologue spills the six integer argument
  *                 registers to the save area va_arg reads.
  *
- * rdx is in the pool for everything else, which is most functions: it
- * appears in 1.5% of the instructions this backend emits. */
+ * Returns 2 when rsi and rdx are both taken, 1 for rdx alone (and sets
+ * *div for a divide, which takes rdx too). rdx is in the pool for
+ * everything else, which is most functions: it appears in 1.5% of the
+ * instructions this backend emits. */
 static int x86_reserves(const struct ir_func *fn, int *div)
 {
     int at = 0;
     *div = 0;
     for (int n = 0; n < fn->nins; n++)
         switch (fn->ins[n].op) {
-        case IR_XCHG: case IR_XADD: case IR_ARMW:
-        case IR_CAS: case IR_CAS16: case IR_CMPXCHG:
-            at = 1; break;
+        case IR_ARMW: case IR_CAS16:
+            at = 2; break;
+        case IR_CAS: case IR_CMPXCHG:
+            if (at < 1) at = 1;
+            break;
         case IR_DIV: case IR_MOD:
             if (!fn->ins[n].flt) *div = 1;
             break;
@@ -209,8 +216,8 @@ static const int *x86_pool_for(const struct ir_func *fn, int *n)
     const int *base;
     int nb;
     if (fn->is_varargs) { nb = NVARIADIC; base = VARIADIC_POOL; }
-    else if (at)        { nb = NLEAF_AT;  base = LEAF_POOL_AT; }
-    else if (div)       { nb = NLEAF;     base = LEAF_POOL; }
+    else if (at == 2)   { nb = NLEAF_AT;  base = LEAF_POOL_AT; }
+    else if (div || at) { nb = NLEAF;     base = LEAF_POOL; }
     else                { nb = NLEAF_RDX; base = LEAF_POOL_RDX; }
     if (!x86_wants_rdi(fn)) { *n = nb; return base; }
     /* After the caller-saved ones already there (it is caller-saved too,
@@ -385,7 +392,9 @@ static const struct ra_target X86_RA = {
     x86_fp_pool_for, x86_fp_callee_saved,
     0,            /* float_in_gpr: floats have their own class (SSE) */
     NULL, NULL,
-    0, /* atomic_in_reg */
+    1, /* atomic_in_reg: every atomic but CAS16 reads its address and
+        * values where they live, and loads only one left in a slot
+        * (x86_atomic_addr, x86_atomic_val, cg_load) */
     0, /* fp_reads_gpr */
     0  /* asm_in_reg: a template may name a callee-saved register */
 };
@@ -2941,6 +2950,30 @@ static int x86_rmw_find(struct ir_func *fn, int n, const int *usecnt)
     return -1;
 }
 
+/* An atomic's address operand, in a register other than rax: its own
+ * when it has one, else loaded from its slot into rcx. */
+static int x86_atomic_addr(struct code *text, const int *sd, int v)
+{
+    if (in_reg(v))
+        return g_loc[v];
+    x86_mov_rcx_slot(text, sd[v]);
+    return REG_RCX;
+}
+
+/* An atomic's value operand, `size` bytes of which the instruction reads:
+ * its own register, or `scratch` filled from its slot. Upper bits past
+ * `size` are whatever they are -- the instructions read only the low
+ * ones. */
+static int x86_atomic_val(struct code *text, const int *sd, int v,
+                          int scratch, int size)
+{
+    if (in_reg(v))
+        return g_loc[v];
+    x86_load_reg_basedisp(text, scratch, REG_RBP, sd[v], size, 0,
+                          size == 8 ? 8 : 4);
+    return scratch;
+}
+
 static void gen_func(struct ir_func *fn, struct code *text,
                      struct sites *st)
 {
@@ -4747,36 +4780,53 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_UD2:
             x86_ud2(text);
             break;
-        case IR_XCHG:
+        /* The atomics read their operands where they live (atomic_in_reg):
+         * an address or a value the allocator put in a register is used
+         * there, and only one left in its slot is loaded -- the address
+         * into rcx, cmpxchg's desired value into rdx, ARMW's operand
+         * into rsi. rax is the one fixed register every one of them
+         * needs (the value exchanged, added, or compared), and it is in
+         * no pool, so nothing an operand lives in is overwritten by
+         * filling it; rcx is in no pool either, and x86_pool_for keeps
+         * rdx and rsi out of a function whose atomics load them. */
+        case IR_XCHG: case IR_XADD: {
+            int A = x86_atomic_addr(text, sd, i->a);
+            cg_load(text, sd, i->b, i->size, 0,
+                    i->size == 8 ? 8 : 4);               /* value -> rax */
+            if (i->op == IR_XCHG)
+                x86_xchg_reg_mem(text, REG_RAX, A, i->size); /* rax = old */
+            else
+                x86_lock_xadd_reg_mem(text, REG_RAX, A, i->size);
             cg_reset();
-            x86_mov_rcx_slot(text, sd[i->a]);            /* address -> rcx */
-            x86_load_slot(text, sd[i->b], i->size, 0,
-                          i->size == 8 ? 8 : 4);         /* new value -> rax */
-            x86_xchg_rax_mem_rcx(text, i->size);         /* atomic; rax = old */
             cg_store(text, sd, i->dst, i->w);
             break;
-        case IR_XADD:
-            cg_reset();
-            x86_mov_rcx_slot(text, sd[i->a]);            /* address -> rcx */
-            x86_load_slot(text, sd[i->b], i->size, 0,
-                          i->size == 8 ? 8 : 4);         /* addend -> rax */
-            x86_lock_xadd_rcx(text, i->size);            /* atomic; rax = old */
-            cg_store(text, sd, i->dst, i->w);
-            break;
-        case IR_CMPXCHG:
-            cg_reset();
-            x86_load_slot(text, sd[i->c], i->size, 0,
-                          i->size == 8 ? 8 : 4);         /* desired -> rax.. */
-            x86_mov_reg_reg(text, REG_RDX, REG_RAX);     /* ..-> rdx */
-            x86_mov_rcx_slot(text, sd[i->a]);            /* object ptr -> rcx */
-            x86_load_slot(text, sd[i->b], 8, 0, 8);      /* &expected -> rax */
-            x86_mov_reg_reg(text, REG_RSI, REG_RAX);     /* save in rsi */
-            x86_load_reg_mem(text, REG_RAX, REG_RSI, 0, i->size); /* rax=*exp */
-            x86_lock_cmpxchg_rcx(text, i->size);         /* CAS; ZF=matched */
-            x86_store_mem_reg(text, REG_RSI, 0, REG_RAX, i->size);/* *exp=seen */
+        }
+        case IR_CMPXCHG: {
+            /* *b is the expected value and gets the value seen when they
+             * differ -- written back only then, as C11 says: on a match
+             * `expected` is not written at all. b is an address held
+             * across the compare-exchange; left in its slot it is read
+             * twice, through rax before it and rcx after (the object's
+             * address in rcx is finished with by then). */
+            int C = x86_atomic_val(text, sd, i->c, REG_RDX, i->size);
+            int A = x86_atomic_addr(text, sd, i->a);
+            int B = in_reg(i->b) ? g_loc[i->b] : REG_RAX;
+            if (B == REG_RAX)
+                x86_load_slot(text, sd[i->b], 8, 0, 8);  /* &expected */
+            x86_load_reg_mem(text, REG_RAX, B, 0, i->size); /* rax = *exp */
+            x86_lock_cmpxchg_reg_mem(text, C, A, i->size); /* ZF=matched */
+            int skip = x86_jz_rel8(text);
+            if (B == REG_RAX) {
+                x86_mov_rcx_slot(text, sd[i->b]);
+                B = REG_RCX;
+            }
+            x86_store_mem_reg(text, B, 0, REG_RAX, i->size); /* *exp=seen */
+            text->p[skip] = (unsigned char)(text->len - (skip + 1));
             x86_setcc_eax(text, 0x94);                   /* setz: dst = matched */
+            cg_reset();
             cg_store(text, sd, i->dst, 4);
             break;
+        }
         case IR_ARMW: {
             /* and / or / xor / nand: x86 has no locked fetch-and-OP that
              * returns the old value, so this is the compare-and-swap loop gcc
@@ -4784,38 +4834,37 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * lock cmpxchg installs rdx only if memory still holds rax, and
              * otherwise reloads rax with what it does hold, so the loop
              * recomputes from the fresh value. */
-            cg_reset();
             int w = i->size == 8 ? 8 : 4;
             int op = (int)i->imm;
-            x86_mov_rcx_slot(text, sd[i->a]);             /* address -> rcx */
-            x86_load_slot(text, sd[i->b], i->size, 0, w); /* operand -> rax.. */
-            x86_mov_reg_reg(text, REG_RSI, REG_RAX);      /* ..-> rsi */
-            x86_load_reg_mem(text, REG_RAX, REG_RCX, 0, i->size); /* current */
+            int A = x86_atomic_addr(text, sd, i->a);
+            int B = x86_atomic_val(text, sd, i->b, REG_RSI, i->size);
+            x86_load_reg_mem(text, REG_RAX, A, 0, i->size);  /* current */
             int loop = text->len;
             x86_mov_reg_reg(text, REG_RDX, REG_RAX);
-            x86_alu_rr(text, op == 'n' ? '&' : op, REG_RDX, REG_RSI, w);
+            x86_alu_rr(text, op == 'n' ? '&' : op, REG_RDX, B, w);
             if (op == 'n')
                 x86_not_reg(text, REG_RDX, w);
-            x86_lock_cmpxchg_rcx(text, i->size);          /* ZF: installed */
+            x86_lock_cmpxchg_reg_mem(text, REG_RDX, A, i->size); /* ZF: installed */
             int back = x86_jnz_rel32(text);
             code_patch32(text, back, (unsigned long)(long)(loop - (back + 4)));
+            cg_reset();
             cg_store(text, sd, i->dst, i->w);             /* rax = the old value */
             break;
         }
-        case IR_CAS:
-            /* By value: rax = expected, rdx = desired. After lock cmpxchg rax
-             * holds the value that was in memory whether or not the swap
-             * happened (on success it already was that value). */
+        case IR_CAS: {
+            /* By value: rax = expected, the desired value in a register.
+             * After lock cmpxchg rax holds the value that was in memory
+             * whether or not the swap happened (on success it already was
+             * that value). */
+            int C = x86_atomic_val(text, sd, i->c, REG_RDX, i->size);
+            int A = x86_atomic_addr(text, sd, i->a);
+            cg_load(text, sd, i->b, i->size, 0,
+                    i->size == 8 ? 8 : 4);                /* expected -> rax */
+            x86_lock_cmpxchg_reg_mem(text, C, A, i->size);
             cg_reset();
-            x86_load_slot(text, sd[i->c], i->size, 0,
-                          i->size == 8 ? 8 : 4);          /* desired -> rax.. */
-            x86_mov_reg_reg(text, REG_RDX, REG_RAX);      /* ..-> rdx */
-            x86_mov_rcx_slot(text, sd[i->a]);             /* address -> rcx */
-            x86_load_slot(text, sd[i->b], i->size, 0,
-                          i->size == 8 ? 8 : 4);          /* expected -> rax */
-            x86_lock_cmpxchg_rcx(text, i->size);
             cg_store(text, sd, i->dst, i->w);
             break;
+        }
         case IR_CAS16:
             break;                      /* (gen_i128's) */
         case IR_FRAMEADDR:
