@@ -23,7 +23,7 @@ little-endian.
 | [x86-64 Windows](#windows-coff) | `x86_64-windows-gnu` | COFF | Microsoft x64, incomplete | an external linker |
 | [AArch64](#aarch64) | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | ELF64 | AAPCS64 | an external linker |
 | [Apple arm64](#apple-arm64) | `aarch64-apple-darwin` | Mach-O | Apple arm64 | the system linker |
-| [ARM Cortex-M](#arm-cortex-m) | `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
+| [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 
@@ -481,13 +481,14 @@ As for x86-64, plus the binary128 `long double` routines (`softtf.c`).
 
 ## ARM Cortex-M
 
-The ARMv7-M, ARMv7E-M and ARMv8-M Mainline profiles, in Thumb-2. Every
-Cortex-M target is freestanding.
+The ARMv6-M profile in Thumb-1, and the ARMv7-M, ARMv7E-M and ARMv8-M
+Mainline profiles in Thumb-2. Every Cortex-M target is freestanding.
 
 ### Triples
 
 | Triple | Accepted aliases | Architecture | Float ABI | Cores |
 |---|---|---|---|---|
+| `thumbv6m-none-eabi` | `thumbv6m`, `armv6m-none-eabi` | ARMv6-M | soft | Cortex-M0, M0+, M1 |
 | `thumbv7m-none-eabi` | `thumbv7m`, `armv7m-none-eabi`, `arm-none-eabi` | ARMv7-M | soft | Cortex-M3 |
 | `thumbv7em-none-eabi` | `thumbv7em`, `armv7em-none-eabi` | ARMv7E-M | soft | Cortex-M4, M7 |
 | `thumbv7em-none-eabihf` | | ARMv7E-M | hard, FPv4-SP-D16; FPv5-D16 with `-mcpu=cortex-m7` | Cortex-M4F; Cortex-M7 |
@@ -514,22 +515,24 @@ only Thumb`.
 
 #### `-mcpu=CPU`
 
-Select the architecture variant by core. `cortex-m3` selects ARMv7-M;
-`cortex-m4`, `cortex-m7` and `cortex-m33` select ARMv7E-M. The option does not change
-the architecture level: `--target=thumbv7m-none-eabi -mcpu=cortex-m33`
-is `thumbv7em-none-eabi`, and ARMv8-M is selected only by a
-`thumbv8m.main` triple. Any other value is an error:
+Select the architecture variant by core. `cortex-m0`, `cortex-m0plus`
+and `cortex-m1` select ARMv6-M on any ARM triple, as
+`thumbv6m-none-eabi` does. `cortex-m3` selects ARMv7-M; `cortex-m4`,
+`cortex-m7` and `cortex-m33` select ARMv7E-M. Otherwise the option does
+not change the architecture level: `--target=thumbv7m-none-eabi
+-mcpu=cortex-m33` is `thumbv7em-none-eabi`, and ARMv8-M is selected only
+by a `thumbv8m.main` triple. On a `thumbv6m` triple, an ARMv7-M or
+ARMv8-M part raises the level. Any other value is an error:
 
 ```text
-embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)
+embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)
 ```
 
-The Cortex-M0, M0+, M1 (ARMv6-M) and M23 (ARMv8-M Baseline) are refused
-by name, because EmbCC emits ARMv7-M Thumb-2 and those cores would fault
-on it:
+The Cortex-M23 (ARMv8-M Baseline) is refused by name: it is a different
+subset from ARMv6-M, and EmbCC emits neither for it:
 
 ```text
-embcc: error: -mcpu=cortex-m0 is ARMv6-M, and EmbCC emits ARMv7-M Thumb-2: that core does not implement its ldr.w or IT blocks
+embcc: error: -mcpu=cortex-m23 is ARMv8-M Baseline, and EmbCC emits ARMv6-M (cortex-m0, m0plus, m1) or ARMv7-M Thumb-2: the second faults on that core and the first is not what it is
 ```
 
 #### `-mfpu=FPU`
@@ -550,6 +553,7 @@ unit. The FPU only takes effect with `-mfloat-abi=softfp` or `hard`.
 | `fpv5-d16` on ARMv8-M | `-mfpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (-mfpu=fpv5-sp-d16) and nothing else: another unit's instruction set and attributes are unchecked here` |
 | `fpv4-sp-d16` or `fpv5-d16` on ARMv7-M | `-mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4` |
 | `fpv5-d16` on another part | `-mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16` |
+| any unit, or `softfp` or `hard`, on ARMv6-M | `-mfpu=fpv5-d16 on thumbv6m-none-eabi: an ARMv6-M core (Cortex-M0, M0+, M1) has no FPU, so floating point is soft and travels in the core registers` |
 
 #### `-mfloat-abi=ABI`
 
@@ -681,6 +685,13 @@ The tables are those of `clang -target thumbv7m-none-eabi` and
 The ARMv7E-M triples define the same macros as ARMv7-M:
 `__ARM_ARCH_7EM__` and `__ARM_FEATURE_DSP` are not defined.
 
+ARMv6-M's table is that of `clang -target thumbv6m-none-eabi`:
+`__ARM_ARCH` is 6, `__ARM_ARCH_6M__` and `__ARM_ARCH_ISA_THUMB` 1 are
+defined, and `__thumb2__`, `__ARM_FEATURE_IDIV`, `__ARM_FEATURE_CLZ`,
+`__ARM_FEATURE_LDREX`, `__ARM_FEATURE_UNALIGNED` and
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_N` are not. The `__GCC_ATOMIC_*_LOCK_FREE`
+values are 1: an atomic read-modify-write is a call (see Runtime).
+
 The float ABI changes these:
 
 | Macro | `soft` | `softfp` | `hard` |
@@ -701,18 +712,38 @@ fused multiply-add.
 Every floating-point operation the hardware lacks, every 64-bit
 division (`__divdi3`, `__udivdi3`, `__moddi3`, `__umoddi3`) and complex
 multiply and divide are calls to helpers with libgcc's names.
-`make rt-embedded` builds `librt.a` for each of the five Cortex-M
+`make rt-embedded` builds `librt.a` for each of the six Cortex-M
 triples (one archive per float ABI, because hard- and soft-float objects
-do not link together); link it after your objects. EmbCC does not provide
-the ARM run-time ABI's `__aeabi_*` routines, so an object from another
-compiler that calls them must bring its own.
+do not link together); link it after your objects. On ARMv7-M and
+ARMv8-M EmbCC does not provide the ARM run-time ABI's `__aeabi_*`
+routines, so an object from another compiler that calls them must bring
+its own.
+
+ARMv6-M has no divide, no 64-bit multiply and no exclusive loads and
+stores, so more operations are calls there. `librt.a` for
+`thumbv6m-none-eabi` (`lib/rt/armv6m.c`) provides them under the names
+clang and GCC use for the triple, all weak, so a program's own
+definition wins:
+
+| Operation | Routine |
+|---|---|
+| 32-bit `/`; `%` and a paired `/` | `__aeabi_idiv`, `__aeabi_uidiv`; `__aeabi_idivmod`, `__aeabi_uidivmod` |
+| 64-bit `*`; shift by a variable | `__aeabi_lmul`; `__aeabi_llsl`, `__aeabi_llsr`, `__aeabi_lasr` |
+| block copy or clear of more than 8 bytes | `__aeabi_memcpy`, `__aeabi_memclr` |
+| atomic read-modify-write, compare-and-swap (1, 2, 4 bytes) | `__atomic_exchange_N`, `__atomic_fetch_OP_N`, `__atomic_compare_exchange_N`, `__sync_val_compare_and_swap_N` |
+
+The atomic routines mask interrupts with PRIMASK around the access. That
+is atomic on a single core running privileged code; CPSID is ignored in
+unprivileged Thread mode, so an RTOS whose tasks run unprivileged, or a
+part with another bus master, defines its own.
 
 ### Limitations
 
 | Construct | Diagnostic |
 |---|---|
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
+| 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` (ARMv6-M: `the ARMv6-M backend cannot lower an atomic wider than four bytes`) |
+| on ARMv6-M, an inline asm template that uses a Thumb-2 instruction | `the ARMv6-M backend cannot lower an instruction ARMv6-M does not have (a 32-bit Thumb-2 encoding, from inline asm or the backend) yet (function f)` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | a scalar local aligned beyond 8 | `'x' needs 32-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
@@ -934,6 +965,7 @@ for each; the machines are:
 | `x86_64-elf` | `qemu-system-x86_64 -cpu max`, a Multiboot image, output on `-debugcon stdio` | The guest prints an exit marker; `isa-debug-exit` stops QEMU |
 | `aarch64-elf` | `qemu-system-aarch64 -M virt -cpu cortex-a72 -semihosting` | Semihosting exit carries the status |
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | A real Linux kernel booted with the program as PID 1 (`-M q35` or `-M virt`) | The kernel's panic message carries the exit status |
+| `thumbv6m-none-eabi` | `qemu-system-arm -M microbit` (nRF51822, Cortex-M0), UART output | The program prints `==EXIT n==`; `qrun.sh --until` stops QEMU |
 | `thumbv7m-none-eabi` | `qemu-system-arm -M lm3s6965evb -cpu cortex-m3`, UART output | The program prints a sentinel; the run is bounded by a timeout |
 | `thumbv7em-none-eabihf` | `qemu-system-arm -M mps2-an386 -cpu cortex-m4` | As above |
 | `thumbv8m.main-none-eabi[hf]` | `qemu-system-arm -M mps2-an505 -cpu cortex-m33` | As above |

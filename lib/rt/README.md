@@ -51,6 +51,7 @@ on aarch64 it is IEEE binary128 with no instruction behind it, so even
 | `ldouble.c` | the x87 128-bit conversions (x86-64), and complex `long double` for both |
 | `softtf.c` | IEEE binary128 from the bits up (aarch64) |
 | `unwind.c` | the DWARF CFI interpreter and the `_Unwind_*` API |
+| `armv6m.c` | ARMv6-M (Cortex-M0): the RTABI's `__aeabi_*` division, 64-bit multiply and shifts and block routines, and the `__atomic_*` calls with interrupts masked; all weak |
 
 `softtf.c` is the largest of them and the one under the most pressure
 from the rule above: it implements `long double` for a machine that has

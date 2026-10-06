@@ -299,6 +299,10 @@ clang's AVR struct convention is not avr-gcc's.
 | `thumb-codegen` | objects are ELF32 ARM, every `.text` instruction decodes, relocations are ARM ones, refusals fire by name |
 | `thumb-encoding` | every Thumb-2 encoder, disassembled by `llvm-objdump` and compared with what it was meant to be |
 | `thumb-vfp` | the VFP instruction vocabulary against `llvm-mc`, for the Cortex-M4F's unit and the Cortex-M7's |
+| `thumb-v6m-encoding` | the ARMv6-M (Thumb-1) encoders across every operand combination, byte for byte against `llvm-mc -triple=thumbv6m-none-eabi`; out-of-field operands refused |
+| `thumbv6m-target` | ARMv6-M as a level: triples, `-mcpu=cortex-m0/m0plus/m1`, the refused M23 and FPU, the data model, the macro table and the object's tags against clang's, and a literal pool right after a switch table marked as one run of data |
+| `thumbv6m-asm-values` | ARMv6-M inline asm with its operands in registers: PRIMASK intrinsics inline into callers that touch no stack, and value, continuation, `"+"`, through-address and r12 operands, values across asm and templates that call, run on the Cortex-M0 board at `-O0` to `-Os` and with two and no pool registers |
+| `thumb-v6m-exec` | the `tests/exec` corpus on the Cortex-M0 board (QEMU micro:bit) at `-O0`, `-O1`, `-O2`, `-Os`, each wrong answer re-run as an ARMv7-M build on the M3 to tell a backend bug from a program that assumes LP64; `embedded-stress` against clang, `embedded-int64`/`-float` against the host; every instruction of every object built scanned for ARMv6-M, and every object for two mapping symbols at one address |
 | `thumb-asm` | the inline-assembly vocabulary against `llvm-mc`, operand handling, refusals |
 | `thumb-exec` | programs compiled by EmbCC and by clang, linked by `embld`, run on the Cortex-M3 board at `-O0`, `-O1`, `-O2`, `-Os`; 64-bit, float, aggregate, varargs and ABI programs against the host |
 | `thumb-relax` | 16-bit branch forms at both sides of every reach limit |
@@ -562,7 +566,7 @@ handlers and stdio flushing run.
 | the target's gcc (`x86_64-elf-gcc` or host `cc`, `aarch64-elf-gcc`) | what a C program computes; half of each SysV/AAPCS64 ABI pairing; warnings that must agree | `agrees-with-gcc`, `optimizer`, `regalloc-O2`, `exec-Os`, `sysv-abi`, `struct-abi-edges`, `cross-varargs`, `complex-abi`, `int128-abi`, `ldouble-abi`, `format-check`, `warnings` |
 | the reference g++ and libstdc++ (`tools/build-ref-gxx.sh`) | what a C++ program computes; mangling, layout and EH interoperability | `cxx-agrees-with-gxx`, `cxx-abi`, `cxx-libstdcxx`, `cxx-std`, `cxx-format-check`, `eh-regions`, `unwind-through` |
 | clang | the embedded targets' reference compiler; Win64 and Apple arm64 conventions; predefined macros and data models for the targets gcc is not installed for | `thumb-exec`, `riscv-exec`, `thumb-hardfp`, `thumb-m7-dp`, `win-abi`, `darwin-abi`, `predef`, `stdint`, `struct-layout` |
-| `llvm-mc` | the bytes of every instruction form the assemblers and encoders produce | `thumb-asm`, `thumb-vfp`, `riscv-asm`, `riscv-compressed`, `riscv-encoding`, `avr-encoding`, `avr-asm` |
+| `llvm-mc` | the bytes of every instruction form the assemblers and encoders produce | `thumb-asm`, `thumb-vfp`, `thumb-v6m-encoding`, `riscv-asm`, `riscv-compressed`, `riscv-encoding`, `avr-encoding`, `avr-asm` |
 | `llvm-objdump`, `aarch64-elf-objdump`, `objdump` | what the emitted bytes decode to | `thumb-encoding`, `thumb-codegen`, `arm64-encoding`, `inline-asm-kernel`, `embdbg-disasm` |
 | `aarch64-elf-as`, the GNU assembler | assembling the same text EmbCC assembles; reassembling `-S` output | `arm64-asm`, `asm-S` |
 | `nasm` | EmbAS | `assembler` |

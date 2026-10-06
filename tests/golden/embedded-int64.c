@@ -126,6 +126,22 @@ int main(void)
         nl();
     }
 
+    /* x++ and x-- are worth x's OLD value, all eight bytes of it: through
+     * a local, a volatile one, a pointer and an array element. */
+    {
+        volatile long long vq = 0x123456789LL;
+        long long q0 = vq--;
+        unsigned long long arr2[2] = { 0xffffffffULL, 0x1ffffffffULL };
+        unsigned long long *pp = &arr2[1];
+        unsigned long long u0 = arr2[0]++;
+        unsigned long long u1 = (*pp)--;
+        long long l = -1;
+        long long l0 = l++;
+        hx((unsigned long long)q0); hx((unsigned long long)vq); nl();
+        hx(u0); hx(arr2[0]); hx(u1); hx(arr2[1]); nl();
+        hx((unsigned long long)l0); hx((unsigned long long)l); nl();
+    }
+
     puts_("==END==\n");
     return 0;
 }
