@@ -206,22 +206,6 @@ static const int T6_POOL_VA[2] = { 4, 5 };
 static const int T6_POOL_FB[5] = { 0, 1, 2, 3, 4 };
 static const int T6_POOL_VA_FB[1] = { 4 };
 
-/* ARMv6-M (v6m.c): r0-r5. Only r0-r7 compute there, and r6/r7 are that
- * lowering's two scratch registers; r5 is the frame base of a function with
- * a variable-length array, where r7 is on ARMv7-M. */
-static const int T6_POOL[6] = { 0, 1, 2, 3, 4, 5 };
-static const int T6_POOL_VA[2] = { 4, 5 };
-static const int T6_POOL_FB[5] = { 0, 1, 2, 3, 4 };
-static const int T6_POOL_VA_FB[1] = { 4 };
-
-/* ARMv6-M (v6m.c): r0-r5. Only r0-r7 compute there, and r6/r7 are that
- * lowering's two scratch registers; r5 is the frame base of a function with
- * a variable-length array, where r7 is on ARMv7-M. */
-static const int T6_POOL[6] = { 0, 1, 2, 3, 4, 5 };
-static const int T6_POOL_VA[2] = { 4, 5 };
-static const int T6_POOL_FB[5] = { 0, 1, 2, 3, 4 };
-static const int T6_POOL_VA_FB[1] = { 4 };
-
 static const int *t_pool_base(const struct ir_func *fn, int *n)
 {
     if (target_thumb_arch() == 6) {
