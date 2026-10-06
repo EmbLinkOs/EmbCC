@@ -156,7 +156,7 @@ compiler, `embas` (`src/arch/x86_64/as.c`) and the GNU-syntax assembler
 | Function | Purpose |
 |---|---|
 | `elfw_new(machine)` | A writer for `e_machine`. The class is ELFCLASS32 when the target's pointer is 4 bytes or fewer, ELFCLASS64 otherwise. ARM's `e_flags` is set to `EF_ARM_EABI_VER5`. |
-| `elfw_set_flags(w, flags)` | `e_flags` from `target_elf_flags`: `EF_RISCV_RVC` on RISC-V, `EF_AVR_ARCH_AVR5` on AVR. |
+| `elfw_set_flags(w, flags)` | `e_flags` from `target_elf_flags`: `EF_RISCV_RVC` on RISC-V, `EF_AVR_ARCH_AVR5` on AVR, `0x70001001` (`EF_MIPS_ARCH_32R2`, `EF_MIPS_ABI_O32`, `EF_MIPS_NOREORDER`) on MIPS32. |
 | `elfw_add_section(w, name, type, flags, data, size, align)` | Appends a section; returns its index. The data is copied. |
 | `elfw_add_symbol(w, name, value, size, info, shndx)` | Appends a symbol; returns its index. Local symbols must all come before global ones: a local added after a global is an internal error. |
 | `elfw_symbol_visibility(w, sym, stv)` | Sets `st_other`. |
@@ -165,8 +165,13 @@ compiler, `embas` (`src/arch/x86_64/as.c`) and the GNU-syntax assembler
 
 The writer builds 64-bit structures and converts them field by field to
 the 32-bit layout when writing an ELFCLASS32 object. Relocations are
-always `SHT_RELA`, one `.rela.NAME` section per relocated section, on
-every target. The file layout is the ELF header, the section payloads
+`SHT_RELA`, one `.rela.NAME` section per relocated section, on every
+target but MIPS32, where o32 requires `SHT_REL` (`.rel.NAME`,
+`target_elf_uses_rel`): there the addend is stored in the relocated
+field itself by `target_rel_put_addend`, in the form that relocation
+type's linker reads back (a word for `R_MIPS_32`; the low 16 bits for
+`R_MIPS_HI16` and `R_MIPS_LO16`, the HI16 rounded by `0x8000` as the
+AHL rule needs; a word index for `R_MIPS_26`). The file layout is the ELF header, the section payloads
 in order, the `.rela.*` sections, `.symtab`, `.strtab`, `.shstrtab`, and
 the section header table. The image is built in memory, zero-filled,
 and written once.
@@ -192,6 +197,7 @@ limit.
 | `.gcc_except_table` | `PROGBITS` | `A` | 4 | a function has exception regions |
 | `.ARM.attributes` | `ARM_ATTRIBUTES` | none | 1 | ARMv7-M and ARMv8-M |
 | `.riscv.attributes` | `RISCV_ATTRIBUTES` | none | 1 | RISC-V |
+| `.MIPS.abiflags` | `MIPS_ABIFLAGS` | `A` | 8 | MIPS32 |
 
 An object with a `section` attribute and an initializer cannot be
 placed in a `NOBITS` section; a thread-local object cannot have a
@@ -203,7 +209,10 @@ constructor priority is refused by the parser.
 and the floating-point ABI (`Tag_CPU_arch`, `Tag_FP_arch`,
 `Tag_ABI_VFP_args`, `Tag_ABI_enum_size` and others), which a linker
 compares across objects. `.riscv.attributes` (`riscv_build_attributes`)
-records the ISA string and the stack alignment.
+records the ISA string and the stack alignment. `.MIPS.abiflags`
+(`mips_build_abiflags`) is the 24 bytes clang writes for `-mcpu=mips32r2
+-msoft-float`: ISA level 32 release 2, 32-bit registers, no FPU
+registers and the soft-float ABI, which EmbLD compares across objects.
 
 ### Symbols
 
@@ -442,8 +451,8 @@ offset within the missing section, and its initializer is not written.
 - `embcc -c FILE.s` and `FILE.S` assemble GNU-syntax source for
   AArch64, ARMv7-M, RISC-V and AVR (`src/as/gas.c`), encoding each
   statement with the same per-target assembler the compiler uses for
-  inline `asm`. `.S` is preprocessed first. x86-64 is refused:
-  `no assembly-file support for x86_64-elf yet`.
+  inline `asm`. `.S` is preprocessed first. x86-64 and MIPS32 are
+  refused: `no assembly-file support for x86_64-elf yet`.
 - `embcc --emit-empty-object FILE` writes an empty ELF object for the
   selected target, with a `.text` section and two local symbols.
 

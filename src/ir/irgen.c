@@ -349,6 +349,11 @@ static void mark_natural(struct ir_func *fn, const struct expr *e)
         i->natural = lv_natural(e);
 }
 
+void irg_mark_natural(struct ir_func *fn, const struct expr *e)
+{
+    mark_natural(fn, e);
+}
+
 /* Typed load/store through an address temp. */
 /* Set while a bit-field is read or written through a VOLATILE lvalue:
  * the storage unit is loaded and stored through an unqualified type of its
@@ -1530,7 +1535,8 @@ static int atomic_arm(void)
 {
     int t = target_get();
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
-           t == TARGET_RISCV32 || t == TARGET_RISCV64;
+           t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
+           t == TARGET_MIPS32;        /* MIPS32 is weakly ordered: sync */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -1567,13 +1573,17 @@ static void atomic_width_ok(struct ir_func *fn, const struct type *t,
 }
 
 /* An atomic access is never merged with another or removed: vol says so to
- * the optimizer (and changes nothing codegen emits). */
+ * the optimizer (and changes nothing codegen emits). It is also ONE
+ * access, so it is natural: an atomic object is aligned (it could not be
+ * atomic otherwise), and a backend that splits what it cannot prove
+ * aligned -- MIPS's lwl/lwr -- would let an interrupt tear it. */
 static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
                        int line)
 {
     atomic_width_ok(fn, t, line);
     int v = emit_load(fn, addr, t);
     fn->ins[fn->nins - 1].vol = 1;
+    fn->ins[fn->nins - 1].natural = 1;
     if (atomic_arm())
         emit(fn)->op = IR_FENCE;          /* acquire */
     return v;
@@ -1587,6 +1597,7 @@ static void atomic_store(struct ir_func *fn, int addr, int val,
         emit(fn)->op = IR_FENCE;          /* release */
     emit_store(fn, addr, val, t);
     fn->ins[fn->nins - 1].vol = 1;
+    fn->ins[fn->nins - 1].natural = 1;
     emit(fn)->op = IR_FENCE;              /* seq_cst: published before what follows */
 }
 
@@ -2416,6 +2427,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_STR: {
         /* The literal arrives encoded at its real width (lit_encode): num
          * elements of str_width bytes each, NUL included. */
+        /* ...and aligned to that width: an array of wchar_t is as
+         * aligned as a wchar_t, and a target whose word loads trap on a
+         * misaligned address (MIPS) read L"..."[0] with one. */
         int w = e->str_width ? e->str_width : 1;
         e->str_index = ir_intern_aligned(cur_unit, e->name, (int)e->num * w,
                                          target_string_align(w));
@@ -2509,16 +2523,26 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int local = e->lhs->kind == EXPR_VAR && !e->lhs->gref;
         int is_bf = expr_is_bitfield(e->lhs);
         int addr = local ? -1 : gen_addr(fn, e->lhs);
-        int cur = local ? emit_ldvar(fn, e->lhs->var_index, t)
-                : is_bf ? bf_load_v(fn, addr, e->lhs->memb, e->lhs->ty)
-                        : emit_load(fn, addr, t);
+        int cur;
+        /* The load and the store are the lvalue's own, aligned as a plain
+         * read or assignment of it is (mark_natural): a volatile device
+         * register's `++` is one lw and one sw on MIPS, not lwl/lwr. */
+        if (local) {
+            cur = emit_ldvar(fn, e->lhs->var_index, t);
+        } else if (is_bf) {
+            cur = bf_load_v(fn, addr, e->lhs->memb, e->lhs->ty);
+        } else {
+            cur = emit_load(fn, addr, t);
+            mark_natural(fn, e->lhs);
+        }
         int old = -1;
         if (e->is_post) {
             /* The old value, at its own width, as a `?:` arm's copy is.
              * emit() makes every instruction four bytes wide, and a
              * four-byte copy of a long long or a double is its low word:
-             * on a 32-bit machine that was x++'s value wherever the
-             * optimizer had not folded the copy away (-O0). */
+             * `e = d--` of a double kept half of the old value wherever the
+             * optimizer had not folded the copy away (-O0 on MIPS, RV32
+             * and ARMv7-M). */
             struct ir_ins *save = emit(fn);
             save->op = IR_MOV;
             save->a = cur;
@@ -2554,12 +2578,14 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->dst = new_temp(fn);
             sum = i->dst;
         }
-        if (local)
+        if (local) {
             emit_stvar(fn, e->lhs->var_index, sum, t);
-        else if (is_bf)
+        } else if (is_bf) {
             sum = bf_store_v(fn, addr, e->lhs->memb, sum, e->lhs->ty);
-        else
+        } else {
             emit_store(fn, addr, sum, t);
+            mark_natural(fn, e->lhs);
+        }
         return e->is_post ? old : sum;
     }
     case EXPR_NOT: {
@@ -2660,6 +2686,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_riscv(fn, e);
         if (target_get() == TARGET_AVR)
             return irg_va_arg_avr(fn, e);
+        if (target_get() == TARGET_MIPS32)
+            return irg_va_arg_mips(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -2830,17 +2858,25 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int local = e->lhs->kind == EXPR_VAR && !e->lhs->gref;
         int is_bf = expr_is_bitfield(e->lhs);
         int addr = local ? -1 : gen_addr(fn, e->lhs);
-        int cur = local ? emit_ldvar(fn, e->lhs->var_index, lt)
-                : is_bf ? bf_load_v(fn, addr, e->lhs->memb, e->lhs->ty)
-                        : emit_load(fn, addr, lt);
+        int cur;
+        if (local) {
+            cur = emit_ldvar(fn, e->lhs->var_index, lt);
+        } else if (is_bf) {
+            cur = bf_load_v(fn, addr, e->lhs->memb, e->lhs->ty);
+        } else {
+            cur = emit_load(fn, addr, lt);     /* aligned as x++'s is */
+            mark_natural(fn, e->lhs);
+        }
         int rv = gen_expr(fn, e->rhs);
         int res = compound_value(fn, e, cur, rv);
-        if (local)
+        if (local) {
             emit_stvar(fn, e->lhs->var_index, res, lt);
-        else if (is_bf)
+        } else if (is_bf) {
             return bf_store_v(fn, addr, e->lhs->memb, res, e->lhs->ty);
-        else
+        } else {
             emit_store(fn, addr, res, lt);
+            mark_natural(fn, e->lhs);
+        }
         return res;
     }
     case EXPR_COND: {
@@ -3784,6 +3820,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_riscv(fn, s);
             else if (target_get() == TARGET_AVR)
                 irg_asm_avr(fn, s);
+            else if (target_get() == TARGET_MIPS32)
+                irg_asm_mips(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;

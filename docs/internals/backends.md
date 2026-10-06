@@ -3,7 +3,7 @@
 This page describes the code generators in `src/arch/`: the target model
 they share (`target.c`), the predefined-macro tables, the contract every
 backend implements, and then each backend in turn (x86-64, AArch64,
-Thumb, RISC-V and AVR): how it lowers EmbIR, how it lays out a frame,
+Thumb, RISC-V, MIPS32 and AVR): how it lowers EmbIR, how it lays out a frame,
 how it implements its calling conventions, how its instruction encoder
 is checked, and what it does specially. It is written for people
 changing EmbCC. Register allocation, which all five share, is in
@@ -26,6 +26,8 @@ changing EmbCC. Register allocation, which all five share, is in
 | `thumbv6m/`, `thumbv8m/` | the ARMv6-M and ARMv8-M predefined-macro tables only |
 | `riscv/` | RV32 and RV64, one backend: `codegen.c`, `emit.c`, `asm.c`, `irgen.c` |
 | `riscv32/`, `riscv64/` | the two RISC-V predefined-macro tables only |
+| `mips/` | MIPS32r2 (mipsel, o32): `codegen.c`, `emit.c`, `asm.c`, `irgen.c` |
+| `mips32/` | its predefined-macro tables |
 | `avr/` | AVR (ATmega328P): `codegen.c`, `emit.c`, `asm.c`, `irgen.c`, `predef*.c` |
 
 Each `irgen.c` holds the target's share of IR generation: `va_arg`,
@@ -43,7 +45,7 @@ the host's architecture. Everything that depends on the target asks
 
 A target has three independent dimensions: the architecture
 (`enum target_arch`: `TARGET_X86_64`, `TARGET_AARCH64`, `TARGET_THUMB`,
-`TARGET_RISCV32`, `TARGET_RISCV64`, `TARGET_AVR`), the operating system
+`TARGET_RISCV32`, `TARGET_RISCV64`, `TARGET_AVR`, `TARGET_MIPS32`), the operating system
 (`enum target_os`: none, EmbLinkOS, Linux, Darwin, Windows), and the
 object format (`enum target_fmt`: ELF, Mach-O, COFF). The accepted
 triples are an explicit table, `g_triples[]` in `target.c`, not a cross
@@ -65,18 +67,18 @@ When no `--target=` is given, `target_apply_default()` applies, in order:
 `g_model[]` holds one row per architecture, and each question has a
 function:
 
-| Function | x86-64 | AArch64 | Thumb | RV32 | RV64 | AVR |
-|---|---|---|---|---|---|---|
-| `target_ptr_size()` | 8 | 8 | 4 | 4 | 8 | 2 |
-| `target_long_size()` | 8 | 8 | 4 | 4 | 8 | 4 |
-| `target_int_size()` | 4 | 4 | 4 | 4 | 4 | 2 |
-| `target_double_size()` | 8 | 8 | 8 | 8 | 8 | 4 |
-| `target_ldouble_size()` | 16 | 16 (8 on Darwin) | 8 | 16 | 16 | 4 |
-| `target_char_unsigned()` | no | yes (no on Darwin) | yes | yes | yes | no |
-| `target_wchar_unsigned()` | no | yes (no on Darwin) | yes | no | no | no |
-| `target_has_int128()` | yes | yes | no | no | yes | no |
-| `target_max_scalar_align()` | none | none | none | none | none | 1 |
-| `target_stack_align()` | 16 | 16 | 8 | 16 | 16 | 1 |
+| Function | x86-64 | AArch64 | Thumb | RV32 | RV64 | AVR | MIPS32 |
+|---|---|---|---|---|---|---|---|
+| `target_ptr_size()` | 8 | 8 | 4 | 4 | 8 | 2 | 4 |
+| `target_long_size()` | 8 | 8 | 4 | 4 | 8 | 4 | 4 |
+| `target_int_size()` | 4 | 4 | 4 | 4 | 4 | 2 | 4 |
+| `target_double_size()` | 8 | 8 | 8 | 8 | 8 | 4 | 8 |
+| `target_ldouble_size()` | 16 | 16 (8 on Darwin) | 8 | 16 | 16 | 4 | 8 |
+| `target_char_unsigned()` | no | yes (no on Darwin) | yes | yes | yes | no | no |
+| `target_wchar_unsigned()` | no | yes (no on Darwin) | yes | no | no | no | no |
+| `target_has_int128()` | yes | yes | no | no | yes | no | no |
+| `target_max_scalar_align()` | none | none | none | none | none | 1 | none |
+| `target_stack_align()` | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
 
 `-fsigned-char` and `-funsigned-char` override the char column through
 `target_set_char_signed()`. `target_xlen()` is the register width in
@@ -87,7 +89,7 @@ so that a new architecture fails to compile until it answers:
 
 | Function | Meaning |
 |---|---|
-| `target_va_list_is_pointer()` | `va_list` is a bare pointer (Thumb, RISC-V, AVR, Win64, Darwin AArch64) rather than a pointer to a tag (System V, AAPCS64); decides what `va_copy` copies |
+| `target_va_list_is_pointer()` | `va_list` is a bare pointer (Thumb, RISC-V, MIPS32, AVR, Win64, Darwin AArch64) rather than a pointer to a tag (System V, AAPCS64); decides what `va_copy` copies |
 | `target_anon_bitfield_aligns()` | an unnamed bit-field raises the struct's alignment (AAPCS, AAPCS64; not Apple arm64, which lays them out as x86-64 does) |
 | `target_widen_unsigned_fp_cvt()` | an unsigned 32-bit integer is widened to 64 bits before a floating-point conversion (x86-64, AArch64) |
 | `target_jump_tables()` | a dense `switch` may become `IR_SWITCH` (every target but AVR) |
@@ -109,8 +111,8 @@ backends.
 A backend records a machine-neutral `enum reloc_kind` at each patch site
 (`RK_CALL`, `RK_TAIL`, `RK_PCREL32`, `RK_ADR_HI21`/`RK_ADD_LO12`,
 `RK_GOT_PAGE`/`RK_GOT_LO12`, `RK_THM_MOVW`/`RK_THM_MOVT`,
-`RK_RISCV_PCREL_HI20`/`RK_RISCV_PCREL_LO12_I`, `RK_RISCV_CALL`, the
-`RK_AVR_*` kinds, `RK_ABS64`, `RK_ABS32`, `RK_DATA_PREL32` and the TLS
+`RK_RISCV_PCREL_HI20`/`RK_RISCV_PCREL_LO12_I`, `RK_RISCV_CALL`,
+`RK_MIPS_HI16`/`RK_MIPS_LO16`, `RK_MIPS_TEXT26`, the `RK_AVR_*` kinds, `RK_ABS64`, `RK_ABS32`, `RK_DATA_PREL32` and the TLS
 kinds). The driver turns a kind into a concrete relocation:
 
 - `target_reloc_type(arch, kind)` gives the ELF type (-1 when the kind
@@ -126,7 +128,10 @@ kinds). The driver turns a kind into a concrete relocation:
 
 `target_elf_machine()` and `target_elf_flags()` give `e_machine` and
 `e_flags` (`EF_ARM_EABI_VER5` on Thumb, `EF_RISCV_RVC` on RISC-V,
-`EF_AVR_ARCH_AVR5` on AVR).
+`EF_AVR_ARCH_AVR5` on AVR, MIPS32r2 | o32 | noreorder on MIPS32).
+`target_elf_uses_rel()` says the target's objects carry REL relocations
+(MIPS32), and `target_rel_put_addend()` stores an addend in the field the
+way that relocation type's linker reads it back.
 
 ### Adding a target
 
@@ -160,6 +165,7 @@ must not be edited by hand.
 | `thumbv8m` | `clang -target thumbv8m.main-none-eabi -mfloat-abi=soft -ffreestanding` |
 | `riscv32` | `clang -target riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mcmodel=medany -ffreestanding` |
 | `riscv64` | `clang -target riscv64-unknown-elf -march=rv64imac -mabi=lp64 -mcmodel=medany -ffreestanding` |
+| `mips32` | `clang -target mipsel-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding` |
 | `avr` | `clang -target avr -mmcu=atmega328p -ffreestanding` |
 
 `EMBCC_REF_GCC_<ARCH>` (for example `EMBCC_REF_GCC_THUMB`) names a
@@ -199,8 +205,8 @@ installed.
 
 `backend.h` declares one entry point per backend, all with the same
 signature: `codegen_unit` (x86-64), `codegen_unit_arm64`,
-`codegen_unit_thumb`, `codegen_unit_riscv` (both widths) and
-`codegen_unit_avr`. Each takes the optimized `struct ir_unit` and
+`codegen_unit_thumb`, `codegen_unit_riscv` (both widths),
+`codegen_unit_mips` and `codegen_unit_avr`. Each takes the optimized `struct ir_unit` and
 returns:
 
 - the unit's `.text` in a `struct code`, with each function's
@@ -236,7 +242,7 @@ Shared helpers:
 
 ### What the backends have in common
 
-All five backends share a shape:
+All six backends share a shape:
 
 - **Every vreg has one home**: the register the allocator assigned, or
   a frame slot. Instructions read operands through accessor functions
@@ -259,7 +265,7 @@ All five backends share a shape:
 - **Tail calls** from `-O1` when the call is direct, every argument is in a
   register, and nothing in the frame outlives the call. Each backend adds
   its own conditions. `EMBCC_NO_TAILCALL` turns them off on AArch64,
-  Thumb, RISC-V and AVR.
+  Thumb, RISC-V, MIPS32 and AVR.
 - **Branch relaxation** (all but AArch64) by generating a function more
   than once: each branch starts in one form, and a later pass shrinks or
   grows it according to the distances measured.
@@ -295,6 +301,8 @@ bytes, with an LLVM or GNU tool.
 | RISC-V `emit.c` | `tests/golden/riscv-encoding.sh` | `tools/riscvcheck` (`--rv32`, `--rv64`) | `llvm-mc --disassemble -mattr=+m` | disassembly text; `--li32`/`--li64` execute `rv_li` sequences in an interpreter; `--refuse` checks the range checks fire |
 | RISC-V compression | `tests/golden/riscv-compressed.sh` | `tools/riscvcheck` (`--csweep32`, `--csweep64`) | `llvm-mc -mattr=+m,+c` | bytes of `rv_compress` against llvm-mc's compression of the same instruction |
 | RISC-V `asm.c` | `tests/golden/riscv-asm.sh` | `tools/rvasmcheck` | `llvm-mc -mattr=+m` | bytes |
+| MIPS `emit.c` | `tests/golden/mips-encoding.sh` | `tools/mipscheck` (`--vocab`, `--li`, `--refuse`) | `llvm-mc -triple=mipsel-unknown-elf -mcpu=mips32r2 -show-encoding` | each word, every register in every field; `--li` executes `mips_li` sequences; `--refuse` checks the range checks fire |
+| MIPS `asm.c` | `tests/golden/mips-asm.sh` | `tools/mipsasmcheck` | `llvm-mc` | bytes; and `-S` reassembled by llvm-mc against `-c`'s object |
 | AVR `emit.c` | `tests/golden/avr-encoding.sh` | `tools/avrcheck` | `llvm-mc -triple=avr -mcpu=atmega328p` | bytes for the vocabulary; PC-relative forms disassembled and compared as text; `--writes` checks the decoder `avr_insn_writes` |
 | AVR `asm.c` | `tests/golden/avr-asm.sh` | `tools/avrasmcheck` | `llvm-mc` | bytes; PC-relative forms as text |
 
@@ -547,7 +555,10 @@ returns its bytes, labels, relocations with their ELF types, alignment
 and data ranges in the same `struct topasm`. A naked function becomes
 such a block before code generation (`naked_to_blocks` in
 `src/driver/main.c`): its label, then its asm statements with their
-constant operands written in.
+constant operands written in. MIPS32 has no GNU-syntax block assembler
+yet: its file-scope blocks go through `topasm.c`, so data directives
+assemble and an instruction is refused by name, and a naked function is
+refused.
 
 `as.c` is EmbAS, the NASM-syntax assembler behind `embas` and
 `embcc -c FILE.asm`; see [embas](../manual/tools/embas.md).
@@ -1239,6 +1250,106 @@ AMOs and `lr`/`sc` are not in the vocabulary.
 `R_RISCV_PCREL_HI20`/`R_RISCV_PCREL_LO12_I`; data `R_RISCV_32` or
 `R_RISCV_64`. EmbCC emits no `R_RISCV_RELAX` or `R_RISCV_ALIGN`.
 
+## MIPS32
+
+`src/arch/mips/codegen.c`, entry point `codegen_unit_mips`, for
+`mipsel-none-elf`: MIPS32 Release 2, little-endian, the o32 ABI with soft
+float. The design notes, with every ABI fact and where it was read off,
+are in [the MIPS32 plan](mips32-plan.md). The backend has RV32's shape
+(one home per vreg, `rdr`/`wreg`/`wrote`, register pairs for 64-bit
+values, helper calls for floating point and 64-bit division), with the
+differences below.
+
+### Lowering
+
+- **Delay slots.** Every branch, jump and call is followed by a `nop`
+  (`br_place`, `branch_to`, `call_sym`), so nothing scheduled into a
+  slot can be wrong. The one filled slot is the return's: `mips_restore`
+  emits `jr $ra` before the frame's `addiu $sp, $sp, N`, which then runs
+  in the slot (a frame too large for 16 bits keeps `li`/`addu` before the
+  `jr` and a `nop` after). MIPS32 has no load delay slots and no HI/LO hazards.
+- **Branches** compare two registers only for `==` and `!=`; an ordered
+  comparison against zero has `bltz`/`bgez`/`blez`/`bgtz`, and anything
+  else is `slt`/`sltu` into `$at` and a `beq`/`bne` of it (`branch_if`).
+  A fused compare against a 16-bit constant is `slti`/`sltiu` into `$at`.
+- **Long branches.** Each branch is first emitted short (±128 KiB). One
+  that does not reach is given the long form -- the inverse branch over a
+  `j` relocated against the function's section (`RK_MIPS_TEXT26`, an
+  `R_MIPS_26` whose addend is the label's offset) -- and the function is
+  generated again until nothing new fails (`gen_func`).
+- **Immediates.** `addiu`, `slti`, `sltiu`, loads and stores take a
+  sign-extended 16-bit field; `andi`, `ori` and `xori` a zero-extended one.
+  `mips_imm_foldable` tells the optimizer which constants fold. An AND
+  with a run of low bits is `ext`, with all but a run of low bits `ins`
+  of `$0`.
+- **Multiply and divide.** `mul` is three-operand (Release 2); a 64-bit
+  product's high word comes from `multu` and `mfhi`. Division is
+  `div`/`divu $zero` then `mflo` or `mfhi`; it never traps.
+- **Addresses** are absolute: `lui` and `addiu` with `RK_MIPS_HI16` and
+  `RK_MIPS_LO16`, noted high first so the relocation table pairs them.
+- **Calls** are `jal` with `R_MIPS_26` to any function, in the unit or
+  not (a `jal` holds an absolute word index only the linker knows); an
+  indirect call is `jalr` through `$t9`.
+- **Misaligned accesses trap.** A 2- or 4-byte load or store irgen did
+  not mark `natural` goes through `ld_any`/`st_any`: `lwl`/`lwr` and
+  `swl`/`swr` for a word, two bytes for a halfword. Block copies whose
+  ends are not known to be word-aligned (`IR_MEMCPY` without a
+  `natural` alignment) use the same, and so do a struct argument's words.
+- **Atomics** are `ll`/`sc` loops on words, bracketed by `sync`; a
+  narrower or wider one is refused. `IR_FENCE` is `sync`.
+- **Select** is `movn`. **Byte swap** is `wsbh` and `rotr`.
+- **`IR_ALLOCA`** rounds to 16 and keeps `sp` 16-aligned, and the frame is
+  addressed from `fp` in such a function.
+- **Refused**: computed `goto`, `IR_SWITCH` (`target_jump_tables()` is
+  false for MIPS), `IR_FRAMEADDR`, 128-bit values.
+
+### Frame and calling convention
+
+From `sp` upward: the outgoing argument block (at least the 16-byte home
+area in any function that calls, a helper included), the shared temp
+slots, 64-bit temps without a pair, the locals, the struct-return
+scratch, the sret pointer, the callee-saved registers and `ra`. A multiple
+of 8. A variadic function stores `a0`-`a3` into its caller's home area,
+at the top of its own frame, so `va_list` walks one block. `place_arg`
+lays every argument out as o32 does: an offset rounded up to the
+argument's alignment (4 to 8) in a block whose first 16 bytes ride in
+`a0`-`a3`; nothing goes by reference. Results come back in `v0:v1`, every
+struct through a hidden `a0` handed back in `v0`, a `_Complex` in
+`v0`..`a1`.
+
+The allocator's pool is `v0`, `v1`, `a0`-`a3`, `t7`, `t8`, then `s0`-`s7`
+(`a0`-`a3` withheld in a variadic function); the pair pool `a0:a1`,
+`a2:a3`, `v0:v1`, `s0:s1` .. `s6:s7`. `t0`-`t6` are scratch, `$at` the
+branch comparison, `$t9` an indirect call's target; `fp` is the frame base
+under `alloca`, and `gp`, `k0`, `k1` are never touched. Each function is
+generated with and without the pair pass and the shorter kept, as at RV32.
+
+### Encoder and inline asm
+
+`emit.c` packs the R, I and J formats once; every instruction is its
+opcode, function code and fields, with the range of its immediate's
+extension checked. `tools/mipscheck` encodes every form with every
+register in every field and both ends of every immediate, and
+`tests/golden/mips-encoding.sh` compares each word with
+`llvm-mc -show-encoding`. `asm.c` is the inline-asm vocabulary (`$`
+register names, numeric branch displacements from the delay slot, the
+pseudo-instructions `move`, `li`, `not`, `negu`, `b`; gas's macros --
+`neg`, `div` with a destination -- refused), checked against llvm-mc by
+`tests/golden/mips-asm.sh`. Operands come from `t0`-`t9`, `v0`-`v1` and
+`a0`-`a3`; a template that names a callee-saved register is refused.
+
+### Relocations and EmbLD
+
+The objects are REL: `elfw` stores each addend in its field
+(`target_rel_put_addend`), the HI16 half rounded by 0x8000 so that it and
+the sign-extended LO16 add back to the addend. `apply_mips` in
+`src/link/link.c` reads REL and RELA, applies a HI16 with the next LO16
+against the same symbol in its section (the AHL rule), checks that a
+`jal`'s target is in its 256 MiB region, checks `.MIPS.abiflags` across
+inputs and drops it and `.reginfo`, and refuses the GOT and gp-relative
+relocations by name. `-Tstack` emits `li sp` and a `jr` to the entry
+through `$t9`.
+
 ## AVR
 
 `src/arch/avr/codegen.c`, entry point `codegen_unit_avr`. Target `avr`
@@ -1414,8 +1525,8 @@ with `lo8`, `hi8`, `pm_lo8`, `pm_hi8` and `gs()` symbol operands.
 
 | Variable | Backend | Effect |
 |---|---|---|
-| `EMBCC_NO_TAILCALL` | AArch64, Thumb, RISC-V, AVR | no tail calls |
-| `EMBCC_NO_MEMOFF` | Thumb, RISC-V, AVR | no constant-offset folding into accesses |
+| `EMBCC_NO_TAILCALL` | AArch64, Thumb, RISC-V, MIPS32, AVR | no tail calls |
+| `EMBCC_NO_MEMOFF` | Thumb, RISC-V, MIPS32, AVR | no constant-offset folding into accesses |
 | `EMBCC_NO_RMW` | x86-64 | no read-modify-write fusion |
 | `EMBCC_NO_MLA` | AArch64, Thumb | no multiply-accumulate fusion |
 | `EMBCC_T_NOLO` | Thumb | no low-register scratch |
