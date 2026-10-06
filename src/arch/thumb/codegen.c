@@ -3485,6 +3485,7 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LABEL:
         F->label_off[i->label] = t->len;
         F->bc_end = -1;          /* something may branch here */
+        F->fl_end = -1;          /* ...with other flags */
         return;
     case IR_JMP:
         /* A jump to the label that follows it is not an instruction.
@@ -3870,7 +3871,10 @@ static void gen_ins(struct t_fn *F, int n)
             set_cc(F, i->dst, cond);
             return;
         }
-        {
+        if (fuse && i->imm_b && in_reg(F, i->a) && F->fl_end == t->len &&
+            F->fl_reg == F->loc[i->a] && F->fl_imm == i->imm) {
+            /* the flags of the compare just made (fl_end) */
+        } else {
         /* The comparison reads its left operand where it already is;
          * only the 0/1 result needs a register of its own. */
         int sa = rdr(F, i->a, T_ACC);
@@ -3889,6 +3893,12 @@ static void gen_ins(struct t_fn *F, int n)
         if (fuse) {
             jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
             F->skip_next = 1;
+            F->fl_end = -1;
+            if (i->imm_b && in_reg(F, i->a)) {
+                F->fl_end = t->len;
+                F->fl_reg = F->loc[i->a];
+                F->fl_imm = i->imm;
+            }
             return;
         }
         /* 0 or 1, without an IT block: set it, then jump over the
@@ -5168,6 +5178,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.loc = NULL; F.nsave = 0; F.save_at = 0;
     F.floc = NULL; F.nfsave = 0;
     F.bc_end = F.bc_fix = -1;
+    F.fl_end = -1;
     F.shortb = NULL; F.nshortb = 0;
     F.scr_save = T_SCR_ALL;
     F.fb = T_SP;
@@ -5398,6 +5409,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.label_off[i] = -1;
         F.skip_next = 0;
         F.bc_end = F.bc_fix = -1;
+        F.fl_end = -1;
         F.va_regsave = F.va_first = -1;
         F.shortb = shortb;
         F.nshortb = nshortb;
