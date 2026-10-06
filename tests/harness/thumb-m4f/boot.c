@@ -26,8 +26,12 @@ void reset(void);
 
 /* mps2-an386 has its SSRAM at 0x20000000, 4 MiB of it; the stack starts
  * at the top of the first 64 KiB and grows down, which matches what the
- * ARMv7-M harness does and keeps the two link scripts the same shape. */
+ * ARMv7-M harness does and keeps the two link scripts the same shape.
+ * -DSRAM_TOP= moves it: big-copy.c in the exec corpus has 240 KiB of
+ * arrays (exec-boards.sh). */
+#ifndef SRAM_TOP
 #define SRAM_TOP 0x20010000u
+#endif
 
 /* Coprocessor Access Control Register. CP10 is bits 21:20 and CP11 bits
  * 23:22; 0b11 in each is "full access". Both must be set, not just CP10:
