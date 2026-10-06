@@ -10351,6 +10351,8 @@ static int const_is_expensive(const struct ir_ins *i)
         }
         if (ta == TARGET_THUMB)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
+        if (ta == TARGET_MIPS32)                /* addiu, or ori from $0 */
+            return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
         return !(v >= -2048 && v <= 2047);                     /* RISC-V */
     }
     default:
@@ -10438,8 +10440,10 @@ static int pass_sinkconst(struct ir_func *fn)
          * Arm have taken it as an immediate before this runs. It used to
          * stay out by accident -- the guard in front of the loop read it
          * too -- until the guard could be decided at compile time. */
+        /* (MIPS's beq/bne compare two registers too.) */
         int rv_cmp = (target_get() == TARGET_RISCV32 ||
-                      target_get() == TARGET_RISCV64) &&
+                      target_get() == TARGET_RISCV64 ||
+                      target_get() == TARGET_MIPS32) &&
                      i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
                      fn->ins[at[i->dst]].op == IR_CMP;
         if (at[i->dst] > n + 1 &&
@@ -10509,6 +10513,11 @@ static int target_imm_foldable(int op, long imm, int w)
     if (target_get() == TARGET_RISCV32 && w == 8 &&
         (op == IR_AND || op == IR_OR || op == IR_XOR) && !getenv("EMBCC_RV_NOWIDEIMM"))
         return riscv_imm_foldable64(op, imm);
+    if (target_get() == TARGET_MIPS32 && w == 8 &&
+        (op == IR_AND || op == IR_OR || op == IR_XOR))
+        return mips_imm_foldable64(op, imm);
+    if (target_get() == TARGET_MIPS32)
+        return mips_imm_foldable(op, imm);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
@@ -10676,7 +10685,8 @@ static int pass_immfold(struct ir_func *fn)
         /* Thumb and RV32 take a 64-bit AND/OR/XOR constant half by half,
          * so its width is not x86's imm32 question (*_imm_foldable64). */
         int wide_ok = (target_get() == TARGET_THUMB ||
-                       target_get() == TARGET_RISCV32) && i->w == 8 &&
+                       target_get() == TARGET_RISCV32 ||
+                       target_get() == TARGET_MIPS32) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
         if (get_const(fn, &d, i->b, &B) && (fits_imm32(B) || wide_ok) &&
             target_imm_foldable(i->op, B, i->w)) {

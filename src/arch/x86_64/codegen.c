@@ -503,7 +503,7 @@ void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
          * an offset -- a jump too far for AVR's 12-bit rjmp, relocated
          * against the section symbol. Everything else here is a string index
          * into the unit's pool. */
-        if (s[k].kind == RK_AVR_TEXT_CALL)
+        if (s[k].kind == RK_AVR_TEXT_CALL || s[k].kind == RK_MIPS_TEXT26)
             continue;
         s[k].str_off = iu->strs[s[k].str_off].off;
     }

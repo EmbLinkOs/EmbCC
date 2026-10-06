@@ -259,7 +259,7 @@ isr_common:
 
 `embas` reads NASM syntax for x86-64 only. Assembly in GNU syntax is
 assembled by `embcc` itself, for the ARM (Thumb), AArch64, RISC-V and AVR
-targets:
+targets (not yet for MIPS32, whose assembler reads inline `asm` only):
 
 ```sh
 embcc --target=thumbv7m-none-eabi -c startup.S -o startup.o

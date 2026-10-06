@@ -357,6 +357,42 @@ typedef struct {
 /* AVR, from the ELF machine registry. */
 #define EM_AVR 83
 
+/* MIPS, from the ELF machine registry: one number for every width and
+ * byte order (the class and EI_DATA say which). */
+#define EM_MIPS 8
+
+/* MIPS e_flags, read off clang's mipsel o32 objects. The architecture
+ * level is the top nibble; the ABI two bits at 12; NOREORDER says the
+ * code is already scheduled -- its delay slots are filled -- and CPIC
+ * (absent from EmbCC's objects) that it follows the abicalls convention. */
+#define EF_MIPS_NOREORDER  0x00000001
+#define EF_MIPS_PIC        0x00000002
+#define EF_MIPS_CPIC       0x00000004
+#define EF_MIPS_ABI_O32    0x00001000
+#define EF_MIPS_ARCH_32R2  0x70000000
+#define EF_MIPS_ARCH_MASK  0xf0000000
+
+/* The o32 relocation types EmbCC writes and EmbLD applies. o32 objects
+ * use SHT_REL: the addend is IN the field, and a HI16's is completed by
+ * the LO16 that follows it (docs/internals/mips32-plan.md, the AHL
+ * rule). The GOT- and GP-relative ones are named so EmbLD can refuse
+ * them by name. */
+#define R_MIPS_NONE      0
+#define R_MIPS_16        1
+#define R_MIPS_32        2
+#define R_MIPS_REL32     3
+#define R_MIPS_26        4
+#define R_MIPS_HI16      5
+#define R_MIPS_LO16      6
+#define R_MIPS_GPREL16   7
+#define R_MIPS_LITERAL   8
+#define R_MIPS_GOT16     9
+#define R_MIPS_PC16     10
+#define R_MIPS_CALL16   11
+#define R_MIPS_GPREL32  12
+#define R_MIPS_JALR     37
+#define R_MIPS_PC32    248
+
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
  * names each one, which is the same referee the encoder uses. */
@@ -377,6 +413,12 @@ typedef struct {
  * SHT_LOPROC+3 rather than a number in the generic range. */
 #define SHT_ARM_ATTRIBUTES 0x70000003
 #define SHT_RISCV_ATTRIBUTES 0x70000003   /* the same processor-specific number */
+/* MIPS: the register-usage summary o32 objects carry, and the ABI flags
+ * (ISA level, register sizes, floating-point ABI) a linker compares
+ * before mixing objects. Both allocated, and neither belongs in a
+ * bare-metal image. */
+#define SHT_MIPS_REGINFO  0x70000006
+#define SHT_MIPS_ABIFLAGS 0x7000002a
 #define SHT_SYMTAB    2
 #define SHT_STRTAB    3
 #define SHT_RELA      4
