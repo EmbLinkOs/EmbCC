@@ -7,7 +7,8 @@
 # finish in ten minutes. Past the budget a function is compiled the way
 # -O0 did before it allocated.
 #
-# Here, on Cortex-M, RV32 and AVR at -O0:
+# Here, on Cortex-M (ARMv7-M, and ARMv6-M's own lowering), RV32 and AVR
+# at -O0:
 #   - a function of 6000 statements compiles to exactly the bytes
 #     EMBCC_O0_NORA=1 gives (the old -O0), well inside a time limit;
 #   - a small function does NOT: -O0 still allocates where it can.
@@ -31,7 +32,7 @@ gen 40 "$out/small.c"
 # A compile that has not finished in 60 s has gone quadratic again.
 limit() { perl -e 'alarm 60; exec @ARGV' "$@"; }
 n=0
-for t in thumbv7m-none-eabi riscv32-unknown-elf avr; do
+for t in thumbv7m-none-eabi thumbv6m-none-eabi riscv32-unknown-elf avr; do
     limit "$EMBCC" --target=$t -O0 -c "$out/big.c" -o "$out/$t-big.o" ||
         fail "$t: the 6000-statement function did not compile in 60 s"
     EMBCC_O0_NORA=1 "$EMBCC" --target=$t -O0 -c "$out/big.c" \

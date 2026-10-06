@@ -2432,7 +2432,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
          * misaligned address (MIPS) read L"..."[0] with one. */
         int w = e->str_width ? e->str_width : 1;
         e->str_index = ir_intern_aligned(cur_unit, e->name, (int)e->num * w,
-                                         w);
+                                         target_string_align(w));
         struct ir_ins *i = emit(fn);
         i->op = IR_STRADDR;
         i->label = e->str_index;
@@ -2537,14 +2537,18 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         }
         int old = -1;
         if (e->is_post) {
-            /* At the value's own width: a MOV that says four bytes
-             * copies four on a 32-bit target, and `e = d--` of a double
-             * kept half of the old value (MIPS and RV32 at -O0). */
+            /* The old value, at its own width, as a `?:` arm's copy is.
+             * emit() makes every instruction four bytes wide, and a
+             * four-byte copy of a long long or a double is its low word:
+             * `e = d--` of a double kept half of the old value wherever the
+             * optimizer had not folded the copy away (-O0 on MIPS, RV32
+             * and ARMv7-M). */
             struct ir_ins *save = emit(fn);
             save->op = IR_MOV;
             save->a = cur;
-            save->w = w;
             save->dst = old = new_temp(fn);
+            save->w = ty_is_float(t) ? ty_size(t) : w;
+            save->flt = ty_is_float(t) && !ty_is_xldouble(t);
         }
         int sum;
         if (ty_is_float(t))   /* x++ adds 1.0 — not 1 to the bit pattern */

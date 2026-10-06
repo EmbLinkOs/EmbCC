@@ -427,6 +427,7 @@ The same kind of note is given for the conversion routines (`__fix*`,
 | `x86_64-linux-gnu` | yes | `int128.c`, `fp128.c`, `complex.c`, `ldouble.c`, `unwind.c` |
 | `aarch64-linux-gnu` | yes | `int128.c`, `fp128.c`, `complex.c`, `ldouble.c`, `softtf.c`, `unwind.c` |
 | `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf`, `riscv32-unknown-elf` | yes | `int64.c`, `softfp.c`, `complex.c` |
+| `thumbv6m-none-eabi` | yes | `armv6m.c` (the `__aeabi_*` divide, multiply, shift and block routines, and the `__atomic_*` calls), `int64.c`, `softfp.c`, `complex.c` |
 | `avr` | yes | `avr.c`, `avr64.c`, `avrfp*.c`, `complex.c` |
 | `x86_64-elf`, `aarch64-elf` | no | these link libgcc |
 | `riscv64-unknown-elf` | no | `int128.c` and `fp128.c` do not compile there; compile `softfp.c` and `complex.c` by hand |

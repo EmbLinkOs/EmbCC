@@ -1252,3 +1252,441 @@ void t_vmrs_apsr(struct code *c)
 {
     hw2(c, 0xEEF1u, 0xFA10u);
 }
+
+/* ---- ARMv6-M: the Thumb-1 forms ------------------------------------------
+ *
+ * ARMv6-M (Cortex-M0, M0+, M1) has the 16-bit encodings and six 32-bit
+ * ones -- BL, MRS, MSR, DMB, DSB and ISB, which t_bl, t_mrs, t_msr and
+ * t_barrier above already write. Every other hw2() in this file is
+ * UNDEFINED there and takes a HardFault.
+ *
+ * The encoders above choose the 16-bit form when the operands allow it
+ * and fall back to a 32-bit one when they do not: right on ARMv7-M, a
+ * fault on ARMv6-M. The t1_* encoders below never widen. Each one
+ *
+ *  - stops with an internal error when given a register its form cannot
+ *    name -- a high register where only r0-r7 fit -- because that is a
+ *    bug in the caller, not a property of the operands;
+ *  - returns 0 and writes nothing when an immediate or an offset does not
+ *    fit its field, as t_ldst_imm and t_ldr_lit16 do, so the caller can
+ *    build the value another way.
+ *
+ * Where an encoder above already writes this form for every operand the
+ * t1_* one accepts, the t1_* one checks the operands and calls it, so
+ * each encoding is written in one place. tools/t1check compares every
+ * t1_* encoder, and the encoders above that ARMv6-M code reuses as they
+ * are, with llvm-mc -triple=thumbv6m-none-eabi byte for byte
+ * (tests/golden/thumb-v6m-encoding.sh).
+ *
+ * Every data-processing instruction on low registers SETS THE FLAGS here;
+ * there is no other form. The only instructions that move or address
+ * without touching them are MOV, ADD and CMP with a high register
+ * (t_mov_reg, t1_add_hi; CMP sets them, which is its purpose), the loads
+ * and stores, ADR, ADD rd, sp, #imm and the sp adjustments. MOVS changes
+ * N and Z but leaves C and V alone.
+ */
+
+/* An operand a Thumb-1 form cannot name. emit.c is linked into the
+ * encoding checkers too, which carry no driver: no internal_error here. */
+static void t1_refuse(const char *insn, const char *what, int v)
+{
+    fprintf(stderr, "embcc: internal: thumb: %s with %s %d, which ARMv6-M "
+                    "cannot encode\n", insn, what, v);
+    abort();
+}
+
+static void t1_lo(const char *insn, int r)
+{
+    if (r < 0 || r > 7)
+        t1_refuse(insn, "register", r);
+}
+
+static void t1_addsub_op(const char *insn, int op)
+{
+    if (op != T_OP_ADD && op != T_OP_SUB)
+        t1_refuse(insn, "operation", op);
+}
+
+/* MOVS Rd, #imm8 (T1): 0010 0 Rd imm8. t_movs_imm's 16-bit form. */
+int t1_movs_imm(struct code *c, int rd, long imm)
+{
+    t1_lo("movs", rd);
+    if (imm < 0 || imm > 255)
+        return 0;
+    return t_movs_imm(c, rd, imm) == 0;
+}
+
+/* MOVS Rd, Rm (T2): 0000 0000 00 Rm Rd, which is LSLS Rd, Rm, #0.
+ * t_movs_reg's 16-bit form. N and Z from Rm; C and V unchanged. */
+void t1_movs_reg(struct code *c, int rd, int rm)
+{
+    t1_lo("movs", rd);
+    t1_lo("movs", rm);
+    t_movs_reg(c, rd, rm);
+}
+
+/* ADDS/SUBS Rd, Rn, Rm (T1): 0001 10 S Rm Rn Rd, S set for SUBS.
+ * t_alu_reg's 16-bit three-register form. */
+void t1_addsub_reg(struct code *c, int op, int rd, int rn, int rm)
+{
+    t1_addsub_op("adds/subs", op);
+    t1_lo("adds/subs", rd);
+    t1_lo("adds/subs", rn);
+    t1_lo("adds/subs", rm);
+    t_alu_reg(c, op, rd, rn, rm, 1);
+}
+
+/* ADDS/SUBS Rd, Rn, #imm3 (T1): 0001 11 S imm3 Rn Rd, 0..7.
+ * t_alu_imm's first form. */
+int t1_addsub_imm3(struct code *c, int op, int rd, int rn, long imm)
+{
+    t1_addsub_op("adds/subs", op);
+    t1_lo("adds/subs", rd);
+    t1_lo("adds/subs", rn);
+    if (imm < 0 || imm > 7)
+        return 0;
+    return t_alu_imm(c, op, rd, rn, imm, 1);
+}
+
+/* ADDS/SUBS Rdn, #imm8 (T2): 0011 S Rdn imm8, 0..255.
+ *
+ * Written here, not through t_alu_imm: for 0..7 that one takes the
+ * three-register imm3 form whatever Rd and Rn are. Both are two bytes and
+ * compute the same thing, but they are different encodings, and this is
+ * the one `adds r0, #5` assembles to. */
+int t1_addsub_imm8(struct code *c, int op, int rdn, long imm)
+{
+    t1_addsub_op("adds/subs", op);
+    t1_lo("adds/subs", rdn);
+    if (imm < 0 || imm > 255)
+        return 0;
+    hw(c, (op == T_OP_ADD ? 0x3000u : 0x3800u) | ((unsigned)rdn << 8) |
+          (unsigned)imm);
+    return 1;
+}
+
+/* ANDS/EORS/ADCS/SBCS/ORRS/BICS Rdn, Rm (T1): 0100 00 op4 Rm Rdn, the
+ * data-processing block. `op` is T_OP_AND, _EOR, _ADC, _SBC, _ORR or
+ * _BIC; narrow_dp() above gives op4, and t_alu_reg writes the form when
+ * the destination is the first operand. */
+void t1_alu_reg(struct code *c, int op, int rdn, int rm)
+{
+    if (narrow_dp(op) < 0)
+        t1_refuse("ands/eors/adcs/sbcs/orrs/bics", "operation", op);
+    t1_lo("ands/eors/adcs/sbcs/orrs/bics", rdn);
+    t1_lo("ands/eors/adcs/sbcs/orrs/bics", rm);
+    t_alu_reg(c, op, rdn, rdn, rm, 1);
+}
+
+/* LSLS/LSRS/ASRS/RORS Rdn, Rm (T1): the data-processing block's op4 2, 3,
+ * 4 and 7 -- a shift by the low byte of Rm. t_shift_reg writes the first
+ * three; ROR it never needed in 16 bits, since ARMv7-M has the wide one:
+ * 0100 0001 11 Rm Rdn. */
+void t1_shift_reg(struct code *c, int op, int rdn, int rm)
+{
+    t1_lo("lsls/lsrs/asrs/rors", rdn);
+    t1_lo("lsls/lsrs/asrs/rors", rm);
+    if (op == T_SH_ROR) {
+        hw(c, 0x41c0u | ((unsigned)rm << 3) | (unsigned)rdn);
+        return;
+    }
+    if (op != T_SH_LSL && op != T_SH_LSR && op != T_SH_ASR)
+        t1_refuse("lsls/lsrs/asrs/rors", "shift", op);
+    t_shift_reg(c, op, rdn, rdn, rm, 1);
+}
+
+/* LSLS/LSRS/ASRS Rd, Rm, #sh (T1): 000 op2 imm5 Rm Rd, op2 the T_SH_*
+ * number. LSL takes 0..31 (0 is MOVS Rd, Rm); LSR and ASR take 1..32,
+ * with 32 written as 0. t_shift_imm's 16-bit form. Thumb-1 has no ROR by
+ * an immediate. */
+int t1_shift_imm(struct code *c, int op, int rd, int rm, int sh)
+{
+    t1_lo("lsls/lsrs/asrs", rd);
+    t1_lo("lsls/lsrs/asrs", rm);
+    if (op != T_SH_LSL && op != T_SH_LSR && op != T_SH_ASR)
+        t1_refuse("lsls/lsrs/asrs", "shift", op);
+    if (op == T_SH_LSL ? (sh < 0 || sh > 31) : (sh < 1 || sh > 32))
+        return 0;
+    t_shift_imm(c, op, rd, rm, sh, 1);
+    return 1;
+}
+
+/* CMP Rn, Rm: T1 (0100 0010 10 Rm Rn) for two low registers, T2 (0100
+ * 0101 N Rm Rn) when either is high -- both sixteen bits, which is what
+ * t_cmp_reg writes. pc is UNPREDICTABLE in T2. */
+void t1_cmp_reg(struct code *c, int rn, int rm)
+{
+    if (rn < 0 || rn > 14)
+        t1_refuse("cmp", "register", rn);
+    if (rm < 0 || rm > 14)
+        t1_refuse("cmp", "register", rm);
+    t_cmp_reg(c, rn, rm);
+}
+
+/* CMP Rn, #imm8 (T1): 0010 1 Rn imm8. t_cmp_imm's 16-bit form. */
+int t1_cmp_imm(struct code *c, int rn, long imm)
+{
+    t1_lo("cmp", rn);
+    if (imm < 0 || imm > 255)
+        return 0;
+    t_cmp_imm(c, rn, imm);
+    return 1;
+}
+
+/* CMN Rn, Rm (T1): 0100 0010 11 Rm Rn -- the flags of Rn + Rm, which is
+ * how a comparison with a small negative constant is made here. */
+void t1_cmn(struct code *c, int rn, int rm)
+{
+    t1_lo("cmn", rn);
+    t1_lo("cmn", rm);
+    hw(c, 0x42c0u | ((unsigned)rm << 3) | (unsigned)rn);
+}
+
+/* TST Rn, Rm (T1): 0100 0010 00 Rm Rn. t_tst_reg's 16-bit form. */
+void t1_tst(struct code *c, int rn, int rm)
+{
+    t1_lo("tst", rn);
+    t1_lo("tst", rm);
+    t_tst_reg(c, rn, rm);
+}
+
+/* RSBS Rd, Rn, #0 (T1, also spelled NEGS): 0100 0010 01 Rn Rd -- the
+ * only reverse subtract ARMv6-M has, and so its only negation. */
+void t1_negs(struct code *c, int rd, int rn)
+{
+    t1_lo("rsbs", rd);
+    t1_lo("rsbs", rn);
+    hw(c, 0x4240u | ((unsigned)rn << 3) | (unsigned)rd);
+}
+
+/* MVNS Rd, Rm (T1): 0100 0011 11 Rm Rd. t_mvn_reg's 16-bit form. */
+void t1_mvns(struct code *c, int rd, int rm)
+{
+    t1_lo("mvns", rd);
+    t1_lo("mvns", rm);
+    t_mvn_reg(c, rd, rm, 1);
+}
+
+/* MULS Rdm, Rn, Rdm (T1): 0100 0011 01 Rn Rdm -- the low 32 bits of the
+ * product, into the register that was the second factor. t_mul's 16-bit
+ * form. There is no other multiply: no MLA, MLS, UMULL or SMULL. */
+void t1_muls(struct code *c, int rdm, int rn)
+{
+    t1_lo("muls", rdm);
+    t1_lo("muls", rn);
+    t_mul(c, rdm, rn, rdm);
+}
+
+/* ADD Rdn, Rm (T2): 0100 0100 DN Rm Rdn -- the special data-processing
+ * group that t_mov_reg (op 10, 0x4600) and t_cmp_reg's high form (op 01,
+ * 0x4500) are in, with op 00. Any two registers, flags unchanged: with sp
+ * as either operand it is ADD (SP plus register), the same bits. Both pc
+ * is UNPREDICTABLE. */
+void t1_add_hi(struct code *c, int rdn, int rm)
+{
+    if (rdn < 0 || rdn > 15)
+        t1_refuse("add", "register", rdn);
+    if (rm < 0 || rm > 15 || (rdn == 15 && rm == 15))
+        t1_refuse("add", "register", rm);
+    hw(c, 0x4400u | ((unsigned)(rdn & 8) << 4) | ((unsigned)rm << 3) |
+          (unsigned)(rdn & 7));
+}
+
+/* SXTB/SXTH/UXTB/UXTH Rd, Rm (T1): 1011 0010 op2 Rm Rd. t_ext's 16-bit
+ * form; `size` 1 or 2. */
+void t1_ext(struct code *c, int rd, int rm, int size, int sign)
+{
+    t1_lo("sxtb/sxth/uxtb/uxth", rd);
+    t1_lo("sxtb/sxth/uxtb/uxth", rm);
+    if (size != 1 && size != 2)
+        t1_refuse("sxtb/sxth/uxtb/uxth", "size", size);
+    t_ext(c, rd, rm, size, sign);
+}
+
+/* REV / REV16 Rd, Rm (T1): 1011 1010 op2 Rm Rd, op2 00 and 01. t_rev's
+ * and t_rev16's 16-bit forms. */
+void t1_rev(struct code *c, int rd, int rm)
+{
+    t1_lo("rev", rd);
+    t1_lo("rev", rm);
+    t_rev(c, rd, rm);
+}
+
+void t1_rev16(struct code *c, int rd, int rm)
+{
+    t1_lo("rev16", rd);
+    t1_lo("rev16", rm);
+    t_rev16(c, rd, rm);
+}
+
+/* REVSH Rd, Rm (T1): the same group, op2 11 -- the low halfword's two
+ * bytes swapped and sign-extended to 32 bits. */
+void t1_revsh(struct code *c, int rd, int rm)
+{
+    t1_lo("revsh", rd);
+    t1_lo("revsh", rm);
+    hw(c, 0xbac0u | ((unsigned)rm << 3) | (unsigned)rd);
+}
+
+/* LDR/STR, LDRB/STRB, LDRH/STRH Rt, [Rn, #off] (T1): 011 B L imm5 Rn Rt
+ * for a word or a byte, 1000 L imm5 Rn Rt for a halfword. The field
+ * counts units of the access, so `off` is 0..31 times `size`. No
+ * sign-extending form takes an immediate: LDRSB and LDRSH are register
+ * offset only (t1_ldst_reg). t_ldst_imm's first form. */
+int t1_ldst_imm(struct code *c, int rt, int rn, long off, int size,
+                int store)
+{
+    t1_lo(store ? "str" : "ldr", rt);
+    t1_lo(store ? "str" : "ldr", rn);
+    if (size != 1 && size != 2 && size != 4)
+        t1_refuse(store ? "str" : "ldr", "size", size);
+    if (off < 0 || off % size != 0 || off / size > 31)
+        return 0;
+    return t_ldst_imm(c, rt, rn, off, size, 0, store);
+}
+
+/* LDR/STR/LDRB/STRB/LDRH/STRH/LDRSB/LDRSH Rt, [Rn, Rm] (T1): 0101 opB Rm
+ * Rn Rt. t_ldst_reg's 16-bit form, through narrow_ldst_reg(). `sign`
+ * matters only to a load narrower than a word. */
+void t1_ldst_reg(struct code *c, int rt, int rn, int rm, int size, int sign,
+                 int store)
+{
+    t1_lo(store ? "str" : "ldr", rt);
+    t1_lo(store ? "str" : "ldr", rn);
+    t1_lo(store ? "str" : "ldr", rm);
+    if (size != 1 && size != 2 && size != 4)
+        t1_refuse(store ? "str" : "ldr", "size", size);
+    if (store || size == 4)
+        sign = 0;
+    t_ldst_reg(c, rt, rn, rm, 0, size, sign, store);
+}
+
+/* LDR/STR Rt, [sp, #off] (T1/T2): 1001 L Rt imm8, `off` 0..1020 in words.
+ * The only sp-relative access: there is no byte, halfword or signed form
+ * from sp. t_ldst_imm's sp form. */
+int t1_ldst_sp(struct code *c, int rt, long off, int store)
+{
+    t1_lo(store ? "str" : "ldr", rt);
+    if (off < 0 || off > 1020 || (off & 3))
+        return 0;
+    return t_ldst_imm(c, rt, T_SP, off, 4, 0, store);
+}
+
+/* ADD Rd, sp, #off (T1): 1010 1 Rd imm8, `off` 0..1020 in words -- a
+ * frame address. t_add_sp's 16-bit form. Flags unchanged. */
+int t1_add_sp_imm(struct code *c, int rd, long off)
+{
+    t1_lo("add", rd);
+    if (off < 0 || off > 1020 || (off & 3))
+        return 0;
+    t_add_sp(c, rd, off);
+    return 1;
+}
+
+/* ADD/SUB sp, sp, #imm (T2/T1): 1011 0000 S imm7, `imm` 0..508 in words.
+ * t_sp_adjust's 16-bit form. A larger frame is several of these, or a
+ * register: ADD sp, Rm is t1_add_hi. */
+int t1_sp_adjust(struct code *c, long imm, int sub)
+{
+    if (imm < 0 || imm > 508 || (imm & 3))
+        return 0;
+    t_sp_adjust(c, imm, sub);
+    return 1;
+}
+
+/* ADR Rd, #off (T1): 1010 0 Rd imm8 -- Rd = Align(pc, 4) + off, `off`
+ * 0..1020 in words, FORWARD only. ARMv6-M's only pc-relative address: the
+ * adr.w a jump table uses on ARMv7-M (t_adr_w) is 32-bit. */
+int t1_adr(struct code *c, int rd, long off)
+{
+    t1_lo("adr", rd);
+    if (off < 0 || off > 1020 || (off & 3))
+        return 0;
+    hw(c, 0xa000u | ((unsigned)rd << 8) | (unsigned)(off >> 2));
+    return 1;
+}
+
+/* The word count an ADR or a literal LDR at `at` holds to reach the code
+ * offset `target`: measured from Align(at + 4, 4), forward. -1 when it
+ * cannot. The buffer is the section, so `at`'s alignment is the
+ * instruction's own, provided the section is four-aligned. */
+static long t1_pc_words(int at, int target)
+{
+    long off = (long)target - (((long)at + 4) & ~3L);
+    if (off < 0 || off > 1020 || (off & 3))
+        return -1;
+    return off >> 2;
+}
+
+/* Point the instruction at `at` -- ADR (1010 0 Rd imm8) or LDR literal
+ * (0100 1 Rt imm8, t_ldr_lit16) -- at `target`, keeping its register. 0
+ * when the target is out of reach, which leaves the instruction as it
+ * was. The literal pool and a jump table emit one with a zero offset and
+ * patch it once the pool or table is placed. */
+static int t1_patch_pc8(struct code *c, int at, int target, unsigned op,
+                        const char *insn)
+{
+    unsigned h = (unsigned)(c->p[at + 1] << 8 | c->p[at]);
+    long w = t1_pc_words(at, target);
+    if ((h & 0xf800u) != op)
+        t1_refuse(insn, "a patch of a different instruction at offset", at);
+    if (w < 0)
+        return 0;
+    patch_hw(c, at, (h & 0xff00u) | (unsigned)w);
+    return 1;
+}
+
+int t1_patch_adr(struct code *c, int at, int target)
+{
+    return t1_patch_pc8(c, at, target, 0xa000u, "adr");
+}
+
+int t1_patch_ldr_lit(struct code *c, int at, int target)
+{
+    return t1_patch_pc8(c, at, target, 0x4800u, "ldr (literal)");
+}
+
+/* LDMIA/STMIA Rn{!}, {list} (T1): 1100 L Rn list, r0-r7, at least one.
+ * There is no W bit: a store always writes the base back, and a load does
+ * exactly when the base is not in the list (the loaded value wins). A
+ * store of the base itself is defined only when it is the lowest register
+ * in the list. 0 for a list the form cannot hold. */
+int t1_ldm_stm(struct code *c, int rn, unsigned mask, int load)
+{
+    t1_lo(load ? "ldm" : "stm", rn);
+    if (!mask || (mask & ~0xffu))
+        return 0;
+    if (!load && (mask & (1u << rn)) && (mask & ((1u << rn) - 1u)))
+        return 0;
+    hw(c, (load ? 0xc800u : 0xc000u) | ((unsigned)rn << 8) | mask);
+    return 1;
+}
+
+/* PUSH {list} / POP {list} (T1): 1011 010 M list and 1011 110 P list --
+ * r0-r7 plus lr (push) or pc (pop), and nothing else: r8-r11 are saved by
+ * moving them into low registers first. t_push's and t_pop's 16-bit
+ * forms. The offset of the instruction, for t_patch_push, or -1 for a
+ * list the form cannot hold. */
+int t1_push(struct code *c, unsigned mask)
+{
+    if (!mask || (mask & ~(0xffu | (1u << T_LR))))
+        return -1;
+    return t_push(c, mask);
+}
+
+int t1_pop(struct code *c, unsigned mask)
+{
+    if (!mask || (mask & ~(0xffu | (1u << T_PC))))
+        return -1;
+    return t_pop(c, mask);
+}
+
+/* UDF #imm8 (T1): 1101 1110 imm8 -- B<c> with the condition 1110, as SVC
+ * (t_svc) is 1111. Permanently undefined, which is what IR_UD2 means. */
+int t1_udf(struct code *c, int imm8)
+{
+    if (imm8 < 0 || imm8 > 255)
+        return 0;
+    hw(c, 0xde00u | (unsigned)imm8);
+    return 1;
+}

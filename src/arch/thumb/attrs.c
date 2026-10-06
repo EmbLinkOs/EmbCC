@@ -35,7 +35,10 @@ enum {
 /* Read off clang's own output (llvm-readobj -A on an object built for each
  * triple), not from recollection: v8-M Mainline is 17 and its THUMB_ISA_use
  * is 3 where v7-M's is 2. */
-enum { CPU_ARCH_V7 = 10, CPU_ARCH_V7E_M = 13, CPU_ARCH_V8M_MAIN = 17 };
+/* ARMv6-M is written as v6S-M, 12, as clang writes it for thumbv6m: every
+ * Cortex-M0/M0+/M1 has the OS extension (SVC and the process stack). */
+enum { CPU_ARCH_V6S_M = 12, CPU_ARCH_V7 = 10, CPU_ARCH_V7E_M = 13,
+       CPU_ARCH_V8M_MAIN = 17 };
 
 struct buf {
     unsigned char *p;
@@ -89,6 +92,7 @@ unsigned char *arm_build_attributes(size_t *len)
     struct buf attrs = { NULL, 0, 0 };
     int em = target_thumb_em();
     int v8 = target_thumb_arch() >= 8;
+    int v6 = target_thumb_arch() == 6;
 
     /* ---- the File sub-subsection's tag/value pairs ---- */
     buleb(&attrs, Tag_conformance);
@@ -97,9 +101,10 @@ unsigned char *arm_build_attributes(size_t *len)
     /* The ARCHITECTURE's name, not a part number: EmbCC emits the same
      * code for every part of a profile, and naming one it was not told
      * about would be a claim it cannot support. */
-    bstr(&attrs, v8 ? "8-M.MAIN" : em ? "7E-M" : "7-M");
+    bstr(&attrs, v8 ? "8-M.MAIN" : v6 ? "6S-M" : em ? "7E-M" : "7-M");
     btag(&attrs, Tag_CPU_arch, v8 ? CPU_ARCH_V8M_MAIN
-                                  : em ? CPU_ARCH_V7E_M : CPU_ARCH_V7);
+                             : v6 ? CPU_ARCH_V6S_M
+                             : em ? CPU_ARCH_V7E_M : CPU_ARCH_V7);
     btag(&attrs, Tag_CPU_arch_profile, 'M');
     /* No ARM instruction set at all -- a Cortex-M is Thumb from end to
      * end, which is also why the object carries a `$t` mapping symbol
@@ -109,7 +114,7 @@ unsigned char *arm_build_attributes(size_t *len)
      * A linker uses this to refuse an object built for a wider set than the
      * image's other objects, so claiming 3 on a v7-M build would let an
      * object into an image whose parts cannot all run there. */
-    btag(&attrs, Tag_THUMB_ISA_use, v8 ? 3 : 2);
+    btag(&attrs, Tag_THUMB_ISA_use, v8 ? 3 : v6 ? 1 : 2);   /* 1: Thumb-1 */
     /* The FPU, when this object's code uses one: -mfpu= with softfp or
      * hard. FPv4-SP-D16 on v7E-M and FPv5-SP-D16 (FP-ARMv8, D16) on v8-M,
      * clang's values for those units. It used to be absent even when the
@@ -143,7 +148,9 @@ unsigned char *arm_build_attributes(size_t *len)
      * absence. When hardware floating point lands this becomes 1, and
      * the two will then refuse to link, which is the point. */
     btag(&attrs, Tag_ABI_VFP_args, target_thumb_hard_abi() ? 1 : 0);
-    btag(&attrs, Tag_CPU_unaligned_access, 1);
+    /* ARMv6-M faults on an unaligned access, and its code never makes one;
+     * the other levels permit them for LDR, STR and LDRH. */
+    btag(&attrs, Tag_CPU_unaligned_access, v6 ? 0 : 1);
 
     /* ---- wrap it: File sub-subsection, vendor subsection, version ----
      *

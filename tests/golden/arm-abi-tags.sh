@@ -84,11 +84,11 @@ do
                              exit 1; }
 done
 # -mfloat-abi=softfp and =hard with no FPU named, and an FPU the part
-# does not have (FPv5 is the Cortex-M33's). The ARMv6-M and ARMv8-M
-# Baseline cores were accepted and given ARMv7-M code they fault on.
+# does not have (FPv5 is the Cortex-M33's). The ARMv8-M Baseline core was
+# accepted once and given ARMv7-M code it faults on; the ARMv6-M ones are
+# accepted now, and select that level (below).
 for fl in -mfloat-abi=hard -mfloat-abi=softfp -mfpu=fpv5-sp-d16 \
-          -marm -mcpu=cortex-m9 -mcpu=cortex-m0 -mcpu=cortex-m0plus \
-          -mcpu=cortex-m1 -mcpu=cortex-m23
+          -marm -mcpu=cortex-m9 -mcpu=cortex-m23
 do
     if "$EMBCC" --target=thumbv7em-none-eabi $fl -c "$out/t.c" -o /dev/null \
          2> "$out/f.err"; then
@@ -99,6 +99,26 @@ do
 done
 echo "the ARM machine flags are accepted where they match and refused by
 name where they do not"
+
+# The ARMv6-M parts select ARMv6-M on any ARM triple -- the code, the
+# macros and the object's tags -- and an FPU is refused there, since none
+# of them has one.
+for cpu in cortex-m0 cortex-m0plus cortex-m1; do
+    got=$("$EMBCC" --target=thumbv7em-none-eabi -mcpu=$cpu -dumpmachine)
+    [ "$got" = "thumbv6m-none-eabi" ] || {
+        echo "-mcpu=$cpu selects '$got', not thumbv6m-none-eabi"; exit 1; }
+done
+for fl in -mfloat-abi=hard -mfloat-abi=softfp -mfpu=fpv4-sp-d16 \
+          -mfpu=fpv5-d16 "-mfpu=fpv5-d16 -mfloat-abi=hard"; do
+    if "$EMBCC" --target=thumbv6m-none-eabi $fl -c "$out/t.c" -o /dev/null \
+         2> "$out/f.err"; then
+        echo "$fl was accepted for ARMv6-M, which has no FPU"; exit 1
+    fi
+    grep -q 'has no FPU' "$out/f.err" || {
+        echo "$fl's refusal on ARMv6-M does not say why:"; cat "$out/f.err"
+        exit 1; }
+done
+echo "-mcpu=cortex-m0/m0plus/m1 select ARMv6-M, where an FPU is refused"
 
 # ---- OUR linker refuses a mismatch -----------------------------------
 # Against objects from another toolchain, since interoperating with one
