@@ -71,7 +71,9 @@ fi
 for o in -mlongcalls -mno-longcalls -mtext-section-literals -mabi=windowed \
          -mlittle-endian -mserialize-volatile -mno-serialize-volatile \
          -mforce-no-pic -mstrict-align -mtarget-align -mno-target-align \
-         -mauto-litpools -mdynconfig=xtensa_esp32.so; do
+         -mauto-litpools -mdynconfig=xtensa_esp32.so -mextra-l32r-costs=2 \
+         -mno-const16 -mno-sse -mgeneral-regs-only -mno-red-zone \
+         -mcmodel=small; do
     "$EMBCC" --target=$T $o -c "$out/f.c" -o /dev/null 2> "$out/opt.err" || {
         echo "$o was refused:"; cat "$out/opt.err"; exit 1; }
 done
@@ -86,6 +88,9 @@ refopt -mabi=call0 '-mabi=call0 is not supported'
 refopt -mbig-endian 'little-endian'
 refopt -mfix-esp32-psram-cache-issue 'PSRAM workaround'
 refopt -mconst16 'is not supported for xtensa-none-elf'
+refopt -mforce-l32 'is not supported for xtensa-none-elf'
+refopt -mabi=n32 'not an Xtensa ABI'
+refopt -mfoo "unknown argument '-mfoo'"
 refopt -mdynconfig=xtensa_esp32s2.so 'is not supported for xtensa-none-elf'
 refopt -S 'is not supported for xtensa-none-elf yet'
 for o in -funwind-tables -fasynchronous-unwind-tables -fexceptions; do

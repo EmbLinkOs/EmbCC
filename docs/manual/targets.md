@@ -27,6 +27,7 @@ little-endian.
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
+| [Xtensa](#xtensa) | `xtensa-none-elf` | ELF32 | windowed, soft float | `embld` |
 
 | Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
@@ -41,6 +42,7 @@ little-endian.
 | RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
 | MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
+| Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
@@ -111,22 +113,22 @@ Size and alignment in bytes, written `size/alignment`. "x86-64" covers
 `aarch64-elf`, `aarch64-emblink` and `aarch64-linux-gnu`; "Cortex-M"
 covers every `thumb*` triple.
 
-| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed |
-| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 |
-| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 |
-| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 |
-| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 |
-| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 |
-| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 |
-| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 |
-| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 |
-| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` |
-| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — |
-| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 |
-| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
-| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | Xtensa |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | unsigned |
+| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 |
+| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 4/4 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 4/4 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 8/8 binary64 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 2/2 `unsigned short` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | — |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
 
 Notes on the table:
 
@@ -181,7 +183,7 @@ and AArch64.
 Any other `-m` option not listed in a target's section is an error:
 `embcc: error: unknown argument '-mfoo'`. In particular `-m32`, `-m64`
 and `-mmcu=` are not accepted, and `-march=` and `-mabi=` only on MIPS
-(see [MIPS32](#mips32)).
+and (`-mabi=`) Xtensa (see [MIPS32](#mips32) and [Xtensa](#xtensa)).
 
 ## x86-64
 
@@ -995,6 +997,148 @@ exception prints its cause and address.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
 | a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
+
+## Xtensa
+
+Little-endian Xtensa with the windowed-register ABI: the instruction set
+of Espressif's ESP32 (Xtensa LX6) and ESP32-S3 (LX7). Freestanding only.
+The design notes are in [the Xtensa plan](../internals/xtensa-plan.md).
+
+### Triples
+
+| Triple | Accepted aliases | Cores | ABI |
+|---|---|---|---|
+| `xtensa-none-elf` | `xtensa-esp32-elf`, `xtensa-esp32s3-elf`, `xtensa-esp-elf`, `xtensa-elf`, `xtensa` | ESP32 (LX6), ESP32-S3 (LX7) | windowed, soft float |
+
+There is no big-endian target (`xtensaeb-none-elf` is unknown).
+
+### Options
+
+EmbCC emits one configuration: the windowed ABI, little-endian, literal
+pools in `.text` before each function, direct `call8`s, `memw` before every
+volatile access. GCC's Xtensa options that ask for that, or that only tune
+GCC's own placement and costs, are accepted; the rest are refused by name.
+
+| Option | Accepted | Refused with |
+|---|---|---|
+| `-mabi=` | `windowed` | `-mabi=call0 is not supported: EmbCC emits the windowed ABI (call8/entry/retw), which ESP-IDF uses` |
+| `-mlongcalls`, `-mno-longcalls` | both: calls are direct; `embld` refuses one beyond `call8`'s 512 KiB | |
+| `-mtext-section-literals`, `-mauto-litpools` (and `-mno-`) | yes | |
+| `-mserialize-volatile`, `-mno-serialize-volatile` | yes; `memw` is emitted either way | |
+| `-mlittle-endian` | yes | `-mbig-endian is not supported: every target EmbCC emits for is little-endian` |
+| `-mdynconfig=` | `xtensa_esp32.so`, `xtensa_esp32s3.so` | `-mdynconfig=xtensa_esp32s2.so is not supported for xtensa-none-elf: ...` |
+| `-mtarget-align`, `-mforce-no-pic`, `-mstrict-align`, `-mextra-l32r-costs=`, `-mno-const16` | yes | |
+| `-mconst16`, `-mforce-l32`, `-mfix-esp32-psram-cache-issue` | | refused by name |
+
+The code uses the core instruction set with windowed registers, MUL32
+(`mull`), DIV32 (`quos`, `quou`, `rems`, `remu`), MINMAX, SEXT, NSA, ABS,
+ADDX and L32R, and S32C1I for atomics -- what the ESP32, the ESP32-S3 and
+QEMU's de212 core share. It does not use the FPU, MUL32_HIGH, the loop
+instructions, MAC16, the boolean registers or the density option's
+16-bit instructions. The ESP32-S2 has no S32C1I, so an atomic
+read-modify-write is not for it.
+
+### Calling convention: windowed, soft float
+
+- A `call8` rotates the register window by eight: the caller puts the
+  arguments in `a10`-`a15` and the callee finds them in `a2`-`a7`; the
+  caller's `a0`-`a7` survive the call and `a8`-`a15` do not. `a0` holds
+  the return address, `a1` is the stack pointer. A function begins with
+  `entry a1, N` and returns with `retw`.
+- Arguments are counted in words, six in registers. A type aligned beyond
+  4 (`long long`, `double`, a structure containing one) starts at an even
+  word. An argument that does not fit entirely in the words left goes on
+  the stack, and so does every argument after it. Stack arguments are at
+  the caller's `sp`, each at its own alignment (4 to 16).
+- A structure or union of any size is passed by value. A `_Complex` is
+  passed as its two parts, each placed as an argument of its own.
+- `float` and `double` travel exactly as `int` and `long long` do: in the
+  address registers, whether or not the core has an FPU, so EmbCC's code
+  links with GCC's hard-float ESP32 code.
+- A result of up to 16 bytes comes back in `a2`-`a5` (the caller's
+  `a10`-`a13`), a structure in its memory order; a larger one through a
+  hidden pointer passed as the first argument, which the callee returns.
+- `char` and `short` arguments and results are extended by the side that
+  produces them.
+- `va_list` is GCC's 12-byte record, `{ int *__va_stk; int *__va_reg; int
+  __va_ndx; }`, held and passed by value, so a `va_list` passes between
+  EmbCC's and GCC's code.
+- The stack is 16-byte aligned. Every frame is at least 32 bytes, its top
+  32 bytes reserved for the window spill handlers. An unnamed bit-field
+  does not affect a structure's alignment.
+
+`tests/golden/xtensa-abi.sh` checks these rules with EmbCC and Espressif's
+GCC calling each other on the board.
+
+### Code generation
+
+Constants that `movi` (or `movi` and a shift) cannot build, and every
+address, are loaded with `l32r` from a literal pool placed right before
+the function, since `l32r` reaches only backwards; the function's symbol
+is at its entry, after the pool. Calls are `call8` with
+`R_XTENSA_SLOT0_OP`, even within the unit. A comparison's value is a
+branch over a `movi`. A conditional branch that does not reach (±128 bytes,
+±2 KiB against zero) becomes the inverse branch over a `j`, and one beyond
+`j`'s ±128 KiB an `l32r` of the label's address and a `jx`; a function more
+than 256 KiB from its pool reads a literal from an island in the code. A
+frame larger than `entry` can allocate, and every `alloca`, moves `sp` with
+`movsp`. A load or store the compiler cannot prove aligned (a packed
+structure's member) is done a byte at a time, because a misaligned access
+raises an exception. A dense `switch` stays a decision tree.
+
+### Object format
+
+ELF32, little-endian, `EM_XTENSA` (94), RELA relocations, `e_flags`
+`0x300` (`EF_XTENSA_XT_INSN | EF_XTENSA_XT_LIT`), as GNU as writes for the
+ESP32. `embld` links these objects and GCC's, applying `R_XTENSA_32` and
+`R_XTENSA_SLOT0_OP` (on `callN`, `j`, the branches, the loop
+instructions, `beqz.n`/`bnez.n` and `l32r`) and ignoring
+`R_XTENSA_ASM_EXPAND` and the `DIFF` types, which only a relaxing linker
+changes. It does not relax and mints no trampolines: a `call8` beyond 512
+KiB, or an `l32r` whose literal is not before it, is refused (compile GCC's
+side with `-mtext-section-literals`). `-Tstack ADDR` makes it emit an entry
+stub that sets `sp` over a valid bottom frame, sets `PS` (window
+exceptions on, level 0) and `WINDOWSTART`, and calls the entry with
+`callx8`.
+
+### Predefined macros
+
+From Espressif's `xtensa-esp32-elf-gcc` 16.1: `__xtensa__`, `__XTENSA__`,
+`__XTENSA_EL__`, `__XTENSA_WINDOWED_ABI__`, the ESP32's `__XCHAL_*`
+configuration, `__CHAR_UNSIGNED__`, `__WCHAR_TYPE__` `short unsigned int`,
+`__INT32_TYPE__` `long int`. Not `__XTENSA_SOFT_FLOAT__`: the ESP32's GCC
+does not define it, and the float ABI is the same either way.
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is defined, the 1- and 2-byte forms
+are not.
+
+### Runtime
+
+`make rt-embedded` builds `librt.a` and `make libc-embedded` builds
+`libc.a` for `xtensa-none-elf` (soft float, 64-bit multiply and division,
+the C library on its bare-metal backend). `tests/harness/xtensa` runs
+programs on QEMU's `sim` machine with the de212 core (an LX6 with no FPU
+or MMU): the generic loader starts the image at its entry, the harness
+installs the window overflow and underflow handlers and the Alloca
+exception's, output and exit are the sim machine's simcalls, and any other
+exception prints its cause, `EPC1` and `EXCVADDR`.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| an atomic read-modify-write on a 1- or 2-byte object | `the Xtensa backend cannot lower an atomic narrower than four bytes (s32c1i is word-sized, ...) yet (function f) [...]` |
+| an 8-byte atomic read-modify-write | `the Xtensa backend cannot lower an atomic wider than a register yet (function f) [...]` |
+| an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
+| a computed `goto` | `the Xtensa backend cannot lower a computed goto yet (function f) [...]` |
+| `__builtin_frame_address`, `__builtin_return_address` | `the Xtensa backend cannot lower __builtin_frame_address or __builtin_return_address (the windowed ABI keeps a caller's frame in its register window, not in a chain) yet (function f) [...]` |
+| inline assembly, `__attribute__((naked))` | `inline assembly is not supported for xtensa-none-elf yet (EmbCC has no Xtensa assembler vocabulary)` |
+| a file-scope `asm` instruction | `file-scope asm instruction "nop": EmbCC assembles instructions for x86-64 only. ...` |
+| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
+| `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
+| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
+| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for xtensa-none-elf: ...` |
 
 ## AVR
 

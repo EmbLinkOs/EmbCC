@@ -22,6 +22,8 @@ src/arch/
   riscv64/         RV64's macro tables only             -> D-016
   mips/            MIPS32r2, o32 soft float, ILP32      -> docs/internals/mips32-plan.md
   mips32/          its macro tables only (as riscv32/)
+  xtensa/          Xtensa LX6/LX7 (ESP32), windowed ABI, soft float, ILP32
+                                                         -> docs/internals/xtensa-plan.md
 ```
 
 Each architecture directory holds the same kinds of file:

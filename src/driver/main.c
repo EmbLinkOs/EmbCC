@@ -720,6 +720,29 @@ static int find_lib(const char *name, char *out, size_t cap, int *own)
     return 0;
 }
 
+/* Is this one of GCC's Xtensa options (gcc/config/xtensa/xtensa.opt and
+ * elf.opt, and Espressif's), which the Xtensa target answers itself:
+ * accepted when it asks for what EmbCC emits, refused by name otherwise.
+ * The -m spellings every target accepts are not among them. */
+static int xtensa_flag(const char *a)
+{
+    static const char *const names[] = {
+        "-mlongcalls", "-mno-longcalls", "-mtext-section-literals",
+        "-mno-text-section-literals", "-mauto-litpools", "-mno-auto-litpools",
+        "-mserialize-volatile", "-mno-serialize-volatile", "-mtarget-align",
+        "-mno-target-align", "-mforce-no-pic", "-mlittle-endian",
+        "-mbig-endian", "-mstrict-align", "-mno-strict-align", "-mlra",
+        "-mno-lra", "-mconst16", "-mno-const16", "-mforce-l32",
+        "-mno-fix-esp32-psram-cache-issue"
+    };
+    for (unsigned k = 0; k < sizeof names / sizeof names[0]; k++)
+        if (!strcmp(a, names[k]))
+            return 1;
+    return !strncmp(a, "-mabi=", 6) || !strncmp(a, "-mdynconfig=", 12) ||
+           !strncmp(a, "-mextra-l32r-costs=", 19) ||
+           !strncmp(a, "-mfix-esp32-psram-cache-issue", 29);
+}
+
 /* Is this a target the driver links firmware for: one embld links, whose
  * memory map the build supplies (-T, or -Wl,-Ttext...). */
 static int firmware_target(void)
@@ -4566,8 +4589,7 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--dump-predef") == 0 ||
                    strcmp(argv[i], "-dumpmachine") == 0) {
             /* answered after every argument has been applied */
-        } else if (target_get() == TARGET_XTENSA &&
-                   strncmp(argv[i], "-m", 2) == 0) {
+        } else if (target_get() == TARGET_XTENSA && xtensa_flag(argv[i])) {
             /* The flags an ESP-IDF build passes, and the rest of GCC's
              * xtensa.opt. What EmbCC emits is ONE configuration -- the
              * windowed ABI, little-endian, literals in .text before each
@@ -4582,15 +4604,23 @@ int main(int argc, char **argv)
                 "-mno-serialize-volatile", "-mtarget-align",
                 "-mno-target-align", "-mforce-no-pic", "-mabi=windowed",
                 "-mlittle-endian", "-mstrict-align", "-mno-strict-align",
-                "-mlra", "-mno-lra", "-mno-fix-esp32-psram-cache-issue"
+                "-mlra", "-mno-lra", "-mno-fix-esp32-psram-cache-issue",
+                "-mno-const16"
             };
             int good = 0;
             for (unsigned k = 0; k < sizeof ok / sizeof ok[0]; k++)
                 good |= strcmp(argv[i], ok[k]) == 0;
+            if (!strncmp(argv[i], "-mextra-l32r-costs=", 19))
+                good = 1;           /* GCC's cost model alone */
             if (!strncmp(argv[i], "-mdynconfig=", 12) &&
                 (strstr(argv[i], "esp32.so") || strstr(argv[i], "esp32s3.so")))
                 good = 1;
             if (!good) {
+                if (!strncmp(argv[i], "-mabi=", 6) &&
+                    strcmp(argv[i], "-mabi=call0"))
+                    diag_fatal(NULL, 0, "%s is not an Xtensa ABI: EmbCC "
+                               "emits the windowed ABI (-mabi=windowed)",
+                               argv[i]);
                 if (!strcmp(argv[i], "-mabi=call0"))
                     diag_fatal(NULL, 0, "-mabi=call0 is not supported: EmbCC "
                                "emits the windowed ABI (call8/entry/retw), "

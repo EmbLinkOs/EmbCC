@@ -219,6 +219,34 @@ machine flag except `-mabi=windowed`, `-mlongcalls`/`-mno-longcalls`
 
 ## Status
 
-Written before the backend; this section is kept current as it lands.
+- Encoder and referee: 1489 forms decoded by QEMU's de212 disassembler,
+  the literal-free constant sequences executed, 40 range checks
+  (`xtensa-encoding.sh`).
+- Code generator at -O0, -O1, -O2 and -Os, with the shared optimizer and
+  register allocator (a pair pass for 64-bit values, the shorter of the
+  two attempts kept); EmbLD; lib/rt and lib/libc.
+- `xtensa-exec.sh`: the exec corpus on the de212, 197 of 197 programs at
+  every level (14 of them judged against GCC for an LP64 or 32-bit-wchar_t
+  assumption, 17 not applicable). Also run with the pair pass forced on
+  and off and with `EMBCC_RA_MAXPOOL=3` and `=1`: 197 of 197 each.
+- `xtensa-abi.sh`: EmbCC and Espressif's GCC (for the de212, through its
+  -mdynconfig plugin, tools/xtensa-ref-gcc.sh) call each other identically
+  in both directions at -O0 and -O2. A random ABI test of the same kind
+  (1100 seeds: random signatures, structs aligned up to 16, _Complex and
+  variadic arguments) found one bug, a variadic _Complex read as one
+  composite, now fixed; 1400 random gen2 programs agree with the host at
+  -O0, -O2 and -Os.
+- `-g` (frame base a1, a7 under alloca), lib/libc's output on the board
+  (`libc-embedded.sh`), the predefined macros (`predef.sh`), the refusals
+  (`xtensa-refuse.sh`).
 
-- Encoder and referee: done (1486 forms, 40 range checks).
+Known gaps, each refused by name rather than miscompiled: inline and
+file-scope assembly (and so naked functions), `-S`, jump tables (a dense
+switch is a decision tree), unwind tables, computed goto, the frame and
+return address builtins, atomics other than a word, interrupt
+attributes, C++. Code size: no density (16-bit) instructions, no zero-
+overhead loops, no MUL32_HIGH (the ESP32 has it, the de212 does not), and
+the 64-bit operations go through scratch registers; GCC -Os code is
+smaller. A composite argument whose type is 4-aligned is read with l32i,
+so passing a member of a packed structure whose address is misaligned
+would raise an exception rather than read the wrong bytes.
