@@ -178,7 +178,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar embsvd
+all: embcc embread embld embas embls embidx embar embsvd embsim
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -225,6 +225,12 @@ embar: tools/embar/embar.c
 # and standalone, like embar.
 embsvd: tools/embsvd/embsvd.c
 	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
+
+# embsim -- a Cortex-M simulator: runs an image on a model of the board
+# QEMU models, counting instructions and estimating cycles with the
+# table tools/bench uses (tools/bench/cost.h). ISO C and libm.
+embsim: tools/embsim/embsim.c tools/bench/cost.h
+	$(CC) $(CFLAGS) -o $@ tools/embsim/embsim.c -lm
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
@@ -356,7 +362,7 @@ check: embcc libc-x86_64 libcxx-x86_64
 # embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
-test: embcc embread embld embdbg embls embas embar embsvd libc-x86_64 \
+test: embcc embread embld embdbg embls embas embar embsvd embsim libc-x86_64 \
       libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
