@@ -427,6 +427,51 @@ static int is_dim_elem(const char *e)
            !strcmp(e, "dimArrayIndex");
 }
 
+static int is_bit_elem(const char *e)
+{
+    return !strcmp(e, "bitOffset") || !strcmp(e, "bitWidth") ||
+           !strcmp(e, "lsb") || !strcmp(e, "msb") || !strcmp(e, "bitRange");
+}
+
+/* a field's bit position, as far as f says it: 1 the lsb, 2 the width */
+static int field_bits(const struct xnode *f, long *lsb, long *width)
+{
+    int got = 0;
+    unsigned msb, l;
+    if (kidtext(f, "bitRange")) {
+        if (sscanf(kidtext(f, "bitRange"), " [%u:%u]", &msb, &l) != 2)
+            die("line %d: bitRange '%s'", f->line, kidtext(f, "bitRange"));
+        *lsb = (long)l;
+        *width = (long)msb - (long)l + 1;
+        return 3;
+    }
+    if (kidtext(f, "lsb") && kidtext(f, "msb")) {
+        *lsb = (long)svd_num(kidtext(f, "lsb"), "lsb", f->line);
+        *width = (long)svd_num(kidtext(f, "msb"), "msb", f->line) - *lsb + 1;
+        return 3;
+    }
+    if (kidtext(f, "bitOffset")) {
+        *lsb = (long)svd_num(kidtext(f, "bitOffset"), "bitOffset", f->line);
+        got |= 1;
+    }
+    if (kidtext(f, "bitWidth")) {
+        *width = (long)svd_num(kidtext(f, "bitWidth"), "bitWidth", f->line);
+        got |= 2;
+    }
+    return got;
+}
+
+static struct xnode *xleaf(const char *name, long v, int line)
+{
+    struct xnode *n = xalloc(sizeof *n);
+    char b[24];
+    n->name = (char *)name;
+    snprintf(b, sizeof b, "%ld", v);
+    n->text = xdup(b, strlen(b));
+    n->line = line;
+    return n;
+}
+
 static struct xnode *merge(const struct xnode *base, const struct xnode *d)
 {
     struct xnode *n = xalloc(sizeof *n);
@@ -443,16 +488,28 @@ static struct xnode *merge(const struct xnode *base, const struct xnode *d)
      * for it: TimerCtrl1 derivedFrom an array is one register */
     const char *dn = kidtext(d, "name");
     int keepdim = dn && strstr(dn, "%s");
+    /* a field's position is one thing written three ways: a derived
+     * field that moves it keeps the base's width unless it says one */
+    long lsb = 0, width = 1, dl = 0, dw = 1;
+    int bits = !strcmp(d->name, "field") ? field_bits(d, &dl, &dw) : 0;
+    if (bits) {
+        field_bits(base, &lsb, &width);
+        xadd(n, xleaf("bitOffset", bits & 1 ? dl : lsb, d->line));
+        xadd(n, xleaf("bitWidth", bits & 2 ? dw : width, d->line));
+    }
     for (int i = 0; i < base->nkid; i++) {
         struct xnode *k = base->kid[i];
         if (!keepdim && is_dim_elem(k->name))
+            continue;
+        if (bits && is_bit_elem(k->name))
             continue;
         if (strcmp(k->name, "enumeratedValue") && kid(d, k->name))
             continue;
         xadd(n, k);
     }
     for (int i = 0; i < d->nkid; i++)
-        xadd(n, d->kid[i]);
+        if (!bits || !is_bit_elem(d->kid[i]->name))
+            xadd(n, d->kid[i]);
     return n;
 }
 
@@ -2096,12 +2153,15 @@ static void json_field(FILE *f, const struct field *fd)
         const struct enumval *e = &fd->ev[i];
         fprintf(f, "%s{\"name\": ", i ? ", " : "");
         js(f, e->name);
+        /* "care": the bits of the field a #1x0 value fixes */
+        unsigned long long fm = fd->width >= 64 ? ~0ULL
+                              : (1ULL << fd->width) - 1;
         if (e->isdef && !e->care)
             fputs(", \"value\": null", f);
         else
-            fprintf(f, ", \"value\": %llu", e->value);
-        if (e->care && e->care != ~0ULL)
-            fprintf(f, ", \"care\": %llu", e->care);
+            fprintf(f, ", \"value\": %llu", e->value & fm);
+        if (e->care && (e->care & fm) != fm)
+            fprintf(f, ", \"care\": %llu", e->care & fm);
         fprintf(f, ", \"isDefault\": %s, \"usage\": ", jb(e->isdef));
         js(f, e->usage);
         fputs(", \"description\": ", f);
@@ -2212,8 +2272,11 @@ static void write_json(FILE *f, const struct device *d, const char *flash,
             fprintf(f, "], \"address\": %llu, \"offset\": %llu, \"size\": %d, "
                     "\"access\": ", p->base + x->off, x->off, r->size);
             js(f, r->acc);
+            /* a device's 32-bit resetMask, on a 16-bit register */
+            unsigned long long rm = r->size == 64 ? ~0ULL
+                                  : (1ULL << r->size) - 1;
             fprintf(f, ", \"resetValue\": %llu, \"resetMask\": %llu, "
-                    "\"alternate\": ", r->reset, r->rmask);
+                    "\"alternate\": ", r->reset & rm, r->rmask & rm);
             js(f, r->alt);
             fputs(", \"description\": ", f);
             js(f, r->desc);
