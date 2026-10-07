@@ -285,13 +285,13 @@ static int alu_imm_cc(struct code *c, unsigned cc, int op, int rd, int rn,
     }
     if (s)
         return 0;
-    if ((op == T_OP_ADD || op == T_OP_SUB) &&
-        (e = a32_encode_imm(neg)) >= 0) {
+    e = op == T_OP_ADD || op == T_OP_SUB ? a32_encode_imm(neg) : -1;
+    if (e >= 0) {
         dp_imm(c, cc, op == T_OP_ADD ? DP_SUB : DP_ADD, 0, rn, rd, e);
         return 1;
     }
-    if ((op == T_OP_AND || op == T_OP_BIC) &&
-        (e = a32_encode_imm(nv)) >= 0) {
+    e = op == T_OP_AND || op == T_OP_BIC ? a32_encode_imm(nv) : -1;
+    if (e >= 0) {
         dp_imm(c, cc, op == T_OP_AND ? DP_BIC : DP_AND, 0, rn, rd, e);
         return 1;
     }
@@ -577,7 +577,8 @@ void a32_add_sp(struct code *c, int rd, long off)
         addsubw_cc(c, cc, rd, 13, off, 0);
         return;
     }
-    if (off < 0 && (e = a32_encode_imm((unsigned long)-off)) >= 0) {
+    e = off < 0 ? a32_encode_imm((unsigned long)-off) : -1;
+    if (e >= 0) {
         dp_imm(c, cc, DP_SUB, 0, 13, rd, e);
         return;
     }
