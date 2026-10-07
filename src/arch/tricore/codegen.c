@@ -3082,8 +3082,13 @@ void codegen_unit_tricore(struct ir_unit *iu, struct code *text,
     (void)optimize; (void)no_sse;
     g_tc_regalloc = regalloc;
     memset(&st, 0, sizeof st);
+    /* the 16-bit forms wherever one says the same (emit.h), and back off
+     * for whatever encodes after this -- EmbLD's fixed-size entry stub,
+     * in the same process when embcc links */
+    tc_set_short(!getenv("EMBCC_TC_NOSHORT"));
     for (int n = 0; n < iu->nfuncs; n++)
         gen_func_best(&iu->funcs[n], text, &st, want_debug);
+    tc_set_short(0);
     cg_resolve_strsites(iu, st.str, st.nstr);
     *ext = st.ext;   *next = st.next;
     *strs = st.str;  *nstrs = st.nstr;

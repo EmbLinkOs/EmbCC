@@ -84,6 +84,29 @@ void tc_h(struct code *c, unsigned h);
 /* Does `v` fit a sign-extended (`sign`) or zero-extended field of `bits`? */
 int tc_fits(long long v, int bits, int sign);
 
+/* ---- the 16-bit forms ---------------------------------------------------
+ *
+ * The halfword encodings with a register (or a 4-bit constant) in each of
+ * two fields: SRR, SRC, SLR and SSR share one layout (tc_enc16). With
+ * tc_set_short(1) -- which the code generator turns on and back off --
+ * the 32-bit emitters below choose one of these where it says the same
+ * thing: mov, mov.a, mov.d, mov.aa, mov of -8..7, a load or store at
+ * offset 0 (LD.W, LD.BU, LD.H, LD.A, ST.W, ST.B, ST.H, ST.A) and RET.
+ * Off, they emit the 32-bit forms only, which is what the encoding
+ * referee sweeps and what EmbLD's fixed-size entry stub needs. */
+unsigned tc_enc16(int op1, int r1, unsigned r2);
+void tc_set_short(int on);
+void tc_mov16(struct code *c, int da, int db);
+void tc_mov_k4(struct code *c, int da, long long k);
+void tc_mov_a16(struct code *c, int aa, int db);
+void tc_mov_d16(struct code *c, int da, int ab);
+void tc_mov_aa16(struct code *c, int aa, int ab);
+int tc_load16_ok(int size, int sign);
+void tc_load16(struct code *c, int dc, int ab, int size, int sign);
+void tc_store16(struct code *c, int da, int ab, int size);
+void tc_ld_a16(struct code *c, int ac, int ab);
+void tc_st_a16(struct code *c, int aa, int ab);
+
 /* ---- moves and constants ---------------------------------------------- */
 
 void tc_mov(struct code *c, int dc, int db);          /* D[c] = D[b] */

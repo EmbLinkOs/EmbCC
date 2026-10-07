@@ -77,6 +77,17 @@ static void put32(long off, unsigned long w)
         hi_water = off + 4;
 }
 
+static void put16(long off, unsigned h)
+{
+    if (off < 0 || off + 2 > RAM_SIZE || used[off] || used[off + 1])
+        { fprintf(stderr, "tricorecheck: bad 16-bit placement\n"); exit(2); }
+    img[off] = (unsigned char)h;
+    img[off + 1] = (unsigned char)(h >> 8);
+    used[off] = used[off + 1] = 1;
+    if (off + 2 > hi_water)
+        hi_water = off + 2;
+}
+
 static int is_free(long off, long n)
 {
     if (off < 0x1000 || off + n > RAM_SIZE)
@@ -97,6 +108,9 @@ struct test {
     int nwant;
     int optional;           /* a path the walk may not take: a branch's
                              * fall-through or landing */
+    int exact;              /* no operation beyond the wanted ones but the
+                             * translation block's own bookkeeping (a
+                             * post-increment form would add one) */
 };
 static struct test *tests;
 static int ntests, captests;
@@ -167,6 +181,13 @@ static void here(void)
  * with want(). */
 #define T(enc, ...) do { begin_at(RAM_BASE + (unsigned long)pos, __VA_ARGS__); \
                          C.len = 0; enc; put32(pos, one()); pos += 4; } while (0)
+/* ...and a 16-bit one. */
+#define T16(enc, ...) do { begin_at(RAM_BASE + (unsigned long)pos, __VA_ARGS__); \
+                           C.len = 0; enc; \
+                           if (C.len != 2) { fprintf(stderr, "tricorecheck: a " \
+                               "16-bit entry made %d bytes\n", C.len); exit(2); } \
+                           put16(pos, (unsigned)C.p[0] | ((unsigned)C.p[1] << 8)); \
+                           pos += 2; C.len = 0; cur->exact = 1; } while (0)
 /* A setup instruction, not itself a test. */
 #define S(enc) do { enc; here(); } while (0)
 
@@ -743,6 +764,54 @@ static void traps(void)
     }
 }
 
+/* The 16-bit forms, every register in each of their two fields. */
+static void shorts(void)
+{
+    static const struct { int size, sign; const char *ld, *st, *mo; } W[] = {
+        { 4, 0, "ld.w", "st.w", "noat+un+leul" },
+        { 1, 0, "ld.bu", "st.b", "noat+al+ub" },
+        { 2, 1, "ld.h", "st.h", "noat+un+lesw" }
+    };
+    for (int k = 0; k < 32; k++) {
+        int x = k < 16 ? k : 3, y = k < 16 ? (k == 5 ? 6 : 5) : k - 16;
+        if (x == y)
+            y = (y + 1) & 15;
+        T16(tc_mov16(&C, x, y), "mov16 %s, %s", D(x), D(y));
+        want("mov_i32 %s,%s", D(x), D(y));
+        T16(tc_mov_a16(&C, x, y), "mov.a16 %s, %s", A(x), D(y));
+        want("mov_i32 %s,%s", A(x), D(y));
+        T16(tc_mov_d16(&C, x, y), "mov.d16 %s, %s", D(x), A(y));
+        want("mov_i32 %s,%s", D(x), A(y));
+        T16(tc_mov_aa16(&C, x, y), "mov.aa16 %s, %s", A(x), A(y));
+        want("mov_i32 %s,%s", A(x), A(y));
+        for (unsigned w = 0; w < 3; w++) {
+            base_to_ram(y);
+            T16(tc_load16(&C, x, y, W[w].size, W[w].sign), "%s16 %s, [%s]",
+                W[w].ld, D(x), A(y));
+            want("qemu_ld_i32 %s,%s,%s,0", D(x), A(y), W[w].mo);
+            base_to_ram(y);
+            T16(tc_store16(&C, x, y, W[w].size), "%s16 [%s], %s", W[w].st,
+                A(y), D(x));
+            want("qemu_st_i32 %s,%s,%s,0", D(x), A(y),
+                 W[w].size == 1 ? "noat+al+ub" : W[w].size == 2
+                                ? "noat+un+leuw" : "noat+un+leul");
+        }
+        if (x != y) {
+            base_to_ram(y);
+            T16(tc_ld_a16(&C, x, y), "ld.a16 %s, [%s]", A(x), A(y));
+            want("qemu_ld_i32 %s,%s,noat+un+leul,0", A(x), A(y));
+        }
+        base_to_ram(y);
+        T16(tc_st_a16(&C, x, y), "st.a16 [%s], %s", A(y), A(x));
+        want("qemu_st_i32 %s,%s,noat+un+leul,0", A(x), A(y));
+    }
+    for (int r = 0; r < 16; r++)
+        for (long long k = -8; k <= 7; k += (r & 1) ? 15 : 5) {
+            T16(tc_mov_k4(&C, r, k), "mov16 %s, %lld", D(r), k);
+            want("mov_i32 %s,%s", D(r), K(k));
+        }
+}
+
 static const char *jname(int cond)
 {
     static const char *const nm[] = { "jeq", "jne", "jlt", "jlt.u", "jge",
@@ -1018,6 +1087,7 @@ static void build(void)
     branches();
     system_forms();
     atomics();
+    shorts();
     li_checks();
     csfr_checks();
     traps();
@@ -1134,6 +1204,16 @@ static int match(const char *pat, const char *op)
     return match1(pat, (int)strlen(pat), op);
 }
 
+/* What every translation block has besides the instruction itself. */
+static int noise(const char *op)
+{
+    return !strncmp(op, "mov_i32 PC,", 11) || !strncmp(op, "call lookup_tb_ptr", 18) ||
+           !strncmp(op, "goto_ptr", 8) || !strncmp(op, "set_label", 9) ||
+           !strncmp(op, "exit_tb", 7) || !strncmp(op, "goto_tb", 7) ||
+           !strncmp(op, "mb ", 3) || !strncmp(op, "ld_i32 loc0", 11) ||
+           !strncmp(op, "brcond_i32 loc0", 15) || !strncmp(op, "st8_i32", 7);
+}
+
 static int check(const char *path)
 {
     int bad = 0;
@@ -1163,8 +1243,15 @@ static int check(const char *path)
                 goto next;
             }
         for (int w = 0; w < x->nwant; w++) {
-            while (at < b->nops && !match(x->want[w], b->ops[at]))
+            while (at < b->nops && !match(x->want[w], b->ops[at])) {
+                if (x->exact && !noise(b->ops[at])) {
+                    if (bad++ < 20)
+                        printf("  0x%08lx %s: `%s` is more than it says\n",
+                               x->pc, x->text, b->ops[at]);
+                    goto next;
+                }
                 at++;
+            }
             if (at == b->nops) {
                 if (bad++ < 20) {
                     printf("  0x%08lx %s: no `%s` in QEMU's translation:\n",
@@ -1176,6 +1263,13 @@ static int check(const char *path)
             }
             at++;
         }
+        for (; x->exact && at < b->nops; at++)
+            if (!noise(b->ops[at])) {
+                if (bad++ < 20)
+                    printf("  0x%08lx %s: `%s` is more than it says\n",
+                           x->pc, x->text, b->ops[at]);
+                break;
+            }
     next:;
     }
     if (bad) {
@@ -1233,10 +1327,15 @@ static void refuse(int n)
     case 36: tc_swap_w(&C, 1, 2, 512); break;
     case 37: tc_cmpswap_w(&C, 1, 2, 0); break;            /* odd pair */
     case 38: tc_cmpswap_w(&C, 2, 2, -513); break;
+    case 39: tc_mov_k4(&C, 1, 8); break;
+    case 40: tc_mov_k4(&C, 1, -9); break;
+    case 41: tc_load16(&C, 1, 2, 1, 1); break;             /* no LD.B form */
+    case 42: tc_load16(&C, 1, 2, 2, 0); break;             /* no LD.HU form */
+    case 43: tc_mov16(&C, 16, 1); break;
     default: break;
     }
 }
-#define NREFUSE 39
+#define NREFUSE 44
 
 int main(int argc, char **argv)
 {

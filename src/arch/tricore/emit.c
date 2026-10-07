@@ -291,30 +291,139 @@ void tc_h(struct code *c, unsigned h)
     code_u16(c, h & 0xffffu);
 }
 
+/* ---- the 16-bit forms --------------------------------------------------- */
+
+/* The two-operand halfword formats: op1 in bits 7:0, the first register
+ * field (s1/d) in 11:8 and the second (s2, or a 4-bit constant) in 15:12
+ * -- SRR, SRC, SLR and SSR are all this one layout. */
+unsigned tc_enc16(int op1, int r1, unsigned r2)
+{
+    need_field(op1, 0, 255, "op1");
+    if (op1 & 1)
+        internal_error("tricore: a 16-bit op1 0x%02x with bit 0 set", op1);
+    need_reg(r1);
+    need_field(r2, 0, 15, "16-bit second field");
+    return (unsigned)op1 | ((unsigned)r1 << 8) | (r2 << 12);
+}
+
+enum {
+    OPC16_MOV = 0x02,        /* SRR  D[a] = D[b] */
+    OPC16_MOV_K4 = 0x82,     /* SRC  D[a] = sext(const4) */
+    OPC16_MOV_A = 0x60,      /* SRR  A[a] = D[b] */
+    OPC16_MOV_D = 0x80,      /* SRR  D[a] = A[b] */
+    OPC16_MOV_AA = 0x40,     /* SRR  A[a] = A[b] */
+    OPC16_LD_W = 0x54, OPC16_LD_BU = 0x14, OPC16_LD_H = 0x94,
+    OPC16_LD_A = 0xd4,       /* SLR  D[c]/A[c] = *A[b] */
+    OPC16_ST_W = 0x74, OPC16_ST_B = 0x34, OPC16_ST_H = 0xb4,
+    OPC16_ST_A = 0xf4        /* SSR  *A[b] = D[a]/A[a] */
+};
+
+/* Whether the emitters below may choose a 16-bit form: off for the
+ * referee's 32-bit sweep and EmbLD's fixed-size stub, on while the code
+ * generator runs. */
+static int g_short;
+void tc_set_short(int on) { g_short = on; }
+
+void tc_mov16(struct code *c, int da, int db)
+{
+    tc_h(c, tc_enc16(OPC16_MOV, da, (unsigned)db));
+}
+
+void tc_mov_k4(struct code *c, int da, long long k)
+{
+    tc_h(c, tc_enc16(OPC16_MOV_K4, da, field(k, 4, 1, "mov const4")));
+}
+
+void tc_mov_a16(struct code *c, int aa, int db)
+{
+    tc_h(c, tc_enc16(OPC16_MOV_A, aa, (unsigned)db));
+}
+
+void tc_mov_d16(struct code *c, int da, int ab)
+{
+    tc_h(c, tc_enc16(OPC16_MOV_D, da, (unsigned)ab));
+}
+
+void tc_mov_aa16(struct code *c, int aa, int ab)
+{
+    tc_h(c, tc_enc16(OPC16_MOV_AA, aa, (unsigned)ab));
+}
+
+int tc_load16_ok(int size, int sign)
+{
+    return (size == 4) || (size == 1 && !sign) || (size == 2 && sign);
+}
+
+void tc_load16(struct code *c, int dc, int ab, int size, int sign)
+{
+    int op = size == 4 ? OPC16_LD_W : size == 1 ? OPC16_LD_BU : OPC16_LD_H;
+    if (!tc_load16_ok(size, sign))
+        internal_error("tricore: no 16-bit load of %d bytes, %s", size,
+                       sign ? "signed" : "unsigned");
+    tc_h(c, tc_enc16(op, dc, (unsigned)ab));
+}
+
+void tc_store16(struct code *c, int da, int ab, int size)
+{
+    int op = size == 4 ? OPC16_ST_W : size == 1 ? OPC16_ST_B : OPC16_ST_H;
+    need_field(size == 3 ? 0 : size, 1, 4, "16-bit store size");
+    tc_h(c, tc_enc16(op, da, (unsigned)ab));
+}
+
+void tc_ld_a16(struct code *c, int ac, int ab)
+{
+    tc_h(c, tc_enc16(OPC16_LD_A, ac, (unsigned)ab));
+}
+
+void tc_st_a16(struct code *c, int aa, int ab)
+{
+    tc_h(c, tc_enc16(OPC16_ST_A, aa, (unsigned)ab));
+}
+
 /* ---- moves and constants ---------------------------------------------- */
 
 void tc_mov(struct code *c, int dc, int db)
 {
+    if (g_short) {
+        tc_mov16(c, dc, db);
+        return;
+    }
     tc_w(c, tc_enc_rr(OPC_RR_ACCUMULATOR, RR_MOV, dc, 0, db, 0));
 }
 
 void tc_mov_a(struct code *c, int ac, int db)
 {
+    if (g_short) {
+        tc_mov_a16(c, ac, db);
+        return;
+    }
     tc_w(c, tc_enc_rr(OPC_RR_ADDRESS, RR_MOV_A, ac, 0, db, 0));
 }
 
 void tc_mov_d(struct code *c, int dc, int ab)
 {
+    if (g_short) {
+        tc_mov_d16(c, dc, ab);
+        return;
+    }
     tc_w(c, tc_enc_rr(OPC_RR_ADDRESS, RR_MOV_D, dc, 0, ab, 0));
 }
 
 void tc_mov_aa(struct code *c, int ac, int ab)
 {
+    if (g_short) {
+        tc_mov_aa16(c, ac, ab);
+        return;
+    }
     tc_w(c, tc_enc_rr(OPC_RR_ADDRESS, RR_MOV_AA, ac, 0, ab, 0));
 }
 
 void tc_mov_imm(struct code *c, int dc, long long v)
 {
+    if (g_short && v >= -8 && v <= 7) {
+        tc_mov_k4(c, dc, v);
+        return;
+    }
     tc_w(c, tc_enc_rlc(OPC_RLC_MOV, dc, 0, field(v, 16, 1, "mov")));
 }
 
@@ -570,6 +679,10 @@ void tc_seln(struct code *c, int dc, int dcond, int dt, int df)
 void tc_load(struct code *c, int dt, int ab, long long off, int size,
              int sign)
 {
+    if (g_short && off == 0 && tc_load16_ok(size, sign)) {
+        tc_load16(c, dt, ab, size, sign);
+        return;
+    }
     int op = 0;
     switch (size) {
     case 1: op = sign ? OPC_BOL_LD_B : OPC_BOL_LD_BU; break;
@@ -582,6 +695,10 @@ void tc_load(struct code *c, int dt, int ab, long long off, int size,
 
 void tc_store(struct code *c, int dt, int ab, long long off, int size)
 {
+    if (g_short && off == 0 && (size == 1 || size == 2 || size == 4)) {
+        tc_store16(c, dt, ab, size);
+        return;
+    }
     int op = 0;
     switch (size) {
     case 1: op = OPC_BOL_ST_B; break;
@@ -594,11 +711,19 @@ void tc_store(struct code *c, int dt, int ab, long long off, int size)
 
 void tc_ld_a(struct code *c, int at, int ab, long long off)
 {
+    if (g_short && off == 0) {
+        tc_ld_a16(c, at, ab);
+        return;
+    }
     tc_w(c, tc_enc_bol(OPC_BOL_LD_A, at, ab, field(off, 16, 1, "ld.a offset")));
 }
 
 void tc_st_a(struct code *c, int at, int ab, long long off)
 {
+    if (g_short && off == 0) {
+        tc_st_a16(c, at, ab);
+        return;
+    }
     tc_w(c, tc_enc_bol(OPC_BOL_ST_A, at, ab, field(off, 16, 1, "st.a offset")));
 }
 
@@ -753,7 +878,14 @@ void tc_calli(struct code *c, int aa)
     tc_w(c, tc_enc_rr(OPC_RR_IDIRECT, RR_CALLI, 0, aa, 0, 0));
 }
 
-void tc_ret(struct code *c)   { tc_w(c, tc_enc_sys(OPC_SYS, SYS_RET, 0)); }
+void tc_ret(struct code *c)
+{
+    if (g_short) {
+        tc_ret16(c);
+        return;
+    }
+    tc_w(c, tc_enc_sys(OPC_SYS, SYS_RET, 0));
+}
 void tc_ret16(struct code *c) { tc_h(c, 0x9000); }
 
 /* ---- the system ------------------------------------------------------- */
