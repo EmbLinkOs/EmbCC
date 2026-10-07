@@ -469,3 +469,16 @@ void ir_print_unit(struct outbuf *b, const struct ir_unit *u)
         print_func(b, u, &u->funcs[i]);
     }
 }
+
+struct ir_arg *ir_args_new(int n)
+{
+    return xcalloc((size_t)(n > 0 ? n : 1), sizeof(struct ir_arg));
+}
+
+struct ir_arg *ir_args_copy(const struct ir_arg *a, int n)
+{
+    struct ir_arg *c = ir_args_new(n);
+    if (a && n > 0)
+        memcpy(c, a, (size_t)n * sizeof *c);
+    return c;
+}

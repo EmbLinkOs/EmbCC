@@ -7,6 +7,7 @@
  */
 #include "opt.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -12146,6 +12147,11 @@ static void inline_call(struct ir_func *fn, int ci, struct ir_func *cf)
             memcpy(ca->out, in.asm_ir->out, (size_t)ca->nout * sizeof *ca->out);
             in.asm_ir = ca;
         }
+        /* ...and so does a call's argument array, which a rename of the
+         * copy would otherwise rewrite in the callee too */
+        if (in.op == IR_CALL && in.argv) {
+            in.argv = ir_args_copy(in.argv, in.nargs);
+        }
         remap_ins(&in, &cm);
         if (in.op == IR_SWITCH)          /* its table, renumbered like its default */
             in.jt = ir_jt_clone(fn, cf, in.jt, L);
@@ -13176,6 +13182,15 @@ static void vrfy_read_cb(int *p, void *ctx)
         "internal: %s reads temp %%%d with no definition (after %s) — an optimizer "
         "pass dropped a value that is still used", v->fn->name, r, v->tag);
 }
+/* pointer order, for the duplicate test only: nothing printed or emitted
+ * depends on it */
+static int cmp_argv_ptr(const void *a, const void *b)
+{
+    uintptr_t x = (uintptr_t)*(const struct ir_arg *const *)a;
+    uintptr_t y = (uintptr_t)*(const struct ir_arg *const *)b;
+    return x < y ? -1 : x > y;
+}
+
 static void verify_func(struct ir_func *fn, const char *tag)
 {
     struct defs d;
@@ -13208,6 +13223,30 @@ static void verify_func(struct ir_func *fn, const char *tag)
             }
         }
         free(placed);
+    }
+    /* (4) every call's argument array is its own (ir.h, argv): two calls
+     * sharing one -- an instruction duplicated without ir_args_copy --
+     * means renaming either renames both. */
+    {
+        int nc = 0;
+        for (int n = 0; n < fn->nins; n++)
+            if (fn->ins[n].op == IR_CALL && fn->ins[n].argv)
+                nc++;
+        if (nc > 1) {
+            const struct ir_arg **pv = xmalloc((size_t)nc * sizeof *pv);
+            nc = 0;
+            for (int n = 0; n < fn->nins; n++)
+                if (fn->ins[n].op == IR_CALL && fn->ins[n].argv)
+                    pv[nc++] = fn->ins[n].argv;
+            qsort(pv, (size_t)nc, sizeof *pv, cmp_argv_ptr);
+            for (int k = 1; k < nc; k++)
+                if (pv[k] == pv[k - 1])
+                    diag_fatal(fn->file, 0, "internal: %s has two calls "
+                               "sharing one argument array (after %s) -- a "
+                               "pass copied a call without ir_args_copy",
+                               fn->name, tag);
+            free(pv);
+        }
     }
     if (fn->var_scope_lo)
         for (int i = 0; i < fn->nvars; i++) {
