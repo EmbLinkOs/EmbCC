@@ -60,7 +60,8 @@ int ty_generic_same(const struct type *a, const struct type *b)
 {
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
         a->is_llong != b->is_llong || a->is_volatile != b->is_volatile ||
-        a->is_atomic != b->is_atomic || a->is_const != b->is_const)
+        a->is_atomic != b->is_atomic || a->is_const != b->is_const ||
+        a->is_flash != b->is_flash)
         return 0;
     if (a->kind == TY_CHAR && ty_is_plain_char(a) != ty_is_plain_char(b))
         return 0;
@@ -169,9 +170,26 @@ struct type *ty_const(struct type *t)
 
 struct type *ty_unqual(struct type *t)
 {
-    if (t && t->canon && (t->is_const || t->is_volatile || t->is_atomic))
+    if (t && t->canon &&
+        (t->is_const || t->is_volatile || t->is_atomic || t->is_flash))
         return t->canon;
     return t;
+}
+
+/* AVR's `__flash`: a copy in program memory. An array of it is an array
+ * of __flash elements, as with const, so that t[i] reads flash. */
+struct type *ty_flash(struct type *t)
+{
+    if (!t || t->is_flash)
+        return t;
+    struct type *c = xcalloc(1, sizeof *c);
+    *c = *t;
+    c->is_flash = 1;
+    c->canon = t->canon ? t->canon : t;
+    note_qcopy(c);
+    if (t->kind == TY_ARRAY)
+        c->pointee = ty_flash(t->pointee);
+    return c;
 }
 
 /* `_Atomic T`: volatile as well (never merged or removed), and every
@@ -472,6 +490,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
         q->is_const = keep.is_const;
         q->is_volatile = keep.is_volatile;
         q->is_atomic = keep.is_atomic;
+        q->is_flash = keep.is_flash;
         q->canon = keep.canon;
         q->qnext = keep.qnext;
         q->qcopies = NULL;
@@ -830,7 +849,8 @@ const char *ty_name(const struct type *t)
         break;
     default: base = "?"; break;
     }
-    int n = snprintf(buf, bufsz, "%s%s", t->is_const ? "const " : "", base);
+    int n = snprintf(buf, bufsz, "%s%s%s", t->is_const ? "const " : "",
+                     t->is_flash ? "__flash " : "", base);
     if (stars) {
         buf[n++] = ' ';
         /* innermost pointer first: `const char *const *` */

@@ -58,11 +58,12 @@
  *   Aggregates by value, varargs, atomics, inline asm, VLAs, computed
  *   goto, exceptions and vectors. Each is ABI or runtime work of its own.
  *
- *   __flash / PROGMEM. Literals and `const` data go to RAM, initialised
- *   from flash by the startup code, which is what avr-gcc does by
- *   default and why `const char *s = "hi"` works there unannotated.
- *   Keeping them in flash is a RAM-saving optimisation on top, and an
- *   address-space qualifier the front end does not have.
+ *   PROGMEM. Literals and `const` data go to RAM, initialised from flash
+ *   by the startup code, which is what avr-gcc does by default and why
+ *   `const char *s = "hi"` works there unannotated. `__flash` keeps an
+ *   object in flash instead: its loads are IR_LOADs marked `flash`, read
+ *   here with LPM (gen_ins, wide_ins). avr-libc's PROGMEM attribute is
+ *   not one EmbCC takes.
  *
  * What it DOES do is the scalar integer language at one, two and four
  * bytes: arithmetic, bitwise operations, shifts by a constant or a
@@ -1483,6 +1484,20 @@ static int z_holds(struct a_fn *F, int v)
     }
     F->zscan = p;
     return 1;
+}
+
+/* Z += off before an LPM, which has no displaced form. */
+static void z_add(struct code *t, long off)
+{
+    if (!off)
+        return;
+    if (off > 0 && off < 64) {
+        avr_adiw(t, AVR_Z, (int)off);
+        return;
+    }
+    long neg = -off;
+    avr_ri(t, AVR_SUBI, AVR_Z, (int)(neg & 0xff));
+    avr_ri(t, AVR_SBCI, AVR_Z + 1, (int)((neg >> 8) & 0xff));
 }
 
 static void vld(struct a_fn *F, int r, int v, long off, int n)
@@ -2953,6 +2968,40 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_LOAD: {
             int from = i->size < 1 ? 1 : i->size;
             if (from > n) from = n;
+            if (i->flash) {
+                /* __flash, eight bytes: LPM through Z, walking -- straight
+                 * into the home when there is one, as the RAM path does:
+                 * A's first byte is the home's first byte too, so a byte
+                 * staged in A was overwritten by the next. */
+                vld(F, AVR_Z, i->a, 0, 2);
+                z_add(t, i->memoff);
+                if (in_pair(F, i->dst)) {
+                    int d = F->loc[i->dst], fill;
+                    for (int k = 0; k < from; k++)
+                        avr_lpm(t, d + k, 1);
+                    F->zv = -1;
+                    fill = w_fill(F, d + from - 1, i->sign);
+                    fill_run(t, d + from, n - from, fill);
+                    return;
+                }
+                for (int k = 0; k < from; k++) {
+                    avr_lpm(t, RA, 1);
+                    vst_cc(F, i->dst, k, RA, 1);
+                }
+                F->zv = -1;
+                if (from < n) {
+                    if (i->sign) {
+                        vld(F, RA, i->dst, from - 1, 1);
+                        avr_rr(t, AVR_ADD, RA, RA);
+                        avr_rr(t, AVR_SBC, RA, RA);
+                    } else {
+                        avr_rr(t, AVR_MOV, RA, R_ZERO);
+                    }
+                    for (int k = from; k < n; k++)
+                        vst_cc(F, i->dst, k, RA, 1);
+                }
+                return;
+            }
             if (in_pair(F, i->dst)) {
                 /* Into the home, through Z: nothing between reaches a
                  * slot, so nothing walks with Z. */
@@ -3801,6 +3850,19 @@ static void gen_ins(struct a_fn *F, int n)
                 return;
             int d = dst_reg(F, i, nb);       /* straight into its home */
             vld(F, AVR_Z, i->a, 0, 2);
+            if (i->flash) {
+                /* __flash: program memory, which LPM alone reads, through
+                 * Z, and with no displaced form -- so Z walks, and holds
+                 * this pointer no longer. */
+                z_add(F->t, i->memoff);
+                for (int k = 0; k < ld; k++)
+                    avr_lpm(t, d + k, 1);
+                F->zv = -1;
+                if (nb > i->size)
+                    extend(F, d, i->size, i->sign, nb);
+                dst_done(F, i, d);
+                return;
+            }
             /* Displaced off Z, low byte first -- the order a 16-bit I/O
              * register's latch needs for a read -- at the field offset
              * ra_fold_memoff folded in, and without moving Z, so the next

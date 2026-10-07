@@ -1181,32 +1181,45 @@ can be interrupted. Interrupts are enabled globally with
 
 ### Data in program memory
 
-EmbCC has no address-space qualifiers. `__flash` is predefined, as
-`__attribute__((__address_space__(1)))`, but the attribute is ignored
-with a warning, and so is `__attribute__((progmem))`:
-
-```text
-embcc: flash3.c:1: warning: attribute 'progmem' is not one EmbCC knows, and is ignored [-Wattributes]
-```
-
-Such data goes to `.rodata` and is copied to SRAM like any other `const`
-data. To keep a table in flash only, place it in a `.text` section and
-read it with `lpm` through inline assembly:
+`__flash` keeps `const` data in program memory instead of copying it to
+SRAM at start-up, as avr-gcc's does. On a part with 2 KiB of SRAM, every
+table that stays in flash is RAM the program gets back.
 
 ```c
-__attribute__((section(".text"))) const char banner[] = "from flash\n";
+static const __flash char banner[] = "ready\n";
+static const __flash unsigned char crc8_table[256] = { 0x00, 0x07, /* ... */ };
 
-static unsigned char flash_byte(const char *p)
+static void puts_P(const __flash char *s)
 {
-    unsigned char r;
-    __asm__ volatile("lpm %0, Z" : "=r"(r) : "z"(p));
-    return r;
+    char c;
+    while ((c = *s++) != 0)
+        uart_putc(c);
 }
 ```
 
-Never dereference such an object directly: a C access compiles to `ld`,
-which reads SRAM at the same address. A section with any other name that
-is not `.text` or `.text.*` is placed in RAM.
+A read through a `__flash` lvalue compiles to `lpm` through Z. That
+includes an element of a `__flash` array, a member of a `__flash` struct,
+and `*p` for a `const __flash T *p`. The object goes to `.progmem.data`.
+EmbLD places that in flash with the code, and so do avr-libc's linker
+scripts (`*(.progmem*)` in `.text`).
+
+The rules are GCC's, and each is refused by name:
+
+- A `__flash` object must be `const` and have static storage: at file
+  scope, or `static` in a function. Program memory is written when the
+  part is flashed, not by the program.
+- A store through a `__flash` lvalue is refused.
+- A `__flash` pointer and a generic pointer are in different address
+  spaces. Converting one to the other needs a cast: a generic pointer to
+  a flash address would read SRAM at the same number.
+- A whole `__flash` struct cannot be copied yet (`struct pin p =
+  pins[i];`). Read its members instead.
+
+`__flash` may stand wherever `const` can, before or after the type, and
+after a `*` for a pointer that is itself in flash
+(`const __flash char *const __flash names[]`). `__memx` and avr-libc's
+`PROGMEM` attribute are not supported. `__attribute__((progmem))` is
+ignored with a `-Wattributes` warning, and the data goes to SRAM.
 
 ### The calling convention
 

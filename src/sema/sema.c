@@ -424,6 +424,35 @@ static void need_arith(struct unit *u, struct expr *e, const char *what)
  * through their 64-bit form. */
 static struct expr *cx_cast(struct expr *x, struct type *to);
 
+/* Is an object of this type in AVR's program memory: __flash itself, or
+ * an array of __flash elements. */
+static int ty_in_flash(const struct type *t)
+{
+    while (t && t->kind == TY_ARRAY && !t->is_flash)
+        t = t->pointee;
+    return t && t->is_flash;
+}
+
+/* A __flash object is in .progmem.data, which the linker keeps in flash
+ * with the code (avr-libc's scripts: `*(.progmem*)` in .text), and is
+ * read with LPM. Flash is written when the part is programmed, never by
+ * the program, so the object must be const, as GCC requires; and one
+ * per thread is not something flash can hold. */
+static void flash_object(struct unit *u, struct global *g)
+{
+    if (!ty_in_flash(g->ty))
+        return;
+    if (!g->is_const && !g->is_extern)
+        sema_error_line(u, g->line, "'%s' is __flash and must be const: "
+                        "program memory is written when the part is "
+                        "flashed, not by the program", g->name);
+    if (g->is_tls)
+        sema_error_line(u, g->line, "'%s' cannot be both __flash and "
+                        "thread-local", g->name);
+    if (!g->section)
+        g->section = ".progmem.data";
+}
+
 static struct expr *convert_assign(struct unit *u, struct expr *rhs,
                                    struct type *to, const char *ctx)
 {
@@ -432,6 +461,12 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
         (ty_is_complex(rhs->ty) && (ty_is_arith(to) || to->kind == TY_BOOL)))
         return cx_cast(rhs, to);
     if (to->kind == TY_STRUCT || rhs->ty->kind == TY_STRUCT) {
+        /* a struct is copied as its bytes, by a copy that reads RAM;
+         * from program memory that would be the wrong bytes */
+        if (rhs->ty->is_flash)
+            sema_error_id(u, rhs->line, rhs->col, "E0003",
+                          "%s: copying a whole __flash %s is not supported "
+                          "yet; read its members", ctx, ty_name(rhs->ty));
         if (!ty_equal(to, rhs->ty))
             sema_error_id(u, rhs->line, rhs->col, "E0003",
                           "%s: cannot convert %s to %s",
@@ -446,6 +481,16 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
     if (ty_is_arith(to) && ty_is_arith(rhs->ty))
         return mk_cast(rhs, to);
     if (to->kind == TY_PTR) {
+        /* AVR: a __flash pointer is a program-memory address, which a
+         * generic pointer's loads would read from RAM -- the bytes at the
+         * same number in the other address space. GCC makes it an error
+         * too; a cast says the program means it. */
+        if (rhs->ty->kind == TY_PTR && !is_null_const(rhs) &&
+            rhs->ty->pointee->is_flash != to->pointee->is_flash)
+            sema_error_id(u, rhs->line, rhs->col, "E0003",
+                          "%s: cannot convert %s to %s: __flash and generic "
+                          "pointers are in different address spaces",
+                          ctx, ty_name(rhs->ty), ty_name(to));
         /* `char *s = some_const_char_ptr;` drops the pointee's const, and
          * a store through s then writes a read-only object: GCC warns
          * (-Wdiscarded-qualifiers, on by default), and so does this. */
@@ -513,6 +558,12 @@ static void need_modifiable(struct unit *u, const struct expr *e,
                             int line, int col, const char *what)
 {
     const struct type *t = e->undecayed ? e->undecayed : e->ty;
+    /* AVR program memory: a store would be a data-space write to the
+     * same number, which is some other object in RAM */
+    if (t && t->is_flash)
+        sema_error_at(u, line, col, "%s of a __flash location: program "
+                      "memory is written when the part is flashed, not by "
+                      "the program", what);
     if (!t || !(t->is_const || has_const_member(t)))
         return;
     const char *nm = e->kind == EXPR_VAR ? e->name
@@ -2026,6 +2077,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* and of a const one const: `cs.a = 1` assigns a const object */
         if (base->is_const && !e->ty->is_const)
             e->ty = ty_const(e->ty);
+        /* and of a __flash one in flash: its bytes are read with LPM */
+        if (base->is_flash && !e->ty->is_flash)
+            e->ty = ty_flash(e->ty);
         if (e->ty->kind == TY_ARRAY) {
             e->undecayed = e->ty;
             e->ty = ty_ptr(e->ty->pointee);
@@ -4586,6 +4640,13 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 vla_prepare(u, f, sc, s->dty);   /* its size slots */
                 break;
             }
+            /* an automatic object lives on the stack, in RAM; only one
+             * with static storage can be in program memory */
+            if (!s->is_static && !s->is_extern &&
+                s->dty && s->dty->kind != TY_FUNC && ty_in_flash(s->dty))
+                sema_error_line(u, s->line, "'%s' is __flash and must be "
+                                "static: an automatic object is on the stack, "
+                                "in RAM", s->name);
             if (s->is_extern) {
                 /* block-scope extern: no storage here, external linkage. Register
                  * the unit global/function (safe now -- parsing is done, so the
@@ -4791,6 +4852,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->ty = s->dty;
                 g->is_static = 1;
                 g->is_const = s->obj_const;   /* a lookup table: .rodata */
+                flash_object(u, g);
                 /* `static __thread` inside a function is still one
                  * object per thread -- the scope decides who can NAME
                  * it, not how many there are. */
@@ -5400,6 +5462,7 @@ static void merge_globals(struct unit *u)
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed)
             continue;
+        flash_object(u, g);
         struct global *canon = find_global(u, g->name);
         if (find_func(u, g->name))
             sema_error_line(u, g->line,

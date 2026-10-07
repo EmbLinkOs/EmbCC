@@ -71,6 +71,7 @@ struct parser {
      * The type carries const too (ty_const); this says whether a
      * declared OBJECT is read-only, which decides where it is placed. */
     int spec_const, q_top;
+    int lead_flash;     /* a __flash before the specifiers, for parse_type_spec */
     /* `#pragma pack`: the maximum member alignment a struct defined now
      * gets (0: none), and the values `push` saved */
     int pack_cur, npack;
@@ -303,11 +304,64 @@ static int tok_is_type_start(enum tok_kind k)
 #define Q_VOL    1
 #define Q_CONST  2
 #define Q_ATOMIC 4
+#define Q_FLASH  8
+
+static int attr_is(const char *n, const char *base);
+
+/* AVR's `__flash`, which this target's predefined macro spells as clang
+ * does, `__attribute__((__address_space__(1)))`: a qualifier, wherever
+ * const may stand. Consumes it and returns Q_FLASH when the attribute
+ * here is exactly that; leaves any other attribute where it is. Address
+ * space 0 is the generic one; any other number is refused by name. */
+static int addr_space_qual(struct parser *ps)
+{
+    if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
+        return 0;
+    struct lexer save = ps->lx;
+    advance(ps);
+    if (cur(ps)->kind == TOK_LPAREN) {
+        advance(ps);
+        if (cur(ps)->kind == TOK_LPAREN) {
+            advance(ps);
+            if (cur(ps)->kind == TOK_IDENT &&
+                attr_is(cur(ps)->text, "address_space")) {
+                int line = cur(ps)->line;
+                advance(ps);
+                expect(ps, TOK_LPAREN, "'(' after address_space");
+                if (cur(ps)->kind != TOK_NUM)
+                    parse_error_line(ps, line, "address_space takes a number");
+                long n = cur(ps)->num;
+                advance(ps);
+                expect(ps, TOK_RPAREN, "')' after the address space");
+                expect(ps, TOK_RPAREN, "')' closing __attribute__");
+                expect(ps, TOK_RPAREN, "')' closing __attribute__");
+                if (n == 0)
+                    return 0;
+                if (n != 1 || target_get() != TARGET_AVR)
+                    parse_error_line(ps, line, "address space %ld is not "
+                                     "supported for %s: EmbCC has AVR's "
+                                     "__flash, address space 1, alone",
+                                     n, target_triple_now());
+                return Q_FLASH;
+            }
+        }
+    }
+    ps->lx = save;
+    return 0;
+}
+
 static int skip_quals(struct parser *ps)
 {
     int vol = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
+        if (k == TOK_KW_ATTRIBUTE) {
+            int q = addr_space_qual(ps);
+            if (!q)
+                break;
+            vol |= q;
+            continue;
+        }
         if (k == TOK_KW_CONST) { vol |= Q_CONST; advance(ps); continue; }
         if (k == TOK_KW_RESTRICT) { advance(ps); continue; }
         if (k == TOK_KW_VOLATILE) { vol |= Q_VOL; advance(ps); continue; }
@@ -332,6 +386,18 @@ static int at_type_start(struct parser *ps)
 {
     if (tok_is_type_start(cur(ps)->kind))
         return 1;
+    /* a type name may begin with __flash: `(const __flash char *)p` is
+     * spelled `(__flash const char *)p` too. Looked at, not taken. */
+    if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+        struct lexer save = ps->lx;
+        int q = addr_space_qual(ps);
+        int type = q && (tok_is_type_start(cur(ps)->kind) ||
+                         (cur(ps)->kind == TOK_IDENT &&
+                          find_typedef(ps, cur(ps)->text) != NULL));
+        ps->lx = save;
+        if (type)
+            return 1;
+    }
     return cur(ps)->kind == TOK_IDENT &&
            (find_typedef(ps, cur(ps)->text) != NULL ||
             /* C23 `auto`, which begins a declaration although it names
@@ -1128,6 +1194,8 @@ static struct type *parse_type_name(struct parser *ps, struct type *base)
  * and only on the first parameter. */
 static int param_sret_attr(struct parser *ps, int index, int *unused)
 {
+    while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
+        ps->lead_flash = 1;            /* `__flash char *p` */
     if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
         return 0;
     struct token *at = cur(ps);
@@ -1186,6 +1254,8 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
              * The last was a syntax error, and `unused` was dropped from
              * all three, so -Wunused-parameter still fired. */
             ps->stars_unused = 0;
+            while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
+                ps->lead_flash = 1;    /* `__flash char *p` */
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
@@ -1381,12 +1451,24 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
 static struct type *parse_type_spec(struct parser *ps, int allow_body)
 {
     int q = 0;
-    struct type *t = parse_type_spec_inner(ps, allow_body, &q);
+    /* a __flash written before the storage class (`__flash static
+     * const char t[]`), where the declaration's own attribute parse met
+     * it: this declaration's, so taken before a struct body's members
+     * can parse a type of their own */
+    if (ps->lead_flash) {
+        ps->lead_flash = 0;
+        q |= Q_FLASH;
+    }
+    int q2 = 0;
+    struct type *t = parse_type_spec_inner(ps, allow_body, &q2);
+    q |= q2;
     /* set AFTER the inner parse, which may hold types of its own (a
      * struct body, typeof): these are this declaration's specifiers */
     ps->spec_const = ps->q_top = (q & Q_CONST) != 0;
     if (t && (q & Q_CONST))
         t = ty_const(t);      /* so does const: _Generic and sema see it */
+    if (t && (q & Q_FLASH))
+        t = ty_flash(t);      /* program memory: every read is an LPM */
     if (t && (q & Q_ATOMIC))
         return ty_atomic(t);
     return (t && (q & Q_VOL)) ? ty_volatile(t) : t;   /* volatile reaches the type */
@@ -1544,6 +1626,13 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             advance(ps); continue;
         }
         else if (k == TOK_KW_ALIGNAS) { consume_alignas(ps); continue; }
+        else if (k == TOK_KW_ATTRIBUTE) {   /* __flash after a type spec */
+            int q = addr_space_qual(ps);
+            if (!q)
+                break;
+            *vol |= q;
+            continue;
+        }
         else if (k == TOK_KW_ATOMIC) {   /* qualifier form after a type spec */
             struct lexer save = ps->lx;
             advance(ps);
@@ -1699,6 +1788,8 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * every use. That volatile was dropped, so a loop polling a
          * pointer an interrupt handler advances read it once. */
         int q = skip_quals(ps);
+        if (q & Q_FLASH)
+            t = ty_flash(t);
         if (q & Q_ATOMIC)
             t = ty_atomic(t);
         else if (q & Q_VOL)
@@ -3977,6 +4068,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
      * failed with "expected a statement". The attributes are merged
      * with any trailing ones at the declarator below. */
     struct attrs lead = { 0 };
+    while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps)) {
+        ps->lead_flash = 1;        /* `__flash static const char t[]` */
+        t = cur(ps);
+    }
     if (at_attribute(ps)) {
         parse_attributes(ps, &lead);
         t = cur(ps);
@@ -4835,6 +4930,8 @@ static void parse_top(struct parser *ps, struct unit *u,
              * legal and mean what they say. */
             is_tls = 1;
             advance(ps);
+        } else if (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps)) {
+            ps->lead_flash = 1;    /* `__flash const char t[]` */
         } else if (at_attribute(ps)) {
             parse_attributes(ps, &at); /* leading __attribute__((weak)) etc. */
         } else if (cur(ps)->kind == TOK_KW_ALIGNAS) {
@@ -5141,6 +5238,8 @@ static void parse_top(struct parser *ps, struct unit *u,
             /* Attributes before the type, between it and the name, and
              * after the name, as in parse_fn_params_named. */
             ps->stars_unused = 0;
+            while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
+                ps->lead_flash = 1;    /* `__flash char *p` */
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);

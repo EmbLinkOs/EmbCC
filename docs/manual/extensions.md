@@ -710,20 +710,14 @@ The target of `alias` must be defined in the same file.
 
 ### AVR program memory
 
-EmbCC has no address-space qualifiers. On AVR, `__flash` is predefined
-as `__attribute__((__address_space__(1)))`, and that attribute is not
-one EmbCC knows, so it is ignored with a warning:
-
-```text
-embcc: fl.c:1: warning: attribute '__address_space__' is not one EmbCC knows, and is ignored [-Wattributes]
-```
-
-The object is placed with ordinary data and copied to SRAM at startup.
-`__flash` written after `const` (`const __flash char s[]`) or in a
-parameter's type is a syntax error (`expected a type before
-'__attribute__'`). `__memx` is not defined. `__attribute__((progmem))`
-is ignored with the same warning. To keep data in flash and read it,
-see [Data in program memory](embedded.md#data-in-program-memory).
+On AVR, `__flash` is GCC's address space 1: `const` data kept in
+program memory and read with `lpm`. It is predefined as clang defines
+it, `__attribute__((__address_space__(1)))`, and EmbCC takes that
+attribute as a qualifier wherever `const` may stand. See
+[Data in program memory](embedded.md#data-in-program-memory) for the
+rules. Another address space, or address space 1 on another target, is
+refused by name. `__memx` is not defined. `__attribute__((progmem))` is
+ignored with a `-Wattributes` warning.
 
 The predefined macros `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`,
 `__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and

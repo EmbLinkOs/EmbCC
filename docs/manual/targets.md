@@ -1883,16 +1883,14 @@ From `clang --target=avr -mmcu=atmega328p`: `__AVR__`, `__AVR`, `AVR`,
 `__AVR_2_BYTE_PC__`, `__SIZEOF_INT__` (2), `__SIZEOF_POINTER__` (2),
 `__SIZEOF_DOUBLE__` (4).
 
-The table also defines `__flash` (as
-`__attribute__((__address_space__(1)))`) and `__BUILTIN_AVR_CLI`,
-`__BUILTIN_AVR_SEI`, `__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`,
-`__BUILTIN_AVR_SWAP` and `__BUILTIN_AVR_WDR`, but EmbCC implements
-neither. `__flash` at the start of a declaration
-(`__flash const char t[]`) is ignored with a `-Wattributes` warning, and
-the data goes to RAM like any other; after another specifier
-(`const __flash char t[]`) it fails with `expected a type before
-'__attribute__'`. The `__builtin_avr_*` functions are undeclared. Use
-inline assembly (`cli`, `sei`, `sleep`, `wdr`, `swap`) instead.
+The table also defines `__flash`, as
+`__attribute__((__address_space__(1)))`, which EmbCC implements: `const`
+data kept in program memory and read with `lpm` (see
+[Data in program memory](embedded.md#data-in-program-memory)). It also
+defines `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`, `__BUILTIN_AVR_NOP`,
+`__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and `__BUILTIN_AVR_WDR`, but
+the `__builtin_avr_*` functions are undeclared. Use inline assembly
+(`cli`, `sei`, `sleep`, `wdr`, `swap`) instead.
 
 ### Interrupt handlers
 
