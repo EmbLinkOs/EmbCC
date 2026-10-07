@@ -540,6 +540,11 @@ enum reloc_kind {
      * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
      * site whose str_off is already the offset). */
     RK_MIPS_TEXT26,
+    /* An Xtensa literal-pool word holding the address of a label in this
+     * object's own .text, for a jump too far for `j` (l32r and jx):
+     * R_XTENSA_32 against the section symbol with the label's offset as
+     * the addend, as RK_MIPS_TEXT26 is. */
+    RK_XTENSA_TEXT32,
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

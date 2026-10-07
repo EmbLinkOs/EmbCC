@@ -3410,7 +3410,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * the addend, because `jmp` carries an absolute address and nothing
          * in a relocatable object knows where its own .text will land. */
         int tx = strs[i].kind == RK_AVR_TEXT_CALL ||
-                 strs[i].kind == RK_MIPS_TEXT26;
+                 strs[i].kind == RK_MIPS_TEXT26 ||
+                 strs[i].kind == RK_XTENSA_TEXT32;
         /* (the auipc, or the jump's label, is in the same function as
          * the site, so in the same section) */
         int ssym = rodata_sym;

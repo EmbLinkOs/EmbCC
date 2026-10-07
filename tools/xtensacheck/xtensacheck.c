@@ -118,6 +118,7 @@ static void vocab(void)
         { XT_SR_DEPC, "depc" }, { XT_SR_EXCSAVE1, "excsave1" },
         { XT_SR_INTENABLE, "intenable" }, { XT_SR_PS, "ps" },
         { XT_SR_VECBASE, "vecbase" }, { XT_SR_EXCCAUSE, "exccause" },
+        { XT_SR_ATOMCTL, "atomctl" },
         { XT_SR_CCOUNT, "ccount" }, { XT_SR_EXCVADDR, "excvaddr" }
     };
     int k, j;
@@ -543,8 +544,8 @@ static int print_vectors(void)
     printf("};\n");
     /* Two windowed functions the C harness calls through a pointer: the
      * simcall (a2 = the call, a3.. its arguments, a2 the result -- which is
-     * exactly where a call8 puts a callee's arguments and result), and
-     * VECBASE's setter. */
+     * exactly where a call8 puts a callee's arguments and result), and the
+     * setter of VECBASE (a2) and ATOMCTL (a3). */
     {
         static const char *const nm[2] = { "xt_simcall_code", "xt_vecbase_code" };
         for (int f = 0; f < 2; f++) {
@@ -554,6 +555,7 @@ static int print_vectors(void)
                 xt_simcall(&C);
             } else {
                 xt_wsr(&C, XT_A2, XT_SR_VECBASE);
+                xt_wsr(&C, XT_A3, XT_SR_ATOMCTL);
                 xt_isync(&C);
             }
             xt_retw(&C);

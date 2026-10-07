@@ -85,10 +85,11 @@ struct xt_sites {
 };
 
 /* A literal-pool entry: a constant, or an address the linker fills in. */
-enum { LIT_CONST, LIT_STR, LIT_GLOB, LIT_FUNC };
+enum { LIT_CONST, LIT_STR, LIT_GLOB, LIT_FUNC, LIT_LABEL };
 struct xt_lit {
     int kind;
-    unsigned long v;       /* LIT_CONST: the word; LIT_STR: the string index */
+    unsigned long v;       /* LIT_CONST: the word; LIT_STR: the string
+                            * index; LIT_LABEL: the label */
     void *p;               /* LIT_GLOB: struct global *; LIT_FUNC: struct func * */
 };
 
@@ -116,7 +117,9 @@ struct xt_fn {
     int *label_off;      /* per label id, or -1 while unseen */
     struct { int at; int label; int kind; } *fix;
     int nfix, capfix;
-    /* Per branch, in emission order: take the long form. */
+    /* Per branch, in emission order: 1 take the long form (the inverse
+     * branch over a j), 2 the far one (over an l32r of the label's
+     * address and a jx). */
     const char *longb;
     int nlongb;
     /* The literal pool: npool words reserved at pool_at, before the
@@ -124,6 +127,11 @@ struct xt_fn {
     struct xt_lit *lit;
     int nlit, caplit;
     int pool_at, npool;
+    /* Literals placed in the code itself, jumped over, for an l32r more
+     * than 256 KiB past the pool: their offsets, and what each holds. */
+    struct xt_lit *isl;
+    int *isl_at;
+    int nisl, capisl;
 };
 
 /* ---- the allocator's view of this machine --------------------------------
@@ -574,9 +582,28 @@ static void lit_load(struct xt_fn *F, int reg, int kind, unsigned long v,
         xt_nop(F->t);
         return;
     }
-    if (!xt_l32r_reaches(at, lit))
-        xt_refuse(F, NULL, "a function too large for its literal pool "
-                           "(l32r reaches 256 KiB back)");
+    if (!xt_l32r_reaches(at, lit)) {
+        /* Past the pool's reach (a function over 256 KiB): an island of
+         * one word in the code, jumped over, and the l32r just after it. */
+        int jat = at, wat = (int)((at + 3 + 3) & ~3L);
+        xt_w(F->t, xt_enc_j((long)(wat + 4) - (jat + 4)));
+        while (F->t->len < wat)
+            code_byte(F->t, 0);
+        code_u32(F->t, 0);
+        code_mark_data(F->t, wat, wat + 4);
+        if (F->nisl == F->capisl) {
+            F->capisl = F->capisl ? F->capisl * 2 : 16;
+            F->isl = xrealloc(F->isl, (size_t)F->capisl * sizeof *F->isl);
+            F->isl_at = xrealloc(F->isl_at,
+                                 (size_t)F->capisl * sizeof *F->isl_at);
+        }
+        F->isl[F->nisl].kind = kind;
+        F->isl[F->nisl].v = v;
+        F->isl[F->nisl].p = p;
+        F->isl_at[F->nisl++] = wat;
+        xt_l32r(F->t, reg, wat);
+        return;
+    }
     xt_l32r(F->t, reg, lit);
 }
 
@@ -1113,7 +1140,7 @@ static void br_back(struct xt_fn *F, int at, int target)
                        "reach", F->fn->name);
 }
 
-enum { FX_B, FX_J };
+enum { FX_B, FX_J, FX_FAR };
 
 static void want_label(struct xt_fn *F, int at, int label, int kind)
 {
@@ -1129,7 +1156,21 @@ static void want_label(struct xt_fn *F, int at, int label, int kind)
 
 static int want_long(const struct xt_fn *F)
 {
-    return F->longb && F->nfix < F->nlongb && F->longb[F->nfix];
+    return F->longb && F->nfix < F->nlongb ? F->longb[F->nfix] : 0;
+}
+
+static void lit_load(struct xt_fn *F, int reg, int kind, unsigned long v,
+                     void *p);
+
+/* A jump to a label beyond j's 128 KiB: its address from the pool, then
+ * jx. ADDR holds nothing live across a branch (a test that read it has
+ * already been evaluated). */
+static void far_jump(struct xt_fn *F, int label)
+{
+    int at = F->t->len;
+    lit_load(F, ADDR, LIT_LABEL, (unsigned long)label, NULL);
+    xt_jx(F->t, ADDR);
+    want_label(F, at, label, FX_FAR);
 }
 
 /* Branch to `label` when the test holds: the short form, or the inverse
@@ -1137,16 +1178,27 @@ static int want_long(const struct xt_fn *F)
  * reach. */
 static void branch_to(struct xt_fn *F, struct xtest x, int label)
 {
-    int at;
+    int at, lv = want_long(F);
     if (x.kind == T_FALSE)
         return;
     if (x.kind == T_TRUE) {
+        if (lv == 2) {
+            far_jump(F, label);
+            return;
+        }
         at = F->t->len;
         xt_w(F->t, xt_enc_j(0));
         want_label(F, at, label, FX_J);
         return;
     }
-    if (want_long(F)) {
+    if (lv == 2) {
+        struct xtest inv = invert(x);
+        /* over the l32r and the jx: 9 bytes on, 5 past the fourth */
+        xt_w(F->t, enc_test(&inv, 5));
+        far_jump(F, label);
+        return;
+    }
+    if (lv) {
         struct xtest inv = invert(x);
         /* over the j: the branch is 3 bytes, the j 3, so 2 from the
          * instruction after the branch's own fourth byte */
@@ -2901,12 +2953,13 @@ static void place_params(struct xt_fn *F)
     F->va_words = words;
 }
 
-/* The pool's words: constants written now, addresses left to the linker. */
+/* The pool's words (and the islands'): constants written now, addresses
+ * left to the linker. */
 static void fill_pool(struct xt_fn *F)
 {
-    for (int k = 0; k < F->nlit; k++) {
-        int at = F->pool_at + 4 * k;
-        struct xt_lit *l = &F->lit[k];
+    for (int k = 0; k < F->nlit + F->nisl; k++) {
+        int at = k < F->nlit ? F->pool_at + 4 * k : F->isl_at[k - F->nlit];
+        struct xt_lit *l = k < F->nlit ? &F->lit[k] : &F->isl[k - F->nlit];
         switch (l->kind) {
         case LIT_CONST:
             code_patch32(F->t, at, l->v);
@@ -2918,6 +2971,10 @@ static void fill_pool(struct xt_fn *F)
         case LIT_GLOB:
             code_patch32(F->t, at, 0);
             note_glob(F->st, at, (struct global *)l->p, RK_ABS32);
+            break;
+        case LIT_LABEL:
+            code_patch32(F->t, at, 0);
+            note_str(F->st, at, F->label_off[l->v], RK_XTENSA_TEXT32);
             break;
         default:
             code_patch32(F->t, at, 0);
@@ -2997,6 +3054,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     F.st->next = se0; F.st->nstr = ss0; F.st->ng = sg0; F.st->nf = sf0;
     F.nfix = 0;
     F.nlit = 0;
+    F.nisl = 0;
     for (i = 0; i <= fn->nlabels; i++)
         F.label_off[i] = -1;
     F.skip_next = 0;
@@ -3049,19 +3107,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
         if (target < 0)
             internal_error("xtensa: label %d of %s was never placed",
                            F.fix[i].label, fn->name);
+        if (F.fix[i].kind == FX_FAR)
+            continue;               /* its literal is the label's address */
         if (!xt_patch_branch(t, F.fix[i].at, target)) {
-            if (F.fix[i].kind == FX_J)
-                xt_refuse(&F, NULL, "a function larger than a jump reaches "
-                                    "(128 KiB)");
             if (nlongb < F.nfix) {
                 longb = xrealloc(longb, (size_t)F.nfix);
                 memset(longb + nlongb, 0, (size_t)(F.nfix - nlongb));
                 nlongb = F.nfix;
             }
-            if (longb[i])
+            /* a short branch becomes the inverse over a j, a j that does
+             * not reach the far form */
+            if (longb[i] >= (F.fix[i].kind == FX_J ? 2 : 1))
                 internal_error("xtensa: %s: a long branch was patched as "
                                "a short one", fn->name);
-            longb[i] = 1;
+            longb[i] = F.fix[i].kind == FX_J ? 2 : 1;
             nfail++;
         }
     }
@@ -3084,6 +3143,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     free(F.label_off);
     free(F.fix);
     free(F.lit);
+    free(F.isl);
+    free(F.isl_at);
     free(F.wide);
     free(F.nshr);
     free(F.loc);

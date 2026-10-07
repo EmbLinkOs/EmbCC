@@ -832,6 +832,7 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_CALL:        return R_XTENSA_SLOT0_OP;
         /* a literal-pool word, a data pointer, a DWARF offset */
         case RK_ABS32:       return R_XTENSA_32;
+        case RK_XTENSA_TEXT32: return R_XTENSA_32;
         default:             return -1;
         }
     }

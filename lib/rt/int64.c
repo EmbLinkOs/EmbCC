@@ -98,6 +98,27 @@ s64 __moddi3(s64 a, s64 b)
     return neg ? -(s64)r : (s64)r;
 }
 
+#if defined(__XTENSA__)
+/* The 64-bit product's low 64 bits, for Xtensa: the LX6 core EmbCC
+ * targets has mull (the low 32 bits of a 32-bit product) and no
+ * instruction for the high word, so the backend calls this, as GCC calls
+ * libgcc's. The high word of al * bl comes from the four 16-bit partial
+ * products, each of which mull computes exactly; the cross terms reach
+ * only the high word. No 64-bit multiply here: that would be this. */
+typedef unsigned int u32_;
+u64 __muldi3(u64 a, u64 b)
+{
+    u32_ al = (u32_)a, ah = (u32_)(a >> 32), bl = (u32_)b, bh = (u32_)(b >> 32);
+    u32_ a0 = al & 0xffffu, a1 = al >> 16, b0 = bl & 0xffffu, b1 = bl >> 16;
+    u32_ p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    u32_ mid = (p00 >> 16) + (p01 & 0xffffu) + (p10 & 0xffffu);
+    u32_ lo = (p00 & 0xffffu) | (mid << 16);
+    u32_ hi = p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16);
+    hi += al * bh + ah * bl;
+    return ((u64)hi << 32) | lo;
+}
+#endif
+
 #else
 /* A translation unit needs a declaration, and this one has none to
  * make on a machine that divides 64 bits by 64 in hardware. */

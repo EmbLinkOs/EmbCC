@@ -36,14 +36,18 @@ void exit(int status);
 
 /* The vectors go where VECBASE says, and VECBASE is set to say so (its
  * reset value on the de212 is the same address, but the startup should
- * not depend on that). */
+ * not depend on that). ATOMCTL says what s32c1i does for each kind of
+ * memory: 0x15 makes it the read-compare-write the atomics need for all
+ * three (bypass, write-through, write-back), where the reset value raises
+ * a LoadStoreError for the bypass region the RAM is in. */
 static void install_vectors(void)
 {
     volatile unsigned char *v = (volatile unsigned char *)XT_VEC_BASE;
-    void (*setvb)(unsigned) = (void (*)(unsigned))(const void *)xt_vecbase_code;
+    void (*setvb)(unsigned, unsigned) =
+        (void (*)(unsigned, unsigned))(const void *)xt_vecbase_code;
     for (unsigned k = 0; k < sizeof xt_vectors; k++)
         v[k] = xt_vectors[k];
-    setvb(XT_VEC_BASE);
+    setvb(XT_VEC_BASE, 0x15);
 }
 
 void _start(void)

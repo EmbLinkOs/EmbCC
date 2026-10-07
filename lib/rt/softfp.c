@@ -46,9 +46,11 @@
  * defined, and an FPU build then linked a soft-float build of this file
  * -- which works until the objects must agree about the float ABI. */
 /* MIPS says it with __mips_soft_float (-msoft-float, which is o32 on a
- * PIC32-class core with no FPU). */
+ * PIC32-class core with no FPU). EmbCC's Xtensa code is soft float on any
+ * core, with or without the ESP32's FPU: the ABI keeps floats in the
+ * address registers either way, and the backend calls these. */
 #if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
-    defined(__mips_soft_float) || \
+    defined(__mips_soft_float) || defined(__XTENSA__) || \
     (defined(__arm__) && (!defined(__ARM_FP) || !(__ARM_FP & 8)))
 #define SOFTFP_ALL 1
 #endif
