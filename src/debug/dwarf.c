@@ -128,21 +128,26 @@ static void db_u8(struct dbuf *b, unsigned v)
     db_need(b, 1);
     b->p[b->len++] = (unsigned char)(v & 0xff);
 }
+/* Every multi-byte field in the target's byte order: DWARF is read by a
+ * debugger of THAT machine (a big-endian target's sections are big-endian
+ * throughout, as clang writes them). */
+static void db_un(struct dbuf *b, int n, unsigned long v)
+{
+    db_need(b, n);
+    target_put_uint(b->p + b->len, n, v);
+    b->len += n;
+}
 static void db_u16(struct dbuf *b, unsigned v)
 {
-    db_u8(b, v); db_u8(b, v >> 8);
+    db_un(b, 2, v & 0xffff);
 }
 static void db_u32(struct dbuf *b, unsigned long v)
 {
-    db_u8(b, (unsigned)v); db_u8(b, (unsigned)(v >> 8));
-    db_u8(b, (unsigned)(v >> 16)); db_u8(b, (unsigned)(v >> 24));
+    db_un(b, 4, v & 0xffffffffUL);
 }
 static void db_u64(struct dbuf *b, unsigned long v)
 {
-    /* `long` is 64-bit on x86_64-elf (and on the host), so a single unsigned
-     * long spans the field — EmbCC's subset has no `long long`. */
-    db_u32(b, v & 0xffffffffUL);
-    db_u32(b, (v >> 32) & 0xffffffffUL);
+    db_un(b, 8, v);
 }
 static void db_str(struct dbuf *b, const char *s)
 {
@@ -326,10 +331,7 @@ static int base_encoding(struct type *t)
 
 static void db_patch_u32(struct dbuf *b, int at, unsigned long v)
 {
-    b->p[at + 0] = (unsigned char)v;
-    b->p[at + 1] = (unsigned char)(v >> 8);
-    b->p[at + 2] = (unsigned char)(v >> 16);
-    b->p[at + 3] = (unsigned char)(v >> 24);
+    target_put_uint(b->p + at, 4, v & 0xffffffffUL);
 }
 
 static int type_is_open(struct typemap *m, struct type *t)
@@ -434,7 +436,10 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
                 db_uleb(b, AB_MEMBER_BF);
                 db_str(b, mb->name);
                 db_u32(b, (unsigned long)mt);
-                db_u32(b, (unsigned long)(mb->off * 8 + mb->bit_off));
+                db_u32(b, (unsigned long)(mb->off * 8 +
+                    ty_bf_mempos(mb->bit_off, mb->bit_width,
+                                 8 * (mb->bf_bytes ? mb->bf_bytes
+                                                   : ty_size(mb->ty)))));
                 db_u8(b, mb->bit_width);
             } else {
                 db_uleb(b, AB_MEMBER);
@@ -593,10 +598,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     free(tm.k); free(tm.off); free(tm.fix);
 
     unsigned long ulen = (unsigned long)(b->len - after_len);
-    b->p[len_at + 0] = (unsigned char)ulen;
-    b->p[len_at + 1] = (unsigned char)(ulen >> 8);
-    b->p[len_at + 2] = (unsigned char)(ulen >> 16);
-    b->p[len_at + 3] = (unsigned char)(ulen >> 24);
+    db_patch_u32(b, len_at, ulen);
 }
 
 /* One function's rows, bracketed by set_address .. end_sequence. Offsets are
@@ -667,20 +669,14 @@ static void emit_line(struct dwarf_out *out, struct dbuf *b,
 
     /* backpatch header_length (bytes from here to end of header) */
     unsigned long hlen = (unsigned long)(b->len - after_hdr_len);
-    b->p[hdr_len_at + 0] = (unsigned char)hlen;
-    b->p[hdr_len_at + 1] = (unsigned char)(hlen >> 8);
-    b->p[hdr_len_at + 2] = (unsigned char)(hlen >> 16);
-    b->p[hdr_len_at + 3] = (unsigned char)(hlen >> 24);
+    db_patch_u32(b, hdr_len_at, hlen);
 
     for (int n = 0; n < iu->nfuncs; n++)
         if (iu->funcs[n].src->code_len > 0)
             emit_line_func(out, b, &iu->funcs[n]);
 
     unsigned long ulen = (unsigned long)(b->len - after_len);
-    b->p[len_at + 0] = (unsigned char)ulen;
-    b->p[len_at + 1] = (unsigned char)(ulen >> 8);
-    b->p[len_at + 2] = (unsigned char)(ulen >> 16);
-    b->p[len_at + 3] = (unsigned char)(ulen >> 24);
+    db_patch_u32(b, len_at, ulen);
 }
 
 static void emit_all(struct ir_unit *iu, const char *filename,

@@ -86,6 +86,29 @@ struct elfw {
     int rel;
 };
 
+/* BYTE ORDER. The tables are built as host structures and memcpy'd, so
+ * on a big-endian target every multi-byte field is reversed in place
+ * once the 32-bit shapes are final (the host is little-endian; a
+ * big-endian host would need the opposite test, which elfw_new checks
+ * for). The section PAYLOADS are not touched: the code generator and the
+ * data writers already put them in the target's order. */
+static void swap_n(void *field, size_t n)
+{
+    unsigned char *p = field;
+    for (size_t k = 0; k < n / 2; k++) {
+        unsigned char c = p[k];
+        p[k] = p[n - 1 - k];
+        p[n - 1 - k] = c;
+    }
+}
+#define SWAP(f) swap_n(&(f), sizeof (f))
+
+static int host_big_endian(void)
+{
+    unsigned u = 1;
+    return *(unsigned char *)&u == 0;
+}
+
 struct elfw *elfw_new(int machine)
 {
     struct elfw *w = calloc(1, sizeof *w);
@@ -100,6 +123,12 @@ struct elfw *elfw_new(int machine)
      * rejected. */
     w->elf32 = target_ptr_size() <= 4;
     w->rel = target_elf_uses_rel(target_get());
+    if (host_big_endian() || (target_big_endian() && !w->elf32)) {
+        fprintf(stderr, "embcc: elf writer: %s objects are written only "
+                "by a little-endian host, and big-endian ones only as "
+                "ELFCLASS32\n", target_triple_now());
+        fatal_unwind();
+    }
     if (machine == EM_ARM)
         w->eflags = EF_ARM_EABI_VER5;
     /* RISC-V's and AVR's come from the target (elfw_set_flags): whether
@@ -376,6 +405,28 @@ int elfw_write(struct elfw *w, const char *path)
             rs->data.len = rs->data.cap = (size_t)m * sizeof *ro;
             rs->hdr.sh_size = rs->data.len;
         }
+        if (target_big_endian()) {
+            Elf32_Sym *sv = (Elf32_Sym *)sy->data.p;
+            for (int k = 0; k < n; k++) {
+                SWAP(sv[k].st_name); SWAP(sv[k].st_value);
+                SWAP(sv[k].st_size); SWAP(sv[k].st_shndx);
+            }
+            for (int i = 0; i < w->nrelagrp; i++) {
+                struct section *rs = &w->sec[w->relagrp[i].sec_ndx];
+                if (w->rel) {
+                    Elf32_Rel *r = (Elf32_Rel *)rs->data.p;
+                    for (size_t k = 0; k < rs->data.len / sizeof *r; k++) {
+                        SWAP(r[k].r_offset); SWAP(r[k].r_info);
+                    }
+                } else {
+                    Elf32_Rela *r = (Elf32_Rela *)rs->data.p;
+                    for (size_t k = 0; k < rs->data.len / sizeof *r; k++) {
+                        SWAP(r[k].r_offset); SWAP(r[k].r_info);
+                        SWAP(r[k].r_addend);
+                    }
+                }
+            }
+        }
     }
 
     /* Lay out: ehdr, section payloads, then the section header table. */
@@ -398,7 +449,7 @@ int elfw_write(struct elfw *w, const char *path)
     eh.e_ident[EI_MAG2] = ELFMAG2;
     eh.e_ident[EI_MAG3] = ELFMAG3;
     eh.e_ident[EI_CLASS] = w->elf32 ? ELFCLASS32 : ELFCLASS64;
-    eh.e_ident[EI_DATA] = ELFDATA2LSB;
+    eh.e_ident[EI_DATA] = target_big_endian() ? ELFDATA2MSB : ELFDATA2LSB;
     eh.e_ident[EI_VERSION] = EV_CURRENT;
     eh.e_type = ET_REL;
     eh.e_machine = (Elf64_Half)w->machine;
@@ -432,6 +483,13 @@ int elfw_write(struct elfw *w, const char *path)
         e32.e_shentsize = eh.e_shentsize;
         e32.e_shnum = eh.e_shnum;
         e32.e_shstrndx = eh.e_shstrndx;
+        if (target_big_endian()) {
+            SWAP(e32.e_type); SWAP(e32.e_machine); SWAP(e32.e_version);
+            SWAP(e32.e_entry); SWAP(e32.e_phoff); SWAP(e32.e_shoff);
+            SWAP(e32.e_flags); SWAP(e32.e_ehsize); SWAP(e32.e_phentsize);
+            SWAP(e32.e_phnum); SWAP(e32.e_shentsize); SWAP(e32.e_shnum);
+            SWAP(e32.e_shstrndx);
+        }
         memcpy(img, &e32, sizeof e32);
     } else {
         memcpy(img, &eh, sizeof eh);
@@ -457,6 +515,12 @@ int elfw_write(struct elfw *w, const char *path)
             h32.sh_info = h->sh_info;
             h32.sh_addralign = (Elf32_Word)h->sh_addralign;
             h32.sh_entsize = (Elf32_Word)h->sh_entsize;
+            if (target_big_endian()) {
+                SWAP(h32.sh_name); SWAP(h32.sh_type); SWAP(h32.sh_flags);
+                SWAP(h32.sh_addr); SWAP(h32.sh_offset); SWAP(h32.sh_size);
+                SWAP(h32.sh_link); SWAP(h32.sh_info);
+                SWAP(h32.sh_addralign); SWAP(h32.sh_entsize);
+            }
             memcpy(at, &h32, sizeof h32);
         } else {
             memcpy(at, &w->sec[i].hdr, sizeof(Elf64_Shdr));

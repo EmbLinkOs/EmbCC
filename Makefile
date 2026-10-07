@@ -154,6 +154,8 @@ SRCS := \
 	src/arch/mips/asm.c \
 	src/arch/mips32/predef.c \
 	src/arch/mips32/predef_cxx.c \
+	src/arch/mips32eb/predef.c \
+	src/arch/mips32eb/predef_cxx.c \
 	src/arch/avr/emit.c \
 	src/arch/avr/codegen.c \
 	src/arch/avr/asm.c \
@@ -280,6 +282,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/riscv32/predef.c src/arch/riscv32/predef_cxx.c \
              src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
              src/arch/mips32/predef.c src/arch/mips32/predef_cxx.c \
+             src/arch/mips32eb/predef.c src/arch/mips32eb/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
@@ -504,7 +507,7 @@ libc-linux-aarch64: embcc embar
 RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf riscv32-unknown-elf riscv64-unknown-elf \
-               mipsel-none-elf
+               mipsel-none-elf mips-none-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -519,7 +522,7 @@ rt-embedded: embcc embar
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf riscv32-unknown-elf \
-                 riscv64-unknown-elf mipsel-none-elf
+                 riscv64-unknown-elf mipsel-none-elf mips-none-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \

@@ -558,17 +558,31 @@ static int init_overhang(struct unit *u, int line, const char *what,
                          struct type *ty, const struct initelem *v, int n,
                          int is_static);
 
-/* A bit-field's value merged into its storage unit's nb bytes at p
- * (they start zeroed, so OR is enough and neighbours are kept): its low
- * `width` bits, at bit_off of p[0] — 17 bytes for a packed __int128's at
- * bit 1..7, the last one past what 128 bits hold. */
-static void merge_bits(char *p, int nb, struct w128 val, int bit_off,
-                       int width)
+/* A bit-field's value merged into its storage unit at p (the bytes start
+ * zeroed, so OR is enough and neighbours are kept): its low `width` bits,
+ * at bit_off of the unit's `unit` bytes read as one integer in the
+ * target's order (type.h) -- 17 bytes for a packed __int128's at bit
+ * 1..7, the last one past what 128 bits hold. Only the first nb of the
+ * unit's bytes are the object's (bf_span), and only they are written: on
+ * a big-endian target the field's bytes are the unit's FIRST, its high
+ * end. */
+static void merge_bits(char *p, int unit, int nb, struct w128 val,
+                       int bit_off, int width)
 {
     struct w128 mask = w_shr(w_make(~0UL, ~0UL), 128 - width, 0);
     val.lo &= mask.lo;
     val.hi &= mask.hi;
     struct w128 lo = w_shl(val, bit_off);
+    if (target_big_endian()) {
+        if (unit > 16)
+            internal_error("a 17-byte bit-field unit on a big-endian "
+                           "target");
+        for (int b = 0; b < unit; b++)
+            if (unit - 1 - b < nb)
+                p[unit - 1 - b] |=
+                    (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
+        return;
+    }
     for (int b = 0; b < nb && b < 16; b++)
         p[b] |= (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
     if (nb == 17 && bit_off)
@@ -3436,12 +3450,11 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                     struct expr *ch = xcalloc(1, sizeof *ch);
                     ch->kind = EXPR_NUM;
                     ch->line = init->line;
-                    /* element i: esz little-endian bytes (lit_encode) */
-                    unsigned long uv = 0;
-                    for (int b = 0; b < esz; b++)
-                        uv |= (unsigned long)(unsigned char)
-                              init->name[(size_t)i * (size_t)esz + (size_t)b]
-                              << (8 * b);
+                    /* element i: esz bytes in the target's order
+                     * (lit_encode) */
+                    unsigned long uv = (unsigned long)target_get_uint(
+                        (const unsigned char *)init->name +
+                        (size_t)i * (size_t)esz, esz);
                     ch->num = (long)uv;
                     ch->ty = ty->pointee;
                     init_push(out, off + i * esz, ty->pointee, ch);
@@ -3615,8 +3628,12 @@ static int init_overhang(struct unit *u, int line, const char *what,
         /* a bit-field reaches as far as its bits do, not as far as its
          * declared type: AVR packs an `unsigned` (2 bytes) field into a
          * one-byte struct */
-        int w = v[k].bit_width ? (v[k].bit_off + v[k].bit_width + 7) / 8
-                               : ty_size(v[k].ty);
+        int w = v[k].bit_width
+              ? (ty_bf_mempos(v[k].bit_off, v[k].bit_width,
+                              8 * (v[k].bf_bytes ? v[k].bf_bytes
+                                                 : ty_size(v[k].ty))) +
+                 v[k].bit_width + 7) / 8
+              : ty_size(v[k].ty);
         if (v[k].off + w > end)
             end = v[k].off + w;
     }
@@ -3705,9 +3722,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "scaling by a real");
             int esz = ty_size(el);
             unsigned char pb[16];
-            ldf_encode(re, fmt, pb);
+            ldf_encode_target(re, fmt, pb);
             memcpy(bytes + v[k].off, pb, (size_t)esz);
-            ldf_encode(im, fmt, pb);
+            ldf_encode_target(im, fmt, pb);
             memcpy(bytes + v[k].off + esz, pb, (size_t)esz);
             continue;
         }
@@ -3719,12 +3736,18 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static long double initializer must be a "
                            "constant expression");
             unsigned char lb[16];
-            ldf_encode(x, ldf_target_fmt(), lb);
-            memcpy(bytes + v[k].off, lb, 16);
+            int lz = ldf_encode_target(x, ldf_target_fmt(), lb);
+            if (lz > sz)
+                lz = sz;
+            /* the format's bytes and no more: 8 where long double is a
+             * double (16 copied the rest of lb, never written, over the
+             * next member or past the image) */
+            memcpy(bytes + v[k].off, lb, (size_t)lz);
             continue;
         }
         /* A float/double slot: fold to the value, store its IEEE-754 bit
-         * pattern (4 bytes for float, 8 for double), little-endian. */
+         * pattern (4 bytes for float, 8 for double), in the target's
+         * byte order. */
         if (ty_is_float(v[k].ty)) {
             double dv;
             if (!const_fold_f(v[k].e, &dv))
@@ -3738,8 +3761,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             } else {
                 memcpy(&ubits, &dv, 8);
             }
-            for (int b = 0; b < sz; b++)
-                bytes[v[k].off + b] = (char)(ubits >> (8 * b));
+            target_put_uint((unsigned char *)bytes + v[k].off, sz, ubits);
             continue;
         }
         if (v[k].ty->kind == TY_INT128) {
@@ -3750,15 +3772,17 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "expression");
             if (v[k].bit_width) {
                 merge_bits(bytes + v[k].off,
+                           v[k].bf_bytes ? v[k].bf_bytes : 16,
                            bf_span(v[k].bf_bytes ? v[k].bf_bytes : 16,
                                    v[k].off, size), w,
                            v[k].bit_off, v[k].bit_width);
                 continue;
             }
-            for (int b = 0; b < 8; b++) {
-                bytes[v[k].off + b] = (char)(w.lo >> (8 * b));
-                bytes[v[k].off + 8 + b] = (char)(w.hi >> (8 * b));
-            }
+            /* the low half first little-endian, the high one big */
+            target_put_uint((unsigned char *)bytes + v[k].off +
+                            (target_big_endian() ? 8 : 0), 8, w.lo);
+            target_put_uint((unsigned char *)bytes + v[k].off +
+                            (target_big_endian() ? 0 : 8), 8, w.hi);
             continue;
         }
         long cv;
@@ -3768,14 +3792,15 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                        "string literal, or the address of a global");
         if (v[k].bit_width) {
             merge_bits(bytes + v[k].off,
+                       v[k].bf_bytes ? v[k].bf_bytes : sz,
                        bf_span(v[k].bf_bytes ? v[k].bf_bytes : sz,
                                v[k].off, size),
                        w_make((unsigned long)cv, 0), v[k].bit_off,
                        v[k].bit_width);
             continue;
         }
-        for (int b = 0; b < sz; b++)
-            bytes[v[k].off + b] = (char)((unsigned long)cv >> (8 * b));
+        target_put_uint((unsigned char *)bytes + v[k].off, sz,
+                        (unsigned long)cv);
     }
     *out_bytes = bytes;
     *out_rel = rel;

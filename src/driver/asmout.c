@@ -307,10 +307,7 @@ static void mips_emit_blocks(struct outbuf *b, const char *srcname,
                     r = &ta->rels[j];
             if (r && k + 4 <= ta->codelen) {
                 const unsigned char *q = text + ta->text_off + k;
-                unsigned long w = (unsigned long)q[0] |
-                                  ((unsigned long)q[1] << 8) |
-                                  ((unsigned long)q[2] << 16) |
-                                  ((unsigned long)q[3] << 24);
+                unsigned long w = (unsigned long)target_get_uint(q, 4);
                 int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
                     rt = (int)(w >> 16) & 31;
                 char sym[200];
@@ -536,10 +533,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
              * nothing to choose, and a REL assembler stores the addend in
              * the field as EmbCC's object writer does. */
             if (st && target_get() == TARGET_MIPS32 && len == 4) {
-                unsigned long w = (unsigned long)text[pc] |
-                                  ((unsigned long)text[pc + 1] << 8) |
-                                  ((unsigned long)text[pc + 2] << 16) |
-                                  ((unsigned long)text[pc + 3] << 24);
+                unsigned long w = (unsigned long)target_get_uint(text + pc,
+                                                                 4);
                 int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
                     rt = (int)(w >> 16) & 31;
                 char sym[200];

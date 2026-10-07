@@ -37,6 +37,11 @@ struct object {
     const char *name;         /* for diagnostics: "libc.a(printf.o)" etc */
     unsigned char *buf;
     long len;
+    /* A big-endian (ELFDATA2MSB) object: its headers, symbols and
+     * relocation entries were turned to host order in place when it was
+     * read (be_normalise), its section CONTENTS were not -- they are the
+     * target's, and the relocations patch them in its order. */
+    int big_endian;
     Elf64_Ehdr *eh;
     Elf64_Shdr *shdrs;
     int nsh;
@@ -223,6 +228,7 @@ struct linker {
     unsigned long rom_limit;   /* bytes of flash the image may occupy, 0 = any */
     int elf32;                 /* ELFCLASS32 output, from the inputs */
     int machine;               /* e_machine, one across every input */
+    int big_endian;            /* the byte order, one across every input */
     const char *rel_sym;       /* the symbol the relocation being applied
                                 * names, for need_range's message */
     int rel_uw;                /* ...and it is an undefined weak one, so
@@ -453,26 +459,139 @@ static void arm_attrs_check(struct linker *l)
 }
 
 
+/* ---- big-endian objects ----------------------------------------------
+ *
+ * A big-endian ELF32 object (mips-none-elf) is read by turning its
+ * DESCRIPTIONS -- the header, the section headers, the symbol table and
+ * the relocation entries -- into host order in place, once, so the rest
+ * of this file reads it like any other. The section contents stay in the
+ * target's order: the relocations patch them through the machine's own
+ * word accessors (mips_get_word), and the image is written in that order
+ * with its headers swapped back (be_image). */
+static void swap_n(void *field, size_t n)
+{
+    unsigned char *p = field;
+    for (size_t k = 0; k < n / 2; k++) {
+        unsigned char c = p[k];
+        p[k] = p[n - 1 - k];
+        p[n - 1 - k] = c;
+    }
+}
+#define SWAP(f) swap_n(&(f), sizeof (f))
+
+static void be_ehdr(Elf32_Ehdr *e)
+{
+    SWAP(e->e_type); SWAP(e->e_machine); SWAP(e->e_version);
+    SWAP(e->e_entry); SWAP(e->e_phoff); SWAP(e->e_shoff); SWAP(e->e_flags);
+    SWAP(e->e_ehsize); SWAP(e->e_phentsize); SWAP(e->e_phnum);
+    SWAP(e->e_shentsize); SWAP(e->e_shnum); SWAP(e->e_shstrndx);
+}
+
+static void be_shdr(Elf32_Shdr *h)
+{
+    SWAP(h->sh_name); SWAP(h->sh_type); SWAP(h->sh_flags); SWAP(h->sh_addr);
+    SWAP(h->sh_offset); SWAP(h->sh_size); SWAP(h->sh_link); SWAP(h->sh_info);
+    SWAP(h->sh_addralign); SWAP(h->sh_entsize);
+}
+
+static void be_sym(Elf32_Sym *y)
+{
+    SWAP(y->st_name); SWAP(y->st_value); SWAP(y->st_size); SWAP(y->st_shndx);
+}
+
+static void be_phdr(Elf32_Phdr *p)
+{
+    SWAP(p->p_type); SWAP(p->p_offset); SWAP(p->p_vaddr); SWAP(p->p_paddr);
+    SWAP(p->p_filesz); SWAP(p->p_memsz); SWAP(p->p_flags); SWAP(p->p_align);
+}
+
+static void be_normalise(const char *name, unsigned char *buf, long len)
+{
+    Elf32_Ehdr *e = (Elf32_Ehdr *)buf;
+    Elf32_Shdr *sh;
+    be_ehdr(e);
+    if ((long)e->e_shoff + (long)e->e_shnum * (long)sizeof(Elf32_Shdr) > len)
+        die("%s: section headers run past end of file", name);
+    sh = (Elf32_Shdr *)(buf + e->e_shoff);
+    for (int i = 0; i < e->e_shnum; i++)
+        be_shdr(&sh[i]);
+    for (int i = 0; i < e->e_shnum; i++) {
+        unsigned char *p = buf + sh[i].sh_offset;
+        if (sh[i].sh_type == SHT_NOBITS ||
+            (long)sh[i].sh_offset + (long)sh[i].sh_size > len)
+            continue;
+        if (sh[i].sh_type == SHT_SYMTAB) {
+            Elf32_Sym *y = (Elf32_Sym *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *y; k++)
+                be_sym(&y[k]);
+        } else if (sh[i].sh_type == SHT_REL) {
+            Elf32_Rel *r = (Elf32_Rel *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *r; k++) {
+                SWAP(r[k].r_offset); SWAP(r[k].r_info);
+            }
+        } else if (sh[i].sh_type == SHT_RELA) {
+            Elf32_Rela *r = (Elf32_Rela *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *r; k++) {
+                SWAP(r[k].r_offset); SWAP(r[k].r_info); SWAP(r[k].r_addend);
+            }
+        }
+    }
+}
+
+/* The finished ELF32 image, written in host order, turned big-endian: the
+ * header, the program and section headers, and the symbol table. */
+static void be_image(unsigned char *img)
+{
+    Elf32_Ehdr *e = (Elf32_Ehdr *)img;
+    Elf32_Shdr *sh = (Elf32_Shdr *)(img + e->e_shoff);
+    Elf32_Phdr *ph = (Elf32_Phdr *)(img + e->e_phoff);
+    int nsh = e->e_shnum, nph = e->e_phoff ? e->e_phnum : 0;
+    for (int i = 0; i < nsh; i++) {
+        if (sh[i].sh_type == SHT_SYMTAB) {
+            Elf32_Sym *y = (Elf32_Sym *)(img + sh[i].sh_offset);
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *y; k++)
+                be_sym(&y[k]);
+        }
+    }
+    for (int i = 0; i < nsh; i++)
+        be_shdr(&sh[i]);
+    for (int i = 0; i < nph; i++)
+        be_phdr(&ph[i]);
+    e->e_ident[EI_DATA] = ELFDATA2MSB;
+    be_ehdr(e);
+}
+
 static struct object *parse_object(const char *name, unsigned char *buf,
                                    long len)
 {
+    int big = 0;
     if (len < (long)sizeof(Elf64_Ehdr))
         die("%s: too small to be an object", name);
     Elf64_Ehdr *eh = (Elf64_Ehdr *)buf;
     if (eh->e_ident[EI_MAG0] != ELFMAG0 || eh->e_ident[EI_MAG1] != ELFMAG1 ||
         eh->e_ident[EI_MAG2] != ELFMAG2 || eh->e_ident[EI_MAG3] != ELFMAG3)
         die("%s: not an ELF file", name);
-    if (eh->e_ident[EI_DATA] != ELFDATA2LSB)
-        die("%s: not little-endian", name);
     if (eh->e_ident[EI_CLASS] != ELFCLASS64 &&
         eh->e_ident[EI_CLASS] != ELFCLASS32)
         die("%s: not a 32- or 64-bit ELF", name);
+    if (eh->e_ident[EI_DATA] == ELFDATA2MSB &&
+        eh->e_ident[EI_CLASS] == ELFCLASS32) {
+        /* big-endian: MIPS o32 only, checked once it reads as numbers */
+        if (len < (long)sizeof(Elf32_Ehdr))
+            die("%s: too small to be an object", name);
+        be_normalise(name, buf, len);
+        big = 1;
+    } else if (eh->e_ident[EI_DATA] != ELFDATA2LSB) {
+        die("%s: neither a little-endian object nor a big-endian 32-bit "
+            "one", name);
+    }
 
     struct object *o = xcalloc(1, sizeof *o);
     o->name = name;
     o->buf = buf;
     o->len = len;
     o->elf32 = eh->e_ident[EI_CLASS] == ELFCLASS32;
+    o->big_endian = big;
 
     /* The 32-bit case is read into the 64-bit structures the rest of
      * this file uses. Field by field, because Elf32_Shdr and Elf32_Sym
@@ -489,13 +608,15 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
                 "RV32 (EM_RISCV), AVR (EM_AVR) and MIPS (EM_MIPS) are "
                 "supported", name, (unsigned)e32->e_machine);
-        /* little-endian o32 only: a big-endian MIPS object's fields
-         * would all be read backwards */
+        /* o32 only, in either byte order; and big-endian only there */
         if (e32->e_machine == EM_MIPS &&
-            (e32->e_ident[EI_DATA] != ELFDATA2LSB ||
-             (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32))
-            die("%s: a MIPS object that is not little-endian o32; this "
-                "linker links mipsel o32 only", name);
+            (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32)
+            die("%s: a MIPS object that is not o32; this linker links "
+                "o32 (mipsel and mips) only", name);
+        if (big && e32->e_machine != EM_MIPS)
+            die("%s: a big-endian object for machine %u; big-endian is "
+                "linked for MIPS (mips-none-elf) only", name,
+                (unsigned)e32->e_machine);
         o->machine = e32->e_machine;
         o->eflags = e32->e_flags;
         o->nsh = e32->e_shnum;
@@ -891,10 +1012,19 @@ static void add_object(struct linker *l, struct object *o)
         l->machine = o->machine;
         l->harvard = o->machine == EM_AVR;
         l->elf32 = o->elf32;
+        l->big_endian = o->big_endian;
+        /* the MIPS words this link reads, patches and writes (the entry
+         * stub) are in the objects' order */
+        mips_set_big_endian(o->big_endian);
     } else if (o->machine != l->machine) {
         die("%s: an object for a different machine than the ones before "
             "it (%u against %u)", o->name, (unsigned)o->machine,
             (unsigned)l->machine);
+    } else if (o->big_endian != l->big_endian) {
+        die("%s: a %s-endian object, and the ones before it are %s-endian; "
+            "an image has one byte order", o->name,
+            o->big_endian ? "big" : "little",
+            l->big_endian ? "big" : "little");
     }
     if (o->machine == EM_RISCV)
         l->eflags |= o->eflags & EF_RISCV_RVC;
@@ -2177,7 +2307,7 @@ static long long mips_lo_of(struct object *o, const struct mips_relctx *c)
         const Elf32_Rel *r = (const Elf32_Rel *)(c->rbytes +
                                                 (long)k * c->relsz);
         if ((r->r_info & 0xff) == R_MIPS_LO16 && (r->r_info >> 8) == c->symi)
-            return sext(get32loc(c->base + r->r_offset) & 0xffffU, 16);
+            return sext(mips_get_word(c->base + r->r_offset) & 0xffffU, 16);
     }
     die("%s: an R_MIPS_HI16 with no R_MIPS_LO16 against the same symbol "
         "after it; the two halves of an address carry one addend between "
@@ -2185,16 +2315,19 @@ static long long mips_lo_of(struct object *o, const struct mips_relctx *c)
     return 0;
 }
 
+/* Every MIPS field is a word in the image's byte order (mips_get_word,
+ * set from the objects), and its 16-bit immediate the word's low half. */
 static void mips_put16(unsigned char *loc, unsigned long v)
 {
-    put32(loc, (get32loc(loc) & 0xffff0000U) | (unsigned int)(v & 0xffffU));
+    mips_put_word(loc, (mips_get_word(loc) & 0xffff0000U) |
+                       (unsigned int)(v & 0xffffU));
 }
 
 static void apply_mips(struct linker *l, struct object *o, unsigned type,
                        unsigned char *loc, Elf64_Addr S, long long A,
                        Elf64_Addr P, const struct mips_relctx *c)
 {
-    unsigned int field = get32loc(loc);
+    unsigned int field = (unsigned int)mips_get_word(loc);
     long long V;
     switch (type) {
     case R_MIPS_NONE:
@@ -2204,7 +2337,7 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
         if (c->isrel) A = (long long)(int)field;
         V = (long long)S + A;
         need_range(l, o, "R_MIPS_32", V, I32_MIN, 0xffffffffLL);
-        put32(loc, (unsigned int)V);
+        mips_put_word(loc, (unsigned int)V);
         return;
     case R_MIPS_HI16:
         if (c->isrel)
@@ -2235,7 +2368,7 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
                 "another 256 MiB region; jal reaches only its own",
                 o->name, (unsigned long long)P,
                 l->rel_sym ? l->rel_sym : "?", (unsigned long long)V);
-        put32(loc, (field & 0xfc000000U) |
+        mips_put_word(loc, (field & 0xfc000000U) |
                    (unsigned int)(((unsigned long long)V >> 2) & 0x3ffffffU));
         return;
     }
@@ -3132,6 +3265,8 @@ static void write_exec(struct linker *l, const char *out,
     }
     free(sy); free(symname); free(symstr.p); free(shstr.p);
 
+    if (l->big_endian)
+        be_image(img);
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
     free(img);
@@ -3152,6 +3287,9 @@ static void emit_embx(struct linker *l, const char *out, unsigned long long caps
                       Elf64_Addr data_start, Elf64_Xword data_filesz,
                       Elf64_Xword data_memsz)
 {
+    if (l->big_endian)
+        die("--embx: an EMBX image is little-endian x86-64's (EmbLinkOS); "
+            "it is not written for a big-endian link");
     /* Capability list: sorted ascending is free — walk cap_id low to high. */
     int ncaps = 0;
     for (int id = 1; id <= EMBX_CAP_MAX; id++)
@@ -3275,6 +3413,13 @@ static void emit_embdbg(struct linker *l, const char *out)
         n++;
     }
 
+    if (n && l->big_endian) {
+        /* its reader (tools/embdbg) parses little-endian ELF and DWARF;
+         * the image itself carries the DWARF a debugger reads */
+        fprintf(stderr, "embld: no .embdbg sidecar for a big-endian image "
+                "(EmbDBG reads little-endian objects only)\n");
+        n = 0;
+    }
     if (n) {
         long ilen;
         unsigned char *img = read_file(out, &ilen);
@@ -4270,8 +4415,9 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
             }
             if (s->kind == LS_DATA) {
                 unsigned long long v = (unsigned long long)s->dval;
-                for (int b = 0; b < s->dsize; b++)    /* little-endian */
-                    img[fo[k] + (Elf64_Off)s->doff + (Elf64_Off)b] =
+                for (int b = 0; b < s->dsize; b++)    /* the target's order */
+                    img[fo[k] + (Elf64_Off)s->doff +
+                        (Elf64_Off)(l->big_endian ? s->dsize - 1 - b : b)] =
                         (unsigned char)(v >> (8 * b));
             }
         }
@@ -4433,6 +4579,8 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
                    (unsigned char)ELF64_ST_INFO(STB_GLOBAL, type), shndx);
         j++;
     }
+    if (l->big_endian)
+        be_image(img);
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
     free(img); free(em); free(fo); free(n_osec); free(n_dbg); free(dbg_at);

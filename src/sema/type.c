@@ -254,14 +254,21 @@ struct type *ty_struct(const char *tag, int is_union)
  * (0 for none), caps every member's alignment at N -- even one a member's
  * own aligned(M) raised, as gcc's maximum_field_alignment does -- and a
  * bit-field's alignment unit with it. */
+int ty_bf_mempos(int bit_off, int bit_width, int unit_bits)
+{
+    return target_big_endian() ? unit_bits - bit_off - bit_width : bit_off;
+}
+
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack)
 {
     int align = 1;
     /* Non-bitfields track a byte offset; bitfields a bit position. The two
      * share one running cursor kept in bits (bitpos), rounded up to a byte
-     * when a plain member intervenes — this is the little-endian gcc layout
-     * (a field never crosses a boundary of its declared type). */
+     * when a plain member intervenes — gcc's layout (a field never crosses
+     * a boundary of its declared type). The positions are in MEMORY order
+     * and the same in either byte order; what the byte order changes is
+     * which bits of the unit a position is, and so bit_off (type.h). */
     int bitpos = 0;   /* bits from the struct start; unions ignore it */
     int umax = 0;     /* union: largest member extent, in bytes */
 
@@ -290,7 +297,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
                 abits = 8 * pack;
             if (t->is_union) {
                 m->off = 0;
-                m->bit_off = 0;
+                m->bit_off = ty_bf_mempos(0, m->bit_width, unit);
                 int ext = (m->bit_width + 7) / 8;
                 if (ext > umax) umax = ext;
             } else if (m->bit_width == 0) {
@@ -317,6 +324,10 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
                     m->off = bitpos / 8;
                     m->bit_off = bitpos % 8;
                     m->bf_bytes = (m->bit_off + m->bit_width + 7) / 8;
+                    m->bit_off = ty_bf_mempos(m->bit_off, m->bit_width,
+                                              8 * m->bf_bytes);
+                } else {
+                    m->bit_off = ty_bf_mempos(m->bit_off, m->bit_width, unit);
                 }
                 bitpos += m->bit_width;
             }

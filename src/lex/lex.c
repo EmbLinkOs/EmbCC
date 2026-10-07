@@ -399,9 +399,7 @@ char *lit_encode(const struct litch *lc, int n, int width, long *nunits,
 #define PUT(val)                                                            \
     do {                                                                    \
         unsigned long pv_ = (val);                                          \
-        for (int b_ = 0; b_ < width; b_++)                                  \
-            out[(size_t)u * (size_t)width + (size_t)b_] =                   \
-                (unsigned char)(pv_ >> (8 * b_));                           \
+        target_put_uint(out + (size_t)u * (size_t)width, width, pv_);       \
         u++;                                                                \
     } while (0)
     for (int i = 0; i < n; i++) {

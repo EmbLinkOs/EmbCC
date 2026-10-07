@@ -48,8 +48,12 @@ static struct code C;
             exit(2);                                                        \
         }                                                                   \
         snprintf(txt_, sizeof txt_, __VA_ARGS__);                           \
-        printf("%s|%02x%02x%02x%02x\n", txt_, C.p[at_ + 3], C.p[at_ + 2],   \
-               C.p[at_ + 1], C.p[at_]);                                     \
+        if (mips_big_endian())          /* the bytes in memory order */     \
+            printf("%s|%02x%02x%02x%02x\n", txt_, C.p[at_], C.p[at_ + 1],   \
+                   C.p[at_ + 2], C.p[at_ + 3]);                             \
+        else                            /* the word, its high byte first */ \
+            printf("%s|%02x%02x%02x%02x\n", txt_, C.p[at_ + 3],             \
+                   C.p[at_ + 2], C.p[at_ + 1], C.p[at_]);                   \
     } while (0)
 
 static const int R[] = { 0, 1, 2, 3, 4, 5, 7, 8, 12, 15, 16, 21, 23, 24,
@@ -217,10 +221,7 @@ static int run_li(const struct code *c, int rd, unsigned long *out)
 {
     unsigned long reg[32] = { 0 };
     for (int p = 0; p + 4 <= c->len; p += 4) {
-        unsigned long w = (unsigned long)c->p[p] |
-                          ((unsigned long)c->p[p + 1] << 8) |
-                          ((unsigned long)c->p[p + 2] << 16) |
-                          ((unsigned long)c->p[p + 3] << 24);
+        unsigned long w = mips_get_word(c->p + p);
         unsigned op = (unsigned)(w >> 26), rs = (unsigned)(w >> 21) & 31,
                  rt = (unsigned)(w >> 16) & 31, imm = (unsigned)w & 0xffff;
         unsigned long simm = imm & 0x8000 ? (0xffff0000UL | imm) : imm;
@@ -319,6 +320,13 @@ static void refuse(int n)
 
 int main(int argc, char **argv)
 {
+    /* --be: big-endian (mips-none-elf), the bytes compared in memory
+     * order against llvm-mc's for mips-unknown-elf */
+    if (argc > 1 && !strcmp(argv[1], "--be")) {
+        mips_set_big_endian(1);
+        argc--;
+        argv++;
+    }
     if (argc > 1 && !strcmp(argv[1], "--vocab")) {
         vocab();
         return 0;
@@ -332,6 +340,6 @@ int main(int argc, char **argv)
         }
         refuse(argc > 2 ? atoi(argv[2]) : -1);
     }
-    fprintf(stderr, "usage: mipscheck --vocab | --li | --refuse N|list\n");
+    fprintf(stderr, "usage: mipscheck [--be] --vocab | --li | --refuse N|list\n");
     return 2;
 }
