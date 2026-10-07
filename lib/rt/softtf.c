@@ -45,7 +45,7 @@
  */
 #include "rt.h"
 
-/* aarch64, RV64 and RV32. A 128-bit significand needs a 128-bit integer
+/* aarch64, RV64, RV32 and LoongArch64. A 128-bit significand needs a 128-bit integer
  * to compute in, and RV32 has none -- GCC and clang give it no __int128
  * either -- so every operation on one goes through the few functions
  * below: the machine's own operators where __int128 exists, and a pair of
@@ -53,7 +53,7 @@
  * text either way, which is what lets the halves be checked against the
  * operators (an RV64 runtime can be built both ways). SOFTTF_PAIRS forces
  * the halves. */
-#if defined(__aarch64__) || defined(__riscv)
+#if defined(__aarch64__) || defined(__riscv) || defined(__loongarch__)
 
 #if defined(__SIZEOF_INT128__) && !defined(SOFTTF_PAIRS)
 static inline u128 u_or(u128 a, u128 b)  { return a | b; }

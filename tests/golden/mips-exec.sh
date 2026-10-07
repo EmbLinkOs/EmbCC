@@ -18,22 +18,30 @@
 # program must pass at every level; a failure prints the program, the
 # level and what it printed (an exception prints ==FAULT== with its cause
 # and address, from the harness).
+#
+# The same corpus runs BIG-endian (mips-none-elf, on qemu-system-mips) as
+# tests/golden/mips-be-exec.sh, which sets MIPS_EXEC_BE=1 and runs this.
 set -u
-echo "TEST-MARKER mips-exec"
+if [ "${MIPS_EXEC_BE:-0}" = 1 ]; then
+    NAME=mips-be-exec T=mips-none-elf CT=mips-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    NAME=mips-exec T=mipsel-none-elf CT=mipsel-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
+echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
 
-QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
 command -v "$QEMU" >/dev/null 2>&1 || {
     echo "skipped: $QEMU not found"; exit 0; }
 CLANG=${EMBCC_REF_CLANG_MIPS:-clang}
 command -v "$CLANG" >/dev/null 2>&1 &&
-    "$CLANG" --target=mipsel-unknown-elf -mcpu=mips32r2 -msoft-float \
+    "$CLANG" --target=$CT -mcpu=mips32r2 -msoft-float \
         -fsyntax-only -x c /dev/null 2>/dev/null || CLANG=
 
-T=mipsel-none-elf
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
-out=tests/golden/out/mips-exec
+out=tests/golden/out/$NAME
 rm -rf "$out"; mkdir -p "$out/run"
 
 EMBCC="$EMBCC" sh tools/build-rt.sh $T "$out/lib" ||
@@ -81,16 +89,32 @@ lp64() {
     esac
 }
 
+# The programs whose expect-exit assumes LITTLE-endian byte order -- a
+# union read through another member, a word's first byte, a double's
+# words through a {lsw, msw} struct. Big-endian they exit with another
+# value, the one clang's code exits with, so there they are judged against
+# clang as the LP64 ones are. Each was read for the assumption, and
+# tests/exec/endian.c checks the same things in either order.
+le_order() {
+    [ "${MIPS_EXEC_BE:-0}" = 1 ] || return 1
+    case $1 in
+    c11-niceties|ext-index|fold-float-constants|fp-bits|packed-bitfields|\
+    pragma-pack|ro-globals|store-forward) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+refd() { lp64 "$1" || le_order "$1"; }
+
 # One run: compile, link, boot, and the exit status the sentinel reports.
 cat > "$out/one.sh" <<'ONE'
 # one.sh SRC OPT OUT EMBCC EMBLD CC -- prints "<status>" or "CFAIL"/"LFAIL"/"NOEXIT"
 src=$1; opt=$2; o=$3; embcc=$4; embld=$5; cc=$6; d=$(dirname "$o")
 if [ "$cc" = clang ]; then
-    "$CLANG" --target=mipsel-unknown-elf -mcpu=mips32r2 -msoft-float $opt \
+    "$CLANG" --target=$CT -mcpu=mips32r2 -msoft-float $opt \
         -ffreestanding -isystem lib/libc/include -w -c "$src" -o "$o.o" \
         > "$o.cerr" 2>&1 || { echo CFAIL; exit 0; }
 else
-    "$embcc" --target=mipsel-none-elf $opt -c "$src" -o "$o.o" \
+    "$embcc" --target=$T $opt -c "$src" -o "$o.o" \
         > "$o.cerr" 2>&1 || { echo CFAIL; exit 0; }
 fi
 "$embld" -e _start -Ttext 0x80100000 -Tstack 0x80800000 "$d/../boot.o" \
@@ -100,7 +124,7 @@ sh tests/harness/mips/run.sh "$o.elf" > "$o.out" 2>&1
 s=$(sed -n 's/.*==EXIT \([0-9]*\) ==.*/\1/p' "$o.out" | tail -1)
 echo "${s:-NOEXIT}"
 ONE
-export CLANG
+export CLANG T CT
 
 : > "$out/jobs"
 nna=0; nlp=0
@@ -113,9 +137,9 @@ for c in tests/exec/*.c; do
         nna=$((nna + 1))
         continue
     fi
-    if lp64 "$n"; then
+    if refd "$n"; then
         if [ -z "$CLANG" ]; then
-            echo "n/a $n: assumes LP64, and there is no clang to referee it" \
+            echo "n/a $n: assumes LP64 or little-endian, and there is no clang to referee it" \
                 >> "$out/na.txt"
             nna=$((nna + 1))
             continue
@@ -143,7 +167,7 @@ for opt in -O0 -O1 -O2 -Os; do
         [ -f "$f" ] || continue
         t=$((t + 1))
         got=$(cat "$f")
-        if lp64 "$n"; then
+        if refd "$n"; then
             want=$(cat "$out/run/$n-clang.status")
         else
             want=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$c" |
@@ -158,9 +182,9 @@ for opt in -O0 -O1 -O2 -Os; do
             fail=1
         fi
     done
-    echo "mips $opt: $p of $t programs pass on the board"
+    echo "$NAME $opt: $p of $t programs pass on the board"
 done
-echo "($nlp of them refereed against clang's status for an LP64 assumption;"
+echo "($nlp of them refereed against clang's status for an LP64 or little-endian assumption;"
 echo " $nna not applicable to an ILP32 target, listed in $out/na.txt)"
 [ "$fail" = 0 ] || exit 1
-echo "the exec corpus runs on MIPS32 at -O0, -O1, -O2 and -Os"
+echo "the exec corpus runs on MIPS32 ($T) at -O0, -O1, -O2 and -Os"

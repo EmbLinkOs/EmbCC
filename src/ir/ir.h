@@ -301,6 +301,11 @@ struct ir_ins {
          * reads these instead of walking `ty`. */
         int align;
         int nat_align;       /* ty_natural_align; 0 when not filled: align */
+        /* A struct argument: its address (vreg) is aligned to its type,
+         * because C promises it there -- 0 for a packed struct's member,
+         * and for anything irgen did not say. A backend whose aligned-only
+         * loads fault (Xtensa) reads a 0 one a byte at a time. */
+        int natural;
         int is_float;
         int is_int128;
         int hfa_n, hfa_size;
@@ -337,6 +342,9 @@ struct ir_ins {
      * where the type still exists (§9.1). Zero size means "no scalar
      * result" -- a void call, or a struct, which retsize describes. */
     int ret_tybytes, ret_tysign;
+    /* TriCore: the call's result is a POINTER, which comes back in the
+     * address register A2 rather than in D2 (irgen sets it there only). */
+    int ret_ptr;
     /* The same, for the value a call returns. */
     int ret_hfa_n, ret_hfa_size;
     int ret_byref;

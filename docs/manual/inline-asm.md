@@ -1421,6 +1421,96 @@ static inline unsigned bswap32(unsigned x)
 }
 ```
 
+## LoongArch64
+
+This section applies to `loongarch64-unknown-elf`.
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `g` | a general register chosen by EmbCC |
+| `m` | a general register chosen by EmbCC, holding the address of the operand; it is written into the template as `$REG, 0`, the base and offset a load or store takes |
+| `i`, `n`, `I`, `J`, `K` | the constant, written into the template as a decimal number |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Anything else, a non-constant `i` included, is refused with
+`asm constraint "=a" is not valid for LoongArch`. A chosen register comes
+from `t0` to `t8`, then `a0` to `a7`, skipping registers listed as
+clobbers or named in the template. A register variable must be one of
+those (`register long x __asm__("a0")`); another is refused with
+`register variable bound to 's3' is not supported for LoongArch asm (use
+a0-a7 or t0-t8)`.
+
+### Modifiers
+
+None. `%N` prints the register with its `$` (`$t0`, `$a1`, ...) or the
+constant; any modifier is refused with `asm template modifier '%z' is
+not supported for LoongArch`.
+
+### Template syntax
+
+GNU LoongArch syntax, as llvm-mc reads it. Registers are `$r0` to `$r31`
+and the psABI names with `$` (`$zero`, `$ra`, `$tp`, `$sp`, `$a0`-`$a7`,
+`$t0`-`$t8`, `$fp` or `$s9`, `$s0`-`$s8`). Every operand is written out:
+a load or store is `ld.w $a0, $a1, 0`, and an offset or immediate may be
+a constant expression. A branch target is a byte offset from the branch,
+a multiple of 4, as a number or `.+N` / `.-N`. Labels and symbols are
+accepted in a [file-scope block](#on-cortex-m-risc-v-mips32-and-avr) and
+a `.S` file, where `b`/`bl sym`, `call36`, `tail36`, `la.pcrel`,
+`la.local`, `la`, `la.global` and the `%pc_hi20`/`%pc_lo12`,
+`%got_pc_hi20`/`%got_pc_lo12`, `%abs_*` and `%call36` operators take
+them. Statements are separated by `;` or newlines; `#` and `//` start a
+comment.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `nop`, `ret`, `ertn` | none |
+| `move Rd, Rj`; `jr Rj`; `li.w`, `li.d` `Rd, IMM` | `li` builds any constant, as llvm-mc's does |
+| `add.w/d`, `sub.w/d`, `slt`, `sltu`, `and`, `or`, `xor`, `nor`, `andn`, `orn`, `sll/srl/sra/rotr.w/d`, `maskeqz`, `masknez`, `mul.w/d`, `mulh.w/wu/d/du`, `mulw.d.w/wu`, `div/mod.w/wu/d/du` | `Rd, Rj, Rk` |
+| `addi.w`, `addi.d`, `slti`, `sltui` | `Rd, Rj, IMM`, 12-bit signed |
+| `andi`, `ori`, `xori` | `Rd, Rj, IMM`, 0 to 4095 |
+| `lu52i.d Rd, Rj, IMM`; `lu12i.w`, `lu32i.d`, `pcaddi`, `pcalau12i`, `pcaddu12i`, `pcaddu18i` `Rd, IMM` | 12- and 20-bit signed |
+| `slli`, `srli`, `srai`, `rotri` `.w` / `.d` | `Rd, Rj, SA`, 0-31 / 0-63 |
+| `ext.w.b`, `ext.w.h`, `clo/clz/cto/ctz.w/d`, `revb.2h/4h/2w/d`, `bitrev.4b/8b/w/d`, `cpucfg`, `rdtimel.w`, `rdtimeh.w`, `rdtime.d`, `iocsrrd.b/h/w/d`, `iocsrwr.b/h/w/d` | `Rd, Rj` |
+| `bstrpick.w/d`, `bstrins.w/d` | `Rd, Rj, MSB, LSB` |
+| `alsl.w`, `alsl.d` | `Rd, Rj, Rk, SA`, 1 to 4 |
+| `ld.b/bu/h/hu/w/wu/d`, `st.b/h/w/d` | `Rd, Rj, OFF`, 12-bit signed |
+| `ldx.*`, `stx.*` | `Rd, Rj, Rk` |
+| `ldptr.w/d`, `stptr.w/d`, `ll.w/d`, `sc.w/d` | `Rd, Rj, OFF`, a multiple of 4 in -32768..32764 |
+| `amswap`, `amadd`, `amand`, `amor`, `amxor`, `ammax`, `ammin` (`.w`, `.d`, `.wu`, `.du`, with and without `_db`) | `Rd, Rk, Rj`; Rd may not be Rk or Rj |
+| `beq`, `bne`, `blt`, `bge`, `bltu`, `bgeu`, `bgt`, `ble`, `bgtu`, `bleu` | `Rj, Rd, TARGET`, +-128 KiB |
+| `beqz`, `bnez` | `Rj, TARGET`, +-4 MiB; `bltz`, `bgez`, `bgtz`, `blez` `Rj, TARGET` +-128 KiB |
+| `b`, `bl` | `TARGET`, +-128 MiB |
+| `jirl Rd, Rj, OFF` | |
+| `dbar`, `ibar`, `break`, `syscall`, `idle` | 0 to 32767 |
+| `csrrd`, `csrwr` `Rd, CSR`; `csrxchg Rd, Rj, CSR` | CSR 0 to 16383; csrxchg's Rj not `$r0` or `$r1` |
+
+Floating-point and vector instructions are refused, as is anything else
+outside the list: `asm instruction "fadd.d $fa0, $fa0, $fa0" is not in
+the LoongArch vocabulary`.
+
+### Callee-saved registers on LoongArch64
+
+EmbCC saves nothing around an asm, so a template or clobber list naming
+`$fp` or `$s0`-`$s8` is refused (`LoongArch asm names callee-saved
+register '$s0', which EmbCC does not save around an asm`), and one naming
+`$tp` or `$r21`, which the psABI reserves, likewise. A template that
+calls (`bl`, `jirl`, `syscall`, ...) clobbers `ra`, `a0`-`a7` and
+`t0`-`t8`, whatever its clobber list says.
+
+### Example
+
+```c
+static inline void irq_disable(void)
+{
+    long ie = 0, mask = 4;                  /* CRMD.IE */
+    __asm__ volatile("csrxchg %0, %1, 0x0" : "+r"(ie) : "r"(mask) : "memory");
+}
+```
+
 ## AVR
 
 This section applies to the `avr` target (ATmega328P).

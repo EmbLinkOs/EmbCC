@@ -25,6 +25,10 @@ levels are in [C language](../manual/c-language.md) and
 - **MIPS32** (`mipsel-none-elf`, MIPS32r2 o32 soft float, a PIC32's
   core) is a bare-metal C target with EmbCC's compiler runtime, C
   library and linker, run on QEMU's malta board. C++ is not supported.
+- **LoongArch64** (`loongarch64-unknown-elf`, LA64 LP64S soft float) is
+  a bare-metal C target with EmbCC's compiler runtime, C library,
+  assembler and linker, run on QEMU's virt board. C++ compiles with
+  `-fno-exceptions`.
 - **Windows x86-64** produces COFF objects that are not yet compatible
   with the Microsoft x64 ABI. EmbCC warns on every such compile.
 
@@ -55,7 +59,7 @@ embcc: f.c:3: error: the RV32 backend cannot lower a computed goto yet (function
 ```
 
 The backend names are `ARMv7-M` (every Cortex-M target), `RV32`, `RV64`,
-`MIPS32` and `AVR`.
+`MIPS32`, `LoongArch64` and `AVR`.
 
 An attribute EmbCC does not know is a warning, not an error, and is
 ignored (see [Attributes](#attributes)).
@@ -73,6 +77,7 @@ ignored (see [Attributes](#attributes)).
 | RV32: `riscv32-unknown-elf` | RV32IMAC, soft float. No operation on `long double`. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`. | `librt.a`. No C library. |
 | RV64: `riscv64-unknown-elf` | RV64IMAC, soft float. No operation on `long double` or `__int128`. C only. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | None built (see below). No C library. |
 | MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. No computed goto or narrow atomics. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
+| LoongArch64: `loongarch64-unknown-elf` | LA64 base integer ISA, LP64S soft float, the normal code model; jump tables; `__int128` and binary128 `long double` in software; atomics of every width but 16 bytes. No computed goto. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`, which also links clang's objects (its medium code model and GOT accesses included). | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
 | AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. No atomic read-modify-write, variable-length arrays or computed goto. C only. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
 
 The register allocator is described in
@@ -86,7 +91,7 @@ listed under [ABI limitations](#abi-limitations).
 ### Linking
 
 The driver links x86-64 ELF programs and, for the firmware targets
-(ARMv7-M, ARMv8-M, RV32, RV64, MIPS32, AVR), images whose memory map the build
+(ARMv7-M, ARMv8-M, RV32, RV64, MIPS32, LoongArch64, AVR), images whose memory map the build
 gives: a linker script (`-T`, ARM and RISC-V) or `-Wl,-Ttext`/`-Tdata`.
 A firmware link without one stops with `embcc: error: linking a TRIPLE
 image needs its memory map`. Every other target (AArch64 ELF, Mach-O,
@@ -210,6 +215,18 @@ MIPS32:
 | `-mhard-float`, `-EB`, `-mabicalls`, `-mabi=n32`, `-G8`, a core that is not MIPS32r2 | each refused by name; see [Invoking EmbCC](../manual/invoking.md#mips-options) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
 
+LoongArch64:
+
+| Construct | Diagnostic |
+|---|---|
+| A 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
+| Computed `goto` and `&&label` | `the LoongArch64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
+| `__builtin_frame_address`, `__builtin_return_address` | `the LoongArch64 backend cannot lower __builtin_frame_address or __builtin_return_address (EmbCC's LoongArch code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
+| A scalar local with `aligned` above 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
+| `-mabi=lp64d`, `-mabi=lp64f`, `-mfpu=64`, `-mdouble-float`, `-mcmodel=extreme`, `-mstrict-align`, `-mlsx`, `-mlasx`, an LA32 `-march` | each refused by name; see [Targets](../manual/targets.md#loongarch64) |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
+| In assembly: `la.abs`, the TLS, extreme-model and absolute-GOT operators, floating-point and vector instructions | each refused by name, with the statement |
+
 AVR:
 
 | Construct | Diagnostic |
@@ -223,7 +240,7 @@ AVR:
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 
 C++ code generation is refused on Cortex-M, RV32, MIPS32 and AVR, and
-C++ exceptions at RV64; see [C++](#c).
+C++ exceptions at RV64 and on LoongArch64; see [C++](#c).
 
 ### Runtime libraries
 
@@ -232,9 +249,10 @@ C++ exceptions at RV64; see [C++](#c).
   triples. It ships no C library for Cortex-M, RISC-V or AVR.
 - The compiler runtime (`librt.a`) is built for both Linux triples
   (`make libc-linux-x86_64`, `make libc-linux-aarch64`) and for every
-  Cortex-M triple, `riscv32-unknown-elf`, `mipsel-none-elf` and `avr`
-  (`make rt-embedded`). For `mipsel-none-elf` the C library is built too
-  (`make libc-embedded`), on its bare-metal backend.
+  Cortex-M triple, `riscv32-unknown-elf`, `mipsel-none-elf`,
+  `loongarch64-unknown-elf` and `avr` (`make rt-embedded`). For
+  `mipsel-none-elf` and `loongarch64-unknown-elf` the C library is built
+  too (`make libc-embedded`), on its bare-metal backend.
   It is not built for `riscv64-unknown-elf`, because `lib/rt/int128.c`
   and `lib/rt/fp128.c` use `__int128`, which the RV64 backend refuses.
   The other `lib/rt` files compile for RV64 one at a time.

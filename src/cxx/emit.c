@@ -430,9 +430,7 @@ static char *str_lit(struct cexpr *e)
     sb_printf(&b, "%s\"", pfx);
     const unsigned char *p = (const unsigned char *)e->text;
     for (long i = 0; i < e->slen - 1; i++) {
-        unsigned long v = 0;
-        for (int k = 0; k < w; k++)
-            v |= (unsigned long)p[i * w + k] << (8 * k);
+        unsigned long v = (unsigned long)target_get_uint(p + i * w, w);
         if (w == 1) {
             if (v >= 0x20 && v < 0x7f && v != '"' && v != '\\' && v != '?')
                 sb_printf(&b, "%c", (int)v);

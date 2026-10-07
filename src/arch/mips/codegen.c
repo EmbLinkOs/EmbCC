@@ -1,4 +1,4 @@
-/* MIPS32r2 code generation, little-endian o32, soft float
+/* MIPS32r2 code generation, o32 in either byte order, soft float
  * (docs/internals/mips32-plan.md).
  *
  * The shape is the RV32 backend's (src/arch/riscv/codegen.c), because the
@@ -135,6 +135,21 @@ static const int MIPS_POOL_VA[MIPS_NPOOL - 4] = {
     MIPS_V0, MIPS_V1, MIPS_T7, MIPS_T8,
     MIPS_S0, MIPS_S1, MIPS_S2, MIPS_S3, MIPS_S4, MIPS_S5, MIPS_S6, MIPS_S7
 };
+
+/* BYTE ORDER (docs/internals/big-endian.md). In memory a 64-bit value's
+ * low word is at +0 little-endian and at +4 big-endian. In registers o32
+ * makes a pair MIRROR memory: the argument block's word at the lower
+ * address travels in the lower-numbered register, so a long long in
+ * a0:a1 has its HIGH word in a0 when big-endian, and a result in v0:v1
+ * likewise (clang --target=mips-unknown-elf). The pairs here follow the
+ * same rule, so a value already where the ABI wants it needs no swap: a
+ * pair is named by its first register r, and holds the low word in PLO(r)
+ * and the high one in PHI(r). WLO/WHI are the memory offsets. */
+static int g_be;
+#define PLO(r) ((r) + g_be)
+#define PHI(r) ((r) + 1 - g_be)
+#define WLO (g_be ? 4 : 0)
+#define WHI (g_be ? 0 : 4)
 
 static unsigned long g_mips_taken;      /* registers the pair pass took */
 static int g_mips_pairs = 1;            /* this attempt uses the pair pass */
@@ -608,39 +623,86 @@ static long sslot(const struct mips_fn *F, int v)
 /* rd: v into exactly `reg`. rdr: where v IS (its register, or `scratch`
  * after a load). wreg: where to compute v. wrote: commit it if that was
  * a scratch. wr: v from `reg`. */
+/* A 64-bit vreg read or written at 32 bits (copy propagation lets any
+ * operation read one at its own width) is its LOW word: PLO of its pair,
+ * or WLO into its slot. */
+static int is_wide(const struct mips_fn *F, int v)
+{
+    return F->wide && v >= 0 && v < F->fn->nvregs && F->wide[v];
+}
+
+static int reg_of(const struct mips_fn *F, int v)
+{
+    return is_wide(F, v) ? PLO(F->loc[v]) : F->loc[v];
+}
+
+static long slot32(const struct mips_fn *F, int v)
+{
+    return sslot(F, v) + (is_wide(F, v) ? WLO : 0);
+}
+
+/* Where variable v's OBJECT is. A variable is also read and written as a
+ * vreg -- a whole word at its slot (rd, wrote, a parameter's incoming
+ * register) -- and its slot is a word even when it is a char or a short
+ * (layout gives every local four bytes at least). Little-endian the
+ * object is the word's first bytes, its low end; big-endian its low end
+ * is the word's LAST bytes, so a narrow integer variable lives there, at
+ * slot + 4 - size, and its address, its loads and its stores all say so. */
+static long obj_slot(const struct mips_fn *F, int v)
+{
+    if (g_be && v < F->fn->nvars) {
+        const struct ir_local *L = &F->fn->locals[v];
+        if (L->is_int_or_ptr && L->size > 0 && L->size < 4)
+            return sslot(F, v) + 4 - L->size;
+    }
+    return sslot(F, v);
+}
+
+/* Where a `size`-byte access of variable v is. The IR only ever reads and
+ * writes a variable at its own size (opt refuses to forward between
+ * differing ones on a big-endian target), so this is the object itself;
+ * were a narrower access of a wider variable to reach here, its VALUE's
+ * low bytes are at the object's end when big-endian. */
+static long var_slot(const struct mips_fn *F, int v, int size)
+{
+    long vs = v < F->fn->nvars ? F->fn->locals[v].size
+            : is_wide(F, v) ? 8 : 4;
+    return obj_slot(F, v) + (g_be && vs > size ? vs - size : 0);
+}
+
 static void rd(struct mips_fn *F, int v, int reg)
 {
     if (in_reg(F, v)) {
-        if (F->loc[v] != reg)
-            mips_mv(F->t, reg, F->loc[v]);
+        if (reg_of(F, v) != reg)
+            mips_mv(F->t, reg, reg_of(F, v));
         return;
     }
-    ld_sp(F, reg, sslot(F, v), 4, 1);
+    ld_sp(F, reg, slot32(F, v), 4, 1);
 }
 
 static int rdr(struct mips_fn *F, int v, int scratch)
 {
     if (in_reg(F, v))
-        return F->loc[v];
-    ld_sp(F, scratch, sslot(F, v), 4, 1);
+        return reg_of(F, v);
+    ld_sp(F, scratch, slot32(F, v), 4, 1);
     return scratch;
 }
 
 static int wreg(struct mips_fn *F, int v, int scratch)
 {
-    return in_reg(F, v) ? F->loc[v] : scratch;
+    return in_reg(F, v) ? reg_of(F, v) : scratch;
 }
 
 static void wrote(struct mips_fn *F, int v, int reg)
 {
     if (in_reg(F, v)) {
-        if (F->loc[v] != reg)
-            mips_mv(F->t, F->loc[v], reg);
+        if (reg_of(F, v) != reg)
+            mips_mv(F->t, reg_of(F, v), reg);
         return;
     }
     if (v < 0 || F->slot[v] < 0)
         return;
-    st_sp(F, reg, sslot(F, v), 4);
+    st_sp(F, reg, slot32(F, v), 4);
 }
 
 static void wr(struct mips_fn *F, int v, int reg)
@@ -667,28 +729,28 @@ static void mv2(struct mips_fn *F, int dl, int sl, int dh, int sh)
     if (dh != sh) mips_mv(F->t, dh, sh);
 }
 
-/* A 64-bit value: its pair (low word in loc, high in loc + 1), or its
- * eight-aligned slot, low word first. */
+/* A 64-bit value: its pair (low word in PLO(loc), high in PHI(loc)), or
+ * its eight-aligned slot in the target's order (WLO, WHI). */
 static void rd64(struct mips_fn *F, int v, int lo, int hi)
 {
     if (in_reg(F, v)) {
-        mv2(F, lo, F->loc[v], hi, F->loc[v] + 1);
+        mv2(F, lo, PLO(F->loc[v]), hi, PHI(F->loc[v]));
         return;
     }
-    ld_sp(F, lo, sslot(F, v), 4, 1);
-    ld_sp(F, hi, sslot(F, v) + 4, 4, 1);
+    ld_sp(F, lo, sslot(F, v) + WLO, 4, 1);
+    ld_sp(F, hi, sslot(F, v) + WHI, 4, 1);
 }
 
 static void wr64(struct mips_fn *F, int v, int lo, int hi)
 {
     if (in_reg(F, v)) {
-        mv2(F, F->loc[v], lo, F->loc[v] + 1, hi);
+        mv2(F, PLO(F->loc[v]), lo, PHI(F->loc[v]), hi);
         return;
     }
     if (v < 0 || F->slot[v] < 0)
         return;
-    st_sp(F, lo, sslot(F, v), 4);
-    st_sp(F, hi, sslot(F, v) + 4, 4);
+    st_sp(F, lo, sslot(F, v) + WLO, 4);
+    st_sp(F, hi, sslot(F, v) + WHI, 4);
 }
 
 /* A folded constant as the register holds it: its low 32 bits,
@@ -754,15 +816,16 @@ static void ld_any(struct mips_fn *F, int rt, int base, int off, int size,
     }
     if (size == 4) {
         int r = rt == base ? SCR2 : rt;
-        mips_lwl(t, r, base, off + 3);
-        mips_lwr(t, r, base, off);
+        mips_lwl(t, r, base, g_be ? off : off + 3);
+        mips_lwr(t, r, base, g_be ? off + 3 : off);
         if (r != rt)
             mips_mv(t, rt, r);
         return;
     }
-    /* size 2: the high byte, extended as the value is, then the low */
-    mips_load(t, SCR2, base, off + 1, 1, sign);
-    mips_load(t, rt, base, off, 1, 0);
+    /* size 2: the high byte, extended as the value is, then the low --
+     * at off + 1 and off little-endian, off and off + 1 big-endian */
+    mips_load(t, SCR2, base, g_be ? off : off + 1, 1, sign);
+    mips_load(t, rt, base, g_be ? off + 1 : off, 1, 0);
     mips_shift_imm(t, MIPS_SLL, SCR2, SCR2, 8);
     mips_alu(t, MIPS_OR, rt, rt, SCR2);
 }
@@ -776,13 +839,13 @@ static void st_any(struct mips_fn *F, int rt, int base, int off, int size,
         return;
     }
     if (size == 4) {
-        mips_swl(t, rt, base, off + 3);
-        mips_swr(t, rt, base, off);
+        mips_swl(t, rt, base, g_be ? off : off + 3);
+        mips_swr(t, rt, base, g_be ? off + 3 : off);
         return;
     }
-    mips_store(t, rt, base, off, 1);
+    mips_store(t, rt, base, g_be ? off + 1 : off, 1);           /* low */
     mips_shift_imm(t, MIPS_SRL, SCR2, rt, 8);
-    mips_store(t, SCR2, base, off + 1, 1);
+    mips_store(t, SCR2, base, g_be ? off : off + 1, 1);          /* high */
 }
 
 /* ---- delay slots -----------------------------------------------------------
@@ -889,10 +952,7 @@ static long take_slot(struct mips_fn *F, unsigned long reads, int links)
     unsigned long w, r, wr;
     if (!F->fill || at < F->barrier || site_at(F, at))
         return -1;
-    w = (unsigned long)(unsigned char)t->p[at] |
-        ((unsigned long)(unsigned char)t->p[at + 1] << 8) |
-        ((unsigned long)(unsigned char)t->p[at + 2] << 16) |
-        ((unsigned long)(unsigned char)t->p[at + 3] << 24);
+    w = mips_rdw(t, at);
     if (!slot_decode(w, &r, &wr))
         return -1;
     if (wr & reads)
@@ -1204,7 +1264,8 @@ static const char *fp_cmp_name(enum binop pred, int w)
 /* Put n vregs into the registers a helper (or a call) expects, all at
  * once: the register-to-register edges as one parallel move (SCR breaks
  * a cycle), then the loads, which only write. `half` (may be NULL) picks
- * word 0 or 1 of a 64-bit value. */
+ * the low (0) or high (1) word of a 64-bit value; without it a vreg is
+ * read at 32 bits, which of a 64-bit one is its low word. */
 static void set_args_half(struct mips_fn *F, const int *dstreg,
                           const int *vreg, const int *half, int n)
 {
@@ -1213,7 +1274,9 @@ static void set_args_half(struct mips_fn *F, const int *dstreg,
     for (int k = 0; k < n; k++)
         if (in_reg(F, vreg[k])) {
             pd[npm] = dstreg[k];
-            ps[npm] = F->loc[vreg[k]] + (half ? half[k] : 0);
+            ps[npm] = !half ? reg_of(F, vreg[k])
+                    : !is_wide(F, vreg[k]) ? F->loc[vreg[k]] + half[k]
+                    : half[k] ? PHI(F->loc[vreg[k]]) : PLO(F->loc[vreg[k]]);
             npm++;
         }
     if (npm) {
@@ -1229,7 +1292,9 @@ static void set_args_half(struct mips_fn *F, const int *dstreg,
     for (int k = 0; k < n; k++)
         if (!in_reg(F, vreg[k]))
             ld_sp(F, dstreg[k],
-                  sslot(F, vreg[k]) + (half ? 4L * half[k] : 0), 4, 1);
+                  !half ? slot32(F, vreg[k])
+                  : !is_wide(F, vreg[k]) ? sslot(F, vreg[k]) + 4L * half[k]
+                  : sslot(F, vreg[k]) + (half[k] ? WHI : WLO), 4, 1);
 }
 
 static void set_args(struct mips_fn *F, const int *dstreg, const int *vreg,
@@ -1238,10 +1303,11 @@ static void set_args(struct mips_fn *F, const int *dstreg, const int *vreg,
     set_args_half(F, dstreg, vreg, NULL, n);
 }
 
-/* Two 64-bit operands into a0:a1 and a2:a3 (vb < 0: only the first). */
+/* Two 64-bit operands into a0:a1 and a2:a3 (vb < 0: only the first),
+ * each pair as the ABI orders it (PLO, PHI). */
 static void args64x2(struct mips_fn *F, int va, int vb)
 {
-    int d[4] = { MIPS_A0, MIPS_A1, MIPS_A2, MIPS_A3 };
+    int d[4] = { PLO(MIPS_A0), PHI(MIPS_A0), PLO(MIPS_A2), PHI(MIPS_A2) };
     int v[4], h[4] = { 0, 1, 0, 1 };
     v[0] = v[1] = va;
     v[2] = v[3] = vb;
@@ -1266,7 +1332,7 @@ static void fp_result(struct mips_fn *F, int dst, int w)
 {
     if (dst < 0)
         return;
-    if (w == 8) wr64(F, dst, MIPS_V0, MIPS_V1);
+    if (w == 8) wr64(F, dst, PLO(MIPS_V0), PHI(MIPS_V0));
     else        wr(F, dst, MIPS_V0);
 }
 
@@ -1508,8 +1574,8 @@ static void logic_half(struct mips_fn *F, int op, int d, int s,
 static void src64(struct mips_fn *F, int v, int slo, int shi, int *lo, int *hi)
 {
     if (in_reg(F, v)) {
-        *lo = F->loc[v];
-        *hi = F->loc[v] + 1;
+        *lo = PLO(F->loc[v]);
+        *hi = PHI(F->loc[v]);
         return;
     }
     rd64(F, v, slo, shi);
@@ -1519,8 +1585,8 @@ static void src64(struct mips_fn *F, int v, int slo, int shi, int *lo, int *hi)
 
 static void dst64(struct mips_fn *F, int v, int *lo, int *hi)
 {
-    *lo = in_reg(F, v) ? F->loc[v] : A_LO;
-    *hi = in_reg(F, v) ? F->loc[v] + 1 : A_HI;
+    *lo = in_reg(F, v) ? PLO(F->loc[v]) : A_LO;
+    *hi = in_reg(F, v) ? PHI(F->loc[v]) : A_HI;
 }
 
 /* A 64-bit comparison into ACC: the high words decide unless they are
@@ -1589,9 +1655,9 @@ static int gen_ins64(struct mips_fn *F, int n)
     case IR_BITCAST:
     case IR_MOV:
         if (in_reg(F, i->dst)) {
-            rd64(F, i->a, F->loc[i->dst], F->loc[i->dst] + 1);
+            rd64(F, i->a, PLO(F->loc[i->dst]), PHI(F->loc[i->dst]));
         } else if (in_reg(F, i->a)) {
-            wr64(F, i->dst, F->loc[i->a], F->loc[i->a] + 1);
+            wr64(F, i->dst, PLO(F->loc[i->a]), PHI(F->loc[i->a]));
         } else {
             rd64(F, i->a, A_LO, A_HI);
             wr64(F, i->dst, A_LO, A_HI);
@@ -1704,9 +1770,9 @@ static int gen_ins64(struct mips_fn *F, int n)
             rd64(F, i->a, A_LO, A_HI);
         } else {
             if (in_reg(F, i->a))
-                ext_reg(F, A_LO, F->loc[i->a], i->size, i->sign);
+                ext_reg(F, A_LO, reg_of(F, i->a), i->size, i->sign);
             else
-                ld_sp(F, A_LO, sslot(F, i->a), i->size, i->sign);
+                ld_sp(F, A_LO, var_slot(F, i->a, i->size), i->size, i->sign);
             if (i->sign) mips_shift_imm(t, MIPS_SRA, A_HI, A_LO, 31);
             else         mips_mv(t, A_HI, MIPS_ZERO);
         }
@@ -1717,15 +1783,15 @@ static int gen_ins64(struct mips_fn *F, int n)
         if (i->size == 8)
             wr64(F, i->dst, A_LO, A_HI);
         else if (in_reg(F, i->dst))
-            ext_reg(F, F->loc[i->dst], A_LO, i->size, 1);
+            ext_reg(F, reg_of(F, i->dst), A_LO, i->size, 1);
         else if (F->slot[i->dst] >= 0)
-            st_sp(F, A_LO, sslot(F, i->dst), i->size);
+            st_sp(F, A_LO, var_slot(F, i->dst, i->size), i->size);
         return 1;
     case IR_LOAD:
         rd(F, i->a, ADDR);
         if (i->size == 8) {
-            ld_any(F, A_LO, ADDR, 0, 4, 1, i->natural);
-            ld_any(F, A_HI, ADDR, 4, 4, 1, i->natural);
+            ld_any(F, A_LO, ADDR, WLO, 4, 1, i->natural);
+            ld_any(F, A_HI, ADDR, WHI, 4, 1, i->natural);
         } else {
             ld_any(F, A_LO, ADDR, 0, i->size, i->sign, i->natural);
             if (i->sign) mips_shift_imm(t, MIPS_SRA, A_HI, A_LO, 31);
@@ -1736,9 +1802,10 @@ static int gen_ins64(struct mips_fn *F, int n)
     case IR_STORE:
         rd(F, i->a, ADDR);
         rd64(F, i->b, A_LO, A_HI);
-        st_any(F, A_LO, ADDR, 0, i->size == 8 ? 4 : i->size, i->natural);
+        st_any(F, A_LO, ADDR, i->size == 8 ? WLO : 0,
+               i->size == 8 ? 4 : i->size, i->natural);
         if (i->size == 8)
-            st_any(F, A_HI, ADDR, 4, 4, i->natural);
+            st_any(F, A_HI, ADDR, WHI, 4, i->natural);
         return 1;
     case IR_SELECT: {
         /* dst = a ? b : c with movn: c into A, then b over it when the
@@ -1851,10 +1918,21 @@ static void mips_restore(struct mips_fn *F, int ret)
 }
 
 /* The last, partial word of a composite in a register: its bytes, packed
- * from the lowest address up, as clang packs them. */
+ * from the lowest address up, as clang packs them -- the first byte the
+ * word's least significant little-endian, its MOST significant
+ * big-endian (o32 left-justifies a short composite there). */
 static void pack_tail(struct mips_fn *F, int r, int base, long off, long left)
 {
     mips_mv(F->t, r, MIPS_ZERO);
+    if (g_be) {
+        for (long b = off; b < off + left; b++) {
+            mips_shift_imm(F->t, MIPS_SLL, r, r, 8);
+            mips_load(F->t, SCR, base, (int)b, 1, 0);
+            mips_alu(F->t, MIPS_OR, r, r, SCR);
+        }
+        mips_shift_imm(F->t, MIPS_SLL, r, r, (int)(8 * (4 - left)));
+        return;
+    }
     for (long b = off + left - 1; b >= off; b--) {
         mips_shift_imm(F->t, MIPS_SLL, r, r, 8);
         mips_load(F->t, SCR, base, (int)b, 1, 0);
@@ -1905,8 +1983,8 @@ static void gen_call(struct mips_fn *F, int n)
         } else if (a->size > 4) {
             /* an 8-byte scalar is 8-aligned, so never split: wholly here */
             rd64(F, a->vreg, SCR, SCR2);
-            st_out(F, SCR, pl[k].stk, 4);
-            st_out(F, SCR2, pl[k].stk + 4, 4);
+            st_out(F, SCR, pl[k].stk + WLO, 4);
+            st_out(F, SCR2, pl[k].stk + WHI, 4);
         } else {
             rd(F, a->vreg, SCR);
             st_out(F, SCR, pl[k].stk, 4);
@@ -1927,7 +2005,8 @@ static void gen_call(struct mips_fn *F, int n)
             for (int q = 0; q < pl[k].nreg; q++) {
                 sd_[ns_] = argreg(pl[k].reg + q);
                 sv_[ns_] = a->vreg;
-                sh_[ns_] = a->size > 4 ? q : 0;
+                /* word q: the high one first when big-endian */
+                sh_[ns_] = a->size > 4 ? (g_be ? 1 - q : q) : 0;
                 ns_++;
             }
         }
@@ -1985,7 +2064,12 @@ static void gen_call(struct mips_fn *F, int n)
         addr_sp(F, ACC, at);
         wr(F, i->dst, ACC);
     } else if (F->wide[i->dst]) {
-        wr64(F, i->dst, MIPS_V0, MIPS_V1);
+        /* a 64-bit result in v0:v1 as the ABI orders it; a 32-bit one read
+         * into a 64-bit value is v0, its low word, in either order */
+        if (g_be && i->ret_tybytes > 4)
+            wr64(F, i->dst, MIPS_V1, MIPS_V0);
+        else
+            wr64(F, i->dst, MIPS_V0, MIPS_V1);
     } else {
         wr(F, i->dst, MIPS_V0);
     }
@@ -2116,9 +2200,9 @@ static void gen_ins(struct mips_fn *F, int n)
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {
         int k = (int)i->imm - 32, d = wreg(F, i->dst, A_LO), hi;
         if (in_reg(F, i->a)) {
-            hi = F->loc[i->a] + 1;
+            hi = PHI(F->loc[i->a]);
         } else {
-            ld_sp(F, A_HI, sslot(F, i->a) + 4, 4, 1);
+            ld_sp(F, A_HI, sslot(F, i->a) + WHI, 4, 1);
             hi = A_HI;
         }
         if (k)
@@ -2157,14 +2241,14 @@ static void gen_ins(struct mips_fn *F, int n)
                  * names, the operands in a0:a1 and a2:a3 */
                 if (i->imm_b) {
                     args64x2(F, i->a, -1);
-                    operand_b64(F, i, MIPS_A2, MIPS_A3);
+                    operand_b64(F, i, PLO(MIPS_A2), PHI(MIPS_A2));
                 } else {
                     args64x2(F, i->a, i->b);
                 }
                 call_helper(F, i->op == IR_DIV
                             ? (i->sign ? "__divdi3" : "__udivdi3")
                             : (i->sign ? "__moddi3" : "__umoddi3"));
-                wr64(F, i->dst, MIPS_V0, MIPS_V1);
+                wr64(F, i->dst, PLO(MIPS_V0), PHI(MIPS_V0));
                 return;
             }
             if (i->op == IR_BSWAP) {
@@ -2247,7 +2331,7 @@ static void gen_ins(struct mips_fn *F, int n)
         {
             /* the second operand may not land in the destination before
              * the first is read: a scratch unless it has a home */
-            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
             if (rb_ == TMP) operand_b(F, i, TMP);
             mips_alu(t, op, rd_, ra_, rb_);
         }
@@ -2256,7 +2340,7 @@ static void gen_ins(struct mips_fn *F, int n)
     }
     case IR_DIV: case IR_MOD: {
         int ra_ = rdr(F, i->a, ACC);
-        int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+        int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
         int d;
         if (rb_ == TMP) operand_b(F, i, TMP);
         mips_muldiv(t, i->sign ? MIPS_DIV : MIPS_DIVU, ra_, rb_);
@@ -2275,7 +2359,7 @@ static void gen_ins(struct mips_fn *F, int n)
                               : i->sign ? MIPS_SRA : MIPS_SRL,
                            d, ra_, (int)i->imm);
         } else {
-            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
             if (rb_ == TMP) operand_b(F, i, TMP);
             d = wreg(F, i->dst, ACC);
             mips_alu(t, i->op == IR_SHL ? MIPS_SLLV
@@ -2345,7 +2429,7 @@ static void gen_ins(struct mips_fn *F, int n)
                 F->skip_next = 1;
                 return;
             }
-            rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
             if (i->imm_b && imm_val(i) == 0)
                 rb_ = MIPS_ZERO;
             if (rb_ == TMP) operand_b(F, i, TMP);
@@ -2371,7 +2455,7 @@ static void gen_ins(struct mips_fn *F, int n)
             /* cmp_to_reg reads its operands only in its first instruction,
              * so d may be either of them */
             int ra_ = rdr(F, i->a, ACC);
-            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
             int d = wreg(F, i->dst, ACC);
             if (i->imm_b && cmp_imm_to_reg(F, i->pred, i->sign, ra_,
                                            imm_val(i), d)) {
@@ -2429,12 +2513,12 @@ static void gen_ins(struct mips_fn *F, int n)
         int d = wreg(F, i->dst, ACC);
         if (in_reg(F, i->a)) {
             if (mips_ldvar_plain(i->size, i->sign, i->w)) {
-                if (d != F->loc[i->a]) mips_mv(t, d, F->loc[i->a]);
+                if (d != reg_of(F, i->a)) mips_mv(t, d, reg_of(F, i->a));
             } else {
-                ext_reg(F, d, F->loc[i->a], i->size, i->sign);
+                ext_reg(F, d, reg_of(F, i->a), i->size, i->sign);
             }
         } else {
-            ld_sp(F, d, sslot(F, i->a), i->size, i->sign);
+            ld_sp(F, d, var_slot(F, i->a, i->size), i->size, i->sign);
         }
         wrote(F, i->dst, d);
         return;
@@ -2445,12 +2529,12 @@ static void gen_ins(struct mips_fn *F, int n)
             /* a narrowing store sign-extends; an unsigned read extends
              * for itself (ldvar_plain is only the full word) */
             if (i->size >= 4) {
-                if (F->loc[i->dst] != src) mips_mv(t, F->loc[i->dst], src);
+                if (reg_of(F, i->dst) != src) mips_mv(t, reg_of(F, i->dst), src);
             } else {
-                ext_reg(F, F->loc[i->dst], src, i->size, 1);
+                ext_reg(F, reg_of(F, i->dst), src, i->size, 1);
             }
         } else {
-            st_sp(F, src, sslot(F, i->dst), i->size);
+            st_sp(F, src, var_slot(F, i->dst, i->size), i->size);
         }
         return;
     }
@@ -2477,7 +2561,7 @@ static void gen_ins(struct mips_fn *F, int n)
 
     case IR_ADDR: {
         int d = wreg(F, i->dst, ACC);
-        addr_sp(F, d, sslot(F, i->a));
+        addr_sp(F, d, obj_slot(F, i->a));
         wrote(F, i->dst, d);
         return;
     }
@@ -2539,8 +2623,11 @@ static void gen_ins(struct mips_fn *F, int n)
                     copy_block(F, 1, fn->ret_abi.size, 0);
                     ld_sp(F, MIPS_V0, F->sret_slot, 4, 1);
                 }
+            } else if (F->wide[i->a] && g_be && fn->ret_abi.size <= 4) {
+                /* a 32-bit result of a 64-bit value: its low word, in v0 */
+                rd(F, i->a, MIPS_V0);
             } else if (F->wide[i->a]) {
-                rd64(F, i->a, MIPS_V0, MIPS_V1);
+                rd64(F, i->a, PLO(MIPS_V0), PHI(MIPS_V0));
             } else {
                 rd(F, i->a, MIPS_V0);
             }
@@ -2602,8 +2689,8 @@ static void gen_ins(struct mips_fn *F, int n)
         if (i->op == IR_I2F && src_w == 8 && i->a >= 0 && !F->wide[i->a]) {
             /* a 32-bit value asked for as 64: zero-extended (only an
              * unsigned one is ever widened this way) */
-            rd(F, i->a, MIPS_A0);
-            mips_mv(t, MIPS_A1, MIPS_ZERO);
+            rd(F, i->a, PLO(MIPS_A0));
+            mips_mv(t, PHI(MIPS_A0), MIPS_ZERO);
         } else if (src_w == 8) {
             args64x2(F, i->a, -1);
         } else {
@@ -2611,8 +2698,10 @@ static void gen_ins(struct mips_fn *F, int n)
         }
         call_helper(F, cvt_name(i));
         if (i->dst >= 0) {
-            if (F->wide[i->dst])
-                wr64(F, i->dst, MIPS_V0, MIPS_V1);
+            if (F->wide[i->dst] && g_be && i->w <= 4)
+                wr64(F, i->dst, MIPS_V0, MIPS_V1);     /* a 32-bit result */
+            else if (F->wide[i->dst])
+                wr64(F, i->dst, PLO(MIPS_V0), PHI(MIPS_V0));
             else
                 wr(F, i->dst, MIPS_V0);
         }
@@ -2820,7 +2909,7 @@ static void gen_ins(struct mips_fn *F, int n)
         for (int k = 0; k < n; k++) {
             want_label(F, t->len, fn->jt[i->jt].labels[k], FX_TAB);
             F->fix[F->nfix - 1].base = anchor;
-            code_u32(t, 0);
+            mips_w(t, 0);
         }
         code_mark_data(t, tab, t->len);
         F->barrier = t->len;
@@ -2872,6 +2961,24 @@ static void copy_block(struct mips_fn *F, int copy, long size, int aligned)
     for (; k < size; k++) {
         if (copy) mips_load(t, SCR, TMP, (int)k, 1, 0);
         mips_store(t, copy ? SCR : MIPS_ZERO, ADDR, (int)k, 1);
+    }
+}
+
+/* The `left` (1..3) bytes of a composite's last, partial word in r, to
+ * the frame at off: the word's first bytes in memory order -- its low end
+ * little-endian, its high end big-endian, where o32 left-justifies them.
+ * r may be clobbered; SCR2 is used. */
+static void store_tail(struct mips_fn *F, int r, long off, long left)
+{
+    for (long b = 0; b < left; b++) {
+        if (g_be) {
+            mips_shift_imm(F->t, MIPS_SRL, SCR2, r, (int)(24 - 8 * b));
+            st_sp(F, SCR2, off + b, 1);
+        } else {
+            if (r != SCR) { mips_mv(F->t, SCR, r); r = SCR; }
+            if (b) mips_shift_imm(F->t, MIPS_SRL, r, r, 8);
+            st_sp(F, r, off + b, 1);
+        }
     }
 }
 
@@ -3096,7 +3203,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)F.slot[v];
+            fn->var_off[v] = F.slot[v] < 0 ? (int)F.slot[v]
+                                           : (int)obj_slot(&F, v);
     }
     /* BRANCH RELAXATION, the other way round from RISC-V's: every branch
      * is tried in its short form, and one that does not reach is given the
@@ -3170,11 +3278,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                 if (a->size > 4 && in_reg(&F, i)) {
                     for (int q = 0; q < 2; q++) {
                         if (q < pl.nreg && !fn->is_varargs) {
-                            pmv_dst[npmv] = F.loc[i] + q;
+                            /* word q is the high one big-endian */
+                            pmv_dst[npmv] = (g_be ? 1 - q : q)
+                                          ? PHI(F.loc[i]) : PLO(F.loc[i]);
                             pmv_src[npmv] = argreg(pl.reg + q);
                             npmv++;
                         } else {
-                            pstk_reg[npstk] = F.loc[i] + q;
+                            pstk_reg[npstk] = (g_be ? 1 - q : q)
+                                            ? PHI(F.loc[i]) : PLO(F.loc[i]);
                             pstk_off[npstk] = q < pl.nreg
                                 ? base + 4L * (pl.reg + q)
                                 : base + pl.stk + 4L * (q - pl.nreg);
@@ -3190,25 +3301,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                         st_sp(&F, SCR, sslot(&F, i) + 4L * (pl.nreg + q), 4);
                     }
                 } else if (pl.nreg && in_reg(&F, i) && !fn->is_varargs) {
-                    pmv_dst[npmv] = F.loc[i];
+                    pmv_dst[npmv] = reg_of(&F, i);
                     pmv_src[npmv] = argreg(pl.reg);
                     npmv++;
                 } else if (pl.nreg && in_reg(&F, i)) {
                     /* variadic: from the home area, which the pool's
                      * registers (no argument register) cannot disturb */
-                    pstk_reg[npstk] = F.loc[i];
+                    pstk_reg[npstk] = reg_of(&F, i);
                     pstk_off[npstk] = base + 4L * pl.reg;
                     npstk++;
                 } else if (pl.nreg) {
                     if (F.slot[i] >= 0)
-                        st_sp(&F, param_reg(&F, &pl, 0), sslot(&F, i), 4);
+                        /* the whole word, in either order: a promoted
+                         * char is right-justified in it, which is where
+                         * obj_slot puts a narrow variable big-endian */
+                        st_sp(&F, param_reg(&F, &pl, 0), slot32(&F, i), 4);
                 } else if (in_reg(&F, i)) {
-                    pstk_reg[npstk] = F.loc[i];
+                    pstk_reg[npstk] = reg_of(&F, i);
                     pstk_off[npstk] = base + pl.stk;
                     npstk++;
                 } else if (F.slot[i] >= 0) {
                     ld_sp(&F, SCR, base + pl.stk, 4, 1);
-                    st_sp(&F, SCR, sslot(&F, i), 4);
+                    st_sp(&F, SCR, slot32(&F, i), 4);
                 }
                 continue;
             }
@@ -3218,29 +3332,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                 long off = sslot(&F, i) + 4L * q;
                 long left = a->size - 4L * q;
                 int r = param_reg(&F, &pl, q);
-                if (left >= 4) {
+                if (left >= 4)
                     st_sp(&F, r, off, 4);
-                } else {
-                    if (r != SCR) { mips_mv(t, SCR, r); r = SCR; }
-                    for (long b = 0; b < left; b++) {
-                        if (b) mips_shift_imm(t, MIPS_SRL, r, r, 8);
-                        st_sp(&F, r, off + b, 1);
-                    }
-                }
+                else
+                    store_tail(&F, r, off, left);
             }
             for (int q = 0; q < pl.nstk; q++) {
                 long src = base + pl.stk + 4L * q;
                 long dst = sslot(&F, i) + 4L * (pl.nreg + q);
                 long left = a->size - 4L * (pl.nreg + q);
                 ld_sp(&F, SCR, src, 4, 1);
-                if (left >= 4) {
+                if (left >= 4)
                     st_sp(&F, SCR, dst, 4);
-                } else {
-                    for (long b = 0; b < left; b++) {
-                        if (b) mips_shift_imm(t, MIPS_SRL, SCR, SCR, 8);
-                        st_sp(&F, SCR, dst + b, 1);
-                    }
-                }
+                else
+                    store_tail(&F, SCR, dst, left);
             }
         }
         if (npmv) {
@@ -3306,9 +3411,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
             continue;
         }
         if (F.fix[i].kind == FX_TAB) {
-            code_patch32(t, F.fix[i].at,
-                         (unsigned long)(target - F.fix[i].base) &
-                         0xffffffffUL);
+            mips_wrw(t, F.fix[i].at,
+                     (unsigned long)(target - F.fix[i].base) & 0xffffffffUL);
             continue;
         }
         if (!mips_patch_b(t, F.fix[i].at, target)) {
@@ -3391,7 +3495,7 @@ void mips_build_abiflags(unsigned char out[24])
     out[3] = 2;                 /* isa_rev */
     out[4] = 1;                 /* gpr_size: AFL_REG_32 */
     out[7] = 3;                 /* fp_abi: Val_GNU_MIPS_ABI_FP_SOFT */
-    out[16] = 1;                /* flags1: AFL_FLAGS1_ODDSPREG */
+    out[target_big_endian() ? 19 : 16] = 1;   /* flags1, a word: ODDSPREG */
 }
 
 void codegen_unit_mips(struct ir_unit *iu, struct code *text,
@@ -3405,6 +3509,8 @@ void codegen_unit_mips(struct ir_unit *iu, struct code *text,
 
     (void)optimize; (void)no_sse;
     g_mips_regalloc = regalloc;
+    g_be = target_big_endian();
+    mips_set_big_endian(g_be);
     memset(&st, 0, sizeof st);
     for (int n = 0; n < iu->nfuncs; n++)
         gen_func_best(&iu->funcs[n], text, &st, want_debug);

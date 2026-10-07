@@ -23,7 +23,7 @@ out=tests/golden/out/thumb-encoding
 rm -rf "$out"; mkdir -p "$out"
 
 cc -std=c99 -Wall -Wextra -o "$out/thumbcheck" \
-   tools/thumbcheck/thumbcheck.c src/arch/thumb/emit.c \
+   tools/thumbcheck/thumbcheck.c src/arch/thumb/emit.c src/arch/thumb/a32.c \
    src/arch/code.c src/driver/util.c || {
     echo "thumbcheck did not build"; exit 1; }
 

@@ -24,9 +24,13 @@ little-endian.
 | [AArch64](#aarch64) | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | ELF64 | AAPCS64 | an external linker |
 | [Apple arm64](#apple-arm64) | `aarch64-apple-darwin` | Mach-O | Apple arm64 | the system linker |
 | [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
+| [ARMv7-A](#armv7-a) | `armv7a-none-eabi`, `armv7a-none-eabihf` | ELF32 | AAPCS, AAPCS-VFP | `embld` |
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
+| [LoongArch64](#loongarch64) | `loongarch64-unknown-elf` | ELF64 | LoongArch psABI, LP64S (soft float) | `embld` |
+| [TriCore](#tricore) | `tricore-none-elf` | ELF32 | TriCore EABI, soft float | `embld` |
+| [Xtensa](#xtensa) | `xtensa-none-elf` | ELF32 | windowed, soft float | `embld` |
 
 | Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
@@ -37,10 +41,15 @@ little-endian.
 | Apple arm64 | Objects for the system linker | FP/SIMD | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
 | Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
 | Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
+| ARMv7-A (A32), soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
+| ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
 | RV32 | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
 | MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
+| LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
+| TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
+| Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
@@ -111,22 +120,50 @@ Size and alignment in bytes, written `size/alignment`. "x86-64" covers
 `aarch64-elf`, `aarch64-emblink` and `aarch64-linux-gnu`; "Cortex-M"
 covers every `thumb*` triple.
 
-| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed |
-| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 |
-| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 |
-| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 |
-| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 |
-| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 |
-| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 |
-| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 |
-| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 |
-| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` |
-| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — |
-| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 |
-| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
-| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | LoongArch64 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | TriCore |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | signed |
+| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 |
+| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 8/8 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 8/8 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 16/16 binary128 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | 16/16 |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 4/4 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/4 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 4/4 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/4 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 8/4 binary64 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | — |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 8 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 8 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | Xtensa |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | unsigned |
+| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 |
+| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 4/4 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 4/4 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 8/8 binary64 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 2/2 `unsigned short` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | — |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
 
 Notes on the table:
 
@@ -159,6 +196,8 @@ Notes on the table:
   `the RV32 backend cannot lower a 128-bit value yet`. RV64's `__int128`
   is the same: it can be declared and measured with `sizeof`, and every
   operation on one is refused with the RV64 form of that message.
+- On LoongArch64 `long double` and `__int128` are computed: binary128
+  arithmetic and the 128-bit divides and variable shifts call lib/rt.
 - On AVR every type has alignment 1, so `struct { char c; int i; }` is
   three bytes.
 - Windows uses the LP64 model here, which is not Microsoft's; see
@@ -181,7 +220,8 @@ and AArch64.
 Any other `-m` option not listed in a target's section is an error:
 `embcc: error: unknown argument '-mfoo'`. In particular `-m32`, `-m64`
 and `-mmcu=` are not accepted, and `-march=` and `-mabi=` only on MIPS
-(see [MIPS32](#mips32)).
+and LoongArch (see [MIPS32](#mips32) and [LoongArch64](#loongarch64)).
+and (`-mabi=`) Xtensa (see [MIPS32](#mips32) and [Xtensa](#xtensa)).
 
 ## x86-64
 
@@ -754,6 +794,110 @@ part with another bus master, defines its own.
 An array or structure local aligned beyond 8 bytes is supported: its
 storage is carved from the stack at function entry and rounded up.
 
+## ARMv7-A
+
+ARMv7-A in ARM state: the A32 instruction set of a Cortex-A5, A7, A8, A9,
+A12, A15 or A17, little-endian, with the base AAPCS (soft float) or, with
+a VFP unit, AAPCS-VFP.
+Freestanding only. It is the Cortex-M backend's instruction selection
+writing A32 encodings; the design notes are in
+[the ARMv7-A plan](../internals/arm-a32-plan.md).
+
+### Triples
+
+| Triple | Accepted aliases | ISA | ABI |
+|---|---|---|---|
+| `armv7a-none-eabi` | `armv7a`, `armv7-none-eabi`, `armv7a-unknown-none-eabi` | ARMv7-A, ARM state | AAPCS, soft float |
+| `armv7a-none-eabihf` | `armv7a-unknown-none-eabihf` | ARMv7-A, ARM state, VFPv3-D16 | AAPCS-VFP |
+
+### Options
+
+| Option | Accepted values | Refused with |
+|---|---|---|
+| `-marm` | (no value) | `-mthumb is not supported on armv7a-none-eabi: EmbCC emits ARM (A32) code for a Cortex-A` |
+| `-mcpu=CPU` | `cortex-a5`, `cortex-a7`, `cortex-a8`, `cortex-a9`, `cortex-a12`, `cortex-a15`, `cortex-a17`, `generic` | `-mcpu=cortex-r5 is not supported on armv7a-none-eabi` (a Cortex-M or Cortex-R core) |
+| `-mfloat-abi=ABI` | `soft`, `softfp`, `hard` (the last two with an `-mfpu=`) | `-mfloat-abi=hard needs an FPU to use: add -mfpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)` |
+| `-mfpu=FPU` | `vfpv3-d16`, `vfpv3`, `vfpv4-d16`, `vfpv4`, `none` | `-mfpu=neon is not supported on armv7a-none-eabi: EmbCC emits VFPv3 or VFPv4 ... and no NEON (Advanced SIMD) instruction` |
+| `-mabi=ABI` | `aapcs`, `aapcs-linux` | as for Cortex-M |
+| `-munaligned-access`, `-mthumb-interwork` | (no value) | `-mno-unaligned-access is not supported` |
+
+No divide instruction is used, so the code runs on every ARMv7-A core:
+`/` and `%` call `__aeabi_idiv`, `__aeabi_uidiv`, `__aeabi_idivmod` and
+`__aeabi_uidivmod`, which `lib/rt` provides. `armv7a-none-eabihf` is
+`-mfpu=vfpv3-d16 -mfloat-abi=hard`; with `softfp` the FPU computes and
+floating point travels in the core registers, as with `soft`. Either way
+the code is the Cortex-M7's single- and double-precision VFP on `d0`–`d15`
+(`s16`–`s31`/`d8`–`d15` preserved); with `-mfloat-abi=soft` no VFP
+instruction is emitted even with an `-mfpu=`, as GCC reads it. No NEON
+instruction is ever emitted.
+
+### Calling convention: AAPCS, soft float
+
+The Cortex-M targets' base standard ([Calling convention:
+AAPCS32](#calling-convention-aapcs32)), unchanged: `r0`–`r3` for
+arguments and results, an 8-byte value in an even register pair or an
+8-aligned stack slot, a composite larger than 4 bytes returned through a
+hidden pointer in `r0`, `r4`–`r11` preserved, the stack 8-byte aligned at
+every call, `char` unsigned and enums `int`-sized. `float` and `double`
+travel as `int` and `long long` do. `tests/golden/arm-a32-abi.sh` checks
+it with EmbCC and clang calling each other, in ARM state and across ARM
+and Thumb.
+
+### Code generation
+
+Every instruction is one A32 word. Constants and addresses are
+`movw`/`movt` (`R_ARM_MOVW_ABS_NC`, `R_ARM_MOVT_ABS`); calls are `bl`
+(`R_ARM_CALL`) and tail calls `b` (`R_ARM_JUMP24`), reaching ±32 MiB. A
+dense `switch` is `add pc, pc, rI, lsl #2` over a table of branches.
+Comparisons that produce a value use conditional `mov`s. The code assumes
+unaligned `ldr`/`str`/`ldrh`/`strh` work (`__ARM_FEATURE_UNALIGNED`, as
+clang does): with the MMU on and the memory Normal, which is how an
+A-profile system runs; with the MMU off every access is Strongly-ordered
+and an unaligned one faults.
+
+### Object format
+
+ELF32, little-endian, `EM_ARM`, `e_flags` `EF_ARM_EABI_VER5`. Function
+symbols are even (ARM state) and each function starts with an `$a`
+mapping symbol. `.ARM.attributes` says `Tag_CPU_arch` v7, profile
+`A`, the ARM ISA permitted and Thumb-2 permitted (as clang writes it), and
+`Tag_ABI_VFP_args` base standard.
+
+`embld` links A32 objects -- its own and clang's, REL or RELA -- and
+interworks: a `bl` to a Thumb function becomes `blx`, as does a Thumb
+`bl` to an ARM function. A jump (`b`) between the two instruction sets
+needs a veneer and is refused. `-Tstack` writes an A32 stub that sets `sp`
+and branches to the entry, since an A-profile core comes out of reset
+with no stack.
+
+### Predefined macros
+
+clang's for `--target=armv7a-none-eabi -mfloat-abi=soft`: `__arm__`,
+`__ARM_ARCH 7`, `__ARM_ARCH_7A__`, `__ARM_ARCH_PROFILE 'A'`,
+`__ARM_ARCH_ISA_ARM`, `__ARM_EABI__`, `__SOFTFP__`, `__ARM_FEATURE_DSP`,
+`__ARM_FEATURE_UNALIGNED`, `__ARM_FEATURE_LDREX 0xf`; no `__thumb__`, no
+`__ARM_FEATURE_IDIV`, no `__ARM_FP`. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8`
+is left out, as an 8-byte atomic is refused.
+
+### Runtime
+
+`make rt-embedded` and `make libc-embedded` build `lib/rt` and `lib/libc`
+for `armv7a-none-eabi`. `lib/libc` has `setjmp`/`longjmp` for ARM state.
+`tests/harness/arm-a32` boots QEMU's `virt` board (a Cortex-A15): the
+MMU on with a flat map, the exception vectors, the PL011 UART and a
+semihosting exit.
+
+### Limitations
+
+Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), an atomic wider than
+four bytes, computed `goto`, `__builtin_frame_address` and
+`__builtin_return_address`, `__attribute__((interrupt))` (an A-profile
+handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
+and C++. Inline assembly takes the Cortex-M vocabulary in ARM state, with
+a condition on any instruction, and adds `mrs`/`msr` of `cpsr`,
+`mrc`/`mcr` and the A32 ranges of `svc`, `bkpt` and `udf`; the M-profile
+special registers, `cbz`, `tbb` and `tbh` are refused.
+
 ## RISC-V
 
 ### Triples
@@ -996,6 +1140,383 @@ exception prints its cause and address.
 | a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
 
+## LoongArch64
+
+LA64, little-endian, with the LoongArch psABI's LP64S convention (soft
+float): `loongarch64-unknown-elf`. Freestanding only. The design notes
+are in [the LoongArch64 plan](../internals/loongarch64-plan.md).
+## TriCore
+
+Infineon TriCore 1.6.1, the core of the AURIX TC2xx microcontrollers and
+a subset of the TC3xx's TriCore 1.6.2: 32-bit, little-endian, soft float.
+Freestanding only. The design notes, and where each fact below comes
+from, are in [the TriCore plan](../internals/tricore-plan.md): there is
+no TriCore compiler on the machine EmbCC is developed on, so the calling
+convention, the data layout, the relocation numbers and the predefined
+macros are the TriCore EABI and GCC for TriCore **as remembered, and
+unverified** against a reference compiler. The instruction encodings are
+checked against QEMU's TriCore translator, and every test runs on QEMU's
+`tricore_testboard`.
+
+### Triples
+
+| Triple | Accepted aliases | ISA | ABI |
+|---|---|---|---|
+| `loongarch64-unknown-elf` | `loongarch64-none-elf`, `loongarch64-elf`, `loongarch64` | LA64 base integer | LP64S |
+
+There is no LA32 target (`loongarch32-unknown-elf` is unknown).
+
+### Options
+
+EmbCC emits one configuration: the LA64 base integer ISA, LP64S, the
+normal code model. The options a LoongArch build passes are accepted when
+they ask for that, or for something it is a valid part of, and refused by
+name otherwise.
+
+| Option | Accepted values | Refused with |
+|---|---|---|
+| `-march=ARCH` | `loongarch64`, `la64v1.0`, `la64v1.1`, `la464`, `la664` | `-march=la32v1.0 is not an LA64 architecture: EmbCC emits the LA64 base integer ISA (loongarch64, la64v1.0, la64v1.1, la464, la664)` |
+| `-mtune=CPU` | any | -- |
+| `-mabi=ABI` | `lp64s` | `-mabi=lp64d is not supported: EmbCC emits the soft-float LP64S convention (-mabi=lp64s), which passes floating point in the integer registers` |
+| `-mfpu=FPU` | `none`, `0` | `-mfpu=64 is not supported: EmbCC's LoongArch code uses no FPU (-mfpu=none)` |
+| `-msoft-float` | (no value) | `-mdouble-float` / `-msingle-float is not supported: EmbCC emits soft-float LP64S code (-msoft-float)` |
+| `-mcmodel=MODEL` | `normal`, `medium` | `-mcmodel=extreme is not supported: EmbCC emits the normal code model (bl, pcalau12i + addi.d)` |
+| `-mrelax`, `-mno-relax` | (no value) | -- |
+| `-mno-strict-align` | (no value) | `-mstrict-align is not supported: EmbCC's LoongArch code may access a packed member unaligned, as LA64 permits` |
+| `-mno-lsx`, `-mno-lasx` | (no value) | `-mlsx is not supported: EmbCC emits no LSX or LASX vector instructions` |
+
+The code runs on every LA64 core; a floating-point or vector unit, if
+the core has one, is not used.
+
+### Calling convention: LP64S
+
+The LoongArch psABI's integer convention, which is RISC-V's LP64 rule for
+rule:
+
+- Arguments go in `a0`–`a7` (`$r4`–`$r11`), then on the stack, each
+  stack argument in an 8-byte slot (16-aligned for a 16-aligned type).
+  A 16-byte scalar (`__int128`, `long double`) takes two registers with
+  no alignment when named -- `f(int, __int128)` uses `a1:a2` -- and an
+  EVEN-aligned pair when variadic; with one register left it is split
+  between `a7` and the stack.
+- A structure of at most 16 bytes travels packed in one or two registers
+  (or split across `a7` and the stack); a larger one is passed by
+  reference to a copy the caller makes.
+- Results come back in `a0` (and `a1`); a structure larger than 16 bytes
+  through a hidden pointer in `a0`. `_Complex` values are small
+  structures.
+- A 32-bit value is kept sign-extended in its 64-bit register, `unsigned
+  int` included.
+- `float` and `double` travel in the integer registers as their bits,
+  and a variadic `float` is promoted to `double`. Floating-point
+  operations call lib/rt (`__adddf3`, ...).
+- `va_list` is a `void *`.
+- `fp` (`$r22`) and `s0`–`s8` survive a call. `tp` (`$r2`) and `$r21`
+  are never used by compiled code.
+- The stack is 16-byte aligned. An unnamed bit-field does not affect a
+  structure's alignment.
+
+`tests/golden/loongarch-abi.sh` checks these rules with EmbCC and clang
+calling each other on the board.
+
+### Code generation
+
+Calls are `bl` with `R_LARCH_B26` (+-128 MiB); addresses are `pcalau12i`
+and `addi.d` with `R_LARCH_PCALA_HI20` and `R_LARCH_PCALA_LO12`.
+Conditional branches reach +-128 KiB (`beqz`/`bnez` +-4 MiB); one that
+does not reach becomes an inverted branch over a `b`. A dense `switch`
+dispatches through a table of offsets from a `pcaddi`. One- and two-byte
+atomics are `ll.w`/`sc.w` loops on the word that holds them; four- and
+eight-byte ones are the `am*_db` instructions and `ll`/`sc` loops.
+
+### Object format
+
+ELF64, little-endian, `EM_LOONGARCH`, RELA relocations, `e_flags` `0x41`
+(soft-float ABI, object ABI v1), as clang writes for `-mabi=lp64s`.
+
+`embld` links these objects and clang's (`--target=loongarch64-unknown-elf
+-msoft-float`, its default medium code model included): the data and
+ADD/SUB relocations, `B16`/`B21`/`B26`, `CALL36`, the PCALA pair, the ABS
+sequence and `PCREL20_S2`. It builds no GOT: clang's GOT access
+(`GOT_PC_HI20`/`GOT_PC_LO12`) is rewritten to the direct address.
+`R_LARCH_RELAX` and `R_LARCH_ALIGN` are ignored. It refuses objects for
+the hard-float ABIs, and the extreme code model's and TLS relocations, by
+name. `-Tstack ADDR` makes it emit an entry stub that sets `sp` and
+jumps to the entry symbol.
+
+### Assembly
+
+`embcc -c` assembles `.s` and `.S` files for LoongArch64, and file-scope
+`asm` blocks and `__attribute__((naked))` functions are assembled the same
+way, in GNU as's syntax with `$`-spelt registers. The vocabulary is the
+base integer ISA, the AM* atomics, the barriers and the privileged
+instructions (`csrrd`, `csrwr`, `csrxchg`, `ertn`, `idle`, `cpucfg`,
+`rdtime*`, `iocsr*`), llvm-mc's pseudos (`nop`, `move`, `li.w`, `li.d`,
+`jr`, `ret`, `bgt`, `ble`, `bgtu`, `bleu`, `bltz`, `bgez`, `bgtz`,
+`blez`), and with a symbol `b`/`bl`, `call36`/`tail36`, `la.pcrel`,
+`la.local`, `la`/`la.global` and the `%pc_hi20`/`%pc_lo12`,
+`%got_pc_hi20`/`%got_pc_lo12`, `%abs_hi20`/`%abs_lo12`/`%abs64_lo20`/
+`%abs64_hi12` and `%call36` operators. In inline asm a register operand
+is written `$a0`, an `"m"` operand `$a0, 0`; the constant letters are
+`i`, `n`, `I`, `J` and `K`. `la.abs`, the TLS operators and
+floating-point and vector instructions are refused.
+
+### Predefined macros
+
+From `clang --target=loongarch64-unknown-elf -msoft-float`:
+`__loongarch__`, `__loongarch64`, `__loongarch_grlen` (64),
+`__loongarch_frlen` (0), `__loongarch_soft_float`, `__loongarch_lp64`,
+`__loongarch_arch` and `__loongarch_tune` (`"loongarch64"`), `_LP64` and
+`__LP64__`. Not `__loongarch_sx` (no LSX). `__CHAR_UNSIGNED__` is not
+defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are.
+## Xtensa
+
+Little-endian Xtensa with the windowed-register ABI: the instruction set
+of Espressif's ESP32 (Xtensa LX6) and ESP32-S3 (LX7). Freestanding only.
+The design notes are in [the Xtensa plan](../internals/xtensa-plan.md).
+
+### Triples
+
+| Triple | Accepted aliases | Cores | ABI |
+|---|---|---|---|
+| `xtensa-none-elf` | `xtensa-esp32-elf`, `xtensa-esp32s3-elf`, `xtensa-esp-elf`, `xtensa-elf`, `xtensa` | ESP32 (LX6), ESP32-S3 (LX7) | windowed, soft float |
+
+There is no big-endian target (`xtensaeb-none-elf` is unknown).
+
+### Options
+
+EmbCC emits one configuration: the windowed ABI, little-endian, literal
+pools in `.text` before each function, direct `call8`s, `memw` before every
+volatile access. GCC's Xtensa options that ask for that, or that only tune
+GCC's own placement and costs, are accepted; the rest are refused by name.
+
+| Option | Accepted | Refused with |
+|---|---|---|
+| `-mabi=` | `windowed` | `-mabi=call0 is not supported: EmbCC emits the windowed ABI (call8/entry/retw), which ESP-IDF uses` |
+| `-mlongcalls`, `-mno-longcalls` | both: calls are direct; `embld` refuses one beyond `call8`'s 512 KiB | |
+| `-mtext-section-literals`, `-mauto-litpools` (and `-mno-`) | yes | |
+| `-mserialize-volatile`, `-mno-serialize-volatile` | yes; `memw` is emitted either way | |
+| `-mlittle-endian` | yes | `-mbig-endian is not supported: every target EmbCC emits for is little-endian` |
+| `-mdynconfig=` | `xtensa_esp32.so`, `xtensa_esp32s3.so` | `-mdynconfig=xtensa_esp32s2.so is not supported for xtensa-none-elf: ...` |
+| `-mtarget-align`, `-mforce-no-pic`, `-mstrict-align`, `-mextra-l32r-costs=`, `-mno-const16` | yes | |
+| `-mconst16`, `-mforce-l32`, `-mfix-esp32-psram-cache-issue` | | refused by name |
+
+The code uses the core instruction set with windowed registers, MUL32
+(`mull`), DIV32 (`quos`, `quou`, `rems`, `remu`), MINMAX, SEXT, NSA, ABS,
+ADDX and L32R, and S32C1I for atomics -- what the ESP32, the ESP32-S3 and
+QEMU's de212 core share. It does not use the FPU, MUL32_HIGH, the loop
+instructions, MAC16, the boolean registers or the density option's
+16-bit instructions. The ESP32-S2 has no S32C1I, so an atomic
+read-modify-write is not for it.
+
+### Calling convention: windowed, soft float
+
+- A `call8` rotates the register window by eight: the caller puts the
+  arguments in `a10`-`a15` and the callee finds them in `a2`-`a7`; the
+  caller's `a0`-`a7` survive the call and `a8`-`a15` do not. `a0` holds
+  the return address, `a1` is the stack pointer. A function begins with
+  `entry a1, N` and returns with `retw`.
+- Arguments are counted in words, six in registers. A type aligned beyond
+  4 (`long long`, `double`, a structure containing one) starts at an even
+  word. An argument that does not fit entirely in the words left goes on
+  the stack, and so does every argument after it. Stack arguments are at
+  the caller's `sp`, each at its own alignment (4 to 16).
+- A structure or union of any size is passed by value. A `_Complex` is
+  passed as its two parts, each placed as an argument of its own.
+- `float` and `double` travel exactly as `int` and `long long` do: in the
+  address registers, whether or not the core has an FPU, so EmbCC's code
+  links with GCC's hard-float ESP32 code.
+- A result of up to 16 bytes comes back in `a2`-`a5` (the caller's
+  `a10`-`a13`), a structure in its memory order; a larger one through a
+  hidden pointer passed as the first argument, which the callee returns.
+- `char` and `short` arguments and results are extended by the side that
+  produces them.
+- `va_list` is GCC's 12-byte record, `{ int *__va_stk; int *__va_reg; int
+  __va_ndx; }`, held and passed by value, so a `va_list` passes between
+  EmbCC's and GCC's code.
+- The stack is 16-byte aligned. Every frame is at least 32 bytes, its top
+  32 bytes reserved for the window spill handlers. An unnamed bit-field
+  does not affect a structure's alignment.
+
+`tests/golden/xtensa-abi.sh` checks these rules with EmbCC and Espressif's
+GCC calling each other on the board.
+
+### Code generation
+
+Constants that `movi` (or `movi` and a shift) cannot build, and every
+address, are loaded with `l32r` from a literal pool placed right before
+the function, since `l32r` reaches only backwards; the function's symbol
+is at its entry, after the pool. Calls are `call8` with
+`R_XTENSA_SLOT0_OP`, even within the unit. A comparison's value is a
+branch over a `movi`. A conditional branch that does not reach (±128 bytes,
+±2 KiB against zero) becomes the inverse branch over a `j`, and one beyond
+`j`'s ±128 KiB an `l32r` of the label's address and a `jx`; a function more
+than 256 KiB from its pool reads a literal from an island in the code. A
+frame larger than `entry` can allocate, and every `alloca`, moves `sp` with
+`movsp`. A load or store the compiler cannot prove aligned (a packed
+structure's member) is done a byte at a time, because a misaligned access
+raises an exception. A dense `switch` stays a decision tree.
+
+### Object format
+
+ELF32, little-endian, `EM_XTENSA` (94), RELA relocations, `e_flags`
+`0x300` (`EF_XTENSA_XT_INSN | EF_XTENSA_XT_LIT`), as GNU as writes for the
+ESP32. `embld` links these objects and GCC's, applying `R_XTENSA_32` and
+`R_XTENSA_SLOT0_OP` (on `callN`, `j`, the branches, the loop
+instructions, `beqz.n`/`bnez.n` and `l32r`) and ignoring
+`R_XTENSA_ASM_EXPAND` and the `DIFF` types, which only a relaxing linker
+changes. It does not relax and mints no trampolines: a `call8` beyond 512
+KiB, or an `l32r` whose literal is not before it, is refused (compile GCC's
+side with `-mtext-section-literals`). `-Tstack ADDR` makes it emit an entry
+stub that sets `sp` over a valid bottom frame, sets `PS` (window
+exceptions on, level 0) and `WINDOWSTART`, and calls the entry with
+`callx8`.
+
+### Predefined macros
+
+From Espressif's `xtensa-esp32-elf-gcc` 16.1: `__xtensa__`, `__XTENSA__`,
+`__XTENSA_EL__`, `__XTENSA_WINDOWED_ABI__`, the ESP32's `__XCHAL_*`
+configuration, `__CHAR_UNSIGNED__`, `__WCHAR_TYPE__` `short unsigned int`,
+`__INT32_TYPE__` `long int`. Not `__XTENSA_SOFT_FLOAT__`: the ESP32's GCC
+does not define it, and the float ABI is the same either way.
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is defined, the 1- and 2-byte forms
+are not.
+
+### Runtime
+
+`make rt-embedded` builds `librt.a` and `make libc-embedded` builds
+`libc.a` for `loongarch64-unknown-elf` (soft float, binary128 and the
+128-bit integer routines, the C library on its bare-metal backend).
+`tests/harness/loongarch` runs programs on QEMU's `virt` board: the image
+is linked at 0x1000000 and loaded with `-kernel`, the UART at 0x1fe001e0
+is the console, an exception prints its code and address, and the ACPI
+GED's sleep register powers the board off at the end.
+| `tricore-none-elf` | `tricore-elf`, `tricore-unknown-elf`, `tricore` | TriCore 1.6.1 | TriCore EABI, soft float |
+
+### Options
+
+| Option | Accepted values | Refused with |
+|---|---|---|
+| `-mcpu=CPU`, `-march=CPU`, `-mCPU` | `tc16`, `tc161`, `tc162`, `tc1.6`, `tc1.6.1`, `tc1.6.2`, `tc16x`, `tc2xx`, `tc22xx`, `tc23xx`, `tc26xx`, `tc27xx`, `tc29xx`, `tc3xx`, `tc33xx`, `tc36xx`, `tc37xx`, `tc38xx`, `tc39xx` | `-mcpu=tc1797 is not a TriCore 1.6 core: EmbCC emits TriCore 1.6.1 code, for the AURIX TC2xx and TC3xx (...)` |
+| `-msoft-float`, `-mlittle-endian` | (no value) | `-mhard-float is not supported: EmbCC emits soft float for TriCore (the TC3xx FPU is not used yet)` |
+
+### Calling convention (TriCore EABI, unverified)
+
+- A pointer argument travels in the next free of `A4`–`A7`; any other
+  scalar of 32 bits or fewer in the lowest free of `D4`–`D7`; a `long
+  long` or `double` in the next free even pair, `E4` (`D4:D5`) or `E6`,
+  low word in the even register -- a register skipped on the way is
+  filled by a later 32-bit argument.
+- A structure or union of 8 bytes or fewer travels as an integer of its
+  size; a larger one by reference, the caller passing the address of its
+  own copy as a pointer argument.
+- What finds no register goes on the stack in whole words from the
+  caller's `A10`, 4-aligned whatever its size. Every unnamed argument of
+  a variadic call goes there too, so `va_list` is a `char *`.
+- A pointer result comes back in `A2`; another of 32 bits or fewer in
+  `D2`; a 64-bit one, or a struct of 5-8 bytes, in `E2`; a larger struct
+  through a hidden pointer the caller passes in `A4`.
+- `CALL` saves the upper context (`D8`–`D15`, `A10`–`A15`) in a
+  context-save area and `RET` restores it, so those registers and the
+  stack pointer survive every call with no save code. `A0`, `A1`, `A8`
+  and `A9` are the system's and never touched.
+- The stack is 8-byte aligned; `long long` and `double` are 4-aligned in
+  memory.
+
+### Code generation
+
+Every value lives in a data register or a frame slot; address registers
+are loaded just before a load or store, and for a call's pointer
+arguments and results. Addresses are absolute: `movh` and `addi` with
+`R_TRICORE_HIADJ` and `R_TRICORE_LO`. Calls are `CALL` with
+`R_TRICORE_24REL` (±16 MiB). Conditional branches reach ±32 KiB; a branch
+in a function larger than that becomes an inverted branch over a `J`. A
+dense `switch` is a tree of compares (no jump tables yet). A load or store
+the compiler cannot prove aligned goes a byte at a time. Only the 32-bit
+encodings are emitted.
+
+### Object format and linking
+
+ELF32, little-endian, `EM_TRICORE` (44), RELA relocations, `e_flags`
+`0x00200000`. `embld` links these objects, applying `R_TRICORE_32ABS`,
+`R_TRICORE_24REL`, `R_TRICORE_HIADJ`, `R_TRICORE_LO` and `R_TRICORE_LO2`,
+and refuses the small-data relocations by name. `-Tstack ADDR --csa
+START:END` makes it emit an entry stub that sets `A10`, links the
+context-save areas in [START, END) into the free list every `CALL` draws
+from, turns call-depth counting off and jumps to the entry symbol; the
+areas must be 64-byte aligned and within the first 4 MiB of one 256 MiB
+segment.
+
+### Assembly
+
+Inline `asm` is assembled by EmbCC's TriCore vocabulary
+(`src/arch/tricore/asm.c`): the system instructions (`mtcr`/`mfcr` with
+core registers by name or number, `isync`, `dsync`, `syscall`,
+`enable`, ...), the moves, the ALU forms, the loads and stores,
+`swap.w`, `cmpswap.w` and the indirect jumps and calls. Constraints:
+`d`/`r` a data register, `a` an address register, `m` an address register
+holding the operand's address (written `[%0]`), `i` a constant; register
+variables bound to `d0`-`d7` or `a2`-`a7`. There is no assembler for
+`.s` files and no instructions in file-scope `asm`; naked functions are
+refused.
+
+### Predefined macros
+
+`__tricore__`, `__TRICORE__`, `__TC161__`, `__TRICORE_CORE__` and
+`__TRICORE_NAME__` (`0x161`), with the ILP32 set; `__CHAR_UNSIGNED__` is
+not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is, the 1- and 2-byte
+forms are not.
+
+### Runtime
+
+`make rt-embedded` and `make libc-embedded` build `librt.a` and `libc.a`
+for `tricore-none-elf`. `tests/harness/tricore` runs programs on QEMU's
+`tricore_testboard` (`-cpu tc27x`): the image is linked at 0x80000000 and
+loaded with `-kernel`; the board has no UART, so a TCG plugin
+(`tests/harness/tricore/putc.c`) prints what the harness stores to its
+output word; a trap prints its class, number and address.
+`libc.a` for `xtensa-none-elf` (soft float, 64-bit multiply and division,
+the C library on its bare-metal backend). `tests/harness/xtensa` runs
+programs on QEMU's `sim` machine with the de212 core (an LX6 with no FPU
+or MMU): the generic loader starts the image at its entry, the harness
+installs the window overflow and underflow handlers and the Alloca
+exception's, output and exit are the sim machine's simcalls, and any other
+exception prints its cause, `EPC1` and `EXCVADDR`.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| a 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
+| a computed `goto` | `the LoongArch64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
+| `__builtin_frame_address`, `__builtin_return_address` | `the LoongArch64 backend cannot lower __builtin_frame_address or __builtin_return_address (EmbCC's LoongArch code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
+| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
+| an atomic on a 1- or 2-byte object | `the TriCore backend cannot lower an atomic narrower than four bytes (SWAP.W and CMPSWAP.W are word-sized, ...)` |
+| an 8-byte atomic | `the TriCore backend cannot lower an atomic wider than a register yet`; a load or store: `an atomic access of 8 bytes is not one access on this target ...` |
+| a computed `goto` | `the TriCore backend cannot lower a computed goto yet` |
+| `__builtin_frame_address`, `__builtin_return_address` | `... (TriCore code keeps no frame-pointer chain; the return address is in the context-save area)` |
+| `__int128` | `__int128 does not exist on this target ...` |
+| `__attribute__((interrupt))`, `__attribute__((naked))` | `__attribute__((...)) is not supported: ...` |
+| `.s` and `.S` files | `no assembly-file support for tricore-none-elf yet ...` |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
+| a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8 ...` |
+| any C++ translation unit | `C++ is not yet supported for tricore-none-elf: ...` |
+| an atomic read-modify-write on a 1- or 2-byte object | `the Xtensa backend cannot lower an atomic narrower than four bytes (s32c1i is word-sized, ...) yet (function f) [...]` |
+| an 8-byte atomic read-modify-write | `the Xtensa backend cannot lower an atomic wider than a register yet (function f) [...]` |
+| an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
+| a computed `goto` | `the Xtensa backend cannot lower a computed goto yet (function f) [...]` |
+| `__builtin_frame_address`, `__builtin_return_address` | `the Xtensa backend cannot lower __builtin_frame_address or __builtin_return_address (the windowed ABI keeps a caller's frame in its register window, not in a chain) yet (function f) [...]` |
+| inline assembly, `__attribute__((naked))` | `inline assembly is not supported for xtensa-none-elf yet (EmbCC has no Xtensa assembler vocabulary)` |
+| a file-scope `asm` instruction | `file-scope asm instruction "nop": EmbCC assembles instructions for x86-64 only. ...` |
+| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
+| `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
+| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
+| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for xtensa-none-elf: ...` |
+
 ## AVR
 
 ### Triples
@@ -1122,6 +1643,7 @@ for each; the machines are:
 | `thumbv8m.main-none-eabi[hf]` | `qemu-system-arm -M mps2-an505 -cpu cortex-m33` | As above |
 | `riscv32-unknown-elf`, `riscv64-unknown-elf` | `qemu-system-riscv32` / `qemu-system-riscv64 -M virt -bios none -m 8` | The startup writes the SiFive test device after `main` returns |
 | `avr` | `qemu-system-avr -M uno`, the image passed with `-bios` | The program prints a sentinel; `qrun.sh --until` stops QEMU when it appears |
+| `tricore-none-elf` | `qemu-system-tricore -M tricore_testboard -cpu tc27x`, output through a TCG plugin | The program prints `==EXIT n==` and writes n to the board's test device |
 
 `-bios none` matters on RISC-V: without it QEMU runs OpenSBI first and
 enters the image in supervisor mode. On AVR, QEMU refuses an image whose

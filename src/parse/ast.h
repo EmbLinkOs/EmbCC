@@ -428,6 +428,11 @@ struct func {
                            * and that call may itself be dead. */
     /* codegen bookkeeping: position inside .text (defined funcs only) */
     int code_off, code_len;
+    /* ...and where its entry is, as bytes from code_off: 0 but on Xtensa,
+     * where the function's literal pool comes first (l32r reaches only
+     * backwards). The symbol is at code_off + code_entry; code_len
+     * covers both. */
+    int code_entry;
     /* ...and the alignment codegen gave that start, in bytes: what the
      * function's section has to claim when it is a section of its own
      * (-ffunction-sections). 0 is "not said", taken as 16. */

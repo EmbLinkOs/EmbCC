@@ -29,6 +29,10 @@ static const struct predef_macro *arch_table(int *count)
                 *count = predef_macro_count_cxx_thumbv8m;
                 return predef_macros_cxx_thumbv8m;
             }
+            if (target_arm_a32()) {
+                *count = predef_macro_count_cxx_armv7a;
+                return predef_macros_cxx_armv7a;
+            }
             if (target_thumb_arch() == 6) {
                 *count = predef_macro_count_cxx_thumbv6m;
                 return predef_macros_cxx_thumbv6m;
@@ -45,8 +49,21 @@ static const struct predef_macro *arch_table(int *count)
             *count = predef_macro_count_cxx_avr;
             return predef_macros_cxx_avr;
         case TARGET_MIPS32:
+            if (target_big_endian()) {
+                *count = predef_macro_count_cxx_mips32eb;
+                return predef_macros_cxx_mips32eb;
+            }
             *count = predef_macro_count_cxx_mips32;
             return predef_macros_cxx_mips32;
+        case TARGET_LOONGARCH64:
+            *count = predef_macro_count_cxx_loongarch64;
+            return predef_macros_cxx_loongarch64;
+        case TARGET_TRICORE:
+            *count = predef_macro_count_cxx_tricore;
+            return predef_macros_cxx_tricore;
+        case TARGET_XTENSA:
+            *count = predef_macro_count_cxx_xtensa;
+            return predef_macros_cxx_xtensa;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -60,6 +77,10 @@ static const struct predef_macro *arch_table(int *count)
         if (target_thumb_arch() >= 8) {
             *count = predef_macro_count_thumbv8m;
             return predef_macros_thumbv8m;
+        }
+        if (target_arm_a32()) {
+            *count = predef_macro_count_armv7a;
+            return predef_macros_armv7a;
         }
         if (target_thumb_arch() == 6) {
             *count = predef_macro_count_thumbv6m;
@@ -77,8 +98,21 @@ static const struct predef_macro *arch_table(int *count)
         *count = predef_macro_count_avr;
         return predef_macros_avr;
     case TARGET_MIPS32:
+        if (target_big_endian()) {
+            *count = predef_macro_count_mips32eb;
+            return predef_macros_mips32eb;
+        }
         *count = predef_macro_count_mips32;
         return predef_macros_mips32;
+    case TARGET_LOONGARCH64:
+        *count = predef_macro_count_loongarch64;
+        return predef_macros_loongarch64;
+    case TARGET_TRICORE:
+        *count = predef_macro_count_tricore;
+        return predef_macros_tricore;
+    case TARGET_XTENSA:
+        *count = predef_macro_count_xtensa;
+        return predef_macros_xtensa;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;
@@ -196,6 +230,16 @@ static const struct predef_macro thumb_fpu_add[] = {
 static const struct predef_macro thumb_fp_dp[] = { { "__ARM_FP", "0xc" } };
 static const struct predef_macro thumb_fpv5_add[] = { { "__ARM_FPV5__", "1" } };
 static const struct predef_macro thumb_hard_add[] = { { "__ARM_PCS_VFP", "1" } };
+/* ARMv7-A's units, as clang defines them for -mfpu=vfpv3[-d16] (0xc:
+ * single and double) and vfpv4[-d16] (0xe: half as well, and the fused
+ * multiply-add). No FPv5 and no NEON. */
+static const struct predef_macro a32_vfp3_add[] = {
+    { "__ARM_FP", "0xc" }, { "__ARM_VFPV2__", "1" }, { "__ARM_VFPV3__", "1" },
+};
+static const struct predef_macro a32_vfp4_add[] = {
+    { "__ARM_FP", "0xe" }, { "__ARM_VFPV2__", "1" }, { "__ARM_VFPV3__", "1" },
+    { "__ARM_VFPV4__", "1" }, { "__ARM_FEATURE_FMA", "1" },
+};
 
 static int thumb_fpu_drops(const char *name)
 {
@@ -273,7 +317,16 @@ const struct predef_macro *predef_table(int *count)
         if (darwin_a64())
             for (int i = 0; i < ndarwin_a64_model; i++)
                 merged[nmerged++] = darwin_a64_model[i];
-        if (fpu) {
+        if (fpu && target_arm_a32()) {
+            int v4 = target_arm_vfp(NULL) == 4;
+            const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;
+            int nadd = v4 ? (int)(sizeof a32_vfp4_add / sizeof *a32_vfp4_add)
+                          : (int)(sizeof a32_vfp3_add / sizeof *a32_vfp3_add);
+            for (int i = 0; i < nadd; i++)
+                merged[nmerged++] = add[i];
+            if (target_thumb_hard_abi())
+                merged[nmerged++] = thumb_hard_add[0];
+        } else if (fpu) {
             for (size_t i = 0; i < sizeof thumb_fpu_add / sizeof *thumb_fpu_add; i++) {
                 if (i == 0 && target_thumb_fpu_dp())
                     merged[nmerged++] = thumb_fp_dp[0];

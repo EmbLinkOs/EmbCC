@@ -6,8 +6,9 @@
  * is defined — this file grows with the writer, it is not a mirror of the
  * spec.
  *
- * Layouts follow the System V gABI, ELF64, little-endian (the only target,
- * TARGET_ABI.md).
+ * Layouts follow the System V gABI, as host structures: the writers lay
+ * them out little-endian, and swap every field for a big-endian target
+ * (src/elf/write.c, EmbLD's image writer).
  */
 #ifndef EMBCC_ELF_ELF_H
 #define EMBCC_ELF_ELF_H
@@ -265,6 +266,14 @@ typedef struct {
 /* The exception index table's self-relative pointer: 31 bits of signed
  * offset, the top bit reserved to say what the entry holds. */
 #define R_ARM_PREL31          42
+/* ARM (A32) state, armv7a-none-eabi: `bl` and `b`/`b<c>` with a 24-bit
+ * word offset from the instruction + 8, and the movw/movt pair whose
+ * 16-bit immediate is split imm4:imm12 -- different bits from the Thumb
+ * types above, for the same four acts. */
+#define R_ARM_CALL            28
+#define R_ARM_JUMP24          29
+#define R_ARM_MOVW_ABS_NC     43
+#define R_ARM_MOVT_ABS        44
 
 /* RISC-V relocations (psABI), the ones an object from this compiler
  * needs.
@@ -326,6 +335,7 @@ typedef struct {
 #define ELFMAG3       'F'
 #define ELFCLASS64    2
 #define ELFDATA2LSB   1
+#define ELFDATA2MSB   2     /* big-endian: mips-none-elf */
 #define EV_CURRENT    1
 
 /* e_type — ET_REL until the integrated linker lands (ROADMAP M3);
@@ -392,6 +402,123 @@ typedef struct {
 #define R_MIPS_GPREL32  12
 #define R_MIPS_JALR     37
 #define R_MIPS_PC32    248
+
+/* LoongArch, from the ELF machine registry: one number for LA32 and LA64
+ * (the class says which). */
+#define EM_LOONGARCH 258
+
+/* LoongArch e_flags, read off clang's objects: the base ABI's float
+ * flavour in bits 2:0 (1 soft, 2 single, 3 double) and the object ABI
+ * version in bits 7:6 (v1, which clang writes). */
+#define EF_LOONGARCH_ABI_SOFT_FLOAT   0x01
+#define EF_LOONGARCH_ABI_SINGLE_FLOAT 0x02
+#define EF_LOONGARCH_ABI_DOUBLE_FLOAT 0x03
+#define EF_LOONGARCH_ABI_MASK         0x07
+#define EF_LOONGARCH_OBJABI_V1        0x40
+#define EF_LOONGARCH_OBJABI_MASK      0xc0
+
+/* LoongArch relocation types (RELA), read off `llvm-readobj -r` on an
+ * object llvm-mc assembled from each operator (docs/internals/
+ * loongarch64-plan.md): the ones EmbCC writes, and the ones clang's
+ * objects carry, which EmbLD applies or refuses by name. */
+#define R_LARCH_NONE           0
+#define R_LARCH_32             1
+#define R_LARCH_64             2
+#define R_LARCH_ADD8          47
+#define R_LARCH_ADD16         48
+#define R_LARCH_ADD24         49
+#define R_LARCH_ADD32         50
+#define R_LARCH_ADD64         51
+#define R_LARCH_SUB8          52
+#define R_LARCH_SUB16         53
+#define R_LARCH_SUB24         54
+#define R_LARCH_SUB32         55
+#define R_LARCH_SUB64         56
+#define R_LARCH_B16           64
+#define R_LARCH_B21           65
+#define R_LARCH_B26           66
+#define R_LARCH_ABS_HI20      67
+#define R_LARCH_ABS_LO12      68
+#define R_LARCH_ABS64_LO20    69
+#define R_LARCH_ABS64_HI12    70
+#define R_LARCH_PCALA_HI20    71
+#define R_LARCH_PCALA_LO12    72
+#define R_LARCH_PCALA64_LO20  73
+#define R_LARCH_PCALA64_HI12  74
+#define R_LARCH_GOT_PC_HI20   75
+#define R_LARCH_GOT_PC_LO12   76
+#define R_LARCH_GOT64_PC_LO20 77
+#define R_LARCH_GOT64_PC_HI12 78
+#define R_LARCH_GOT_HI20      79
+#define R_LARCH_GOT_LO12      80
+#define R_LARCH_32_PCREL      99
+#define R_LARCH_RELAX        100
+#define R_LARCH_ALIGN        102
+#define R_LARCH_PCREL20_S2   103
+#define R_LARCH_ADD6         105
+#define R_LARCH_SUB6         106
+#define R_LARCH_ADD_ULEB128  107
+#define R_LARCH_SUB_ULEB128  108
+#define R_LARCH_64_PCREL     109
+#define R_LARCH_CALL36       110
+/* Infineon TriCore, from the ELF machine registry. */
+#define EM_TRICORE 44
+
+/* TriCore e_flags: the core architecture the code needs. The TriCore
+ * EABI's value for TriCore 1.6.1 as remembered -- there is no TriCore
+ * toolchain here to read it off (docs/internals/tricore-plan.md). */
+#define EF_TRICORE_V1_6_1   0x00200000
+#define EF_TRICORE_CORE_MASK 0xfff00000
+
+/* The TriCore relocation types EmbCC writes and EmbLD applies, numbered
+ * as the TriCore EABI's table is remembered (unverified, as above). All
+ * RELA. HIADJ is the high half of an address rounded by 0x8000, because
+ * the low half (LO for an ADDI, LO2 for a LEA, load or store) is
+ * sign-extended where it is added; 24REL is CALL's and J's halfword
+ * displacement. The rest are named so EmbLD can refuse them by name. */
+#define R_TRICORE_NONE      0
+#define R_TRICORE_32REL     1
+#define R_TRICORE_32ABS     2
+#define R_TRICORE_24REL     3
+#define R_TRICORE_24ABS     4
+#define R_TRICORE_16SM      5
+#define R_TRICORE_HIADJ     6
+#define R_TRICORE_LO        7
+#define R_TRICORE_LO2       8
+#define R_TRICORE_18ABS     9
+#define R_TRICORE_10SM     10
+#define R_TRICORE_15REL    11
+/* Xtensa, from the ELF machine registry, and the e_flags GNU as writes
+ * for the ESP32's objects (binutils include/elf/xtensa.h): the code uses
+ * the Xtensa instruction set (XT_INSN) and its literals (XT_LIT); the
+ * low nibble, the machine variant, is 0. */
+#define EM_XTENSA 94
+#define EF_XTENSA_XT_INSN  0x00000100
+#define EF_XTENSA_XT_LIT   0x00000200
+
+/* The Xtensa relocation types (RELA). EmbCC writes R_XTENSA_32 on its
+ * literal-pool words and SLOT0_OP on each call8; GNU as also puts SLOT0_OP
+ * on branches, j and l32r against a symbol in another section, and
+ * ASM_EXPAND as a relaxation hint, which a linker may ignore. The rest are
+ * named so EmbLD can refuse them by name. */
+#define R_XTENSA_NONE        0
+#define R_XTENSA_32          1
+#define R_XTENSA_RTLD        2
+#define R_XTENSA_GLOB_DAT    3
+#define R_XTENSA_JMP_SLOT    4
+#define R_XTENSA_RELATIVE    5
+#define R_XTENSA_PLT         6
+#define R_XTENSA_OP0         8
+#define R_XTENSA_OP1         9
+#define R_XTENSA_OP2        10
+#define R_XTENSA_ASM_EXPAND 11
+#define R_XTENSA_ASM_SIMPLIFY 12
+#define R_XTENSA_32_PCREL   14
+#define R_XTENSA_DIFF8      17
+#define R_XTENSA_DIFF16     18
+#define R_XTENSA_DIFF32     19
+#define R_XTENSA_SLOT0_OP   20
+#define R_XTENSA_SLOT0_ALT  35
 
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
