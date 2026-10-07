@@ -2964,16 +2964,6 @@ static void copy_block(struct mips_fn *F, int copy, long size, int aligned)
     }
 }
 
-/* A scalar parameter's incoming word into its slot: the whole word, in
- * either order -- a promoted `char` is right-justified in its word, which
- * is where obj_slot puts a narrow variable big-endian, and its other
- * bytes are what a whole-word read of the variable (rd) expects. */
-static int pslot_size(const struct mips_fn *F, int v)
-{
-    (void)F; (void)v;
-    return 4;
-}
-
 /* The `left` (1..3) bytes of a composite's last, partial word in r, to
  * the frame at off: the word's first bytes in memory order -- its low end
  * little-endian, its high end big-endian, where o32 left-justifies them.
@@ -3322,15 +3312,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                     npstk++;
                 } else if (pl.nreg) {
                     if (F.slot[i] >= 0)
-                        st_sp(&F, param_reg(&F, &pl, 0), slot32(&F, i),
-                              pslot_size(&F, i));
+                        /* the whole word, in either order: a promoted
+                         * char is right-justified in it, which is where
+                         * obj_slot puts a narrow variable big-endian */
+                        st_sp(&F, param_reg(&F, &pl, 0), slot32(&F, i), 4);
                 } else if (in_reg(&F, i)) {
                     pstk_reg[npstk] = reg_of(&F, i);
                     pstk_off[npstk] = base + pl.stk;
                     npstk++;
                 } else if (F.slot[i] >= 0) {
                     ld_sp(&F, SCR, base + pl.stk, 4, 1);
-                    st_sp(&F, SCR, slot32(&F, i), pslot_size(&F, i));
+                    st_sp(&F, SCR, slot32(&F, i), 4);
                 }
                 continue;
             }
