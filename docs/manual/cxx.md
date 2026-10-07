@@ -23,8 +23,8 @@ also ships its own C++ runtime and standard library (`lib/libcxx`).
 
 On the Darwin and Windows targets C++ works with restrictions. On the
 32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
-C++ is supported without exceptions and RTTI (`-fno-exceptions
--fno-rtti`), following the ARM C++ ABI and the Itanium ABI's 32-bit form;
+C++ is supported without exceptions (`-fno-exceptions`), with or without
+RTTI, following the ARM C++ ABI and the Itanium ABI's 32-bit form;
 objects link with clang++'s. On `riscv64-unknown-elf` C++ is not
 supported: a unit compiles when exceptions are turned off, and is not
 tested. On AVR, MIPS32, Xtensa and TriCore EmbCC refuses to generate
@@ -202,8 +202,8 @@ this:
 | `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
 | `x86_64-windows-gnu` | Restricted | Not supported | none |
 | `riscv64-unknown-elf` | Not supported; compiles, untested | Not supported | none |
-| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `-fno-exceptions -fno-rtti` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `riscv32-unknown-elf` | Supported with `-fno-exceptions -fno-rtti` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `riscv32-unknown-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
 | `avr`, `mipsel-none-elf`, `mips-none-elf`, `xtensa-none-elf`, `tricore-none-elf` | Refused | Not supported | none |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
@@ -244,13 +244,14 @@ in the COFF object, so it does not run. See [Windows](targets.md#windows-coff)
 for the other limits of that target.
 
 **32-bit ARM and RV32.** C++ is compiled for the Cortex-M targets, ARM
-state (`armv7a-none-eabi`) and `riscv32-unknown-elf` without exceptions
-and RTTI: the subset firmware and RTOS wrappers are written in --
+state (`armv7a-none-eabi`) and `riscv32-unknown-elf` without exceptions:
+the subset firmware and RTOS wrappers are written in --
 classes, constructors and destructors, virtual functions and abstract
 classes, multiple and virtual inheritance, templates, namespaces,
 references, operator overloading, `constexpr`, static objects with
 constructors, function-local statics, placement `new`, `new[]` and
-`delete[]`, pointers to members and lambdas. The objects follow the
+`delete[]`, pointers to members and lambdas, and with RTTI `typeid` and
+`dynamic_cast`. The objects follow the
 Itanium C++ ABI's 32-bit form, and on ARM the ARM C++ ABI's changes to
 it:
 
@@ -269,7 +270,8 @@ it:
 Each of these is checked against clang++: `tests/golden/cxx-abi-ilp32.sh`
 links EmbCC and clang++ objects calling each other both ways on a
 Cortex-M3, a Cortex-M4F and RV32, and compares what the two compilers
-say about sizes, offsets, cookies and the data the ABI lays out. clang++
+say about sizes, offsets, cookies and the data the ABI lays out, and with
+RTTI casts across classes whose `type_info` the other compiler wrote. clang++
 itself registers static destructors with `__cxa_atexit` on ARM; the
 runtime provides both.
 
@@ -279,7 +281,11 @@ libcxx-embedded` (`tools/build-libcxx.sh TRIPLE OUTDIR`) into
 `malloc` (weak, so a program may replace any of them), the guard
 functions `__cxa_guard_acquire`, `__cxa_guard_release` and
 `__cxa_guard_abort`, `__cxa_pure_virtual`, `__aeabi_atexit` and
-`__dso_handle`. `__cxa_atexit` is in the target's `libc.a`. Link it
+`__dso_handle`; for RTTI `std::type_info`, the `__cxxabiv1` type-information
+classes and `__dynamic_cast`; and `__cxa_bad_cast` and `__cxa_bad_typeid`,
+which stop the program (`__builtin_trap`), there being no exception to
+throw: a failed `dynamic_cast` to a reference, or `typeid` of `*p` with
+`p` null. `__cxa_atexit` is in the target's `libc.a`. Link it
 before `libc.a` and `librt.a`. The startup code must run the
 constructors in `.init_array` (between `__init_array_start` and
 `__init_array_end`) before `main`, as the test harnesses' startups do.
@@ -296,9 +302,8 @@ embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC
 An explicit `-funwind-tables` or `-fasynchronous-unwind-tables` is
 refused the same way (`unwind tables are not supported for TRIPLE yet
 ... EmbCC writes no ARM unwind tables (.ARM.exidx)`), and without it a
-C++ unit writes no `.eh_frame`. With RTTI on (the default) a program that
-uses a vtable needs the `__cxxabiv1` type-information vtables, which the
-embedded `libcxx.a` does not provide: compile with `-fno-rtti`.
+C++ unit writes no `.eh_frame`. RTTI is on by default; `-fno-rtti`
+leaves out the type-information objects and the code that reads them.
 
 **AVR, MIPS32, Xtensa and TriCore.** The C++ ABI of these targets is not
 implemented, and EmbCC refuses to generate code for a C++ unit there,

@@ -2,6 +2,10 @@
 // the program: main prints a line per property.
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#ifdef ABI_RTTI
+#include <typeinfo>
+#endif
 #include "abi.h"
 
 // The replaceable array form of operator new, so a test can see what a
@@ -101,6 +105,20 @@ Square *new_square_from_a(int id, long side) { return new Square(id, side); }
 
 void facts_a(long *out) { ABI_FACTS(out); }
 
+#ifdef ABI_RTTI
+long rtti_a(Shape *s, Calc *c)
+{
+    long r = 0;
+    r = r * 10 + (dynamic_cast<Square *>(s) != nullptr);     // B's class
+    r = r * 10 + (dynamic_cast<Calc2 *>(c) != nullptr);      // B's, base at 16
+    r = r * 10 + (typeid(*s) == typeid(Square));
+    r = r * 10 + !strcmp(typeid(*c).name(), "N3abi5Calc2E");
+    Pad *p = dynamic_cast<Pad *>(c);                         // a cross-cast
+    r = r * 10 + (p != nullptr && p->z[0] == -1);
+    return r;
+}
+#endif
+
 }  // namespace abi
 
 using namespace abi;
@@ -182,6 +200,15 @@ int main()
     Calc *nc = new_calc_from_b(9);
     printf("new from b %d %d\n", nc->base, nc->scale(2));
     delete nc;
+#ifdef ABI_RTTI
+    {
+        Square sq(8, 2);
+        Calc2 c2r(3);
+        Pipe pr;
+        Diamond dr;
+        printf("rtti %ld %ld\n", rtti_a(&sq, &c2r), rtti_b(&sq, &pr, &dr));
+    }
+#endif
     long fa[NFACTS], fb[NFACTS];
     facts_a(fa);
     facts_b(fb);

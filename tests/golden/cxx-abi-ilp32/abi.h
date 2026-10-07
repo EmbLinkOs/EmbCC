@@ -254,6 +254,14 @@ inline long bits_image(const Bits &x)
             o[i_++] = -1;                                                   \
     } while (0)
 
+#ifdef ABI_RTTI
+// ---- RTTI (the pass built with it): type_info objects each side emits for
+// its own classes, read by the other side's dynamic_cast and typeid and
+// by the runtime's __dynamic_cast
+long rtti_a(Shape *s, Calc *c);                  // A
+long rtti_b(Shape *s, Sink *k, Node *n);         // B
+#endif
+
 }  // namespace abi
 
 #endif

@@ -14,7 +14,8 @@
 # namespaces, references, operator overloading, static objects with
 # constructors (.init_array) and destructors, function-local statics
 # (guards), placement new and new[]/delete[] (cookies), member pointers and
-# lambdas. They print a line per property and nothing that differs between
+# lambdas -- and, in rtti.cc (built with -frtti), typeid and dynamic_cast.
+# They print a line per property and nothing that differs between
 # a 32-bit board and a 64-bit host (no sizes, no addresses), and end with
 # the sentinel ==END==.
 set -u
@@ -130,7 +131,9 @@ d=$out/$t
 read H hv board < "$d/harness"
 o=$d/$n$opt
 rm -f "$o.o" "$o.elf"
-if ! "$EMBCC" --target="$t" $opt -fno-exceptions -fno-rtti \
+# a program's own flags after the suite's (rtti.cc: -frtti)
+extra=$(sed -n 's|^// embedded-flags: *||p' "tests/cxx-embedded/$n.cc")
+if ! "$EMBCC" --target="$t" $opt -fno-exceptions -fno-rtti $extra \
         -Ilib/libc/include -c "tests/cxx-embedded/$n.cc" -o "$o.o" \
         > "$o.err" 2>&1; then
     echo "FAIL $t $opt $n: does not compile: $(head -1 "$o.err")"; exit 0
@@ -171,5 +174,5 @@ sort "$out/results.txt" | grep '^FAIL' | head -40
 pass=$(grep -c '^PASS' "$out/results.txt")
 fail=$(grep -c '^FAIL' "$out/results.txt")
 echo "$pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -ge 168 ] || exit 1
+[ "$fail" = 0 ] && [ "$pass" -ge 192 ] || exit 1
 echo "C++ runs on the Cortex-M, ARM and RV32 boards as it does on the host"

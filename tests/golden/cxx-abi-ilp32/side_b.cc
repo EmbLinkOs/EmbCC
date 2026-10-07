@@ -1,4 +1,8 @@
 // Side B of the C++ interop test: what abi.h says B defines.
+#include <string.h>
+#ifdef ABI_RTTI
+#include <typeinfo>
+#endif
 #include "abi.h"
 
 namespace abi {
@@ -121,5 +125,22 @@ Pair swap_pair(Pair p) { return Pair{ (short)p.y, p.x }; }
 Calc *new_calc_from_b(int base) { return new Calc(base); }
 
 void facts_b(long *out) { ABI_FACTS(out); }
+
+#ifdef ABI_RTTI
+long rtti_b(Shape *s, Sink *k, Node *n)
+{
+    long r = 0;
+    r = r * 10 + (dynamic_cast<Square *>(s) != nullptr);
+    r = r * 10 + (dynamic_cast<Pipe *>(k) != nullptr);       // A's class
+    Source *src = dynamic_cast<Source *>(k);                 // across Pipe
+    r = r * 10 + (src != nullptr && src == static_cast<Pipe *>(k));
+    Rnode *rn = dynamic_cast<Rnode *>(n);                    // a virtual base
+    r = r * 10 + (rn != nullptr && rn->r == 2);
+    r = r * 10 + (dynamic_cast<Diamond *>(n) != nullptr);
+    r = r * 10 + !strcmp(typeid(*n).name(), "N3abi7DiamondE");
+    r = r * 10 + (dynamic_cast<Square *>(static_cast<Shape *>(nullptr)) == nullptr);
+    return r;
+}
+#endif
 
 }  // namespace abi

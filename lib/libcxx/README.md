@@ -6,7 +6,8 @@
 Built with EmbCC itself: `make libcxx-x86_64`, `make libcxx-aarch64`.
 For the 32-bit embedded targets (32-bit ARM, RV32), `make libcxx-embedded`
 (`tools/build-libcxx.sh`) builds the part a `-fno-exceptions -fno-rtti`
-program needs: `new.cc`, `guard.cc` and `atexit.cc`.
+program needs: `new.cc`, `guard.cc`, `atexit.cc`, `typeinfo.cc`,
+`dyncast.cc` and `noexcept.cc`.
 
 ## What is here
 
@@ -14,6 +15,7 @@ program needs: `new.cc`, `guard.cc` and `atexit.cc`.
 |---|---|
 | `new.cc` | `operator new`/`delete` — all twenty spellings, two of which do the work |
 | `guard.cc` | static-local guards (64-bit, or 32-bit on ARM) and the pure-virtual trap (`__cxa_atexit` is in the C library, beside `exit`) |
+| `noexcept.cc` | `__cxa_bad_cast` and `__cxa_bad_typeid` for a runtime built without exceptions: they trap (empty with exceptions) |
 | `atexit.cc` | `__aeabi_atexit` (ARM) and a weak `__dso_handle`, for images with no `crtbegin.o` |
 | `typeinfo.cc` | `std::type_info` and the ABI's type_info hierarchy |
 | `dyncast.cc` | `__dynamic_cast`, and the base-class search catch matching shares |

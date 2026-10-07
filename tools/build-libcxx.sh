@@ -12,10 +12,18 @@
 #              __cxa_pure_virtual, __cxa_deleted_virtual
 #   atexit.cc  __aeabi_atexit (ARM) and __dso_handle; __cxa_atexit itself is
 #              lib/libc's (tools/build-libc.sh), beside atexit and exit
+#   typeinfo.cc, dyncast.cc
+#              RTTI: std::type_info, the __cxxabiv1 type_info classes whose
+#              vtables a program built with RTTI points its typeinfo at, and
+#              __dynamic_cast
+#   noexcept.cc
+#              __cxa_bad_cast and __cxa_bad_typeid, which stop the program:
+#              there are no exceptions to throw
 #
-# Built with -fno-exceptions -fno-rtti, as the programs are: there is no
-# unwinder on these targets, so no type_info, no exception objects and no
-# personality routine. Link it before libc.a and librt.a.
+# Built with -fno-exceptions, as the programs must be: there is no unwinder
+# on these targets, so no exception objects and no personality routine.
+# A program may be built with RTTI or without it. Link it before libc.a
+# and librt.a.
 #
 # -Os: this is firmware, and the runtime is linked into every image.
 set -eu
@@ -29,7 +37,7 @@ command -v "$AR" >/dev/null 2>&1 || [ -x "$AR" ] || AR=ar
 
 rm -rf "$out/cxx"
 mkdir -p "$out/cxx"
-for b in new guard atexit; do
+for b in new guard atexit typeinfo dyncast noexcept; do
     "$EMBCC" --target="$triple" -Os -fno-exceptions -fno-rtti -x c++ \
         -I"$here/lib/libcxx/include" -I"$here/lib/libc/include" \
         -c "$here/lib/libcxx/src/$b.cc" -o "$out/cxx/$b.o" || {

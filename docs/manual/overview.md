@@ -201,7 +201,7 @@ exact list of accepted names is under
 
 C is supported on every target. C++ is supported on the x86-64 and
 AArch64 targets, with restrictions on macOS and Windows, and on 32-bit
-ARM (Cortex-M and ARM state) and RV32 without exceptions and RTTI, with
+ARM (Cortex-M and ARM state) and RV32 without exceptions, with
 a small runtime (`make libcxx-embedded`). On AVR, MIPS32, Xtensa and
 TriCore EmbCC refuses to generate code for a C++ unit
 (`embcc: error: C++ is not yet supported for TRIPLE: ...`); `-fsyntax-only`

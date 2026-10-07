@@ -20,6 +20,9 @@
 #     (.init_array), a guarded local static, and an inline function's
 #     static that BOTH units define, so one guard serves the two;
 #   new[] in one unit and delete[] in the other (the array cookie);
+#   with RTTI (a second pass, -frtti): dynamic_cast down, across and
+#     through a virtual base, and typeid, on classes whose type_info the
+#     other compiler emitted, through the runtime's __dynamic_cast;
 #   a class with a copy constructor passed and returned by value, a small
 #     trivial one by value, and constructors called through new from the
 #     other side (on ARM a constructor returns `this`).
@@ -53,6 +56,13 @@ export EMBCC EMBLD
 "$out/host" > "$out/host.txt" 2>&1
 grep -q '==END==' "$out/host.txt" || {
     echo "the host reference does not reach ==END=="; exit 1; }
+# ... and for the RTTI pass (-frtti -DABI_RTTI: typeid and dynamic_cast
+# across the two units)
+"$CLANGXX" -std=c++20 -w -DABI_RTTI -o "$out/host-rtti" "$D/side_a.cc" \
+    "$D/side_b.cc" || { echo "the host RTTI reference does not build"; exit 1; }
+"$out/host-rtti" > "$out/host-rtti.txt" 2>&1
+grep -q '^rtti ' "$out/host-rtti.txt" || {
+    echo "the host RTTI reference prints no rtti line"; exit 1; }
 
 fail=0
 for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf; do
@@ -81,25 +91,32 @@ for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf; do
     "$EMBCC" --target="$t" -c tests/cxx-embedded/board.c -o "$d/board.o" ||
         exit 1
     # clang++ over EmbCC's C library headers, as a firmware build would be
-    CL="$CL -std=c++20 -fno-exceptions -fno-rtti -nostdlibinc
-        -isystem lib/libc/include -w -c"
+    CL="$CL -std=c++20 -fno-exceptions -nostdlibinc
+        -isystem lib/libcxx/include -isystem lib/libc/include -w -c"
     n=0
-    for combo in e:e e:c c:e c:c; do
+    # without RTTI at every level, then with it (rt: -frtti -DABI_RTTI)
+    for combo in e:e e:c c:e c:c rt:e:e rt:e:c rt:c:e; do
+        mode=; ref=$out/host.txt; rtti=-fno-rtti
+        case $combo in rt:*) mode=r; ref=$out/host-rtti.txt
+                             rtti="-frtti -DABI_RTTI"; combo=${combo#rt:} ;;
+        esac
         sa=${combo%:*} sb=${combo#*:}
         for opt in -O0 -O2 -Os; do
             [ "$combo" = c:c ] && [ "$opt" != -O2 ] && continue
-            tag=$sa$sb$opt
+            [ -n "$mode" ] && [ "$opt" = -Os ] && continue
+            tag=$mode$sa$sb$opt
             for side in a b; do
                 if [ "$side" = a ]; then who=$sa; else who=$sb; fi
                 rm -f "$d/$side.$tag.o"
                 if [ "$who" = e ]; then
-                    "$EMBCC" --target="$t" $opt -fno-exceptions -fno-rtti \
+                    "$EMBCC" --target="$t" $opt -fno-exceptions $rtti \
                         -Ilib/libc/include -c "$D/side_$side.cc" \
                         -o "$d/$side.$tag.o"
                 else
                     # clang at -O2 against EmbCC's levels; -O0 with EmbCC -O0
                     co=-O2; [ "$opt" = -O0 ] && co=-O0
-                    $CLANGXX $CL $co "$D/side_$side.cc" -o "$d/$side.$tag.o"
+                    $CLANGXX $CL $rtti $co "$D/side_$side.cc" \
+                        -o "$d/$side.$tag.o"
                 fi > "$d/$tag.err" 2>&1 || {
                     echo "$t $tag: side $side ($who) does not compile:"
                     head -3 "$d/$tag.err"; fail=1; continue 2; }
@@ -114,7 +131,7 @@ for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf; do
                 --until '==END==' "$@" -nographic -kernel "$d/$tag.elf" \
                 > "$d/$tag.raw" 2>/dev/null
             sed -n '1,/==END==/p' "$d/$tag.raw" > "$d/$tag.txt"
-            if ! diff "$out/host.txt" "$d/$tag.txt" > "$d/$tag.diff"; then
+            if ! diff "$ref" "$d/$tag.txt" > "$d/$tag.diff"; then
                 echo "$t $tag (side a: $sa, side b: $sb): differs from the host:"
                 head -8 "$d/$tag.diff"; fail=1
             fi

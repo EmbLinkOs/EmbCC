@@ -1317,8 +1317,8 @@ cross toolchain; only the program under test comes from EmbCC.
 ## C++ on the embedded targets
 
 C++ is compiled for the 32-bit ARM targets (the Cortex-M triples and
-`armv7a-none-eabi`) and for `riscv32-unknown-elf` without exceptions and
-RTTI. A firmware build looks like this:
+`armv7a-none-eabi`) and for `riscv32-unknown-elf` without exceptions,
+with or without RTTI. A firmware build looks like this:
 
 ```sh
 embcc --target=thumbv7em-none-eabihf -Os -fno-exceptions -fno-rtti \
@@ -1333,7 +1333,7 @@ The startup code must call the functions between `__init_array_start`
 and `__init_array_end` before `main`: that is where the constructors of
 namespace-scope objects are. `make libcxx-embedded` builds the C++
 runtime (`operator new` and `delete`, the guard functions,
-`__aeabi_atexit`); objects follow the ARM C++ ABI and link with
+`__aeabi_atexit`, the RTTI classes and `__dynamic_cast`); objects follow the ARM C++ ABI and link with
 clang++'s. Exceptions are refused by name, as there are no unwind tables
 for these machines:
 
