@@ -488,3 +488,56 @@ the convenience.
 anything; Windows (`CreateProcess`) and EmbLinkOS (should it gain a spawn
 call -- EmbBuild already runs one program per recipe) would each be a
 `process_NAME.c`.
+
+## D-020: ARMv8-M Baseline is ARMv6-M's code generator with a flag
+
+**Decision.** `thumbv8m.base-none-eabi` (the Cortex-M23) is Thumb level 6
+-- `target_thumb_arch()` answers 6 and `src/arch/thumb/v6m.c` generates
+its code -- with a flag, `target_thumb_v8m_base()`, which the few places
+where Baseline differs from ARMv6-M ask: the 32-bit divide and the one-,
+two- and four-byte atomics become instructions instead of `librt.a`
+calls, the encoding scan (`t_thumb1_ok32`) admits Baseline's 32-bit
+encodings, the predefined macros and build attributes are Baseline's,
+and the security extension (`-mcmse`) is available. Constants stay in
+literal pools and branches keep ARMv6-M's forms, as clang keeps them for
+this core.
+
+**Why.** Every other question asked of level 6 -- no IT block, no
+unaligned access, r0-r7 only, no FPU, word-aligned arrays -- has the same
+answer on Baseline, and a separate level would have had to be added to
+each of those checks to say so. A third code generator was not worth
+writing for what Baseline adds; ARMv7-M's is Thumb-2 throughout and
+emits nothing a Cortex-M23 has a use for that ARMv6-M's lacks.
+
+**Status.** Current. MOVW/MOVT for constants and CBZ for a compare with
+zero are instructions the scan admits and the backend does not choose
+yet; if code size on Baseline matters, they are the next step.
+
+## D-021: TrustZone-M's Secure side, and veneers in the linker
+
+**Decision.** `-mcmse` compiles for the Secure state of an ARMv8-M part,
+as ACLE's CMSE and clang define it: `cmse_nonsecure_entry` functions
+return through BXNS with every register and flag that could hold a
+secret overwritten, calls through a `cmse_nonsecure_call` pointer save
+r4-r11 and clear the rest before BLXNS, and `<arm_cmse.h>` provides the
+TT intrinsics and the pointer checks. `embld` makes the secure gateway
+veneers from the `__acle_se_` symbols, writes the import library, and
+adds a long-branch veneer for a Thumb call to an absolute symbol out of
+reach -- the first veneers it makes. The floating-point state is not
+handled: `-mcmse` is refused with an FPU.
+
+**Why.** The security extension is useless without the linker half, and
+both halves have exactly one correct shape, which clang and GNU ld
+define; following them lets a Secure image built by EmbCC serve a
+Non-secure one built by either. The long-branch veneer is limited to
+absolute targets because that is the case an import library creates and
+the only one a pre-layout pass can decide; a general range-extension
+pass would need layout to iterate. Refusing the FPU rather than clearing
+s0-s15 keeps every Secure image this compiler produces free of floating
+point state to leak.
+
+**Status.** Current. `--in-implib` (stable veneer addresses across
+releases), the FPU, `cmse_nonsecure_caller()`, and entry functions or
+Non-secure calls with arguments on the stack are refused by name; the
+last is what clang refuses too.
+
