@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include "emit.h"
+#include "a32.h"
 #include "cg.h"
 #include "../backend.h"
 #include "../regalloc.h"
@@ -632,10 +633,10 @@ static void t_refuse(const struct ir_func *fn, const struct ir_ins *i,
         snprintf(op, sizeof op, " [%s w=%d size=%d]", ir_opname(i->op),
                  i->w, i->size);
     fprintf(stderr,
-            "embcc: %s:%d: error: the ARMv7-M backend cannot lower %s yet "
+            "embcc: %s:%d: error: the %s backend cannot lower %s yet "
             "(function %s)%s\n",
-            fn->file ? fn->file : "?", i ? i->line : fn->line, what,
-            fn->name, op);
+            fn->file ? fn->file : "?", i ? i->line : fn->line,
+            t_isa_a32 ? "ARMv7-A" : "ARMv7-M", what, fn->name, op);
     exit(1);
 }
 
@@ -3202,9 +3203,11 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
     struct code *t = F->t;
     int sz = i->size, addr, top, br;
     if (sz != 1 && sz != 2 && sz != 4)
-        t_refuse(F->fn, i, "an atomic wider than four bytes (ARMv7-M has "
-                           "no doubleword exclusive; GCC calls libatomic "
-                           "for these)");
+        t_refuse(F->fn, i, t_isa_a32
+                 ? "an atomic wider than four bytes (ldrexd/strexd are not "
+                   "used yet)"
+                 : "an atomic wider than four bytes (ARMv7-M has no "
+                   "doubleword exclusive; GCC calls libatomic for these)");
 #define LDX(rt) (sz == 4 ? t_ldrex(t, (rt), addr, 0) \
                          : t_ldrexbh(t, (rt), addr, sz))
 #define STX(rt) (sz == 4 ? t_strex(t, T_LR, (rt), addr, 0) \
@@ -3495,6 +3498,14 @@ static void gen_ins(struct t_fn *F, int n)
             wide = i->w != 4 &&
                    ((i->dst >= 0 && F->wide[i->dst]) ||
                     (i->op == IR_MOV && i->a >= 0 && F->wide[i->a]));
+            break;
+        /* Refused below by what they are, not as "at 64 bits": the
+         * frame address carries w = 8 on every target, and an 8-byte
+         * atomic is thumb_atomic's to refuse. */
+        case IR_FRAMEADDR:
+        case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS:
+        case IR_CMPXCHG:
+            wide = 0;
             break;
         default: break;
         }
@@ -4532,14 +4543,18 @@ static void gen_ins(struct t_fn *F, int n)
          * op means. A load from address zero was standing in for it and
          * is not the same thing at all — on a Cortex-M address zero is
          * the vector table and the load succeeds, so a
-         * __builtin_unreachable() that was reached carried on. */
+         * __builtin_unreachable() that was reached carried on. (ARM
+         * state: its own `udf #0`, a word.) */
+        if (t_isa_a32) {
+            a32_udf(t, 0);
+            return;
+        }
         code_byte(t, 0x00);
         code_byte(t, 0xde);
         return;
     case IR_FENCE:
         /* dmb sy — a full data barrier. */
-        code_byte(t, 0xbf); code_byte(t, 0xf3);
-        code_byte(t, 0x5f); code_byte(t, 0x8f);
+        t_barrier(t, T_BAR_DMB);
         return;
 
     /* The conversions, which carry no `flt` of their own: `size` is the
@@ -4910,6 +4925,10 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_XCHG: case IR_XADD: case IR_ARMW:
     case IR_CAS: case IR_CMPXCHG:
         thumb_atomic(F, i);
+        return;
+    case IR_FRAMEADDR:
+        t_refuse(fn, i, "__builtin_frame_address or __builtin_return_address "
+                        "(this backend keeps no frame-pointer chain)");
         return;
     case IR_CAS16:
         t_refuse(fn, i, "a 16-byte atomic (ARMv7-M has no doubleword "

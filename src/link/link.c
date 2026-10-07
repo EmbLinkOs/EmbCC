@@ -1989,6 +1989,21 @@ static void patch_arm_b24(struct object *o, unsigned char *loc, long long off,
     put32(loc, (w & 0xff000000u) | ((unsigned)(off >> 2) & 0xffffffu));
 }
 
+/* Is the target of a Thumb branch at `symi` an ARM-state function? Its
+ * symbol is a defined global FUNCTION with bit 0 clear: every Thumb
+ * function's symbol carries the bit, so an even one is A32 code. */
+static int thumb_to_arm(struct linker *l, struct object *o, Elf64_Word symi,
+                        Elf64_Addr S)
+{
+    Elf64_Sym *sy = &o->syms[symi];
+    const char *name = o->symstr + sy->st_name;
+    struct symbol *g;
+    if ((S & 1) || ELF64_ST_BIND(sy->st_info) == STB_LOCAL || !*name)
+        return 0;
+    g = sym_find(l, name);
+    return g && g->defined && g->type == STT_FUNC && g->insec >= 0;
+}
+
 static unsigned int read_arm_mov(const unsigned char *loc)
 {
     unsigned int w = get32loc(loc);
@@ -2678,6 +2693,24 @@ static void apply_relocs(struct linker *l, struct object *o)
                     break;
                 case R_ARM_THM_CALL:
                 case R_ARM_THM_JUMP24:
+                    /* A call from Thumb code to an ARM-state function --
+                     * a global function symbol with the Thumb bit CLEAR,
+                     * which only an A32 object (armv7a) defines -- is
+                     * `blx`: the second halfword's bit 12 clear, and the
+                     * displacement from Align(P + 4, 4) to the word-aligned
+                     * target. A jump there would need a veneer. */
+                    if (thumb_to_arm(l, o, symi, S)) {
+                        if (type != R_ARM_THM_CALL)
+                            die("%s: a Thumb branch to the ARM-state function "
+                                "'%s' needs an interworking veneer, which "
+                                "this linker does not mint; only a call (bl, "
+                                "made blx) can switch state", o->name,
+                                l->rel_sym);
+                        patch_thm_b24(o, loc, (long long)S + A -
+                                      (long long)((P + 4) & ~(Elf64_Addr)3));
+                        put16(loc + 2, get16(loc + 2) & ~0x1000u);
+                        break;
+                    }
                     /* The displacement is between ADDRESSES, so the
                      * Thumb bit comes off S first -- leaving it on would
                      * shift every call by one byte. */

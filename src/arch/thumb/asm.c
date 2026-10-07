@@ -1377,6 +1377,24 @@ int tasm_is_word(const char *stmt, const char *w, int wlen)
     if ((mlen >= 3 && (strncmp(m, "mrs", 3) == 0 || strncmp(m, "msr", 3) == 0))
         && sysreg_num(w, wlen) >= 0)
         return 1;
+    /* ARM state: the status register's names, and the coprocessor and
+     * its registers (`mrc p15, #0, r0, c1, c0, #0`) */
+    if (t_isa_a32 && mlen >= 3 &&
+        (strncmp(m, "mrs", 3) == 0 || strncmp(m, "msr", 3) == 0)) {
+        struct tok tw;
+        tw.s = w;
+        tw.len = wlen;
+        if (psr_fields(&tw) >= 0)
+            return 1;
+    }
+    if (t_isa_a32 && mlen >= 3 &&
+        (strncmp(m, "mrc", 3) == 0 || strncmp(m, "mcr", 3) == 0)) {
+        struct tok tw;
+        tw.s = w;
+        tw.len = wlen;
+        if (tok_cnum(&tw, 'p') >= 0 || tok_cnum(&tw, 'c') >= 0)
+            return 1;
+    }
     if (mlen >= 5 && strncmp(m, "cps", 3) == 0) {
         int ok = wlen > 0 && wlen <= 2;
         for (int k = 0; k < wlen; k++)
