@@ -1047,10 +1047,19 @@ static int pass_fold(struct ir_func *fn)
         default:
             continue;
         }
-        /* A compare of a loop-carried temp against what the block has
-         * just assigned it: see lk_note. Only a compare, and only at the
-         * width the constant was written at. */
-        if (i->op == IR_CMP && !i->imm_b && (i->w == 4 || i->w == 8) &&
+        /* A loop-carried temp read where the block has just assigned it
+         * a constant: see lk_note. Only at the width the constant was
+         * written at. A compare at first (a rotated loop's guard); then
+         * the arithmetic too, because a FULLY unrolled loop is this shape
+         * from end to end -- `b = 0`, then `b*8`, `(b+1)*8`, ... in one
+         * block, with the latch's dead `b = b + 4` keeping b two
+         * definitions -- and FNV's byte loop shifted by a register four
+         * times where clang has uxtb, ubfx and lsr #24. Not a division:
+         * see fold_bin. */
+        if ((i->op == IR_CMP || i->op == IR_ADD || i->op == IR_SUB ||
+             i->op == IR_MUL || i->op == IR_AND || i->op == IR_OR ||
+             i->op == IR_XOR || i->op == IR_SHL || i->op == IR_SHR) &&
+            !i->imm_b && (i->w == 4 || i->w == 8) &&
             !(ka && kb) && !getenv("EMBCC_NO_LKCONST")) {
             long la, lb;
             int ja = ka || lk_get(&lk, i->a, i->w, &la);
