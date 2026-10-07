@@ -247,6 +247,7 @@ return address builtins, atomics other than a word, interrupt
 attributes, C++. Code size: no density (16-bit) instructions, no zero-
 overhead loops, no MUL32_HIGH (the ESP32 has it, the de212 does not), and
 the 64-bit operations go through scratch registers; GCC -Os code is
-smaller. A composite argument whose type is 4-aligned is read with l32i,
-so passing a member of a packed structure whose address is misaligned
-would raise an exception rather than read the wrong bytes.
+smaller. A struct argument or return value is read with l32i only where
+irgen promises its address is aligned (ir_arg.natural); a packed
+structure's member goes a byte at a time
+(tests/exec/packed-member-by-value.c).
