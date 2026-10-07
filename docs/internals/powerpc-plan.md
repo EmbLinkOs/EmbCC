@@ -144,4 +144,5 @@ C++ (laid out LP64 only); unwind tables.
 | --- | --- |
 | `tests/golden/ppc-encoding.sh` | every encoder form against `llvm-mc -show-encoding`, bytes in memory order; `ppc_li` executed; every range check |
 | `tests/golden/ppc-exec.sh` | `tests/exec/*.c` on the ppce500 board at -O0, -O1, -O2 and -Os; the LP64- and little-endian-dependent programs against clang's result on the same board |
+| `tests/golden/ppc-abi.sh` | EmbCC and clang objects calling each other (embedded-abi, mips-abi and ppc-abi pairs) at -O0 and -O2 |
 | `tests/golden/predef.sh` | the `ppc32` table against clang's |
