@@ -766,10 +766,12 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                         "ignored", name);
                 else if (ae->disp == ATTR_REFUSED &&
                          !(attr_is(name, "interrupt") &&
-                           target_get() == TARGET_THUMB) &&
+                           target_get() == TARGET_THUMB &&
+                           !target_arm_a32()) &&
                          !(attr_is(name, "naked") &&
                            target_get() != TARGET_X86_64 &&
-                           target_get() != TARGET_AARCH64) &&
+                           target_get() != TARGET_AARCH64 &&
+                           target_get() != TARGET_TRICORE) &&
                          !((attr_is(name, "interrupt") ||
                             attr_is(name, "signal")) &&
                            target_get() == TARGET_AVR))

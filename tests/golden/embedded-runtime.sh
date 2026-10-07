@@ -44,11 +44,13 @@ shared=$(grep -ohE '"__(mul|div)(sc|dc)3"' src/sema/sema.c | tr -d '"' | sort -u
 fail=0
 checked=0
 for triple in avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
-              thumbv8m.main-none-eabi riscv32-unknown-elf riscv64-unknown-elf; do
+              thumbv8m.main-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
+              loongarch64-unknown-elf; do
     case $triple in
         avr)     be=avr ;;
         thumb*)  be=thumb ;;
         riscv*)  be=riscv ;;
+        loongarch*) be=loongarch ;;
     esac
     d=$out/$triple
     sh tools/build-rt.sh "$triple" "$d" 2> "$d.err" || {

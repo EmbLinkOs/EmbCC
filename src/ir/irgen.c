@@ -341,6 +341,27 @@ static int lv_natural(const struct expr *e)
     }
 }
 
+/* Is a struct-valued expression's address -- what irgen hands a call or a
+ * return -- aligned to its type? An lvalue as lv_natural says; a call's
+ * result, a compound literal or a va_arg is in a slot of irgen's own. A
+ * conditional or a comma is its operands'. Anything else is not known. */
+static int struct_val_natural(const struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_VAR: case EXPR_DEREF: case EXPR_MEMBER:
+        return lv_natural(e);
+    case EXPR_CALL: case EXPR_COMPLIT: case EXPR_VA_ARG:
+        return 1;
+    case EXPR_COMMA:
+        return struct_val_natural(e->rhs);
+    case EXPR_COND:
+        return (!e->lhs || struct_val_natural(e->lhs)) &&
+               (!e->rhs || struct_val_natural(e->rhs));
+    default:
+        return 0;
+    }
+}
+
 /* Mark the load or store just emitted for lvalue `e`. */
 static void mark_natural(struct ir_func *fn, const struct expr *e)
 {
@@ -394,9 +415,11 @@ void emit_mov(struct ir_func *fn, int dst, int src)
     i->a = src;
 }
 
-/* ---- bitfield access (little-endian, gcc-compatible) ----
+/* ---- bitfield access (gcc-compatible, either byte order) ----
  * A bitfield occupies bits [bit_off, bit_off+width) of the storage unit at
- * `addr` (a load/store of the field's declared type). Reading shifts the
+ * `addr` (a load/store of the field's declared type), counted from the
+ * unit's least significant end as that load reads it -- type.c has put
+ * bit_off where the byte order puts the field, so nothing here asks. Reading shifts the
  * field to the top of the value class then back down — arithmetic for a
  * signed field so its sign bit fills — the classic two-shift extraction,
  * immune to neighbouring fields packed into the same unit. */
@@ -413,8 +436,15 @@ static int zext64(struct ir_func *fn, int v)
     return i->dst;
 }
 
+/* Where byte k of n read as one integer in the target's order lies in it:
+ * a left shift of 8k little-endian, 8(n-1-k) big-endian. */
+static int bf_byte_shift(int k, int n)
+{
+    return 8 * (target_big_endian() ? n - 1 - k : k);
+}
+
 /* A packed struct's field across its unit (m->bf_bytes): its bytes read
- * one at a time, as a 64-bit value with byte k at bits 8k. */
+ * one at a time, as a 64-bit value with byte k at bf_byte_shift(k). */
 static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
 {
     struct type *u8 = ty_base(TY_CHAR, 1);
@@ -423,11 +453,23 @@ static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
         int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                   : addr;
         int b = zext64(fn, emit_load(fn, a, u8));
-        if (k)
-            b = emit_bin(fn, IR_SHL, b, emit_const(fn, 8 * k, 4), 8, 0);
+        int sh = bf_byte_shift(k, m->bf_bytes);
+        if (sh)
+            b = emit_bin(fn, IR_SHL, b, emit_const(fn, sh, 4), 8, 0);
         raw = emit_bin(fn, IR_OR, raw, b, 8, 0);
     }
     return raw;
+}
+
+/* The 128-bit byte-at-a-time forms below are little-endian, and no
+ * big-endian target has a 128-bit integer to carry them: refused there by
+ * name rather than laid out backwards. */
+static void bf_wide_refuse(struct ir_func *fn, const struct member *m)
+{
+    if (target_big_endian())
+        diag_fatal(fn->file, 0, "a packed bit-field '%s' across %d bytes is "
+                   "not supported on a big-endian target (%s)",
+                   m->name ? m->name : "", m->bf_bytes, target_triple_now());
 }
 
 /* A packed field across its unit that 8 bytes do not hold (a long long's
@@ -454,6 +496,7 @@ static int bf_wide_load(struct ir_func *fn, int addr, const struct member *m)
 {
     const struct type *bt = m->ty;
     int n = m->bf_bytes, off = m->bit_off, wd = m->bit_width;
+    bf_wide_refuse(fn, m);
     int v = bf_wide_bytes(fn, addr, 0, n < 16 ? n : 16);
     if (off)
         v = emit_bin(fn, IR_SHR, v, emit_const(fn, off, 4), 16, 0);
@@ -479,6 +522,7 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
     const struct type *bt = m->ty;
     int n = m->bf_bytes, off = m->bit_off, wd = m->bit_width;
     struct type *u8 = ty_base(TY_CHAR, 1), *u128 = ty_base(TY_INT128, 1);
+    bf_wide_refuse(fn, m);
     int v = bt->kind == TY_INT128 ? val : gen_convert(fn, val, bt, u128);
     int ones = emit_const(fn, -1, 16);
     int fm = wd < 128 ? emit_bin(fn, IR_SHR, ones,
@@ -517,6 +561,18 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
     return bf_wide_load(fn, addr, m);
 }
 
+/* The storage unit's type, unsigned: the field's declared type's kind --
+ * but `long long` by name, which shares TY_LONG with `long`: on an ILP32
+ * target ty_base(TY_LONG) is FOUR bytes, and a `long long x : 40` was
+ * loaded and stored as its unit's first word. */
+static struct type *bf_unit(const struct type *bt)
+{
+    if (bt->kind == TY_LONG && bt->is_llong &&
+        ty_size(ty_base(TY_LONG, 1)) != ty_size(bt))
+        return ty_llong(1);
+    return ty_base(bt->kind, 1);
+}
+
 static int bf_load(struct ir_func *fn, int addr, const struct member *m)
 {
     const struct type *bt = m->ty;
@@ -535,7 +591,7 @@ static int bf_load(struct ir_func *fn, int addr, const struct member *m)
         return v;                 /* (a 32-bit class reads the low half) */
     }
     /* load the raw storage unit UNSIGNED, so no stray sign extension */
-    int v = emit_load(fn, addr, ty_base(bt->kind, 1));
+    int v = emit_load(fn, addr, bf_unit(bt));
     int lsh = vb - m->bit_off - m->bit_width;
     if (lsh)
         v = emit_bin(fn, IR_SHL, v, emit_const(fn, lsh, 4), w, 0);
@@ -575,14 +631,15 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
         for (int k = 0; k < m->bf_bytes && k < 8; k++) {
             int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                       : addr;
-            int b = k ? emit_bin(fn, IR_SHR, merged,
-                                 emit_const(fn, 8 * k, 4), 8, 0)
-                      : merged;
+            int sh = bf_byte_shift(k, m->bf_bytes);
+            int b = sh ? emit_bin(fn, IR_SHR, merged,
+                                  emit_const(fn, sh, 4), 8, 0)
+                       : merged;
             emit_store(fn, a, b, u8);
         }
         return bf_load(fn, addr, m);
     }
-    struct type *ut = ty_base(bt->kind, 1);
+    struct type *ut = bf_unit(bt);
     if (bt->kind == TY_INT128) {
         /* the masks in 128 bits, from all ones: fmask = ~0 >> (128 - width) */
         int ones = emit_const(fn, -1, 16);
@@ -1160,8 +1217,8 @@ static int win64_byref(const struct type *t)
  * .rodata like a string and is loaded from there. */
 static int emit_ldconst(struct ir_func *fn, const struct ldf *v)
 {
-    char *b = xmalloc(16);
-    ldf_encode(v, ldf_target_fmt(), (unsigned char *)b);
+    char *b = xcalloc(1, 16);
+    ldf_encode_target(v, ldf_target_fmt(), (unsigned char *)b);
     struct ir_ins *i = emit(fn);
     i->op = IR_STRADDR;
     i->label = ir_intern_aligned(cur_unit, b, 16, 16);
@@ -1536,7 +1593,10 @@ static int atomic_arm(void)
     int t = target_get();
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
            t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
-           t == TARGET_MIPS32;        /* MIPS32 is weakly ordered: sync */
+           t == TARGET_MIPS32 ||      /* MIPS32 is weakly ordered: sync */
+           t == TARGET_LOONGARCH64 ||  /* ...and LoongArch: dbar */
+           t == TARGET_TRICORE ||     /* TriCore orders with dsync */
+           t == TARGET_XTENSA;        /* and Xtensa: memw */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -2155,6 +2215,7 @@ static int bswap_insn(int size)
     switch (target_get()) {
     case TARGET_X86_64: case TARGET_AARCH64: case TARGET_RISCV64:
     case TARGET_AVR: case TARGET_THUMB:
+    case TARGET_LOONGARCH64:              /* revb.2h, revb.2w, revb.d */
         return 1;
     default:
         return 0;
@@ -2714,12 +2775,19 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_VA_ARG:
         if (target_get() == TARGET_THUMB)
             return irg_va_arg_thumb(fn, e);
-        if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
+        /* LoongArch's LP64 variadic convention is RV64's rule for rule
+         * (src/arch/loongarch/irgen.c says how that was established). */
+        if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
+            target_get() == TARGET_LOONGARCH64)
             return irg_va_arg_riscv(fn, e);
         if (target_get() == TARGET_AVR)
             return irg_va_arg_avr(fn, e);
         if (target_get() == TARGET_MIPS32)
             return irg_va_arg_mips(fn, e);
+        if (target_get() == TARGET_TRICORE)
+            return irg_va_arg_tricore(fn, e);
+        if (target_get() == TARGET_XTENSA)
+            return irg_va_arg_xtensa(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -2965,6 +3033,19 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
              * the copy IS the assignment. Copying 24 bytes from it would
              * copy the ARGUMENTS, and advancing either list would then
              * walk a snapshot of them. */
+            /* Xtensa's va_list is GCC's 12-byte record, by value: the
+             * copy is the record's. */
+            if (target_get() == TARGET_XTENSA) {
+                int dsta = gen_addr(fn, e->args[0]);
+                int srca = gen_addr(fn, e->args[1]);
+                struct ir_ins *c = emit(fn);
+                c->op = IR_MEMCPY;
+                c->a = dsta;
+                c->b = srca;
+                c->size = 12;
+                c->natural = 4;
+                return -1;
+            }
             if (target_va_list_is_pointer()) {
                 struct type *ptr = ty_int_of_size(target_ptr_size(), 1);
                 int dsta = gen_addr(fn, e->args[0]);
@@ -3192,6 +3273,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             ar->is_float = ty_is_float(at);
             ar->is_int128 = at->kind == TY_INT128;
             ar->is_struct = at->kind == TY_STRUCT;
+            ar->natural = ar->is_struct && struct_val_natural(e->args[k]);
             ar->size = ty_size(at);
             ar->nclass = ty_classify(at, ar->cls);
             ar->stk_off = 0;
@@ -3335,6 +3417,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->ret_tybytes = ty_size(e->ty);
             i->ret_tysign = ty_is_integer(e->ty) && !e->ty->is_unsigned;
         }
+        /* TriCore returns a pointer in A2 and anything else in D2, so its
+         * caller must know which (ir_ins.ret_ptr). Set there alone: no
+         * other target reads it, and no other IR prints it. */
+        if (target_get() == TARGET_TRICORE)
+            i->ret_ptr = e->ty->kind == TY_PTR;
         /* An integer result comes back in the whole RETURN REGISTER, so
          * the width here is the register's and not the type's: an `int`
          * returned on x86-64 arrives in rax and codegen reads all of
@@ -3857,6 +3944,14 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_avr(fn, s);
             else if (target_get() == TARGET_MIPS32)
                 irg_asm_mips(fn, s);
+            else if (target_get() == TARGET_LOONGARCH64)
+                irg_asm_loongarch(fn, s);
+            else if (target_get() == TARGET_TRICORE)
+                irg_asm_tricore(fn, s);
+            else if (target_get() == TARGET_XTENSA)
+                diag_fatal(fn->file, s->line, "inline assembly is not "
+                           "supported for xtensa-none-elf yet (EmbCC has no "
+                           "Xtensa assembler vocabulary)");
             else
                 irg_asm_x86(fn, s);
             break;
@@ -3874,6 +3969,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                  * is the callee's classification, computed in codegen
                  * from the function's own return type. */
                 i->size = ty_size(s->expr->ty);
+                i->natural = struct_val_natural(s->expr);
             }
             break;
         }

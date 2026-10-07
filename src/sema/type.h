@@ -32,7 +32,16 @@ struct member {
     struct type *ty;
     int off;              /* byte offset; for a bitfield, of its storage unit */
     int is_bitfield;
-    int bit_off;          /* bitfield: bit position within the storage unit */
+    /* bitfield: its shift within the storage unit -- the bit, counted from
+     * the LEAST significant end of the unit as a load of it reads it, at
+     * which the field's own least significant bit lies. Where that is in
+     * memory depends on the byte order: on a little-endian target the
+     * field allocated first is at the low end of its unit, on a big-endian
+     * one at the HIGH end (gcc's layout either way), so a field's position
+     * in memory order is ty_bf_mempos(). The byte-at-a-time forms below
+     * (bf_bytes) count from the least significant end of that many bytes
+     * read as one integer in the target's order. */
+    int bit_off;
     int bit_width;        /* bitfield: width in bits (0 = zero-width separator) */
     int bf_bytes;         /* bitfield of a packed struct crossing its type's
                            * storage unit: off/bit_off are its first byte and
@@ -40,6 +49,15 @@ struct member {
                            * time over this many bytes (0: a unit access) */
     int user_align;       /* __attribute__((aligned(N))) on the member; 0 = none */
 };
+
+/* A bit-field's first bit in MEMORY order -- bits from the first byte of
+ * its unit, most significant bit of each byte first on a big-endian
+ * target and least significant first on a little-endian one, so that
+ * consecutive fields have consecutive positions -- given its shift
+ * (bit_off), width and unit width in bits (8 * bf_bytes, or 8 * the size
+ * of its type). What DWARF's DW_AT_data_bit_offset and an extent in bytes
+ * are measured in; the same number as bit_off on a little-endian target. */
+int ty_bf_mempos(int bit_off, int bit_width, int unit_bits);
 
 struct type {
     enum ty_kind kind;

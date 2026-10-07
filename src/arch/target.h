@@ -14,10 +14,12 @@
 enum target_arch {
     TARGET_X86_64 = 0,
     TARGET_AARCH64 = 1,
-    /* ARMv7-M: Cortex-M3/M4/M7, which execute Thumb-2 and nothing else.
-     * Named for the instruction set rather than the architecture family
-     * because that is the part the backend encodes, and because there is
-     * no A-profile ARM32 target here to be confused with. */
+    /* 32-bit ARM, AAPCS32: the Cortex-M levels (ARMv6-M, v7-M, v7E-M,
+     * v8-M Mainline), which execute Thumb and nothing else, and ARMv7-A in
+     * ARM state (target_arm_a32). Named for the instruction set the
+     * Cortex-M levels encode, which came first; ARMv7-A shares everything
+     * this enum keys -- the data model and the calling convention -- and
+     * differs only in the encoding, which is a level of this target. */
     TARGET_THUMB = 2,
     /* RISC-V, as two targets rather than one: the instruction set is
      * nearly the same at both widths and ONE backend serves them
@@ -44,12 +46,31 @@ enum target_arch {
      * and it differs from clang's AVR target. Both are measured facts
      * rather than recollections; see docs. */
     TARGET_AVR = 5,
-    /* 32-bit little-endian MIPS, MIPS32 Release 2, the o32 ABI with soft
-     * float (mipsel-none-elf): the core of Microchip's PIC32 parts. ILP32
+    /* 32-bit MIPS, MIPS32 Release 2, the o32 ABI with soft float:
+     * little-endian (mipsel-none-elf), the core of Microchip's PIC32
+     * parts, or big-endian (mips-none-elf, target_big_endian). ILP32
      * like ARMv7-M and RV32, with a SIGNED char and long double = double,
      * and the only target here with branch delay slots and REL
      * relocations. docs/internals/mips32-plan.md. */
-    TARGET_MIPS32 = 6
+    TARGET_MIPS32 = 6,
+    /* 64-bit little-endian LoongArch, LA64, the LP64S (soft-float)
+     * convention (loongarch64-unknown-elf). LP64 like RV64, whose calling
+     * convention it shares rule for rule, but with a SIGNED char.
+     * docs/internals/loongarch64-plan.md. */
+    TARGET_LOONGARCH64 = 7,
+    /* Infineon TriCore 1.6.1, the AURIX core (tricore-none-elf): 32-bit
+     * little-endian, soft float, ILP32 with a SIGNED char and 8-byte
+     * long long and double aligned to only 4. The only target here with
+     * two register files -- data and address -- and a hardware context
+     * save at every call. docs/internals/tricore-plan.md. */
+    TARGET_TRICORE = 8,
+    /* Little-endian Xtensa with the windowed-register ABI: the ESP32's
+     * LX6 and the ESP32-S3's LX7 (xtensa-none-elf). ILP32 with an
+     * UNSIGNED char, a 16-bit wchar_t, long double = double, and the only
+     * target here whose registers are a window that a call rotates, whose
+     * instructions are three bytes, and whose constants come from a
+     * literal pool before each function. docs/internals/xtensa-plan.md. */
+    TARGET_XTENSA = 9
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -61,6 +82,23 @@ enum target_arch {
  * bytes; this exists because the backend's arithmetic reads more clearly
  * against the name the ISA manual uses. */
 int target_xlen(void);
+
+/* The BYTE ORDER of the target's memory: 1 when a multi-byte value's most
+ * significant byte is at its lowest address (mips-none-elf), 0 for the
+ * little-endian targets -- every other one. Not the host's: the compiler
+ * never stores a host integer into an object, an instruction or an image
+ * by copying its bytes; every such value goes through target_put_uint or
+ * an explicit order. docs/internals/big-endian.md lists each place that
+ * depends on it and the test that would notice. */
+int target_big_endian(void);
+void target_set_big_endian(int on);
+/* `v`'s low `n` bytes (1..8) at p, in the target's order; and back. */
+void target_put_uint(unsigned char *p, int n, unsigned long long v);
+unsigned long long target_get_uint(const unsigned char *p, int n);
+/* Where the `size` bytes at byte `off` of a `whole`-byte value sit in it,
+ * as a right shift of the value: 8*off little-endian, 8*(whole-off-size)
+ * big-endian. What a narrower piece of a wider stored value IS. */
+int target_byte_shift(int off, int size, int whole);
 
 /* The operating system the emitted code will run ON, which is a
  * different question from the architecture and was not asked at all
@@ -135,7 +173,10 @@ int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
  * not a preference -- a buffer of plain `char` compares differently
  * either way -- so a build that asks is obeyed. */
 void target_set_char_signed(int unsigned_char);
-int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
+int target_wchar_unsigned(void);  /* wchar_t's signedness */
+/* wchar_t's width: int's, except on Xtensa, where GCC's xtensa-elf makes
+ * it a 16-bit unsigned short (gcc/config/xtensa/elf.h). */
+int target_wchar_size(void);
 
 /* Whether __int128 exists at all. It does not on a 32-bit target: the
  * type needs a register pair per half and libgcc's __divti3 family is
@@ -167,6 +208,9 @@ int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c 
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
+int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codegen.c */
+int tc_op_calls_helper(const struct ir_ins *i);     /* src/arch/tricore/codegen.c */
+int xtensa_op_calls_helper(const struct ir_ins *i); /* src/arch/xtensa/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -228,6 +272,18 @@ int target_thumb_em(void);
  * keys the data model and these two share one; see g_thumb_arch. */
 int target_thumb_arch(void);
 void target_set_thumb_arch(int lvl);
+/* ARMv7-A in ARM state (armv7a-none-eabi): TARGET_THUMB's data model and
+ * AAPCS32, at level 7 with the DSP set (target_thumb_em), encoded as A32
+ * instructions rather than Thumb-2 -- the backend's encoder switches on it
+ * (src/arch/thumb/a32.c), and so do the relocation types, the symbols'
+ * Thumb bit and the mapping symbols. docs/internals/arm-a32-plan.md. */
+int target_arm_a32(void);
+/* ARMv7-A's VFP unit, for the code that says which (the attributes, the
+ * predefined macros): 3 for VFPv3, 4 for VFPv4, and through `d32` whether
+ * it has 32 double registers. The code uses d0-d15 either way; both units
+ * compute in single and double precision (target_thumb_fpu_dp). */
+int target_arm_vfp(int *d32);
+void target_set_arm_vfp(int version, int d32);
 /* The alignment a string literal of `width`-byte elements gets in .rodata.
  * Its element width: ARMv6-M reads L"..."[0] with LDR and MIPS with lw,
  * and a wide literal at an odd offset faults on both (a HardFault, an
@@ -301,6 +357,9 @@ int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 int a64_imm_foldable(int op, long imm, int w);   /* arch/aarch64/irgen.c */
 int mips_imm_foldable(int op, long imm);    /* arch/mips/irgen.c */
 int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
+int la_imm_foldable(int op, long imm);      /* arch/loongarch/irgen.c */
+int tc_imm_foldable(int op, long imm);      /* arch/tricore/irgen.c */
+int xtensa_imm_foldable(int op, long imm);  /* arch/xtensa/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -528,6 +587,26 @@ enum reloc_kind {
      * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
      * site whose str_off is already the offset). */
     RK_MIPS_TEXT26,
+    /* LoongArch takes an address as `pcalau12i` (the 4 KiB page of the
+     * symbol, relative to the page of the instruction) and an `addi.d`
+     * (or a load's offset) holding the symbol's low 12 bits -- each
+     * relocated against the SYMBOL itself, unlike RISC-V's low half,
+     * which names its auipc. The linker rounds the page by 0x800 because
+     * the low half is sign-extended. */
+    RK_LA_PCALA_HI20,
+    RK_LA_PCALA_LO12,
+    /* TriCore takes an absolute address in two halves too: MOVH (or
+     * MOVH.A) the high 16 bits rounded by 0x8000, then the low 16 bits
+     * SIGN-EXTENDED in an ADDI (LO) or in a LEA, load or store's long
+     * offset (LO2) -- two fields in two different places, so two kinds. */
+    RK_TRICORE_HI,
+    RK_TRICORE_LO,
+    RK_TRICORE_LO2,
+    /* An Xtensa literal-pool word holding the address of a label in this
+     * object's own .text, for a jump too far for `j` (l32r and jx):
+     * R_XTENSA_32 against the section symbol with the label's offset as
+     * the addend, as RK_MIPS_TEXT26 is. */
+    RK_XTENSA_TEXT32,
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

@@ -84,9 +84,44 @@ unsigned long mips_enc_j(int op, unsigned long target26)
     return ((unsigned long)op << 26) | target26;
 }
 
+/* The byte order the words go out in. Here rather than read from
+ * target.h, because EmbLD links this file without the target module and
+ * decides the order from the objects it reads. */
+static int g_mips_be;
+
+void mips_set_big_endian(int on) { g_mips_be = on ? 1 : 0; }
+int mips_big_endian(void) { return g_mips_be; }
+
+void mips_put_word(unsigned char *p, unsigned long w)
+{
+    for (int b = 0; b < 4; b++)
+        p[g_mips_be ? 3 - b : b] = (unsigned char)(w >> (8 * b));
+}
+
+unsigned long mips_get_word(const unsigned char *p)
+{
+    unsigned long w = 0;
+    for (int b = 0; b < 4; b++)
+        w |= (unsigned long)p[g_mips_be ? 3 - b : b] << (8 * b);
+    return w;
+}
+
 void mips_w(struct code *c, unsigned long w)
 {
-    code_u32(c, w & 0xffffffffUL);
+    unsigned char b[4];
+    mips_put_word(b, w & 0xffffffffUL);
+    for (int k = 0; k < 4; k++)
+        code_byte(c, b[k]);
+}
+
+unsigned long mips_rdw(const struct code *c, int at)
+{
+    return mips_get_word(c->p + at);
+}
+
+void mips_wrw(struct code *c, int at, unsigned long w)
+{
+    mips_put_word(c->p + at, w & 0xffffffffUL);
 }
 
 /* A signed or unsigned value as the 16-bit field that extends back to it. */
@@ -376,11 +411,9 @@ int mips_patch_b(struct code *c, int at, int target)
     long off = (long)target - (at + 4);
     if (!mips_b_reaches(at, target))
         return 0;
-    w = (unsigned long)c->p[at] | ((unsigned long)c->p[at + 1] << 8) |
-        ((unsigned long)c->p[at + 2] << 16) |
-        ((unsigned long)c->p[at + 3] << 24);
+    w = mips_rdw(c, at);
     w = (w & 0xffff0000UL) | (unsigned long)((off >> 2) & 0xffff);
-    code_patch32(c, at, w);
+    mips_wrw(c, at, w);
     return 1;
 }
 

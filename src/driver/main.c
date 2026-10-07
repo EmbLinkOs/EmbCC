@@ -23,6 +23,7 @@
 #include "../coff/write.h"
 #include "../ir/ir.h"
 #include "../arch/thumb/attrs.h"
+#include "../arch/thumb/emit.h"
 #include "../opt/opt.h"
 #include "../parse/parse.h"
 #include "../sema/sema.h"
@@ -54,11 +55,12 @@ static void print_version(void)
            dt ? " (as configured)" : "");
     printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
-           "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (little-endian "
-           "o32), AVR (ATmega328P)\n");
+           "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (o32, little- "
+           "and big-endian), LoongArch64 (LP64S), Xtensa (ESP32,\n"
+           "windowed ABI), AVR (ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32 and AVR images; "
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, LoongArch64, Xtensa and AVR images; "
            "AArch64 and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
@@ -117,8 +119,14 @@ static void print_options(FILE *out)
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
-      "                         riscv32/riscv64-unknown-elf, avr,\n"
-      "                         mipsel-none-elf, and the\n"
+      "                         armv7a-none-eabi, riscv32/riscv64-unknown-elf, avr,\n",
+      out);
+    /* (two literals: one string this long passes the IR's text form's
+     * limit, and tests/golden/ir-roundtrip.sh prints main.c's) */
+    fputs(
+      "                         mipsel-none-elf, loongarch64-unknown-elf,\n"
+      "                         xtensa-none-elf,\n"
+      "                         and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
       "                         them all\n",
@@ -503,9 +511,17 @@ static const struct func *alias_target(const struct unit *u,
     return NULL;
 }
 
+/* ...and ARMv7-A in ARM state (armv7a-none-eabi) is the one ARM target
+ * whose functions are A32: their symbols are even, as clang's are, and the
+ * mapping symbol is `$a`. */
+static int thumb_state(void)
+{
+    return target_get() == TARGET_THUMB && !target_arm_a32();
+}
+
 static long fn_sym_value(enum target_arch a, long code_off)
 {
-    return a == TARGET_THUMB ? code_off | 1 : code_off;
+    return a == TARGET_THUMB && thumb_state() ? code_off | 1 : code_off;
 }
 
 /* A function's symbol: its value and section from its code-buffer offset
@@ -618,6 +634,15 @@ static int apply_wl(struct link_opts *lo)
             lo->have_stack = 1;
         } else if ((v = wl_value("--rom-limit", 0, &k))) {
             lo->rom_limit = strtoul(v, NULL, 0);
+        } else if ((v = wl_value("--csa", 0, &k))) {
+            const char *colon = strchr(v, ':');
+            if (!colon) {
+                fprintf(stderr, "embcc: error: --csa takes START:END\n");
+                return 1;
+            }
+            lo->csa_start = strtoul(v, NULL, 0);
+            lo->csa_end = strtoul(colon + 1, NULL, 0);
+            lo->have_csa = 1;
         } else if ((v = wl_value("--lma-offset", 0, &k))) {
             lo->lma_offset = strtoull(v, NULL, 0);
         } else if ((v = wl_value("--entry", 0, &k)) ||
@@ -682,7 +707,7 @@ static int apply_wl(struct link_opts *lo)
         } else {
             fprintf(stderr, "embcc: error: linker option '%s' is not one "
                             "EmbLD has (it takes -T, -L, -u, -e, -Ttext, "
-                            "-Tdata, -Tstack, --rom-limit, --lma-offset, "
+                            "-Tdata, -Tstack, --csa, --rom-limit, --lma-offset, "
                             "--orphan-handling, --gc-sections, "
                             "--print-gc-sections, -Map and "
                             "--print-memory-usage); dropping it could build a "
@@ -727,6 +752,29 @@ static int find_lib(const char *name, char *out, size_t cap, int *own)
     return 0;
 }
 
+/* Is this one of GCC's Xtensa options (gcc/config/xtensa/xtensa.opt and
+ * elf.opt, and Espressif's), which the Xtensa target answers itself:
+ * accepted when it asks for what EmbCC emits, refused by name otherwise.
+ * The -m spellings every target accepts are not among them. */
+static int xtensa_flag(const char *a)
+{
+    static const char *const names[] = {
+        "-mlongcalls", "-mno-longcalls", "-mtext-section-literals",
+        "-mno-text-section-literals", "-mauto-litpools", "-mno-auto-litpools",
+        "-mserialize-volatile", "-mno-serialize-volatile", "-mtarget-align",
+        "-mno-target-align", "-mforce-no-pic", "-mlittle-endian",
+        "-mbig-endian", "-mstrict-align", "-mno-strict-align", "-mlra",
+        "-mno-lra", "-mconst16", "-mno-const16", "-mforce-l32",
+        "-mno-fix-esp32-psram-cache-issue"
+    };
+    for (unsigned k = 0; k < sizeof names / sizeof names[0]; k++)
+        if (!strcmp(a, names[k]))
+            return 1;
+    return !strncmp(a, "-mabi=", 6) || !strncmp(a, "-mdynconfig=", 12) ||
+           !strncmp(a, "-mextra-l32r-costs=", 19) ||
+           !strncmp(a, "-mfix-esp32-psram-cache-issue", 29);
+}
+
 /* Is this a target the driver links firmware for: one embld links, whose
  * memory map the build supplies (-T, or -Wl,-Ttext...). */
 static int firmware_target(void)
@@ -734,7 +782,9 @@ static int firmware_target(void)
     return target_fmt_get() == TGT_FMT_ELF &&
            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
-            target_get() == TARGET_MIPS32);
+            target_get() == TARGET_MIPS32 || target_get() == TARGET_LOONGARCH64 ||
+            target_get() == TARGET_TRICORE ||
+            target_get() == TARGET_XTENSA);
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -801,8 +851,8 @@ static int compile_and_link(const char *in, const char *out)
     lo.undefs = g_undefs;
     lo.nundefs = g_nundefs;
     if (fw && !lo.script && !lo.have_base) {
-        /* embld lays a script out for ARM and RISC-V only: an AVR or
-         * MIPS build is not sent looking for one */
+        /* embld lays a script out for ARM and RISC-V only: an AVR,
+         * MIPS or LoongArch build is not sent looking for one */
         int scripts = target_get() == TARGET_THUMB ||
                       target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64;
@@ -1236,7 +1286,8 @@ static int blocks_by_gas(void)
 {
     enum target_arch a = target_get();
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32;
+           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32 ||
+           a == TARGET_LOONGARCH64;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1328,7 +1379,8 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         const struct expr *e = s->kind == STMT_EXPR ? s->expr : NULL;
         if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
             enum target_arch t = target_get();
-            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ? "bl"
+            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ||
+                                 t == TARGET_LOONGARCH64 ? "bl"
                                  : t == TARGET_MIPS32 ? "jal" : "call",
                    e->callee->name);
             continue;
@@ -1370,7 +1422,7 @@ static void naked_to_blocks(struct unit *u)
         else if (!f->is_static)
             ob_fmt(&b, ".global %s\n", f->name);
         ob_fmt(&b, ".type %s, %%function\n", f->name);
-        if (t == TARGET_THUMB)
+        if (t == TARGET_THUMB && thumb_state())
             ob_str(&b, ".thumb_func\n");
         ob_fmt(&b, "%s:\n", f->name);
         /* a diagnostic in the body names the line of its first asm */
@@ -1464,6 +1516,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 "front end lays out types for 8-byte long and pointers, and "
                 "this target's long is %d bytes and its pointers %d\n",
                 target_triple_now(), target_long_size(), target_ptr_size());
+        return 1;
+    }
+    if (lang_cxx && !syntax_only && target_big_endian()) {
+        /* The C++ constant evaluator (src/cxx/consteval.c) models an
+         * object's bytes little-endian, and a literal's bytes come in in
+         * the target's order (lit_encode): a constexpr read of a big-endian
+         * u"" literal would see each unit byte-swapped. Refused until it
+         * reads memory in the target's order. */
+        fprintf(stderr,
+                "embcc: error: C++ is not yet supported for %s: the C++ "
+                "constant evaluator lays memory out little-endian, and this "
+                "target is big-endian\n", target_triple_now());
         return 1;
     }
     if (lang_cxx) {
@@ -1818,10 +1882,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit_riscv(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                            opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
+    else if (ta == TARGET_XTENSA)
+        codegen_unit_xtensa(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                            opt_level >= 1);
     else if (ta == TARGET_MIPS32)
         codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                           opt_level >= 1);
+    else if (ta == TARGET_LOONGARCH64)
+        codegen_unit_loongarch(iu, &text, &ext, &next, &strs, &nstrs, &gs,
+                               &ngs, &fs, &nfs, want_debug, opt_level >= 1,
+                               no_sse,
+                               opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
+    else if (ta == TARGET_TRICORE)
+        codegen_unit_tricore(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                             &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                             opt_level >= 1);
     else if (ta == TARGET_THUMB)
         codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -2178,8 +2255,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 continue;
             }
             unsigned long v = (unsigned long)g->init;
-            for (int b = 0; b < ty_size(g->ty); b++)
-                img[g->off + b] = (char)((v >> (8 * b)) & 0xff);
+            target_put_uint((unsigned char *)img + g->off, ty_size(g->ty), v);
         }
     }
 
@@ -2236,8 +2312,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 memcpy(rodata + g->off, g->init_bytes, (size_t)n);
             } else {
                 unsigned long v = (unsigned long)g->init;
-                for (int b = 0; b < global_size(g) && b < 8; b++)
-                    rodata[g->off + b] = (char)((v >> (8 * b)) & 0xff);
+                target_put_uint((unsigned char *)rodata + g->off,
+                                global_size(g) < 8 ? global_size(g) : 8, v);
             }
         }
     }
@@ -2304,15 +2380,47 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * PC-relative relocation MIPS's REL objects have no type for. */
     if (unwind && ta == TARGET_MIPS32)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "mipsel-none-elf yet (-funwind-tables, "
+                            "%s yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no MIPS .eh_frame");
+                            "EmbCC writes no MIPS .eh_frame",
+                   target_triple_now());
+    /* LoongArch: no .eh_frame yet. C++ asks for the tables by default
+     * whether or not it throws; with -fno-exceptions nothing reads them,
+     * so there they are simply not written, and only an explicit request
+     * -- or exceptions -- is refused. */
+    if (unwind && ta == TARGET_LOONGARCH64 && lang_cxx && want_unwind < 0 &&
+        !want_exceptions)
+        unwind = 0;
+    if (unwind && ta == TARGET_LOONGARCH64)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "%s yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions, and "
+                            "C++ without -fno-exceptions): EmbCC writes no "
+                            "LoongArch .eh_frame",
+                   target_triple_now());
+    if (unwind && ta == TARGET_TRICORE)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "tricore-none-elf yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no TriCore .eh_frame");
+    if (unwind && ta == TARGET_XTENSA)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "xtensa-none-elf yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no Xtensa .eh_frame");
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
     /* -S: the same bytes, as text (src/driver/asmout.c). Everything the
      * emitter needs is in hand here -- the code, the string pool, and the
      * relocation sites the backend recorded. */
+    /* Xtensa's -S would need an assembler that reads it back, and there
+     * is none to check it against (no Xtensa llvm-mc): refused by name
+     * rather than written unverified. */
+    if (want_asm && ta == TARGET_XTENSA)
+        diag_fatal(NULL, 0, "-S is not supported for xtensa-none-elf yet: "
+                            "compile with -c (there is no Xtensa assembler "
+                            "here to check the text against)");
     if (want_asm) {
         /* Every target, now. What -S emits is the OBJECT's bytes as
          * .byte directives with the relocations attached explicitly --
@@ -3114,7 +3222,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * jump table in .text is data between two of these: `$d` where
          * it starts and the code symbol again where it ends, so that a
          * disassembler prints words, not instructions. */
-        const char *codesym = ta == TARGET_THUMB ? "$t" : "$x";
+        const char *codesym = ta != TARGET_THUMB ? "$x"
+                            : thumb_state() ? "$t" : "$a";
         elfw_add_symbol(w, codesym, 0, 0,
                         ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                         (Elf64_Half)text_ndx);
@@ -3197,8 +3306,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && f->is_static && f->used)
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off),
-                (Elf64_Xword)f->code_len,
+                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off + f->code_entry),
+                (Elf64_Xword)(f->code_len - f->code_entry),
                 ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
                 (Elf64_Half)code_sec(f->code_off, text_ndx));
     /* An alias is one more symbol at its target's address and size (sema
@@ -3209,8 +3318,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (!f->absorbed && f->alias_of && f->is_static) {
             const struct func *t = alias_target(u, f);
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off),
-                (Elf64_Xword)t->code_len, ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
+                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off + t->code_entry),
+                (Elf64_Xword)(t->code_len - t->code_entry), ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
                 (Elf64_Half)code_sec(t->code_off, text_ndx));
         }
     for (struct global *g = u->globals; g; g = g->next)
@@ -3260,16 +3369,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && !f->is_static)
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off),
-                (Elf64_Xword)f->code_len,
+                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off + f->code_entry),
+                (Elf64_Xword)(f->code_len - f->code_entry),
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
                 (Elf64_Half)code_sec(f->code_off, text_ndx));
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->alias_of && !f->is_static) {
             const struct func *t = alias_target(u, f);
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off),
-                (Elf64_Xword)t->code_len,
+                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off + t->code_entry),
+                (Elf64_Xword)(t->code_len - t->code_entry),
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
                 (Elf64_Half)code_sec(t->code_off, text_ndx));
         }
@@ -3310,7 +3419,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                  * untyped label NOTYPE and even. A typed Thumb function
                  * was even, so a call through a pointer to it switched
                  * to the ARM state a Cortex-M does not have. */
-                int thumb = target_get() == TARGET_THUMB;
+                int thumb = thumb_state();
                 int st = as->type == ASMSYM_OBJECT ? STT_OBJECT
                        : as->type == ASMSYM_FUNC || !thumb ? STT_FUNC
                        : STT_NOTYPE;
@@ -3443,7 +3552,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                            text_sym, &sym);
                         /* a Thumb function's ADDRESS carries bit 0; a
                          * branch to it does not */
-                        if (target_get() == TARGET_THUMB &&
+                        if (thumb_state() &&
                             lb->syms[k].type == ASMSYM_FUNC &&
                             (!etype || etype == R_ARM_ABS32))
                             addend |= 1;
@@ -3495,7 +3604,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * the addend, because `jmp` carries an absolute address and nothing
          * in a relocatable object knows where its own .text will land. */
         int tx = strs[i].kind == RK_AVR_TEXT_CALL ||
-                 strs[i].kind == RK_MIPS_TEXT26;
+                 strs[i].kind == RK_MIPS_TEXT26 ||
+                 strs[i].kind == RK_XTENSA_TEXT32;
         /* (the auipc, or the jump's label, is in the same function as
          * the site, so in the same section) */
         int ssym = rodata_sym;
@@ -3755,6 +3865,45 @@ static void arm_float_resolve(void)
 {
     if (target_get() != TARGET_THUMB)
         return;                        /* refused where the flag was parsed */
+    /* ARMv7-A: VFPv3 or VFPv4, D16 or D32 -- every Cortex-A's unit but
+     * NEON's SIMD, which nothing here emits and so nothing may claim. The
+     * code is the Cortex-M7's (single and double precision on d0-d15),
+     * each instruction under a condition field. armv7a-none-eabihf is
+     * -mfpu=vfpv3-d16 -mfloat-abi=hard: the unit every Cortex-A with an
+     * FPU has. */
+    if (target_arm_a32()) {
+        static const struct { const char *name; int ver, d32; } units[] = {
+            { "vfpv3-d16", 3, 0 }, { "vfpv3", 3, 1 }, { "vfp3", 3, 1 },
+            { "vfpv4-d16", 4, 0 }, { "vfpv4", 4, 1 }, { "vfp4", 4, 1 },
+            { NULL, 0, 0 }
+        };
+        int hfa = target_thumb_hf_name(), unit = -1;
+        const char *a = g_arm_float_abi ? g_arm_float_abi : hfa ? "hard" : "soft";
+        const char *u = g_arm_fpu ? g_arm_fpu : hfa ? "vfpv3-d16" : NULL;
+        int named = u && strcmp(u, "none") && strcmp(u, "soft") &&
+                    strcmp(u, "auto");
+        if (strcmp(a, "soft") && strcmp(a, "softfp") && strcmp(a, "hard"))
+            diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it "
+                       "is one of soft, softfp and hard", a);
+        for (int k = 0; named && units[k].name; k++)
+            if (!strcmp(u, units[k].name))
+                unit = k;
+        if (named && unit < 0)
+            diag_fatal(NULL, 0, "-mfpu=%s is not supported on %s: EmbCC "
+                       "emits VFPv3 or VFPv4 (-mfpu=vfpv3-d16, vfpv3, "
+                       "vfpv4-d16, vfpv4) there, and no NEON (Advanced SIMD) "
+                       "instruction", u, target_triple_now());
+        if (!strcmp(a, "soft"))
+            return;                    /* no FPU instructions, as GCC reads it */
+        if (!named)
+            diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
+                       "-mfpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)", a);
+        target_set_thumb_hard_abi(!strcmp(a, "hard"));
+        target_set_thumb_fpu(1);
+        target_set_thumb_fpu_dp(1);
+        target_set_arm_vfp(units[unit].ver, units[unit].d32);
+        return;
+    }
     /* An -eabihf triple is shorthand for the part's FPU and the hard
      * convention; a flag that says otherwise wins, as with clang. */
     int hf = target_thumb_hf_name();
@@ -4006,10 +4155,21 @@ int main(int argc, char **argv)
      * same compiler told that board by name. */
     {
         enum target_arch a = target_get();
+        /* ...and the encoder the Thumb backend writes through: A32 for
+         * armv7a-none-eabi. Here, before anything is compiled, because the
+         * optimizer asks the encoder which constants an instruction can
+         * carry (thumb_imm_foldable) long before code generation. */
+        t_isa_a32 = target_arm_a32();
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
                               : a == TARGET_MIPS32 ? mips_op_calls_helper
+                              : a == TARGET_LOONGARCH64 ? la_op_calls_helper
+                              : a == TARGET_TRICORE ? tc_op_calls_helper
+                              : a == TARGET_XTENSA ? xtensa_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
+        /* the MIPS encoder's byte order, for the code generator and the
+         * inline and file-scope assemblers alike */
+        mips_set_big_endian(target_big_endian());
     }
     /* Scanned across the whole command line, not just argv[1]: these
      * describe the TARGET, so `--target=aarch64-elf --dump-predef` has to
@@ -4495,7 +4655,8 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-fno-move-loop-invariants") == 0 ||
                    strcmp(argv[i], "-fno-ipa-sra") == 0 ||
                    strcmp(argv[i], "-fno-lto") == 0 ||
-                   strcmp(argv[i], "-mlittle-endian") == 0) {
+                   (strcmp(argv[i], "-mlittle-endian") == 0 &&
+                    !target_big_endian())) {
             /* What arm-none-eabi-gcc builds pass, each accepted for a
              * reason that holds of THIS compiler (docs/manual/invoking.md;
              * tests/golden/gcc-flags.sh checks the promises):
@@ -4549,7 +4710,8 @@ int main(int argc, char **argv)
              *   -fno-builtin-NAME     no library name is a builtin at all
              *   -fno-isolate-erroneous-paths-dereference  nothing turns
              *                         a null dereference into a trap
-             *   -mlittle-endian       every target EmbCC has is */
+             *   -mlittle-endian       every target EmbCC has is, but
+             *                         mips-none-elf (refused below) */
         } else if (strncmp(argv[i], "-specs=", 7) == 0 ||
                    strncmp(argv[i], "--specs=", 8) == 0) {
             /* nano.specs, nosys.specs: which newlib and which syscall
@@ -4607,10 +4769,28 @@ int main(int argc, char **argv)
                                 "convention\n", v, target_triple_now(), want);
                 return 1;
             }
-        } else if (strcmp(argv[i], "-mbig-endian") == 0) {
-            fprintf(stderr, "embcc: error: -mbig-endian is not supported: "
-                            "every target EmbCC emits for is little-endian\n");
-            return 1;
+        } else if (strcmp(argv[i], "-mbig-endian") == 0 ||
+                   strcmp(argv[i], "-mlittle-endian") == 0) {
+            /* The byte order is the target's: it says what it is, and a
+             * flag that says the same is accepted. One that contradicts it
+             * is refused rather than obeyed, because the triple decides
+             * more than the order (the runtime's directory, the object's
+             * name for itself) and a silent switch would leave them
+             * disagreeing. */
+            int be = argv[i][2] == 'b';
+            if (be != target_big_endian()) {
+                fprintf(stderr, "embcc: error: %s is not supported for %s, "
+                                "which is %s-endian%s\n", argv[i],
+                        target_triple_now(),
+                        target_big_endian() ? "big" : "little",
+                        target_get() == TARGET_MIPS32
+                            ? (be ? " (big-endian MIPS is "
+                                    "--target=mips-none-elf)"
+                                  : " (little-endian MIPS is "
+                                    "--target=mipsel-none-elf)")
+                            : "");
+                return 1;
+            }
         } else if (strncmp(argv[i], "-fgnuc-version=", 15) == 0) {
             /* clang's spelling: present a C unit as this GCC, so a vendor
              * header that picks its compiler support by __GNUC__ (CMSIS)
@@ -4653,6 +4833,128 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--dump-predef") == 0 ||
                    strcmp(argv[i], "-dumpmachine") == 0) {
             /* answered after every argument has been applied */
+        } else if (target_get() == TARGET_LOONGARCH64 &&
+                   (strncmp(argv[i], "-march=", 7) == 0 ||
+                    strncmp(argv[i], "-mtune=", 7) == 0 ||
+                    strncmp(argv[i], "-mabi=", 6) == 0 ||
+                    strncmp(argv[i], "-mfpu=", 6) == 0 ||
+                    strncmp(argv[i], "-mcmodel=", 9) == 0 ||
+                    strcmp(argv[i], "-msoft-float") == 0 ||
+                    strcmp(argv[i], "-msingle-float") == 0 ||
+                    strcmp(argv[i], "-mdouble-float") == 0 ||
+                    strcmp(argv[i], "-mrelax") == 0 ||
+                    strcmp(argv[i], "-mno-relax") == 0 ||
+                    strcmp(argv[i], "-mstrict-align") == 0 ||
+                    strcmp(argv[i], "-mno-strict-align") == 0 ||
+                    strcmp(argv[i], "-mlsx") == 0 ||
+                    strcmp(argv[i], "-mno-lsx") == 0 ||
+                    strcmp(argv[i], "-mlasx") == 0 ||
+                    strcmp(argv[i], "-mno-lasx") == 0)) {
+            /* The flags a LoongArch build passes (clang's and gcc's for
+             * loongarch64 bare metal). What EmbCC emits is ONE
+             * configuration -- the LA64 base integer ISA, the LP64S
+             * soft-float convention, the normal code model -- so each flag
+             * either says that (or something it is a valid part of) and is
+             * accepted, or asks for something else and is refused by name:
+             * an object built for the FPU convention would link and then
+             * disagree with every caller about where a double travels. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : "";
+            if (strncmp(argv[i], "-march=", 7) == 0) {
+                /* the base ISA runs on every one of these */
+                static const char *const archs[] = {
+                    "loongarch64", "la64v1.0", "la64v1.1", "la464", "la664"
+                };
+                int ok = 0;
+                for (unsigned k = 0; k < sizeof archs / sizeof archs[0]; k++)
+                    ok |= strcmp(v, archs[k]) == 0;
+                if (!ok)
+                    diag_fatal(NULL, 0, "%s is not an LA64 architecture: "
+                               "EmbCC emits the LA64 base integer ISA "
+                               "(loongarch64, la64v1.0, la64v1.1, la464, "
+                               "la664)", argv[i]);
+            } else if (strncmp(argv[i], "-mabi=", 6) == 0) {
+                if (strcmp(v, "lp64s") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                               "the soft-float LP64S convention "
+                               "(-mabi=lp64s), which passes floating point "
+                               "in the integer registers", argv[i]);
+            } else if (strncmp(argv[i], "-mfpu=", 6) == 0) {
+                if (strcmp(v, "none") != 0 && strcmp(v, "0") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC's "
+                               "LoongArch code uses no FPU (-mfpu=none)",
+                               argv[i]);
+            } else if (strncmp(argv[i], "-mcmodel=", 9) == 0) {
+                /* normal: bl and pcalau12i reach +-128 MiB and +-2 GiB;
+                 * a medium program fits in that too, and one that does
+                 * not is refused by the linker, never mislinked */
+                if (strcmp(v, "normal") != 0 && strcmp(v, "medium") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                               "the normal code model (bl, pcalau12i + "
+                               "addi.d)", argv[i]);
+            } else if (strcmp(argv[i], "-msingle-float") == 0 ||
+                       strcmp(argv[i], "-mdouble-float") == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                           "soft-float LP64S code (-msoft-float)", argv[i]);
+            } else if (strcmp(argv[i], "-mstrict-align") == 0) {
+                diag_fatal(NULL, 0, "-mstrict-align is not supported: "
+                           "EmbCC's LoongArch code may access a packed "
+                           "member unaligned, as LA64 permits");
+            } else if (strcmp(argv[i], "-mlsx") == 0 ||
+                       strcmp(argv[i], "-mlasx") == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits no "
+                           "LSX or LASX vector instructions", argv[i]);
+            }
+            continue;
+        } else if (target_get() == TARGET_XTENSA && xtensa_flag(argv[i])) {
+            /* The flags an ESP-IDF build passes, and the rest of GCC's
+             * xtensa.opt. What EmbCC emits is ONE configuration -- the
+             * windowed ABI, little-endian, literals in .text before each
+             * function, direct call8s, memw before every volatile access
+             * -- so a flag that says that (or only changes how GCC would
+             * have placed or costed the same code) is accepted, and one
+             * that asks for anything else is refused by name. */
+            static const char *const ok[] = {
+                "-mlongcalls", "-mno-longcalls", "-mtext-section-literals",
+                "-mno-text-section-literals", "-mauto-litpools",
+                "-mno-auto-litpools", "-mserialize-volatile",
+                "-mno-serialize-volatile", "-mtarget-align",
+                "-mno-target-align", "-mforce-no-pic", "-mabi=windowed",
+                "-mlittle-endian", "-mstrict-align", "-mno-strict-align",
+                "-mlra", "-mno-lra", "-mno-fix-esp32-psram-cache-issue",
+                "-mno-const16"
+            };
+            int good = 0;
+            for (unsigned k = 0; k < sizeof ok / sizeof ok[0]; k++)
+                good |= strcmp(argv[i], ok[k]) == 0;
+            if (!strncmp(argv[i], "-mextra-l32r-costs=", 19))
+                good = 1;           /* GCC's cost model alone */
+            if (!strncmp(argv[i], "-mdynconfig=", 12) &&
+                (strstr(argv[i], "esp32.so") || strstr(argv[i], "esp32s3.so")))
+                good = 1;
+            if (!good) {
+                if (!strncmp(argv[i], "-mabi=", 6) &&
+                    strcmp(argv[i], "-mabi=call0"))
+                    diag_fatal(NULL, 0, "%s is not an Xtensa ABI: EmbCC "
+                               "emits the windowed ABI (-mabi=windowed)",
+                               argv[i]);
+                if (!strcmp(argv[i], "-mabi=call0"))
+                    diag_fatal(NULL, 0, "-mabi=call0 is not supported: EmbCC "
+                               "emits the windowed ABI (call8/entry/retw), "
+                               "which ESP-IDF uses");
+                if (!strcmp(argv[i], "-mbig-endian"))
+                    diag_fatal(NULL, 0, "-mbig-endian is not supported: the "
+                               "Xtensa target is little-endian only");
+                if (!strncmp(argv[i], "-mfix-esp32-psram-cache-issue", 29))
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC does not "
+                               "insert the ESP32 rev. 1 PSRAM workaround",
+                               argv[i]);
+                diag_fatal(NULL, 0, "%s is not supported for xtensa-none-elf: "
+                           "EmbCC emits the windowed ABI for the ESP32 "
+                           "(LX6) and ESP32-S3 (LX7), little-endian, with "
+                           "literals before each function", argv[i]);
+            }
+            continue;
         } else if (target_get() == TARGET_MIPS32 &&
                    (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                     strncmp(argv[i], "-march=", 7) == 0 ||
@@ -4665,8 +4967,9 @@ int main(int argc, char **argv)
                     strncmp(argv[i], "-G", 2) == 0)) {
             /* The flags a MIPS build passes (a PIC32 project's, clang's
              * and gcc's for mipsel bare metal). What EmbCC emits is ONE
-             * configuration -- MIPS32 Release 2, little-endian, o32, soft
-             * float, no abicalls, no small data -- so each flag either
+             * configuration -- MIPS32 Release 2, o32, soft float, no
+             * abicalls, no small data, in the triple's byte order (-EL
+             * mipsel, -EB mips) -- so each flag either
              * says exactly that and is accepted, or asks for something
              * else and is refused by name: an object built for another
              * of these would link and then disagree with its callers
@@ -4699,14 +5002,56 @@ int main(int argc, char **argv)
                 diag_fatal(NULL, 0, "-mabicalls is not supported: EmbCC's "
                            "MIPS code takes addresses absolutely (lui/addiu) "
                            "and keeps no $gp; it is -mno-abicalls code");
-            } else if (strcmp(argv[i], "-EB") == 0) {
-                diag_fatal(NULL, 0, "-EB is not supported: the MIPS target "
-                           "is little-endian (mipsel) only");
+            } else if (strcmp(argv[i], "-EB") == 0 && !target_big_endian()) {
+                diag_fatal(NULL, 0, "-EB contradicts --target=%s, which is "
+                           "little-endian: big-endian MIPS is "
+                           "--target=mips-none-elf", target_triple_now());
+            } else if (strcmp(argv[i], "-EL") == 0 && target_big_endian()) {
+                diag_fatal(NULL, 0, "-EL contradicts --target=%s, which is "
+                           "big-endian: little-endian MIPS is "
+                           "--target=mipsel-none-elf", target_triple_now());
             } else if (strncmp(argv[i], "-G", 2) == 0 &&
                        strcmp(argv[i], "-G0") != 0) {
                 diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no "
                            "data in .sdata and addresses nothing through "
                            "$gp (-G0)", argv[i]);
+            }
+            continue;
+        } else if (target_get() == TARGET_TRICORE &&
+                   (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                    strncmp(argv[i], "-march=", 7) == 0 ||
+                    strncmp(argv[i], "-mtc", 4) == 0 ||
+                    strcmp(argv[i], "-msoft-float") == 0 ||
+                    strcmp(argv[i], "-mhard-float") == 0 ||
+                    strcmp(argv[i], "-mlittle-endian") == 0)) {
+            /* The flags a TriCore build passes (HighTec's GCC spells the
+             * core -mcpu=tc27xx or -mtc161). What EmbCC emits is ONE
+             * configuration -- TriCore 1.6.1 instructions, which every
+             * TC2xx and TC3xx core executes, and soft float -- so each
+             * flag either names a core that runs it and is accepted, or
+             * asks for something else and is refused by name. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : argv[i] + 2;          /* -mtc161: "tc161" */
+            if (strcmp(argv[i], "-mhard-float") == 0)
+                diag_fatal(NULL, 0, "-mhard-float is not supported: EmbCC "
+                           "emits soft float for TriCore (the TC3xx FPU is "
+                           "not used yet)");
+            if (strcmp(argv[i], "-msoft-float") && strcmp(argv[i],
+                                                         "-mlittle-endian")) {
+                static const char *const cores[] = {
+                    "tc16", "tc161", "tc162", "tc1.6", "tc1.6.1", "tc1.6.2",
+                    "tc16x", "tc2xx", "tc22xx", "tc23xx", "tc26xx", "tc27xx",
+                    "tc29xx", "tc3xx", "tc33xx", "tc36xx", "tc37xx",
+                    "tc38xx", "tc39xx"
+                };
+                int ok = 0;
+                for (unsigned k = 0; k < sizeof cores / sizeof cores[0]; k++)
+                    ok |= strcmp(v, cores[k]) == 0;
+                if (!ok)
+                    diag_fatal(NULL, 0, "%s is not a TriCore 1.6 core: EmbCC "
+                               "emits TriCore 1.6.1 code, for the AURIX "
+                               "TC2xx and TC3xx (tc16, tc161, tc162, tc27xx, "
+                               "tc37xx, ...)", argv[i]);
             }
             continue;
         } else if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
@@ -4737,6 +5082,44 @@ int main(int argc, char **argv)
             if (target_get() != TARGET_THUMB)
                 diag_fatal(NULL, 0, "%s is an ARM option, and the target "
                            "is %s", argv[i], target_triple_now());
+            /* ARMv7-A in ARM state: -marm is what is emitted, -mthumb
+             * would be Thumb-2 on a Cortex-A, which EmbCC does not emit
+             * there (the Thumb-2 it emits is the Cortex-M levels'). The
+             * rest of the flags are read below as on the Cortex-M levels,
+             * with the parts and units this target has. */
+            if (target_arm_a32()) {
+                if (strcmp(argv[i], "-marm") == 0)
+                    continue;
+                if (strcmp(argv[i], "-mthumb") == 0)
+                    diag_fatal(NULL, 0, "-mthumb is not supported on %s: "
+                               "EmbCC emits ARM (A32) code for a Cortex-A; "
+                               "Thumb-2 is for the Cortex-M targets "
+                               "(thumbv7m-none-eabi and the others)",
+                               target_triple_now());
+                if (strncmp(argv[i], "-mcpu=", 6) == 0) {
+                    /* The ARMv7-A cores. All of them run what is emitted:
+                     * no divide instruction is used (the A7, A12, A15 and
+                     * A17 have one; the code calls __aeabi_idiv anyway),
+                     * and no VFP or NEON. */
+                    static const char *const a7cores[] = {
+                        "cortex-a5", "cortex-a7", "cortex-a8", "cortex-a9",
+                        "cortex-a12", "cortex-a15", "cortex-a17", "generic",
+                        NULL
+                    };
+                    int known = 0;
+                    for (int k = 0; a7cores[k]; k++)
+                        known |= strcmp(v, a7cores[k]) == 0;
+                    if (!known)
+                        diag_fatal(NULL, 0, "-mcpu=%s is not supported on %s: "
+                                   "EmbCC emits ARMv7-A (cortex-a5, a7, a8, "
+                                   "a9, a12, a15, a17) here; a Cortex-M is "
+                                   "one of the thumb targets, and an ARMv7-R "
+                                   "core's profile is not this one", v,
+                                   target_triple_now());
+                    g_arm_cpu = v;
+                    continue;
+                }
+            }
             if (strcmp(argv[i], "-marm") == 0)
                 diag_fatal(NULL, 0, "-marm is not supported: a Cortex-M "
                            "has no ARM instruction set, only Thumb");

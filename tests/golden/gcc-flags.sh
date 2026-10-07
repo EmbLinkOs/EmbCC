@@ -111,7 +111,7 @@ refuse() {
     [ ! -e "$out/r.o" ] || fail "$* on $t refused but wrote an object"
 }
 for t in $ALL; do
-    refuse $t "every target EmbCC emits for is little-endian" -mbig-endian
+    refuse $t "which is little-endian" -mbig-endian
     refuse $t "dumps GCC's internal representation" -fdump-rtl-expand
     refuse $t "dumps GCC's internal representation" -fdump-tree-all
     refuse $t "dumps GCC's internal representation" -fcallgraph-info=da
@@ -585,7 +585,10 @@ for t in $ALL; do
 done
 echo "-fno-tree-loop-distribute-patterns: no loop or copy becomes a call"
 
-# -fno-short-enums and -mlittle-endian describe every target as it is.
+# -fno-short-enums and -mlittle-endian describe every target here as it is
+# (each is little-endian; mips-none-elf, the big-endian one, is
+# mips-refuse.sh's, where -mlittle-endian is refused and -mbig-endian
+# accepted).
 cat > "$out/en.c" <<'EOF'
 enum e { A, B };
 _Static_assert(sizeof(enum e) == sizeof(int), "an enum is int-sized");
@@ -595,7 +598,7 @@ for t in $ALL; do
     "$EMBCC" --target=$t -fno-short-enums -mlittle-endian -c "$out/en.c" \
         -o "$out/en.o" || fail "$t: an enum is not int, or not little-endian"
 done
-echo "-fno-short-enums and -mlittle-endian: what every target already is"
+echo "-fno-short-enums and -mlittle-endian: what every target here already is"
 
 # -Werror=implicit-function-declaration: an implicit declaration is an
 # error anyway, and the flag no longer claims the warning is missing.

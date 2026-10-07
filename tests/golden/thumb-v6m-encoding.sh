@@ -29,7 +29,7 @@ command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 || {
     echo "SKIP: llvm-mc/llvm-objcopy not found (set EMBCC_LLVM_MC)"; exit 0; }
 
 cc -std=c99 -Wall -Wextra -Werror -o "$out/t1check" \
-   tools/t1check/t1check.c src/arch/thumb/emit.c src/arch/code.c \
+   tools/t1check/t1check.c src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/code.c \
    src/driver/util.c || {
     echo "t1check did not build"; exit 1; }
 

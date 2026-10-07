@@ -129,6 +129,7 @@ SRCS := \
 	src/arch/aarch64/predef.c \
 	src/arch/aarch64/predef_cxx.c \
 	src/arch/thumb/emit.c \
+	src/arch/thumb/a32.c \
 	src/arch/thumb/attrs.c \
 	src/arch/thumb/irgen.c \
 	src/arch/thumb/codegen.c \
@@ -140,6 +141,8 @@ SRCS := \
 	src/arch/thumbv8m/predef_cxx.c \
 	src/arch/thumbv6m/predef.c \
 	src/arch/thumbv6m/predef_cxx.c \
+	src/arch/armv7a/predef.c \
+	src/arch/armv7a/predef_cxx.c \
 	src/arch/riscv/emit.c \
 	src/arch/riscv/codegen.c \
 	src/arch/riscv/irgen.c \
@@ -154,6 +157,25 @@ SRCS := \
 	src/arch/mips/asm.c \
 	src/arch/mips32/predef.c \
 	src/arch/mips32/predef_cxx.c \
+	src/arch/mips32eb/predef.c \
+	src/arch/mips32eb/predef_cxx.c \
+	src/arch/loongarch/emit.c \
+	src/arch/loongarch/codegen.c \
+	src/arch/loongarch/irgen.c \
+	src/arch/loongarch/asm.c \
+	src/arch/loongarch64/predef.c \
+	src/arch/loongarch64/predef_cxx.c \
+	src/arch/tricore/emit.c \
+	src/arch/tricore/codegen.c \
+	src/arch/tricore/irgen.c \
+	src/arch/tricore/asm.c \
+	src/arch/tricore/predef.c \
+	src/arch/tricore/predef_cxx.c \
+	src/arch/xtensa/emit.c \
+	src/arch/xtensa/codegen.c \
+	src/arch/xtensa/irgen.c \
+	src/arch/xtensa/predef.c \
+	src/arch/xtensa/predef_cxx.c \
 	src/arch/avr/emit.c \
 	src/arch/avr/codegen.c \
 	src/arch/avr/asm.c \
@@ -178,7 +200,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar embsvd embrt
+all: embcc embread embld embas embls embidx embar embsvd embpack embmap embrt
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -232,6 +254,17 @@ embsvd: tools/embsvd/embsvd.c
 # ISO C and standalone, like embar.
 embrt: tools/embrt/embrt.c
 	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
+# embpack -- a linked image as the file a programmer or bootloader takes:
+# raw binary, Intel HEX, S-records or UF2, with a CRC-32 stamped into a
+# symbol or appended and a JSON manifest (tools/embpack). ISO C and
+# standalone, like embar.
+embpack: tools/embpack/embpack.c
+	$(CC) $(CFLAGS) -o $@ tools/embpack/embpack.c
+# embmap -- where an image's flash and RAM go: sections, regions, the
+# biggest symbols, the bytes by input file from a map, and the growth
+# between two builds (tools/embmap). ISO C and standalone, like embar.
+embmap: tools/embmap/embmap.c
+	$(CC) $(CFLAGS) -o $@ tools/embmap/embmap.c
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
@@ -250,7 +283,9 @@ embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
 # writer the embdbg tool uses — one implementation, not two.
 embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
-       src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c src/arch/code.c \
+       src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c \
+       src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/thumb/a32.h \
+       src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/code.c \
        src/link/link.h src/link/ldscript.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        $(PLATFORM_SRCS) src/platform/platform.h
@@ -259,7 +294,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS) \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c \
-	    src/arch/mips/emit.c src/arch/code.c
+	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/code.c
 
 # NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
 # a backend file added without a line here breaks only `make test` -- and
@@ -287,9 +322,14 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/riscv32/predef.c src/arch/riscv32/predef_cxx.c \
              src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
              src/arch/mips32/predef.c src/arch/mips32/predef_cxx.c \
+             src/arch/mips32eb/predef.c src/arch/mips32eb/predef_cxx.c \
+             src/arch/loongarch64/predef.c src/arch/loongarch64/predef_cxx.c \
+             src/arch/tricore/predef.c src/arch/tricore/predef_cxx.c \
+             src/arch/xtensa/predef.c src/arch/xtensa/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
+             src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
@@ -299,9 +339,15 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
-             src/arch/thumb/emit.c src/arch/thumb/attrs.c src/arch/riscv/irgen.c \
+             src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \
+             src/arch/riscv/irgen.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
              src/arch/mips/irgen.c src/arch/mips/asm.c src/arch/mips/emit.c \
+             src/arch/loongarch/irgen.c src/arch/loongarch/emit.c \
+             src/arch/loongarch/asm.c \
+             src/arch/tricore/irgen.c src/arch/tricore/asm.c \
+             src/arch/tricore/emit.c \
+             src/arch/xtensa/irgen.c src/arch/xtensa/emit.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
@@ -510,8 +556,9 @@ libc-linux-aarch64: embcc embar
 # with soft-float ones, so its runtime is a separate archive.
 RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
-               thumbv8m.main-none-eabihf riscv32-unknown-elf riscv64-unknown-elf \
-               mipsel-none-elf
+               thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
+               riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
+                 xtensa-none-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -525,8 +572,10 @@ rt-embedded: embcc embar
 # locks are refused for it.
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
-                 thumbv8m.main-none-eabihf riscv32-unknown-elf \
-                 riscv64-unknown-elf mipsel-none-elf
+                 thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
+                 riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \
+                 loongarch64-unknown-elf tricore-none-elf \
+                 xtensa-none-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \

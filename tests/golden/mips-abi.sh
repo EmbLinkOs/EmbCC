@@ -24,24 +24,33 @@
 # The clang objects carry REL relocations, .reginfo, .MIPS.abiflags and
 # .pdr, which embld must read, check and drop; so this is EmbLD's test
 # for foreign objects as well.
+#
+# The same pairs run BIG-endian (mips-none-elf against clang's
+# mips-unknown-elf, on qemu-system-mips) as tests/golden/mips-be-abi.sh,
+# which sets MIPS_ABI_BE=1 and runs this.
 set -u
-echo "TEST-MARKER mips-abi"
+if [ "${MIPS_ABI_BE:-0}" = 1 ]; then
+    NAME=mips-be-abi T=mips-none-elf CT=mips-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    NAME=mips-abi T=mipsel-none-elf CT=mipsel-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
+echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
 
-QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
 command -v "$QEMU" >/dev/null 2>&1 || {
     echo "skipped: $QEMU not found"; exit 0; }
 CLANG=${EMBCC_REF_CLANG_MIPS:-clang}
 command -v "$CLANG" >/dev/null 2>&1 &&
-    "$CLANG" --target=mipsel-unknown-elf -mcpu=mips32r2 -msoft-float \
+    "$CLANG" --target=$CT -mcpu=mips32r2 -msoft-float \
         -fsyntax-only -x c /dev/null 2>/dev/null || {
     echo "skipped: no clang with a MIPS target (set EMBCC_REF_CLANG_MIPS)"
     exit 0; }
 
-T=mipsel-none-elf
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
-out=tests/golden/out/mips-abi
+out=tests/golden/out/$NAME
 rm -rf "$out"; mkdir -p "$out"
 export EMBCC_MIPS_HARNESS="$PWD/$out"
 
@@ -54,7 +63,7 @@ EMBCC="$EMBCC" sh tools/build-rt.sh $T "$out/lib" || {
 
 compile() {             # compile CC OPT SRC OBJ
     if [ "$1" = clang ]; then
-        "$CLANG" --target=mipsel-unknown-elf -mcpu=mips32r2 -msoft-float \
+        "$CLANG" --target=$CT -mcpu=mips32r2 -msoft-float \
             -ffreestanding -O1 -I tests/golden -c "$3" -o "$4"
     else
         "$EMBCC" --target=$T "$2" -I tests/golden -c "$3" -o "$4"
@@ -92,4 +101,4 @@ for prog in embedded-abi mips-abi; do
     done
     echo "$prog: EmbCC and clang call each other identically at -O0 and -O2"
 done
-echo "o32 calls agree with clang's in both directions"
+echo "o32 calls ($T) agree with clang's in both directions"
