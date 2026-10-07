@@ -65,7 +65,7 @@ the full entry.
 | [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fmessage-length=N` `-fdiagnostics-parseable-fixits` `--fix` `-fanalyzer` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
 | [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-fremarks` `-fremarks=json` |
-| [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fcallgraph-info[=su]` `-fno-stack-protector` |
+| [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fcallgraph-info[=su]` `-ftime-report` `-fno-stack-protector` |
 | [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-include FILE` `-Wp,ARGS` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
 | [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` `-specs=FILE` |
@@ -985,6 +985,30 @@ absorbed or that were dropped as unreachable are not listed.
 
 The `.su` name is derived from the output file, or, with no `-o`, from the
 source's name in the current directory, as GCC does.
+
+### `-ftime-report`
+
+Print where the compile's time went, phase by phase, on standard error at
+exit, as GCC and clang do. The times are processor time (ISO C `clock()`),
+so they mean the same on every host. A phase not listed (writing the
+object, linking) is counted in "object and the rest". The output is
+otherwise unchanged: the object is the same with or without it.
+
+```text
+Execution times (seconds, processor time)
+ startup               :    0.001 (  0%)
+ preprocess            :    0.039 (  4%)
+ parse                 :    0.006 (  1%)
+ semantic analysis     :    0.004 (  0%)
+ IR generation         :    0.002 (  0%)
+ optimization          :    0.958 ( 91%)
+ code generation       :    0.039 (  4%)
+ object and the rest   :    0.000 (  0%)
+ TOTAL                 :    1.050
+```
+
+A C++ unit also lists "C++ front end". With several inputs, each phase is
+the sum over them.
 
 ### `-fcallgraph-info`, `-fcallgraph-info=su`
 

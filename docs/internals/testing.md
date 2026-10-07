@@ -444,6 +444,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `vectorize` | auto-vectorization fires and computes the same checksums as `-O0`, `-O1` and gcc |
 | `tailcall` | sibling calls run in constant stack |
 | `frameless` | leaves with no frame, and the conditions that make it safe |
+| `time-report` | `-ftime-report` reports every phase and a total on stderr, and the object is the same with or without it |
 | `branches` | short branch encodings where they reach |
 | `parallel-move` | `ra_parallel_move` simulated over every small shape (`tools/pmovecheck`) |
 | `remarks` | optimization remarks and `embcc why`: different causes give different reasons |
