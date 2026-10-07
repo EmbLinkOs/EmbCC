@@ -6236,10 +6236,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
 
     f->code_len = t->len - f->code_off;
     /* What -fstack-usage reports: the registers the prologue pushed
-     * plus everything sub sp reserved. */
-    f->stack_bytes = F.nopush ? 0 : F.noret ? (int)F.frame : (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
+     * plus everything sub sp reserved -- and a variadic function's
+     * register save area, r0-r3, which it pushes first and apart from
+     * the rest. Leaving those 16 bytes out made embrt's bound for a
+     * program calling a variadic function 16 bytes short of what ran
+     * (tests/golden/embrt.sh, floats2). */
+    f->stack_bytes = (F.nopush ? 0 : F.noret ? (int)F.frame : (int)(F.frame + save_bytes_for(F.nsave, F.used_callee,
                                                     F.scr_save) +
-                           (long)F.nfsave * 4);
+                           (long)F.nfsave * 4)) +
+                     (fn->is_varargs ? 16 : 0);
     free(F.usecnt);
     free(F.selimm);
     free(F.selimm_v);

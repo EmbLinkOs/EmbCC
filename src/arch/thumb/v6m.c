@@ -3139,8 +3139,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     v6_scan(&F, f->code_off);
     f->code_len = t->len - f->code_off;
-    f->stack_bytes = F.nopush ? 0 : (int)(F.frame +
-                                          mask_bytes(save_mask6(&F, F.scr_save)));
+    /* ...and the variadic register save area pushed before it */
+    f->stack_bytes = (F.nopush ? 0 : (int)(F.frame +
+                                           mask_bytes(save_mask6(&F, F.scr_save)))) +
+                     (fn->is_varargs ? 16 : 0);
     free(cls);
     free(F.usecnt);
     free(F.slot);

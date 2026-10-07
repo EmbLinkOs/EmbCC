@@ -178,7 +178,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar embsvd
+all: embcc embread embld embas embls embidx embar embsvd embrt
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -225,6 +225,13 @@ embar: tools/embar/embar.c
 # and standalone, like embar.
 embsvd: tools/embsvd/embsvd.c
 	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
+
+# embrt -- the worst-case stack of each entry point and interrupt, from
+# the compiler's frames (-fstack-usage), its call graph
+# (-fcallgraph-info=su) and the objects' call relocations (tools/embrt).
+# ISO C and standalone, like embar.
+embrt: tools/embrt/embrt.c
+	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
