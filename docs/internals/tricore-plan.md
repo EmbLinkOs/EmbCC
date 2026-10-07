@@ -122,8 +122,10 @@ structure's alignment. There is no `__int128`.
 
 ## Instruction selection
 
-Only the 32-bit encodings are emitted (the 16-bit forms, the obvious -Os
-win, are for later), and these formats: RR, RR2, RC, RLC, RRR, RRR2, RRRR,
+The 16-bit forms are emitted wherever one says the same as the 32-bit
+instruction (mov, mov.a, mov.d, mov.aa, mov of -8..7, the loads and stores
+at offset 0 that have one, RET; emit.h's tc_set_short); otherwise these
+32-bit formats: RR, RR2, RC, RLC, RRR, RRR2, RRRR,
 RRPW, RCPW, BOL, BRR, BRC, B and SYS. Everything is a data-register
 operation except addressing:
 
@@ -230,7 +232,10 @@ say):
 | `tests/golden/debug-embedded.sh` | `-g`: the frame base (breg26, A10), address size, pointer DIEs |
 
 The exec corpus also passes with the allocator's pool cut to two
-registers (`EMBCC_RA_MAXPOOL=2`), which drives every spill path.
+registers (`EMBCC_RA_MAXPOOL=2`), which drives every spill path; a fuzz
+campaign (tools of the other targets' campaigns: 440 gen2 and 100 gen
+programs, each at -O0, -O2 and -Os, against the host's checksum) found no
+miscompile; and the whole `make test` passes (514 of 514).
 
 Known gaps, in the order they matter:
 
@@ -243,10 +248,11 @@ Known gaps, in the order they matter:
    reference compiler (HighTec GCC, TASKING) can say it is THE
    convention, and a change made on both sides alike passes every test
    here.
-2. **Code size.** Only 32-bit encodings are emitted; the 16-bit forms
-   (`mov d15,...`, `ld.w d, [a]`, `ret`, `j`) would save a large share.
-   Pointers are never allocated to address registers, so an access
-   through a pointer in a register costs a `mov.a` each time.
+2. **Code size.** lib/libc's text is 98874 bytes (MIPS32: about 137 KB
+   with rodata). The 16-bit forms with implicit D15/A15 or offsets, and
+   16-bit branches, are not used yet; pointers are never allocated to
+   address registers, so an access through a pointer in a register costs
+   a `mov.a` (2 bytes) each time.
 3. **Refused by name:** jump tables (a dense switch is a compare tree),
    `.s` files and instructions in file-scope asm, naked and interrupt
    functions, atomics narrower than a word or wider than one, computed
