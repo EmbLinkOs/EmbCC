@@ -55,7 +55,7 @@ fail=0
 for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
          thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf \
          mips-none-elf loongarch64-unknown-elf tricore-none-elf \
-         xtensa-none-elf; do
+         xtensa-none-elf powerpc-none-eabi; do
     # how the image is loaded: -kernel, but on Xtensa's sim machine the
     # generic loader, which also starts the core at the entry
     # (tests/harness/xtensa/run.sh says why)
@@ -88,6 +88,8 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
         xtensa*)  H=tests/harness/xtensa
                   Q="qemu-system-xtensa -M sim -cpu de212 -m 128 -semihosting -display none -monitor none"
                   load=loader ;;
+        powerpc*) H=tests/harness/ppc
+                  Q="qemu-system-ppc -M ppce500 -m 128 -display none -monitor none -serial stdio -no-reboot" ;;
     esac
     command -v "${Q%% *}" >/dev/null 2>&1 || { echo "SKIP $t: no ${Q%% *}"; continue; }
     d=$out/$t; mkdir -p "$d"
@@ -109,6 +111,7 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
             loongarch64*) hv=EMBCC_LOONGARCH_HARNESS ;;
             tricore*)  hv=EMBCC_TRICORE_HARNESS ;;
             xtensa*)   hv=EMBCC_XTENSA_HARNESS ;;
+            powerpc*)  hv=EMBCC_PPC_HARNESS ;;
             *)         hv=EMBCC_THUMB_HARNESS ;;
         esac
         env "$hv=$d" sh "$H/link.sh" "$d/p$opt.elf" "$d/p$opt.o" \

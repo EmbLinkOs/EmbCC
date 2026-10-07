@@ -519,6 +519,30 @@ typedef struct {
 #define R_XTENSA_DIFF32     19
 #define R_XTENSA_SLOT0_OP   20
 #define R_XTENSA_SLOT0_ALT  35
+/* 32-bit PowerPC, from the ELF machine registry; big-endian only here.
+ * clang's powerpc-none-eabi objects carry e_flags 0. */
+#define EM_PPC 20
+
+/* The PowerPC (SVR4/EABI) relocation types: RELA, the addend in the
+ * entry. HA is the high half ADJUSTED -- ((S + A + 0x8000) >> 16) --
+ * because the low half is sign-extended where it is added; REL24 is
+ * b/bl's word displacement and REL14 bc's. The small-data and GOT types
+ * are named so EmbLD can refuse them by name. */
+#define R_PPC_NONE          0
+#define R_PPC_ADDR32        1
+#define R_PPC_ADDR24        2
+#define R_PPC_ADDR16        3
+#define R_PPC_ADDR16_LO     4
+#define R_PPC_ADDR16_HI     5
+#define R_PPC_ADDR16_HA     6
+#define R_PPC_ADDR14        7
+#define R_PPC_REL24         10
+#define R_PPC_REL14         11
+#define R_PPC_GOT16         14
+#define R_PPC_PLTREL24      18
+#define R_PPC_REL32         26
+#define R_PPC_SDAREL16      32
+#define R_PPC_EMB_SDA21     109
 
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word

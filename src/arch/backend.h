@@ -153,6 +153,13 @@ void codegen_unit_xtensa(struct ir_unit *iu, struct code *text,
                          struct gsite **gs, int *ngs,
                          struct fsite **fs, int *nfs, int want_debug,
                          int optimize, int no_sse, int regalloc);
+/* And for 32-bit PowerPC, the embedded EABI, big-endian, soft float. */
+void codegen_unit_ppc(struct ir_unit *iu, struct code *text,
+                      struct extcall **ext, int *next,
+                      struct strsite **strs, int *nstrs,
+                      struct gsite **gs, int *ngs,
+                      struct fsite **fs, int *nfs, int want_debug,
+                      int optimize, int no_sse, int regalloc);
 
 /* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
  * a register and every value is a run of them. Same signature all the

@@ -64,6 +64,9 @@ static const struct predef_macro *arch_table(int *count)
         case TARGET_XTENSA:
             *count = predef_macro_count_cxx_xtensa;
             return predef_macros_cxx_xtensa;
+        case TARGET_PPC32:
+            *count = predef_macro_count_cxx_ppc32;
+            return predef_macros_cxx_ppc32;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -113,6 +116,9 @@ static const struct predef_macro *arch_table(int *count)
     case TARGET_XTENSA:
         *count = predef_macro_count_xtensa;
         return predef_macros_xtensa;
+    case TARGET_PPC32:
+        *count = predef_macro_count_ppc32;
+        return predef_macros_ppc32;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;

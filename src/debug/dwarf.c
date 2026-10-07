@@ -79,6 +79,8 @@
 #define DW_REG_FB_TRICORE     30
 #define DW_REG_SP_XTENSA      1      /* a1 */
 #define DW_REG_FB_XTENSA      7      /* a7: sp at entry, under alloca */
+#define DW_REG_SP_PPC         1      /* r1 */
+#define DW_REG_FB_PPC         31     /* r31: the frame base under alloca */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -575,23 +577,25 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
             if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
                 a == TARGET_RISCV64 || a == TARGET_MIPS32 ||
                 a == TARGET_LOONGARCH64 || a == TARGET_TRICORE ||
-                a == TARGET_XTENSA) {
+                a == TARGET_XTENSA || a == TARGET_PPC32) {
                 struct dbuf e = { 0, 0, 0 };
                 int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
                 int la = a == TARGET_LOONGARCH64, tc = a == TARGET_TRICORE;
-                int xt = a == TARGET_XTENSA;
+                int xt = a == TARGET_XTENSA, ppc = a == TARGET_PPC32;
                 db_u8(&e, DW_OP_breg(fn->has_alloca
                                      ? (thumb ? DW_REG_FB_ARM
                                         : mips ? DW_REG_FB_MIPS
                                         : la ? DW_REG_FB_LA
                                         : tc ? DW_REG_FB_TRICORE
                                         : xt ? DW_REG_FB_XTENSA
+                                    : ppc ? DW_REG_FB_PPC
                                              : DW_REG_FB_RISCV)
                                      : (thumb ? DW_REG_SP_ARM
                                         : mips ? DW_REG_SP_MIPS
                                         : la ? DW_REG_SP_LA
                                         : tc ? DW_REG_SP_TRICORE
                                         : xt ? DW_REG_SP_XTENSA
+                                    : ppc ? DW_REG_SP_PPC
                                              : DW_REG_SP_RISCV)));
                 db_sleb(&e, 0);
                 db_uleb(b, (unsigned long)e.len);

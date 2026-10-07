@@ -57,10 +57,11 @@ static void print_version(void)
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
            "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (o32, little- "
            "and big-endian), LoongArch64 (LP64S), Xtensa (ESP32,\n"
-           "windowed ABI), AVR (ATmega328P)\n");
+           "windowed ABI), PowerPC (32-bit EABI, big-endian), AVR "
+           "(ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, LoongArch64, Xtensa and AVR images; "
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, LoongArch64, Xtensa, PowerPC and AVR images; "
            "AArch64 and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
@@ -124,9 +125,9 @@ static void print_options(FILE *out)
     /* (two literals: one string this long passes the IR's text form's
      * limit, and tests/golden/ir-roundtrip.sh prints main.c's) */
     fputs(
-      "                         mipsel-none-elf, loongarch64-unknown-elf,\n"
-      "                         xtensa-none-elf,\n"
-      "                         and the\n"
+      "                         mipsel-none-elf, mips-none-elf,\n"
+      "                         loongarch64-unknown-elf, xtensa-none-elf,\n"
+      "                         powerpc-none-eabi, and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
       "                         them all\n",
@@ -777,7 +778,7 @@ static int firmware_target(void)
             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
             target_get() == TARGET_MIPS32 || target_get() == TARGET_LOONGARCH64 ||
             target_get() == TARGET_TRICORE ||
-            target_get() == TARGET_XTENSA);
+            target_get() == TARGET_XTENSA || target_get() == TARGET_PPC32);
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -1371,7 +1372,8 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
             enum target_arch t = target_get();
             ob_fmt(b, "%s %s\n", t == TARGET_THUMB ||
-                                 t == TARGET_LOONGARCH64 ? "bl"
+                                 t == TARGET_LOONGARCH64 ||
+                                     t == TARGET_PPC32 ? "bl"
                                  : t == TARGET_MIPS32 ? "jal" : "call",
                    e->callee->name);
             continue;
@@ -1890,6 +1892,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit_tricore(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                              &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                              opt_level >= 1);
+    else if (ta == TARGET_PPC32)
+        codegen_unit_ppc(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                         &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                         opt_level >= 1);
     else if (ta == TARGET_THUMB)
         codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -2277,12 +2283,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                   target_fmt_get() == TGT_FMT_ELF);
     /* The tables eh_emit writes are x86-64's and AArch64's layout, with a
      * PC-relative relocation MIPS's REL objects have no type for. */
-    if (unwind && ta == TARGET_MIPS32)
+    if (unwind && (ta == TARGET_MIPS32 || ta == TARGET_PPC32))
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "%s yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no MIPS .eh_frame",
-                   target_triple_now());
+                            "EmbCC writes no %s .eh_frame",
+                   target_triple_now(),
+                   ta == TARGET_PPC32 ? "PowerPC" : "MIPS");
     /* LoongArch: no .eh_frame yet. C++ asks for the tables by default
      * whether or not it throws; with -fno-exceptions nothing reads them,
      * so there they are simply not written, and only an explicit request
@@ -4065,6 +4072,7 @@ int main(int argc, char **argv)
                               : a == TARGET_LOONGARCH64 ? la_op_calls_helper
                               : a == TARGET_TRICORE ? tc_op_calls_helper
                               : a == TARGET_XTENSA ? xtensa_op_calls_helper
+                              : a == TARGET_PPC32 ? ppc_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
@@ -4848,6 +4856,88 @@ int main(int argc, char **argv)
                            "EmbCC emits the windowed ABI for the ESP32 "
                            "(LX6) and ESP32-S3 (LX7), little-endian, with "
                            "literals before each function", argv[i]);
+            }
+            continue;
+        } else if (target_get() == TARGET_PPC32 &&
+                   (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                    strcmp(argv[i], "-msoft-float") == 0 ||
+                    strcmp(argv[i], "-mhard-float") == 0 ||
+                    strcmp(argv[i], "-mspe") == 0 ||
+                    strcmp(argv[i], "-mno-spe") == 0 ||
+                    strcmp(argv[i], "-mvle") == 0 ||
+                    strcmp(argv[i], "-mno-vle") == 0 ||
+                    strcmp(argv[i], "-meabi") == 0 ||
+                    strcmp(argv[i], "-mno-eabi") == 0 ||
+                    strcmp(argv[i], "-mlong-double-64") == 0 ||
+                    strcmp(argv[i], "-mlong-double-128") == 0 ||
+                    strcmp(argv[i], "-mno-isel") == 0 ||
+                    strcmp(argv[i], "-misel") == 0 ||
+                    strcmp(argv[i], "-msecure-plt") == 0 ||
+                    strcmp(argv[i], "-mno-sdata") == 0 ||
+                    strncmp(argv[i], "-msdata", 7) == 0 ||
+                    strncmp(argv[i], "-mfloat-abi=", 12) == 0 ||
+                    strncmp(argv[i], "-mabi=", 6) == 0 ||
+                    strncmp(argv[i], "-G", 2) == 0)) {
+            /* The flags an e500/e200 build passes (gcc's powerpc-eabi and
+             * clang's). What EmbCC emits is ONE configuration -- 32-bit
+             * Book E PowerPC, the EABI, soft float, no SPE or VLE, a
+             * 64-bit long double, no small data -- so each flag either
+             * says that and is accepted, or asks for something else and
+             * is refused by name: an object built for another would link
+             * and then disagree with its callers about where a double is,
+             * how wide a long double is, or what r2 and r13 hold. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : "";
+            if (strncmp(argv[i], "-mcpu=", 6) == 0) {
+                static const char *const cores[] = {
+                    "e500", "8548", "e500v1", "e500v2", "8540", "e200",
+                    "e200z0", "e200z2", "e200z3", "e200z4", "e200z6",
+                    "e200z7", "ppc", "powerpc", "ppc32", "generic",
+                    "603", "603e", "e300c2", "e300c3", "750", "7400", "440"
+                };
+                int ok = 0;
+                for (unsigned k = 0; k < sizeof cores / sizeof cores[0]; k++)
+                    ok |= strcmp(v, cores[k]) == 0;
+                if (!ok)
+                    diag_fatal(NULL, 0, "%s is not a 32-bit PowerPC core "
+                               "EmbCC emits for: its code is 32-bit Book E "
+                               "PowerPC without SPE (e500, 8548, e500v1, "
+                               "e500v2, e200z0-z7, ppc, 603, 750, 440, ...)",
+                               argv[i]);
+            } else if (strcmp(argv[i], "-mhard-float") == 0 ||
+                       (strncmp(argv[i], "-mfloat-abi=", 12) == 0 &&
+                        strcmp(v, "soft") != 0)) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                           "soft-float PowerPC code, which passes floating "
+                           "point in the general registers", argv[i]);
+            } else if (strcmp(argv[i], "-mspe") == 0) {
+                diag_fatal(NULL, 0, "-mspe is not supported: EmbCC emits no "
+                           "SPE (signal processing engine) instructions; its "
+                           "e500 code is soft float (-mno-spe)");
+            } else if (strcmp(argv[i], "-mvle") == 0) {
+                diag_fatal(NULL, 0, "-mvle is not supported: EmbCC emits "
+                           "32-bit Book E instructions, not VLE");
+            } else if (strcmp(argv[i], "-mlong-double-128") == 0) {
+                diag_fatal(NULL, 0, "-mlong-double-128 is not supported: "
+                           "EmbCC's PowerPC long double is the 8-byte double "
+                           "(-mlong-double-64)");
+            } else if (strcmp(argv[i], "-mno-eabi") == 0 ||
+                       strcmp(argv[i], "-msecure-plt") == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits the "
+                           "embedded ABI (-meabi) for bare metal", argv[i]);
+            } else if (strncmp(argv[i], "-mabi=", 6) == 0 &&
+                       strcmp(v, "ibmlongdouble") != 0 &&
+                       strcmp(v, "no-spe") != 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits the "
+                           "PowerPC EABI with soft float", argv[i]);
+            } else if ((strncmp(argv[i], "-msdata", 7) == 0 &&
+                        strcmp(argv[i], "-msdata=none") != 0) ||
+                       (strncmp(argv[i], "-G", 2) == 0 &&
+                        strcmp(argv[i], "-G0") != 0)) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no "
+                           "data in small-data sections and addresses "
+                           "nothing through r2 or r13 (-msdata=none, -G0)",
+                           argv[i]);
             }
             continue;
         } else if (target_get() == TARGET_MIPS32 &&

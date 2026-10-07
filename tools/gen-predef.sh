@@ -13,7 +13,7 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m armv7a riscv32 riscv64 avr mips32
-#                   mips32eb
+#                   mips32eb ppc32
 #                   loongarch64
 #                   xtensa
 #
@@ -88,7 +88,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|ppc32) eval "echo \${$gccvar:-clang}" ;;
         # Xtensa: Espressif's own GCC for the ESP32 (crosstool-NG release
         # esp-16.1.0_20260609), there being no Xtensa target in clang.
         xtensa)  eval "echo \${$gccvar:-xtensa-esp32-elf-gcc}" ;;
@@ -164,6 +164,12 @@ refflags() {
         # never touches.
         loongarch64) [ -n "${EMBCC_REF_GCC_LOONGARCH64:-}" ] || \
                      echo "-target loongarch64-unknown-elf -msoft-float -ffreestanding" ;;
+        # 32-bit PowerPC, the embedded EABI: an e500-class core WITHOUT
+        # SPE (-mcpu=e500 alone defines __SPE__ and claims instructions the
+        # backend never emits), soft float, and the 8-byte long double
+        # e500 code has (-mcpu=ppc's default is the IBM double-double).
+        ppc32)   [ -n "${EMBCC_REF_GCC_PPC32:-}" ] || \
+                     echo "-target powerpc-none-eabi -mcpu=e500 -mno-spe -msoft-float -mlong-double-64 -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -195,6 +201,8 @@ exclude_arch() {
         # (xtensa-esp32-elf-gcc, which has no -msoft-float: the float ABI
         # is the same either way, every float in the address registers).
         xtensa)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # PowerPC's lwarx/stwcx. likewise (lbarx/lharx are not Book E's).
+        ppc32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -228,7 +236,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|loongarch64) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|loongarch64|ppc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -315,8 +323,9 @@ case "${1:-both}" in
     mips32eb) gen mips32eb ;;
     loongarch64) gen loongarch64 ;;
     xtensa)  gen xtensa ;;
+    ppc32)   gen ppc32 ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen armv7a; gen riscv32
-              gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64; gen xtensa ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|xtensa]" >&2
+              gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64; gen xtensa; gen ppc32 ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|xtensa|ppc32]" >&2
        exit 1 ;;
 esac

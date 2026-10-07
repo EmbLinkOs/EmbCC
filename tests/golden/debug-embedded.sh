@@ -47,7 +47,8 @@ for spec in "x86_64-elf:8:DW_OP_reg6" \
             "mipsel-none-elf:4:DW_OP_breg29" \
             "loongarch64-unknown-elf:8:DW_OP_breg3" \
             "tricore-none-elf:4:DW_OP_breg26" \
-            "xtensa-none-elf:4:DW_OP_breg1"; do
+            "xtensa-none-elf:4:DW_OP_breg1" \
+            "powerpc-none-eabi:4:DW_OP_breg1"; do
     t=${spec%%:*}; rest=${spec#*:}; want_as=${rest%%:*}; want_fb=${rest#*:}
     o="$out/$t.o"
     "$EMBCC" --target="$t" -g -O0 -c "$out/p.c" -o "$o" 2> "$out/$t.err" || {
@@ -140,6 +141,18 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
         echo "FAIL loongarch64-unknown-elf: 'p' is at fbreg '$off' but nothing stores \$a0 there"
         fail=1
     fi
+    # ...and PowerPC, whose frame base is r1: p arrives in r3
+    o="$out/powerpc-none-eabi.o"
+    off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
+          grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+          grep -oE '[+-][0-9]+' | head -1)
+    if [ -n "$off" ] && "$OBJDUMP" -d "$o" 2>/dev/null |
+         grep -qE "stw[[:space:]]+3,[[:space:]]*$(printf '%d' "$off")\(1\)"; then
+        echo "  powerpc-none-eabi: 'p' at fbreg $off is the slot the prologue writes"
+    else
+        echo "FAIL powerpc-none-eabi: 'p' is at fbreg '$off' but nothing stores r3 there"
+        fail=1
+    fi
 fi
 # ...and Xtensa, whose frame base is a1 (sp): p arrives in a2. There is no
 # Xtensa llvm-objdump; GNU's comes with the reference GCC (hostpaths.sh).
@@ -162,7 +175,8 @@ fi
 # DIE's byte_size was 8 on every target, so a debugger read a 32-bit
 # target's pointer variable together with the four bytes after it.
 for t in thumbv7m-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
-         mipsel-none-elf loongarch64-unknown-elf tricore-none-elf xtensa-none-elf; do
+         mipsel-none-elf loongarch64-unknown-elf tricore-none-elf xtensa-none-elf \
+         powerpc-none-eabi; do
     want=4; [ $t = riscv64-unknown-elf ] && want=8
     [ $t = loongarch64-unknown-elf ] && want=8
     "$EMBCC" --target=$t -g -c "$out/p.c" -o "$out/ptr-$t.o" 2>/dev/null || {
@@ -219,7 +233,21 @@ done
     grep -q "DW_AT_frame_base.*DW_OP_breg7" || {
     echo "FAIL xtensa-none-elf: an alloca function's frame base is not a7"
     fail=1; }
-[ "$fail" -eq 0 ] && echo "  an alloca function's locations are relative to r7 / s0 / fp / a7"
+# PowerPC's is r31, which the prologue copies r1 into
+t=powerpc-none-eabi
+if "$EMBCC" --target=$t -g -O0 -c "$out/al.c" -o "$out/al-$t.o" 2>/dev/null; then
+    "$DWDUMP" --debug-info "$out/al-$t.o" > "$out/al-$t.dw" 2>/dev/null
+    off=$(grep -A3 'DW_AT_name.*"n"' "$out/al-$t.dw" |
+          sed -n 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' | head -1)
+    grep -q "DW_AT_frame_base.*DW_OP_breg31" "$out/al-$t.dw" &&
+    "$OBJDUMP" -d "$out/al-$t.o" 2>/dev/null |
+        grep -Eq "stw[[:space:]]+3,[[:space:]]*$off\(31\)" || {
+        echo "FAIL $t: an alloca function's frame base is not r31, or 'n'"
+        echo "  at fbreg +$off is not where the prologue stores it"; fail=1; }
+else
+    echo "FAIL $t: al.c with -g"; fail=1
+fi
+[ "$fail" -eq 0 ] && echo "  an alloca function's locations are relative to r7 / s0 / fp / a7 / r31"
 
 # What is NOT claimed. embld drops non-SHF_ALLOC sections and writes
 # its own .embdbg sidecar, so the LINKED image carries no DWARF and a

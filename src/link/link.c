@@ -28,6 +28,7 @@
 #include "../arch/thumb/a32.h"
 #include "../arch/tricore/emit.h"
 #include "../arch/xtensa/emit.h"
+#include "../arch/ppc/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -581,7 +582,8 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         die("%s: not a 32- or 64-bit ELF", name);
     if (eh->e_ident[EI_DATA] == ELFDATA2MSB &&
         eh->e_ident[EI_CLASS] == ELFCLASS32) {
-        /* big-endian: MIPS o32 only, checked once it reads as numbers */
+        /* big-endian: MIPS o32 and PowerPC, checked once it reads as
+         * numbers */
         if (len < (long)sizeof(Elf32_Ehdr))
             die("%s: too small to be an object", name);
         be_normalise(name, buf, len);
@@ -610,10 +612,12 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             die("%s: not a relocatable object (ET_REL)", name);
         if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
             e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS &&
-            e32->e_machine != EM_TRICORE && e32->e_machine != EM_XTENSA)
+            e32->e_machine != EM_TRICORE && e32->e_machine != EM_XTENSA &&
+            e32->e_machine != EM_PPC)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
                 "RV32 (EM_RISCV), AVR (EM_AVR), MIPS (EM_MIPS), TriCore "
-                "(EM_TRICORE) and Xtensa (EM_XTENSA) are supported", name,
+                "(EM_TRICORE), Xtensa (EM_XTENSA) and PowerPC (EM_PPC) are "
+                "supported", name,
                 (unsigned)e32->e_machine);
         if (e32->e_machine == EM_TRICORE &&
             e32->e_ident[EI_DATA] != ELFDATA2LSB)
@@ -628,10 +632,13 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32)
             die("%s: a MIPS object that is not o32; this linker links "
                 "o32 (mipsel and mips) only", name);
-        if (big && e32->e_machine != EM_MIPS)
+        if (big && e32->e_machine != EM_MIPS && e32->e_machine != EM_PPC)
             die("%s: a big-endian object for machine %u; big-endian is "
-                "linked for MIPS (mips-none-elf) only", name,
+                "linked for MIPS (mips-none-elf) and PowerPC only", name,
                 (unsigned)e32->e_machine);
+        if (!big && e32->e_machine == EM_PPC)
+            die("%s: a little-endian PowerPC object; this linker links "
+                "big-endian 32-bit PowerPC (powerpc-none-eabi) only", name);
         o->machine = e32->e_machine;
         o->eflags = e32->e_flags;
         o->nsh = e32->e_shnum;
@@ -1057,6 +1064,7 @@ static void add_entry_stub(struct linker *l)
               : l->machine == EM_ARM ? 20
               : l->machine == EM_TRICORE ? TC_STUB_SIZE
               : l->machine == EM_XTENSA ? 52
+              : l->machine == EM_PPC ? 32
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -1141,6 +1149,22 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         xt_callx(&c, 2, XT_A8);
         xt_w(&c, xt_enc_j(-4));
         (void)s;
+        return;
+    }
+    if (l->machine == EM_PPC) {
+        /* r1 = the stack's top, then the first frame below it with a
+         * zero back chain (the end of the chain), and a bctr to the
+         * entry -- lis/ori always both, so the size is known before
+         * layout. */
+        ppc_lis(&c, PPC_SP, (unsigned)(l->stack_top >> 16) & 0xffff);
+        ppc_imm(&c, PPC_ORI, PPC_SP, PPC_SP,
+                (long long)(l->stack_top & 0xffff));
+        ppc_li(&c, PPC_R0, 0);
+        ppc_stwu(&c, PPC_R0, PPC_SP, -16);
+        ppc_lis(&c, PPC_R12, (unsigned)(entry >> 16) & 0xffff);
+        ppc_imm(&c, PPC_ORI, PPC_R12, PPC_R12, (long long)(entry & 0xffff));
+        ppc_mtctr(&c, PPC_R12);
+        ppc_bctr(&c);
         return;
     }
     if (l->machine == EM_MIPS) {
@@ -1905,7 +1929,7 @@ static void layout(struct linker *l, struct osec_bound *b,
      * vector. Both ends are kept on word boundaries, the padding inside
      * the image, as a GNU script's ALIGN(4) puts it. */
     if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
-        l->machine == EM_XTENSA)
+        l->machine == EM_XTENSA || l->machine == EM_PPC)
         va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
@@ -1940,7 +1964,7 @@ static void layout(struct linker *l, struct osec_bound *b,
         va += g->size;
     }
     if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
-        l->machine == EM_XTENSA)
+        l->machine == EM_XTENSA || l->machine == EM_PPC)
         va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
@@ -2907,6 +2931,99 @@ static void apply_tricore(struct linker *l, struct object *o, unsigned type,
  * same one the encoder writes through. None of those layouts is written
  * down here.
  */
+/* PowerPC (SVR4/EABI): RELA, so the addend is in the entry and every
+ * field is written whole. The fields are big-endian words and halfwords
+ * in the image (ppc_get_word); a 16-bit relocation's r_offset names the
+ * HALFWORD, an instruction's low half. ADDR16_HA is the high half
+ * adjusted for the sign of the low one, which addi adds sign-extended.
+ * The small-data and GOT/PLT types are what -msdata and PIC code use;
+ * this linker lays out neither, and says so by name. */
+static void put16be(unsigned char *loc, unsigned long v)
+{
+    loc[0] = (unsigned char)(v >> 8);
+    loc[1] = (unsigned char)v;
+}
+
+static void apply_ppc(struct linker *l, struct object *o, unsigned type,
+                      unsigned char *loc, Elf64_Addr S, long long A,
+                      Elf64_Addr P)
+{
+    long long V = (long long)S + A, d;
+    unsigned long w;
+    switch (type) {
+    case R_PPC_NONE:
+        return;
+    case R_PPC_ADDR32:
+        need_range(l, o, "R_PPC_ADDR32", V, I32_MIN, 0xffffffffLL);
+        ppc_put_word(loc, (unsigned long)V & 0xffffffffUL);
+        return;
+    case R_PPC_REL32:
+        d = V - (long long)P;
+        need_range(l, o, "R_PPC_REL32", d, I32_MIN, 0x7fffffffLL);
+        ppc_put_word(loc, (unsigned long)d & 0xffffffffUL);
+        return;
+    case R_PPC_ADDR16:
+        need_range(l, o, "R_PPC_ADDR16", V, -32768, 65535);
+        put16be(loc, (unsigned long)V);
+        return;
+    case R_PPC_ADDR16_LO:
+        put16be(loc, (unsigned long)V);
+        return;
+    case R_PPC_ADDR16_HI:
+        put16be(loc, (unsigned long)(V >> 16));
+        return;
+    case R_PPC_ADDR16_HA:
+        put16be(loc, (unsigned long)((V + 0x8000) >> 16));
+        return;
+    case R_PPC_REL24: case R_PPC_PLTREL24:
+        /* b/bl: a word displacement in bits 6..29, +-32 MiB of the branch */
+        d = V - (long long)P;
+        if (d & 3)
+            die("%s: a branch at 0x%llx to '%s' at 0x%llx, which is not a "
+                "multiple of 4", o->name, (unsigned long long)P,
+                l->rel_sym ? l->rel_sym : "?", (unsigned long long)V);
+        need_range(l, o, type == R_PPC_REL24 ? "R_PPC_REL24"
+                                             : "R_PPC_PLTREL24",
+                   d, -(1LL << 25), (1LL << 25) - 4);
+        w = ppc_get_word(loc);
+        ppc_put_word(loc, (w & ~0x3fffffcUL) |
+                          ((unsigned long)d & 0x3fffffcUL));
+        return;
+    case R_PPC_ADDR24:
+        if (V & 3)
+            die("%s: an absolute branch to 0x%llx, not a multiple of 4",
+                o->name, (unsigned long long)V);
+        need_range(l, o, "R_PPC_ADDR24", V, -(1LL << 25), (1LL << 25) - 4);
+        w = ppc_get_word(loc);
+        ppc_put_word(loc, (w & ~0x3fffffcUL) |
+                          ((unsigned long)V & 0x3fffffcUL));
+        return;
+    case R_PPC_REL14:
+        d = V - (long long)P;
+        if (d & 3)
+            die("%s: a conditional branch to an address not a multiple of 4",
+                o->name);
+        need_range(l, o, "R_PPC_REL14", d, -32768, 32764);
+        w = ppc_get_word(loc);
+        ppc_put_word(loc, (w & ~0xfffcUL) | ((unsigned long)d & 0xfffcUL));
+        return;
+    case R_PPC_SDAREL16: case R_PPC_EMB_SDA21:
+        die("%s: relocation %s: small-data (r2/r13-relative) addressing, "
+            "which this linker does not lay out; compile it with "
+            "-msdata=none (-G0)", o->name,
+            type == R_PPC_SDAREL16 ? "R_PPC_SDAREL16" : "R_PPC_EMB_SDA21");
+        return;
+    case R_PPC_GOT16:
+        die("%s: relocation R_PPC_GOT16: position-independent code through "
+            "a GOT, which this linker does not build; compile it without "
+            "-fPIC", o->name);
+        return;
+    default:
+        die("%s: unsupported PowerPC relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
 static void apply_avr(struct linker *l, struct object *o, unsigned type,
                       unsigned char *loc, Elf64_Addr S, long long A,
                       Elf64_Addr P)
@@ -3271,6 +3388,13 @@ static void apply_relocs(struct linker *l, struct object *o)
             }
             if (o->machine == EM_XTENSA) {
                 apply_xtensa(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_PPC) {
+                if (isrel)
+                    die("%s: a PowerPC object with REL relocations; the "
+                        "SVR4 ABI's are RELA", o->name);
+                apply_ppc(l, o, type, loc, S, A, P);
                 continue;
             }
             if (o->machine == EM_MIPS) {
@@ -5636,8 +5760,10 @@ int embld_link(const char **inputs, int ninputs, const char *out,
          * not run one, having no ARM state. */
         if (l.machine != EM_RISCV && l.machine != EM_MIPS &&
             l.machine != EM_LOONGARCH && l.machine != EM_ARM &&
-            l.machine != EM_TRICORE && l.machine != EM_XTENSA)
-            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore and Xtensa "
+            l.machine != EM_TRICORE && l.machine != EM_XTENSA &&
+            l.machine != EM_PPC)
+            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore, Xtensa and "
+                "PowerPC "
                 "option: "
                 "every other target here starts with a stack pointer already "
                 "set (a Cortex-M reads its own from the vector table)");

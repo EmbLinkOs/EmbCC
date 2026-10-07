@@ -94,6 +94,12 @@ extern const struct predef_macro predef_macros_xtensa[];
 extern const int predef_macro_count_xtensa;
 extern const struct predef_macro predef_macros_cxx_xtensa[];
 extern const int predef_macro_count_cxx_xtensa;
+/* 32-bit PowerPC, the EABI: clang's for powerpc-none-eabi -mcpu=e500
+ * -mno-spe -msoft-float -mlong-double-64. */
+extern const struct predef_macro predef_macros_ppc32[];
+extern const int predef_macro_count_ppc32;
+extern const struct predef_macro predef_macros_cxx_ppc32[];
+extern const int predef_macro_count_cxx_ppc32;
 
 /* AVR (ATmega328P). Generated like the others, from the reference
  * compiler's own answer for the triple. */

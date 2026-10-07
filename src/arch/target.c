@@ -154,6 +154,9 @@ int target_insn_len(const unsigned char *p, int avail)
         int n = (p[0] & 15) >= 8 && (p[0] & 15) <= 13 ? 2 : 3;
         return avail >= n ? n : 0;
     }
+    case TARGET_PPC32:
+        /* Book E PowerPC is fixed 32-bit; VLE is refused, not emitted. */
+        return avail >= 4 ? 4 : 0;
 
     case TARGET_X86_64:
     default:
@@ -268,6 +271,10 @@ static const struct data_model {
      * UNSIGNED wchar_t (target_wchar_size), long double the 8-byte
      * double, and no __int128. */
     [TARGET_XTENSA]  = { 4, 4, 4, 8,  8, 1, 1, 0, 0 },
+    /* The PowerPC EABI (clang --target=powerpc-none-eabi -mcpu=e500
+     * -mno-spe -msoft-float -mlong-double-64 -dM): ILP32, an UNSIGNED char,
+     * a signed int wchar_t, long double the 8-byte double, no __int128. */
+    [TARGET_PPC32]   = { 4, 4, 4, 8,  8, 1, 0, 0, 0 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -392,6 +399,9 @@ int target_anon_bitfield_aligns(void)
     case TARGET_TRICORE: return 0;   /* as GCC lays them out (unverified) */
     /* GCC's generic rule (PCC_BITFIELD_TYPE_MATTERS, no ABI override) */
     case TARGET_XTENSA:  return 0;
+    /* SVR4 PowerPC: `struct { char c; int :4; char d; }` is 3 bytes in
+     * clang, aligned 1 */
+    case TARGET_PPC32:   return 0;
     }
     return 0;
 }
@@ -417,6 +427,11 @@ int target_va_list_is_pointer(void)
     /* GCC's 12-byte record, held by value -- not a pointer to one, and not
      * a tag va_copy needs: a copy is the record's assignment (irgen) */
     case TARGET_XTENSA:  return 0;
+    /* SVR4 PowerPC: a 12-byte record (the GPR count, the FPR count, the
+     * overflow area and the register save area) that va_start builds and
+     * va_arg advances; `va_list` is a pointer to it, which is what clang's
+     * one-element array decays to when it is passed */
+    case TARGET_PPC32:   return 0;
     }
     return 0;
 }
@@ -636,6 +651,14 @@ static const struct triple {
     { "xtensa-esp-elf",      TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "xtensa-elf",          TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "xtensa",              TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    /* 32-bit PowerPC, the embedded EABI, big-endian, soft float: an
+     * e500/e200-class core. `-none-eabi` is clang's and GCC's spelling
+     * (powerpc-eabi is the GNU target name). Bare metal only. */
+    { "powerpc-none-eabi",   TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "powerpc-unknown-eabi",TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "powerpc-eabi",        TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "powerpc",             TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "ppc",                 TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
 
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
@@ -668,8 +691,9 @@ int target_from_triple(const char *triple, enum target_arch *out,
             if (fmt) *fmt = g_triples[i].fmt;
             /* Byte order travels with the name too: every triple but
              * the big-endian MIPS ones is little-endian. */
-            g_big_endian = g_triples[i].arch == TARGET_MIPS32 &&
-                           g_triples[i].thumb_em == 1;
+            g_big_endian = (g_triples[i].arch == TARGET_MIPS32 &&
+                            g_triples[i].thumb_em == 1) ||
+                           g_triples[i].arch == TARGET_PPC32;
             /* The ARM sub-architecture travels with the name, so
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
@@ -805,6 +829,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_LOONGARCH64: return EM_LOONGARCH;
     case TARGET_TRICORE: return EM_TRICORE;
     case TARGET_XTENSA:  return EM_XTENSA;
+    case TARGET_PPC32:   return EM_PPC;
     default:             return EM_X86_64;
     }
 }
@@ -998,6 +1023,17 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         default:             return -1;
         }
     }
+    if (a == TARGET_PPC32) {
+        switch (k) {
+        /* bl and b alike: a 24-bit word displacement from the branch */
+        case RK_CALL:          return R_PPC_REL24;
+        case RK_PPC_ADDR16_HA: return R_PPC_ADDR16_HA;
+        case RK_PPC_ADDR16_LO: return R_PPC_ADDR16_LO;
+        case RK_ABS32:         return R_PPC_ADDR32;
+        case RK_DATA_PREL32:   return R_PPC_REL32;
+        default:               return -1;
+        }
+    }
     if (a == TARGET_AVR) {
         switch (k) {
         case RK_CALL:            return R_AVR_CALL;
@@ -1111,7 +1147,7 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
         a == TARGET_MIPS32 || a == TARGET_LOONGARCH64 ||
-        a == TARGET_TRICORE || a == TARGET_XTENSA)
+        a == TARGET_TRICORE || a == TARGET_XTENSA || a == TARGET_PPC32)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -1170,6 +1206,14 @@ static const struct reloc_spelling {
     { EM_LOONGARCH, R_LARCH_PCALA_LO12, "R_LARCH_PCALA_LO12" },
     { EM_LOONGARCH, R_LARCH_CALL36,    "R_LARCH_CALL36" },
     { EM_LOONGARCH, R_LARCH_32_PCREL,  "R_LARCH_32_PCREL" },
+    { EM_PPC,   R_PPC_NONE,            "R_PPC_NONE" },
+    { EM_PPC,   R_PPC_ADDR32,          "R_PPC_ADDR32" },
+    { EM_PPC,   R_PPC_ADDR16_LO,       "R_PPC_ADDR16_LO" },
+    { EM_PPC,   R_PPC_ADDR16_HI,       "R_PPC_ADDR16_HI" },
+    { EM_PPC,   R_PPC_ADDR16_HA,       "R_PPC_ADDR16_HA" },
+    { EM_PPC,   R_PPC_REL24,           "R_PPC_REL24" },
+    { EM_PPC,   R_PPC_REL14,           "R_PPC_REL14" },
+    { EM_PPC,   R_PPC_REL32,           "R_PPC_REL32" },
     { EM_AVR,   R_AVR_NONE,            "R_AVR_NONE" },
     { EM_AVR,   R_AVR_32,              "R_AVR_32" },
     { EM_AVR,   R_AVR_7_PCREL,         "R_AVR_7_PCREL" },
