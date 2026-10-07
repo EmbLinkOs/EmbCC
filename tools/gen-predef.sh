@@ -169,9 +169,8 @@ exclude_arch() {
         # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
         # two-byte atomic exactly as RISC-V's does (no libatomic here).
         mips32)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
-        # LoongArch's am* and ll/sc are word and doubleword only in the base
-        # ISA, and the backend refuses a narrower atomic as RISC-V's does.
-        loongarch64) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # (LoongArch64 claims all four: its backend makes a one- or two-byte
+        # atomic an ll.w/sc.w loop on the word, as clang does.)
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }

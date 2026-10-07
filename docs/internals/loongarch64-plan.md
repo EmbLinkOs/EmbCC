@@ -109,9 +109,11 @@ RISC-V that the selection has to respect:
   `amxor_db` at .w and .d (full barrier), `ll`/`sc` for the rest; `sc`
   writes 1 on SUCCESS (RISC-V's writes 0). An `am*` instruction's rd may
   not be its rj or rk. There is no byte or halfword form in the base ISA,
-  so a one- or two-byte atomic is refused by name, as on RISC-V, and
-  `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1/_2` are left out of the predefined
-  macros. `dbar 0` is the full fence.
+  so a one- or two-byte atomic is an ll.w/sc.w loop on the word that
+  holds it, changing only its field -- clang's lowering, atomic against
+  the neighbouring bytes because a store to any of them breaks the
+  reservation -- and all four `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_N` are
+  claimed, as clang claims them. `dbar 0` is the full fence.
 - **Traps.** `break 0` is IR_UD2.
 
 ## Code model and relocations
@@ -148,7 +150,8 @@ what clang writes for `-mabi=lp64s`.
 ## Predefined macros
 
 clang's for `--target=loongarch64-unknown-elf -msoft-float` (generated
-by tools/gen-predef.sh): `__loongarch__`, `__loongarch64`,
+by tools/gen-predef.sh, nothing excluded but the compiler-identity
+families): `__loongarch__`, `__loongarch64`,
 `__loongarch_grlen 64`, `__loongarch_frlen 0`, `__loongarch_soft_float`,
 `__loongarch_lp64`, `__loongarch_arch "loongarch64"`. Without
 `-mfpu=none` clang would claim `__loongarch_frlen 64` and LSX
@@ -194,8 +197,8 @@ Done, each committed and pushed:
    `-fno-exceptions`.
 3. EmbLD for EM_LOONGARCH (EmbCC's and clang's objects), lib/rt and
    lib/libc (`make rt-embedded libc-embedded`), the QEMU virt harness.
-4. Goldens: loongarch-exec (the exec corpus, 208 of 208 at every level,
-   6 not applicable), loongarch-abi (EmbCC and clang calling each other:
+4. Goldens: loongarch-exec (the exec corpus, 209 of 209 at every level,
+   5 not applicable), loongarch-abi (EmbCC and clang calling each other:
    the shared embedded pair, the 128-bit pair and the LP64S pair),
    loongarch-refuse; and LoongArch64 joined predef, libc-embedded,
    debug-embedded and embedded-runtime.
@@ -213,8 +216,7 @@ Not done, refused by name meanwhile:
 
 - `la.abs` and the TLS, extreme-model and absolute-GOT operators in
   assembly; floating-point and vector instructions;
-- one-, two- and sixteen-byte atomics (no such am*/ll/sc in the base ISA;
-  a masked ll.w/sc.w loop, as clang emits, would lift the first two);
+- sixteen-byte atomics (no 128-bit ll/sc in the base ISA);
 - `__builtin_frame_address`/`__builtin_return_address` (no frame-pointer
   chain), computed goto, interrupt functions, unwind tables and C++
   exceptions, a scalar local aligned above 16;

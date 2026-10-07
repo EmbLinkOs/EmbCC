@@ -2127,6 +2127,104 @@ static void gen_ins128(struct la_fn *F, struct ir_ins *i)
     }
 }
 
+/* ---- one- and two-byte atomics --------------------------------------------
+ *
+ * The base ISA's am* and ll/sc are word and doubleword only, so a byte or
+ * halfword atomic is an ll.w/sc.w loop on the WORD that holds it, changing
+ * only its field -- clang's lowering, and atomic against the neighbouring
+ * bytes because any store to the word breaks the reservation:
+ *
+ *   al = addr & ~3          sh = (addr & 3) * 8      mask = 0xff.. << sh
+ *   loop: ll.w old, al      new = old <op> (v << sh)
+ *         tmp = old ^ ((old ^ new) & mask)   sc.w tmp, al   beqz tmp, loop
+ *   result = (old >> sh) & 0xff..   (zero-extended, as irgen expects of a
+ *                                    narrow exchange)
+ *
+ * between dbar 0s. Every operand is read before the loop, into the six
+ * scratches -- FAR included, since nothing in between addresses a slot. */
+static void la_atomic_narrow(struct la_fn *F, struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int bits = i->size * 8, a, v, top, br, out_br = -1;
+    long long m0 = (1LL << bits) - 1;
+    int cas = i->op == IR_CAS || i->op == IR_CMPXCHG;
+
+    /* (FAR last: reading a far slot builds its address in FAR) */
+    a = rdr(F, i->a, ADDR);
+    la_alu_imm(t, LA_AND, SCR, a, 3, 0);
+    la_shift_imm(t, LA_SLL, SCR, SCR, 3, 0);                  /* sh */
+    la_li(t, ACC, m0);
+    if (i->op == IR_CMPXCHG) {
+        int p = rdr(F, i->b, TMP);
+        la_load(t, SCR2, p, 0, i->size, 0);                   /* *b */
+    } else {
+        v = rdr(F, i->b, TMP);
+        la_alu(t, LA_AND, SCR2, v, ACC, 0);
+    }
+    la_alu(t, LA_SLL, SCR2, SCR2, SCR, 0);   /* v << sh, or expected << sh */
+    if (cas) {
+        v = rdr(F, i->c, TMP);
+        la_alu(t, LA_AND, TMP, v, ACC, 0);
+        la_alu(t, LA_SLL, TMP, TMP, SCR, 0);                 /* desired << sh */
+    }
+    a = rdr(F, i->a, ADDR);
+    la_shift_imm(t, LA_SRL, FAR, a, 2, 0);
+    la_shift_imm(t, LA_SLL, FAR, FAR, 2, 0);                  /* al */
+    la_alu(t, LA_SLL, ACC, ACC, SCR, 0);                      /* mask */
+    la_dbar(t, 0);
+    top = t->len;
+    la_ll(t, ADDR, FAR, 0, 0);                                /* old */
+    if (cas) {
+        /* SCR, sh, is free in here: it is made again below */
+        la_alu(t, LA_AND, SCR, ADDR, ACC, 0);
+        out_br = la_b_placeholder(t, LA_BNE, SCR, SCR2);
+        la_alu(t, LA_XOR, SCR, ADDR, TMP, 0);
+        la_alu(t, LA_AND, SCR, SCR, ACC, 0);
+        la_alu(t, LA_XOR, SCR, SCR, ADDR, 0);
+        la_sc(t, SCR, FAR, 0, 0);
+        br = la_b_placeholder(t, LA_BEQZ, SCR, LA_ZERO);
+    } else {
+        switch (i->op == IR_XCHG ? 'x' : i->op == IR_XADD ? '+' : (int)i->imm) {
+        case 'x': la_mv(t, TMP, SCR2); break;
+        case '+': la_alu(t, LA_ADD, TMP, ADDR, SCR2, 1); break;
+        case '&': la_alu(t, LA_AND, TMP, ADDR, SCR2, 0); break;
+        case '|': la_alu(t, LA_OR, TMP, ADDR, SCR2, 0); break;
+        case '^': la_alu(t, LA_XOR, TMP, ADDR, SCR2, 0); break;
+        default:                                              /* nand */
+            la_alu(t, LA_AND, TMP, ADDR, SCR2, 0);
+            la_alu(t, LA_NOR, TMP, TMP, LA_ZERO, 0);
+            break;
+        }
+        la_alu(t, LA_XOR, TMP, TMP, ADDR, 0);
+        la_alu(t, LA_AND, TMP, TMP, ACC, 0);
+        la_alu(t, LA_XOR, TMP, TMP, ADDR, 0);
+        la_sc(t, TMP, FAR, 0, 0);
+        br = la_b_placeholder(t, LA_BEQZ, TMP, LA_ZERO);
+    }
+    if (!la_patch_b(t, br, top) ||
+        (out_br >= 0 && !la_patch_b(t, out_br, t->len)))
+        internal_error("loongarch: a narrow atomic's loop branch");
+    la_dbar(t, 0);
+    if (i->op == IR_CMPXCHG) {
+        /* the bool, before sh is made again over SCR2 */
+        la_alu(t, LA_AND, TMP, ADDR, ACC, 0);
+        la_alu(t, LA_XOR, TMP, TMP, SCR2, 0);
+        la_alu_imm(t, LA_SLTU, TMP, TMP, 1, 0);
+    }
+    a = rdr(F, i->a, SCR);
+    la_alu_imm(t, LA_AND, SCR2, a, 3, 0);
+    la_shift_imm(t, LA_SLL, SCR2, SCR2, 3, 0);
+    la_alu(t, LA_SRL, SCR2, ADDR, SCR2, 0);
+    ext_reg(F, SCR2, SCR2, i->size, 0);                       /* seen */
+    if (i->op == IR_CMPXCHG) {
+        int p = rdr(F, i->b, FAR);
+        la_store(t, SCR2, p, 0, i->size);                     /* *b = seen */
+        wr(F, i->dst, TMP);
+    } else {
+        wr(F, i->dst, SCR2);
+    }
+}
+
 /* ---- one instruction ------------------------------------------------------ */
 
 static void gen_ins(struct la_fn *F, int n)
@@ -2916,20 +3014,17 @@ static void gen_ins(struct la_fn *F, int n)
      * failure path; a full barrier is never wrong). sc writes 1 when the
      * store happened -- the opposite of RISC-V's sc.
      *
-     * Only at four and eight bytes: the base ISA has no byte or halfword
-     * am* or ll/sc, so a one- or two-byte atomic is refused rather than
-     * turned into a read-modify-write of the word around it, which would
-     * not be atomic with respect to a neighbouring byte. */
+     * A one- or two-byte atomic is an ll.w/sc.w loop on its word
+     * (la_atomic_narrow). */
     case IR_XCHG: case IR_XADD: case IR_ARMW: {
         int aw = i->size;
         int addr, val, dst;
+        if (aw == 1 || aw == 2) {
+            la_atomic_narrow(F, i);
+            return;
+        }
         if (aw != 4 && aw != 8)
-            la_refuse(F, i, aw < 4 ? "an atomic narrower than four bytes "
-                                     "(the base ISA has no such am* or "
-                                     "ll/sc, and a read-modify-write of the "
-                                     "containing word is not atomic against "
-                                     "its neighbours)"
-                                   : "an atomic wider than a register");
+            la_refuse(F, i, "an atomic wider than a register");
         addr = rdr(F, i->a, ADDR);
         val = rdr(F, i->b, TMP);
         dst = wreg(F, i->dst, ACC);
@@ -2990,10 +3085,12 @@ static void gen_ins(struct la_fn *F, int n)
          * stored afterwards, so they share the loop. */
         int aw = i->size;
         int addr, exp, des, seen, out_br, top, sc_br;
+        if (aw == 1 || aw == 2) {
+            la_atomic_narrow(F, i);
+            return;
+        }
         if (aw != 4 && aw != 8)
-            la_refuse(F, i, aw < 4 ? "an atomic compare-and-swap narrower "
-                                     "than four bytes"
-                                   : "an atomic wider than a register");
+            la_refuse(F, i, "an atomic wider than a register");
         addr = rdr(F, i->a, ADDR);
         if (i->op == IR_CAS) {
             /* compared with what ll.w sign-extended (rd32) */

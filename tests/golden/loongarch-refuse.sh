@@ -118,12 +118,6 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
 for O in -O0 -O2; do
-    refc "a 1-byte atomic ($O)" 'an atomic narrower than four bytes' \
-        'char c; int f(void){ return __atomic_fetch_add(&c, 1, 5); }' $O
-    refc "a 2-byte exchange ($O)" 'an atomic narrower than four bytes' \
-        'short s; short f(void){ return __atomic_exchange_n(&s, 1, 5); }' $O
-    refc "a 2-byte compare-and-swap ($O)" 'an atomic compare-and-swap narrower than four bytes' \
-        'short s; int f(void){ short e = 0; return __atomic_compare_exchange_n(&s, &e, 1, 0, 5, 5); }' $O
     refc "a 16-byte atomic ($O)" 'a sixteen-byte atomic' \
         '__int128 x; int f(void){ __int128 e = 0; return __atomic_compare_exchange_n(&x, &e, 1, 0, 5, 5); }' $O
     refc "a computed goto ($O)" 'a computed goto' \
@@ -148,7 +142,7 @@ fi
 grep -q "C++ without -fno-exceptions" "$out/cxx.err" || {
     echo "C++ with exceptions was refused, but not by name:"
     cat "$out/cxx.err"; exit 1; }
-echo "narrow and sixteen-byte atomics, computed goto, the frame and return"
+echo "sixteen-byte atomics, computed goto, the frame and return"
 echo "address, interrupt functions, an over-aligned scalar and C++ exceptions"
 echo "are each refused by name (assembly's refusals are loongarch-asm.sh's)"
 
