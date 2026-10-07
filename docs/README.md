@@ -37,6 +37,7 @@ Start with the [overview](manual/overview.md) and
 | `embar` | [The archiver](manual/tools/embar.md) |
 | `embsvd` | [A device's header, startup and linker script from its SVD file](manual/tools/embsvd.md) |
 | `embmap` | [Where an image's flash and RAM go: sections, regions, symbols, files, two builds](manual/tools/embmap.md) |
+| `embpack` | [A linked image as bin, Intel HEX, S-records or UF2, with a CRC and a manifest](manual/tools/embpack.md) |
 | `embdbg` | [The debugger](manual/tools/embdbg.md) |
 | `embread` | [The EMBX image reader](manual/tools/embread.md) |
 | `embls` | [The language server](manual/tools/embls.md) |
