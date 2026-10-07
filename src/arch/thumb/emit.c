@@ -491,6 +491,23 @@ void t_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
            (unsigned)(rdlo << 12) | (unsigned)(rdhi << 8) | (unsigned)rm);
 }
 
+/* SMLAL/UMLAL T1: the long multiplies' accumulating twins, op1 one more
+ * (bit 6 of the first halfword) */
+void t_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
+{
+    A32(a32_mlal(c, rdlo, rdhi, rn, rm, sign));
+    hw2(c, (sign ? 0xfbc0u : 0xfbe0u) | (unsigned)rn,
+           (unsigned)(rdlo << 12) | (unsigned)(rdhi << 8) | (unsigned)rm);
+}
+
+/* SMMUL T1: 1111 1011 0101 Rn | 1111 Rd 0000 Rm (Ra = 1111) */
+void t_smmul(struct code *c, int rd, int rn, int rm)
+{
+    A32(a32_smmul(c, rd, rn, rm));
+    hw2(c, 0xfb50u | (unsigned)rn,
+           0xf000u | (unsigned)(rd << 8) | (unsigned)rm);
+}
+
 void t_cmp_reg(struct code *c, int rn, int rm)
 {
     A32(a32_cmp_reg(c, rn, rm));

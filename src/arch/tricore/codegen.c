@@ -241,6 +241,7 @@ static char *wide_map(struct ir_func *fn)
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
+        case IR_MULW:             /* two words in, a 64-bit product out */
             w[i->dst] = 1;
             break;
         default:
@@ -1440,6 +1441,20 @@ static int gen_ins64(struct tc_fn *F, int n)
         tc_alu(t, TC_ADD, B_HI, B_HI, A_HI);
         wr64(F, i->dst, B_LO, B_HI);
         return 1;
+    case IR_MULW: {
+        /* MUL / MUL.U into an E register: the whole product of two words
+         * in one, straight into the result's pair when that is one (the
+         * pair pool's are even, E4 and E6), else through E0 */
+        int ra_ = rdr(F, i->a, B_LO), rb_ = rdr(F, i->b, B_HI), dl, dh;
+        dst64(F, i->dst, &dl, &dh);
+        if (dl & 1) {
+            dl = A_LO;
+            dh = A_HI;
+        }
+        tc_mul64(t, dl, ra_, rb_, i->sign);
+        wr64(F, i->dst, dl, dh);
+        return 1;
+    }
     case IR_NEG:
         tc_mov_imm(t, A_LO, 0);
         tc_mov_imm(t, A_HI, 0);
@@ -2212,6 +2227,13 @@ static void gen_ins(struct tc_fn *F, int n)
             tc_alu(t, op, rd_, ra_, rb_);
         }
         wrote(F, i->dst, rd_);
+        return;
+    }
+    case IR_MULH: {
+        /* the high word of a 32 x 32 product: MUL(.U) into E0, and D1 */
+        int ra_ = rdr(F, i->a, ACC), rb_ = rdr(F, i->b, TMP);
+        tc_mul64(t, A_LO, ra_, rb_, i->sign);
+        wrote(F, i->dst, A_HI);
         return;
     }
     case IR_DIV: case IR_MOD: {

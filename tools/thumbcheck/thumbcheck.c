@@ -194,6 +194,8 @@ int main(int argc, char **argv)
     t_div(&C, 0, 1, 2, 0);              expect("udiv\tr0, r1, r2");
     t_mull(&C, 0, 1, 2, 3, 1);          expect("smull\tr0, r1, r2, r3");
     t_mull(&C, 0, 1, 2, 3, 0);          expect("umull\tr0, r1, r2, r3");
+    t_mlal(&C, 0, 1, 2, 3, 1);          expect("smlal\tr0, r1, r2, r3");
+    t_mlal(&C, 4, 9, 12, 7, 0);         expect("umlal\tr4, r9, r12, r7");
 
     t_cmp_reg(&C, 0, 1);                expect("cmp\tr0, r1");
     t_cmp_reg(&C, 9, 1);                expect("cmp\tr9, r1");

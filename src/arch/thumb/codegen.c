@@ -688,6 +688,7 @@ static char *wide64_map(struct ir_func *fn)
         case IR_NEG: case IR_BNOT: case IR_BSWAP:
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT:
+        case IR_MULW:             /* two words in, a 64-bit product out */
         /* The conversions' `w` is their RESULT's width too: a double
          * out of I2F, and the 64-bit intermediate F2I goes through so
          * that an unsigned int lands right. */
@@ -2644,6 +2645,49 @@ static int gen_ins64(struct t_fn *F, int n)
         return 1;
     }
 
+    case IR_MULW: {
+        /* smull/umull: the 64-bit product of two words, one instruction
+         * that reads both before writing either half, so the result may
+         * land on its operands. The operands are single words wherever
+         * they live; B's registers take them, A is the result's. */
+        int sa = rdr(F, i->a, B_LO), sb = rdr(F, i->b, B_HI), dl, dh;
+        /* With the 64-bit add that is its one reader right after it,
+         * smlal/umlal: acc += a * b in one, where the add was four
+         * instructions of its own -- a long dot product, a fixed-point
+         * filter with a 64-bit accumulator. The accumulator goes into
+         * the result's pair first, which must then hold neither
+         * operand. */
+        if (F->usecnt && i->dst >= 0 && F->usecnt[i->dst] == 1 &&
+            n + 1 < fn->nins && !getenv("EMBCC_NO_MLAL")) {
+            const struct ir_ins *nx = &fn->ins[n + 1];
+            int c = -1;
+            if (nx->op == IR_ADD && !nx->imm_b && !nx->flt && nx->w == 8 &&
+                nx->dst >= 0 && F->wide[nx->dst]) {
+                if (nx->b == i->dst && nx->a != i->dst)
+                    c = nx->a;
+                else if (nx->a == i->dst && nx->b != i->dst)
+                    c = nx->b;
+            }
+            if (c >= 0 && F->wide[c] && !in_freg(F, c) &&
+                !in_freg(F, nx->dst)) {
+                dst64(F, nx->dst, &dl, &dh);
+                int same = in_reg(F, c) && F->loc[c] == dl;
+                if (same || (dl != sa && dl != sb && dh != sa && dh != sb)) {
+                    if (!same)
+                        rd64(F, c, dl, dh);
+                    t_mlal(t, dl, dh, sa, sb, i->sign);
+                    wr64(F, nx->dst, dl, dh);
+                    F->skip_next = 1;
+                    return 1;
+                }
+            }
+        }
+        dst64(F, i->dst, &dl, &dh);
+        t_mull(t, dl, dh, sa, sb, i->sign);
+        wr64(F, i->dst, dl, dh);
+        return 1;
+    }
+
     case IR_MUL:
         /* (a_hi:a_lo) * (b_hi:b_lo), keeping 64 bits: the two cross
          * products contribute only to the high word, and the low
@@ -3945,6 +3989,25 @@ static void gen_ins(struct t_fn *F, int n)
                 t_alu_reg(t, op, d, rb_, ra_, 1);
             else
                 t_alu_reg(t, op, d, ra_, rb_, 1);   /* flags dead: above */
+        }
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_MULH: {
+        /* The high word of a 32 x 32 product, which division by a
+         * constant multiplies by: the long multiply with its low word
+         * thrown away -- or smmul in ARM state, where every ARMv7-A has
+         * it. Not on ARMv7E-M, though the DSP set has it there too: the
+         * Cortex-M levels select the same instructions for v7-M and
+         * v7E-M (target_thumb_em), and a v7E-M image is run on a
+         * Cortex-M3 by the firmware tests, where smmul is undefined. */
+        int sa = rdr(F, i->a, T_ACC), sb = rdr(F, i->b, T_TMP);
+        int d = wreg(F, i->dst, T_ACC);
+        if (i->sign && t_isa_a32 && !getenv("EMBCC_NO_SMMUL")) {
+            t_smmul(t, d, sa, sb);
+        } else {
+            int lo = d != T_ACC ? LO(F, T_ACC) : LO(F, T_ADDR);
+            t_mull(t, lo, d, sa, sb, i->sign);
         }
         wrote(F, i->dst, d);
         return;
@@ -5397,7 +5460,7 @@ static int lo_op_ok(const struct t_fn *F, const struct ir_ins *i)
     switch (i->op) {
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
-    case IR_NEG: case IR_BNOT: case IR_CMP:
+    case IR_NEG: case IR_BNOT: case IR_CMP: case IR_MULH:
         if (i->flt)
             return 0;
         break;

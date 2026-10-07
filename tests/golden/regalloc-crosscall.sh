@@ -17,8 +17,10 @@
 # innermost loop, a loop being the span of a backward branch. Where a
 # value must go to memory it is one read once a trip in an outer loop,
 # not the inner loop's counter. Thumb gives five registers (r4-r8) to
-# twelve values that cross a call, so there one constant read once a trip
-# is still reloaded; one access is allowed there and no more.
+# twelve values that cross a call, so there the constants read once a
+# trip are still reloaded: the LCG's multiplier, and since `% 900` became
+# a multiply (pass_divmagic, umull) the divisor's magic number -- two
+# accesses are allowed there and no more, neither of them the counter.
 #
 # EMBCC_RA_POOL_K=1 restores the old count, and this test fails under it
 # on all five targets.
@@ -97,7 +99,7 @@ EOF
 
 fail=0
 for t in x86_64-elf:0 aarch64-elf:0 riscv32-unknown-elf:0 \
-         riscv64-unknown-elf:0 thumbv7em-none-eabi:1; do
+         riscv64-unknown-elf:0 thumbv7em-none-eabi:2; do
     tg=${t%:*}; max=${t#*:}
     "$EMBCC" --target=$tg -O2 -c "$out/hot.c" -o "$out/$tg.o" || {
         echo "$tg: does not compile"; exit 1; }

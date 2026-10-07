@@ -165,7 +165,23 @@ enum ir_op {
                 * which is why it takes a half at a time -- and why a
                 * widening sum needs two accumulators. */
 
-    IR_OPCOUNT    /* not an opcode: the table size, so print and parse can
+    /* ---- the 32x32->64 multiply, for the 32-bit machines -----------
+     *
+     * Both read their operands as 32-bit values, whatever `w` says, and
+     * `sign` says how: 1 signed by signed, 0 unsigned by unsigned. They
+     * exist because the IR's only multiply keeps the low half at its
+     * width, so a 32-bit machine that HAS a widening multiply (umull,
+     * mulhu, multu, mulhwu, umul and %y...) had to be handed a 64-bit
+     * multiply of two extended values -- four multiplies on RV32 -- or,
+     * for a division by a constant, nothing at all. Emitted only where
+     * target_has_mulh() says the backend lowers them; the folders take
+     * them by the same definition (fold_bin). */
+    IR_MULH,   /* dst = the HIGH 32 bits of the 64-bit product a * b
+                * (w 4, sign) -- mulh/mulhu, smull/umull's high register */
+    IR_MULW,   /* dst = the whole 64-bit product of 32-bit a and b
+                * (w 8, sign) -- mul + mulh, smull/umull, mult/multu */
+
+    IR_OPCOUNT   /* not an opcode: the table size, so print and parse can
                    * agree on how many there are */
 };
 

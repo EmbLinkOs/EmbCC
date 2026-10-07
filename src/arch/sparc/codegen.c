@@ -250,6 +250,7 @@ static char *wide_map(struct ir_func *fn)
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
+        case IR_MULW:             /* two words in, a 64-bit product out */
             w[i->dst] = 1;
             break;
         default:
@@ -1443,6 +1444,17 @@ static int gen_ins64(struct sparc_fn *F, int n)
         sparc_alu(t, SP_ADD, A_HI, A_HI, SCR);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
+    case IR_MULW: {
+        /* umul/smul: the low word to a register and the high one to %y,
+         * where `rd %y` finds it -- the operands are read before either
+         * is written, so the pair may hold them */
+        int ra_ = rdr(F, i->a, B_LO), rb_ = rdr(F, i->b, B_HI), dl, dh;
+        dst64(F, i->dst, &dl, &dh);
+        sparc_alu(t, i->sign ? SP_SMUL : SP_UMUL, dl, ra_, rb_);
+        sparc_rdy(t, dh);
+        wr64(F, i->dst, dl, dh);
+        return 1;
+    }
     case IR_NEG: {
         int al, ah, dl, dh;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
@@ -2325,6 +2337,16 @@ static void gen_ins(struct sparc_fn *F, int n)
             sparc_alu(t, op, rd_, ra_, rb_);
         }
         wrote(F, i->dst, rd_);
+        return;
+    }
+    case IR_MULH: {
+        /* the high word of a 32 x 32 product is %y after umul/smul; the
+         * low word goes to the destination and is replaced */
+        int ra_ = rdr(F, i->a, ACC), rb_ = rdr(F, i->b, TMP);
+        int d = wreg(F, i->dst, ACC);
+        sparc_alu(t, i->sign ? SP_SMUL : SP_UMUL, d, ra_, rb_);
+        sparc_rdy(t, d);
+        wrote(F, i->dst, d);
         return;
     }
     case IR_DIV: case IR_MOD: {

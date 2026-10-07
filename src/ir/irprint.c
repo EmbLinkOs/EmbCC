@@ -76,6 +76,7 @@ const char *ir_opname(enum ir_op op)
         [IR_VLOAD] = "vload",   [IR_VSTORE] = "vstore", [IR_VBIN] = "vbin",
         [IR_VSPLAT] = "vsplat", [IR_VREDADD] = "vredadd",
         [IR_VWIDEN] = "vwiden", [IR_SELECT] = "select",
+        [IR_MULH] = "mulh",     [IR_MULW] = "mulw",
     };
     if ((int)op < 0 || (int)op >= IR_OPCOUNT || !n[op])
         return "op?";
@@ -187,6 +188,7 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         break;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+    case IR_MULH: case IR_MULW:
         ob_fmt(b, "%%%d = %s", i->dst, ir_opname(i->op)); suffix(b, i, 1);
         ob_fmt(b, " %%%d, ", i->a); operand_b(b, i);
         break;

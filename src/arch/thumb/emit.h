@@ -140,6 +140,12 @@ void t_mls(struct code *c, int rd, int rn, int rm, int ra);
 void t_div(struct code *c, int rd, int rn, int rm, int sign);
 /* rdlo:rdhi = rn * rm, the 64-bit product. */
 void t_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
+/* rdhi:rdlo += rn * rm, 64 bits (smlal/umlal) */
+void t_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
+/* rd = the high word of the signed rn * rm: smmul, emitted in ARM state
+ * only (the Cortex-M levels select alike for v7-M, which lacks it; its
+ * Thumb form was checked against llvm-mc's thumbv7em by hand) */
+void t_smmul(struct code *c, int rd, int rn, int rm);
 
 void t_cmp_reg(struct code *c, int rn, int rm);
 void t_cmp_imm(struct code *c, int rn, long imm);   /* t_imm_ok(imm) */

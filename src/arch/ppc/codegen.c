@@ -229,6 +229,7 @@ static char *wide_map(struct ir_func *fn)
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
+        case IR_MULW:             /* two words in, a 64-bit product out */
             w[i->dst] = 1;
             break;
         default:
@@ -1376,6 +1377,27 @@ static int gen_ins64(struct ppc_fn *F, int n)
         ppc_alu(t, PPC_MULLW, A_LO, A_LO, B_LO);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
+    case IR_MULW: {
+        /* mulhw(u) and mullw: the two words of a 32 x 32 product, the
+         * second into a register the first did not overwrite an operand
+         * in -- through r0 when the pair holds both operands */
+        int ra_ = rdr(F, i->a, B_LO), rb_ = rdr(F, i->b, B_HI), dl, dh;
+        int hop = i->sign ? PPC_MULHW : PPC_MULHWU;
+        dst64(F, i->dst, &dl, &dh);
+        if (dh != ra_ && dh != rb_) {
+            ppc_alu(t, hop, dh, ra_, rb_);
+            ppc_alu(t, PPC_MULLW, dl, ra_, rb_);
+        } else if (dl != ra_ && dl != rb_) {
+            ppc_alu(t, PPC_MULLW, dl, ra_, rb_);
+            ppc_alu(t, hop, dh, ra_, rb_);
+        } else {
+            ppc_alu(t, hop, SCR, ra_, rb_);
+            ppc_alu(t, PPC_MULLW, dl, ra_, rb_);
+            ppc_mr(t, dh, SCR);
+        }
+        wr64(F, i->dst, dl, dh);
+        return 1;
+    }
     case IR_NEG: {
         int al, ah, dl, dh;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
@@ -2033,6 +2055,14 @@ static void gen_ins(struct ppc_fn *F, int n)
             ppc_alu(t, op, rd_, ra_, rb_);
         }
         wrote(F, i->dst, rd_);
+        return;
+    }
+    case IR_MULH: {
+        /* the high word of a 32 x 32 product */
+        int ra_ = rdr(F, i->a, ACC), rb_ = rdr(F, i->b, TMP);
+        int d = wreg(F, i->dst, ACC);
+        ppc_alu(t, i->sign ? PPC_MULHW : PPC_MULHWU, d, ra_, rb_);
+        wrote(F, i->dst, d);
         return;
     }
     case IR_DIV: case IR_MOD: {
