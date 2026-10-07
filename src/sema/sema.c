@@ -3601,10 +3601,6 @@ static int flatten_sized(struct unit *u, struct func *f, struct scope *sc,
     return n;
 }
 
-/* Resolve a constant-address expression (the value of a pointer slot in a
- * static initializer) to a target global/function plus a byte addend:
- * `&g`, a decayed array/function, `&arr[i]`, `&g.field`, `p + n`. Returns 1
- * on success, filling *gt or *ft and adding to *add. */
 /* GNU C: a static local's initializer may hold `&&label`, the address
  * of a label of the function it is in -- g_label_fn, while that
  * initializer is lowered. resolve_addr answers one with the function as
@@ -3614,6 +3610,10 @@ static struct func *g_label_fn;
 static const char *g_addr_label;
 static int g_addr_label_line;
 
+/* Resolve a constant-address expression (the value of a pointer slot in a
+ * static initializer) to a target global/function plus a byte addend:
+ * `&g`, a decayed array/function, `&arr[i]`, `&g.field`, `p + n`. Returns 1
+ * on success, filling *gt or *ft and adding to *add. */
 static int resolve_addr(struct expr *e, struct global **gt,
                         struct func **ft, long *add)
 {
