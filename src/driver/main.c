@@ -1495,19 +1495,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             fputs(pp, stdout);
         return 0;
     }
-    if (lang_cxx && !syntax_only &&
-        (target_ptr_size() != 8 || target_long_size() != 8)) {
-        /* The C++ front end lays types out itself (src/cxx/type.c), for
-         * an LP64 target, and the C it lowers to is laid out by the
-         * target's own rules. Anywhere else the two disagree --
-         * sizeof(long) was 8 on ARMv7-M and sizeof(void *) 8 on AVR --
-         * and every class layout, sizeof and pointer step would be wrong
-         * without a word. A check that writes nothing is still allowed. */
+    if (lang_cxx && !syntax_only && target_ptr_size() != 8 &&
+        target_get() != TARGET_THUMB && target_get() != TARGET_RISCV32) {
+        /* The C++ front end lays types out itself (src/cxx/type.c) by the
+         * target's data model, and follows the Itanium C++ ABI's 32-bit
+         * form -- with the ARM C++ ABI's changes on ARM. That is checked
+         * against clang on 32-bit ARM and RV32 only; on the other 32-bit
+         * targets nobody has compared a vtable, a guard or a mangled
+         * name, and AVR's two-byte pointers and one-byte alignment are a
+         * data model the front end has never laid a class out for. */
         fprintf(stderr,
-                "embcc: error: C++ is not yet supported for %s: the C++ "
-                "front end lays out types for 8-byte long and pointers, and "
-                "this target's long is %d bytes and its pointers %d\n",
-                target_triple_now(), target_long_size(), target_ptr_size());
+                "embcc: error: C++ is not supported for %s: its C++ ABI "
+                "(%d-byte pointers) is not implemented; C++ is supported on "
+                "x86-64, AArch64, 32-bit ARM and riscv32\n",
+                target_triple_now(), target_ptr_size());
         return 1;
     }
     if (lang_cxx && !syntax_only && target_big_endian()) {

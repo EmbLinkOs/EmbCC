@@ -349,7 +349,7 @@ static struct cval load(struct cptr p, const struct cty *t)
     if (p.bw)
         return load_bits(p, t);
     int k = scalar_kind(t);
-    long n = ct_is_ref(t) ? 8 : ct_size(t);
+    long n = ct_is_ref(t) ? cx_ptr_size() : ct_size(t);
     check_range(p, n, 0);
     unsigned char *q = p.blk->b + p.off;
     if (k == V_FLT) {
@@ -473,7 +473,7 @@ static void store(struct cptr p, const struct cty *t, struct cval v)
             q[i] = (unsigned char)w.lo;
         return;
     }
-    long n = ct_is_ref(t) ? 8 : ct_size(t);
+    long n = ct_is_ref(t) ? cx_ptr_size() : ct_size(t);
     check_range(p, n, 1);
     unsigned char *q = p.blk->b + p.off;
     if (v.k == V_FLT) {

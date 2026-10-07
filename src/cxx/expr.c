@@ -3817,7 +3817,7 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
         e->count = convert(count, ct_size_t(), "an array new's size");
         e->init = init_object(t, form, NULL, 0, at);
         if (elem->k == CT_CLASS && class_dtor(elem->cls))
-            e->cookie = ct_align(elem) > 8 ? ct_align(elem) : 8;
+            e->cookie = cx_array_cookie(elem);
     } else {
         e->init = init_object(t, form, args, na, at);
     }
@@ -3882,7 +3882,7 @@ static struct cexpr *parse_delete(const struct ctok *at, int global)
                      ct_name(t));
         e->dtor = class_dtor(t->cls);
         if (arr && e->dtor)
-            e->cookie = ct_align(t) > 8 ? ct_align(t) : 8;
+            e->cookie = cx_array_cookie(t);
     }
     /* g++ calls the sized forms where it knows the size, the aligned
      * ones for an over-aligned type */
@@ -3925,7 +3925,8 @@ static const char *powi_fn(const char *n)
     if (!strcmp(n, "powif"))
         return "__powisf2";
     if (!strcmp(n, "powil"))
-        return target_get() == TARGET_AARCH64 ? "__powitf2" : "__powixf2";
+        return target_ldouble_size() == 8 ? "__powidf2"
+               : target_get() == TARGET_X86_64 ? "__powixf2" : "__powitf2";
     return NULL;
 }
 
@@ -3935,7 +3936,7 @@ int cxx_has_builtin(const char *name)
         if (lib_sig(name + 10) || powi_fn(name + 10))
             return 1;
         if (rdrand_width(name + 10) || !strcmp(name + 10, "ia32_pause"))
-            return target_get() != TARGET_AARCH64;
+            return target_get() == TARGET_X86_64;
         static const char *const special[] = {
             "offsetof", "is_constant_evaluated", "addressof", "launder",
             "expect", "constant_p", "va_arg", "coro_done", "coro_resume",
@@ -4435,7 +4436,7 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
     }
     if (!strcmp(n, "ia32_pause")) {
         /* the spin-wait hint: pause (emit.c) */
-        if (target_get() == TARGET_AARCH64)
+        if (target_get() != TARGET_X86_64)
             cx_error(at, "'%s' is an x86 builtin", name);
         struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_VOID), VC_PRVALUE);
         e->name = name;
@@ -4447,7 +4448,7 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
     if (rdrand_width(n)) {
         /* x86's rdrand/rdseed: a random value stored, 1 when there was
          * one (emit.c writes the instruction) */
-        if (target_get() == TARGET_AARCH64)
+        if (target_get() != TARGET_X86_64)
             cx_error(at, "'%s' is an x86 builtin", name);
         if (na != 1)
             cx_error(at, "'%s' takes one pointer", name);

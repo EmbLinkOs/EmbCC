@@ -36,13 +36,36 @@ extern "C" {
 namespace {
 
 /* The guard, as this implementation lays it out. The layout is private
- * to these three functions; the compiler only ever tests byte 0. */
+ * to these three functions; the compiler only ever tests byte 0.
+ *
+ * On 32-bit ARM the guard is one 32-bit word (the ARM C++ ABI, 3.2.3),
+ * and the compiler tests its bit 0 -- byte 0 on a little-endian core, so
+ * `done` stays where it is. There is no room for the wait word, so the
+ * waiters of every guard sleep on one shared word: a release wakes them
+ * all, and each re-tests its own guard, which they do anyway. */
+#ifdef __ARM_EABI__
+typedef unsigned guard_word;
+volatile int shared_wait;
+
+struct guard_t {
+    unsigned char done;      /* byte 0 (bit 0): initialised */
+    unsigned char busy;      /* byte 1: an initialisation is running */
+    unsigned char pad[2];
+};
+
+volatile int *wait_word(guard_t *) { return &shared_wait; }
+#else
+typedef std::uint64_t guard_word;
+
 struct guard_t {
     unsigned char done;      /* byte 0: initialised, the inline fast path */
     unsigned char busy;      /* byte 1: an initialisation is running */
     unsigned char pad[2];
     volatile int  wait;      /* bytes 4..7: bumped on release, slept on */
 };
+
+volatile int *wait_word(guard_t *g) { return &g->wait; }
+#endif
 
 /* Who is running which initialiser, so that a thread finding a guard
  * busy can tell RECURSION (its own, a bug) from CONTENTION (another
@@ -122,15 +145,24 @@ bool owned_by_me(guard_t *g)
 
 }  // namespace
 
-int __cxa_guard_acquire(std::uint64_t *g)
+int __cxa_guard_acquire(guard_word *g)
 {
     guard_t *gd = reinterpret_cast<guard_t *>(g);
     for (;;) {
         if (__atomic_load_n(&gd->done, __ATOMIC_ACQUIRE))
             return 0;                /* already done; do not initialise */
 
-        unsigned char expect = 0;
-        if (__atomic_compare_exchange_n(&gd->busy, &expect, 1, 0,
+        /* `busy` from 0 to 1, as a compare-and-swap of the guard's first
+         * word -- done, busy and the padding -- from all zero: RV32 has
+         * no byte-wide one, and the word's other bytes are zero exactly
+         * when the byte's would have succeeded (done is set only by the
+         * thread that set busy). */
+        guard_t claimed = {};
+        claimed.busy = 1;
+        unsigned expect = 0, busy_word;
+        __builtin_memcpy(&busy_word, &claimed, sizeof busy_word);
+        if (__atomic_compare_exchange_n(reinterpret_cast<unsigned *>(gd),
+                                        &expect, busy_word, 0,
                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
             own(gd);
             return 1;                /* the caller runs the initialiser */
@@ -150,10 +182,11 @@ int __cxa_guard_acquire(std::uint64_t *g)
          * the word inside the guard -- reading it BEFORE re-testing
          * `busy`, so a release between the two is not missed: the wait
          * compares the word and returns at once if it has changed. */
-        int seen = __atomic_load_n(&gd->wait, __ATOMIC_ACQUIRE);
+        volatile int *w = wait_word(gd);
+        int seen = __atomic_load_n(w, __ATOMIC_ACQUIRE);
         if (__atomic_load_n(&gd->busy, __ATOMIC_ACQUIRE) &&
             !__atomic_load_n(&gd->done, __ATOMIC_ACQUIRE)) {
-            if (__os_futex_wait(&gd->wait, seen, -1) < 0)
+            if (__os_futex_wait(w, seen, -1) < 0)
                 __os_thread_yield();
         }
     }
@@ -161,11 +194,12 @@ int __cxa_guard_acquire(std::uint64_t *g)
 
 static void guard_wake(guard_t *gd)
 {
-    __atomic_fetch_add(&gd->wait, 1, __ATOMIC_RELEASE);
-    __os_futex_wake(&gd->wait, -1);      /* every waiter: all may proceed */
+    volatile int *w = wait_word(gd);
+    __atomic_fetch_add(w, 1, __ATOMIC_RELEASE);
+    __os_futex_wake(w, -1);              /* every waiter: all may proceed */
 }
 
-void __cxa_guard_release(std::uint64_t *g)
+void __cxa_guard_release(guard_word *g)
 {
     guard_t *gd = reinterpret_cast<guard_t *>(g);
     disown(gd);
@@ -180,7 +214,7 @@ void __cxa_guard_release(std::uint64_t *g)
 /* The initialiser threw. The object is not constructed, so the guard goes
  * back to its starting state and the NEXT call tries again -- which is
  * what [stmt.dcl]/4 requires and the easiest thing to get wrong. */
-void __cxa_guard_abort(std::uint64_t *g)
+void __cxa_guard_abort(guard_word *g)
 {
     guard_t *gd = reinterpret_cast<guard_t *>(g);
     disown(gd);
