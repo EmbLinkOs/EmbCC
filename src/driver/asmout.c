@@ -223,7 +223,11 @@ static const char *reloc_name(int kind)
         default:               return NULL;
         }
     case TARGET_MIPS32:
+    case TARGET_MIPS64:
         switch (kind) {
+        case RK_MIPS_HIGHEST: return "R_MIPS_HIGHEST";
+        case RK_MIPS_HIGHER: return "R_MIPS_HIGHER";
+        case RK_ABS64:       return "R_MIPS_64";
         case RK_CALL:        return "R_MIPS_26";       /* jal and j alike */
         case RK_MIPS_TEXT26: return "R_MIPS_26";
         case RK_MIPS_HI16:   return "R_MIPS_HI16";
@@ -473,7 +477,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     /* MIPS: the code is already scheduled -- its delay slots are filled --
      * and uses $at itself, so the assembler may neither reorder, nor fill
      * a slot, nor expand a macro through $at. */
-    if (target_get() == TARGET_MIPS32)
+    if (target_is_mips())
         ob_str(b, "\t.set\tnoreorder\n\t.set\tnoat\n\t.set\tnomacro\n");
     ob_str(b, "\t.text\n");
     long prev_end = 0;
@@ -595,7 +599,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
              * Each of these has exactly one encoding, so the assembler has
              * nothing to choose, and a REL assembler stores the addend in
              * the field as EmbCC's object writer does. */
-            if (st && target_get() == TARGET_MIPS32 && len == 4) {
+            if (st && target_is_mips() && len == 4) {
                 unsigned long w = (unsigned long)target_get_uint(text + pc,
                                                                  4);
                 int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
@@ -616,6 +620,18 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                            sym, add);
                 else if (st->kind == RK_MIPS_HI16 && op == 0x0f)
                     ob_fmt(b, "\tlui\t$%d, %%hi(%s%+ld)\n", rt, sym, add);
+                /* MIPS64's four pieces: lui %highest, then daddiu
+                 * %higher, %hi and %lo with dsll 16 between */
+                else if (st->kind == RK_MIPS_HIGHEST && op == 0x0f)
+                    ob_fmt(b, "\tlui\t$%d, %%highest(%s%+ld)\n", rt, sym,
+                           add);
+                else if ((st->kind == RK_MIPS_HIGHER ||
+                          st->kind == RK_MIPS_HI16 ||
+                          st->kind == RK_MIPS_LO16) && op == 0x19)
+                    ob_fmt(b, "\tdaddiu\t$%d, $%d, %%%s(%s%+ld)\n", rt, rs,
+                           st->kind == RK_MIPS_HIGHER ? "higher"
+                           : st->kind == RK_MIPS_HI16 ? "hi" : "lo",
+                           sym, add);
                 else if (st->kind == RK_MIPS_LO16 && op == 0x09)
                     ob_fmt(b, "\taddiu\t$%d, $%d, %%lo(%s%+ld)\n", rt, rs,
                            sym, add);
@@ -699,7 +715,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * in .text, whatever section the last function was in. */
     if (cursec)
         ob_str(b, "\n\t.text\n");
-    if (target_get() == TARGET_MIPS32 && u->topasm) {
+    if (target_is_mips() && u->topasm) {
         mips_emit_blocks(b, srcname, u, text, prev_end, textlen);
         prev_end = textlen;
     }
@@ -730,7 +746,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         ob_str(b, "\n\t.section\t.rodata\n");
         /* the object's .rodata is 16-aligned (main.c); an assembler's
          * starts at 1 unless told */
-        if (target_get() == TARGET_MIPS32)
+        if (target_is_mips())
             ob_str(b, "\t.p2align\t4\n");
         for (int i = 0; i < iu->nstrs; i++) {
             if (iu->strs[i].align > 1)       /* the same gap irgen left */

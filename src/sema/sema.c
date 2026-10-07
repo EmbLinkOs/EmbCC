@@ -576,13 +576,19 @@ static void merge_bits(char *p, int unit, int nb, struct w128 val,
     val.hi &= mask.hi;
     struct w128 lo = w_shl(val, bit_off);
     if (target_big_endian()) {
-        if (unit > 16)
-            internal_error("a 17-byte bit-field unit on a big-endian "
-                           "target");
-        for (int b = 0; b < unit; b++)
-            if (unit - 1 - b < nb)
-                p[unit - 1 - b] |=
-                    (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
+        /* byte b of the value (from the least significant end) is the
+         * unit's byte unit-1-b; a 17-byte unit's top byte is what the
+         * shift carried past 128 bits */
+        for (int b = 0; b < unit; b++) {
+            unsigned long byte;
+            if (unit - 1 - b >= nb)
+                continue;
+            if (b < 16)
+                byte = (b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7));
+            else
+                byte = bit_off ? w_shr(val, 128 - bit_off, 0).lo : 0;
+            p[unit - 1 - b] |= (char)byte;
+        }
         return;
     }
     for (int b = 0; b < nb && b < 16; b++)
@@ -4439,7 +4445,7 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 0);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
-    if (target_get() == TARGET_MIPS32)
+    if (target_is_mips())
         return asm_resolve_reg_mips(u, s, op, c);
     if (target_get() == TARGET_LOONGARCH64)
         return asm_resolve_reg_la(u, s, op, c);

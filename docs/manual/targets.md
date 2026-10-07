@@ -14,7 +14,8 @@ interrupt handlers are in [Embedded programming](embedded.md).
 ## Summary
 
 One `embcc` process compiles for one target. Every target is
-little-endian.
+little-endian but the big-endian MIPS ones, `mips-none-elf` and
+`mips64-none-elf`.
 
 | Family | Canonical triples | Object format | Calling convention | Linked by |
 |---|---|---|---|---|
@@ -28,6 +29,7 @@ little-endian.
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
+| [MIPS64](#mips64) | `mips64el-none-elf`, `mips64-none-elf` | ELF64 | n64, soft float | `embld` |
 | [LoongArch64](#loongarch64) | `loongarch64-unknown-elf` | ELF64 | LoongArch psABI, LP64S (soft float) | `embld` |
 | [TriCore](#tricore) | `tricore-none-elf` | ELF32 | TriCore EABI, soft float | `embld` |
 | [Xtensa](#xtensa) | `xtensa-none-elf` | ELF32 | windowed, soft float | `embld` |
@@ -50,6 +52,7 @@ little-endian.
 | RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
 | MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
+| MIPS64r2 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Refused big-endian; little-endian compiles without exceptions and unwind tables, untested |
 | LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
 | TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
@@ -181,6 +184,11 @@ Notes on the table:
   `ptrdiff_t` and `wchar_t` are `long` types. SPARC's binary128
   `long double` is 8-aligned. Xtensa's `wchar_t` is a 16-bit
   `unsigned short`.
+- MIPS64 has LP64's sizes in the RV64 column: `long` and pointers 8/8,
+  `long double` 16/16 binary128, `__int128` 16/16, a signed plain `char`
+  and an `int` `wchar_t`, `__BIGGEST_ALIGNMENT__` and the stack 16 (see
+  [MIPS64](#mips64)). `long double` and `__int128` are computed, binary128
+  and the 128-bit divides through lib/rt.
 - On AVR every type has alignment 1, so `struct { char c; int i; }` is
   three bytes.
 - Windows uses the LP64 model here, which is not Microsoft's; see
@@ -1147,6 +1155,133 @@ exception prints its cause and address.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
 | a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
+
+## MIPS64
+
+MIPS64 Release 2 with the n64 ABI and soft float, in either byte order.
+Freestanding only. It is the MIPS32 backend at 64 bits; the design notes
+are in [the MIPS64 plan](../internals/mips64-plan.md).
+
+### Triples
+
+| Triple | Accepted aliases | ISA | ABI |
+|---|---|---|---|
+| `mips64el-none-elf` | `mips64el-unknown-elf`, `mips64el-elf`, `mips64el` | MIPS64r2, little-endian | n64, soft float |
+| `mips64-none-elf` | `mips64-unknown-elf`, `mips64-elf`, `mips64` | MIPS64r2, big-endian | n64, soft float |
+
+### Options
+
+EmbCC emits one configuration: MIPS64 Release 2, n64, soft float, without
+abicalls and without small data, in the triple's byte order. The options
+a MIPS64 build passes are accepted when they ask for exactly that and
+refused by name otherwise.
+
+| Option | Accepted values | Refused with |
+|---|---|---|
+| `-mcpu=CPU`, `-march=CPU` | `mips64r2`, `5kc`, `5kf`, `5kec`, `5kef`, `octeon` | `-mcpu=mips64r6 is not a MIPS64 Release 2 core: EmbCC emits MIPS64r2 (mips64r2, 5kc, 5kf, 5kec, 5kef, octeon)` |
+| `-mabi=ABI` | `64` | `-mabi=n32 is not supported: EmbCC emits the n64 ABI (-mabi=64) only` |
+| `-msoft-float` | (no value) | `-mhard-float is not supported: EmbCC emits soft-float n64, which passes floating point in the integer registers` |
+| `-EL` (`mips64el`), `-EB` (`mips64`) | (no value) | `-EB contradicts --target=mips64el-none-elf, which is little-endian: big-endian MIPS64 is --target=mips64-none-elf` |
+| `-mno-abicalls` | (no value) | `-mabicalls is not supported: EmbCC's MIPS64 code takes addresses absolutely (%highest..%lo) and keeps no $gp; it is -mno-abicalls code` |
+| `-G0` | (no value) | `-G8 is not supported: EmbCC puts no data in .sdata and addresses nothing through $gp (-G0)` |
+
+A floating-point unit, if the core has one, is not used.
+
+### Data model
+
+LP64, as RV64's column above: `long` and pointers 8/8, `long long` 8/8,
+`long double` 16/16 IEEE binary128, `__int128` 16/16. Plain `char` is
+signed and `wchar_t` is a signed `int`. `__BIGGEST_ALIGNMENT__` is 16 and
+the stack is 16-byte aligned.
+
+### Calling convention: n64, soft float
+
+- Arguments take doubleword slots: the first eight in `a0`–`a7`
+  (`$4`–`$11`), the rest on the stack from the caller's `sp`, with no home
+  area. A `long double`, or a structure aligned to 16, starts at an even
+  slot; an `__int128` takes the next slot whatever it is (clang's rule).
+- A structure or union of any size is passed by value, its bytes as the
+  doublewords `ld` would read -- a short one left-justified big-endian --
+  split between `a7` and the stack when it straddles them.
+- A 32-bit value, `unsigned` included, travels and is returned
+  sign-extended to 64 bits; a `float` as its bits, a `double` as a `long`
+  does.
+- A scalar result comes back in `v0`, an `__int128` in `v0:v1`, and a
+  `long double` in `v0` and `a0` (its first doubleword in memory in
+  `v0`). A structure or union of at most 16 bytes comes back in `v0:v1` as
+  its doublewords, except that a structure of one or two floating-point
+  fields returns each field in its own register (a `float` field in the
+  register's high half big-endian), a structure of one `long double` as a
+  `long double`, and a `_Complex float` or `_Complex double` each part in
+  its own register. A larger one comes back through a hidden pointer the
+  caller passes in `a0`, handed back in `v0`.
+- A variadic argument takes the same slots; an unnamed `__int128` or
+  `long double` starts at an even one, where `va_arg` rounds the pointer
+  up to 16. `va_list` is a `void *`: a variadic function stores `a0`–`a7`
+  just below its incoming stack words.
+- `s0`–`s7`, `fp`, `gp` and `sp` survive a call.
+
+`tests/golden/mips64-abi.sh` and `mips64-be-abi.sh` check every rule above
+with EmbCC and clang calling each other on the board.
+
+### Code generation
+
+Addresses are absolute and 64-bit, as clang takes them for n64 without
+abicalls: `lui`, `daddiu`, `dsll`, `daddiu`, `dsll`, `daddiu` with
+`R_MIPS_HIGHEST`, `R_MIPS_HIGHER`, `R_MIPS_HI16` and `R_MIPS_LO16`. Calls
+are `jal` with `R_MIPS_26`, within one 256 MiB region. Branches, delay
+slots, jump tables and misaligned accesses are as on [MIPS32](#mips32),
+with `ldl`/`ldr` and `sdl`/`sdr` for a doubleword. An `__int128` or
+`long double` is computed in two doublewords in memory; 128-bit division,
+remainder and every `long double` operation call lib/rt.
+
+### Object format
+
+ELF64, `EM_MIPS`, in the triple's byte order, with RELA relocations whose
+`r_info` is n64's record (symbol, then three type bytes; EmbCC writes one
+type each, as clang does). `e_flags` is `0x80000001`:
+`EF_MIPS_ARCH_64R2` and `EF_MIPS_NOREORDER`. Each object has a
+`.MIPS.abiflags` section saying ISA MIPS64r2, 64-bit registers and the
+soft-float ABI. `embld` links these objects and clang's
+(`--target=mips64el-unknown-elf -mcpu=mips64r2 -msoft-float -mno-abicalls
+-G0`), applying `R_MIPS_64`, `R_MIPS_32`, `R_MIPS_26`, `R_MIPS_HIGHEST`,
+`R_MIPS_HIGHER`, `R_MIPS_HI16`, `R_MIPS_LO16` and `R_MIPS_PC16`; it
+refuses a composite relocation (PIC and gp-relative code) by name.
+`-Tstack ADDR` emits the entry stub, both addresses sign-extended 32-bit.
+
+### Predefined macros
+
+From `clang --target=mips64el-unknown-elf` (and `mips64-unknown-elf`)
+`-mcpu=mips64r2 -msoft-float -mno-abicalls`: `__mips__`, `__mips` (64),
+`__mips64`, `__mips_n64`, `_ABI64`, `_MIPS_SIM`, `_MIPS_SZLONG` and
+`_MIPS_SZPTR` (64), `__mips_isa_rev` (2), `__mips_soft_float`, `__LP64__`,
+`__SIZEOF_INT128__`, and `__MIPSEL__` or `__MIPSEB__` by the byte order.
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` and `_8` are defined; the 1- and
+2-byte forms are not.
+
+### Runtime
+
+`make rt-embedded` and `make libc-embedded` build `librt.a` and `libc.a`
+for both triples (soft float, binary128, 128-bit integer arithmetic).
+`tests/harness/mips64` runs programs on QEMU's `malta` board with a 5KEc
+core: the image is linked at 0xffffffff80100000 (KSEG0) and loaded with
+`-kernel`, with tests/harness/mips's startup and UART output.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| an atomic read-modify-write on a 1- or 2-byte object | `the MIPS64 backend cannot lower an atomic narrower than four bytes (...) yet (function f) [xadd w=4 size=1]` |
+| a 16-byte atomic | `the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]` |
+| a computed `goto` | `the MIPS64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
+| `__builtin_frame_address`, `__builtin_return_address` | `the MIPS64 backend cannot lower __builtin_frame_address or __builtin_return_address (n64 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
+| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
+| a doubleword instruction in inline assembly (`daddu`, `ld`, ...) | `asm instruction "daddu $a4, $a5, $a5" is not in the MIPS vocabulary` |
+| `la` in a `.s` file or file-scope `asm` | `la loads a 32-bit address, and a MIPS64 address is 64 bits (nor are %highest and %higher assembled here): load it from a .dword holding the symbol` |
+| reading a packed bit-field over more than 8 bytes, big-endian | `a packed bit-field 'v' across 9 bytes is not supported on a big-endian target (mips64-none-elf)` |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mips64el-none-elf yet (...): EmbCC writes no MIPS .eh_frame` |
+| a C++ translation unit for `mips64-none-elf` | `C++ is not yet supported for mips64-none-elf: the C++ constant evaluator lays memory out little-endian, and this target is big-endian` |
 
 ## LoongArch64
 

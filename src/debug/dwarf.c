@@ -593,9 +593,10 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
                 a == TARGET_RISCV64 || a == TARGET_MIPS32 ||
                 a == TARGET_LOONGARCH64 || a == TARGET_TRICORE ||
                 a == TARGET_XTENSA || a == TARGET_PPC32 ||
-                a == TARGET_RX) {
+                a == TARGET_RX || a == TARGET_MIPS64) {
                 struct dbuf e = { 0, 0, 0 };
-                int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
+                int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32 ||
+                                                a == TARGET_MIPS64;
                 int la = a == TARGET_LOONGARCH64, tc = a == TARGET_TRICORE;
                 int xt = a == TARGET_XTENSA, ppc = a == TARGET_PPC32;
                 int rx = a == TARGET_RX;

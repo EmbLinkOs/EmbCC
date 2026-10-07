@@ -92,8 +92,18 @@ enum target_arch {
      * beyond two bytes -- the m68k's own data model. Every argument is on
      * the stack. 12 because other new targets took 7-11 on their branches.
      * docs/internals/coldfire-plan.md. */
-    TARGET_COLDFIRE = 12
+    TARGET_COLDFIRE = 12,
+    /* MIPS64 Release 2 with the n64 convention, soft float, in either
+     * byte order (mips64el-none-elf, mips64-none-elf): LP64 with a SIGNED
+     * char, a binary128 long double and __int128. The MIPS32 backend at
+     * 64 bits (src/arch/mips, target_xlen() == 64), as src/arch/riscv
+     * serves both RISC-V widths. 13, not 10: other target branches hold
+     * 10-12. docs/internals/mips64-plan.md. */
+    TARGET_MIPS64 = 13
 };
+
+/* Either MIPS: the one backend, the one encoder, the one assembler. */
+int target_is_mips(void);
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
  * 64-bit targets. The RISC-V backend is written once against this,
@@ -627,6 +637,12 @@ enum reloc_kind {
      * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
      * site whose str_off is already the offset). */
     RK_MIPS_TEXT26,
+    /* MIPS64 takes a 64-bit address in four 16-bit pieces (lui, daddiu,
+     * dsll, daddiu, dsll, daddiu): %highest, %higher, %hi, %lo, each
+     * rounded for the sign extension of the pieces below it. With RELA
+     * each is relocated on its own; HI16 and LO16 are the kinds above. */
+    RK_MIPS_HIGHEST,
+    RK_MIPS_HIGHER,
     /* LoongArch takes an address as `pcalau12i` (the 4 KiB page of the
      * symbol, relative to the page of the instruction) and an `addi.d`
      * (or a load's offset) holding the symbol's low 12 bits -- each

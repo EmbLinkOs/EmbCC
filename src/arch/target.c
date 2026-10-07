@@ -135,7 +135,8 @@ int target_insn_len(const unsigned char *p, int avail)
     }
 
     case TARGET_MIPS32:
-        /* MIPS32 is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
+    case TARGET_MIPS64:
+        /* MIPS is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
         return avail >= 4 ? 4 : 0;
 
     case TARGET_LOONGARCH64:
@@ -303,7 +304,16 @@ static const struct data_model {
      * aligned beyond two bytes (BIGGEST_ALIGNMENT 16 bits without
      * -malign-int): an int in a struct may sit at offset 2. */
     [TARGET_COLDFIRE] = { 4, 4, 4, 8,  8, 0, 0, 0, 2 },
+    /* n64 (clang --target=mips64el-none-elf -msoft-float -dM): LP64, a
+     * SIGNED char as on o32, a signed int wchar_t, a binary128 long
+     * double and __int128. */
+    [TARGET_MIPS64]  = { 8, 8, 4, 8, 16, 0, 0, 1, 0 },
 };
+
+int target_is_mips(void)
+{
+    return g_arch == TARGET_MIPS32 || g_arch == TARGET_MIPS64;
+}
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
 int target_double_size(void)    { return g_model[g_arch].dbl; }
@@ -425,6 +435,7 @@ int target_anon_bitfield_aligns(void)
     /* o32: `struct { char c; int :4; char d; }` is 3 bytes in clang, and
      * `int :0` moves d to offset 4 without making the struct 4-aligned */
     case TARGET_MIPS32:  return 0;
+    case TARGET_MIPS64:  return 0;   /* n64: as o32 (clang) */
     /* LoongArch psABI: `struct { char c; int :0; char d; }` is 5 bytes in
      * clang, aligned 1 */
     case TARGET_LOONGARCH64: return 0;
@@ -464,6 +475,7 @@ int target_va_list_is_pointer(void)
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
     case TARGET_AVR:     return 1;   /* avr-gcc: char * */
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
+    case TARGET_MIPS64:  return 1;   /* n64: void *, over the save area */
     case TARGET_LOONGARCH64: return 1;   /* LoongArch psABI: void * */
     case TARGET_TRICORE: return 1;   /* char *, over the caller's stack words */
     /* GCC's 12-byte record, held by value -- not a pointer to one, and not
@@ -670,6 +682,17 @@ static const struct triple {
     { "mips-elf",            TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
     { "mips",                TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
 
+    /* MIPS64r2, n64, soft float, either byte order: the same columns as
+     * the 32-bit pair, the sub-architecture 1 meaning big-endian. */
+    { "mips64el-none-elf",   TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "mips64el-unknown-elf", TARGET_MIPS64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "mips64el-elf",        TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "mips64el",            TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "mips64-none-elf",     TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   2, 1 },
+    { "mips64-unknown-elf",  TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
+    { "mips64-elf",          TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
+    { "mips64",              TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
+
     /* LoongArch64, LP64S (soft float), bare metal. `-unknown-elf` is
      * clang's spelling and the canonical one; the short forms are accepted
      * because everyone writes them. */
@@ -760,7 +783,8 @@ int target_from_triple(const char *triple, enum target_arch *out,
             if (fmt) *fmt = g_triples[i].fmt;
             /* Byte order travels with the name too: every triple but
              * the big-endian MIPS ones is little-endian. */
-            g_big_endian = (g_triples[i].arch == TARGET_MIPS32 &&
+            g_big_endian = ((g_triples[i].arch == TARGET_MIPS32 ||
+                             g_triples[i].arch == TARGET_MIPS64) &&
                             g_triples[i].thumb_em == 1) ||
                            g_triples[i].arch == TARGET_PPC32 ||
                            g_triples[i].arch == TARGET_SPARC32 ||
@@ -807,7 +831,7 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
              : g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
              : g_thumb_arch == 6 ? 6
              : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
-    if (a == TARGET_MIPS32 && g_big_endian)
+    if ((a == TARGET_MIPS32 || a == TARGET_MIPS64) && g_big_endian)
         want = 2;
     for (int i = 0; i < g_ntriples; i++)
         if (g_triples[i].canon == want && g_triples[i].arch == a &&
@@ -896,7 +920,8 @@ int target_elf_machine(enum target_arch a)
     case TARGET_RISCV32:
     case TARGET_RISCV64: return EM_RISCV;
     case TARGET_AVR:     return EM_AVR;
-    case TARGET_MIPS32:  return EM_MIPS;
+    case TARGET_MIPS32:
+    case TARGET_MIPS64:  return EM_MIPS;
     case TARGET_LOONGARCH64: return EM_LOONGARCH;
     case TARGET_TRICORE: return EM_TRICORE;
     case TARGET_XTENSA:  return EM_XTENSA;
@@ -945,6 +970,8 @@ unsigned long target_elf_flags(enum target_arch a)
      * slots are filled (with nops), the code is not abicalls/PIC. */
     case TARGET_MIPS32:  return EF_MIPS_ARCH_32R2 | EF_MIPS_ABI_O32 |
                                 EF_MIPS_NOREORDER;
+    /* ...and for mips64r2 n64: no ABI field (ELFCLASS64 is n64) */
+    case TARGET_MIPS64:  return EF_MIPS_ARCH_64R2 | EF_MIPS_NOREORDER;
     /* what clang writes for -mabi=lp64s: the soft-float base ABI, object
      * ABI v1 */
     case TARGET_LOONGARCH64: return EF_LOONGARCH_ABI_SOFT_FLOAT |
@@ -1067,6 +1094,19 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_ABS64:         return R_LARCH_64;
         case RK_DATA_PREL32:   return R_LARCH_32_PCREL;
         default:               return -1;
+        }
+    }
+    if (a == TARGET_MIPS64) {
+        switch (k) {
+        case RK_CALL:         return R_MIPS_26;
+        case RK_MIPS_HIGHEST: return R_MIPS_HIGHEST;
+        case RK_MIPS_HIGHER:  return R_MIPS_HIGHER;
+        case RK_MIPS_HI16:    return R_MIPS_HI16;
+        case RK_MIPS_LO16:    return R_MIPS_LO16;
+        case RK_MIPS_TEXT26:  return R_MIPS_26;
+        case RK_ABS32:        return R_MIPS_32;
+        case RK_ABS64:        return R_MIPS_64;
+        default:              return -1;
         }
     }
     if (a == TARGET_MIPS32) {
@@ -1258,7 +1298,7 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
         a == TARGET_MIPS32 || a == TARGET_LOONGARCH64 ||
         a == TARGET_TRICORE || a == TARGET_XTENSA || a == TARGET_PPC32 ||
         a == TARGET_RX || a == TARGET_SPARC32 ||
-        a == TARGET_COLDFIRE)
+        a == TARGET_COLDFIRE || a == TARGET_MIPS64)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V

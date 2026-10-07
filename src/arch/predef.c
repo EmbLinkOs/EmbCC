@@ -55,6 +55,13 @@ static const struct predef_macro *arch_table(int *count)
             }
             *count = predef_macro_count_cxx_mips32;
             return predef_macros_cxx_mips32;
+        case TARGET_MIPS64:
+            if (target_big_endian()) {
+                *count = predef_macro_count_cxx_mips64eb;
+                return predef_macros_cxx_mips64eb;
+            }
+            *count = predef_macro_count_cxx_mips64;
+            return predef_macros_cxx_mips64;
         case TARGET_LOONGARCH64:
             *count = predef_macro_count_cxx_loongarch64;
             return predef_macros_cxx_loongarch64;
@@ -116,6 +123,13 @@ static const struct predef_macro *arch_table(int *count)
         }
         *count = predef_macro_count_mips32;
         return predef_macros_mips32;
+    case TARGET_MIPS64:
+        if (target_big_endian()) {
+            *count = predef_macro_count_mips64eb;
+            return predef_macros_mips64eb;
+        }
+        *count = predef_macro_count_mips64;
+        return predef_macros_mips64;
     case TARGET_LOONGARCH64:
         *count = predef_macro_count_loongarch64;
         return predef_macros_loongarch64;

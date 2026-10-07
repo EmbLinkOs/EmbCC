@@ -126,10 +126,9 @@ struct elfw *elfw_new(int machine)
      * rejected. */
     w->elf32 = target_ptr_size() <= 4;
     w->rel = target_elf_uses_rel(target_get());
-    if (host_big_endian() || (target_big_endian() && !w->elf32)) {
+    if (host_big_endian()) {
         fprintf(stderr, "embcc: elf writer: %s objects are written only "
-                "by a little-endian host, and big-endian ones only as "
-                "ELFCLASS32\n", target_triple_now());
+                "by a little-endian host\n", target_triple_now());
         fatal_unwind();
     }
     w->sym_prefix = target_get() == TARGET_RX ? "_" : NULL;
@@ -445,6 +444,38 @@ int elfw_write(struct elfw *w, const char *path)
         }
     }
 
+    /* ELFCLASS64 MIPS (n64): r_info is not ELF64_R_INFO but a record --
+     * a 32-bit symbol, then one byte each of r_ssym, r_type3, r_type2 and
+     * r_type -- in the target's byte order. Big-endian that is the
+     * standard layout read whole; little-endian the type lands in the top
+     * byte of the 64-bit word. Every relocation here is one type with
+     * R_MIPS_NONE in the other two slots, as clang writes them. */
+    if (!w->elf32 && w->machine == EM_MIPS && !target_big_endian()) {
+        for (int i = 0; i < w->nrelagrp; i++) {
+            struct section *rs = &w->sec[w->relagrp[i].sec_ndx];
+            Elf64_Rela *r = (Elf64_Rela *)rs->data.p;
+            for (size_t k = 0; k < rs->data.len / sizeof *r; k++)
+                r[k].r_info = (ELF64_R_SYM(r[k].r_info) & 0xffffffffULL) |
+                              (ELF64_R_TYPE(r[k].r_info) & 0xffULL) << 56;
+        }
+    }
+    /* ...and every 64-bit structure big-endian (mips64-none-elf). */
+    if (!w->elf32 && target_big_endian()) {
+        struct section *sy = &w->sec[symtab_ndx];
+        Elf64_Sym *sv = (Elf64_Sym *)sy->data.p;
+        for (size_t k = 0; k < sy->data.len / sizeof *sv; k++) {
+            SWAP(sv[k].st_name); SWAP(sv[k].st_shndx);
+            SWAP(sv[k].st_value); SWAP(sv[k].st_size);
+        }
+        for (int i = 0; i < w->nrelagrp; i++) {
+            struct section *rs = &w->sec[w->relagrp[i].sec_ndx];
+            Elf64_Rela *r = (Elf64_Rela *)rs->data.p;
+            for (size_t k = 0; k < rs->data.len / sizeof *r; k++) {
+                SWAP(r[k].r_offset); SWAP(r[k].r_info); SWAP(r[k].r_addend);
+            }
+        }
+    }
+
     /* Lay out: ehdr, section payloads, then the section header table. */
     Elf64_Off off = w->elf32 ? sizeof(Elf32_Ehdr) : sizeof(Elf64_Ehdr);
     for (int i = 1; i < w->nsec; i++) {
@@ -508,6 +539,13 @@ int elfw_write(struct elfw *w, const char *path)
         }
         memcpy(img, &e32, sizeof e32);
     } else {
+        if (target_big_endian()) {
+            SWAP(eh.e_type); SWAP(eh.e_machine); SWAP(eh.e_version);
+            SWAP(eh.e_entry); SWAP(eh.e_phoff); SWAP(eh.e_shoff);
+            SWAP(eh.e_flags); SWAP(eh.e_ehsize); SWAP(eh.e_phentsize);
+            SWAP(eh.e_phnum); SWAP(eh.e_shentsize); SWAP(eh.e_shnum);
+            SWAP(eh.e_shstrndx);
+        }
         memcpy(img, &eh, sizeof eh);
     }
     for (int i = 1; i < w->nsec; i++) {
@@ -539,7 +577,14 @@ int elfw_write(struct elfw *w, const char *path)
             }
             memcpy(at, &h32, sizeof h32);
         } else {
-            memcpy(at, &w->sec[i].hdr, sizeof(Elf64_Shdr));
+            Elf64_Shdr h = w->sec[i].hdr;
+            if (target_big_endian()) {
+                SWAP(h.sh_name); SWAP(h.sh_type); SWAP(h.sh_flags);
+                SWAP(h.sh_addr); SWAP(h.sh_offset); SWAP(h.sh_size);
+                SWAP(h.sh_link); SWAP(h.sh_info);
+                SWAP(h.sh_addralign); SWAP(h.sh_entsize);
+            }
+            memcpy(at, &h, sizeof h);
         }
     }
     int rc = plat_write_file(path, img, total);

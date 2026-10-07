@@ -386,8 +386,8 @@ static struct fpval fp_of_ldouble(long double v)
     struct fpval f;
     f.hi = 0;
     f.lo = 0;
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    /* SPARC: the most significant byte first */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    /* big-endian (SPARC, mips64-none-elf): the high word's bytes first */
     for (int i = 0; i < 8; i++)   f.hi = (f.hi << 8) | b[i];
     for (int i = 8; i < 16; i++)  f.lo = (f.lo << 8) | b[i];
 #else

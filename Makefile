@@ -159,6 +159,10 @@ SRCS := \
 	src/arch/mips32/predef_cxx.c \
 	src/arch/mips32eb/predef.c \
 	src/arch/mips32eb/predef_cxx.c \
+	src/arch/mips64/predef.c \
+	src/arch/mips64/predef_cxx.c \
+	src/arch/mips64eb/predef.c \
+	src/arch/mips64eb/predef_cxx.c \
 	src/arch/loongarch/emit.c \
 	src/arch/loongarch/codegen.c \
 	src/arch/loongarch/irgen.c \
@@ -336,6 +340,8 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
              src/arch/mips32/predef.c src/arch/mips32/predef_cxx.c \
              src/arch/mips32eb/predef.c src/arch/mips32eb/predef_cxx.c \
+             src/arch/mips64/predef.c src/arch/mips64/predef_cxx.c \
+             src/arch/mips64eb/predef.c src/arch/mips64eb/predef_cxx.c \
              src/arch/loongarch64/predef.c src/arch/loongarch64/predef_cxx.c \
              src/arch/tricore/predef.c src/arch/tricore/predef_cxx.c \
              src/arch/xtensa/predef.c src/arch/xtensa/predef_cxx.c \
@@ -579,7 +585,8 @@ RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
                riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
-                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf
+                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
+                 mips64el-none-elf mips64-none-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -596,7 +603,8 @@ LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
                  riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \
                  loongarch64-unknown-elf tricore-none-elf \
-                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf
+                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
+                 mips64el-none-elf mips64-none-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \

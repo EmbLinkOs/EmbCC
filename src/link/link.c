@@ -569,6 +569,133 @@ static void be_image(unsigned char *img)
     be_ehdr(e);
 }
 
+/* ...and a big-endian ELF64 one (mips64-none-elf), the same way with the
+ * 64-bit structures. */
+static void be_ehdr64(Elf64_Ehdr *e)
+{
+    SWAP(e->e_type); SWAP(e->e_machine); SWAP(e->e_version);
+    SWAP(e->e_entry); SWAP(e->e_phoff); SWAP(e->e_shoff); SWAP(e->e_flags);
+    SWAP(e->e_ehsize); SWAP(e->e_phentsize); SWAP(e->e_phnum);
+    SWAP(e->e_shentsize); SWAP(e->e_shnum); SWAP(e->e_shstrndx);
+}
+
+static void be_shdr64(Elf64_Shdr *h)
+{
+    SWAP(h->sh_name); SWAP(h->sh_type); SWAP(h->sh_flags); SWAP(h->sh_addr);
+    SWAP(h->sh_offset); SWAP(h->sh_size); SWAP(h->sh_link); SWAP(h->sh_info);
+    SWAP(h->sh_addralign); SWAP(h->sh_entsize);
+}
+
+static void be_sym64(Elf64_Sym *y)
+{
+    SWAP(y->st_name); SWAP(y->st_shndx); SWAP(y->st_value); SWAP(y->st_size);
+}
+
+static void be_phdr64(Elf64_Phdr *p)
+{
+    SWAP(p->p_type); SWAP(p->p_flags); SWAP(p->p_offset); SWAP(p->p_vaddr);
+    SWAP(p->p_paddr); SWAP(p->p_filesz); SWAP(p->p_memsz); SWAP(p->p_align);
+}
+
+static void be_normalise64(const char *name, unsigned char *buf, long len)
+{
+    Elf64_Ehdr *e = (Elf64_Ehdr *)buf;
+    Elf64_Shdr *sh;
+    be_ehdr64(e);
+    if ((long)e->e_shoff + (long)e->e_shnum * (long)sizeof(Elf64_Shdr) > len)
+        die("%s: section headers run past end of file", name);
+    sh = (Elf64_Shdr *)(buf + e->e_shoff);
+    for (int i = 0; i < e->e_shnum; i++)
+        be_shdr64(&sh[i]);
+    for (int i = 0; i < e->e_shnum; i++) {
+        unsigned char *p = buf + sh[i].sh_offset;
+        if (sh[i].sh_type == SHT_NOBITS ||
+            (long)sh[i].sh_offset + (long)sh[i].sh_size > len)
+            continue;
+        if (sh[i].sh_type == SHT_SYMTAB) {
+            Elf64_Sym *y = (Elf64_Sym *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *y; k++)
+                be_sym64(&y[k]);
+        } else if (sh[i].sh_type == SHT_RELA) {
+            Elf64_Rela *r = (Elf64_Rela *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *r; k++) {
+                SWAP(r[k].r_offset); SWAP(r[k].r_info); SWAP(r[k].r_addend);
+            }
+        } else if (sh[i].sh_type == SHT_REL) {
+            Elf64_Rel *r = (Elf64_Rel *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *r; k++) {
+                SWAP(r[k].r_offset); SWAP(r[k].r_info);
+            }
+        }
+    }
+}
+
+/* The finished ELF64 image turned big-endian, as be_image does ELF32's. */
+static void be_image64(unsigned char *img)
+{
+    Elf64_Ehdr *e = (Elf64_Ehdr *)img;
+    Elf64_Shdr *sh = (Elf64_Shdr *)(img + e->e_shoff);
+    Elf64_Phdr *ph = (Elf64_Phdr *)(img + e->e_phoff);
+    int nsh = e->e_shnum, nph = e->e_phoff ? e->e_phnum : 0;
+    for (int i = 0; i < nsh; i++) {
+        if (sh[i].sh_type == SHT_SYMTAB) {
+            Elf64_Sym *y = (Elf64_Sym *)(img + sh[i].sh_offset);
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *y; k++)
+                be_sym64(&y[k]);
+        }
+    }
+    for (int i = 0; i < nsh; i++)
+        be_shdr64(&sh[i]);
+    for (int i = 0; i < nph; i++)
+        be_phdr64(&ph[i]);
+    e->e_ident[EI_DATA] = ELFDATA2MSB;
+    be_ehdr64(e);
+}
+
+/* ELFCLASS64 MIPS (n64): r_info is a record -- the symbol's 32 bits,
+ * then r_ssym, r_type3, r_type2 and r_type, a byte each -- in the
+ * object's byte order. Rewritten to ELF64_R_INFO(sym, type) once, so the
+ * rest of this file reads it like any other; a COMPOSITE relocation (a
+ * second or third type, which n64 PIC and gp-relative code use) is
+ * refused by name. Called after be_normalise64 for a big-endian object,
+ * which has already read the record as one big-endian word. */
+static void mips64_rinfo(const char *name, unsigned char *buf, int big)
+{
+    Elf64_Ehdr *e = (Elf64_Ehdr *)buf;
+    Elf64_Shdr *sh = (Elf64_Shdr *)(buf + e->e_shoff);
+    for (int i = 0; i < e->e_shnum; i++) {
+        size_t esz = sh[i].sh_type == SHT_RELA ? sizeof(Elf64_Rela)
+                   : sh[i].sh_type == SHT_REL ? sizeof(Elf64_Rel) : 0;
+        if (!esz)
+            continue;
+        for (size_t k = 0; k < sh[i].sh_size / esz; k++) {
+            Elf64_Xword *ri = (Elf64_Xword *)(buf + sh[i].sh_offset +
+                                              k * esz + 8);
+            Elf64_Xword v = *ri;
+            unsigned sym, ssym, t3, t2, t;
+            if (big) {
+                sym = (unsigned)(v >> 32);
+                ssym = (unsigned)(v >> 24) & 0xff;
+                t3 = (unsigned)(v >> 16) & 0xff;
+                t2 = (unsigned)(v >> 8) & 0xff;
+                t = (unsigned)v & 0xff;
+            } else {
+                sym = (unsigned)(v & 0xffffffffULL);
+                ssym = (unsigned)(v >> 32) & 0xff;
+                t3 = (unsigned)(v >> 40) & 0xff;
+                t2 = (unsigned)(v >> 48) & 0xff;
+                t = (unsigned)(v >> 56) & 0xff;
+            }
+            if (ssym || t2 || t3)
+                die("%s: a composite MIPS64 relocation (type %u/%u/%u); "
+                    "this linker links n64 relocations of one type each, "
+                    "as non-PIC code without small data has them (compile "
+                    "with -mno-abicalls -G0)", name, t, t2, t3);
+            *ri = ELF64_R_INFO((Elf64_Xword)sym, (Elf64_Xword)t);
+        }
+    }
+}
+
 static struct object *parse_object(const char *name, unsigned char *buf,
                                    long len)
 {
@@ -590,9 +717,13 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             die("%s: too small to be an object", name);
         be_normalise(name, buf, len);
         big = 1;
+    } else if (eh->e_ident[EI_DATA] == ELFDATA2MSB) {
+        /* big-endian ELF64: MIPS64 n64 only, checked below */
+        be_normalise64(name, buf, len);
+        big = 1;
     } else if (eh->e_ident[EI_DATA] != ELFDATA2LSB) {
-        die("%s: neither a little-endian object nor a big-endian 32-bit "
-            "one", name);
+        die("%s: neither a little-endian object nor a big-endian one",
+            name);
     }
 
     struct object *o = xcalloc(1, sizeof *o);
@@ -696,10 +827,26 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (eh->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
         if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV &&
-            eh->e_machine != EM_LOONGARCH)
+            eh->e_machine != EM_LOONGARCH && eh->e_machine != EM_MIPS)
             die("%s: a 64-bit object for machine %u; only x86-64, RV64 "
-                "(EM_RISCV) and LoongArch64 (EM_LOONGARCH) are supported",
+                "(EM_RISCV), LoongArch64 (EM_LOONGARCH) and MIPS64 "
+                "(EM_MIPS) are supported", name, (unsigned)eh->e_machine);
+        if (big && eh->e_machine != EM_MIPS)
+            die("%s: a big-endian 64-bit object for machine %u; big-endian "
+                "is linked for MIPS (mips-none-elf, mips64-none-elf) only",
                 name, (unsigned)eh->e_machine);
+        /* n64 only: an ELFCLASS64 MIPS object is n64 unless it names an
+         * ABI in e_flags (o64 or EABI64), which this linker does not */
+        if (eh->e_machine == EM_MIPS) {
+            if (eh->e_flags & 0x0000f000UL)
+                die("%s: a 64-bit MIPS object that is not n64 (e_flags "
+                    "0x%lx); this linker links n64 (mips64el and mips64) "
+                    "only", name, (unsigned long)eh->e_flags);
+            if (eh->e_shoff + (Elf64_Off)eh->e_shnum * sizeof(Elf64_Shdr) >
+                (Elf64_Off)len)
+                die("%s: section headers run past end of file", name);
+            mips64_rinfo(name, buf, big);
+        }
         /* LP64S only: an object for the FPU conventions passes a double
          * in a floating-point register where EmbCC's code passes it in
          * an integer one, and linking the two would be a miscompilation
@@ -1235,6 +1382,16 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         return;
     }
     if (l->machine == EM_MIPS) {
+        /* MIPS64 too, where lui and addiu sign-extend: both addresses
+         * must be the sign extension of their low 32 bits (KSEG0/1,
+         * 0xffffffff80000000 up), as a MIPS64 board's RAM is reached */
+        if (!l->elf32 &&
+            ((long long)l->stack_top != (long long)(int)l->stack_top ||
+             (long long)entry != (long long)(int)entry))
+            die("-Tstack on MIPS64: the stack top 0x%llx and the entry "
+                "0x%llx must be sign-extended 32-bit addresses (KSEG0 is "
+                "0xffffffff80000000)", (unsigned long long)l->stack_top,
+                (unsigned long long)entry);
         mips_li(&c, MIPS_SP, (long long)l->stack_top);
         mips_lui(&c, MIPS_T9, (unsigned)(entry >> 16) & 0xffff);
         mips_alu_imm(&c, MIPS_ORI, MIPS_T9, MIPS_T9, (long long)(entry & 0xffff));
@@ -2950,6 +3107,26 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
         V = (long long)S + A;
         mips_put16(loc, (unsigned long)((V + 0x8000) >> 16));
         return;
+    /* n64's upper pieces of a 64-bit address (RELA), each rounded for
+     * the sign extension of every piece added after it */
+    case R_MIPS_HIGHER:
+        V = (long long)S + A;
+        mips_put16(loc, (unsigned long)(((unsigned long long)V +
+                                         0x80008000ULL) >> 32));
+        return;
+    case R_MIPS_HIGHEST:
+        V = (long long)S + A;
+        mips_put16(loc, (unsigned long)(((unsigned long long)V +
+                                         0x800080008000ULL) >> 48));
+        return;
+    case R_MIPS_64:
+        if (c->isrel)
+            die("%s: an R_MIPS_64 in a REL section", o->name);
+        V = (long long)S + A;
+        for (int b = 0; b < 8; b++)
+            loc[mips_big_endian() ? 7 - b : b] =
+                (unsigned char)((unsigned long long)V >> (8 * b));
+        return;
     case R_MIPS_LO16:
         if (c->isrel) A = sext(field & 0xffffU, 16);
         V = (long long)S + A;
@@ -4364,8 +4541,10 @@ static void write_exec(struct linker *l, const char *out,
     }
     free(sy); free(symname); free(symstr.p); free(shstr.p);
 
-    if (l->big_endian)
-        be_image(img);
+    if (l->big_endian) {
+        if (l->elf32) be_image(img);
+        else          be_image64(img);
+    }
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
     free(img);
@@ -5678,8 +5857,10 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
                    (unsigned char)ELF64_ST_INFO(STB_GLOBAL, type), shndx);
         j++;
     }
-    if (l->big_endian)
-        be_image(img);
+    if (l->big_endian) {
+        if (l->elf32) be_image(img);
+        else          be_image64(img);
+    }
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
     free(img); free(em); free(fo); free(n_osec); free(n_dbg); free(dbg_at);
