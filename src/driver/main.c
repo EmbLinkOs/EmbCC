@@ -118,7 +118,11 @@ static void print_options(FILE *out)
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
-      "                         riscv32/riscv64-unknown-elf, avr,\n"
+      "                         riscv32/riscv64-unknown-elf, avr,\n",
+      out);
+    /* (two literals: one string this long passes the IR's text form's
+     * limit, and tests/golden/ir-roundtrip.sh prints main.c's) */
+    fputs(
       "                         mipsel-none-elf, mips-none-elf,\n"
       "                         powerpc-none-eabi, and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"

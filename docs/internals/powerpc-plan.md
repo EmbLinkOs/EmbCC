@@ -148,3 +148,31 @@ C++ (laid out LP64 only); unwind tables.
 | `tests/golden/ppc-data.sh` | tests/golden/be-data.c's every object, bytes and relocations, against clang's; -g's DWARF verified with clang's bit offsets; the values printed on the board from both compilers' objects |
 | `tests/golden/ppc-refuse.sh` | the triples, the object's header, -S reassembled by llvm-mc into -c's code and relocations, the accepted and refused options and constructs, EmbLD's refusal of a little-endian object |
 | `tests/golden/predef.sh` | the `ppc32` table against clang's |
+| `tests/golden/libc-embedded.sh` | lib/libc on the board at -O0, -O2 and -Os against the same library on x86-64 |
+| `tests/golden/debug-embedded.sh` | -g verifies; frame base breg1 (breg31 under alloca); the first parameter's location is where the prologue stores r3 |
+
+## Status (2026-10-07)
+
+Done: the encoder (1651 forms refereed by llvm-mc), the target, the code
+generator at -O0 and with the allocator at -O1/-O2/-Os, EmbLD, lib/rt and
+lib/libc, the ppce500 harness, -g, -S (reassembled by llvm-mc), and the
+goldens above. The exec corpus passes 199 of 199 at each of -O0, -O1, -O2
+and -Os (21 judged against clang's result for an LP64 or little-endian
+assumption; 17 not applicable, listed by ppc-exec.sh), also under
+EMBCC_VERIFY=1, with each pair mode forced and with EMBCC_RA_MAXPOOL=3.
+
+Not yet, each refused by name:
+
+- **Inline and file-scope assembly, `.s` files.** There is no PowerPC
+  assembler vocabulary (an `asm.c` beside emit.c, as MIPS and LoongArch
+  have); the harness writes its few privileged instructions as words. This
+  is the first gap a real e500/e200 project meets (mtspr, wrteei, isync).
+- **One- and two-byte atomics** (lwarx/stwcx. on the containing word, as
+  LoongArch does with ll.w/sc.w); the predefined
+  `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1/2` are left out to match.
+- `__builtin_frame_address`/`__builtin_return_address` (the back chain is
+  there to walk; LR's save word is the caller's frame + 4), computed goto,
+  interrupt functions, unwind tables, C++.
+- Linker scripts for PowerPC images (EmbLD lays them out with
+  -Ttext/-Tstack, as for MIPS).
+- isel (e500 and e200 have it; the code is portable Book E without it).
