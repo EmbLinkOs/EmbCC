@@ -53,6 +53,20 @@ int main(void)
     ALL(double, -0.0, -0.0);
     ALL(double, -1.0, 0.0);
     ALL(double, 1e300, 1e-300);
+    {   /* a loop the optimizer unrolls into a chain of constants -- b
+         * names every step -- and folds: each step rounded at its own
+         * width, as the machine rounds it (float 1.1 is inexact) */
+        float b = 1.0f; volatile float vb = 1.0f, k = 1.1f, c = 0.3f;
+        for (int i = 0; i < 6; i++) b = b * 1.1f + 0.3f;
+        for (int i = 0; i < 6; i++) vb = vb * k + c;
+        float rb = vb;
+        if (!same(&b, &rb, sizeof b)) bad++;
+        double d = 1.0; volatile double vd = 1.0, two = 2.0;
+        for (int i = 0; i < 4; i++) d *= 2.0;
+        for (int i = 0; i < 4; i++) vd *= two;
+        double rd = vd;
+        if (!same(&d, &rd, sizeof d)) bad++;
+    }
     {   /* negation, and a folded value that feeds a branch */
         volatile float vf = 2.5f;
         float nf = -(2.5f), rf = -vf;

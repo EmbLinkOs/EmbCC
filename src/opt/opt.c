@@ -877,12 +877,22 @@ static int pass_fold(struct ir_func *fn)
         if (i->op == IR_LABEL)
             lk.gen++;
         if (i->flt) {
-            /* never as an integer -- as a float, from bit patterns */
+            /* never as an integer -- as a float, from bit patterns. An
+             * operand is a constant when it has one definition that is
+             * one, or -- for the arithmetic, whose width is its operands'
+             * -- when the block has just made it one (lk_note), as the
+             * integer folds below already ask: an unrolled `b *= 2.0`
+             * reuses b's name, so b has several definitions and the
+             * chain of multiplies by constants stayed a chain. Not a
+             * compare, whose w is its result's, not its operands'. */
             long A, B = 0, r;
-            if ((i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
-                 i->op == IR_DIV || i->op == IR_NEG || i->op == IR_CMP) &&
-                get_const(fn, &d, i->a, &A) &&
-                (i->op == IR_NEG || get_const(fn, &d, i->b, &B)) &&
+            int arith = i->op == IR_ADD || i->op == IR_SUB ||
+                        i->op == IR_MUL || i->op == IR_DIV || i->op == IR_NEG;
+            if ((arith || i->op == IR_CMP) &&
+                (get_const(fn, &d, i->a, &A) ||
+                 (arith && lk_get(&lk, i->a, i->w, &A))) &&
+                (i->op == IR_NEG || get_const(fn, &d, i->b, &B) ||
+                 (arith && lk_get(&lk, i->b, i->w, &B))) &&
                 fold_fp(i, A, B, &r)) {
                 to_const(i, r);
                 i->flt = 0;             /* a bit pattern, as irgen's are */
