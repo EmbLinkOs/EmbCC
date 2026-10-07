@@ -181,6 +181,10 @@ Done:
   allocator's attempts forced one at a time (`EMBCC_T_PAIRS=0/1`,
   `EMBCC_T_EXT=1`, `EMBCC_T_LOWREGS=1`) and with the pool shrunk to three
   registers (`EMBCC_RA_MAXPOOL=3`).
+- Differential fuzzing (the gen2 generator: integers, floats, structs by
+  value, bit-fields, function-pointer tables, checksummed against host
+  clang): 252 programs at -O0/-O2 and -O1/-Os soft float, and 121 at
+  -O0/-O2 with `armv7a-none-eabihf`, all agreeing on the board.
 - The file assembler and inline asm in ARM state (conditions on any
   instruction; `mrs`/`msr` of `cpsr`, `mrc`/`mcr`, the A32 `svc`/`bkpt`/
   `udf`), `lib/libc`'s `setjmp`/`longjmp` written with it.
