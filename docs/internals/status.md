@@ -407,7 +407,11 @@ that are missing:
 - Target builtins: `__builtin_cpu_supports`, `__builtin_ia32_*`,
   `__builtin_avr_*`.
 - Clang's `__c11_atomic_*` family. `_Atomic`, `<stdatomic.h>`, the
-  `__atomic_*` builtins and the `__sync_*` builtins are provided.
+  `__atomic_*` builtins and the `__sync_*` builtins are provided. Where
+  the machine's atomic instructions are a word -- RISC-V, MIPS,
+  LoongArch64, PowerPC, SPARC, TriCore, Xtensa -- a one- or two-byte
+  atomic is a loop on the aligned word around it that rewrites only its
+  lane (`docs/manual/targets.md`, each target's Atomics).
 
 ### Code generation
 

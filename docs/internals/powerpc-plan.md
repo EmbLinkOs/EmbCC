@@ -134,7 +134,7 @@ refused by name. `e_machine` is `EM_PPC` (20), class 32, big-endian,
 SPE and VLE (`-mspe`, `-mvle`), hard float (`-mhard-float`), the 128-bit
 `long double` (`-mlong-double-128`), small data (`-msdata=` other than
 none, `-G` other than 0), little-endian, PIC; computed goto; atomics
-narrower than a word (`lwarx`/`stwcx.` are word-sized);
+wider than a word;
 `__builtin_frame_address` and `__builtin_return_address`; `__int128`;
 C++ (laid out LP64 only); unwind tables.
 
@@ -167,9 +167,6 @@ Not yet, each refused by name:
   assembler vocabulary (an `asm.c` beside emit.c, as MIPS and LoongArch
   have); the harness writes its few privileged instructions as words. This
   is the first gap a real e500/e200 project meets (mtspr, wrteei, isync).
-- **One- and two-byte atomics** (lwarx/stwcx. on the containing word, as
-  LoongArch does with ll.w/sc.w); the predefined
-  `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1/2` are left out to match.
 - `__builtin_frame_address`/`__builtin_return_address` (the back chain is
   there to walk; LR's save word is the caller's frame + 4), computed goto,
   interrupt functions, unwind tables, C++.

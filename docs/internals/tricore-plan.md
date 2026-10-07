@@ -227,6 +227,7 @@ say):
 | `tests/golden/tricore-exec.sh` | `tests/exec/*.c` on the board at -O0, -O1, -O2 and -Os: 196 of 196 at every level, 13 of them judged against clang's MIPS32 status for an LP64 assumption, 18 not applicable |
 | `tests/golden/tricore-abi.sh` | caller and callee in separate units at -O0/-O2, all four pairings, against the host's output |
 | `tests/golden/tricore-asm.sh` | the inline-asm vocabulary on the board, and its refusals |
+| `tests/golden/tricore-atomics.sh` | one- and two-byte atomics (the CMPSWAP.W loop on the word around them) on every lane of a word at every level, against the host |
 | `tests/golden/tricore-refuse.sh` | the object header and relocations, the accepted and refused options, constructs and links |
 | `tests/golden/libc-embedded.sh` | lib/libc's output on the board equals x86-64's at -O0, -O2, -Os |
 | `tests/golden/debug-embedded.sh` | `-g`: the frame base (breg26, A10), address size, pointer DIEs |
@@ -255,6 +256,6 @@ Known gaps, in the order they matter:
    a `mov.a` (2 bytes) each time.
 3. **Refused by name:** jump tables (a dense switch is a compare tree),
    `.s` files and instructions in file-scope asm, naked and interrupt
-   functions, atomics narrower than a word or wider than one, computed
+   functions, atomics wider than a word, computed
    goto, `__builtin_frame_address`/`__builtin_return_address`, C++.
 4. The TC3xx FPU is not used (soft float everywhere).

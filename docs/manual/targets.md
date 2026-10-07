@@ -1616,6 +1616,16 @@ instructions, MAC16, the boolean registers or the density option's
 16-bit instructions. The ESP32-S2 has no S32C1I, so an atomic
 read-modify-write is not for it.
 
+### Atomics
+
+Every atomic is an `s32c1i` loop (the store that happens only while the
+word still equals `SCOMPARE1`) bracketed by `memw`. A one- or two-byte
+atomic works on the aligned word around it, as GCC's does: the loop
+rewrites only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic
+against the neighbouring bytes too (a store to any of them makes the
+`s32c1i` fail and the loop go round), and a compare-and-swap compares only
+its lane. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
+
 ### Calling convention: windowed, soft float
 
 - A `call8` rotates the register window by eight: the caller puts the
@@ -1686,8 +1696,7 @@ From Espressif's `xtensa-esp32-elf-gcc` 16.1: `__xtensa__`, `__XTENSA__`,
 configuration, `__CHAR_UNSIGNED__`, `__WCHAR_TYPE__` `short unsigned int`,
 `__INT32_TYPE__` `long int`. Not `__XTENSA_SOFT_FLOAT__`: the ESP32's GCC
 does not define it, and the float ABI is the same either way.
-`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is defined, the 1- and 2-byte forms
-are not.
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 ## SPARC
 
 SPARC V8, big-endian, as Gaisler's LEON3 implements it -- the processor
@@ -1745,6 +1754,20 @@ is `sethi`/`or` with `R_SPARC_HI22`/`R_SPARC_LO10`, a call is `call` with
 clang's (non-PIC), and refuses the GOT and PC-relative-address relocations
 of PIC code by name. `-Tstack` emits a stub that sets `%sp` and jumps to
 the entry.
+
+### Atomics
+
+An exchange of a word is `swap`; every other atomic is LEON3's `casa`
+(ASI 10), after a `stbar`, and a read-modify-write is a `casa` loop. A
+one- or two-byte atomic works on the aligned word around it, as GCC's and
+clang's do: the loop rewrites only its lane, `old ^ ((new ^ old) & mask)`,
+so it is atomic against the neighbouring bytes too (a store to any of them
+makes the `casa` fail and the loop go round with the word it saw), and a
+compare-and-swap compares only its lane. The lane of offset `a & 3` is
+counted from the top of the word (big-endian). Test-and-set stores 1, as
+`__GCC_ATOMIC_TEST_AND_SET_TRUEVAL` says, not `ldstub`'s 0xff. No
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_N` is defined: the table is clang's for
+`-mcpu=leon3`, which defines none.
 
 ### Assembly
 
@@ -1815,6 +1838,18 @@ dense `switch` is a tree of compares (no jump tables yet). A load or store
 the compiler cannot prove aligned goes a byte at a time. Only the 32-bit
 encodings are emitted.
 
+### Atomics
+
+An exchange of a word is `SWAP.W`, a compare-and-swap `CMPSWAP.W`, and a
+read-modify-write a `CMPSWAP.W` loop, each bracketed by `DSYNC`. A one- or
+two-byte atomic works on the aligned word around it: the loop rewrites
+only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic against the
+neighbouring bytes too (a store to any of them makes the `CMPSWAP.W` fail
+and the loop go round). A compare-and-swap hands `CMPSWAP.W` the word last
+seen with the expected value in the lane; when it fails because a
+neighbour moved, the loop goes round, and when the lane differs, it
+fails. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
+
 ### Object format and linking
 
 ELF32, little-endian, `EM_TRICORE` (44), RELA relocations, `e_flags`
@@ -1844,8 +1879,7 @@ refused.
 
 `__tricore__`, `__TRICORE__`, `__TC161__`, `__TRICORE_CORE__` and
 `__TRICORE_NAME__` (`0x161`), with the ILP32 set; `__CHAR_UNSIGNED__` is
-not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is, the 1- and 2-byte
-forms are not.
+not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are.
 
 ### Runtime
 
@@ -1933,7 +1967,6 @@ the entry.
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
 | a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
-| an atomic on a 1- or 2-byte object | `the TriCore backend cannot lower an atomic narrower than four bytes (SWAP.W and CMPSWAP.W are word-sized, ...)` |
 | an 8-byte atomic | `the TriCore backend cannot lower an atomic wider than a register yet`; a load or store: `an atomic access of 8 bytes is not one access on this target ...` |
 | a computed `goto` | `the TriCore backend cannot lower a computed goto yet` |
 | `__builtin_frame_address`, `__builtin_return_address` | `... (TriCore code keeps no frame-pointer chain; the return address is in the context-save area)` |
@@ -1943,7 +1976,6 @@ the entry.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
 | a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8 ...` |
 | any C++ translation unit | `C++ is not yet supported for tricore-none-elf: ...` |
-| an atomic read-modify-write on a 1- or 2-byte object | `the Xtensa backend cannot lower an atomic narrower than four bytes (s32c1i is word-sized, ...) yet (function f) [...]` |
 | an 8-byte atomic read-modify-write | `the Xtensa backend cannot lower an atomic wider than a register yet (function f) [...]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
 | a computed `goto` | `the Xtensa backend cannot lower a computed goto yet (function f) [...]` |
@@ -1956,7 +1988,6 @@ the entry.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
 | a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for xtensa-none-elf: ...` |
-| an atomic read-modify-write on a 1- or 2-byte object | `the SPARC backend cannot lower an atomic narrower than four bytes (casa and swap are word-sized, ...) yet (function f) [xadd w=4 size=1]` |
 | an 8-byte atomic read-modify-write | `the SPARC backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
 | a computed `goto` | `the SPARC backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |

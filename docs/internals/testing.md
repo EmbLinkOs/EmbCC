@@ -364,6 +364,10 @@ clang's AVR struct convention is not avr-gcc's.
 | `loongarch-asm` | the assembler's vocabulary against `llvm-mc`, pseudos included; a C program of inline asm, a file-scope block and a naked function linked with a `.S` file (assembled by EmbCC and by clang) on the board; `-S` reassembled; the refusals |
 | `loongarch-atomics` | one- and two-byte atomics at every place in their word on the board, the neighbours untouched; the `ll.w`/`sc.w` loop in the object |
 | `mips-atomics` | one- and two-byte atomics at every place in their word on MIPS32 and MIPS64, both byte orders and every level: the little-endian boards against the host, the big-endian ones against clang's build on the same board; the compare-and-swap macros |
+| `ppc-atomics` | one- and two-byte atomics at every place in their word on the ppce500 board at every level, against clang's build on the same board; the `lwarx`/`stwcx.` loop in the object; the compare-and-swap macros |
+| `sparc-atomics` | one- and two-byte atomics at every place in their word on the leon3_generic board at every level, against clang's build (a `casa` loop too) on the same board; the `casa` loop in the object |
+| `tricore-atomics` | one- and two-byte atomics at every place in their word on the tricore_testboard at every level, against the host; the compare-and-swap macros |
+| `xtensa-atomics` | one- and two-byte atomics at every place in their word on the de212 sim board at every level, against the host; the compare-and-swap macros |
 | `loongarch-refuse` | the triples, the object header and flags, `-S` reassembled, the options accepted and refused, the constructs refused by name, the objects `embld` refuses |
 
 `libc-embedded`, `debug-embedded`, `embedded-runtime` and `predef` include
