@@ -882,11 +882,14 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
     const struct type *u16 = ty_base(TY_SHORT, 1);
     const struct type *u64 = ty_int_of_size(8, 1);
     int x87 = target_get() == TARGET_X86_64;
+    /* big-endian (mips64-none-elf): binary128's top halfword is its first
+     * two bytes, and its high doubleword the first eight */
+    int be = target_big_endian();
     int x = gen_expr(fn, e->args[0]);
     int y = strncmp(bn, "copysign", 8) == 0 ? gen_expr(fn, e->args[1]) : -1;
     int slot = local_addr(fn, e->var_index);
-    int sea = emit_bin(fn, IR_ADD, slot, emit_const(fn, x87 ? 8 : 14, AW),
-                       AW, 1);
+    int sea = emit_bin(fn, IR_ADD, slot,
+                       emit_const(fn, x87 ? 8 : be ? 0 : 14, AW), AW, 1);
     int ysign = -1;
     if (y >= 0) {
         emit_store(fn, slot, y, ld);
@@ -914,14 +917,18 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
                         emit_cmp(fn, B_NE, ex, emit_const(fn, 0, 4), 4, 0),
                         emit_cmp(fn, B_NE, ex, emit_const(fn, 0x7fff, 4), 4, 0),
                         4, 0);
-    int lo = emit_load(fn, slot, u64);
+    int lo = emit_load(fn, be ? emit_bin(fn, IR_ADD, slot,
+                                         emit_const(fn, 8, AW), AW, 1)
+                              : slot, u64);
     int frac;
     if (x87) {
         frac = emit_bin(fn, IR_AND, lo,
                         emit_const(fn, 0x7fffffffffffffffL, 8), 8, 0);
     } else {
-        int hi = emit_load(fn, emit_bin(fn, IR_ADD, slot,
-                                        emit_const(fn, 8, AW), AW, 1), u64);
+        int hi = emit_load(fn, be ? slot
+                                  : emit_bin(fn, IR_ADD, slot,
+                                             emit_const(fn, 8, AW), AW, 1),
+                           u64);
         frac = emit_bin(fn, IR_OR, lo,
                         emit_bin(fn, IR_SHL, hi, emit_const(fn, 16, 8), 8, 0),
                         8, 0);

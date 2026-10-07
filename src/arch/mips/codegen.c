@@ -446,6 +446,19 @@ static int arg_align(const struct ir_arg *a)
     return a->size > 4 ? 8 : 4;
 }
 
+/* ...and a call's argument k, which at n64 may be VARIADIC: an unnamed
+ * __int128 starts at an even slot, as clang's va_arg and GCC both read
+ * it, where clang places a named one at any slot (and its own variadic
+ * calls, which its va_arg then misreads, likewise). */
+static int call_arg_align(const struct ir_ins *i, int k)
+{
+    const struct ir_arg *a = &i->argv[k];
+    if (g_m64 && !a->is_struct && a->size > 8 && i->call_varargs &&
+        k >= i->call_nfixed)
+        return 16;
+    return arg_align(a);
+}
+
 /* How many words of a returned composite come back in registers rather
  * than through the hidden pointer: a _Complex float's two (v0, v1) and a
  * _Complex double's four (v0, v1, a0, a1), as clang returns them; 0 for
@@ -579,7 +592,7 @@ static void mips_abi_hints(const struct ir_func *fn, int *hint)
         blk = call_sret(i) ? W : 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(a->size, arg_align(a), &blk, &pl);
+            place_arg(a->size, call_arg_align(i, k), &blk, &pl);
             if (pl.nreg == 1 && !pl.nstk && !a->is_struct && a->size <= W &&
                 a->vreg >= 0 && a->vreg < fn->nvregs)
                 hint[a->vreg] = argreg(pl.reg);
@@ -615,7 +628,7 @@ static long outgoing_area(const struct mips_fn *F)
             continue;
         blk = call_sret(i) ? W : 0;
         for (int k = 0; k < i->nargs; k++)
-            place_arg(i->argv[k].size, arg_align(&i->argv[k]), &blk, &pl);
+            place_arg(i->argv[k].size, call_arg_align(i, k), &blk, &pl);
         if (g_m64)
             blk -= 64;
         if (blk > most)
@@ -833,8 +846,12 @@ static long obj_slot(const struct mips_fn *F, int v)
 {
     if (g_be && v < F->fn->nvars) {
         const struct ir_local *L = &F->fn->locals[v];
+        /* ...unless it asked for an alignment its own size does not
+         * give (`_Alignas(16) char`): then at the slot's start, which is
+         * aligned. Nothing writes such a local as a whole word -- a
+         * parameter cannot carry an alignment specifier. */
         if ((L->is_int_or_ptr || L->is_scalar_float) && L->size > 0 &&
-            L->size < W)
+            L->size < W && L->user_align <= L->size)
             return sslot(F, v) + W - L->size;
     }
     return sslot(F, v);
@@ -2347,7 +2364,7 @@ static int mips_tail_ok(const struct mips_fn *F, int n)
     if (fn->has_alloca || fn->is_varargs || fn->neh)
         return 0;
     for (int k = 0; k < i->nargs; k++) {
-        place_arg(i->argv[k].size, arg_align(&i->argv[k]), &blk, &pl);
+        place_arg(i->argv[k].size, call_arg_align(i, k), &blk, &pl);
         if (pl.nstk)
             return 0;
     }
@@ -2434,7 +2451,7 @@ static void gen_call(struct mips_fn *F, int n)
     if (sret)
         blk = W;                          /* a0 holds the result's address */
     for (int k = 0; k < i->nargs; k++)
-        place_arg(i->argv[k].size, arg_align(&i->argv[k]), &blk, &pl[k]);
+        place_arg(i->argv[k].size, call_arg_align(i, k), &blk, &pl[k]);
 
     /* The STACK words first: storing one needs a scratch, and once the
      * argument registers are loaded none is left that is not an argument.

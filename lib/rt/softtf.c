@@ -45,7 +45,7 @@
  */
 #include "rt.h"
 
-/* aarch64, RV64, RV32 and LoongArch64. A 128-bit significand needs a 128-bit integer
+/* aarch64, RV64, RV32, LoongArch64 and MIPS64 (n64). A 128-bit significand needs a 128-bit integer
  * to compute in, and RV32 has none -- GCC and clang give it no __int128
  * either -- so every operation on one goes through the few functions
  * below: the machine's own operators where __int128 exists, and a pair of
@@ -53,7 +53,8 @@
  * text either way, which is what lets the halves be checked against the
  * operators (an RV64 runtime can be built both ways). SOFTTF_PAIRS forces
  * the halves. */
-#if defined(__aarch64__) || defined(__riscv) || defined(__loongarch__)
+#if defined(__aarch64__) || defined(__riscv) || defined(__loongarch__) || \
+    defined(__mips64)
 
 #if defined(__SIZEOF_INT128__) && !defined(SOFTTF_PAIRS)
 static inline u128 u_or(u128 a, u128 b)  { return a | b; }
@@ -63,9 +64,13 @@ static inline u128 u_sub(u128 a, u128 b) { return a - b; }
 static inline int  u_eq(u128 a, u128 b)  { return a == b; }
 static inline int  u_gt(u128 a, u128 b)  { return a > b; }
 #else
-/* The pair. `lo` first, so that it overlays a binary128 in memory the way
- * the integer does on these little-endian machines (union tfbits). */
+/* The pair. In memory order, so that it overlays a binary128 the way the
+ * integer does (union tfbits): `lo` first little-endian, `hi` big-endian. */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+typedef struct { u64 hi, lo; } tf_u128;
+#else
 typedef struct { u64 lo, hi; } tf_u128;
+#endif
 #define u128 tf_u128            /* (rt.h's, where it has one, is not used) */
 #define mk   tf_mk
 #define hi64 tf_hi64
@@ -91,10 +96,16 @@ static inline int u_gt(u128 a, u128 b)
 }
 #endif
 
+/* (the halves in memory order, as rt.h's w128: big-endian on MIPS64's
+ * mips64-none-elf the high one is first) */
 union tfbits {
     long double f;
     u128 u;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    struct { u64 hi, lo; } h;
+#else
     struct { u64 lo, hi; } h;
+#endif
 };
 
 #define TF_BIAS      16383
