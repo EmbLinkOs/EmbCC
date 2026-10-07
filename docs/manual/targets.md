@@ -1023,7 +1023,7 @@ semihosting exit.
 ### Limitations
 
 Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), an atomic wider than
-four bytes, computed `goto`, `__builtin_frame_address` and
+four bytes, `__builtin_frame_address` and
 `__builtin_return_address`, `__attribute__((interrupt))` (an A-profile
 handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
 and C++. Inline assembly takes the Cortex-M vocabulary in ARM state, with
@@ -1297,7 +1297,6 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 |---|---|
 | an 8-byte atomic read-modify-write | `the MIPS32 backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| a computed `goto` | `the MIPS32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function; see [Bare metal](embedded.md#mips32)) |
@@ -1430,7 +1429,6 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are defined.
 | Construct | Diagnostic |
 |---|---|
 | a 16-byte atomic | `the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]` |
-| a computed `goto` | `the MIPS64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS64 backend cannot lower __builtin_frame_address or __builtin_return_address (n64 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
@@ -1928,14 +1926,12 @@ the entry.
 | Construct | Diagnostic |
 |---|---|
 | a 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
-| a computed `goto` | `the LoongArch64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the LoongArch64 backend cannot lower __builtin_frame_address or __builtin_return_address (EmbCC's LoongArch code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
 | a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | an atomic on a 1- or 2-byte object | `the TriCore backend cannot lower an atomic narrower than four bytes (SWAP.W and CMPSWAP.W are word-sized, ...)` |
 | an 8-byte atomic | `the TriCore backend cannot lower an atomic wider than a register yet`; a load or store: `an atomic access of 8 bytes is not one access on this target ...` |
-| a computed `goto` | `the TriCore backend cannot lower a computed goto yet` |
 | `__builtin_frame_address`, `__builtin_return_address` | `... (TriCore code keeps no frame-pointer chain; the return address is in the context-save area)` |
 | `__int128` | `__int128 does not exist on this target ...` |
 | `__attribute__((interrupt))`, `__attribute__((naked))` | `__attribute__((...)) is not supported: ...` |
@@ -1946,7 +1942,6 @@ the entry.
 | an atomic read-modify-write on a 1- or 2-byte object | `the Xtensa backend cannot lower an atomic narrower than four bytes (s32c1i is word-sized, ...) yet (function f) [...]` |
 | an 8-byte atomic read-modify-write | `the Xtensa backend cannot lower an atomic wider than a register yet (function f) [...]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
-| a computed `goto` | `the Xtensa backend cannot lower a computed goto yet (function f) [...]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the Xtensa backend cannot lower __builtin_frame_address or __builtin_return_address (the windowed ABI keeps a caller's frame in its register window, not in a chain) yet (function f) [...]` |
 | inline assembly, `__attribute__((naked))` | `inline assembly is not supported for xtensa-none-elf yet (EmbCC has no Xtensa assembler vocabulary)` |
 | a file-scope `asm` instruction | `file-scope asm instruction "nop": EmbCC assembles instructions for x86-64 only. ...` |
@@ -1959,7 +1954,6 @@ the entry.
 | an atomic read-modify-write on a 1- or 2-byte object | `the SPARC backend cannot lower an atomic narrower than four bytes (casa and swap are word-sized, ...) yet (function f) [xadd w=4 size=1]` |
 | an 8-byte atomic read-modify-write | `the SPARC backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
-| a computed `goto` | `the SPARC backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the SPARC backend cannot lower __builtin_frame_address or __builtin_return_address yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |

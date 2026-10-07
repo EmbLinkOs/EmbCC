@@ -349,7 +349,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `mips-slots` | delay-slot filling on `malta` at `-O1`..`-Os`: instructions that write a branch's operand, touch `$ra` under a `jal`, write `jalr`'s target, or sit behind a label (the epilogue's included) stay put; argument setup moves; some call's slot must be filled |
 | `mips-switch` | jump tables in a leaf (its `$ra` kept across the `bal`) and a calling function, values below, inside and above the range, `-O0`..`-Os` on `malta`; the dispatch must be in the object |
 | `mips-exc` | a general exception handler in a `.S` file on `malta`: syscalls from a naked function return the handler's values, the CP0 timer interrupts a register-heavy loop under `-icount` without changing its result, a file-scope asm function calls C; at `-O0` to `-Os` |
-| `mips-refuse` | the object header and flags, the MIPS options accepted and refused, the constructs refused by name (atomics, computed goto, frame builtins, `__int128`, `interrupt`, unwind tables, C++) |
+| `mips-refuse` | the object header and flags, the MIPS options accepted and refused, the constructs refused by name (atomics, frame builtins, `__int128`, `interrupt`, unwind tables, C++) |
 | `mips-access` | atomic, volatile, `op=`, `++` and `va_arg` accesses are single `lw`/`sw`/`lhu`/`sh` (disassembled at `-O0` and `-O2`); packed members are still split, and run right at a misaligned address on the board, in an image whose `.data` ends mid-word |
 
 `libc-embedded` and `debug-embedded` include `mipsel-none-elf` too.
@@ -379,6 +379,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `avr-exec` | programs run on the ATmega328P board against the same source run on the host |
 | `avr-abi` | the calling convention against avr-libc's documented rules, with hand-written assembly on the other side |
 | `avr-calleesave` | every function preserves r2-r17 and Y |
+| `avr-cgoto` | the computed-goto programs of `tests/exec` on the part at every level and allocation mode, and their label addresses as word (`gs`, `pm`) relocations |
 | `avr-float` | software binary32 on the part, bit for bit against the host |
 | `avr-softfp-host` | the same float routines built for the host, against native float |
 | `avr-inline-asm` | operand constraint classes, byte modifiers, refusals |
