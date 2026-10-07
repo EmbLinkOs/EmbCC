@@ -27,6 +27,7 @@ little-endian.
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
+| [Renesas RX](#renesas-rx) | `rx-none-elf` | ELF32 | GCC rx-elf, 32-bit doubles, no FPU | `embld` |
 
 | Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
@@ -41,6 +42,7 @@ little-endian.
 | RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
 | MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
+| Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | One shared instance | Refused |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
@@ -847,6 +849,31 @@ individually.
 
 An array or structure local aligned beyond 16 bytes is supported: its
 storage is carved from the stack at function entry and rounded up.
+
+## Renesas RX
+
+RXv1 -- the RX600/RX610 cores, and RX100/RX200 -- little-endian, in GCC's
+rx-elf default configuration without the FPU: `double` and `long double`
+are binary32 (GCC's `-m32bit-doubles`), plain `char` is unsigned,
+`long long` is 4-aligned, `size_t`, `ptrdiff_t` and `wchar_t` are `long`
+types, bit-fields use the Microsoft layout, and every C symbol carries
+an underscore in the object (`main` is `_main`). Freestanding only. The
+calling convention is GCC's (r1-r4 by whole words, nothing split, the
+hidden result pointer in r15); EmbCC and rx-elf-gcc objects call each
+other (tests/golden/rx-abi.sh). The design notes, the convention in full
+and what is refused are in [the RX plan](../internals/rx-plan.md).
+
+| Triple | Accepted aliases |
+|---|---|
+| `rx-none-elf` | `rx-elf`, `rx-unknown-elf`, `rx` |
+
+Accepted options: `-mcpu=rx600|rx610|rx200|rx100`, `-m32bit-doubles`,
+`-nofpu`, `-mlittle-endian-data`, `-mrx-abi`, `-msmall-data-limit=0`,
+`-mno-pid`, `-mint-register=0`, `-mallow-string-insns`, `-mrelax`.
+Refused by name: `-m64bit-doubles`, `-fpu`, `-mbig-endian-data`,
+`-mgcc-abi`, a nonzero `-msmall-data-limit`, `-mpid`, a nonzero
+`-mint-register`, `-mno-allow-string-insns`, `-mas100-syntax`, unwind
+tables, `-S`, inline and file-scope assembly, and C++.
 
 ## MIPS32
 

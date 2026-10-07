@@ -327,6 +327,15 @@ clang's AVR struct convention is not avr-gcc's.
 | `riscv-relax` | branch and jump relaxation at the reach limits |
 | `riscv-atomics` | the A extension at both widths |
 
+### Renesas RX
+
+| Test | Checks |
+|---|---|
+| `rx-encoding` | every encoder form decoded by QEMU's RX disassembler (its monitor's `x/Ni`) as the instruction meant and from the length emitted; byte for byte against GNU as when an rx-elf binutils is installed; every range check provoked |
+| `rx-exec` | `tests/exec/*.c` on QEMU `gdbsim-r5f562n8` at `-O0`, `-O1`, `-O2`, `-Os`, linked with lib/libc and lib/rt built for RX; the programs whose expected value assumes LP64 or a binary64 double against the status rx-elf-gcc's code exits with (recorded) |
+| `rx-abi` | EmbCC and rx-elf-gcc calling each other: the shared embedded ABI pairing and the RX-specific one (`rx-abi-*.c`); skipped without an rx-elf-gcc |
+| `rx-refuse` | the object's header, the data model and Microsoft bit-field layout, the options and constructs refused by name |
+
 ### MIPS32
 
 | Test | Checks |
