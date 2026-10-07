@@ -5292,26 +5292,23 @@ static void check_func(struct unit *u, struct func *f)
      * pointer plus it, and sp is only ever 16-aligned (8 on AAPCS32):
      * Thumb and RISC-V put `char buf[64] __attribute__((aligned(64)))`
      * at whatever sp gave them, silently, and x86-64 and aarch64 refused
-     * it. An aggregate gets storage of its own instead (var_indirect);
-     * a scalar so aligned is refused by name. AVR keeps its own refusal
-     * of any aligned local. */
+     * it. Such a local gets storage of its own instead (var_indirect),
+     * a scalar as well as an aggregate: irgen reads and writes a scalar
+     * there rather than in its slot. One bound to a register by
+     * `register ... __asm__("r")` keeps the register. On AVR, whose
+     * stack promises no alignment at all, that is any aligned local. */
     f->var_indirect = NULL;
     f->var_ind_align = NULL;
-    for (int i = f->nparams; i < sc.n && target_get() != TARGET_AVR; i++) {
+    for (int i = f->nparams; i < sc.n; i++) {
         struct type *t = f->var_tys[i];
-        if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t))
+        if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t) ||
+            sc.vars[i].asm_reg)
             continue;
         int al = ty_align(t);
         if (f->var_aligns[i] > al)
             al = f->var_aligns[i];
         if (al <= target_stack_align())
             continue;
-        if (t->kind != TY_STRUCT && t->kind != TY_ARRAY)
-            sema_error_at(u, sc.vars[i].line, sc.vars[i].col,
-                          "'%s' needs %d-byte alignment and the stack only "
-                          "guarantees %d: supported for an array or a "
-                          "struct, not yet for a scalar", sc.vars[i].name,
-                          al, target_stack_align());
         if (!f->var_indirect) {
             f->var_indirect = xcalloc((size_t)sc.n, sizeof *f->var_indirect);
             f->var_ind_align = xcalloc((size_t)sc.n,

@@ -129,8 +129,6 @@ refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "a 16-aligned scalar local" 'needs 16-byte alignment and the stack only guarantees 4' \
-    'int f(void){ _Alignas(16) int x = 1; return x; }'
 refc "inline assembly" 'inline assembly is not supported for rx-none-elf' \
     'int f(void){ __asm__("nop"); return 0; }'
 refc "a naked function" 'inline assembly is not supported for rx-none-elf' \

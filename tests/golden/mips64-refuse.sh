@@ -108,8 +108,6 @@ refc "__builtin_frame_address" 'n64 code keeps no frame-pointer chain' \
     'void *f(void){ return __builtin_frame_address(0); }'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "a 32-aligned scalar local" 'needs 32-byte alignment and the stack only guarantees 16' \
-    'int f(void){ _Alignas(32) int x = 1; return x; }'
 refc "a doubleword instruction in inline asm" 'is not in the MIPS vocabulary' \
     'long f(long a){ long r; __asm__("daddu %0, %1, %1" : "=r"(r) : "r"(a)); return r; }'
 refc "a packed bit-field over 8 bytes, big-endian" \
