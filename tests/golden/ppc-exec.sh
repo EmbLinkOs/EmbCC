@@ -60,8 +60,6 @@ na() {
         echo "a 40-bit field of an unsigned long, which is 32 bits here" ;;
     bit-builtins|global-aggregates|longs)
         echo "shifts a long by 32 or more, undefined when long is 32 bits" ;;
-    computed-goto|computed-goto-more)
-        echo "computed goto, refused by name (tests/golden/ppc-refuse.sh)" ;;
     atomics|atomics-reg)
         echo "1- and 2-byte atomics and __builtin_frame_address, refused by name (ppc-refuse.sh)" ;;
     volatile-local-longjmp)
