@@ -66,6 +66,13 @@ struct link_opts {
      * symbol as before. */
     unsigned long stack_top;
     int have_stack;
+    /* TriCore: the context-save areas, [csa_start, csa_end), which the
+     * -Tstack stub links into the free list before the first CALL (every
+     * CALL takes one, and with none the first traps). Both 64-byte
+     * aligned and within the first 4 MiB of one 256 MiB segment, which is
+     * all a link word can name. --csa START:END. */
+    unsigned long csa_start, csa_end;
+    int have_csa;
     /* -T SCRIPT: a GNU ld linker script lays the image out (ARM and
      * RISC-V; src/link/ldscript.h has what it supports). The directories
      * its INPUT/GROUP/INCLUDE names are looked up in (-L), symbols to

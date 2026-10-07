@@ -28,6 +28,8 @@ changing EmbCC. Register allocation, which all five share, is in
 | `riscv32/`, `riscv64/` | the two RISC-V predefined-macro tables only |
 | `mips/` | MIPS32r2 (mipsel, o32): `codegen.c`, `emit.c`, `asm.c`, `irgen.c` |
 | `mips32/` | its predefined-macro tables |
+| `loongarch/` | LoongArch64 (LP64S): `codegen.c`, `emit.c`, `asm.c`, `irgen.c` |
+| `loongarch64/` | its predefined-macro tables |
 | `avr/` | AVR (ATmega328P): `codegen.c`, `emit.c`, `asm.c`, `irgen.c`, `predef*.c` |
 
 Each `irgen.c` holds the target's share of IR generation: `va_arg`,
@@ -303,6 +305,8 @@ bytes, with an LLVM or GNU tool.
 | RISC-V `asm.c` | `tests/golden/riscv-asm.sh` | `tools/rvasmcheck` | `llvm-mc -mattr=+m` | bytes |
 | MIPS `emit.c` | `tests/golden/mips-encoding.sh` | `tools/mipscheck` (`--vocab`, `--li`, `--refuse`) | `llvm-mc -triple=mipsel-unknown-elf -mcpu=mips32r2 -show-encoding` | each word, every register in every field; `--li` executes `mips_li` sequences; `--refuse` checks the range checks fire |
 | MIPS `asm.c` | `tests/golden/mips-asm.sh` | `tools/mipsasmcheck` | `llvm-mc` | bytes; and `-S` reassembled by llvm-mc against `-c`'s object |
+| LoongArch `emit.c` | `tests/golden/loongarch-encoding.sh` | `tools/lacheck` (`--vocab`, `--li`, `--run-li`, `--refuse`) | `llvm-mc --triple=loongarch64 -show-encoding` | each word, every register in every field; `--li` against llvm-mc's `li.d`; `--run-li` executes the sequences; `--refuse` checks the range checks fire |
+| LoongArch `asm.c` | `tests/golden/loongarch-asm.sh` | `tools/laasmcheck` | `llvm-mc` | each statement's words, pseudos included; and `-S` reassembled |
 | AVR `emit.c` | `tests/golden/avr-encoding.sh` | `tools/avrcheck` | `llvm-mc -triple=avr -mcpu=atmega328p` | bytes for the vocabulary; PC-relative forms disassembled and compared as text; `--writes` checks the decoder `avr_insn_writes` |
 | AVR `asm.c` | `tests/golden/avr-asm.sh` | `tools/avrasmcheck` | `llvm-mc` | bytes; PC-relative forms as text |
 
@@ -1367,6 +1371,43 @@ against the same symbol in its section (the AHL rule), checks that a
 inputs and drops it and `.reginfo`, and refuses the GOT and gp-relative
 relocations by name. `-Tstack` emits `li sp` and a `jr` to the entry
 through `$t9`.
+
+## LoongArch64
+
+`src/arch/loongarch/codegen.c`, entry point `codegen_unit_loongarch`, for
+`loongarch64-unknown-elf`: LA64, LP64S (soft float). The facts it rests on
+are in [the LoongArch64 plan](loongarch64-plan.md). The file began as a
+copy of RV64's code generator, because the LP64 calling conventions are
+the same rule for rule, with the RV32 machinery removed (register pairs,
+64-bit-at-RV32 lowering, RV32's long double, the C extension) and every
+instruction re-selected; a copy, so that nothing here can move RISC-V.
+
+- **Registers.** t0, t1, t2, t4, t5 and t6 are the scratches (t6 only for
+  sp plus a far offset); the allocator's pool is a0-a7, t3, t7, t8, then
+  fp and s0-s8. `r21` and `tp` are never named. A function with a VLA
+  addresses its frame from fp.
+- **Immediates.** addi, slti, sltui, the loads and stores take a signed
+  12-bit field; andi, ori and xori an unsigned one, so `la_imm_foldable`
+  folds an AND/OR/XOR constant only in 0..4095, `not` is `nor rd, rj,
+  zero`, and an alloca rounds down with two shifts. Constants are
+  LoongArchMatInt's sequences (`la_li`).
+- **32-bit values** stay sign-extended (`sext_map`, `rd32`), as at RV64;
+  div.w/mod.w/div.wu/mod.wu read their operands through `rd32` because
+  they are undefined otherwise.
+- **Branches** are emitted short (beq-family +-128 KiB, beqz/bnez +-4
+  MiB); a function in which one does not reach is generated again with
+  that one the long form (the inverse branch over a `b`).
+- **Calls** are `bl` (`R_LARCH_B26`), within the unit patched directly;
+  addresses `pcalau12i`/`addi.d` (`RK_LA_PCALA_HI20`/`LO12`, both against
+  the symbol). A jump table is found by `pcaddi` and indexed by `alsl.d`.
+- **Select** is maskeqz/masknez/or; **bswap** is revb plus a bstrpick.
+- **Atomics** are `am*_db` and `ll`/`sc` loops between `dbar 0`s; a one-
+  or two-byte one is an ll.w/sc.w loop on its word (`la_atomic_narrow`).
+- **Inline asm** is substituted in `loongarch/irgen.c` and assembled by
+  `loongarch/asm.c`; the operand moves are RISC-V's.
+
+`tools/lacheck` and `tools/laasmcheck` referee `emit.c` and `asm.c`
+against llvm-mc (tests/golden/loongarch-encoding.sh, loongarch-asm.sh).
 
 ## AVR
 

@@ -22,8 +22,12 @@
 #include "../elf/elf.h"
 #include "../embx/embx.h"
 #include "../arch/riscv/emit.h"
+#include "../arch/loongarch/emit.h"
 #include "../arch/avr/emit.h"
 #include "../arch/mips/emit.h"
+#include "../arch/thumb/a32.h"
+#include "../arch/tricore/emit.h"
+#include "../arch/xtensa/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -37,6 +41,11 @@ struct object {
     const char *name;         /* for diagnostics: "libc.a(printf.o)" etc */
     unsigned char *buf;
     long len;
+    /* A big-endian (ELFDATA2MSB) object: its headers, symbols and
+     * relocation entries were turned to host order in place when it was
+     * read (be_normalise), its section CONTENTS were not -- they are the
+     * target's, and the relocations patch them in its order. */
+    int big_endian;
     Elf64_Ehdr *eh;
     Elf64_Shdr *shdrs;
     int nsh;
@@ -214,6 +223,7 @@ struct linker {
     struct { Elf64_Addr at; long long val; } *pcrel;
     int npcrel, cappcrel;
     Elf64_Addr stack_top;      /* RISC-V: the entry stub's sp, 0 = no stub */
+    unsigned long csa_start, csa_end;   /* TriCore: the stub's CSA list */
     int stub_sec;              /* the stub's insecs index, or -1 */
     unsigned char *stub;       /* its bytes, written after layout */
     long stub_size;
@@ -223,6 +233,7 @@ struct linker {
     unsigned long rom_limit;   /* bytes of flash the image may occupy, 0 = any */
     int elf32;                 /* ELFCLASS32 output, from the inputs */
     int machine;               /* e_machine, one across every input */
+    int big_endian;            /* the byte order, one across every input */
     const char *rel_sym;       /* the symbol the relocation being applied
                                 * names, for need_range's message */
     int rel_uw;                /* ...and it is an undefined weak one, so
@@ -453,26 +464,139 @@ static void arm_attrs_check(struct linker *l)
 }
 
 
+/* ---- big-endian objects ----------------------------------------------
+ *
+ * A big-endian ELF32 object (mips-none-elf) is read by turning its
+ * DESCRIPTIONS -- the header, the section headers, the symbol table and
+ * the relocation entries -- into host order in place, once, so the rest
+ * of this file reads it like any other. The section contents stay in the
+ * target's order: the relocations patch them through the machine's own
+ * word accessors (mips_get_word), and the image is written in that order
+ * with its headers swapped back (be_image). */
+static void swap_n(void *field, size_t n)
+{
+    unsigned char *p = field;
+    for (size_t k = 0; k < n / 2; k++) {
+        unsigned char c = p[k];
+        p[k] = p[n - 1 - k];
+        p[n - 1 - k] = c;
+    }
+}
+#define SWAP(f) swap_n(&(f), sizeof (f))
+
+static void be_ehdr(Elf32_Ehdr *e)
+{
+    SWAP(e->e_type); SWAP(e->e_machine); SWAP(e->e_version);
+    SWAP(e->e_entry); SWAP(e->e_phoff); SWAP(e->e_shoff); SWAP(e->e_flags);
+    SWAP(e->e_ehsize); SWAP(e->e_phentsize); SWAP(e->e_phnum);
+    SWAP(e->e_shentsize); SWAP(e->e_shnum); SWAP(e->e_shstrndx);
+}
+
+static void be_shdr(Elf32_Shdr *h)
+{
+    SWAP(h->sh_name); SWAP(h->sh_type); SWAP(h->sh_flags); SWAP(h->sh_addr);
+    SWAP(h->sh_offset); SWAP(h->sh_size); SWAP(h->sh_link); SWAP(h->sh_info);
+    SWAP(h->sh_addralign); SWAP(h->sh_entsize);
+}
+
+static void be_sym(Elf32_Sym *y)
+{
+    SWAP(y->st_name); SWAP(y->st_value); SWAP(y->st_size); SWAP(y->st_shndx);
+}
+
+static void be_phdr(Elf32_Phdr *p)
+{
+    SWAP(p->p_type); SWAP(p->p_offset); SWAP(p->p_vaddr); SWAP(p->p_paddr);
+    SWAP(p->p_filesz); SWAP(p->p_memsz); SWAP(p->p_flags); SWAP(p->p_align);
+}
+
+static void be_normalise(const char *name, unsigned char *buf, long len)
+{
+    Elf32_Ehdr *e = (Elf32_Ehdr *)buf;
+    Elf32_Shdr *sh;
+    be_ehdr(e);
+    if ((long)e->e_shoff + (long)e->e_shnum * (long)sizeof(Elf32_Shdr) > len)
+        die("%s: section headers run past end of file", name);
+    sh = (Elf32_Shdr *)(buf + e->e_shoff);
+    for (int i = 0; i < e->e_shnum; i++)
+        be_shdr(&sh[i]);
+    for (int i = 0; i < e->e_shnum; i++) {
+        unsigned char *p = buf + sh[i].sh_offset;
+        if (sh[i].sh_type == SHT_NOBITS ||
+            (long)sh[i].sh_offset + (long)sh[i].sh_size > len)
+            continue;
+        if (sh[i].sh_type == SHT_SYMTAB) {
+            Elf32_Sym *y = (Elf32_Sym *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *y; k++)
+                be_sym(&y[k]);
+        } else if (sh[i].sh_type == SHT_REL) {
+            Elf32_Rel *r = (Elf32_Rel *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *r; k++) {
+                SWAP(r[k].r_offset); SWAP(r[k].r_info);
+            }
+        } else if (sh[i].sh_type == SHT_RELA) {
+            Elf32_Rela *r = (Elf32_Rela *)p;
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *r; k++) {
+                SWAP(r[k].r_offset); SWAP(r[k].r_info); SWAP(r[k].r_addend);
+            }
+        }
+    }
+}
+
+/* The finished ELF32 image, written in host order, turned big-endian: the
+ * header, the program and section headers, and the symbol table. */
+static void be_image(unsigned char *img)
+{
+    Elf32_Ehdr *e = (Elf32_Ehdr *)img;
+    Elf32_Shdr *sh = (Elf32_Shdr *)(img + e->e_shoff);
+    Elf32_Phdr *ph = (Elf32_Phdr *)(img + e->e_phoff);
+    int nsh = e->e_shnum, nph = e->e_phoff ? e->e_phnum : 0;
+    for (int i = 0; i < nsh; i++) {
+        if (sh[i].sh_type == SHT_SYMTAB) {
+            Elf32_Sym *y = (Elf32_Sym *)(img + sh[i].sh_offset);
+            for (size_t k = 0; k < sh[i].sh_size / sizeof *y; k++)
+                be_sym(&y[k]);
+        }
+    }
+    for (int i = 0; i < nsh; i++)
+        be_shdr(&sh[i]);
+    for (int i = 0; i < nph; i++)
+        be_phdr(&ph[i]);
+    e->e_ident[EI_DATA] = ELFDATA2MSB;
+    be_ehdr(e);
+}
+
 static struct object *parse_object(const char *name, unsigned char *buf,
                                    long len)
 {
+    int big = 0;
     if (len < (long)sizeof(Elf64_Ehdr))
         die("%s: too small to be an object", name);
     Elf64_Ehdr *eh = (Elf64_Ehdr *)buf;
     if (eh->e_ident[EI_MAG0] != ELFMAG0 || eh->e_ident[EI_MAG1] != ELFMAG1 ||
         eh->e_ident[EI_MAG2] != ELFMAG2 || eh->e_ident[EI_MAG3] != ELFMAG3)
         die("%s: not an ELF file", name);
-    if (eh->e_ident[EI_DATA] != ELFDATA2LSB)
-        die("%s: not little-endian", name);
     if (eh->e_ident[EI_CLASS] != ELFCLASS64 &&
         eh->e_ident[EI_CLASS] != ELFCLASS32)
         die("%s: not a 32- or 64-bit ELF", name);
+    if (eh->e_ident[EI_DATA] == ELFDATA2MSB &&
+        eh->e_ident[EI_CLASS] == ELFCLASS32) {
+        /* big-endian: MIPS o32 only, checked once it reads as numbers */
+        if (len < (long)sizeof(Elf32_Ehdr))
+            die("%s: too small to be an object", name);
+        be_normalise(name, buf, len);
+        big = 1;
+    } else if (eh->e_ident[EI_DATA] != ELFDATA2LSB) {
+        die("%s: neither a little-endian object nor a big-endian 32-bit "
+            "one", name);
+    }
 
     struct object *o = xcalloc(1, sizeof *o);
     o->name = name;
     o->buf = buf;
     o->len = len;
     o->elf32 = eh->e_ident[EI_CLASS] == ELFCLASS32;
+    o->big_endian = big;
 
     /* The 32-bit case is read into the 64-bit structures the rest of
      * this file uses. Field by field, because Elf32_Shdr and Elf32_Sym
@@ -485,17 +609,29 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (e32->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
         if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
-            e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS)
+            e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS &&
+            e32->e_machine != EM_TRICORE && e32->e_machine != EM_XTENSA)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
-                "RV32 (EM_RISCV), AVR (EM_AVR) and MIPS (EM_MIPS) are "
-                "supported", name, (unsigned)e32->e_machine);
-        /* little-endian o32 only: a big-endian MIPS object's fields
-         * would all be read backwards */
+                "RV32 (EM_RISCV), AVR (EM_AVR), MIPS (EM_MIPS), TriCore "
+                "(EM_TRICORE) and Xtensa (EM_XTENSA) are supported", name,
+                (unsigned)e32->e_machine);
+        if (e32->e_machine == EM_TRICORE &&
+            e32->e_ident[EI_DATA] != ELFDATA2LSB)
+            die("%s: a big-endian TriCore object; TriCore is little-endian",
+                name);
+        if (e32->e_machine == EM_XTENSA &&
+            e32->e_ident[EI_DATA] != ELFDATA2LSB)
+            die("%s: a big-endian Xtensa object; this linker links "
+                "little-endian Xtensa only", name);
+        /* o32 only, in either byte order; and big-endian only there */
         if (e32->e_machine == EM_MIPS &&
-            (e32->e_ident[EI_DATA] != ELFDATA2LSB ||
-             (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32))
-            die("%s: a MIPS object that is not little-endian o32; this "
-                "linker links mipsel o32 only", name);
+            (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32)
+            die("%s: a MIPS object that is not o32; this linker links "
+                "o32 (mipsel and mips) only", name);
+        if (big && e32->e_machine != EM_MIPS)
+            die("%s: a big-endian object for machine %u; big-endian is "
+                "linked for MIPS (mips-none-elf) only", name,
+                (unsigned)e32->e_machine);
         o->machine = e32->e_machine;
         o->eflags = e32->e_flags;
         o->nsh = e32->e_shnum;
@@ -525,9 +661,24 @@ static struct object *parse_object(const char *name, unsigned char *buf,
     } else {
         if (eh->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
-        if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV)
-            die("%s: a 64-bit object for machine %u; only x86-64 and RV64 "
-                "(EM_RISCV) are supported", name, (unsigned)eh->e_machine);
+        if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV &&
+            eh->e_machine != EM_LOONGARCH)
+            die("%s: a 64-bit object for machine %u; only x86-64, RV64 "
+                "(EM_RISCV) and LoongArch64 (EM_LOONGARCH) are supported",
+                name, (unsigned)eh->e_machine);
+        /* LP64S only: an object for the FPU conventions passes a double
+         * in a floating-point register where EmbCC's code passes it in
+         * an integer one, and linking the two would be a miscompilation
+         * made at link time. */
+        if (eh->e_machine == EM_LOONGARCH &&
+            (eh->e_flags & EF_LOONGARCH_ABI_MASK) !=
+                EF_LOONGARCH_ABI_SOFT_FLOAT)
+            die("%s: a LoongArch object for the %s-float ABI (e_flags "
+                "0x%lx); this linker links LP64S, the soft-float convention "
+                "(-mabi=lp64s)", name,
+                (eh->e_flags & EF_LOONGARCH_ABI_MASK) ==
+                    EF_LOONGARCH_ABI_DOUBLE_FLOAT ? "double" : "single",
+                (unsigned long)eh->e_flags);
         o->machine = eh->e_machine;
         o->eflags = eh->e_flags;
         o->eh = eh;
@@ -804,6 +955,74 @@ static void collect_sections(struct linker *l, struct object *o)
     }
 }
 
+/* The TriCore entry stub, a fixed TC_STUB_SIZE bytes (every address is a
+ * MOVH/ADDI or MOVH.A/LEA pair, both halves always, so the size is known
+ * before layout):
+ *
+ *     A10 = the stack top
+ *     link each CSA in [csa_start, csa_end) to the next, the last to none;
+ *     FCX = the first, LCX = the one 16 before the end (the depletion
+ *     trap comes with room left to handle it)
+ *     PCXI = 0, PSW.CDC = 0x7f (call depth counting off), isync
+ *     JI to the entry
+ *
+ * A CSA link word holds the address's segment (bits 31:28) in bits 19:16
+ * and address bits 21:6 in 15:0, so consecutive 64-byte areas have
+ * consecutive links. Without the list, the entry's first CALL traps. */
+#define TC_STUB_SIZE 116
+
+static unsigned long tc_csa_link(unsigned long a)
+{
+    return ((a >> 12) & 0xf0000UL) | ((a >> 6) & 0xffffUL);
+}
+
+static void tc_li_fixed(struct code *c, int d, unsigned long v)
+{
+    tc_movh(c, d, tc_hi_adj(v));
+    tc_addi(c, d, d, (long long)(short)(unsigned short)(v & 0xffff));
+}
+
+static void tc_li_a_fixed(struct code *c, int a, unsigned long v)
+{
+    tc_movh_a(c, a, tc_hi_adj(v));
+    tc_lea(c, a, a, (long long)(short)(unsigned short)(v & 0xffff));
+}
+
+static void fill_tricore_stub(struct linker *l, struct code *c,
+                              Elf64_Addr entry)
+{
+    unsigned long n = (l->csa_end - l->csa_start) / 64;
+    unsigned long last = n > 32 ? n - 16 : n - 2;
+    int top;
+    tc_li_a_fixed(c, TC_SP, (unsigned long)l->stack_top);
+    tc_li_a_fixed(c, 12, l->csa_start);
+    tc_li_fixed(c, 0, tc_csa_link(l->csa_start));
+    tc_mov(c, 2, 0);                               /* FCX: the first */
+    tc_li_fixed(c, 1, n - 1);
+    top = c->len;
+    tc_addi(c, 0, 0, 1);                           /* the next one's link */
+    tc_store(c, 0, 12, 0, 4);
+    tc_lea(c, 12, 12, 64);
+    tc_addi(c, 1, 1, -1);
+    tc_w(c, tc_enc_jcci(TC_JNE, 1, 0, (long)top - (long)c->len));
+    tc_mov_imm(c, 0, 0);
+    tc_store(c, 0, 12, 0, 4);                      /* the last: no next */
+    tc_mtcr(c, TC_CSFR_FCX, 2);
+    tc_li_fixed(c, 0, tc_csa_link(l->csa_start + 64 * last));
+    tc_mtcr(c, TC_CSFR_LCX, 0);
+    tc_mov_imm(c, 0, 0);
+    tc_mtcr(c, TC_CSFR_PCXI, 0);
+    tc_mfcr(c, 0, TC_CSFR_PSW);
+    tc_alu_imm(c, TC_OR, 0, 0, 0x7f);
+    tc_mtcr(c, TC_CSFR_PSW, 0);
+    tc_isync(c);
+    tc_li_a_fixed(c, 12, (unsigned long)entry);
+    tc_ji(c, 12);
+    if (c->len != TC_STUB_SIZE)
+        internal_error("the TriCore entry stub is %d bytes, not %d", c->len,
+                       TC_STUB_SIZE);
+}
+
 /* The RISC-V entry stub: set sp, then jump to the real entry.
  *
  * Registered as an ordinary input section in the .vectors group, which
@@ -823,8 +1042,21 @@ static void add_entry_stub(struct linker *l)
     /* MIPS: li sp, then lui/ori t9 with the entry's absolute address and
      * a jr through it, its delay slot a nop -- the lui/ori pair always
      * both, so the size is known before layout. */
+    /* Xtensa: `j` over three literals (sp, PS, the entry), then sp and
+     * its bottom frame, PS for the windowed ABI, and a callx8 to the
+     * entry -- which is then an ordinary windowed function -- and a loop
+     * should it return: 4 + 12 + 12 * 3 bytes. */
+    /* ARM (an A-profile core, which comes out of reset in ARM state
+     * with sp unset): movw/movt sp, movw/movt ip with the entry, bx ip --
+     * five A32 words, whatever the addresses, and bx interworks if the
+     * entry is Thumb. */
     long size = l->machine == EM_MIPS
               ? mips_li_len((long long)l->stack_top) + 16
+              : l->machine == EM_LOONGARCH
+              ? la_li_len((long long)l->stack_top) + 8
+              : l->machine == EM_ARM ? 20
+              : l->machine == EM_TRICORE ? TC_STUB_SIZE
+              : l->machine == EM_XTENSA ? 52
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -853,12 +1085,81 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
     struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
+    if (l->machine == EM_ARM) {
+        a32_movw_movt(&c, 13, (unsigned)(l->stack_top & 0xffff), 0);
+        a32_movw_movt(&c, 13, (unsigned)((l->stack_top >> 16) & 0xffff), 1);
+        a32_movw_movt(&c, 12, (unsigned)(entry & 0xffff), 0);
+        a32_movw_movt(&c, 12, (unsigned)((entry >> 16) & 0xffff), 1);
+        a32_bx(&c, 12, 0);
+        return;
+    }
+    if (l->machine == EM_TRICORE) {
+        fill_tricore_stub(l, &c, entry);
+        return;
+    }
+    if (l->machine == EM_XTENSA) {
+        /*   0  j     16          (over the literals)
+         *   4  .word stack_top - 32, PS, entry
+         *  16  l32r  a1, 4       sp, below a 32-byte bottom frame
+         *      addi  a2, a1, 32
+         *      addi  a3, a1, -16
+         *      s32i  a2, a3, 4   [sp - 12] = stack_top, see below
+         *      l32r  a2, 8       PS: WOE (bit 18) | UM (bit 5), level 0
+         *      wsr   a2, ps
+         *      movi  a2, 1
+         *      wsr   a2, windowstart   this window, the only live one
+         *      rsync
+         *      l32r  a8, 12
+         *      callx8 a8
+         *      j     .
+         *
+         * The stub's own window is the bottom of the call stack, and when
+         * the calls nest deep enough the window overflow handler spills
+         * it like any other: its a0-a3 below its callee's sp, and its
+         * a4-a7 below ITS caller's sp, which the handler reads from the
+         * stub's [sp - 12] -- where a real caller's spill would have
+         * left it. Nothing has, so the stub puts stack_top there, and the
+         * 32 bytes it sits under are the room for those four words.
+         * WINDOWSTART says which windows hold a live frame, and a core
+         * started anywhere but its reset vector may hold anything there
+         * (QEMU's loader leaves 0): it is set to this window alone. */
+        xt_w(&c, xt_enc_j(16 - 4));
+        code_byte(&c, 0);
+        code_u32(&c, ((unsigned long)l->stack_top - 32) & 0xffffffffUL);
+        code_u32(&c, (1UL << 18) | (1UL << 5));
+        code_u32(&c, (unsigned long)entry & 0xffffffffUL);
+        xt_w(&c, xt_enc_l32r(XT_A1, c.len, 4));
+        xt_addi(&c, XT_A2, XT_A1, 32);
+        xt_addi(&c, XT_A3, XT_A1, -16);
+        xt_store(&c, XT_A2, XT_A3, 4, 4);
+        xt_w(&c, xt_enc_l32r(XT_A2, c.len, 8));
+        xt_wsr(&c, XT_A2, XT_SR_PS);
+        xt_movi(&c, XT_A2, 1);
+        xt_wsr(&c, XT_A2, XT_SR_WINDOWSTART);
+        xt_rsync(&c);
+        xt_w(&c, xt_enc_l32r(XT_A8, c.len, 12));
+        xt_callx(&c, 2, XT_A8);
+        xt_w(&c, xt_enc_j(-4));
+        (void)s;
+        return;
+    }
     if (l->machine == EM_MIPS) {
         mips_li(&c, MIPS_SP, (long long)l->stack_top);
         mips_lui(&c, MIPS_T9, (unsigned)(entry >> 16) & 0xffff);
         mips_alu_imm(&c, MIPS_ORI, MIPS_T9, MIPS_T9, (long long)(entry & 0xffff));
         mips_jr(&c, MIPS_T9);
         mips_nop(&c);
+        return;
+    }
+    if (l->machine == EM_LOONGARCH) {
+        /* li sp, then pcaddu18i t0 + jirl zero, t0 to the entry: +-128
+         * GiB, and a fixed eight bytes whatever the distance */
+        Elf64_Addr pc_at = s->vaddr + (Elf64_Addr)l->stub_size - 8;
+        long long dd = (long long)entry - (long long)pc_at, hi;
+        la_li(&c, LA_SP, (long long)l->stack_top);
+        hi = (dd + 0x20000) >> 18;
+        la_pcrel(&c, LA_PCADDU18I, LA_T0, (long)hi);
+        la_jirl(&c, LA_ZERO, LA_T0, (long)(dd - (hi << 18)));
         return;
     }
     /* The auipc sits just before the jalr, at the end of the stub. */
@@ -891,10 +1192,19 @@ static void add_object(struct linker *l, struct object *o)
         l->machine = o->machine;
         l->harvard = o->machine == EM_AVR;
         l->elf32 = o->elf32;
+        l->big_endian = o->big_endian;
+        /* the MIPS words this link reads, patches and writes (the entry
+         * stub) are in the objects' order */
+        mips_set_big_endian(o->big_endian);
     } else if (o->machine != l->machine) {
         die("%s: an object for a different machine than the ones before "
             "it (%u against %u)", o->name, (unsigned)o->machine,
             (unsigned)l->machine);
+    } else if (o->big_endian != l->big_endian) {
+        die("%s: a %s-endian object, and the ones before it are %s-endian; "
+            "an image has one byte order", o->name,
+            o->big_endian ? "big" : "little",
+            l->big_endian ? "big" : "little");
     }
     if (o->machine == EM_RISCV)
         l->eflags |= o->eflags & EF_RISCV_RVC;
@@ -905,6 +1215,10 @@ static void add_object(struct linker *l, struct object *o)
                               : o->eflags & (EF_MIPS_ARCH_MASK | 0xf000UL);
     else if (o->machine == EM_AVR && !(l->eflags & EF_AVR_ARCH_MASK))
         l->eflags = o->eflags & EF_AVR_ARCH_MASK;
+    else if (o->machine == EM_LOONGARCH)
+        l->eflags = EF_LOONGARCH_ABI_SOFT_FLOAT | EF_LOONGARCH_OBJABI_V1;
+    else if (o->machine == EM_TRICORE && !(l->eflags & EF_TRICORE_CORE_MASK))
+        l->eflags = o->eflags & EF_TRICORE_CORE_MASK;
     if (l->nobj == l->capobj) {
         l->capobj = l->capobj ? l->capobj * 2 : 8;
         l->objs = xrealloc(l->objs, (size_t)l->capobj * sizeof *l->objs);
@@ -1590,7 +1904,8 @@ static void layout(struct linker *l, struct osec_bound *b,
      * two bytes into a word sent the harness's .bss loop to the reset
      * vector. Both ends are kept on word boundaries, the padding inside
      * the image, as a GNU script's ALIGN(4) puts it. */
-    if (l->machine == EM_MIPS)
+    if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
+        l->machine == EM_XTENSA)
         va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
@@ -1624,7 +1939,8 @@ static void layout(struct linker *l, struct osec_bound *b,
         g->common = 0;
         va += g->size;
     }
-    if (l->machine == EM_MIPS)
+    if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
+        l->machine == EM_XTENSA)
         va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
@@ -1936,6 +2252,72 @@ static void patch_thm_b24(struct object *o, unsigned char *loc, long long off)
 
 static unsigned int get32loc(const unsigned char *p);
 
+/* ---- A32 (ARM state) ----------------------------------------------------
+ *
+ * One little-endian word each. `b`, `bl` and `b<c>`: cond 101 L imm24, a
+ * word displacement from the instruction + 8. movw/movt: the 16-bit
+ * immediate split imm4 (bits 19:16) and imm12 (bits 11:0). */
+static long long read_arm_b24(const unsigned char *loc)
+{
+    long long v = (long long)(get32loc(loc) & 0xffffffu);
+    if (v & 0x800000)
+        v -= 0x1000000;
+    return v * 4;
+}
+
+/* `blx` (immediate) is `bl`'s ARM-to-Thumb twin: 1111 101 H imm24, H the
+ * halfword bit of the displacement. A call relocation against a Thumb
+ * function (its symbol odd) becomes one; a jump cannot. */
+static void patch_arm_b24(struct object *o, unsigned char *loc, long long off,
+                          int call, int thumb)
+{
+    unsigned int w = get32loc(loc);
+    if (off < -(1LL << 25) || off >= (1LL << 25))
+        die("%s: an ARM branch is more than 32MB away; this linker mints "
+            "no veneers", o->name);
+    if (thumb) {
+        if (!call || (w >> 28) != 0xe)
+            die("%s: a %s to a Thumb function from ARM code needs an "
+                "interworking veneer, which this linker does not mint; "
+                "only an unconditional call (bl, made blx) can switch state",
+                o->name, call ? "conditional call" : "branch");
+        put32(loc, 0xfa000000u | (unsigned)((off >> 1) & 1) << 24 |
+                   ((unsigned)(off >> 2) & 0xffffffu));
+        return;
+    }
+    if (off & 3)
+        die("%s: an ARM branch to an address that is not word-aligned",
+            o->name);
+    put32(loc, (w & 0xff000000u) | ((unsigned)(off >> 2) & 0xffffffu));
+}
+
+/* Is the target of a Thumb branch at `symi` an ARM-state function? Its
+ * symbol is a defined global FUNCTION with bit 0 clear: every Thumb
+ * function's symbol carries the bit, so an even one is A32 code. */
+static int thumb_to_arm(struct linker *l, struct object *o, Elf64_Word symi,
+                        Elf64_Addr S)
+{
+    Elf64_Sym *sy = &o->syms[symi];
+    const char *name = o->symstr + sy->st_name;
+    struct symbol *g;
+    if ((S & 1) || ELF64_ST_BIND(sy->st_info) == STB_LOCAL || !*name)
+        return 0;
+    g = sym_find(l, name);
+    return g && g->defined && g->type == STT_FUNC && g->insec >= 0;
+}
+
+static unsigned int read_arm_mov(const unsigned char *loc)
+{
+    unsigned int w = get32loc(loc);
+    return ((w >> 4) & 0xf000u) | (w & 0xfffu);
+}
+
+static void patch_arm_mov(unsigned char *loc, unsigned int h)
+{
+    unsigned int w = get32loc(loc);
+    put32(loc, (w & 0xfff0f000u) | ((h & 0xf000u) << 4) | (h & 0xfffu));
+}
+
 /* ---- RISC-V relocations -------------------------------------------------
  *
  * Four shapes, and only one of them is an ordinary field.
@@ -2143,6 +2525,180 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     }
 }
 
+/* ---- LoongArch64 ---------------------------------------------------------
+ *
+ * RELA, every field a plain bit range of one instruction word (the 21- and
+ * 26-bit branch offsets split in two). EmbCC's objects carry B26 and the
+ * PCALA pair; clang's also carry its default MEDIUM code model's CALL36
+ * (pcaddu18i + jirl) and, for a symbol another object defines, the GOT
+ * pair. This linker builds no GOT: a GOT access -- `pcalau12i rd,
+ * %got_pc_hi20(s)` then `ld.d rd, rj, %got_pc_lo12(s)` -- is rewritten to
+ * the direct address, `pcalau12i` of the symbol's page and an `addi.d` of
+ * its low 12 bits, which is the relaxation GNU ld and lld apply whenever
+ * the symbol is in the image (and on bare metal it always is). RELAX and
+ * ALIGN are hints for a relaxing linker; this one moves nothing, which
+ * leaves every distance the assembler measured as it was.
+ * docs/internals/loongarch64-plan.md. */
+
+/* Put `v` (already reduced to the field's width) into bits lo..hi of the
+ * word at loc, leaving every other bit -- the opcode, the registers -- as
+ * the compiler wrote them. */
+static void la_put(unsigned char *loc, int lo, int width, unsigned long long v)
+{
+    unsigned int m = (unsigned int)(((1ULL << width) - 1) << lo);
+    put32(loc, (get32loc(loc) & ~m) |
+               ((unsigned int)(v << lo) & m));
+}
+
+static void apply_loongarch(struct linker *l, struct object *o, unsigned type,
+                            unsigned char *loc, Elf64_Addr S, long long A,
+                            Elf64_Addr P)
+{
+    long long V = (long long)S + A, d = V - (long long)P;
+    switch (type) {
+    case R_LARCH_NONE:
+    case R_LARCH_RELAX:
+    case R_LARCH_ALIGN:
+        return;
+    case R_LARCH_32:
+        need_range(l, o, "R_LARCH_32", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_LARCH_64:
+        put64(loc, (unsigned long long)V);
+        return;
+    case R_LARCH_32_PCREL:
+        need_range(l, o, "R_LARCH_32_PCREL", d, I32_MIN, I32_MAX);
+        put32(loc, (unsigned int)d);
+        return;
+    case R_LARCH_64_PCREL:
+        put64(loc, (unsigned long long)d);
+        return;
+    /* In-place arithmetic: a difference of two labels in data (a debug
+     * line program's lengths, a jump table of offsets) is written as an
+     * ADD of one symbol and a SUB of the other at the same place. */
+    case R_LARCH_ADD8:  loc[0] = (unsigned char)(loc[0] + V); return;
+    case R_LARCH_SUB8:  loc[0] = (unsigned char)(loc[0] - V); return;
+    case R_LARCH_ADD16: put16(loc, (get16(loc) + (unsigned int)V) & 0xffffU);
+                        return;
+    case R_LARCH_SUB16: put16(loc, (get16(loc) - (unsigned int)V) & 0xffffU);
+                        return;
+    case R_LARCH_ADD32: put32(loc, get32loc(loc) + (unsigned int)V); return;
+    case R_LARCH_SUB32: put32(loc, get32loc(loc) - (unsigned int)V); return;
+    case R_LARCH_ADD6:
+        loc[0] = (unsigned char)((loc[0] & 0xc0) | ((loc[0] + V) & 0x3f));
+        return;
+    case R_LARCH_SUB6:
+        loc[0] = (unsigned char)((loc[0] & 0xc0) | ((loc[0] - V) & 0x3f));
+        return;
+    case R_LARCH_ADD64: case R_LARCH_SUB64: {
+        unsigned long long w = (unsigned long long)get32loc(loc) |
+                               ((unsigned long long)get32loc(loc + 4) << 32);
+        w = type == R_LARCH_ADD64 ? w + (unsigned long long)V
+                                  : w - (unsigned long long)V;
+        put64(loc, w);
+        return;
+    }
+    case R_LARCH_B16:
+        if (d & 3)
+            die("%s: R_LARCH_B16 against '%s' is not a multiple of four",
+                o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_B16", d, -(1LL << 17), (1LL << 17) - 4);
+        la_put(loc, 10, 16, (unsigned long long)(d >> 2));
+        return;
+    case R_LARCH_B21:
+        if (d & 3)
+            die("%s: R_LARCH_B21 against '%s' is not a multiple of four",
+                o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_B21", d, -(1LL << 22), (1LL << 22) - 4);
+        la_put(loc, 10, 16, (unsigned long long)(d >> 2));
+        la_put(loc, 0, 5, (unsigned long long)(d >> 18));
+        return;
+    case R_LARCH_B26:
+        if (d & 3)
+            die("%s: R_LARCH_B26 against '%s' is not a multiple of four",
+                o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_B26", d, -(1LL << 27), (1LL << 27) - 4);
+        la_put(loc, 10, 16, (unsigned long long)(d >> 2));
+        la_put(loc, 0, 10, (unsigned long long)(d >> 18));
+        return;
+    case R_LARCH_CALL36: {
+        /* pcaddu18i ra, hi20 ; jirl ra, ra, lo16 -- the jirl's offset is
+         * sign-extended, so the high part is rounded by half its unit */
+        long long hi;
+        if (d & 3)
+            die("%s: R_LARCH_CALL36 against '%s' is not a multiple of four",
+                o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_CALL36", d, -(1LL << 37) - 0x20000,
+                   (1LL << 37) - 0x20000 - 4);
+        hi = (d + 0x20000) >> 18;
+        la_put(loc, 5, 20, (unsigned long long)hi);
+        la_put(loc + 4, 10, 16, (unsigned long long)((d - (hi << 18)) >> 2));
+        return;
+    }
+    case R_LARCH_GOT_PC_HI20:
+    case R_LARCH_PCALA_HI20: {
+        /* the page of the symbol, rounded by 0x800 because the low half
+         * is sign-extended where it is added, less the page of pc */
+        long long pg = (long long)(((unsigned long long)V + 0x800) & ~0xfffULL) -
+                       (long long)(P & ~(Elf64_Addr)0xfff);
+        need_range(l, o, type == R_LARCH_PCALA_HI20 ? "R_LARCH_PCALA_HI20"
+                                                    : "R_LARCH_GOT_PC_HI20",
+                   pg, I32_MIN, I32_MAX - 0xfff);
+        la_put(loc, 5, 20, (unsigned long long)(pg >> 12));
+        return;
+    }
+    case R_LARCH_GOT_PC_LO12: {
+        /* ld.d rd, rj, %got_pc_lo12 -> addi.d rd, rj, %pc_lo12: the
+         * address itself rather than a GOT slot holding it */
+        unsigned int w = get32loc(loc);
+        if ((w & 0xffc00000U) != 0x28c00000U)
+            die("%s: R_LARCH_GOT_PC_LO12 against '%s' is on 0x%08x, not an "
+                "ld.d; this linker builds no GOT and rewrites only the normal "
+                "and medium models' ld.d (-mcmodel=extreme is not linked)",
+                o->name, l->rel_sym ? l->rel_sym : "?", w);
+        put32(loc, (w & 0x003fffffU) | 0x02c00000U);
+    }
+        /* fall through */
+    case R_LARCH_PCALA_LO12:
+    case R_LARCH_ABS_LO12:
+        la_put(loc, 10, 12, (unsigned long long)V & 0xfff);
+        return;
+    case R_LARCH_ABS_HI20:
+        /* lu12i.w then ori: no rounding, the ori ORs in the low 12 bits.
+         * Alone (no lu32i.d after it) the pair reaches a sign-extended
+         * 32-bit address; that is the instruction's to know, not this
+         * field's, so only the field is checked here. */
+        la_put(loc, 5, 20, ((unsigned long long)V >> 12) & 0xfffff);
+        return;
+    case R_LARCH_ABS64_LO20:
+        la_put(loc, 5, 20, ((unsigned long long)V >> 32) & 0xfffff);
+        return;
+    case R_LARCH_ABS64_HI12:
+        la_put(loc, 10, 12, ((unsigned long long)V >> 52) & 0xfff);
+        return;
+    case R_LARCH_PCREL20_S2:
+        if (d & 3)
+            die("%s: R_LARCH_PCREL20_S2 against '%s' is not a multiple of "
+                "four", o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_PCREL20_S2", d, -(1LL << 21),
+                   (1LL << 21) - 4);
+        la_put(loc, 5, 20, (unsigned long long)(d >> 2));
+        return;
+    case R_LARCH_PCALA64_LO20: case R_LARCH_PCALA64_HI12:
+    case R_LARCH_GOT64_PC_LO20: case R_LARCH_GOT64_PC_HI12:
+    case R_LARCH_GOT_HI20: case R_LARCH_GOT_LO12:
+        die("%s: LoongArch relocation type %u against '%s' is the extreme "
+            "code model's or an absolute GOT's; this linker links the normal "
+            "and medium models (-mcmodel=normal or medium)", o->name, type,
+            l->rel_sym ? l->rel_sym : "?");
+    default:
+        die("%s: unsupported LoongArch relocation type %u against '%s' (TLS "
+            "and ULEB128 differences are not linked yet)", o->name, type,
+            l->rel_sym ? l->rel_sym : "?");
+    }
+}
+
 /* ---- MIPS (o32) --------------------------------------------------------
  *
  * The objects are REL: each addend is in the field it relocates, in that
@@ -2177,7 +2733,7 @@ static long long mips_lo_of(struct object *o, const struct mips_relctx *c)
         const Elf32_Rel *r = (const Elf32_Rel *)(c->rbytes +
                                                 (long)k * c->relsz);
         if ((r->r_info & 0xff) == R_MIPS_LO16 && (r->r_info >> 8) == c->symi)
-            return sext(get32loc(c->base + r->r_offset) & 0xffffU, 16);
+            return sext(mips_get_word(c->base + r->r_offset) & 0xffffU, 16);
     }
     die("%s: an R_MIPS_HI16 with no R_MIPS_LO16 against the same symbol "
         "after it; the two halves of an address carry one addend between "
@@ -2185,16 +2741,19 @@ static long long mips_lo_of(struct object *o, const struct mips_relctx *c)
     return 0;
 }
 
+/* Every MIPS field is a word in the image's byte order (mips_get_word,
+ * set from the objects), and its 16-bit immediate the word's low half. */
 static void mips_put16(unsigned char *loc, unsigned long v)
 {
-    put32(loc, (get32loc(loc) & 0xffff0000U) | (unsigned int)(v & 0xffffU));
+    mips_put_word(loc, (mips_get_word(loc) & 0xffff0000U) |
+                       (unsigned int)(v & 0xffffU));
 }
 
 static void apply_mips(struct linker *l, struct object *o, unsigned type,
                        unsigned char *loc, Elf64_Addr S, long long A,
                        Elf64_Addr P, const struct mips_relctx *c)
 {
-    unsigned int field = get32loc(loc);
+    unsigned int field = (unsigned int)mips_get_word(loc);
     long long V;
     switch (type) {
     case R_MIPS_NONE:
@@ -2204,7 +2763,7 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
         if (c->isrel) A = (long long)(int)field;
         V = (long long)S + A;
         need_range(l, o, "R_MIPS_32", V, I32_MIN, 0xffffffffLL);
-        put32(loc, (unsigned int)V);
+        mips_put_word(loc, (unsigned int)V);
         return;
     case R_MIPS_HI16:
         if (c->isrel)
@@ -2235,7 +2794,7 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
                 "another 256 MiB region; jal reaches only its own",
                 o->name, (unsigned long long)P,
                 l->rel_sym ? l->rel_sym : "?", (unsigned long long)V);
-        put32(loc, (field & 0xfc000000U) |
+        mips_put_word(loc, (field & 0xfc000000U) |
                    (unsigned int)(((unsigned long long)V >> 2) & 0x3ffffffU));
         return;
     }
@@ -2261,6 +2820,68 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
         return;
     default:
         die("%s: unsupported MIPS relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
+/* ---- TriCore -------------------------------------------------------------
+ *
+ * RELA, the addend in the relocation (docs/internals/tricore-plan.md).
+ * An address is two halves in two instruction formats: HIADJ in an RLC
+ * const16 (MOVH, MOVH.A), rounded by 0x8000 because the low half is
+ * sign-extended where it is added; LO in an RLC const16 (ADDI); LO2 in a
+ * BOL long offset (LEA, a load, a store), whose 16 bits are scattered in
+ * three pieces. 24REL is CALL's and J's halfword displacement. Every
+ * field is rebuilt by src/arch/tricore/emit.c's format packers from the
+ * instruction's own other fields, so no layout is written down here. The
+ * small-data and other types are refused by name. */
+static void apply_tricore(struct linker *l, struct object *o, unsigned type,
+                          unsigned char *loc, Elf64_Addr S, long long A,
+                          Elf64_Addr P)
+{
+    unsigned long w = get32loc(loc);
+    int op1 = (int)(w & 0xff), s1 = (int)((w >> 8) & 15),
+        s2 = (int)((w >> 12) & 15), d = (int)((w >> 28) & 15);
+    long long V = (long long)S + A;
+    switch (type) {
+    case R_TRICORE_NONE:
+        return;
+    case R_TRICORE_32ABS:
+        need_range(l, o, "R_TRICORE_32ABS", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_TRICORE_24REL: {
+        long long dd = V - (long long)P;
+        if (op1 != 0x1d && op1 != 0x6d && op1 != 0x5d)
+            die("%s: R_TRICORE_24REL on 0x%08lx, which is not a J, CALL or "
+                "JL", o->name, w);
+        if (dd & 1)
+            die("%s: a call or jump to the odd address 0x%llx ('%s')",
+                o->name, (unsigned long long)V, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_TRICORE_24REL", dd, -16777216LL, 16777214LL);
+        put32(loc, (unsigned int)tc_enc_b(op1, (unsigned long)(dd / 2) &
+                                               0xffffffUL));
+        return;
+    }
+    case R_TRICORE_HIADJ:
+        put32(loc, (unsigned int)tc_enc_rlc(op1, d, s1,
+                                            tc_hi_adj((unsigned long)V)));
+        return;
+    case R_TRICORE_LO:
+        put32(loc, (unsigned int)tc_enc_rlc(op1, d, s1,
+                                            (unsigned)(V & 0xffff)));
+        return;
+    case R_TRICORE_LO2:
+        put32(loc, (unsigned int)tc_enc_bol(op1, s1, s2,
+                                            (unsigned)(V & 0xffff)));
+        return;
+    case R_TRICORE_16SM: case R_TRICORE_10SM:
+        die("%s: relocation %s: small-data (A0-relative) addressing, which "
+            "this linker does not lay out", o->name,
+            type == R_TRICORE_16SM ? "R_TRICORE_16SM" : "R_TRICORE_10SM");
+        return;
+    default:
+        die("%s: unsupported TriCore relocation type %u (this is the next "
             "linker increment, not a bug in your program)", o->name, type);
     }
 }
@@ -2394,6 +3015,119 @@ static void patch_thm_mov(unsigned char *loc, unsigned int h)
     put16(loc + 2, lo);
 }
 
+/* Xtensa (RELA). R_XTENSA_32 is S + A added to what the field holds
+ * (binutils' howto has it partial_inplace; every assembler leaves the
+ * field 0). SLOT0_OP names the instruction's one PC-relative operand, so
+ * the opcode at the site says which field and which reach: a call's word
+ * offset from (P & ~3) + 4, a j's, a branch's or a zero-test's byte
+ * offset from P + 4, a loop's forward eight bits to its end (GCC uses the
+ * zero-overhead loops on a core that has them), a density beqz.n/bnez.n's
+ * forward six bits, an l32r's
+ * backward word offset from (P + 3) & ~3. ASM_EXPAND marks a call an
+ * assembler could relax, and the DIFF types hold differences between two
+ * places in one section, which only a relaxing linker changes: none is
+ * an instruction to patch here. */
+static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
+                         unsigned char *loc, Elf64_Addr S, long long A,
+                         Elf64_Addr P)
+{
+    long long V = (long long)S + A;
+    (void)l;
+    switch (type) {
+    case R_XTENSA_NONE:
+    case R_XTENSA_ASM_EXPAND:
+    case R_XTENSA_ASM_SIMPLIFY:
+    case R_XTENSA_DIFF8:
+    case R_XTENSA_DIFF16:
+    case R_XTENSA_DIFF32:
+        return;
+    case R_XTENSA_32:
+        put32(loc, (unsigned int)(V + (long long)get32loc(loc)));
+        return;
+    case R_XTENSA_SLOT0_OP: {
+        unsigned long w = (unsigned long)loc[0] | ((unsigned long)loc[1] << 8) |
+                          ((unsigned long)loc[2] << 16);
+        int op0 = (int)(w & 15), n = (int)(w >> 4) & 3, m = (int)(w >> 6) & 3;
+        long long d = V - (long long)P - 4;
+        const char *what = NULL;
+        if (op0 == 5) {                                   /* callN */
+            long long c = V - (long long)((P & ~(Elf64_Addr)3) + 4);
+            if (V & 3)
+                die("%s: a call to 0x%llx (%s), which is not 4-aligned: an "
+                    "Xtensa call's target is a word address", o->name,
+                    (unsigned long long)V, l->rel_sym);
+            if (c < -524288 || c > 524284)
+                die("%s: a call to '%s' is %lld bytes away and call8 "
+                    "reaches 512 KiB; this linker mints no trampolines "
+                    "(-mlongcalls code calls through a register)",
+                    o->name, l->rel_sym, c);
+            w = (w & 0x3fUL) | (((unsigned long)(c >> 2) & 0x3ffffUL) << 6);
+        } else if (op0 == 6 && n == 0) {                  /* j */
+            if (d < -131072 || d > 131071)
+                what = "a j reaches 128 KiB";
+            else
+                w = (w & 0x3fUL) | (((unsigned long)d & 0x3ffffUL) << 6);
+        } else if (op0 == 6 && n == 1) {                  /* beqz .. bgez */
+            if (d < -2048 || d > 2047)
+                what = "a zero-test branch reaches 2 KiB";
+            else
+                w = (w & 0xfffUL) | (((unsigned long)d & 0xfffUL) << 12);
+        } else if (op0 == 7 || (op0 == 6 && (n == 2 || (n == 3 && m >= 2)))) {
+            if (d < -128 || d > 127)
+                what = "a branch reaches 128 bytes";
+            else
+                w = (w & 0xffffUL) | (((unsigned long)d & 0xffUL) << 16);
+        } else if (op0 == 6 && n == 3 && m == 1 &&
+                   ((w >> 12) & 15) >= 8 && ((w >> 12) & 15) <= 10) {
+            /* loop, loopnez, loopgtz: the loop's end, 0..255 forward */
+            if (d < 0 || d > 255)
+                what = "a loop's end is 0..255 bytes past it";
+            else
+                w = (w & 0xffffUL) | (((unsigned long)d & 0xffUL) << 16);
+        } else if (op0 == 12 && (w & 0x80)) {             /* beqz.n bnez.n */
+            if (d < 0 || d > 63)
+                what = "a beqz.n/bnez.n reaches 63 bytes forward";
+            else {
+                unsigned long h = (unsigned long)loc[0] | ((unsigned long)loc[1] << 8);
+                h = (h & 0x0fcfUL) | (((unsigned long)d & 0x30UL)) |
+                    (((unsigned long)d & 0xfUL) << 12);
+                loc[0] = (unsigned char)(h & 0xff);
+                loc[1] = (unsigned char)(h >> 8);
+                return;
+            }
+        } else if (op0 == 1) {                            /* l32r */
+            long long r = V - (long long)((P + 3) & ~(Elf64_Addr)3);
+            if (V & 3)
+                die("%s: an l32r of a literal at 0x%llx, which is not "
+                    "4-aligned", o->name, (unsigned long long)V);
+            if (r >= 0 || r < -262144)
+                die("%s: an l32r at 0x%llx cannot reach its literal '%s' at "
+                    "0x%llx: l32r reaches 256 KiB BACKWARDS, so a literal "
+                    "must be placed before the code that loads it (compile "
+                    "with -mtext-section-literals)", o->name,
+                    (unsigned long long)P, l->rel_sym, (unsigned long long)V);
+            w = (w & 0xffUL) | (((unsigned long)(r >> 2) & 0xffffUL) << 8);
+        } else {
+            die("%s: an R_XTENSA_SLOT0_OP on an instruction this linker "
+                "does not decode (0x%06lx at 0x%llx)", o->name, w,
+                (unsigned long long)P);
+        }
+        if (what)
+            die("%s: a branch to '%s' at 0x%llx is %lld bytes away and %s; "
+                "this linker does not relax", o->name, l->rel_sym,
+                (unsigned long long)V, d, what);
+        loc[0] = (unsigned char)(w & 0xff);
+        loc[1] = (unsigned char)((w >> 8) & 0xff);
+        loc[2] = (unsigned char)((w >> 16) & 0xff);
+        return;
+    }
+    default:
+        die("%s: unsupported Xtensa relocation type %u against '%s' (EmbLD "
+            "applies R_XTENSA_32 and R_XTENSA_SLOT0_OP; PIC, TLS and the "
+            "other slots are not supported)", o->name, type, l->rel_sym);
+    }
+}
+
 static void apply_relocs(struct linker *l, struct object *o)
 {
     for (int i = 0; i < o->nsh; i++) {
@@ -2459,6 +3193,10 @@ static void apply_relocs(struct linker *l, struct object *o)
             if (o->machine == EM_RISCV &&
                 (type == R_RISCV_RELAX || type == R_RISCV_ALIGN))
                 continue;
+            /* LoongArch's are the same two hints, symbol 0 likewise. */
+            if (o->machine == EM_LOONGARCH &&
+                (type == R_LARCH_RELAX || type == R_LARCH_ALIGN))
+                continue;
             int uw;
             Elf64_Addr S = reloc_symval(l, o, symi, &uw);
             {
@@ -2519,8 +3257,20 @@ static void apply_relocs(struct linker *l, struct object *o)
                 apply_riscv(l, o, type, loc, S, A, P);
                 continue;
             }
+            if (o->machine == EM_LOONGARCH) {
+                apply_loongarch(l, o, type, loc, S, A, P);
+                continue;
+            }
             if (o->machine == EM_AVR) {
                 apply_avr(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_TRICORE) {
+                apply_tricore(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_XTENSA) {
+                apply_xtensa(l, o, type, loc, S, A, P);
                 continue;
             }
             if (o->machine == EM_MIPS) {
@@ -2570,6 +3320,16 @@ static void apply_relocs(struct linker *l, struct object *o)
                     case R_ARM_THM_MOVT_ABS:
                         A = (short)read_thm_mov(loc);
                         break;
+                    case R_ARM_CALL:
+                    case R_ARM_JUMP24:
+                        /* from the instruction + 8, as THM_CALL's is +4:
+                         * an assembler's `bl f` holds -8 */
+                        A = read_arm_b24(loc) + 8;
+                        break;
+                    case R_ARM_MOVW_ABS_NC:
+                    case R_ARM_MOVT_ABS:
+                        A = (short)read_arm_mov(loc);
+                        break;
                     default:
                         A = 0;
                         break;
@@ -2603,6 +3363,24 @@ static void apply_relocs(struct linker *l, struct object *o)
                     break;
                 case R_ARM_THM_CALL:
                 case R_ARM_THM_JUMP24:
+                    /* A call from Thumb code to an ARM-state function --
+                     * a global function symbol with the Thumb bit CLEAR,
+                     * which only an A32 object (armv7a) defines -- is
+                     * `blx`: the second halfword's bit 12 clear, and the
+                     * displacement from Align(P + 4, 4) to the word-aligned
+                     * target. A jump there would need a veneer. */
+                    if (thumb_to_arm(l, o, symi, S)) {
+                        if (type != R_ARM_THM_CALL)
+                            die("%s: a Thumb branch to the ARM-state function "
+                                "'%s' needs an interworking veneer, which "
+                                "this linker does not mint; only a call (bl, "
+                                "made blx) can switch state", o->name,
+                                l->rel_sym);
+                        patch_thm_b24(o, loc, (long long)S + A -
+                                      (long long)((P + 4) & ~(Elf64_Addr)3));
+                        put16(loc + 2, get16(loc + 2) & ~0x1000u);
+                        break;
+                    }
                     /* The displacement is between ADDRESSES, so the
                      * Thumb bit comes off S first -- leaving it on would
                      * shift every call by one byte. */
@@ -2613,6 +3391,23 @@ static void apply_relocs(struct linker *l, struct object *o)
                 case R_ARM_THM_MOVW_ABS_NC:
                     patch_thm_mov(loc, (unsigned int)((S + (Elf64_Addr)A)
                                                       & 0xffff));
+                    break;
+                case R_ARM_CALL:
+                case R_ARM_JUMP24:
+                    /* the Thumb bit comes off for the displacement, and
+                     * says the call must switch state (blx) */
+                    patch_arm_b24(o, loc,
+                                  (long long)(S & ~(Elf64_Addr)1) + A -
+                                  ((long long)P + 8),
+                                  type == R_ARM_CALL, (int)(S & 1));
+                    break;
+                case R_ARM_MOVW_ABS_NC:
+                    patch_arm_mov(loc, (unsigned int)((S + (Elf64_Addr)A)
+                                                      & 0xffff));
+                    break;
+                case R_ARM_MOVT_ABS:
+                    patch_arm_mov(loc, (unsigned int)(((S + (Elf64_Addr)A)
+                                                       >> 16) & 0xffff));
                     break;
                 case R_ARM_THM_MOVT_ABS:
                     patch_thm_mov(loc, (unsigned int)(((S + (Elf64_Addr)A)
@@ -2913,7 +3708,9 @@ static void write_exec(struct linker *l, const char *out,
      * RISC-V's are the float ABI, whose 0 means SOFT. */
     eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5
                 : l->machine == EM_RISCV || l->machine == EM_AVR ||
-                  l->machine == EM_MIPS ? l->eflags
+                  l->machine == EM_MIPS || l->machine == EM_LOONGARCH ||
+                  l->machine == EM_TRICORE
+                ? l->eflags
                 : 0;
     eh->e_phoff = ehsz;
     eh->e_ehsize = (Elf64_Half)ehsz;
@@ -3132,6 +3929,8 @@ static void write_exec(struct linker *l, const char *out,
     }
     free(sy); free(symname); free(symstr.p); free(shstr.p);
 
+    if (l->big_endian)
+        be_image(img);
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
     free(img);
@@ -3152,6 +3951,9 @@ static void emit_embx(struct linker *l, const char *out, unsigned long long caps
                       Elf64_Addr data_start, Elf64_Xword data_filesz,
                       Elf64_Xword data_memsz)
 {
+    if (l->big_endian)
+        die("--embx: an EMBX image is little-endian x86-64's (EmbLinkOS); "
+            "it is not written for a big-endian link");
     /* Capability list: sorted ascending is free — walk cap_id low to high. */
     int ncaps = 0;
     for (int id = 1; id <= EMBX_CAP_MAX; id++)
@@ -3275,6 +4077,13 @@ static void emit_embdbg(struct linker *l, const char *out)
         n++;
     }
 
+    if (n && l->big_endian) {
+        /* its reader (tools/embdbg) parses little-endian ELF and DWARF;
+         * the image itself carries the DWARF a debugger reads */
+        fprintf(stderr, "embld: no .embdbg sidecar for a big-endian image "
+                "(EmbDBG reads little-endian objects only)\n");
+        n = 0;
+    }
     if (n) {
         long ilen;
         unsigned char *img = read_file(out, &ilen);
@@ -4270,8 +5079,9 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
             }
             if (s->kind == LS_DATA) {
                 unsigned long long v = (unsigned long long)s->dval;
-                for (int b = 0; b < s->dsize; b++)    /* little-endian */
-                    img[fo[k] + (Elf64_Off)s->doff + (Elf64_Off)b] =
+                for (int b = 0; b < s->dsize; b++)    /* the target's order */
+                    img[fo[k] + (Elf64_Off)s->doff +
+                        (Elf64_Off)(l->big_endian ? s->dsize - 1 - b : b)] =
                         (unsigned char)(v >> (8 * b));
             }
         }
@@ -4433,6 +5243,8 @@ static void write_exec_script(struct linker *l, struct ls_script *sc,
                    (unsigned char)ELF64_ST_INFO(STB_GLOBAL, type), shndx);
         j++;
     }
+    if (l->big_endian)
+        be_image(img);
     if (plat_write_file(out, img, (size_t)total) != 0)
         die("cannot write '%s'", out);
     free(img); free(em); free(fo); free(n_osec); free(n_dbg); free(dbg_at);
@@ -4818,10 +5630,34 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     if (l.gc_sections)
         gc_sections(&l, l.gc_undefs, l.gc_nundefs);
     if (opts && opts->have_stack) {
-        if (l.machine != EM_RISCV && l.machine != EM_MIPS)
-            die("-Tstack is a RISC-V and MIPS option: every other target "
-                "here starts with a stack pointer already set (a Cortex-M "
-                "reads its own from the vector table)");
+        /* ARM: for an A-profile core (armv7a-none-eabi), which starts in
+         * ARM state with no stack; the stub is A32. A Cortex-M image
+         * reads its sp from the vector table and wants none -- and could
+         * not run one, having no ARM state. */
+        if (l.machine != EM_RISCV && l.machine != EM_MIPS &&
+            l.machine != EM_LOONGARCH && l.machine != EM_ARM &&
+            l.machine != EM_TRICORE && l.machine != EM_XTENSA)
+            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore and Xtensa "
+                "option: "
+                "every other target here starts with a stack pointer already "
+                "set (a Cortex-M reads its own from the vector table)");
+        if (l.machine == EM_TRICORE) {
+            if (!opts->have_csa)
+                die("-Tstack on TriCore needs --csa START:END as well: the "
+                    "stub links the context-save areas every CALL takes, "
+                    "and with none the entry's first call traps");
+            if ((opts->csa_start & 63) || (opts->csa_end & 63) ||
+                opts->csa_end < opts->csa_start + 128 ||
+                (opts->csa_start >> 28) != ((opts->csa_end - 1) >> 28) ||
+                ((opts->csa_start | (opts->csa_end - 1)) & 0x0fc00000UL))
+                die("--csa 0x%lx:0x%lx: the context-save areas must be "
+                    "64-byte aligned, at least two of them, and within the "
+                    "first 4 MiB of one 256 MiB segment (a link word holds "
+                    "address bits 31:28 and 21:6)",
+                    opts->csa_start, opts->csa_end);
+            l.csa_start = opts->csa_start;
+            l.csa_end = opts->csa_end;
+        }
         add_entry_stub(&l);
     }
 

@@ -472,6 +472,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                     in->call_nfixed = atoi(va + 8);
             }
             in->sret_first = has_flag(rest, "sret");
+            in->ret_ptr = has_flag(rest, "ptrret");
             break;
         }
         case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: {
@@ -647,8 +648,11 @@ struct ir_unit *ir_parse(const char *file, char *text)
         if (!strcmp(w, "}")) { p.fn = NULL; continue; }
         if (!strcmp(w, "local")) { parse_local(&p, keep); continue; }
         if (!strncmp(w, "str", 3) && w[3] >= '0' && w[3] <= '9') {
-            /* strN = "...": the bytes, unescaped */
-            const char *q = strchr(keep, '"');
+            /* strN = "...": the bytes, unescaped -- read from the line
+             * itself, past the word, and not from `keep`, whose 2048 bytes
+             * cut a long string short (driver/main.c's help text, once
+             * xtensa-none-elf was added to it) */
+            const char *q = strchr(p.cur, '"');
             if (!q)
                 perr(&p, "a quoted string after strN =");
             struct outbuf b = { NULL, 0, 0 };

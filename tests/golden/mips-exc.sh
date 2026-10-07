@@ -17,15 +17,22 @@
 #
 # Each C level is run; the line printed must be "35 5 1 1 1 0 84".
 set -u
-echo "TEST-MARKER mips-exc"
+# Run BIG-endian (mips-none-elf) as tests/golden/mips-be-exc.sh, which sets
+# MIPS_BE=1.
+if [ "${MIPS_BE:-0}" = 1 ]; then
+    NAME=mips-be-exc T=mips-none-elf MT=mips-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    NAME=mips-exc T=mipsel-none-elf MT=mipsel-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
+echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
 
-QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
 command -v "$QEMU" >/dev/null 2>&1 || { echo "skipped: $QEMU not found"; exit 0; }
-T=mipsel-none-elf
 EMBCC=${EMBCC:-./embcc}
 d=tests/golden/mips-exc
-out=tests/golden/out/mips-exc
+out=tests/golden/out/$NAME
 rm -rf "$out"; mkdir -p "$out"
 export EMBCC_MIPS_HARNESS="$PWD/$out"
 for f in boot io; do

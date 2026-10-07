@@ -4,6 +4,7 @@
  *
  *   mipsasmcheck --list    the vocabulary, one statement per line
  *   mipsasmcheck bytes     what src/arch/mips/asm.c assembles it to
+ *   mipsasmcheck bytes-be  ...big-endian (mips-none-elf)
  *
  * The vocabulary is generated from asm.c's own tables, so an instruction
  * added there cannot escape the referee. Each line is assembled in
@@ -14,6 +15,7 @@
 #include <string.h>
 
 #include "../../src/arch/mips/asm.h"
+#include "../../src/arch/mips/emit.h"
 
 int main(int argc, char **argv)
 {
@@ -22,6 +24,9 @@ int main(int argc, char **argv)
     struct code c = { 0 };
     char err[512];
     int list = argc > 1 && strcmp(argv[1], "--list") == 0;
+
+    if (argc > 1 && strcmp(argv[1], "bytes-be") == 0)
+        mips_set_big_endian(1);
 
     tmp = tmpfile();
     if (!tmp) { fprintf(stderr, "no tmpfile\n"); return 1; }

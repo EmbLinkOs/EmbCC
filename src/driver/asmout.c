@@ -149,6 +149,12 @@ static void str_label(char *out, size_t cap, const struct ir_unit *iu, int off)
  * is spelled `%function` there and `@function` everywhere else. Getting
  * this wrong is not subtle -- the whole directive vanishes into a
  * comment and the symbol is left untyped. */
+/* Thumb state: every ARM target but ARMv7-A, which is A32 (ARM state). */
+static int arm_thumb(void)
+{
+    return target_get() == TARGET_THUMB && !target_arm_a32();
+}
+
 static const char *type_sigil(void)
 {
     return target_get() == TARGET_THUMB ? "%" : "@";
@@ -176,6 +182,16 @@ static const char *reloc_name(int kind)
         default:             return NULL;
         }
     case TARGET_THUMB:
+        if (!arm_thumb())
+            switch (kind) {              /* ARM state: the A32 fields */
+            case RK_CALL:        return "R_ARM_CALL";
+            case RK_TAIL:        return "R_ARM_JUMP24";
+            case RK_THM_MOVW:    return "R_ARM_MOVW_ABS_NC";
+            case RK_THM_MOVT:    return "R_ARM_MOVT_ABS";
+            case RK_ABS32:       return "R_ARM_ABS32";
+            case RK_DATA_PREL32: return "R_ARM_REL32";
+            default:             return NULL;
+            }
         switch (kind) {
         case RK_CALL:        return "R_ARM_THM_CALL";
         case RK_TAIL:        return "R_ARM_THM_JUMP24";
@@ -196,6 +212,16 @@ static const char *reloc_name(int kind)
         case RK_RISCV_PCREL_LO12_I: return "R_RISCV_PCREL_LO12_I";
         default:                  return NULL;
         }
+    case TARGET_LOONGARCH64:
+        switch (kind) {
+        case RK_CALL:          return "R_LARCH_B26";   /* bl and b alike */
+        case RK_LA_PCALA_HI20: return "R_LARCH_PCALA_HI20";
+        case RK_LA_PCALA_LO12: return "R_LARCH_PCALA_LO12";
+        case RK_ABS64:         return "R_LARCH_64";
+        case RK_ABS32:         return "R_LARCH_32";
+        case RK_DATA_PREL32:   return "R_LARCH_32_PCREL";
+        default:               return NULL;
+        }
     case TARGET_MIPS32:
         switch (kind) {
         case RK_CALL:        return "R_MIPS_26";       /* jal and j alike */
@@ -203,6 +229,15 @@ static const char *reloc_name(int kind)
         case RK_MIPS_HI16:   return "R_MIPS_HI16";
         case RK_MIPS_LO16:   return "R_MIPS_LO16";
         case RK_ABS32:       return "R_MIPS_32";
+        default:             return NULL;
+        }
+    case TARGET_TRICORE:
+        switch (kind) {
+        case RK_CALL:        return "R_TRICORE_24REL";  /* call and j alike */
+        case RK_TRICORE_HI:  return "R_TRICORE_HIADJ";
+        case RK_TRICORE_LO:  return "R_TRICORE_LO";
+        case RK_TRICORE_LO2: return "R_TRICORE_LO2";
+        case RK_ABS32:       return "R_TRICORE_32ABS";
         default:             return NULL;
         }
     case TARGET_AVR:
@@ -307,10 +342,7 @@ static void mips_emit_blocks(struct outbuf *b, const char *srcname,
                     r = &ta->rels[j];
             if (r && k + 4 <= ta->codelen) {
                 const unsigned char *q = text + ta->text_off + k;
-                unsigned long w = (unsigned long)q[0] |
-                                  ((unsigned long)q[1] << 8) |
-                                  ((unsigned long)q[2] << 16) |
-                                  ((unsigned long)q[3] << 24);
+                unsigned long w = (unsigned long)target_get_uint(q, 4);
                 int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
                     rt = (int)(w >> 16) & 31;
                 char sym[200];
@@ -409,7 +441,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * set. `.syntax unified` because the pre-UAL syntax is still the
      * default in some assemblers. */
     if (target_get() == TARGET_THUMB)
-        ob_str(b, "\t.syntax unified\n\t.thumb\n");
+        ob_str(b, arm_thumb() ? "\t.syntax unified\n\t.thumb\n"
+                              : "\t.syntax unified\n\t.arm\n");
     /* MIPS: the code is already scheduled -- its delay slots are filled --
      * and uses $at itself, so the assembler may neither reorder, nor fill
      * a slot, nor expand a macro through $at. */
@@ -466,7 +499,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         if (!f->is_static)
             ob_fmt(b, "\t.%s\t%s\n", f->src->is_weak ? "weak" : "globl",
                    asym(f->name));
-        if (target_get() == TARGET_THUMB)
+        if (arm_thumb())
             ob_fmt(b, "\t.thumb_func\n");
         ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", asym(f->name),
                type_sigil(), asym(f->name));
@@ -536,10 +569,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
              * nothing to choose, and a REL assembler stores the addend in
              * the field as EmbCC's object writer does. */
             if (st && target_get() == TARGET_MIPS32 && len == 4) {
-                unsigned long w = (unsigned long)text[pc] |
-                                  ((unsigned long)text[pc + 1] << 8) |
-                                  ((unsigned long)text[pc + 2] << 16) |
-                                  ((unsigned long)text[pc + 3] << 24);
+                unsigned long w = (unsigned long)target_get_uint(text + pc,
+                                                                 4);
                 int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
                     rt = (int)(w >> 16) & 31;
                 char sym[200];
@@ -662,7 +693,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                    asym(f->name));
         ob_fmt(b, "\t.type\t%s, %sfunction\n", asym(f->name), type_sigil());
         ob_fmt(b, "\t.%s\t%s, %s\n",
-               target_get() == TARGET_THUMB ? "thumb_set" : "set",
+               arm_thumb() ? "thumb_set" : "set",
                asym(f->name), asym(f->alias_of));
     }
 
@@ -854,7 +885,7 @@ static int blocks_by_reloc(void)
 {
     enum target_arch a = target_get();
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR;
+           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_LOONGARCH64;
 }
 
 static struct blabel *blabel_add(struct bstate *s, int blk, long off)
@@ -1029,6 +1060,8 @@ static long bdata_width(int type)
     case TARGET_AVR:
         return type == R_AVR_16 || type == R_AVR_16_PM ? 2
              : type == R_AVR_32 ? 4 : 0;
+    case TARGET_LOONGARCH64:
+        return type == R_LARCH_32 ? 4 : type == R_LARCH_64 ? 8 : 0;
     default:
         return 0;
     }

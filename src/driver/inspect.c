@@ -289,10 +289,15 @@ void inspect_types(struct outbuf *b, const struct unit *u)
             ob_fmt(b, "  %4d  %-20s %s", m->off,
                    m->name ? m->name : "(unnamed)",
                    m->ty ? ty_name(m->ty) : "?");
+            /* bits in memory order from the unit's first byte */
+            int bpos = m->is_bitfield && m->ty
+                ? ty_bf_mempos(m->bit_off, m->bit_width,
+                               8 * (m->bf_bytes ? m->bf_bytes
+                                                : ty_size(m->ty)))
+                : 0;
             if (m->is_bitfield)
                 ob_fmt(b, " : %d  (bits %d-%d of the unit at %d)",
-                       m->bit_width, m->bit_off,
-                       m->bit_off + m->bit_width - 1, m->off);
+                       m->bit_width, bpos, bpos + m->bit_width - 1, m->off);
             else if (m->ty)
                 ob_fmt(b, "  (%d byte%s)", ty_size(m->ty),
                        ty_size(m->ty) == 1 ? "" : "s");
@@ -302,7 +307,7 @@ void inspect_types(struct outbuf *b, const struct unit *u)
              * of them is reported against the wrong place. */
             if (m->ty) {
                 int end = m->is_bitfield
-                    ? m->off + (m->bit_off + m->bit_width + 7) / 8
+                    ? m->off + (bpos + m->bit_width + 7) / 8
                     : m->off + ty_size(m->ty);
                 if (end > prev_end)
                     prev_end = end;

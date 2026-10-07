@@ -21,16 +21,24 @@
 # file does not define, MIPS16/microMIPS/R6 modes, a hard-float module,
 # floating-point instructions, and an unbalanced .set pop.
 set -u
-echo "TEST-MARKER mips-gas"
+# Run BIG-endian (mips-none-elf) as tests/golden/mips-be-gas.sh, which sets
+# MIPS_BE=1.
+if [ "${MIPS_BE:-0}" = 1 ]; then
+    NAME=mips-be-gas T=mips-none-elf MT=mips-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    NAME=mips-gas T=mipsel-none-elf MT=mipsel-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
+echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
 
-T=mipsel-none-elf
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
 CLANG_=${EMBCC_CLANG:-clang}
 OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
 RE=${EMBCC_LLVM_READELF:-llvm-readelf}
-out=tests/golden/out/mips-gas
+out=tests/golden/out/$NAME
 rm -rf "$out"; mkdir -p "$out"
 
 "$EMBCC" --target=$T -c tests/golden/mips-gas/forms.S -o "$out/forms.o" || {
@@ -47,7 +55,7 @@ if command -v "$RE" >/dev/null 2>&1; then
 fi
 
 if command -v "$CLANG_" >/dev/null 2>&1 &&
-   "$CLANG_" --target=mipsel-unknown-elf -mcpu=mips32r2 -msoft-float \
+   "$CLANG_" --target=$MT -mcpu=mips32r2 -msoft-float \
        -mno-abicalls -c tests/golden/mips-gas/forms.S -o "$out/forms-clang.o" \
        2> "$out/clang.err"; then
     printf 'int ext_data[8] = { 1 };\nvoid ext_fn(void) {}\nvoid _start(void) {}\n' \

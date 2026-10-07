@@ -11,20 +11,29 @@
 #  3. An instruction outside the vocabulary, an assembler MACRO it does
 #     not expand, x86's constraint letters and a callee-saved register
 #     are each refused by name.
+#
+# All of it again BIG-endian (mips-none-elf, llvm-mc's mips-unknown-elf,
+# qemu-system-mips) as tests/golden/mips-be-asm.sh, which sets MIPS_BE=1.
 set -u
-echo "TEST-MARKER mips-asm"
+if [ "${MIPS_BE:-0}" = 1 ]; then
+    NAME=mips-be-asm T=mips-none-elf MT=mips-unknown-elf BYTES=bytes-be
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    NAME=mips-asm T=mipsel-none-elf MT=mipsel-unknown-elf BYTES=bytes
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
+echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
 
 MC=${EMBCC_LLVM_MC:-llvm-mc}
 OBJCOPY=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
-T=mipsel-none-elf
 EMBCC=${EMBCC:-./embcc}
-out=tests/golden/out/mips-asm
+out=tests/golden/out/$NAME
 rm -rf "$out"; mkdir -p "$out"
 
 # ---- 1. the vocabulary ---------------------------------------------------
 if command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 &&
-   "$MC" -triple=mipsel-unknown-elf -mcpu=mips32r2 /dev/null -o /dev/null \
+   "$MC" -triple=$MT -mcpu=mips32r2 /dev/null -o /dev/null \
        2>/dev/null
 then
     cc -std=c99 -Wall -Wextra -o "$out/mipsasmcheck" \
@@ -35,11 +44,11 @@ then
         echo "mipsasmcheck did not build"; exit 1; }
     "$out/mipsasmcheck" --list > "$out/v.s" || {
         echo "could not list the vocabulary"; exit 1; }
-    "$out/mipsasmcheck" bytes > "$out/v.bin" 2> "$out/v.err" || {
+    "$out/mipsasmcheck" $BYTES > "$out/v.bin" 2> "$out/v.err" || {
         echo "the assembler refused its own vocabulary:"
         head -3 "$out/v.err"; exit 1; }
     { printf '.set noreorder\n.set noat\n'; cat "$out/v.s"; } > "$out/v2.s"
-    "$MC" -triple=mipsel-unknown-elf -mcpu=mips32r2 -mattr=+soft-float \
+    "$MC" -triple=$MT -mcpu=mips32r2 -mattr=+soft-float \
         -filetype=obj "$out/v2.s" -o "$out/v.o" 2> "$out/v.mc" || {
         echo "llvm-mc rejected the vocabulary -- an entry claims an"
         echo "instruction that does not exist:"
@@ -136,7 +145,6 @@ int main(void)
 }
 CEOF
 
-QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
 if command -v "$QEMU" >/dev/null 2>&1; then
     export EMBCC_MIPS_HARNESS="$PWD/$out"
     for f in boot io; do
@@ -209,7 +217,7 @@ canon() {           # canon OBJ -> one line per relocation: section, place, type
          /^[0-9a-f]+ R_MIPS/ { print rs, $1, $2 }' "$1.r" | sort
 }
 if command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 &&
-   "$MC" -triple=mipsel-unknown-elf -mcpu=mips32r2 /dev/null -o /dev/null \
+   "$MC" -triple=$MT -mcpu=mips32r2 /dev/null -o /dev/null \
        2>/dev/null
 then
     cat > "$out/s.c" <<'CEOF'
@@ -234,7 +242,7 @@ CEOF
         "$EMBCC" --target=$T "$2" -c "$1" -o "$out/$n-c.o" &&
         "$EMBCC" --target=$T "$2" -S "$1" -o "$out/$n.s" || {
             echo "-S: $1 does not compile"; exit 1; }
-        "$MC" -triple=mipsel-unknown-elf -mcpu=mips32r2 -mattr=+soft-float \
+        "$MC" -triple=$MT -mcpu=mips32r2 -mattr=+soft-float \
             -filetype=obj "$out/$n.s" -o "$out/$n-s.o" 2> "$out/$n.mcerr" || {
             echo "-S: llvm-mc rejects the assembly for $1:"
             head -4 "$out/$n.mcerr"; exit 1; }

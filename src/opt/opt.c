@@ -2785,7 +2785,11 @@ static int pass_mem2reg(struct ir_func *fn)
             (in->vol ||
              (fn->locals[in->a].size < 4
                   ? in->size != fn->locals[in->a].size
-                  : !m2r_plain(in->size, in->sign, in->w)))) {
+                  : !m2r_plain(in->size, in->sign, in->w)) ||
+             /* a narrower read of a wider local is its FIRST bytes,
+              * which are the value's low end only little-endian */
+             (target_big_endian() &&
+              in->size != fn->locals[in->a].size))) {
             ok[in->a] = 0;
             why[in->a] = in->vol ? "read-is-volatile"
                                  : "read-is-partial-or-extending";
@@ -10773,15 +10777,22 @@ static int pass_storefwd(struct ir_func *fn)
             /* Never a volatile local: each read of one must happen, and
              * read what is there. `volatile int v = 5; return v + v;`
              * returned 10 with no load at all. */
+            /* (big-endian: only an access at the local's own size, as
+             * mem2reg asks -- a narrower one is the stored value's HIGH
+             * end there, not the low bits the MOV would carry) */
             if (L >= 0 && L < nvars)
                 cur[L] = (!taken[L] && !in->vol &&
                           !(fn->locals && fn->locals[L].is_volatile) &&
-                          sf_plain(in->size, 0, in->size))
+                          sf_plain(in->size, 0, in->size) &&
+                          !(target_big_endian() && fn->locals &&
+                            in->size != fn->locals[L].size))
                              ? in->a : -1;
         } else if (in->op == IR_LDVAR) {
             int L = in->a;
             if (L >= 0 && L < nvars && !taken[L] && cur[L] >= 0 && !in->vol &&
-                sf_plain(in->size, in->sign, in->w)) {
+                sf_plain(in->size, in->sign, in->w) &&
+                !(target_big_endian() && fn->locals &&
+                  in->size != fn->locals[L].size)) {
                 in->op = IR_MOV;                  /* LDVAR L -> MOV of the stored temp */
                 in->a = cur[L];
                 in->b = -1;
@@ -10926,13 +10937,20 @@ static int ro_bytes(const struct global *g, long off, int size,
         if (ro < off + size && off < ro + 8)
             return 0;
     }
-    for (int b = size - 1; b >= 0; b--) {
+    /* The bytes are the object's image, in the target's order: the most
+     * significant first is the LAST of them little-endian, the first
+     * big-endian. A scalar without an image is its value, stored the same
+     * way. */
+    for (int k = 0; k < size; k++) {
+        int b = target_big_endian() ? k : size - 1 - k;
+        long at = off + b;
         unsigned char byte;
         if (g->init_bytes)
-            byte = off + b < g->init_len
-                 ? (unsigned char)g->init_bytes[off + b] : 0;
+            byte = at < g->init_len ? (unsigned char)g->init_bytes[at] : 0;
         else
-            byte = (unsigned char)(((unsigned long)g->init >> (8 * (off + b)))
+            byte = (unsigned char)(((unsigned long)g->init >>
+                                    (8 * (target_big_endian() ? gs - 1 - at
+                                                              : at)))
                                    & 0xff);
         v = v << 8 | byte;
     }
@@ -11141,7 +11159,10 @@ static int pass_punfwd(struct ir_func *fn)
                 continue;
             }
             const struct pun_rec *r = &pr[n];
-            int x = r->val, hi = (int)boff[in.a] != r->off;
+            /* the word at +4 of an 8-byte store is its high half
+             * little-endian, its low half big-endian */
+            int x = r->val,
+                hi = ((int)boff[in.a] != r->off) != target_big_endian();
             if (r->width == in.size) {
                 struct ir_ins *m = ib_push(&nb);
                 *m = in;
@@ -11294,6 +11315,14 @@ static int const_is_expensive(const struct ir_ins *i)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
         if (ta == TARGET_MIPS32)                /* addiu, or ori from $0 */
             return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
+        if (ta == TARGET_LOONGARCH64)  /* ori/addi.w from r0, or a lu12i.w */
+            return !((v >= -2048 && v <= 4095) ||
+                     ((v & 0xfff) == 0 && v == (long)(int)v));
+        if (ta == TARGET_TRICORE)               /* mov, mov.u or movh */
+            return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff) ||
+                     !(v & 0xffff));
+        if (ta == TARGET_XTENSA)                /* movi; else a literal */
+            return !(v >= -2048 && v <= 2047);
         return !(v >= -2048 && v <= 2047);                     /* RISC-V */
     }
     default:
@@ -11384,7 +11413,9 @@ static int pass_sinkconst(struct ir_func *fn)
         /* (MIPS's beq/bne compare two registers too.) */
         int rv_cmp = (target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64 ||
-                      target_get() == TARGET_MIPS32) &&
+                      target_get() == TARGET_MIPS32 ||
+                      target_get() == TARGET_LOONGARCH64 ||
+                      target_get() == TARGET_XTENSA) &&
                      i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
                      fn->ins[at[i->dst]].op == IR_CMP;
         /* A select's value stops above the compare that makes its
@@ -11466,10 +11497,19 @@ static int target_imm_foldable(int op, long imm, int w)
         return mips_imm_foldable64(op, imm);
     if (target_get() == TARGET_MIPS32)
         return mips_imm_foldable(op, imm);
+    /* TriCore: a 64-bit AND/OR/XOR is done half by half with any constant
+     * (codegen.c's logic_half); every other 64-bit operation builds it */
+    if (target_get() == TARGET_TRICORE)
+        return w == 8 ? op == IR_AND || op == IR_OR || op == IR_XOR
+                      : tc_imm_foldable(op, imm);
+    if (target_get() == TARGET_XTENSA)
+        return w == 4 && xtensa_imm_foldable(op, imm);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return riscv_imm_foldable(op, imm);
+    if (target_get() == TARGET_LOONGARCH64)
+        return la_imm_foldable(op, imm);
     if (target_get() == TARGET_AARCH64)
         return a64_imm_foldable(op, imm, w);
     return 1;
@@ -11634,7 +11674,8 @@ static int pass_immfold(struct ir_func *fn)
          * so its width is not x86's imm32 question (*_imm_foldable64). */
         int wide_ok = (target_get() == TARGET_THUMB ||
                        target_get() == TARGET_RISCV32 ||
-                       target_get() == TARGET_MIPS32) && i->w == 8 &&
+                       target_get() == TARGET_MIPS32 ||
+                       target_get() == TARGET_TRICORE) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
         /* ...and a 64-bit compare with any constant whose halves its
          * subs/sbcs or cmp/cmpeq take (thumb_cmp64_imm): strtol's

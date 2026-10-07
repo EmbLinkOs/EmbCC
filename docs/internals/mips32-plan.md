@@ -1,7 +1,11 @@
 # MIPS32 (mipsel, o32): the plan
 
 The target is 32-bit little-endian MIPS, MIPS32 Release 2, the o32 ABI
-with soft float: `mipsel-none-elf` (also `mipsel-unknown-elf`). It is the
+with soft float: `mipsel-none-elf` (also `mipsel-unknown-elf`). The same
+core big-endian is `mips-none-elf` (`mips-unknown-elf`); what the byte
+order changes -- the register pairs, sub-word composites in registers,
+`lwl`/`lwr`, the objects and the image -- is in big-endian.md, and
+everything below holds for both otherwise. It is the
 core of Microchip's PIC32 parts. The board it is tested on is QEMU's
 `malta`. Every fact below was read off clang 23
 (`--target=mipsel-unknown-elf -mcpu=mips32r2 -msoft-float`), llvm-mc or
