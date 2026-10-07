@@ -31,10 +31,9 @@
  *     are jal (R_MIPS_26), even within the unit: there is no PC-relative
  *     address and a jal's target is an absolute word index.
  *
- * Refused by name: computed goto, a jump table (target_jump_tables keeps
- * a dense switch a decision tree), atomics narrower than a word, a
- * branch beyond +-128 KiB, and __int128 and binary128 (neither exists on
- * o32). THE RULE.
+ * Refused by name: atomics narrower than a word, a branch beyond
+ * +-128 KiB, and __int128 and binary128 (neither exists on o32). THE
+ * RULE.
  *
  * ---- MIPS64 (n64) --------------------------------------------------------
  *
@@ -1392,8 +1391,10 @@ static void br_back(struct mips_fn *F, int at, int target)
                        "reach", F->fn->name);
 }
 
-/* FX_TAB: a jump table's word, the label's offset from `base` */
-enum { FX_B, FX_J, FX_TAB };
+/* FX_TAB: a jump table's word, the label's offset from `base`.
+ * FX_ADDR: &&label, the function-address sites from index `base` on,
+ * whose addend becomes the label's offset in the function. */
+enum { FX_B, FX_J, FX_TAB, FX_ADDR };
 
 static void want_label(struct mips_fn *F, int at, int label, int kind)
 {
@@ -2665,13 +2666,75 @@ static void need_word_atomic(struct mips_fn *F, const struct ir_ins *i)
 {
     if (g_m64 && i->size == 8)       /* lld/scd */
         return;
+    if (i->size == 1 || i->size == 2)   /* sub_* below: the word around it */
+        return;
     if (i->size != 4)
-        mips_refuse(F, i, i->size < 4
-                    ? "an atomic narrower than four bytes (ll/sc are "
-                      "word-sized, and a read-modify-write of the "
-                      "containing word is not atomic against its "
-                      "neighbours)"
-                    : "an atomic wider than a register");
+        mips_refuse(F, i, "an atomic wider than a register");
+}
+
+/* ---- one- and two-byte atomics ---------------------------------------
+ *
+ * ll/sc are word-sized, so a narrow atomic works on the aligned word
+ * around it, as GCC's and LLVM's do: an ll/sc loop that rewrites only its
+ * lane,
+ *
+ *   retry: ll    old, 0(aligned)
+ *          new = f(old)  in the lane
+ *          new = old ^ ((new ^ old) & mask)
+ *          sc    new, 0(aligned)
+ *          beq   new, $0, retry
+ *
+ * atomic against the neighbouring bytes too: a store to any of them
+ * between the ll and the sc fails the sc. The lane of address a is bits
+ * 8*(a & 3) up little-endian and 8*((a & 3) ^ (4 - size)) up big-endian.
+ * Every operation is a 32-bit one on values ll and rd32 sign-extend, so
+ * MIPS64 keeps them sign-extended, as its 32-bit forms require. */
+#define SUB_SH  SCR
+#define SUB_AL  SCR2
+#define SUB_MK  B_HI
+#define SUB_OLD ACC
+
+static void sub_lane(struct mips_fn *F, int addr, int size)
+{
+    struct code *t = F->t;
+    mips_alu_imm(t, MIPS_ANDI, SUB_SH, addr, 3);
+    mips_alu(t, P_SUBU, SUB_AL, addr, SUB_SH);      /* aligned */
+    if (target_big_endian())
+        mips_alu_imm(t, MIPS_XORI, SUB_SH, SUB_SH, 4 - size);
+    mips_shift_imm(t, MIPS_SLL, SUB_SH, SUB_SH, 3);
+    mips_alu_imm(t, MIPS_ORI, SUB_MK, MIPS_ZERO, size == 1 ? 0xff : 0xffff);
+    mips_alu(t, MIPS_SLLV, SUB_MK, SUB_MK, SUB_SH);
+}
+
+/* reg = (src << shift) & mask */
+static void sub_in(struct mips_fn *F, int reg, int src)
+{
+    mips_alu(F->t, MIPS_SLLV, reg, src, SUB_SH);
+    mips_alu(F->t, MIPS_AND, reg, reg, SUB_MK);
+}
+
+/* SUB_OLD = its lane at bit 0, extended as `sign` says */
+static void sub_out(struct mips_fn *F, int size, int sign)
+{
+    struct code *t = F->t;
+    mips_alu(t, MIPS_AND, SUB_OLD, SUB_OLD, SUB_MK);
+    mips_alu(t, MIPS_SRLV, SUB_OLD, SUB_OLD, SUB_SH);
+    if (sign) {
+        mips_shift_imm(t, MIPS_SLL, SUB_OLD, SUB_OLD, 32 - 8 * size);
+        mips_shift_imm(t, MIPS_SRA, SUB_OLD, SUB_OLD, 32 - 8 * size);
+    }
+}
+
+/* FAR = old ^ ((new ^ old) & mask), sc'd, retried from `top` */
+static void sub_commit(struct mips_fn *F, int new_reg, int top)
+{
+    struct code *t = F->t;
+    mips_alu(t, MIPS_XOR, FAR, new_reg, SUB_OLD);
+    mips_alu(t, MIPS_AND, FAR, FAR, SUB_MK);
+    mips_alu(t, MIPS_XOR, FAR, FAR, SUB_OLD);
+    mips_sc(t, FAR, SUB_AL, 0);
+    int again = br_place(F, MIPS_BEQ, FAR, MIPS_ZERO);
+    br_back(F, again, top);
 }
 
 static void gen_ins(struct mips_fn *F, int n)
@@ -3444,6 +3507,35 @@ static void gen_ins(struct mips_fn *F, int n)
          * so the new value is built in SCR on every trip. */
         int addr, val, dst, top, again, dw;
         need_word_atomic(F, i);
+        if (i->size == 1 || i->size == 2) {
+            addr = rdr(F, i->a, ADDR);
+            val = g_m64 ? rd32(F, i->b, TMP) : rdr(F, i->b, TMP);
+            sub_lane(F, addr, i->size);
+            sub_in(F, TMP, val);                  /* the operand, in lane */
+            int op = i->op == IR_ARMW ? (int)i->imm : 0;
+            mips_sync(t, 0);
+            top = t->len;
+            mips_ll(t, SUB_OLD, SUB_AL, 0);
+            if (i->op == IR_XCHG)
+                mips_mv(t, ADDR, TMP);
+            else if (i->op == IR_XADD)
+                mips_alu(t, MIPS_ADDU, ADDR, SUB_OLD, TMP);
+            else if (op == '&')
+                mips_alu(t, MIPS_AND, ADDR, SUB_OLD, TMP);
+            else if (op == '|')
+                mips_alu(t, MIPS_OR, ADDR, SUB_OLD, TMP);
+            else if (op == '^')
+                mips_alu(t, MIPS_XOR, ADDR, SUB_OLD, TMP);
+            else {                                  /* nand */
+                mips_alu(t, MIPS_AND, ADDR, SUB_OLD, TMP);
+                mips_alu(t, MIPS_NOR, ADDR, ADDR, MIPS_ZERO);
+            }
+            sub_commit(F, ADDR, top);
+            mips_sync(t, 0);
+            sub_out(F, i->size, i->sign);
+            wrote(F, i->dst, SUB_OLD);
+            return;
+        }
         dw = i->size == 8;            /* MIPS64: lld/scd */
         addr = rdr(F, i->a, ADDR);
         val = g_m64 && !dw ? rd32(F, i->b, TMP) : rdr(F, i->b, TMP);
@@ -3490,6 +3582,41 @@ static void gen_ins(struct mips_fn *F, int n)
         int addr, exp, des, seen = ACC, out_br, top, again;
         int dw;
         need_word_atomic(F, i);
+        if (i->size == 1 || i->size == 2) {
+            /* the lane only: expected and desired moved into it */
+            addr = rdr(F, i->a, ADDR);
+            sub_lane(F, addr, i->size);
+            if (i->op == IR_CAS) {
+                sub_in(F, TMP, g_m64 ? rd32(F, i->b, TMP) : rdr(F, i->b, TMP));
+            } else {
+                int p = rdr(F, i->b, TMP);
+                mips_load(t, TMP, p, 0, i->size, 0);
+                sub_in(F, TMP, TMP);
+            }
+            sub_in(F, ADDR, g_m64 ? rd32(F, i->c, ADDR) : rdr(F, i->c, ADDR));
+            mips_sync(t, 0);
+            top = t->len;
+            mips_ll(t, SUB_OLD, SUB_AL, 0);
+            mips_alu(t, MIPS_AND, FAR, SUB_OLD, SUB_MK);
+            out_br = br_place(F, MIPS_BNE, FAR, TMP);
+            sub_commit(F, ADDR, top);
+            br_land(F, out_br);
+            mips_sync(t, 0);
+            if (i->op == IR_CAS) {
+                sub_out(F, i->size, i->sign);
+                wr(F, i->dst, SUB_OLD);
+            } else {
+                /* the flag from the lanes compared; then *b = seen */
+                mips_alu(t, MIPS_AND, ADDR, SUB_OLD, SUB_MK);
+                mips_alu(t, MIPS_XOR, ADDR, ADDR, TMP);
+                mips_alu_imm(t, MIPS_SLTIU, ADDR, ADDR, 1);
+                sub_out(F, i->size, 0);
+                int p = rdr(F, i->b, TMP);
+                mips_store(t, SUB_OLD, p, 0, i->size);
+                wr(F, i->dst, ADDR);
+            }
+            return;
+        }
         dw = i->size == 8;            /* MIPS64: lld/scd */
         addr = rdr(F, i->a, ADDR);
         if (i->op == IR_CAS) {
@@ -3611,8 +3738,32 @@ static void gen_ins(struct mips_fn *F, int n)
         F->barrier = t->len;
         return;
     }
-    case IR_LABELADDR: case IR_IGOTO:
-        mips_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label: the function's own address, as IR_FADDR takes it,
+         * plus the label's offset in it -- the addend set once the
+         * function is laid out. o32 has no PC-relative address. */
+        int d = wreg(F, i->dst, ACC);
+        int at = abs_pair(F, d), s0 = F->st->nf;
+        struct func *self = fn->src;
+        if (g_m64) {
+            note_fn(F->st, at, self, RK_MIPS_HIGHEST);
+            note_fn(F->st, at + 4, self, RK_MIPS_HIGHER);
+            note_fn(F->st, at + 12, self, RK_MIPS_HI16);
+            note_fn(F->st, at + 20, self, RK_MIPS_LO16);
+        } else {
+            note_fn(F->st, at, self, RK_MIPS_HI16);
+            note_fn(F->st, at + 4, self, RK_MIPS_LO16);
+        }
+        want_label(F, at, i->label, FX_ADDR);
+        F->fix[F->nfix - 1].base = s0;
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        mips_jr(t, rdr(F, i->a, ACC));
+        put_slot(F, -1);
         return;
     default:
         mips_refuse(F, i, "this operation");
@@ -4119,6 +4270,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                      (unsigned long)(target - F.fix[i].base) & 0xffffffffUL);
             continue;
         }
+        if (F.fix[i].kind == FX_ADDR) {
+            for (int k = 0; k < (g_m64 ? 4 : 2); k++)
+                F.st->f[F.fix[i].base + k].addend = target - f->code_off;
+            continue;
+        }
         if (!mips_patch_b(t, F.fix[i].at, target)) {
             if (nlongb < F.nfix) {
                 longb = xrealloc(longb, (size_t)F.nfix);
@@ -4143,6 +4299,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

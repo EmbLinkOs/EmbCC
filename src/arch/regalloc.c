@@ -139,8 +139,13 @@ void ra_count_vreg_uses(const struct ir_func *fn, int *cnt)
  * block's live-out set, and every consumer walks it that way
  * (ra_lset_out / ra_lset_step). The blocks are those of the
  * instruction-level graph the old fixpoint used: a successor is the next
- * instruction unless the op is JMP, RET, UD2 or SWITCH, plus a jump's or
- * a switch's labels -- so `goto *p` falls through here as it did there. */
+ * instruction unless the op is JMP, RET, UD2, SWITCH or IGOTO, plus a
+ * jump's or a switch's labels -- and `goto *p` reaches every label whose
+ * address is taken (an IR_LABELADDR names it). It used to fall through
+ * here, as it did there: a value read only at a label the jump went BACK
+ * to looked dead after its last read, and the allocator gave its register
+ * to the next value -- harmless only on the backends that switched the
+ * allocator off for a function with a computed goto. */
 struct ra_live {
     int nins, nvr, nbb;
     int *bstart;                    /* block b is [bstart[b], bstart[b+1]) */
@@ -221,7 +226,8 @@ struct ra_live *ra_live_compute(const struct ir_func *fn, int *first, int *last)
         enum ir_op op = fn->ins[i].op;
         if (op == IR_LABEL) lead[i] = 1;
         if ((op == IR_JMP || op == IR_BRZ || op == IR_BRNZ || op == IR_RET ||
-             op == IR_UD2 || op == IR_SWITCH) && i + 1 < nins)
+             op == IR_UD2 || op == IR_SWITCH || op == IR_IGOTO) &&
+            i + 1 < nins)
             lead[i + 1] = 1;
     }
     int nbb = 0;
@@ -244,13 +250,34 @@ struct ra_live *ra_live_compute(const struct ir_func *fn, int *first, int *last)
         if (fn->ins[i].op == IR_LABEL && fn->ins[i].label >= 0 &&
             fn->ins[i].label < fn->nlabels)
             labelidx[fn->ins[i].label] = i;
+    /* the blocks a computed goto may reach: one per address-taken label */
+    int *taken = NULL, ntaken = 0;
+    for (int i = 0; i < nins; i++)
+        if (fn->ins[i].op == IR_IGOTO) {
+            char *seen = xcalloc((size_t)nbb, 1);
+            taken = xmalloc((size_t)nbb * sizeof *taken);
+            for (int k = 0; k < nins; k++) {
+                int l = fn->ins[k].label;
+                if (fn->ins[k].op != IR_LABELADDR || l < 0 ||
+                    l >= fn->nlabels || labelidx[l] < 0 ||
+                    seen[lv->blk[labelidx[l]]])
+                    continue;
+                seen[lv->blk[labelidx[l]]] = 1;
+                taken[ntaken++] = lv->blk[labelidx[l]];
+            }
+            free(seen);
+            break;
+        }
     struct ra_pairs edge = { NULL, NULL, 0, 0 };     /* (succ, pred) */
     for (int b = 0; b < nbb; b++) {
         int i = lv->bstart[b + 1] - 1;
         const struct ir_ins *s = &fn->ins[i];
         if (s->op != IR_JMP && s->op != IR_RET && s->op != IR_UD2 &&
-            s->op != IR_SWITCH && i + 1 < nins)
+            s->op != IR_SWITCH && s->op != IR_IGOTO && i + 1 < nins)
             ra_pairs_add(&edge, b + 1, b);
+        if (s->op == IR_IGOTO)
+            for (int k = 0; k < ntaken; k++)
+                ra_pairs_add(&edge, taken[k], b);
         if ((s->op == IR_JMP || s->op == IR_BRZ || s->op == IR_BRNZ) &&
             s->label >= 0 && s->label < fn->nlabels &&
             labelidx[s->label] >= 0)
@@ -264,6 +291,7 @@ struct ra_live *ra_live_compute(const struct ir_func *fn, int *first, int *last)
             }
     }
     free(labelidx);
+    free(taken);
     int *poff, *pred;                 /* predecessors of each block */
     ra_pairs_csr(&edge, 0, nbb, &poff, &pred);
     free(edge.v); free(edge.b);
@@ -1926,7 +1954,7 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
         if (op == IR_LABEL) b++;
         blk[i] = b;
         if (op == IR_JMP || op == IR_BRZ || op == IR_BRNZ ||
-            op == IR_RET || op == IR_UD2 || op == IR_SWITCH)
+            op == IR_RET || op == IR_UD2 || op == IR_SWITCH || op == IR_IGOTO)
             b++;
     }
 

@@ -323,23 +323,37 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf; do
 done
 echo "case nolink: a board image with no memory map, or an AArch64 one, is refused by name"
 
-# C++ is laid out by its own front end for LP64. On a target whose long
-# or pointers are not 8 bytes it compiled anyway, with sizeof(long) 8 on
-# ARMv7-M and sizeof(void *) 8 on AVR, so it is refused there -- except
-# for a check that writes nothing.
+# C++ follows the target's data model and C++ ABI on 32-bit ARM and RV32
+# (tests/golden/cxx-embedded.sh); on the other narrow targets -- AVR's
+# two-byte pointers, MIPS, Xtensa, TriCore -- nobody has checked a vtable
+# or a mangled name, so code generation is refused by name there, except
+# for a check that writes nothing. On ARM and RV32 exceptions are refused
+# by name: there are no unwind tables for them.
 printf 'long f(long x) { return x + (long)sizeof(long); }\n' > "$out_dir/ilp.cpp"
-for t in thumbv7em-none-eabi riscv32-unknown-elf avr; do
-    if err=$("$EMBCC" --target=$t -c "$out_dir/ilp.cpp" \
+for t in avr mipsel-none-elf xtensa-none-elf tricore-none-elf; do
+    if err=$("$EMBCC" --target=$t -fno-exceptions -c "$out_dir/ilp.cpp" \
              -o "$out_dir/ilp.o" 2>&1); then
-        echo "case cxx-not-lp64 $t: compiled C++ laid out for LP64"; exit 1
+        echo "case cxx-not-lp64 $t: compiled C++ for an unchecked C++ ABI"; exit 1
     fi
     echo "$err" | grep -q "C++ is not yet supported for $t" || {
         echo "case cxx-not-lp64 $t: wrong diagnostic:"; echo "$err"; exit 1; }
 done
-"$EMBCC" --target=riscv32-unknown-elf -fsyntax-only "$out_dir/ilp.cpp" || {
+for t in thumbv7em-none-eabi riscv32-unknown-elf; do
+    if err=$("$EMBCC" --target=$t -c "$out_dir/ilp.cpp" \
+             -o "$out_dir/ilp.o" 2>&1); then
+        echo "case cxx-not-lp64 $t: compiled C++ with exceptions"; exit 1
+    fi
+    echo "$err" | grep -q "C++ exceptions are not supported for $t" || {
+        echo "case cxx-not-lp64 $t: wrong diagnostic:"; echo "$err"; exit 1; }
+    "$EMBCC" --target=$t -fno-exceptions -c "$out_dir/ilp.cpp" \
+        -o "$out_dir/ilp.o" || {
+        echo "case cxx-not-lp64 $t: C++ with -fno-exceptions was refused"
+        exit 1; }
+done
+"$EMBCC" --target=avr -fsyntax-only "$out_dir/ilp.cpp" || {
     echo "case cxx-not-lp64: -fsyntax-only, which writes nothing, was refused"
     exit 1; }
-echo "case cxx-not-lp64: C++ for a target that is not LP64 is refused by name"
+echo "case cxx-not-lp64: C++ for an unchecked C++ ABI, and exceptions on ARM and RV32, are refused by name"
 
 # File-scope asm: AArch64's blocks are read by the x86-64 vocabulary's
 # assembler (src/arch/x86_64/topasm.c), so an instruction in one is
@@ -414,10 +428,6 @@ int f(int n, ...) { va_list ap; __builtin_va_start(ap, n);
 int main(void) { return 0; }' \
     "va_arg of a struct is not supported for a Windows target" \
     --target=x86_64-windows-gnu
-check overaligned-scalar-local \
-    'int f(int k) { int x __attribute__((aligned(64))); x = k; return x; }
-int main(void) { return 0; }' \
-    "not yet for a scalar"
 check static-assert-false \
     '_Static_assert(sizeof(int) == 8, "int is not eight bytes");
 int main(void) { return 0; }' \
@@ -648,3 +658,15 @@ check coff-section-variable \
     'int a = 1; int b __attribute__((section(".mydata"))) = 2;' \
     "variable's section attribute is not supported for COFF" \
     --target=x86_64-windows-gnu
+
+# The frame builtins are refused by NAME where the code keeps no frame
+# chain. On RISC-V and AVR the eight-byte check met them first (their w is
+# a host pointer's) and the message said "this operation at 64 bits".
+for t in riscv32-unknown-elf riscv64-unknown-elf avr; do
+    check "frame-builtins-$t" \
+        'void *f(void) { return __builtin_frame_address(0); }
+void *g(void) { return __builtin_return_address(0); }
+int main(void) { return 0; }' \
+        "__builtin_frame_address or __builtin_return_address" \
+        "--target=$t"
+done

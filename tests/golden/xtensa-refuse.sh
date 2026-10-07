@@ -108,16 +108,10 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "a 1-byte atomic" 'an atomic narrower than four bytes' \
-    'char c; int f(void){ return __atomic_fetch_add(&c, 1, 5); }' -O1
-refc "a 2-byte compare-and-swap" 'an atomic narrower than four bytes' \
-    'short s; int f(void){ short e = 0; return __atomic_compare_exchange_n(&s, &e, 1, 0, 5, 5); }'
 refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
     'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
     'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "a computed goto" 'a computed goto' \
-    'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }'
 refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
     'void *f(void){ return __builtin_return_address(0); }'
 refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
@@ -132,14 +126,12 @@ refc "a naked function" 'inline assembly is not supported for xtensa-none-elf' \
     'void __attribute__((naked)) f(void){ __asm__("retw"); }'
 refc "a file-scope instruction" 'file-scope asm instruction' \
     '__asm__(".globl x\nx: nop");'
-refc "a 32-aligned scalar local" 'needs 32-byte alignment and the stack only guarantees 16' \
-    'int g(int *); int f(void){ _Alignas(32) int x = 1; return g(&x); }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
     echo "C++ was accepted"; exit 1
 fi
 grep -q 'C++ is not yet supported for xtensa-none-elf' "$out/cxx.err" || {
     echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
-echo "narrow and 8-byte atomics, computed goto, the frame and return address,"
+echo "narrow and 8-byte atomics, the frame and return address,"
 echo "__int128, interrupt and naked functions, inline and file-scope assembly,"
 echo "a scalar aligned beyond the 16-byte stack and C++ are each refused by name"

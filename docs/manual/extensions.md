@@ -46,7 +46,7 @@ A construct that a code generator cannot lower is refused when the
 function containing it is compiled, with a message of the form
 
 ```text
-embcc: f.c:2: error: the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]
+embcc: f.c:3: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]
 ```
 
 The bracketed part names the internal operation that could not be
@@ -73,7 +73,7 @@ operators](#feature-test-operators), with the limits described there.
 | [Statement expressions](#statement-expressions) `({ ... })` | Supported |
 | [`typeof`, `__typeof__`, `__typeof`, `typeof_unqual`](#typeof) | Supported for a type name and for most expressions |
 | [`__auto_type`](#__auto_type) | Supported at block scope |
-| [Labels as values and computed `goto`](#labels-as-values-and-computed-goto) | x86-64 and AArch64 only |
+| [Labels as values and computed `goto`](#labels-as-values-and-computed-goto) | Supported, in static tables too |
 | [Local labels](#local-labels) (`__label__`) | Supported |
 | [Case ranges](#case-ranges) (`case 1 ... 5:`) | Supported |
 | [Designated range initializers](#designated-range-initializers) (`[2 ... 5] = x`) | Supported |
@@ -178,24 +178,41 @@ sub:
 }
 ```
 
-This is supported on x86-64 and AArch64. The other code generators
-refuse it:
+This is supported on every target. A label's address is a code
+address, the same kind of value a function pointer holds: on Cortex-M
+it has bit 0 set (Thumb state, ready for `bx`), and on AVR it is a
+word address in program memory, as `gs()` makes it.
 
-| Target | Diagnostic |
-|---|---|
-| Cortex-M | `the ARMv7-M backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| RV32 | `the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| RV64 | `the RV64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| AVR | `the AVR backend cannot lower labeladdr yet (function f) [labeladdr w=4 size=4]` |
+A label address may also initialize an object with static storage
+duration inside its function, which is how a threaded interpreter
+keeps its dispatch table, and the difference of two label addresses is
+a constant there, as in GCC:
 
-On every target, a label address cannot initialize an object with
-static storage duration, so the table above must be an automatic
-array. A `static` table is refused with `a static initializer must be a
-constant, a string literal, or the address of a global`. The difference
-of two label addresses (`&&b - &&a`) is refused as `arithmetic on void
-*`. A label whose address is taken must be defined (`label 'x' used but
-not defined`). A function that contains a computed `goto` is never
-inlined; see [Inlining](optimization.md#inlining).
+```c
+int step(int op)
+{
+    static void *const table[] = { &&add, &&sub };
+    static const int off[] = { &&add - &&add, &&sub - &&add };
+    if (op < 0)
+        goto *(&&add + off[-op - 1]);
+    goto *table[op];
+add:
+    return 1;
+sub:
+    return 2;
+}
+```
+
+Arithmetic on a label address -- `&&b - &&a`, `&&a + n` -- is in bytes,
+as on a `char *` (on AVR, in words, since the address is one); `void *`
+arithmetic is still refused anywhere else (`arithmetic on void *`). A
+label address cannot initialize an object outside its function: at
+file scope it is refused with `a static initializer must be a constant,
+a string literal, or the address of a global`. A label whose address is
+taken must be defined (`label 'x' used but not defined`). A function
+that contains a computed `goto` is never inlined; see
+[Inlining](optimization.md#inlining). C++ refuses both forms (see
+[C++](cxx.md)).
 
 ### Local labels
 
@@ -334,8 +351,10 @@ attribute means the same in both.
 
 An attribute may appear:
 
-- at the start of a declaration, before or among the declaration
-  specifiers;
+- at the start of a declaration, or among its specifiers, after a
+  storage class or a qualifier (`static const __attribute__((aligned(4)))
+  char t[4];`), at any scope, and so in a structure member's or a
+  parameter's specifiers;
 - after a declarator, including after a function's parameter list;
 - after `struct`, `union` or `enum`, before the tag, or after the closing
   brace of the definition (not between the tag and `{`);
@@ -356,7 +375,10 @@ These positions are not accepted:
 - on an enumerator: `expected '}' before '__attribute__'`;
 - after the `*` of a structure member's declarator, for an attribute
   that changes layout or linkage:
-  `__attribute__((weak)) is not supported in this position (after a declarator it is; on a struct or union, put it right after the keyword or after the closing '}')`.
+  `__attribute__((weak)) is not supported in this position (after a declarator it is; on a struct or union, put it right after the keyword or after the closing '}')`;
+- in the type name of a cast or `sizeof`, for an attribute that changes
+  layout or linkage, which has no declaration there to apply to:
+  `__attribute__((aligned)) is not supported in a type name: there is no declaration here to carry it`.
 
 ### How EmbCC treats an attribute
 
@@ -484,21 +506,16 @@ embcc: a.c:1: error: aligned wants a constant power of two
 two`), except that `_Alignas(0)` is accepted and has no effect, as C11
 specifies.
 
-A local array, structure or union whose alignment exceeds what the
-stack pointer guarantees (16 bytes on x86-64, AArch64 and RISC-V, 8 on
-Cortex-M) is placed in storage that EmbCC aligns at function entry, so
-its address has the requested alignment at any call depth. A local of
-scalar type with such an alignment is refused:
+A local whose alignment exceeds what the stack pointer guarantees (16
+bytes on x86-64, AArch64 and RISC-V, 8 on Cortex-M) is placed in storage
+that EmbCC aligns at function entry, so its address has the requested
+alignment at any call depth. That holds for a scalar as well as an
+array, structure or union; a scalar so aligned is read and written in
+that storage, as a variable whose address is taken is, rather than kept
+in a register.
 
-```text
-embcc: f.c:2:20: error: 'x' needs 64-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar
-```
-
-On AVR, a local variable cannot be given an alignment:
-
-```text
-embcc: f.c:1: error: the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)
-```
+On AVR, whose stack pointer has no alignment at all, every local with
+an alignment greater than 1 is placed that way.
 
 `_Alignas` and `#pragma pack` interact with `aligned` as in GCC: the
 stricter of `aligned(N)` and `_Alignas(N)` applies, and `#pragma
@@ -909,15 +926,13 @@ check, as a call to a `noreturn` function does.
 
 | Builtin | Result | Targets |
 |---|---|---|
-| `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All but AVR |
-| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All but AVR |
+| `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All |
+| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All |
 | `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | x86-64, AArch64 |
 | `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | x86-64, AArch64 |
 
 `level` must be a non-negative integer constant (`__builtin_frame_address
-needs a non-negative constant level`). On AVR, `alloca` is refused as a
-variable-length array is (`the AVR backend cannot lower a variable-length
-array yet (function f)`). On Cortex-M, RISC-V, MIPS32 and AVR the frame
+needs a non-negative constant level`). On Cortex-M, RISC-V, MIPS32 and AVR the frame
 builtins are refused:
 
 ```text

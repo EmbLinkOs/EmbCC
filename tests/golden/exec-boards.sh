@@ -19,9 +19,9 @@
 # run found a linker bug (a thread_local moved a Cortex-M image's text
 # below address 0) and two -O0 miscompiles of `x--` on wide values.
 #
-# A driver runs the constructors (.init_array, between the bracket
-# symbols embld defines, as a crt0 does), calls the program's main,
-# renamed, and exits QEMU with its result: semihosting's
+# The harness's boot runs the constructors (.init_array, between the
+# bracket symbols embld defines, as a crt0 does); a driver calls the
+# program's main, renamed, and exits QEMU with its result: semihosting's
 # SYS_EXIT_EXTENDED on the M4, the test device on virt. The M4's stack is
 # at the top of the board's 4 MiB: big-copy.c has 240 KiB of arrays.
 # A program that does not compile for a target, or does not link against
@@ -59,15 +59,12 @@ triple() {
 }
 
 cat > "$out/drv-m4.c" <<'EOT'
-/* the constructors, then main's result out through semihosting
- * SYS_EXIT_EXTENDED */
+/* main's result out through semihosting SYS_EXIT_EXTENDED (the
+ * harness's boot has run the constructors) */
 int prog_main(void);
-extern void (*__init_array_start[])(void), (*__init_array_end[])(void);
 static volatile unsigned blk[2];
 int main(void)
 {
-    for (void (**f)(void) = __init_array_start; f < __init_array_end; f++)
-        (*f)();
     int r = prog_main();
     blk[0] = 0x20026u;              /* ADP_Stopped_ApplicationExit */
     blk[1] = (unsigned)r;
@@ -84,15 +81,12 @@ int prog_main(void);
 int main(void) { return prog_main(); }
 EOT
 cat > "$out/drv-rv.c" <<'EOT'
-/* the constructors, then main's result out through virt's test device:
- * 0x5555 exits 0, and 0x3333 with a code in the upper half exits with
- * that code */
+/* main's result out through virt's test device: 0x5555 exits 0, and
+ * 0x3333 with a code in the upper half exits with that code (the
+ * harness's boot has run the constructors) */
 int prog_main(void);
-extern void (*__init_array_start[])(void), (*__init_array_end[])(void);
 int main(void)
 {
-    for (void (**f)(void) = __init_array_start; f < __init_array_end; f++)
-        (*f)();
     int r = prog_main();
     *(volatile unsigned *)0x100000u =
         r ? ((unsigned)r << 16) | 0x3333u : 0x5555u;

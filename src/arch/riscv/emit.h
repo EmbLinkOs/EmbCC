@@ -109,6 +109,10 @@ void rv_cunimp(struct code *c);   /* two bytes, and it traps */
  * both left for relocation, and never compressed (addi rd,rd,0 is
  * c.mv). Returns the auipc's offset; the addi is at +4. */
 int rv_pcrel_pair(struct code *c, int rd);
+/* ...and one whose target is in this same buffer, patched here once its
+ * place is known: `auipc rd, %pcrel_hi; addi rd, rd, %pcrel_lo` with no
+ * relocation (a computed goto's &&label). */
+void rv_patch_pcrel_pair(struct code *c, int at, int target);
 void rv_set_compress(int on, int xlen);
 int  rv_compress_enabled(void);
 

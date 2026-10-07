@@ -199,8 +199,8 @@ the ESP32 objects.
 
 ## What the first backend refuses
 
-By name: `__int128` (no 128-bit type on ILP32), atomics narrower or wider
-than a word (s32c1i is a word), computed goto, `__builtin_frame_address`
+By name: `__int128` (no 128-bit type on ILP32), atomics wider than a word
+(one and two bytes are an s32c1i loop on the word around them), computed goto, `__builtin_frame_address`
 and `__builtin_return_address`, inline and file-scope assembly, naked and
 interrupt functions, tail calls (the windowed ABI has none), C++, `-S`
 (no Xtensa assembler to read it back), a function over 128 KiB, and every

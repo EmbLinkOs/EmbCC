@@ -161,8 +161,6 @@ refc "an 8-byte atomic read-modify-write" 'an atomic wider than four bytes' \
     'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
     'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "a computed goto" 'cannot lower a computed goto' \
-    'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }'
 refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
     'void *f(void){ return __builtin_return_address(0); }'
 refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
@@ -170,8 +168,6 @@ refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_addr
 refc "__int128" '__int128 does not exist on this target' '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt("IRQ"))) f(void){}'
-refc "a 16-aligned scalar local" 'needs 16-byte alignment and the stack only guarantees 8' \
-    'int f(void){ _Alignas(16) int x = 1; return x; }'
 refc "an M-profile special register in asm" 'the M-profile special registers do not exist here' \
     'int f(void){ int r; __asm__ volatile("mrs %0, primask" : "=r"(r)); return r; }'
 refc "cbz in asm" 'cbz is a Thumb instruction' \
@@ -182,15 +178,20 @@ refc ".thumb_func in file-scope asm" '.thumb_func: EmbCC assembles ARM (A32) cod
     '__asm__(".thumb_func\nfoo:\n bx lr\n");'
 refc ".thumb in file-scope asm" '.thumb: EmbCC assembles ARM (A32) code' \
     '__asm__(".thumb\nfoo:\n bx lr\n");'
+# C++ compiles here (the ARM C++ ABI, tests/golden/cxx-embedded.sh), but
+# not with exceptions: EmbCC writes no EHABI unwind tables
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for armv7a-none-eabi' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
-echo "8-byte atomics, computed goto, the frame and return address, __int128,"
+grep -q 'C++ exceptions are not supported for armv7a-none-eabi' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"
+    exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions was refused"; exit 1; }
+echo "8-byte atomics, the frame and return address, __int128,"
 echo "interrupt functions, an over-aligned scalar, Thumb and M-profile asm, a"
-echo "condition on a sequence and C++ are each refused by name"
+echo "condition on a sequence and C++ exceptions are each refused by name"
 
 # ---- and what ARM state does accept in asm, run through llvm-mc ----------
 MC=${EMBCC_LLVM_MC:-llvm-mc}

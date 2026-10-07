@@ -138,6 +138,28 @@ struct greloc {
     struct global *gtarget; /* an &global target, else NULL */
     struct func *ftarget; /* a function-address target, else NULL */
     long addend;
+    /* GNU C: `static void *tab[] = { &&a, &&b }`. A label's address is
+     * the address of its function plus the label's offset in it, which
+     * only codegen knows: `label` names it (ftarget is the function),
+     * irgen gives it slot `label_slot` of ftarget->label_pos, and the
+     * driver adds the offset to the addend once the function is laid
+     * out. Unused (NULL) for every other kind of target. */
+    const char *label;
+    int label_line;
+    int label_slot;
+};
+
+/* GNU C: `&&b - &&a` in a static initializer -- a constant, but one only
+ * codegen knows: `size` bytes at `off` become label - minus + addend,
+ * written into the image by the driver once the function is laid out.
+ * No relocation: the two labels are in one function. */
+struct glabeldiff {
+    int off, size;
+    struct func *fn;
+    const char *label, *minus;
+    int line;
+    int slot, minus_slot;     /* irgen: slots of fn->label_pos */
+    long addend;
 };
 
 enum stmt_kind { STMT_RETURN, STMT_DECL, STMT_EXPR, STMT_IF, STMT_WHILE,
@@ -301,6 +323,8 @@ struct global {
                            * global_size() */
     struct greloc *relocs;  /* pointer slots the linker resolves */
     int nrelocs;
+    struct glabeldiff *ldiffs;  /* `&&b - &&a` slots the driver fills */
+    int nldiffs;
     struct global *next;
 
     int defined;          /* sema, canonical: some declaration defines it */
@@ -439,6 +463,13 @@ struct func {
      * backwards). The symbol is at code_off + code_entry; code_len
      * covers both. */
     int code_entry;
+    /* GNU C: the labels whose addresses static data takes (struct
+     * greloc's label, struct glabeldiff), by slot: each one's offset from
+     * the function's symbol, -1 until codegen places it (cg_note_labels);
+     * and the slots' count, which irgen sets. */
+    long *label_pos;
+    int nlabel_pos;
+    int has_label_data;   /* sema: some static local takes a label's address */
     /* ...and the alignment codegen gave that start, in bytes: what the
      * function's section has to claim when it is a section of its own
      * (-ffunction-sections). 0 is "not said", taken as 16. */

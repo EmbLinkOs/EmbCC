@@ -1258,11 +1258,13 @@ floating-point operation is a call into the binary32 routines (`__addsf3`,
 `__mulsf3`, `__divsf3`, `__ltsf2`, `__fixsfsi`, ...). EmbCC does not call
 avr-gcc's `__divmodsi4` family, and its `librt.a` does not define it.
 
-### What is refused
+### The stack
 
-| Construct | Diagnostic |
-|---|---|
-| Variable-length arrays | `the AVR backend cannot lower a variable-length array yet` |
+Variable-length arrays, `alloca` and locals with an alignment move the
+stack pointer below the frame, which stays at Y. A call made after one
+copies its stack arguments down to the new stack pointer, where the callee
+looks for them, and the stack pointer is restored at the end of a VLA's
+scope and at the return.
 
 Atomics of one, two and four bytes compile: every read-modify-write,
 compare-exchange, and a two- or four-byte load or store. Each is done with
@@ -1340,16 +1342,40 @@ cross toolchain; only the program under test comes from EmbCC.
 
 ## C++ on the embedded targets
 
-EmbCC's C++ front end lays out classes for a target whose `long` and
-pointers are 8 bytes. On the Cortex-M targets, RV32, MIPS32 and AVR it
-refuses to generate code for a C++ unit:
+C++ is compiled for the 32-bit ARM targets (the Cortex-M triples and
+`armv7a-none-eabi`) and for `riscv32-unknown-elf` without exceptions,
+with or without RTTI. A firmware build looks like this:
 
-```text
-embcc: error: C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4
+```sh
+embcc --target=thumbv7em-none-eabihf -Os -fno-exceptions -fno-rtti \
+      -c driver.cc -o driver.o
+embld -e reset -Ttext 0x0 -Tdata 0x20000000 boot.o driver.o \
+      build/libcxx/thumbv7em-none-eabihf/libcxx.a \
+      build/libc/thumbv7em-none-eabihf/libc.a \
+      build/libc/thumbv7em-none-eabihf/librt.a -o image.elf
 ```
 
-`-fsyntax-only`, `-E`, `-M` and `-MM` still accept C++ there; `-c`, `-S`,
-`--emit-c` and `--emit-interfaces` do not.
+The startup code must call the functions between `__init_array_start`
+and `__init_array_end` before `main`: that is where the constructors of
+namespace-scope objects are. `make libcxx-embedded` builds the C++
+runtime (`operator new` and `delete`, the guard functions,
+`__aeabi_atexit`, the RTTI classes and `__dynamic_cast`); objects follow the ARM C++ ABI and link with
+clang++'s. Exceptions are refused by name, as there are no unwind tables
+for these machines:
+
+```text
+embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions
+```
+
+On AVR, MIPS32, Xtensa and TriCore EmbCC refuses to generate code for a
+C++ unit:
+
+```text
+embcc: error: C++ is not yet supported for avr: the C++ front end follows the C++ ABI of x86-64, AArch64, 32-bit ARM and riscv32, and this target's (2-byte pointers) is not implemented
+```
+
+`-fsyntax-only`, `-E`, `-M` and `-MM` still accept C++ there. See
+[C++ targets](cxx.md#targets) for what the ABI is on each target.
 
 C++ compiles for `riscv64-unknown-elf`, but no C++ runtime is built for
 it. Code that needs a landing pad (a `try` block, or a local

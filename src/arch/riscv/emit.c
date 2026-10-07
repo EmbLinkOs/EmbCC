@@ -812,6 +812,24 @@ int rv_pcrel_pair(struct code *c, int rd)
     return at;
 }
 
+void rv_patch_pcrel_pair(struct code *c, int at, int target)
+{
+    long d = (long)target - at;
+    for (int k = 0; k < 2; k++) {
+        int o = at + 4 * k;
+        unsigned long w = (unsigned long)c->p[o] |
+                          ((unsigned long)c->p[o + 1] << 8) |
+                          ((unsigned long)c->p[o + 2] << 16) |
+                          ((unsigned long)c->p[o + 3] << 24);
+        /* keep the opcode and registers; replace the immediate only */
+        if (k == 0)
+            w = (w & 0xfffUL) | rv_enc_u(0, 0, hi20_of(d));
+        else
+            w = (w & 0xfffffUL) | rv_enc_i(0, 0, 0, 0, lo12_of(d));
+        code_patch32(c, o, w);
+    }
+}
+
 int rv_call_placeholder(struct code *c)
 {
     /* No compression here: the auipc/jalr pair, patched at at+0 and at+4. A decision made on a

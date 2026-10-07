@@ -403,11 +403,9 @@ libc-linux-x86_64` and linked automatically. On `x86_64-elf`, link
   separately. See [Linking](invoking.md#linking).
 - `__thread` uses the local-exec model only (`R_X86_64_TPOFF32`), which
   is correct in a statically linked executable.
-- A scalar local aligned beyond 16 bytes is refused: `'x' needs 32-byte
-  alignment and the stack only guarantees 16: supported for an array or a
-  struct, not yet for a scalar`. An array or structure local so aligned
-  is supported: its storage is carved from the stack at function entry
-  and rounded up.
+- A local aligned beyond 16 bytes, scalar or aggregate, is supported: its
+  storage is carved from the stack at function entry and rounded up, and
+  a scalar is read and written there.
 
 ## AArch64
 
@@ -921,7 +919,6 @@ part with another bus master, defines its own.
 | 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` (ARMv6-M: `the ARMv6-M backend cannot lower an atomic wider than four bytes`; ARMv8-M Baseline: `the ARMv8-M Baseline backend cannot lower an atomic wider than four bytes (ARMv8-M Baseline has no doubleword exclusive; ...)`) |
 | on ARMv6-M, an inline asm template that uses a Thumb-2 instruction | `the ARMv6-M backend cannot lower an instruction ARMv6-M does not have (a 32-bit Thumb-2 encoding, from inline asm or the backend) yet (function f)` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| a scalar local aligned beyond 8 | `'x' needs 32-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
 
 An array or structure local aligned beyond 8 bytes is supported: its
@@ -1023,7 +1020,7 @@ semihosting exit.
 ### Limitations
 
 Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), an atomic wider than
-four bytes, computed `goto`, `__builtin_frame_address` and
+four bytes, `__builtin_frame_address` and
 `__builtin_return_address`, `__attribute__((interrupt))` (an A-profile
 handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
 and C++. Inline assembly takes the Cortex-M vocabulary in ARM state, with
@@ -1117,7 +1114,6 @@ individually.
 | `__int128` at RV32 | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | an 8-byte atomic read-modify-write at RV32 | `the RV32 backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit at RV32, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for riscv32-unknown-elf: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
 | C++ code that needs a landing pad (`try`, or a destructor run during unwinding) at RV64 | `the RV64 backend cannot lower this operation yet (function f) [landing w=8 size=4]` |
 
@@ -1282,19 +1278,25 @@ QEMU's `malta` board: the image is linked at 0x80100000 in KSEG0 and
 loaded with `-kernel`, the FPGA UART at 0xbf000900 is the console, and an
 exception prints its cause and address.
 
+### Atomics
+
+Every atomic is an `ll`/`sc` loop bracketed by `sync`. A one- or two-byte
+atomic works on the aligned word around it, as GCC's and clang's do: the
+loop rewrites only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic
+against the neighbouring bytes too (a store to any of them fails the
+`sc`). Big-endian, the lane of offset `a & 3` is counted from the top of
+the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
+
 ### Limitations
 
 | Construct | Diagnostic |
 |---|---|
-| an atomic read-modify-write on a 1- or 2-byte object | `the MIPS32 backend cannot lower an atomic narrower than four bytes (ll/sc are word-sized, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [xadd w=4 size=1]` |
 | an 8-byte atomic read-modify-write | `the MIPS32 backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| a computed `goto` | `the MIPS32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function; see [Bare metal](embedded.md#mips32)) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
-| a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
 
 ## MIPS64
@@ -1408,16 +1410,22 @@ for both triples (soft float, binary128, 128-bit integer arithmetic).
 core: the image is linked at 0xffffffff80100000 (KSEG0) and loaded with
 `-kernel`, with tests/harness/mips's startup and UART output.
 
+### Atomics
+
+Every atomic is an `ll`/`sc` loop (`lld`/`scd` for eight bytes) bracketed by `sync`. A one- or two-byte
+atomic works on the aligned word around it, as GCC's and clang's do: the
+loop rewrites only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic
+against the neighbouring bytes too (a store to any of them fails the
+`sc`). Big-endian, the lane of offset `a & 3` is counted from the top of
+the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are defined.
+
 ### Limitations
 
 | Construct | Diagnostic |
 |---|---|
-| an atomic read-modify-write on a 1- or 2-byte object | `the MIPS64 backend cannot lower an atomic narrower than four bytes (...) yet (function f) [xadd w=4 size=1]` |
 | a 16-byte atomic | `the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]` |
-| a computed `goto` | `the MIPS64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS64 backend cannot lower __builtin_frame_address or __builtin_return_address (n64 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
-| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | a doubleword instruction in inline assembly (`daddu`, `ld`, ...) | `asm instruction "daddu $a4, $a5, $a5" is not in the MIPS vocabulary` |
 | `la` in a `.s` file or file-scope `asm` | `la loads a 32-bit address, and a MIPS64 address is 64 bits (nor are %highest and %higher assembled here): load it from a .dword holding the symbol` |
 | reading a packed bit-field over more than 8 bytes, big-endian | `a packed bit-field 'v' across 9 bytes is not supported on a big-endian target (mips64-none-elf)` |
@@ -1600,6 +1608,16 @@ instructions, MAC16, the boolean registers or the density option's
 16-bit instructions. The ESP32-S2 has no S32C1I, so an atomic
 read-modify-write is not for it.
 
+### Atomics
+
+Every atomic is an `s32c1i` loop (the store that happens only while the
+word still equals `SCOMPARE1`) bracketed by `memw`. A one- or two-byte
+atomic works on the aligned word around it, as GCC's does: the loop
+rewrites only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic
+against the neighbouring bytes too (a store to any of them makes the
+`s32c1i` fail and the loop go round), and a compare-and-swap compares only
+its lane. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
+
 ### Calling convention: windowed, soft float
 
 - A `call8` rotates the register window by eight: the caller puts the
@@ -1670,8 +1688,7 @@ From Espressif's `xtensa-esp32-elf-gcc` 16.1: `__xtensa__`, `__XTENSA__`,
 configuration, `__CHAR_UNSIGNED__`, `__WCHAR_TYPE__` `short unsigned int`,
 `__INT32_TYPE__` `long int`. Not `__XTENSA_SOFT_FLOAT__`: the ESP32's GCC
 does not define it, and the float ABI is the same either way.
-`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is defined, the 1- and 2-byte forms
-are not.
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 ## SPARC
 
 SPARC V8, big-endian, as Gaisler's LEON3 implements it -- the processor
@@ -1729,6 +1746,20 @@ is `sethi`/`or` with `R_SPARC_HI22`/`R_SPARC_LO10`, a call is `call` with
 clang's (non-PIC), and refuses the GOT and PC-relative-address relocations
 of PIC code by name. `-Tstack` emits a stub that sets `%sp` and jumps to
 the entry.
+
+### Atomics
+
+An exchange of a word is `swap`; every other atomic is LEON3's `casa`
+(ASI 10), after a `stbar`, and a read-modify-write is a `casa` loop. A
+one- or two-byte atomic works on the aligned word around it, as GCC's and
+clang's do: the loop rewrites only its lane, `old ^ ((new ^ old) & mask)`,
+so it is atomic against the neighbouring bytes too (a store to any of them
+makes the `casa` fail and the loop go round with the word it saw), and a
+compare-and-swap compares only its lane. The lane of offset `a & 3` is
+counted from the top of the word (big-endian). Test-and-set stores 1, as
+`__GCC_ATOMIC_TEST_AND_SET_TRUEVAL` says, not `ldstub`'s 0xff. No
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_N` is defined: the table is clang's for
+`-mcpu=leon3`, which defines none.
 
 ### Assembly
 
@@ -1799,6 +1830,18 @@ dense `switch` is a tree of compares (no jump tables yet). A load or store
 the compiler cannot prove aligned goes a byte at a time. Only the 32-bit
 encodings are emitted.
 
+### Atomics
+
+An exchange of a word is `SWAP.W`, a compare-and-swap `CMPSWAP.W`, and a
+read-modify-write a `CMPSWAP.W` loop, each bracketed by `DSYNC`. A one- or
+two-byte atomic works on the aligned word around it: the loop rewrites
+only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic against the
+neighbouring bytes too (a store to any of them makes the `CMPSWAP.W` fail
+and the loop go round). A compare-and-swap hands `CMPSWAP.W` the word last
+seen with the expected value in the lane; when it fails because a
+neighbour moved, the loop goes round, and when the lane differs, it
+fails. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
+
 ### Object format and linking
 
 ELF32, little-endian, `EM_TRICORE` (44), RELA relocations, `e_flags`
@@ -1828,8 +1871,7 @@ refused.
 
 `__tricore__`, `__TRICORE__`, `__TC161__`, `__TRICORE_CORE__` and
 `__TRICORE_NAME__` (`0x161`), with the ILP32 set; `__CHAR_UNSIGNED__` is
-not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is, the 1- and 2-byte
-forms are not.
+not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are.
 
 ### Runtime
 
@@ -1912,25 +1954,18 @@ the entry.
 | Construct | Diagnostic |
 |---|---|
 | a 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
-| a computed `goto` | `the LoongArch64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the LoongArch64 backend cannot lower __builtin_frame_address or __builtin_return_address (EmbCC's LoongArch code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
-| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
-| an atomic on a 1- or 2-byte object | `the TriCore backend cannot lower an atomic narrower than four bytes (SWAP.W and CMPSWAP.W are word-sized, ...)` |
 | an 8-byte atomic | `the TriCore backend cannot lower an atomic wider than a register yet`; a load or store: `an atomic access of 8 bytes is not one access on this target ...` |
-| a computed `goto` | `the TriCore backend cannot lower a computed goto yet` |
 | `__builtin_frame_address`, `__builtin_return_address` | `... (TriCore code keeps no frame-pointer chain; the return address is in the context-save area)` |
 | `__int128` | `__int128 does not exist on this target ...` |
 | `__attribute__((interrupt))`, `__attribute__((naked))` | `__attribute__((...)) is not supported: ...` |
 | `.s` and `.S` files | `no assembly-file support for tricore-none-elf yet ...` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
-| a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8 ...` |
 | any C++ translation unit | `C++ is not yet supported for tricore-none-elf: ...` |
-| an atomic read-modify-write on a 1- or 2-byte object | `the Xtensa backend cannot lower an atomic narrower than four bytes (s32c1i is word-sized, ...) yet (function f) [...]` |
 | an 8-byte atomic read-modify-write | `the Xtensa backend cannot lower an atomic wider than a register yet (function f) [...]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
-| a computed `goto` | `the Xtensa backend cannot lower a computed goto yet (function f) [...]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the Xtensa backend cannot lower __builtin_frame_address or __builtin_return_address (the windowed ABI keeps a caller's frame in its register window, not in a chain) yet (function f) [...]` |
 | inline assembly, `__attribute__((naked))` | `inline assembly is not supported for xtensa-none-elf yet (EmbCC has no Xtensa assembler vocabulary)` |
 | a file-scope `asm` instruction | `file-scope asm instruction "nop": EmbCC assembles instructions for x86-64 only. ...` |
@@ -1938,19 +1973,15 @@ the entry.
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
-| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for xtensa-none-elf: ...` |
-| an atomic read-modify-write on a 1- or 2-byte object | `the SPARC backend cannot lower an atomic narrower than four bytes (casa and swap are word-sized, ...) yet (function f) [xadd w=4 size=1]` |
 | an 8-byte atomic read-modify-write | `the SPARC backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
-| a computed `goto` | `the SPARC backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the SPARC backend cannot lower __builtin_frame_address or __builtin_return_address yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | inline assembly, a naked function | `inline assembly is not supported for sparc-none-elf yet: EmbCC has no SPARC assembler (...)` |
 | a `.s` or `.S` file | `no assembly-file support for sparc-none-elf yet: EmbCC has no SPARC assembler` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
-| a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for sparc-none-elf: ...` |
 | inline asm | `inline assembly is not supported for m68k-none-elf yet: EmbCC has no ColdFire assembler` |
 | file-scope asm, `.s` and `.S` files | `file-scope asm is not supported for m68k-none-elf yet` / `no assembly-file support` |
@@ -2097,8 +2128,6 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 | Construct | Diagnostic |
 |---|---|
 | an atomic load or store wider than 1 byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
-| a variable-length array | `the AVR backend cannot lower a variable-length array yet (function f)` |
-| any local with `__attribute__((aligned))` | `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
 | an interrupt handler with parameters | `the AVR backend cannot lower an interrupt handler with parameters: the hardware calls it, so there is no caller to pass them and they would be read out of whatever the interrupted code left in those registers yet (function __vector_3)` |
 | an interrupt handler that returns a value | ``the AVR backend cannot lower an interrupt handler that returns a value: `reti` goes back to the interrupted instruction, and nothing is there to receive it yet (function __vector_3)`` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |

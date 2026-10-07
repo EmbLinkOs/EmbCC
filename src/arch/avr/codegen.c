@@ -149,8 +149,9 @@ struct a_sites {
  * offset. A FORWARD jump is always the wide form, because its distance is not
  * known when it is emitted and the two sizes differ; a BACKWARD one takes
  * the short form when it fits, which is the common case and every loop. */
-/* wide: 0 an rjmp, 1 a 32-bit jmp (relocated), 2 a conditional br.
- * site: the jump site it belongs to (avr_relax), or -1. */
+/* wide: 0 an rjmp, 1 a 32-bit jmp (relocated), 2 a conditional br, 3 no
+ * jump at all -- &&label, whose `at` is its first function-address site's
+ * index. site: the jump site it belongs to (avr_relax), or -1. */
 struct a_fix { int at; int label; int wide; int site; };
 
 /* Branch relaxation, by regeneration. A forward branch's distance is not
@@ -470,6 +471,21 @@ static void place_arg(int size, int *cursor, long *stk, struct argplace *p)
     }
 }
 
+static int sret_bytes(int retsize);
+
+/* The bytes a call passes on the stack: its outgoing area's extent */
+static long call_stack_bytes(const struct ir_ins *i)
+{
+    int cursor = i->call_varargs ? -1 : ARG_TOP;
+    long stk = 0;
+    struct argplace pl;
+    if (sret_bytes(i->retsize))
+        place_arg(2, &cursor, &stk, &pl);
+    for (int k = 0; k < i->nargs; k++)
+        place_arg(i->argv[k].size, &cursor, &stk, &pl);
+    return stk;
+}
+
 /* Where a returned value's low byte is: r24 for one or two bytes, r22 for
  * up to four, r18 for up to eight.
  *
@@ -764,6 +780,7 @@ static void ext_info(struct a_fn *F)
             /* An address is two bytes, zero above: the machine has no
              * more, and every lowering of one fills the rest with r1. */
             case IR_ADDR: case IR_GADDR: case IR_STRADDR: case IR_FADDR:
+            case IR_LABELADDR:
                 w = 2; k = 0;
                 break;
             /* A call's result is extended by the CALLER from its own
@@ -2540,6 +2557,7 @@ static void emit_moves(struct code *t, const int *od, const int *os, int no)
 }
 
 static void set_sp_from_y(struct code *t);
+static void set_sp_from(struct code *t, int lo);
 
 /* The registers the epilogue pops: the saved pairs, and Y when it was
  * set up. */
@@ -2557,10 +2575,12 @@ static unsigned long a_saved_mask(const struct a_fn *F)
 static void a_teardown(struct a_fn *F)
 {
     struct code *t = F->t;
-    if (F->frame) {
+    /* after an alloca sp is below the frame, so it is set from Y even
+     * when there is no frame to add */
+    if (F->frame)
         add_const16(F, AVR_Y, F->frame);
+    if (F->frame || F->fn->has_alloca)
         set_sp_from_y(t);
-    }
     if (F->use_y) {
         avr_pop(t, 29);
         avr_pop(t, 28);
@@ -2706,6 +2726,11 @@ static void gen_ins(struct a_fn *F, int n)
      * such path say so where they are. */
     if (i->w == 16)
         a_refuse(fn, i, "a 128-bit value");
+    /* named here, before the eight-byte test below would call it "this
+     * operation at 64 bits": its w is a host pointer's */
+    if (i->op == IR_FRAMEADDR)
+        a_refuse(fn, i, "__builtin_frame_address or __builtin_return_address "
+                        "(AVR code keeps no frame-pointer chain)");
     /* A memory access's width is `size`, not `w`, and the four that use it
      * size a REGISTER RUN from it: RA is r18, so size 8 would write
      * r18..r25 and take B for the top half of the value. The w == 8
@@ -3359,7 +3384,7 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_CALL: case IR_RET: case IR_LABEL: case IR_JMP:
         case IR_MEMCPY: case IR_MEMZERO: case IR_FENCE: case IR_UD2:
         case IR_ASM: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
-        case IR_FADDR:
+        case IR_FADDR: case IR_LABELADDR: case IR_IGOTO:
             break;
 
         default:
@@ -4089,6 +4114,39 @@ static void gen_ins(struct a_fn *F, int n)
         return;
     }
 
+    /* A variable-length array, alloca, or a local aligned beyond what
+     * the stack promises (which is nothing here): sp -= size, and the
+     * block is the bytes above the new sp -- AVR's sp points at the next
+     * FREE byte, so the block starts at sp + 1. sp is moved with
+     * interrupts masked, as the prologue does. The frame stays at Y, so
+     * every slot keeps its address; a call's stack arguments, which a
+     * callee finds just above its return address, are moved down to the
+     * new sp at the call (IR_CALL). X is no home's register. */
+    case IR_ALLOCA:
+        vld(F, RA, i->a, 0, 2);
+        avr_in(t, AVR_X, IO_SPL);
+        avr_in(t, AVR_X + 1, IO_SPH);
+        avr_rr(t, AVR_SUB, AVR_X, RA);
+        avr_rr(t, AVR_SBC, AVR_X + 1, RA + 1);
+        set_sp_from(t, AVR_X);
+        avr_adiw(t, AVR_X, 1);
+        avr_movw(t, RA, AVR_X);
+        if (dw(F, i) > 2)
+            extend(F, RA, 2, 0, dw(F, i));
+        wr4(F, i->dst, RA);
+        return;
+    case IR_SPSAVE:
+        avr_in(t, RA, IO_SPL);
+        avr_in(t, RA + 1, IO_SPH);
+        if (dw(F, i) > 2)
+            extend(F, RA, 2, 0, dw(F, i));
+        wr4(F, i->dst, RA);
+        return;
+    case IR_SPRESTORE:
+        vld(F, AVR_X, i->a, 0, 2);
+        set_sp_from(t, AVR_X);
+        return;
+
     case IR_ADDR:
         y_to(F, RA);
         add_const16(F, RA, sslot(F, i->a));
@@ -4122,6 +4180,32 @@ static void gen_ins(struct a_fn *F, int n)
             wr4(F, i->dst, RA);
         return;
     }
+
+    /* GNU computed goto. &&label is a code address, so a WORD address
+     * as a function pointer is: the function's own symbol through the _GS
+     * forms, as IR_FADDR takes it, plus the label's byte offset as the
+     * addend (the linker halves the sum), set once the function is laid
+     * out -- a fix of `wide` 3 whose `at` is the first site's index.
+     * goto *p puts that word address in Z and is ijmp. */
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        int nb = dw(F, i), d = addr_reg(F, i), s0 = F->st->nf;
+        if (!nb)
+            return;
+        note_fn(F->st, ldi_addr_pair(F, d), fn->src, RK_AVR_LO8_LDI_GS);
+        note_fn(F->st, F->t->len - 2, fn->src, RK_AVR_HI8_LDI_GS);
+        want_label_site(F, s0, i->label, 3, -1);
+        if (nb > 2)
+            extend(F, d, 2, 0, nb);
+        if (d == RA)
+            wr4(F, i->dst, RA);
+        return;
+    }
+    case IR_IGOTO:
+        vld(F, AVR_Z, i->a, 0, 2);
+        avr_ijmp(F->t);
+        return;
 
     case IR_LABEL:
         F->label_off[i->label] = t->len;
@@ -4352,11 +4436,34 @@ static void gen_ins(struct a_fn *F, int n)
             if (i->indirect && !zmoved)
                 vld(F, AVR_Z, i->a, 0, 2);
         }
+        /* After an alloca sp is below the frame, and the stack arguments
+         * written to the outgoing area at Y+1 are not where the callee
+         * looks, just above the return address. They are copied down:
+         * sp -= n, then byte by byte from Y+1 through X, which no argument
+         * travels in (they are r8-r25, and Z is an icall's target). sp
+         * comes back up after the call. */
+        long nout = fn->has_alloca ? call_stack_bytes(i) : 0;
+        if (nout) {
+            if (nout > 63)
+                a_refuse(fn, i, "a call passing more than 63 bytes on the "
+                                "stack in a function that uses alloca or a "
+                                "variable-length array");
+            avr_in(t, AVR_X, IO_SPL);
+            avr_in(t, AVR_X + 1, IO_SPH);
+            avr_sbiw(t, AVR_X, (int)nout);
+            set_sp_from(t, AVR_X);
+            avr_adiw(t, AVR_X, 1);
+            for (long b = 0; b < nout; b++) {
+                avr_ldd(t, R_TMP, AVR_Y, (int)(1 + b));
+                avr_st(t, AVR_X, R_TMP, AVR_PTR_POST_INC);
+            }
+        }
         if (i->indirect) {
             /* Z holds a WORD address here, which is what icall wants and
              * what IR_FADDR put in the pointer. */
             avr_icall(t);
-        } else if (F->tail && F->tail[n] && !(argregs & a_saved_mask(F)) &&
+        } else if (!nout && F->tail && F->tail[n] &&
+                   !(argregs & a_saved_mask(F)) &&
                    (F->tail[n] == 1 ||
                     (!F->frame && !F->use_y && !F->nsave))) {
             /* The epilogue's teardown, then a JUMP: the return address
@@ -4379,6 +4486,13 @@ static void gen_ins(struct a_fn *F, int n)
         } else {
             note_call(F->st, t->len, i->callee);
             avr_call(t, 0);
+        }
+        if (nout) {
+            /* X again: the result is in r18-r25 */
+            avr_in(t, AVR_X, IO_SPL);
+            avr_in(t, AVR_X + 1, IO_SPH);
+            avr_adiw(t, AVR_X, (int)nout);
+            set_sp_from(t, AVR_X);
         }
 
         if (i->dst >= 0 && i->retsize) {
@@ -4620,13 +4734,18 @@ static void gen_ins(struct a_fn *F, int n)
  * is safe because AVR executes the instruction after an interrupt-enable
  * before servicing anything, and is the order avr-gcc and clang both use.
  */
-static void set_sp_from_y(struct code *t)
+static void set_sp_from(struct code *t, int lo)
 {
     avr_in(t, R_TMP, IO_SREG);
     avr_bclr(t, AVR_SREG_I);                 /* cli */
-    avr_out(t, IO_SPH, 29);
+    avr_out(t, IO_SPH, lo + 1);
     avr_out(t, IO_SREG, R_TMP);
-    avr_out(t, IO_SPL, 28);
+    avr_out(t, IO_SPL, lo);
+}
+
+static void set_sp_from_y(struct code *t)
+{
+    set_sp_from(t, AVR_Y);
 }
 
 /* ---- interrupt handlers ----------------------------------------------
@@ -5156,8 +5275,6 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     F.want_debug = want_debug;
     F.rx = rx;
 
-    if (fn->has_alloca)
-        a_refuse(fn, NULL, "a variable-length array");
     if (fn->neh)
         a_refuse(fn, NULL, "an exception region");
     /* The width map BEFORE layout: a slot's size depends on it. */
@@ -5275,7 +5392,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         int cursor = ARG_TOP;
         long stk = 0;
         F.use_y = f->is_isr || fn->is_varargs || F.frame != 0 ||
-                  F.sret_slot >= 0;
+                  F.sret_slot >= 0 || fn->has_alloca;
         if (fn_sret_bytes(fn)) place_arg(2, &cursor, &stk, &pl);
         for (i = 0; i < fn->nparams && !F.use_y; i++) {
             place_arg(fn->param_abi[i].size, &cursor, &stk, &pl);
@@ -5439,10 +5556,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     if (tail_end) {
         ;
     } else if (f->is_isr) {
-        if (F.frame) {
+        if (F.frame)
             add_const16(&F, AVR_Y, F.frame);
+        if (F.frame || fn->has_alloca)
             set_sp_from_y(t);
-        }
         isr_epilogue(t);
     } else {
         a_teardown(&F);
@@ -5454,6 +5571,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         int to = F.label_off[F.fix[i].label];
         if (to < 0)
             a_refuse(fn, NULL, "a jump to a label that was never placed");
+        if (F.fix[i].wide == 3) {                     /* &&label */
+            F.st->f[at].addend = to - f->code_off;
+            F.st->f[at + 1].addend = to - f->code_off;
+            continue;
+        }
         if (F.fix[i].wide != 1) {
             /* A short form relaxation chose: it must reach, or this
              * attempt is thrown away and that site pinned long. One
@@ -5522,6 +5644,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.js);
     free(F.slot);
     free(F.need);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.cval);

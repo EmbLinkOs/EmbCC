@@ -93,6 +93,8 @@ const struct predef_macro predef_macros_ppc32[] = {
     { "__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "2" },
     { "__GCC_CONSTRUCTIVE_SIZE", "32" },
     { "__GCC_DESTRUCTIVE_SIZE", "32" },
+    { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1", "1" },
+    { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2", "1" },
     { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4", "1" },
     { "__GXX_ABI_VERSION", "1002" },
     { "__HAVE_BSWAP__", "1" },

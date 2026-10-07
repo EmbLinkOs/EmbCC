@@ -407,6 +407,13 @@ static void parse_ins(struct p *p, char *first, const char *rest)
             break;
         case IR_LABELADDR:
             in->label = labelno(p, word(p));
+            if (eat(p, "data")) {          /* static data's marker */
+                char *k = word(p);
+                if (!k)
+                    perr(p, "a label-data slot");
+                in->vol = 1;
+                in->imm = strtol(k, NULL, 10);
+            }
             break;
         case IR_XCHG: case IR_XADD: case IR_CAS: case IR_CAS16:
         case IR_ARMW: case IR_CMPXCHG: {

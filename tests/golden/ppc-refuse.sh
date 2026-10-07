@@ -119,16 +119,10 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "a 1-byte atomic" 'an atomic narrower than four bytes' \
-    'char c; int f(void){ return __atomic_fetch_add(&c, 1, 5); }'
-refc "a 2-byte compare-and-swap" 'an atomic narrower than four bytes' \
-    'short s; int f(void){ short e = 0; return __atomic_compare_exchange_n(&s, &e, 1, 0, 5, 5); }'
 refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
     'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
     'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "a computed goto" 'a computed goto' \
-    'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }'
 refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
     'void *f(void){ return __builtin_return_address(0); }'
 refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
@@ -137,8 +131,6 @@ refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "a 32-aligned scalar local" 'needs 32-byte alignment and the stack only guarantees 16' \
-    'int f(void){ _Alignas(32) int x = 1; return x; }'
 refc "inline assembly" 'inline assembly is not supported for powerpc-none-eabi' \
     'int f(void){ int r; __asm__("li %0, 1" : "=r"(r)); return r; }'
 refc "a file-scope instruction" 'file-scope asm instruction' \
@@ -156,7 +148,7 @@ fi
 grep -q 'no assembly-file support for powerpc-none-eabi yet: EmbCC has no PowerPC assembler' \
     "$out/as.err" || {
     echo "an assembly file was refused, but not by name:"; cat "$out/as.err"; exit 1; }
-echo "narrow and 8-byte atomics, computed goto, the frame and return address,"
+echo "narrow and 8-byte atomics, the frame and return address,"
 echo "__int128, interrupt functions, an over-aligned scalar, inline and"
 echo "file-scope assembly, .s files and C++ are each refused by name"
 

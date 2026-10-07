@@ -352,7 +352,7 @@ is printed `#IMM` when `imm_b` is set.
 | `IR_STRADDR` | `%d = straddr strN` | `dst` = the address of string `label` in `.rodata`. |
 | `IR_GADDR` | `%d = gaddr @NAME` | `dst` = the address of the object `glob`. |
 | `IR_FADDR` | `%d = faddr @NAME` | `dst` = the address of the function `callee`. |
-| `IR_LABELADDR` | `%d = labeladdr LN` | `dst` = the address of label `label` (GNU `&&label`). |
+| `IR_LABELADDR` | `%d = labeladdr LN` | `dst` = the address of label `label` (GNU `&&label`). With `vol` set -- printed `labeladdr LN data K` -- it is a marker irgen plants at a function's entry for a label static data takes the address of (`static void *t[] = { &&a }`, `&&b - &&a`): it emits no code and nothing reads `dst`; it keeps the label address-taken and current through the passes, and the backend records where the label landed in slot `imm` of the function's `label_pos` (`cg_note_labels`), which the driver adds into the data. |
 
 #### Calls and returns
 

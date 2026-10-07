@@ -3558,6 +3558,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             a64_add_imm(t, A64_SP, A64_ACC, 0, 8);    /* mov sp, x9 */
             break;
         case IR_LABELADDR: {
+            if (cg_label_mark(i))       /* static data's marker: no code */
+                break;
             /* &&label. adr gives the label's RUN-TIME address directly,
              * and its ±1 MiB reach covers any function EmbCC will emit. */
             struct a64_fix fx;
@@ -3680,6 +3682,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     free(usecnt);
     free(g_a64_afold.ok); free(g_a64_afold.disp);
     g_a64_afold.ok = NULL; g_a64_afold.disp = NULL;
+    cg_note_labels(fn, loff);
     free(loff); free(fix); free(retfix); free(sd);
 }
 

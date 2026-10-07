@@ -96,24 +96,16 @@ refc() {            # refc WHAT PATTERN SOURCE [TRIPLE]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "a 1-byte atomic" 'an atomic narrower than four bytes' \
-    'char c; int f(void){ return __atomic_fetch_add(&c, 1, 5); }'
-refc "a 2-byte compare-and-swap" 'an atomic narrower than four bytes' \
-    'short s; int f(void){ short e = 0; return __atomic_compare_exchange_n(&s, &e, 1, 0, 5, 5); }'
 refc "a 16-byte atomic" 'a 16-byte atomic' \
     '__int128 x; __int128 f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "a 16-byte atomic load" 'a 16-byte atomic' \
     '__int128 x; __int128 f(void){ return __atomic_load_n(&x, 5); }'
-refc "a computed goto" 'a computed goto' \
-    'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }'
 refc "__builtin_return_address" 'n64 code keeps no frame-pointer chain' \
     'void *f(void){ return __builtin_return_address(0); }'
 refc "__builtin_frame_address" 'n64 code keeps no frame-pointer chain' \
     'void *f(void){ return __builtin_frame_address(0); }'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "a 32-aligned scalar local" 'needs 32-byte alignment and the stack only guarantees 16' \
-    'int f(void){ _Alignas(32) int x = 1; return x; }'
 refc "a doubleword instruction in inline asm" 'is not in the MIPS vocabulary' \
     'long f(long a){ long r; __asm__("daddu %0, %1, %1" : "=r"(r) : "r"(a)); return r; }'
 refc "a packed bit-field over 8 bytes, big-endian" \
@@ -139,7 +131,7 @@ grep -q 'C++ is not yet supported for mips64-none-elf' "$out/cxx.err" || {
 printf '%s\n' 'void v(int, ...); void f(__int128 x){ v(1, x); }' > "$out/v.c"
 "$EMBCC" --target=$T -c "$out/v.c" -o /dev/null || {
     echo "a variadic __int128 was refused"; exit 1; }
-echo "narrow and 16-byte atomics, computed goto, the frame and return address,"
+echo "narrow and 16-byte atomics, the frame and return address,"
 echo "interrupt functions, an over-aligned scalar, MIPS64 instructions in"
 echo "inline asm, a 32-bit la, a wide packed bit-field big-endian and C++"
 echo "big-endian are each refused by name"

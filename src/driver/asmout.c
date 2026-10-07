@@ -87,7 +87,7 @@ static const char *asym(const char *n)
  * recorded, so this is the same information the ELF writer turns into
  * relocations — not a second derivation of it. */
 struct site {
-    long addend;             /* an RK_ABS64 site's offset into its target */
+    long addend;             /* a function site's offset into its target */
     int off;                 /* the relocated field's offset in .text */
     const char *name;        /* the symbol, or NULL for a .rodata string */
     int str_off;             /* when name is NULL: offset inside .rodata */
@@ -449,7 +449,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
     for (int i = 0; i < nfs; i++) {
         site[ns].off = fs[i].patch_off;
         site[ns].name = fs[i].target ? asym(fs[i].target->name) : "?";
-        site[ns].addend = fs[i].kind == RK_ABS64 ? fs[i].addend : 0;
+        site[ns].addend = fs[i].addend;
         site[ns++].kind = fs[i].kind;
     }
     for (int i = 0; i < ngs; i++) {

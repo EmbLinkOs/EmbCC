@@ -161,7 +161,8 @@ class 32, big-endian, `e_flags` 0 (what clang writes for V8).
 
 ## What the first backend refuses
 
-By name: computed goto, atomics other than a word (`casa` and `swap` are word-sized),
+By name: computed goto, atomics wider than a word (one and two bytes are
+a `casa` loop on the word around them),
 `__builtin_frame_address`/`__builtin_return_address`, inline assembly
 and `.s` files (there is no SPARC assembler in EmbCC yet), naked and
 interrupt functions, C++, a scalar local aligned beyond 8, a branch beyond

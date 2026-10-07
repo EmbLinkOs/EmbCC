@@ -861,9 +861,14 @@ written with `wreg`/`wr`/`wrote`; `rd64`/`wr64` handle register pairs.
   bytes) subtracts the size rounded to 8 from `sp`.
 - **Byte swaps** arrive as shifts and masks: IR generation emits no
   `IR_BSWAP` for ARMv7-M.
-- **Refused**: computed `goto`, exception landing pads, 128-bit values,
-  `long double` operations the target lacks, and anything else not
-  handled, with the backend's refusal message. `IR_UD2` is `udf #0`.
+- **Computed goto**: `&&label` is pc-relative with no relocation,
+  `movw`/`movt rD, #(label | 1) - (pc)` then `add rD, pc` (in ARM state
+  `add rD, pc, rD` and no Thumb bit; on ARMv6-M and v8-M Baseline the
+  distance is a literal-pool word), patched once the label is placed;
+  `goto *p` is `bx p`.
+- **Refused**: exception landing pads, 128-bit values, `long double`
+  operations the target lacks, and anything else not handled, with the
+  backend's refusal message. `IR_UD2` is `udf #0`.
 
 ### Frame layout
 
@@ -1136,7 +1141,10 @@ Operands are read with `rdr` and written with `wreg`/`wrote`;
 - **Byte swaps** are `IR_BSWAP` only at RV64; at RV32 IR generation
   builds them from shifts and masks.
 - **Block copies** are straight-line up to 2040 bytes and a loop beyond.
-- **Refused**: computed `goto` and 128-bit values. `IR_UD2` is `unimp`.
+- **Computed goto**: `&&label` is `auipc`/`addi` (never compressed)
+  patched with the label's distance, no relocation; `goto *p` is
+  `jalr zero, 0(p)`.
+- **Refused**: 128-bit values. `IR_UD2` is `unimp`.
 
 **32-bit values at RV64.** The psABI keeps a 32-bit value in a register
 as its sign extension, unsigned values included (`0xffffffffu` is all
@@ -1322,8 +1330,11 @@ differences below.
 - **Select** is `movn`. **Byte swap** is `wsbh` and `rotr`.
 - **`IR_ALLOCA`** rounds to 16 and keeps `sp` 16-aligned, and the frame is
   addressed from `fp` in such a function.
-- **Refused**: computed `goto`, `IR_SWITCH` (`target_jump_tables()` is
-  false for MIPS), `IR_FRAMEADDR`, 128-bit values.
+- **Computed goto**: `&&label` is the function's own address as
+  `IR_FADDR` takes it (`lui`/`addiu`, or MIPS64's four pieces) plus the
+  label's offset as the relocation's addend; `goto *p` is `jr p` and a
+  `nop`.
+- **Refused**: `IR_FRAMEADDR`, 128-bit values.
 
 ### Frame and calling convention
 
@@ -1456,9 +1467,13 @@ with it.
 - **Refused** with the backend's message: 128-bit values, a memory
   access wider than four bytes, a VLA, an exception region, an aligned
   local, returns wider than 8 bytes, and every operation without a
-  lowering by its IR name (`switch`, `igoto`, `labeladdr`, `bswap`,
-  atomics wider than one byte). IR generation does not emit `IR_BSWAP`
-  for AVR; a byte swap arrives as shifts and masks.
+  lowering by its IR name (`switch`, `bswap`, atomics wider than one
+  byte). IR generation does not emit `IR_BSWAP` for AVR; a byte swap
+  arrives as shifts and masks.
+- **Computed goto**: `&&label` is a word address, as a function pointer
+  is: `ldi lo8(gs(f+L))`, `ldi hi8(gs(f+L))` against the function's own
+  symbol with the label's byte offset `L` as the addend; `goto *p` loads
+  `Z` and is `ijmp`.
 
 The compiler never emits `lpm`: the linker places `.rodata` in the data
 segment, and the startup code copies `.data` and `.rodata` from flash.

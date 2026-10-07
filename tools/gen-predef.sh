@@ -205,11 +205,10 @@ refflags() {
 exclude_arch() {
     case "$1" in
         riscv32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8' ;;
-        # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
-        # two-byte atomic exactly as RISC-V's does (no libatomic here).
-        mips32|mips32eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
-        # MIPS64: ll/sc and lld/scd, a word and a doubleword, the same rule
-        mips64|mips64eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2|16)' ;;
+        # MIPS claims one and two bytes the same way, through an ll/sc loop
+        # on the word around them (the backend's sub_lane), and MIPS64 the
+        # doubleword with lld/scd; it has no sixteen-byte form.
+        mips64|mips64eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16' ;;
         # (LoongArch64 claims all four: its backend makes a one- or two-byte
         # atomic an ll.w/sc.w loop on the word, as clang does.)
         # ARMv7-A has ldrexd/strexd, so clang claims an eight-byte
@@ -225,12 +224,13 @@ exclude_arch() {
         # for armv8-m.base. A program that tests __ARM_FEATURE_CLZ and
         # writes `clz` in asm would get an UNDEFINED instruction.
         thumbv8mbase) echo '^#define __ARM_FEATURE_(CLZ|QBIT|SAT|NUMERIC_MAXMIN|DIRECTED_ROUNDING) ' ;;
-        # Xtensa's s32c1i is word-sized too. The table is the ESP32's
-        # (xtensa-esp32-elf-gcc, which has no -msoft-float: the float ABI
-        # is the same either way, every float in the address registers).
-        xtensa)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
-        # PowerPC's lwarx/stwcx. likewise (lbarx/lharx are not Book E's).
-        ppc32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # (Xtensa claims one and two bytes too: s32c1i is word-sized, and
+        # its backend makes them an s32c1i loop on the word. The table is
+        # the ESP32's -- xtensa-esp32-elf-gcc, which has no -msoft-float:
+        # the float ABI is the same either way, every float in the address
+        # registers.)
+        # (PowerPC claims one and two bytes too: lbarx/lharx are not Book
+        # E's, so its backend makes them a lwarx/stwcx. loop on the word.)
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }

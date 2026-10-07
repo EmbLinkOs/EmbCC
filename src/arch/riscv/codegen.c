@@ -32,7 +32,7 @@
  * ---- what this file refuses -------------------------------------------
  *
  * By name, with the IR operation printed: inline assembly, atomics,
- * computed goto, __int128, long double arithmetic, -g. THE RULE -- an
+ * __int128, long double arithmetic, -g. THE RULE -- an
  * object full of plausible instructions that implement something else is
  * worse than no object.
  */
@@ -1320,8 +1320,9 @@ static void ext_reg(struct rv_fn *F, int rdst, int rs, int size, int sign)
  * x8-x15). Code between a branch and its target only shrinks on the
  * second pass, so what reached still reaches; the patch checks anyway. */
 enum { FX_J, FX_CJ, FX_LONG, FX_B, FX_CB,
-       FX_TAB };   /* a jump table's entry: bat is the auipc that finds
+       FX_TAB,     /* a jump table's entry: bat is the auipc that finds
                     * the table, the word becomes target - auipc */
+       FX_ADDR };  /* &&label: an auipc/addi pair at `at` */
 
 static void want_label(struct rv_fn *F, int at, int label, int kind,
                        int cond, int rs1, int rs2, int bat)
@@ -3299,6 +3300,12 @@ static void gen_ins(struct rv_fn *F, int n)
         rv_refuse(F, i, "this floating-point operation");
     }
 
+    /* named here, before the pair test below would call it "this
+     * operation at 64 bits": its w is a host pointer's */
+    if (i->op == IR_FRAMEADDR)
+        rv_refuse(F, i, "__builtin_frame_address or __builtin_return_address "
+                        "(RISC-V code keeps no frame-pointer chain)");
+
     /* (At RV64 a call or a return of one is gen_call's and IR_RET's.) */
     if (i->w > 8 &&
         !(F->w16 && (i->op == IR_CALL || i->op == IR_RET)))
@@ -4365,8 +4372,19 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
     }
-    case IR_LABELADDR: case IR_IGOTO:
-        rv_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label: `auipc d, 0; addi d, d, 0`, never compressed, patched
+         * with the label's distance once it is placed -- no relocation,
+         * the label being in this same function. */
+        int d = wreg(F, i->dst, ACC);
+        want_label(F, rv_pcrel_pair(t, d), i->label, FX_ADDR, 0, 0, 0, 0);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        rv_jalr(t, RV_ZERO, rdr(F, i->a, ACC), 0);
         return;
     default:
         rv_refuse(F, i, "this operation");
@@ -5117,6 +5135,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             code_patch32(t, F.fix[i].at,
                          (unsigned long)(unsigned int)(target - F.fix[i].bat));
             break;
+        case FX_ADDR:
+            rv_patch_pcrel_pair(t, F.fix[i].at, target);
+            break;
         default:                                    /* FX_CB */
             ok = rv_patch_cb(t, F.fix[i].at, F.fix[i].cond == RV_BNE,
                              F.fix[i].rs1, target);
@@ -5137,8 +5158,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         relax = xcalloc((size_t)(nrelax ? nrelax : 1), 1);
         for (i = 0; i < F.nfix; i++) {
             long tgt = F.label_off[F.fix[i].label];
-            if (F.fix[i].kind == FX_TAB) {             /* not a branch */
-                relax[i] = FX_TAB;
+            if (F.fix[i].kind == FX_TAB || F.fix[i].kind == FX_ADDR) {
+                relax[i] = (signed char)F.fix[i].kind;  /* not a branch */
                 continue;
             }
             if (F.fix[i].kind == FX_J) {
@@ -5169,6 +5190,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

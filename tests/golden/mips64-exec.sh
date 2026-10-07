@@ -60,8 +60,6 @@ na() {
     case $1 in
     preprocessor)
         echo "#errors unless the target is x86-64 or AArch64" ;;
-    computed-goto)
-        echo "computed goto, refused by name (tests/golden/mips64-refuse.sh)" ;;
     atomics|atomics-reg|int128-atomic)
         echo "1-, 2- and 16-byte atomics and __builtin_frame_address, refused by name (mips64-refuse.sh)" ;;
     volatile-local-longjmp)

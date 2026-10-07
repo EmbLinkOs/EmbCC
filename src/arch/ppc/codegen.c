@@ -25,7 +25,7 @@
  *     its caller's frame, and an alloca keeps the chain (IR_ALLOCA).
  *   * No delay slots, and misaligned accesses are the hardware's.
  *
- * Refused by name: computed goto, atomics narrower than a word,
+ * Refused by name: atomics wider than a word,
  * __builtin_frame_address/return_address, inline asm (for now), a branch
  * beyond +-32 MiB, and __int128 (ILP32). THE RULE.
  */
@@ -763,7 +763,9 @@ static void st_mem(struct ppc_fn *F, int rs, int base, long off, int size)
  * relocation: a bc reaches +-32 KiB, and one that does not is given the
  * long form -- the inverse bc over a `b`, which reaches 32 MiB -- and the
  * function generated again (gen_func). */
-enum { FX_B, FX_TAB };
+/* FX_ADDR: &&label, the two function-address sites from index `base`,
+ * whose addend becomes the label's offset in the function */
+enum { FX_B, FX_TAB, FX_ADDR };
 
 static void want_label(struct ppc_fn *F, int at, int label, int kind)
 {
@@ -1755,12 +1757,71 @@ static const char *cvt_name(const struct ir_ins *i)
 
 static void need_word_atomic(struct ppc_fn *F, const struct ir_ins *i)
 {
+    if (i->size == 1 || i->size == 2)   /* sub_* below: the word around it */
+        return;
     if (i->size != 4)
-        ppc_refuse(F, i, i->size < 4
-                   ? "an atomic narrower than four bytes (lwarx/stwcx. are "
-                     "word-sized, and a read-modify-write of the containing "
-                     "word is not atomic against its neighbours)"
-                   : "an atomic wider than a register");
+        ppc_refuse(F, i, "an atomic wider than a register");
+}
+
+/* ---- one- and two-byte atomics ---------------------------------------
+ *
+ * lwarx/stwcx. are word-sized (Book E has no lbarx/lharx), so a narrow
+ * atomic works on the aligned word around it, as GCC's and LLVM's do: a
+ * lwarx/stwcx. loop that rewrites only its lane,
+ *
+ *   retry: lwarx   old, 0, aligned
+ *          new = f(old)  in the lane
+ *          new = old ^ ((new ^ old) & mask)
+ *          stwcx.  new, 0, aligned
+ *          bne-    retry
+ *
+ * atomic against the neighbouring bytes too: a store to any of them
+ * between the lwarx and the stwcx. loses the reservation. Big-endian, the
+ * lane of address a is bits 8*((a & 3) ^ (4 - size)) up. The scratches are
+ * five (r0, r9-r12) and a compare-and-swap needs six values in its loop,
+ * so the desired value waits in CTR; the shift is not kept at all, but
+ * worked out again from the address after the loop. */
+#define SUB_AL  ADDR        /* r10: the aligned word's address */
+#define SUB_MK  B_HI        /* r9:  the lane's mask */
+#define SUB_OLD ACC         /* r11: the word lwarx saw */
+#define SUB_VAL TMP         /* r12: the operand, moved into its lane */
+
+/* sh = the lane's shift, from the address a (in place when sh == a) */
+static void sub_shift(struct ppc_fn *F, int sh, int a, int size)
+{
+    ppc_rlwinm(F->t, sh, a, 3, 27, 28);             /* (a & 3) * 8 */
+    if (target_big_endian())
+        ppc_imm(F->t, PPC_XORI, sh, sh, (4 - size) * 8);
+}
+
+/* SUB_AL, SUB_MK, and the shift in `sh`, for the address a */
+static void sub_lane(struct ppc_fn *F, int a, int size, int sh)
+{
+    struct code *t = F->t;
+    sub_shift(F, sh, a, size);
+    ppc_rlwinm(t, SUB_AL, a, 0, 0, 29);             /* a & ~3 */
+    ppc_li(t, SUB_MK, size == 1 ? 0xff : 0xffff);
+    ppc_alu(t, PPC_SLW, SUB_MK, SUB_MK, sh);
+}
+
+/* reg = (src << sh) & mask */
+static void sub_in(struct ppc_fn *F, int reg, int src, int sh)
+{
+    ppc_alu(F->t, PPC_SLW, reg, src, sh);
+    ppc_alu(F->t, PPC_AND, reg, reg, SUB_MK);
+}
+
+/* reg, its lane already masked, shifted down to bit 0 and extended as
+ * `sign` says; the shift comes from vreg a's address again, through
+ * `scr` */
+static void sub_out(struct ppc_fn *F, int reg, int a, int scr, int size,
+                    int sign)
+{
+    struct code *t = F->t;
+    sub_shift(F, scr, rdr(F, a, scr), size);
+    ppc_alu(t, PPC_SRW, reg, reg, scr);
+    if (sign)
+        ppc_un(t, size == 1 ? PPC_EXTSB : PPC_EXTSH, reg, reg);
 }
 
 static void gen_ins(struct ppc_fn *F, int n)
@@ -2304,6 +2365,38 @@ static void gen_ins(struct ppc_fn *F, int n)
     case IR_XCHG: case IR_XADD: case IR_ARMW: {
         int addr, val, dst, top, again;
         need_word_atomic(F, i);
+        if (i->size == 1 || i->size == 2) {
+            addr = rdr(F, i->a, ADDR);
+            sub_lane(F, addr, i->size, SUB_OLD);
+            sub_in(F, SUB_VAL, rdr(F, i->b, TMP), SUB_OLD);
+            ppc_sync(t);
+            top = t->len;
+            ppc_lwarx(t, SUB_OLD, 0, SUB_AL);
+            if (i->op == IR_XCHG) {
+                ppc_mr(t, SCR, SUB_VAL);
+            } else if (i->op == IR_XADD) {
+                ppc_alu(t, PPC_ADD, SCR, SUB_OLD, SUB_VAL);
+            } else {
+                switch ((int)i->imm) {
+                case '&': ppc_alu(t, PPC_AND, SCR, SUB_OLD, SUB_VAL); break;
+                case '|': ppc_alu(t, PPC_OR, SCR, SUB_OLD, SUB_VAL); break;
+                case '^': ppc_alu(t, PPC_XOR, SCR, SUB_OLD, SUB_VAL); break;
+                default:  ppc_alu(t, PPC_NAND, SCR, SUB_OLD, SUB_VAL); break;
+                }
+            }
+            /* only the lane changes: old ^ ((new ^ old) & mask) */
+            ppc_alu(t, PPC_XOR, SCR, SCR, SUB_OLD);
+            ppc_alu(t, PPC_AND, SCR, SCR, SUB_MK);
+            ppc_alu(t, PPC_XOR, SCR, SCR, SUB_OLD);
+            ppc_stwcx(t, SCR, 0, SUB_AL);
+            again = br_place(F, PPC_NE);
+            br_back(F, again, top);
+            ppc_sync(t);
+            ppc_alu(t, PPC_AND, SUB_OLD, SUB_OLD, SUB_MK);
+            sub_out(F, SUB_OLD, i->a, SUB_VAL, i->size, i->sign);
+            wrote(F, i->dst, SUB_OLD);
+            return;
+        }
         addr = rdr(F, i->a, ADDR);
         val = rdr(F, i->b, TMP);
         dst = wreg(F, i->dst, ACC);
@@ -2341,6 +2434,59 @@ static void gen_ins(struct ppc_fn *F, int n)
          *   out:   sync                                              */
         int addr, exp, des, seen = ACC, out_br, top, again;
         need_word_atomic(F, i);
+        if (i->size == 1 || i->size == 2) {
+            /*   sync
+             *   retry: lwarx  w, 0, aligned
+             *          xor    w, w, expected          (both in the lane)
+             *          and    r0, w, mask ; cmpwi r0, 0 ; bne out
+             *          mfctr  r0 ; xor w, w, r0       (old ^ exp ^ des)
+             *          stwcx. w, 0, aligned ; bne- retry
+             *          li     r0, 0
+             *   out:   sync
+             * r0 is then the seen lane xor the expected one, 0 on a match:
+             * so the lane seen is r0 ^ expected either way. */
+            addr = rdr(F, i->a, ADDR);
+            sub_lane(F, addr, i->size, SUB_OLD);
+            sub_in(F, SUB_VAL, rdr(F, i->c, TMP), SUB_OLD);
+            ppc_mtctr(t, SUB_VAL);                  /* desired, in lane */
+            if (i->op == IR_CAS) {
+                sub_in(F, SUB_VAL, rdr(F, i->b, TMP), SUB_OLD);
+            } else {
+                int p = rdr(F, i->b, TMP);
+                ppc_load(t, SUB_VAL, p, 0, i->size, 0);
+                sub_in(F, SUB_VAL, SUB_VAL, SUB_OLD);
+            }
+            ppc_sync(t);
+            top = t->len;
+            ppc_lwarx(t, SUB_OLD, 0, SUB_AL);
+            ppc_alu(t, PPC_XOR, SUB_OLD, SUB_OLD, SUB_VAL);
+            ppc_alu(t, PPC_AND, SCR, SUB_OLD, SUB_MK);
+            ppc_cmpi(t, 0, 1, SCR, 0);
+            out_br = br_place(F, PPC_NE);
+            ppc_mfspr(t, SCR, 9);                   /* mfctr */
+            ppc_alu(t, PPC_XOR, SUB_OLD, SUB_OLD, SCR);
+            ppc_stwcx(t, SUB_OLD, 0, SUB_AL);
+            again = br_place(F, PPC_NE);
+            br_back(F, again, top);
+            ppc_li(t, SCR, 0);
+            br_land(F, out_br);
+            ppc_sync(t);
+            if (i->op == IR_CMPXCHG) {
+                ppc_cmpi(t, 0, 1, SCR, 0);
+                cond_to_reg(F, PPC_EQ, SUB_MK);     /* the flag */
+            }
+            ppc_alu(t, PPC_XOR, SUB_OLD, SCR, SUB_VAL);
+            sub_out(F, SUB_OLD, i->a, SUB_VAL, i->size,
+                    i->op == IR_CAS && i->sign);
+            if (i->op == IR_CAS) {
+                wr(F, i->dst, SUB_OLD);
+            } else {
+                int p = rdr(F, i->b, ADDR);
+                ppc_store(t, SUB_OLD, p, 0, i->size);
+                wr(F, i->dst, SUB_MK);
+            }
+            return;
+        }
         addr = rdr(F, i->a, ADDR);
         if (i->op == IR_CAS) {
             exp = rdr(F, i->b, TMP);
@@ -2438,8 +2584,25 @@ static void gen_ins(struct ppc_fn *F, int n)
         code_mark_data(t, tab, t->len);
         return;
     }
-    case IR_LABELADDR: case IR_IGOTO:
-        ppc_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label: the function's own address as IR_FADDR takes it,
+         * lis/addi (@ha/@l), plus the label's offset in it -- the addend
+         * set once the function is laid out. Absolute like every other
+         * address here, and it needs no LR (a bcl would). */
+        int d = wreg(F, i->dst, ACC);
+        int at = abs_pair(F, d), s0 = F->st->nf;
+        note_fn(F->st, at + 2, fn->src, RK_PPC_ADDR16_HA);
+        note_fn(F->st, at + 6, fn->src, RK_PPC_ADDR16_LO);
+        want_label(F, at, i->label, FX_ADDR);
+        F->fix[F->nfix - 1].base = s0;
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        ppc_mtctr(t, rdr(F, i->a, ACC));
+        ppc_bctr(t);
         return;
     default:
         ppc_refuse(F, i, "this operation");
@@ -2912,6 +3075,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
                     (unsigned long)(target - F.fix[i].base) & 0xffffffffUL);
             continue;
         }
+        if (F.fix[i].kind == FX_ADDR) {
+            F.st->f[F.fix[i].base].addend = target - f->code_off;
+            F.st->f[F.fix[i].base + 1].addend = target - f->code_off;
+            continue;
+        }
         if (!ppc_patch_branch(t, F.fix[i].at, target)) {
             if ((ppc_rdw(t, F.fix[i].at) >> 26) == 18)
                 ppc_refuse(&F, NULL, "a branch beyond +-32 MiB");
@@ -2938,6 +3106,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

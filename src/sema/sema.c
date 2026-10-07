@@ -2208,6 +2208,19 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         case B_ADD:
         case B_SUB: {
             int lp = lt->kind == TY_PTR, rp = rt->kind == TY_PTR;
+            /* GNU C's label arithmetic: `&&b - &&a` is the distance in
+             * bytes and `&&a + n` an address n bytes on, as GCC computes
+             * them on its void * (whose size it takes as 1). Only on
+             * label addresses: a void * anywhere else is still refused
+             * below. */
+            if (lp && e->lhs->kind == EXPR_LABELADDR) {
+                lt = ty_ptr(ty_base(TY_CHAR, 0));
+                e->lhs = mk_cast(e->lhs, lt);
+            }
+            if (rp && e->rhs->kind == EXPR_LABELADDR) {
+                rt = ty_ptr(ty_base(TY_CHAR, 0));
+                e->rhs = mk_cast(e->rhs, rt);
+            }
             if (lp && rp) {
                 if (e->op == B_ADD)
                     sema_error_at(u, e->line, e->col,
@@ -3588,6 +3601,15 @@ static int flatten_sized(struct unit *u, struct func *f, struct scope *sc,
     return n;
 }
 
+/* GNU C: a static local's initializer may hold `&&label`, the address
+ * of a label of the function it is in -- g_label_fn, while that
+ * initializer is lowered. resolve_addr answers one with the function as
+ * *ft and the label in g_addr_label (its addend being the label's offset,
+ * which only codegen knows). */
+static struct func *g_label_fn;
+static const char *g_addr_label;
+static int g_addr_label_line;
+
 /* Resolve a constant-address expression (the value of a pointer slot in a
  * static initializer) to a target global/function plus a byte addend:
  * `&g`, a decayed array/function, `&arr[i]`, `&g.field`, `p + n`. Returns 1
@@ -3599,6 +3621,12 @@ static int resolve_addr(struct expr *e, struct global **gt,
         e = e->rhs;
     if (!e)
         return 0;
+    if (e->kind == EXPR_LABELADDR && g_label_fn) {
+        *ft = g_label_fn;
+        g_addr_label = e->name;
+        g_addr_label_line = e->line;
+        return 1;
+    }
     if (e->kind == EXPR_VAR && e->gref) { *gt = e->gref; return 1; }
     if (e->kind == EXPR_VAR && e->fref) { *ft = e->fref; return 1; }
     /* A dereference whose RESULT is an array loads nothing: an array
@@ -3728,6 +3756,35 @@ static int bf_span(int nb, int off, int size)
     return off + nb > size ? size - off : nb;
 }
 
+/* `&&b - &&a` (each side perhaps cast, or offset by a constant): both
+ * labels of g_label_fn, and the constant part. */
+static int label_diff(struct expr *e, const char **lb, const char **la,
+                      int *line, long *add)
+{
+    struct global *gt = NULL;
+    struct func *fb = NULL, *fa = NULL;
+    long ab = 0, aa = 0;
+    while (e && e->kind == EXPR_CAST)
+        e = e->rhs;
+    if (!g_label_fn || !e || e->kind != EXPR_BINOP || e->op != B_SUB ||
+        !e->ty || e->ty->kind == TY_PTR)
+        return 0;
+    g_addr_label = NULL;
+    if (!resolve_addr(e->lhs, &gt, &fb, &ab) || gt || !g_addr_label)
+        return 0;
+    *lb = g_addr_label;
+    *line = g_addr_label_line;
+    g_addr_label = NULL;
+    if (!resolve_addr(e->rhs, &gt, &fa, &aa) || gt || !g_addr_label)
+        return 0;
+    *la = g_addr_label;
+    *add = ab - aa;
+    return 1;
+}
+
+static struct glabeldiff *g_ldiff;    /* lower_static_bytes' label diffs */
+static int g_nldiff, g_capldiff;
+
 static void lower_static_bytes(struct unit *u, int line, int size,
                                struct initelem *v, int n,
                                const char **out_bytes,
@@ -3736,15 +3793,43 @@ static void lower_static_bytes(struct unit *u, int line, int size,
     char *bytes = xcalloc(1, (size_t)(size ? size : 1));
     struct greloc *rel = NULL;
     int nrel = 0, caprel = 0;
+    g_nldiff = 0;
     for (int k = 0; k < n; k++) {
         struct expr *core = v[k].e;
         while (core && core->kind == EXPR_CAST)
             core = core->rhs;
+        /* GNU C: `&&b - &&a`, an integer only codegen knows -- written
+         * into the image by the driver, not relocated (glabeldiff). */
+        {
+            const char *lb, *la;
+            int ll;
+            long ad;
+            if (ty_is_integer(v[k].ty) && !v[k].bit_width &&
+                label_diff(core, &lb, &la, &ll, &ad)) {
+                if (g_nldiff == g_capldiff) {
+                    g_capldiff = g_capldiff ? g_capldiff * 2 : 8;
+                    g_ldiff = xrealloc(g_ldiff, (size_t)g_capldiff *
+                                                sizeof *g_ldiff);
+                }
+                struct glabeldiff *d = &g_ldiff[g_nldiff++];
+                memset(d, 0, sizeof *d);
+                d->off = v[k].off;
+                d->size = ty_size(v[k].ty);
+                d->fn = g_label_fn;
+                d->label = lb;
+                d->minus = la;
+                d->line = ll;
+                d->slot = d->minus_slot = -1;
+                d->addend = ad;
+                continue;
+            }
+        }
         /* The address of a global: `&g`, or an array/function global that
          * decayed to a pointer (`char **environ = embk_empty_env`). */
         struct global *gt = NULL;
         struct func *ft = NULL;
         long addend = 0;
+        g_addr_label = NULL;
         if (core && core->kind != EXPR_STR)
             resolve_addr(core, &gt, &ft, &addend);
         /* An integer exactly as wide as a pointer holds an address as
@@ -3771,6 +3856,10 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             rel[nrel].gtarget = gt;
             rel[nrel].ftarget = ft;
             rel[nrel].addend = addend;
+            /* &&label: the function plus an offset codegen fills in */
+            rel[nrel].label = ft ? g_addr_label : NULL;
+            rel[nrel].label_line = g_addr_label_line;
+            rel[nrel].label_slot = -1;
             nrel++;
             continue;
         }
@@ -4890,9 +4979,23 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     snprintf(what, sizeof what, "'%s'", s->name);
                     g->fam_extra = init_overhang(u, s->line, what, s->dty,
                                                  iv, in, 1);
+                    g_label_fn = f;
                     lower_static_bytes(u, s->line, global_size(g), iv, in,
                                        &g->init_bytes, &g->relocs,
                                        &g->nrelocs);
+                    g_label_fn = NULL;
+                    if (g_nldiff) {
+                        g->ldiffs = xmalloc((size_t)g_nldiff *
+                                            sizeof *g->ldiffs);
+                        memcpy(g->ldiffs, g_ldiff,
+                               (size_t)g_nldiff * sizeof *g->ldiffs);
+                        g->nldiffs = g_nldiff;
+                    }
+                    for (int r = 0; r < g->nrelocs; r++)
+                        if (g->relocs[r].label)
+                            f->has_label_data = 1;
+                    if (g->nldiffs)
+                        f->has_label_data = 1;
                     g->init_len = global_size(g);
                     g->has_init = 1;
                 }
@@ -5292,26 +5395,23 @@ static void check_func(struct unit *u, struct func *f)
      * pointer plus it, and sp is only ever 16-aligned (8 on AAPCS32):
      * Thumb and RISC-V put `char buf[64] __attribute__((aligned(64)))`
      * at whatever sp gave them, silently, and x86-64 and aarch64 refused
-     * it. An aggregate gets storage of its own instead (var_indirect);
-     * a scalar so aligned is refused by name. AVR keeps its own refusal
-     * of any aligned local. */
+     * it. Such a local gets storage of its own instead (var_indirect),
+     * a scalar as well as an aggregate: irgen reads and writes a scalar
+     * there rather than in its slot. One bound to a register by
+     * `register ... __asm__("r")` keeps the register. On AVR, whose
+     * stack promises no alignment at all, that is any aligned local. */
     f->var_indirect = NULL;
     f->var_ind_align = NULL;
-    for (int i = f->nparams; i < sc.n && target_get() != TARGET_AVR; i++) {
+    for (int i = f->nparams; i < sc.n; i++) {
         struct type *t = f->var_tys[i];
-        if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t))
+        if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t) ||
+            sc.vars[i].asm_reg)
             continue;
         int al = ty_align(t);
         if (f->var_aligns[i] > al)
             al = f->var_aligns[i];
         if (al <= target_stack_align())
             continue;
-        if (t->kind != TY_STRUCT && t->kind != TY_ARRAY)
-            sema_error_at(u, sc.vars[i].line, sc.vars[i].col,
-                          "'%s' needs %d-byte alignment and the stack only "
-                          "guarantees %d: supported for an array or a "
-                          "struct, not yet for a scalar", sc.vars[i].name,
-                          al, target_stack_align());
         if (!f->var_indirect) {
             f->var_indirect = xcalloc((size_t)sc.n, sizeof *f->var_indirect);
             f->var_ind_align = xcalloc((size_t)sc.n,

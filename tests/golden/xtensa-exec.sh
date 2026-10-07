@@ -64,10 +64,10 @@ na() {
         echo "a 40-bit field of an unsigned long, which is 32 bits here" ;;
     bit-builtins|global-aggregates|longs)
         echo "shifts a long by 32 or more, undefined when long is 32 bits" ;;
-    computed-goto)
-        echo "computed goto, refused by name (tests/golden/xtensa-refuse.sh)" ;;
-    atomics|atomics-reg)
-        echo "1- and 2-byte atomics and __builtin_frame_address, refused by name (xtensa-refuse.sh)" ;;
+    atomics)
+        echo "__builtin_frame_address, refused by name (xtensa-refuse.sh)" ;;
+    atomics-reg)
+        echo "a 64-bit long (0x123456789abcdef0L in a long: it exits 4 on ILP32); its 1- and 2-byte atomics run in xtensa-atomics.sh" ;;
     volatile-local-longjmp)
         echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     *) return 1 ;;

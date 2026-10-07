@@ -659,7 +659,8 @@ LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
 # test that rebuilds the compiler while the rest of the suite is using
 # it, which is the one thing the suite must never do to itself.
 install: all libc libcxx libc-linux libcxx-linux-x86_64 \
-         libcxx-linux-aarch64 rt-embedded libc-embedded install-files
+         libcxx-linux-aarch64 rt-embedded libc-embedded libcxx-embedded \
+         install-files
 
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
@@ -764,11 +765,26 @@ libcxx-linux-aarch64: embcc embar
 
 libcxx: libcxx-x86_64 libcxx-aarch64
 
+# The C++ runtime for the 32-bit embedded targets C++ is supported on
+# (32-bit ARM, RV32): operator new/delete, the guards, __aeabi_atexit --
+# the -fno-exceptions -fno-rtti subset, tools/build-libcxx.sh. Into
+# build/libcxx/<triple>/, where the driver looks for it beside
+# build/libc/<triple>/libc.a and librt.a.
+LIBCXX_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+                   thumbv7em-none-eabihf thumbv8m.main-none-eabi \
+                   thumbv8m.main-none-eabihf armv7a-none-eabi \
+                   armv7a-none-eabihf riscv32-unknown-elf
+libcxx-embedded: embcc embar
+	@for t in $(LIBCXX_EMBEDDED); do \
+	    sh tools/build-libcxx.sh $$t $(BUILD)/libcxx/$$t || exit 1; \
+	    echo "libcxx: $(BUILD)/libcxx/$$t/libcxx.a"; \
+	done
+
 clean:
 	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar embsvd
 
 .PHONY: all check test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
         libcxx libcxx-x86_64 libcxx-aarch64 \
-        libcxx-linux-x86_64 libcxx-linux-aarch64 \
+        libcxx-linux-x86_64 libcxx-linux-aarch64 libcxx-embedded \
         install install-files uninstall libc-linux-all clean

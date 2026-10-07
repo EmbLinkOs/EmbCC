@@ -54,8 +54,6 @@ na() {
         echo "static assertions of the LP64 sizes" ;;
     preprocessor)
         echo "#errors unless the target is x86-64 or AArch64" ;;
-    computed-goto)
-        echo "computed goto, refused by name (tests/golden/rx-refuse.sh)" ;;
     bitfields)
         echo "a 40-bit field of an unsigned long, which is 32 bits here" ;;
     bit-builtins|global-aggregates|longs)

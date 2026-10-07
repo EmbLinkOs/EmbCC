@@ -9,6 +9,7 @@
 #include "../driver/util.h"
 #include "../lex/lex.h"
 #include "../arch/predef.h"
+#include "../arch/target.h"
 #include "../sema/sema.h"
 
 /* C11 5.2.4.1 requires 127. The list is allocated per macro, so the
@@ -2417,7 +2418,9 @@ char *cpp_process(const char *path, const char *src,
         if (cxx_strict)
             define_macro(&boot, "__STRICT_ANSI__ 1");
         if (si >= 3)                            /* (aligned new: C++17) */
-            define_macro(&boot, "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 16");
+            define_macro(&boot, target_default_new_align() == 8
+                                ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 8"
+                                : "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 16");
         if (cxx_char8 && si < 4)                /* -fchar8_t before C++20 */
             define_macro(&boot, "__cpp_char8_t 202207L");
         /* C++ units present as g++ to the headers: libstdc++ is GCC's

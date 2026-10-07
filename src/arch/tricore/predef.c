@@ -4,7 +4,9 @@
  * long double = double) with its MIPS macros dropped; the TriCore ones are
  * what GCC for TriCore defines as remembered -- __tricore__, __TRICORE__,
  * the core version __TRICORE_CORE__ 0x161 -- and unverified
- * (docs/internals/tricore-plan.md). */
+ * (docs/internals/tricore-plan.md). __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1/2/4
+ * are what the backend lowers: CMPSWAP.W, and a loop of it on the word
+ * around a byte or halfword. */
 
 #include "../predef.h"
 
@@ -92,6 +94,8 @@ const struct predef_macro predef_macros_tricore[] = {
     { "__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "2" },
     { "__GCC_CONSTRUCTIVE_SIZE", "32" },
     { "__GCC_DESTRUCTIVE_SIZE", "32" },
+    { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1", "1" },
+    { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2", "1" },
     { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4", "1" },
     { "__GXX_ABI_VERSION", "1002" },
     { "__ILP32__", "1" },

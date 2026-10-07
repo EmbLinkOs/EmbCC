@@ -122,6 +122,18 @@ struct parser {
      * because then there really is nowhere for it to go. */
     struct attrs attr_slot;
     int attr_carry_on;
+    /* An attribute among the declaration specifiers -- `static const
+     * __attribute__((aligned(4))) char t[4]`, as GCC takes it -- belongs
+     * to the declaration. One that wants it calls parse_type_spec_attrs,
+     * which seeds spec_slot with its attributes so far (spec_want) and
+     * reads them back from spec_out. parse_type_spec saves the slot of
+     * any declaration around it, so a struct body's members keep their
+     * own. By value, as attr_slot is: an error's longjmp leaves nothing
+     * pointing into a dead frame. Where no declaration asked -- a cast,
+     * sizeof -- spec_on is clear, and spec_attr refuses an attribute
+     * that would change layout or linkage. */
+    struct attrs spec_slot, spec_seed, spec_out;
+    int spec_on, spec_want;
     /* Where the last declarator's name token was, so a parameter can be
      * pointed AT rather than at the function's line -- an editor renaming
      * one has to edit the name, not the first column of the signature. */
@@ -1055,6 +1067,8 @@ static const struct expr *generic_choice(const struct expr *e);
 static struct type *parse_array_dims(struct parser *ps, struct type *t);
 static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
+static struct type *parse_type_spec_attrs(struct parser *ps, int allow_body,
+                                          struct attrs *a);
 static void parse_static_assert(struct parser *ps);
 static int at_pack(struct parser *ps);
 static int parse_constexpr(struct parser *ps);
@@ -1322,7 +1336,10 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
             }
-            struct type *spec = parse_type_spec(ps, 0);
+            struct attrs sat = { 0 };
+            struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            pcs_not_here(ps, &sat, "a parameter");
+            unused |= sat.unused;
             if (!spec)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a parameter type before %s",
@@ -1513,6 +1530,14 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
 static struct type *parse_type_spec(struct parser *ps, int allow_body)
 {
     int q = 0;
+    struct attrs outer = ps->spec_slot;
+    int outer_on = ps->spec_on;
+    ps->spec_on = ps->spec_want;
+    ps->spec_want = 0;
+    if (ps->spec_on)
+        ps->spec_slot = ps->spec_seed;
+    else
+        memset(&ps->spec_slot, 0, sizeof ps->spec_slot);
     /* a __flash written before the storage class (`__flash static
      * const char t[]`), where the declaration's own attribute parse met
      * it: this declaration's, so taken before a struct body's members
@@ -1524,6 +1549,9 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
     int q2 = 0;
     struct type *t = parse_type_spec_inner(ps, allow_body, &q2);
     q |= q2;
+    ps->spec_out = ps->spec_slot;
+    ps->spec_slot = outer;
+    ps->spec_on = outer_on;
     /* set AFTER the inner parse, which may hold types of its own (a
      * struct body, typeof): these are this declaration's specifiers */
     ps->spec_const = ps->q_top = (q & Q_CONST) != 0;
@@ -1534,6 +1562,39 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
     if (t && (q & Q_ATOMIC))
         return ty_atomic(t);
     return (t && (q & Q_VOL)) ? ty_volatile(t) : t;   /* volatile reaches the type */
+}
+
+/* parse_type_spec for a declaration, whose attributes *a gains the ones
+ * written among its specifiers */
+static struct type *parse_type_spec_attrs(struct parser *ps, int allow_body,
+                                          struct attrs *a)
+{
+    ps->spec_seed = *a;
+    ps->spec_want = 1;
+    struct type *t = parse_type_spec(ps, allow_body);
+    *a = ps->spec_out;
+    return t;
+}
+
+/* An __attribute__ among the specifiers, before the type: the
+ * declaration's (see spec_slot), or, in a type name, kept only when
+ * dropping it changes nothing -- the rule parse_stars applies. */
+static void spec_attr(struct parser *ps)
+{
+    struct token *at_tok = cur(ps);
+    struct attrs a = { 0 };
+    if (ps->spec_on) {
+        parse_attributes(ps, &ps->spec_slot);
+        return;
+    }
+    parse_attributes(ps, &a);
+    if (a.packed || a.aligned || a.weak || a.noreturn || a.section || a.pcs)
+        parse_error_at(ps, at_tok->line, at_tok->col,
+                "__attribute__((%s)) is not supported in a type name: "
+                "there is no declaration here to carry it",
+                a.packed ? "packed" : a.aligned ? "aligned"
+                : a.weak ? "weak" : a.noreturn ? "noreturn"
+                : a.section ? "section" : "pcs");
 }
 
 /* `_Alignas(N)` / `_Alignas(type-name)` — a C11 alignment specifier among the
@@ -1571,6 +1632,10 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                                           int *vol)
 {
     *vol = skip_quals(ps);
+    while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {   /* `const __attribute__((x)) int` */
+        spec_attr(ps);
+        *vol |= skip_quals(ps);
+    }
     consume_alignas(ps);
     /* GNU `typeof(x)` / `typeof(type)` — the type of an expression (never
      * evaluated, like sizeof) or a type-name. The expression's type is resolved
@@ -2471,9 +2536,9 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
          * to theirs. gcc and clang accept both; this refused the first. */
         struct attrs lmat = { 0 };
         parse_attributes(ps, &lmat);
-        pcs_not_here(ps, &lmat, "a member");
         /* allow_body: nested struct/union definitions are legal C */
-        struct type *spec = parse_type_spec(ps, 1);
+        struct type *spec = parse_type_spec_attrs(ps, 1, &lmat);
+        pcs_not_here(ps, &lmat, "a member");
         if (!spec)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a member type before %s",
@@ -4036,7 +4101,16 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                        "wrap it in braces");
         int is_td = t->kind == TOK_KW_TYPEDEF;
         advance(ps);
-        struct type *base = parse_type_spec(ps, 1);
+        /* attributes among the specifiers, as the trailing ones below:
+         * the extern's are a promise about the definition elsewhere, and
+         * a block-scope typedef's must not change the layout */
+        struct attrs bat = { 0 };
+        struct type *base = parse_type_spec_attrs(ps, 1, &bat);
+        if (is_td && (bat.aligned || bat.packed))
+            parse_error_at(ps, t->line, t->col,
+                       "an aligned or packed attribute on a block-scope "
+                       "typedef is not supported; declare the typedef at "
+                       "file scope");
         int spec_const = ps->spec_const;
         if (!base)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -4171,9 +4245,21 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * from a declaration the standard spells out. */
         while (cur(ps)->kind == TOK_KW_STATIC ||
                cur(ps)->kind == TOK_KW_THREAD ||
-               cur(ps)->kind == TOK_KW_ALIGNAS) {
+               cur(ps)->kind == TOK_KW_ALIGNAS ||
+               cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             if (cur(ps)->kind == TOK_KW_ALIGNAS) {
                 consume_alignas(ps);       /* accumulates ps->alignas_out */
+                continue;
+            }
+            if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+                /* `static __attribute__((aligned(4))) char t[4]`; a
+                 * __flash here is the type's, and parse_type_spec's */
+                struct lexer asave = ps->lx;
+                if (addr_space_qual(ps)) {
+                    ps->lx = asave;
+                    break;
+                }
+                parse_attributes(ps, &lead);
                 continue;
             }
             if (cur(ps)->kind == TOK_KW_STATIC)
@@ -4292,7 +4378,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * the one flat tag namespace EmbCC keeps -- fine for the anonymous
          * types real code uses here; a same-named tag in two scopes is the
          * documented limitation, not a miscompile. */
-        struct type *base = parse_type_spec(ps, 1);
+        struct type *base = parse_type_spec_attrs(ps, 1, &lead);
         int spec_const = ps->spec_const;
         /* every declarator takes the declaration's _Alignas, not only
          * the first */
@@ -5033,7 +5119,7 @@ static void parse_top(struct parser *ps, struct unit *u,
         struct attrs tdat = { 0 };
         if (at_attribute(ps))
             parse_attributes(ps, &tdat);
-        struct type *tbase = parse_type_spec(ps, 1);
+        struct type *tbase = parse_type_spec_attrs(ps, 1, &tdat);
         int spec_const = ps->spec_const;
         if (!tbase)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -5096,7 +5182,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
     if (cur(ps)->kind == TOK_IDENT)
         reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
-    struct type *base = parse_type_spec(ps, 1);
+    struct type *base = parse_type_spec_attrs(ps, 1, &at);
     int spec_const = ps->spec_const;
     if (!base)
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -5325,7 +5411,10 @@ static void parse_top(struct parser *ps, struct unit *u,
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
             }
-            struct type *spec = parse_type_spec(ps, 0);
+            struct attrs sat = { 0 };
+            struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            pcs_not_here(ps, &sat, "a parameter");
+            unused |= sat.unused;
             if (!spec)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a parameter type before %s",

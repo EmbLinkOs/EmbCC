@@ -567,6 +567,67 @@ static long code_ref(long off, int text_sym, int *sym)
 
 static int compile_unit(const char *in, const char *out, int pp_only);
 
+/* GNU C's static label data, once codegen has laid every function out
+ * (cg_note_labels): `&&a` in a pointer slot is its function's symbol plus
+ * the label's offset -- added into the relocation's addend, so the Thumb
+ * bit, AVR's word address and every other target's spelling of a
+ * function pointer apply to it as they do to `&f` -- and `&&b - &&a` is a
+ * plain number written into the image. Before any writer reads either.
+ *
+ * On AVR a label's VALUE is a word address, as a function pointer's is,
+ * so the difference of two is in words and `&&a + n` is n words on: the
+ * code computes both that way, and the data must agree. */
+static void resolve_label_data(struct unit *u)
+{
+    long unit = target_get() == TARGET_AVR ? 2 : 1;   /* bytes per value */
+    for (struct global *g = u->globals; g; g = g->next) {
+        /* A table in a function that was never generated (an unused
+         * static one) is that function's alone, and nothing can read it:
+         * its label slots stay zero rather than name a symbol that was
+         * not emitted. */
+        int keep = 0;
+        for (int r = 0; r < g->nrelocs; r++) {
+            struct greloc *rl = &g->relocs[r];
+            if (rl->label && rl->ftarget && !rl->ftarget->label_pos)
+                continue;
+            g->relocs[keep++] = *rl;
+        }
+        g->nrelocs = keep;
+        for (int r = 0; r < g->nrelocs; r++) {
+            struct greloc *rl = &g->relocs[r];
+            struct func *f = rl->ftarget;
+            if (!rl->label)
+                continue;
+            if (!f || !f->label_pos || rl->label_slot < 0 ||
+                rl->label_slot >= f->nlabel_pos ||
+                f->label_pos[rl->label_slot] < 0)
+                internal_error("%s: the address of label '%s' was never "
+                               "placed", g->name, rl->label);
+            rl->addend = rl->addend * unit + f->label_pos[rl->label_slot];
+            rl->label_slot = -1;        /* once */
+        }
+        for (int d = 0; d < g->nldiffs; d++) {
+            struct glabeldiff *ld = &g->ldiffs[d];
+            struct func *f = ld->fn;
+            if (f && !f->label_pos)
+                continue;                 /* never generated, as above */
+            if (!f || !f->label_pos || ld->slot < 0 || ld->minus_slot < 0 ||
+                ld->slot >= f->nlabel_pos || ld->minus_slot >= f->nlabel_pos ||
+                f->label_pos[ld->slot] < 0 || f->label_pos[ld->minus_slot] < 0)
+                internal_error("%s: '&&%s - &&%s' was never placed", g->name,
+                               ld->label, ld->minus);
+            if (!g->init_bytes || ld->off + ld->size > g->init_len)
+                internal_error("%s: '&&%s - &&%s' is outside the image",
+                               g->name, ld->label, ld->minus);
+            target_put_uint((unsigned char *)g->init_bytes +
+                            ld->off, ld->size,
+                            (unsigned long long)((f->label_pos[ld->slot] -
+                                                  f->label_pos[ld->minus_slot])
+                                                 / unit + ld->addend));
+        }
+    }
+}
+
 /* -Wl,... and -Xlinker: options for the link, kept until there is one. A
  * compile that does not link ignores them, as GCC's does. */
 static const char *g_wl[128];
@@ -1514,19 +1575,36 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             fputs(pp, stdout);
         return 0;
     }
-    if (lang_cxx && !syntax_only &&
-        (target_ptr_size() != 8 || target_long_size() != 8)) {
-        /* The C++ front end lays types out itself (src/cxx/type.c), for
-         * an LP64 target, and the C it lowers to is laid out by the
-         * target's own rules. Anywhere else the two disagree --
-         * sizeof(long) was 8 on ARMv7-M and sizeof(void *) 8 on AVR --
-         * and every class layout, sizeof and pointer step would be wrong
-         * without a word. A check that writes nothing is still allowed. */
+    if (lang_cxx && !syntax_only && target_ptr_size() != 8 &&
+        target_get() != TARGET_THUMB && target_get() != TARGET_RISCV32) {
+        /* The C++ front end lays types out itself (src/cxx/type.c) by the
+         * target's data model, and follows the Itanium C++ ABI's 32-bit
+         * form -- with the ARM C++ ABI's changes on ARM. That is checked
+         * against clang on 32-bit ARM and RV32 only; on the other 32-bit
+         * targets nobody has compared a vtable, a guard or a mangled
+         * name, and AVR's two-byte pointers and one-byte alignment are a
+         * data model the front end has never laid a class out for. */
         fprintf(stderr,
                 "embcc: error: C++ is not yet supported for %s: the C++ "
-                "front end lays out types for 8-byte long and pointers, and "
-                "this target's long is %d bytes and its pointers %d\n",
-                target_triple_now(), target_long_size(), target_ptr_size());
+                "front end follows the C++ ABI of x86-64, AArch64, 32-bit "
+                "ARM and riscv32, and this target's (%d-byte pointers) is "
+                "not implemented\n",
+                target_triple_now(), target_ptr_size());
+        return 1;
+    }
+    if (lang_cxx && !syntax_only && want_exceptions &&
+        (target_get() == TARGET_THUMB || target_get() == TARGET_RISCV32)) {
+        /* Exceptions need the unwinder's tables and a personality routine
+         * reading them: ARM EHABI's .ARM.exidx on ARM, DWARF .eh_frame on
+         * RV32. EmbCC writes neither for these machines yet, so a throw
+         * could never be caught -- refused rather than compiled into
+         * landing pads nothing would reach. */
+        fprintf(stderr,
+                "embcc: error: C++ exceptions are not supported for %s yet: "
+                "EmbCC writes no %s; compile with -fno-exceptions\n",
+                target_triple_now(), target_get() == TARGET_THUMB
+                ? "ARM EHABI unwind tables (.ARM.exidx)"
+                : "RISC-V .eh_frame");
         return 1;
     }
     if (lang_cxx && !syntax_only && target_big_endian()) {
@@ -1946,6 +2024,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                      &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                      opt_level >= 1);
+    resolve_label_data(u);
 
     /* The groups, as codegen laid them out (the sort above). */
     g_plain_end = g_groups_end = (long)text.len;
@@ -2442,6 +2521,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "C++ without -fno-exceptions): EmbCC writes no "
                             "LoongArch .eh_frame",
                    target_triple_now());
+    /* 32-bit ARM and RV32: eh_emit's CFI is x86-64's and AArch64's
+     * (their register numbers, their CFA rules), not these machines', and
+     * ARM unwinds through EHABI's .ARM.exidx besides. A C++ unit asks for
+     * the tables by default; with -fno-exceptions nothing reads them, so
+     * they are not written, and only an explicit request is refused. (A
+     * C++ unit with exceptions is refused before this, by name.) */
+    if (unwind && (ta == TARGET_THUMB || ta == TARGET_RISCV32) && lang_cxx &&
+        want_unwind < 0 && !want_exceptions)
+        unwind = 0;
+    if (unwind && (ta == TARGET_THUMB || ta == TARGET_RISCV32))
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "%s yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no %s",
+                   target_triple_now(), ta == TARGET_THUMB
+                   ? "ARM unwind tables (.ARM.exidx)" : "RISC-V .eh_frame");
     if (unwind && ta == TARGET_TRICORE)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "tricore-none-elf yet (-funwind-tables, "
@@ -3768,8 +3863,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                               STT_NOTYPE), SHN_UNDEF);
         int lo = riscv && fs[i].kind == RK_RISCV_PCREL_LO12_I;
         int fsym = tf->sym_ndx;
-        long fadd = target_reloc_addend(ta, fs[i].kind, 0) +
-                    (fs[i].kind == RK_ABS64 ? fs[i].addend : 0);
+        long fadd = target_reloc_addend(ta, fs[i].kind, 0) + fs[i].addend;
         if (lo)
             fadd = code_ref(fs[i].patch_off - 4, text_sym, &fsym);
         code_rela(w, text_ndx, fs[i].patch_off, fsym,

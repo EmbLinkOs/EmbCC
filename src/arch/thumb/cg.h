@@ -153,6 +153,10 @@ struct t_fn {
     int nlit, caplit;
     struct v6_lsite *lsite;
     int nlsite, caplsite;
+    /* Per &&label this pass, in order: its label and the `add rD, pc`
+     * its pool word is relative to (lrel[2k], lrel[2k + 1]). */
+    int *lrel;
+    int nlrel, caplrel;
     /* Per pool point (pool_point in v6m.c, in emission order): an island
      * there -- 1 with a branch around it, 2 where the code before ends in
      * an unconditional transfer. The first pass of each layout decides;

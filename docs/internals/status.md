@@ -60,7 +60,7 @@ A backend that cannot lower an operation names itself, the operation and
 the IR instruction:
 
 ```text
-embcc: f.c:3: error: the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]
+embcc: f.c:3: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]
 ```
 
 The backend names are `ARMv7-M` (every Cortex-M target), `RV32`, `RV64`,
@@ -81,9 +81,9 @@ ignored (see [Attributes](#attributes)).
 | Cortex-M: `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | Thumb-1 for ARMv6-M and ARMv8-M Baseline (with Baseline's divides and exclusives), Thumb-2 for ARMv7-M, ARMv7E-M and ARMv8-M Mainline. Soft float, or a single-precision FPU with `double` in software. No DSP instructions. TrustZone-M's Secure side (`-mcmse`, soft float) on both ARMv8-M profiles. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values; `s16`-`s31` with an FPU. | DWARF 4, with [known problems](../manual/debugging.md#known-problems). | `embld`. | `librt.a`, one per triple. No C library. |
 | RV32: `riscv32-unknown-elf` | RV32IMAC, soft float. No operation on `long double`. C only. | Every pass except vectorization and division by a constant. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`. | `librt.a`. No C library. |
 | RV64: `riscv64-unknown-elf` | RV64IMAC, soft float. No operation on `long double` or `__int128`. C only. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | None built (see below). No C library. |
-| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. No computed goto or narrow atomics. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
-| LoongArch64: `loongarch64-unknown-elf` | LA64 base integer ISA, LP64S soft float, the normal code model; jump tables; `__int128` and binary128 `long double` in software; atomics of every width but 16 bytes. No computed goto. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`, which also links clang's objects (its medium code model and GOT accesses included). | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
-| AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. No variable-length arrays or computed goto. C only. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
+| MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
+| LoongArch64: `loongarch64-unknown-elf` | LA64 base integer ISA, LP64S soft float, the normal code model; jump tables; `__int128` and binary128 `long double` in software; atomics of every width but 16 bytes. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`, which also links clang's objects (its medium code model and GOT accesses included). | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
+| AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. C only. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
 
 The register allocator is described in
 [Register allocation](register-allocation.md), the passes and their
@@ -173,7 +173,6 @@ x86-64 and AArch64:
 
 | Construct | Diagnostic |
 |---|---|
-| A scalar local with `aligned` above 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | Floating point under `-mno-sse` (x86-64) | `floating point needs SSE, which -mno-sse forbids` |
 | Floating point under `-mgeneral-regs-only` (AArch64) | `floating point used under -mgeneral-regs-only (in 'f')` |
 
@@ -184,9 +183,7 @@ Cortex-M (`ARMv7-M` backend):
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| Computed `goto` and `&&label` | `the ARMv7-M backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | An `asm` output wider than 4 bytes | `the ARMv7-M backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
-| A scalar local with `aligned` above 8 | `'x' needs 32-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 
 RISC-V (RV32 messages shown; RV64 names itself):
 
@@ -197,9 +194,7 @@ RISC-V (RV32 messages shown; RV64 names itself):
 | Any operation on `__int128` at RV64 | `the RV64 backend cannot lower a 128-bit value yet (function f) [ldvar w=16 size=16]` |
 | 8-byte atomic read-modify-write at RV32 | `the RV32 backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| Computed `goto` and `&&label` | `the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | An `asm` output wider than a register | `the RV32 backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
-| A scalar local with `aligned` above 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 
 `long double` and `__int128` can still be declared and measured with
 `sizeof` on RISC-V, and a static initializer such as
@@ -209,13 +204,10 @@ MIPS32:
 
 | Construct | Diagnostic |
 |---|---|
-| Atomic read-modify-write on a 1- or 2-byte object | `the MIPS32 backend cannot lower an atomic narrower than four bytes (ll/sc are word-sized, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [xadd w=4 size=1]` |
 | 8-byte atomic read-modify-write | `the MIPS32 backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| Computed `goto` and `&&label` | `the MIPS32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| A scalar local with `aligned` above 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | `-mhard-float`, `-EB`, `-mabicalls`, `-mabi=n32`, `-G8`, a core that is not MIPS32r2 | each refused by name; see [Invoking EmbCC](../manual/invoking.md#mips-options) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
 
@@ -224,9 +216,7 @@ LoongArch64:
 | Construct | Diagnostic |
 |---|---|
 | A 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
-| Computed `goto` and `&&label` | `the LoongArch64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the LoongArch64 backend cannot lower __builtin_frame_address or __builtin_return_address (EmbCC's LoongArch code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
-| A scalar local with `aligned` above 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | `-mabi=lp64d`, `-mabi=lp64f`, `-mfpu=64`, `-mdouble-float`, `-mcmodel=extreme`, `-mstrict-align`, `-mlsx`, `-mlasx`, an LA32 `-march` | each refused by name; see [Targets](../manual/targets.md#loongarch64) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
 | In assembly: `la.abs`, the TLS, extreme-model and absolute-GOT operators, floating-point and vector instructions | each refused by name, with the statement |
@@ -236,9 +226,6 @@ AVR:
 | Construct | Diagnostic |
 |---|---|
 | An atomic load or store wider than 1 byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
-| A variable-length array | `the AVR backend cannot lower a variable-length array yet (function f)` |
-| Computed `goto` and `&&label` | `the AVR backend cannot lower labeladdr yet (function f) [labeladdr w=4 size=4]` |
-| A local with `__attribute__((aligned))` | `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
 | An 8-byte `asm` operand | `an asm operand of 8 bytes needs 8 consecutive registers, which is more than this backend keeps free across an asm` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 
@@ -408,7 +395,11 @@ that are missing:
 - Target builtins: `__builtin_cpu_supports`, `__builtin_ia32_*`,
   `__builtin_avr_*`.
 - Clang's `__c11_atomic_*` family. `_Atomic`, `<stdatomic.h>`, the
-  `__atomic_*` builtins and the `__sync_*` builtins are provided.
+  `__atomic_*` builtins and the `__sync_*` builtins are provided. Where
+  the machine's atomic instructions are a word -- RISC-V, MIPS,
+  LoongArch64, PowerPC, SPARC, TriCore, Xtensa -- a one- or two-byte
+  atomic is a loop on the aligned word around it that rewrites only its
+  lane (`docs/manual/targets.md`, each target's Atomics).
 
 ### Code generation
 
@@ -427,7 +418,8 @@ target:
 | Apple arm64 | Supported, with exceptions, against the system's C++ runtime. |
 | macOS x86-64 | An object that uses exceptions does not link: Apple's linker reports `ld: fixup error (kind=x86_64_rip) ... target '___cxa_allocate_exception' does not have address`. Compile with `-fno-exceptions`. |
 | Windows x86-64 | Only with `-fno-exceptions -fno-unwind-tables`. Otherwise every unit is refused: `C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written` |
-| Cortex-M, RV32, AVR | Not supported. The C++ front end lays out types for 8-byte `long` and pointers, so code generation is refused on a target where either is narrower: `C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4`. `-fsyntax-only`, `-E` and `-c -M` still run. |
+| 32-bit ARM (Cortex-M, ARM state), RV32 | Supported with `-fno-exceptions`, with or without RTTI: the data model is the target's, the Itanium ABI's 32-bit form with the ARM C++ ABI's changes on ARM, checked against clang++ by `tests/golden/cxx-abi-ilp32.sh` and run on six boards by `tests/golden/cxx-embedded.sh`; runtime from `make libcxx-embedded`. Exceptions are refused: `C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions`. |
+| AVR, MIPS32, Xtensa, TriCore | Not supported: `C++ is not yet supported for avr: the C++ front end follows the C++ ABI of x86-64, AArch64, 32-bit ARM and riscv32, and this target's (2-byte pointers) is not implemented`. `-fsyntax-only`, `-E` and `-c -M` still run. |
 | RV64 | Not supported. Code is generated, but no `libcxx.a` is built, and a function that needs a landing pad is refused: `the RV64 backend cannot lower this operation yet (function F) [landing w=8 size=4]`. |
 
 Language refusals:
@@ -657,7 +649,9 @@ source states them:
   that need a complete control-flow graph are skipped in a function with
   live exception regions, and the passes that place code on an edge are
   skipped in a function with `goto *`. On x86-64 and AArch64 such a
-  function keeps every value in memory.
+  function keeps every value in memory; the other backends allocate
+  registers in it, the allocator giving `goto *p` an edge to every label
+  whose address is taken.
 - **`-O3` is `-O2`.** There is no `-Og`.
 
 ## Milestones
@@ -687,9 +681,8 @@ dates.
   registers; `.pdata`/`.xdata` unwind tables for Windows.
 - GNU-syntax assembly files for x86-64.
 - binary128 `long double` arithmetic on RISC-V, and `__int128` at RV64.
-- Computed `goto` on Cortex-M, RISC-V, MIPS32 and AVR; variable-length
-  arrays and aligned locals on AVR;
-  narrow and 8-byte atomic read-modify-write, unwind tables and
+- Computed `goto` on Cortex-M, RISC-V, MIPS32 and AVR;
+  8-byte atomic read-modify-write, unwind tables and
   `__attribute__((interrupt))` on MIPS32.
 - On MIPS32, a delay slot filled from anywhere but the instruction just
   before the transfer (the branch target's first instruction, or one

@@ -1809,10 +1809,49 @@ void func_deduce_return(struct cfunc *f, const struct ctok *at)
                  f->name);
 }
 
+/* f, a specialization of a function template made while the template was
+ * only declared (a call, an `extern template`, before the definition):
+ * its body is the definition's, now that there is one -- the declaration
+ * replayed from the definition for f's arguments, and its body taken. The
+ * point of instantiation is the unit's end too (13.8.4.1), so a call
+ * before the definition still gets one. */
+static void spec_body_from_definition(struct cfunc *f)
+{
+    struct ctemplate *t = f->spec_of;
+    if (f->lazy || f->body_tok >= 0 || f->cls || !t || !t->has_body ||
+        t->lambda || (f->extern_inst && !f->is_constexpr))
+        return;           /* (extern template: another unit's) */
+    struct cscope *ps = tparam_scope(t->params, t->nparams, f->targs,
+                                     f->ntargs, t->scope);
+    jmp_buf jb;
+    void *saved = cx_sfinae;
+    struct parse_state *st = parse_save();
+    if (setjmp(jb)) {
+        parse_restore(st);
+        cx_sfinae = saved;
+        return;
+    }
+    cx_sfinae = &jb;
+    struct cfunc *g = func_decl_replay(t, ps);
+    cx_sfinae = saved;
+    parse_restore(st);
+    if (!g->lazy)
+        return;
+    f->lazy = 1;
+    f->body_tok = g->body_tok;
+    f->body_end = g->body_end;
+    f->mi_tok = g->mi_tok;
+    f->def_scope = g->def_scope;
+    f->pnames = g->pnames;
+    f->type = g->type;
+    f->inst_scope = ps;
+}
+
 void func_ensure_body(struct cfunc *f)
 {
     if (f->defined || f->is_deleted || f->tmpl)
         return;
+    spec_body_from_definition(f);
     if (f->is_defaulted && !f->special && is_defaultable_cmp(f)) {
         define_defaulted_cmp(f);
         return;

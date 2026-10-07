@@ -142,18 +142,16 @@ t=$(grep -c R_ARM_THM_MOVT_ABS "$out/rel.txt" || true)
     exit 1; }
 echo "ARM relocations, $w movw/movt pairs and an ABS32 in .data"
 
-# THE RULE: what the backend has not got, it refuses by name.
-refuses() {
-    printf '%s\n' "$2" > "$out/no.c"
-    if "$EMBCC" --target=$T -c "$out/no.c" -o "$out/no.o" 2>"$out/no.err"; then
-        echo "$1 was accepted by a backend that cannot lower it"; exit 1
-    fi
-    grep -q "cannot lower" "$out/no.err" || {
-        echo "$1 failed, but not with the backend's own refusal:"
-        cat "$out/no.err"; exit 1; }
-}
-refuses "a computed goto"   'void f(int i){ void *t[] = { &&a, &&b }; goto *t[i & 1]; a: return; b: return; }'
-echo "a computed goto refuses by name"
+# A computed goto: &&label is pc-relative (movw/movt, add rD, pc), so it
+# needs no relocation at all; what it computes is tests/exec's
+# computed-goto*.c's to check.
+printf '%s\n' 'int f(int i){ void *t[] = { &&a, &&b }; goto *t[i & 1]; a: return 1; b: return 2; }' > "$out/cg.c"
+"$EMBCC" --target=$T -O2 -c "$out/cg.c" -o "$out/cg.o" ||
+    { echo "a computed goto does not compile"; exit 1; }
+"$RE" -r "$out/cg.o" > "$out/cg.rel"
+! grep -q R_ARM "$out/cg.rel" || {
+    echo "a label address took a relocation:"; cat "$out/cg.rel"; exit 1; }
+echo "a computed goto's label addresses need no relocation"
 # long double is a double on ARM EABI and is lowered as one now; what it
 # computes is tests/golden/ldouble-same.sh's to check.
 printf 'long double f(long double a){return a*a;}\n' > "$out/ld.c"

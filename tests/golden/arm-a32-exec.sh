@@ -58,8 +58,6 @@ na() {
         echo "a 16-aligned scalar local, refused by name above the 8-byte AAPCS stack (as on Thumb)" ;;
     alloca)
         echo "checks that alloca is 16-aligned; AAPCS gives 8 (__BIGGEST_ALIGNMENT__), and clang's build fails it at -O2 too" ;;
-    computed-goto)
-        echo "computed goto, refused by name (tests/golden/arm-a32-refuse.sh)" ;;
     atomics)
         echo "__builtin_frame_address, refused by name (arm-a32-refuse.sh)" ;;
     *) return 1 ;;

@@ -31,8 +31,7 @@
  *     a load or store irgen cannot promise is aligned (a packed member)
  *     goes byte by byte.
  *
- * Refused by name: atomics narrower than a word, computed
- * goto, jump tables
+ * Refused by name: atomics wider than a word, jump tables
  * (target_jump_tables keeps a dense switch a decision tree), the frame
  * and return address, __int128 and binary128. THE RULE.
  */
@@ -843,7 +842,10 @@ static void st_any(struct tc_fn *F, int rt, int base, long off, int size,
  * relocation: +-32 KiB for a conditional one, +-16 MiB for a J. One that
  * does not reach takes the long form on the next attempt: the inverse
  * condition over a J. */
-enum { FX_B, FX_J };
+/* FX_ADDR is no branch: &&label, whose `at` is the index of the first
+ * of its two function-address sites, the addend of each becoming the
+ * label's offset in the function. */
+enum { FX_B, FX_J, FX_ADDR };
 
 static void want_label(struct tc_fn *F, int at, int label, int kind)
 {
@@ -1810,6 +1812,161 @@ static int pred_cond(enum binop pred, int sign, int *swap)
     }
 }
 
+/* ---- one- and two-byte atomics ---------------------------------------
+ *
+ * SWAP.W and CMPSWAP.W are word-sized, so a narrow atomic works on the
+ * aligned word around it, as GCC's and LLVM's do elsewhere: a CMPSWAP.W
+ * loop that rewrites only its lane,
+ *
+ *   retry: ld.w      d1, [a12]               (a12 = the aligned word)
+ *          d0 = f(d1)  in the lane
+ *          d0 = d1 ^ ((d0 ^ d1) & mask)
+ *          cmpswap.w [a12], e0               (stored if still d1; d0 = seen)
+ *          jne       d0, d1, retry
+ *
+ * atomic against the neighbouring bytes too: a store to any of them
+ * between the load and the CMPSWAP.W makes it fail, and the loop goes
+ * round. TriCore is little-endian: the lane of address a is bits
+ * 8*(a & 3) up. SH shifts left by a positive count and right by a
+ * negative one. The data scratches are five, D0-D3 and D15. */
+#define SUB_MK 2            /* the lane's mask */
+#define SUB_SH 3            /* the lane's shift */
+#define SUB_VAL 15          /* the operand, moved into its lane */
+
+/* sh = the lane's shift, from the address a (in place when sh == a) */
+static void sub_shift(struct tc_fn *F, int sh, int a)
+{
+    tc_alu_imm(F->t, TC_AND, sh, a, 3);
+    tc_alu_imm(F->t, TC_SH, sh, sh, 3);
+}
+
+/* AD = the aligned word, SUB_MK and SUB_SH, for the address in vreg a */
+static void sub_lane(struct tc_fn *F, int av, int size)
+{
+    struct code *t = F->t;
+    int a = rdr(F, av, SUB_VAL);
+    sub_shift(F, SUB_SH, a);
+    tc_alu_imm(t, TC_ANDN, SUB_MK, a, 3);
+    tc_mov_a(t, AD, SUB_MK);
+    tc_li(t, SUB_MK, size == 1 ? 0xff : 0xffff);
+    tc_alu(t, TC_SH, SUB_MK, SUB_MK, SUB_SH);
+}
+
+/* reg = (src << SUB_SH) & mask */
+static void sub_in(struct tc_fn *F, int reg, int src)
+{
+    tc_alu(F->t, TC_SH, reg, src, SUB_SH);
+    tc_alu(F->t, TC_AND, reg, reg, SUB_MK);
+}
+
+/* reg, its lane already masked, shifted down to bit 0 and extended as
+ * `sign` says; the shift is SUB_SH's, or worked out again from vreg a's
+ * address when `again` */
+static void sub_out(struct tc_fn *F, int reg, int a, int again, int size,
+                    int sign)
+{
+    struct code *t = F->t;
+    if (again)
+        sub_shift(F, SUB_SH, rdr(F, a, SUB_SH));
+    tc_alu_imm(t, TC_RSUB, SUB_SH, SUB_SH, 0);      /* right: negative */
+    tc_alu(t, TC_SH, reg, reg, SUB_SH);
+    if (sign)
+        tc_extr(t, reg, reg, 0, 8 * size, 1);
+}
+
+/* swap, fetch-and-add and the bitwise ones, on a byte or a halfword */
+static void sub_rmw(struct tc_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int top, again;
+    sub_lane(F, i->a, i->size);
+    sub_in(F, SUB_VAL, rdr(F, i->b, SUB_VAL));
+    tc_dsync(t);
+    top = t->len;
+    tc_load(t, 1, AD, 0, 4, 0);
+    if (i->op == IR_XCHG) {
+        tc_mov(t, 0, SUB_VAL);
+    } else if (i->op == IR_XADD) {
+        tc_alu(t, TC_ADD, 0, 1, SUB_VAL);
+    } else {
+        switch ((int)i->imm) {
+        case '&': tc_alu(t, TC_AND, 0, 1, SUB_VAL); break;
+        case '|': tc_alu(t, TC_OR, 0, 1, SUB_VAL); break;
+        case '^': tc_alu(t, TC_XOR, 0, 1, SUB_VAL); break;
+        default:  tc_alu(t, TC_NAND, 0, 1, SUB_VAL); break;    /* nand */
+        }
+    }
+    /* only the lane changes: old ^ ((new ^ old) & mask) */
+    tc_alu(t, TC_XOR, 0, 0, 1);
+    tc_alu(t, TC_AND, 0, 0, SUB_MK);
+    tc_alu(t, TC_XOR, 0, 0, 1);
+    tc_cmpswap_w(t, 0, AD, 0);
+    again = tc_jcc_placeholder(t, TC_JNE, 0, 1);
+    br_back(F, again, top);
+    tc_dsync(t);
+    tc_alu(t, TC_AND, 1, 1, SUB_MK);
+    sub_out(F, 1, i->a, 0, i->size, i->sign);
+    wr(F, i->dst, 1);
+}
+
+/* compare-and-swap on a byte or a halfword. CMPSWAP.W compares the whole
+ * word, so the word it is given to compare is the one last seen with the
+ * expected value in the lane, and when it fails the loop looks at why:
+ *
+ *          ld.w  d1, [a12] ; d1 = (d1 & ~mask) | expected
+ *   retry: d0 = d1 ^ x                       (x = expected ^ desired)
+ *          cmpswap.w [a12], e0               (d0 = the word seen)
+ *          jeq   d0, d1, out                 (swapped)
+ *          ((d0 ^ d1) & ~mask) == 0: out     (the lane differs: failed)
+ *          d1 = (d0 & ~mask) | expected ; j retry   (a neighbour moved)
+ *   out:
+ * d0 is the word seen either way. */
+static void sub_cas(struct tc_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int top, again, done, failed;
+    sub_lane(F, i->a, i->size);
+    sub_in(F, 0, rdr(F, i->c, 0));                     /* desired */
+    if (i->op == IR_CAS) {
+        sub_in(F, SUB_VAL, rdr(F, i->b, SUB_VAL));     /* expected */
+    } else {
+        rda(F, i->b, AD2);
+        tc_load(t, SUB_VAL, AD2, 0, i->size, 0);
+        sub_in(F, SUB_VAL, SUB_VAL);
+    }
+    tc_alu(t, TC_XOR, SUB_SH, 0, SUB_VAL);            /* x; no shift now */
+    tc_dsync(t);
+    tc_load(t, 1, AD, 0, 4, 0);
+    tc_alu(t, TC_ANDN, 1, 1, SUB_MK);
+    tc_alu(t, TC_OR, 1, 1, SUB_VAL);
+    top = t->len;
+    tc_alu(t, TC_XOR, 0, 1, SUB_SH);
+    tc_cmpswap_w(t, 0, AD, 0);
+    done = tc_jcc_placeholder(t, TC_JEQ, 0, 1);
+    tc_alu(t, TC_XOR, 1, 1, 0);
+    tc_alu(t, TC_ANDN, 1, 1, SUB_MK);
+    failed = tc_jcci_placeholder(t, TC_JEQ, 1, 0);
+    tc_alu(t, TC_ANDN, 1, 0, SUB_MK);
+    tc_alu(t, TC_OR, 1, 1, SUB_VAL);
+    again = tc_j_placeholder(t);
+    br_back(F, again, top);
+    br_land(F, done);
+    br_land(F, failed);
+    tc_dsync(t);
+    tc_alu(t, TC_AND, 0, 0, SUB_MK);
+    if (i->op == IR_CAS) {
+        sub_out(F, 0, i->a, 1, i->size, i->sign);
+        wr(F, i->dst, 0);
+    } else {
+        /* the flag from the lanes compared; then *b = the lane seen */
+        tc_alu(t, TC_EQ, 1, 0, SUB_VAL);
+        sub_out(F, 0, i->a, 1, i->size, 0);
+        rda(F, i->b, AD2);
+        tc_store(t, 0, AD2, 0, i->size);
+        wr(F, i->dst, 1);
+    }
+}
+
 static void gen_ins(struct tc_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -1885,14 +2042,10 @@ static void gen_ins(struct tc_fn *F, int n)
 
     if (i->w > 8)
         tc_refuse(F, i, "a 128-bit value");
+    /* (one and two bytes are sub_rmw/sub_cas: the word around them) */
     if ((i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
-         i->op == IR_CAS || i->op == IR_CMPXCHG) && i->size != 4)
-        tc_refuse(F, i, i->size < 4
-                  ? "an atomic narrower than four bytes (SWAP.W and "
-                    "CMPSWAP.W are word-sized, and a read-modify-write of "
-                    "the containing word is not atomic against its "
-                    "neighbours)"
-                  : "an atomic wider than a register");
+         i->op == IR_CAS || i->op == IR_CMPXCHG) && i->size > 4)
+        tc_refuse(F, i, "an atomic wider than a register");
     if (i->op == IR_CAS16)
         tc_refuse(F, i, "a 16-byte atomic");
     if (i->op == IR_FRAMEADDR)
@@ -2480,6 +2633,10 @@ static void gen_ins(struct tc_fn *F, int n)
 
     /* ---- atomics: SWAP.W, and CMPSWAP.W loops, bracketed by dsync ---- */
     case IR_XCHG:
+        if (i->size == 1 || i->size == 2) {
+            sub_rmw(F, i);
+            return;
+        }
         rda(F, i->a, AD);
         rd(F, i->b, ACC);
         tc_dsync(t);
@@ -2494,6 +2651,10 @@ static void gen_ins(struct tc_fn *F, int n)
          *          jne    d0, d1, retry
          * and the old value is d1. */
         int top, again;
+        if (i->size == 1 || i->size == 2) {
+            sub_rmw(F, i);
+            return;
+        }
         rda(F, i->a, AD);
         rd(F, i->b, B_LO);
         tc_dsync(t);
@@ -2518,6 +2679,10 @@ static void gen_ins(struct tc_fn *F, int n)
     }
     case IR_CAS:
         /* dst = the value seen, whether or not the swap happened */
+        if (i->size == 1 || i->size == 2) {
+            sub_cas(F, i);
+            return;
+        }
         rd(F, i->c, 0);
         rd(F, i->b, 1);
         rda(F, i->a, AD);
@@ -2529,6 +2694,10 @@ static void gen_ins(struct tc_fn *F, int n)
     case IR_CMPXCHG:
         /* the expected value through the pointer in b, written back with
          * what was seen; dst = whether it was the expected one */
+        if (i->size == 1 || i->size == 2) {
+            sub_cas(F, i);
+            return;
+        }
         rd(F, i->c, 0);
         rda(F, i->a, AD);
         rda(F, i->b, AD2);
@@ -2572,8 +2741,24 @@ static void gen_ins(struct tc_fn *F, int n)
     case IR_SWITCH:
         tc_refuse(F, i, "a jump table");
         return;
-    case IR_LABELADDR: case IR_IGOTO:
-        tc_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label: the function's own address as IR_FADDR takes it,
+         * movh/addi (HI/LO), plus the label's offset in it -- the addend
+         * set once the function is laid out. */
+        int d = wreg(F, i->dst, ACC);
+        int at = abs_pair(F, d), s0 = F->st->nf;
+        note_fn(F->st, at, fn->src, RK_TRICORE_HI);
+        note_fn(F->st, at + 4, fn->src, RK_TRICORE_LO);
+        want_label(F, s0, i->label, FX_ADDR);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        /* an indirect jump takes an address register */
+        rda(F, i->a, AD);
+        tc_ji(t, AD);
         return;
     default:
         tc_refuse(F, i, "this operation");
@@ -2998,6 +3183,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
         if (target < 0)
             internal_error("tricore: label %d of %s was never placed",
                            F.fix[i].label, fn->name);
+        if (F.fix[i].kind == FX_ADDR) {
+            F.st->f[F.fix[i].at].addend = target - f->code_off;
+            F.st->f[F.fix[i].at + 1].addend = target - f->code_off;
+            continue;
+        }
         if (!tc_patch(t, F.fix[i].at, target)) {
             if (F.fix[i].kind == FX_J)
                 tc_refuse(&F, NULL, "a jump beyond 16 MiB");
@@ -3024,6 +3214,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

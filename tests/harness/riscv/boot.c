@@ -16,6 +16,11 @@
  */
 extern unsigned __data_load, __data_start, __data_end;
 extern unsigned __bss_start, __bss_end;
+/* The static constructors -- a C++ namespace-scope object's, a C
+ * __attribute__((constructor)) -- which embld gathers into .init_array
+ * between these two symbols. */
+typedef void (*initfn)(void);
+extern initfn __init_array_start[], __init_array_end[];
 
 int main(void);
 void _start(void);
@@ -36,6 +41,8 @@ void _start(void)
         *d++ = *s++;
     for (d = &__bss_start; d < &__bss_end; )
         *d++ = 0;
+    for (initfn *f = __init_array_start; f < __init_array_end; f++)
+        (*f)();
     main();
     SIFIVE_TEST = TEST_PASS;
     for (;;)

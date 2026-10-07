@@ -1,5 +1,6 @@
-/* One- and two-byte atomics on RISC-V, which work on the word around the
- * byte or halfword (src/arch/riscv/codegen.c, sub_lane): every operation
+/* One- and two-byte atomics on RISC-V, MIPS, PowerPC, SPARC, TriCore and
+ * Xtensa, which work on the word around the byte or halfword (each
+ * backend's sub_lane, or its CAS loop on the word): every operation
  * on every lane of one word, with the whole word printed after each, so
  * a merge that touched a neighbouring lane shows. Signed results are
  * extended; the compare-and-swaps take both outcomes. The host runs the
@@ -64,6 +65,38 @@ int main(void)
     putn(__atomic_fetch_sub(&sc, 100, __ATOMIC_SEQ_CST)); putn(sc);
     putn(__atomic_fetch_sub(&ss, 1, __ATOMIC_SEQ_CST)); putn(ss);
     putn(__atomic_exchange_n(&ss, -32768, __ATOMIC_SEQ_CST)); putn(ss);
+
+    /* a negative expected value is sign-extended past its lane, which the
+     * compare must not see: every lane, so each byte order has low ones */
+    static signed char sb[4] __attribute__((aligned(4))) = { -1, -2, -3, -4 };
+    static short sh[2] __attribute__((aligned(4))) = { -5, -6 };
+    for (int k = 0; k < 4; k++) {
+        putn(__sync_bool_compare_and_swap(&sb[k], (signed char)-(k + 1), -9));
+        putn(sb[k]);
+    }
+    for (int k = 0; k < 2; k++) {
+        putn(__sync_val_compare_and_swap(&sh[k], (short)-(k + 5), -700));
+        putn(sh[k]);
+    }
+    /* ...and a negative expected value with a positive desired one, whose
+     * extensions differ: neither may reach a neighbour */
+    for (int k = 0; k < 4; k++) {
+        putn(__sync_val_compare_and_swap(&sb[k], (signed char)-9, 7));
+        putn(sb[0]); putn(sb[1]); putn(sb[2]); putn(sb[3]);
+    }
+    for (int k = 0; k < 2; k++) {
+        putn(__sync_bool_compare_and_swap(&sh[k], (short)-700, 300));
+        putn(sh[0]); putn(sh[1]);
+    }
+    puts_("\n");
+
+    /* test-and-set, an exchange of a byte with 1, on every lane, with
+     * set and clear neighbours */
+    static unsigned char tb[4] __attribute__((aligned(4))) = { 0, 0x5A, 0, 0xA5 };
+    for (int k = 0; k < 4; k++) {
+        putn(__atomic_test_and_set(&tb[k], __ATOMIC_SEQ_CST));
+        putn(tb[0]); putn(tb[1]); putn(tb[2]); putn(tb[3]);
+    }
     puts_("\nDONE\n");
     return 0;
 }

@@ -29,8 +29,8 @@
  *     promise is aligned goes through bytes.
  *   * Multiply and divide are LEON3's umul/smul/udiv/sdiv through %y.
  *
- * Refused by name: computed goto, atomics other than a word, the frame
- * and return address builtins, a branch beyond +-8 MiB, and __int128.
+ * Refused by name: atomics wider than a word, the frame and return
+ * address builtins, a branch beyond +-8 MiB, and __int128.
  * THE RULE.
  */
 #include "emit.h"
@@ -1963,17 +1963,174 @@ static const char *cvt_name(const struct ir_ins *i)
 
 static void need_word_atomic(struct sparc_fn *F, const struct ir_ins *i)
 {
+    if (i->size == 1 || i->size == 2)   /* sub_* below: the word around it */
+        return;
     if (i->size != 4)
-        sparc_refuse(F, i, i->size < 4
-                     ? "an atomic narrower than four bytes (casa and swap "
-                       "are word-sized, and a read-modify-write of the "
-                       "containing word is not atomic against its "
-                       "neighbours)"
-                     : "an atomic wider than a register");
+        sparc_refuse(F, i, "an atomic wider than a register");
 }
 
 /* The ASI LEON3's casa is given: 10, user data, as clang writes it. */
 #define CASA_ASI 10
+
+/* ---- one- and two-byte atomics ---------------------------------------
+ *
+ * casa and swap are word-sized, so a narrow atomic works on the aligned
+ * word around it, as GCC's and LLVM's do: a casa loop that rewrites only
+ * its lane,
+ *
+ *        ld    [aligned], old
+ *   1:   new = f(old)  in the lane
+ *        new = old ^ ((new ^ old) & mask)
+ *        casa  [aligned], old, new        (new = what was there)
+ *        cmp   new, old ; bne,a 1b ; mov new, old
+ *
+ * atomic against the neighbouring bytes too: a store to any of them
+ * between the load and the casa makes the casa fail, and the loop goes
+ * round with the word it saw. SPARC is big-endian: the lane of address a
+ * is bits 8*((a & 3) ^ (4 - size)) up. (ldstub is a byte, but it only
+ * ever stores 0xff, so test-and-set, which stores 1, is the loop too.) */
+#define SUB_AL  B_LO        /* %g3: the aligned word's address */
+#define SUB_MK  B_HI        /* %g4: the lane's mask */
+#define SUB_SH  A_LO        /* %g1: the lane's shift (then the CAS's x) */
+#define SUB_VAL A_HI        /* %g2: the operand, moved into its lane */
+#define SUB_OLD SCR         /* %l7: the word seen */
+#define SUB_NEW SCR2        /* %l6: the word to store */
+
+/* sh = the lane's shift, from the address a (in place when sh == a) */
+static void sub_shift(struct sparc_fn *F, int sh, int a, int size)
+{
+    sparc_alu_imm(F->t, SP_AND, sh, a, 3);
+    if (target_big_endian())
+        sparc_alu_imm(F->t, SP_XOR, sh, sh, 4 - size);
+    sparc_alu_imm(F->t, SP_SLL, sh, sh, 3);
+}
+
+/* SUB_AL, SUB_MK and SUB_SH for the address a */
+static void sub_lane(struct sparc_fn *F, int a, int size)
+{
+    struct code *t = F->t;
+    sub_shift(F, SUB_SH, a, size);
+    sparc_alu_imm(t, SP_ANDN, SUB_AL, a, 3);
+    sparc_li(t, SUB_MK, size == 1 ? 0xff : 0xffff);
+    sparc_alu(t, SP_SLL, SUB_MK, SUB_MK, SUB_SH);
+}
+
+/* reg = (src << SUB_SH) & mask */
+static void sub_in(struct sparc_fn *F, int reg, int src)
+{
+    sparc_alu(F->t, SP_SLL, reg, src, SUB_SH);
+    sparc_alu(F->t, SP_AND, reg, reg, SUB_MK);
+}
+
+/* reg, its lane already masked, shifted down to bit 0 and extended as
+ * `sign` says; the shift is in `sh`, or worked out again from vreg a's
+ * address through it when `again` */
+static void sub_out(struct sparc_fn *F, int reg, int a, int sh, int again,
+                    int size, int sign)
+{
+    struct code *t = F->t;
+    if (again)
+        sub_shift(F, sh, rdr(F, a, sh), size);
+    sparc_alu(t, SP_SRL, reg, reg, sh);
+    if (sign) {
+        sparc_alu_imm(t, SP_SLL, reg, reg, 32 - 8 * size);
+        sparc_alu_imm(t, SP_SRA, reg, reg, 32 - 8 * size);
+    }
+}
+
+/* swap, fetch-and-add and the bitwise ones, on a byte or a halfword */
+static void sub_rmw(struct sparc_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int top, again;
+    sub_lane(F, rdr(F, i->a, ADDR), i->size);
+    sub_in(F, SUB_VAL, rdr(F, i->b, TMP));
+    sparc_stbar(t);
+    sparc_load(t, SUB_OLD, SUB_AL, 0, 4, 0);
+    top = t->len;
+    if (i->op == IR_XCHG) {
+        sparc_mov(t, SUB_NEW, SUB_VAL);
+    } else if (i->op == IR_XADD) {
+        sparc_alu(t, SP_ADD, SUB_NEW, SUB_OLD, SUB_VAL);
+    } else {
+        switch ((int)i->imm) {
+        case '&': sparc_alu(t, SP_AND, SUB_NEW, SUB_OLD, SUB_VAL); break;
+        case '|': sparc_alu(t, SP_OR, SUB_NEW, SUB_OLD, SUB_VAL); break;
+        case '^': sparc_alu(t, SP_XOR, SUB_NEW, SUB_OLD, SUB_VAL); break;
+        default:                                        /* nand */
+            sparc_alu(t, SP_AND, SUB_NEW, SUB_OLD, SUB_VAL);
+            sparc_alu(t, SP_XNOR, SUB_NEW, SUB_NEW, SP_G0);
+            break;
+        }
+    }
+    /* only the lane changes: old ^ ((new ^ old) & mask) */
+    sparc_alu(t, SP_XOR, SUB_NEW, SUB_NEW, SUB_OLD);
+    sparc_alu(t, SP_AND, SUB_NEW, SUB_NEW, SUB_MK);
+    sparc_alu(t, SP_XOR, SUB_NEW, SUB_NEW, SUB_OLD);
+    sparc_casa(t, SUB_AL, CASA_ASI, SUB_OLD, SUB_NEW);
+    cmp_rr(F, SUB_NEW, SUB_OLD);
+    again = t->len;
+    sparc_w(t, sparc_enc_branch(SP_BNE, 1, 0));
+    sparc_mov(t, SUB_OLD, SUB_NEW);
+    br_back(F, again, top);
+    sparc_alu(t, SP_AND, SUB_OLD, SUB_OLD, SUB_MK);
+    sub_out(F, SUB_OLD, i->a, SUB_SH, 0, i->size, i->sign);
+    wr(F, i->dst, SUB_OLD);
+}
+
+/* compare-and-swap on a byte or a halfword:
+ *
+ *        ld    [aligned], old
+ *   1:   and   old, mask, new ; cmp new, expected ; bne 2f
+ *        xor   old, x, new                (x = expected ^ desired)
+ *        casa  [aligned], old, new
+ *        cmp   new, old ; bne,a 1b ; mov new, old
+ *   2:
+ * old is then the word seen, whichever way the loop ended; the lane is
+ * compared, not the word, so a neighbour's change only goes round. */
+static void sub_cas(struct sparc_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int top, again, out_br;
+    sub_lane(F, rdr(F, i->a, ADDR), i->size);
+    sub_in(F, SUB_NEW, rdr(F, i->c, SCR2));            /* desired */
+    if (i->op == IR_CAS) {
+        sub_in(F, SUB_VAL, rdr(F, i->b, TMP));         /* expected */
+    } else {
+        int p = rdr(F, i->b, TMP);
+        sparc_load(t, SUB_VAL, p, 0, i->size, 0);
+        sub_in(F, SUB_VAL, SUB_VAL);
+    }
+    sparc_alu(t, SP_XOR, SUB_SH, SUB_NEW, SUB_VAL);    /* x; no shift now */
+    sparc_stbar(t);
+    sparc_load(t, SUB_OLD, SUB_AL, 0, 4, 0);
+    top = t->len;
+    sparc_alu(t, SP_AND, SUB_NEW, SUB_OLD, SUB_MK);
+    cmp_rr(F, SUB_NEW, SUB_VAL);
+    out_br = br_place(F, SP_BNE);
+    sparc_alu(t, SP_XOR, SUB_NEW, SUB_OLD, SUB_SH);
+    sparc_casa(t, SUB_AL, CASA_ASI, SUB_OLD, SUB_NEW);
+    cmp_rr(F, SUB_NEW, SUB_OLD);
+    again = t->len;
+    sparc_w(t, sparc_enc_branch(SP_BNE, 1, 0));
+    sparc_mov(t, SUB_OLD, SUB_NEW);
+    br_back(F, again, top);
+    br_land(F, out_br);
+    sparc_alu(t, SP_AND, SUB_OLD, SUB_OLD, SUB_MK);
+    if (i->op == IR_CAS) {
+        sub_out(F, SUB_OLD, i->a, SUB_SH, 1, i->size, i->sign);
+        wr(F, i->dst, SUB_OLD);
+    } else {
+        /* the flag from the lanes compared; then *b = the lane seen */
+        int p;
+        cmp_rr(F, SUB_OLD, SUB_VAL);
+        cc_to_reg(F, SP_BE, SUB_NEW);
+        sub_out(F, SUB_OLD, i->a, SUB_SH, 1, i->size, 0);
+        p = rdr(F, i->b, TMP);
+        sparc_store(t, SUB_OLD, p, 0, i->size);
+        wr(F, i->dst, SUB_NEW);
+    }
+}
 
 static void gen_ins(struct sparc_fn *F, int n)
 {
@@ -2517,8 +2674,13 @@ static void gen_ins(struct sparc_fn *F, int n)
 
     /* ---- atomics: swap and casa, after a stbar --------------------- */
     case IR_XCHG: {
-        int addr = rdr(F, i->a, ADDR);
-        int d = wreg(F, i->dst, ACC);
+        int addr, d;
+        if (i->size == 1 || i->size == 2) {
+            sub_rmw(F, i);
+            return;
+        }
+        addr = rdr(F, i->a, ADDR);
+        d = wreg(F, i->dst, ACC);
         rd(F, i->b, SCR);
         sparc_stbar(t);
         sparc_swap(t, SCR, addr, 0);
@@ -2535,6 +2697,10 @@ static void gen_ins(struct sparc_fn *F, int n)
          *   cmp   new, seen ; bne,a 1b ; mov new, seen
          * The annulled slot carries the value just seen into the retry. */
         int addr, val, top, again;
+        if (i->size == 1 || i->size == 2) {
+            sub_rmw(F, i);
+            return;
+        }
         addr = rdr(F, i->a, ADDR);
         val = rdr(F, i->b, TMP);
         sparc_stbar(t);
@@ -2566,7 +2732,12 @@ static void gen_ins(struct sparc_fn *F, int n)
         /* casa [addr] asi, expected, desired: desired becomes what was
          * seen. IR_CAS yields it; IR_CMPXCHG writes it back through the
          * pointer in b and yields whether it was the expected one. */
-        int addr = rdr(F, i->a, ADDR), exp;
+        int addr, exp;
+        if (i->size == 1 || i->size == 2) {
+            sub_cas(F, i);
+            return;
+        }
+        addr = rdr(F, i->a, ADDR);
         if (i->op == IR_CAS) {
             exp = rdr(F, i->b, TMP);
         } else {
@@ -2664,8 +2835,26 @@ static void gen_ins(struct sparc_fn *F, int n)
         code_mark_data(t, tab, t->len);
         return;
     }
-    case IR_LABELADDR: case IR_IGOTO:
-        sparc_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label: the function's own address as IR_FADDR takes it,
+         * sethi/or (HI22/LO10), plus the label's offset in it -- the
+         * addend set once the function is laid out. The fix's base is
+         * -2 - the first site's index (a table entry's is >= 0, a
+         * branch's -1). */
+        int d = wreg(F, i->dst, ACC);
+        int at = abs_pair(F, d), s0 = F->st->nf;
+        note_fn(F->st, at, fn->src, RK_SPARC_HI22);
+        note_fn(F->st, at + 4, fn->src, RK_SPARC_LO10);
+        want_label(F, at, i->label);
+        F->fix[F->nfix - 1].base = -2 - s0;
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        sparc_jmpl(t, SP_G0, rdr(F, i->a, ACC), 0);
+        sparc_nop(t);
         return;
     default:
         sparc_refuse(F, i, "this operation");
@@ -3046,6 +3235,12 @@ static void gen_func(struct ir_func *fn, struct code *t,
                                       & 0xffffffffUL);
             continue;
         }
+        if (F.fix[i].base <= -2) {                    /* &&label */
+            int s0 = -2 - F.fix[i].base;
+            F.st->f[s0].addend = target - f->code_off;
+            F.st->f[s0 + 1].addend = target - f->code_off;
+            continue;
+        }
         if (!sparc_patch_b(t, F.fix[i].at, target))
             sparc_refuse(&F, NULL, "a branch beyond +-8 MiB (the function "
                                    "is too large)");
@@ -3055,6 +3250,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);
