@@ -2765,9 +2765,15 @@ static void gen_ins(struct mips_fn *F, int n)
     /* o32 keeps no frame-pointer chain to walk, and a function's own
      * return address is in ra only until its first call. */
     if (i->op == IR_FRAMEADDR)
-        mips_refuse(F, i, "__builtin_frame_address or "
-                          "__builtin_return_address (o32 code keeps no "
-                          "frame-pointer chain)");
+        mips_refuse(F, i, g_m64 ? "__builtin_frame_address or "
+                                  "__builtin_return_address (n64 code keeps "
+                                  "no frame-pointer chain)"
+                                : "__builtin_frame_address or "
+                                  "__builtin_return_address (o32 code keeps "
+                                  "no frame-pointer chain)");
+    if (i->op == IR_CAS16)
+        mips_refuse(F, i, "a 16-byte atomic (MIPS64's lld/scd are a "
+                          "doubleword; there is no 128-bit ll/sc)");
 
     /* The high word of a 64-bit value, shifted: one register. */
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {
@@ -2845,7 +2851,8 @@ static void gen_ins(struct mips_fn *F, int n)
             }
             if (gen_ins64(F, n))
                 return;
-            mips_refuse(F, i, "this operation at 64 bits");
+            mips_refuse(F, i, g_m64 ? "this operation at 128 bits"
+                                    : "this operation at 64 bits");
         }
         if (wide && (i->op == IR_CMP || i->op == IR_BRZ || i->op == IR_BRNZ))
             i->w = pw;        /* the cases below read `w` to pick the pair */
