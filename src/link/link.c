@@ -2456,7 +2456,9 @@ static void patch_thm_mov(unsigned char *loc, unsigned int h)
  * field 0). SLOT0_OP names the instruction's one PC-relative operand, so
  * the opcode at the site says which field and which reach: a call's word
  * offset from (P & ~3) + 4, a j's, a branch's or a zero-test's byte
- * offset from P + 4, a density beqz.n/bnez.n's forward six bits, an l32r's
+ * offset from P + 4, a loop's forward eight bits to its end (GCC uses the
+ * zero-overhead loops on a core that has them), a density beqz.n/bnez.n's
+ * forward six bits, an l32r's
  * backward word offset from (P + 3) & ~3. ASM_EXPAND marks a call an
  * assembler could relax, and the DIFF types hold differences between two
  * places in one section, which only a relaxing linker changes: none is
@@ -2509,6 +2511,13 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
         } else if (op0 == 7 || (op0 == 6 && (n == 2 || (n == 3 && m >= 2)))) {
             if (d < -128 || d > 127)
                 what = "a branch reaches 128 bytes";
+            else
+                w = (w & 0xffffUL) | (((unsigned long)d & 0xffUL) << 16);
+        } else if (op0 == 6 && n == 3 && m == 1 &&
+                   ((w >> 12) & 15) >= 8 && ((w >> 12) & 15) <= 10) {
+            /* loop, loopnez, loopgtz: the loop's end, 0..255 forward */
+            if (d < 0 || d > 255)
+                what = "a loop's end is 0..255 bytes past it";
             else
                 w = (w & 0xffffUL) | (((unsigned long)d & 0xffUL) << 16);
         } else if (op0 == 12 && (w & 0x80)) {             /* beqz.n bnez.n */

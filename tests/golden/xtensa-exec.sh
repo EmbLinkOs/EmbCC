@@ -27,14 +27,14 @@ echo "TEST-MARKER xtensa-exec"
 QEMU=${EMBCC_QEMU_XTENSA:-qemu-system-xtensa}
 command -v "$QEMU" >/dev/null 2>&1 || {
     echo "skipped: $QEMU not found"; exit 0; }
-REFGCC=${EMBCC_REF_GCC_XTENSA:-}
-if [ -z "$REFGCC" ]; then
-    for c in xtensa-esp32s2-elf-gcc \
-             "$HOME/EmbRef/xtensa-esp-elf-16.1.0/xtensa-esp-elf/bin/xtensa-esp32s2-elf-gcc"; do
-        if command -v "$c" >/dev/null 2>&1; then REFGCC=$c; break; fi
-    done
+# Espressif's GCC for the de212 board (tools/xtensa-ref-gcc.sh, located by
+# tools/hostpaths.sh), or nothing.
+REFGCC=
+if [ -x "$XTENSA_REF_GCC" ] &&
+   "$XTENSA_REF_GCC" $XTENSA_REF_FLAGS -dM -E -x c /dev/null 2>/dev/null |
+       grep -q '__XCHAL_HAVE_MUL32_HIGH 0'; then
+    REFGCC=$XTENSA_REF_GCC
 fi
-
 T=xtensa-none-elf
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
@@ -92,7 +92,7 @@ src=$1; opt=$2; o=$3; embcc=$4; embld=$5; cc=$6; d=$(dirname "$o")
 if [ "$cc" = gcc ]; then
     # -fpermissive: the corpus was written for compilers whose char32_t
     # is unsigned int, and GCC's for Xtensa is unsigned long
-    "$REFGCC" -mtext-section-literals $opt -ffreestanding -fno-builtin \
+    "$REFGCC" $XTENSA_REF_FLAGS -mtext-section-literals $opt -ffreestanding -fno-builtin \
         -fpermissive \
         -isystem lib/libc/include -w -c "$src" -o "$o.o" \
         > "$o.cerr" 2>&1 || { echo CFAIL; exit 0; }
@@ -107,7 +107,7 @@ sh tests/harness/xtensa/run.sh "$o.elf" > "$o.out" 2>&1
 s=$(sed -n 's/.*==EXIT \([0-9]*\) ==.*/\1/p' "$o.out" | tail -1)
 echo "${s:-NOEXIT}"
 ONE
-export REFGCC
+export REFGCC XTENSA_REF_FLAGS
 
 : > "$out/jobs"
 nna=0; nlp=0
