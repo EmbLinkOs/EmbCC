@@ -33,6 +33,9 @@
 #     QEMU too.
 #  3. The ends of a run: semihosting's exit status, a lockup, a loop
 #     nothing can interrupt, --until and --max-insns.
+#  4. Instruction edges no exec program reaches (tests/golden/embsim/isa.c,
+#     built by clang): flags, overflow, long multiply, VFP conversion and
+#     fused multiply, and the exception frame's alignment.
 set -u
 echo "TEST-MARKER embsim"
 . "$(dirname "$0")/../lib.sh"
@@ -107,6 +110,39 @@ done
 "$EMBSIM" "$e/e3.elf" --max-insns 500 > "$e/4.out" 2>&1; st=$?
 [ $st = 4 ] && grep -q '500 instructions' "$e/4.out" || { cat "$e/4.out"; fail "--max-insns 500: status $st"; }
 echo "embsim: semihosting exit, lockup, idle loop, --until and --max-insns end a run as documented"
+
+x=$out/exc; mkdir -p "$x"
+# ---- 4. instruction edges the corpus never reaches ---------------------------
+# tests/golden/embsim/isa.c: asrs's carry, sdiv of INT_MIN by -1, umlal's
+# accumulation, vcvt's truncation, vfms and vfma, and an exception taken
+# with sp 4 below an 8-byte boundary. Built by clang, whose assembler has
+# every one of these forms; EmbCC's inline assembler does not.
+CLANG=${EMBCC_REF_GCC_THUMB:-clang}
+if command -v "$CLANG" >/dev/null 2>&1 &&
+   "$CLANG" --target=thumbv7em-none-eabihf -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 \
+       -mfloat-abi=hard -O1 -ffreestanding -fno-builtin \
+       -c tests/golden/embsim/isa.c -o "$x/isa.o" 2>/dev/null; then
+    "$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$x/isa.o" -o "$x/isa.elf" ||
+        fail "isa.c does not link"
+    "$EMBSIM" "$x/isa.elf" --board mps2-an386 --max-insns 10000000 > "$x/isa.sim" 2>&1 ||
+        { cat "$x/isa.sim"; fail "isa.c: EmbSim does not exit 0"; }
+    cmp -s "$x/isa.sim" tests/golden/embsim/isa.txt || {
+        diff tests/golden/embsim/isa.txt "$x/isa.sim"
+        fail "isa.c: EmbSim's output is not isa.txt"; }
+    if [ $have_qemu = 1 ]; then
+        # shellcheck disable=SC2086
+        sh tests/harness/qrun.sh 20 "$QA" -M mps2-an386 -cpu cortex-m4 -nographic \
+            -chardev file,id=semi,path="$x/isa.qemu" \
+            -semihosting-config enable=on,chardev=semi \
+            -kernel "$x/isa.elf" > /dev/null 2>&1
+        cmp -s "$x/isa.qemu" "$x/isa.sim" || {
+            diff "$x/isa.qemu" "$x/isa.sim"
+            fail "isa.c: EmbSim's output is not QEMU's"; }
+    fi
+    echo "embsim: asrs's carry, sdiv's overflow, umlal, vcvt, vfms/vfma and an unaligned exception frame as QEMU and the record have them"
+else
+    echo "embsim: no clang for thumbv7em: the instruction-edge program was not built"
+fi
 
 # ---- the configurations -----------------------------------------------------
 # TAG TRIPLE EXTRA-CFLAGS HARNESS HARNESS-CFLAGS OPT QEMU-ARGS EMBSIM-ARGS COUNTS
@@ -268,3 +304,4 @@ EOF
     fi
 done
 echo "embsim: exceptions (SVC, PendSV, nesting, masking, faults, SysTick, PSP, FP frame) as QEMU and the record have them, on m3, m4hf and m0"
+
