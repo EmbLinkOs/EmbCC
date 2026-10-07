@@ -1006,18 +1006,16 @@ does not reflect the table below.
 
 | Operation | x86-64 | AArch64 | Cortex-M | RV32 | RV64 | AVR |
 |---|---|---|---|---|---|---|
-| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1 |
-| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 4 | 4, 8 | None |
+| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4 |
+| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4 |
 | Fences | Yes | Yes | Yes | Yes | Yes | Yes (no instruction) |
 
 16-byte operations need `__int128` or a 16-byte object through the
 generic forms. Other sizes are refused, for example:
 
 ```text
-embcc: a.c:1: error: the RV32 backend cannot lower an atomic narrower than four bytes (the A extension has no such form, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [xadd w=4 size=1]
 embcc: a.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]
 embcc: a.c:1: error: an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core
-embcc: a.c:1: error: the AVR backend cannot lower xadd yet (function f) [xadd w=4 size=2]
 ```
 
 The instructions used on each embedded target are described in

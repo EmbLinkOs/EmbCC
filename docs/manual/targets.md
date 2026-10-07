@@ -982,7 +982,6 @@ individually.
 |---|---|
 | any operation on `long double` (and at RV64 on `__int128`) | `the RV32 backend cannot lower a 128-bit value yet (function f) [ldvar w=16 size=16]` |
 | `__int128` at RV32 | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| an atomic read-modify-write on a 1- or 2-byte object | `the RV32 backend cannot lower an atomic narrower than four bytes (the A extension has no such form, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [xadd w=4 size=2]` |
 | an 8-byte atomic read-modify-write at RV32 | `the RV32 backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
@@ -1612,7 +1611,6 @@ rt-embedded` builds `librt.a` for `avr`.
 
 | Construct | Diagnostic |
 |---|---|
-| any atomic read-modify-write | `the AVR backend cannot lower xadd yet (function f) [xadd w=4 size=2]` (the operation is named) |
 | an atomic load or store wider than 1 byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
 | a variable-length array | `the AVR backend cannot lower a variable-length array yet (function f)` |
 | any local with `__attribute__((aligned))` | `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |

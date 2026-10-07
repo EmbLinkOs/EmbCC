@@ -14,12 +14,14 @@
 # -- which is exactly the kind of bug that must be caught by reading the
 # instruction rather than by running it.
 #
-# NARROWER THAN A WORD IS REFUSED. The A extension provides .w and, at RV64,
-# .d, and nothing smaller. gcc answers a one-byte atomic by calling
-# libatomic; EmbCC has no such library, so a read-modify-write of the
-# containing word would be the only option and it is not atomic against a
-# neighbouring byte. The predefined macros say so too: only the
-# __GCC_HAVE_SYNC_COMPARE_AND_SWAP_ widths that exist are claimed.
+# NARROWER THAN A WORD WORKS ON THE WORD AROUND IT. The A extension
+# provides .w and, at RV64, .d, and nothing smaller, so a one- or two-byte
+# atomic is an AMO with the other lanes neutral (AND, OR, XOR) or an LR/SC
+# loop that rewrites only its lane -- atomic against the neighbouring bytes
+# too, since a write to any of them breaks the reservation. That is GCC's
+# and LLVM's lowering. tests/golden/riscv-atomics/subword.c runs every
+# operation on every lane of one word on the boards and compares with the
+# host. The predefined macros claim the compare-and-swap widths there are.
 set -u
 echo "TEST-MARKER riscv-atomics"
 . "$(dirname "$0")/../lib.sh"
@@ -38,10 +40,9 @@ for pair in "riscv32-unknown-elf 32" "riscv64-unknown-elf 64"; do
     echo "$m" | grep -q 'SYNC_COMPARE_AND_SWAP_4' || {
         echo "$t: a four-byte compare-and-swap is not claimed"; exit 1; }
     for w in 1 2; do
-        echo "$m" | grep -q "SYNC_COMPARE_AND_SWAP_$w" && {
-            echo "$t: claims a $w-byte compare-and-swap. The A extension has
-            no such instruction and EmbCC has no libatomic to call, so a
-            program using one would compile and fail to link"; exit 1; }
+        echo "$m" | grep -q "SYNC_COMPARE_AND_SWAP_$w" || {
+            echo "$t: a $w-byte compare-and-swap is not claimed, and the
+            backend has one (an LR/SC loop on the word)"; exit 1; }
     done
     if [ "$x" = 64 ]; then
         echo "$m" | grep -q 'SYNC_COMPARE_AND_SWAP_8' || {
@@ -53,19 +54,39 @@ for pair in "riscv32-unknown-elf 32" "riscv64-unknown-elf 64"; do
             RV64-only"; exit 1; }
     fi
 done
-echo "both widths claim exactly the compare-and-swap sizes the A extension has"
+echo "both widths claim exactly the compare-and-swap sizes there are"
 
-# ---- a sub-word atomic is refused by name -----------------------------
-printf 'char c;\nchar f(void){return __sync_fetch_and_add(&c,1);}\n' \
-    > "$out/nb.c"
-"$EMBCC" --target=riscv32-unknown-elf -O1 -c "$out/nb.c" -o "$out/nb.o" \
-    2> "$out/nb.err" && {
-    echo "a one-byte atomic compiled. The A extension has no such
-    instruction, so whatever was emitted is not atomic"; exit 1; }
-grep -q "narrower than four bytes" "$out/nb.err" || {
-    echo "the one-byte atomic was refused, but not by name:"
-    head -3 "$out/nb.err"; exit 1; }
-echo "a one-byte atomic is refused by name"
+# ---- a sub-word atomic, on the board ----------------------------------
+# every operation on every lane of one word, the whole word after each, at
+# both widths and every level, against the same program on the host
+HOSTCC=${HOSTCC:-cc}
+"$HOSTCC" -std=c99 -w -O2 -o "$out/sub-host" tests/golden/riscv-atomics/subword.c \
+    tests/harness/thumb/hostio.c || { echo "the host does not build subword.c"; exit 1; }
+"$out/sub-host" > "$out/sub-want.txt"
+S=$out/s; mkdir -p "$S"
+for x in 32 64; do
+    t=riscv$x-unknown-elf
+    Q=${EMBCC_QEMU_RISCV:-qemu-system-riscv$x}
+    command -v "$Q" >/dev/null 2>&1 || { echo "(SKIP: no $Q for RV$x)"; continue; }
+    for O in -O0 -O1 -O2 -Os; do
+        for f in boot io; do
+            "$EMBCC" --target=$t $O -c tests/harness/riscv/$f.c -o "$S/$f.o" ||
+                { echo "RV$x $O: the harness did not compile"; exit 1; }
+        done
+        "$EMBCC" --target=$t $O -c tests/golden/riscv-atomics/subword.c -o "$S/sub.o" \
+            2> "$out/sub.err" || { echo "RV$x $O: subword.c did not compile:"
+            head -3 "$out/sub.err"; exit 1; }
+        EMBCC_RISCV_HARNESS="$S" sh tests/harness/riscv/link.sh "$S/sub.elf" "$S/sub.o" ||
+            { echo "RV$x $O: subword.c did not link"; exit 1; }
+        EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-20} \
+            sh tests/harness/riscv/run.sh "$S/sub.elf" "$x" 2>/dev/null |
+            tr -d '\r' | sed -n '1,/^DONE/p' > "$out/sub-got.txt"
+        cmp -s "$out/sub-want.txt" "$out/sub-got.txt" || {
+            echo "RV$x $O: the one- and two-byte atomics differ from the host:"
+            diff "$out/sub-want.txt" "$out/sub-got.txt" | head -8; exit 1; }
+    done
+done
+echo "one- and two-byte atomics on every lane of a word, at RV32 and RV64 and every level, as the host computes them"
 
 # ---- the ordering is AQRL, read off the instruction -------------------
 command -v llvm-objdump >/dev/null 2>&1 || {

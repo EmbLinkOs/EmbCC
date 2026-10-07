@@ -924,9 +924,15 @@ exception, the handler must advance `mepc` past the faulting instruction
 Atomic operations up to the register width are inline A-extension
 instructions: `atomic_fetch_add` on an `int` is one `amoadd.w.aqrl`, a
 compare-exchange is an `lr.w.aq`/`sc.w.rl` loop, and
-`atomic_thread_fence` is `fence rw, rw`. No library is involved. 64-bit
-atomics on RV32 are refused (`the RV32 backend cannot lower this
-operation at 64 bits yet`).
+`atomic_thread_fence` is `fence rw, rw`. No library is involved.
+
+A one- or two-byte atomic works on the aligned word around it, as GCC's
+and LLVM's do: AND, OR and XOR are one AMO with the other lanes neutral,
+and the rest an `lr.w`/`sc.w` loop that rewrites only its lane. That is
+atomic against the neighbouring bytes too, because a write to any of them
+breaks the reservation and the loop runs again. 64-bit atomics on RV32
+are refused (`the RV32 backend cannot lower this operation at 64 bits
+yet`).
 
 ### The C extension
 
@@ -1241,11 +1247,13 @@ avr-gcc's `__divmodsi4` family, and its `librt.a` does not define it.
 | Construct | Diagnostic |
 |---|---|
 | Variable-length arrays | `the AVR backend cannot lower a variable-length array yet` |
-| Atomic read-modify-write (`atomic_fetch_add`, compare-exchange, ...) | `the AVR backend cannot lower xadd yet` |
-| Atomic load or store wider than one byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
 
-One-byte atomic loads and stores are single instructions and compile;
-fences compile to nothing.
+Atomics of one, two and four bytes compile: every read-modify-write,
+compare-exchange, and a two- or four-byte load or store. Each is done with
+interrupts masked, as avr-libc's `ATOMIC_BLOCK` does it: SREG is saved,
+`cli`, the access, SREG restored. On one core that is all the atomicity
+there is to have. A one-byte load or store is a single instruction.
+Fences compile to nothing. Eight-byte atomics are refused.
 
 ## x86-64 kernels and EmbLinkOS
 

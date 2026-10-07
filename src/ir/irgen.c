@@ -1637,9 +1637,24 @@ static void atomic_width_ok(struct ir_func *fn, const struct type *t,
  * access, so it is natural: an atomic object is aligned (it could not be
  * atomic otherwise), and a backend that splits what it cannot prove
  * aligned -- MIPS's lwl/lwr -- would let an interrupt tear it. */
+static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
+                      int val, const struct type *t);
+
+/* AVR moves one byte per access, so a two- or four-byte atomic load or
+ * store is two or four; there it is a read-modify-write instead, which the
+ * backend does with interrupts masked: a load is a fetch-or of 0, a store
+ * an exchange whose old value is dropped. */
+static int avr_atomic_rmw_size(const struct type *t)
+{
+    return target_get() == TARGET_AVR &&
+           (ty_size(t) == 2 || ty_size(t) == 4) && ty_is_integer(t);
+}
+
 static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
                        int line)
 {
+    if (avr_atomic_rmw_size(t))
+        return atomic_rmw(fn, IR_ARMW, '|', addr, emit_const(fn, 0, ty_w(t)), t);
     atomic_width_ok(fn, t, line);
     int v = emit_load(fn, addr, t);
     fn->ins[fn->nins - 1].vol = 1;
@@ -1652,6 +1667,10 @@ static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
 static void atomic_store(struct ir_func *fn, int addr, int val,
                          const struct type *t, int line)
 {
+    if (avr_atomic_rmw_size(t)) {
+        (void)atomic_rmw(fn, IR_XCHG, 0, addr, val, t);
+        return;
+    }
     atomic_width_ok(fn, t, line);
     if (atomic_arm())
         emit(fn)->op = IR_FENCE;          /* release */
