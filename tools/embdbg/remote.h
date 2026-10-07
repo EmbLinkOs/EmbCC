@@ -28,10 +28,11 @@ struct rsp {
 struct rsp_regdef {
     const char *name;
     int off;              /* byte offset into the `g` reply */
-    int size;             /* 4 or 8 */
+    int size;             /* 1, 2, 4 or 8 */
 };
 
-/* `arch` is one of "x86_64", "aarch64", "arm", "riscv32", "riscv64". */
+/* `arch` is one of "x86_64", "aarch64", "arm", "riscv32", "riscv64",
+ * "avr". */
 const struct rsp_regdef *rsp_regs_for(const char *arch);
 const char *rsp_pc_name(const char *arch);
 const char *rsp_sp_name(const char *arch);
@@ -46,6 +47,8 @@ int  rsp_recv(struct rsp *r);
 int  rsp_read_regs(struct rsp *r);
 int  rsp_reg(struct rsp *r, const struct rsp_regdef *tab, const char *name,
              unsigned long long *out);
+int  rsp_write_reg(struct rsp *r, const struct rsp_regdef *tab, const char *name,
+                   unsigned long long val);
 int  rsp_read_mem(struct rsp *r, unsigned long long addr, unsigned char *buf,
                   int len);
 

@@ -3775,6 +3775,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             if (r->target == DWTGT_TEXT)
                 add = r->end ? code_ref(r->addend - 1, text_sym, &sym) + 1
                              : code_ref(r->addend, text_sym, &sym);
+            /* a global variable's DW_OP_addr: its own symbol, which
+             * every defined global has by now */
+            if (r->target == DWTGT_GLOBAL) {
+                if (!r->glob->sym_ndx)
+                    internal_error("-g: the global '%s' has no symbol to "
+                                   "locate it by", r->glob->name);
+                sym = r->glob->sym_ndx;
+            }
             elfw_add_rela(w, dwsec_ndx[r->in_sec], (Elf64_Addr)r->off, sym,
                           target_reloc_type(ta, r->width == 8 ? RK_ABS64
                                                               : RK_ABS32),

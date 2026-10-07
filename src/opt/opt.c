@@ -2828,6 +2828,19 @@ static int pass_mem2reg(struct ir_func *fn)
         prom[L] = ok[L] ? (ploc[nprom] = L, nprom++) : -1;
     free(ok);
     if (nprom == 0) { free(prom); free(ploc); return 0; }
+    /* -g: a promoted variable that is ASSIGNED leaves its slot behind.
+     * For a local nothing writes the slot any more, which a backend sees
+     * for itself; a parameter's slot is still written once, by the
+     * prologue, and only this can say the value there goes stale. */
+    for (int i = 0; i < fn->nins; i++) {
+        const struct ir_ins *in = &fn->ins[i];
+        if (in->op != IR_STVAR || in->dst < 0 || in->dst >= nvars ||
+            prom[in->dst] < 0)
+            continue;
+        for (int d = 0; d < fn->ndbgvars; d++)
+            if (fn->dbgvars[d].vreg == in->dst)
+                fn->dbgvars[d].moved = 1;
+    }
 
     /* The ENTRY BLOCK must not be a join. It is one whenever the
      * function's first instruction is a label something branches back

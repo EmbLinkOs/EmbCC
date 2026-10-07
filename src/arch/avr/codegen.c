@@ -2633,6 +2633,62 @@ static int addr_reg(const struct a_fn *F, const struct ir_ins *i)
     return RA;
 }
 
+/* ---- -g --------------------------------------------------------------- */
+
+/* A line-table row wherever the source line changes, at the offset the
+ * instruction's code begins -- what the other backends record, and what
+ * was missing here: an AVR object's .debug_line held one empty sequence,
+ * so no address had a line and no line had an address. Two instructions
+ * that emit nothing between them leave one row, the later line's. */
+static void a_line_row(struct ir_func *fn, long off, int line)
+{
+    struct ir_line *last;
+    if (!line)
+        return;
+    last = fn->nlines ? &fn->lines[fn->nlines - 1] : (struct ir_line *)0;
+    if (last && last->off == off) {
+        last->line = line;
+        return;
+    }
+    if (last && last->line == line)
+        return;
+    if (fn->nlines == fn->linecap) {
+        fn->linecap = fn->linecap ? fn->linecap * 2 : 8;
+        fn->lines = xrealloc(fn->lines,
+                             (size_t)fn->linecap * sizeof *fn->lines);
+    }
+    fn->lines[fn->nlines].off = off;
+    fn->lines[fn->nlines].line = line;
+    fn->nlines++;
+}
+
+/* Whether variable v's slot is where its value is, for DW_AT_location.
+ *
+ * At -O0 every variable is read and written through its slot. Optimized,
+ * mem2reg may have turned it into temporaries, and then the slot (the
+ * layout still gives one to every variable under -g) is never written:
+ * naming it would have a debugger print whatever the frame held before.
+ * A local is in its slot exactly when something still loads, stores or
+ * takes the address of it. A parameter is stored there by the prologue
+ * whatever happens, so its slot holds the value it arrived with -- right
+ * unless the body assigned it after mem2reg took it out of memory, which
+ * mem2reg records (ir_dbgvar.moved). */
+static int a_var_in_slot(const struct ir_func *fn, int v)
+{
+    for (int k = 0; k < fn->nins; k++) {
+        const struct ir_ins *in = &fn->ins[k];
+        if (((in->op == IR_LDVAR || in->op == IR_ADDR) && in->a == v) ||
+            (in->op == IR_STVAR && in->dst == v))
+            return 1;
+    }
+    if (v >= fn->nparams)
+        return 0;
+    for (int d = 0; d < fn->ndbgvars; d++)
+        if (fn->dbgvars[d].vreg == v && fn->dbgvars[d].moved)
+            return 0;
+    return 1;
+}
+
 /* ---- the instruction dispatch ---------------------------------------- */
 
 static void gen_ins(struct a_fn *F, int n)
@@ -5050,9 +5106,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     f->code_align = 2;                  /* a word of flash */
     if (want_debug) {
         int nv = fn->nvars ? fn->nvars : 1;
+        free(fn->var_off);             /* this function generated again */
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)F.slot[v];
+            fn->var_off[v] = F.slot[v] >= 0 && a_var_in_slot(fn, v)
+                           ? (int)F.slot[v] : IR_VAR_NO_LOC;
+        /* ...and its rows recorded again, the first at its entry with
+         * the line it was declared on, as clang and avr-gcc write it: a
+         * debugger finds the end of the prologue as the SECOND row, and
+         * without this one it scanned the prologue instead -- stopping
+         * before the parameters were stored to the slots it reads. */
+        fn->nlines = 0;
+        a_line_row(fn, t->len, fn->line);
     }
 
     /* ---- prologue ---- */
@@ -5231,6 +5296,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             long at = t->len;
             int first = i;
             F.tail_made = 0;
+            if (want_debug)
+                a_line_row(fn, t->len, fn->ins[i].line);
             gen_ins(&F, i);
             if (F.skip_next) {          /* the compare emitted its branch */
                 F.skip_next = 0;

@@ -50,7 +50,7 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 | ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
 | RV32 | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
-| AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
+| AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF, 4-byte addresses | None (1-byte load and store only) | One shared instance | Refused |
 | MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | MIPS64r2 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Refused big-endian; little-endian compiles without exceptions and unwind tables, untested |
 | LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
@@ -1907,6 +1907,50 @@ Integer multiplication and division are helper calls with libgcc's names
 binary32 helpers (`__addsf3`, ...) in `lib/rt/avrfp*.c`. `make
 rt-embedded` builds `librt.a` for `avr`.
 
+### Debugging
+
+`-g` writes DWARF 4 that `llvm-dwarfdump --verify` accepts and that gdb
+(`set architecture avr`) and [EmbDBG](tools/embdbg.md) read, at `-O0`
+and above:
+
+- **Addresses are 4 bytes**, as avr-gcc writes them, although a pointer
+  is 2. A code address is a byte address in flash (the address in the
+  ELF symbol table, twice the word address the core counts in). A data
+  address is `0x800000` plus the SRAM address: data memory is a separate
+  space that also starts at 0, and GDB and QEMU's gdb stub put it at
+  `0x800000` up. A global at SRAM `0x13a` has `DW_OP_addr 0x80013a`.
+- **The frame base is `Y`**, `DW_OP_breg28 0`: the prologue points
+  `r28:r29` one byte below the frame, and every variable's
+  `DW_OP_fbreg` offset is the displacement the code uses for it
+  (`std Y+1, r24`). A debugger reads register 28 as the pair. `Y` is
+  set by the prologue, so locations are right from the second line-table
+  row of a function on, which is where a breakpoint on the function
+  stops.
+- **Line table.** Each function's first row is its entry, on the line
+  the function is declared; the body's rows follow wherever the source
+  line changes.
+- **Optimized code.** At `-O1` and above, a variable the optimizer took
+  out of memory has an empty location, which a debugger shows as
+  `<optimized out>`; so does a parameter that is assigned after it was
+  taken out of memory. A parameter that is never assigned keeps its
+  slot, which the prologue writes.
+- **Globals** the unit defines are described with their type.
+
+`-g` turns off this backend's register allocation at `-O1` and above, so
+that every variable stays in its slot; `-O2 -g` code can be about twice
+the size of `-O2` code. There is no `.debug_frame`: gdb finds a caller by
+analyzing the prologue, and EmbDBG's backtrace stops at frame `#0`.
+
+QEMU's arduino-uno has a gdb stub:
+
+```sh
+qemu-system-avr -M uno -nographic -bios fw.elf -S -gdb tcp::1234 &
+embdbg fw.elf remote 1234
+```
+
+The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
+`SREG` one byte, `SP` two bytes, and `PC` four bytes, a byte address.
+
 ### Limitations
 
 | Construct | Diagnostic |
@@ -1941,7 +1985,7 @@ for each; the machines are:
 | `thumbv7em-none-eabihf` | `qemu-system-arm -M mps2-an386 -cpu cortex-m4` | As above |
 | `thumbv8m.main-none-eabi[hf]` | `qemu-system-arm -M mps2-an505 -cpu cortex-m33` | As above |
 | `riscv32-unknown-elf`, `riscv64-unknown-elf` | `qemu-system-riscv32` / `qemu-system-riscv64 -M virt -bios none -m 8` | The startup writes the SiFive test device after `main` returns |
-| `avr` | `qemu-system-avr -M uno`, the image passed with `-bios` | The program prints a sentinel; `qrun.sh --until` stops QEMU when it appears |
+| `avr` | `qemu-system-avr -M uno`, the image passed with `-bios`; `-S -gdb tcp::PORT` for a debugger | The program prints a sentinel; `qrun.sh --until` stops QEMU when it appears |
 | `tricore-none-elf` | `qemu-system-tricore -M tricore_testboard -cpu tc27x`, output through a TCG plugin | The program prints `==EXIT n==` and writes n to the board's test device |
 | `sparc-none-elf` | `qemu-system-sparc -M leon3_generic`, the image passed with `-kernel`, APBUART output | The program prints `==EXIT n==` and executes `ta 0` with traps disabled, which QEMU's LEON3 takes as a shutdown |
 
