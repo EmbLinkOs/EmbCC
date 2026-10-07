@@ -81,8 +81,28 @@ static void one(u32 r)
     u_big(r); u_b3(r);
 }
 
+/* Dividends the optimizer knows: after the division becomes a multiply,
+ * the multiply of two constants is folded (fold_bin), and must agree
+ * with what the machine's own divide gives. */
+#define KS(X, D) do { i32 x_ = (X); vs = (D);                             \
+        if (x_ / (D) != x_ / vs || x_ % (D) != x_ % vs) bad++; } while (0)
+#define KU(X, D) do { u32 x_ = (X); vu = (D);                             \
+        if (x_ / (D) != x_ / vu || x_ % (D) != x_ % vu) bad++; } while (0)
+static void known(void)
+{
+    KS(INT32_MIN, 7); KS(INT32_MIN, -7); KS(INT32_MAX, 7); KS(-1, 7);
+    KS(-1000000007, 10); KS(-1000000007, -10); KS(123456789, 641);
+    KS(-123456789, 641); KS(INT32_MIN, 3); KS(INT32_MAX, -3); KS(-5, 5);
+    KS(-6, 5); KS(2147483641, 1000); KS(-2147483641, -1000);
+    KU(0xffffffffu, 7u); KU(0xfffffffeu, 10u); KU(4000000000u, 641u);
+    KU(0x80000000u, 3u); KU(0xffffffffu, 0x80000001u);
+    KU(0x80000000u, 0x80000001u); KU(3000000000u, 3000000000u);
+    KU(77777u, 19u); KU(0xfffffff9u, 14u);
+}
+
 int main(void)
 {
+    known();
     static const u32 edge[] = {
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 24, 25, 26, 27,
         99, 100, 101, 124, 125, 126, 254, 255, 256, 640, 641, 642, 999,

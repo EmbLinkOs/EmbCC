@@ -31,6 +31,12 @@ static i64 skmax(i32 a) { return (i64)a * 0x7fffffff; }
 static i64 skmin(i32 a) { return (i64)a * (i64)INT32_MIN; }
 static u64 uk3e9(u32 a) { return (u64)a * 3000000000u; }
 static u64 ukff(u32 a) { return (u64)a * 0xffffffffu; }
+/* constants that only ONE extension makes: a signed operand by one that
+ * needs 33 bits signed, an unsigned one by a negative 64-bit value --
+ * each stays a 64-bit multiply */
+static i64 skbig(i32 a) { return (i64)a * 3000000000LL; }
+static i64 skffff(i32 a) { return (i64)a * 0xffffffffLL; }
+static u64 ukneg(u32 a) { return (u64)a * (u64)-7; }
 static i64 narrow(i64 a, i64 b) { return (i64)(i32)a * (i32)b; }
 static i64 sacc(const i32 *p, const i32 *q, int n, i64 s)
 {
@@ -70,6 +76,12 @@ static void pair(u32 x, u32 y)
     if (skmin(a) != sref(a, INT32_MIN)) bad++;
     if (uk3e9(x) != uref(x, 3000000000u)) bad++;
     if (ukff(x) != uref(x, 0xffffffffu)) bad++;
+    vsa = a; vsb = 3000000000LL;
+    if (skbig(a) != vsa * vsb) bad++;
+    vsa = a; vsb = 0xffffffffLL;
+    if (skffff(a) != vsa * vsb) bad++;
+    vua = x; vub = (u64)-7;
+    if (ukneg(x) != vua * vub) bad++;
     /* the high halves of the 64-bit arguments must not be read */
     if (narrow((i64)0x5a5a5a5a00000000LL + x, (i64)0x1234567800000000LL + y) !=
         sref(a, b)) bad++;
