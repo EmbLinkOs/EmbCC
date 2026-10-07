@@ -479,17 +479,31 @@ static int ret_word_reg(int q)
     return q < 2 ? MIPS_V0 + q : MIPS_A0 + (q - 2);
 }
 
+/* n64 soft float returns a binary128 -- a long double, or a structure of
+ * one -- in v0 and A0, not v0:v1: its first doubleword in memory in v0
+ * and its second in a0 (clang's RetCC_F128SoftFloat, which follows GCC).
+ * The low and high halves' registers, in the target's order. */
+#define TF_RET_LO (g_be ? MIPS_A0 : MIPS_V0)
+#define TF_RET_HI (g_be ? MIPS_V0 : MIPS_A0)
+
 /* n64's composite results (clang's MipsABIInfo for N32/N64): at most 16
  * bytes come back in v0 and v1, larger ones through a hidden pointer in
- * a0. A complex of floating type, and a structure of one or two
- * floating-point fields the first at offset 0, return each FIELD in its
- * own register -- a float as its 32 bits sign-extended, as an FPR pair
- * would hold them in hard float -- and any other composite returns its
- * bytes as the doublewords `ld` would read from memory, the last one
- * packed (left-justified big-endian). ret_pieces gives each register's
- * offset and size and says which of the two ways (*fields); 0 for a
- * hidden pointer, -1 for a complex of integers, which is refused as at
- * o32. */
+ * a0. ret_pieces gives each register's offset and size, and *fields says
+ * how a piece sits in its register:
+ *
+ *   0  the composite's bytes as the doublewords `ld` would read from
+ *      memory, the last one packed (left-justified big-endian);
+ *   1  a structure of one or two floating-point fields, the first at
+ *      offset 0: each FIELD in its own register, as `ld` at the field
+ *      would read it -- so a float is the register's low half
+ *      little-endian and its HIGH half big-endian;
+ *   2  a structure of one long double: binary128's two doublewords in
+ *      v0 and a0, as a long double result (TF_RET_*);
+ *   3  a _Complex float or double: each part in its own register as a
+ *      scalar of its type, a float sign-extended in the low half.
+ *
+ * 0 for a hidden pointer, -1 for a complex of integers, which is refused
+ * as at o32. */
 static int ret_pieces(const struct type *t, long size, int *off, int *sz,
                       int *fields)
 {
@@ -509,7 +523,16 @@ static int ret_pieces(const struct type *t, long size, int *off, int *sz,
             return -1;
         off[0] = 0; sz[0] = (int)size / 2;
         off[1] = (int)size / 2; sz[1] = (int)size / 2;
-        *fields = 1;
+        *fields = 3;
+        return 2;
+    }
+    if (t->kind == TY_STRUCT && !t->is_union && t->nmembers == 1 &&
+        !t->members[0].is_bitfield && t->members[0].ty &&
+        t->members[0].ty->kind == TY_LDOUBLE) {
+        /* one binary128 field: its doublewords in v0 and a0 */
+        off[0] = 0; sz[0] = 8;
+        off[1] = 8; sz[1] = 8;
+        *fields = 2;
         return 2;
     }
     if (t->kind == TY_STRUCT && !t->is_union && t->nmembers >= 1 &&
@@ -1718,8 +1741,9 @@ static void fp_result(struct mips_fn *F, int dst, int w)
 {
     if (dst < 0)
         return;
-    if (w == 2 * W) wr64(F, dst, PLO(MIPS_V0), PHI(MIPS_V0));
-    else            wr(F, dst, MIPS_V0);
+    if (w == 2 * W && g_m64) wr64(F, dst, TF_RET_LO, TF_RET_HI);
+    else if (w == 2 * W)     wr64(F, dst, PLO(MIPS_V0), PHI(MIPS_V0));
+    else                     wr(F, dst, MIPS_V0);
 }
 
 /* ---- comparisons -----------------------------------------------------------
@@ -2571,13 +2595,16 @@ static void gen_call(struct mips_fn *F, int n)
          * callee wrote through a0 is there already. */
         long at = F->scratch_at + i->scratch;
         for (int q = 0; q < rw; q++) {
-            if (rfields || rsz[q] == W)
-                st_sp(F, ret_word_reg(q), at + roff[q], rsz[q]);
-            else
-                store_tail(F, ret_word_reg(q), at + roff[q], rsz[q]);
+            int r = rfields == 2 && q ? MIPS_A0 : ret_word_reg(q);
+            if (rsz[q] == W || rfields == 3 || (rfields && !g_be))
+                st_sp(F, r, at + roff[q], rsz[q]);
+            else                    /* the register's first bytes */
+                store_tail(F, r, at + roff[q], rsz[q]);
         }
         addr_sp(F, ACC, at);
         wr(F, i->dst, ACC);
+    } else if (F->wide[i->dst] && g_m64 && i->flt && i->ret_tybytes == 16) {
+        wr64(F, i->dst, TF_RET_LO, TF_RET_HI);     /* binary128: v0, a0 */
     } else if (F->wide[i->dst]) {
         /* a two-register result in v0:v1 as the ABI orders it; a narrower
          * one read into a wide value is v0, its low word, in either order */
@@ -3231,14 +3258,17 @@ static void gen_ins(struct mips_fn *F, int n)
                      * reads, the last one packed */
                     rd(F, i->a, ADDR);
                     for (int q = 0; q < rw; q++) {
-                        if (!g_m64)
-                            ld_any(F, ret_word_reg(q), ADDR, 4 * q, 4, 0, 0);
-                        else if (rfields || rsz[q] == 8)
-                            ld_any(F, ret_word_reg(q), ADDR, roff[q], rsz[q],
-                                   1, 0);
-                        else
-                            pack_tail(F, ret_word_reg(q), ADDR, roff[q],
-                                      rsz[q]);
+                        int r = rfields == 2 && q ? MIPS_A0 : ret_word_reg(q);
+                        if (!g_m64) {
+                            ld_any(F, r, ADDR, 4 * q, 4, 0, 0);
+                        } else if (rfields || rsz[q] == 8) {
+                            ld_any(F, r, ADDR, roff[q], rsz[q], 1, 0);
+                            /* a float field big-endian: the high half */
+                            if (rfields == 1 && rsz[q] == 4 && g_be)
+                                mips_shift_imm(t, MIPS_DSLL, r, r, 32);
+                        } else {
+                            pack_tail(F, r, ADDR, roff[q], rsz[q]);
+                        }
                     }
                 } else {
                     /* through the caller's buffer, whose address the
@@ -3251,6 +3281,8 @@ static void gen_ins(struct mips_fn *F, int n)
             } else if (F->wide[i->a] && g_be && fn->ret_abi.size <= W) {
                 /* a 32-bit result of a 64-bit value: its low word, in v0 */
                 rd(F, i->a, MIPS_V0);
+            } else if (F->wide[i->a] && g_m64 && fn->ret_abi.is_float) {
+                rd64(F, i->a, TF_RET_LO, TF_RET_HI);   /* binary128 */
             } else if (F->wide[i->a]) {
                 rd64(F, i->a, PLO(MIPS_V0), PHI(MIPS_V0));
             } else if (g_m64 && fn->ret_abi.size <= 4) {
@@ -3344,6 +3376,9 @@ static void gen_ins(struct mips_fn *F, int n)
         if (i->dst >= 0) {
             if (F->wide[i->dst] && g_be && i->w <= W)
                 wr64(F, i->dst, MIPS_V0, MIPS_V1);     /* a 32-bit result */
+            else if (F->wide[i->dst] && g_m64 && i->w == 16 &&
+                     i->op != IR_F2I)
+                wr64(F, i->dst, TF_RET_LO, TF_RET_HI); /* binary128 */
             else if (F->wide[i->dst])
                 wr64(F, i->dst, PLO(MIPS_V0), PHI(MIPS_V0));
             else
