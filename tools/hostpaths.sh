@@ -29,3 +29,11 @@ _hp_tool() { for c in "$@"; do command -v "$c" >/dev/null 2>&1 && { command -v "
 READELF=${READELF:-$(_hp_tool readelf x86_64-elf-readelf)}
 OBJDUMP=${OBJDUMP:-$(_hp_tool x86_64-elf-objdump objdump)}
 OBJCOPY=${OBJCOPY:-$(_hp_tool x86_64-elf-objcopy objcopy)}
+
+# The Xtensa reference: Espressif's GCC told to generate for the de212 core
+# QEMU emulates, through a configuration plugin built from that core's
+# overlay (tools/xtensa-ref-gcc.sh makes both). XTENSA_REF_GCC is the
+# compiler and XTENSA_REF_FLAGS the -mdynconfig that selects the core.
+XTENSA_REF_DIR=${EMBCC_XTENSA_REF_DIR:-$HOME/EmbRef/xtensa-de212-gcc-16.1.0/xtensa-esp-elf}
+XTENSA_REF_GCC=${EMBCC_REF_GCC_XTENSA:-$XTENSA_REF_DIR/bin/xtensa-esp-elf-gcc}
+XTENSA_REF_FLAGS=${EMBCC_REF_GCC_XTENSA_FLAGS:--mdynconfig=$XTENSA_REF_DIR/lib/xtensa_de212.so}

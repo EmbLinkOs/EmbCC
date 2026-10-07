@@ -56,10 +56,11 @@ static void print_version(void)
     printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
            "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (o32, little- "
-           "and big-endian), LoongArch64 (LP64S), AVR (ATmega328P)\n");
+           "and big-endian), LoongArch64 (LP64S), Xtensa (ESP32,\n"
+           "windowed ABI), AVR (ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, LoongArch64 and AVR images; "
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, LoongArch64, Xtensa and AVR images; "
            "AArch64 and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
@@ -124,6 +125,7 @@ static void print_options(FILE *out)
      * limit, and tests/golden/ir-roundtrip.sh prints main.c's) */
     fputs(
       "                         mipsel-none-elf, loongarch64-unknown-elf,\n"
+      "                         xtensa-none-elf,\n"
       "                         and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
@@ -743,6 +745,29 @@ static int find_lib(const char *name, char *out, size_t cap, int *own)
     return 0;
 }
 
+/* Is this one of GCC's Xtensa options (gcc/config/xtensa/xtensa.opt and
+ * elf.opt, and Espressif's), which the Xtensa target answers itself:
+ * accepted when it asks for what EmbCC emits, refused by name otherwise.
+ * The -m spellings every target accepts are not among them. */
+static int xtensa_flag(const char *a)
+{
+    static const char *const names[] = {
+        "-mlongcalls", "-mno-longcalls", "-mtext-section-literals",
+        "-mno-text-section-literals", "-mauto-litpools", "-mno-auto-litpools",
+        "-mserialize-volatile", "-mno-serialize-volatile", "-mtarget-align",
+        "-mno-target-align", "-mforce-no-pic", "-mlittle-endian",
+        "-mbig-endian", "-mstrict-align", "-mno-strict-align", "-mlra",
+        "-mno-lra", "-mconst16", "-mno-const16", "-mforce-l32",
+        "-mno-fix-esp32-psram-cache-issue"
+    };
+    for (unsigned k = 0; k < sizeof names / sizeof names[0]; k++)
+        if (!strcmp(a, names[k]))
+            return 1;
+    return !strncmp(a, "-mabi=", 6) || !strncmp(a, "-mdynconfig=", 12) ||
+           !strncmp(a, "-mextra-l32r-costs=", 19) ||
+           !strncmp(a, "-mfix-esp32-psram-cache-issue", 29);
+}
+
 /* Is this a target the driver links firmware for: one embld links, whose
  * memory map the build supplies (-T, or -Wl,-Ttext...). */
 static int firmware_target(void)
@@ -751,7 +776,8 @@ static int firmware_target(void)
            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
             target_get() == TARGET_MIPS32 || target_get() == TARGET_LOONGARCH64 ||
-            target_get() == TARGET_TRICORE);
+            target_get() == TARGET_TRICORE ||
+            target_get() == TARGET_XTENSA);
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -1847,6 +1873,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit_riscv(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                            opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
+    else if (ta == TARGET_XTENSA)
+        codegen_unit_xtensa(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                            opt_level >= 1);
     else if (ta == TARGET_MIPS32)
         codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -2272,12 +2302,24 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "tricore-none-elf yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
                             "EmbCC writes no TriCore .eh_frame");
+    if (unwind && ta == TARGET_XTENSA)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "xtensa-none-elf yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no Xtensa .eh_frame");
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
     /* -S: the same bytes, as text (src/driver/asmout.c). Everything the
      * emitter needs is in hand here -- the code, the string pool, and the
      * relocation sites the backend recorded. */
+    /* Xtensa's -S would need an assembler that reads it back, and there
+     * is none to check it against (no Xtensa llvm-mc): refused by name
+     * rather than written unverified. */
+    if (want_asm && ta == TARGET_XTENSA)
+        diag_fatal(NULL, 0, "-S is not supported for xtensa-none-elf yet: "
+                            "compile with -c (there is no Xtensa assembler "
+                            "here to check the text against)");
     if (want_asm) {
         /* Every target, now. What -S emits is the OBJECT's bytes as
          * .byte directives with the relocations attached explicitly --
@@ -3163,8 +3205,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && f->is_static && f->used)
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off),
-                (Elf64_Xword)f->code_len,
+                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off + f->code_entry),
+                (Elf64_Xword)(f->code_len - f->code_entry),
                 ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
                 (Elf64_Half)code_sec(f->code_off, text_ndx));
     /* An alias is one more symbol at its target's address and size (sema
@@ -3175,8 +3217,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         if (!f->absorbed && f->alias_of && f->is_static) {
             const struct func *t = alias_target(u, f);
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off),
-                (Elf64_Xword)t->code_len, ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
+                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off + t->code_entry),
+                (Elf64_Xword)(t->code_len - t->code_entry), ELF64_ST_INFO(STB_LOCAL, STT_FUNC),
                 (Elf64_Half)code_sec(t->code_off, text_ndx));
         }
     for (struct global *g = u->globals; g; g = g->next)
@@ -3226,16 +3268,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn && !f->is_static)
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off),
-                (Elf64_Xword)f->code_len,
+                w, f->name, (Elf64_Addr)code_sym_value(ta, f->code_off + f->code_entry),
+                (Elf64_Xword)(f->code_len - f->code_entry),
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
                 (Elf64_Half)code_sec(f->code_off, text_ndx));
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->alias_of && !f->is_static) {
             const struct func *t = alias_target(u, f);
             f->sym_ndx = elfw_add_symbol(
-                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off),
-                (Elf64_Xword)t->code_len,
+                w, f->name, (Elf64_Addr)code_sym_value(ta, t->code_off + t->code_entry),
+                (Elf64_Xword)(t->code_len - t->code_entry),
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
                 (Elf64_Half)code_sec(t->code_off, text_ndx));
         }
@@ -3461,7 +3503,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * the addend, because `jmp` carries an absolute address and nothing
          * in a relocatable object knows where its own .text will land. */
         int tx = strs[i].kind == RK_AVR_TEXT_CALL ||
-                 strs[i].kind == RK_MIPS_TEXT26;
+                 strs[i].kind == RK_MIPS_TEXT26 ||
+                 strs[i].kind == RK_XTENSA_TEXT32;
         /* (the auipc, or the jump's label, is in the same function as
          * the site, so in the same section) */
         int ssym = rodata_sym;
@@ -4021,6 +4064,7 @@ int main(int argc, char **argv)
                               : a == TARGET_MIPS32 ? mips_op_calls_helper
                               : a == TARGET_LOONGARCH64 ? la_op_calls_helper
                               : a == TARGET_TRICORE ? tc_op_calls_helper
+                              : a == TARGET_XTENSA ? xtensa_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
@@ -4755,6 +4799,55 @@ int main(int argc, char **argv)
                        strcmp(argv[i], "-mlasx") == 0) {
                 diag_fatal(NULL, 0, "%s is not supported: EmbCC emits no "
                            "LSX or LASX vector instructions", argv[i]);
+            }
+            continue;
+        } else if (target_get() == TARGET_XTENSA && xtensa_flag(argv[i])) {
+            /* The flags an ESP-IDF build passes, and the rest of GCC's
+             * xtensa.opt. What EmbCC emits is ONE configuration -- the
+             * windowed ABI, little-endian, literals in .text before each
+             * function, direct call8s, memw before every volatile access
+             * -- so a flag that says that (or only changes how GCC would
+             * have placed or costed the same code) is accepted, and one
+             * that asks for anything else is refused by name. */
+            static const char *const ok[] = {
+                "-mlongcalls", "-mno-longcalls", "-mtext-section-literals",
+                "-mno-text-section-literals", "-mauto-litpools",
+                "-mno-auto-litpools", "-mserialize-volatile",
+                "-mno-serialize-volatile", "-mtarget-align",
+                "-mno-target-align", "-mforce-no-pic", "-mabi=windowed",
+                "-mlittle-endian", "-mstrict-align", "-mno-strict-align",
+                "-mlra", "-mno-lra", "-mno-fix-esp32-psram-cache-issue",
+                "-mno-const16"
+            };
+            int good = 0;
+            for (unsigned k = 0; k < sizeof ok / sizeof ok[0]; k++)
+                good |= strcmp(argv[i], ok[k]) == 0;
+            if (!strncmp(argv[i], "-mextra-l32r-costs=", 19))
+                good = 1;           /* GCC's cost model alone */
+            if (!strncmp(argv[i], "-mdynconfig=", 12) &&
+                (strstr(argv[i], "esp32.so") || strstr(argv[i], "esp32s3.so")))
+                good = 1;
+            if (!good) {
+                if (!strncmp(argv[i], "-mabi=", 6) &&
+                    strcmp(argv[i], "-mabi=call0"))
+                    diag_fatal(NULL, 0, "%s is not an Xtensa ABI: EmbCC "
+                               "emits the windowed ABI (-mabi=windowed)",
+                               argv[i]);
+                if (!strcmp(argv[i], "-mabi=call0"))
+                    diag_fatal(NULL, 0, "-mabi=call0 is not supported: EmbCC "
+                               "emits the windowed ABI (call8/entry/retw), "
+                               "which ESP-IDF uses");
+                if (!strcmp(argv[i], "-mbig-endian"))
+                    diag_fatal(NULL, 0, "-mbig-endian is not supported: the "
+                               "Xtensa target is little-endian only");
+                if (!strncmp(argv[i], "-mfix-esp32-psram-cache-issue", 29))
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC does not "
+                               "insert the ESP32 rev. 1 PSRAM workaround",
+                               argv[i]);
+                diag_fatal(NULL, 0, "%s is not supported for xtensa-none-elf: "
+                           "EmbCC emits the windowed ABI for the ESP32 "
+                           "(LX6) and ESP32-S3 (LX7), little-endian, with "
+                           "literals before each function", argv[i]);
             }
             continue;
         } else if (target_get() == TARGET_MIPS32 &&

@@ -77,6 +77,8 @@
  * base the backend keeps under alloca. */
 #define DW_REG_SP_TRICORE     26
 #define DW_REG_FB_TRICORE     30
+#define DW_REG_SP_XTENSA      1      /* a1 */
+#define DW_REG_FB_XTENSA      7      /* a7: sp at entry, under alloca */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -540,7 +542,10 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     for (int n = 0; n < iu->nfuncs; n++) {
         struct ir_func *fn = &iu->funcs[n];
         if (fn->src->code_len <= 0) continue;
-        long lo = fn->src->code_off, hi = lo + fn->src->code_len;
+        /* the function starts at its entry, past an Xtensa literal pool
+         * (code_entry, 0 elsewhere) */
+        long lo = fn->src->code_off + fn->src->code_entry;
+        long hi = fn->src->code_off + fn->src->code_len;
 
         int rtoff = type_lookup(&tm, fn->src->ret_ty);
         db_uleb(b, rtoff >= 0 ? AB_SUBPROGRAM_T : AB_SUBPROGRAM);
@@ -569,30 +574,24 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
             enum target_arch a = target_get();
             if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
                 a == TARGET_RISCV64 || a == TARGET_MIPS32 ||
-                a == TARGET_LOONGARCH64) {
+                a == TARGET_LOONGARCH64 || a == TARGET_TRICORE ||
+                a == TARGET_XTENSA) {
                 struct dbuf e = { 0, 0, 0 };
                 int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
-                int la = a == TARGET_LOONGARCH64;
+                int la = a == TARGET_LOONGARCH64, tc = a == TARGET_TRICORE;
+                int xt = a == TARGET_XTENSA;
                 db_u8(&e, DW_OP_breg(fn->has_alloca
                                      ? (thumb ? DW_REG_FB_ARM
                                         : mips ? DW_REG_FB_MIPS
                                         : la ? DW_REG_FB_LA
+                                        : tc ? DW_REG_FB_TRICORE
+                                        : xt ? DW_REG_FB_XTENSA
                                              : DW_REG_FB_RISCV)
                                      : (thumb ? DW_REG_SP_ARM
                                         : mips ? DW_REG_SP_MIPS
                                         : la ? DW_REG_SP_LA
-                a == TARGET_TRICORE) {
-                struct dbuf e = { 0, 0, 0 };
-                int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
-                int tc = a == TARGET_TRICORE;
-                db_u8(&e, DW_OP_breg(fn->has_alloca
-                                     ? (thumb ? DW_REG_FB_ARM
-                                        : mips ? DW_REG_FB_MIPS
-                                        : tc ? DW_REG_FB_TRICORE
-                                             : DW_REG_FB_RISCV)
-                                     : (thumb ? DW_REG_SP_ARM
-                                        : mips ? DW_REG_SP_MIPS
                                         : tc ? DW_REG_SP_TRICORE
+                                        : xt ? DW_REG_SP_XTENSA
                                              : DW_REG_SP_RISCV)));
                 db_sleb(&e, 0);
                 db_uleb(b, (unsigned long)e.len);
@@ -630,7 +629,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
 static void emit_line_func(struct dwarf_out *out, struct dbuf *b,
                            struct ir_func *fn)
 {
-    long lo = fn->src->code_off;
+    long lo = fn->src->code_off + fn->src->code_entry;
     long hi = fn->src->code_off + fn->src->code_len;
 
     /* DW_LNE_set_address <.text address, relocated, 4 or 8 bytes> */

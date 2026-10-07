@@ -83,6 +83,9 @@ int ty_generic_same(const struct type *a, const struct type *b)
 
 struct type *ty_wchar(void)
 {
+    /* int-sized, but for Xtensa's 16-bit unsigned short (xtensa/elf.h) */
+    if (target_wchar_size() == 2 && target_int_size() != 2)
+        return ty_base(TY_SHORT, target_wchar_unsigned());
     return ty_base(TY_INT, target_wchar_unsigned());
 }
 

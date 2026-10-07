@@ -147,6 +147,13 @@ int target_insn_len(const unsigned char *p, int avail)
         if (p[0] & 1)
             return avail >= 4 ? 4 : 0;
         return avail >= 2 ? 2 : 0;
+    case TARGET_XTENSA: {
+        /* Three bytes, or two for a density instruction: op0 (the low
+         * nibble of the first byte) 8..13. EmbCC emits only the
+         * three-byte forms, and a literal pool's words are data. */
+        int n = (p[0] & 15) >= 8 && (p[0] & 15) <= 13 ? 2 : 3;
+        return avail >= n ? n : 0;
+    }
 
     case TARGET_X86_64:
     default:
@@ -257,6 +264,10 @@ static const struct data_model {
      * word, since a TriCore doubleword access needs only that: long long
      * and double are 4-aligned (maxal 4). */
     [TARGET_TRICORE] = { 4, 4, 4, 8,  8, 0, 0, 0, 4 },
+    /* Xtensa (xtensa-esp32-elf-gcc -dM): ILP32, UNSIGNED char, a 16-bit
+     * UNSIGNED wchar_t (target_wchar_size), long double the 8-byte
+     * double, and no __int128. */
+    [TARGET_XTENSA]  = { 4, 4, 4, 8,  8, 1, 1, 0, 0 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -319,6 +330,11 @@ int target_char_unsigned(void)
     return g_char_uns_override >= 0 ? g_char_uns_override
            : darwin_a64() ? 0 : g_model[g_arch].char_uns;
 }
+int target_wchar_size(void)
+{
+    return g_arch == TARGET_XTENSA ? 2 : g_model[g_arch].it;
+}
+
 int target_wchar_unsigned(void)
 {
     return darwin_a64() ? 0 : g_model[g_arch].wchar_uns;
@@ -332,14 +348,15 @@ int target_has_int128(void)     { return g_model[g_arch].int128; }
  * the promise. */
 static int g_no_jump_tables;
 void target_set_jump_tables(int on) { g_no_jump_tables = !on; }
-/* TriCore keeps the decision tree for now: a table there needs its own
- * address, absolute (a HI/LO2 pair against .text) or from a JL, and
- * neither lowering is written -- IR_SWITCH is refused by name if one
- * ever arrives. */
+/* TriCore and Xtensa keep the decision tree for now: a table needs its
+ * own address (TriCore: a HI/LO2 pair against .text or a JL; Xtensa: the
+ * base from a literal and a jx), and neither lowering is written --
+ * IR_SWITCH is refused by name if one ever arrives. */
 int target_jump_tables(void)
 {
     return !g_no_jump_tables && target_get() != TARGET_AVR &&
-           target_get() != TARGET_TRICORE;
+           target_get() != TARGET_TRICORE &&
+           target_get() != TARGET_XTENSA;
 }
 int target_switch_table_min_os(void)
 {
@@ -373,6 +390,8 @@ int target_anon_bitfield_aligns(void)
      * clang, aligned 1 */
     case TARGET_LOONGARCH64: return 0;
     case TARGET_TRICORE: return 0;   /* as GCC lays them out (unverified) */
+    /* GCC's generic rule (PCC_BITFIELD_TYPE_MATTERS, no ABI override) */
+    case TARGET_XTENSA:  return 0;
     }
     return 0;
 }
@@ -395,6 +414,9 @@ int target_va_list_is_pointer(void)
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
     case TARGET_LOONGARCH64: return 1;   /* LoongArch psABI: void * */
     case TARGET_TRICORE: return 1;   /* char *, over the caller's stack words */
+    /* GCC's 12-byte record, held by value -- not a pointer to one, and not
+     * a tag va_copy needs: a copy is the record's assignment (irgen) */
+    case TARGET_XTENSA:  return 0;
     }
     return 0;
 }
@@ -603,6 +625,18 @@ static const struct triple {
     { "tricore-unknown-elf", TARGET_TRICORE, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "tricore",             TARGET_TRICORE, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
 
+    /* Xtensa, little-endian, windowed ABI: the ESP32 (LX6) and ESP32-S3
+     * (LX7). `-none-elf` is the canonical spelling; the -esp* ones are
+     * Espressif's toolchains' names, which a project already built with
+     * them will say. One instruction set for all of them (the subset
+     * the plan names), so one target. */
+    { "xtensa-none-elf",     TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "xtensa-esp32-elf",    TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "xtensa-esp32s3-elf",  TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "xtensa-esp-elf",      TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "xtensa-elf",          TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "xtensa",              TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
@@ -770,6 +804,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_MIPS32:  return EM_MIPS;
     case TARGET_LOONGARCH64: return EM_LOONGARCH;
     case TARGET_TRICORE: return EM_TRICORE;
+    case TARGET_XTENSA:  return EM_XTENSA;
     default:             return EM_X86_64;
     }
 }
@@ -816,6 +851,8 @@ unsigned long target_elf_flags(enum target_arch a)
     case TARGET_LOONGARCH64: return EF_LOONGARCH_ABI_SOFT_FLOAT |
                                     EF_LOONGARCH_OBJABI_V1;
     case TARGET_TRICORE: return EF_TRICORE_V1_6_1;
+    /* What GNU as writes for the ESP32's objects: XT_INSN | XT_LIT */
+    case TARGET_XTENSA:  return EF_XTENSA_XT_INSN | EF_XTENSA_XT_LIT;
     default:             return 0;
     }
 }
@@ -951,6 +988,16 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         default:             return -1;
         }
     }
+    if (a == TARGET_XTENSA) {
+        switch (k) {
+        /* call8's offset, which a linker decodes the opcode to find */
+        case RK_CALL:        return R_XTENSA_SLOT0_OP;
+        /* a literal-pool word, a data pointer, a DWARF offset */
+        case RK_ABS32:       return R_XTENSA_32;
+        case RK_XTENSA_TEXT32: return R_XTENSA_32;
+        default:             return -1;
+        }
+    }
     if (a == TARGET_AVR) {
         switch (k) {
         case RK_CALL:            return R_AVR_CALL;
@@ -1064,7 +1111,7 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
         a == TARGET_MIPS32 || a == TARGET_LOONGARCH64 ||
-        a == TARGET_TRICORE)
+        a == TARGET_TRICORE || a == TARGET_XTENSA)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -1140,6 +1187,10 @@ static const struct reloc_spelling {
     { EM_TRICORE, R_TRICORE_HIADJ,     "R_TRICORE_HIADJ" },
     { EM_TRICORE, R_TRICORE_LO,        "R_TRICORE_LO" },
     { EM_TRICORE, R_TRICORE_LO2,       "R_TRICORE_LO2" },
+    { EM_XTENSA, R_XTENSA_NONE,        "R_XTENSA_NONE" },
+    { EM_XTENSA, R_XTENSA_32,          "R_XTENSA_32" },
+    { EM_XTENSA, R_XTENSA_ASM_EXPAND,  "R_XTENSA_ASM_EXPAND" },
+    { EM_XTENSA, R_XTENSA_SLOT0_OP,    "R_XTENSA_SLOT0_OP" },
 };
 
 const char *target_reloc_name(enum target_arch a, int type)

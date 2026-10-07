@@ -56,6 +56,11 @@
  * PIC32-class core with no FPU). */
 #if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
     defined(__mips_soft_float) || defined(__tricore__) || \
+ * PIC32-class core with no FPU). EmbCC's Xtensa code is soft float on any
+ * core, with or without the ESP32's FPU: the ABI keeps floats in the
+ * address registers either way, and the backend calls these. */
+#if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
+    defined(__mips_soft_float) || defined(__XTENSA__) || \
     (defined(__arm__) && (!defined(__ARM_FP) || !(__ARM_FP & 8)))
 #define SOFTFP_ALL 1
 #endif

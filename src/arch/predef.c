@@ -61,6 +61,9 @@ static const struct predef_macro *arch_table(int *count)
         case TARGET_TRICORE:
             *count = predef_macro_count_cxx_tricore;
             return predef_macros_cxx_tricore;
+        case TARGET_XTENSA:
+            *count = predef_macro_count_cxx_xtensa;
+            return predef_macros_cxx_xtensa;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -107,6 +110,9 @@ static const struct predef_macro *arch_table(int *count)
     case TARGET_TRICORE:
         *count = predef_macro_count_tricore;
         return predef_macros_tricore;
+    case TARGET_XTENSA:
+        *count = predef_macro_count_xtensa;
+        return predef_macros_xtensa;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;

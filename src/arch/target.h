@@ -57,13 +57,20 @@ enum target_arch {
      * convention (loongarch64-unknown-elf). LP64 like RV64, whose calling
      * convention it shares rule for rule, but with a SIGNED char.
      * docs/internals/loongarch64-plan.md. */
-    TARGET_LOONGARCH64 = 7
+    TARGET_LOONGARCH64 = 7,
     /* Infineon TriCore 1.6.1, the AURIX core (tricore-none-elf): 32-bit
      * little-endian, soft float, ILP32 with a SIGNED char and 8-byte
      * long long and double aligned to only 4. The only target here with
      * two register files -- data and address -- and a hardware context
      * save at every call. docs/internals/tricore-plan.md. */
-    TARGET_TRICORE = 7
+    TARGET_TRICORE = 8,
+    /* Little-endian Xtensa with the windowed-register ABI: the ESP32's
+     * LX6 and the ESP32-S3's LX7 (xtensa-none-elf). ILP32 with an
+     * UNSIGNED char, a 16-bit wchar_t, long double = double, and the only
+     * target here whose registers are a window that a call rotates, whose
+     * instructions are three bytes, and whose constants come from a
+     * literal pool before each function. docs/internals/xtensa-plan.md. */
+    TARGET_XTENSA = 9
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -166,7 +173,10 @@ int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
  * not a preference -- a buffer of plain `char` compares differently
  * either way -- so a build that asks is obeyed. */
 void target_set_char_signed(int unsigned_char);
-int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
+int target_wchar_unsigned(void);  /* wchar_t's signedness */
+/* wchar_t's width: int's, except on Xtensa, where GCC's xtensa-elf makes
+ * it a 16-bit unsigned short (gcc/config/xtensa/elf.h). */
+int target_wchar_size(void);
 
 /* Whether __int128 exists at all. It does not on a 32-bit target: the
  * type needs a register pair per half and libgcc's __divti3 family is
@@ -200,6 +210,7 @@ int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
 int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codegen.c */
 int tc_op_calls_helper(const struct ir_ins *i);     /* src/arch/tricore/codegen.c */
+int xtensa_op_calls_helper(const struct ir_ins *i); /* src/arch/xtensa/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -348,6 +359,7 @@ int mips_imm_foldable(int op, long imm);    /* arch/mips/irgen.c */
 int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
 int la_imm_foldable(int op, long imm);      /* arch/loongarch/irgen.c */
 int tc_imm_foldable(int op, long imm);      /* arch/tricore/irgen.c */
+int xtensa_imm_foldable(int op, long imm);  /* arch/xtensa/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -590,6 +602,11 @@ enum reloc_kind {
     RK_TRICORE_HI,
     RK_TRICORE_LO,
     RK_TRICORE_LO2,
+    /* An Xtensa literal-pool word holding the address of a label in this
+     * object's own .text, for a jump too far for `j` (l32r and jx):
+     * R_XTENSA_32 against the section symbol with the label's offset as
+     * the addend, as RK_MIPS_TEXT26 is. */
+    RK_XTENSA_TEXT32,
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

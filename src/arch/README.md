@@ -23,6 +23,8 @@ src/arch/
   mips/            MIPS32r2, o32 soft float, ILP32      -> docs/internals/mips32-plan.md
   mips32/          its macro tables only (as riscv32/)
   tricore/         TriCore 1.6.1 (AURIX), TriCore EABI  -> docs/internals/tricore-plan.md
+  xtensa/          Xtensa LX6/LX7 (ESP32), windowed ABI, soft float, ILP32
+                                                         -> docs/internals/xtensa-plan.md
 ```
 
 Each architecture directory holds the same kinds of file:

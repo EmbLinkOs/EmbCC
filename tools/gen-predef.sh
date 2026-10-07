@@ -15,6 +15,7 @@
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m armv7a riscv32 riscv64 avr mips32
 #                   mips32eb
 #                   loongarch64
+#                   xtensa
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -88,6 +89,9 @@ refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
         thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64) eval "echo \${$gccvar:-clang}" ;;
+        # Xtensa: Espressif's own GCC for the ESP32 (crosstool-NG release
+        # esp-16.1.0_20260609), there being no Xtensa target in clang.
+        xtensa)  eval "echo \${$gccvar:-xtensa-esp32-elf-gcc}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -187,6 +191,10 @@ exclude_arch() {
         # compare-and-swap; the backend refuses an eight-byte atomic by name
         # (as on ARMv7-M, which has no ldrexd), so this does not claim it.
         armv7a)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8' ;;
+        # Xtensa's s32c1i is word-sized too. The table is the ESP32's
+        # (xtensa-esp32-elf-gcc, which has no -msoft-float: the float ABI
+        # is the same either way, every float in the address registers).
+        xtensa)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -306,8 +314,9 @@ case "${1:-both}" in
     mips32)  gen mips32 ;;
     mips32eb) gen mips32eb ;;
     loongarch64) gen loongarch64 ;;
+    xtensa)  gen xtensa ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen armv7a; gen riscv32
-              gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64]" >&2
+              gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64; gen xtensa ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|xtensa]" >&2
        exit 1 ;;
 esac

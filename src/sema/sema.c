@@ -2291,7 +2291,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * an assignment and never looks at this -- and on AVR, where
              * long[4] is sixteen bytes, it was a 16-byte buffer that a
              * 24-byte copy ran eight bytes past. */
-            if (is_copy && !target_va_list_is_pointer())
+            if (is_copy && !target_va_list_is_pointer() &&
+                target_get() != TARGET_XTENSA)
                 e->var_index = scope_add(sc, "<va_copy tag>",
                                          ty_array(ty_base(TY_LONG, 0), 4),
                                          NULL);

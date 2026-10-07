@@ -27,6 +27,7 @@
 #include "../arch/mips/emit.h"
 #include "../arch/thumb/a32.h"
 #include "../arch/tricore/emit.h"
+#include "../arch/xtensa/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -609,14 +610,19 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             die("%s: not a relocatable object (ET_REL)", name);
         if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
             e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS &&
-            e32->e_machine != EM_TRICORE)
+            e32->e_machine != EM_TRICORE && e32->e_machine != EM_XTENSA)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
-                "RV32 (EM_RISCV), AVR (EM_AVR), MIPS (EM_MIPS) and TriCore "
-                "(EM_TRICORE) are supported", name, (unsigned)e32->e_machine);
+                "RV32 (EM_RISCV), AVR (EM_AVR), MIPS (EM_MIPS), TriCore "
+                "(EM_TRICORE) and Xtensa (EM_XTENSA) are supported", name,
+                (unsigned)e32->e_machine);
         if (e32->e_machine == EM_TRICORE &&
             e32->e_ident[EI_DATA] != ELFDATA2LSB)
             die("%s: a big-endian TriCore object; TriCore is little-endian",
                 name);
+        if (e32->e_machine == EM_XTENSA &&
+            e32->e_ident[EI_DATA] != ELFDATA2LSB)
+            die("%s: a big-endian Xtensa object; this linker links "
+                "little-endian Xtensa only", name);
         /* o32 only, in either byte order; and big-endian only there */
         if (e32->e_machine == EM_MIPS &&
             (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32)
@@ -1036,6 +1042,10 @@ static void add_entry_stub(struct linker *l)
     /* MIPS: li sp, then lui/ori t9 with the entry's absolute address and
      * a jr through it, its delay slot a nop -- the lui/ori pair always
      * both, so the size is known before layout. */
+    /* Xtensa: `j` over three literals (sp, PS, the entry), then sp and
+     * its bottom frame, PS for the windowed ABI, and a callx8 to the
+     * entry -- which is then an ordinary windowed function -- and a loop
+     * should it return: 4 + 12 + 12 * 3 bytes. */
     /* ARM (an A-profile core, which comes out of reset in ARM state
      * with sp unset): movw/movt sp, movw/movt ip with the entry, bx ip --
      * five A32 words, whatever the addresses, and bx interworks if the
@@ -1046,6 +1056,7 @@ static void add_entry_stub(struct linker *l)
               ? la_li_len((long long)l->stack_top) + 8
               : l->machine == EM_ARM ? 20
               : l->machine == EM_TRICORE ? TC_STUB_SIZE
+              : l->machine == EM_XTENSA ? 52
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -1084,6 +1095,52 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
     }
     if (l->machine == EM_TRICORE) {
         fill_tricore_stub(l, &c, entry);
+        return;
+    }
+    if (l->machine == EM_XTENSA) {
+        /*   0  j     16          (over the literals)
+         *   4  .word stack_top - 32, PS, entry
+         *  16  l32r  a1, 4       sp, below a 32-byte bottom frame
+         *      addi  a2, a1, 32
+         *      addi  a3, a1, -16
+         *      s32i  a2, a3, 4   [sp - 12] = stack_top, see below
+         *      l32r  a2, 8       PS: WOE (bit 18) | UM (bit 5), level 0
+         *      wsr   a2, ps
+         *      movi  a2, 1
+         *      wsr   a2, windowstart   this window, the only live one
+         *      rsync
+         *      l32r  a8, 12
+         *      callx8 a8
+         *      j     .
+         *
+         * The stub's own window is the bottom of the call stack, and when
+         * the calls nest deep enough the window overflow handler spills
+         * it like any other: its a0-a3 below its callee's sp, and its
+         * a4-a7 below ITS caller's sp, which the handler reads from the
+         * stub's [sp - 12] -- where a real caller's spill would have
+         * left it. Nothing has, so the stub puts stack_top there, and the
+         * 32 bytes it sits under are the room for those four words.
+         * WINDOWSTART says which windows hold a live frame, and a core
+         * started anywhere but its reset vector may hold anything there
+         * (QEMU's loader leaves 0): it is set to this window alone. */
+        xt_w(&c, xt_enc_j(16 - 4));
+        code_byte(&c, 0);
+        code_u32(&c, ((unsigned long)l->stack_top - 32) & 0xffffffffUL);
+        code_u32(&c, (1UL << 18) | (1UL << 5));
+        code_u32(&c, (unsigned long)entry & 0xffffffffUL);
+        xt_w(&c, xt_enc_l32r(XT_A1, c.len, 4));
+        xt_addi(&c, XT_A2, XT_A1, 32);
+        xt_addi(&c, XT_A3, XT_A1, -16);
+        xt_store(&c, XT_A2, XT_A3, 4, 4);
+        xt_w(&c, xt_enc_l32r(XT_A2, c.len, 8));
+        xt_wsr(&c, XT_A2, XT_SR_PS);
+        xt_movi(&c, XT_A2, 1);
+        xt_wsr(&c, XT_A2, XT_SR_WINDOWSTART);
+        xt_rsync(&c);
+        xt_w(&c, xt_enc_l32r(XT_A8, c.len, 12));
+        xt_callx(&c, 2, XT_A8);
+        xt_w(&c, xt_enc_j(-4));
+        (void)s;
         return;
     }
     if (l->machine == EM_MIPS) {
@@ -1847,7 +1904,8 @@ static void layout(struct linker *l, struct osec_bound *b,
      * two bytes into a word sent the harness's .bss loop to the reset
      * vector. Both ends are kept on word boundaries, the padding inside
      * the image, as a GNU script's ALIGN(4) puts it. */
-    if (l->machine == EM_MIPS || l->machine == EM_TRICORE)
+    if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
+        l->machine == EM_XTENSA)
         va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
@@ -1881,7 +1939,8 @@ static void layout(struct linker *l, struct osec_bound *b,
         g->common = 0;
         va += g->size;
     }
-    if (l->machine == EM_MIPS || l->machine == EM_TRICORE)
+    if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
+        l->machine == EM_XTENSA)
         va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
@@ -2956,6 +3015,119 @@ static void patch_thm_mov(unsigned char *loc, unsigned int h)
     put16(loc + 2, lo);
 }
 
+/* Xtensa (RELA). R_XTENSA_32 is S + A added to what the field holds
+ * (binutils' howto has it partial_inplace; every assembler leaves the
+ * field 0). SLOT0_OP names the instruction's one PC-relative operand, so
+ * the opcode at the site says which field and which reach: a call's word
+ * offset from (P & ~3) + 4, a j's, a branch's or a zero-test's byte
+ * offset from P + 4, a loop's forward eight bits to its end (GCC uses the
+ * zero-overhead loops on a core that has them), a density beqz.n/bnez.n's
+ * forward six bits, an l32r's
+ * backward word offset from (P + 3) & ~3. ASM_EXPAND marks a call an
+ * assembler could relax, and the DIFF types hold differences between two
+ * places in one section, which only a relaxing linker changes: none is
+ * an instruction to patch here. */
+static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
+                         unsigned char *loc, Elf64_Addr S, long long A,
+                         Elf64_Addr P)
+{
+    long long V = (long long)S + A;
+    (void)l;
+    switch (type) {
+    case R_XTENSA_NONE:
+    case R_XTENSA_ASM_EXPAND:
+    case R_XTENSA_ASM_SIMPLIFY:
+    case R_XTENSA_DIFF8:
+    case R_XTENSA_DIFF16:
+    case R_XTENSA_DIFF32:
+        return;
+    case R_XTENSA_32:
+        put32(loc, (unsigned int)(V + (long long)get32loc(loc)));
+        return;
+    case R_XTENSA_SLOT0_OP: {
+        unsigned long w = (unsigned long)loc[0] | ((unsigned long)loc[1] << 8) |
+                          ((unsigned long)loc[2] << 16);
+        int op0 = (int)(w & 15), n = (int)(w >> 4) & 3, m = (int)(w >> 6) & 3;
+        long long d = V - (long long)P - 4;
+        const char *what = NULL;
+        if (op0 == 5) {                                   /* callN */
+            long long c = V - (long long)((P & ~(Elf64_Addr)3) + 4);
+            if (V & 3)
+                die("%s: a call to 0x%llx (%s), which is not 4-aligned: an "
+                    "Xtensa call's target is a word address", o->name,
+                    (unsigned long long)V, l->rel_sym);
+            if (c < -524288 || c > 524284)
+                die("%s: a call to '%s' is %lld bytes away and call8 "
+                    "reaches 512 KiB; this linker mints no trampolines "
+                    "(-mlongcalls code calls through a register)",
+                    o->name, l->rel_sym, c);
+            w = (w & 0x3fUL) | (((unsigned long)(c >> 2) & 0x3ffffUL) << 6);
+        } else if (op0 == 6 && n == 0) {                  /* j */
+            if (d < -131072 || d > 131071)
+                what = "a j reaches 128 KiB";
+            else
+                w = (w & 0x3fUL) | (((unsigned long)d & 0x3ffffUL) << 6);
+        } else if (op0 == 6 && n == 1) {                  /* beqz .. bgez */
+            if (d < -2048 || d > 2047)
+                what = "a zero-test branch reaches 2 KiB";
+            else
+                w = (w & 0xfffUL) | (((unsigned long)d & 0xfffUL) << 12);
+        } else if (op0 == 7 || (op0 == 6 && (n == 2 || (n == 3 && m >= 2)))) {
+            if (d < -128 || d > 127)
+                what = "a branch reaches 128 bytes";
+            else
+                w = (w & 0xffffUL) | (((unsigned long)d & 0xffUL) << 16);
+        } else if (op0 == 6 && n == 3 && m == 1 &&
+                   ((w >> 12) & 15) >= 8 && ((w >> 12) & 15) <= 10) {
+            /* loop, loopnez, loopgtz: the loop's end, 0..255 forward */
+            if (d < 0 || d > 255)
+                what = "a loop's end is 0..255 bytes past it";
+            else
+                w = (w & 0xffffUL) | (((unsigned long)d & 0xffUL) << 16);
+        } else if (op0 == 12 && (w & 0x80)) {             /* beqz.n bnez.n */
+            if (d < 0 || d > 63)
+                what = "a beqz.n/bnez.n reaches 63 bytes forward";
+            else {
+                unsigned long h = (unsigned long)loc[0] | ((unsigned long)loc[1] << 8);
+                h = (h & 0x0fcfUL) | (((unsigned long)d & 0x30UL)) |
+                    (((unsigned long)d & 0xfUL) << 12);
+                loc[0] = (unsigned char)(h & 0xff);
+                loc[1] = (unsigned char)(h >> 8);
+                return;
+            }
+        } else if (op0 == 1) {                            /* l32r */
+            long long r = V - (long long)((P + 3) & ~(Elf64_Addr)3);
+            if (V & 3)
+                die("%s: an l32r of a literal at 0x%llx, which is not "
+                    "4-aligned", o->name, (unsigned long long)V);
+            if (r >= 0 || r < -262144)
+                die("%s: an l32r at 0x%llx cannot reach its literal '%s' at "
+                    "0x%llx: l32r reaches 256 KiB BACKWARDS, so a literal "
+                    "must be placed before the code that loads it (compile "
+                    "with -mtext-section-literals)", o->name,
+                    (unsigned long long)P, l->rel_sym, (unsigned long long)V);
+            w = (w & 0xffUL) | (((unsigned long)(r >> 2) & 0xffffUL) << 8);
+        } else {
+            die("%s: an R_XTENSA_SLOT0_OP on an instruction this linker "
+                "does not decode (0x%06lx at 0x%llx)", o->name, w,
+                (unsigned long long)P);
+        }
+        if (what)
+            die("%s: a branch to '%s' at 0x%llx is %lld bytes away and %s; "
+                "this linker does not relax", o->name, l->rel_sym,
+                (unsigned long long)V, d, what);
+        loc[0] = (unsigned char)(w & 0xff);
+        loc[1] = (unsigned char)((w >> 8) & 0xff);
+        loc[2] = (unsigned char)((w >> 16) & 0xff);
+        return;
+    }
+    default:
+        die("%s: unsupported Xtensa relocation type %u against '%s' (EmbLD "
+            "applies R_XTENSA_32 and R_XTENSA_SLOT0_OP; PIC, TLS and the "
+            "other slots are not supported)", o->name, type, l->rel_sym);
+    }
+}
+
 static void apply_relocs(struct linker *l, struct object *o)
 {
     for (int i = 0; i < o->nsh; i++) {
@@ -3095,6 +3267,10 @@ static void apply_relocs(struct linker *l, struct object *o)
             }
             if (o->machine == EM_TRICORE) {
                 apply_tricore(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_XTENSA) {
+                apply_xtensa(l, o, type, loc, S, A, P);
                 continue;
             }
             if (o->machine == EM_MIPS) {
@@ -5460,8 +5636,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
          * not run one, having no ARM state. */
         if (l.machine != EM_RISCV && l.machine != EM_MIPS &&
             l.machine != EM_LOONGARCH && l.machine != EM_ARM &&
-            l.machine != EM_TRICORE)
-            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A and TriCore option: "
+            l.machine != EM_TRICORE && l.machine != EM_XTENSA)
+            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore and Xtensa "
+                "option: "
                 "every other target here starts with a stack pointer already "
                 "set (a Cortex-M reads its own from the vector table)");
         if (l.machine == EM_TRICORE) {

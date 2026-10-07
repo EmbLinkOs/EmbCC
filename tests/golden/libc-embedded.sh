@@ -54,7 +54,12 @@ grep -q '==END==' "$out/ref.txt" || {
 fail=0
 for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
          thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf \
-         mips-none-elf loongarch64-unknown-elf tricore-none-elf; do
+         mips-none-elf loongarch64-unknown-elf tricore-none-elf \
+         xtensa-none-elf; do
+    # how the image is loaded: -kernel, but on Xtensa's sim machine the
+    # generic loader, which also starts the core at the entry
+    # (tests/harness/xtensa/run.sh says why)
+    load=-kernel
     case $t in
         riscv32*) H=tests/harness/riscv
                   Q="qemu-system-riscv32 -M virt -bios none -nographic -m 8" ;;
@@ -80,6 +85,9 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
                      -undefined dynamic_lookup -o "$out/putc.so" \
                      "$H/putc.c" 2>/dev/null || { echo "SKIP $t: no plugin"; continue; }
                   Q="qemu-system-tricore -M tricore_testboard -cpu tc27x -display none -monitor none -plugin $PWD/$out/putc.so" ;;
+        xtensa*)  H=tests/harness/xtensa
+                  Q="qemu-system-xtensa -M sim -cpu de212 -m 128 -semihosting -display none -monitor none"
+                  load=loader ;;
     esac
     command -v "${Q%% *}" >/dev/null 2>&1 || { echo "SKIP $t: no ${Q%% *}"; continue; }
     d=$out/$t; mkdir -p "$d"
@@ -100,15 +108,21 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
             mips*)     hv=EMBCC_MIPS_HARNESS ;;
             loongarch64*) hv=EMBCC_LOONGARCH_HARNESS ;;
             tricore*)  hv=EMBCC_TRICORE_HARNESS ;;
+            xtensa*)   hv=EMBCC_XTENSA_HARNESS ;;
             *)         hv=EMBCC_THUMB_HARNESS ;;
         esac
         env "$hv=$d" sh "$H/link.sh" "$d/p$opt.elf" "$d/p$opt.o" \
             "$d/libc.a" "$d/librt.a" > "$d/ld.txt" 2>&1 || {
             echo "$t $opt: does not link:"; head -3 "$d/ld.txt"; fail=1
             continue; }
+        if [ "$load" = loader ]; then
+            set -- -device "loader,file=$d/p$opt.elf,cpu-num=0"
+        else
+            set -- -kernel "$d/p$opt.elf"
+        fi
         # shellcheck disable=SC2086
         sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" --until '==END==' \
-            $Q -kernel "$d/p$opt.elf" > "$d/run$opt.raw" 2>/dev/null
+            $Q "$@" > "$d/run$opt.raw" 2>/dev/null
         sed -n '1,/==END==/p' "$d/run$opt.raw" > "$d/run$opt.txt"
         if ! diff -u "$out/ref.txt" "$d/run$opt.txt" > "$d/run$opt.diff"; then
             echo "$t $opt: libc does not agree with x86-64:"

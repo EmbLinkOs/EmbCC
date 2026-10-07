@@ -144,6 +144,16 @@ void codegen_unit_tricore(struct ir_unit *iu, struct code *text,
                           struct fsite **fs, int *nfs, int want_debug,
                           int optimize, int no_sse, int regalloc);
 
+/* And for Xtensa, the windowed ABI of the ESP32 (LX6) and ESP32-S3
+ * (LX7), little-endian, soft float. A function's literal pool precedes
+ * it, so its symbol is at code_off + code_entry. */
+void codegen_unit_xtensa(struct ir_unit *iu, struct code *text,
+                         struct extcall **ext, int *next,
+                         struct strsite **strs, int *nstrs,
+                         struct gsite **gs, int *ngs,
+                         struct fsite **fs, int *nfs, int want_debug,
+                         int optimize, int no_sse, int regalloc);
+
 /* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
  * a register and every value is a run of them. Same signature all the
  * same, so the driver still picks one on --target= and nothing downstream
