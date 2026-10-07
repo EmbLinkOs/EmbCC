@@ -128,6 +128,33 @@ fi
 grep -q 'C++ is not yet supported for sparc-none-elf' "$out/cxx.err" || {
     echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
 
+# ---- -S ------------------------------------------------------------------------
+# The assembly EmbCC writes for SPARC is its words as .byte and its
+# relocations as .reloc with SPARC's names (they once came out as x86-64's
+# R_X86_64_PC32): llvm-mc assembles it into the same instructions and the
+# same relocation types at the same offsets as -c's object -- against the
+# same symbols, but for a string literal's, which -S names by its label.
+MC=${EMBCC_LLVM_MC:-llvm-mc}
+OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
+if command -v "$MC" >/dev/null 2>&1 && command -v "$OD" >/dev/null 2>&1; then
+    for f in tests/golden/sparc-abi-caller.c tests/exec/structs.c; do
+        b=$(basename "$f" .c)
+        "$EMBCC" --target=$T -O2 -I tests/golden -S "$f" -o "$out/$b.s" &&
+        "$EMBCC" --target=$T -O2 -I tests/golden -c "$f" -o "$out/$b.o" &&
+        "$MC" -triple=sparc -mcpu=leon3 -filetype=obj "$out/$b.s" \
+            -o "$out/$b.re.o" || { echo "-S of $f does not reassemble"; exit 1; }
+        for o in "$b.o" "$b.re.o"; do
+            "$OD" -dr --no-show-raw-insn "$out/$o" | tail -n +3 |
+                sed -E 's/(R_SPARC_[A-Z0-9]+)[[:space:]]+(\.LC[0-9]+|\.rodata).*/\1 (a string)/' \
+                > "$out/$o.d"
+        done
+        cmp -s "$out/$b.o.d" "$out/$b.re.o.d" || {
+            echo "-S of $f reassembles into other code than -c makes:"
+            diff "$out/$b.o.d" "$out/$b.re.o.d" | head -10; exit 1; }
+    done
+    echo "-S reassembles with llvm-mc into -c's instructions and relocations"
+fi
+
 # ---- EmbLD -------------------------------------------------------------------
 # A relocation it does not lay out -- clang's -fPIC code takes the GOT's
 # base PC-relatively (R_SPARC_PC22/PC10) -- is refused by name, not

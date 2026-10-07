@@ -205,6 +205,16 @@ static const char *reloc_name(int kind)
         case RK_ABS32:       return "R_MIPS_32";
         default:             return NULL;
         }
+    case TARGET_SPARC32:
+        /* llvm-mc's SPARC .reloc knows these by name */
+        switch (kind) {
+        case RK_CALL:        return "R_SPARC_WDISP30";
+        case RK_SPARC_HI22:  return "R_SPARC_HI22";
+        case RK_SPARC_LO10:  return "R_SPARC_LO10";
+        case RK_ABS32:       return "R_SPARC_32";
+        case RK_DATA_PREL32: return "R_SPARC_DISP32";
+        default:             return NULL;
+        }
     case TARGET_AVR:
         /* (without this case AVR fell through to x86-64's names) */
         switch (kind) {
