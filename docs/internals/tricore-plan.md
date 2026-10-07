@@ -191,11 +191,13 @@ is 1.3 and lacks `DIV`).
   points it at a table of eight vectors, written as words at start-up,
   that load the class, the TIN (D15) and the trapping address (A11) into
   D4-D6 and jump to a C reporter, which ends the run without the sentinel.
-- **Memory map of an image** (tests/harness/tricore/link.sh): everything
-  at 0x80000000 as a RAM image; the context-save areas in the top 512 KiB
-  of the same RAM (8192 contexts: a link word can name only the first
-  4 MiB of a segment, which rules out 0xa1000000); the stack at the top
-  of 0xa1000000's 4 MiB, growing down.
+- **Memory map of an image** (tests/harness/tricore/link.sh): the text at
+  0x80000000; .data and .bss at 0xa1000000 (copied there by the startup),
+  the stack growing down from 0xa1400000; the context-save areas in the
+  top 512 KiB of the code RAM (8192 contexts: a link word can name only
+  the first 4 MiB of a segment, which rules out 0xa1000000). Data beside
+  code is slow under QEMU: a store to a page of translated code
+  invalidates it, and one fuzz program ran ten times slower that way.
 
 ## The referee for encodings
 

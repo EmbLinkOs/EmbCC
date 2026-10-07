@@ -106,7 +106,7 @@ cat > "$out/one.sh" <<'ONE'
 src=$1; opt=$2; o=$3; embcc=$4; embld=$5; d=$(dirname "$o")
 "$embcc" --target=tricore-none-elf $opt -c "$src" -o "$o.o" \
     > "$o.cerr" 2>&1 || { echo CFAIL; exit 0; }
-"$embld" -e _start -Ttext 0x80000000 -Tstack 0xa1400000 \
+"$embld" -e _start -Ttext 0x80000000 -Tdata 0xa1000000 -Tstack 0xa1400000 \
     --csa 0x80180000:0x80200000 "$d/../boot.o" \
     "$d/../io.o" "$o.o" "$d/../lib/libc.a" "$d/../lib/librt.a" \
     -o "$o.elf" > "$o.lerr" 2>&1 || { echo LFAIL; exit 0; }

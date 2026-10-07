@@ -6,7 +6,7 @@
  * stub: it sets A10, links the context-save areas (--csa) into the free
  * list every CALL draws from, turns call-depth counting off, and jumps
  * here -- with JI, not CALL, so this function must never return. Then
- * this copies .data (which moves nothing in a RAM image), zeroes .bss,
+ * this copies .data from behind the text to the data RAM, zeroes .bss,
  * runs the static constructors, then main, and reports its result.
  *
  * A bare-metal image never returns, so the end of a run is a SENTINEL --
