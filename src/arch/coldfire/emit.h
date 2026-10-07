@@ -181,6 +181,10 @@ void cf_illegal(struct code *c);
 void cf_halt(struct code *c);
 void cf_trap(struct code *c, int vec);
 void cf_link(struct code *c, int an, long disp);   /* link.w: -32768..32767 */
+/* move.w %sr,Dn and move.w Dn,%sr: supervisor-only on ColdFire. The
+ * atomics mask interrupts with them (docs/internals/coldfire-plan.md). */
+void cf_move_from_sr(struct code *c, int dn);
+void cf_move_to_sr(struct code *c, int dn);
 void cf_unlk(struct code *c, int an);
 
 #endif

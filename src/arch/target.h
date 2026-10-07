@@ -50,7 +50,14 @@ enum target_arch {
      * like ARMv7-M and RV32, with a SIGNED char and long double = double,
      * and the only target here with branch delay slots and REL
      * relocations. docs/internals/mips32-plan.md. */
-    TARGET_MIPS32 = 6
+    TARGET_MIPS32 = 6,
+    /* ColdFire (m68k-none-elf): the 68000's embedded descendant, ISA_A
+     * with the hardware divide (an MCF5208), big-endian, soft float.
+     * ILP32 with a SIGNED char, long double = double, and nothing aligned
+     * beyond two bytes -- the m68k's own data model. Every argument is on
+     * the stack. 12 because other new targets took 7-11 on their branches.
+     * docs/internals/coldfire-plan.md. */
+    TARGET_COLDFIRE = 12
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -185,6 +192,7 @@ int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c 
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
+int cf_op_calls_helper(const struct ir_ins *i);     /* src/arch/coldfire/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -319,6 +327,9 @@ int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 int a64_imm_foldable(int op, long imm, int w);   /* arch/aarch64/irgen.c */
 int mips_imm_foldable(int op, long imm);    /* arch/mips/irgen.c */
 int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
+/* ColdFire: every 32-bit constant is an operand (addi, andi, cmpi, ... take
+ * #imm32), and a 64-bit AND/OR/XOR one half by half */
+int cf_imm_foldable(int op, long imm, int w);   /* arch/coldfire/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -546,6 +557,9 @@ enum reloc_kind {
      * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
      * site whose str_off is already the offset). */
     RK_MIPS_TEXT26,
+    /* ColdFire takes an address as a 32-bit absolute operand -- `move.l
+     * #sym,Dn`, `lea sym,An`, `jsr sym` -- relocated by R_68K_32 at the
+     * extension words: RK_ABS32, RK_CALL and RK_TAIL, no kind of its own. */
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

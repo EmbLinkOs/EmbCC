@@ -3329,10 +3329,15 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
 
     const struct gas_target *t = target_for();
     if (!t) {
-        fprintf(stderr, "embcc: error: no assembly-file support for %s yet; "
-                        "its instruction encoder exists (inline __asm__ "
-                        "works) but this driver has not been wired to it\n",
-                target_triple_now());
+        if (target_get() == TARGET_COLDFIRE)
+            fprintf(stderr, "embcc: error: no assembly-file support for %s "
+                            "yet: EmbCC has no ColdFire assembler\n",
+                    target_triple_now());
+        else
+            fprintf(stderr, "embcc: error: no assembly-file support for %s "
+                            "yet; its instruction encoder exists (inline "
+                            "__asm__ works) but this driver has not been "
+                            "wired to it\n", target_triple_now());
         return 1;
     }
 

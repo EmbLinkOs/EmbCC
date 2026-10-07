@@ -125,6 +125,13 @@ int target_insn_len(const unsigned char *p, int avail)
         /* MIPS32 is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
         return avail >= 4 ? 4 : 0;
 
+    case TARGET_COLDFIRE:
+        /* One to five 16-bit words, decided by the operation word and its
+         * effective addresses. -S groups the stream by word: its bytes are
+         * written as data either way, and there is no m68k assembler here
+         * to read the text back. */
+        return avail >= 2 ? 2 : 0;
+
     case TARGET_X86_64:
     default:
         /* Variable-length, and no rule short of decoding it. The caller
@@ -224,6 +231,12 @@ static const struct data_model {
      * -- unlike the ARM and RISC-V targets beside it -- a signed int
      * wchar_t, long double the same 8-byte double, and no __int128. */
     [TARGET_MIPS32]  = { 4, 4, 4, 8,  8, 0, 0, 0, 0 },
+    /* ColdFire as GCC's m68k-elf lays it out (docs/internals/coldfire-plan.md,
+     * unverified -- there is no m68k compiler here): ILP32, a SIGNED char
+     * and wchar_t, long double the 8-byte double, no __int128, and NOTHING
+     * aligned beyond two bytes (BIGGEST_ALIGNMENT 16 bits without
+     * -malign-int): an int in a struct may sit at offset 2. */
+    [TARGET_COLDFIRE] = { 4, 4, 4, 8,  8, 0, 0, 0, 2 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -255,6 +268,7 @@ int target_stack_align(void)
     switch (g_arch) {
     case TARGET_THUMB: return 8;        /* AAPCS32 at a public interface */
     case TARGET_MIPS32: return 8;       /* o32 */
+    case TARGET_COLDFIRE: return 4;     /* ColdFire's preferred boundary */
     case TARGET_AVR:   return 1;
     default:           return 16;       /* SysV, AAPCS64, RISC-V psABI */
     }
@@ -330,6 +344,8 @@ int target_anon_bitfield_aligns(void)
     /* o32: `struct { char c; int :4; char d; }` is 3 bytes in clang, and
      * `int :0` moves d to offset 4 without making the struct 4-aligned */
     case TARGET_MIPS32:  return 0;
+    /* m68k: only named members align a structure (and nothing beyond 2) */
+    case TARGET_COLDFIRE: return 0;
     }
     return 0;
 }
@@ -350,6 +366,8 @@ int target_va_list_is_pointer(void)
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
     case TARGET_AVR:     return 1;   /* avr-gcc: char * */
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
+    case TARGET_COLDFIRE: return 1;  /* m68k: char *, over the caller's
+                                      * argument words */
     }
     return 0;
 }
@@ -526,6 +544,14 @@ static const struct triple {
     { "mips-elf",            TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
     { "mips",                TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
 
+    /* ColdFire: GCC's target name is m68k-elf with -mcpu=5208; EmbCC's
+     * m68k is ColdFire ISA_A only (the 68000/68020 family proper is
+     * refused by -mcpu). Big-endian, bare metal. */
+    { "m68k-none-elf",       TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   1, 0 },
+    { "m68k-unknown-elf",    TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
+    { "m68k-elf",            TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
+    { "m68k",                TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
+
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
@@ -557,8 +583,9 @@ int target_from_triple(const char *triple, enum target_arch *out,
             if (fmt) *fmt = g_triples[i].fmt;
             /* Byte order travels with the name too: every triple but
              * the big-endian MIPS ones is little-endian. */
-            g_big_endian = g_triples[i].arch == TARGET_MIPS32 &&
-                           g_triples[i].thumb_em == 1;
+            g_big_endian = (g_triples[i].arch == TARGET_MIPS32 &&
+                            g_triples[i].thumb_em == 1) ||
+                           g_triples[i].arch == TARGET_COLDFIRE;
             /* The ARM sub-architecture travels with the name, so
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
@@ -673,6 +700,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_RISCV64: return EM_RISCV;
     case TARGET_AVR:     return EM_AVR;
     case TARGET_MIPS32:  return EM_MIPS;
+    case TARGET_COLDFIRE: return EM_68K;
     default:             return EM_X86_64;
     }
 }
@@ -714,6 +742,9 @@ unsigned long target_elf_flags(enum target_arch a)
      * slots are filled (with nops), the code is not abicalls/PIC. */
     case TARGET_MIPS32:  return EF_MIPS_ARCH_32R2 | EF_MIPS_ABI_O32 |
                                 EF_MIPS_NOREORDER;
+    /* binutils' ISA_A with the hardware divide, no MAC, no FPU: what the
+     * code uses, which every ColdFire core with a divider executes */
+    case TARGET_COLDFIRE: return EF_M68K_CF_ISA_A;
     default:             return 0;
     }
 }
@@ -819,6 +850,17 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_MIPS_LO16:   return R_MIPS_LO16;
         case RK_MIPS_TEXT26: return R_MIPS_26;
         case RK_ABS32:       return R_MIPS_32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_COLDFIRE) {
+        switch (k) {
+        /* jsr and jmp to an absolute address, and every address operand:
+         * the 32-bit field in the extension words */
+        case RK_CALL:        return R_68K_32;
+        case RK_TAIL:        return R_68K_32;
+        case RK_ABS32:       return R_68K_32;
+        case RK_DATA_PREL32: return R_68K_PC32;
         default:             return -1;
         }
     }
@@ -934,7 +976,7 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
-        a == TARGET_MIPS32)
+        a == TARGET_MIPS32 || a == TARGET_COLDFIRE)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -983,6 +1025,11 @@ static const struct reloc_spelling {
     { EM_RISCV, R_RISCV_HI20,          "R_RISCV_HI20" },
     { EM_RISCV, R_RISCV_LO12_I,        "R_RISCV_LO12_I" },
     { EM_RISCV, R_RISCV_LO12_S,        "R_RISCV_LO12_S" },
+    { EM_68K,   R_68K_NONE,            "R_68K_NONE" },
+    { EM_68K,   R_68K_32,              "R_68K_32" },
+    { EM_68K,   R_68K_16,              "R_68K_16" },
+    { EM_68K,   R_68K_PC32,            "R_68K_PC32" },
+    { EM_68K,   R_68K_PC16,            "R_68K_PC16" },
     { EM_AVR,   R_AVR_NONE,            "R_AVR_NONE" },
     { EM_AVR,   R_AVR_32,              "R_AVR_32" },
     { EM_AVR,   R_AVR_7_PCREL,         "R_AVR_7_PCREL" },

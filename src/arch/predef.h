@@ -77,6 +77,12 @@ extern const struct predef_macro predef_macros_mips32eb[];
 extern const int predef_macro_count_mips32eb;
 extern const struct predef_macro predef_macros_cxx_mips32eb[];
 extern const int predef_macro_count_cxx_mips32eb;
+/* ColdFire (m68k-none-elf): written by hand, there being no m68k compiler
+ * here to generate it from (src/arch/coldfire/predef.c says what from). */
+extern const struct predef_macro predef_macros_coldfire[];
+extern const int predef_macro_count_coldfire;
+extern const struct predef_macro predef_macros_cxx_coldfire[];
+extern const int predef_macro_count_cxx_coldfire;
 
 /* AVR (ATmega328P). Generated like the others, from the reference
  * compiler's own answer for the triple. */

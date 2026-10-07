@@ -55,10 +55,10 @@ static void print_version(void)
     printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
            "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (o32, little- "
-           "and big-endian), AVR (ATmega328P)\n");
+           "and big-endian), ColdFire (m68k, ISA_A), AVR (ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32 and AVR images; "
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, ColdFire and AVR images; "
            "AArch64 and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
@@ -118,7 +118,7 @@ static void print_options(FILE *out)
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
       "                         riscv32/riscv64-unknown-elf, avr,\n"
-      "                         mipsel-none-elf, and the\n"
+      "                         mipsel-none-elf, m68k-none-elf, and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
       "                         them all\n",
@@ -727,7 +727,7 @@ static int firmware_target(void)
     return target_fmt_get() == TGT_FMT_ELF &&
            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
-            target_get() == TARGET_MIPS32);
+            target_get() == TARGET_MIPS32 || target_get() == TARGET_COLDFIRE);
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -1320,7 +1320,8 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
             enum target_arch t = target_get();
             ob_fmt(b, "%s %s\n", t == TARGET_THUMB ? "bl"
-                                 : t == TARGET_MIPS32 ? "jal" : "call",
+                                 : t == TARGET_MIPS32 ? "jal"
+                                 : t == TARGET_COLDFIRE ? "jsr" : "call",
                    e->callee->name);
             continue;
         }
@@ -1566,6 +1567,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * written as data assembles, and one written with mnemonics is
          * refused by name instead of quietly emitting x86 bytes. The
          * embedded targets have an assembler of their own. */
+        if (target_get() == TARGET_COLDFIRE)
+            diag_fatal(NULL, 0, "file-scope asm is not supported for %s "
+                       "yet: EmbCC has no ColdFire assembler",
+                       target_triple_now());
         if (blocks_by_gas()) {
             if (gas_assemble_block(ta))
                 return 1;
@@ -1825,6 +1830,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                           opt_level >= 1);
+    else if (ta == TARGET_COLDFIRE)
+        codegen_unit_coldfire(iu, &text, &ext, &next, &strs, &nstrs, &gs,
+                              &ngs, &fs, &nfs, want_debug, opt_level >= 1,
+                              no_sse, opt_level >= 1);
     else if (ta == TARGET_THUMB)
         codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -2212,12 +2221,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                   target_fmt_get() == TGT_FMT_ELF);
     /* The tables eh_emit writes are x86-64's and AArch64's layout, with a
      * PC-relative relocation MIPS's REL objects have no type for. */
-    if (unwind && ta == TARGET_MIPS32)
+    if (unwind && (ta == TARGET_MIPS32 || ta == TARGET_COLDFIRE))
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "%s yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no MIPS .eh_frame",
-                   target_triple_now());
+                            "EmbCC writes no %s .eh_frame",
+                   target_triple_now(),
+                   ta == TARGET_COLDFIRE ? "ColdFire" : "MIPS");
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
@@ -3920,6 +3930,7 @@ int main(int argc, char **argv)
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
                               : a == TARGET_MIPS32 ? mips_op_calls_helper
+                              : a == TARGET_COLDFIRE ? cf_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
@@ -4583,6 +4594,120 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--dump-predef") == 0 ||
                    strcmp(argv[i], "-dumpmachine") == 0) {
             /* answered after every argument has been applied */
+        } else if (target_get() == TARGET_COLDFIRE &&
+                   (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                    strncmp(argv[i], "-march=", 7) == 0 ||
+                    strncmp(argv[i], "-mtune=", 7) == 0 ||
+                    strncmp(argv[i], "-m5", 3) == 0 ||
+                    strncmp(argv[i], "-m68", 4) == 0 ||
+                    strncmp(argv[i], "-mc68", 5) == 0 ||
+                    strncmp(argv[i], "-mcpu32", 7) == 0 ||
+                    strncmp(argv[i], "-mcfv", 5) == 0 ||
+                    strcmp(argv[i], "-msoft-float") == 0 ||
+                    strcmp(argv[i], "-mhard-float") == 0 ||
+                    strcmp(argv[i], "-mdiv") == 0 ||
+                    strcmp(argv[i], "-mno-div") == 0 ||
+                    strcmp(argv[i], "-malign-int") == 0 ||
+                    strcmp(argv[i], "-mno-align-int") == 0 ||
+                    strcmp(argv[i], "-mshort") == 0 ||
+                    strcmp(argv[i], "-mno-short") == 0 ||
+                    strcmp(argv[i], "-mstrict-align") == 0 ||
+                    strcmp(argv[i], "-mno-strict-align") == 0 ||
+                    strcmp(argv[i], "-mpcrel") == 0 ||
+                    strcmp(argv[i], "-mid-shared-library") == 0 ||
+                    strcmp(argv[i], "-msep-data") == 0 ||
+                    strcmp(argv[i], "-mxgot") == 0 ||
+                    strcmp(argv[i], "-mrtd") == 0 ||
+                    strcmp(argv[i], "-mno-rtd") == 0)) {
+            /* The flags a ColdFire build passes (GCC's m68k-elf, which
+             * selects ColdFire with -mcpu=). What EmbCC emits is ONE
+             * configuration -- ColdFire ISA_A with the hardware divide,
+             * soft float, int 32 bits and 2-aligned, the caller popping
+             * its arguments, absolute addresses -- so each flag either says
+             * that and is accepted, or asks for something else and is
+             * refused by name: an object built otherwise would link and
+             * then disagree with its callers about where an argument is,
+             * how wide an int is or what an instruction means. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : "";
+            if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                strncmp(argv[i], "-mtune=", 7) == 0 ||
+                strncmp(argv[i], "-m5", 3) == 0) {
+                /* the ISA_A-or-later cores with a divider and no FPU */
+                static const char *const cores[] = {
+                    "5208", "5207", "5206e", "5210a", "5211a", "5211",
+                    "5212", "5213", "5214", "5216", "5221x", "52221",
+                    "52223", "52230", "52231", "52232", "52233", "52234",
+                    "52235", "5224", "5225", "52252", "52254", "52255",
+                    "52256", "52258", "52259", "52274", "52277", "5232",
+                    "5233", "5234", "5235", "523x", "5249", "5250", "5253",
+                    "5270", "5271", "5272", "5274", "5275", "5280", "5281",
+                    "5282", "528x", "5307", "5327", "5328", "5329", "532x",
+                    "5372", "5373", "537x", "5407", "54410", "54415",
+                    "54416", "54417", "54418", "54450", "54451", "54452",
+                    "54453", "54454", "54455"
+                };
+                const char *c = strncmp(argv[i], "-m5", 3) == 0
+                              ? argv[i] + 2 : v;
+                int ok = 0;
+                for (unsigned k = 0; k < sizeof cores / sizeof cores[0]; k++)
+                    ok |= strcmp(c, cores[k]) == 0;
+                if (!ok && (strcmp(c, "5206") == 0 || strcmp(c, "5202") == 0 ||
+                            strcmp(c, "5204") == 0))
+                    diag_fatal(NULL, 0, "%s is not supported: that core has "
+                               "no hardware divide, and EmbCC's ColdFire "
+                               "code divides with divs.l/divu.l", argv[i]);
+                if (!ok && strncmp(c, "547", 3) != 0 &&
+                    strncmp(c, "548", 3) != 0)
+                    diag_fatal(NULL, 0, "%s is not a ColdFire core EmbCC "
+                               "emits for: its code is ColdFire ISA_A with the "
+                               "hardware divide (5208, 5213, 5235, 5282, 5329, "
+                               "5407, 54455, ...); the 68000 family proper is "
+                               "not a target", argv[i]);
+                if (!ok)
+                    diag_fatal(NULL, 0, "%s is not supported: that core's "
+                               "FPU makes GCC pass and return floating point "
+                               "in its registers, and EmbCC's ColdFire code "
+                               "is soft float", argv[i]);
+            } else if (strncmp(argv[i], "-march=", 7) == 0) {
+                if (strcmp(v, "isaa") != 0 && strcmp(v, "isaaplus") != 0 &&
+                    strcmp(v, "isab") != 0 && strcmp(v, "isac") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                               "ColdFire ISA_A (-march=isaa), which isaaplus, "
+                               "isab and isac cores also run", argv[i]);
+            } else if (strncmp(argv[i], "-m68", 4) == 0 ||
+                       strncmp(argv[i], "-mc68", 5) == 0 ||
+                       strncmp(argv[i], "-mcpu32", 7) == 0 ||
+                       strncmp(argv[i], "-mcfv", 5) == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC's m68k "
+                           "target is ColdFire ISA_A (-mcpu=5208 and its "
+                           "kin); the 68000 family proper is not a target",
+                           argv[i]);
+            } else if (strcmp(argv[i], "-mhard-float") == 0) {
+                diag_fatal(NULL, 0, "-mhard-float is not supported: EmbCC "
+                           "emits soft-float ColdFire code, which passes "
+                           "floating point in the data registers");
+            } else if (strcmp(argv[i], "-mno-div") == 0) {
+                diag_fatal(NULL, 0, "-mno-div is not supported: EmbCC's "
+                           "ColdFire code divides with divs.l/divu.l");
+            } else if (strcmp(argv[i], "-malign-int") == 0) {
+                diag_fatal(NULL, 0, "-malign-int is not supported: EmbCC "
+                           "lays out the m68k's 2-byte alignment, which "
+                           "GCC's ColdFire code has without it");
+            } else if (strcmp(argv[i], "-mshort") == 0) {
+                diag_fatal(NULL, 0, "-mshort is not supported: EmbCC's int "
+                           "is 32 bits on the m68k");
+            } else if (strcmp(argv[i], "-mrtd") == 0) {
+                diag_fatal(NULL, 0, "-mrtd is not supported: EmbCC's caller "
+                           "pops its arguments (the SVR4 m68k convention)");
+            } else if (strcmp(argv[i], "-mpcrel") == 0 ||
+                       strcmp(argv[i], "-mid-shared-library") == 0 ||
+                       strcmp(argv[i], "-msep-data") == 0 ||
+                       strcmp(argv[i], "-mxgot") == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC's ColdFire "
+                           "code takes every address absolutely", argv[i]);
+            }
+            continue;
         } else if (target_get() == TARGET_MIPS32 &&
                    (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                     strncmp(argv[i], "-march=", 7) == 0 ||

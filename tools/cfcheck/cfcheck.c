@@ -523,6 +523,16 @@ static void vocab(void)
             cf_unlk(&C, a);
             line(at, t);
         }
+        for (int r = 0; r < 8; r++) {
+            at = C.len;
+            snprintf(t, sizeof t, "movew %%sr,%%%s", cf_reg_name(r));
+            cf_move_from_sr(&C, r);
+            line(at, t);
+            at = C.len;
+            snprintf(t, sizeof t, "movew %%%s,%%sr", cf_reg_name(r));
+            cf_move_to_sr(&C, r);
+            line(at, t);
+        }
     }
 }
 
@@ -570,6 +580,7 @@ static void refuse(int n)
     case 35: cf_addx(&C, 0, CF_A0, 0); break;
     case 36: cf_mul(&C, 0, 2, cf_areg(CF_A0), 0); break;
     case 37: cf_movem_load(&C, cf_disp16(CF_SP, 0), 0); break;
+    case 38: cf_move_to_sr(&C, CF_A0); break;
     default:
         fprintf(stderr, "cfcheck: no refusal %d\n", n);
         exit(2);
@@ -577,7 +588,7 @@ static void refuse(int n)
     /* reached only when the check did not fire */
     printf("refusal %d emitted %d bytes\n", n, C.len);
 }
-#define NREFUSE 38
+#define NREFUSE 39
 
 int main(int argc, char **argv)
 {

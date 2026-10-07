@@ -661,6 +661,18 @@ void cf_link(struct code *c, int an, long disp)
     cf_w(c, (unsigned)disp & 0xffff);
 }
 
+void cf_move_from_sr(struct code *c, int dn)
+{
+    need_d(dn, "move from sr");
+    cf_w(c, 0x40c0u | (unsigned)dn);
+}
+
+void cf_move_to_sr(struct code *c, int dn)
+{
+    need_d(dn, "move to sr");
+    cf_w(c, 0x46c0u | (unsigned)dn);
+}
+
 void cf_unlk(struct code *c, int an)
 {
     need_a(an, "unlk");
