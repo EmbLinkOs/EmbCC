@@ -11293,7 +11293,8 @@ int a64_bitmask_ok(long imm, int w);    /* arch/aarch64/emit.c */
 static int const_is_expensive(const struct ir_ins *i)
 {
     enum target_arch ta = target_get();
-    if (ta == TARGET_X86_64 || ta == TARGET_AVR)
+    /* RX: any constant or address is one `mov.l #imm, rd` */
+    if (ta == TARGET_X86_64 || ta == TARGET_AVR || ta == TARGET_RX)
         return 0;
     switch (i->op) {
     case IR_GADDR: case IR_STRADDR: case IR_FADDR:
@@ -11313,7 +11314,7 @@ static int const_is_expensive(const struct ir_ins *i)
         }
         if (ta == TARGET_THUMB)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
-        if (ta == TARGET_MIPS32)                /* addiu, or ori from $0 */
+        if (ta == TARGET_MIPS32 || ta == TARGET_MIPS64)  /* addiu, ori from $0 */
             return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
         if (ta == TARGET_LOONGARCH64)  /* ori/addi.w from r0, or a lu12i.w */
             return !((v >= -2048 && v <= 4095) ||
@@ -11323,6 +11324,12 @@ static int const_is_expensive(const struct ir_ins *i)
                      !(v & 0xffff));
         if (ta == TARGET_XTENSA)                /* movi; else a literal */
             return !(v >= -2048 && v <= 2047);
+        if (ta == TARGET_PPC32)                 /* li, or lis */
+            return !((v >= -32768 && v <= 32767) || (v & 0xffff) == 0);
+        if (ta == TARGET_SPARC32)               /* or from %g0, or sethi */
+            return !((v >= -4096 && v <= 4095) || (v & 0x3ff) == 0);
+        if (ta == TARGET_COLDFIRE)              /* moveq */
+            return !(v >= -128 && v <= 127);
         return !(v >= -2048 && v <= 2047);                     /* RISC-V */
     }
     default:
@@ -11413,7 +11420,7 @@ static int pass_sinkconst(struct ir_func *fn)
         /* (MIPS's beq/bne compare two registers too.) */
         int rv_cmp = (target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64 ||
-                      target_get() == TARGET_MIPS32 ||
+                      target_is_mips() ||
                       target_get() == TARGET_LOONGARCH64 ||
                       target_get() == TARGET_XTENSA) &&
                      i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
@@ -11497,6 +11504,9 @@ static int target_imm_foldable(int op, long imm, int w)
         return mips_imm_foldable64(op, imm);
     if (target_get() == TARGET_MIPS32)
         return mips_imm_foldable(op, imm);
+    /* MIPS64: one register to 64 bits; a 128-bit operation takes none */
+    if (target_get() == TARGET_MIPS64)
+        return w <= 8 && mips_imm_foldable(op, imm);
     /* TriCore: a 64-bit AND/OR/XOR is done half by half with any constant
      * (codegen.c's logic_half); every other 64-bit operation builds it */
     if (target_get() == TARGET_TRICORE)
@@ -11504,6 +11514,18 @@ static int target_imm_foldable(int op, long imm, int w)
                       : tc_imm_foldable(op, imm);
     if (target_get() == TARGET_XTENSA)
         return w == 4 && xtensa_imm_foldable(op, imm);
+    if (target_get() == TARGET_PPC32 && w == 8 &&
+        (op == IR_AND || op == IR_OR || op == IR_XOR))
+        return ppc_imm_foldable64(op, imm);
+    if (target_get() == TARGET_PPC32)
+        return ppc_imm_foldable(op, imm);
+    if (target_get() == TARGET_SPARC32 && w == 8 &&
+        (op == IR_AND || op == IR_OR || op == IR_XOR))
+        return sparc_imm_foldable64(op, imm);
+    if (target_get() == TARGET_SPARC32)
+        return sparc_imm_foldable(op, imm);
+    if (target_get() == TARGET_COLDFIRE)
+        return cf_imm_foldable(op, imm, w);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
@@ -11675,7 +11697,11 @@ static int pass_immfold(struct ir_func *fn)
         int wide_ok = (target_get() == TARGET_THUMB ||
                        target_get() == TARGET_RISCV32 ||
                        target_get() == TARGET_MIPS32 ||
-                       target_get() == TARGET_TRICORE) && i->w == 8 &&
+                       target_get() == TARGET_TRICORE ||
+                       target_get() == TARGET_PPC32 ||
+                       target_get() == TARGET_RX ||
+                       target_get() == TARGET_SPARC32 ||
+                       target_get() == TARGET_COLDFIRE) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
         /* ...and a 64-bit compare with any constant whose halves its
          * subs/sbcs or cmp/cmpeq take (thumb_cmp64_imm): strtol's

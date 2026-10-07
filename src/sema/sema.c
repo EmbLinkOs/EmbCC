@@ -576,13 +576,19 @@ static void merge_bits(char *p, int unit, int nb, struct w128 val,
     val.hi &= mask.hi;
     struct w128 lo = w_shl(val, bit_off);
     if (target_big_endian()) {
-        if (unit > 16)
-            internal_error("a 17-byte bit-field unit on a big-endian "
-                           "target");
-        for (int b = 0; b < unit; b++)
-            if (unit - 1 - b < nb)
-                p[unit - 1 - b] |=
-                    (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
+        /* byte b of the value (from the least significant end) is the
+         * unit's byte unit-1-b; a 17-byte unit's top byte is what the
+         * shift carried past 128 bits */
+        for (int b = 0; b < unit; b++) {
+            unsigned long byte;
+            if (unit - 1 - b >= nb)
+                continue;
+            if (b < 16)
+                byte = (b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7));
+            else
+                byte = bit_off ? w_shr(val, 128 - bit_off, 0).lo : 0;
+            p[unit - 1 - b] |= (char)byte;
+        }
         return;
     }
     for (int b = 0; b < nb && b < 16; b++)
@@ -825,6 +831,10 @@ static struct func *cx_helper(int div, struct type *T)
         if (lf == LDF_QUAD)        k = 6 + div;
         else if (lf == LDF_DOUBLE) k = 2 + div;
     }
+    /* A four-byte double or long double (AVR's, RX's) is binary32, and
+     * its helpers are the `s` pair, as GCC calls them there. */
+    if (ty_size(T) == 4)
+        k = div;
     static const char *const names[8] = {
         "__mulsc3", "__divsc3", "__muldc3", "__divdc3",
         "__mulxc3", "__divxc3", "__multc3", "__divtc3" };
@@ -3714,7 +3724,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         /* A complex slot: both parts folded in its element's format */
         if (ty_is_complex(v[k].ty)) {
             struct type *el = v[k].ty->celem;
-            enum ldf_fmt fmt = el->kind == TY_FLOAT ? LDF_FLOAT
+            /* (a four-byte double -- AVR's, RX's -- is binary32) */
+            enum ldf_fmt fmt = el->kind == TY_FLOAT || ty_size(el) == 4
+                             ? LDF_FLOAT
                              : el->kind == TY_DOUBLE ? LDF_DOUBLE
                              : ldf_target_fmt();
             struct ldf *re, *im;
@@ -3758,7 +3770,8 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static float initializer must be a constant "
                            "expression");
             unsigned long ubits;
-            if (v[k].ty->kind == TY_FLOAT) {
+            if (v[k].ty->kind == TY_FLOAT || sz == 4) {
+                /* float, or a double that is binary32 (AVR, RX) */
                 float fv = (float)dv; unsigned int u32;
                 memcpy(&u32, &fv, 4); ubits = u32;
             } else {
@@ -4432,7 +4445,7 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 0);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
-    if (target_get() == TARGET_MIPS32)
+    if (target_is_mips())
         return asm_resolve_reg_mips(u, s, op, c);
     if (target_get() == TARGET_LOONGARCH64)
         return asm_resolve_reg_la(u, s, op, c);

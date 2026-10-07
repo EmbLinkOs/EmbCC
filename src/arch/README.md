@@ -21,10 +21,15 @@ src/arch/
   riscv32/         RV32's macro tables only             -> D-016
   riscv64/         RV64's macro tables only             -> D-016
   mips/            MIPS32r2, o32 soft float, ILP32      -> docs/internals/mips32-plan.md
+                   and MIPS64r2, n64 soft float, LP64: one backend at
+                   two widths, as riscv/       -> docs/internals/mips64-plan.md
   mips32/          its macro tables only (as riscv32/)
+  mips32eb/, mips64/, mips64eb/   the other MIPS macro tables
   tricore/         TriCore 1.6.1 (AURIX), TriCore EABI  -> docs/internals/tricore-plan.md
   xtensa/          Xtensa LX6/LX7 (ESP32), windowed ABI, soft float, ILP32
                                                          -> docs/internals/xtensa-plan.md
+  coldfire/        ColdFire ISA_A (m68k-none-elf), big-endian, soft float
+                                                         -> docs/internals/coldfire-plan.md
 ```
 
 Each architecture directory holds the same kinds of file:

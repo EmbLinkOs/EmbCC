@@ -61,6 +61,7 @@ decides which.
 | ARM, Thumb (`EM_ARM`) | ELF32 | `thumbv7m-none-eabi`, `thumbv7em-*`, `thumbv8m.*` | ELF32 executable |
 | MIPS32, little-endian o32 (`EM_MIPS`) | ELF32 | `mipsel-none-elf`; clang's `mipsel-unknown-elf` without `-fPIC` | ELF32 executable |
 | AVR (`EM_AVR`) | ELF32 | `avr` | ELF32 executable |
+| Renesas RX, little-endian (`EM_RX`) | ELF32 | `rx-none-elf`; rx-elf-gcc's objects (sections `P`, `D_1`, `B_1`, ...) | ELF32 executable |
 
 AArch64 objects are not supported. Such an input is refused with:
 

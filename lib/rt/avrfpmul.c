@@ -4,7 +4,9 @@
  * a 32-bit word, and mul24 below is how it is carried without a 64-bit type --
  * which on this backend would be a byte-at-a-time chain through frame slots.
  */
-#ifdef __AVR__
+/* RX too: GCC rx-elf's double is binary32 (-m32bit-doubles), so it needs
+ * exactly this native binary32 and no binary64. */
+#if defined(__AVR__) || defined(__RX__)
 
 #include "avrfp.h"
 
@@ -79,4 +81,4 @@ float __mulsf3(float a, float b)
  * translation unit has to contain at least one declaration. */
 typedef int embcc_rt_avrfpmul_is_not_this_target;
 
-#endif /* __AVR__ */
+#endif /* __AVR__ || __RX__ */

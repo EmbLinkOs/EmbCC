@@ -872,7 +872,9 @@ static long fb_expmask(int w)  { return w == 4 ? (long)0x7f800000L
  * stack slot sema gave the call, and that halfword is read and written
  * as an integer. The fraction, for the NaN and infinity tests, is the
  * low 63 bits of x87's explicit-integer-bit significand, and binary128's
- * low 112 bits. */
+ * low 112 bits. BIG-endian (SPARC's binary128) the format's top sixteen
+ * bits are its FIRST two bytes, and its low doubleword the second
+ * (docs/internals/big-endian.md). */
 static int local_addr(struct ir_func *fn, int v);
 
 static int fb_wide(struct ir_func *fn, struct expr *e)
@@ -882,11 +884,14 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
     const struct type *u16 = ty_base(TY_SHORT, 1);
     const struct type *u64 = ty_int_of_size(8, 1);
     int x87 = target_get() == TARGET_X86_64;
+    /* big-endian (mips64-none-elf): binary128's top halfword is its first
+     * two bytes, and its high doubleword the first eight */
+    int be = target_big_endian();
     int x = gen_expr(fn, e->args[0]);
     int y = strncmp(bn, "copysign", 8) == 0 ? gen_expr(fn, e->args[1]) : -1;
     int slot = local_addr(fn, e->var_index);
-    int sea = emit_bin(fn, IR_ADD, slot, emit_const(fn, x87 ? 8 : 14, AW),
-                       AW, 1);
+    int sea = emit_bin(fn, IR_ADD, slot,
+                       emit_const(fn, x87 ? 8 : be ? 0 : 14, AW), AW, 1);
     int ysign = -1;
     if (y >= 0) {
         emit_store(fn, slot, y, ld);
@@ -914,14 +919,18 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
                         emit_cmp(fn, B_NE, ex, emit_const(fn, 0, 4), 4, 0),
                         emit_cmp(fn, B_NE, ex, emit_const(fn, 0x7fff, 4), 4, 0),
                         4, 0);
-    int lo = emit_load(fn, slot, u64);
+    int lo = emit_load(fn, be ? emit_bin(fn, IR_ADD, slot,
+                                         emit_const(fn, 8, AW), AW, 1)
+                              : slot, u64);
     int frac;
     if (x87) {
         frac = emit_bin(fn, IR_AND, lo,
                         emit_const(fn, 0x7fffffffffffffffL, 8), 8, 0);
     } else {
-        int hi = emit_load(fn, emit_bin(fn, IR_ADD, slot,
-                                        emit_const(fn, 8, AW), AW, 1), u64);
+        int hi = emit_load(fn, be ? slot
+                                  : emit_bin(fn, IR_ADD, slot,
+                                             emit_const(fn, 8, AW), AW, 1),
+                           u64);
         frac = emit_bin(fn, IR_OR, lo,
                         emit_bin(fn, IR_SHL, hi, emit_const(fn, 16, 8), 8, 0),
                         8, 0);
@@ -1594,9 +1603,11 @@ static int atomic_arm(void)
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
            t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
            t == TARGET_MIPS32 ||      /* MIPS32 is weakly ordered: sync */
+           t == TARGET_MIPS64 ||
            t == TARGET_LOONGARCH64 ||  /* ...and LoongArch: dbar */
            t == TARGET_TRICORE ||     /* TriCore orders with dsync */
-           t == TARGET_XTENSA;        /* and Xtensa: memw */
+           t == TARGET_XTENSA ||      /* Xtensa: memw */
+           t == TARGET_PPC32;         /* and PowerPC: sync */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -2782,12 +2793,20 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_riscv(fn, e);
         if (target_get() == TARGET_AVR)
             return irg_va_arg_avr(fn, e);
-        if (target_get() == TARGET_MIPS32)
+        if (target_is_mips())
             return irg_va_arg_mips(fn, e);
         if (target_get() == TARGET_TRICORE)
             return irg_va_arg_tricore(fn, e);
         if (target_get() == TARGET_XTENSA)
             return irg_va_arg_xtensa(fn, e);
+        if (target_get() == TARGET_PPC32)
+            return irg_va_arg_ppc(fn, e);
+        if (target_get() == TARGET_RX)
+            return irg_va_arg_rx(fn, e);
+        if (target_get() == TARGET_SPARC32)
+            return irg_va_arg_sparc(fn, e);
+        if (target_get() == TARGET_COLDFIRE)
+            return irg_va_arg_coldfire(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -3063,7 +3082,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             c->op = IR_MEMCPY;
             c->a = tag;
             c->b = src;
-            c->size = target_get() == TARGET_AARCH64 ? 32 : 24;
+            c->size = target_get() == TARGET_AARCH64 ? 32
+                    : target_get() == TARGET_PPC32 ? 12 : 24;
             struct expr *d = e->args[0];
             if (d->kind == EXPR_VAR && !d->gref)
                 emit_stvar(fn, d->var_index, tag, d->ty);
@@ -3942,7 +3962,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_riscv(fn, s);
             else if (target_get() == TARGET_AVR)
                 irg_asm_avr(fn, s);
-            else if (target_get() == TARGET_MIPS32)
+            else if (target_is_mips())
                 irg_asm_mips(fn, s);
             else if (target_get() == TARGET_LOONGARCH64)
                 irg_asm_loongarch(fn, s);
@@ -3952,6 +3972,16 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 diag_fatal(fn->file, s->line, "inline assembly is not "
                            "supported for xtensa-none-elf yet (EmbCC has no "
                            "Xtensa assembler vocabulary)");
+            else if (target_get() == TARGET_PPC32)
+                irg_asm_ppc(fn, s);
+            else if (target_get() == TARGET_RX)
+                diag_fatal(fn->file, s->line,
+                           "inline assembly is not supported for "
+                           "rx-none-elf yet: EmbCC has no RX assembler");
+            else if (target_get() == TARGET_SPARC32)
+                irg_asm_sparc(fn, s);
+            else if (target_get() == TARGET_COLDFIRE)
+                irg_asm_coldfire(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;

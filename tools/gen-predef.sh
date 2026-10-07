@@ -13,9 +13,9 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m armv7a riscv32 riscv64 avr mips32
-#                   mips32eb
+#                   mips32eb ppc32 sparc32 mips64 mips64eb
 #                   loongarch64
-#                   xtensa
+#                   xtensa rx
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -88,7 +88,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|ppc32|sparc32) eval "echo \${$gccvar:-clang}" ;;
         # Xtensa: Espressif's own GCC for the ESP32 (crosstool-NG release
         # esp-16.1.0_20260609), there being no Xtensa target in clang.
         xtensa)  eval "echo \${$gccvar:-xtensa-esp32-elf-gcc}" ;;
@@ -158,12 +158,33 @@ refflags() {
         # _MIPSEB family) are the generated answer, not a patch on mipsel's.
         mips32eb) [ -n "${EMBCC_REF_GCC_MIPS32EB:-}" ] || \
                      echo "-target mips-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # MIPS64r2, n64, soft float, both byte orders (mips64el-none-elf
+        # and mips64-none-elf): -mno-abicalls for the reason mips32 takes
+        # it -- absolute addresses, jal, no $gp.
+        mips64)  [ -n "${EMBCC_REF_GCC_MIPS64:-}" ] || \
+                     echo "-target mips64el-unknown-elf -mcpu=mips64r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        mips64eb) [ -n "${EMBCC_REF_GCC_MIPS64EB:-}" ] || \
+                     echo "-target mips64-unknown-elf -mcpu=mips64r2 -msoft-float -mno-abicalls -ffreestanding" ;;
         # LoongArch64, LP64S. -msoft-float is -mabi=lp64s AND -mfpu=none:
         # with the ABI alone clang still claims __loongarch_frlen 64 and the
         # LSX vector unit (__loongarch_sx), hardware the soft-float code
         # never touches.
         loongarch64) [ -n "${EMBCC_REF_GCC_LOONGARCH64:-}" ] || \
                      echo "-target loongarch64-unknown-elf -msoft-float -ffreestanding" ;;
+        # 32-bit PowerPC, the embedded EABI: an e500-class core WITHOUT
+        # SPE (-mcpu=e500 alone defines __SPE__ and claims instructions the
+        # backend never emits), soft float, and the 8-byte long double
+        # e500 code has (-mcpu=ppc's default is the IBM double-double).
+        ppc32)   [ -n "${EMBCC_REF_GCC_PPC32:-}" ] || \
+                     echo "-target powerpc-none-eabi -mcpu=e500 -mno-spe -msoft-float -mlong-double-64 -ffreestanding" ;;
+        # Renesas RX: GCC's own rx-elf-gcc (there is no RX clang), with
+        # -nofpu because EmbCC's RX code is soft float -- the default
+        # -fpu would claim __RX_FPU_INSNS__ and __FINITE_MATH_ONLY__ 1.
+        rx)      echo "-nofpu" ;;
+        # SPARC V8 as Gaisler's LEON3 implements it, soft float: what the
+        # backend emits (src/arch/sparc/, docs/internals/sparc-plan.md).
+        sparc32) [ -n "${EMBCC_REF_GCC_SPARC32:-}" ] || \
+                     echo "-target sparc-none-elf -mcpu=leon3 -msoft-float -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -185,6 +206,8 @@ exclude_arch() {
         # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
         # two-byte atomic exactly as RISC-V's does (no libatomic here).
         mips32|mips32eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # MIPS64: ll/sc and lld/scd, a word and a doubleword, the same rule
+        mips64|mips64eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2|16)' ;;
         # (LoongArch64 claims all four: its backend makes a one- or two-byte
         # atomic an ll.w/sc.w loop on the word, as clang does.)
         # ARMv7-A has ldrexd/strexd, so clang claims an eight-byte
@@ -195,6 +218,8 @@ exclude_arch() {
         # (xtensa-esp32-elf-gcc, which has no -msoft-float: the float ABI
         # is the same either way, every float in the address registers).
         xtensa)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # PowerPC's lwarx/stwcx. likewise (lbarx/lharx are not Book E's).
+        ppc32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -228,7 +253,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|loongarch64) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|mips64|mips64eb|loongarch64|ppc32|sparc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -248,6 +273,32 @@ if [ "${1:-}" = --reference-cxx ]; then
     reference_cxx "${2:?usage: gen-predef.sh --reference-cxx ARCH}"
     exit 0
 fi
+
+# C only: the target refuses C++ (RX: no g++ was built for the reference).
+gen_c() {
+    arch=$1
+    GCC=$(refgcc "$arch")
+    OUT="$(dirname "$0")/../src/arch/$arch/predef.c"
+    command -v "$GCC" >/dev/null 2>&1 || {
+        echo "gen-predef: reference compiler '$GCC' not found" >&2; exit 1; }
+    {
+        echo "/* Generated by tools/gen-predef.sh from \`$("$GCC" $(refflags "$arch") -dumpmachine) $(basename "$GCC") $("$GCC" -dumpversion) $(refflags "$arch") -dM -E\`."
+        echo "   Do not edit by hand; rerun the script (ARCHITECTURE.md §5). */"
+        echo
+        echo "#include \"../predef.h\""
+        echo
+        echo "const struct predef_macro predef_macros_$arch[] = {"
+        reference "$arch" \
+            | sed -e 's/^#define \([^ ]*\) \(.*\)$/\1\x01\2/' \
+            | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+            | sed -e 's/^\(.*\)\x01\(.*\)$/    { "\1", "\2" },/'
+        echo "};"
+        echo
+        echo "const int predef_macro_count_$arch ="
+        echo "    (int)(sizeof predef_macros_$arch / sizeof predef_macros_$arch[0]);"
+    } > "$OUT"
+    echo "gen-predef: wrote $OUT ($(grep -c '{ "' "$OUT") macros)"
+}
 
 gen() {
     arch=$1
@@ -313,10 +364,15 @@ case "${1:-both}" in
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
     mips32eb) gen mips32eb ;;
+    mips64)  gen mips64 ;;
+    mips64eb) gen mips64eb ;;
     loongarch64) gen loongarch64 ;;
     xtensa)  gen xtensa ;;
+    ppc32)   gen ppc32 ;;
+    rx)      gen_c rx ;;
+    sparc32) gen sparc32 ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen armv7a; gen riscv32
-              gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64; gen xtensa ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|xtensa]" >&2
+              gen riscv64; gen avr; gen mips32; gen mips32eb; gen mips64; gen mips64eb; gen loongarch64; gen xtensa; gen ppc32; gen sparc32 ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|xtensa|ppc32|rx|sparc32]" >&2
        exit 1 ;;
 esac

@@ -135,7 +135,8 @@ int target_insn_len(const unsigned char *p, int avail)
     }
 
     case TARGET_MIPS32:
-        /* MIPS32 is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
+    case TARGET_MIPS64:
+        /* MIPS is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
         return avail >= 4 ? 4 : 0;
 
     case TARGET_LOONGARCH64:
@@ -154,6 +155,21 @@ int target_insn_len(const unsigned char *p, int avail)
         int n = (p[0] & 15) >= 8 && (p[0] & 15) <= 13 ? 2 : 3;
         return avail >= n ? n : 0;
     }
+    case TARGET_PPC32:
+        /* Book E PowerPC is fixed 32-bit; VLE is refused, not emitted. */
+        return avail >= 4 ? 4 : 0;
+    case TARGET_RX:
+        /* One to eight bytes, and no rule short of decoding: as x86. */
+        return 0;
+    case TARGET_SPARC32:
+        /* SPARC V8 is fixed 32-bit. */
+        return avail >= 4 ? 4 : 0;
+    case TARGET_COLDFIRE:
+        /* One to five 16-bit words, decided by the operation word and its
+         * effective addresses. -S groups the stream by word: its bytes are
+         * written as data either way, and there is no m68k assembler here
+         * to read the text back. */
+        return avail >= 2 ? 2 : 0;
 
     case TARGET_X86_64:
     default:
@@ -268,7 +284,36 @@ static const struct data_model {
      * UNSIGNED wchar_t (target_wchar_size), long double the 8-byte
      * double, and no __int128. */
     [TARGET_XTENSA]  = { 4, 4, 4, 8,  8, 1, 1, 0, 0 },
+    /* The PowerPC EABI (clang --target=powerpc-none-eabi -mcpu=e500
+     * -mno-spe -msoft-float -mlong-double-64 -dM): ILP32, an UNSIGNED char,
+     * a signed int wchar_t, long double the 8-byte double, no __int128. */
+    [TARGET_PPC32]   = { 4, 4, 4, 8,  8, 1, 0, 0, 0 },
+    /* RX (rx-elf-gcc -nofpu -dM): ILP32 with an UNSIGNED char, a signed
+     * `long int` wchar_t, double and long double both binary32 (GCC's
+     * -m32bit-doubles default), no __int128, and nothing aligned beyond
+     * 4 (__BIGGEST_ALIGNMENT__ 4: a long long is 4-aligned). */
+    [TARGET_RX]      = { 4, 4, 4, 4,  4, 1, 0, 0, 4 },
+    /* SPARC V8 (clang --target=sparc-none-elf -mcpu=leon3 -dM): ILP32, a
+     * SIGNED char and wchar_t, a binary128 long double -- and nothing
+     * aligned beyond 8 (__BIGGEST_ALIGNMENT__ 8: _Alignof(long double) is
+     * 8), which is the cap column's second use after AVR's 1. */
+    [TARGET_SPARC32] = { 4, 4, 4, 8, 16, 0, 0, 0, 8 },
+    /* ColdFire as GCC's m68k-elf lays it out (docs/internals/coldfire-plan.md,
+     * unverified -- there is no m68k compiler here): ILP32, a SIGNED char
+     * and wchar_t, long double the 8-byte double, no __int128, and NOTHING
+     * aligned beyond two bytes (BIGGEST_ALIGNMENT 16 bits without
+     * -malign-int): an int in a struct may sit at offset 2. */
+    [TARGET_COLDFIRE] = { 4, 4, 4, 8,  8, 0, 0, 0, 2 },
+    /* n64 (clang --target=mips64el-none-elf -msoft-float -dM): LP64, a
+     * SIGNED char as on o32, a signed int wchar_t, a binary128 long
+     * double and __int128. */
+    [TARGET_MIPS64]  = { 8, 8, 4, 8, 16, 0, 0, 1, 0 },
 };
+
+int target_is_mips(void)
+{
+    return g_arch == TARGET_MIPS32 || g_arch == TARGET_MIPS64;
+}
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
 int target_double_size(void)    { return g_model[g_arch].dbl; }
@@ -300,6 +345,9 @@ int target_stack_align(void)
     case TARGET_THUMB: return 8;        /* AAPCS32 at a public interface */
     case TARGET_MIPS32: return 8;       /* o32 */
     case TARGET_TRICORE: return 8;      /* the TriCore EABI */
+    case TARGET_RX:     return 4;       /* STACK_BOUNDARY 32 */
+    case TARGET_SPARC32: return 8;      /* the SPARC V8 ABI */
+    case TARGET_COLDFIRE: return 4;     /* ColdFire's preferred boundary */
     case TARGET_AVR:   return 1;
     default:           return 16;       /* SysV, AAPCS64, RISC-V psABI */
     }
@@ -356,7 +404,8 @@ int target_jump_tables(void)
 {
     return !g_no_jump_tables && target_get() != TARGET_AVR &&
            target_get() != TARGET_TRICORE &&
-           target_get() != TARGET_XTENSA;
+           target_get() != TARGET_XTENSA &&
+           target_get() != TARGET_RX;
 }
 int target_switch_table_min_os(void)
 {
@@ -386,15 +435,29 @@ int target_anon_bitfield_aligns(void)
     /* o32: `struct { char c; int :4; char d; }` is 3 bytes in clang, and
      * `int :0` moves d to offset 4 without making the struct 4-aligned */
     case TARGET_MIPS32:  return 0;
+    case TARGET_MIPS64:  return 0;   /* n64: as o32 (clang) */
     /* LoongArch psABI: `struct { char c; int :0; char d; }` is 5 bytes in
      * clang, aligned 1 */
     case TARGET_LOONGARCH64: return 0;
     case TARGET_TRICORE: return 0;   /* as GCC lays them out (unverified) */
     /* GCC's generic rule (PCC_BITFIELD_TYPE_MATTERS, no ABI override) */
     case TARGET_XTENSA:  return 0;
+    /* SVR4 PowerPC: `struct { char c; int :4; char d; }` is 3 bytes in
+     * clang, aligned 1 */
+    case TARGET_PPC32:   return 0;
+    /* RX: the Microsoft layout, where an unnamed bit-field's type raises
+     * the struct's alignment like a named one's (stor-layout.cc) */
+    case TARGET_RX:      return 1;
+    /* SPARC: `struct { char c; int :4; char d; }` is 3 bytes in clang */
+    case TARGET_SPARC32: return 0;
+    /* m68k: only named members align a structure (and nothing beyond 2) */
+    case TARGET_COLDFIRE: return 0;
     }
     return 0;
 }
+
+int target_long_size_types(void) { return g_arch == TARGET_RX; }
+int target_ms_bitfields(void)    { return g_arch == TARGET_RX; }
 
 int target_va_list_is_pointer(void)
 {
@@ -412,11 +475,21 @@ int target_va_list_is_pointer(void)
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
     case TARGET_AVR:     return 1;   /* avr-gcc: char * */
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
+    case TARGET_MIPS64:  return 1;   /* n64: void *, over the save area */
     case TARGET_LOONGARCH64: return 1;   /* LoongArch psABI: void * */
     case TARGET_TRICORE: return 1;   /* char *, over the caller's stack words */
     /* GCC's 12-byte record, held by value -- not a pointer to one, and not
      * a tag va_copy needs: a copy is the record's assignment (irgen) */
     case TARGET_XTENSA:  return 0;
+    /* SVR4 PowerPC: a 12-byte record (the GPR count, the FPR count, the
+     * overflow area and the register save area) that va_start builds and
+     * va_arg advances; `va_list` is a pointer to it, which is what clang's
+     * one-element array decays to when it is passed */
+    case TARGET_PPC32:   return 0;
+    case TARGET_RX:      return 1;   /* char *, over the stacked arguments */
+    case TARGET_SPARC32: return 1;   /* void *, over the home area */
+    case TARGET_COLDFIRE: return 1;  /* m68k: char *, over the caller's
+                                      * argument words */
     }
     return 0;
 }
@@ -609,6 +682,17 @@ static const struct triple {
     { "mips-elf",            TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
     { "mips",                TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
 
+    /* MIPS64r2, n64, soft float, either byte order: the same columns as
+     * the 32-bit pair, the sub-architecture 1 meaning big-endian. */
+    { "mips64el-none-elf",   TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "mips64el-unknown-elf", TARGET_MIPS64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "mips64el-elf",        TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "mips64el",            TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "mips64-none-elf",     TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   2, 1 },
+    { "mips64-unknown-elf",  TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
+    { "mips64-elf",          TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
+    { "mips64",              TARGET_MIPS64,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
+
     /* LoongArch64, LP64S (soft float), bare metal. `-unknown-elf` is
      * clang's spelling and the canonical one; the short forms are accepted
      * because everyone writes them. */
@@ -636,6 +720,37 @@ static const struct triple {
     { "xtensa-esp-elf",      TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "xtensa-elf",          TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "xtensa",              TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    /* 32-bit PowerPC, the embedded EABI, big-endian, soft float: an
+     * e500/e200-class core. `-none-eabi` is clang's and GCC's spelling
+     * (powerpc-eabi is the GNU target name). Bare metal only. */
+    { "powerpc-none-eabi",   TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "powerpc-unknown-eabi",TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "powerpc-eabi",        TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "powerpc",             TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "ppc",                 TARGET_PPC32,   TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+
+    /* Renesas RX (RXv1: RX600/RX610, RX100/RX200), little-endian. GCC's
+     * triple is rx-elf; -none-elf is the canonical spelling here, as for
+     * the other bare-metal targets. */
+    { "rx-none-elf",         TARGET_RX,      TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "rx-elf",              TARGET_RX,      TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "rx-unknown-elf",      TARGET_RX,      TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "rx",                  TARGET_RX,      TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    /* 32-bit SPARC V8, big-endian, soft float: Gaisler's LEON3. Bare
+     * metal only; `sparc-none-elf` is clang's spelling (sparc-elf the GNU
+     * target name, sparc-gaisler-elf BCC's). */
+    { "sparc-none-elf",      TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "sparc-unknown-elf",   TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "sparc-elf",           TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "sparc-gaisler-elf",   TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "sparc",               TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    /* ColdFire: GCC's target name is m68k-elf with -mcpu=5208; EmbCC's
+     * m68k is ColdFire ISA_A only (the 68000/68020 family proper is
+     * refused by -mcpu). Big-endian, bare metal. */
+    { "m68k-none-elf",       TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   1, 0 },
+    { "m68k-unknown-elf",    TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
+    { "m68k-elf",            TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
+    { "m68k",                TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
 
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
@@ -668,8 +783,12 @@ int target_from_triple(const char *triple, enum target_arch *out,
             if (fmt) *fmt = g_triples[i].fmt;
             /* Byte order travels with the name too: every triple but
              * the big-endian MIPS ones is little-endian. */
-            g_big_endian = g_triples[i].arch == TARGET_MIPS32 &&
-                           g_triples[i].thumb_em == 1;
+            g_big_endian = ((g_triples[i].arch == TARGET_MIPS32 ||
+                             g_triples[i].arch == TARGET_MIPS64) &&
+                            g_triples[i].thumb_em == 1) ||
+                           g_triples[i].arch == TARGET_PPC32 ||
+                           g_triples[i].arch == TARGET_SPARC32 ||
+                           g_triples[i].arch == TARGET_COLDFIRE;
             /* The ARM sub-architecture travels with the name, so
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
@@ -712,7 +831,7 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
              : g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
              : g_thumb_arch == 6 ? 6
              : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
-    if (a == TARGET_MIPS32 && g_big_endian)
+    if ((a == TARGET_MIPS32 || a == TARGET_MIPS64) && g_big_endian)
         want = 2;
     for (int i = 0; i < g_ntriples; i++)
         if (g_triples[i].canon == want && g_triples[i].arch == a &&
@@ -801,10 +920,15 @@ int target_elf_machine(enum target_arch a)
     case TARGET_RISCV32:
     case TARGET_RISCV64: return EM_RISCV;
     case TARGET_AVR:     return EM_AVR;
-    case TARGET_MIPS32:  return EM_MIPS;
+    case TARGET_MIPS32:
+    case TARGET_MIPS64:  return EM_MIPS;
     case TARGET_LOONGARCH64: return EM_LOONGARCH;
     case TARGET_TRICORE: return EM_TRICORE;
     case TARGET_XTENSA:  return EM_XTENSA;
+    case TARGET_PPC32:   return EM_PPC;
+    case TARGET_RX:      return EM_RX;
+    case TARGET_SPARC32: return EM_SPARC;
+    case TARGET_COLDFIRE: return EM_68K;
     default:             return EM_X86_64;
     }
 }
@@ -846,6 +970,8 @@ unsigned long target_elf_flags(enum target_arch a)
      * slots are filled (with nops), the code is not abicalls/PIC. */
     case TARGET_MIPS32:  return EF_MIPS_ARCH_32R2 | EF_MIPS_ABI_O32 |
                                 EF_MIPS_NOREORDER;
+    /* ...and for mips64r2 n64: no ABI field (ELFCLASS64 is n64) */
+    case TARGET_MIPS64:  return EF_MIPS_ARCH_64R2 | EF_MIPS_NOREORDER;
     /* what clang writes for -mabi=lp64s: the soft-float base ABI, object
      * ABI v1 */
     case TARGET_LOONGARCH64: return EF_LOONGARCH_ABI_SOFT_FLOAT |
@@ -853,6 +979,11 @@ unsigned long target_elf_flags(enum target_arch a)
     case TARGET_TRICORE: return EF_TRICORE_V1_6_1;
     /* What GNU as writes for the ESP32's objects: XT_INSN | XT_LIT */
     case TARGET_XTENSA:  return EF_XTENSA_XT_INSN | EF_XTENSA_XT_LIT;
+    /* what GNU as writes for GCC's -m32bit-doubles -mrx-abi */
+    case TARGET_RX:      return E_FLAG_RX_ABI;
+    /* binutils' ISA_A with the hardware divide, no MAC, no FPU: what the
+     * code uses, which every ColdFire core with a divider executes */
+    case TARGET_COLDFIRE: return EF_M68K_CF_ISA_A;
     default:             return 0;
     }
 }
@@ -965,6 +1096,19 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         default:               return -1;
         }
     }
+    if (a == TARGET_MIPS64) {
+        switch (k) {
+        case RK_CALL:         return R_MIPS_26;
+        case RK_MIPS_HIGHEST: return R_MIPS_HIGHEST;
+        case RK_MIPS_HIGHER:  return R_MIPS_HIGHER;
+        case RK_MIPS_HI16:    return R_MIPS_HI16;
+        case RK_MIPS_LO16:    return R_MIPS_LO16;
+        case RK_MIPS_TEXT26:  return R_MIPS_26;
+        case RK_ABS32:        return R_MIPS_32;
+        case RK_ABS64:        return R_MIPS_64;
+        default:              return -1;
+        }
+    }
     if (a == TARGET_MIPS32) {
         switch (k) {
         /* jal and j alike: a 26-bit word index within the 256 MiB region
@@ -995,6 +1139,47 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         /* a literal-pool word, a data pointer, a DWARF offset */
         case RK_ABS32:       return R_XTENSA_32;
         case RK_XTENSA_TEXT32: return R_XTENSA_32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_PPC32) {
+        switch (k) {
+        /* bl and b alike: a 24-bit word displacement from the branch */
+        case RK_CALL:          return R_PPC_REL24;
+        case RK_PPC_ADDR16_HA: return R_PPC_ADDR16_HA;
+        case RK_PPC_ADDR16_LO: return R_PPC_ADDR16_LO;
+        case RK_ABS32:         return R_PPC_ADDR32;
+        case RK_DATA_PREL32:   return R_PPC_REL32;
+        default:               return -1;
+        }
+    }
+    if (a == TARGET_RX) {
+        switch (k) {
+        /* bsr.a's 24-bit field, measured from its opcode */
+        case RK_CALL:        return R_RX_DIR24S_PCREL;
+        case RK_ABS32:       return R_RX_DIR32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_SPARC32) {
+        switch (k) {
+        /* call: a 30-bit word displacement from the call itself */
+        case RK_CALL:        return R_SPARC_WDISP30;
+        case RK_SPARC_HI22:  return R_SPARC_HI22;
+        case RK_SPARC_LO10:  return R_SPARC_LO10;
+        case RK_ABS32:       return R_SPARC_32;
+        case RK_DATA_PREL32: return R_SPARC_DISP32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_COLDFIRE) {
+        switch (k) {
+        /* jsr and jmp to an absolute address, and every address operand:
+         * the 32-bit field in the extension words */
+        case RK_CALL:        return R_68K_32;
+        case RK_TAIL:        return R_68K_32;
+        case RK_ABS32:       return R_68K_32;
+        case RK_DATA_PREL32: return R_68K_PC32;
         default:             return -1;
         }
     }
@@ -1111,7 +1296,9 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
         a == TARGET_MIPS32 || a == TARGET_LOONGARCH64 ||
-        a == TARGET_TRICORE || a == TARGET_XTENSA)
+        a == TARGET_TRICORE || a == TARGET_XTENSA || a == TARGET_PPC32 ||
+        a == TARGET_RX || a == TARGET_SPARC32 ||
+        a == TARGET_COLDFIRE || a == TARGET_MIPS64)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -1170,6 +1357,31 @@ static const struct reloc_spelling {
     { EM_LOONGARCH, R_LARCH_PCALA_LO12, "R_LARCH_PCALA_LO12" },
     { EM_LOONGARCH, R_LARCH_CALL36,    "R_LARCH_CALL36" },
     { EM_LOONGARCH, R_LARCH_32_PCREL,  "R_LARCH_32_PCREL" },
+    { EM_PPC,   R_PPC_NONE,            "R_PPC_NONE" },
+    { EM_PPC,   R_PPC_ADDR32,          "R_PPC_ADDR32" },
+    { EM_PPC,   R_PPC_ADDR16_LO,       "R_PPC_ADDR16_LO" },
+    { EM_PPC,   R_PPC_ADDR16_HI,       "R_PPC_ADDR16_HI" },
+    { EM_PPC,   R_PPC_ADDR16_HA,       "R_PPC_ADDR16_HA" },
+    { EM_PPC,   R_PPC_REL24,           "R_PPC_REL24" },
+    { EM_PPC,   R_PPC_REL14,           "R_PPC_REL14" },
+    { EM_PPC,   R_PPC_REL32,           "R_PPC_REL32" },
+    { EM_RX,    R_RX_NONE,             "R_RX_NONE" },
+    { EM_RX,    R_RX_DIR32,            "R_RX_DIR32" },
+    { EM_RX,    R_RX_DIR24S_PCREL,     "R_RX_DIR24S_PCREL" },
+    { EM_RX,    R_RX_DIR16S_PCREL,     "R_RX_DIR16S_PCREL" },
+    { EM_RX,    R_RX_DIR8S_PCREL,      "R_RX_DIR8S_PCREL" },
+    { EM_SPARC, R_SPARC_NONE,          "R_SPARC_NONE" },
+    { EM_SPARC, R_SPARC_32,            "R_SPARC_32" },
+    { EM_SPARC, R_SPARC_DISP32,        "R_SPARC_DISP32" },
+    { EM_SPARC, R_SPARC_WDISP30,       "R_SPARC_WDISP30" },
+    { EM_SPARC, R_SPARC_WDISP22,       "R_SPARC_WDISP22" },
+    { EM_SPARC, R_SPARC_HI22,          "R_SPARC_HI22" },
+    { EM_SPARC, R_SPARC_LO10,          "R_SPARC_LO10" },
+    { EM_68K,   R_68K_NONE,            "R_68K_NONE" },
+    { EM_68K,   R_68K_32,              "R_68K_32" },
+    { EM_68K,   R_68K_16,              "R_68K_16" },
+    { EM_68K,   R_68K_PC32,            "R_68K_PC32" },
+    { EM_68K,   R_68K_PC16,            "R_68K_PC16" },
     { EM_AVR,   R_AVR_NONE,            "R_AVR_NONE" },
     { EM_AVR,   R_AVR_32,              "R_AVR_32" },
     { EM_AVR,   R_AVR_7_PCREL,         "R_AVR_7_PCREL" },

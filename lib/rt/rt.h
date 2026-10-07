@@ -43,10 +43,17 @@ typedef unsigned long      u32;
 typedef unsigned __int128  u128;
 typedef __int128           s128;
 
+/* The halves in MEMORY order: the low one first little-endian, the high
+ * one first big-endian (MIPS64's mips64-none-elf, the first big-endian
+ * target with __int128 -- where {lo, hi} named each half the other). */
 union w128 {
     u128 u;
     s128 s;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    struct { u64 hi, lo; } h;
+#else
     struct { u64 lo, hi; } h;
+#endif
 };
 
 static inline u128 mk(u64 hi, u64 lo)

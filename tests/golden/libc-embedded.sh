@@ -1,7 +1,8 @@
 #!/bin/sh
 # EmbCC's C library on the boards: RV32, RV64, a Cortex-M3, a Cortex-M4F
 # with the hard-float calling convention, a Cortex-M33 (ARMv8-M), a
-# MIPS32r2 core (QEMU's malta) and a LoongArch64 one (QEMU's virt), each image
+# MIPS32r2 core (QEMU's malta, both byte orders), a LoongArch64 one (QEMU's
+# virt), a SPARC LEON3 (QEMU's leon3_generic) and the others below, each image
 # built with lib/libc on its bare-metal backend (tools/build-libc.sh) and
 # run under QEMU -- against the SAME library built for x86-64.
 #
@@ -55,7 +56,7 @@ fail=0
 for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
          thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf \
          mips-none-elf loongarch64-unknown-elf tricore-none-elf \
-         xtensa-none-elf; do
+         xtensa-none-elf powerpc-none-eabi sparc-none-elf m68k-none-elf; do
     # how the image is loaded: -kernel, but on Xtensa's sim machine the
     # generic loader, which also starts the core at the entry
     # (tests/harness/xtensa/run.sh says why)
@@ -88,6 +89,12 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
         xtensa*)  H=tests/harness/xtensa
                   Q="qemu-system-xtensa -M sim -cpu de212 -m 128 -semihosting -display none -monitor none"
                   load=loader ;;
+        powerpc*) H=tests/harness/ppc
+                  Q="qemu-system-ppc -M ppce500 -m 128 -display none -monitor none -serial stdio -no-reboot" ;;
+        sparc-*)  H=tests/harness/sparc     # big-endian, register windows
+                  Q="qemu-system-sparc -M leon3_generic -m 64 -display none -monitor none -serial stdio -no-reboot" ;;
+        m68k-*)   H=tests/harness/coldfire  # big-endian, 2-byte alignment
+                  Q="qemu-system-m68k -M mcf5208evb -cpu m5208 -display none -monitor none -serial stdio" ;;
     esac
     command -v "${Q%% *}" >/dev/null 2>&1 || { echo "SKIP $t: no ${Q%% *}"; continue; }
     d=$out/$t; mkdir -p "$d"
@@ -109,6 +116,9 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
             loongarch64*) hv=EMBCC_LOONGARCH_HARNESS ;;
             tricore*)  hv=EMBCC_TRICORE_HARNESS ;;
             xtensa*)   hv=EMBCC_XTENSA_HARNESS ;;
+            powerpc*)  hv=EMBCC_PPC_HARNESS ;;
+            sparc*)    hv=EMBCC_SPARC_HARNESS ;;
+            m68k*)     hv=EMBCC_CF_HARNESS ;;
             *)         hv=EMBCC_THUMB_HARNESS ;;
         esac
         env "$hv=$d" sh "$H/link.sh" "$d/p$opt.elf" "$d/p$opt.o" \

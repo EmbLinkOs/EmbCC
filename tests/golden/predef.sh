@@ -12,7 +12,7 @@ echo "TEST-MARKER predef"
 # ONE exclusion list in tools/gen-predef.sh (asked for directly, not restated
 # here, so the test and the generator cannot drift apart).
 checked=0
-for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips32eb loongarch64 tricore xtensa; do
+for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips32eb loongarch64 tricore xtensa ppc32 sparc32 mips64 mips64eb; do
     # The triple is not always "<arch>-elf": ARMv7-M is spelled the way
     # every other toolchain spells it, and gen-predef.sh keys on the short
     # name, so the two are named apart here rather than assumed equal.
@@ -24,9 +24,13 @@ for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips
         avr)            triple=avr ;;
         mips32)         triple=mipsel-none-elf ;;
         mips32eb)       triple=mips-none-elf ;;
+        mips64)         triple=mips64el-none-elf ;;
+        mips64eb)       triple=mips64-none-elf ;;
         loongarch64)    triple=loongarch64-unknown-elf ;;
         tricore)        triple=tricore-none-elf ;;
         xtensa)         triple=xtensa-none-elf ;;
+        ppc32)          triple=powerpc-none-eabi ;;
+        sparc32)        triple=sparc-none-elf ;;
         *)              triple=$arch-elf ;;
     esac
     out=$("$EMBCC" --target=$triple --dump-predef) || {
@@ -64,11 +68,15 @@ for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips
             avr)     own="__AVR__ __AVR_ARCH__ __AVR_ATmega328P__ __SIZEOF_INT__" ;;
             mips32)  own="__mips__ _MIPSEL __mips_soft_float __mips_o32 _MIPS_SZPTR" ;;
             mips32eb) own="__mips__ _MIPSEB __BIG_ENDIAN__ __mips_soft_float __mips_o32" ;;
+            mips64)  own="__mips__ __mips64 _MIPSEL __mips_soft_float __mips_n64 __LP64__" ;;
+            mips64eb) own="__mips__ __mips64 _MIPSEB __mips_soft_float __mips_n64 __LP64__" ;;
             loongarch64) own="__loongarch__ __loongarch64 __loongarch_soft_float __loongarch_lp64 __LP64__" ;;
             # (there is no TriCore compiler to generate the table from:
             #  src/arch/tricore/predef.c says how it was made)
             tricore) own="__tricore__ __TRICORE__ __TRICORE_CORE__ __ILP32__" ;;
             xtensa)  own="__xtensa__ __XTENSA__ __XTENSA_EL__ __XTENSA_WINDOWED_ABI__ __CHAR_UNSIGNED__ __SIZEOF_WCHAR_T__" ;;
+            ppc32)   own="__PPC__ _ARCH_PPC __BIG_ENDIAN__ _SOFT_FLOAT __CHAR_UNSIGNED__" ;;
+            sparc32) own="__sparc__ __sparcv8 __BIG_ENDIAN__ SOFT_FLOAT __SIZEOF_LONG_DOUBLE__" ;;
         esac
         for m in __INT64_TYPE__ __INTPTR_TYPE__ __SIZE_TYPE__ __PTRDIFF_TYPE__ \
                  __CHAR_BIT__ __SIZEOF_POINTER__ __SIZEOF_LONG__ \

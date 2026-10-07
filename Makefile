@@ -159,6 +159,10 @@ SRCS := \
 	src/arch/mips32/predef_cxx.c \
 	src/arch/mips32eb/predef.c \
 	src/arch/mips32eb/predef_cxx.c \
+	src/arch/mips64/predef.c \
+	src/arch/mips64/predef_cxx.c \
+	src/arch/mips64eb/predef.c \
+	src/arch/mips64eb/predef_cxx.c \
 	src/arch/loongarch/emit.c \
 	src/arch/loongarch/codegen.c \
 	src/arch/loongarch/irgen.c \
@@ -176,6 +180,25 @@ SRCS := \
 	src/arch/xtensa/irgen.c \
 	src/arch/xtensa/predef.c \
 	src/arch/xtensa/predef_cxx.c \
+	src/arch/ppc/emit.c \
+	src/arch/ppc/codegen.c \
+	src/arch/ppc/irgen.c \
+	src/arch/ppc32/predef.c \
+	src/arch/ppc32/predef_cxx.c \
+	src/arch/rx/emit.c \
+	src/arch/rx/codegen.c \
+	src/arch/rx/irgen.c \
+	src/arch/rx/predef.c \
+	src/arch/sparc/emit.c \
+	src/arch/sparc/codegen.c \
+	src/arch/sparc/irgen.c \
+	src/arch/sparc32/predef.c \
+	src/arch/sparc32/predef_cxx.c \
+	src/arch/coldfire/emit.c \
+	src/arch/coldfire/codegen.c \
+	src/arch/coldfire/irgen.c \
+	src/arch/coldfire/predef.c \
+	src/arch/coldfire/predef_cxx.c \
 	src/arch/avr/emit.c \
 	src/arch/avr/codegen.c \
 	src/arch/avr/asm.c \
@@ -279,7 +302,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
        src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c \
        src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/thumb/a32.h \
-       src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/code.c \
+       src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c \
        src/link/link.h src/link/ldscript.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        $(PLATFORM_SRCS) src/platform/platform.h
@@ -288,7 +311,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS) \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c \
-	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/code.c
+	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c
 
 # NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
 # a backend file added without a line here breaks only `make test` -- and
@@ -317,9 +340,15 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
              src/arch/mips32/predef.c src/arch/mips32/predef_cxx.c \
              src/arch/mips32eb/predef.c src/arch/mips32eb/predef_cxx.c \
+             src/arch/mips64/predef.c src/arch/mips64/predef_cxx.c \
+             src/arch/mips64eb/predef.c src/arch/mips64eb/predef_cxx.c \
              src/arch/loongarch64/predef.c src/arch/loongarch64/predef_cxx.c \
              src/arch/tricore/predef.c src/arch/tricore/predef_cxx.c \
              src/arch/xtensa/predef.c src/arch/xtensa/predef_cxx.c \
+             src/arch/ppc32/predef.c src/arch/ppc32/predef_cxx.c \
+             src/arch/rx/predef.c \
+             src/arch/sparc32/predef.c src/arch/sparc32/predef_cxx.c \
+             src/arch/coldfire/predef.c src/arch/coldfire/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
@@ -342,6 +371,10 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/tricore/irgen.c src/arch/tricore/asm.c \
              src/arch/tricore/emit.c \
              src/arch/xtensa/irgen.c src/arch/xtensa/emit.c \
+             src/arch/ppc/irgen.c src/arch/ppc/emit.c \
+             src/arch/rx/irgen.c src/arch/rx/emit.c \
+             src/arch/sparc/irgen.c src/arch/sparc/emit.c \
+             src/arch/coldfire/irgen.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
@@ -552,7 +585,8 @@ RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
                riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
-                 xtensa-none-elf
+                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
+                 mips64el-none-elf mips64-none-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -569,7 +603,8 @@ LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
                  riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \
                  loongarch64-unknown-elf tricore-none-elf \
-                 xtensa-none-elf
+                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
+                 mips64el-none-elf mips64-none-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \
