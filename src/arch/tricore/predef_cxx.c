@@ -96,6 +96,8 @@ const struct predef_macro predef_macros_cxx_tricore[] = {
     { "__GCC_CONSTRUCTIVE_SIZE", "32" },
     { "__GCC_DESTRUCTIVE_SIZE", "32" },
     { "__GCC_HAVE_DWARF2_CFI_ASM", "1" },
+    { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1", "1" },
+    { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2", "1" },
     { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4", "1" },
     { "__GXX_ABI_VERSION", "1002" },
     { "__GXX_EXPERIMENTAL_CXX0X__", "1" },
