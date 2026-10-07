@@ -37,7 +37,9 @@ void putn(long v);
  * register the ABI keeps for exactly this). QEMU models no caches, so the
  * words need no flush. The report is followed by the board's reset and
  * never by `==EXIT`, so a run that faults cannot pass. */
-#define SOFTRES (*(volatile unsigned *)0xbf000500u)
+/* (KSEG: see io.c -- the same windows sign-extended on MIPS64) */
+#define KSEG(a)  ((unsigned long)(long)(int)(a))
+#define SOFTRES (*(volatile unsigned *)KSEG(0xbf000500u))
 
 void writec(int c);
 
@@ -69,8 +71,8 @@ static void harness_fault(void)
 
 static void install_vectors(void)
 {
-    volatile unsigned *v = (volatile unsigned *)0x80000180u;
-    unsigned h = (unsigned)harness_fault, status;
+    volatile unsigned *v = (volatile unsigned *)KSEG(0x80000180u);
+    unsigned h = (unsigned)(unsigned long)harness_fault, status;
     v[0] = 0x3c1a0000u | (h >> 16);           /* lui  k0, %hi */
     v[1] = 0x375a0000u | (h & 0xffffu);       /* ori  k0, k0, %lo */
     v[2] = 0x03400008u;                       /* jr   k0 */

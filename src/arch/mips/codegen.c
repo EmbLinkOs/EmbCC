@@ -3491,9 +3491,10 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
 void mips_build_abiflags(unsigned char out[24])
 {
     memset(out, 0, 24);
-    out[2] = 32;                /* isa_level */
+    int m64 = target_get() == TARGET_MIPS64;
+    out[2] = m64 ? 64 : 32;     /* isa_level */
     out[3] = 2;                 /* isa_rev */
-    out[4] = 1;                 /* gpr_size: AFL_REG_32 */
+    out[4] = m64 ? 2 : 1;       /* gpr_size: AFL_REG_64 / AFL_REG_32 */
     out[7] = 3;                 /* fp_abi: Val_GNU_MIPS_ABI_FP_SOFT */
     out[target_big_endian() ? 19 : 16] = 1;   /* flags1, a word: ODDSPREG */
 }
