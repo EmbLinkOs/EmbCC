@@ -4367,6 +4367,8 @@ static void gen_ins(struct rv_fn *F, int n)
         return;
     }
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label: `auipc d, 0; addi d, d, 0`, never compressed, patched
          * with the label's distance once it is placed -- no relocation,
          * the label being in this same function. */
@@ -5182,6 +5184,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

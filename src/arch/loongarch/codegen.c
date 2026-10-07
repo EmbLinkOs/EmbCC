@@ -3191,6 +3191,8 @@ static void gen_ins(struct la_fn *F, int n)
         return;
     }
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label: `pcaddi d, (label - .) >> 2`, patched once the label
          * is placed -- pc-relative, no relocation, +-2 MiB. */
         int d = wreg(F, i->dst, ACC);
@@ -3732,6 +3734,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

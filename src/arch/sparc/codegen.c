@@ -2665,6 +2665,8 @@ static void gen_ins(struct sparc_fn *F, int n)
         return;
     }
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label: the function's own address as IR_FADDR takes it,
          * sethi/or (HI22/LO10), plus the label's offset in it -- the
          * addend set once the function is laid out. The fix's base is
@@ -3077,6 +3079,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

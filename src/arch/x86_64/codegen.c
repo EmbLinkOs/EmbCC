@@ -539,6 +539,28 @@ int cg_call_local(const struct func *caller, const struct func *callee)
     return strcmp(a, b) == 0;
 }
 
+int cg_label_mark(const struct ir_ins *i)
+{
+    return i->op == IR_LABELADDR && i->vol;
+}
+
+void cg_note_labels(struct ir_func *fn, const int *label_off)
+{
+    struct func *f = fn->src;
+    if (!f || !f->label_pos)
+        return;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (!cg_label_mark(i) || i->imm < 0 || i->imm >= f->nlabel_pos)
+            continue;
+        if (i->label < 0 || i->label >= fn->nlabels || label_off[i->label] < 0)
+            internal_error("%s: a label static data takes the address of "
+                           "was never placed", fn->name);
+        f->label_pos[i->imm] =
+            (long)label_off[i->label] - (f->code_off + f->code_entry);
+    }
+}
+
 /* Can this load, store, ldvar or stvar move its value as a float or a
  * double? (cg_float_vregs) */
 static int flt_width(const struct ir_ins *i)
@@ -5087,6 +5109,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         }
         case IR_LABELADDR: {
+            if (cg_label_mark(i))       /* static data's marker: no code */
+                break;
             /* dst = &&label: `lea rax,[rip+disp32]`, the disp32 patched to the
              * label's code offset via the SAME list and formula as a rel32
              * branch (target - (patch_off + 4)). */
@@ -5886,6 +5910,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                      (unsigned long)(unsigned int)(int)rel);
     }
     free(brs);
+    cg_note_labels(fn, label_off);
     free(label_off);
     afold_free(&g_afold);
     g_afold.ok = NULL; g_afold.disp = NULL;

@@ -269,6 +269,8 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         break;
     case IR_LABELADDR:
         ob_fmt(b, "%%%d = labeladdr L%d", i->dst, i->label);
+        if (i->vol)                 /* static data's marker, and its slot */
+            ob_fmt(b, " data %ld", (long)i->imm);
         break;
     case IR_IGOTO:
         ob_fmt(b, "igoto [%%%d]", i->a);

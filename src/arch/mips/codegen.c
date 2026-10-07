@@ -3739,6 +3739,8 @@ static void gen_ins(struct mips_fn *F, int n)
         return;
     }
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label: the function's own address, as IR_FADDR takes it,
          * plus the label's offset in it -- the addend set once the
          * function is laid out. o32 has no PC-relative address. */
@@ -4297,6 +4299,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

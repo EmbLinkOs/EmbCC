@@ -2723,6 +2723,8 @@ static void gen_ins(struct xt_fn *F, int n)
         xt_refuse(F, i, "a byte swap as one operation");
         return;
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label: l32r of a pool word holding the label's address --
          * the far jump's literal, R_XTENSA_32 against .text plus the
          * label's offset (RK_XTENSA_TEXT32). */
@@ -3154,6 +3156,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct xt_sites *st,
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.lit);

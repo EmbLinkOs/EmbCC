@@ -2270,6 +2270,8 @@ static void gen_ins(struct cf_fn *F, int n)
         return;
     }
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* lea (0,pc),a0 ; adda.l #label-., a0 -- the long branch's way
          * to an address, which reaches anywhere. `lea (label,pc)` alone
          * reached 32 KiB, and a threaded interpreter's -O0 body passes
@@ -2625,6 +2627,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

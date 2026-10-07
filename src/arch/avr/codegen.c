@@ -4132,6 +4132,8 @@ static void gen_ins(struct a_fn *F, int n)
      * out -- a fix of `wide` 3 whose `at` is the first site's index.
      * goto *p puts that word address in Z and is ijmp. */
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         int nb = dw(F, i), d = addr_reg(F, i), s0 = F->st->nf;
         if (!nb)
             return;
@@ -5553,6 +5555,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     free(F.js);
     free(F.slot);
     free(F.need);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.cval);

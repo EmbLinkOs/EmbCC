@@ -2796,6 +2796,8 @@ static void gen_ins(struct t_fn *F, int n)
         v6_refuse(fn, i, "an exception landing pad");
         return;
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label, PC-relative and with no relocation: a pool word of
          * the label's distance from the pc an `add` reads, Thumb bit
          * included --
@@ -3416,6 +3418,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(cls);
     free(F.usecnt);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

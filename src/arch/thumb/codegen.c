@@ -5166,6 +5166,8 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label, PC-relative and with no relocation: the label's
          * distance from the pc the `add` reads, built by movw/movt and
          * patched once the label is placed:
@@ -6369,6 +6371,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.selimm_v);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

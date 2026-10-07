@@ -2575,6 +2575,8 @@ static void gen_ins(struct tc_fn *F, int n)
         tc_refuse(F, i, "a jump table");
         return;
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label: the function's own address as IR_FADDR takes it,
          * movh/addi (HI/LO), plus the label's offset in it -- the addend
          * set once the function is laid out. */
@@ -3045,6 +3047,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

@@ -35,6 +35,18 @@ void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n);
 struct func;
 int cg_call_local(const struct func *caller, const struct func *callee);
 
+/* GNU C's static label data (`static void *tab[] = { &&a }`): irgen marks
+ * each label it takes with an IR_LABELADDR that is `vol` and names a slot
+ * of fn->src->label_pos in imm. Such a marker emits NO code
+ * (cg_label_mark says which ones are), and once the function is laid out
+ * every backend hands this its label positions -- offsets in the code
+ * buffer, by label id -- so the slots hold each label's offset from the
+ * function's symbol, which the driver adds into the data. */
+struct ir_func;
+struct ir_ins;
+int cg_label_mark(const struct ir_ins *i);
+void cg_note_labels(struct ir_func *fn, const int *label_off);
+
 struct extcall {
     int patch_off;        /* offset of the rel32 field in .text */
     struct func *callee;  /* canonical, !has_defn */

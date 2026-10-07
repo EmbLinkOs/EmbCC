@@ -200,6 +200,54 @@ static int label_idx(struct ir_func *fn, const char *name, int line)
     return g_nlabels_used++;
 }
 
+/* GNU C: `static void *tab[] = { &&a, &&b }` and `&&b - &&a` in a static
+ * initializer. Sema made the data (struct greloc's label, struct
+ * glabeldiff) and left the labels by name; here each becomes a slot of
+ * f->label_pos and a MARKER at the function's entry -- an IR_LABELADDR
+ * that is `vol` (kept with nothing reading it) and names its slot in
+ * imm. The marker is what makes the label address-taken to every pass
+ * that asks (a computed goto's successors, the CFG cleanups that delete
+ * an unreachable label, the passes that renumber labels and so keep
+ * its label current); it emits no code, and the backend records where
+ * its label landed in the slot (cg_note_labels) for the driver to put
+ * into the data. */
+static int label_mark(struct ir_func *fn, struct func *f, const char *name,
+                      int line)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = IR_LABELADDR;
+    i->label = g_labels[label_idx(fn, name, line)].label;
+    i->dst = new_temp(fn);
+    i->vol = 1;
+    i->imm = f->nlabel_pos;
+    return f->nlabel_pos++;
+}
+
+static void label_data_marks(struct ir_func *fn, struct func *f)
+{
+    struct unit *u = cur_unit->src;
+    f->nlabel_pos = 0;
+    for (struct global *g = u->globals; g; g = g->next) {
+        for (int r = 0; r < g->nrelocs; r++)
+            if (g->relocs[r].label && g->relocs[r].ftarget == f)
+                g->relocs[r].label_slot =
+                    label_mark(fn, f, g->relocs[r].label,
+                               g->relocs[r].label_line);
+        for (int d = 0; d < g->nldiffs; d++)
+            if (g->ldiffs[d].fn == f) {
+                g->ldiffs[d].slot = label_mark(fn, f, g->ldiffs[d].label,
+                                               g->ldiffs[d].line);
+                g->ldiffs[d].minus_slot =
+                    label_mark(fn, f, g->ldiffs[d].minus, g->ldiffs[d].line);
+            }
+    }
+    free(f->label_pos);
+    f->label_pos = xmalloc((size_t)(f->nlabel_pos ? f->nlabel_pos : 1) *
+                           sizeof *f->label_pos);
+    for (int k = 0; k < f->nlabel_pos; k++)
+        f->label_pos[k] = -1;
+}
+
 void emit_brz(struct ir_func *fn, int v, int w, int label)
 {
     struct ir_ins *i = emit(fn);
@@ -4441,6 +4489,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
         emit_stvar(fn, v, p, ty_ptr(f->var_indirect[v]));
         fn->has_alloca = 1;
     }
+    if (f->has_label_data)
+        label_data_marks(fn, f);
     gen_stmt(fn, f->body, NULL);
     /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3). After
      * a body whose every path returned this is unreachable, and goes. */

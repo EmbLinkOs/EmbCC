@@ -2086,6 +2086,8 @@ static void gen_ins(struct rx_fn *F, int n)
     case IR_SWITCH:
         rx_refuse(F, i, "a jump table");
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label: the function's own address as IR_FADDR takes it, a
          * mov.l #imm32 (ABS32), plus the label's offset in it -- the
          * addend set once the function is laid out. The fix is no
@@ -2413,6 +2415,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
     f->stack_bytes = (int)(F.in_base - 4);
     free(F.usecnt);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

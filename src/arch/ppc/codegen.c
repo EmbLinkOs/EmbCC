@@ -2441,6 +2441,8 @@ static void gen_ins(struct ppc_fn *F, int n)
         return;
     }
     case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
         /* &&label: the function's own address as IR_FADDR takes it,
          * lis/addi (@ha/@l), plus the label's offset in it -- the addend
          * set once the function is laid out. Absolute like every other
@@ -2960,6 +2962,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);
