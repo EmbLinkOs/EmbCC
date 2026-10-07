@@ -23,8 +23,8 @@
  *
  * ---- what this file refuses -------------------------------------------
  *
- * By name, with the IR operation printed: inline assembly, computed goto,
- * one- and two-byte atomics. THE RULE -- an object full of plausible
+ * By name, with the IR operation printed: inline assembly, one- and
+ * two-byte atomics. THE RULE -- an object full of plausible
  * instructions that implement something else is worse than no object.
  */
 #include "emit.h"
@@ -1043,8 +1043,9 @@ static void ext_reg(struct la_fn *F, int rdst, int rs, int size, int sign)
 enum { FX_J,       /* b label */
        FX_B,       /* a direct conditional branch */
        FX_LONG,    /* the inverse branch at bat, over a b at `at` */
-       FX_TAB };   /* a jump table's entry: bat is the pcaddi that finds
+       FX_TAB,     /* a jump table's entry: bat is the pcaddi that finds
                     * the table, the word becomes target - pcaddi */
+       FX_ADDR };  /* &&label: a pcaddi at `at` into register rs1 */
 
 static void want_label(struct la_fn *F, int at, int label, int kind,
                        int cond, int rs1, int rs2, int bat)
@@ -3189,8 +3190,17 @@ static void gen_ins(struct la_fn *F, int n)
         code_mark_data(t, tab, t->len);
         return;
     }
-    case IR_LABELADDR: case IR_IGOTO:
-        la_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        /* &&label: `pcaddi d, (label - .) >> 2`, patched once the label
+         * is placed -- pc-relative, no relocation, +-2 MiB. */
+        int d = wreg(F, i->dst, ACC);
+        want_label(F, t->len, i->label, FX_ADDR, 0, d, 0, 0);
+        la_pcrel(t, LA_PCADDI, d, 0);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        la_jirl(t, LA_ZERO, rdr(F, i->a, ACC), 0);
         return;
     default:
         la_refuse(F, i, "this operation");
@@ -3678,6 +3688,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
         case FX_B:
             ok = la_patch_b(t, F.fix[i].at, target);
             break;
+        case FX_ADDR: {
+            /* the pcaddi again, by the same encoder, over the zero */
+            long d = (long)target - F.fix[i].at;
+            struct code one;
+            if (d < -(1L << 21) || d >= (1L << 21))
+                la_refuse(&F, NULL, "a label address beyond 2 MiB");
+            memset(&one, 0, sizeof one);
+            la_pcrel(&one, LA_PCADDI, F.fix[i].rs1, d >> 2);
+            memcpy(t->p + F.fix[i].at, one.p, 4);
+            free(one.p);
+            break;
+        }
         default:                                    /* FX_TAB */
             code_patch32(t, F.fix[i].at,
                          (unsigned long)(unsigned int)(target - F.fix[i].bat));
