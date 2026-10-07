@@ -187,6 +187,12 @@ int t_movs_imm(struct code *c, int rd, long imm)
 int t_it_imm_ok(long imm)
 {
     unsigned long v = (unsigned long)imm & 0xffffffffUL;
+    /* A32: one conditional MOV, MVN or MOVW (a32_mov_imm takes the
+     * queued condition). Not the Thumb answer -- A32's rotations are
+     * not Thumb's modified immediates. */
+    if (t_isa_a32)
+        return a32_encode_imm(v) >= 0 ||
+               a32_encode_imm(~v & 0xffffffffUL) >= 0 || v <= 0xffff;
     return v <= 0xff || encode_imm(v) >= 0 ||
            encode_imm(~v & 0xffffffffUL) >= 0;
 }
@@ -197,6 +203,7 @@ int t_it_imm_ok(long imm)
  * immediate, S clear. */
 void t_mov_imm_it(struct code *c, int rd, long imm)
 {
+    A32(a32_mov_imm(c, rd, imm, 0));
     unsigned long v = (unsigned long)imm & 0xffffffffUL;
     int e;
     if (low(rd) && v <= 0xff) {
