@@ -112,4 +112,6 @@ Pair swap_pair(Pair p) { return Pair{ (short)p.y, p.x }; }
 
 Calc *new_calc_from_b(int base) { return new Calc(base); }
 
+void facts_b(long *out) { ABI_FACTS(out); }
+
 }  // namespace abi

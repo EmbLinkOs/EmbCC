@@ -8948,6 +8948,68 @@ struct cvar *var_define_from(struct ctemplate *t, int pos, struct ctarg *args,
 
 /* ---- the unit ---- */
 
+static void declare_builtin_op(const char *name, int ret_void,
+                               struct cty **p, int np)
+{
+    struct cty *ft = ct_func(ret_void ? ct_basic(CT_VOID)
+                                      : ct_ptr(ct_basic(CT_VOID)),
+                             p, np, 0);
+    struct dspec ds;
+    memset(&ds, 0, sizeof ds);
+    struct declarator d;
+    memset(&d, 0, sizeof d);
+    d.kind = DN_OPERATOR;
+    d.name = name;
+    struct cfunc *f = declare_function(&ds, &d, ft, cx_global);
+    f->is_builtin = 1;
+}
+
+/* std::align_val_t and the global allocation functions that take it,
+ * which every unit declares implicitly too (6.7.5.5.2/2) -- made when a
+ * new-expression of an over-aligned type wants them in a unit that has
+ * not included <new>. Without them such a `new` fell back to operator
+ * new(size_t), whose memory is aligned for the default only: an
+ * alignas(16) object new'd on a Cortex-M, where the default is 8, came
+ * back 8-aligned. The enum is declared opaque, so <new> included later
+ * defines it, and its declarations of these functions are these. */
+struct cty *cx_implicit_align_val_t(void)
+{
+    struct csym *ns = scope_find_here(cx_global, "std");
+    if (ns && ns->k != CS_NAMESPACE)
+        return NULL;
+    if (!ns) {
+        ns = scope_add(cx_global, CS_NAMESPACE, "std");
+        ns->ns = scope_new(SC_NAMESPACE, "std", cx_global);
+    }
+    struct csym *y = lookup_in(ns->ns, "align_val_t");
+    if (y)
+        return y->k == CS_ENUM ? y->type : NULL;
+    struct cenum *en = xcalloc(1, sizeof *en);
+    en->name = "align_val_t";
+    en->owner = ns->ns;
+    en->scoped = 1;
+    en->scope = scope_new(SC_ENUM, en->name, ns->ns);
+    en->scope->en = en;
+    en->underlying = ct_size_t();
+    en->fixed = 1;
+    y = scope_add(ns->ns, CS_ENUM, en->name);
+    y->type = ct_enum(en);
+    static const char *const names[] = {
+        "operator new", "operator new[]", "operator delete",
+        "operator delete[]", "operator delete", "operator delete[]",
+    };
+    for (int i = 0; i < 6; i++) {
+        struct cty *p[3];
+        int np = 0;
+        p[np++] = i < 2 ? ct_size_t() : ct_ptr(ct_basic(CT_VOID));
+        if (i >= 4)
+            p[np++] = ct_size_t();
+        p[np++] = y->type;
+        declare_builtin_op(names[i], i >= 2, p, np);
+    }
+    return y->type;
+}
+
 /* The global operator new/delete are declared in every unit (6.7.5.5.2). */
 static void declare_builtin_ops(void)
 {
@@ -8969,17 +9031,7 @@ static void declare_builtin_ops(void)
             p[np++] = ct_size_t();
         if (ops[i].second)
             p[np++] = ct_size_t();
-        struct cty *ft = ct_func(ops[i].ret_void ? ct_basic(CT_VOID)
-                                                 : ct_ptr(ct_basic(CT_VOID)),
-                                 p, np, 0);
-        struct dspec ds;
-        memset(&ds, 0, sizeof ds);
-        struct declarator d;
-        memset(&d, 0, sizeof d);
-        d.kind = DN_OPERATOR;
-        d.name = ops[i].name;
-        struct cfunc *f = declare_function(&ds, &d, ft, cx_global);
-        f->is_builtin = 1;
+        declare_builtin_op(ops[i].name, ops[i].ret_void, p, np);
     }
 }
 

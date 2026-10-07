@@ -31,6 +31,7 @@ echo "TEST-MARKER cxx-abi-ilp32"
 . "$(dirname "$0")/../lib.sh"
 
 CLANGXX=${EMBCC_CLANGXX:-clang++}
+NM=${EMBCC_LLVM_NM:-llvm-nm}
 command -v "$CLANGXX" >/dev/null 2>&1 || {
     echo "skipped: no $CLANGXX (EMBCC_CLANGXX)"; exit 0; }
 command -v qemu-system-arm >/dev/null 2>&1 &&
@@ -120,6 +121,27 @@ for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf; do
             n=$((n + 1))
         done
     done
+    # The data the ABI lays out, compared object to object: every vtable,
+    # VTT, construction vtable and guard variable both compilers define for
+    # a side must be the same size (a guard is 4 bytes on ARM, 8 on RV32).
+    if command -v "$NM" >/dev/null 2>&1; then
+        for pair in "a ee-O0 ce-O0" "b ee-O0 ec-O0"; do
+            set -- $pair
+            for who in "$2" "$3"; do
+                "$NM" -S --defined-only "$d/$1.$who.o" | awk '
+                    NF == 4 && $4 ~ /^_Z(TV|TT|TC|GV)/ { print $4, $2 }' |
+                    sort > "$d/sym.$1.$who"
+            done
+            join "$d/sym.$1.$2" "$d/sym.$1.$3" |
+                awk '$2 != $3 { print "  " $1 ": EmbCC " $2 " bytes, clang " $3 }' \
+                > "$d/sym.$1.diff"
+            k=$(join "$d/sym.$1.$2" "$d/sym.$1.$3" | wc -l)
+            if [ -s "$d/sym.$1.diff" ] || [ "$k" -lt 4 ]; then
+                echo "$t side $1: the ABI's data differ in size ($k compared):"
+                cat "$d/sym.$1.diff"; fail=1
+            fi
+        done
+    fi
     [ "$fail" = 0 ] && echo "$t: $n pairings of EmbCC and clang++ agree with the host"
 done
 [ "$fail" = 0 ] || exit 1

@@ -156,6 +156,90 @@ Pair swap_pair(Pair p);                          // B
 Square *new_square_from_a(int id, long side);    // A
 Calc *new_calc_from_b(int base);                 // B
 
+// ---- what each compiler says about the target ---------------------------
+// ABI_FACTS is expanded in each unit, so each compiler computes the list
+// itself; side A compares B's with its own. Built for the host, the two
+// agree whatever the values; built by EmbCC and clang++ for a board, a
+// size, an alignment, an offset, a bit-field's place or an array cookie
+// that EmbCC lays out differently is a line that differs.
+struct Layout { char c; long long ll; short s; double d; char tail; };
+struct Bits {
+    unsigned a : 3;
+    int : 0;
+    char b;
+    unsigned long long c : 40;
+    short d : 7;
+};
+struct Over16 { alignas(16) char b[16]; };
+struct Over32 { alignas(32) char b[32]; };
+extern size_t last_array_new;                    // A: its operator new[]'s
+void keep(const void *p);                        // A: an escape, so an
+                                                 // allocation is not elided
+enum { NFACTS = 48 };
+void facts_a(long *out);                         // A
+void facts_b(long *out);                         // B
+
+inline long bits_image(const Bits &x)
+{
+    const unsigned char *p = reinterpret_cast<const unsigned char *>(&x);
+    long h = 0;
+    for (size_t i = 0; i < sizeof x; i++)
+        h = h * 31 + p[i];
+    return h;
+}
+
+#define ABI_FACTS(o)                                                        \
+    do {                                                                    \
+        int i_ = 0;                                                         \
+        o[i_++] = sizeof(long); o[i_++] = alignof(long);                    \
+        o[i_++] = sizeof(long long); o[i_++] = alignof(long long);          \
+        o[i_++] = sizeof(double); o[i_++] = alignof(double);                \
+        o[i_++] = sizeof(long double); o[i_++] = alignof(long double);      \
+        o[i_++] = sizeof(wchar_t); o[i_++] = (wchar_t)-1 < 0;               \
+        o[i_++] = (char)-1 < 0; o[i_++] = sizeof(bool);                     \
+        o[i_++] = sizeof(size_t); o[i_++] = sizeof(ptrdiff_t);              \
+        o[i_++] = sizeof(void *); o[i_++] = alignof(void *);                \
+        o[i_++] = sizeof(Op); o[i_++] = alignof(Op);                        \
+        o[i_++] = sizeof(int Calc::*);                                      \
+        o[i_++] = sizeof(Shape); o[i_++] = sizeof(Square);                  \
+        o[i_++] = sizeof(Pipe); o[i_++] = alignof(Pipe);                    \
+        o[i_++] = sizeof(Diamond); o[i_++] = sizeof(Calc2);                 \
+        o[i_++] = sizeof(Big); o[i_++] = sizeof(Pair); o[i_++] = alignof(Pair); \
+        o[i_++] = sizeof(Layout); o[i_++] = alignof(Layout);                \
+        o[i_++] = offsetof(Layout, d); o[i_++] = offsetof(Layout, tail);    \
+        o[i_++] = sizeof(Bits); o[i_++] = alignof(Bits);                    \
+        o[i_++] = __STDCPP_DEFAULT_NEW_ALIGNMENT__;                         \
+        {                                                                   \
+            Bits bt = {};                                                   \
+            bt.a = 5; bt.b = 'x'; bt.c = 0x123456789aULL; bt.d = -3;        \
+            o[i_++] = bits_image(bt);                                       \
+        }                                                                   \
+        {                                                                   \
+            Calc2 c2(1);                                                    \
+            o[i_++] = (char *)static_cast<Calc *>(&c2) - (char *)&c2;       \
+            Diamond dm;                                                     \
+            o[i_++] = (char *)static_cast<Node *>(&dm) - (char *)&dm;       \
+            o[i_++] = (char *)static_cast<Rnode *>(&dm) - (char *)&dm;      \
+            Pipe pp;                                                        \
+            o[i_++] = (char *)static_cast<Sink *>(&pp) - (char *)&pp;       \
+        }                                                                   \
+        {   /* the array cookie: what new[] asks for beyond the elements */ \
+            last_array_new = 0;                                             \
+            Elem *e_ = new Elem[3];                                         \
+            keep(e_);                                                       \
+            o[i_++] = (long)last_array_new - 3 * (long)sizeof(Elem);        \
+            delete[] e_;                                                    \
+            last_array_new = 0;                                             \
+            Over16 *v_ = new Over16[2];                                     \
+            keep(v_);                                                       \
+            o[i_++] = (long)last_array_new;                                 \
+            delete[] v_;                                                    \
+        }                                                                   \
+        o[i_++] = sizeof(Over32); o[i_++] = alignof(Over32);                \
+        while (i_ < NFACTS)                                                 \
+            o[i_++] = -1;                                                   \
+    } while (0)
+
 }  // namespace abi
 
 #endif

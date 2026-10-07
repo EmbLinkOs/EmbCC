@@ -2093,7 +2093,8 @@ static struct cty *align_val_type(void)
 long over_alignment(struct cty *t)
 {
     long al = ct_align(t);
-    return al > target_default_new_align() && align_val_type() ? al : 0;
+    return al > target_default_new_align() &&
+           (align_val_type() || cx_implicit_align_val_t()) ? al : 0;
 }
 
 /* The allocation functions an allocation of t looks at: its class's (they

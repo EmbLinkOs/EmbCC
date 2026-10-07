@@ -1,7 +1,22 @@
 // Side A of the C++ interop test (abi.h says what each side defines), and
 // the program: main prints a line per property.
 #include <stdio.h>
+#include <stdlib.h>
 #include "abi.h"
+
+// The replaceable array form of operator new, so a test can see what a
+// new-expression asks for (abi.h's ABI_FACTS: the cookie); every unit's
+// new[] comes here, whichever compiler built it.
+size_t abi::last_array_new;
+void *operator new[](size_t n)
+{
+    abi::last_array_new = n;
+    return malloc(n);
+}
+static const void *volatile kept;
+void abi::keep(const void *p) { kept = p; }
+void operator delete[](void *p) noexcept { free(p); }
+void operator delete[](void *p, size_t) noexcept { free(p); }
 
 namespace abi {
 
@@ -75,6 +90,8 @@ long sum_big(Big b)
 }
 
 Square *new_square_from_a(int id, long side) { return new Square(id, side); }
+
+void facts_a(long *out) { ABI_FACTS(out); }
 
 }  // namespace abi
 
@@ -156,6 +173,17 @@ int main()
     Calc *nc = new_calc_from_b(9);
     printf("new from b %d %d\n", nc->base, nc->scale(2));
     delete nc;
+    long fa[NFACTS], fb[NFACTS];
+    facts_a(fa);
+    facts_b(fb);
+    int agree = 0;
+    for (int i = 0; i < NFACTS; i++) {
+        if (fa[i] == fb[i])
+            agree++;
+        else
+            printf("fact %d: side a says %ld, side b %ld\n", i, fa[i], fb[i]);
+    }
+    printf("facts agree %d of %d\n", agree, (int)NFACTS);
     printf("==END==\n");
     fflush(stdout);
     return 0;
