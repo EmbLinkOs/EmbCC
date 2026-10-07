@@ -222,3 +222,43 @@ Not done, refused by name meanwhile:
   exceptions, a scalar local aligned above 16;
 - the LP64D/LP64F hard-float conventions and the FPU (`-mabi=lp64d`), the
   extreme code model, LSX/LASX, TLS beyond one shared instance.
+
+## Next: LP64D and the FPU
+
+What clang (`-mabi=lp64d -mno-lsx`) does, gathered for the follow-up:
+
+- Arguments: float and double in fa0-fa7; past eight they go to the
+  integer registers (the ninth double lands in a0), then the stack.
+  Structs of at most two members are flattened as on RISC-V LP64D:
+  `{float, double}` in fa0+fa1, `{double, int}` in fa0+a0. Variadic
+  arguments always travel in integer registers (`movfr2gr.d`). Long
+  double stays binary128 in integer pairs through `__extenddftf2` and
+  friends.
+- Code: `fcmp.c{lt,le,ceq,une,un}.{s,d}` + `movcf2gr` for compares,
+  `ffint`/`ftintrz` with `movgr2fr`/`movfr2gr` for conversions, unsigned
+  64-bit conversions inline (no libcall), `fsel` fed by `movgr2cf`,
+  `fsqrt` with a `fcmp.cor` check falling back to a `sqrt` call.
+- Predefined macros: `__loongarch_double_float 1`,
+  `__loongarch_hard_float 1`, `__loongarch_frlen 64`, no
+  `__loongarch_soft_float`. e_flags 0x43.
+- Encodings (checked with llvm-mc): fadd.s 0x01008000, fadd.d 0x01010000
+  (sub/mul/div step by 0x00020000), fneg/fabs/fsqrt/fmov .s/.d 0x011414xx/
+  0x011404xx/0x011444xx/0x011494xx (.s 0x400, .d 0x800), movgr2fr.w/.d
+  0x0114a400/a800, movfr2gr.s/.d 0x0114b400/b800, movgr2cf 0x0114d800,
+  movcf2gr 0x0114dc00, fsel 0x0d000000, ffint.s.w/.s.l/.d.w/.d.l
+  0x011d1000/1800/2000/2800, ftintrz.w.s/.w.d/.l.s/.l.d
+  0x011a8400/8800/a400/a800, fcvt.s.d/.d.s 0x01191800/2400, fld.s/.d
+  0x2b000000/2b800000, fst.s/.d 0x2b400000/2bc00000, bceqz/bcnez
+  0x48000000/0x48000100, fcmp.cond.s 0x0c100000 | cond<<15 (caf 0, clt 2,
+  ceq 4, cle 6, cun 8, cult 0xa, cueq 0xc, cule 0xe, cne 0x10, cor 0x14,
+  cune 0x18), .d at 0x0c200000.
+
+Plan: keep float values in integer registers as now (the soft-float
+code's float_in_gpr shape) and use the FPRs only as scratch inside an
+operation and at call and return boundaries, so the allocator stays
+integer-only; a flattening classifier over the struct type (as
+hfa_walk in src/sema/type.c walks it) decides the boundary moves.
+Selected by `-mabi=lp64d`: its own predef table, rt/libc built twice,
+EmbLD accepting double-float objects but refusing a mix of ABIs, the
+harness setting EUEN.FPE, and loongarch-abi pairing against clang's
+lp64d objects.
