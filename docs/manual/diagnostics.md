@@ -1202,7 +1202,7 @@ holds both.
 | `unroll` | `unrolled` | `counted-loop` |
 | `switch-thread` | `threaded` | `state-known` |
 | `regalloc` | `spilled-to-stack`, `split` | `no-register-free`, `loop-live-range` |
-| `opt` | `optimized`, `rewrote`, `inferred`, `hoisted`, `rotated`, `vectorized`, `strength-reduced`, `recognized-memcpy`, `recognized-memzero`, `dropped` | `fixpoint-reached`, `pass-counts`, `attr/const`, `attr/pure`, `licm/loop-invariant`, `licm/bottom-tested-loop`, `vec/constant-trip-count`, `vec/runtime-trip-count`, `ivsr/address`, `idiom/loop`, `unreachable` |
+| `opt` | `optimized`, `rewrote`, `inferred`, `hoisted`, `promoted`, `rotated`, `vectorized`, `strength-reduced`, `recognized-memcpy`, `recognized-memzero`, `dropped` | `fixpoint-reached`, `pass-counts`, `attr/const`, `attr/pure`, `licm/loop-invariant`, `licm/load`, `licm/promote`, `licm/bottom-tested-loop`, `vec/constant-trip-count`, `vec/runtime-trip-count`, `ivsr/address`, `idiom/loop`, `unreachable` |
 
 The SCCP decisions describe the branch in the intermediate code: a
 branch that "always jumps" corresponds to a source condition that is
