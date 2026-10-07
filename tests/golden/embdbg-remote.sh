@@ -194,7 +194,7 @@ CEOF
              grep -A3 'DW_AT_name	("acc")' | sed -n 's/.*DW_OP_addr 0x\([0-9a-f]*\).*/\1/p')
         [ -n "$sym" ] && [ -n "$dw" ] &&
             [ $((0x$dw)) -eq $((0x800000 + 0x$sym)) ] || {
-            echo "avr: acc's DW_OP_addr is 0x$dw; it is at 0x$sym in SRAM, so 0x80$sym"
+            printf "avr: acc's DW_OP_addr is 0x%s; it is at 0x%x in SRAM, so 0x%x\n" "$dw" $((0x$sym)) $((0x800000 + 0x$sym))
             return 1; }
     fi
 
