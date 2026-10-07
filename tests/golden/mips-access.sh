@@ -18,15 +18,23 @@
 # whose .data ends mid-word -- which EmbLD must pad, or the startup's
 # word loop over .bss traps.
 set -u
-echo "TEST-MARKER mips-access"
+# Run BIG-endian (mips-none-elf) as tests/golden/mips-be-access.sh, which sets
+# MIPS_BE=1.
+if [ "${MIPS_BE:-0}" = 1 ]; then
+    NAME=mips-be-access T=mips-none-elf MT=mips-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    NAME=mips-access T=mipsel-none-elf MT=mipsel-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
+echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
 
-T=mipsel-none-elf
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
 OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
 command -v "$OD" >/dev/null 2>&1 || { echo "skipped: $OD not found"; exit 0; }
-out=tests/golden/out/mips-access
+out=tests/golden/out/$NAME
 rm -rf "$out"; mkdir -p "$out"
 
 cat > "$out/a.c" <<'CEOF'
@@ -94,7 +102,6 @@ done
 echo "atomic, volatile, op=, ++ and va_arg accesses are single lw/sw/lhu/sh at -O0 and -O2; packed members are split"
 
 # ---- the packed ones, on the board at a misaligned address ---------------
-QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
 command -v "$QEMU" >/dev/null 2>&1 || { echo "board run skipped: $QEMU not found"; exit 0; }
 export EMBCC_MIPS_HARNESS="$PWD/$out"
 for f in boot io; do

@@ -249,6 +249,8 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
             ob_fmt(b, " varargs(%d)", i->call_nfixed);
         if (i->sret_first)
             ob_str(b, " sret");
+        if (i->ret_ptr)
+            ob_str(b, " ptrret");
         break;
     case IR_RET:
         ob_str(b, "ret");

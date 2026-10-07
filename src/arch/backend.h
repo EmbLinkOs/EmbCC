@@ -112,7 +112,7 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
  * mul, div and lr/sc as <unknown>. A malloc'd buffer the caller frees. */
 unsigned char *riscv_build_attributes(size_t *len);
 
-/* And for MIPS32r2, little-endian o32 soft-float (PIC32's core). */
+/* And for MIPS32r2 o32 soft-float (PIC32's core), in either byte order. */
 void codegen_unit_mips(struct ir_unit *iu, struct code *text,
                        struct extcall **ext, int *next,
                        struct strsite **strs, int *nstrs,
@@ -122,6 +122,37 @@ void codegen_unit_mips(struct ir_unit *iu, struct code *text,
 /* The 24-byte .MIPS.abiflags payload EmbCC's objects carry: MIPS32r2,
  * 32-bit GPRs, no FPU, the soft-float ABI -- clang's for the same flags. */
 void mips_build_abiflags(unsigned char out[24]);
+/* The MIPS encoder's byte order (arch/mips/emit.h), which the driver sets
+ * from target_big_endian() once the target is chosen. */
+void mips_set_big_endian(int on);
+
+/* And for LoongArch64, LP64S (soft float): RV64's lowering with
+ * LoongArch's instructions (src/arch/loongarch/codegen.c). */
+void codegen_unit_loongarch(struct ir_unit *iu, struct code *text,
+                            struct extcall **ext, int *next,
+                            struct strsite **strs, int *nstrs,
+                            struct gsite **gs, int *ngs,
+                            struct fsite **fs, int *nfs, int want_debug,
+                            int optimize, int no_sse, int regalloc);
+
+/* And for TriCore 1.6.1, the AURIX core: little-endian, soft float, the
+ * TriCore EABI (docs/internals/tricore-plan.md). */
+void codegen_unit_tricore(struct ir_unit *iu, struct code *text,
+                          struct extcall **ext, int *next,
+                          struct strsite **strs, int *nstrs,
+                          struct gsite **gs, int *ngs,
+                          struct fsite **fs, int *nfs, int want_debug,
+                          int optimize, int no_sse, int regalloc);
+
+/* And for Xtensa, the windowed ABI of the ESP32 (LX6) and ESP32-S3
+ * (LX7), little-endian, soft float. A function's literal pool precedes
+ * it, so its symbol is at code_off + code_entry. */
+void codegen_unit_xtensa(struct ir_unit *iu, struct code *text,
+                         struct extcall **ext, int *next,
+                         struct strsite **strs, int *nstrs,
+                         struct gsite **gs, int *ngs,
+                         struct fsite **fs, int *nfs, int want_debug,
+                         int optimize, int no_sse, int regalloc);
 
 /* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
  * a register and every value is a run of them. Same signature all the

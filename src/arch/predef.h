@@ -59,6 +59,10 @@ extern const struct predef_macro predef_macros_thumbv6m[];
 extern const int predef_macro_count_thumbv6m;
 extern const struct predef_macro predef_macros_cxx_thumbv6m[];
 extern const int predef_macro_count_cxx_thumbv6m;
+extern const struct predef_macro predef_macros_armv7a[];
+extern const int predef_macro_count_armv7a;
+extern const struct predef_macro predef_macros_cxx_armv7a[];
+extern const int predef_macro_count_cxx_armv7a;
 extern const struct predef_macro predef_macros_riscv32[];
 extern const int predef_macro_count_riscv32;
 extern const struct predef_macro predef_macros_cxx_riscv32[];
@@ -71,6 +75,25 @@ extern const struct predef_macro predef_macros_mips32[];
 extern const int predef_macro_count_mips32;
 extern const struct predef_macro predef_macros_cxx_mips32[];
 extern const int predef_macro_count_cxx_mips32;
+/* ...and big-endian (mips-none-elf), generated from clang's own answer for
+ * mips-unknown-elf: the byte-order macros are the difference. */
+extern const struct predef_macro predef_macros_mips32eb[];
+extern const int predef_macro_count_mips32eb;
+extern const struct predef_macro predef_macros_cxx_mips32eb[];
+extern const int predef_macro_count_cxx_mips32eb;
+extern const struct predef_macro predef_macros_loongarch64[];
+extern const int predef_macro_count_loongarch64;
+extern const struct predef_macro predef_macros_cxx_loongarch64[];
+extern const int predef_macro_count_cxx_loongarch64;
+extern const struct predef_macro predef_macros_tricore[];
+extern const int predef_macro_count_tricore;
+extern const struct predef_macro predef_macros_cxx_tricore[];
+extern const int predef_macro_count_cxx_tricore;
+/* Xtensa (the ESP32), from Espressif's xtensa-esp32-elf-gcc. */
+extern const struct predef_macro predef_macros_xtensa[];
+extern const int predef_macro_count_xtensa;
+extern const struct predef_macro predef_macros_cxx_xtensa[];
+extern const int predef_macro_count_cxx_xtensa;
 
 /* AVR (ATmega328P). Generated like the others, from the reference
  * compiler's own answer for the triple. */

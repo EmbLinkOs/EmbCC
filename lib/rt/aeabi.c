@@ -1,5 +1,5 @@
 /* The ARM run-time ABI's helper functions (RTABI32, "Run-time ABI for the
- * Arm Architecture"), for every Cortex-M target: the names clang, GCC and
+ * Arm Architecture"), for every Cortex-M target and ARMv7-A: the names clang, GCC and
  * the vendors' toolchains call, so an object or library built by them --
  * CMSIS-DSP, a vendor HAL, anything compiled with arm-none-eabi-gcc --
  * links against this archive. EmbCC's own code calls the libgcc names
@@ -8,9 +8,11 @@
  *   __aeabi_memcpy[4|8], __aeabi_memmove[4|8], __aeabi_memset[4|8],
  *   __aeabi_memclr[4|8]                      block operations
  *   __aeabi_idiv, __aeabi_uidiv, __aeabi_idivmod, __aeabi_uidivmod
- *                                            (ARMv7-M and up; ARMv6-M's are
- *                                            in armv6m.c, as are its
- *                                            memcpy/memclr, lmul and shifts)
+ *                                            (where there is a divide
+ *                                            instruction; the others' are
+ *                                            in aeabidiv.c, and ARMv6-M's
+ *                                            memcpy/memclr, lmul and shifts
+ *                                            in armv6m.c)
  *   __aeabi_ldivmod, __aeabi_uldivmod        quotient in r0:r1, remainder
  *                                            in r2:r3
  *   __aeabi_lmul, __aeabi_llsl, __aeabi_llsr, __aeabi_lasr,
@@ -27,7 +29,7 @@
  * THE RULE of lib/rt holds (README.md): the block loops have a variable
  * count, and EmbCC turns no loop into a call.
  */
-#if defined(__ARM_EABI__) && defined(__thumb__)
+#if defined(__ARM_EABI__)
 
 #define WEAK __attribute__((weak))
 #define BASE __attribute__((weak, pcs("aapcs")))
@@ -103,8 +105,9 @@ WEAK void __aeabi_memclr8(void *d, size_t n) { fill(d, n, 0); }
 
 /* ---- integers -------------------------------------------------------- */
 
-#if !defined(__ARM_ARCH_6M__)
-/* ARMv7-M divides in hardware: these are one sdiv/udiv each */
+#if defined(__ARM_FEATURE_IDIV)
+/* ARMv7-M divides in hardware: these are one sdiv/udiv each. (Without
+ * the instruction `n / d` IS a call to __aeabi_idiv: aeabidiv.c.) */
 WEAK s32 __aeabi_idiv(s32 n, s32 d) { return n / d; }
 WEAK u32 __aeabi_uidiv(u32 n, u32 d) { return n / d; }
 /* the quotient in r0 and the remainder in r1: a 64-bit return's halves */
@@ -118,6 +121,8 @@ WEAK u64 __aeabi_uidivmod(u32 n, u32 d)
     u32 q = n / d;
     return (u64)q | (u64)(n - q * d) << 32;
 }
+#endif
+#if !defined(__ARM_ARCH_6M__)
 WEAK u64 __aeabi_lmul(u64 a, u64 b) { return a * b; }
 WEAK u64 __aeabi_llsl(u64 a, int n) { return n >= 64 ? 0 : a << n; }
 WEAK u64 __aeabi_llsr(u64 a, int n) { return n >= 64 ? 0 : a >> n; }
@@ -170,6 +175,62 @@ __attribute__((naked, weak)) void __aeabi_ldivmod(void)
 }
 
 /* ---- soft float, in the base procedure call standard ----------------- */
+
+/* With a DOUBLE-precision FPU (bit 3 of __ARM_FP: the Cortex-M7's
+ * FPv5-D16, an ARMv7-A VFPv3/VFPv4) lib/rt/softfp.c keeps only the 64-bit
+ * integer conversions, which no VFP unit has -- so these are the
+ * operations themselves, one instruction each, still taking and returning
+ * their operands in the core registers (BASE). Forwarding to __addsf3 and
+ * the rest, as below, left every such image that pulled this member in
+ * with undefined symbols. Out-of-range float-to-int conversions saturate,
+ * as vcvt does and as the libgcc routines answer. */
+#if defined(__ARM_FP) && (__ARM_FP & 8)
+float __floatdisf(long long); float __floatundisf(unsigned long long);
+double __floatdidf(long long); double __floatundidf(unsigned long long);
+long long __fixsfdi(float); unsigned long long __fixunssfdi(float);
+long long __fixdfdi(double); unsigned long long __fixunsdfdi(double);
+
+BASE float __aeabi_fadd(float a, float b) { return a + b; }
+BASE float __aeabi_fsub(float a, float b) { return a - b; }
+BASE float __aeabi_frsub(float a, float b) { return b - a; }
+BASE float __aeabi_fmul(float a, float b) { return a * b; }
+BASE float __aeabi_fdiv(float a, float b) { return a / b; }
+BASE double __aeabi_dadd(double a, double b) { return a + b; }
+BASE double __aeabi_dsub(double a, double b) { return a - b; }
+BASE double __aeabi_drsub(double a, double b) { return b - a; }
+BASE double __aeabi_dmul(double a, double b) { return a * b; }
+BASE double __aeabi_ddiv(double a, double b) { return a / b; }
+BASE int __aeabi_fcmpeq(float a, float b) { return a == b; }
+BASE int __aeabi_fcmplt(float a, float b) { return a < b; }
+BASE int __aeabi_fcmple(float a, float b) { return a <= b; }
+BASE int __aeabi_fcmpge(float a, float b) { return a >= b; }
+BASE int __aeabi_fcmpgt(float a, float b) { return a > b; }
+BASE int __aeabi_fcmpun(float a, float b) { return a != a || b != b; }
+BASE int __aeabi_dcmpeq(double a, double b) { return a == b; }
+BASE int __aeabi_dcmplt(double a, double b) { return a < b; }
+BASE int __aeabi_dcmple(double a, double b) { return a <= b; }
+BASE int __aeabi_dcmpge(double a, double b) { return a >= b; }
+BASE int __aeabi_dcmpgt(double a, double b) { return a > b; }
+BASE int __aeabi_dcmpun(double a, double b) { return a != a || b != b; }
+BASE float __aeabi_i2f(int a) { return (float)a; }
+BASE float __aeabi_ui2f(unsigned a) { return (float)a; }
+BASE float __aeabi_l2f(long long a) { return __floatdisf(a); }
+BASE float __aeabi_ul2f(unsigned long long a) { return __floatundisf(a); }
+BASE double __aeabi_i2d(int a) { return (double)a; }
+BASE double __aeabi_ui2d(unsigned a) { return (double)a; }
+BASE double __aeabi_l2d(long long a) { return __floatdidf(a); }
+BASE double __aeabi_ul2d(unsigned long long a) { return __floatundidf(a); }
+BASE int __aeabi_f2iz(float a) { return (int)a; }
+BASE unsigned __aeabi_f2uiz(float a) { return (unsigned)a; }
+BASE long long __aeabi_f2lz(float a) { return __fixsfdi(a); }
+BASE unsigned long long __aeabi_f2ulz(float a) { return __fixunssfdi(a); }
+BASE int __aeabi_d2iz(double a) { return (int)a; }
+BASE unsigned __aeabi_d2uiz(double a) { return (unsigned)a; }
+BASE long long __aeabi_d2lz(double a) { return __fixdfdi(a); }
+BASE unsigned long long __aeabi_d2ulz(double a) { return __fixunsdfdi(a); }
+BASE double __aeabi_f2d(float a) { return (double)a; }
+BASE float __aeabi_d2f(double a) { return (float)a; }
+#else
 
 float __addsf3(float, float); float __subsf3(float, float);
 float __mulsf3(float, float); float __divsf3(float, float);
@@ -234,4 +295,5 @@ BASE unsigned long long __aeabi_d2ulz(double a) { return __fixunsdfdi(a); }
 BASE double __aeabi_f2d(float a) { return __extendsfdf2(a); }
 BASE float __aeabi_d2f(double a) { return __truncdfsf2(a); }
 
+#endif /* __ARM_FP & 8 */
 #endif

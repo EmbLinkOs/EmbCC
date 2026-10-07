@@ -15,15 +15,22 @@
  * include lines. The Sun copyright/notice above is preserved as required. The
  * numerics below (the __HI/__LO word macros, the __ieee754_/__kernel decls) are
  * fdlibm's; emlibc supplies only the environment: <stdint.h>-based __int32_t,
- * little-endian selection, and a tiny math_config.h (__math_oflow/uflow).
+ * the byte-order selection, and a tiny math_config.h (__math_oflow/uflow).
  * __OBSOLETE_MATH forces the classic path (our e_*.c define __ieee754_*), so the
  * "!__OBSOLETE_MATH" block that would redirect __ieee754_exp->exp is skipped. */
 #include <math.h>
 #include <stdint.h>
 typedef int32_t  __int32_t;
 typedef uint32_t __uint32_t;
-#ifndef __IEEE_LITTLE_ENDIAN
+/* Which word of a double is at the lower address: the target's byte order,
+ * as the compiler predefines it (big-endian MIPS, mips-none-elf, has its
+ * high word first). Exactly one of the two, as fdlibm's shape union asks. */
+#if !defined(__IEEE_LITTLE_ENDIAN) && !defined(__IEEE_BIG_ENDIAN)
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define __IEEE_BIG_ENDIAN 1
+#else
 #define __IEEE_LITTLE_ENDIAN 1
+#endif
 #endif
 #ifndef __OBSOLETE_MATH
 #define __OBSOLETE_MATH 1

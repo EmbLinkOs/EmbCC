@@ -15,6 +15,8 @@
 #include "../arch/avr/asm.h"
 #include "../arch/riscv/asm.h"
 #include "../arch/mips/asm.h"
+#include "../arch/loongarch/asm.h"
+#include "../arch/tricore/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
@@ -558,17 +560,31 @@ static int init_overhang(struct unit *u, int line, const char *what,
                          struct type *ty, const struct initelem *v, int n,
                          int is_static);
 
-/* A bit-field's value merged into its storage unit's nb bytes at p
- * (they start zeroed, so OR is enough and neighbours are kept): its low
- * `width` bits, at bit_off of p[0] — 17 bytes for a packed __int128's at
- * bit 1..7, the last one past what 128 bits hold. */
-static void merge_bits(char *p, int nb, struct w128 val, int bit_off,
-                       int width)
+/* A bit-field's value merged into its storage unit at p (the bytes start
+ * zeroed, so OR is enough and neighbours are kept): its low `width` bits,
+ * at bit_off of the unit's `unit` bytes read as one integer in the
+ * target's order (type.h) -- 17 bytes for a packed __int128's at bit
+ * 1..7, the last one past what 128 bits hold. Only the first nb of the
+ * unit's bytes are the object's (bf_span), and only they are written: on
+ * a big-endian target the field's bytes are the unit's FIRST, its high
+ * end. */
+static void merge_bits(char *p, int unit, int nb, struct w128 val,
+                       int bit_off, int width)
 {
     struct w128 mask = w_shr(w_make(~0UL, ~0UL), 128 - width, 0);
     val.lo &= mask.lo;
     val.hi &= mask.hi;
     struct w128 lo = w_shl(val, bit_off);
+    if (target_big_endian()) {
+        if (unit > 16)
+            internal_error("a 17-byte bit-field unit on a big-endian "
+                           "target");
+        for (int b = 0; b < unit; b++)
+            if (unit - 1 - b < nb)
+                p[unit - 1 - b] |=
+                    (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
+        return;
+    }
     for (int b = 0; b < nb && b < 16; b++)
         p[b] |= (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
     if (nb == 17 && bit_off)
@@ -2275,7 +2291,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * an assignment and never looks at this -- and on AVR, where
              * long[4] is sixteen bytes, it was a 16-byte buffer that a
              * 24-byte copy ran eight bytes past. */
-            if (is_copy && !target_va_list_is_pointer())
+            if (is_copy && !target_va_list_is_pointer() &&
+                target_get() != TARGET_XTENSA)
                 e->var_index = scope_add(sc, "<va_copy tag>",
                                          ty_array(ty_base(TY_LONG, 0), 4),
                                          NULL);
@@ -3436,12 +3453,11 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                     struct expr *ch = xcalloc(1, sizeof *ch);
                     ch->kind = EXPR_NUM;
                     ch->line = init->line;
-                    /* element i: esz little-endian bytes (lit_encode) */
-                    unsigned long uv = 0;
-                    for (int b = 0; b < esz; b++)
-                        uv |= (unsigned long)(unsigned char)
-                              init->name[(size_t)i * (size_t)esz + (size_t)b]
-                              << (8 * b);
+                    /* element i: esz bytes in the target's order
+                     * (lit_encode) */
+                    unsigned long uv = (unsigned long)target_get_uint(
+                        (const unsigned char *)init->name +
+                        (size_t)i * (size_t)esz, esz);
                     ch->num = (long)uv;
                     ch->ty = ty->pointee;
                     init_push(out, off + i * esz, ty->pointee, ch);
@@ -3615,8 +3631,12 @@ static int init_overhang(struct unit *u, int line, const char *what,
         /* a bit-field reaches as far as its bits do, not as far as its
          * declared type: AVR packs an `unsigned` (2 bytes) field into a
          * one-byte struct */
-        int w = v[k].bit_width ? (v[k].bit_off + v[k].bit_width + 7) / 8
-                               : ty_size(v[k].ty);
+        int w = v[k].bit_width
+              ? (ty_bf_mempos(v[k].bit_off, v[k].bit_width,
+                              8 * (v[k].bf_bytes ? v[k].bf_bytes
+                                                 : ty_size(v[k].ty))) +
+                 v[k].bit_width + 7) / 8
+              : ty_size(v[k].ty);
         if (v[k].off + w > end)
             end = v[k].off + w;
     }
@@ -3705,9 +3725,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "scaling by a real");
             int esz = ty_size(el);
             unsigned char pb[16];
-            ldf_encode(re, fmt, pb);
+            ldf_encode_target(re, fmt, pb);
             memcpy(bytes + v[k].off, pb, (size_t)esz);
-            ldf_encode(im, fmt, pb);
+            ldf_encode_target(im, fmt, pb);
             memcpy(bytes + v[k].off + esz, pb, (size_t)esz);
             continue;
         }
@@ -3719,12 +3739,18 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static long double initializer must be a "
                            "constant expression");
             unsigned char lb[16];
-            ldf_encode(x, ldf_target_fmt(), lb);
-            memcpy(bytes + v[k].off, lb, 16);
+            int lz = ldf_encode_target(x, ldf_target_fmt(), lb);
+            if (lz > sz)
+                lz = sz;
+            /* the format's bytes and no more: 8 where long double is a
+             * double (16 copied the rest of lb, never written, over the
+             * next member or past the image) */
+            memcpy(bytes + v[k].off, lb, (size_t)lz);
             continue;
         }
         /* A float/double slot: fold to the value, store its IEEE-754 bit
-         * pattern (4 bytes for float, 8 for double), little-endian. */
+         * pattern (4 bytes for float, 8 for double), in the target's
+         * byte order. */
         if (ty_is_float(v[k].ty)) {
             double dv;
             if (!const_fold_f(v[k].e, &dv))
@@ -3738,8 +3764,7 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             } else {
                 memcpy(&ubits, &dv, 8);
             }
-            for (int b = 0; b < sz; b++)
-                bytes[v[k].off + b] = (char)(ubits >> (8 * b));
+            target_put_uint((unsigned char *)bytes + v[k].off, sz, ubits);
             continue;
         }
         if (v[k].ty->kind == TY_INT128) {
@@ -3750,15 +3775,17 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "expression");
             if (v[k].bit_width) {
                 merge_bits(bytes + v[k].off,
+                           v[k].bf_bytes ? v[k].bf_bytes : 16,
                            bf_span(v[k].bf_bytes ? v[k].bf_bytes : 16,
                                    v[k].off, size), w,
                            v[k].bit_off, v[k].bit_width);
                 continue;
             }
-            for (int b = 0; b < 8; b++) {
-                bytes[v[k].off + b] = (char)(w.lo >> (8 * b));
-                bytes[v[k].off + 8 + b] = (char)(w.hi >> (8 * b));
-            }
+            /* the low half first little-endian, the high one big */
+            target_put_uint((unsigned char *)bytes + v[k].off +
+                            (target_big_endian() ? 8 : 0), 8, w.lo);
+            target_put_uint((unsigned char *)bytes + v[k].off +
+                            (target_big_endian() ? 0 : 8), 8, w.hi);
             continue;
         }
         long cv;
@@ -3768,14 +3795,15 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                        "string literal, or the address of a global");
         if (v[k].bit_width) {
             merge_bits(bytes + v[k].off,
+                       v[k].bf_bytes ? v[k].bf_bytes : sz,
                        bf_span(v[k].bf_bytes ? v[k].bf_bytes : sz,
                                v[k].off, size),
                        w_make((unsigned long)cv, 0), v[k].bit_off,
                        v[k].bit_width);
             continue;
         }
-        for (int b = 0; b < sz; b++)
-            bytes[v[k].off + b] = (char)((unsigned long)cv >> (8 * b));
+        target_put_uint((unsigned char *)bytes + v[k].off, sz,
+                        (unsigned long)cv);
     }
     *out_bytes = bytes;
     *out_rel = rel;
@@ -4310,6 +4338,82 @@ static int asm_resolve_reg_mips(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* TriCore: "d", "r" and "g" a data register (-2), "a" and "m" an address
+ * register (-3: "m" holds the lvalue's address, written [%0]), "i" and
+ * "n" a constant; a register variable its register, an address register
+ * numbered 16 + n (tricore/irgen.c). */
+static int asm_resolve_reg_tricore(struct unit *u, struct stmt *s,
+                                   struct asm_operand *op, const char *c)
+{
+    int has_d = 0, has_a = 0, has_i = 0;
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int f, r = tcasm_reg(rn, (int)strlen(rn), &f);
+        if (r < 0 || f == 'e' || (f == 'd' && r > 7) ||
+            (f == 'a' && (r < 2 || r > 7)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "TriCore asm (use d0-d7 or a2-a7)", rn);
+        return f == 'a' ? 16 + r : r;
+    }
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'd') has_d = 1;
+        if (*p == 'a' || *p == 'm') has_a = 1;
+        if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+            has_i = 1;
+    }
+    if (has_i && !has_d && !has_a) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_d)
+        return -2;
+    if (has_a)
+        return -3;
+    return ASM_REG_INVALID;
+}
+
+/* LoongArch: the same three kinds of operand. A register variable must
+ * name a register irgen's pool hands out -- the caller-saved a0-a7 and
+ * t0-t8 ($r4-$r20) -- and the constant letters are gcc's LoongArch ones
+ * (I a signed 12-bit, K an unsigned 12-bit, J zero) as well as i and n. */
+static int asm_resolve_reg_la(struct unit *u, struct stmt *s,
+                              struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = laasm_gpr(rn, (int)strlen(rn));
+        if (!(r >= 4 && r <= 20))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "LoongArch asm (use a0-a7 or t0-t8)", rn);
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'm') has_r = 1;
+        if (*p == 'i' || *p == 'n' || *p == 'I' || *p == 'J' || *p == 'K')
+            has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -4330,6 +4434,10 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
     if (target_get() == TARGET_MIPS32)
         return asm_resolve_reg_mips(u, s, op, c);
+    if (target_get() == TARGET_LOONGARCH64)
+        return asm_resolve_reg_la(u, s, op, c);
+    if (target_get() == TARGET_TRICORE)
+        return asm_resolve_reg_tricore(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

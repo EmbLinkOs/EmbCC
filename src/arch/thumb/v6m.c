@@ -1339,7 +1339,10 @@ static void gen_call(struct t_fn *F, int n)
     for (int k = 0; k < i->nargs; k++)
         tcg_place_one(&w, &i->argv[k], &pl[k]);
     /* The stack words first: writing one needs scratch registers, and once
-     * r0-r3 are loaded only r6 and r7 are left. */
+     * r0-r3 are loaded only r6 and r7 are left. A struct's words are read
+     * at its type's alignment only where irgen promises the address has it
+     * (ir_arg.natural): a packed struct's member may be anywhere, and LDR
+     * faults on a misaligned address here. */
     for (int k = 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
         if (pl[k].vfp >= 0 && pl[k].nvfp)
@@ -1353,7 +1356,8 @@ static void gen_call(struct t_fn *F, int n)
                 int nb = a->size - off < 4 ? (int)(a->size - off) : 4;
                 pool_point(F, 96, 0);
                 F->tbusy |= 1u << S1;
-                agg_word(F, sc(F, S0), S1, off, nb, a->align);
+                agg_word(F, sc(F, S0), S1, off, nb,
+                         a->natural ? a->align : 1);
                 F->tbusy &= ~(1u << S1);
                 sp_st(F, S0, pl[k].stk + (long)q * 4, 1u << S1);
             }
@@ -1402,7 +1406,8 @@ static void gen_call(struct t_fn *F, int n)
             for (int q = 0; q < pl[k].nreg; q++) {
                 long off = (long)q * 4;
                 int nb = a->size - off < 4 ? (int)(a->size - off) : 4;
-                agg_word(F, pl[k].reg + q, S1, off, nb, a->align);
+                agg_word(F, pl[k].reg + q, S1, off, nb,
+                         a->natural ? a->align : 1);
             }
             F->tbusy &= ~(1u << S1);
         } else if (a->size > 4) {
@@ -1454,7 +1459,9 @@ static void gen_ret(struct t_fn *F, int n)
     struct code *t = F->t;
     if (i->a >= 0 && fn->ret_abi.size && fn->ret_abi.is_struct) {
         long sz = fn->ret_abi.size;
-        int al = fn->ret_abi.align ? fn->ret_abi.align : 1;
+        /* the value's address need not be aligned: a packed struct's
+         * member (irgen's IR_RET natural), and LDR faults on ARMv6-M */
+        int al = i->natural && fn->ret_abi.align ? fn->ret_abi.align : 1;
         if (F->sret_slot >= 0) {
             /* Copied to the buffer the caller named. r0-r3 hold nothing
              * at a return, so they carry the copy: r0 the destination, r1

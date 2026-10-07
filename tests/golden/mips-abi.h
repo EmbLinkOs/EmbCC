@@ -54,3 +54,30 @@ int vmixed(int n, ...);
 int far_elt(int i);
 extern int far_array[10000];
 int (*pick(int k))(int);
+
+/* Where the byte order shows (mips-be-abi.sh runs these big-endian): a
+ * composite shorter than a word travels LEFT-justified in its register
+ * big-endian (its first byte the register's most significant), a
+ * long long's or double's HIGH word is the lower-numbered register of its
+ * pair and the lower stack word, and a long long comes back high word in
+ * v0. Each in the registers, straddling a3 and the stack, and wholly on
+ * the stack, named and variadic. */
+struct b1 { unsigned char a; };
+struct b2 { unsigned char a, b; };
+struct h1 { short h; };
+struct b5 { unsigned char c[5]; };
+struct b6 { short h[3]; };
+int take_b1(struct b1 s, int k);
+int take_b2_h1(int k, struct b2 s, struct h1 t);
+int take_b5_at3(int a, int b, int c, struct b5 s);
+int take_small_stack(int a, int b, int c, int d, struct b1 s, struct b2 t,
+                     struct h1 u, struct b6 v);
+long long ll_first(long long a, int b);
+long long ll_stack(int a, int b, int c, int d, long long e, int f);
+long long ll_mix(long long a, long long b);
+unsigned long long ull_ret(unsigned hi, unsigned lo);
+double d_stack(int a, int b, int c, int d, int e, double f);
+struct b2 ret_b2(int k);
+struct h1 ret_h1(int k);
+long long vll(int n, ...);
+int vsmall(int n, ...);

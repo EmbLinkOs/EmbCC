@@ -30,7 +30,7 @@ if command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1
 then
     cc -std=c99 -Wall -Wextra -o "$out/tasmcheck" \
        tools/tasmcheck/tasmcheck.c src/arch/thumb/asm.c \
-       src/arch/thumb/emit.c src/arch/code.c src/driver/util.c \
+       src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/code.c src/driver/util.c \
        src/driver/diag.c src/platform/platform_common.c src/platform/platform_posix.c || {
         echo "tasmcheck did not build"; exit 1; }
     "$out/tasmcheck" --list > "$out/v.s" || {
