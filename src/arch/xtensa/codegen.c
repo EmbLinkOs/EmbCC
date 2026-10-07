@@ -38,7 +38,7 @@
  *     -mserialize-volatile has them.
  *
  * Refused by name: computed goto, a jump table (target_jump_tables keeps a
- * dense switch a decision tree), atomics other than a word, inline asm,
+ * dense switch a decision tree), atomics wider than a word, inline asm,
  * the frame and return address, a function too large for its branches or
  * its literal pool, and __int128 (which does not exist on ILP32). THE RULE.
  */
@@ -2005,12 +2005,170 @@ static const char *cvt_name(const struct ir_ins *i)
 
 static void need_word_atomic(struct xt_fn *F, const struct ir_ins *i)
 {
+    if (i->size == 1 || i->size == 2)   /* sub_* below: the word around it */
+        return;
     if (i->size != 4)
-        xt_refuse(F, i, i->size < 4
-                  ? "an atomic narrower than four bytes (s32c1i is "
-                    "word-sized, and a read-modify-write of the containing "
-                    "word is not atomic against its neighbours)"
-                  : "an atomic wider than a register");
+        xt_refuse(F, i, "an atomic wider than a register");
+}
+
+/* ---- one- and two-byte atomics ---------------------------------------
+ *
+ * s32c1i is word-sized, so a narrow atomic works on the aligned word
+ * around it, as GCC's and LLVM's do: an s32c1i loop that rewrites only its
+ * lane,
+ *
+ *   retry: l32i   old, aligned, 0
+ *          wsr    old, scompare1
+ *          new = f(old)  in the lane
+ *          new = old ^ ((new ^ old) & mask)
+ *          s32c1i new, aligned, 0          (new = what memory held)
+ *          bne    new, old, retry
+ *
+ * atomic against the neighbouring bytes too: a store to any of them
+ * between the load and the s32c1i makes it fail, and the loop goes round.
+ * Xtensa is little-endian here: the lane of address a is bits 8*(a & 3)
+ * up. The scratches are four, one short of what such a loop holds, so the
+ * lane's shift is kept in SAR (ssl: sll then shifts left by it) and the
+ * operands are read from their homes and shifted into the lane on every
+ * trip; the merge masks them, so they need no mask of their own. */
+#define SUB_AL  ADDR        /* a15: the aligned word's address */
+#define SUB_MK  SCR         /* a14: the lane's mask */
+#define SUB_OLD ACC         /* a8:  the word seen */
+#define SUB_NEW TMP         /* a9:  the operand, then the word to store */
+
+/* SUB_AL, SUB_MK, and SAR for sll into the lane, for the address in a */
+static void sub_lane(struct xt_fn *F, int av, int size)
+{
+    struct code *t = F->t;
+    int a = rdr(F, av, SUB_AL);
+    xt_extui(t, SUB_NEW, a, 0, 2);
+    xt_slli(t, SUB_NEW, SUB_NEW, 3);
+    xt_ssl(t, SUB_NEW);
+    xt_srli(t, SUB_AL, a, 2);
+    xt_slli(t, SUB_AL, SUB_AL, 2);
+    xt_movi(t, SUB_MK, -1);
+    xt_extui(t, SUB_MK, SUB_MK, 0, 8 * size);
+    xt_sll(t, SUB_MK, SUB_MK);
+}
+
+/* SUB_NEW = vreg v shifted into the lane (SAR as sub_lane left it) */
+static void sub_in(struct xt_fn *F, int v)
+{
+    xt_sll(F->t, SUB_NEW, rdr(F, v, SUB_NEW));
+}
+
+/* SUB_NEW = the byte or halfword at the pointer in vreg p, in the lane */
+static void sub_in_mem(struct xt_fn *F, int p, int size)
+{
+    xt_load(F->t, SUB_NEW, rdr(F, p, SUB_NEW), 0, size, 0);
+    xt_sll(F->t, SUB_NEW, SUB_NEW);
+}
+
+/* SUB_NEW = old ^ ((SUB_NEW ^ old) & mask) */
+static void sub_merge(struct xt_fn *F)
+{
+    xt_alu(F->t, XT_XOR, SUB_NEW, SUB_NEW, SUB_OLD);
+    xt_alu(F->t, XT_AND, SUB_NEW, SUB_NEW, SUB_MK);
+    xt_alu(F->t, XT_XOR, SUB_NEW, SUB_NEW, SUB_OLD);
+}
+
+/* SUB_OLD's lane down to bit 0, extended as `sign` says: the shift from
+ * vreg a's address again (ssa8l: srl then shifts right by 8 * (a & 3)) */
+static void sub_out(struct xt_fn *F, int av, int size, int sign)
+{
+    struct code *t = F->t;
+    xt_alu(t, XT_AND, SUB_OLD, SUB_OLD, SUB_MK);
+    xt_ssa8l(t, rdr(F, av, SUB_NEW));
+    xt_srl(t, SUB_OLD, SUB_OLD);
+    if (sign)
+        xt_sext(t, SUB_OLD, SUB_OLD, 8 * size - 1);
+}
+
+/* swap, fetch-and-add and the bitwise ones, on a byte or a halfword */
+static void sub_rmw(struct xt_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int top, again;
+    sub_lane(F, i->a, i->size);
+    xt_memw(t);
+    top = t->len;
+    xt_load(t, SUB_OLD, SUB_AL, 0, 4, 0);
+    xt_wsr(t, SUB_OLD, XT_SR_SCOMPARE1);
+    sub_in(F, i->b);
+    if (i->op == IR_XADD) {
+        xt_alu(t, XT_ADD, SUB_NEW, SUB_OLD, SUB_NEW);
+    } else if (i->op == IR_ARMW) {
+        switch ((int)i->imm) {
+        case '&': xt_alu(t, XT_AND, SUB_NEW, SUB_OLD, SUB_NEW); break;
+        case '|': xt_alu(t, XT_OR, SUB_NEW, SUB_OLD, SUB_NEW); break;
+        case '^': xt_alu(t, XT_XOR, SUB_NEW, SUB_OLD, SUB_NEW); break;
+        default:                                        /* nand */
+            xt_alu(t, XT_AND, SUB_NEW, SUB_OLD, SUB_NEW);
+            xt_neg(t, SUB_NEW, SUB_NEW);
+            xt_addi(t, SUB_NEW, SUB_NEW, -1);
+            break;
+        }
+    }                                       /* (IR_XCHG: the operand) */
+    sub_merge(F);
+    xt_s32c1i(t, SUB_NEW, SUB_AL, 0);
+    again = br_place(F, test_rr(XT_BNE, SUB_NEW, SUB_OLD));
+    br_back(F, again, top);
+    xt_memw(t);
+    sub_out(F, i->a, i->size, i->sign);
+    wrote(F, i->dst, SUB_OLD);
+}
+
+/* compare-and-swap on a byte or a halfword: the lane is compared, not the
+ * word, so a neighbour's change only goes round:
+ *
+ *          l32i   old, aligned, 0
+ *   retry: (expected, in the lane) ^ old ; bany it, mask, out
+ *          wsr    old, scompare1
+ *          new = old ^ (((desired, in the lane) ^ old) & mask)
+ *          s32c1i new, aligned, 0
+ *          beq    new, old, out
+ *          mov    old, new ; j retry
+ *   out:
+ * old is then the word seen, whichever way the loop ended. */
+static void sub_cas(struct xt_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int top, again, failed, done;
+    sub_lane(F, i->a, i->size);
+    xt_memw(t);
+    xt_load(t, SUB_OLD, SUB_AL, 0, 4, 0);
+    top = t->len;
+    if (i->op == IR_CAS)
+        sub_in(F, i->b);
+    else
+        sub_in_mem(F, i->b, i->size);
+    xt_alu(t, XT_XOR, SUB_NEW, SUB_NEW, SUB_OLD);
+    failed = br_place(F, test_rr(XT_BANY, SUB_NEW, SUB_MK));
+    xt_wsr(t, SUB_OLD, XT_SR_SCOMPARE1);
+    sub_in(F, i->c);
+    sub_merge(F);
+    xt_s32c1i(t, SUB_NEW, SUB_AL, 0);
+    done = br_place(F, test_rr(XT_BEQ, SUB_NEW, SUB_OLD));
+    xt_mov(t, SUB_OLD, SUB_NEW);
+    again = br_place(F, test_const(1));
+    br_back(F, again, top);
+    br_land(F, failed);
+    br_land(F, done);
+    xt_memw(t);
+    if (i->op == IR_CAS) {
+        sub_out(F, i->a, i->size, i->sign);
+        wr(F, i->dst, SUB_OLD);
+    } else {
+        /* the flag from the lanes compared (SAR still shifts left); then
+         * *b = the lane seen */
+        sub_in_mem(F, i->b, i->size);
+        xt_alu(t, XT_XOR, SUB_NEW, SUB_NEW, SUB_OLD);
+        xt_alu(t, XT_AND, SUB_NEW, SUB_NEW, SUB_MK);
+        emit_bool(F, test_z(XT_BEQZ, SUB_NEW), SUB_AL);
+        sub_out(F, i->a, i->size, 0);
+        xt_store(t, SUB_OLD, rdr(F, i->b, SUB_NEW), 0, i->size);
+        wr(F, i->dst, SUB_AL);
+    }
 }
 
 /* Copy `size` bytes from [TMP] to [ADDR] (copy) or zero them (!copy):
@@ -2629,6 +2787,10 @@ static void gen_ins(struct xt_fn *F, int n)
          *   memw                         -- dst = old */
         int addr, val, top, again;
         need_word_atomic(F, i);
+        if (i->size == 1 || i->size == 2) {
+            sub_rmw(F, i);
+            return;
+        }
         addr = rdr(F, i->a, ADDR);
         val = rdr(F, i->b, TMP);
         xt_memw(t);
@@ -2663,6 +2825,10 @@ static void gen_ins(struct xt_fn *F, int n)
          * value when memory holds SCOMPARE1, and returns what it held */
         int addr, exp, des;
         need_word_atomic(F, i);
+        if (i->size == 1 || i->size == 2) {
+            sub_cas(F, i);
+            return;
+        }
         addr = rdr(F, i->a, ADDR);
         if (i->op == IR_CAS) {
             exp = rdr(F, i->b, TMP);

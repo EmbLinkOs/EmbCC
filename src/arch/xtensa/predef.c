@@ -119,6 +119,8 @@ const struct predef_macro predef_macros_xtensa[] = {
     { "__GCC_ATOMIC_SHORT_LOCK_FREE", "2" },
     { "__GCC_ATOMIC_TEST_AND_SET_TRUEVAL", "1" },
     { "__GCC_ATOMIC_WCHAR_T_LOCK_FREE", "2" },
+    { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1", "1" },
+    { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2", "1" },
     { "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4", "1" },
     { "__GCC_IEC_559", "0" },
     { "__GCC_IEC_559_COMPLEX", "0" },

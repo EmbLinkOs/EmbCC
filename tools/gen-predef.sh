@@ -224,10 +224,11 @@ exclude_arch() {
         # for armv8-m.base. A program that tests __ARM_FEATURE_CLZ and
         # writes `clz` in asm would get an UNDEFINED instruction.
         thumbv8mbase) echo '^#define __ARM_FEATURE_(CLZ|QBIT|SAT|NUMERIC_MAXMIN|DIRECTED_ROUNDING) ' ;;
-        # Xtensa's s32c1i is word-sized too. The table is the ESP32's
-        # (xtensa-esp32-elf-gcc, which has no -msoft-float: the float ABI
-        # is the same either way, every float in the address registers).
-        xtensa)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # (Xtensa claims one and two bytes too: s32c1i is word-sized, and
+        # its backend makes them an s32c1i loop on the word. The table is
+        # the ESP32's -- xtensa-esp32-elf-gcc, which has no -msoft-float:
+        # the float ABI is the same either way, every float in the address
+        # registers.)
         # (PowerPC claims one and two bytes too: lbarx/lharx are not Book
         # E's, so its backend makes them a lwarx/stwcx. loop on the word.)
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
