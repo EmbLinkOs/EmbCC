@@ -163,6 +163,32 @@ for opt in -O0 -O1 -O2; do
 done
 echo "data: $(cat "$out/cmp-O0.txt") (at -O0, -O1 and -O2)"
 
+# The debug information big-endian: every DWARF field in the target's
+# order (llvm-dwarfdump --verify reads a unit length written backwards as
+# a unit four gigabytes long), and a bit-field's DW_AT_data_bit_offset in
+# memory order, as clang gives it.
+DD=${EMBCC_LLVM_DWARFDUMP:-llvm-dwarfdump}
+if command -v "$DD" >/dev/null 2>&1; then
+    printf '%s\n' 'struct bf1 { unsigned a : 3, b : 5, c : 9, d : 15; };' \
+        'int f(struct bf1 *p) { struct bf1 x = *p; return x.c + x.d; }' \
+        > "$out/dbg.c"
+    "$EMBCC" --target=$T -g -O0 -c "$out/dbg.c" -o "$out/dbg.o" &&
+    "$EMBCC" --target=$T -g -O1 -c "$src" -o "$out/dbg2.o" || {
+        echo "EmbCC cannot compile with -g"; exit 1; }
+    for o in dbg dbg2; do
+        "$DD" --verify "$out/$o.o" > "$out/$o.verify" 2>&1 || {
+            echo "FAIL: the -g object's DWARF does not verify:"
+            grep -i 'error\|warning' "$out/$o.verify" | head -4; exit 1; }
+    done
+    offs=$("$DD" --debug-info "$out/dbg.o" |
+           sed -n 's/.*DW_AT_data_bit_offset.*(0x0*\([0-9a-f]*\)).*/\1/p' |
+           tr '\n' ' ')
+    [ "$offs" = " 3 8 11 " ] || [ "$offs" = "0 3 8 11 " ] || {
+        echo "FAIL: bit-field DW_AT_data_bit_offset '$offs', clang's is 0 3 8 0x11"
+        exit 1; }
+    echo "-g: the DWARF verifies, and bit-field offsets are clang's"
+fi
+
 # On the board, when there is one.
 QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
 command -v "$QEMU" >/dev/null 2>&1 || {

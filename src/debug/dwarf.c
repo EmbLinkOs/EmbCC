@@ -598,10 +598,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     free(tm.k); free(tm.off); free(tm.fix);
 
     unsigned long ulen = (unsigned long)(b->len - after_len);
-    b->p[len_at + 0] = (unsigned char)ulen;
-    b->p[len_at + 1] = (unsigned char)(ulen >> 8);
-    b->p[len_at + 2] = (unsigned char)(ulen >> 16);
-    b->p[len_at + 3] = (unsigned char)(ulen >> 24);
+    db_patch_u32(b, len_at, ulen);
 }
 
 /* One function's rows, bracketed by set_address .. end_sequence. Offsets are
@@ -672,20 +669,14 @@ static void emit_line(struct dwarf_out *out, struct dbuf *b,
 
     /* backpatch header_length (bytes from here to end of header) */
     unsigned long hlen = (unsigned long)(b->len - after_hdr_len);
-    b->p[hdr_len_at + 0] = (unsigned char)hlen;
-    b->p[hdr_len_at + 1] = (unsigned char)(hlen >> 8);
-    b->p[hdr_len_at + 2] = (unsigned char)(hlen >> 16);
-    b->p[hdr_len_at + 3] = (unsigned char)(hlen >> 24);
+    db_patch_u32(b, hdr_len_at, hlen);
 
     for (int n = 0; n < iu->nfuncs; n++)
         if (iu->funcs[n].src->code_len > 0)
             emit_line_func(out, b, &iu->funcs[n]);
 
     unsigned long ulen = (unsigned long)(b->len - after_len);
-    b->p[len_at + 0] = (unsigned char)ulen;
-    b->p[len_at + 1] = (unsigned char)(ulen >> 8);
-    b->p[len_at + 2] = (unsigned char)(ulen >> 16);
-    b->p[len_at + 3] = (unsigned char)(ulen >> 24);
+    db_patch_u32(b, len_at, ulen);
 }
 
 static void emit_all(struct ir_unit *iu, const char *filename,

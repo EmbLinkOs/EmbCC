@@ -53,7 +53,8 @@ grep -q '==END==' "$out/ref.txt" || {
 # locks are refused for it.
 fail=0
 for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
-         thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf; do
+         thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf \
+         mips-none-elf; do
     case $t in
         riscv32*) H=tests/harness/riscv
                   Q="qemu-system-riscv32 -M virt -bios none -nographic -m 8" ;;
@@ -67,6 +68,8 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
                   Q="qemu-system-arm -M mps2-an505 -cpu cortex-m33 -nographic" ;;
         mipsel*)  H=tests/harness/mips
                   Q="qemu-system-mipsel -M malta -cpu 24Kc -m 64 -display none -monitor none -serial null -serial null -serial stdio -no-reboot" ;;
+        mips-*)   H=tests/harness/mips      # big-endian
+                  Q="qemu-system-mips -M malta -cpu 24Kc -m 64 -display none -monitor none -serial null -serial null -serial stdio -no-reboot" ;;
     esac
     command -v "${Q%% *}" >/dev/null 2>&1 || { echo "SKIP $t: no ${Q%% *}"; continue; }
     d=$out/$t; mkdir -p "$d"
@@ -84,7 +87,7 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
         case $t in
             riscv*)    hv=EMBCC_RISCV_HARNESS ;;
             thumbv8m*) hv=EMBCC_M33_HARNESS ;;
-            mipsel*)   hv=EMBCC_MIPS_HARNESS ;;
+            mips*)     hv=EMBCC_MIPS_HARNESS ;;
             *)         hv=EMBCC_THUMB_HARNESS ;;
         esac
         env "$hv=$d" sh "$H/link.sh" "$d/p$opt.elf" "$d/p$opt.o" \

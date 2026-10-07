@@ -47,16 +47,16 @@ order.
 | `src/ir/irgen.c` `emit_ldconst` | a long double constant's pool bytes | (no big-endian target has a 16-byte long double yet) |
 | `src/sema/type.c` bit-field layout | `bit_off` is the field's shift from the least significant end of its unit AS LOADED; the positions in memory order are the same in both orders (gcc's layout), and `ty_bf_mempos` converts between them. Big-endian the first field is at the unit's high end. Union members and packed straddling fields likewise. | mips-be-data (six bit-field structs, a union), endian.c |
 | `src/ir/irgen.c` bit-fields | the unit loads and stores need nothing (they shift from the loaded value's LSB); the byte-at-a-time forms of a packed field across its unit put byte k at `8(n-1-k)`; the 128-bit byte forms are refused big-endian | endian.c, mips-be-exec (packed-bitfields, refereed) |
-| `src/debug/dwarf.c`, `src/debug/eh.c` | every multi-byte field through `target_put_uint`; `DW_AT_data_bit_offset` is the memory-order position | `-g` objects read by llvm-dwarfdump |
-| `src/as/gas.c` `emit_int` | `.word`/`.half`/`.quad` data in the target's order | mips-asm (file-scope blocks) |
-| `src/driver/asmout.c` | a relocated MIPS instruction is decoded from its bytes in order for `-S` | mips-asm |
+| `src/debug/dwarf.c`, `src/debug/eh.c` | every multi-byte field through `target_put_uint`, the backpatched unit and header lengths included; `DW_AT_data_bit_offset` is the memory-order position | mips-be-data (`llvm-dwarfdump --verify`, clang's bit offsets) |
+| `src/as/gas.c` `emit_int` | `.word`/`.half`/`.quad` data in the target's order | mips-be-gas, mips-be-exc |
+| `src/driver/asmout.c` | a relocated MIPS instruction is decoded from its bytes in order for `-S` | mips-be-asm (-S reassembled by llvm-mc) |
 | `src/opt/opt.c` `ro_bytes` | a load from a constant global folded from its image: the first byte is the most significant | ro-globals, endian.c |
 | `src/opt/opt.c` `pass_punfwd` | the word at +4 of an 8-byte store is the LOW half (fdlibm's GET_HIGH_WORD) | fp-bits, store-forward (refereed), endian.c |
 | `src/opt/opt.c` `pass_storefwd`, `pass_mem2reg` | a read of a local narrower than the local is its first bytes -- the value's high end -- so neither forwards across differing sizes big-endian (the IR does not produce them; this keeps it that way) | -- |
-| `src/arch/mips/emit.c` | instruction words in order (`mips_set_big_endian`, set by the driver for the compiler and by EmbLD from its objects -- the linker links this file without target.c) | every board test |
+| `src/arch/mips/emit.c` | instruction words in order (`mips_set_big_endian`, set by the driver for the compiler and by EmbLD from its objects -- the linker links this file without target.c) | mips-encoding (bytes in memory order against llvm-mc's), every board test |
 | `src/arch/mips/codegen.c` | see below | mips-be-exec, mips-be-abi |
 | `src/link/link.c` | see below | every board test, mips-be-abi (clang's objects) |
-| `lib/libc/src/math/fdlibm/fdlibm.h` | `__IEEE_BIG_ENDIAN` from `__BYTE_ORDER__`: which word of a double is first | mips-be-exec (math programs) |
+| `lib/libc/src/math/fdlibm/fdlibm.h` | `__IEEE_BIG_ENDIAN` from `__BYTE_ORDER__`: which word of a double is first | libc-embedded (mips-none-elf against x86-64), mips-be-exec |
 | `tests/harness/mips/run.sh` | the board is chosen by the image's `EI_DATA` | -- |
 
 ### The MIPS backend
@@ -132,9 +132,21 @@ one link are refused by name.
   checks unions, memcpy, static images, bit-fields through bytes, wide
   strings and network order against it.
 - `tests/golden/predef.sh`: the `mips32eb` table against clang's.
+- `mips-be-asm`, `mips-be-link`, `mips-be-gas`, `mips-be-exc`,
+  `mips-be-switch`, `mips-be-slots`, `mips-be-access`: the little-endian
+  MIPS goldens run for mips-none-elf (`MIPS_BE=1`) against llvm-mc and
+  clang for mips-unknown-elf and on qemu-system-mips; `mips-encoding`
+  checks the encoder's big-endian bytes; `mips-refuse` the triples, the
+  header and the `-EB`/`-EL` rules; `libc-embedded` lib/libc on the board
+  against x86-64.
+- `tests/exec/llong-bitfield.c`: a `long long` bit-field's unit is eight
+  bytes on an ILP32 target (it was loaded as a `long`, on every 32-bit
+  target, little-endian too -- found by mips-be-data's program).
 - Little-endian byte identity: lib/libc, lib/rt and tests/exec built for
-  thumbv7em, riscv32 and mipsel by the compiler before and after compare
-  equal in `.text` and `.data` (see the branch's report for the run).
+  thumbv7em, riscv32 and mipsel at -O0, -O2 and -Os (and tests/exec at -O1
+  -g) by the compiler before and after are identical object files, but for
+  tests/exec/llong-bitfield.c, whose fix is the point of it; EmbLD's
+  mipsel images of the corpus are identical too.
 
 Each was shown to fail against a mutant of the code it guards.
 
