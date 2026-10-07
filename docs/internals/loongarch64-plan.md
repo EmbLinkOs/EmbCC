@@ -158,8 +158,19 @@ by tools/gen-predef.sh): `__loongarch__`, `__loongarch64`,
 
 - `-kernel` loads an ELF at its physical address (the high bits of a
   `0x9000...` kernel address are ignored, too) and starts it in direct
-  address mode, so the image is linked at 0x200000 in the low 256 MiB of
-  RAM and runs with addresses equal to physical ones.
+  address mode, so addresses equal physical ones. QEMU keeps its boot
+  information at 0-0x100000 and the device tree at 0x100000-0x200000
+  (`info roms`), and refuses an image that overlaps them -- which one
+  linked at 0x200000 did as soon as embld put its ELF header in the first
+  page -- so the harness links at 0x1000000 (16 MiB) with the stack's top
+  at 0x3000000, in the low 256 MiB of RAM.
+- **Faults.** EmbCC has no LoongArch inline assembler yet, so the
+  harness writes the privileged instructions it needs (`csrwr a0,
+  EENTRY`, `csrrd a0, ESTAT/ERA/BADV`, and the exception entry, which must
+  be 4 KiB-aligned) as words into a page of RAM and calls them there. An
+  exception prints `==FAULT ecode n ...==` and powers off, so a run that
+  faults never reports an exit status. The FPU is disabled at reset, so a
+  floating-point instruction in soft-float code faults too.
 - **Output.** A 16550 UART at 0x1fe001e0 (the first serial port, so the
   board runs with `-serial stdio`).
 - **Ending a run.** The ACPI GED's registers sit at 0x100e001c (`info

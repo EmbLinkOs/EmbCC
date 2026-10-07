@@ -13,6 +13,7 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m riscv32 riscv64 avr mips32
+#                   loongarch64
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -85,7 +86,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|loongarch64) eval "echo \${$gccvar:-clang}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -141,6 +142,12 @@ refflags() {
         # flag changes.
         mips32)  [ -n "${EMBCC_REF_GCC_MIPS32:-}" ] || \
                      echo "-target mipsel-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # LoongArch64, LP64S. -msoft-float is -mabi=lp64s AND -mfpu=none:
+        # with the ABI alone clang still claims __loongarch_frlen 64 and the
+        # LSX vector unit (__loongarch_sx), hardware the soft-float code
+        # never touches.
+        loongarch64) [ -n "${EMBCC_REF_GCC_LOONGARCH64:-}" ] || \
+                     echo "-target loongarch64-unknown-elf -msoft-float -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -162,6 +169,9 @@ exclude_arch() {
         # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
         # two-byte atomic exactly as RISC-V's does (no libatomic here).
         mips32)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # LoongArch's am* and ll/sc are word and doubleword only in the base
+        # ISA, and the backend refuses a narrower atomic as RISC-V's does.
+        loongarch64) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -195,7 +205,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32|loongarch64) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -278,8 +288,9 @@ case "${1:-both}" in
     riscv64) gen riscv64 ;;
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
+    loongarch64) gen loongarch64 ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen riscv32
-              gen riscv64; gen avr; gen mips32 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32]" >&2
+              gen riscv64; gen avr; gen mips32; gen loongarch64 ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|loongarch64]" >&2
        exit 1 ;;
 esac

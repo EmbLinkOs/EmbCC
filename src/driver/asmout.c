@@ -196,6 +196,16 @@ static const char *reloc_name(int kind)
         case RK_RISCV_PCREL_LO12_I: return "R_RISCV_PCREL_LO12_I";
         default:                  return NULL;
         }
+    case TARGET_LOONGARCH64:
+        switch (kind) {
+        case RK_CALL:          return "R_LARCH_B26";   /* bl and b alike */
+        case RK_LA_PCALA_HI20: return "R_LARCH_PCALA_HI20";
+        case RK_LA_PCALA_LO12: return "R_LARCH_PCALA_LO12";
+        case RK_ABS64:         return "R_LARCH_64";
+        case RK_ABS32:         return "R_LARCH_32";
+        case RK_DATA_PREL32:   return "R_LARCH_32_PCREL";
+        default:               return NULL;
+        }
     case TARGET_MIPS32:
         switch (kind) {
         case RK_CALL:        return "R_MIPS_26";       /* jal and j alike */

@@ -55,10 +55,10 @@ static void print_version(void)
     printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
            "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (little-endian "
-           "o32), AVR (ATmega328P)\n");
+           "o32), LoongArch64 (LP64S), AVR (ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32 and AVR images; "
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, LoongArch64 and AVR images; "
            "AArch64 and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
@@ -118,7 +118,8 @@ static void print_options(FILE *out)
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
       "                         riscv32/riscv64-unknown-elf, avr,\n"
-      "                         mipsel-none-elf, and the\n"
+      "                         mipsel-none-elf, loongarch64-unknown-elf,\n"
+      "                         and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
       "                         them all\n",
@@ -727,7 +728,7 @@ static int firmware_target(void)
     return target_fmt_get() == TGT_FMT_ELF &&
            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
-            target_get() == TARGET_MIPS32);
+            target_get() == TARGET_MIPS32 || target_get() == TARGET_LOONGARCH64);
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -794,8 +795,8 @@ static int compile_and_link(const char *in, const char *out)
     lo.undefs = g_undefs;
     lo.nundefs = g_nundefs;
     if (fw && !lo.script && !lo.have_base) {
-        /* embld lays a script out for ARM and RISC-V only: an AVR or
-         * MIPS build is not sent looking for one */
+        /* embld lays a script out for ARM and RISC-V only: an AVR,
+         * MIPS or LoongArch build is not sent looking for one */
         int scripts = target_get() == TARGET_THUMB ||
                       target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64;
@@ -1813,6 +1814,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                           opt_level >= 1);
+    else if (ta == TARGET_LOONGARCH64)
+        codegen_unit_loongarch(iu, &text, &ext, &next, &strs, &nstrs, &gs,
+                               &ngs, &fs, &nfs, want_debug, opt_level >= 1,
+                               no_sse,
+                               opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
     else if (ta == TARGET_THUMB)
         codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -2206,6 +2212,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "mipsel-none-elf yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
                             "EmbCC writes no MIPS .eh_frame");
+    if (unwind && ta == TARGET_LOONGARCH64)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "%s yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no LoongArch .eh_frame",
+                   target_triple_now());
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
@@ -3908,6 +3920,7 @@ int main(int argc, char **argv)
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
                               : a == TARGET_MIPS32 ? mips_op_calls_helper
+                              : a == TARGET_LOONGARCH64 ? la_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
     }
     /* Scanned across the whole command line, not just argv[1]: these
@@ -4548,6 +4561,79 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--dump-predef") == 0 ||
                    strcmp(argv[i], "-dumpmachine") == 0) {
             /* answered after every argument has been applied */
+        } else if (target_get() == TARGET_LOONGARCH64 &&
+                   (strncmp(argv[i], "-march=", 7) == 0 ||
+                    strncmp(argv[i], "-mtune=", 7) == 0 ||
+                    strncmp(argv[i], "-mabi=", 6) == 0 ||
+                    strncmp(argv[i], "-mfpu=", 6) == 0 ||
+                    strncmp(argv[i], "-mcmodel=", 9) == 0 ||
+                    strcmp(argv[i], "-msoft-float") == 0 ||
+                    strcmp(argv[i], "-msingle-float") == 0 ||
+                    strcmp(argv[i], "-mdouble-float") == 0 ||
+                    strcmp(argv[i], "-mrelax") == 0 ||
+                    strcmp(argv[i], "-mno-relax") == 0 ||
+                    strcmp(argv[i], "-mstrict-align") == 0 ||
+                    strcmp(argv[i], "-mno-strict-align") == 0 ||
+                    strcmp(argv[i], "-mlsx") == 0 ||
+                    strcmp(argv[i], "-mno-lsx") == 0 ||
+                    strcmp(argv[i], "-mlasx") == 0 ||
+                    strcmp(argv[i], "-mno-lasx") == 0)) {
+            /* The flags a LoongArch build passes (clang's and gcc's for
+             * loongarch64 bare metal). What EmbCC emits is ONE
+             * configuration -- the LA64 base integer ISA, the LP64S
+             * soft-float convention, the normal code model -- so each flag
+             * either says that (or something it is a valid part of) and is
+             * accepted, or asks for something else and is refused by name:
+             * an object built for the FPU convention would link and then
+             * disagree with every caller about where a double travels. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : "";
+            if (strncmp(argv[i], "-march=", 7) == 0) {
+                /* the base ISA runs on every one of these */
+                static const char *const archs[] = {
+                    "loongarch64", "la64v1.0", "la64v1.1", "la464", "la664"
+                };
+                int ok = 0;
+                for (unsigned k = 0; k < sizeof archs / sizeof archs[0]; k++)
+                    ok |= strcmp(v, archs[k]) == 0;
+                if (!ok)
+                    diag_fatal(NULL, 0, "%s is not an LA64 architecture: "
+                               "EmbCC emits the LA64 base integer ISA "
+                               "(loongarch64, la64v1.0, la64v1.1, la464, "
+                               "la664)", argv[i]);
+            } else if (strncmp(argv[i], "-mabi=", 6) == 0) {
+                if (strcmp(v, "lp64s") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                               "the soft-float LP64S convention "
+                               "(-mabi=lp64s), which passes floating point "
+                               "in the integer registers", argv[i]);
+            } else if (strncmp(argv[i], "-mfpu=", 6) == 0) {
+                if (strcmp(v, "none") != 0 && strcmp(v, "0") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC's "
+                               "LoongArch code uses no FPU (-mfpu=none)",
+                               argv[i]);
+            } else if (strncmp(argv[i], "-mcmodel=", 9) == 0) {
+                /* normal: bl and pcalau12i reach +-128 MiB and +-2 GiB;
+                 * a medium program fits in that too, and one that does
+                 * not is refused by the linker, never mislinked */
+                if (strcmp(v, "normal") != 0 && strcmp(v, "medium") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                               "the normal code model (bl, pcalau12i + "
+                               "addi.d)", argv[i]);
+            } else if (strcmp(argv[i], "-msingle-float") == 0 ||
+                       strcmp(argv[i], "-mdouble-float") == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                           "soft-float LP64S code (-msoft-float)", argv[i]);
+            } else if (strcmp(argv[i], "-mstrict-align") == 0) {
+                diag_fatal(NULL, 0, "-mstrict-align is not supported: "
+                           "EmbCC's LoongArch code may access a packed "
+                           "member unaligned, as LA64 permits");
+            } else if (strcmp(argv[i], "-mlsx") == 0 ||
+                       strcmp(argv[i], "-mlasx") == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits no "
+                           "LSX or LASX vector instructions", argv[i]);
+            }
+            continue;
         } else if (target_get() == TARGET_MIPS32 &&
                    (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                     strncmp(argv[i], "-march=", 7) == 0 ||

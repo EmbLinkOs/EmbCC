@@ -62,6 +62,7 @@ void irg_asm_x86(struct ir_func *fn, struct stmt *s);
 void irg_asm_arm64(struct ir_func *fn, struct stmt *s);
 void irg_asm_riscv(struct ir_func *fn, struct stmt *s);
 void irg_asm_mips(struct ir_func *fn, struct stmt *s);
+void irg_asm_loongarch(struct ir_func *fn, struct stmt *s);   /* refuses */
 void irg_asm_thumb(struct ir_func *fn, struct stmt *s);
 void irg_asm_avr(struct ir_func *fn, struct stmt *s);
 

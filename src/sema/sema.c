@@ -4330,6 +4330,11 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
     if (target_get() == TARGET_MIPS32)
         return asm_resolve_reg_mips(u, s, op, c);
+    /* No LoongArch asm vocabulary yet (src/arch/loongarch/irgen.c): said
+     * here, at the first operand, rather than read as x86's constraints. */
+    if (target_get() == TARGET_LOONGARCH64)
+        sema_error_at(u, s->line, s->col, "inline assembly is not supported "
+                      "for %s yet", target_triple_now());
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

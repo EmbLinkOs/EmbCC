@@ -1536,7 +1536,8 @@ static int atomic_arm(void)
     int t = target_get();
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
            t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
-           t == TARGET_MIPS32;        /* MIPS32 is weakly ordered: sync */
+           t == TARGET_MIPS32 ||      /* MIPS32 is weakly ordered: sync */
+           t == TARGET_LOONGARCH64;   /* ...and LoongArch: dbar */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -2155,6 +2156,7 @@ static int bswap_insn(int size)
     switch (target_get()) {
     case TARGET_X86_64: case TARGET_AARCH64: case TARGET_RISCV64:
     case TARGET_AVR: case TARGET_THUMB:
+    case TARGET_LOONGARCH64:              /* revb.2h, revb.2w, revb.d */
         return 1;
     default:
         return 0;
@@ -2714,7 +2716,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
     case EXPR_VA_ARG:
         if (target_get() == TARGET_THUMB)
             return irg_va_arg_thumb(fn, e);
-        if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
+        /* LoongArch's LP64 variadic convention is RV64's rule for rule
+         * (src/arch/loongarch/irgen.c says how that was established). */
+        if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
+            target_get() == TARGET_LOONGARCH64)
             return irg_va_arg_riscv(fn, e);
         if (target_get() == TARGET_AVR)
             return irg_va_arg_avr(fn, e);
@@ -3857,6 +3862,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_avr(fn, s);
             else if (target_get() == TARGET_MIPS32)
                 irg_asm_mips(fn, s);
+            else if (target_get() == TARGET_LOONGARCH64)
+                irg_asm_loongarch(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;

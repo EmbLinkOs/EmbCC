@@ -100,6 +100,10 @@ int target_insn_len(const unsigned char *p, int avail)
         /* MIPS32 is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
         return avail >= 4 ? 4 : 0;
 
+    case TARGET_LOONGARCH64:
+        /* LoongArch is fixed 32-bit, with no compressed forms at all. */
+        return avail >= 4 ? 4 : 0;
+
     case TARGET_X86_64:
     default:
         /* Variable-length, and no rule short of decoding it. The caller
@@ -199,6 +203,10 @@ static const struct data_model {
      * -- unlike the ARM and RISC-V targets beside it -- a signed int
      * wchar_t, long double the same 8-byte double, and no __int128. */
     [TARGET_MIPS32]  = { 4, 4, 4, 8,  8, 0, 0, 0, 0 },
+    /* LP64S (clang --target=loongarch64-unknown-elf -msoft-float -dM): LP64
+     * like RV64, a binary128 long double and __int128 -- but a SIGNED
+     * char, which RISC-V's is not, and a signed int wchar_t. */
+    [TARGET_LOONGARCH64] = { 8, 8, 4, 8, 16, 0, 0, 1, 0 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -305,6 +313,9 @@ int target_anon_bitfield_aligns(void)
     /* o32: `struct { char c; int :4; char d; }` is 3 bytes in clang, and
      * `int :0` moves d to offset 4 without making the struct 4-aligned */
     case TARGET_MIPS32:  return 0;
+    /* LoongArch psABI: `struct { char c; int :0; char d; }` is 5 bytes in
+     * clang, aligned 1 */
+    case TARGET_LOONGARCH64: return 0;
     }
     return 0;
 }
@@ -325,6 +336,7 @@ int target_va_list_is_pointer(void)
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
     case TARGET_AVR:     return 1;   /* avr-gcc: char * */
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
+    case TARGET_LOONGARCH64: return 1;   /* LoongArch psABI: void * */
     }
     return 0;
 }
@@ -492,6 +504,14 @@ static const struct triple {
     { "mipsel-elf",          TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "mipsel",              TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
 
+    /* LoongArch64, LP64S (soft float), bare metal. `-unknown-elf` is
+     * clang's spelling and the canonical one; the short forms are accepted
+     * because everyone writes them. */
+    { "loongarch64-unknown-elf", TARGET_LOONGARCH64, TGT_OS_NONE, TGT_FMT_ELF, 1, 0 },
+    { "loongarch64-none-elf", TARGET_LOONGARCH64, TGT_OS_NONE, TGT_FMT_ELF,  0, 0 },
+    { "loongarch64-elf",     TARGET_LOONGARCH64, TGT_OS_NONE, TGT_FMT_ELF,   0, 0 },
+    { "loongarch64",         TARGET_LOONGARCH64, TGT_OS_NONE, TGT_FMT_ELF,   0, 0 },
+
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
@@ -633,6 +653,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_RISCV64: return EM_RISCV;
     case TARGET_AVR:     return EM_AVR;
     case TARGET_MIPS32:  return EM_MIPS;
+    case TARGET_LOONGARCH64: return EM_LOONGARCH;
     default:             return EM_X86_64;
     }
 }
@@ -674,6 +695,10 @@ unsigned long target_elf_flags(enum target_arch a)
      * slots are filled (with nops), the code is not abicalls/PIC. */
     case TARGET_MIPS32:  return EF_MIPS_ARCH_32R2 | EF_MIPS_ABI_O32 |
                                 EF_MIPS_NOREORDER;
+    /* what clang writes for -mabi=lp64s: the soft-float base ABI, object
+     * ABI v1 */
+    case TARGET_LOONGARCH64: return EF_LOONGARCH_ABI_SOFT_FLOAT |
+                                    EF_LOONGARCH_OBJABI_V1;
     default:             return 0;
     }
 }
@@ -771,6 +796,19 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
          * kind this table merely lacks. */
         case RK_ABS64:       return a == TARGET_RISCV64 ? R_RISCV_64 : -1;
         default:             return -1;
+        }
+    }
+    if (a == TARGET_LOONGARCH64) {
+        switch (k) {
+        /* bl and b alike: a 26-bit word offset, +-128 MiB -- the normal
+         * code model (docs/internals/loongarch64-plan.md) */
+        case RK_CALL:          return R_LARCH_B26;
+        case RK_LA_PCALA_HI20: return R_LARCH_PCALA_HI20;
+        case RK_LA_PCALA_LO12: return R_LARCH_PCALA_LO12;
+        case RK_ABS32:         return R_LARCH_32;
+        case RK_ABS64:         return R_LARCH_64;
+        case RK_DATA_PREL32:   return R_LARCH_32_PCREL;
+        default:               return -1;
         }
     }
     if (a == TARGET_MIPS32) {
@@ -897,7 +935,7 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
-        a == TARGET_MIPS32)
+        a == TARGET_MIPS32 || a == TARGET_LOONGARCH64)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -946,6 +984,16 @@ static const struct reloc_spelling {
     { EM_RISCV, R_RISCV_HI20,          "R_RISCV_HI20" },
     { EM_RISCV, R_RISCV_LO12_I,        "R_RISCV_LO12_I" },
     { EM_RISCV, R_RISCV_LO12_S,        "R_RISCV_LO12_S" },
+    { EM_LOONGARCH, R_LARCH_NONE,      "R_LARCH_NONE" },
+    { EM_LOONGARCH, R_LARCH_32,        "R_LARCH_32" },
+    { EM_LOONGARCH, R_LARCH_64,        "R_LARCH_64" },
+    { EM_LOONGARCH, R_LARCH_B16,       "R_LARCH_B16" },
+    { EM_LOONGARCH, R_LARCH_B21,       "R_LARCH_B21" },
+    { EM_LOONGARCH, R_LARCH_B26,       "R_LARCH_B26" },
+    { EM_LOONGARCH, R_LARCH_PCALA_HI20, "R_LARCH_PCALA_HI20" },
+    { EM_LOONGARCH, R_LARCH_PCALA_LO12, "R_LARCH_PCALA_LO12" },
+    { EM_LOONGARCH, R_LARCH_CALL36,    "R_LARCH_CALL36" },
+    { EM_LOONGARCH, R_LARCH_32_PCREL,  "R_LARCH_32_PCREL" },
     { EM_AVR,   R_AVR_NONE,            "R_AVR_NONE" },
     { EM_AVR,   R_AVR_32,              "R_AVR_32" },
     { EM_AVR,   R_AVR_7_PCREL,         "R_AVR_7_PCREL" },
