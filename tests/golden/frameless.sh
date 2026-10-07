@@ -47,6 +47,17 @@ cat > "$out/leaf.c" <<'EOF'
 long add(long a, long b) { return a + b; }
 int  pick(int a, int b, int c) { return a > b ? a + c : b - c; }
 EOF
+# No parameters and no locals, so vreg 0 is a temp -- and every
+# instruction's unused `c` operand is 0. Read as a reference, it kept a
+# slot, and a frame, for a temp nothing names.
+cat > "$out/leaf0.c" <<'EOF'
+double six(void) { return 2.0 * 3.0; }
+EOF
+if has_frame "$out/leaf0.c" ""; then
+    echo "FAIL: a leaf with no parameters or locals still builds a frame:"
+    grep '#' "$out/t.s" | sed 's/.*#//'
+    exit 1
+fi
 if has_frame "$out/leaf.c" ""; then
     echo "FAIL: a leaf that touches no stack still builds a frame:"
     grep '#' "$out/t.s" | sed 's/.*#//'

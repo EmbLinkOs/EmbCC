@@ -1967,7 +1967,16 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
     for (int i = 0; i < nins; i++) {
         struct ir_ins *in = &fn->ins[i];
         int vs[4]; int nv = 0;
-        vs[nv++] = in->dst; vs[nv++] = in->a; vs[nv++] = in->b; vs[nv++] = in->c;
+        vs[nv++] = in->dst; vs[nv++] = in->a; vs[nv++] = in->b;
+        /* `c` names a value only for these (opt.c, each_read): elsewhere
+         * it is 0 -- irgen's emit and the optimizer's ins_blank leave it
+         * there -- or a vector shift's constant count. Read regardless,
+         * it made every instruction a reference to vreg 0, which in a
+         * function with no locals or parameters is a temp: `double m(void)
+         * { return 2.0 * 3.0; }` kept a 16-byte frame on x86-64 for it. */
+        if (in->op == IR_CMPXCHG || in->op == IR_CAS || in->op == IR_CAS16 ||
+            in->op == IR_SELECT)
+            vs[nv++] = in->c;
         for (int j = 0; j < nv; j++) {
             int v = vs[j];
             if (v >= nvars && v < nvr) {
