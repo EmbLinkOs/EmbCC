@@ -258,6 +258,20 @@ struct linker {
     struct orphan orphans[MAX_ORPHANS];
     int norphan;
     struct ls_script *sc;      /* -T: the layout comes from here */
+    /* ARMv8-M CMSE: the secure gateway veneers (cmse_scan) -- their
+     * section's insecs index or -1, and for each the symbols it joins:
+     * the entry's own name, which comes to name the veneer, and its
+     * __acle_se_ twin, which keeps naming the code. */
+    int sg_sec;
+    struct { int sym, se; } *sg;
+    int nsg;
+    /* Long-branch veneers for a Thumb call to an ABSOLUTE symbol (an
+     * import library's, chiefly) that may be out of a BL's reach: the
+     * section, and the symbols they lead to. */
+    int lb_sec;
+    int *lb;
+    int nlb;
+    int lb_thumb1;             /* the image is ARMv6-M: no MOVW/MOVT */
     int gc_sections;           /* --gc-sections */
     int print_gc;              /* --print-gc-sections */
     const char *const *gc_undefs;  /* -u: roots too */
@@ -3128,6 +3142,8 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
     }
 }
 
+static Elf64_Addr arm_lb_for(struct linker *l, const char *name);
+
 static void apply_relocs(struct linker *l, struct object *o)
 {
     for (int i = 0; i < o->nsh; i++) {
@@ -3380,6 +3396,16 @@ static void apply_relocs(struct linker *l, struct object *o)
                                       (long long)((P + 4) & ~(Elf64_Addr)3));
                         put16(loc + 2, get16(loc + 2) & ~0x1000u);
                         break;
+                    }
+                    /* An absolute target out of a BL's reach goes through
+                     * its long-branch veneer (arm_abs_thunks). */
+                    {
+                        long long d = (long long)(S & ~(Elf64_Addr)1) + A -
+                                      ((long long)P + 4);
+                        Elf64_Addr lb = d < -(1LL << 24) || d >= (1LL << 24)
+                            ? arm_lb_for(l, l->rel_sym) : 0;
+                        if (lb)
+                            S = lb;
                     }
                     /* The displacement is between ADDRESSES, so the
                      * Thumb bit comes off S first -- leaving it on would
@@ -4486,6 +4512,24 @@ static void ls_claim(struct linker *l, struct ls_script *sc)
                     }
                 }
             }
+            /* the linker's own sections (the CMSE veneers), which belong
+             * to no file: matched by name under a `*` file pattern */
+            for (int si = 0; si < l->nsec; si++) {
+                struct insec *is = &l->insecs[si];
+                if (is->obj || is->sosec != -1 ||
+                    !ls_file_match(s->in.file, "*linker stubs*"))
+                    continue;
+                for (int j = 0; j < s->in.nsec; j++) {
+                    if (strcmp(s->in.sec[j], "COMMON") &&
+                        ls_glob(s->in.sec[j], is->name)) {
+                        is->sosec = o->discard ? -2 : k;
+                        is->discarded = o->discard;
+                        is->keep = 1;
+                        ls_push_list(s, si);
+                        break;
+                    }
+                }
+            }
             if (sort && s->nlist > 1) {
                 g_ls_sort_l = l;
                 g_ls_sort_kind = sort;
@@ -5513,6 +5557,297 @@ static const char *ls_find_input(const char *name, const char **dirs,
     return NULL;
 }
 
+/* ---- ARMv8-M's security extension: CMSE -----------------------------------
+ *
+ * A cmse_nonsecure_entry function arrives as two global symbols at one
+ * address, `f` and `__acle_se_f` (ACLE; src/driver writes both). For each
+ * such pair the linker makes a SECURE GATEWAY VENEER in .gnu.sgstubs --
+ *
+ *      f:  sg                      e97f e97f
+ *          b.w  __acle_se_f
+ *
+ * -- and `f` comes to name the veneer, as GNU ld does: a Non-secure caller
+ * can only enter the Secure state at an SG in memory the SAU/IDAU marks
+ * Non-secure Callable, which is where the image's .gnu.sgstubs is put, and
+ * `__acle_se_f` still names the code for a Secure caller that wants to skip
+ * the gateway. Eight bytes each, in name order, the section 32-byte aligned
+ * and padded to 32 bytes, the SAU's granule.
+ *
+ * --cmse-implib --out-implib=FILE then writes the IMPORT LIBRARY: an ELF
+ * relocatable holding nothing but an absolute global function symbol per
+ * veneer, which the Non-secure image links against.
+ *
+ * And that image's calls into it reach a Secure address the Non-secure code
+ * is usually more than a BL's 16 MiB from (on the mps2-an505, 0x00200000
+ * against 0x10000000), so a Thumb call to an ABSOLUTE symbol gets a
+ * long-branch veneer, again as GNU ld makes one: `movw ip, #lo; movt ip,
+ * #hi; bx ip`, or on ARMv6-M, which has no MOVW, `push {r0, r1}; ldr r0,
+ * [pc, #4]; str r0, [sp, #4]; pop {r0, pc}` and the address. IP is the
+ * register the AAPCS gives a veneer. Only a call that does not reach goes
+ * through one. */
+static struct linker *g_sg_l;
+static int sg_cmp(const void *pa, const void *pb)
+{
+    const int *a = pa, *b = pb;
+    return strcmp(g_sg_l->syms[a[0]].name, g_sg_l->syms[b[0]].name);
+}
+
+/* A section of the linker's own, with no object behind it. */
+static int add_synth(struct linker *l, const char *name, long size, int align,
+                     int osec, unsigned char *data)
+{
+    struct insec *s;
+    if (l->nsec == l->capsec) {
+        l->capsec = l->capsec ? l->capsec * 2 : 64;
+        l->insecs = xrealloc(l->insecs, (size_t)l->capsec * sizeof *l->insecs);
+    }
+    s = &l->insecs[l->nsec];
+    memset(s, 0, sizeof *s);
+    s->obj = NULL;
+    s->shndx = -1;
+    s->name = name;
+    s->size = (Elf64_Xword)size;
+    s->align = (Elf64_Xword)align;
+    s->data = data;
+    s->osec = osec;
+    s->seg = SEG_TEXT;
+    s->sosec = -1;
+    s->shflags = SHF_ALLOC | SHF_EXECINSTR;
+    return l->nsec++;
+}
+
+static void cmse_scan(struct linker *l)
+{
+    int (*pairs)[2] = NULL;
+    int n = 0;
+    l->sg_sec = -1;
+    if (l->machine != EM_ARM)
+        return;
+    for (int i = 0; i < l->nsym; i++) {
+        struct symbol *se = &l->syms[i], *g;
+        if (!se->defined || !se->name || strncmp(se->name, "__acle_se_", 10))
+            continue;
+        g = sym_find(l, se->name + 10);
+        if (!g || !g->defined || g->insec < 0 || g->insec != se->insec ||
+            g->value != se->value)
+            die("'%s' has no global '%s' at the same address: a "
+                "cmse_nonsecure_entry function is the pair (ACLE), and the "
+                "secure gateway veneer is built from it", se->name,
+                se->name + 10);
+        if (!(se->value & 1))
+            die("'%s' is not Thumb code, and a secure gateway veneer can "
+                "only branch to Thumb code", se->name);
+        pairs = xrealloc(pairs, (size_t)(n + 1) * sizeof *pairs);
+        pairs[n][0] = (int)(g - l->syms);
+        pairs[n][1] = i;
+        n++;
+    }
+    if (!n)
+        return;
+    g_sg_l = l;
+    qsort(pairs, (size_t)n, sizeof *pairs, sg_cmp);
+    {
+        long size = ((long)n * 8 + 31) & ~31L;
+        l->sg_sec = add_synth(l, ".gnu.sgstubs", size, 32,
+                              orphan_osec(l, ".gnu.sgstubs", 0),
+                              xcalloc((size_t)size, 1));
+    }
+    l->sg = xmalloc((size_t)n * sizeof *l->sg);
+    for (int k = 0; k < n; k++) {
+        struct symbol *g = &l->syms[pairs[k][0]];
+        l->sg[k].sym = pairs[k][0];
+        l->sg[k].se = pairs[k][1];
+        g->insec = l->sg_sec;
+        g->value = (Elf64_Addr)(8 * k) | 1;
+        g->size = 8;
+        g->type = STT_FUNC;
+    }
+    l->nsg = n;
+    free(pairs);
+}
+
+static void arm_abs_thunks(struct linker *l)
+{
+    l->lb_sec = -1;
+    if (l->machine != EM_ARM)
+        return;
+    for (int i = 0; i < l->nobj; i++) {
+        struct object *o = l->objs[i];
+        if (!o->elf32)
+            continue;
+        /* Tag_CPU_arch 11 or 12 (v6-M, v6S-M), stored plus one */
+        if (o->arm_arch == 12 || o->arm_arch == 13)
+            l->lb_thumb1 = 1;
+        for (int s = 1; s < o->nsh; s++) {
+            Elf64_Shdr *rsh = sh_at(o, s);
+            long esz;
+            if (rsh->sh_type != SHT_REL && rsh->sh_type != SHT_RELA)
+                continue;
+            if (rsh->sh_info >= (Elf64_Word)o->nsh ||
+                o->sec_out[rsh->sh_info] < 0)
+                continue;
+            esz = rsh->sh_type == SHT_REL ? 8 : 12;
+            for (long j = 0; j + esz <= (long)rsh->sh_size; j += esz) {
+                const unsigned char *r = o->buf + rsh->sh_offset + j;
+                unsigned info = (unsigned)r[4] | (unsigned)r[5] << 8 |
+                                (unsigned)r[6] << 16 | (unsigned)r[7] << 24;
+                unsigned type = info & 0xff, symi = info >> 8;
+                Elf64_Sym *sy;
+                struct symbol *g;
+                int gi, have = 0;
+                if ((type != R_ARM_THM_CALL && type != R_ARM_THM_JUMP24) ||
+                    symi >= (unsigned)o->nsym)
+                    continue;
+                sy = &o->syms[symi];
+                if (ELF64_ST_BIND(sy->st_info) == STB_LOCAL ||
+                    !o->symstr[sy->st_name])
+                    continue;
+                g = sym_find(l, o->symstr + sy->st_name);
+                if (!g || !g->defined || g->insec >= 0 || g->scripted ||
+                    g->common)
+                    continue;
+                gi = (int)(g - l->syms);
+                for (int k = 0; k < l->nlb; k++)
+                    have |= l->lb[k] == gi;
+                if (have)
+                    continue;
+                l->lb = xrealloc(l->lb, (size_t)(l->nlb + 1) * sizeof *l->lb);
+                l->lb[l->nlb++] = gi;
+            }
+        }
+    }
+    if (l->nlb)
+        l->lb_sec = add_synth(l, ".text.__embld_veneer", 12L * l->nlb, 4,
+                              OSEC_TEXT, xcalloc((size_t)l->nlb, 12));
+}
+
+/* The long-branch veneer for the global `name`, when it has one: its
+ * address with the Thumb bit, or 0. */
+static Elf64_Addr arm_lb_for(struct linker *l, const char *name)
+{
+    struct symbol *g = name && *name ? sym_find(l, name) : NULL;
+    if (!g || l->lb_sec < 0)
+        return 0;
+    for (int k = 0; k < l->nlb; k++)
+        if (&l->syms[l->lb[k]] == g)
+            return (l->insecs[l->lb_sec].vaddr + 12 * (Elf64_Addr)k) | 1;
+    return 0;
+}
+
+static struct object g_cmse_obj;
+
+/* After layout: the veneers' bytes. */
+static void cmse_fill(struct linker *l)
+{
+    g_cmse_obj.name = "the linker's CMSE veneers";
+    if (l->sg_sec >= 0) {
+        struct insec *s = &l->insecs[l->sg_sec];
+        unsigned char *b = (unsigned char *)s->data;
+        for (int k = 0; k < l->nsg; k++) {
+            unsigned char *p = b + 8 * k;
+            Elf64_Addr at = s->vaddr + 8 * (Elf64_Addr)k;
+            Elf64_Addr to = l->syms[l->sg[k].se].value & ~(Elf64_Addr)1;
+            put16(p, 0xe97f);
+            put16(p + 2, 0xe97f);
+            put16(p + 4, 0xf000);
+            put16(p + 6, 0x9000);                   /* b.w */
+            patch_thm_b24(&g_cmse_obj, p + 4,
+                          (long long)to - (long long)(at + 8));
+        }
+    }
+    if (l->lb_sec >= 0) {
+        struct insec *s = &l->insecs[l->lb_sec];
+        unsigned char *b = (unsigned char *)s->data;
+        for (int k = 0; k < l->nlb; k++) {
+            unsigned char *p = b + 12 * k;
+            unsigned v = (unsigned)l->syms[l->lb[k]].value | 1u;
+            if (l->lb_thumb1) {
+                put16(p, 0xb403);                   /* push {r0, r1} */
+                put16(p + 2, 0x4801);               /* ldr r0, [pc, #4] */
+                put16(p + 4, 0x9001);               /* str r0, [sp, #4] */
+                put16(p + 6, 0xbd01);               /* pop {r0, pc} */
+                put32(p + 8, v);
+            } else {
+                for (int h = 0; h < 2; h++) {       /* movw, movt ip */
+                    unsigned imm = h ? v >> 16 : v & 0xffffu;
+                    put16(p + 4 * h, (h ? 0xf2c0u : 0xf240u) |
+                                     ((imm >> 1) & 0x400u) | (imm >> 12));
+                    put16(p + 4 * h + 2, ((imm << 4) & 0x7000u) |
+                                         (12u << 8) | (imm & 0xffu));
+                }
+                put16(p + 8, 0x4760);               /* bx ip */
+                put16(p + 10, 0xbf00);              /* nop */
+            }
+        }
+    }
+}
+
+/* --out-implib: the import library, an ELF32 relocatable holding one
+ * absolute global function symbol per veneer. */
+static void write_implib(struct linker *l, const char *path)
+{
+    long nstr = 1, symoff = 52, strsz, shstroff, shoff, len;
+    static const char shstr[] = "\0.symtab\0.strtab\0.shstrtab";
+    unsigned char *img;
+    FILE *f;
+    for (int k = 0; k < l->nsg; k++)
+        nstr += (long)strlen(l->syms[l->sg[k].sym].name) + 1;
+    strsz = nstr;
+    shstroff = symoff + 16L * (l->nsg + 1) + strsz;
+    shoff = (shstroff + (long)sizeof shstr + 3) & ~3L;
+    len = shoff + 4 * 40;
+    img = xcalloc((size_t)len, 1);
+    memcpy(img, "\177ELF", 4);
+    img[4] = ELFCLASS32; img[5] = ELFDATA2LSB; img[6] = EV_CURRENT;
+    put16(img + 16, ET_REL);
+    put16(img + 18, EM_ARM);
+    put32(img + 20, EV_CURRENT);
+    put32(img + 32, (unsigned)shoff);
+    put32(img + 36, EF_ARM_EABI_VER5);
+    put16(img + 40, 52);
+    put16(img + 46, 40);
+    put16(img + 48, 4);
+    put16(img + 50, 3);
+    {
+        long so = 1;
+        unsigned char *strs = img + symoff + 16L * (l->nsg + 1);
+        for (int k = 0; k < l->nsg; k++) {
+            const struct symbol *g = &l->syms[l->sg[k].sym];
+            unsigned char *y = img + symoff + 16L * (k + 1);
+            size_t nl = strlen(g->name);
+            memcpy(strs + so, g->name, nl);
+            put32(y, (unsigned)so);
+            put32(y + 4, (unsigned)g->value);
+            put32(y + 8, 8);
+            y[12] = (unsigned char)((STB_GLOBAL << 4) | STT_FUNC);
+            put16(y + 14, SHN_ABS);
+            so += (long)nl + 1;
+        }
+    }
+    memcpy(img + shstroff, shstr, sizeof shstr);
+    {
+        /* null; .symtab; .strtab; .shstrtab */
+        unsigned char *h = img + shoff + 40;
+        put32(h, 1); put32(h + 4, SHT_SYMTAB);
+        put32(h + 16, (unsigned)symoff);
+        put32(h + 20, (unsigned)(16L * (l->nsg + 1)));
+        put32(h + 24, 2); put32(h + 28, 1);
+        put32(h + 32, 4); put32(h + 36, 16);
+        h += 40;
+        put32(h, 9); put32(h + 4, SHT_STRTAB);
+        put32(h + 16, (unsigned)(symoff + 16L * (l->nsg + 1)));
+        put32(h + 20, (unsigned)strsz); put32(h + 32, 1);
+        h += 40;
+        put32(h, 17); put32(h + 4, SHT_STRTAB);
+        put32(h + 16, (unsigned)shstroff);
+        put32(h + 20, (unsigned)sizeof shstr); put32(h + 32, 1);
+    }
+    f = fopen(path, "wb");
+    if (!f || fwrite(img, 1, (size_t)len, f) != (size_t)len || fclose(f))
+        die("cannot write the import library %s", path);
+    free(img);
+}
+
 int embld_link(const char **inputs, int ninputs, const char *out,
                const struct link_opts *opts)
 {
@@ -5590,6 +5925,12 @@ int embld_link(const char **inputs, int ninputs, const char *out,
      * reach back into an earlier archive (the --start-group behaviour,
      * always on: correct over order-sensitive). */
     pull_archives(&l);
+    /* every input is in: the CMSE veneers, before any layout */
+    cmse_scan(&l);
+    arm_abs_thunks(&l);
+    if (opts && opts->out_implib && !opts->cmse_implib)
+        die("--out-implib needs --cmse-implib: the import library this "
+            "linker writes is ARMv8-M's secure gateway one");
     if (l.print_gc && !l.gc_sections)
         die("--print-gc-sections without --gc-sections: nothing is "
             "collected to print");
@@ -5597,6 +5938,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     if (sc) {
         ls_layout(&l, sc, opts->orphan_mode);
         finalize_symbols(&l);
+        cmse_fill(&l);
         /* ld's bounds for an output section whose name is a C
          * identifier, which is how a program walks a table it put in a
          * section of its own */
@@ -5642,6 +5984,8 @@ int embld_link(const char **inputs, int ninputs, const char *out,
             print_memory_usage(sc);
         write_exec_script(&l, sc, out, ev);
         emit_embdbg(&l, out);
+        if (opts->out_implib)
+            write_implib(&l, opts->out_implib);
         return 0;
     }
 
@@ -5702,6 +6046,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     l.tls_start = tls_start;
     l.tls_size = align_up(tls_memsz, tls_align);
     finalize_symbols(&l);
+    cmse_fill(&l);
     define_brackets(&l, bounds);
     define_orphan_brackets(&l, bounds);
     define_end_symbols(&l, data_start + data_memsz);   /* L1: kernel_end/_end */
@@ -5737,5 +6082,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
                    tls_start, tls_filesz, tls_memsz, tls_align);
         emit_embdbg(&l, out);   /* a .embdbg sidecar if any input carries -g info */
     }
+    if (opts && opts->out_implib)
+        write_implib(&l, opts->out_implib);
     return 0;
 }

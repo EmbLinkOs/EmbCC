@@ -62,6 +62,9 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * (src/driver: it is assembled as a block). Last, for the
                 * reason isr gives. */
                int naked;
+               /* cmse_nonsecure_entry (-mcmse): see struct func. Last, for
+                * the reason isr gives. */
+               int cmse_entry;
 };
 
 struct parser {
@@ -128,6 +131,11 @@ struct parser {
      * (`int __attribute__((unused)) x`, `char *__attribute__((unused)) p`):
      * the declaration being parsed takes it. */
     int stars_unused;
+    /* __attribute__((cmse_nonsecure_call)) seen and not yet given to the
+     * function type it belongs to: the next function declarator takes it
+     * (fn_suffix), and a declaration that ends with it still pending put
+     * it where there is no function type to carry it. */
+    int cmse_call_pending, cmse_call_line;
     const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
                            * function declarator inside parentheses
                            * (`(*f(int a))[3]`) */
@@ -221,8 +229,13 @@ static void parse_error_line(struct parser *ps, int line, const char *fmt, ...)
     fatal_unwind();
 }
 
+static void cmse_call_leftover(struct parser *ps);
+
 static void expect(struct parser *ps, enum tok_kind kind, const char *what)
 {
+    /* a declaration's end: see cmse_call_leftover */
+    if (kind == TOK_SEMI)
+        cmse_call_leftover(ps);
     if (cur(ps)->kind == kind) {
         advance(ps);
         return;
@@ -444,6 +457,10 @@ static const struct attr_entry attr_table[] = {
      * function uses. What every runtime library puts on its helpers so
      * they keep the base convention under -mfloat-abi=hard. */
     { "pcs",           ATTR_HONOURED, NULL },
+    /* ARMv8-M's security extension, ACLE's CMSE, under -mcmse (the Secure
+     * side): checked below. */
+    { "cmse_nonsecure_entry", ATTR_HONOURED, NULL },
+    { "cmse_nonsecure_call",  ATTR_HONOURED, NULL },
 
     /* ---- refused ---- */
     /* Honoured on the embedded targets, whose assembler reads the body as
@@ -638,6 +655,23 @@ static void pcs_not_here(struct parser *ps, const struct attrs *a,
 static struct expr *parse_cond(struct parser *ps);
 static int size_fold(const struct expr *e, long *out);
 
+/* A cmse_nonsecure_call still pending when its declaration is complete
+ * had no function type after it to attach to -- `int __attribute__((
+ * cmse_nonsecure_call)) x;`, or after the declarator -- and dropping it
+ * would make a call that should clear the registers and BLXNS an ordinary
+ * BLX into the Non-secure state's code. */
+static void cmse_call_leftover(struct parser *ps)
+{
+    if (ps->cmse_call_pending) {
+        ps->cmse_call_pending = 0;
+        parse_error_line(ps, ps->cmse_call_line,
+            "cmse_nonsecure_call applies to a function type, written among "
+            "the specifiers before its declarator: `typedef int "
+            "__attribute__((cmse_nonsecure_call)) ns_fn(int);` or `void "
+            "__attribute__((cmse_nonsecure_call)) (*fp)(void);`");
+    }
+}
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
     /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
@@ -782,6 +816,28 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     diag_warn_opt(ps->lx.file, aline, 0, "attributes",
                         "__attribute__((%s)) is accepted but does nothing "
                         "here: %s", name, ae->why);
+            }
+            /* CMSE. Without -mcmse there is no Secure side to build, and
+             * both are ignored with a warning, as clang and GCC do: the
+             * function or the call is then an ordinary one, which is what
+             * a Non-secure build of the same header needs. */
+            if (name && (attr_is(name, "cmse_nonsecure_entry") ||
+                         attr_is(name, "cmse_nonsecure_call"))) {
+                int entry = attr_is(name, "cmse_nonsecure_entry");
+                if (!target_thumb_cmse())
+                    diag_warn_opt(ps->lx.file, aline, 0, "attributes",
+                        "__attribute__((%s)) is ignored without -mcmse "
+                        "(the Secure side of an ARMv8-M build)", name);
+                else if (entry && !out)
+                    parse_error_line(ps, aline,
+                        "cmse_nonsecure_entry is only supported on a "
+                        "function declaration");
+                else if (entry)
+                    out->cmse_entry = 1;
+                else {
+                    ps->cmse_call_pending = 1;
+                    ps->cmse_call_line = aline;
+                }
             }
             if (name && attr_is(name, "pcs")) {
                 int v = sarg && !strcmp(sarg, "aapcs") ? 1
@@ -1155,6 +1211,10 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     /* The declarator being parsed has its name already: the parameters'
      * own declarators must not leave theirs in its place. */
     int name_line = ps->decl_name_line, name_col = ps->decl_name_col;
+    /* A pending cmse_nonsecure_call belongs to THIS function type, not to
+     * one among its parameters' types. */
+    int cmse_call = ps->cmse_call_pending;
+    ps->cmse_call_pending = 0;
     expect(ps, TOK_LPAREN, "'('");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
@@ -1232,11 +1292,13 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
         }
     }
     expect(ps, TOK_RPAREN, "')'");
+    cmse_call_leftover(ps);             /* one a parameter could not take */
     ps->vla_ok = saved_vla_ok;
     ps->decl_name_line = name_line;
     ps->decl_name_col = name_col;
     struct type *ft = ty_func(ret, pt, n, varargs);
     ft->sret_first = sret;
+    ft->cmse_ns_call = cmse_call;
     return ft;
 }
 
@@ -3896,6 +3958,9 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 int tconst;
                 struct type *tt = parse_declarator_c(ps, base, &tname,
                                                      spec_const, &tconst);
+                /* `typedef int fn(int);` (see the file-scope typedef) */
+                if (tname && cur(ps)->kind == TOK_LPAREN)
+                    tt = parse_fn_params(ps, tt);
                 if (!tname)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "typedef needs a name, got %s", tok_describe(cur(ps)));
@@ -4878,6 +4943,14 @@ static void parse_top(struct parser *ps, struct unit *u,
             int tconst;
             struct type *tt = parse_declarator_c(ps, tbase, &tname,
                                                  spec_const, &tconst);
+            /* `typedef int fn(int);`: a FUNCTION type's name. The
+             * declarator reads `(params)` after a name only inside
+             * parentheses; here, as for a function declaration, the
+             * caller does. CMSE's `typedef void
+             * __attribute__((cmse_nonsecure_call)) ns_fn(void);` is this
+             * shape, and it was a syntax error. */
+            if (tname && cur(ps)->kind == TOK_LPAREN)
+                tt = parse_fn_params(ps, tt);
             if (!tname)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "typedef needs a name, got %s",
@@ -4997,6 +5070,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->is_ctor = at.ctor;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
+    if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
@@ -5010,6 +5084,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->is_ctor = at.ctor;
                 if (at.isr) f->is_isr = at.isr;
                 if (at.naked) f->is_naked = 1;
+                if (at.cmse_entry) f->cmse_entry = 1;
                 f->is_dtor = at.dtor;
                 f->attr_used = at.used;
                 f->attr_unused = at.unused;
@@ -5094,6 +5169,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->is_ctor = at.ctor;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
+    if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
@@ -5200,6 +5276,7 @@ fn_tail:
     f->is_ctor = at.ctor;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
+    if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
     f->attr_used = at.used;
     f->attr_unused = at.unused;

@@ -1436,7 +1436,36 @@ static void gen_call(struct t_fn *F, int n)
     }
     if (sret)
         fr_addr(F, T_R0, F->scratch_at + i->scratch);
-    if (i->indirect) {
+    if (i->indirect && i->call_cmse) {
+        /* CMSE's call into the Non-secure state (codegen.c says why each
+         * step), in Thumb-1: r4-r7 pushed, then r8-r11 through them; the
+         * target's bit 0 cleared in r4 (BICS takes low registers only);
+         * every register but the arguments overwritten with it, and the
+         * flags; BLXNS; and r8-r11, r4-r7 back. No VLSTM: Baseline has
+         * no FPU. */
+        tcg_cmse_check_call(fn, i, &w, sret);
+        v_rd(F, i->a, sc(F, S0));
+        t_mov_reg(t, IP, S0);
+        t1_push(t, 0xf0u);
+        for (int r = 4; r < 8; r++)
+            t_mov_reg(t, r, r + 4);
+        t1_push(t, 0xf0u);
+        t_mov_reg(t, 4, IP);
+        t1_movs_imm(t, 5, 1);
+        t1_alu_reg(t, T_OP_BIC, 4, 5);
+        for (int r = w.ncrn; r < 13; r++)
+            if (r != 4)
+                t_mov_reg(t, r, 4);
+        t_msr_apsr(t, 4, 0);
+        t_bxns(t, 4, 1);
+        t1_pop(t, 0xf0u);
+        for (int r = 4; r < 8; r++)
+            t_mov_reg(t, r + 4, r);
+        t1_pop(t, 0xf0u);
+        if (i->dst >= 0 && !i->retsize &&
+            (i->ret_tybytes == 1 || i->ret_tybytes == 2))
+            t1_ext(t, T_R0, T_R0, i->ret_tybytes, i->ret_tysign);
+    } else if (i->indirect) {
         v_rd(F, i->a, sc(F, S0));
         t_blx(t, S0);
     } else if (cg_call_local(fn->src, i->callee)) {
@@ -3003,6 +3032,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = FB6;
+    if (fn->cmse_entry)
+        tcg_cmse_check_entry(fn);
     /* A leaf: nothing calls, the lowering's own calls included. An asm
      * writes lr when its template calls or names it, which irgen recorded
      * (ir_asm.clob); one whose clobbers are unknown might. */
@@ -3190,7 +3221,24 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (fn->has_alloca)
             t_mov_reg(t, T_SP, FB6);
         sp_frame(&F, F.frame, 0);
-        if (F.nopush) {
+        if (fn->cmse_entry) {
+            /* CMSE: back to the Non-secure state (codegen.c's
+             * cmse_entry_return). POP cannot name lr here, so the return
+             * address comes off into r3 -- which is cleared anyway -- and
+             * every cleared register then takes lr's value. */
+            if (!F.nopush) {
+                unsigned mask = save_mask6(&F, F.scr_save);
+                if (mask & ~(1u << T_LR))
+                    t1_pop(t, mask & ~(1u << T_LR));
+                t1_pop(t, 1u << 3);
+                t_mov_reg(t, T_LR, 3);
+            }
+            for (int r = tcg_cmse_ret_regs(fn); r < 4; r++)
+                t_mov_reg(t, r, T_LR);
+            t_mov_reg(t, IP, T_LR);
+            t_msr_apsr(t, T_LR, 0);
+            t_bxns(t, T_LR, 0);
+        } else if (F.nopush) {
             t_bx(t, T_LR);
         } else {
             unsigned mask = save_mask6(&F, F.scr_save);

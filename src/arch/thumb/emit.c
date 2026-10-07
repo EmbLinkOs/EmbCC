@@ -1206,10 +1206,22 @@ void t_mrs(struct code *c, int rd, int sysm)
 /* MSR <spec_reg>, <Rn>: 1111 0011 100 0 Rn | 1000 mask 00 SYSm, with the
  * mask 0b10 -- write the whole register, which is the only form a C
  * program wants. */
-void t_msr(struct code *c, int sysm, int rn)
+static void msr_mask(struct code *c, int sysm, int rn, unsigned mask)
 {
     if (t_isa_a32) a32_refuse("an M-profile special register", sysm);
-    hw2(c, 0xF380u | (unsigned)rn, 0x8800u | ((unsigned)sysm & 0xff));
+    hw2(c, 0xF380u | (unsigned)rn,
+           0x8000u | (mask << 10) | ((unsigned)sysm & 0xff));
+}
+void t_msr(struct code *c, int sysm, int rn)
+{
+    msr_mask(c, sysm, rn, 2u);
+}
+
+/* MSR APSR_nzcvq, Rn -- t_msr of APSR -- or with `ge` APSR_nzcvqg, mask
+ * 0b11, which writes the DSP extension's GE bits as well. */
+void t_msr_apsr(struct code *c, int rn, int ge)
+{
+    msr_mask(c, T_SYS_APSR, rn, ge ? 3u : 2u);
 }
 
 /* CPS: 1011 0110 011 im 0 a i f. Only i and f matter on M-profile. */

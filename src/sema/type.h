@@ -124,6 +124,11 @@ struct type {
     struct type *ptypes[MAX_PARAMS];
     int nptypes;
     int is_varargs;
+    int cmse_ns_call;       /* __attribute__((cmse_nonsecure_call)) under
+                             * -mcmse: a call through a pointer to this
+                             * type enters the Non-secure state (BLXNS),
+                             * with every register and flag that could
+                             * carry a secret cleared first */
     int sret_first;         /* the first parameter is the ABI's indirect-
                              * result pointer (__attribute__((embcc_sret)),
                              * which C++ lowering writes): aarch64 passes it

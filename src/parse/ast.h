@@ -342,6 +342,12 @@ struct func {
     /* __attribute__((naked)): no prologue, no epilogue -- the body is asm
      * statements, assembled as a block of its own (src/driver/main.c). */
     int is_naked;
+    /* __attribute__((cmse_nonsecure_entry)) under -mcmse: a Secure function
+     * the Non-secure state may call, through the SG veneer the linker
+     * makes from its second symbol, __acle_se_<name>. Its return clears
+     * every register and flag that could carry a secret and is a BXNS
+     * (src/arch/thumb). */
+    int cmse_entry;
     /* The hints EmbCC acts on: keep the symbol, do not warn that it is
      * unused, force or forbid inlining, warn at each call, warn when a
      * caller throws the result away. `vis` is an ELF visibility. */

@@ -211,6 +211,14 @@ int tcg_o0(void);
 int tcg_pairs(void);
 void tcg_reset_taken(void);
 
+/* CMSE (-mcmse), for both lowerings: the refusals, and how many core
+ * registers an entry function's result occupies. */
+void tcg_cmse_fail(const struct ir_func *fn, int line, const char *what);
+int tcg_cmse_ret_regs(const struct ir_func *fn);
+void tcg_cmse_check_entry(const struct ir_func *fn);
+void tcg_cmse_check_call(const struct ir_func *fn, const struct ir_ins *i,
+                         const struct abi_walk *w, long sret);
+
 /* ---- exported by v6m.c ------------------------------------------------- */
 
 /* One function, ARMv6-M: the counterpart of codegen.c's gen_func. */

@@ -3274,6 +3274,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 (Elf64_Xword)(f->code_len - f->code_entry),
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
                 (Elf64_Half)code_sec(f->code_off, text_ndx));
+    /* ACLE's CMSE: a cmse_nonsecure_entry function has a second global
+     * symbol at the same address, __acle_se_<name>. The linker sees the
+     * pair, makes the SG veneer in .gnu.sgstubs and points <name> at it
+     * (src/link/link.c), which is how a Non-secure caller enters through
+     * the gateway and a Secure caller may still reach the code. */
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->has_defn && !f->is_static && f->cmse_entry &&
+            target_thumb_cmse()) {
+            char *se = xmalloc(strlen(f->name) + sizeof "__acle_se_");
+            strcpy(se, "__acle_se_");
+            strcat(se, f->name);
+            elfw_add_symbol(
+                w, se, (Elf64_Addr)code_sym_value(ta, f->code_off + f->code_entry),
+                (Elf64_Xword)(f->code_len - f->code_entry),
+                ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                (Elf64_Half)code_sec(f->code_off, text_ndx));
+        }
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->alias_of && !f->is_static) {
             const struct func *t = alias_target(u, f);
@@ -5410,6 +5427,18 @@ int main(int argc, char **argv)
     }
 
     arm_float_resolve();
+    /* -mcmse with the FPU in use: an entry function would have to clear
+     * s0-s15 and FPSCR when the Secure state's FP context is active
+     * (CONTROL_S.SFPA), and a call to the Non-secure state would have to
+     * hand the hard-float convention's arguments over in VFP registers.
+     * Neither is emitted, so the combination is refused rather than
+     * leaking a Secure float into the Non-secure state. */
+    if (g_arm_cmse && target_thumb_fpu())
+        diag_fatal(NULL, 0, "-mcmse with an FPU (-mfpu=, -mfloat-abi=softfp "
+                   "or hard, or an -eabihf triple) is not supported: EmbCC "
+                   "does not clear the floating-point registers a "
+                   "cmse_nonsecure_entry function must clear; build the "
+                   "Secure side with -mfloat-abi=soft");
     sema_set_gnu89_inline(gnu89_inline || std_gnu89);
     /* -fno-jump-tables for a whole test suite, whose scripts spell their
      * own command lines: every dense switch takes the compare tree. */

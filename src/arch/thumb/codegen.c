@@ -979,8 +979,9 @@ static int t_tail_ok(const struct ir_func *fn, int n)
         i->flt || call_sret_bytes(i) || call_ret_vfp(i, &esz) ||
         getenv("EMBCC_NO_TAILCALL"))
         return 0;
+    /* a cmse_nonsecure_entry function leaves through its own BXNS */
     if (fn->ret_abi.is_struct || fn->ret_abi.is_float || fn->is_varargs ||
-        fn->has_alloca || fn->neh)
+        fn->has_alloca || fn->neh || fn->cmse_entry)
         return 0;
     if (n + 1 >= fn->nins) {
         if (fn->ret_abi.size)
@@ -3235,6 +3236,8 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
  * result is sign-extended on the way out. Eight bytes has no exclusive
  * pair on ARMv7-M and is refused. */
 static void set_cc(struct t_fn *F, int dst, int cond);
+static void cmse_entry_return(struct t_fn *F);
+static void cmse_call(struct t_fn *F, int ncrn);
 
 static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
 {
@@ -4672,7 +4675,16 @@ static void gen_ins(struct t_fn *F, int n)
                 F->skip_next = 1;     /* the IR_RET: not reached */
             return;
         }
-        if (i->indirect) {
+        if (i->indirect && i->call_cmse) {
+            tcg_cmse_check_call(fn, i, &w, sret);
+            rd(F, i->a, T_ACC);
+            cmse_call(F, w.ncrn);
+            /* the Non-secure callee is not trusted to have extended a
+             * narrow result as the AAPCS asks */
+            if (i->dst >= 0 && !i->retsize &&
+                (i->ret_tybytes == 1 || i->ret_tybytes == 2))
+                t_ext(t, T_R0, T_R0, i->ret_tybytes, i->ret_tysign);
+        } else if (i->indirect) {
             rd(F, i->a, T_ACC);
             t_blx(t, T_ACC);
         } else if (cg_call_local(F->fn->src, i->callee)) {
@@ -5706,6 +5718,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     /* A tail call leaves lr alone -- it is the caller's, and the callee
      * returns with it -- so it does not make this function a non-leaf. */
     F.tail = NULL;
+    if (fn->cmse_entry)
+        tcg_cmse_check_entry(fn);
     if (g_t_regalloc && !want_debug && !g_t_o0)
         for (i = 0; i < fn->nins; i++)
             if (t_tail_ok(fn, i)) {
@@ -6148,11 +6162,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * callee-saved registers the allocator took. Built here and
          * patched into the push below, so the two cannot disagree. */
         unsigned mask = save_mask_for(F.nsave, F.used_callee, F.scr_save);
-        if (F.nopush)
+        if (F.nopush && !fn->cmse_entry)
             t_bx(t, T_LR);
-        else
+        else if (!F.nopush)
             t_patch_push(t, push_at, mask);
-        if (F.nopush) {
+        if (fn->cmse_entry) {
+            /* lr back, then the clearing and BXNS */
+            if (!F.nopush)
+                t_pop(t, mask);
+            cmse_entry_return(&F);
+        } else if (F.nopush) {
             /* returned above */
         } else if (fn->is_varargs) {
             /* Return through lr rather than popping into pc: the four
@@ -6539,6 +6558,111 @@ void tcg_place_one(struct abi_walk *w, const struct ir_arg *a,
 }
 int tcg_call_sret_bytes(const struct ir_ins *i) { return call_sret_bytes(i); }
 int tcg_fn_sret_bytes(const struct ir_func *fn) { return fn_sret_bytes(fn); }
+
+/* ---- ARMv8-M's security extension: ACLE's CMSE, under -mcmse ------------
+ *
+ * Both lowerings share these: ARMv8-M Mainline here (cmse_entry_return,
+ * cmse_call), ARMv8-M Baseline in v6m.c, the same shape in Thumb-1.
+ *
+ * A cmse_nonsecure_entry function returns to the Non-secure state with
+ * BXNS lr. Before it, every register the AAPCS lets a callee leave
+ * changed and that does not hold the result -- r0-r3 above it, and r12 --
+ * is overwritten with lr (the return address, which the caller knows
+ * already), and so are the flags, with an MSR of lr into APSR: a secret
+ * the body computed must not be readable there. r4-r11 hold the caller's
+ * values again after the epilogue's pop. This is clang's sequence for a
+ * soft-float build. The floating-point state is not cleared: -mcmse is
+ * refused with an FPU (src/driver), so Secure code built here never puts
+ * anything in it.
+ *
+ * A call through a cmse_nonsecure_call pointer saves r4-r11, clears the
+ * target's bit 0 (a Non-secure address: BLXNS to an odd one would stay
+ * Secure), overwrites every register that is not an argument with the
+ * target, and the flags, and branches with BLXNS; the callee's result
+ * comes back in r0 (r0:r1), and r4-r11 are restored -- the Non-secure
+ * callee is not trusted to preserve them. Mainline also saves and clears
+ * the floating-point context around the call with VLSTM/VLLDM, as clang
+ * does, which is a no-op where no Secure FP context is active.
+ *
+ * What CMSE forbids is refused by name, as clang refuses it: an entry
+ * function with arguments on the stack or a result returned through
+ * memory (the stack is the Non-secure caller's), and the same for a call
+ * through a Non-secure pointer. */
+void tcg_cmse_fail(const struct ir_func *fn, int line, const char *what)
+{
+    diag_fatal(fn->file, line ? line : fn->line, "%s '%s' %s",
+               "cmse_nonsecure_entry function", fn->name, what);
+}
+
+/* The core registers the result occupies, r0 up: 0, 1 or 2. */
+int tcg_cmse_ret_regs(const struct ir_func *fn)
+{
+    long sz = fn->ret_abi.size;
+    if (!sz)
+        return 0;
+    return fn->ret_abi.is_struct ? 1 : (int)((sz + 3) / 4);
+}
+
+void tcg_cmse_check_entry(const struct ir_func *fn)
+{
+    struct abi_walk w;
+    struct argplace pl;
+    if (fn_sret_bytes(fn))
+        tcg_cmse_fail(fn, 0, "would return its value through memory the "
+                      "Non-secure caller owns (CMSE allows a result in r0-r3 "
+                      "only)");
+    walk_init(&w, 0, fn->is_varargs, fn->pcs);
+    for (int k = 0; k < fn->nparams; k++)
+        place_one(&w, &fn->param_abi[k], &pl);
+    if (w.stk)
+        tcg_cmse_fail(fn, 0, "requires arguments on the stack, which is the "
+                      "Non-secure caller's (CMSE allows r0-r3 only)");
+}
+
+void tcg_cmse_check_call(const struct ir_func *fn, const struct ir_ins *i,
+                         const struct abi_walk *w, long sret)
+{
+    if (sret || w->stk)
+        diag_fatal(fn->file, i->line ? i->line : fn->line,
+                   "a call through a cmse_nonsecure_call pointer in '%s' "
+                   "%s, which is not supported: CMSE passes r0-r3 only",
+                   fn->name, sret ? "returns its value through memory"
+                                  : "passes arguments on the stack");
+}
+
+/* ARMv8-M Mainline: an entry function's way out, after the pop that put
+ * the caller's registers and lr back (or none, in a function that pushed
+ * nothing). */
+static void cmse_entry_return(struct t_fn *F)
+{
+    struct code *t = F->t;
+    for (int r = tcg_cmse_ret_regs(F->fn); r < 4; r++)
+        t_mov_reg(t, r, T_LR);
+    t_mov_reg(t, 12, T_LR);
+    /* APSR_nzcvqg where the part has the DSP extension's GE bits, which
+     * a SIMD instruction in the body could have set -- clang's choice
+     * for the Cortex-M33 */
+    t_msr_apsr(t, T_LR, target_thumb_em());
+    t_bxns(t, T_LR, 0);
+}
+
+/* ARMv8-M Mainline: the target in T_ACC, the arguments in r0..r(ncrn-1). */
+static void cmse_call(struct t_fn *F, int ncrn)
+{
+    struct code *t = F->t;
+    t_push(t, 0x0ff0u);                            /* r4-r11 */
+    if (!t_alu_imm(t, T_OP_BIC, T_ACC, T_ACC, 1, 0))
+        internal_error("thumb: bic #1 does not encode");
+    t_sp_adjust(t, 136, 1);
+    t_vlstm(t, T_SP, 0);
+    for (int r = ncrn; r < 12; r++)
+        t_mov_reg(t, r, T_ACC);
+    t_msr_apsr(t, T_ACC, target_thumb_em());
+    t_bxns(t, T_ACC, 1);
+    t_vlstm(t, T_SP, 1);
+    t_sp_adjust(t, 136, 0);
+    t_pop(t, 0x0ff0u);
+}
 long tcg_slot_of(const struct t_fn *F, int v) { return slot_of(F, v); }
 int tcg_faddr(const struct t_fn *F, int v, long *off) { return faddr(F, v, off); }
 void tcg_want_label(struct t_fn *F, int at, int label, int cond)

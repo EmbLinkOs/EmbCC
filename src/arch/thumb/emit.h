@@ -257,6 +257,9 @@ enum {
 
 void t_mrs(struct code *c, int rd, int sysm);
 void t_msr(struct code *c, int sysm, int rn);
+/* msr apsr_nzcvq, rn; with `ge`, apsr_nzcvqg (the DSP extension's GE bits
+ * too). */
+void t_msr_apsr(struct code *c, int rn, int ge);
 
 /* `cpsid`/`cpsie` over the i and f masks. Masking interrupts is what a
  * critical section is on this machine. */

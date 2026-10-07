@@ -924,6 +924,16 @@ static int one_stmt(const char *stmt, int len, struct code *out,
     if (mnemonic_is(&t[0], "msr")) {
         int rn, sys;
         if (n != 3) FAIL("msr takes a special register and a register");
+        /* the flags and the DSP extension's GE bits (mask 0b11) */
+        if (tok_is(&t[1], "apsr_nzcvqg")) {
+            rn = tok_reg(&t[2]);
+            if (rn < 0) FAIL("\"%.*s\" is not a register", t[2].len, t[2].s);
+            if (arch_thumb1())
+                FAIL("apsr_nzcvqg: %s has no DSP extension, and no GE bits",
+                     g_arch == 6 ? "ARMv6-M" : "ARMv8-M Baseline");
+            t_msr_apsr(out, rn, 1);
+            return 0;
+        }
         sys = sysreg_num(t[1].s, t[1].len);
         rn = tok_reg(&t[2]);
         if (sys < 0) FAIL("\"%.*s\" is not an ARMv7-M special register",

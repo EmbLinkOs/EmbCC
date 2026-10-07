@@ -5374,6 +5374,7 @@ static void merge_decls(struct unit *u)
         /* naked on the prototype and not on the definition is how
          * FreeRTOS's ports write it */
         canon->is_naked |= f->is_naked;
+        canon->cmse_entry |= f->cmse_entry;
         f->absorbed = 1;
     }
 }
@@ -5466,6 +5467,34 @@ static void merge_globals(struct unit *u)
             canon->section = g->section;
         }
         g->absorbed = 1;
+    }
+}
+
+/* A cmse_nonsecure_entry function is entered from the Non-secure state
+ * through the SG veneer the linker builds from its __acle_se_ symbol, so
+ * it has to have one: internal linkage would leave nothing to build it
+ * from, and a function the Non-secure side cannot reach while the Secure
+ * side believes it is guarded is worse than a refusal. A variadic one is
+ * refused as clang refuses it: its arguments are on the Non-secure
+ * stack. It is kept like a `used` function -- nothing in this image need
+ * call it -- and never inlined, so its own epilogue is the only way out. */
+static void check_cmse_entries(struct unit *u)
+{
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || !f->cmse_entry)
+            continue;
+        if (f->is_static)
+            sema_error_line(u, f->line, "cmse_nonsecure_entry function "
+                            "'%s' has internal linkage: the Non-secure state "
+                            "enters it through a veneer the linker makes from "
+                            "its global symbol", f->name);
+        if (f->is_varargs)
+            sema_error_line(u, f->line, "cmse_nonsecure_entry function "
+                            "'%s' is variadic, and its unnamed arguments would "
+                            "be on the Non-secure stack", f->name);
+        f->used = 1;
+        f->attr_used = 1;
+        f->attr_noinline = 1;
     }
 }
 
@@ -5563,6 +5592,7 @@ void sema_check(struct unit *u)
     merge_decls(u);
     decide_inline_only(u);
     check_aliases(u);
+    check_cmse_entries(u);
     merge_globals(u);
     check_econst_names(u);
     lower_globals(u);
