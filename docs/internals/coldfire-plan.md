@@ -80,9 +80,12 @@ The m68k SVR4 convention as GCC's m68k-elf implements it:
   in a0 AND d0 (the SVR4 m68k rule: GCC's callee copies a0 to d0 so a
   caller without a prototype finds it): EmbCC's callee writes both and
   its caller reads d0. A `_Complex float` comes back in d0 (real) and d1
-  (imaginary) -- it is not an aggregate to GCC; a `_Complex double` in
-  d0-d3, which EmbCC refuses by name rather than give d2 and d3 a meaning
-  its allocator does not know.
+  (imaginary) -- it is not an aggregate to GCC, so pcc struct return
+  does not apply, and m68k_function_value gives its mode d0 on -- and a
+  `_Complex double` in d0:d1 (real) and d2:d3 (imaginary). A function
+  that returns one, or calls one that does, keeps d2 and d3 out of its
+  register pool, so it never saves, restores or keeps a value in them
+  across that call (uses_d2d3_result).
 - **Every structure and union is returned through memory**
   (DEFAULT_PCC_STRUCT_RETURN): the caller passes the buffer's address in
   **a1**, not on the stack, and the callee returns it in d0 (and a0).
@@ -133,9 +136,25 @@ left decides the code:
 - **Comparisons** set the condition codes; a 0/1 value is `scc` (0 or
   -1 in the low byte), `extb.l` and `neg.l`.
 - **Branches** are `bcc.w` (+-32 KiB) inside a function, `.b` where it
-  reaches; a function whose branch does not reach is refused by name.
-  Calls are `jsr` to an absolute address (`R_68K_32`), so every call
-  reaches.
+  reaches. One that does not reach takes a long form with no relocation
+  -- the inverse `bcc.b` over `lea (0,%pc),%a0; adda.l #d,%a0; jmp (%a0)`
+  -- and the function is generated again until nothing new fails, then
+  once more with every branch that fits 8 bits short (shrinking only
+  brings code closer). Calls are `jsr` to an absolute address
+  (`R_68K_32`), so every call reaches. A dense `switch` is a table of
+  32-bit offsets from itself after a `lea (d16,%pc)`, so it needs no
+  relocation either.
+- **Atomics**: ISA_A has no compare-and-swap (`cas` is not ColdFire's),
+  so an atomic read-modify-write of 1, 2 or 4 bytes is a plain one with
+  interrupts masked -- `move.w %sr` saved, the mask raised to 7, `move.w`
+  back -- which on a single core is atomic. Moving to and from `%sr` is
+  supervisor-only, where a bare-metal ColdFire program runs; in user mode
+  the first atomic traps (a privilege violation) rather than run
+  unprotected. 8-byte atomics are refused by name. A fence is `nop`, which
+  synchronises the ColdFire pipeline.
+- **`alloca`** moves `%sp` down by the size plus 15 and hands out the
+  first 16-aligned address above the argument area, the IR's promise;
+  the frame is a6-relative, so nothing else moves.
 - **Addresses** of globals, strings and functions are 32-bit absolute
   immediates: `move.l #sym,Dn` or `lea sym,An`, `R_68K_32`.
 - Soft float through lib/rt under libgcc's names.
@@ -192,4 +211,37 @@ range check widened.
 
 ## Status
 
-In progress: the encoder and its referee are done.
+Done -- each test shown to fail against a deliberate mutant, as the
+commits say:
+
+| Test | What it checks |
+| --- | --- |
+| `tests/golden/coldfire-encoding.sh` | every encoder form against QEMU's m68k disassembler (3979 instructions), and 39 encoder checks |
+| `tests/golden/coldfire-exec.sh` | `tests/exec/*.c` on the mcf5208evb at -O0, -O1, -O2 and -Os: 200 of 200 at every level, 22 of them judged against clang's big-endian MIPS32 status for an LP64 or little-endian assumption, 1 against the value the m68k's 2-byte alignment gives, 16 not applicable |
+| `tests/golden/coldfire-abi.sh` | caller and callee in separate units, -O0/-O2 in all four pairings, against the host's output: the shared embedded programs and the m68k-specific ones |
+| `tests/golden/coldfire-refuse.sh` | the triples, the object header and relocations, the accepted and refused options and constructs, EmbLD's refusals |
+| `tests/golden/libc-embedded.sh` | lib/libc on the board equals x86-64's at -O0, -O2, -Os |
+| `tests/golden/debug-embedded.sh` | `-g`: `llvm-dwarfdump --verify`, the frame base (breg14, a6), address size, pointer DIEs |
+
+The exec corpus also passes with the allocator's pool cut to one
+register (`EMBCC_RA_MAXPOOL=1`, every spill path) and with the address
+class off (`EMBCC_CF_NOAREG=1`).
+
+Known gaps, in the order they matter:
+
+1. **The ABI is unverified** against a real m68k compiler: the argument
+   padding of small composites, the 2-byte alignment, struct return
+   through a1, `_Complex` results in d0-d3, the predefined macros
+   (written by hand) and `wchar_t`'s spelling are GCC's m68k port as
+   remembered. `coldfire-abi.sh` makes the convention one convention;
+   only m68k-elf-gcc can say it is GCC's.
+2. **Refused by name:** inline asm, file-scope asm and `.s` files (there
+   is no ColdFire assembler), 8-byte atomics, a frame beyond 32 KiB,
+   unwind tables, C++ (as on every ILP32 target), and a scalar local
+   aligned beyond the 4-byte stack.
+3. **Code size**: every function links a6 and a 64-bit value always lives
+   in its frame slot (there is no pair allocation); constants and
+   addresses are 6-byte operands where GCC would use shorter forms; a
+   64-bit shift by most constants is a call.
+4. ISA_A+ and ISA_B forms (`mvs`/`mvz`, `mov3q`, `byterev`, `cmp.b/.w`)
+   are not used, so the code runs on every ColdFire core with a divider.

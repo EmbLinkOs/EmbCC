@@ -58,6 +58,8 @@ order.
 | `src/link/link.c` | see below | every board test, mips-be-abi (clang's objects) |
 | `lib/libc/src/math/fdlibm/fdlibm.h` | `__IEEE_BIG_ENDIAN` from `__BYTE_ORDER__`: which word of a double is first | libc-embedded (mips-none-elf against x86-64), mips-be-exec |
 | `tests/harness/mips/run.sh` | the board is chosen by the image's `EI_DATA` | -- |
+| `src/arch/coldfire/` | the second big-endian target (`m68k-none-elf`), with no little-endian twin: the encoder writes every 16-bit word high byte first, a pair holds the high word in d0 and at the lower address, a narrow parameter's byte is its word's last (11(%fp)), a composite smaller than a word is right-justified in its argument word, and `va_arg` reads it there | coldfire-exec, coldfire-abi, libc-embedded |
+| `src/link/link.c` `apply_m68k` | every m68k field written big-endian whole; the `-Tstack` stub's words | coldfire-exec, coldfire-refuse |
 
 ### The MIPS backend
 

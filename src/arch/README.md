@@ -22,6 +22,8 @@ src/arch/
   riscv64/         RV64's macro tables only             -> D-016
   mips/            MIPS32r2, o32 soft float, ILP32      -> docs/internals/mips32-plan.md
   mips32/          its macro tables only (as riscv32/)
+  coldfire/        ColdFire ISA_A (m68k-none-elf), big-endian, soft float
+                                                         -> docs/internals/coldfire-plan.md
 ```
 
 Each architecture directory holds the same kinds of file:

@@ -61,7 +61,7 @@ struct cf_sites {
     struct fsite *f;       int nf, capf;
 };
 
-enum { FX_B, FX_TAB, FX_PC16 };
+enum { FX_B, FX_TAB, FX_PC16, FX_LONG };
 
 struct cf_fn {
     struct ir_func *fn;
@@ -86,8 +86,8 @@ struct cf_fn {
     int *label_off;
     struct { int at; int label; int kind; int base; } *fix;
     int nfix, capfix;
-    const char *shortb;  /* per fix: emit the 8-bit branch */
-    int nshortb;
+    const char *form;    /* per fix: 0 bcc.w, 1 bcc.b, 2 the long form */
+    int nform;
 };
 
 static void copy_block(struct cf_fn *F, int copy, long size);
@@ -124,12 +124,14 @@ static int g_cf_apool[CF_NAPOOL];
 static int g_cf_regalloc;
 static int g_cf_maxd = CF_NPOOL, g_cf_maxa = CF_NAPOOL;
 
+static int uses_d2d3_result(const struct ir_func *fn);
+
 static const int *cf_pool_for(const struct ir_func *fn, int *n)
 {
-    int k = 0;
-    (void)fn;
+    int k = 0, skip23 = uses_d2d3_result(fn);
     for (int j = 0; j < CF_NPOOL && k < g_cf_maxd; j++)
-        g_cf_pool[k++] = CF_POOL[j];
+        if (!(skip23 && (CF_POOL[j] == 2 || CF_POOL[j] == 3)))
+            g_cf_pool[k++] = CF_POOL[j];
     *n = k;
     return g_cf_pool;
 }
@@ -168,7 +170,16 @@ int cf_op_calls_helper(const struct ir_ins *i)
         return 1;
     if (i->w == 8 && (i->op == IR_DIV || i->op == IR_MOD || i->op == IR_MUL))
         return 1;
-    return i->w == 8 && (i->op == IR_SHL || i->op == IR_SHR) && !i->imm_b;
+    /* a 64-bit shift: inline by 0, by 32 or more, and left by 1 (gen_ins64);
+     * every other count is __ashldi3 and friends. The frame's argument
+     * area is sized by this answer, so it must be gen_ins64's exactly. */
+    if (i->w == 8 && (i->op == IR_SHL || i->op == IR_SHR)) {
+        long k = i->imm & 63;
+        if (!i->imm_b)
+            return 1;
+        return !(k == 0 || k >= 32 || (k == 1 && i->op == IR_SHL));
+    }
+    return 0;
 }
 
 static const struct ra_target CF_RATGT = {
@@ -258,22 +269,42 @@ static long pad_of(const struct ir_arg *a)
     return a->is_struct && a->size < 4 ? 4 - a->size : 0;
 }
 
-/* A _Complex float comes back in d0 (real) and d1 (imaginary): to GCC it
- * is not an aggregate. */
-static int cplx_float(const struct type *t, long size)
+/* A _Complex float or double comes back in registers: to GCC it is not an
+ * aggregate, so DEFAULT_PCC_STRUCT_RETURN does not send it to memory, and
+ * m68k_function_value gives its mode d0 on -- d0 (real) and d1 (imaginary)
+ * for a float, d0:d1 (real) and d2:d3 (imaginary) for a double. How many
+ * registers, or 0 for memory. */
+static int cplx_regs(const struct type *t, long size)
 {
-    return t && t->kind == TY_STRUCT && t->is_complex && size == 8;
+    if (!t || t->kind != TY_STRUCT || !t->is_complex)
+        return 0;
+    return size == 8 ? 2 : size == 16 ? 4 : 0;
 }
 
 static int fn_sret(const struct ir_func *fn)
 {
-    return fn->ret_abi.is_struct && !cplx_float(fn->ret_abi.ty,
-                                                fn->ret_abi.size);
+    return fn->ret_abi.is_struct && !cplx_regs(fn->ret_abi.ty,
+                                               fn->ret_abi.size);
 }
 
 static int call_sret(const struct ir_ins *i)
 {
-    return i->retsize && !cplx_float(i->rety, i->retsize);
+    return i->retsize && !cplx_regs(i->rety, i->retsize);
+}
+
+/* Does fn return, or call something that returns, a _Complex double? Its
+ * imaginary part is in d2:d3, which then are not callee-saved values but
+ * results: the function keeps them out of its pool, so it never saves,
+ * restores or keeps a value in them across that call. */
+static int uses_d2d3_result(const struct ir_func *fn)
+{
+    if (cplx_regs(fn->ret_abi.ty, fn->ret_abi.size) == 4)
+        return 1;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_CALL &&
+            cplx_regs(fn->ins[n].rety, fn->ins[n].retsize) == 4)
+            return 1;
+    return 0;
 }
 
 /* ---- the frame -------------------------------------------------------------
@@ -670,10 +701,19 @@ static long imm_val(const struct ir_ins *i)
 
 /* ---- branches ------------------------------------------------------------
  *
- * A branch to a label is a bcc.w resolved when the function ends; the
- * function is then generated again with every branch that reached within
- * 8 bits in its 2-byte form (gen_func). Shrinking only brings code
- * closer, so a branch that fit still does. */
+ * A branch to a label is a bcc.w resolved when the function ends. One that
+ * does not reach 32 KiB is given the long form and the function generated
+ * again, until nothing new fails; then once more with every branch that
+ * reached within 8 bits in its 2-byte form (gen_func). Shrinking only
+ * brings code closer, so a branch that fit still does.
+ *
+ * The long form is position-independent, with no relocation: the inverse
+ * condition's bcc.b over
+ *
+ *     lea (0,%pc),%a0 ; adda.l #(target - that word),%a0 ; jmp (%a0)
+ *
+ * (bra's has no bcc.b). a0 is free between instructions: the epilogue
+ * sets a returned pointer's copy in a0 itself, after the branch to it. */
 static void want_label(struct cf_fn *F, int at, int label, int kind, int base)
 {
     if (F->nfix == F->capfix) {
@@ -690,7 +730,20 @@ static void want_label(struct cf_fn *F, int at, int label, int kind, int base)
 static void branch_to(struct cf_fn *F, int cond, int label)
 {
     int at = F->t->len;
-    if (F->shortb && F->nfix < F->nshortb && F->shortb[F->nfix])
+    int form = F->form && F->nfix < F->nform ? F->form[F->nfix] : 0;
+    if (form == 2) {
+        int ext, imm;
+        if (cond != CF_T)
+            cf_bcc_b(F->t, cf_cond_invert(cond), 12);
+        ext = F->t->len + 2;
+        cf_lea(F->t, cf_pcdisp(0), A0);
+        imm = F->t->len + 2;
+        cf_alua(F->t, CF_ADD, cf_imm(0), A0);
+        cf_jmp(F->t, cf_ind(A0));
+        want_label(F, imm, label, FX_LONG, ext);
+        return;
+    }
+    if (form == 1)
         cf_w(F->t, 0x6000u | (unsigned)((cond & 15) << 8) | 0x7fu);
     else
         cf_bcc_w(F->t, cond, 0);
@@ -812,13 +865,27 @@ static struct cf_ea out_at(long off)
     return cf_disp(CF_SP, off);
 }
 
+/* An argument word at the stack pointer must lie inside the argument
+ * area the frame reserved (out_area): past it are the callee-saved
+ * registers. A lowering that calls a helper its op_calls_helper answer
+ * did not admit would write there; this stops the compile instead. */
+static void need_out(const struct cf_fn *F, long end)
+{
+    if (end > F->out_bytes)
+        internal_error("coldfire: %s: a call's arguments need %ld bytes and "
+                       "the frame reserved %ld", F->fn->name, end,
+                       F->out_bytes);
+}
+
 static void harg32(struct cf_fn *F, long off, int v)
 {
+    need_out(F, off + 4);
     mv(F, 4, vea(F, v), out_at(off), D0);
 }
 
 static void harg64(struct cf_fn *F, long off, int v)
 {
+    need_out(F, off + 8);
     mv(F, 4, hi_ea(F, v), out_at(off), D0);
     mv(F, 4, lo_ea(F, v), out_at(off + 4), D0);
 }
@@ -1177,6 +1244,7 @@ static int gen_ins64(struct cf_fn *F, int n)
     case IR_MUL: case IR_DIV: case IR_MOD:
         harg64(F, 0, i->a);
         if (i->imm_b) {
+            need_out(F, 16);
             ldi(F, (long)imm_hi(i), out_at(8), D0);
             ldi(F, (long)imm_lo(i), out_at(12), D0);
         } else {
@@ -1223,6 +1291,7 @@ static int gen_ins64(struct cf_fn *F, int n)
                     cf_alu(t, CF_ADD, cf_dreg(D1), D1);
                     cf_addx(t, 0, D0, D0);
                 } else {
+                    need_out(F, 12);
                     cf_move(t, 4, cf_dreg(D0), out_at(0));
                     cf_move(t, 4, cf_dreg(D1), out_at(4));
                     ldi(F, k, out_at(8), D0);
@@ -1353,6 +1422,7 @@ static void gen_call(struct cf_fn *F, int n)
     /* each argument into its words at the stack pointer */
     for (int k = 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
+        need_out(F, off + arg_words(a));
         if (a->is_struct) {
             cf_move(t, 4, vea(F, a->vreg), cf_areg(A1));
             cf_lea(t, out_at(off + pad_of(a)), A0);
@@ -1384,11 +1454,9 @@ static void gen_call(struct cf_fn *F, int n)
         return;
     if (i->retsize) {
         long at = F->scratch_at + i->scratch;
-        if (!call_sret(i)) {
-            /* a _Complex float, in d0 and d1 */
-            cf_move(t, 4, cf_dreg(D0), fp_at(at));
-            cf_move(t, 4, cf_dreg(D1), fp_at(at + 4));
-        }
+        if (!call_sret(i))      /* a _Complex, in d0 on */
+            for (int r = 0; r < cplx_regs(i->rety, i->retsize); r++)
+                cf_move(t, 4, cf_dreg(r), fp_at(at + 4L * r));
         cf_lea(t, fp_at(at), A0);
         wrote(F, i->dst, A0);
     } else if (is_wide(F, i->dst)) {
@@ -1938,10 +2006,12 @@ static void gen_ins(struct cf_fn *F, int n)
         if (i->a >= 0) {
             if (fn->ret_abi.is_struct) {
                 if (!fn_sret(fn)) {
-                    /* a _Complex float: d0 the real part, d1 the other */
+                    /* a _Complex: its words in d0 on (the pool keeps
+                     * d2 and d3 free for a double's: uses_d2d3_result) */
                     int r = areg(F, i->a, A0);
-                    cf_move(t, 4, cf_ind(r), cf_dreg(D0));
-                    cf_move(t, 4, cf_disp(r, 4), cf_dreg(D1));
+                    for (int k = 0; k < cplx_regs(fn->ret_abi.ty,
+                                                   fn->ret_abi.size); k++)
+                        cf_move(t, 4, cf_disp(r, 4L * k), cf_dreg(k));
                 } else {
                     /* into the caller's buffer, whose address comes back
                      * in d0 and a0 */
@@ -1949,17 +2019,13 @@ static void gen_ins(struct cf_fn *F, int n)
                     cf_move(t, 4, fp_at(F->sret_slot), cf_areg(A0));
                     copy_block(F, 1, fn->ret_abi.size);
                     cf_move(t, 4, fp_at(F->sret_slot), cf_dreg(D0));
-                    cf_move(t, 4, cf_dreg(D0), cf_areg(A0));
                 }
             } else if (is_wide(F, i->a) && fn->ret_abi.size <= 4) {
                 cf_move(t, 4, lo_ea(F, i->a), cf_dreg(D0));
             } else if (is_wide(F, i->a)) {
                 rd64(F, i->a, D0, D1);
             } else {
-                rd(F, i->a, D0);
-                /* a pointer comes back in a0 as well (the SVR4 rule) */
-                if (fn->ret_abi.ty && fn->ret_abi.ty->kind == TY_PTR)
-                    cf_move(t, 4, cf_dreg(D0), cf_areg(A0));
+                rd(F, i->a, D0);    /* and a0 for a pointer: the epilogue */
             }
         }
         {
@@ -2040,6 +2106,7 @@ static void gen_ins(struct cf_fn *F, int n)
             cf_refuse(F, i, "a conversion of a 128-bit value");
         if (i->op == IR_I2F && src_w == 8 && !is_wide(F, i->a)) {
             /* a 32-bit value asked for as 64: zero-extended */
+            need_out(F, 8);
             cf_clr(t, 4, out_at(0));
             harg32(F, 4, i->a);
         } else if (src_w == 8) {
@@ -2157,14 +2224,18 @@ static void gen_ins(struct cf_fn *F, int n)
             mv(F, 4, cf_areg(CF_FP), vea(F, i->dst), D0);
         return;
     case IR_ALLOCA:
-        /* the stack pointer down by the size rounded to a word; the block
-         * is above the argument area, which moves down with it */
+        /* A fresh 16-aligned block (the IR's promise; the stack itself is
+         * only 4-aligned): the stack pointer down by the size plus 15,
+         * rounded to a word, and the block the first 16-aligned address
+         * above the argument area, which moves down with it. */
         cf_move(t, 4, vea(F, i->a), cf_dreg(D0));
-        cf_addq(t, 0, 3, cf_dreg(D0));
+        cf_alu_imm(t, CF_ADD, 18, D0);
         cf_alu_imm(t, CF_AND, -4, D0);
         cf_alua(t, CF_SUB, cf_dreg(D0), CF_SP);
-        cf_lea(t, out_at(F->out_bytes), A0);
-        wrote(F, i->dst, A0);
+        cf_lea(t, out_at(F->out_bytes + 15), A0);
+        cf_move(t, 4, cf_areg(A0), cf_dreg(D0));
+        cf_alu_imm(t, CF_AND, -16, D0);
+        wrote(F, i->dst, D0);
         return;
     case IR_SPSAVE:
         if (i->dst >= 0)
@@ -2427,10 +2498,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
     {
     int len0 = t->len, nl0 = fn->nlines;
     int se0 = F.st->next, ss0 = F.st->nstr, sg0 = F.st->ng, sf0 = F.st->nf;
-    char *shortb = NULL;
-    int nshortb = 0;
-    for (int pass = 0; pass < 2; pass++) {
-    int nshort = 0;
+    char *form = NULL;
+    int nform = 0, shrunk = 0;
+    for (;;) {
+    int grew = 0;
     t->len = len0;
     fn->nlines = nl0;
     F.st->next = se0; F.st->nstr = ss0; F.st->ng = sg0; F.st->nf = sf0;
@@ -2438,8 +2509,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
     for (i = 0; i <= fn->nlabels; i++)
         F.label_off[i] = -1;
     F.skip_next = 0;
-    F.shortb = shortb;
-    F.nshortb = nshortb;
+    F.form = form;
+    F.nform = nform;
     f->code_off = t->len;
 
     /* The prologue: the frame, the callee-saved registers, the sret
@@ -2467,6 +2538,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
         }
     }
     F.label_off[fn->nlabels] = t->len;
+    /* a returned pointer, and an sret buffer's address, in a0 as well
+     * (the SVR4 rule); here rather than at each return, whose branch
+     * here may take a0 */
+    if (fn_sret(fn) || (fn->ret_abi.ty && fn->ret_abi.ty->kind == TY_PTR))
+        cf_move(t, 4, cf_dreg(D0), cf_areg(A0));
     if (F.nsave == 1) {
         cf_move(t, 4, fp_at(F.save_at), reg_ea(F.used_callee[0]));
     } else if (F.nsave) {
@@ -2478,10 +2554,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
     cf_unlk(t, CF_FP);
     cf_rts(t);
 
-    if (pass == 0) {
-        shortb = xcalloc((size_t)(F.nfix ? F.nfix : 1), 1);
-        nshortb = F.nfix;
+    if (!form) {
+        form = xcalloc((size_t)(F.nfix ? F.nfix : 1), 1);
+        nform = F.nfix;
     }
+    if (nform != F.nfix)
+        internal_error("coldfire: %s: %d branches, then %d", fn->name, nform,
+                       F.nfix);
     for (i = 0; i < F.nfix; i++) {
         int target = F.label_off[F.fix[i].label];
         int at = F.fix[i].at;
@@ -2493,6 +2572,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
                           0xffffffffUL);
             continue;
         }
+        if (F.fix[i].kind == FX_LONG) {
+            cf_wrl(t, at, (unsigned long)((long)target - F.fix[i].base) &
+                          0xffffffffUL);
+            continue;
+        }
         if (F.fix[i].kind == FX_PC16) {
             long d = (long)target - F.fix[i].base;
             if (d < -32768 || d > 32767)
@@ -2500,7 +2584,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
             cf_wrw(t, at, (unsigned)d & 0xffff);
             continue;
         }
-        if (pass == 1 && shortb[i]) {
+        if (form[i] == 1) {
             long d = (long)target - (at + 2);
             if (d == 0) {
                 cf_wrw(t, at, 0x4e71u);      /* to the next word: a nop */
@@ -2513,20 +2597,30 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
             }
             continue;
         }
-        if (!cf_patch_bcc(t, at, target))
-            cf_refuse(&F, NULL, "a branch beyond 32 KiB");
-        if (pass == 0) {
-            long d = (long)target - (at + 2);
-            if (d >= -128 && d <= 127) {
-                shortb[i] = 1;
-                nshort++;
-            }
+        if (!cf_patch_bcc(t, at, target)) {
+            if (shrunk)
+                internal_error("coldfire: %s: a branch stopped reaching "
+                               "when the code shrank", fn->name);
+            form[i] = 2;
+            grew = 1;
         }
     }
-    if (pass == 0 && !nshort)
+    if (grew)
+        continue;                       /* again, with the long forms */
+    if (shrunk)
         break;
-    }                                   /* the passes */
-    free(shortb);
+    /* every branch reaches: those within 8 bits take the short form */
+    for (i = 0; i < F.nfix; i++) {
+        long d = (long)F.label_off[F.fix[i].label] - (F.fix[i].at + 2);
+        if (F.fix[i].kind == FX_B && form[i] == 0 && d >= -128 && d <= 127) {
+            form[i] = 1;
+            shrunk = 1;
+        }
+    }
+    if (!shrunk)
+        break;
+    }                                   /* the attempts */
+    free(form);
     }
 
     f->code_len = t->len - f->code_off;
