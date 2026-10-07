@@ -31,10 +31,9 @@
  *     are jal (R_MIPS_26), even within the unit: there is no PC-relative
  *     address and a jal's target is an absolute word index.
  *
- * Refused by name: computed goto, a jump table (target_jump_tables keeps
- * a dense switch a decision tree), atomics narrower than a word, a
- * branch beyond +-128 KiB, and __int128 and binary128 (neither exists on
- * o32). THE RULE.
+ * Refused by name: atomics narrower than a word, a branch beyond
+ * +-128 KiB, and __int128 and binary128 (neither exists on o32). THE
+ * RULE.
  *
  * ---- MIPS64 (n64) --------------------------------------------------------
  *
@@ -1392,8 +1391,10 @@ static void br_back(struct mips_fn *F, int at, int target)
                        "reach", F->fn->name);
 }
 
-/* FX_TAB: a jump table's word, the label's offset from `base` */
-enum { FX_B, FX_J, FX_TAB };
+/* FX_TAB: a jump table's word, the label's offset from `base`.
+ * FX_ADDR: &&label, the function-address sites from index `base` on,
+ * whose addend becomes the label's offset in the function. */
+enum { FX_B, FX_J, FX_TAB, FX_ADDR };
 
 static void want_label(struct mips_fn *F, int at, int label, int kind)
 {
@@ -3737,8 +3738,30 @@ static void gen_ins(struct mips_fn *F, int n)
         F->barrier = t->len;
         return;
     }
-    case IR_LABELADDR: case IR_IGOTO:
-        mips_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        /* &&label: the function's own address, as IR_FADDR takes it,
+         * plus the label's offset in it -- the addend set once the
+         * function is laid out. o32 has no PC-relative address. */
+        int d = wreg(F, i->dst, ACC);
+        int at = abs_pair(F, d), s0 = F->st->nf;
+        struct func *self = fn->src;
+        if (g_m64) {
+            note_fn(F->st, at, self, RK_MIPS_HIGHEST);
+            note_fn(F->st, at + 4, self, RK_MIPS_HIGHER);
+            note_fn(F->st, at + 12, self, RK_MIPS_HI16);
+            note_fn(F->st, at + 20, self, RK_MIPS_LO16);
+        } else {
+            note_fn(F->st, at, self, RK_MIPS_HI16);
+            note_fn(F->st, at + 4, self, RK_MIPS_LO16);
+        }
+        want_label(F, at, i->label, FX_ADDR);
+        F->fix[F->nfix - 1].base = s0;
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        mips_jr(t, rdr(F, i->a, ACC));
+        put_slot(F, -1);
         return;
     default:
         mips_refuse(F, i, "this operation");
@@ -4243,6 +4266,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
         if (F.fix[i].kind == FX_TAB) {
             mips_wrw(t, F.fix[i].at,
                      (unsigned long)(target - F.fix[i].base) & 0xffffffffUL);
+            continue;
+        }
+        if (F.fix[i].kind == FX_ADDR) {
+            for (int k = 0; k < (g_m64 ? 4 : 2); k++)
+                F.st->f[F.fix[i].base + k].addend = target - f->code_off;
             continue;
         }
         if (!mips_patch_b(t, F.fix[i].at, target)) {

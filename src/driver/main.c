@@ -3801,8 +3801,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                               STT_NOTYPE), SHN_UNDEF);
         int lo = riscv && fs[i].kind == RK_RISCV_PCREL_LO12_I;
         int fsym = tf->sym_ndx;
-        long fadd = target_reloc_addend(ta, fs[i].kind, 0) +
-                    (fs[i].kind == RK_ABS64 ? fs[i].addend : 0);
+        long fadd = target_reloc_addend(ta, fs[i].kind, 0) + fs[i].addend;
         if (lo)
             fadd = code_ref(fs[i].patch_off - 4, text_sym, &fsym);
         code_rela(w, text_ndx, fs[i].patch_off, fsym,

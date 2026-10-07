@@ -63,9 +63,10 @@ struct fsite {
     int patch_off;
     struct func *target;
     enum reloc_kind kind;
-    /* RK_ABS64 only: added to the target's address -- a label inside
-     * it, for a jump table of absolute entries. Read for no other
-     * kind, and set to 0 by every site that makes one anyway. */
+    /* Added to the target's address -- a label inside it: x86-64's
+     * jump table of absolute entries, and a computed goto's &&label on
+     * the targets that materialise it as an absolute address (the
+     * function's own symbol plus the label's offset). 0 for &f. */
     long addend;
 };
 
