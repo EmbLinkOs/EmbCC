@@ -208,6 +208,7 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack);
 struct member *ty_find_member(struct type *t, const char *name);
+struct member *ty_find_member_deep(struct type *t, const char *name, long *off);
 
 int ty_size(const struct type *t);          /* bytes; void has none */
 int ty_align(const struct type *t);

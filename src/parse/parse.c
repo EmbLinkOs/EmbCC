@@ -2007,7 +2007,8 @@ static struct type *ce_type(const struct expr *e)
                         ? (bt->kind == TY_PTR ? bt->pointee : NULL) : bt;
         if (!st || st->kind != TY_STRUCT || !st->complete)
             return NULL;
-        struct member *m = ty_find_member(st, e->name);
+        long moff;
+        struct member *m = ty_find_member_deep(st, e->name, &moff);
         return m ? m->ty : NULL;
     }
     default:
@@ -2904,7 +2905,9 @@ static struct expr *parse_primary(struct parser *ps)
                 if (cur(ps)->kind != TOK_IDENT)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "expected a member name in offsetof");
-                struct member *m2 = ty_find_member(ty, cur(ps)->text);
+                long moff = 0;
+                struct member *m2 = ty_find_member_deep(ty, cur(ps)->text,
+                                                        &moff);
                 if (!m2)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "%s has no member '%s'", ty_name(ty),
@@ -2915,7 +2918,7 @@ static struct expr *parse_primary(struct parser *ps)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "offsetof cannot name the bit-field '%s'",
                                cur(ps)->text);
-                off += m2->off;
+                off += moff;
                 ty = m2->ty;
                 advance(ps);
                 while (cur(ps)->kind == TOK_LBRACKET) {
