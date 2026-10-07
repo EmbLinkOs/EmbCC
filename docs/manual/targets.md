@@ -2103,8 +2103,6 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 | Construct | Diagnostic |
 |---|---|
 | an atomic load or store wider than 1 byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
-| a variable-length array | `the AVR backend cannot lower a variable-length array yet (function f)` |
-| any local with `__attribute__((aligned))` | `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
 | an interrupt handler with parameters | `the AVR backend cannot lower an interrupt handler with parameters: the hardware calls it, so there is no caller to pass them and they would be read out of whatever the interrupted code left in those registers yet (function __vector_3)` |
 | an interrupt handler that returns a value | ``the AVR backend cannot lower an interrupt handler that returns a value: `reti` goes back to the interrupted instruction, and nothing is there to receive it yet (function __vector_3)`` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |

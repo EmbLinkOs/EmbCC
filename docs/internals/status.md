@@ -83,7 +83,7 @@ ignored (see [Attributes](#attributes)).
 | RV64: `riscv64-unknown-elf` | RV64IMAC, soft float. No operation on `long double` or `__int128`. C only. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`. | None built (see below). No C library. |
 | MIPS32: `mipsel-none-elf` | MIPS32r2, little-endian, o32, soft float. Delay slots filled from the instruction before the transfer where safe, else a `nop`; jump tables. No computed goto. C only. | Every pass except vectorization. | Graph colouring; register pairs for 64-bit values. | DWARF 4, with known problems. | `embld`, which also links clang's objects. | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
 | LoongArch64: `loongarch64-unknown-elf` | LA64 base integer ISA, LP64S soft float, the normal code model; jump tables; `__int128` and binary128 `long double` in software; atomics of every width but 16 bytes. No computed goto. C, and C++ without exceptions. | Every pass except vectorization. | Graph colouring. | DWARF 4, with known problems. | `embld`, which also links clang's objects (its medium code model and GOT accesses included). | `librt.a` and `libc.a` (`make rt-embedded libc-embedded`). |
-| AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. No variable-length arrays or computed goto. C only. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
+| AVR: `avr` | ATmega328P (AVR5). 16-bit `int`, 32-bit `double`. No computed goto. C only. | Every pass except vectorization and division by a constant; a few more passes do nothing on AVR. | Graph colouring over register runs; each function is generated under several allocation modes and the shortest result kept. Off under `-g`. | Accepted, but not usable by a debugger. | `embld`. | `librt.a`. No C library. |
 
 The register allocator is described in
 [Register allocation](register-allocation.md), the passes and their
@@ -230,9 +230,7 @@ AVR:
 | Construct | Diagnostic |
 |---|---|
 | An atomic load or store wider than 1 byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
-| A variable-length array | `the AVR backend cannot lower a variable-length array yet (function f)` |
 | Computed `goto` and `&&label` | `the AVR backend cannot lower labeladdr yet (function f) [labeladdr w=4 size=4]` |
-| A local with `__attribute__((aligned))` | `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
 | An 8-byte `asm` operand | `an asm operand of 8 bytes needs 8 consecutive registers, which is more than this backend keeps free across an asm` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 
@@ -682,9 +680,8 @@ dates.
   registers; `.pdata`/`.xdata` unwind tables for Windows.
 - GNU-syntax assembly files for x86-64.
 - binary128 `long double` arithmetic on RISC-V, and `__int128` at RV64.
-- Computed `goto` on Cortex-M, RISC-V, MIPS32 and AVR; variable-length
-  arrays and aligned locals on AVR;
-  narrow and 8-byte atomic read-modify-write, unwind tables and
+- Computed `goto` on Cortex-M, RISC-V, MIPS32 and AVR;
+  8-byte atomic read-modify-write, unwind tables and
   `__attribute__((interrupt))` on MIPS32.
 - On MIPS32, a delay slot filled from anywhere but the instruction just
   before the transfer (the branch target's first instruction, or one

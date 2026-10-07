@@ -5295,11 +5295,11 @@ static void check_func(struct unit *u, struct func *f)
      * it. Such a local gets storage of its own instead (var_indirect),
      * a scalar as well as an aggregate: irgen reads and writes a scalar
      * there rather than in its slot. One bound to a register by
-     * `register ... __asm__("r")` keeps the register. AVR keeps its own
-     * refusal of any aligned local. */
+     * `register ... __asm__("r")` keeps the register. On AVR, whose
+     * stack promises no alignment at all, that is any aligned local. */
     f->var_indirect = NULL;
     f->var_ind_align = NULL;
-    for (int i = f->nparams; i < sc.n && target_get() != TARGET_AVR; i++) {
+    for (int i = f->nparams; i < sc.n; i++) {
         struct type *t = f->var_tys[i];
         if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t) ||
             sc.vars[i].asm_reg)

@@ -377,6 +377,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `avr-encoding` | the instruction vocabulary against `llvm-mc`, including decoding EmbCC's bytes back for branch forms |
 | `avr-asm` | EmbCC's AVR assembler against `llvm-mc` |
 | `avr-exec` | programs run on the ATmega328P board against the same source run on the host |
+| `avr-alloca` | variable-length arrays, `alloca` and aligned locals on the ATmega328P against the host, at every level and every forced allocation mode: stack arguments after each (direct, indirect, variadic), 300 VLA scopes, a 400-call loop and a frameless alloca function, any of which overruns the 2 KiB if sp is not given back |
 | `avr-abi` | the calling convention against avr-libc's documented rules, with hand-written assembly on the other side |
 | `avr-calleesave` | every function preserves r2-r17 and Y |
 | `avr-float` | software binary32 on the part, bit for bit against the host |

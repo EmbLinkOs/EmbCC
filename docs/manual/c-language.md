@@ -329,7 +329,6 @@ The errors for the "No" entries:
 
 | Case | Diagnostic |
 |---|---|
-| A VLA on AVR | `the AVR backend cannot lower a variable-length array yet (function f)` |
 | `long double` or `_Float128` arithmetic on RISC-V, `__int128` arithmetic on RV64 | `the RV64 backend cannot lower a 128-bit value yet (function f) [...]` (`RV32` on RV32) |
 | `long double` in a signature on Windows | `long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
 | `long double _Complex` arithmetic on Windows | `passing long double is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
@@ -575,7 +574,6 @@ Refused:
 | A VLA at file scope or as a structure member | `array size must be a constant expression here (a variable length array can only be a local variable or a parameter)` |
 | `static int a[n];` | `static 'a' cannot have a variably modified type (int[*])` |
 | `int a[n] = { 1 };`, `int a[n] = {};` | `variable length array 'a' cannot be initialized` |
-| Any VLA on AVR | `the AVR backend cannot lower a variable-length array yet (function f)` |
 
 A `goto` or `switch` that jumps into the scope of a VLA is not
 diagnosed, although the standard requires a diagnostic.
@@ -667,7 +665,6 @@ EmbCC limits, are handled as follows:
 | An alignment weaker than the type's, `_Alignas(1) int` | Not diagnosed. The type's own alignment is kept. |
 | `_Alignas` in a typedef or on a parameter | Not diagnosed. |
 | An automatic object aligned beyond the stack's alignment, `_Alignas(32) int x;` | Supported, scalar or aggregate: its storage is carved from the stack at function entry and rounded up to the alignment, so its address has it at any call depth. A scalar so aligned lives in that storage rather than in a register. |
-| On AVR, an alignment greater than 1 on an automatic object | Refused: `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
 
 `_Alignof` applied to an expression is a GNU extension; see
 [Extensions](extensions.md).

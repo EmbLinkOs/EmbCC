@@ -1258,11 +1258,13 @@ floating-point operation is a call into the binary32 routines (`__addsf3`,
 `__mulsf3`, `__divsf3`, `__ltsf2`, `__fixsfsi`, ...). EmbCC does not call
 avr-gcc's `__divmodsi4` family, and its `librt.a` does not define it.
 
-### What is refused
+### The stack
 
-| Construct | Diagnostic |
-|---|---|
-| Variable-length arrays | `the AVR backend cannot lower a variable-length array yet` |
+Variable-length arrays, `alloca` and locals with an alignment move the
+stack pointer below the frame, which stays at Y. A call made after one
+copies its stack arguments down to the new stack pointer, where the callee
+looks for them, and the stack pointer is restored at the end of a VLA's
+scope and at the return.
 
 Atomics of one, two and four bytes compile: every read-modify-write,
 compare-exchange, and a two- or four-byte load or store. Each is done with

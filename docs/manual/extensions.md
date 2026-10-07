@@ -497,11 +497,8 @@ array, structure or union; a scalar so aligned is read and written in
 that storage, as a variable whose address is taken is, rather than kept
 in a register.
 
-On AVR, a local variable cannot be given an alignment:
-
-```text
-embcc: f.c:1: error: the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)
-```
+On AVR, whose stack pointer has no alignment at all, every local with
+an alignment greater than 1 is placed that way.
 
 `_Alignas` and `#pragma pack` interact with `aligned` as in GCC: the
 stricter of `aligned(N)` and `_Alignas(N)` applies, and `#pragma
@@ -912,15 +909,13 @@ check, as a call to a `noreturn` function does.
 
 | Builtin | Result | Targets |
 |---|---|---|
-| `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All but AVR |
-| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All but AVR |
+| `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All |
+| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All |
 | `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | x86-64, AArch64 |
 | `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | x86-64, AArch64 |
 
 `level` must be a non-negative integer constant (`__builtin_frame_address
-needs a non-negative constant level`). On AVR, `alloca` is refused as a
-variable-length array is (`the AVR backend cannot lower a variable-length
-array yet (function f)`). On Cortex-M, RISC-V, MIPS32 and AVR the frame
+needs a non-negative constant level`). On Cortex-M, RISC-V, MIPS32 and AVR the frame
 builtins are refused:
 
 ```text
