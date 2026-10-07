@@ -32,8 +32,8 @@
  * word of the A pair), r15 (TMP, its high word) and r5 (SCR). r15 also
  * carries a call's hidden result pointer, set last.
  *
- * Refused by name: computed goto, a jump table (target_jump_tables keeps
- * a dense switch a decision tree), inline assembly, __int128,
+ * Refused by name: a jump table (target_jump_tables keeps a dense
+ * switch a decision tree), inline assembly, __int128,
  * __builtin_frame_address, and a frame beyond what the encodings reach.
  * THE RULE.
  */
@@ -2085,8 +2085,21 @@ static void gen_ins(struct rx_fn *F, int n)
         return;
     case IR_SWITCH:
         rx_refuse(F, i, "a jump table");
-    case IR_LABELADDR: case IR_IGOTO:
-        rx_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        /* &&label: the function's own address as IR_FADDR takes it, a
+         * mov.l #imm32 (ABS32), plus the label's offset in it -- the
+         * addend set once the function is laid out. The fix is no
+         * branch: level -1, `at` the site's index. */
+        int d = wreg(F, i->dst, ACC);
+        int at = rx_mov_abs(t, d, 0), s0 = F->st->nf;
+        note_fn(F->st, at, fn->src, RK_ABS32);
+        want_label(F, s0, i->label, -1);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        rx_jmp(t, rdr(F, i->a, ACC));
+        return;
     default:
         rx_refuse(F, i, "this operation");
     }
@@ -2373,6 +2386,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
         if (target < 0)
             internal_error("rx: label %d of %s was never placed",
                            F.fix[i].label, fn->name);
+        if (F.fix[i].level < 0) {                     /* &&label */
+            F.st->f[F.fix[i].at].addend = target - f->code_off;
+            continue;
+        }
         if (!rx_patch_branch(t, F.fix[i].at, target)) {
             if (nlevel < F.nfix) {
                 level = xrealloc(level, (size_t)F.nfix);
