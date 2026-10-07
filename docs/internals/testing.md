@@ -363,6 +363,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `loongarch-abi` | EmbCC and clang (`loongarch64-unknown-elf -msoft-float`, its default medium code model and GOT accesses) calling each other: the shared embedded pairing, the 128-bit one and the LP64S one (`loongarch-abi-*.c`) |
 | `loongarch-asm` | the assembler's vocabulary against `llvm-mc`, pseudos included; a C program of inline asm, a file-scope block and a naked function linked with a `.S` file (assembled by EmbCC and by clang) on the board; `-S` reassembled; the refusals |
 | `loongarch-atomics` | one- and two-byte atomics at every place in their word on the board, the neighbours untouched; the `ll.w`/`sc.w` loop in the object |
+| `mips-atomics` | one- and two-byte atomics at every place in their word on MIPS32 and MIPS64, both byte orders and every level: the little-endian boards against the host, the big-endian ones against clang's build on the same board; the compare-and-swap macros |
 | `loongarch-refuse` | the triples, the object header and flags, `-S` reassembled, the options accepted and refused, the constructs refused by name, the objects `embld` refuses |
 
 `libc-embedded`, `debug-embedded`, `embedded-runtime` and `predef` include

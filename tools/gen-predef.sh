@@ -205,11 +205,10 @@ refflags() {
 exclude_arch() {
     case "$1" in
         riscv32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8' ;;
-        # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
-        # two-byte atomic exactly as RISC-V's does (no libatomic here).
-        mips32|mips32eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
-        # MIPS64: ll/sc and lld/scd, a word and a doubleword, the same rule
-        mips64|mips64eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2|16)' ;;
+        # MIPS claims one and two bytes the same way, through an ll/sc loop
+        # on the word around them (the backend's sub_lane), and MIPS64 the
+        # doubleword with lld/scd; it has no sixteen-byte form.
+        mips64|mips64eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16' ;;
         # (LoongArch64 claims all four: its backend makes a one- or two-byte
         # atomic an ll.w/sc.w loop on the word, as clang does.)
         # ARMv7-A has ldrexd/strexd, so clang claims an eight-byte

@@ -1282,11 +1282,19 @@ QEMU's `malta` board: the image is linked at 0x80100000 in KSEG0 and
 loaded with `-kernel`, the FPGA UART at 0xbf000900 is the console, and an
 exception prints its cause and address.
 
+### Atomics
+
+Every atomic is an `ll`/`sc` loop bracketed by `sync`. A one- or two-byte
+atomic works on the aligned word around it, as GCC's and clang's do: the
+loop rewrites only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic
+against the neighbouring bytes too (a store to any of them fails the
+`sc`). Big-endian, the lane of offset `a & 3` is counted from the top of
+the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
+
 ### Limitations
 
 | Construct | Diagnostic |
 |---|---|
-| an atomic read-modify-write on a 1- or 2-byte object | `the MIPS32 backend cannot lower an atomic narrower than four bytes (ll/sc are word-sized, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [xadd w=4 size=1]` |
 | an 8-byte atomic read-modify-write | `the MIPS32 backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | a computed `goto` | `the MIPS32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
@@ -1408,11 +1416,19 @@ for both triples (soft float, binary128, 128-bit integer arithmetic).
 core: the image is linked at 0xffffffff80100000 (KSEG0) and loaded with
 `-kernel`, with tests/harness/mips's startup and UART output.
 
+### Atomics
+
+Every atomic is an `ll`/`sc` loop (`lld`/`scd` for eight bytes) bracketed by `sync`. A one- or two-byte
+atomic works on the aligned word around it, as GCC's and clang's do: the
+loop rewrites only its lane, `old ^ ((new ^ old) & mask)`, so it is atomic
+against the neighbouring bytes too (a store to any of them fails the
+`sc`). Big-endian, the lane of offset `a & 3` is counted from the top of
+the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are defined.
+
 ### Limitations
 
 | Construct | Diagnostic |
 |---|---|
-| an atomic read-modify-write on a 1- or 2-byte object | `the MIPS64 backend cannot lower an atomic narrower than four bytes (...) yet (function f) [xadd w=4 size=1]` |
 | a 16-byte atomic | `the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]` |
 | a computed `goto` | `the MIPS64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS64 backend cannot lower __builtin_frame_address or __builtin_return_address (n64 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
