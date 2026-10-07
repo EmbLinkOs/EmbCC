@@ -92,6 +92,8 @@ struct sparc_fn {
     char *wide;          /* per vreg: a 64-bit value, a register pair */
     char *w16;           /* per vreg: a 16-byte long double, or NULL */
     char *nshr;          /* per vreg: a narrow high-word shift (narrow_shr) */
+    int *last;           /* per vreg: its live range's last instruction, when
+                          * there are long doubles (tf_operand); or NULL */
     long *slot;          /* per vreg: byte offset from %sp after the save */
     long frame;          /* bytes the save moves %sp down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
@@ -140,12 +142,20 @@ static const int SPARC_POOL_VA[SPARC_NPOOL - 6] = {
 
 static unsigned long g_sp_taken;        /* registers the pair pass took */
 static int g_sp_pairs = 1;              /* this attempt uses the pair pass */
+static int g_sp_leaf;                   /* this attempt is a leaf (leaf_fix) */
 static int g_sp_pool[SPARC_NPOOL];
+
+/* A LEAF attempt has the ins only: they become the outs (leaf_fix). */
+static const int SPARC_POOL_LEAF[6] = {
+    SP_I0, SP_I1, SP_I2, SP_I3, SP_I4, SP_I5
+};
 
 static const int *sparc_pool_for(const struct ir_func *fn, int *n)
 {
-    const int *p = fn->is_varargs ? SPARC_POOL_VA : SPARC_POOL;
-    int np = fn->is_varargs ? SPARC_NPOOL - 6 : SPARC_NPOOL, k = 0;
+    const int *p = g_sp_leaf ? SPARC_POOL_LEAF
+                 : fn->is_varargs ? SPARC_POOL_VA : SPARC_POOL;
+    int np = g_sp_leaf ? 6
+           : fn->is_varargs ? SPARC_NPOOL - 6 : SPARC_NPOOL, k = 0;
     if (!g_sp_taken) {
         *n = np;
         return p;
@@ -167,6 +177,10 @@ static const int SPARC_PAIRS[SPARC_NPAIRS] = {
 };
 static const int *sparc_pair_pool_for(const struct ir_func *fn, int *n)
 {
+    if (g_sp_leaf) {
+        *n = 3;
+        return SPARC_PAIRS + 6;                 /* %i0, %i2, %i4 */
+    }
     *n = fn->is_varargs ? SPARC_NPAIRS - 3 : SPARC_NPAIRS;
     return SPARC_PAIRS;
 }
@@ -1162,7 +1176,15 @@ static long restore_fusable(const struct sparc_fn *F)
 static void ret_restore(struct sparc_fn *F)
 {
     struct code *t = F->t;
-    long r = restore_fusable(F);
+    long r;
+    if (g_sp_leaf) {
+        /* `retl` once %i7 is %o7 (leaf_fix), with a filled slot */
+        long slot = take_slot(F, 1ULL << SP_I7, 0);
+        sparc_jmpl(t, SP_G0, SP_I7, 8);
+        put_slot(F, slot);
+        return;
+    }
+    r = restore_fusable(F);
     if (r >= 0)
         t->len -= 4;
     sparc_jmpl(t, SP_G0, SP_I7, fn_sret(F->fn) ? 12 : 8);
@@ -1180,7 +1202,8 @@ static void ret_restore(struct sparc_fn *F)
 static void ret_or_jump(struct sparc_fn *F)
 {
     long slot;
-    if (restore_fusable(F) < 0 && (slot = take_slot(F, 0, 0)) >= 0) {
+    if (!g_sp_leaf && restore_fusable(F) < 0 &&
+        (slot = take_slot(F, 0, 0)) >= 0) {
         int at = sparc_b_placeholder(F->t, SP_BA, 0);
         put_slot(F, slot);
         want_label(F, at, F->fn->nlabels);
@@ -1868,29 +1891,39 @@ static int gen_ins64(struct sparc_fn *F, int n)
         else if (F->slot[i->dst] >= 0)
             st_sp(F, A_LO, var_slot(F, i->dst, i->size), i->size);
         return 1;
-    case IR_LOAD:
-        rd(F, i->a, ADDR);
+    case IR_LOAD: {
+        /* into the pair itself; the word whose register is the base
+         * last */
+        int addr = rdr(F, i->a, ADDR), dl, dh;
+        dst64(F, i->dst, &dl, &dh);
         if (i->size == 8) {
-            ld_any(F, A_HI, ADDR, (int)i->memoff + WHI, 4, 0, i->natural);
-            ld_any(F, A_LO, ADDR, (int)i->memoff + WLO, 4, 0, i->natural);
+            if (addr == dh) {
+                ld_any(F, dl, addr, (int)i->memoff + WLO, 4, 0, i->natural);
+                ld_any(F, dh, addr, (int)i->memoff + WHI, 4, 0, i->natural);
+            } else {
+                ld_any(F, dh, addr, (int)i->memoff + WHI, 4, 0, i->natural);
+                ld_any(F, dl, addr, (int)i->memoff + WLO, 4, 0, i->natural);
+            }
         } else {
-            ld_any(F, A_LO, ADDR, (int)i->memoff, i->size, i->sign,
+            ld_any(F, dl, addr, (int)i->memoff, i->size, i->sign,
                    i->natural);
-            if (i->sign) sparc_alu_imm(t, SP_SRA, A_HI, A_LO, 31);
-            else         sparc_mov(t, A_HI, SP_G0);
+            if (i->sign) sparc_alu_imm(t, SP_SRA, dh, dl, 31);
+            else         sparc_mov(t, dh, SP_G0);
         }
-        wr64(F, i->dst, A_LO, A_HI);
+        wr64(F, i->dst, dl, dh);
         return 1;
-    case IR_STORE:
-        rd(F, i->a, ADDR);
-        rd64(F, i->b, A_LO, A_HI);
+    }
+    case IR_STORE: {
+        int addr = rdr(F, i->a, ADDR), lo, hi;
+        src64(F, i->b, A_LO, A_HI, &lo, &hi);
         if (i->size == 8) {
-            st_any(F, A_HI, ADDR, (int)i->memoff + WHI, 4, i->natural);
-            st_any(F, A_LO, ADDR, (int)i->memoff + WLO, 4, i->natural);
+            st_any(F, hi, addr, (int)i->memoff + WHI, 4, i->natural);
+            st_any(F, lo, addr, (int)i->memoff + WLO, 4, i->natural);
         } else {
-            st_any(F, A_LO, ADDR, (int)i->memoff, i->size, i->natural);
+            st_any(F, lo, addr, (int)i->memoff, i->size, i->natural);
         }
         return 1;
+    }
     case IR_SELECT: {
         /* dst = a ? b : c: c into A, then b over it unless the condition
          * (either half of a 64-bit one) is zero */
@@ -1949,10 +1982,29 @@ static long tf_result(struct sparc_fn *F, int v)
     return F->slot[v];
 }
 
-/* The operand into the tf area at `at`, and `reg` pointing there. */
-static void tf_operand(struct sparc_fn *F, int v, long at, int reg)
+/* Does temp v's value die at instruction n -- no read after it, on any
+ * path (the live range is dataflow's, so one live round a loop's back
+ * edge ends past it)? Then its slot may be handed to a callee as a
+ * by-reference copy, which the callee owns and may write. */
+static int dies_at(const struct sparc_fn *F, int v, int n)
 {
+    return F->last && v >= F->fn->nvars && v < F->fn->nvregs &&
+           F->last[v] == n;
+}
+
+/* The operand's address in `reg`: its own slot when it dies here and is
+ * neither the result's slot nor `other` (the other operand, which a
+ * callee writing one could change), else a copy in the tf area at `at`. */
+static void tf_operand(struct sparc_fn *F, const struct ir_ins *i, int v,
+                       long at, int reg, int other)
+{
+    int n = (int)(i - F->fn->ins);
     need16(F, v);
+    if (dies_at(F, v, n) && v != other &&
+        (i->dst < 0 || F->slot[i->dst] != F->slot[v])) {
+        addr_sp(F, reg, sslot(F, v));
+        return;
+    }
     copy16(F, F->tfa + at, sslot(F, v));
     addr_sp(F, reg, F->tfa + at);
 }
@@ -2098,8 +2150,8 @@ static void gen_ld(struct sparc_fn *F, struct ir_ins *i)
     }
     if (i->flt && (i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
                    i->op == IR_DIV)) {
-        tf_operand(F, i->a, 0, SP_O0);
-        tf_operand(F, i->b, 16, SP_O1);
+        tf_operand(F, i, i->a, 0, SP_O0, i->b);
+        tf_operand(F, i, i->b, 16, SP_O1, i->a);
         call_tf_sret(F, i->op == IR_ADD ? "__addtf3"
                         : i->op == IR_SUB ? "__subtf3"
                         : i->op == IR_MUL ? "__multf3" : "__divtf3",
@@ -2107,8 +2159,8 @@ static void gen_ld(struct sparc_fn *F, struct ir_ins *i)
         return;
     }
     if (i->flt && i->op == IR_CMP) {
-        tf_operand(F, i->a, 0, SP_O0);
-        tf_operand(F, i->b, 16, SP_O1);
+        tf_operand(F, i, i->a, 0, SP_O0, i->b);
+        tf_operand(F, i, i->b, 16, SP_O1, i->a);
         call_helper(F, tf_cmp_name(i->pred));
         {
             int d = wreg(F, i->dst, ACC);
@@ -2142,7 +2194,7 @@ static void gen_ld(struct sparc_fn *F, struct ir_ins *i)
             return;
         }
         if (sw == 16) {
-            tf_operand(F, i->a, 0, SP_O0);
+            tf_operand(F, i, i->a, 0, SP_O0, -1);
             if (i->op == IR_F2F)
                 name = dw == 8 ? "__trunctfdf2" : "__trunctfsf2";
             else
@@ -2194,7 +2246,15 @@ static void gen_call(struct sparc_fn *F, int n)
                        rdr(F, a->vreg, TMP), 0,  /* its address */
                        SP_FP, fpo(F, copy_at));
         } else {
+            int dup = 0;
             need16(F, a->vreg);                  /* a long double */
+            for (int q = 0; q < i->nargs; q++)
+                dup |= q != k && i->argv[q].vreg == a->vreg;
+            if (dies_at(F, a->vreg, n) && !dup &&
+                (i->dst < 0 || F->slot[i->dst] != F->slot[a->vreg])) {
+                pl[k].copy = sslot(F, a->vreg);  /* its own: it dies */
+                continue;
+            }
             copy16(F, copy_at, sslot(F, a->vreg));
         }
         copy_at += a->size;
@@ -2211,16 +2271,16 @@ static void gen_call(struct sparc_fn *F, int n)
             st_out(F, SCR, pl[k].stk, 4);
         } else if (a->size > 4) {
             /* the low word (and the high, when it did not fit %o5) */
-            rd64(F, a->vreg, SCR, SCR2);
+            int lo, hi;
+            src64(F, a->vreg, SCR, SCR2, &lo, &hi);
             if (pl[k].nreg == 0) {
-                st_out(F, SCR2, pl[k].stk, 4);
-                st_out(F, SCR, pl[k].stk + 4, 4);
+                st_out(F, hi, pl[k].stk, 4);
+                st_out(F, lo, pl[k].stk + 4, 4);
             } else {
-                st_out(F, SCR, pl[k].stk, 4);
+                st_out(F, lo, pl[k].stk, 4);
             }
         } else {
-            rd(F, a->vreg, SCR);
-            st_out(F, SCR, pl[k].stk, 4);
+            st_out(F, rdr(F, a->vreg, SCR), pl[k].stk, 4);
         }
     }
     /* The scalar register words, all at once: a value for %o0 may be in
@@ -3522,6 +3582,12 @@ static void gen_func(struct ir_func *fn, struct code *t,
         for (int v = 0; v < fn->nvregs; v++)
             if (F.w16[v]) F.wide[v] = 0;
     F.nshr = ra_narrow_hishift(fn);
+    if (F.w16 && !want_debug && fn->nvregs) {
+        int *first = xmalloc((size_t)fn->nvregs * sizeof *first);
+        F.last = xmalloc((size_t)fn->nvregs * sizeof *F.last);
+        ra_live_ranges(fn, first, F.last);
+        free(first);
+    }
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
     if (g_sp_regalloc) {
@@ -3582,7 +3648,9 @@ static void gen_func(struct ir_func *fn, struct code *t,
 
     /* The prologue: a new window and the frame. A frame past simm13 is
      * built in %g1, which no argument is in. */
-    if (fits13(-F.frame)) {
+    if (g_sp_leaf) {
+        /* no window: leaf_fix checks nothing touches the frame */
+    } else if (fits13(-F.frame)) {
         sparc_save(t, SP_SP, SP_SP, -F.frame);
     } else {
         sparc_li(t, SP_G1, -F.frame);
@@ -3726,7 +3794,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
     }
 
     f->code_len = t->len - f->code_off;
-    f->stack_bytes = (int)F.frame;
+    f->stack_bytes = g_sp_leaf ? 0 : (int)F.frame;
     free(F.usecnt);
     free(F.slot);
     cg_note_labels(fn, F.label_off);
@@ -3735,7 +3803,112 @@ static void gen_func(struct ir_func *fn, struct code *t,
     free(F.wide);
     free(F.w16);
     free(F.nshr);
+    free(F.last);
     free(F.loc);
+}
+
+/* ---- leaf functions --------------------------------------------------------
+ *
+ * A function that calls nothing and needs no stack can run in its
+ * caller's window, as clang's do: no `save`, its arguments in %o0-%o5,
+ * its result back in %o0, `retl` (jmpl %o7 + 8). It is generated as an
+ * ordinary function whose allocation pool is the ins alone, without the
+ * save, and then CHECKED word by word (leaf_fix): every register any
+ * instruction names must be %g0-%g4 or %i0-%i5 -- nothing of the
+ * caller's window (%l*, %o*), no %sp or %fp, so no slot -- the only
+ * transfers branches and the return through %i7, and no call, save or
+ * restore. Then the ins are renamed the outs. Anything else, and the
+ * attempt is thrown away. */
+static int leaf_candidate(const struct ir_func *fn)
+{
+    int word = 0;
+    struct argplace pl;
+    if (fn->is_varargs || fn->has_alloca || fn_sret(fn) || !fn->src)
+        return 0;
+    for (int p = 0; p < fn->nparams; p++) {
+        place_arg(&fn->param_abi[p], &word, &pl);
+        if (pl.byref || pl.nstk)
+            return 0;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_CALL: case IR_SWITCH: case IR_LABELADDR: case IR_IGOTO:
+        case IR_FENCE: case IR_ALLOCA: case IR_SPSAVE: case IR_SPRESTORE:
+        case IR_VA_START: case IR_ASM: case IR_FRAMEADDR:
+            return 0;
+        default:
+            break;
+        }
+        if (sparc_op_calls_helper(i))
+            return 0;
+    }
+    return 1;
+}
+
+/* One register field: allowed in a leaf, and renamed %iN -> %oN. */
+static int leaf_reg(int r, int *out)
+{
+    if (r <= SP_G4) {
+        *out = r;
+        return 1;
+    }
+    if (r >= SP_I0 && r <= SP_I5) {
+        *out = r - SP_I0 + SP_O0;
+        return 1;
+    }
+    return 0;
+}
+
+static int leaf_fix(struct code *t, int from)
+{
+    for (int pass = 0; pass < 2; pass++)
+        for (int at = from; at < t->len; at += 4) {
+            unsigned long w = sparc_rdw(t, at);
+            int op = (int)(w >> 30) & 3, rd = (int)(w >> 25) & 31,
+                op3 = (int)(w >> 19) & 63, rs1 = (int)(w >> 14) & 31,
+                imm = (int)(w >> 13) & 1, rs2 = (int)w & 31;
+            int nrd = rd, nrs1 = rs1, nrs2 = rs2, nrd2;
+            if (op == 1)
+                return 0;                               /* a call */
+            if (op == 0) {
+                int op2 = (int)(w >> 22) & 7;
+                if (op2 == 2 || (op2 == 0 && rd == 0))
+                    continue;                   /* a branch; unimp */
+                if (op2 != 4 || !leaf_reg(rd, &nrd))
+                    return 0;
+                if (pass)
+                    sparc_wrw(t, at, (w & ~(31UL << 25)) |
+                                     ((unsigned long)nrd << 25));
+                continue;
+            }
+            if (op == 2 && op3 == 0x38) {               /* jmpl */
+                if (w != sparc_enc_ri(2, SP_G0, 0x38, SP_I7, 8))
+                    return 0;
+                if (pass)
+                    sparc_wrw(t, at, sparc_enc_ri(2, SP_G0, 0x38, SP_O7, 8));
+                continue;
+            }
+            if (op == 2 && !((op3 <= 0x1f) || (op3 >= 0x25 && op3 <= 0x28) ||
+                             op3 == 0x30))
+                return 0;              /* save, restore, rett, ticc, ... */
+            if (op == 2 && op3 == 0x28 && rs1 != 0 && rs1 != 15)
+                return 0;                       /* rd of a state register */
+            if (!leaf_reg(rd, &nrd) || !leaf_reg(rs1, &nrs1) ||
+                (!imm && !leaf_reg(rs2, &nrs2)))
+                return 0;
+            if (op == 3 && (op3 == 0x03 || op3 == 0x07) &&
+                !leaf_reg(rd + 1, &nrd2))
+                return 0;                       /* ldd/std's second word */
+            if (pass) {
+                w = (w & ~((31UL << 25) | (31UL << 14))) |
+                    ((unsigned long)nrd << 25) | ((unsigned long)nrs1 << 14);
+                if (!imm)
+                    w = (w & ~31UL) | (unsigned long)nrs2;
+                sparc_wrw(t, at, w);
+            }
+        }
+    return 1;
 }
 
 /* With the allocator on, a function is generated with the pair pass and
@@ -3769,6 +3942,42 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         st->nf = nf;
         g_sp_pairs = 1;
         gen_func(fn, t, st, want_debug);
+    }
+    with = t->len - at;
+    /* the leaf attempt, kept when it checks out and is shorter: tried
+     * after the others, so the one kept is regenerated as it was */
+    if (leaf_candidate(fn) && !getenv("EMBCC_SPARC_NO_LEAF")) {
+        int pairs = g_sp_pairs, len = t->len, leaf;
+        unsigned char *keep = xmalloc((size_t)(len - at) + 1);
+        memcpy(keep, t->p + at, (size_t)(len - at));
+        {
+            int knext = st->next, knstr = st->nstr, kng = st->ng,
+                knf = st->nf;
+            t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
+            st->nf = nf;
+            g_sp_leaf = 1;
+            g_sp_pairs = 1;
+            gen_func(fn, t, st, want_debug);
+            g_sp_leaf = 0;
+            leaf = leaf_fix(t, fn->src->code_off) && t->len - at < with;
+            if (!leaf) {
+                /* the other one back, byte for byte: its sites are the
+                 * entries past the counts, which a leaf (no call)
+                 * attempt may have overwritten -- so it is generated
+                 * again instead, as it was */
+                t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
+                st->nf = nf;
+                g_sp_pairs = pairs;
+                gen_func(fn, t, st, want_debug);
+                if (t->len != len || memcmp(t->p + at, keep,
+                                            (size_t)(len - at)) ||
+                    st->next != knext || st->nstr != knstr ||
+                    st->ng != kng || st->nf != knf)
+                    internal_error("sparc: %s: generating it again gave "
+                                   "other code", fn->name);
+            }
+        }
+        free(keep);
     }
     g_sp_pairs = 1;
 }
