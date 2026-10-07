@@ -8710,6 +8710,79 @@ static int linear_in_iv(struct ir_func *fn, struct defs *d, int lo, int hi,
     return 0;
 }
 
+/* Every definition and every read of each vreg, as chains built once:
+ * ivsr_one asked "who defines the counter outside the loop" and "does
+ * anything outside the loop read this address" by walking the whole
+ * function, for every loop and every candidate in it -- 40% of the time
+ * EmbCC took to compile its own src/arch/regalloc.c at -O2. The chains
+ * answer the same questions, in the same order, from the vreg's own
+ * list. A definition here is def_target's, IR_LANDING included (unlike
+ * defs_lists); a read is ins_reads's, a frame slot's LDVAR/ADDR not. */
+struct vchains {
+    int nv;
+    int *dfirst, *dnext;             /* definitions, by instruction */
+    int *rfirst, *rnext, *rins;      /* reads: entries, newest first */
+    int nr, cap, cur;
+};
+static void vchains_read_cb(int *p, void *ctx)
+{
+    struct vchains *c = ctx;
+    int v = *p;
+    if (v < 0 || v >= c->nv)
+        return;
+    if (c->rfirst[v] >= 0 && c->rins[c->rfirst[v]] == c->cur)
+        return;                       /* read twice by one instruction */
+    if (c->nr == c->cap) {
+        c->cap = c->cap ? 2 * c->cap : 64;
+        c->rnext = xrealloc(c->rnext, (size_t)c->cap * sizeof *c->rnext);
+        c->rins = xrealloc(c->rins, (size_t)c->cap * sizeof *c->rins);
+    }
+    c->rins[c->nr] = c->cur;
+    c->rnext[c->nr] = c->rfirst[v];
+    c->rfirst[v] = c->nr++;
+}
+static void vchains_build(struct ir_func *fn, struct vchains *c)
+{
+    memset(c, 0, sizeof *c);
+    c->nv = fn->nvregs;
+    size_t nv = (size_t)(fn->nvregs ? fn->nvregs : 1);
+    c->dfirst = xmalloc(nv * sizeof *c->dfirst);
+    c->rfirst = xmalloc(nv * sizeof *c->rfirst);
+    c->dnext = xmalloc((size_t)(fn->nins ? fn->nins : 1) * sizeof *c->dnext);
+    for (int v = 0; v < fn->nvregs; v++)
+        c->dfirst[v] = c->rfirst[v] = -1;
+    for (int n = fn->nins - 1; n >= 0; n--) {   /* ascending chains */
+        int t = def_target(&fn->ins[n]);
+        c->dnext[n] = -1;
+        if (t >= 0 && t < fn->nvregs) {
+            c->dnext[n] = c->dfirst[t];
+            c->dfirst[t] = n;
+        }
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_LDVAR || i->op == IR_ADDR)
+            continue;
+        c->cur = n;
+        each_read(i, vchains_read_cb, c);
+    }
+}
+static void vchains_free(struct vchains *c)
+{
+    free(c->dfirst); free(c->dnext);
+    free(c->rfirst); free(c->rnext); free(c->rins);
+}
+/* Does an instruction outside [lo, hi) read v? */
+static int vchains_read_outside(const struct vchains *c, int v, int lo, int hi)
+{
+    if (v < 0 || v >= c->nv)
+        return 0;
+    for (int k = c->rfirst[v]; k >= 0; k = c->rnext[k])
+        if (c->rins[k] < lo || c->rins[k] >= hi)
+            return 1;
+    return 0;
+}
+
 static int ivsr_one(struct ir_func *fn)
 {
     if (fn->nins == 0)
@@ -8725,6 +8798,8 @@ static int ivsr_one(struct ir_func *fn)
     compute_idom(bb, order, norder);
     struct defs d;
     compute_defs(fn, &d);
+    struct vchains vc;
+    vchains_build(fn, &vc);
     char *in = xmalloc((size_t)nbb);
     int done = 0;
 
@@ -8815,12 +8890,11 @@ static int ivsr_one(struct ir_func *fn)
          * because that inner loop was rewritten first and its counter
          * was gone before the outer one looked. */
         int init_zero = 1, ninit = 0;
-        for (int n = 0; n < fn->nins && init_zero; n++) {
+        for (int n = iv >= 0 && iv < vc.nv ? vc.dfirst[iv] : -1;
+             n >= 0 && init_zero; n = vc.dnext[n]) {
             if (n >= lo && n < hi)
                 continue;
             struct ir_ins *i = &fn->ins[n];
-            if (def_target(i) != iv)
-                continue;
             ninit++;
             if (!((i->op == IR_MOV && i->a >= 0 && i->a < fn->nvregs &&
                    d.cnt[i->a] == 1 && d.ins[i->a] >= 0 &&
@@ -8880,11 +8954,7 @@ static int ivsr_one(struct ir_func *fn)
             if (!linear_in_iv(fn, &d, lo, hi, t, iv, &base, &scale) &&
                 !linear_in_iv2(fn, &d, lo, hi, t, iv, &base, &base2, &scale))
                 continue;
-            int escapes = 0;
-            for (int m = 0; m < fn->nins && !escapes; m++)
-                if ((m < lo || m >= hi) && ins_reads(&fn->ins[m], t))
-                    escapes = 1;
-            if (escapes)
+            if (vchains_read_outside(&vc, t, lo, hi))
                 continue;
             int dup = 0;
             for (int k = 0; k < nc; k++)
@@ -8962,6 +9032,24 @@ static int ivsr_one(struct ir_func *fn)
         struct ibuf nb = { 0, 0, 0 };
         int *newpos = fn->var_scope_lo
             ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        /* The renames, made once: every candidate to its pointer, and the
+         * index to its own name inside the loop. They were a table of
+         * every vreg, allocated and filled for each instruction of the
+         * function and each candidate -- instructions x vregs a rewrite,
+         * most of EmbCC's -O2 time on its own regalloc.c. One table holds
+         * all the candidates: a pointer is a fresh vreg and never a
+         * candidate, so renaming them together is renaming them in turn. */
+        int nvmap = fn->nvregs;
+        int *cmap = xmalloc((size_t)nvmap * sizeof *cmap);
+        int *imap = lftr_iv >= 0 ? xmalloc((size_t)nvmap * sizeof *imap) : NULL;
+        for (int v = 0; v < nvmap; v++) {
+            cmap[v] = -1;
+            if (imap) imap[v] = -1;
+        }
+        for (int k = 0; k < nc; k++)
+            cmap[cand[k]] = ptr[k];
+        if (imap)
+            imap[iv] = lftr_iv;
         for (int n = 0; n < fn->nins; n++) {
             if (n == lo) {
                 /* a two-part base, summed once before the loop */
@@ -9029,24 +9117,14 @@ static int ivsr_one(struct ir_func *fn)
             }
             struct ir_ins *o = ib_push(&nb);
             *o = fn->ins[n];
-            for (int k = 0; k < nc; k++) {
-                struct lcopy lc;
-                int *tbl = xmalloc((size_t)fn->nvregs * sizeof *tbl);
-                for (int v = 0; v < fn->nvregs; v++) tbl[v] = -1;
-                tbl[cand[k]] = ptr[k];
-                lc.cp = tbl; lc.nv = fn->nvregs; lc.n = 0;
+            {
+                struct lcopy lc = { cmap, nvmap, 0 };
                 each_read(o, lcopy_cb, &lc);
-                free(tbl);
             }
             /* Inside the loop, the index goes by its own name. */
             if (lftr_iv >= 0 && n >= lo && n < hi) {
-                struct lcopy lc;
-                int *tbl = xmalloc((size_t)fn->nvregs * sizeof *tbl);
-                for (int v = 0; v < fn->nvregs; v++) tbl[v] = -1;
-                tbl[iv] = lftr_iv;
-                lc.cp = tbl; lc.nv = fn->nvregs; lc.n = 0;
+                struct lcopy lc = { imap, nvmap, 0 };
                 each_read(o, lcopy_cb, &lc);
-                free(tbl);
                 if (def_target(o) == iv)
                     o->dst = lftr_iv;
             }
@@ -9062,6 +9140,7 @@ static int ivsr_one(struct ir_func *fn)
             free(newpos);
         }
         free(fn->ins);
+        free(cmap); free(imap);
         fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
         if (remarks_on() && fn->src)
             remark_add("opt", "strength-reduced", fn->name, "ivsr/address",
@@ -9071,7 +9150,7 @@ static int ivsr_one(struct ir_func *fn)
         done = 1;
     }
 
-    free(in); free_defs(&d);
+    free(in); free_defs(&d); vchains_free(&vc);
     free(order); free(l2b);
     free_cfg(bb, nbb);
     return done;
