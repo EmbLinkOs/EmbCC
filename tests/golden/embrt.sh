@@ -11,6 +11,7 @@ set -u
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
 EMBRT=${EMBRT:-./embrt}
+[ -x "$EMBRT" ] || { echo "FAIL: $EMBRT is not built (make embrt)"; exit 1; }
 QARM=${EMBCC_QEMU_ARM:-qemu-system-arm}
 echo "TEST-MARKER embrt"
 out=tests/golden/out/embrt

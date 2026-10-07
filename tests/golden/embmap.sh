@@ -10,6 +10,7 @@ set -u
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
 EMBMAP=${EMBMAP:-./embmap}
+[ -x "$EMBMAP" ] || { echo "FAIL: $EMBMAP is not built (make embmap)"; exit 1; }
 NM=${EMBCC_LLVM_NM:-llvm-nm}
 RE=${EMBCC_LLVM_READELF:-llvm-readelf}
 echo "TEST-MARKER embmap"
