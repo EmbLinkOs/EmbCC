@@ -219,6 +219,7 @@ struct a_fn {
      * can change through a pointer to it. -1 when nothing. */
     int zv;
     long zat;
+    long zscan;          /* z_holds has seen [zat, zscan) leave Z alone */
     /* Per instruction: an IR_CALL that may be a TAIL call (a_tail_ok) --
      * made one when, too, no argument register is one the epilogue pops.
      * NULL when there are none. */
@@ -1000,7 +1001,11 @@ static int dw(const struct a_fn *F, const struct ir_ins *i)
 }
 
 static int in_pair(const struct a_fn *F, int v);
-static int g_a_regalloc;           /* -O2 and -Os (defined below) */
+static int g_a_regalloc;           /* -O1 and up, and -O0 (defined below) */
+/* -O0: the allocator runs for the temporaries of expressions only, every
+ * source variable pinned to its slot (ra_debug_pin_vars), with no tail
+ * call and no folded offset -- as thumb's g_t_o0. */
+static int g_a_o0;
 
 static void layout(struct a_fn *F)
 {
@@ -1451,12 +1456,24 @@ static int is_remat(const struct a_fn *F, int v)
 
 static void vld_raw(struct a_fn *F, int r, int v, long off, int n);
 
+/* Does Z still hold v, nothing emitted since it was loaded having written
+ * it? Each question decodes only what was emitted since the last one:
+ * re-reading everything from the load made a pointer kept in Z across a
+ * long function -- a global read at every statement -- quadratic, and an
+ * -O2 function of 2000 statements spent most of its time here. What was
+ * already read stays read: nothing rewrites an instruction in place but
+ * to patch a branch's distance or an ldi's constant, which leaves the
+ * register it writes as it was; and a rewind of the code below what was
+ * read starts the reading over. */
 static int z_holds(struct a_fn *F, int v)
 {
     struct code *t = F->t;
     if (F->zv < 0 || F->zv != v)
         return 0;
-    for (long p = F->zat; p < t->len; ) {
+    long p = F->zscan;
+    if (p < F->zat || p > t->len)
+        p = F->zat;
+    while (p < t->len) {
         int len;
         if (avr_insn_writes(t->p + p, t->len - p, &len) & (3UL << AVR_Z)) {
             F->zv = -1;
@@ -1464,6 +1481,7 @@ static int z_holds(struct a_fn *F, int v)
         }
         p += len;
     }
+    F->zscan = p;
     return 1;
 }
 
@@ -1475,7 +1493,7 @@ static void vld(struct a_fn *F, int r, int v, long off, int n)
     vld_raw(F, r, v, off, n);
     if (zc) {
         F->zv = v;
-        F->zat = F->t->len;
+        F->zat = F->zscan = F->t->len;
     }
 }
 
@@ -2384,9 +2402,73 @@ static void a_verify_use(int v, void *p)
         a_conflict(c->F, v);
 }
 
+/* What a_verify needs of liveness: per instruction, the values live
+ * out of it that have a home -- the only ones a write can clobber --
+ * ascending (hl_v[hl_off[k] .. hl_off[k + 1])). It used to be the whole
+ * live-out bit set of every instruction; a walk back through each block
+ * (ra_lset_step) keeps the homed ones aside as it goes, so building this
+ * costs what changes at each instruction and what it holds. */
+struct a_homed { const struct a_fn *F; struct ra_lset *h; };
+static void a_homed_chg(int v, int added, void *ctx)
+{
+    struct a_homed *c = ctx;
+    if (!home_mask(c->F, v))
+        return;
+    if (added) ra_lset_add(c->h, v);
+    else       ra_lset_del(c->h, v);
+}
+
+static void a_homed_map(const struct a_fn *F, int **off_out, int **v_out)
+{
+    const struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, nins = fn->nins;
+    int *lf = xmalloc((size_t)nv * sizeof *lf);
+    int *ll = xmalloc((size_t)nv * sizeof *ll);
+    struct ra_live *lv = ra_live_compute(fn, lf, ll);
+    struct ra_lset s, h;
+    struct a_homed c;
+    ra_lset_init(&s, nv);
+    ra_lset_init(&h, nv);
+    c.F = F;
+    c.h = &h;
+    s.chg = a_homed_chg;
+    s.chg_ctx = &c;
+    /* first the counts, then the lists: two walks */
+    int *off = xcalloc((size_t)nins + 1, sizeof *off);
+    int *val = NULL;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int b = ra_live_nblocks(lv) - 1; b >= 0; b--) {
+            ra_lset_out(&s, lv, b);
+            for (int i = ra_live_block_start(lv, b + 1) - 1;
+                 i >= ra_live_block_start(lv, b); i--) {
+                if (!pass) {
+                    off[i + 1] = h.n;
+                } else {
+                    int *o = val + off[i];
+                    for (int k = 0; k < h.n; k++) {   /* insertion, ascending */
+                        int x = h.mem[k], j = k;
+                        while (j > 0 && o[j - 1] > x) { o[j] = o[j - 1]; j--; }
+                        o[j] = x;
+                    }
+                }
+                ra_lset_step(&s, &fn->ins[i]);
+            }
+        }
+        if (!pass) {
+            for (int i = 0; i < nins; i++) off[i + 1] += off[i];
+            val = xmalloc((size_t)(off[nins] ? off[nins] : 1) * sizeof *val);
+        }
+    }
+    ra_lset_free(&s); ra_lset_free(&h);
+    ra_live_free(lv);
+    free(lf); free(ll);
+    *off_out = off;
+    *v_out = val;
+}
+
 /* IR instructions n..last were emitted from byte `at` on. */
 static void a_verify(struct a_fn *F, int n, int last, long at,
-                     const unsigned long *lout, int words)
+                     const int *hl_off, const int *hl_v)
 {
     struct code *t = F->t;
     unsigned long w = 0;
@@ -2409,17 +2491,10 @@ static void a_verify(struct a_fn *F, int n, int last, long at,
         return;
     for (int k = n; k <= last; k++) {
         const struct ir_ins *i = &F->fn->ins[k];
-        const unsigned long *lo = lout + (size_t)k * words;
-        for (int q = 0; q < words; q++) {
-            unsigned long bits = lo[q];
-            while (bits) {
-                int b = 0;
-                while (!((bits >> b) & 1)) b++;
-                bits &= bits - 1;
-                int v = q * 64 + b;
-                if (v != i->dst && (home_mask(F, v) & w))
-                    a_conflict(F, v);
-            }
+        for (int q = hl_off[k]; q < hl_off[k + 1]; q++) {
+            int v = hl_v[q];
+            if (v != i->dst && (home_mask(F, v) & w))
+                a_conflict(F, v);
         }
         /* The operands -- not a fused branch's, whose one operand is the
          * comparison it replaced and never existed. */
@@ -3936,9 +4011,31 @@ static void gen_ins(struct a_fn *F, int n)
                     st_slot(F, 1 + pl.stk + b, R_TMP, 1);
                 }
             } else {
-                int n = vw(F, i->argv[k].vreg);
-                vld(F, RA, i->argv[k].vreg, 0, pl.nstk < n ? pl.nstk : n);
-                st_slot(F, 1 + pl.stk, RA, pl.nstk);
+                int n = vw(F, i->argv[k].vreg), m = pl.nstk < n ? pl.nstk : n;
+                /* r18 up is this store's scratch, and may be where another
+                 * argument already lives -- in its home, before the
+                 * parallel move below. -O0's `-5`, computed into r18-r25
+                 * for the first argument, was overwritten so by the
+                 * bytes of an eight-byte stack argument. Then the bytes
+                 * go one at a time through r0, which nothing holds. */
+                int busy = 0;
+                for (int q = 0; q < i->nargs && !busy; q++) {
+                    int v = i->argv[q].vreg;
+                    if (q == k || i->argv[q].is_struct || !in_pair(F, v))
+                        continue;
+                    busy = F->loc[v] < RA + m && F->loc[v] + F->hw[v] > RA;
+                }
+                if (busy) {
+                    for (int b = 0; b < pl.nstk; b++) {
+                        if (b < m)
+                            vld(F, R_TMP, i->argv[k].vreg, b, 1);
+                        st_slot(F, 1 + pl.stk + b, b < m ? R_TMP : R_ZERO,
+                                1);
+                    }
+                } else {
+                    vld(F, RA, i->argv[k].vreg, 0, m);
+                    st_slot(F, 1 + pl.stk, RA, pl.nstk);
+                }
             }
         }
         /* Then the register ones: first every argument that lives in a
@@ -4705,6 +4802,12 @@ static void avr_ra_pass(struct a_fn *F, int hw, int low, int *taken,
     x = avr_excl(F, hw);
     for (int v = 0; v < nv; v++)
         if (also[v]) x[v] = 1;
+    if (g_a_o0) {
+        char *pin = ra_debug_pin_vars(fn);
+        for (int v = 0; pin && v < nv; v++)
+            if (pin[v]) x[v] = 1;
+        free(pin);
+    }
     g_a_quadpass = hw != 2;
     /* `wide` tells the allocator which values no register can hold, and
      * for the eight-byte pass that is none of them: its registers are
@@ -5049,7 +5152,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     /* Which calls may be tail calls (a_tail_ok); whether each is made
      * waits for the argument registers it uses. */
     F.tail = NULL;
-    if (F.loc)
+    if (F.loc && !g_a_o0)
         for (i = 0; i < fn->nins; i++)
             if (a_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -5058,16 +5161,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             }
     {
         /* Liveness for a_verify, when anything has a home to check. */
-        unsigned long *lout = NULL;
-        int lwords = 0;
-        if (F.loc && fn->nvregs && fn->nins) {
-            int *lf = xmalloc((size_t)fn->nvregs * sizeof *lf);
-            int *ll = xmalloc((size_t)fn->nvregs * sizeof *ll);
-            unsigned long *lin = NULL;
-            int *dv = NULL;
-            lout = ra_live_intervals(fn, lf, ll, &lin, &dv, &lwords);
-            free(lf); free(ll); free(lin); free(dv);
-        }
+        int *hl_off = NULL, *hl_v = NULL;
+        if (F.loc && fn->nvregs && fn->nins)
+            a_homed_map(&F, &hl_off, &hl_v);
         F.zv = -1;
         for (i = 0; i < fn->nins; i++) {
             long at = t->len;
@@ -5080,11 +5176,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             }
             if (fn->ins[first].dst >= 0 && fn->ins[first].dst == F.zv)
                 F.zv = -1;              /* Z's pointer was redefined */
-            if (lout)
-                a_verify(&F, first, i, at, lout, lwords);
+            if (hl_off)
+                a_verify(&F, first, i, at, hl_off, hl_v);
             tail_end = i == fn->nins - 1 && F.tail_made;
         }
-        free(lout);
+        free(hl_off); free(hl_v);
     }
 
     /* ---- epilogue ---- */
@@ -5300,9 +5396,9 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * since the base's live range grows. `f->flags` was the pointer into
      * X, subi/sbci, into Z and a load: six instructions for clang's
      * three. EMBCC_NO_MEMOFF turns it off, as on Thumb and RISC-V. */
-    if (!avr_knob("EMBCC_NO_MEMOFF")) {
+    if (!avr_knob("EMBCC_NO_MEMOFF") && !g_a_o0) {
         char *w = avr_wide_map(fn);
-        ra_fold_memoff(fn, 0, 64, 2, 4, w);
+        ra_fold_memoff(fn, 0, 64, 2, 4, w, 0, 0);
         free(w);
     }
     int m0 = AVR_RA_QUADS_FIRST, m1 = AVR_RA_PAIRS_ONLY;
@@ -5390,11 +5486,17 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
 {
     struct a_sites st;
     memset(&st, 0, sizeof st);
-    (void)optimize; (void)no_sse;
-    g_a_regalloc = regalloc;           /* -O2 and -Os */
+    (void)no_sse;
+    g_a_regalloc = regalloc;           /* -O1 and up, and -O0 */
+    g_a_o0 = !optimize;
 
-    for (int n = 0; n < iu->nfuncs; n++)
+    for (int n = 0; n < iu->nfuncs; n++) {
+        int ra = g_a_regalloc;
+        if (g_a_o0 && ra_o0_too_big(&iu->funcs[n]))
+            g_a_regalloc = 0;          /* see ra_o0_too_big */
         gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        g_a_regalloc = ra;
+    }
 
     /* The sites still carry string INDICES; the driver's relocations want
      * .rodata offsets. */

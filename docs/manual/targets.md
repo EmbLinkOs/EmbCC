@@ -23,9 +23,10 @@ little-endian.
 | [x86-64 Windows](#windows-coff) | `x86_64-windows-gnu` | COFF | Microsoft x64, incomplete | an external linker |
 | [AArch64](#aarch64) | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | ELF64 | AAPCS64 | an external linker |
 | [Apple arm64](#apple-arm64) | `aarch64-apple-darwin` | Mach-O | Apple arm64 | the system linker |
-| [ARM Cortex-M](#arm-cortex-m) | `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
+| [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
+| [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
 
 | Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
@@ -39,6 +40,7 @@ little-endian.
 | RV32 | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
+| MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
@@ -109,22 +111,22 @@ Size and alignment in bytes, written `size/alignment`. "x86-64" covers
 `aarch64-elf`, `aarch64-emblink` and `aarch64-linux-gnu`; "Cortex-M"
 covers every `thumb*` triple.
 
-| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR |
-|---|---|---|---|---|---|---|---|---|---|
-| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed |
-| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 |
-| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 |
-| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 |
-| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 |
-| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 |
-| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 |
-| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 |
-| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 |
-| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` |
-| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — |
-| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 |
-| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 |
-| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed |
+| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 |
+| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
 
 Notes on the table:
 
@@ -177,8 +179,9 @@ and AArch64.
 | `-mcmodel=MODEL` | Accepted with any value; no effect. Each target uses the single code model described in its section. |
 
 Any other `-m` option not listed in a target's section is an error:
-`embcc: error: unknown argument '-mfoo'`. In particular `-m32`, `-m64`,
-`-march=`, `-mabi=` and `-mmcu=` are not accepted.
+`embcc: error: unknown argument '-mfoo'`. In particular `-m32`, `-m64`
+and `-mmcu=` are not accepted, and `-march=` and `-mabi=` only on MIPS
+(see [MIPS32](#mips32)).
 
 ## x86-64
 
@@ -481,13 +484,14 @@ As for x86-64, plus the binary128 `long double` routines (`softtf.c`).
 
 ## ARM Cortex-M
 
-The ARMv7-M, ARMv7E-M and ARMv8-M Mainline profiles, in Thumb-2. Every
-Cortex-M target is freestanding.
+The ARMv6-M profile in Thumb-1, and the ARMv7-M, ARMv7E-M and ARMv8-M
+Mainline profiles in Thumb-2. Every Cortex-M target is freestanding.
 
 ### Triples
 
 | Triple | Accepted aliases | Architecture | Float ABI | Cores |
 |---|---|---|---|---|
+| `thumbv6m-none-eabi` | `thumbv6m`, `armv6m-none-eabi` | ARMv6-M | soft | Cortex-M0, M0+, M1 |
 | `thumbv7m-none-eabi` | `thumbv7m`, `armv7m-none-eabi`, `arm-none-eabi` | ARMv7-M | soft | Cortex-M3 |
 | `thumbv7em-none-eabi` | `thumbv7em`, `armv7em-none-eabi` | ARMv7E-M | soft | Cortex-M4, M7 |
 | `thumbv7em-none-eabihf` | | ARMv7E-M | hard, FPv4-SP-D16; FPv5-D16 with `-mcpu=cortex-m7` | Cortex-M4F; Cortex-M7 |
@@ -514,22 +518,24 @@ only Thumb`.
 
 #### `-mcpu=CPU`
 
-Select the architecture variant by core. `cortex-m3` selects ARMv7-M;
-`cortex-m4`, `cortex-m7` and `cortex-m33` select ARMv7E-M. The option does not change
-the architecture level: `--target=thumbv7m-none-eabi -mcpu=cortex-m33`
-is `thumbv7em-none-eabi`, and ARMv8-M is selected only by a
-`thumbv8m.main` triple. Any other value is an error:
+Select the architecture variant by core. `cortex-m0`, `cortex-m0plus`
+and `cortex-m1` select ARMv6-M on any ARM triple, as
+`thumbv6m-none-eabi` does. `cortex-m3` selects ARMv7-M; `cortex-m4`,
+`cortex-m7` and `cortex-m33` select ARMv7E-M. Otherwise the option does
+not change the architecture level: `--target=thumbv7m-none-eabi
+-mcpu=cortex-m33` is `thumbv7em-none-eabi`, and ARMv8-M is selected only
+by a `thumbv8m.main` triple. On a `thumbv6m` triple, an ARMv7-M or
+ARMv8-M part raises the level. Any other value is an error:
 
 ```text
-embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)
+embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)
 ```
 
-The Cortex-M0, M0+, M1 (ARMv6-M) and M23 (ARMv8-M Baseline) are refused
-by name, because EmbCC emits ARMv7-M Thumb-2 and those cores would fault
-on it:
+The Cortex-M23 (ARMv8-M Baseline) is refused by name: it is a different
+subset from ARMv6-M, and EmbCC emits neither for it:
 
 ```text
-embcc: error: -mcpu=cortex-m0 is ARMv6-M, and EmbCC emits ARMv7-M Thumb-2: that core does not implement its ldr.w or IT blocks
+embcc: error: -mcpu=cortex-m23 is ARMv8-M Baseline, and EmbCC emits ARMv6-M (cortex-m0, m0plus, m1) or ARMv7-M Thumb-2: the second faults on that core and the first is not what it is
 ```
 
 #### `-mfpu=FPU`
@@ -550,6 +556,7 @@ unit. The FPU only takes effect with `-mfloat-abi=softfp` or `hard`.
 | `fpv5-d16` on ARMv8-M | `-mfpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (-mfpu=fpv5-sp-d16) and nothing else: another unit's instruction set and attributes are unchecked here` |
 | `fpv4-sp-d16` or `fpv5-d16` on ARMv7-M | `-mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4` |
 | `fpv5-d16` on another part | `-mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16` |
+| any unit, or `softfp` or `hard`, on ARMv6-M | `-mfpu=fpv5-d16 on thumbv6m-none-eabi: an ARMv6-M core (Cortex-M0, M0+, M1) has no FPU, so floating point is soft and travels in the core registers` |
 
 #### `-mfloat-abi=ABI`
 
@@ -681,6 +688,13 @@ The tables are those of `clang -target thumbv7m-none-eabi` and
 The ARMv7E-M triples define the same macros as ARMv7-M:
 `__ARM_ARCH_7EM__` and `__ARM_FEATURE_DSP` are not defined.
 
+ARMv6-M's table is that of `clang -target thumbv6m-none-eabi`:
+`__ARM_ARCH` is 6, `__ARM_ARCH_6M__` and `__ARM_ARCH_ISA_THUMB` 1 are
+defined, and `__thumb2__`, `__ARM_FEATURE_IDIV`, `__ARM_FEATURE_CLZ`,
+`__ARM_FEATURE_LDREX`, `__ARM_FEATURE_UNALIGNED` and
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_N` are not. The `__GCC_ATOMIC_*_LOCK_FREE`
+values are 1: an atomic read-modify-write is a call (see Runtime).
+
 The float ABI changes these:
 
 | Macro | `soft` | `softfp` | `hard` |
@@ -701,18 +715,38 @@ fused multiply-add.
 Every floating-point operation the hardware lacks, every 64-bit
 division (`__divdi3`, `__udivdi3`, `__moddi3`, `__umoddi3`) and complex
 multiply and divide are calls to helpers with libgcc's names.
-`make rt-embedded` builds `librt.a` for each of the five Cortex-M
+`make rt-embedded` builds `librt.a` for each of the six Cortex-M
 triples (one archive per float ABI, because hard- and soft-float objects
-do not link together); link it after your objects. EmbCC does not provide
-the ARM run-time ABI's `__aeabi_*` routines, so an object from another
-compiler that calls them must bring its own.
+do not link together); link it after your objects. On ARMv7-M and
+ARMv8-M EmbCC does not provide the ARM run-time ABI's `__aeabi_*`
+routines, so an object from another compiler that calls them must bring
+its own.
+
+ARMv6-M has no divide, no 64-bit multiply and no exclusive loads and
+stores, so more operations are calls there. `librt.a` for
+`thumbv6m-none-eabi` (`lib/rt/armv6m.c`) provides them under the names
+clang and GCC use for the triple, all weak, so a program's own
+definition wins:
+
+| Operation | Routine |
+|---|---|
+| 32-bit `/`; `%` and a paired `/` | `__aeabi_idiv`, `__aeabi_uidiv`; `__aeabi_idivmod`, `__aeabi_uidivmod` |
+| 64-bit `*`; shift by a variable | `__aeabi_lmul`; `__aeabi_llsl`, `__aeabi_llsr`, `__aeabi_lasr` |
+| block copy or clear of more than 8 bytes | `__aeabi_memcpy`, `__aeabi_memclr` |
+| atomic read-modify-write, compare-and-swap (1, 2, 4 bytes) | `__atomic_exchange_N`, `__atomic_fetch_OP_N`, `__atomic_compare_exchange_N`, `__sync_val_compare_and_swap_N` |
+
+The atomic routines mask interrupts with PRIMASK around the access. That
+is atomic on a single core running privileged code; CPSID is ignored in
+unprivileged Thread mode, so an RTOS whose tasks run unprivileged, or a
+part with another bus master, defines its own.
 
 ### Limitations
 
 | Construct | Diagnostic |
 |---|---|
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
+| 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` (ARMv6-M: `the ARMv6-M backend cannot lower an atomic wider than four bytes`) |
+| on ARMv6-M, an inline asm template that uses a Thumb-2 instruction | `the ARMv6-M backend cannot lower an instruction ARMv6-M does not have (a 32-bit Thumb-2 encoding, from inline asm or the backend) yet (function f)` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | a scalar local aligned beyond 8 | `'x' needs 32-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
@@ -813,6 +847,154 @@ individually.
 
 An array or structure local aligned beyond 16 bytes is supported: its
 storage is carved from the stack at function entry and rounded up.
+
+## MIPS32
+
+MIPS32 Release 2, little-endian, with the o32 ABI and soft float: the
+core of Microchip's PIC32 parts. Freestanding only. The design notes are
+in [the MIPS32 plan](../internals/mips32-plan.md).
+
+### Triples
+
+| Triple | Accepted aliases | ISA | ABI |
+|---|---|---|---|
+| `mipsel-none-elf` | `mipsel-unknown-elf`, `mipsel-elf`, `mipsel` | MIPS32r2 | o32, soft float |
+
+There is no big-endian target (`mips-none-elf` is unknown).
+
+### Options
+
+EmbCC emits one configuration: MIPS32 Release 2, little-endian, o32, soft
+float, without abicalls and without small data. The options a MIPS build
+passes are accepted when they ask for exactly that and refused by name
+otherwise.
+
+| Option | Accepted values | Refused with |
+|---|---|---|
+| `-mcpu=CPU`, `-march=CPU` | `mips32r2`, `m4k`, `m14k`, `m14kc`, `24kc`, `24kf`, `24kec`, `24kef`, `34kc`, `74kc` | `-mcpu=mips32r6 is not a MIPS32 Release 2 core: EmbCC emits MIPS32r2 (mips32r2, m4k, m14k, m14kc, 24kc, 24kf, 24kec, 24kef, 34kc, 74kc)` |
+| `-mabi=ABI` | `32` | `-mabi=n32 is not supported: EmbCC emits the o32 ABI (-mabi=32) only` |
+| `-msoft-float` | (no value) | `-mhard-float is not supported: EmbCC emits soft-float o32, which passes floating point in the integer registers` |
+| `-EL` | (no value) | `-EB is not supported: the MIPS target is little-endian (mipsel) only` |
+| `-mno-abicalls` | (no value) | `-mabicalls is not supported: EmbCC's MIPS code takes addresses absolutely (lui/addiu) and keeps no $gp; it is -mno-abicalls code` |
+| `-G0` | (no value) | `-G8 is not supported: EmbCC puts no data in .sdata and addresses nothing through $gp (-G0)` |
+
+The code runs on any MIPS32 Release 2 or later core that keeps the
+Release 2 encodings (`lwl`/`lwr` among them), which Release 6 does not.
+A floating-point unit, if the core has one, is not used.
+
+### Calling convention: o32, soft float
+
+- The arguments are laid out as a block in memory: each at its offset
+  rounded up to its alignment (at least 4, at most 8), in whole words.
+  The first 16 bytes travel in `a0`–`a3` and the rest on the stack at
+  the same offset from the caller's `sp`. So after one `int`, a `long
+  long` or `double` skips `a1` for `a2:a3`; after three it goes on the
+  stack at `sp+16`.
+- A structure or union of any size is passed by value in that layout,
+  its bytes packed into the words (the low address in the low bits) and
+  split between `a3` and the stack when it straddles them.
+- The caller always reserves the first 16 bytes of its outgoing area, the
+  home area, for the callee to store `a0`–`a3` into.
+- `float` and `double` travel exactly as `int` and `long long` do.
+- A scalar result comes back in `v0`, or `v0:v1` (low word in `v0`) for a
+  `long long` or `double`. Every structure and union is returned through
+  a hidden pointer the caller passes in `a0`, and the callee hands it back
+  in `v0`. A `_Complex float` comes back in `v0` (real) and `v1`
+  (imaginary), a `_Complex double` in `v0:v1` and `a0:a1`, as clang
+  returns them.
+- A variadic argument follows the same layout. `va_list` is a `void *`;
+  a variadic function stores `a0`–`a3` into its home area, so the named
+  and unnamed arguments are one block, and `va_arg` of an 8-byte type
+  rounds the pointer up to 8 first.
+- `s0`–`s7`, `fp`, `gp` and `sp` survive a call. `at`, `k0` and `k1` are
+  never used by compiled code except `at` as a scratch.
+- The stack is 8-byte aligned. An unnamed bit-field does not affect a
+  structure's alignment.
+
+`tests/golden/mips-abi.sh` checks every rule above with EmbCC and clang
+calling each other on the board.
+
+### Code generation
+
+Addresses are absolute: `lui` and `addiu` with `R_MIPS_HI16` and
+`R_MIPS_LO16`. Calls, inside the unit as well, are `jal` with
+`R_MIPS_26`, so caller and callee must share a 256 MiB region, as they
+always do in a PIC32 or a KSEG0 image. Branches reach ±128 KiB; a branch
+in a function larger than that becomes an inverted branch over a `j`.
+A delay slot holds the instruction before the branch, call or return
+when that keeps the program -- the classic fill -- and otherwise a `nop`;
+a return's holds the release of the function's frame (`jr $ra` then
+`addiu $sp, $sp, N`), as clang's does. Under `-g` every slot but the
+return's is a `nop`. A dense `switch` dispatches through a jump table of
+offsets from the address a `bal` returns, so it needs no relocation. A load or store the compiler
+cannot prove aligned (a packed structure's member) uses `lwl`/`lwr` and
+`swl`/`swr`, because a misaligned word access traps.
+
+### Object format
+
+ELF32, little-endian, `EM_MIPS`, with REL relocations (`.rel.text`, the
+addend stored in the field) as o32 requires. `e_flags` is `0x70001001`:
+`EF_MIPS_ARCH_32R2`, `EF_MIPS_ABI_O32` and `EF_MIPS_NOREORDER`; not
+`EF_MIPS_CPIC`. Each object has a `.MIPS.abiflags` section saying ISA
+MIPS32r2, 32-bit registers and the soft-float ABI.
+
+`embld` links these objects and clang's (`--target=mipsel-unknown-elf
+-msoft-float`, in its default non-PIC mode), applying `R_MIPS_32`,
+`R_MIPS_26`, `R_MIPS_HI16`/`R_MIPS_LO16` (a HI16's addend completed by the
+`R_MIPS_LO16` that follows it) and `R_MIPS_PC16`. It refuses objects
+with a different floating-point ABI in their `.MIPS.abiflags`, and the
+GOT and gp-relative relocations of PIC and small-data code by name, and
+drops `.MIPS.abiflags`, `.reginfo` and `.pdr` from the image.
+`-Tstack ADDR` makes it emit an entry stub that sets `sp` and jumps to
+the entry symbol.
+
+### Assembly
+
+`embcc -c` assembles `.s` and `.S` files for MIPS32, and file-scope
+`asm` blocks and `__attribute__((naked))` functions are assembled the
+same way, in GNU as's syntax: `$`-spelt registers, `jal sym`, `%hi(sym)`
+and `%lo(sym)`, `la`, `.word sym`, labels and numeric locals, `.set
+reorder`/`noreorder`/`push`/`pop`, and the `.ent`/`.end`/`.frame` markers.
+A file starts in `.set reorder`, where the assembler fills each delay
+slot with a `nop`, as GNU as does; so does an inline-asm template, as
+GCC's and clang's do. PIC and small-data code (`.abicalls`, `.cpload`,
+`%got`, `%call16`, `%gp_rel`) is refused. The vocabulary and its rules
+are in [Inline assembly](inline-asm.md#mips32).
+
+### Predefined macros
+
+From `clang --target=mipsel-unknown-elf -mcpu=mips32r2 -msoft-float
+-mno-abicalls`: `__mips__`, `__mips` (32), `mips`, `_mips`, `__MIPSEL__`,
+`_MIPSEL`, `MIPSEL`, `__mips_isa_rev` (2), `_MIPS_ARCH_MIPS32R2`,
+`__mips_o32`, `_ABIO32`, `_MIPS_SIM`, `_MIPS_SZINT`, `_MIPS_SZLONG` and
+`_MIPS_SZPTR` (32), `__mips_soft_float`, `__mips_fpr` (0). Not
+`__mips_abicalls`: the code is not abicalls code. `__CHAR_UNSIGNED__` is
+not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is, and the 1- and
+2-byte forms are not.
+
+### Runtime
+
+`make rt-embedded` builds `librt.a` and `make libc-embedded` builds
+`libc.a` for `mipsel-none-elf` (soft float, 64-bit division, the C
+library on its bare-metal backend). `tests/harness/mips` runs programs on
+QEMU's `malta` board: the image is linked at 0x80100000 in KSEG0 and
+loaded with `-kernel`, the FPGA UART at 0xbf000900 is the console, and an
+exception prints its cause and address.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| an atomic read-modify-write on a 1- or 2-byte object | `the MIPS32 backend cannot lower an atomic narrower than four bytes (ll/sc are word-sized, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [xadd w=4 size=1]` |
+| an 8-byte atomic read-modify-write | `the MIPS32 backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
+| an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
+| a computed `goto` | `the MIPS32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
+| `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
+| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function; see [Bare metal](embedded.md#mips32)) |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
+| a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
+| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
 
 ## AVR
 
@@ -934,6 +1116,7 @@ for each; the machines are:
 | `x86_64-elf` | `qemu-system-x86_64 -cpu max`, a Multiboot image, output on `-debugcon stdio` | The guest prints an exit marker; `isa-debug-exit` stops QEMU |
 | `aarch64-elf` | `qemu-system-aarch64 -M virt -cpu cortex-a72 -semihosting` | Semihosting exit carries the status |
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | A real Linux kernel booted with the program as PID 1 (`-M q35` or `-M virt`) | The kernel's panic message carries the exit status |
+| `thumbv6m-none-eabi` | `qemu-system-arm -M microbit` (nRF51822, Cortex-M0), UART output | The program prints `==EXIT n==`; `qrun.sh --until` stops QEMU |
 | `thumbv7m-none-eabi` | `qemu-system-arm -M lm3s6965evb -cpu cortex-m3`, UART output | The program prints a sentinel; the run is bounded by a timeout |
 | `thumbv7em-none-eabihf` | `qemu-system-arm -M mps2-an386 -cpu cortex-m4` | As above |
 | `thumbv8m.main-none-eabi[hf]` | `qemu-system-arm -M mps2-an505 -cpu cortex-m33` | As above |

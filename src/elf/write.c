@@ -80,6 +80,10 @@ struct elfw {
      * pointer size and the machine only says which target. */
     int elf32;
     Elf64_Word eflags;   /* e_flags: the EABI version on ARM, 0 elsewhere */
+    /* REL rather than RELA: o32 MIPS keeps each addend in the field it
+     * relocates (target_elf_uses_rel), so the writer stores them there
+     * and emits .rel.<name> sections of Elf32_Rel. */
+    int rel;
 };
 
 struct elfw *elfw_new(int machine)
@@ -95,6 +99,7 @@ struct elfw *elfw_new(int machine)
      * gave it an ELF64 header, which readelf accepted and every AVR tool
      * rejected. */
     w->elf32 = target_ptr_size() <= 4;
+    w->rel = target_elf_uses_rel(target_get());
     if (machine == EM_ARM)
         w->eflags = EF_ARM_EABI_VER5;
     /* RISC-V's and AVR's come from the target (elfw_set_flags): whether
@@ -263,11 +268,13 @@ int elfw_write(struct elfw *w, const char *path)
                             w->sec[gp->target].hdr.sh_name;
         /* copied before the add, which may move the string table */
         size_t tl = strlen(tname);
+        size_t pl = w->rel ? 4 : 5;
         char *rname = xmalloc(tl + 6);
-        memcpy(rname, ".rela", 5);
-        memcpy(rname + 5, tname, tl + 1);
-        gp->sec_ndx = elfw_add_section(w, rname, SHT_RELA, SHF_INFO_LINK,
-                                       gp->rela.p, gp->rela.len, 8);
+        memcpy(rname, w->rel ? ".rel" : ".rela", pl);
+        memcpy(rname + pl, tname, tl + 1);
+        gp->sec_ndx = elfw_add_section(w, rname, w->rel ? SHT_REL : SHT_RELA,
+                                       SHF_INFO_LINK, gp->rela.p,
+                                       gp->rela.len, w->rel ? 4 : 8);
         free(rname);
     }
     int symtab_ndx = elfw_add_section(w, ".symtab", SHT_SYMTAB, 0,
@@ -295,7 +302,8 @@ int elfw_write(struct elfw *w, const char *path)
         w->sec[gp->sec_ndx].hdr.sh_link = (Elf64_Word)symtab_ndx;
         w->sec[gp->sec_ndx].hdr.sh_info = (Elf64_Word)gp->target;
         w->sec[gp->sec_ndx].hdr.sh_entsize =
-            w->elf32 ? sizeof(Elf32_Rela) : sizeof(Elf64_Rela);
+            w->rel ? sizeof(Elf32_Rel)
+                   : w->elf32 ? sizeof(Elf32_Rela) : sizeof(Elf64_Rela);
     }
 
     /* The symbol table and the relocation tables were built as arrays of
@@ -322,7 +330,37 @@ int elfw_write(struct elfw *w, const char *path)
         sy->data.len = sy->data.cap = (size_t)n * sizeof *out;
         sy->hdr.sh_size = sy->data.len;
 
-        for (int i = 0; i < w->nrelagrp; i++) {
+        for (int i = 0; w->rel && i < w->nrelagrp; i++) {
+            /* REL: each addend goes into the field it relocates, in the
+             * shape that relocation type's linker reads it back, and the
+             * entry keeps only the offset and the info word. */
+            struct section *rs = &w->sec[w->relagrp[i].sec_ndx];
+            struct section *ts = &w->sec[w->relagrp[i].target];
+            Elf64_Rela *ri = (Elf64_Rela *)rs->data.p;
+            int m = (int)(rs->data.len / sizeof(Elf64_Rela));
+            Elf32_Rel *ro = xmalloc((size_t)(m ? m : 1) * sizeof *ro);
+            for (int k = 0; k < m; k++) {
+                int type = (int)ELF64_R_TYPE(ri[k].r_info);
+                if (ts->hdr.sh_type == SHT_NOBITS ||
+                    ri[k].r_offset + 4 > ts->data.len ||
+                    !target_rel_put_addend(target_get(), type,
+                                           ts->data.p + ri[k].r_offset,
+                                           (long)ri[k].r_addend)) {
+                    fprintf(stderr, "embcc: elf writer: cannot store the "
+                            "addend of a type %d relocation at offset %lu\n",
+                            type, (unsigned long)ri[k].r_offset);
+                    fatal_unwind();
+                }
+                ro[k].r_offset = (Elf32_Addr)ri[k].r_offset;
+                ro[k].r_info = ELF32_R_INFO(ELF64_R_SYM(ri[k].r_info),
+                                            (unsigned)type);
+            }
+            free(rs->data.p);
+            rs->data.p = (unsigned char *)ro;
+            rs->data.len = rs->data.cap = (size_t)m * sizeof *ro;
+            rs->hdr.sh_size = rs->data.len;
+        }
+        for (int i = 0; !w->rel && i < w->nrelagrp; i++) {
             struct section *rs = &w->sec[w->relagrp[i].sec_ndx];
             Elf64_Rela *ri = (Elf64_Rela *)rs->data.p;
             int m = (int)(rs->data.len / sizeof(Elf64_Rela));

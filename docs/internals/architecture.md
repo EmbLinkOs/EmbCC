@@ -138,7 +138,7 @@ in order:
 | IR generation | `irgen` | `src/ir`, `src/arch/<arch>/irgen.c` | [EmbIR](ir.md) |
 | Optimizer | `opt_run` | `src/opt` | [The optimizer](optimizer.md) |
 | Register allocation | `ra_allocate`, `ra_allocate_fp` | `src/arch/regalloc.c` | [Register allocation](register-allocation.md) |
-| Code generation | `codegen_unit`, `codegen_unit_arm64`, `codegen_unit_thumb`, `codegen_unit_riscv`, `codegen_unit_avr` | `src/arch/<arch>` | [Backends](backends.md) |
+| Code generation | `codegen_unit`, `codegen_unit_arm64`, `codegen_unit_thumb`, `codegen_unit_riscv`, `codegen_unit_mips`, `codegen_unit_avr` | `src/arch/<arch>` | [Backends](backends.md) |
 | Debug and unwind tables | `dwarf_emit`, `eh_emit` | `src/debug` | [Object files](object-formats.md#debug-information) |
 | Object writers | `elfw_write`, `machow_write`, `coffw_write` | `src/elf`, `src/macho`, `src/coff` | [Object files](object-formats.md) |
 | Linker | `embld_link` | `src/link`, `src/embx` | [EmbLD](linker.md) |
@@ -165,7 +165,7 @@ Notes on the order:
   section.
 - The backend is chosen by `target_get()` in `compile_unit`: one call
   per architecture, with RV32 and RV64 sharing `codegen_unit_riscv`
-  ([D-016](decisions.md#d-016)). All five have the same signature and
+  ([D-016](decisions.md#d-016)). All six have the same signature and
   return the same structures, so nothing after this point knows which
   machine produced the bytes.
 - The driver, not the backends, lays out `.data`, `.bss`, `.rodata` and
@@ -248,7 +248,7 @@ The driver dispatches on the input's suffix before the C pipeline runs:
 |---|---|---|
 | `FILE.c`, or any file with `-x c` | the pipeline above | |
 | `FILE.cc`, `.cpp`, `.cxx`, `.C`, `.c++`, `.cp`, `.CPP`, `.ii`, or `-x c++` | the pipeline, through `cxx_translate` | |
-| `FILE.s`, `FILE.S` | `gas_assemble` in `src/as/gas.c` | GNU syntax for AArch64, ARMv7-M, RISC-V and AVR, encoded by each target's own inline-asm assembler; `.S` is preprocessed first |
+| `FILE.s`, `FILE.S` | `gas_assemble` in `src/as/gas.c` | GNU syntax for AArch64, ARMv7-M, RISC-V, MIPS32 and AVR, encoded by each target's own inline-asm assembler; `.S` is preprocessed first |
 | `FILE.asm` | `as_assemble` in `src/arch/x86_64/as.c` | NASM syntax, x86-64 only; the same code as `embas` |
 | `FILE.ir` | `ir_parse` in `src/ir/irparse.c` | with `embcc inspect ir` only |
 
@@ -279,7 +279,7 @@ are applied, options that change nothing about the image are accepted,
 and any other is refused ([EmbLD](linker.md#the-drivers-link)).
 
 The driver links x86-64 ELF programs and, for the firmware targets
-(ARMv7-M, ARMv8-M, RV32, RV64, AVR), images whose memory map the build
+(ARMv7-M, ARMv8-M, RV32, RV64, MIPS32, AVR), images whose memory map the build
 gives: a linker script (`-T`, ARM and RISC-V) or `-Wl,-Ttext`/`-Tdata`.
 A firmware link without one stops with `embcc: error: linking a TRIPLE
 image needs its memory map`. Every other target (AArch64 ELF, Mach-O,
@@ -324,7 +324,8 @@ The following still end the process directly:
   diagnostic would itself allocate.
 - The refusal functions of the embedded backends (`t_refuse` in
   `src/arch/thumb/codegen.c`, `rv_refuse` in `src/arch/riscv/codegen.c`,
-  `a_refuse` in `src/arch/avr/codegen.c`), which print the
+  `mips_refuse` in `src/arch/mips/codegen.c`, `a_refuse` in
+  `src/arch/avr/codegen.c`), which print the
   `cannot lower ... yet` message and call `exit(1)`.
 - Consistency checks in the Thumb encoder (`src/arch/thumb/emit.c`),
   which call `abort()` because the file is also linked into the encoding
@@ -442,7 +443,7 @@ example, runs `embcc` for diagnostics and parses in a forked child.
 | Program | Source | What it links from `src/` | Reference |
 |---|---|---|---|
 | `embcc` | `src/driver/main.c` | all of `SRCS` | [Invoking EmbCC](../manual/invoking.md) |
-| `embld` | `tools/embld/embld.c`, `doctor.c` | `src/link`, `src/embx`, the RISC-V and AVR encoders (for the RISC-V entry stub and AVR relocations), the x86-64 decoder, the `embdbg` core | [EmbLD](linker.md), [embld](../manual/tools/embld.md) |
+| `embld` | `tools/embld/embld.c`, `doctor.c` | `src/link`, `src/embx`, the RISC-V, MIPS and AVR encoders (for the RISC-V and MIPS entry stubs and AVR relocations), the x86-64 decoder, the `embdbg` core | [EmbLD](linker.md), [embld](../manual/tools/embld.md) |
 | `embas` | `tools/embas/embas.c` | the NASM-syntax assembler (`src/arch/x86_64/as.c`) and the ELF writer | [embas](../manual/tools/embas.md) |
 | `embread` | `tools/embread/embread.c` | `src/embx` | [embread](../manual/tools/embread.md) |
 | `embdbg` | `tools/embdbg/embdbg.c`, `remote.c` | the x86-64 decoder (`src/arch/x86_64/disasm.c`) | [embdbg](../manual/tools/embdbg.md) |
@@ -460,7 +461,9 @@ golden tests that use them, not by the Makefile.
 |---|---|---|
 | `tools/a64check/a64check.c`, `a64asmcheck.c` | the AArch64 encoder and inline-asm assembler | `tests/golden/aarch64/arm64-encoding.sh`, `arm64-asm.sh` |
 | `tools/thumbcheck`, `tools/tasmcheck`, `tools/vfpcheck` | the Thumb encoder, the Thumb inline-asm assembler, the VFP instructions | `thumb-encoding.sh`, `thumb-asm.sh`, `thumb-vfp.sh` |
+| `tools/t1check` | the ARMv6-M (Thumb-1) encoders, `t1_*` in `src/arch/thumb/emit.c` | `thumb-v6m-encoding.sh` |
 | `tools/riscvcheck`, `tools/rvasmcheck` | the RISC-V encoder and inline-asm assembler | `riscv-encoding.sh`, `riscv-compressed.sh`, `riscv-asm.sh` |
+| `tools/mipscheck`, `tools/mipsasmcheck` | the MIPS32 encoder and inline-asm assembler | `mips-encoding.sh`, `mips-asm.sh` |
 | `tools/avrcheck`, `tools/avrasmcheck` | the AVR encoder and inline-asm assembler | `avr-encoding.sh`, `avr-asm.sh` |
 | `tools/pmovecheck` | `ra_parallel_move`, by executing every small case against a model register file | `parallel-move.sh` |
 

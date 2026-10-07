@@ -241,28 +241,68 @@ int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *wide, const char *fltmap,
                  int *used_out, int *nused_out);
 
-/* Backward liveness over the IR: fills first[v]/last[v] with the range
- * vreg v is live over -- a sound over-approximation that SPANS loop
- * back-edges, where a naive first/last-appearance interval does not and
- * would let a loop-carried value's register be clobbered mid-loop. Also
- * returns the per-instruction live-in and live-out bitsets and the def
- * vreg per instruction, which the interference graph needs.
+/* Liveness kept per basic block (regalloc.c says how): ra_live_compute
+ * fills first[v]/last[v] -- the earliest and latest instruction where v
+ * is live in, live out or written, -1 for a vreg never live -- and
+ * returns the blocks' live sets, which a walk turns back into any
+ * instruction's:
  *
- * Shared because slot coalescing wants the same ranges the allocator
- * does, and two copies of a dataflow are two chances to disagree about
- * a back-edge. Everything is malloc'd; the caller frees. */
-unsigned long *ra_live_intervals(struct ir_func *fn, int *first, int *last,
-                                 unsigned long **livein_out, int **defv_out,
-                                 int *words_out);
+ *     for (int b = ra_live_nblocks(lv) - 1; b >= 0; b--) {
+ *         ra_lset_out(&s, lv, b);
+ *         for (int i = ra_live_block_start(lv, b + 1) - 1;
+ *              i >= ra_live_block_start(lv, b); i--) {
+ *             ... s is the set live after instruction i ...
+ *             ra_lset_step(&s, &fn->ins[i]);
+ *             ... and now the set live before it ...
+ *         }
+ *     }
+ *
+ * (block nblocks starts at nins). After block 0, s is the set live into
+ * the function. Its cost is the size of the sets, not nins x nvregs. */
+struct ra_live;
+struct ra_live *ra_live_compute(const struct ir_func *fn, int *first, int *last);
+void ra_live_free(struct ra_live *lv);
+int ra_live_nblocks(const struct ra_live *lv);
+int ra_live_block_start(const struct ra_live *lv, int b);
+/* Is v live into instruction i? One scan of i's block. */
+int ra_live_in_at(const struct ra_live *lv, const struct ir_func *fn,
+                  int i, int v);
+
+/* ra_live_compute's first[] and last[] alone. */
+void ra_live_ranges(const struct ir_func *fn, int *first, int *last);
+
+/* A set of vregs: its members in mem[0..n), in no order. `chg`, when
+ * set, hears of every vreg added (1) or removed (0) -- for a walk that
+ * keeps a summary of the set, such as which registers its members hold,
+ * without visiting all of them at every instruction. */
+struct ra_lset {
+    int *mem, *pos;
+    int n, nvr;
+    void (*chg)(int v, int added, void *ctx);
+    void *chg_ctx;
+};
+void ra_lset_init(struct ra_lset *s, int nvr);
+void ra_lset_free(struct ra_lset *s);
+void ra_lset_add(struct ra_lset *s, int v);
+void ra_lset_del(struct ra_lset *s, int v);
+void ra_lset_out(struct ra_lset *s, const struct ra_live *lv, int b);
+void ra_lset_step(struct ra_lset *s, const struct ir_ins *in);
 
 /* A register a PAIR pass gave a 64-bit value, over the instructions
- * [first, last] that value is live (ra_live_intervals' numbering): the
+ * [first, last] that value is live (ra_live_compute's numbering): the
  * next allocation treats the register as taken there, and only there.
  * Withholding a pair's registers from the whole function -- the old
  * rule -- cost a Cortex-M4 loop its r0 for three doubles that lived
  * briefly after it. The list is read by the next ra_allocate and then
- * dropped. */
-struct ra_range { int reg, first, last; };
+ * dropped.
+ *
+ * `born`: the value the instruction at `last` defines may have the
+ * register as well, because the backend's lowering of that instruction
+ * reads the pair before it writes its result (a 64-bit compare's 0 or 1
+ * on Thumb). Only that value: another one live into `last` still may
+ * not, which is why this is a flag and not `last - 1` -- at instruction
+ * 0 that would hand a parameter's registers to the other parameters. */
+struct ra_range { int reg, first, last, born; };
 void ra_reserve(const struct ra_range *r, int n);
 
 /* A map of the function's source variables, for the -g pinning above.
@@ -336,6 +376,18 @@ int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
  * and one copy is how it stays agreed. */
 int ra_ins_def(const struct ir_ins *in);
 
+/* At -O0, is fn too big to allocate? -O0 is meant to be quick, and once
+ * allocated nothing. When liveness was a bit set of every vreg at every
+ * instruction and colouring a bit matrix of the eligible ones, allocating
+ * cost the SQUARE of a function's size: a generated function of 8000
+ * statements went from 0.1 s to 5.5 s, and one of 84000 did not finish in
+ * ten minutes. Both are linear now (ra_live_compute, struct ra_graph), so
+ * what is left is a cap on a cost that is merely large -- AVR's, which
+ * generates a function several times -- set in instructions. Over it,
+ * -O0 compiles the function the way it did before it allocated (what
+ * EMBCC_O0_NORA=1 does to every function): its temporaries in slots. */
+int ra_o0_too_big(const struct ir_func *fn);
+
 /* ---- a PARALLEL MOVE ------------------------------------------------------
  *
  * "Put these values in these registers, all at once." Three places in a
@@ -388,8 +440,13 @@ char *ra_narrow_hishift(const struct ir_func *fn);
 /* Fold an ADD of a constant into the loads and stores that are its only
  * uses (ir_ins.memoff), for a target with base+offset addressing whose
  * encodable range is [lo, hi - size]. Run before allocation. */
-/* `max_size`: the widest access whose lowering reads memoff. */
+/* `max_size`: the widest access whose lowering reads memoff.
+ * `regoff`: the target's accesses can add a register themselves
+ * ([rn, rm, lsl #s]), so `(base + K) + i` is reassociated only for an
+ * address two or more accesses share; `short_k`, when not 0, the largest
+ * multiple of an access's size its short encoding reaches (31 on Thumb),
+ * beyond which the constant stays out of the access. */
 int ra_fold_memoff(struct ir_func *fn, long lo, long hi, int w_addr,
-                   int max_size, const char *wide);
+                   int max_size, const char *wide, int regoff, int short_k);
 
 #endif

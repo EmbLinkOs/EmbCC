@@ -23,6 +23,7 @@
 #include "../embx/embx.h"
 #include "../arch/riscv/emit.h"
 #include "../arch/avr/emit.h"
+#include "../arch/mips/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -237,6 +238,12 @@ struct linker {
      * flash load address -- so the startup can copy it across. AVR is
      * the only such target here. */
     int harvard;
+    /* MIPS: the floating-point ABI the first object's .MIPS.abiflags
+     * named (0 = none named yet, or "any"), which every later one must
+     * agree with -- a soft-float and a hard-float object pass doubles in
+     * different registers. And which object named it, for the message. */
+    int mips_fp_abi;
+    const char *mips_fp_from;
     struct orphan orphans[MAX_ORPHANS];
     int norphan;
     struct ls_script *sc;      /* -T: the layout comes from here */
@@ -478,10 +485,17 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (e32->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
         if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
-            e32->e_machine != EM_AVR)
+            e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
-                "RV32 (EM_RISCV) and AVR (EM_AVR) are supported", name,
-                (unsigned)e32->e_machine);
+                "RV32 (EM_RISCV), AVR (EM_AVR) and MIPS (EM_MIPS) are "
+                "supported", name, (unsigned)e32->e_machine);
+        /* little-endian o32 only: a big-endian MIPS object's fields
+         * would all be read backwards */
+        if (e32->e_machine == EM_MIPS &&
+            (e32->e_ident[EI_DATA] != ELFDATA2LSB ||
+             (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32))
+            die("%s: a MIPS object that is not little-endian o32; this "
+                "linker links mipsel o32 only", name);
         o->machine = e32->e_machine;
         o->eflags = e32->e_flags;
         o->nsh = e32->e_shnum;
@@ -677,6 +691,32 @@ static void dbg_append(struct dbgsec *d, const unsigned char *p, long n)
     d->len += n;
 }
 
+/* MIPS's .MIPS.abiflags: byte 7 is the floating-point ABI (1 double,
+ * 2 single, 3 soft, ...; 0 any). Objects that name different ones pass
+ * floating-point values in different places and must not be linked
+ * together -- the check GNU ld makes, and the one place it can be made. */
+static void mips_abiflags_check(struct linker *l, struct object *o,
+                                const unsigned char *p, Elf64_Xword n)
+{
+    int fp;
+    if (n < 24)
+        die("%s: a .MIPS.abiflags section of %lu bytes; it has 24",
+            o->name, (unsigned long)n);
+    fp = p[7];
+    if (!fp)
+        return;
+    if (!l->mips_fp_abi) {
+        l->mips_fp_abi = fp;
+        l->mips_fp_from = o->name;
+    } else if (l->mips_fp_abi != fp) {
+        die("%s: its floating-point ABI (%s) is not that of %s (%s); "
+            "objects compiled for soft float and for an FPU pass floating "
+            "point in different registers", o->name,
+            fp == 3 ? "soft float" : "an FPU", l->mips_fp_from,
+            l->mips_fp_abi == 3 ? "soft float" : "an FPU");
+    }
+}
+
 /* Collect the object's SHF_ALLOC sections into the global insec list and
  * record where each landed (sec_out), so relocations and symbols can map
  * a (object, section) back to its output placement. */
@@ -684,6 +724,16 @@ static void collect_sections(struct linker *l, struct object *o)
 {
     for (int i = 0; i < o->nsh; i++) {
         Elf64_Shdr *sh = sh_at(o, i);
+        /* MIPS's register-usage and ABI-flag records are ALLOCATED, and
+         * nothing in a bare-metal image reads them: checked, then left
+         * out (as with no other section, their relocations go nowhere). */
+        if (o->machine == EM_MIPS && (sh->sh_type == SHT_MIPS_ABIFLAGS ||
+                                      sh->sh_type == SHT_MIPS_REGINFO)) {
+            if (sh->sh_type == SHT_MIPS_ABIFLAGS)
+                mips_abiflags_check(l, o, o->buf + sh->sh_offset,
+                                    sh->sh_size);
+            continue;
+        }
         if (!(sh->sh_flags & SHF_ALLOC)) {
             /* Not allocated, but DWARF still has to reach the output.
              * Concatenated per name; the offset this object's piece
@@ -770,7 +820,12 @@ static void collect_sections(struct linker *l, struct object *o)
 static void add_entry_stub(struct linker *l)
 {
     int xlen = l->elf32 ? 32 : 64;
-    long size = rv_li_len((long long)l->stack_top, xlen) + 8;
+    /* MIPS: li sp, then lui/ori t9 with the entry's absolute address and
+     * a jr through it, its delay slot a nop -- the lui/ori pair always
+     * both, so the size is known before layout. */
+    long size = l->machine == EM_MIPS
+              ? mips_li_len((long long)l->stack_top) + 16
+              : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
         l->capsec = l->capsec ? l->capsec * 2 : 64;
@@ -798,6 +853,14 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
     struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
+    if (l->machine == EM_MIPS) {
+        mips_li(&c, MIPS_SP, (long long)l->stack_top);
+        mips_lui(&c, MIPS_T9, (unsigned)(entry >> 16) & 0xffff);
+        mips_alu_imm(&c, MIPS_ORI, MIPS_T9, MIPS_T9, (long long)(entry & 0xffff));
+        mips_jr(&c, MIPS_T9);
+        mips_nop(&c);
+        return;
+    }
     /* The auipc sits just before the jalr, at the end of the stub. */
     Elf64_Addr auipc_at = s->vaddr + (Elf64_Addr)l->stub_size - 8;
     long long d = (long long)entry - (long long)auipc_at;
@@ -835,6 +898,11 @@ static void add_object(struct linker *l, struct object *o)
     }
     if (o->machine == EM_RISCV)
         l->eflags |= o->eflags & EF_RISCV_RVC;
+    else if (o->machine == EM_MIPS)
+        /* the architecture and the ABI, from the first object; NOREORDER
+         * is a property of each object's code and not of the image */
+        l->eflags = l->eflags ? l->eflags
+                              : o->eflags & (EF_MIPS_ARCH_MASK | 0xf000UL);
     else if (o->machine == EM_AVR && !(l->eflags & EF_AVR_ARCH_MASK))
         l->eflags = o->eflags & EF_AVR_ARCH_MASK;
     if (l->nobj == l->capobj) {
@@ -1516,6 +1584,14 @@ static void layout(struct linker *l, struct osec_bound *b,
     for (int i = 0; i < l->norphan; i++)
         if (l->orphans[i].writable)
             place_osec(l, OSEC_COUNT + i, &va, b);
+    /* MIPS: a word store to an address that is not a multiple of four
+     * traps, and a startup's word loops (define_firmware_symbols) run
+     * from __data_end and __bss_start to __bss_end. A .data that ended
+     * two bytes into a word sent the harness's .bss loop to the reset
+     * vector. Both ends are kept on word boundaries, the padding inside
+     * the image, as a GNU script's ALIGN(4) puts it. */
+    if (l->machine == EM_MIPS)
+        va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
     /* The part's flash is finite, and an image past its end does not fail
@@ -1548,6 +1624,8 @@ static void layout(struct linker *l, struct osec_bound *b,
         g->common = 0;
         va += g->size;
     }
+    if (l->machine == EM_MIPS)
+        va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
 }
@@ -2065,6 +2143,128 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     }
 }
 
+/* ---- MIPS (o32) --------------------------------------------------------
+ *
+ * The objects are REL: each addend is in the field it relocates, in that
+ * field's shape. HI16 and LO16 share ONE addend between them -- AHL, the
+ * HI16 field shifted up plus the LO16 field sign-extended -- so a HI16 is
+ * applied with the next LO16 against the same symbol in its section (the
+ * AHL rule; docs/internals/mips32-plan.md). The high half is rounded by
+ * 0x8000 because the low half is sign-extended when it is added.
+ *
+ * The GOT and GP-relative types are what PIC and small-data code use;
+ * this linker builds neither a GOT nor a _gp, and says so by name. */
+struct mips_relctx {
+    const unsigned char *rbytes;   /* the relocation section */
+    int j, n, relsz, isrel;
+    const unsigned char *base;     /* the relocated section's bytes */
+    Elf64_Word symi;
+    int local;                     /* the symbol is STB_LOCAL */
+};
+
+static long long sext(unsigned long long v, int bits)
+{
+    unsigned long long m = 1ULL << (bits - 1);
+    v &= (1ULL << bits) - 1;
+    return (long long)((v ^ m) - m);
+}
+
+/* The LO16 that pairs with the HI16 at index c->j: its sign-extended
+ * field, the low half of AHL. */
+static long long mips_lo_of(struct object *o, const struct mips_relctx *c)
+{
+    for (int k = c->j + 1; k < c->n; k++) {
+        const Elf32_Rel *r = (const Elf32_Rel *)(c->rbytes +
+                                                (long)k * c->relsz);
+        if ((r->r_info & 0xff) == R_MIPS_LO16 && (r->r_info >> 8) == c->symi)
+            return sext(get32loc(c->base + r->r_offset) & 0xffffU, 16);
+    }
+    die("%s: an R_MIPS_HI16 with no R_MIPS_LO16 against the same symbol "
+        "after it; the two halves of an address carry one addend between "
+        "them and cannot be resolved apart", o->name);
+    return 0;
+}
+
+static void mips_put16(unsigned char *loc, unsigned long v)
+{
+    put32(loc, (get32loc(loc) & 0xffff0000U) | (unsigned int)(v & 0xffffU));
+}
+
+static void apply_mips(struct linker *l, struct object *o, unsigned type,
+                       unsigned char *loc, Elf64_Addr S, long long A,
+                       Elf64_Addr P, const struct mips_relctx *c)
+{
+    unsigned int field = get32loc(loc);
+    long long V;
+    switch (type) {
+    case R_MIPS_NONE:
+    case R_MIPS_JALR:             /* a hint that a jalr may become a bal */
+        return;
+    case R_MIPS_32:
+        if (c->isrel) A = (long long)(int)field;
+        V = (long long)S + A;
+        need_range(l, o, "R_MIPS_32", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_MIPS_HI16:
+        if (c->isrel)
+            A = ((long long)(field & 0xffffU) << 16) + mips_lo_of(o, c);
+        V = (long long)S + A;
+        mips_put16(loc, (unsigned long)((V + 0x8000) >> 16));
+        return;
+    case R_MIPS_LO16:
+        if (c->isrel) A = sext(field & 0xffffU, 16);
+        V = (long long)S + A;
+        mips_put16(loc, (unsigned long)V);
+        return;
+    case R_MIPS_26: {
+        /* A 26-bit word index within the 256 MiB region of the delay
+         * slot. A local symbol's addend is unsigned (its region bits come
+         * from the place), an external one's sign-extended. */
+        long long a = c->isrel ? (long long)((field & 0x3ffffffU) << 2) : A;
+        if (c->isrel && !c->local)
+            a = sext((unsigned long long)a, 28);
+        V = (long long)S + a;
+        if (V & 3)
+            die("%s: a jal or j to 0x%llx, which is not a multiple of 4 "
+                "(against '%s')", o->name, (unsigned long long)V,
+                l->rel_sym ? l->rel_sym : "?");
+        if ((((unsigned long long)V ^ (unsigned long long)(P + 4)) &
+             0xf0000000ULL) != 0)
+            die("%s: a jal or j at 0x%llx to '%s' at 0x%llx, which is in "
+                "another 256 MiB region; jal reaches only its own",
+                o->name, (unsigned long long)P,
+                l->rel_sym ? l->rel_sym : "?", (unsigned long long)V);
+        put32(loc, (field & 0xfc000000U) |
+                   (unsigned int)(((unsigned long long)V >> 2) & 0x3ffffffU));
+        return;
+    }
+    case R_MIPS_PC16: {
+        long long d;
+        if (c->isrel) A = sext((unsigned long long)(field & 0xffffU) << 2, 18);
+        d = (long long)S + A - (long long)P;
+        need_range(l, o, "R_MIPS_PC16", d, -131072, 131068);
+        mips_put16(loc, (unsigned long)(d >> 2));
+        return;
+    }
+    case R_MIPS_GPREL16: case R_MIPS_GPREL32: case R_MIPS_LITERAL:
+        die("%s: relocation %s: small-data (gp-relative) addressing, which "
+            "this linker does not lay out; compile it with -G0", o->name,
+            type == R_MIPS_LITERAL ? "R_MIPS_LITERAL" : type == R_MIPS_GPREL32
+            ? "R_MIPS_GPREL32" : "R_MIPS_GPREL16");
+        return;
+    case R_MIPS_GOT16: case R_MIPS_CALL16:
+        die("%s: relocation %s: position-independent code through a GOT, "
+            "which this linker does not build; compile it without -fPIC "
+            "(-mno-abicalls, or clang's default -fno-pic)", o->name,
+            type == R_MIPS_GOT16 ? "R_MIPS_GOT16" : "R_MIPS_CALL16");
+        return;
+    default:
+        die("%s: unsupported MIPS relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
 /* ---- AVR --------------------------------------------------------------
  *
  * Two things make this machine's relocations unlike the others'.
@@ -2323,6 +2523,19 @@ static void apply_relocs(struct linker *l, struct object *o)
                 apply_avr(l, o, type, loc, S, A, P);
                 continue;
             }
+            if (o->machine == EM_MIPS) {
+                struct mips_relctx mc;
+                mc.rbytes = rbytes;
+                mc.j = j;
+                mc.n = n;
+                mc.relsz = relsz;
+                mc.isrel = isrel;
+                mc.base = base;
+                mc.symi = symi;
+                mc.local = ELF64_ST_BIND(o->syms[symi].st_info) == STB_LOCAL;
+                apply_mips(l, o, type, loc, S, A, P, &mc);
+                continue;
+            }
             if (o->elf32) {
                 /* SHT_REL keeps the addend IN the field, in whatever
                  * shape that field has -- a word for the data
@@ -2526,8 +2739,16 @@ static void write_exec(struct linker *l, const char *out,
      * offset 0, covering the headers. An image without one keeps the
      * layout it has always had, because EmbLinkOS's loader has been
      * reading that layout since before this existed and nothing here
-     * needs to change for it. */
+     * needs to change for it.
+     *
+     * Not a FIRMWARE image (-Tdata): nothing hands it AT_PHDR -- it is
+     * copied into flash and its startup finds the template by the
+     * linker's symbols -- and covering the headers started its text
+     * segment that many bytes below the text, which at -Ttext 0 is
+     * 0xffffff6c: QEMU loaded no vector table and the Cortex-M locked
+     * up at reset, for any program with a thread_local in it. */
     int ntls = tls_memsz ? 1 : 0;
+    int hdrs_in_text = ntls && !l->data_base;
     int nph = 2 + ntls;
     /* File layout: ehdr, 2 phdrs, then the text bytes at a file offset
      * congruent to their vaddr mod PAGE, then the data bytes likewise.
@@ -2691,7 +2912,8 @@ static void write_exec(struct linker *l, const char *out,
     /* RISC-V's and AVR's from the inputs (see l->eflags); bits 2:1 of
      * RISC-V's are the float ABI, whose 0 means SOFT. */
     eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5
-                : l->machine == EM_RISCV || l->machine == EM_AVR ? l->eflags
+                : l->machine == EM_RISCV || l->machine == EM_AVR ||
+                  l->machine == EM_MIPS ? l->eflags
                 : 0;
     eh->e_phoff = ehsz;
     eh->e_ehsize = (Elf64_Half)ehsz;
@@ -2701,7 +2923,7 @@ static void write_exec(struct linker *l, const char *out,
     Elf64_Phdr *ph = phbuf;
     ph[0].p_type = PT_LOAD;
     ph[0].p_flags = PF_R | PF_X;
-    if (ntls) {
+    if (hdrs_in_text) {
         /* From file offset 0, so the headers are mapped and AT_PHDR is
          * real. The segment therefore begins text_off bytes before the
          * text does. */
@@ -4596,9 +4818,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     if (l.gc_sections)
         gc_sections(&l, l.gc_undefs, l.gc_nundefs);
     if (opts && opts->have_stack) {
-        if (l.machine != EM_RISCV)
-            die("-Tstack is a RISC-V option: every other target here "
-                "starts with a stack pointer already set (a Cortex-M "
+        if (l.machine != EM_RISCV && l.machine != EM_MIPS)
+            die("-Tstack is a RISC-V and MIPS option: every other target "
+                "here starts with a stack pointer already set (a Cortex-M "
                 "reads its own from the vector table)");
         add_entry_stub(&l);
     }

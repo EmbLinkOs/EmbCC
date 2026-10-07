@@ -29,6 +29,10 @@ static const struct predef_macro *arch_table(int *count)
                 *count = predef_macro_count_cxx_thumbv8m;
                 return predef_macros_cxx_thumbv8m;
             }
+            if (target_thumb_arch() == 6) {
+                *count = predef_macro_count_cxx_thumbv6m;
+                return predef_macros_cxx_thumbv6m;
+            }
             *count = predef_macro_count_cxx_thumb;
             return predef_macros_cxx_thumb;
         case TARGET_RISCV32:
@@ -40,6 +44,9 @@ static const struct predef_macro *arch_table(int *count)
         case TARGET_AVR:
             *count = predef_macro_count_cxx_avr;
             return predef_macros_cxx_avr;
+        case TARGET_MIPS32:
+            *count = predef_macro_count_cxx_mips32;
+            return predef_macros_cxx_mips32;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -54,6 +61,10 @@ static const struct predef_macro *arch_table(int *count)
             *count = predef_macro_count_thumbv8m;
             return predef_macros_thumbv8m;
         }
+        if (target_thumb_arch() == 6) {
+            *count = predef_macro_count_thumbv6m;
+            return predef_macros_thumbv6m;
+        }
         *count = predef_macro_count_thumb;
         return predef_macros_thumb;
     case TARGET_RISCV32:
@@ -65,6 +76,9 @@ static const struct predef_macro *arch_table(int *count)
     case TARGET_AVR:
         *count = predef_macro_count_avr;
         return predef_macros_avr;
+    case TARGET_MIPS32:
+        *count = predef_macro_count_mips32;
+        return predef_macros_mips32;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;

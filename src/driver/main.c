@@ -54,10 +54,11 @@ static void print_version(void)
            dt ? " (as configured)" : "");
     printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
-           "ARMv8-M Mainline), RISC-V (RV32, RV64), AVR (ATmega328P)\n");
+           "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (little-endian "
+           "o32), AVR (ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32 and AVR images; "
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32 and AVR images; "
            "AArch64 and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
@@ -108,10 +109,16 @@ static void print_options(FILE *out)
       "  -fstack-usage                write FILE.su: each function's frame\n"
       "  -fno-exceptions, -fno-rtti   C++ without them\n"
       "  -fno-access-control          do not enforce private/protected\n"
+      "  -fno-jump-tables             no switch through a table of addresses\n"
+      "  -fno-inline-functions        inline only what is declared inline\n"
+      "  -fcommon                     tentative definitions are COMMON (C, ELF)\n"
+      "  -fsingle-precision-constant  1.0 is a float (C)\n"
+      "  -save-temps[=cwd|obj]        keep the .i and the .s\n"
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
-      "                         riscv32/riscv64-unknown-elf, avr, and the\n"
+      "                         riscv32/riscv64-unknown-elf, avr,\n"
+      "                         mipsel-none-elf, and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
       "                         them all\n",
@@ -365,6 +372,22 @@ static const char *why_decision, *why_subject;
  * compile rather than accompanying it. */
 static int dep_mode, dep_only, dep_phony;
 static const char *dep_file, *dep_target;
+
+/* -fcommon: a C tentative definition (`int x;` at file scope, nothing
+ * else saying where it goes) is a COMMON symbol, which the linker merges
+ * with the others of its name, instead of a .bss definition. ELF only. */
+static int g_fcommon;
+/* -fsingle-precision-constant: an unsuffixed floating constant is a
+ * float (C only; see the check after the arguments). */
+static int g_single_prec;
+/* -specs=FILE / --specs=FILE: a GCC driver specs file, named so the link
+ * can say once that EmbCC's own libraries are linked instead. */
+static const char *g_specs;
+/* -save-temps[=cwd|obj]: 1 beside the output, 2 in the current
+ * directory. -dumpbase NAME names the files outright (multi_source passes
+ * it to the compiler it runs for each source of a link). */
+static int g_save_temps;
+static const char *g_dumpbase;
 
 /* The make rule: "target: source header...", wrapped as GCC wraps it, and
  * with -MP a bare rule per header so a deleted header does not break the
@@ -666,6 +689,7 @@ static int apply_wl(struct link_opts *lo)
 
 static int compile(const char *in, const char *out, int pp_only);
 static int has_gas_suffix(const char *s);
+static int assemble_file(const char *in, const char *out);
 
 /* An object or an archive, which goes to the link as it is. */
 static int has_link_input_suffix(const char *p)
@@ -702,7 +726,8 @@ static int firmware_target(void)
 {
     return target_fmt_get() == TGT_FMT_ELF &&
            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
-            target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64);
+            target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
+            target_get() == TARGET_MIPS32);
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -769,10 +794,15 @@ static int compile_and_link(const char *in, const char *out)
     lo.undefs = g_undefs;
     lo.nundefs = g_nundefs;
     if (fw && !lo.script && !lo.have_base) {
+        /* embld lays a script out for ARM and RISC-V only: an AVR or
+         * MIPS build is not sent looking for one */
+        int scripts = target_get() == TARGET_THUMB ||
+                      target_get() == TARGET_RISCV32 ||
+                      target_get() == TARGET_RISCV64;
         fprintf(stderr,
-                "embcc: error: linking a %s image needs its memory map: a "
-                "linker script (-T FILE.ld), or -Wl,-Ttext=FLASH and "
-                "-Wl,-Tdata=RAM\n", target_triple_now());
+                "embcc: error: linking a %s image needs its memory map: %s"
+                "-Wl,-Ttext=FLASH and -Wl,-Tdata=RAM\n", target_triple_now(),
+                scripts ? "a linker script (-T FILE.ld), or " : "");
         return 1;
     }
     if (!fw && lo.script) {
@@ -782,6 +812,12 @@ static int compile_and_link(const char *in, const char *out)
         return 1;
     }
 
+    /* -specs=nano.specs, --specs=nosys.specs: the GCC driver's choice of
+     * newlib and its syscall stubs. Said once, here, where it would have
+     * mattered; a compile that does not link has nothing to say. */
+    if (g_specs)
+        fprintf(stderr, "embcc: note: -specs=%s is ignored: EmbCC links its "
+                        "own C library and runtime, not newlib\n", g_specs);
     const char *exe = out ? out : "a.out";
     /* The temporary lives beside the output, not in /tmp: a build that
      * cannot write next to its own output has a problem worth seeing,
@@ -791,7 +827,7 @@ static int compile_and_link(const char *in, const char *out)
     int rc;
     if (in) {
         rc = has_gas_suffix(in)
-            ? gas_assemble(in, obj, has_gas_suffix(in) == 2)
+            ? assemble_file(in, obj)
             : compile(in, obj, 0);
         if (rc != 0)
             return rc;
@@ -905,6 +941,122 @@ static int compile_and_link(const char *in, const char *out)
     return rc;
 }
 
+/* ---- -save-temps ---------------------------------------------------------
+ *
+ * GCC keeps what its passes hand each other -- the preprocessed source
+ * and the assembly -- and names them after the output, as GCC 11 and
+ * later do: `-c x.c -o build/x.o` keeps build/x.i and build/x.s, a link
+ * `x.c -o fw.elf` keeps fw-x.i and fw-x.s beside fw.elf, and with no -o
+ * the input's name is used in the current directory. -save-temps=cwd
+ * puts them in the current directory whatever the output; -dumpbase
+ * NAME names them NAME.i and NAME.s.
+ *
+ * EmbCC has no files between its stages, so each is produced by running
+ * this compiler again over the same source with -E and with -S -- the
+ * compile is deterministic, so that .s is the assembly of the object
+ * this command writes. A unit's state lives in globals (multi_source),
+ * so the second and third runs are processes of their own. */
+static char *strip_ext(const char *p)
+{
+    const char *sl = strrchr(p, '/'), *dot = strrchr(p, '.');
+    size_t n = dot && (!sl || dot > sl) && dot != (sl ? sl + 1 : p)
+             ? (size_t)(dot - p) : strlen(p);
+    return xstrndup(p, n);
+}
+
+static const char *base_name(const char *p)
+{
+    const char *sl = strrchr(p, '/');
+    return sl ? sl + 1 : p;
+}
+
+static int save_temps(int argc, char **argv, const char *in, const char *out,
+                      int compile_mode, int want_s)
+{
+    char *base;
+    if (g_dumpbase) {
+        base = xstrndup(g_dumpbase, strlen(g_dumpbase));
+    } else if (compile_mode) {
+        base = strip_ext(out ? out : base_name(in));
+    } else {
+        char *o = strip_ext(out ? out : "a.out");
+        char *s = strip_ext(base_name(in));
+        size_t n = strlen(o) + strlen(s) + 2;
+        base = xmalloc(n);
+        snprintf(base, n, "%s-%s", o, s);
+        free(o);
+        free(s);
+    }
+    if (g_save_temps == 2) {            /* =cwd */
+        char *b = xstrndup(base_name(base), strlen(base_name(base)));
+        free(base);
+        base = b;
+    }
+    if (!plat_can_run()) {
+        fprintf(stderr, "embcc: error: -save-temps runs the compiler again "
+                "for %s.i and %s.s, and this host cannot run a program "
+                "(EmbCC was built with PROCESS=none): use -E and -S\n",
+                base, base);
+        free(base);
+        return 1;
+    }
+    const char *self = plat_self_path();
+    if (!self)
+        self = argv[0];
+    const char **av = xmalloc((size_t)(argc + 8) * sizeof *av);
+    int rc = 0;
+    for (int pass = 0; pass < 2 && !rc; pass++) {
+        if (pass == 1 && want_s)
+            break;                  /* the .s is this command's own output */
+        size_t n = strlen(base) + 4;
+        char *path = xmalloc(n);
+        snprintf(path, n, "%s.%s", base,
+                 pass ? "s" : lang_cxx ? "ii" : "i");
+        if (strcmp(path, in) == 0 || (out && strcmp(path, out) == 0)) {
+            free(path);             /* never over the input or the output */
+            continue;
+        }
+        int k = 0;
+        av[k++] = self;
+        for (int i = 1; i < argc; i++) {
+            const char *a = argv[i];
+            if (g_child_skip[i])
+                continue;           /* sources, link inputs, -o, -j */
+            if (!strcmp(a, "-dumpbase") || !strcmp(a, "-MF") ||
+                !strcmp(a, "-MT") || !strcmp(a, "-MQ")) {
+                i++;
+                continue;
+            }
+            if (!strcmp(a, "-c") || !strcmp(a, "-S") || !strcmp(a, "-E") ||
+                !strncmp(a, "-save-temps", 11) ||
+                !strcmp(a, "--save-temps") || !strcmp(a, "-M") ||
+                !strcmp(a, "-MM") || !strcmp(a, "-MD") ||
+                !strcmp(a, "-MMD") || !strcmp(a, "-MP") ||
+                !strcmp(a, "-fstack-usage") || !strcmp(a, "-fremarks") ||
+                !strcmp(a, "-fremarks=json"))
+                continue;           /* this command's own outputs */
+            av[k++] = a;
+        }
+        av[k++] = pass ? "-S" : "-E";
+        av[k++] = "-o";
+        av[k++] = path;
+        av[k++] = in;
+        av[k] = NULL;
+        int which = -1;
+        if (plat_run_start(av) < 0) {
+            fprintf(stderr, "embcc: error: could not run %s for %s\n", self,
+                    path);
+            rc = 1;
+        } else if (plat_run_wait(&which) != 0) {
+            rc = 1;                 /* its diagnostics are already out */
+        }
+        free(path);
+    }
+    free(av);
+    free(base);
+    return rc;
+}
+
 /* ---- several sources in one command --------------------------------------
  *
  * `embcc a.c b.c -o prog`, `embcc -c a.c b.c`: what GCC and Clang take
@@ -956,12 +1108,25 @@ static int multi_source(int argc, char **argv, const char *output,
     while (next < g_nsrc || running) {
         while (next < g_nsrc && running < jobs && !failed) {
             int n = base;
-            const char **av = xmalloc((size_t)(base + 6) * sizeof *av);
+            const char **av = xmalloc((size_t)(base + 8) * sizeof *av);
             memcpy(av, cargv, (size_t)base * sizeof *av);
             if (link) {
                 size_t ln = strlen(exe) + 32;
                 tmp[next] = xmalloc(ln);
                 snprintf(tmp[next], ln, "%s.embcc-tmp-%d.o", exe, next + 1);
+                /* -save-temps: named after the image and the source, as
+                 * for one source (save_temps), not after the temporary */
+                if (g_save_temps && !g_dumpbase) {
+                    char *o = strip_ext(exe), *sb = strip_ext(base_name(
+                                                         g_srcs[next]));
+                    size_t bn = strlen(o) + strlen(sb) + 2;
+                    char *db = xmalloc(bn);
+                    snprintf(db, bn, "%s-%s", o, sb);
+                    free(o);
+                    free(sb);
+                    av[n++] = "-dumpbase";
+                    av[n++] = db;   /* (freed with the process) */
+                }
                 av[n++] = "-c";
                 av[n++] = g_srcs[next];
                 av[n++] = "-o";
@@ -1062,7 +1227,7 @@ static int blocks_by_gas(void)
 {
     enum target_arch a = target_get();
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR;
+           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1154,7 +1319,8 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         const struct expr *e = s->kind == STMT_EXPR ? s->expr : NULL;
         if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
             enum target_arch t = target_get();
-            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ? "bl" : "call",
+            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ? "bl"
+                                 : t == TARGET_MIPS32 ? "jal" : "call",
                    e->callee->name);
             continue;
         }
@@ -1216,6 +1382,37 @@ static void naked_to_blocks(struct unit *u)
     }
 }
 
+/* EmbCC's own headers after every -I the caller gave, once, and marked
+ * system (compile_unit says why). */
+static int g_incdirs_done;
+static void incdirs_with_defaults(void)
+{
+    if (g_incdirs_done)
+        return;
+    g_incdirs_done = 1;
+    if (!no_stdinc) {
+        int ndef = 0;
+        const char *const *def = paths_default_includes(&ndef);
+        for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = def[k];
+        }
+    }
+    cpp_set_system_dirs(incdir_sys, nincdirs);
+}
+
+/* A `.s` or `.S` file. A `.S` is preprocessed with the same search path
+ * as C: the -I directories reached a C file's #include and not an
+ * assembly file's, so FreeRTOS's RISC-V portASM.S could not find the
+ * chip-specific header its build names with -I. */
+static int assemble_file(const char *in, const char *out)
+{
+    int kind = has_gas_suffix(in);
+    if (kind == 2)
+        incdirs_with_defaults();
+    return gas_assemble(in, out, kind == 2, incdirs, nincdirs);
+}
+
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
@@ -1229,22 +1426,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * parsing so that -nostdinc and the -I order both stay simple, and
      * they are marked system so a warning inside them is not the
      * caller's problem. */
-    if (!no_stdinc) {
-        int ndef = 0;
-        const char *const *def = paths_default_includes(&ndef);
-        for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
-            incdir_sys[nincdirs] = 1;
-            incdirs[nincdirs++] = def[k];
-        }
-    }
-    cpp_set_system_dirs(incdir_sys, nincdirs);
+    incdirs_with_defaults();
     char *pp = cpp_process(in, src, incdirs, nincdirs);
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
         write_deps(in, out);
         return 0;
     }
     if (pp_only) {
-        fputs(pp, stdout);
+        /* -E -o FILE writes FILE, as GCC's does (the output used to go
+         * to standard output whatever -o said, and `cc -E x.c -o x.i`
+         * left no x.i). */
+        if (out && plat_write_file(out, pp, strlen(pp)) != 0)
+            diag_fatal(out, 0, "cannot write the file");
+        if (!out)
+            fputs(pp, stdout);
         return 0;
     }
     if (lang_cxx && !syntax_only &&
@@ -1605,15 +1800,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     if (ta == TARGET_AVR)
         codegen_unit_avr(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                          &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                         opt_level >= 1);
+                         opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
+    /* AVR, Thumb and RISC-V allocate at -O0 too, for the temporaries of
+     * each expression, every source variable pinned to its slot (the
+     * backends' g_a_o0 / g_t_o0 / g_rv_o0). EMBCC_O0_NORA=1 is the old
+     * -O0, for bisecting a difference. */
     else if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64)
         codegen_unit_riscv(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                           opt_level >= 1);
+                           opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
+    else if (ta == TARGET_MIPS32)
+        codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                          &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                          opt_level >= 1);
     else if (ta == TARGET_THUMB)
         codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                           opt_level >= 1);
+                           opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
     else if (ta == TARGET_AARCH64)
         codegen_unit_arm64(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -1718,9 +1921,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * one of its own. Decided as the layout below decides it: read-only
      * where it would be in .rodata, initialized data, or zeros. A
      * thread-local keeps .tdata/.tbss, which is what makes it one. */
+    /* -fcommon (C, ELF): a TENTATIVE definition -- external, no
+     * initializer, nothing saying where it goes -- is a COMMON symbol,
+     * as GCC makes it: the linker merges every unit's `int x;` into one
+     * object, the largest size and strictest alignment, and a real
+     * definition elsewhere wins. A static, a thread-local, a weak one or
+     * one with a section of its own stays a definition, as in GCC; a
+     * const one is COMMON as GCC's is (it is zeros either way). */
+    for (struct global *g = u->globals; g; g = g->next)
+        g->is_common = g_fcommon && !lang_cxx &&
+                       target_fmt_get() == TGT_FMT_ELF &&
+                       !g->absorbed && g->defined && !g->has_init &&
+                       !g->is_static && !g->is_tls && !g->section &&
+                       !g->is_weak;
     if (data_sections && target_fmt_get() == TGT_FMT_ELF)
         for (struct global *g = u->globals; g; g = g->next) {
-            if (g->absorbed || !g->defined || g->section || g->is_tls)
+            if (g->absorbed || !g->defined || g->section || g->is_tls ||
+                g->is_common)
                 continue;
             const struct type *ot = g->ty;
             while (ot && ot->kind == TY_ARRAY)
@@ -1752,8 +1969,15 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         int align = ty_align(g->ty);
         if (g->user_align > align)
             align = g->user_align;
+        align = target_object_align(g->ty && g->ty->kind == TY_ARRAY,
+                                    global_size(g), align);
         g->in_bss = !g->has_init;
         g->named = 0;
+        if (g->is_common) {    /* the linker places it (symbol below) */
+            g->in_rodata = 0;
+            g->off = align;    /* SHN_COMMON's st_value is the alignment */
+            continue;
+        }
         /* A const object is read-only data, where gcc puts it: in flash
          * on a microcontroller rather than copied into RAM at startup,
          * and write-protected under an MMU. Its place is fixed below,
@@ -1872,8 +2096,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             /* Already encoded at its real width: str_len elements of
              * str_width bytes (lit_encode). */
             int w = g->relocs[i].str_width ? g->relocs[i].str_width : 1;
-            int si = ir_intern_string(iu, g->relocs[i].str,
-                                      g->relocs[i].str_len * w);
+            int si = ir_intern_aligned(iu, g->relocs[i].str,
+                                       g->relocs[i].str_len * w,
+                                       target_string_align(w));
             g->relocs[i].str_off = iu->strs[si].off;
         }
     }
@@ -1887,6 +2112,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         int align = ty_align(g->ty);
         if (g->user_align > align)
             align = g->user_align;
+        align = target_object_align(g->ty && g->ty->kind == TY_ARRAY,
+                                    global_size(g), align);
         if (align > rodata_align)
             rodata_align = align;
         rodata_len = (rodata_len + align - 1) & ~(align - 1);
@@ -1972,6 +2199,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                  (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
                  (want_unwind < 0 && target_is_hosted() &&
                   target_fmt_get() == TGT_FMT_ELF);
+    /* The tables eh_emit writes are x86-64's and AArch64's layout, with a
+     * PC-relative relocation MIPS's REL objects have no type for. */
+    if (unwind && ta == TARGET_MIPS32)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "mipsel-none-elf yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no MIPS .eh_frame");
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
@@ -2655,6 +2889,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                       (Elf64_Xword)rodata_len,
                                       (Elf64_Xword)rodata_align);
     int data_ndx = 0, bss_ndx = 0;
+    /* MIPS: .data and .bss at 16 at least, as clang's and GNU as's MIPS
+     * objects have them -- so an object -S reassembled lays out as -c's */
+    if (ta == TARGET_MIPS32) {
+        if (data_align < 16) data_align = 16;
+        if (bss_align < 16) bss_align = 16;
+    }
     if (data_len)
         data_ndx = elfw_add_section(w, ".data", SHT_PROGBITS,
                                     SHF_ALLOC | SHF_WRITE, data,
@@ -2789,10 +3029,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                             (Elf64_Half)dn);
             /* the code resumes where the data ends, in the same section,
-             * unless that is the section's end */
+             * unless that is the section's end -- or more data starts
+             * right there: an ARMv6-M literal pool can follow a switch
+             * table with no instruction between, and a `$t` and a `$d` at
+             * one address leave a disassembler to pick one, which it did,
+             * decoding the pool as instructions. */
             long e = o + (text.drange[r + 1] - text.drange[r]);
             long send = gi ? g_tg[gi - 1].end - g_tg[gi - 1].start : tlen;
-            if (e < send)
+            if (e < send &&
+                !(r + 3 < text.ndrange &&
+                  text.drange[r + 2] == text.drange[r + 1]))
                 elfw_add_symbol(w, codesym, (Elf64_Addr)e, 0,
                                 ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                                 (Elf64_Half)dn);
@@ -2818,6 +3064,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         elfw_add_section(w, ".riscv.attributes", SHT_RISCV_ATTRIBUTES, 0,
                          ab, (Elf64_Xword)alen, 1);
         free(ab);
+    }
+    if (ta == TARGET_MIPS32) {
+        /* The ABI flags clang's objects carry: what ISA and register
+         * sizes the code needs and which floating-point ABI it was
+         * compiled for (soft), so a linker can refuse to mix it with a
+         * hard-float object. src/arch/mips/codegen.c. */
+        unsigned char af[24];
+        mips_build_abiflags(af);
+        elfw_add_section(w, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC,
+                         af, (Elf64_Xword)sizeof af, 8);
     }
     int rodata_sym = 0;
     if (rodata)
@@ -2923,7 +3179,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 (Elf64_Xword)global_size(g),
                 ELF64_ST_INFO(g->is_weak ? STB_WEAK : STB_GLOBAL,
                               g->is_tls ? STT_TLS : STT_OBJECT),
-                (Elf64_Half)(g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
+                (Elf64_Half)(g->is_common ? SHN_COMMON
+                             : g->is_tls ? (g->in_bss ? tbss_ndx : tdata_ndx)
                              : g->in_rodata ? rodata_ndx
                              : g->named ? named[g->named - 1].ndx
                              : g->in_bss ? bss_ndx : data_ndx));
@@ -3136,7 +3393,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * 12-bit rjmp. Against the SECTION symbol with the label's offset as
          * the addend, because `jmp` carries an absolute address and nothing
          * in a relocatable object knows where its own .text will land. */
-        int tx = strs[i].kind == RK_AVR_TEXT_CALL;
+        int tx = strs[i].kind == RK_AVR_TEXT_CALL ||
+                 strs[i].kind == RK_MIPS_TEXT26;
         /* (the auipc, or the jump's label, is in the same function as
          * the site, so in the same section) */
         int ssym = rodata_sym;
@@ -3412,6 +3670,12 @@ static void arm_float_resolve(void)
     if (strcmp(abi, "soft") && strcmp(abi, "softfp") && strcmp(abi, "hard"))
         diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it is "
                    "one of soft, softfp and hard", abi);
+    /* No ARMv6-M part has an FPU: only the base standard means anything. */
+    if (target_thumb_arch() == 6 && (fpu_named || strcmp(abi, "soft")))
+        diag_fatal(NULL, 0, "%s%s on %s: an ARMv6-M core (Cortex-M0, M0+, "
+                   "M1) has no FPU, so floating point is soft and travels in "
+                   "the core registers", fpu_named ? "-mfpu=" : "-mfloat-abi=",
+                   fpu_named ? g_arm_fpu : abi, target_triple_now());
     if (fpu_named) {
         int v8 = target_thumb_arch() >= 8;
         int dp = strcmp(g_arm_fpu, "fpv5-d16") == 0;
@@ -3643,6 +3907,7 @@ int main(int argc, char **argv)
         enum target_arch a = target_get();
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
+                              : a == TARGET_MIPS32 ? mips_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
     }
     /* Scanned across the whole command line, not just argv[1]: these
@@ -3931,10 +4196,20 @@ int main(int argc, char **argv)
             /* one warning made an error, or exempted from -Werror */
             int on = argv[i][2] == 'e';
             const char *nm = argv[i] + (on ? 8 : 11);
-            if (!diag_set_werror_for(nm, on))
+            if (diag_always_error(nm)) {
+                /* an error already; -Wno-error= cannot make it less */
+                if (!on)
+                    fprintf(stderr, "embcc: warning: %s: an implicit "
+                                    "function declaration is always an "
+                                    "error in EmbCC\n", argv[i]);
+            } else if (!diag_set_werror_for(nm, on))
                 fprintf(stderr, "embcc: warning: %s names no warning EmbCC "
                                 "has (--help-warnings lists them)\n",
                         argv[i]);
+        } else if (strcmp(argv[i], "-Werror-implicit-function-"
+                                   "declaration") == 0) {
+            /* GCC's old spelling of -Werror=implicit-function-declaration,
+             * and as that one, what EmbCC always does */
         } else if (strcmp(argv[i], "-w") == 0) {
             diag_set_no_warnings(1);
         } else if (strcmp(argv[i], "-pedantic") == 0 ||
@@ -3985,7 +4260,8 @@ int main(int argc, char **argv)
              * A warning rather than an error, which is what GCC does,
              * because a build should not stop over a diagnostic it
              * asked for and this compiler does not have. */
-            if (!diag_enable_warning(argv[i] + 2, 1))
+            if (!diag_enable_warning(argv[i] + 2, 1) &&
+                !diag_always_error(argv[i] + 2))
                 fprintf(stderr, "embcc: warning: %s is not a warning EmbCC "
                                 "has, so it turns nothing on "
                                 "(--help-warnings lists them)\n", argv[i]);
@@ -4003,6 +4279,15 @@ int main(int argc, char **argv)
                 { opt_level = lvl[0] - '0'; opt_for_size = 0; }
             else if (lvl[0] == 'z' && lvl[1] == '\0')
                 { opt_level = 2; opt_for_size = 1; }   /* -Oz is -Os here */
+            /* -Og, "optimize for debugging": the level that removes work
+             * without moving the program around, which here is -O1.
+             * -Ofast is -O3 and nothing more -- GCC adds -ffast-math,
+             * which EmbCC does not do (see -ffast-math below), so no
+             * result can differ from -O3's. */
+            else if (!strcmp(lvl, "g"))
+                { opt_level = 1; opt_for_size = 0; }
+            else if (!strcmp(lvl, "fast"))
+                { opt_level = 3; opt_for_size = 0; }
             else {
                 fprintf(stderr, "embcc: unknown optimization flag '%s'\n",
                         argv[i]);
@@ -4032,7 +4317,6 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-fno-strict-aliasing") == 0 ||
                    strcmp(argv[i], "-fstrict-aliasing") == 0 ||
                    strcmp(argv[i], "-fwrapv") == 0 ||
-                   strcmp(argv[i], "-fno-common") == 0 ||
                    strcmp(argv[i], "-fno-plt") == 0 ||
                    strcmp(argv[i], "-fomit-frame-pointer") == 0 ||
                    strcmp(argv[i], "-fno-omit-frame-pointer") == 0) {
@@ -4048,13 +4332,180 @@ int main(int argc, char **argv)
              *                       it gives
              *   -fwrapv             signed overflow wraps; nothing here
              *                       optimises on the assumption it cannot
-             *   -fno-common         a tentative definition is already
-             *                       emitted into .bss, not a common block
              *   -f[no-]omit-frame-pointer  x86-64 and aarch64 always keep
              *                       one, ARMv7-M and RISC-V never do
              *
              * The opposite spellings are NOT accepted, because those
              * would be promises: see the refusals below. */
+        } else if (strcmp(argv[i], "-fcommon") == 0 ||
+                   strcmp(argv[i], "-fno-common") == 0) {
+            /* -fno-common is the default: a tentative definition is a
+             * .bss definition. -fcommon makes it a COMMON symbol (C, ELF;
+             * checked after the arguments), which embld merges. */
+            g_fcommon = argv[i][2] == 'c';
+        } else if (strcmp(argv[i], "-fno-jump-tables") == 0 ||
+                   strcmp(argv[i], "-fjump-tables") == 0) {
+            /* A PROMISE, kept: no switch is lowered through a table of
+             * addresses. Code that runs before it is relocated, or from
+             * an address other than its link address, cannot index one.
+             * The decision is irgen's alone (switch_dense), so every
+             * backend -- each lowers only the IR_SWITCH irgen made --
+             * keeps it; a dense switch becomes the compare tree. */
+            target_set_jump_tables(argv[i][2] == 'j');
+        } else if (strcmp(argv[i], "-fno-inline-functions") == 0 ||
+                   strcmp(argv[i], "-finline-functions") == 0) {
+            /* GCC's "consider every function for inlining, not only
+             * those declared inline": the -O2 default here too. The
+             * negative is honoured -- the inliner then takes only
+             * functions declared `inline` (or always_inline), at any
+             * level -- because a build asking for it usually wants
+             * each function it wrote to stay a function it can find
+             * in the image. */
+            opt_set_inline_declared_only(argv[i][2] == 'n');
+        } else if (strcmp(argv[i], "-fsingle-precision-constant") == 0 ||
+                   strcmp(argv[i], "-fno-single-precision-constant") == 0) {
+            /* Changes TYPES -- sizeof(1.0) is 4, 0.1 is 0.1f -- so it
+             * is implemented (src/parse/parse.c), not nodded at. */
+            g_single_prec = argv[i][2] == 's';
+        } else if (strcmp(argv[i], "-finline-small-functions") == 0 ||
+                   strcmp(argv[i], "-fno-inline-small-functions") == 0 ||
+                   strncmp(argv[i], "-finline-limit=", 15) == 0 ||
+                   strcmp(argv[i], "-fno-short-enums") == 0 ||
+                   strcmp(argv[i], "-fno-math-errno") == 0 ||
+                   strcmp(argv[i], "-ffast-math") == 0 ||
+                   strncmp(argv[i], "-fmessage-length=", 17) == 0 ||
+                   strcmp(argv[i], "-fverbose-asm") == 0 ||
+                   strcmp(argv[i], "-pipe") == 0 ||
+                   strcmp(argv[i], "-fno-pic") == 0 ||
+                   strcmp(argv[i], "-fno-PIC") == 0 ||
+                   strcmp(argv[i], "-fno-pie") == 0 ||
+                   strcmp(argv[i], "-fno-PIE") == 0 ||
+                   strcmp(argv[i], "-fmerge-constants") == 0 ||
+                   strcmp(argv[i], "-fno-strict-overflow") == 0 ||
+                   strcmp(argv[i], "-fno-delete-null-pointer-checks") == 0 ||
+                   strcmp(argv[i], "-fno-tree-loop-distribute-patterns") == 0 ||
+                   strcmp(argv[i], "-fno-zero-initialized-in-bss") == 0 ||
+                   strcmp(argv[i], "-fzero-initialized-in-bss") == 0 ||
+                   strcmp(argv[i], "-fstrict-volatile-bitfields") == 0 ||
+                   strcmp(argv[i], "-fno-strict-volatile-bitfields") == 0 ||
+                   strncmp(argv[i], "-fno-builtin-", 13) == 0 ||
+                   strcmp(argv[i], "-fno-isolate-erroneous-paths-"
+                                   "dereference") == 0 ||
+                   strcmp(argv[i], "-fno-move-loop-invariants") == 0 ||
+                   strcmp(argv[i], "-fno-ipa-sra") == 0 ||
+                   strcmp(argv[i], "-fno-lto") == 0 ||
+                   strcmp(argv[i], "-mlittle-endian") == 0) {
+            /* What arm-none-eabi-gcc builds pass, each accepted for a
+             * reason that holds of THIS compiler (docs/manual/invoking.md;
+             * tests/golden/gcc-flags.sh checks the promises):
+             *
+             * Hints, which a compiler may decline: -finline-small-
+             * functions and its negative, -finline-limit=, and the
+             * optimisation switches -fno-move-loop-invariants,
+             * -fno-ipa-sra, -fno-lto (none of those passes exists here
+             * under GCC's name).
+             *
+             * Permissions, which are kept by not using them:
+             * -fno-math-errno, -ffast-math (no __FAST_MATH__: nothing
+             * here relaxes IEEE arithmetic, and a header testing for it
+             * takes the careful path), -fmerge-constants,
+             * -fzero-initialized-in-bss, -fno-strict-volatile-bitfields.
+             *
+             * Formatting and plumbing that change no byte of the object:
+             * -fmessage-length=, -fverbose-asm, -pipe.
+             *
+             * Promises EmbCC already keeps -- each was checked:
+             *   -fno-short-enums      an enum is int-sized on every target
+             *   -fno-pic/-fno-pie     the code is not position
+             *                         independent (-fPIC is refused): an
+             *                         x86-64 jump table holds absolute
+             *                         addresses, a Cortex-M address is a
+             *                         movw/movt pair, and embld links no
+             *                         PIE. (Darwin's code is PC-relative
+             *                         because Mach-O requires it, and
+             *                         links the same either way.)
+             *   -fno-strict-overflow  -fwrapv's rule, which always holds
+             *   -fno-delete-null-pointer-checks  no pass infers that a
+             *                         pointer is non-null -- not from a
+             *                         dereference, not from nonnull
+             *                         (an ignored attribute), not from
+             *                         being an object's address -- so no
+             *                         check is ever deleted, and a load
+             *                         from address 0 stays a load
+             *   -fno-tree-loop-distribute-patterns  no loop becomes a
+             *                         CALL: the idiom pass makes a copy or
+             *                         clear loop an IR_MEMCPY/IR_MEMZERO,
+             *                         and every backend expands those
+             *                         inline, as it does struct copies,
+             *                         so a hand-written memset cannot turn
+             *                         into a call to itself
+             *   -fno-zero-initialized-in-bss  `int x = 0;` is already in
+             *                         .data; only an object with no
+             *                         initializer is .bss
+             *   -fstrict-volatile-bitfields  a volatile bit-field is read
+             *                         and written with one access of its
+             *                         declared type's width (AAPCS)
+             *   -fno-builtin-NAME     no library name is a builtin at all
+             *   -fno-isolate-erroneous-paths-dereference  nothing turns
+             *                         a null dereference into a trap
+             *   -mlittle-endian       every target EmbCC has is */
+        } else if (strncmp(argv[i], "-specs=", 7) == 0 ||
+                   strncmp(argv[i], "--specs=", 8) == 0) {
+            /* nano.specs, nosys.specs: which newlib and which syscall
+             * stubs the GCC driver links. EmbCC links its own libc and
+             * runtime, so there is nothing to select; the link says so
+             * once (compile_and_link) rather than every compile. */
+            g_specs = strchr(argv[i], '=') + 1;
+        } else if (strcmp(argv[i], "-fanalyzer") == 0) {
+            fprintf(stderr, "embcc: warning: -fanalyzer: EmbCC has no "
+                            "static analyzer, so this checks nothing\n");
+        } else if (strcmp(argv[i], "-save-temps") == 0 ||
+                   strcmp(argv[i], "-save-temps=obj") == 0 ||
+                   strcmp(argv[i], "--save-temps") == 0) {
+            g_save_temps = 1;
+        } else if (strcmp(argv[i], "-save-temps=cwd") == 0) {
+            g_save_temps = 2;
+        } else if (strcmp(argv[i], "-dumpbase") == 0) {
+            if (i + 1 == argc) {
+                fprintf(stderr, "embcc: -dumpbase needs a name\n");
+                return 1;
+            }
+            g_dumpbase = argv[++i];
+        } else if (strncmp(argv[i], "-fdump-", 7) == 0 ||
+                   strncmp(argv[i], "-fcallgraph-info", 16) == 0) {
+            /* GCC's own internals -- its RTL, its trees, its call graph
+             * as cc1 sees it -- which have no counterpart to write. A
+             * build that asked for one would look for a file that never
+             * appears, so it is told now. */
+            fprintf(stderr, "embcc: error: %s is not supported: it dumps "
+                            "GCC's internal representation, which EmbCC "
+                            "does not have; `embcc inspect ir|cfg|callgraph` "
+                            "shows EmbCC's, and -fstack-usage its frames\n",
+                    argv[i]);
+            return 1;
+        } else if (strncmp(argv[i], "-mabi=", 6) == 0 &&
+                   (target_get() == TARGET_RISCV32 ||
+                    target_get() == TARGET_RISCV64)) {
+            /* The RISC-V calling convention. EmbCC's is the integer one
+             * -- floating point passed in the integer registers, which
+             * __riscv_float_abi_soft says -- at the target's XLEN: ilp32
+             * for RV32, lp64 for RV64. An F/D convention (ilp32f, lp64d)
+             * passes floats in f registers, and ilp32e has half the
+             * registers: either would link and then disagree with every
+             * caller. */
+            const char *v = argv[i] + 6;
+            const char *want = target_get() == TARGET_RISCV32 ? "ilp32"
+                                                              : "lp64";
+            if (strcmp(v, want) != 0) {
+                fprintf(stderr, "embcc: error: -mabi=%s is not supported "
+                                "for %s: EmbCC emits the soft-float -mabi=%s "
+                                "convention\n", v, target_triple_now(), want);
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-mbig-endian") == 0) {
+            fprintf(stderr, "embcc: error: -mbig-endian is not supported: "
+                            "every target EmbCC emits for is little-endian\n");
+            return 1;
         } else if (strncmp(argv[i], "-fgnuc-version=", 15) == 0) {
             /* clang's spelling: present a C unit as this GCC, so a vendor
              * header that picks its compiler support by __GNUC__ (CMSIS)
@@ -4097,11 +4548,74 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--dump-predef") == 0 ||
                    strcmp(argv[i], "-dumpmachine") == 0) {
             /* answered after every argument has been applied */
+        } else if (target_get() == TARGET_MIPS32 &&
+                   (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                    strncmp(argv[i], "-march=", 7) == 0 ||
+                    strncmp(argv[i], "-mabi=", 6) == 0 ||
+                    strcmp(argv[i], "-msoft-float") == 0 ||
+                    strcmp(argv[i], "-mhard-float") == 0 ||
+                    strcmp(argv[i], "-mno-abicalls") == 0 ||
+                    strcmp(argv[i], "-mabicalls") == 0 ||
+                    strcmp(argv[i], "-EL") == 0 || strcmp(argv[i], "-EB") == 0 ||
+                    strncmp(argv[i], "-G", 2) == 0)) {
+            /* The flags a MIPS build passes (a PIC32 project's, clang's
+             * and gcc's for mipsel bare metal). What EmbCC emits is ONE
+             * configuration -- MIPS32 Release 2, little-endian, o32, soft
+             * float, no abicalls, no small data -- so each flag either
+             * says exactly that and is accepted, or asks for something
+             * else and is refused by name: an object built for another
+             * of these would link and then disagree with its callers
+             * about registers, byte order or the global pointer. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : "";
+            if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                strncmp(argv[i], "-march=", 7) == 0) {
+                static const char *const cores[] = {
+                    "mips32r2", "m4k", "m14k", "m14kc", "24kc", "24kf",
+                    "24kec", "24kef", "34kc", "74kc"
+                };
+                int ok = 0;
+                for (unsigned k = 0; k < sizeof cores / sizeof cores[0]; k++)
+                    ok |= strcmp(v, cores[k]) == 0;
+                if (!ok)
+                    diag_fatal(NULL, 0, "%s is not a MIPS32 Release 2 core: "
+                               "EmbCC emits MIPS32r2 (mips32r2, m4k, m14k, "
+                               "m14kc, 24kc, 24kf, 24kec, 24kef, 34kc, 74kc)",
+                               argv[i]);
+            } else if (strncmp(argv[i], "-mabi=", 6) == 0) {
+                if (strcmp(v, "32") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                               "the o32 ABI (-mabi=32) only", argv[i]);
+            } else if (strcmp(argv[i], "-mhard-float") == 0) {
+                diag_fatal(NULL, 0, "-mhard-float is not supported: EmbCC "
+                           "emits soft-float o32, which passes floating "
+                           "point in the integer registers");
+            } else if (strcmp(argv[i], "-mabicalls") == 0) {
+                diag_fatal(NULL, 0, "-mabicalls is not supported: EmbCC's "
+                           "MIPS code takes addresses absolutely (lui/addiu) "
+                           "and keeps no $gp; it is -mno-abicalls code");
+            } else if (strcmp(argv[i], "-EB") == 0) {
+                diag_fatal(NULL, 0, "-EB is not supported: the MIPS target "
+                           "is little-endian (mipsel) only");
+            } else if (strncmp(argv[i], "-G", 2) == 0 &&
+                       strcmp(argv[i], "-G0") != 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no "
+                           "data in .sdata and addresses nothing through "
+                           "$gp (-G0)", argv[i]);
+            }
+            continue;
         } else if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfloat-abi=", 12) == 0 ||
                    strcmp(argv[i], "-mthumb") == 0 ||
-                   strcmp(argv[i], "-marm") == 0) {
+                   strcmp(argv[i], "-marm") == 0 ||
+                   strcmp(argv[i], "-mthumb-interwork") == 0 ||
+                   strcmp(argv[i], "-mno-thumb-interwork") == 0 ||
+                   (strncmp(argv[i], "-mabi=", 6) == 0 &&
+                    target_get() == TARGET_THUMB) ||
+                   strcmp(argv[i], "-mslow-flash-data") == 0 ||
+                   strcmp(argv[i], "-munaligned-access") == 0 ||
+                   strcmp(argv[i], "-mno-unaligned-access") == 0) {
             /* The ARM machine flags every Cortex-M build passes. They
              * were "unknown argument" before, which stops a kernel's
              * existing Makefile dead -- and the two that describe the
@@ -4123,25 +4637,89 @@ int main(int argc, char **argv)
                            "has no ARM instruction set, only Thumb");
             if (strcmp(argv[i], "-mthumb") == 0)
                 continue;          /* the only state there is */
+            /* Interworking is between ARM and Thumb code, and a
+             * Cortex-M runs only Thumb: every call and return here is
+             * already one bx/blx would make (bit 0 set), so both
+             * spellings describe what is emitted. */
+            if (strcmp(argv[i], "-mthumb-interwork") == 0 ||
+                strcmp(argv[i], "-mno-thumb-interwork") == 0)
+                continue;
+            /* A hint: keep constants out of literal pools in slow flash.
+             * The compiled code has none -- constants and addresses are
+             * movw/movt -- so there is nothing to move. */
+            if (strcmp(argv[i], "-mslow-flash-data") == 0)
+                continue;
+            /* The procedure call standard. EmbCC's is AAPCS (the base
+             * standard, or AAPCS-VFP under -mfloat-abi=hard); aapcs-linux
+             * is the same convention with int-sized enums, which is what
+             * EmbCC's enums are. The pre-EABI conventions pass and lay
+             * out differently, and an object built for one links and
+             * then disagrees with its callers. */
+            if (strncmp(argv[i], "-mabi=", 6) == 0) {
+                if (strcmp(v, "aapcs") && strcmp(v, "aapcs-linux"))
+                    diag_fatal(NULL, 0, "-mabi=%s is not supported: EmbCC "
+                               "emits the AAPCS (-mabi=aapcs, or "
+                               "aapcs-linux, whose int-sized enums are "
+                               "EmbCC's too); %s passes arguments and lays "
+                               "out data differently", v, v);
+                continue;
+            }
+            /* ARMv7-M and ARMv8-M Mainline load and store a word or a
+             * halfword at any address (LDR/STR/LDRH/STRH; never
+             * LDRD/STRD/LDM/STM, which this backend keeps to aligned
+             * addresses). -munaligned-access says so, and is what is
+             * emitted. */
+            if (strcmp(argv[i], "-munaligned-access") == 0)
+                continue;
+            /* -mno-unaligned-access is a promise this backend does not
+             * keep: a packed struct's int member is one ldr.w at its
+             * odd address, and a struct whose alignment is below four
+             * (a packed one, or `struct { char c[5]; }`) is copied, and
+             * passed by value, a word at a time from wherever it is.
+             * That is ARMv7-M's default and it is fine there; under the
+             * flag the same image faults wherever unaligned accesses
+             * trap (CCR.UNALIGN_TRP, or Device memory on an M7). */
+            if (strcmp(argv[i], "-mno-unaligned-access") == 0)
+                diag_fatal(NULL, 0, "-mno-unaligned-access is not "
+                           "supported: EmbCC's ARMv7-M code uses word and "
+                           "halfword loads and stores at unaligned addresses "
+                           "(packed struct members; copies and by-value "
+                           "passing of structs aligned below 4), which the "
+                           "architecture allows and this flag forbids");
             if (strncmp(argv[i], "-mcpu=", 6) == 0) {
                 /* Only the parts whose ISA this backend really emits.
                  * An F part is refused by name rather than accepted and
                  * built soft-float: its ABI passes floats in s0-s15 and
                  * an object built the other way links and then reads its
                  * arguments from the wrong registers. */
-                /* The ARMv6-M and ARMv8-M Baseline parts are refused too:
-                 * they were taken as ARMv7-M (the M23 as ARMv7E-M, DSP and
-                 * all), and the code that came out used ldr.w and IT
-                 * blocks, which those cores do not implement -- a
-                 * HardFault at the first one, from an image that built
-                 * and linked without a word. */
+                /* The ARMv6-M parts select that level: Thumb-1, which the
+                 * backend emits for them (src/arch/thumb/v6m.c). They used
+                 * to be taken as ARMv7-M, and the code that came out used
+                 * ldr.w and IT blocks -- a HardFault at the first one.
+                 *
+                 * ARMv8-M Baseline (Cortex-M23) is still refused: it is a
+                 * different subset (CBZ, MOVW, the divides), and neither
+                 * the ARMv6-M code nor the ARMv7-M code is right for it. */
+                if (!strcmp(v, "cortex-m23"))
+                    diag_fatal(NULL, 0, "-mcpu=%s is ARMv8-M Baseline, and "
+                               "EmbCC emits ARMv6-M (cortex-m0, m0plus, m1) "
+                               "or ARMv7-M Thumb-2: the second faults on that "
+                               "core and the first is not what it is", v);
                 if (!strcmp(v, "cortex-m0") || !strcmp(v, "cortex-m0plus") ||
-                    !strcmp(v, "cortex-m1") || !strcmp(v, "cortex-m23"))
-                    diag_fatal(NULL, 0, "-mcpu=%s is %s, and EmbCC emits "
-                               "ARMv7-M Thumb-2: that core does not "
-                               "implement its ldr.w or IT blocks", v,
-                               strcmp(v, "cortex-m23") ? "ARMv6-M"
-                                                       : "ARMv8-M Baseline");
+                    !strcmp(v, "cortex-m1")) {
+                    target_set_thumb_arch(6);
+                    target_set_thumb_em(0);
+                    g_arm_cpu = v;
+                    continue;
+                }
+                /* An ARMv7-M part named on an ARMv6-M triple raises the
+                 * level, as -mcpu= on the others selects the DSP set. */
+                if (target_thumb_arch() == 6 &&
+                    (!strcmp(v, "cortex-m3") || !strcmp(v, "cortex-m4") ||
+                     !strcmp(v, "cortex-m7")))
+                    target_set_thumb_arch(7);
+                if (target_thumb_arch() == 6 && !strcmp(v, "cortex-m33"))
+                    target_set_thumb_arch(8);
                 if (!strcmp(v, "cortex-m3"))
                     target_set_thumb_em(0);
                 else if (!strcmp(v, "cortex-m4") || !strcmp(v, "cortex-m7") ||
@@ -4149,8 +4727,9 @@ int main(int argc, char **argv)
                     target_set_thumb_em(1);
                 else
                     diag_fatal(NULL, 0, "-mcpu=%s is not a part EmbCC knows: "
-                               "it emits ARMv7-M and ARMv7E-M (cortex-m3, "
-                               "m4, m7, m33)", v);
+                               "it emits ARMv6-M (cortex-m0, m0plus, m1), "
+                               "ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)",
+                               v);
                 /* Kept for arm_float_resolve: which unit the part's
                  * -eabihf name implies depends on which part it is. */
                 g_arm_cpu = v;
@@ -4425,6 +5004,21 @@ int main(int argc, char **argv)
 
     arm_float_resolve();
     sema_set_gnu89_inline(gnu89_inline || std_gnu89);
+    /* -fno-jump-tables for a whole test suite, whose scripts spell their
+     * own command lines: every dense switch takes the compare tree. */
+    if (plat_getenv("EMBCC_NO_JUMP_TABLES"))
+        target_set_jump_tables(0);
+    /* COMMON is an ELF symbol kind (SHN_COMMON); the Mach-O and COFF
+     * writers emit every tentative definition as a definition, and a
+     * build that needs two of them merged would be told so only by its
+     * linker. */
+    if (g_fcommon && target_fmt_get() != TGT_FMT_ELF) {
+        fprintf(stderr, "embcc: error: -fcommon is not supported for %s: "
+                        "EmbCC writes COMMON symbols into ELF objects only, "
+                        "and this target's are %s\n", target_triple_now(),
+                target_fmt_name(target_fmt_get()));
+        return 1;
+    }
 
     if (g_want_dumpmachine) {
         printf("%s\n", target_triple_now());
@@ -4466,6 +5060,18 @@ int main(int argc, char **argv)
     irgen_set_sanitize(san_mask);
     irgen_set_opt_size(opt_for_size);
     lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
+    /* The C parser types the constants (parse.c); the C++ front end
+     * types its own, and resolves overloads by them before lowering to
+     * C, so the flag would reach one and not the other. */
+    if (g_single_prec) {
+        if (lang_cxx) {
+            fprintf(stderr, "embcc: error: -fsingle-precision-constant is "
+                            "supported for C, not C++: the C++ front end "
+                            "would still type 1.0 as double\n");
+            return 1;
+        }
+        parse_set_single_precision_constant(1);
+    }
     if (lang_cxx) {
         /* These analyses run in the C front end, over the C that C++ lowers
          * to — where a template instantiated from a header is attributed to
@@ -4553,15 +5159,13 @@ int main(int argc, char **argv)
      * `embcc -c foo.asm -o foo.o` replaces `nasm -f elf64`. */
     if (has_gas_suffix(input)) {
         if (pp_only)
-            return done(compile(input, NULL, 1));
+            return done(compile(input, dep_only ? NULL : output, 1));
         /* Without -c a .s/.S is assembled AND linked, as gcc does it:
          * `embcc start.S main.o -T fw.ld -o fw.elf`. It used to write the
          * object under the output's name, an "image" no loader reads. */
         if (!compile_mode && !syntax_only && !want_asm && !want_iface)
             return done(compile_and_link(input, output));
-        return gas_assemble(input,
-                            output ? output : default_output(input),
-                            has_gas_suffix(input) == 2);
+        return assemble_file(input, output ? output : default_output(input));
     }
     if (has_asm_suffix(input)) {
         if (pp_only) {
@@ -4582,7 +5186,7 @@ int main(int argc, char **argv)
                            AS_ELF64);
     }
     if (pp_only)
-        return done(compile(input, NULL, 1));
+        return done(compile(input, dep_only ? NULL : output, 1));
     if (emit_c_only) {
         if (!lang_cxx) {
             fprintf(stderr, "embcc: error: --emit-c lowers C++; '%s' is C\n",
@@ -4595,6 +5199,12 @@ int main(int argc, char **argv)
      * is nothing to link: they imply -c, as they do in GCC. */
     if (syntax_only)
         compile_mode = 1;
+    if (g_save_temps && !syntax_only && !want_iface) {
+        int src = has_c_suffix(input) || has_cxx_suffix(input) || lang >= 0;
+        if (src && save_temps(argc, argv, input, output, compile_mode,
+                              want_asm))
+            return done(1);
+    }
     if (!compile_mode)
         return done(compile_and_link(input, output));
     /* An interface report goes to stdout unless the caller named a file.

@@ -285,7 +285,7 @@ in full what it checks and why.
 
 The embedded ABI pairing (`tests/golden/embedded-abi-caller.c`,
 `embedded-abi-callee.c`, `embedded-abi.h`) has no script of its own: it
-runs inside `thumb-exec`, `riscv-exec` and `avr-wide`, which build every
+runs inside `thumb-exec`, `riscv-exec`, `mips-abi` and `avr-wide`, which build every
 pairing of EmbCC and the reference compiler for caller and callee. AVR is
 paired against the documented avr-gcc rules instead (`avr-abi`), because
 clang's AVR struct convention is not avr-gcc's.
@@ -299,6 +299,10 @@ clang's AVR struct convention is not avr-gcc's.
 | `thumb-codegen` | objects are ELF32 ARM, every `.text` instruction decodes, relocations are ARM ones, refusals fire by name |
 | `thumb-encoding` | every Thumb-2 encoder, disassembled by `llvm-objdump` and compared with what it was meant to be |
 | `thumb-vfp` | the VFP instruction vocabulary against `llvm-mc`, for the Cortex-M4F's unit and the Cortex-M7's |
+| `thumb-v6m-encoding` | the ARMv6-M (Thumb-1) encoders across every operand combination, byte for byte against `llvm-mc -triple=thumbv6m-none-eabi`; out-of-field operands refused |
+| `thumbv6m-target` | ARMv6-M as a level: triples, `-mcpu=cortex-m0/m0plus/m1`, the refused M23 and FPU, the data model, the macro table and the object's tags against clang's, and a literal pool right after a switch table marked as one run of data |
+| `thumbv6m-asm-values` | ARMv6-M inline asm with its operands in registers: PRIMASK intrinsics inline into callers that touch no stack, and value, continuation, `"+"`, through-address and r12 operands, values across asm and templates that call, run on the Cortex-M0 board at `-O0` to `-Os` and with two and no pool registers |
+| `thumb-v6m-exec` | the `tests/exec` corpus on the Cortex-M0 board (QEMU micro:bit) at `-O0`, `-O1`, `-O2`, `-Os`, each wrong answer re-run as an ARMv7-M build on the M3 to tell a backend bug from a program that assumes LP64; `embedded-stress` against clang, `embedded-int64`/`-float` against the host; every instruction of every object built scanned for ARMv6-M, and every object for two mapping symbols at one address |
 | `thumb-asm` | the inline-assembly vocabulary against `llvm-mc`, operand handling, refusals |
 | `thumb-exec` | programs compiled by EmbCC and by clang, linked by `embld`, run on the Cortex-M3 board at `-O0`, `-O1`, `-O2`, `-Os`; 64-bit, float, aggregate, varargs and ABI programs against the host |
 | `thumb-relax` | 16-bit branch forms at both sides of every reach limit |
@@ -322,6 +326,24 @@ clang's AVR struct convention is not avr-gcc's.
 | `riscv-exec` | programs compiled by EmbCC and by clang, run on QEMU `virt` at both widths, plus the ABI pairing |
 | `riscv-relax` | branch and jump relaxation at the reach limits |
 | `riscv-atomics` | the A extension at both widths |
+
+### MIPS32
+
+| Test | Checks |
+|---|---|
+| `mips-encoding` | every encoder form against `llvm-mc -show-encoding`, word by word; `mips_li` executed; every range check provoked |
+| `mips-exec` | `tests/exec/*.c` on QEMU `malta` at `-O0`, `-O1`, `-O2`, `-Os`, linked with lib/libc and lib/rt built for mipsel; the programs whose expected value assumes LP64 against clang's result on the same board |
+| `mips-abi` | EmbCC and clang (`mipsel-unknown-elf -msoft-float`) calling each other: the shared embedded ABI pairing and the o32-specific one (`mips-abi-*.c`) |
+| `mips-link` | EmbLD's REL relocations: the HI16/LO16 AHL rule against absolute symbols over every carry case, EmbCC's own far addends, the link refusals (gp-relative, hard float, a lone HI16, a linker script) |
+| `mips-asm` | the inline-assembly vocabulary against `llvm-mc`, asm programs on the board (in `.set reorder` and `noreorder`), refusals, and `-S` reassembled by `llvm-mc` and linked to the same image as `-c`'s object, asm blocks included |
+| `mips-gas` | a `.S` file of every form (modes, labels, `jal`/`%hi`/`%lo`/`la`, expressions, data) assembled by EmbCC and by clang and linked to the same image; the `.S` refusals |
+| `mips-slots` | delay-slot filling on `malta` at `-O1`..`-Os`: instructions that write a branch's operand, touch `$ra` under a `jal`, write `jalr`'s target, or sit behind a label (the epilogue's included) stay put; argument setup moves; some call's slot must be filled |
+| `mips-switch` | jump tables in a leaf (its `$ra` kept across the `bal`) and a calling function, values below, inside and above the range, `-O0`..`-Os` on `malta`; the dispatch must be in the object |
+| `mips-exc` | a general exception handler in a `.S` file on `malta`: syscalls from a naked function return the handler's values, the CP0 timer interrupts a register-heavy loop under `-icount` without changing its result, a file-scope asm function calls C; at `-O0` to `-Os` |
+| `mips-refuse` | the object header and flags, the MIPS options accepted and refused, the constructs refused by name (atomics, computed goto, frame builtins, `__int128`, `interrupt`, unwind tables, C++) |
+| `mips-access` | atomic, volatile, `op=`, `++` and `va_arg` accesses are single `lw`/`sw`/`lhu`/`sh` (disassembled at `-O0` and `-O2`); packed members are still split, and run right at a misaligned address on the board, in an image whose `.data` ends mid-word |
+
+`libc-embedded` and `debug-embedded` include `mipsel-none-elf` too.
 
 ### AVR
 
@@ -411,6 +433,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `install` | the compiler finds its headers and libraries relative to its own binary |
 | `version` | `--version` names the target and the language and admits what is missing |
 | `driver-deps` | `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MP` and `-fsyntax-only` |
+| `gcc-flags` | the flags an arm-none-eabi-gcc build passes: each accepted one compiles silently on every target it applies to, each refused one names itself, and each promise holds in the object -- no jump table under `-fno-jump-tables` on any backend (and the same answers on QEMU's Cortex-M3 and RV32), `-fcommon`'s COMMON symbols merged by `embld` and run, `-fno-inline-functions`, `-fsingle-precision-constant`, `-save-temps`, `= 0` in `.data`, volatile bit-fields at their declared width |
 | `stack-usage` | `-fstack-usage` output in gcc's format |
 | `sanitize` | `-fsanitize=undefined` in trap mode on every target |
 | `tools-build` | every tool in `make all` links |
@@ -543,6 +566,13 @@ Exit statuses from `run.sh`:
   Supply one as `tests/harness/linux/vmlinuz-x86_64` or `-aarch64`, or
   name it with `EMBCC_LINUX_KERNEL_X86_64` or `EMBCC_LINUX_KERNEL_AARCH64`.
 
+`tests/harness/mips` boots on QEMU `malta` (`-cpu 24Kc`, no FPU): the
+image is linked at 0x80100000 in KSEG0 and loaded with `-kernel`, writes
+the FPGA UART at 0xbf000900 (the third serial port), reports an exception
+as `==FAULT cause N epc ... badvaddr ...==`, and ends with `==EXIT n==`
+and a write to the FPGA's SOFTRES register, which `-no-reboot` turns into
+QEMU's exit.
+
 `tests/harness/qrun.sh SECONDS [--until TEXT] CMD...` runs QEMU under a
 hard timeout. With `--until TEXT` it polls the guest's output and kills
 QEMU as soon as `TEXT` appears, which turns a run that would cost the full
@@ -561,8 +591,8 @@ handlers and stdio flushing run.
 |---|---|---|
 | the target's gcc (`x86_64-elf-gcc` or host `cc`, `aarch64-elf-gcc`) | what a C program computes; half of each SysV/AAPCS64 ABI pairing; warnings that must agree | `agrees-with-gcc`, `optimizer`, `regalloc-O2`, `exec-Os`, `sysv-abi`, `struct-abi-edges`, `cross-varargs`, `complex-abi`, `int128-abi`, `ldouble-abi`, `format-check`, `warnings` |
 | the reference g++ and libstdc++ (`tools/build-ref-gxx.sh`) | what a C++ program computes; mangling, layout and EH interoperability | `cxx-agrees-with-gxx`, `cxx-abi`, `cxx-libstdcxx`, `cxx-std`, `cxx-format-check`, `eh-regions`, `unwind-through` |
-| clang | the embedded targets' reference compiler; Win64 and Apple arm64 conventions; predefined macros and data models for the targets gcc is not installed for | `thumb-exec`, `riscv-exec`, `thumb-hardfp`, `thumb-m7-dp`, `win-abi`, `darwin-abi`, `predef`, `stdint`, `struct-layout` |
-| `llvm-mc` | the bytes of every instruction form the assemblers and encoders produce | `thumb-asm`, `thumb-vfp`, `riscv-asm`, `riscv-compressed`, `riscv-encoding`, `avr-encoding`, `avr-asm` |
+| clang | the embedded targets' reference compiler; Win64 and Apple arm64 conventions; predefined macros and data models for the targets gcc is not installed for | `thumb-exec`, `riscv-exec`, `mips-abi`, `mips-exec`, `thumb-hardfp`, `thumb-m7-dp`, `win-abi`, `darwin-abi`, `predef`, `stdint`, `struct-layout` |
+| `llvm-mc` | the bytes of every instruction form the assemblers and encoders produce | `thumb-asm`, `thumb-vfp`, `thumb-v6m-encoding`, `riscv-asm`, `riscv-compressed`, `riscv-encoding`, `mips-encoding`, `mips-asm`, `mips-link`, `avr-encoding`, `avr-asm` |
 | `llvm-objdump`, `aarch64-elf-objdump`, `objdump` | what the emitted bytes decode to | `thumb-encoding`, `thumb-codegen`, `arm64-encoding`, `inline-asm-kernel`, `embdbg-disasm` |
 | `aarch64-elf-as`, the GNU assembler | assembling the same text EmbCC assembles; reassembling `-S` output | `arm64-asm`, `asm-S` |
 | `nasm` | EmbAS | `assembler` |
@@ -575,7 +605,8 @@ handlers and stdio flushing run.
 
 A referee grades only what it is shown. A vocabulary generated from the
 encoder's own tables (`tools/thumbcheck`, `riscvcheck`, `avrcheck`,
-`vfpcheck`, `a64check`, `tasmcheck`, `rvasmcheck`, `avrasmcheck`) cannot
+`vfpcheck`, `a64check`, `tasmcheck`, `rvasmcheck`, `avrasmcheck`,
+`mipscheck`, `mipsasmcheck`) cannot
 miss a form that was added to the encoder; an encoder function that is not
 in the vocabulary is unchecked however many forms the vocabulary reports.
 Where a reference assembler emits a placeholder (a relocated branch), the
@@ -628,7 +659,9 @@ finding a miscompile; none of them is needed to use EmbCC.
 | `EMBCC_NO_MEMOFF`, `EMBCC_NO_RMW`, `EMBCC_NO_MLA`, `EMBCC_NO_SPLITLOOPS`, `EMBCC_NO_TAILCALL`, `EMBCC_NO_LKCONST` | turn off one transformation (constant offsets folded into loads and stores on Thumb and RISC-V; x86-64 read-modify-write fusion; multiply-accumulate fusion on aarch64 and Thumb; loop live-range splitting; tail calls on aarch64, Thumb and RISC-V; compares decided from a constant the block has just written) for bisecting |
 | `EMBCC_RV_JAL_RANGE=BYTES`, `EMBCC_RV_LONG_CALLS` | shrink the reach the RISC-V backend assumes for `jal`, or (when set) call functions in the same unit with `auipc`+`jalr` instead of `jal`, to test the long-call path without a megabyte of code |
 | `EMBCC_T_FPU` | `1` or `0` overrides whether the Thumb backend uses the FPU |
-| `EMBCC_T_NOWIDEIMM`, `EMBCC_RV_NOWIDEIMM`, `EMBCC_NO_SIGNTEST`, `EMBCC_RV_NOCMPIMM` | build a 64-bit constant whole on Thumb or RV32; keep `x >> 63` a shift, and `x & K` eight bytes wide, before a branch; load a RISC-V value compare's constant into a register; for bisecting |
+| `EMBCC_T_EXT` | `1` keeps a Thumb attempt with r9-r11 in the pool whenever its scratch roles found registers, `0` never tries one; unset, it competes on size with the others. tests/golden/thumb-ext-pool.sh runs the exec programs with `1`. |
+| `EMBCC_T_NOWIDEIMM`, `EMBCC_T_NOCMP64IMM`, `EMBCC_RV_NOWIDEIMM`, `EMBCC_NO_SIGNTEST`, `EMBCC_RV_NOCMPIMM` | build a 64-bit constant whole on Thumb or RV32; keep `x >> 63` a shift, and `x & K` eight bytes wide, before a branch; load a RISC-V value compare's constant into a register; for bisecting |
+| `EMBCC_NO_JUMP_TABLES` | compile as with `-fno-jump-tables` whatever the command line says: run an exec golden with it set to take every dense switch through the compare tree |
 | `EMBCC_VECDEBUG` | the vectorizer prints, on stderr, each loop it considers and why it rejected it |
 | `EMBCC_NO_FULLUNROLL` | a loop with a constant trip count is unrolled like any other instead of being copied whole, for bisecting |
 

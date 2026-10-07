@@ -43,7 +43,13 @@ enum target_arch {
      * `char` is UNSIGNED by default -- avr-gcc's documented behaviour,
      * and it differs from clang's AVR target. Both are measured facts
      * rather than recollections; see docs. */
-    TARGET_AVR = 5
+    TARGET_AVR = 5,
+    /* 32-bit little-endian MIPS, MIPS32 Release 2, the o32 ABI with soft
+     * float (mipsel-none-elf): the core of Microchip's PIC32 parts. ILP32
+     * like ARMv7-M and RV32, with a SIGNED char and long double = double,
+     * and the only target here with branch delay slots and REL
+     * relocations. docs/internals/mips32-plan.md. */
+    TARGET_MIPS32 = 6
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -136,7 +142,13 @@ int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
  * not in the 32-bit multilib, so the front-end refuses it by name
  * rather than lowering something no backend can carry. */
 int target_has_int128(void);
-int target_jump_tables(void);     /* a dense switch may be a table: not AVR */
+int target_jump_tables(void);     /* a dense switch may be a table: not AVR,
+                                   * not under -fno-jump-tables */
+void target_set_jump_tables(int on);   /* -f[no-]jump-tables */
+/* Under -Os, the fewest cases a dense switch needs to be a table rather
+ * than a tree of compares: 4 where the dispatch is ARMv7-M's cmp, bhs,
+ * tbh and two bytes an entry; 6 elsewhere. */
+int target_switch_table_min_os(void);
 /* Does the current backend lower this op to a CALL of a runtime helper
  * (soft-float arithmetic, a 64-bit divide, an __int128 op)? The
  * allocator already knows -- it is the backend's own predicate, handed
@@ -154,6 +166,7 @@ void target_set_calls_helper(int (*pred)(const struct ir_ins *i));
 int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c */
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
+int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -209,11 +222,23 @@ int target_anon_bitfield_aligns(void);
  * for both; this changes what the object SAYS it was built for, which
  * is what a linker and a debugger read. */
 int target_thumb_em(void);
-/* The Thumb architecture level: 7 (ARMv7-M) or 8 (ARMv8-M Mainline). A
+/* The Thumb architecture level: 6 (ARMv6-M), 7 (ARMv7-M) or 8 (ARMv8-M
+ * Mainline). A
  * level rather than a separate enum target_arch value, because that enum
  * keys the data model and these two share one; see g_thumb_arch. */
 int target_thumb_arch(void);
 void target_set_thumb_arch(int lvl);
+/* The alignment a string literal of `width`-byte elements gets in .rodata.
+ * Its element width: ARMv6-M reads L"..."[0] with LDR and MIPS with lw,
+ * and a wide literal at an odd offset faults on both (a HardFault, an
+ * address error); the other targets read it with aligned loads too, as
+ * clang lays it out. */
+int target_string_align(int width);
+/* A static object's alignment, given its type's (`align`): on ARMv6-M an
+ * array of four bytes or more gets a word, as GCC's ARM port gives its
+ * char arrays (DATA_ALIGNMENT) -- code that reads a byte buffer a word at
+ * a time is common there, and ARMv6-M faults where ARMv7-M did not. */
+int target_object_align(int is_array, long size, int align);
 void target_set_thumb_em(int on);
 
 /* Hardware floating point on ARMv7E-M (FPv4-SP-D16, the Cortex-M4F
@@ -262,6 +287,9 @@ int target_thumb_hf_name(void);
  * not name one. */
 int thumb_imm_foldable(int op, long imm);
 int thumb_imm_foldable64(int op, long imm);   /* a 64-bit AND/OR/XOR, half by half */
+/* A 64-bit compare with a constant, as codegen.c's cmp64 takes it. */
+int thumb_cmp64_imm(int pred, int sign, long imm, int *pout, long *lo,
+                    long *hi);
 int riscv_imm_foldable64(int op, long imm);   /* the same at RV32 */
 /* Is c == ((1 << k) + 1) << j or ((1 << k) - 1) << j, with k >= 1? Then a
  * multiply by c is an add or a reverse-subtract with a shifted operand,
@@ -271,6 +299,8 @@ int riscv_imm_foldable64(int op, long imm);   /* the same at RV32 */
 int target_mul_shift_add(long c, int *k, int *neg, int *j);
 int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 int a64_imm_foldable(int op, long imm, int w);   /* arch/aarch64/irgen.c */
+int mips_imm_foldable(int op, long imm);    /* arch/mips/irgen.c */
+int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -484,6 +514,20 @@ enum reloc_kind {
      * auipc patches BOTH -- which is why there is no separate kind for
      * the jalr. That is the ABI's own shape, not a convenience here. */
     RK_RISCV_CALL,
+    /* MIPS takes an absolute address in two halves: `lui` the high 16
+     * bits, then an `addiu` (or a load's offset) the low 16,
+     * SIGN-EXTENDED -- so the high half is rounded by 0x8000, as RISC-V's
+     * is by 0x800. o32 relocations are REL, the addend stored in the two
+     * fields, and a linker reads a HI16 together with the LO16 that
+     * follows it against the same symbol (the AHL rule); the backend
+     * always notes the pair adjacently, high first. */
+    RK_MIPS_HI16,
+    RK_MIPS_LO16,
+    /* A `j` to a label in this object's own .text, for a branch too far
+     * for the 16-bit form: R_MIPS_26 against the section symbol with the
+     * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
+     * site whose str_off is already the offset). */
+    RK_MIPS_TEXT26,
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --
@@ -563,6 +607,12 @@ int target_macho_reloc(enum target_arch a, enum reloc_kind k,
  * site-specific part (a string's offset into .rodata, say). */
 long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias);
 
+/* An ELF relocation type's name on this target's machine, as `.reloc`
+ * spells it ("R_ARM_THM_CALL"), or NULL where the table has none; and
+ * the type a name means, or -1. */
+const char *target_reloc_name(enum target_arch a, int type);
+int target_reloc_by_name(enum target_arch a, const char *name, int n);
+
 /* ELF e_machine. */
 int target_elf_machine(enum target_arch a);
 /* ...and its e_flags: ARM's EABI version, RISC-V's EF_RISCV_RVC when the
@@ -571,5 +621,17 @@ unsigned long target_elf_flags(enum target_arch a);
 /* Does RISC-V code use the C extension? The one answer the code generator
  * and the object's e_flags both read. */
 int target_riscv_rvc(void);
+
+/* Does this target's object carry REL relocations -- the addend stored in
+ * the field it relocates -- rather than RELA? o32 MIPS does, as the ABI
+ * specifies and clang writes, and its linkers pair a HI16's addend with
+ * the LO16 after it. The ELF writer stores each addend through
+ * target_rel_put_addend when it writes the object. */
+int target_elf_uses_rel(enum target_arch a);
+/* Store `addend` into the field a relocation of ELF type `type` patches,
+ * at `field`, the way that type's linker reads it back. Returns 0 for a
+ * type it does not know, which is the caller's to refuse. */
+int target_rel_put_addend(enum target_arch a, int type, unsigned char *field,
+                          long addend);
 
 #endif

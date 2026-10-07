@@ -1309,42 +1309,63 @@ void x86_ud2(struct code *c)
     code_byte(c, 0x0b);
 }
 
-/* xchg rax/eax/ax/al with [rcx] — the memory operand makes it implicitly
- * LOCKed, i.e. atomic. RAX ends holding the old value at [rcx]. */
+/* The three atomic instructions, each `op %reg, (base)` at 1, 2, 4 or 8
+ * bytes with any register and any base: the operand-size prefix, then REX
+ * (REX.W at 8; REX.R/REX.B for r8-r15; a bare REX for a byte register
+ * numbered 4-7, which without one means %ah..%bh -- rex_rb8), the
+ * opcode (the byte form one below the others), and [base] in its
+ * shortest ModRM (modrm_base0: rsp/r12 take a SIB, rbp/r13 a zero
+ * disp8). The rax/rcx forms below are these with those two registers.
+ *
+ * xchg with a memory operand is LOCKed whether or not the prefix is
+ * there: the old value lands in reg. */
+static void x86_atomic_reg_mem(struct code *c, int lock, int op2, int op1,
+                               int reg, int base, int size)
+{
+    if (size != 1 && size != 2 && size != 4 && size != 8)
+        internal_error("bad atomic size %d", size);
+    if (lock)
+        code_byte(c, 0xf0);                   /* LOCK */
+    if (size == 2)
+        code_byte(c, 0x66);
+    rex_rb8(c, size == 8, reg, base, size == 1, 0);
+    if (op2)
+        code_byte(c, 0x0f);
+    code_byte(c, size == 1 ? op1 - 1 : op1);
+    modrm_base0(c, reg, base);
+}
+
+void x86_xchg_reg_mem(struct code *c, int reg, int base, int size)
+{
+    x86_atomic_reg_mem(c, 0, 0, 0x87, reg, base, size);
+}
+
+/* lock xadd %reg, (base): atomically *base += reg, reg = the old *base. */
+void x86_lock_xadd_reg_mem(struct code *c, int reg, int base, int size)
+{
+    x86_atomic_reg_mem(c, 1, 1, 0xc1, reg, base, size);
+}
+
+/* lock cmpxchg %reg, (base): compare rax with *base; if equal, set *base =
+ * reg and ZF, else load *base into rax and clear ZF. */
+void x86_lock_cmpxchg_reg_mem(struct code *c, int reg, int base, int size)
+{
+    x86_atomic_reg_mem(c, 1, 1, 0xb1, reg, base, size);
+}
+
 void x86_xchg_rax_mem_rcx(struct code *c, int size)
 {
-    switch (size) {
-    case 1: code_byte(c, 0x86); break;
-    case 2: code_byte(c, 0x66); code_byte(c, 0x87); break;
-    case 4: code_byte(c, 0x87); break;
-    case 8: code_byte(c, 0x48); code_byte(c, 0x87); break;
-    default:
-        internal_error("bad xchg size %d", size);
-    }
-    code_byte(c, 0x01); /* ModRM: [rcx] <-> eax/rax */
+    x86_xchg_reg_mem(c, REG_RAX, REG_RCX, size);
 }
 
-/* lock xadd %rax/eax/ax/al, (%rcx): atomically *rcx += rax, rax = old *rcx. */
 void x86_lock_xadd_rcx(struct code *c, int size)
 {
-    code_byte(c, 0xf0);                       /* LOCK */
-    if (size == 2) code_byte(c, 0x66);
-    if (size == 8) code_byte(c, 0x48);        /* REX.W */
-    code_byte(c, 0x0f);
-    code_byte(c, size == 1 ? 0xc0 : 0xc1);
-    code_byte(c, 0x01);                       /* ModRM: reg=rax, [rcx] */
+    x86_lock_xadd_reg_mem(c, REG_RAX, REG_RCX, size);
 }
 
-/* lock cmpxchg %rdx/edx/dx/dl, (%rcx): compare RAX with *rcx; if equal set
- * *rcx = RDX and ZF, else load *rcx into RAX and clear ZF. Atomic. */
 void x86_lock_cmpxchg_rcx(struct code *c, int size)
 {
-    code_byte(c, 0xf0);                       /* LOCK */
-    if (size == 2) code_byte(c, 0x66);
-    if (size == 8) code_byte(c, 0x48);        /* REX.W */
-    code_byte(c, 0x0f);
-    code_byte(c, size == 1 ? 0xb0 : 0xb1);
-    code_byte(c, 0x11);                       /* ModRM: reg=rdx, [rcx] */
+    x86_lock_cmpxchg_reg_mem(c, REG_RDX, REG_RCX, size);
 }
 
 void x86_not_eax(struct code *c, int w)

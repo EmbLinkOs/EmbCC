@@ -91,11 +91,10 @@ static const int LEAF_POOL[NLEAF] = { 6 /*rsi*/, 8, 9, 10, 11,
  * Emitting the sret `lea` after the parallel move (below) fixes one of
  * those writes and is kept for when the rest are found; it is not
  * enough on its own. */
-/* ...without rsi, for a function that has an atomic in it: IR_CMPXCHG
- * parks `&expected` there across the compare-exchange. rdi stays,
- * because nothing outside the __int128 lowering uses it -- and a
- * function containing an __int128 is kept out of the allocator
- * entirely. */
+/* ...without rsi, for a function with an ARMW (whose loop holds its
+ * operand there when it has no register) or a CAS16 (gen_i128's). rdi
+ * stays, because nothing outside the __int128 lowering uses it, and
+ * x86_wants_rdi keeps it from a function that has one. */
 /* ...and with rdx, for a function that neither divides nor has an
  * atomic in it. */
 #define NLEAF_RDX 11
@@ -142,23 +141,31 @@ static int x86_fp_callee_saved(int reg) { (void)reg; return 0; }
 
 /* What this function reserves, beyond what the machine does.
  *
- *   an atomic  -- IR_CMPXCHG parks `&expected` in rsi across the
- *                 compare-exchange, and rdx holds `desired`;
+ *   an atomic  -- each reads its operands where they live (atomic_in_reg),
+ *                 and loads only one left in a slot: a compare-exchange's
+ *                 desired value into rdx, ARMW's operand into rsi while
+ *                 its loop builds the new value in rdx. An exchange or
+ *                 fetch-add needs nothing beyond rax and rcx, which no
+ *                 pool holds. CAS16 is gen_i128's, and keeps both out;
  *   a divide   -- idiv writes the rdx:rax pair, whatever the operands;
  *   variadic   -- the prologue spills the six integer argument
  *                 registers to the save area va_arg reads.
  *
- * rdx is in the pool for everything else, which is most functions: it
- * appears in 1.5% of the instructions this backend emits. */
+ * Returns 2 when rsi and rdx are both taken, 1 for rdx alone (and sets
+ * *div for a divide, which takes rdx too). rdx is in the pool for
+ * everything else, which is most functions: it appears in 1.5% of the
+ * instructions this backend emits. */
 static int x86_reserves(const struct ir_func *fn, int *div)
 {
     int at = 0;
     *div = 0;
     for (int n = 0; n < fn->nins; n++)
         switch (fn->ins[n].op) {
-        case IR_XCHG: case IR_XADD: case IR_ARMW:
-        case IR_CAS: case IR_CAS16: case IR_CMPXCHG:
-            at = 1; break;
+        case IR_ARMW: case IR_CAS16:
+            at = 2; break;
+        case IR_CAS: case IR_CMPXCHG:
+            if (at < 1) at = 1;
+            break;
         case IR_DIV: case IR_MOD:
             if (!fn->ins[n].flt) *div = 1;
             break;
@@ -209,8 +216,8 @@ static const int *x86_pool_for(const struct ir_func *fn, int *n)
     const int *base;
     int nb;
     if (fn->is_varargs) { nb = NVARIADIC; base = VARIADIC_POOL; }
-    else if (at)        { nb = NLEAF_AT;  base = LEAF_POOL_AT; }
-    else if (div)       { nb = NLEAF;     base = LEAF_POOL; }
+    else if (at == 2)   { nb = NLEAF_AT;  base = LEAF_POOL_AT; }
+    else if (div || at) { nb = NLEAF;     base = LEAF_POOL; }
     else                { nb = NLEAF_RDX; base = LEAF_POOL_RDX; }
     if (!x86_wants_rdi(fn)) { *n = nb; return base; }
     /* After the caller-saved ones already there (it is caller-saved too,
@@ -385,7 +392,9 @@ static const struct ra_target X86_RA = {
     x86_fp_pool_for, x86_fp_callee_saved,
     0,            /* float_in_gpr: floats have their own class (SSE) */
     NULL, NULL,
-    0, /* atomic_in_reg */
+    1, /* atomic_in_reg: every atomic but CAS16 reads its address and
+        * values where they live, and loads only one left in a slot
+        * (x86_atomic_addr, x86_atomic_val, cg_load) */
     0, /* fp_reads_gpr */
     0  /* asm_in_reg: a template may name a callee-saved register */
 };
@@ -503,7 +512,7 @@ void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
          * an offset -- a jump too far for AVR's 12-bit rjmp, relocated
          * against the section symbol. Everything else here is a string index
          * into the unit's pool. */
-        if (s[k].kind == RK_AVR_TEXT_CALL)
+        if (s[k].kind == RK_AVR_TEXT_CALL || s[k].kind == RK_MIPS_TEXT26)
             continue;
         s[k].str_off = iu->strs[s[k].str_off].off;
     }
@@ -540,21 +549,52 @@ static int flt_width(const struct ir_ins *i)
     return 1;
 }
 
-struct flt_bad { char *bad; int nv; };
+struct flt_bad { char *bad; int *soft; int nv; };
 static void flt_bad_cb(int v, void *ctx)
 {
     struct flt_bad *b = ctx;
-    if (v >= 0 && v < b->nv)
-        b->bad[v] = 1;
+    if (v >= 0 && v < b->nv) {
+        if (b->soft) b->soft[v]++;
+        else b->bad[v] = 1;
+    }
 }
 
+static int flt_find(int *uf, int x)
+{
+    while (uf[x] != x) { uf[x] = uf[uf[x]]; x = uf[x]; }
+    return x;
+}
+
+static char *float_vregs(struct ir_func *fn, int by_cost);
+
 char *cg_float_vregs(struct ir_func *fn)
+{
+    return float_vregs(fn, 0);
+}
+
+/* The same classes, decided by cost where a value is touched both ways:
+ * for a backend whose integer lowering can also reach a value at home in
+ * an FP register (one fmov) -- AArch64. An integer use that can only be
+ * made from a general register (an address, a narrow access, a narrow
+ * result) still decides for the integer class; one that an fmov serves
+ * is a vote, and the floating-point uses are the other votes. fdlibm's
+ * `x` is read by a dozen float operations and by the one shift that
+ * takes its high word: it belongs in a d register, with one fmov out. */
+char *cg_float_vregs_by_cost(struct ir_func *fn)
+{
+    return float_vregs(fn, 1);
+}
+
+static char *float_vregs(struct ir_func *fn, int by_cost)
 {
     int nv = fn->nvregs ? fn->nvregs : 1;
     char *w = xcalloc((size_t)nv, 1);
     char *wide = cg_wide_vregs(fn);
     int any = 0;
-#define MARK(v) do { int _v=(v); if (_v>=0 && _v<nv && !w[_v]) { w[_v]=1; any=1; } } while (0)
+    /* by_cost: each value's floating-point uses, the votes for its class */
+    int *fcnt = by_cost ? xcalloc((size_t)nv, sizeof *fcnt) : NULL;
+#define MARK(v) do { int _v=(v); if (_v>=0 && _v<nv) { if (fcnt) fcnt[_v]++; \
+                     if (!w[_v]) { w[_v]=1; any=1; } } } while (0)
     for (int v = 0; v < fn->nvars; v++)
         if (fn->locals[v].is_scalar_float) MARK(v);
     for (int n = 0; n < fn->nins; n++) {
@@ -610,9 +650,13 @@ char *cg_float_vregs(struct ir_func *fn)
      * marking did -- both ends of a `mov` are one value and cannot be in
      * two classes. */
     char *bad = xcalloc((size_t)nv, 1);
-    struct flt_bad fb = { bad, nv };
+    /* by_cost: the integer uses an fmov can serve, counted, not decided */
+    int *soft = by_cost ? xcalloc((size_t)nv, sizeof *soft) : NULL;
+    struct flt_bad fb = { bad, soft, nv };
     void *bad_ctx = &fb;
 #define BAD(v) do { int _v=(v); if (_v>=0 && _v<nv) bad[_v]=1; } while (0)
+#define SOFT(v) do { int _v=(v); if (_v>=0 && _v<nv) { \
+                     if (soft) soft[_v]++; else bad[_v]=1; } } while (0)
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->flt) {
@@ -629,10 +673,12 @@ char *cg_float_vregs(struct ir_func *fn)
              * BOTH classes. An op that wants it as an integer still
              * BADs it by its own rule, so the whitelist stays sound. */
             break;
-        case IR_I2F:  BAD(i->a);   break;         /* integer in */
-        case IR_F2I:  BAD(i->dst); break;         /* integer out */
+        case IR_I2F:  SOFT(i->a);   break;        /* integer in */
+        case IR_F2I:                              /* integer out */
+            if (i->w == 8) SOFT(i->dst); else BAD(i->dst);
+            break;
         case IR_BITCAST:
-            if (i->sign) BAD(i->dst); else BAD(i->a);
+            if (i->sign) SOFT(i->dst); else SOFT(i->a);
             break;
         case IR_F2F:
             /* A conversion with a LONG DOUBLE on either side goes
@@ -664,12 +710,14 @@ char *cg_float_vregs(struct ir_func *fn)
         /* A floating-point return is `flt` and never reaches here; this
          * one hands its value back in rax (x0), so the value has to be
          * in a general register. */
-        case IR_RET:   BAD(i->a); break;
+        case IR_RET:   SOFT(i->a); break;
         case IR_CALL:
             if (i->indirect) BAD(i->a);
             for (int k = 0; k < i->nargs; k++)
-                if (i->argv[k].cls[0] != CLASS_SSE) BAD(i->argv[k].vreg);
-            if (!i->flt) BAD(i->dst);
+                if (i->argv[k].cls[0] != CLASS_SSE) SOFT(i->argv[k].vreg);
+            if (!i->flt) {
+                if (i->w == 8 && !i->retsize) SOFT(i->dst); else BAD(i->dst);
+            }
             break;
         default:
             /* every other op is integer in and integer out -- in the
@@ -678,12 +726,44 @@ char *cg_float_vregs(struct ir_func *fn)
              * -1, so `and.4 %x, #1` or an `ext` anywhere in a function
              * took vreg 0 -- the first parameter -- out of the float
              * class, and a double argument went through memory. */
-            BAD(i->dst);
+            /* a result narrower than eight bytes is not something an
+             * fmov puts in a d register whole */
+            if (i->w == 8) SOFT(i->dst); else BAD(i->dst);
             ra_each_use(i, flt_bad_cb, bad_ctx);
             break;
         }
     }
 #undef BAD
+#undef SOFT
+    if (by_cost) {
+        /* A copy's two ends are one value: the votes are pooled over the
+         * copies, and a hard integer use anywhere decides for all. */
+        int *uf = xmalloc((size_t)nv * sizeof *uf);
+        for (int v = 0; v < nv; v++) uf[v] = v;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if ((i->op == IR_MOV || i->op == IR_LDVAR || i->op == IR_STVAR) &&
+                i->a >= 0 && i->a < nv && i->dst >= 0 && i->dst < nv) {
+                int x = flt_find(uf, i->a), y = flt_find(uf, i->dst);
+                if (x != y) uf[x] = y;
+            }
+        }
+        long *fs = xcalloc((size_t)nv, sizeof *fs);
+        long *is = xcalloc((size_t)nv, sizeof *is);
+        char *hard = xcalloc((size_t)nv, 1);
+        for (int v = 0; v < nv; v++) {
+            int r = flt_find(uf, v);
+            fs[r] += fcnt[v];
+            is[r] += soft[v];
+            hard[r] |= bad[v];
+        }
+        for (int v = 0; v < nv; v++) {
+            int r = flt_find(uf, v);
+            bad[v] = hard[r] || (is[r] > 0 && fs[r] < is[r]);
+        }
+        free(uf); free(fs); free(is); free(hard);
+        free(fcnt); free(soft);
+    }
     for (int changed = 1; changed; ) {
         changed = 0;
         for (int n = 0; n < fn->nins; n++) {
@@ -787,8 +867,7 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
         }
     int *lf = xmalloc((size_t)fn->nvregs * sizeof *lf);
     int *ll = xmalloc((size_t)fn->nvregs * sizeof *ll);
-    unsigned long *lin = NULL, *lout = NULL; int *dv = NULL, lw = 0;
-    lout = ra_live_intervals(fn, lf, ll, &lin, &dv, &lw);
+    ra_live_ranges(fn, lf, ll);
 
     int *rlo = xmalloc((size_t)n * sizeof *rlo);
     int *rhi = xmalloc((size_t)n * sizeof *rhi);
@@ -809,7 +888,7 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
         if (i < fn->nparams)
             rlo[i] = 0;
     }
-    free(at); free(lf); free(ll); free(lout); free(lin); free(dv);
+    free(at); free(lf); free(ll);
 
     /* interval-graph colouring in range-start order (optimal for intervals):
      * reuse a slot once its occupant's range ends at or before this one starts. */
@@ -2870,6 +2949,30 @@ static int x86_rmw_find(struct ir_func *fn, int n, const int *usecnt)
     return -1;
 }
 
+/* An atomic's address operand, in a register other than rax: its own
+ * when it has one, else loaded from its slot into rcx. */
+static int x86_atomic_addr(struct code *text, const int *sd, int v)
+{
+    if (in_reg(v))
+        return g_loc[v];
+    x86_mov_rcx_slot(text, sd[v]);
+    return REG_RCX;
+}
+
+/* An atomic's value operand, `size` bytes of which the instruction reads:
+ * its own register, or `scratch` filled from its slot. Upper bits past
+ * `size` are whatever they are -- the instructions read only the low
+ * ones. */
+static int x86_atomic_val(struct code *text, const int *sd, int v,
+                          int scratch, int size)
+{
+    if (in_reg(v))
+        return g_loc[v];
+    x86_load_reg_basedisp(text, scratch, REG_RBP, sd[v], size, 0,
+                          size == 8 ? 8 : 4);
+    return scratch;
+}
+
 static void gen_func(struct ir_func *fn, struct code *text,
                      struct sites *st)
 {
@@ -4676,36 +4779,53 @@ static void gen_func(struct ir_func *fn, struct code *text,
         case IR_UD2:
             x86_ud2(text);
             break;
-        case IR_XCHG:
+        /* The atomics read their operands where they live (atomic_in_reg):
+         * an address or a value the allocator put in a register is used
+         * there, and only one left in its slot is loaded -- the address
+         * into rcx, cmpxchg's desired value into rdx, ARMW's operand
+         * into rsi. rax is the one fixed register every one of them
+         * needs (the value exchanged, added, or compared), and it is in
+         * no pool, so nothing an operand lives in is overwritten by
+         * filling it; rcx is in no pool either, and x86_pool_for keeps
+         * rdx and rsi out of a function whose atomics load them. */
+        case IR_XCHG: case IR_XADD: {
+            int A = x86_atomic_addr(text, sd, i->a);
+            cg_load(text, sd, i->b, i->size, 0,
+                    i->size == 8 ? 8 : 4);               /* value -> rax */
+            if (i->op == IR_XCHG)
+                x86_xchg_reg_mem(text, REG_RAX, A, i->size); /* rax = old */
+            else
+                x86_lock_xadd_reg_mem(text, REG_RAX, A, i->size);
             cg_reset();
-            x86_mov_rcx_slot(text, sd[i->a]);            /* address -> rcx */
-            x86_load_slot(text, sd[i->b], i->size, 0,
-                          i->size == 8 ? 8 : 4);         /* new value -> rax */
-            x86_xchg_rax_mem_rcx(text, i->size);         /* atomic; rax = old */
             cg_store(text, sd, i->dst, i->w);
             break;
-        case IR_XADD:
-            cg_reset();
-            x86_mov_rcx_slot(text, sd[i->a]);            /* address -> rcx */
-            x86_load_slot(text, sd[i->b], i->size, 0,
-                          i->size == 8 ? 8 : 4);         /* addend -> rax */
-            x86_lock_xadd_rcx(text, i->size);            /* atomic; rax = old */
-            cg_store(text, sd, i->dst, i->w);
-            break;
-        case IR_CMPXCHG:
-            cg_reset();
-            x86_load_slot(text, sd[i->c], i->size, 0,
-                          i->size == 8 ? 8 : 4);         /* desired -> rax.. */
-            x86_mov_reg_reg(text, REG_RDX, REG_RAX);     /* ..-> rdx */
-            x86_mov_rcx_slot(text, sd[i->a]);            /* object ptr -> rcx */
-            x86_load_slot(text, sd[i->b], 8, 0, 8);      /* &expected -> rax */
-            x86_mov_reg_reg(text, REG_RSI, REG_RAX);     /* save in rsi */
-            x86_load_reg_mem(text, REG_RAX, REG_RSI, 0, i->size); /* rax=*exp */
-            x86_lock_cmpxchg_rcx(text, i->size);         /* CAS; ZF=matched */
-            x86_store_mem_reg(text, REG_RSI, 0, REG_RAX, i->size);/* *exp=seen */
+        }
+        case IR_CMPXCHG: {
+            /* *b is the expected value and gets the value seen when they
+             * differ -- written back only then, as C11 says: on a match
+             * `expected` is not written at all. b is an address held
+             * across the compare-exchange; left in its slot it is read
+             * twice, through rax before it and rcx after (the object's
+             * address in rcx is finished with by then). */
+            int C = x86_atomic_val(text, sd, i->c, REG_RDX, i->size);
+            int A = x86_atomic_addr(text, sd, i->a);
+            int B = in_reg(i->b) ? g_loc[i->b] : REG_RAX;
+            if (B == REG_RAX)
+                x86_load_slot(text, sd[i->b], 8, 0, 8);  /* &expected */
+            x86_load_reg_mem(text, REG_RAX, B, 0, i->size); /* rax = *exp */
+            x86_lock_cmpxchg_reg_mem(text, C, A, i->size); /* ZF=matched */
+            int skip = x86_jz_rel8(text);
+            if (B == REG_RAX) {
+                x86_mov_rcx_slot(text, sd[i->b]);
+                B = REG_RCX;
+            }
+            x86_store_mem_reg(text, B, 0, REG_RAX, i->size); /* *exp=seen */
+            text->p[skip] = (unsigned char)(text->len - (skip + 1));
             x86_setcc_eax(text, 0x94);                   /* setz: dst = matched */
+            cg_reset();
             cg_store(text, sd, i->dst, 4);
             break;
+        }
         case IR_ARMW: {
             /* and / or / xor / nand: x86 has no locked fetch-and-OP that
              * returns the old value, so this is the compare-and-swap loop gcc
@@ -4713,38 +4833,37 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * lock cmpxchg installs rdx only if memory still holds rax, and
              * otherwise reloads rax with what it does hold, so the loop
              * recomputes from the fresh value. */
-            cg_reset();
             int w = i->size == 8 ? 8 : 4;
             int op = (int)i->imm;
-            x86_mov_rcx_slot(text, sd[i->a]);             /* address -> rcx */
-            x86_load_slot(text, sd[i->b], i->size, 0, w); /* operand -> rax.. */
-            x86_mov_reg_reg(text, REG_RSI, REG_RAX);      /* ..-> rsi */
-            x86_load_reg_mem(text, REG_RAX, REG_RCX, 0, i->size); /* current */
+            int A = x86_atomic_addr(text, sd, i->a);
+            int B = x86_atomic_val(text, sd, i->b, REG_RSI, i->size);
+            x86_load_reg_mem(text, REG_RAX, A, 0, i->size);  /* current */
             int loop = text->len;
             x86_mov_reg_reg(text, REG_RDX, REG_RAX);
-            x86_alu_rr(text, op == 'n' ? '&' : op, REG_RDX, REG_RSI, w);
+            x86_alu_rr(text, op == 'n' ? '&' : op, REG_RDX, B, w);
             if (op == 'n')
                 x86_not_reg(text, REG_RDX, w);
-            x86_lock_cmpxchg_rcx(text, i->size);          /* ZF: installed */
+            x86_lock_cmpxchg_reg_mem(text, REG_RDX, A, i->size); /* ZF: installed */
             int back = x86_jnz_rel32(text);
             code_patch32(text, back, (unsigned long)(long)(loop - (back + 4)));
+            cg_reset();
             cg_store(text, sd, i->dst, i->w);             /* rax = the old value */
             break;
         }
-        case IR_CAS:
-            /* By value: rax = expected, rdx = desired. After lock cmpxchg rax
-             * holds the value that was in memory whether or not the swap
-             * happened (on success it already was that value). */
+        case IR_CAS: {
+            /* By value: rax = expected, the desired value in a register.
+             * After lock cmpxchg rax holds the value that was in memory
+             * whether or not the swap happened (on success it already was
+             * that value). */
+            int C = x86_atomic_val(text, sd, i->c, REG_RDX, i->size);
+            int A = x86_atomic_addr(text, sd, i->a);
+            cg_load(text, sd, i->b, i->size, 0,
+                    i->size == 8 ? 8 : 4);                /* expected -> rax */
+            x86_lock_cmpxchg_reg_mem(text, C, A, i->size);
             cg_reset();
-            x86_load_slot(text, sd[i->c], i->size, 0,
-                          i->size == 8 ? 8 : 4);          /* desired -> rax.. */
-            x86_mov_reg_reg(text, REG_RDX, REG_RAX);      /* ..-> rdx */
-            x86_mov_rcx_slot(text, sd[i->a]);             /* address -> rcx */
-            x86_load_slot(text, sd[i->b], i->size, 0,
-                          i->size == 8 ? 8 : 4);          /* expected -> rax */
-            x86_lock_cmpxchg_rcx(text, i->size);
             cg_store(text, sd, i->dst, i->w);
             break;
+        }
         case IR_CAS16:
             break;                      /* (gen_i128's) */
         case IR_FRAMEADDR:

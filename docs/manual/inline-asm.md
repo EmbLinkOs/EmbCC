@@ -28,6 +28,7 @@ stated under the target.
 | [AArch64](#aarch64) | `aarch64 inline asm: instruction 'ldxr' is not supported (in "...")` |
 | [ARM Cortex-M](#arm-cortex-m) | `asm instruction "vldr" is not in the ARMv7-M vocabulary` |
 | [RISC-V](#risc-v) | `asm instruction "amoswap.w" is not in the RISC-V vocabulary` |
+| [MIPS32](#mips32) | `asm instruction "madd $t0, $t1" is not in the MIPS vocabulary` |
 | [AVR](#avr) | `'frobnicate' is not an AVR instruction this assembler knows (assembling "...")` |
 
 The full diagnostic carries the file and the line of the `asm` statement:
@@ -44,6 +45,8 @@ same assembler that handles `.s` and `.S` files for that target (see
 AT&T syntax and is read by a separate encoder that resolves each operand
 reference as it encodes the instruction; it is unrelated to the
 NASM-syntax assembler used for `.asm` files ([embas](tools/embas.md)).
+On MIPS32 the operands are substituted the same way, and the text is
+assembled by the same MIPS32 assembler that reads `.s` and `.S` files.
 
 A template is assembled only when its function is emitted. An `asm`
 statement in a function that is never emitted, such as an unused
@@ -142,7 +145,7 @@ writing as many bytes as the lvalue's type has.
 
 An output must fit in one general-purpose register; on AVR it may occupy
 up to four consecutive registers. A wider output is refused on ARM
-Cortex-M, RISC-V and AVR with the diagnostics listed under each target;
+Cortex-M, RISC-V, MIPS32 and AVR with the diagnostics listed under each target;
 on x86-64 and AArch64 it stops the compiler with an internal error
 (`bad store size 16`, `aarch64 access size cannot encode 16`).
 
@@ -170,15 +173,15 @@ dereference itself:
 |---|---|
 | x86-64 | `movq (%1), %0` |
 | AArch64, ARM Cortex-M | `ldr %0, [%1]` |
-| RISC-V | `lw %0, 0(%1)` |
+| RISC-V, MIPS32 | `lw %0, 0(%1)` |
 | AVR | do not use `m`; pass a pointer with `e`, `x` or `z` and write `%a1` (see [AVR](#avr)) |
 
 On AArch64 a bare `m` is refused; `rm` is accepted and passes the
 address.
 
 The integer-constant constraints `i` and `n` behave differently per
-target. On AArch64 and AVR the constant is substituted into the template
-as a literal. On x86-64, ARM Cortex-M and RISC-V the constant is
+target. On AArch64, MIPS32 and AVR the constant is substituted into the
+template as a literal. On x86-64, ARM Cortex-M and RISC-V the constant is
 computed into a register like any other input, so the template uses it
 as a register operand:
 
@@ -204,7 +207,7 @@ A clobber that does not name a general-purpose register of the target
 ignored.
 
 A callee-saved register in the clobber list is refused on AArch64, ARM
-Cortex-M, RISC-V and AVR, and accepted without being saved on x86-64; see
+Cortex-M, RISC-V, MIPS32 and AVR, and accepted without being saved on x86-64; see
 [Callee-saved registers](#callee-saved-registers).
 
 ### Referring to operands in the template
@@ -255,8 +258,8 @@ refused. Flag outputs are discussed under [x86-64](#x86-64) and
 
 Whether an unsupported constraint is reported depends on the target. On
 x86-64, ARM Cortex-M and RISC-V it is reported when the function is
-checked, even if the function is never emitted. On AArch64 and AVR it is
-reported only when the `asm` statement is generated, so a GCC-style
+checked, even if the function is never emitted. On AArch64, MIPS32 and
+AVR it is reported only when the `asm` statement is generated, so a GCC-style
 header with another machine's constraints in an unused `static inline`
 function compiles.
 
@@ -308,6 +311,7 @@ Each target handles a template that would change one as follows:
 | AArch64 | refused (x19 to x30) | cannot happen: neither the allocator nor a register variable uses one |
 | ARM Cortex-M | refused (r4 to r11) | never chosen by the allocator; possible through the letters `S` and `D` (see [ARM Cortex-M](#arm-cortex-m)), and then saved by the prologue and given no other value in that function |
 | RISC-V | refused (s0 to s11) | never chosen by the allocator; see [Register variables](#register-variables) |
+| MIPS32 | refused (s0 to s7, and gp, sp, fp, ra, k0, k1) | cannot happen: neither the allocator nor a register variable uses one |
 | AVR | refused (r2 to r17, and r28 and r29) | refused |
 
 The details and the diagnostics are under each target.
@@ -331,6 +335,7 @@ same way.
 | AArch64 | `x0` to `x11`, `x13` to `x15`, and the `w` names of the same registers | refused |
 | ARM Cortex-M | not supported (see below) | |
 | RISC-V | not supported (see below) | |
+| MIPS32 | `v0`, `v1`, `a0` to `a3`, `t0` to `t9`, with or without `$`, and their numbers `$2` to `$15`, `$24`, `$25` | refused |
 | AVR | `r0`, `r1`, `r18` to `r27`, `r30`, `r31`, `XL`, `XH`, `ZL`, `ZH`, `X`, `Z`, `__tmp_reg__`, `__zero_reg__` | refused |
 
 On x86-64 a fixed-register constraint letter (`a`, `b`, `c`, `d`, `S`,
@@ -342,6 +347,9 @@ On AArch64 any other name is refused with
 x12 is the code generator's address scratch, x16 to x18 are the
 intra-procedure-call and platform registers, and x19 and above are
 callee-saved.
+
+On MIPS32 any other name is refused with
+`register variable bound to '$s0' is not supported for MIPS asm (use v0-v1, a0-a3 or t0-t9)`.
 
 On AVR a name that is not a register is refused with
 `register variable bound to 'foo' is not an AVR register`, and a
@@ -397,9 +405,9 @@ label (`name:`).
 
 How a block is assembled depends on the target:
 
-- **ARM Cortex-M, RISC-V and AVR.** The block is read by the assembler
+- **ARM Cortex-M, RISC-V, MIPS32 and AVR.** The block is read by the assembler
   that reads a `.s` file, so it holds the target's own instructions; see
-  [On Cortex-M, RISC-V and AVR](#on-cortex-m-risc-v-and-avr).
+  [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr).
 - **x86-64 and AArch64.** The block is read by a small fixed vocabulary
   of directives, data and (on x86-64) four instructions, described in the
   rest of this section. `#`, `;` and `/*` start a comment that runs to
@@ -485,7 +493,7 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| ARM Cortex-M, RISC-V, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V and AVR](#on-cortex-m-risc-v-and-avr) |
+| ARM Cortex-M, RISC-V, MIPS32, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
 | AArch64 ELF | directives and data only; an instruction is refused (below) |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
@@ -511,7 +519,7 @@ a file-scope asm block with labels or symbol references is not supported for a D
 a file-scope asm block with labels or symbol references is not supported for a Windows target yet
 ```
 
-### On Cortex-M, RISC-V and AVR
+### On Cortex-M, RISC-V, MIPS32 and AVR
 
 On these targets a block is assembled by EmbCC's GNU-syntax assembler,
 the one that assembles a `.s` or `.S` file (see
@@ -553,6 +561,11 @@ alignment directives ask and at least to 4 bytes (2 on AVR). Its symbols:
   written in assembly is called from C.
 - Other labels produce no symbol.
 
+A reference to a label the block itself defines and does not make global
+reaches that label, whatever C or another block calls by the same name:
+two naked functions may each have a `loop:`, and a block's own `cfunc:`
+is not the C function `cfunc`.
+
 A call or a data word naming a C function or object is a relocation
 against it, and a function called only from a block is still emitted.
 A data word naming a local label (`.word .Ldata`) is a relocation
@@ -582,9 +595,9 @@ A naked function has no prologue and no epilogue: its body is the asm in
 it, which must return by itself. It is how a Cortex-M RTOS writes its
 context switch, which runs on a task's stack and saves registers the
 code generator's frame would otherwise own. EmbCC supports `naked` on
-ARM Cortex-M, RISC-V and AVR, and does what GCC does: the function's
+ARM Cortex-M, RISC-V, MIPS32 and AVR, and does what GCC does: the function's
 body is assembled where the function would be, starting with its label.
-It is assembled as a [file-scope block](#on-cortex-m-risc-v-and-avr), so
+It is assembled as a [file-scope block](#on-cortex-m-risc-v-mips32-and-avr), so
 it may hold labels, literal pools and calls into C.
 
 The attribute may be on any declaration of the function; FreeRTOS's
@@ -612,7 +625,8 @@ The body may contain:
   into the template as numbers: `%0`, `%c0` and `%[name]` all give `80`
   for `"i"(80)`. `%%` is `%`.
 - **calls with no arguments,** `vTaskSwitchContext();`, assembled as the
-  target's call instruction (`bl` on ARM, `call` on RISC-V and AVR).
+  target's call instruction (`bl` on ARM, `jal` on MIPS32, `call` on
+  RISC-V and AVR).
   AVR's FreeRTOS port calls the scheduler this way from its naked yield.
 
 A naked function's parameters arrive in the registers the calling
@@ -628,7 +642,7 @@ These are refused, because a naked function has no frame for them:
 | an operand that is not a constant | `operand 0 of the asm in naked function 'f' is not a constant ("i"); a naked function has no frame to load one from` |
 | an output operand | `the asm in naked function 'f' has an output; a naked function has no frame to put it in` |
 | a `section` attribute | `naked function 'f' in section '.ramfunc' is not supported yet: its body is assembled into .text` |
-| x86-64 and AArch64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V and AVR targets` |
+| x86-64 and AArch64 | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
 
 `tests/golden/freertos-cm3.sh` builds the FreeRTOS kernel and its GCC
 ARM_CM3 port, unmodified, and runs three tasks, a queue, a mutex and a
@@ -1012,6 +1026,14 @@ the start of the instruction, written `.+N`, `.-N` or as a bare number;
 every branch uses the 32-bit encoding. Labels are not accepted (`1:` is
 reported as an unknown instruction).
 
+An immediate (`#...`), including a memory operand's offset, may be a
+constant expression, as in GNU as: C's integer literals (decimal, `0x`,
+`0b`, octal, with `u`/`l` suffixes) and operators (`~ * / % + - << >> &
+^ |`) with parentheses. It runs to the next comma, so spaces are allowed:
+FreeRTOS's Cortex-M4F port enables the FPU with
+`orr r1, r1, #( 0xf << 20 )`. A symbol in an immediate is not evaluated
+and is refused, as is a value the instruction cannot encode.
+
 ### Instructions
 
 | Instruction | Operands |
@@ -1252,6 +1274,153 @@ long sbi_call(long ext, long fid, long arg0)
 }
 ```
 
+## MIPS32
+
+This section applies to `mipsel-none-elf`.
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `d`, `g` | a general register chosen by EmbCC |
+| `m` | a general register chosen by EmbCC, holding the address of the operand; for an `=m` output the template stores through it |
+| `i`, `n`, `I` to `P` | the constant, written into the template as a decimal number |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+A constraint with `r`, `d`, `g` or `m` anywhere gets a register; one with
+only the constant letters must be given an integer constant expression.
+Anything else, a non-constant `i` included, is refused with
+`asm constraint "=a" is not valid for MIPS`.
+
+A chosen register comes from `t0` to `t9`, then `v0`, `v1` and `a0` to
+`a3`, skipping registers listed as clobbers or named in the template.
+When none is left EmbCC reports `no free register for an asm operand`.
+An input wider than a register passes its low word; an output wider than
+a register is refused:
+
+```text
+the MIPS32 backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]
+```
+
+### Modifiers
+
+None. `%N` prints the register with its `$` (`$t0`, `$a1`, ...) or the
+constant. Any modifier is refused with
+`asm template modifier '%z' is not supported for MIPS`.
+
+### Template syntax
+
+GNU MIPS syntax. A template starts in `.set reorder` mode, as GCC's and
+clang's do: the assembler puts a `nop` in the delay slot of every branch
+and jump, so the instruction written after a transfer runs after it, not
+in its slot. A template that schedules its own delay slots says `.set
+noreorder` (and may `.set push` and `.set pop` around it); a template
+written for GCC with an explicit slot but without `.set noreorder` gets
+an extra `nop`, as it would from GNU as. The other `.set` options that
+name what EmbCC emits anyway (`at`, `noat`, `macro`, `nomacro`,
+`mips32r2`, ...) are accepted; `.set mips16`, `micromips`, `mips32r6`
+and the 64-bit ISAs are refused. Statements are separated by `;` or
+newlines; `#` and `//` start a comment. Mnemonics are lower case. Registers are `$0` to `$31` and the
+ABI names with `$` (`$zero`, `$at`, `$v0`, `$v1`, `$a0`-`$a3`,
+`$t0`-`$t9`, `$s0`-`$s7`, `$k0`, `$k1`, `$gp`, `$sp`, `$fp` or `$s8`,
+`$ra`). Memory operands are `OFF(REG)` or `(REG)` with a 16-bit signed
+offset; an offset or immediate may be a constant expression (`(16 + 4 *
+3)($sp)`), and `%hi(N)` and `%lo(N)` of a number give the halves a
+`lui`/`addiu` pair adds up to. A branch target is a byte displacement
+from the delay slot, a multiple of 4 written as a number (`b 8` skips the
+slot and the instruction after it), or `.+N` / `.-N` from the branch
+itself. Labels are not accepted in a template; they are in a
+[file-scope block](#on-cortex-m-risc-v-mips32-and-avr) and a `.S` file,
+where `jal sym`, `%hi(sym)`, `%lo(sym)` and `la` also take symbols.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `nop`, `ssnop`, `ehb`, `eret`, `wait`, `syscall` | none |
+| `break [CODE]` | 0 to 1023 |
+| `sync [STYPE]` | 0 to 31 |
+| `di [Rt]`, `ei [Rt]` | |
+| `addu`, `subu`, `and`, `or`, `xor`, `nor`, `slt`, `sltu`, `movn`, `movz`, `mul` `Rd, Rs, Rt` | |
+| `sllv`, `srlv`, `srav`, `rotrv` `Rd, Rt, Rs` | the value, then the amount |
+| `addiu`, `slti`, `sltiu` `Rt, Rs, IMM` | 16-bit signed |
+| `andi`, `ori`, `xori` `Rt, Rs, IMM` | 0 to 0xffff |
+| `sll`, `srl`, `sra`, `rotr` `Rd, Rt, SA` | 0 to 31 |
+| `lui Rt, IMM` | 0 to 65535, or `%hi(N)` |
+| `lb`, `lbu`, `lh`, `lhu`, `lw`, `sb`, `sh`, `sw`, `ll`, `sc`, `lwl`, `lwr`, `swl`, `swr` | `Rt, OFF(Rs)` |
+| `mult`, `multu` `Rs, Rt` | |
+| `div`, `divu` | `$zero, Rs, Rt` only (below) |
+| `mfhi`, `mflo`, `mthi`, `mtlo` `Rd` | |
+| `clz`, `clo`, `seb`, `seh`, `wsbh` `Rd, Rs` | |
+| `ext`, `ins` `Rt, Rs, POS, SIZE` | within the word |
+| `mfc0`, `mtc0` `Rt, $N[, SEL]` | `SEL` 0 to 7 |
+| `teq Rs, Rt[, CODE]` | 0 to 1023 |
+| `beq`, `bne` `Rs, Rt, OFFSET`; `blez`, `bgtz`, `bltz`, `bgez`, `beqz`, `bnez` `Rs, OFFSET`; `b`, `bal` `OFFSET` | a multiple of 4 from -131072 to 131068 |
+| `jr Rs`, `jalr Rs`, `jalr Rd, Rs` | `Rd` and `Rs` different |
+| `j TARGET`, `jal TARGET` | a register (`j $ra` is `jr`, `jal $t9` is `jalr`); `.+N` from the jump, encoded as `b`/`bal` within 128 KiB; or a number, the target's place in its 256 MiB region |
+| `jal SYM`, `j SYM`, `lui Rt, %hi(SYM)`, `addiu Rt, Rs, %lo(SYM)`, `lw Rt, %lo(SYM)(Rs)` (and the other loads and stores), `la Rt, SYM` | a `.S` file or a file-scope block only: `R_MIPS_26`, `R_MIPS_HI16`, `R_MIPS_LO16`; `SYM` may have a `+K` or `-K` |
+| `move Rd, Rs` | `or Rd, Rs, $zero` |
+| `li Rd, IMM` | any 32-bit constant; the code generator's sequence (one or two instructions) |
+| `not Rd, Rs`, `negu Rd, Rs` | `nor Rd, Rs, $zero`; `subu Rd, $zero, Rs` |
+
+`div` and `divu` with two registers are assembler macros in GNU `as`,
+which add a divide-by-zero trap, and are refused:
+`this div is an assembler macro (it adds a divide-by-zero trap); write div $zero, rs, rt and read the quotient with mflo`.
+`neg` is not accepted for the same reason (it is the trapping `sub`);
+write `negu`. An immediate out of its field is refused with, for example,
+`addiu immediate 70000 does not fit its signed 16-bit field`.
+
+`%lo` is only an `addiu`'s or a load's or store's offset, and `%hi`
+only a `lui`'s operand: `%hi` is rounded for the sign extension those
+instructions give `%lo`, so `ori $t0, $t0, %lo(sym)` would compute a
+wrong address for half of all symbols, and is refused (`%lo(symbol) is an
+addiu's or a load's or store's offset: %hi is rounded for its sign
+extension`). The operators of position-independent, small-data and TLS
+code (`%got`, `%call16`, `%gp_rel`, ...) are refused, and so is a branch
+to a symbol the block or file does not define.
+
+There are no floating-point or coprocessor 1 instructions, no trapping
+`add`, `addi` or `sub`, no DSP, MIPS16 or microMIPS instructions, no
+`cache`, `pref` or `rdhwr`, and no `madd` or `msub`.
+
+### Callee-saved registers on MIPS32
+
+A template that names s0 to s7, gp, fp, ra, k0 or k1 is refused, and so
+is the same register in the clobber list:
+
+```text
+MIPS asm names register '$s1', which EmbCC does not save around an asm
+MIPS asm clobbers register 's2', which EmbCC does not save around an asm
+```
+
+`$sp` may be named, for a template that reads it. `$at` may be named and
+changed: no value is kept in it across an `asm`.
+
+### Example
+
+```c
+static inline unsigned read_status(void)     /* CP0 Status */
+{
+    unsigned s;
+    __asm__ volatile("mfc0 %0, $12" : "=r"(s));
+    return s;
+}
+
+static inline unsigned irq_save(void)
+{
+    unsigned s;
+    __asm__ volatile("di %0; ehb" : "=r"(s) : : "memory");
+    return s & 1;
+}
+
+static inline unsigned bswap32(unsigned x)
+{
+    unsigned r;
+    __asm__("wsbh %0, %1; rotr %0, %0, 16" : "=r"(r) : "r"(x));
+    return r;
+}
+```
+
 ## AVR
 
 This section applies to the `avr` target (ATmega328P).
@@ -1445,7 +1614,8 @@ In summary, compared with GCC:
 - `asm goto`, `asm inline`, matching constraints (`"0"`) and flag-output
   constraints are not supported. Flag outputs are not always refused
   (see [x86-64](#x86-64) and [AArch64](#aarch64)).
-- `m` outputs do not work, and `m` inputs are a register holding the
+- `m` outputs do not work (except on MIPS32, where the operand's
+  register holds the address), and `m` inputs are a register holding the
   address rather than a memory reference.
 - On x86-64, ARM Cortex-M and RISC-V, `i` and `n` give a register, not
   an immediate.

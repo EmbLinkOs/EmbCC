@@ -126,14 +126,24 @@ static int split(const char *stmt, int len, struct tok *t, int max)
         t[n].s = stmt + i;
         {
             int depth = 0;
+            /* An immediate runs to the next comma, spaces and all, as in
+             * GNU as: `#(1 << 2) - 1` and `#0x3f0 >> 4` are one operand. */
+            int imm = stmt[i] == '#';
             while (i < len && (depth > 0 ||
-                   (!isspace((unsigned char)stmt[i]) && stmt[i] != ','))) {
-                if (stmt[i] == '[' || stmt[i] == '{') depth++;
-                else if (stmt[i] == ']' || stmt[i] == '}') depth--;
+                   ((imm || !isspace((unsigned char)stmt[i])) &&
+                    stmt[i] != ','))) {
+                /* (and an immediate's expression, which may have spaces:
+                 * FreeRTOS's ARM_CM4F port writes `#( 0xf << 20 )`) */
+                if (stmt[i] == '[' || stmt[i] == '{' || stmt[i] == '(')
+                    depth++;
+                else if (stmt[i] == ']' || stmt[i] == '}' || stmt[i] == ')')
+                    depth--;
                 i++;
             }
         }
         t[n].len = (int)(stmt + i - t[n].s);
+        while (t[n].len > 0 && isspace((unsigned char)t[n].s[t[n].len - 1]))
+            t[n].len--;
         if (t[n].len > 0)
             n++;
     }
@@ -161,13 +171,29 @@ static int tok_is(const struct tok *t, const char *s)
 
 static int tok_reg(const struct tok *t) { return tasm_gpr(t->s, t->len); }
 
-/* `#imm`, or a bare number. */
+#include "../asmexpr.h"
+
+/* `#imm`, or a bare number, or `#(` a constant expression `)`. */
 static int tok_imm(const struct tok *t, long *out)
 {
     int i = 0, neg = 0, base = 10, any = 0;
     long v = 0;
     if (i < t->len && t->s[i] == '#')
         i++;
+    /* An expression: anything past a leading sign that is not a digit
+     * of one number (`.+8`, a displacement, is the plain path below). */
+    int ex = 0;
+    for (int j = i; j < t->len && t->s[i] != '.'; j++)
+        if (strchr("()~<>|&^*/% ", t->s[j]) ||
+            (j > i && (t->s[j] == '+' || t->s[j] == '-')))
+            ex = 1;
+    if (ex) {
+        long long ev;
+        if (!asm_const_expr(t->s + i, t->len - i, &ev))
+            return 0;
+        *out = (long)ev;
+        return 1;
+    }
     /* `.+8` / `.-12`: a displacement from this instruction. The file
      * assembler (src/as/gas.c) turns a label into exactly this before
      * calling, and a branch operand can mean nothing else here --
@@ -825,6 +851,24 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             if (rm >= 0) { t_alu_reg(out, e->op, rd, rn, rm, e->s); return 0; }
             if (!tok_imm(&t[3], &imm))
                 FAIL("%s wants a register or an immediate", e->name);
+            /* sp's own 16-bit forms, as GNU as and llvm-mc choose them
+             * unless told `.w`: `add|sub sp, sp, #imm7*4` and `add rd,
+             * sp, #imm8*4`. The only ones ARMv6-M has -- the wide ones
+             * this took instead are UNDEFINED there, and v6_scan
+             * refused lib/rt's __aeabi_uldivmod for them. */
+            if (!e->s && rn == 13 && imm >= 0 && !(imm & 3) &&
+                !(t[0].len > 2 && t[0].s[t[0].len - 2] == '.' &&
+                  t[0].s[t[0].len - 1] == 'w')) {
+                if (rd == 13 && imm / 4 <= 127 &&
+                    (e->op == T_OP_ADD || e->op == T_OP_SUB)) {
+                    t_sp_adjust(out, imm, e->op == T_OP_SUB);
+                    return 0;
+                }
+                if (e->op == T_OP_ADD && rd >= 0 && rd < 8 && imm / 4 <= 255) {
+                    t_add_sp(out, rd, imm);
+                    return 0;
+                }
+            }
             /* addw/subw reach any 0..4095 where the modified immediate
              * reaches only what it can rotate into place. The encoder
              * says which; this does not second-guess it. */
@@ -1309,6 +1353,10 @@ void tasm_vocabulary(FILE *f)
      * rd, #imm` is: llvm-mc loads it from a literal pool, this assembler
      * with movw/movt, and both are right. */
     fprintf(f, "\tsvc #0\n\tsvc #171\n\ttst lr, #16\n\ttst r3, #0xff00\n");
+    /* sp's narrow forms, and the wide ones .w or a register past r7 asks */
+    fprintf(f, "\tsub sp, sp, #16\n\tadd sp, sp, #508\n\tadd r4, sp, #8\n"
+               "\tadd r7, sp, #1020\n\tsub.w sp, sp, #16\n\tadd r9, sp, #8\n"
+               "\tsub sp, sp, #512\n");
     fprintf(f, "\tpush {r4-r7, lr}\n\tpop {r4-r7, pc}\n");
     fprintf(f, "\tpush {r4-r11, lr}\n\tpop {r4-r11, pc}\n");
     fprintf(f, "\tstmdb r0!, {r4-r11, lr}\n\tldmia r0!, {r4-r11, lr}\n");

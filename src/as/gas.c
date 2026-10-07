@@ -19,6 +19,8 @@
 #include "../arch/thumb/emit.h"
 #include "../arch/thumb/attrs.h"
 #include "../arch/aarch64/asm.h"
+#include "../arch/mips/asm.h"
+#include "../arch/backend.h"
 #include "../parse/ast.h"
 
 /* ---- the pieces of a file ------------------------------------------ */
@@ -1029,6 +1031,37 @@ static char *substitute(struct gas *g, const char *stmt, long pc,
     return out;
 }
 
+/* RISC-V's `lw rd, sym` (and lb, lbu, lh, lhu, lwu, ld): a load from a
+ * symbol, which GNU as makes `auipc rd, %pcrel_hi(sym)` and
+ * `lw rd, %pcrel_lo(.L)(rd)` -- the `la` pair with a load where the add
+ * is. FreeRTOS's RISC-V port reads pxCurrentTCB and the critical-nesting
+ * count this way. Returns the mnemonic's length when the statement is one:
+ * a load, a register, and a bare symbol (an address, `0(sp)`, is not). */
+static int rv_load_sym(const struct gas *g, const char *p)
+{
+    static const char *const ld[] = { "lbu", "lhu", "lwu", "lb", "lh",
+                                      "lw", "ld" };
+    if (g->tgt->machine != EM_RISCV)
+        return 0;
+    for (unsigned k = 0; k < sizeof ld / sizeof ld[0]; k++) {
+        size_t n = strlen(ld[k]);
+        if (strncmp(p, ld[k], n) != 0 || !isspace((unsigned char)p[n]))
+            continue;
+        const char *q = skip_ws((char *)p + n);
+        while (*q && is_symc((unsigned char)*q)) q++;          /* rd */
+        q = skip_ws((char *)q);
+        if (*q != ',')
+            return 0;
+        q = skip_ws((char *)q + 1);
+        if (!is_sym0((unsigned char)*q))
+            return 0;
+        while (*q && is_symc((unsigned char)*q)) q++;
+        q = skip_ws((char *)q);
+        return *q == '\0' || *q == '#' ? (int)n : 0;
+    }
+    return 0;
+}
+
 /* `call sym` and `la rd, sym`: the two forms that may name a symbol
  * this file does not define. Both are an auipc paired with a second
  * instruction, eight bytes, and both carry their relocation on the
@@ -1063,8 +1096,14 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             return 1;
         }
     }
-    int is_call = strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
-    int is_la = strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
+    int is_call = g->tgt->machine == EM_RISCV &&
+                  strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
+    int is_la = g->tgt->machine == EM_RISCV &&
+                strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
+    /* `lw rd, sym` is RISC-V's pair too; MIPS's is its own symform's */
+    int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
+    if (ld_len)
+        is_la = 1;                            /* the same pair, but a load */
     /* ARM's jump to a symbol defined elsewhere -- a tail call, an RTOS's
      * branch into its C half -- is `b sym`: one wide branch and one
      * R_ARM_THM_JUMP24, as a call is `bl` and R_ARM_THM_CALL. */
@@ -1138,7 +1177,7 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         const char *rd = "ra";
         char rdbuf[16];
         if (is_la) {
-            const char *q = skip_ws((char *)p + 2);
+            const char *q = skip_ws((char *)p + (ld_len ? ld_len : 2));
             size_t n = 0;
             while (q[n] && is_symc((unsigned char)q[n]) && n < sizeof rdbuf - 1)
                 n++;
@@ -1149,8 +1188,11 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
         }
-        snprintf(buf, sizeof buf, is_call ? "jalr ra, 0(ra)" : "addi %s, %s, 0",
-                 rd, rd);
+        if (ld_len)
+            snprintf(buf, sizeof buf, "%.*s %s, 0(%s)", ld_len, p, rd, rd);
+        else
+            snprintf(buf, sizeof buf, is_call ? "jalr ra, 0(ra)"
+                                              : "addi %s, %s, 0", rd, rd);
         if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
         }
@@ -1213,12 +1255,17 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
                 return sym_get(g, stmt + f.sym_at, (size_t)f.sym_len)->name;
         }
     }
-    if (!((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
-          (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]))))
+    /* RISC-V's pair pseudos; another machine's `la` or `lw rd, sym`
+     * (MIPS's) is its own symform's */
+    int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
+    if (g->tgt->machine != EM_RISCV ||
+        !((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
+          (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2])) ||
+          ld_len))
         return NULL;
-    q = p + (p[1] == 'a' && p[2] != 'l' ? 2 : 4);
+    q = p + (ld_len ? ld_len : p[1] == 'a' && p[2] != 'l' ? 2 : 4);
     q = skip_ws((char *)q);
-    if (*p == 'l') {                       /* la rd, sym -- skip rd */
+    if (*p == 'l') {                /* la/lw rd, sym -- skip rd */
         while (*q && is_symc((unsigned char)*q)) q++;
         q = skip_ws((char *)q);
         if (*q == ',') q = skip_ws((char *)(q + 1));
@@ -2274,6 +2321,11 @@ static int directive(struct gas *g, char *p, int pass)
         g->cur = k;
         return 1;
     }
+    /* .extern: GNU as accepts and ignores it -- every symbol a file uses
+     * and does not define is external already. FreeRTOS's RISC-V
+     * portASM.S declares the kernel's variables with it. */
+    if (DIR(".extern"))
+        return 1;
     /* .global/.globl/.weak/.hidden/.internal/.protected/.local take a
      * comma-separated list of names. .weak: a kernel's vector table names
      * a handler for every interrupt the part has, and a program that uses
@@ -2359,6 +2411,44 @@ static int directive(struct gas *g, char *p, int pass)
      * file, is an alias resolved when the object is written. .thumb_set
      * also makes NAME a Thumb function -- how a startup file points every
      * weak handler at Default_Handler. */
+    /* MIPS's `.set noreorder`, `.set push`, `.set at`...: an option of
+     * the instruction assembler, which keeps the mode (mips/asm.c) --
+     * told apart from `.set NAME, VALUE` by having no comma. */
+    if (g->tgt->machine == EM_MIPS && DIR(".set") && !strchr(arg, ',')) {
+        struct code tmp = { 0 };
+        char err[256], buf[160];
+        snprintf(buf, sizeof buf, ".set %s", arg);
+        if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0)
+            gerr(g, "%s", err);
+        free(tmp.p);
+        return 1;
+    }
+    /* MIPS's function markers and module options say nothing an object
+     * here needs; the ones that ask for PIC or $gp-relative code are
+     * refused, because this assembler and EmbLD build neither. */
+    if (g->tgt->machine == EM_MIPS) {
+        if (DIR(".ent") || DIR(".end") || DIR(".frame") || DIR(".mask") ||
+            DIR(".fmask") || DIR(".insn") || DIR(".nan") ||
+            (DIR(".module") && strncmp(arg, "hardfloat", 9) &&
+             strncmp(arg, "fp=64", 5) && strncmp(arg, "mips16", 6) &&
+             strncmp(arg, "micromips", 9)))
+            return 1;
+        if (DIR(".abicalls") || DIR(".cpload") || DIR(".cprestore") ||
+            DIR(".cpsetup") || DIR(".cpreturn") || DIR(".gpword") ||
+            DIR(".gpvalue") || DIR(".cplocal") || DIR(".cpadd") ||
+            (DIR(".option") && strncmp(skip_ws(arg), "pic0", 4))) {
+            gerr(g, "%.*s%s%s: this is position-independent (abicalls) or "
+                    "$gp-relative code, which this assembler and EmbLD do "
+                    "not build; write -mno-abicalls code (%%hi/%%lo, jal)",
+                 (int)nlen, name, *arg ? " " : "", arg);
+            return 1;
+        }
+        if (DIR(".module")) {
+            gerr(g, ".module %s is not supported: EmbCC's MIPS objects are "
+                    "MIPS32r2, soft float", arg);
+            return 1;
+        }
+    }
     if (DIR(".equ") || DIR(".set") || DIR(".thumb_set") || DIR(".equiv")) {
         char *e = arg;
         const char *v;
@@ -2476,6 +2566,60 @@ static int directive(struct gas *g, char *p, int pass)
         g->cur = save;
         return 1;
     }
+    /* .reloc OFFSET, TYPE, SYMBOL[+ADDEND]: a relocation of the given
+     * ELF type at a place in this section, with the bytes there left as
+     * they are. It is how `embcc -S` attaches every relocated field
+     * (src/driver/asmout.c), so the compiler's own assembly output
+     * reassembles here into the object -c writes. */
+    if (DIR(".reloc")) {
+        const char *v = arg, *tn;
+        int bad, type;
+        struct gval at = gx_eval(g, &v, pass, &bad);
+        if (bad)
+            return 1;
+        v = skip_ws((char *)v);
+        if (*v != ',') {
+            gerr(g, ".reloc wants OFFSET, TYPE, SYMBOL");
+            return 1;
+        }
+        tn = v = skip_ws((char *)v + 1);
+        while (is_symc((unsigned char)*v))
+            v++;
+        type = target_reloc_by_name(target_get(), tn, (int)(v - tn));
+        if (type < 0) {
+            gerr(g, ".reloc: '%.*s' is not a relocation this assembler "
+                    "knows for %s", (int)(v - tn), tn, target_triple_now());
+            return 1;
+        }
+        v = skip_ws((char *)v);
+        if (*v != ',') {
+            gerr(g, ".reloc with no symbol is not supported: it wants "
+                    "OFFSET, TYPE, SYMBOL");
+            return 1;
+        }
+        v++;
+        struct gval sv = gx_eval(g, &v, pass, &bad);
+        if (bad)
+            return 1;
+        if (*skip_ws((char *)v)) {
+            gerr(g, ".reloc: \"%s\" is not one expression", arg);
+            return 1;
+        }
+        if (pass != 2)
+            return 1;
+        if (at.sec != g->cur && at.sec != SEC_ABS) {
+            gerr(g, ".reloc needs an offset in this section");
+            return 1;
+        }
+        if (sv.sec == SEC_ABS) {
+            gerr(g, ".reloc against a plain number is not supported: "
+                    "it needs a symbol");
+            return 1;
+        }
+        fix_add(g, g->cur, at.v, sv.base->name, type,
+                sv.sec >= 0 ? sv.v - sv.base->value : sv.v);
+        return 1;
+    }
     if (DIR(".org")) {
         const char *v = arg;
         int bad;
@@ -2505,12 +2649,34 @@ static int directive(struct gas *g, char *p, int pass)
             const char *e = gx_operand_end(q);
             char *one = xstrndup(q, (size_t)(e - q));
             const char *v = one;
-            int bad;
+            int bad, pm = 0;
+            /* AVR's pm(sym) and gs(sym): a function's WORD address, which
+             * is what a function pointer in data holds there -- and what
+             * `embcc -S` writes one as (R_AVR_16_PM). The parentheses are
+             * left to the expression. */
+            if (g->tgt->machine == EM_AVR) {
+                const char *w = skip_ws((char *)v);
+                if ((!strncmp(w, "pm", 2) || !strncmp(w, "gs", 2)) &&
+                    *skip_ws((char *)w + 2) == '(') {
+                    pm = 1;
+                    v = skip_ws((char *)w + 2);
+                }
+            }
             struct gval gv = gx_eval(g, &v, pass, &bad);
             if (!bad && *skip_ws((char *)v))
                 gerr(g, "\"%s\" is not one expression", one), bad = 1;
-            if (bad || gv.sec == SEC_ABS || gv.unknown) {
+            if (!bad && pm && width != 2)
+                gerr(g, "\"%s\": a program-memory address is two bytes",
+                     one), bad = 1;
+            if (!bad && pm && gv.sec == SEC_ABS) {
+                emit_int(g, gv.v >> 1, width);
+            } else if (bad || gv.sec == SEC_ABS || gv.unknown) {
                 emit_int(g, bad || gv.unknown ? 0 : gv.v, width);
+            } else if (pm) {
+                if (pass == 2)
+                    fix_add(g, g->cur, cur_off(g), gv.base->name, R_AVR_16_PM,
+                            gv.sec >= 0 ? gv.v - gv.base->value : gv.v);
+                emit_int(g, 0, width);
             } else {
                 /* An ADDRESS in a data word: a relocation, against the
                  * label it is relative to or the external symbol. */
@@ -2765,7 +2931,10 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
             }
         }
         if (*q == '.' && !strncmp(q, ".end", 4) &&
-            (!q[4] || isspace((unsigned char)q[4]))) {
+            (!q[4] || isspace((unsigned char)q[4])) &&
+            /* MIPS writes `.end f` after each function (with `.ent f`):
+             * a marker, not the end of the file */
+            !(g->tgt->machine == EM_MIPS && *skip_ws(q + 4))) {
             free(line);
             break;                        /* the rest of the file is ignored */
         }
@@ -2932,10 +3101,14 @@ static int write_object(struct gas *g, const char *out_path)
                                                       : s->sec == SEC_ABS
                                                       ? SHN_ABS : SHN_UNDEF));
         }
-    /* Anything a relocation names and nothing defined becomes UNDEF. */
+    /* Anything a relocation names and nothing defined becomes UNDEF --
+     * but not a label defined here that no symbol was written for: a
+     * data word naming a `.L` label is relocated against its section
+     * (above), and an undefined `.Lx` beside that was a symbol no other
+     * object can define. */
     for (i = 0; i < g->nfix; i++) {
         struct sym *s = sym_find(g, g->fix[i].sym, strlen(g->fix[i].sym));
-        if (s && !s->elf_ndx)
+        if (s && !s->elf_ndx && s->sec < 0)
             s->elf_ndx = elfw_add_symbol(w, s->name, 0, 0,
                                          (Elf64_Uchar)(((s->is_weak ? STB_WEAK
                                                        : STB_GLOBAL) << 4) |
@@ -2967,6 +3140,16 @@ static int write_object(struct gas *g, const char *out_path)
      * assembled object says what it was built for as a compiled one does:
      * the linker checks them across objects, and a disassembler decodes
      * Thumb-2 only when told the core has it. */
+    /* MIPS: the header's MIPS32r2 | o32 | noreorder and the soft-float
+     * .MIPS.abiflags a compiled object carries, which EmbLD checks
+     * across the objects it links */
+    if (g->tgt->machine == EM_MIPS) {
+        unsigned char af[24];
+        elfw_set_flags(w, target_elf_flags(target_get()));
+        mips_build_abiflags(af);
+        elfw_add_section(w, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC,
+                         af, (Elf64_Xword)sizeof af, 8);
+    }
     if (g->tgt->machine == EM_ARM) {
         size_t alen = 0;
         unsigned char *ab = arm_build_attributes(&alen);
@@ -3036,9 +3219,23 @@ static const struct gas_target AVR_GAS = {
     0, NULL, NULL, NULL
 };
 
+/* MIPS32r2, o32. Its symbol forms -- `jal sym`, `%hi`/`%lo`, `la` -- are
+ * mipsasm_symform's, carrying R_MIPS_26, R_MIPS_HI16 and R_MIPS_LO16;
+ * `.word sym` is R_MIPS_32. A register is always `$`-spelt (is_reg),
+ * the word after a `%` is an operator (is_word), and the reorder mode is
+ * the instruction assembler's, reset at each pass. */
+static const struct gas_target MIPS_GAS = {
+    EM_MIPS, 1, mipsasm_encode, mipsasm_is_reg,
+    0, 0, 0,
+    R_MIPS_32, 0,
+    0, 0, mipsasm_symform, 0,
+    0, mipsasm_is_word, mipsasm_reset, NULL
+};
+
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+    case TARGET_MIPS32: return &MIPS_GAS;
     case TARGET_AVR: return &AVR_GAS;
     case TARGET_RISCV32: case TARGET_RISCV64: return &RISCV_GAS;
     case TARGET_THUMB: return &THUMB_GAS;
@@ -3122,7 +3319,8 @@ static void gas_free(struct gas *g, struct gexp *gx)
     free(g->syms); free(g->fix);
 }
 
-int gas_assemble(const char *in_path, const char *out_path, int preprocess)
+int gas_assemble(const char *in_path, const char *out_path, int preprocess,
+                 const char **incdirs, int nincdirs)
 {
     struct gas g;
     struct gexp gx;
@@ -3146,7 +3344,7 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess)
     }
     /* `.S` is preprocessed and `.s` is not, which is the whole of the
      * difference between them. */
-    text = preprocess ? cpp_process(in_path, src, NULL, 0) : src;
+    text = preprocess ? cpp_process(in_path, src, incdirs, nincdirs) : src;
 
     memset(&g, 0, sizeof g);
     g.path = in_path;
@@ -3239,10 +3437,15 @@ int gas_assemble_block(struct topasm *ta)
                      : s->is_object ? ASMSYM_OBJECT : ASMSYM_UNTYPED;
             as->size = s->size;
         }
-        /* its relocations, with the ELF type the assembler chose; a
-         * field against an assembler-local label names the label's
-         * offset in this block instead, which the driver turns into one
-         * against .text */
+        /* its relocations, with the ELF type the assembler chose. A
+         * field against a label this block defines and does not export
+         * names the label's offset in this block instead, which the
+         * driver turns into one against .text: the block's own label,
+         * whatever C or another block calls by the same name. Handed
+         * over by name, `loop` in a second naked function reached the
+         * first one's, and a label named like a C function reached the
+         * function. A Thumb function's address carries its bit, as the
+         * driver gives it to a named one. */
         ta->rels = xcalloc((size_t)(g.nfix ? g.nfix : 1), sizeof *ta->rels);
         for (int i = 0; i < g.nfix; i++) {
             const struct fixup *f = &g.fix[i];
@@ -3252,10 +3455,12 @@ int gas_assemble_block(struct topasm *ta)
             r->addend = f->addend;
             r->elf_type = f->type;
             r->kind = ASMREL_ABS32;
-            if (s && !s->is_global && s->sec == SEC_TEXT &&
-                !strncmp(s->name, ".L", 2)) {
+            if (s && !s->is_global && s->sec == SEC_TEXT) {
                 r->target = NULL;                 /* the block itself */
                 r->addend += s->value;
+                if (t->machine == EM_ARM && s->is_func &&
+                    f->type == R_ARM_ABS32)
+                    r->addend |= 1;
             } else {
                 r->target = xstrndup(f->sym, strlen(f->sym));
             }

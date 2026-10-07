@@ -95,6 +95,8 @@ void t_mvn_reg(struct code *c, int rd, int rm, int s);
  * returns -1, emitting nothing, for a value no flag-setting MOV encodes. */
 void t_movs_reg(struct code *c, int rd, int rm);
 int t_movs_imm(struct code *c, int rd, long imm);
+int t_it_imm_ok(long imm);
+void t_mov_imm_it(struct code *c, int rd, long imm);
 
 /* ---- data processing ------------------------------------------------ */
 
@@ -342,5 +344,68 @@ void t_rbit(struct code *c, int rd, int rm);
  * byte offset and must be a multiple of four. */
 void t_ldrex(struct code *c, int rt, int rn, int off);
 void t_strex(struct code *c, int rd, int rt, int rn, int off);
+
+/* ---- ARMv6-M: the Thumb-1 forms ----------------------------------------
+ *
+ * Sixteen bits, always: an ARMv6-M core (Cortex-M0, M0+, M1) has no
+ * 32-bit encodings but BL, MRS, MSR, DMB, DSB and ISB, and faults on the
+ * rest. The encoders above may widen when the operands do not fit a
+ * 16-bit form; these never do. A register the form cannot name (a high
+ * one where only r0-r7 fit) is an internal error; an immediate or offset
+ * that does not fit makes the int-returning ones return 0 and write
+ * nothing. Low-register data processing always sets the flags.
+ *
+ * Already Thumb-1 for every operand, and so used as they are: t_mov_reg,
+ * t_bx, t_blx, t_nop, t_hint, t_svc, t_bkpt, t_cps, t_ldr_lit16, the
+ * 16-bit branches (t_bcond16, t_b16 and their patchers) and the 32-bit
+ * ones ARMv6-M has (t_bl, t_patch_bl, t_mrs, t_msr, t_barrier).
+ * tools/t1check proves both sets against llvm-mc's thumbv6m encoder.
+ *
+ * `op` is T_OP_ADD/T_OP_SUB for the add/subtract forms, T_OP_AND, _EOR,
+ * _ADC, _SBC, _ORR or _BIC for t1_alu_reg, and a T_SH_* for the shifts. */
+int  t1_movs_imm(struct code *c, int rd, long imm);              /* 0..255 */
+void t1_movs_reg(struct code *c, int rd, int rm);
+void t1_addsub_reg(struct code *c, int op, int rd, int rn, int rm);
+int  t1_addsub_imm3(struct code *c, int op, int rd, int rn, long imm); /* 0..7 */
+int  t1_addsub_imm8(struct code *c, int op, int rdn, long imm);  /* 0..255 */
+void t1_alu_reg(struct code *c, int op, int rdn, int rm);
+void t1_shift_reg(struct code *c, int op, int rdn, int rm);      /* + ROR */
+/* LSL #0..31, LSR/ASR #1..32. */
+int  t1_shift_imm(struct code *c, int op, int rd, int rm, int sh);
+void t1_cmp_reg(struct code *c, int rn, int rm);    /* any but pc: T1 or T2 */
+int  t1_cmp_imm(struct code *c, int rn, long imm);               /* 0..255 */
+void t1_cmn(struct code *c, int rn, int rm);
+void t1_tst(struct code *c, int rn, int rm);
+void t1_negs(struct code *c, int rd, int rn);                /* rsbs #0 */
+void t1_mvns(struct code *c, int rd, int rm);
+void t1_muls(struct code *c, int rdm, int rn);           /* rdm = rn * rdm */
+/* ADD Rdn, Rm with any registers (sp and pc included), flags unchanged. */
+void t1_add_hi(struct code *c, int rdn, int rm);
+void t1_ext(struct code *c, int rd, int rm, int size, int sign);
+void t1_rev(struct code *c, int rd, int rm);
+void t1_rev16(struct code *c, int rd, int rm);
+void t1_revsh(struct code *c, int rd, int rm);
+
+/* [Rn, #off]: `off` 0..31 units of `size`. No sign-extending form. */
+int  t1_ldst_imm(struct code *c, int rt, int rn, long off, int size,
+                 int store);
+/* [Rn, Rm], every size, LDRSB and LDRSH included. */
+void t1_ldst_reg(struct code *c, int rt, int rn, int rm, int size, int sign,
+                 int store);
+int  t1_ldst_sp(struct code *c, int rt, long off, int store); /* 0..1020 */
+int  t1_add_sp_imm(struct code *c, int rd, long off);        /* 0..1020 */
+int  t1_sp_adjust(struct code *c, long imm, int sub);         /* 0..508 */
+/* ADR Rd, Align(pc, 4) + off, `off` 0..1020 forward. */
+int  t1_adr(struct code *c, int rd, long off);
+/* Re-aim the ADR / LDR (literal) at `at` at code offset `target`; 0 when
+ * it is out of reach (behind, or more than 1020 bytes past Align(pc, 4)). */
+int  t1_patch_adr(struct code *c, int at, int target);
+int  t1_patch_ldr_lit(struct code *c, int at, int target);
+/* LDMIA/STMIA Rn{!}: write-back unless a load names Rn. */
+int  t1_ldm_stm(struct code *c, int rn, unsigned mask, int load);
+/* r0-r7 plus lr / pc. The offset, or -1 when the list does not fit. */
+int  t1_push(struct code *c, unsigned mask);
+int  t1_pop(struct code *c, unsigned mask);
+int  t1_udf(struct code *c, int imm8);
 
 #endif

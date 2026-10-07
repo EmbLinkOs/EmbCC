@@ -61,8 +61,8 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e)
         size = align = wb;
     }
 
-    int apa = gen_addr(fn, e->lhs);
-    int cur = emit_load(fn, apa, ptr);
+    int apa;
+    int cur = irg_va_ptr_read(fn, e->lhs, ptr, &apa);
 
     /* A struct of more than two registers came by REFERENCE: its slot is
      * a pointer to the caller's copy. A smaller one is its own bytes in
@@ -96,7 +96,7 @@ int irg_va_arg_riscv(struct ir_func *fn, struct expr *e)
         int addr = new_temp(fn);
         emit_mov(fn, addr, cur);
         step = (size + wb - 1) & ~(long)(wb - 1);
-        emit_store(fn, apa,
+        irg_va_ptr_write(fn, e->lhs, apa,
                    emit_bin(fn, IR_ADD, addr, emit_const(fn, step, wb),
                             wb, 1),
                    ptr);

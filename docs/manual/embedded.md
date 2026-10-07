@@ -15,8 +15,9 @@ rather than repeating them.
 
 | Board family | Triples | Startup written in | Interrupt handlers | Runtime archive |
 |---|---|---|---|---|
-| ARM Cortex-M (ARMv7-M, ARMv7E-M, ARMv8-M Mainline) | `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | C | `__attribute__((interrupt))` or a plain function | `librt.a` per triple |
+| ARM Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M Mainline) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | C | `__attribute__((interrupt))` or a plain function | `librt.a` per triple |
 | RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | C, with a stack stub from EmbLD | assembly entry, C body | `librt.a` for RV32 only |
+| MIPS32 (MIPS32r2, little-endian, a PIC32's core) | `mipsel-none-elf` | C, with a stack stub from EmbLD | assembly entry (`.S` or naked), C body | `librt.a` and `libc.a` |
 | AVR (ATmega328P) | `avr` | assembly | `__attribute__((signal))`, `__attribute__((interrupt))` | `librt.a` |
 | x86-64 kernel | `x86_64-elf`, `x86_64-emblink` | assembly | assembly entry, C body | none built; libgcc's names (see [below](#x86-64-kernels-and-emblinkos)) |
 
@@ -46,7 +47,7 @@ Without a memory map the driver refuses the link
 (`embcc: error: linking a thumbv7m-none-eabi image needs its memory
 map`).
 
-`embld` reads ARM, RV32, RV64, AVR and x86-64 objects. It does not read
+`embld` reads ARM, RV32, RV64, MIPS32, AVR and x86-64 objects. It does not read
 AArch64 objects; a bare-metal AArch64 image is linked with another
 toolchain's linker (see [Running images under QEMU](#running-images-under-qemu)).
 
@@ -107,20 +108,20 @@ It emits no stack-protector calls (`-fstack-protector` is refused), no
 `__aeabi_*` calls, no `__atomic_*` or `__sync_*` library calls (atomic
 operations are inline or refused; see each board's section), no
 profiling or sanitizer runtime calls (`-fsanitize=` checks trap in place),
-and no `abort`: `__builtin_trap()` is `udf #0` on ARM and `unimp` on
-RISC-V, and on AVR a jump to itself.
+and no `abort`: `__builtin_trap()` is `udf #0` on ARM, `unimp` on
+RISC-V and `break` on MIPS32, and on AVR a jump to itself.
 
 Which operations become helper calls depends on the target:
 
-| Operation | Cortex-M soft-float | Cortex-M `-eabihf` | RV32 | RV64 | AVR |
-|---|---|---|---|---|---|
-| 8/16/32-bit multiply | inline | inline | inline (M) | inline (M) | `__mulsi3` |
-| 8/16/32-bit divide, remainder | inline (`sdiv`/`udiv`) | inline | inline (M) | inline (M) | `__divsi3` `__udivsi3` `__modsi3` `__umodsi3` |
-| 64-bit add, subtract, shift, compare, multiply | inline | inline | inline | inline | inline, except multiply: `__muldi3` |
-| 64-bit divide, remainder | `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | same | same | inline | same |
-| `float` arithmetic, comparison, conversion | `__addsf3` `__mulsf3` `__ltsf2` `__fixsfsi` ... | inline (VFP), except conversions to and from 64-bit integers (`__fixsfdi`, `__floatdisf`) | `__addsf3` ... | `__addsf3` ... | `__addsf3` ... |
-| `double` arithmetic, comparison, conversion | `__adddf3` `__muldf3` `__ltdf2` `__floatsidf` `__extendsfdf2` ... | same (the FPU is single-precision) | same | same | not applicable: `double` is `float` |
-| `_Complex` multiply, divide | `__mulsc3` `__muldc3` `__divsc3` `__divdc3` | same | same | same | same |
+| Operation | Cortex-M soft-float | Cortex-M `-eabihf` | RV32 | RV64 | MIPS32 | AVR |
+|---|---|---|---|---|---|---|
+| 8/16/32-bit multiply | inline | inline | inline (M) | inline (M) | inline (`mul`) | `__mulsi3` |
+| 8/16/32-bit divide, remainder | inline (`sdiv`/`udiv`) | inline | inline (M) | inline (M) | inline (`div`/`divu`) | `__divsi3` `__udivsi3` `__modsi3` `__umodsi3` |
+| 64-bit add, subtract, shift, compare, multiply | inline | inline | inline | inline | inline | inline, except multiply: `__muldi3` |
+| 64-bit divide, remainder | `__divdi3` `__udivdi3` `__moddi3` `__umoddi3` | same | same | inline | same | same |
+| `float` arithmetic, comparison, conversion | `__addsf3` `__mulsf3` `__ltsf2` `__fixsfsi` ... | inline (VFP), except conversions to and from 64-bit integers (`__fixsfdi`, `__floatdisf`) | `__addsf3` ... | `__addsf3` ... | `__addsf3` ... | `__addsf3` ... |
+| `double` arithmetic, comparison, conversion | `__adddf3` `__muldf3` `__ltdf2` `__floatsidf` `__extendsfdf2` ... | same (the FPU is single-precision) | same | same | same | not applicable: `double` is `float` |
+| `_Complex` multiply, divide | `__mulsc3` `__muldc3` `__divsc3` `__divdc3` | same | same | same | same | same |
 
 The complete list of what each `librt.a` defines is in
 [Libraries](libraries.md#the-compiler-runtime-librt). The names are
@@ -134,9 +135,10 @@ from another ARM compiler that calls them must bring its own.
 
 `make rt-embedded` builds one `librt.a` per embedded triple with
 `tools/build-rt.sh`, at `-Os`, into `build/libc/TRIPLE/librt.a`:
-`avr`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`,
+`avr`, `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`,
 `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`,
-`thumbv8m.main-none-eabihf` and `riscv32-unknown-elf`. `make install`
+`thumbv8m.main-none-eabihf`, `riscv32-unknown-elf` and
+`mipsel-none-elf`. `make install`
 copies each to `PREFIX/lib/embcc/VERSION/TRIPLE/librt.a`. To build one by
 hand:
 
@@ -366,16 +368,18 @@ table above, region by region. The details are in
 
 | Part | Triple | Notes |
 |---|---|---|
+| Cortex-M0, M0+, M1 | `thumbv6m-none-eabi`, or `-mcpu=cortex-m0` (`m0plus`, `m1`) on any ARM triple | Thumb-1; divide, 64-bit multiply and atomics are `librt.a` calls |
 | Cortex-M3 | `thumbv7m-none-eabi` | no FPU |
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
 | Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi -mfpu=fpv4-sp-d16 -mfloat-abi=hard` | single-precision FPU, hard-float convention |
 | Cortex-M7 | `thumbv7em-none-eabihf -mcpu=cortex-m7`, or `thumbv7em-none-eabi -mfpu=fpv5-d16 -mfloat-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
 | Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16 |
 
-`-mcpu=cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
-sub-architecture as GCC's options do. `-mcpu=cortex-m0`, `cortex-m0plus`,
-`cortex-m1` and `cortex-m23` are refused: EmbCC emits ARMv7-M Thumb-2,
-which an ARMv6-M or ARMv8-M Baseline part cannot execute. `-mthumb` is
+`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m3`,
+`cortex-m4`, `cortex-m7` and `cortex-m33` select the sub-architecture as
+GCC's options do. `-mcpu=cortex-m23` is refused: an ARMv8-M Baseline part
+is a different subset, and EmbCC emits neither ARMv6-M nor ARMv7-M code
+it can run. `-mthumb` is
 accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
@@ -655,6 +659,110 @@ void exit_qemu(int code)
 On real hardware a `bkpt` with no debugger attached escalates to a
 HardFault; remove semihosting calls from production images.
 
+### An RTOS kernel
+
+What a preemptive kernel on Cortex-M asks of its compiler, and where
+EmbCC provides it:
+
+| The kernel needs | EmbCC |
+|---|---|
+| A context switch with no prologue (PendSV) | `__attribute__((naked))` with a basic `asm` body, or file-scope `asm`; see [Naked functions](inline-asm.md#naked-functions) |
+| Critical sections on `BASEPRI` or `PRIMASK` | extended `asm` with `msr`/`mrs`; an `always_inline` wrapper inlines, and its operands live in registers |
+| Handlers for SysTick, PendSV and SVC | ordinary functions (see [Interrupt handlers](#interrupt-handlers)) in the vector table |
+| The vector table at the reset address | a `const` array with `__attribute__((section(".isr_vector"), used))` and a linker script (`-T`) |
+| 64-bit division (tick conversions) | the compiler runtime, `librt.a`, which the driver links |
+| A stack size for each task | `-fstack-usage` (see [Sizing the stack](#sizing-the-stack--fstack-usage)) |
+
+#### FreeRTOS as the worked example
+
+FreeRTOS's kernel and its GCC Cortex-M ports compile unmodified, and run
+on QEMU at `-O0`, `-O1`, `-O2` and `-Os` (tasks, a queue, a mutex, a
+software timer and time slicing; on the FPU parts, two tasks doing
+floating-point arithmetic through every switch):
+
+| Port | Target | QEMU board | Test |
+|---|---|---|---|
+| `ARM_CM3` | `thumbv7m-none-eabi` | `lm3s6965evb` | `freertos-cm3.sh` |
+| `ARM_CM4F` | `thumbv7em-none-eabihf -mfpu=fpv4-sp-d16` | `mps2-an386` | `freertos-ports.sh` |
+| `ARM_CM7/r0p1` | `thumbv7em-none-eabihf -mfpu=fpv4-sp-d16` | `mps2-an500` | `freertos-ports.sh` |
+| `ARM_CM33_NTZ/non_secure` | `thumbv8m.main-none-eabihf` | `mps2-an505` | `freertos-ports.sh` |
+| `RISC-V` (CLINT timer) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | `virt` | `freertos-ports.sh` |
+
+The files the Cortex-M3 test uses, in `tests/golden/freertos-cm3/`, are a
+starting point for a board of your own (`tests/golden/freertos-ports/`
+has the same for the MPS2 boards):
+
+- `FreeRTOSConfig.h`, whose interrupt priorities must match the part:
+  `configPRIO_BITS` is 3 on the LM3S6965 and 4 on most STM32 parts, and
+  `configMAX_SYSCALL_INTERRUPT_PRIORITY` is shifted by `8 - configPRIO_BITS`;
+- `startup.c`, whose vector table sends SVC to `vPortSVCHandler`, PendSV
+  to `xPortPendSVHandler` and SysTick to `xPortSysTickHandler`;
+- `lm3s.ld`, the memory map.
+
+With `K` the FreeRTOS-Kernel directory and the three files above in
+`board/`:
+
+```sh
+CF="--target=thumbv7m-none-eabi -Os -Iboard -I$K/include -I$K/portable/GCC/ARM_CM3"
+for f in board/startup.c main.c $K/tasks.c $K/queue.c $K/list.c $K/timers.c \
+         $K/portable/MemMang/heap_4.c $K/portable/GCC/ARM_CM3/port.c; do
+    embcc $CF -c "$f" -o "$(basename "$f" .c).o"
+done
+embcc --target=thumbv7m-none-eabi -T board/lm3s.ld *.o -o fw.elf
+qemu-system-arm -M lm3s6965evb -cpu cortex-m3 -nographic -kernel fw.elf
+```
+
+For a Cortex-M4F, use `--target=thumbv7em-none-eabihf -mfpu=fpv4-sp-d16`
+and the `ARM_CM4F` port, whose PendSV handler also saves `s16`-`s31`; the
+startup code must enable the FPU (`CPACR`) before `main` when anything
+before the scheduler may use it. The ARMv8-M ports name their handlers
+as CMSIS does (`SVC_Handler`, `PendSV_Handler`, `SysTick_Handler`), and
+want `configENABLE_FPU`, `configENABLE_MPU`, `configENABLE_TRUSTZONE` and
+`configRUN_FREERTOS_SECURE_ONLY` set in `FreeRTOSConfig.h`.
+
+The RISC-V port is `port.c` and `portASM.S`, compiled with `-I` naming its
+chip-specific directory (`chip_specific_extensions/RISCV_MTIME_CLINT_no_extensions`
+for a CLINT timer). Its `FreeRTOSConfig.h` gives the timer's addresses
+(`configMTIME_BASE_ADDRESS`, `configMTIMECMP_BASE_ADDRESS`; on QEMU's
+`virt` `0x0200BFF8` and `0x02004000`), and `configCPU_CLOCK_HZ` is the
+timer's rate, 10 MHz there. The startup points `mtvec` at
+`freertos_risc_v_trap_handler` before calling `main` (see
+`tests/golden/freertos-ports/riscv-start.S`).
+
+Under QEMU, add `-icount shift=2` when the program measures time:
+without it SysTick follows the host's clock, and a loaded host delivers
+fewer ticks than the guest's code expects.
+
+#### Writing your own
+
+The port's three hard parts are the same for any kernel:
+
+- **The context switch.** A naked PendSV handler saves `r4`-`r11` (and,
+  with an FPU, `s16`-`s31` when `lr` says the task used it) on the
+  process stack, stores the stack pointer in the current task's control
+  block, calls the scheduler with interrupts masked, and restores the
+  next task the same way. Nothing in a naked function may need a frame:
+  only basic `asm` is allowed in its body, and EmbCC refuses anything
+  else by name.
+- **Critical sections.** Raise `BASEPRI` rather than masking everything,
+  so that interrupts above the kernel's priority still run:
+
+  ```c
+  static inline __attribute__((always_inline)) unsigned raise_basepri(void)
+  {
+      unsigned old, pri = 5 << (8 - 3);
+      __asm__ volatile("mrs %0, basepri\n\tmsr basepri, %1\n\tisb\n\tdsb"
+                       : "=r"(old) : "r"(pri) : "memory");
+      return old;
+  }
+  ```
+
+  The `"memory"` clobber is what keeps the compiler from moving loads
+  and stores of shared data across the boundary.
+- **Shared data.** A flag or counter an interrupt writes is `volatile`;
+  a structure the kernel protects with a critical section is not, and
+  must not need to be.
+
 ## RISC-V
 
 ### The target
@@ -840,6 +948,144 @@ software `float` and `double`, and complex multiply and divide. RV64
 divides 64-bit integers in hardware and needs only the floating-point
 and complex routines, which have to be compiled by hand (see
 [The runtime archive](#the-runtime-archive)).
+
+## MIPS32
+
+### The target
+
+`mipsel-none-elf` generates MIPS32 Release 2 code, little-endian, with
+the o32 ABI and soft float: the configuration of a PIC32MX or PIC32MZ
+part's core used without its FPU. The code is not abicalls code and puts
+nothing in small data: addresses are built with `lui`/`addiu`, calls are
+`jal`, and `$gp` is never read. Plain `char` is signed, `long double` is
+`double`, and a misaligned word access is avoided rather than trapped:
+a packed member is read with `lwl`/`lwr`. The options and the full data
+model are in [Targets](targets.md#mips32).
+
+### Boot
+
+As on RISC-V, C cannot set `sp`, and `embld -Tstack ADDR` puts a stub at
+the start of the image that loads `ADDR` into `sp` and jumps to the `-e`
+symbol through `t9`. The startup is then C:
+
+```sh
+embcc --target=mipsel-none-elf -Os -c boot.c -o boot.o
+embld -e _start -Ttext 0x80100000 -Tstack 0x80800000 boot.o main.o \
+      build/libc/mipsel-none-elf/libc.a build/libc/mipsel-none-elf/librt.a \
+      -o fw.elf
+```
+
+`tests/harness/mips/boot.c` is a complete startup for QEMU's `malta`
+board: it copies `.data`, zeroes `.bss`, runs the static constructors and
+calls `main`. Its image is linked in KSEG0 (cached, unmapped), so
+`.data` needs no `-Tdata`. A PIC32 runs from flash in KSEG1 or KSEG0 and
+keeps its data in RAM: link it with `-Ttext` at the flash address and
+`-Tdata` at the RAM address, as on Cortex-M. A `jal` keeps the caller's
+top four address bits, so a call must stay in its 256 MiB region: code in
+the boot flash (KSEG1, `0xbfc00000`) calling program flash in KSEG0
+(`0x9d000000`) must go through a function pointer, and EmbLD refuses a
+`jal` that does not reach (`a jal or j at ADDR to 'f' at ADDR, which is
+in another 256 MiB region`).
+
+### Exceptions and interrupts
+
+`__attribute__((interrupt))` is refused on MIPS32. An exception or
+interrupt handler is an entry written in a `.S` file (or a naked
+function, or a file-scope `asm` block) that saves the registers C may
+change, calls a C function, restores them and returns with `eret`.
+`tests/golden/mips-exc/vector.S` is a complete one, run on `malta` by
+`tests/golden/mips-exc.sh`, and its shape is:
+
+```asm
+/* vector.S */
+#define FRAME (16 + 4 * 24)
+    .text
+    .set noat                       /* $at is saved by hand */
+
+    .globl exc_stub, exc_stub_end   /* copied to EBase + 0x180 */
+    .set push
+    .set noreorder
+exc_stub:
+    lui     $k0, %hi(exc_entry)
+    addiu   $k0, $k0, %lo(exc_entry)
+    jr      $k0
+    nop
+exc_stub_end:
+    .set pop
+
+exc_entry:
+    addiu   $sp, $sp, -FRAME
+    sw      $at, 16($sp)            /* ...and v0-v1, a0-a3, t0-t9, ra */
+    mfhi    $t0                     /* ...and HI, LO */
+    sw      $t0, 88($sp)
+    mfc0    $a0, $13                /* Cause */
+    mfc0    $a1, $14                /* EPC */
+    addiu   $a2, $sp, 16            /* the saved words, for C to edit */
+    jal     exc_c                   /* returns where to resume */
+    mtc0    $v0, $14
+    ehb
+    lw      $t0, 88($sp)            /* restore in reverse */
+    mthi    $t0
+    lw      $at, 16($sp)
+    addiu   $sp, $sp, FRAME
+    eret
+```
+
+The file is in `.set reorder` mode outside the stub, so the assembler
+puts a `nop` after `jal` and `jr`; the stub is in `.set noreorder` so it
+is exactly four words. The C side copies the stub to the vector and
+clears `Status.BEV`, `ERL` and `EXL` (`tests/harness/mips/boot.c` does
+the same for its fault report):
+
+```c
+extern char exc_stub[], exc_stub_end[];
+
+unsigned exc_c(unsigned cause, unsigned epc, unsigned *frame)
+{
+    switch ((cause >> 2) & 31) {
+    case 8:                                 /* syscall: resume after it */
+        frame[1] = handle_syscall(frame[3]);    /* v0 from a0 */
+        return epc + 4;
+    case 0:                                 /* an interrupt: resume at it */
+        if (cause & (1u << 15))             /* IP7, the CP0 timer */
+            timer_tick();                   /* writes Compare: the ack */
+        return epc;
+    }
+    return epc + 4;
+}
+
+void install(void)
+{
+    volatile unsigned *vec = (volatile unsigned *)0x80000180u;
+    for (unsigned k = 0; k < (unsigned)(exc_stub_end - exc_stub) / 4; k++)
+        vec[k] = ((unsigned *)exc_stub)[k];
+}
+```
+
+A real core caches the vector's words: write them back from the data
+cache and invalidate the instruction cache (`cache`, or `synci`) before
+the first exception; QEMU models no caches. Interrupts are enabled and
+disabled with inline `ei`, `di` and `ehb`, and CP0 registers are read and
+written with `mfc0` and `mtc0`; see [MIPS32](inline-asm.md#mips32) in
+Inline Assembly. `cache` and `synci` are not in the assembler's
+vocabulary yet.
+
+### Atomics
+
+4-byte atomic read-modify-write operations are inline `ll`/`sc` loops
+bracketed by `sync`. An atomic load of 4 bytes or fewer is one `lw`
+(`lhu`, `lbu`) followed by `sync`, and an atomic store one `sw` (`sh`,
+`sb`) with a `sync` before and after: never the two-instruction
+`lwl`/`lwr` form a packed member gets, which an interrupt could split. A read-modify-write of a 1- or 2-byte object, and any 8-byte
+atomic, is refused by name. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is
+defined, and the 1-, 2- and 8-byte forms are not.
+
+### Runtime
+
+`make rt-embedded libc-embedded` builds `librt.a` (the 64-bit division
+routines, soft `float` and `double`, complex multiply and divide) and
+`libc.a` (EmbCC's C library on its bare-metal backend: `write` is a weak
+function the program overrides to reach its UART) for `mipsel-none-elf`.
 
 ## AVR (ATmega328P)
 
@@ -1071,8 +1317,8 @@ cross toolchain; only the program under test comes from EmbCC.
 ## C++ on the embedded targets
 
 EmbCC's C++ front end lays out classes for a target whose `long` and
-pointers are 8 bytes. On the Cortex-M targets, RV32 and AVR it refuses to
-generate code for a C++ unit:
+pointers are 8 bytes. On the Cortex-M targets, RV32, MIPS32 and AVR it
+refuses to generate code for a C++ unit:
 
 ```text
 embcc: error: C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4
@@ -1105,10 +1351,12 @@ link line for each board:
 
 | Harness | QEMU command | Output | How the run ends |
 |---|---|---|---|
+| `thumb-m0/` (Cortex-M0) | `qemu-system-arm -M microbit -nographic -kernel IMAGE`; `-global nrf51-soc.sram-size=65536` for more than the part's 16 KiB | nRF51 UART0 at `0x40002000`: `ENABLE` (`+0x500`) = 4, trigger `TASKS_STARTTX` (`+0x008`), then each byte to `TXD` (`+0x51C`) and wait for `EVENTS_TXDRDY` (`+0x11C`) | `_exit` prints `==EXIT n==`, and `run.sh` stops QEMU there and exits with `n` (125 for a fault, reported with the faulting pc) |
 | `thumb/` (Cortex-M3) | `qemu-system-arm -M lm3s6965evb -cpu cortex-m3 -nographic -kernel IMAGE` | UART0 data register at `0x4000C000` | the startup executes `__builtin_trap()` after `main`; with no HardFault handler the core locks up and QEMU exits |
 | `thumb-m4f/` (Cortex-M4F) | `qemu-system-arm -M mps2-an386 -cpu cortex-m4 -nographic -kernel IMAGE` | CMSDK UART at `0x40004000`; set `CTRL` (`0x40004008`) to 1 first | killed at the timeout |
 | `thumb-m33/` (Cortex-M33) | `qemu-system-arm -M mps2-an505 -cpu cortex-m33 -nographic -kernel IMAGE` | CMSDK UART at `0x40200000` | killed after the sentinel or the timeout |
 | `riscv/` (RV32, RV64) | `qemu-system-riscv32` or `qemu-system-riscv64 -M virt -bios none -nographic -m 8 -kernel IMAGE` | 16550A UART at `0x10000000` | the startup writes `0x5555` to the SiFive test device at `0x100000`, and QEMU exits with status 0 |
+| `mips/` (MIPS32r2, 24Kc) | `qemu-system-mipsel -M malta -cpu 24Kc -m 64 -display none -monitor none -serial null -serial null -serial stdio -no-reboot -kernel IMAGE` | the FPGA UART at `0xbf000900` (third serial port) | the program prints `==EXIT n ==`, then writes `0x42` to the board's reset register at `0xbf000500`, which `-no-reboot` turns into QEMU's exit |
 | `avr/` (ATmega328P) | `qemu-system-avr -M uno -nographic -bios IMAGE` | USART0 (`UDR0` at `0xC6`) | killed after the sentinel or the timeout |
 | `x86_64/` | `qemu-system-x86_64 -cpu max -m 128M -display none -no-reboot -monitor none -serial none -debugcon stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04 -kernel IMAGE` | debug console, port `0xE9` | the program prints `@@EMBCC-EXIT n@@` and writes to `isa-debug-exit` |
 | `aarch64/` | `qemu-system-aarch64 -M virt -cpu cortex-a72 -semihosting -nographic -kernel IMAGE` | ARM semihosting | semihosting exit, carrying the status |
@@ -1122,6 +1370,8 @@ Board details the harnesses encode:
 - On `virt`, `-bios none` keeps OpenSBI out, so the image runs in machine
   mode from `0x80000000`.
 - On `uno`, the image is given with `-bios`, not `-kernel`.
+- On `malta`, `-kernel` loads the image at its KSEG0 link address
+  (`0x80100000`) and QEMU's own reset code jumps to its entry.
 - `isa-debug-exit` can only report `(v << 1) | 1`, which is why the x86-64
   harness prints the real exit code first and `run.sh` reads it back
   (124 for a timeout, 125 for a crash).
@@ -1143,9 +1393,9 @@ The harness scripts read these environment variables:
 |---|---|
 | `EMBCC_QEMU_TIMEOUT` | seconds before a run is killed (10 for the boards, 20 for x86-64 and AArch64) |
 | `EMBCC_QEMU_UNTIL` | the sentinel `avr/run.sh` and `thumb-m33/run.sh` pass to `--until` |
-| `EMBCC_QEMU_ARM`, `EMBCC_QEMU_RISCV`, `EMBCC_QEMU_AVR`, `EMBCC_QEMU_X86`, `EMBCC_QEMU_AARCH64` | the QEMU binary to run |
+| `EMBCC_QEMU_ARM`, `EMBCC_QEMU_RISCV`, `EMBCC_QEMU_MIPS`, `EMBCC_QEMU_AVR`, `EMBCC_QEMU_X86`, `EMBCC_QEMU_AARCH64` | the QEMU binary to run |
 | `EMBLD` | the `embld` the board `link.sh` scripts use |
-| `EMBCC_THUMB_HARNESS`, `EMBCC_M33_HARNESS`, `EMBCC_RISCV_HARNESS`, `EMBCC_AVR_HARNESS` | where `boot.o` and `io.o` were built |
+| `EMBCC_THUMB_HARNESS`, `EMBCC_M33_HARNESS`, `EMBCC_RISCV_HARNESS`, `EMBCC_MIPS_HARNESS`, `EMBCC_AVR_HARNESS` | where `boot.o` and `io.o` were built |
 
 ## Debugging a board
 

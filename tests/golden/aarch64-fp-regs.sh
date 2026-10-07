@@ -8,7 +8,9 @@
 #     `and #imm` elsewhere in the function used to take vreg 0 out of the
 #     float class (cg_float_vregs read every op's unused `c` field, 0);
 #   - a value both kinds of op touch crosses the register files with one
-#     fmov, never a store and a load;
+#     fmov, never a store and a load -- and lives in the file most of its
+#     uses are in: fdlibm's x, read by many float ops and by the one shift
+#     that takes its high word, stays in a d register;
 #   - a double constant is one `ldr dN, <literal>` from the function's
 #     pool, not mov/movk/movk/movk/fmov; +0.0 is `fmov d, xzr`.
 set -u
@@ -44,6 +46,14 @@ double poly(double z)
            z * 4.13813679705723846039e-08)));
 }
 double zero(void) { return 0.0; }
+double kt(double x)
+{
+    int hx;
+    { shape u; u.value = x; hx = (int)u.parts.msw; }
+    if (hx > 0x3fe00000)
+        return x * x * x + x * 0.5 + x;
+    return x * x - x;
+}
 EOF
 "$EMBCC" --target=aarch64-elf -O2 -c "$out/f.c" -o "$out/f.o" || fail "f.c"
 "$OBJDUMP" -d --no-show-raw-insn "$out/f.o" > "$out/f.dis"
@@ -72,4 +82,11 @@ if grep -q 'movk' "$out/poly.dis"; then
     cat "$out/poly.dis"; fail "poly: a constant built with movk"
 fi
 fn zero | grep -q 'fmov	d0, xzr' || { fn zero; fail "zero: 0.0 is not fmov from xzr"; }
-echo "AArch64: a float parameter in d0, crossings by fmov, constants from the literal pool"
+fn kt > "$out/kt.dis"
+if grep -q 'fmov	d[0-9]*, x' "$out/kt.dis"; then
+    cat "$out/kt.dis"; fail "kt: x lives in an x register and every float use moves it back"
+fi
+grep -q 'fmov	x[0-9]*, d' "$out/kt.dis" ||
+    { cat "$out/kt.dis"; fail "kt: no fmov out for the high word"; }
+echo "AArch64: a float parameter in d0, crossings by fmov, mixed values in the file most uses are in,"
+echo "and constants from the literal pool"

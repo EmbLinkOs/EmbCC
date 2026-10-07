@@ -43,6 +43,11 @@ void opt_run(struct ir_unit *iu, int level);
  * defaults; an explicit flag overrides whatever the level chose. */
 int opt_set_pass(const char *name, int on);
 
+/* -fno-inline-functions: the inliner takes only a function declared
+ * `inline` (in any declaration) or always_inline, at every level.
+ * -finline-functions restores the default, which considers them all. */
+void opt_set_inline_declared_only(int on);
+
 /* Every pass name, for --help and for an error message that can list
  * them. Returns the count; names[] is static. */
 int opt_pass_names(const char *const **names);

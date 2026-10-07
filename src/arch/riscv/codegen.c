@@ -49,6 +49,8 @@
 
 struct rv_fn;
 static void copy_block(struct rv_fn *F, int copy, long size, int step);
+static void copy_block_at(struct rv_fn *F, int copy, long size, int step,
+                          int sreg, long soff, int dreg, long doff);
 
 /* The scratch registers. Four named ones, because a 64-bit value at RV32
  * is a pair and a binary operation on two of them needs four; t5 and t6
@@ -160,15 +162,22 @@ struct rv_fn {
  * asks for: a short-lived value takes one and the prologue never has to
  * save it.
  */
-#define RV_NPOOL 20
+#define RV_NPOOL 21
 static const int RV_POOL[RV_NPOOL] = {
     /* caller-saved: a0-a7, then the one spare temporary */
     RV_A0, RV_A1, RV_A2, RV_A3, RV_A4, RV_A5, RV_A6, RV_A7, RV_T3,
-    /* callee-saved: s1, s2-s11. s0 is left out -- it is the frame
-     * pointer by convention and DWARF names it as the frame base, and
-     * a register the debugger believes in is not one to hand out. */
-    RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4, RV_S2 + 5,
-    RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
+    /* callee-saved: s0, s1, s2-s11. s0 and s1 first: they are x8 and
+     * x9, the only callee-saved registers the compressed loads, stores
+     * and ALU forms reach.
+     *
+     * s0 was left out as "the frame pointer", which this backend does not
+     * keep: every slot is addressed from sp, and DWARF's frame base is sp
+     * too (src/debug/dwarf.c), except in a function with a variable-
+     * length array, where s0 holds the frame base and rv_pool_for takes it
+     * out. Everywhere else it sat unused -- not one access in lib/libc
+     * went through it -- while clang hands it out like s1. */
+    RV_FP, RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4,
+    RV_S2 + 5, RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
 };
 /* The same list with the argument file removed, for a variadic
  * function: its prologue spills a0-a7 into the register save area and
@@ -176,8 +185,8 @@ static const int RV_POOL[RV_NPOOL] = {
  */
 static const int RV_POOL_VA[RV_NPOOL - 8] = {
     RV_T3,
-    RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4, RV_S2 + 5,
-    RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
+    RV_FP, RV_S1, RV_S2, RV_S2 + 1, RV_S2 + 2, RV_S2 + 3, RV_S2 + 4,
+    RV_S2 + 5, RV_S2 + 6, RV_S2 + 7, RV_S2 + 8, RV_S2 + 9
 };
 
 /* Registers the RV32 pair pass (rv_pair_alloc) took for the whole
@@ -203,6 +212,9 @@ static const int *rv_pool_for(const struct ir_func *fn, int *n)
                 out |= 1UL << RV_T3;
                 break;
             }
+    /* A VLA's function addresses its frame from s0 (IR_ALLOCA). */
+    if (fn->has_alloca)
+        out |= 1UL << RV_FP;
     if (!out) {
         *n = np;
         return p;
@@ -336,6 +348,10 @@ static const struct ra_target RISCV_RA = {
 
 /* -O2 and -Os: the allocator is on. */
 static int g_rv_regalloc;
+/* -O0: the allocator runs for the temporaries of each expression only,
+ * every source variable pinned to its slot as under -g; see thumb's
+ * g_t_o0. */
+static int g_rv_o0;
 
 /* ---- refusal ---------------------------------------------------------- */
 
@@ -728,14 +744,20 @@ static void layout(struct rv_fn *F)
      * Temporaries share a pool (ra_coalesce_temps, as the other backends
      * use): two whose live ranges do not overlap take one slot. A 64-bit
      * temp at RV32 keeps a slot of its own, eight-aligned, and so is shown
-     * to the coalescer as if it had a register. Then locals, small ones
+     * to the coalescer as if it had a register. At RV64 a 64-bit temp is
+     * one register and shares the pool like any other: `wide` marks it
+     * there too (wide_map), and reading the map without asking the XLEN
+     * gave each one a slot of its own -- xTaskIncrementTick's -O0 frame
+     * was 2384 bytes at RV64 against 128 at RV32, and FreeRTOS's timer
+     * task overflowed a 2 KB stack. Then locals, small ones
      * first; one nothing names needs none (ra_locals_referenced), nor one
      * in a register (ra_slot_dead; under -g every local keeps its slot). */
     {
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
         for (int v = 0; v < nv; v++)
-            loc2[v] = in_reg(F, v) || F->wide[v] || is16(F, v) ? 0 : -1;
+            loc2[v] = in_reg(F, v) || (F->xlen == 32 && F->wide[v]) ||
+                      is16(F, v) ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
@@ -760,7 +782,7 @@ static void layout(struct rv_fn *F)
             off += 16;
         }
         for (int v = fn->nvars; v < nv; v++) {
-            if (!F->wide[v] || in_reg(F, v) || is16(F, v))
+            if (F->xlen != 32 || !F->wide[v] || in_reg(F, v) || is16(F, v))
                 continue;
             off = (off + 7) & ~7L;
             F->slot[v] = off;
@@ -1619,25 +1641,6 @@ static int cmp_imm_to_reg(struct rv_fn *F, enum binop pred, int sign,
  * addition wrapped. That is the whole trick, and it is why these
  * sequences are a little longer than ARM's adds/adcs.
  */
-static void add64(struct rv_fn *F)
-{
-    struct code *t = F->t;
-    rv_alu(t, RV_ADD, SCR, A_LO, B_LO, 0);
-    rv_alu(t, RV_SLTU, SCR2, SCR, B_LO, 0);      /* did it wrap? */
-    rv_mv(t, A_LO, SCR);
-    rv_alu(t, RV_ADD, A_HI, A_HI, B_HI, 0);
-    rv_alu(t, RV_ADD, A_HI, A_HI, SCR2, 0);
-}
-
-static void sub64(struct rv_fn *F)
-{
-    struct code *t = F->t;
-    rv_alu(t, RV_SLTU, SCR2, A_LO, B_LO, 0);     /* will it borrow? */
-    rv_alu(t, RV_SUB, A_LO, A_LO, B_LO, 0);
-    rv_alu(t, RV_SUB, A_HI, A_HI, B_HI, 0);
-    rv_alu(t, RV_SUB, A_HI, A_HI, SCR2, 0);
-}
-
 /* A shift of a 64-bit value by a CONSTANT amount. */
 static void shift64_imm(struct rv_fn *F, int op, int sign, long n)
 {
@@ -1939,18 +1942,40 @@ static int gen_ins64(struct rv_fn *F, int n)
             wr64(F, i->dst, A_LO, A_HI);
         }
         return 1;
-    case IR_ADD:
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
-        add64(F);
-        wr64(F, i->dst, A_LO, A_HI);
+    case IR_ADD: case IR_SUB: {
+        /* Operands where they live and the result where it lives, as
+         * the logic operations below: through A and B a pair-to-pair add
+         * was eight moves around five instructions. The carry (borrow)
+         * is computed from the low words before the low result can
+         * overwrite one of them; the low result waits in SCR only when
+         * its register is still to be read. */
+        int al, ah, bl, bh, dl, dh;
+        src64(F, i->a, A_LO, A_HI, &al, &ah);
+        if (i->imm_b) {
+            operand_b64(F, i, B_LO, B_HI);
+            bl = B_LO; bh = B_HI;
+        } else {
+            src64(F, i->b, B_LO, B_HI, &bl, &bh);
+        }
+        dst64(F, i->dst, &dl, &dh);
+        int lo = dl == ah || dl == bh || (i->op == IR_ADD && dl == bl)
+                     ? SCR : dl;
+        if (i->op == IR_ADD) {
+            rv_alu(t, RV_ADD, lo, al, bl, 0);
+            rv_alu(t, RV_SLTU, SCR2, lo, bl, 0);     /* did it wrap? */
+            rv_alu(t, RV_ADD, dh, ah, bh, 0);
+            rv_alu(t, RV_ADD, dh, dh, SCR2, 0);
+        } else {
+            rv_alu(t, RV_SLTU, SCR2, al, bl, 0);     /* will it borrow? */
+            rv_alu(t, RV_SUB, lo, al, bl, 0);
+            rv_alu(t, RV_SUB, dh, ah, bh, 0);
+            rv_alu(t, RV_SUB, dh, dh, SCR2, 0);
+        }
+        if (lo != dl)
+            rv_mv(t, dl, lo);
+        wr64(F, i->dst, dl, dh);
         return 1;
-    case IR_SUB:
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
-        sub64(F);
-        wr64(F, i->dst, A_LO, A_HI);
-        return 1;
+    }
     case IR_AND: case IR_OR: case IR_XOR: {
         /* Each half on its own: operands where they live, result where it
          * lives. */
@@ -2032,12 +2057,18 @@ static int gen_ins64(struct rv_fn *F, int n)
     case IR_EXT:
         /* Widening TO 64 bits: the low word is the value, the high word
          * is its sign or zero. */
-        rd(F, i->a, A_LO);
-        if (i->size < 4)
-            ext_reg(F, A_LO, A_LO, i->size, i->sign);
-        if (i->sign) rv_shift_imm(t, RV_SRA, A_HI, A_LO, 31, 0, 32);
-        else         rv_mv(t, A_HI, RV_ZERO);
-        wr64(F, i->dst, A_LO, A_HI);
+        {
+            /* From where it lives into the destination's own pair. */
+            int s = rdr(F, i->a, A_LO), dl, dh;
+            dst64(F, i->dst, &dl, &dh);
+            if (i->size < 4)
+                ext_reg(F, dl, s, i->size, i->sign);
+            else if (dl != s)
+                rv_mv(t, dl, s);
+            if (i->sign) rv_shift_imm(t, RV_SRA, dh, dl, 31, 0, 32);
+            else         rv_mv(t, dh, RV_ZERO);
+            wr64(F, i->dst, dl, dh);
+        }
         return 1;
     /* These four reach here when EITHER side is 64 bits, and only one
      * of them has to be: `*(unsigned *)p = (unsigned)(v >> i)` is a
@@ -2050,6 +2081,16 @@ static int gen_ins64(struct rv_fn *F, int n)
      * low word, and a narrower read extends into the high one. */
     case IR_LDVAR:
         if (i->size == 8) {
+            /* Straight between the two homes, as IR_MOV does: through
+             * A, a pair-to-pair read was four moves. */
+            if (in_reg(F, i->dst)) {
+                rd64(F, i->a, F->loc[i->dst], F->loc[i->dst] + 1);
+                return 1;
+            }
+            if (in_reg(F, i->a)) {
+                wr64(F, i->dst, F->loc[i->a], F->loc[i->a] + 1);
+                return 1;
+            }
             rd64(F, i->a, A_LO, A_HI);       /* the local, slot or pair */
         } else {
             if (in_reg(F, i->a))
@@ -2062,6 +2103,14 @@ static int gen_ins64(struct rv_fn *F, int n)
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     case IR_STVAR:
+        if (i->size == 8 && in_reg(F, i->dst)) {     /* as IR_LDVAR */
+            rd64(F, i->a, F->loc[i->dst], F->loc[i->dst] + 1);
+            return 1;
+        }
+        if (i->size == 8 && in_reg(F, i->a)) {
+            wr64(F, i->dst, F->loc[i->a], F->loc[i->a] + 1);
+            return 1;
+        }
         rd64(F, i->a, A_LO, A_HI);
         if (i->size == 8)
             wr64(F, i->dst, A_LO, A_HI);
@@ -2070,25 +2119,38 @@ static int gen_ins64(struct rv_fn *F, int n)
         else if (F->slot[i->dst] >= 0)
             st_sp(F, A_LO, sslot(F, i->dst), i->size);
         return 1;
-    case IR_LOAD:
-        rd(F, i->a, ADDR);
+    case IR_LOAD: {
+        /* The address where it lives, and the words straight into the
+         * destination's pair: through ADDR and A, a 64-bit load from a
+         * pointer in a register was two moves and the loads and two
+         * moves more. A destination whose low register IS the address
+         * takes the high word first. */
+        int ra_ = rdr(F, i->a, ADDR), dl, dh;
+        dst64(F, i->dst, &dl, &dh);
         if (i->size == 8) {
-            rv_load(t, A_LO, ADDR, 0, 4, 1, F->xlen);
-            rv_load(t, A_HI, ADDR, 4, 4, 1, F->xlen);
+            if (dl == ra_) {
+                rv_load(t, dh, ra_, 4, 4, 1, F->xlen);
+                rv_load(t, dl, ra_, 0, 4, 1, F->xlen);
+            } else {
+                rv_load(t, dl, ra_, 0, 4, 1, F->xlen);
+                rv_load(t, dh, ra_, 4, 4, 1, F->xlen);
+            }
         } else {
-            rv_load(t, A_LO, ADDR, 0, i->size, i->sign, F->xlen);
-            if (i->sign) rv_shift_imm(t, RV_SRA, A_HI, A_LO, 31, 0, 32);
-            else         rv_mv(t, A_HI, RV_ZERO);
+            rv_load(t, dl, ra_, 0, i->size, i->sign, F->xlen);
+            if (i->sign) rv_shift_imm(t, RV_SRA, dh, dl, 31, 0, 32);
+            else         rv_mv(t, dh, RV_ZERO);
         }
-        wr64(F, i->dst, A_LO, A_HI);
+        wr64(F, i->dst, dl, dh);
         return 1;
-    case IR_STORE:
-        rd(F, i->a, ADDR);
-        rd64(F, i->b, A_LO, A_HI);
-        rv_store(t, A_LO, ADDR, 0, i->size == 8 ? 4 : i->size, F->xlen);
+    }
+    case IR_STORE: {
+        int ra_ = rdr(F, i->a, ADDR), vl, vh;
+        src64(F, i->b, A_LO, A_HI, &vl, &vh);
+        rv_store(t, vl, ra_, 0, i->size == 8 ? 4 : i->size, F->xlen);
         if (i->size == 8)
-            rv_store(t, A_HI, ADDR, 4, 4, F->xlen);
+            rv_store(t, vh, ra_, 4, 4, F->xlen);
         return 1;
+    }
     case IR_SELECT: {
         int take_c, done;
         if (i->size == 8 && rv_wide_imm()) {   /* either half, in place */
@@ -2225,13 +2287,14 @@ static void gen_call(struct rv_fn *F, int n)
         copy_at = (copy_at + 15) & ~15L;
         pl[k].copy = copy_at;
         if (a->is_struct) {
-            rd(F, a->vreg, TMP);         /* its address */
+            int s = rdr(F, a->vreg, TMP);    /* its address */
+            copy_block_at(F, 1, a->size, byref_step(F->w, a), s, 0,
+                          F->fb, copy_at);
         } else {
             need16(F, a->vreg);          /* RV32's long double: its slot */
-            addr_sp(F, TMP, sslot(F, a->vreg));
+            copy_block_at(F, 1, a->size, byref_step(F->w, a), F->fb,
+                          sslot(F, a->vreg), F->fb, copy_at);
         }
-        addr_sp(F, ADDR, copy_at);
-        copy_block(F, 1, a->size, byref_step(F->w, a));
         copy_at += a->size;
     }
 
@@ -3129,9 +3192,38 @@ static void gen_ins(struct rv_fn *F, int n)
         if (i->op == IR_CMP) {
             fp_args2(F, i);
             call_helper(F, fp_cmp_name(i->pred, i->w));
-            rv_mv(t, TMP, RV_A0);
-            cmp_to_reg(F, i->pred, 1, TMP, RV_ZERO, ACC);
-            wr(F, i->dst, ACC);
+            /* The helper's int is the answer's sign (fp_cmp_name). Read
+             * only by the branch after it, it IS the branch: `bltz a0`
+             * where the 0 or 1 was built in t0, moved home and tested. */
+            if (n + 1 < F->fn->nins && F->usecnt && i->dst >= 0 &&
+                F->usecnt[i->dst] == 1) {
+                struct ir_ins *nx = &F->fn->ins[n + 1];
+                if ((nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
+                    nx->a == i->dst) {
+                    int cond, r1 = RV_A0, r2 = RV_ZERO;
+                    switch (i->pred) {
+                    case B_EQ: cond = RV_BEQ; break;
+                    case B_NE: cond = RV_BNE; break;
+                    case B_LT: cond = RV_BLT; break;
+                    case B_GE: cond = RV_BGE; break;
+                    case B_GT: cond = RV_BLT; r1 = RV_ZERO; r2 = RV_A0; break;
+                    default:   cond = RV_BGE; r1 = RV_ZERO; r2 = RV_A0; break;
+                    }
+                    if (nx->op == IR_BRZ)
+                        cond = invert_branch(cond);
+                    branch_if(F, cond, r1, r2, nx->label);
+                    F->skip_next = 1;
+                    return;
+                }
+            }
+            /* Otherwise from a0 straight into the destination: each
+             * cmp_to_reg form reads its operands in its first
+             * instruction, so the destination may be a0 itself. */
+            {
+                int d = wreg(F, i->dst, ACC);
+                cmp_to_reg(F, i->pred, 1, RV_A0, RV_ZERO, d);
+                wrote(F, i->dst, d);
+            }
             return;
         }
         if (i->op == IR_SQRT)
@@ -3599,12 +3691,12 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         return;
 
-    case IR_MEMCPY: case IR_MEMZERO:
-        rd(F, i->a, ADDR);
-        if (i->op == IR_MEMCPY)
-            rd(F, i->b, TMP);
-        copy_block(F, i->op == IR_MEMCPY, i->size, F->w);
+    case IR_MEMCPY: case IR_MEMZERO: {
+        int d = rdr(F, i->a, ADDR);
+        int s = i->op == IR_MEMCPY ? rdr(F, i->b, TMP) : RV_ZERO;
+        copy_block_at(F, i->op == IR_MEMCPY, i->size, F->w, s, 0, d, 0);
         return;
+    }
 
     case IR_CALL:
         gen_call(F, n);
@@ -4195,6 +4287,51 @@ static void copy_block(struct rv_fn *F, int copy, long size, int step)
     }
 }
 
+/* copy_block from [sreg + soff] to [dreg + doff] with those registers as
+ * the bases, when every offset fits a load's or store's immediate: a
+ * struct or long double whose address is already in a register, or whose
+ * home is a frame slot, was first moved into TMP and ADDR -- a by-value
+ * parameter's copy into its slot was `mv t1, a1; addi t2, sp, 48` before
+ * its first word. Otherwise the addresses go to TMP and ADDR, and
+ * copy_block does the rest. sreg and dreg are left as they were. */
+static void copy_block_at(struct rv_fn *F, int copy, long size, int step,
+                          int sreg, long soff, int dreg, long doff)
+{
+    struct code *t = F->t;
+    if (size <= 2040 && rv_fits(doff, 12) && rv_fits(doff + size, 12) &&
+        (!copy || (rv_fits(soff, 12) && rv_fits(soff + size, 12)))) {
+        /* the data register: SCR, unless a base is (param_reg's is) */
+        int dr = sreg == SCR || dreg == SCR ? SCR2 : SCR;
+        long k;
+        for (k = 0; k + step <= size; k += step) {
+            if (copy) rv_load(t, dr, sreg, (int)(soff + k), step, 0, F->xlen);
+            rv_store(t, copy ? dr : RV_ZERO, dreg, (int)(doff + k), step,
+                     F->xlen);
+        }
+        for (; k < size; k++) {
+            if (copy) rv_load(t, dr, sreg, (int)(soff + k), 1, 0, F->xlen);
+            rv_store(t, copy ? dr : RV_ZERO, dreg, (int)(doff + k), 1,
+                     F->xlen);
+        }
+        return;
+    }
+    if (copy) {
+        if (rv_fits(soff, 12)) {
+            rv_alu_imm(t, RV_ADD, TMP, sreg, (int)soff, 0);
+        } else {
+            rv_li(t, TMP, soff, F->xlen);
+            rv_alu(t, RV_ADD, TMP, sreg, TMP, 0);
+        }
+    }
+    if (rv_fits(doff, 12)) {
+        rv_alu_imm(t, RV_ADD, ADDR, dreg, (int)doff, 0);
+    } else {
+        rv_li(t, ADDR, doff, F->xlen);
+        rv_alu(t, RV_ADD, ADDR, dreg, ADDR, 0);
+    }
+    copy_block(F, copy, size, step);
+}
+
 /* A parameter's qth incoming word, in a register ready to store.
  *
  * Normally that is the argument register itself. In a VARIADIC function
@@ -4298,10 +4435,7 @@ static void g_rv_reserve_pairs(struct ir_func *fn, const int *loc)
     int nv = fn->nvregs;
     int *first = xmalloc((size_t)(nv ? nv : 1) * sizeof *first);
     int *last = xmalloc((size_t)(nv ? nv : 1) * sizeof *last);
-    unsigned long *li = NULL, *lo;
-    int *dv = NULL, wds = 0;
-    lo = ra_live_intervals(fn, first, last, &li, &dv, &wds);
-    free(lo); free(li); free(dv);
+    ra_live_ranges(fn, first, last);
     g_rv_nres = 0;
     for (int v = 0; v < nv; v++) {
         if (loc[v] < 0 || first[v] < 0) continue;
@@ -4313,6 +4447,7 @@ static void g_rv_reserve_pairs(struct ir_func *fn, const int *loc)
             g_rv_res[g_rv_nres].reg = loc[v] + h;
             g_rv_res[g_rv_nres].first = first[v];
             g_rv_res[g_rv_nres].last = last[v];
+            g_rv_res[g_rv_nres].born = 0;
             g_rv_nres++;
         }
     }
@@ -4373,6 +4508,11 @@ static int *rv_pair_alloc(struct ir_func *fn, struct rv_fn *F,
 
 /* ---- one function --------------------------------------------------------- */
 
+/* The callee-saved renaming (defined with gen_func_best), and whether this
+ * attempt at a function makes it. */
+static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed);
+static int g_rv_lowregs = 1;
+
 static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                      int xlen, int want_debug)
 {
@@ -4425,7 +4565,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
          * both classes and leave it with nowhere to live. */
         /* Under -g a source variable stays in its frame slot, so the
          * DW_AT_location naming that slot is true (see regalloc.h). */
-        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        char *pin = want_debug || g_rv_o0 ? ra_debug_pin_vars(fn)
+                                          : (char *)0;
         int *pair = xlen == 32 && g_rv_pairs ? rv_pair_alloc(fn, &F, pin)
                                              : NULL;
         {
@@ -4446,15 +4587,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 free(ineligible);
         }
         g_rv_taken = 0;
+        unsigned long pair_regs = 0;
         if (pair) {
             for (int v = 0; v < fn->nvregs; v++)
-                if (pair[v] >= 0) F.loc[v] = pair[v];
+                if (pair[v] >= 0) {
+                    F.loc[v] = pair[v];
+                    pair_regs |= 3UL << pair[v];
+                }
             for (int k = 0; k < F.npair; k++) {
                 F.used_callee[F.nsave++] = F.pair_used[k];
                 F.used_callee[F.nsave++] = F.pair_used[k] + 1;
             }
             free(pair);
         }
+        if (g_rv_lowregs && F.loc && rv_compress_enabled())
+            rv_lowregs(fn, F.loc, pair_regs);
         free(pin);
         /* Read counts for comparison/branch fusion, with the allocator
          * on: without it every value goes through a slot and the
@@ -4484,8 +4631,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
     /* A variable-length array moves sp at run time, so the frame is
      * addressed from s0 instead, which the prologue sets once the frame
-     * is in place. s0 is callee-saved and never in the allocator's pool,
-     * so it only has to be saved like any other callee-saved register. */
+     * is in place. s0 is callee-saved and, in such a function, out of the
+     * allocator's pool (rv_pool_for), so it only has to be saved like any
+     * other callee-saved register. */
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = RV_FP;
     /* A leaf: no call in the IR and none the lowering makes -- the same
@@ -4495,7 +4643,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* A tail call leaves ra alone -- it is the caller's, and the callee
      * returns with it -- so it does not make this function a non-leaf. */
     F.tail = NULL;
-    if (g_rv_regalloc && !want_debug)
+    if (g_rv_regalloc && !want_debug && !g_rv_o0)
         for (i = 0; i < fn->nins; i++)
             if (rv_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -4641,10 +4789,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                  * would make a struct parameter's slot sometimes hold an
                  * object and sometimes an address, which is how u20()
                  * came to print a stack address where it meant 190. */
-                if (pl.nreg) rv_mv(t, TMP, param_reg(&F, &pl, 0));
-                else         ld_sp(&F, TMP, base + pl.stk, F.w, 1);
-                addr_sp(&F, ADDR, sslot(&F, i));
-                copy_block(&F, 1, a->size, byref_step(F.w, a));
+                {
+                    int src = TMP;
+                    if (pl.nreg) src = param_reg(&F, &pl, 0);
+                    else         ld_sp(&F, TMP, base + pl.stk, F.w, 1);
+                    copy_block_at(&F, 1, a->size, byref_step(F.w, a),
+                                  src, 0, F.fb, sslot(&F, i));
+                }
                 continue;
             }
             /* A SCALAR occupies whole registers and a whole slot: store
@@ -4901,6 +5052,111 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.loc);
 }
 
+/* ---- s0 AND s1 FOR THE BUSIEST VALUES ----------------------------------
+ *
+ * The compressed forms reach x8-x15 only for most of what they do --
+ * c.lw and c.sw (base and value), c.and/or/xor/sub, c.andi, c.srli,
+ * c.srai, c.beqz/c.bnez -- and of the callee-saved registers just s0 and
+ * s1 are in that range. The colourer gives callee-saved registers out in
+ * pool order to whichever value it reaches first, so a pointer every load
+ * in a loop goes through could land in s4 and make each of them four
+ * bytes instead of two.
+ *
+ * The callee-saved registers are interchangeable (the prologue saves a
+ * set), so once allocation is done the ones the function used are renamed
+ * among themselves, the busiest by that measure first into s0, then s1,
+ * then on in pool order: loads and stores count twice, a move, call or
+ * return not at all (c.mv and c.add take any register), a loop body
+ * eight times per level. The set, and the saves, are unchanged. A
+ * register a 64-bit pair uses is left alone. As on Cortex-M, the weights
+ * are an estimate, so gen_func_best tries the function both ways. */
+struct rv_lowreg_w {
+    const int *loc;
+    long w[32];
+    long f;                    /* this instruction's weight */
+};
+
+static void rv_lowreg_count(int v, void *ctx)
+{
+    struct rv_lowreg_w *c = ctx;
+    if (v >= 0 && c->loc[v] >= 0 && c->loc[v] < 32)
+        c->w[c->loc[v]] += c->f;
+}
+
+static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed)
+{
+    int np;
+    const int *pool = rv_pool_for(fn, &np);
+    unsigned long cand = 0, seen = 0;
+    for (int j = 0; j < np; j++)
+        if (rv_callee_saved(pool[j]))
+            cand |= 1UL << pool[j];
+    for (int v = 0; v < fn->nvregs; v++)
+        if (loc[v] >= 0 && loc[v] < 32)
+            seen |= 1UL << loc[v];
+    cand &= seen & ~fixed;
+    if (!cand || !(cand & (cand - 1)))
+        return;
+
+    /* Loop depth by back edge, as t_lowregs does. */
+    int *depth = xcalloc((size_t)fn->nins + 1, sizeof *depth);
+    int nl = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= nl)
+            nl = fn->ins[n].label + 1;
+    int *lpos = xmalloc((size_t)(nl ? nl : 1) * sizeof *lpos);
+    for (int k = 0; k < nl; k++)
+        lpos[k] = -1;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0)
+            lpos[fn->ins[n].label] = n;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ) &&
+            i->label >= 0 && i->label < nl && lpos[i->label] >= 0 &&
+            lpos[i->label] <= n) {
+            depth[lpos[i->label]]++;
+            depth[n + 1]--;
+        }
+    }
+    struct rv_lowreg_w c;
+    c.loc = loc;
+    for (int r = 0; r < 32; r++)
+        c.w[r] = 0;
+    int d = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        d += depth[n];
+        const struct ir_ins *i = &fn->ins[n];
+        int k = i->op == IR_LOAD || i->op == IR_STORE ? 2 :
+                i->op == IR_MOV || i->op == IR_CALL || i->op == IR_RET ? 0 : 1;
+        c.f = (long)k * (d <= 0 ? 1 : d == 1 ? 8 : 64);
+        int def = ra_ins_def(i);
+        if (def >= 0 && def < fn->nvregs && loc[def] >= 0 && loc[def] < 32)
+            c.w[loc[def]] += c.f;
+        ra_each_use(i, rv_lowreg_count, &c);
+    }
+    free(depth);
+    free(lpos);
+
+    /* Heaviest first onto the earliest in pool order (s0, s1, s2, ...). */
+    int from[32], to[32], n = 0;
+    for (int j = 0; j < np; j++)
+        if (cand >> pool[j] & 1)
+            to[n] = from[n] = pool[j], n++;
+    for (int a = 1; a < n; a++)
+        for (int b = a; b > 0 && c.w[from[b]] > c.w[from[b - 1]]; b--) {
+            int t = from[b]; from[b] = from[b - 1]; from[b - 1] = t;
+        }
+    int map[32];
+    for (int r = 0; r < 32; r++)
+        map[r] = r;
+    for (int k = 0; k < n; k++)
+        map[from[k]] = to[k];
+    for (int v = 0; v < fn->nvregs; v++)
+        if (loc[v] >= 0 && loc[v] < 32 && (cand >> loc[v] & 1))
+            loc[v] = map[loc[v]];
+}
+
 /* At RV32 with the allocator on, a function is generated with the pair
  * pass and without it, and the shorter is kept. A pair the pass takes is
  * withheld from the ordinary pool for the whole function, which costs a
@@ -4908,7 +5164,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
  * doubles did: over tests/ and lib/libc, eight files came out larger by
  * up to 60 bytes while the total fell 12.8%. A discarded attempt is
  * undone by truncating what it appended -- the code and the five site
- * lists, which only ever grow. */
+ * lists, which only ever grow.
+ *
+ * Each attempt is also made with the callee-saved registers renamed for
+ * the compressed forms (rv_lowregs) and without, at RV32 and RV64 alike,
+ * and the shortest kept; the first of equal sizes wins.
+ * EMBCC_RV_LOWREGS=0/1 forces that choice. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
                           struct rv_sites *st, int xlen, int want_debug)
 {
@@ -4920,33 +5181,61 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
 
     /* A field's constant offset into its load or store (lw r, k(rn)) --
      * once, before any attempt, and before allocation. */
-    if (g_rv_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+    if (g_rv_regalloc && !want_debug && !g_rv_o0 &&
+        !getenv("EMBCC_NO_MEMOFF")) {
         char *w = xlen == 32 ? wide_map(fn) : NULL;
-        ra_fold_memoff(fn, -2048, 2047, xlen / 8, xlen / 8, w);
+        ra_fold_memoff(fn, -2048, 2047, xlen / 8, xlen / 8, w, 0, 0);
         free(w);
     }
+    const char *lr = getenv("EMBCC_RV_LOWREGS");
+    int lr_forced = lr && *lr;
     g_rv_pairs = 1;
-    if (xlen != 32 || !g_rv_regalloc || want_debug || (knob && *knob) ||
-        (only && *only)) {
-        if (knob && *knob) g_rv_pairs = atoi(knob);
-        if (only && *only) g_rv_pairs = strcmp(only, fn->name) == 0;
+    g_rv_lowregs = lr_forced ? atoi(lr) != 0 : 1;
+    if (!g_rv_regalloc || want_debug || g_rv_o0) {
         gen_func(fn, t, st, xlen, want_debug);
-        g_rv_pairs = 1;
+        g_rv_lowregs = 1;
         return;
     }
-    gen_func(fn, t, st, xlen, want_debug);
-    with = t->len - at;
-    t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
-    st->ng = ng; st->nf = nf;
-    g_rv_pairs = 0;
-    gen_func(fn, t, st, xlen, want_debug);
-    if (t->len - at > with) {
+    /* The attempts: pairs on and off (RV32 only, unless a knob fixes
+     * them), each with the rename on and off (unless EMBCC_RV_LOWREGS
+     * fixes it). */
+    int pv[2], np = 0, lv[2], nl = 0;
+    if (xlen != 32 || (knob && *knob) || (only && *only)) {
+        pv[np++] = !(knob && *knob) || atoi(knob);
+        if (only && *only)
+            pv[0] = strcmp(only, fn->name) == 0;
+    } else {
+        pv[np++] = 1;
+        pv[np++] = 0;
+    }
+    lv[nl++] = g_rv_lowregs;
+    if (!lr_forced && rv_compress_enabled())
+        lv[nl++] = 0;
+    int best = -1, bestlen = 0, last = -1;
+    for (int a = 0; a < np * nl; a++) {
+        if (a) {
+            t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
+            st->ng = ng; st->nf = nf;
+        }
+        g_rv_pairs = pv[a / nl];
+        g_rv_lowregs = lv[a % nl];
+        gen_func(fn, t, st, xlen, want_debug);
+        with = t->len - at;
+        last = a;
+        if (best < 0 || with < bestlen) {
+            best = a;
+            bestlen = with;
+        }
+    }
+    if (best != last) {
         t->len = at; st->ncall = ncall; st->next = next; st->nstr = nstr;
         st->ng = ng; st->nf = nf;
-        g_rv_pairs = 1;
+        g_rv_pairs = pv[best / nl];
+        g_rv_lowregs = lv[best % nl];
         gen_func(fn, t, st, xlen, want_debug);
     }
     g_rv_pairs = 1;
+    g_rv_lowregs = 1;
 }
 
 /* ---- .riscv.attributes ------------------------------------------------
@@ -5016,7 +5305,8 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     struct rv_sites st;
     int xlen = target_xlen();
 
-    (void)optimize; (void)no_sse;
+    (void)no_sse;
+    g_rv_o0 = !optimize;
     /* The C extension: target_riscv_rvc, which the object's e_flags
      * read as well. */
     rv_set_compress(target_riscv_rvc(), xlen);
@@ -5031,8 +5321,13 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
     g_rv_short_calls = !getenv("EMBCC_RV_LONG_CALLS");
     for (;;) {
         int far = 0;
-        for (int n = 0; n < iu->nfuncs; n++)
+        for (int n = 0; n < iu->nfuncs; n++) {
+            int ra = g_rv_regalloc;
+            if (g_rv_o0 && ra_o0_too_big(&iu->funcs[n]))
+                g_rv_regalloc = 0;     /* see ra_o0_too_big */
             gen_func_best(&iu->funcs[n], text, &st, xlen, want_debug);
+            g_rv_regalloc = ra;
+        }
         for (int k = 0; k < st.ncall; k++) {
             long disp = st.call[k].target->code_off - st.call[k].patch_off;
             if (st.call[k].jal && (disp < -reach || disp >= reach))

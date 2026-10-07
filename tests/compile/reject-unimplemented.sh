@@ -303,7 +303,7 @@ check assign-to-literal \
 # for. The message once named "aarch64" for every such target -- a Thumb
 # build was told it needed aarch64 -- so each target is named as itself.
 printf 'int main(void) { return 0; }\n' > "$out_dir/nolink.c"
-for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf; do
+for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf; do
     if err=$("$EMBCC" --target=$t "$out_dir/nolink.c" \
              -o "$out_dir/nolink.bin" 2>&1); then
         echo "case nolink $t: linked in one step without a memory map"
@@ -316,6 +316,10 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf; do
         want="cannot link for $t: embld does not read AArch64 objects"
     echo "$err" | grep -q "$want" || {
         echo "case nolink $t: wrong diagnostic:"; echo "$err"; exit 1; }
+    # MIPS (like AVR) has no linker-script layout in embld: not offered
+    if [ "$t" = mipsel-none-elf ] && echo "$err" | grep -q 'linker script'; then
+        echo "case nolink $t: offered a linker script embld refuses:"; echo "$err"; exit 1
+    fi
 done
 echo "case nolink: a board image with no memory map, or an AArch64 one, is refused by name"
 
