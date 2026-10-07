@@ -47,7 +47,8 @@ for spec in "x86_64-elf:8:DW_OP_reg6" \
             "mipsel-none-elf:4:DW_OP_breg29" \
             "loongarch64-unknown-elf:8:DW_OP_breg3" \
             "tricore-none-elf:4:DW_OP_breg26" \
-            "xtensa-none-elf:4:DW_OP_breg1"; do
+            "xtensa-none-elf:4:DW_OP_breg1" \
+            "avr:4:DW_OP_breg28"; do
     t=${spec%%:*}; rest=${spec#*:}; want_as=${rest%%:*}; want_fb=${rest#*:}
     o="$out/$t.o"
     "$EMBCC" --target="$t" -g -O0 -c "$out/p.c" -o "$o" 2> "$out/$t.err" || {
@@ -162,9 +163,11 @@ fi
 # DIE's byte_size was 8 on every target, so a debugger read a 32-bit
 # target's pointer variable together with the four bytes after it.
 for t in thumbv7m-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
-         mipsel-none-elf loongarch64-unknown-elf tricore-none-elf xtensa-none-elf; do
+         mipsel-none-elf loongarch64-unknown-elf tricore-none-elf xtensa-none-elf \
+         avr; do
     want=4; [ $t = riscv64-unknown-elf ] && want=8
     [ $t = loongarch64-unknown-elf ] && want=8
+    [ $t = avr ] && want=2
     "$EMBCC" --target=$t -g -c "$out/p.c" -o "$out/ptr-$t.o" 2>/dev/null || {
         echo "FAIL $t: p.c with -g"; fail=1; continue; }
     got=$("$DWDUMP" --debug-info "$out/ptr-$t.o" 2>/dev/null |
@@ -176,6 +179,85 @@ for t in thumbv7m-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
         fail=1; }
 done
 [ "$fail" -eq 0 ] && echo "  pointer DIEs carry the target's pointer width"
+
+# AVR. Its DWARF was EMPTY: the CU header said address_size 2 and every
+# address field was written eight bytes wide, so a reader lost the thread
+# at the first one; and the backend recorded no line rows at all. Now its
+# addresses are four bytes, as avr-gcc writes them (a code address is a
+# byte address in flash, past 64K on the larger parts; a data address is
+# 0x800000 up), and the frame base is Y, r28:r29, which every slot is
+# addressed from -- so a variable's DW_OP_fbreg IS the displacement in
+# the code's own `std Y+q` / `ldd Y+q`. Checked at -O0 and -O2:
+#   * p arrives in r24:r25 and the prologue stores it: `std Y+fbreg, r24`;
+#   * at -O0, `wide` is stored to its slot by code the line table puts on
+#     line 4, where `int wide = ...` is -- a location and a line that
+#     agree with each other and with the instruction;
+#   * at -O2 a local mem2reg took out of memory has an EMPTY location
+#     (optimized out), not a slot nothing stores to: every location a
+#     variable does have is a slot some instruction writes;
+#   * the first row is the function's own line at its entry, so a
+#     debugger takes the second as the end of the prologue.
+if command -v "$OBJDUMP" >/dev/null 2>&1; then
+    for O in 0 2; do
+        o="$out/avr-O$O.o"
+        "$EMBCC" --target=avr -g -O$O -c "$out/p.c" -o "$o" 2>/dev/null || {
+            echo "FAIL avr -O$O: -g does not compile"; fail=1; continue; }
+        "$DWDUMP" --verify "$o" > "$out/avr-O$O.verify" 2>&1 || {
+            echo "FAIL avr -O$O: llvm-dwarfdump --verify rejects it"
+            grep -iE 'error' "$out/avr-O$O.verify" | head -3 | sed 's/^/     | /'
+            fail=1; continue; }
+        "$DWDUMP" --debug-info "$o" > "$out/avr-O$O.di" 2>/dev/null
+        "$DWDUMP" --debug-line "$o" > "$out/avr-O$O.dl" 2>/dev/null
+        "$OBJDUMP" -d "$o" > "$out/avr-O$O.dis" 2>/dev/null
+        # the address of each row of line N, and of the row after it
+        rows=$(grep -E '^0x[0-9a-f]+ +[0-9]+ ' "$out/avr-O$O.dl" |
+               while read -r a l rest; do echo "$(printf '%d' "$a") $l"; done)
+        first=$(echo "$rows" | head -1)
+        [ "$first" = "0 2" ] || {
+            echo "FAIL avr -O$O: the first row is '$first', not line 2 at the entry"
+            fail=1; }
+        loc() {     # loc NAME -> its fbreg offset, or "empty", or nothing
+            grep -A2 "DW_AT_name	(\"$1\")" "$out/avr-O$O.di" |
+                sed -n -e 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' \
+                       -e 's/.*DW_AT_location	(<empty>).*/empty/p' | head -1
+        }
+        stores_to() {   # stores_to OFF -> the addresses of `std Y+OFF, ...`
+            grep -E "std[[:space:]]+Y\+$1, r[0-9]+\$" "$out/avr-O$O.dis" |
+                sed 's/^ *\([0-9a-f]*\):.*/\1/'
+        }
+        off=$(loc p)
+        if [ -n "$off" ] && [ "$off" != empty ] &&
+           grep -qE "std[[:space:]]+Y\+$off, r24\$" "$out/avr-O$O.dis"; then
+            echo "  avr -O$O: 'p' at fbreg +$off is the slot the prologue writes (std Y+$off, r24)"
+        else
+            echo "FAIL avr -O$O: 'p' is at fbreg '$off' but nothing stores r24 there"
+            grep -E 'std' "$out/avr-O$O.dis" | head -4 | sed 's/^/     | /'
+            fail=1
+        fi
+        for v in wide tall k; do
+            off=$(loc $v)
+            [ -n "$off" ] || { echo "FAIL avr -O$O: '$v' has no DW_AT_location"; fail=1; continue; }
+            [ "$off" = empty ] && continue
+            [ -n "$(stores_to "$off")" ] || {
+                echo "FAIL avr -O$O: '$v' is at fbreg +$off and nothing stores to Y+$off"
+                fail=1; }
+        done
+        [ $O = 2 ] && continue
+        # -O0: wide's store is on line 4
+        off=$(loc wide)
+        at=$(stores_to "$off" | head -1)
+        line=$(echo "$rows" | awk -v a=$((0x${at:-0})) '$1 <= a { l = $2 } END { print l }')
+        [ -n "$at" ] && [ "$line" = 4 ] || {
+            echo "FAIL avr -O0: 'wide' (fbreg +$off) is stored at 0x$at, which the line table puts on line '$line', not 4"
+            fail=1; }
+    done
+    o0=$(grep -c 'DW_AT_location	(<empty>)' "$out/avr-O0.di" 2>/dev/null) || o0=0
+    o2=$(grep -c 'DW_AT_location	(<empty>)' "$out/avr-O2.di" 2>/dev/null) || o2=0
+    [ "$o0" -eq 0 ] || { echo "FAIL avr -O0: $o0 variables have no location"; fail=1; }
+    [ "$fail" -eq 0 ] &&
+        echo "  avr: -O0 and -O2 verify; locations are the slots the code writes, and" &&
+        echo "  the line table puts wide's store on line 4 ($o2 optimized out at -O2)"
+fi
 
 # A function whose sp moves (alloca, a VLA) addresses its frame from the
 # copy of sp the prologue leaves in r7 (Thumb) or s0 (RISC-V), so that is

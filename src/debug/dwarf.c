@@ -57,6 +57,7 @@
 #define DW_ATE_unsigned_char  0x08
 /* location/frame-base operations */
 #define DW_OP_fbreg           0x91
+#define DW_OP_addr            0x03
 #define DW_OP_reg6            0x56   /* rbp — EmbCC's x86-64 frame pointer */
 #define DW_OP_reg29           0x6d   /* x29 — its aarch64 frame pointer */
 /* DW_OP_bregN is 0x70 + N, and takes a signed offset. The embedded
@@ -79,6 +80,18 @@
 #define DW_REG_FB_TRICORE     30
 #define DW_REG_SP_XTENSA      1      /* a1 */
 #define DW_REG_FB_XTENSA      7      /* a7: sp at entry, under alloca */
+/* AVR numbers r0-r31 0-31 (GCC and LLVM agree; GCC's SP is 32). The frame
+ * base is Y, r28:r29, which the prologue points one byte below the frame
+ * and every slot is addressed from -- `ldd r24, Y+5` -- so `breg28 + 0`
+ * makes each slot's DW_OP_fbreg offset the displacement the code uses. A
+ * debugger reads the pointer-sized r28 as the pair, r29 the high byte. */
+#define DW_REG_FB_AVR         28
+/* What a data address is to a debugger on AVR. Data memory is a separate
+ * space from program memory and both start at 0, so GDB, avr-gcc's
+ * DWARF and QEMU's gdb stub all put data at 0x800000 up: `m800100,2`
+ * reads SRAM at 0x100, where `m100,2` reads flash. A global's DW_OP_addr
+ * carries the offset, and the code addresses carry none. */
+#define AVR_DATA_SPACE        0x800000L
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -202,6 +215,7 @@ static void reloc(struct dwarf_out *out, int in_sec, int at_off, int width,
     r->target = target;
     r->addend = addend;
     r->end = 0;
+    r->glob = NULL;
 }
 
 /* The same for the address one past a function's code (dwarf.h). */
@@ -475,25 +489,77 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
  * address_size; emitting eight everywhere was fine while every target
  * was 64-bit and is simply wrong on ARMv7-M and RV32 -- a debugger
  * reads the next field out of the second half of the address. */
+/* AVR's pointer is two bytes, and its DWARF addresses are four, as
+ * avr-gcc writes them: a code address is a BYTE address in program
+ * memory, past 64K on the larger parts (an ATmega2560 has 256K of
+ * flash), and a data address is 0x800000 up (AVR_DATA_SPACE), so neither
+ * fits the pointer. Two-byte addresses were also simply wrong here: this
+ * wrote EIGHT bytes for anything that was not four, so an AVR CU said
+ * address_size 2 and carried eight-byte fields, and a reader lost the
+ * thread at the first one -- the whole unit decoded as empty. */
 static int addr_bytes(void)
 {
+    if (target_get() == TARGET_AVR) return 4;
     return target_ptr_size();
 }
 
 static void db_addr(struct dbuf *b, unsigned long v)
 {
-    if (addr_bytes() == 4) db_u32(b, v);
-    else                   db_u64(b, v);
+    if (addr_bytes() == 2)      db_u16(b, (unsigned)v);
+    else if (addr_bytes() == 4) db_u32(b, v);
+    else                        db_u64(b, v);
 }
 
 static void loc_fbreg(struct dbuf *b, long off)
 {
     struct dbuf e = { 0, 0, 0 };
+    /* No location: an EMPTY expression, which DWARF defines as "present
+     * in the source, not in the object code" (DWARF 4, 2.6.1.1.4) -- an
+     * optimized-out variable, and not a slot nothing writes. */
+    if (off == IR_VAR_NO_LOC) {
+        db_uleb(b, 0);
+        return;
+    }
     db_u8(&e, DW_OP_fbreg);
     db_sleb(&e, off);
     db_uleb(b, (unsigned long)e.len);
     for (int i = 0; i < e.len; i++) db_u8(b, e.p[i]);
     free(e.p);
+}
+
+/* The unit's global variables, as CU-level DW_TAG_variable DIEs located
+ * by DW_OP_addr -- a relocation against the object's own symbol, so the
+ * address is wherever the linker puts it. Without them a debugger had a
+ * global's address from the symbol table and nothing to say what it was.
+ *
+ * Only what this unit DEFINES (an extern is described by the unit that
+ * owns it), not thread-local (its address is per thread, an expression
+ * this writer does not have), and only a type this writer can describe
+ * -- the rule ensure_type keeps: no confidently-wrong type. A function's
+ * static local is a global too, under a compiler-made name with a dot,
+ * and is left out: its name is not one the programmer could ask for. */
+static void emit_globals(struct dwarf_out *out, struct dbuf *b,
+                         struct typemap *tm, struct ir_unit *iu)
+{
+    if (!iu->src)
+        return;
+    for (struct global *g = iu->src->globals; g; g = g->next) {
+        if (g->absorbed || !g->defined || g->is_tls || !g->name ||
+            strchr(g->name, '.'))
+            continue;
+        int toff = ensure_type(b, tm, g->ty);
+        if (toff < 0)
+            continue;
+        db_uleb(b, AB_VAR_T);
+        db_str(b, g->name);
+        db_u32(b, (unsigned long)toff);
+        db_uleb(b, (unsigned long)(1 + addr_bytes()));
+        db_u8(b, DW_OP_addr);
+        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_GLOBAL,
+              target_get() == TARGET_AVR ? AVR_DATA_SPACE : 0);
+        out->relocs[out->nrelocs - 1].glob = g;
+        db_addr(b, 0);
+    }
 }
 
 /* --- .debug_info: a compile_unit with children — the type DIEs, then one
@@ -538,6 +604,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         for (int v = 0; v < iu->funcs[n].ndbgvars; v++)
             (void)ensure_type(b, &tm, iu->funcs[n].dbgvars[v].ty);
     }
+    emit_globals(out, b, &tm, iu);
 
     for (int n = 0; n < iu->nfuncs; n++) {
         struct ir_func *fn = &iu->funcs[n];
@@ -572,7 +639,13 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
          * the first allocation on. */
         {
             enum target_arch a = target_get();
-            if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
+            if (a == TARGET_AVR) {
+                /* Y, which the AVR backend always uses as its frame
+                 * pointer (a VLA it refuses): breg28 + 0 */
+                db_uleb(b, 2);
+                db_u8(b, DW_OP_breg(DW_REG_FB_AVR));
+                db_u8(b, 0);
+            } else if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
                 a == TARGET_RISCV64 || a == TARGET_MIPS32 ||
                 a == TARGET_LOONGARCH64 || a == TARGET_TRICORE ||
                 a == TARGET_XTENSA) {

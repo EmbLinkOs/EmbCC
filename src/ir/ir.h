@@ -400,6 +400,12 @@ struct ir_dbgvar {
     int is_param;
     struct type *ty;
     int line, col;
+    /* mem2reg took this variable out of memory although something
+     * assigned it: its slot no longer follows it. Its only reader is a
+     * backend deciding whether the slot is a true DW_AT_location -- for a
+     * parameter, whose slot the prologue still writes, that is the one
+     * thing that says the value there went stale. */
+    int moved;
 };
 
 /* What EmbIR needs to know about one frame slot's type, decided at irgen
@@ -467,6 +473,12 @@ struct ir_func {
     struct ir_dbgvar *dbgvars; /* -g: params + locals (irgen) */
     int ndbgvars, dbgvarcap;
     int *var_off;            /* -g: rbp-relative slot offset per vreg (codegen) */
+/* A var_off for a variable with NO location: its slot is never written in
+ * the code the function became (the optimizer kept the value in a
+ * temporary). The DIE then says so with an empty location -- a debugger
+ * prints <optimized out> -- rather than naming a slot that holds whatever
+ * was there before. */
+#define IR_VAR_NO_LOC (-0x7fffffff)
     /* Per-LOCAL lexical scope, as a half-open instruction range [lo, hi) (irgen).
      * Two locals whose scopes are disjoint never coexist — a stack pointer used
      * past its scope is UB — so codegen may give them one stack slot. Params and
