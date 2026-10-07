@@ -1771,16 +1771,28 @@ static void fb_ld(struct t_fn *F, int rt, long off, int size, int sign)
     ldst_must(F->t, rt, rt, 0, size, sign, 0);
 }
 
+/* The most a block copy or clear does in straight-line code; past it, a
+ * loop (t_copy_block). It was "while every offset fits an immediate":
+ * 4092 bytes, and a 2 KB table cleared in a loop -- tools/bench's hash --
+ * became 512 four-byte stores, two kilobytes of code where clang has a
+ * loop of 32. A word is a load and a store, so 128 bytes is 64
+ * instructions at most; 64 bytes at -Os. */
+static long t_block_straight(void)
+{
+    return target_opt_size() ? 64 : 128;
+}
+
 /* Copy `size` bytes from [src] to [dst] (copy) or zero them (!copy).
- * Straight-line while every offset fits an immediate; past that a loop
- * that walks both pointers, with the end in r9 -- so src and dst are
- * scratch and are moved. T_ACC carries the data. */
+ * Straight-line up to t_block_straight; past that a loop of eight words
+ * a trip (four at -Os) that walks both pointers, with the end in r9 --
+ * so src and dst are scratch and are moved -- and what is left over
+ * after it straight-line. T_ACC carries the data. */
 static void t_copy_block(struct code *t, int dst, int src, int copy, long size)
 {
     long k;
     if (!copy)
         t_mov_imm(t, T_ACC, 0, 0);
-    if (size <= 4092) {
+    if (size <= t_block_straight()) {
         for (k = 0; k + 4 <= size; k += 4) {
             if (copy) ldst_must(t, T_ACC, src, k, 4, 0, 0);
             ldst_must(t, T_ACC, dst, k, 4, 0, 1);
@@ -1791,19 +1803,25 @@ static void t_copy_block(struct code *t, int dst, int src, int copy, long size)
         }
         return;
     }
-    long body = size & ~3L;
+    long step = target_opt_size() ? 16 : 32;
+    long body = size / step * step;
     t_mov_imm(t, T_SCR, body, 0);
     t_alu_reg(t, T_OP_ADD, T_SCR, T_SCR, dst, 0);
     int top = t->len;
-    if (copy) {
-        ldst_must(t, T_ACC, src, 0, 4, 0, 0);
-        t_addw(t, src, src, 4);
+    for (k = 0; k < step; k += 4) {
+        if (copy) ldst_must(t, T_ACC, src, k, 4, 0, 0);
+        ldst_must(t, T_ACC, dst, k, 4, 0, 1);
     }
-    ldst_must(t, T_ACC, dst, 0, 4, 0, 1);
-    t_addw(t, dst, dst, 4);
+    if (copy)
+        t_addw(t, src, src, step);
+    t_addw(t, dst, dst, step);
     t_cmp_reg(t, dst, T_SCR);
     t_patch_bcond(t, t_bcond(t, T_NE), top);
-    for (k = 0; k < size - body; k++) {
+    for (k = 0; k + 4 <= size - body; k += 4) {
+        if (copy) ldst_must(t, T_ACC, src, k, 4, 0, 0);
+        ldst_must(t, T_ACC, dst, k, 4, 0, 1);
+    }
+    for (; k < size - body; k++) {
         if (copy) ldst_must(t, T_ACC, src, k, 1, 0, 0);
         ldst_must(t, T_ACC, dst, k, 1, 0, 1);
     }
@@ -4395,7 +4413,7 @@ static void gen_ins(struct t_fn *F, int n)
     }
 
     case IR_MEMCPY: case IR_MEMZERO: {
-        /* Straight-line where every offset reaches: each side through
+        /* Straight-line up to t_block_straight bytes: each side through
          * the frame base when it is a local's address (no register
          * for it at all), the words through a free low register (the
          * two-byte ldr/str), and eight bytes at a time with ldrd/strd
@@ -4407,7 +4425,7 @@ static void gen_ins(struct t_fn *F, int n)
         int dfa = faddr(F, i->a, &doff);
         int sfa = copy && faddr(F, i->b, &soff);
         long size = i->size, k = 0;
-        int reach = size <= 1020 &&
+        int reach = size <= t_block_straight() &&
                     (!dfa || (doff >= 0 && doff + size <= 1020)) &&
                     (!sfa || (soff >= 0 && soff + size <= 1020));
         if (!reach) {
