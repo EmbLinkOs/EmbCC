@@ -370,12 +370,18 @@ int target_has_mulh(void)
      * ARMv8-M Baseline have only the 32-bit muls */
     case TARGET_THUMB:   return target_thumb_arch() >= 7 &&
                                 !target_thumb_v8m_base();
-    case TARGET_MIPS32:
-    case TARGET_TRICORE:
+    /* mult/multu and HI */
+    case TARGET_MIPS32:  return 1;
+    case TARGET_TRICORE: return 1;    /* MUL and MUL.U into an E register */
+    case TARGET_PPC32:   return 1;    /* mulhw, mulhwu */
+    case TARGET_RX:      return 1;    /* emul, emulu */
+    case TARGET_SPARC32: return 1;    /* umul and smul, and %y */
+    /* Xtensa's high multiplies (mulsh, muluh) are the MUL32_HIGH option,
+     * which the ESP32 has and the de212 core EmbCC is tested on does not
+     * (docs/internals/xtensa-plan.md): its quou and remu stay. ColdFire
+     * has only the 32-bit muls.l and mulu.l -- the 64-bit result forms
+     * are the 68020's -- and AVR none at all. */
     case TARGET_XTENSA:
-    case TARGET_PPC32:
-    case TARGET_RX:
-    case TARGET_SPARC32:
     case TARGET_COLDFIRE:
     case TARGET_AVR:
         return 0;
