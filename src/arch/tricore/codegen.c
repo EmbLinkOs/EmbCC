@@ -31,7 +31,7 @@
  *     a load or store irgen cannot promise is aligned (a packed member)
  *     goes byte by byte.
  *
- * Refused by name: inline asm, atomics narrower than a word, computed
+ * Refused by name: atomics narrower than a word, computed
  * goto, jump tables
  * (target_jump_tables keeps a dense switch a decision tree), the frame
  * and return address, __int128 and binary128. THE RULE.
@@ -2422,9 +2422,61 @@ static void gen_ins(struct tc_fn *F, int n)
         return;
     }
 
-    case IR_ASM:
-        tc_refuse(F, i, "inline asm (TriCore has no asm vocabulary yet)");
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (tricore/irgen.c) against the
+         * vocabulary in tricore/asm.c. Nothing is live in a register
+         * across one -- the allocator excludes every vreg whose range
+         * spans an IR_ASM -- so operands' registers may be loaded freely.
+         * An operand register is a data register 0-15 or an address
+         * register 16 + n; an output's lvalue address goes through an
+         * address register no operand uses. */
+        struct ir_asm *ia = i->asm_ir;
+        int used[32] = { 0 };
+        static const int scr_pool[] = { 2, 3, 4, 5, 6, 7 };
+        int scr = -1;
+        for (int k = 0; k < ia->nin; k++) used[ia->in[k].reg] = 1;
+        for (int k = 0; k < ia->nout; k++) used[ia->out[k].reg] = 1;
+        for (unsigned k = 0; k < sizeof scr_pool / sizeof scr_pool[0]; k++)
+            if (!used[16 + scr_pool[k]]) { scr = scr_pool[k]; break; }
+        if (scr < 0 && ia->nout > 0)
+            tc_refuse(F, i, "an asm with no address register left around it");
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && (ia->out[k].size > 4 ||
+                                    (ia->out[k].reg >= 16 &&
+                                     ia->out[k].size != 4)))
+                tc_refuse(F, i, "an asm output wider than a register, or a "
+                                "narrow one in an address register");
+        for (int k = 0; k < ia->nout; k++) {
+            int r = ia->out[k].reg;
+            if (!ia->out[k].inout || ia->out[k].mem)
+                continue;
+            rda(F, ia->out[k].temp, scr);
+            if (r >= 16) tc_ld_a(t, r - 16, scr, 0);
+            else         tc_load(t, r, scr, 0, ia->out[k].size, 0);
+        }
+        for (int k = 0; k < ia->nin; k++) {
+            int r = ia->in[k].reg;
+            if (r >= 16) rda(F, ia->in[k].temp, r - 16);
+            else         rd(F, ia->in[k].temp, r);
+        }
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].mem) {
+                if (ia->out[k].reg < 16)
+                    tc_refuse(F, i, "an \"m\" asm operand in a data register");
+                rda(F, ia->out[k].temp, ia->out[k].reg - 16);
+            }
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        for (int k = 0; k < ia->nout; k++) {
+            int r = ia->out[k].reg;
+            if (ia->out[k].mem)
+                continue;
+            rda(F, ia->out[k].temp, scr);
+            if (r >= 16) tc_st_a(t, r - 16, scr, 0);
+            else         tc_store(t, r, scr, 0, ia->out[k].size);
+        }
         return;
+    }
 
     /* ---- atomics: SWAP.W, and CMPSWAP.W loops, bracketed by dsync ---- */
     case IR_XCHG:

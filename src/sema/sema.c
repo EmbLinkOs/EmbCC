@@ -15,6 +15,7 @@
 #include "../arch/avr/asm.h"
 #include "../arch/riscv/asm.h"
 #include "../arch/mips/asm.h"
+#include "../arch/tricore/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
@@ -4310,6 +4311,46 @@ static int asm_resolve_reg_mips(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* TriCore: "d", "r" and "g" a data register (-2), "a" and "m" an address
+ * register (-3: "m" holds the lvalue's address, written [%0]), "i" and
+ * "n" a constant; a register variable its register, an address register
+ * numbered 16 + n (tricore/irgen.c). */
+static int asm_resolve_reg_tricore(struct unit *u, struct stmt *s,
+                                   struct asm_operand *op, const char *c)
+{
+    int has_d = 0, has_a = 0, has_i = 0;
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int f, r = tcasm_reg(rn, (int)strlen(rn), &f);
+        if (r < 0 || f == 'e' || (f == 'd' && r > 7) ||
+            (f == 'a' && (r < 2 || r > 7)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "TriCore asm (use d0-d7 or a2-a7)", rn);
+        return f == 'a' ? 16 + r : r;
+    }
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'd') has_d = 1;
+        if (*p == 'a' || *p == 'm') has_a = 1;
+        if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+            has_i = 1;
+    }
+    if (has_i && !has_d && !has_a) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_d)
+        return -2;
+    if (has_a)
+        return -3;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -4330,6 +4371,8 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
     if (target_get() == TARGET_MIPS32)
         return asm_resolve_reg_mips(u, s, op, c);
+    if (target_get() == TARGET_TRICORE)
+        return asm_resolve_reg_tricore(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)
