@@ -205,6 +205,15 @@ static const char *reloc_name(int kind)
         case RK_ABS32:       return "R_MIPS_32";
         default:             return NULL;
         }
+    case TARGET_PPC32:
+        switch (kind) {
+        case RK_CALL:          return "R_PPC_REL24";      /* bl and b alike */
+        case RK_PPC_ADDR16_HA: return "R_PPC_ADDR16_HA";
+        case RK_PPC_ADDR16_LO: return "R_PPC_ADDR16_LO";
+        case RK_ABS32:         return "R_PPC_ADDR32";
+        case RK_DATA_PREL32:   return "R_PPC_REL32";
+        default:               return NULL;
+        }
     case TARGET_AVR:
         /* (without this case AVR fell through to x86-64's names) */
         switch (kind) {
