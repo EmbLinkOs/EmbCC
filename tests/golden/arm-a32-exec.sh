@@ -1,9 +1,13 @@
 #!/bin/sh
 # What the ARMv7-A (A32) code COMPUTES: every program in tests/exec, at
 # -O0, -O1, -O2 and -Os, linked by embld with lib/libc and lib/rt built for
-# armv7a-none-eabi and run on QEMU's virt board, a Cortex-A15
+# the target and run on QEMU's virt board, a Cortex-A15
 # (tests/harness/arm-a32) -- the exit status must be the program's
-# `// expect-exit` value.
+# `// expect-exit` value. Twice: soft float (armv7a-none-eabi), and VFPv3
+# with the hard-float convention (armv7a-none-eabihf: -mfpu=vfpv3-d16
+# -mfloat-abi=hard), each with its own runtime and harness, as objects of
+# the two conventions do not mix. A32_EXEC_CONFIGS="soft" (or "hf") runs
+# one.
 #
 # The corpus was written for x86-64 and AArch64, both LP64, and a few
 # programs assert that: `long` holds 2^40, a pointer is 8 bytes, a struct
@@ -31,20 +35,10 @@ command -v "$CLANG" >/dev/null 2>&1 &&
     "$CLANG" --target=armv7a-none-eabi -mfloat-abi=soft \
         -fsyntax-only -x c /dev/null 2>/dev/null || CLANG=
 
-T=armv7a-none-eabi
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
-out=tests/golden/out/arm-a32-exec
-rm -rf "$out"; mkdir -p "$out/run"
-
-EMBCC="$EMBCC" sh tools/build-rt.sh $T "$out/lib" ||
-    { echo "lib/rt does not build for $T"; exit 1; }
-EMBCC="$EMBCC" sh tools/build-libc.sh $T "$out/lib" ||
-    { echo "lib/libc does not build for $T"; exit 1; }
-"$EMBCC" --target=$T -O1 -DHARNESS_LIBC -c tests/harness/arm-a32/boot.c \
-    -o "$out/boot.o" &&
-"$EMBCC" --target=$T -O1 -c tests/harness/arm-a32/io.c -o "$out/io.o" ||
-    { echo "the harness does not compile"; exit 1; }
+top=tests/golden/out/arm-a32-exec
+rm -rf "$top"; mkdir -p "$top"
 
 # The programs that do not apply to this target, each with the reason. A
 # program here is not run; one that should be belongs in the corpus run.
@@ -83,16 +77,36 @@ lp64() {
     esac
 }
 
+fail=0
+for cfg in ${A32_EXEC_CONFIGS:-soft hf}; do
+case $cfg in
+    soft) T=armv7a-none-eabi; CLF="-mfloat-abi=soft"; tag=armv7a ;;
+    hf)   T=armv7a-none-eabihf; CLF="-mfloat-abi=hard -mfpu=vfpv3-d16"
+          tag=armv7a-hf ;;
+    *)    echo "unknown configuration $cfg"; exit 1 ;;
+esac
+out=$top/$cfg
+mkdir -p "$out/run"
+export T CLF
+EMBCC="$EMBCC" sh tools/build-rt.sh $T "$out/lib" > "$out/lib.log" 2>&1 ||
+    { echo "lib/rt does not build for $T"; tail -3 "$out/lib.log"; exit 1; }
+EMBCC="$EMBCC" sh tools/build-libc.sh $T "$out/lib" >> "$out/lib.log" 2>&1 ||
+    { echo "lib/libc does not build for $T"; tail -3 "$out/lib.log"; exit 1; }
+"$EMBCC" --target=$T -O1 -DHARNESS_LIBC -c tests/harness/arm-a32/boot.c \
+    -o "$out/boot.o" &&
+"$EMBCC" --target=$T -O1 -c tests/harness/arm-a32/io.c -o "$out/io.o" ||
+    { echo "the harness does not compile for $T"; exit 1; }
+
 # One run: compile, link, boot, and the exit status the sentinel reports.
 cat > "$out/one.sh" <<'ONE'
 # one.sh SRC OPT OUT EMBCC EMBLD CC -- prints "<status>" or "CFAIL"/"LFAIL"/"NOEXIT"
 src=$1; opt=$2; o=$3; embcc=$4; embld=$5; cc=$6; d=$(dirname "$o")
 if [ "$cc" = clang ]; then
-    "$CLANG" --target=armv7a-none-eabi -mfloat-abi=soft $opt \
+    "$CLANG" --target=$T $CLF $opt \
         -ffreestanding -isystem lib/libc/include -w -c "$src" -o "$o.o" \
         > "$o.cerr" 2>&1 || { echo CFAIL; exit 0; }
 else
-    "$embcc" --target=armv7a-none-eabi $opt -c "$src" -o "$o.o" \
+    "$embcc" --target=$T $opt -c "$src" -o "$o.o" \
         > "$o.cerr" 2>&1 || { echo CFAIL; exit 0; }
 fi
 "$embld" -e _start -Ttext 0x40100000 -Tstack 0x40800000 "$d/../boot.o" \
@@ -136,7 +150,6 @@ export ONE EMBCC_X EMBLD_X
 xargs -P "$jobs" -n 4 sh -c \
     'sh "$ONE" "$0" "$1" "$2" "$EMBCC_X" "$EMBLD_X" "$3" > "$2.status"' \
     < "$out/jobs"
-fail=0
 for opt in -O0 -O1 -O2 -Os; do
     p=0; t=0
     for c in tests/exec/*.c; do
@@ -160,9 +173,11 @@ for opt in -O0 -O1 -O2 -Os; do
             fail=1
         fi
     done
-    echo "armv7a $opt: $p of $t programs pass on the board"
+    echo "$tag $opt: $p of $t programs pass on the board"
 done
-echo "($nlp of them refereed against clang's status for an LP64 assumption;"
-echo " $nna not applicable to an ILP32 target, listed in $out/na.txt)"
+echo "($tag: $nlp of them refereed against clang's status for an LP64"
+echo " assumption; $nna not applicable to an ILP32 target, listed in"
+echo " $out/na.txt)"
+done
 [ "$fail" = 0 ] || exit 1
 echo "the exec corpus runs on ARMv7-A (A32) at -O0, -O1, -O2 and -Os"

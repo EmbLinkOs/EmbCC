@@ -28,6 +28,13 @@
 #    an ARM one); a return is bx lr or a pop into pc, which interwork by
 #    themselves on ARMv7.
 #
+# 4. AAPCS-VFP: the arm-a32-abi pair again with both sides hard float
+#    (armv7a-none-eabihf, -mfpu=vfpv3-d16 -mfloat-abi=hard): floats and
+#    doubles in s0-s15/d0-d7, back-filling a single into the gap a double
+#    left, homogeneous float aggregates in VFP registers, variadics still
+#    in the core registers -- against clang the same way, on its own
+#    runtime and harness.
+#
 # The clang objects carry REL relocations, so this is EmbLD's test for
 # foreign A32 objects as well.
 set -u
@@ -46,27 +53,32 @@ command -v "$CLANG" >/dev/null 2>&1 &&
 NM=${EMBCC_LLVM_NM:-llvm-nm}
 
 T=armv7a-none-eabi
+CLF=-mfloat-abi=soft
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
-out=tests/golden/out/arm-a32-abi
-rm -rf "$out"; mkdir -p "$out"
-export EMBCC_A32_HARNESS="$PWD/$out"
+top=tests/golden/out/arm-a32-abi
+rm -rf "$top"; mkdir -p "$top"
 
-for f in boot io; do
-    "$EMBCC" --target=$T -O1 -c "tests/harness/arm-a32/$f.c" -o "$out/$f.o" || {
-        echo "the harness does not compile"; exit 1; }
-done
-{ EMBCC="$EMBCC" sh tools/build-rt.sh $T "$out/lib" &&
-  EMBCC="$EMBCC" sh tools/build-libc.sh $T "$out/lib"; } > "$out/lib.log" 2>&1 || {
-    echo "lib/rt or lib/libc does not build for $T"; tail -3 "$out/lib.log"
-    exit 1; }
+setup() {               # setup DIR: the harness and the runtime for $T
+    out=$1; mkdir -p "$out"
+    export EMBCC_A32_HARNESS="$PWD/$out"
+    for f in boot io; do
+        "$EMBCC" --target=$T -O1 -c "tests/harness/arm-a32/$f.c" \
+            -o "$out/$f.o" || { echo "the harness does not compile"; exit 1; }
+    done
+    { EMBCC="$EMBCC" sh tools/build-rt.sh $T "$out/lib" &&
+      EMBCC="$EMBCC" sh tools/build-libc.sh $T "$out/lib"; } > "$out/lib.log" 2>&1 || {
+        echo "lib/rt or lib/libc does not build for $T"; tail -3 "$out/lib.log"
+        exit 1; }
+}
+setup "$top"
 
 # CC is embcc, clang (ARM state) or clangt (Thumb state)
 compile() {             # compile CC OPT SRC OBJ
     case $1 in
-    clang)  "$CLANG" --target=$T -mfloat-abi=soft -ffreestanding -O1 \
+    clang)  "$CLANG" --target=$T $CLF -ffreestanding -O1 \
                 -I tests/golden -c "$3" -o "$4" ;;
-    clangt) "$CLANG" --target=$T -mthumb -mfloat-abi=soft -ffreestanding \
+    clangt) "$CLANG" --target=$T -mthumb $CLF -ffreestanding \
                 -O1 -I tests/golden -c "$3" -o "$4" ;;
     *)      "$EMBCC" --target=$T "$2" -I tests/golden -c "$3" -o "$4" ;;
     esac
@@ -136,4 +148,25 @@ for opt in -O1 -O2; do
         echo "the host:"; head -12 $o.diff; exit 1; }
     echo "embedded-aeabi $opt: clang's object calls $n __aeabi_* helpers and agrees with the host"
 done
+
+# 4. hard float
+T=armv7a-none-eabihf
+CLF="-mfloat-abi=hard -mfpu=vfpv3-d16"
+setup "$top/hf"
+prog=arm-a32-abi
+run_pair $prog clang clang -O1 "$prog-cc" || exit 1
+for opt in -O0 -O2; do
+    for pair in "embcc embcc ee" "embcc clang ec" "clang embcc ce"; do
+        set -- $pair
+        tag="$prog-$3$opt"
+        run_pair $prog "$1" "$2" $opt "$tag" || exit 1
+        diff -u "$out/$prog-cc.txt" "$out/$tag.txt" > "$out/$tag.diff" || {
+            echo "$prog (hard float): $1 calling $2 at $opt disagrees with clang"
+            head -16 "$out/$tag.diff"; exit 1; }
+    done
+done
+llvm-objdump -d "$out/$prog-ee-O2-callee.o" 2>/dev/null | grep -q 'vadd' || {
+    echo "the hard-float callee has no VFP arithmetic: the pairing is vacuous"
+    exit 1; }
+echo "$prog: AAPCS-VFP calls agree with clang's at -O0 and -O2"
 echo "AAPCS calls in ARM state agree with clang's in both directions"

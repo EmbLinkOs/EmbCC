@@ -30,6 +30,10 @@ static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
  * as the Cortex-M levels -- which is why it is this target and not a new
  * enum value -- with the A32 instruction set. See target_arm_a32. */
 static int g_arm_a32;
+/* ...and its floating-point unit, when -mfpu= names one: 3 or 4 for VFPv3
+ * or VFPv4, `d32` for the 32-register file (the D16 units have 16). Only
+ * read when target_thumb_fpu() says the code uses an FPU. */
+static int g_arm_vfp = 3, g_arm_vfp_d32;
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
 
@@ -477,6 +481,10 @@ static const struct triple {
     { "armv7a",             TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 7 },
     { "armv7-none-eabi",    TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 7 },
     { "armv7a-unknown-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 0, 7 },
+    /* ...with VFP and the hard-float convention: -mfpu=vfpv3-d16 and
+     * -mfloat-abi=hard unless a flag says otherwise (canon 8). */
+    { "armv7a-none-eabihf", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   8, 7 },
+    { "armv7a-unknown-none-eabihf", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 0, 7 },
     { "thumbv8m.main-none-eabihf", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 5, 3 },
 
     /* RISC-V, bare metal. `-unknown-elf` is the spelling the reference
@@ -579,7 +587,7 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
      * sub-architecture as well, which is the only place that is true. */
     int want = 1;
     if (a == TARGET_THUMB)
-        want = g_arm_a32 ? 7
+        want = g_arm_a32 ? (g_thumb_hard ? 8 : 7)
              : g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
              : g_thumb_arch == 6 ? 6
              : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
@@ -600,6 +608,17 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
  * believe. */
 int target_thumb_em(void) { return g_thumb_em; }
 int target_arm_a32(void) { return g_arch == TARGET_THUMB && g_arm_a32; }
+int target_arm_vfp(int *d32)
+{
+    if (d32)
+        *d32 = g_arm_vfp_d32;
+    return g_arm_vfp;
+}
+void target_set_arm_vfp(int version, int d32)
+{
+    g_arm_vfp = version;
+    g_arm_vfp_d32 = d32 ? 1 : 0;
+}
 int target_thumb_arch(void) { return g_thumb_arch; }
 int target_object_align(int is_array, long size, int align)
 {

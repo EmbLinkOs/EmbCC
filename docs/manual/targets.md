@@ -24,7 +24,7 @@ little-endian.
 | [AArch64](#aarch64) | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | ELF64 | AAPCS64 | an external linker |
 | [Apple arm64](#apple-arm64) | `aarch64-apple-darwin` | Mach-O | Apple arm64 | the system linker |
 | [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
-| [ARMv7-A](#armv7-a) | `armv7a-none-eabi` | ELF32 | AAPCS, soft float | `embld` |
+| [ARMv7-A](#armv7-a) | `armv7a-none-eabi`, `armv7a-none-eabihf` | ELF32 | AAPCS, AAPCS-VFP | `embld` |
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
@@ -38,7 +38,8 @@ little-endian.
 | Apple arm64 | Objects for the system linker | FP/SIMD | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
 | Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
 | Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
-| ARMv7-A (A32) | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
+| ARMv7-A (A32), soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
+| ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
 | RV32 | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
@@ -759,7 +760,8 @@ storage is carved from the stack at function entry and rounded up.
 ## ARMv7-A
 
 ARMv7-A in ARM state: the A32 instruction set of a Cortex-A5, A7, A8, A9,
-A12, A15 or A17, little-endian, with the base AAPCS (soft float).
+A12, A15 or A17, little-endian, with the base AAPCS (soft float) or, with
+a VFP unit, AAPCS-VFP.
 Freestanding only. It is the Cortex-M backend's instruction selection
 writing A32 encodings; the design notes are in
 [the ARMv7-A plan](../internals/arm-a32-plan.md).
@@ -769,6 +771,7 @@ writing A32 encodings; the design notes are in
 | Triple | Accepted aliases | ISA | ABI |
 |---|---|---|---|
 | `armv7a-none-eabi` | `armv7a`, `armv7-none-eabi`, `armv7a-unknown-none-eabi` | ARMv7-A, ARM state | AAPCS, soft float |
+| `armv7a-none-eabihf` | `armv7a-unknown-none-eabihf` | ARMv7-A, ARM state, VFPv3-D16 | AAPCS-VFP |
 
 ### Options
 
@@ -776,15 +779,20 @@ writing A32 encodings; the design notes are in
 |---|---|---|
 | `-marm` | (no value) | `-mthumb is not supported on armv7a-none-eabi: EmbCC emits ARM (A32) code for a Cortex-A` |
 | `-mcpu=CPU` | `cortex-a5`, `cortex-a7`, `cortex-a8`, `cortex-a9`, `cortex-a12`, `cortex-a15`, `cortex-a17`, `generic` | `-mcpu=cortex-r5 is not supported on armv7a-none-eabi` (a Cortex-M or Cortex-R core) |
-| `-mfloat-abi=ABI` | `soft` | `-mfloat-abi=hard is not supported on armv7a-none-eabi: EmbCC emits soft-float ARM code there` |
-| `-mfpu=FPU` | `none`, `soft`, `auto` | `-mfpu=vfpv3 is not supported on armv7a-none-eabi` |
+| `-mfloat-abi=ABI` | `soft`, `softfp`, `hard` (the last two with an `-mfpu=`) | `-mfloat-abi=hard needs an FPU to use: add -mfpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)` |
+| `-mfpu=FPU` | `vfpv3-d16`, `vfpv3`, `vfpv4-d16`, `vfpv4`, `none` | `-mfpu=neon is not supported on armv7a-none-eabi: EmbCC emits VFPv3 or VFPv4 ... and no NEON (Advanced SIMD) instruction` |
 | `-mabi=ABI` | `aapcs`, `aapcs-linux` | as for Cortex-M |
 | `-munaligned-access`, `-mthumb-interwork` | (no value) | `-mno-unaligned-access is not supported` |
 
 No divide instruction is used, so the code runs on every ARMv7-A core:
 `/` and `%` call `__aeabi_idiv`, `__aeabi_uidiv`, `__aeabi_idivmod` and
-`__aeabi_uidivmod`, which `lib/rt` provides. No VFP or NEON instruction is
-used either.
+`__aeabi_uidivmod`, which `lib/rt` provides. `armv7a-none-eabihf` is
+`-mfpu=vfpv3-d16 -mfloat-abi=hard`; with `softfp` the FPU computes and
+floating point travels in the core registers, as with `soft`. Either way
+the code is the Cortex-M7's single- and double-precision VFP on `d0`–`d15`
+(`s16`–`s31`/`d8`–`d15` preserved); with `-mfloat-abi=soft` no VFP
+instruction is emitted even with an `-mfpu=`, as GCC reads it. No NEON
+instruction is ever emitted.
 
 ### Calling convention: AAPCS, soft float
 
@@ -844,8 +852,7 @@ semihosting exit.
 
 ### Limitations
 
-Refused by name: hard float (`-mfloat-abi=softfp|hard`, `-mfpu=`),
-Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), an atomic wider than
+Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), an atomic wider than
 four bytes, computed `goto`, `__builtin_frame_address` and
 `__builtin_return_address`, `__attribute__((interrupt))` (an A-profile
 handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,

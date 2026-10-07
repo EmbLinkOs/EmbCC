@@ -135,8 +135,9 @@ can end QEMU itself (SYS_EXIT through `svc #0x123456`). The harness prints
 
 ## What is refused (by name)
 
-- `-mfpu=` other than none, `-mfloat-abi=softfp|hard` (VFP is a later
-  step; the Thumb VFP encodings carry over with a condition field).
+- `-mfpu=neon` and the Cortex-M units; `-mfloat-abi=softfp|hard`
+  without an `-mfpu=` (VFPv3/VFPv4 came after the soft-float backend:
+  the Thumb VFP encodings carry over with a condition field).
 - `-mcpu=` other than the ARMv7-A cores, `-mthumb` (that is the
   thumbv7 targets), interrupt functions (an A-profile handler returns
   with `subs pc, lr, #4`, which this backend does not emit).
@@ -155,7 +156,14 @@ can end QEMU itself (SYS_EXIT through `svc #0x123456`). The harness prints
 
 ## Status
 
-Done (soft float):
+Done:
+
+- Hard float: `armv7a-none-eabihf` (= `-mfpu=vfpv3-d16 -mfloat-abi=hard`),
+  and `-mfpu=vfpv3-d16|vfpv3|vfpv4-d16|vfpv4` with `-mfloat-abi=softfp|
+  hard` -- the Cortex-M7's double-precision VFP code under a condition
+  field, clang's macros and Tag_FP_arch for each unit, an `eabihf`
+  runtime, the harness turning the unit on (CPACR, FPEXC). The exec
+  corpus and the AAPCS-VFP pairs against clang run on it too.
 
 - `src/arch/thumb/a32.c`, the A32 encoder, behind every `t_*` encoder in
   `emit.c` (one dispatch line each; the Thumb encodings are unchanged and
@@ -191,10 +199,8 @@ Done (soft float):
 
 Known gaps:
 
-- Hard float (VFPv3/VFPv4, `-mfloat-abi=softfp|hard`) and NEON are refused
-  by name. The VFP encodings already carry over (a32check checks them);
-  what is missing is the option plumbing, the attributes and an `eabihf`
-  runtime.
+- NEON (Advanced SIMD) is refused by name: nothing here emits it, and
+  `__ARM_NEON` would promise `arm_neon.h`.
 - 8-byte atomics are refused, though ARMv7-A has `ldrexd`/`strexd`.
 - No hardware divide even on the cores that have it (A7, A15): the
   helpers are always called.

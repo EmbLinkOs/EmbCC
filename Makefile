@@ -509,7 +509,7 @@ libc-linux-aarch64: embcc embar
 # with soft-float ones, so its runtime is a separate archive.
 RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
-               thumbv8m.main-none-eabihf armv7a-none-eabi riscv32-unknown-elf \
+               thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
                riscv64-unknown-elf mipsel-none-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
@@ -524,7 +524,7 @@ rt-embedded: embcc embar
 # locks are refused for it.
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
-                 thumbv8m.main-none-eabihf armv7a-none-eabi \
+                 thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
                  riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \

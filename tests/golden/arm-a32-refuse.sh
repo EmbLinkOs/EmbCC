@@ -24,7 +24,7 @@ for t in armv7a-none-eabi armv7a armv7-none-eabi armv7a-unknown-none-eabi; do
     m=$("$EMBCC" --target=$t -dumpmachine) || { echo "--target=$t refused"; exit 1; }
     [ "$m" = $T ] || { echo "--target=$t is '$m'"; exit 1; }
 done
-for t in armv7a-none-eabihf armv7r-none-eabi armebv7a-none-eabi; do
+for t in armv7r-none-eabi armebv7a-none-eabi; do
     if "$EMBCC" --target=$t -dumpmachine > /dev/null 2>&1; then
         echo "--target=$t was accepted"; exit 1
     fi
@@ -101,13 +101,52 @@ refopt() {          # refopt OPTION PATTERN
 refopt -mthumb '-mthumb is not supported on armv7a-none-eabi'
 refopt -mcpu=cortex-m4 '-mcpu=cortex-m4 is not supported on armv7a-none-eabi'
 refopt -mcpu=cortex-r5 '-mcpu=cortex-r5 is not supported on armv7a-none-eabi'
-refopt -mfpu=vfpv3 '-mfpu=vfpv3 is not supported on armv7a-none-eabi'
 refopt -mfpu=neon '-mfpu=neon is not supported on armv7a-none-eabi'
-refopt -mfloat-abi=hard '-mfloat-abi=hard is not supported on armv7a-none-eabi'
-refopt -mfloat-abi=softfp '-mfloat-abi=softfp is not supported on armv7a-none-eabi'
+refopt -mfpu=fpv4-sp-d16 '-mfpu=fpv4-sp-d16 is not supported on armv7a-none-eabi'
+refopt -mfloat-abi=hard '-mfloat-abi=hard needs an FPU to use'
+refopt -mfloat-abi=softfp '-mfloat-abi=softfp needs an FPU to use'
 refopt -mno-unaligned-access '-mno-unaligned-access is not supported'
 refopt -mbig-endian 'little-endian'
 echo "the ARMv7-A/ARM-state/soft-float flags are accepted, others refused"
+
+# ---- hard float: the VFPv3/VFPv4 units, NEON's SIMD refused ----------------
+m=$("$EMBCC" --target=armv7a-none-eabihf -dumpmachine)
+[ "$m" = armv7a-none-eabihf ] || { echo "armv7a-none-eabihf is '$m'"; exit 1; }
+m=$("$EMBCC" --target=$T -mfpu=vfpv4 -mfloat-abi=hard -dumpmachine)
+[ "$m" = armv7a-none-eabihf ] || {
+    echo "-mfpu=vfpv4 -mfloat-abi=hard names itself '$m'"; exit 1; }
+predef() {          # predef WANT-PRESENT WANT-ABSENT FLAGS...
+    w=$1; a=$2; shift 2
+    "$EMBCC" "$@" --dump-predef > "$out/pd.txt" || exit 1
+    for m in $w; do grep -q "^#define $m " "$out/pd.txt" || {
+        echo "$*: no $m"; exit 1; }; done
+    for m in $a; do ! grep -q "^#define $m " "$out/pd.txt" || {
+        echo "$*: defines $m"; exit 1; }; done
+}
+predef "__ARM_FP __ARM_VFPV3__ __ARM_PCS_VFP" \
+       "__SOFTFP__ __ARM_VFPV4__ __ARM_NEON __ARM_FPV5__" \
+       --target=armv7a-none-eabihf
+grep -q '^#define __ARM_FP 0xc$' "$out/pd.txt" || { echo "VFPv3's __ARM_FP is not 0xc"; exit 1; }
+predef "__ARM_FP __ARM_VFPV4__ __ARM_FEATURE_FMA __ARM_PCS" \
+       "__SOFTFP__ __ARM_PCS_VFP __ARM_NEON" \
+       --target=$T -mfpu=vfpv4-d16 -mfloat-abi=softfp
+grep -q '^#define __ARM_FP 0xe$' "$out/pd.txt" || { echo "VFPv4's __ARM_FP is not 0xe"; exit 1; }
+predef "__SOFTFP__" "__ARM_FP __ARM_PCS_VFP" --target=armv7a-none-eabihf -mfloat-abi=soft
+if command -v "$RE" >/dev/null 2>&1; then
+    for c in "vfpv3-d16:VFPv3-D16" "vfpv3:VFPv3" "vfpv4-d16:VFPv4-D16" "vfpv4:VFPv4"; do
+        u=${c%%:*}; d=${c#*:}
+        "$EMBCC" --target=armv7a-none-eabihf -mfpu=$u -c "$out/f.c" \
+            -o "$out/hf.o" || exit 1
+        "$RE" -A "$out/hf.o" > "$out/hf.attr"
+        grep -A2 'TagName: FP_arch' "$out/hf.attr" | grep -q "Description: $d\$" || {
+            echo "-mfpu=$u: Tag_FP_arch is not $d"; exit 1; }
+        grep -A2 'TagName: ABI_VFP_args' "$out/hf.attr" | grep -q 'AAPCS VFP' || {
+            echo "-mfpu=$u -mfloat-abi=hard: Tag_ABI_VFP_args is not AAPCS VFP"
+            exit 1; }
+    done
+fi
+echo "armv7a-none-eabihf and -mfpu=vfpv3[-d16]/vfpv4[-d16]: the macros and"
+echo "  attributes of each unit; NEON and the Cortex-M units refused"
 
 # ---- the constructs ----------------------------------------------------------
 refc() {            # refc WHAT PATTERN SOURCE

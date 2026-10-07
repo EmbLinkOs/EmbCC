@@ -236,6 +236,12 @@ void target_set_thumb_arch(int lvl);
  * (src/arch/thumb/a32.c), and so do the relocation types, the symbols'
  * Thumb bit and the mapping symbols. docs/internals/arm-a32-plan.md. */
 int target_arm_a32(void);
+/* ARMv7-A's VFP unit, for the code that says which (the attributes, the
+ * predefined macros): 3 for VFPv3, 4 for VFPv4, and through `d32` whether
+ * it has 32 double registers. The code uses d0-d15 either way; both units
+ * compute in single and double precision (target_thumb_fpu_dp). */
+int target_arm_vfp(int *d32);
+void target_set_arm_vfp(int version, int d32);
 /* The alignment a string literal of `width`-byte elements gets in .rodata.
  * Its element width: ARMv6-M reads L"..."[0] with LDR and MIPS with lw,
  * and a wide literal at an odd offset faults on both (a HardFault, an

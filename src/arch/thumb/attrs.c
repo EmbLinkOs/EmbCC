@@ -128,7 +128,12 @@ unsigned char *arm_build_attributes(size_t *len)
      * FPU while containing FPU code. The Cortex-M7's FPv5-D16 is the same
      * architecture as the M33's unit, 8, with double precision too -- which
      * is Tag_ABI_HardFP_use's to say, below. */
-    if (target_thumb_fpu())
+    /* ARMv7-A: VFPv3 is 3 (D16: 4), VFPv4 5 (D16: 6), as clang writes
+     * them for -mfpu=vfpv3 ... vfpv4-d16. */
+    if (target_thumb_fpu() && a32) {
+        int d32, ver = target_arm_vfp(&d32);
+        btag(&attrs, Tag_FP_arch, ver == 4 ? (d32 ? 5 : 6) : (d32 ? 3 : 4));
+    } else if (target_thumb_fpu())
         btag(&attrs, Tag_FP_arch, v8 || target_thumb_fpu_dp() ? 8 : 6);
     btag(&attrs, Tag_ABI_PCS_R9_use, 0);         /* r9 is an ordinary reg */
     btag(&attrs, Tag_ABI_PCS_GOT_use, 1);        /* direct: no GOT, no PIC */

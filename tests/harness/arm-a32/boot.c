@@ -139,6 +139,24 @@ static void mmu_on(void)
                      : : "r"(sctlr) : "memory");
 }
 
+/* The FPU is off at reset: CPACR gives CP10 and CP11 (the VFP's two
+ * coprocessor numbers) full access, and FPEXC.EN turns the unit on. Done
+ * whether or not the program uses it -- a hard-float build's first vmov
+ * would otherwise be an undefined instruction -- and harmless when it
+ * does not. `vmsr fpexc, r0` is written as its word: the inline-asm
+ * vocabulary has no FPEXC, which only a startup ever touches. */
+__asm__(".type harness_fpu_on, %function\n"
+        "harness_fpu_on:\n"
+        "  mrc p15, #0, r0, c1, c0, #2\n"
+        "  orr r0, r0, #0xf00000\n"
+        "  mcr p15, #0, r0, c1, c0, #2\n"
+        "  isb\n"
+        "  mov r0, #0x40000000\n"
+        "  .inst 0xeee80a10\n"
+        "  bx lr\n"
+        ".size harness_fpu_on, .-harness_fpu_on\n");
+void harness_fpu_on(void);
+
 #ifdef HARNESS_LIBC
 void exit(int status);
 #endif
@@ -147,6 +165,7 @@ void _start(void)
 {
     unsigned *d = &__data_start, *s = &__data_load;
     int r;
+    harness_fpu_on();
     mmu_on();
     while (d < &__data_end)
         *d++ = *s++;

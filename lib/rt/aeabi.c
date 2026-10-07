@@ -176,6 +176,62 @@ __attribute__((naked, weak)) void __aeabi_ldivmod(void)
 
 /* ---- soft float, in the base procedure call standard ----------------- */
 
+/* With a DOUBLE-precision FPU (bit 3 of __ARM_FP: the Cortex-M7's
+ * FPv5-D16, an ARMv7-A VFPv3/VFPv4) lib/rt/softfp.c keeps only the 64-bit
+ * integer conversions, which no VFP unit has -- so these are the
+ * operations themselves, one instruction each, still taking and returning
+ * their operands in the core registers (BASE). Forwarding to __addsf3 and
+ * the rest, as below, left every such image that pulled this member in
+ * with undefined symbols. Out-of-range float-to-int conversions saturate,
+ * as vcvt does and as the libgcc routines answer. */
+#if defined(__ARM_FP) && (__ARM_FP & 8)
+float __floatdisf(long long); float __floatundisf(unsigned long long);
+double __floatdidf(long long); double __floatundidf(unsigned long long);
+long long __fixsfdi(float); unsigned long long __fixunssfdi(float);
+long long __fixdfdi(double); unsigned long long __fixunsdfdi(double);
+
+BASE float __aeabi_fadd(float a, float b) { return a + b; }
+BASE float __aeabi_fsub(float a, float b) { return a - b; }
+BASE float __aeabi_frsub(float a, float b) { return b - a; }
+BASE float __aeabi_fmul(float a, float b) { return a * b; }
+BASE float __aeabi_fdiv(float a, float b) { return a / b; }
+BASE double __aeabi_dadd(double a, double b) { return a + b; }
+BASE double __aeabi_dsub(double a, double b) { return a - b; }
+BASE double __aeabi_drsub(double a, double b) { return b - a; }
+BASE double __aeabi_dmul(double a, double b) { return a * b; }
+BASE double __aeabi_ddiv(double a, double b) { return a / b; }
+BASE int __aeabi_fcmpeq(float a, float b) { return a == b; }
+BASE int __aeabi_fcmplt(float a, float b) { return a < b; }
+BASE int __aeabi_fcmple(float a, float b) { return a <= b; }
+BASE int __aeabi_fcmpge(float a, float b) { return a >= b; }
+BASE int __aeabi_fcmpgt(float a, float b) { return a > b; }
+BASE int __aeabi_fcmpun(float a, float b) { return a != a || b != b; }
+BASE int __aeabi_dcmpeq(double a, double b) { return a == b; }
+BASE int __aeabi_dcmplt(double a, double b) { return a < b; }
+BASE int __aeabi_dcmple(double a, double b) { return a <= b; }
+BASE int __aeabi_dcmpge(double a, double b) { return a >= b; }
+BASE int __aeabi_dcmpgt(double a, double b) { return a > b; }
+BASE int __aeabi_dcmpun(double a, double b) { return a != a || b != b; }
+BASE float __aeabi_i2f(int a) { return (float)a; }
+BASE float __aeabi_ui2f(unsigned a) { return (float)a; }
+BASE float __aeabi_l2f(long long a) { return __floatdisf(a); }
+BASE float __aeabi_ul2f(unsigned long long a) { return __floatundisf(a); }
+BASE double __aeabi_i2d(int a) { return (double)a; }
+BASE double __aeabi_ui2d(unsigned a) { return (double)a; }
+BASE double __aeabi_l2d(long long a) { return __floatdidf(a); }
+BASE double __aeabi_ul2d(unsigned long long a) { return __floatundidf(a); }
+BASE int __aeabi_f2iz(float a) { return (int)a; }
+BASE unsigned __aeabi_f2uiz(float a) { return (unsigned)a; }
+BASE long long __aeabi_f2lz(float a) { return __fixsfdi(a); }
+BASE unsigned long long __aeabi_f2ulz(float a) { return __fixunssfdi(a); }
+BASE int __aeabi_d2iz(double a) { return (int)a; }
+BASE unsigned __aeabi_d2uiz(double a) { return (unsigned)a; }
+BASE long long __aeabi_d2lz(double a) { return __fixdfdi(a); }
+BASE unsigned long long __aeabi_d2ulz(double a) { return __fixunsdfdi(a); }
+BASE double __aeabi_f2d(float a) { return (double)a; }
+BASE float __aeabi_d2f(double a) { return (float)a; }
+#else
+
 float __addsf3(float, float); float __subsf3(float, float);
 float __mulsf3(float, float); float __divsf3(float, float);
 double __adddf3(double, double); double __subdf3(double, double);
@@ -239,4 +295,5 @@ BASE unsigned long long __aeabi_d2ulz(double a) { return __fixunsdfdi(a); }
 BASE double __aeabi_f2d(float a) { return __extendsfdf2(a); }
 BASE float __aeabi_d2f(double a) { return __truncdfsf2(a); }
 
+#endif /* __ARM_FP & 8 */
 #endif

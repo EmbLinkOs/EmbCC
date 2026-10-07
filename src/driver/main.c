@@ -3664,20 +3664,43 @@ static void arm_float_resolve(void)
 {
     if (target_get() != TARGET_THUMB)
         return;                        /* refused where the flag was parsed */
-    /* ARMv7-A: soft float only, for now. Its units (VFPv3, VFPv4, NEON)
-     * encode as the Cortex-M ones do under a condition field, but the
-     * ABI variants and attributes for them are unchecked here. */
+    /* ARMv7-A: VFPv3 or VFPv4, D16 or D32 -- every Cortex-A's unit but
+     * NEON's SIMD, which nothing here emits and so nothing may claim. The
+     * code is the Cortex-M7's (single and double precision on d0-d15),
+     * each instruction under a condition field. armv7a-none-eabihf is
+     * -mfpu=vfpv3-d16 -mfloat-abi=hard: the unit every Cortex-A with an
+     * FPU has. */
     if (target_arm_a32()) {
-        if ((g_arm_fpu && strcmp(g_arm_fpu, "none") &&
-             strcmp(g_arm_fpu, "soft") && strcmp(g_arm_fpu, "auto")) ||
-            (g_arm_float_abi && strcmp(g_arm_float_abi, "soft")))
-            diag_fatal(NULL, 0, "%s%s is not supported on %s: EmbCC emits "
-                       "soft-float ARM code there (-mfloat-abi=soft): every "
-                       "floating-point operation is a call, and floating "
-                       "point travels in the core registers",
-                       g_arm_fpu ? "-mfpu=" : "-mfloat-abi=",
-                       g_arm_fpu ? g_arm_fpu : g_arm_float_abi,
-                       target_triple_now());
+        static const struct { const char *name; int ver, d32; } units[] = {
+            { "vfpv3-d16", 3, 0 }, { "vfpv3", 3, 1 }, { "vfp3", 3, 1 },
+            { "vfpv4-d16", 4, 0 }, { "vfpv4", 4, 1 }, { "vfp4", 4, 1 },
+            { NULL, 0, 0 }
+        };
+        int hfa = target_thumb_hf_name(), unit = -1;
+        const char *a = g_arm_float_abi ? g_arm_float_abi : hfa ? "hard" : "soft";
+        const char *u = g_arm_fpu ? g_arm_fpu : hfa ? "vfpv3-d16" : NULL;
+        int named = u && strcmp(u, "none") && strcmp(u, "soft") &&
+                    strcmp(u, "auto");
+        if (strcmp(a, "soft") && strcmp(a, "softfp") && strcmp(a, "hard"))
+            diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it "
+                       "is one of soft, softfp and hard", a);
+        for (int k = 0; named && units[k].name; k++)
+            if (!strcmp(u, units[k].name))
+                unit = k;
+        if (named && unit < 0)
+            diag_fatal(NULL, 0, "-mfpu=%s is not supported on %s: EmbCC "
+                       "emits VFPv3 or VFPv4 (-mfpu=vfpv3-d16, vfpv3, "
+                       "vfpv4-d16, vfpv4) there, and no NEON (Advanced SIMD) "
+                       "instruction", u, target_triple_now());
+        if (!strcmp(a, "soft"))
+            return;                    /* no FPU instructions, as GCC reads it */
+        if (!named)
+            diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
+                       "-mfpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)", a);
+        target_set_thumb_hard_abi(!strcmp(a, "hard"));
+        target_set_thumb_fpu(1);
+        target_set_thumb_fpu_dp(1);
+        target_set_arm_vfp(units[unit].ver, units[unit].d32);
         return;
     }
     /* An -eabihf triple is shorthand for the part's FPU and the hard
