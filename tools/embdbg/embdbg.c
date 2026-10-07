@@ -238,6 +238,43 @@ static const char *frame_base_name(struct img *m)
     }
 }
 
+/* The register a function's DW_AT_frame_base actually names, when the
+ * DWARF said (a .embdbg does not keep it): `sp` on Thumb and RISC-V, `Y`
+ * on AVR -- not the register the machine would use as a frame pointer,
+ * which is what frame_base_name() can only guess. */
+static const char *fb_label(struct img *m, const struct dfunc *d)
+{
+    static const char *const x86[16] = {
+        "rax", "rdx", "rcx", "rbx", "rsi", "rdi", "rbp", "rsp",
+        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+    static const char *const rv[32] = {
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+        "s0",   "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+        "a6",   "a7", "s2", "s3", "s4", "s5", "s6", "s7",
+        "s8",   "s9", "s10", "s11", "t3", "t4", "t5", "t6" };
+    static char buf[8];
+    Elf64_Ehdr *e = (Elf64_Ehdr *)m->b;
+    int n = d ? d->fb_reg : -1;
+    if (n < 0 || m->len < 20 || memcmp(m->b, "\177ELF", 4) != 0)
+        return frame_base_name(m);
+    switch (e->e_machine) {
+    case 62:  return n < 16 ? x86[n] : frame_base_name(m);   /* EM_X86_64 */
+    case 243: return n < 32 ? rv[n] : frame_base_name(m);    /* EM_RISCV */
+    case 83:  return n == 28 ? "Y" : frame_base_name(m);     /* EM_AVR */
+    case 40:                                                  /* EM_ARM */
+        if (n == 13) return "sp";
+        break;
+    case 183:                                                 /* EM_AARCH64 */
+        if (n == 31) return "sp";
+        snprintf(buf, sizeof buf, "x%d", n);
+        return buf;
+    default:
+        return frame_base_name(m);
+    }
+    snprintf(buf, sizeof buf, "r%d", n);
+    return buf;
+}
+
 static void load_funcs(struct img *m)
 {
     struct sec *st = find_sec(m, ".symtab");
@@ -764,7 +801,7 @@ static void list_vars(struct img *m, const struct dfunc *d)
         printf("    %-5s %-14s %-8s @ %s%+ld\n",
                v->is_param ? "param" : "local",
                type_name(m, v->type_off), v->name,
-               frame_base_name(m), v->fbreg);
+               fb_label(m, d), v->fbreg);
     }
 }
 
@@ -1447,7 +1484,7 @@ static int build_detail(struct img *m, const struct dfunc *d,
         snprintf(lines[n++], 256, "  %-5s %-12s %-8s @ %s%+ld",
                  dv->is_param ? "param" : "local",
                  type_name(m, dv->type_off), dv->name,
-                 frame_base_name(m), dv->fbreg);
+                 fb_label(m, d), dv->fbreg);
     }
     return n;
 }
