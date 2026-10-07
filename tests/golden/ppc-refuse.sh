@@ -119,10 +119,6 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "a 1-byte atomic" 'an atomic narrower than four bytes' \
-    'char c; int f(void){ return __atomic_fetch_add(&c, 1, 5); }'
-refc "a 2-byte compare-and-swap" 'an atomic narrower than four bytes' \
-    'short s; int f(void){ short e = 0; return __atomic_compare_exchange_n(&s, &e, 1, 0, 5, 5); }'
 refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
     'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \

@@ -228,8 +228,8 @@ exclude_arch() {
         # (xtensa-esp32-elf-gcc, which has no -msoft-float: the float ABI
         # is the same either way, every float in the address registers).
         xtensa)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
-        # PowerPC's lwarx/stwcx. likewise (lbarx/lharx are not Book E's).
-        ppc32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # (PowerPC claims one and two bytes too: lbarx/lharx are not Book
+        # E's, so its backend makes them a lwarx/stwcx. loop on the word.)
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }

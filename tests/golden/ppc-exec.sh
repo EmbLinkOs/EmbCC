@@ -62,8 +62,8 @@ na() {
         echo "shifts a long by 32 or more, undefined when long is 32 bits" ;;
     computed-goto)
         echo "computed goto, refused by name (tests/golden/ppc-refuse.sh)" ;;
-    atomics|atomics-reg)
-        echo "1- and 2-byte atomics and __builtin_frame_address, refused by name (ppc-refuse.sh)" ;;
+    atomics)
+        echo "__builtin_frame_address, refused by name (ppc-refuse.sh)" ;;
     volatile-local-longjmp)
         echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     *) return 1 ;;
