@@ -3300,6 +3300,12 @@ static void gen_ins(struct rv_fn *F, int n)
         rv_refuse(F, i, "this floating-point operation");
     }
 
+    /* named here, before the pair test below would call it "this
+     * operation at 64 bits": its w is a host pointer's */
+    if (i->op == IR_FRAMEADDR)
+        rv_refuse(F, i, "__builtin_frame_address or __builtin_return_address "
+                        "(RISC-V code keeps no frame-pointer chain)");
+
     /* (At RV64 a call or a return of one is gen_call's and IR_RET's.) */
     if (i->w > 8 &&
         !(F->w16 && (i->op == IR_CALL || i->op == IR_RET)))

@@ -658,3 +658,15 @@ check coff-section-variable \
     'int a = 1; int b __attribute__((section(".mydata"))) = 2;' \
     "variable's section attribute is not supported for COFF" \
     --target=x86_64-windows-gnu
+
+# The frame builtins are refused by NAME where the code keeps no frame
+# chain. On RISC-V and AVR the eight-byte check met them first (their w is
+# a host pointer's) and the message said "this operation at 64 bits".
+for t in riscv32-unknown-elf riscv64-unknown-elf avr; do
+    check "frame-builtins-$t" \
+        'void *f(void) { return __builtin_frame_address(0); }
+void *g(void) { return __builtin_return_address(0); }
+int main(void) { return 0; }' \
+        "__builtin_frame_address or __builtin_return_address" \
+        "--target=$t"
+done
