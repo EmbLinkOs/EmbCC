@@ -190,6 +190,18 @@ void rx_mvtc_i(struct code *c, long imm, int cr);
 void rx_mvfc(struct code *c, int cr, int rd);
 void rx_mvtipl(struct code *c, int ipl);
 
+/* rolc/rorc rd: rotate left/right one bit through C. */
+void rx_rolc(struct code *c, int rd);
+void rx_rorc(struct code *c, int rd);
+/* smovf: copy r3 bytes from [r2] to [r1] upward (r1, r2 advance, r3 to
+ * 0); sstr.b: store r2's low byte r3 times from [r1]. */
+void rx_smovf(struct code *c);
+void rx_sstr_b(struct code *c);
+/* push/pop a control register (pushc psw / popc psw: the whole PSW, the
+ * interrupt mask and the flags with it). */
+void rx_pushc(struct code *c, int cr);
+void rx_popc(struct code *c, int cr);
+
 /* ---- bits ------------------------------------------------------------- */
 /* BSET BCLR BTST BNOT #bit, rd (bit 0..31). */
 enum { RX_BSET, RX_BCLR, RX_BTST, RX_BNOT };

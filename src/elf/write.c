@@ -84,6 +84,9 @@ struct elfw {
      * relocates (target_elf_uses_rel), so the writer stores them there
      * and emits .rel.<name> sections of Elf32_Rel. */
     int rel;
+    /* Prepended to every function and object symbol's name: "_" on RX,
+     * whose C symbols carry GCC's __USER_LABEL_PREFIX__ (main is _main). */
+    const char *sym_prefix;
 };
 
 struct elfw *elfw_new(int machine)
@@ -100,6 +103,7 @@ struct elfw *elfw_new(int machine)
      * rejected. */
     w->elf32 = target_ptr_size() <= 4;
     w->rel = target_elf_uses_rel(target_get());
+    w->sym_prefix = target_get() == TARGET_RX ? "_" : NULL;
     if (machine == EM_ARM)
         w->eflags = EF_ARM_EABI_VER5;
     /* RISC-V's and AVR's come from the target (elfw_set_flags): whether
@@ -207,7 +211,19 @@ int elfw_add_symbol(struct elfw *w, const char *name, Elf64_Addr value,
 
     Elf64_Sym sym;
     memset(&sym, 0, sizeof sym);
-    sym.st_name = name && *name ? strtab_add(&w->strtab, name) : 0;
+    if (name && *name && w->sym_prefix &&
+        (ELF64_ST_TYPE(info) == STT_FUNC || ELF64_ST_TYPE(info) == STT_OBJECT ||
+         ELF64_ST_TYPE(info) == STT_NOTYPE || ELF64_ST_TYPE(info) == STT_TLS) &&
+        name[0] != '$' && name[0] != '.') {
+        size_t pl = strlen(w->sym_prefix), nl = strlen(name);
+        char *pn = xmalloc(pl + nl + 1);
+        memcpy(pn, w->sym_prefix, pl);
+        memcpy(pn + pl, name, nl + 1);
+        sym.st_name = strtab_add(&w->strtab, pn);
+        free(pn);
+    } else {
+        sym.st_name = name && *name ? strtab_add(&w->strtab, name) : 0;
+    }
     sym.st_info = info;
     sym.st_shndx = shndx;
     sym.st_value = value;

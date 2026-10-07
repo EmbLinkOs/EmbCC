@@ -69,6 +69,8 @@
 #define DW_REG_FB_ARM         7      /* r7: the frame base under alloca */
 #define DW_REG_FB_RISCV       8      /* x8, s0: the same */
 #define DW_REG_SP_MIPS        29     /* $29 */
+#define DW_REG_SP_RX          0      /* r0 */
+#define DW_REG_FB_RX          13     /* r13: the frame base under alloca */
 #define DW_REG_FB_MIPS        30     /* $30, fp/s8: the same */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
@@ -556,16 +558,20 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         {
             enum target_arch a = target_get();
             if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
-                a == TARGET_RISCV64 || a == TARGET_MIPS32) {
+                a == TARGET_RISCV64 || a == TARGET_MIPS32 ||
+                a == TARGET_RX) {
                 struct dbuf e = { 0, 0, 0 };
-                int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
+                int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32,
+                    rx = a == TARGET_RX;
                 db_u8(&e, DW_OP_breg(fn->has_alloca
                                      ? (thumb ? DW_REG_FB_ARM
                                         : mips ? DW_REG_FB_MIPS
-                                               : DW_REG_FB_RISCV)
+                                        : rx ? DW_REG_FB_RX
+                                             : DW_REG_FB_RISCV)
                                      : (thumb ? DW_REG_SP_ARM
                                         : mips ? DW_REG_SP_MIPS
-                                               : DW_REG_SP_RISCV)));
+                                        : rx ? DW_REG_SP_RX
+                                             : DW_REG_SP_RISCV)));
                 db_sleb(&e, 0);
                 db_uleb(b, (unsigned long)e.len);
                 for (int k = 0; k < e.len; k++) db_u8(b, e.p[k]);

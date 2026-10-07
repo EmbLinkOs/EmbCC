@@ -423,6 +423,35 @@ static void v_memex(void)
             }
 }
 
+static void v_adcsbb(void)
+{
+    static const long D[] = { 0, 4, 1020, 1024, 262140 };
+    for (int o = 0; o < 2; o++)
+        for (int k = 0; k < 5; k++)
+            for (int a = 0; a < NR; a += 3) {
+                int op = o ? RX_SBB : RX_ADC, rs = R[a], rd = R[(a + k) % NR];
+                int at = C.len;
+                if (!rx_rm_ok(op, RX_L, 1, D[k])) {
+                    fprintf(stderr, "rxcheck: rx_rm_ok refuses adc/sbb\n");
+                    exit(2);
+                }
+                rx_rm(&C, op, RX_L, 1, D[k], rs, rd);
+                if (D[k])
+                    QF("%s\t%ld[r%d], r%d", rx_op_name(op), D[k], rs, rd);
+                else
+                    QF("%s\t[r%d], r%d", rx_op_name(op), rs, rd);
+                if (op == RX_SBB && D[k])  /* QEMU's prt_ldmi adds .l */
+                    QF("sbb\t%ld[r%d].l, r%d", D[k], rs, rd);
+                else if (op == RX_SBB)
+                    QF("sbb\t[r%d].l, r%d", rs, rd);
+                if (D[k])
+                    GF("%s\t%ld[r%d].l, r%d", rx_op_name(op), D[k], rs, rd);
+                else
+                    GF("%s\t[r%d].l, r%d", rx_op_name(op), rs, rd);
+                line(at);
+            }
+}
+
 static void v_stack(void)
 {
     for (int a = 0; a < NR; a++) {
@@ -562,6 +591,20 @@ static void v_misc(void)
             GF("sc%s.l\tr%d", rx_cond_name(cond), R[d]);
             line(at);
         }
+    for (int d = 0; d < NR; d += 2) {
+        /* (QEMU's disassembler names rolc `rorc` too) */
+        at = C.len; rx_rolc(&C, R[d]); QF("rorc\tr%d", R[d]); GF("rolc\tr%d", R[d]); line(at);
+        at = C.len; rx_rorc(&C, R[d]); QF("rorc\tr%d", R[d]); GF("rorc\tr%d", R[d]); line(at);
+    }
+    at = C.len; rx_smovf(&C); QF("smovf"); GF("smovf"); line(at);
+    at = C.len; rx_sstr_b(&C); QF("sstr.b"); GF("sstr.b"); line(at);
+    for (int k = 0; k <= 12; k++) {
+        if ((k > 3 && k < 8) || k == 1)
+            continue;
+        at = C.len; rx_pushc(&C, k); QF("push\t%s", cr[k]); GF("pushc\t%s", cr[k]); line(at);
+        /* QEMU prints popc with a stray `r` before the name */
+        at = C.len; rx_popc(&C, k); QF("pop\tr%s", cr[k]); GF("popc\t%s", cr[k]); line(at);
+    }
     at = C.len; rx_nop(&C);  QF("nop");  GF("nop");  line(at);
     at = C.len; rx_brk(&C);  QF("brk");  GF("brk");  line(at);
     at = C.len; rx_wait(&C); QF("wait"); GF("wait"); line(at);
@@ -657,7 +700,7 @@ static void refuse(int n)
     case 17: rx_scc(&C, RX_ALWAYS, 1); break;
     case 18: rx_mvtc(&C, 1, 1); break;                  /* pc */
     case 19: rx_setpsw(&C, 5); break;
-    case 20: rx_rm(&C, RX_ADC, RX_L, 1, 0, 1, 2); break;
+    case 20: rx_rm(&C, RX_ADC, RX_W, 1, 0, 1, 2); break;
     case 21: rx_rm(&C, RX_ADD, RX_W, 1, 3, 1, 2); break;
     case 22: rx_ri(&C, RX_SBB, 1, 2); break;
     case 23: rx_store_imm(&C, RX_L, 1, 2, 3); break;
@@ -697,6 +740,7 @@ int main(int argc, char **argv)
     v_ext();
     v_mem();
     v_memex();
+    v_adcsbb();
     v_stack();
     v_branch();
     v_misc();

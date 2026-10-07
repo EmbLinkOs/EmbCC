@@ -809,6 +809,10 @@ static struct func *cx_helper(int div, struct type *T)
         if (lf == LDF_QUAD)        k = 6 + div;
         else if (lf == LDF_DOUBLE) k = 2 + div;
     }
+    /* A four-byte double or long double (AVR's, RX's) is binary32, and
+     * its helpers are the `s` pair, as GCC calls them there. */
+    if (ty_size(T) == 4)
+        k = div;
     static const char *const names[8] = {
         "__mulsc3", "__divsc3", "__muldc3", "__divdc3",
         "__mulxc3", "__divxc3", "__multc3", "__divtc3" };
@@ -3694,7 +3698,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         /* A complex slot: both parts folded in its element's format */
         if (ty_is_complex(v[k].ty)) {
             struct type *el = v[k].ty->celem;
-            enum ldf_fmt fmt = el->kind == TY_FLOAT ? LDF_FLOAT
+            /* (a four-byte double -- AVR's, RX's -- is binary32) */
+            enum ldf_fmt fmt = el->kind == TY_FLOAT || ty_size(el) == 4
+                             ? LDF_FLOAT
                              : el->kind == TY_DOUBLE ? LDF_DOUBLE
                              : ldf_target_fmt();
             struct ldf *re, *im;
@@ -3720,7 +3726,8 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "constant expression");
             unsigned char lb[16];
             ldf_encode(x, ldf_target_fmt(), lb);
-            memcpy(bytes + v[k].off, lb, 16);
+            /* its own size: 4 or 8 where long double is a double */
+            memcpy(bytes + v[k].off, lb, (size_t)(sz < 16 ? sz : 16));
             continue;
         }
         /* A float/double slot: fold to the value, store its IEEE-754 bit
@@ -3732,7 +3739,8 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static float initializer must be a constant "
                            "expression");
             unsigned long ubits;
-            if (v[k].ty->kind == TY_FLOAT) {
+            if (v[k].ty->kind == TY_FLOAT || sz == 4) {
+                /* float, or a double that is binary32 (AVR, RX) */
                 float fv = (float)dv; unsigned int u32;
                 memcpy(&u32, &fv, 4); ubits = u32;
             } else {

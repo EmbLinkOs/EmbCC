@@ -588,6 +588,8 @@ int rx_rm_ok(int op, int size, int sign, long dsp)
 {
     int scale, ext, mi;
     long u;
+    if (op == RX_ADC || op == RX_SBB)          /* .l only */
+        return size == RX_L && scaled(4, dsp, &u);
     if (short_op(op) < 0 && fc_op(op, &ext) < 0)
         return 0;
     if (size < RX_B || size > RX_L)
@@ -606,6 +608,17 @@ void rx_rm(struct code *c, int op, int size, int sign, long dsp, int rs,
     reg_ok(rs); reg_ok(rd);
     if (!scaled(scale, dsp, &u))
         bad("memory operand displacement", dsp);
+    if (op == RX_ADC || op == RX_SBB) {
+        /* 06 a0|ld 02/00: only the .l form exists */
+        if (size != RX_L)
+            bad("adc/sbb memory operand size", size);
+        code_byte(c, 0x06);
+        code_byte(c, 2 << 6 | 0x20 | ld_field(u));
+        code_byte(c, op == RX_ADC ? 0x02 : 0x00);
+        code_byte(c, rs << 4 | rd);
+        ld_bytes(c, u);
+        return;
+    }
     if (s < 0 && f < 0)
         bad("memory-operand operation", op);
     if ((op == RX_EMUL || op == RX_EMULU) && rd == 15)
@@ -927,6 +940,25 @@ void rx_mvtipl(struct code *c, int ipl)
     code_byte(c, 0x75);
     code_byte(c, 0x70);
     code_byte(c, ipl);
+}
+
+void rx_rolc(struct code *c, int rd) { reg_ok(rd); code_byte(c, 0x7e); code_byte(c, 0x50 | rd); }
+void rx_rorc(struct code *c, int rd) { reg_ok(rd); code_byte(c, 0x7e); code_byte(c, 0x40 | rd); }
+void rx_smovf(struct code *c)   { code_byte(c, 0x7f); code_byte(c, 0x8f); }
+void rx_sstr_b(struct code *c)  { code_byte(c, 0x7f); code_byte(c, 0x88); }
+
+void rx_pushc(struct code *c, int cr)
+{
+    cr_ok(cr, 0);
+    code_byte(c, 0x7e);
+    code_byte(c, 0xc0 | cr);
+}
+
+void rx_popc(struct code *c, int cr)
+{
+    cr_ok(cr, 1);
+    code_byte(c, 0x7e);
+    code_byte(c, 0xe0 | cr);
 }
 
 /* ---- bits ------------------------------------------------------------- */

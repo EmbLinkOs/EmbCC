@@ -10887,7 +10887,8 @@ int a64_bitmask_ok(long imm, int w);    /* arch/aarch64/emit.c */
 static int const_is_expensive(const struct ir_ins *i)
 {
     enum target_arch ta = target_get();
-    if (ta == TARGET_X86_64 || ta == TARGET_AVR)
+    /* RX: any constant or address is one `mov.l #imm, rd` */
+    if (ta == TARGET_X86_64 || ta == TARGET_AVR || ta == TARGET_RX)
         return 0;
     switch (i->op) {
     case IR_GADDR: case IR_STRADDR: case IR_FADDR:
@@ -11242,7 +11243,8 @@ static int pass_immfold(struct ir_func *fn)
          * so its width is not x86's imm32 question (*_imm_foldable64). */
         int wide_ok = (target_get() == TARGET_THUMB ||
                        target_get() == TARGET_RISCV32 ||
-                       target_get() == TARGET_MIPS32) && i->w == 8 &&
+                       target_get() == TARGET_MIPS32 ||
+                       target_get() == TARGET_RX) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
         /* ...and a 64-bit compare with any constant whose halves its
          * subs/sbcs or cmp/cmpeq take (thumb_cmp64_imm): strtol's

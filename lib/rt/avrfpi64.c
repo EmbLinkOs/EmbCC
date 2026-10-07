@@ -12,7 +12,9 @@
  * 64 bits do not fit in 24, so something has to give, and what gives is
  * decided by round-to-nearest rather than by truncation.
  */
-#ifdef __AVR__
+/* RX too: GCC rx-elf's double is binary32 (-m32bit-doubles), so it needs
+ * exactly this native binary32 and no binary64. */
+#if defined(__AVR__) || defined(__RX__)
 
 #include "avrfp.h"
 
@@ -53,4 +55,4 @@ float __floatdisf(long long v)
  * translation unit has to contain at least one declaration. */
 typedef int embcc_rt_avrfpi64_is_not_this_target;
 
-#endif /* __AVR__ */
+#endif /* __AVR__ || __RX__ */

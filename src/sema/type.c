@@ -83,7 +83,8 @@ int ty_generic_same(const struct type *a, const struct type *b)
 
 struct type *ty_wchar(void)
 {
-    return ty_base(TY_INT, target_wchar_unsigned());
+    return ty_base(target_long_size_types() ? TY_LONG : TY_INT,
+                   target_wchar_unsigned());
 }
 
 struct type *ty_llong(int is_unsigned)
@@ -93,12 +94,14 @@ struct type *ty_llong(int is_unsigned)
 
 struct type *ty_size_t(void)
 {
-    return ty_base(target_int_size() == target_ptr_size() ? TY_INT : TY_LONG, 1);
+    return ty_base(target_int_size() == target_ptr_size() &&
+                   !target_long_size_types() ? TY_INT : TY_LONG, 1);
 }
 
 struct type *ty_ptrdiff_t(void)
 {
-    return ty_base(target_int_size() == target_ptr_size() ? TY_INT : TY_LONG, 0);
+    return ty_base(target_int_size() == target_ptr_size() &&
+                   !target_long_size_types() ? TY_INT : TY_LONG, 0);
 }
 
 struct type *ty_int_of_size(int size, int is_unsigned)
@@ -254,10 +257,109 @@ struct type *ty_struct(const char *tag, int is_union)
  * (0 for none), caps every member's alignment at N -- even one a member's
  * own aligned(M) raised, as gcc's maximum_field_alignment does -- and a
  * bit-field's alignment unit with it. */
+/* The Microsoft bit-field layout, as GCC's place_field computes it when
+ * TARGET_MS_BITFIELD_LAYOUT_P is true (RX, for a struct that is not
+ * packed): a run of bit-fields whose declared types have the same SIZE
+ * shares a storage unit of that type while the bits last; any other
+ * field ends the run, the rest of whose unit is then skipped; a new unit
+ * starts aligned for its type; a `:0` ends a run and is otherwise
+ * ignored; and a bit-field's type raises the struct's alignment, named or
+ * not (a `:0` only right after a nonzero bit-field). */
+static void ms_struct_layout(struct type *t, struct member *members, int n,
+                             int pack, int *align_out, long *bits_out)
+{
+    long bitpos = 0, remaining = 0, unit_start = 0;
+    int align = 1;
+    struct member *prev = NULL;      /* the run's latest bit-field */
+    for (int i = 0; i < n; i++) {
+        struct member *m = &members[i];
+        int isbf = m->is_bitfield;
+        long tsize = 8L * ty_size(m->ty);
+        long width = isbf ? m->bit_width : tsize;
+        int ma = ty_align(m->ty);
+        struct member *prev_saved = prev;
+        m->bf_bytes = 0;
+        if (m->user_align > ma)
+            ma = m->user_align;
+        if (pack && ma > pack)
+            ma = pack;
+        if (!isbf || width != 0 || (prev && prev->bit_width != 0))
+            if (ma > align)
+                align = ma;
+        if (prev) {
+            if (isbf && width && prev->bit_width &&
+                tsize == 8L * ty_size(prev->ty)) {
+                if (remaining < width) {         /* out of bits */
+                    bitpos += remaining;
+                    unit_start = bitpos;
+                    prev = m;
+                    remaining = tsize < width ? 0 : tsize - width;
+                } else {
+                    remaining -= width;
+                }
+            } else {
+                if (prev->bit_width)
+                    bitpos += remaining;         /* use up the unit */
+                else
+                    prev_saved = NULL;
+                if (!isbf || width == 0)
+                    prev = NULL;
+            }
+        }
+        if (!isbf || (prev_saved ? tsize != 8L * ty_size(prev_saved->ty)
+                                 : width != 0)) {
+            long ta = 8L * ma;
+            remaining = tsize < width ? 0 : tsize - width;
+            bitpos = (bitpos + ta - 1) / ta * ta;
+            unit_start = bitpos;
+            prev = NULL;
+        }
+        if (isbf) {
+            m->off = (int)(unit_start / 8);
+            m->bit_off = (int)(bitpos - unit_start);
+        } else {
+            m->off = (int)(bitpos / 8);
+        }
+        if (!prev && isbf)
+            prev = m;
+        bitpos += width;
+        if (isbf && width && i == n - 1)
+            bitpos += remaining;
+    }
+    (void)t;
+    *align_out = align;
+    *bits_out = bitpos;
+}
+
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack)
 {
     int align = 1;
+    if (target_ms_bitfields() && !packed && !t->is_union) {
+        long bits = 0;
+        int bytes;
+        ms_struct_layout(t, members, n, pack, &align, &bits);
+        t->nat_align = align;
+        if (user_align > align)
+            align = user_align;
+        bytes = (int)((bits + 7) / 8);
+        t->members = members;
+        t->nmembers = n;
+        t->align = align;
+        t->size = (bytes + align - 1) & ~(align - 1);
+        t->complete = 1;
+        for (struct type *q = t->qcopies; q; q = q->qnext) {
+            struct type keep = *q;
+            *q = *t;
+            q->is_const = keep.is_const;
+            q->is_volatile = keep.is_volatile;
+            q->is_atomic = keep.is_atomic;
+            q->canon = keep.canon;
+            q->qnext = keep.qnext;
+            q->qcopies = NULL;
+        }
+        return;
+    }
     /* Non-bitfields track a byte offset; bitfields a bit position. The two
      * share one running cursor kept in bits (bitpos), rounded up to a byte
      * when a plain member intervenes — this is the little-endian gcc layout

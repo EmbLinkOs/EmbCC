@@ -294,6 +294,33 @@ struct fpval {
     int neg;
 };
 
+#if __SIZEOF_DOUBLE__ == 4
+/* A double that is binary32 (RX's and AVR's: GCC's default there): eight
+ * exponent bits and a 24-bit significand, the leading bit implied. */
+static struct fpval fp_of_double(double v)
+{
+    union { double d; unsigned int u; } cv;
+    cv.d = v;
+    struct fpval f;
+    f.hi = 0;
+    f.neg = (int)(cv.u >> 31);
+    f.lo = cv.u & 0x7fffffULL;
+    f.mant_bits = 24;
+    int be = (int)((cv.u >> 23) & 0xff);
+    if (be == 0xff) {
+        f.cls = f.lo ? FP_NAN : FP_INF;
+        f.e2 = 0;
+    } else if (be == 0) {
+        f.e2 = -149;                 /* subnormal: no implicit leading 1 */
+        f.cls = f.lo ? FP_NORMAL : FP_ZERO;
+    } else {
+        f.lo |= 1ULL << 23;
+        f.e2 = be - 150;
+        f.cls = FP_NORMAL;
+    }
+    return f;
+}
+#else
 static struct fpval fp_of_double(double v)
 {
     union { double d; unsigned long long u; } cv;
@@ -317,6 +344,7 @@ static struct fpval fp_of_double(double v)
     }
     return f;
 }
+#endif
 
 #if __LDBL_MANT_DIG__ == 64
 /* x87 80-bit extended, little-endian: eight bytes of significand whose

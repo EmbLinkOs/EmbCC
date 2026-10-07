@@ -49,7 +49,11 @@ enum target_arch {
      * like ARMv7-M and RV32, with a SIGNED char and long double = double,
      * and the only target here with branch delay slots and REL
      * relocations. docs/internals/mips32-plan.md. */
-    TARGET_MIPS32 = 6
+    TARGET_MIPS32 = 6,
+    /* Renesas RX (RXv1, the RX600/RX610 cores), little-endian, GCC's
+     * rx-elf ABI with 32-bit doubles (docs/internals/rx-plan.md). 8 and
+     * not 7, which another branch gives LoongArch64. */
+    TARGET_RX = 8
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -136,6 +140,13 @@ int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
  * either way -- so a build that asks is obeyed. */
 void target_set_char_signed(int unsigned_char);
 int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
+/* size_t, ptrdiff_t and wchar_t are `long` types rather than `int` ones,
+ * where the two have one width: GCC's rx-elf (newlib-stdint) says
+ * `long unsigned int`, `long int` and `long int`. */
+int target_long_size_types(void);
+/* Bit-fields in the Microsoft layout (GCC's TARGET_MS_BITFIELD_LAYOUT_P),
+ * for a struct that is not packed: RX. */
+int target_ms_bitfields(void);
 
 /* Whether __int128 exists at all. It does not on a 32-bit target: the
  * type needs a register pair per half and libgcc's __divti3 family is
@@ -167,6 +178,7 @@ int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c 
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
+int rx_op_calls_helper(const struct ir_ins *i);     /* src/arch/rx/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.

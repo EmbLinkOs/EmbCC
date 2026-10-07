@@ -6,7 +6,9 @@
  * negative for unordered and the other five positive, because the backend
  * tests the result against zero and both directions have to be false.
  */
-#ifdef __AVR__
+/* RX too: GCC rx-elf's double is binary32 (-m32bit-doubles), so it needs
+ * exactly this native binary32 and no binary64. */
+#if defined(__AVR__) || defined(__RX__)
 
 #include "avrfp.h"
 
@@ -54,4 +56,4 @@ int __unordsf2(float a, float b) { return is_nan(f2u(a)) || is_nan(f2u(b)); }
  * translation unit has to contain at least one declaration. */
 typedef int embcc_rt_avrfpcmp_is_not_this_target;
 
-#endif /* __AVR__ */
+#endif /* __AVR__ || __RX__ */

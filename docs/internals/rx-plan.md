@@ -231,6 +231,22 @@ and SysV bit-fields), `__int128`, and whatever the exec corpus finds.
 
 ## Status
 
-1. Plan, encoder and referee: done (9192 forms decode in QEMU as meant,
-   9003 of them byte for byte as GNU as 2.47 encodes them; 32 range
+1. Plan, encoder and referee: done (9250 forms decode in QEMU as meant,
+   9061 of them byte for byte as GNU as 2.47 encodes them; 32 range
    checks). Shown to fail against five mutants.
+2. The target (`rx-none-elf`, aliases `rx-elf`, `rx-unknown-elf`, `rx`),
+   its data model (size_t/ptrdiff_t/wchar_t `long`, the Microsoft
+   bit-field layout), the predefined macros (tools/gen-predef.sh from
+   rx-elf-gcc -nofpu), the code generator at -O0 and with the allocator at
+   -O1/-O2/-Os, EmbLD for EM_RX (DIR32 and the PC-relative fields, the
+   underscored linker symbols, the -Tstack stub), lib/rt (the binary32
+   soft float lib/rt/avrfp*.c already had) and lib/libc (printf learns a
+   binary32 double), the gdbsim harness, tests/golden/rx-exec.sh: 196 of
+   196 at every level, 23 of them judged by the status GCC's code exits
+   with, 18 not applicable. Shown to fail against a condition mutant.
+
+Shared fixes the board found: a static initializer of a four-byte double
+or long double (AVR's too) was stored as a binary64's low word or 16 bytes
+over its neighbours; a four-byte complex now calls the binary32 `s`
+helpers; and of two weak definitions EmbLD now keeps the first, as GNU ld
+does -- the harness's weak write() lost to lib/libc's.

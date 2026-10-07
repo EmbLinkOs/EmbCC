@@ -7,7 +7,9 @@
  * of equal magnitudes has to produce +0 rather than -0, and every combination
  * of zero, subnormal, infinity and NaN has its own answer.
  */
-#ifdef __AVR__
+/* RX too: GCC rx-elf's double is binary32 (-m32bit-doubles), so it needs
+ * exactly this native binary32 and no binary64. */
+#if defined(__AVR__) || defined(__RX__)
 
 #include "avrfp.h"
 
@@ -91,4 +93,4 @@ float __negsf2(float a) { return u2f(f2u(a) ^ 0x80000000ul); }
  * translation unit has to contain at least one declaration. */
 typedef int embcc_rt_avrfpadd_is_not_this_target;
 
-#endif /* __AVR__ */
+#endif /* __AVR__ || __RX__ */
