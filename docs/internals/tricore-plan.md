@@ -178,16 +178,24 @@ is 1.3 and lacks `DIV`).
   holds address bits 31:28 and 21:6), which rules out 0xa1000000; the
   harness puts them in the top half of the code RAM.
 - **Output.** The board has no UART. The harness's `putchar` stores each
-  byte to a fixed word in the test device's page that the device ignores,
-  and a TCG plugin (tests/harness/tricore/putc.c, built with the host cc)
-  watches that one store and prints it. *(to be built)*
+  byte to a word at the top of the internal data RAM (0xd000bff0) that
+  nothing else uses, and a TCG plugin (tests/harness/tricore/putc.c,
+  built with the host cc against QEMU's qemu-plugin.h) instruments only
+  the byte stores and prints each one to that address, unbuffered.
 - **Ending a run.** The harness prints `==EXIT n==` and then writes n to
   the test device, which exits QEMU at once; tests/harness/qrun.sh's
   `--until` and timeout bound a run that never gets there. An address
   QEMU has no memory at reads as zeros, which are NOPs, so a wild jump
   runs on until the timeout.
-- **Traps** go to BTV; the harness points it at a table that reports the
-  trap class and number and ends the run.
+- **Traps** go to BTV (0 at reset, where there is no memory); the harness
+  points it at a table of eight vectors, written as words at start-up,
+  that load the class, the TIN (D15) and the trapping address (A11) into
+  D4-D6 and jump to a C reporter, which ends the run without the sentinel.
+- **Memory map of an image** (tests/harness/tricore/link.sh): everything
+  at 0x80000000 as a RAM image; the context-save areas in the top 512 KiB
+  of the same RAM (8192 contexts: a link word can name only the first
+  4 MiB of a segment, which rules out 0xa1000000); the stack at the top
+  of 0xa1000000's 4 MiB, growing down.
 
 ## The referee for encodings
 
@@ -206,9 +214,39 @@ illegal instruction.
 
 ## Status
 
-- [x] Encoder and its referee (tests/golden/tricore-encoding.sh: 8636
-      instructions, 36 range checks; shown to fail against seven mutants).
-- [ ] Target, driver, ELF, EmbLD.
-- [ ] Code generator, register allocator.
-- [ ] Harness, exec corpus at -O0/-O1/-O2/-Os.
-- [ ] lib/rt, lib/libc.
+Done (each test shown to fail against deliberate mutants, as the commits
+say):
+
+| Test | What it checks |
+| --- | --- |
+| `tests/golden/tricore-encoding.sh` | every encoder form against QEMU's translator (8717 instructions), `tc_li` and the CSFR numbers on the board, 39 range checks |
+| `tests/golden/tricore-exec.sh` | `tests/exec/*.c` on the board at -O0, -O1, -O2 and -Os: 196 of 196 at every level, 13 of them judged against clang's MIPS32 status for an LP64 assumption, 18 not applicable |
+| `tests/golden/tricore-abi.sh` | caller and callee in separate units at -O0/-O2, all four pairings, against the host's output |
+| `tests/golden/tricore-asm.sh` | the inline-asm vocabulary on the board, and its refusals |
+| `tests/golden/tricore-refuse.sh` | the object header and relocations, the accepted and refused options, constructs and links |
+| `tests/golden/libc-embedded.sh` | lib/libc's output on the board equals x86-64's at -O0, -O2, -Os |
+| `tests/golden/debug-embedded.sh` | `-g`: the frame base (breg26, A10), address size, pointer DIEs |
+
+The exec corpus also passes with the allocator's pool cut to two
+registers (`EMBCC_RA_MAXPOOL=2`), which drives every spill path.
+
+Known gaps, in the order they matter:
+
+1. **The ABI is unverified.** The argument placement (especially the
+   back-fill of a skipped register, structs by reference, unnamed
+   variadic arguments on the stack), the 4-byte alignment of `long long`
+   and `double`, the relocation numbers, `e_flags` and the predefined
+   macros are the TriCore EABI and GCC for TriCore as remembered. The
+   tests make the convention one convention (`tricore-abi.sh`); only a
+   reference compiler (HighTec GCC, TASKING) can say it is THE
+   convention, and a change made on both sides alike passes every test
+   here.
+2. **Code size.** Only 32-bit encodings are emitted; the 16-bit forms
+   (`mov d15,...`, `ld.w d, [a]`, `ret`, `j`) would save a large share.
+   Pointers are never allocated to address registers, so an access
+   through a pointer in a register costs a `mov.a` each time.
+3. **Refused by name:** jump tables (a dense switch is a compare tree),
+   `.s` files and instructions in file-scope asm, naked and interrupt
+   functions, atomics narrower than a word or wider than one, computed
+   goto, `__builtin_frame_address`/`__builtin_return_address`, C++.
+4. The TC3xx FPU is not used (soft float everywhere).
