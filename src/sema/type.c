@@ -505,6 +505,28 @@ struct member *ty_find_member(struct type *t, const char *name)
     return NULL;
 }
 
+/* ty_find_member, also looking inside anonymous struct and union members
+ * (C11 6.7.2.1p13: their members are the enclosing type's). *off gets the
+ * member's offset from the start of t, through the anonymous ones. */
+struct member *ty_find_member_deep(struct type *t, const char *name, long *off)
+{
+    for (int i = 0; i < t->nmembers; i++) {
+        struct member *m = &t->members[i];
+        if (m->name && strcmp(m->name, name) == 0) {
+            *off = m->off;
+            return m;
+        }
+        if (!m->name && !m->is_bitfield && m->ty->kind == TY_STRUCT) {
+            struct member *r = ty_find_member_deep(m->ty, name, off);
+            if (r) {
+                *off += m->off;
+                return r;
+            }
+        }
+    }
+    return NULL;
+}
+
 int ty_size(const struct type *t)
 {
     switch (t->kind) {

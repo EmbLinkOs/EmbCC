@@ -4217,6 +4217,18 @@ static int sel_width(struct ir_func *fn, struct defs *d, int v)
         return 0;
     }
     int w = fn->ins[n].w;
+    /* An address is pointer-sized whatever its w says: irgen leaves w at
+     * its default 4 on these. Read as 4, `c ? "a" : "b"` -- once value
+     * numbering had made both arms plain moves of addresses computed
+     * earlier -- became a 32-bit select, and on x86-64 and aarch64 the
+     * pointer lost its top half (embsvd crashed in sprintf at -O2). */
+    switch (fn->ins[n].op) {
+    case IR_STRADDR: case IR_GADDR: case IR_FADDR: case IR_ADDR:
+        w = PTRW;
+        break;
+    default:
+        break;
+    }
     return w == 4 || w == 8 ? w : 0;
 }
 

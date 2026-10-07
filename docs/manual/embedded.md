@@ -627,9 +627,12 @@ embsvd STM32F405.svd --header STM32F405.h --startup startup.c \
 
 The header has CMSIS's shape -- `USART1->CR1`, `USART1_IRQn`,
 `RCC_APB2ENR_USART1EN_Msk` -- and includes CMSIS-Core for the SVD's
-core. `embsvd --show USART1` prints the registers and their fields.
+core. `embsvd --show USART1` prints the registers and their fields, and
+`embsvd --json` describes the whole device -- every register at its
+absolute address, with its fields -- for tools rather than compilers.
 `tests/golden/svd-stm32f405.sh` checks the generated layout against ST's
-own header, and runs a firmware built from the generated files.
+own header, and runs a firmware built from the generated files;
+`tests/golden/svd-clusters.sh` checks clusters, arrays and the JSON.
 
 ### Stopping and printing under a debugger or emulator
 
