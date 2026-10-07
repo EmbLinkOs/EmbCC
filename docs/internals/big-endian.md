@@ -6,8 +6,9 @@ the compiler, the linker and the libraries without anyone deciding it. The
 first big-endian target is `mips-none-elf` (also `mips-unknown-elf`,
 `mips-elf`, `mips`): MIPS32r2, o32, soft float, the same backend as
 `mipsel-none-elf`, run on QEMU's big-endian malta (`qemu-system-mips`).
-This page lists every place that depends on the byte order, what it does
-big-endian, and the test that notices when it is wrong. A new big-endian
+The second is `powerpc-none-eabi` (powerpc-plan.md), which is big-endian
+only. This page lists every place that depends on the byte order, what it
+does big-endian, and the test that notices when it is wrong. A new big-endian
 target (PowerPC, SPARC LEON3, m68k/ColdFire, OpenRISC, s390x) should walk
 the same list.
 
@@ -15,7 +16,7 @@ the same list.
 
 `target_big_endian()` (src/arch/target.h) answers it. It is set with the
 triple (`target_from_triple`; on MIPS the sub-architecture column's 1 means
-big-endian) and nothing else changes it. `-EB`/`-mbig-endian` and
+big-endian, and every PowerPC triple is) and nothing else changes it. `-EB`/`-mbig-endian` and
 `-EL`/`-mlittle-endian` are accepted when they agree with the triple and
 refused by name when they do not (the triple decides more than the order:
 the runtime's directory, the predefined macros). Values go into target
@@ -58,6 +59,9 @@ order.
 | `src/link/link.c` | see below | every board test, mips-be-abi (clang's objects) |
 | `lib/libc/src/math/fdlibm/fdlibm.h` | `__IEEE_BIG_ENDIAN` from `__BYTE_ORDER__`: which word of a double is first | libc-embedded (mips-none-elf against x86-64), mips-be-exec |
 | `tests/harness/mips/run.sh` | the board is chosen by the image's `EI_DATA` | -- |
+| `src/arch/ppc/emit.c` | instruction words always big-endian (`ppc_put_word`), there being no other order | ppc-encoding (bytes in memory order against llvm-mc's) |
+| `src/arch/ppc/codegen.c` | pairs high word first (r3:r4, PHI = the first register), as memory and the SVR4 ABI have them; a narrow variable at the end of its word home (`obj_slot`), and one aligned beyond its word with the object -- not the word -- on the alignment; small composites returned right-justified in r3:r4 | ppc-exec, ppc-abi, ppc-data |
+| `src/link/link.c` `apply_ppc` | every field written big-endian through `ppc_put_word` and a big-endian halfword for @ha/@l; a little-endian PowerPC object refused | ppc-abi (clang's objects), ppc-refuse |
 
 ### The MIPS backend
 
@@ -151,6 +155,9 @@ one link are refused by name.
 Each was shown to fail against a mutant of the code it guards.
 
 ## Adding the next big-endian target
+
+PowerPC (powerpc-plan.md) walked this list; what it found is in the table
+above.
 
 1. A triple that sets `g_big_endian` (target.c), and a generated predef
    table from the reference compiler.
