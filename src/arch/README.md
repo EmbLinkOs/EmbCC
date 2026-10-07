@@ -25,6 +25,8 @@ src/arch/
   tricore/         TriCore 1.6.1 (AURIX), TriCore EABI  -> docs/internals/tricore-plan.md
   xtensa/          Xtensa LX6/LX7 (ESP32), windowed ABI, soft float, ILP32
                                                          -> docs/internals/xtensa-plan.md
+  coldfire/        ColdFire ISA_A (m68k-none-elf), big-endian, soft float
+                                                         -> docs/internals/coldfire-plan.md
 ```
 
 Each architecture directory holds the same kinds of file:

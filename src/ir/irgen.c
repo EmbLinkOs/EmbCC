@@ -2803,6 +2803,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_rx(fn, e);
         if (target_get() == TARGET_SPARC32)
             return irg_va_arg_sparc(fn, e);
+        if (target_get() == TARGET_COLDFIRE)
+            return irg_va_arg_coldfire(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -3976,6 +3978,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                            "rx-none-elf yet: EmbCC has no RX assembler");
             else if (target_get() == TARGET_SPARC32)
                 irg_asm_sparc(fn, s);
+            else if (target_get() == TARGET_COLDFIRE)
+                irg_asm_coldfire(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;

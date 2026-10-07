@@ -84,6 +84,7 @@
 #define DW_REG_SP_PPC         1      /* r1 */
 #define DW_REG_FB_PPC         31     /* r31: the frame base under alloca */
 #define DW_REG_FP_SPARC       30     /* %i6, %fp: every SPARC slot's base */
+#define DW_REG_FB_M68K        14     /* a6: every ColdFire function links it */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -577,7 +578,12 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
          * the first allocation on. */
         {
             enum target_arch a = target_get();
-            if (a == TARGET_SPARC32) {
+            if (a == TARGET_COLDFIRE) {
+                /* the slots are a6-relative in every function */
+                db_uleb(b, 2);
+                db_u8(b, DW_OP_breg(DW_REG_FB_M68K));
+                db_u8(b, 0);
+            } else if (a == TARGET_SPARC32) {
                 /* SPARC: every slot is addressed from %fp, which never
                  * moves (src/arch/sparc/codegen.c), alloca or not */
                 db_uleb(b, 2);

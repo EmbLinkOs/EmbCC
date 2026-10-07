@@ -33,6 +33,7 @@ little-endian.
 | [Xtensa](#xtensa) | `xtensa-none-elf` | ELF32 | windowed, soft float | `embld` |
 | [Renesas RX](#renesas-rx) | `rx-none-elf` | ELF32 | GCC rx-elf, 32-bit doubles, no FPU | `embld` |
 | [SPARC](#sparc) | `sparc-none-elf` | ELF32, big-endian | SPARC V8 (register windows), soft float | `embld` |
+| [ColdFire](#coldfire) | `m68k-none-elf` | ELF32, big-endian | m68k SVR4 (GCC m68k-elf), soft float | `embld` |
 
 | Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
@@ -54,6 +55,7 @@ little-endian.
 | Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | One shared instance | Refused |
 | SPARC V8 (LEON3) | Bare metal | Software; `long double` binary128 | DWARF | 4 bytes | One shared instance | Refused |
+| ColdFire ISA_A (MCF5208-class) | Bare metal | Software | DWARF | 1, 2, 4 bytes (interrupts masked; supervisor mode) | One shared instance | Refused |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
@@ -124,22 +126,22 @@ Size and alignment in bytes, written `size/alignment`. "x86-64" covers
 `aarch64-elf`, `aarch64-emblink` and `aarch64-linux-gnu`; "Cortex-M"
 covers every `thumb*` triple.
 
-| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | LoongArch64 | TriCore | Xtensa | PowerPC | RX | SPARC |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | signed | signed | unsigned | unsigned | unsigned | signed |
-| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 |
-| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
-| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 8/8 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
-| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 | 8/4 | 8/8 | 8/8 | 8/4 | 8/8 |
-| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 8/8 | 4/4 | 4/4 | 4/4 | 4/4 `long` | 4/4 |
-| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
-| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 | 8/4 | 8/8 | 8/8 | 4/4 | 8/8 |
-| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 16/16 binary128 | 8/4 binary64 | 8/8 binary64 | 8/8 binary64 | 4/4 binary32 | 16/8 binary128 |
-| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 2/2 `unsigned short` | 4/4 `int` | 4/4 `long` | 4/4 `int` |
-| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | 16/16 | — | — | — | — | — |
-| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 | 4 | 4 | 4 | 4 | 4 |
-| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 | 8 | 16 | 16 | 4 | 8 |
-| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 | 8 | 16 | 16 | 4 | 8 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | LoongArch64 | TriCore | Xtensa | PowerPC | RX | SPARC | ColdFire |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | signed | signed | unsigned | unsigned | unsigned | signed | signed |
+| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 |
+| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/2 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 8/8 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/2 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 | 8/4 | 8/8 | 8/8 | 8/4 | 8/8 | 8/2 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 8/8 | 4/4 | 4/4 | 4/4 | 4/4 `long` | 4/4 | 4/2 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/2 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 | 8/4 | 8/8 | 8/8 | 4/4 | 8/8 | 8/2 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 16/16 binary128 | 8/4 binary64 | 8/8 binary64 | 8/8 binary64 | 4/4 binary32 | 16/8 binary128 | 8/2 binary64 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 2/2 `unsigned short` | 4/4 `int` | 4/4 `long` | 4/4 `int` | 4/2 `int` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | 16/16 | — | — | — | — | — | — |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 | 8 | 16 | 16 | 4 | 8 | 2 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 | 8 | 16 | 16 | 4 | 8 | 4 |
 
 Notes on the table:
 
@@ -1163,6 +1165,13 @@ macros are the TriCore EABI and GCC for TriCore **as remembered, and
 unverified** against a reference compiler. The instruction encodings are
 checked against QEMU's TriCore translator, and every test runs on QEMU's
 `tricore_testboard`.
+## ColdFire
+
+Motorola/NXP ColdFire, ISA_A with the hardware divide (an MCF5208 and
+every later core), big-endian, soft float: GCC's `m68k-elf` with
+`-mcpu=5208`. Freestanding only. The design notes, and which facts are
+not yet checked against a real m68k compiler, are in
+[the ColdFire plan](../internals/coldfire-plan.md).
 
 ### Triples
 
@@ -1569,6 +1578,58 @@ console, and the harness installs the window overflow and underflow trap
 handlers a windowed program needs (any other trap prints its type and
 address). A program for real LEON3 hardware needs the same handlers in its
 startup, as BCC's provides.
+| `m68k-none-elf` | `m68k-unknown-elf`, `m68k-elf`, `m68k` | ColdFire ISA_A | m68k SVR4, soft float |
+
+The 68000 family proper (68000-68060, CPU32) is not a target.
+
+### Options
+
+| Option | Accepted values | Refused |
+|---|---|---|
+| `-mcpu=CPU`, `-mtune=CPU`, `-mCPU` | `5208`, `5207`, `5206e`, `5211`-`5216`, `5235`, `5249`, `5271`-`5282`, `5307`, `5329`, `5373`, `5407`, `54455` and their kin | a 68000-family CPU; `5206`, `5202`, `5204` (no divider); `547x`/`548x` (an FPU) |
+| `-march=ISA` | `isaa`, `isaaplus`, `isab`, `isac` | anything else |
+| `-msoft-float`, `-mdiv`, `-mno-align-int`, `-mno-short`, `-mno-rtd`, `-m[no-]strict-align`, `-mbig-endian` | (no value) | `-mhard-float`, `-mno-div`, `-malign-int`, `-mshort`, `-mrtd`, `-mpcrel`, `-mid-shared-library`, `-msep-data`, `-mxgot`, `-mlittle-endian` |
+
+### Calling convention
+
+- Every argument is on the stack in whole 4-byte words, the first at
+  `4(%sp)` on entry: a scalar of four bytes or fewer promoted to a word
+  (a `char`'s byte is its word's last), a `long long` or `double` two
+  words, high first, a structure or union by value, its size rounded up
+  to a word -- right-justified when smaller than a word. The caller pops.
+- A variadic function's unnamed arguments are laid out as named ones;
+  `va_list` is a `char *`.
+- A scalar result comes back in `d0`, or `d0:d1` (high word in `d0`); a
+  pointer in `a0` and `d0`; a `_Complex float` in `d0`/`d1`, a `_Complex
+  double` in `d0:d1`/`d2:d3`. Every other structure and union is returned
+  through the buffer whose address the caller passes in `a1`.
+- `d2`-`d7` and `a2`-`a6` survive a call; `a6` is the frame pointer, which
+  every function links.
+- Nothing is aligned beyond 2 bytes, so `struct { char c; int i; }` is 6
+  bytes; the stack is 4-aligned at a call.
+
+`tests/golden/coldfire-abi.sh` checks that caller and callee agree, EmbCC
+to EmbCC at every optimization pairing.
+
+### Code generation
+
+Operands are effective addresses, so a frame slot is read in place. The
+allocator's data class is `d2`-`d7` and its address class `a2`-`a5`.
+Addresses and calls are 32-bit absolute (`move.l #sym`, `lea sym`,
+`jsr sym`, `R_68K_32`). Branches are `bcc.b`/`bcc.w`; one beyond 32 KiB
+becomes a position-independent `lea`/`adda.l`/`jmp`. A 64-bit multiply,
+divide and variable shift call `lib/rt`. The atomics mask interrupts
+around a plain read-modify-write -- ISA_A has no compare-and-swap -- so
+they need supervisor mode, where bare-metal code runs; in user mode they
+trap.
+
+### Object format
+
+ELF32, big-endian, `EM_68K`, RELA, `e_flags` `0x2` (ISA_A). `embld` links
+them, applying `R_68K_32`/`16`/`8` and `R_68K_PC32`/`PC16`/`PC8`, refuses
+GOT and PLT relocations, a little-endian, FPU or non-ColdFire object by
+name, and with `-Tstack ADDR` emits a stub that sets `%sp` and jumps to
+the entry.
 
 ### Limitations
 
@@ -1615,6 +1676,12 @@ startup, as BCC's provides.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
 | a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for sparc-none-elf: ...` |
+| inline asm | `inline assembly is not supported for m68k-none-elf yet: EmbCC has no ColdFire assembler` |
+| file-scope asm, `.s` and `.S` files | `file-scope asm is not supported for m68k-none-elf yet` / `no assembly-file support` |
+| an atomic of 8 bytes | `an atomic wider than four bytes` |
+| a frame beyond 32 KiB | `a stack frame larger than 32 KiB` |
+| unwind tables | `unwind tables are not supported for m68k-none-elf yet` |
+| C++ | refused, as on every ILP32 target |
 
 ## AVR
 

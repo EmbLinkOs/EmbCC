@@ -163,6 +163,12 @@ int target_insn_len(const unsigned char *p, int avail)
     case TARGET_SPARC32:
         /* SPARC V8 is fixed 32-bit. */
         return avail >= 4 ? 4 : 0;
+    case TARGET_COLDFIRE:
+        /* One to five 16-bit words, decided by the operation word and its
+         * effective addresses. -S groups the stream by word: its bytes are
+         * written as data either way, and there is no m68k assembler here
+         * to read the text back. */
+        return avail >= 2 ? 2 : 0;
 
     case TARGET_X86_64:
     default:
@@ -291,6 +297,12 @@ static const struct data_model {
      * aligned beyond 8 (__BIGGEST_ALIGNMENT__ 8: _Alignof(long double) is
      * 8), which is the cap column's second use after AVR's 1. */
     [TARGET_SPARC32] = { 4, 4, 4, 8, 16, 0, 0, 0, 8 },
+    /* ColdFire as GCC's m68k-elf lays it out (docs/internals/coldfire-plan.md,
+     * unverified -- there is no m68k compiler here): ILP32, a SIGNED char
+     * and wchar_t, long double the 8-byte double, no __int128, and NOTHING
+     * aligned beyond two bytes (BIGGEST_ALIGNMENT 16 bits without
+     * -malign-int): an int in a struct may sit at offset 2. */
+    [TARGET_COLDFIRE] = { 4, 4, 4, 8,  8, 0, 0, 0, 2 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -325,6 +337,7 @@ int target_stack_align(void)
     case TARGET_TRICORE: return 8;      /* the TriCore EABI */
     case TARGET_RX:     return 4;       /* STACK_BOUNDARY 32 */
     case TARGET_SPARC32: return 8;      /* the SPARC V8 ABI */
+    case TARGET_COLDFIRE: return 4;     /* ColdFire's preferred boundary */
     case TARGET_AVR:   return 1;
     default:           return 16;       /* SysV, AAPCS64, RISC-V psABI */
     }
@@ -426,6 +439,8 @@ int target_anon_bitfield_aligns(void)
     case TARGET_RX:      return 1;
     /* SPARC: `struct { char c; int :4; char d; }` is 3 bytes in clang */
     case TARGET_SPARC32: return 0;
+    /* m68k: only named members align a structure (and nothing beyond 2) */
+    case TARGET_COLDFIRE: return 0;
     }
     return 0;
 }
@@ -461,6 +476,8 @@ int target_va_list_is_pointer(void)
     case TARGET_PPC32:   return 0;
     case TARGET_RX:      return 1;   /* char *, over the stacked arguments */
     case TARGET_SPARC32: return 1;   /* void *, over the home area */
+    case TARGET_COLDFIRE: return 1;  /* m68k: char *, over the caller's
+                                      * argument words */
     }
     return 0;
 }
@@ -704,6 +721,13 @@ static const struct triple {
     { "sparc-elf",           TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "sparc-gaisler-elf",   TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "sparc",               TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    /* ColdFire: GCC's target name is m68k-elf with -mcpu=5208; EmbCC's
+     * m68k is ColdFire ISA_A only (the 68000/68020 family proper is
+     * refused by -mcpu). Big-endian, bare metal. */
+    { "m68k-none-elf",       TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   1, 0 },
+    { "m68k-unknown-elf",    TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
+    { "m68k-elf",            TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
+    { "m68k",                TARGET_COLDFIRE, TGT_OS_NONE,  TGT_FMT_ELF,   0, 0 },
 
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
@@ -739,7 +763,8 @@ int target_from_triple(const char *triple, enum target_arch *out,
             g_big_endian = (g_triples[i].arch == TARGET_MIPS32 &&
                             g_triples[i].thumb_em == 1) ||
                            g_triples[i].arch == TARGET_PPC32 ||
-                           g_triples[i].arch == TARGET_SPARC32;
+                           g_triples[i].arch == TARGET_SPARC32 ||
+                           g_triples[i].arch == TARGET_COLDFIRE;
             /* The ARM sub-architecture travels with the name, so
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
@@ -878,6 +903,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_PPC32:   return EM_PPC;
     case TARGET_RX:      return EM_RX;
     case TARGET_SPARC32: return EM_SPARC;
+    case TARGET_COLDFIRE: return EM_68K;
     default:             return EM_X86_64;
     }
 }
@@ -928,6 +954,9 @@ unsigned long target_elf_flags(enum target_arch a)
     case TARGET_XTENSA:  return EF_XTENSA_XT_INSN | EF_XTENSA_XT_LIT;
     /* what GNU as writes for GCC's -m32bit-doubles -mrx-abi */
     case TARGET_RX:      return E_FLAG_RX_ABI;
+    /* binutils' ISA_A with the hardware divide, no MAC, no FPU: what the
+     * code uses, which every ColdFire core with a divider executes */
+    case TARGET_COLDFIRE: return EF_M68K_CF_ISA_A;
     default:             return 0;
     }
 }
@@ -1103,6 +1132,17 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         default:             return -1;
         }
     }
+    if (a == TARGET_COLDFIRE) {
+        switch (k) {
+        /* jsr and jmp to an absolute address, and every address operand:
+         * the 32-bit field in the extension words */
+        case RK_CALL:        return R_68K_32;
+        case RK_TAIL:        return R_68K_32;
+        case RK_ABS32:       return R_68K_32;
+        case RK_DATA_PREL32: return R_68K_PC32;
+        default:             return -1;
+        }
+    }
     if (a == TARGET_AVR) {
         switch (k) {
         case RK_CALL:            return R_AVR_CALL;
@@ -1217,7 +1257,8 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
         a == TARGET_MIPS32 || a == TARGET_LOONGARCH64 ||
         a == TARGET_TRICORE || a == TARGET_XTENSA || a == TARGET_PPC32 ||
-        a == TARGET_RX || a == TARGET_SPARC32)
+        a == TARGET_RX || a == TARGET_SPARC32 ||
+        a == TARGET_COLDFIRE)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -1296,6 +1337,11 @@ static const struct reloc_spelling {
     { EM_SPARC, R_SPARC_WDISP22,       "R_SPARC_WDISP22" },
     { EM_SPARC, R_SPARC_HI22,          "R_SPARC_HI22" },
     { EM_SPARC, R_SPARC_LO10,          "R_SPARC_LO10" },
+    { EM_68K,   R_68K_NONE,            "R_68K_NONE" },
+    { EM_68K,   R_68K_32,              "R_68K_32" },
+    { EM_68K,   R_68K_16,              "R_68K_16" },
+    { EM_68K,   R_68K_PC32,            "R_68K_PC32" },
+    { EM_68K,   R_68K_PC16,            "R_68K_PC16" },
     { EM_AVR,   R_AVR_NONE,            "R_AVR_NONE" },
     { EM_AVR,   R_AVR_32,              "R_AVR_32" },
     { EM_AVR,   R_AVR_7_PCREL,         "R_AVR_7_PCREL" },

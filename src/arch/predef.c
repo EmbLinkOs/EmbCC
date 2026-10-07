@@ -73,6 +73,9 @@ static const struct predef_macro *arch_table(int *count)
         case TARGET_SPARC32:
             *count = predef_macro_count_cxx_sparc32;
             return predef_macros_cxx_sparc32;
+        case TARGET_COLDFIRE:
+            *count = predef_macro_count_cxx_coldfire;
+            return predef_macros_cxx_coldfire;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -131,6 +134,9 @@ static const struct predef_macro *arch_table(int *count)
     case TARGET_SPARC32:
         *count = predef_macro_count_sparc32;
         return predef_macros_sparc32;
+    case TARGET_COLDFIRE:
+        *count = predef_macro_count_coldfire;
+        return predef_macros_coldfire;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;

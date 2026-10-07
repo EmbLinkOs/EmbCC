@@ -616,11 +616,11 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS &&
             e32->e_machine != EM_TRICORE && e32->e_machine != EM_XTENSA &&
             e32->e_machine != EM_PPC && e32->e_machine != EM_RX &&
-            e32->e_machine != EM_SPARC)
+            e32->e_machine != EM_SPARC && e32->e_machine != EM_68K)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
                 "RV32 (EM_RISCV), AVR (EM_AVR), MIPS (EM_MIPS), TriCore "
                 "(EM_TRICORE), Xtensa (EM_XTENSA), PowerPC (EM_PPC), RX (EM_RX) "
-                "and SPARC (EM_SPARC) are supported", name,
+                "SPARC (EM_SPARC) and ColdFire (EM_68K) are supported", name,
                 (unsigned)e32->e_machine);
         if (e32->e_machine == EM_TRICORE &&
             e32->e_ident[EI_DATA] != ELFDATA2LSB)
@@ -645,13 +645,27 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             die("%s: a little-endian SPARC object; SPARC is big-endian",
                 name);
         if (big && e32->e_machine != EM_MIPS && e32->e_machine != EM_PPC &&
-            e32->e_machine != EM_SPARC)
+            e32->e_machine != EM_SPARC && e32->e_machine != EM_68K)
             die("%s: a big-endian object for machine %u; big-endian is "
-                "linked for MIPS (mips-none-elf), PowerPC and SPARC only", name,
+                "linked for MIPS (mips-none-elf), PowerPC, SPARC and ColdFire "
+                "only", name,
                 (unsigned)e32->e_machine);
         if (!big && e32->e_machine == EM_PPC)
             die("%s: a little-endian PowerPC object; this linker links "
                 "big-endian 32-bit PowerPC (powerpc-none-eabi) only", name);
+        if (!big && e32->e_machine == EM_68K)
+            die("%s: a little-endian m68k object; the m68k is big-endian",
+                name);
+        /* ColdFire: the ISA in e_flags' low nibble -- a 68000-family
+         * object (68020, CPU32, ...) or one built for an FPU is not one
+         * this linker's ColdFire images can run */
+        if (e32->e_machine == EM_68K &&
+            ((e32->e_flags & 0x0fUL) == 0 ||
+             (e32->e_flags & 0x40UL) != 0))
+            die("%s: an m68k object that is not soft-float ColdFire "
+                "(e_flags 0x%lx); this linker links ColdFire ISA_A..C "
+                "objects without the FPU", name,
+                (unsigned long)e32->e_flags);
         o->machine = e32->e_machine;
         o->eflags = e32->e_flags;
         o->nsh = e32->e_shnum;
@@ -1080,6 +1094,7 @@ static void add_entry_stub(struct linker *l)
               : l->machine == EM_PPC ? 32
               : l->machine == EM_RX ? 14
               : l->machine == EM_SPARC ? 20
+              : l->machine == EM_68K ? 12
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -1204,6 +1219,21 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         sparc_nop(&c);
         return;
     }
+    if (l->machine == EM_68K) {
+        /* movea.l #top,%sp; jmp entry (abs.l): the encodings
+         * tests/golden/coldfire-encoding.sh referees (cf_move, cf_jmp) */
+        unsigned long top = (unsigned long)l->stack_top & 0xffffffffUL;
+        unsigned long e = (unsigned long)entry & 0xffffffffUL;
+        unsigned char *p = l->stub;
+        (void)c;
+        p[0] = 0x2e; p[1] = 0x7c;
+        p[2] = (unsigned char)(top >> 24); p[3] = (unsigned char)(top >> 16);
+        p[4] = (unsigned char)(top >> 8);  p[5] = (unsigned char)top;
+        p[6] = 0x4e; p[7] = 0xf9;
+        p[8] = (unsigned char)(e >> 24);   p[9] = (unsigned char)(e >> 16);
+        p[10] = (unsigned char)(e >> 8);   p[11] = (unsigned char)e;
+        return;
+    }
     if (l->machine == EM_MIPS) {
         mips_li(&c, MIPS_SP, (long long)l->stack_top);
         mips_lui(&c, MIPS_T9, (unsigned)(entry >> 16) & 0xffff);
@@ -1282,6 +1312,11 @@ static void add_object(struct linker *l, struct object *o)
         l->eflags = EF_LOONGARCH_ABI_SOFT_FLOAT | EF_LOONGARCH_OBJABI_V1;
     else if (o->machine == EM_TRICORE && !(l->eflags & EF_TRICORE_CORE_MASK))
         l->eflags = o->eflags & EF_TRICORE_CORE_MASK;
+    else if (o->machine == EM_68K)
+        /* the image needs the highest ColdFire ISA any object does
+         * (binutils numbers them in order: A, A+, B, C) */
+        l->eflags = (o->eflags & 0x0fUL) > (l->eflags & 0x0fUL)
+                  ? o->eflags : l->eflags;
     if (l->nobj == l->capobj) {
         l->capobj = l->capobj ? l->capobj * 2 : 8;
         l->objs = xrealloc(l->objs, (size_t)l->capobj * sizeof *l->objs);
@@ -1975,7 +2010,8 @@ static void layout(struct linker *l, struct osec_bound *b,
      * the image, as a GNU script's ALIGN(4) puts it. */
     if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
         l->machine == EM_XTENSA || l->machine == EM_PPC ||
-        l->machine == EM_RX || l->machine == EM_SPARC)
+        l->machine == EM_RX || l->machine == EM_SPARC ||
+        l->machine == EM_68K)
         va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
@@ -2011,7 +2047,8 @@ static void layout(struct linker *l, struct osec_bound *b,
     }
     if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
         l->machine == EM_XTENSA || l->machine == EM_PPC ||
-        l->machine == EM_RX || l->machine == EM_SPARC)
+        l->machine == EM_RX || l->machine == EM_SPARC ||
+        l->machine == EM_68K)
         va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
@@ -3224,6 +3261,61 @@ static void apply_sparc(struct linker *l, struct object *o, unsigned type,
     }
 }
 
+/* m68k / ColdFire: RELA, every field big-endian and written whole. EmbCC's
+ * objects carry R_68K_32 for every address and call (the 32-bit operand
+ * after the operation word); the PC-relative forms are what an assembler
+ * writes for a bsr or a (d16,pc) operand, measured from the field. The
+ * GOT and PLT forms are position-independent code, refused by name. */
+static void put_be(unsigned char *loc, int n, unsigned long v)
+{
+    for (int k = 0; k < n; k++)
+        loc[k] = (unsigned char)(v >> (8 * (n - 1 - k)));
+}
+
+static void apply_m68k(struct linker *l, struct object *o, unsigned type,
+                       unsigned char *loc, Elf64_Addr S, long long A,
+                       Elf64_Addr P)
+{
+    long long V = (long long)S + A, d = V - (long long)P;
+    switch (type) {
+    case R_68K_NONE:
+        return;
+    case R_68K_32:
+        need_range(l, o, "R_68K_32", V, I32_MIN, 0xffffffffLL);
+        put_be(loc, 4, (unsigned long)V & 0xffffffffUL);
+        return;
+    case R_68K_16:
+        need_range(l, o, "R_68K_16", V, -32768, 65535);
+        put_be(loc, 2, (unsigned long)V & 0xffffUL);
+        return;
+    case R_68K_8:
+        need_range(l, o, "R_68K_8", V, -128, 255);
+        put_be(loc, 1, (unsigned long)V & 0xffUL);
+        return;
+    case R_68K_PC32:
+        need_range(l, o, "R_68K_PC32", d, I32_MIN, 0x7fffffffLL);
+        put_be(loc, 4, (unsigned long)d & 0xffffffffUL);
+        return;
+    case R_68K_PC16:
+        need_range(l, o, "R_68K_PC16", d, -32768, 32767);
+        put_be(loc, 2, (unsigned long)d & 0xffffUL);
+        return;
+    case R_68K_PC8:
+        need_range(l, o, "R_68K_PC8", d, -128, 127);
+        put_be(loc, 1, (unsigned long)d & 0xffUL);
+        return;
+    case R_68K_GOT32: case R_68K_PLT32:
+        die("%s: relocation %s: position-independent code through a GOT "
+            "or PLT, which this linker does not build; compile it without "
+            "-fPIC", o->name,
+            type == R_68K_GOT32 ? "R_68K_GOT32" : "R_68K_PLT32");
+        return;
+    default:
+        die("%s: unsupported m68k relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
 static void apply_avr(struct linker *l, struct object *o, unsigned type,
                       unsigned char *loc, Elf64_Addr S, long long A,
                       Elf64_Addr P)
@@ -3606,6 +3698,13 @@ static void apply_relocs(struct linker *l, struct object *o)
                     die("%s: a SPARC object with REL relocations; the "
                         "SPARC ABI's are RELA", o->name);
                 apply_sparc(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_68K) {
+                if (isrel)
+                    die("%s: an m68k object with REL relocations; m68k "
+                        "objects carry RELA", o->name);
+                apply_m68k(l, o, type, loc, S, A, P);
                 continue;
             }
             if (o->machine == EM_MIPS) {
@@ -4044,7 +4143,8 @@ static void write_exec(struct linker *l, const char *out,
     eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5
                 : l->machine == EM_RISCV || l->machine == EM_AVR ||
                   l->machine == EM_MIPS || l->machine == EM_LOONGARCH ||
-                  l->machine == EM_TRICORE || l->machine == EM_RX
+                  l->machine == EM_TRICORE || l->machine == EM_RX ||
+                  l->machine == EM_68K
                 ? l->eflags
                 : 0;
     eh->e_phoff = ehsz;
@@ -5984,9 +6084,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
             l.machine != EM_LOONGARCH && l.machine != EM_ARM &&
             l.machine != EM_TRICORE && l.machine != EM_XTENSA &&
             l.machine != EM_PPC && l.machine != EM_RX &&
-            l.machine != EM_SPARC)
+            l.machine != EM_SPARC && l.machine != EM_68K)
             die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore, Xtensa, "
-                "PowerPC, RX and SPARC "
+                "PowerPC, RX, SPARC and ColdFire "
                 "option: "
                 "every other target here starts with a stack pointer already "
                 "set (a Cortex-M reads its own from the vector table)");

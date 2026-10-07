@@ -190,6 +190,11 @@ SRCS := \
 	src/arch/sparc/irgen.c \
 	src/arch/sparc32/predef.c \
 	src/arch/sparc32/predef_cxx.c \
+	src/arch/coldfire/emit.c \
+	src/arch/coldfire/codegen.c \
+	src/arch/coldfire/irgen.c \
+	src/arch/coldfire/predef.c \
+	src/arch/coldfire/predef_cxx.c \
 	src/arch/avr/emit.c \
 	src/arch/avr/codegen.c \
 	src/arch/avr/asm.c \
@@ -337,6 +342,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/ppc32/predef.c src/arch/ppc32/predef_cxx.c \
              src/arch/rx/predef.c \
              src/arch/sparc32/predef.c src/arch/sparc32/predef_cxx.c \
+             src/arch/coldfire/predef.c src/arch/coldfire/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
@@ -362,6 +368,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/ppc/irgen.c src/arch/ppc/emit.c \
              src/arch/rx/irgen.c src/arch/rx/emit.c \
              src/arch/sparc/irgen.c src/arch/sparc/emit.c \
+             src/arch/coldfire/irgen.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
@@ -572,7 +579,7 @@ RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
                riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
-                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf
+                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -589,7 +596,7 @@ LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
                  riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \
                  loongarch64-unknown-elf tricore-none-elf \
-                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf
+                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \

@@ -85,7 +85,14 @@ enum target_arch {
      * windows. ILP32 with a SIGNED char and a 16-byte binary128 long
      * double. 11 rather than the next number: the numbers between are
      * taken by targets on other branches. docs/internals/sparc-plan.md. */
-    TARGET_SPARC32 = 11
+    TARGET_SPARC32 = 11,
+    /* ColdFire (m68k-none-elf): the 68000's embedded descendant, ISA_A
+     * with the hardware divide (an MCF5208), big-endian, soft float.
+     * ILP32 with a SIGNED char, long double = double, and nothing aligned
+     * beyond two bytes -- the m68k's own data model. Every argument is on
+     * the stack. 12 because other new targets took 7-11 on their branches.
+     * docs/internals/coldfire-plan.md. */
+    TARGET_COLDFIRE = 12
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -236,6 +243,7 @@ int xtensa_op_calls_helper(const struct ir_ins *i); /* src/arch/xtensa/codegen.c
 int ppc_op_calls_helper(const struct ir_ins *i);    /* src/arch/ppc/codegen.c */
 int rx_op_calls_helper(const struct ir_ins *i);     /* src/arch/rx/codegen.c */
 int sparc_op_calls_helper(const struct ir_ins *i);  /* src/arch/sparc/codegen.c */
+int cf_op_calls_helper(const struct ir_ins *i);     /* src/arch/coldfire/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -389,6 +397,9 @@ int ppc_imm_foldable(int op, long imm);     /* arch/ppc/irgen.c */
 int ppc_imm_foldable64(int op, long imm);
 int sparc_imm_foldable(int op, long imm);   /* arch/sparc/irgen.c */
 int sparc_imm_foldable64(int op, long imm);
+/* ColdFire: every 32-bit constant is an operand (addi, andi, cmpi, ... take
+ * #imm32), and a 64-bit AND/OR/XOR one half by half */
+int cf_imm_foldable(int op, long imm, int w);   /* arch/coldfire/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -647,6 +658,9 @@ enum reloc_kind {
      * which never carry, so neither half is rounded. RELA. */
     RK_SPARC_HI22,
     RK_SPARC_LO10,
+    /* ColdFire takes an address as a 32-bit absolute operand -- `move.l
+     * #sym,Dn`, `lea sym,An`, `jsr sym` -- relocated by R_68K_32 at the
+     * extension words: RK_ABS32, RK_CALL and RK_TAIL, no kind of its own. */
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

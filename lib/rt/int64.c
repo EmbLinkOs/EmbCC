@@ -125,6 +125,78 @@ u64 __muldi3(u64 a, u64 b)
 }
 #endif
 
+#if defined(__mcoldfire__)
+/* ColdFire also calls for a 64-bit multiply -- it has no 32 x 32 -> 64
+ * product -- and for a 64-bit shift by a variable count. libgcc's names
+ * again, and written with 32-bit operations only: a 64-bit multiply or
+ * variable shift in here would be a call to itself. Shifts by a constant
+ * 32 are inline (a word moves), so they split and join the halves. */
+typedef unsigned int u32;
+
+u64 __ashldi3(u64 a, int b)
+{
+    u32 hi = (u32)(a >> 32), lo = (u32)a;
+    b &= 63;
+    if (b == 0)
+        return a;
+    if (b >= 32) {
+        hi = lo << (b - 32);
+        lo = 0;
+    } else {
+        hi = (hi << b) | (lo >> (32 - b));
+        lo <<= b;
+    }
+    return ((u64)hi << 32) | lo;
+}
+
+u64 __lshrdi3(u64 a, int b)
+{
+    u32 hi = (u32)(a >> 32), lo = (u32)a;
+    b &= 63;
+    if (b == 0)
+        return a;
+    if (b >= 32) {
+        lo = hi >> (b - 32);
+        hi = 0;
+    } else {
+        lo = (lo >> b) | (hi << (32 - b));
+        hi >>= b;
+    }
+    return ((u64)hi << 32) | lo;
+}
+
+s64 __ashrdi3(s64 a, int b)
+{
+    int hi = (int)((u64)a >> 32);
+    u32 lo = (u32)a;
+    b &= 63;
+    if (b == 0)
+        return a;
+    if (b >= 32) {
+        lo = (u32)(hi >> (b - 32));
+        hi = hi < 0 ? -1 : 0;
+    } else {
+        lo = (lo >> b) | ((u32)hi << (32 - b));
+        hi >>= b;
+    }
+    return (s64)(((u64)(u32)hi << 32) | lo);
+}
+
+/* The low 64 bits of a product: the low words' full 64-bit product from
+ * four 16 x 16 pieces, and the cross terms into the high word. */
+u64 __muldi3(u64 a, u64 b)
+{
+    u32 al = (u32)a, ah = (u32)(a >> 32), bl = (u32)b, bh = (u32)(b >> 32);
+    u32 a0 = al & 0xffff, a1 = al >> 16, b0 = bl & 0xffff, b1 = bl >> 16;
+    u32 p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    u32 mid = (p00 >> 16) + (p01 & 0xffff) + (p10 & 0xffff);
+    u32 hi = p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16);
+    u32 lo = (mid << 16) | (p00 & 0xffff);
+    hi += al * bh + ah * bl;
+    return ((u64)hi << 32) | lo;
+}
+#endif
+
 #else
 /* A translation unit needs a declaration, and this one has none to
  * make on a machine that divides 64 bits by 64 in hardware. */

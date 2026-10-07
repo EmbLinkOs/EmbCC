@@ -259,6 +259,14 @@ static const char *reloc_name(int kind)
         case RK_DATA_PREL32: return "R_SPARC_DISP32";
         default:             return NULL;
         }
+    case TARGET_COLDFIRE:
+        switch (kind) {
+        case RK_CALL:        return "R_68K_32";      /* jsr to an address */
+        case RK_TAIL:        return "R_68K_32";
+        case RK_ABS32:       return "R_68K_32";
+        case RK_DATA_PREL32: return "R_68K_PC32";
+        default:             return NULL;
+        }
     case TARGET_AVR:
         /* (without this case AVR fell through to x86-64's names) */
         switch (kind) {

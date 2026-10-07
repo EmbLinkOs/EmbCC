@@ -65,6 +65,8 @@ order.
 | `src/arch/ppc/emit.c` | instruction words always big-endian (`ppc_put_word`), there being no other order | ppc-encoding (bytes in memory order against llvm-mc's) |
 | `src/arch/ppc/codegen.c` | pairs high word first (r3:r4, PHI = the first register), as memory and the SVR4 ABI have them; a narrow variable at the end of its word home (`obj_slot`), and one aligned beyond its word with the object -- not the word -- on the alignment; small composites returned right-justified in r3:r4 | ppc-exec, ppc-abi, ppc-data |
 | `src/link/link.c` `apply_ppc` | every field written big-endian through `ppc_put_word` and a big-endian halfword for @ha/@l; a little-endian PowerPC object refused | ppc-abi (clang's objects), ppc-refuse |
+| `src/arch/coldfire/` | the second big-endian target (`m68k-none-elf`), with no little-endian twin: the encoder writes every 16-bit word high byte first, a pair holds the high word in d0 and at the lower address, a narrow parameter's byte is its word's last (11(%fp)), a composite smaller than a word is right-justified in its argument word, and `va_arg` reads it there | coldfire-exec, coldfire-abi, libc-embedded |
+| `src/link/link.c` `apply_m68k` | every m68k field written big-endian whole; the `-Tstack` stub's words | coldfire-exec, coldfire-refuse |
 
 ### The MIPS backend
 
