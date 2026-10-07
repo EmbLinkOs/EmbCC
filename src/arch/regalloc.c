@@ -1142,9 +1142,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             /* A struct or float return reads its slot raw on every
              * backend; a scalar one only where the backend can take it
              * from a register. */
-            if (fn->ret_abi.is_struct ||
-                (in->flt && !t->float_in_gpr && !t->fp_reads_gpr
-                     ? !fp : !t->ret_scalar_in_reg))
+            if (fn->ret_abi.is_struct ? t->memcpy_addr_in_reg < 2
+                : in->flt && !t->float_in_gpr && !t->fp_reads_gpr
+                     ? !fp : !t->ret_scalar_in_reg)
                 OPAQUE(in->a);
             break;
         case IR_CALL:
@@ -1164,11 +1164,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * everywhere. A scalar-integer one is moved straight into
              * its argument register only by a backend that knows how. */
             for (int k = 0; k < in->nargs; k++)
-                if (in->argv[k].is_struct ||
-                    (in->argv[k].cls[0] == CLASS_SSE && !t->float_in_gpr
-                         ? !fp : !t->call_int_arg_in_reg))
+                if (in->argv[k].is_struct ? t->memcpy_addr_in_reg < 2
+                    : in->argv[k].cls[0] == CLASS_SSE && !t->float_in_gpr
+                         ? !fp : !t->call_int_arg_in_reg)
                     OPAQUE(in->argv[k].vreg);
-            if (in->retsize || (in->flt && !t->float_in_gpr ? !fp : 0))
+            if (in->retsize ? t->memcpy_addr_in_reg < 2
+                : in->flt && !t->float_in_gpr ? !fp : 0)
                 OPAQUE(in->dst);                     /* float/struct result */
             break;
         case IR_ASM:

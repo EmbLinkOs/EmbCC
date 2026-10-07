@@ -1318,7 +1318,11 @@ static int emit_ldconst(struct ir_func *fn, const struct ldf *v)
     i->op = IR_STRADDR;
     i->label = ir_intern_aligned(cur_unit, b, 16, 16);
     i->dst = new_temp(fn);
-    return emit_load(fn, i->dst, ty_base(TY_LDOUBLE, 0));
+    {
+        int v = emit_load(fn, i->dst, ty_base(TY_LDOUBLE, 0));
+        fn->ins[fn->nins - 1].natural = 1;    /* interned 16-aligned */
+        return v;
+    }
 }
 
 /* !x and conditions want "is zero" — comparison against a zero of the

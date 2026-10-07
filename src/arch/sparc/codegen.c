@@ -48,7 +48,9 @@
 #include <string.h>
 
 struct sparc_fn;
-static void copy_block(struct sparc_fn *F, int copy, long size, int aligned);
+static void gen_ins(struct sparc_fn *F, int n);
+static int copy_block(struct sparc_fn *F, int copy, long size, int align,
+                      int sb, long so, int db, long dof);
 
 /* The scratch registers, none of them in the allocator's pool: %g1-%g4
  * (caller-saved by the ABI, the application's to use), %l6 and %l7 (this
@@ -78,6 +80,7 @@ struct sparc_sites {
 struct sparc_fn {
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
     int skip_next;       /* the instruction after this one is already out */
+    int skip_to;         /* or every one before this index (cond_branch) */
     int want_debug;
     struct ir_func *fn;
     int *loc;            /* per vreg: its register, -1 in memory; NULL at -O0 */
@@ -205,8 +208,9 @@ static const struct ra_target SPARC_RATGT = {
     sparc_pool_for,
     sparc_callee_saved,
     sparc_ldvar_plain,
-    1, 1, 1,        /* call args, returns and memcpy addresses from registers:
-                     * the call setup is one parallel move (gen_call) */
+    1, 1, 2,        /* call args, returns, memcpy and every aggregate address
+                     * from registers: the call setup is one parallel move
+                     * (gen_call); a struct's address is read through rd */
     sparc_op_calls_helper,
     0,              /* three-operand */
     sparc_abi_hints,
@@ -415,8 +419,11 @@ static void sparc_abi_hints(const struct ir_func *fn, int *hint)
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
             place_arg(a, &word, &pl);
+            /* not over a parameter's own register (or an earlier
+             * call's): a value that lives across this call cannot take
+             * an %o register, and the fallback was any free one */
             if (pl.nreg == 1 && !pl.nstk && !pl.byref && a->size <= 4 &&
-                a->vreg >= 0 && a->vreg < fn->nvregs)
+                a->vreg >= 0 && a->vreg < fn->nvregs && hint[a->vreg] < 0)
                 hint[a->vreg] = out_reg(pl.reg);
         }
     }
@@ -633,6 +640,20 @@ static void addr_fp(struct sparc_fn *F, int reg, long o)
 static void addr_sp(struct sparc_fn *F, int reg, long off)
 {
     addr_fp(F, reg, fpo(F, off));
+}
+
+/* reg = base + o (base may be reg; FAR builds a large o) */
+static void addr_off_into(struct sparc_fn *F, int reg, int base, long o)
+{
+    if (o == 0) {
+        if (reg != base)
+            sparc_mov(F->t, reg, base);
+    } else if (fits13(o)) {
+        sparc_alu_imm(F->t, SP_ADD, reg, base, o);
+    } else {
+        sparc_li(F->t, FAR, o);
+        sparc_alu(F->t, SP_ADD, reg, base, FAR);
+    }
 }
 
 static int in_reg(const struct sparc_fn *F, int v)
@@ -1168,6 +1189,62 @@ static void ret_or_jump(struct sparc_fn *F)
     ret_restore(F);
 }
 
+/* The last instruction emitted, at `at`, when it may be rewritten in
+ * place: no label, landing or transfer after it (F->barrier), not a
+ * relocation site, and not in a transfer's delay slot (where it might
+ * not run). -1 otherwise. */
+static int last_rewritable(const struct sparc_fn *F)
+{
+    const struct code *t = F->t;
+    int at = t->len - 4;
+    if (at < F->barrier || at <= last_site(F) || at < 4 ||
+        is_dcti(sparc_rdw(t, at - 4)))
+        return -1;
+    return at;
+}
+
+/* Set Z from r == 0 for a be/bne: `tst r` (orcc r, %g0, %g0) -- unless
+ * the instruction just emitted computed r by an add, sub or a logical
+ * operation, which then becomes its cc form and sets Z from the same
+ * value (the other codes differ, so only for Z). */
+static void test_zero(struct sparc_fn *F, int r)
+{
+    struct code *t = F->t;
+    int at = F->fill ? last_rewritable(F) : -1;
+    if (at >= 0 && r != SP_G0) {
+        unsigned long w = sparc_rdw(t, at);
+        int op3 = (int)(w >> 19) & 63;
+        /* add and or xor sub andn orn xnor: op3 0..7, cc forms 0x10.. */
+        if ((w >> 30) == 2 && (int)(w >> 25 & 31) == r && op3 <= SP_XNOR) {
+            sparc_wrw(t, at, w | (0x10UL << 19));
+            return;
+        }
+    }
+    sparc_alu(t, SP_ORCC, SP_G0, r, SP_G0);
+}
+
+/* A narrow load just emitted into r, extended into d: the load itself
+ * with the extension asked for, into d. Only when r is dead after (the
+ * caller checks the loaded value has no other reader). */
+static int load_ext(struct sparc_fn *F, int r, int d, int size, int sign)
+{
+    struct code *t = F->t;
+    int at = F->fill ? last_rewritable(F) : -1, op3;
+    unsigned long w;
+    if (at < 0)
+        return 0;
+    w = sparc_rdw(t, at);
+    op3 = (int)(w >> 19) & 63;
+    if ((w >> 30) != 3 || (int)(w >> 25 & 31) != r ||
+        !(size == 1 ? op3 == 0x01 || op3 == 0x09
+                    : op3 == 0x02 || op3 == 0x0a))
+        return 0;
+    op3 = size == 1 ? (sign ? 0x09 : 0x01) : (sign ? 0x0a : 0x02);
+    sparc_wrw(t, at, (w & ~((31UL << 25) | (63UL << 19))) |
+                     ((unsigned long)d << 25) | ((unsigned long)op3 << 19));
+    return 1;
+}
+
 /* cmp a, b (or an immediate): subcc into %g0. */
 static void cmp_rr(struct sparc_fn *F, int a, int b)
 {
@@ -1659,8 +1736,8 @@ static int gen_ins64(struct sparc_fn *F, int n)
         int al, ah, dl, dh;
         int add = i->op == IR_ADD;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
-        operand_b64(F, i, B_LO, B_HI);
         if (i->imm_b || !in_reg(F, i->b)) {
+            operand_b64(F, i, B_LO, B_HI);
             dst64(F, i->dst, &dl, &dh);
             sparc_alu(t, add ? SP_ADDCC : SP_SUBCC, dl, al, B_LO);
             sparc_alu(t, add ? SP_ADDXCC : SP_SUBXCC, dh, ah, B_HI);
@@ -1754,14 +1831,21 @@ static int gen_ins64(struct sparc_fn *F, int n)
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     }
-    case IR_EXT:
-        rd(F, i->a, A_LO);
+    case IR_EXT: {
+        /* straight into the pair: the source read once, before either
+         * half is written; the low word first, the high made from it */
+        int dl, dh, s;
+        dst64(F, i->dst, &dl, &dh);
+        s = rdr(F, i->a, dl);
         if (i->size < 4)
-            ext_reg(F, A_LO, A_LO, i->size, i->sign);
-        if (i->sign) sparc_alu_imm(t, SP_SRA, A_HI, A_LO, 31);
-        else         sparc_mov(t, A_HI, SP_G0);
-        wr64(F, i->dst, A_LO, A_HI);
+            ext_reg(F, dl, s, i->size, i->sign);
+        else if (s != dl)
+            sparc_mov(t, dl, s);
+        if (i->sign) sparc_alu_imm(t, SP_SRA, dh, dl, 31);
+        else         sparc_mov(t, dh, SP_G0);
+        wr64(F, i->dst, dl, dh);
         return 1;
+    }
     case IR_LDVAR:
         if (i->size == 8) {
             rd64(F, i->a, A_LO, A_HI);
@@ -2106,9 +2190,9 @@ static void gen_call(struct sparc_fn *F, int n)
         copy_at = (copy_at + 7) & ~7L;
         pl[k].copy = copy_at;
         if (a->is_struct) {
-            rd(F, a->vreg, TMP);                 /* its address */
-            addr_sp(F, ADDR, copy_at);
-            copy_block(F, 1, a->size, 0);
+            copy_block(F, 1, a->size, a->natural ? a->align : 1,
+                       rdr(F, a->vreg, TMP), 0,  /* its address */
+                       SP_FP, fpo(F, copy_at));
         } else {
             need16(F, a->vreg);                  /* a long double */
             copy16(F, copy_at, sslot(F, a->vreg));
@@ -2402,6 +2486,76 @@ static void sub_cas(struct sparc_fn *F, const struct ir_ins *i)
     }
 }
 
+/* A conditional branch to `label` whose fall-through is ONE machine
+ * instruction X (from the IR at m, up to three instructions that make one
+ * word between them, as an add and the copy that coalesces away), a jump
+ * to L2, and `label` itself -- an if/else arm, a loop's step:
+ *
+ *     b<cond> label ; nop ; X ; ba L2 ; nop ; label:
+ *
+ * becomes the inverse branch to L2, annulled, with X in its slot. X then
+ * runs exactly when the branch is taken, which is when the old code ran
+ * it, and the jump is gone:
+ *
+ *     b<!cond>,a L2 ; X ; label:
+ *
+ * X is generated after the placeholder and kept only when it came out as
+ * one ordinary word (slot_decode) that noted no relocation site or
+ * branch; otherwise everything is undone and the branch is the plain one. */
+static int cond_x_op(enum ir_op op)
+{
+    switch (op) {
+    case IR_CONST: case IR_MOV: case IR_BITCAST: case IR_ADD: case IR_SUB:
+    case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+    case IR_NEG: case IR_BNOT: case IR_LDVAR: case IR_STVAR: case IR_LOAD:
+    case IR_STORE: case IR_EXT: case IR_ADDR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void cond_branch(struct sparc_fn *F, int m, int cond, int label)
+{
+    struct ir_func *fn = F->fn;
+    struct code *t = F->t;
+    struct sparc_sites *st = F->st;
+    int k = 0, j;
+    while (k < 3 && m + k < fn->nins && cond_x_op(fn->ins[m + k].op) &&
+           !fn->ins[m + k].flt && !sparc_op_calls_helper(&fn->ins[m + k]))
+        k++;
+    j = m + k;                               /* the jump */
+    if (F->fill && cond != SP_BA && k > 0 && j + 1 < fn->nins &&
+        fn->ins[j].op == IR_JMP && fn->ins[j].label != label &&
+        fn->ins[j + 1].op == IR_LABEL && fn->ins[j + 1].label == label) {
+        int len = t->len, nx = st->next, ns = st->nstr, ng = st->ng,
+            nf = st->nf, nfix = F->nfix, bar = F->barrier, ok = 1;
+        int at = sparc_b_placeholder(t, sparc_cond_invert(cond), 1);
+        struct sdec d;
+        want_label(F, at, fn->ins[j].label);
+        F->barrier = t->len;
+        for (int q = m; ok && q < j; q++) {
+            gen_ins(F, q);
+            ok = !F->skip_next && !F->skip_to && t->len <= at + 8;
+        }
+        if (ok && t->len == at + 8 &&
+            st->next == nx && st->nstr == ns && st->ng == ng &&
+            st->nf == nf && F->nfix == nfix + 1 &&
+            slot_decode(sparc_rdw(t, at + 4), &d)) {
+            F->barrier = t->len;
+            F->skip_to = j + 1;              /* X and the jump are out */
+            return;
+        }
+        t->len = len;
+        st->next = nx; st->nstr = ns; st->ng = ng; st->nf = nf;
+        F->nfix = nfix;
+        F->barrier = bar;
+        F->skip_next = 0;
+        F->skip_to = 0;
+    }
+    branch_to(F, cond, label);
+}
+
 static void gen_ins(struct sparc_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -2566,8 +2720,13 @@ static void gen_ins(struct sparc_fn *F, int n)
     }
     case IR_BITCAST:
     case IR_MOV: {
-        int src = rdr(F, i->a, ACC);
+        /* a slot into its register, or a register into its slot, at once */
         int d = wreg(F, i->dst, ACC);
+        int src = rdr(F, i->a, d);
+        if (!in_reg(F, i->dst)) {
+            wrote(F, i->dst, src);
+            return;
+        }
         if (src != d)
             sparc_mov(t, d, src);
         wrote(F, i->dst, d);
@@ -2663,7 +2822,7 @@ static void gen_ins(struct sparc_fn *F, int n)
             if (fuse) {
                 if (nx->op == IR_BRZ)
                     cond = sparc_cond_invert(cond);
-                branch_to(F, cond, nx->label);
+                cond_branch(F, n + 2, cond, nx->label);
                 F->skip_next = 1;
                 return;
             }
@@ -2678,7 +2837,10 @@ static void gen_ins(struct sparc_fn *F, int n)
             /* one compare and one branch */
             int ra_ = rdr(F, i->a, ACC);
             int cond = pred_cond(i->pred, i->sign);
-            if (i->imm_b && sparc_simm13_ok(imm_val(i))) {
+            if (i->imm_b && imm_val(i) == 0 &&
+                (i->pred == B_EQ || i->pred == B_NE)) {
+                test_zero(F, ra_);
+            } else if (i->imm_b && sparc_simm13_ok(imm_val(i))) {
                 sparc_alu_imm(t, SP_SUBCC, SP_G0, ra_, imm_val(i));
             } else {
                 int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP
@@ -2688,7 +2850,7 @@ static void gen_ins(struct sparc_fn *F, int n)
             }
             if (nx->op == IR_BRZ)
                 cond = sparc_cond_invert(cond);
-            branch_to(F, cond, nx->label);
+            cond_branch(F, n + 2, cond, nx->label);
             F->skip_next = 1;
             return;
         }
@@ -2742,9 +2904,9 @@ static void gen_ins(struct sparc_fn *F, int n)
             sparc_alu(t, SP_ORCC, SP_G0, al, ah);
         } else {
             r = rdr(F, i->a, A_LO);
-            sparc_alu(t, SP_ORCC, SP_G0, r, SP_G0);
+            test_zero(F, r);
         }
-        branch_to(F, i->op == IR_BRZ ? SP_BE : SP_BNE, i->label);
+        cond_branch(F, n + 1, i->op == IR_BRZ ? SP_BE : SP_BNE, i->label);
         return;
     }
 
@@ -2792,7 +2954,10 @@ static void gen_ins(struct sparc_fn *F, int n)
     case IR_EXT: {
         int ra_ = rdr(F, i->a, ACC);
         int d = wreg(F, i->dst, ACC);
-        ext_reg(F, d, ra_, i->size, i->sign);
+        if (!(i->size < 4 && F->usecnt && i->a >= 0 && i->a < fn->nvregs &&
+              F->usecnt[i->a] == 1 && in_reg(F, i->a) &&
+              load_ext(F, ra_, d, i->size, i->sign)))
+            ext_reg(F, d, ra_, i->size, i->sign);
         wrote(F, i->dst, d);
         return;
     }
@@ -2829,10 +2994,12 @@ static void gen_ins(struct sparc_fn *F, int n)
     }
 
     case IR_MEMCPY: case IR_MEMZERO:
-        rd(F, i->a, ADDR);
-        if (i->op == IR_MEMCPY)
-            rd(F, i->b, TMP);
-        copy_block(F, i->op == IR_MEMCPY, i->size, i->natural >= 4);
+    {
+        int db = rdr(F, i->a, ADDR);
+        int sb = i->op == IR_MEMCPY ? rdr(F, i->b, TMP) : TMP;
+        copy_block(F, i->op == IR_MEMCPY, i->size, i->natural >= 4 ? 4 : 1,
+                   sb, 0, db, 0);
+    }
         return;
 
     case IR_CALL:
@@ -2848,14 +3015,19 @@ static void gen_ins(struct sparc_fn *F, int n)
                 if (rw > 0) {
                     rd(F, i->a, ADDR);
                     for (int q = 0; q < rw; q++)
-                        ld_any(F, in_reg_n(q), ADDR, 4 * q, 4, 0, 0);
+                        ld_any(F, in_reg_n(q), ADDR, 4 * q, 4, 0,
+                               i->natural);
                 } else {
                     /* through the caller's buffer, whose address is the
                      * struct-return word; it comes back in %i0 */
-                    rd(F, i->a, TMP);
+                    int sb = rdr(F, i->a, TMP);
                     ld_fp(F, ADDR, SRET, 4, 0);
-                    copy_block(F, 1, fn->ret_abi.size, 0);
-                    ld_fp(F, SP_I0, SRET, 4, 0);
+                    if (copy_block(F, 1, fn->ret_abi.size,
+                                   i->natural ? fn->ret_abi.align : 1,
+                                   sb, 0, ADDR, 0))
+                        sparc_mov(t, SP_I0, ADDR);
+                    else
+                        ld_fp(F, SP_I0, SRET, 4, 0);
                 }
             } else if (fn->ret_abi.size == 16) {
                 need16(F, i->a);
@@ -3135,41 +3307,68 @@ static void gen_ins(struct sparc_fn *F, int n)
     }
 }
 
-/* Copy `size` bytes from [TMP] to [ADDR] (copy) or zero them (!copy):
- * word by word when both ends are known to be word-aligned (`aligned`),
- * else byte by byte. Straight-line up to 128 bytes, a loop beyond. TMP
- * and ADDR are scratch and may be moved. */
-static void copy_block(struct sparc_fn *F, int copy, long size, int aligned)
+/* Copy `size` bytes from [sb + so] to [db + dof] (copy) or zero them
+ * (!copy; sb unused), both ends `align`-aligned (1 when not known): in
+ * doublewords through the even pair %l6:%l7 when both are 8-aligned,
+ * words when 4-aligned, else bytes. Straight-line up to 128 bytes, a loop
+ * beyond, which first moves the addresses into TMP and ADDR (scratch,
+ * then advanced). Returns 1 when sb and db are left as they were. */
+static int copy_block(struct sparc_fn *F, int copy, long size, int align,
+                      int sb, long so, int db, long dof)
 {
     struct code *t = F->t;
-    int step = aligned ? 4 : 1;
+    int step = align >= 8 && copy ? 8 : align >= 4 ? 4 : 1;
+    int reg = step == 8 ? SCR2 : SCR, kept = 1;
     long k, body = size & ~(long)(step - 1);
+    if (size > 128 || !fits13(so) || !fits13(so + size) || !fits13(dof) ||
+        !fits13(dof + size)) {
+        /* the one that is not a base of the other first */
+        if (copy && sb == ADDR) {
+            if (db == TMP)
+                internal_error("sparc: a block copy's bases are crossed");
+            addr_off_into(F, TMP, sb, so);
+            addr_off_into(F, ADDR, db, dof);
+        } else {
+            addr_off_into(F, ADDR, db, dof);
+            if (copy)
+                addr_off_into(F, TMP, sb, so);
+        }
+        kept = (sb == TMP || !copy) && db == ADDR && so == 0 && dof == 0 &&
+               size <= 128;
+        sb = TMP; db = ADDR; so = dof = 0;
+    }
     if (size > 128) {
         int top, again;
-        sparc_li(t, SCR2, body);
-        sparc_alu(t, SP_ADD, SCR2, SCR2, ADDR);
+        sparc_li(t, FAR, body);
+        sparc_alu(t, SP_ADD, FAR, FAR, ADDR);
         top = mark_here(F);
         if (copy) {
-            sparc_load(t, SCR, TMP, 0, step, 0);
+            sparc_load(t, reg, TMP, 0, step, 0);
             sparc_alu_imm(t, SP_ADD, TMP, TMP, step);
         }
-        sparc_store(t, copy ? SCR : SP_G0, ADDR, 0, step);
+        sparc_store(t, copy ? reg : SP_G0, ADDR, 0, step);
         sparc_alu_imm(t, SP_ADD, ADDR, ADDR, step);
-        cmp_rr(F, ADDR, SCR2);
+        cmp_rr(F, ADDR, FAR);
         again = br_place(F, SP_BNE);
         br_back(F, again, top);
         k = 0;
         size -= body;
+        kept = 0;
     } else {
         for (k = 0; k + step <= size; k += step) {
-            if (copy) sparc_load(t, SCR, TMP, (int)k, step, 0);
-            sparc_store(t, copy ? SCR : SP_G0, ADDR, (int)k, step);
+            if (copy) sparc_load(t, reg, sb, (int)(so + k), step, 0);
+            sparc_store(t, copy ? reg : SP_G0, db, (int)(dof + k), step);
         }
     }
-    for (; k < size; k++) {
-        if (copy) sparc_load(t, SCR, TMP, (int)k, 1, 0);
-        sparc_store(t, copy ? SCR : SP_G0, ADDR, (int)k, 1);
+    for (; k + 4 <= size && step >= 4; k += 4) {
+        if (copy) sparc_load(t, SCR, sb, (int)(so + k), 4, 0);
+        sparc_store(t, copy ? SCR : SP_G0, db, (int)(dof + k), 4);
     }
+    for (; k < size; k++) {
+        if (copy) sparc_load(t, SCR, sb, (int)(so + k), 1, 0);
+        sparc_store(t, copy ? SCR : SP_G0, db, (int)(dof + k), 1);
+    }
+    return kept;
 }
 
 /* ---- register pairs ------------------------------------------------------ */
@@ -3223,7 +3422,7 @@ static void sparc_pair_hints(const struct ir_func *fn, int *hint)
             const struct ir_arg *a = &i->argv[k];
             place_arg(a, &word, &pl);
             if (a->size == 8 && pl.nreg == 2 && !pl.byref && !(pl.reg & 1) &&
-                a->vreg >= 0 && a->vreg < fn->nvregs)
+                a->vreg >= 0 && a->vreg < fn->nvregs && hint[a->vreg] < 0)
                 hint[a->vreg] = out_reg(pl.reg);
         }
     }
@@ -3415,14 +3614,12 @@ static void gen_func(struct ir_func *fn, struct code *t,
                 int src = param_word(&F, &pl, 0, TMP);
                 if (F.slot[i] < 0)
                     continue;
-                if (src != TMP)
-                    sparc_mov(t, TMP, src);
                 if (a->is_struct) {
-                    addr_sp(&F, ADDR, sslot(&F, i));
-                    copy_block(&F, 1, a->size, 0);
+                    copy_block(&F, 1, a->size, a->align, src, 0, SP_FP,
+                               fpo(&F, sslot(&F, i)));
                 } else {
                     for (int q = 0; q < a->size; q += 4) {
-                        sparc_load(t, A_LO, TMP, q, 4, 0);
+                        sparc_load(t, A_LO, src, q, 4, 0);
                         st_sp(&F, A_LO, sslot(&F, i) + q, 4);
                     }
                 }
@@ -3488,7 +3685,11 @@ static void gen_func(struct ir_func *fn, struct code *t,
 
     for (i = 0; i < fn->nins; i++) {
         gen_ins(&F, i);
-        if (F.skip_next) {
+        if (F.skip_to) {
+            i = F.skip_to - 1;
+            F.skip_to = 0;
+            F.skip_next = 0;
+        } else if (F.skip_next) {
             F.skip_next = 0;
             i++;
         }
