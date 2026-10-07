@@ -13,7 +13,7 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m armv7a riscv32 riscv64 avr mips32
-#                   mips32eb ppc32
+#                   mips32eb ppc32 sparc32
 #                   loongarch64
 #                   xtensa rx
 #
@@ -88,7 +88,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|ppc32) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|ppc32|sparc32) eval "echo \${$gccvar:-clang}" ;;
         # Xtensa: Espressif's own GCC for the ESP32 (crosstool-NG release
         # esp-16.1.0_20260609), there being no Xtensa target in clang.
         xtensa)  eval "echo \${$gccvar:-xtensa-esp32-elf-gcc}" ;;
@@ -174,6 +174,10 @@ refflags() {
         # -nofpu because EmbCC's RX code is soft float -- the default
         # -fpu would claim __RX_FPU_INSNS__ and __FINITE_MATH_ONLY__ 1.
         rx)      echo "-nofpu" ;;
+        # SPARC V8 as Gaisler's LEON3 implements it, soft float: what the
+        # backend emits (src/arch/sparc/, docs/internals/sparc-plan.md).
+        sparc32) [ -n "${EMBCC_REF_GCC_SPARC32:-}" ] || \
+                     echo "-target sparc-none-elf -mcpu=leon3 -msoft-float -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -240,7 +244,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|loongarch64|ppc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|loongarch64|ppc32|sparc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -355,8 +359,9 @@ case "${1:-both}" in
     xtensa)  gen xtensa ;;
     ppc32)   gen ppc32 ;;
     rx)      gen_c rx ;;
+    sparc32) gen sparc32 ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen armv7a; gen riscv32
-              gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64; gen xtensa; gen ppc32 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|xtensa|ppc32|rx]" >&2
+              gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64; gen xtensa; gen ppc32; gen sparc32 ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|xtensa|ppc32|rx|sparc32]" >&2
        exit 1 ;;
 esac

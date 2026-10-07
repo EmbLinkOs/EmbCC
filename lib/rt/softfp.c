@@ -52,11 +52,13 @@
  * code is soft float on any core, with or without the ESP32's FPU: the
  * ABI keeps floats in the address registers either way, and the backend
  * calls these. PowerPC says it with _SOFT_FLOAT: an e500 or e200 core
- * without its SPE (-msoft-float). */
+ * without its SPE (-msoft-float). SPARC says it with SOFT_FLOAT,
+ * clang's and GCC's -msoft-float. */
 #if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
     defined(__mips_soft_float) || defined(__loongarch_soft_float) || \
     defined(__tricore__) || defined(__XTENSA__) || \
     (defined(__PPC__) && defined(_SOFT_FLOAT)) || \
+    (defined(__sparc__) && defined(SOFT_FLOAT)) || \
     (defined(__arm__) && (!defined(__ARM_FP) || !(__ARM_FP & 8)))
 #define SOFTFP_ALL 1
 #endif

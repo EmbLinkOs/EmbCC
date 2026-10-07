@@ -32,6 +32,7 @@ little-endian.
 | [TriCore](#tricore) | `tricore-none-elf` | ELF32 | TriCore EABI, soft float | `embld` |
 | [Xtensa](#xtensa) | `xtensa-none-elf` | ELF32 | windowed, soft float | `embld` |
 | [Renesas RX](#renesas-rx) | `rx-none-elf` | ELF32 | GCC rx-elf, 32-bit doubles, no FPU | `embld` |
+| [SPARC](#sparc) | `sparc-none-elf` | ELF32, big-endian | SPARC V8 (register windows), soft float | `embld` |
 
 | Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
@@ -52,6 +53,7 @@ little-endian.
 | TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | One shared instance | Refused |
+| SPARC V8 (LEON3) | Bare metal | Software; `long double` binary128 | DWARF | 4 bytes | One shared instance | Refused |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
@@ -122,50 +124,22 @@ Size and alignment in bytes, written `size/alignment`. "x86-64" covers
 `aarch64-elf`, `aarch64-emblink` and `aarch64-linux-gnu`; "Cortex-M"
 covers every `thumb*` triple.
 
-| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | LoongArch64 |
-| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | TriCore |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | signed |
-| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 |
-| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 |
-| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 8/8 |
-| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 |
-| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 8/8 |
-| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
-| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 |
-| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 16/16 binary128 |
-| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` |
-| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | 16/16 |
-| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
-| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
-| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
-| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 4/4 |
-| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/4 |
-| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 4/4 |
-| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
-| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/4 |
-| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 8/4 binary64 |
-| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` |
-| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | — |
-| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
-| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 8 |
-| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 8 |
-| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | Xtensa |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | unsigned |
-| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 |
-| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 |
-| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 4/4 |
-| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 |
-| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 4/4 |
-| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
-| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 |
-| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 8/8 binary64 |
-| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 2/2 `unsigned short` |
-| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | — |
-| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
-| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
-| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | LoongArch64 | TriCore | Xtensa | PowerPC | RX | SPARC |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | signed | signed | unsigned | unsigned | unsigned | signed |
+| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 |
+| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 8/8 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 | 8/4 | 8/8 | 8/8 | 8/4 | 8/8 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 8/8 | 4/4 | 4/4 | 4/4 | 4/4 `long` | 4/4 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 | 8/4 | 8/8 | 8/8 | 4/4 | 8/8 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 16/16 binary128 | 8/4 binary64 | 8/8 binary64 | 8/8 binary64 | 4/4 binary32 | 16/8 binary128 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 2/2 `unsigned short` | 4/4 `int` | 4/4 `long` | 4/4 `int` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | 16/16 | — | — | — | — | — |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 | 4 | 4 | 4 | 4 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 | 8 | 16 | 16 | 4 | 8 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 | 8 | 16 | 16 | 4 | 8 |
 
 Notes on the table:
 
@@ -200,6 +174,11 @@ Notes on the table:
   operation on one is refused with the RV64 form of that message.
 - On LoongArch64 `long double` and `__int128` are computed: binary128
   arithmetic and the 128-bit divides and variable shifts call lib/rt.
+- On TriCore and RX nothing is aligned beyond 4 bytes. On RX `double` and
+  `long double` are binary32 (GCC's `-m32bit-doubles`), and `size_t`,
+  `ptrdiff_t` and `wchar_t` are `long` types. SPARC's binary128
+  `long double` is 8-aligned. Xtensa's `wchar_t` is a 16-bit
+  `unsigned short`.
 - On AVR every type has alignment 1, so `struct { char c; int i; }` is
   three bytes.
 - Windows uses the LP64 model here, which is not Microsoft's; see
@@ -1408,6 +1387,79 @@ configuration, `__CHAR_UNSIGNED__`, `__WCHAR_TYPE__` `short unsigned int`,
 does not define it, and the float ABI is the same either way.
 `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is defined, the 1- and 2-byte forms
 are not.
+## SPARC
+
+SPARC V8, big-endian, as Gaisler's LEON3 implements it -- the processor
+of many spacecraft -- with soft float and LEON3's integer multiply and
+divide. The design and the facts behind it (read off clang 23) are in
+[the SPARC plan](../internals/sparc-plan.md).
+
+### Triples
+
+| Triple | Accepted aliases | Core | ABI |
+|---|---|---|---|
+| `sparc-none-elf` | `sparc-unknown-elf`, `sparc-elf`, `sparc-gaisler-elf`, `sparc` | SPARC V8 with MUL/DIV (LEON3) | SPARC V8 ABI, soft float |
+
+### Options
+
+EmbCC emits one configuration: SPARC V8 with `umul`/`smul`/`udiv`/`sdiv`,
+register windows, soft float, `%g2`-`%g4` used as scratch. The flags that
+say so are accepted; the rest are refused by name.
+
+| Option | Accepted | Refused, for example |
+|---|---|---|
+| `-mcpu=CPU`, `-march=CPU`, `-mtune=CPU` | `leon3`, `leon4`, `v8`, `gr712rc`, `gr740`, `ut699` | `-mcpu=v9 is not a SPARC V8 core with hardware multiply and divide: EmbCC emits LEON3 code (...)` |
+| `-msoft-float`, `-mno-fpu` | (no value) | `-mhard-float is not supported: EmbCC emits soft-float SPARC code, which passes floating point in the integer registers` |
+| `-mno-flat`, `-mapp-regs`, `-mv8`, `-m32`, `-mcmodel=medlow`, `-mbig-endian` | (no value) | `-mflat is not supported: EmbCC's SPARC code uses register windows (save and restore)`; `-mno-app-regs`, `-m64`, `-mcmodel=medany`, `-mfix-*` (no errata workarounds), `-mlittle-endian` likewise |
+
+### Calling convention
+
+Every function opens a register window (`save`) and returns with `ret;
+restore`. Arguments are words with no padding: the first six in
+`%o0`-`%o5` (the callee's `%i0`-`%i5`), the rest at `%sp+92`; a `long
+long` or `double` is two words, high first, and may straddle `%o5` and the
+stack. Every structure, union, `_Complex` and `long double` is passed by
+reference to a copy the caller makes. Results: `%o0`, or `%o0:%o1` for 8
+bytes; a `_Complex float` in `%o0:%o1` and a `_Complex double` in
+`%o0`-`%o3`; a structure, union, `_Complex long double` or `long double`
+through a buffer whose address the caller stores at `%sp+64`, with an
+`unimp` holding its size after the call, which the callee returns past.
+`va_list` is a pointer over the argument words. `tests/golden/sparc-abi.sh`
+checks this with EmbCC and clang calling each other.
+
+clang calls the binary128 helpers (`__addtf3`, ...) with their operands
+in registers, which no SPARC runtime implements; EmbCC calls them as it
+calls any function taking a `long double`, by reference, and its
+`lib/rt` defines them that way. Code compiled by clang that does
+`long double` arithmetic therefore does not link correctly against
+EmbCC's runtime. clang's own callee of a `_Complex long double` returns to
+`%i7+8`, not past its caller's `unimp` -- a clang bug; EmbCC's follows the
+ABI.
+
+### Objects and linking
+
+ELF32, big-endian, `EM_SPARC`, `e_flags` 0, RELA relocations: an address
+is `sethi`/`or` with `R_SPARC_HI22`/`R_SPARC_LO10`, a call is `call` with
+`R_SPARC_WDISP30`, data words `R_SPARC_32`. `embld` links these objects and
+clang's (non-PIC), and refuses the GOT and PC-relative-address relocations
+of PIC code by name. `-Tstack` emits a stub that sets `%sp` and jumps to
+the entry.
+
+### Assembly
+
+There is no SPARC assembler in EmbCC yet: an `asm` statement with an
+instruction or an operand, a naked function, file-scope instructions and
+`.s` files are refused by name. An empty `asm` (a compiler barrier) is
+accepted. `-S` writes the instructions as `.byte` and their relocations as
+`.reloc` with SPARC's names, which llvm-mc assembles back into the same
+object.
+
+### Predefined macros
+
+From `clang --target=sparc-none-elf -mcpu=leon3 -msoft-float`:
+`__sparc__`, `__sparc`, `sparc`, `__sparcv8`, `__sparcv8__`,
+`__BIG_ENDIAN__`, `__BYTE_ORDER__` big-endian, `SOFT_FLOAT`,
+`__SIZEOF_LONG_DOUBLE__` 16 and `__LDBL_MANT_DIG__` 113.
 
 ### Runtime
 
@@ -1509,6 +1561,14 @@ or MMU): the generic loader starts the image at its entry, the harness
 installs the window overflow and underflow handlers and the Alloca
 exception's, output and exit are the sim machine's simcalls, and any other
 exception prints its cause, `EPC1` and `EXCVADDR`.
+`libc.a` for `sparc-none-elf` (soft float, 64-bit division, binary128,
+the C library on its bare-metal backend). `tests/harness/sparc` runs
+programs on QEMU's `leon3_generic` board: the image is linked at
+0x40000000 and loaded with `-kernel`, the APBUART at 0x80000100 is the
+console, and the harness installs the window overflow and underflow trap
+handlers a windowed program needs (any other trap prints its type and
+address). A program for real LEON3 hardware needs the same handlers in its
+startup, as BCC's provides.
 
 ### Limitations
 
@@ -1543,6 +1603,18 @@ exception prints its cause, `EPC1` and `EXCVADDR`.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
 | a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for xtensa-none-elf: ...` |
+| an atomic read-modify-write on a 1- or 2-byte object | `the SPARC backend cannot lower an atomic narrower than four bytes (casa and swap are word-sized, ...) yet (function f) [xadd w=4 size=1]` |
+| an 8-byte atomic read-modify-write | `the SPARC backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
+| an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
+| a computed `goto` | `the SPARC backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
+| `__builtin_frame_address`, `__builtin_return_address` | `the SPARC backend cannot lower __builtin_frame_address or __builtin_return_address yet (function f) [frameaddr w=8 size=4]` |
+| `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
+| inline assembly, a naked function | `inline assembly is not supported for sparc-none-elf yet: EmbCC has no SPARC assembler (...)` |
+| a `.s` or `.S` file | `no assembly-file support for sparc-none-elf yet: EmbCC has no SPARC assembler` |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
+| a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
+| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for sparc-none-elf: ...` |
 
 ## AVR
 
@@ -1671,6 +1743,7 @@ for each; the machines are:
 | `riscv32-unknown-elf`, `riscv64-unknown-elf` | `qemu-system-riscv32` / `qemu-system-riscv64 -M virt -bios none -m 8` | The startup writes the SiFive test device after `main` returns |
 | `avr` | `qemu-system-avr -M uno`, the image passed with `-bios` | The program prints a sentinel; `qrun.sh --until` stops QEMU when it appears |
 | `tricore-none-elf` | `qemu-system-tricore -M tricore_testboard -cpu tc27x`, output through a TCG plugin | The program prints `==EXIT n==` and writes n to the board's test device |
+| `sparc-none-elf` | `qemu-system-sparc -M leon3_generic`, the image passed with `-kernel`, APBUART output | The program prints `==EXIT n==` and executes `ta 0` with traps disabled, which QEMU's LEON3 takes as a shutdown |
 
 `-bios none` matters on RISC-V: without it QEMU runs OpenSBI first and
 enters the image in supervisor mode. On AVR, QEMU refuses an image whose

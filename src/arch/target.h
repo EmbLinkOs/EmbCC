@@ -79,7 +79,13 @@ enum target_arch {
     /* Renesas RX (RXv1, the RX600/RX610 cores), little-endian, GCC's
      * rx-elf ABI with 32-bit doubles (docs/internals/rx-plan.md). 8 and
      * not 7, which another branch gives LoongArch64. */
-    TARGET_RX = 14
+    TARGET_RX = 14,
+    /* 32-bit SPARC V8, big-endian, as Gaisler's LEON3 implements it
+     * (sparc-none-elf): soft float, LEON3's multiply and divide, register
+     * windows. ILP32 with a SIGNED char and a 16-byte binary128 long
+     * double. 11 rather than the next number: the numbers between are
+     * taken by targets on other branches. docs/internals/sparc-plan.md. */
+    TARGET_SPARC32 = 11
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -229,6 +235,7 @@ int tc_op_calls_helper(const struct ir_ins *i);     /* src/arch/tricore/codegen.
 int xtensa_op_calls_helper(const struct ir_ins *i); /* src/arch/xtensa/codegen.c */
 int ppc_op_calls_helper(const struct ir_ins *i);    /* src/arch/ppc/codegen.c */
 int rx_op_calls_helper(const struct ir_ins *i);     /* src/arch/rx/codegen.c */
+int sparc_op_calls_helper(const struct ir_ins *i);  /* src/arch/sparc/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -380,6 +387,8 @@ int tc_imm_foldable(int op, long imm);      /* arch/tricore/irgen.c */
 int xtensa_imm_foldable(int op, long imm);  /* arch/xtensa/irgen.c */
 int ppc_imm_foldable(int op, long imm);     /* arch/ppc/irgen.c */
 int ppc_imm_foldable64(int op, long imm);
+int sparc_imm_foldable(int op, long imm);   /* arch/sparc/irgen.c */
+int sparc_imm_foldable64(int op, long imm);
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -633,6 +642,11 @@ enum reloc_kind {
      * RELA, so the addend travels in the entry. */
     RK_PPC_ADDR16_HA,
     RK_PPC_ADDR16_LO,
+    /* SPARC takes an absolute address in two halves as well: `sethi` the
+     * high 22 bits, then an `or` (or a load's offset) the low 10 --
+     * which never carry, so neither half is rounded. RELA. */
+    RK_SPARC_HI22,
+    RK_SPARC_LO10,
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

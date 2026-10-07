@@ -11326,6 +11326,8 @@ static int const_is_expensive(const struct ir_ins *i)
             return !(v >= -2048 && v <= 2047);
         if (ta == TARGET_PPC32)                 /* li, or lis */
             return !((v >= -32768 && v <= 32767) || (v & 0xffff) == 0);
+        if (ta == TARGET_SPARC32)               /* or from %g0, or sethi */
+            return !((v >= -4096 && v <= 4095) || (v & 0x3ff) == 0);
         return !(v >= -2048 && v <= 2047);                     /* RISC-V */
     }
     default:
@@ -11512,6 +11514,11 @@ static int target_imm_foldable(int op, long imm, int w)
         return ppc_imm_foldable64(op, imm);
     if (target_get() == TARGET_PPC32)
         return ppc_imm_foldable(op, imm);
+    if (target_get() == TARGET_SPARC32 && w == 8 &&
+        (op == IR_AND || op == IR_OR || op == IR_XOR))
+        return sparc_imm_foldable64(op, imm);
+    if (target_get() == TARGET_SPARC32)
+        return sparc_imm_foldable(op, imm);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
@@ -11685,7 +11692,8 @@ static int pass_immfold(struct ir_func *fn)
                        target_get() == TARGET_MIPS32 ||
                        target_get() == TARGET_TRICORE ||
                        target_get() == TARGET_PPC32 ||
-                       target_get() == TARGET_RX) && i->w == 8 &&
+                       target_get() == TARGET_RX ||
+                       target_get() == TARGET_SPARC32) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
         /* ...and a 64-bit compare with any constant whose halves its
          * subs/sbcs or cmp/cmpeq take (thumb_cmp64_imm): strtol's

@@ -103,6 +103,12 @@ extern const int predef_macro_count_cxx_ppc32;
 /* Renesas RX: C only (EmbCC refuses C++ for RX), from rx-elf-gcc -nofpu. */
 extern const struct predef_macro predef_macros_rx[];
 extern const int predef_macro_count_rx;
+/* 32-bit SPARC V8, LEON3: clang's for sparc-none-elf -mcpu=leon3
+ * -msoft-float. */
+extern const struct predef_macro predef_macros_sparc32[];
+extern const int predef_macro_count_sparc32;
+extern const struct predef_macro predef_macros_cxx_sparc32[];
+extern const int predef_macro_count_cxx_sparc32;
 
 /* AVR (ATmega328P). Generated like the others, from the reference
  * compiler's own answer for the triple. */

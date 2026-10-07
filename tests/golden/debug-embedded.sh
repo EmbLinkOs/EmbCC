@@ -48,7 +48,8 @@ for spec in "x86_64-elf:8:DW_OP_reg6" \
             "loongarch64-unknown-elf:8:DW_OP_breg3" \
             "tricore-none-elf:4:DW_OP_breg26" \
             "xtensa-none-elf:4:DW_OP_breg1" \
-            "powerpc-none-eabi:4:DW_OP_breg1"; do
+            "powerpc-none-eabi:4:DW_OP_breg1" \
+            "sparc-none-elf:4:DW_OP_breg30"; do
     t=${spec%%:*}; rest=${spec#*:}; want_as=${rest%%:*}; want_fb=${rest#*:}
     o="$out/$t.o"
     "$EMBCC" --target="$t" -g -O0 -c "$out/p.c" -o "$o" 2> "$out/$t.err" || {
@@ -153,6 +154,20 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
         echo "FAIL powerpc-none-eabi: 'p' is at fbreg '$off' but nothing stores r3 there"
         fail=1
     fi
+    # ...and SPARC, whose frame base is %fp (%i6) in every function, alloca
+    # or not: p arrives in %i0 and the prologue stores it at %fp - n
+    o="$out/sparc-none-elf.o"
+    off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
+          grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+          grep -oE '[+-][0-9]+' | head -1)
+    if [ -n "$off" ] && [ "$off" -lt 0 ] && "$OBJDUMP" -d "$o" 2>/dev/null |
+         grep -qE "st[[:space:]]+%i0,[[:space:]]*\\[%fp\\+-0x$(printf '%x' "$((-off))")\\]"; then
+        echo "  sparc-none-elf: 'p' at fbreg $off is the slot the prologue writes"
+    else
+        echo "FAIL sparc-none-elf: 'p' is at fbreg '$off' but nothing stores %i0 there"
+        "$OBJDUMP" -d "$o" 2>/dev/null | grep -E 'st .*%i0' | head -3
+        fail=1
+    fi
 fi
 # ...and Xtensa, whose frame base is a1 (sp): p arrives in a2. There is no
 # Xtensa llvm-objdump; GNU's comes with the reference GCC (hostpaths.sh).
@@ -176,7 +191,7 @@ fi
 # target's pointer variable together with the four bytes after it.
 for t in thumbv7m-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
          mipsel-none-elf loongarch64-unknown-elf tricore-none-elf xtensa-none-elf \
-         powerpc-none-eabi; do
+         powerpc-none-eabi sparc-none-elf; do
     want=4; [ $t = riscv64-unknown-elf ] && want=8
     [ $t = loongarch64-unknown-elf ] && want=8
     "$EMBCC" --target=$t -g -c "$out/p.c" -o "$out/ptr-$t.o" 2>/dev/null || {
