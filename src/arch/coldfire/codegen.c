@@ -61,7 +61,7 @@ struct cf_sites {
     struct fsite *f;       int nf, capf;
 };
 
-enum { FX_B, FX_TAB, FX_PC16, FX_LONG };
+enum { FX_B, FX_TAB, FX_LONG };
 
 struct cf_fn {
     struct ir_func *fn;
@@ -2270,10 +2270,15 @@ static void gen_ins(struct cf_fn *F, int n)
         return;
     }
     case IR_LABELADDR: {
-        /* lea (label,pc): the 16-bit displacement patched at the end */
-        int at = t->len;
+        /* lea (0,pc),a0 ; adda.l #label-., a0 -- the long branch's way
+         * to an address, which reaches anywhere. `lea (label,pc)` alone
+         * reached 32 KiB, and a threaded interpreter's -O0 body passes
+         * that (tests/exec/computed-goto-more.c's far()). */
+        int ext = t->len + 2, imm;
         cf_lea(t, cf_pcdisp(0), A0);
-        want_label(F, at + 2, i->label, FX_PC16, at + 2);
+        imm = t->len + 2;
+        cf_alua(t, CF_ADD, cf_imm(0), A0);
+        want_label(F, imm, i->label, FX_LONG, ext);
         wrote(F, i->dst, A0);
         return;
     }
@@ -2575,13 +2580,6 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
         if (F.fix[i].kind == FX_LONG) {
             cf_wrl(t, at, (unsigned long)((long)target - F.fix[i].base) &
                           0xffffffffUL);
-            continue;
-        }
-        if (F.fix[i].kind == FX_PC16) {
-            long d = (long)target - F.fix[i].base;
-            if (d < -32768 || d > 32767)
-                cf_refuse(&F, NULL, "a label address beyond 32 KiB");
-            cf_wrw(t, at, (unsigned)d & 0xffff);
             continue;
         }
         if (form[i] == 1) {

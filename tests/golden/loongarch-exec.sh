@@ -49,7 +49,7 @@ na() {
     case $1 in
     preprocessor)
         echo "#errors unless the target is x86-64 or AArch64" ;;
-    computed-goto)
+    computed-goto|computed-goto-more)
         echo "computed goto, refused by name (tests/golden/loongarch-refuse.sh)" ;;
     volatile-local-longjmp)
         echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
