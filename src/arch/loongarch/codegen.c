@@ -2235,6 +2235,17 @@ static void gen_ins(struct la_fn *F, int n)
         la_refuse(F, i, "this floating-point operation");
     }
 
+    /* Named before the width check below, so each says what it is. */
+    if (i->op == IR_CAS16)
+        la_refuse(F, i, "a sixteen-byte atomic (the LA64 base ISA has no "
+                        "128-bit ll/sc or am* instruction)");
+    /* The code keeps no frame-pointer chain to walk, and a function's
+     * own return address is in ra only until its first call. */
+    if (i->op == IR_FRAMEADDR)
+        la_refuse(F, i, "__builtin_frame_address or "
+                        "__builtin_return_address (EmbCC's LoongArch code "
+                        "keeps no frame-pointer chain)");
+
     /* (A call or a return of one is gen_call's and IR_RET's.) */
     if (i->w > 8 &&
         !(F->w16 && (i->op == IR_CALL || i->op == IR_RET)))

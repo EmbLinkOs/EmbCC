@@ -2303,7 +2303,8 @@ static void apply_loongarch(struct linker *l, struct object *o, unsigned type,
         unsigned int w = get32loc(loc);
         if ((w & 0xffc00000U) != 0x28c00000U)
             die("%s: R_LARCH_GOT_PC_LO12 against '%s' is on 0x%08x, not an "
-                "ld.d; this linker builds no GOT and rewrites only ld.d",
+                "ld.d; this linker builds no GOT and rewrites only the normal "
+                "and medium models' ld.d (-mcmodel=extreme is not linked)",
                 o->name, l->rel_sym ? l->rel_sym : "?", w);
         put32(loc, (w & 0x003fffffU) | 0x02c00000U);
     }

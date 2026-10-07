@@ -2212,11 +2212,19 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "mipsel-none-elf yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
                             "EmbCC writes no MIPS .eh_frame");
+    /* LoongArch: no .eh_frame yet. C++ asks for the tables by default
+     * whether or not it throws; with -fno-exceptions nothing reads them,
+     * so there they are simply not written, and only an explicit request
+     * -- or exceptions -- is refused. */
+    if (unwind && ta == TARGET_LOONGARCH64 && lang_cxx && want_unwind < 0 &&
+        !want_exceptions)
+        unwind = 0;
     if (unwind && ta == TARGET_LOONGARCH64)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "%s yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no LoongArch .eh_frame",
+                            "-fasynchronous-unwind-tables, -fexceptions, and "
+                            "C++ without -fno-exceptions): EmbCC writes no "
+                            "LoongArch .eh_frame",
                    target_triple_now());
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
