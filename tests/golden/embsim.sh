@@ -147,8 +147,9 @@ if ! "$CC" --target=$T $X $OPT -Dmain=prog_main -Ilib/libc/include -c "$c" -o $o
     echo "NA $tag $n"; exit 0
 fi
 # a budget, so a simulator that loops fails here instead of hanging the
-# suite: 500M instructions is 40 times the corpus's longest program
-"$EMBSIM" $o.elf $EA --max-insns 500000000 --count $o.en > $o.eout 2> $o.eerr; es=$?
+# suite: 4G instructions, over three times the corpus's longest program
+# (div-const on the M0, 1.19G: a divide by a constant is a helper call)
+"$EMBSIM" $o.elf $EA --max-insns 4000000000 --count $o.en > $o.eout 2> $o.eerr; es=$?
 if [ "$QA" = - ]; then
     echo "SIM $tag $n $es"; exit 0
 fi
