@@ -175,6 +175,7 @@ static void split_mnemonic(char *m, char **base, struct ir_ins *in)
         else if (*s == 's') in->sign = 1;
         else if (*s == 'f') in->flt = 1;
         else if (*s == 'v') in->vol = 1;
+        else if (*s == 'p') in->flash = 1;
     }
 }
 

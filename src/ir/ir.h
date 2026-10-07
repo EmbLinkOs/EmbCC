@@ -243,6 +243,9 @@ struct ir_ins {
     int flt;                 /* operate in xmm at width w (SSE scalar) */
     int vol;                 /* LOAD/STORE/LDVAR/STVAR: a `volatile` access —
                               * the optimizer must never CSE or remove it (MMIO) */
+    int flash;               /* LOAD: from AVR program memory (__flash), read
+                              * with LPM. Set with vol, so no pass folds it into
+                              * an ordinary load or a memcpy (irgen emit_load) */
     long imm;                /* IR_CONST; also the folded value when imm_b */
     int imm_b;               /* ADD/SUB/AND/OR/XOR/CMP: operand b is the constant
                               * in `imm` (an immediate), not vreg b — set by the

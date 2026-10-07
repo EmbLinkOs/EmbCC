@@ -127,6 +127,8 @@ static void suffix(struct outbuf *b, const struct ir_ins *i, int with_w)
         ob_ch(b, 'f');
     if (i->vol)
         ob_ch(b, 'v');
+    if (i->flash)
+        ob_ch(b, 'p');
 }
 
 /* The same, for an op that also names a MEMORY width: the widths read
@@ -140,6 +142,7 @@ static void memsuffix(struct outbuf *b, const struct ir_ins *i, int with_w)
     if (i->sign) ob_ch(b, 's');
     if (i->flt)  ob_ch(b, 'f');
     if (i->vol)  ob_ch(b, 'v');
+    if (i->flash) ob_ch(b, 'p');   /* program memory (AVR __flash) */
 }
 
 static void operand_b(struct outbuf *b, const struct ir_ins *i)

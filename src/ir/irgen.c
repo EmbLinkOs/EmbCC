@@ -392,6 +392,12 @@ int emit_load(struct ir_func *fn, int addr, const struct type *t)
     i->sign = ty_signed_int(t);
     i->w = ty_w(t);
     i->vol = t->is_volatile || g_bf_vol;
+    /* __flash: program memory, which only LPM reads. vol as well, so
+     * that no optimizer pass rewrites the load into one that reads RAM
+     * (store forwarding, a memcpy idiom, a load folded from .rodata) */
+    i->flash = t->is_flash;
+    if (i->flash)
+        i->vol = 1;
     i->dst = new_temp(fn);
     return i->dst;
 }
@@ -2745,6 +2751,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
          * hand and never said so, while emit_load did: at -O2 two reads
          * of the same status register became one on every target. */
         i->vol = e->ty->is_volatile;
+        /* and `*p` with p a __flash pointer reads program memory */
+        i->flash = e->ty->is_flash;
+        if (i->flash)
+            i->vol = 1;
         i->dst = new_temp(fn);
         return i->dst;
     }

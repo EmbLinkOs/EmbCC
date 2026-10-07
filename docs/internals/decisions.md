@@ -451,8 +451,8 @@ rather than against clang, whose AVR struct convention is not avr-gcc's.
 longer holds. Still refused: variable-length arrays, label addresses and
 computed `goto`, byte swaps, `sqrt`, and atomic accesses wider than one
 byte; dense switches are not lowered to jump tables on this target. The
-`__flash` qualifier is not supported, and the `progmem` attribute is
-ignored with a `-Wattributes` warning. Plain `char` is signed, following
+`__flash` qualifier is supported (program-memory data read with `lpm`);
+the `progmem` attribute is ignored with a `-Wattributes` warning. Plain `char` is signed, following
 clang; whether avr-gcc's default agrees has not been checked against
 avr-gcc.
 

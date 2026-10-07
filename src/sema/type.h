@@ -79,6 +79,12 @@ struct type {
     int is_const;           /* `const`-qualified: an lvalue of this type may
                              * not be assigned (sema). A copy, like a
                              * volatile one. Ignored by ty_equal. */
+    int is_flash;           /* AVR's `__flash`, GCC's address space 1: the
+                             * object is in program memory and is read with
+                             * LPM through a 16-bit program-space address. A
+                             * copy, like const; an array's elements carry it
+                             * too. Ignored by ty_equal; sema keeps pointers to
+                             * the two spaces apart. */
     /* A struct's qualified copies, on the original, linked by qnext: a
      * copy made while the struct was incomplete (`const struct T *p;`
      * before T's body) is brought up to date when the body arrives. */
@@ -166,6 +172,7 @@ struct type *ty_ptrdiff_t(void);
 struct type *ty_volatile(struct type *t);
 /* A copy of `t` marked `const`, the same way. */
 struct type *ty_const(struct type *t);
+struct type *ty_flash(struct type *t);   /* AVR __flash: program memory */
 /* `t` without its own qualifiers (const, volatile, _Atomic): the
  * original a qualified copy points at. A pointee's stay. */
 struct type *ty_unqual(struct type *t);
