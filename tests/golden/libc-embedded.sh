@@ -1,7 +1,8 @@
 #!/bin/sh
 # EmbCC's C library on the boards: RV32, RV64, a Cortex-M3, a Cortex-M4F
 # with the hard-float calling convention, a Cortex-M33 (ARMv8-M) and a
-# MIPS32r2 core (QEMU's malta), each image
+# MIPS32r2 core (QEMU's malta) and a TriCore 1.6.1 (QEMU's
+# tricore_testboard), each image
 # built with lib/libc on its bare-metal backend (tools/build-libc.sh) and
 # run under QEMU -- against the SAME library built for x86-64.
 #
@@ -53,7 +54,8 @@ grep -q '==END==' "$out/ref.txt" || {
 # locks are refused for it.
 fail=0
 for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
-         thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf; do
+         thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf \
+         tricore-none-elf; do
     case $t in
         riscv32*) H=tests/harness/riscv
                   Q="qemu-system-riscv32 -M virt -bios none -nographic -m 8" ;;
@@ -67,6 +69,14 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
                   Q="qemu-system-arm -M mps2-an505 -cpu cortex-m33 -nographic" ;;
         mipsel*)  H=tests/harness/mips
                   Q="qemu-system-mipsel -M malta -cpu 24Kc -m 64 -display none -monitor none -serial null -serial null -serial stdio -no-reboot" ;;
+        tricore*) H=tests/harness/tricore
+                  # the board has no UART: putc.so prints the harness's
+                  # output word (tests/harness/tricore/putc.c)
+                  cc -shared -fPIC -O2 -I"${QEMU_PLUGIN_INC:-/opt/homebrew/include}" \
+                     $(pkg-config --cflags glib-2.0 2>/dev/null) \
+                     -undefined dynamic_lookup -o "$out/putc.so" \
+                     "$H/putc.c" 2>/dev/null || { echo "SKIP $t: no plugin"; continue; }
+                  Q="qemu-system-tricore -M tricore_testboard -cpu tc27x -display none -monitor none -plugin $PWD/$out/putc.so" ;;
     esac
     command -v "${Q%% *}" >/dev/null 2>&1 || { echo "SKIP $t: no ${Q%% *}"; continue; }
     d=$out/$t; mkdir -p "$d"
@@ -85,6 +95,7 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
             riscv*)    hv=EMBCC_RISCV_HARNESS ;;
             thumbv8m*) hv=EMBCC_M33_HARNESS ;;
             mipsel*)   hv=EMBCC_MIPS_HARNESS ;;
+            tricore*)  hv=EMBCC_TRICORE_HARNESS ;;
             *)         hv=EMBCC_THUMB_HARNESS ;;
         esac
         env "$hv=$d" sh "$H/link.sh" "$d/p$opt.elf" "$d/p$opt.o" \

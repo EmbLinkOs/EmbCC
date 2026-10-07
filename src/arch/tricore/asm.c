@@ -151,8 +151,8 @@ static const struct { const char *nm; int op; } alus[] = {
 static int one(const struct stmt *s, struct code *c, char *err, size_t errlen)
 {
     struct tok m = s->mn;
-    int n = s->nop, a, b, d;
-    long long k, off;
+    int n = s->nop, a = -1, b = -1, d = -1;
+    long long k = 0, off = 0;
 #define BAD() do { snprintf(err, errlen, "TriCore asm: '%.*s' with these " \
                             "operands is not supported", m.n, m.p); \
                    return -1; } while (0)
