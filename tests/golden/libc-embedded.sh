@@ -1,7 +1,7 @@
 #!/bin/sh
 # EmbCC's C library on the boards: RV32, RV64, a Cortex-M3, a Cortex-M4F
-# with the hard-float calling convention, a Cortex-M33 (ARMv8-M) and a
-# MIPS32r2 core (QEMU's malta), each image
+# with the hard-float calling convention, a Cortex-M33 (ARMv8-M), a
+# MIPS32r2 core (QEMU's malta) and an Xtensa LX6 (QEMU's de212), each image
 # built with lib/libc on its bare-metal backend (tools/build-libc.sh) and
 # run under QEMU -- against the SAME library built for x86-64.
 #
@@ -53,7 +53,12 @@ grep -q '==END==' "$out/ref.txt" || {
 # locks are refused for it.
 fail=0
 for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
-         thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf; do
+         thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf \
+         xtensa-none-elf; do
+    # how the image is loaded: -kernel, but on Xtensa's sim machine the
+    # generic loader, which also starts the core at the entry
+    # (tests/harness/xtensa/run.sh says why)
+    load=-kernel
     case $t in
         riscv32*) H=tests/harness/riscv
                   Q="qemu-system-riscv32 -M virt -bios none -nographic -m 8" ;;
@@ -67,6 +72,9 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
                   Q="qemu-system-arm -M mps2-an505 -cpu cortex-m33 -nographic" ;;
         mipsel*)  H=tests/harness/mips
                   Q="qemu-system-mipsel -M malta -cpu 24Kc -m 64 -display none -monitor none -serial null -serial null -serial stdio -no-reboot" ;;
+        xtensa*)  H=tests/harness/xtensa
+                  Q="qemu-system-xtensa -M sim -cpu de212 -m 128 -semihosting -display none -monitor none"
+                  load=loader ;;
     esac
     command -v "${Q%% *}" >/dev/null 2>&1 || { echo "SKIP $t: no ${Q%% *}"; continue; }
     d=$out/$t; mkdir -p "$d"
@@ -85,15 +93,21 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
             riscv*)    hv=EMBCC_RISCV_HARNESS ;;
             thumbv8m*) hv=EMBCC_M33_HARNESS ;;
             mipsel*)   hv=EMBCC_MIPS_HARNESS ;;
+            xtensa*)   hv=EMBCC_XTENSA_HARNESS ;;
             *)         hv=EMBCC_THUMB_HARNESS ;;
         esac
         env "$hv=$d" sh "$H/link.sh" "$d/p$opt.elf" "$d/p$opt.o" \
             "$d/libc.a" "$d/librt.a" > "$d/ld.txt" 2>&1 || {
             echo "$t $opt: does not link:"; head -3 "$d/ld.txt"; fail=1
             continue; }
+        if [ "$load" = loader ]; then
+            set -- -device "loader,file=$d/p$opt.elf,cpu-num=0"
+        else
+            set -- -kernel "$d/p$opt.elf"
+        fi
         # shellcheck disable=SC2086
         sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-60}" --until '==END==' \
-            $Q -kernel "$d/p$opt.elf" > "$d/run$opt.raw" 2>/dev/null
+            $Q "$@" > "$d/run$opt.raw" 2>/dev/null
         sed -n '1,/==END==/p' "$d/run$opt.raw" > "$d/run$opt.txt"
         if ! diff -u "$out/ref.txt" "$d/run$opt.txt" > "$d/run$opt.diff"; then
             echo "$t $opt: libc does not agree with x86-64:"
