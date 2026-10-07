@@ -28,6 +28,11 @@ new_handler get_new_handler() noexcept { return g_new_handler; }
 
 const nothrow_t nothrow{};
 
+#if __cpp_exceptions
+/* The exception classes only where there are exceptions: built with
+ * -fno-exceptions (tools/build-libcxx.sh, the embedded targets) nothing
+ * can throw or catch one, and their vtables would pull std::exception's
+ * key function, which that build does not have. */
 bad_alloc::bad_alloc() noexcept {}
 bad_alloc::~bad_alloc() noexcept {}
 const char *bad_alloc::what() const noexcept { return "std::bad_alloc"; }
@@ -36,8 +41,16 @@ bad_array_new_length::bad_array_new_length() noexcept {}
 bad_array_new_length::~bad_array_new_length() noexcept {}
 const char *bad_array_new_length::what() const noexcept
 { return "std::bad_array_new_length"; }
+#endif
 
 }  // namespace std
+
+/* Every allocation and deallocation function is weak: a program may
+ * replace any one of them ([replacement.functions]) and keep the rest,
+ * and these all sit in one archive member -- so a program defining
+ * operator new[] alone, and calling operator new too, pulled this member
+ * in for the one and collided with it on the other. */
+#define REPLACEABLE __attribute__((weak))
 
 /* The loop [new.delete.single]/3 describes: call the new-handler and try
  * again, until either the allocation succeeds or there is no handler, in
@@ -45,7 +58,9 @@ const char *bad_array_new_length::what() const noexcept
  * forever -- and that is specified behaviour, not a bug here: the contract
  * is that a handler must free memory, install a different handler, or not
  * return. */
-static void *allocate(std::size_t n, std::size_t align)
+/* (`nothrow`: give back null where there is no handler, instead of
+ * failing; only for the build without exceptions, below) */
+static void *allocate(std::size_t n, std::size_t align, bool nothrow = false)
 {
     if (n == 0)
         n = 1;                      /* distinct pointers for zero-size */
@@ -56,8 +71,20 @@ static void *allocate(std::size_t n, std::size_t align)
         if (p)
             return p;
         std::new_handler h = std::get_new_handler();
-        if (!h)
+        if (!h) {
+#if __cpp_exceptions
+            (void)nothrow;
             throw std::bad_alloc();
+#else
+            /* Without exceptions there is nothing to throw, and returning
+             * null from a throwing operator new lets the caller construct
+             * into address 0. Stop where the memory ran out -- what
+             * libsupc++ built with -fno-exceptions does (abort). */
+            if (nothrow)
+                return nullptr;
+            __builtin_trap();
+#endif
+        }
         h();
     }
 }
@@ -67,36 +94,40 @@ static void *allocate_nothrow(std::size_t n, std::size_t align) noexcept
     /* [new.delete.single]/7: the nothrow forms are specified to call the
      * throwing form and catch, NOT to skip the new-handler. A program that
      * installs a handler expects it to run here too. */
+#if __cpp_exceptions
     try {
         return allocate(n, align);
     } catch (...) {
         return nullptr;
     }
+#else
+    return allocate(n, align, true);
+#endif
 }
 
-void *operator new(std::size_t n)
+REPLACEABLE void *operator new(std::size_t n)
 { return allocate(n, __STDCPP_DEFAULT_NEW_ALIGNMENT__); }
 
-void *operator new[](std::size_t n)
+REPLACEABLE void *operator new[](std::size_t n)
 { return ::operator new(n); }
 
-void *operator new(std::size_t n, const std::nothrow_t &) noexcept
+REPLACEABLE void *operator new(std::size_t n, const std::nothrow_t &) noexcept
 { return allocate_nothrow(n, __STDCPP_DEFAULT_NEW_ALIGNMENT__); }
 
-void *operator new[](std::size_t n, const std::nothrow_t &nt) noexcept
+REPLACEABLE void *operator new[](std::size_t n, const std::nothrow_t &nt) noexcept
 { return ::operator new(n, nt); }
 
-void *operator new(std::size_t n, std::align_val_t a)
+REPLACEABLE void *operator new(std::size_t n, std::align_val_t a)
 { return allocate(n, static_cast<std::size_t>(a)); }
 
-void *operator new[](std::size_t n, std::align_val_t a)
+REPLACEABLE void *operator new[](std::size_t n, std::align_val_t a)
 { return ::operator new(n, a); }
 
-void *operator new(std::size_t n, std::align_val_t a,
+REPLACEABLE void *operator new(std::size_t n, std::align_val_t a,
                    const std::nothrow_t &) noexcept
 { return allocate_nothrow(n, static_cast<std::size_t>(a)); }
 
-void *operator new[](std::size_t n, std::align_val_t a,
+REPLACEABLE void *operator new[](std::size_t n, std::align_val_t a,
                      const std::nothrow_t &nt) noexcept
 { return ::operator new(n, a, nt); }
 
@@ -104,24 +135,24 @@ void *operator new[](std::size_t n, std::align_val_t a,
  * the same call. The sized and aligned forms exist so an allocator that
  * WANTS the size or the alignment can use them; this one does not need
  * either, and saying so once is better than four copies of free(). */
-void operator delete(void *p) noexcept { free(p); }
-void operator delete[](void *p) noexcept { ::operator delete(p); }
-void operator delete(void *p, std::size_t) noexcept { ::operator delete(p); }
-void operator delete[](void *p, std::size_t) noexcept { ::operator delete(p); }
-void operator delete(void *p, const std::nothrow_t &) noexcept
+REPLACEABLE void operator delete(void *p) noexcept { free(p); }
+REPLACEABLE void operator delete[](void *p) noexcept { ::operator delete(p); }
+REPLACEABLE void operator delete(void *p, std::size_t) noexcept { ::operator delete(p); }
+REPLACEABLE void operator delete[](void *p, std::size_t) noexcept { ::operator delete(p); }
+REPLACEABLE void operator delete(void *p, const std::nothrow_t &) noexcept
 { ::operator delete(p); }
-void operator delete[](void *p, const std::nothrow_t &) noexcept
+REPLACEABLE void operator delete[](void *p, const std::nothrow_t &) noexcept
 { ::operator delete(p); }
-void operator delete(void *p, std::align_val_t) noexcept
+REPLACEABLE void operator delete(void *p, std::align_val_t) noexcept
 { ::operator delete(p); }
-void operator delete[](void *p, std::align_val_t) noexcept
+REPLACEABLE void operator delete[](void *p, std::align_val_t) noexcept
 { ::operator delete(p); }
-void operator delete(void *p, std::size_t, std::align_val_t) noexcept
+REPLACEABLE void operator delete(void *p, std::size_t, std::align_val_t) noexcept
 { ::operator delete(p); }
-void operator delete[](void *p, std::size_t, std::align_val_t) noexcept
+REPLACEABLE void operator delete[](void *p, std::size_t, std::align_val_t) noexcept
 { ::operator delete(p); }
-void operator delete(void *p, std::align_val_t, const std::nothrow_t &) noexcept
+REPLACEABLE void operator delete(void *p, std::align_val_t, const std::nothrow_t &) noexcept
 { ::operator delete(p); }
-void operator delete[](void *p, std::align_val_t,
+REPLACEABLE void operator delete[](void *p, std::align_val_t,
                        const std::nothrow_t &) noexcept
 { ::operator delete(p); }

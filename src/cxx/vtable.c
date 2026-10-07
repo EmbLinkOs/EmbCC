@@ -293,7 +293,7 @@ static void vbase_entries(struct binfo *y, struct vid *v)
         v->marked[v->nmarked++] = b;
         if (v->primary_vtbl)
             v->derived->cls->vbases[m].vbindex = v->index;
-        v->index -= 8;
+        v->index -= cx_ptr_size();
         push_val(v, b->off - v->binfo->off);
     }
 }
@@ -313,7 +313,7 @@ static void add_vcall(struct cfunc *fn, struct binfo *y, struct vid *v)
         c->vcidx[c->nvc] = v->index;
         c->nvc++;
     }
-    v->index -= 8;
+    v->index -= cx_ptr_size();
     if (v->nfns == v->capfns) {
         v->capfns = v->capfns ? v->capfns * 2 : 8;
         v->fns = xrealloc(v->fns, (size_t)v->capfns * sizeof *v->fns);
@@ -373,7 +373,7 @@ static void vcall_indices(struct cclass *c)
     memset(&v, 0, sizeof v);
     v.binfo = v.rtti = v.derived = t.root;
     v.t = &t;
-    v.index = -24;
+    v.index = -3 * cx_ptr_size();     /* past offset-to-top and the RTTI */
     v.record = c;
     vcall_and_vbase(t.root, &v);
 }
@@ -448,7 +448,7 @@ static struct vtbl build_vtbl(struct binfo *x, struct binfo *r,
     v.derived = t->root;
     v.t = t;
     v.primary_vtbl = x == t->root;
-    v.index = -24;
+    v.index = -3 * cx_ptr_size();     /* past offset-to-top and the RTTI */
     v.generate = 1;
     vcall_and_vbase(x, &v);
     out.npre = v.nvals;
@@ -705,7 +705,7 @@ static struct vinfo *tree_info(struct cclass *c)
     v.binfo = v.rtti = v.derived = vi->t.root;
     v.t = &vi->t;
     v.primary_vtbl = 1;
-    v.index = -24;
+    v.index = -3 * cx_ptr_size();     /* past offset-to-top and the RTTI */
     vcall_and_vbase(vi->t.root, &v);  /* as the primary vtable lays them */
     return vi;
 }

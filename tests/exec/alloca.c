@@ -1,5 +1,7 @@
-/* __builtin_alloca: n bytes of this function's stack, 16-aligned, alive
- * until it returns — beside a VLA, in a loop, and passed to a callee.
+/* __builtin_alloca: n bytes of this function's stack, aligned for any
+ * type (__BIGGEST_ALIGNMENT__: 16 on x86-64, AArch64 and RISC-V, 8 on
+ * 32-bit ARM, whose stack AAPCS keeps 8-aligned -- a test for 16 there
+ * passed or failed with the caller's frame size), alive until it returns — beside a VLA, in a loop, and passed to a callee.
  * libstdc++'s <format> uses it (the C++ front end passes it through).
  * gcc referees every value. */
 // expect-exit: 42
@@ -25,7 +27,7 @@ static int f(int n)
     }
     char vla[n];
     vla[0] = 5;
-    if (((unsigned long)p & 15) != 0)
+    if (((unsigned long)p & (__BIGGEST_ALIGNMENT__ - 1)) != 0)
         return -1;
     return sum(p, n) + total + vla[0];
 }

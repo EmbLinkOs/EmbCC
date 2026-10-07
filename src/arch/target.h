@@ -190,6 +190,10 @@ int target_double_size(void);      /* 8, or 4 on AVR */
 int target_int_size(void);
 /* The most alignment any scalar gets, or 0 for no cap -- 1 on AVR. */
 int target_max_scalar_align(void);         /* 4, or 2 on AVR */
+/* __STDCPP_DEFAULT_NEW_ALIGNMENT__: what operator new(size_t) returns
+ * aligned for, and above which `new` calls the align_val_t forms -- 8 on
+ * 32-bit ARM, 16 on the others (clang's __BIGGEST_ALIGNMENT__) */
+int target_default_new_align(void);
 /* What the stack pointer is aligned to at every call -- and so the most a
  * frame slot's offset alone can promise an address. */
 int target_stack_align(void);

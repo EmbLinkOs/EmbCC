@@ -11,6 +11,7 @@
 
 #include <string.h>
 
+#include "../arch/target.h"
 #include "../driver/util.h"
 
 struct cfield *class_find_field(struct cclass *c, const char *name)
@@ -86,7 +87,7 @@ int field_omitted(const struct cclass *c, const struct cfield *fl)
 /* A class whose non-virtual part is just a vptr (Itanium 2.2). */
 static int nearly_empty(const struct cclass *c)
 {
-    return c->dynamic && c->nvsize == 8;
+    return c->dynamic && c->nvsize == cx_ptr_size();
 }
 
 /* c's virtual bases in inheritance graph order (a depth-first preorder:
@@ -230,12 +231,10 @@ static void layout(struct cclass *c)
             c->primary = first;
         c->primary_virt = c->primary != NULL;
     }
-    if (c->primary_virt) {
-        bits = 64;                           /* its vptr, at 0 */
-        size = align = 8;
-    } else if (c->dynamic && !c->primary) {
-        bits = 64;                           /* the vptr */
-        size = align = 8;
+    if (c->primary_virt || (c->dynamic && !c->primary)) {
+        /* the vptr, at 0 (the primary virtual base's, or the class's) */
+        size = align = cx_ptr_size();
+        bits = 8 * size;
     }
     /* the primary base first, at 0; then the other bases in order */
     for (int pass = 0; pass < 2; pass++)
@@ -269,8 +268,8 @@ static void layout(struct cclass *c)
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
         struct cty *t = fl->type;
-        long fs = ct_is_ref(t) ? 8 : ct_size(t);
-        long fa = ct_is_ref(t) ? 8 : ct_align(t);
+        long fs = ct_is_ref(t) ? cx_ptr_size() : ct_size(t);
+        long fa = ct_is_ref(t) ? cx_ptr_size() : ct_align(t);
         if (c->packed)
             fa = 1;
         if (fl->bitwidth < 0 && fl->align_attr > fa)
@@ -287,6 +286,10 @@ static void layout(struct cclass *c)
         }
         if (fl->bitwidth >= 0) {
             long w = fl->bitwidth, unit = fs * 8;
+            /* an unnamed bit-field (a :0 too) raises the class's alignment
+             * on the ARM ABIs only, as in C (target_anon_bitfield_aligns) */
+            if ((fl->name || target_anon_bitfield_aligns()) && fa > align)
+                align = fa;
             if (w == 0) {
                 bits = (bits + fa * 8 - 1) / (fa * 8) * (fa * 8);
                 fl->bitpos = bits;
@@ -297,8 +300,6 @@ static void layout(struct cclass *c)
             fl->off = bits / 8 / fa * fa;
             fl->bitpos = bits;
             bits += w;
-            if (fl->name && fa > align)
-                align = fa;
             continue;
         }
         if (fl->nua && t->k == CT_CLASS && t->cls->empty) {
@@ -767,8 +768,8 @@ static int plain_layout(struct cclass *c)
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
         struct cty *t = fl->type;
-        long fs = ct_is_ref(t) ? 8 : ct_size(t);
-        long fa = ct_is_ref(t) ? 8 : ct_align(t);
+        long fs = ct_is_ref(t) ? cx_ptr_size() : ct_size(t);
+        long fa = ct_is_ref(t) ? cx_ptr_size() : ct_align(t);
         if (c->packed)
             fa = 1;
         if (fl->bitwidth < 0 && fl->align_attr > fa)

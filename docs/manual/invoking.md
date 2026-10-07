@@ -144,11 +144,12 @@ As with GCC, a default output is written in the current directory, not
 next to the input: `embcc -c src/foo.c` writes `foo.o`, and
 `embcc -S src/foo.c` writes `foo.s`.
 
-A C++ input is compiled only for a target whose `long` and pointers are
-8 bytes. For the Cortex-M targets, RV32 and AVR, every mode but `-E`,
-`-M`, `-MM` and `-fsyntax-only` stops with `embcc: error: C++ is not yet supported for
-TRIPLE: the C++ front end lays out types for 8-byte long and pointers,
-...` (see [Targets](targets.md)).
+A C++ input is compiled only for a target whose C++ ABI is implemented:
+x86-64, AArch64, 32-bit ARM and RV32 (the last two with
+`-fno-exceptions`). For AVR, MIPS32, Xtensa and TriCore, every mode but
+`-E`, `-M`, `-MM` and `-fsyntax-only` stops with `embcc: error: C++ is
+not yet supported for TRIPLE: the C++ front end follows the C++ ABI of
+...` (see [C++ targets](cxx.md#targets)).
 
 When several mode options are given, `-E` takes precedence over the
 others, then `-fsyntax-only`, then `-S`, then `-c`.

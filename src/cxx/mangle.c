@@ -872,8 +872,12 @@ static void mangle_type(struct mbuf *m, struct cty *t)
     case CT_VALIST:
         /* g++'s own spelling: x86-64's va_list is __va_list_tag[1], which a
          * parameter decays to a pointer; aarch64's is struct std::__va_list */
-        if (target_get() == TARGET_AARCH64) {
+        if (target_get() == TARGET_AARCH64 || target_get() == TARGET_THUMB) {
+            /* AAPCS and AAPCS64: struct std::__va_list */
             put_component(m, "St9__va_list");
+        } else if (target_va_list_is_pointer()) {
+            /* RISC-V's (and the other one-pointer ones'): void * */
+            mangle_type(m, ct_ptr(ct_basic(CT_VOID)));
         } else {
             int i = sub_find(m, "P13__va_list_tag");
             if (i >= 0) {
