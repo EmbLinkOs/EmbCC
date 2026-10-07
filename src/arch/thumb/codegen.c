@@ -3995,11 +3995,15 @@ static void gen_ins(struct t_fn *F, int n)
     }
     case IR_MULH: {
         /* The high word of a 32 x 32 product, which division by a
-         * constant multiplies by: smmul where the DSP set has it, else
-         * the long multiply with its low word thrown away. */
+         * constant multiplies by: the long multiply with its low word
+         * thrown away -- or smmul in ARM state, where every ARMv7-A has
+         * it. Not on ARMv7E-M, though the DSP set has it there too: the
+         * Cortex-M levels select the same instructions for v7-M and
+         * v7E-M (target_thumb_em), and a v7E-M image is run on a
+         * Cortex-M3 by the firmware tests, where smmul is undefined. */
         int sa = rdr(F, i->a, T_ACC), sb = rdr(F, i->b, T_TMP);
         int d = wreg(F, i->dst, T_ACC);
-        if (i->sign && target_thumb_em() && !getenv("EMBCC_NO_SMMUL")) {
+        if (i->sign && t_isa_a32 && !getenv("EMBCC_NO_SMMUL")) {
             t_smmul(t, d, sa, sb);
         } else {
             int lo = d != T_ACC ? LO(F, T_ACC) : LO(F, T_ADDR);

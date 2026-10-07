@@ -9,8 +9,8 @@
 #
 # At -Os the quotient is ARMv7-M's udiv or sdiv; at -O2 it is the high
 # word of a multiply by the divisor's magic number (pass_divmagic, IR
-# mulh): umull, or smmul for a signed one on ARMv7E-M -- and either way
-# there is ONE of it for the pair.
+# mulh): umull, or smull for a signed one -- and either way there is ONE
+# of it for the pair.
 set -u
 echo "TEST-MARKER thumb-divmod"
 . "$(dirname "$0")/../lib.sh"
@@ -67,11 +67,11 @@ for f in digits rem_only; do
         cat "$out/d.dis"; exit 1; }
 done
 echo "v % 10 and v / 10, and a remainder alone: one umull and one mls"
-[ "$(count spair '\tsmmul\t')" = 1 ] && [ "$(count spair '\tmls\t')" = 1 ] &&
+[ "$(count spair '\tsmull\t')" = 1 ] && [ "$(count spair '\tmls\t')" = 1 ] &&
 [ "$(count spair 'div\t')" = 0 ] || {
-    echo "FAIL: a signed pair by -7 should be one smmul and one mls:"
+    echo "FAIL: a signed pair by -7 should be one smull and one mls:"
     cat "$out/d.dis"; exit 1; }
-echo "a / -7 and a % -7: one smmul and one mls"
+echo "a / -7 and a % -7: one smull and one mls"
 [ "$(count macc '\tmla\t')" -ge 1 ] && [ "$(count macc 'lsl #')" = 0 ] || {
     echo "FAIL: s += x[i] * 10 should be an mla with 10 in a register, not"
     echo "      shifted adds:"; cat "$out/d.dis"; exit 1; }

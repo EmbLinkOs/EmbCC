@@ -314,10 +314,16 @@ static void data_processing(void)
         I("a32_mla", (t_mls(&C, d, n, m, a), 0), "mls %s, %s, %s, %s",
           R[d], R[n], R[m], R[a]);
         if (d != a)
-            for (int sg = 0; sg < 2; sg++)
+            for (int sg = 0; sg < 2; sg++) {
                 I("a32_mull", (t_mull(&C, d, a, n, m, sg), 0),
                   "%s %s, %s, %s, %s", sg ? "smull" : "umull", R[d], R[a],
                   R[n], R[m]);
+                I("a32_mlal", (t_mlal(&C, d, a, n, m, sg), 0),
+                  "%s %s, %s, %s, %s", sg ? "smlal" : "umlal", R[d], R[a],
+                  R[n], R[m]);
+            }
+        I("a32_smmul", (t_smmul(&C, d, n, m), 0), "smmul %s, %s, %s",
+          R[d], R[n], R[m]);
         for (int sg = 0; sg < 2; sg++)
             I("a32_div", (t_div(&C, d, n, m, sg), 0), "%s %s, %s, %s",
               sg ? "sdiv" : "udiv", R[d], R[n], R[m]);

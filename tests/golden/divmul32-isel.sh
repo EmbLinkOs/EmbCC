@@ -91,10 +91,11 @@ for tag in m4 m3 a7; do
     want $tag m10 '\tumull\t' 1 "x % 10 should be one umull"
     want $tag m10 '\tmls\t' 1 "x % 10 should take its remainder with mls"
     want $tag m10 'div\t|\tbl' 0 "x % 10 should neither divide nor call"
-    if [ $tag = m3 ]; then
-        want $tag s5 '\tsmull\t' 1 "x / 5 should be smull (no smmul on ARMv7-M)"
-    else
+    if [ $tag = a7 ]; then
         want $tag s5 '\tsmmul\t' 1 "x / 5 should be one smmul"
+    else
+        # v7-M and v7E-M select alike, and smmul is v7E-M's DSP set
+        want $tag s5 '\tsmull\t' 1 "x / 5 should be smull (no smmul on the M profile)"
     fi
     want $tag s5 'div\t|\tbl' 0 "x / 5 should neither divide nor call"
     want $tag smul 'mul' 1 "(int64)a * b should be one multiply"
