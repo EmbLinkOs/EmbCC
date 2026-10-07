@@ -341,6 +341,27 @@ static int lv_natural(const struct expr *e)
     }
 }
 
+/* Is a struct-valued expression's address -- what irgen hands a call or a
+ * return -- aligned to its type? An lvalue as lv_natural says; a call's
+ * result, a compound literal or a va_arg is in a slot of irgen's own. A
+ * conditional or a comma is its operands'. Anything else is not known. */
+static int struct_val_natural(const struct expr *e)
+{
+    switch (e->kind) {
+    case EXPR_VAR: case EXPR_DEREF: case EXPR_MEMBER:
+        return lv_natural(e);
+    case EXPR_CALL: case EXPR_COMPLIT: case EXPR_VA_ARG:
+        return 1;
+    case EXPR_COMMA:
+        return struct_val_natural(e->rhs);
+    case EXPR_COND:
+        return (!e->lhs || struct_val_natural(e->lhs)) &&
+               (!e->rhs || struct_val_natural(e->rhs));
+    default:
+        return 0;
+    }
+}
+
 /* Mark the load or store just emitted for lvalue `e`. */
 static void mark_natural(struct ir_func *fn, const struct expr *e)
 {
@@ -3208,6 +3229,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             ar->is_float = ty_is_float(at);
             ar->is_int128 = at->kind == TY_INT128;
             ar->is_struct = at->kind == TY_STRUCT;
+            ar->natural = ar->is_struct && struct_val_natural(e->args[k]);
             ar->size = ty_size(at);
             ar->nclass = ty_classify(at, ar->cls);
             ar->stk_off = 0;
@@ -3894,6 +3916,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                  * is the callee's classification, computed in codegen
                  * from the function's own return type. */
                 i->size = ty_size(s->expr->ty);
+                i->natural = struct_val_natural(s->expr);
             }
             break;
         }

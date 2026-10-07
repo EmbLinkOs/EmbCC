@@ -301,6 +301,11 @@ struct ir_ins {
          * reads these instead of walking `ty`. */
         int align;
         int nat_align;       /* ty_natural_align; 0 when not filled: align */
+        /* A struct argument: its address (vreg) is aligned to its type,
+         * because C promises it there -- 0 for a packed struct's member,
+         * and for anything irgen did not say. A backend whose aligned-only
+         * loads fault (Xtensa) reads a 0 one a byte at a time. */
+        int natural;
         int is_float;
         int is_int128;
         int hfa_n, hfa_size;

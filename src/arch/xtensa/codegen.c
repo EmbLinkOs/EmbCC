@@ -1817,7 +1817,9 @@ static int gen_ins64(struct xt_fn *F, int n)
 /* ---- one call ------------------------------------------------------------------- */
 
 /* Word q of a composite at [base] into register r: one l32i when the
- * composite is 4-aligned, else its bytes from the highest down, through
+ * composite is 4-aligned at that address (irgen's ir_arg.natural, or the
+ * IR_RET's natural: a packed structure's member need not be), else its
+ * bytes from the highest down, through
  * the scratch `by`. `base` is the caller's scratch, and is moved on (by
  * *adv bytes so far) when an offset passes the fields' reach. */
 static void comp_word(struct xt_fn *F, int r, int base, long size, int align,
@@ -1873,7 +1875,8 @@ static void gen_call(struct xt_fn *F, int n)
                 rd(F, a->vreg, ADDR);
                 for (int q = 0; q < pc->nw; q++) {
                     comp_word(F, SCR, ADDR, a->size,
-                              a->align ? a->align : 1, (int)(base_w + q), ACC,
+                              a->natural && a->align ? a->align : 1,
+                              (int)(base_w + q), ACC,
                               &adv);
                     st_out(F, SCR, pc->stk + 4L * q, 4, TMP);
                 }
@@ -1935,7 +1938,8 @@ static void gen_call(struct xt_fn *F, int n)
             rd(F, a->vreg, ACC);
             for (int q = 0; q < pc->nw; q++)
                 comp_word(F, OUT_ARG(pc->reg + q), ACC, a->size,
-                          a->align ? a->align : 1, (int)(base_w + q), TMP,
+                          a->natural && a->align ? a->align : 1,
+                              (int)(base_w + q), TMP,
                           &adv);
         }
     }
@@ -2529,7 +2533,8 @@ static void gen_ins(struct xt_fn *F, int n)
                     rd(F, i->a, ACC);
                     for (int q = 0; q < rw; q++)
                         comp_word(F, XT_A2 + q, ACC, fn->ret_abi.size,
-                                  fn->ret_abi.align ? fn->ret_abi.align : 1,
+                                  i->natural && fn->ret_abi.align
+                                      ? fn->ret_abi.align : 1,
                                   q, TMP, &adv);
                 } else {
                     /* through the caller's buffer, whose address the
