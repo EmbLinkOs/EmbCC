@@ -275,11 +275,11 @@ On ARM, the entry symbol's Thumb bit is kept in the ELF entry point.
 
 ### Linker scripts
 
-`-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM
-and RISC-V images (a MIPS or AVR image is refused: `embld: -T: a linker
-script is supported for ARM and RISC-V images only (this one is machine
-8)`): the script a CMSIS, STM32CubeMX, vendor SDK or RTOS
-project already has. It replaces `-Ttext`, `-Tdata`, `-Tstack`,
+`-T SCRIPT` lays the image out by a GNU ld linker script instead, for ARM,
+RISC-V and AVR images (another machine is refused: `embld: -T: a linker
+script is supported for ARM, RISC-V and AVR images only (this one is
+machine 8)`): the script a CMSIS, STM32CubeMX, vendor SDK, avr-libc or
+RTOS project already has. It replaces `-Ttext`, `-Tdata`, `-Tstack`,
 `--rom-limit` and `--lma-offset`, which are refused with it, and the
 linker defines no bracket symbols of its own except `__start_NAME` and
 `__stop_NAME` for an output section whose name is a C identifier.
@@ -342,7 +342,54 @@ on a section the program still refers to is refused with both sections
 named. COMMON symbols (tentative definitions from an object built with
 `-fcommon`; EmbCC emits none) are refused unless the script places
 `*(COMMON)`, because anywhere else is outside the range the startup
-zeroes. AVR images do not take a script yet.
+zeroes.
+
+#### AVR scripts
+
+An AVR script is written as avr-libc's are. Program space and data space
+are separate on AVR, and the script tells them apart by address: flash
+from 0, and data space from `0x800000`, so the ATmega328P's SRAM begins
+at `0x800100`. A relocation keeps the low 16 bits of a data address, as
+avr-ld's does, so `0x800100` is the pointer `0x0100`.
+
+```text
+ENTRY(__vectors)
+MEMORY
+{
+  text (rx)   : ORIGIN = 0, LENGTH = 32K
+  data (rw!x) : ORIGIN = 0x800100, LENGTH = 2K
+}
+SECTIONS
+{
+  .text : { KEEP(*(.vectors)) *(.text .text.*) } > text
+  .data : {
+    __data_start = .;
+    *(.rodata .rodata*) *(.data .data*)
+    . = ALIGN(2);
+    __data_end = .;
+  } > data AT> text
+  __data_load = LOADADDR(.data);
+  .bss (NOLOAD) : { __bss_start = .; *(.bss .bss*) *(COMMON) __bss_end = .; } > data
+}
+```
+
+EmbCC reads read-only data with data-space loads, as avr-gcc does without
+`__flash` or `PROGMEM`. So `.rodata` belongs in a section the startup
+copies to RAM, beside `.data`, which is where avr-libc's scripts put it.
+A script that leaves `.rodata` in program space would link and then read
+whatever RAM holds at those addresses. That script is refused, with the
+input section and its object named:
+
+```text
+embld: m328p.ld:14: section .text keeps .rodata of main.o in program space at 0x1a4; EmbCC reads read-only data from RAM on AVR, so it has to be in an output section the startup copies there (> data AT> text, as avr-libc's scripts place it)
+```
+
+The linker defines no symbols for an AVR script either. The startup's
+copy and zeroing loops need the brackets: `__data_load`, `__data_start`,
+`__data_end`, `__bss_start` and `__bss_end` for EmbCC's AVR startup, or
+avr-libc's `__data_load_start` names. `tests/golden/avr-ldscript.sh` links
+the same program with a script and with `-Ttext`/`-Tdata` and runs both
+on QEMU's ATmega328P.
 
 ### Garbage collection
 
