@@ -79,7 +79,7 @@ for t in thumbv7em-none-eabi thumbv6m-none-eabi riscv32-unknown-elf \
     case $t in
         mips*) cflags="-mcpu=mips32r2 -msoft-float -mno-abicalls -fno-pic -G0" ;;
         powerpc*) cflags="-msoft-float" ;;
-        sparc*) cflags="-mcpu=leon3" ;;
+        sparc*) cflags="-mcpu=leon3 -msoft-float" ;;   # EmbCC is soft float here
         loongarch*) cflags="-mabi=lp64s -msoft-float" ;;
         thumbv7em*|thumbv6m*) cflags="-mfloat-abi=soft" ;;
         riscv32*) cflags="-march=rv32imac -mabi=ilp32" ;;
@@ -101,9 +101,12 @@ for t in thumbv7em-none-eabi thumbv6m-none-eabi riscv32-unknown-elf \
         for o in "$d/$k"/*.o; do
             [ -f "$o" ] || continue
             m=0; case $o in *math*) m=1 ;; esac
+            # keyed by file AND name: a static `conv` is in strtol.c and in
+            # strtod.c, and joining on the name alone paired one file's
+            # with the other's
             llvm-nm -S --defined-only "$o" 2>/dev/null |
-                awk -v m=$m 'NF == 4 && ($3 == "T" || $3 == "t") {
-                    printf "%s %d %d\n", $4, strtonum_hex($2), m }
+                awk -v m=$m -v f="$(basename "$o" .o)" 'NF == 4 && ($3 == "T" || $3 == "t") {
+                    printf "%s:%s %d %d\n", f, $4, strtonum_hex($2), m }
                     function strtonum_hex(h,  i, v, c) { v = 0
                         for (i = 1; i <= length(h); i++) {
                             c = index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
