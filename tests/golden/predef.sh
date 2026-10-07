@@ -12,21 +12,27 @@ echo "TEST-MARKER predef"
 # ONE exclusion list in tools/gen-predef.sh (asked for directly, not restated
 # here, so the test and the generator cannot drift apart).
 checked=0
-for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips32eb loongarch64 tricore xtensa; do
+for arch in x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 riscv64 avr mips32 mips32eb loongarch64 tricore xtensa ppc32 sparc32 mips64 mips64eb; do
     # The triple is not always "<arch>-elf": ARMv7-M is spelled the way
     # every other toolchain spells it, and gen-predef.sh keys on the short
     # name, so the two are named apart here rather than assumed equal.
     case $arch in
         thumb)          triple=thumbv7m-none-eabi ;;
         thumbv6m)       triple=thumbv6m-none-eabi ;;
+        thumbv8m)       triple=thumbv8m.main-none-eabi ;;
+        thumbv8mbase)   triple=thumbv8m.base-none-eabi ;;
         armv7a)         triple=armv7a-none-eabi ;;
         riscv32|riscv64) triple=$arch-unknown-elf ;;
         avr)            triple=avr ;;
         mips32)         triple=mipsel-none-elf ;;
         mips32eb)       triple=mips-none-elf ;;
+        mips64)         triple=mips64el-none-elf ;;
+        mips64eb)       triple=mips64-none-elf ;;
         loongarch64)    triple=loongarch64-unknown-elf ;;
         tricore)        triple=tricore-none-elf ;;
         xtensa)         triple=xtensa-none-elf ;;
+        ppc32)          triple=powerpc-none-eabi ;;
+        sparc32)        triple=sparc-none-elf ;;
         *)              triple=$arch-elf ;;
     esac
     out=$("$EMBCC" --target=$triple --dump-predef) || {
@@ -52,7 +58,7 @@ for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips
         case $arch in
             x86_64)  own="__x86_64__ __LP64__" ;;
             aarch64) own="__aarch64__ __LP64__" ;;
-            thumb|thumbv6m) own="__arm__ __thumb__ __ARM_EABI__ __CHAR_UNSIGNED__" ;;
+            thumb|thumbv6m|thumbv8m|thumbv8mbase) own="__arm__ __thumb__ __ARM_EABI__ __CHAR_UNSIGNED__" ;;
             armv7a) own="__arm__ __ARM_ARCH_7A__ __ARM_EABI__ __CHAR_UNSIGNED__" ;;
             riscv32) own="__riscv __riscv_xlen __riscv_float_abi_soft __CHAR_UNSIGNED__" ;;
             riscv64) own="__riscv __riscv_xlen __riscv_float_abi_soft __LP64__" ;;
@@ -64,11 +70,15 @@ for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips
             avr)     own="__AVR__ __AVR_ARCH__ __AVR_ATmega328P__ __SIZEOF_INT__" ;;
             mips32)  own="__mips__ _MIPSEL __mips_soft_float __mips_o32 _MIPS_SZPTR" ;;
             mips32eb) own="__mips__ _MIPSEB __BIG_ENDIAN__ __mips_soft_float __mips_o32" ;;
+            mips64)  own="__mips__ __mips64 _MIPSEL __mips_soft_float __mips_n64 __LP64__" ;;
+            mips64eb) own="__mips__ __mips64 _MIPSEB __mips_soft_float __mips_n64 __LP64__" ;;
             loongarch64) own="__loongarch__ __loongarch64 __loongarch_soft_float __loongarch_lp64 __LP64__" ;;
             # (there is no TriCore compiler to generate the table from:
             #  src/arch/tricore/predef.c says how it was made)
             tricore) own="__tricore__ __TRICORE__ __TRICORE_CORE__ __ILP32__" ;;
             xtensa)  own="__xtensa__ __XTENSA__ __XTENSA_EL__ __XTENSA_WINDOWED_ABI__ __CHAR_UNSIGNED__ __SIZEOF_WCHAR_T__" ;;
+            ppc32)   own="__PPC__ _ARCH_PPC __BIG_ENDIAN__ _SOFT_FLOAT __CHAR_UNSIGNED__" ;;
+            sparc32) own="__sparc__ __sparcv8 __BIG_ENDIAN__ SOFT_FLOAT __SIZEOF_LONG_DOUBLE__" ;;
         esac
         for m in __INT64_TYPE__ __INTPTR_TYPE__ __SIZE_TYPE__ __PTRDIFF_TYPE__ \
                  __CHAR_BIT__ __SIZEOF_POINTER__ __SIZEOF_LONG__ \
@@ -83,3 +93,21 @@ for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips
         echo "$arch: no reference gcc; the known-fatal macros are present"
     fi
 done
+
+# -mcmse, the Secure side of ARMv8-M: __ARM_FEATURE_CMSE is 3 where the table
+# says 1, as clang defines it under the flag, at both profiles -- and the rest
+# of the table is the same.
+tmpa=${TMPDIR:-/tmp}/predef.nocmse.$$
+tmpb=${TMPDIR:-/tmp}/predef.cmse.$$
+for triple in thumbv8m.main-none-eabi thumbv8m.base-none-eabi; do
+    "$EMBCC" --target=$triple --dump-predef | sort > "$tmpa"
+    "$EMBCC" --target=$triple -mcmse --dump-predef | sort > "$tmpb"
+    d=$(diff "$tmpa" "$tmpb" | grep '^[<>]')
+    rm -f "$tmpa" "$tmpb"
+    want='< #define __ARM_FEATURE_CMSE 1
+> #define __ARM_FEATURE_CMSE 3'
+    [ "$d" = "$want" ] || {
+        echo "$triple -mcmse: the table should change in __ARM_FEATURE_CMSE alone:"
+        printf '%s\n' "$d" | head -6; exit 1; }
+done
+echo "-mcmse makes __ARM_FEATURE_CMSE 3 on both ARMv8-M profiles, and changes nothing else"

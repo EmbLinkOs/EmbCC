@@ -14,6 +14,21 @@
  * each finished function and refuses it, by name, if anything else got
  * in -- an inline asm template included.
  *
+ * ---- ARMv8-M Baseline ----------------------------------------------------
+ *
+ * The Cortex-M23 runs this same selection (target_thumb_v8m_base), with
+ * what Baseline adds to ARMv6-M turned on where it replaces a call: a
+ * 32-bit divide is SDIV/UDIV (and a remainder the quotient times the
+ * divisor taken from the dividend -- there is no MLS), and a one-, two- or
+ * four-byte atomic is an LDREX/STREX loop between two DMBs, as on ARMv7-M,
+ * instead of a call to lib/rt's interrupt-masking __atomic_* routines.
+ * v6_scan then admits Baseline's 32-bit encodings as well -- the divides,
+ * the exclusives and the acquire/release forms, MOVW/MOVT, B.W, CLREX, TT
+ * and SG -- and CBZ/CBNZ; still no IT and no other Thumb-2 form. A
+ * cmse_nonsecure_entry function and a cmse_nonsecure_call are lowered
+ * here too (-mcmse; see gen_ret and gen_call). Constants and addresses
+ * stay in literal pools, as clang keeps them for this core.
+ *
  * ---- registers ---------------------------------------------------------
  *
  * Only r0-r7 compute. r6 and r7 are this lowering's two scratch registers
@@ -81,9 +96,10 @@ static void v6_refuse(const struct ir_func *fn, const struct ir_ins *i,
         snprintf(op, sizeof op, " [%s w=%d size=%d]", ir_opname(i->op),
                  i->w, i->size);
     fprintf(stderr,
-            "embcc: %s:%d: error: the ARMv6-M backend cannot lower %s yet "
+            "embcc: %s:%d: error: the %s backend cannot lower %s yet "
             "(function %s)%s\n",
-            fn->file ? fn->file : "?", i ? i->line : fn->line, what,
+            fn->file ? fn->file : "?", i ? i->line : fn->line,
+            target_thumb_v8m_base() ? "ARMv8-M Baseline" : "ARMv6-M", what,
             fn->name, op);
     exit(1);
 }
@@ -92,7 +108,8 @@ int v6_op_calls_helper(const struct ir_ins *i)
 {
     switch (i->op) {
     case IR_DIV: case IR_MOD:
-        return !i->flt;
+        /* ARMv8-M Baseline divides 32 bits in hardware */
+        return !i->flt && (i->w == 8 || !target_thumb_v8m_base());
     case IR_MUL:
         return !i->flt && i->w == 8;
     case IR_SHL: case IR_SHR:
@@ -100,7 +117,8 @@ int v6_op_calls_helper(const struct ir_ins *i)
     case IR_MEMCPY: case IR_MEMZERO:
         return i->size > V6_INLINE_COPY;
     case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS: case IR_CMPXCHG:
-        return 1;
+        /* ...and has the exclusives (an eight-byte one is refused) */
+        return !target_thumb_v8m_base();
     default:
         return 0;
     }
@@ -1418,7 +1436,36 @@ static void gen_call(struct t_fn *F, int n)
     }
     if (sret)
         fr_addr(F, T_R0, F->scratch_at + i->scratch);
-    if (i->indirect) {
+    if (i->indirect && i->call_cmse) {
+        /* CMSE's call into the Non-secure state (codegen.c says why each
+         * step), in Thumb-1: r4-r7 pushed, then r8-r11 through them; the
+         * target's bit 0 cleared in r4 (BICS takes low registers only);
+         * every register but the arguments overwritten with it, and the
+         * flags; BLXNS; and r8-r11, r4-r7 back. No VLSTM: Baseline has
+         * no FPU. */
+        tcg_cmse_check_call(fn, i, &w, sret);
+        v_rd(F, i->a, sc(F, S0));
+        t_mov_reg(t, IP, S0);
+        t1_push(t, 0xf0u);
+        for (int r = 4; r < 8; r++)
+            t_mov_reg(t, r, r + 4);
+        t1_push(t, 0xf0u);
+        t_mov_reg(t, 4, IP);
+        t1_movs_imm(t, 5, 1);
+        t1_alu_reg(t, T_OP_BIC, 4, 5);
+        for (int r = w.ncrn; r < 13; r++)
+            if (r != 4)
+                t_mov_reg(t, r, 4);
+        t_msr_apsr(t, 4, 0);
+        t_bxns(t, 4, 1);
+        t1_pop(t, 0xf0u);
+        for (int r = 4; r < 8; r++)
+            t_mov_reg(t, r + 4, r);
+        t1_pop(t, 0xf0u);
+        if (i->dst >= 0 && !i->retsize &&
+            (i->ret_tybytes == 1 || i->ret_tybytes == 2))
+            t1_ext(t, T_R0, T_R0, i->ret_tybytes, i->ret_tysign);
+    } else if (i->indirect) {
         v_rd(F, i->a, sc(F, S0));
         t_blx(t, S0);
     } else if (cg_call_local(fn->src, i->callee)) {
@@ -1634,6 +1681,138 @@ static const char *const cas_names[2][3] = {
       "__atomic_compare_exchange_4" },
 };
 
+/* ARMv8-M Baseline: the exclusives, so codegen.c's loop (thumb_atomic),
+ * in low registers:
+ *
+ *      dmb
+ *   1: ldrex{b,h}  old, [addr]
+ *      <new from old>
+ *      strex{b,h}  st, new, [addr]
+ *      cmp  st, #0
+ *      bne  1b
+ *      dmb
+ *
+ * Every operand is in a register before the loop: a load from the frame
+ * between the LDREX and the STREX is a memory access the architecture
+ * allows to clear the reservation. The temporaries are taken before the
+ * loop too, so a pushed one is pushed outside it. */
+static unsigned rbit(int r) { return 1u << r; }
+
+static void v8b_atomic(struct t_fn *F, int n)
+{
+    struct ir_func *fn = F->fn;
+    struct ir_ins *i = &fn->ins[n];
+    struct code *t = F->t;
+    int sz = i->size, addr, top, br;
+    if (sz != 1 && sz != 2 && sz != 4)
+        v6_refuse(fn, i, "an atomic wider than four bytes (ARMv8-M Baseline "
+                         "has no doubleword exclusive; clang calls "
+                         "__atomic_*_8 for these)");
+#define LDX(rt) (sz == 4 ? t_ldrex(t, (rt), addr, 0) \
+                         : t_ldrexbh(t, (rt), addr, sz))
+#define STX(st, rt) (sz == 4 ? t_strex(t, (st), (rt), addr, 0) \
+                             : t_strexbh(t, (st), (rt), addr, sz))
+    addr = v_rdr(F, i->a, S0);
+    if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW) {
+        int val = v_rdr(F, i->b, S1), old, st, nw;
+        unsigned av = rbit(addr) | rbit(val);
+        old = tmp_get(F, av);
+        st = tmp_get(F, av | rbit(old));
+        nw = i->op == IR_XCHG ? val
+           : tmp_get(F, av | rbit(old) | rbit(st));
+        if (i->op == IR_ARMW && i->imm != '&' && i->imm != '|' &&
+            i->imm != '^' && i->imm != 'n')
+            v6_refuse(fn, i, "an atomic read-modify-write of this operation");
+        t_barrier(t, T_BAR_DMB);
+        top = t->len;
+        LDX(old);
+        if (i->op == IR_XADD) {
+            t1_addsub_reg(t, T_OP_ADD, nw, old, val);
+        } else if (i->op == IR_ARMW) {
+            mov(F, nw, old);
+            t1_alu_reg(t, i->imm == '|' ? T_OP_ORR : i->imm == '^' ? T_OP_EOR
+                                                    : T_OP_AND, nw, val);
+            if (i->imm == 'n')
+                t1_mvns(t, nw, nw);
+        }
+        STX(st, nw);
+        t1_cmp_imm(t, st, 0);
+        br = bc16(F, T_NE);
+        if (!t_patch_bcond16(t, br, top))
+            internal_error("thumb: an atomic's retry loop is out of reach");
+        t_barrier(t, T_BAR_DMB);
+        if (sz < 4 && i->sign)
+            t1_ext(t, old, old, sz, 1);
+        v_wr(F, i->dst, old);
+        if (nw != val)
+            tmp_put(F, nw);
+        tmp_put(F, st);
+        tmp_put(F, old);
+    } else {
+        /* compare-and-swap: IR_CAS by value, IR_CMPXCHG with the expected
+         * value at *b and the value seen written back there */
+        int p = -1, exp, des, old, st, fail, done;
+        unsigned av = rbit(addr);
+        exp = tmp_get(F, av);
+        av |= rbit(exp);
+        if (i->op == IR_CMPXCHG) {
+            p = v_rdr(F, i->b, S1);
+            av |= rbit(p);
+            if (p == exp)
+                internal_error("thumb: %s: a compare-and-swap's registers",
+                               fn->name);
+            t1_ldst_imm(t, exp, p, 0, sz, 0);        /* zero-extended */
+        } else {
+            v_rd(F, i->b, exp);
+            if (sz < 4)
+                t1_ext(t, exp, exp, sz, 0);
+        }
+        des = tmp_get(F, av);
+        av |= rbit(des);
+        v_rd(F, i->c, des);
+        old = tmp_get(F, av);
+        av |= rbit(old);
+        st = tmp_get(F, av);
+        t_barrier(t, T_BAR_DMB);
+        top = t->len;
+        LDX(old);
+        t1_cmp_reg(t, old, exp);
+        fail = bc16(F, T_NE);
+        STX(st, des);
+        t1_cmp_imm(t, st, 0);
+        br = bc16(F, T_NE);
+        done = b16(F);
+        if (!t_patch_bcond16(t, br, top))
+            internal_error("thumb: a compare-and-swap loop is out of reach");
+        bc16_here(F, fail);
+        t_clrex(t);                  /* the failed path holds a reservation */
+        b16_here(F, done);
+        t_barrier(t, T_BAR_DMB);
+        if (i->op == IR_CMPXCHG) {
+            /* *b = the value seen; the result is whether it matched. The
+             * temporaries go first (a pop leaves the flags alone), as
+             * set_cc may need a register of its own. */
+            t1_ldst_imm(t, old, p, 0, sz, 1);
+            t1_cmp_reg(t, old, exp);
+            tmp_put(F, st);
+            tmp_put(F, old);
+            tmp_put(F, des);
+            tmp_put(F, exp);
+            set_cc(F, i->dst, T_EQ);
+        } else {
+            if (sz < 4 && i->sign)
+                t1_ext(t, old, old, sz, 1);
+            v_wr(F, i->dst, old);
+            tmp_put(F, st);
+            tmp_put(F, old);
+            tmp_put(F, des);
+            tmp_put(F, exp);
+        }
+    }
+#undef LDX
+#undef STX
+}
+
 static void gen_atomic(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -1643,6 +1822,10 @@ static void gen_atomic(struct t_fn *F, int n)
     int vr[3], nw[3] = { 1, 1, 1 }, dst[3] = { 0, 1, 2 };
     long kv[3] = { 0, 0, 0 };
     const char *name;
+    if (target_thumb_v8m_base()) {
+        v8b_atomic(F, n);
+        return;
+    }
     if (sz != 1 && sz != 2 && sz != 4)
         v6_refuse(fn, i, "an atomic wider than four bytes (ARMv6-M has no "
                          "exclusives; it calls __atomic_* for these)");
@@ -2161,6 +2344,13 @@ static void gen_ins(struct t_fn *F, int n)
             break;
         default: break;
         }
+        /* an eight-byte atomic is refused by name there */
+        if (wide && (i->op == IR_XCHG || i->op == IR_XADD ||
+                     i->op == IR_ARMW || i->op == IR_CAS ||
+                     i->op == IR_CMPXCHG)) {
+            gen_atomic(F, n);
+            return;
+        }
         if (wide && i->op != IR_CMP && i->op != IR_BRZ &&
             i->op != IR_BRNZ && i->op != IR_CALL && i->op != IR_RET &&
             i->op != IR_I2F && i->op != IR_F2I && i->op != IR_F2F) {
@@ -2237,6 +2427,29 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_DIV: case IR_MOD:
+        /* ARMv8-M Baseline: SDIV/UDIV, and a remainder as clang makes it
+         * there, a - (a / b) * b, with MULS and SUBS -- no MLS. */
+        if (target_thumb_v8m_base()) {
+            int ra = v_rdr(F, i->a, S0), rb, d, q;
+            if (i->imm_b) {
+                k32(F, sc(F, S1), (unsigned long)i->imm);
+                rb = S1;
+            } else {
+                rb = v_rdr(F, i->b, S1);
+            }
+            d = v_wreg(F, i->dst, S0);
+            if (i->op == IR_DIV) {
+                t_div(t, d, ra, rb, i->sign);
+            } else {
+                q = tmp_get(F, rbit(ra) | rbit(rb) | rbit(d));
+                t_div(t, q, ra, rb, i->sign);
+                t1_muls(t, q, rb);
+                t1_addsub_reg(t, T_OP_SUB, d, ra, q);
+                tmp_put(F, q);
+            }
+            v_wr(F, i->dst, d);
+            return;
+        }
         /* No divide instruction: the RTABI routines. __aeabi_idivmod
          * leaves the quotient in r0 and the remainder in r1. */
         helper2(F, i, i->op == IR_DIV
@@ -2670,19 +2883,15 @@ static void pool_point(struct t_fn *F, long est, int natural)
  * not BL, MRS, MSR, DMB, DSB or ISB, an IT block, or a CBZ/CBNZ would be
  * UNDEFINED on the core. A lowering that reached an ARMv7-M encoder, or an
  * inline asm template that used Thumb-2, stops the function here by name
- * rather than at a HardFault. */
+ * rather than at a HardFault.
+ *
+ * ARMv8-M Baseline has CBZ/CBNZ and more 32-bit ones as well, each matched
+ * on its fixed bits by t_thumb1_ok32 (emit.c), which the assembler asks
+ * too; tests/golden/thumbv8mbase-encoding.sh checks that set against
+ * llvm-mc. */
 static int v6_ok32(unsigned h, unsigned h2)
 {
-    if ((h & 0xf800u) == 0xf000u && (h2 & 0xd000u) == 0xd000u)
-        return 1;                                    /* BL */
-    if (h == 0xf3efu && (h2 & 0xf000u) == 0x8000u)
-        return 1;                                    /* MRS */
-    if ((h & 0xfff0u) == 0xf380u && (h2 & 0xff00u) == 0x8800u)
-        return 1;                                    /* MSR */
-    if (h == 0xf3bfu && (h2 & 0xff0fu) == 0x8f0fu &&
-        ((h2 >> 4) & 0xf) >= 4 && ((h2 >> 4) & 0xf) <= 6)
-        return 1;                                    /* DSB, DMB, ISB */
-    return 0;
+    return t_thumb1_ok32(h, h2, target_thumb_v8m_base());
 }
 
 static void v6_scan(struct t_fn *F, int from)
@@ -2704,14 +2913,21 @@ static void v6_scan(struct t_fn *F, int from)
             unsigned h2 = at + 3 < t->len
                 ? (unsigned)(t->p[at + 2] | t->p[at + 3] << 8) : 0;
             if (!v6_ok32(h, h2))
-                v6_refuse(F->fn, NULL, "an instruction ARMv6-M does not have "
-                          "(a 32-bit Thumb-2 encoding, from inline asm or "
-                          "the backend)");
+                v6_refuse(F->fn, NULL, target_thumb_v8m_base()
+                          ? "an instruction ARMv8-M Baseline does not have "
+                            "(a 32-bit Thumb-2 encoding, from inline asm or "
+                            "the backend)"
+                          : "an instruction ARMv6-M does not have "
+                            "(a 32-bit Thumb-2 encoding, from inline asm or "
+                            "the backend)");
             at += 4;
             continue;
         }
-        if (((h & 0xff00u) == 0xbf00u && (h & 0xfu)) ||    /* IT */
-            (h & 0xf500u) == 0xb100u)                      /* CBZ/CBNZ */
+        if ((h & 0xff00u) == 0xbf00u && (h & 0xfu))       /* IT */
+            v6_refuse(F->fn, NULL, target_thumb_v8m_base()
+                      ? "an IT block, which ARMv8-M Baseline does not have"
+                      : "an IT block or CBZ, which ARMv6-M does not have");
+        if ((h & 0xf500u) == 0xb100u && !target_thumb_v8m_base())  /* CBZ */
             v6_refuse(F->fn, NULL, "an IT block or CBZ, which ARMv6-M does "
                       "not have");
         at += 2;
@@ -2816,6 +3032,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = FB6;
+    if (fn->cmse_entry)
+        tcg_cmse_check_entry(fn);
     /* A leaf: nothing calls, the lowering's own calls included. An asm
      * writes lr when its template calls or names it, which irgen recorded
      * (ir_asm.clob); one whose clobbers are unknown might. */
@@ -3003,7 +3221,24 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (fn->has_alloca)
             t_mov_reg(t, T_SP, FB6);
         sp_frame(&F, F.frame, 0);
-        if (F.nopush) {
+        if (fn->cmse_entry) {
+            /* CMSE: back to the Non-secure state (codegen.c's
+             * cmse_entry_return). POP cannot name lr here, so the return
+             * address comes off into r3 -- which is cleared anyway -- and
+             * every cleared register then takes lr's value. */
+            if (!F.nopush) {
+                unsigned mask = save_mask6(&F, F.scr_save);
+                if (mask & ~(1u << T_LR))
+                    t1_pop(t, mask & ~(1u << T_LR));
+                t1_pop(t, 1u << 3);
+                t_mov_reg(t, T_LR, 3);
+            }
+            for (int r = tcg_cmse_ret_regs(fn); r < 4; r++)
+                t_mov_reg(t, r, T_LR);
+            t_mov_reg(t, IP, T_LR);
+            t_msr_apsr(t, T_LR, 0);
+            t_bxns(t, T_LR, 0);
+        } else if (F.nopush) {
             t_bx(t, T_LR);
         } else {
             unsigned mask = save_mask6(&F, F.scr_save);
@@ -3146,8 +3381,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     v6_scan(&F, f->code_off);
     f->code_len = t->len - f->code_off;
-    f->stack_bytes = F.nopush ? 0 : (int)(F.frame +
-                                          mask_bytes(save_mask6(&F, F.scr_save)));
+    /* ...and the variadic register save area pushed before it */
+    f->stack_bytes = (F.nopush ? 0 : (int)(F.frame +
+                                           mask_bytes(save_mask6(&F, F.scr_save)))) +
+                     (fn->is_varargs ? 16 : 0);
     free(cls);
     free(F.usecnt);
     free(F.slot);

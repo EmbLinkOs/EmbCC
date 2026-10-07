@@ -32,7 +32,7 @@ enum { DWSEC_ABBREV, DWSEC_INFO, DWSEC_LINE, DWSEC_RANGES };
 /* What a relocation binds against — the driver resolves each to the matching
  * section symbol (STT_SECTION). DWTGT_TEXT is the code the addresses point
  * into; the rest are self-references between debug sections. */
-enum { DWTGT_TEXT, DWTGT_ABBREV, DWTGT_LINE, DWTGT_RANGES };
+enum { DWTGT_TEXT, DWTGT_ABBREV, DWTGT_LINE, DWTGT_RANGES, DWTGT_GLOBAL };
 
 struct dwarf_reloc {
     int in_sec;      /* DWSEC_* the field lives in */
@@ -40,6 +40,9 @@ struct dwarf_reloc {
     int width;       /* 4 or 8 — selects R_X86_64_32 vs R_X86_64_64 */
     int target;      /* DWTGT_* — which section symbol to bind against */
     long addend;
+    /* DWTGT_GLOBAL: the object whose symbol the field binds to (a global
+     * variable's DW_OP_addr), the driver resolving its symbol index. */
+    struct global *glob;
     /* DWTGT_TEXT: the address is an END, one past a function's last
      * byte. In a unit whose functions are in sections of their own that
      * is where the NEXT section's code begins in the code buffer, so the

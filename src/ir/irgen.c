@@ -392,6 +392,12 @@ int emit_load(struct ir_func *fn, int addr, const struct type *t)
     i->sign = ty_signed_int(t);
     i->w = ty_w(t);
     i->vol = t->is_volatile || g_bf_vol;
+    /* __flash: program memory, which only LPM reads. vol as well, so
+     * that no optimizer pass rewrites the load into one that reads RAM
+     * (store forwarding, a memcpy idiom, a load folded from .rodata) */
+    i->flash = t->is_flash;
+    if (i->flash)
+        i->vol = 1;
     i->dst = new_temp(fn);
     return i->dst;
 }
@@ -872,7 +878,9 @@ static long fb_expmask(int w)  { return w == 4 ? (long)0x7f800000L
  * stack slot sema gave the call, and that halfword is read and written
  * as an integer. The fraction, for the NaN and infinity tests, is the
  * low 63 bits of x87's explicit-integer-bit significand, and binary128's
- * low 112 bits. */
+ * low 112 bits. BIG-endian (SPARC's binary128) the format's top sixteen
+ * bits are its FIRST two bytes, and its low doubleword the second
+ * (docs/internals/big-endian.md). */
 static int local_addr(struct ir_func *fn, int v);
 
 static int fb_wide(struct ir_func *fn, struct expr *e)
@@ -882,11 +890,14 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
     const struct type *u16 = ty_base(TY_SHORT, 1);
     const struct type *u64 = ty_int_of_size(8, 1);
     int x87 = target_get() == TARGET_X86_64;
+    /* big-endian (mips64-none-elf): binary128's top halfword is its first
+     * two bytes, and its high doubleword the first eight */
+    int be = target_big_endian();
     int x = gen_expr(fn, e->args[0]);
     int y = strncmp(bn, "copysign", 8) == 0 ? gen_expr(fn, e->args[1]) : -1;
     int slot = local_addr(fn, e->var_index);
-    int sea = emit_bin(fn, IR_ADD, slot, emit_const(fn, x87 ? 8 : 14, AW),
-                       AW, 1);
+    int sea = emit_bin(fn, IR_ADD, slot,
+                       emit_const(fn, x87 ? 8 : be ? 0 : 14, AW), AW, 1);
     int ysign = -1;
     if (y >= 0) {
         emit_store(fn, slot, y, ld);
@@ -914,14 +925,18 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
                         emit_cmp(fn, B_NE, ex, emit_const(fn, 0, 4), 4, 0),
                         emit_cmp(fn, B_NE, ex, emit_const(fn, 0x7fff, 4), 4, 0),
                         4, 0);
-    int lo = emit_load(fn, slot, u64);
+    int lo = emit_load(fn, be ? emit_bin(fn, IR_ADD, slot,
+                                         emit_const(fn, 8, AW), AW, 1)
+                              : slot, u64);
     int frac;
     if (x87) {
         frac = emit_bin(fn, IR_AND, lo,
                         emit_const(fn, 0x7fffffffffffffffL, 8), 8, 0);
     } else {
-        int hi = emit_load(fn, emit_bin(fn, IR_ADD, slot,
-                                        emit_const(fn, 8, AW), AW, 1), u64);
+        int hi = emit_load(fn, be ? slot
+                                  : emit_bin(fn, IR_ADD, slot,
+                                             emit_const(fn, 8, AW), AW, 1),
+                           u64);
         frac = emit_bin(fn, IR_OR, lo,
                         emit_bin(fn, IR_SHL, hi, emit_const(fn, 16, 8), 8, 0),
                         8, 0);
@@ -1594,9 +1609,11 @@ static int atomic_arm(void)
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
            t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
            t == TARGET_MIPS32 ||      /* MIPS32 is weakly ordered: sync */
+           t == TARGET_MIPS64 ||
            t == TARGET_LOONGARCH64 ||  /* ...and LoongArch: dbar */
            t == TARGET_TRICORE ||     /* TriCore orders with dsync */
-           t == TARGET_XTENSA;        /* and Xtensa: memw */
+           t == TARGET_XTENSA ||      /* Xtensa: memw */
+           t == TARGET_PPC32;         /* and PowerPC: sync */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -1637,9 +1654,24 @@ static void atomic_width_ok(struct ir_func *fn, const struct type *t,
  * access, so it is natural: an atomic object is aligned (it could not be
  * atomic otherwise), and a backend that splits what it cannot prove
  * aligned -- MIPS's lwl/lwr -- would let an interrupt tear it. */
+static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
+                      int val, const struct type *t);
+
+/* AVR moves one byte per access, so a two- or four-byte atomic load or
+ * store is two or four; there it is a read-modify-write instead, which the
+ * backend does with interrupts masked: a load is a fetch-or of 0, a store
+ * an exchange whose old value is dropped. */
+static int avr_atomic_rmw_size(const struct type *t)
+{
+    return target_get() == TARGET_AVR &&
+           (ty_size(t) == 2 || ty_size(t) == 4) && ty_is_integer(t);
+}
+
 static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
                        int line)
 {
+    if (avr_atomic_rmw_size(t))
+        return atomic_rmw(fn, IR_ARMW, '|', addr, emit_const(fn, 0, ty_w(t)), t);
     atomic_width_ok(fn, t, line);
     int v = emit_load(fn, addr, t);
     fn->ins[fn->nins - 1].vol = 1;
@@ -1652,6 +1684,10 @@ static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
 static void atomic_store(struct ir_func *fn, int addr, int val,
                          const struct type *t, int line)
 {
+    if (avr_atomic_rmw_size(t)) {
+        (void)atomic_rmw(fn, IR_XCHG, 0, addr, val, t);
+        return;
+    }
     atomic_width_ok(fn, t, line);
     if (atomic_arm())
         emit(fn)->op = IR_FENCE;          /* release */
@@ -2745,6 +2781,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
          * hand and never said so, while emit_load did: at -O2 two reads
          * of the same status register became one on every target. */
         i->vol = e->ty->is_volatile;
+        /* and `*p` with p a __flash pointer reads program memory */
+        i->flash = e->ty->is_flash;
+        if (i->flash)
+            i->vol = 1;
         i->dst = new_temp(fn);
         return i->dst;
     }
@@ -2782,12 +2822,20 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_riscv(fn, e);
         if (target_get() == TARGET_AVR)
             return irg_va_arg_avr(fn, e);
-        if (target_get() == TARGET_MIPS32)
+        if (target_is_mips())
             return irg_va_arg_mips(fn, e);
         if (target_get() == TARGET_TRICORE)
             return irg_va_arg_tricore(fn, e);
         if (target_get() == TARGET_XTENSA)
             return irg_va_arg_xtensa(fn, e);
+        if (target_get() == TARGET_PPC32)
+            return irg_va_arg_ppc(fn, e);
+        if (target_get() == TARGET_RX)
+            return irg_va_arg_rx(fn, e);
+        if (target_get() == TARGET_SPARC32)
+            return irg_va_arg_sparc(fn, e);
+        if (target_get() == TARGET_COLDFIRE)
+            return irg_va_arg_coldfire(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -3063,7 +3111,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             c->op = IR_MEMCPY;
             c->a = tag;
             c->b = src;
-            c->size = target_get() == TARGET_AARCH64 ? 32 : 24;
+            c->size = target_get() == TARGET_AARCH64 ? 32
+                    : target_get() == TARGET_PPC32 ? 12 : 24;
             struct expr *d = e->args[0];
             if (d->kind == EXPR_VAR && !d->gref)
                 emit_stvar(fn, d->var_index, tag, d->ty);
@@ -3239,6 +3288,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         /* Only a direct call can name one: sema refuses to take the
          * address of a function whose pcs is not the default. */
         i->call_pcs = e->callee ? e->callee->pcs : 0;
+        /* (a direct call to a function never is one: the attribute is on
+         * the pointed-to function TYPE, and a pointer to it is only ever
+         * called through) */
+        i->call_cmse = !e->callee && e->lhs->ty->pointee &&
+                       e->lhs->ty->pointee->cmse_ns_call;
         i->call_nfixed = e->callee ? e->callee->nparams
                                    : e->lhs->ty->pointee->nptypes;
         i->sret_first = e->callee ? e->callee->sret_first
@@ -3942,7 +3996,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_riscv(fn, s);
             else if (target_get() == TARGET_AVR)
                 irg_asm_avr(fn, s);
-            else if (target_get() == TARGET_MIPS32)
+            else if (target_is_mips())
                 irg_asm_mips(fn, s);
             else if (target_get() == TARGET_LOONGARCH64)
                 irg_asm_loongarch(fn, s);
@@ -3952,6 +4006,16 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 diag_fatal(fn->file, s->line, "inline assembly is not "
                            "supported for xtensa-none-elf yet (EmbCC has no "
                            "Xtensa assembler vocabulary)");
+            else if (target_get() == TARGET_PPC32)
+                irg_asm_ppc(fn, s);
+            else if (target_get() == TARGET_RX)
+                diag_fatal(fn->file, s->line,
+                           "inline assembly is not supported for "
+                           "rx-none-elf yet: EmbCC has no RX assembler");
+            else if (target_get() == TARGET_SPARC32)
+                irg_asm_sparc(fn, s);
+            else if (target_get() == TARGET_COLDFIRE)
+                irg_asm_coldfire(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;
@@ -4211,6 +4275,7 @@ static void add_dbgvar(struct ir_func *fn, const char *name, int vreg,
     v->ty = ty;
     v->line = line;
     v->col = col;
+    v->moved = 0;
 }
 
 /* -g: walk the body for block-scope locals. Each STMT_DECL owns a var slot
@@ -4279,6 +4344,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
         fn->ret_abi.byref = ty_aapcs64_byref(rt);
         fn->ret_abi.ty = rt;
         fn->pcs = f->pcs;
+        fn->cmse_entry = f->cmse_entry;
     }
     /* The same two refusals as at a call site, on the SIGNATURE --
      * because a function that merely takes or returns one of these

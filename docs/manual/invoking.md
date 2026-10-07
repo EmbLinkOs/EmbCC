@@ -65,15 +65,15 @@ the full entry.
 | [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fmessage-length=N` `-fdiagnostics-parseable-fixits` `--fix` `-fanalyzer` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
 | [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-fremarks` `-fremarks=json` |
-| [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fno-stack-protector` |
+| [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fcallgraph-info[=su]` `-fno-stack-protector` |
 | [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-include FILE` `-Wp,ARGS` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
 | [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` `-specs=FILE` |
 | [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-fno-pic` `-fno-pie` `-fno-jump-tables` `-fjump-tables` `-fno-zero-initialized-in-bss` `-fstrict-volatile-bitfields` `-fno-strict-volatile-bitfields` `-fverbose-asm` `-ffunction-sections` `-fdata-sections` |
-| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mfpu=FPU` `-mfloat-abi=ABI` `-mabi=ABI` `-mthumb-interwork` `-mno-thumb-interwork` `-munaligned-access` `-mslow-flash-data` `-mlittle-endian`; on MIPS `-mcpu=CPU` `-march=CPU` `-mabi=32` `-msoft-float` `-EL` `-mno-abicalls` `-G0` |
+| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mcmse` `-mfpu=FPU` `-mfloat-abi=ABI` `-mabi=ABI` `-mthumb-interwork` `-mno-thumb-interwork` `-munaligned-access` `-mslow-flash-data` `-mlittle-endian`; on MIPS `-mcpu=CPU` `-march=CPU` `-mabi=32` `-msoft-float` `-EL` `-mno-abicalls` `-G0` |
 | [Target](#target-selection) | `--target=TRIPLE` |
 | [Developer](#developer-and-inspection-options) | `inspect` `why` `-fremarks` `--emit-interfaces` `--explain` |
-| [Refused](#refused-options) | `-fPIC` `-fpic` `-fPIE` `-fpie` `-shared` `-static-pie` `-flto` `-fshort-enums` `-fprofile*` `--coverage` `-fcoverage-mapping` `-pg` `-fstack-protector*` `-fstack-clash-protection` `-fcf-protection*` `-fsanitize*` (other than the forms above) `-gdwarf-N` (N not 2 to 4) `-gsplit-dwarf` `-gz` `-mno-unaligned-access` `-mbig-endian` `-mabi=` (other values) `-fdump-*` `-fcallgraph-info*` |
+| [Refused](#refused-options) | `-fPIC` `-fpic` `-fPIE` `-fpie` `-shared` `-static-pie` `-flto` `-fshort-enums` `-fprofile*` `--coverage` `-fcoverage-mapping` `-pg` `-fstack-protector*` `-fstack-clash-protection` `-fcf-protection*` `-fsanitize*` (other than the forms above) `-gdwarf-N` (N not 2 to 4) `-gsplit-dwarf` `-gz` `-mno-unaligned-access` `-mbig-endian` `-mabi=` (other values) `-fdump-*` |
 
 ## Overall options
 
@@ -975,14 +975,37 @@ w.c:3:f	8	static
 ```
 
 The fields are `FILE:LINE:FUNCTION`, the frame size in bytes, and the
-qualifier, which is always `static`. Functions that inlining absorbed or
-that were dropped as unreachable are not listed.
+qualifier: `static`, or `dynamic` for a function whose frame grows at run
+time (a variable-length array or `alloca`), whose number is then only the
+fixed part. The frame includes everything the prologue reserves, a
+variadic function's register save area among it. Functions that inlining
+absorbed or that were dropped as unreachable are not listed.
 
-The `.su` name is derived from the output file, so `-fstack-usage` with
-`-S` needs `-o FILE`.
-<!-- Lead: `embcc -fstack-usage -S foo.c` (no -o) crashes with a
-segmentation fault in this build (out is NULL in the .su naming code in
-compile_unit). Remove the sentence above once fixed. -->
+The `.su` name is derived from the output file, or, with no `-o`, from the
+source's name in the current directory, as GCC does.
+
+### `-fcallgraph-info`, `-fcallgraph-info=su`
+
+Write the call graph beside the output as `FILE.ci`, in GCC's format: a
+VCG graph with a node per emitted function (with `=su`, its frame and
+qualifier as in `-fstack-usage`), an elliptic node per external callee,
+and an edge per call site left after optimisation, labelled with its
+location. A call through a pointer is an edge to the
+`__indirect_call` placeholder. A function the inliner absorbed is not a
+node: its calls appear under its callers.
+
+```text
+graph: { title: "w.c"
+node: { title: "main" label: "main\nw.c:5:5\n16 bytes (static)" }
+node: { title: "g" label: "g" shape : ellipse }
+edge: { sourcename: "main" targetname: "g" label: "w.c:5:18" }
+}
+```
+
+A backend's calls to run-time helpers (a soft-float operation, a 64-bit
+divide) are not in the graph: they are in the object's relocations.
+[`embrt`](tools/embrt.md) reads all three -- `.su`, `.ci` and the
+object -- to bound each entry point's stack.
 
 ### `-fno-stack-protector`
 
@@ -1524,14 +1547,21 @@ extension); `cortex-m3` selects ARMv7-M code. `-mcpu=` does not move
 between ARMv7-M and ARMv8-M; that level comes from the triple
 (`thumbv8m.main-none-eabi`).
 
-EmbCC has no ARMv8-M Baseline code generator, so `cortex-m23` is refused:
-`-mcpu=cortex-m23 is ARMv8-M Baseline, and EmbCC emits ARMv6-M (cortex-m0,
-m0plus, m1) or ARMv7-M Thumb-2: the second faults on that core and the
-first is not what it is`.
+`cortex-m23` selects ARMv8-M Baseline on any ARM triple, as
+`thumbv8m.base-none-eabi` does ([Targets](targets.md#armv8-m-baseline)).
 
 Any other `CPU` is refused: `-mcpu=cortex-m55 is not a part EmbCC knows:
-it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv7-M and ARMv7E-M
-(cortex-m3, m4, m7, m33)`.
+it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23),
+ARMv7-M and ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M Mainline
+(cortex-m33)`.
+
+#### `-mcmse`
+
+Compile for the Secure state of an ARMv8-M part (TrustZone-M, ACLE's
+CMSE): `cmse_nonsecure_entry` and `cmse_nonsecure_call` take effect, and
+`__ARM_FEATURE_CMSE` is 3. Only on `thumbv8m.main-none-eabi` and
+`thumbv8m.base-none-eabi`, and only with soft float. See
+[Targets](targets.md#trustzone-m-cmse).
 
 #### `-mfpu=FPU`
 
@@ -1668,7 +1698,7 @@ Accepted: every target EmbCC emits for is little-endian.
 
 ### Machine options that are not accepted
 
-`-mtune=`, `-mmcu=`, `-mcmse`, `-masm=`, `-m32` and `-m64` are unknown
+`-mtune=`, `-mmcu=`, `-masm=`, `-m32` and `-m64` are unknown
 arguments, and so are `-march=`, `-msoft-float` and `-mhard-float` on
 every target but MIPS, and `-mabi=` on x86-64, AArch64 and AVR. The architecture, ABI and part are selected by the
 [target triple](#target-selection) (and on ARM by `-mcpu=`, `-mfpu=` and
@@ -1833,7 +1863,7 @@ message that names the option.
 | `-mabi=apcs-gnu`, `-mabi=atpcs`, `-mabi=iwmmxt` (ARM) | `-mabi=apcs-gnu is not supported: EmbCC emits the AAPCS ...` |
 | `-mabi=ilp32f`, `ilp32d`, `ilp32e`, `lp64f`, `lp64d` (RISC-V) | `embcc: error: -mabi=ilp32d is not supported for riscv32-unknown-elf: EmbCC emits the soft-float -mabi=ilp32 convention` |
 | `-mbig-endian` | `embcc: error: -mbig-endian is not supported: every target EmbCC emits for is little-endian` |
-| `-fdump-rtl-*`, `-fdump-tree-*` and every other `-fdump-`, `-fcallgraph-info[=...]` | `embcc: error: -fdump-rtl-expand is not supported: it dumps GCC's internal representation, which EmbCC does not have; ...` |
+| `-fdump-rtl-*`, `-fdump-tree-*` and every other `-fdump-`; `-fcallgraph-info=` with anything but `su` | `embcc: error: -fdump-rtl-expand is not supported: it dumps GCC's internal representation, which EmbCC does not have; ...` |
 | `-fcommon` for a Mach-O or COFF target | `embcc: error: -fcommon is not supported for x86_64-apple-darwin: ...` |
 | `-fsingle-precision-constant` for C++ | `embcc: error: -fsingle-precision-constant is supported for C, not C++: ...` |
 | `-O4` and other `-O` forms not listed | `embcc: unknown optimization flag '-O4'` |

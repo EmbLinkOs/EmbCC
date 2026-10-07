@@ -70,8 +70,40 @@ enum target_arch {
      * target here whose registers are a window that a call rotates, whose
      * instructions are three bytes, and whose constants come from a
      * literal pool before each function. docs/internals/xtensa-plan.md. */
-    TARGET_XTENSA = 9
+    TARGET_XTENSA = 9,
+    /* 32-bit PowerPC, big-endian, the embedded EABI with soft float
+     * (powerpc-none-eabi): e500/e200-class cores. ILP32 with an UNSIGNED
+     * char, long double = double, and the only target here whose byte
+     * order has no little-endian twin. docs/internals/powerpc-plan.md. */
+    TARGET_PPC32 = 10,
+    /* Renesas RX (RXv1, the RX600/RX610 cores), little-endian, GCC's
+     * rx-elf ABI with 32-bit doubles (docs/internals/rx-plan.md). 8 and
+     * not 7, which another branch gives LoongArch64. */
+    TARGET_RX = 14,
+    /* 32-bit SPARC V8, big-endian, as Gaisler's LEON3 implements it
+     * (sparc-none-elf): soft float, LEON3's multiply and divide, register
+     * windows. ILP32 with a SIGNED char and a 16-byte binary128 long
+     * double. 11 rather than the next number: the numbers between are
+     * taken by targets on other branches. docs/internals/sparc-plan.md. */
+    TARGET_SPARC32 = 11,
+    /* ColdFire (m68k-none-elf): the 68000's embedded descendant, ISA_A
+     * with the hardware divide (an MCF5208), big-endian, soft float.
+     * ILP32 with a SIGNED char, long double = double, and nothing aligned
+     * beyond two bytes -- the m68k's own data model. Every argument is on
+     * the stack. 12 because other new targets took 7-11 on their branches.
+     * docs/internals/coldfire-plan.md. */
+    TARGET_COLDFIRE = 12,
+    /* MIPS64 Release 2 with the n64 convention, soft float, in either
+     * byte order (mips64el-none-elf, mips64-none-elf): LP64 with a SIGNED
+     * char, a binary128 long double and __int128. The MIPS32 backend at
+     * 64 bits (src/arch/mips, target_xlen() == 64), as src/arch/riscv
+     * serves both RISC-V widths. 13, not 10: other target branches hold
+     * 10-12. docs/internals/mips64-plan.md. */
+    TARGET_MIPS64 = 13
 };
+
+/* Either MIPS: the one backend, the one encoder, the one assembler. */
+int target_is_mips(void);
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
  * 64-bit targets. The RISC-V backend is written once against this,
@@ -177,6 +209,13 @@ int target_wchar_unsigned(void);  /* wchar_t's signedness */
 /* wchar_t's width: int's, except on Xtensa, where GCC's xtensa-elf makes
  * it a 16-bit unsigned short (gcc/config/xtensa/elf.h). */
 int target_wchar_size(void);
+/* size_t, ptrdiff_t and wchar_t are `long` types rather than `int` ones,
+ * where the two have one width: GCC's rx-elf (newlib-stdint) says
+ * `long unsigned int`, `long int` and `long int`. */
+int target_long_size_types(void);
+/* Bit-fields in the Microsoft layout (GCC's TARGET_MS_BITFIELD_LAYOUT_P),
+ * for a struct that is not packed: RX. */
+int target_ms_bitfields(void);
 
 /* Whether __int128 exists at all. It does not on a 32-bit target: the
  * type needs a register pair per half and libgcc's __divti3 family is
@@ -211,6 +250,10 @@ int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c *
 int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codegen.c */
 int tc_op_calls_helper(const struct ir_ins *i);     /* src/arch/tricore/codegen.c */
 int xtensa_op_calls_helper(const struct ir_ins *i); /* src/arch/xtensa/codegen.c */
+int ppc_op_calls_helper(const struct ir_ins *i);    /* src/arch/ppc/codegen.c */
+int rx_op_calls_helper(const struct ir_ins *i);     /* src/arch/rx/codegen.c */
+int sparc_op_calls_helper(const struct ir_ins *i);  /* src/arch/sparc/codegen.c */
+int cf_op_calls_helper(const struct ir_ins *i);     /* src/arch/coldfire/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -271,7 +314,22 @@ int target_thumb_em(void);
  * level rather than a separate enum target_arch value, because that enum
  * keys the data model and these two share one; see g_thumb_arch. */
 int target_thumb_arch(void);
+/* (setting a level leaves ARMv8-M Baseline: see below) */
 void target_set_thumb_arch(int lvl);
+/* ARMv8-M Baseline (Cortex-M23, thumbv8m.base-none-eabi): level 6 -- the
+ * ARMv6-M instruction selection -- plus the divides, the exclusives,
+ * MOVW/MOVT, CBZ, B.W and the security extension. Every question about
+ * level 6 that Baseline answers the same way keeps asking the level. */
+int target_thumb_v8m_base(void);
+void target_set_thumb_v8m_base(void);
+/* Either ARMv8-M profile (Mainline or Baseline): the security extension's
+ * instructions (SG, BXNS, BLXNS, TT) and the stack-limit registers. */
+int target_thumb_v8m(void);
+/* -mcmse: this is the Secure side of a TrustZone-M build, so
+ * cmse_nonsecure_entry and cmse_nonsecure_call mean what ACLE says.
+ * Only ever true on ARMv8-M. */
+int target_thumb_cmse(void);
+void target_set_thumb_cmse(int on);
 /* ARMv7-A in ARM state (armv7a-none-eabi): TARGET_THUMB's data model and
  * AAPCS32, at level 7 with the DSP set (target_thumb_em), encoded as A32
  * instructions rather than Thumb-2 -- the backend's encoder switches on it
@@ -360,6 +418,13 @@ int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
 int la_imm_foldable(int op, long imm);      /* arch/loongarch/irgen.c */
 int tc_imm_foldable(int op, long imm);      /* arch/tricore/irgen.c */
 int xtensa_imm_foldable(int op, long imm);  /* arch/xtensa/irgen.c */
+int ppc_imm_foldable(int op, long imm);     /* arch/ppc/irgen.c */
+int ppc_imm_foldable64(int op, long imm);
+int sparc_imm_foldable(int op, long imm);   /* arch/sparc/irgen.c */
+int sparc_imm_foldable64(int op, long imm);
+/* ColdFire: every 32-bit constant is an operand (addi, andi, cmpi, ... take
+ * #imm32), and a 64-bit AND/OR/XOR one half by half */
+int cf_imm_foldable(int op, long imm, int w);   /* arch/coldfire/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -587,6 +652,12 @@ enum reloc_kind {
      * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
      * site whose str_off is already the offset). */
     RK_MIPS_TEXT26,
+    /* MIPS64 takes a 64-bit address in four 16-bit pieces (lui, daddiu,
+     * dsll, daddiu, dsll, daddiu): %highest, %higher, %hi, %lo, each
+     * rounded for the sign extension of the pieces below it. With RELA
+     * each is relocated on its own; HI16 and LO16 are the kinds above. */
+    RK_MIPS_HIGHEST,
+    RK_MIPS_HIGHER,
     /* LoongArch takes an address as `pcalau12i` (the 4 KiB page of the
      * symbol, relative to the page of the instruction) and an `addi.d`
      * (or a load's offset) holding the symbol's low 12 bits -- each
@@ -607,6 +678,20 @@ enum reloc_kind {
      * R_XTENSA_32 against the section symbol with the label's offset as
      * the addend, as RK_MIPS_TEXT26 is. */
     RK_XTENSA_TEXT32,
+    /* PowerPC takes an absolute address in two halves as well: `lis` the
+     * high 16 bits ADJUSTED for the sign of the low half (@ha, rounded by
+     * 0x8000), then an `addi` or a load's displacement the low 16 (@l).
+     * RELA, so the addend travels in the entry. */
+    RK_PPC_ADDR16_HA,
+    RK_PPC_ADDR16_LO,
+    /* SPARC takes an absolute address in two halves as well: `sethi` the
+     * high 22 bits, then an `or` (or a load's offset) the low 10 --
+     * which never carry, so neither half is rounded. RELA. */
+    RK_SPARC_HI22,
+    RK_SPARC_LO10,
+    /* ColdFire takes an address as a 32-bit absolute operand -- `move.l
+     * #sym,Dn`, `lea sym,An`, `jsr sym` -- relocated by R_68K_32 at the
+     * extension words: RK_ABS32, RK_CALL and RK_TAIL, no kind of its own. */
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

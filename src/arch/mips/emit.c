@@ -1,7 +1,11 @@
-/* MIPS32r2 instruction encoding. See emit.h for the shape. */
+/* MIPS32r2 and MIPS64r2 instruction encoding. See emit.h for the shape. */
 #include "emit.h"
 
 #include "../../driver/util.h"
+
+/* MIPS64: the doubleword instructions. Off by default, so a MIPS32
+ * object can never carry one -- each is refused with the switch off. */
+static int g_mips_64;
 
 const int mips_argreg[MIPS_NARGREG] = { MIPS_A0, MIPS_A1, MIPS_A2, MIPS_A3 };
 
@@ -12,8 +16,16 @@ static const char *const reg_names[32] = {
     "t8",   "t9", "k0", "k1", "gp", "sp", "fp", "ra"
 };
 
+/* n64 renames $8-$15: the four argument registers past a3 and then the
+ * temporaries t0-t3 (o32's t4-t7). */
+static const char *const reg_names64[8] = {
+    "a4", "a5", "a6", "a7", "t0", "t1", "t2", "t3"
+};
+
 const char *mips_reg_name(int r)
 {
+    if (g_mips_64 && r >= 8 && r <= 15)
+        return reg_names64[r - 8];
     return r >= 0 && r < 32 ? reg_names[r] : "?";
 }
 
@@ -27,7 +39,11 @@ enum {
     OP_SPECIAL2 = 0x1c, OP_SPECIAL3 = 0x1f,
     OP_LB = 0x20, OP_LH = 0x21, OP_LW = 0x23, OP_LBU = 0x24, OP_LHU = 0x25,
     OP_SB = 0x28, OP_SH = 0x29, OP_SW = 0x2b, OP_LL = 0x30, OP_SC = 0x38,
-    OP_LWL = 0x22, OP_LWR = 0x26, OP_SWL = 0x2a, OP_SWR = 0x2e
+    OP_LWL = 0x22, OP_LWR = 0x26, OP_SWL = 0x2a, OP_SWR = 0x2e,
+    /* MIPS64 */
+    OP_DADDIU = 0x19, OP_LDL = 0x1a, OP_LDR = 0x1b, OP_LWU = 0x27,
+    OP_SDL = 0x2c, OP_SDR = 0x2d, OP_LLD = 0x34, OP_LD = 0x37,
+    OP_SCD = 0x3c, OP_SD = 0x3f
 };
 enum {                                              /* SPECIAL's funct */
     F_SLL = 0x00, F_SRL = 0x02, F_SRA = 0x03, F_SLLV = 0x04, F_SRLV = 0x06,
@@ -36,11 +52,20 @@ enum {                                              /* SPECIAL's funct */
     F_MTHI = 0x11, F_MFLO = 0x12, F_MTLO = 0x13, F_MULT = 0x18,
     F_MULTU = 0x19, F_DIV = 0x1a, F_DIVU = 0x1b, F_ADDU = 0x21,
     F_SUBU = 0x23, F_AND = 0x24, F_OR = 0x25, F_XOR = 0x26, F_NOR = 0x27,
-    F_SLT = 0x2a, F_SLTU = 0x2b, F_TEQ = 0x34
+    F_SLT = 0x2a, F_SLTU = 0x2b, F_TEQ = 0x34,
+    /* MIPS64 */
+    F_DSLLV = 0x14, F_DSRLV = 0x16, F_DSRAV = 0x17, F_DMULT = 0x1c,
+    F_DMULTU = 0x1d, F_DDIV = 0x1e, F_DDIVU = 0x1f, F_DADDU = 0x2d,
+    F_DSUBU = 0x2f, F_DSLL = 0x38, F_DSRL = 0x3a, F_DSRA = 0x3b,
+    F_DSLL32 = 0x3c, F_DSRL32 = 0x3e, F_DSRA32 = 0x3f
 };
-enum { F2_MUL = 0x02, F2_CLZ = 0x20, F2_CLO = 0x21 };   /* SPECIAL2 */
-enum { F3_EXT = 0x00, F3_INS = 0x04, F3_BSHFL = 0x20 };  /* SPECIAL3 */
+enum { F2_MUL = 0x02, F2_CLZ = 0x20, F2_CLO = 0x21,     /* SPECIAL2 */
+       F2_DCLZ = 0x24, F2_DCLO = 0x25 };
+enum { F3_EXT = 0x00, F3_DEXTM = 0x01, F3_DEXTU = 0x02,  /* SPECIAL3 */
+       F3_DEXT = 0x03, F3_INS = 0x04, F3_DINSM = 0x05, F3_DINSU = 0x06,
+       F3_DINS = 0x07, F3_BSHFL = 0x20, F3_DBSHFL = 0x24 };
 enum { BSHFL_WSBH = 0x02, BSHFL_SEB = 0x10, BSHFL_SEH = 0x18 };
+enum { DBSHFL_DSBH = 0x02, DBSHFL_DSHD = 0x05 };
 enum { RI_BLTZ = 0x00, RI_BGEZ = 0x01, RI_BGEZAL = 0x11 }; /* REGIMM's rt */
 
 static void need_reg(int r)
@@ -82,6 +107,15 @@ unsigned long mips_enc_j(int op, unsigned long target26)
 {
     need_field((long long)target26, 0, 0x3ffffff, "jump target");
     return ((unsigned long)op << 26) | target26;
+}
+
+void mips_set_64(int on) { g_mips_64 = on ? 1 : 0; }
+int mips_is_64(void) { return g_mips_64; }
+
+static void need_64(const char *what)
+{
+    if (!g_mips_64)
+        internal_error("mips: %s is a MIPS64 instruction", what);
 }
 
 /* The byte order the words go out in. Here rather than read from
@@ -178,6 +212,83 @@ void mips_li(struct code *c, int rd, long long v)
         mips_alu_imm(c, MIPS_ORI, rd, rd, v & 0xffff);
 }
 
+/* MIPS64 constants. A value that is the sign extension of its low 32 bits
+ * is mips_li's: lui and addiu sign-extend into the upper half here, and
+ * ori from $0 zero-extends a 16-bit field, so the 32-bit sequences mean
+ * the same 64-bit value. Anything wider is the shortest of
+ *
+ *   - v >> s (s the trailing zeros), built recursively, then dsll s;
+ *   - v >> 16 (arithmetic) built recursively, dsll 16, ori the low half;
+ *   - the zero extension of a 32-bit value: that value, then dext 0, 32.
+ *
+ * li64_plan writes the sequence when `c` is not NULL and returns its
+ * length in instructions either way. */
+static int li64_plan(struct code *c, int rd, long long v);
+
+static int li64_len_of(long long v)
+{
+    return li64_plan((struct code *)0, 0, v);
+}
+
+static int li64_plan(struct code *c, int rd, long long v)
+{
+    unsigned long long u = (unsigned long long)v;
+    int best, how = 0, n, s = 0;
+    if (v == (long long)(int)v) {
+        n = mips_li_len(v) / 4;
+        if (c)
+            mips_li(c, rd, v);
+        return n;
+    }
+    /* by the trailing zeros */
+    while (!((u >> s) & 1))
+        s++;
+    best = 1 << 30;
+    if (s) {
+        n = li64_len_of(v >> s) + 1;
+        if (n < best) { best = n; how = 1; }
+    }
+    /* the zero extension of a 32-bit value */
+    if (!(u >> 32)) {
+        n = mips_li_len((long long)(int)(unsigned)u) / 4 + 1;
+        if (n < best) { best = n; how = 2; }
+    }
+    /* sixteen bits at a time from the top */
+    n = li64_len_of(v >> 16) + 1 + ((u & 0xffff) != 0);
+    if (n < best) { best = n; how = 3; }
+    if (!c)
+        return best;
+    switch (how) {
+    case 1:
+        li64_plan(c, rd, v >> s);
+        mips_shift_imm(c, MIPS_DSLL, rd, rd, s);
+        break;
+    case 2:
+        mips_li(c, rd, (long long)(int)(unsigned)u);
+        mips_dext(c, rd, rd, 0, 32);
+        break;
+    default:
+        li64_plan(c, rd, v >> 16);
+        mips_shift_imm(c, MIPS_DSLL, rd, rd, 16);
+        if (u & 0xffff)
+            mips_alu_imm(c, MIPS_ORI, rd, rd, (long long)(u & 0xffff));
+        break;
+    }
+    return best;
+}
+
+int mips_li64_len(long long v)
+{
+    return 4 * li64_len_of(v);
+}
+
+void mips_li64(struct code *c, int rd, long long v)
+{
+    if (v != (long long)(int)v)
+        need_64("a 64-bit constant");
+    li64_plan(c, rd, v);
+}
+
 /* ---- arithmetic and logic --------------------------------------------- */
 
 void mips_alu(struct code *c, int op, int rd, int a, int b)
@@ -201,16 +312,35 @@ void mips_alu(struct code *c, int op, int rd, int a, int b)
     case MIPS_MOVN:  w = mips_enc_r(OP_SPECIAL, a, b, rd, 0, F_MOVN); break;
     case MIPS_MOVZ:  w = mips_enc_r(OP_SPECIAL, a, b, rd, 0, F_MOVZ); break;
     case MIPS_MUL:   w = mips_enc_r(OP_SPECIAL2, a, b, rd, 0, F2_MUL); break;
+    case MIPS_DADDU: need_64("daddu");
+                     w = mips_enc_r(OP_SPECIAL, a, b, rd, 0, F_DADDU); break;
+    case MIPS_DSUBU: need_64("dsubu");
+                     w = mips_enc_r(OP_SPECIAL, a, b, rd, 0, F_DSUBU); break;
+    case MIPS_DSLLV: need_64("dsllv");
+                     w = mips_enc_r(OP_SPECIAL, b, a, rd, 0, F_DSLLV); break;
+    case MIPS_DSRLV: need_64("dsrlv");
+                     w = mips_enc_r(OP_SPECIAL, b, a, rd, 0, F_DSRLV); break;
+    case MIPS_DSRAV: need_64("dsrav");
+                     w = mips_enc_r(OP_SPECIAL, b, a, rd, 0, F_DSRAV); break;
+    /* drotrv is dsrlv with the sa field's low bit set */
+    case MIPS_DROTRV: need_64("drotrv");
+                     w = mips_enc_r(OP_SPECIAL, b, a, rd, 1, F_DSRLV); break;
     default:
         internal_error("mips: ALU operation %d", op);
     }
     mips_w(c, w);
 }
 
+int mips_alu_imm_signed(int op)
+{
+    return op == MIPS_ADDIU || op == MIPS_SLTI || op == MIPS_SLTIU ||
+           op == MIPS_DADDIU;
+}
+
 int mips_alu_imm_ok(int op, long long imm)
 {
     switch (op) {
-    case MIPS_ADDIU: case MIPS_SLTI: case MIPS_SLTIU:
+    case MIPS_ADDIU: case MIPS_SLTI: case MIPS_SLTIU: case MIPS_DADDIU:
         return mips_fits16(imm, 1);
     case MIPS_ANDI: case MIPS_ORI: case MIPS_XORI:
         return mips_fits16(imm, 0);
@@ -222,17 +352,30 @@ int mips_alu_imm_ok(int op, long long imm)
 void mips_alu_imm(struct code *c, int op, int rt, int rs, long long imm)
 {
     static const int opc[] = { OP_ADDIU, OP_SLTI, OP_SLTIU, OP_ANDI,
-                               OP_ORI, OP_XORI };
+                               OP_ORI, OP_XORI, OP_DADDIU };
     static const char *const nm[] = { "addiu", "slti", "sltiu", "andi",
-                                      "ori", "xori" };
-    if (op < MIPS_ADDIU || op > MIPS_XORI)
+                                      "ori", "xori", "daddiu" };
+    if (op < MIPS_ADDIU || op > MIPS_DADDIU)
         internal_error("mips: immediate operation %d", op);
+    if (op == MIPS_DADDIU)
+        need_64("daddiu");
     mips_w(c, mips_enc_i(opc[op], rs, rt,
-                         imm16(imm, op <= MIPS_SLTIU, nm[op])));
+                         imm16(imm, mips_alu_imm_signed(op), nm[op])));
 }
 
 void mips_shift_imm(struct code *c, int op, int rd, int rt, int sa)
 {
+    if (op >= MIPS_DSLL && op <= MIPS_DROTR) {
+        /* sa 32..63 is the *32 form with sa - 32 in the field */
+        static const int f[] = { F_DSLL, F_DSRL, F_DSRA, F_DSRL };
+        static const int f32[] = { F_DSLL32, F_DSRL32, F_DSRA32, F_DSRL32 };
+        int k = op - MIPS_DSLL;
+        need_64("a doubleword shift");
+        need_field(sa, 0, 63, "doubleword shift amount");
+        mips_w(c, mips_enc_r(OP_SPECIAL, op == MIPS_DROTR, rt, rd, sa & 31,
+                             sa >= 32 ? f32[k] : f[k]));
+        return;
+    }
     need_field(sa, 0, 31, "shift amount");
     switch (op) {
     case MIPS_SLL:  mips_w(c, mips_enc_r(OP_SPECIAL, 0, rt, rd, sa, F_SLL)); break;
@@ -247,9 +390,12 @@ void mips_shift_imm(struct code *c, int op, int rd, int rt, int sa)
 
 void mips_muldiv(struct code *c, int op, int rs, int rt)
 {
-    static const int fn[] = { F_MULT, F_MULTU, F_DIV, F_DIVU };
-    if (op < MIPS_MULT || op > MIPS_DIVU)
+    static const int fn[] = { F_MULT, F_MULTU, F_DIV, F_DIVU,
+                              F_DMULT, F_DMULTU, F_DDIV, F_DDIVU };
+    if (op < MIPS_MULT || op > MIPS_DDIVU)
         internal_error("mips: multiply/divide operation %d", op);
+    if (op >= MIPS_DMULT)
+        need_64("a doubleword multiply or divide");
     mips_w(c, mips_enc_r(OP_SPECIAL, rs, rt, MIPS_ZERO, 0, fn[op]));
 }
 
@@ -310,6 +456,59 @@ void mips_ins(struct code *c, int rt, int rs, int pos, int size)
     mips_w(c, mips_enc_r(OP_SPECIAL3, rs, rt, pos + size - 1, pos, F3_INS));
 }
 
+/* The doubleword field instructions: three encodings each, chosen by
+ * where the field lies. dext keeps size-1 in rd and pos in sa (both
+ * below 32); dextm a size over 32 (size-33 in rd); dextu a pos of 32 or
+ * more (pos-32 in sa). dins keeps the last bit, pos+size-1: dinsm when
+ * that is 32 or more and pos is not, dinsu when pos is. */
+void mips_dext(struct code *c, int rt, int rs, int pos, int size)
+{
+    need_64("dext");
+    need_field(pos, 0, 63, "dext position");
+    need_field(size, 1, 64 - pos, "dext size");
+    if (pos >= 32)
+        mips_w(c, mips_enc_r(OP_SPECIAL3, rs, rt, size - 1, pos - 32,
+                             F3_DEXTU));
+    else if (size > 32)
+        mips_w(c, mips_enc_r(OP_SPECIAL3, rs, rt, size - 33, pos, F3_DEXTM));
+    else
+        mips_w(c, mips_enc_r(OP_SPECIAL3, rs, rt, size - 1, pos, F3_DEXT));
+}
+void mips_dins(struct code *c, int rt, int rs, int pos, int size)
+{
+    int msb = pos + size - 1;
+    need_64("dins");
+    need_field(pos, 0, 63, "dins position");
+    need_field(size, 1, 64 - pos, "dins size");
+    if (pos >= 32)
+        mips_w(c, mips_enc_r(OP_SPECIAL3, rs, rt, msb - 32, pos - 32,
+                             F3_DINSU));
+    else if (msb >= 32)
+        mips_w(c, mips_enc_r(OP_SPECIAL3, rs, rt, msb - 32, pos, F3_DINSM));
+    else
+        mips_w(c, mips_enc_r(OP_SPECIAL3, rs, rt, msb, pos, F3_DINS));
+}
+void mips_dsbh(struct code *c, int rd, int rt)
+{
+    need_64("dsbh");
+    mips_w(c, mips_enc_r(OP_SPECIAL3, 0, rt, rd, DBSHFL_DSBH, F3_DBSHFL));
+}
+void mips_dshd(struct code *c, int rd, int rt)
+{
+    need_64("dshd");
+    mips_w(c, mips_enc_r(OP_SPECIAL3, 0, rt, rd, DBSHFL_DSHD, F3_DBSHFL));
+}
+void mips_dclz(struct code *c, int rd, int rs)
+{
+    need_64("dclz");
+    mips_w(c, mips_enc_r(OP_SPECIAL2, rs, rd, rd, 0, F2_DCLZ));
+}
+void mips_dclo(struct code *c, int rd, int rs)
+{
+    need_64("dclo");
+    mips_w(c, mips_enc_r(OP_SPECIAL2, rs, rd, rd, 0, F2_DCLO));
+}
+
 /* ---- memory ----------------------------------------------------------- */
 
 void mips_load(struct code *c, int rt, int base, int off, int size, int sign)
@@ -319,6 +518,7 @@ void mips_load(struct code *c, int rt, int base, int off, int size, int sign)
     case 1: op = sign ? OP_LB : OP_LBU; break;
     case 2: op = sign ? OP_LH : OP_LHU; break;
     case 4: op = OP_LW; break;
+    case 8: need_64("ld"); op = OP_LD; break;
     default:
         internal_error("mips: a %d-byte load", size);
     }
@@ -332,6 +532,7 @@ void mips_store(struct code *c, int rt, int base, int off, int size)
     case 1: op = OP_SB; break;
     case 2: op = OP_SH; break;
     case 4: op = OP_SW; break;
+    case 8: need_64("sd"); op = OP_SD; break;
     default:
         internal_error("mips: a %d-byte store", size);
     }
@@ -353,6 +554,42 @@ void mips_swl(struct code *c, int rt, int base, int off)
 void mips_swr(struct code *c, int rt, int base, int off)
 {
     mips_w(c, mips_enc_i(OP_SWR, base, rt, imm16(off, 1, "swr offset")));
+}
+
+void mips_lwu(struct code *c, int rt, int base, int off)
+{
+    need_64("lwu");
+    mips_w(c, mips_enc_i(OP_LWU, base, rt, imm16(off, 1, "lwu offset")));
+}
+void mips_ldl(struct code *c, int rt, int base, int off)
+{
+    need_64("ldl");
+    mips_w(c, mips_enc_i(OP_LDL, base, rt, imm16(off, 1, "ldl offset")));
+}
+void mips_ldr(struct code *c, int rt, int base, int off)
+{
+    need_64("ldr");
+    mips_w(c, mips_enc_i(OP_LDR, base, rt, imm16(off, 1, "ldr offset")));
+}
+void mips_sdl(struct code *c, int rt, int base, int off)
+{
+    need_64("sdl");
+    mips_w(c, mips_enc_i(OP_SDL, base, rt, imm16(off, 1, "sdl offset")));
+}
+void mips_sdr(struct code *c, int rt, int base, int off)
+{
+    need_64("sdr");
+    mips_w(c, mips_enc_i(OP_SDR, base, rt, imm16(off, 1, "sdr offset")));
+}
+void mips_lld(struct code *c, int rt, int base, int off)
+{
+    need_64("lld");
+    mips_w(c, mips_enc_i(OP_LLD, base, rt, imm16(off, 1, "lld offset")));
+}
+void mips_scd(struct code *c, int rt, int base, int off)
+{
+    need_64("scd");
+    mips_w(c, mips_enc_i(OP_SCD, base, rt, imm16(off, 1, "scd offset")));
 }
 
 void mips_ll(struct code *c, int rt, int base, int off)
@@ -471,4 +708,16 @@ void mips_mtc0(struct code *c, int rt, int rd, int sel)
 {
     need_field(sel, 0, 7, "coprocessor 0 select");
     mips_w(c, mips_enc_r(OP_COP0, 0x04, rt, rd, 0, sel));
+}
+void mips_dmfc0(struct code *c, int rt, int rd, int sel)
+{
+    need_64("dmfc0");
+    need_field(sel, 0, 7, "coprocessor 0 select");
+    mips_w(c, mips_enc_r(OP_COP0, 0x01, rt, rd, 0, sel));
+}
+void mips_dmtc0(struct code *c, int rt, int rd, int sel)
+{
+    need_64("dmtc0");
+    need_field(sel, 0, 7, "coprocessor 0 select");
+    mips_w(c, mips_enc_r(OP_COP0, 0x05, rt, rd, 0, sel));
 }

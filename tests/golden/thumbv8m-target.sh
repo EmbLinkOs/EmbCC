@@ -72,16 +72,16 @@ echo "$v7" | grep -q '^#define __ARM_ARCH 7$' || {
     echo "ARMv7-M's __ARM_ARCH changed"; exit 1; }
 echo "$v8" | grep -q '__ARM_ARCH_7M__' && {
     echo "ARMv8-M still claims to be ARMv7-M"; exit 1; }
-# The security extension is NOT advertised. clang defines __ARM_FEATURE_CMSE
-# for every v8-M target because it is part of the architecture, but EmbCC
-# cannot emit for it: a non-secure entry function needs the linker to mint a
-# secure gateway veneer and embld does not. A header that sees the macro
-# writes __attribute__((cmse_nonsecure_entry)), so leaving it in advertises a
-# feature whose use fails somewhere else entirely.
-echo "$v8" | grep -q '__ARM_FEATURE_CMSE' && {
-    echo "__ARM_FEATURE_CMSE is defined, and EmbCC cannot emit a secure
-    gateway -- a header would take that path and fail elsewhere"; exit 1; }
-echo "the macros say ARMv8-M Mainline, and do not claim TrustZone"
+# The security extension's macro is clang's: __ARM_FEATURE_CMSE is 1 -- the
+# TT instruction, which <arm_cmse.h>'s cmse_TT uses -- and 3 under -mcmse,
+# the Secure side (tests/golden/thumbv8m-cmse.sh). It was filtered while
+# embld minted no secure gateway veneer: a header that sees it may write
+# __attribute__((cmse_nonsecure_entry)).
+echo "$v8" | grep -q '^#define __ARM_FEATURE_CMSE 1$' || {
+    echo "__ARM_FEATURE_CMSE is not 1, which every ARMv8-M part has"; exit 1; }
+echo "$v7" | grep -q '__ARM_FEATURE_CMSE' && {
+    echo "ARMv7-M claims the ARMv8-M security extension"; exit 1; }
+echo "the macros say ARMv8-M Mainline, and the TT instruction"
 
 # ---- the object says so too -------------------------------------------
 printf 'int f(int a, int b) { return a * b + 1; }\n' > "$out/f.c"

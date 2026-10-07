@@ -74,7 +74,10 @@ when there is any, is in `.eh_frame`; see
 [Call frames and unwinding](#call-frames-and-unwinding).
 
 The 32-bit DWARF format is used. The address size is the target's
-pointer size: 8 on x86-64, AArch64 and RV64, 4 on Thumb and RV32.
+pointer size: 8 on x86-64, AArch64 and RV64, 4 on Thumb and RV32. AVR's
+is 4, as avr-gcc's is, although its pointers are 2 bytes: a code address
+there is a byte address in flash, and a data address is `0x800000` plus
+the SRAM address (see [Targets](targets.md#debugging)).
 
 ### Compile unit
 
@@ -114,13 +117,16 @@ The frame base, against which every variable's location is given:
 | AArch64 | `DW_OP_reg29` (`x29`) |
 | Thumb | `DW_OP_breg13 0` (`sp`); `DW_OP_breg7 0` (`r7`) in a function with `alloca`, a variable-length array or an over-aligned local, which addresses its frame from `r7` |
 | RISC-V | `DW_OP_breg2 0` (`sp`); `DW_OP_breg8 0` (`s0`) in such a function |
+| AVR | `DW_OP_breg28 0` (`Y`, the pair `r28:r29`), which the prologue points one byte below the frame: a variable at `DW_OP_fbreg 5` is the one the code addresses as `Y+5` |
 
 ### Variables
 
 Every parameter and every local variable of a function is described,
 with its name, its type and a location that is a single offset from the
 frame base (`DW_OP_fbreg`). There are no location lists and no
-register locations.
+register locations. On AVR, a variable with no slot that holds its value
+in optimized code has an empty location instead (see
+[Optimized code](#optimized-code)).
 
 An array or structure aligned beyond what the stack guarantees (for
 example `char buf[64] __attribute__((aligned(64)))`) is stored in a
@@ -134,9 +140,12 @@ function, with no `DW_TAG_lexical_block`: the debugger sees all of a
 function's variables at once, including ones whose block has not been
 entered or has ended.
 
-Global variables and `static` local variables are not described. A
-debugger can still find a global by its symbol, but does not know its
-type.
+Each global variable the unit defines is a `DW_TAG_variable` child of
+the compile unit, with its name, its type and a `DW_OP_addr` location
+relocated against its own symbol. Thread-local variables, `static` local
+variables and variables only declared (`extern`) are not described; a
+`static` local is in the symbol table as `FUNCTION.NAME` (`f.cnt`), so
+a debugger can find its address but not its type.
 
 ### Types
 
@@ -161,7 +170,7 @@ type.
 | AArch64 (ELF) | Yes | Tested with gdb under QEMU. |
 | Thumb (Cortex-M) | Yes | |
 | RISC-V, RV32 and RV64 | Yes | Tested with gdb under QEMU (RV32). See [Known problems](#known-problems). |
-| AVR | Accepted, not usable | No line table rows and an unreadable `.debug_info`. |
+| AVR | Yes | Tested with gdb and with EmbDBG under QEMU (`-M uno`). |
 | Any Darwin target (Mach-O) | Refused | |
 | Any Windows target (COFF) | Refused | |
 
@@ -201,6 +210,9 @@ one of three ways, depending on the target:
   [Known problems](#known-problems)).
 - **Thumb and RISC-V.** No frame pointer and no correct `.eh_frame`; the
   debugger analyzes the function's prologue. gdb does this for both.
+- **AVR.** `Y` is a frame pointer, but nothing records where the return
+  address is above it; gdb analyzes the prologue, which follows
+  avr-gcc's.
 
 ## Frame pointers
 
@@ -251,10 +263,12 @@ value there:
 - `mem2reg` moves local variables into registers. The variable's slot is
   then never written, and the debugger shows whatever the slot holds:
   usually a stale or uninitialized value. There is no "optimized out"
-  marker.
+  marker, except on AVR, where such a variable has an empty location and
+  the debugger shows `<optimized out>`.
 - Parameters are stored to their slots on entry to the function, so the
   debugger shows each parameter's value at entry, even after the
-  function has changed it.
+  function has changed it. On AVR, a parameter that the function assigns
+  after `mem2reg` moved it has an empty location instead.
 - A `volatile` local is the exception at every level: it is never
   promoted, forwarded or given a register, so its slot always holds its
   current value.
@@ -307,7 +321,7 @@ for flashing does not contain the debug sections in any case.
 
 The DWARF EmbCC emits is read by gdb and lldb. The test suite checks it
 with `llvm-dwarfdump --verify` and with gdb sessions against QEMU on
-x86-64, AArch64 and RISC-V.
+x86-64, AArch64, RISC-V and AVR.
 
 ### A program on the host
 
@@ -352,6 +366,7 @@ Then use gdb as usual: `break scale`, `continue`, `info args`, `next`,
 | Thumb, Cortex-M4F | `qemu-system-arm -M mps2-an386` | `arm` |
 | Thumb, Cortex-M33 | `qemu-system-arm -M mps2-an505` | `arm` |
 | RISC-V | `qemu-system-riscv32` / `qemu-system-riscv64 -M virt -bios none` | `riscv:rv32` / `riscv:rv64` |
+| AVR | `qemu-system-avr -M uno -bios IMAGE` | `avr` |
 
 On x86-64, the test suite uses hardware breakpoints (`hbreak`), because
 the boot loader writes the code after the debugger has attached and
@@ -377,17 +392,13 @@ qemu-system-riscv64 -M virt -bios none -nographic -m 8 -kernel fw.elf -S -gdb tc
 embdbg fw.elf remote :3333
 ```
 
-`remote` supports x86-64, AArch64, Thumb, RV32 and RV64, not AVR. See
+`remote` supports x86-64, AArch64, Thumb, RV32, RV64 and AVR. See
 [EmbDBG](tools/embdbg.md) for its commands.
 
 ## Known problems
 
 These are defects in the current implementation, not intended behavior.
 
-- **AVR.** `-g` is accepted, but no line-table rows are emitted, the
-  frame base is wrong, and `.debug_info` declares a 2-byte address size
-  while writing 8-byte addresses, so debuggers cannot read past the
-  compile unit. `-g` also turns off register allocation at `-O1` and above.
 - **Unwind tables on Thumb, RISC-V and AVR.** `-funwind-tables` (and C++
   at RV64, the one of these targets that compiles C++) produce an
   `.eh_frame` in the x86-64 layout on these targets, which does not

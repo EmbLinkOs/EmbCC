@@ -338,8 +338,6 @@ The errors for the "No" entries:
 | `_Float128` on x86-64 | `` _Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type `` |
 | `_Float128` where `long double` is not 16 bytes | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
 | An `_Atomic` object wider than the machine moves at once | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| An atomic read-modify-write narrower than 4 bytes on RISC-V | `the RV32 backend cannot lower an atomic narrower than four bytes (the A extension has no such form, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [...]` |
-| An atomic read-modify-write on AVR | `the AVR backend cannot lower xadd yet (function f) [...]` |
 | `_Thread_local` on macOS | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
 | `_Thread_local` on Windows | `__thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit` |
 | `va_arg` of a structure on Windows | `va_arg of a struct is not supported for a Windows target yet` |

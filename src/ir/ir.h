@@ -243,6 +243,9 @@ struct ir_ins {
     int flt;                 /* operate in xmm at width w (SSE scalar) */
     int vol;                 /* LOAD/STORE/LDVAR/STVAR: a `volatile` access —
                               * the optimizer must never CSE or remove it (MMIO) */
+    int flash;               /* LOAD: from AVR program memory (__flash), read
+                              * with LPM. Set with vol, so no pass folds it into
+                              * an ordinary load or a memcpy (irgen emit_load) */
     long imm;                /* IR_CONST; also the folded value when imm_b */
     int imm_b;               /* ADD/SUB/AND/OR/XOR/CMP: operand b is the constant
                               * in `imm` (an immediate), not vreg b — set by the
@@ -275,6 +278,10 @@ struct ir_ins {
                               * a misaligned address must not use them. */
     int call_pcs;            /* IR_CALL: the callee's pcs attribute (ARM;
                               * see target_pcs_vfp) */
+    int call_cmse;           /* IR_CALL, indirect: through a pointer to a
+                              * cmse_nonsecure_call function type (-mcmse):
+                              * the registers and flags are cleared and the
+                              * branch is a BLXNS (src/arch/thumb) */
     int call_nfixed;         /* IR_CALL: how many NAMED parameters the
                               * callee has. Needed because Darwin's
                               * arm64 passes every argument past them on
@@ -400,6 +407,12 @@ struct ir_dbgvar {
     int is_param;
     struct type *ty;
     int line, col;
+    /* mem2reg took this variable out of memory although something
+     * assigned it: its slot no longer follows it. Its only reader is a
+     * backend deciding whether the slot is a true DW_AT_location -- for a
+     * parameter, whose slot the prologue still writes, that is the one
+     * thing that says the value there went stale. */
+    int moved;
 };
 
 /* What EmbIR needs to know about one frame slot's type, decided at irgen
@@ -447,6 +460,7 @@ struct ir_func {
     /* The function's own return type, classified as a call's is. */
     struct ir_arg ret_abi;
     int pcs;                 /* its own pcs attribute (ARM) */
+    int cmse_entry;          /* cmse_nonsecure_entry (-mcmse; struct func) */
 
     struct func *src;        /* code_off/len; the types not yet interned */
     int nvregs;
@@ -467,6 +481,12 @@ struct ir_func {
     struct ir_dbgvar *dbgvars; /* -g: params + locals (irgen) */
     int ndbgvars, dbgvarcap;
     int *var_off;            /* -g: rbp-relative slot offset per vreg (codegen) */
+/* A var_off for a variable with NO location: its slot is never written in
+ * the code the function became (the optimizer kept the value in a
+ * temporary). The DIE then says so with an empty location -- a debugger
+ * prints <optimized out> -- rather than naming a slot that holds whatever
+ * was there before. */
+#define IR_VAR_NO_LOC (-0x7fffffff)
     /* Per-LOCAL lexical scope, as a half-open instruction range [lo, hi) (irgen).
      * Two locals whose scopes are disjoint never coexist — a stack pointer used
      * past its scope is UB — so codegen may give them one stack slot. Params and

@@ -1,0 +1,6 @@
+svc 2
+pendsv 1
+irq PlHL-H=H
+faults 1 1
+ticks done
+psp 113

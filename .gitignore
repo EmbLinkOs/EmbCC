@@ -14,6 +14,7 @@
 /embidx
 /embar
 /embsvd
+/embsim
 /embcc-stage1
 /embcc-stage2
 
@@ -36,5 +37,6 @@ ref/
 
 # Debug bundles the macOS toolchain leaves beside each -g binary.
 *.dSYM/
-/embpack
 /embmap
+/embpack
+/embrt

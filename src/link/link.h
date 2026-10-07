@@ -95,6 +95,11 @@ struct link_opts {
      * full each MEMORY region of the script is, in ld's table. */
     const char *map_file;
     int print_memory_usage;
+    /* ARMv8-M CMSE (link.c): the secure gateway veneers are made whenever
+     * an input has __acle_se_ symbols; --cmse-implib with --out-implib=FILE
+     * also writes the import library a Non-secure image links against. */
+    int cmse_implib;
+    const char *out_implib;
 };
 
 /* Links inputs[0..n) into an ET_EXEC at `out`. Inputs are object files

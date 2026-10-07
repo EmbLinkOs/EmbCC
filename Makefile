@@ -141,6 +141,8 @@ SRCS := \
 	src/arch/thumbv8m/predef_cxx.c \
 	src/arch/thumbv6m/predef.c \
 	src/arch/thumbv6m/predef_cxx.c \
+	src/arch/thumbv8mbase/predef.c \
+	src/arch/thumbv8mbase/predef_cxx.c \
 	src/arch/armv7a/predef.c \
 	src/arch/armv7a/predef_cxx.c \
 	src/arch/riscv/emit.c \
@@ -159,6 +161,10 @@ SRCS := \
 	src/arch/mips32/predef_cxx.c \
 	src/arch/mips32eb/predef.c \
 	src/arch/mips32eb/predef_cxx.c \
+	src/arch/mips64/predef.c \
+	src/arch/mips64/predef_cxx.c \
+	src/arch/mips64eb/predef.c \
+	src/arch/mips64eb/predef_cxx.c \
 	src/arch/loongarch/emit.c \
 	src/arch/loongarch/codegen.c \
 	src/arch/loongarch/irgen.c \
@@ -176,6 +182,25 @@ SRCS := \
 	src/arch/xtensa/irgen.c \
 	src/arch/xtensa/predef.c \
 	src/arch/xtensa/predef_cxx.c \
+	src/arch/ppc/emit.c \
+	src/arch/ppc/codegen.c \
+	src/arch/ppc/irgen.c \
+	src/arch/ppc32/predef.c \
+	src/arch/ppc32/predef_cxx.c \
+	src/arch/rx/emit.c \
+	src/arch/rx/codegen.c \
+	src/arch/rx/irgen.c \
+	src/arch/rx/predef.c \
+	src/arch/sparc/emit.c \
+	src/arch/sparc/codegen.c \
+	src/arch/sparc/irgen.c \
+	src/arch/sparc32/predef.c \
+	src/arch/sparc32/predef_cxx.c \
+	src/arch/coldfire/emit.c \
+	src/arch/coldfire/codegen.c \
+	src/arch/coldfire/irgen.c \
+	src/arch/coldfire/predef.c \
+	src/arch/coldfire/predef_cxx.c \
 	src/arch/avr/emit.c \
 	src/arch/avr/codegen.c \
 	src/arch/avr/asm.c \
@@ -200,7 +225,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar embsvd embpack embmap
+all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -248,17 +273,31 @@ embar: tools/embar/embar.c
 embsvd: tools/embsvd/embsvd.c
 	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
 
+# embmap -- where an image's flash and RAM go: sections, regions, the
+# biggest symbols, the bytes by input file from a map, and the growth
+# between two builds (tools/embmap). ISO C and standalone, like embar.
+embmap: tools/embmap/embmap.c
+	$(CC) $(CFLAGS) -o $@ tools/embmap/embmap.c
+
 # embpack -- a linked image as the file a programmer or bootloader takes:
 # raw binary, Intel HEX, S-records or UF2, with a CRC-32 stamped into a
 # symbol or appended and a JSON manifest (tools/embpack). ISO C and
 # standalone, like embar.
 embpack: tools/embpack/embpack.c
 	$(CC) $(CFLAGS) -o $@ tools/embpack/embpack.c
-# embmap -- where an image's flash and RAM go: sections, regions, the
-# biggest symbols, the bytes by input file from a map, and the growth
-# between two builds (tools/embmap). ISO C and standalone, like embar.
-embmap: tools/embmap/embmap.c
-	$(CC) $(CFLAGS) -o $@ tools/embmap/embmap.c
+
+# embrt -- the worst-case stack of each entry point and interrupt, from
+# the compiler's frames (-fstack-usage), its call graph
+# (-fcallgraph-info=su) and the objects' call relocations (tools/embrt).
+# ISO C and standalone, like embar.
+embrt: tools/embrt/embrt.c
+	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
+
+# embsim -- a Cortex-M simulator: runs an image on a model of the board
+# QEMU models, counting instructions and estimating cycles with the
+# table tools/bench uses (tools/bench/cost.h). ISO C and libm.
+embsim: tools/embsim/embsim.c tools/bench/cost.h
+	$(CC) $(CFLAGS) -o $@ tools/embsim/embsim.c -lm
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
@@ -279,7 +318,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
        src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c \
        src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/thumb/a32.h \
-       src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/code.c \
+       src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c \
        src/link/link.h src/link/ldscript.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        $(PLATFORM_SRCS) src/platform/platform.h
@@ -288,7 +327,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS) \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c \
-	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/code.c
+	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/tricore/emit.c src/arch/xtensa/emit.c src/arch/ppc/emit.c src/arch/rx/emit.c src/arch/sparc/emit.c src/arch/code.c
 
 # NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
 # a backend file added without a line here breaks only `make test` -- and
@@ -317,12 +356,19 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
              src/arch/mips32/predef.c src/arch/mips32/predef_cxx.c \
              src/arch/mips32eb/predef.c src/arch/mips32eb/predef_cxx.c \
+             src/arch/mips64/predef.c src/arch/mips64/predef_cxx.c \
+             src/arch/mips64eb/predef.c src/arch/mips64eb/predef_cxx.c \
              src/arch/loongarch64/predef.c src/arch/loongarch64/predef_cxx.c \
              src/arch/tricore/predef.c src/arch/tricore/predef_cxx.c \
              src/arch/xtensa/predef.c src/arch/xtensa/predef_cxx.c \
+             src/arch/ppc32/predef.c src/arch/ppc32/predef_cxx.c \
+             src/arch/rx/predef.c \
+             src/arch/sparc32/predef.c src/arch/sparc32/predef_cxx.c \
+             src/arch/coldfire/predef.c src/arch/coldfire/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
+             src/arch/thumbv8mbase/predef.c src/arch/thumbv8mbase/predef_cxx.c \
              src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
@@ -342,6 +388,10 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/tricore/irgen.c src/arch/tricore/asm.c \
              src/arch/tricore/emit.c \
              src/arch/xtensa/irgen.c src/arch/xtensa/emit.c \
+             src/arch/ppc/irgen.c src/arch/ppc/emit.c \
+             src/arch/rx/irgen.c src/arch/rx/emit.c \
+             src/arch/sparc/irgen.c src/arch/sparc/emit.c \
+             src/arch/coldfire/irgen.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
@@ -403,7 +453,8 @@ check: embcc libc-x86_64 libcxx-x86_64
 # embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
-test: embcc embread embld embdbg embls embas embar embsvd libc-x86_64 \
+test: embcc embread embld embdbg embls embas embar embsvd embmap embpack \
+      embrt embsim libc-x86_64 \
       libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
@@ -548,11 +599,12 @@ libc-linux-aarch64: embcc embar
 # is the archive that ships.
 # The -eabihf ones are the hard-float convention: its objects do not link
 # with soft-float ones, so its runtime is a separate archive.
-RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+RT_EMBEDDED := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
                riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
-                 xtensa-none-elf
+                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
+                 mips64el-none-elf mips64-none-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -564,12 +616,13 @@ rt-embedded: embcc embar
 # the recipe, and tests/golden/libc-embedded.sh runs what it builds on the
 # boards. Not avr: a two-byte atomic is two accesses there, and the library's
 # locks are refused for it.
-LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+LIBC_EMBEDDED := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
                  riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \
                  loongarch64-unknown-elf tricore-none-elf \
-                 xtensa-none-elf
+                 xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
+                 mips64el-none-elf mips64-none-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \

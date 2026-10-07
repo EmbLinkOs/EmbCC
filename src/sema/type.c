@@ -60,7 +60,8 @@ int ty_generic_same(const struct type *a, const struct type *b)
 {
     if (a->kind != b->kind || a->is_unsigned != b->is_unsigned ||
         a->is_llong != b->is_llong || a->is_volatile != b->is_volatile ||
-        a->is_atomic != b->is_atomic || a->is_const != b->is_const)
+        a->is_atomic != b->is_atomic || a->is_const != b->is_const ||
+        a->is_flash != b->is_flash)
         return 0;
     if (a->kind == TY_CHAR && ty_is_plain_char(a) != ty_is_plain_char(b))
         return 0;
@@ -86,7 +87,8 @@ struct type *ty_wchar(void)
     /* int-sized, but for Xtensa's 16-bit unsigned short (xtensa/elf.h) */
     if (target_wchar_size() == 2 && target_int_size() != 2)
         return ty_base(TY_SHORT, target_wchar_unsigned());
-    return ty_base(TY_INT, target_wchar_unsigned());
+    return ty_base(target_long_size_types() ? TY_LONG : TY_INT,
+                   target_wchar_unsigned());
 }
 
 struct type *ty_llong(int is_unsigned)
@@ -96,12 +98,14 @@ struct type *ty_llong(int is_unsigned)
 
 struct type *ty_size_t(void)
 {
-    return ty_base(target_int_size() == target_ptr_size() ? TY_INT : TY_LONG, 1);
+    return ty_base(target_int_size() == target_ptr_size() &&
+                   !target_long_size_types() ? TY_INT : TY_LONG, 1);
 }
 
 struct type *ty_ptrdiff_t(void)
 {
-    return ty_base(target_int_size() == target_ptr_size() ? TY_INT : TY_LONG, 0);
+    return ty_base(target_int_size() == target_ptr_size() &&
+                   !target_long_size_types() ? TY_INT : TY_LONG, 0);
 }
 
 struct type *ty_int_of_size(int size, int is_unsigned)
@@ -166,9 +170,26 @@ struct type *ty_const(struct type *t)
 
 struct type *ty_unqual(struct type *t)
 {
-    if (t && t->canon && (t->is_const || t->is_volatile || t->is_atomic))
+    if (t && t->canon &&
+        (t->is_const || t->is_volatile || t->is_atomic || t->is_flash))
         return t->canon;
     return t;
+}
+
+/* AVR's `__flash`: a copy in program memory. An array of it is an array
+ * of __flash elements, as with const, so that t[i] reads flash. */
+struct type *ty_flash(struct type *t)
+{
+    if (!t || t->is_flash)
+        return t;
+    struct type *c = xcalloc(1, sizeof *c);
+    *c = *t;
+    c->is_flash = 1;
+    c->canon = t->canon ? t->canon : t;
+    note_qcopy(c);
+    if (t->kind == TY_ARRAY)
+        c->pointee = ty_flash(t->pointee);
+    return c;
 }
 
 /* `_Atomic T`: volatile as well (never merged or removed), and every
@@ -262,10 +283,109 @@ int ty_bf_mempos(int bit_off, int bit_width, int unit_bits)
     return target_big_endian() ? unit_bits - bit_off - bit_width : bit_off;
 }
 
+/* The Microsoft bit-field layout, as GCC's place_field computes it when
+ * TARGET_MS_BITFIELD_LAYOUT_P is true (RX, for a struct that is not
+ * packed): a run of bit-fields whose declared types have the same SIZE
+ * shares a storage unit of that type while the bits last; any other
+ * field ends the run, the rest of whose unit is then skipped; a new unit
+ * starts aligned for its type; a `:0` ends a run and is otherwise
+ * ignored; and a bit-field's type raises the struct's alignment, named or
+ * not (a `:0` only right after a nonzero bit-field). */
+static void ms_struct_layout(struct type *t, struct member *members, int n,
+                             int pack, int *align_out, long *bits_out)
+{
+    long bitpos = 0, remaining = 0, unit_start = 0;
+    int align = 1;
+    struct member *prev = NULL;      /* the run's latest bit-field */
+    for (int i = 0; i < n; i++) {
+        struct member *m = &members[i];
+        int isbf = m->is_bitfield;
+        long tsize = 8L * ty_size(m->ty);
+        long width = isbf ? m->bit_width : tsize;
+        int ma = ty_align(m->ty);
+        struct member *prev_saved = prev;
+        m->bf_bytes = 0;
+        if (m->user_align > ma)
+            ma = m->user_align;
+        if (pack && ma > pack)
+            ma = pack;
+        if (!isbf || width != 0 || (prev && prev->bit_width != 0))
+            if (ma > align)
+                align = ma;
+        if (prev) {
+            if (isbf && width && prev->bit_width &&
+                tsize == 8L * ty_size(prev->ty)) {
+                if (remaining < width) {         /* out of bits */
+                    bitpos += remaining;
+                    unit_start = bitpos;
+                    prev = m;
+                    remaining = tsize < width ? 0 : tsize - width;
+                } else {
+                    remaining -= width;
+                }
+            } else {
+                if (prev->bit_width)
+                    bitpos += remaining;         /* use up the unit */
+                else
+                    prev_saved = NULL;
+                if (!isbf || width == 0)
+                    prev = NULL;
+            }
+        }
+        if (!isbf || (prev_saved ? tsize != 8L * ty_size(prev_saved->ty)
+                                 : width != 0)) {
+            long ta = 8L * ma;
+            remaining = tsize < width ? 0 : tsize - width;
+            bitpos = (bitpos + ta - 1) / ta * ta;
+            unit_start = bitpos;
+            prev = NULL;
+        }
+        if (isbf) {
+            m->off = (int)(unit_start / 8);
+            m->bit_off = (int)(bitpos - unit_start);
+        } else {
+            m->off = (int)(bitpos / 8);
+        }
+        if (!prev && isbf)
+            prev = m;
+        bitpos += width;
+        if (isbf && width && i == n - 1)
+            bitpos += remaining;
+    }
+    (void)t;
+    *align_out = align;
+    *bits_out = bitpos;
+}
+
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack)
 {
     int align = 1;
+    if (target_ms_bitfields() && !packed && !t->is_union) {
+        long bits = 0;
+        int bytes;
+        ms_struct_layout(t, members, n, pack, &align, &bits);
+        t->nat_align = align;
+        if (user_align > align)
+            align = user_align;
+        bytes = (int)((bits + 7) / 8);
+        t->members = members;
+        t->nmembers = n;
+        t->align = align;
+        t->size = (bytes + align - 1) & ~(align - 1);
+        t->complete = 1;
+        for (struct type *q = t->qcopies; q; q = q->qnext) {
+            struct type keep = *q;
+            *q = *t;
+            q->is_const = keep.is_const;
+            q->is_volatile = keep.is_volatile;
+            q->is_atomic = keep.is_atomic;
+            q->canon = keep.canon;
+            q->qnext = keep.qnext;
+            q->qcopies = NULL;
+        }
+        return;
+    }
     /* Non-bitfields track a byte offset; bitfields a bit position. The two
      * share one running cursor kept in bits (bitpos), rounded up to a byte
      * when a plain member intervenes — gcc's layout (a field never crosses
@@ -370,6 +490,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
         q->is_const = keep.is_const;
         q->is_volatile = keep.is_volatile;
         q->is_atomic = keep.is_atomic;
+        q->is_flash = keep.is_flash;
         q->canon = keep.canon;
         q->qnext = keep.qnext;
         q->qcopies = NULL;
@@ -381,6 +502,28 @@ struct member *ty_find_member(struct type *t, const char *name)
     for (int i = 0; i < t->nmembers; i++)
         if (t->members[i].name && strcmp(t->members[i].name, name) == 0)
             return &t->members[i];
+    return NULL;
+}
+
+/* ty_find_member, also looking inside anonymous struct and union members
+ * (C11 6.7.2.1p13: their members are the enclosing type's). *off gets the
+ * member's offset from the start of t, through the anonymous ones. */
+struct member *ty_find_member_deep(struct type *t, const char *name, long *off)
+{
+    for (int i = 0; i < t->nmembers; i++) {
+        struct member *m = &t->members[i];
+        if (m->name && strcmp(m->name, name) == 0) {
+            *off = m->off;
+            return m;
+        }
+        if (!m->name && !m->is_bitfield && m->ty->kind == TY_STRUCT) {
+            struct member *r = ty_find_member_deep(m->ty, name, off);
+            if (r) {
+                *off += m->off;
+                return r;
+            }
+        }
+    }
     return NULL;
 }
 
@@ -467,8 +610,11 @@ int ty_equal(const struct type *a, const struct type *b)
         return ca == cb;
     }
     if (a->kind == TY_FUNC) {
+        /* a cmse_nonsecure_call is a different way to call: a pointer to
+         * one is not a pointer to the other (as clang has it) */
         if (a->nptypes != b->nptypes || a->is_varargs != b->is_varargs ||
-            a->sret_first != b->sret_first || !ty_equal(a->ret, b->ret))
+            a->sret_first != b->sret_first ||
+            a->cmse_ns_call != b->cmse_ns_call || !ty_equal(a->ret, b->ret))
             return 0;
         for (int i = 0; i < a->nptypes; i++)
             if (!ty_equal(a->ptypes[i], b->ptypes[i]))
@@ -728,7 +874,8 @@ const char *ty_name(const struct type *t)
         break;
     default: base = "?"; break;
     }
-    int n = snprintf(buf, bufsz, "%s%s", t->is_const ? "const " : "", base);
+    int n = snprintf(buf, bufsz, "%s%s%s", t->is_const ? "const " : "",
+                     t->is_flash ? "__flash " : "", base);
     if (stars) {
         buf[n++] = ' ';
         /* innermost pointer first: `const char *const *` */

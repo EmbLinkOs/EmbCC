@@ -710,20 +710,14 @@ The target of `alias` must be defined in the same file.
 
 ### AVR program memory
 
-EmbCC has no address-space qualifiers. On AVR, `__flash` is predefined
-as `__attribute__((__address_space__(1)))`, and that attribute is not
-one EmbCC knows, so it is ignored with a warning:
-
-```text
-embcc: fl.c:1: warning: attribute '__address_space__' is not one EmbCC knows, and is ignored [-Wattributes]
-```
-
-The object is placed with ordinary data and copied to SRAM at startup.
-`__flash` written after `const` (`const __flash char s[]`) or in a
-parameter's type is a syntax error (`expected a type before
-'__attribute__'`). `__memx` is not defined. `__attribute__((progmem))`
-is ignored with the same warning. To keep data in flash and read it,
-see [Data in program memory](embedded.md#data-in-program-memory).
+On AVR, `__flash` is GCC's address space 1: `const` data kept in
+program memory and read with `lpm`. It is predefined as clang defines
+it, `__attribute__((__address_space__(1)))`, and EmbCC takes that
+attribute as a qualifier wherever `const` may stand. See
+[Data in program memory](embedded.md#data-in-program-memory) for the
+rules. Another address space, or address space 1 on another target, is
+refused by name. `__memx` is not defined. `__attribute__((progmem))` is
+ignored with a `-Wattributes` warning.
 
 The predefined macros `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`,
 `__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and
@@ -1006,18 +1000,16 @@ does not reflect the table below.
 
 | Operation | x86-64 | AArch64 | Cortex-M | RV32 | RV64 | AVR |
 |---|---|---|---|---|---|---|
-| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1 |
-| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 4 | 4, 8 | None |
+| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4 |
+| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4 |
 | Fences | Yes | Yes | Yes | Yes | Yes | Yes (no instruction) |
 
 16-byte operations need `__int128` or a 16-byte object through the
 generic forms. Other sizes are refused, for example:
 
 ```text
-embcc: a.c:1: error: the RV32 backend cannot lower an atomic narrower than four bytes (the A extension has no such form, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [xadd w=4 size=1]
 embcc: a.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]
 embcc: a.c:1: error: an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core
-embcc: a.c:1: error: the AVR backend cannot lower xadd yet (function f) [xadd w=4 size=2]
 ```
 
 The instructions used on each embedded target are described in

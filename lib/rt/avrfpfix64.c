@@ -7,7 +7,9 @@
  * the exponent decides where it lands; a value with a negative exponent has
  * nothing left after truncation and is zero.
  */
-#ifdef __AVR__
+/* RX too: GCC rx-elf's double is binary32 (-m32bit-doubles), so it needs
+ * exactly this native binary32 and no binary64. */
+#if defined(__AVR__) || defined(__RX__)
 
 #include "avrfp.h"
 
@@ -70,4 +72,4 @@ long long __fixsfdi(float f)
  * translation unit has to contain at least one declaration. */
 typedef int embcc_rt_avrfpfix64_is_not_this_target;
 
-#endif /* __AVR__ */
+#endif /* __AVR__ || __RX__ */

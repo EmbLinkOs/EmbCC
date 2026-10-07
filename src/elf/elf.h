@@ -367,6 +367,29 @@ typedef struct {
 /* AVR, from the ELF machine registry. */
 #define EM_AVR 83
 
+/* Renesas RX, from the ELF machine registry, and the relocation types
+ * and e_flags binutils' include/elf/rx.h defines. EmbCC writes DIR32 and
+ * DIR24S_PCREL; the 16- and 8-bit PC-relative ones are what GNU as writes
+ * for bsr.w/bra.w and bCND.b against another section's symbol. A
+ * PC-relative field is measured from the opcode, one byte before it
+ * (docs/internals/rx-plan.md). */
+#define EM_RX 173
+#define R_RX_NONE          0x00
+#define R_RX_DIR32         0x01
+#define R_RX_DIR24S        0x02
+#define R_RX_DIR16         0x03
+#define R_RX_DIR16U        0x04
+#define R_RX_DIR16S        0x05
+#define R_RX_DIR8          0x06
+#define R_RX_DIR8U         0x07
+#define R_RX_DIR8S         0x08
+#define R_RX_DIR24S_PCREL  0x09
+#define R_RX_DIR16S_PCREL  0x0a
+#define R_RX_DIR8S_PCREL   0x0b
+#define R_RX_RH_RELAX      0x2d
+#define E_FLAG_RX_64BIT_DOUBLES 0x01
+#define E_FLAG_RX_ABI           0x08
+
 /* MIPS, from the ELF machine registry: one number for every width and
  * byte order (the class and EI_DATA say which). */
 #define EM_MIPS 8
@@ -380,6 +403,7 @@ typedef struct {
 #define EF_MIPS_CPIC       0x00000004
 #define EF_MIPS_ABI_O32    0x00001000
 #define EF_MIPS_ARCH_32R2  0x70000000
+#define EF_MIPS_ARCH_64R2  0x80000000
 #define EF_MIPS_ARCH_MASK  0xf0000000
 
 /* The o32 relocation types EmbCC writes and EmbLD applies. o32 objects
@@ -400,6 +424,13 @@ typedef struct {
 #define R_MIPS_PC16     10
 #define R_MIPS_CALL16   11
 #define R_MIPS_GPREL32  12
+#define R_MIPS_64       18
+#define R_MIPS_GOT_DISP 19
+#define R_MIPS_GOT_PAGE 20
+#define R_MIPS_GOT_OFST 21
+#define R_MIPS_SUB      24
+#define R_MIPS_HIGHER   28
+#define R_MIPS_HIGHEST  29
 #define R_MIPS_JALR     37
 #define R_MIPS_PC32    248
 
@@ -519,6 +550,76 @@ typedef struct {
 #define R_XTENSA_DIFF32     19
 #define R_XTENSA_SLOT0_OP   20
 #define R_XTENSA_SLOT0_ALT  35
+/* 32-bit PowerPC, from the ELF machine registry; big-endian only here.
+ * clang's powerpc-none-eabi objects carry e_flags 0. */
+#define EM_PPC 20
+
+/* The PowerPC (SVR4/EABI) relocation types: RELA, the addend in the
+ * entry. HA is the high half ADJUSTED -- ((S + A + 0x8000) >> 16) --
+ * because the low half is sign-extended where it is added; REL24 is
+ * b/bl's word displacement and REL14 bc's. The small-data and GOT types
+ * are named so EmbLD can refuse them by name. */
+#define R_PPC_NONE          0
+#define R_PPC_ADDR32        1
+#define R_PPC_ADDR24        2
+#define R_PPC_ADDR16        3
+#define R_PPC_ADDR16_LO     4
+#define R_PPC_ADDR16_HI     5
+#define R_PPC_ADDR16_HA     6
+#define R_PPC_ADDR14        7
+#define R_PPC_REL24         10
+#define R_PPC_REL14         11
+#define R_PPC_GOT16         14
+#define R_PPC_PLTREL24      18
+#define R_PPC_REL32         26
+#define R_PPC_SDAREL16      32
+#define R_PPC_EMB_SDA21     109
+/* SPARC, from the ELF machine registry (EM_SPARC32PLUS, 18, is V8+ and
+ * not this). clang's sparc-none-elf objects carry e_flags 0. */
+#define EM_SPARC 2
+
+/* The SPARC relocation types: RELA, the addend in the entry. HI22 is
+ * sethi's (S + A) >> 10 and LO10 the low ten bits an `or` or a load's
+ * offset adds back; WDISP30 is call's word displacement and WDISP22 a
+ * branch's. The GOT and PC-relative-address types are named so EmbLD can
+ * refuse them by name. */
+#define R_SPARC_NONE      0
+#define R_SPARC_8         1
+#define R_SPARC_16        2
+#define R_SPARC_32        3
+#define R_SPARC_DISP8     4
+#define R_SPARC_DISP16    5
+#define R_SPARC_DISP32    6
+#define R_SPARC_WDISP30   7
+#define R_SPARC_WDISP22   8
+#define R_SPARC_HI22      9
+#define R_SPARC_22       10
+#define R_SPARC_13       11
+#define R_SPARC_LO10     12
+#define R_SPARC_GOT10    13
+#define R_SPARC_GOT13    14
+#define R_SPARC_GOT22    15
+#define R_SPARC_PC10     16
+#define R_SPARC_PC22     17
+#define R_SPARC_WPLT30   18
+#define R_SPARC_UA32     23
+/* Motorola 68000 and ColdFire, from the ELF machine registry; big-endian.
+ * e_flags' low byte says which ColdFire ISA (binutils' include/elf/m68k.h):
+ * EmbCC's objects are ISA_A with the hardware divide. */
+#define EM_68K 4
+#define EF_M68K_CF_ISA_A 0x02
+/* The m68k relocation types: RELA, the addend in the entry. EmbCC writes
+ * R_68K_32 for every address and call; the PC-relative and the GOT/PLT
+ * forms are named so EmbLD can link or refuse them by name. */
+#define R_68K_NONE      0
+#define R_68K_32        1
+#define R_68K_16        2
+#define R_68K_8         3
+#define R_68K_PC32      4
+#define R_68K_PC16      5
+#define R_68K_PC8       6
+#define R_68K_GOT32     7
+#define R_68K_PLT32     13
 
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
@@ -546,6 +647,7 @@ typedef struct {
  * bare-metal image. */
 #define SHT_MIPS_REGINFO  0x70000006
 #define SHT_MIPS_ABIFLAGS 0x7000002a
+#define SHT_MIPS_OPTIONS  0x7000000d
 #define SHT_SYMTAB    2
 #define SHT_STRTAB    3
 #define SHT_RELA      4

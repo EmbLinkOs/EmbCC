@@ -6,11 +6,15 @@
  * The transmit-holding register takes a byte once the line status
  * register's THRE bit (5) says it is empty, which QEMU reports at once and
  * a real 16550 after the previous byte has gone. */
-#define UART_THR (*(volatile unsigned char *)0xbf000900u)
-#define UART_LSR (*(volatile unsigned char *)0xbf000928u)
+/* KSEG: a KSEG0/KSEG1 address as a pointer -- itself on MIPS32, and its
+ * sign extension on MIPS64 (n64, tests/harness/mips64), where the same
+ * windows are 0xffffffff80000000 up. */
+#define KSEG(a)  ((unsigned long)(long)(int)(a))
+#define UART_THR (*(volatile unsigned char *)KSEG(0xbf000900u))
+#define UART_LSR (*(volatile unsigned char *)KSEG(0xbf000928u))
 /* The FPGA's SOFTRES register: 0x42 resets the board, which QEMU run with
  * -no-reboot turns into an exit. */
-#define SOFTRES  (*(volatile unsigned *)0xbf000500u)
+#define SOFTRES  (*(volatile unsigned *)KSEG(0xbf000500u))
 
 void writec(int c)
 {

@@ -47,15 +47,20 @@ From an ELF file, `embdbg` reads:
 - the symbol table (`.symtab`): every `STT_FUNC` symbol with a nonzero
   size is a function, with the Thumb bit removed from ARM addresses;
 - the line table (`.debug_line`);
-- the functions, parameters, local variables and their types from
-  `.debug_info` and `.debug_abbrev`, as EmbCC's DWARF 4 writer emits them:
-  each variable has a location relative to the frame base, and base types
-  and pointers are named;
+- the functions, parameters, local variables, global variables and their
+  types from `.debug_info` and `.debug_abbrev`, as EmbCC's DWARF 4 writer
+  emits them: each local variable has a location relative to its
+  function's frame base, each global an address, and base types and
+  pointers are named. A linked image has one compile unit per object
+  compiled with `-g`, and every one is read. Units in DWARF 5 (from
+  another compiler) are skipped;
 - `.text`, for disassembly.
 
 In a relocatable object, code addresses are offsets into `.text`, and the
 relocations in `.rela.debug_line` and `.rela.debug_info` are applied to
-recover them. In a linked image, addresses are absolute.
+recover them. In a linked image, addresses are absolute. Addresses are
+read at the size the unit's header gives: 8 bytes on the 64-bit targets,
+4 on the 32-bit ones and on AVR.
 
 A `.embdbg` file holds the same functions, line table, variables and
 types, with absolute addresses, but no machine code: the commands that
@@ -73,10 +78,12 @@ the current directory. When the file cannot be opened, `embdbg` says
 
 Variables are shown with their kind (`param` or `local`), their type,
 their name, and their frame slot: an offset from the function's frame
-base. `embdbg` labels the frame base `rbp` on x86-64, `x29` on AArch64,
-`r7` on ARM and `s0` on RISC-V. On x86-64 and AArch64 that is the register
-EmbCC's DWARF names. On ARM and RISC-V the DWARF names the stack pointer
-(`sp`) as the frame base, so read `s0+32` there as `sp+32`.
+base, labeled with the register the function's `DW_AT_frame_base` names:
+`rbp` on x86-64, `x29` on AArch64, `sp` on ARM and RISC-V (`r7` or `s0`
+in a function with `alloca`), and `Y` (`r28:r29`) on AVR. A `.embdbg`
+file does not record the frame base, and its slots are labeled `rbp`.
+A variable the compiler marks as optimized out (an empty location, which
+EmbCC writes on AVR) is not listed.
 
 ### Target support
 
@@ -85,17 +92,11 @@ EmbCC's DWARF names. On ARM and RISC-V the DWARF names the stack pointer
 | x86-64 (ELF64) | yes | yes | yes | yes |
 | AArch64 (ELF64) | yes | yes | no | yes |
 | RISC-V 64 (ELF64) | yes | yes | no | yes |
-| RISC-V 32 (ELF32) | yes | no | no | yes |
-| ARM, Thumb (ELF32) | yes | no | no | yes |
-| AVR (ELF32) | yes | no | no | no |
+| RISC-V 32 (ELF32) | yes | yes | no | yes |
+| ARM, Thumb (ELF32) | yes | yes | no | yes |
+| AVR (ELF32) | yes | yes | no | yes |
 
-The DWARF reader handles 64-bit images only. For an ELF32 image it reads
-the symbol table correctly, but the line table it decodes is wrong
-(addresses such as `0xa0203030000045a`), no function has variable
-information, and the `.embdbg` file `embld` writes for such an image
-lists no functions. Use `llvm-dwarfdump` or `gdb` for line and variable
-information on those targets. The disassembler decodes x86-64 only.
-`remote` has no register layout for AVR.
+The disassembler decodes x86-64 only.
 
 ## COMMANDS
 
@@ -246,7 +247,8 @@ This makes the command usable in scripts and tests.
 Connect to a GDB remote-protocol stub at `HOST:PORT` (or at `localhost`
 when only a port is given) and debug the running target with the symbols
 and debug information of `FILE`. The register layout is chosen from
-`FILE`'s ELF header: x86-64, AArch64, ARM (M-profile), RV32 or RV64. If
+`FILE`'s ELF header: x86-64, AArch64, ARM (M-profile), RV32, RV64 or
+AVR. `FILE` must be the ELF image, not a `.embdbg` file. If
 the connection fails, `embdbg` prints
 `embdbg: cannot reach a gdb stub at HOST:PORT` and exits with status 1.
 
@@ -266,24 +268,51 @@ a session can be scripted with a here-document.
 | `where`, `w` | show the stop address symbolized, the source around it, and the variables in scope |
 | `bt` | show a backtrace (see below) |
 | `regs` | show the registers |
+| `set REG VALUE` | write a register, named as `regs` shows it; prints `REG = 0xVALUE` |
+| `print NAME`, `p NAME` | read a variable and print `NAME = VALUE`: a parameter or local of the function the target is stopped in, else a global. An optimized-out variable prints `NAME = <optimized out>` |
+| `locals`, `info locals` | print every parameter and local of the current function, as `print` does |
 | `mem ADDR [LENGTH]` | dump `LENGTH` bytes of target memory (default 32, at most 512), 16 per line |
 | `quit`, `q` | detach and exit; the target continues to run |
 
-`where` lists variables with their frame slots; it does not read their
-values. The registers `regs` shows are: `rax` to `r15`, `rip` and
+`where` lists variables with their frame slots; `print` and `locals`
+read their values. A local is read at the frame base (the register
+`DW_AT_frame_base` names, read from the stub, plus that attribute's
+offset) plus the variable's offset; a global at its `DW_OP_addr`. The
+value is printed by its type: a signed or unsigned integer, a character
+as its number, a `float` or `double`, a pointer in hexadecimal, and a
+structure, union or array as its bytes in hexadecimal.
+
+The registers `regs` shows are: `rax` to `r15`, `rip` and
 `eflags` on x86-64; `x0` to `x8`, `x19` to `x21`, `x29`, `x30`, `sp`, `pc`
 and `cpsr` on AArch64; `r0` to `r12`, `sp`, `lr`, `pc` and `xpsr` on ARM;
-the 32 integer registers by ABI name and `pc` on RISC-V.
+the 32 integer registers by ABI name and `pc` on RISC-V; `r0` to `r31`,
+`sreg`, `sp` and `pc` on AVR. `set` writes the whole register block back
+with the protocol's `G` packet, so any register `regs` shows can be
+written.
+
+On AVR the layout is QEMU's (and GDB's): `r0` to `r31` one byte each,
+`sreg` one byte, `sp` two bytes and `pc` four, 39 bytes in all; `pc` is a
+byte address, the same number as an ELF symbol's value. The stub reads
+data memory at `0x800000` plus the SRAM address, and flash below that:
+`embdbg` adds `0x800000` to a frame address (`Y` plus an offset), and a
+global's DWARF address already includes it. Give `mem` the `0x800000`
+form too.
 
 `bt` on x86-64 follows the frame-pointer chain in target memory. On the
 other machines EmbCC's code keeps no frame pointer and `-g` emits no
 `.debug_frame`, so `bt` shows frame `#0` and, as frame `#1`, the address
 in the return-address register (`lr` or `ra`), which is the caller only
-until the function's prologue has saved it.
+until the function's prologue has saved it. AVR has no return-address
+register, and `bt` there shows frame `#0` only.
 
-The breakpoint length given to the stub is 1 byte on x86-64, 2 on ARM and
-4 on the other machines. Messages a session can print include
+The breakpoint length given to the stub is 1 byte on x86-64, 2 on ARM
+and AVR, and 4 on the other machines. When `continue` or `step` starts
+with the target stopped on one of its breakpoints, `embdbg` removes that
+breakpoint, steps one instruction and puts it back first: otherwise a
+stub can stop at the same breakpoint again at once, and QEMU's AVR stub
+does. Messages a session can print include
 `embdbg: cannot resolve 'LOCATION'`,
+`embdbg: no variable 'NAME' here`, `embdbg: could not write REG`,
 `embdbg: this stub has no software breakpoints`,
 `embdbg: the stub refused a breakpoint at 0xADDR`, `the target exited`
 (the program ended), `the target has exited` (a later run command), and
@@ -411,6 +440,52 @@ pc    0000000080000326
 
 (Output shortened.) `stopped at 0x1000` is QEMU's reset code, before the
 image runs.
+
+Debug an ATmega328P image built with `-g` on QEMU's arduino-uno: stop at
+a function's entry, change its first argument, then stop at a source line
+and read a local and a global:
+
+```sh
+qemu-system-avr -M uno -nographic -bios fw.elf -S -gdb tcp::1234 &
+embdbg fw.elf remote 1234 <<'END'
+break *0xa80
+break fw.c:6
+continue
+regs
+set r24 7
+continue
+print t
+print acc
+step
+print acc
+quit
+END
+```
+
+```text
+connected to localhost:1234 — avr target
+stopped at 0x0  ??
+breakpoint 1 at 0xa80  compute+0x0  fw.c:3
+breakpoint 2 at 0xafa  compute+0x7a  fw.c:6
+stopped at 0xa80  compute+0x0  fw.c:3
+...
+r24   03  r25   00  r26   3e  r27   01  r28   e9  r29   08  r30   14  r31   0d
+sreg  02  sp    08e7  pc    00000a80
+r24 = 0x7
+stopped at 0xafa  compute+0x7a  fw.c:6
+...
+t = 33
+acc = 100
+stopped at 0xb46  compute+0xc6  fw.c:7
+...
+acc = 133
+```
+
+(Output shortened.) `0xa80` is `compute`'s address from `funcs`. The
+program is `int acc = 100;` and `compute(int a, int b)` with
+`int t = a * b + 5; acc += t; return t + 1;` on lines 5 to 7, first
+called as `compute(3, 4)`: with `r24`, its first argument, changed to 7,
+`t` is 33.
 
 Convert an object's DWARF to `.embdbg` and check the result:
 

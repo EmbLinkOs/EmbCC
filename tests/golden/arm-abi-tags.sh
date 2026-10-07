@@ -88,7 +88,7 @@ done
 # accepted once and given ARMv7-M code it faults on; the ARMv6-M ones are
 # accepted now, and select that level (below).
 for fl in -mfloat-abi=hard -mfloat-abi=softfp -mfpu=fpv5-sp-d16 \
-          -marm -mcpu=cortex-m9 -mcpu=cortex-m23
+          -marm -mcpu=cortex-m9
 do
     if "$EMBCC" --target=thumbv7em-none-eabi $fl -c "$out/t.c" -o /dev/null \
          2> "$out/f.err"; then
@@ -119,6 +119,14 @@ for fl in -mfloat-abi=hard -mfloat-abi=softfp -mfpu=fpv4-sp-d16 \
         exit 1; }
 done
 echo "-mcpu=cortex-m0/m0plus/m1 select ARMv6-M, where an FPU is refused"
+
+# The Cortex-M23 selects ARMv8-M Baseline on any Thumb triple, as clang
+# takes it: ARMv6-M's Thumb-1 with the divides and the exclusives. It was
+# refused here until the backend had that level.
+got=$("$EMBCC" --target=thumbv7em-none-eabi -mcpu=cortex-m23 -dumpmachine)
+[ "$got" = "thumbv8m.base-none-eabi" ] || {
+    echo "-mcpu=cortex-m23 selects '$got', not thumbv8m.base-none-eabi"; exit 1; }
+echo "-mcpu=cortex-m23 selects ARMv8-M Baseline"
 
 # ---- OUR linker refuses a mismatch -----------------------------------
 # Against objects from another toolchain, since interoperating with one

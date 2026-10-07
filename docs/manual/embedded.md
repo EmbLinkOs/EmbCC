@@ -369,17 +369,17 @@ table above, region by region. The details are in
 | Part | Triple | Notes |
 |---|---|---|
 | Cortex-M0, M0+, M1 | `thumbv6m-none-eabi`, or `-mcpu=cortex-m0` (`m0plus`, `m1`) on any ARM triple | Thumb-1; divide, 64-bit multiply and atomics are `librt.a` calls |
+| Cortex-M23 | `thumbv8m.base-none-eabi`, or `-mcpu=cortex-m23` on any ARM triple | Thumb-1 with `sdiv`/`udiv` and exclusives; 64-bit multiply and shifts are `librt.a` calls; TrustZone with `-mcmse` |
 | Cortex-M3 | `thumbv7m-none-eabi` | no FPU |
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
 | Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi -mfpu=fpv4-sp-d16 -mfloat-abi=hard` | single-precision FPU, hard-float convention |
 | Cortex-M7 | `thumbv7em-none-eabihf -mcpu=cortex-m7`, or `thumbv7em-none-eabi -mfpu=fpv5-d16 -mfloat-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
-| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16 |
+| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `-mcmse` (soft float) |
 
-`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m3`,
-`cortex-m4`, `cortex-m7` and `cortex-m33` select the sub-architecture as
-GCC's options do. `-mcpu=cortex-m23` is refused: an ARMv8-M Baseline part
-is a different subset, and EmbCC emits neither ARMv6-M nor ARMv7-M code
-it can run. `-mthumb` is
+`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m23`,
+`cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
+sub-architecture as GCC's options do. The Secure side of a TrustZone-M
+build is `-mcmse` ([Targets](targets.md#trustzone-m-cmse)). `-mthumb` is
 accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
@@ -627,9 +627,12 @@ embsvd STM32F405.svd --header STM32F405.h --startup startup.c \
 
 The header has CMSIS's shape -- `USART1->CR1`, `USART1_IRQn`,
 `RCC_APB2ENR_USART1EN_Msk` -- and includes CMSIS-Core for the SVD's
-core. `embsvd --show USART1` prints the registers and their fields.
+core. `embsvd --show USART1` prints the registers and their fields, and
+`embsvd --json` describes the whole device -- every register at its
+absolute address, with its fields -- for tools rather than compilers.
 `tests/golden/svd-stm32f405.sh` checks the generated layout against ST's
-own header, and runs a firmware built from the generated files.
+own header, and runs a firmware built from the generated files;
+`tests/golden/svd-clusters.sh` checks clusters, arrays and the JSON.
 
 ### Stopping and printing under a debugger or emulator
 
@@ -924,9 +927,15 @@ exception, the handler must advance `mepc` past the faulting instruction
 Atomic operations up to the register width are inline A-extension
 instructions: `atomic_fetch_add` on an `int` is one `amoadd.w.aqrl`, a
 compare-exchange is an `lr.w.aq`/`sc.w.rl` loop, and
-`atomic_thread_fence` is `fence rw, rw`. No library is involved. 64-bit
-atomics on RV32 are refused (`the RV32 backend cannot lower this
-operation at 64 bits yet`).
+`atomic_thread_fence` is `fence rw, rw`. No library is involved.
+
+A one- or two-byte atomic works on the aligned word around it, as GCC's
+and LLVM's do: AND, OR and XOR are one AMO with the other lanes neutral,
+and the rest an `lr.w`/`sc.w` loop that rewrites only its lane. That is
+atomic against the neighbouring bytes too, because a write to any of them
+breaks the reservation and the loop runs again. 64-bit atomics on RV32
+are refused (`the RV32 backend cannot lower this operation at 64 bits
+yet`).
 
 ### The C extension
 
@@ -1181,32 +1190,45 @@ can be interrupted. Interrupts are enabled globally with
 
 ### Data in program memory
 
-EmbCC has no address-space qualifiers. `__flash` is predefined, as
-`__attribute__((__address_space__(1)))`, but the attribute is ignored
-with a warning, and so is `__attribute__((progmem))`:
-
-```text
-embcc: flash3.c:1: warning: attribute 'progmem' is not one EmbCC knows, and is ignored [-Wattributes]
-```
-
-Such data goes to `.rodata` and is copied to SRAM like any other `const`
-data. To keep a table in flash only, place it in a `.text` section and
-read it with `lpm` through inline assembly:
+`__flash` keeps `const` data in program memory instead of copying it to
+SRAM at start-up, as avr-gcc's does. On a part with 2 KiB of SRAM, every
+table that stays in flash is RAM the program gets back.
 
 ```c
-__attribute__((section(".text"))) const char banner[] = "from flash\n";
+static const __flash char banner[] = "ready\n";
+static const __flash unsigned char crc8_table[256] = { 0x00, 0x07, /* ... */ };
 
-static unsigned char flash_byte(const char *p)
+static void puts_P(const __flash char *s)
 {
-    unsigned char r;
-    __asm__ volatile("lpm %0, Z" : "=r"(r) : "z"(p));
-    return r;
+    char c;
+    while ((c = *s++) != 0)
+        uart_putc(c);
 }
 ```
 
-Never dereference such an object directly: a C access compiles to `ld`,
-which reads SRAM at the same address. A section with any other name that
-is not `.text` or `.text.*` is placed in RAM.
+A read through a `__flash` lvalue compiles to `lpm` through Z. That
+includes an element of a `__flash` array, a member of a `__flash` struct,
+and `*p` for a `const __flash T *p`. The object goes to `.progmem.data`.
+EmbLD places that in flash with the code, and so do avr-libc's linker
+scripts (`*(.progmem*)` in `.text`).
+
+The rules are GCC's, and each is refused by name:
+
+- A `__flash` object must be `const` and have static storage: at file
+  scope, or `static` in a function. Program memory is written when the
+  part is flashed, not by the program.
+- A store through a `__flash` lvalue is refused.
+- A `__flash` pointer and a generic pointer are in different address
+  spaces. Converting one to the other needs a cast: a generic pointer to
+  a flash address would read SRAM at the same number.
+- A whole `__flash` struct cannot be copied yet (`struct pin p =
+  pins[i];`). Read its members instead.
+
+`__flash` may stand wherever `const` can, before or after the type, and
+after a `*` for a pointer that is itself in flash
+(`const __flash char *const __flash names[]`). `__memx` and avr-libc's
+`PROGMEM` attribute are not supported. `__attribute__((progmem))` is
+ignored with a `-Wattributes` warning, and the data goes to SRAM.
 
 ### The calling convention
 
@@ -1241,11 +1263,13 @@ avr-gcc's `__divmodsi4` family, and its `librt.a` does not define it.
 | Construct | Diagnostic |
 |---|---|
 | Variable-length arrays | `the AVR backend cannot lower a variable-length array yet` |
-| Atomic read-modify-write (`atomic_fetch_add`, compare-exchange, ...) | `the AVR backend cannot lower xadd yet` |
-| Atomic load or store wider than one byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
 
-One-byte atomic loads and stores are single instructions and compile;
-fences compile to nothing.
+Atomics of one, two and four bytes compile: every read-modify-write,
+compare-exchange, and a two- or four-byte load or store. Each is done with
+interrupts masked, as avr-libc's `ATOMIC_BLOCK` does it: SREG is saved,
+`cli`, the access, SREG restored. On one core that is all the atomicity
+there is to have. A one-byte load or store is a single instruction.
+Fences compile to nothing. Eight-byte atomics are refused.
 
 ## x86-64 kernels and EmbLinkOS
 

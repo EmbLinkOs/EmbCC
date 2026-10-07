@@ -4,7 +4,9 @@
  * loop is not an optimisation: without it the invariant `rem < den` does not
  * hold on the first iteration and 3.0f / 1.0f came out 2.0f.
  */
-#ifdef __AVR__
+/* RX too: GCC rx-elf's double is binary32 (-m32bit-doubles), so it needs
+ * exactly this native binary32 and no binary64. */
+#if defined(__AVR__) || defined(__RX__)
 
 #include "avrfp.h"
 
@@ -79,4 +81,4 @@ float __divsf3(float a, float b)
  * translation unit has to contain at least one declaration. */
 typedef int embcc_rt_avrfpdiv_is_not_this_target;
 
-#endif /* __AVR__ */
+#endif /* __AVR__ || __RX__ */

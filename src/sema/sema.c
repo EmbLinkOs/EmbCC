@@ -424,6 +424,35 @@ static void need_arith(struct unit *u, struct expr *e, const char *what)
  * through their 64-bit form. */
 static struct expr *cx_cast(struct expr *x, struct type *to);
 
+/* Is an object of this type in AVR's program memory: __flash itself, or
+ * an array of __flash elements. */
+static int ty_in_flash(const struct type *t)
+{
+    while (t && t->kind == TY_ARRAY && !t->is_flash)
+        t = t->pointee;
+    return t && t->is_flash;
+}
+
+/* A __flash object is in .progmem.data, which the linker keeps in flash
+ * with the code (avr-libc's scripts: `*(.progmem*)` in .text), and is
+ * read with LPM. Flash is written when the part is programmed, never by
+ * the program, so the object must be const, as GCC requires; and one
+ * per thread is not something flash can hold. */
+static void flash_object(struct unit *u, struct global *g)
+{
+    if (!ty_in_flash(g->ty))
+        return;
+    if (!g->is_const && !g->is_extern)
+        sema_error_line(u, g->line, "'%s' is __flash and must be const: "
+                        "program memory is written when the part is "
+                        "flashed, not by the program", g->name);
+    if (g->is_tls)
+        sema_error_line(u, g->line, "'%s' cannot be both __flash and "
+                        "thread-local", g->name);
+    if (!g->section)
+        g->section = ".progmem.data";
+}
+
 static struct expr *convert_assign(struct unit *u, struct expr *rhs,
                                    struct type *to, const char *ctx)
 {
@@ -432,6 +461,12 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
         (ty_is_complex(rhs->ty) && (ty_is_arith(to) || to->kind == TY_BOOL)))
         return cx_cast(rhs, to);
     if (to->kind == TY_STRUCT || rhs->ty->kind == TY_STRUCT) {
+        /* a struct is copied as its bytes, by a copy that reads RAM;
+         * from program memory that would be the wrong bytes */
+        if (rhs->ty->is_flash)
+            sema_error_id(u, rhs->line, rhs->col, "E0003",
+                          "%s: copying a whole __flash %s is not supported "
+                          "yet; read its members", ctx, ty_name(rhs->ty));
         if (!ty_equal(to, rhs->ty))
             sema_error_id(u, rhs->line, rhs->col, "E0003",
                           "%s: cannot convert %s to %s",
@@ -446,6 +481,16 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
     if (ty_is_arith(to) && ty_is_arith(rhs->ty))
         return mk_cast(rhs, to);
     if (to->kind == TY_PTR) {
+        /* AVR: a __flash pointer is a program-memory address, which a
+         * generic pointer's loads would read from RAM -- the bytes at the
+         * same number in the other address space. GCC makes it an error
+         * too; a cast says the program means it. */
+        if (rhs->ty->kind == TY_PTR && !is_null_const(rhs) &&
+            rhs->ty->pointee->is_flash != to->pointee->is_flash)
+            sema_error_id(u, rhs->line, rhs->col, "E0003",
+                          "%s: cannot convert %s to %s: __flash and generic "
+                          "pointers are in different address spaces",
+                          ctx, ty_name(rhs->ty), ty_name(to));
         /* `char *s = some_const_char_ptr;` drops the pointee's const, and
          * a store through s then writes a read-only object: GCC warns
          * (-Wdiscarded-qualifiers, on by default), and so does this. */
@@ -513,6 +558,12 @@ static void need_modifiable(struct unit *u, const struct expr *e,
                             int line, int col, const char *what)
 {
     const struct type *t = e->undecayed ? e->undecayed : e->ty;
+    /* AVR program memory: a store would be a data-space write to the
+     * same number, which is some other object in RAM */
+    if (t && t->is_flash)
+        sema_error_at(u, line, col, "%s of a __flash location: program "
+                      "memory is written when the part is flashed, not by "
+                      "the program", what);
     if (!t || !(t->is_const || has_const_member(t)))
         return;
     const char *nm = e->kind == EXPR_VAR ? e->name
@@ -576,13 +627,19 @@ static void merge_bits(char *p, int unit, int nb, struct w128 val,
     val.hi &= mask.hi;
     struct w128 lo = w_shl(val, bit_off);
     if (target_big_endian()) {
-        if (unit > 16)
-            internal_error("a 17-byte bit-field unit on a big-endian "
-                           "target");
-        for (int b = 0; b < unit; b++)
-            if (unit - 1 - b < nb)
-                p[unit - 1 - b] |=
-                    (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
+        /* byte b of the value (from the least significant end) is the
+         * unit's byte unit-1-b; a 17-byte unit's top byte is what the
+         * shift carried past 128 bits */
+        for (int b = 0; b < unit; b++) {
+            unsigned long byte;
+            if (unit - 1 - b >= nb)
+                continue;
+            if (b < 16)
+                byte = (b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7));
+            else
+                byte = bit_off ? w_shr(val, 128 - bit_off, 0).lo : 0;
+            p[unit - 1 - b] |= (char)byte;
+        }
         return;
     }
     for (int b = 0; b < nb && b < 16; b++)
@@ -825,6 +882,10 @@ static struct func *cx_helper(int div, struct type *T)
         if (lf == LDF_QUAD)        k = 6 + div;
         else if (lf == LDF_DOUBLE) k = 2 + div;
     }
+    /* A four-byte double or long double (AVR's, RX's) is binary32, and
+     * its helpers are the `s` pair, as GCC calls them there. */
+    if (ty_size(T) == 4)
+        k = div;
     static const char *const names[8] = {
         "__mulsc3", "__divsc3", "__muldc3", "__divdc3",
         "__mulxc3", "__divxc3", "__multc3", "__divtc3" };
@@ -2016,6 +2077,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* and of a const one const: `cs.a = 1` assigns a const object */
         if (base->is_const && !e->ty->is_const)
             e->ty = ty_const(e->ty);
+        /* and of a __flash one in flash: its bytes are read with LPM */
+        if (base->is_flash && !e->ty->is_flash)
+            e->ty = ty_flash(e->ty);
         if (e->ty->kind == TY_ARRAY) {
             e->undecayed = e->ty;
             e->ty = ty_ptr(e->ty->pointee);
@@ -3714,7 +3778,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         /* A complex slot: both parts folded in its element's format */
         if (ty_is_complex(v[k].ty)) {
             struct type *el = v[k].ty->celem;
-            enum ldf_fmt fmt = el->kind == TY_FLOAT ? LDF_FLOAT
+            /* (a four-byte double -- AVR's, RX's -- is binary32) */
+            enum ldf_fmt fmt = el->kind == TY_FLOAT || ty_size(el) == 4
+                             ? LDF_FLOAT
                              : el->kind == TY_DOUBLE ? LDF_DOUBLE
                              : ldf_target_fmt();
             struct ldf *re, *im;
@@ -3758,7 +3824,8 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static float initializer must be a constant "
                            "expression");
             unsigned long ubits;
-            if (v[k].ty->kind == TY_FLOAT) {
+            if (v[k].ty->kind == TY_FLOAT || sz == 4) {
+                /* float, or a double that is binary32 (AVR, RX) */
                 float fv = (float)dv; unsigned int u32;
                 memcpy(&u32, &fv, 4); ubits = u32;
             } else {
@@ -4432,7 +4499,7 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 0);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
-    if (target_get() == TARGET_MIPS32)
+    if (target_is_mips())
         return asm_resolve_reg_mips(u, s, op, c);
     if (target_get() == TARGET_LOONGARCH64)
         return asm_resolve_reg_la(u, s, op, c);
@@ -4573,6 +4640,13 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 vla_prepare(u, f, sc, s->dty);   /* its size slots */
                 break;
             }
+            /* an automatic object lives on the stack, in RAM; only one
+             * with static storage can be in program memory */
+            if (!s->is_static && !s->is_extern &&
+                s->dty && s->dty->kind != TY_FUNC && ty_in_flash(s->dty))
+                sema_error_line(u, s->line, "'%s' is __flash and must be "
+                                "static: an automatic object is on the stack, "
+                                "in RAM", s->name);
             if (s->is_extern) {
                 /* block-scope extern: no storage here, external linkage. Register
                  * the unit global/function (safe now -- parsing is done, so the
@@ -4778,6 +4852,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->ty = s->dty;
                 g->is_static = 1;
                 g->is_const = s->obj_const;   /* a lookup table: .rodata */
+                flash_object(u, g);
                 /* `static __thread` inside a function is still one
                  * object per thread -- the scope decides who can NAME
                  * it, not how many there are. */
@@ -5374,6 +5449,7 @@ static void merge_decls(struct unit *u)
         /* naked on the prototype and not on the definition is how
          * FreeRTOS's ports write it */
         canon->is_naked |= f->is_naked;
+        canon->cmse_entry |= f->cmse_entry;
         f->absorbed = 1;
     }
 }
@@ -5387,6 +5463,7 @@ static void merge_globals(struct unit *u)
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed)
             continue;
+        flash_object(u, g);
         struct global *canon = find_global(u, g->name);
         if (find_func(u, g->name))
             sema_error_line(u, g->line,
@@ -5466,6 +5543,34 @@ static void merge_globals(struct unit *u)
             canon->section = g->section;
         }
         g->absorbed = 1;
+    }
+}
+
+/* A cmse_nonsecure_entry function is entered from the Non-secure state
+ * through the SG veneer the linker builds from its __acle_se_ symbol, so
+ * it has to have one: internal linkage would leave nothing to build it
+ * from, and a function the Non-secure side cannot reach while the Secure
+ * side believes it is guarded is worse than a refusal. A variadic one is
+ * refused as clang refuses it: its arguments are on the Non-secure
+ * stack. It is kept like a `used` function -- nothing in this image need
+ * call it -- and never inlined, so its own epilogue is the only way out. */
+static void check_cmse_entries(struct unit *u)
+{
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || !f->cmse_entry)
+            continue;
+        if (f->is_static)
+            sema_error_line(u, f->line, "cmse_nonsecure_entry function "
+                            "'%s' has internal linkage: the Non-secure state "
+                            "enters it through a veneer the linker makes from "
+                            "its global symbol", f->name);
+        if (f->is_varargs)
+            sema_error_line(u, f->line, "cmse_nonsecure_entry function "
+                            "'%s' is variadic, and its unnamed arguments would "
+                            "be on the Non-secure stack", f->name);
+        f->used = 1;
+        f->attr_used = 1;
+        f->attr_noinline = 1;
     }
 }
 
@@ -5563,6 +5668,7 @@ void sema_check(struct unit *u)
     merge_decls(u);
     decide_inline_only(u);
     check_aliases(u);
+    check_cmse_entries(u);
     merge_globals(u);
     check_econst_names(u);
     lower_globals(u);

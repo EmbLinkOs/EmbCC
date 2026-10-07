@@ -294,6 +294,33 @@ struct fpval {
     int neg;
 };
 
+#if __SIZEOF_DOUBLE__ == 4
+/* A double that is binary32 (RX's and AVR's: GCC's default there): eight
+ * exponent bits and a 24-bit significand, the leading bit implied. */
+static struct fpval fp_of_double(double v)
+{
+    union { double d; unsigned int u; } cv;
+    cv.d = v;
+    struct fpval f;
+    f.hi = 0;
+    f.neg = (int)(cv.u >> 31);
+    f.lo = cv.u & 0x7fffffULL;
+    f.mant_bits = 24;
+    int be = (int)((cv.u >> 23) & 0xff);
+    if (be == 0xff) {
+        f.cls = f.lo ? FP_NAN : FP_INF;
+        f.e2 = 0;
+    } else if (be == 0) {
+        f.e2 = -149;                 /* subnormal: no implicit leading 1 */
+        f.cls = f.lo ? FP_NORMAL : FP_ZERO;
+    } else {
+        f.lo |= 1ULL << 23;
+        f.e2 = be - 150;
+        f.cls = FP_NORMAL;
+    }
+    return f;
+}
+#else
 static struct fpval fp_of_double(double v)
 {
     union { double d; unsigned long long u; } cv;
@@ -317,6 +344,7 @@ static struct fpval fp_of_double(double v)
     }
     return f;
 }
+#endif
 
 #if __LDBL_MANT_DIG__ == 64
 /* x87 80-bit extended, little-endian: eight bytes of significand whose
@@ -358,8 +386,14 @@ static struct fpval fp_of_ldouble(long double v)
     struct fpval f;
     f.hi = 0;
     f.lo = 0;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    /* big-endian (SPARC, mips64-none-elf): the high word's bytes first */
+    for (int i = 0; i < 8; i++)   f.hi = (f.hi << 8) | b[i];
+    for (int i = 8; i < 16; i++)  f.lo = (f.lo << 8) | b[i];
+#else
     for (int i = 7; i >= 0; i--)  f.lo = (f.lo << 8) | b[i];
     for (int i = 15; i >= 8; i--) f.hi = (f.hi << 8) | b[i];
+#endif
     f.neg = (int)(f.hi >> 63);
     f.mant_bits = 113;
     int be = (int)((f.hi >> 48) & 0x7fff);

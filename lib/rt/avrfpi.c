@@ -4,7 +4,9 @@
  * is not what round_pack does; int->float rounds to nearest, because 32 bits
  * do not all fit in 24 and something has to give.
  */
-#ifdef __AVR__
+/* RX too: GCC rx-elf's double is binary32 (-m32bit-doubles), so it needs
+ * exactly this native binary32 and no binary64. */
+#if defined(__AVR__) || defined(__RX__)
 
 #include "avrfp.h"
 
@@ -102,4 +104,4 @@ long __fixsfsi(float f)
  * translation unit has to contain at least one declaration. */
 typedef int embcc_rt_avrfpi_is_not_this_target;
 
-#endif /* __AVR__ */
+#endif /* __AVR__ || __RX__ */

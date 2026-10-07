@@ -125,6 +125,7 @@ void mips_build_abiflags(unsigned char out[24]);
 /* The MIPS encoder's byte order (arch/mips/emit.h), which the driver sets
  * from target_big_endian() once the target is chosen. */
 void mips_set_big_endian(int on);
+void mips_set_64(int on);           /* ...and MIPS64's doubleword forms */
 
 /* And for LoongArch64, LP64S (soft float): RV64's lowering with
  * LoongArch's instructions (src/arch/loongarch/codegen.c). */
@@ -153,6 +154,38 @@ void codegen_unit_xtensa(struct ir_unit *iu, struct code *text,
                          struct gsite **gs, int *ngs,
                          struct fsite **fs, int *nfs, int want_debug,
                          int optimize, int no_sse, int regalloc);
+/* And for 32-bit PowerPC, the embedded EABI, big-endian, soft float. */
+void codegen_unit_ppc(struct ir_unit *iu, struct code *text,
+                      struct extcall **ext, int *next,
+                      struct strsite **strs, int *nstrs,
+                      struct gsite **gs, int *ngs,
+                      struct fsite **fs, int *nfs, int want_debug,
+                      int optimize, int no_sse, int regalloc);
+
+/* And for Renesas RX (RXv1), GCC's rx-elf ABI with 32-bit doubles and no
+ * FPU (docs/internals/rx-plan.md). */
+void codegen_unit_rx(struct ir_unit *iu, struct code *text,
+                     struct extcall **ext, int *next,
+                     struct strsite **strs, int *nstrs,
+                     struct gsite **gs, int *ngs,
+                     struct fsite **fs, int *nfs, int want_debug,
+                     int optimize, int no_sse, int regalloc);
+/* And for 32-bit SPARC V8 (LEON3), big-endian, soft float, with register
+ * windows (docs/internals/sparc-plan.md). */
+void codegen_unit_sparc(struct ir_unit *iu, struct code *text,
+                        struct extcall **ext, int *next,
+                        struct strsite **strs, int *nstrs,
+                        struct gsite **gs, int *ngs,
+                        struct fsite **fs, int *nfs, int want_debug,
+                        int optimize, int no_sse, int regalloc);
+/* And for ColdFire (m68k-none-elf): ISA_A, big-endian, every argument on
+ * the stack, soft float. */
+void codegen_unit_coldfire(struct ir_unit *iu, struct code *text,
+                           struct extcall **ext, int *next,
+                           struct strsite **strs, int *nstrs,
+                           struct gsite **gs, int *ngs,
+                           struct fsite **fs, int *nfs, int want_debug,
+                           int optimize, int no_sse, int regalloc);
 
 /* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
  * a register and every value is a run of them. Same signature all the

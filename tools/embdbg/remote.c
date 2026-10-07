@@ -122,8 +122,36 @@ static const struct rsp_regdef *riscv_table(int wb)
     return regs_riscv;
 }
 
+/* AVR, as QEMU's stub and GDB's avr target lay it out: r0..r31 one byte
+ * each, then SREG (one byte), SP (two), and PC (four) -- the PC a BYTE
+ * address, twice the word address the core counts in, so it compares
+ * directly with an ELF symbol's value. 39 bytes in all. */
+static struct rsp_regdef regs_avr[36];
+static const char *const avr_name[32] = {
+    "r0",  "r1",  "r2",  "r3",  "r4",  "r5",  "r6",  "r7",
+    "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15",
+    "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
+    "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31"
+};
+
+static const struct rsp_regdef *avr_table(void)
+{
+    int i;
+    for (i = 0; i < 32; i++) {
+        regs_avr[i].name = avr_name[i];
+        regs_avr[i].off = i;
+        regs_avr[i].size = 1;
+    }
+    regs_avr[32].name = "sreg"; regs_avr[32].off = 32; regs_avr[32].size = 1;
+    regs_avr[33].name = "sp";   regs_avr[33].off = 33; regs_avr[33].size = 2;
+    regs_avr[34].name = "pc";   regs_avr[34].off = 35; regs_avr[34].size = 4;
+    regs_avr[35].name = NULL;
+    return regs_avr;
+}
+
 const struct rsp_regdef *rsp_regs_for(const char *arch)
 {
+    if (strcmp(arch, "avr") == 0)     return avr_table();
     if (strcmp(arch, "aarch64") == 0) return regs_aarch64;
     if (strcmp(arch, "arm") == 0)     return regs_arm;
     if (strcmp(arch, "riscv32") == 0) return riscv_table(4);
@@ -147,6 +175,7 @@ const char *rsp_fp_name(const char *arch)
     if (strcmp(arch, "x86_64") == 0)  return "rbp";
     if (strcmp(arch, "aarch64") == 0) return "x29";
     if (strcmp(arch, "arm") == 0)     return "r7";
+    if (strcmp(arch, "avr") == 0)     return "r28";   /* Y's low half */
     return "s0";                      /* RISC-V's frame pointer is x8 */
 }
 
@@ -351,6 +380,34 @@ int rsp_reg(struct rsp *r, const struct rsp_regdef *tab, const char *name,
         return 0;
     }
     return -1;
+}
+
+/* Write one register: change its bytes in the last `g` reply and send the
+ * whole block back with `G`, which every stub implements -- `P` (one
+ * register by number) is optional, and its numbering is a second table
+ * to keep right. The registers are re-read first, so nothing else the
+ * target changed since is written back stale. */
+int rsp_write_reg(struct rsp *r, const struct rsp_regdef *tab, const char *name,
+                  unsigned long long val)
+{
+    static const char hex[] = "0123456789abcdef";
+    char cmd[2 * sizeof r->regbuf + 2];
+    const struct rsp_regdef *d;
+    int k = 0;
+    for (d = tab; d->name; d++)
+        if (strcmp(d->name, name) == 0) break;
+    if (!d->name) return -1;
+    if (rsp_read_regs(r) < 0 || d->off + d->size > r->nregbytes) return -1;
+    for (int i = 0; i < d->size; i++)            /* little-endian */
+        r->regbuf[d->off + i] = (unsigned char)(val >> (8 * i));
+    cmd[k++] = 'G';
+    for (int i = 0; i < r->nregbytes; i++) {
+        cmd[k++] = hex[r->regbuf[i] >> 4];
+        cmd[k++] = hex[r->regbuf[i] & 15];
+    }
+    cmd[k] = 0;
+    if (rsp_xchg(r, cmd) < 0) return -1;
+    return strcmp(r->pkt, "OK") == 0 ? 0 : -1;
 }
 
 int rsp_read_mem(struct rsp *r, unsigned long long addr, unsigned char *buf,

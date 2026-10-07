@@ -6,8 +6,9 @@ the compiler, the linker and the libraries without anyone deciding it. The
 first big-endian target is `mips-none-elf` (also `mips-unknown-elf`,
 `mips-elf`, `mips`): MIPS32r2, o32, soft float, the same backend as
 `mipsel-none-elf`, run on QEMU's big-endian malta (`qemu-system-mips`).
-This page lists every place that depends on the byte order, what it does
-big-endian, and the test that notices when it is wrong. A new big-endian
+The second is `powerpc-none-eabi` (powerpc-plan.md), which is big-endian
+only. This page lists every place that depends on the byte order, what it
+does big-endian, and the test that notices when it is wrong. A new big-endian
 target (PowerPC, SPARC LEON3, m68k/ColdFire, OpenRISC, s390x) should walk
 the same list.
 
@@ -15,7 +16,7 @@ the same list.
 
 `target_big_endian()` (src/arch/target.h) answers it. It is set with the
 triple (`target_from_triple`; on MIPS the sub-architecture column's 1 means
-big-endian) and nothing else changes it. `-EB`/`-mbig-endian` and
+big-endian, and every PowerPC triple is) and nothing else changes it. `-EB`/`-mbig-endian` and
 `-EL`/`-mlittle-endian` are accepted when they agree with the triple and
 refused by name when they do not (the triple decides more than the order:
 the runtime's directory, the predefined macros). Values go into target
@@ -44,7 +45,8 @@ order.
 | `src/lex/lex.c` `lit_encode` | `u""`, `U""`, `L""` units in the target's order (every literal, every consumer) | mips-be-data, endian.c |
 | `src/sema/ldfloat.c` | `ldf_encode_target`: the format's bytes reversed whole. `ldf_encode` stays little-endian, because `ldf_to_double` and the C++ evaluator read it as host order | mips-be-data (`d_ld`, `d_cd`, `d_cf`) |
 | `src/driver/main.c` | a scalar global's `.data`/`.rodata` image from `g->init`; `-EB`/`-EL` | mips-be-data |
-| `src/ir/irgen.c` `emit_ldconst` | a long double constant's pool bytes | (no big-endian target has a 16-byte long double yet) |
+| `src/ir/irgen.c` `emit_ldconst` | a long double constant's pool bytes (ldf_encode_target) | sparc-exec (long-double-quad.c: run-time constants against the static folds) |
+| `src/ir/irgen.c` `fb_wide` | the binary128 sign and exponent are its FIRST two bytes and its low doubleword the second (signbit, isnan, fabsl, copysignl, ...) | sparc-exec (fp-bits-long-double) |
 | `src/sema/type.c` bit-field layout | `bit_off` is the field's shift from the least significant end of its unit AS LOADED; the positions in memory order are the same in both orders (gcc's layout), and `ty_bf_mempos` converts between them. Big-endian the first field is at the unit's high end. Union members and packed straddling fields likewise. | mips-be-data (six bit-field structs, a union), endian.c |
 | `src/ir/irgen.c` bit-fields | the unit loads and stores need nothing (they shift from the loaded value's LSB); the byte-at-a-time forms of a packed field across its unit put byte k at `8(n-1-k)`; the 128-bit byte forms are refused big-endian | endian.c, mips-be-exec (packed-bitfields, refereed) |
 | `src/debug/dwarf.c`, `src/debug/eh.c` | every multi-byte field through `target_put_uint`, the backpatched unit and header lengths included; `DW_AT_data_bit_offset` is the memory-order position | mips-be-data (`llvm-dwarfdump --verify`, clang's bit offsets) |
@@ -57,7 +59,14 @@ order.
 | `src/arch/mips/codegen.c` | see below | mips-be-exec, mips-be-abi |
 | `src/link/link.c` | see below | every board test, mips-be-abi (clang's objects) |
 | `lib/libc/src/math/fdlibm/fdlibm.h` | `__IEEE_BIG_ENDIAN` from `__BYTE_ORDER__`: which word of a double is first | libc-embedded (mips-none-elf against x86-64), mips-be-exec |
+| `lib/libc/src/stdio/format.c` `fp_of_ldouble` | a binary128's bytes most significant first | libc-embedded (sparc-none-elf's `%Lf`) |
+| `lib/rt/softtf.c` | the 64-bit halves of the soft binary128 (`tf_u128`, `union tfbits`) in memory order | sparc-exec (long-double-quad.c) |
 | `tests/harness/mips/run.sh` | the board is chosen by the image's `EI_DATA` | -- |
+| `src/arch/ppc/emit.c` | instruction words always big-endian (`ppc_put_word`), there being no other order | ppc-encoding (bytes in memory order against llvm-mc's) |
+| `src/arch/ppc/codegen.c` | pairs high word first (r3:r4, PHI = the first register), as memory and the SVR4 ABI have them; a narrow variable at the end of its word home (`obj_slot`), and one aligned beyond its word with the object -- not the word -- on the alignment; small composites returned right-justified in r3:r4 | ppc-exec, ppc-abi, ppc-data |
+| `src/link/link.c` `apply_ppc` | every field written big-endian through `ppc_put_word` and a big-endian halfword for @ha/@l; a little-endian PowerPC object refused | ppc-abi (clang's objects), ppc-refuse |
+| `src/arch/coldfire/` | the second big-endian target (`m68k-none-elf`), with no little-endian twin: the encoder writes every 16-bit word high byte first, a pair holds the high word in d0 and at the lower address, a narrow parameter's byte is its word's last (11(%fp)), a composite smaller than a word is right-justified in its argument word, and `va_arg` reads it there | coldfire-exec, coldfire-abi, libc-embedded |
+| `src/link/link.c` `apply_m68k` | every m68k field written big-endian whole; the `-Tstack` stub's words | coldfire-exec, coldfire-refuse |
 
 ### The MIPS backend
 
@@ -151,6 +160,9 @@ one link are refused by name.
 Each was shown to fail against a mutant of the code it guards.
 
 ## Adding the next big-endian target
+
+PowerPC (powerpc-plan.md) walked this list; what it found is in the table
+above.
 
 1. A triple that sets `g_big_endian` (target.c), and a generated predef
    table from the reference compiler.
