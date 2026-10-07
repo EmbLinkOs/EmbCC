@@ -849,6 +849,7 @@ on its own. The pass names are:
 | `unroll` | `-O2`, not `-Os` | unrolls counted loops |
 | `pre` | `-O2` | partial-redundancy elimination |
 | `switch-thread` | `-O2`, not `-Os` | jumps from a known state straight to its `switch` case |
+| `licm-mem` | `-O1` | moves loads out of loops and keeps a loop's variable in a register |
 
 An `-f` or `-fno-` option that is not a pass name and not listed elsewhere
 on this page is an unknown argument. GCC's pass options are accepted only

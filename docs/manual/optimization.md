@@ -188,7 +188,7 @@ the command line: `-fno-sccp -O2` and `-O2 -fno-sccp` are the same.
 ### `-fNAME`, `-fno-NAME`
 
 Turn the optimizer pass `NAME` on or off. `NAME` is one of the
-seventeen names below. The level sets each pass's default, and an
+eighteen names below. The level sets each pass's default, and an
 explicit option overrides the level wherever it appears on the command
 line.
 
@@ -245,6 +245,7 @@ The table lists every pass. The entries that follow describe each one.
 | `unroll` | `-O2` | Loop unrolling |
 | `pre` | `-O2`, `-Os` | Partial redundancy elimination |
 | `switch-thread` | `-O2` | State machines jump straight to the next case |
+| `licm-mem` | `-O1`, `-O2`, `-Os` | Loads out of loops; a variable in memory kept in a register across one |
 
 Two kinds of function get less than the full pipeline at any level:
 
@@ -326,6 +327,18 @@ The loop passes:
   cannot fault are moved, so a load through a pointer, a division and a
   remainder stay in the loop. A read of a local variable is moved only
   when nothing in the loop writes it and its address is never taken.
+- **Memory in loops** (`-fno-licm-mem` turns off just this). A load
+  whose address does not change is moved in front of the loop when
+  nothing in the loop can write those bytes -- no store that may reach
+  them, no call that may write memory, and no inline asm, atomic or
+  volatile access anywhere in the loop -- and when moving it cannot
+  fault: the loop would have executed it anyway, or it reads a global or
+  a local inside its bounds. A location the loop both writes and reads,
+  such as `p->count++` or a global sum, is kept in a register instead
+  when nothing else in the loop can reach it, the loop calls nothing that
+  touches memory, and every way out of the loop has just stored it; it
+  is stored once on each way out. `volatile` and `_Atomic` objects are
+  never moved or kept, and nothing moves across an access to one.
 - **Induction-variable strength reduction.** An array access `a[i]` in a
   loop is turned into a pointer that advances by the element size each
   iteration.
