@@ -251,6 +251,40 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
             echo "FAIL avr -O0: 'wide' (fbreg +$off) is stored at 0x$at, which the line table puts on line '$line', not 4"
             fail=1; }
     done
+    # A PARAMETER the body assigns, at -O2: mem2reg turns `n` into
+    # temporaries, and the prologue's store of the incoming value is the
+    # only write its slot ever gets -- so the slot is right on entry and
+    # wrong from the assignment on. Its location must be empty, or a slot
+    # something writes after the prologue. `m`, never assigned, keeps its
+    # slot: there the prologue's store is the value for good.
+    cat > "$out/as.c" <<'CEOF'
+int tick(void);
+int bump(int n, int m)
+{
+    n = n * 3 + tick();
+    return n + m + tick();
+}
+CEOF
+    if "$EMBCC" --target=avr -g -O2 -c "$out/as.c" -o "$out/avr-as.o" 2>/dev/null; then
+        "$DWDUMP" --debug-info "$out/avr-as.o" > "$out/avr-as.di" 2>/dev/null
+        "$OBJDUMP" -d "$out/avr-as.o" > "$out/avr-as.dis" 2>/dev/null
+        for v in n m; do
+            off=$(grep -A2 "DW_AT_name	(\"$v\")" "$out/avr-as.di" |
+                  sed -n -e 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' \
+                         -e 's/.*DW_AT_location	(<empty>).*/empty/p' | head -1)
+            [ "$off" = empty ] && [ $v = n ] && continue
+            nst=$(grep -cE "std[[:space:]]+Y\+$off, r[0-9]+\$" "$out/avr-as.dis") || nst=0
+            if [ $v = n ] && [ "$nst" -lt 2 ]; then
+                echo "FAIL avr -O2: the assigned parameter 'n' is at fbreg +$off, which only the prologue writes"
+                fail=1
+            elif [ $v = m ] && [ "$nst" -lt 1 ]; then
+                echo "FAIL avr -O2: the parameter 'm' is at fbreg '$off', which nothing writes"
+                fail=1
+            fi
+        done
+    else
+        echo "FAIL avr -O2: as.c does not compile with -g"; fail=1
+    fi
     o0=$(grep -c 'DW_AT_location	(<empty>)' "$out/avr-O0.di" 2>/dev/null) || o0=0
     o2=$(grep -c 'DW_AT_location	(<empty>)' "$out/avr-O2.di" 2>/dev/null) || o2=0
     [ "$o0" -eq 0 ] || { echo "FAIL avr -O0: $o0 variables have no location"; fail=1; }
