@@ -265,6 +265,14 @@ typedef struct {
 /* The exception index table's self-relative pointer: 31 bits of signed
  * offset, the top bit reserved to say what the entry holds. */
 #define R_ARM_PREL31          42
+/* ARM (A32) state, armv7a-none-eabi: `bl` and `b`/`b<c>` with a 24-bit
+ * word offset from the instruction + 8, and the movw/movt pair whose
+ * 16-bit immediate is split imm4:imm12 -- different bits from the Thumb
+ * types above, for the same four acts. */
+#define R_ARM_CALL            28
+#define R_ARM_JUMP24          29
+#define R_ARM_MOVW_ABS_NC     43
+#define R_ARM_MOVT_ABS        44
 
 /* RISC-V relocations (psABI), the ones an object from this compiler
  * needs.

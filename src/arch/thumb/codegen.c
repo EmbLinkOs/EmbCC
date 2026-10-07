@@ -491,6 +491,9 @@ int t_op_calls_helper(const struct ir_ins *i)
                i->op == IR_DIV || i->op == IR_CMP;
     if (i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F)
         return 1;
+    /* ARMv7-A has no divide in ARM state: __aeabi_idiv and family */
+    if (t_isa_a32 && (i->op == IR_DIV || i->op == IR_MOD))
+        return 1;
     return (i->op == IR_DIV || i->op == IR_MOD) && i->w == 8;
 }
 
@@ -3293,7 +3296,8 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
 static void set_cc(struct t_fn *F, int dst, int cond)
 {
     int d = wreg(F, dst, T_ACC);
-    if (d < 8) {
+    /* (ARM state: two conditional movs, into any register) */
+    if (d < 8 || t_isa_a32) {
         t_setcc_low(F->t, cond, d);
         wrote(F, dst, d);
         return;
@@ -3727,6 +3731,23 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_DIV: case IR_MOD: {
+        /* ARMv7-A in ARM state has no sdiv/udiv (an A7 or A15 has, base
+         * v7-A does not): the RTABI's routines, as clang calls them --
+         * the quotient in r0, and from the divmod pair the remainder in
+         * r1. lib/rt provides them for this target. */
+        if (t_isa_a32) {
+            if (i->imm_b) {
+                rd(F, i->a, T_R0);
+                t_mov_imm(t, T_R1, (long)i->imm, 0);
+            } else {
+                fp_args2(F, i);
+            }
+            call_helper(F, i->op == IR_DIV
+                        ? (i->sign ? "__aeabi_idiv" : "__aeabi_uidiv")
+                        : (i->sign ? "__aeabi_idivmod" : "__aeabi_uidivmod"));
+            wr(F, i->dst, i->op == IR_DIV ? T_R0 : T_R1);
+            return;
+        }
         /* The operands where they live and the result where it goes:
          * sdiv, udiv and mls take any registers and read all of them
          * before writing. Copying both into r12 and r11 first and the
@@ -3822,7 +3843,9 @@ static void gen_ins(struct t_fn *F, int n)
                                ax->memoff == 0 && ax->size <= 4 &&
                                ax->b >= 0 && ax->b != nx->dst &&
                                !F->wide[ax->b] && !in_freg(F, ax->b);
-                    if (isld || isst) {
+                    if ((isld || isst) &&
+                        t_ldst_reg_ok((int)i->imm, ax->size,
+                                      isld && ax->sign, isst)) {
                         int rm = rdr(F, i->a, T_TMP);
                         int rn = rdr(F, other, T_ADDR);
                         if (isld) {
@@ -4208,8 +4231,11 @@ static void gen_ins(struct t_fn *F, int n)
             int dst = dfa ? F->fb : rdr(F, i->a, T_ADDR);
             int src = !copy ? -1 : sfa ? F->fb : rdr(F, i->b, T_TMP);
             int d0 = LO(F, T_ACC), d1 = -1;
+            /* (not in ARM state, where ldrd takes an even register and
+             * the next, and these two are whatever LO answers) */
             int pairs = dfa && (sfa || !copy) && doff % 4 == 0 &&
-                        (!copy || soff % 4 == 0) && size >= 8;
+                        (!copy || soff % 4 == 0) && size >= 8 &&
+                        !t_isa_a32;
             if (pairs)
                 d1 = LO(F, T_SCR);
             if (!copy) {
@@ -4825,6 +4851,19 @@ static void gen_ins(struct t_fn *F, int n)
             t_cmp_reg(t, ri, T_TMP);
         }
         jump_if(F, T_CS, i->label);                  /* bhs: unsigned >= n */
+        /* ARM state: `add pc, pc, rI, lsl #2` over a table of branches.
+         * pc reads as the add's address + 8, which is where the table
+         * starts, one word on -- so the word between is never run. The
+         * entries are instructions, not data: no $d, and each reaches
+         * its case like any other branch. */
+        if (t_isa_a32) {
+            t_alu_reg_shift(t, T_OP_ADD, T_PC, T_PC, ri, T_SH_LSL, 2, 0);
+            t_nop(t);
+            for (int k = 0; k < n; k++)
+                want_label(F, t_b(t), fn->jt[i->jt].labels[k], -1);
+            F->bc_end = -1;
+            return;
+        }
         /* When every target still lies ahead, the one-instruction form:
          * `tbh [pc, rI, lsl #1]` adds twice the halfword the index picks
          * from the table right after it. Its offsets are unsigned, so a
@@ -5507,8 +5546,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * byte pairs into 0xbfbf, which is an `itttt` — harmless, since
      * nothing branches there, but it makes every disassembly of the gap
      * between two functions look like a condition block. */
+    /* An A32 function is word-aligned, as every A32 instruction is. */
     {
-        int al = 1;
+        int al = t_isa_a32 ? 3 : 1;
         for (int k = 0; k < fn->nins; k++)
             if (fn->ins[k].op == IR_ASM)
                 al = 3;
@@ -5956,6 +5996,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             long d = (long)F.label_off[F.fix[i].label] - F.fix[i].at - 4;
             shortb[i] = F.fix[i].cond < 0 ? (d >= -2048 && d <= 2046)
                                           : (d >= -256 && d <= 254);
+            /* ARM state: one branch form, and no cbz */
+            if (t_isa_a32) {
+                shortb[i] = 0;
+                continue;
+            }
             /* cbz: forward 0..126 from where the cmp stands, since the
              * two become the one instruction there -- and not to the
              * instruction right after the branch. Measured from the cmp,
@@ -6068,7 +6113,8 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     const char *lr = getenv("EMBCC_T_LOWREGS");
     int lr_forced = lr && *lr;
     g_t_pairs = 1;
-    g_t_lowregs = lr_forced ? atoi(lr) != 0 : 1;
+    /* the rename is for the 16-bit encodings, which ARM state has none of */
+    g_t_lowregs = lr_forced ? atoi(lr) != 0 : !t_isa_a32;
     if (!g_t_regalloc || want_debug || g_t_o0) {
         gen(fn, t, st, want_debug);
         g_t_lowregs = 1;
@@ -6098,7 +6144,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         pv[np++] = 0;
     }
     lv[nl++] = g_t_lowregs;
-    if (!lr_forced && target_thumb_arch() != 6)
+    if (!lr_forced && target_thumb_arch() != 6 && !t_isa_a32)
         lv[nl++] = 0;
     const char *ek = getenv("EMBCC_T_EXT");
     int ext_ok = target_thumb_arch() != 6 && !(ek && *ek && atoi(ek) == 0);

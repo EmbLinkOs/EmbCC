@@ -11,6 +11,7 @@
 #include "asm.h"
 
 #include "emit.h"
+#include "a32.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -505,6 +506,112 @@ static const struct ls_ent ls_tab[] = {
 #define FAIL(...)  do { snprintf(err, (size_t)errlen, __VA_ARGS__); \
                         return -1; } while (0)
 
+/* `c<n>`, a coprocessor register name, or `p<n>`, a coprocessor. */
+static int tok_cnum(const struct tok *t, char letter)
+{
+    int v = 0;
+    if (t->len < 2 || t->len > 3 || tolower((unsigned char)t->s[0]) != letter)
+        return -1;
+    for (int k = 1; k < t->len; k++) {
+        if (!isdigit((unsigned char)t->s[k]))
+            return -1;
+        v = v * 10 + (t->s[k] - '0');
+    }
+    return v <= 15 ? v : -1;
+}
+
+/* The status register as msr names it: `cpsr_` (or `spsr_`, refused)
+ * with any of c x s f, `apsr_nzcvq` and `apsr_nzcvqg`, `cpsr` alone
+ * (c and f, as GNU as reads it). The field mask, bit 0 c ... bit 3 f, or
+ * -1. */
+static int psr_fields(const struct tok *t)
+{
+    int m = 0;
+    if (tok_is(t, "cpsr") || tok_is(t, "apsr"))
+        return 9;
+    if (tok_is(t, "apsr_nzcvq"))
+        return 8;
+    if (tok_is(t, "apsr_nzcvqg") || tok_is(t, "apsr_g"))
+        return tok_is(t, "apsr_g") ? 4 : 12;
+    if (t->len < 6 || !same_nocase(t->s, "cpsr_", 5))
+        return -1;
+    for (int k = 5; k < t->len; k++) {
+        const char *f = strchr("cxsf", tolower((unsigned char)t->s[k]));
+        if (!f || !t->s[k])
+            return -1;
+        m |= 1 << (f - "cxsf");
+    }
+    return m;
+}
+
+/* ARM state's own forms. 1 when the statement is not one of them (the
+ * shared vocabulary takes it), 0 when assembled, -1 with err set. */
+static int a32_one_stmt(struct tok *t, int n, struct code *out, char *err,
+                        int errlen)
+{
+    long imm;
+    if (mnemonic_is(&t[0], "mrs")) {
+        int rd = n == 3 ? tok_reg(&t[1]) : -1;
+        if (rd < 0 || rd == 15 || !(tok_is(&t[2], "cpsr") ||
+                                    tok_is(&t[2], "apsr")))
+            FAIL("mrs takes a register and cpsr (or apsr) in ARM state%s",
+                 n == 3 && sysreg_num(t[2].s, t[2].len) >= 0
+                 ? "; the M-profile special registers do not exist here" : "");
+        a32_mrs_cpsr(out, rd);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "msr")) {
+        int f = n == 3 ? psr_fields(&t[1]) : -1;
+        int rn = n == 3 ? tok_reg(&t[2]) : -1;
+        if (f <= 0 || rn < 0 || rn == 15)
+            FAIL("msr takes cpsr_<fields> (c, x, s, f) or apsr_nzcvq and a "
+                 "register in ARM state%s",
+                 n == 3 && sysreg_num(t[1].s, t[1].len) >= 0
+                 ? "; the M-profile special registers do not exist here" : "");
+        a32_msr_cpsr(out, f, rn);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "mrc") || mnemonic_is(&t[0], "mcr")) {
+        long opc1, opc2 = 0;
+        int cp = n >= 6 ? tok_cnum(&t[1], 'p') : -1;
+        int rt = n >= 6 ? tok_reg(&t[3]) : -1;
+        int crn = n >= 6 ? tok_cnum(&t[4], 'c') : -1;
+        int crm = n >= 6 ? tok_cnum(&t[5], 'c') : -1;
+        if (n < 6 || n > 7 || cp < 0 || rt < 0 || rt == 13 || rt == 15 ||
+            crn < 0 || crm < 0 || !tok_imm(&t[2], &opc1) || opc1 < 0 ||
+            opc1 > 7 || (n == 7 && (!tok_imm(&t[6], &opc2) || opc2 < 0 ||
+                                    opc2 > 7)))
+            FAIL("%.*s takes p<n>, #opc1, a register, c<n>, c<m>[, #opc2]",
+                 t[0].len, t[0].s);
+        a32_mrc_mcr(out, mnemonic_is(&t[0], "mrc"), cp, (int)opc1, rt, crn,
+                    crm, (int)opc2);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "svc") && n == 2) {
+        if (!tok_imm(&t[1], &imm) || imm < 0 || imm > 0xffffff)
+            FAIL("svc takes a 0..0xffffff immediate in ARM state");
+        a32_svc(out, imm);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "bkpt") && n == 2) {
+        if (!tok_imm(&t[1], &imm) || imm < 0 || imm > 0xffff)
+            FAIL("bkpt takes a 0..65535 immediate");
+        a32_bkpt(out, (int)imm);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "udf") && n == 2) {
+        if (!tok_imm(&t[1], &imm) || imm < 0 || imm > 0xffff)
+            FAIL("udf takes a 0..65535 immediate");
+        a32_udf(out, (int)imm);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "tbb") || mnemonic_is(&t[0], "tbh") ||
+        mnemonic_is(&t[0], "cbz") || mnemonic_is(&t[0], "cbnz"))
+        FAIL("%.*s is a Thumb instruction; ARM state has none", t[0].len,
+             t[0].s);
+    return 1;
+}
+
 static int one_stmt(const char *stmt, int len, struct code *out,
                     char *err, int errlen)
 {
@@ -641,6 +748,18 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         }
         t_cps(out, dis, mi, mf);
         return 0;
+    }
+
+    /* ---- ARMv7-A in ARM state: its own system vocabulary ----
+     * The status register by name (cpsr/apsr, and the fields msr
+     * writes), the coprocessor moves an A-profile kernel reaches the
+     * system control registers with (VBAR, SCTLR, the MMU's), and svc /
+     * bkpt with their wider A32 immediates. An M-profile name is refused
+     * here rather than encoded as something else. */
+    if (t_isa_a32) {
+        int r = a32_one_stmt(t, n, out, err, errlen);
+        if (r != 1)
+            return r;
     }
 
     /* ---- the special registers ---- */
@@ -820,6 +939,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             if (off < 0 || off > 1020 || (off & 3))
                 FAIL("ldrex offset %ld must be a multiple of 4 in 0..1020",
                      off);
+            if (off && t_isa_a32)
+                FAIL("ldrex takes no offset in ARM state");
             t_ldrex(out, rd, base, (int)off);
             return 0;
         }
@@ -917,6 +1038,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             if (off < 0 || off > 1020 || (off & 3))
                 FAIL("strex offset %ld must be a multiple of 4 in 0..1020",
                      off);
+            if (off && t_isa_a32)
+                FAIL("strex takes no offset in ARM state");
             t_strex(out, rd, rn, base, (int)off);
             return 0;
         }
@@ -980,6 +1103,10 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         t_patch_bl(out, at, at + (int)v);
         return 0;
     }
+    if ((mnemonic_is(&t[0], "cbz") || mnemonic_is(&t[0], "cbnz")) && n == 3 &&
+        t_isa_a32)
+        FAIL("%.*s is a Thumb instruction; ARM state has none (cmp, then "
+             "beq/bne)", t[0].len, t[0].s);
     if ((mnemonic_is(&t[0], "cbz") || mnemonic_is(&t[0], "cbnz")) && n == 3) {
         long v;
         int r = tok_reg(&t[1]);
@@ -1127,7 +1254,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         /* `adds rdn, #imm8` / `subs rdn, #imm8`: the two-byte form with
          * an eight-bit immediate, which is what GNU as picks for this
          * spelling (the three-operand one takes only three bits) */
-        if (is_alu && tok_reg(&t[1]) >= 0 && tok_reg(&t[1]) <= 7 &&
+        if (is_alu && !t_isa_a32 && tok_reg(&t[1]) >= 0 &&
+            tok_reg(&t[1]) <= 7 &&
             (mnemonic_is(&t[0], "adds") || mnemonic_is(&t[0], "subs")) &&
             tok_imm(&t[2], &imm) && imm >= 0 && imm <= 255) {
             unsigned h = (mnemonic_is(&t[0], "adds") ? 0x3000u : 0x3800u) |
@@ -1144,8 +1272,43 @@ static int one_stmt(const char *stmt, int len, struct code *out,
             return one_stmt(buf, (int)strlen(buf), out, err, errlen);
         }
     }
-    FAIL("asm instruction \"%.*s\" is not in the ARMv7-M vocabulary",
-         t[0].len, t[0].s);
+    /* ARM state: any instruction may carry a condition, with no IT block
+     * -- `moveq r0, #1`. Tried only once the mnemonic is not one of the
+     * vocabulary's own, so `bics` stays BIC with S rather than becoming
+     * `bi` under CS. The condition goes through the same queue an IT
+     * block fills (a32_it). */
+    if (t_isa_a32 && t[0].len > 2 && !tasm_open()) {
+        int mlen = t[0].len, wlen = 0, c;
+        if (mlen > 4 && t[0].s[mlen - 2] == '.') { wlen = 2; mlen -= 2; }
+        c = cond_num(t[0].s + mlen - 2, 2);
+        if (c >= 0 && c != 14 && mlen > 2) {
+            char buf[256];
+            struct code probe = { 0 };
+            int r;
+            snprintf(buf, sizeof buf, "%.*s%.*s%.*s", mlen - 2, t[0].s,
+                     wlen, t[0].s + t[0].len - wlen,
+                     (int)(stmt + len - (t[0].s + t[0].len)),
+                     t[0].s + t[0].len);
+            /* assembled once to see that it is ONE instruction (a
+             * condition on a sequence would cover only its first word),
+             * then for real under the condition */
+            r = one_stmt(buf, (int)strlen(buf), &probe, err, errlen);
+            free(probe.p);
+            if (r == 0 && probe.len != 4)
+                FAIL("\"%.*s\" is more than one instruction, and a "
+                     "condition cannot cover them", t[0].len, t[0].s);
+            if (r == 0) {
+                t_it(out, c, "");
+                r = one_stmt(buf, (int)strlen(buf), out, err, errlen);
+                if (r == 0 && a32_it_open())
+                    FAIL("\"%.*s\" took no condition", t[0].len, t[0].s);
+                a32_it_reset();
+            }
+            return r;
+        }
+    }
+    FAIL("asm instruction \"%.*s\" is not in the %s vocabulary",
+         t[0].len, t[0].s, t_isa_a32 ? "ARMv7-A" : "ARMv7-M");
 }
 
 int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
@@ -1287,8 +1450,10 @@ int tasm_symform(const char *stmt, struct asm_symform *f)
         f->sym_at = (int)(q - stmt); f->sym_len = n;
         snprintf(f->encode, sizeof f->encode, "movw %.*s, #0; movt %.*s, #0",
                  rdlen, rd, rdlen, rd);
-        f->site[0].off = 0; f->site[0].reloc = R_ARM_THM_MOVW_ABS_NC;
-        f->site[1].off = 4; f->site[1].reloc = R_ARM_THM_MOVT_ABS;
+        f->site[0].off = 0;
+        f->site[0].reloc = t_isa_a32 ? R_ARM_MOVW_ABS_NC : R_ARM_THM_MOVW_ABS_NC;
+        f->site[1].off = 4;
+        f->site[1].reloc = t_isa_a32 ? R_ARM_MOVT_ABS : R_ARM_THM_MOVT_ABS;
         f->nsites = 2;
         return 1;
     }
@@ -1301,7 +1466,9 @@ int tasm_symform(const char *stmt, struct asm_symform *f)
         f->sym_at = (int)(q - stmt); f->sym_len = n;
         snprintf(f->encode, sizeof f->encode, "%.4s %.*s, #0", mn, rdlen, rd);
         f->site[0].off = 0;
-        f->site[0].reloc = top ? R_ARM_THM_MOVT_ABS : R_ARM_THM_MOVW_ABS_NC;
+        f->site[0].reloc = t_isa_a32
+            ? (top ? R_ARM_MOVT_ABS : R_ARM_MOVW_ABS_NC)
+            : (top ? R_ARM_THM_MOVT_ABS : R_ARM_THM_MOVW_ABS_NC);
         f->nsites = 1;
         return 1;
     }

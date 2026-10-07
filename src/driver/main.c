@@ -23,6 +23,7 @@
 #include "../coff/write.h"
 #include "../ir/ir.h"
 #include "../arch/thumb/attrs.h"
+#include "../arch/thumb/emit.h"
 #include "../opt/opt.h"
 #include "../parse/parse.h"
 #include "../sema/sema.h"
@@ -117,7 +118,7 @@ static void print_options(FILE *out)
       "\nthe target\n"
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
-      "                         riscv32/riscv64-unknown-elf, avr,\n"
+      "                         armv7a-none-eabi, riscv32/riscv64-unknown-elf, avr,\n"
       "                         mipsel-none-elf, and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
@@ -496,9 +497,17 @@ static const struct func *alias_target(const struct unit *u,
     return NULL;
 }
 
+/* ...and ARMv7-A in ARM state (armv7a-none-eabi) is the one ARM target
+ * whose functions are A32: their symbols are even, as clang's are, and the
+ * mapping symbol is `$a`. */
+static int thumb_state(void)
+{
+    return target_get() == TARGET_THUMB && !target_arm_a32();
+}
+
 static long fn_sym_value(enum target_arch a, long code_off)
 {
-    return a == TARGET_THUMB ? code_off | 1 : code_off;
+    return a == TARGET_THUMB && thumb_state() ? code_off | 1 : code_off;
 }
 
 /* A function's symbol: its value and section from its code-buffer offset
@@ -1361,7 +1370,7 @@ static void naked_to_blocks(struct unit *u)
         else if (!f->is_static)
             ob_fmt(&b, ".global %s\n", f->name);
         ob_fmt(&b, ".type %s, %%function\n", f->name);
-        if (t == TARGET_THUMB)
+        if (t == TARGET_THUMB && thumb_state())
             ob_str(&b, ".thumb_func\n");
         ob_fmt(&b, "%s:\n", f->name);
         /* a diagnostic in the body names the line of its first asm */
@@ -3013,7 +3022,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * jump table in .text is data between two of these: `$d` where
          * it starts and the code symbol again where it ends, so that a
          * disassembler prints words, not instructions. */
-        const char *codesym = ta == TARGET_THUMB ? "$t" : "$x";
+        const char *codesym = ta != TARGET_THUMB ? "$x"
+                            : thumb_state() ? "$t" : "$a";
         elfw_add_symbol(w, codesym, 0, 0,
                         ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE),
                         (Elf64_Half)text_ndx);
@@ -3209,7 +3219,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                  * untyped label NOTYPE and even. A typed Thumb function
                  * was even, so a call through a pointer to it switched
                  * to the ARM state a Cortex-M does not have. */
-                int thumb = target_get() == TARGET_THUMB;
+                int thumb = thumb_state();
                 int st = as->type == ASMSYM_OBJECT ? STT_OBJECT
                        : as->type == ASMSYM_FUNC || !thumb ? STT_FUNC
                        : STT_NOTYPE;
@@ -3342,7 +3352,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                            text_sym, &sym);
                         /* a Thumb function's ADDRESS carries bit 0; a
                          * branch to it does not */
-                        if (target_get() == TARGET_THUMB &&
+                        if (thumb_state() &&
                             lb->syms[k].type == ASMSYM_FUNC &&
                             (!etype || etype == R_ARM_ABS32))
                             addend |= 1;
@@ -3654,6 +3664,22 @@ static void arm_float_resolve(void)
 {
     if (target_get() != TARGET_THUMB)
         return;                        /* refused where the flag was parsed */
+    /* ARMv7-A: soft float only, for now. Its units (VFPv3, VFPv4, NEON)
+     * encode as the Cortex-M ones do under a condition field, but the
+     * ABI variants and attributes for them are unchecked here. */
+    if (target_arm_a32()) {
+        if ((g_arm_fpu && strcmp(g_arm_fpu, "none") &&
+             strcmp(g_arm_fpu, "soft") && strcmp(g_arm_fpu, "auto")) ||
+            (g_arm_float_abi && strcmp(g_arm_float_abi, "soft")))
+            diag_fatal(NULL, 0, "%s%s is not supported on %s: EmbCC emits "
+                       "soft-float ARM code there (-mfloat-abi=soft): every "
+                       "floating-point operation is a call, and floating "
+                       "point travels in the core registers",
+                       g_arm_fpu ? "-mfpu=" : "-mfloat-abi=",
+                       g_arm_fpu ? g_arm_fpu : g_arm_float_abi,
+                       target_triple_now());
+        return;
+    }
     /* An -eabihf triple is shorthand for the part's FPU and the hard
      * convention; a flag that says otherwise wins, as with clang. */
     int hf = target_thumb_hf_name();
@@ -3905,6 +3931,11 @@ int main(int argc, char **argv)
      * same compiler told that board by name. */
     {
         enum target_arch a = target_get();
+        /* ...and the encoder the Thumb backend writes through: A32 for
+         * armv7a-none-eabi. Here, before anything is compiled, because the
+         * optimizer asks the encoder which constants an instruction can
+         * carry (thumb_imm_foldable) long before code generation. */
+        t_isa_a32 = target_arm_a32();
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
                               : a == TARGET_MIPS32 ? mips_op_calls_helper
@@ -4632,6 +4663,44 @@ int main(int argc, char **argv)
             if (target_get() != TARGET_THUMB)
                 diag_fatal(NULL, 0, "%s is an ARM option, and the target "
                            "is %s", argv[i], target_triple_now());
+            /* ARMv7-A in ARM state: -marm is what is emitted, -mthumb
+             * would be Thumb-2 on a Cortex-A, which EmbCC does not emit
+             * there (the Thumb-2 it emits is the Cortex-M levels'). The
+             * rest of the flags are read below as on the Cortex-M levels,
+             * with the parts and units this target has. */
+            if (target_arm_a32()) {
+                if (strcmp(argv[i], "-marm") == 0)
+                    continue;
+                if (strcmp(argv[i], "-mthumb") == 0)
+                    diag_fatal(NULL, 0, "-mthumb is not supported on %s: "
+                               "EmbCC emits ARM (A32) code for a Cortex-A; "
+                               "Thumb-2 is for the Cortex-M targets "
+                               "(thumbv7m-none-eabi and the others)",
+                               target_triple_now());
+                if (strncmp(argv[i], "-mcpu=", 6) == 0) {
+                    /* The ARMv7-A cores. All of them run what is emitted:
+                     * no divide instruction is used (the A7, A12, A15 and
+                     * A17 have one; the code calls __aeabi_idiv anyway),
+                     * and no VFP or NEON. */
+                    static const char *const a7cores[] = {
+                        "cortex-a5", "cortex-a7", "cortex-a8", "cortex-a9",
+                        "cortex-a12", "cortex-a15", "cortex-a17", "generic",
+                        NULL
+                    };
+                    int known = 0;
+                    for (int k = 0; a7cores[k]; k++)
+                        known |= strcmp(v, a7cores[k]) == 0;
+                    if (!known)
+                        diag_fatal(NULL, 0, "-mcpu=%s is not supported on %s: "
+                                   "EmbCC emits ARMv7-A (cortex-a5, a7, a8, "
+                                   "a9, a12, a15, a17) here; a Cortex-M is "
+                                   "one of the thumb targets, and an ARMv7-R "
+                                   "core's profile is not this one", v,
+                                   target_triple_now());
+                    g_arm_cpu = v;
+                    continue;
+                }
+            }
             if (strcmp(argv[i], "-marm") == 0)
                 diag_fatal(NULL, 0, "-marm is not supported: a Cortex-M "
                            "has no ARM instruction set, only Thumb");

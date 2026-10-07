@@ -93,6 +93,10 @@ unsigned char *arm_build_attributes(size_t *len)
     int em = target_thumb_em();
     int v8 = target_thumb_arch() >= 8;
     int v6 = target_thumb_arch() == 6;
+    /* ARMv7-A in ARM state: clang writes v7, profile 'A', the ARM
+     * instruction set permitted and Thumb-2 too (an A-profile core has
+     * both, whichever this object uses). */
+    int a32 = target_arm_a32();
 
     /* ---- the File sub-subsection's tag/value pairs ---- */
     buleb(&attrs, Tag_conformance);
@@ -101,15 +105,17 @@ unsigned char *arm_build_attributes(size_t *len)
     /* The ARCHITECTURE's name, not a part number: EmbCC emits the same
      * code for every part of a profile, and naming one it was not told
      * about would be a claim it cannot support. */
-    bstr(&attrs, v8 ? "8-M.MAIN" : v6 ? "6S-M" : em ? "7E-M" : "7-M");
-    btag(&attrs, Tag_CPU_arch, v8 ? CPU_ARCH_V8M_MAIN
+    bstr(&attrs, a32 ? "7-A" : v8 ? "8-M.MAIN" : v6 ? "6S-M"
+                 : em ? "7E-M" : "7-M");
+    btag(&attrs, Tag_CPU_arch, a32 ? CPU_ARCH_V7
+                             : v8 ? CPU_ARCH_V8M_MAIN
                              : v6 ? CPU_ARCH_V6S_M
                              : em ? CPU_ARCH_V7E_M : CPU_ARCH_V7);
-    btag(&attrs, Tag_CPU_arch_profile, 'M');
+    btag(&attrs, Tag_CPU_arch_profile, a32 ? 'A' : 'M');
     /* No ARM instruction set at all -- a Cortex-M is Thumb from end to
      * end, which is also why the object carries a `$t` mapping symbol
      * and no `$a`. */
-    btag(&attrs, Tag_ARM_ISA_use, 0);
+    btag(&attrs, Tag_ARM_ISA_use, a32 ? 1 : 0);
     /* 2 is Thumb-2; 3 is "the v8-M Mainline Thumb set", which is a superset.
      * A linker uses this to refuse an object built for a wider set than the
      * image's other objects, so claiming 3 on a v7-M build would let an

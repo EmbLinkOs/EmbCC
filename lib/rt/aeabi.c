@@ -1,5 +1,5 @@
 /* The ARM run-time ABI's helper functions (RTABI32, "Run-time ABI for the
- * Arm Architecture"), for every Cortex-M target: the names clang, GCC and
+ * Arm Architecture"), for every Cortex-M target and ARMv7-A: the names clang, GCC and
  * the vendors' toolchains call, so an object or library built by them --
  * CMSIS-DSP, a vendor HAL, anything compiled with arm-none-eabi-gcc --
  * links against this archive. EmbCC's own code calls the libgcc names
@@ -8,9 +8,11 @@
  *   __aeabi_memcpy[4|8], __aeabi_memmove[4|8], __aeabi_memset[4|8],
  *   __aeabi_memclr[4|8]                      block operations
  *   __aeabi_idiv, __aeabi_uidiv, __aeabi_idivmod, __aeabi_uidivmod
- *                                            (ARMv7-M and up; ARMv6-M's are
- *                                            in armv6m.c, as are its
- *                                            memcpy/memclr, lmul and shifts)
+ *                                            (where there is a divide
+ *                                            instruction; the others' are
+ *                                            in aeabidiv.c, and ARMv6-M's
+ *                                            memcpy/memclr, lmul and shifts
+ *                                            in armv6m.c)
  *   __aeabi_ldivmod, __aeabi_uldivmod        quotient in r0:r1, remainder
  *                                            in r2:r3
  *   __aeabi_lmul, __aeabi_llsl, __aeabi_llsr, __aeabi_lasr,
@@ -27,7 +29,7 @@
  * THE RULE of lib/rt holds (README.md): the block loops have a variable
  * count, and EmbCC turns no loop into a call.
  */
-#if defined(__ARM_EABI__) && defined(__thumb__)
+#if defined(__ARM_EABI__)
 
 #define WEAK __attribute__((weak))
 #define BASE __attribute__((weak, pcs("aapcs")))
@@ -103,8 +105,9 @@ WEAK void __aeabi_memclr8(void *d, size_t n) { fill(d, n, 0); }
 
 /* ---- integers -------------------------------------------------------- */
 
-#if !defined(__ARM_ARCH_6M__)
-/* ARMv7-M divides in hardware: these are one sdiv/udiv each */
+#if defined(__ARM_FEATURE_IDIV)
+/* ARMv7-M divides in hardware: these are one sdiv/udiv each. (Without
+ * the instruction `n / d` IS a call to __aeabi_idiv: aeabidiv.c.) */
 WEAK s32 __aeabi_idiv(s32 n, s32 d) { return n / d; }
 WEAK u32 __aeabi_uidiv(u32 n, u32 d) { return n / d; }
 /* the quotient in r0 and the remainder in r1: a 64-bit return's halves */
@@ -118,6 +121,8 @@ WEAK u64 __aeabi_uidivmod(u32 n, u32 d)
     u32 q = n / d;
     return (u64)q | (u64)(n - q * d) << 32;
 }
+#endif
+#if !defined(__ARM_ARCH_6M__)
 WEAK u64 __aeabi_lmul(u64 a, u64 b) { return a * b; }
 WEAK u64 __aeabi_llsl(u64 a, int n) { return n >= 64 ? 0 : a << n; }
 WEAK u64 __aeabi_llsr(u64 a, int n) { return n >= 64 ? 0 : a >> n; }

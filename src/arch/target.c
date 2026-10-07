@@ -26,6 +26,10 @@ static int g_thumb_fpu;     /* see target_thumb_fpu */
 static int g_thumb_fpu_dp;  /* see target_thumb_fpu_dp */
 static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
+/* ARMv7-A in ARM state (armv7a-none-eabi): the same AAPCS32 and data model
+ * as the Cortex-M levels -- which is why it is this target and not a new
+ * enum value -- with the A32 instruction set. See target_arm_a32. */
+static int g_arm_a32;
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
 
@@ -392,7 +396,7 @@ static const struct triple {
                         * Mainline one; 6 the ARMv6-M one -- see
                         * target_triple_of */
     int thumb_em;      /* 1 ARMv7E-M rather than ARMv7-M; 3 ARMv8-M Mainline;
-                        * 6 ARMv6-M */
+                        * 6 ARMv6-M; 7 ARMv7-A in ARM state (A32) */
 } g_triples[] = {
     /* freestanding: bare metal and EmbLinkOS (the default) */
     { "x86_64-elf",        TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
@@ -457,6 +461,17 @@ static const struct triple {
      * not link, so their runtimes cannot share a name. -mfloat-abi= and
      * -mfpu= still override what the name implies. */
     { "thumbv7em-none-eabihf", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF,    4, 1 },
+
+    /* ARMv7-A in ARM state: a Cortex-A (A7, A8, A9, A15), or a Cortex-R
+     * running A32. The same ILP32 data model and AAPCS32 as the Cortex-M
+     * levels, so a level of this target and not a new one; what differs
+     * is the instruction set the encoder writes (src/arch/thumb/a32.c,
+     * docs/internals/arm-a32-plan.md) and that base ARMv7-A has no
+     * divide. `armv7-none-eabi` is clang's spelling of the same thing. */
+    { "armv7a-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   7, 7 },
+    { "armv7a",             TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 7 },
+    { "armv7-none-eabi",    TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 7 },
+    { "armv7a-unknown-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 0, 7 },
     { "thumbv8m.main-none-eabihf", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 5, 3 },
 
     /* RISC-V, bare metal. `-unknown-elf` is the spelling the reference
@@ -531,7 +546,12 @@ int target_from_triple(const char *triple, enum target_arch *out,
                  * v7E-M/DSP instructions". */
                 size_t n = strlen(triple);
                 g_thumb_hf_name = n > 6 && !strcmp(triple + n - 6, "eabihf");
-                if (g_triples[i].thumb_em == 3) {
+                g_arm_a32 = g_triples[i].thumb_em == 7;
+                if (g_triples[i].thumb_em == 7) {
+                    /* v7-A has the DSP instructions v7E-M adds */
+                    g_thumb_arch = 7;
+                    g_thumb_em = 1;
+                } else if (g_triples[i].thumb_em == 3) {
                     g_thumb_arch = 8;
                     g_thumb_em = 1;
                 } else if (g_triples[i].thumb_em == 6) {
@@ -554,7 +574,8 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
      * sub-architecture as well, which is the only place that is true. */
     int want = 1;
     if (a == TARGET_THUMB)
-        want = g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
+        want = g_arm_a32 ? 7
+             : g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
              : g_thumb_arch == 6 ? 6
              : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
     for (int i = 0; i < g_ntriples; i++)
@@ -573,6 +594,7 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
  * the object reports about itself, which a consumer is entitled to
  * believe. */
 int target_thumb_em(void) { return g_thumb_em; }
+int target_arm_a32(void) { return g_arch == TARGET_THUMB && g_arm_a32; }
 int target_thumb_arch(void) { return g_thumb_arch; }
 int target_object_align(int is_array, long size, int align)
 {
@@ -744,12 +766,15 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
          * field is the split 11+11 offset a `bl` encodes there and not
          * the ARM-state 24-bit one. A linker told CALL would patch the
          * wrong bits of the right instruction. */
-        case RK_CALL:        return R_ARM_THM_CALL;
-        case RK_TAIL:        return R_ARM_THM_JUMP24;
+        /* ARM state (armv7a): the same acts, the A32 instructions' fields */
+        case RK_CALL:        return g_arm_a32 ? R_ARM_CALL : R_ARM_THM_CALL;
+        case RK_TAIL:        return g_arm_a32 ? R_ARM_JUMP24 : R_ARM_THM_JUMP24;
         case RK_ABS32:       return R_ARM_ABS32;
         case RK_DATA_PREL32: return R_ARM_REL32;
-        case RK_THM_MOVW:    return R_ARM_THM_MOVW_ABS_NC;
-        case RK_THM_MOVT:    return R_ARM_THM_MOVT_ABS;
+        case RK_THM_MOVW:    return g_arm_a32 ? R_ARM_MOVW_ABS_NC
+                                              : R_ARM_THM_MOVW_ABS_NC;
+        case RK_THM_MOVT:    return g_arm_a32 ? R_ARM_MOVT_ABS
+                                              : R_ARM_THM_MOVT_ABS;
         /* No ABS64: a 32-bit target has no 64-bit address to relocate,
          * and asking for one is a bug upstream rather than a kind this
          * table is merely missing. */

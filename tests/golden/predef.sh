@@ -12,13 +12,14 @@ echo "TEST-MARKER predef"
 # ONE exclusion list in tools/gen-predef.sh (asked for directly, not restated
 # here, so the test and the generator cannot drift apart).
 checked=0
-for arch in x86_64 aarch64 thumb thumbv6m riscv32 riscv64 avr mips32; do
+for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32; do
     # The triple is not always "<arch>-elf": ARMv7-M is spelled the way
     # every other toolchain spells it, and gen-predef.sh keys on the short
     # name, so the two are named apart here rather than assumed equal.
     case $arch in
         thumb)          triple=thumbv7m-none-eabi ;;
         thumbv6m)       triple=thumbv6m-none-eabi ;;
+        armv7a)         triple=armv7a-none-eabi ;;
         riscv32|riscv64) triple=$arch-unknown-elf ;;
         avr)            triple=avr ;;
         mips32)         triple=mipsel-none-elf ;;
@@ -48,6 +49,7 @@ for arch in x86_64 aarch64 thumb thumbv6m riscv32 riscv64 avr mips32; do
             x86_64)  own="__x86_64__ __LP64__" ;;
             aarch64) own="__aarch64__ __LP64__" ;;
             thumb|thumbv6m) own="__arm__ __thumb__ __ARM_EABI__ __CHAR_UNSIGNED__" ;;
+            armv7a) own="__arm__ __ARM_ARCH_7A__ __ARM_EABI__ __CHAR_UNSIGNED__" ;;
             riscv32) own="__riscv __riscv_xlen __riscv_float_abi_soft __CHAR_UNSIGNED__" ;;
             riscv64) own="__riscv __riscv_xlen __riscv_float_abi_soft __LP64__" ;;
             # AVR is the one target where an `int` is two bytes and a

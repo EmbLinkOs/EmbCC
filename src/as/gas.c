@@ -360,6 +360,16 @@ static void advance(struct gas *g, long n)
     advance_fill(g, n, 0);
 }
 
+/* ARMv7-A (armv7a-none-eabi): an ARM file is A32 -- the statements are
+ * encoded through the same tasm_assemble, which writes A32 when
+ * t_isa_a32 is set -- and its functions carry no Thumb bit, its code is
+ * `$a`, and pc reads as the instruction + 8. Every other ARM target is
+ * Thumb only. */
+static int arm_a32(const struct gas *g)
+{
+    return g->tgt->machine == EM_ARM && t_isa_a32;
+}
+
 /* `$t`/`$d` where what this section holds changes from code to data. */
 static void map_mark(struct gas *g, char kind)
 {
@@ -399,7 +409,11 @@ static void do_align(struct gas *g, long boundary)
         struct code *c = &g->secs[g->cur].c;
         while (off % boundary) {
             long left = boundary - off % boundary;
-            if (m == EM_ARM && !(off & 1) && left >= 2) {
+            if (m == EM_ARM && t_isa_a32 && !(off & 3) && left >= 4) {
+                code_byte(c, 0x00); code_byte(c, 0xf0); code_byte(c, 0x20);
+                code_byte(c, 0xe3);                              /* nop */
+                off += 4;
+            } else if (m == EM_ARM && !t_isa_a32 && !(off & 1) && left >= 2) {
                 code_byte(c, 0x00); code_byte(c, 0xbf);          /* nop */
                 off += 2;
             } else if (m == EM_RISCV && !(off & 3) && left >= 4) {
@@ -1113,7 +1127,8 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         struct code tmp = { 0 };
         char err[256];
         if (pass == 2)
-            fix_add(g, g->cur, pc, ext, R_ARM_THM_JUMP24, 0);
+            fix_add(g, g->cur, pc, ext,
+                    arm_a32(g) ? R_ARM_JUMP24 : R_ARM_THM_JUMP24, 0);
         if (g->tgt->encode("b .+0", &tmp, err, sizeof err) != 0)
             gerr(g, "%s", err);
         else
@@ -1332,8 +1347,10 @@ static int ldr_literal(struct gas *g, const char *stmt, int pass)
     else
         k = pool_entry(g, 1, v.v, v.base);
     long base = pool_base_prev(g);
-    int narrow = !g->wide[g->li] && rd <= 7 && want != 'w';
-    long off = base < 0 ? 0 : base + 4L * k - ((pc + 4) & ~3L);
+    /* (A32: one form, from the instruction + 8) */
+    int narrow = !g->wide[g->li] && rd <= 7 && want != 'w' && !arm_a32(g);
+    long off = base < 0 ? 0 : arm_a32(g) ? base + 4L * k - (pc + 8)
+             : base + 4L * k - ((pc + 4) & ~3L);
     if (narrow && t_ldr_lit16(&tmp, rd, off)) {
         emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
         free(tmp.p);
@@ -1391,7 +1408,8 @@ static void instruction(struct gas *g, char *stmt, int pass)
                 disp = strtol(d + 1, &e, 10);
             if (e && *skip_ws(e) == 0) {
                 char buf[96];
-                long off = (pc + disp) - ((pc + 4) & ~3L);
+                long off = arm_a32(g) ? disp - 8
+                         : (pc + disp) - ((pc + 4) & ~3L);
                 snprintf(buf, sizeof buf, "ldr %.*s, [pc, #%ld]",
                          (int)(c - r), r, off);
                 free(text);
@@ -2386,7 +2404,11 @@ static int directive(struct gas *g, char *p, int pass)
      * state instead of faulting. GNU as does the same for a label typed
      * %function in Thumb code, and so does write_object below. */
     if (DIR(".thumb_func")) {
-        if (g->tgt->machine == EM_ARM)
+        if (arm_a32(g))
+            gerr(g, ".thumb_func: EmbCC assembles ARM (A32) code for %s; "
+                 "Thumb code belongs to the thumb targets",
+                 target_triple_now());
+        else if (g->tgt->machine == EM_ARM)
             g->thumb_func_next = 1;
         return 1;
     }
@@ -2490,13 +2512,24 @@ static int directive(struct gas *g, char *p, int pass)
     }
     /* ARM state does not exist on an M-profile part: refused rather than
      * assembled as Thumb, which would be a different program. */
-    if (DIR(".arm") || (DIR(".code") && skip_ws(arg)[0] == '3')) {
+    /* ...and on ARMv7-A the file is A32 and stays so: Thumb in it would
+     * need its own encoder state and interworking, which are not here. */
+    if (arm_a32(g) && (DIR(".thumb") || DIR(".thumb_func") ||
+                       DIR(".force_thumb") ||
+                       (DIR(".code") && skip_ws(arg)[0] == '1'))) {
+        gerr(g, "%s: EmbCC assembles ARM (A32) code for %s; Thumb code "
+             "belongs to the thumb targets", name, target_triple_now());
+        return 1;
+    }
+    if (!arm_a32(g) &&
+        (DIR(".arm") || (DIR(".code") && skip_ws(arg)[0] == '3'))) {
         gerr(g, "%s: an M-profile core has no ARM state; this file is for "
              "an A- or R-profile one", DIR(".arm") ? ".arm" : ".code 32");
         return 1;
     }
     if (DIR(".file") || DIR(".ident") || DIR(".cfi_startproc") ||
         DIR(".cfi_endproc") || DIR(".syntax") || DIR(".thumb") ||
+        DIR(".arm") ||
         DIR(".arch") || DIR(".attribute") || DIR(".option") ||
         DIR(".code") || DIR(".fpu") || DIR(".eabi_attribute") ||
         DIR(".cpu") || DIR(".arch_extension") || DIR(".object_arch") ||
@@ -2712,7 +2745,9 @@ static int directive(struct gas *g, char *p, int pass)
             long v;
             if (!gx_abs_now(g, &q, pass, &v, "an instruction"))
                 return 1;
-            if (g->tgt->machine == EM_ARM) {
+            if (arm_a32(g)) {
+                emit_int(g, v & 0xffffffffL, 4);      /* an A32 word */
+            } else if (g->tgt->machine == EM_ARM) {
                 int wide = DIR(".inst.w") || (!DIR(".inst.n") && v > 0xffff);
                 if (wide) emit_int(g, (v >> 16) & 0xffff, 2);
                 emit_int(g, v & 0xffff, 2);
@@ -3062,7 +3097,8 @@ static int write_object(struct gas *g, const char *out_path)
             hascode[g->maps[i].sec] = 1;
     for (i = 0; i < g->nmaps; i++)
         if (ndx[g->maps[i].sec] && hascode[g->maps[i].sec])
-            elfw_add_symbol(w, g->maps[i].kind == 't' ? "$t" : "$d",
+            elfw_add_symbol(w, g->maps[i].kind != 't' ? "$d"
+                               : arm_a32(g) ? "$a" : "$t",
                             (Elf64_Addr)g->maps[i].off, 0,
                             (Elf64_Uchar)((STB_LOCAL << 4) | STT_NOTYPE),
                             (Elf64_Half)ndx[g->maps[i].sec]);
@@ -3088,8 +3124,8 @@ static int write_object(struct gas *g, const char *out_path)
             /* A function in Thumb code: the interworking bit. Every
              * function here is Thumb (M-profile has no ARM state), in
              * whichever section it was placed. */
-            long thumb = g->tgt->machine == EM_ARM && s->is_func &&
-                         s->sec >= 0;
+            long thumb = g->tgt->machine == EM_ARM && !arm_a32(g) &&
+                         s->is_func && s->sec >= 0;
             s->elf_ndx = elfw_add_symbol(w, s->name,
                                          (Elf64_Addr)(s->sec >= 0 ?
                                                       (s->value | thumb)
@@ -3192,6 +3228,16 @@ static const struct gas_target THUMB_GAS = {
     1, tasm_is_word, tasm_reset, tasm_open
 };
 
+/* ARMv7-A in ARM state: the same assembler, which writes A32 under
+ * t_isa_a32, and `bl sym` carrying R_ARM_CALL. */
+static const struct gas_target A32_GAS = {
+    EM_ARM, 1, tasm_assemble, tasm_gpr,
+    R_ARM_CALL, 0, 0,
+    R_ARM_ABS32, 0,
+    0, 0, tasm_symform, '@',
+    1, tasm_is_word, tasm_reset, tasm_open
+};
+
 /* aarch64. `bl sym` carries R_AARCH64_CALL26, one instruction and one
  * relocation, the same shape ARM uses -- so the driver's ARM branch
  * covers it once the machine is allowed through. */
@@ -3238,7 +3284,7 @@ static const struct gas_target *target_for(void)
     case TARGET_MIPS32: return &MIPS_GAS;
     case TARGET_AVR: return &AVR_GAS;
     case TARGET_RISCV32: case TARGET_RISCV64: return &RISCV_GAS;
-    case TARGET_THUMB: return &THUMB_GAS;
+    case TARGET_THUMB: return t_isa_a32 ? &A32_GAS : &THUMB_GAS;
     case TARGET_AARCH64: return &A64_GAS;
     default: return NULL;
     }
@@ -3458,7 +3504,7 @@ int gas_assemble_block(struct topasm *ta)
             if (s && !s->is_global && s->sec == SEC_TEXT) {
                 r->target = NULL;                 /* the block itself */
                 r->addend += s->value;
-                if (t->machine == EM_ARM && s->is_func &&
+                if (t->machine == EM_ARM && !t_isa_a32 && s->is_func &&
                     f->type == R_ARM_ABS32)
                     r->addend |= 1;
             } else {
