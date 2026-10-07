@@ -29,6 +29,7 @@
 #include "../arch/tricore/emit.h"
 #include "../arch/xtensa/emit.h"
 #include "../arch/ppc/emit.h"
+#include "../arch/rx/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -613,11 +614,11 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
             e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS &&
             e32->e_machine != EM_TRICORE && e32->e_machine != EM_XTENSA &&
-            e32->e_machine != EM_PPC)
+            e32->e_machine != EM_PPC && e32->e_machine != EM_RX)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
                 "RV32 (EM_RISCV), AVR (EM_AVR), MIPS (EM_MIPS), TriCore "
-                "(EM_TRICORE), Xtensa (EM_XTENSA) and PowerPC (EM_PPC) are "
-                "supported", name,
+                "(EM_TRICORE), Xtensa (EM_XTENSA), PowerPC (EM_PPC) and RX "
+                "(EM_RX) are supported", name,
                 (unsigned)e32->e_machine);
         if (e32->e_machine == EM_TRICORE &&
             e32->e_ident[EI_DATA] != ELFDATA2LSB)
@@ -627,6 +628,12 @@ static struct object *parse_object(const char *name, unsigned char *buf,
             e32->e_ident[EI_DATA] != ELFDATA2LSB)
             die("%s: a big-endian Xtensa object; this linker links "
                 "little-endian Xtensa only", name);
+        if (e32->e_machine == EM_RX &&
+            (e32->e_ident[EI_DATA] != ELFDATA2LSB ||
+             (e32->e_flags & E_FLAG_RX_64BIT_DOUBLES)))
+            die("%s: an RX object that is big-endian or built with "
+                "-m64bit-doubles; this linker links little-endian RX code "
+                "with 32-bit doubles only", name);
         /* o32 only, in either byte order; and big-endian only there */
         if (e32->e_machine == EM_MIPS &&
             (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32)
@@ -1065,6 +1072,7 @@ static void add_entry_stub(struct linker *l)
               : l->machine == EM_TRICORE ? TC_STUB_SIZE
               : l->machine == EM_XTENSA ? 52
               : l->machine == EM_PPC ? 32
+              : l->machine == EM_RX ? 14
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -1167,6 +1175,14 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         ppc_bctr(&c);
         return;
     }
+    if (l->machine == EM_RX) {
+        /* mov.l #top, r0; mov.l #entry, r14; jmp r14 -- both moves in
+         * their six-byte form, so the size is known before layout */
+        rx_mov_abs(&c, RX_SP, (unsigned long)l->stack_top);
+        rx_mov_abs(&c, RX_R14, (unsigned long)entry);
+        rx_jmp(&c, RX_R14);
+        return;
+    }
     if (l->machine == EM_MIPS) {
         mips_li(&c, MIPS_SP, (long long)l->stack_top);
         mips_lui(&c, MIPS_T9, (unsigned)(entry >> 16) & 0xffff);
@@ -1237,6 +1253,8 @@ static void add_object(struct linker *l, struct object *o)
          * is a property of each object's code and not of the image */
         l->eflags = l->eflags ? l->eflags
                               : o->eflags & (EF_MIPS_ARCH_MASK | 0xf000UL);
+    else if (o->machine == EM_RX)
+        l->eflags = l->eflags ? l->eflags : o->eflags;
     else if (o->machine == EM_AVR && !(l->eflags & EF_AVR_ARCH_MASK))
         l->eflags = o->eflags & EF_AVR_ARCH_MASK;
     else if (o->machine == EM_LOONGARCH)
@@ -1448,6 +1466,12 @@ static void add_symbols(struct linker *l, struct object *o)
                 g->obj ? g->obj->name : "?", o->name);
         if (g->defined && !g->weak && weak)
             continue; /* keep the strong one already present */
+        /* Two weak definitions: the first one the link meets stands, as
+         * GNU ld and lld have it -- a harness's weak write() given ahead
+         * of lib/libc was replaced by libc's own weak default when
+         * __os_write pulled that member in, and stdout went nowhere. */
+        if (g->defined && !g->common && g->weak && weak && g->obj)
+            continue;
 
         g->defined = 1;
         g->common = 0;
@@ -1929,7 +1953,8 @@ static void layout(struct linker *l, struct osec_bound *b,
      * vector. Both ends are kept on word boundaries, the padding inside
      * the image, as a GNU script's ALIGN(4) puts it. */
     if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
-        l->machine == EM_XTENSA || l->machine == EM_PPC)
+        l->machine == EM_XTENSA || l->machine == EM_PPC ||
+        l->machine == EM_RX)
         va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
@@ -1964,7 +1989,8 @@ static void layout(struct linker *l, struct osec_bound *b,
         va += g->size;
     }
     if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
-        l->machine == EM_XTENSA || l->machine == EM_PPC)
+        l->machine == EM_XTENSA || l->machine == EM_PPC ||
+        l->machine == EM_RX)
         va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
@@ -2010,6 +2036,24 @@ static void define_linker_symbol(struct linker *l, const char *name,
     g->common = 0;
     g->insec = -1;
     g->value = value;
+    /* RX: C names carry a leading underscore in the object (`__bss_start`
+     * in C is `___bss_start`), so each linker symbol is given under that
+     * spelling as well -- when something refers to it. */
+    if (l->machine == EM_RX && strlen(name) < 250) {
+        char un[256];
+        un[0] = '_';
+        memcpy(un + 1, name, strlen(name) + 1);
+        if (sym_find(l, un)) {
+            struct symbol *u = sym_find(l, un);
+            if (!((u->defined || u->common) && u->obj)) {
+                u->defined = 1;
+                u->weak = 0;
+                u->common = 0;
+                u->insec = -1;
+                u->value = value;
+            }
+        }
+    }
 }
 
 /* The bracket symbols crt0 walks, each pair the bounds of its group. An
@@ -2432,6 +2476,59 @@ static void need_range(struct linker *l, struct object *o, const char *rel,
         "to %lld; the image is laid out beyond what this code can reach",
         o->name, rel, l->rel_sym ? l->rel_sym : "?", v,
         (unsigned long long)v, lo, hi);
+}
+
+/* ---- RX ------------------------------------------------------------------
+ *
+ * RELA. The PC-relative fields are measured from the branch's opcode, one
+ * byte before the field (binutils' elf32-rx.c adds the 1): S + A - P + 1.
+ * Every field is little-endian. R_RX_RH_RELAX is a hint for a relaxing
+ * linker, which this is not; the other linker-relaxation, small-data and
+ * expression relocations GNU as can write are refused by name. */
+static void apply_rx(struct linker *l, struct object *o, unsigned type,
+                     unsigned char *loc, Elf64_Addr S, long long A,
+                     Elf64_Addr P)
+{
+    long long V = (long long)S + A;
+    long long d = V - (long long)P + 1;
+    switch (type) {
+    case R_RX_NONE:
+    case R_RX_RH_RELAX:
+        return;
+    case R_RX_DIR32:
+        need_range(l, o, "R_RX_DIR32", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_RX_DIR24S_PCREL:
+        need_range(l, o, "R_RX_DIR24S_PCREL", d, -0x800000LL, 0x7fffffLL);
+        loc[0] = (unsigned char)d;
+        loc[1] = (unsigned char)(d >> 8);
+        loc[2] = (unsigned char)(d >> 16);
+        return;
+    case R_RX_DIR16S_PCREL:
+        need_range(l, o, "R_RX_DIR16S_PCREL", d, -32768, 32767);
+        loc[0] = (unsigned char)d;
+        loc[1] = (unsigned char)(d >> 8);
+        return;
+    case R_RX_DIR8S_PCREL:
+        need_range(l, o, "R_RX_DIR8S_PCREL", d, -128, 127);
+        loc[0] = (unsigned char)d;
+        return;
+    case R_RX_DIR16: case R_RX_DIR16U: case R_RX_DIR16S:
+        need_range(l, o, "R_RX_DIR16", V, -32768, 65535);
+        loc[0] = (unsigned char)V;
+        loc[1] = (unsigned char)(V >> 8);
+        return;
+    case R_RX_DIR8: case R_RX_DIR8U: case R_RX_DIR8S:
+        need_range(l, o, "R_RX_DIR8", V, -128, 255);
+        loc[0] = (unsigned char)V;
+        return;
+    default:
+        die("%s: unsupported RX relocation type %u (a linker-relaxation, "
+            "small-data or expression relocation; this linker applies "
+            "R_RX_DIR32/24S/16/8 and their PC-relative forms)", o->name,
+            type);
+    }
 }
 
 static void apply_riscv(struct linker *l, struct object *o, unsigned type,
@@ -3397,6 +3494,10 @@ static void apply_relocs(struct linker *l, struct object *o)
                 apply_ppc(l, o, type, loc, S, A, P);
                 continue;
             }
+            if (o->machine == EM_RX) {
+                apply_rx(l, o, type, loc, S, A, P);
+                continue;
+            }
             if (o->machine == EM_MIPS) {
                 struct mips_relctx mc;
                 mc.rbytes = rbytes;
@@ -3833,7 +3934,7 @@ static void write_exec(struct linker *l, const char *out,
     eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5
                 : l->machine == EM_RISCV || l->machine == EM_AVR ||
                   l->machine == EM_MIPS || l->machine == EM_LOONGARCH ||
-                  l->machine == EM_TRICORE
+                  l->machine == EM_TRICORE || l->machine == EM_RX
                 ? l->eflags
                 : 0;
     eh->e_phoff = ehsz;
@@ -5751,6 +5852,17 @@ int embld_link(const char **inputs, int ninputs, const char *out,
      * one. Refused on a machine that does not need it rather than
      * silently ignored: -Tstack on ARM would mean the caller believes
      * something about the image that is not true. */
+    /* RX: a C function `_start` is the object's `__start`; an entry
+     * named the C way is found under that spelling. */
+    if (l.machine == EM_RX && !sym_find(&l, l.entry)) {
+        char *un = xmalloc(strlen(l.entry) + 2);
+        un[0] = '_';
+        memcpy(un + 1, l.entry, strlen(l.entry) + 1);
+        if (sym_find(&l, un))
+            l.entry = un;
+        else
+            free(un);
+    }
     if (l.gc_sections)
         gc_sections(&l, l.gc_undefs, l.gc_nundefs);
     if (opts && opts->have_stack) {
@@ -5761,9 +5873,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
         if (l.machine != EM_RISCV && l.machine != EM_MIPS &&
             l.machine != EM_LOONGARCH && l.machine != EM_ARM &&
             l.machine != EM_TRICORE && l.machine != EM_XTENSA &&
-            l.machine != EM_PPC)
-            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore, Xtensa and "
-                "PowerPC "
+            l.machine != EM_PPC && l.machine != EM_RX)
+            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A, TriCore, Xtensa, "
+                "PowerPC and RX "
                 "option: "
                 "every other target here starts with a stack pointer already "
                 "set (a Cortex-M reads its own from the vector table)");

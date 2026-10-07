@@ -75,7 +75,11 @@ enum target_arch {
      * (powerpc-none-eabi): e500/e200-class cores. ILP32 with an UNSIGNED
      * char, long double = double, and the only target here whose byte
      * order has no little-endian twin. docs/internals/powerpc-plan.md. */
-    TARGET_PPC32 = 10
+    TARGET_PPC32 = 10,
+    /* Renesas RX (RXv1, the RX600/RX610 cores), little-endian, GCC's
+     * rx-elf ABI with 32-bit doubles (docs/internals/rx-plan.md). 8 and
+     * not 7, which another branch gives LoongArch64. */
+    TARGET_RX = 14
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -182,6 +186,13 @@ int target_wchar_unsigned(void);  /* wchar_t's signedness */
 /* wchar_t's width: int's, except on Xtensa, where GCC's xtensa-elf makes
  * it a 16-bit unsigned short (gcc/config/xtensa/elf.h). */
 int target_wchar_size(void);
+/* size_t, ptrdiff_t and wchar_t are `long` types rather than `int` ones,
+ * where the two have one width: GCC's rx-elf (newlib-stdint) says
+ * `long unsigned int`, `long int` and `long int`. */
+int target_long_size_types(void);
+/* Bit-fields in the Microsoft layout (GCC's TARGET_MS_BITFIELD_LAYOUT_P),
+ * for a struct that is not packed: RX. */
+int target_ms_bitfields(void);
 
 /* Whether __int128 exists at all. It does not on a 32-bit target: the
  * type needs a register pair per half and libgcc's __divti3 family is
@@ -217,6 +228,7 @@ int la_op_calls_helper(const struct ir_ins *i);     /* src/arch/loongarch/codege
 int tc_op_calls_helper(const struct ir_ins *i);     /* src/arch/tricore/codegen.c */
 int xtensa_op_calls_helper(const struct ir_ins *i); /* src/arch/xtensa/codegen.c */
 int ppc_op_calls_helper(const struct ir_ins *i);    /* src/arch/ppc/codegen.c */
+int rx_op_calls_helper(const struct ir_ins *i);     /* src/arch/rx/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.

@@ -367,6 +367,29 @@ typedef struct {
 /* AVR, from the ELF machine registry. */
 #define EM_AVR 83
 
+/* Renesas RX, from the ELF machine registry, and the relocation types
+ * and e_flags binutils' include/elf/rx.h defines. EmbCC writes DIR32 and
+ * DIR24S_PCREL; the 16- and 8-bit PC-relative ones are what GNU as writes
+ * for bsr.w/bra.w and bCND.b against another section's symbol. A
+ * PC-relative field is measured from the opcode, one byte before it
+ * (docs/internals/rx-plan.md). */
+#define EM_RX 173
+#define R_RX_NONE          0x00
+#define R_RX_DIR32         0x01
+#define R_RX_DIR24S        0x02
+#define R_RX_DIR16         0x03
+#define R_RX_DIR16U        0x04
+#define R_RX_DIR16S        0x05
+#define R_RX_DIR8          0x06
+#define R_RX_DIR8U         0x07
+#define R_RX_DIR8S         0x08
+#define R_RX_DIR24S_PCREL  0x09
+#define R_RX_DIR16S_PCREL  0x0a
+#define R_RX_DIR8S_PCREL   0x0b
+#define R_RX_RH_RELAX      0x2d
+#define E_FLAG_RX_64BIT_DOUBLES 0x01
+#define E_FLAG_RX_ABI           0x08
+
 /* MIPS, from the ELF machine registry: one number for every width and
  * byte order (the class and EI_DATA say which). */
 #define EM_MIPS 8

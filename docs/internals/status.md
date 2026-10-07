@@ -29,6 +29,11 @@ levels are in [C language](../manual/c-language.md) and
   a bare-metal C target with EmbCC's compiler runtime, C library,
   assembler and linker, run on QEMU's virt board. C++ compiles with
   `-fno-exceptions`.
+- **Renesas RX** (`rx-none-elf`, RXv1, GCC's rx-elf ABI with 32-bit
+  doubles and no FPU) is a bare-metal C target with EmbCC's compiler
+  runtime, C library and linker, run on QEMU's gdbsim-r5f562n8 board.
+  No assembler yet (inline, file-scope, `.s` and `-S` are refused). C++
+  is not supported.
 - **Windows x86-64** produces COFF objects that are not yet compatible
   with the Microsoft x64 ABI. EmbCC warns on every such compile.
 

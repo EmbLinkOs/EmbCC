@@ -69,6 +69,8 @@
 #define DW_REG_FB_ARM         7      /* r7: the frame base under alloca */
 #define DW_REG_FB_RISCV       8      /* x8, s0: the same */
 #define DW_REG_SP_MIPS        29     /* $29 */
+#define DW_REG_SP_RX          0      /* r0 */
+#define DW_REG_FB_RX          13     /* r13: the frame base under alloca */
 #define DW_REG_FB_MIPS        30     /* $30, fp/s8: the same */
 #define DW_REG_SP_LA           3     /* $r3, sp: LoongArch numbers r0-r31 0-31 */
 #define DW_REG_FB_LA          22     /* $r22, fp: the VLA frame base */
@@ -577,25 +579,29 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
             if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
                 a == TARGET_RISCV64 || a == TARGET_MIPS32 ||
                 a == TARGET_LOONGARCH64 || a == TARGET_TRICORE ||
-                a == TARGET_XTENSA || a == TARGET_PPC32) {
+                a == TARGET_XTENSA || a == TARGET_PPC32 ||
+                a == TARGET_RX) {
                 struct dbuf e = { 0, 0, 0 };
                 int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
                 int la = a == TARGET_LOONGARCH64, tc = a == TARGET_TRICORE;
                 int xt = a == TARGET_XTENSA, ppc = a == TARGET_PPC32;
+                int rx = a == TARGET_RX;
                 db_u8(&e, DW_OP_breg(fn->has_alloca
                                      ? (thumb ? DW_REG_FB_ARM
                                         : mips ? DW_REG_FB_MIPS
                                         : la ? DW_REG_FB_LA
                                         : tc ? DW_REG_FB_TRICORE
                                         : xt ? DW_REG_FB_XTENSA
-                                    : ppc ? DW_REG_FB_PPC
+                                        : ppc ? DW_REG_FB_PPC
+                                        : rx ? DW_REG_FB_RX
                                              : DW_REG_FB_RISCV)
                                      : (thumb ? DW_REG_SP_ARM
                                         : mips ? DW_REG_SP_MIPS
                                         : la ? DW_REG_SP_LA
                                         : tc ? DW_REG_SP_TRICORE
                                         : xt ? DW_REG_SP_XTENSA
-                                    : ppc ? DW_REG_SP_PPC
+                                        : ppc ? DW_REG_SP_PPC
+                                        : rx ? DW_REG_SP_RX
                                              : DW_REG_SP_RISCV)));
                 db_sleb(&e, 0);
                 db_uleb(b, (unsigned long)e.len);

@@ -127,7 +127,7 @@ static void print_options(FILE *out)
     fputs(
       "                         mipsel-none-elf, mips-none-elf,\n"
       "                         loongarch64-unknown-elf, xtensa-none-elf,\n"
-      "                         powerpc-none-eabi, and the\n"
+      "                         powerpc-none-eabi, rx-none-elf, and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
       "                         them all\n",
@@ -778,7 +778,8 @@ static int firmware_target(void)
             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
             target_get() == TARGET_MIPS32 || target_get() == TARGET_LOONGARCH64 ||
             target_get() == TARGET_TRICORE ||
-            target_get() == TARGET_XTENSA || target_get() == TARGET_PPC32);
+            target_get() == TARGET_XTENSA || target_get() == TARGET_PPC32 ||
+            target_get() == TARGET_RX);
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -1614,6 +1615,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * The placement pass further down reuses these already-assembled bytes. */
     if (blocks_by_gas())
         naked_to_blocks(u);
+    if (u->topasm && target_get() == TARGET_RX)
+        diag_fatal(in, u->topasm->line, "file-scope assembly is not "
+                   "supported for rx-none-elf yet: EmbCC has no RX "
+                   "assembler");
     for (struct topasm *ta = u->topasm; ta; ta = ta->next) {
         /* x86-64's mnemonics are what topasm.c encodes; the directives --
          * labels and .byte/.long/.quad -- are not, so on AArch64 a block
@@ -1879,6 +1884,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit_xtensa(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                             &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                             opt_level >= 1);
+    else if (ta == TARGET_RX)
+        codegen_unit_rx(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                        &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                        opt_level >= 1);
     else if (ta == TARGET_MIPS32)
         codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -2314,6 +2323,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "xtensa-none-elf yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
                             "EmbCC writes no Xtensa .eh_frame");
+    if (unwind && ta == TARGET_RX)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "rx-none-elf yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no RX .eh_frame");
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
@@ -2327,6 +2341,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         diag_fatal(NULL, 0, "-S is not supported for xtensa-none-elf yet: "
                             "compile with -c (there is no Xtensa assembler "
                             "here to check the text against)");
+    /* RX instructions are one to eight bytes with no length rule short of
+     * decoding, and EmbCC has no RX assembler to read -S back: refused
+     * rather than written as bytes no tool here can check. */
+    if (want_asm && ta == TARGET_RX)
+        diag_fatal(NULL, 0, "-S is not supported for rx-none-elf yet: there "
+                            "is no RX assembler in EmbCC to read it back "
+                            "(use -c)");
     if (want_asm) {
         /* Every target, now. What -S emits is the OBJECT's bytes as
          * .byte directives with the relocations attached explicitly --
@@ -4073,6 +4094,7 @@ int main(int argc, char **argv)
                               : a == TARGET_TRICORE ? tc_op_calls_helper
                               : a == TARGET_XTENSA ? xtensa_op_calls_helper
                               : a == TARGET_PPC32 ? ppc_op_calls_helper
+                              : a == TARGET_RX ? rx_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
@@ -4938,6 +4960,81 @@ int main(int argc, char **argv)
                            "data in small-data sections and addresses "
                            "nothing through r2 or r13 (-msdata=none, -G0)",
                            argv[i]);
+            }
+            continue;
+        } else if (target_get() == TARGET_RX &&
+                   (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                    strncmp(argv[i], "-m32bit-doubles", 15) == 0 ||
+                    strcmp(argv[i], "-m64bit-doubles") == 0 ||
+                    strcmp(argv[i], "-nofpu") == 0 ||
+                    strcmp(argv[i], "-mnofpu") == 0 ||
+                    strcmp(argv[i], "-fpu") == 0 ||
+                    strcmp(argv[i], "-mlittle-endian-data") == 0 ||
+                    strcmp(argv[i], "-mbig-endian-data") == 0 ||
+                    strcmp(argv[i], "-mrx-abi") == 0 ||
+                    strcmp(argv[i], "-mgcc-abi") == 0 ||
+                    strncmp(argv[i], "-msmall-data-limit=", 19) == 0 ||
+                    strcmp(argv[i], "-mpid") == 0 ||
+                    strcmp(argv[i], "-mno-pid") == 0 ||
+                    strncmp(argv[i], "-mint-register=", 15) == 0 ||
+                    strncmp(argv[i], "-mmax-constant-size=", 20) == 0 ||
+                    strcmp(argv[i], "-mallow-string-insns") == 0 ||
+                    strcmp(argv[i], "-mno-allow-string-insns") == 0 ||
+                    strcmp(argv[i], "-mas100-syntax") == 0 ||
+                    strcmp(argv[i], "-mrelax") == 0)) {
+            /* The flags an RX build passes (GCC's rx-elf ones). EmbCC
+             * emits ONE configuration -- RXv1, little-endian data, GCC's
+             * RX ABI with 32-bit doubles, no FPU instructions -- so each
+             * flag either says that and is accepted, or asks for another
+             * and is refused by name: an object built otherwise would
+             * link and then disagree with its callers about doubles, byte
+             * order or a reserved register. */
+            const char *a = argv[i];
+            if (strncmp(a, "-mcpu=", 6) == 0) {
+                const char *v = a + 6;
+                if (strcmp(v, "rx600") && strcmp(v, "rx610") &&
+                    strcmp(v, "rx200") && strcmp(v, "rx100") &&
+                    strcmp(v, "RX600") && strcmp(v, "RX610") &&
+                    strcmp(v, "RX200") && strcmp(v, "RX100"))
+                    diag_fatal(NULL, 0, "%s is not an RXv1 core: EmbCC "
+                               "emits the RXv1 instruction set (rx600, "
+                               "rx610, rx200, rx100)", a);
+            } else if (!strcmp(a, "-m64bit-doubles")) {
+                diag_fatal(NULL, 0, "-m64bit-doubles is not supported: EmbCC "
+                           "emits GCC's rx-elf default, -m32bit-doubles "
+                           "(double is binary32), and a 64-bit double "
+                           "changes the ABI of every double");
+            } else if (!strcmp(a, "-fpu")) {
+                diag_fatal(NULL, 0, "-fpu is not supported: EmbCC's RX code "
+                           "is soft float (-nofpu); the RX600 FPU "
+                           "instructions are not emitted yet");
+            } else if (!strcmp(a, "-mbig-endian-data")) {
+                diag_fatal(NULL, 0, "-mbig-endian-data is not supported: the "
+                           "RX target is little-endian only");
+            } else if (!strcmp(a, "-mgcc-abi")) {
+                diag_fatal(NULL, 0, "-mgcc-abi is not supported: EmbCC "
+                           "passes stacked arguments naturally aligned, "
+                           "GCC's default -mrx-abi");
+            } else if (strncmp(a, "-msmall-data-limit=", 19) == 0 &&
+                       strcmp(a + 19, "0") != 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no data "
+                           "in a small-data area addressed from a base "
+                           "register", a);
+            } else if (!strcmp(a, "-mpid")) {
+                diag_fatal(NULL, 0, "-mpid is not supported: EmbCC's RX code "
+                           "addresses data absolutely, not position-"
+                           "independently");
+            } else if (strncmp(a, "-mint-register=", 15) == 0 &&
+                       strcmp(a + 15, "0") != 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC reserves no "
+                           "registers for interrupt handlers", a);
+            } else if (!strcmp(a, "-mno-allow-string-insns")) {
+                diag_fatal(NULL, 0, "-mno-allow-string-insns is not "
+                           "supported: EmbCC copies large blocks with smovf "
+                           "and sstr");
+            } else if (!strcmp(a, "-mas100-syntax")) {
+                diag_fatal(NULL, 0, "-mas100-syntax is not supported: EmbCC "
+                           "writes objects, not Renesas AS100 assembly");
             }
             continue;
         } else if (target_get() == TARGET_MIPS32 &&
