@@ -328,7 +328,14 @@ struct ir_ins {
                                 * (a Homogeneous Floating-point Aggregate
                                 * travels in v registers), which the SysV
                                 * classes above cannot express */
-    } argv[MAX_PARAMS];
+    } *argv;                 /* IR_CALL: nargs of them, out of line. They
+                              * were MAX_PARAMS inline in EVERY instruction
+                              * -- 2.6 KB of an ir_ins's 2.8 -- and each pass
+                              * that rebuilds a function copies all of it.
+                              * A call's array is its own: an instruction
+                              * copied while the original stays (the
+                              * inliner) takes ir_args_copy, and the verifier
+                              * refuses two live calls sharing one. */
     int nargs;
     /* IR_CALL returning a struct: its size, classification, and the
      * caller-side scratch the result lands in. nclass 0 means MEMORY,
@@ -575,6 +582,9 @@ void ir_print_unit(struct outbuf *b, const struct ir_unit *u);
 void ir_print_func(struct outbuf *b, const struct ir_func *f);
 /* An opcode's mnemonic, so a diagnostic can name the instruction. */
 const char *ir_opname(enum ir_op op);
+/* A call's argument array of its own, with n entries (at least one) */
+struct ir_arg *ir_args_new(int n);
+struct ir_arg *ir_args_copy(const struct ir_arg *a, int n);
 /* The inverse, for the parser (src/ir/irparse.c): -1 when unknown. */
 int ir_op_from_name(const char *n);
 /* Read EmbIR back from its textual form (src/ir/irparse.c). `text` is

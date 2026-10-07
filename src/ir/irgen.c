@@ -3378,6 +3378,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         i->sret_first = e->callee ? e->callee->sret_first
                                   : e->lhs->ty->pointee->sret_first;
         i->nargs = e->nargs;
+        i->argv = ir_args_new(e->nargs);
 
         /* Classify every argument here, where the types still exist;
          * codegen only places what it is told. MEMORY-class arguments

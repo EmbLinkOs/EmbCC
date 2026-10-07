@@ -447,6 +447,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                 perr(p, "@name or [%vreg] as the call target");
             }
             /* the argument list, `%1, %2)` possibly split across words */
+            in->argv = ir_args_new(MAX_PARAMS);
             char *arg = lp + 1;
             for (;;) {
                 while (*arg == ' ' || *arg == ',')
@@ -455,6 +456,8 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                     break;
                 if (*arg != '%')
                     perr(p, "a %vreg argument");
+                if (in->nargs >= MAX_PARAMS)
+                    perr(p, "at most MAX_PARAMS arguments");
                 in->argv[in->nargs++].vreg = (int)strtol(arg + 1, &arg, 10);
                 while (*arg == ',' || *arg == ' ')
                     arg++;
