@@ -1072,7 +1072,8 @@ GNU as (`MRS %0, primask`). The two-operand forms (`adds r0, #1`,
 `lsls r2, #2`) are the three-operand ones with the destination repeated.
 Loads and stores take `[Rn, Rm]` and `[Rn, Rm, lsl #N]` (N 0 to 3) too.
 The barriers take `sy` or its number `0xF`; on ARMv8-M, `mrs`/`msr` also
-name `msplim`, `psplim` and the TrustZone `_ns` registers.
+name `msplim`, `psplim` and the TrustZone `_ns` registers (see
+[ARMv8-M stack limits](#armv8-m-stack-limits)).
 
 Points that differ from the GNU assembler (in inline asm; a `.s`/`.S`
 file is assembled as GNU as does it, see [embas](tools/embas.md#gnu-syntax-assembly)):
@@ -1092,8 +1093,42 @@ There is no `ldrd` or `strd`, no `clrex`, no byte or
 halfword exclusives, no extend, bit-field, multiply-accumulate or
 long-multiply instruction, and no floating-point instruction beyond
 `vmov`, `vldm`/`vstm` and `vpush`/`vpop` (`vmrs`, `vmsr`, `vldr`, ...).
-The ARMv8-M registers `msplim` and `psplim` and the ARMv8-M security
-instructions are not available on the `thumbv8m.main` triples either.
+The ARMv8-M security instructions (`sg`, `tt`, `tta`, `ttt`, `ttat`,
+`bxns`, `blxns`) are not available on the `thumbv8m.main` triples either.
+
+### ARMv8-M stack limits
+
+On the `thumbv8m.main` triples, `mrs` and `msr` name the stack-limit
+registers, and the core enforces them. A push or a stack-pointer
+adjustment that would take the stack below its limit is not made, and
+takes a UsageFault with CFSR.STKOF (bit 20) set instead. An RTOS sets
+PSPLIM to the bottom of each task's stack, so an overflow faults rather
+than overwriting whatever lies below.
+
+| Name | Register |
+|---|---|
+| `msplim` | the main stack's limit |
+| `psplim` | the process stack's limit |
+| `msplim_ns`, `psplim_ns` | the Non-secure limits, from Secure code |
+
+```c
+static inline void set_psplim(unsigned limit)
+{
+    __asm__ volatile("msr psplim, %0" : : "r"(limit));
+}
+
+static inline unsigned get_msplim(void)
+{
+    unsigned v;
+    __asm__ volatile("mrs %0, msplim" : "=r"(v));
+    return v;
+}
+```
+
+The encodings are clang's. `tests/golden/thumbv8m-splim.sh` runs a
+thread past its PSPLIM on QEMU's Cortex-M33 and checks the UsageFault.
+The ARMv7-M triples have no stack-limit registers, and refuse the names:
+`"msplim" is not an ARMv7-M special register`.
 
 ### Callee-saved registers on ARM Cortex-M
 
