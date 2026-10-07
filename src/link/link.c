@@ -2178,11 +2178,15 @@ static void layout(struct linker *l, struct osec_bound *b,
      * from __data_end and __bss_start to __bss_end. A .data that ended
      * two bytes into a word sent the harness's .bss loop to the reset
      * vector. Both ends are kept on word boundaries, the padding inside
-     * the image, as a GNU script's ALIGN(4) puts it. */
+     * the image, as a GNU script's ALIGN(4) puts it. ARM and RISC-V too:
+     * ARMv6-M and ARMv8-M Baseline have no unaligned access, and a
+     * Cortex-M0 image with 37 bytes of .data took a HardFault in its
+     * .bss loop before main; a RISC-V core may trap the same store. */
     if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
         l->machine == EM_XTENSA || l->machine == EM_PPC ||
         l->machine == EM_RX || l->machine == EM_SPARC ||
-        l->machine == EM_68K)
+        l->machine == EM_68K || l->machine == EM_ARM ||
+        l->machine == EM_RISCV)
         va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
