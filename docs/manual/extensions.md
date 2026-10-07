@@ -334,8 +334,10 @@ attribute means the same in both.
 
 An attribute may appear:
 
-- at the start of a declaration, before or among the declaration
-  specifiers;
+- at the start of a declaration, or among its specifiers, after a
+  storage class or a qualifier (`static const __attribute__((aligned(4)))
+  char t[4];`), at any scope, and so in a structure member's or a
+  parameter's specifiers;
 - after a declarator, including after a function's parameter list;
 - after `struct`, `union` or `enum`, before the tag, or after the closing
   brace of the definition (not between the tag and `{`);
@@ -356,7 +358,10 @@ These positions are not accepted:
 - on an enumerator: `expected '}' before '__attribute__'`;
 - after the `*` of a structure member's declarator, for an attribute
   that changes layout or linkage:
-  `__attribute__((weak)) is not supported in this position (after a declarator it is; on a struct or union, put it right after the keyword or after the closing '}')`.
+  `__attribute__((weak)) is not supported in this position (after a declarator it is; on a struct or union, put it right after the keyword or after the closing '}')`;
+- in the type name of a cast or `sizeof`, for an attribute that changes
+  layout or linkage, which has no declaration there to apply to:
+  `__attribute__((aligned)) is not supported in a type name: there is no declaration here to carry it`.
 
 ### How EmbCC treats an attribute
 
