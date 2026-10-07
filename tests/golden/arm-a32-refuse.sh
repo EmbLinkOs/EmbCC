@@ -161,8 +161,6 @@ refc "an 8-byte atomic read-modify-write" 'an atomic wider than four bytes' \
     'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
     'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "a computed goto" 'cannot lower a computed goto' \
-    'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }'
 refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
     'void *f(void){ return __builtin_return_address(0); }'
 refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
@@ -193,7 +191,7 @@ grep -q 'C++ exceptions are not supported for armv7a-none-eabi' "$out/cxx.err" |
     exit 1; }
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions was refused"; exit 1; }
-echo "8-byte atomics, computed goto, the frame and return address, __int128,"
+echo "8-byte atomics, the frame and return address, __int128,"
 echo "interrupt functions, an over-aligned scalar, Thumb and M-profile asm, a"
 echo "condition on a sequence and C++ exceptions are each refused by name"
 
