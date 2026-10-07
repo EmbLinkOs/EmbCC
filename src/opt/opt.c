@@ -7179,6 +7179,8 @@ static int licm_one(struct ir_func *fn)
     char *stored = xmalloc((size_t)(fn->nvars ? fn->nvars : 1));
     int *hoist = xmalloc((size_t)fn->nins * sizeof *hoist);
     int *i2b = xmalloc((size_t)(fn->nins ? fn->nins : 1) * sizeof *i2b);
+    /* a load the memory rules refused, so the fixpoint asks once */
+    char *nomem = xmalloc((size_t)(fn->nins ? fn->nins : 1));
     for (int b = 0; b < nbb; b++)
         for (int n = bb[b].start; n < bb[b].end; n++)
             i2b[n] = b;
@@ -7281,6 +7283,7 @@ static int licm_one(struct ir_func *fn)
 
         /* The invariance fixpoint. */
         memset(inv, 0, (size_t)fn->nins);
+        memset(nomem, 0, (size_t)fn->nins);
         int grew = 1, nloads = 0;
         while (grew) {
             grew = 0;
@@ -7292,7 +7295,8 @@ static int licm_one(struct ir_func *fn)
                     continue;
                 /* A load: when nothing in the loop writes its bytes and
                  * running it before the loop cannot fault (above). */
-                int memld = i->op == IR_LOAD && !i->flash && !lm.barrier;
+                int memld = i->op == IR_LOAD && !i->flash && !lm.barrier &&
+                            !nomem[n];
                 if (!is_pure(i->op) && !memld)
                     continue;
                 int t = def_target(i);
@@ -7332,10 +7336,14 @@ static int licm_one(struct ir_func *fn)
                         all = 0;
                 }
                 if (all && memld) {
+                    /* the memory rules do not change as the fixpoint
+                     * grows: asked once per load */
                     struct maccess x = mem_access(fn, &d, i->a, i->size);
                     all = lmem_no_write(&lm, x, addr_taken, fn->nvars) &&
                           lp_load_safe(fn, &d, bb, nbb, in, h, &lm, i2b[n],
                                        x, i->size);
+                    if (!all)
+                        nomem[n] = 1;
                 }
                 if (all) {
                     inv[n] = 1; grew = 1;
@@ -7440,7 +7448,7 @@ static int licm_one(struct ir_func *fn)
         done = 1;
     }
 
-    free(i2b);
+    free(i2b); free(nomem);
     free(hoist); free(stored); free(inv); free(inl_ins); free(wrin); free(in);
     free_defs(&d); free(addr_taken);
     free(order); free(l2b);
