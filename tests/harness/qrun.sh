@@ -32,9 +32,28 @@
 # $(...) waits for every holder of that pipe to close it, so an extra process
 # in the pipeline reintroduces the hang this script exists to avoid.
 #
+# ---- caps the kernel enforces --------------------------------------------
+#
+# The watchdogs above are shell processes. When the shell that started a run
+# is killed -- an agent stopped mid-test, a terminal closed -- they die with
+# it, and the emulator does not: on 2026-10-07 seven orphaned QEMUs, each a
+# guest printing in a loop into an output file, filled 770 GB of disk in a
+# few hours. So the emulator itself runs under two rlimits, which hold
+# whatever happens to its supervisor: a file-size cap on what it writes
+# (EMBCC_QEMU_MAXBLOCKS blocks of ulimit -f: 1 KB in bash, the /bin/sh here;
+# 64 MB by default -- a guest that
+# prints more than that is broken anyway) and a CPU-time cap of twice the
+# timeout plus half a minute. A pipe is not a file, so output streamed to a
+# caller is bounded by the timeout as before; the CPU cap ends an orphan.
+#
 # usage: qrun.sh <seconds> [--until TEXT] <command> [args...]
 #                                          -> the guest's exit status
 timeout=$1; shift
+capped() {
+    ulimit -f "${EMBCC_QEMU_MAXBLOCKS:-65536}" 2>/dev/null
+    ulimit -t $((timeout * 2 + 30)) 2>/dev/null
+    exec "$@"
+}
 until_text=
 if [ "${1:-}" = "--until" ]; then
     until_text=$2
@@ -49,7 +68,7 @@ if [ -n "$until_text" ]; then
     # ELF entry point is not 0 and says so in one line there, and a test that
     # captures stdout with `> got 2>/dev/null` would otherwise find that
     # warning in its first field. It did.
-    "$@" > "$tmp" &
+    ( capped "$@" ) > "$tmp" &
     qpid=$!
     # Five polls a second, for `timeout` seconds. The kill -0 is what makes a
     # guest that exits on its own (a hosted binary, not a board) cost nothing.
@@ -70,7 +89,7 @@ if [ -n "$until_text" ]; then
     exit 0
 fi
 
-"$@" & qpid=$!
+( capped "$@" ) & qpid=$!
 (
     trap 'kill "$s" 2>/dev/null; exit 0' TERM
     sleep "$timeout" & s=$!
