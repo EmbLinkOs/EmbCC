@@ -864,7 +864,7 @@ static int blocks_by_reloc(void)
 {
     enum target_arch a = target_get();
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR;
+           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_LOONGARCH64;
 }
 
 static struct blabel *blabel_add(struct bstate *s, int blk, long off)
@@ -1039,6 +1039,8 @@ static long bdata_width(int type)
     case TARGET_AVR:
         return type == R_AVR_16 || type == R_AVR_16_PM ? 2
              : type == R_AVR_32 ? 4 : 0;
+    case TARGET_LOONGARCH64:
+        return type == R_LARCH_32 ? 4 : type == R_LARCH_64 ? 8 : 0;
     default:
         return 0;
     }

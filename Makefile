@@ -157,6 +157,7 @@ SRCS := \
 	src/arch/loongarch/emit.c \
 	src/arch/loongarch/codegen.c \
 	src/arch/loongarch/irgen.c \
+	src/arch/loongarch/asm.c \
 	src/arch/loongarch64/predef.c \
 	src/arch/loongarch64/predef_cxx.c \
 	src/arch/avr/emit.c \
@@ -303,6 +304,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
              src/arch/mips/irgen.c src/arch/mips/asm.c src/arch/mips/emit.c \
              src/arch/loongarch/irgen.c src/arch/loongarch/emit.c \
+             src/arch/loongarch/asm.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)

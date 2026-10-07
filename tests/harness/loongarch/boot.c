@@ -33,17 +33,14 @@ void harness_poweroff(void);
 
 /* An exception -- an unaligned atomic, a reserved instruction, a `break`,
  * a floating-point instruction in soft-float code (the FPU is disabled at
- * reset) -- reports itself instead of hanging. EmbCC has no LoongArch
- * inline assembler, so the few privileged instructions this needs are
- * written as words into a page of RAM and called there: `csrwr a0,
- * EENTRY` and `csrrd a0, ESTAT/ERA/BADV`, each followed by `ret`, and at
- * the page's start the exception entry itself, a jump to harness_fault.
- * EENTRY's low twelve bits are zero, hence the page alignment. The
- * report is followed by the power-off and never by `==EXIT`, so a run
- * that faults cannot pass. */
-static unsigned int page[1024] __attribute__((aligned(4096)));
-
-typedef unsigned long (*csrfn)(unsigned long);
+ * reset) -- reports itself instead of hanging. EENTRY's low twelve bits
+ * are zero, so the entry is a `b harness_fault` written into a page of
+ * RAM aligned to 4 KiB (a block in .text has no such alignment); the CSRs
+ * are read and written with inline asm.
+ * The report is followed by the power-off and never by `==EXIT`, so a
+ * run that faults cannot pass. */
+void harness_fault(void);
+static unsigned int vector_page[1024] __attribute__((aligned(4096)));
 
 static void puthex(unsigned long v)
 {
@@ -53,11 +50,12 @@ static void puthex(unsigned long v)
     writec(' ');
 }
 
-static void harness_fault(void)
+void harness_fault(void)
 {
-    unsigned long estat = ((csrfn)(void *)&page[6])(0);
-    unsigned long era = ((csrfn)(void *)&page[8])(0);
-    unsigned long badv = ((csrfn)(void *)&page[10])(0);
+    unsigned long estat, era, badv;
+    __asm__ volatile("csrrd %0, 0x5" : "=r"(estat));     /* ESTAT */
+    __asm__ volatile("csrrd %0, 0x6" : "=r"(era));       /* ERA */
+    __asm__ volatile("csrrd %0, 0x7" : "=r"(badv));      /* BADV */
     puts_("\n==FAULT ecode ");
     putn((long)((estat >> 16) & 63));
     puts_("subcode ");
@@ -74,18 +72,13 @@ static void harness_fault(void)
 
 static void install_vectors(void)
 {
-    unsigned long h = (unsigned long)harness_fault;
-    volatile unsigned int *v = page;
-    /* the entry: lu12i.w t0, h >> 12; ori t0, t0, h & 0xfff; jr t0 --
-     * the image sits below 2 GiB, so two instructions build h */
-    v[0] = 0x14000000u | (unsigned)(((h >> 12) & 0xfffff) << 5) | 12u;
-    v[1] = 0x03800000u | (unsigned)((h & 0xfff) << 10) | (12u << 5) | 12u;
-    v[2] = 0x4c000000u | (12u << 5);
-    v[4] = 0x04003024u;  v[5] = 0x4c000020u;      /* csrwr a0, EENTRY; ret */
-    v[6] = 0x04001404u;  v[7] = 0x4c000020u;      /* csrrd a0, ESTAT; ret */
-    v[8] = 0x04001804u;  v[9] = 0x4c000020u;      /* csrrd a0, ERA; ret */
-    v[10] = 0x04001c04u; v[11] = 0x4c000020u;     /* csrrd a0, BADV; ret */
-    ((csrfn)(void *)&page[4])((unsigned long)page);
+    unsigned long e = (unsigned long)vector_page;
+    long off = (long)((unsigned long)harness_fault - e);
+    /* b off: the word offset's low 16 bits at 25:10, its high 10 at 9:0 */
+    vector_page[0] = 0x50000000u | (unsigned)(((off >> 2) & 0xffff) << 10) |
+                     (unsigned)((off >> 18) & 0x3ff);
+    __asm__ volatile("ibar 0" : : : "memory");
+    __asm__ volatile("csrwr %0, 0xc" : "+r"(e) : : "memory");  /* EENTRY */
 }
 
 #ifdef HARNESS_LIBC

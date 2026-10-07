@@ -1228,7 +1228,8 @@ static int blocks_by_gas(void)
 {
     enum target_arch a = target_get();
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32;
+           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32 ||
+           a == TARGET_LOONGARCH64;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1320,7 +1321,8 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         const struct expr *e = s->kind == STMT_EXPR ? s->expr : NULL;
         if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
             enum target_arch t = target_get();
-            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ? "bl"
+            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ||
+                                 t == TARGET_LOONGARCH64 ? "bl"
                                  : t == TARGET_MIPS32 ? "jal" : "call",
                    e->callee->name);
             continue;

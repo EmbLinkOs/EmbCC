@@ -222,7 +222,7 @@ static const struct ra_target LOONGARCH_RA = {
     1,            /* atomic_in_reg: every atomic reads its address and
                    * values through rdr and writes through wreg/wr */
     0,            /* fp_reads_gpr: floats are already general (above) */
-    0             /* asm_in_reg: inline asm is refused (IR_ASM) */
+    1             /* asm_in_reg: see IR_ASM */
 };
 
 /* -O1 and up: the allocator is on. */
@@ -2749,10 +2749,10 @@ static void gen_ins(struct la_fn *F, int n)
     }
 
     case IR_ASM: {
-        /* Extended asm, assembled in irgen against the target's
-         * vocabulary. This only places the operands and splices the
-         * bytes. (irgen refuses inline asm on LoongArch today; this is the
-         * RISC-V lowering with LoongArch's register roles, ready for it.)
+        /* Extended asm, assembled in irgen (loongarch/irgen.c
+         * irg_asm_loongarch) against the vocabulary in loongarch/asm.c.
+         * This only places the operands and splices the bytes -- the
+         * RISC-V lowering with LoongArch's register roles.
          *
          * To the allocator (ra_target.asm_in_reg) a value live across an
          * asm keeps out of the registers the asm may change, which irgen

@@ -7,7 +7,8 @@
 # machine options a LoongArch build passes -- the one configuration EmbCC
 # emits is accepted, every other one refused -- the constructs the backend
 # does not lower, each with a message naming it rather than code that does
-# something else, and the objects embld will not link.
+# something else, and the objects embld will not link. (Assembly is
+# loongarch-asm.sh's.)
 set -u
 echo "TEST-MARKER loongarch-refuse"
 . "$(dirname "$0")/../lib.sh"
@@ -132,25 +133,10 @@ for O in -O0 -O2; do
     refc "__builtin_frame_address ($O)" '__builtin_frame_address or __builtin_return_address' \
         'void *f(void){ return __builtin_frame_address(0); }' $O
 done
-refc "inline asm" 'inline assembly is not supported for loongarch64-unknown-elf' \
-    'int f(int x){ __asm__ volatile("nop"); return x; }'
-refc "inline asm with operands" 'inline assembly is not supported for loongarch64-unknown-elf' \
-    'int f(int x){ int y; __asm__("move %0, %1" : "=r"(y) : "r"(x)); return y; }'
-refc "a naked function" 'inline assembly is not supported for loongarch64-unknown-elf' \
-    '__attribute__((naked)) void f(void){ __asm__("ret"); }'
-refc "a file-scope instruction" 'EmbCC assembles instructions for x86-64 only' \
-    '__asm__("nop");'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
 refc "a 64-aligned scalar local" 'needs 64-byte alignment and the stack only guarantees 16' \
     'int g(int *); int f(void){ _Alignas(64) int x = 1; return g(&x); }'
-printf '.text\nf: ret\n' > "$out/a.s"
-if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err"; then
-    echo "an assembly file was accepted"; exit 1
-fi
-grep -q 'no assembly-file support for loongarch64-unknown-elf' "$out/as.err" || {
-    echo "an assembly file was refused, but not by name:"; cat "$out/as.err"
-    exit 1; }
 # C++ without exceptions is LP64 like the targets its front end lays out
 # for, and compiles; with them it needs the .eh_frame EmbCC does not write.
 printf 'struct A { int v; int get() const { return v * 2; } };\nint f(A a) { return a.get(); }\n' > "$out/c.cc"
@@ -163,8 +149,8 @@ grep -q "C++ without -fno-exceptions" "$out/cxx.err" || {
     echo "C++ with exceptions was refused, but not by name:"
     cat "$out/cxx.err"; exit 1; }
 echo "narrow and sixteen-byte atomics, computed goto, the frame and return"
-echo "address, inline and file-scope assembly, .s files, interrupt functions,"
-echo "an over-aligned scalar and C++ exceptions are each refused by name"
+echo "address, interrupt functions, an over-aligned scalar and C++ exceptions"
+echo "are each refused by name (assembly's refusals are loongarch-asm.sh's)"
 
 # ---- what embld will not link ------------------------------------------------
 CLANG=${EMBCC_REF_CLANG_LOONGARCH:-clang}

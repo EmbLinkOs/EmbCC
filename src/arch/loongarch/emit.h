@@ -183,4 +183,32 @@ void la_am(struct code *c, int op, int rd, int rk, int rj, int d);
 void la_dbar(struct code *c, int hint);
 void la_break(struct code *c, int code);
 
+/* ---- what only the assembler emits -------------------------------------
+ *
+ * The instructions src/arch/loongarch/asm.c accepts that the code
+ * generator never emits, by name: each with its FORMAT (which fields it
+ * has) and its opcode word -- the instruction with every field zero, as
+ * llvm-mc encodes it. The format packers above place the fields, so these
+ * too are derived rather than restated, and tests/golden/loongarch-asm.sh
+ * compares each with llvm-mc. */
+enum {
+    LAF_2R,         /* rd, rj */
+    LAF_3R,         /* rd, rj, rk (indexed loads and stores, mulw) */
+    LAF_AM,         /* rd, rk, rj: an AM* atomic; rd may be neither */
+    LAF_PTR,        /* rd, rj, si14 << 2 (ldptr/stptr) */
+    LAF_CSRRD,      /* rd, csr */
+    LAF_CSRWR,      /* rd, csr */
+    LAF_CSRXCHG,    /* rd, rj, csr (rj not r0 or r1) */
+    LAF_CODE15,     /* a 15-bit code or hint (syscall, idle, ibar) */
+    LAF_NONE,       /* no operand (ertn) */
+    LAF_BSTRINS     /* rd, rj, msb, lsb, w or d by the opcode */
+};
+struct la_raw {
+    const char *name;
+    int fmt;
+    unsigned long op;
+    int d;          /* a 64-bit (.d) form: bit-field widths, ptr scale */
+};
+extern const struct la_raw la_raw_insns[];
+
 #endif

@@ -20,6 +20,7 @@
 #include "../arch/thumb/attrs.h"
 #include "../arch/aarch64/asm.h"
 #include "../arch/mips/asm.h"
+#include "../arch/loongarch/asm.h"
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
@@ -3143,6 +3144,10 @@ static int write_object(struct gas *g, const char *out_path)
     /* MIPS: the header's MIPS32r2 | o32 | noreorder and the soft-float
      * .MIPS.abiflags a compiled object carries, which EmbLD checks
      * across the objects it links */
+    /* LoongArch: the soft-float LP64S, object ABI v1 flags of a compiled
+     * object, which EmbLD checks */
+    if (g->tgt->machine == EM_LOONGARCH)
+        elfw_set_flags(w, target_elf_flags(target_get()));
     if (g->tgt->machine == EM_MIPS) {
         unsigned char af[24];
         elfw_set_flags(w, target_elf_flags(target_get()));
@@ -3232,9 +3237,23 @@ static const struct gas_target MIPS_GAS = {
     0, mipsasm_is_word, mipsasm_reset, NULL
 };
 
+/* LoongArch64. Its symbol forms -- b/bl, call36/tail36, la.pcrel and
+ * la.local, la/la.global, and the %pc_hi20/%pc_lo12, %got_pc_*, %abs_* and
+ * %call36 operators -- are laasm_symform's; `.word`/`.dword sym` are
+ * R_LARCH_32/R_LARCH_64. A register is always `$`-spelt (is_reg) and the
+ * word after a `%` is an operator (is_word). */
+static const struct gas_target LA_GAS = {
+    EM_LOONGARCH, 0, laasm_assemble, laasm_is_reg,
+    0, 0, 0,
+    R_LARCH_32, R_LARCH_64,
+    0, 0, laasm_symform, 0,
+    0, laasm_is_word, NULL, NULL
+};
+
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+    case TARGET_LOONGARCH64: return &LA_GAS;
     case TARGET_MIPS32: return &MIPS_GAS;
     case TARGET_AVR: return &AVR_GAS;
     case TARGET_RISCV32: case TARGET_RISCV64: return &RISCV_GAS;
@@ -3329,12 +3348,6 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     int rc;
 
     const struct gas_target *t = target_for();
-    if (!t && target_get() == TARGET_LOONGARCH64) {
-        fprintf(stderr, "embcc: error: no assembly-file support for %s yet: "
-                        "EmbCC has no LoongArch assembler vocabulary (inline "
-                        "assembly is refused too)\n", target_triple_now());
-        return 1;
-    }
     if (!t) {
         fprintf(stderr, "embcc: error: no assembly-file support for %s yet; "
                         "its instruction encoder exists (inline __asm__ "

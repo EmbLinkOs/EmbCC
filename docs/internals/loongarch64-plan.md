@@ -164,12 +164,12 @@ by tools/gen-predef.sh): `__loongarch__`, `__loongarch64`,
   linked at 0x200000 did as soon as embld put its ELF header in the first
   page -- so the harness links at 0x1000000 (16 MiB) with the stack's top
   at 0x3000000, in the low 256 MiB of RAM.
-- **Faults.** EmbCC has no LoongArch inline assembler yet, so the
-  harness writes the privileged instructions it needs (`csrwr a0,
-  EENTRY`, `csrrd a0, ESTAT/ERA/BADV`, and the exception entry, which must
-  be 4 KiB-aligned) as words into a page of RAM and calls them there. An
-  exception prints `==FAULT ecode n ...==` and powers off, so a run that
-  faults never reports an exit status. The FPU is disabled at reset, so a
+- **Faults.** EENTRY's low twelve bits are zero, so the harness writes
+  the exception entry -- a `b` to its C reporter -- into a 4 KiB-aligned
+  page of RAM and points EENTRY there with inline `csrwr`; the reporter
+  reads ESTAT, ERA and BADV with `csrrd`. An exception prints `==FAULT
+  ecode n ...==` and powers off, so a run that faults never reports an
+  exit status. The FPU is disabled at reset, so a
   floating-point instruction in soft-float code faults too.
 - **Output.** A 16550 UART at 0x1fe001e0 (the first serial port, so the
   board runs with `-serial stdio`).
@@ -200,10 +200,19 @@ Done, each committed and pushed:
    loongarch-refuse; and LoongArch64 joined predef, libc-embedded,
    debug-embedded and embedded-runtime.
 
+5. The assembler (src/arch/loongarch/asm.c): inline asm, `.s`/`.S`
+   files, file-scope blocks and naked functions, the base integer ISA,
+   the AM* atomics, the barriers and the privileged instructions an RTOS
+   needs (csrrd/csrwr/csrxchg, ertn, idle, rdtime*, cpucfg, iocsr*), with
+   llvm-mc's pseudos and symbol forms (b/bl, call36/tail36, la.pcrel,
+   la.global, the %pc/%got_pc/%abs/%call36 operators); loongarch-asm
+   compares all 403 vocabulary statements with llvm-mc and runs C, inline
+   asm and a .S file (EmbCC's and clang's) on the board.
+
 Not done, refused by name meanwhile:
 
-- inline assembly, `.s`/`.S` files, file-scope instructions and naked
-  functions (no LoongArch assembler vocabulary);
+- `la.abs` and the TLS, extreme-model and absolute-GOT operators in
+  assembly; floating-point and vector instructions;
 - one-, two- and sixteen-byte atomics (no such am*/ll/sc in the base ISA;
   a masked ll.w/sc.w loop, as clang emits, would lift the first two);
 - `__builtin_frame_address`/`__builtin_return_address` (no frame-pointer
