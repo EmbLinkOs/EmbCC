@@ -56,3 +56,42 @@ int far_elt(int i) { return far_array[i]; }
 static int twice(int x) { return 2 * x; }
 static int thrice(int x) { return 3 * x; }
 int (*pick(int k))(int) { return k ? thrice : twice; }
+int take_b1(struct b1 s, int k) { return s.a * 1000 + k; }
+int take_b2_h1(int k, struct b2 s, struct h1 t)
+{ return k * 1000000 + s.a * 10000 + s.b * 100 + t.h; }
+int take_b5_at3(int a, int b, int c, struct b5 s)
+{ return a + b + c + s.c[0] * 10000 + s.c[1] * 1000 + s.c[2] * 100 +
+         s.c[3] * 10 + s.c[4]; }
+int take_small_stack(int a, int b, int c, int d, struct b1 s, struct b2 t,
+                     struct h1 u, struct b6 v)
+{ return a + b + c + d + s.a * 100000 + t.a * 10000 + t.b * 1000 + u.h * 10 +
+         v.h[0] + v.h[1] * 2 + v.h[2] * 3; }
+long long ll_first(long long a, int b) { return a * 3 + b; }
+long long ll_stack(int a, int b, int c, int d, long long e, int f)
+{ return e - (a + b + c + d) + f * 0x100000000LL; }
+long long ll_mix(long long a, long long b) { return (a << 4) ^ b; }
+unsigned long long ull_ret(unsigned hi, unsigned lo)
+{ return (unsigned long long)hi << 32 | lo; }
+double d_stack(int a, int b, int c, int d, int e, double f)
+{ return f * (a + b + c + d + e); }
+struct b2 ret_b2(int k) { struct b2 s; s.a = (unsigned char)k; s.b = (unsigned char)(k + 1); return s; }
+struct h1 ret_h1(int k) { struct h1 s; s.h = (short)-k; return s; }
+long long vll(int n, ...)
+{
+    va_list ap; long long t = 0;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) t = t * 7 + va_arg(ap, long long);
+    va_end(ap);
+    return t;
+}
+int vsmall(int n, ...)
+{
+    va_list ap; int t = 0;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) {
+        if (i % 2) { struct b2 s = va_arg(ap, struct b2); t = t * 3 + s.a - s.b; }
+        else { struct b1 s = va_arg(ap, struct b1); t = t * 5 + s.a; }
+    }
+    va_end(ap);
+    return t;
+}

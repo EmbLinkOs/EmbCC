@@ -540,6 +540,18 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
     return bf_wide_load(fn, addr, m);
 }
 
+/* The storage unit's type, unsigned: the field's declared type's kind --
+ * but `long long` by name, which shares TY_LONG with `long`: on an ILP32
+ * target ty_base(TY_LONG) is FOUR bytes, and a `long long x : 40` was
+ * loaded and stored as its unit's first word. */
+static struct type *bf_unit(const struct type *bt)
+{
+    if (bt->kind == TY_LONG && bt->is_llong &&
+        ty_size(ty_base(TY_LONG, 1)) != ty_size(bt))
+        return ty_llong(1);
+    return ty_base(bt->kind, 1);
+}
+
 static int bf_load(struct ir_func *fn, int addr, const struct member *m)
 {
     const struct type *bt = m->ty;
@@ -558,7 +570,7 @@ static int bf_load(struct ir_func *fn, int addr, const struct member *m)
         return v;                 /* (a 32-bit class reads the low half) */
     }
     /* load the raw storage unit UNSIGNED, so no stray sign extension */
-    int v = emit_load(fn, addr, ty_base(bt->kind, 1));
+    int v = emit_load(fn, addr, bf_unit(bt));
     int lsh = vb - m->bit_off - m->bit_width;
     if (lsh)
         v = emit_bin(fn, IR_SHL, v, emit_const(fn, lsh, 4), w, 0);
@@ -606,7 +618,7 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
         }
         return bf_load(fn, addr, m);
     }
-    struct type *ut = ty_base(bt->kind, 1);
+    struct type *ut = bf_unit(bt);
     if (bt->kind == TY_INT128) {
         /* the masks in 128 bits, from all ones: fmask = ~0 >> (128 - width) */
         int ones = emit_const(fn, -1, 16);

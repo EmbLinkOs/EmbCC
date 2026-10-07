@@ -641,16 +641,33 @@ static long slot32(const struct mips_fn *F, int v)
     return sslot(F, v) + (is_wide(F, v) ? WLO : 0);
 }
 
-/* Where a `size`-byte access of variable v is in its slot. The IR only
- * ever reads and writes a variable at its own size (opt refuses to
- * forward between differing ones on a big-endian target), so this is the
- * slot itself; were a narrower access of a wider variable to reach here,
- * its VALUE's low bytes are at the slot's end when big-endian. */
+/* Where variable v's OBJECT is. A variable is also read and written as a
+ * vreg -- a whole word at its slot (rd, wrote, a parameter's incoming
+ * register) -- and its slot is a word even when it is a char or a short
+ * (layout gives every local four bytes at least). Little-endian the
+ * object is the word's first bytes, its low end; big-endian its low end
+ * is the word's LAST bytes, so a narrow integer variable lives there, at
+ * slot + 4 - size, and its address, its loads and its stores all say so. */
+static long obj_slot(const struct mips_fn *F, int v)
+{
+    if (g_be && v < F->fn->nvars) {
+        const struct ir_local *L = &F->fn->locals[v];
+        if (L->is_int_or_ptr && L->size > 0 && L->size < 4)
+            return sslot(F, v) + 4 - L->size;
+    }
+    return sslot(F, v);
+}
+
+/* Where a `size`-byte access of variable v is. The IR only ever reads and
+ * writes a variable at its own size (opt refuses to forward between
+ * differing ones on a big-endian target), so this is the object itself;
+ * were a narrower access of a wider variable to reach here, its VALUE's
+ * low bytes are at the object's end when big-endian. */
 static long var_slot(const struct mips_fn *F, int v, int size)
 {
     long vs = v < F->fn->nvars ? F->fn->locals[v].size
             : is_wide(F, v) ? 8 : 4;
-    return sslot(F, v) + (g_be && vs > size ? vs - size : 0);
+    return obj_slot(F, v) + (g_be && vs > size ? vs - size : 0);
 }
 
 static void rd(struct mips_fn *F, int v, int reg)
@@ -2314,7 +2331,7 @@ static void gen_ins(struct mips_fn *F, int n)
         {
             /* the second operand may not land in the destination before
              * the first is read: a scratch unless it has a home */
-            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
             if (rb_ == TMP) operand_b(F, i, TMP);
             mips_alu(t, op, rd_, ra_, rb_);
         }
@@ -2323,7 +2340,7 @@ static void gen_ins(struct mips_fn *F, int n)
     }
     case IR_DIV: case IR_MOD: {
         int ra_ = rdr(F, i->a, ACC);
-        int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+        int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
         int d;
         if (rb_ == TMP) operand_b(F, i, TMP);
         mips_muldiv(t, i->sign ? MIPS_DIV : MIPS_DIVU, ra_, rb_);
@@ -2342,7 +2359,7 @@ static void gen_ins(struct mips_fn *F, int n)
                               : i->sign ? MIPS_SRA : MIPS_SRL,
                            d, ra_, (int)i->imm);
         } else {
-            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
             if (rb_ == TMP) operand_b(F, i, TMP);
             d = wreg(F, i->dst, ACC);
             mips_alu(t, i->op == IR_SHL ? MIPS_SLLV
@@ -2412,7 +2429,7 @@ static void gen_ins(struct mips_fn *F, int n)
                 F->skip_next = 1;
                 return;
             }
-            rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
             if (i->imm_b && imm_val(i) == 0)
                 rb_ = MIPS_ZERO;
             if (rb_ == TMP) operand_b(F, i, TMP);
@@ -2438,7 +2455,7 @@ static void gen_ins(struct mips_fn *F, int n)
             /* cmp_to_reg reads its operands only in its first instruction,
              * so d may be either of them */
             int ra_ = rdr(F, i->a, ACC);
-            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : F->loc[i->b];
+            int rb_ = (i->imm_b || !in_reg(F, i->b)) ? TMP : reg_of(F, i->b);
             int d = wreg(F, i->dst, ACC);
             if (i->imm_b && cmp_imm_to_reg(F, i->pred, i->sign, ra_,
                                            imm_val(i), d)) {
@@ -2544,7 +2561,7 @@ static void gen_ins(struct mips_fn *F, int n)
 
     case IR_ADDR: {
         int d = wreg(F, i->dst, ACC);
-        addr_sp(F, d, sslot(F, i->a));
+        addr_sp(F, d, obj_slot(F, i->a));
         wrote(F, i->dst, d);
         return;
     }
@@ -2947,14 +2964,14 @@ static void copy_block(struct mips_fn *F, int copy, long size, int aligned)
     }
 }
 
-/* A scalar parameter's incoming word into its slot: the whole word
- * little-endian, where its low bytes come first (the slot has room for
- * it); big-endian only the variable's own bytes, which are the word's
- * LAST ones -- a promoted `char` is right-justified in its word. */
+/* A scalar parameter's incoming word into its slot: the whole word, in
+ * either order -- a promoted `char` is right-justified in its word, which
+ * is where obj_slot puts a narrow variable big-endian, and its other
+ * bytes are what a whole-word read of the variable (rd) expects. */
 static int pslot_size(const struct mips_fn *F, int v)
 {
-    int ls = F->fn->locals[v].size;
-    return g_be && ls > 0 && ls < 4 ? ls : 4;
+    (void)F; (void)v;
+    return 4;
 }
 
 /* The `left` (1..3) bytes of a composite's last, partial word in r, to
@@ -3196,7 +3213,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)F.slot[v];
+            fn->var_off[v] = F.slot[v] < 0 ? (int)F.slot[v]
+                                           : (int)obj_slot(&F, v);
     }
     /* BRANCH RELAXATION, the other way round from RISC-V's: every branch
      * is tried in its short form, and one that does not reach is given the

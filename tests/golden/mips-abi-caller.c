@@ -43,6 +43,29 @@ int main(void)
     for (int i = 0; i < 10000; i++) far_array[i] = i * 3;
     putn(far_array[9000]); putn(far_elt(9001)); putn(far_array[0]);
     putn(pick(0)(21)); putn(pick(1)(7));
+    writec('\n');
+    { struct b1 s = { 0xA5 }; putn(take_b1(s, 7)); }
+    { struct b2 s = { 0x12, 0xF3 }; struct h1 t = { -77 };
+      putn(take_b2_h1(4, s, t)); }
+    { struct b5 s = { { 1, 2, 3, 4, 5 } }; putn(take_b5_at3(10, 20, 30, s)); }
+    { struct b1 s = { 9 }; struct b2 t = { 8, 7 }; struct h1 u = { -6 };
+      struct b6 v = { { 100, -200, 300 } };
+      putn(take_small_stack(1, 2, 3, 4, s, t, u, v)); }
+    { long long r = ll_first(0x123456789ALL, -5);
+      putn((long)(unsigned)(r >> 32)); putn((long)(unsigned)r); }
+    { long long r = ll_stack(1, 2, 3, 4, 0x7766554433LL, 3);
+      putn((long)(unsigned)(r >> 32)); putn((long)(unsigned)r); }
+    { long long r = ll_mix(-0x10000001LL, 0x0F0F0F0F0F0FLL);
+      putn((long)(unsigned)(r >> 32)); putn((long)(unsigned)r); }
+    { unsigned long long r = ull_ret(0xCAFEu, 0xF00Du);
+      putn((long)(unsigned)(r >> 32)); putn((long)(unsigned)r); }
+    putd(d_stack(1, 2, 3, 4, 5, 0.5));
+    { struct b2 s = ret_b2(40); putn(s.a); putn(s.b); }
+    { struct h1 s = ret_h1(1234); putn(s.h); }
+    { long long r = vll(3, 1LL, -2LL, 0x100000003LL);
+      putn((long)(unsigned)(r >> 32)); putn((long)(unsigned)r); }
+    { struct b1 x = { 3 }, y = { 250 }; struct b2 p = { 9, 4 }, q = { 1, 200 };
+      putn(vsmall(4, x, p, y, q)); }
     puts_("\n==END==\n");
     return 0;
 }
