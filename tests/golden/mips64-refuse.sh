@@ -100,8 +100,6 @@ refc "a 16-byte atomic" 'a 16-byte atomic' \
     '__int128 x; __int128 f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "a 16-byte atomic load" 'a 16-byte atomic' \
     '__int128 x; __int128 f(void){ return __atomic_load_n(&x, 5); }'
-refc "a computed goto" 'a computed goto' \
-    'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }'
 refc "__builtin_return_address" 'n64 code keeps no frame-pointer chain' \
     'void *f(void){ return __builtin_return_address(0); }'
 refc "__builtin_frame_address" 'n64 code keeps no frame-pointer chain' \
@@ -133,7 +131,7 @@ grep -q 'C++ is not yet supported for mips64-none-elf' "$out/cxx.err" || {
 printf '%s\n' 'void v(int, ...); void f(__int128 x){ v(1, x); }' > "$out/v.c"
 "$EMBCC" --target=$T -c "$out/v.c" -o /dev/null || {
     echo "a variadic __int128 was refused"; exit 1; }
-echo "narrow and 16-byte atomics, computed goto, the frame and return address,"
+echo "narrow and 16-byte atomics, the frame and return address,"
 echo "interrupt functions, an over-aligned scalar, MIPS64 instructions in"
 echo "inline asm, a 32-bit la, a wide packed bit-field big-endian and C++"
 echo "big-endian are each refused by name"

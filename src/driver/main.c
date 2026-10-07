@@ -567,6 +567,67 @@ static long code_ref(long off, int text_sym, int *sym)
 
 static int compile_unit(const char *in, const char *out, int pp_only);
 
+/* GNU C's static label data, once codegen has laid every function out
+ * (cg_note_labels): `&&a` in a pointer slot is its function's symbol plus
+ * the label's offset -- added into the relocation's addend, so the Thumb
+ * bit, AVR's word address and every other target's spelling of a
+ * function pointer apply to it as they do to `&f` -- and `&&b - &&a` is a
+ * plain number written into the image. Before any writer reads either.
+ *
+ * On AVR a label's VALUE is a word address, as a function pointer's is,
+ * so the difference of two is in words and `&&a + n` is n words on: the
+ * code computes both that way, and the data must agree. */
+static void resolve_label_data(struct unit *u)
+{
+    long unit = target_get() == TARGET_AVR ? 2 : 1;   /* bytes per value */
+    for (struct global *g = u->globals; g; g = g->next) {
+        /* A table in a function that was never generated (an unused
+         * static one) is that function's alone, and nothing can read it:
+         * its label slots stay zero rather than name a symbol that was
+         * not emitted. */
+        int keep = 0;
+        for (int r = 0; r < g->nrelocs; r++) {
+            struct greloc *rl = &g->relocs[r];
+            if (rl->label && rl->ftarget && !rl->ftarget->label_pos)
+                continue;
+            g->relocs[keep++] = *rl;
+        }
+        g->nrelocs = keep;
+        for (int r = 0; r < g->nrelocs; r++) {
+            struct greloc *rl = &g->relocs[r];
+            struct func *f = rl->ftarget;
+            if (!rl->label)
+                continue;
+            if (!f || !f->label_pos || rl->label_slot < 0 ||
+                rl->label_slot >= f->nlabel_pos ||
+                f->label_pos[rl->label_slot] < 0)
+                internal_error("%s: the address of label '%s' was never "
+                               "placed", g->name, rl->label);
+            rl->addend = rl->addend * unit + f->label_pos[rl->label_slot];
+            rl->label_slot = -1;        /* once */
+        }
+        for (int d = 0; d < g->nldiffs; d++) {
+            struct glabeldiff *ld = &g->ldiffs[d];
+            struct func *f = ld->fn;
+            if (f && !f->label_pos)
+                continue;                 /* never generated, as above */
+            if (!f || !f->label_pos || ld->slot < 0 || ld->minus_slot < 0 ||
+                ld->slot >= f->nlabel_pos || ld->minus_slot >= f->nlabel_pos ||
+                f->label_pos[ld->slot] < 0 || f->label_pos[ld->minus_slot] < 0)
+                internal_error("%s: '&&%s - &&%s' was never placed", g->name,
+                               ld->label, ld->minus);
+            if (!g->init_bytes || ld->off + ld->size > g->init_len)
+                internal_error("%s: '&&%s - &&%s' is outside the image",
+                               g->name, ld->label, ld->minus);
+            target_put_uint((unsigned char *)g->init_bytes +
+                            ld->off, ld->size,
+                            (unsigned long long)((f->label_pos[ld->slot] -
+                                                  f->label_pos[ld->minus_slot])
+                                                 / unit + ld->addend));
+        }
+    }
+}
+
 /* -Wl,... and -Xlinker: options for the link, kept until there is one. A
  * compile that does not link ignores them, as GCC's does. */
 static const char *g_wl[128];
@@ -1963,6 +2024,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                      &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                      opt_level >= 1);
+    resolve_label_data(u);
 
     /* The groups, as codegen laid them out (the sort above). */
     g_plain_end = g_groups_end = (long)text.len;
@@ -3801,8 +3863,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                               STT_NOTYPE), SHN_UNDEF);
         int lo = riscv && fs[i].kind == RK_RISCV_PCREL_LO12_I;
         int fsym = tf->sym_ndx;
-        long fadd = target_reloc_addend(ta, fs[i].kind, 0) +
-                    (fs[i].kind == RK_ABS64 ? fs[i].addend : 0);
+        long fadd = target_reloc_addend(ta, fs[i].kind, 0) + fs[i].addend;
         if (lo)
             fadd = code_ref(fs[i].patch_off - 4, text_sym, &fsym);
         code_rela(w, text_ndx, fs[i].patch_off, fsym,

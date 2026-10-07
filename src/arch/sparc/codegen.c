@@ -29,8 +29,8 @@
  *     promise is aligned goes through bytes.
  *   * Multiply and divide are LEON3's umul/smul/udiv/sdiv through %y.
  *
- * Refused by name: computed goto, atomics wider than a word, the frame
- * and return address builtins, a branch beyond +-8 MiB, and __int128.
+ * Refused by name: atomics wider than a word, the frame and return
+ * address builtins, a branch beyond +-8 MiB, and __int128.
  * THE RULE.
  */
 #include "emit.h"
@@ -2835,8 +2835,26 @@ static void gen_ins(struct sparc_fn *F, int n)
         code_mark_data(t, tab, t->len);
         return;
     }
-    case IR_LABELADDR: case IR_IGOTO:
-        sparc_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label: the function's own address as IR_FADDR takes it,
+         * sethi/or (HI22/LO10), plus the label's offset in it -- the
+         * addend set once the function is laid out. The fix's base is
+         * -2 - the first site's index (a table entry's is >= 0, a
+         * branch's -1). */
+        int d = wreg(F, i->dst, ACC);
+        int at = abs_pair(F, d), s0 = F->st->nf;
+        note_fn(F->st, at, fn->src, RK_SPARC_HI22);
+        note_fn(F->st, at + 4, fn->src, RK_SPARC_LO10);
+        want_label(F, at, i->label);
+        F->fix[F->nfix - 1].base = -2 - s0;
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        sparc_jmpl(t, SP_G0, rdr(F, i->a, ACC), 0);
+        sparc_nop(t);
         return;
     default:
         sparc_refuse(F, i, "this operation");
@@ -3217,6 +3235,12 @@ static void gen_func(struct ir_func *fn, struct code *t,
                                       & 0xffffffffUL);
             continue;
         }
+        if (F.fix[i].base <= -2) {                    /* &&label */
+            int s0 = -2 - F.fix[i].base;
+            F.st->f[s0].addend = target - f->code_off;
+            F.st->f[s0 + 1].addend = target - f->code_off;
+            continue;
+        }
         if (!sparc_patch_b(t, F.fix[i].at, target))
             sparc_refuse(&F, NULL, "a branch beyond +-8 MiB (the function "
                                    "is too large)");
@@ -3226,6 +3250,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
     f->stack_bytes = (int)F.frame;
     free(F.usecnt);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

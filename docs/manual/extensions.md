@@ -46,7 +46,7 @@ A construct that a code generator cannot lower is refused when the
 function containing it is compiled, with a message of the form
 
 ```text
-embcc: f.c:2: error: the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]
+embcc: f.c:3: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]
 ```
 
 The bracketed part names the internal operation that could not be
@@ -73,7 +73,7 @@ operators](#feature-test-operators), with the limits described there.
 | [Statement expressions](#statement-expressions) `({ ... })` | Supported |
 | [`typeof`, `__typeof__`, `__typeof`, `typeof_unqual`](#typeof) | Supported for a type name and for most expressions |
 | [`__auto_type`](#__auto_type) | Supported at block scope |
-| [Labels as values and computed `goto`](#labels-as-values-and-computed-goto) | x86-64 and AArch64 only |
+| [Labels as values and computed `goto`](#labels-as-values-and-computed-goto) | Supported, in static tables too |
 | [Local labels](#local-labels) (`__label__`) | Supported |
 | [Case ranges](#case-ranges) (`case 1 ... 5:`) | Supported |
 | [Designated range initializers](#designated-range-initializers) (`[2 ... 5] = x`) | Supported |
@@ -178,24 +178,41 @@ sub:
 }
 ```
 
-This is supported on x86-64 and AArch64. The other code generators
-refuse it:
+This is supported on every target. A label's address is a code
+address, the same kind of value a function pointer holds: on Cortex-M
+it has bit 0 set (Thumb state, ready for `bx`), and on AVR it is a
+word address in program memory, as `gs()` makes it.
 
-| Target | Diagnostic |
-|---|---|
-| Cortex-M | `the ARMv7-M backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| RV32 | `the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| RV64 | `the RV64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| AVR | `the AVR backend cannot lower labeladdr yet (function f) [labeladdr w=4 size=4]` |
+A label address may also initialize an object with static storage
+duration inside its function, which is how a threaded interpreter
+keeps its dispatch table, and the difference of two label addresses is
+a constant there, as in GCC:
 
-On every target, a label address cannot initialize an object with
-static storage duration, so the table above must be an automatic
-array. A `static` table is refused with `a static initializer must be a
-constant, a string literal, or the address of a global`. The difference
-of two label addresses (`&&b - &&a`) is refused as `arithmetic on void
-*`. A label whose address is taken must be defined (`label 'x' used but
-not defined`). A function that contains a computed `goto` is never
-inlined; see [Inlining](optimization.md#inlining).
+```c
+int step(int op)
+{
+    static void *const table[] = { &&add, &&sub };
+    static const int off[] = { &&add - &&add, &&sub - &&add };
+    if (op < 0)
+        goto *(&&add + off[-op - 1]);
+    goto *table[op];
+add:
+    return 1;
+sub:
+    return 2;
+}
+```
+
+Arithmetic on a label address -- `&&b - &&a`, `&&a + n` -- is in bytes,
+as on a `char *` (on AVR, in words, since the address is one); `void *`
+arithmetic is still refused anywhere else (`arithmetic on void *`). A
+label address cannot initialize an object outside its function: at
+file scope it is refused with `a static initializer must be a constant,
+a string literal, or the address of a global`. A label whose address is
+taken must be defined (`label 'x' used but not defined`). A function
+that contains a computed `goto` is never inlined; see
+[Inlining](optimization.md#inlining). C++ refuses both forms (see
+[C++](cxx.md)).
 
 ### Local labels
 

@@ -67,8 +67,6 @@ na() {
         echo "shifts a long by 32 or more, undefined when long is 32 bits" ;;
     alignas-decl)
         echo "a 16-aligned scalar local, refused by name above the 8-byte stack (as on Thumb and MIPS)" ;;
-    computed-goto)
-        echo "computed goto, refused by name (tests/golden/tricore-refuse.sh)" ;;
     atomics)
         echo "__builtin_frame_address, refused by name (tricore-refuse.sh)" ;;
     atomics-reg)

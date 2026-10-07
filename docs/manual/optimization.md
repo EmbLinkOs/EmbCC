@@ -660,7 +660,8 @@ At `-O1` and above, every code generator:
 - **allocates registers** to values, including callee-saved registers,
   which are then saved and restored. On x86-64 and AArch64, a function
   with computed `goto` or a C++ exception region is compiled without
-  register allocation;
+  register allocation; on the other targets one with computed `goto`
+  is allocated like any other;
 - **folds a constant offset** into a load or store addressing mode;
 - **makes tail calls**: a call immediately followed by a return of its
   value becomes a jump, under the conditions in the table below.

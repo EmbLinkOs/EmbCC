@@ -194,7 +194,9 @@ static void tmp_put(struct t_fn *F, int r)
 
 /* ---- the literal pool ---------------------------------------------------- */
 
-enum { LIT_K, LIT_STR, LIT_GLOB, LIT_FN };
+/* LIT_LREL: &&label's word, (label | 1) - pc at its `add rD, pc`; v
+ * is its index in F->lrel, so no two share a word. */
+enum { LIT_K, LIT_STR, LIT_GLOB, LIT_FN, LIT_LREL };
 struct v6_lit { int kind; unsigned long v; const void *p; };
 struct v6_lsite { int at, k; };
 
@@ -266,6 +268,13 @@ static void pool_dump(struct t_fn *F, int branch)
             break;
         case LIT_FN:
             tcg_note_fn(F->st, t->len, (struct func *)l->p, RK_ABS32);
+            code_u32(t, 0);
+            break;
+        case LIT_LREL:
+            /* the jump table's word, (target | 1) - base, with the add's
+             * pc as the base: patched with the branches */
+            tcg_want_label(F, t->len, F->lrel[2 * l->v], T_TAB);
+            F->fix[F->nfix - 1].cz_at = F->lrel[2 * l->v + 1] + 4;
             code_u32(t, 0);
             break;
         default:
@@ -2786,8 +2795,28 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LANDING:
         v6_refuse(fn, i, "an exception landing pad");
         return;
-    case IR_IGOTO: case IR_LABELADDR:
-        v6_refuse(fn, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label, PC-relative and with no relocation: a pool word of
+         * the label's distance from the pc an `add` reads, Thumb bit
+         * included --
+         *     ldr rD, =(label | 1) - (1f + 4) ; 1: add rD, pc
+         * -- as the word jump table makes the same sum for bx. */
+        int d = v_wreg(F, i->dst, S0), k = F->nlrel++;
+        if (k * 2 + 2 > F->caplrel) {
+            F->caplrel = F->caplrel ? F->caplrel * 2 : 16;
+            F->lrel = xrealloc(F->lrel, (size_t)F->caplrel * sizeof *F->lrel);
+        }
+        lit_load(F, d, LIT_LREL, (unsigned long)k, NULL);
+        F->lrel[2 * k] = i->label;
+        F->lrel[2 * k + 1] = t->len;
+        t1_add_hi(t, d, T_PC);
+        v_wr(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        t_bx(t, v_rdr(F, i->a, S0));
         return;
     case IR_CAS16:
         v6_refuse(fn, i, "a 16-byte atomic");
@@ -3070,6 +3099,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.bc_end = F.bc_fix = -1;
         F.va_regsave = F.va_first = -1;
         F.nlit = F.nlsite = 0;
+        F.nlrel = 0;
         F.npads = 0;
         F.spb = 0;
         F.ntmp = 0;
@@ -3388,6 +3418,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(cls);
     free(F.usecnt);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);
@@ -3399,5 +3430,6 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.no_tbh);
     free(F.lit);
     free(F.lsite);
+    free(F.lrel);
     free(F.pads);
 }

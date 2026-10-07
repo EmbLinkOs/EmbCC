@@ -31,8 +31,7 @@
  *     a load or store irgen cannot promise is aligned (a packed member)
  *     goes byte by byte.
  *
- * Refused by name: atomics wider than a word, computed
- * goto, jump tables
+ * Refused by name: atomics wider than a word, jump tables
  * (target_jump_tables keeps a dense switch a decision tree), the frame
  * and return address, __int128 and binary128. THE RULE.
  */
@@ -843,7 +842,10 @@ static void st_any(struct tc_fn *F, int rt, int base, long off, int size,
  * relocation: +-32 KiB for a conditional one, +-16 MiB for a J. One that
  * does not reach takes the long form on the next attempt: the inverse
  * condition over a J. */
-enum { FX_B, FX_J };
+/* FX_ADDR is no branch: &&label, whose `at` is the index of the first
+ * of its two function-address sites, the addend of each becoming the
+ * label's offset in the function. */
+enum { FX_B, FX_J, FX_ADDR };
 
 static void want_label(struct tc_fn *F, int at, int label, int kind)
 {
@@ -2739,8 +2741,24 @@ static void gen_ins(struct tc_fn *F, int n)
     case IR_SWITCH:
         tc_refuse(F, i, "a jump table");
         return;
-    case IR_LABELADDR: case IR_IGOTO:
-        tc_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label: the function's own address as IR_FADDR takes it,
+         * movh/addi (HI/LO), plus the label's offset in it -- the addend
+         * set once the function is laid out. */
+        int d = wreg(F, i->dst, ACC);
+        int at = abs_pair(F, d), s0 = F->st->nf;
+        note_fn(F->st, at, fn->src, RK_TRICORE_HI);
+        note_fn(F->st, at + 4, fn->src, RK_TRICORE_LO);
+        want_label(F, s0, i->label, FX_ADDR);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        /* an indirect jump takes an address register */
+        rda(F, i->a, AD);
+        tc_ji(t, AD);
         return;
     default:
         tc_refuse(F, i, "this operation");
@@ -3165,6 +3183,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
         if (target < 0)
             internal_error("tricore: label %d of %s was never placed",
                            F.fix[i].label, fn->name);
+        if (F.fix[i].kind == FX_ADDR) {
+            F.st->f[F.fix[i].at].addend = target - f->code_off;
+            F.st->f[F.fix[i].at + 1].addend = target - f->code_off;
+            continue;
+        }
         if (!tc_patch(t, F.fix[i].at, target)) {
             if (F.fix[i].kind == FX_J)
                 tc_refuse(&F, NULL, "a jump beyond 16 MiB");
@@ -3191,6 +3214,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

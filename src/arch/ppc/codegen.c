@@ -25,7 +25,7 @@
  *     its caller's frame, and an alloca keeps the chain (IR_ALLOCA).
  *   * No delay slots, and misaligned accesses are the hardware's.
  *
- * Refused by name: computed goto, atomics wider than a word,
+ * Refused by name: atomics wider than a word,
  * __builtin_frame_address/return_address, inline asm (for now), a branch
  * beyond +-32 MiB, and __int128 (ILP32). THE RULE.
  */
@@ -763,7 +763,9 @@ static void st_mem(struct ppc_fn *F, int rs, int base, long off, int size)
  * relocation: a bc reaches +-32 KiB, and one that does not is given the
  * long form -- the inverse bc over a `b`, which reaches 32 MiB -- and the
  * function generated again (gen_func). */
-enum { FX_B, FX_TAB };
+/* FX_ADDR: &&label, the two function-address sites from index `base`,
+ * whose addend becomes the label's offset in the function */
+enum { FX_B, FX_TAB, FX_ADDR };
 
 static void want_label(struct ppc_fn *F, int at, int label, int kind)
 {
@@ -2582,8 +2584,25 @@ static void gen_ins(struct ppc_fn *F, int n)
         code_mark_data(t, tab, t->len);
         return;
     }
-    case IR_LABELADDR: case IR_IGOTO:
-        ppc_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label: the function's own address as IR_FADDR takes it,
+         * lis/addi (@ha/@l), plus the label's offset in it -- the addend
+         * set once the function is laid out. Absolute like every other
+         * address here, and it needs no LR (a bcl would). */
+        int d = wreg(F, i->dst, ACC);
+        int at = abs_pair(F, d), s0 = F->st->nf;
+        note_fn(F->st, at + 2, fn->src, RK_PPC_ADDR16_HA);
+        note_fn(F->st, at + 6, fn->src, RK_PPC_ADDR16_LO);
+        want_label(F, at, i->label, FX_ADDR);
+        F->fix[F->nfix - 1].base = s0;
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        ppc_mtctr(t, rdr(F, i->a, ACC));
+        ppc_bctr(t);
         return;
     default:
         ppc_refuse(F, i, "this operation");
@@ -3056,6 +3075,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
                     (unsigned long)(target - F.fix[i].base) & 0xffffffffUL);
             continue;
         }
+        if (F.fix[i].kind == FX_ADDR) {
+            F.st->f[F.fix[i].base].addend = target - f->code_off;
+            F.st->f[F.fix[i].base + 1].addend = target - f->code_off;
+            continue;
+        }
         if (!ppc_patch_branch(t, F.fix[i].at, target)) {
             if ((ppc_rdw(t, F.fix[i].at) >> 26) == 18)
                 ppc_refuse(&F, NULL, "a branch beyond +-32 MiB");
@@ -3082,6 +3106,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);

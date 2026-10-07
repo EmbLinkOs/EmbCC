@@ -120,8 +120,6 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
 for O in -O0 -O2; do
     refc "a 16-byte atomic ($O)" 'a sixteen-byte atomic' \
         '__int128 x; int f(void){ __int128 e = 0; return __atomic_compare_exchange_n(&x, &e, 1, 0, 5, 5); }' $O
-    refc "a computed goto ($O)" 'a computed goto' \
-        'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }' $O
     refc "__builtin_return_address ($O)" '__builtin_frame_address or __builtin_return_address' \
         'void *f(void){ return __builtin_return_address(0); }' $O
     refc "__builtin_frame_address ($O)" '__builtin_frame_address or __builtin_return_address' \
@@ -140,7 +138,7 @@ fi
 grep -q "C++ without -fno-exceptions" "$out/cxx.err" || {
     echo "C++ with exceptions was refused, but not by name:"
     cat "$out/cxx.err"; exit 1; }
-echo "sixteen-byte atomics, computed goto, the frame and return"
+echo "sixteen-byte atomics, the frame and return"
 echo "address, interrupt functions, an over-aligned scalar and C++ exceptions"
 echo "are each refused by name (assembly's refusals are loongarch-asm.sh's)"
 

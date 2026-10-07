@@ -1840,6 +1840,8 @@ static void t_copy_block(struct code *t, int dst, int src, int copy, long size)
 #define T_TBH 98               /* a tbh table's halfword: cz_at holds the pc
                                 * it is relative to, the halfword becomes
                                 * (target - pc) / 2 */
+#define T_LADDR 97             /* &&label: a movw/movt pair into register
+                                * `ins`, added to pc at cz_at */
 
 static void want_label(struct t_fn *F, int at, int label, int cond)
 {
@@ -5163,8 +5165,31 @@ static void gen_ins(struct t_fn *F, int n)
         code_mark_data(t, tab, t->len);
         return;
     }
-    case IR_IGOTO: case IR_LABELADDR:
-        t_refuse(fn, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label, PC-relative and with no relocation: the label's
+         * distance from the pc the `add` reads, built by movw/movt and
+         * patched once the label is placed:
+         *     movw rD, #lo ; movt rD, #hi ; add rD, pc
+         * In Thumb state pc reads as the add + 4 and the distance carries
+         * the Thumb bit, so the address is ready for bx; in ARM state it
+         * is `add rD, pc, rD`, pc reading as the add + 8, bit 0 clear.
+         * adr.w would be one instruction but reaches only 4 KiB. */
+        int d = wreg(F, i->dst, T_ACC);
+        int at = t_mov_addr(t, d, 0), add_at = t->len;
+        if (t_isa_a32)
+            a32_alu_reg(t, T_OP_ADD, d, T_PC, d, 0);
+        else
+            t1_add_hi(t, d, T_PC);
+        want_label(F, at, i->label, T_LADDR);
+        F->fix[F->nfix - 1].cz_at = add_at;
+        F->fix[F->nfix - 1].ins = d;
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        t_bx(t, rdr(F, i->a, T_ACC));
         return;
     case IR_XCHG: case IR_XADD: case IR_ARMW:
     case IR_CAS: case IR_CMPXCHG:
@@ -6197,6 +6222,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (F.fix[i].cond == T_TAB) {
             code_patch32(t, F.fix[i].at, (unsigned long)(unsigned int)
                          ((target | 1) - F.fix[i].cz_at));
+        } else if (F.fix[i].cond == T_LADDR) {
+            /* the pair again, by the same encoder, over the placeholder */
+            long v = t_isa_a32 ? (long)target - (F.fix[i].cz_at + 8)
+                               : (long)(target | 1) - (F.fix[i].cz_at + 4);
+            struct code pair;
+            memset(&pair, 0, sizeof pair);
+            t_mov_addr(&pair, F.fix[i].ins, (unsigned long)v & 0xffffffffUL);
+            if (pair.len != F.fix[i].cz_at - F.fix[i].at)
+                internal_error("thumb: %s: a label address changed size",
+                               fn->name);
+            memcpy(t->p + F.fix[i].at, pair.p, (size_t)pair.len);
+            free(pair.p);
+            free(pair.drange);
         } else if (F.fix[i].cond == T_TBH) {
             long d = (long)target - F.fix[i].cz_at;
             if (d < 0 || d > 2L * 65535 || (d & 1)) {
@@ -6333,6 +6371,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.selimm_v);
     free(F.tail);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);
