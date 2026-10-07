@@ -192,17 +192,13 @@ refflags() {
 # Per-ARCH exclusions, for a macro that is legitimate on one target and an
 # overclaim on another.
 #
-# RISC-V: __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 and _2 claim one- and two-byte
-# atomics. The A extension has no such instruction -- it provides .w and, at
-# RV64, .d and nothing narrower -- so the backend refuses them rather than
-# doing a read-modify-write of the containing word, which would not be atomic
-# against a neighbouring byte. gcc answers these by calling libatomic; EmbCC
-# has no such library, so claiming them would make a program compile and then
-# fail to link. _4 (and _8 at RV64) stay: those are real.
+# RISC-V claims every compare-and-swap width it has: the A extension's .w
+# and .d, and one and two bytes through an LR/SC loop on the word around
+# them (the backend's sub_lane), as GCC's and LLVM's are. RV32 has no
+# eight-byte form.
 exclude_arch() {
     case "$1" in
-        riscv32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2|8)' ;;
-        riscv64) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        riscv32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8' ;;
         # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
         # two-byte atomic exactly as RISC-V's does (no libatomic here).
         mips32|mips32eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
