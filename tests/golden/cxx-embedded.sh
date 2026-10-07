@@ -171,5 +171,5 @@ sort "$out/results.txt" | grep '^FAIL' | head -40
 pass=$(grep -c '^PASS' "$out/results.txt")
 fail=$(grep -c '^FAIL' "$out/results.txt")
 echo "$pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -ge 144 ] || exit 1
+[ "$fail" = 0 ] && [ "$pass" -ge 168 ] || exit 1
 echo "C++ runs on the Cortex-M, ARM and RV32 boards as it does on the host"
