@@ -44,7 +44,8 @@ for spec in "x86_64-elf:8:DW_OP_reg6" \
             "thumbv7m-none-eabi:4:DW_OP_breg13" \
             "riscv32-unknown-elf:4:DW_OP_breg2" \
             "riscv64-unknown-elf:8:DW_OP_breg2" \
-            "mipsel-none-elf:4:DW_OP_breg29"; do
+            "mipsel-none-elf:4:DW_OP_breg29" \
+            "sparc-none-elf:4:DW_OP_breg30"; do
     t=${spec%%:*}; rest=${spec#*:}; want_as=${rest%%:*}; want_fb=${rest#*:}
     o="$out/$t.o"
     "$EMBCC" --target="$t" -g -O0 -c "$out/p.c" -o "$o" 2> "$out/$t.err" || {
@@ -125,13 +126,27 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
         echo "FAIL mipsel-none-elf: 'p' is at fbreg '$off' but nothing stores \$4 there"
         fail=1
     fi
+    # ...and SPARC, whose frame base is %fp (%i6) in every function, alloca
+    # or not: p arrives in %i0 and the prologue stores it at %fp - n
+    o="$out/sparc-none-elf.o"
+    off=$("$DWDUMP" --debug-info "$o" 2>/dev/null |
+          grep -A2 'DW_AT_name	("p")' | grep -oE 'fbreg [+-][0-9]+' |
+          grep -oE '[+-][0-9]+' | head -1)
+    if [ -n "$off" ] && [ "$off" -lt 0 ] && "$OBJDUMP" -d "$o" 2>/dev/null |
+         grep -qE "st[[:space:]]+%i0,[[:space:]]*\\[%fp\\+-0x$(printf '%x' "$((-off))")\\]"; then
+        echo "  sparc-none-elf: 'p' at fbreg $off is the slot the prologue writes"
+    else
+        echo "FAIL sparc-none-elf: 'p' is at fbreg '$off' but nothing stores %i0 there"
+        "$OBJDUMP" -d "$o" 2>/dev/null | grep -E 'st .*%i0' | head -3
+        fail=1
+    fi
 fi
 
 # A pointer is the target's width in the type DIEs too. The pointer
 # DIE's byte_size was 8 on every target, so a debugger read a 32-bit
 # target's pointer variable together with the four bytes after it.
 for t in thumbv7m-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
-         mipsel-none-elf; do
+         mipsel-none-elf sparc-none-elf; do
     want=4; [ $t = riscv64-unknown-elf ] && want=8
     "$EMBCC" --target=$t -g -c "$out/p.c" -o "$out/ptr-$t.o" 2>/dev/null || {
         echo "FAIL $t: p.c with -g"; fail=1; continue; }

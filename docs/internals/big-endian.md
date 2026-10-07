@@ -44,7 +44,8 @@ order.
 | `src/lex/lex.c` `lit_encode` | `u""`, `U""`, `L""` units in the target's order (every literal, every consumer) | mips-be-data, endian.c |
 | `src/sema/ldfloat.c` | `ldf_encode_target`: the format's bytes reversed whole. `ldf_encode` stays little-endian, because `ldf_to_double` and the C++ evaluator read it as host order | mips-be-data (`d_ld`, `d_cd`, `d_cf`) |
 | `src/driver/main.c` | a scalar global's `.data`/`.rodata` image from `g->init`; `-EB`/`-EL` | mips-be-data |
-| `src/ir/irgen.c` `emit_ldconst` | a long double constant's pool bytes | (no big-endian target has a 16-byte long double yet) |
+| `src/ir/irgen.c` `emit_ldconst` | a long double constant's pool bytes (ldf_encode_target) | sparc-exec (long-double-quad.c: run-time constants against the static folds) |
+| `src/ir/irgen.c` `fb_wide` | the binary128 sign and exponent are its FIRST two bytes and its low doubleword the second (signbit, isnan, fabsl, copysignl, ...) | sparc-exec (fp-bits-long-double) |
 | `src/sema/type.c` bit-field layout | `bit_off` is the field's shift from the least significant end of its unit AS LOADED; the positions in memory order are the same in both orders (gcc's layout), and `ty_bf_mempos` converts between them. Big-endian the first field is at the unit's high end. Union members and packed straddling fields likewise. | mips-be-data (six bit-field structs, a union), endian.c |
 | `src/ir/irgen.c` bit-fields | the unit loads and stores need nothing (they shift from the loaded value's LSB); the byte-at-a-time forms of a packed field across its unit put byte k at `8(n-1-k)`; the 128-bit byte forms are refused big-endian | endian.c, mips-be-exec (packed-bitfields, refereed) |
 | `src/debug/dwarf.c`, `src/debug/eh.c` | every multi-byte field through `target_put_uint`, the backpatched unit and header lengths included; `DW_AT_data_bit_offset` is the memory-order position | mips-be-data (`llvm-dwarfdump --verify`, clang's bit offsets) |
@@ -57,6 +58,8 @@ order.
 | `src/arch/mips/codegen.c` | see below | mips-be-exec, mips-be-abi |
 | `src/link/link.c` | see below | every board test, mips-be-abi (clang's objects) |
 | `lib/libc/src/math/fdlibm/fdlibm.h` | `__IEEE_BIG_ENDIAN` from `__BYTE_ORDER__`: which word of a double is first | libc-embedded (mips-none-elf against x86-64), mips-be-exec |
+| `lib/libc/src/stdio/format.c` `fp_of_ldouble` | a binary128's bytes most significant first | libc-embedded (sparc-none-elf's `%Lf`) |
+| `lib/rt/softtf.c` | the 64-bit halves of the soft binary128 (`tf_u128`, `union tfbits`) in memory order | sparc-exec (long-double-quad.c) |
 | `tests/harness/mips/run.sh` | the board is chosen by the image's `EI_DATA` | -- |
 
 ### The MIPS backend
