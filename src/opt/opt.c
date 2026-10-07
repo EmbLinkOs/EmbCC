@@ -3967,19 +3967,20 @@ static int pass_divmagic(struct ir_func *fn)
      * a divide instruction the shifts are a few bytes longer than it. */
     /* A 32-bit machine with a widening multiply has the high half in one
      * instruction (target_has_mulh), and takes the magic number as a
-     * 64-bit one does -- except at -Os, where a hardware divide is the
-     * shorter of the two, and a library call's few bytes are too. */
+     * 64-bit one does -- at -Os too where the divide is a library call
+     * (ARM state: __aeabi_uidiv), which is the slower by far and hardly
+     * the shorter once its argument registers are counted. Where it is
+     * an instruction, -Os keeps it: four bytes against a dozen. */
     int narrow = target_ptr_size() < 8;
-    int mulh32 = narrow && target_has_mulh() && !g_opt_size &&
-                 !getenv("EMBCC_NO_MULH");
-    int pow2_only = narrow && !mulh32;
-    if (pow2_only && g_opt_size) {
+    if (narrow && g_opt_size) {
         struct ir_ins probe;
         memset(&probe, 0, sizeof probe);
         probe.op = IR_DIV; probe.w = 4; probe.sign = 1;
         if (!target_op_calls_helper(&probe))
             return 0;
     }
+    int mulh32 = narrow && target_has_mulh() && !getenv("EMBCC_NO_MULH");
+    int pow2_only = narrow && !mulh32;
     struct defs d;
     compute_defs(fn, &d);
     struct ibuf nb = { 0, 0, 0 };
