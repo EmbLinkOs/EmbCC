@@ -37,8 +37,8 @@
  *   * VOLATILE accesses are preceded by memw, as GCC's default
  *     -mserialize-volatile has them.
  *
- * Refused by name: computed goto, a jump table (target_jump_tables keeps a
- * dense switch a decision tree), atomics other than a word, inline asm,
+ * Refused by name: a jump table (target_jump_tables keeps a dense switch
+ * a decision tree), atomics other than a word, inline asm,
  * the frame and return address, a function too large for its branches or
  * its literal pool, and __int128 (which does not exist on ILP32). THE RULE.
  */
@@ -2722,8 +2722,17 @@ static void gen_ins(struct xt_fn *F, int n)
     case IR_BSWAP:
         xt_refuse(F, i, "a byte swap as one operation");
         return;
-    case IR_LABELADDR: case IR_IGOTO:
-        xt_refuse(F, i, "a computed goto");
+    case IR_LABELADDR: {
+        /* &&label: l32r of a pool word holding the label's address --
+         * the far jump's literal, R_XTENSA_32 against .text plus the
+         * label's offset (RK_XTENSA_TEXT32). */
+        int d = wreg(F, i->dst, ACC);
+        lit_load(F, d, LIT_LABEL, (unsigned long)i->label, NULL);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        xt_jx(t, rdr(F, i->a, ACC));
         return;
     default:
         xt_refuse(F, i, "this operation");
