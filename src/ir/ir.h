@@ -337,6 +337,9 @@ struct ir_ins {
      * where the type still exists (§9.1). Zero size means "no scalar
      * result" -- a void call, or a struct, which retsize describes. */
     int ret_tybytes, ret_tysign;
+    /* TriCore: the call's result is a POINTER, which comes back in the
+     * address register A2 rather than in D2 (irgen sets it there only). */
+    int ret_ptr;
     /* The same, for the value a call returns. */
     int ret_hfa_n, ret_hfa_size;
     int ret_byref;

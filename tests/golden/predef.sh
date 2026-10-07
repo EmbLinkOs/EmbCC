@@ -12,7 +12,7 @@ echo "TEST-MARKER predef"
 # ONE exclusion list in tools/gen-predef.sh (asked for directly, not restated
 # here, so the test and the generator cannot drift apart).
 checked=0
-for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips32eb loongarch64; do
+for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips32eb loongarch64 tricore; do
     # The triple is not always "<arch>-elf": ARMv7-M is spelled the way
     # every other toolchain spells it, and gen-predef.sh keys on the short
     # name, so the two are named apart here rather than assumed equal.
@@ -25,6 +25,7 @@ for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips
         mips32)         triple=mipsel-none-elf ;;
         mips32eb)       triple=mips-none-elf ;;
         loongarch64)    triple=loongarch64-unknown-elf ;;
+        tricore)        triple=tricore-none-elf ;;
         *)              triple=$arch-elf ;;
     esac
     out=$("$EMBCC" --target=$triple --dump-predef) || {
@@ -63,6 +64,9 @@ for arch in x86_64 aarch64 thumb thumbv6m armv7a riscv32 riscv64 avr mips32 mips
             mips32)  own="__mips__ _MIPSEL __mips_soft_float __mips_o32 _MIPS_SZPTR" ;;
             mips32eb) own="__mips__ _MIPSEB __BIG_ENDIAN__ __mips_soft_float __mips_o32" ;;
             loongarch64) own="__loongarch__ __loongarch64 __loongarch_soft_float __loongarch_lp64 __LP64__" ;;
+            # (there is no TriCore compiler to generate the table from:
+            #  src/arch/tricore/predef.c says how it was made)
+            tricore) own="__tricore__ __TRICORE__ __TRICORE_CORE__ __ILP32__" ;;
         esac
         for m in __INT64_TYPE__ __INTPTR_TYPE__ __SIZE_TYPE__ __PTRDIFF_TYPE__ \
                  __CHAR_BIT__ __SIZEOF_POINTER__ __SIZEOF_LONG__ \

@@ -29,6 +29,7 @@ little-endian.
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
 | [LoongArch64](#loongarch64) | `loongarch64-unknown-elf` | ELF64 | LoongArch psABI, LP64S (soft float) | `embld` |
+| [TriCore](#tricore) | `tricore-none-elf` | ELF32 | TriCore EABI, soft float | `embld` |
 
 | Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
@@ -46,6 +47,7 @@ little-endian.
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
 | MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 | LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
+| TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
@@ -117,6 +119,7 @@ Size and alignment in bytes, written `size/alignment`. "x86-64" covers
 covers every `thumb*` triple.
 
 | Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | LoongArch64 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | TriCore |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | signed |
 | `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 |
@@ -132,6 +135,17 @@ covers every `thumb*` triple.
 | `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
 | `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
 | Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 4/4 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/4 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 4/4 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/4 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 8/4 binary64 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | — |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 8 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 8 |
 
 Notes on the table:
 
@@ -1112,6 +1126,18 @@ exception prints its cause and address.
 LA64, little-endian, with the LoongArch psABI's LP64S convention (soft
 float): `loongarch64-unknown-elf`. Freestanding only. The design notes
 are in [the LoongArch64 plan](../internals/loongarch64-plan.md).
+## TriCore
+
+Infineon TriCore 1.6.1, the core of the AURIX TC2xx microcontrollers and
+a subset of the TC3xx's TriCore 1.6.2: 32-bit, little-endian, soft float.
+Freestanding only. The design notes, and where each fact below comes
+from, are in [the TriCore plan](../internals/tricore-plan.md): there is
+no TriCore compiler on the machine EmbCC is developed on, so the calling
+convention, the data layout, the relocation numbers and the predefined
+macros are the TriCore EABI and GCC for TriCore **as remembered, and
+unverified** against a reference compiler. The instruction encodings are
+checked against QEMU's TriCore translator, and every test runs on QEMU's
+`tricore_testboard`.
 
 ### Triples
 
@@ -1234,6 +1260,90 @@ defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are.
 is linked at 0x1000000 and loaded with `-kernel`, the UART at 0x1fe001e0
 is the console, an exception prints its code and address, and the ACPI
 GED's sleep register powers the board off at the end.
+| `tricore-none-elf` | `tricore-elf`, `tricore-unknown-elf`, `tricore` | TriCore 1.6.1 | TriCore EABI, soft float |
+
+### Options
+
+| Option | Accepted values | Refused with |
+|---|---|---|
+| `-mcpu=CPU`, `-march=CPU`, `-mCPU` | `tc16`, `tc161`, `tc162`, `tc1.6`, `tc1.6.1`, `tc1.6.2`, `tc16x`, `tc2xx`, `tc22xx`, `tc23xx`, `tc26xx`, `tc27xx`, `tc29xx`, `tc3xx`, `tc33xx`, `tc36xx`, `tc37xx`, `tc38xx`, `tc39xx` | `-mcpu=tc1797 is not a TriCore 1.6 core: EmbCC emits TriCore 1.6.1 code, for the AURIX TC2xx and TC3xx (...)` |
+| `-msoft-float`, `-mlittle-endian` | (no value) | `-mhard-float is not supported: EmbCC emits soft float for TriCore (the TC3xx FPU is not used yet)` |
+
+### Calling convention (TriCore EABI, unverified)
+
+- A pointer argument travels in the next free of `A4`–`A7`; any other
+  scalar of 32 bits or fewer in the lowest free of `D4`–`D7`; a `long
+  long` or `double` in the next free even pair, `E4` (`D4:D5`) or `E6`,
+  low word in the even register -- a register skipped on the way is
+  filled by a later 32-bit argument.
+- A structure or union of 8 bytes or fewer travels as an integer of its
+  size; a larger one by reference, the caller passing the address of its
+  own copy as a pointer argument.
+- What finds no register goes on the stack in whole words from the
+  caller's `A10`, 4-aligned whatever its size. Every unnamed argument of
+  a variadic call goes there too, so `va_list` is a `char *`.
+- A pointer result comes back in `A2`; another of 32 bits or fewer in
+  `D2`; a 64-bit one, or a struct of 5-8 bytes, in `E2`; a larger struct
+  through a hidden pointer the caller passes in `A4`.
+- `CALL` saves the upper context (`D8`–`D15`, `A10`–`A15`) in a
+  context-save area and `RET` restores it, so those registers and the
+  stack pointer survive every call with no save code. `A0`, `A1`, `A8`
+  and `A9` are the system's and never touched.
+- The stack is 8-byte aligned; `long long` and `double` are 4-aligned in
+  memory.
+
+### Code generation
+
+Every value lives in a data register or a frame slot; address registers
+are loaded just before a load or store, and for a call's pointer
+arguments and results. Addresses are absolute: `movh` and `addi` with
+`R_TRICORE_HIADJ` and `R_TRICORE_LO`. Calls are `CALL` with
+`R_TRICORE_24REL` (±16 MiB). Conditional branches reach ±32 KiB; a branch
+in a function larger than that becomes an inverted branch over a `J`. A
+dense `switch` is a tree of compares (no jump tables yet). A load or store
+the compiler cannot prove aligned goes a byte at a time. Only the 32-bit
+encodings are emitted.
+
+### Object format and linking
+
+ELF32, little-endian, `EM_TRICORE` (44), RELA relocations, `e_flags`
+`0x00200000`. `embld` links these objects, applying `R_TRICORE_32ABS`,
+`R_TRICORE_24REL`, `R_TRICORE_HIADJ`, `R_TRICORE_LO` and `R_TRICORE_LO2`,
+and refuses the small-data relocations by name. `-Tstack ADDR --csa
+START:END` makes it emit an entry stub that sets `A10`, links the
+context-save areas in [START, END) into the free list every `CALL` draws
+from, turns call-depth counting off and jumps to the entry symbol; the
+areas must be 64-byte aligned and within the first 4 MiB of one 256 MiB
+segment.
+
+### Assembly
+
+Inline `asm` is assembled by EmbCC's TriCore vocabulary
+(`src/arch/tricore/asm.c`): the system instructions (`mtcr`/`mfcr` with
+core registers by name or number, `isync`, `dsync`, `syscall`,
+`enable`, ...), the moves, the ALU forms, the loads and stores,
+`swap.w`, `cmpswap.w` and the indirect jumps and calls. Constraints:
+`d`/`r` a data register, `a` an address register, `m` an address register
+holding the operand's address (written `[%0]`), `i` a constant; register
+variables bound to `d0`-`d7` or `a2`-`a7`. There is no assembler for
+`.s` files and no instructions in file-scope `asm`; naked functions are
+refused.
+
+### Predefined macros
+
+`__tricore__`, `__TRICORE__`, `__TC161__`, `__TRICORE_CORE__` and
+`__TRICORE_NAME__` (`0x161`), with the ILP32 set; `__CHAR_UNSIGNED__` is
+not defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is, the 1- and 2-byte
+forms are not.
+
+### Runtime
+
+`make rt-embedded` and `make libc-embedded` build `librt.a` and `libc.a`
+for `tricore-none-elf`. `tests/harness/tricore` runs programs on QEMU's
+`tricore_testboard` (`-cpu tc27x`): the image is linked at 0x80000000 and
+loaded with `-kernel`; the board has no UART, so a TCG plugin
+(`tests/harness/tricore/putc.c`) prints what the harness stores to its
+output word; a trap prints its class, number and address.
 
 ### Limitations
 
@@ -1245,6 +1355,16 @@ GED's sleep register powers the board off at the end.
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
 | a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
+| an atomic on a 1- or 2-byte object | `the TriCore backend cannot lower an atomic narrower than four bytes (SWAP.W and CMPSWAP.W are word-sized, ...)` |
+| an 8-byte atomic | `the TriCore backend cannot lower an atomic wider than a register yet`; a load or store: `an atomic access of 8 bytes is not one access on this target ...` |
+| a computed `goto` | `the TriCore backend cannot lower a computed goto yet` |
+| `__builtin_frame_address`, `__builtin_return_address` | `... (TriCore code keeps no frame-pointer chain; the return address is in the context-save area)` |
+| `__int128` | `__int128 does not exist on this target ...` |
+| `__attribute__((interrupt))`, `__attribute__((naked))` | `__attribute__((...)) is not supported: ...` |
+| `.s` and `.S` files | `no assembly-file support for tricore-none-elf yet ...` |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
+| a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8 ...` |
+| any C++ translation unit | `C++ is not yet supported for tricore-none-elf: ...` |
 
 ## AVR
 
@@ -1372,6 +1492,7 @@ for each; the machines are:
 | `thumbv8m.main-none-eabi[hf]` | `qemu-system-arm -M mps2-an505 -cpu cortex-m33` | As above |
 | `riscv32-unknown-elf`, `riscv64-unknown-elf` | `qemu-system-riscv32` / `qemu-system-riscv64 -M virt -bios none -m 8` | The startup writes the SiFive test device after `main` returns |
 | `avr` | `qemu-system-avr -M uno`, the image passed with `-bios` | The program prints a sentinel; `qrun.sh --until` stops QEMU when it appears |
+| `tricore-none-elf` | `qemu-system-tricore -M tricore_testboard -cpu tc27x`, output through a TCG plugin | The program prints `==EXIT n==` and writes n to the board's test device |
 
 `-bios none` matters on RISC-V: without it QEMU runs OpenSBI first and
 enters the image in supervisor mode. On AVR, QEMU refuses an image whose

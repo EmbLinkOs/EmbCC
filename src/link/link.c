@@ -26,6 +26,7 @@
 #include "../arch/avr/emit.h"
 #include "../arch/mips/emit.h"
 #include "../arch/thumb/a32.h"
+#include "../arch/tricore/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -221,6 +222,7 @@ struct linker {
     struct { Elf64_Addr at; long long val; } *pcrel;
     int npcrel, cappcrel;
     Elf64_Addr stack_top;      /* RISC-V: the entry stub's sp, 0 = no stub */
+    unsigned long csa_start, csa_end;   /* TriCore: the stub's CSA list */
     int stub_sec;              /* the stub's insecs index, or -1 */
     unsigned char *stub;       /* its bytes, written after layout */
     long stub_size;
@@ -606,10 +608,15 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (e32->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
         if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
-            e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS)
+            e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS &&
+            e32->e_machine != EM_TRICORE)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
-                "RV32 (EM_RISCV), AVR (EM_AVR) and MIPS (EM_MIPS) are "
-                "supported", name, (unsigned)e32->e_machine);
+                "RV32 (EM_RISCV), AVR (EM_AVR), MIPS (EM_MIPS) and TriCore "
+                "(EM_TRICORE) are supported", name, (unsigned)e32->e_machine);
+        if (e32->e_machine == EM_TRICORE &&
+            e32->e_ident[EI_DATA] != ELFDATA2LSB)
+            die("%s: a big-endian TriCore object; TriCore is little-endian",
+                name);
         /* o32 only, in either byte order; and big-endian only there */
         if (e32->e_machine == EM_MIPS &&
             (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32)
@@ -942,6 +949,74 @@ static void collect_sections(struct linker *l, struct object *o)
     }
 }
 
+/* The TriCore entry stub, a fixed TC_STUB_SIZE bytes (every address is a
+ * MOVH/ADDI or MOVH.A/LEA pair, both halves always, so the size is known
+ * before layout):
+ *
+ *     A10 = the stack top
+ *     link each CSA in [csa_start, csa_end) to the next, the last to none;
+ *     FCX = the first, LCX = the one 16 before the end (the depletion
+ *     trap comes with room left to handle it)
+ *     PCXI = 0, PSW.CDC = 0x7f (call depth counting off), isync
+ *     JI to the entry
+ *
+ * A CSA link word holds the address's segment (bits 31:28) in bits 19:16
+ * and address bits 21:6 in 15:0, so consecutive 64-byte areas have
+ * consecutive links. Without the list, the entry's first CALL traps. */
+#define TC_STUB_SIZE 116
+
+static unsigned long tc_csa_link(unsigned long a)
+{
+    return ((a >> 12) & 0xf0000UL) | ((a >> 6) & 0xffffUL);
+}
+
+static void tc_li_fixed(struct code *c, int d, unsigned long v)
+{
+    tc_movh(c, d, tc_hi_adj(v));
+    tc_addi(c, d, d, (long long)(short)(unsigned short)(v & 0xffff));
+}
+
+static void tc_li_a_fixed(struct code *c, int a, unsigned long v)
+{
+    tc_movh_a(c, a, tc_hi_adj(v));
+    tc_lea(c, a, a, (long long)(short)(unsigned short)(v & 0xffff));
+}
+
+static void fill_tricore_stub(struct linker *l, struct code *c,
+                              Elf64_Addr entry)
+{
+    unsigned long n = (l->csa_end - l->csa_start) / 64;
+    unsigned long last = n > 32 ? n - 16 : n - 2;
+    int top;
+    tc_li_a_fixed(c, TC_SP, (unsigned long)l->stack_top);
+    tc_li_a_fixed(c, 12, l->csa_start);
+    tc_li_fixed(c, 0, tc_csa_link(l->csa_start));
+    tc_mov(c, 2, 0);                               /* FCX: the first */
+    tc_li_fixed(c, 1, n - 1);
+    top = c->len;
+    tc_addi(c, 0, 0, 1);                           /* the next one's link */
+    tc_store(c, 0, 12, 0, 4);
+    tc_lea(c, 12, 12, 64);
+    tc_addi(c, 1, 1, -1);
+    tc_w(c, tc_enc_jcci(TC_JNE, 1, 0, (long)top - (long)c->len));
+    tc_mov_imm(c, 0, 0);
+    tc_store(c, 0, 12, 0, 4);                      /* the last: no next */
+    tc_mtcr(c, TC_CSFR_FCX, 2);
+    tc_li_fixed(c, 0, tc_csa_link(l->csa_start + 64 * last));
+    tc_mtcr(c, TC_CSFR_LCX, 0);
+    tc_mov_imm(c, 0, 0);
+    tc_mtcr(c, TC_CSFR_PCXI, 0);
+    tc_mfcr(c, 0, TC_CSFR_PSW);
+    tc_alu_imm(c, TC_OR, 0, 0, 0x7f);
+    tc_mtcr(c, TC_CSFR_PSW, 0);
+    tc_isync(c);
+    tc_li_a_fixed(c, 12, (unsigned long)entry);
+    tc_ji(c, 12);
+    if (c->len != TC_STUB_SIZE)
+        internal_error("the TriCore entry stub is %d bytes, not %d", c->len,
+                       TC_STUB_SIZE);
+}
+
 /* The RISC-V entry stub: set sp, then jump to the real entry.
  *
  * Registered as an ordinary input section in the .vectors group, which
@@ -970,6 +1045,7 @@ static void add_entry_stub(struct linker *l)
               : l->machine == EM_LOONGARCH
               ? la_li_len((long long)l->stack_top) + 8
               : l->machine == EM_ARM ? 20
+              : l->machine == EM_TRICORE ? TC_STUB_SIZE
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -1004,6 +1080,10 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         a32_movw_movt(&c, 12, (unsigned)(entry & 0xffff), 0);
         a32_movw_movt(&c, 12, (unsigned)((entry >> 16) & 0xffff), 1);
         a32_bx(&c, 12, 0);
+        return;
+    }
+    if (l->machine == EM_TRICORE) {
+        fill_tricore_stub(l, &c, entry);
         return;
     }
     if (l->machine == EM_MIPS) {
@@ -1080,6 +1160,8 @@ static void add_object(struct linker *l, struct object *o)
         l->eflags = o->eflags & EF_AVR_ARCH_MASK;
     else if (o->machine == EM_LOONGARCH)
         l->eflags = EF_LOONGARCH_ABI_SOFT_FLOAT | EF_LOONGARCH_OBJABI_V1;
+    else if (o->machine == EM_TRICORE && !(l->eflags & EF_TRICORE_CORE_MASK))
+        l->eflags = o->eflags & EF_TRICORE_CORE_MASK;
     if (l->nobj == l->capobj) {
         l->capobj = l->capobj ? l->capobj * 2 : 8;
         l->objs = xrealloc(l->objs, (size_t)l->capobj * sizeof *l->objs);
@@ -1765,7 +1847,7 @@ static void layout(struct linker *l, struct osec_bound *b,
      * two bytes into a word sent the harness's .bss loop to the reset
      * vector. Both ends are kept on word boundaries, the padding inside
      * the image, as a GNU script's ALIGN(4) puts it. */
-    if (l->machine == EM_MIPS)
+    if (l->machine == EM_MIPS || l->machine == EM_TRICORE)
         va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
@@ -1799,7 +1881,7 @@ static void layout(struct linker *l, struct osec_bound *b,
         g->common = 0;
         va += g->size;
     }
-    if (l->machine == EM_MIPS)
+    if (l->machine == EM_MIPS || l->machine == EM_TRICORE)
         va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
@@ -2683,6 +2765,68 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
     }
 }
 
+/* ---- TriCore -------------------------------------------------------------
+ *
+ * RELA, the addend in the relocation (docs/internals/tricore-plan.md).
+ * An address is two halves in two instruction formats: HIADJ in an RLC
+ * const16 (MOVH, MOVH.A), rounded by 0x8000 because the low half is
+ * sign-extended where it is added; LO in an RLC const16 (ADDI); LO2 in a
+ * BOL long offset (LEA, a load, a store), whose 16 bits are scattered in
+ * three pieces. 24REL is CALL's and J's halfword displacement. Every
+ * field is rebuilt by src/arch/tricore/emit.c's format packers from the
+ * instruction's own other fields, so no layout is written down here. The
+ * small-data and other types are refused by name. */
+static void apply_tricore(struct linker *l, struct object *o, unsigned type,
+                          unsigned char *loc, Elf64_Addr S, long long A,
+                          Elf64_Addr P)
+{
+    unsigned long w = get32loc(loc);
+    int op1 = (int)(w & 0xff), s1 = (int)((w >> 8) & 15),
+        s2 = (int)((w >> 12) & 15), d = (int)((w >> 28) & 15);
+    long long V = (long long)S + A;
+    switch (type) {
+    case R_TRICORE_NONE:
+        return;
+    case R_TRICORE_32ABS:
+        need_range(l, o, "R_TRICORE_32ABS", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_TRICORE_24REL: {
+        long long dd = V - (long long)P;
+        if (op1 != 0x1d && op1 != 0x6d && op1 != 0x5d)
+            die("%s: R_TRICORE_24REL on 0x%08lx, which is not a J, CALL or "
+                "JL", o->name, w);
+        if (dd & 1)
+            die("%s: a call or jump to the odd address 0x%llx ('%s')",
+                o->name, (unsigned long long)V, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_TRICORE_24REL", dd, -16777216LL, 16777214LL);
+        put32(loc, (unsigned int)tc_enc_b(op1, (unsigned long)(dd / 2) &
+                                               0xffffffUL));
+        return;
+    }
+    case R_TRICORE_HIADJ:
+        put32(loc, (unsigned int)tc_enc_rlc(op1, d, s1,
+                                            tc_hi_adj((unsigned long)V)));
+        return;
+    case R_TRICORE_LO:
+        put32(loc, (unsigned int)tc_enc_rlc(op1, d, s1,
+                                            (unsigned)(V & 0xffff)));
+        return;
+    case R_TRICORE_LO2:
+        put32(loc, (unsigned int)tc_enc_bol(op1, s1, s2,
+                                            (unsigned)(V & 0xffff)));
+        return;
+    case R_TRICORE_16SM: case R_TRICORE_10SM:
+        die("%s: relocation %s: small-data (A0-relative) addressing, which "
+            "this linker does not lay out", o->name,
+            type == R_TRICORE_16SM ? "R_TRICORE_16SM" : "R_TRICORE_10SM");
+        return;
+    default:
+        die("%s: unsupported TriCore relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
 /* ---- AVR --------------------------------------------------------------
  *
  * Two things make this machine's relocations unlike the others'.
@@ -2947,6 +3091,10 @@ static void apply_relocs(struct linker *l, struct object *o)
             }
             if (o->machine == EM_AVR) {
                 apply_avr(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_TRICORE) {
+                apply_tricore(l, o, type, loc, S, A, P);
                 continue;
             }
             if (o->machine == EM_MIPS) {
@@ -3384,7 +3532,8 @@ static void write_exec(struct linker *l, const char *out,
      * RISC-V's are the float ABI, whose 0 means SOFT. */
     eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5
                 : l->machine == EM_RISCV || l->machine == EM_AVR ||
-                  l->machine == EM_MIPS || l->machine == EM_LOONGARCH
+                  l->machine == EM_MIPS || l->machine == EM_LOONGARCH ||
+                  l->machine == EM_TRICORE
                 ? l->eflags
                 : 0;
     eh->e_phoff = ehsz;
@@ -5310,10 +5459,28 @@ int embld_link(const char **inputs, int ninputs, const char *out,
          * reads its sp from the vector table and wants none -- and could
          * not run one, having no ARM state. */
         if (l.machine != EM_RISCV && l.machine != EM_MIPS &&
-            l.machine != EM_LOONGARCH && l.machine != EM_ARM)
-            die("-Tstack is a RISC-V, MIPS, LoongArch and ARMv7-A option: "
+            l.machine != EM_LOONGARCH && l.machine != EM_ARM &&
+            l.machine != EM_TRICORE)
+            die("-Tstack is a RISC-V, MIPS, LoongArch, ARMv7-A and TriCore option: "
                 "every other target here starts with a stack pointer already "
                 "set (a Cortex-M reads its own from the vector table)");
+        if (l.machine == EM_TRICORE) {
+            if (!opts->have_csa)
+                die("-Tstack on TriCore needs --csa START:END as well: the "
+                    "stub links the context-save areas every CALL takes, "
+                    "and with none the entry's first call traps");
+            if ((opts->csa_start & 63) || (opts->csa_end & 63) ||
+                opts->csa_end < opts->csa_start + 128 ||
+                (opts->csa_start >> 28) != ((opts->csa_end - 1) >> 28) ||
+                ((opts->csa_start | (opts->csa_end - 1)) & 0x0fc00000UL))
+                die("--csa 0x%lx:0x%lx: the context-save areas must be "
+                    "64-byte aligned, at least two of them, and within the "
+                    "first 4 MiB of one 256 MiB segment (a link word holds "
+                    "address bits 31:28 and 21:6)",
+                    opts->csa_start, opts->csa_end);
+            l.csa_start = opts->csa_start;
+            l.csa_end = opts->csa_end;
+        }
         add_entry_stub(&l);
     }
 

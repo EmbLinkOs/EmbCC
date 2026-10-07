@@ -72,6 +72,11 @@
 #define DW_REG_FB_MIPS        30     /* $30, fp/s8: the same */
 #define DW_REG_SP_LA           3     /* $r3, sp: LoongArch numbers r0-r31 0-31 */
 #define DW_REG_FB_LA          22     /* $r22, fp: the VLA frame base */
+/* TriCore, as GCC for TriCore numbers its registers (unverified: D0-D15
+ * are 0-15 and A0-A15 16-31): A10, the stack pointer, and A14, the frame
+ * base the backend keeps under alloca. */
+#define DW_REG_SP_TRICORE     26
+#define DW_REG_FB_TRICORE     30
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -576,6 +581,18 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
                                      : (thumb ? DW_REG_SP_ARM
                                         : mips ? DW_REG_SP_MIPS
                                         : la ? DW_REG_SP_LA
+                a == TARGET_TRICORE) {
+                struct dbuf e = { 0, 0, 0 };
+                int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
+                int tc = a == TARGET_TRICORE;
+                db_u8(&e, DW_OP_breg(fn->has_alloca
+                                     ? (thumb ? DW_REG_FB_ARM
+                                        : mips ? DW_REG_FB_MIPS
+                                        : tc ? DW_REG_FB_TRICORE
+                                             : DW_REG_FB_RISCV)
+                                     : (thumb ? DW_REG_SP_ARM
+                                        : mips ? DW_REG_SP_MIPS
+                                        : tc ? DW_REG_SP_TRICORE
                                              : DW_REG_SP_RISCV)));
                 db_sleb(&e, 0);
                 db_uleb(b, (unsigned long)e.len);

@@ -58,6 +58,9 @@ static const struct predef_macro *arch_table(int *count)
         case TARGET_LOONGARCH64:
             *count = predef_macro_count_cxx_loongarch64;
             return predef_macros_cxx_loongarch64;
+        case TARGET_TRICORE:
+            *count = predef_macro_count_cxx_tricore;
+            return predef_macros_cxx_tricore;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -101,6 +104,9 @@ static const struct predef_macro *arch_table(int *count)
     case TARGET_LOONGARCH64:
         *count = predef_macro_count_loongarch64;
         return predef_macros_loongarch64;
+    case TARGET_TRICORE:
+        *count = predef_macro_count_tricore;
+        return predef_macros_tricore;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;

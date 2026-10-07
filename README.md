@@ -17,12 +17,13 @@ x86-64.
 | ARM Cortex-M | `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 objects, linked by `embld` |
 | RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF objects, linked by `embld` |
 | MIPS32 (little-endian, o32, soft float) | `mipsel-none-elf` | ELF32 objects, linked by `embld` |
+| Infineon TriCore 1.6.1 (AURIX TC2xx/TC3xx, soft float) | `tricore-none-elf` | ELF32 objects, linked by `embld` |
 | AVR (ATmega328P) | `avr` | ELF32 objects, linked by `embld` |
 | macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Mach-O objects for the system linker |
 | Windows | `x86_64-windows-gnu` | COFF objects, not yet compatible with the Microsoft x64 ABI |
 
 C is supported on every target. C++ is supported on the x86-64 and
-AArch64 targets; Cortex-M, RISC-V, MIPS32 and AVR are C only. An unknown
+AArch64 targets; Cortex-M, RISC-V, MIPS32, TriCore and AVR are C only. An unknown
 `--target=` lists every triple EmbCC accepts. Each target's ABI, options
 and limitations are in [Targets](docs/manual/targets.md) and
 [Status](docs/internals/status.md).

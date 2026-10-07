@@ -46,6 +46,7 @@ for spec in "x86_64-elf:8:DW_OP_reg6" \
             "riscv64-unknown-elf:8:DW_OP_breg2" \
             "mipsel-none-elf:4:DW_OP_breg29" \
             "loongarch64-unknown-elf:8:DW_OP_breg3"; do
+            "tricore-none-elf:4:DW_OP_breg26"; do
     t=${spec%%:*}; rest=${spec#*:}; want_as=${rest%%:*}; want_fb=${rest#*:}
     o="$out/$t.o"
     "$EMBCC" --target="$t" -g -O0 -c "$out/p.c" -o "$o" 2> "$out/$t.err" || {
@@ -144,7 +145,7 @@ fi
 # DIE's byte_size was 8 on every target, so a debugger read a 32-bit
 # target's pointer variable together with the four bytes after it.
 for t in thumbv7m-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
-         mipsel-none-elf loongarch64-unknown-elf; do
+         mipsel-none-elf loongarch64-unknown-elf tricore-none-elf; do
     want=4; [ $t = riscv64-unknown-elf ] && want=8
     [ $t = loongarch64-unknown-elf ] && want=8
     "$EMBCC" --target=$t -g -c "$out/p.c" -o "$out/ptr-$t.o" 2>/dev/null || {

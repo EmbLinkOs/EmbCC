@@ -53,6 +53,8 @@ void irg_va_ptr_write(struct ir_func *fn, struct expr *lv, int slot,
                       int val, const struct type *ptr);
 int irg_va_arg_riscv(struct ir_func *fn, struct expr *e);
 int irg_va_arg_mips(struct ir_func *fn, struct expr *e);
+/* TriCore, where every unnamed argument is on the stack in whole words. */
+int irg_va_arg_tricore(struct ir_func *fn, struct expr *e);
 /* AVR, where a variadic call puts EVERY argument on the stack -- the named
  * ones too -- so the list is a bare pointer and there is no split point. */
 int irg_va_arg_avr(struct ir_func *fn, struct expr *e);
@@ -63,6 +65,7 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s);
 void irg_asm_riscv(struct ir_func *fn, struct stmt *s);
 void irg_asm_mips(struct ir_func *fn, struct stmt *s);
 void irg_asm_loongarch(struct ir_func *fn, struct stmt *s);
+void irg_asm_tricore(struct ir_func *fn, struct stmt *s);
 void irg_asm_thumb(struct ir_func *fn, struct stmt *s);
 void irg_asm_avr(struct ir_func *fn, struct stmt *s);
 

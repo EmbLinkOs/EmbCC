@@ -231,6 +231,15 @@ static const char *reloc_name(int kind)
         case RK_ABS32:       return "R_MIPS_32";
         default:             return NULL;
         }
+    case TARGET_TRICORE:
+        switch (kind) {
+        case RK_CALL:        return "R_TRICORE_24REL";  /* call and j alike */
+        case RK_TRICORE_HI:  return "R_TRICORE_HIADJ";
+        case RK_TRICORE_LO:  return "R_TRICORE_LO";
+        case RK_TRICORE_LO2: return "R_TRICORE_LO2";
+        case RK_ABS32:       return "R_TRICORE_32ABS";
+        default:             return NULL;
+        }
     case TARGET_AVR:
         /* (without this case AVR fell through to x86-64's names) */
         switch (kind) {
