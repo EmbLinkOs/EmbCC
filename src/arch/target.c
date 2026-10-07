@@ -280,6 +280,10 @@ int target_int_size(void)       { return g_model[g_arch].it; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
+int target_default_new_align(void)
+{
+    return g_arch == TARGET_THUMB ? 8 : 16;
+}
 int target_has_sqrt(int bytes)
 {
     switch (g_arch) {

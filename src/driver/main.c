@@ -1511,6 +1511,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 target_triple_now(), target_ptr_size());
         return 1;
     }
+    if (lang_cxx && !syntax_only && want_exceptions &&
+        (target_get() == TARGET_THUMB || target_get() == TARGET_RISCV32)) {
+        /* Exceptions need the unwinder's tables and a personality routine
+         * reading them: ARM EHABI's .ARM.exidx on ARM, DWARF .eh_frame on
+         * RV32. EmbCC writes neither for these machines yet, so a throw
+         * could never be caught -- refused rather than compiled into
+         * landing pads nothing would reach. */
+        fprintf(stderr,
+                "embcc: error: C++ exceptions are not supported for %s yet: "
+                "EmbCC writes no %s; compile with -fno-exceptions\n",
+                target_triple_now(), target_get() == TARGET_THUMB
+                ? "ARM EHABI unwind tables (.ARM.exidx)"
+                : "RISC-V .eh_frame");
+        return 1;
+    }
     if (lang_cxx && !syntax_only && target_big_endian()) {
         /* The C++ constant evaluator (src/cxx/consteval.c) models an
          * object's bytes little-endian, and a literal's bytes come in in
@@ -2299,6 +2314,22 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "C++ without -fno-exceptions): EmbCC writes no "
                             "LoongArch .eh_frame",
                    target_triple_now());
+    /* 32-bit ARM and RV32: eh_emit's CFI is x86-64's and AArch64's
+     * (their register numbers, their CFA rules), not these machines', and
+     * ARM unwinds through EHABI's .ARM.exidx besides. A C++ unit asks for
+     * the tables by default; with -fno-exceptions nothing reads them, so
+     * they are not written, and only an explicit request is refused. (A
+     * C++ unit with exceptions is refused before this, by name.) */
+    if (unwind && (ta == TARGET_THUMB || ta == TARGET_RISCV32) && lang_cxx &&
+        want_unwind < 0 && !want_exceptions)
+        unwind = 0;
+    if (unwind && (ta == TARGET_THUMB || ta == TARGET_RISCV32))
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "%s yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no %s",
+                   target_triple_now(), ta == TARGET_THUMB
+                   ? "ARM unwind tables (.ARM.exidx)" : "RISC-V .eh_frame");
     if (unwind && ta == TARGET_TRICORE)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "tricore-none-elf yet (-funwind-tables, "

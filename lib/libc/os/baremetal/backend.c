@@ -97,7 +97,10 @@ WEAK void *sbrk(long increment)
     static char *brk;
     char here, *old;
     if (!brk)
-        brk = _end;
+        /* from a 16-byte boundary: malloc hands out its blocks from here
+         * aligned for max_align_t (16, lib/libc/src/stdlib/malloc.c), and
+         * the image may end at any word */
+        brk = _end + (-(unsigned long)_end & 15);
     old = brk;
     if (increment < 0 ? (unsigned long)-increment > (unsigned long)(brk - _end)
                       : brk + increment + HEAP_MARGIN > &here) {
