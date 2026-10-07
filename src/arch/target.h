@@ -271,7 +271,22 @@ int target_thumb_em(void);
  * level rather than a separate enum target_arch value, because that enum
  * keys the data model and these two share one; see g_thumb_arch. */
 int target_thumb_arch(void);
+/* (setting a level leaves ARMv8-M Baseline: see below) */
 void target_set_thumb_arch(int lvl);
+/* ARMv8-M Baseline (Cortex-M23, thumbv8m.base-none-eabi): level 6 -- the
+ * ARMv6-M instruction selection -- plus the divides, the exclusives,
+ * MOVW/MOVT, CBZ, B.W and the security extension. Every question about
+ * level 6 that Baseline answers the same way keeps asking the level. */
+int target_thumb_v8m_base(void);
+void target_set_thumb_v8m_base(void);
+/* Either ARMv8-M profile (Mainline or Baseline): the security extension's
+ * instructions (SG, BXNS, BLXNS, TT) and the stack-limit registers. */
+int target_thumb_v8m(void);
+/* -mcmse: this is the Secure side of a TrustZone-M build, so
+ * cmse_nonsecure_entry and cmse_nonsecure_call mean what ACLE says.
+ * Only ever true on ARMv8-M. */
+int target_thumb_cmse(void);
+void target_set_thumb_cmse(int on);
 /* ARMv7-A in ARM state (armv7a-none-eabi): TARGET_THUMB's data model and
  * AAPCS32, at level 7 with the DSP set (target_thumb_em), encoded as A32
  * instructions rather than Thumb-2 -- the backend's encoder switches on it

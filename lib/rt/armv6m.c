@@ -1,5 +1,8 @@
 /* The ARMv6-M (Cortex-M0, M0+, M1) compiler runtime: the routines the
- * backend calls for what Thumb-1 has no instruction for.
+ * backend calls for what Thumb-1 has no instruction for. ARMv8-M Baseline
+ * (Cortex-M23) takes all of it but the atomics: it has no 64-bit multiply
+ * and no Thumb-2 shifts either, but its exclusives make an atomic inline
+ * (src/arch/thumb/v6m.c), and its divides are instructions.
  *
  *   (32-bit division: aeabidiv.c, shared with ARMv7-A)
  *   __aeabi_lmul                             64-bit multiply (no UMULL)
@@ -22,7 +25,7 @@
  * Compiled to nothing on every other target: tools/build-rt.sh compiles
  * every lib/rt file for every triple.
  */
-#if defined(__ARM_ARCH_6M__)
+#if defined(__ARM_ARCH_6M__) || defined(__ARM_ARCH_8M_BASE__)
 
 /* Weak, all of them: a program that brings its own (a freestanding one
  * built for clang often defines __aeabi_memcpy) keeps it. */
@@ -153,6 +156,9 @@ WEAK void __aeabi_memclr4(void *dst, unsigned long n)
 
 /* ---- atomics ------------------------------------------------------------------
  *
+ * ARMv6-M only (the backend inlines them on ARMv8-M Baseline). */
+#if defined(__ARM_ARCH_6M__)
+/*
  * With interrupts masked: on a single Cortex-M0 there is nothing else to
  * exclude, so a sequence with PRIMASK set is atomic. PRIMASK is saved and
  * restored rather than cleared, so these nest inside a critical section.
@@ -235,5 +241,7 @@ static void irq_restore(u32 m)
 ALL(1, unsigned char)
 ALL(2, unsigned short)
 ALL(4, unsigned int)
+
+#endif /* __ARM_ARCH_6M__ */
 
 #endif

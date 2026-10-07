@@ -18,6 +18,7 @@ const struct predef_macro predef_macros_cxx_thumbv8m[] = {
     { "__ARM_ARCH_PROFILE", "'M'" },
     { "__ARM_EABI__", "1" },
     { "__ARM_FEATURE_CLZ", "1" },
+    { "__ARM_FEATURE_CMSE", "1" },
     { "__ARM_FEATURE_COPROC", "0xf" },
     { "__ARM_FEATURE_DIRECTED_ROUNDING", "1" },
     { "__ARM_FEATURE_IDIV", "1" },

@@ -60,8 +60,8 @@ static void fill(unsigned char *d, size_t n, int c)
         *d++ = (unsigned char)c;
 }
 
-/* ARMv6-M's own copy and clear are in armv6m.c */
-#if !defined(__ARM_ARCH_6M__)
+/* ARMv6-M's own copy and clear are in armv6m.c (ARMv8-M Baseline's too) */
+#if !defined(__ARM_ARCH_6M__) && !defined(__ARM_ARCH_8M_BASE__)
 WEAK void __aeabi_memcpy(void *d, const void *s, size_t n) { copy_fwd(d, s, n); }
 WEAK void __aeabi_memcpy4(void *d, const void *s, size_t n)
 {
@@ -122,7 +122,7 @@ WEAK u64 __aeabi_uidivmod(u32 n, u32 d)
     return (u64)q | (u64)(n - q * d) << 32;
 }
 #endif
-#if !defined(__ARM_ARCH_6M__)
+#if !defined(__ARM_ARCH_6M__) && !defined(__ARM_ARCH_8M_BASE__)
 WEAK u64 __aeabi_lmul(u64 a, u64 b) { return a * b; }
 WEAK u64 __aeabi_llsl(u64 a, int n) { return n >= 64 ? 0 : a << n; }
 WEAK u64 __aeabi_llsr(u64 a, int n) { return n >= 64 ? 0 : a >> n; }

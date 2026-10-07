@@ -33,6 +33,10 @@ static const struct predef_macro *arch_table(int *count)
                 *count = predef_macro_count_cxx_armv7a;
                 return predef_macros_cxx_armv7a;
             }
+            if (target_thumb_v8m_base()) {
+                *count = predef_macro_count_cxx_thumbv8mbase;
+                return predef_macros_cxx_thumbv8mbase;
+            }
             if (target_thumb_arch() == 6) {
                 *count = predef_macro_count_cxx_thumbv6m;
                 return predef_macros_cxx_thumbv6m;
@@ -81,6 +85,10 @@ static const struct predef_macro *arch_table(int *count)
         if (target_arm_a32()) {
             *count = predef_macro_count_armv7a;
             return predef_macros_armv7a;
+        }
+        if (target_thumb_v8m_base()) {
+            *count = predef_macro_count_thumbv8mbase;
+            return predef_macros_thumbv8mbase;
         }
         if (target_thumb_arch() == 6) {
             *count = predef_macro_count_thumbv6m;
@@ -241,6 +249,13 @@ static const struct predef_macro a32_vfp4_add[] = {
     { "__ARM_VFPV4__", "1" }, { "__ARM_FEATURE_FMA", "1" },
 };
 
+/* -mcmse: the Secure side. ACLE's __ARM_FEATURE_CMSE is a bit set -- 1 the
+ * TT instruction (every ARMv8-M table says that much), 2 compiling for the
+ * Secure state -- and clang defines 3 under the flag. */
+static const struct predef_macro thumb_cmse_add[] = {
+    { "__ARM_FEATURE_CMSE", "3" },
+};
+
 static int thumb_fpu_drops(const char *name)
 {
     if (target_get() != TARGET_THUMB || !target_thumb_fpu())
@@ -267,7 +282,8 @@ static int contradicted(const char *name)
                 return 1;               /* replaced below */
     }
     return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
-           thumb_fpu_drops(name);
+           thumb_fpu_drops(name) ||
+           (target_thumb_cmse() && strcmp(name, "__ARM_FEATURE_CMSE") == 0);
 }
 
 const struct predef_macro *predef_table(int *count)
@@ -299,7 +315,8 @@ const struct predef_macro *predef_table(int *count)
      * filtering, nothing to go wrong in the path that everything else
      * depends on. */
     int fpu = target_get() == TARGET_THUMB && target_thumb_fpu();
-    if (!os && !fpu && target_fmt_get() == TGT_FMT_ELF) {
+    int cmse = target_thumb_cmse();
+    if (!os && !fpu && !cmse && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -317,6 +334,8 @@ const struct predef_macro *predef_table(int *count)
         if (darwin_a64())
             for (int i = 0; i < ndarwin_a64_model; i++)
                 merged[nmerged++] = darwin_a64_model[i];
+        if (cmse)
+            merged[nmerged++] = thumb_cmse_add[0];
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;

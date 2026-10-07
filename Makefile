@@ -141,6 +141,8 @@ SRCS := \
 	src/arch/thumbv8m/predef_cxx.c \
 	src/arch/thumbv6m/predef.c \
 	src/arch/thumbv6m/predef_cxx.c \
+	src/arch/thumbv8mbase/predef.c \
+	src/arch/thumbv8mbase/predef_cxx.c \
 	src/arch/armv7a/predef.c \
 	src/arch/armv7a/predef_cxx.c \
 	src/arch/riscv/emit.c \
@@ -323,6 +325,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
+             src/arch/thumbv8mbase/predef.c src/arch/thumbv8mbase/predef_cxx.c \
              src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
@@ -548,7 +551,7 @@ libc-linux-aarch64: embcc embar
 # is the archive that ships.
 # The -eabihf ones are the hard-float convention: its objects do not link
 # with soft-float ones, so its runtime is a separate archive.
-RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+RT_EMBEDDED := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
                riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
@@ -564,7 +567,7 @@ rt-embedded: embcc embar
 # the recipe, and tests/golden/libc-embedded.sh runs what it builds on the
 # boards. Not avr: a two-byte atomic is two accesses there, and the library's
 # locks are refused for it.
-LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
+LIBC_EMBEDDED := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
                  riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \

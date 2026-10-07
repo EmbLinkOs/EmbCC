@@ -22,6 +22,16 @@ static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
  * a superset), the predefined macros, and two .ARM.attributes tags. A
  * second enum value would duplicate a data model to express none of that. */
 static int g_thumb_arch = 7;
+/* ARMv8-M Baseline (Cortex-M23): level 6 -- the ARMv6-M instruction
+ * selection, v6m.c, and everything else level 6 means (no FPU, no IT, an
+ * unaligned access faults) -- with what Baseline adds on top: the
+ * divides, the exclusives, MOVW/MOVT, CBZ and B.W, and the security
+ * extension. A flag beside the level rather than a level of its own,
+ * because nearly every question asked of level 6 has the same answer
+ * here; the few that differ ask target_thumb_v8m_base(). */
+static int g_thumb_v8b;
+/* -mcmse: the Secure-side build of ARMv8-M's security extension. */
+static int g_thumb_cmse;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
 static int g_thumb_fpu_dp;  /* see target_thumb_fpu_dp */
 static int g_thumb_hard;    /* see target_thumb_hard_abi */
@@ -481,11 +491,11 @@ static const struct triple {
     enum target_os os;
     enum target_fmt fmt;
     int canon;         /* 1 the canonical name; 2 the v7E-M one; 3 the v8-M
-                        * Mainline one; 6 the ARMv6-M one -- see
-                        * target_triple_of */
+                        * Mainline one; 6 the ARMv6-M one; 9 the v8-M
+                        * Baseline one -- see target_triple_of */
     int thumb_em;      /* 1 ARMv7E-M rather than ARMv7-M; 3 ARMv8-M Mainline;
-                        * 6 ARMv6-M; 7 ARMv7-A in ARM state (A32). On MIPS: 1
-                        * big-endian */
+                        * 6 ARMv6-M; 7 ARMv7-A in ARM state (A32); 9 ARMv8-M
+                        * Baseline. On MIPS: 1 big-endian */
 } g_triples[] = {
     /* freestanding: bare metal and EmbLinkOS (the default) */
     { "x86_64-elf",        TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
@@ -524,6 +534,14 @@ static const struct triple {
     { "thumbv6m",           TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 6 },
     { "armv6m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 6 },
 
+    /* ARMv8-M Baseline: Cortex-M23, the low end of ARMv8-M. ARMv6-M's
+     * instruction set and data model plus the divides, the exclusives,
+     * MOVW/MOVT, CBZ/CBNZ, B.W and the security extension, so it is
+     * level 6 with a flag (g_thumb_v8b): `thumb_em` 9 here, canon 9. */
+    { "thumbv8m.base-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 9, 9 },
+    { "thumbv8m.base",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 9 },
+    { "armv8m.base-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF,    0, 9 },
+
     /* ARMv8-M Mainline: Cortex-M33, the RTOS requirements' third target,
      * and the RP2350's core. The same data model and the same AAPCS32 as
      * ARMv7-M, so it is a LEVEL on this target and not a new one (see
@@ -533,9 +551,8 @@ static const struct triple {
      * column saying the same thing twice.
      *
      * The DSP extension and the FPU are what -mcpu/-mfpu select, exactly
-     * as on v7em; the security extension (TrustZone-M) is refused by name
-     * because an object that used it would need the linker to place a
-     * secure gateway veneer, which embld does not mint. */
+     * as on v7em; the security extension (TrustZone-M) is -mcmse, for the
+     * Secure side, and embld mints the secure gateway veneers. */
     /*                                                          canon, em */
     { "thumbv8m.main-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 3, 3 },
     { "thumbv8m.main",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 3 },
@@ -681,6 +698,7 @@ int target_from_triple(const char *triple, enum target_arch *out,
                 size_t n = strlen(triple);
                 g_thumb_hf_name = n > 6 && !strcmp(triple + n - 6, "eabihf");
                 g_arm_a32 = g_triples[i].thumb_em == 7;
+                g_thumb_v8b = g_triples[i].thumb_em == 9;
                 if (g_triples[i].thumb_em == 7) {
                     /* v7-A has the DSP instructions v7E-M adds */
                     g_thumb_arch = 7;
@@ -688,7 +706,8 @@ int target_from_triple(const char *triple, enum target_arch *out,
                 } else if (g_triples[i].thumb_em == 3) {
                     g_thumb_arch = 8;
                     g_thumb_em = 1;
-                } else if (g_triples[i].thumb_em == 6) {
+                } else if (g_triples[i].thumb_em == 6 ||
+                           g_triples[i].thumb_em == 9) {
                     g_thumb_arch = 6;
                     g_thumb_em = 0;
                 } else {
@@ -710,7 +729,7 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
     if (a == TARGET_THUMB)
         want = g_arm_a32 ? (g_thumb_hard ? 8 : 7)
              : g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
-             : g_thumb_arch == 6 ? 6
+             : g_thumb_arch == 6 ? (g_thumb_v8b ? 9 : 6)
              : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
     if (a == TARGET_MIPS32 && g_big_endian)
         want = 2;
@@ -754,7 +773,28 @@ int target_string_align(int width)
 {
     return width > 1 ? width : 1;
 }
-void target_set_thumb_arch(int lvl) { g_thumb_arch = lvl; }
+void target_set_thumb_arch(int lvl)
+{
+    g_thumb_arch = lvl;
+    g_thumb_v8b = 0;
+}
+int target_thumb_v8m_base(void)
+{
+    return g_arch == TARGET_THUMB && g_thumb_arch == 6 && g_thumb_v8b;
+}
+void target_set_thumb_v8m_base(void)
+{
+    g_thumb_arch = 6;
+    g_thumb_v8b = 1;
+    g_thumb_em = 0;
+}
+int target_thumb_v8m(void)
+{
+    return g_arch == TARGET_THUMB && !g_arm_a32 &&
+           (g_thumb_arch >= 8 || (g_thumb_arch == 6 && g_thumb_v8b));
+}
+int target_thumb_cmse(void) { return target_thumb_v8m() && g_thumb_cmse; }
+void target_set_thumb_cmse(int on) { g_thumb_cmse = on ? 1 : 0; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
 int target_thumb_fpu_dp(void) { return g_thumb_fpu && g_thumb_fpu_dp; }
