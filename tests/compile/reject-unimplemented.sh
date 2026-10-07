@@ -428,10 +428,6 @@ int f(int n, ...) { va_list ap; __builtin_va_start(ap, n);
 int main(void) { return 0; }' \
     "va_arg of a struct is not supported for a Windows target" \
     --target=x86_64-windows-gnu
-check overaligned-scalar-local \
-    'int f(int k) { int x __attribute__((aligned(64))); x = k; return x; }
-int main(void) { return 0; }' \
-    "not yet for a scalar"
 check static-assert-false \
     '_Static_assert(sizeof(int) == 8, "int is not eight bytes");
 int main(void) { return 0; }' \

@@ -666,7 +666,7 @@ EmbCC limits, are handled as follows:
 | An alignment that is not a power of two, `_Alignas(3)` | Refused: `_Alignas requires a constant power of two`. |
 | An alignment weaker than the type's, `_Alignas(1) int` | Not diagnosed. The type's own alignment is kept. |
 | `_Alignas` in a typedef or on a parameter | Not diagnosed. |
-| An automatic scalar aligned beyond the stack's alignment, `_Alignas(32) int x;` | Refused: `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
+| An automatic object aligned beyond the stack's alignment, `_Alignas(32) int x;` | Supported, scalar or aggregate: its storage is carved from the stack at function entry and rounded up to the alignment, so its address has it at any call depth. A scalar so aligned lives in that storage rather than in a register. |
 | On AVR, an alignment greater than 1 on an automatic object | Refused: `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
 
 `_Alignof` applied to an expression is a GNU extension; see

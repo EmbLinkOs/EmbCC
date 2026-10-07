@@ -489,15 +489,13 @@ embcc: a.c:1: error: aligned wants a constant power of two
 two`), except that `_Alignas(0)` is accepted and has no effect, as C11
 specifies.
 
-A local array, structure or union whose alignment exceeds what the
-stack pointer guarantees (16 bytes on x86-64, AArch64 and RISC-V, 8 on
-Cortex-M) is placed in storage that EmbCC aligns at function entry, so
-its address has the requested alignment at any call depth. A local of
-scalar type with such an alignment is refused:
-
-```text
-embcc: f.c:2:20: error: 'x' needs 64-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar
-```
+A local whose alignment exceeds what the stack pointer guarantees (16
+bytes on x86-64, AArch64 and RISC-V, 8 on Cortex-M) is placed in storage
+that EmbCC aligns at function entry, so its address has the requested
+alignment at any call depth. That holds for a scalar as well as an
+array, structure or union; a scalar so aligned is read and written in
+that storage, as a variable whose address is taken is, rather than kept
+in a register.
 
 On AVR, a local variable cannot be given an alignment:
 

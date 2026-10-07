@@ -132,8 +132,6 @@ refc "a naked function" 'inline assembly is not supported for xtensa-none-elf' \
     'void __attribute__((naked)) f(void){ __asm__("retw"); }'
 refc "a file-scope instruction" 'file-scope asm instruction' \
     '__asm__(".globl x\nx: nop");'
-refc "a 32-aligned scalar local" 'needs 32-byte alignment and the stack only guarantees 16' \
-    'int g(int *); int f(void){ _Alignas(32) int x = 1; return g(&x); }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
     echo "C++ was accepted"; exit 1

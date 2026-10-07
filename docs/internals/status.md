@@ -173,7 +173,6 @@ x86-64 and AArch64:
 
 | Construct | Diagnostic |
 |---|---|
-| A scalar local with `aligned` above 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | Floating point under `-mno-sse` (x86-64) | `floating point needs SSE, which -mno-sse forbids` |
 | Floating point under `-mgeneral-regs-only` (AArch64) | `floating point used under -mgeneral-regs-only (in 'f')` |
 
@@ -186,7 +185,6 @@ Cortex-M (`ARMv7-M` backend):
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | Computed `goto` and `&&label` | `the ARMv7-M backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | An `asm` output wider than 4 bytes | `the ARMv7-M backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
-| A scalar local with `aligned` above 8 | `'x' needs 32-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 
 RISC-V (RV32 messages shown; RV64 names itself):
 
@@ -199,7 +197,6 @@ RISC-V (RV32 messages shown; RV64 names itself):
 | 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | Computed `goto` and `&&label` | `the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | An `asm` output wider than a register | `the RV32 backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
-| A scalar local with `aligned` above 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 
 `long double` and `__int128` can still be declared and measured with
 `sizeof` on RISC-V, and a static initializer such as
@@ -214,7 +211,6 @@ MIPS32:
 | Computed `goto` and `&&label` | `the MIPS32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| A scalar local with `aligned` above 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | `-mhard-float`, `-EB`, `-mabicalls`, `-mabi=n32`, `-G8`, a core that is not MIPS32r2 | each refused by name; see [Invoking EmbCC](../manual/invoking.md#mips-options) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
 
@@ -225,7 +221,6 @@ LoongArch64:
 | A 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
 | Computed `goto` and `&&label` | `the LoongArch64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the LoongArch64 backend cannot lower __builtin_frame_address or __builtin_return_address (EmbCC's LoongArch code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
-| A scalar local with `aligned` above 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 | `-mabi=lp64d`, `-mabi=lp64f`, `-mfpu=64`, `-mdouble-float`, `-mcmodel=extreme`, `-mstrict-align`, `-mlsx`, `-mlasx`, an LA32 `-march` | each refused by name; see [Targets](../manual/targets.md#loongarch64) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
 | In assembly: `la.abs`, the TLS, extreme-model and absolute-GOT operators, floating-point and vector instructions | each refused by name, with the statement |

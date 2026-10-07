@@ -978,14 +978,9 @@ expression:
 - for objects with static storage duration, at least up to 4096 (the
   section is given the alignment);
 - for structure members, which raises the structure's alignment;
-- for local arrays, structures and unions on every target except AVR.
-
-A local scalar may be aligned up to the stack's alignment, which is 16
-bytes, or 8 on Cortex-M. A larger alignment is refused:
-
-```text
-embcc: f.c:1:32: error: 'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar
-```
+- for local variables of any type on every target except AVR. One
+  aligned beyond the stack's alignment (16 bytes, or 8 on Cortex-M) is
+  placed in storage carved at function entry and rounded up.
 
 On AVR a local with an alignment greater than 1 is refused:
 

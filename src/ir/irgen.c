@@ -281,8 +281,9 @@ static int emit_fbin(struct ir_func *fn, enum ir_op op, int a, int b, int w)
     return i->dst;
 }
 
-/* Load variable v (type t) into a fresh promoted temp. */
-static int emit_ldvar(struct ir_func *fn, int v, const struct type *t)
+/* Variable v's own slot, whatever it holds: for a local aligned beyond
+ * the stack's guarantee (func.var_indirect), the pointer to its storage. */
+static int emit_ldvar_slot(struct ir_func *fn, int v, const struct type *t)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_LDVAR;
@@ -295,8 +296,8 @@ static int emit_ldvar(struct ir_func *fn, int v, const struct type *t)
     return i->dst;
 }
 
-static void emit_stvar(struct ir_func *fn, int v, int val,
-                       const struct type *t)
+static void emit_stvar_slot(struct ir_func *fn, int v, int val,
+                            const struct type *t)
 {
     struct ir_ins *i = emit(fn);
     i->op = IR_STVAR;
@@ -304,6 +305,37 @@ static void emit_stvar(struct ir_func *fn, int v, int val,
     i->a = val;
     i->size = ty_size(t);
     i->vol = t->is_volatile;
+}
+
+static int local_addr(struct ir_func *fn, int v);
+
+/* Is local v kept in storage of its own, its slot holding the address? */
+static int var_is_indirect(const struct ir_func *fn, int v)
+{
+    const struct func *f = fn->src;
+    return f && f->var_indirect && v >= 0 && v < f->nvars &&
+           f->var_indirect[v];
+}
+
+/* Load variable v (type t) into a fresh promoted temp -- through its
+ * storage when it has its own: a scalar aligned beyond the stack's
+ * guarantee is read and written there, every time, like a variable whose
+ * address is taken. */
+static int emit_ldvar(struct ir_func *fn, int v, const struct type *t)
+{
+    if (var_is_indirect(fn, v))
+        return emit_load(fn, local_addr(fn, v), t);
+    return emit_ldvar_slot(fn, v, t);
+}
+
+static void emit_stvar(struct ir_func *fn, int v, int val,
+                       const struct type *t)
+{
+    if (var_is_indirect(fn, v)) {
+        emit_store(fn, local_addr(fn, v), val, t);
+        return;
+    }
+    emit_stvar_slot(fn, v, val, t);
 }
 
 static int emit_gaddr(struct ir_func *fn, struct global *g)
@@ -1057,8 +1089,8 @@ static int stmts_define_label(const struct stmt *s, const char *name)
 static int local_addr(struct ir_func *fn, int v)
 {
     struct func *f = fn->src;
-    if (f && f->var_indirect && v < f->nvars && f->var_indirect[v])
-        return emit_ldvar(fn, v, ty_ptr(f->var_indirect[v]));
+    if (var_is_indirect(fn, v))
+        return emit_ldvar_slot(fn, v, ty_ptr(f->var_indirect[v]));
     struct ir_ins *i = emit(fn);
     i->op = IR_ADDR;
     i->a = v;
@@ -1755,7 +1787,7 @@ static int atomic_lv(const struct expr *e)
  * list, an add, a store of it and the load it was for, where clang's is
  * one post-indexed ldr. `*slot` is -1 for a local, its address
  * otherwise. (A local aligned beyond the stack's guarantee is indirect,
- * but only an aggregate is, and the list is a pointer.) */
+ * and emit_ldvar/emit_stvar go through its storage.) */
 int irg_va_ptr_read(struct ir_func *fn, struct expr *lv,
                     const struct type *ptr, int *slot)
 {
@@ -4438,7 +4470,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
                          emit_bin(fn, IR_ADD, a->dst,
                                   emit_const(fn, al - 1, AW), AW, 1),
                          emit_const(fn, -al, AW), AW, 1);
-        emit_stvar(fn, v, p, ty_ptr(f->var_indirect[v]));
+        emit_stvar_slot(fn, v, p, ty_ptr(f->var_indirect[v]));
         fn->has_alloca = 1;
     }
     gen_stmt(fn, f->body, NULL);

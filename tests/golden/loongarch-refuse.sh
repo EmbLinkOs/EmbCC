@@ -129,8 +129,6 @@ for O in -O0 -O2; do
 done
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "a 64-aligned scalar local" 'needs 64-byte alignment and the stack only guarantees 16' \
-    'int g(int *); int f(void){ _Alignas(64) int x = 1; return g(&x); }'
 # C++ without exceptions is LP64 like the targets its front end lays out
 # for, and compiles; with them it needs the .eh_frame EmbCC does not write.
 printf 'struct A { int v; int get() const { return v * 2; } };\nint f(A a) { return a.get(); }\n' > "$out/c.cc"

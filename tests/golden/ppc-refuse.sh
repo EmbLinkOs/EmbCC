@@ -137,8 +137,6 @@ refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "a 32-aligned scalar local" 'needs 32-byte alignment and the stack only guarantees 16' \
-    'int f(void){ _Alignas(32) int x = 1; return x; }'
 refc "inline assembly" 'inline assembly is not supported for powerpc-none-eabi' \
     'int f(void){ int r; __asm__("li %0, 1" : "=r"(r)); return r; }'
 refc "a file-scope instruction" 'file-scope asm instruction' \

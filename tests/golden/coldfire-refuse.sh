@@ -109,8 +109,6 @@ refc "__int128" '__int128' \
     '__int128 f(__int128 a){ return a; }'
 refc "a frame beyond 32 KiB" 'a stack frame larger than 32 KiB' \
     'void g(char *); void f(void){ char b[40000]; g(b); }'
-refc "an 8-aligned scalar local" 'needs 8-byte alignment and the stack only guarantees 4' \
-    'int f(void){ int x __attribute__((aligned(8))) = 1; return x; }'
 printf '\t.text\n\tnop\n' > "$out/a.s"
 if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err"; then
     echo "an assembly file was accepted"; exit 1
