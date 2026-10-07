@@ -200,7 +200,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar embsvd embmap
+all: embcc embread embld embas embls embidx embar embsvd embpack embmap
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -248,6 +248,12 @@ embar: tools/embar/embar.c
 embsvd: tools/embsvd/embsvd.c
 	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
 
+# embpack -- a linked image as the file a programmer or bootloader takes:
+# raw binary, Intel HEX, S-records or UF2, with a CRC-32 stamped into a
+# symbol or appended and a JSON manifest (tools/embpack). ISO C and
+# standalone, like embar.
+embpack: tools/embpack/embpack.c
+	$(CC) $(CFLAGS) -o $@ tools/embpack/embpack.c
 # embmap -- where an image's flash and RAM go: sections, regions, the
 # biggest symbols, the bytes by input file from a map, and the growth
 # between two builds (tools/embmap). ISO C and standalone, like embar.

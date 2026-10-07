@@ -36,4 +36,5 @@ ref/
 
 # Debug bundles the macOS toolchain leaves beside each -g binary.
 *.dSYM/
+/embpack
 /embmap
