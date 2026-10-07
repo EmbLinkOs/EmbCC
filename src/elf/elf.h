@@ -395,6 +395,36 @@ typedef struct {
 #define R_MIPS_JALR     37
 #define R_MIPS_PC32    248
 
+/* SPARC, from the ELF machine registry (EM_SPARC32PLUS, 18, is V8+ and
+ * not this). clang's sparc-none-elf objects carry e_flags 0. */
+#define EM_SPARC 2
+
+/* The SPARC relocation types: RELA, the addend in the entry. HI22 is
+ * sethi's (S + A) >> 10 and LO10 the low ten bits an `or` or a load's
+ * offset adds back; WDISP30 is call's word displacement and WDISP22 a
+ * branch's. The GOT and PC-relative-address types are named so EmbLD can
+ * refuse them by name. */
+#define R_SPARC_NONE      0
+#define R_SPARC_8         1
+#define R_SPARC_16        2
+#define R_SPARC_32        3
+#define R_SPARC_DISP8     4
+#define R_SPARC_DISP16    5
+#define R_SPARC_DISP32    6
+#define R_SPARC_WDISP30   7
+#define R_SPARC_WDISP22   8
+#define R_SPARC_HI22      9
+#define R_SPARC_22       10
+#define R_SPARC_13       11
+#define R_SPARC_LO10     12
+#define R_SPARC_GOT10    13
+#define R_SPARC_GOT13    14
+#define R_SPARC_GOT22    15
+#define R_SPARC_PC10     16
+#define R_SPARC_PC22     17
+#define R_SPARC_WPLT30   18
+#define R_SPARC_UA32     23
+
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
  * names each one, which is the same referee the encoder uses. */

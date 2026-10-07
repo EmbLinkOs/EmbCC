@@ -13,7 +13,7 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m riscv32 riscv64 avr mips32
-#                   mips32eb
+#                   mips32eb sparc32
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -86,7 +86,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb|sparc32) eval "echo \${$gccvar:-clang}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -147,6 +147,10 @@ refflags() {
         # _MIPSEB family) are the generated answer, not a patch on mipsel's.
         mips32eb) [ -n "${EMBCC_REF_GCC_MIPS32EB:-}" ] || \
                      echo "-target mips-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # SPARC V8 as Gaisler's LEON3 implements it, soft float: what the
+        # backend emits (src/arch/sparc/, docs/internals/sparc-plan.md).
+        sparc32) [ -n "${EMBCC_REF_GCC_SPARC32:-}" ] || \
+                     echo "-target sparc-none-elf -mcpu=leon3 -msoft-float -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -201,7 +205,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32|mips32eb) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32|mips32eb|sparc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -285,8 +289,9 @@ case "${1:-both}" in
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
     mips32eb) gen mips32eb ;;
+    sparc32) gen sparc32 ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen riscv32
-              gen riscv64; gen avr; gen mips32; gen mips32eb ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb]" >&2
+              gen riscv64; gen avr; gen mips32; gen mips32eb; gen sparc32 ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb|sparc32]" >&2
        exit 1 ;;
 esac

@@ -125,6 +125,10 @@ int target_insn_len(const unsigned char *p, int avail)
         /* MIPS32 is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
         return avail >= 4 ? 4 : 0;
 
+    case TARGET_SPARC32:
+        /* SPARC V8 is fixed 32-bit. */
+        return avail >= 4 ? 4 : 0;
+
     case TARGET_X86_64:
     default:
         /* Variable-length, and no rule short of decoding it. The caller
@@ -224,6 +228,11 @@ static const struct data_model {
      * -- unlike the ARM and RISC-V targets beside it -- a signed int
      * wchar_t, long double the same 8-byte double, and no __int128. */
     [TARGET_MIPS32]  = { 4, 4, 4, 8,  8, 0, 0, 0, 0 },
+    /* SPARC V8 (clang --target=sparc-none-elf -mcpu=leon3 -dM): ILP32, a
+     * SIGNED char and wchar_t, a binary128 long double -- and nothing
+     * aligned beyond 8 (__BIGGEST_ALIGNMENT__ 8: _Alignof(long double) is
+     * 8), which is the cap column's second use after AVR's 1. */
+    [TARGET_SPARC32] = { 4, 4, 4, 8, 16, 0, 0, 0, 8 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -255,6 +264,7 @@ int target_stack_align(void)
     switch (g_arch) {
     case TARGET_THUMB: return 8;        /* AAPCS32 at a public interface */
     case TARGET_MIPS32: return 8;       /* o32 */
+    case TARGET_SPARC32: return 8;      /* the SPARC V8 ABI */
     case TARGET_AVR:   return 1;
     default:           return 16;       /* SysV, AAPCS64, RISC-V psABI */
     }
@@ -330,6 +340,8 @@ int target_anon_bitfield_aligns(void)
     /* o32: `struct { char c; int :4; char d; }` is 3 bytes in clang, and
      * `int :0` moves d to offset 4 without making the struct 4-aligned */
     case TARGET_MIPS32:  return 0;
+    /* SPARC: `struct { char c; int :4; char d; }` is 3 bytes in clang */
+    case TARGET_SPARC32: return 0;
     }
     return 0;
 }
@@ -350,6 +362,7 @@ int target_va_list_is_pointer(void)
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
     case TARGET_AVR:     return 1;   /* avr-gcc: char * */
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
+    case TARGET_SPARC32: return 1;   /* void *, over the home area */
     }
     return 0;
 }
@@ -526,6 +539,15 @@ static const struct triple {
     { "mips-elf",            TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
     { "mips",                TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
 
+    /* 32-bit SPARC V8, big-endian, soft float: Gaisler's LEON3. Bare
+     * metal only; `sparc-none-elf` is clang's spelling (sparc-elf the GNU
+     * target name, sparc-gaisler-elf BCC's). */
+    { "sparc-none-elf",      TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "sparc-unknown-elf",   TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "sparc-elf",           TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "sparc-gaisler-elf",   TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "sparc",               TARGET_SPARC32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
@@ -557,8 +579,9 @@ int target_from_triple(const char *triple, enum target_arch *out,
             if (fmt) *fmt = g_triples[i].fmt;
             /* Byte order travels with the name too: every triple but
              * the big-endian MIPS ones is little-endian. */
-            g_big_endian = g_triples[i].arch == TARGET_MIPS32 &&
-                           g_triples[i].thumb_em == 1;
+            g_big_endian = (g_triples[i].arch == TARGET_MIPS32 &&
+                            g_triples[i].thumb_em == 1) ||
+                           g_triples[i].arch == TARGET_SPARC32;
             /* The ARM sub-architecture travels with the name, so
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
@@ -673,6 +696,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_RISCV64: return EM_RISCV;
     case TARGET_AVR:     return EM_AVR;
     case TARGET_MIPS32:  return EM_MIPS;
+    case TARGET_SPARC32: return EM_SPARC;
     default:             return EM_X86_64;
     }
 }
@@ -822,6 +846,17 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         default:             return -1;
         }
     }
+    if (a == TARGET_SPARC32) {
+        switch (k) {
+        /* call: a 30-bit word displacement from the call itself */
+        case RK_CALL:        return R_SPARC_WDISP30;
+        case RK_SPARC_HI22:  return R_SPARC_HI22;
+        case RK_SPARC_LO10:  return R_SPARC_LO10;
+        case RK_ABS32:       return R_SPARC_32;
+        case RK_DATA_PREL32: return R_SPARC_DISP32;
+        default:             return -1;
+        }
+    }
     if (a == TARGET_AVR) {
         switch (k) {
         case RK_CALL:            return R_AVR_CALL;
@@ -934,7 +969,7 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
-        a == TARGET_MIPS32)
+        a == TARGET_MIPS32 || a == TARGET_SPARC32)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -983,6 +1018,13 @@ static const struct reloc_spelling {
     { EM_RISCV, R_RISCV_HI20,          "R_RISCV_HI20" },
     { EM_RISCV, R_RISCV_LO12_I,        "R_RISCV_LO12_I" },
     { EM_RISCV, R_RISCV_LO12_S,        "R_RISCV_LO12_S" },
+    { EM_SPARC, R_SPARC_NONE,          "R_SPARC_NONE" },
+    { EM_SPARC, R_SPARC_32,            "R_SPARC_32" },
+    { EM_SPARC, R_SPARC_DISP32,        "R_SPARC_DISP32" },
+    { EM_SPARC, R_SPARC_WDISP30,       "R_SPARC_WDISP30" },
+    { EM_SPARC, R_SPARC_WDISP22,       "R_SPARC_WDISP22" },
+    { EM_SPARC, R_SPARC_HI22,          "R_SPARC_HI22" },
+    { EM_SPARC, R_SPARC_LO10,          "R_SPARC_LO10" },
     { EM_AVR,   R_AVR_NONE,            "R_AVR_NONE" },
     { EM_AVR,   R_AVR_32,              "R_AVR_32" },
     { EM_AVR,   R_AVR_7_PCREL,         "R_AVR_7_PCREL" },

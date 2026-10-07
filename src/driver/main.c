@@ -55,10 +55,10 @@ static void print_version(void)
     printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
            "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (o32, little- "
-           "and big-endian), AVR (ATmega328P)\n");
+           "and big-endian), SPARC V8 (LEON3), AVR (ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32 and AVR images; "
+    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, SPARC and AVR images; "
            "AArch64 and Darwin link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
@@ -118,7 +118,7 @@ static void print_options(FILE *out)
       "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
       "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
       "                         riscv32/riscv64-unknown-elf, avr,\n"
-      "                         mipsel-none-elf, and the\n"
+      "                         mipsel-none-elf, sparc-none-elf, and the\n"
       "                         -emblink, -linux-gnu, -apple-darwin and\n"
       "                         -windows-gnu spellings; an unknown one lists\n"
       "                         them all\n",
@@ -727,7 +727,7 @@ static int firmware_target(void)
     return target_fmt_get() == TGT_FMT_ELF &&
            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
-            target_get() == TARGET_MIPS32);
+            target_get() == TARGET_MIPS32 || target_get() == TARGET_SPARC32);
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -1825,6 +1825,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                           opt_level >= 1);
+    else if (ta == TARGET_SPARC32)
+        codegen_unit_sparc(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
+                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
+                           opt_level >= 1);
     else if (ta == TARGET_THUMB)
         codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
@@ -2212,6 +2216,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                   target_fmt_get() == TGT_FMT_ELF);
     /* The tables eh_emit writes are x86-64's and AArch64's layout, with a
      * PC-relative relocation MIPS's REL objects have no type for. */
+    if (unwind && ta == TARGET_SPARC32)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "%s yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes no SPARC .eh_frame",
+                   target_triple_now());
     if (unwind && ta == TARGET_MIPS32)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "%s yet (-funwind-tables, "
@@ -3920,6 +3930,7 @@ int main(int argc, char **argv)
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
                               : a == TARGET_MIPS32 ? mips_op_calls_helper
+                              : a == TARGET_SPARC32 ? sparc_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
@@ -4583,6 +4594,74 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--dump-predef") == 0 ||
                    strcmp(argv[i], "-dumpmachine") == 0) {
             /* answered after every argument has been applied */
+        } else if (target_get() == TARGET_SPARC32 &&
+                   (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                    strncmp(argv[i], "-march=", 7) == 0 ||
+                    strncmp(argv[i], "-mtune=", 7) == 0 ||
+                    strcmp(argv[i], "-msoft-float") == 0 ||
+                    strcmp(argv[i], "-mhard-float") == 0 ||
+                    strcmp(argv[i], "-mfpu") == 0 ||
+                    strcmp(argv[i], "-mno-fpu") == 0 ||
+                    strcmp(argv[i], "-mflat") == 0 ||
+                    strcmp(argv[i], "-mno-flat") == 0 ||
+                    strcmp(argv[i], "-mv8") == 0 ||
+                    strcmp(argv[i], "-mapp-regs") == 0 ||
+                    strcmp(argv[i], "-mno-app-regs") == 0 ||
+                    strcmp(argv[i], "-mfix-gr712rc") == 0 ||
+                    strcmp(argv[i], "-mfix-ut699") == 0 ||
+                    strcmp(argv[i], "-mfix-ut700") == 0 ||
+                    strncmp(argv[i], "-mcmodel=", 9) == 0 ||
+                    strcmp(argv[i], "-m32") == 0 ||
+                    strcmp(argv[i], "-m64") == 0)) {
+            /* The flags a LEON3 build passes (BCC's and clang's for
+             * sparc bare metal). What EmbCC emits is ONE configuration --
+             * SPARC V8 with LEON3's multiply and divide, register windows,
+             * soft float, %g2-%g4 used as scratch -- so each flag either
+             * says exactly that and is accepted, or asks for something else
+             * and is refused by name: an object built for another would
+             * link and then disagree with its callers about where a double
+             * is or which registers survive a call. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : "";
+            if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                strncmp(argv[i], "-march=", 7) == 0 ||
+                strncmp(argv[i], "-mtune=", 7) == 0) {
+                static const char *const cores[] = {
+                    "leon3", "v8", "leon4", "gr712rc", "gr740", "ut699",
+                    "sparcleon3", "leon3v7"
+                };
+                int ok = 0;
+                for (unsigned k = 0; k < sizeof cores / sizeof cores[0]; k++)
+                    ok |= strcmp(v, cores[k]) == 0;
+                if (!ok)
+                    diag_fatal(NULL, 0, "%s is not a SPARC V8 core with "
+                               "hardware multiply and divide: EmbCC emits "
+                               "LEON3 code (leon3, leon4, v8, gr712rc, "
+                               "gr740, ut699)", argv[i]);
+            } else if (strcmp(argv[i], "-mhard-float") == 0 ||
+                       strcmp(argv[i], "-mfpu") == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                           "soft-float SPARC code, which passes floating "
+                           "point in the integer registers", argv[i]);
+            } else if (strcmp(argv[i], "-mflat") == 0) {
+                diag_fatal(NULL, 0, "-mflat is not supported: EmbCC's "
+                           "SPARC code uses register windows (save and "
+                           "restore)");
+            } else if (strcmp(argv[i], "-mno-app-regs") == 0) {
+                diag_fatal(NULL, 0, "-mno-app-regs is not supported: "
+                           "EmbCC's SPARC code uses %%g2-%%g4 as scratch "
+                           "registers (-mapp-regs)");
+            } else if (strcmp(argv[i], "-m64") == 0 ||
+                       (strncmp(argv[i], "-mcmodel=", 9) == 0 &&
+                        strcmp(v, "medlow") != 0)) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                           "32-bit SPARC V8 with absolute addresses "
+                           "(sethi/or)", argv[i]);
+            } else if (strncmp(argv[i], "-mfix-", 6) == 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC applies "
+                           "no LEON errata workarounds", argv[i]);
+            }
+            continue;
         } else if (target_get() == TARGET_MIPS32 &&
                    (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                     strncmp(argv[i], "-march=", 7) == 0 ||

@@ -50,7 +50,13 @@ enum target_arch {
      * like ARMv7-M and RV32, with a SIGNED char and long double = double,
      * and the only target here with branch delay slots and REL
      * relocations. docs/internals/mips32-plan.md. */
-    TARGET_MIPS32 = 6
+    TARGET_MIPS32 = 6,
+    /* 32-bit SPARC V8, big-endian, as Gaisler's LEON3 implements it
+     * (sparc-none-elf): soft float, LEON3's multiply and divide, register
+     * windows. ILP32 with a SIGNED char and a 16-byte binary128 long
+     * double. 11 rather than the next number: the numbers between are
+     * taken by targets on other branches. docs/internals/sparc-plan.md. */
+    TARGET_SPARC32 = 11
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -185,6 +191,7 @@ int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c 
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
+int sparc_op_calls_helper(const struct ir_ins *i);  /* src/arch/sparc/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -319,6 +326,8 @@ int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 int a64_imm_foldable(int op, long imm, int w);   /* arch/aarch64/irgen.c */
 int mips_imm_foldable(int op, long imm);    /* arch/mips/irgen.c */
 int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
+int sparc_imm_foldable(int op, long imm);   /* arch/sparc/irgen.c */
+int sparc_imm_foldable64(int op, long imm);
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -546,6 +555,11 @@ enum reloc_kind {
      * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
      * site whose str_off is already the offset). */
     RK_MIPS_TEXT26,
+    /* SPARC takes an absolute address in two halves as well: `sethi` the
+     * high 22 bits, then an `or` (or a load's offset) the low 10 --
+     * which never carry, so neither half is rounded. RELA. */
+    RK_SPARC_HI22,
+    RK_SPARC_LO10,
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

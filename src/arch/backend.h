@@ -126,6 +126,15 @@ void mips_build_abiflags(unsigned char out[24]);
  * from target_big_endian() once the target is chosen. */
 void mips_set_big_endian(int on);
 
+/* And for 32-bit SPARC V8 (LEON3), big-endian, soft float, with register
+ * windows (docs/internals/sparc-plan.md). */
+void codegen_unit_sparc(struct ir_unit *iu, struct code *text,
+                        struct extcall **ext, int *next,
+                        struct strsite **strs, int *nstrs,
+                        struct gsite **gs, int *ngs,
+                        struct fsite **fs, int *nfs, int want_debug,
+                        int optimize, int no_sse, int regalloc);
+
 /* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
  * a register and every value is a run of them. Same signature all the
  * same, so the driver still picks one on --target= and nothing downstream

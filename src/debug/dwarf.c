@@ -70,6 +70,7 @@
 #define DW_REG_FB_RISCV       8      /* x8, s0: the same */
 #define DW_REG_SP_MIPS        29     /* $29 */
 #define DW_REG_FB_MIPS        30     /* $30, fp/s8: the same */
+#define DW_REG_FP_SPARC       30     /* %i6, %fp: every SPARC slot's base */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -560,7 +561,13 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
          * the first allocation on. */
         {
             enum target_arch a = target_get();
-            if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
+            if (a == TARGET_SPARC32) {
+                /* SPARC: every slot is addressed from %fp, which never
+                 * moves (src/arch/sparc/codegen.c), alloca or not */
+                db_uleb(b, 2);
+                db_u8(b, DW_OP_breg(DW_REG_FP_SPARC));
+                db_u8(b, 0);
+            } else if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
                 a == TARGET_RISCV64 || a == TARGET_MIPS32) {
                 struct dbuf e = { 0, 0, 0 };
                 int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;

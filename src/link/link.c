@@ -24,6 +24,7 @@
 #include "../arch/riscv/emit.h"
 #include "../arch/avr/emit.h"
 #include "../arch/mips/emit.h"
+#include "../arch/sparc/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -604,16 +605,20 @@ static struct object *parse_object(const char *name, unsigned char *buf,
         if (e32->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
         if (e32->e_machine != EM_ARM && e32->e_machine != EM_RISCV &&
-            e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS)
+            e32->e_machine != EM_AVR && e32->e_machine != EM_MIPS &&
+            e32->e_machine != EM_SPARC)
             die("%s: a 32-bit object for machine %u; only ARM (EM_ARM), "
-                "RV32 (EM_RISCV), AVR (EM_AVR) and MIPS (EM_MIPS) are "
+                "RV32 (EM_RISCV), AVR (EM_AVR), MIPS (EM_MIPS) and SPARC (EM_SPARC) are "
                 "supported", name, (unsigned)e32->e_machine);
         /* o32 only, in either byte order; and big-endian only there */
         if (e32->e_machine == EM_MIPS &&
             (e32->e_flags & 0x0000f000UL) != EF_MIPS_ABI_O32)
             die("%s: a MIPS object that is not o32; this linker links "
                 "o32 (mipsel and mips) only", name);
-        if (big && e32->e_machine != EM_MIPS)
+        if (!big && e32->e_machine == EM_SPARC)
+            die("%s: a little-endian SPARC object; SPARC is big-endian",
+                name);
+        if (big && e32->e_machine != EM_MIPS && e32->e_machine != EM_SPARC)
             die("%s: a big-endian object for machine %u; big-endian is "
                 "linked for MIPS (mips-none-elf) only", name,
                 (unsigned)e32->e_machine);
@@ -946,6 +951,7 @@ static void add_entry_stub(struct linker *l)
      * both, so the size is known before layout. */
     long size = l->machine == EM_MIPS
               ? mips_li_len((long long)l->stack_top) + 16
+              : l->machine == EM_SPARC ? 20
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -974,6 +980,20 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
     struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
+    if (l->machine == EM_SPARC) {
+        /* %sp = the stack's top less a 96-byte frame (the window save
+         * area the first function's save writes below it is its own),
+         * then sethi/jmp to the entry, its delay slot a nop -- always five
+         * words, so the size is known before layout. */
+        unsigned long sp = (unsigned long)(l->stack_top - 96) & 0xffffffffUL;
+        unsigned long e = (unsigned long)entry & 0xffffffffUL;
+        sparc_sethi(&c, SP_SP, sp >> 10);
+        sparc_alu_imm(&c, SP_OR, SP_SP, SP_SP, (long long)(sp & 0x3ff));
+        sparc_sethi(&c, SP_G1, e >> 10);
+        sparc_jmpl(&c, SP_G0, SP_G1, (long long)(e & 0x3ff));
+        sparc_nop(&c);
+        return;
+    }
     if (l->machine == EM_MIPS) {
         mips_li(&c, MIPS_SP, (long long)l->stack_top);
         mips_lui(&c, MIPS_T9, (unsigned)(entry >> 16) & 0xffff);
@@ -1720,7 +1740,7 @@ static void layout(struct linker *l, struct osec_bound *b,
      * two bytes into a word sent the harness's .bss loop to the reset
      * vector. Both ends are kept on word boundaries, the padding inside
      * the image, as a GNU script's ALIGN(4) puts it. */
-    if (l->machine == EM_MIPS)
+    if (l->machine == EM_MIPS || l->machine == EM_SPARC)
         va = align_up(va, 4);
     *data_filesz = va - *data_start;   /* .bss is beyond the file image */
 
@@ -1754,7 +1774,7 @@ static void layout(struct linker *l, struct osec_bound *b,
         g->common = 0;
         va += g->size;
     }
-    if (l->machine == EM_MIPS)
+    if (l->machine == EM_MIPS || l->machine == EM_SPARC)
         va = align_up(va, 4);
     b[OSEC_BSS].end = va;
     *data_memsz = va - *data_start;
@@ -2419,6 +2439,88 @@ static void apply_mips(struct linker *l, struct object *o, unsigned type,
  * same one the encoder writes through. None of those layouts is written
  * down here.
  */
+/* SPARC: RELA, so the addend is in the entry and every field is written
+ * whole, a big-endian word in the image (sparc_get_word). HI22 is sethi's
+ * high 22 bits and LO10 the low ten that an `or` or a load's offset adds
+ * back -- they never carry, so neither is rounded. WDISP30 is call's word
+ * displacement (it reaches anywhere in 32 bits), WDISP22 a branch's. The
+ * GOT and PLT types are what PIC code uses, which this linker does not
+ * lay out, and it says so by name. */
+static void apply_sparc(struct linker *l, struct object *o, unsigned type,
+                        unsigned char *loc, Elf64_Addr S, long long A,
+                        Elf64_Addr P)
+{
+    long long V = (long long)S + A, d;
+    unsigned long w;
+    switch (type) {
+    case R_SPARC_NONE:
+        return;
+    case R_SPARC_32: case R_SPARC_UA32:
+        need_range(l, o, "R_SPARC_32", V, I32_MIN, 0xffffffffLL);
+        sparc_put_word(loc, (unsigned long)V & 0xffffffffUL);
+        return;
+    case R_SPARC_DISP32:
+        d = V - (long long)P;
+        need_range(l, o, "R_SPARC_DISP32", d, I32_MIN, 0x7fffffffLL);
+        sparc_put_word(loc, (unsigned long)d & 0xffffffffUL);
+        return;
+    case R_SPARC_16:
+        need_range(l, o, "R_SPARC_16", V, -32768, 65535);
+        loc[0] = (unsigned char)(V >> 8);
+        loc[1] = (unsigned char)V;
+        return;
+    case R_SPARC_8:
+        need_range(l, o, "R_SPARC_8", V, -128, 255);
+        loc[0] = (unsigned char)V;
+        return;
+    case R_SPARC_HI22:
+        need_range(l, o, "R_SPARC_HI22", V, I32_MIN, 0xffffffffLL);
+        w = sparc_get_word(loc);
+        sparc_put_word(loc, (w & ~0x3fffffUL) |
+                            (((unsigned long)V >> 10) & 0x3fffffUL));
+        return;
+    case R_SPARC_LO10:
+        w = sparc_get_word(loc);
+        sparc_put_word(loc, (w & ~0x3ffUL) | ((unsigned long)V & 0x3ffUL));
+        return;
+    case R_SPARC_13:
+        need_range(l, o, "R_SPARC_13", V, -4096, 4095);
+        w = sparc_get_word(loc);
+        sparc_put_word(loc, (w & ~0x1fffUL) | ((unsigned long)V & 0x1fffUL));
+        return;
+    case R_SPARC_WDISP30: case R_SPARC_WPLT30:
+        d = V - (long long)P;
+        if (d & 3)
+            die("%s: a call at 0x%llx to '%s' at 0x%llx, which is not a "
+                "multiple of 4", o->name, (unsigned long long)P,
+                l->rel_sym ? l->rel_sym : "?", (unsigned long long)V);
+        w = sparc_get_word(loc);
+        sparc_put_word(loc, (w & ~0x3fffffffUL) |
+                            ((unsigned long)(d >> 2) & 0x3fffffffUL));
+        return;
+    case R_SPARC_WDISP22:
+        d = V - (long long)P;
+        if (d & 3)
+            die("%s: a branch at 0x%llx to an address not a multiple of 4",
+                o->name, (unsigned long long)P);
+        need_range(l, o, "R_SPARC_WDISP22", d, -(1LL << 23),
+                   (1LL << 23) - 4);
+        w = sparc_get_word(loc);
+        sparc_put_word(loc, (w & ~0x3fffffUL) |
+                            ((unsigned long)(d >> 2) & 0x3fffffUL));
+        return;
+    case R_SPARC_GOT10: case R_SPARC_GOT13: case R_SPARC_GOT22:
+    case R_SPARC_PC10: case R_SPARC_PC22:
+        die("%s: relocation type %u: position-independent code (a GOT or "
+            "a PC-relative address), which this linker does not lay out; "
+            "compile it without -fPIC", o->name, type);
+        return;
+    default:
+        die("%s: unsupported SPARC relocation type %u (this is the next "
+            "linker increment, not a bug in your program)", o->name, type);
+    }
+}
+
 static void apply_avr(struct linker *l, struct object *o, unsigned type,
                       unsigned char *loc, Elf64_Addr S, long long A,
                       Elf64_Addr P)
@@ -2654,6 +2756,13 @@ static void apply_relocs(struct linker *l, struct object *o)
             }
             if (o->machine == EM_AVR) {
                 apply_avr(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_SPARC) {
+                if (isrel)
+                    die("%s: a SPARC object with REL relocations; the "
+                        "SPARC ABI's are RELA", o->name);
+                apply_sparc(l, o, type, loc, S, A, P);
                 continue;
             }
             if (o->machine == EM_MIPS) {
@@ -4966,8 +5075,9 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     if (l.gc_sections)
         gc_sections(&l, l.gc_undefs, l.gc_nundefs);
     if (opts && opts->have_stack) {
-        if (l.machine != EM_RISCV && l.machine != EM_MIPS)
-            die("-Tstack is a RISC-V and MIPS option: every other target "
+        if (l.machine != EM_RISCV && l.machine != EM_MIPS &&
+            l.machine != EM_SPARC)
+            die("-Tstack is a RISC-V, MIPS and SPARC option: every other target "
                 "here starts with a stack pointer already set (a Cortex-M "
                 "reads its own from the vector table)");
         add_entry_stub(&l);
