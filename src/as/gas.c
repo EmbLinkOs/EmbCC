@@ -3282,6 +3282,16 @@ static const struct gas_target MIPS_GAS = {
     0, mipsasm_is_word, mipsasm_reset, NULL
 };
 
+/* MIPS64r2, n64: the same vocabulary and forms, an ELFCLASS64 object,
+ * and `.dword sym` is R_MIPS_64. */
+static const struct gas_target MIPS64_GAS = {
+    EM_MIPS, 0, mipsasm_encode, mipsasm_is_reg,
+    0, 0, 0,
+    R_MIPS_32, R_MIPS_64,
+    0, 0, mipsasm_symform, 0,
+    0, mipsasm_is_word, mipsasm_reset, NULL
+};
+
 /* LoongArch64. Its symbol forms -- b/bl, call36/tail36, la.pcrel and
  * la.local, la/la.global, and the %pc_hi20/%pc_lo12, %got_pc_*, %abs_* and
  * %call36 operators -- are laasm_symform's; `.word`/`.dword sym` are
@@ -3300,6 +3310,7 @@ static const struct gas_target *target_for(void)
     switch (target_get()) {
     case TARGET_LOONGARCH64: return &LA_GAS;
     case TARGET_MIPS32: return &MIPS_GAS;
+    case TARGET_MIPS64: return &MIPS64_GAS;
     case TARGET_AVR: return &AVR_GAS;
     case TARGET_RISCV32: case TARGET_RISCV64: return &RISCV_GAS;
     case TARGET_THUMB: return t_isa_a32 ? &A32_GAS : &THUMB_GAS;

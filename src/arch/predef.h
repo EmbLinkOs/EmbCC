@@ -81,6 +81,15 @@ extern const struct predef_macro predef_macros_mips32eb[];
 extern const int predef_macro_count_mips32eb;
 extern const struct predef_macro predef_macros_cxx_mips32eb[];
 extern const int predef_macro_count_cxx_mips32eb;
+/* MIPS64r2 n64, little- (mips64) and big-endian (mips64eb). */
+extern const struct predef_macro predef_macros_mips64[];
+extern const int predef_macro_count_mips64;
+extern const struct predef_macro predef_macros_cxx_mips64[];
+extern const int predef_macro_count_cxx_mips64;
+extern const struct predef_macro predef_macros_mips64eb[];
+extern const int predef_macro_count_mips64eb;
+extern const struct predef_macro predef_macros_cxx_mips64eb[];
+extern const int predef_macro_count_cxx_mips64eb;
 extern const struct predef_macro predef_macros_loongarch64[];
 extern const int predef_macro_count_loongarch64;
 extern const struct predef_macro predef_macros_cxx_loongarch64[];

@@ -11313,7 +11313,7 @@ static int const_is_expensive(const struct ir_ins *i)
         }
         if (ta == TARGET_THUMB)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
-        if (ta == TARGET_MIPS32)                /* addiu, or ori from $0 */
+        if (ta == TARGET_MIPS32 || ta == TARGET_MIPS64)  /* addiu, ori from $0 */
             return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
         if (ta == TARGET_LOONGARCH64)  /* ori/addi.w from r0, or a lu12i.w */
             return !((v >= -2048 && v <= 4095) ||
@@ -11413,7 +11413,7 @@ static int pass_sinkconst(struct ir_func *fn)
         /* (MIPS's beq/bne compare two registers too.) */
         int rv_cmp = (target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64 ||
-                      target_get() == TARGET_MIPS32 ||
+                      target_is_mips() ||
                       target_get() == TARGET_LOONGARCH64 ||
                       target_get() == TARGET_XTENSA) &&
                      i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
@@ -11497,6 +11497,9 @@ static int target_imm_foldable(int op, long imm, int w)
         return mips_imm_foldable64(op, imm);
     if (target_get() == TARGET_MIPS32)
         return mips_imm_foldable(op, imm);
+    /* MIPS64: one register to 64 bits; a 128-bit operation takes none */
+    if (target_get() == TARGET_MIPS64)
+        return w <= 8 && mips_imm_foldable(op, imm);
     /* TriCore: a 64-bit AND/OR/XOR is done half by half with any constant
      * (codegen.c's logic_half); every other 64-bit operation builds it */
     if (target_get() == TARGET_TRICORE)

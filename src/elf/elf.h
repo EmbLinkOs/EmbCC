@@ -380,6 +380,7 @@ typedef struct {
 #define EF_MIPS_CPIC       0x00000004
 #define EF_MIPS_ABI_O32    0x00001000
 #define EF_MIPS_ARCH_32R2  0x70000000
+#define EF_MIPS_ARCH_64R2  0x80000000
 #define EF_MIPS_ARCH_MASK  0xf0000000
 
 /* The o32 relocation types EmbCC writes and EmbLD applies. o32 objects
@@ -400,6 +401,13 @@ typedef struct {
 #define R_MIPS_PC16     10
 #define R_MIPS_CALL16   11
 #define R_MIPS_GPREL32  12
+#define R_MIPS_64       18
+#define R_MIPS_GOT_DISP 19
+#define R_MIPS_GOT_PAGE 20
+#define R_MIPS_GOT_OFST 21
+#define R_MIPS_SUB      24
+#define R_MIPS_HIGHER   28
+#define R_MIPS_HIGHEST  29
 #define R_MIPS_JALR     37
 #define R_MIPS_PC32    248
 
@@ -546,6 +554,7 @@ typedef struct {
  * bare-metal image. */
 #define SHT_MIPS_REGINFO  0x70000006
 #define SHT_MIPS_ABIFLAGS 0x7000002a
+#define SHT_MIPS_OPTIONS  0x7000000d
 #define SHT_SYMTAB    2
 #define SHT_STRTAB    3
 #define SHT_RELA      4

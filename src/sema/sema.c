@@ -4432,7 +4432,7 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 0);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
-    if (target_get() == TARGET_MIPS32)
+    if (target_is_mips())
         return asm_resolve_reg_mips(u, s, op, c);
     if (target_get() == TARGET_LOONGARCH64)
         return asm_resolve_reg_la(u, s, op, c);

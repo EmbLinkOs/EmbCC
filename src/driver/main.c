@@ -775,7 +775,7 @@ static int firmware_target(void)
     return target_fmt_get() == TGT_FMT_ELF &&
            (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
             target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
-            target_get() == TARGET_MIPS32 || target_get() == TARGET_LOONGARCH64 ||
+            target_is_mips() || target_get() == TARGET_LOONGARCH64 ||
             target_get() == TARGET_TRICORE ||
             target_get() == TARGET_XTENSA);
 }
@@ -1278,7 +1278,7 @@ static int blocks_by_gas(void)
     enum target_arch a = target_get();
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
            a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32 ||
-           a == TARGET_LOONGARCH64;
+           a == TARGET_LOONGARCH64 || a == TARGET_MIPS64;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1372,7 +1372,8 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
             enum target_arch t = target_get();
             ob_fmt(b, "%s %s\n", t == TARGET_THUMB ||
                                  t == TARGET_LOONGARCH64 ? "bl"
-                                 : t == TARGET_MIPS32 ? "jal" : "call",
+                                 : t == TARGET_MIPS32 ||
+                                   t == TARGET_MIPS64 ? "jal" : "call",
                    e->callee->name);
             continue;
         }
@@ -1877,7 +1878,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit_xtensa(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                             &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                             opt_level >= 1);
-    else if (ta == TARGET_MIPS32)
+    else if (ta == TARGET_MIPS32 || ta == TARGET_MIPS64)
         codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                           opt_level >= 1);
@@ -2277,7 +2278,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                   target_fmt_get() == TGT_FMT_ELF);
     /* The tables eh_emit writes are x86-64's and AArch64's layout, with a
      * PC-relative relocation MIPS's REL objects have no type for. */
-    if (unwind && ta == TARGET_MIPS32)
+    if (unwind && (ta == TARGET_MIPS32 || ta == TARGET_MIPS64))
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "%s yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
@@ -2999,7 +3000,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     int data_ndx = 0, bss_ndx = 0;
     /* MIPS: .data and .bss at 16 at least, as clang's and GNU as's MIPS
      * objects have them -- so an object -S reassembled lays out as -c's */
-    if (ta == TARGET_MIPS32) {
+    if (ta == TARGET_MIPS32 || ta == TARGET_MIPS64) {
         if (data_align < 16) data_align = 16;
         if (bss_align < 16) bss_align = 16;
     }
@@ -3174,7 +3175,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                          ab, (Elf64_Xword)alen, 1);
         free(ab);
     }
-    if (ta == TARGET_MIPS32) {
+    if (ta == TARGET_MIPS32 || ta == TARGET_MIPS64) {
         /* The ABI flags clang's objects carry: what ISA and register
          * sizes the code needs and which floating-point ABI it was
          * compiled for (soft), so a linker can refuse to mix it with a
@@ -4061,7 +4062,8 @@ int main(int argc, char **argv)
         t_isa_a32 = target_arm_a32();
         target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
-                              : a == TARGET_MIPS32 ? mips_op_calls_helper
+                              : a == TARGET_MIPS32 || a == TARGET_MIPS64
+                                ? mips_op_calls_helper
                               : a == TARGET_LOONGARCH64 ? la_op_calls_helper
                               : a == TARGET_TRICORE ? tc_op_calls_helper
                               : a == TARGET_XTENSA ? xtensa_op_calls_helper
@@ -4069,6 +4071,8 @@ int main(int argc, char **argv)
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
         mips_set_big_endian(target_big_endian());
+        /* ...and its width: the doubleword instructions at MIPS64 */
+        mips_set_64(a == TARGET_MIPS64);
     }
     /* Scanned across the whole command line, not just argv[1]: these
      * describe the TARGET, so `--target=aarch64-elf --dump-predef` has to
@@ -4683,6 +4687,11 @@ int main(int argc, char **argv)
                                     "--target=mips-none-elf)"
                                   : " (little-endian MIPS is "
                                     "--target=mipsel-none-elf)")
+                        : target_get() == TARGET_MIPS64
+                            ? (be ? " (big-endian MIPS64 is "
+                                    "--target=mips64-none-elf)"
+                                  : " (little-endian MIPS64 is "
+                                    "--target=mips64el-none-elf)")
                             : "");
                 return 1;
             }
@@ -4848,6 +4857,61 @@ int main(int argc, char **argv)
                            "EmbCC emits the windowed ABI for the ESP32 "
                            "(LX6) and ESP32-S3 (LX7), little-endian, with "
                            "literals before each function", argv[i]);
+            }
+            continue;
+        } else if (target_get() == TARGET_MIPS64 &&
+                   (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                    strncmp(argv[i], "-march=", 7) == 0 ||
+                    strncmp(argv[i], "-mabi=", 6) == 0 ||
+                    strcmp(argv[i], "-msoft-float") == 0 ||
+                    strcmp(argv[i], "-mhard-float") == 0 ||
+                    strcmp(argv[i], "-mno-abicalls") == 0 ||
+                    strcmp(argv[i], "-mabicalls") == 0 ||
+                    strcmp(argv[i], "-EL") == 0 || strcmp(argv[i], "-EB") == 0 ||
+                    strncmp(argv[i], "-G", 2) == 0)) {
+            /* MIPS64's one configuration, as MIPS32's below: MIPS64
+             * Release 2, n64, soft float, no abicalls, no small data, in
+             * the triple's byte order. */
+            const char *v = strchr(argv[i], '=');
+            v = v ? v + 1 : "";
+            if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
+                strncmp(argv[i], "-march=", 7) == 0) {
+                static const char *const cores[] = {
+                    "mips64r2", "5kc", "5kf", "5kec", "5kef", "octeon"
+                };
+                int ok = 0;
+                for (unsigned k = 0; k < sizeof cores / sizeof cores[0]; k++)
+                    ok |= strcmp(v, cores[k]) == 0;
+                if (!ok)
+                    diag_fatal(NULL, 0, "%s is not a MIPS64 Release 2 core: "
+                               "EmbCC emits MIPS64r2 (mips64r2, 5kc, 5kf, "
+                               "5kec, 5kef, octeon)", argv[i]);
+            } else if (strncmp(argv[i], "-mabi=", 6) == 0) {
+                if (strcmp(v, "64") != 0)
+                    diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
+                               "the n64 ABI (-mabi=64) only", argv[i]);
+            } else if (strcmp(argv[i], "-mhard-float") == 0) {
+                diag_fatal(NULL, 0, "-mhard-float is not supported: EmbCC "
+                           "emits soft-float n64, which passes floating "
+                           "point in the integer registers");
+            } else if (strcmp(argv[i], "-mabicalls") == 0) {
+                diag_fatal(NULL, 0, "-mabicalls is not supported: EmbCC's "
+                           "MIPS64 code takes addresses absolutely "
+                           "(%%highest..%%lo) and keeps no $gp; it is "
+                           "-mno-abicalls code");
+            } else if (strcmp(argv[i], "-EB") == 0 && !target_big_endian()) {
+                diag_fatal(NULL, 0, "-EB contradicts --target=%s, which is "
+                           "little-endian: big-endian MIPS64 is "
+                           "--target=mips64-none-elf", target_triple_now());
+            } else if (strcmp(argv[i], "-EL") == 0 && target_big_endian()) {
+                diag_fatal(NULL, 0, "-EL contradicts --target=%s, which is "
+                           "big-endian: little-endian MIPS64 is "
+                           "--target=mips64el-none-elf", target_triple_now());
+            } else if (strncmp(argv[i], "-G", 2) == 0 &&
+                       strcmp(argv[i], "-G0") != 0) {
+                diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no "
+                           "data in .sdata and addresses nothing through "
+                           "$gp (-G0)", argv[i]);
             }
             continue;
         } else if (target_get() == TARGET_MIPS32 &&

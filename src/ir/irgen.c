@@ -1594,6 +1594,7 @@ static int atomic_arm(void)
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
            t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
            t == TARGET_MIPS32 ||      /* MIPS32 is weakly ordered: sync */
+           t == TARGET_MIPS64 ||
            t == TARGET_LOONGARCH64 ||  /* ...and LoongArch: dbar */
            t == TARGET_TRICORE ||     /* TriCore orders with dsync */
            t == TARGET_XTENSA;        /* and Xtensa: memw */
@@ -2782,7 +2783,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_riscv(fn, e);
         if (target_get() == TARGET_AVR)
             return irg_va_arg_avr(fn, e);
-        if (target_get() == TARGET_MIPS32)
+        if (target_is_mips())
             return irg_va_arg_mips(fn, e);
         if (target_get() == TARGET_TRICORE)
             return irg_va_arg_tricore(fn, e);
@@ -3942,7 +3943,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_riscv(fn, s);
             else if (target_get() == TARGET_AVR)
                 irg_asm_avr(fn, s);
-            else if (target_get() == TARGET_MIPS32)
+            else if (target_is_mips())
                 irg_asm_mips(fn, s);
             else if (target_get() == TARGET_LOONGARCH64)
                 irg_asm_loongarch(fn, s);

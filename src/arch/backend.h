@@ -125,6 +125,7 @@ void mips_build_abiflags(unsigned char out[24]);
 /* The MIPS encoder's byte order (arch/mips/emit.h), which the driver sets
  * from target_big_endian() once the target is chosen. */
 void mips_set_big_endian(int on);
+void mips_set_64(int on);           /* ...and MIPS64's doubleword forms */
 
 /* And for LoongArch64, LP64S (soft float): RV64's lowering with
  * LoongArch's instructions (src/arch/loongarch/codegen.c). */

@@ -13,7 +13,7 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m armv7a riscv32 riscv64 avr mips32
-#                   mips32eb
+#                   mips32eb mips64 mips64eb
 #                   loongarch64
 #                   xtensa
 #
@@ -88,7 +88,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64) eval "echo \${$gccvar:-clang}" ;;
         # Xtensa: Espressif's own GCC for the ESP32 (crosstool-NG release
         # esp-16.1.0_20260609), there being no Xtensa target in clang.
         xtensa)  eval "echo \${$gccvar:-xtensa-esp32-elf-gcc}" ;;
@@ -158,6 +158,13 @@ refflags() {
         # _MIPSEB family) are the generated answer, not a patch on mipsel's.
         mips32eb) [ -n "${EMBCC_REF_GCC_MIPS32EB:-}" ] || \
                      echo "-target mips-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # MIPS64r2, n64, soft float, both byte orders (mips64el-none-elf
+        # and mips64-none-elf): -mno-abicalls for the reason mips32 takes
+        # it -- absolute addresses, jal, no $gp.
+        mips64)  [ -n "${EMBCC_REF_GCC_MIPS64:-}" ] || \
+                     echo "-target mips64el-unknown-elf -mcpu=mips64r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        mips64eb) [ -n "${EMBCC_REF_GCC_MIPS64EB:-}" ] || \
+                     echo "-target mips64-unknown-elf -mcpu=mips64r2 -msoft-float -mno-abicalls -ffreestanding" ;;
         # LoongArch64, LP64S. -msoft-float is -mabi=lp64s AND -mfpu=none:
         # with the ABI alone clang still claims __loongarch_frlen 64 and the
         # LSX vector unit (__loongarch_sx), hardware the soft-float code
@@ -185,6 +192,8 @@ exclude_arch() {
         # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
         # two-byte atomic exactly as RISC-V's does (no libatomic here).
         mips32|mips32eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # MIPS64: ll/sc and lld/scd, a word and a doubleword, the same rule
+        mips64|mips64eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2|16)' ;;
         # (LoongArch64 claims all four: its backend makes a one- or two-byte
         # atomic an ll.w/sc.w loop on the word, as clang does.)
         # ARMv7-A has ldrexd/strexd, so clang claims an eight-byte
@@ -228,7 +237,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|loongarch64) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|mips64|mips64eb|loongarch64) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -313,10 +322,12 @@ case "${1:-both}" in
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
     mips32eb) gen mips32eb ;;
+    mips64)  gen mips64 ;;
+    mips64eb) gen mips64eb ;;
     loongarch64) gen loongarch64 ;;
     xtensa)  gen xtensa ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen armv7a; gen riscv32
-              gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64; gen xtensa ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64|xtensa]" >&2
+              gen riscv64; gen avr; gen mips32; gen mips32eb; gen mips64; gen mips64eb; gen loongarch64; gen xtensa ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|xtensa]" >&2
        exit 1 ;;
 esac
