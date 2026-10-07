@@ -144,8 +144,10 @@ SKIP32=" atomics-reg attr-layout bit-builtins c-extras2 enum-wide-values
 SKIPM4=" complex "
 # On the A7 only: alloca.c checks that alloca is 16-aligned, where AAPCS
 # gives 8 -- it passes or not by where sp happens to be, and clang's
-# build fails it at -O2 there too (tests/golden/arm-a32-exec.sh).
-SKIPA7=" alloca "
+# build fails it at -O2 there too; and complex.c, as on the M4, whose
+# result clang's build gives there too (both judged against clang in
+# tests/golden/arm-a32-exec.sh).
+SKIPA7=" alloca complex "
 SKIP32=" $(echo $SKIP32) "
 
 cat > "$out/one.sh" <<'EOT'
