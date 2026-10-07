@@ -41,7 +41,7 @@ command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1 || {
     echo "SKIP: llvm-mc/llvm-objcopy not found"; exit 0; }
 
 cc -std=c99 -Wall -Wextra -o "$out/vfpcheck" \
-   tools/vfpcheck/vfpcheck.c src/arch/thumb/emit.c src/arch/code.c \
+   tools/vfpcheck/vfpcheck.c src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/code.c \
    src/arch/target.c src/driver/util.c src/driver/diag.c \
    src/platform/platform_common.c src/platform/platform_posix.c src/sema/type.c src/sema/ldfloat.c || {
     echo "vfpcheck did not build"; exit 1; }

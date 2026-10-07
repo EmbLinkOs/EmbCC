@@ -129,6 +129,7 @@ SRCS := \
 	src/arch/aarch64/predef.c \
 	src/arch/aarch64/predef_cxx.c \
 	src/arch/thumb/emit.c \
+	src/arch/thumb/a32.c \
 	src/arch/thumb/attrs.c \
 	src/arch/thumb/irgen.c \
 	src/arch/thumb/codegen.c \
@@ -140,6 +141,8 @@ SRCS := \
 	src/arch/thumbv8m/predef_cxx.c \
 	src/arch/thumbv6m/predef.c \
 	src/arch/thumbv6m/predef_cxx.c \
+	src/arch/armv7a/predef.c \
+	src/arch/armv7a/predef_cxx.c \
 	src/arch/riscv/emit.c \
 	src/arch/riscv/codegen.c \
 	src/arch/riscv/irgen.c \
@@ -253,6 +256,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
        src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c \
        src/arch/loongarch/emit.c src/arch/code.c \
+       src/arch/thumb/a32.c src/arch/thumb/a32.h \
        src/link/link.h src/link/ldscript.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        $(PLATFORM_SRCS) src/platform/platform.h
@@ -261,7 +265,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS) \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c \
-	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/code.c
+	    src/arch/mips/emit.c src/arch/loongarch/emit.c src/arch/thumb/a32.c src/arch/code.c
 
 # NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
 # a backend file added without a line here breaks only `make test` -- and
@@ -294,6 +298,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
+             src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
              src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
@@ -303,7 +308,8 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/x86_64/as.c src/arch/x86_64/disasm.c src/arch/aarch64/irgen.c \
              src/arch/aarch64/codegen.c src/arch/aarch64/emit.c \
              src/arch/aarch64/asm.c src/arch/thumb/irgen.c src/arch/thumb/asm.c \
-             src/arch/thumb/emit.c src/arch/thumb/attrs.c src/arch/riscv/irgen.c \
+             src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/thumb/attrs.c \
+             src/arch/riscv/irgen.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
              src/arch/mips/irgen.c src/arch/mips/asm.c src/arch/mips/emit.c \
              src/arch/loongarch/irgen.c src/arch/loongarch/emit.c \
@@ -516,8 +522,8 @@ libc-linux-aarch64: embcc embar
 # with soft-float ones, so its runtime is a separate archive.
 RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
-               thumbv8m.main-none-eabihf riscv32-unknown-elf riscv64-unknown-elf \
-               mipsel-none-elf mips-none-elf loongarch64-unknown-elf
+               thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
+               riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -531,8 +537,9 @@ rt-embedded: embcc embar
 # locks are refused for it.
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
-                 thumbv8m.main-none-eabihf riscv32-unknown-elf \
-                 riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf
+                 thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
+                 riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \
+                 loongarch64-unknown-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \

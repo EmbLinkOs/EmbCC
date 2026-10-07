@@ -8,6 +8,7 @@
 #   m4     thumbv7em-none-eabi on the Cortex-M4F board (mps2-an386)
 #   m4hf   thumbv7em-none-eabihf, the same board with the FPU and the
 #          hard-float calling convention -- what an RTOS build ships
+#   a7     armv7a-none-eabi, ARM (A32) state, on virt's Cortex-A15
 #   rv32   riscv32-unknown-elf on virt
 #   rv64   riscv64-unknown-elf on virt
 #
@@ -42,7 +43,7 @@ EMBLD=${EMBLD:-$PWD/embld}
 export EMBCC EMBLD
 
 boards=
-command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf"
+command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7"
 command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32"
 command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64"
 [ -n "$boards" ] || { echo "SKIP: no qemu-system-arm or -riscv32/64"; exit 0; }
@@ -51,6 +52,7 @@ triple() {
     case $1 in
         m4) echo thumbv7em-none-eabi ;;
         m4hf) echo thumbv7em-none-eabihf ;;
+        a7) echo armv7a-none-eabi ;;
         rv32) echo riscv32-unknown-elf ;;
         rv64) echo riscv64-unknown-elf ;;
     esac
@@ -74,6 +76,12 @@ int main(void)
     for (;;)
         ;
 }
+EOT
+cat > "$out/drv-a7.c" <<'EOT'
+/* tests/harness/arm-a32's boot runs the constructors and ends the run
+ * with main's result through semihosting SYS_EXIT_EXTENDED */
+int prog_main(void);
+int main(void) { return prog_main(); }
 EOT
 cat > "$out/drv-rv.c" <<'EOT'
 /* the constructors, then main's result out through virt's test device:
@@ -106,6 +114,11 @@ for b in $boards; do
                     echo "FAIL: the M4 harness"; exit 1; }
             done
             "$EMBCC" --target=$T -O1 -c "$out/drv-m4.c" -o "$L/drv.o" ;;
+        a7) for f in boot io; do
+                "$EMBCC" --target=$T -O1 -c tests/harness/arm-a32/$f.c \
+                    -o "$L/$f.o" || { echo "FAIL: the ARMv7-A harness"; exit 1; }
+            done
+            "$EMBCC" --target=$T -O1 -c "$out/drv-a7.c" -o "$L/drv.o" ;;
         rv*) for f in boot io; do
                 "$EMBCC" --target=$T -c tests/harness/riscv/$f.c \
                     -o "$L/$f.o" || { echo "FAIL: the RISC-V harness"; exit 1; }
@@ -129,13 +142,22 @@ SKIP32=" atomics-reg attr-layout bit-builtins c-extras2 enum-wide-values
  sizeof-cast static-local-init strings structs u64-float "
 # On the M4 only: complex.c, which clang's build fails there too.
 SKIPM4=" complex "
+# On the A7 only: alloca.c checks that alloca is 16-aligned, where AAPCS
+# gives 8 -- it passes or not by where sp happens to be, and clang's
+# build fails it at -O2 there too; and complex.c, as on the M4, whose
+# result clang's build gives there too (both judged against clang in
+# tests/golden/arm-a32-exec.sh).
+SKIPA7=" alloca complex "
 SKIP32=" $(echo $SKIP32) "
 
 cat > "$out/one.sh" <<'EOT'
 c=$1; opt=$2; b=$3; out=$4
 name=$(basename "$c" .c)
 case $b in
-    m4|m4hf|rv32) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
+    m4|m4hf|a7|rv32) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
+esac
+case $b in
+    a7) case "$SKIPA7" in *" $name "*) exit 0 ;; esac ;;
 esac
 case $b in
     m4|m4hf) case "$SKIPM4" in *" $name "*) exit 0 ;; esac ;;
@@ -144,6 +166,7 @@ expect=$(sed -n 's|.*// expect-exit: *\([0-9][0-9]*\).*|\1|p' "$c" | head -1)
 [ -n "$expect" ] || exit 0
 case $b in
     m4) T=thumbv7em-none-eabi ;; m4hf) T=thumbv7em-none-eabihf ;;
+    a7) T=armv7a-none-eabi ;;
     rv32) T=riscv32-unknown-elf ;;
     rv64) T=riscv64-unknown-elf ;;
 esac
@@ -156,6 +179,8 @@ fi
 case $b in
     m4|m4hf) EMBCC_THUMB_HARNESS=$L sh tests/harness/thumb-m4f/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
+    a7) EMBCC_A32_HARNESS=$L sh tests/harness/arm-a32/link.sh $o.elf \
+            $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
     rv*) EMBCC_RISCV_HARNESS=$L sh tests/harness/riscv/link.sh $o.elf \
             $o.o $L/drv.o $L/libc.a $L/librt.a > $o.lerr 2>&1 ;;
 esac || { echo "NA $name $b $opt: does not link: $(head -1 $o.lerr)"; exit 0; }
@@ -163,6 +188,9 @@ case $b in
     m4|m4hf) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
             -M mps2-an386 -cpu cortex-m4 -semihosting -nographic \
             -kernel $o.elf > $o.txt 2>&1 ;;
+    a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
+            -M virt -cpu cortex-a15 -m 128 -semihosting -nographic \
+            -monitor none -kernel $o.elf > $o.txt 2>&1 ;;
     rv32) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
     rv64) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \
@@ -175,7 +203,7 @@ else
     echo "FAIL $name $b $opt: exit $got, want $expect"
 fi
 EOT
-export SKIP32 SKIPM4 QA Q32 Q64
+export SKIP32 SKIPM4 SKIPA7 QA Q32 Q64
 for b in $boards; do
     for opt in -O0 -O1 -O2 -Os; do
         for c in tests/exec/*.c; do

@@ -14,10 +14,12 @@
 enum target_arch {
     TARGET_X86_64 = 0,
     TARGET_AARCH64 = 1,
-    /* ARMv7-M: Cortex-M3/M4/M7, which execute Thumb-2 and nothing else.
-     * Named for the instruction set rather than the architecture family
-     * because that is the part the backend encodes, and because there is
-     * no A-profile ARM32 target here to be confused with. */
+    /* 32-bit ARM, AAPCS32: the Cortex-M levels (ARMv6-M, v7-M, v7E-M,
+     * v8-M Mainline), which execute Thumb and nothing else, and ARMv7-A in
+     * ARM state (target_arm_a32). Named for the instruction set the
+     * Cortex-M levels encode, which came first; ARMv7-A shares everything
+     * this enum keys -- the data model and the calling convention -- and
+     * differs only in the encoding, which is a level of this target. */
     TARGET_THUMB = 2,
     /* RISC-V, as two targets rather than one: the instruction set is
      * nearly the same at both widths and ONE backend serves them
@@ -252,6 +254,18 @@ int target_thumb_em(void);
  * keys the data model and these two share one; see g_thumb_arch. */
 int target_thumb_arch(void);
 void target_set_thumb_arch(int lvl);
+/* ARMv7-A in ARM state (armv7a-none-eabi): TARGET_THUMB's data model and
+ * AAPCS32, at level 7 with the DSP set (target_thumb_em), encoded as A32
+ * instructions rather than Thumb-2 -- the backend's encoder switches on it
+ * (src/arch/thumb/a32.c), and so do the relocation types, the symbols'
+ * Thumb bit and the mapping symbols. docs/internals/arm-a32-plan.md. */
+int target_arm_a32(void);
+/* ARMv7-A's VFP unit, for the code that says which (the attributes, the
+ * predefined macros): 3 for VFPv3, 4 for VFPv4, and through `d32` whether
+ * it has 32 double registers. The code uses d0-d15 either way; both units
+ * compute in single and double precision (target_thumb_fpu_dp). */
+int target_arm_vfp(int *d32);
+void target_set_arm_vfp(int version, int d32);
 /* The alignment a string literal of `width`-byte elements gets in .rodata.
  * Its element width: ARMv6-M reads L"..."[0] with LDR and MIPS with lw,
  * and a wide literal at an odd offset faults on both (a HardFault, an

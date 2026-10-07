@@ -149,6 +149,12 @@ static void str_label(char *out, size_t cap, const struct ir_unit *iu, int off)
  * is spelled `%function` there and `@function` everywhere else. Getting
  * this wrong is not subtle -- the whole directive vanishes into a
  * comment and the symbol is left untyped. */
+/* Thumb state: every ARM target but ARMv7-A, which is A32 (ARM state). */
+static int arm_thumb(void)
+{
+    return target_get() == TARGET_THUMB && !target_arm_a32();
+}
+
 static const char *type_sigil(void)
 {
     return target_get() == TARGET_THUMB ? "%" : "@";
@@ -176,6 +182,16 @@ static const char *reloc_name(int kind)
         default:             return NULL;
         }
     case TARGET_THUMB:
+        if (!arm_thumb())
+            switch (kind) {              /* ARM state: the A32 fields */
+            case RK_CALL:        return "R_ARM_CALL";
+            case RK_TAIL:        return "R_ARM_JUMP24";
+            case RK_THM_MOVW:    return "R_ARM_MOVW_ABS_NC";
+            case RK_THM_MOVT:    return "R_ARM_MOVT_ABS";
+            case RK_ABS32:       return "R_ARM_ABS32";
+            case RK_DATA_PREL32: return "R_ARM_REL32";
+            default:             return NULL;
+            }
         switch (kind) {
         case RK_CALL:        return "R_ARM_THM_CALL";
         case RK_TAIL:        return "R_ARM_THM_JUMP24";
@@ -416,7 +432,8 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * set. `.syntax unified` because the pre-UAL syntax is still the
      * default in some assemblers. */
     if (target_get() == TARGET_THUMB)
-        ob_str(b, "\t.syntax unified\n\t.thumb\n");
+        ob_str(b, arm_thumb() ? "\t.syntax unified\n\t.thumb\n"
+                              : "\t.syntax unified\n\t.arm\n");
     /* MIPS: the code is already scheduled -- its delay slots are filled --
      * and uses $at itself, so the assembler may neither reorder, nor fill
      * a slot, nor expand a macro through $at. */
@@ -473,7 +490,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
         if (!f->is_static)
             ob_fmt(b, "\t.%s\t%s\n", f->src->is_weak ? "weak" : "globl",
                    asym(f->name));
-        if (target_get() == TARGET_THUMB)
+        if (arm_thumb())
             ob_fmt(b, "\t.thumb_func\n");
         ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", asym(f->name),
                type_sigil(), asym(f->name));
@@ -667,7 +684,7 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                    asym(f->name));
         ob_fmt(b, "\t.type\t%s, %sfunction\n", asym(f->name), type_sigil());
         ob_fmt(b, "\t.%s\t%s, %s\n",
-               target_get() == TARGET_THUMB ? "thumb_set" : "set",
+               arm_thumb() ? "thumb_set" : "set",
                asym(f->name), asym(f->alias_of));
     }
 

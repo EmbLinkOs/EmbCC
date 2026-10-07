@@ -12,7 +12,7 @@
 #                                                    (what tests/golden/predef.sh
 #                                                    compares --dump-predef with)
 #
-#   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m riscv32 riscv64 avr mips32
+#   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m armv7a riscv32 riscv64 avr mips32
 #                   mips32eb
 #                   loongarch64
 #
@@ -87,7 +87,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb|loongarch64) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64) eval "echo \${$gccvar:-clang}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -124,6 +124,12 @@ refflags() {
                      echo "-target thumbv6m-none-eabi -ffreestanding" ;;
         thumbv8m) [ -n "${EMBCC_REF_GCC_THUMBV8M:-}" ] || \
                      echo "-target thumbv8m.main-none-eabi -mfloat-abi=soft -ffreestanding" ;;
+        # ARMv7-A in ARM state. -mfloat-abi=soft for the reason thumbv8m
+        # takes it: clang's default for this triple is VFPv3 with NEON
+        # (__ARM_FP, __ARM_NEON), and the backend does every float
+        # operation as a call.
+        armv7a)  [ -n "${EMBCC_REF_GCC_ARMV7A:-}" ] || \
+                     echo "-target armv7a-none-eabi -mfloat-abi=soft -ffreestanding" ;;
         riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
                      echo "-target riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
@@ -177,6 +183,10 @@ exclude_arch() {
         mips32|mips32eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         # (LoongArch64 claims all four: its backend makes a one- or two-byte
         # atomic an ll.w/sc.w loop on the word, as clang does.)
+        # ARMv7-A has ldrexd/strexd, so clang claims an eight-byte
+        # compare-and-swap; the backend refuses an eight-byte atomic by name
+        # (as on ARMv7-M, which has no ldrexd), so this does not claim it.
+        armv7a)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8' ;;
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -210,7 +220,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32|mips32eb|loongarch64) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|loongarch64) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -289,14 +299,15 @@ case "${1:-both}" in
     thumb)   gen thumb ;;
     thumbv6m) gen thumbv6m ;;
     thumbv8m) gen thumbv8m ;;
+    armv7a)  gen armv7a ;;
     riscv32) gen riscv32 ;;
     riscv64) gen riscv64 ;;
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
     mips32eb) gen mips32eb ;;
     loongarch64) gen loongarch64 ;;
-    both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen riscv32
+    both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen armv7a; gen riscv32
               gen riscv64; gen avr; gen mips32; gen mips32eb; gen loongarch64 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb|loongarch64]" >&2
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|loongarch64]" >&2
        exit 1 ;;
 esac

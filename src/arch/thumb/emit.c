@@ -4,6 +4,24 @@
 #include <stdlib.h>
 
 #include "emit.h"
+#include "a32.h"
+
+/* ARM state (armv7a-none-eabi): each encoder below hands its call to its
+ * A32 twin in a32.c when this is set (docs/internals/arm-a32-plan.md). In
+ * Thumb state nothing changes -- the test is the first statement and
+ * false -- so the Cortex-M encodings are exactly what they were. */
+int t_isa_a32;
+
+#define A32(call) do { if (t_isa_a32) { call; return; } } while (0)
+
+/* A Thumb-only form asked for in ARM state: a code generator bug, since
+ * every caller checks t_isa_a32 first. */
+static void a32_refuse(const char *what, long v)
+{
+    fprintf(stderr, "embcc: internal: arm: %s has no A32 form (%ld)\n",
+            what, v);
+    abort();
+}
 
 /* A Thumb instruction is one or two halfwords, each written
  * little-endian. A 32-bit instruction is NOT a little-endian word: its
@@ -21,6 +39,16 @@ static void hw2(struct code *c, unsigned a, unsigned b)
 {
     hw(c, a);
     hw(c, b);
+}
+
+/* A coprocessor (VFP) instruction: the same 28 bits in both states, under
+ * a condition field in ARM state where Thumb has 1110. */
+static void vhw2(struct code *c, unsigned a, unsigned b)
+{
+    if (t_isa_a32)
+        a32_vfp_word(c, a, b);
+    else
+        hw2(c, a, b);
 }
 
 static void patch_hw(struct code *c, int off, unsigned v)
@@ -105,7 +133,12 @@ static int encode_imm(unsigned long v)
     return g_imm_val[lo] == want ? g_imm_enc[lo] : -1;
 }
 
-int t_imm_ok(long imm) { return encode_imm((unsigned long)imm) >= 0; }
+int t_imm_ok(long imm)
+{
+    if (t_isa_a32)
+        return a32_imm_ok(imm);
+    return encode_imm((unsigned long)imm) >= 0;
+}
 
 /* i:imm3:imm8 split into the two halfwords' fields. */
 static unsigned imm_i(int e)    { return (unsigned)(e >> 11) & 1; }
@@ -116,6 +149,7 @@ static unsigned imm_lo8(int e)  { return (unsigned)e & 0xff; }
 
 void t_mov_reg(struct code *c, int rd, int rm)
 {
+    A32(a32_mov_reg(c, rd, rm));
     if (rd == rm)
         return;
     hw(c, 0x4600u | (unsigned)((rd & 8) << 4) | (unsigned)(rm << 3) |
@@ -124,6 +158,7 @@ void t_mov_reg(struct code *c, int rd, int rm)
 
 void t_movs_reg(struct code *c, int rd, int rm)
 {
+    A32(a32_movs_reg(c, rd, rm));
     if (low(rd) && low(rm))
         hw(c, 0x0000u | (unsigned)(rm << 3) | (unsigned)rd); /* LSLS #0 */
     else
@@ -132,6 +167,7 @@ void t_movs_reg(struct code *c, int rd, int rm)
 
 int t_movs_imm(struct code *c, int rd, long imm)
 {
+    if (t_isa_a32) return a32_movs_imm(c, rd, imm);
     unsigned long v = (unsigned long)imm & 0xffffffffUL;
     int e;
     if (low(rd) && v <= 0xff) {
@@ -179,6 +215,7 @@ void t_mov_imm_it(struct code *c, int rd, long imm)
 
 void t_mvn_reg(struct code *c, int rd, int rm, int s)
 {
+    A32(a32_mvn_reg(c, rd, rm, s));
     if (s && low(rd) && low(rm)) {
         hw(c, 0x43c0u | (unsigned)(rm << 3) | (unsigned)rd);
         return;
@@ -201,6 +238,7 @@ static void movw(struct code *c, int rd, unsigned v, int top)
  * relocated pair. */
 void t_movw_movt(struct code *c, int rd, unsigned v, int top)
 {
+    A32(a32_movw_movt(c, rd, v, top));
     movw(c, rd, v, top);
 }
 
@@ -225,6 +263,7 @@ void t_mov_imm_dead_flags(struct code *c, int rd, long imm)
 
 void t_mov_imm(struct code *c, int rd, long imm, int s)
 {
+    A32(a32_mov_imm(c, rd, imm, s));
     unsigned long v = (unsigned long)imm & 0xffffffffUL;
     if (s && low(rd) && v <= 0xff) {
         hw(c, 0x2000u | (unsigned)(rd << 8) | (unsigned)v);
@@ -253,6 +292,7 @@ void t_mov_imm(struct code *c, int rd, long imm, int s)
 
 int t_mov_addr(struct code *c, int rd, unsigned long value)
 {
+    if (t_isa_a32) return a32_mov_addr(c, rd, value);
     int at = c->len;
     movw(c, rd, (unsigned)(value & 0xffff), 0);
     movw(c, rd, (unsigned)((value >> 16) & 0xffff), 1);
@@ -279,6 +319,7 @@ static int narrow_dp(int op)
 
 void t_alu_reg(struct code *c, int op, int rd, int rn, int rm, int s)
 {
+    A32(a32_alu_reg(c, op, rd, rn, rm, s));
     if (s && low(rd) && low(rn) && low(rm)) {
         /* The three-operand 16-bit adds/subs. */
         if (op == T_OP_ADD) {
@@ -309,6 +350,7 @@ void t_alu_reg(struct code *c, int op, int rd, int rn, int rm, int s)
 void t_alu_reg_shift(struct code *c, int op, int rd, int rn, int rm,
                      int type, int amount, int s)
 {
+    A32(a32_alu_reg_shift(c, op, rd, rn, rm, type, amount, s));
     /* The same first halfword as t_alu_reg's 32-bit form; the amount is
      * split imm3:imm2 around rd, and the type sits below it. */
     unsigned imm3 = (unsigned)(amount >> 2) & 7, imm2 = (unsigned)amount & 3;
@@ -319,6 +361,7 @@ void t_alu_reg_shift(struct code *c, int op, int rd, int rn, int rm,
 
 void t_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign)
 {
+    A32(a32_bfx(c, rd, rn, lsb, width, sign));
     unsigned imm3 = (unsigned)(lsb >> 2) & 7, imm2 = (unsigned)lsb & 3;
     hw2(c, (sign ? 0xf340u : 0xf3c0u) | (unsigned)rn,
            (imm3 << 12) | (unsigned)(rd << 8) | (imm2 << 6) |
@@ -327,6 +370,7 @@ void t_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign)
 
 int t_alu_imm(struct code *c, int op, int rd, int rn, long imm, int s)
 {
+    if (t_isa_a32) return a32_alu_imm(c, op, rd, rn, imm, s);
     int e;
     if (s && low(rd) && low(rn) && imm >= 0 && imm <= 7 &&
         (op == T_OP_ADD || op == T_OP_SUB)) {
@@ -356,11 +400,20 @@ static void addsubw(struct code *c, int rd, int rn, long imm, int sub)
            (((v >> 8) & 7) << 12) | (unsigned)(rd << 8) | (v & 0xff));
 }
 
-void t_addw(struct code *c, int rd, int rn, long imm) { addsubw(c, rd, rn, imm, 0); }
-void t_subw(struct code *c, int rd, int rn, long imm) { addsubw(c, rd, rn, imm, 1); }
+void t_addw(struct code *c, int rd, int rn, long imm)
+{
+    A32(a32_addsubw(c, rd, rn, imm, 0));
+    addsubw(c, rd, rn, imm, 0);
+}
+void t_subw(struct code *c, int rd, int rn, long imm)
+{
+    A32(a32_addsubw(c, rd, rn, imm, 1));
+    addsubw(c, rd, rn, imm, 1);
+}
 
 void t_shift_imm(struct code *c, int op, int rd, int rm, int sh, int s)
 {
+    A32(a32_shift_imm(c, op, rd, rm, sh, s));
     if (op == T_SH_LSL && sh == 0) {
         if (s && low(rd) && low(rm))
             hw(c, 0x0000u | (unsigned)(rm << 3) | (unsigned)rd);  /* movs */
@@ -382,6 +435,7 @@ void t_shift_imm(struct code *c, int op, int rd, int rm, int sh, int s)
 
 void t_shift_reg(struct code *c, int op, int rd, int rn, int rm, int s)
 {
+    A32(a32_shift_reg(c, op, rd, rn, rm, s));
     if (s && low(rd) && low(rm) && rd == rn && op != T_SH_ROR) {
         static const int n16[3] = { 2, 3, 4 };  /* LSLS, LSRS, ASRS */
         hw(c, 0x4000u | (unsigned)(n16[op] << 6) | (unsigned)(rm << 3) |
@@ -394,6 +448,7 @@ void t_shift_reg(struct code *c, int op, int rd, int rn, int rm, int s)
 
 void t_mul(struct code *c, int rd, int rn, int rm)
 {
+    A32(a32_mul(c, rd, rn, rm));
     if (low(rd) && low(rn) && rd == rm) {
         hw(c, 0x4340u | (unsigned)(rn << 3) | (unsigned)rd);   /* muls */
         return;
@@ -403,30 +458,35 @@ void t_mul(struct code *c, int rd, int rn, int rm)
 
 void t_mla(struct code *c, int rd, int rn, int rm, int ra)
 {
+    A32(a32_mla(c, rd, rn, rm, ra, 0));
     hw2(c, 0xfb00u | (unsigned)rn,
            (unsigned)(ra << 12) | (unsigned)(rd << 8) | (unsigned)rm);
 }
 
 void t_mls(struct code *c, int rd, int rn, int rm, int ra)
 {
+    A32(a32_mla(c, rd, rn, rm, ra, 1));
     hw2(c, 0xfb00u | (unsigned)rn,
            (unsigned)(ra << 12) | (unsigned)(rd << 8) | 0x10u | (unsigned)rm);
 }
 
 void t_div(struct code *c, int rd, int rn, int rm, int sign)
 {
+    A32(a32_div(c, rd, rn, rm, sign));
     hw2(c, (sign ? 0xfb90u : 0xfbb0u) | (unsigned)rn,
            0xf0f0u | (unsigned)(rd << 8) | (unsigned)rm);
 }
 
 void t_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
 {
+    A32(a32_mull(c, rdlo, rdhi, rn, rm, sign));
     hw2(c, (sign ? 0xfb80u : 0xfba0u) | (unsigned)rn,
            (unsigned)(rdlo << 12) | (unsigned)(rdhi << 8) | (unsigned)rm);
 }
 
 void t_cmp_reg(struct code *c, int rn, int rm)
 {
+    A32(a32_cmp_reg(c, rn, rm));
     if (low(rn) && low(rm)) {
         hw(c, 0x4280u | (unsigned)(rm << 3) | (unsigned)rn);
         return;
@@ -438,6 +498,7 @@ void t_cmp_reg(struct code *c, int rn, int rm)
 
 void t_cmp_imm(struct code *c, int rn, long imm)
 {
+    A32(a32_cmp_imm(c, rn, imm));
     int e;
     if (low(rn) && imm >= 0 && imm <= 255) {
         hw(c, 0x2800u | (unsigned)(rn << 8) | (unsigned)imm);
@@ -451,6 +512,7 @@ void t_cmp_imm(struct code *c, int rn, long imm)
 
 void t_tst_reg(struct code *c, int rn, int rm)
 {
+    A32(a32_tst_reg(c, rn, rm));
     if (low(rn) && low(rm)) {
         hw(c, 0x4200u | (unsigned)(rm << 3) | (unsigned)rn);
         return;
@@ -460,6 +522,7 @@ void t_tst_reg(struct code *c, int rn, int rm)
 
 void t_ext(struct code *c, int rd, int rm, int size, int sign)
 {
+    A32(a32_ext(c, rd, rm, size, sign));
     unsigned base16 = size == 1 ? (sign ? 0xb240u : 0xb2c0u)
                                 : (sign ? 0xb200u : 0xb280u);
     if (low(rd) && low(rm)) {
@@ -473,11 +536,13 @@ void t_ext(struct code *c, int rd, int rm, int size, int sign)
 
 void t_clz(struct code *c, int rd, int rm)
 {
+    A32(a32_bitop(c, A32_CLZ, rd, rm));
     hw2(c, 0xfab0u | (unsigned)rm, 0xf080u | (unsigned)(rd << 8) | (unsigned)rm);
 }
 
 void t_rev(struct code *c, int rd, int rm)
 {
+    A32(a32_bitop(c, A32_REV, rd, rm));
     if (low(rd) && low(rm)) {
         hw(c, 0xba00u | (unsigned)(rm << 3) | (unsigned)rd);
         return;
@@ -487,6 +552,7 @@ void t_rev(struct code *c, int rd, int rm)
 
 void t_rev16(struct code *c, int rd, int rm)
 {
+    A32(a32_bitop(c, A32_REV16, rd, rm));
     if (low(rd) && low(rm)) {
         hw(c, 0xba40u | (unsigned)(rm << 3) | (unsigned)rd);
         return;
@@ -525,6 +591,7 @@ static unsigned wide_ldst_op(int size, int sign, int store)
 
 int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
 {
+    if (t_isa_a32) return a32_ldst_pair(c, rt, rt2, rn, off, store);
     /* LDRD/STRD (immediate) T1, offset addressing: 1110 100 P U 1 W L Rn,
      * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. */
     if (rt >= T_SP || rt2 >= T_SP || rn == T_PC || (!store && rt == rt2))
@@ -541,6 +608,7 @@ int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
 int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
                int store)
 {
+    if (t_isa_a32) return a32_ldst_imm(c, rt, rn, off, size, sign, store);
     /* Signedness means something only for a load narrower than the
      * register. A four-byte `load.4:4s` or any store carrying it was sent
      * to the 32-bit forms, and every signed int read through a pointer
@@ -594,6 +662,7 @@ int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
 int t_ldst_wb(struct code *c, int rt, int rn, long off, int size, int sign,
               int store, int pre)
 {
+    if (t_isa_a32) return a32_ldst_wb(c, rt, rn, off, size, sign, store, pre);
     if (store || size >= 4)
         sign = 0;
     if (rn == T_PC || rn == rt || off < -255 || off > 255)
@@ -606,9 +675,15 @@ int t_ldst_wb(struct code *c, int rt, int rn, long off, int size, int sign,
     return 1;
 }
 
+int t_ldst_reg_ok(int shift, int size, int sign, int store)
+{
+    return !t_isa_a32 || a32_ldst_reg_ok(shift, size, sign, store);
+}
+
 void t_ldst_reg(struct code *c, int rt, int rn, int rm, int shift, int size,
                 int sign, int store)
 {
+    A32(a32_ldst_reg(c, rt, rn, rm, shift, size, sign, store));
     if (shift == 0 && low(rt) && low(rn) && low(rm)) {
         hw(c, narrow_ldst_reg(size, sign, store) | (unsigned)(rm << 6) |
               (unsigned)(rn << 3) | (unsigned)rt);
@@ -620,6 +695,7 @@ void t_ldst_reg(struct code *c, int rt, int rn, int rm, int shift, int size,
 
 void t_add_sp(struct code *c, int rd, long off)
 {
+    A32(a32_add_sp(c, rd, off));
     if (low(rd) && off >= 0 && (off % 4) == 0 && (off / 4) <= 255) {
         hw(c, 0xa800u | (unsigned)(rd << 8) | (unsigned)(off / 4));
         return;
@@ -634,6 +710,7 @@ void t_add_sp(struct code *c, int rd, long off)
 
 void t_sp_adjust(struct code *c, long imm, int sub)
 {
+    A32(a32_sp_adjust(c, imm, sub));
     if (imm >= 0 && (imm % 4) == 0 && (imm / 4) <= 127) {
         hw(c, (sub ? 0xb080u : 0xb000u) | (unsigned)(imm / 4));
         return;
@@ -652,6 +729,7 @@ void t_sp_adjust(struct code *c, long imm, int sub)
  * leaf's `push {r3, lr}` / `pop {r3, pc}` is two bytes each. */
 int t_push(struct code *c, unsigned mask)
 {
+    if (t_isa_a32) return a32_push(c, mask);
     int at = c->len;
     if (!(mask & ~(0xffu | (1u << 14))))
         hw(c, 0xb400u | ((mask >> 14) & 1u) << 8 | (mask & 0xffu));
@@ -662,6 +740,7 @@ int t_push(struct code *c, unsigned mask)
 
 int t_pop(struct code *c, unsigned mask)
 {
+    if (t_isa_a32) return a32_pop(c, mask);
     int at = c->len;
     if (!(mask & ~(0xffu | (1u << 15))))
         hw(c, 0xbc00u | ((mask >> 15) & 1u) << 8 | (mask & 0xffu));
@@ -674,6 +753,7 @@ int t_pop(struct code *c, unsigned mask)
  * change form, because the size would move everything after it. */
 void t_patch_push(struct code *c, int at, unsigned mask)
 {
+    A32(a32_patch_mask(c, at, mask & 0x5fffu));
     if (((unsigned)(c->p[at + 1] << 8 | c->p[at]) & 0xfe00u) == 0xb400u) {
         if (mask & ~(0xffu | (1u << 14)))
         {
@@ -691,15 +771,24 @@ void t_patch_push(struct code *c, int at, unsigned mask)
 
 void t_patch_pop(struct code *c, int at, unsigned mask)
 {
+    A32(a32_patch_mask(c, at, mask & 0xdfffu));
     patch_hw(c, at + 2, mask & 0xdfffu);
 }
 
 /* ---- control flow ---------------------------------------------------- */
 
-int t_b(struct code *c)     { int at = c->len; hw2(c, 0xf000u, 0x9000u); return at; }
+int t_b(struct code *c)
+{
+    int at = c->len;
+    if (t_isa_a32)
+        return a32_b(c, -1, 0);
+    hw2(c, 0xf000u, 0x9000u);
+    return at;
+}
 
 int t_adr_w(struct code *c, int rd, int imm12)
 {
+    if (t_isa_a32) { int at = c->len; if (!a32_adr(c, rd, imm12)) a32_refuse("adr", imm12); return at; }
     /* 11110 i 1 0 0 0 0 0 1111 | 0 imm3 Rd imm8. llvm-mc: adr.w r11, .+100
      * from a 4-aligned pc is f20f 0b60. */
     int at = c->len;
@@ -711,6 +800,7 @@ int t_adr_w(struct code *c, int rd, int imm12)
 
 int t_tbh(struct code *c, int rm)
 {
+    if (t_isa_a32) a32_refuse("tbh", rm);
     /* 1110 1000 1101 1111 | 1111 0000 0001 Rm. llvm-mc: tbh [pc, r0,
      * lsl #1] = e8df f010, [pc, r12, lsl #1] = e8df f01c. */
     int at = c->len;
@@ -726,16 +816,25 @@ void t_patch_hw16(struct code *c, int at, unsigned v)
 
 void t_patch_adr_w(struct code *c, int at, int rd, int imm12)
 {
+    if (t_isa_a32) { if (!a32_patch_adr(c, at, rd, imm12)) a32_refuse("adr", imm12); return; }
     unsigned i1 = (unsigned)(imm12 >> 11) & 1, imm3 = (unsigned)(imm12 >> 8) & 7;
     unsigned imm8 = (unsigned)imm12 & 0xff;
     unsigned h1 = 0xf20fu | (i1 << 10);
     unsigned h2 = (imm3 << 12) | ((unsigned)rd << 8) | imm8;
     code_patch32(c, at, (unsigned long)h1 | ((unsigned long)h2 << 16));
 }
-int t_bl(struct code *c)    { int at = c->len; hw2(c, 0xf000u, 0xd000u); return at; }
+int t_bl(struct code *c)
+{
+    int at = c->len;
+    if (t_isa_a32)
+        return a32_b(c, -1, 1);
+    hw2(c, 0xf000u, 0xd000u);
+    return at;
+}
 
 int t_bcond(struct code *c, int cond)
 {
+    if (t_isa_a32) return a32_b(c, cond, 0);
     int at = c->len;
     hw2(c, 0xf000u | (unsigned)(cond << 6), 0x8000u);
     return at;
@@ -770,13 +869,30 @@ static void patch_b24(struct code *c, int at, int target, unsigned keep)
                         (unsigned)(v & 0x7ff));
 }
 
-void t_patch_b(struct code *c, int at, int target)  { patch_b24(c, at, target, 0x9000u); }
-void t_patch_bl(struct code *c, int at, int target) { patch_b24(c, at, target, 0xd000u); }
+void t_patch_b(struct code *c, int at, int target)
+{
+    if (t_isa_a32) {
+        if (!a32_patch_b(c, at, target))
+            out_of_reach("an ARM branch", (long)target - at - 8);
+        return;
+    }
+    patch_b24(c, at, target, 0x9000u);
+}
+void t_patch_bl(struct code *c, int at, int target)
+{
+    if (t_isa_a32) {
+        if (!a32_patch_b(c, at, target))
+            out_of_reach("an ARM call", (long)target - at - 8);
+        return;
+    }
+    patch_b24(c, at, target, 0xd000u);
+}
 
 /* The ±1MB conditional form: S:J2:J1:imm6:imm11, with J1 and J2 stored
  * straight rather than through the exclusive-or above. */
 void t_patch_bcond(struct code *c, int at, int target)
 {
+    if (t_isa_a32) { if (!a32_patch_b(c, at, target)) out_of_reach("an ARM branch", (long)target - at - 8); return; }
     long off = (long)target - (long)at - 4;
     unsigned long v = (unsigned long)off >> 1;
     /* +-1 MB. This had no check: a conditional branch further away -- a
@@ -801,16 +917,25 @@ void t_patch_bcond(struct code *c, int at, int target)
  * fit rather than wrapping it into a jump somewhere else. */
 int t_bcond16(struct code *c, int cond)
 {
+    if (t_isa_a32) return a32_b(c, cond, 0);
     int at = c->len;
     hw(c, 0xD000u | (unsigned)(cond << 8));
     return at;
 }
-int t_b16(struct code *c) { int at = c->len; hw(c, 0xE000u); return at; }
+int t_b16(struct code *c)
+{
+    int at = c->len;
+    if (t_isa_a32)
+        return a32_b(c, -1, 0);
+    hw(c, 0xE000u);
+    return at;
+}
 
 /* cbz/cbnz Rn, label: 1011 o0i1 iiii irrr, a FORWARD branch of 0..126
  * bytes from pc+4 on r0-r7 being zero (o=0) or not (o=1). No flags. */
 int t_cbz(struct code *c, int nonzero, int rn)
 {
+    if (t_isa_a32) a32_refuse("cbz", rn);
     int at = c->len;
     if (rn < 0 || rn > 7) {
         /* emit.c is linked into the encoding checkers, which carry no
@@ -824,6 +949,7 @@ int t_cbz(struct code *c, int nonzero, int rn)
 }
 int t_patch_cbz(struct code *c, int at, int target)
 {
+    if (t_isa_a32) a32_refuse("cbz", at);
     long off = (long)target - (long)at - 4;
     unsigned h = (unsigned)(c->p[at + 1] << 8 | c->p[at]);
     if (off < 0 || off > 126 || (off & 1))
@@ -835,6 +961,7 @@ int t_patch_cbz(struct code *c, int at, int target)
 
 int t_patch_bcond16(struct code *c, int at, int target)
 {
+    if (t_isa_a32) return a32_patch_b(c, at, target);
     long off = (long)target - (long)at - 4;
     unsigned h = (unsigned)(c->p[at + 1] << 8 | c->p[at]);
     if (off < -256 || off > 254 || (off & 1))
@@ -844,6 +971,7 @@ int t_patch_bcond16(struct code *c, int at, int target)
 }
 int t_patch_b16(struct code *c, int at, int target)
 {
+    if (t_isa_a32) return a32_patch_b(c, at, target);
     long off = (long)target - (long)at - 4;
     if (off < -2048 || off > 2046 || (off & 1))
         return 0;
@@ -856,25 +984,44 @@ int t_patch_b16(struct code *c, int at, int target)
  * No offset form exists for these. `size` is 1 or 2. */
 void t_ldrexbh(struct code *c, int rt, int rn, int size)
 {
+    A32(a32_ldrex(c, rt, rn, size));
     hw2(c, 0xe8d0u | (unsigned)rn,
            ((unsigned)rt << 12) | (size == 1 ? 0x0f4fu : 0x0f5fu));
 }
 void t_strexbh(struct code *c, int rd, int rt, int rn, int size)
 {
+    A32(a32_strex(c, rd, rt, rn, size));
     hw2(c, 0xe8c0u | (unsigned)rn,
            ((unsigned)rt << 12) | (size == 1 ? 0x0f40u : 0x0f50u) |
            (unsigned)rd);
 }
 /* clrex: drop the exclusive reservation, as a failed compare-and-swap
  * does before it leaves the loop. */
-void t_clrex(struct code *c) { hw2(c, 0xf3bfu, 0x8f2fu); }
+void t_clrex(struct code *c)
+{
+    A32(a32_clrex(c));
+    hw2(c, 0xf3bfu, 0x8f2fu);
+}
 
-void t_bx(struct code *c, int rm)  { hw(c, 0x4700u | (unsigned)(rm << 3)); }
-void t_blx(struct code *c, int rm) { hw(c, 0x4780u | (unsigned)(rm << 3)); }
-void t_nop(struct code *c)         { hw(c, 0xbf00u); }
+void t_bx(struct code *c, int rm)
+{
+    A32(a32_bx(c, rm, 0));
+    hw(c, 0x4700u | (unsigned)(rm << 3));
+}
+void t_blx(struct code *c, int rm)
+{
+    A32(a32_bx(c, rm, 1));
+    hw(c, 0x4780u | (unsigned)(rm << 3));
+}
+void t_nop(struct code *c)
+{
+    A32(a32_nop(c));
+    hw(c, 0xbf00u);
+}
 
 void t_it(struct code *c, int cond, const char *te)
 {
+    A32(a32_it(cond, te));
     /* firstcond, then for each further instruction one mask bit: the
      * condition's own low bit for 't', its inverse for 'e' -- so the
      * instruction runs under firstcond[3:1]:bit, which is cond or its
@@ -899,6 +1046,7 @@ int t_cond_invert(int cond) { return cond ^ 1; }
  * bit, since it is the ELSE -- then the terminating 1. */
 void t_setcc_low(struct code *c, int cond, int rd)
 {
+    A32(a32_setcc(c, cond, rd));
     hw(c, 0xbf00u | (unsigned)(cond << 4) |
           ((unsigned)(~cond & 1) << 3) | 4u);
     hw(c, 0x2000u | (unsigned)(rd << 8) | 1u);
@@ -917,6 +1065,7 @@ void t_setcc_low(struct code *c, int cond, int rd)
 /* MRS <Rd>, <spec_reg>: 1111 0011 1110 1111 | 1000 Rd SYSm. */
 void t_mrs(struct code *c, int rd, int sysm)
 {
+    if (t_isa_a32) a32_refuse("an M-profile special register", sysm);
     hw2(c, 0xF3EF, 0x8000u | ((unsigned)rd << 8) | ((unsigned)sysm & 0xff));
 }
 
@@ -925,12 +1074,14 @@ void t_mrs(struct code *c, int rd, int sysm)
  * program wants. */
 void t_msr(struct code *c, int sysm, int rn)
 {
+    if (t_isa_a32) a32_refuse("an M-profile special register", sysm);
     hw2(c, 0xF380u | (unsigned)rn, 0x8800u | ((unsigned)sysm & 0xff));
 }
 
 /* CPS: 1011 0110 011 im 0 a i f. Only i and f matter on M-profile. */
 void t_cps(struct code *c, int disable, int mask_i, int mask_f)
 {
+    A32(a32_cps(c, disable, mask_i, mask_f));
     hw(c, 0xB660u | (disable ? 0x10u : 0u) |
           (mask_i ? 2u : 0u) | (mask_f ? 1u : 0u));
 }
@@ -941,28 +1092,33 @@ void t_cps(struct code *c, int disable, int mask_i, int mask_f)
  * indistinguishable from one that works until it does not. */
 void t_barrier(struct code *c, int op)
 {
+    A32(a32_barrier(c, op));
     hw2(c, 0xF3BF, 0x8F0Fu | ((unsigned)op << 4));
 }
 
 /* The hints share one 16-bit encoding: 1011 1111 op 0000. */
 void t_hint(struct code *c, int op)
 {
+    A32(a32_hint(c, op));
     hw(c, 0xBF00u | ((unsigned)op << 4));
 }
 
 void t_bkpt(struct code *c, int imm8)
 {
+    A32(a32_bkpt(c, imm8));
     hw(c, 0xBE00u | ((unsigned)imm8 & 0xff));
 }
 
 /* SVC: 1101 1111 imm8, B<c> T1's encoding with the condition `1111`. */
 void t_svc(struct code *c, int imm8)
 {
+    A32(a32_svc(c, imm8));
     hw(c, 0xDF00u | ((unsigned)imm8 & 0xff));
 }
 
 int t_tst_imm(struct code *c, int rn, long imm)
 {
+    if (t_isa_a32) return a32_tst_imm(c, rn, imm);
     int e;
     if (!t_imm_ok(imm))
         return 0;
@@ -980,6 +1136,7 @@ int t_tst_imm(struct code *c, int rn, long imm)
 int t_ldm_stm(struct code *c, int rn, unsigned mask, int wback, int before,
               int load)
 {
+    if (t_isa_a32) return a32_ldm_stm(c, rn, mask, wback, before, load);
     int n = 0;
     for (unsigned m = mask; m; m &= m - 1)
         n++;
@@ -1007,7 +1164,7 @@ int t_vldm_vstm(struct code *c, int rn, int first, int n, int wback,
         (before && !wback))
         return 0;
     vsplit(first, 0, &f, &fl);
-    hw2(c, 0xec00u | ((unsigned)before << 8) | ((unsigned)!before << 7) |
+    vhw2(c, 0xec00u | ((unsigned)before << 8) | ((unsigned)!before << 7) |
            (fl << 6) | ((unsigned)wback << 5) | ((unsigned)load << 4) |
            (unsigned)rn,
         (f << 12) | 0x0a00u | ((unsigned)n & 0xffu));
@@ -1019,6 +1176,7 @@ int t_vldm_vstm(struct code *c, int rn, int first, int n, int wback,
  * sign. */
 int t_ldr_lit(struct code *c, int rt, long off)
 {
+    if (t_isa_a32) return a32_ldr_lit(c, rt, off);
     long mag = off < 0 ? -off : off;
     if (mag > 4095)
         return 0;
@@ -1032,6 +1190,7 @@ int t_ldr_lit(struct code *c, int rt, long off)
  * fit, and the caller takes the four-byte t_ldr_lit. */
 int t_ldr_lit16(struct code *c, int rt, long off)
 {
+    if (t_isa_a32) return 0;
     if (rt < 0 || rt > 7 || off < 0 || off > 1020 || (off & 3))
         return 0;
     hw(c, 0x4800u | (unsigned)(rt << 8) | (unsigned)(off >> 2));
@@ -1046,6 +1205,7 @@ int t_ldr_lit16(struct code *c, int rt, long off)
  * two-byte `movs` is never one of them. sp and pc take the literal. */
 int t_ldr_const(struct code *c, int rd, unsigned long v)
 {
+    if (t_isa_a32) return a32_ldr_const(c, rd, v);
     int e;
     v &= 0xffffffffUL;
     if (rd == 13 || rd == 15)
@@ -1071,6 +1231,7 @@ int t_ldr_const(struct code *c, int rd, unsigned long v)
  * is the encoding and not a typo. */
 void t_rbit(struct code *c, int rd, int rm)
 {
+    A32(a32_bitop(c, A32_RBIT, rd, rm));
     hw2(c, 0xFA90u | (unsigned)rm,
            0xF0A0u | ((unsigned)rd << 8) | (unsigned)rm);
 }
@@ -1080,12 +1241,14 @@ void t_rbit(struct code *c, int rd, int rm)
  * factor of four until a disassembler says so. */
 void t_ldrex(struct code *c, int rt, int rn, int off)
 {
+    if (t_isa_a32) { if (off) a32_refuse("ldrex with an offset", off); a32_ldrex(c, rt, rn, 4); return; }
     hw2(c, 0xE850u | (unsigned)rn,
            ((unsigned)rt << 12) | 0x0F00u | (((unsigned)off >> 2) & 0xff));
 }
 
 void t_strex(struct code *c, int rd, int rt, int rn, int off)
 {
+    if (t_isa_a32) { if (off) a32_refuse("strex with an offset", off); a32_strex(c, rd, rt, rn, 4); return; }
     hw2(c, 0xE840u | (unsigned)rn,
            ((unsigned)rt << 12) | ((unsigned)rd << 8) |
            (((unsigned)off >> 2) & 0xff));
@@ -1150,7 +1313,7 @@ static void vfp(struct code *c, unsigned grp, unsigned vn4, unsigned n1,
     unsigned df, dfl, mf, mfl;
     vsplit(d, d_dbl, &df, &dfl);
     vsplit(m, m_dbl, &mf, &mfl);
-    hw2(c, 0xEE00u | (dfl << 6) | grp | (vn4 & 0xfu),
+    vhw2(c, 0xEE00u | (dfl << 6) | grp | (vn4 & 0xfu),
            (df << 12) | 0x0A00u | ((unsigned)!!sz << 8) | (n1 << 7) |
            (op6 << 6) | (mfl << 5) | mf);
 }
@@ -1263,7 +1426,7 @@ void t_vldst(struct code *c, int sd, int rn, int off, int dbl, int store)
     int neg = off < 0;
     unsigned u = (unsigned)(neg ? -off : off);
     vsplit(sd, dbl, &df, &dfl);
-    hw2(c, 0xED00u | (store ? 0 : 0x10u) | ((unsigned)!neg << 7) |
+    vhw2(c, 0xED00u | (store ? 0 : 0x10u) | ((unsigned)!neg << 7) |
            (dfl << 6) | ((unsigned)rn & 0xfu),
            (df << 12) | 0x0A00u | ((unsigned)!!dbl << 8) | ((u >> 2) & 0xffu));
 }
@@ -1274,7 +1437,7 @@ void t_vmov_core(struct code *c, int sn, int rt, int to_fp)
 {
     unsigned f, fl;
     vsplit(sn, 0, &f, &fl);
-    hw2(c, 0xEE00u | (to_fp ? 0 : 0x10u) | f,
+    vhw2(c, 0xEE00u | (to_fp ? 0 : 0x10u) | f,
            ((unsigned)rt << 12) | 0x0A00u | (fl << 7) | 0x10u);
 }
 
@@ -1285,7 +1448,7 @@ void t_vmov_core_pair(struct code *c, int dm, int rt, int rt2, int to_fp)
 {
     unsigned f, fl;
     vsplit(dm, 1, &f, &fl);
-    hw2(c, 0xEC00u | (to_fp ? 0x40u : 0x50u) | ((unsigned)rt2 & 0xfu),
+    vhw2(c, 0xEC00u | (to_fp ? 0x40u : 0x50u) | ((unsigned)rt2 & 0xfu),
            ((unsigned)rt << 12) | 0x0B00u | (fl << 5) | 0x10u | f);
 }
 
@@ -1298,7 +1461,7 @@ static void vpushpop(struct code *c, int first, int n, int pop, int dbl)
 {
     unsigned f, fl;
     vsplit(first, dbl, &f, &fl);
-    hw2(c, (pop ? 0xECBDu : 0xED2Du) | (fl << 6),
+    vhw2(c, (pop ? 0xECBDu : 0xED2Du) | (fl << 6),
            (f << 12) | 0x0A00u | ((unsigned)!!dbl << 8) |
            ((unsigned)(dbl ? 2 * n : n) & 0xffu));
 }
@@ -1311,7 +1474,7 @@ void t_vpush_d(struct code *c, int first, int n, int pop)
  * reaches the condition flags. */
 void t_vmrs_apsr(struct code *c)
 {
-    hw2(c, 0xEEF1u, 0xFA10u);
+    vhw2(c, 0xEEF1u, 0xFA10u);
 }
 
 /* ---- ARMv6-M: the Thumb-1 forms ------------------------------------------

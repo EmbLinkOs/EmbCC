@@ -25,6 +25,7 @@
 #include "../arch/loongarch/emit.h"
 #include "../arch/avr/emit.h"
 #include "../arch/mips/emit.h"
+#include "../arch/thumb/a32.h"
 #include "../../tools/embdbg/embdbg_core.h"
 
 /* EmbLink app image (TARGET_ABI §4a, newlib.ld): text at 0x400000
@@ -960,10 +961,15 @@ static void add_entry_stub(struct linker *l)
     /* MIPS: li sp, then lui/ori t9 with the entry's absolute address and
      * a jr through it, its delay slot a nop -- the lui/ori pair always
      * both, so the size is known before layout. */
+    /* ARM (an A-profile core, which comes out of reset in ARM state
+     * with sp unset): movw/movt sp, movw/movt ip with the entry, bx ip --
+     * five A32 words, whatever the addresses, and bx interworks if the
+     * entry is Thumb. */
     long size = l->machine == EM_MIPS
               ? mips_li_len((long long)l->stack_top) + 16
               : l->machine == EM_LOONGARCH
               ? la_li_len((long long)l->stack_top) + 8
+              : l->machine == EM_ARM ? 20
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -992,6 +998,14 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
     struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
+    if (l->machine == EM_ARM) {
+        a32_movw_movt(&c, 13, (unsigned)(l->stack_top & 0xffff), 0);
+        a32_movw_movt(&c, 13, (unsigned)((l->stack_top >> 16) & 0xffff), 1);
+        a32_movw_movt(&c, 12, (unsigned)(entry & 0xffff), 0);
+        a32_movw_movt(&c, 12, (unsigned)((entry >> 16) & 0xffff), 1);
+        a32_bx(&c, 12, 0);
+        return;
+    }
     if (l->machine == EM_MIPS) {
         mips_li(&c, MIPS_SP, (long long)l->stack_top);
         mips_lui(&c, MIPS_T9, (unsigned)(entry >> 16) & 0xffff);
@@ -2097,6 +2111,72 @@ static void patch_thm_b24(struct object *o, unsigned char *loc, long long off)
 
 static unsigned int get32loc(const unsigned char *p);
 
+/* ---- A32 (ARM state) ----------------------------------------------------
+ *
+ * One little-endian word each. `b`, `bl` and `b<c>`: cond 101 L imm24, a
+ * word displacement from the instruction + 8. movw/movt: the 16-bit
+ * immediate split imm4 (bits 19:16) and imm12 (bits 11:0). */
+static long long read_arm_b24(const unsigned char *loc)
+{
+    long long v = (long long)(get32loc(loc) & 0xffffffu);
+    if (v & 0x800000)
+        v -= 0x1000000;
+    return v * 4;
+}
+
+/* `blx` (immediate) is `bl`'s ARM-to-Thumb twin: 1111 101 H imm24, H the
+ * halfword bit of the displacement. A call relocation against a Thumb
+ * function (its symbol odd) becomes one; a jump cannot. */
+static void patch_arm_b24(struct object *o, unsigned char *loc, long long off,
+                          int call, int thumb)
+{
+    unsigned int w = get32loc(loc);
+    if (off < -(1LL << 25) || off >= (1LL << 25))
+        die("%s: an ARM branch is more than 32MB away; this linker mints "
+            "no veneers", o->name);
+    if (thumb) {
+        if (!call || (w >> 28) != 0xe)
+            die("%s: a %s to a Thumb function from ARM code needs an "
+                "interworking veneer, which this linker does not mint; "
+                "only an unconditional call (bl, made blx) can switch state",
+                o->name, call ? "conditional call" : "branch");
+        put32(loc, 0xfa000000u | (unsigned)((off >> 1) & 1) << 24 |
+                   ((unsigned)(off >> 2) & 0xffffffu));
+        return;
+    }
+    if (off & 3)
+        die("%s: an ARM branch to an address that is not word-aligned",
+            o->name);
+    put32(loc, (w & 0xff000000u) | ((unsigned)(off >> 2) & 0xffffffu));
+}
+
+/* Is the target of a Thumb branch at `symi` an ARM-state function? Its
+ * symbol is a defined global FUNCTION with bit 0 clear: every Thumb
+ * function's symbol carries the bit, so an even one is A32 code. */
+static int thumb_to_arm(struct linker *l, struct object *o, Elf64_Word symi,
+                        Elf64_Addr S)
+{
+    Elf64_Sym *sy = &o->syms[symi];
+    const char *name = o->symstr + sy->st_name;
+    struct symbol *g;
+    if ((S & 1) || ELF64_ST_BIND(sy->st_info) == STB_LOCAL || !*name)
+        return 0;
+    g = sym_find(l, name);
+    return g && g->defined && g->type == STT_FUNC && g->insec >= 0;
+}
+
+static unsigned int read_arm_mov(const unsigned char *loc)
+{
+    unsigned int w = get32loc(loc);
+    return ((w >> 4) & 0xf000u) | (w & 0xfffu);
+}
+
+static void patch_arm_mov(unsigned char *loc, unsigned int h)
+{
+    unsigned int w = get32loc(loc);
+    put32(loc, (w & 0xfff0f000u) | ((h & 0xf000u) << 4) | (h & 0xfffu));
+}
+
 /* ---- RISC-V relocations -------------------------------------------------
  *
  * Four shapes, and only one of them is an ordinary field.
@@ -2916,6 +2996,16 @@ static void apply_relocs(struct linker *l, struct object *o)
                     case R_ARM_THM_MOVT_ABS:
                         A = (short)read_thm_mov(loc);
                         break;
+                    case R_ARM_CALL:
+                    case R_ARM_JUMP24:
+                        /* from the instruction + 8, as THM_CALL's is +4:
+                         * an assembler's `bl f` holds -8 */
+                        A = read_arm_b24(loc) + 8;
+                        break;
+                    case R_ARM_MOVW_ABS_NC:
+                    case R_ARM_MOVT_ABS:
+                        A = (short)read_arm_mov(loc);
+                        break;
                     default:
                         A = 0;
                         break;
@@ -2949,6 +3039,24 @@ static void apply_relocs(struct linker *l, struct object *o)
                     break;
                 case R_ARM_THM_CALL:
                 case R_ARM_THM_JUMP24:
+                    /* A call from Thumb code to an ARM-state function --
+                     * a global function symbol with the Thumb bit CLEAR,
+                     * which only an A32 object (armv7a) defines -- is
+                     * `blx`: the second halfword's bit 12 clear, and the
+                     * displacement from Align(P + 4, 4) to the word-aligned
+                     * target. A jump there would need a veneer. */
+                    if (thumb_to_arm(l, o, symi, S)) {
+                        if (type != R_ARM_THM_CALL)
+                            die("%s: a Thumb branch to the ARM-state function "
+                                "'%s' needs an interworking veneer, which "
+                                "this linker does not mint; only a call (bl, "
+                                "made blx) can switch state", o->name,
+                                l->rel_sym);
+                        patch_thm_b24(o, loc, (long long)S + A -
+                                      (long long)((P + 4) & ~(Elf64_Addr)3));
+                        put16(loc + 2, get16(loc + 2) & ~0x1000u);
+                        break;
+                    }
                     /* The displacement is between ADDRESSES, so the
                      * Thumb bit comes off S first -- leaving it on would
                      * shift every call by one byte. */
@@ -2959,6 +3067,23 @@ static void apply_relocs(struct linker *l, struct object *o)
                 case R_ARM_THM_MOVW_ABS_NC:
                     patch_thm_mov(loc, (unsigned int)((S + (Elf64_Addr)A)
                                                       & 0xffff));
+                    break;
+                case R_ARM_CALL:
+                case R_ARM_JUMP24:
+                    /* the Thumb bit comes off for the displacement, and
+                     * says the call must switch state (blx) */
+                    patch_arm_b24(o, loc,
+                                  (long long)(S & ~(Elf64_Addr)1) + A -
+                                  ((long long)P + 8),
+                                  type == R_ARM_CALL, (int)(S & 1));
+                    break;
+                case R_ARM_MOVW_ABS_NC:
+                    patch_arm_mov(loc, (unsigned int)((S + (Elf64_Addr)A)
+                                                      & 0xffff));
+                    break;
+                case R_ARM_MOVT_ABS:
+                    patch_arm_mov(loc, (unsigned int)(((S + (Elf64_Addr)A)
+                                                       >> 16) & 0xffff));
                     break;
                 case R_ARM_THM_MOVT_ABS:
                     patch_thm_mov(loc, (unsigned int)(((S + (Elf64_Addr)A)
@@ -5180,11 +5305,15 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     if (l.gc_sections)
         gc_sections(&l, l.gc_undefs, l.gc_nundefs);
     if (opts && opts->have_stack) {
+        /* ARM: for an A-profile core (armv7a-none-eabi), which starts in
+         * ARM state with no stack; the stub is A32. A Cortex-M image
+         * reads its sp from the vector table and wants none -- and could
+         * not run one, having no ARM state. */
         if (l.machine != EM_RISCV && l.machine != EM_MIPS &&
-            l.machine != EM_LOONGARCH)
-            die("-Tstack is a RISC-V, MIPS and LoongArch option: every other "
-                "target here starts with a stack pointer already set (a "
-                "Cortex-M reads its own from the vector table)");
+            l.machine != EM_LOONGARCH && l.machine != EM_ARM)
+            die("-Tstack is a RISC-V, MIPS, LoongArch and ARMv7-A option: "
+                "every other target here starts with a stack pointer already "
+                "set (a Cortex-M reads its own from the vector table)");
         add_entry_stub(&l);
     }
 
