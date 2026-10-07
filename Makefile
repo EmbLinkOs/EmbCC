@@ -507,7 +507,7 @@ libc-linux-aarch64: embcc embar
 RT_EMBEDDED := avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf riscv32-unknown-elf riscv64-unknown-elf \
-               mipsel-none-elf
+               mipsel-none-elf mips-none-elf
 rt-embedded: embcc embar
 	@for t in $(RT_EMBEDDED); do \
 	    sh tools/build-rt.sh $$t $(BUILD)/libc/$$t || exit 1; \
@@ -522,7 +522,7 @@ rt-embedded: embcc embar
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf riscv32-unknown-elf \
-                 riscv64-unknown-elf mipsel-none-elf
+                 riscv64-unknown-elf mipsel-none-elf mips-none-elf
 libc-embedded: embcc embar
 	@for t in $(LIBC_EMBEDDED); do \
 	    sh tools/build-libc.sh $$t $(BUILD)/libc/$$t || exit 1; \

@@ -69,6 +69,29 @@ if [ -s "$out/diff.txt" ]; then
     exit 1
 fi
 
+# Big-endian (mips-none-elf): the same vocabulary, its bytes in MEMORY
+# order against llvm-mc's for mips-unknown-elf -- each word stored most
+# significant byte first.
+"$out/mipscheck" --be --vocab > "$out/vocab-be.txt" || {
+    echo "mipscheck --be could not encode its own vocabulary"; exit 1; }
+cut -d'|' -f2 "$out/vocab-be.txt" > "$out/ours-be.txt"
+"$MC" -triple=mips-unknown-elf -mcpu=mips32r2 -show-encoding "$out/v.s" \
+    > "$out/mc-be.txt" 2> "$out/mc-be.err" || {
+    echo "llvm-mc (mips-unknown-elf) rejected the vocabulary:"
+    head -6 "$out/mc-be.err"; exit 1; }
+sed -n 's/.*# encoding: \[0x\(..\),0x\(..\),0x\(..\),0x\(..\)\].*/\1\2\3\4/p' \
+    "$out/mc-be.txt" > "$out/ref-be.txt"
+paste -d'|' "$out/text.txt" "$out/ours-be.txt" "$out/ref-be.txt" |
+    awk -F'|' '$2 != $3 { print "  " $1 ": ours " $2 ", llvm-mc " $3 }' \
+    > "$out/diff-be.txt"
+if [ -s "$out/diff-be.txt" ]; then
+    echo "$(wc -l < "$out/diff-be.txt" | tr -d ' ') of $n big-endian encodings differ from llvm-mc's:"
+    head -20 "$out/diff-be.txt"
+    exit 1
+fi
+"$out/mipscheck" --be --li > "$out/li-be.txt" || {
+    echo "mips_li computes the wrong value big-endian:"; cat "$out/li-be.txt"; exit 1; }
+
 "$out/mipscheck" --li > "$out/li.txt" || {
     echo "mips_li computes the wrong value:"; cat "$out/li.txt"; exit 1; }
 

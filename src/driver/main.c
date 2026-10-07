@@ -1457,6 +1457,18 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 target_triple_now(), target_long_size(), target_ptr_size());
         return 1;
     }
+    if (lang_cxx && !syntax_only && target_big_endian()) {
+        /* The C++ constant evaluator (src/cxx/consteval.c) models an
+         * object's bytes little-endian, and a literal's bytes come in in
+         * the target's order (lit_encode): a constexpr read of a big-endian
+         * u"" literal would see each unit byte-swapped. Refused until it
+         * reads memory in the target's order. */
+        fprintf(stderr,
+                "embcc: error: C++ is not yet supported for %s: the C++ "
+                "constant evaluator lays memory out little-endian, and this "
+                "target is big-endian\n", target_triple_now());
+        return 1;
+    }
     if (lang_cxx) {
         cxx_set_exceptions(want_exceptions);
         cxx_set_rtti(want_rtti);
@@ -2202,9 +2214,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * PC-relative relocation MIPS's REL objects have no type for. */
     if (unwind && ta == TARGET_MIPS32)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "mipsel-none-elf yet (-funwind-tables, "
+                            "%s yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no MIPS .eh_frame");
+                            "EmbCC writes no MIPS .eh_frame",
+                   target_triple_now());
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 

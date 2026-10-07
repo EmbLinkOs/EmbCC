@@ -83,6 +83,31 @@ __attribute__((noinline)) static uint16_t half_at(uint32_t x, int k)
     return h[k];
 }
 
+/* A double's and a long long's words at CONSTANT indices, the way fdlibm's
+ * GET_HIGH_WORD reads them: a store of the whole value and a narrower
+ * load of part of it, which an optimizer may forward without memory --
+ * and must pick the right half to. */
+__attribute__((noinline)) static uint32_t dword(double x, int which)
+{
+    union { double d; uint32_t w[2]; } t;
+    t.d = x;
+    return which ? t.w[1] : t.w[0];
+}
+
+__attribute__((noinline)) static uint32_t llword0(uint64_t x)
+{
+    union { uint64_t q; uint32_t w[2]; } t;
+    t.q = x;
+    return t.w[0];
+}
+
+__attribute__((noinline)) static uint32_t llword1(uint64_t x)
+{
+    union { uint64_t q; uint32_t w[2]; } t;
+    t.q = x;
+    return t.w[1];
+}
+
 /* network (big-endian) order with shifts, the portable way */
 static uint32_t my_htonl(uint32_t x)
 {
@@ -116,6 +141,14 @@ int main(void)
     if (!same_bytes(&ll, 0x8899AABBCCDDEEFFULL, 8)) return 4;
     if (word_at(ll, g_be ? 0 : 1) != 0x8899AABBu) return 5;
     if (word_at(ll, g_be ? 1 : 0) != 0xCCDDEEFFu) return 6;
+    if (llword0(ll) != (g_be ? 0x8899AABBu : 0xCCDDEEFFu)) return 31;
+    if (llword1(ll) != (g_be ? 0xCCDDEEFFu : 0x8899AABBu)) return 32;
+    if (sizeof(double) == 8) {
+        volatile double vx = -2.5;              /* 0xC004000000000000 */
+        double x = vx;
+        if (dword(x, 0) != (g_be ? 0xC0040000u : 0)) return 33;
+        if (dword(x, 1) != (g_be ? 0 : 0xC0040000u)) return 34;
+    }
     if (half_at(w, g_be ? 0 : 1) != 0x1122u) return 7;
     if (half_at(w, g_be ? 1 : 0) != 0x3344u) return 8;
 
