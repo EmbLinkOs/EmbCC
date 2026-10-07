@@ -1505,9 +1505,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * name, and AVR's two-byte pointers and one-byte alignment are a
          * data model the front end has never laid a class out for. */
         fprintf(stderr,
-                "embcc: error: C++ is not supported for %s: its C++ ABI "
-                "(%d-byte pointers) is not implemented; C++ is supported on "
-                "x86-64, AArch64, 32-bit ARM and riscv32\n",
+                "embcc: error: C++ is not yet supported for %s: the C++ "
+                "front end follows the C++ ABI of x86-64, AArch64, 32-bit "
+                "ARM and riscv32, and this target's (%d-byte pointers) is "
+                "not implemented\n",
                 target_triple_now(), target_ptr_size());
         return 1;
     }

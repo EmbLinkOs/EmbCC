@@ -70,6 +70,8 @@ long mix(size_t a, ptrdiff_t b, long c, unsigned long d, wchar_t e,
          long long k, unsigned long long l, float m, double n, bool o); // B
 }
 long by_ref(const long &a, long *const b, int (&arr)[4]);    // A
+long sum_va(int n, ...);                                     // A
+long vsum(int n, __builtin_va_list ap);                      // B: va_list
 template <typename T> T twice(T v);                          // B: explicit
 extern template int twice<int>(int);
 extern template long twice<long>(long);
@@ -170,12 +172,13 @@ struct Bits {
     unsigned long long c : 40;
     short d : 7;
 };
+struct Anon { char a; int : 4; char b; };       // ARM: 4 bytes; RV32: 3
 struct Over16 { alignas(16) char b[16]; };
 struct Over32 { alignas(32) char b[32]; };
 extern size_t last_array_new;                    // A: its operator new[]'s
 void keep(const void *p);                        // A: an escape, so an
                                                  // allocation is not elided
-enum { NFACTS = 48 };
+enum { NFACTS = 64 };
 void facts_a(long *out);                         // A
 void facts_b(long *out);                         // B
 
@@ -236,6 +239,17 @@ inline long bits_image(const Bits &x)
             delete[] v_;                                                    \
         }                                                                   \
         o[i_++] = sizeof(Over32); o[i_++] = alignof(Over32);                \
+        o[i_++] = sizeof(Anon); o[i_++] = alignof(Anon);                    \
+        {   /* the C types things are lowered to, at run time */            \
+            volatile wchar_t w_ = (wchar_t)-1;                              \
+            o[i_++] = (long long)w_ < 0;                                    \
+            volatile long double ld_ = -2.5L;                               \
+            o[i_++] = __builtin_signbit(ld_) != 0;                          \
+            volatile long l_ = -1;                                          \
+            o[i_++] = (unsigned long)l_ > 4294967295ULL;                    \
+        }                                                                   \
+        if (i_ > NFACTS)                                                    \
+            __builtin_trap();                                               \
         while (i_ < NFACTS)                                                 \
             o[i_++] = -1;                                                   \
     } while (0)

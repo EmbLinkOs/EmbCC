@@ -182,15 +182,20 @@ refc ".thumb_func in file-scope asm" '.thumb_func: EmbCC assembles ARM (A32) cod
     '__asm__(".thumb_func\nfoo:\n bx lr\n");'
 refc ".thumb in file-scope asm" '.thumb: EmbCC assembles ARM (A32) code' \
     '__asm__(".thumb\nfoo:\n bx lr\n");'
+# C++ compiles here (the ARM C++ ABI, tests/golden/cxx-embedded.sh), but
+# not with exceptions: EmbCC writes no EHABI unwind tables
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for armv7a-none-eabi' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+grep -q 'C++ exceptions are not supported for armv7a-none-eabi' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"
+    exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions was refused"; exit 1; }
 echo "8-byte atomics, computed goto, the frame and return address, __int128,"
 echo "interrupt functions, an over-aligned scalar, Thumb and M-profile asm, a"
-echo "condition on a sequence and C++ are each refused by name"
+echo "condition on a sequence and C++ exceptions are each refused by name"
 
 # ---- and what ARM state does accept in asm, run through llvm-mc ----------
 MC=${EMBCC_LLVM_MC:-llvm-mc}

@@ -57,6 +57,14 @@ long mix(size_t a, ptrdiff_t b, long c, unsigned long d, wchar_t e,
 }
 }
 
+long vsum(int n, __builtin_va_list ap)
+{
+    long s = 0;
+    for (int i = 0; i < n; i++)
+        s += __builtin_va_arg(ap, long);
+    return s;
+}
+
 template <typename T> T twice(T v) { return v + v; }
 template int twice<int>(int);
 template long twice<long>(long);

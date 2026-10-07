@@ -2,8 +2,9 @@
 # C++ on the 32-bit embedded boards: every tests/cxx-embedded program built
 # by EmbCC with -fno-exceptions -fno-rtti for a Cortex-M3 (thumbv7m), a
 # Cortex-M4F with the hard-float convention (thumbv7em-none-eabihf), a
-# Cortex-M0 (thumbv6m), a Cortex-M33 (thumbv8m.main) and RV32
-# (riscv32-unknown-elf), at -O0, -O1, -O2 and -Os, linked with the embedded
+# Cortex-M0 (thumbv6m), a Cortex-M33 (thumbv8m.main), a Cortex-A15 in ARM
+# state (armv7a-none-eabi) and RV32 (riscv32-unknown-elf), at -O0, -O1,
+# -O2 and -Os, linked with the embedded
 # C++ runtime (tools/build-libcxx.sh), lib/libc and lib/rt, and run under
 # QEMU -- and each must print exactly what the same source prints built
 # by the host's clang++ and run here.
@@ -37,6 +38,46 @@ EMBCC=${EMBCC:-$PWD/embcc}
 EMBLD=${EMBLD:-$PWD/embld}
 export EMBCC EMBLD
 
+# ---- what is refused, by name ----------------------------------------------
+# Exceptions want unwind tables -- EHABI's .ARM.exidx on ARM, .eh_frame on
+# RV32 -- and EmbCC writes neither for these machines: a unit with
+# exceptions on is refused, and so is an explicit request for the tables.
+# Without them a C++ unit writes no .eh_frame at all (it once got
+# x86-64's CFI in a section typed SHT_ARM_EXIDX).
+printf 'struct A { virtual ~A(); int f(int); };\nA::~A() {}\nint A::f(int x) { return x; }\n' \
+    > "$out/refuse.cc"
+for t in thumbv7m-none-eabi armv7a-none-eabi riscv32-unknown-elf; do
+    if "$EMBCC" --target=$t -c "$out/refuse.cc" -o "$out/r.o" \
+            2> "$out/r.err"; then
+        echo "$t: C++ with exceptions was accepted"; exit 1
+    fi
+    grep -q "C++ exceptions are not supported for $t" "$out/r.err" || {
+        echo "$t: exceptions refused, but not by name:"; cat "$out/r.err"
+        exit 1; }
+    if "$EMBCC" --target=$t -fno-exceptions -funwind-tables \
+            -c "$out/refuse.cc" -o "$out/r.o" 2> "$out/r.err"; then
+        echo "$t: -funwind-tables was accepted"; exit 1
+    fi
+    grep -q "unwind tables are not supported for $t" "$out/r.err" || {
+        echo "$t: unwind tables refused, but not by name:"; cat "$out/r.err"
+        exit 1; }
+    "$EMBCC" --target=$t -fno-exceptions -c "$out/refuse.cc" -o "$out/r.o" || {
+        echo "$t: C++ with -fno-exceptions does not compile"; exit 1; }
+    if "${READELF:-llvm-readelf}" -S "$out/r.o" | grep -q 'eh_frame'; then
+        echo "$t: a C++ unit without exceptions wrote an .eh_frame"; exit 1
+    fi
+done
+for t in avr mipsel-none-elf xtensa-none-elf tricore-none-elf; do
+    if "$EMBCC" --target=$t -fno-exceptions -c "$out/refuse.cc" \
+            -o "$out/r.o" 2> "$out/r.err"; then
+        echo "$t: C++ was accepted for a C++ ABI nobody has checked"; exit 1
+    fi
+    grep -q "C++ is not yet supported for $t" "$out/r.err" || {
+        echo "$t: C++ refused, but not by name:"; cat "$out/r.err"; exit 1; }
+done
+echo "exceptions and unwind tables on ARM and RV32, and C++ on AVR, MIPS,"
+echo "Xtensa and TriCore, are refused by name"
+
 # ---- the reference: the host's own C++ compiler, run here ----------------
 progs=
 for cc in tests/cxx-embedded/*.cc; do
@@ -52,7 +93,7 @@ done
 
 # ---- each board: its libraries and harness, then every program ----------
 boards="thumbv7m-none-eabi thumbv7em-none-eabihf thumbv6m-none-eabi
-        thumbv8m.main-none-eabi riscv32-unknown-elf"
+        thumbv8m.main-none-eabi armv7a-none-eabi riscv32-unknown-elf"
 for t in $boards; do
     d=$out/$t; mkdir -p "$d"
     case $t in
@@ -61,6 +102,7 @@ for t in $boards; do
         thumbv6m*)  H=tests/harness/thumb-m0; hv=EMBCC_THUMB_M0_HARNESS
                     flags=-DSRAM_TOP=0x20010000u ;;
         thumbv8m*)  H=tests/harness/thumb-m33; hv=EMBCC_M33_HARNESS; flags= ;;
+        armv7a*)    H=tests/harness/arm-a32; hv=EMBCC_A32_HARNESS; flags= ;;
         riscv32*)   H=tests/harness/riscv; hv=EMBCC_RISCV_HARNESS; flags= ;;
     esac
     { sh tools/build-rt.sh "$t" "$d" && sh tools/build-libc.sh "$t" "$d" &&
@@ -103,6 +145,8 @@ case $t in
     thumbv6m*)  set -- qemu-system-arm -M microbit \
                     -global nrf51-soc.sram-size=65536 ;;
     thumbv8m*)  set -- qemu-system-arm -M mps2-an505 -cpu cortex-m33 ;;
+    armv7a*)    set -- qemu-system-arm -M virt -cpu cortex-a15 -m 128 \
+                    -monitor none -semihosting ;;
     riscv32*)   set -- qemu-system-riscv32 -M virt -bios none -m 8 ;;
 esac
 sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" --until '==END==' \
@@ -127,5 +171,5 @@ sort "$out/results.txt" | grep '^FAIL' | head -40
 pass=$(grep -c '^PASS' "$out/results.txt")
 fail=$(grep -c '^FAIL' "$out/results.txt")
 echo "$pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -ge 120 ] || exit 1
-echo "C++ runs on the Cortex-M and RV32 boards as it does on the host"
+[ "$fail" = 0 ] && [ "$pass" -ge 144 ] || exit 1
+echo "C++ runs on the Cortex-M, ARM and RV32 boards as it does on the host"

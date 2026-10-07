@@ -53,6 +53,14 @@ long by_ref(const long &a, long *const b, int (&arr)[4])
     return arr[0] + arr[3] + *b;
 }
 bool Money::operator<(const Money &o) const { return cents < o.cents; }
+long sum_va(int n, ...)
+{
+    __builtin_va_list ap;
+    __builtin_va_start(ap, n);
+    long r = vsum(n, ap);
+    __builtin_va_end(ap);
+    return r;
+}
 long apply_binop(binop f, long a, long b) { return f(a, b); }
 
 // ---- member pointers ----
@@ -132,6 +140,7 @@ int main()
     int arr[4] = { 1, 2, 3, 4 };
     printf("mix %ld by_ref %ld %ld\n", r, by_ref(5L, &b, arr), b);
     printf("twice %d %ld %u\n", twice(21), twice(-4000L), twice(7u));
+    printf("va %ld\n", sum_va(4, 10L, -3L, 100L, 7L));
     Money m1 = { 250 }, m2 = { 175 };
     Money m3 = m1 + m2;
     printf("money %ld less %d %d\n", m3.cents, m2 < m1, m1 < m2);
