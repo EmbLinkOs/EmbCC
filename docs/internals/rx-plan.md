@@ -227,7 +227,8 @@ and SysV bit-fields), `__int128`, and whatever the exec corpus finds.
 | --- | --- |
 | `tests/golden/rx-encoding.sh` | every encoder form against QEMU's decoder, and GNU as when installed; every range check |
 | `tests/golden/rx-exec.sh` | `tests/exec/*.c` on the gdbsim board at -O0, -O1, -O2 and -Os |
-| `tests/golden/rx-refuse.sh` | the object's header, the accepted and refused options and constructs |
+| `tests/golden/rx-abi.sh` | calls in both directions against rx-elf-gcc (skipped without one), the shared embedded ABI programs and the RX-specific ones |
+| `tests/golden/rx-refuse.sh` | the object's header, the data model and bit-field layout, the accepted and refused options and constructs |
 
 ## Status
 
@@ -250,3 +251,14 @@ or long double (AVR's too) was stored as a binary64's low word or 16 bytes
 over its neighbours; a four-byte complex now calls the binary32 `s`
 helpers; and of two weak definitions EmbLD now keeps the first, as GNU ld
 does -- the harness's weak write() lost to lib/libc's.
+3. tests/golden/rx-refuse.sh (the header, the data model, the
+   Microsoft layout against GCC's sizes, every option and construct
+   refused by name; shown to fail with the layout turned off) and
+   tests/golden/rx-abi.sh: EmbCC and rx-elf-gcc call each other the same
+   at -O0 and -O2, the shared embedded-abi pair and rx-abi-*.c (the
+   register count advancing past a stacked argument, narrow stacked
+   arguments, every return path, variadics, an aligned(16) struct, a
+   bit-field struct by value); shown to fail against the mutant that
+   rx-exec could not see. The Microsoft layout was also compared with
+   GCC's on 600 random structs, byte for byte (a scratch fuzzer, not a
+   golden).

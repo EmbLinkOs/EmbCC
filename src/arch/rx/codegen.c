@@ -1539,6 +1539,11 @@ static void gen_ins(struct rx_fn *F, int n)
 
     if (i->w > 8)
         rx_refuse(F, i, "a 128-bit value");
+    /* (before the 64-bit dispatch, so a long long one is named as what
+     * it is) */
+    if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
+        i->op == IR_CAS || i->op == IR_CMPXCHG)
+        (void)atomic_sz(F, i);
     if (i->op == IR_FRAMEADDR)
         rx_refuse(F, i, "__builtin_frame_address or "
                         "__builtin_return_address (RX code keeps no "
