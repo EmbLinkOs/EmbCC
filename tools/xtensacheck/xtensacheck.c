@@ -316,6 +316,258 @@ static void vocab(void)
         V(xt_waiti(&C, j), "waiti\t%d", j);
 }
 
+
+/* ---- the test harness's exception vectors -------------------------------
+ *
+ * tests/harness/xtensa/vectors.h is this table, generated (`xtensacheck
+ * --vectors`) rather than written as bytes by hand, so every instruction
+ * in it went through the encoder QEMU referees. The harness copies it to
+ * VECBASE (0x60000000 on the de212, its reset value), where:
+ *
+ *   0x000-0x17f  the window overflow and underflow handlers for call4,
+ *                call8 and call12 frames: the Xtensa ISA manual's, which
+ *                spill a frame's a0-a3 to the 16 bytes below the stack
+ *                pointer of the frame it called and its a4-a11 to the top
+ *                of its own frame, below its caller's sp (the frame
+ *                layout docs/internals/xtensa-plan.md describes)
+ *   0x340        the user exception vector: an Alloca exception (cause 5,
+ *                a movsp whose caller's registers are spilled) reloads the
+ *                caller's frame through the underflow handler and retries
+ *                the movsp -- the ESP-IDF's _xt_alloca_exc; any other
+ *                cause reports itself
+ *   0x300, 0x3c0 the kernel and double exception vectors, and every
+ *                interrupt level: report
+ *   0x400        the report: "==FAULT cause C pc P addr A ==" through the
+ *                sim machine's write simcall, then exit(99)
+ *   0x600        that message's template
+ */
+#define VEC_BASE 0x60000000UL
+#define VEC_SIZE 0x680
+#define VEC_MSG  0x600
+
+static void at(int off)
+{
+    if (C.len > off) {
+        fprintf(stderr, "xtensacheck: the vectors overran offset 0x%x\n", off);
+        exit(2);
+    }
+    while (C.len < off)
+        code_byte(&C, 0);
+}
+
+/* `j target` from here, both offsets in the table */
+static void jto(int target)
+{
+    xt_w(&C, xt_enc_j((long)target - (C.len + 4)));
+}
+
+/* bit `bit` of s set: skip the next (3-byte) instruction */
+static void skip_if_bit(int s, int bit)
+{
+    xt_w(&C, xt_enc_bbi(1, s, bit, 3 - 1));
+}
+
+static void vectors(void)
+{
+    static const char msg[] = "\n==FAULT cause XX pc XXXXXXXX addr XXXXXXXX ==\n";
+    int fault = 0x400, hexr;
+    /* WindowOverflow4 */
+    at(0x000);
+    xt_s32e(&C, XT_A0, XT_A5, -16);
+    xt_s32e(&C, XT_A1, XT_A5, -12);
+    xt_s32e(&C, XT_A2, XT_A5, -8);
+    xt_s32e(&C, XT_A3, XT_A5, -4);
+    xt_rfwo(&C);
+    /* WindowUnderflow4 */
+    at(0x040);
+    xt_l32e(&C, XT_A0, XT_A5, -16);
+    xt_l32e(&C, XT_A1, XT_A5, -12);
+    xt_l32e(&C, XT_A2, XT_A5, -8);
+    xt_l32e(&C, XT_A3, XT_A5, -4);
+    xt_rfwu(&C);
+    /* WindowOverflow8 */
+    at(0x080);
+    xt_s32e(&C, XT_A0, XT_A9, -16);
+    xt_l32e(&C, XT_A0, XT_A1, -12);
+    xt_s32e(&C, XT_A1, XT_A9, -12);
+    xt_s32e(&C, XT_A2, XT_A9, -8);
+    xt_s32e(&C, XT_A3, XT_A9, -4);
+    xt_s32e(&C, XT_A4, XT_A0, -32);
+    xt_s32e(&C, XT_A5, XT_A0, -28);
+    xt_s32e(&C, XT_A6, XT_A0, -24);
+    xt_s32e(&C, XT_A7, XT_A0, -20);
+    xt_rfwo(&C);
+    /* WindowUnderflow8 */
+    at(0x0c0);
+    xt_l32e(&C, XT_A1, XT_A9, -12);
+    xt_l32e(&C, XT_A0, XT_A9, -16);
+    xt_l32e(&C, XT_A7, XT_A1, -12);
+    xt_l32e(&C, XT_A2, XT_A9, -8);
+    xt_l32e(&C, XT_A4, XT_A7, -32);
+    xt_l32e(&C, XT_A3, XT_A9, -4);
+    xt_l32e(&C, XT_A5, XT_A7, -28);
+    xt_l32e(&C, XT_A6, XT_A7, -24);
+    xt_l32e(&C, XT_A7, XT_A7, -20);
+    xt_rfwu(&C);
+    /* WindowOverflow12 */
+    at(0x100);
+    xt_s32e(&C, XT_A0, XT_A13, -16);
+    xt_l32e(&C, XT_A0, XT_A1, -12);
+    xt_s32e(&C, XT_A1, XT_A13, -12);
+    xt_s32e(&C, XT_A2, XT_A13, -8);
+    xt_s32e(&C, XT_A3, XT_A13, -4);
+    xt_s32e(&C, XT_A4, XT_A0, -48);
+    xt_s32e(&C, XT_A5, XT_A0, -44);
+    xt_s32e(&C, XT_A6, XT_A0, -40);
+    xt_s32e(&C, XT_A7, XT_A0, -36);
+    xt_s32e(&C, XT_A8, XT_A0, -32);
+    xt_s32e(&C, XT_A9, XT_A0, -28);
+    xt_s32e(&C, XT_A10, XT_A0, -24);
+    xt_s32e(&C, XT_A11, XT_A0, -20);
+    xt_rfwo(&C);
+    /* WindowUnderflow12 */
+    at(0x140);
+    xt_l32e(&C, XT_A1, XT_A13, -12);
+    xt_l32e(&C, XT_A0, XT_A13, -16);
+    xt_l32e(&C, XT_A11, XT_A1, -12);
+    xt_l32e(&C, XT_A2, XT_A13, -8);
+    xt_l32e(&C, XT_A4, XT_A11, -48);
+    xt_l32e(&C, XT_A8, XT_A11, -32);
+    xt_l32e(&C, XT_A3, XT_A13, -4);
+    xt_l32e(&C, XT_A5, XT_A11, -44);
+    xt_l32e(&C, XT_A6, XT_A11, -40);
+    xt_l32e(&C, XT_A7, XT_A11, -36);
+    xt_l32e(&C, XT_A9, XT_A11, -28);
+    xt_l32e(&C, XT_A10, XT_A11, -24);
+    xt_l32e(&C, XT_A11, XT_A11, -20);
+    xt_rfwu(&C);
+    /* the interrupt levels 2-7 and the kernel vector: report */
+    for (int v = 0x180; v <= 0x300; v += 0x40) {
+        at(v);
+        jto(fault);
+    }
+    /* UserExceptionVector */
+    at(0x340);
+    xt_wsr(&C, XT_A0, XT_SR_EXCSAVE1);      /* the faulting window's a0 */
+    xt_rsr(&C, XT_A0, XT_SR_EXCCAUSE);
+    xt_w(&C, xt_enc_bi(XT_BEQI, XT_A0, 5, 3 - 1));
+    jto(fault);
+    /* Alloca: the caller of the movsp's function has been spilled to its
+     * old base save area. Reload it through the underflow handler for
+     * its frame size (the original a0's top bits), with PS.OWB set to the
+     * current window so that rfwu comes back here -- to the movsp, which
+     * then finds the caller live and succeeds. */
+    xt_rsr(&C, XT_A0, XT_SR_WINDOWBASE);
+    xt_rotw(&C, -1);                       /* WINDOWBASE is now a4 */
+    xt_rsr(&C, XT_A2, XT_SR_PS);
+    xt_extui(&C, XT_A3, XT_A2, 8, 4);      /* PS.OWB */
+    xt_alu(&C, XT_XOR, XT_A3, XT_A3, XT_A4);
+    xt_rsr(&C, XT_A4, XT_SR_EXCSAVE1);     /* the original a0 */
+    xt_slli(&C, XT_A3, XT_A3, 8);
+    xt_alu(&C, XT_XOR, XT_A2, XT_A2, XT_A3);
+    xt_wsr(&C, XT_A2, XT_SR_PS);
+    xt_rsync(&C);
+    skip_if_bit(XT_A4, 31);
+    jto(0x040);                            /* a call4 frame */
+    xt_rotw(&C, -1);
+    skip_if_bit(XT_A8, 30);
+    jto(0x0c0);                            /* a call8 frame */
+    xt_rotw(&C, -1);
+    jto(0x140);                            /* a call12 frame */
+    /* DoubleExceptionVector */
+    at(0x3c0);
+    jto(fault);
+    /* The report. a6 the message, a7 the hex routine's cursor. */
+    at(fault);
+    xt_movi(&C, XT_A6, (long)(VEC_BASE >> 20));
+    xt_slli(&C, XT_A6, XT_A6, 20);
+    xt_addmi(&C, XT_A6, XT_A6, VEC_MSG);
+    xt_rsr(&C, XT_A3, XT_SR_EXCCAUSE);
+    xt_slli(&C, XT_A3, XT_A3, 24);         /* two digits: the top byte */
+    xt_addi(&C, XT_A7, XT_A6, 15);
+    xt_movi(&C, XT_A5, 2);
+    hexr = 0x4c0;
+    xt_w(&C, xt_enc_call_to(0, C.len, hexr));
+    xt_rsr(&C, XT_A3, XT_SR_EPC1);
+    xt_addi(&C, XT_A7, XT_A6, 21);
+    xt_movi(&C, XT_A5, 8);
+    xt_w(&C, xt_enc_call_to(0, C.len, hexr));
+    xt_rsr(&C, XT_A3, XT_SR_EXCVADDR);
+    xt_addi(&C, XT_A7, XT_A6, 35);
+    xt_movi(&C, XT_A5, 8);
+    xt_w(&C, xt_enc_call_to(0, C.len, hexr));
+    xt_movi(&C, XT_A2, 4);                 /* SYS_write(1, msg, len) */
+    xt_movi(&C, XT_A3, 1);
+    xt_mov(&C, XT_A4, XT_A6);
+    xt_movi(&C, XT_A5, (long)(sizeof msg - 1));
+    xt_simcall(&C);
+    xt_movi(&C, XT_A2, 1);                 /* SYS_exit(99) */
+    xt_movi(&C, XT_A3, 99);
+    xt_simcall(&C);
+    jto(C.len);
+    /* hex: a5 digits of a3, from its top, to a7 onward (call0, ret) */
+    at(hexr);
+    {
+        int top = C.len, digit;
+        xt_extui(&C, XT_A8, XT_A3, 28, 4);
+        xt_movi(&C, XT_A9, 10);
+        xt_w(&C, xt_enc_b(XT_BLT, XT_A8, XT_A9, 3 - 1));
+        xt_addi(&C, XT_A8, XT_A8, 'a' - '0' - 10);
+        digit = C.len;
+        (void)digit;
+        xt_addi(&C, XT_A8, XT_A8, '0');
+        xt_store(&C, XT_A8, XT_A7, 0, 1);
+        xt_addi(&C, XT_A7, XT_A7, 1);
+        xt_slli(&C, XT_A3, XT_A3, 4);
+        xt_addi(&C, XT_A5, XT_A5, -1);
+        xt_w(&C, xt_enc_bz(XT_BNEZ, XT_A5, (long)top - (C.len + 4)));
+        xt_ret(&C);
+    }
+    at(VEC_MSG);
+    for (unsigned k = 0; k < sizeof msg - 1; k++)
+        code_byte(&C, msg[k]);
+    at(VEC_SIZE);
+}
+
+static int print_vectors(void)
+{
+    vectors();
+    printf("/* Generated by `tools/xtensacheck/xtensacheck --vectors`: the "
+           "harness's\n * exception vectors (tools/xtensacheck/"
+           "xtensacheck.c says what each\n * is). Do not edit by hand. */\n");
+    printf("#define XT_VEC_BASE 0x%lxu\n", VEC_BASE);
+    printf("static const unsigned char xt_vectors[%d] = {\n", C.len);
+    for (int k = 0; k < C.len; k++)
+        printf("%s0x%02x,%s", k % 12 ? " " : "    ", C.p[k],
+               k % 12 == 11 || k + 1 == C.len ? "\n" : "");
+    printf("};\n");
+    /* Two windowed functions the C harness calls through a pointer: the
+     * simcall (a2 = the call, a3.. its arguments, a2 the result -- which is
+     * exactly where a call8 puts a callee's arguments and result), and
+     * VECBASE's setter. */
+    {
+        static const char *const nm[2] = { "xt_simcall_code", "xt_vecbase_code" };
+        for (int f = 0; f < 2; f++) {
+            C.len = 0;
+            xt_entry(&C, XT_SP, 32);
+            if (f == 0) {
+                xt_simcall(&C);
+            } else {
+                xt_wsr(&C, XT_A2, XT_SR_VECBASE);
+                xt_isync(&C);
+            }
+            xt_retw(&C);
+            code_align(&C, 4, 0);
+            printf("static const unsigned char %s[%d] "
+                   "__attribute__((aligned(4))) = {\n   ", nm[f], C.len);
+            for (int k = 0; k < C.len; k++)
+                printf(" 0x%02x,", C.p[k]);
+            printf("\n};\n");
+        }
+    }
+    return 0;
+}
+
 /* ---- xt_li_inline and xt_addi_any, executed ------------------------------ */
 
 /* The instructions the two may emit, evaluated: movi, slli, addi, addmi.
@@ -486,6 +738,13 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && !strcmp(argv[1], "--li"))
         return check_li();
+    if (argc > 1 && !strcmp(argv[1], "--vectors"))
+        return print_vectors();
+    if (argc > 1 && !strcmp(argv[1], "--vectors-bin")) {
+        vectors();
+        fwrite(C.p, 1, (size_t)C.len, stdout);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "--refuse")) {
         if (argc > 2 && !strcmp(argv[2], "list")) {
             printf("%d\n", NREFUSE);
@@ -493,7 +752,7 @@ int main(int argc, char **argv)
         }
         refuse(argc > 2 ? atoi(argv[2]) : -1);
     }
-    fprintf(stderr, "usage: xtensacheck --vocab BASE | --li | "
-                    "--refuse N|list\n");
+    fprintf(stderr, "usage: xtensacheck --vocab BASE | --li | --vectors | "
+                    "--vectors-bin | --refuse N|list\n");
     return 2;
 }

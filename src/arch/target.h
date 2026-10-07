@@ -49,7 +49,14 @@ enum target_arch {
      * like ARMv7-M and RV32, with a SIGNED char and long double = double,
      * and the only target here with branch delay slots and REL
      * relocations. docs/internals/mips32-plan.md. */
-    TARGET_MIPS32 = 6
+    TARGET_MIPS32 = 6,
+    /* Little-endian Xtensa with the windowed-register ABI: the ESP32's
+     * LX6 and the ESP32-S3's LX7 (xtensa-none-elf). ILP32 with an
+     * UNSIGNED char, a 16-bit wchar_t, long double = double, and the only
+     * target here whose registers are a window that a call rotates, whose
+     * instructions are three bytes, and whose constants come from a
+     * literal pool before each function. docs/internals/xtensa-plan.md. */
+    TARGET_XTENSA = 7
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -135,7 +142,10 @@ int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
  * not a preference -- a buffer of plain `char` compares differently
  * either way -- so a build that asks is obeyed. */
 void target_set_char_signed(int unsigned_char);
-int target_wchar_unsigned(void);  /* wchar_t, which is always int-sized */
+int target_wchar_unsigned(void);  /* wchar_t's signedness */
+/* wchar_t's width: int's, except on Xtensa, where GCC's xtensa-elf makes
+ * it a 16-bit unsigned short (gcc/config/xtensa/elf.h). */
+int target_wchar_size(void);
 
 /* Whether __int128 exists at all. It does not on a 32-bit target: the
  * type needs a register pair per half and libgcc's __divti3 family is
@@ -167,6 +177,7 @@ int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c 
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
+int xtensa_op_calls_helper(const struct ir_ins *i); /* src/arch/xtensa/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -301,6 +312,7 @@ int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 int a64_imm_foldable(int op, long imm, int w);   /* arch/aarch64/irgen.c */
 int mips_imm_foldable(int op, long imm);    /* arch/mips/irgen.c */
 int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
+int xtensa_imm_foldable(int op, long imm);  /* arch/xtensa/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);

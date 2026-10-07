@@ -10909,6 +10909,8 @@ static int const_is_expensive(const struct ir_ins *i)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
         if (ta == TARGET_MIPS32)                /* addiu, or ori from $0 */
             return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
+        if (ta == TARGET_XTENSA)                /* movi; else a literal */
+            return !(v >= -2048 && v <= 2047);
         return !(v >= -2048 && v <= 2047);                     /* RISC-V */
     }
     default:
@@ -10999,7 +11001,8 @@ static int pass_sinkconst(struct ir_func *fn)
         /* (MIPS's beq/bne compare two registers too.) */
         int rv_cmp = (target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64 ||
-                      target_get() == TARGET_MIPS32) &&
+                      target_get() == TARGET_MIPS32 ||
+                      target_get() == TARGET_XTENSA) &&
                      i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
                      fn->ins[at[i->dst]].op == IR_CMP;
         if (at[i->dst] > n + 1 &&
@@ -11074,6 +11077,8 @@ static int target_imm_foldable(int op, long imm, int w)
         return mips_imm_foldable64(op, imm);
     if (target_get() == TARGET_MIPS32)
         return mips_imm_foldable(op, imm);
+    if (target_get() == TARGET_XTENSA)
+        return w == 4 && xtensa_imm_foldable(op, imm);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)

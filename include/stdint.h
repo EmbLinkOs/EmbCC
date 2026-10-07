@@ -119,6 +119,8 @@ typedef __UINTMAX_TYPE__  uintmax_t;
 #define WINT_MAX     __WINT_MAX__
 #ifdef __WCHAR_UNSIGNED__
 #define WCHAR_MIN    0
+#elif defined(__WCHAR_MIN__)
+#define WCHAR_MIN    __WCHAR_MIN__
 #else
 #define WCHAR_MIN    (-WCHAR_MAX - 1)
 #endif

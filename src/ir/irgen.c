@@ -1536,7 +1536,8 @@ static int atomic_arm(void)
     int t = target_get();
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
            t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
-           t == TARGET_MIPS32;        /* MIPS32 is weakly ordered: sync */
+           t == TARGET_MIPS32 ||      /* MIPS32 is weakly ordered: sync */
+           t == TARGET_XTENSA;        /* and Xtensa: memw */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -2720,6 +2721,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_avr(fn, e);
         if (target_get() == TARGET_MIPS32)
             return irg_va_arg_mips(fn, e);
+        if (target_get() == TARGET_XTENSA)
+            return irg_va_arg_xtensa(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -2965,6 +2968,19 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
              * the copy IS the assignment. Copying 24 bytes from it would
              * copy the ARGUMENTS, and advancing either list would then
              * walk a snapshot of them. */
+            /* Xtensa's va_list is GCC's 12-byte record, by value: the
+             * copy is the record's. */
+            if (target_get() == TARGET_XTENSA) {
+                int dsta = gen_addr(fn, e->args[0]);
+                int srca = gen_addr(fn, e->args[1]);
+                struct ir_ins *c = emit(fn);
+                c->op = IR_MEMCPY;
+                c->a = dsta;
+                c->b = srca;
+                c->size = 12;
+                c->natural = 4;
+                return -1;
+            }
             if (target_va_list_is_pointer()) {
                 struct type *ptr = ty_int_of_size(target_ptr_size(), 1);
                 int dsta = gen_addr(fn, e->args[0]);
@@ -3857,6 +3873,10 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_avr(fn, s);
             else if (target_get() == TARGET_MIPS32)
                 irg_asm_mips(fn, s);
+            else if (target_get() == TARGET_XTENSA)
+                diag_fatal(fn->file, s->line, "inline assembly is not "
+                           "supported for xtensa-none-elf yet (EmbCC has no "
+                           "Xtensa assembler vocabulary)");
             else
                 irg_asm_x86(fn, s);
             break;

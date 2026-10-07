@@ -13,6 +13,7 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m riscv32 riscv64 avr mips32
+#                   xtensa
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -86,6 +87,9 @@ refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
         thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32) eval "echo \${$gccvar:-clang}" ;;
+        # Xtensa: Espressif's own GCC for the ESP32 (crosstool-NG release
+        # esp-16.1.0_20260609), there being no Xtensa target in clang.
+        xtensa)  eval "echo \${$gccvar:-xtensa-esp32-elf-gcc}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -162,6 +166,10 @@ exclude_arch() {
         # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
         # two-byte atomic exactly as RISC-V's does (no libatomic here).
         mips32)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # Xtensa's s32c1i is word-sized too. The table is the ESP32's
+        # (xtensa-esp32-elf-gcc, which has no -msoft-float: the float ABI
+        # is the same either way, every float in the address registers).
+        xtensa)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -278,8 +286,9 @@ case "${1:-both}" in
     riscv64) gen riscv64 ;;
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
+    xtensa)  gen xtensa ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen riscv32
-              gen riscv64; gen avr; gen mips32 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32]" >&2
+              gen riscv64; gen avr; gen mips32; gen xtensa ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|xtensa]" >&2
        exit 1 ;;
 esac

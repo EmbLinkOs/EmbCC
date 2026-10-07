@@ -71,6 +71,11 @@ extern const struct predef_macro predef_macros_mips32[];
 extern const int predef_macro_count_mips32;
 extern const struct predef_macro predef_macros_cxx_mips32[];
 extern const int predef_macro_count_cxx_mips32;
+/* Xtensa (the ESP32), from Espressif's xtensa-esp32-elf-gcc. */
+extern const struct predef_macro predef_macros_xtensa[];
+extern const int predef_macro_count_xtensa;
+extern const struct predef_macro predef_macros_cxx_xtensa[];
+extern const int predef_macro_count_cxx_xtensa;
 
 /* AVR (ATmega328P). Generated like the others, from the reference
  * compiler's own answer for the triple. */

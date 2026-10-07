@@ -393,6 +393,38 @@ typedef struct {
 #define R_MIPS_JALR     37
 #define R_MIPS_PC32    248
 
+/* Xtensa, from the ELF machine registry, and the e_flags GNU as writes
+ * for the ESP32's objects (binutils include/elf/xtensa.h): the code uses
+ * the Xtensa instruction set (XT_INSN) and its literals (XT_LIT); the
+ * low nibble, the machine variant, is 0. */
+#define EM_XTENSA 94
+#define EF_XTENSA_XT_INSN  0x00000100
+#define EF_XTENSA_XT_LIT   0x00000200
+
+/* The Xtensa relocation types (RELA). EmbCC writes R_XTENSA_32 on its
+ * literal-pool words and SLOT0_OP on each call8; GNU as also puts SLOT0_OP
+ * on branches, j and l32r against a symbol in another section, and
+ * ASM_EXPAND as a relaxation hint, which a linker may ignore. The rest are
+ * named so EmbLD can refuse them by name. */
+#define R_XTENSA_NONE        0
+#define R_XTENSA_32          1
+#define R_XTENSA_RTLD        2
+#define R_XTENSA_GLOB_DAT    3
+#define R_XTENSA_JMP_SLOT    4
+#define R_XTENSA_RELATIVE    5
+#define R_XTENSA_PLT         6
+#define R_XTENSA_OP0         8
+#define R_XTENSA_OP1         9
+#define R_XTENSA_OP2        10
+#define R_XTENSA_ASM_EXPAND 11
+#define R_XTENSA_ASM_SIMPLIFY 12
+#define R_XTENSA_32_PCREL   14
+#define R_XTENSA_DIFF8      17
+#define R_XTENSA_DIFF16     18
+#define R_XTENSA_DIFF32     19
+#define R_XTENSA_SLOT0_OP   20
+#define R_XTENSA_SLOT0_ALT  35
+
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
  * names each one, which is the same referee the encoder uses. */

@@ -458,6 +458,14 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
             return (long)b;
         return b > 0x7F ? (long)b - 0x100 : (long)b;
     }
+    if (pfx == 'L' && target_wchar_size() == 2 && target_wchar_unsigned()) {
+        /* a 16-bit unsigned wchar_t (Xtensa): the low 16 bits, as GCC */
+        if (c.v > 0xFFFF)
+            fprintf(stderr, "embcc: %s:%d: warning: character constant out "
+                    "of range for a 16-bit wchar_t; truncated, as gcc "
+                    "does\n", file, line);
+        return (long)(c.v & 0xFFFF);          /* wchar_t promotes to int */
+    }
     if (pfx == 'u') {
         if (!c.raw && c.v > 0xFFFF)
             diag_fatal(file, line, "U+%04lX needs two UTF-16 code units and "
@@ -735,7 +743,7 @@ void lex_next(struct lexer *lx)
             /* U"" is UTF-32. L"" is wchar_t, which is int-sized: two
              * bytes on AVR, where four-byte elements made p[1] of an
              * L"xyz" read the high half of 'x'. */
-            w = q[0] == 'L' ? target_int_size() : 4; adv = 1;
+            w = q[0] == 'L' ? target_wchar_size() : 4; adv = 1;
         } else if (q[0] == 'u' && q[1] == '8' && q[2] == '"') {
             w = 1; adv = 2;
         } else if (q[0] == 'u' && (q[1] == '"' || q[1] == '\'')) {

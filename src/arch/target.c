@@ -100,6 +100,14 @@ int target_insn_len(const unsigned char *p, int avail)
         /* MIPS32 is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
         return avail >= 4 ? 4 : 0;
 
+    case TARGET_XTENSA: {
+        /* Three bytes, or two for a density instruction: op0 (the low
+         * nibble of the first byte) 8..13. EmbCC emits only the
+         * three-byte forms, and a literal pool's words are data. */
+        int n = (p[0] & 15) >= 8 && (p[0] & 15) <= 13 ? 2 : 3;
+        return avail >= n ? n : 0;
+    }
+
     case TARGET_X86_64:
     default:
         /* Variable-length, and no rule short of decoding it. The caller
@@ -199,6 +207,10 @@ static const struct data_model {
      * -- unlike the ARM and RISC-V targets beside it -- a signed int
      * wchar_t, long double the same 8-byte double, and no __int128. */
     [TARGET_MIPS32]  = { 4, 4, 4, 8,  8, 0, 0, 0, 0 },
+    /* Xtensa (xtensa-esp32-elf-gcc -dM): ILP32, UNSIGNED char, a 16-bit
+     * UNSIGNED wchar_t (target_wchar_size), long double the 8-byte
+     * double, and no __int128. */
+    [TARGET_XTENSA]  = { 4, 4, 4, 8,  8, 1, 1, 0, 0 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -260,6 +272,11 @@ int target_char_unsigned(void)
     return g_char_uns_override >= 0 ? g_char_uns_override
            : darwin_a64() ? 0 : g_model[g_arch].char_uns;
 }
+int target_wchar_size(void)
+{
+    return g_arch == TARGET_XTENSA ? 2 : g_model[g_arch].it;
+}
+
 int target_wchar_unsigned(void)
 {
     return darwin_a64() ? 0 : g_model[g_arch].wchar_uns;
@@ -273,9 +290,13 @@ int target_has_int128(void)     { return g_model[g_arch].int128; }
  * the promise. */
 static int g_no_jump_tables;
 void target_set_jump_tables(int on) { g_no_jump_tables = !on; }
+/* Xtensa too, for now: its table needs the base address from a literal
+ * and a jx, which is not written yet, so a dense switch stays a decision
+ * tree (refused by name if one ever arrives). */
 int target_jump_tables(void)
 {
-    return !g_no_jump_tables && target_get() != TARGET_AVR;
+    return !g_no_jump_tables && target_get() != TARGET_AVR &&
+           target_get() != TARGET_XTENSA;
 }
 int target_switch_table_min_os(void)
 {
@@ -305,6 +326,8 @@ int target_anon_bitfield_aligns(void)
     /* o32: `struct { char c; int :4; char d; }` is 3 bytes in clang, and
      * `int :0` moves d to offset 4 without making the struct 4-aligned */
     case TARGET_MIPS32:  return 0;
+    /* GCC's generic rule (PCC_BITFIELD_TYPE_MATTERS, no ABI override) */
+    case TARGET_XTENSA:  return 0;
     }
     return 0;
 }
@@ -325,6 +348,9 @@ int target_va_list_is_pointer(void)
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
     case TARGET_AVR:     return 1;   /* avr-gcc: char * */
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
+    /* GCC's 12-byte record, held by value -- not a pointer to one, and not
+     * a tag va_copy needs: a copy is the record's assignment (irgen) */
+    case TARGET_XTENSA:  return 0;
     }
     return 0;
 }
@@ -492,6 +518,18 @@ static const struct triple {
     { "mipsel-elf",          TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "mipsel",              TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
 
+    /* Xtensa, little-endian, windowed ABI: the ESP32 (LX6) and ESP32-S3
+     * (LX7). `-none-elf` is the canonical spelling; the -esp* ones are
+     * Espressif's toolchains' names, which a project already built with
+     * them will say. One instruction set for all of them (the subset
+     * the plan names), so one target. */
+    { "xtensa-none-elf",     TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "xtensa-esp32-elf",    TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "xtensa-esp32s3-elf",  TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "xtensa-esp-elf",      TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "xtensa-elf",          TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "xtensa",              TARGET_XTENSA,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
@@ -633,6 +671,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_RISCV64: return EM_RISCV;
     case TARGET_AVR:     return EM_AVR;
     case TARGET_MIPS32:  return EM_MIPS;
+    case TARGET_XTENSA:  return EM_XTENSA;
     default:             return EM_X86_64;
     }
 }
@@ -674,6 +713,8 @@ unsigned long target_elf_flags(enum target_arch a)
      * slots are filled (with nops), the code is not abicalls/PIC. */
     case TARGET_MIPS32:  return EF_MIPS_ARCH_32R2 | EF_MIPS_ABI_O32 |
                                 EF_MIPS_NOREORDER;
+    /* What GNU as writes for the ESP32's objects: XT_INSN | XT_LIT */
+    case TARGET_XTENSA:  return EF_XTENSA_XT_INSN | EF_XTENSA_XT_LIT;
     default:             return 0;
     }
 }
@@ -782,6 +823,15 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_MIPS_LO16:   return R_MIPS_LO16;
         case RK_MIPS_TEXT26: return R_MIPS_26;
         case RK_ABS32:       return R_MIPS_32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_XTENSA) {
+        switch (k) {
+        /* call8's offset, which a linker decodes the opcode to find */
+        case RK_CALL:        return R_XTENSA_SLOT0_OP;
+        /* a literal-pool word, a data pointer, a DWARF offset */
+        case RK_ABS32:       return R_XTENSA_32;
         default:             return -1;
         }
     }
@@ -897,7 +947,7 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
-        a == TARGET_MIPS32)
+        a == TARGET_MIPS32 || a == TARGET_XTENSA)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -957,6 +1007,10 @@ static const struct reloc_spelling {
     { EM_AVR,   R_AVR_CALL,            "R_AVR_CALL" },
     { EM_AVR,   R_AVR_LO8_LDI_GS,      "R_AVR_LO8_LDI_GS" },
     { EM_AVR,   R_AVR_HI8_LDI_GS,      "R_AVR_HI8_LDI_GS" },
+    { EM_XTENSA, R_XTENSA_NONE,        "R_XTENSA_NONE" },
+    { EM_XTENSA, R_XTENSA_32,          "R_XTENSA_32" },
+    { EM_XTENSA, R_XTENSA_ASM_EXPAND,  "R_XTENSA_ASM_EXPAND" },
+    { EM_XTENSA, R_XTENSA_SLOT0_OP,    "R_XTENSA_SLOT0_OP" },
 };
 
 const char *target_reloc_name(enum target_arch a, int type)
