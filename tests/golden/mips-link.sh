@@ -183,7 +183,7 @@ if "$EMBLD" -T "$out/s.ld" -e _start "$out/boot.o" "$out/io.o" "$out/far.o" \
        -o "$out/s.elf" > "$out/s.txt" 2>&1; then
     echo "embld linked a MIPS image by a linker script"; exit 1
 fi
-grep -q 'a linker script is supported for ARM and RISC-V images only' \
+grep -q 'a linker script is supported for ARM, RISC-V and AVR images only' \
     "$out/s.txt" || {
     echo "embld refused a MIPS linker script, but not by name:"
     cat "$out/s.txt"; exit 1; }
