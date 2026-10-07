@@ -149,8 +149,9 @@ struct a_sites {
  * offset. A FORWARD jump is always the wide form, because its distance is not
  * known when it is emitted and the two sizes differ; a BACKWARD one takes
  * the short form when it fits, which is the common case and every loop. */
-/* wide: 0 an rjmp, 1 a 32-bit jmp (relocated), 2 a conditional br.
- * site: the jump site it belongs to (avr_relax), or -1. */
+/* wide: 0 an rjmp, 1 a 32-bit jmp (relocated), 2 a conditional br, 3 no
+ * jump at all -- &&label, whose `at` is its first function-address site's
+ * index. site: the jump site it belongs to (avr_relax), or -1. */
 struct a_fix { int at; int label; int wide; int site; };
 
 /* Branch relaxation, by regeneration. A forward branch's distance is not
@@ -764,6 +765,7 @@ static void ext_info(struct a_fn *F)
             /* An address is two bytes, zero above: the machine has no
              * more, and every lowering of one fills the rest with r1. */
             case IR_ADDR: case IR_GADDR: case IR_STRADDR: case IR_FADDR:
+            case IR_LABELADDR:
                 w = 2; k = 0;
                 break;
             /* A call's result is extended by the CALLER from its own
@@ -3359,7 +3361,7 @@ static void gen_ins(struct a_fn *F, int n)
         case IR_CALL: case IR_RET: case IR_LABEL: case IR_JMP:
         case IR_MEMCPY: case IR_MEMZERO: case IR_FENCE: case IR_UD2:
         case IR_ASM: case IR_ADDR: case IR_STRADDR: case IR_GADDR:
-        case IR_FADDR:
+        case IR_FADDR: case IR_LABELADDR: case IR_IGOTO:
             break;
 
         default:
@@ -4122,6 +4124,30 @@ static void gen_ins(struct a_fn *F, int n)
             wr4(F, i->dst, RA);
         return;
     }
+
+    /* GNU computed goto. &&label is a code address, so a WORD address
+     * as a function pointer is: the function's own symbol through the _GS
+     * forms, as IR_FADDR takes it, plus the label's byte offset as the
+     * addend (the linker halves the sum), set once the function is laid
+     * out -- a fix of `wide` 3 whose `at` is the first site's index.
+     * goto *p puts that word address in Z and is ijmp. */
+    case IR_LABELADDR: {
+        int nb = dw(F, i), d = addr_reg(F, i), s0 = F->st->nf;
+        if (!nb)
+            return;
+        note_fn(F->st, ldi_addr_pair(F, d), fn->src, RK_AVR_LO8_LDI_GS);
+        note_fn(F->st, F->t->len - 2, fn->src, RK_AVR_HI8_LDI_GS);
+        want_label_site(F, s0, i->label, 3, -1);
+        if (nb > 2)
+            extend(F, d, 2, 0, nb);
+        if (d == RA)
+            wr4(F, i->dst, RA);
+        return;
+    }
+    case IR_IGOTO:
+        vld(F, AVR_Z, i->a, 0, 2);
+        avr_ijmp(F->t);
+        return;
 
     case IR_LABEL:
         F->label_off[i->label] = t->len;
@@ -5454,6 +5480,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         int to = F.label_off[F.fix[i].label];
         if (to < 0)
             a_refuse(fn, NULL, "a jump to a label that was never placed");
+        if (F.fix[i].wide == 3) {                     /* &&label */
+            F.st->f[at].addend = to - f->code_off;
+            F.st->f[at + 1].addend = to - f->code_off;
+            continue;
+        }
         if (F.fix[i].wide != 1) {
             /* A short form relaxation chose: it must reach, or this
              * attempt is thrown away and that site pinned long. One

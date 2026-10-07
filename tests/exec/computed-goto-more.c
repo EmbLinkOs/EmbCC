@@ -107,12 +107,19 @@ lb: return r + 200;
 }
 
 /* 5. far: 512 statements of filler between each label and the code that
- * takes its address */
+ * takes its address -- 128 on AVR, whose part has 32 KiB of flash for
+ * all of it, where 512 of them at -O0 are 47 KiB (its label address is
+ * an absolute word address in any case, and 128 still put each label
+ * past rjmp's 4 KiB there) */
 static volatile unsigned g;
 #define F1 g ^= g << 1;
 #define F8 F1 F1 F1 F1 F1 F1 F1 F1
 #define F64 F8 F8 F8 F8 F8 F8 F8 F8
+#if defined(__AVR__)
+#define F512 F64 F64
+#else
 #define F512 F64 F64 F64 F64 F64 F64 F64 F64
+#endif
 static int far(int sel)
 {
     int r = 0;
