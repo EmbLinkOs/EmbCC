@@ -844,11 +844,12 @@ static int compile_and_link(const char *in, const char *out)
     lo.undefs = g_undefs;
     lo.nundefs = g_nundefs;
     if (fw && !lo.script && !lo.have_base) {
-        /* embld lays a script out for ARM and RISC-V only: an AVR,
-         * MIPS or LoongArch build is not sent looking for one */
+        /* embld lays a script out for ARM, RISC-V and AVR only: a MIPS
+         * or LoongArch build is not sent looking for one */
         int scripts = target_get() == TARGET_THUMB ||
                       target_get() == TARGET_RISCV32 ||
-                      target_get() == TARGET_RISCV64;
+                      target_get() == TARGET_RISCV64 ||
+                      target_get() == TARGET_AVR;
         fprintf(stderr,
                 "embcc: error: linking a %s image needs its memory map: %s"
                 "-Wl,-Ttext=FLASH and -Wl,-Tdata=RAM\n", target_triple_now(),
@@ -856,8 +857,8 @@ static int compile_and_link(const char *in, const char *out)
         return 1;
     }
     if (!fw && lo.script) {
-        fprintf(stderr, "embcc: error: a linker script (-T) is for an ARM or "
-                        "RISC-V image; %s links without one\n",
+        fprintf(stderr, "embcc: error: a linker script (-T) is for an ARM, "
+                        "RISC-V or AVR image; %s links without one\n",
                 target_triple_now());
         return 1;
     }

@@ -1253,8 +1253,8 @@ the file and links it in the same process with EmbCC's linker,
 (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` and their aliases).
 For the firmware targets (ARMv7-M, ARMv8-M, RV32, RV64, MIPS32 and AVR)
 the driver links too, and the build supplies the memory map: a linker
-script with `-T FILE.ld` (ARM and RISC-V), or `-Wl,-Ttext=FLASH` and
-`-Wl,-Tdata=RAM` (on MIPS32 and AVR the message offers only these). There is no default map, because an image linked to a
+script with `-T FILE.ld` (ARM, RISC-V and AVR), or `-Wl,-Ttext=FLASH`
+and `-Wl,-Tdata=RAM` (on MIPS32 the message offers only these). There is no default map, because an image linked to a
 guessed one runs, wrongly:
 
 ```text

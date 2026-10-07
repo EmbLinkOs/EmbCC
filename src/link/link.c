@@ -4812,12 +4812,10 @@ static unsigned long long ls_signature(struct linker *l, struct ls_script *sc)
 
 static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
 {
-    if (l->harvard)
-        die("a linker script for an AVR image is not supported yet; AVR "
-            "links with -Ttext/-Tdata");
-    if (l->machine != EM_ARM && l->machine != EM_RISCV)
-        die("-T: a linker script is supported for ARM and RISC-V images "
-            "only (this one is machine %u)", (unsigned)l->machine);
+    if (l->machine != EM_ARM && l->machine != EM_RISCV &&
+        l->machine != EM_AVR)
+        die("-T: a linker script is supported for ARM, RISC-V and AVR "
+            "images only (this one is machine %u)", (unsigned)l->machine);
     /* A region every output section names must exist, whether or not
      * anything ends up in the section: a typo in `> RAM` is a typo. */
     for (int k = 0; k < sc->nosec; k++) {
@@ -4867,6 +4865,31 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
         die("the linker script's layout does not settle: an address depends "
             "on itself (a section placed by a symbol defined after it?)");
     ls_layout_pass(l, sc, 1);        /* the same again, now reporting */
+    /* AVR is a Harvard machine and EmbCC reads read-only data with
+     * data-space loads (ld, lds), like avr-gcc without __flash or
+     * PROGMEM. A .rodata left in program space -- run where it is stored,
+     * below the data space at 0x800000 -- would link and then read
+     * whatever RAM holds at those addresses. avr-libc's scripts put
+     * .rodata in .data, which the startup copies to RAM; refuse the
+     * layout that would silently do otherwise. */
+    if (l->machine == EM_AVR)
+        for (int k = 0; k < sc->nosec; k++) {
+            const struct ls_osec *o = &sc->osecs[k];
+            if (o->vma != o->lma || o->vma >= 0x800000)
+                continue;
+            for (int b2 = 0; b2 < o->nbody; b2++)
+                for (int j = 0; j < o->body[b2].nlist; j++) {
+                    const struct insec *in = &l->insecs[o->body[b2].list[j]];
+                    if (strncmp(in->name, ".rodata", 7) == 0 && in->size)
+                        die("%s:%d: section %s keeps %s of %s in program "
+                            "space at 0x%llx; EmbCC reads read-only data "
+                            "from RAM on AVR, so it has to be in an output "
+                            "section the startup copies there (> data "
+                            "AT> text, as avr-libc's scripts place it)",
+                            o->file, o->line, o->name, in->name,
+                            in->obj->name, (unsigned long long)o->vma);
+                }
+        }
     for (int i = 0; i < l->nsym; i++)
         if (l->syms[i].common) {     /* placed by *(COMMON): absolute now */
             l->syms[i].common = 0;
