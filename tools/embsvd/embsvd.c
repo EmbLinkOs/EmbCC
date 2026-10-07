@@ -1081,8 +1081,9 @@ static void read_cluster(struct node *c, const struct xnode *x,
     if (h) {
         c->tname = xdup(h, strlen(h));
     } else {
-        c->tname = xalloc(strlen(pbase) + strlen(pn) + 2);
-        sprintf(c->tname, "%s_%s", pbase, pn);
+        size_t tl = strlen(pbase) + strlen(pn) + 2;
+        c->tname = xalloc(tl);
+        snprintf(c->tname, tl, "%s_%s", pbase, pn);
     }
     free(pn);
     for (char *q = c->tname; *q; q++)
@@ -1580,10 +1581,12 @@ static void flatten(const struct node *kids, int nkid, const char *pre,
             char *seg = !k->dim ? xdup(k->name, strlen(k->name))
                       : carray(k) ? plain_name(k->name)
                       : subst(k->name, k->idx[e], 1);
-            char *path = xalloc((pre ? strlen(pre) : 0) + strlen(seg) + 16);
-            sprintf(path, "%s%s%s", pre ? pre : "", pre ? "." : "", ident(seg));
+            size_t pl = (pre ? strlen(pre) : 0) + strlen(seg) + 16;
+            char *path = xalloc(pl);
+            snprintf(path, pl, "%s%s%s", pre ? pre : "", pre ? "." : "",
+                     ident(seg));
             if (carray(k))
-                sprintf(path + strlen(path), "[%d]", e);
+                snprintf(path + strlen(path), pl - strlen(path), "[%d]", e);
             free(seg);
             if (k->dim) {
                 if (nidx >= 40)
