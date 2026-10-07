@@ -3321,10 +3321,25 @@ static struct cexpr *comma(struct cexpr *l, struct cexpr *r)
     return ex2(E_COMMA, r->t, r->vc, l, r);
 }
 
+/* An arm of ?: naming one function, not a set to choose from: that
+ * function's address (`w ? mul : add`, `w ? &C::f : &C::g`). The arms of
+ * ?: are not converted to a target type, so nothing else would ever pick
+ * it, and the set reached C unresolved. */
+static struct cexpr *cond_arm(struct cexpr *x)
+{
+    if (x->k != E_OVL || x->fn->next || x->fn->tmpl)
+        return x;
+    if (x->memptr)
+        return convert(x, ct_mptr(x->fn->cls, x->fn->type), "?:");
+    return rvalue(x);
+}
+
 static struct cexpr *conditional(struct cexpr *c, struct cexpr *a,
                                  struct cexpr *b)
 {
     c = convert_bool(c, "?:");
+    a = cond_arm(a);
+    b = cond_arm(b);
     struct cty *at = a->t, *bt = b->t;
     struct cexpr *e = ex_new(E_COND, NULL, VC_PRVALUE);
     e->line = c->line;

@@ -8120,6 +8120,7 @@ static void parse_explicit_instantiation(int is_extern)
     }
     struct cfunc *spec = specialization_named(&d, ft, at);
     if (!is_extern) {
+        spec->extern_inst = 0;        /* (after an extern template) */
         func_ensure_body(spec);
         spec->explicit_inst = 1;
     } else {
@@ -9077,9 +9078,12 @@ void cx_parse_unit(void)
     for (int progress = 1; progress;) {
         progress = 0;
         for (struct cfunc *f = cx_funcs; f; f = f->all_next)
-            if (f->called && !f->defined && !f->is_deleted && !f->tmpl &&
-                f->cls && !f->is_implicit && !f->is_defaulted &&
-                !f->lazy && f->body_tok < 0) {
+            if ((f->called || f->explicit_inst) && !f->defined &&
+                !f->is_deleted && !f->tmpl &&
+                (f->cls || f->spec_of) && !f->is_implicit &&
+                !f->is_defaulted && !f->lazy && f->body_tok < 0) {
+                /* (and specializations of function templates made before
+                 * their template's definition: func_ensure_body) */
                 func_ensure_body(f);
                 progress |= f->defined;
             }
