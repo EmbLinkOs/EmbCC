@@ -186,7 +186,9 @@ lib/rt and lib/libc, the board, and the goldens above. The exec corpus
 passes on leon3_generic at every level (199 of 199: 21 refereed against
 clang for an LP64 or little-endian assumption, 18 not applicable, plus
 SPARC's own long-double-quad.c), also with the register pool shrunk to 2
-and 4 and with the pair pass forced on and off. lib/libc prints on the
+and 4 and with the pair pass forced on and off, and 60 programs from the
+differential fuzzer (gen2) agree with host clang at -O0, -O1, -O2 and -Os
+on the board. lib/libc prints on the
 board what it prints on x86-64 (libc-embedded), and -g verifies
 (debug-embedded).
 
