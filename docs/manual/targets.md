@@ -27,6 +27,7 @@ little-endian.
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
+| [LoongArch64](#loongarch64) | `loongarch64-unknown-elf` | ELF64 | LoongArch psABI, LP64S (soft float) | `embld` |
 
 | Target | Status | Floating point | `-g` | Lock-free atomic read-modify-write | `__thread` | C++ |
 |---|---|---|---|---|---|---|
@@ -41,6 +42,7 @@ little-endian.
 | RV64 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions |
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF | None (1-byte load and store only) | One shared instance | Refused |
 | MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
+| LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
@@ -111,22 +113,22 @@ Size and alignment in bytes, written `size/alignment`. "x86-64" covers
 `aarch64-elf`, `aarch64-emblink` and `aarch64-linux-gnu`; "Cortex-M"
 covers every `thumb*` triple.
 
-| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed |
-| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 |
-| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 |
-| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 |
-| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 |
-| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 |
-| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 |
-| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 |
-| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 |
-| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` |
-| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — |
-| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 |
-| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
-| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 |
+| Type | x86-64 | macOS x86-64 | Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR | MIPS32 | LoongArch64 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| plain `char` | signed | signed | signed | unsigned | signed | unsigned | unsigned | unsigned | signed | signed | signed |
+| `short` | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | 2/1 | 2/2 | 2/2 |
+| `int` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 2/1 | 4/4 | 4/4 |
+| `long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 4/1 | 4/4 | 8/8 |
+| `long long` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/1 | 8/8 | 8/8 |
+| pointer, `size_t` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 | 8/8 | 2/1 | 4/4 | 8/8 |
+| `float` | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/1 | 4/4 | 4/4 |
+| `double` | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 8/8 | 4/1 | 8/8 | 8/8 |
+| `long double` | 16/16 x87 | 16/16 x87 | 16/16 x87 | 16/16 binary128 | 8/8 binary64 | 8/8 binary64 | 16/16 binary128 | 16/16 binary128 | 4/1 binary32 | 8/8 binary64 | 16/16 binary128 |
+| `wchar_t` | 4/4 `int` | 4/4 `int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `unsigned int` | 4/4 `int` | 4/4 `int` | 2/1 `int` | 4/4 `int` | 4/4 `int` |
+| `__int128` | 16/16 | 16/16 | 16/16 | 16/16 | 16/16 | — | — | 16/16 | — | — | 16/16 |
+| `enum` (all values fit `int`) | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 4 | 2 | 4 | 4 |
+| `__BIGGEST_ALIGNMENT__` | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
+| Stack alignment at a call | 16 | 16 | 16 | 16 | 16 | 8 | 16 | 16 | 1 | 8 | 16 |
 
 Notes on the table:
 
@@ -159,6 +161,8 @@ Notes on the table:
   `the RV32 backend cannot lower a 128-bit value yet`. RV64's `__int128`
   is the same: it can be declared and measured with `sizeof`, and every
   operation on one is refused with the RV64 form of that message.
+- On LoongArch64 `long double` and `__int128` are computed: binary128
+  arithmetic and the 128-bit divides and variable shifts call lib/rt.
 - On AVR every type has alignment 1, so `struct { char c; int i; }` is
   three bytes.
 - Windows uses the LP64 model here, which is not Microsoft's; see
@@ -181,7 +185,7 @@ and AArch64.
 Any other `-m` option not listed in a target's section is an error:
 `embcc: error: unknown argument '-mfoo'`. In particular `-m32`, `-m64`
 and `-mmcu=` are not accepted, and `-march=` and `-mabi=` only on MIPS
-(see [MIPS32](#mips32)).
+and LoongArch (see [MIPS32](#mips32) and [LoongArch64](#loongarch64)).
 
 ## x86-64
 
@@ -995,6 +999,145 @@ exception prints its cause and address.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
 | a scalar local aligned beyond 8 | `'x' needs 16-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
+
+## LoongArch64
+
+LA64, little-endian, with the LoongArch psABI's LP64S convention (soft
+float): `loongarch64-unknown-elf`. Freestanding only. The design notes
+are in [the LoongArch64 plan](../internals/loongarch64-plan.md).
+
+### Triples
+
+| Triple | Accepted aliases | ISA | ABI |
+|---|---|---|---|
+| `loongarch64-unknown-elf` | `loongarch64-none-elf`, `loongarch64-elf`, `loongarch64` | LA64 base integer | LP64S |
+
+There is no LA32 target (`loongarch32-unknown-elf` is unknown).
+
+### Options
+
+EmbCC emits one configuration: the LA64 base integer ISA, LP64S, the
+normal code model. The options a LoongArch build passes are accepted when
+they ask for that, or for something it is a valid part of, and refused by
+name otherwise.
+
+| Option | Accepted values | Refused with |
+|---|---|---|
+| `-march=ARCH` | `loongarch64`, `la64v1.0`, `la64v1.1`, `la464`, `la664` | `-march=la32v1.0 is not an LA64 architecture: EmbCC emits the LA64 base integer ISA (loongarch64, la64v1.0, la64v1.1, la464, la664)` |
+| `-mtune=CPU` | any | -- |
+| `-mabi=ABI` | `lp64s` | `-mabi=lp64d is not supported: EmbCC emits the soft-float LP64S convention (-mabi=lp64s), which passes floating point in the integer registers` |
+| `-mfpu=FPU` | `none`, `0` | `-mfpu=64 is not supported: EmbCC's LoongArch code uses no FPU (-mfpu=none)` |
+| `-msoft-float` | (no value) | `-mdouble-float` / `-msingle-float is not supported: EmbCC emits soft-float LP64S code (-msoft-float)` |
+| `-mcmodel=MODEL` | `normal`, `medium` | `-mcmodel=extreme is not supported: EmbCC emits the normal code model (bl, pcalau12i + addi.d)` |
+| `-mrelax`, `-mno-relax` | (no value) | -- |
+| `-mno-strict-align` | (no value) | `-mstrict-align is not supported: EmbCC's LoongArch code may access a packed member unaligned, as LA64 permits` |
+| `-mno-lsx`, `-mno-lasx` | (no value) | `-mlsx is not supported: EmbCC emits no LSX or LASX vector instructions` |
+
+The code runs on every LA64 core; a floating-point or vector unit, if
+the core has one, is not used.
+
+### Calling convention: LP64S
+
+The LoongArch psABI's integer convention, which is RISC-V's LP64 rule for
+rule:
+
+- Arguments go in `a0`–`a7` (`$r4`–`$r11`), then on the stack, each
+  stack argument in an 8-byte slot (16-aligned for a 16-aligned type).
+  A 16-byte scalar (`__int128`, `long double`) takes two registers with
+  no alignment when named -- `f(int, __int128)` uses `a1:a2` -- and an
+  EVEN-aligned pair when variadic; with one register left it is split
+  between `a7` and the stack.
+- A structure of at most 16 bytes travels packed in one or two registers
+  (or split across `a7` and the stack); a larger one is passed by
+  reference to a copy the caller makes.
+- Results come back in `a0` (and `a1`); a structure larger than 16 bytes
+  through a hidden pointer in `a0`. `_Complex` values are small
+  structures.
+- A 32-bit value is kept sign-extended in its 64-bit register, `unsigned
+  int` included.
+- `float` and `double` travel in the integer registers as their bits,
+  and a variadic `float` is promoted to `double`. Floating-point
+  operations call lib/rt (`__adddf3`, ...).
+- `va_list` is a `void *`.
+- `fp` (`$r22`) and `s0`–`s8` survive a call. `tp` (`$r2`) and `$r21`
+  are never used by compiled code.
+- The stack is 16-byte aligned. An unnamed bit-field does not affect a
+  structure's alignment.
+
+`tests/golden/loongarch-abi.sh` checks these rules with EmbCC and clang
+calling each other on the board.
+
+### Code generation
+
+Calls are `bl` with `R_LARCH_B26` (+-128 MiB); addresses are `pcalau12i`
+and `addi.d` with `R_LARCH_PCALA_HI20` and `R_LARCH_PCALA_LO12`.
+Conditional branches reach +-128 KiB (`beqz`/`bnez` +-4 MiB); one that
+does not reach becomes an inverted branch over a `b`. A dense `switch`
+dispatches through a table of offsets from a `pcaddi`. One- and two-byte
+atomics are `ll.w`/`sc.w` loops on the word that holds them; four- and
+eight-byte ones are the `am*_db` instructions and `ll`/`sc` loops.
+
+### Object format
+
+ELF64, little-endian, `EM_LOONGARCH`, RELA relocations, `e_flags` `0x41`
+(soft-float ABI, object ABI v1), as clang writes for `-mabi=lp64s`.
+
+`embld` links these objects and clang's (`--target=loongarch64-unknown-elf
+-msoft-float`, its default medium code model included): the data and
+ADD/SUB relocations, `B16`/`B21`/`B26`, `CALL36`, the PCALA pair, the ABS
+sequence and `PCREL20_S2`. It builds no GOT: clang's GOT access
+(`GOT_PC_HI20`/`GOT_PC_LO12`) is rewritten to the direct address.
+`R_LARCH_RELAX` and `R_LARCH_ALIGN` are ignored. It refuses objects for
+the hard-float ABIs, and the extreme code model's and TLS relocations, by
+name. `-Tstack ADDR` makes it emit an entry stub that sets `sp` and
+jumps to the entry symbol.
+
+### Assembly
+
+`embcc -c` assembles `.s` and `.S` files for LoongArch64, and file-scope
+`asm` blocks and `__attribute__((naked))` functions are assembled the same
+way, in GNU as's syntax with `$`-spelt registers. The vocabulary is the
+base integer ISA, the AM* atomics, the barriers and the privileged
+instructions (`csrrd`, `csrwr`, `csrxchg`, `ertn`, `idle`, `cpucfg`,
+`rdtime*`, `iocsr*`), llvm-mc's pseudos (`nop`, `move`, `li.w`, `li.d`,
+`jr`, `ret`, `bgt`, `ble`, `bgtu`, `bleu`, `bltz`, `bgez`, `bgtz`,
+`blez`), and with a symbol `b`/`bl`, `call36`/`tail36`, `la.pcrel`,
+`la.local`, `la`/`la.global` and the `%pc_hi20`/`%pc_lo12`,
+`%got_pc_hi20`/`%got_pc_lo12`, `%abs_hi20`/`%abs_lo12`/`%abs64_lo20`/
+`%abs64_hi12` and `%call36` operators. In inline asm a register operand
+is written `$a0`, an `"m"` operand `$a0, 0`; the constant letters are
+`i`, `n`, `I`, `J` and `K`. `la.abs`, the TLS operators and
+floating-point and vector instructions are refused.
+
+### Predefined macros
+
+From `clang --target=loongarch64-unknown-elf -msoft-float`:
+`__loongarch__`, `__loongarch64`, `__loongarch_grlen` (64),
+`__loongarch_frlen` (0), `__loongarch_soft_float`, `__loongarch_lp64`,
+`__loongarch_arch` and `__loongarch_tune` (`"loongarch64"`), `_LP64` and
+`__LP64__`. Not `__loongarch_sx` (no LSX). `__CHAR_UNSIGNED__` is not
+defined. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are.
+
+### Runtime
+
+`make rt-embedded` builds `librt.a` and `make libc-embedded` builds
+`libc.a` for `loongarch64-unknown-elf` (soft float, binary128 and the
+128-bit integer routines, the C library on its bare-metal backend).
+`tests/harness/loongarch` runs programs on QEMU's `virt` board: the image
+is linked at 0x1000000 and loaded with `-kernel`, the UART at 0x1fe001e0
+is the console, an exception prints its code and address, and the ACPI
+GED's sleep register powers the board off at the end.
+
+### Limitations
+
+| Construct | Diagnostic |
+|---|---|
+| a 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
+| a computed `goto` | `the LoongArch64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
+| `__builtin_frame_address`, `__builtin_return_address` | `the LoongArch64 backend cannot lower __builtin_frame_address or __builtin_return_address (EmbCC's LoongArch code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
+| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
+| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
+| a scalar local aligned beyond 16 | `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
 
 ## AVR
 

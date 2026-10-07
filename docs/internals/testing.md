@@ -345,6 +345,20 @@ clang's AVR struct convention is not avr-gcc's.
 
 `libc-embedded` and `debug-embedded` include `mipsel-none-elf` too.
 
+### LoongArch64
+
+| Test | Checks |
+|---|---|
+| `loongarch-encoding` | every encoder form against `llvm-mc -show-encoding`, word by word, every register in every field; 6000 `la_li` constants against llvm-mc's own `li.d` expansion and executed; every range check provoked |
+| `loongarch-exec` | `tests/exec/*.c` on QEMU `virt` at `-O0`, `-O1`, `-O2`, `-Os`, linked with lib/libc and lib/rt built for loongarch64 |
+| `loongarch-abi` | EmbCC and clang (`loongarch64-unknown-elf -msoft-float`, its default medium code model and GOT accesses) calling each other: the shared embedded pairing, the 128-bit one and the LP64S one (`loongarch-abi-*.c`) |
+| `loongarch-asm` | the assembler's vocabulary against `llvm-mc`, pseudos included; a C program of inline asm, a file-scope block and a naked function linked with a `.S` file (assembled by EmbCC and by clang) on the board; `-S` reassembled; the refusals |
+| `loongarch-atomics` | one- and two-byte atomics at every place in their word on the board, the neighbours untouched; the `ll.w`/`sc.w` loop in the object |
+| `loongarch-refuse` | the triples, the object header and flags, `-S` reassembled, the options accepted and refused, the constructs refused by name, the objects `embld` refuses |
+
+`libc-embedded`, `debug-embedded`, `embedded-runtime` and `predef` include
+`loongarch64-unknown-elf` too.
+
 ### AVR
 
 | Test | Checks |
@@ -572,6 +586,14 @@ the FPGA UART at 0xbf000900 (the third serial port), reports an exception
 as `==FAULT cause N epc ... badvaddr ...==`, and ends with `==EXIT n==`
 and a write to the FPGA's SOFTRES register, which `-no-reboot` turns into
 QEMU's exit.
+
+`tests/harness/loongarch` boots on QEMU `virt` (`-kernel`, direct address
+mode): the image is linked at 0x1000000, above the boot information and
+device tree QEMU keeps in the first 2 MiB, writes the UART at 0x1fe001e0
+(the first serial port), reports an exception as `==FAULT ecode N subcode
+N era ... badv ...==` through a `b` written into a 4 KiB-aligned page that
+EENTRY points at, and ends with `==EXIT n ==` and the ACPI GED's
+power-off (0x34 to 0x100e001c).
 
 `tests/harness/qrun.sh SECONDS [--until TEXT] CMD...` runs QEMU under a
 hard timeout. With `--until TEXT` it polls the guest's output and kills
