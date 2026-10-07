@@ -472,6 +472,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                     in->call_nfixed = atoi(va + 8);
             }
             in->sret_first = has_flag(rest, "sret");
+            in->ret_ptr = has_flag(rest, "ptrret");
             break;
         }
         case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: {

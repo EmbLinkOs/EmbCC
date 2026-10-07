@@ -70,6 +70,7 @@ unsigned long tc_enc_rrpw(int op1, int op2, int d, int s1, int s2, int pos,
 unsigned long tc_enc_rcpw(int op1, int op2, int d, int s1, unsigned c4,
                           int pos, int width);
 unsigned long tc_enc_bol(int op1, int s1d, int s2, unsigned off16);
+unsigned long tc_enc_bo(int op1, int op2, int s1d, int s2, unsigned off10);
 unsigned long tc_enc_brr(int op1, int op2, int s1, int s2, unsigned disp15);
 unsigned long tc_enc_brc(int op1, int op2, int s1, unsigned c4,
                          unsigned disp15);
@@ -171,6 +172,13 @@ void tc_store(struct code *c, int dt, int ab, long long off, int size);
 void tc_ld_a(struct code *c, int at, int ab, long long off);
 void tc_st_a(struct code *c, int at, int ab, long long off);
 
+/* The atomic word accesses (TriCore 1.6.1), with the short (BO) form's
+ * signed 10-bit offset. SWAP.W exchanges D[a] with the word at A[b] +
+ * off. CMPSWAP.W stores D[e] there if the word equals D[e+1], and leaves
+ * the word it read in D[e] either way. */
+void tc_swap_w(struct code *c, int da, int ab, long long off);
+void tc_cmpswap_w(struct code *c, int ea, int ab, long long off);
+
 /* ---- control flow ----------------------------------------------------- */
 
 /* The conditional branches, each comparing two registers (BRR) or a
@@ -222,9 +230,12 @@ void tc_rslcx(struct code *c);
 void tc_enable(struct code *c);
 void tc_disable(struct code *c);
 void tc_rfe(struct code *c);
-/* SYSCALL const9: a system-call trap (class 6) with the constant as its
+/* An instruction no TriCore defines (op1 0x01, op2 0xff): the
+ * illegal-opcode trap, class 2 TIN 1 (IOPC). __builtin_trap. */
+void tc_illegal(struct code *c);
+/* SYSCALL: a system-call trap (class 6) with the constant, 0-255, as its
  * identification number. */
-void tc_syscall(struct code *c, unsigned k9);
+void tc_syscall(struct code *c, unsigned k8);
 void tc_mtcr(struct code *c, unsigned csfr, int da);
 void tc_mfcr(struct code *c, int dc, unsigned csfr);
 

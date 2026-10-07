@@ -1536,7 +1536,8 @@ static int atomic_arm(void)
     int t = target_get();
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
            t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
-           t == TARGET_MIPS32;        /* MIPS32 is weakly ordered: sync */
+           t == TARGET_MIPS32 ||      /* MIPS32 is weakly ordered: sync */
+           t == TARGET_TRICORE;       /* TriCore orders with dsync */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -2720,6 +2721,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_avr(fn, e);
         if (target_get() == TARGET_MIPS32)
             return irg_va_arg_mips(fn, e);
+        if (target_get() == TARGET_TRICORE)
+            return irg_va_arg_tricore(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -3335,6 +3338,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->ret_tybytes = ty_size(e->ty);
             i->ret_tysign = ty_is_integer(e->ty) && !e->ty->is_unsigned;
         }
+        /* TriCore returns a pointer in A2 and anything else in D2, so its
+         * caller must know which (ir_ins.ret_ptr). Set there alone: no
+         * other target reads it, and no other IR prints it. */
+        if (target_get() == TARGET_TRICORE)
+            i->ret_ptr = e->ty->kind == TY_PTR;
         /* An integer result comes back in the whole RETURN REGISTER, so
          * the width here is the register's and not the type's: an `int`
          * returned on x86-64 arrives in rax and codegen reads all of
@@ -3857,6 +3865,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_avr(fn, s);
             else if (target_get() == TARGET_MIPS32)
                 irg_asm_mips(fn, s);
+            else if (target_get() == TARGET_TRICORE)
+                irg_asm_tricore(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;

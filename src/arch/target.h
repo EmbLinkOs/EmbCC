@@ -49,7 +49,13 @@ enum target_arch {
      * like ARMv7-M and RV32, with a SIGNED char and long double = double,
      * and the only target here with branch delay slots and REL
      * relocations. docs/internals/mips32-plan.md. */
-    TARGET_MIPS32 = 6
+    TARGET_MIPS32 = 6,
+    /* Infineon TriCore 1.6.1, the AURIX core (tricore-none-elf): 32-bit
+     * little-endian, soft float, ILP32 with a SIGNED char and 8-byte
+     * long long and double aligned to only 4. The only target here with
+     * two register files -- data and address -- and a hardware context
+     * save at every call. docs/internals/tricore-plan.md. */
+    TARGET_TRICORE = 7
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -167,6 +173,7 @@ int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c 
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
+int tc_op_calls_helper(const struct ir_ins *i);     /* src/arch/tricore/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -301,6 +308,7 @@ int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 int a64_imm_foldable(int op, long imm, int w);   /* arch/aarch64/irgen.c */
 int mips_imm_foldable(int op, long imm);    /* arch/mips/irgen.c */
 int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
+int tc_imm_foldable(int op, long imm);      /* arch/tricore/irgen.c */
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -528,6 +536,13 @@ enum reloc_kind {
      * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
      * site whose str_off is already the offset). */
     RK_MIPS_TEXT26,
+    /* TriCore takes an absolute address in two halves too: MOVH (or
+     * MOVH.A) the high 16 bits rounded by 0x8000, then the low 16 bits
+     * SIGN-EXTENDED in an ADDI (LO) or in a LEA, load or store's long
+     * offset (LO2) -- two fields in two different places, so two kinds. */
+    RK_TRICORE_HI,
+    RK_TRICORE_LO,
+    RK_TRICORE_LO2,
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

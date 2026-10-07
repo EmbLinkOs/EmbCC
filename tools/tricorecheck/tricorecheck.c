@@ -684,6 +684,65 @@ static void memory(void)
     }
 }
 
+/* The atomic word accesses, every register in each field and both ends
+ * of the BO form's signed 10-bit offset. */
+static void atomics(void)
+{
+    static const long long OFF[] = { -512, -511, -342, -1, 0, 1, 341, 510,
+                                     511 };
+    for (int k = 0; k < 32 + 9; k++) {
+        int r = 4, b = 12;
+        long long off = 8;
+        if (k < 16) r = k;
+        else if (k < 32) b = k - 16;
+        else off = OFF[k - 32];
+        base_to_ram(b);
+        T(tc_swap_w(&C, r, b, off), "swap.w [%s]%lld, %s", A(b), off, D(r));
+        want(off ? "add_i32 ?,%s,%s" : "mov_i32 ?,%s%.0s", A(b), K(off));
+        want("qemu_ld_i32 ?,?,noat+un+leul,0");
+        want("qemu_st_i32 %s,?,noat+un+leul,0", D(r));
+        want("mov_i32 %s,?", D(r));
+        if (r & 1)
+            continue;
+        base_to_ram(b);
+        T(tc_cmpswap_w(&C, r, b, off), "cmpswap.w [%s]%lld, %s", A(b), off,
+          tc_reg_name('e', r));
+        want(off ? "add_i32 ?,%s,%s" : "mov_i32 ?,%s%.0s", A(b), K(off));
+        want("qemu_ld_i32 ?,?,noat+un+leul,0");
+        want("movcond_i32 ?,%s,?,%s,?,eq", D(r + 1), D(r));
+        want("qemu_st_i32 ?,?,noat+un+leul,0");
+        want("mov_i32 %s,?", D(r));
+    }
+}
+
+/* A block of n bytes at a multiple of `align`, claimed. */
+static long claim_aligned(long n, long align);
+
+/* The trapping forms: the trap table at BTV is pointed at landings that
+ * continue the walk, then each instruction is executed once. */
+static void traps(void)
+{
+    long tab = claim_aligned(256, 256), back;
+    set_a(14, RAM_BASE + (unsigned long)tab);
+    S(tc_mov_d(&C, 4, 14));
+    S(tc_mtcr(&C, TC_CSFR_BTV, 4));
+    S(tc_isync(&C));
+    T(tc_illegal(&C), "(undefined: op1 0x01, op2 0xff)");
+    want("call raise_exception_sync,?,?,env,$0x2,$0x1");   /* class 2, IOPC */
+    back = pos;
+    walk_jump(tab + 2 * 32, back);                         /* class 2 */
+    /* a system call returns to the instruction after it, in A11 */
+    begin_at(RAM_BASE + (unsigned long)(tab + 6 * 32), "ji a11 (class 6)");
+    want("and_i32 PC,a11,$0xfffffffe");
+    tc_ji(&C, TC_RA);
+    put32(tab + 6 * 32, one());
+    for (unsigned k = 0; k < 4; k++) {
+        static const unsigned SYS[] = { 0, 1, 170, 255 };
+        T(tc_syscall(&C, SYS[k]), "syscall %u", SYS[k]);
+        want("call raise_exception_sync,?,?,env,$0x6,%s", K(SYS[k]));
+    }
+}
+
 static const char *jname(int cond)
 {
     static const char *const nm[] = { "jeq", "jne", "jlt", "jlt.u", "jge",
@@ -823,7 +882,12 @@ static int nfail_codes;
 /* A free block of n bytes anywhere in RAM, claimed. */
 static long claim(long n)
 {
-    for (long p = 0x2000; p + n <= RAM_SIZE; p += 8) {
+    return claim_aligned(n, 8);
+}
+
+static long claim_aligned(long n, long align)
+{
+    for (long p = 0x2000; p + n <= RAM_SIZE; p += align) {
         if (p + n > MAIN_AT - 0x100 && p < MAIN_AT + 0x40000)
             continue;
         if (is_free(p, n))
@@ -905,18 +969,18 @@ static void prologue(void)
 {
     long save = pos;
     pos = 0;
-    /* eight CSAs at CSA_RAM, each linking to the next: a link word is the
+    /* 32 CSAs at CSA_RAM, each linking to the next: a link word is the
      * segment in bits 19:16 and address bits 21:6 in 15:0 */
     S(tc_movh_a(&C, 12, (unsigned)(CSA_RAM >> 16)));
-    for (int k = 0; k < 8; k++) {
-        unsigned long link = k < 7 ? ((CSA_RAM >> 28) << 16) | (unsigned long)(k + 1)
-                                   : 0;
+    for (int k = 0; k < 32; k++) {
+        unsigned long link = k < 31 ? ((CSA_RAM >> 28) << 16) | (unsigned long)(k + 1)
+                                    : 0;
         S(tc_li(&C, 4, (long long)link));
         S(tc_store(&C, 4, 12, 64L * k, 4));
     }
     S(tc_li(&C, 4, (long long)((CSA_RAM >> 28) << 16)));
     S(tc_mtcr(&C, TC_CSFR_FCX, 4));
-    S(tc_li(&C, 4, (long long)(((CSA_RAM >> 28) << 16) | 6)));
+    S(tc_li(&C, 4, (long long)(((CSA_RAM >> 28) << 16) | 30)));
     S(tc_mtcr(&C, TC_CSFR_LCX, 4));
     /* call depth counting off (PSW.CDC = 0x7f) */
     S(tc_mfcr(&C, 4, TC_CSFR_PSW));
@@ -953,8 +1017,10 @@ static void build(void)
     memory();
     branches();
     system_forms();
+    atomics();
     li_checks();
     csfr_checks();
+    traps();
     epilogue();
 }
 
@@ -1088,8 +1154,9 @@ static int check(const char *path)
             continue;
         }
         for (int k = 0; k < b->nops; k++)
-            if (strstr(b->ops[k], "raise_exception") ||
-                strstr(b->ops[k], "qemu_excp")) {
+            if ((strstr(b->ops[k], "raise_exception") ||
+                 strstr(b->ops[k], "qemu_excp")) &&
+                !(x->nwant && strstr(x->want[0], "raise_exception"))) {
                 if (bad++ < 20)
                     printf("  0x%08lx %s: QEMU raises an exception: %s\n",
                            x->pc, x->text, b->ops[k]);
@@ -1159,14 +1226,17 @@ static void refuse(int n)
     case 29: tc_insert_imm(&C, 1, 2, 16, 0, 4); break;
     case 30: tc_mov(&C, 16, 1); break;
     case 31: tc_mov_a(&C, 1, -1); break;
-    case 32: tc_syscall(&C, 512); break;
+    case 32: tc_syscall(&C, 256); break;
     case 33: tc_dextr(&C, 1, 2, 3, 32); break;
     case 34: tc_movh(&C, 1, 0x10000); break;
     case 35: tc_addsc_a(&C, 1, 2, 3, 4); break;
+    case 36: tc_swap_w(&C, 1, 2, 512); break;
+    case 37: tc_cmpswap_w(&C, 1, 2, 0); break;            /* odd pair */
+    case 38: tc_cmpswap_w(&C, 2, 2, -513); break;
     default: break;
     }
 }
-#define NREFUSE 36
+#define NREFUSE 39
 
 int main(int argc, char **argv)
 {

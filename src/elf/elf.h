@@ -393,6 +393,34 @@ typedef struct {
 #define R_MIPS_JALR     37
 #define R_MIPS_PC32    248
 
+/* Infineon TriCore, from the ELF machine registry. */
+#define EM_TRICORE 44
+
+/* TriCore e_flags: the core architecture the code needs. The TriCore
+ * EABI's value for TriCore 1.6.1 as remembered -- there is no TriCore
+ * toolchain here to read it off (docs/internals/tricore-plan.md). */
+#define EF_TRICORE_V1_6_1   0x00200000
+#define EF_TRICORE_CORE_MASK 0xfff00000
+
+/* The TriCore relocation types EmbCC writes and EmbLD applies, numbered
+ * as the TriCore EABI's table is remembered (unverified, as above). All
+ * RELA. HIADJ is the high half of an address rounded by 0x8000, because
+ * the low half (LO for an ADDI, LO2 for a LEA, load or store) is
+ * sign-extended where it is added; 24REL is CALL's and J's halfword
+ * displacement. The rest are named so EmbLD can refuse them by name. */
+#define R_TRICORE_NONE      0
+#define R_TRICORE_32REL     1
+#define R_TRICORE_32ABS     2
+#define R_TRICORE_24REL     3
+#define R_TRICORE_24ABS     4
+#define R_TRICORE_16SM      5
+#define R_TRICORE_HIADJ     6
+#define R_TRICORE_LO        7
+#define R_TRICORE_LO2       8
+#define R_TRICORE_18ABS     9
+#define R_TRICORE_10SM     10
+#define R_TRICORE_15REL    11
+
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
  * names each one, which is the same referee the encoder uses. */

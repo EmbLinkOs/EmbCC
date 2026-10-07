@@ -10909,6 +10909,9 @@ static int const_is_expensive(const struct ir_ins *i)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
         if (ta == TARGET_MIPS32)                /* addiu, or ori from $0 */
             return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
+        if (ta == TARGET_TRICORE)               /* mov, mov.u or movh */
+            return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff) ||
+                     !(v & 0xffff));
         return !(v >= -2048 && v <= 2047);                     /* RISC-V */
     }
     default:
@@ -11074,6 +11077,11 @@ static int target_imm_foldable(int op, long imm, int w)
         return mips_imm_foldable64(op, imm);
     if (target_get() == TARGET_MIPS32)
         return mips_imm_foldable(op, imm);
+    /* TriCore: a 64-bit AND/OR/XOR is done half by half with any constant
+     * (codegen.c's logic_half); every other 64-bit operation builds it */
+    if (target_get() == TARGET_TRICORE)
+        return w == 8 ? op == IR_AND || op == IR_OR || op == IR_XOR
+                      : tc_imm_foldable(op, imm);
     if (target_get() == TARGET_THUMB)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
@@ -11242,7 +11250,8 @@ static int pass_immfold(struct ir_func *fn)
          * so its width is not x86's imm32 question (*_imm_foldable64). */
         int wide_ok = (target_get() == TARGET_THUMB ||
                        target_get() == TARGET_RISCV32 ||
-                       target_get() == TARGET_MIPS32) && i->w == 8 &&
+                       target_get() == TARGET_MIPS32 ||
+                       target_get() == TARGET_TRICORE) && i->w == 8 &&
                       (i->op == IR_AND || i->op == IR_OR || i->op == IR_XOR);
         /* ...and a 64-bit compare with any constant whose halves its
          * subs/sbcs or cmp/cmpeq take (thumb_cmp64_imm): strtol's

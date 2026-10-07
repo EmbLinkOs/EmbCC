@@ -100,6 +100,13 @@ int target_insn_len(const unsigned char *p, int avail)
         /* MIPS32 is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
         return avail >= 4 ? 4 : 0;
 
+    case TARGET_TRICORE:
+        /* Bit 0 of the first byte: set for a 32-bit instruction, clear
+         * for a 16-bit one (TriCore 1.6 architecture manual, vol. 2). */
+        if (p[0] & 1)
+            return avail >= 4 ? 4 : 0;
+        return avail >= 2 ? 2 : 0;
+
     case TARGET_X86_64:
     default:
         /* Variable-length, and no rule short of decoding it. The caller
@@ -199,6 +206,12 @@ static const struct data_model {
      * -- unlike the ARM and RISC-V targets beside it -- a signed int
      * wchar_t, long double the same 8-byte double, and no __int128. */
     [TARGET_MIPS32]  = { 4, 4, 4, 8,  8, 0, 0, 0, 0 },
+    /* The TriCore EABI as remembered (unverified; no TriCore compiler
+     * here): ILP32, a SIGNED char, a signed int wchar_t, long double the
+     * same 8-byte double, no __int128 -- and nothing aligned beyond a
+     * word, since a TriCore doubleword access needs only that: long long
+     * and double are 4-aligned (maxal 4). */
+    [TARGET_TRICORE] = { 4, 4, 4, 8,  8, 0, 0, 0, 4 },
 };
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
@@ -230,6 +243,7 @@ int target_stack_align(void)
     switch (g_arch) {
     case TARGET_THUMB: return 8;        /* AAPCS32 at a public interface */
     case TARGET_MIPS32: return 8;       /* o32 */
+    case TARGET_TRICORE: return 8;      /* the TriCore EABI */
     case TARGET_AVR:   return 1;
     default:           return 16;       /* SysV, AAPCS64, RISC-V psABI */
     }
@@ -273,9 +287,14 @@ int target_has_int128(void)     { return g_model[g_arch].int128; }
  * the promise. */
 static int g_no_jump_tables;
 void target_set_jump_tables(int on) { g_no_jump_tables = !on; }
+/* TriCore keeps the decision tree for now: a table there needs its own
+ * address, absolute (a HI/LO2 pair against .text) or from a JL, and
+ * neither lowering is written -- IR_SWITCH is refused by name if one
+ * ever arrives. */
 int target_jump_tables(void)
 {
-    return !g_no_jump_tables && target_get() != TARGET_AVR;
+    return !g_no_jump_tables && target_get() != TARGET_AVR &&
+           target_get() != TARGET_TRICORE;
 }
 int target_switch_table_min_os(void)
 {
@@ -305,6 +324,7 @@ int target_anon_bitfield_aligns(void)
     /* o32: `struct { char c; int :4; char d; }` is 3 bytes in clang, and
      * `int :0` moves d to offset 4 without making the struct 4-aligned */
     case TARGET_MIPS32:  return 0;
+    case TARGET_TRICORE: return 0;   /* as GCC lays them out (unverified) */
     }
     return 0;
 }
@@ -325,6 +345,7 @@ int target_va_list_is_pointer(void)
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
     case TARGET_AVR:     return 1;   /* avr-gcc: char * */
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
+    case TARGET_TRICORE: return 1;   /* char *, over the caller's stack words */
     }
     return 0;
 }
@@ -492,6 +513,14 @@ static const struct triple {
     { "mipsel-elf",          TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "mipsel",              TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
 
+    /* Infineon TriCore 1.6.1 (AURIX TC2xx, and the subset of TC3xx's
+     * 1.6.2 it shares), little-endian, soft float. `tricore-elf` is the
+     * GNU spelling HighTec's toolchain uses. */
+    { "tricore-none-elf",    TARGET_TRICORE, TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
+    { "tricore-elf",         TARGET_TRICORE, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "tricore-unknown-elf", TARGET_TRICORE, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    { "tricore",             TARGET_TRICORE, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
      * time, which is why the format column says ELF and not EMBX. */
@@ -633,6 +662,7 @@ int target_elf_machine(enum target_arch a)
     case TARGET_RISCV64: return EM_RISCV;
     case TARGET_AVR:     return EM_AVR;
     case TARGET_MIPS32:  return EM_MIPS;
+    case TARGET_TRICORE: return EM_TRICORE;
     default:             return EM_X86_64;
     }
 }
@@ -674,6 +704,7 @@ unsigned long target_elf_flags(enum target_arch a)
      * slots are filled (with nops), the code is not abicalls/PIC. */
     case TARGET_MIPS32:  return EF_MIPS_ARCH_32R2 | EF_MIPS_ABI_O32 |
                                 EF_MIPS_NOREORDER;
+    case TARGET_TRICORE: return EF_TRICORE_V1_6_1;
     default:             return 0;
     }
 }
@@ -782,6 +813,17 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_MIPS_LO16:   return R_MIPS_LO16;
         case RK_MIPS_TEXT26: return R_MIPS_26;
         case RK_ABS32:       return R_MIPS_32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_TRICORE) {
+        switch (k) {
+        /* CALL and J alike: a halfword displacement in 24 bits */
+        case RK_CALL:        return R_TRICORE_24REL;
+        case RK_TRICORE_HI:  return R_TRICORE_HIADJ;
+        case RK_TRICORE_LO:  return R_TRICORE_LO;
+        case RK_TRICORE_LO2: return R_TRICORE_LO2;
+        case RK_ABS32:       return R_TRICORE_32ABS;
         default:             return -1;
         }
     }
@@ -897,7 +939,7 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
-        a == TARGET_MIPS32)
+        a == TARGET_MIPS32 || a == TARGET_TRICORE)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -957,6 +999,12 @@ static const struct reloc_spelling {
     { EM_AVR,   R_AVR_CALL,            "R_AVR_CALL" },
     { EM_AVR,   R_AVR_LO8_LDI_GS,      "R_AVR_LO8_LDI_GS" },
     { EM_AVR,   R_AVR_HI8_LDI_GS,      "R_AVR_HI8_LDI_GS" },
+    { EM_TRICORE, R_TRICORE_NONE,      "R_TRICORE_NONE" },
+    { EM_TRICORE, R_TRICORE_32ABS,     "R_TRICORE_32ABS" },
+    { EM_TRICORE, R_TRICORE_24REL,     "R_TRICORE_24REL" },
+    { EM_TRICORE, R_TRICORE_HIADJ,     "R_TRICORE_HIADJ" },
+    { EM_TRICORE, R_TRICORE_LO,        "R_TRICORE_LO" },
+    { EM_TRICORE, R_TRICORE_LO2,       "R_TRICORE_LO2" },
 };
 
 const char *target_reloc_name(enum target_arch a, int type)

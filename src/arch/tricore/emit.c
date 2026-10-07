@@ -49,6 +49,7 @@ enum {
     OPC_RC_LOGICAL_SHIFT = 0x8f,
     OPC_RC_SERVICE = 0xad,        /* SYSCALL */
     OPC_RCPW_INSERT = 0xb7,
+    OPC_BO_STCTX = 0x49,          /* SWAP.W, CMPSWAP.W (short offset) */
     OPC_SYS = 0x0d,
     /* the long-offset (BOL) loads and stores */
     OPC_BOL_LD_W = 0x19, OPC_BOL_LD_A = 0x99, OPC_BOL_LD_B = 0x79,
@@ -80,6 +81,7 @@ enum {                                  /* SYS */
     SYS_DISABLE = 0x0d, SYS_DSYNC = 0x12, SYS_ISYNC = 0x13
 };
 enum { RC_SYSCALL = 0x04 };
+enum { BO_SWAP_W = 0x20, BO_CMPSWAP_W = 0x23 };
 
 static void need_reg(int r)
 {
@@ -223,6 +225,20 @@ unsigned long tc_enc_bol(int op1, int s1d, int s2, unsigned off16)
            ((unsigned long)s2 << 12) | ((unsigned long)(off16 & 0x3f) << 16) |
            ((unsigned long)((off16 >> 10) & 0x3f) << 22) |
            ((unsigned long)((off16 >> 6) & 0xf) << 28);
+}
+
+/* BO: the 10-bit offset in two pieces -- bits 5:0 at 21:16, 9:6 at
+ * 31:28 -- and op2 at 27:22. */
+unsigned long tc_enc_bo(int op1, int op2, int s1d, int s2, unsigned off10)
+{
+    need_field(op1, 0, 255, "op1");
+    need_reg(s1d); need_reg(s2);
+    need_field(op2, 0, 63, "BO op2");
+    need_field(off10, 0, 0x3ff, "BO offset");
+    return (unsigned long)op1 | ((unsigned long)s1d << 8) |
+           ((unsigned long)s2 << 12) | ((unsigned long)(off10 & 0x3f) << 16) |
+           ((unsigned long)op2 << 22) |
+           ((unsigned long)((off10 >> 6) & 0xf) << 28);
 }
 
 unsigned long tc_enc_brr(int op1, int op2, int s1, int s2, unsigned disp15)
@@ -586,6 +602,19 @@ void tc_st_a(struct code *c, int at, int ab, long long off)
     tc_w(c, tc_enc_bol(OPC_BOL_ST_A, at, ab, field(off, 16, 1, "st.a offset")));
 }
 
+void tc_swap_w(struct code *c, int da, int ab, long long off)
+{
+    tc_w(c, tc_enc_bo(OPC_BO_STCTX, BO_SWAP_W, da, ab,
+                      field(off, 10, 1, "swap.w offset")));
+}
+
+void tc_cmpswap_w(struct code *c, int ea, int ab, long long off)
+{
+    need_even(ea);
+    tc_w(c, tc_enc_bo(OPC_BO_STCTX, BO_CMPSWAP_W, ea, ab,
+                      field(off, 10, 1, "cmpswap.w offset")));
+}
+
 /* ---- control flow ----------------------------------------------------- */
 
 /* Each condition's BRR op1/op2, its BRC op1 (0: none) and how BRC extends
@@ -739,11 +768,18 @@ void tc_rslcx(struct code *c)   { tc_w(c, tc_enc_sys(OPC_SYS, SYS_RSLCX, 0)); }
 void tc_enable(struct code *c)  { tc_w(c, tc_enc_sys(OPC_SYS, SYS_ENABLE, 0)); }
 void tc_disable(struct code *c) { tc_w(c, tc_enc_sys(OPC_SYS, SYS_DISABLE, 0)); }
 void tc_rfe(struct code *c)     { tc_w(c, tc_enc_sys(OPC_SYS, SYS_RFE, 0)); }
+void tc_illegal(struct code *c)
+{
+    tc_w(c, tc_enc_rr(OPC_RR_ADDRESS, 0xff, 0, 0, 0, 0));
+}
 
-void tc_syscall(struct code *c, unsigned k9)
+/* The field is const9, but the trap's identification number is its low
+ * eight bits (QEMU agrees: SYSCALL 511 traps with TIN 255), so a number
+ * above 255 is refused rather than silently aliased. */
+void tc_syscall(struct code *c, unsigned k8)
 {
     tc_w(c, tc_enc_rc(OPC_RC_SERVICE, RC_SYSCALL, 0, 0,
-                      field(k9, 9, 0, "syscall number")));
+                      field(k8, 8, 0, "syscall number")));
 }
 
 void tc_mtcr(struct code *c, unsigned csfr, int da)

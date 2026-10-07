@@ -154,6 +154,11 @@ SRCS := \
 	src/arch/mips/asm.c \
 	src/arch/mips32/predef.c \
 	src/arch/mips32/predef_cxx.c \
+	src/arch/tricore/emit.c \
+	src/arch/tricore/codegen.c \
+	src/arch/tricore/irgen.c \
+	src/arch/tricore/predef.c \
+	src/arch/tricore/predef_cxx.c \
 	src/arch/avr/emit.c \
 	src/arch/avr/codegen.c \
 	src/arch/avr/asm.c \
@@ -243,7 +248,8 @@ embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
 # writer the embdbg tool uses — one implementation, not two.
 embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
        src/driver/util.c src/driver/diag.c src/driver/explain.c \
-       src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c src/arch/code.c \
+       src/arch/riscv/emit.c src/arch/avr/emit.c src/arch/mips/emit.c \
+       src/arch/tricore/emit.c src/arch/code.c \
        src/link/link.h src/link/ldscript.h src/elf/elf.h src/embx/embx.c src/embx/embx.h \
        tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h \
        $(PLATFORM_SRCS) src/platform/platform.h
@@ -252,7 +258,7 @@ embld: tools/embld/embld.c tools/embld/doctor.c src/link/link.c \
 	    src/driver/util.c src/driver/diag.c src/driver/explain.c \
 	    src/embx/embx.c tools/embdbg/embdbg.c $(PLATFORM_SRCS) \
 	    src/arch/x86_64/disasm.c src/arch/riscv/emit.c src/arch/avr/emit.c \
-	    src/arch/mips/emit.c src/arch/code.c
+	    src/arch/mips/emit.c src/arch/tricore/emit.c src/arch/code.c
 
 # NOTE: this list is HAND-MAINTAINED and `make check` does not build embls, so
 # a backend file added without a line here breaks only `make test` -- and
@@ -280,6 +286,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/riscv32/predef.c src/arch/riscv32/predef_cxx.c \
              src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
              src/arch/mips32/predef.c src/arch/mips32/predef_cxx.c \
+             src/arch/tricore/predef.c src/arch/tricore/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
@@ -295,6 +302,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/thumb/emit.c src/arch/thumb/attrs.c src/arch/riscv/irgen.c \
              src/arch/riscv/asm.c src/arch/riscv/emit.c \
              src/arch/mips/irgen.c src/arch/mips/asm.c src/arch/mips/emit.c \
+             src/arch/tricore/irgen.c src/arch/tricore/emit.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)

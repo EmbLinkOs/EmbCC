@@ -71,6 +71,10 @@ extern const struct predef_macro predef_macros_mips32[];
 extern const int predef_macro_count_mips32;
 extern const struct predef_macro predef_macros_cxx_mips32[];
 extern const int predef_macro_count_cxx_mips32;
+extern const struct predef_macro predef_macros_tricore[];
+extern const int predef_macro_count_tricore;
+extern const struct predef_macro predef_macros_cxx_tricore[];
+extern const int predef_macro_count_cxx_tricore;
 
 /* AVR (ATmega328P). Generated like the others, from the reference
  * compiler's own answer for the triple. */

@@ -45,10 +45,12 @@
  * instruction for. It used to be compiled away as soon as __ARM_FP was
  * defined, and an FPU build then linked a soft-float build of this file
  * -- which works until the objects must agree about the float ABI. */
-/* MIPS says it with __mips_soft_float (-msoft-float, which is o32 on a
+/* TriCore code from EmbCC is soft float on every core (the TC3xx FPU is
+ * not used yet), so __tricore__ alone says it.
+ * MIPS says it with __mips_soft_float (-msoft-float, which is o32 on a
  * PIC32-class core with no FPU). */
 #if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
-    defined(__mips_soft_float) || \
+    defined(__mips_soft_float) || defined(__tricore__) || \
     (defined(__arm__) && (!defined(__ARM_FP) || !(__ARM_FP & 8)))
 #define SOFTFP_ALL 1
 #endif
