@@ -20,8 +20,8 @@
  * The image lives at the board's SECURE alias, 0x10000000, because the core
  * leaves reset in the Secure state (see ../thumb-m33/link.sh).
  */
-extern unsigned __data_load, __data_start, __data_end;
-extern unsigned __bss_start, __bss_end;
+extern unsigned char __data_load, __data_start, __data_end;
+extern unsigned char __bss_start, __bss_end;
 
 int main(void);
 void reset(void);
@@ -41,9 +41,13 @@ void *const vectors[4] = {
     (void *)harness_fault
 };
 
+/* The copy and the clear go a byte at a time: the linker's bounds are
+ * where the sections end, which need not be a word boundary (a char
+ * last in .data), and a word store there faults with UNALIGN_TRP set --
+ * as it would on the part. */
 void reset(void)
 {
-    unsigned *d = &__data_start, *s = &__data_load;
+    unsigned char *d = &__data_start, *s = &__data_load;
     CCR |= 1u << 3;
     __asm__ volatile("dsb");
     __asm__ volatile("isb");

@@ -93,18 +93,44 @@ static const struct sysreg sysregs_v8m[] = {
     { NULL, 0 }
 };
 
-/* The architecture level the statements are for, 7 or 8: told by the
+/* The architecture level the statements are for: 6 (ARMv6-M), 7, 8
+ * (ARMv8-M Mainline) or TASM_V8M_BASE (ARMv8-M Baseline). Told by the
  * caller (the file assembler, inline asm in irgen) rather than asked of
  * the target, so the encoder links on its own (tools/tasmcheck). */
 static int g_arch = 7;
 void tasm_set_arch(int level) { g_arch = level; }
+
+/* Either ARMv8-M profile: the security extension, the acquire/release
+ * forms and the stack-limit registers. */
+static int arch_v8m(void) { return g_arch == 8 || g_arch == TASM_V8M_BASE; }
+/* A Thumb-1 core (ARMv6-M, ARMv8-M Baseline): every 32-bit encoding a
+ * statement produces is checked against what the core has. */
+static int arch_thumb1(void) { return g_arch == 6 || g_arch == TASM_V8M_BASE; }
+
+/* Other spellings of one in the tables: `apsr_nzcvq` is what an msr that
+ * writes the flags is written as on a Mainline part, and the same
+ * encoding (mask 0b10) as `apsr`. Not in the vocabulary listing, since
+ * llvm-mc reads it only after msr. */
+static const struct sysreg sysreg_alias[] = {
+    { "apsr_nzcvq", T_SYS_APSR }, { NULL, 0 }
+};
+
+/* The Main Extension's: no ARMv6-M or ARMv8-M Baseline core has them. */
+static int sysreg_main_only(int sysm)
+{
+    return sysm == T_SYS_BASEPRI || sysm == T_SYS_BASEPRI_MAX ||
+           sysm == T_SYS_FAULTMASK || sysm == 0x91 || sysm == 0x93;
+}
 
 static int sysreg_num(const char *s, int len)
 {
     for (const struct sysreg *r = sysregs; r->name; r++)
         if ((int)strlen(r->name) == len && same_nocase(s, r->name, len))
             return r->sysm;
-    if (g_arch >= 8)
+    for (const struct sysreg *r = sysreg_alias; r->name; r++)
+        if ((int)strlen(r->name) == len && same_nocase(s, r->name, len))
+            return r->sysm;
+    if (arch_v8m())
         for (const struct sysreg *r = sysregs_v8m; r->name; r++)
             if ((int)strlen(r->name) == len && same_nocase(s, r->name, len))
                 return r->sysm;
@@ -612,6 +638,117 @@ static int a32_one_stmt(struct tok *t, int n, struct code *out, char *err,
     return 1;
 }
 
+/* ---- the exclusives' byte and halfword forms, and ARMv8-M's own ----
+ *
+ * ldrexb/ldrexh/strexb/strexh (every Thumb-2 level), clrex; and on ARMv8-M
+ * the load-acquire/store-release family, the security extension's tt, sg,
+ * bxns and blxns, and Mainline's vlstm/vlldm. One of these on a level that
+ * lacks it is refused by name, rather than encoded for a core that would
+ * take it as UNDEFINED. 1 when the statement is none of them. */
+struct xa_ent { const char *name; int size, kind; };
+/* kind: 0 ldrex[bh], 1 strex[bh], 2 lda*, 3 ldaex*, 4 stl*, 5 stlex* */
+static const struct xa_ent xa_tab[] = {
+    { "ldrexb", 1, 0 }, { "ldrexh", 2, 0 },
+    { "strexb", 1, 1 }, { "strexh", 2, 1 },
+    { "ldab", 1, 2 }, { "ldah", 2, 2 }, { "lda", 4, 2 },
+    { "ldaexb", 1, 3 }, { "ldaexh", 2, 3 }, { "ldaex", 4, 3 },
+    { "stlb", 1, 4 }, { "stlh", 2, 4 }, { "stl", 4, 4 },
+    { "stlexb", 1, 5 }, { "stlexh", 2, 5 }, { "stlex", 4, 5 },
+    { NULL, 0, 0 }
+};
+
+static int v8m_stmt(const struct tok *t, int n, struct code *out,
+                    char *err, int errlen)
+{
+    const char *only = NULL;
+    if (mnemonic_is(&t[0], "clrex") && n == 1) {
+        t_clrex(out);
+        return 0;
+    }
+    for (const struct xa_ent *e = xa_tab; e->name; e++) {
+        int st = e->kind == 1 || e->kind == 5, rd = -1, rt, rn;
+        long off;
+        if (!mnemonic_is(&t[0], e->name))
+            continue;
+        if (e->kind >= 2 && !arch_v8m())
+            FAIL("%s is an ARMv8-M instruction (load-acquire and "
+                 "store-release), and this is not an ARMv8-M target",
+                 e->name);
+        if (n != (st ? 4 : 3))
+            FAIL("%s wants %s and a [reg] address", e->name,
+                 st ? "two registers" : "a register");
+        if (st)
+            rd = tok_reg(&t[1]);
+        rt = tok_reg(&t[st ? 2 : 1]);
+        if (!tok_mem(&t[st ? 3 : 2], &rn, &off) || off != 0)
+            FAIL("%s wants a [reg] address with no offset", e->name);
+        if (rt < 0 || (st && rd < 0))
+            FAIL("%s wants registers", e->name);
+        if (rt == 13 || rt == 15 || rn == 15 || rd == 13 || rd == 15)
+            FAIL("%s: sp and pc are not its registers", e->name);
+        if (st && (rd == rt || rd == rn))
+            FAIL("%s: the status register must differ from the others",
+                 e->name);
+        switch (e->kind) {
+        case 0: t_ldrexbh(out, rt, rn, e->size); break;
+        case 1: t_strexbh(out, rd, rt, rn, e->size); break;
+        case 2: t_lda(out, rt, rn, e->size, 0); break;
+        case 3: t_lda(out, rt, rn, e->size, 1); break;
+        case 4: t_stl(out, rt, rn, e->size); break;
+        default: t_stlex(out, rd, rt, rn, e->size); break;
+        }
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "tt") || mnemonic_is(&t[0], "ttt") ||
+        mnemonic_is(&t[0], "tta") || mnemonic_is(&t[0], "ttat"))
+        only = "tt";
+    else if (mnemonic_is(&t[0], "sg") || mnemonic_is(&t[0], "bxns") ||
+             mnemonic_is(&t[0], "blxns"))
+        only = "sg";
+    else if (mnemonic_is(&t[0], "vlstm") || mnemonic_is(&t[0], "vlldm"))
+        only = "vlstm";
+    if (!only)
+        return 1;
+    if (!arch_v8m())
+        FAIL("%.*s is an instruction of ARMv8-M's security extension, and "
+             "this is not an ARMv8-M target", t[0].len, t[0].s);
+    if (only[0] == 't') {
+        int rd = n == 3 ? tok_reg(&t[1]) : -1, rn = n == 3 ? tok_reg(&t[2]) : -1;
+        int alt = mnemonic_is(&t[0], "tta") || mnemonic_is(&t[0], "ttat");
+        int unpriv = mnemonic_is(&t[0], "ttt") || mnemonic_is(&t[0], "ttat");
+        if (rd < 0 || rn < 0)
+            FAIL("%.*s wants two registers", t[0].len, t[0].s);
+        if (rd == 13 || rd == 15 || rn == 15)
+            FAIL("%.*s: sp and pc are not its registers", t[0].len, t[0].s);
+        t_tt(out, rd, rn, alt, unpriv);
+        return 0;
+    }
+    if (mnemonic_is(&t[0], "sg")) {
+        if (n != 1)
+            FAIL("sg takes no operands");
+        t_sg(out);
+        return 0;
+    }
+    if (only[0] == 's') {
+        int rm = n == 2 ? tok_reg(&t[1]) : -1;
+        if (rm < 0 || rm == 15)
+            FAIL("%.*s wants a register", t[0].len, t[0].s);
+        t_bxns(out, rm, mnemonic_is(&t[0], "blxns"));
+        return 0;
+    }
+    /* vlstm/vlldm rn{, {d0-d15}}: the register list is the only one
+     * there is, and llvm-mc prints it */
+    if (g_arch != 8)
+        FAIL("%.*s is an ARMv8-M Mainline instruction", t[0].len, t[0].s);
+    {
+        int rn = n >= 2 ? tok_reg(&t[1]) : -1;
+        if (rn < 0 || rn == 15 || (n == 3 && t[2].s[0] != '{') || n > 3)
+            FAIL("%.*s wants a register", t[0].len, t[0].s);
+        t_vlstm(out, rn, mnemonic_is(&t[0], "vlldm"));
+    }
+    return 0;
+}
+
 static int one_stmt(const char *stmt, int len, struct code *out,
                     char *err, int errlen)
 {
@@ -703,6 +840,12 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         return r;
     }
 
+    {
+        int r = v8m_stmt(t, n, out, err, errlen);
+        if (r != 1)
+            return r;
+    }
+
     /* ---- no operands ---- */
     if (n == 1) {
         if (mnemonic_is(&t[0], "nop"))   { t_hint(out, T_HINT_NOP); return 0; }
@@ -771,6 +914,10 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         if (rd < 0) FAIL("\"%.*s\" is not a register", t[1].len, t[1].s);
         if (sys < 0) FAIL("\"%.*s\" is not an ARMv7-M special register",
                           t[2].len, t[2].s);
+        if (arch_thumb1() && sysreg_main_only(sys))
+            FAIL("\"%.*s\" is not a special register of %s: it is the "
+                 "Main Extension's", t[2].len, t[2].s,
+                 g_arch == 6 ? "ARMv6-M" : "ARMv8-M Baseline");
         t_mrs(out, rd, sys);
         return 0;
     }
@@ -781,6 +928,10 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         rn = tok_reg(&t[2]);
         if (sys < 0) FAIL("\"%.*s\" is not an ARMv7-M special register",
                           t[1].len, t[1].s);
+        if (arch_thumb1() && sysreg_main_only(sys))
+            FAIL("\"%.*s\" is not a special register of %s: it is the "
+                 "Main Extension's", t[1].len, t[1].s,
+                 g_arch == 6 ? "ARMv6-M" : "ARMv8-M Baseline");
         if (rn < 0) FAIL("\"%.*s\" is not a register", t[2].len, t[2].s);
         t_msr(out, sys, rn);
         return 0;
@@ -1311,6 +1462,31 @@ static int one_stmt(const char *stmt, int len, struct code *out,
          t[0].len, t[0].s, t_isa_a32 ? "ARMv7-A" : "ARMv7-M");
 }
 
+/* Did the statement just written at out->p[at..] produce a 32-bit
+ * instruction a Thumb-1 level's core lacks (t_thumb1_ok32), or an IT --
+ * or on ARMv6-M a CBZ? An instruction this assembler would otherwise widen
+ * silently, as `adds r0, r1, #200` does to adds.w, is refused here by
+ * name rather than becoming a HardFault on a Cortex-M0 or M23. */
+static int thumb1_bad(const struct code *c, int at)
+{
+    while (at + 1 < c->len) {
+        unsigned h = (unsigned)(c->p[at] | c->p[at + 1] << 8);
+        if ((h >> 11) >= 0x1d) {
+            unsigned h2 = at + 3 < c->len
+                ? (unsigned)(c->p[at + 2] | c->p[at + 3] << 8) : 0;
+            if (!t_thumb1_ok32(h, h2, g_arch == TASM_V8M_BASE))
+                return 1;
+            at += 4;
+            continue;
+        }
+        if (((h & 0xff00u) == 0xbf00u && (h & 0xfu)) ||
+            (g_arch == 6 && (h & 0xf500u) == 0xb100u))
+            return 1;
+        at += 2;
+    }
+    return 0;
+}
+
 int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
 {
     const char *p = text;
@@ -1333,6 +1509,7 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
         {
             char buf[512];
             int k = 0, r;
+            int at = out->len;
             if (len >= (int)sizeof buf) {
                 r = one_stmt(start, len, out, err, errlen);
             } else {
@@ -1346,6 +1523,13 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
             }
             if (r != 0)
                 return -1;
+            if (arch_thumb1() && !t_isa_a32 && thumb1_bad(out, at)) {
+                snprintf(err, (size_t)errlen, "\"%.*s\" is not an %s "
+                         "instruction: it encodes as a 32-bit Thumb-2 form "
+                         "that core does not have", len, start,
+                         g_arch == 6 ? "ARMv6-M" : "ARMv8-M Baseline");
+                return -1;
+            }
         }
         if (*p)
             p++;
@@ -1495,6 +1679,78 @@ int tasm_symform(const char *stmt, struct asm_symform *f)
 
 /* ---- the referee's input ------------------------------------------------ */
 
+/* ARMv8-M's additions, for tests/golden/thumbv8m-asm.sh: with `base` 0
+ * every one Mainline has beyond tasm_vocabulary's, with `base` 1 EVERY
+ * 32-bit instruction ARMv8-M Baseline has (and its 16-bit bxns/blxns),
+ * across the registers each field takes -- the branches excepted, which
+ * need labels and which the test writes itself. The stack-limit and the
+ * Non-secure special registers come from the table above, less the Main
+ * Extension's at Baseline. */
+static const char *const v8_regs[] = {
+    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10",
+    "r11", "r12", "lr", NULL
+};
+
+void tasm_vocabulary_v8m(FILE *f, int base)
+{
+    for (const struct xa_ent *e = xa_tab; e->name; e++)
+        for (int a = 0; v8_regs[a]; a++)
+            for (int b = 0; v8_regs[b]; b++) {
+                if (e->kind != 1 && e->kind != 5) {
+                    fprintf(f, "\t%s %s, [%s]\n", e->name, v8_regs[a],
+                            v8_regs[b]);
+                    continue;
+                }
+                /* the status register, rotated through the rest */
+                int d = (a + b + 1) % 14;
+                if (d == a || d == b)
+                    d = (d + 1) % 14;
+                if (d == a || d == b)
+                    d = (d + 1) % 14;
+                fprintf(f, "\t%s %s, %s, [%s]\n", e->name, v8_regs[d],
+                        v8_regs[a], v8_regs[b]);
+            }
+    for (int a = 0; v8_regs[a]; a++)
+        for (int b = 0; v8_regs[b]; b++)
+            fprintf(f, "\ttt %s, %s\n\tttt %s, %s\n\ttta %s, %s\n"
+                       "\tttat %s, %s\n", v8_regs[a], v8_regs[b],
+                    v8_regs[a], v8_regs[b], v8_regs[a], v8_regs[b],
+                    v8_regs[a], v8_regs[b]);
+    fprintf(f, "\tsg\n");
+    for (int a = 0; v8_regs[a]; a++)
+        fprintf(f, "\tbxns %s\n\tblxns %s\n", v8_regs[a], v8_regs[a]);
+    for (const struct sysreg *r = sysregs_v8m; r->name; r++) {
+        if (base && sysreg_main_only(r->sysm))
+            continue;
+        fprintf(f, "\tmrs r3, %s\n\tmsr %s, r4\n", r->name, r->name);
+    }
+    if (!base) {
+        fprintf(f, "\tvlstm sp\n\tvlldm sp\n\tvlstm r4\n\tvlldm r12\n");
+        return;
+    }
+    /* the rest of Baseline's 32-bit set */
+    for (const struct sysreg *r = sysregs; r->name; r++) {
+        if (sysreg_main_only(r->sysm))
+            continue;
+        fprintf(f, "\tmrs r5, %s\n\tmsr %s, r6\n", r->name, r->name);
+    }
+    fprintf(f, "\tdsb sy\n\tdmb sy\n\tisb sy\n\tclrex\n");
+    for (int a = 0; v8_regs[a]; a++) {
+        int b = (a + 3) % 14, c = (a + 7) % 14;
+        fprintf(f, "\tsdiv %s, %s, %s\n\tudiv %s, %s, %s\n",
+                v8_regs[a], v8_regs[b], v8_regs[c],
+                v8_regs[c], v8_regs[a], v8_regs[b]);
+        fprintf(f, "\tmovw %s, #%d\n\tmovt %s, #%d\n\tmovw %s, #65535\n",
+                v8_regs[a], 0x1234 + 0x1111 * a, v8_regs[b], 0xfedc - 0x123 * a,
+                v8_regs[c]);
+        fprintf(f, "\tldrex %s, [%s]\n\tldrex %s, [%s, #%d]\n",
+                v8_regs[a], v8_regs[b], v8_regs[c], v8_regs[a], 4 * (a * 18 % 256));
+        fprintf(f, "\tstrex %s, %s, [%s]\n\tstrex %s, %s, [%s, #1020]\n",
+                v8_regs[a], v8_regs[b], v8_regs[c],
+                v8_regs[b], v8_regs[c], v8_regs[a]);
+    }
+}
+
 void tasm_vocabulary(FILE *f)
 {
     fprintf(f, "\tnop\n\tyield\n\twfe\n\twfi\n\tsev\n");
@@ -1531,6 +1787,8 @@ void tasm_vocabulary(FILE *f)
         fprintf(f, "\t%s r0, [r1, #8]\n", e->name);
     fprintf(f, "\tldrex r0, [r1]\n\tldrex r2, [r3, #16]\n");
     fprintf(f, "\tstrex r0, r1, [r2]\n\tstrex r3, r4, [r5, #8]\n");
+    fprintf(f, "\tldrexb r6, [r7]\n\tldrexh r8, [r9]\n");
+    fprintf(f, "\tstrexb r0, r1, [r2]\n\tstrexh r10, r11, [r12]\n\tclrex\n");
     /* What an RTOS's context switch is made of. The multiple transfers
      * name high registers or the forms with no 16-bit encoding, which is
      * the only case where llvm-mc and this assembler (always 32-bit) pick

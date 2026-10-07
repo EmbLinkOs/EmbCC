@@ -2315,6 +2315,13 @@ static void gen_ins(struct t_fn *F, int n)
             break;
         default: break;
         }
+        /* an eight-byte atomic is refused by name there */
+        if (wide && (i->op == IR_XCHG || i->op == IR_XADD ||
+                     i->op == IR_ARMW || i->op == IR_CAS ||
+                     i->op == IR_CMPXCHG)) {
+            gen_atomic(F, n);
+            return;
+        }
         if (wide && i->op != IR_CMP && i->op != IR_BRZ &&
             i->op != IR_BRNZ && i->op != IR_CALL && i->op != IR_RET &&
             i->op != IR_I2F && i->op != IR_F2I && i->op != IR_F2F) {
@@ -2849,53 +2856,13 @@ static void pool_point(struct t_fn *F, long est, int natural)
  * inline asm template that used Thumb-2, stops the function here by name
  * rather than at a HardFault.
  *
- * ARMv8-M Baseline has CBZ/CBNZ and these 32-bit ones as well, each matched
- * on its fixed bits (the ARMv8-M ARM's encodings, which
- * tests/golden/thumbv8mbase-encoding.sh checks against llvm-mc). */
-static int v8b_ok32(unsigned h, unsigned h2)
-{
-    unsigned op = (h2 >> 4) & 0xfu;
-    if (((h & 0xfff0u) == 0xfb90u || (h & 0xfff0u) == 0xfbb0u) &&
-        (h2 & 0xf0f0u) == 0xf0f0u)
-        return 1;                                    /* SDIV, UDIV */
-    if ((h & 0xfff0u) == 0xe850u && (h2 & 0x0f00u) == 0x0f00u)
-        return 1;                                    /* LDREX */
-    if ((h & 0xfff0u) == 0xe840u)
-        return 1;                                    /* STREX; TT, TTT, TTA, TTAT */
-    if ((h & 0xfff0u) == 0xe8d0u && (h2 & 0x0f0fu) == 0x0f0fu &&
-        (op == 4 || op == 5 || op == 8 || op == 9 || op == 10 ||
-         op == 12 || op == 13 || op == 14))
-        return 1;      /* LDREXB, LDREXH, LDAB, LDAH, LDA, LDAEXB/H, LDAEX */
-    if ((h & 0xfff0u) == 0xe8c0u && (h2 & 0x0f00u) == 0x0f00u &&
-        (op == 4 || op == 5 || op == 12 || op == 13 || op == 14 ||
-         ((op == 8 || op == 9 || op == 10) && (h2 & 0xfu) == 0xfu)))
-        return 1;      /* STREXB/H, STLEXB/H, STLEX; STLB, STLH, STL */
-    if (h == 0xf3bfu && h2 == 0x8f2fu)
-        return 1;                                    /* CLREX */
-    if (h == 0xe97fu && h2 == 0xe97fu)
-        return 1;                                    /* SG */
-    if (((h & 0xfbf0u) == 0xf240u || (h & 0xfbf0u) == 0xf2c0u) &&
-        !(h2 & 0x8000u))
-        return 1;                                    /* MOVW, MOVT */
-    if ((h & 0xf800u) == 0xf000u && (h2 & 0xd000u) == 0x9000u)
-        return 1;                                    /* B.W */
-    return 0;
-}
-
+ * ARMv8-M Baseline has CBZ/CBNZ and more 32-bit ones as well, each matched
+ * on its fixed bits by t_thumb1_ok32 (emit.c), which the assembler asks
+ * too; tests/golden/thumbv8mbase-encoding.sh checks that set against
+ * llvm-mc. */
 static int v6_ok32(unsigned h, unsigned h2)
 {
-    if (target_thumb_v8m_base() && v8b_ok32(h, h2))
-        return 1;
-    if ((h & 0xf800u) == 0xf000u && (h2 & 0xd000u) == 0xd000u)
-        return 1;                                    /* BL */
-    if (h == 0xf3efu && (h2 & 0xf000u) == 0x8000u)
-        return 1;                                    /* MRS */
-    if ((h & 0xfff0u) == 0xf380u && (h2 & 0xff00u) == 0x8800u)
-        return 1;                                    /* MSR */
-    if (h == 0xf3bfu && (h2 & 0xff0fu) == 0x8f0fu &&
-        ((h2 >> 4) & 0xf) >= 4 && ((h2 >> 4) & 0xf) <= 6)
-        return 1;                                    /* DSB, DMB, ISB */
-    return 0;
+    return t_thumb1_ok32(h, h2, target_thumb_v8m_base());
 }
 
 static void v6_scan(struct t_fn *F, int from)

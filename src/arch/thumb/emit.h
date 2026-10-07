@@ -322,6 +322,22 @@ void t_vcmpe(struct code *c, int n, int m, int dbl);
 void t_vpush_s(struct code *c, int first, int n, int pop);
 void t_ldrexbh(struct code *c, int rt, int rn, int size);
 void t_strexbh(struct code *c, int rd, int rt, int rn, int size);
+/* ARMv8-M (Mainline and Baseline): load-acquire (`ex` its exclusive form),
+ * store-release, and store-release exclusive, at `size` 1, 2 or 4. */
+void t_lda(struct code *c, int rt, int rn, int size, int ex);
+void t_stl(struct code *c, int rt, int rn, int size);
+void t_stlex(struct code *c, int rd, int rt, int rn, int size);
+/* ARMv8-M's security extension: tt (alt: tta, unpriv: ttt; both: ttat),
+ * sg, bxns/blxns (link) and Mainline's vlstm/vlldm (load). */
+void t_tt(struct code *c, int rd, int rn, int alt, int unpriv);
+void t_sg(struct code *c);
+void t_bxns(struct code *c, int rm, int link);
+void t_vlstm(struct code *c, int rn, int load);
+/* Does an ARMv6-M core have the 32-bit instruction h:h2 -- or, with
+ * `v8b`, an ARMv8-M Baseline one? (BL, MRS, MSR and the barriers; and
+ * Baseline's divides, exclusives, acquire/release, MOVW/MOVT, B.W, CLREX,
+ * TT and SG.) */
+int t_thumb1_ok32(unsigned h, unsigned h2, int v8b);
 void t_clrex(struct code *c);
 int t_bcond16(struct code *c, int cond);
 int t_b16(struct code *c);
