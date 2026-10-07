@@ -114,7 +114,7 @@ for t in $ALL; do
     refuse $t "which is little-endian" -mbig-endian
     refuse $t "dumps GCC's internal representation" -fdump-rtl-expand
     refuse $t "dumps GCC's internal representation" -fdump-tree-all
-    refuse $t "dumps GCC's internal representation" -fcallgraph-info=su
+    refuse $t "dumps GCC's internal representation" -fcallgraph-info=da
 done
 for t in $THUMB; do
     for abi in apcs-gnu atpcs iwmmxt; do

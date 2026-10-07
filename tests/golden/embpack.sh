@@ -9,6 +9,7 @@ set -u
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
 EMBPACK=${EMBPACK:-./embpack}
+[ -x "$EMBPACK" ] || { echo "FAIL: $EMBPACK is not built (make embpack)"; exit 1; }
 OC=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
 echo "TEST-MARKER embpack"
 command -v "$OC" >/dev/null 2>&1 || { echo "SKIP: $OC not found"; exit 0; }

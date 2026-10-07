@@ -223,7 +223,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar embsvd embpack embmap
+all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -271,17 +271,31 @@ embar: tools/embar/embar.c
 embsvd: tools/embsvd/embsvd.c
 	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
 
+# embmap -- where an image's flash and RAM go: sections, regions, the
+# biggest symbols, the bytes by input file from a map, and the growth
+# between two builds (tools/embmap). ISO C and standalone, like embar.
+embmap: tools/embmap/embmap.c
+	$(CC) $(CFLAGS) -o $@ tools/embmap/embmap.c
+
 # embpack -- a linked image as the file a programmer or bootloader takes:
 # raw binary, Intel HEX, S-records or UF2, with a CRC-32 stamped into a
 # symbol or appended and a JSON manifest (tools/embpack). ISO C and
 # standalone, like embar.
 embpack: tools/embpack/embpack.c
 	$(CC) $(CFLAGS) -o $@ tools/embpack/embpack.c
-# embmap -- where an image's flash and RAM go: sections, regions, the
-# biggest symbols, the bytes by input file from a map, and the growth
-# between two builds (tools/embmap). ISO C and standalone, like embar.
-embmap: tools/embmap/embmap.c
-	$(CC) $(CFLAGS) -o $@ tools/embmap/embmap.c
+
+# embrt -- the worst-case stack of each entry point and interrupt, from
+# the compiler's frames (-fstack-usage), its call graph
+# (-fcallgraph-info=su) and the objects' call relocations (tools/embrt).
+# ISO C and standalone, like embar.
+embrt: tools/embrt/embrt.c
+	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
+
+# embsim -- a Cortex-M simulator: runs an image on a model of the board
+# QEMU models, counting instructions and estimating cycles with the
+# table tools/bench uses (tools/bench/cost.h). ISO C and libm.
+embsim: tools/embsim/embsim.c tools/bench/cost.h
+	$(CC) $(CFLAGS) -o $@ tools/embsim/embsim.c -lm
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
@@ -436,7 +450,8 @@ check: embcc libc-x86_64 libcxx-x86_64
 # embas belongs here too: tests/golden/x86_64/assembler.sh runs it, and
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
-test: embcc embread embld embdbg embls embas embar embsvd libc-x86_64 \
+test: embcc embread embld embdbg embls embas embar embsvd embmap embpack \
+      embrt embsim libc-x86_64 \
       libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 

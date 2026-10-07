@@ -303,6 +303,13 @@ static int want_debug;
  * page to catch an overflow and nothing to grow into. */
 static int want_stack_usage;
 
+/* -fcallgraph-info[=su]: write FILE.ci beside the object, the call graph
+ * in GCC's format (a VCG graph: a node per function, with its frame under
+ * =su, an edge per call site, and calls through a pointer to the
+ * __indirect_call placeholder), so the stack analysers written for GCC's
+ * files -- and embrt -- read EmbCC's. */
+static int want_callgraph, callgraph_su;
+
 /* -ffunction-sections / -fdata-sections: each function in .text.NAME,
  * each object in .data.NAME, .rodata.NAME or .bss.NAME, as GCC names
  * them, so a linker's --gc-sections can drop what nothing reaches. ELF
@@ -1090,6 +1097,8 @@ static int save_temps(int argc, char **argv, const char *in, const char *out,
                 !strcmp(a, "-MM") || !strcmp(a, "-MD") ||
                 !strcmp(a, "-MMD") || !strcmp(a, "-MP") ||
                 !strcmp(a, "-fstack-usage") || !strcmp(a, "-fremarks") ||
+                !strcmp(a, "-fcallgraph-info") ||
+                !strcmp(a, "-fcallgraph-info=su") ||
                 !strcmp(a, "-fremarks=json"))
                 continue;           /* this command's own outputs */
             av[k++] = a;
@@ -2000,10 +2009,20 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * that reachability dropped, still has a definition in the AST
          * and no frame — reporting it as zero would read as "this one
          * uses no stack" rather than "this one is not here". */
+        /* A function with a variable-length array or alloca moves sp at
+         * run time by an amount no frame size bounds: GCC calls that
+         * "dynamic", and a stack analysis must not take its number as the
+         * whole truth. */
         for (struct func *fn = u->funcs; fn; fn = fn->next)
-            if (!fn->absorbed && fn->has_defn && fn->code_len > 0)
-                ob_fmt(&sub, "%s:%d:%s\t%d\tstatic\n",
-                       in, fn->line, fn->name, fn->stack_bytes);
+            if (!fn->absorbed && fn->has_defn && fn->code_len > 0) {
+                int dyn = 0;
+                for (int k = 0; k < iu->nfuncs; k++)
+                    if (iu->funcs[k].src == fn)
+                        dyn = iu->funcs[k].has_alloca;
+                ob_fmt(&sub, "%s:%d:%s\t%d\t%s\n",
+                       in, fn->line, fn->name, fn->stack_bytes,
+                       dyn ? "dynamic" : "static");
+            }
         strcpy(sup, base);
         dot = strrchr(sup, '.');
         strcpy((char *)(dot && !strchr(dot, '/') ? dot : sup + strlen(sup)),
@@ -2013,6 +2032,88 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             fprintf(stderr, "embcc: cannot write '%s'\n", sup);
         free(sup);
         ob_free(&sub);
+    }
+
+    /* -fcallgraph-info: the calls left after optimisation, beside the
+     * object, in GCC's .ci format. A function the inliner absorbed is not
+     * a node, and its calls are its callers' now; a call through a pointer
+     * goes to the __indirect_call placeholder, as GCC writes it. What the
+     * IR cannot show -- a backend's call to a run-time helper for an
+     * operation the target lacks -- is in the object's relocations, which
+     * is where embrt looks for it. */
+    if (want_callgraph) {
+        struct outbuf cg = { NULL, 0, 0 };
+        const char *base = out;
+        if (!base) {
+            const char *sl = strrchr(in, '/');
+            base = sl ? sl + 1 : in;
+        }
+        char *cip = xmalloc(strlen(base) + 4);
+        const char *dot;
+        char *seen = xcalloc((size_t)(iu->nsyms ? iu->nsyms : 1), 1);
+        int indirect_node = 0;
+        ob_fmt(&cg, "graph: { title: \"%s\"\n", in);
+        for (int k = 0; k < iu->nfuncs; k++) {
+            struct func *fn = iu->funcs[k].src;
+            if (!fn || fn->absorbed || !fn->has_defn || fn->code_len <= 0)
+                continue;
+            if (callgraph_su)
+                ob_fmt(&cg, "node: { title: \"%s\" label: \"%s\\n%s:%d:%d"
+                       "\\n%d bytes (%s)\" }\n", fn->name, fn->name, in,
+                       fn->name_line ? fn->name_line : fn->line,
+                       fn->name_col ? fn->name_col : 1, fn->stack_bytes,
+                       iu->funcs[k].has_alloca ? "dynamic" : "static");
+            else
+                ob_fmt(&cg, "node: { title: \"%s\" label: \"%s\\n%s:%d:%d\" }\n",
+                       fn->name, fn->name, in,
+                       fn->name_line ? fn->name_line : fn->line,
+                       fn->name_col ? fn->name_col : 1);
+            for (int j = 0; j < iu->nsyms; j++)
+                if (iu->syms[j].name && !strcmp(iu->syms[j].name, fn->name))
+                    seen[j] = 1;
+        }
+        for (int k = 0; k < iu->nfuncs; k++) {
+            struct ir_func *f = &iu->funcs[k];
+            struct func *fn = f->src;
+            if (!fn || fn->absorbed || !fn->has_defn || fn->code_len <= 0)
+                continue;
+            for (int n = 0; n < f->nins; n++) {
+                const struct ir_ins *ci = &f->ins[n];
+                const char *callee;
+                if (ci->op != IR_CALL)
+                    continue;
+                if (ci->indirect || ci->callee_sym < 0 ||
+                    ci->callee_sym >= iu->nsyms) {
+                    if (!indirect_node) {
+                        ob_fmt(&cg, "node: { title: \"__indirect_call\" label: "
+                               "\"Indirect Call Placeholder\" shape : "
+                               "ellipse }\n");
+                        indirect_node = 1;
+                    }
+                    callee = "__indirect_call";
+                } else {
+                    callee = iu->syms[ci->callee_sym].name;
+                    if (!seen[ci->callee_sym]) {
+                        seen[ci->callee_sym] = 1;
+                        ob_fmt(&cg, "node: { title: \"%s\" label: \"%s\" "
+                               "shape : ellipse }\n", callee, callee);
+                    }
+                }
+                ob_fmt(&cg, "edge: { sourcename: \"%s\" targetname: \"%s\" "
+                       "label: \"%s:%d:%d\" }\n", fn->name, callee, in,
+                       ci->line, ci->col);
+            }
+        }
+        ob_fmt(&cg, "}\n");
+        strcpy(cip, base);
+        dot = strrchr(cip, '.');
+        strcpy((char *)(dot && !strchr(dot, '/') ? dot : cip + strlen(cip)),
+               ".ci");
+        if (plat_write_file(cip, (const unsigned char *)cg.p, cg.n) != 0)
+            fprintf(stderr, "embcc: cannot write '%s'\n", cip);
+        free(seen);
+        free(cip);
+        ob_free(&cg);
     }
 
     /* Lay out the defined globals: initialized -> .data, zero -> .bss,
@@ -4695,6 +4796,10 @@ int main(int argc, char **argv)
                 return 1;
             }
             g_dumpbase = argv[++i];
+        } else if (strcmp(argv[i], "-fcallgraph-info") == 0 ||
+                   strcmp(argv[i], "-fcallgraph-info=su") == 0) {
+            want_callgraph = 1;
+            callgraph_su = argv[i][16] == '=';
         } else if (strncmp(argv[i], "-fdump-", 7) == 0 ||
                    strncmp(argv[i], "-fcallgraph-info", 16) == 0) {
             /* GCC's own internals -- its RTL, its trees, its call graph
