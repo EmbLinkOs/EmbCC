@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../arch/x86_64/emit.h"
 #include "../arch/x86_64/topasm.h"
@@ -370,6 +371,46 @@ static int want_fix;
  * (docs/manual/diagnostics.md T5) and what a build's "does this still compile" step
  * wants. */
 static int syntax_only;
+
+/* -ftime-report, as GCC and clang spell it: where a compile's time went,
+ * phase by phase, on stderr at exit. clock() is processor time and ISO C,
+ * so it means the same on every host EmbCC runs on. A phase is marked
+ * when it ENDS; what was not marked by the end (writing the object, the
+ * link) is reported as the rest. */
+static int g_time_report;
+static clock_t g_time_start, g_time_last;
+static struct { const char *name; double secs; } g_phase[12];
+static int g_nphase;
+static void time_mark(const char *name)
+{
+    if (!g_time_report)
+        return;
+    clock_t now = clock();
+    for (int k = 0; k < g_nphase; k++)
+        if (!strcmp(g_phase[k].name, name)) {
+            g_phase[k].secs += (double)(now - g_time_last) / CLOCKS_PER_SEC;
+            g_time_last = now;
+            return;
+        }
+    if (g_nphase < (int)(sizeof g_phase / sizeof g_phase[0])) {
+        g_phase[g_nphase].name = name;
+        g_phase[g_nphase++].secs = (double)(now - g_time_last) / CLOCKS_PER_SEC;
+    }
+    g_time_last = now;
+}
+static void time_report(void)
+{
+    if (!g_time_report)
+        return;
+    time_mark("object and the rest");
+    double total = (double)(clock() - g_time_start) / CLOCKS_PER_SEC;
+    fprintf(stderr, "\nExecution times (seconds, processor time)\n");
+    for (int k = 0; k < g_nphase; k++)
+        fprintf(stderr, " %-22s: %8.3f (%3.0f%%)\n", g_phase[k].name,
+                g_phase[k].secs,
+                total > 0 ? 100.0 * g_phase[k].secs / total : 0.0);
+    fprintf(stderr, " %-22s: %8.3f\n", "TOTAL", total);
+}
 /* Tool mode (§17): `embcc inspect <stage> file.c` stops the pipeline at a
  * stage and prints what it built, instead of producing an object. */
 static const char *inspect_stage;
@@ -1560,7 +1601,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * they are marked system so a warning inside them is not the
      * caller's problem. */
     incdirs_with_defaults();
+    time_mark("startup");
     char *pp = cpp_process(in, src, incdirs, nincdirs);
+    time_mark("preprocess");
     if (dep_mode && dep_only) {       /* -M/-MM: the rule is the output */
         write_deps(in, out);
         return 0;
@@ -1623,6 +1666,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         cxx_set_exceptions(want_exceptions);
         cxx_set_rtti(want_rtti);
         pp = cxx_translate(in, pp);
+        time_mark("C++ front end");
         if (cx_nerrors) {
             /* Every C++ error is out; what it lowered to describes a
              * program that does not exist, so nothing downstream runs. */
@@ -1650,6 +1694,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     }
 
     struct unit *u = parse_unit(in, pp);
+    time_mark("parse");
     if (parse_error_count()) {
         /* Every syntax error is out; the tree is not whole, so nothing
          * downstream runs on it (a later pass would only invent errors). */
@@ -1657,6 +1702,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 1;                     /* (--fix still gets its turn) */
     }
     sema_check(u);
+    time_mark("semantic analysis");
     if (sema_error_count()) {
         diag_terminated(sema_error_count());
         return 1;                     /* (--fix still gets its turn) */
@@ -1759,7 +1805,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
 
     remarks_enable(want_remarks || why_decision != NULL);
     struct ir_unit *iu = irgen(u);
+    time_mark("IR generation");
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
+    time_mark("optimization");
     target_set_opt_size(opt_for_size);
 
     /* An inline definition (C11 6.7.4p7, decided by sema) has done its
@@ -2024,6 +2072,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         codegen_unit(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
                      &fs, &nfs, want_debug, opt_level >= 1, no_sse,
                      opt_level >= 1);
+    time_mark("code generation");
     resolve_label_data(u);
 
     /* The groups, as codegen laid them out (the sort above). */
@@ -4560,6 +4609,12 @@ int main(int argc, char **argv)
             want_stack_usage = 1;
         } else if (strcmp(argv[i], "-fsyntax-only") == 0) {
             syntax_only = 1;
+        } else if (strcmp(argv[i], "-ftime-report") == 0) {
+            if (!g_time_report) {
+                g_time_report = 1;
+                g_time_start = g_time_last = clock();
+                atexit(time_report);
+            }
         } else if (strcmp(argv[i], "-fremarks") == 0) {
             want_remarks = 1;
         } else if (strcmp(argv[i], "-fremarks=json") == 0) {
