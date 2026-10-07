@@ -92,7 +92,8 @@ annulled slot runs only when the branch is taken).
 
 Every branch, call and jump has a DELAY SLOT, as on MIPS. The first
 backend fills every slot with a `nop` except where an instruction is
-part of the idiom (`ret; restore`, the annulled `mov 1`). A branch's
+part of the idiom (`ret; restore`, the annulled `mov 1`, the `sll` in a
+jump table's `call .+8`). A branch's
 22-bit displacement is counted in words from the branch itself (+-8 MiB);
 a function whose branch does not reach is refused by name. `call` has a
 30-bit displacement and reaches the whole address space.
@@ -106,6 +107,13 @@ writes 0 to `%y` first, a signed one the dividend's sign word (`sra x,
 (LEON3 has no write delay on `%y`). A remainder is `a - (a/b)*b`. A
 division by zero traps (tt 0x2a); `INT_MIN / -1` saturates to INT_MAX
 (both undefined in C). 64-bit divides call lib/rt (`__divdi3`, ...).
+
+## Switches
+
+A dense `switch` is a table of 32-bit offsets in .text after its
+dispatch, measured from a `call .+8` that finds its own address in
+`%o7` -- so it needs no relocation; one unsigned compare sends both sides
+of the range to the default (`bcc`).
 
 ## Misaligned accesses
 
@@ -138,8 +146,9 @@ class 32, big-endian, `e_flags` 0 (what clang writes for V8).
   trap handlers, or the ninth nested `save` stops the processor. The
   harness installs a trap table (TBR) whose overflow and underflow entries
   jump to the classic handlers (save the oldest window to its `%sp` and
-  rotate WIM right; restore it and rotate WIM left), with WIM = 2 at CWP 0
-  and traps enabled. The handlers and every privileged instruction are
+  rotate WIM right; restore it and rotate WIM left), with one invalid
+  window just behind the two in use (the startup's and its caller's) and
+  traps enabled with every interrupt masked (PIL 15). The handlers and every privileged instruction are
   hand-encoded words in tests/harness/sparc/boot.c, each with its
   assembly, refereed by sparc-encoding's encoder through the board tests
   (a deep recursion in the exec corpus overflows and underflows the
@@ -152,8 +161,7 @@ class 32, big-endian, `e_flags` 0 (what clang writes for V8).
 
 ## What the first backend refuses
 
-By name: computed goto, jump tables (a dense switch stays a decision
-tree), atomics other than a word (`casa` and `swap` are word-sized),
+By name: computed goto, atomics other than a word (`casa` and `swap` are word-sized),
 `__builtin_frame_address`/`__builtin_return_address`, inline assembly
 and `.s` files (there is no SPARC assembler in EmbCC yet), naked and
 interrupt functions, C++, a scalar local aligned beyond 8, a branch beyond
@@ -172,4 +180,29 @@ and `-mbig-endian`.
 
 ## Status
 
-Work in progress; see the commit log of the `sparc-leon3` branch.
+Done: the encoder (2039 forms against llvm-mc), the target, the code
+generator at -O0 and with the register allocator at -O1/-O2/-Os, EmbLD,
+lib/rt and lib/libc, the board, and the goldens above. The exec corpus
+passes on leon3_generic at every level (199 of 199: 21 refereed against
+clang for an LP64 or little-endian assumption, 18 not applicable, plus
+SPARC's own long-double-quad.c), also with the register pool shrunk to 2
+and 4 and with the pair pass forced on and off. lib/libc prints on the
+board what it prints on x86-64 (libc-embedded), and -g verifies
+(debug-embedded).
+
+Known gaps, none of which miscompiles:
+
+- Every delay slot is a nop (except `ret; restore` and the annulled `mov`
+  of a 0/1 result), and every function opens a window even when it is a
+  leaf; clang fills slots and leaves leaves windowless. Both are size and
+  speed, not correctness.
+- A local struct asking for alignment beyond 8 is placed at 8, as on MIPS
+  (no SPARC instruction needs more); an over-aligned scalar is refused.
+- No assembler: inline assembly with instructions, naked functions and
+  `.s` files are refused. The harness writes its privileged instructions
+  as words for that reason.
+- No hardware floating point (`-mhard-float` refused), no `-mflat`.
+- clang-compiled code doing long double arithmetic cannot use EmbCC's
+  lib/rt (clang passes binary128 helper operands in registers).
+- No WRY nops: as clang does for -mcpu=leon3, a divide follows `wr %y`
+  directly (LEON3 has no delay on it; an older V8 part might).
