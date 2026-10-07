@@ -67,6 +67,10 @@ int vlate(int a, int b, int c, int d, int e, ...);
  * not fit in a4-a7, at six words plus its own */
 int vsix(int a, int b, int c, int d, int e, int f, ...);
 int vstraddle(int a, int b, int c, int d, struct s12 s, ...);
+/* a variadic _Complex is its two parts, each its own argument: the real
+ * part in the last register word(s), the imaginary one on the stack */
+double vcd(int a, int b, int c, ...);
+float vcf(int a, int b, int c, int d, int e, ...);
 int vlist(int n, va_list ap);              /* defined by the callee */
 int vforward(int n, ...);                  /* the callee's, calling vlist */
 int caller_vlist(int n, va_list ap);       /* defined by the CALLER */

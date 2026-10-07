@@ -69,6 +69,8 @@ int main(void)
     putn(vlate(1, 2, 3, 4, 5, 6, 7LL, 8));
     putn(vsix(1, 2, 3, 4, 5, 6, 7, 8.0));
     { struct s12 s = { 7, 8, 9 }; putn(vstraddle(1, 2, 3, 4, s, 5, 6)); }
+    { _Complex double z; __real__ z = 1.5; __imag__ z = 2.25; putd(vcd(1, 2, 3, z, 4)); }
+    { _Complex float z; __real__ z = 1.5f; __imag__ z = 2.25f; putf(vcf(1, 2, 3, 4, 5, z, 6)); }
     putn(pass_on(4, 1, 2, 3, 4)); putn(pass_on(7, 1, 2, 3, 4, 5, 6, 7));
     putn(vforward(3, 5, 6, 7)); putn(vforward(8, 1, 1, 1, 1, 1, 1, 1, 9));
     putn(pick(0)(21)); putn(pick(1)(7));

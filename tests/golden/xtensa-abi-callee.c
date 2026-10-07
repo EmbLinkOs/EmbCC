@@ -92,6 +92,24 @@ int vstraddle(int a, int b, int c, int d, struct s12 s, ...)
     va_end(ap);
     return t;
 }
+double vcd(int a, int b, int c, ...)
+{
+    va_list ap; _Complex double z; double t;
+    va_start(ap, c);
+    z = va_arg(ap, _Complex double);
+    t = a + b + c + __real__ z * 10 + __imag__ z * 100 + va_arg(ap, int) * 1000;
+    va_end(ap);
+    return t;
+}
+float vcf(int a, int b, int c, int d, int e, ...)
+{
+    va_list ap; _Complex float z; float t;
+    va_start(ap, e);
+    z = va_arg(ap, _Complex float);
+    t = a + b + c + d + e + __real__ z * 10 + __imag__ z * 100 + va_arg(ap, int) * 1000;
+    va_end(ap);
+    return t;
+}
 int vlist(int n, va_list ap)
 {
     int t = 0;

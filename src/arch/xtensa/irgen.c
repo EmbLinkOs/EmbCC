@@ -18,7 +18,8 @@
  *            array = ap.stk; }
  *     return *(T *)(array + ap.ndx - size4);
  *
- * A `float` arrives as a double. A struct is its own bytes, by value.
+ * A `float` arrives as a double. A struct is its own bytes, by value; a
+ * _Complex is its two parts, each taken as an argument of its own.
  */
 #include "../../ir/irgen_int.h"
 
@@ -31,29 +32,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-int irg_va_arg_xtensa(struct ir_func *fn, struct expr *e)
+/* One step of the walk: the address of the next argument of `size`
+ * bytes and `align`, with ap.ndx advanced past it. apa is &ap. */
+static int va_step(struct ir_func *fn, struct expr *lv, int apa, long size,
+                   long align)
 {
-    struct type *rt = e->ty;
-    int flt = ty_is_float(rt);
     struct type *word = ty_int_of_size(4, 1);
-    long size = ty_size(rt);
-    long align = ty_align(rt);
-    long size4;
-    int apa, ndx, newndx, sum, arr, l_stk, l_have, l_over, addr;
-    int sdst = rt->kind == TY_STRUCT ? irg_va_struct_slot(fn, e) : -1;
+    long size4 = (size + 3) & ~3L;
+    int ndx, newndx, arr, l_stk, l_have, l_over, addr;
 
-    if (flt && rt->kind == TY_FLOAT) {          /* promoted to double */
-        size = 8;
-        align = 8;
-    }
     if (align > 16)
         align = 16;
-    size4 = (size + 3) & ~3L;
-
-    apa = gen_addr(fn, e->lhs);
     ndx = emit_load(fn, emit_bin(fn, IR_ADD, apa, emit_const(fn, 8, 4), 4, 1),
                     word);
-    irg_mark_natural(fn, e->lhs);
+    irg_mark_natural(fn, lv);
     if (align > 4)
         ndx = emit_bin(fn, IR_AND,
                        emit_bin(fn, IR_ADD, ndx, emit_const(fn, align - 1, 4),
@@ -72,7 +64,7 @@ int irg_va_arg_xtensa(struct ir_func *fn, struct expr *e)
     emit_mov(fn, arr, emit_load(fn, emit_bin(fn, IR_ADD, apa,
                                              emit_const(fn, 4, 4), 4, 1),
                                 word));
-    irg_mark_natural(fn, e->lhs);
+    irg_mark_natural(fn, lv);
     emit_jmp(fn, l_over);
     /* on the stack: one that straddled the register words is wholly
      * there, at index 32 */
@@ -82,16 +74,45 @@ int irg_va_arg_xtensa(struct ir_func *fn, struct expr *e)
     emit_mov(fn, newndx, emit_const(fn, 32 + size4, 4));
     emit_label(fn, l_have);
     emit_mov(fn, arr, emit_load(fn, apa, word));
-    irg_mark_natural(fn, e->lhs);
+    irg_mark_natural(fn, lv);
     emit_label(fn, l_over);
     emit_store(fn, emit_bin(fn, IR_ADD, apa, emit_const(fn, 8, 4), 4, 1),
                newndx, word);
-    irg_mark_natural(fn, e->lhs);
-    sum = emit_bin(fn, IR_ADD, arr,
-                   emit_bin(fn, IR_SUB, newndx, emit_const(fn, size4, 4), 4,
-                            1), 4, 1);
+    irg_mark_natural(fn, lv);
     addr = new_temp(fn);
-    emit_mov(fn, addr, sum);
+    emit_mov(fn, addr, emit_bin(fn, IR_ADD, arr,
+                                emit_bin(fn, IR_SUB, newndx,
+                                         emit_const(fn, size4, 4), 4, 1),
+                                4, 1));
+    return addr;
+}
+
+int irg_va_arg_xtensa(struct ir_func *fn, struct expr *e)
+{
+    struct type *rt = e->ty;
+    int flt = ty_is_float(rt);
+    long size = ty_size(rt);
+    long align = ty_align(rt);
+    int sdst = rt->kind == TY_STRUCT ? irg_va_struct_slot(fn, e) : -1;
+    int apa, addr;
+
+    if (flt && rt->kind == TY_FLOAT) {          /* promoted to double */
+        size = 8;
+        align = 8;
+    }
+    apa = gen_addr(fn, e->lhs);
+
+    /* A _Complex was passed as its two parts, each an argument of its
+     * own (xtensa_gimplify_va_arg_expr does the same): the real part may
+     * be in a7 and the imaginary one on the stack. */
+    if (sdst >= 0 && rt->is_complex && rt->celem) {
+        long esz = ty_size(rt->celem);
+        int re = va_step(fn, e->lhs, apa, esz, esz);
+        irg_va_copy(fn, sdst, 0, re, esz);
+        irg_va_copy(fn, sdst, esz, va_step(fn, e->lhs, apa, esz, esz), esz);
+        return sdst;
+    }
+    addr = va_step(fn, e->lhs, apa, size, align);
 
     /* Every slot is a whole word, 8-aligned for an 8-aligned type, so the
      * reads are natural. */
