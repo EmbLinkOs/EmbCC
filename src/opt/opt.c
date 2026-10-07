@@ -3973,14 +3973,12 @@ static int pass_divtest(struct ir_func *fn)
         unsigned long D = (unsigned long)(Dl < 0 ? -Dl : Dl) & 0xffffffffUL;
         struct ir_ins at = *src;
         if ((D & (D - 1)) == 0) {
+            /* the constant first: an ib_push pointer held across another
+             * push dangles when that push moves the buffer */
+            int mask = dm_const(&nb, fn, (long)(int)(D - 1), 4, &at);
             struct ir_ins *m = ib_push(&nb);
             *m = at;
-            m->op = IR_AND; m->sign = 0;
-            m->b = dm_const(&nb, fn, (long)(int)(D - 1), 4, &at);
-            /* the constant was pushed after m: put it first */
-            struct ir_ins k = nb.p[nb.n - 1];
-            nb.p[nb.n - 1] = nb.p[nb.n - 2];
-            nb.p[nb.n - 2] = k;
+            m->op = IR_AND; m->sign = 0; m->b = mask;
             changed = 1;
             continue;
         }
