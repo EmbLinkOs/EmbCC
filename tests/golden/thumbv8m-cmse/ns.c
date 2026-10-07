@@ -13,6 +13,7 @@ unsigned s_secret(unsigned x);
 int s_call_back(int (*cb)(int, int));
 int s_sum(const int *p, int n);
 unsigned s_tta(void *p);
+int s_call_raw(int (*cb)(int, int));
 
 void probe(unsigned *out);
 int ns_cb(int a, int b);
@@ -112,6 +113,9 @@ int main(void)
     /* TTA on a Non-secure and a Secure address: the `secure` bit, 22 */
     check(11, !(s_tta(ns_buf) & (1u << 22)) &&
               (s_tta((void *)0x10100000) & (1u << 22)), s_tta(ns_buf));
+    /* a Non-secure function pointer with its Thumb bit, called as is */
+    v = s_call_raw(ns_cb);
+    check(12, v == 11, (unsigned)v);
     s_done(fails);
     return 0;
 }

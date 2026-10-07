@@ -141,6 +141,14 @@ int __attribute__((cmse_nonsecure_entry)) s_call_back(int (*cb)(int, int))
     return secret_then_call(f) + 1;
 }
 
+/* The same call with the pointer as the Non-secure state handed it, bit 0
+ * SET (a Thumb address): the call itself must clear it, as ACLE says, or
+ * BLXNS stays in the Secure state and runs Non-secure memory there. */
+int __attribute__((cmse_nonsecure_entry)) s_call_raw(int (*cb)(int, int))
+{
+    return ((ns_cb_t *)cb)(5, 6);
+}
+
 /* A Non-secure pointer checked with <arm_cmse.h> before it is read:
  * -1 when [p, p + n) is not memory the Non-secure state may read. */
 int __attribute__((cmse_nonsecure_entry)) s_sum(const int *p, int n)
