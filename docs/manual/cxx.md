@@ -21,10 +21,14 @@ by g++ and with libstdc++, and exceptions propagate between the two. The
 headers and the sources of GCC's libstdc++ compile with EmbCC. EmbCC
 also ships its own C++ runtime and standard library (`lib/libcxx`).
 
-On the Darwin and Windows targets C++ works with restrictions. On
-`riscv64-unknown-elf` it is not supported: a unit compiles when
-exceptions are turned off, and is not tested. On the Cortex-M, RV32 and AVR targets
-EmbCC refuses to generate code for C++. See [Targets](#targets).
+On the Darwin and Windows targets C++ works with restrictions. On the
+32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
+C++ is supported without exceptions and RTTI (`-fno-exceptions
+-fno-rtti`), following the ARM C++ ABI and the Itanium ABI's 32-bit form;
+objects link with clang++'s. On `riscv64-unknown-elf` C++ is not
+supported: a unit compiles when exceptions are turned off, and is not
+tested. On AVR, MIPS32, Xtensa and TriCore EmbCC refuses to generate
+code for C++. See [Targets](#targets).
 
 EmbCC compiles C++ by lowering it to C, which the C front end, the
 optimizer and the code generators then compile (design decision D-013 in
@@ -179,13 +183,14 @@ this:
   by the length of its name and the name (`_C5Shape`). Line numbers refer
   to the C++ source. See [Debugging](debugging.md).
 - **Data model.** The C++ front end computes `sizeof`, `alignof`, class
-  layout and constant expressions itself, for a target whose `long` and
-  pointers are 8 bytes: `int` and `wchar_t` are 4 bytes; `long`,
-  `long long`, `double` and pointers 8. `long double` has the target's
-  size and alignment: 16 bytes on x86-64, on AArch64 ELF and Linux, and
-  on RISC-V, and 8 on `arm64-apple-darwin`. A target whose `long` or
-  pointers are not 8 bytes refuses C++ code generation; see
-  [Targets](#targets).
+  layout and constant expressions itself, by the target's data model, as
+  the C front end does: `long` and pointers are 8 bytes on the 64-bit
+  targets and 4 on 32-bit ARM and RV32, where `size_t` is `unsigned int`
+  and `ptrdiff_t` is `int` (and are mangled `j` and `i`). `long double`
+  has the target's size and alignment: 16 bytes on x86-64, on AArch64
+  ELF and Linux, and on RISC-V, and 8 on `arm64-apple-darwin` and 32-bit
+  ARM. A target whose C++ ABI is not implemented refuses C++ code
+  generation; see [Targets](#targets).
 
 ## Targets
 
@@ -197,7 +202,9 @@ this:
 | `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
 | `x86_64-windows-gnu` | Restricted | Not supported | none |
 | `riscv64-unknown-elf` | Not supported; compiles, untested | Not supported | none |
-| Cortex-M (`thumbv7m-none-eabi`, ...), `riscv32-unknown-elf`, `avr` | Refused | Not supported | none |
+| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `-fno-exceptions -fno-rtti` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `riscv32-unknown-elf` | Supported with `-fno-exceptions -fno-rtti` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `avr`, `mipsel-none-elf`, `mips-none-elf`, `xtensa-none-elf`, `tricore-none-elf` | Refused | Not supported | none |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
 built for `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu` and
@@ -236,18 +243,72 @@ The dynamic initialization of namespace-scope objects is not registered
 in the COFF object, so it does not run. See [Windows](targets.md#windows-coff)
 for the other limits of that target.
 
-**Cortex-M, RV32 and AVR.** The C++ front end lays out types for 8-byte
-`long` and pointers (see [Data model](#how-c-is-compiled) above), and
-these targets have a 4-byte `long` and 4-byte pointers (2-byte on AVR).
-EmbCC refuses to generate code for a C++ unit there, whether with `-c`,
-`-S` or `--emit-c`:
+**32-bit ARM and RV32.** C++ is compiled for the Cortex-M targets, ARM
+state (`armv7a-none-eabi`) and `riscv32-unknown-elf` without exceptions
+and RTTI: the subset firmware and RTOS wrappers are written in --
+classes, constructors and destructors, virtual functions and abstract
+classes, multiple and virtual inheritance, templates, namespaces,
+references, operator overloading, `constexpr`, static objects with
+constructors, function-local statics, placement `new`, `new[]` and
+`delete[]`, pointers to members and lambdas. The objects follow the
+Itanium C++ ABI's 32-bit form, and on ARM the ARM C++ ABI's changes to
+it:
+
+| | ARM (EABI) | RV32 |
+|---|---|---|
+| `size_t`, `ptrdiff_t` | `unsigned int`, `int` (`_Znwj`) | `unsigned int`, `int` (`_Znwj`) |
+| vtable entries, offsets | 4 bytes | 4 bytes |
+| constructors, complete and base-object destructors | return `this` | return nothing |
+| pointer to member function | `{ ptr, adj }`: a virtual one's `ptr` is the vtable offset and `adj` is twice the adjustment plus 1 | `{ ptr, adj }`: a virtual one's `ptr` is the vtable offset plus 1 |
+| guard variable | 32 bits; initialized when bit 0 is set | 64 bits; initialized when the first byte is non-zero |
+| array cookie | 8 bytes at the start of the allocation: the element size, then the count | the count, in the 4 bytes before the elements |
+| static destructors registered with | `__aeabi_atexit` | `__cxa_atexit` |
+| `__STDCPP_DEFAULT_NEW_ALIGNMENT__` | 8 | 16 |
+| `va_list` mangled as | `St9__va_list` | `Pv` |
+
+Each of these is checked against clang++: `tests/golden/cxx-abi-ilp32.sh`
+links EmbCC and clang++ objects calling each other both ways on a
+Cortex-M3, a Cortex-M4F and RV32, and compares what the two compilers
+say about sizes, offsets, cookies and the data the ABI lays out. clang++
+itself registers static destructors with `__cxa_atexit` on ARM; the
+runtime provides both.
+
+The run-time support is the embedded `libcxx.a`, built by `make
+libcxx-embedded` (`tools/build-libcxx.sh TRIPLE OUTDIR`) into
+`build/libcxx/TRIPLE/`: `operator new` and `operator delete` over
+`malloc` (weak, so a program may replace any of them), the guard
+functions `__cxa_guard_acquire`, `__cxa_guard_release` and
+`__cxa_guard_abort`, `__cxa_pure_virtual`, `__aeabi_atexit` and
+`__dso_handle`. `__cxa_atexit` is in the target's `libc.a`. Link it
+before `libc.a` and `librt.a`. The startup code must run the
+constructors in `.init_array` (between `__init_array_start` and
+`__init_array_end`) before `main`, as the test harnesses' startups do.
+Static destructors run only if the program calls `exit`.
+
+Exceptions are refused, because EmbCC writes no ARM EHABI unwind tables
+(`.ARM.exidx`) and no RISC-V `.eh_frame`. Exceptions are on by default,
+so a C++ unit compiled without `-fno-exceptions` stops with:
 
 ```text
-embcc: error: C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4
+embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions
 ```
 
-`-fsyntax-only`, which writes nothing, is accepted. It checks the unit
-with the front end's sizes, not the target's: `sizeof(long)` is 8 there.
+An explicit `-funwind-tables` or `-fasynchronous-unwind-tables` is
+refused the same way (`unwind tables are not supported for TRIPLE yet
+... EmbCC writes no ARM unwind tables (.ARM.exidx)`), and without it a
+C++ unit writes no `.eh_frame`. With RTTI on (the default) a program that
+uses a vtable needs the `__cxxabiv1` type-information vtables, which the
+embedded `libcxx.a` does not provide: compile with `-fno-rtti`.
+
+**AVR, MIPS32, Xtensa and TriCore.** The C++ ABI of these targets is not
+implemented, and EmbCC refuses to generate code for a C++ unit there,
+whether with `-c`, `-S` or `--emit-c`:
+
+```text
+embcc: error: C++ is not yet supported for avr: the C++ front end follows the C++ ABI of x86-64, AArch64, 32-bit ARM and riscv32, and this target's (2-byte pointers) is not implemented
+```
+
+`-fsyntax-only`, which writes nothing, is accepted.
 
 **`riscv64-unknown-elf`.** The front end's data model is the target's,
 and a C++ unit compiles, but C++ is not supported there:
