@@ -200,7 +200,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt
+all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -267,6 +267,12 @@ embpack: tools/embpack/embpack.c
 # ISO C and standalone, like embar.
 embrt: tools/embrt/embrt.c
 	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
+
+# embsim -- a Cortex-M simulator: runs an image on a model of the board
+# QEMU models, counting instructions and estimating cycles with the
+# table tools/bench uses (tools/bench/cost.h). ISO C and libm.
+embsim: tools/embsim/embsim.c tools/bench/cost.h
+	$(CC) $(CFLAGS) -o $@ tools/embsim/embsim.c -lm
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
@@ -412,7 +418,7 @@ check: embcc libc-x86_64 libcxx-x86_64
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
 test: embcc embread embld embdbg embls embas embar embsvd embmap embpack \
-      embrt libc-x86_64 \
+      embrt embsim libc-x86_64 \
       libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
