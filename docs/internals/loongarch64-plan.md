@@ -182,12 +182,32 @@ by tools/gen-predef.sh): `__loongarch__`, `__loongarch64`,
 
 ## Status
 
-Built in order, each committed and pushed:
+Done, each committed and pushed:
 
-1. this plan; the encoder and its referee (tests/golden/loongarch-encoding.sh:
+1. This plan; the encoder and its referee (tests/golden/loongarch-encoding.sh:
    1669 forms against `llvm-mc -show-encoding`, 6000 constants against
-   llvm-mc's own `li.d` expansion and an interpreter, 26 range checks);
-2. the target registered, the code generator at -O0 and -O1/-O2/-Os with
-   the register allocator;
-3. EmbLD, lib/rt and lib/libc, the harness, and the goldens
-   (loongarch-exec, loongarch-abi, loongarch-refuse).
+   llvm-mc's own `li.d` expansion and an interpreter, 26 range checks).
+2. The target (`loongarch64-unknown-elf`, aliases `-none-elf`, `-elf`,
+   bare `loongarch64`), its data model and predefined macros, the code
+   generator at -O0 and -O1/-O2/-Os with the register allocator, `-g`
+   (frame base `DW_OP_breg3`, `breg22` with alloca), C++ with
+   `-fno-exceptions`.
+3. EmbLD for EM_LOONGARCH (EmbCC's and clang's objects), lib/rt and
+   lib/libc (`make rt-embedded libc-embedded`), the QEMU virt harness.
+4. Goldens: loongarch-exec (the exec corpus, 208 of 208 at every level,
+   6 not applicable), loongarch-abi (EmbCC and clang calling each other:
+   the shared embedded pair, the 128-bit pair and the LP64S pair),
+   loongarch-refuse; and LoongArch64 joined predef, libc-embedded,
+   debug-embedded and embedded-runtime.
+
+Not done, refused by name meanwhile:
+
+- inline assembly, `.s`/`.S` files, file-scope instructions and naked
+  functions (no LoongArch assembler vocabulary);
+- one-, two- and sixteen-byte atomics (no such am*/ll/sc in the base ISA;
+  a masked ll.w/sc.w loop, as clang emits, would lift the first two);
+- `__builtin_frame_address`/`__builtin_return_address` (no frame-pointer
+  chain), computed goto, interrupt functions, unwind tables and C++
+  exceptions, a scalar local aligned above 16;
+- the LP64D/LP64F hard-float conventions and the FPU (`-mabi=lp64d`), the
+  extreme code model, LSX/LASX, TLS beyond one shared instance.
