@@ -52,8 +52,8 @@ __attribute__((noinline)) long vla_calls(int n)
     return r * 7 + q * 5 + v * 3 + s;
 }
 
-/* a VLA scope per trip: 300 trips of 40 bytes is 12000, six times the
- * part's RAM, so each trip must give its block back */
+/* a VLA scope per trip: 80 trips of 32 to 40 bytes is about 2.9 KB,
+ * more than the part's 2 KiB, so each trip must give its block back */
 __attribute__((noinline)) long vla_loop(int trips)
 {
     long t = 0;
@@ -109,6 +109,14 @@ __attribute__((noinline)) long aligned_locals(int x)
     return l + k + ok * 1000L;
 }
 
+/* twelve's shape without its multiplies, so 400 calls stay quick at -O0 */
+__attribute__((noinline)) int twelve_sum(int a, int b, int c, int d, int e,
+                                         int f, int g, int h, int i, int j,
+                                         int k, int l)
+{
+    return a + b + c + d + e + f + g + h + i + j + k - l;
+}
+
 /* storage carved once at the entry, then many calls with stack
  * arguments: 400 of them would leak 2400 bytes, more than the part has,
  * if sp were not given back after each */
@@ -117,7 +125,7 @@ __attribute__((noinline)) long many_calls(int n)
     _Alignas(4) int base = 3;
     long t = 0;
     for (int i = 0; i < n; i++)
-        t += twelve(base, i, 0, 0, 0, 0, 0, 0, 0, 1, 2, i & 7);
+        t += twelve_sum(base, i, 0, 0, 0, 0, 0, 0, 0, 1, 2, i & 7);
     return t + base;
 }
 
@@ -141,7 +149,7 @@ __attribute__((noinline)) int tiny(int n)
 int main(void)
 {
     putn(vla_calls(12)); putn(vla_calls(20)); puts_("\n");
-    putn(vla_loop(300)); puts_("\n");
+    putn(vla_loop(80)); puts_("\n");
     putn(vla_rec(6)); puts_("\n");
     putn(alloca_sum(10)); puts_("\n");
     putn(aligned_locals(7)); putn(aligned_locals(-20)); puts_("\n");

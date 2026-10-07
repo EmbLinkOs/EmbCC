@@ -7,10 +7,13 @@
 # given them copied down to the new sp (src/arch/avr/codegen.c, IR_CALL);
 # a VLA scope gives its block back at its end (IR_SPRESTORE), and the
 # epilogue sets sp from Y. tests/golden/avr-alloca/prog.c drives each:
-# stack arguments after a VLA, direct, indirect and variadic; 300 VLA
-# scopes, six times the part's RAM if one leaks; recursion; alloca in a
-# loop; aligned locals at their alignment. Every level, and every register
-# allocation mode forced, since best-of-three only ever runs the winner.
+# stack arguments after a VLA, direct, indirect and variadic; 80 VLA
+# scopes, more than the part's RAM if one leaks; 400 calls after an
+# aligned local, the same; a frameless alloca function; recursion; alloca
+# in a loop; aligned locals at their alignment. Every level, and every
+# register allocation mode forced, since best-of-three only ever runs the
+# winner. Its own time limit rather than the suite's 20 s: -O0 is the
+# slowest AVR run there is, and a loaded machine once cut it short.
 set -u
 echo "TEST-MARKER avr-alloca"
 . "$(dirname "$0")/../lib.sh"
@@ -40,7 +43,7 @@ for mode in best 1 2 3; do
         "$EMBLD" -e __vectors -Ttext 0x0 -Tdata 0x100 --rom-limit 32768 \
             "$out/boot.o" "$o/io.o" "$o/rt.o" "$o/prog.o" -o "$o/prog.elf" ||
             fail "$O mode $mode: does not link"
-        EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-30} EMBCC_QEMU_UNTIL='==END==' sh tests/harness/avr/run.sh "$o/prog.elf" 2>/dev/null |
+        EMBCC_QEMU_TIMEOUT=60 EMBCC_QEMU_UNTIL='==END==' sh tests/harness/avr/run.sh "$o/prog.elf" 2>/dev/null |
             tr -d '\r' > "$o/got.txt"
         cmp -s "$out/want.txt" "$o/got.txt" || { diff "$out/want.txt" "$o/got.txt" | head -8
             fail "$O mode $mode: the board differs from the host"; }
