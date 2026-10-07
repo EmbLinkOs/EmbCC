@@ -90,8 +90,6 @@ refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
     'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
     'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "a computed goto" 'a computed goto' \
-    'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }'
 refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
     'void *f(void){ return __builtin_return_address(0); }'
 refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
@@ -176,6 +174,6 @@ if command -v "$CLANG" >/dev/null 2>&1 &&
         echo "a GOT relocation was refused, but not by name:"; cat "$out/ld.err"; exit 1; }
     echo "embld refuses a SPARC object's GOT relocation by name"
 fi
-echo "narrow and 8-byte atomics, computed goto, the frame and return address,"
+echo "narrow and 8-byte atomics, the frame and return address,"
 echo "__int128, interrupt and naked functions, inline and file assembly, an"
 echo "over-aligned scalar and C++ are each refused by name"

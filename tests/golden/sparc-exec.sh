@@ -65,8 +65,6 @@ na() {
         echo "shifts a long by 32 or more, undefined when long is 32 bits" ;;
     alignas-decl)
         echo "a 16-aligned scalar local, refused by name above the 8-byte SPARC stack (as on Thumb)" ;;
-    computed-goto|computed-goto-more)
-        echo "computed goto, refused by name (tests/golden/sparc-refuse.sh)" ;;
     atomics|atomics-reg)
         echo "1- and 2-byte atomics and __builtin_frame_address, refused by name (sparc-refuse.sh)" ;;
     volatile-local-longjmp)
