@@ -22,6 +22,7 @@
 #include "../elf/elf.h"
 #include "../embx/embx.h"
 #include "../arch/riscv/emit.h"
+#include "../arch/loongarch/emit.h"
 #include "../arch/avr/emit.h"
 #include "../arch/mips/emit.h"
 #include "../../tools/embdbg/embdbg_core.h"
@@ -646,9 +647,24 @@ static struct object *parse_object(const char *name, unsigned char *buf,
     } else {
         if (eh->e_type != ET_REL)
             die("%s: not a relocatable object (ET_REL)", name);
-        if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV)
-            die("%s: a 64-bit object for machine %u; only x86-64 and RV64 "
-                "(EM_RISCV) are supported", name, (unsigned)eh->e_machine);
+        if (eh->e_machine != EM_X86_64 && eh->e_machine != EM_RISCV &&
+            eh->e_machine != EM_LOONGARCH)
+            die("%s: a 64-bit object for machine %u; only x86-64, RV64 "
+                "(EM_RISCV) and LoongArch64 (EM_LOONGARCH) are supported",
+                name, (unsigned)eh->e_machine);
+        /* LP64S only: an object for the FPU conventions passes a double
+         * in a floating-point register where EmbCC's code passes it in
+         * an integer one, and linking the two would be a miscompilation
+         * made at link time. */
+        if (eh->e_machine == EM_LOONGARCH &&
+            (eh->e_flags & EF_LOONGARCH_ABI_MASK) !=
+                EF_LOONGARCH_ABI_SOFT_FLOAT)
+            die("%s: a LoongArch object for the %s-float ABI (e_flags "
+                "0x%lx); this linker links LP64S, the soft-float convention "
+                "(-mabi=lp64s)", name,
+                (eh->e_flags & EF_LOONGARCH_ABI_MASK) ==
+                    EF_LOONGARCH_ABI_DOUBLE_FLOAT ? "double" : "single",
+                (unsigned long)eh->e_flags);
         o->machine = eh->e_machine;
         o->eflags = eh->e_flags;
         o->eh = eh;
@@ -946,6 +962,8 @@ static void add_entry_stub(struct linker *l)
      * both, so the size is known before layout. */
     long size = l->machine == EM_MIPS
               ? mips_li_len((long long)l->stack_top) + 16
+              : l->machine == EM_LOONGARCH
+              ? la_li_len((long long)l->stack_top) + 8
               : rv_li_len((long long)l->stack_top, xlen) + 8;
 
     if (l->nsec == l->capsec) {
@@ -980,6 +998,17 @@ static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
         mips_alu_imm(&c, MIPS_ORI, MIPS_T9, MIPS_T9, (long long)(entry & 0xffff));
         mips_jr(&c, MIPS_T9);
         mips_nop(&c);
+        return;
+    }
+    if (l->machine == EM_LOONGARCH) {
+        /* li sp, then pcaddu18i t0 + jirl zero, t0 to the entry: +-128
+         * GiB, and a fixed eight bytes whatever the distance */
+        Elf64_Addr pc_at = s->vaddr + (Elf64_Addr)l->stub_size - 8;
+        long long dd = (long long)entry - (long long)pc_at, hi;
+        la_li(&c, LA_SP, (long long)l->stack_top);
+        hi = (dd + 0x20000) >> 18;
+        la_pcrel(&c, LA_PCADDU18I, LA_T0, (long)hi);
+        la_jirl(&c, LA_ZERO, LA_T0, (long)(dd - (hi << 18)));
         return;
     }
     /* The auipc sits just before the jalr, at the end of the stub. */
@@ -1035,6 +1064,8 @@ static void add_object(struct linker *l, struct object *o)
                               : o->eflags & (EF_MIPS_ARCH_MASK | 0xf000UL);
     else if (o->machine == EM_AVR && !(l->eflags & EF_AVR_ARCH_MASK))
         l->eflags = o->eflags & EF_AVR_ARCH_MASK;
+    else if (o->machine == EM_LOONGARCH)
+        l->eflags = EF_LOONGARCH_ABI_SOFT_FLOAT | EF_LOONGARCH_OBJABI_V1;
     if (l->nobj == l->capobj) {
         l->capobj = l->capobj ? l->capobj * 2 : 8;
         l->objs = xrealloc(l->objs, (size_t)l->capobj * sizeof *l->objs);
@@ -2273,6 +2304,180 @@ static void apply_riscv(struct linker *l, struct object *o, unsigned type,
     }
 }
 
+/* ---- LoongArch64 ---------------------------------------------------------
+ *
+ * RELA, every field a plain bit range of one instruction word (the 21- and
+ * 26-bit branch offsets split in two). EmbCC's objects carry B26 and the
+ * PCALA pair; clang's also carry its default MEDIUM code model's CALL36
+ * (pcaddu18i + jirl) and, for a symbol another object defines, the GOT
+ * pair. This linker builds no GOT: a GOT access -- `pcalau12i rd,
+ * %got_pc_hi20(s)` then `ld.d rd, rj, %got_pc_lo12(s)` -- is rewritten to
+ * the direct address, `pcalau12i` of the symbol's page and an `addi.d` of
+ * its low 12 bits, which is the relaxation GNU ld and lld apply whenever
+ * the symbol is in the image (and on bare metal it always is). RELAX and
+ * ALIGN are hints for a relaxing linker; this one moves nothing, which
+ * leaves every distance the assembler measured as it was.
+ * docs/internals/loongarch64-plan.md. */
+
+/* Put `v` (already reduced to the field's width) into bits lo..hi of the
+ * word at loc, leaving every other bit -- the opcode, the registers -- as
+ * the compiler wrote them. */
+static void la_put(unsigned char *loc, int lo, int width, unsigned long long v)
+{
+    unsigned int m = (unsigned int)(((1ULL << width) - 1) << lo);
+    put32(loc, (get32loc(loc) & ~m) |
+               ((unsigned int)(v << lo) & m));
+}
+
+static void apply_loongarch(struct linker *l, struct object *o, unsigned type,
+                            unsigned char *loc, Elf64_Addr S, long long A,
+                            Elf64_Addr P)
+{
+    long long V = (long long)S + A, d = V - (long long)P;
+    switch (type) {
+    case R_LARCH_NONE:
+    case R_LARCH_RELAX:
+    case R_LARCH_ALIGN:
+        return;
+    case R_LARCH_32:
+        need_range(l, o, "R_LARCH_32", V, I32_MIN, 0xffffffffLL);
+        put32(loc, (unsigned int)V);
+        return;
+    case R_LARCH_64:
+        put64(loc, (unsigned long long)V);
+        return;
+    case R_LARCH_32_PCREL:
+        need_range(l, o, "R_LARCH_32_PCREL", d, I32_MIN, I32_MAX);
+        put32(loc, (unsigned int)d);
+        return;
+    case R_LARCH_64_PCREL:
+        put64(loc, (unsigned long long)d);
+        return;
+    /* In-place arithmetic: a difference of two labels in data (a debug
+     * line program's lengths, a jump table of offsets) is written as an
+     * ADD of one symbol and a SUB of the other at the same place. */
+    case R_LARCH_ADD8:  loc[0] = (unsigned char)(loc[0] + V); return;
+    case R_LARCH_SUB8:  loc[0] = (unsigned char)(loc[0] - V); return;
+    case R_LARCH_ADD16: put16(loc, (get16(loc) + (unsigned int)V) & 0xffffU);
+                        return;
+    case R_LARCH_SUB16: put16(loc, (get16(loc) - (unsigned int)V) & 0xffffU);
+                        return;
+    case R_LARCH_ADD32: put32(loc, get32loc(loc) + (unsigned int)V); return;
+    case R_LARCH_SUB32: put32(loc, get32loc(loc) - (unsigned int)V); return;
+    case R_LARCH_ADD6:
+        loc[0] = (unsigned char)((loc[0] & 0xc0) | ((loc[0] + V) & 0x3f));
+        return;
+    case R_LARCH_SUB6:
+        loc[0] = (unsigned char)((loc[0] & 0xc0) | ((loc[0] - V) & 0x3f));
+        return;
+    case R_LARCH_ADD64: case R_LARCH_SUB64: {
+        unsigned long long w = (unsigned long long)get32loc(loc) |
+                               ((unsigned long long)get32loc(loc + 4) << 32);
+        w = type == R_LARCH_ADD64 ? w + (unsigned long long)V
+                                  : w - (unsigned long long)V;
+        put64(loc, w);
+        return;
+    }
+    case R_LARCH_B16:
+        if (d & 3)
+            die("%s: R_LARCH_B16 against '%s' is not a multiple of four",
+                o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_B16", d, -(1LL << 17), (1LL << 17) - 4);
+        la_put(loc, 10, 16, (unsigned long long)(d >> 2));
+        return;
+    case R_LARCH_B21:
+        if (d & 3)
+            die("%s: R_LARCH_B21 against '%s' is not a multiple of four",
+                o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_B21", d, -(1LL << 22), (1LL << 22) - 4);
+        la_put(loc, 10, 16, (unsigned long long)(d >> 2));
+        la_put(loc, 0, 5, (unsigned long long)(d >> 18));
+        return;
+    case R_LARCH_B26:
+        if (d & 3)
+            die("%s: R_LARCH_B26 against '%s' is not a multiple of four",
+                o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_B26", d, -(1LL << 27), (1LL << 27) - 4);
+        la_put(loc, 10, 16, (unsigned long long)(d >> 2));
+        la_put(loc, 0, 10, (unsigned long long)(d >> 18));
+        return;
+    case R_LARCH_CALL36: {
+        /* pcaddu18i ra, hi20 ; jirl ra, ra, lo16 -- the jirl's offset is
+         * sign-extended, so the high part is rounded by half its unit */
+        long long hi;
+        if (d & 3)
+            die("%s: R_LARCH_CALL36 against '%s' is not a multiple of four",
+                o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_CALL36", d, -(1LL << 37) - 0x20000,
+                   (1LL << 37) - 0x20000 - 4);
+        hi = (d + 0x20000) >> 18;
+        la_put(loc, 5, 20, (unsigned long long)hi);
+        la_put(loc + 4, 10, 16, (unsigned long long)((d - (hi << 18)) >> 2));
+        return;
+    }
+    case R_LARCH_GOT_PC_HI20:
+    case R_LARCH_PCALA_HI20: {
+        /* the page of the symbol, rounded by 0x800 because the low half
+         * is sign-extended where it is added, less the page of pc */
+        long long pg = (long long)(((unsigned long long)V + 0x800) & ~0xfffULL) -
+                       (long long)(P & ~(Elf64_Addr)0xfff);
+        need_range(l, o, type == R_LARCH_PCALA_HI20 ? "R_LARCH_PCALA_HI20"
+                                                    : "R_LARCH_GOT_PC_HI20",
+                   pg, I32_MIN, I32_MAX - 0xfff);
+        la_put(loc, 5, 20, (unsigned long long)(pg >> 12));
+        return;
+    }
+    case R_LARCH_GOT_PC_LO12: {
+        /* ld.d rd, rj, %got_pc_lo12 -> addi.d rd, rj, %pc_lo12: the
+         * address itself rather than a GOT slot holding it */
+        unsigned int w = get32loc(loc);
+        if ((w & 0xffc00000U) != 0x28c00000U)
+            die("%s: R_LARCH_GOT_PC_LO12 against '%s' is on 0x%08x, not an "
+                "ld.d; this linker builds no GOT and rewrites only the normal "
+                "and medium models' ld.d (-mcmodel=extreme is not linked)",
+                o->name, l->rel_sym ? l->rel_sym : "?", w);
+        put32(loc, (w & 0x003fffffU) | 0x02c00000U);
+    }
+        /* fall through */
+    case R_LARCH_PCALA_LO12:
+    case R_LARCH_ABS_LO12:
+        la_put(loc, 10, 12, (unsigned long long)V & 0xfff);
+        return;
+    case R_LARCH_ABS_HI20:
+        /* lu12i.w then ori: no rounding, the ori ORs in the low 12 bits.
+         * Alone (no lu32i.d after it) the pair reaches a sign-extended
+         * 32-bit address; that is the instruction's to know, not this
+         * field's, so only the field is checked here. */
+        la_put(loc, 5, 20, ((unsigned long long)V >> 12) & 0xfffff);
+        return;
+    case R_LARCH_ABS64_LO20:
+        la_put(loc, 5, 20, ((unsigned long long)V >> 32) & 0xfffff);
+        return;
+    case R_LARCH_ABS64_HI12:
+        la_put(loc, 10, 12, ((unsigned long long)V >> 52) & 0xfff);
+        return;
+    case R_LARCH_PCREL20_S2:
+        if (d & 3)
+            die("%s: R_LARCH_PCREL20_S2 against '%s' is not a multiple of "
+                "four", o->name, l->rel_sym ? l->rel_sym : "?");
+        need_range(l, o, "R_LARCH_PCREL20_S2", d, -(1LL << 21),
+                   (1LL << 21) - 4);
+        la_put(loc, 5, 20, (unsigned long long)(d >> 2));
+        return;
+    case R_LARCH_PCALA64_LO20: case R_LARCH_PCALA64_HI12:
+    case R_LARCH_GOT64_PC_LO20: case R_LARCH_GOT64_PC_HI12:
+    case R_LARCH_GOT_HI20: case R_LARCH_GOT_LO12:
+        die("%s: LoongArch relocation type %u against '%s' is the extreme "
+            "code model's or an absolute GOT's; this linker links the normal "
+            "and medium models (-mcmodel=normal or medium)", o->name, type,
+            l->rel_sym ? l->rel_sym : "?");
+    default:
+        die("%s: unsupported LoongArch relocation type %u against '%s' (TLS "
+            "and ULEB128 differences are not linked yet)", o->name, type,
+            l->rel_sym ? l->rel_sym : "?");
+    }
+}
+
 /* ---- MIPS (o32) --------------------------------------------------------
  *
  * The objects are REL: each addend is in the field it relocates, in that
@@ -2592,6 +2797,10 @@ static void apply_relocs(struct linker *l, struct object *o)
             if (o->machine == EM_RISCV &&
                 (type == R_RISCV_RELAX || type == R_RISCV_ALIGN))
                 continue;
+            /* LoongArch's are the same two hints, symbol 0 likewise. */
+            if (o->machine == EM_LOONGARCH &&
+                (type == R_LARCH_RELAX || type == R_LARCH_ALIGN))
+                continue;
             int uw;
             Elf64_Addr S = reloc_symval(l, o, symi, &uw);
             {
@@ -2650,6 +2859,10 @@ static void apply_relocs(struct linker *l, struct object *o)
 
             if (o->machine == EM_RISCV) {
                 apply_riscv(l, o, type, loc, S, A, P);
+                continue;
+            }
+            if (o->machine == EM_LOONGARCH) {
+                apply_loongarch(l, o, type, loc, S, A, P);
                 continue;
             }
             if (o->machine == EM_AVR) {
@@ -3046,7 +3259,8 @@ static void write_exec(struct linker *l, const char *out,
      * RISC-V's are the float ABI, whose 0 means SOFT. */
     eh->e_flags = l->machine == EM_ARM ? EF_ARM_EABI_VER5
                 : l->machine == EM_RISCV || l->machine == EM_AVR ||
-                  l->machine == EM_MIPS ? l->eflags
+                  l->machine == EM_MIPS || l->machine == EM_LOONGARCH
+                ? l->eflags
                 : 0;
     eh->e_phoff = ehsz;
     eh->e_ehsize = (Elf64_Half)ehsz;
@@ -4966,10 +5180,11 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     if (l.gc_sections)
         gc_sections(&l, l.gc_undefs, l.gc_nundefs);
     if (opts && opts->have_stack) {
-        if (l.machine != EM_RISCV && l.machine != EM_MIPS)
-            die("-Tstack is a RISC-V and MIPS option: every other target "
-                "here starts with a stack pointer already set (a Cortex-M "
-                "reads its own from the vector table)");
+        if (l.machine != EM_RISCV && l.machine != EM_MIPS &&
+            l.machine != EM_LOONGARCH)
+            die("-Tstack is a RISC-V, MIPS and LoongArch option: every other "
+                "target here starts with a stack pointer already set (a "
+                "Cortex-M reads its own from the vector table)");
         add_entry_stub(&l);
     }
 

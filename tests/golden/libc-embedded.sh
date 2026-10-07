@@ -1,7 +1,7 @@
 #!/bin/sh
 # EmbCC's C library on the boards: RV32, RV64, a Cortex-M3, a Cortex-M4F
-# with the hard-float calling convention, a Cortex-M33 (ARMv8-M) and a
-# MIPS32r2 core (QEMU's malta), each image
+# with the hard-float calling convention, a Cortex-M33 (ARMv8-M), a
+# MIPS32r2 core (QEMU's malta) and a LoongArch64 one (QEMU's virt), each image
 # built with lib/libc on its bare-metal backend (tools/build-libc.sh) and
 # run under QEMU -- against the SAME library built for x86-64.
 #
@@ -54,7 +54,7 @@ grep -q '==END==' "$out/ref.txt" || {
 fail=0
 for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
          thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf \
-         mips-none-elf; do
+         mips-none-elf loongarch64-unknown-elf; do
     case $t in
         riscv32*) H=tests/harness/riscv
                   Q="qemu-system-riscv32 -M virt -bios none -nographic -m 8" ;;
@@ -70,6 +70,8 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
                   Q="qemu-system-mipsel -M malta -cpu 24Kc -m 64 -display none -monitor none -serial null -serial null -serial stdio -no-reboot" ;;
         mips-*)   H=tests/harness/mips      # big-endian
                   Q="qemu-system-mips -M malta -cpu 24Kc -m 64 -display none -monitor none -serial null -serial null -serial stdio -no-reboot" ;;
+        loongarch64*) H=tests/harness/loongarch
+                  Q="qemu-system-loongarch64 -M virt -m 64 -display none -monitor none -serial stdio -no-reboot" ;;
     esac
     command -v "${Q%% *}" >/dev/null 2>&1 || { echo "SKIP $t: no ${Q%% *}"; continue; }
     d=$out/$t; mkdir -p "$d"
@@ -88,6 +90,7 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
             riscv*)    hv=EMBCC_RISCV_HARNESS ;;
             thumbv8m*) hv=EMBCC_M33_HARNESS ;;
             mips*)     hv=EMBCC_MIPS_HARNESS ;;
+            loongarch64*) hv=EMBCC_LOONGARCH_HARNESS ;;
             *)         hv=EMBCC_THUMB_HARNESS ;;
         esac
         env "$hv=$d" sh "$H/link.sh" "$d/p$opt.elf" "$d/p$opt.o" \

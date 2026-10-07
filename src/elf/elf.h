@@ -395,6 +395,65 @@ typedef struct {
 #define R_MIPS_JALR     37
 #define R_MIPS_PC32    248
 
+/* LoongArch, from the ELF machine registry: one number for LA32 and LA64
+ * (the class says which). */
+#define EM_LOONGARCH 258
+
+/* LoongArch e_flags, read off clang's objects: the base ABI's float
+ * flavour in bits 2:0 (1 soft, 2 single, 3 double) and the object ABI
+ * version in bits 7:6 (v1, which clang writes). */
+#define EF_LOONGARCH_ABI_SOFT_FLOAT   0x01
+#define EF_LOONGARCH_ABI_SINGLE_FLOAT 0x02
+#define EF_LOONGARCH_ABI_DOUBLE_FLOAT 0x03
+#define EF_LOONGARCH_ABI_MASK         0x07
+#define EF_LOONGARCH_OBJABI_V1        0x40
+#define EF_LOONGARCH_OBJABI_MASK      0xc0
+
+/* LoongArch relocation types (RELA), read off `llvm-readobj -r` on an
+ * object llvm-mc assembled from each operator (docs/internals/
+ * loongarch64-plan.md): the ones EmbCC writes, and the ones clang's
+ * objects carry, which EmbLD applies or refuses by name. */
+#define R_LARCH_NONE           0
+#define R_LARCH_32             1
+#define R_LARCH_64             2
+#define R_LARCH_ADD8          47
+#define R_LARCH_ADD16         48
+#define R_LARCH_ADD24         49
+#define R_LARCH_ADD32         50
+#define R_LARCH_ADD64         51
+#define R_LARCH_SUB8          52
+#define R_LARCH_SUB16         53
+#define R_LARCH_SUB24         54
+#define R_LARCH_SUB32         55
+#define R_LARCH_SUB64         56
+#define R_LARCH_B16           64
+#define R_LARCH_B21           65
+#define R_LARCH_B26           66
+#define R_LARCH_ABS_HI20      67
+#define R_LARCH_ABS_LO12      68
+#define R_LARCH_ABS64_LO20    69
+#define R_LARCH_ABS64_HI12    70
+#define R_LARCH_PCALA_HI20    71
+#define R_LARCH_PCALA_LO12    72
+#define R_LARCH_PCALA64_LO20  73
+#define R_LARCH_PCALA64_HI12  74
+#define R_LARCH_GOT_PC_HI20   75
+#define R_LARCH_GOT_PC_LO12   76
+#define R_LARCH_GOT64_PC_LO20 77
+#define R_LARCH_GOT64_PC_HI12 78
+#define R_LARCH_GOT_HI20      79
+#define R_LARCH_GOT_LO12      80
+#define R_LARCH_32_PCREL      99
+#define R_LARCH_RELAX        100
+#define R_LARCH_ALIGN        102
+#define R_LARCH_PCREL20_S2   103
+#define R_LARCH_ADD6         105
+#define R_LARCH_SUB6         106
+#define R_LARCH_ADD_ULEB128  107
+#define R_LARCH_SUB_ULEB128  108
+#define R_LARCH_64_PCREL     109
+#define R_LARCH_CALL36       110
+
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
  * names each one, which is the same referee the encoder uses. */

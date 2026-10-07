@@ -70,6 +70,8 @@
 #define DW_REG_FB_RISCV       8      /* x8, s0: the same */
 #define DW_REG_SP_MIPS        29     /* $29 */
 #define DW_REG_FB_MIPS        30     /* $30, fp/s8: the same */
+#define DW_REG_SP_LA           3     /* $r3, sp: LoongArch numbers r0-r31 0-31 */
+#define DW_REG_FB_LA          22     /* $r22, fp: the VLA frame base */
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -561,16 +563,20 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         {
             enum target_arch a = target_get();
             if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
-                a == TARGET_RISCV64 || a == TARGET_MIPS32) {
+                a == TARGET_RISCV64 || a == TARGET_MIPS32 ||
+                a == TARGET_LOONGARCH64) {
                 struct dbuf e = { 0, 0, 0 };
                 int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
+                int la = a == TARGET_LOONGARCH64;
                 db_u8(&e, DW_OP_breg(fn->has_alloca
                                      ? (thumb ? DW_REG_FB_ARM
                                         : mips ? DW_REG_FB_MIPS
-                                               : DW_REG_FB_RISCV)
+                                        : la ? DW_REG_FB_LA
+                                             : DW_REG_FB_RISCV)
                                      : (thumb ? DW_REG_SP_ARM
                                         : mips ? DW_REG_SP_MIPS
-                                               : DW_REG_SP_RISCV)));
+                                        : la ? DW_REG_SP_LA
+                                             : DW_REG_SP_RISCV)));
                 db_sleb(&e, 0);
                 db_uleb(b, (unsigned long)e.len);
                 for (int k = 0; k < e.len; k++) db_u8(b, e.p[k]);

@@ -15,6 +15,7 @@
 #include "../arch/avr/asm.h"
 #include "../arch/riscv/asm.h"
 #include "../arch/mips/asm.h"
+#include "../arch/loongarch/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
@@ -4335,6 +4336,42 @@ static int asm_resolve_reg_mips(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* LoongArch: the same three kinds of operand. A register variable must
+ * name a register irgen's pool hands out -- the caller-saved a0-a7 and
+ * t0-t8 ($r4-$r20) -- and the constant letters are gcc's LoongArch ones
+ * (I a signed 12-bit, K an unsigned 12-bit, J zero) as well as i and n. */
+static int asm_resolve_reg_la(struct unit *u, struct stmt *s,
+                              struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = laasm_gpr(rn, (int)strlen(rn));
+        if (!(r >= 4 && r <= 20))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "LoongArch asm (use a0-a7 or t0-t8)", rn);
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'm') has_r = 1;
+        if (*p == 'i' || *p == 'n' || *p == 'I' || *p == 'J' || *p == 'K')
+            has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -4355,6 +4392,8 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
     if (target_get() == TARGET_MIPS32)
         return asm_resolve_reg_mips(u, s, op, c);
+    if (target_get() == TARGET_LOONGARCH64)
+        return asm_resolve_reg_la(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

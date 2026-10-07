@@ -11315,6 +11315,9 @@ static int const_is_expensive(const struct ir_ins *i)
             return !(t_imm_ok(v) || (v >= 0 && v <= 0xffff));
         if (ta == TARGET_MIPS32)                /* addiu, or ori from $0 */
             return !((v >= -32768 && v <= 32767) || (v >= 0 && v <= 0xffff));
+        if (ta == TARGET_LOONGARCH64)  /* ori/addi.w from r0, or a lu12i.w */
+            return !((v >= -2048 && v <= 4095) ||
+                     ((v & 0xfff) == 0 && v == (long)(int)v));
         return !(v >= -2048 && v <= 2047);                     /* RISC-V */
     }
     default:
@@ -11405,7 +11408,8 @@ static int pass_sinkconst(struct ir_func *fn)
         /* (MIPS's beq/bne compare two registers too.) */
         int rv_cmp = (target_get() == TARGET_RISCV32 ||
                       target_get() == TARGET_RISCV64 ||
-                      target_get() == TARGET_MIPS32) &&
+                      target_get() == TARGET_MIPS32 ||
+                      target_get() == TARGET_LOONGARCH64) &&
                      i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
                      fn->ins[at[i->dst]].op == IR_CMP;
         /* A select's value stops above the compare that makes its
@@ -11491,6 +11495,8 @@ static int target_imm_foldable(int op, long imm, int w)
         return thumb_imm_foldable(op, imm);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return riscv_imm_foldable(op, imm);
+    if (target_get() == TARGET_LOONGARCH64)
+        return la_imm_foldable(op, imm);
     if (target_get() == TARGET_AARCH64)
         return a64_imm_foldable(op, imm, w);
     return 1;

@@ -196,6 +196,16 @@ static const char *reloc_name(int kind)
         case RK_RISCV_PCREL_LO12_I: return "R_RISCV_PCREL_LO12_I";
         default:                  return NULL;
         }
+    case TARGET_LOONGARCH64:
+        switch (kind) {
+        case RK_CALL:          return "R_LARCH_B26";   /* bl and b alike */
+        case RK_LA_PCALA_HI20: return "R_LARCH_PCALA_HI20";
+        case RK_LA_PCALA_LO12: return "R_LARCH_PCALA_LO12";
+        case RK_ABS64:         return "R_LARCH_64";
+        case RK_ABS32:         return "R_LARCH_32";
+        case RK_DATA_PREL32:   return "R_LARCH_32_PCREL";
+        default:               return NULL;
+        }
     case TARGET_MIPS32:
         switch (kind) {
         case RK_CALL:        return "R_MIPS_26";       /* jal and j alike */
@@ -849,7 +859,7 @@ static int blocks_by_reloc(void)
 {
     enum target_arch a = target_get();
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR;
+           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_LOONGARCH64;
 }
 
 static struct blabel *blabel_add(struct bstate *s, int blk, long off)
@@ -1024,6 +1034,8 @@ static long bdata_width(int type)
     case TARGET_AVR:
         return type == R_AVR_16 || type == R_AVR_16_PM ? 2
              : type == R_AVR_32 ? 4 : 0;
+    case TARGET_LOONGARCH64:
+        return type == R_LARCH_32 ? 4 : type == R_LARCH_64 ? 8 : 0;
     default:
         return 0;
     }
