@@ -45,6 +45,7 @@ int ra_ins_def(const struct ir_ins *in)
      * across it. */
     case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
     case IR_VWIDEN: case IR_SELECT:
+    case IR_MULH: case IR_MULW:
         return in->dst;
     case IR_ASM:              /* its `val` output's value, or -1 */
         return in->dst;
@@ -85,6 +86,7 @@ void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
     case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
     case IR_XCHG: case IR_XADD: case IR_ARMW:
     case IR_VSTORE: case IR_VBIN:
+    case IR_MULH: case IR_MULW:
         U(s->a); U(s->b); break;
     case IR_CMPXCHG: case IR_CAS: case IR_CAS16: case IR_SELECT:
         U(s->a); U(s->b); U(s->c); break;
@@ -2198,6 +2200,8 @@ static int nhs_reader(const struct ir_func *fn, const struct ir_ins *i,
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
     case IR_CMP: case IR_BRZ: case IR_BRNZ: case IR_NEG: case IR_BNOT:
         return i->w == 4 && !i->flt;
+    case IR_MULH: case IR_MULW:     /* 32-bit operands at either width */
+        return 1;
     case IR_MOV:
         return i->w == 4;
     case IR_EXT:

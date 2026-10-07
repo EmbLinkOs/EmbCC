@@ -353,6 +353,36 @@ int target_has_sqrt(int bytes)
     }
 }
 
+int target_has_mulh(void)
+{
+    switch (g_arch) {
+    /* A 64-bit register holds the whole product of two 32-bit values,
+     * so these take the ordinary 64-bit multiply and never see one. */
+    case TARGET_X86_64:
+    case TARGET_AARCH64:
+    case TARGET_RISCV64:
+    case TARGET_LOONGARCH64:
+    case TARGET_MIPS64:
+        return 0;
+    /* RV32IM: mulh, mulhu (the M extension is always present here) */
+    case TARGET_RISCV32: return 1;
+    /* umull and smull from ARMv7-M up, and in ARM state; ARMv6-M and
+     * ARMv8-M Baseline have only the 32-bit muls */
+    case TARGET_THUMB:   return target_thumb_arch() >= 7 &&
+                                !target_thumb_v8m_base();
+    case TARGET_MIPS32:
+    case TARGET_TRICORE:
+    case TARGET_XTENSA:
+    case TARGET_PPC32:
+    case TARGET_RX:
+    case TARGET_SPARC32:
+    case TARGET_COLDFIRE:
+    case TARGET_AVR:
+        return 0;
+    }
+    return 0;
+}
+
 int target_stack_align(void)
 {
     switch (g_arch) {

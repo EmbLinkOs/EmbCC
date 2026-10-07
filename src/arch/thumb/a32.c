@@ -409,6 +409,21 @@ void a32_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
                        (unsigned long)rm << 8 | 0x90UL | (unsigned long)rn);
 }
 
+/* UMLAL/SMLAL: the same with the accumulate bit (A, bit 21) */
+void a32_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
+{
+    word(c, cc_take(), (sign ? 0x00E00000UL : 0x00A00000UL) |
+                       (unsigned long)rdhi << 16 | (unsigned long)rdlo << 12 |
+                       (unsigned long)rm << 8 | 0x90UL | (unsigned long)rn);
+}
+
+/* SMMUL: cond 0111 0101 Rd 1111 Rm 0001 Rn */
+void a32_smmul(struct code *c, int rd, int rn, int rm)
+{
+    word(c, cc_take(), 0x0750F010UL | (unsigned long)rd << 16 |
+                       (unsigned long)rm << 8 | (unsigned long)rn);
+}
+
 /* SDIV/UDIV: cond 0111 0U01 Rd 1111 Rm 0001 Rn -- the ARMv7VE (Cortex-A7,
  * A15) instructions. Base ARMv7-A has neither, and the code generator
  * calls __aeabi_idiv instead; this exists for the encoder's referee and

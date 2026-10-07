@@ -52,7 +52,7 @@ static int writes_temp(enum ir_op op)
     case IR_CALL: case IR_XCHG:
     case IR_XADD: case IR_CMPXCHG: case IR_ARMW: case IR_CAS: case IR_CAS16:
     case IR_FRAMEADDR: case IR_ALLOCA: case IR_SPSAVE:
-    case IR_SELECT:
+    case IR_SELECT: case IR_MULH: case IR_MULW:
     /* `dst = &&label` defines dst. It was missing here for as long as
      * the optimizer skipped every function that used one, which meant
      * nothing counted it as a definition -- so the verifier reported
@@ -83,6 +83,7 @@ static int is_pure(enum ir_op op)
     case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
     case IR_SELECT:        /* both arms are values; it cannot trap */
     case IR_LABELADDR:     /* the address of a label is a constant */
+    case IR_MULH: case IR_MULW:
         return 1;
     default:
         return 0;
@@ -177,6 +178,7 @@ static void each_read(struct ir_ins *i, void (*cb)(int *, void *), void *ctx)
     case IR_STORE: case IR_MEMCPY: case IR_XCHG:
     case IR_XADD: case IR_ARMW:
     case IR_VSTORE:
+    case IR_MULH: case IR_MULW:     /* never an immediate b */
         cb(&i->a, ctx);
         cb(&i->b, ctx);
         break;
@@ -432,6 +434,20 @@ static int fold_bin(enum ir_op op, long A, long B, int w, int sign,
     case IR_ADD: r = ua + ub; break;
     case IR_SUB: r = ua - ub; break;
     case IR_MUL: r = ua * ub; break;
+    /* The operands are 32-bit values whatever the width: the low word
+     * of each, extended by `sign`. The product of two of them fits in
+     * 64 bits either way, so it is exact here. */
+    case IR_MULH: case IR_MULW: {
+        unsigned long p = sign
+            ? (unsigned long)((long)(int)A * (long)(int)B)
+            : (unsigned long)(unsigned int)A * (unsigned int)B;
+        if (op == IR_MULW) {
+            *out = (long)p;
+            return 1;
+        }
+        r = sign ? (unsigned long)((long)p >> 32) : p >> 32;
+        break;
+    }
     case IR_AND: r = ua & ub; break;
     case IR_OR:  r = ua | ub; break;
     case IR_XOR: r = ua ^ ub; break;
@@ -1038,6 +1054,16 @@ static int pass_fold(struct ir_func *fn)
         }
 
         long r;
+        /* Two constants and nothing else: none of the multiply's
+         * identities below holds for the high half. */
+        if (i->op == IR_MULH || i->op == IR_MULW) {
+            if (ka && kb &&
+                fold_bin(i->op, A, B, i->w, i->sign, i->pred, &r)) {
+                to_const(i, r);
+                changed = 1;
+            }
+            continue;
+        }
         switch (i->op) {
         case IR_ADD: case IR_SUB: case IR_MUL:
         case IR_AND: case IR_OR: case IR_XOR:
@@ -1330,6 +1356,7 @@ static int vn_key(struct ir_ins *i, int memver, struct vn *k)
         k->imm = i->imm; k->w = i->w; return 1;
     case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+    case IR_MULH: case IR_MULW:
         k->a = i->a; k->b = i->b; k->w = i->w; k->sign = i->sign; return 1;
     case IR_CMP:
         k->a = i->a; k->b = i->b; k->w = i->w; k->sign = i->sign;
@@ -3229,6 +3256,7 @@ static int gcse_numberable(enum ir_op op)
     case IR_ADD: case IR_SUB: case IR_MUL:
     case IR_DIV: case IR_MOD: case IR_AND: case IR_OR: case IR_XOR:
     case IR_SHL: case IR_SHR: case IR_CMP: case IR_NEG: case IR_BNOT:
+    case IR_MULH: case IR_MULW:
         return 1;
     /* A global's or a string's address is not that cheap. It is two
      * instructions on Thumb (movw/movt), RISC-V (auipc/addi) and aarch64
@@ -3857,6 +3885,68 @@ static int dm_op(struct ibuf *nb, struct ir_func *fn, enum ir_op o,
 
 static int g_opt_size;                  /* -Os, set by opt_run (below) */
 
+/* x / D for a 32-bit machine with a widening multiply: the high half of
+ * the 32x32 product is one IR_MULH, so the magic number needs no 64-bit
+ * value at all. Hacker's Delight 10-1 (signed) and 10-8 (unsigned), all
+ * in 32 bits: the multiplier is the low word of magic_s32's, and its
+ * corrections are decided by THAT word's sign -- for a negative D the
+ * negated multiplier is what the algorithm defines, wrapped. D is the
+ * divisor as the IR holds it (a 32-bit constant, sign-extended). Returns
+ * the vreg holding the quotient. */
+static int dm_div32(struct ibuf *nb, struct ir_func *fn, int x, long D,
+                    int sg, const struct ir_ins *src)
+{
+    if (!sg) {
+        unsigned long ud = (unsigned long)D & 0xFFFFFFFFUL;
+        int k = log2_pow2_l(ud);
+        if (k >= 0)
+            return dm_op(nb, fn, IR_SHR, x, dm_const(nb, fn, k, 4, src),
+                         4, 0, 0, src);
+        if (ud >= 0x80000000UL) {
+            /* The quotient is 0 or 1: one unsigned compare. The constant
+             * first -- a pointer from ib_push dangles across another. */
+            int c = dm_const(nb, fn, (long)(int)ud, 4, src);
+            int t = fn->nvregs++;
+            struct ir_ins *p = ib_push(nb);
+            p->op = IR_CMP; p->dst = t; p->a = x; p->b = c; p->w = 4;
+            p->sign = 0; p->pred = B_GE;
+            p->line = src->line; p->col = src->col; p->synth = 1;
+            return t;
+        }
+        struct magicu mg = magic_u32(ud);
+        int hi = dm_op(nb, fn, IR_MULH, x,
+                       dm_const(nb, fn, (long)(int)mg.m, 4, src), 4, 0, 0, src);
+        if (!mg.add)
+            return mg.s ? dm_op(nb, fn, IR_SHR, hi,
+                                dm_const(nb, fn, mg.s, 4, src), 4, 0, 0, src)
+                        : hi;
+        /* ((x - hi) >> 1) + hi, which cannot carry out of 32 bits */
+        int t4 = dm_op(nb, fn, IR_SUB, x, hi, 4, 0, 0, src);
+        int t5 = dm_op(nb, fn, IR_SHR, t4, dm_const(nb, fn, 1, 4, src),
+                       4, 0, 0, src);
+        int t6 = dm_op(nb, fn, IR_ADD, t5, hi, 4, 0, 0, src);
+        return mg.s > 1 ? dm_op(nb, fn, IR_SHR, t6,
+                                dm_const(nb, fn, mg.s - 1, 4, src),
+                                4, 0, 0, src)
+                        : t6;
+    }
+    struct magics mg = magic_s32(D);
+    long m = (long)(int)mg.m;
+    int t = dm_op(nb, fn, IR_MULH, x, dm_const(nb, fn, m, 4, src),
+                  4, 1, 0, src);
+    if (D > 0 && m < 0)
+        t = dm_op(nb, fn, IR_ADD, t, x, 4, 1, 0, src);
+    else if (D < 0 && m > 0)
+        t = dm_op(nb, fn, IR_SUB, t, x, 4, 1, 0, src);
+    if (mg.s)
+        t = dm_op(nb, fn, IR_SHR, t, dm_const(nb, fn, mg.s, 4, src),
+                  4, 1, 0, src);
+    /* plus one where the quotient so far is negative: toward zero */
+    int sb = dm_op(nb, fn, IR_SHR, t, dm_const(nb, fn, 31, 4, src),
+                   4, 0, 0, src);
+    return dm_op(nb, fn, IR_ADD, t, sb, 4, 1, 0, src);
+}
+
 /* Replace 32-bit `x / C` and `x % C` with a multiply and shifts. */
 static int pass_divmagic(struct ir_func *fn)
 {
@@ -3875,7 +3965,14 @@ static int pass_divmagic(struct ir_func *fn)
      * Cortex-M4, 30-odd on many RISC-V cores) where clang and GCC shift.
      * At -Os only where the divide is a library call (ARMv6-M, AVR): with
      * a divide instruction the shifts are a few bytes longer than it. */
-    int pow2_only = target_ptr_size() < 8;
+    /* A 32-bit machine with a widening multiply has the high half in one
+     * instruction (target_has_mulh), and takes the magic number as a
+     * 64-bit one does -- except at -Os, where a hardware divide is the
+     * shorter of the two, and a library call's few bytes are too. */
+    int narrow = target_ptr_size() < 8;
+    int mulh32 = narrow && target_has_mulh() && !g_opt_size &&
+                 !getenv("EMBCC_NO_MULH");
+    int pow2_only = narrow && !mulh32;
     if (pow2_only && g_opt_size) {
         struct ir_ins probe;
         memset(&probe, 0, sizeof probe);
@@ -3895,9 +3992,11 @@ static int pass_divmagic(struct ir_func *fn)
         if (newpos) newpos[n] = nb.n;
         struct ir_ins *src = &fn->ins[n];
         long D;
+        /* (an unsigned divide by 0xffffffff, which the IR holds as -1,
+         * is a compare on the 32-bit path) */
         if ((src->op != IR_DIV && src->op != IR_MOD) || src->flt ||
             src->w != 4 || src->dst < 0 || !const_b(fn, &d, src, &D) ||
-            D == 0 || D == 1 || D == -1) {
+            D == 0 || D == 1 || (D == -1 && !(mulh32 && !src->sign))) {
             *ib_push(&nb) = *src;
             continue;
         }
@@ -3911,7 +4010,10 @@ static int pass_divmagic(struct ir_func *fn)
          * runs; a signed one is not, and its bias is cheaper than a
          * multiply, so take it here. */
         int q;
-        if (sg && log2_pow2_l((unsigned long)(D < 0 ? -D : D)) >= 0) {
+        if (mulh32 &&
+            !(sg && log2_pow2_l((unsigned long)(D < 0 ? -D : D)) >= 0)) {
+            q = dm_div32(&nb, fn, x, (long)(int)D, sg, src);
+        } else if (sg && log2_pow2_l((unsigned long)(D < 0 ? -D : D)) >= 0) {
             int sh = log2_pow2_l((unsigned long)(D < 0 ? -D : D));
             /* q = (x + ((x >> 31) >>u (32 - sh))) >> sh */
             int t1 = dm_op(&nb, fn, IR_SHR, x, dm_const(&nb, fn, 31, 4, src),
@@ -4018,6 +4120,124 @@ static int pass_divmagic(struct ir_func *fn)
     free_defs(&d);
     g_did.divmagic++;
     return changed;
+}
+
+/* ---- the widening multiply ---------------------------------------------
+ *
+ * `(int64_t)a * b` with 32-bit a and b is, in the IR, a 64-bit multiply
+ * of two extended values -- and on a 32-bit machine a 64x64 multiply is
+ * three or four multiplies and the adds between them. The product of two
+ * 32-bit values needs one: umull/smull, mul + mulh(u), multu. This makes
+ * the multiply an IR_MULW of the 32-bit values themselves, where
+ * target_has_mulh() says the backend has one, and leaves the extensions
+ * to dead-code elimination.
+ *
+ * An operand qualifies when it is the extension of a 32-bit value
+ * (ext.8:4, signed or not) or a constant that the same extension would
+ * produce; both must agree on the signedness, which is the multiply's.
+ * The value extended must itself be 32 bits wide where it is defined --
+ * a narrow read of a wide value would hand the backend a register pair
+ * where it reads one register. After the fixpoint, so that nothing
+ * which reasons about a 64-bit multiply (strength reduction, the
+ * induction variables) meets this instead. */
+static int mw_narrow(struct ir_func *fn, const struct defs *d, int v)
+{
+    if (v < 0 || v >= fn->nvregs)
+        return 0;
+    if (v < fn->nvars)
+        return fn->locals[v].size <= 4 && fn->locals[v].is_int_or_ptr &&
+               !fn->locals[v].is_scalar_float;
+    if (d->cnt[v] != 1 || d->ins[v] < 0)
+        return 0;
+    const struct ir_ins *e = &fn->ins[d->ins[v]];
+    return e->w == 4 && !e->flt && writes_temp(e->op) && e->op != IR_CALL;
+}
+
+/* An operand of the 64-bit multiply as a 32-bit one: *x the vreg (or -1
+ * with *k the constant), *s 1 when it is a sign extension, 0 a zero one,
+ * and 2 when a constant reads the same either way. 0 if it is neither. */
+static int mw_opnd(struct ir_func *fn, const struct defs *d, int v,
+                   int *x, long *k, int *s)
+{
+    if (v < 0 || v >= fn->nvregs || d->cnt[v] != 1 || d->ins[v] < 0)
+        return 0;
+    const struct ir_ins *e = &fn->ins[d->ins[v]];
+    if (e->op == IR_CONST && !e->flt) {
+        long c = e->imm;
+        *x = -1; *k = c;
+        if (c >= 0 && c <= 0x7fffffffL)          *s = 2;
+        else if (c < 0 && c >= -0x80000000L)     *s = 1;
+        else if (c > 0 && c <= 0xffffffffL)      *s = 0;
+        else return 0;
+        return 1;
+    }
+    if (e->op != IR_EXT || e->flt || e->size != 4 || e->w != 8 ||
+        !mw_narrow(fn, d, e->a))
+        return 0;
+    *x = e->a; *s = e->sign ? 1 : 0;
+    return 1;
+}
+
+static int pass_mulwiden(struct ir_func *fn)
+{
+    if (fn->nins == 0 || target_ptr_size() >= 8 || !target_has_mulh() ||
+        getenv("EMBCC_NO_MULW"))
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    int changed = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        struct ir_ins at = fn->ins[n];
+        int xa = -1, xb = -1, sa = -1, sb = -1, ok;
+        long ka = 0, kb = 0;
+        ok = at.op == IR_MUL && at.w == 8 && !at.flt && at.dst >= 0 &&
+             mw_opnd(fn, &d, at.a, &xa, &ka, &sa);
+        if (ok && at.imm_b) {
+            long c = at.imm;
+            xb = -1; kb = c;
+            if (c >= 0 && c <= 0x7fffffffL)          sb = 2;
+            else if (c < 0 && c >= -0x80000000L)     sb = 1;
+            else if (c > 0 && c <= 0xffffffffL)      sb = 0;
+            else ok = 0;
+        } else if (ok) {
+            ok = mw_opnd(fn, &d, at.b, &xb, &kb, &sb);
+        }
+        /* the signedness both agree on; two constants are the folder's */
+        int s = sa == 2 ? sb : sa;
+        ok = ok && (xa >= 0 || xb >= 0) &&
+             (sa == 2 || sb == 2 || sa == sb) && s != 2;
+        if (!ok) {
+            *ib_push(&nb) = at;
+            continue;
+        }
+        if (xa < 0)
+            xa = dm_const(&nb, fn, (long)(int)ka, 4, &at);
+        if (xb < 0)
+            xb = dm_const(&nb, fn, (long)(int)kb, 4, &at);
+        struct ir_ins *p = ib_push(&nb);
+        *p = at;
+        p->op = IR_MULW; p->a = xa; p->b = xb; p->sign = s;
+        p->imm_b = 0; p->imm = 0;
+        changed = 1;
+    }
+    if (!changed) { free(nb.p); free(newpos); free_defs(&d); return 0; }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free_defs(&d);
+    return 1;
 }
 
 /* ---- divisibility by a multiply ----------------------------------------
@@ -14818,6 +15038,9 @@ static void opt_func(struct ir_func *fn)
     /* After the fixpoint: fold constant operands into immediates, then DCE the
      * CONSTs that leaves unreferenced. Kept out of the fixpoint so the earlier
      * passes never reason about the imm_b form. */
+    /* the 64-bit product of two 32-bit values: one widening multiply */
+    if (pass_mulwiden(fn))
+        pass_dce(fn);
     if (pass_immfold(fn))
         pass_dce(fn);
     pass_signtest(fn);       /* `if (x >> 63)` is `if (x < 0)` */
