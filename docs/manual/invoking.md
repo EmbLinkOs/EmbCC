@@ -70,7 +70,7 @@ the full entry.
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
 | [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` `-specs=FILE` |
 | [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-fno-pic` `-fno-pie` `-fno-jump-tables` `-fjump-tables` `-fno-zero-initialized-in-bss` `-fstrict-volatile-bitfields` `-fno-strict-volatile-bitfields` `-fverbose-asm` `-ffunction-sections` `-fdata-sections` |
-| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mfpu=FPU` `-mfloat-abi=ABI` `-mabi=ABI` `-mthumb-interwork` `-mno-thumb-interwork` `-munaligned-access` `-mslow-flash-data` `-mlittle-endian`; on MIPS `-mcpu=CPU` `-march=CPU` `-mabi=32` `-msoft-float` `-EL` `-mno-abicalls` `-G0` |
+| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mcmse` `-mfpu=FPU` `-mfloat-abi=ABI` `-mabi=ABI` `-mthumb-interwork` `-mno-thumb-interwork` `-munaligned-access` `-mslow-flash-data` `-mlittle-endian`; on MIPS `-mcpu=CPU` `-march=CPU` `-mabi=32` `-msoft-float` `-EL` `-mno-abicalls` `-G0` |
 | [Target](#target-selection) | `--target=TRIPLE` |
 | [Developer](#developer-and-inspection-options) | `inspect` `why` `-fremarks` `--emit-interfaces` `--explain` |
 | [Refused](#refused-options) | `-fPIC` `-fpic` `-fPIE` `-fpie` `-shared` `-static-pie` `-flto` `-fshort-enums` `-fprofile*` `--coverage` `-fcoverage-mapping` `-pg` `-fstack-protector*` `-fstack-clash-protection` `-fcf-protection*` `-fsanitize*` (other than the forms above) `-gdwarf-N` (N not 2 to 4) `-gsplit-dwarf` `-gz` `-mno-unaligned-access` `-mbig-endian` `-mabi=` (other values) `-fdump-*` `-fcallgraph-info*` |
@@ -1524,14 +1524,21 @@ extension); `cortex-m3` selects ARMv7-M code. `-mcpu=` does not move
 between ARMv7-M and ARMv8-M; that level comes from the triple
 (`thumbv8m.main-none-eabi`).
 
-EmbCC has no ARMv8-M Baseline code generator, so `cortex-m23` is refused:
-`-mcpu=cortex-m23 is ARMv8-M Baseline, and EmbCC emits ARMv6-M (cortex-m0,
-m0plus, m1) or ARMv7-M Thumb-2: the second faults on that core and the
-first is not what it is`.
+`cortex-m23` selects ARMv8-M Baseline on any ARM triple, as
+`thumbv8m.base-none-eabi` does ([Targets](targets.md#armv8-m-baseline)).
 
 Any other `CPU` is refused: `-mcpu=cortex-m55 is not a part EmbCC knows:
-it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv7-M and ARMv7E-M
-(cortex-m3, m4, m7, m33)`.
+it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23),
+ARMv7-M and ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M Mainline
+(cortex-m33)`.
+
+#### `-mcmse`
+
+Compile for the Secure state of an ARMv8-M part (TrustZone-M, ACLE's
+CMSE): `cmse_nonsecure_entry` and `cmse_nonsecure_call` take effect, and
+`__ARM_FEATURE_CMSE` is 3. Only on `thumbv8m.main-none-eabi` and
+`thumbv8m.base-none-eabi`, and only with soft float. See
+[Targets](targets.md#trustzone-m-cmse).
 
 #### `-mfpu=FPU`
 
@@ -1668,7 +1675,7 @@ Accepted: every target EmbCC emits for is little-endian.
 
 ### Machine options that are not accepted
 
-`-mtune=`, `-mmcu=`, `-mcmse`, `-masm=`, `-m32` and `-m64` are unknown
+`-mtune=`, `-mmcu=`, `-masm=`, `-m32` and `-m64` are unknown
 arguments, and so are `-march=`, `-msoft-float` and `-mhard-float` on
 every target but MIPS, and `-mabi=` on x86-64, AArch64 and AVR. The architecture, ABI and part are selected by the
 [target triple](#target-selection) (and on ARM by `-mcpu=`, `-mfpu=` and

@@ -23,7 +23,7 @@ embld -T SCRIPT [-L DIR]... [-u SYMBOL]... [--orphan-handling=MODE]
       [-o FILE] [-e SYMBOL] INPUT...
 
 embld ... [--gc-sections [--print-gc-sections]] [-Map FILE]
-      [--print-memory-usage] INPUT...
+      [--print-memory-usage] [--cmse-implib [--out-implib=FILE]] INPUT...
 
 embld --doctor INPUT...
 ```
@@ -499,6 +499,45 @@ embld: 'a.o' and 'b.o' disagree about the size of an enum, which changes the lay
 
 An object without an attributes section takes no part in the comparison.
 
+### ARMv8-M secure gateway veneers
+
+An ARM input that defines a global `__acle_se_NAME` beside a global
+`NAME` at the same address -- what `embcc -mcmse` writes for a
+`cmse_nonsecure_entry` function -- gets a secure gateway veneer, as GNU
+ld makes one:
+
+```text
+NAME:   sg                          e97f e97f
+        b.w     __acle_se_NAME
+```
+
+The veneers are eight bytes each, in name order, in a section
+`.gnu.sgstubs` that is 32-byte aligned and padded to 32 bytes (the SAU's
+granule), and `NAME` comes to name the veneer, so a call from anywhere
+enters through the gateway while `__acle_se_NAME` still names the code.
+A linker script places the section by name (`KEEP(*(.gnu.sgstubs*))`) in
+the region the image marks Non-secure Callable; without one it is an
+orphan after `.rodata`. A `__acle_se_` symbol with no `NAME` at its
+address, or one that is not Thumb code, stops the link by name.
+
+`--cmse-implib --out-implib=FILE` also writes the import library: an ELF32
+relocatable object holding, for each veneer, a global absolute
+(`SHN_ABS`) Thumb function symbol `NAME` at the veneer's address. A
+Non-secure image links against it to call the Secure entry functions.
+
+A Thumb call (`R_ARM_THM_CALL`, `R_ARM_THM_JUMP24`) to an ABSOLUTE symbol
+-- an import library's, chiefly -- that is out of a `bl`'s ±16 MiB goes
+through a long-branch veneer the linker adds to `.text`: `movw ip, #lo;
+movt ip, #hi; bx ip`, or on ARMv6-M, which has no `movw`, `push {r0,
+r1}; ldr r0, [pc, #4]; str r0, [sp, #4]; pop {r0, pc}` and the address.
+`ip` is the register the AAPCS gives a veneer. A call that reaches
+branches directly. The Non-secure code of an ARMv8-M part is usually
+that far from the Secure veneers (0x00200000 against 0x10000000 on the
+mps2-an505), so a call through the import library needs it.
+
+`tests/golden/thumbv8m-cmse.sh` links a Secure and a Non-secure image
+this way and runs them on QEMU's mps2-an505.
+
 ### Relocations
 
 | Machine | Relocation types applied |
@@ -524,7 +563,7 @@ of small-data and position-independent code are refused by name:
 `-G0`), `R_MIPS_GOT16` and `R_MIPS_CALL16` (compile without `-fPIC`).
 
 `embld` performs no linker relaxation and creates no veneers,
-trampolines or stubs. A relocated value that its field cannot hold is an
+trampolines or stubs, except ARMv8-M's (above). A relocated value that its field cannot hold is an
 error, not truncated. For these types the message names the relocation,
 the symbol, the value and the range the field holds:
 
@@ -554,7 +593,7 @@ relocation errors have messages of their own:
 
 | Message | Cause |
 |---|---|
-| `a Thumb call is more than 16MB away; this linker mints no veneers` | ARM `bl`/`b.w` out of range |
+| `a Thumb call is more than 16MB away; this linker mints no veneers` | ARM `bl`/`b.w` out of range, to a symbol that is not absolute |
 | `an rjmp reaches +-4KB and this target is N bytes away; ...` | AVR `rjmp`/`rcall` out of range; use `call` and `jmp` |
 | `a conditional branch reaches +-126 bytes and this target is N away; ...` | AVR conditional branch out of range |
 | `a call to an odd address 0x...; ...` | AVR `call`/`jmp` to an odd byte address |
@@ -680,6 +719,26 @@ Write the map file. See [Map file and memory usage](#map-file-and-memory-usage).
 ### `--print-memory-usage`
 
 Print the region usage table on standard output.
+
+### `--cmse-implib`
+
+ARMv8-M: with `--out-implib`, write the secure gateway import library.
+The veneers themselves are made whether or not it is given (see
+[ARMv8-M secure gateway veneers](#armv8-m-secure-gateway-veneers)).
+
+### `--out-implib=FILE`, `--out-implib FILE`
+
+Write the import library to `FILE`. Requires `--cmse-implib`:
+`--out-implib needs --cmse-implib: the import library this linker writes
+is ARMv8-M's secure gateway one`.
+
+### `--in-implib=FILE`
+
+Refused: `--in-implib is not supported: it keeps each secure gateway
+veneer at the address an earlier import library gave it, and this linker
+lays the veneers out in name order every link`. A Secure image whose
+veneers must keep their addresses across releases cannot be built with
+embld yet.
 
 ### `--embx`
 

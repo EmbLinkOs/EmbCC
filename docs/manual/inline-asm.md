@@ -965,10 +965,13 @@ int second(const int *p)
 
 ## ARM Cortex-M
 
-This section applies to every Cortex-M triple: `thumbv7m-none-eabi`,
-`thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`
-and `thumbv8m.main-none-eabihf`. All of them use the same ARMv7-M
-instruction set for inline assembly.
+This section applies to every Cortex-M triple: `thumbv6m-none-eabi`,
+`thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`,
+`thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi` and
+`thumbv8m.main-none-eabihf`. All of them use the same assembler; at the
+Thumb-1 levels (ARMv6-M and ARMv8-M Baseline) it refuses what the core
+does not have, and the ARMv8-M levels add the instructions in
+[ARMv8-M security and acquire/release instructions](#armv8-m-security-and-acquirerelease-instructions).
 
 ### Constraints
 
@@ -1057,6 +1060,10 @@ and is refused, as is a value the instruction cannot encode.
 | `ldr Rt, =IMM` | any 32-bit constant, assembled as `movw` and `movt` |
 | `ldrex Rt, [Rn{, #OFF}]` | `OFF` a multiple of 4, 0 to 1020 |
 | `strex Rd, Rt, [Rn{, #OFF}]` | `OFF` a multiple of 4, 0 to 1020 |
+| `ldrexb`, `ldrexh` `Rt, [Rn]`; `strexb`, `strexh` `Rd, Rt, [Rn]` | `Rd` neither `Rt` nor `Rn` |
+| `clrex` | none |
+| `msr apsr_nzcvq, Rn`, `msr apsr_nzcvqg, Rn` | the flags; `apsr_nzcvqg` also the DSP extension's GE bits (not on ARMv6-M or ARMv8-M Baseline) |
+| ARMv8-M only: `lda`, `ldab`, `ldah`, `ldaex`, `ldaexb`, `ldaexh`, `stl`, `stlb`, `stlh`, `stlex`, `stlexb`, `stlexh`, `tt`, `ttt`, `tta`, `ttat`, `sg`, `bxns`, `blxns`, and on Mainline `vlstm`, `vlldm` | see [ARMv8-M security and acquire/release instructions](#armv8-m-security-and-acquirerelease-instructions) |
 | `b`, `bl`, `beq`, `bne`, `bcs`, `bhs`, `bcc`, `blo`, `bmi`, `bpl`, `bvs`, `bvc`, `bhi`, `bls`, `bge`, `blt`, `bgt`, `ble` | `OFFSET` (even) |
 | `cbz`, `cbnz` | `Rn, OFFSET`: `Rn` r0 to r7, `OFFSET` 4 to 130, forward |
 | `push`, `pop` | a register list, `{r4-r7, lr}` or without braces, `r4, lr` |
@@ -1089,16 +1096,74 @@ file is assembled as GNU as does it, see [embas](tools/embas.md#gnu-syntax-assem
 - A barrier option other than `sy` is refused with
   ``only the `sy` barrier option is supported; "ish" is not``.
 
-There is no `ldrd` or `strd`, no `clrex`, no byte or
-halfword exclusives, no extend, bit-field, multiply-accumulate or
-long-multiply instruction, and no floating-point instruction beyond
+There is no `ldrd` or `strd`, no extend, bit-field, multiply-accumulate
+or long-multiply instruction, and no floating-point instruction beyond
 `vmov`, `vldm`/`vstm` and `vpush`/`vpop` (`vmrs`, `vmsr`, `vldr`, ...).
-The ARMv8-M security instructions (`sg`, `tt`, `tta`, `ttt`, `ttat`,
-`bxns`, `blxns`) are not available on the `thumbv8m.main` triples either.
+
+On ARMv6-M (`thumbv6m-none-eabi`) and ARMv8-M Baseline
+(`thumbv8m.base-none-eabi`), every 32-bit encoding a statement produces is
+checked against what the core has, in inline asm and in a `.s` file
+alike: an instruction outside the set -- `ldr.w`, an `add` whose
+immediate needs the 32-bit form, `it` -- is refused by name rather than
+assembled into a HardFault, and so are the Main Extension's special
+registers (`basepri`, `basepri_max`, `faultmask` and their `_ns` forms):
+
+```text
+"add.w r0, r1, #4096" is not an ARMv8-M Baseline instruction: it encodes as a 32-bit Thumb-2 form that core does not have
+"basepri" is not a special register of ARMv8-M Baseline: it is the Main Extension's
+```
+
+ARMv6-M has `bl`, `mrs`, `msr` and the barriers; ARMv8-M Baseline adds
+`b.w`, `movw`, `movt`, `sdiv`, `udiv`, the exclusives (`ldrex`/`strex`
+with an offset, the byte and halfword forms, `clrex`), the
+acquire/release family, `tt`/`ttt`/`tta`/`ttat` and `sg`, and the 16-bit
+`cbz`, `cbnz`, `bxns` and `blxns` (see
+[Targets](targets.md#armv8-m-baseline)).
+
+### ARMv8-M security and acquire/release instructions
+
+On the ARMv8-M triples (`thumbv8m.main-none-eabi[hf]` and
+`thumbv8m.base-none-eabi`), the security extension's instructions and the
+load-acquire/store-release family assemble; on any other level each is
+refused by name (`tt is an instruction of ARMv8-M's security extension,
+and this is not an ARMv8-M target`, `lda is an ARMv8-M instruction
+(load-acquire and store-release), and this is not an ARMv8-M target`).
+
+| Instruction | Operands | Meaning |
+|---|---|---|
+| `tt`, `ttt`, `tta`, `ttat` | `Rd, Rn` (`Rd` not `sp` or `pc`) | the test target: the MPU, SAU and IDAU attributes of the address in `Rn`; `t` as unprivileged code would see them, `a` as the other security state would (Secure state only) |
+| `sg` | none | the secure gateway: the first instruction of an entry the Non-secure state may branch to |
+| `bxns`, `blxns` | `Rm` | `bx`/`blx` that may leave the Secure state, when `Rm`'s bit 0 is clear |
+| `vlstm`, `vlldm` | `Rn` (or `Rn, {d0-d15}`) | Mainline only: the lazy save and restore of the floating-point context around a call to the Non-secure state |
+| `lda`, `ldab`, `ldah` | `Rt, [Rn]` | load-acquire, word, byte, halfword |
+| `ldaex`, `ldaexb`, `ldaexh` | `Rt, [Rn]` | load-acquire exclusive |
+| `stl`, `stlb`, `stlh` | `Rt, [Rn]` | store-release |
+| `stlex`, `stlexb`, `stlexh` | `Rd, Rt, [Rn]` | store-release exclusive; `Rd` 0 when it took |
+
+None of these takes an offset, and `sp` and `pc` are refused as their
+registers. `tasm_vocabulary_v8m` in `src/arch/thumb/asm.c` lists every
+form across the registers, and `tests/golden/thumbv8mbase-encoding.sh`
+checks each against llvm-mc (`-mattr=+8msecext`) byte for byte, at
+Baseline and Mainline. A Secure program normally reaches `tt` through
+`<arm_cmse.h>` ([Targets](targets.md#trustzone-m-cmse)):
+
+```c
+static inline unsigned test_target(void *p)
+{
+    unsigned v;
+    __asm__ volatile("tt %0, %1" : "=r"(v) : "r"(p));
+    return v;          /* bits 7:0 the MPU region, 16 MPU-region-valid, ... */
+}
+```
+
+`sg`, `bxns` and `blxns` are what the compiler and the linker emit for
+`cmse_nonsecure_entry` and `cmse_nonsecure_call`; written by hand, a
+`bxns` to the Non-secure state must first clear every register and flag
+that holds a secret, as those do.
 
 ### ARMv8-M stack limits
 
-On the `thumbv8m.main` triples, `mrs` and `msr` name the stack-limit
+On the ARMv8-M triples, `mrs` and `msr` name the stack-limit
 registers, and the core enforces them. A push or a stack-pointer
 adjustment that would take the stack below its limit is not made, and
 takes a UsageFault with CFSR.STKOF (bit 20) set instead. An RTOS sets

@@ -369,17 +369,17 @@ table above, region by region. The details are in
 | Part | Triple | Notes |
 |---|---|---|
 | Cortex-M0, M0+, M1 | `thumbv6m-none-eabi`, or `-mcpu=cortex-m0` (`m0plus`, `m1`) on any ARM triple | Thumb-1; divide, 64-bit multiply and atomics are `librt.a` calls |
+| Cortex-M23 | `thumbv8m.base-none-eabi`, or `-mcpu=cortex-m23` on any ARM triple | Thumb-1 with `sdiv`/`udiv` and exclusives; 64-bit multiply and shifts are `librt.a` calls; TrustZone with `-mcmse` |
 | Cortex-M3 | `thumbv7m-none-eabi` | no FPU |
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
 | Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi -mfpu=fpv4-sp-d16 -mfloat-abi=hard` | single-precision FPU, hard-float convention |
 | Cortex-M7 | `thumbv7em-none-eabihf -mcpu=cortex-m7`, or `thumbv7em-none-eabi -mfpu=fpv5-d16 -mfloat-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
-| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16 |
+| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `-mcmse` (soft float) |
 
-`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m3`,
-`cortex-m4`, `cortex-m7` and `cortex-m33` select the sub-architecture as
-GCC's options do. `-mcpu=cortex-m23` is refused: an ARMv8-M Baseline part
-is a different subset, and EmbCC emits neither ARMv6-M nor ARMv7-M code
-it can run. `-mthumb` is
+`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m23`,
+`cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
+sub-architecture as GCC's options do. The Secure side of a TrustZone-M
+build is `-mcmse` ([Targets](targets.md#trustzone-m-cmse)). `-mthumb` is
 accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
