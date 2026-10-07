@@ -15,7 +15,7 @@ program can rely on. Firmware-specific use of the runtime is in
 | Library | Source | Archive | Built for | Make target |
 |---|---|---|---|---|
 | C library | `lib/libc` | `libc.a` (+ `crt1.o` on Linux) | `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-linux-gnu`, EmbLinkOS | `libc-x86_64`, `libc-aarch64`, `libc-linux-x86_64`, `libc-linux-aarch64`, `libc-emblinkos` |
-| C++ runtime and standard library | `lib/libcxx` | `libcxx.a` | `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-linux-gnu` | `libcxx-x86_64`, `libcxx-aarch64`, `libcxx-linux-x86_64`, `libcxx-linux-aarch64` |
+| C++ runtime and standard library | `lib/libcxx` | `libcxx.a` | `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu`, `aarch64-linux-gnu`; the runtime alone (no exceptions, no RTTI) for 32-bit ARM and `riscv32-unknown-elf` | `libcxx-x86_64`, `libcxx-aarch64`, `libcxx-linux-x86_64`, `libcxx-linux-aarch64`, `libcxx-embedded` |
 | Compiler runtime | `lib/rt` | `librt.a` | `x86_64-linux-gnu`, `aarch64-linux-gnu`, and the embedded triples | `libc-linux-*` (Linux), `rt-embedded` (embedded) |
 
 Every library is built per target by the `embcc` in the same tree, so it
@@ -338,7 +338,7 @@ depends on the target:
 | `x86_64-linux-gnu`, `aarch64-linux-gnu` | EmbCC's own, `lib/rt/unwind.c`, in `librt.a` |
 | `x86_64-elf`, `aarch64-elf` | libgcc's; the program links `libgcc.a` (or `libgcc_eh.a`) |
 | EmbLinkOS, macOS | the platform's |
-| the embedded targets | none. C++ code generation is refused on Cortex-M, RV32 and AVR, and at RV64 a function that needs a landing pad is refused (see [Bare-metal programming](embedded.md#c-on-the-embedded-targets)) |
+| the embedded targets | none. C++ exceptions are refused on 32-bit ARM and RV32, C++ code generation on AVR, MIPS32, Xtensa and TriCore, and at RV64 a function that needs a landing pad is refused (see [Bare-metal programming](embedded.md#c-on-the-embedded-targets)) |
 
 `<unwind.h>` in the freestanding directory declares the level-I unwinder
 interface (`_Unwind_RaiseException`, `_Unwind_GetIP`, ...) with the GCC
@@ -451,6 +451,7 @@ scratch.
 | `make libcxx-x86_64`, `make libcxx-aarch64` | C++ library for `x86_64-elf`, `aarch64-elf`, `-O2` | `build/libcxx/x86_64/libcxx.a`, `build/libcxx/aarch64/libcxx.a` |
 | `make libcxx` | both of the above | |
 | `make libcxx-linux-x86_64`, `make libcxx-linux-aarch64` | C++ library for the Linux triples | `build/libcxx/linux-x86_64/libcxx.a`, `build/libcxx/linux-aarch64/libcxx.a` |
+| `make libcxx-embedded` | the C++ runtime for the 32-bit ARM triples and `riscv32-unknown-elf`, `-Os -fno-exceptions -fno-rtti`, through `tools/build-libcxx.sh`: `operator new`/`delete` (weak), the guard functions, `__cxa_pure_virtual`, `__aeabi_atexit`, `__dso_handle` | `build/libcxx/TRIPLE/libcxx.a` |
 | `make libc-linux-all` | `libc-linux` and both Linux C++ libraries | |
 | `make rt-embedded` | `librt.a` for `avr`, the five Cortex-M triples and `riscv32-unknown-elf`, `-Os`, through `tools/build-rt.sh` | `build/libc/TRIPLE/librt.a` |
 
