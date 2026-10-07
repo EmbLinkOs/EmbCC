@@ -76,6 +76,11 @@ int target_insn_len(const unsigned char *p, int avail)
         return 0;                               /* 48-bit and wider: unused */
 
     case TARGET_THUMB: {
+        /* ARM state (armv7a): one word, always -- grouped by the Thumb
+         * rule below, -S put each relocation two bytes into the
+         * instruction before its own. */
+        if (g_arm_a32)
+            return avail >= 4 ? 4 : 0;
         /* Thumb-2: a first halfword whose top five bits are 0b11101,
          * 0b11110 or 0b11111 introduces a 32-bit instruction; everything
          * else is one halfword (ARMv7-M ARM, A5.1). */

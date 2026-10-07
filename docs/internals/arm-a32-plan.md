@@ -155,4 +155,53 @@ can end QEMU itself (SYS_EXIT through `svc #0x123456`). The harness prints
 
 ## Status
 
-Work in progress; see the end of this file once the backend lands.
+Done (soft float):
+
+- `src/arch/thumb/a32.c`, the A32 encoder, behind every `t_*` encoder in
+  `emit.c` (one dispatch line each; the Thumb encodings are unchanged and
+  their goldens pass). `tools/a32check` + `arm-a32-encoding`: 130,123
+  instructions from 57 encoders identical to llvm-mc's, 104 out-of-form
+  operands refused with nothing written.
+- The target: `--target=armv7a-none-eabi` (`armv7a`, `armv7-none-eabi`,
+  `armv7a-unknown-none-eabi`), clang's predefined macros
+  (`src/arch/armv7a`), `.ARM.attributes` v7-A, `$a`, even function
+  symbols, the four A32 relocation types; `-marm`, the ARMv7-A
+  `-mcpu=`s and `-mfloat-abi=soft` accepted.
+- Code generation at -O0 (allocator for the temporaries) and
+  -O1/-O2/-Os, through the ARMv7-M selection with the differences listed
+  above. The exec corpus passes 197 of 197 at every level, also with the
+  allocator's attempts forced one at a time (`EMBCC_T_PAIRS=0/1`,
+  `EMBCC_T_EXT=1`, `EMBCC_T_LOWREGS=1`) and with the pool shrunk to three
+  registers (`EMBCC_RA_MAXPOOL=3`).
+- The file assembler and inline asm in ARM state (conditions on any
+  instruction; `mrs`/`msr` of `cpsr`, `mrc`/`mcr`, the A32 `svc`/`bkpt`/
+  `udf`), `lib/libc`'s `setjmp`/`longjmp` written with it.
+- EmbLD: the A32 relocations (REL and RELA), `bl` made `blx` across
+  instruction sets in both directions, the A32 `-Tstack` stub.
+- `lib/rt` and `lib/libc` build for the target (`make rt-embedded`,
+  `make libc-embedded`); `__aeabi_[u]idiv[mod]` in software
+  (`lib/rt/aeabidiv.c`, shared with ARMv6-M).
+- The board: `tests/harness/arm-a32`, QEMU virt / Cortex-A15, also a board
+  of `exec-boards.sh` (`a7`).
+- Goldens: `arm-a32-encoding`, `arm-a32-exec`, `arm-a32-abi` (EmbCC and
+  clang in all four pairings, in ARM state and across ARM/Thumb, plus
+  clang's `__aeabi_*` calls on EmbCC's runtime), `arm-a32-refuse`; and an
+  `armv7a` row in `asmout-roundtrip` and `predef`. Each new golden was
+  shown to fail against a deliberate mutant.
+
+Known gaps:
+
+- Hard float (VFPv3/VFPv4, `-mfloat-abi=softfp|hard`) and NEON are refused
+  by name. The VFP encodings already carry over (a32check checks them);
+  what is missing is the option plumbing, the attributes and an `eabihf`
+  runtime.
+- 8-byte atomics are refused, though ARMv7-A has `ldrexd`/`strexd`.
+- No hardware divide even on the cores that have it (A7, A15): the
+  helpers are always called.
+- Interworking is calls only: a `b` (tail call) between ARM and Thumb
+  code needs a veneer, which EmbLD refuses.
+- The code assumes unaligned word/halfword accesses are permitted (MMU on,
+  Normal memory), as clang's does; `-mno-unaligned-access` is refused.
+- C++, computed goto, `__builtin_frame_address`, interrupt functions:
+  refused, as on the Cortex-M targets (interrupt functions are accepted
+  there).
