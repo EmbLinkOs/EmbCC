@@ -44,8 +44,9 @@ enum target_arch {
      * and it differs from clang's AVR target. Both are measured facts
      * rather than recollections; see docs. */
     TARGET_AVR = 5,
-    /* 32-bit little-endian MIPS, MIPS32 Release 2, the o32 ABI with soft
-     * float (mipsel-none-elf): the core of Microchip's PIC32 parts. ILP32
+    /* 32-bit MIPS, MIPS32 Release 2, the o32 ABI with soft float:
+     * little-endian (mipsel-none-elf), the core of Microchip's PIC32
+     * parts, or big-endian (mips-none-elf, target_big_endian). ILP32
      * like ARMv7-M and RV32, with a SIGNED char and long double = double,
      * and the only target here with branch delay slots and REL
      * relocations. docs/internals/mips32-plan.md. */
@@ -61,6 +62,23 @@ enum target_arch {
  * bytes; this exists because the backend's arithmetic reads more clearly
  * against the name the ISA manual uses. */
 int target_xlen(void);
+
+/* The BYTE ORDER of the target's memory: 1 when a multi-byte value's most
+ * significant byte is at its lowest address (mips-none-elf), 0 for the
+ * little-endian targets -- every other one. Not the host's: the compiler
+ * never stores a host integer into an object, an instruction or an image
+ * by copying its bytes; every such value goes through target_put_uint or
+ * an explicit order. docs/internals/big-endian.md lists each place that
+ * depends on it and the test that would notice. */
+int target_big_endian(void);
+void target_set_big_endian(int on);
+/* `v`'s low `n` bytes (1..8) at p, in the target's order; and back. */
+void target_put_uint(unsigned char *p, int n, unsigned long long v);
+unsigned long long target_get_uint(const unsigned char *p, int n);
+/* Where the `size` bytes at byte `off` of a `whole`-byte value sit in it,
+ * as a right shift of the value: 8*off little-endian, 8*(whole-off-size)
+ * big-endian. What a narrower piece of a wider stored value IS. */
+int target_byte_shift(int off, int size, int whole);
 
 /* The operating system the emitted code will run ON, which is a
  * different question from the architecture and was not asked at all

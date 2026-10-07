@@ -54,8 +54,8 @@ static void print_version(void)
            dt ? " (as configured)" : "");
     printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
            "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
-           "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (little-endian "
-           "o32), AVR (ATmega328P)\n");
+           "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (o32, little- "
+           "and big-endian), AVR (ATmega328P)\n");
     printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
            "64-bit targets\n");
     printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32 and AVR images; "
@@ -2077,8 +2077,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 continue;
             }
             unsigned long v = (unsigned long)g->init;
-            for (int b = 0; b < ty_size(g->ty); b++)
-                img[g->off + b] = (char)((v >> (8 * b)) & 0xff);
+            target_put_uint((unsigned char *)img + g->off, ty_size(g->ty), v);
         }
     }
 
@@ -2135,8 +2134,8 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 memcpy(rodata + g->off, g->init_bytes, (size_t)n);
             } else {
                 unsigned long v = (unsigned long)g->init;
-                for (int b = 0; b < global_size(g) && b < 8; b++)
-                    rodata[g->off + b] = (char)((v >> (8 * b)) & 0xff);
+                target_put_uint((unsigned char *)rodata + g->off,
+                                global_size(g) < 8 ? global_size(g) : 8, v);
             }
         }
     }
@@ -3909,6 +3908,9 @@ int main(int argc, char **argv)
                               : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
                               : a == TARGET_MIPS32 ? mips_op_calls_helper
                               : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
+        /* the MIPS encoder's byte order, for the code generator and the
+         * inline and file-scope assemblers alike */
+        mips_set_big_endian(target_big_endian());
     }
     /* Scanned across the whole command line, not just argv[1]: these
      * describe the TARGET, so `--target=aarch64-elf --dump-predef` has to
@@ -4394,7 +4396,8 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-fno-move-loop-invariants") == 0 ||
                    strcmp(argv[i], "-fno-ipa-sra") == 0 ||
                    strcmp(argv[i], "-fno-lto") == 0 ||
-                   strcmp(argv[i], "-mlittle-endian") == 0) {
+                   (strcmp(argv[i], "-mlittle-endian") == 0 &&
+                    !target_big_endian())) {
             /* What arm-none-eabi-gcc builds pass, each accepted for a
              * reason that holds of THIS compiler (docs/manual/invoking.md;
              * tests/golden/gcc-flags.sh checks the promises):
@@ -4448,7 +4451,8 @@ int main(int argc, char **argv)
              *   -fno-builtin-NAME     no library name is a builtin at all
              *   -fno-isolate-erroneous-paths-dereference  nothing turns
              *                         a null dereference into a trap
-             *   -mlittle-endian       every target EmbCC has is */
+             *   -mlittle-endian       every target EmbCC has is, but
+             *                         mips-none-elf (refused below) */
         } else if (strncmp(argv[i], "-specs=", 7) == 0 ||
                    strncmp(argv[i], "--specs=", 8) == 0) {
             /* nano.specs, nosys.specs: which newlib and which syscall
@@ -4502,10 +4506,28 @@ int main(int argc, char **argv)
                                 "convention\n", v, target_triple_now(), want);
                 return 1;
             }
-        } else if (strcmp(argv[i], "-mbig-endian") == 0) {
-            fprintf(stderr, "embcc: error: -mbig-endian is not supported: "
-                            "every target EmbCC emits for is little-endian\n");
-            return 1;
+        } else if (strcmp(argv[i], "-mbig-endian") == 0 ||
+                   strcmp(argv[i], "-mlittle-endian") == 0) {
+            /* The byte order is the target's: it says what it is, and a
+             * flag that says the same is accepted. One that contradicts it
+             * is refused rather than obeyed, because the triple decides
+             * more than the order (the runtime's directory, the object's
+             * name for itself) and a silent switch would leave them
+             * disagreeing. */
+            int be = argv[i][2] == 'b';
+            if (be != target_big_endian()) {
+                fprintf(stderr, "embcc: error: %s is not supported for %s, "
+                                "which is %s-endian%s\n", argv[i],
+                        target_triple_now(),
+                        target_big_endian() ? "big" : "little",
+                        target_get() == TARGET_MIPS32
+                            ? (be ? " (big-endian MIPS is "
+                                    "--target=mips-none-elf)"
+                                  : " (little-endian MIPS is "
+                                    "--target=mipsel-none-elf)")
+                            : "");
+                return 1;
+            }
         } else if (strncmp(argv[i], "-fgnuc-version=", 15) == 0) {
             /* clang's spelling: present a C unit as this GCC, so a vendor
              * header that picks its compiler support by __GNUC__ (CMSIS)
@@ -4560,8 +4582,9 @@ int main(int argc, char **argv)
                     strncmp(argv[i], "-G", 2) == 0)) {
             /* The flags a MIPS build passes (a PIC32 project's, clang's
              * and gcc's for mipsel bare metal). What EmbCC emits is ONE
-             * configuration -- MIPS32 Release 2, little-endian, o32, soft
-             * float, no abicalls, no small data -- so each flag either
+             * configuration -- MIPS32 Release 2, o32, soft float, no
+             * abicalls, no small data, in the triple's byte order (-EL
+             * mipsel, -EB mips) -- so each flag either
              * says exactly that and is accepted, or asks for something
              * else and is refused by name: an object built for another
              * of these would link and then disagree with its callers
@@ -4594,9 +4617,14 @@ int main(int argc, char **argv)
                 diag_fatal(NULL, 0, "-mabicalls is not supported: EmbCC's "
                            "MIPS code takes addresses absolutely (lui/addiu) "
                            "and keeps no $gp; it is -mno-abicalls code");
-            } else if (strcmp(argv[i], "-EB") == 0) {
-                diag_fatal(NULL, 0, "-EB is not supported: the MIPS target "
-                           "is little-endian (mipsel) only");
+            } else if (strcmp(argv[i], "-EB") == 0 && !target_big_endian()) {
+                diag_fatal(NULL, 0, "-EB contradicts --target=%s, which is "
+                           "little-endian: big-endian MIPS is "
+                           "--target=mips-none-elf", target_triple_now());
+            } else if (strcmp(argv[i], "-EL") == 0 && target_big_endian()) {
+                diag_fatal(NULL, 0, "-EL contradicts --target=%s, which is "
+                           "big-endian: little-endian MIPS is "
+                           "--target=mipsel-none-elf", target_triple_now());
             } else if (strncmp(argv[i], "-G", 2) == 0 &&
                        strcmp(argv[i], "-G0") != 0) {
                 diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no "

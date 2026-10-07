@@ -13,6 +13,7 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m riscv32 riscv64 avr mips32
+#                   mips32eb
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -85,7 +86,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb) eval "echo \${$gccvar:-clang}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -141,6 +142,11 @@ refflags() {
         # flag changes.
         mips32)  [ -n "${EMBCC_REF_GCC_MIPS32:-}" ] || \
                      echo "-target mipsel-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # The same core BIG-endian (mips-none-elf): its own table, as the
+        # byte-order macros (__BYTE_ORDER__, __BIG_ENDIAN__, MIPSEB and the
+        # _MIPSEB family) are the generated answer, not a patch on mipsel's.
+        mips32eb) [ -n "${EMBCC_REF_GCC_MIPS32EB:-}" ] || \
+                     echo "-target mips-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -161,7 +167,7 @@ exclude_arch() {
         riscv64) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
         # two-byte atomic exactly as RISC-V's does (no libatomic here).
-        mips32)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        mips32|mips32eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -195,7 +201,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32|mips32eb) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -278,8 +284,9 @@ case "${1:-both}" in
     riscv64) gen riscv64 ;;
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
+    mips32eb) gen mips32eb ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen riscv32
-              gen riscv64; gen avr; gen mips32 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32]" >&2
+              gen riscv64; gen avr; gen mips32; gen mips32eb ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb]" >&2
        exit 1 ;;
 esac

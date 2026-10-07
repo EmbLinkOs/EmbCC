@@ -1,6 +1,6 @@
 #!/bin/sh
-# Run one MIPS harness image on QEMU's malta board and pass the UART
-# through to stdout.
+# Run one MIPS harness image on QEMU's malta board -- little- or
+# big-endian, as the image is -- and pass the UART through to stdout.
 #
 #   usage: run.sh IMAGE.elf
 #
@@ -16,7 +16,14 @@
 # machine, so a passing program read as one that never exited.
 set -u
 here=$(dirname "$0")
-QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+# The board's byte order is the image's: EI_DATA, the ELF header's sixth
+# byte, is 2 for a big-endian (mips-none-elf) image, which QEMU's malta
+# runs as qemu-system-mips; its -kernel loader refuses the other order.
+if [ "$(od -An -tu1 -j5 -N1 "$1" 2>/dev/null | tr -d ' ')" = 2 ]; then
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
 "$here/../qrun.sh" "${EMBCC_QEMU_TIMEOUT:-10}" --until "==EXIT [0-9]* ==" \
     "$QEMU" -M malta -cpu 24Kc -m 64 -display none -monitor none \
     -serial null -serial null -serial stdio -no-reboot -kernel "$1" \

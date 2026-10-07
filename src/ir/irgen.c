@@ -394,9 +394,11 @@ void emit_mov(struct ir_func *fn, int dst, int src)
     i->a = src;
 }
 
-/* ---- bitfield access (little-endian, gcc-compatible) ----
+/* ---- bitfield access (gcc-compatible, either byte order) ----
  * A bitfield occupies bits [bit_off, bit_off+width) of the storage unit at
- * `addr` (a load/store of the field's declared type). Reading shifts the
+ * `addr` (a load/store of the field's declared type), counted from the
+ * unit's least significant end as that load reads it -- type.c has put
+ * bit_off where the byte order puts the field, so nothing here asks. Reading shifts the
  * field to the top of the value class then back down — arithmetic for a
  * signed field so its sign bit fills — the classic two-shift extraction,
  * immune to neighbouring fields packed into the same unit. */
@@ -413,8 +415,15 @@ static int zext64(struct ir_func *fn, int v)
     return i->dst;
 }
 
+/* Where byte k of n read as one integer in the target's order lies in it:
+ * a left shift of 8k little-endian, 8(n-1-k) big-endian. */
+static int bf_byte_shift(int k, int n)
+{
+    return 8 * (target_big_endian() ? n - 1 - k : k);
+}
+
 /* A packed struct's field across its unit (m->bf_bytes): its bytes read
- * one at a time, as a 64-bit value with byte k at bits 8k. */
+ * one at a time, as a 64-bit value with byte k at bf_byte_shift(k). */
 static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
 {
     struct type *u8 = ty_base(TY_CHAR, 1);
@@ -423,11 +432,23 @@ static int bf_bytes_load(struct ir_func *fn, int addr, const struct member *m)
         int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                   : addr;
         int b = zext64(fn, emit_load(fn, a, u8));
-        if (k)
-            b = emit_bin(fn, IR_SHL, b, emit_const(fn, 8 * k, 4), 8, 0);
+        int sh = bf_byte_shift(k, m->bf_bytes);
+        if (sh)
+            b = emit_bin(fn, IR_SHL, b, emit_const(fn, sh, 4), 8, 0);
         raw = emit_bin(fn, IR_OR, raw, b, 8, 0);
     }
     return raw;
+}
+
+/* The 128-bit byte-at-a-time forms below are little-endian, and no
+ * big-endian target has a 128-bit integer to carry them: refused there by
+ * name rather than laid out backwards. */
+static void bf_wide_refuse(struct ir_func *fn, const struct member *m)
+{
+    if (target_big_endian())
+        diag_fatal(fn->file, 0, "a packed bit-field '%s' across %d bytes is "
+                   "not supported on a big-endian target (%s)",
+                   m->name ? m->name : "", m->bf_bytes, target_triple_now());
 }
 
 /* A packed field across its unit that 8 bytes do not hold (a long long's
@@ -454,6 +475,7 @@ static int bf_wide_load(struct ir_func *fn, int addr, const struct member *m)
 {
     const struct type *bt = m->ty;
     int n = m->bf_bytes, off = m->bit_off, wd = m->bit_width;
+    bf_wide_refuse(fn, m);
     int v = bf_wide_bytes(fn, addr, 0, n < 16 ? n : 16);
     if (off)
         v = emit_bin(fn, IR_SHR, v, emit_const(fn, off, 4), 16, 0);
@@ -479,6 +501,7 @@ static int bf_wide_store(struct ir_func *fn, int addr, const struct member *m,
     const struct type *bt = m->ty;
     int n = m->bf_bytes, off = m->bit_off, wd = m->bit_width;
     struct type *u8 = ty_base(TY_CHAR, 1), *u128 = ty_base(TY_INT128, 1);
+    bf_wide_refuse(fn, m);
     int v = bt->kind == TY_INT128 ? val : gen_convert(fn, val, bt, u128);
     int ones = emit_const(fn, -1, 16);
     int fm = wd < 128 ? emit_bin(fn, IR_SHR, ones,
@@ -575,9 +598,10 @@ static int bf_store(struct ir_func *fn, int addr, const struct member *m,
         for (int k = 0; k < m->bf_bytes && k < 8; k++) {
             int a = k ? emit_bin(fn, IR_ADD, addr, emit_const(fn, k, AW), AW, 0)
                       : addr;
-            int b = k ? emit_bin(fn, IR_SHR, merged,
-                                 emit_const(fn, 8 * k, 4), 8, 0)
-                      : merged;
+            int sh = bf_byte_shift(k, m->bf_bytes);
+            int b = sh ? emit_bin(fn, IR_SHR, merged,
+                                  emit_const(fn, sh, 4), 8, 0)
+                       : merged;
             emit_store(fn, a, b, u8);
         }
         return bf_load(fn, addr, m);
@@ -1160,8 +1184,8 @@ static int win64_byref(const struct type *t)
  * .rodata like a string and is loaded from there. */
 static int emit_ldconst(struct ir_func *fn, const struct ldf *v)
 {
-    char *b = xmalloc(16);
-    ldf_encode(v, ldf_target_fmt(), (unsigned char *)b);
+    char *b = xcalloc(1, 16);
+    ldf_encode_target(v, ldf_target_fmt(), (unsigned char *)b);
     struct ir_ins *i = emit(fn);
     i->op = IR_STRADDR;
     i->label = ir_intern_aligned(cur_unit, b, 16, 16);

@@ -6,8 +6,9 @@
  * is defined — this file grows with the writer, it is not a mirror of the
  * spec.
  *
- * Layouts follow the System V gABI, ELF64, little-endian (the only target,
- * TARGET_ABI.md).
+ * Layouts follow the System V gABI, as host structures: the writers lay
+ * them out little-endian, and swap every field for a big-endian target
+ * (src/elf/write.c, EmbLD's image writer).
  */
 #ifndef EMBCC_ELF_ELF_H
 #define EMBCC_ELF_ELF_H
@@ -326,6 +327,7 @@ typedef struct {
 #define ELFMAG3       'F'
 #define ELFCLASS64    2
 #define ELFDATA2LSB   1
+#define ELFDATA2MSB   2     /* big-endian: mips-none-elf */
 #define EV_CURRENT    1
 
 /* e_type — ET_REL until the integrated linker lands (ROADMAP M3);

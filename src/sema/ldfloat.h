@@ -40,6 +40,13 @@ struct ldf *ldf_round(const struct ldf *a, enum ldf_fmt fmt);
 /* The value's bytes in fmt, little-endian: 16 for LDF_X87 (10 significant,
  * 6 of zero padding) and LDF_QUAD, 8 for LDF_DOUBLE, 4 for LDF_FLOAT. */
 void ldf_encode(const struct ldf *a, enum ldf_fmt fmt, unsigned char *out);
+/* ...in the TARGET's byte order, for an object's image (.rodata, .data):
+ * ldf_encode's bytes reversed whole on a big-endian target, as a
+ * big-endian machine stores a float, a double or a binary128. Returns the
+ * format's size in bytes (4, 8 or 16). ldf_encode stays little-endian:
+ * ldf_to_double and the C++ evaluator read it as the host's order. */
+int ldf_encode_target(const struct ldf *a, enum ldf_fmt fmt,
+                      unsigned char *out);
 
 /* The value converted to double / truncated toward zero to an integer
  * (C's conversion; out-of-range is undefined in C, saturated here). */

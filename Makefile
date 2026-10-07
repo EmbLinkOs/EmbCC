@@ -154,6 +154,8 @@ SRCS := \
 	src/arch/mips/asm.c \
 	src/arch/mips32/predef.c \
 	src/arch/mips32/predef_cxx.c \
+	src/arch/mips32eb/predef.c \
+	src/arch/mips32eb/predef_cxx.c \
 	src/arch/avr/emit.c \
 	src/arch/avr/codegen.c \
 	src/arch/avr/asm.c \
@@ -280,6 +282,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/riscv32/predef.c src/arch/riscv32/predef_cxx.c \
              src/arch/riscv64/predef.c src/arch/riscv64/predef_cxx.c \
              src/arch/mips32/predef.c src/arch/mips32/predef_cxx.c \
+             src/arch/mips32eb/predef.c src/arch/mips32eb/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \

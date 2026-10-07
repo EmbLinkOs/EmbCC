@@ -45,6 +45,10 @@ static const struct predef_macro *arch_table(int *count)
             *count = predef_macro_count_cxx_avr;
             return predef_macros_cxx_avr;
         case TARGET_MIPS32:
+            if (target_big_endian()) {
+                *count = predef_macro_count_cxx_mips32eb;
+                return predef_macros_cxx_mips32eb;
+            }
             *count = predef_macro_count_cxx_mips32;
             return predef_macros_cxx_mips32;
         default:
@@ -77,6 +81,10 @@ static const struct predef_macro *arch_table(int *count)
         *count = predef_macro_count_avr;
         return predef_macros_avr;
     case TARGET_MIPS32:
+        if (target_big_endian()) {
+            *count = predef_macro_count_mips32eb;
+            return predef_macros_mips32eb;
+        }
         *count = predef_macro_count_mips32;
         return predef_macros_mips32;
     default:

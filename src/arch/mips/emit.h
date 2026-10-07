@@ -1,4 +1,5 @@
-/* MIPS32 Release 2 instruction encoding, little-endian (mipsel).
+/* MIPS32 Release 2 instruction encoding, in either byte order (mipsel,
+ * mips): an instruction is a 32-bit word stored in the target's order.
  *
  * Three formats carry almost everything -- R (register), I (16-bit
  * immediate) and J (26-bit jump target) -- and the rest are the same
@@ -63,8 +64,19 @@ unsigned long mips_enc_j(int op, unsigned long target26);
 /* Does `v` fit a sign-extended (`sign`) or zero-extended 16-bit field? */
 int mips_fits16(long long v, int sign);
 
-/* Every instruction becomes four little-endian bytes here. */
+/* The byte order instruction words are stored in: little-endian until
+ * told otherwise. The code generator sets it from target_big_endian(),
+ * EmbLD from the objects it links. */
+void mips_set_big_endian(int on);
+int mips_big_endian(void);
+/* A word at p, in that order. */
+void mips_put_word(unsigned char *p, unsigned long w);
+unsigned long mips_get_word(const unsigned char *p);
+/* Every instruction becomes four bytes in that order here. */
 void mips_w(struct code *c, unsigned long w);
+/* ...and the word already emitted at `at`, read and rewritten. */
+unsigned long mips_rdw(const struct code *c, int at);
+void mips_wrw(struct code *c, int at, unsigned long w);
 
 /* ---- moves and constants ---------------------------------------------- */
 
@@ -128,8 +140,11 @@ void mips_load(struct code *c, int rt, int base, int off, int size, int sign);
 void mips_store(struct code *c, int rt, int base, int off, int size);
 /* The unaligned halves (Release 2 has them; Release 6 removed them).
  * Little-endian: a word at any address is `lwl rt, off+3(b)` then
- * `lwr rt, off(b)`, and stored the same way with swl/swr. rt must not be
- * the base for the load pair -- the first half writes it. */
+ * `lwr rt, off(b)`; big-endian, `lwl rt, off(b)` then `lwr rt, off+3(b)`
+ * (lwl always fills the register's most significant end, from the byte
+ * the address names toward the word's boundary). Stored the same way
+ * with swl/swr. rt must not be the base for the load pair -- the first
+ * half writes it. */
 void mips_lwl(struct code *c, int rt, int base, int off);
 void mips_lwr(struct code *c, int rt, int base, int off);
 void mips_swl(struct code *c, int rt, int base, int off);

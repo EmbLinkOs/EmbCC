@@ -71,6 +71,12 @@ extern const struct predef_macro predef_macros_mips32[];
 extern const int predef_macro_count_mips32;
 extern const struct predef_macro predef_macros_cxx_mips32[];
 extern const int predef_macro_count_cxx_mips32;
+/* ...and big-endian (mips-none-elf), generated from clang's own answer for
+ * mips-unknown-elf: the byte-order macros are the difference. */
+extern const struct predef_macro predef_macros_mips32eb[];
+extern const int predef_macro_count_mips32eb;
+extern const struct predef_macro predef_macros_cxx_mips32eb[];
+extern const int predef_macro_count_cxx_mips32eb;
 
 /* AVR (ATmega328P). Generated like the others, from the reference
  * compiler's own answer for the triple. */

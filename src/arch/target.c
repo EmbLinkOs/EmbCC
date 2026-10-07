@@ -28,6 +28,31 @@ static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
+/* The target's byte order: 1 for big-endian (mips-none-elf), 0 for every
+ * other target. Set with the triple, and by -EB/-EL on MIPS. */
+static int g_big_endian;
+
+int target_big_endian(void) { return g_big_endian; }
+void target_set_big_endian(int on) { g_big_endian = on ? 1 : 0; }
+
+void target_put_uint(unsigned char *p, int n, unsigned long long v)
+{
+    for (int b = 0; b < n; b++)
+        p[g_big_endian ? n - 1 - b : b] = (unsigned char)(v >> (8 * b));
+}
+
+unsigned long long target_get_uint(const unsigned char *p, int n)
+{
+    unsigned long long v = 0;
+    for (int b = 0; b < n; b++)
+        v |= (unsigned long long)p[g_big_endian ? n - 1 - b : b] << (8 * b);
+    return v;
+}
+
+int target_byte_shift(int off, int size, int whole)
+{
+    return 8 * (g_big_endian ? whole - off - size : off);
+}
 
 enum target_arch target_get(void) { return g_arch; }
 void target_set(enum target_arch a) { g_arch = a; }
@@ -392,7 +417,7 @@ static const struct triple {
                         * Mainline one; 6 the ARMv6-M one -- see
                         * target_triple_of */
     int thumb_em;      /* 1 ARMv7E-M rather than ARMv7-M; 3 ARMv8-M Mainline;
-                        * 6 ARMv6-M */
+                        * 6 ARMv6-M. On MIPS: 1 big-endian */
 } g_triples[] = {
     /* freestanding: bare metal and EmbLinkOS (the default) */
     { "x86_64-elf",        TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
@@ -491,6 +516,15 @@ static const struct triple {
     { "mipsel-unknown-elf",  TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "mipsel-elf",          TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
     { "mipsel",              TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
+    /* ...and the same core BIG-endian, o32 (mips-none-elf): the byte
+     * order is the only difference, and it is a property of the target
+     * every phase that lays out or reads memory asks about
+     * (target_big_endian; docs/internals/big-endian.md). Canon 2, and a 1
+     * in the sub-architecture column, which on MIPS means big-endian. */
+    { "mips-none-elf",       TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   2, 1 },
+    { "mips-unknown-elf",    TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
+    { "mips-elf",            TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
+    { "mips",                TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 1 },
 
     /* EmbLinkOS: the primary product target (vision §5.2). Its objects
      * are ELF; `embld --embx` turns them into a native image at LINK
@@ -521,6 +555,10 @@ int target_from_triple(const char *triple, enum target_arch *out,
             if (out) *out = g_triples[i].arch;
             if (os)  *os  = g_triples[i].os;
             if (fmt) *fmt = g_triples[i].fmt;
+            /* Byte order travels with the name too: every triple but
+             * the big-endian MIPS ones is little-endian. */
+            g_big_endian = g_triples[i].arch == TARGET_MIPS32 &&
+                           g_triples[i].thumb_em == 1;
             /* The ARM sub-architecture travels with the name, so
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
@@ -557,6 +595,8 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
         want = g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
              : g_thumb_arch == 6 ? 6
              : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
+    if (a == TARGET_MIPS32 && g_big_endian)
+        want = 2;
     for (int i = 0; i < g_ntriples; i++)
         if (g_triples[i].canon == want && g_triples[i].arch == a &&
             g_triples[i].os == o)
@@ -683,18 +723,15 @@ int target_elf_uses_rel(enum target_arch a)
     return a == TARGET_MIPS32;
 }
 
-static void put_le32(unsigned char *p, unsigned long v)
+/* The field is a word in the TARGET's order: an o32 object is either. */
+static void put_w32(unsigned char *p, unsigned long v)
 {
-    p[0] = (unsigned char)v;
-    p[1] = (unsigned char)(v >> 8);
-    p[2] = (unsigned char)(v >> 16);
-    p[3] = (unsigned char)(v >> 24);
+    target_put_uint(p, 4, v);
 }
 
-static unsigned long get_le32(const unsigned char *p)
+static unsigned long get_w32(const unsigned char *p)
 {
-    return (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
-           ((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24);
+    return (unsigned long)target_get_uint(p, 4);
 }
 
 int target_rel_put_addend(enum target_arch a, int type, unsigned char *field,
@@ -703,30 +740,30 @@ int target_rel_put_addend(enum target_arch a, int type, unsigned char *field,
     unsigned long w;
     if (a != TARGET_MIPS32)
         return 0;
-    w = get_le32(field);
+    w = get_w32(field);
     switch (type) {
     case R_MIPS_NONE:
         return 1;
     case R_MIPS_32:
-        put_le32(field, (unsigned long)addend & 0xffffffffUL);
+        put_w32(field, (unsigned long)addend & 0xffffffffUL);
         return 1;
     case R_MIPS_26:
         /* the field holds a WORD index: A >> 2 */
-        put_le32(field, (w & 0xfc000000UL) |
+        put_w32(field, (w & 0xfc000000UL) |
                         (((unsigned long)addend >> 2) & 0x3ffffffUL));
         return 1;
     case R_MIPS_HI16:
         /* AHI, rounded so that AHI << 16 plus the LO16's sign-extended
          * half gives back the whole addend */
-        put_le32(field, (w & 0xffff0000UL) |
+        put_w32(field, (w & 0xffff0000UL) |
                         (((unsigned long)(addend + 0x8000) >> 16) & 0xffffUL));
         return 1;
     case R_MIPS_LO16:
-        put_le32(field, (w & 0xffff0000UL) |
+        put_w32(field, (w & 0xffff0000UL) |
                         ((unsigned long)addend & 0xffffUL));
         return 1;
     case R_MIPS_PC16:
-        put_le32(field, (w & 0xffff0000UL) |
+        put_w32(field, (w & 0xffff0000UL) |
                         (((unsigned long)addend >> 2) & 0xffffUL));
         return 1;
     default:

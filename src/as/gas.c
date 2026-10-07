@@ -332,8 +332,7 @@ static void emit_bytes(struct gas *g, const unsigned char *p, long n)
 static void emit_int(struct gas *g, long v, int width)
 {
     unsigned char b[8];
-    for (int i = 0; i < width; i++)
-        b[i] = (unsigned char)((unsigned long)v >> (8 * i));
+    target_put_uint(b, width, (unsigned long)v);   /* the target's order */
     emit_bytes(g, b, width);
 }
 

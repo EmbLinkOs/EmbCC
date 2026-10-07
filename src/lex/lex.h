@@ -153,8 +153,9 @@ struct litch {
  * *p just past the backslash if esc) — and advances *p past it. */
 struct litch lit_decode(const char **p, int esc, const char *file, int line);
 
-/* Encodes n elements at `width` bytes per unit (1, 2 or 4), little-endian,
- * followed by a NUL unit. Returns a malloc'd buffer of *nunits * width bytes,
+/* Encodes n elements at `width` bytes per unit (1, 2 or 4), each unit in
+ * the TARGET's byte order (target_put_uint; target_get_uint reads one
+ * back), followed by a NUL unit. Returns a malloc'd buffer of *nunits * width bytes,
  * *nunits counting the NUL. An escape too wide for the unit is truncated with
  * a warning, as gcc does. */
 char *lit_encode(const struct litch *lc, int n, int width, long *nunits,
