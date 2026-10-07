@@ -50,7 +50,12 @@ enum target_arch {
      * like ARMv7-M and RV32, with a SIGNED char and long double = double,
      * and the only target here with branch delay slots and REL
      * relocations. docs/internals/mips32-plan.md. */
-    TARGET_MIPS32 = 6
+    TARGET_MIPS32 = 6,
+    /* 32-bit PowerPC, big-endian, the embedded EABI with soft float
+     * (powerpc-none-eabi): e500/e200-class cores. ILP32 with an UNSIGNED
+     * char, long double = double, and the only target here whose byte
+     * order has no little-endian twin. docs/internals/powerpc-plan.md. */
+    TARGET_PPC32 = 7
 };
 
 /* The register width in bytes: 4 on RV32, 8 on RV64 and on the other
@@ -185,6 +190,7 @@ int t_op_calls_helper(const struct ir_ins *i);      /* src/arch/thumb/codegen.c 
 int rv_op_calls_helper(const struct ir_ins *i);     /* src/arch/riscv/codegen.c */
 int a64_op_calls_helper(const struct ir_ins *i);    /* src/arch/aarch64/codegen.c */
 int mips_op_calls_helper(const struct ir_ins *i);   /* src/arch/mips/codegen.c */
+int ppc_op_calls_helper(const struct ir_ins *i);    /* src/arch/ppc/codegen.c */
 
 /* Whether an unsigned 32-bit integer is WIDENED to 64 bits before a
  * conversion to or from floating point.
@@ -319,6 +325,8 @@ int riscv_imm_foldable(int op, long imm);   /* arch/riscv/irgen.c */
 int a64_imm_foldable(int op, long imm, int w);   /* arch/aarch64/irgen.c */
 int mips_imm_foldable(int op, long imm);    /* arch/mips/irgen.c */
 int mips_imm_foldable64(int op, long imm);  /* a 64-bit AND/OR/XOR, by halves */
+int ppc_imm_foldable(int op, long imm);     /* arch/ppc/irgen.c */
+int ppc_imm_foldable64(int op, long imm);
 /* Are floating-point arguments and results in VFP registers for a
  * function with this pcs and variadic-ness? */
 int target_pcs_vfp(int pcs, int varargs);
@@ -546,6 +554,12 @@ enum reloc_kind {
      * label's offset as the addend, as RK_AVR_TEXT_CALL is (a string
      * site whose str_off is already the offset). */
     RK_MIPS_TEXT26,
+    /* PowerPC takes an absolute address in two halves as well: `lis` the
+     * high 16 bits ADJUSTED for the sign of the low half (@ha, rounded by
+     * 0x8000), then an `addi` or a load's displacement the low 16 (@l).
+     * RELA, so the addend travels in the entry. */
+    RK_PPC_ADDR16_HA,
+    RK_PPC_ADDR16_LO,
     /* A TAIL call to a function symbol: a branch, not a call. Thumb
      * spells it differently -- THM_JUMP24 for `b.w` against THM_CALL for
      * `bl`, whose encodings differ in one bit a linker must not flip --

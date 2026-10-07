@@ -12,7 +12,7 @@ echo "TEST-MARKER predef"
 # ONE exclusion list in tools/gen-predef.sh (asked for directly, not restated
 # here, so the test and the generator cannot drift apart).
 checked=0
-for arch in x86_64 aarch64 thumb thumbv6m riscv32 riscv64 avr mips32 mips32eb; do
+for arch in x86_64 aarch64 thumb thumbv6m riscv32 riscv64 avr mips32 mips32eb ppc32; do
     # The triple is not always "<arch>-elf": ARMv7-M is spelled the way
     # every other toolchain spells it, and gen-predef.sh keys on the short
     # name, so the two are named apart here rather than assumed equal.
@@ -23,6 +23,7 @@ for arch in x86_64 aarch64 thumb thumbv6m riscv32 riscv64 avr mips32 mips32eb; d
         avr)            triple=avr ;;
         mips32)         triple=mipsel-none-elf ;;
         mips32eb)       triple=mips-none-elf ;;
+        ppc32)          triple=powerpc-none-eabi ;;
         *)              triple=$arch-elf ;;
     esac
     out=$("$EMBCC" --target=$triple --dump-predef) || {
@@ -59,6 +60,7 @@ for arch in x86_64 aarch64 thumb thumbv6m riscv32 riscv64 avr mips32 mips32eb; d
             avr)     own="__AVR__ __AVR_ARCH__ __AVR_ATmega328P__ __SIZEOF_INT__" ;;
             mips32)  own="__mips__ _MIPSEL __mips_soft_float __mips_o32 _MIPS_SZPTR" ;;
             mips32eb) own="__mips__ _MIPSEB __BIG_ENDIAN__ __mips_soft_float __mips_o32" ;;
+            ppc32)   own="__PPC__ _ARCH_PPC __BIG_ENDIAN__ _SOFT_FLOAT __CHAR_UNSIGNED__" ;;
         esac
         for m in __INT64_TYPE__ __INTPTR_TYPE__ __SIZE_TYPE__ __PTRDIFF_TYPE__ \
                  __CHAR_BIT__ __SIZEOF_POINTER__ __SIZEOF_LONG__ \

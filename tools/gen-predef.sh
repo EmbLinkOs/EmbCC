@@ -13,7 +13,7 @@
 #                                                    compares --dump-predef with)
 #
 #   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m riscv32 riscv64 avr mips32
-#                   mips32eb
+#                   mips32eb ppc32
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -86,7 +86,7 @@ EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm_
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb|ppc32) eval "echo \${$gccvar:-clang}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -147,6 +147,12 @@ refflags() {
         # _MIPSEB family) are the generated answer, not a patch on mipsel's.
         mips32eb) [ -n "${EMBCC_REF_GCC_MIPS32EB:-}" ] || \
                      echo "-target mips-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # 32-bit PowerPC, the embedded EABI: an e500-class core WITHOUT
+        # SPE (-mcpu=e500 alone defines __SPE__ and claims instructions the
+        # backend never emits), soft float, and the 8-byte long double
+        # e500 code has (-mcpu=ppc's default is the IBM double-double).
+        ppc32)   [ -n "${EMBCC_REF_GCC_PPC32:-}" ] || \
+                     echo "-target powerpc-none-eabi -mcpu=e500 -mno-spe -msoft-float -mlong-double-64 -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -168,6 +174,8 @@ exclude_arch() {
         # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
         # two-byte atomic exactly as RISC-V's does (no libatomic here).
         mips32|mips32eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        # PowerPC's lwarx/stwcx. likewise (lbarx/lharx are not Book E's).
+        ppc32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -201,7 +209,7 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32|mips32eb) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32|mips32eb|ppc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
     esac
 }
@@ -285,8 +293,9 @@ case "${1:-both}" in
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
     mips32eb) gen mips32eb ;;
+    ppc32)   gen ppc32 ;;
     both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen riscv32
-              gen riscv64; gen avr; gen mips32; gen mips32eb ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb]" >&2
+              gen riscv64; gen avr; gen mips32; gen mips32eb; gen ppc32 ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32|mips32eb|ppc32]" >&2
        exit 1 ;;
 esac

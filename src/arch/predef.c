@@ -51,6 +51,9 @@ static const struct predef_macro *arch_table(int *count)
             }
             *count = predef_macro_count_cxx_mips32;
             return predef_macros_cxx_mips32;
+        case TARGET_PPC32:
+            *count = predef_macro_count_cxx_ppc32;
+            return predef_macros_cxx_ppc32;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -87,6 +90,9 @@ static const struct predef_macro *arch_table(int *count)
         }
         *count = predef_macro_count_mips32;
         return predef_macros_mips32;
+    case TARGET_PPC32:
+        *count = predef_macro_count_ppc32;
+        return predef_macros_ppc32;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;

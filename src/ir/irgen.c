@@ -1572,7 +1572,8 @@ static int atomic_arm(void)
     int t = target_get();
     return t == TARGET_AARCH64 || t == TARGET_THUMB ||
            t == TARGET_RISCV32 || t == TARGET_RISCV64 ||
-           t == TARGET_MIPS32;        /* MIPS32 is weakly ordered: sync */
+           t == TARGET_MIPS32 ||      /* MIPS32 is weakly ordered: sync */
+           t == TARGET_PPC32;         /* and PowerPC: sync */
 }
 
 /* The machine exchange leaves a narrow result zero-extended; re-extend it as
@@ -2756,6 +2757,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return irg_va_arg_avr(fn, e);
         if (target_get() == TARGET_MIPS32)
             return irg_va_arg_mips(fn, e);
+        if (target_get() == TARGET_PPC32)
+            return irg_va_arg_ppc(fn, e);
         if (target_get() != TARGET_AARCH64)
             return irg_va_arg_sysv(fn, e);
         return target_os_get() == TGT_OS_DARWIN ? irg_va_arg_darwin(fn, e)
@@ -3018,7 +3021,8 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             c->op = IR_MEMCPY;
             c->a = tag;
             c->b = src;
-            c->size = target_get() == TARGET_AARCH64 ? 32 : 24;
+            c->size = target_get() == TARGET_AARCH64 ? 32
+                    : target_get() == TARGET_PPC32 ? 12 : 24;
             struct expr *d = e->args[0];
             if (d->kind == EXPR_VAR && !d->gref)
                 emit_stvar(fn, d->var_index, tag, d->ty);
@@ -3893,6 +3897,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                 irg_asm_avr(fn, s);
             else if (target_get() == TARGET_MIPS32)
                 irg_asm_mips(fn, s);
+            else if (target_get() == TARGET_PPC32)
+                irg_asm_ppc(fn, s);
             else
                 irg_asm_x86(fn, s);
             break;

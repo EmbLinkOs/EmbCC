@@ -46,9 +46,11 @@
  * defined, and an FPU build then linked a soft-float build of this file
  * -- which works until the objects must agree about the float ABI. */
 /* MIPS says it with __mips_soft_float (-msoft-float, which is o32 on a
- * PIC32-class core with no FPU). */
+ * PIC32-class core with no FPU), and PowerPC with _SOFT_FLOAT (an e500 or
+ * e200 core without its SPE, -msoft-float). */
 #if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
     defined(__mips_soft_float) || \
+    (defined(__PPC__) && defined(_SOFT_FLOAT)) || \
     (defined(__arm__) && (!defined(__ARM_FP) || !(__ARM_FP & 8)))
 #define SOFTFP_ALL 1
 #endif
