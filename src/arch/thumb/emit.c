@@ -146,6 +146,37 @@ int t_movs_imm(struct code *c, int rd, long imm)
     return 0;
 }
 
+/* A constant one instruction can move into ANY register without
+ * touching the flags: what an IT block's slot can hold (t_mov_imm_it). */
+int t_it_imm_ok(long imm)
+{
+    unsigned long v = (unsigned long)imm & 0xffffffffUL;
+    return v <= 0xff || encode_imm(v) >= 0 ||
+           encode_imm(~v & 0xffffffffUL) >= 0;
+}
+
+/* `mov<c> rd, #imm` inside an IT block, one instruction (t_it_imm_ok):
+ * the 16-bit MOVS encoding for 0..255 into r0-r7, which an IT block
+ * makes MOV<c> and flagless; else MOV.W or MVN.W with a modified
+ * immediate, S clear. */
+void t_mov_imm_it(struct code *c, int rd, long imm)
+{
+    unsigned long v = (unsigned long)imm & 0xffffffffUL;
+    int e;
+    if (low(rd) && v <= 0xff) {
+        hw(c, 0x2000u | (unsigned)(rd << 8) | (unsigned)v);
+        return;
+    }
+    unsigned op = 0xf04fu;                      /* MOV.W */
+    e = encode_imm(v);
+    if (e < 0) {
+        op = 0xf06fu;                           /* MVN.W */
+        e = encode_imm(~v & 0xffffffffUL);
+    }
+    hw2(c, op | (imm_i(e) << 10),
+           (imm_hi3(e) << 12) | (unsigned)(rd << 8) | imm_lo8(e));
+}
+
 void t_mvn_reg(struct code *c, int rd, int rm, int s)
 {
     if (s && low(rd) && low(rm)) {

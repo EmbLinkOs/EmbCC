@@ -4089,10 +4089,173 @@ static int ifconv_one(struct ir_func *fn)
     return done;
 }
 
+/* Where a select is a conditional move rather than a branch: x86-64's
+ * cmov, aarch64's csel, and an IT block on ARMv7-M and up. Elsewhere
+ * (RISC-V, MIPS, AVR, ARMv6-M) the select is lowered with a branch, so
+ * turning a branch into one buys nothing and costs moves. */
+static int target_cheap_select(void)
+{
+    return target_get() == TARGET_X86_64 || target_get() == TARGET_AARCH64 ||
+           (target_get() == TARGET_THUMB && target_thumb_arch() >= 7);
+}
+
+/* One arm of a diamond that ifconv_any can fold: a block reached only
+ * from the branch at the end of block `b`, holding one move or constant
+ * (after a label, if it has one) and then falling through, or jumping, to
+ * the block it continues to (*cont). *mi is the move's index, *jmp the
+ * jump's, or -1. The move may follow constants into temps defined only
+ * there -- irgen's `%3 = const 2; %1 = mov %3`, which copy propagation
+ * folds only after if-conversion has run -- and *hs is the first of
+ * them: a constant costs nothing to compute on both paths. */
+static int arm_one(const struct ir_func *fn, const struct defs *d,
+                   const struct bb *bb, int nbb, const int *l2b, int arm,
+                   int b, int *hs, int *mi, int *jmp, int *cont)
+{
+    if (arm <= b || arm >= nbb || bb[arm].npred != 1 || bb[arm].pred[0] != b)
+        return 0;
+    int s = bb[arm].start, e = bb[arm].end;
+    if (s < e && fn->ins[s].op == IR_LABEL)
+        s++;
+    *jmp = -1;
+    if (e - 1 > s && fn->ins[e - 1].op == IR_JMP) {
+        *jmp = e - 1;
+        e--;
+    }
+    *hs = s;
+    while (s + 1 < e && fn->ins[s].op == IR_CONST && !fn->ins[s].flt &&
+           fn->ins[s].dst >= fn->nvars && d->cnt[fn->ins[s].dst] == 1)
+        s++;
+    if (e - s != 1)
+        return 0;
+    const struct ir_ins *m = &fn->ins[s];
+    if ((m->op != IR_MOV && m->op != IR_CONST) || m->dst < 0 || m->vol ||
+        m->flt || (m->op == IR_MOV && m->a < 0))
+        return 0;
+    *mi = s;
+    *cont = *jmp >= 0 ? l2b[fn->ins[*jmp].label] : arm + 1;
+    return *cont >= 0;
+}
+
+/* The diamonds ifconv_one leaves, where a select is cheap
+ * (target_cheap_select): arms that are constants as well as moves
+ * (`st = len ? 2 : 0`), and an else arm that block layout put out of
+ * line and that jumps back. Each was a branch where clang has an IT
+ * block or a cmov. A constant arm becomes a fresh temp, defined -- with
+ * any constants the arms computed first -- ahead of the compare that
+ * makes the condition, so the backend still finds the compare right
+ * before the select and can select on its flags. Both arms go, except a
+ * jump the fall-through arm ended in, which the select's successor
+ * still needs.
+ *
+ * A branch with ONE arm, `if (c) dst = v;`, would be `dst = c ? v :
+ * dst`; it is not taken, because it never arrives in that shape: phi
+ * destruction gives both arms their move (218 diamonds over the tests,
+ * libc and the bench at -O2, none one-armed). */
+static int ifconv_any(struct ir_func *fn)
+{
+    if (fn->nins == 0 || !target_cheap_select())
+        return 0;
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    struct defs d;
+    compute_defs(fn, &d);
+    int done = 0;
+    for (int b = 0; b + 1 < nbb && !done; b++) {
+        if (bb[b].end - bb[b].start < 1)
+            continue;
+        struct ir_ins *br = &fn->ins[bb[b].end - 1];
+        if ((br->op != IR_BRZ && br->op != IR_BRNZ) || br->a < 0 ||
+            (br->w != 4 && br->w != 8) || br->label < 0)
+            continue;
+        int thn = b + 1, els = l2b[br->label];
+        int th, tm, tj, tc, eh = -1, em = -1, ej = -1, ec;
+        if (els < 0 ||
+            !arm_one(fn, &d, bb, nbb, l2b, thn, b, &th, &tm, &tj, &tc))
+            continue;
+        if (els == thn || els == tc ||
+            !arm_one(fn, &d, bb, nbb, l2b, els, b, &eh, &em, &ej, &ec) ||
+            ec != tc || fn->ins[em].dst != fn->ins[tm].dst)
+            continue;
+        const struct ir_ins *mt = &fn->ins[tm];
+        const struct ir_ins *me = &fn->ins[em];
+        int wt = mt->op == IR_CONST ? mt->w : sel_width(fn, &d, mt->a);
+        int we = me->op == IR_CONST ? me->w : sel_width(fn, &d, me->a);
+        if ((wt != 4 && wt != 8) || wt != we)
+            continue;
+        int dst = mt->dst;
+        int vt = mt->a, ve = me->a;
+        /* The constants go before the compare that makes the condition
+         * when that is the instruction before the branch, else before
+         * the select. */
+        int at = bb[b].end - 1;
+        if (at > bb[b].start && fn->ins[at - 1].op == IR_CMP &&
+            fn->ins[at - 1].dst == br->a)
+            at--;
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        int ts = bb[thn].start, te = bb[thn].end;
+        int es = bb[els].start, ee = bb[els].end;
+        for (int n = 0; n < fn->nins; n++) {
+            if (newpos) newpos[n] = nb.n;
+            if (n == at) {
+                for (int h = th; h < tm; h++)
+                    *ib_push(&nb) = fn->ins[h];
+                for (int h = eh; h < em; h++)
+                    *ib_push(&nb) = fn->ins[h];
+                if (mt->op == IR_CONST) {
+                    struct ir_ins *k = ib_push(&nb);
+                    *k = *mt;
+                    k->dst = vt = fn->nvregs++;
+                }
+                if (me->op == IR_CONST) {
+                    struct ir_ins *k = ib_push(&nb);
+                    *k = *me;
+                    k->dst = ve = fn->nvregs++;
+                }
+            }
+            if (n == bb[b].end - 1) {
+                struct ir_ins *sel = ib_push(&nb);
+                memset(sel, 0, sizeof *sel);
+                sel->op = IR_SELECT; sel->dst = dst; sel->a = br->a;
+                /* the fall-through arm runs when brz's condition is
+                 * NOT zero, brnz's when it is */
+                sel->b = br->op == IR_BRZ ? vt : ve;
+                sel->c = br->op == IR_BRZ ? ve : vt;
+                sel->w = wt; sel->sign = mt->sign;
+                sel->size = br->w;
+                sel->line = br->line; sel->col = br->col;
+                continue;
+            }
+            if (n >= ts && n < te && n != tj)
+                continue;                       /* the then arm */
+            if (n >= es && n < ee)
+                continue;                       /* the else arm */
+            *ib_push(&nb) = fn->ins[n];
+        }
+        if (newpos) {
+            newpos[fn->nins] = nb.n;
+            for (int v = 0; v < fn->nvars; v++) {
+                int l2 = fn->var_scope_lo[v], h2 = fn->var_scope_hi[v];
+                if (l2 >= 0 && l2 <= fn->nins) fn->var_scope_lo[v] = newpos[l2];
+                if (h2 >= 0 && h2 <= fn->nins) fn->var_scope_hi[v] = newpos[h2];
+            }
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+        g_did.ifconv++;
+        done = 1;
+    }
+    free_defs(&d); free(l2b);
+    free_cfg(bb, nbb);
+    return done;
+}
+
 static int pass_ifconv(struct ir_func *fn)
 {
     int changed = 0, guard = 0;
-    while (guard++ < 64 && ifconv_one(fn))
+    while (guard++ < 64 && (ifconv_one(fn) || ifconv_any(fn)))
         changed = 1;
     return changed;
 }
@@ -11002,10 +11165,17 @@ static int pass_sinkconst(struct ir_func *fn)
                       target_get() == TARGET_MIPS32) &&
                      i->op == IR_CONST && i->imm != 0 && at[i->dst] >= 0 &&
                      fn->ins[at[i->dst]].op == IR_CMP;
-        if (at[i->dst] > n + 1 &&
-            (depth[at[i->dst]] <= depth[n] || g_opt_size ||
+        /* A select's value stops above the compare that makes its
+         * condition: between the two it would part the flags from the
+         * IT block or cmov that reads them (ifconv_any put it there). */
+        int u = at[i->dst];
+        if (u > 0 && fn->ins[u].op == IR_SELECT && target_cheap_select() &&
+            fn->ins[u - 1].op == IR_CMP && fn->ins[u - 1].dst == fn->ins[u].a)
+            u--;
+        if (u > n + 1 &&
+            (depth[u] <= depth[n] || g_opt_size ||
              (!const_is_expensive(i) && !rv_cmp))) {
-            to[n] = at[i->dst];
+            to[n] = u;
             any = 1;
         }
     }

@@ -95,6 +95,8 @@ void t_mvn_reg(struct code *c, int rd, int rm, int s);
  * returns -1, emitting nothing, for a value no flag-setting MOV encodes. */
 void t_movs_reg(struct code *c, int rd, int rm);
 int t_movs_imm(struct code *c, int rd, long imm);
+int t_it_imm_ok(long imm);
+void t_mov_imm_it(struct code *c, int rd, long imm);
 
 /* ---- data processing ------------------------------------------------ */
 
