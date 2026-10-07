@@ -52,6 +52,7 @@ src = os.path.join('lib', 'rt')
 for path in [os.path.join(src, 'avrfp.h')] + sorted(glob.glob(os.path.join(src, 'avrfp*.c'))):
     s = open(path).read()
     s = s.replace('#ifdef __AVR__', '#if 1', 1)
+    s = s.replace('#if defined(__AVR__) || defined(__RX__)', '#if 1', 1)
     # The 32-bit type: `long` on AVR, `int` here.
     s = s.replace('typedef unsigned long      u32;', 'typedef unsigned int       u32;')
     s = s.replace('typedef long               s32;', 'typedef int                s32;')
