@@ -55,6 +55,10 @@ extern const struct predef_macro predef_macros_cxx_thumbv8m[];
 extern const int predef_macro_count_cxx_thumbv8m;
 /* ARMv6-M (Cortex-M0/M0+/M1): Thumb-1, no divide, no exclusives, no
  * unaligned access -- its own table, generated like the other two. */
+extern const struct predef_macro predef_macros_thumbv8mbase[];
+extern const int predef_macro_count_thumbv8mbase;
+extern const struct predef_macro predef_macros_cxx_thumbv8mbase[];
+extern const int predef_macro_count_cxx_thumbv8mbase;
 extern const struct predef_macro predef_macros_thumbv6m[];
 extern const int predef_macro_count_thumbv6m;
 extern const struct predef_macro predef_macros_cxx_thumbv6m[];

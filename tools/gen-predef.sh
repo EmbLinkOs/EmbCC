@@ -12,7 +12,7 @@
 #                                                    (what tests/golden/predef.sh
 #                                                    compares --dump-predef with)
 #
-#   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m armv7a riscv32 riscv64 avr mips32
+#   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 riscv64 avr mips32
 #                   mips32eb ppc32 sparc32 mips64 mips64eb
 #                   loongarch64
 #                   xtensa rx
@@ -76,19 +76,19 @@ set -eu
 # __clang__/__llvm__ join the list for the same reason __GNUC__ is on it:
 # EmbCC is not clang either, and a header that believes it is will take a
 # path built on builtins this compiler does not have.
-#   __ARM_FEATURE_CMSE       clang defines it for every ARMv8-M target,
-#        because the security extension is part of the architecture. EmbCC
-#        cannot emit for it: a non-secure entry function needs the linker to
-#        mint a secure gateway veneer, and embld does not. A header that sees
-#        this macro writes __attribute__((cmse_nonsecure_entry)), so leaving
-#        it in advertises a feature whose use would then fail somewhere else
-#        entirely -- the same reason __riscv_v_intrinsic is filtered.
-EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__|__riscv_v_intrinsic|__ARM_FEATURE_CMSE)'
+#
+# __ARM_FEATURE_CMSE is NOT excluded: clang defines it as 1 for every ARMv8-M
+# target (the TT instruction, which <arm_cmse.h> reads through cmse_TT), and
+# EmbCC has both -- and with -mcmse src/arch/predef.c makes it 3, the Secure
+# side, as clang does. It was filtered while embld minted no secure gateway
+# veneer, so that a header seeing it would not write a cmse_nonsecure_entry
+# that then failed somewhere else.
+EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__|__riscv_v_intrinsic)'
 
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|ppc32|sparc32) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|thumbv8mbase|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|ppc32|sparc32) eval "echo \${$gccvar:-clang}" ;;
         # Xtensa: Espressif's own GCC for the ESP32 (crosstool-NG release
         # esp-16.1.0_20260609), there being no Xtensa target in clang.
         xtensa)  eval "echo \${$gccvar:-xtensa-esp32-elf-gcc}" ;;
@@ -128,6 +128,12 @@ refflags() {
                      echo "-target thumbv6m-none-eabi -ffreestanding" ;;
         thumbv8m) [ -n "${EMBCC_REF_GCC_THUMBV8M:-}" ] || \
                      echo "-target thumbv8m.main-none-eabi -mfloat-abi=soft -ffreestanding" ;;
+        # ARMv8-M Baseline (Cortex-M23): its own table, as v6m and v8m have.
+        # No FPU exists for it either. Its lock-free values are 2: the
+        # exclusives are there, and the backend inlines a one-, two- or
+        # four-byte atomic as an ldrex/strex loop (v6m.c).
+        thumbv8mbase) [ -n "${EMBCC_REF_GCC_THUMBV8MBASE:-}" ] || \
+                     echo "-target thumbv8m.base-none-eabi -mcpu=cortex-m23 -ffreestanding" ;;
         # ARMv7-A in ARM state. -mfloat-abi=soft for the reason thumbv8m
         # takes it: clang's default for this triple is VFPv3 with NEON
         # (__ARM_FP, __ARM_NEON), and the backend does every float
@@ -210,6 +216,15 @@ exclude_arch() {
         # compare-and-swap; the backend refuses an eight-byte atomic by name
         # (as on ARMv7-M, which has no ldrexd), so this does not claim it.
         armv7a)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8' ;;
+        # ARMv8-M Baseline: clang defines the ARMv8 feature macros it has
+        # for every v8 architecture, and five of them claim what Baseline
+        # does not have -- CLZ, the saturating instructions (SAT) and the
+        # Q flag they set (QBIT) are Thumb-2 DSP-class instructions this
+        # core lacks, and NUMERIC_MAXMIN and DIRECTED_ROUNDING are VFP
+        # instructions on a core with no FPU. GCC defines none of the five
+        # for armv8-m.base. A program that tests __ARM_FEATURE_CLZ and
+        # writes `clz` in asm would get an UNDEFINED instruction.
+        thumbv8mbase) echo '^#define __ARM_FEATURE_(CLZ|QBIT|SAT|NUMERIC_MAXMIN|DIRECTED_ROUNDING) ' ;;
         # Xtensa's s32c1i is word-sized too. The table is the ESP32's
         # (xtensa-esp32-elf-gcc, which has no -msoft-float: the float ABI
         # is the same either way, every float in the address registers).
@@ -249,8 +264,19 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|mips32|mips32eb|mips64|mips64eb|loongarch64|ppc32|sparc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|thumbv8mbase|armv7a|riscv32|riscv64|mips32|mips32eb|mips64|mips64eb|loongarch64|ppc32|sparc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
+    esac
+}
+
+# The per-arch exclusions the C++ table takes too. Only Baseline's: they
+# are claims about INSTRUCTIONS, which a C++ program reads the same way.
+# (The atomics ones above have never been applied to the C++ tables, and
+# changing those tables is a separate decision.)
+exclude_arch_cxx() {
+    case "$1" in
+        thumbv8mbase) exclude_arch "$1" ;;
+        *)            echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
 
@@ -258,7 +284,8 @@ reference_cxx() {
     # shellcheck disable=SC2046
     { "$(refgxx "$1")" $(refflags "$1") -std=gnu++20 -x c++ -dM -E - \
         </dev/null; computed; } \
-        | LC_ALL=C sort -u | grep -v -E "$EXCLUDE" | grep -v -E "$EXCLUDE_CXX"
+        | LC_ALL=C sort -u | grep -v -E "$EXCLUDE" | grep -v -E "$EXCLUDE_CXX" \
+        | grep -v -E "$(exclude_arch_cxx "$1")"
 }
 
 if [ "${1:-}" = --reference ]; then
@@ -354,6 +381,7 @@ case "${1:-both}" in
     thumb)   gen thumb ;;
     thumbv6m) gen thumbv6m ;;
     thumbv8m) gen thumbv8m ;;
+    thumbv8mbase) gen thumbv8mbase ;;
     armv7a)  gen armv7a ;;
     riscv32) gen riscv32 ;;
     riscv64) gen riscv64 ;;
@@ -367,8 +395,8 @@ case "${1:-both}" in
     ppc32)   gen ppc32 ;;
     rx)      gen_c rx ;;
     sparc32) gen sparc32 ;;
-    both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen armv7a; gen riscv32
+    both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen thumbv8mbase; gen armv7a; gen riscv32
               gen riscv64; gen avr; gen mips32; gen mips32eb; gen mips64; gen mips64eb; gen loongarch64; gen xtensa; gen ppc32; gen sparc32 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|xtensa|ppc32|rx|sparc32]" >&2
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|thumbv8mbase|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|xtensa|ppc32|rx|sparc32]" >&2
        exit 1 ;;
 esac

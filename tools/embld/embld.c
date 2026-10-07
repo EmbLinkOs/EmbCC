@@ -9,6 +9,7 @@
  *              [-T SCRIPT [-L DIR]... [--orphan-handling=MODE]] [-u SYM]...
  *              [--gc-sections [--print-gc-sections]] [-Map FILE]
  *              [--print-memory-usage]
+ *              [--cmse-implib [--out-implib=FILE]]
  *              [--embx [--cap NAME]...] INPUT.o|INPUT.a ...
  *        embld --doctor INPUT.o|INPUT.a ...
  *
@@ -156,6 +157,19 @@ int main(int argc, char **argv)
             int id = embx_cap_id(argv[i]);
             if (id <= 0) { fprintf(stderr, "embld: unknown capability '%s'\n", argv[i]); return 2; }
             opts.caps |= (1ULL << id);     /* declare it in the EMBX cap table */
+        } else if (strcmp(argv[i], "--cmse-implib") == 0) {
+            opts.cmse_implib = 1;          /* ARMv8-M: see link.h */
+        } else if (strncmp(argv[i], "--out-implib", 12) == 0) {
+            const char *v = argv[i][12] == '=' ? argv[i] + 13
+                          : (++i < argc ? argv[i] : NULL);
+            if (!v || !*v) { fprintf(stderr, "embld: --out-implib needs a file\n"); return 2; }
+            opts.out_implib = v;
+        } else if (strncmp(argv[i], "--in-implib", 11) == 0) {
+            fprintf(stderr, "embld: --in-implib is not supported: it keeps "
+                    "each secure gateway veneer at the address an earlier "
+                    "import library gave it, and this linker lays the "
+                    "veneers out in name order every link\n");
+            return 2;
         } else if (strcmp(argv[i], "--doctor") == 0) {
             doctor = 1;
         } else if (argv[i][0] == '-') {
@@ -170,7 +184,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: embld [-o OUT] [-e ENTRY] [-Ttext ADDR] [-Tstack ADDR]\n"
                         "             [-T SCRIPT [-L DIR]... [--orphan-handling=place|warn|error]]\n"
                         "             [--gc-sections [--print-gc-sections]] [-Map FILE]\n"
-                        "             [--print-memory-usage]\n"
+                        "             [--print-memory-usage] [--cmse-implib [--out-implib=FILE]]\n"
                         "             [--embx [--cap NAME]...] INPUT.o|INPUT.a ...\n"
                         "       embld --doctor INPUT.o|INPUT.a ...   "
                         "(why the link fails)\n");

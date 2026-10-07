@@ -38,14 +38,12 @@ done
 got=$("$EMBCC" --target=thumbv6m-none-eabi -mcpu=cortex-m3 -dumpmachine)
 [ "$got" = "thumbv7m-none-eabi" ] || {
     echo "-mcpu=cortex-m3 on the ARMv6-M triple selects '$got'"; exit 1; }
-if "$EMBCC" --target=thumbv6m-none-eabi -mcpu=cortex-m23 -dumpmachine \
-     > /dev/null 2> "$out/m23.err"; then
-    echo "-mcpu=cortex-m23 (ARMv8-M Baseline) was accepted"; exit 1
-fi
-grep -q 'ARMv8-M Baseline' "$out/m23.err" || {
-    echo "the Cortex-M23's refusal does not say why:"; cat "$out/m23.err"
-    exit 1; }
-echo "the triples and -mcpu=cortex-m0/m0plus/m1 select ARMv6-M; the M23 is refused"
+# The Cortex-M23 is ARMv8-M Baseline, a level of its own now
+# (tests/golden/thumbv8mbase-target.sh), not ARMv6-M.
+got=$("$EMBCC" --target=thumbv6m-none-eabi -mcpu=cortex-m23 -dumpmachine)
+[ "$got" = "thumbv8m.base-none-eabi" ] || {
+    echo "-mcpu=cortex-m23 on the ARMv6-M triple selects '$got'"; exit 1; }
+echo "the triples and -mcpu=cortex-m0/m0plus/m1 select ARMv6-M; the M23 selects ARMv8-M Baseline"
 
 # ---- the data model is ARMv7-M's ------------------------------------------
 cat > "$out/dm.c" <<'CEOF'

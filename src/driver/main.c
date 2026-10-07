@@ -126,6 +126,7 @@ static void print_options(FILE *out)
     /* (two literals: one string this long passes the IR's text form's
      * limit, and tests/golden/ir-roundtrip.sh prints main.c's) */
     fputs(
+      "                         thumbv6m-none-eabi, thumbv8m.base-none-eabi,\n"
       "                         mipsel-none-elf, mips-none-elf,\n"
       "                         loongarch64-unknown-elf, xtensa-none-elf,\n"
       "                         powerpc-none-eabi, rx-none-elf, sparc-none-elf,\n"
@@ -3428,6 +3429,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                 (Elf64_Xword)(f->code_len - f->code_entry),
                 ELF64_ST_INFO(f->is_weak ? STB_WEAK : STB_GLOBAL, STT_FUNC),
                 (Elf64_Half)code_sec(f->code_off, text_ndx));
+    /* ACLE's CMSE: a cmse_nonsecure_entry function has a second global
+     * symbol at the same address, __acle_se_<name>. The linker sees the
+     * pair, makes the SG veneer in .gnu.sgstubs and points <name> at it
+     * (src/link/link.c), which is how a Non-secure caller enters through
+     * the gateway and a Secure caller may still reach the code. */
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (!f->absorbed && f->has_defn && !f->is_static && f->cmse_entry &&
+            target_thumb_cmse()) {
+            char *se = xmalloc(strlen(f->name) + sizeof "__acle_se_");
+            strcpy(se, "__acle_se_");
+            strcat(se, f->name);
+            elfw_add_symbol(
+                w, se, (Elf64_Addr)code_sym_value(ta, f->code_off + f->code_entry),
+                (Elf64_Xword)(f->code_len - f->code_entry),
+                ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
+                (Elf64_Half)code_sec(f->code_off, text_ndx));
+        }
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->alias_of && !f->is_static) {
             const struct func *t = alias_target(u, f);
@@ -3899,6 +3917,7 @@ static int g_want_dump_predef, g_want_dumpmachine;
 static const char *g_arm_fpu;
 static const char *g_arm_float_abi;
 static const char *g_arm_cpu;
+static int g_arm_cmse;             /* -mcmse was given */
 
 /* What the two ARM float flags mean together, decided once every argument has
  * been seen.
@@ -3928,6 +3947,12 @@ static void arm_float_resolve(void)
 {
     if (target_get() != TARGET_THUMB)
         return;                        /* refused where the flag was parsed */
+    /* -mcmse needs the security extension, which only ARMv8-M has. */
+    if (g_arm_cmse && !target_thumb_v8m())
+        diag_fatal(NULL, 0, "-mcmse is the Secure side of ARMv8-M's "
+                   "security extension, and %s is not ARMv8-M: use "
+                   "thumbv8m.main-none-eabi or thumbv8m.base-none-eabi",
+                   target_triple_now());
     /* ARMv7-A: VFPv3 or VFPv4, D16 or D32 -- every Cortex-A's unit but
      * NEON's SIMD, which nothing here emits and so nothing may claim. The
      * code is the Cortex-M7's (single and double precision on d0-d15),
@@ -3985,10 +4010,13 @@ static void arm_float_resolve(void)
                    "one of soft, softfp and hard", abi);
     /* No ARMv6-M part has an FPU: only the base standard means anything. */
     if (target_thumb_arch() == 6 && (fpu_named || strcmp(abi, "soft")))
-        diag_fatal(NULL, 0, "%s%s on %s: an ARMv6-M core (Cortex-M0, M0+, "
-                   "M1) has no FPU, so floating point is soft and travels in "
-                   "the core registers", fpu_named ? "-mfpu=" : "-mfloat-abi=",
-                   fpu_named ? g_arm_fpu : abi, target_triple_now());
+        diag_fatal(NULL, 0, "%s%s on %s: %s has no FPU, so floating point "
+                   "is soft and travels in the core registers",
+                   fpu_named ? "-mfpu=" : "-mfloat-abi=",
+                   fpu_named ? g_arm_fpu : abi, target_triple_now(),
+                   target_thumb_v8m_base()
+                   ? "an ARMv8-M Baseline core (Cortex-M23)"
+                   : "an ARMv6-M core (Cortex-M0, M0+, M1)");
     if (fpu_named) {
         int v8 = target_thumb_arch() >= 8;
         int dp = strcmp(g_arm_fpu, "fpv5-d16") == 0;
@@ -5523,6 +5551,17 @@ int main(int argc, char **argv)
                                "tc37xx, ...)", argv[i]);
             }
             continue;
+        } else if (strcmp(argv[i], "-mcmse") == 0) {
+            /* The Secure side of ARMv8-M's security extension (ACLE's
+             * CMSE): cmse_nonsecure_entry and cmse_nonsecure_call, and
+             * __ARM_FEATURE_CMSE 3. Checked against the architecture once
+             * every argument is read: -mcpu= may come after it. */
+            if (target_get() != TARGET_THUMB)
+                diag_fatal(NULL, 0, "-mcmse is an ARMv8-M option, and the "
+                           "target is %s", target_triple_now());
+            g_arm_cmse = 1;
+            target_set_thumb_cmse(1);
+            continue;
         } else if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfloat-abi=", 12) == 0 ||
@@ -5654,14 +5693,14 @@ int main(int argc, char **argv)
                  * to be taken as ARMv7-M, and the code that came out used
                  * ldr.w and IT blocks -- a HardFault at the first one.
                  *
-                 * ARMv8-M Baseline (Cortex-M23) is still refused: it is a
-                 * different subset (CBZ, MOVW, the divides), and neither
-                 * the ARMv6-M code nor the ARMv7-M code is right for it. */
-                if (!strcmp(v, "cortex-m23"))
-                    diag_fatal(NULL, 0, "-mcpu=%s is ARMv8-M Baseline, and "
-                               "EmbCC emits ARMv6-M (cortex-m0, m0plus, m1) "
-                               "or ARMv7-M Thumb-2: the second faults on that "
-                               "core and the first is not what it is", v);
+                 * ARMv8-M Baseline (Cortex-M23) is that selection with
+                 * the divides and the exclusives turned on (v6m.c), on
+                 * any Thumb triple, as clang takes it. */
+                if (!strcmp(v, "cortex-m23")) {
+                    target_set_thumb_v8m_base();
+                    g_arm_cpu = v;
+                    continue;
+                }
                 if (!strcmp(v, "cortex-m0") || !strcmp(v, "cortex-m0plus") ||
                     !strcmp(v, "cortex-m1")) {
                     target_set_thumb_arch(6);
@@ -5685,8 +5724,9 @@ int main(int argc, char **argv)
                 else
                     diag_fatal(NULL, 0, "-mcpu=%s is not a part EmbCC knows: "
                                "it emits ARMv6-M (cortex-m0, m0plus, m1), "
-                               "ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)",
-                               v);
+                               "ARMv8-M Baseline (cortex-m23), ARMv7-M and "
+                               "ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M "
+                               "Mainline (cortex-m33)", v);
                 /* Kept for arm_float_resolve: which unit the part's
                  * -eabihf name implies depends on which part it is. */
                 g_arm_cpu = v;
@@ -5960,6 +6000,18 @@ int main(int argc, char **argv)
     }
 
     arm_float_resolve();
+    /* -mcmse with the FPU in use: an entry function would have to clear
+     * s0-s15 and FPSCR when the Secure state's FP context is active
+     * (CONTROL_S.SFPA), and a call to the Non-secure state would have to
+     * hand the hard-float convention's arguments over in VFP registers.
+     * Neither is emitted, so the combination is refused rather than
+     * leaking a Secure float into the Non-secure state. */
+    if (g_arm_cmse && target_thumb_fpu())
+        diag_fatal(NULL, 0, "-mcmse with an FPU (-mfpu=, -mfloat-abi=softfp "
+                   "or hard, or an -eabihf triple) is not supported: EmbCC "
+                   "does not clear the floating-point registers a "
+                   "cmse_nonsecure_entry function must clear; build the "
+                   "Secure side with -mfloat-abi=soft");
     sema_set_gnu89_inline(gnu89_inline || std_gnu89);
     /* -fno-jump-tables for a whole test suite, whose scripts spell their
      * own command lines: every dense switch takes the compare tree. */

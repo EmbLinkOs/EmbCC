@@ -24,7 +24,7 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 | [x86-64 Windows](#windows-coff) | `x86_64-windows-gnu` | COFF | Microsoft x64, incomplete | an external linker |
 | [AArch64](#aarch64) | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | ELF64 | AAPCS64 | an external linker |
 | [Apple arm64](#apple-arm64) | `aarch64-apple-darwin` | Mach-O | Apple arm64 | the system linker |
-| [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
+| [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
 | [ARMv7-A](#armv7-a) | `armv7a-none-eabi`, `armv7a-none-eabihf` | ELF32 | AAPCS, AAPCS-VFP | `embld` |
 | [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
@@ -515,14 +515,18 @@ As for x86-64, plus the binary128 `long double` routines (`softtf.c`).
 
 ## ARM Cortex-M
 
-The ARMv6-M profile in Thumb-1, and the ARMv7-M, ARMv7E-M and ARMv8-M
-Mainline profiles in Thumb-2. Every Cortex-M target is freestanding.
+The ARMv6-M profile in Thumb-1, ARMv8-M Baseline in Thumb-1 with the
+32-bit instructions Baseline adds, and the ARMv7-M, ARMv7E-M and ARMv8-M
+Mainline profiles in Thumb-2. Both ARMv8-M profiles support the Secure
+side of TrustZone-M ([`-mcmse`](#trustzone-m-cmse)). Every Cortex-M
+target is freestanding.
 
 ### Triples
 
 | Triple | Accepted aliases | Architecture | Float ABI | Cores |
 |---|---|---|---|---|
 | `thumbv6m-none-eabi` | `thumbv6m`, `armv6m-none-eabi` | ARMv6-M | soft | Cortex-M0, M0+, M1 |
+| `thumbv8m.base-none-eabi` | `thumbv8m.base`, `armv8m.base-none-eabi` | ARMv8-M Baseline | soft | Cortex-M23 |
 | `thumbv7m-none-eabi` | `thumbv7m`, `armv7m-none-eabi`, `arm-none-eabi` | ARMv7-M | soft | Cortex-M3 |
 | `thumbv7em-none-eabi` | `thumbv7em`, `armv7em-none-eabi` | ARMv7E-M | soft | Cortex-M4, M7 |
 | `thumbv7em-none-eabihf` | | ARMv7E-M | hard, FPv4-SP-D16; FPv5-D16 with `-mcpu=cortex-m7` | Cortex-M4F; Cortex-M7 |
@@ -551,7 +555,8 @@ only Thumb`.
 
 Select the architecture variant by core. `cortex-m0`, `cortex-m0plus`
 and `cortex-m1` select ARMv6-M on any ARM triple, as
-`thumbv6m-none-eabi` does. `cortex-m3` selects ARMv7-M; `cortex-m4`,
+`thumbv6m-none-eabi` does, and `cortex-m23` selects ARMv8-M Baseline, as
+`thumbv8m.base-none-eabi` does. `cortex-m3` selects ARMv7-M; `cortex-m4`,
 `cortex-m7` and `cortex-m33` select ARMv7E-M. Otherwise the option does
 not change the architecture level: `--target=thumbv7m-none-eabi
 -mcpu=cortex-m33` is `thumbv7em-none-eabi`, and ARMv8-M is selected only
@@ -559,14 +564,7 @@ by a `thumbv8m.main` triple. On a `thumbv6m` triple, an ARMv7-M or
 ARMv8-M part raises the level. Any other value is an error:
 
 ```text
-embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7, m33)
-```
-
-The Cortex-M23 (ARMv8-M Baseline) is refused by name: it is a different
-subset from ARMv6-M, and EmbCC emits neither for it:
-
-```text
-embcc: error: -mcpu=cortex-m23 is ARMv8-M Baseline, and EmbCC emits ARMv6-M (cortex-m0, m0plus, m1) or ARMv7-M Thumb-2: the second faults on that core and the first is not what it is
+embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M Mainline (cortex-m33)
 ```
 
 #### `-mfpu=FPU`
@@ -588,6 +586,7 @@ unit. The FPU only takes effect with `-mfloat-abi=softfp` or `hard`.
 | `fpv4-sp-d16` or `fpv5-d16` on ARMv7-M | `-mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4` |
 | `fpv5-d16` on another part | `-mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16` |
 | any unit, or `softfp` or `hard`, on ARMv6-M | `-mfpu=fpv5-d16 on thumbv6m-none-eabi: an ARMv6-M core (Cortex-M0, M0+, M1) has no FPU, so floating point is soft and travels in the core registers` |
+| the same on ARMv8-M Baseline | `-mfpu=fpv5-sp-d16 on thumbv8m.base-none-eabi: an ARMv8-M Baseline core (Cortex-M23) has no FPU, so floating point is soft and travels in the core registers` |
 
 #### `-mfloat-abi=ABI`
 
@@ -635,9 +634,136 @@ ABI. `fpv5-d16` computes in double precision as well:
 | `softfp` or `hard` with no FPU | `-mfloat-abi=hard needs an FPU to use: add -mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 (Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)` |
 | any ARM option on another target | `-mcpu=cortex-m3 is an ARM option, and the target is riscv32-unknown-elf` |
 
-ARMv8-M's security extension (TrustZone-M) is not supported. `-mcmse`
-is an unknown argument, and `cmse_nonsecure_entry` and the other CMSE
-attributes are ignored with a `-Wattributes` warning.
+#### `-mcmse`
+
+Compile for the Secure state of an ARMv8-M part with the security
+extension: see [TrustZone-M](#trustzone-m-cmse).
+
+### ARMv8-M Baseline
+
+`thumbv8m.base-none-eabi` (or `-mcpu=cortex-m23`) is the ARMv6-M code
+generator with what ARMv8-M Baseline adds where it replaces a call:
+
+- a 32-bit `/` is `sdiv` or `udiv`, and `%` is the quotient multiplied
+  back and subtracted (`muls`, `subs`; Baseline has no `mls`), as clang
+  does it. `__aeabi_idiv` and its family are not called. A 64-bit
+  division is still `__divdi3` and the others.
+- a 1-, 2- or 4-byte atomic read-modify-write or compare-and-swap is a
+  `ldrex`/`strex` (`b`, `h`) loop between two `dmb`s, as on ARMv7-M. The
+  `__GCC_ATOMIC_*_LOCK_FREE` values are 2. An 8-byte atomic is refused:
+  Baseline has no `ldrexd`.
+
+Everything else is ARMv6-M's: Thumb-1 data processing on r0-r7, literal
+pools for constants and addresses (clang keeps them for this core too),
+no IT block, and no unaligned access -- the Cortex-M23 faults on one, as
+the M0 does. A function is scanned when it is finished, and any 32-bit
+encoding Baseline lacks -- or an IT block -- is refused by name (an
+inline asm template's included):
+
+```text
+embcc: f.c:3: error: the ARMv8-M Baseline backend cannot lower an instruction ARMv8-M Baseline does not have (a 32-bit Thumb-2 encoding, from inline asm or the backend) yet (function f)
+```
+
+The 32-bit instructions Baseline has are `bl`, `b.w`, `mrs`, `msr`,
+`dmb`, `dsb`, `isb`, `sdiv`, `udiv`, `movw`, `movt`, `ldrex`, `strex`
+(with an offset), `ldrexb`, `ldrexh`, `strexb`, `strexh`, `clrex`, the
+load-acquire and store-release family (`lda`, `ldab`, `ldah`, `ldaex`,
+`ldaexb`, `ldaexh`, `stl`, `stlb`, `stlh`, `stlex`, `stlexb`,
+`stlexh`), `tt`, `ttt`, `tta`, `ttat` and `sg`; it adds `cbz`, `cbnz`,
+`bxns` and `blxns` to the 16-bit set. The inline and file assemblers
+accept exactly these at this level
+([Inline assembly](inline-asm.md#armv8-m-security-and-acquirerelease-instructions)).
+`tests/golden/thumbv8mbase-encoding.sh` checks every one against llvm-mc
+and the refusals line for line, and `tests/golden/thumbv8mbase-exec.sh`
+runs the exec corpus at `-O0` to `-Os`, with `lib/libc` and `lib/rt`
+built for the triple, and scans every object it builds.
+
+QEMU has no Cortex-M23, so that suite runs Baseline code on the
+mps2-an505's Cortex-M33 (`tests/harness/thumb-m23`), which executes every
+Baseline instruction, with CCR.UNALIGN_TRP set so that an unaligned
+access faults as on the M23. That the code contains nothing else is the
+scan's to show.
+
+The object's build attributes are clang's: `Tag_CPU_arch` 16 (v8-M
+Baseline), `Tag_THUMB_ISA_use` 3, `Tag_CPU_unaligned_access` 0.
+
+### TrustZone-M (CMSE)
+
+`-mcmse` compiles for the Secure state of an ARMv8-M part with the
+security extension (ACLE's CMSE), on `thumbv8m.main-none-eabi` and
+`thumbv8m.base-none-eabi`. `__ARM_FEATURE_CMSE` is 3 with it, and 1 (the
+`tt` instruction) on every ARMv8-M target without it.
+
+`__attribute__((cmse_nonsecure_entry))` makes a function the Non-secure
+state may call:
+
+- its object has a second global symbol at the same address,
+  `__acle_se_NAME`. `embld` sees the pair and makes the secure gateway
+  veneer, `sg; b.w __acle_se_NAME`, in `.gnu.sgstubs`, and `NAME` names
+  the veneer ([embld](tools/embld.md#armv8-m-secure-gateway-veneers)).
+- it returns with `bxns lr`, and before that overwrites `r0`-`r3` (those
+  the result does not occupy) and `r12` with `lr`, and the flags with
+  `msr apsr_nzcvq, lr` (`apsr_nzcvqg` on Mainline, whose DSP extension
+  has the GE bits; `apsr` on Baseline). `r4`-`r11` hold the caller's
+  values again after the epilogue. This is clang's soft-float sequence.
+- it is kept and not inlined, has no tail calls, and must have external
+  linkage.
+
+A call through a pointer to a function type with
+`__attribute__((cmse_nonsecure_call))` enters the Non-secure state. The
+attribute is written among the specifiers, before the declarator:
+
+```c
+#include <arm_cmse.h>
+typedef int __attribute__((cmse_nonsecure_call)) ns_fn(int, int);
+
+int call_ns(void *p)
+{
+    ns_fn *f = cmse_nsfptr_create((ns_fn *)p);
+    return f(1, 2);
+}
+```
+
+The call saves `r4`-`r11`, clears bit 0 of the target, overwrites every
+register that holds no argument with it, and the flags, branches with
+`blxns`, and restores `r4`-`r11`; on Mainline it also saves and clears
+the floating-point context with `vlstm`/`vlldm`, as clang does. A
+narrow result is extended again after the call, since the Non-secure
+callee is not trusted to have done it. `tests/golden/thumbv8m-cmse.sh`
+compares these sequences with clang's and runs a Secure and a
+Non-secure image on the mps2-an505, reading the registers on the other
+side of every crossing.
+
+`<arm_cmse.h>` provides `cmse_address_info_t`, `cmse_TT`, `cmse_TTT`,
+`cmse_TTA`, `cmse_TTAT` and their `_fptr` forms,
+`cmse_check_address_range`, `cmse_check_pointed_object`,
+`cmse_nsfptr_create` and `cmse_is_nsfptr`, as ACLE defines them;
+`tt`/`ttt`/`tta`/`ttat` are inline assembly there.
+
+Without `-mcmse`, both attributes are ignored with a warning, as clang
+and GCC do: `__attribute__((cmse_nonsecure_entry)) is ignored without
+-mcmse (the Secure side of an ARMv8-M build)`.
+
+| Construct | Diagnostic |
+|---|---|
+| `-mcmse` below ARMv8-M | `-mcmse is the Secure side of ARMv8-M's security extension, and thumbv7m-none-eabi is not ARMv8-M: use thumbv8m.main-none-eabi or thumbv8m.base-none-eabi` |
+| `-mcmse` with an FPU | `-mcmse with an FPU (-mfpu=, -mfloat-abi=softfp or hard, or an -eabihf triple) is not supported: EmbCC does not clear the floating-point registers a cmse_nonsecure_entry function must clear; build the Secure side with -mfloat-abi=soft` |
+| an entry function with stack arguments | `cmse_nonsecure_entry function 'f' requires arguments on the stack, which is the Non-secure caller's (CMSE allows r0-r3 only)` |
+| an entry function returning through memory | `cmse_nonsecure_entry function 'f' would return its value through memory the Non-secure caller owns (CMSE allows a result in r0-r3 only)` |
+| a static entry function | `cmse_nonsecure_entry function 'f' has internal linkage: the Non-secure state enters it through a veneer the linker makes from its global symbol` |
+| a variadic entry function | `cmse_nonsecure_entry function 'f' is variadic, and its unnamed arguments would be on the Non-secure stack` |
+| a Non-secure call with stack arguments or a result through memory | `a call through a cmse_nonsecure_call pointer in 'g' passes arguments on the stack, which is not supported: CMSE passes r0-r3 only` |
+| `cmse_nonsecure_call` with no function type to attach to | `cmse_nonsecure_call applies to a function type, written among the specifiers before its declarator: ...` |
+| `cmse_nonsecure_caller()` | an undeclared `__cmse_nonsecure_caller_is_not_supported_by_EmbCC` (it needs `lr` as the function was entered) |
+
+The Secure image is linked with `embld`, normally with a linker script
+that puts `.gnu.sgstubs` in a region the SAU (and on parts like the
+mps2-an505, the IDAU) marks Non-secure Callable; `--cmse-implib
+--out-implib=FILE` writes the import library the Non-secure image links
+against. `tests/golden/thumbv8m-cmse/` holds a complete example: the
+Secure boot that programs the SAU, NSCCFG and the memory protection
+controller and enters the Non-secure reset handler, both images, and the
+script.
 
 ### Calling convention: AAPCS32
 
@@ -719,6 +845,17 @@ The tables are those of `clang -target thumbv7m-none-eabi` and
 The ARMv7E-M triples define the same macros as ARMv7-M:
 `__ARM_ARCH_7EM__` and `__ARM_FEATURE_DSP` are not defined.
 
+ARMv8-M Baseline's is that of `clang -target thumbv8m.base-none-eabi
+-mcpu=cortex-m23`: `__ARM_ARCH` 8, `__ARM_ARCH_8M_BASE__`,
+`__ARM_ARCH_ISA_THUMB` 1, `__ARM_FEATURE_IDIV`, `__ARM_FEATURE_LDREX`
+(0x7) and `__ARM_FEATURE_CMSE` (1), lock-free values of 2, and no
+`__thumb2__`. clang also defines `__ARM_FEATURE_CLZ`, `__ARM_FEATURE_SAT`,
+`__ARM_FEATURE_QBIT`, `__ARM_FEATURE_NUMERIC_MAXMIN` and
+`__ARM_FEATURE_DIRECTED_ROUNDING` there, which name instructions a
+Cortex-M23 does not have (GCC defines none of them for
+`armv8-m.base`); EmbCC leaves them out (`tools/gen-predef.sh`).
+`__ARM_FEATURE_CMSE` is 1 on both ARMv8-M tables and 3 with `-mcmse`.
+
 ARMv6-M's table is that of `clang -target thumbv6m-none-eabi`:
 `__ARM_ARCH` is 6, `__ARM_ARCH_6M__` and `__ARM_ARCH_ISA_THUMB` 1 are
 defined, and `__thumb2__`, `__ARM_FEATURE_IDIV`, `__ARM_FEATURE_CLZ`,
@@ -766,6 +903,11 @@ definition wins:
 | block copy or clear of more than 8 bytes | `__aeabi_memcpy`, `__aeabi_memclr` |
 | atomic read-modify-write, compare-and-swap (1, 2, 4 bytes) | `__atomic_exchange_N`, `__atomic_fetch_OP_N`, `__atomic_compare_exchange_N`, `__sync_val_compare_and_swap_N` |
 
+ARMv8-M Baseline uses the same archive for the 64-bit multiply, the
+shifts and the block routines; its 32-bit divides and its atomics are
+instructions, so neither the division routines nor the atomic ones are
+called (`lib/rt/armv6m.c` builds no atomics for it).
+
 The atomic routines mask interrupts with PRIMASK around the access. That
 is atomic on a single core running privileged code; CPSID is ignored in
 unprivileged Thread mode, so an RTOS whose tasks run unprivileged, or a
@@ -776,7 +918,7 @@ part with another bus master, defines its own.
 | Construct | Diagnostic |
 |---|---|
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` (ARMv6-M: `the ARMv6-M backend cannot lower an atomic wider than four bytes`) |
+| 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` (ARMv6-M: `the ARMv6-M backend cannot lower an atomic wider than four bytes`; ARMv8-M Baseline: `the ARMv8-M Baseline backend cannot lower an atomic wider than four bytes (ARMv8-M Baseline has no doubleword exclusive; ...)`) |
 | on ARMv6-M, an inline asm template that uses a Thumb-2 instruction | `the ARMv6-M backend cannot lower an instruction ARMv6-M does not have (a 32-bit Thumb-2 encoding, from inline asm or the backend) yet (function f)` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | a scalar local aligned beyond 8 | `'x' needs 32-byte alignment and the stack only guarantees 8: supported for an array or a struct, not yet for a scalar` |

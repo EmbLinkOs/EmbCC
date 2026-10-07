@@ -22,7 +22,7 @@ Every triple each name covers is listed in [Targets](targets.md).
 | x86-64 | `x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` | LP64 |
 | Apple arm64 | `aarch64-apple-darwin` | LP64, Apple's variant |
 | AArch64 | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | LP64 |
-| Cortex-M | `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | ILP32 |
+| Cortex-M | `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | ILP32 |
 | RV32 | `riscv32-unknown-elf` | ILP32 |
 | RV64 | `riscv64-unknown-elf` | LP64 |
 | AVR | `avr` | 16-bit `int` and pointers |

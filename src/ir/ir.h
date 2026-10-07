@@ -278,6 +278,10 @@ struct ir_ins {
                               * a misaligned address must not use them. */
     int call_pcs;            /* IR_CALL: the callee's pcs attribute (ARM;
                               * see target_pcs_vfp) */
+    int call_cmse;           /* IR_CALL, indirect: through a pointer to a
+                              * cmse_nonsecure_call function type (-mcmse):
+                              * the registers and flags are cleared and the
+                              * branch is a BLXNS (src/arch/thumb) */
     int call_nfixed;         /* IR_CALL: how many NAMED parameters the
                               * callee has. Needed because Darwin's
                               * arm64 passes every argument past them on
@@ -456,6 +460,7 @@ struct ir_func {
     /* The function's own return type, classified as a call's is. */
     struct ir_arg ret_abi;
     int pcs;                 /* its own pcs attribute (ARM) */
+    int cmse_entry;          /* cmse_nonsecure_entry (-mcmse; struct func) */
 
     struct func *src;        /* code_off/len; the types not yet interned */
     int nvregs;

@@ -986,21 +986,148 @@ int t_patch_b16(struct code *c, int at, int target)
     return 1;
 }
 
-/* The byte and halfword exclusives (ARMv7-M and v8-M Mainline have both):
+/* The byte and halfword exclusives and ARMv8-M's load-acquire and
+ * store-release forms are one group, T1 of each:
+ *
+ *   1110 1000 110 L Rn | Rt 1111 op Rd
+ *
+ * L 1 for a load; op 0100/0101 the byte/halfword exclusive, 1000/1001/1010
+ * the plain acquire/release at one, two and four bytes, 1100/1101/1110 the
+ * exclusive acquire/release at the same three. Rd is the store-exclusive's
+ * status register, and 1111 in every form that has none. */
+static void ldst_xa(struct code *c, int load, unsigned op, int rt, int rn,
+                    int rd)
+{
+    hw2(c, 0xe8c0u | (load ? 0x10u : 0u) | (unsigned)rn,
+           ((unsigned)rt << 12) | 0x0f00u | (op << 4) |
+           (rd < 0 ? 0xfu : (unsigned)rd));
+}
+/* `op` for a size (1, 2 or 4) in one of the three sets: 0 the exclusive
+ * (byte and halfword only: the word form is t_ldrex), 1 acquire/release,
+ * 2 exclusive acquire/release. */
+static unsigned xa_op(int set, int size)
+{
+    unsigned base = set == 0 ? 4u : set == 1 ? 8u : 12u;
+    return base + (size == 1 ? 0u : size == 2 ? 1u : 2u);
+}
+
+/* The byte and halfword exclusives (ARMv7-M and v8-M have both):
  * ldrexb/ldrexh zero-extend, and strexb/strexh put 0 in rd on success.
  * No offset form exists for these. `size` is 1 or 2. */
 void t_ldrexbh(struct code *c, int rt, int rn, int size)
 {
     A32(a32_ldrex(c, rt, rn, size));
-    hw2(c, 0xe8d0u | (unsigned)rn,
-           ((unsigned)rt << 12) | (size == 1 ? 0x0f4fu : 0x0f5fu));
+    ldst_xa(c, 1, xa_op(0, size), rt, rn, -1);
 }
 void t_strexbh(struct code *c, int rd, int rt, int rn, int size)
 {
     A32(a32_strex(c, rd, rt, rn, size));
-    hw2(c, 0xe8c0u | (unsigned)rn,
-           ((unsigned)rt << 12) | (size == 1 ? 0x0f40u : 0x0f50u) |
-           (unsigned)rd);
+    ldst_xa(c, 0, xa_op(0, size), rt, rn, rd);
+}
+
+/* ARMv8-M's load-acquire (lda, ldab, ldah; with `ex`, ldaex, ldaexb,
+ * ldaexh), store-release (stl, stlb, stlh) and store-release exclusive
+ * (stlex, stlexb, stlexh). Both profiles, Baseline included. */
+void t_lda(struct code *c, int rt, int rn, int size, int ex)
+{
+    if (t_isa_a32) a32_refuse("an ARMv8-M load-acquire", rt);
+    ldst_xa(c, 1, xa_op(ex ? 2 : 1, size), rt, rn, -1);
+}
+void t_stl(struct code *c, int rt, int rn, int size)
+{
+    if (t_isa_a32) a32_refuse("an ARMv8-M store-release", rt);
+    ldst_xa(c, 0, xa_op(1, size), rt, rn, -1);
+}
+void t_stlex(struct code *c, int rd, int rt, int rn, int size)
+{
+    if (t_isa_a32) a32_refuse("an ARMv8-M store-release", rt);
+    ldst_xa(c, 0, xa_op(2, size), rt, rn, rd);
+}
+
+/* ---- the security extension (TrustZone-M) --------------------------------
+ *
+ * TT Rd, Rn: 1110 1000 0100 Rn | 1111 Rd A T 000000 -- the strex word
+ * form's opcode with Rt 1111 and no offset. A asks about the other
+ * security state (tta, ttat; Secure only), T about unprivileged access
+ * (ttt, ttat). */
+void t_tt(struct code *c, int rd, int rn, int alt, int unpriv)
+{
+    if (t_isa_a32) a32_refuse("tt", rd);
+    hw2(c, 0xe840u | (unsigned)rn,
+           0xf000u | ((unsigned)rd << 8) | (alt ? 0x80u : 0u) |
+           (unpriv ? 0x40u : 0u));
+}
+
+/* SG: the secure gateway, the first instruction of every entry a
+ * Non-secure caller may branch to. Its two halfwords are the same,
+ * 1110 1001 0111 1111, so it cannot be entered half way. */
+void t_sg(struct code *c)
+{
+    if (t_isa_a32) a32_refuse("sg", 0);
+    hw2(c, 0xe97fu, 0xe97fu);
+}
+
+/* BXNS / BLXNS Rm: bx and blx with bit 2 set -- the branch that may leave
+ * the Secure state (when Rm's bit 0 is clear). */
+void t_bxns(struct code *c, int rm, int link)
+{
+    if (t_isa_a32) a32_refuse("bxns", rm);
+    hw(c, (link ? 0x4780u : 0x4700u) | (unsigned)(rm << 3) | 4u);
+}
+
+/* VLSTM / VLLDM Rn: 1110 1100 001 L Rn | 0000 1010 0000 0000. The lazy
+ * save and restore of the floating-point state around a call to the
+ * Non-secure state (ARMv8-M Mainline; a no-op on a part with no FPU). */
+void t_vlstm(struct code *c, int rn, int load)
+{
+    if (t_isa_a32) a32_refuse("vlstm", rn);
+    hw2(c, 0xec20u | (load ? 0x10u : 0u) | (unsigned)rn, 0x0a00u);
+}
+
+/* Is the 32-bit Thumb instruction h:h2 one an ARMv6-M core has (BL, MRS,
+ * MSR, DMB, DSB, ISB), or with `v8b` one ARMv8-M Baseline has -- those
+ * and the divides, the exclusives and the acquire/release forms,
+ * MOVW/MOVT, B.W, CLREX, TT and SG? Matched on each one's fixed bits.
+ * The backend's scan (v6m.c v6_scan) and the assembler (asm.c) both ask. */
+int t_thumb1_ok32(unsigned h, unsigned h2, int v8b)
+{
+    unsigned op = (h2 >> 4) & 0xfu;
+    if ((h & 0xf800u) == 0xf000u && (h2 & 0xd000u) == 0xd000u)
+        return 1;                                    /* BL */
+    if (h == 0xf3efu && (h2 & 0xf000u) == 0x8000u)
+        return 1;                                    /* MRS */
+    if ((h & 0xfff0u) == 0xf380u && (h2 & 0xff00u) == 0x8800u)
+        return 1;                                    /* MSR */
+    if (h == 0xf3bfu && (h2 & 0xff0fu) == 0x8f0fu &&
+        ((h2 >> 4) & 0xf) >= 4 && ((h2 >> 4) & 0xf) <= 6)
+        return 1;                                    /* DSB, DMB, ISB */
+    if (!v8b)
+        return 0;
+    if (((h & 0xfff0u) == 0xfb90u || (h & 0xfff0u) == 0xfbb0u) &&
+        (h2 & 0xf0f0u) == 0xf0f0u)
+        return 1;                                    /* SDIV, UDIV */
+    if ((h & 0xfff0u) == 0xe850u && (h2 & 0x0f00u) == 0x0f00u)
+        return 1;                                    /* LDREX */
+    if ((h & 0xfff0u) == 0xe840u)
+        return 1;                          /* STREX; TT, TTT, TTA, TTAT */
+    if ((h & 0xfff0u) == 0xe8d0u && (h2 & 0x0f0fu) == 0x0f0fu &&
+        (op == 4 || op == 5 || op == 8 || op == 9 || op == 10 ||
+         op == 12 || op == 13 || op == 14))
+        return 1;     /* LDREXB/H; LDAB, LDAH, LDA; LDAEXB, LDAEXH, LDAEX */
+    if ((h & 0xfff0u) == 0xe8c0u && (h2 & 0x0f00u) == 0x0f00u &&
+        (op == 4 || op == 5 || op == 12 || op == 13 || op == 14 ||
+         ((op == 8 || op == 9 || op == 10) && (h2 & 0xfu) == 0xfu)))
+        return 1;     /* STREXB/H; STLEXB, STLEXH, STLEX; STLB, STLH, STL */
+    if (h == 0xf3bfu && h2 == 0x8f2fu)
+        return 1;                                    /* CLREX */
+    if (h == 0xe97fu && h2 == 0xe97fu)
+        return 1;                                    /* SG */
+    if (((h & 0xfbf0u) == 0xf240u || (h & 0xfbf0u) == 0xf2c0u) &&
+        !(h2 & 0x8000u))
+        return 1;                                    /* MOVW, MOVT */
+    if ((h & 0xf800u) == 0xf000u && (h2 & 0xd000u) == 0x9000u)
+        return 1;                                    /* B.W */
+    return 0;
 }
 /* clrex: drop the exclusive reservation, as a failed compare-and-swap
  * does before it leaves the loop. */
@@ -1079,10 +1206,22 @@ void t_mrs(struct code *c, int rd, int sysm)
 /* MSR <spec_reg>, <Rn>: 1111 0011 100 0 Rn | 1000 mask 00 SYSm, with the
  * mask 0b10 -- write the whole register, which is the only form a C
  * program wants. */
-void t_msr(struct code *c, int sysm, int rn)
+static void msr_mask(struct code *c, int sysm, int rn, unsigned mask)
 {
     if (t_isa_a32) a32_refuse("an M-profile special register", sysm);
-    hw2(c, 0xF380u | (unsigned)rn, 0x8800u | ((unsigned)sysm & 0xff));
+    hw2(c, 0xF380u | (unsigned)rn,
+           0x8000u | (mask << 10) | ((unsigned)sysm & 0xff));
+}
+void t_msr(struct code *c, int sysm, int rn)
+{
+    msr_mask(c, sysm, rn, 2u);
+}
+
+/* MSR APSR_nzcvq, Rn -- t_msr of APSR -- or with `ge` APSR_nzcvqg, mask
+ * 0b11, which writes the DSP extension's GE bits as well. */
+void t_msr_apsr(struct code *c, int rn, int ge)
+{
+    msr_mask(c, T_SYS_APSR, rn, ge ? 3u : 2u);
 }
 
 /* CPS: 1011 0110 011 im 0 a i f. Only i and f matter on M-profile. */

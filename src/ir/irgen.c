@@ -3288,6 +3288,11 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         /* Only a direct call can name one: sema refuses to take the
          * address of a function whose pcs is not the default. */
         i->call_pcs = e->callee ? e->callee->pcs : 0;
+        /* (a direct call to a function never is one: the attribute is on
+         * the pointed-to function TYPE, and a pointer to it is only ever
+         * called through) */
+        i->call_cmse = !e->callee && e->lhs->ty->pointee &&
+                       e->lhs->ty->pointee->cmse_ns_call;
         i->call_nfixed = e->callee ? e->callee->nparams
                                    : e->lhs->ty->pointee->nptypes;
         i->sret_first = e->callee ? e->callee->sret_first
@@ -4339,6 +4344,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
         fn->ret_abi.byref = ty_aapcs64_byref(rt);
         fn->ret_abi.ty = rt;
         fn->pcs = f->pcs;
+        fn->cmse_entry = f->cmse_entry;
     }
     /* The same two refusals as at a call site, on the SIGNATURE --
      * because a function that merely takes or returns one of these
