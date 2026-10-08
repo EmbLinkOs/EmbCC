@@ -83,5 +83,18 @@ void tasm_set_arch(int level);
 /* tasm_set_arch's value for ARMv8-M Baseline: the Thumb-1 level (6) with
  * Baseline's 32-bit instructions and the security extension. */
 #define TASM_V8M_BASE 9
+/* Whether the core has the DSP extension (ARMv7E-M; ARMv8-M Mainline
+ * with it): sadd16, smlad, pkhbt and the rest are refused without it, as
+ * llvm-mc refuses them. Off until a caller says otherwise. */
+void tasm_set_dsp(int on);
+/* The DSP extension's instructions, ssat/usat and the extends, across the
+ * registers and immediates each field takes, for the referee
+ * (tests/golden/thumb-dsp.sh): one line each. */
+void tasm_vocabulary_dsp(FILE *f);
+/* The multiplies, rev16/revsh, rrx, the bit fields and ldrd/strd (and in
+ * ARM state the doubleword exclusives), the same way, for
+ * tests/golden/arm-asm-more.sh. Both vocabularies are ARM state's when
+ * t_isa_a32 is set. */
+void tasm_vocabulary_more(FILE *f);
 
 #endif

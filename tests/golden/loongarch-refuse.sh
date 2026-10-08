@@ -120,10 +120,10 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
 for O in -O0 -O2; do
     refc "a 16-byte atomic ($O)" 'a sixteen-byte atomic' \
         '__int128 x; int f(void){ __int128 e = 0; return __atomic_compare_exchange_n(&x, &e, 1, 0, 5, 5); }' $O
-    refc "__builtin_return_address ($O)" '__builtin_frame_address or __builtin_return_address' \
-        'void *f(void){ return __builtin_return_address(0); }' $O
-    refc "__builtin_frame_address ($O)" '__builtin_frame_address or __builtin_return_address' \
-        'void *f(void){ return __builtin_frame_address(0); }' $O
+    refc "__builtin_return_address(1) ($O)" 'only level 0' \
+        'void *f(void){ return __builtin_return_address(1); }' $O
+    refc "__builtin_frame_address(1) ($O)" 'only level 0' \
+        'void *f(void){ return __builtin_frame_address(1); }' $O
 done
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'

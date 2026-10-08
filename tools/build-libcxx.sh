@@ -29,6 +29,19 @@
 set -eu
 triple=$1
 out=$2
+# A RISC-V hardware-float ABI's library is named TRIPLE/ABI
+# (riscv32-unknown-elf/ilp32f), as in tools/build-rt.sh.
+flags=
+case $triple in
+    */*) abi=${triple#*/}; triple=${triple%%/*}
+         case $abi in
+             ilp32f) flags="-march=rv32imafc -mabi=ilp32f" ;;
+             ilp32d) flags="-march=rv32imafdc -mabi=ilp32d" ;;
+             lp64f)  flags="-march=rv64imafc -mabi=lp64f" ;;
+             lp64d)  flags="-march=rv64imafdc -mabi=lp64d" ;;
+             *) echo "$0: no library variant '$abi' for $triple" >&2; exit 1 ;;
+         esac ;;
+esac
 here=$(cd "$(dirname "$0")/.." && pwd)
 EMBCC=${EMBCC:-$here/embcc}
 AR=${EMBCC_AR:-./embar}
@@ -38,7 +51,8 @@ command -v "$AR" >/dev/null 2>&1 || [ -x "$AR" ] || AR=ar
 rm -rf "$out/cxx"
 mkdir -p "$out/cxx"
 for b in new guard atexit typeinfo dyncast noexcept; do
-    "$EMBCC" --target="$triple" -Os -fno-exceptions -fno-rtti -x c++ \
+    # shellcheck disable=SC2086
+    "$EMBCC" --target="$triple" $flags -Os -fno-exceptions -fno-rtti -x c++ \
         -I"$here/lib/libcxx/include" -I"$here/lib/libc/include" \
         -c "$here/lib/libcxx/src/$b.cc" -o "$out/cxx/$b.o" || {
         echo "build-libcxx: lib/libcxx/src/$b.cc does not compile for $triple" >&2

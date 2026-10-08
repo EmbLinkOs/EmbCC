@@ -66,7 +66,10 @@ enum {
  * field has them so one table drives both widths. */
 enum {
     T_OP_AND = 0, T_OP_BIC = 1, T_OP_ORR = 2, T_OP_ORN = 3, T_OP_EOR = 4,
-    T_OP_ADD = 8, T_OP_ADC = 10, T_OP_SBC = 11, T_OP_SUB = 13, T_OP_RSB = 14
+    T_OP_ADD = 8, T_OP_ADC = 10, T_OP_SBC = 11, T_OP_SUB = 13, T_OP_RSB = 14,
+    /* the same row's PKHBT/PKHTB (DSP), for t_alu_reg_shift through t_pkh
+     * only: there is no 16-bit form and no immediate one */
+    T_OP_PKH = 6
 };
 
 /* The shifts, numbered as the `type` field has them. */
@@ -80,6 +83,12 @@ void t_alu_reg_shift(struct code *c, int op, int rd, int rn, int rm,
 /* rd = rn's bits lsb .. lsb+width-1, at the bottom, zero- or sign-extended:
  * ubfx / sbfx. width is 1..32-lsb. */
 void t_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign);
+/* rd's bits lsb .. lsb+width-1 = rn's bottom `width` bits, the rest of rd
+ * kept: bfi; with rn 15, those bits of rd cleared: bfc. width is
+ * 1..32-lsb. */
+void t_bfi(struct code *c, int rd, int rn, int lsb, int width);
+/* rd = rm rotated right one bit through the carry: rrx (rrxs with `s`). */
+void t_rrx(struct code *c, int rd, int rm, int s);
 
 /* ---- moves ---------------------------------------------------------- */
 
@@ -142,6 +151,9 @@ void t_div(struct code *c, int rd, int rn, int rm, int sign);
 void t_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
 /* rdhi:rdlo += rn * rm, 64 bits (smlal/umlal) */
 void t_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
+/* rdhi:rdlo = rn * rm + rdlo + rdhi, unsigned (umaal): the DSP
+ * extension's on a Cortex-M, every ARMv7-A part's. */
+void t_umaal(struct code *c, int rdlo, int rdhi, int rn, int rm);
 /* rd = the high word of the signed rn * rm: smmul, emitted in ARM state
  * only (the Cortex-M levels select alike for v7-M, which lacks it; its
  * Thumb form was checked against llvm-mc's thumbv7em by hand) */
@@ -158,6 +170,64 @@ void t_clz(struct code *c, int rd, int rm);
 void t_rev(struct code *c, int rd, int rm);
 /* rd = rm with the bytes of each halfword swapped. */
 void t_rev16(struct code *c, int rd, int rm);
+/* rd = the low halfword of rm with its bytes swapped, sign-extended. */
+void t_revsh(struct code *c, int rd, int rm);
+
+/* ---- the DSP extension (ARMv7E-M; ARMv8-M Mainline with +dsp) -------
+ * Every ARMv7-A part has them too: in ARM state each hands its call to its
+ * A32 twin (a32.c). Register operands are never pc, nor in Thumb state sp
+ * (UNPREDICTABLE), which the assembler checks. */
+
+/* rd = rn + extend(rm ror rot), rot 0/8/16/24: size 1 sxtab/uxtab, 2
+ * sxtah/uxtah, 16 sxtab16/uxtab16 (a byte into each halfword); rn 15 is
+ * the plain extend (sxtb, uxth, sxtb16, ...), always the 32-bit form. */
+void t_extadd(struct code *c, int rd, int rn, int rm, int size, int sign,
+              int rot);
+/* The parallel adds and subtracts, <kind><op>: op says which lanes and
+ * how (add8 sadd8...), kind the arithmetic. */
+enum { T_PAR_ADD8 = 0, T_PAR_ADD16 = 1, T_PAR_ASX = 2, T_PAR_SUB8 = 4,
+       T_PAR_SUB16 = 5, T_PAR_SAX = 6 };
+enum { T_PAR_S = 0, T_PAR_Q = 1, T_PAR_SH = 2, T_PAR_U = 4, T_PAR_UQ = 5,
+       T_PAR_UH = 6 };
+void t_parallel(struct code *c, int op, int kind, int rd, int rn, int rm);
+/* qadd/qdadd/qsub/qdsub (op 0..3) rd, rm, rn -- the syntax names Rm
+ * FIRST: qsub rd, rm, rn is rd = sat(rm - rn). */
+void t_qarith(struct code *c, int op, int rd, int rm, int rn);
+/* sel rd, rn, rm: each byte from rn where its GE bit is set, else rm */
+void t_sel(struct code *c, int rd, int rn, int rm);
+/* rd = ra + rn.half * rm.half (smla<x><y>); ra 15 is smul<x><y>. ntop and
+ * mtop pick the top halfword of rn and of rm. */
+void t_smlaxy(struct code *c, int rd, int rn, int rm, int ra, int ntop,
+              int mtop);
+/* rd = ra + (rn * rm.half) >> 16 (smlaw<y>); ra 15 is smulw<y>. */
+void t_smlaw(struct code *c, int rd, int rn, int rm, int ra, int mtop);
+/* rd = ra + rn.lo*rm.lo +/- rn.hi*rm.hi, with x the halves of rm
+ * exchanged: smlad[x]/smlsd[x], and with ra 15 smuad[x]/smusd[x]. */
+void t_smlad(struct code *c, int rd, int rn, int rm, int ra, int sub, int x);
+/* rd = the top word of (ra << 32) +/- rn * rm, rounded when `round`:
+ * smmla[r]/smmls[r], and with ra 15 (not sub) smmul[r]. */
+void t_smmla(struct code *c, int rd, int rn, int rm, int ra, int sub,
+             int round);
+/* rd = ra + the sum of rn's and rm's bytes' absolute differences: usada8,
+ * and with ra 15 usad8. */
+void t_usada8(struct code *c, int rd, int rn, int rm, int ra);
+/* rdhi:rdlo += rn.half * rm.half: smlal<x><y>. */
+void t_smlalxy(struct code *c, int rdlo, int rdhi, int rn, int rm, int ntop,
+               int mtop);
+/* rdhi:rdlo += rn.lo*rm.lo +/- rn.hi*rm.hi: smlald[x]/smlsld[x]. */
+void t_smlald(struct code *c, int rdlo, int rdhi, int rn, int rm, int sub,
+              int x);
+/* rd = saturate(rn <shift> amt) to `bound` bits: ssat (1..32, signed)
+ * and usat (0..31); the shift is lsl #0..31 or, with asr, asr #1..31.
+ * Not DSP: every ARMv7-M part has these two. */
+void t_sat(struct code *c, int rd, int bound, int rn, int sign, int asr,
+           int amt);
+/* each halfword of rn saturated: ssat16 (1..16), usat16 (0..15) */
+void t_sat16(struct code *c, int rd, int bound, int rn, int sign);
+/* pkhbt rd, rn, rm, lsl #amt (amt 0..31): the bottom half from rn, the
+ * top from the shifted rm; pkhtb rd, rn, rm, asr #amt (1..32), the other
+ * way round. */
+void t_pkh(struct code *c, int rd, int rn, int rm, int tb, int amt);
 
 /* ---- memory --------------------------------------------------------- */
 
@@ -174,6 +244,14 @@ int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
  * form cannot say it. The address must be word-aligned: ARMv7-M faults on
  * an unaligned ldrd/strd where two ldr would not. */
 int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store);
+/* ...as the assembler takes it: in any addressing form (T_IDX_OFF [rn,
+ * #off], T_IDX_PRE [rn, #off]!, T_IDX_POST [rn], #off), and with lr in
+ * the pair. With writeback rn is neither pc nor rt nor rt2; a store's rn
+ * is never pc. In ARM state rt is even and rt2 rt + 1, and |off| is at
+ * most 255. 0, writing nothing, when the form cannot say it. */
+enum { T_IDX_OFF = 0, T_IDX_PRE = 1, T_IDX_POST = 2 };
+int t_ldst_pair_any(struct code *c, int rt, int rt2, int rn, long off,
+                    int store, int idx);
 /* With writeback: pre != 0 is [rn, #off]!, 0 is [rn], #off. 0 when it
  * cannot be encoded (|off| > 255, rn pc or rt). */
 int t_ldst_wb(struct code *c, int rt, int rn, long off, int size, int sign,
@@ -219,6 +297,8 @@ void t_patch_adr_w(struct code *c, int at, int rd, int imm12);
 /* tbh [pc, rm, lsl #1]: pc += 2 * halfword[rm] of the table that follows
  * (pc is the tbh's address + 4, i.e. the table). Returns where it is. */
 int  t_tbh(struct code *c, int rm);
+/* tbb [pc, rm]: the same with a byte table, entries reaching 510 bytes. */
+int  t_tbb(struct code *c, int rm);
 void t_patch_hw16(struct code *c, int at, unsigned v);     /* one halfword */
 void t_blx(struct code *c, int rm);
 void t_nop(struct code *c);

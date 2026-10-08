@@ -10,6 +10,11 @@ int many_i(int a, int b, int c, int d, int e, int f, int g, int h, int i,
            unsigned j)
 { return a - b + c - d + e - f + g - h + i + (j == 0xffffffffu) * 1000; }
 float fmul3(float a, float b, float c) { return a * b * c; }
+float many_f(long a, long b, long c, long d, long e, long f, long g, long h,
+             float i, int j, float k)
+{
+    return (float)(a + b + c + d + e + f + g + h) + i * (float)j - k;
+}
 unsigned uret(unsigned a, unsigned b) { return a - b; }
 int is_max(unsigned u) { return u == 0xffffffffu; }
 long sext_back(int x) { return x; }

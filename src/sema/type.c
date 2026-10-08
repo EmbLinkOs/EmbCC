@@ -84,11 +84,28 @@ int ty_generic_same(const struct type *a, const struct type *b)
 
 struct type *ty_wchar(void)
 {
-    /* int-sized, but for Xtensa's 16-bit unsigned short (xtensa/elf.h) */
+    /* int-sized, but for Xtensa's 16-bit unsigned short (xtensa/elf.h),
+     * and unsigned short on every target under -fshort-wchar -- AVR's
+     * 2-byte int included, where the type, not the size, changes */
+    if (target_short_wchar())
+        return ty_base(TY_SHORT, 1);
     if (target_wchar_size() == 2 && target_int_size() != 2)
         return ty_base(TY_SHORT, target_wchar_unsigned());
     return ty_base(target_long_size_types() ? TY_LONG : TY_INT,
                    target_wchar_unsigned());
+}
+
+struct type *ty_str_elem(int prefix)
+{
+    /* By the PREFIX: L is wchar_t whatever its width (two bytes on AVR),
+     * U is char32_t and u char16_t, as __CHAR32_TYPE__ and
+     * __CHAR16_TYPE__ spell them -- on AVR unsigned long and unsigned
+     * int, where U"" was the two-byte unsigned int. */
+    int i16 = target_int_size() == 2;
+    return prefix == 'L' ? ty_wchar()
+         : prefix == 'U' ? ty_base(i16 ? TY_LONG : TY_INT, 1)
+         : prefix == 'u' ? ty_base(i16 ? TY_INT : TY_SHORT, 1)
+         : ty_plain_char();
 }
 
 struct type *ty_llong(int is_unsigned)
@@ -168,11 +185,25 @@ struct type *ty_const(struct type *t)
     return c;
 }
 
+struct type *ty_aligned(struct type *t, int align)
+{
+    if (!t || t->align_ovr == align)
+        return t;
+    struct type *c = xcalloc(1, sizeof *c);
+    *c = *t;                 /* a non-interned copy */
+    c->align_ovr = align;
+    c->canon = t->canon ? t->canon : t;
+    note_qcopy(c);
+    return c;
+}
+
 struct type *ty_unqual(struct type *t)
 {
     if (t && t->canon &&
         (t->is_const || t->is_volatile || t->is_atomic || t->is_flash))
-        return t->canon;
+        /* the qualifiers go; an aligned typedef's alignment stays */
+        return t->align_ovr ? ty_aligned(t->canon, t->align_ovr)
+                            : t->canon;
     return t;
 }
 
@@ -380,6 +411,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
             q->is_const = keep.is_const;
             q->is_volatile = keep.is_volatile;
             q->is_atomic = keep.is_atomic;
+            q->align_ovr = keep.align_ovr;
             q->canon = keep.canon;
             q->qnext = keep.qnext;
             q->qcopies = NULL;
@@ -491,6 +523,7 @@ void ty_struct_layout(struct type *t, struct member *members, int n,
         q->is_volatile = keep.is_volatile;
         q->is_atomic = keep.is_atomic;
         q->is_flash = keep.is_flash;
+        q->align_ovr = keep.align_ovr;
         q->canon = keep.canon;
         q->qnext = keep.qnext;
         q->qcopies = NULL;
@@ -554,16 +587,22 @@ int ty_size(const struct type *t)
 }
 
 /* The ARM procedure-call standards' natural alignment (type.h). */
+
 int ty_natural_align(const struct type *t)
 {
     if (t->kind == TY_ARRAY)
         return ty_natural_align(t->pointee);
     if (t->kind == TY_STRUCT && t->complete && t->nat_align)
         return t->nat_align;
-    return ty_align(t);
+    return ty_own_align(t);
 }
 
 int ty_align(const struct type *t)
+{
+    return t->align_ovr ? t->align_ovr : ty_own_align(t);
+}
+
+int ty_own_align(const struct type *t)
 {
     switch (t->kind) {
     case TY_ARRAY: return ty_align(t->pointee);

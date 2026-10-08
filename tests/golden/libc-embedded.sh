@@ -53,7 +53,10 @@ grep -q '==END==' "$out/ref.txt" || {
 # Not AVR: a two-byte atomic is two accesses on that part, and lib/libc's
 # locks are refused for it.
 fail=0
-for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
+# RISC-V's hardware-float ABIs are TRIPLE/ABI (tools/build-libc.sh): the
+# library built for the ABI and the program compiled with its -march.
+for t in riscv32-unknown-elf riscv64-unknown-elf riscv32-unknown-elf/ilp32f \
+         riscv32-unknown-elf/ilp32d riscv64-unknown-elf/lp64d thumbv7m-none-eabi \
          thumbv7em-none-eabihf thumbv8m.main-none-eabi mipsel-none-elf \
          mips-none-elf loongarch64-unknown-elf tricore-none-elf \
          xtensa-none-elf powerpc-none-eabi sparc-none-elf m68k-none-elf; do
@@ -98,15 +101,23 @@ for t in riscv32-unknown-elf riscv64-unknown-elf thumbv7m-none-eabi \
     esac
     command -v "${Q%% *}" >/dev/null 2>&1 || { echo "SKIP $t: no ${Q%% *}"; continue; }
     d=$out/$t; mkdir -p "$d"
+    tt=${t%%/*}; fl=
+    case $t in
+        */ilp32f) fl="-march=rv32imafc -mabi=ilp32f" ;;
+        */ilp32d) fl="-march=rv32imafdc -mabi=ilp32d" ;;
+        */lp64d)  fl="-march=rv64gc -mabi=lp64d" ;;
+    esac
     sh tools/build-libc.sh "$t" "$d" 2> "$d/build.err" &&
     sh tools/build-rt.sh "$t" "$d" 2>> "$d/build.err" || {
         echo "$t: the library does not build:"; head -3 "$d/build.err"
         fail=1; continue; }
     for f in boot io; do
-        "$EMBCC" --target="$t" -c "$H/$f.c" -o "$d/$f.o" || exit 1
+        # shellcheck disable=SC2086
+        "$EMBCC" --target="$tt" $fl -c "$H/$f.c" -o "$d/$f.o" || exit 1
     done
     for opt in -O0 -O2 -Os; do
-        "$EMBCC" --target="$t" $opt -Ilib/libc/include -c "$prog" \
+        # shellcheck disable=SC2086
+        "$EMBCC" --target="$tt" $fl $opt -Ilib/libc/include -c "$prog" \
             -o "$d/p$opt.o" || { echo "$t $opt: does not compile"; fail=1
                                  continue; }
         case $t in

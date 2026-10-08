@@ -85,6 +85,11 @@ struct type {
                              * copy, like const; an array's elements carry it
                              * too. Ignored by ty_equal; sema keeps pointers to
                              * the two spaces apart. */
+    int align_ovr;          /* a typedef's __attribute__((aligned(N))): the
+                             * type's alignment is N, larger or smaller than
+                             * its own, and its size is unchanged (GCC's and
+                             * clang's rule). 0: none. A copy (ty_aligned),
+                             * like const; ignored by ty_equal. */
     /* A struct's qualified copies, on the original, linked by qnext: a
      * copy made while the struct was incomplete (`const struct T *p;`
      * before T's body) is brought up to date when the body arrives. */
@@ -157,6 +162,11 @@ struct type *ty_plain_char(void);
 int ty_is_plain_char(const struct type *t);
 int ty_generic_same(const struct type *a, const struct type *b);
 struct type *ty_wchar(void);
+/* A string literal's element type by its prefix: L wchar_t, U char32_t,
+ * u char16_t, none (or u8, in C) plain char. The parser's constant
+ * folder and sema both ask here, so sizeof(L"ab") folds to what sema
+ * types it as. */
+struct type *ty_str_elem(int prefix);
 /* `long long` / `unsigned long long`: eight bytes on every target. */
 struct type *ty_llong(int is_unsigned);
 /* The integer type that is exactly `size` bytes wide, or NULL if the
@@ -177,6 +187,8 @@ struct type *ty_ptrdiff_t(void);
 struct type *ty_volatile(struct type *t);
 /* A copy of `t` marked `const`, the same way. */
 struct type *ty_const(struct type *t);
+/* A copy of t whose alignment is `align` (a typedef's aligned attribute). */
+struct type *ty_aligned(struct type *t, int align);
 struct type *ty_flash(struct type *t);   /* AVR __flash: program memory */
 /* `t` without its own qualifiers (const, volatile, _Atomic): the
  * original a qualified copy points at. A pointee's stay. */
@@ -225,6 +237,10 @@ struct member *ty_find_member_deep(struct type *t, const char *name, long *off);
 int ty_size(const struct type *t);          /* bytes; void has none */
 int ty_align(const struct type *t);
 int ty_natural_align(const struct type *t);
+/* The alignment before a typedef's aligned attribute (align_ovr): what
+ * the calling convention places an argument by. GCC's and clang's
+ * aligned typedef moves an object, not an argument slot. */
+int ty_own_align(const struct type *t);
 int ty_equal(const struct type *a, const struct type *b);
 int ty_is_integer(const struct type *t);
 int ty_is_float(const struct type *t);

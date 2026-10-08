@@ -32,7 +32,8 @@
  *   * Multiply and divide are LEON3's umul/smul/udiv/sdiv through %y.
  *
  * Refused by name: atomics wider than a word, the frame and return
- * address builtins, a branch beyond +-8 MiB, and __int128.
+ * address builtins, a branch beyond +-8 MiB, and __int128. Inline asm is
+ * assembled by sparc/asm.c and placed here (IR_ASM).
  * THE RULE.
  */
 #include "emit.h"
@@ -236,7 +237,7 @@ static const struct ra_target SPARC_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg: the casa/swap lowerings read through rdr */
     0,
-    0               /* asm_in_reg: there is no SPARC inline asm to place */
+    1               /* asm_in_reg: see IR_ASM */
 };
 
 static int g_sp_regalloc;
@@ -340,9 +341,29 @@ static int arg_byref(const struct ir_arg *a)
     return a->is_struct || a->size > 8;
 }
 
-static void place_arg(const struct ir_arg *a, int *word, struct argplace *p)
+/* sret: this is the C++ indirect-result pointer (sret_first: the return
+ * slot of a class that is not trivially copyable, which the C++ lowering
+ * passes first). The SPARC V8 ABI passes it as it passes a C struct's
+ * result buffer: in the struct-return word, %sp+64, taking no argument
+ * word -- as clang++ and g++ do. */
+static int fn_sret_first(const struct ir_func *fn)
+{
+    return fn->src && fn->src->sret_first;
+}
+
+static void place_arg(const struct ir_arg *a, int sret, int *word,
+                      struct argplace *p)
 {
     int byref = arg_byref(a);
+    if (sret) {
+        p->byref = 0;
+        p->copy = -1;
+        p->reg = NARGREG;
+        p->nreg = 0;
+        p->nstk = 1;
+        p->stk = SRET;
+        return;
+    }
     int words = byref ? 1 : (a->size + 3) / 4;
     int w = *word;
     p->byref = byref;
@@ -384,6 +405,8 @@ static int ret_reg_words(const struct type *t)
  * a long double? */
 static int fn_sret(const struct ir_func *fn)
 {
+    if (fn_sret_first(fn))
+        return 1;
     if (fn->ret_abi.is_struct)
         return ret_reg_words(fn->ret_abi.ty) == 0;
     return fn->ret_abi.size == 16;
@@ -408,7 +431,7 @@ static void sparc_abi_hints(const struct ir_func *fn, int *hint)
     struct argplace pl;
     for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
-        place_arg(a, &word, &pl);
+        place_arg(a, p == 0 && fn_sret_first(fn), &word, &pl);
         if (pl.nreg == 1 && !pl.nstk && !pl.byref && a->size <= 4 &&
             !fn->is_varargs)
             hint[p] = in_reg_n(pl.reg);
@@ -436,7 +459,7 @@ static void sparc_abi_hints(const struct ir_func *fn, int *hint)
         word = 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(a, &word, &pl);
+            place_arg(a, k == 0 && i->sret_first, &word, &pl);
             /* not over a parameter's own register (or an earlier
              * call's): a value that lives across this call cannot take
              * an %o register, and the fallback was any free one */
@@ -470,7 +493,7 @@ static long outgoing_area(const struct sparc_fn *F)
         if (i->op != IR_CALL)
             continue;
         for (int k = 0; k < i->nargs; k++)
-            place_arg(&i->argv[k], &word, &pl);
+            place_arg(&i->argv[k], k == 0 && i->sret_first, &word, &pl);
         end = word > NARGREG ? ARG_STK + 4L * (word - NARGREG) : 0;
         if (end > most)
             most = end;
@@ -1527,7 +1550,7 @@ static void const_remat(struct sparc_fn *F)
             struct argplace pl;
             for (int k = 0; k < i->nargs; k++) {
                 const struct ir_arg *a = &i->argv[k];
-                place_arg(a, &word, &pl);
+                place_arg(a, k == 0 && i->sret_first, &word, &pl);
                 if (!pl.byref && !pl.nstk && a->vreg >= 0 && a->vreg < nv)
                     site[a->vreg]++;
             }
@@ -2428,7 +2451,7 @@ static void gen_call(struct sparc_fn *F, int n)
     if (rw < 0)
         sparc_refuse(F, i, "a call returning a _Complex of this type");
     for (int k = 0; k < i->nargs; k++)
-        place_arg(&i->argv[k], &word, &pl[k]);
+        place_arg(&i->argv[k], k == 0 && i->sret_first, &word, &pl[k]);
 
     /* The by-reference COPIES first: the caller owns them, because the
      * callee may write its parameter. */
@@ -2526,6 +2549,10 @@ static void gen_call(struct sparc_fn *F, int n)
     }
     if (sret)
         sparc_unimp(t, (unsigned long)call_sret_size(i) & 0xfff);
+    else if (i->sret_first)
+        /* the C++ return slot's call: the callee returns past this, as
+         * a struct-returning one does; the size is the class's */
+        sparc_unimp(t, (unsigned long)i->sret_size & 0xfff);
 
     if (i->dst < 0)
         return;
@@ -2900,9 +2927,19 @@ static void gen_ins(struct sparc_fn *F, int n)
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG)
         need_word_atomic(F, i);
-    if (i->op == IR_FRAMEADDR)
-        sparc_refuse(F, i, "__builtin_frame_address or "
-                           "__builtin_return_address");
+    /* Level 0 only (irgen). A function that asks always has its own
+     * register window (leaf_candidate), so, as clang: the frame address
+     * is %fp -- the caller's %sp, the stack pointer at entry -- and the
+     * return address is %i7, the address of the call that entered it (the
+     * return goes to %i7 + 8). */
+    if (i->op == IR_FRAMEADDR) {
+        if (i->dst >= 0) {
+            int d = wreg(F, i->dst, ACC);
+            sparc_mov(F->t, d, i->imm == 2 ? SP_I7 : SP_FP);
+            wrote(F, i->dst, d);
+        }
+        return;
+    }
 
     /* The high word of a 64-bit value, shifted: one register. */
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {
@@ -3391,13 +3428,151 @@ static void gen_ins(struct sparc_fn *F, int n)
         return;
     }
 
-    case IR_ASM:
-        /* only the empty asm reaches here (sparc/irgen.c): a compiler
-         * barrier, which emits nothing */
-        if (i->asm_ir && (i->asm_ir->codelen || i->asm_ir->nin ||
-                          i->asm_ir->nout))
-            sparc_refuse(F, i, "inline assembly");
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (sparc/irgen.c irg_asm_sparc)
+         * against the vocabulary in sparc/asm.c. This only places the
+         * operands and splices the bytes -- Xtensa's lowering with the
+         * register windows' roles.
+         *
+         * To the allocator (ra_target.asm_in_reg) a value live across an
+         * asm keeps out of the registers it may change, which irgen
+         * recorded (ir_asm.clob): its operands', its clobbers', the
+         * template's, a call's, and its scratch. The operands are values
+         * like any other, moved into and out of their registers here,
+         * each way as ONE parallel move. No operand is ever in a global,
+         * %o6/%o7, %l6/%l7 or %i6/%i7: the scratch the moves and the
+         * frame accesses below use, the stack and frame pointers and the
+         * return address. The template's bytes are a barrier: no later
+         * transfer takes one of its instructions into a delay slot. */
+        struct ir_asm *ia = i->asm_ir;
+        int vreg_[16], vdst[16], nval = 0;
+        if (!ia)
+            return;
+        /* A continuation's value was written by the asm before it, which
+         * must be right there: nothing may run between an asm and the
+         * moment its registers are read. */
+        if (ia->cont) {
+            int k = n - 1;
+            while (k >= 0 && fn->ins[k].op == IR_ASM && fn->ins[k].asm_ir &&
+                   fn->ins[k].asm_ir->cont)
+                k--;
+            if (k < 0 || fn->ins[k].op != IR_ASM)
+                internal_error("sparc: %s: an asm's further output is not "
+                               "right after the asm", fn->name);
+            return;
+        }
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].val) {
+                vreg_[nval] = ia->out[k].reg;
+                vdst[nval++] = i->dst;
+            }
+        for (int q = n + 1; q < fn->nins && fn->ins[q].op == IR_ASM &&
+                            fn->ins[q].asm_ir && fn->ins[q].asm_ir->cont &&
+                            nval < 16; q++) {
+            vreg_[nval] = fn->ins[q].asm_ir->out[0].reg;
+            vdst[nval++] = fn->ins[q].dst;
+        }
+        for (int k = 0; k < ia->nin; k++)
+            if (!(ia->in[k].reg >= SP_O0 && ia->in[k].reg <= SP_O5) &&
+                !(ia->in[k].reg >= SP_L0 && ia->in[k].reg <= SP_L5) &&
+                !(ia->in[k].reg >= SP_I0 && ia->in[k].reg <= SP_I5))
+                internal_error("sparc: %s: an asm operand in %%%s", fn->name,
+                               sparc_reg_name(ia->in[k].reg));
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && ia->out[k].size > 4)
+                sparc_refuse(F, i, "an asm output wider than a register");
+        {
+            int naddr = 0;
+            for (int k = 0; k < ia->nout; k++)
+                naddr += !ia->out[k].val && !ia->out[k].mem;
+            if (ia->scr < 0 && naddr > 0)
+                sparc_refuse(F, i, "an asm with no scratch register left "
+                                   "around it");
+        }
+        /* In: an input's value, an "m" output's address, and a "+"
+         * output's address (its current value is loaded through it
+         * below) -- the register-resident ones as one parallel move
+         * (SCR breaks a cycle), then the rest from their slots. */
+        {
+            int pd[40], ps[40], npm = 0;
+            for (int k = 0; k < ia->nin && npm < 40; k++)
+                if (in_reg(F, ia->in[k].temp)) {
+                    pd[npm] = ia->in[k].reg;
+                    ps[npm++] = reg_of(F, ia->in[k].temp);
+                }
+            for (int k = 0; k < ia->nout && npm < 40; k++)
+                if (!ia->out[k].val &&
+                    (ia->out[k].mem || ia->out[k].inout) &&
+                    in_reg(F, ia->out[k].temp)) {
+                    pd[npm] = ia->out[k].reg;
+                    ps[npm++] = reg_of(F, ia->out[k].temp);
+                }
+            if (npm) {
+                int od[80], os[80];
+                int m = ra_parallel_move(pd, ps, npm, SCR, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    sparc_refuse(F, i, "an asm whose operands cannot be "
+                                       "moved into place");
+                for (int k = 0; k < m; k++)
+                    sparc_mov(t, od[k], os[k]);
+            }
+            for (int k = 0; k < ia->nin; k++)
+                if (!in_reg(F, ia->in[k].temp))
+                    rd(F, ia->in[k].temp, ia->in[k].reg);
+            for (int k = 0; k < ia->nout; k++) {
+                const struct ir_asm_op *o = &ia->out[k];
+                if (o->val || !(o->mem || o->inout))
+                    continue;
+                if (!in_reg(F, o->temp))
+                    rd(F, o->temp, o->reg);
+                /* A "+" output starts with the lvalue's CURRENT value. */
+                if (o->inout && !o->mem)
+                    sparc_load(t, o->reg, o->reg, 0, o->size, 0);
+            }
+        }
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        F->barrier = t->len;
+        /* Out, through an address: the address is live across the asm
+         * (regalloc.c counts it so), so it is still there. An "m" output
+         * was written BY the template through the address its register
+         * holds; storing over it would destroy what it wrote. */
+        for (int k = 0; k < ia->nout; k++) {
+            const struct ir_asm_op *o = &ia->out[k];
+            if (o->mem || o->val)
+                continue;
+            rd(F, o->temp, ia->scr);
+            sparc_store(t, o->reg, ia->scr, 0, o->size);
+        }
+        /* Out, as values: each to its home -- those in memory first,
+         * while every operand register still holds what the asm left,
+         * then the register-resident ones as one parallel move. */
+        {
+            int pd[16], ps[16], npm = 0;
+            for (int k = 0; k < nval; k++) {
+                if (vdst[k] < 0)
+                    continue;
+                if (in_reg(F, vdst[k])) {
+                    pd[npm] = reg_of(F, vdst[k]);
+                    ps[npm++] = vreg_[k];
+                } else {
+                    wr(F, vdst[k], vreg_[k]);
+                }
+            }
+            if (npm) {
+                int od[32], os[32];
+                int m = ra_parallel_move(pd, ps, npm, SCR, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    sparc_refuse(F, i, "an asm whose outputs cannot be "
+                                       "moved into place");
+                for (int k = 0; k < m; k++)
+                    sparc_mov(t, od[k], os[k]);
+            }
+        }
         return;
+    }
 
     /* ---- atomics: swap and casa, after a stbar --------------------- */
     case IR_XCHG: {
@@ -3678,7 +3853,7 @@ static void sparc_pair_hints(const struct ir_func *fn, int *hint)
     struct argplace pl;
     for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
-        place_arg(a, &word, &pl);
+        place_arg(a, p == 0 && fn_sret_first(fn), &word, &pl);
         if (a->size == 8 && pl.nreg == 2 && !pl.byref && !(pl.reg & 1) &&
             !fn->is_varargs)
             hint[p] = in_reg_n(pl.reg);
@@ -3705,7 +3880,7 @@ static void sparc_pair_hints(const struct ir_func *fn, int *hint)
         word = 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(a, &word, &pl);
+            place_arg(a, k == 0 && i->sret_first, &word, &pl);
             if (a->size == 8 && pl.nreg == 2 && !pl.byref && !(pl.reg & 1) &&
                 a->vreg >= 0 && a->vreg < fn->nvregs && hint[a->vreg] < 0)
                 hint[a->vreg] = out_reg(pl.reg);
@@ -3902,7 +4077,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
         int npstk = 0;
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
-            place_arg(a, &word, &pl);
+            place_arg(a, i == 0 && fn_sret_first(fn), &word, &pl);
             if (pl.byref) {
                 /* the word is the address of the caller's copy; the body
                  * expects the object in the parameter's own slot */
@@ -4063,7 +4238,7 @@ static int leaf_candidate(const struct ir_func *fn)
     if (fn->is_varargs || fn->has_alloca || fn_sret(fn) || !fn->src)
         return 0;
     for (int p = 0; p < fn->nparams; p++) {
-        place_arg(&fn->param_abi[p], &word, &pl);
+        place_arg(&fn->param_abi[p], p == 0 && fn_sret_first(fn), &word, &pl);
         if (pl.byref || pl.nstk)
             return 0;
     }

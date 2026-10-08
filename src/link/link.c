@@ -145,6 +145,19 @@ struct insec {
  * of the bracket symbols. */
 struct osec_bound { Elf64_Addr start, end; };
 
+/* A long-branch veneer (arm_veneers): for the calls from output section
+ * `key` (a fixed group's index, or a linker script's output section) to
+ * the global `gsym`, or to object `obj`'s local symbol `symi`, plus
+ * `addend`; from ARM code (`arm`) or Thumb; `other` when the target is
+ * in the other instruction state. Its twelve bytes are at 12 * `k` in
+ * input section `sec`. */
+struct veneer {
+    int key, gsym, obj, symi, arm, other;
+    long long addend;
+    int sec, k;
+};
+struct veneer_sec { int key, sec, n; };
+
 /* A section name none of the fixed groups claims (.embk_exports, a
  * `section("my_table")` array) is an orphan, and each distinct orphan
  * name is a group of its own, numbered from OSEC_COUNT: its inputs land
@@ -158,6 +171,7 @@ struct symbol {
     const char *name;
     struct object *obj;        /* defining object, or NULL if undefined */
     int insec;                 /* insecs index of its section, or -1 (ABS) */
+    int was_common;            /* a COMMON layout() placed: placed again */
     Elf64_Addr value;          /* section-relative until layout, then absolute */
     int defined;
     int weak;
@@ -268,12 +282,12 @@ struct linker {
     int sg_sec;
     struct { int sym, se; } *sg;
     int nsg;
-    /* Long-branch veneers for a Thumb call to an ABSOLUTE symbol (an
-     * import library's, chiefly) that may be out of a BL's reach: the
-     * section, and the symbols they lead to. */
-    int lb_sec;
-    int *lb;
-    int nlb;
+    /* The ARM long-branch veneers (arm_veneers), and the section of each
+     * output section's. */
+    struct veneer *vn;
+    int nvn, capvn;
+    struct veneer_sec *vns;
+    int nvns, capvns;
     int lb_thumb1;             /* the image is ARMv6-M: no MOVW/MOVT */
     int gc_sections;           /* --gc-sections */
     int print_gc;              /* --print-gc-sections */
@@ -1468,9 +1482,23 @@ static void add_object(struct linker *l, struct object *o)
             o->big_endian ? "big" : "little",
             l->big_endian ? "big" : "little");
     }
-    if (o->machine == EM_RISCV)
-        l->eflags |= o->eflags & EF_RISCV_RVC;
-    else if (o->machine == EM_MIPS)
+    if (o->machine == EM_RISCV) {
+        /* The float ABI is every object's or none's: an ilp32f caller
+         * leaves a float argument in fa0 and an ilp32 callee reads a0. The
+         * first object decides, as for the machine. */
+        unsigned long fa = o->eflags & EF_RISCV_FLOAT_ABI_MASK;
+        static const char *const fname[] = { "soft-float (ilp32/lp64)",
+            "single-float (ilp32f/lp64f)", "double-float (ilp32d/lp64d)",
+            "quad-float" };
+        if (l->nobj && fa != (l->eflags & EF_RISCV_FLOAT_ABI_MASK))
+            die("%s: a %s object, and the ones before it are %s: they "
+                "disagree about which registers carry floating-point "
+                "arguments, so every call between them would read one the "
+                "caller never wrote. Build both with the same -mabi=",
+                o->name, fname[fa >> 1],
+                fname[(l->eflags & EF_RISCV_FLOAT_ABI_MASK) >> 1]);
+        l->eflags |= (o->eflags & EF_RISCV_RVC) | fa;
+    } else if (o->machine == EM_MIPS)
         /* the architecture and the ABI, from the first object; NOREORDER
          * is a property of each object's code and not of the image */
         l->eflags = l->eflags ? l->eflags
@@ -2065,27 +2093,53 @@ static Elf64_Addr align_up(Elf64_Addr v, Elf64_Xword a)
 
 /* Places every insec belonging to output section `os`, recording the
  * group's [start,end) bounds. Advances *va. */
+static unsigned long ls_init_priority(const char *name);
+
+/* The members of group `os` in placement order. Input order, except in
+ * .init_array and .fini_array, which GNU ld's default script lays out
+ * SORT_BY_INIT_PRIORITY(.init_array.*) first, then the plain arrays: a
+ * constructor(101)'s .init_array.00101 runs before a constructor(200)'s,
+ * and both before every unnumbered one (the startup walks the array in
+ * order, the exit walks .fini_array backwards). Stable: a priority's
+ * inputs stay in input order. Returns how many, in *out (caller frees). */
+static int osec_members(struct linker *l, int os, int **out)
+{
+    int n = 0, *v = xmalloc((size_t)(l->nsec + 1) * sizeof *v);
+    for (int i = 0; i < l->nsec; i++)
+        if (l->insecs[i].osec == os && !l->insecs[i].discarded)
+            v[n++] = i;
+    if (os == OSEC_INIT_ARRAY || os == OSEC_FINI_ARRAY)
+        for (int i = 1; i < n; i++) {           /* insertion: stable */
+            int x = v[i], j = i - 1;
+            unsigned long px = ls_init_priority(l->insecs[x].name);
+            while (j >= 0 && ls_init_priority(l->insecs[v[j]].name) > px) {
+                v[j + 1] = v[j];
+                j--;
+            }
+            v[j + 1] = x;
+        }
+    *out = v;
+    return n;
+}
+
 static void place_osec(struct linker *l, int os, Elf64_Addr *va,
                        struct osec_bound *b)
 {
+    int *m, n = osec_members(l, os, &m);
     /* the group starts where its first member does — the padding before
      * that member is not part of the group, or a bracket-walked table
      * would begin with it */
-    for (int i = 0; i < l->nsec; i++)
-        if (l->insecs[i].osec == os && !l->insecs[i].discarded) {
-            *va = align_up(*va, l->insecs[i].align);
-            break;
-        }
+    if (n)
+        *va = align_up(*va, l->insecs[m[0]].align);
     b[os].start = *va;
-    for (int i = 0; i < l->nsec; i++) {
-        struct insec *s = &l->insecs[i];
-        if (s->osec != os || s->discarded)
-            continue;
+    for (int k = 0; k < n; k++) {
+        struct insec *s = &l->insecs[m[k]];
         *va = align_up(*va, s->align);
         s->vaddr = *va;
         *va += s->size;
     }
     b[os].end = *va;
+    free(m);
 }
 
 /* Lay the output sections out in order into the two segments, recording
@@ -2212,12 +2266,13 @@ static void layout(struct linker *l, struct osec_bound *b,
      * honored, and its value fixed to the reserved slot. */
     for (int i = 0; i < l->nsym; i++) {
         struct symbol *g = &l->syms[i];
-        if (!g->common)
+        if (!g->common && !g->was_common)
             continue;
         va = align_up(va, g->align ? g->align : 1);
         g->value = va;
         g->insec = -1;                 /* now an absolute address */
         g->common = 0;
+        g->was_common = 1;             /* and placed again by a re-run */
         va += g->size;
     }
     if (l->machine == EM_MIPS || l->machine == EM_TRICORE ||
@@ -2536,8 +2591,8 @@ static void patch_thm_b24(struct object *o, unsigned char *loc, long long off)
     unsigned long v;
     unsigned s, i1, i2, j1, j2;
     if (off < -(1LL << 24) || off >= (1LL << 24))
-        die("%s: a Thumb call is more than 16MB away; this linker mints "
-            "no veneers", o->name);
+        die("%s: a Thumb branch is more than 16MB away, and so would be a "
+            "veneer at the end of its output section", o->name);
     v = (unsigned long)(off >> 1) & 0xffffffUL;
     s = (unsigned)((v >> 23) & 1);
     i1 = (unsigned)((v >> 22) & 1);
@@ -2574,13 +2629,12 @@ static void patch_arm_b24(struct object *o, unsigned char *loc, long long off,
 {
     unsigned int w = get32loc(loc);
     if (off < -(1LL << 25) || off >= (1LL << 25))
-        die("%s: an ARM branch is more than 32MB away; this linker mints "
-            "no veneers", o->name);
+        die("%s: an ARM branch is more than 32MB away, and so would be a "
+            "veneer at the end of its output section", o->name);
     if (thumb) {
         if (!call || (w >> 28) != 0xe)
             die("%s: a %s to a Thumb function from ARM code needs an "
-                "interworking veneer, which this linker does not mint; "
-                "only an unconditional call (bl, made blx) can switch state",
+                "interworking veneer, and none was minted for it",
                 o->name, call ? "conditional call" : "branch");
         put32(loc, 0xfa000000u | (unsigned)((off >> 1) & 1) << 24 |
                    ((unsigned)(off >> 2) & 0xffffffu));
@@ -3732,7 +3786,13 @@ static void apply_xtensa(struct linker *l, struct object *o, unsigned type,
     }
 }
 
-static Elf64_Addr arm_lb_for(struct linker *l, const char *name);
+static int veneer_needed(int arm, int call, int cond_al, int other,
+                         long long d);
+static Elf64_Addr arm_veneer_addr(struct linker *l, const struct insec *ts,
+                                  struct object *o, Elf64_Word symi,
+                                  long long A, int arm);
+static int arm_veneer_scan(struct linker *l);
+#define VENEER_MAX_ROUNDS 8
 
 static void apply_relocs(struct linker *l, struct object *o)
 {
@@ -3993,34 +4053,36 @@ static void apply_relocs(struct linker *l, struct object *o)
                                                     (long long)P));
                     break;
                 case R_ARM_THM_CALL:
-                case R_ARM_THM_JUMP24:
+                case R_ARM_THM_JUMP24: {
                     /* A call from Thumb code to an ARM-state function --
                      * a global function symbol with the Thumb bit CLEAR,
                      * which only an A32 object (armv7a) defines -- is
                      * `blx`: the second halfword's bit 12 clear, and the
                      * displacement from Align(P + 4, 4) to the word-aligned
-                     * target. A jump there would need a veneer. */
-                    if (thumb_to_arm(l, o, symi, S)) {
+                     * target. A jump there, and any branch out of reach,
+                     * goes to its veneer (arm_veneers): Thumb code within
+                     * reach, which goes the rest of the way. */
+                    int to_arm = thumb_to_arm(l, o, symi, S);
+                    long long d = (long long)(S & ~(Elf64_Addr)1) + A -
+                                  ((long long)P + 4);
+                    if (veneer_needed(0, type == R_ARM_THM_CALL, 1, to_arm,
+                                      d)) {
+                        Elf64_Addr vn = arm_veneer_addr(l, ts, o, symi, A, 0);
+                        if (vn) {
+                            S = vn;
+                            A = 0;
+                            to_arm = 0;
+                        }
+                    }
+                    if (to_arm) {
                         if (type != R_ARM_THM_CALL)
-                            die("%s: a Thumb branch to the ARM-state function "
-                                "'%s' needs an interworking veneer, which "
-                                "this linker does not mint; only a call (bl, "
-                                "made blx) can switch state", o->name,
-                                l->rel_sym);
+                            internal_error("%s: the Thumb branch to the "
+                                           "ARM-state function '%s' has no "
+                                           "veneer", o->name, l->rel_sym);
                         patch_thm_b24(o, loc, (long long)S + A -
                                       (long long)((P + 4) & ~(Elf64_Addr)3));
                         put16(loc + 2, get16(loc + 2) & ~0x1000u);
                         break;
-                    }
-                    /* An absolute target out of a BL's reach goes through
-                     * its long-branch veneer (arm_abs_thunks). */
-                    {
-                        long long d = (long long)(S & ~(Elf64_Addr)1) + A -
-                                      ((long long)P + 4);
-                        Elf64_Addr lb = d < -(1LL << 24) || d >= (1LL << 24)
-                            ? arm_lb_for(l, l->rel_sym) : 0;
-                        if (lb)
-                            S = lb;
                     }
                     /* The displacement is between ADDRESSES, so the
                      * Thumb bit comes off S first -- leaving it on would
@@ -4029,19 +4091,36 @@ static void apply_relocs(struct linker *l, struct object *o)
                                   (long long)(S & ~(Elf64_Addr)1) + A -
                                   ((long long)P + 4));
                     break;
+                }
                 case R_ARM_THM_MOVW_ABS_NC:
                     patch_thm_mov(loc, (unsigned int)((S + (Elf64_Addr)A)
                                                       & 0xffff));
                     break;
                 case R_ARM_CALL:
-                case R_ARM_JUMP24:
+                case R_ARM_JUMP24: {
                     /* the Thumb bit comes off for the displacement, and
-                     * says the call must switch state (blx) */
+                     * says the call must switch state (blx); a branch out
+                     * of reach, or a jump or a conditional call that must
+                     * switch state, goes to its veneer */
+                    int thumb = (int)(S & 1);
+                    long long d = (long long)(S & ~(Elf64_Addr)1) + A -
+                                  ((long long)P + 8);
+                    if (veneer_needed(1, type == R_ARM_CALL,
+                                      (get32loc(loc) >> 28) == 0xe, thumb,
+                                      d)) {
+                        Elf64_Addr vn = arm_veneer_addr(l, ts, o, symi, A, 1);
+                        if (vn) {
+                            S = vn;
+                            A = 0;
+                            thumb = 0;
+                        }
+                    }
                     patch_arm_b24(o, loc,
                                   (long long)(S & ~(Elf64_Addr)1) + A -
                                   ((long long)P + 8),
-                                  type == R_ARM_CALL, (int)(S & 1));
+                                  type == R_ARM_CALL, thumb);
                     break;
+                }
                 case R_ARM_MOVW_ABS_NC:
                     patch_arm_mov(loc, (unsigned int)((S + (Elf64_Addr)A)
                                                       & 0xffff));
@@ -5058,6 +5137,7 @@ static int ls_class(Elf64_Xword flags, int bss)
 static struct linker *g_ls_sort_l;
 static int g_ls_sort_kind;
 
+/* `.init_array.00101`'s priority, 101; 65536 for a name without one. */
 static unsigned long ls_init_priority(const char *name)
 {
     const char *d = strrchr(name, '.');
@@ -5514,18 +5594,28 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
                 "startup code zeroes it", ncommon, ncommon == 1 ? "" : "s");
     }
     ls_orphans(l, sc, orphan_mode);
-    unsigned long long prev = 0;
-    int pass;
-    for (pass = 0; pass < LS_MAX_PASSES; pass++) {
-        ls_layout_pass(l, sc, 0);
-        unsigned long long sig = ls_signature(l, sc);
-        if (pass > 0 && sig == prev)
+    /* Settled; then the ARM veneers these addresses call for, which move
+     * what follows them: settled again, until no branch wants a new one. */
+    for (int round = 0;; round++) {
+        unsigned long long prev = 0;
+        int pass;
+        for (pass = 0; pass < LS_MAX_PASSES; pass++) {
+            ls_layout_pass(l, sc, 0);
+            unsigned long long sig = ls_signature(l, sc);
+            if (pass > 0 && sig == prev)
+                break;
+            prev = sig;
+        }
+        if (pass == LS_MAX_PASSES)
+            die("the linker script's layout does not settle: an address "
+                "depends on itself (a section placed by a symbol defined "
+                "after it?)");
+        if (!arm_veneer_scan(l))
             break;
-        prev = sig;
+        if (round == VENEER_MAX_ROUNDS)
+            die("the long-branch veneers do not settle: each round's put "
+                "another branch out of reach");
     }
-    if (pass == LS_MAX_PASSES)
-        die("the linker script's layout does not settle: an address depends "
-            "on itself (a section placed by a symbol defined after it?)");
     ls_layout_pass(l, sc, 1);        /* the same again, now reporting */
     /* AVR is a Harvard machine and EmbCC reads read-only data with
      * data-space loads (ld, lds), like avr-gcc without __flash or
@@ -6199,12 +6289,8 @@ static const char *ls_find_input(const char *name, const char **dirs,
  *
  * And that image's calls into it reach a Secure address the Non-secure code
  * is usually more than a BL's 16 MiB from (on the mps2-an505, 0x00200000
- * against 0x10000000), so a Thumb call to an ABSOLUTE symbol gets a
- * long-branch veneer, again as GNU ld makes one: `movw ip, #lo; movt ip,
- * #hi; bx ip`, or on ARMv6-M, which has no MOVW, `push {r0, r1}; ldr r0,
- * [pc, #4]; str r0, [sp, #4]; pop {r0, pc}` and the address. IP is the
- * register the AAPCS gives a veneer. Only a call that does not reach goes
- * through one. */
+ * against 0x10000000): they go through long-branch veneers, as every
+ * call out of reach does (arm_veneers below). */
 static struct linker *g_sg_l;
 static int sg_cmp(const void *pa, const void *pb)
 {
@@ -6286,72 +6372,326 @@ static void cmse_scan(struct linker *l)
     free(pairs);
 }
 
-static void arm_abs_thunks(struct linker *l)
+/* ---- ARM long-branch veneers (arm_veneers) ------------------------------
+ *
+ * A Thumb `bl` or `b.w` reaches 16 MB either way and an ARM `bl` or `b`
+ * 32 MB, and a function run from RAM -- an STM32's SRAM is at 0x20000000,
+ * its flash at 0x08000000 -- is 384 MB from the code it calls. GNU ld
+ * answers with a VENEER: a stub the branch can reach, which goes the rest
+ * of the way through a register. This linker mints the same, AFTER a
+ * layout, since which branches reach is a question of addresses, and AT
+ * THE END OF THE CALLER'S OUTPUT SECTION, since a veneer in flash is no
+ * nearer to the RAM code than its callee was. The veneers move whatever
+ * follows them, so the layout is run again, until no branch wants a new
+ * one; a veneer once minted is kept, so that ends.
+ *
+ * Twelve bytes each, four-aligned. From Thumb code: `movw ip, #lo; movt
+ * ip, #hi; bx ip`, or on ARMv6-M, which has no MOVW, `push {r0, r1}; ldr
+ * r0, [pc, #4]; str r0, [sp, #4]; pop {r0, pc}` and the address. From ARM
+ * code: `ldr ip, [pc]; bx ip` and the address. IP is the register the
+ * AAPCS gives a veneer. `bx`, and the pop into pc, take the target's
+ * instruction state from the address's low bit, so a branch that must
+ * change state and cannot -- a jump either way, or a conditional ARM
+ * call, which no blx encodes -- goes through one whatever its distance.
+ *
+ * One veneer serves every branch from its output section to one target:
+ * a symbol plus an addend, since an assembler spells a call to a static
+ * function as its section plus an offset. An absolute target -- a CMSE
+ * import library's gateway -- is the same case as any other. */
+static void arm_veneer_init(struct linker *l)
 {
-    l->lb_sec = -1;
     if (l->machine != EM_ARM)
         return;
     for (int i = 0; i < l->nobj; i++) {
         struct object *o = l->objs[i];
-        if (!o->elf32)
-            continue;
         /* Tag_CPU_arch 11 or 12 (v6-M, v6S-M), stored plus one */
-        if (o->arm_arch == 12 || o->arm_arch == 13)
+        if (o->elf32 && (o->arm_arch == 12 || o->arm_arch == 13))
             l->lb_thumb1 = 1;
-        for (int s = 1; s < o->nsh; s++) {
-            Elf64_Shdr *rsh = sh_at(o, s);
-            long esz;
+    }
+}
+
+/* Whether a branch whose displacement would be `d` needs a veneer: it is
+ * out of the branch's reach, or it must change state and cannot. The
+ * same question is asked when the veneers are decided and when the
+ * branch is patched, so the two agree. */
+static int veneer_needed(int arm, int call, int cond_al, int other,
+                         long long d)
+{
+    int bits = arm ? 25 : 24;
+    if (d < -(1LL << bits) || d >= (1LL << bits))
+        return 1;
+    return other && (!call || !cond_al);
+}
+
+/* Which output section a branch is in: the key its veneer is kept under. */
+static int veneer_key(const struct linker *l, const struct insec *s)
+{
+    return l->sc ? s->sosec : s->osec;
+}
+
+/* The global a relocation's symbol names, or -1 for a local one. */
+static int veneer_gsym(struct linker *l, struct object *o, Elf64_Word symi)
+{
+    Elf64_Sym *sy = &o->syms[symi];
+    const char *name = o->symstr + sy->st_name;
+    struct symbol *g;
+    if (ELF64_ST_BIND(sy->st_info) == STB_LOCAL || !*name)
+        return -1;
+    g = sym_find(l, name);
+    return g ? (int)(g - l->syms) : -1;
+}
+
+static int veneer_find(struct linker *l, int key, int gsym, int obj,
+                       Elf64_Word symi, long long A, int arm)
+{
+    for (int k = 0; k < l->nvn; k++) {
+        const struct veneer *v = &l->vn[k];
+        if (v->key != key || v->arm != arm || v->addend != A)
+            continue;
+        if (gsym >= 0 ? v->gsym == gsym
+                      : v->gsym < 0 && v->obj == obj && v->symi == (int)symi)
+            return k;
+    }
+    return -1;
+}
+
+/* A branch's target BEFORE finalize_symbols, which is when the veneers
+ * are decided: its section's address plus its offset in it. *ok is
+ * cleared for a target with no address (undefined, or in a section the
+ * link dropped), which gets no veneer. */
+static Elf64_Addr veneer_target(struct linker *l, struct object *o,
+                                Elf64_Word symi, int gsym, int *ok)
+{
+    Elf64_Sym *sy = &o->syms[symi];
+    int out;
+    *ok = 1;
+    if (gsym >= 0) {
+        struct symbol *g = &l->syms[gsym];
+        if (!g->defined) {
+            *ok = 0;
+            return 0;
+        }
+        if (g->insec < 0)
+            return g->value;
+        if (l->insecs[g->insec].discarded) {
+            *ok = 0;
+            return 0;
+        }
+        return l->insecs[g->insec].vaddr + g->value;
+    }
+    if (ELF64_ST_BIND(sy->st_info) != STB_LOCAL) {
+        *ok = 0;
+        return 0;
+    }
+    if (sy->st_shndx == SHN_ABS)
+        return sy->st_value;
+    out = sy->st_shndx < (unsigned)o->nsh ? o->sec_out[sy->st_shndx] : -1;
+    if (out < 0 || l->insecs[out].discarded) {
+        *ok = 0;
+        return 0;
+    }
+    return l->insecs[out].vaddr + sy->st_value;
+}
+
+/* Each new veneer's twelve bytes, in its output section's veneer section
+ * -- made at the first one, and appended to that output section: the
+ * fixed group's last member, or (-T) the last input of the script's
+ * section. The bytes are written after the final layout (arm_veneer_fill). */
+static void arm_veneer_place(struct linker *l)
+{
+    for (int k = 0; k < l->nvn; k++) {
+        struct veneer *v = &l->vn[k];
+        struct veneer_sec *vs = NULL;
+        struct insec *s;
+        if (v->sec >= 0)
+            continue;
+        for (int j = 0; j < l->nvns; j++)
+            if (l->vns[j].key == v->key)
+                vs = &l->vns[j];
+        if (!vs) {
+            int sec = add_synth(l, ".text.__embld_veneer", 0, 4,
+                                l->sc ? OSEC_TEXT : v->key, NULL);
+            if (l->sc) {
+                struct ls_osec *o = &l->sc->osecs[v->key];
+                int b;
+                for (b = o->nbody - 1; b >= 0 && o->body[b].kind != LS_INPUT;
+                     b--)
+                    ;
+                if (b < 0) {
+                    LS_PUSH(o->body, o->nbody, o->capbody);
+                    memset(&o->body[o->nbody], 0, sizeof o->body[0]);
+                    o->body[o->nbody].kind = LS_INPUT;
+                    b = o->nbody++;
+                }
+                l->insecs[sec].sosec = v->key;
+                ls_push_list(&o->body[b], sec);
+            } else {
+                /* the callers' segment: a veneer in .data is copied to
+                 * RAM with the function it serves */
+                int key = v->key;
+                l->insecs[sec].seg =
+                    key == OSEC_VECTORS || key == OSEC_TEXT ||
+                    key == OSEC_RODATA ||
+                    (key >= OSEC_COUNT && !l->orphans[key - OSEC_COUNT].writable)
+                        ? SEG_TEXT : SEG_DATA;
+            }
+            l->insecs[sec].keep = 1;
+            l->insecs[sec].live = 1;
+            LS_PUSH(l->vns, l->nvns, l->capvns);
+            vs = &l->vns[l->nvns++];
+            vs->key = v->key;
+            vs->sec = sec;
+            vs->n = 0;
+        }
+        s = &l->insecs[vs->sec];
+        v->sec = vs->sec;
+        v->k = vs->n++;
+        s->size = 12 * (Elf64_Xword)vs->n;
+        s->data = xrealloc((void *)s->data, (size_t)s->size);
+        memset((unsigned char *)s->data + 12 * v->k, 0, 12);
+    }
+}
+
+/* After a layout: a veneer for every branch that needs one and has none.
+ * How many were added; the layout is run again when any was. */
+static int arm_veneer_scan(struct linker *l)
+{
+    int added = 0;
+    if (l->machine != EM_ARM)
+        return 0;
+    for (int oi = 0; oi < l->nobj; oi++) {
+        struct object *o = l->objs[oi];
+        if (!o->elf32 || o->machine != EM_ARM)
+            continue;
+        for (int si = 1; si < o->nsh; si++) {
+            Elf64_Shdr *rsh = sh_at(o, si);
+            int isrel = rsh->sh_type == SHT_REL;
+            long esz = isrel ? 8 : 12;
+            const struct insec *ts;
+            const unsigned char *tbase;
             if (rsh->sh_type != SHT_REL && rsh->sh_type != SHT_RELA)
                 continue;
             if (rsh->sh_info >= (Elf64_Word)o->nsh ||
                 o->sec_out[rsh->sh_info] < 0)
                 continue;
-            esz = rsh->sh_type == SHT_REL ? 8 : 12;
+            ts = &l->insecs[o->sec_out[rsh->sh_info]];
+            if (ts->discarded || ts->is_bss)
+                continue;
+            tbase = o->buf + sh_at(o, (int)rsh->sh_info)->sh_offset;
             for (long j = 0; j + esz <= (long)rsh->sh_size; j += esz) {
                 const unsigned char *r = o->buf + rsh->sh_offset + j;
-                unsigned info = (unsigned)r[4] | (unsigned)r[5] << 8 |
-                                (unsigned)r[6] << 16 | (unsigned)r[7] << 24;
+                Elf64_Addr r_offset = get32loc(r), S;
+                unsigned info = get32loc(r + 4);
                 unsigned type = info & 0xff, symi = info >> 8;
-                Elf64_Sym *sy;
-                struct symbol *g;
-                int gi, have = 0;
-                if ((type != R_ARM_THM_CALL && type != R_ARM_THM_JUMP24) ||
-                    symi >= (unsigned)o->nsym)
+                const unsigned char *loc = tbase + r_offset;
+                int arm, call, gsym, ok, other, cond_al, key;
+                long long A, d;
+                if (type != R_ARM_THM_CALL && type != R_ARM_THM_JUMP24 &&
+                    type != R_ARM_CALL && type != R_ARM_JUMP24)
                     continue;
-                sy = &o->syms[symi];
-                if (ELF64_ST_BIND(sy->st_info) == STB_LOCAL ||
-                    !o->symstr[sy->st_name])
+                if (symi >= (unsigned)o->nsym || r_offset + 4 > ts->size)
                     continue;
-                g = sym_find(l, o->symstr + sy->st_name);
-                if (!g || !g->defined || g->insec >= 0 || g->scripted ||
-                    g->common)
+                arm = type == R_ARM_CALL || type == R_ARM_JUMP24;
+                call = type == R_ARM_THM_CALL || type == R_ARM_CALL;
+                A = isrel ? (arm ? read_arm_b24(loc) + 8
+                                 : read_thm_b24(loc) + 4)
+                          : (int)get32loc(r + 8);
+                gsym = veneer_gsym(l, o, symi);
+                S = veneer_target(l, o, symi, gsym, &ok);
+                if (!ok)
                     continue;
-                gi = (int)(g - l->syms);
-                for (int k = 0; k < l->nlb; k++)
-                    have |= l->lb[k] == gi;
-                if (have)
+                other = arm ? (int)(S & 1) : thumb_to_arm(l, o, symi, S);
+                cond_al = !arm || (get32loc(loc) >> 28) == 0xe;
+                d = (long long)(S & ~(Elf64_Addr)1) + A -
+                    (long long)(ts->vaddr + r_offset + (arm ? 8 : 4));
+                if (!veneer_needed(arm, call, cond_al, other, d))
                     continue;
-                l->lb = xrealloc(l->lb, (size_t)(l->nlb + 1) * sizeof *l->lb);
-                l->lb[l->nlb++] = gi;
+                key = veneer_key(l, ts);
+                if (veneer_find(l, key, gsym, oi, symi, A, arm) >= 0)
+                    continue;
+                LS_PUSH(l->vn, l->nvn, l->capvn);
+                {
+                    struct veneer *v = &l->vn[l->nvn++];
+                    memset(v, 0, sizeof *v);
+                    v->key = key;
+                    v->gsym = gsym;
+                    v->obj = oi;
+                    v->symi = (int)symi;
+                    v->arm = arm;
+                    v->other = other;
+                    v->addend = A;
+                    v->sec = -1;
+                    v->k = -1;
+                }
+                added++;
             }
         }
     }
-    if (l->nlb)
-        l->lb_sec = add_synth(l, ".text.__embld_veneer", 12L * l->nlb, 4,
-                              OSEC_TEXT, xcalloc((size_t)l->nlb, 12));
+    if (added)
+        arm_veneer_place(l);
+    return added;
 }
 
-/* The long-branch veneer for the global `name`, when it has one: its
- * address with the Thumb bit, or 0. */
-static Elf64_Addr arm_lb_for(struct linker *l, const char *name)
+/* The veneer for the branch in `ts` to the relocation's target, when it
+ * has one: its address, or 0. */
+static Elf64_Addr arm_veneer_addr(struct linker *l, const struct insec *ts,
+                                  struct object *o, Elf64_Word symi,
+                                  long long A, int arm)
 {
-    struct symbol *g = name && *name ? sym_find(l, name) : NULL;
-    if (!g || l->lb_sec < 0)
+    int oi, k;
+    if (!ts || !l->nvn)
         return 0;
-    for (int k = 0; k < l->nlb; k++)
-        if (&l->syms[l->lb[k]] == g)
-            return (l->insecs[l->lb_sec].vaddr + 12 * (Elf64_Addr)k) | 1;
-    return 0;
+    for (oi = 0; oi < l->nobj && l->objs[oi] != o; oi++)
+        ;
+    k = veneer_find(l, veneer_key(l, ts), veneer_gsym(l, o, symi), oi, symi,
+                    A, arm);
+    if (k < 0)
+        return 0;
+    return l->insecs[l->vn[k].sec].vaddr + 12 * (Elf64_Addr)l->vn[k].k;
+}
+
+/* After the final layout and finalize_symbols: the veneers' bytes. */
+static void arm_veneer_fill(struct linker *l)
+{
+    for (int k = 0; k < l->nvn; k++) {
+        const struct veneer *v = &l->vn[k];
+        unsigned char *p = (unsigned char *)l->insecs[v->sec].data + 12 * v->k;
+        int uw;
+        Elf64_Addr to = v->gsym >= 0
+            ? l->syms[v->gsym].value
+            : reloc_symval(l, l->objs[v->obj], (Elf64_Word)v->symi, &uw);
+        unsigned dest;
+        to += (Elf64_Addr)v->addend;
+        /* bx and the pop into pc take the state from the low bit, which
+         * a section symbol plus an offset does not carry: Thumb unless
+         * the branch changes state to ARM, or stays there */
+        if (v->arm ? !v->other : v->other)
+            to &= ~(Elf64_Addr)1;
+        else
+            to |= 1;
+        dest = (unsigned)to;
+        if (v->arm) {
+            put32(p, 0xe59fc000u);                  /* ldr ip, [pc] */
+            put32(p + 4, 0xe12fff1cu);              /* bx ip */
+            put32(p + 8, dest);
+        } else if (l->lb_thumb1) {
+            put16(p, 0xb403);                       /* push {r0, r1} */
+            put16(p + 2, 0x4801);                   /* ldr r0, [pc, #4] */
+            put16(p + 4, 0x9001);                   /* str r0, [sp, #4] */
+            put16(p + 6, 0xbd01);                   /* pop {r0, pc} */
+            put32(p + 8, dest);
+        } else {
+            for (int h = 0; h < 2; h++) {           /* movw, movt ip */
+                unsigned imm = h ? dest >> 16 : dest & 0xffffu;
+                put16(p + 4 * h, (h ? 0xf2c0u : 0xf240u) |
+                                 ((imm >> 1) & 0x400u) | (imm >> 12));
+                put16(p + 4 * h + 2, ((imm << 4) & 0x7000u) |
+                                     (12u << 8) | (imm & 0xffu));
+            }
+            put16(p + 8, 0x4760);                   /* bx ip */
+            put16(p + 10, 0xbf00);                  /* nop */
+        }
+    }
 }
 
 static struct object g_cmse_obj;
@@ -6375,31 +6715,7 @@ static void cmse_fill(struct linker *l)
                           (long long)to - (long long)(at + 8));
         }
     }
-    if (l->lb_sec >= 0) {
-        struct insec *s = &l->insecs[l->lb_sec];
-        unsigned char *b = (unsigned char *)s->data;
-        for (int k = 0; k < l->nlb; k++) {
-            unsigned char *p = b + 12 * k;
-            unsigned v = (unsigned)l->syms[l->lb[k]].value | 1u;
-            if (l->lb_thumb1) {
-                put16(p, 0xb403);                   /* push {r0, r1} */
-                put16(p + 2, 0x4801);               /* ldr r0, [pc, #4] */
-                put16(p + 4, 0x9001);               /* str r0, [sp, #4] */
-                put16(p + 6, 0xbd01);               /* pop {r0, pc} */
-                put32(p + 8, v);
-            } else {
-                for (int h = 0; h < 2; h++) {       /* movw, movt ip */
-                    unsigned imm = h ? v >> 16 : v & 0xffffu;
-                    put16(p + 4 * h, (h ? 0xf2c0u : 0xf240u) |
-                                     ((imm >> 1) & 0x400u) | (imm >> 12));
-                    put16(p + 4 * h + 2, ((imm << 4) & 0x7000u) |
-                                         (12u << 8) | (imm & 0xffu));
-                }
-                put16(p + 8, 0x4760);               /* bx ip */
-                put16(p + 10, 0xbf00);              /* nop */
-            }
-        }
-    }
+    arm_veneer_fill(l);
 }
 
 /* --out-implib: the import library, an ELF32 relocatable holding one
@@ -6547,7 +6863,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     pull_archives(&l);
     /* every input is in: the CMSE veneers, before any layout */
     cmse_scan(&l);
-    arm_abs_thunks(&l);
+    arm_veneer_init(&l);
     if (opts && opts->out_implib && !opts->cmse_implib)
         die("--out-implib needs --cmse-implib: the import library this "
             "linker writes is ARMv8-M's secure gateway one");
@@ -6670,6 +6986,16 @@ int embld_link(const char **inputs, int ninputs, const char *out,
     Elf64_Xword tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     layout(&l, bounds, &text_start, &text_size, &data_start, &data_filesz,
            &data_memsz, &tls_start, &tls_filesz, &tls_memsz, &tls_align);
+    /* The ARM veneers these addresses call for move what follows them:
+     * laid out again, until no branch wants a new one. */
+    for (int round = 0; arm_veneer_scan(&l); round++) {
+        if (round == VENEER_MAX_ROUNDS)
+            die("the long-branch veneers do not settle: each round's put "
+                "another branch out of reach");
+        layout(&l, bounds, &text_start, &text_size, &data_start,
+               &data_filesz, &data_memsz, &tls_start, &tls_filesz,
+               &tls_memsz, &tls_align);
+    }
     /* What a TPOFF relocation is measured against. x86-64 puts the
      * thread block BELOW the thread pointer, so an object at offset k
      * within the block is at tp - (aligned size) + k, and every such

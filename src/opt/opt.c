@@ -25,6 +25,7 @@
 #define PTRW (target_ptr_size())
 #include "../driver/remark.h"
 #include "../driver/util.h"
+#include "../sema/ldfloat.h"
 
 /* What the quiet passes did, counted per function.
  *
@@ -942,6 +943,229 @@ static int kz_copy_wide_ok(struct ir_func *fn, struct defs *d,
     return any;
 }
 
+/* ---- long double constants ----
+ *
+ * A long double is 16 bytes -- x87 extended on x86-64, IEEE binary128 on
+ * AArch64, RV64, MIPS64, SPARC and the rest -- too wide for IR_CONST, so
+ * irgen keeps each constant in .rodata and loads it (`load.16 [straddr
+ * strN]`). fold_fp never saw one: `2.0L * 3.0L` was a multiply at run
+ * time, an x87 fmul through three slots or a __multf3 call, and a loop
+ * `for (64) b *= 2.0L` unrolled to 64 of them.
+ *
+ * The arithmetic is sema/ldfloat's: each operation exact, then rounded
+ * once to the target's format, round-to-nearest-even -- what the target's
+ * x87 (precision control at 64 bits, as every x86-64 ABI EmbCC targets
+ * leaves it) or its binary128 library computes. NaN is never folded, as
+ * fold_fp does not: which NaN an operation makes is the machine's choice.
+ *
+ * A value is known when its single definition is such a load, or one
+ * this pass folded (ldf_val), or -- inside one block -- when it was just
+ * read from a 16-byte local the function never takes the address of,
+ * after a known value was stored there: an unrolled `b *= 2.0L` keeps b in
+ * its slot, since mem2reg does not promote 16-byte locals.
+ *
+ * A folded result becomes `load.16 [p]` with p a new `straddr` of the
+ * result's interned bytes; the straddrs are inserted when the pass ends
+ * (ld_insert), and the operands' loads are left for dead-code removal. */
+static struct ir_unit *g_fold_unit;     /* where pass_fold interns */
+static int g_opt_size;                  /* -Os, set by opt_run (below) */
+
+struct ldfold {
+    struct ldf **val;          /* per vreg: folded by this pass */
+    struct ldf **kval;         /* per vreg: known in this block (kgen) */
+    int *kgen;
+    struct ldf **vval;         /* per local: holds this, in this block */
+    int *vgen;
+    char *vok;                 /* per local: 16 bytes, never addressed */
+    int nv, nvars;
+    /* the straddrs to insert: before instruction at[k], p[k] = str lab[k] */
+    int *at, *p, *lab, n, cap;
+};
+
+/* The value a 16-byte .rodata constant holds -- only if its bytes are
+ * exactly what ldf_encode makes of that value, so an encoding x87 would
+ * load as something else (an unnormal, a pseudo-denormal) or a NaN is
+ * not mistaken for a number. */
+static struct ldf *ld_of_str(int label)
+{
+    if (!g_fold_unit || label < 0 || label >= g_fold_unit->nstrs)
+        return NULL;
+    const struct ir_str *s = &g_fold_unit->strs[label];
+    if (s->len != 16 || !s->bytes)
+        return NULL;
+    enum ldf_fmt fmt = ldf_target_fmt();
+    unsigned char b[16], back[16];
+    int be = target_big_endian();
+    for (int k = 0; k < 16; k++)
+        b[k] = (unsigned char)s->bytes[be ? 15 - k : k];
+    struct ldf *v = ldf_from_bytes(b, fmt);
+    if (!v || ldf_cmp(v, v) == LDF_UNORDERED)
+        return NULL;
+    ldf_encode(v, fmt, back);
+    if (memcmp(b, back, fmt == LDF_X87 ? 10 : 16) != 0)
+        return NULL;
+    return v;
+}
+
+/* Is v a long double constant here (instruction-order position n)? */
+static struct ldf *ld_known(struct ir_func *fn, struct defs *d,
+                            const struct ldfold *L, int gen, int v)
+{
+    if (v < 0 || v >= L->nv)
+        return NULL;
+    if (L->val[v] && d->cnt[v] == 1)
+        return L->val[v];
+    if (L->kgen[v] == gen && L->kval[v])
+        return L->kval[v];
+    if (d->cnt[v] != 1 || d->ins[v] < 0)
+        return NULL;
+    const struct ir_ins *ld = &fn->ins[d->ins[v]];
+    if (ld->op != IR_LOAD || ld->size != 16 || ld->w != 16 || ld->vol ||
+        ld->flash || ld->memoff || ld->a < 0 || ld->a >= L->nv ||
+        d->cnt[ld->a] != 1 || d->ins[ld->a] < 0)
+        return NULL;
+    const struct ir_ins *sa = &fn->ins[d->ins[ld->a]];
+    return sa->op == IR_STRADDR ? ld_of_str(sa->label) : NULL;
+}
+
+/* What instruction i, just executed, tells the block about 16-byte
+ * locals and the values read from them. */
+static void ld_note(struct ir_func *fn, struct defs *d, struct ldfold *L,
+                    int gen, const struct ir_ins *i)
+{
+    if (i->op == IR_STVAR && i->dst >= 0 && i->dst < L->nvars) {
+        struct ldf *x = L->vok[i->dst] && i->size == 16 && !i->vol
+                        ? ld_known(fn, d, L, gen, i->a) : NULL;
+        L->vval[i->dst] = x;
+        L->vgen[i->dst] = x ? gen : 0;
+        return;
+    }
+    int t = def_target(i);
+    if (t < 0 || t >= L->nv)
+        return;
+    if (i->op == IR_LDVAR && i->a >= 0 && i->a < L->nvars && L->vok[i->a] &&
+        i->size == 16 && i->w == 16 && !i->vol && L->vgen[i->a] == gen &&
+        L->vval[i->a]) {
+        L->kval[t] = L->vval[i->a];
+        L->kgen[t] = gen;
+    } else {
+        L->kgen[t] = 0;
+    }
+}
+
+/* Turn i into a load of the constant x, its straddr to come before
+ * instruction n. */
+static void ld_become(struct ir_func *fn, struct ldfold *L, struct ir_ins *i,
+                      int n, struct ldf *x)
+{
+    unsigned char *b = xcalloc(1, 16);
+    ldf_encode_target(x, ldf_target_fmt(), b);
+    int lab = ir_intern_aligned(g_fold_unit, (const char *)b, 16, 16);
+    int p = fn->nvregs++;
+    if (L->n == L->cap) {
+        L->cap = L->cap ? 2 * L->cap : 8;
+        L->at = xrealloc(L->at, (size_t)L->cap * sizeof *L->at);
+        L->p = xrealloc(L->p, (size_t)L->cap * sizeof *L->p);
+        L->lab = xrealloc(L->lab, (size_t)L->cap * sizeof *L->lab);
+    }
+    L->at[L->n] = n; L->p[L->n] = p; L->lab[L->n] = lab; L->n++;
+    int dst = i->dst, line = i->line, col = i->col, synth = i->synth;
+    memset(i, 0, sizeof *i);
+    i->op = IR_LOAD;
+    i->dst = dst; i->a = p; i->b = i->c = -1;
+    i->size = 16; i->w = 16; i->natural = 1;
+    i->pred = B_ADD; i->label = -1; i->callee_sym = i->glob_sym = -1;
+    i->line = line; i->col = col; i->synth = synth;
+    if (dst >= 0 && dst < L->nv)
+        L->val[dst] = x;
+}
+
+/* A float or double's bits as an exact ldf; NULL if it is a NaN. */
+static struct ldf *ld_from_bits(long A, int size)
+{
+    double v = fc_bits_to(A, size);
+    return v == v ? ldf_from_double(v) : NULL;
+}
+
+/* Fold i if it is long double arithmetic or a conversion to or from one
+ * on constants. Returns 1 if it changed. */
+static int ld_fold(struct ir_func *fn, struct defs *d, struct ldfold *L,
+                   struct lkconst *lk, struct ir_ins *i, int n)
+{
+    enum ldf_fmt fmt = ldf_target_fmt();
+    int gen = lk->gen;
+    if (fmt != LDF_X87 && fmt != LDF_QUAD)
+        return 0;
+    if (i->flt && i->w == 16 &&
+        (i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+         i->op == IR_DIV || i->op == IR_NEG)) {
+        struct ldf *a = ld_known(fn, d, L, gen, i->a), *b = NULL, *r;
+        if (!a || (i->op != IR_NEG && !(b = ld_known(fn, d, L, gen, i->b))))
+            return 0;
+        r = i->op == IR_NEG ? ldf_neg(a)
+          : ldf_binop(i->op == IR_ADD ? '+' : i->op == IR_SUB ? '-'
+                      : i->op == IR_MUL ? '*' : '/', a, b, fmt);
+        if (!r || ldf_cmp(r, r) == LDF_UNORDERED)
+            return 0;
+        ld_become(fn, L, i, n, r);
+        return 1;
+    }
+    /* long double -> float or double: one rounding, from the exact value */
+    if (i->op == IR_F2F && i->size == 16 && (i->w == 4 || i->w == 8)) {
+        struct ldf *a = ld_known(fn, d, L, gen, i->a);
+        unsigned char b[8];
+        if (!a)
+            return 0;
+        enum ldf_fmt to = i->w == 4 ? LDF_FLOAT : LDF_DOUBLE;
+        ldf_encode(ldf_round(a, to), to, b);
+        unsigned long bits = 0;
+        for (int k = 0; k < i->w; k++)
+            bits |= (unsigned long)b[k] << (8 * k);
+        to_const(i, i->w == 4 ? (long)(unsigned int)bits : (long)bits);
+        i->flt = 0;
+        return 1;
+    }
+    /* A widening of a constant to binary128 is a library call of eight
+     * bytes or so, and its folded form a sixteen-byte constant and the
+     * load of it: at -Os the call is kept. (x87 loads either way.) */
+    if (g_opt_size && fmt == LDF_QUAD &&
+        (i->op == IR_I2F || i->op == IR_F2F) && i->w == 16)
+        return 0;
+    /* float or double -> long double: exact */
+    if (i->op == IR_F2F && i->w == 16 && (i->size == 4 || i->size == 8)) {
+        long A;
+        struct ldf *x;
+        if (!get_const(fn, d, i->a, &A) && !lk_get(lk, i->a, i->size, &A))
+            return 0;
+        if (!(x = ld_from_bits(A, i->size)))
+            return 0;
+        ld_become(fn, L, i, n, x);
+        return 1;
+    }
+    /* an integer -> long double: rounded once (a 64-bit integer does not
+     * fit binary64, and x87's 64-bit significand holds it exactly) */
+    if (i->op == IR_I2F && i->w == 16 && (i->size == 4 || i->size == 8)) {
+        long A;
+        int wide = 0;                       /* known as an 8-byte value */
+        if (get_const(fn, d, i->a, &A))
+            wide = fn->ins[d->ins[i->a]].w == 8;
+        else if (lk_get(lk, i->a, i->size, &A))
+            wide = i->size == 8;
+        else
+            return 0;
+        /* as fold_cvt (see there), unless the constant is 8 bytes itself */
+        if (i->size == 8 && !wide && target_widen_unsigned_fp_cvt() &&
+            (A < 0 || A > 0x7fffffffL))
+            return 0;
+        long v = fold_ext(A, i->size, i->sign, 8);
+        ld_become(fn, L, i, n, ldf_round(ldf_from_int(v, !i->sign), fmt));
+        return 1;
+    }
+    return 0;
+}
+
+static void ld_insert(struct ir_func *fn, struct ldfold *L);
+
 static int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -957,14 +1181,35 @@ static int pass_fold(struct ir_func *fn)
         xmalloc((size_t)fn->nvregs * sizeof(long)),
         xmalloc((size_t)fn->nvregs * sizeof(int)), 1, fn->nvregs
     };
+    int nv0 = fn->nvregs, nl = fn->nvars > 0 ? fn->nvars : 1;
+    struct ldfold L = {
+        xcalloc((size_t)nv0, sizeof(struct ldf *)),
+        xcalloc((size_t)nv0, sizeof(struct ldf *)),
+        xcalloc((size_t)nv0, sizeof(int)),
+        xcalloc((size_t)nl, sizeof(struct ldf *)),
+        xcalloc((size_t)nl, sizeof(int)),
+        xcalloc((size_t)nl, 1), nv0, fn->nvars, NULL, NULL, NULL, 0, 0
+    };
+    for (int v = 0; v < fn->nvars; v++)
+        L.vok[v] = fn->locals[v].is_ldouble && !fn->locals[v].is_volatile;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a >= 0 &&
+            fn->ins[n].a < fn->nvars)
+            L.vok[fn->ins[n].a] = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         /* What the previous instruction left, in its final form: one
          * this loop has just folded to a constant is a constant. */
-        if (n > 0)
+        if (n > 0) {
             lk_note(&lk, &fn->ins[n - 1]);
+            ld_note(fn, &d, &L, lk.gen, &fn->ins[n - 1]);
+        }
         if (i->op == IR_LABEL)
             lk.gen++;
+        if (ld_fold(fn, &d, &L, &lk, i, n)) {
+            changed = 1;
+            continue;
+        }
         if (i->flt) {
             /* never as an integer -- as a float, from bit patterns. An
              * operand is a constant when it has one definition that is
@@ -1355,6 +1600,10 @@ static int pass_fold(struct ir_func *fn)
     free(lk.gen_of); free(lk.val); free(lk.w);
     free(use);
     free_defs(&d);
+    if (L.n)
+        ld_insert(fn, &L);
+    free(L.val); free(L.kval); free(L.kgen); free(L.vval); free(L.vgen);
+    free(L.vok); free(L.at); free(L.p); free(L.lab);
     return changed;
 }
 
@@ -2000,6 +2249,25 @@ static void mark_cb(int *p, void *ctx)
  * one step backwards through code that runs forwards -- a chain of 4000
  * joins, each copy read by the next, took 4000 sweeps. Both compute the
  * least set closed under the two rules, so they mark the same set. */
+/* A load is not pure -- it may fault -- except one of a string
+ * constant's own bytes: its address is the constant's (one straddr) and
+ * it reads inside it, which is .rodata the program cannot unmap. Those
+ * are what a folded long double leaves behind (ld_fold), and a string's
+ * byte read and dropped. */
+static int rodata_load(const struct ir_func *fn, const int *dhead,
+                       const int *dnext, const struct ir_ins *i)
+{
+    if (i->op != IR_LOAD || i->vol || i->flash || def_target(i) < 0 ||
+        !g_fold_unit || i->a < 0 || i->a >= fn->nvregs)
+        return 0;
+    int n = dhead[i->a];
+    if (n < 0 || dnext[n] >= 0 || fn->ins[n].op != IR_STRADDR)
+        return 0;
+    int lab = fn->ins[n].label;
+    return lab >= 0 && lab < g_fold_unit->nstrs && i->memoff >= 0 &&
+           i->size > 0 && i->memoff + i->size <= g_fold_unit->strs[lab].len;
+}
+
 static int pass_dce(struct ir_func *fn)
 {
     int nins = fn->nins, nvr = fn->nvregs;
@@ -2046,6 +2314,8 @@ static int pass_dce(struct ir_func *fn)
         /* a volatile local's read happens even when nothing uses it:
          * `(void)v;` is a read the program asked for */
         if (is_pure(i->op) && def_target(i) >= 0 && !i->vol)
+            continue;
+        if (rodata_load(fn, dhead, dnext, i))
             continue;
         live_ins[n] = 1;
     }
@@ -2169,6 +2439,42 @@ static struct ir_ins *ib_push(struct ibuf *b)
     ins_blank(i);
     return i;
 }
+
+/* Insert the straddrs ld_become asked for, each before its instruction. */
+static void ld_insert(struct ir_func *fn, struct ldfold *L)
+{
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    int k = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        while (k < L->n && L->at[k] == n) {
+            struct ir_ins *e = ib_push(&nb);
+            memset(e, 0, sizeof *e);
+            e->op = IR_STRADDR;
+            e->dst = L->p[k]; e->label = L->lab[k];
+            e->a = e->b = e->c = -1;
+            e->w = 4; e->size = 4; e->sign = 1; e->pred = B_ADD;
+            e->callee_sym = e->glob_sym = -1;
+            e->line = fn->ins[n].line; e->col = fn->ins[n].col; e->synth = 1;
+            k++;
+        }
+        *ib_push(&nb) = fn->ins[n];
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+}
+
 
 /* ==== reassociation ========================================================
  *
@@ -2747,6 +3053,14 @@ static int m2r_plain(int size, int sign, int w)
     return size == 8 || (size == 4 && !(sign && w == 8));
 }
 
+/* The width of a promoted local's value: 16 for a long double (binary128
+ * or x87, w 16 everywhere else in the IR), else 8 or 4 -- a 16-byte value
+ * copied at width 4 moved a quarter of it. */
+static int m2r_w(int size)
+{
+    return size == 16 ? 16 : size == 8 ? 8 : 4;
+}
+
 /* Emit the phi copies for edge (pred p -> block s): read every incoming value
  * into a fresh temp, then write each phi result — read-all-then-write-all, so a
  * self-referential loop phi or a swap is realised correctly. */
@@ -2778,7 +3092,7 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         for (int k = 0; k < S->nphi; k++) {
             struct ir_ins *mv = ib_push(nb);
             mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = S->phi_inc[pi][k];
-            mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
+            mv->w = m2r_w(fn->locals[S->phi_local[k]].size);
             mv->line = eline; mv->col = ecol; mv->synth = !eline;
         }
         return;
@@ -2788,13 +3102,13 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         tmp[k] = fn->nvregs++;
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = tmp[k]; mv->a = S->phi_inc[pi][k];
-        mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
+        mv->w = m2r_w(fn->locals[S->phi_local[k]].size);
         mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     for (int k = 0; k < S->nphi; k++) {
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = tmp[k];
-        mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
+        mv->w = m2r_w(fn->locals[S->phi_local[k]].size);
         mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     free(tmp);
@@ -2875,8 +3189,16 @@ static int pass_mem2reg(struct ir_func *fn)
          * value numbering, LICM and strength reduction below cannot see. */
         int narrow = Li->is_int_or_ptr && !Li->is_int128 &&
                      (Li->size == 1 || Li->size == 2);
+        /* ...and a 16-byte long double (x87 or binary128). Kept in
+         * memory, every read was a 16-byte copy into a temp's slot and
+         * every call argument another: RV32's roundl was three times
+         * clang's size. Its copies are w 16 (m2r_w), and an undefined
+         * one's seed a pooled zero. EMBCC_NO_M2R_LD=1 keeps them in
+         * memory, for bisecting. */
+        int ld16 = Li->is_ldouble && Li->size == 16 &&
+                   !getenv("EMBCC_NO_M2R_LD");
         int promotable = Li->is_scalar_int_or_ptr || Li->is_scalar_float ||
-                         narrow;
+                         narrow || ld16;
         if (!Li->size)                          { ok[L] = 0; why[L] = "type-unknown"; }
         else if (!promotable && (Li->size == 4 || Li->size == 8))
                                                 { ok[L] = 0; why[L] = "not-a-scalar-integer-pointer-or-float"; }
@@ -2896,6 +3218,8 @@ static int pass_mem2reg(struct ir_func *fn)
             (in->vol ||
              (fn->locals[in->a].size < 4
                   ? in->size != fn->locals[in->a].size
+                  : fn->locals[in->a].size == 16
+                  ? !(in->size == 16 && in->w == 16)
                   : !m2r_plain(in->size, in->sign, in->w)) ||
              /* a narrower read of a wider local is its FIRST bytes,
               * which are the value's low end only little-endian */
@@ -3123,7 +3447,7 @@ static int pass_mem2reg(struct ir_func *fn)
                 struct ir_ins *in = &fn->ins[i];
                 if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars && prom[in->a] >= 0) {
                     int pidx = prom[in->a];
-                    int fw = in->size == 8 ? 8 : 4;
+                    int fw = m2r_w(in->size);
                     int was_float = in->flt;
                     if (fn->locals[ploc[pidx]].size < 4) {
                         /* A narrow local: the read extends the value's low
@@ -3178,6 +3502,24 @@ static int pass_mem2reg(struct ir_func *fn)
     for (int p = 0; p < nprom; p++) {   /* entry undef defs */
         if (ploc[p] < nparams)
             continue;                   /* the prologue defined it */
+        if (fn->locals[ploc[p]].size == 16) {
+            /* no IR_CONST is 16 bytes wide: the seed is a load of a
+             * pooled zero, as irgen makes every long double constant */
+            static const char zero16[16];
+            struct ir_ins *a = ib_push(&nb);
+            memset(a, 0, sizeof *a);
+            a->op = IR_STRADDR; a->dst = fn->nvregs++;
+            a->label = ir_intern_aligned(g_fold_unit, zero16, 16, 16);
+            a->a = a->b = a->c = -1; a->w = 4; a->size = 4; a->sign = 1;
+            a->callee_sym = a->glob_sym = -1; a->synth = 1;
+            int at = a->dst;
+            struct ir_ins *l = ib_push(&nb);
+            memset(l, 0, sizeof *l);
+            l->op = IR_LOAD; l->dst = undef[p]; l->a = at;
+            l->b = l->c = -1; l->size = 16; l->w = 16; l->natural = 1;
+            l->label = -1; l->callee_sym = l->glob_sym = -1; l->synth = 1;
+            continue;
+        }
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_CONST; c->dst = undef[p]; c->imm = 0;
         c->w = fn->locals[ploc[p]].size == 8 ? 8 : 4;
@@ -3204,7 +3546,7 @@ static int pass_mem2reg(struct ir_func *fn)
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_MOV; c->dst = bb[0].phi_res[k];
         c->a = undef[pidx]; c->b = -1;
-        c->w = fn->locals[ploc[pidx]].size == 8 ? 8 : 4;
+        c->w = m2r_w(fn->locals[ploc[pidx]].size);
         c->synth = 1;
     }
     struct { int lbl, from, edge_pred; } *tramp = NULL; int ntramp = 0, ctramp = 0;
@@ -5464,7 +5806,7 @@ static int pass_tailrec(struct ir_func *fn)
                 tmp[k] = fn->nvregs++;
                 struct ir_ins *m = ib_push(&nb);
                 m->op = IR_MOV; m->dst = tmp[k]; m->a = argv[k];
-                m->w = fn->locals[k].size == 8 ? 8 : 4;
+                m->w = m2r_w(fn->locals[k].size);
                 m->line = c->line; m->col = c->col; m->synth = 1;
             }
             for (int k = 0; k < np; k++) {          /* then write all */
@@ -5869,9 +6211,28 @@ static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
     }
 }
 
+/* On ARM: a load through an address temp written more than once -- a
+ * pointer a loop walks -- is keyed by that temp too, and every write of
+ * it drops the key, so `*p` read in each arm of an if-else chain is read
+ * once: printf's flag loop read its character five times. Its value is a
+ * temp written once (the load), so nothing else has to drop it. Thumb
+ * only, measured there; the other targets' output stays as it was. */
+static void lcse_kill_defs(int *s, int nk, const struct lkey *keys,
+                           const struct ir_ins *ins)
+{
+    int t = def_target(ins);
+    if (t < 0)
+        return;
+    for (int k = 0; k < nk; k++)
+        if (keys[k].op == IR_LOAD && keys[k].bkind == BASE_NONE &&
+            keys[k].a == t)
+            s[k] = -1;
+}
+
 static int pass_loadcse(struct ir_func *fn)
 {
     int nvars = fn->nvars;
+    int mdef = target_get() == TARGET_THUMB && !getenv("EMBCC_NO_LCSE_MDEF");
     if (fn->nins == 0)
         return 0;
     struct defs d;
@@ -5899,7 +6260,11 @@ static int pass_loadcse(struct ir_func *fn)
         if (in->op == IR_LDVAR && !in->vol && in->a >= 0 && in->a < nvars) {
             k.op = IR_LDVAR;
         } else if (in->op == IR_LOAD && !in->vol && in->a >= 0 &&
-                   in->a < fn->nvregs && d.cnt[in->a] == 1) {
+                   in->a < fn->nvregs &&
+                   (d.cnt[in->a] == 1 ||
+                    (mdef && in->a >= nvars && in->dst != in->a &&
+                     in->dst >= 0 && in->dst < fn->nvregs &&
+                     d.cnt[in->dst] == 1))) {
             k.op = IR_LOAD;
         } else {
             continue;
@@ -5982,6 +6347,8 @@ static int pass_loadcse(struct ir_func *fn)
                     if (ins->op == IR_STORE)
                         lcse_store_gen(s, nk, keys, ins, fn, &d);
                 }
+                if (mdef)
+                    lcse_kill_defs(s, nk, keys, ins);
                 int k = keyidx[i];
                 if (k >= 0 && s[k] < 0) s[k] = ins->dst;   /* first def of the value */
             }
@@ -6008,6 +6375,8 @@ static int pass_loadcse(struct ir_func *fn)
                 if (ins->op == IR_STORE)
                     lcse_store_gen(s, nk, keys, ins, fn, &d);
             }
+            if (mdef)
+                lcse_kill_defs(s, nk, keys, ins);
             int k = keyidx[i];
             if (k < 0) continue;
             if (s[k] >= 0 && s[k] != ins->dst) {
@@ -8022,6 +8391,729 @@ static int rotate_one(struct ir_func *fn)
 
     free(order); free(l2b);
     free_cfg(bb, nbb);
+    return done;
+}
+
+/* ==== -Os on Cortex-M: enter a rotated loop at its test ======================
+ *
+ * Rotation (above) leaves the loop's test twice: the original as a guard
+ * in front of the body, the copy at the bottom.
+ *
+ *           t = *p                 <- the guard
+ *           brz t -> Lexit
+ *      Lbody:
+ *           p = p + 1
+ *           t' = *p                <- the copy
+ *           brnz t' -> Lbody
+ *      Lexit:
+ *
+ * The steady state is what rotation is for: one taken branch a trip. The
+ * guard is what it costs, and at -Os that was most of the bytes rotation
+ * added to lib/libc on ARMv7-M (750 of them). Jumping to the copy keeps
+ * the steady state and drops the guard -- the form GCC gives a loop at -Os:
+ *
+ *           jmp Lt
+ *      Lbody:
+ *           p = p + 1
+ *      Lt:  t' = *p
+ *           brnz t' -> Lbody
+ *      Lexit:
+ *
+ * It is the same computation only when the guard IS the copy: the longest
+ * run of instructions ending at the guard's branch that matches the run
+ * ending at the latch's, operand for operand, where an operand the guard
+ * defines corresponds to the one the copy defines. And the guard's values
+ * must not be read anywhere else (the copy writes its own names, not the
+ * guard's), unless the two are the same name; a name only the copy writes
+ * must be written nowhere else, so that writing it once more, on the way
+ * in, disturbs nothing. Rotation makes this shape; folding the guard
+ * (`i = 0; i < n` decided) makes the two differ, and then the guard stays.
+ *
+ * Only a run of plain computations and loads (not volatile, which is the
+ * access itself): the guard runs where the copy now runs, once, on the
+ * same values. Runs last, at -Os, on ARM targets (pass_guardjump's caller):
+ * every loop pass is done, and the bottom-tested shape they match on is
+ * gone afterwards -- the loop's header is now its test. */
+static int gj_op_ok(const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_AND: case IR_OR:
+    case IR_XOR: case IR_SHL: case IR_SHR: case IR_NEG: case IR_BNOT:
+    case IR_CMP: case IR_MOV: case IR_EXT: case IR_CONST: case IR_GADDR:
+    case IR_STRADDR: case IR_ADDR: case IR_BITCAST:
+        return 1;
+    case IR_LOAD:
+        return !i->vol && !i->flash;
+    default:
+        return 0;
+    }
+}
+
+/* The fields an instruction's value depends on, besides its operands. */
+static int gj_same_fields(const struct ir_ins *g, const struct ir_ins *c)
+{
+    return g->op == c->op && g->w == c->w && g->size == c->size &&
+           g->sign == c->sign && g->flt == c->flt && g->vol == c->vol &&
+           g->flash == c->flash && g->imm == c->imm &&
+           g->imm_b == c->imm_b && g->pred == c->pred &&
+           g->label == c->label && g->callee == c->callee &&
+           g->callee_sym == c->callee_sym && g->glob == c->glob &&
+           g->glob_sym == c->glob_sym && g->memoff == c->memoff &&
+           g->natural == c->natural && g->c == c->c;
+}
+
+struct gj_map { const int *tbl; int nv; };
+static void gj_map_cb(int *p, void *ctx)
+{
+    const struct gj_map *m = ctx;
+    if (*p >= 0 && *p < m->nv && m->tbl[*p] >= 0)
+        *p = m->tbl[*p];
+}
+
+struct gj_reads { int *cnt; int nv; };
+static void gj_count_cb(int *p, void *ctx)
+{
+    struct gj_reads *r = ctx;
+    if (*p >= 0 && *p < r->nv)
+        r->cnt[*p]++;
+}
+
+/* Does the guard's run [gs, gb) match the copy's run [cs, cb), and
+ * the guard's branch gb the copy's cb? tbl is scratch, nvregs wide,
+ * all -1 on entry and on return. */
+static int gj_match(struct ir_func *fn, int gs, int gb, int cs, int cb,
+                    int *tbl, const int *nreads, const struct defs *d)
+{
+    int L = gb - gs, ok = 1, nv = fn->nvregs;
+    struct gj_map m = { tbl, nv };
+    int *gread = xcalloc((size_t)nv, sizeof *gread);
+    struct gj_reads gr = { gread, nv };
+    for (int k = 0; k < L && ok; k++) {
+        struct ir_ins g = fn->ins[gs + k];
+        const struct ir_ins *c = &fn->ins[cs + k];
+        if (!gj_op_ok(&g) || !gj_same_fields(&g, c)) { ok = 0; break; }
+        each_read(&fn->ins[gs + k], gj_count_cb, &gr);
+        each_read(&g, gj_map_cb, &m);
+        if (g.a != c->a || g.b != c->b) { ok = 0; break; }
+        int gd = def_target(&g), cd = def_target(c);
+        if (gd < 0 || cd < 0 || gd >= nv || cd >= nv) { ok = 0; break; }
+        /* A name only the copy writes must be written there alone. */
+        if (gd != cd && d->cnt[cd] != 1) { ok = 0; break; }
+        /* Each guard definition maps once: a second write of the same
+         * name inside the run would make the table say two things. */
+        if (tbl[gd] >= 0 && tbl[gd] != cd) { ok = 0; break; }
+        tbl[gd] = cd;
+    }
+    if (ok) {
+        struct ir_ins g = fn->ins[gb];
+        each_read(&fn->ins[gb], gj_count_cb, &gr);
+        each_read(&g, gj_map_cb, &m);
+        if (g.a != fn->ins[cb].a || g.w != fn->ins[cb].w ||
+            g.size != fn->ins[cb].size || g.flt != fn->ins[cb].flt)
+            ok = 0;
+    }
+    /* The guard's own values are read only inside the guard -- unless
+     * the copy writes the same name, which it then holds either way. */
+    for (int k = 0; k < L && ok; k++) {
+        int gd = def_target(&fn->ins[gs + k]);
+        if (tbl[gd] != gd && gread[gd] != nreads[gd])
+            ok = 0;
+    }
+    for (int k = 0; k < L; k++) {
+        int gd = def_target(&fn->ins[gs + k]);
+        if (gd >= 0 && gd < nv)
+            tbl[gd] = -1;
+    }
+    free(gread);
+    return ok;
+}
+
+/* The code between the guard's branch and the body's label -- copies and
+ * address set-up the loop passes put on the way in (`p = d` before a
+ * pointer walk) -- runs before the jump instead, on the loop-skipped path
+ * as well. So it may only compute (gj_pre_ok), must not touch what the
+ * test reads or writes, and what it writes must be read only from there
+ * to the latch's branch -- the loop itself -- with nothing outside that
+ * span jumping into it; and it may not read the guard's values, which
+ * the jump no longer computes. */
+static int gj_pre_ok(const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR:
+    case IR_SHL: case IR_SHR: case IR_NEG: case IR_BNOT: case IR_CMP:
+    case IR_MOV: case IR_EXT: case IR_CONST: case IR_GADDR:
+    case IR_STRADDR: case IR_ADDR: case IR_BITCAST: case IR_MUL:
+        return !i->flt;
+    default:
+        return 0;
+    }
+}
+
+struct gj_mark { char *m; int nv; };
+static void gj_mark_cb(int *p, void *ctx)
+{
+    struct gj_mark *g = ctx;
+    if (*p >= 0 && *p < g->nv)
+        g->m[*p] = 1;
+}
+struct gj_lab { int *cnt; int nl; };
+static void gj_lab_cb(int *p, void *ctx)
+{
+    struct gj_lab *g = ctx;
+    if (*p >= 0 && *p < g->nl)
+        g->cnt[*p]++;
+}
+
+static int gj_pre_check(struct ir_func *fn, int gs, int gb, int lb, int cb,
+                        const int *nreads, const int *labrefs)
+{
+    int nv = fn->nvregs, ok = 1;
+    char *gdef = xcalloc((size_t)nv, 1);
+    for (int n = gs; n < gb; n++) {
+        int dv = def_target(&fn->ins[n]);
+        if (dv >= 0 && dv < nv) gdef[dv] = 1;
+    }
+    /* Every read of what it writes lies in [gb, cb]. That also keeps it
+     * clear of the test: the guard reads what the copy reads, and the
+     * guard is outside the span -- and a name the copy writes in place of
+     * the guard is written nowhere else (gj_match). */
+    int *rin = xcalloc((size_t)nv, sizeof *rin);
+    struct gj_reads rr = { rin, nv };
+    for (int n = gb + 1; n <= cb; n++)
+        each_read(&fn->ins[n], gj_count_cb, &rr);
+    char *rd = xcalloc((size_t)nv, 1);
+    struct gj_mark rm = { rd, nv };
+    for (int n = gb + 1; n < lb && ok; n++) {
+        int dv = def_target(&fn->ins[n]);
+        memset(rd, 0, (size_t)nv);
+        each_read(&fn->ins[n], gj_mark_cb, &rm);
+        for (int v = 0; v < nv && ok; v++)
+            if (rd[v] && gdef[v])
+                ok = 0;                 /* reads the guard's value */
+        if (!ok || dv < 0 || dv >= nv || rin[dv] != nreads[dv])
+            ok = 0;
+    }
+    /* nothing outside [gb, cb] jumps into it */
+    if (ok) {
+        int *inside = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1),
+                              sizeof *inside);
+        struct gj_lab gl = { inside, fn->nlabels };
+        for (int n = gb; n <= cb; n++)
+            each_label(fn, &fn->ins[n], gj_lab_cb, &gl);
+        for (int n = lb; n <= cb && ok; n++)
+            if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+                fn->ins[n].label < fn->nlabels &&
+                inside[fn->ins[n].label] != labrefs[fn->ins[n].label])
+                ok = 0;
+        free(inside);
+    }
+    free(gdef); free(rin); free(rd);
+    return ok;
+}
+
+/* Is instruction n inside a loop: between a label and a branch back to
+ * it? */
+static int gj_in_loop(const struct ir_func *fn, int n, const int *labpos)
+{
+    for (int j = n + 1; j < fn->nins; j++) {
+        const struct ir_ins *i = &fn->ins[j];
+        if ((i->op == IR_JMP || i->op == IR_BRZ || i->op == IR_BRNZ) &&
+            i->label >= 0 && i->label < fn->nlabels &&
+            labpos[i->label] >= 0 && labpos[i->label] <= n)
+            return 1;
+    }
+    return 0;
+}
+
+static int pass_guardjump(struct ir_func *fn)
+{
+    int nv = fn->nvregs, done = 0;
+    if (fn->nins < 4 || nv == 0)
+        return 0;
+    int *labpos = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *labpos);
+    int *labrefs = xcalloc((size_t)(fn->nlabels ? fn->nlabels : 1), sizeof *labrefs);
+    struct gj_lab gl = { labrefs, fn->nlabels };
+    for (int l = 0; l < fn->nlabels; l++)
+        labpos[l] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < fn->nlabels)
+            labpos[fn->ins[n].label] = n;
+        each_label(fn, &fn->ins[n], gj_lab_cb, &gl);
+    }
+    int *nreads = xcalloc((size_t)nv, sizeof *nreads);
+    struct gj_reads rr = { nreads, nv };
+    for (int n = 0; n < fn->nins; n++)
+        each_read(&fn->ins[n], gj_count_cb, &rr);
+    struct defs d;
+    compute_defs(fn, &d);
+    int *tbl = xmalloc((size_t)nv * sizeof *tbl);
+    for (int v = 0; v < nv; v++)
+        tbl[v] = -1;
+
+    for (int gb = 1; gb + 1 < fn->nins && !done; gb++) {
+        const struct ir_ins *g = &fn->ins[gb];
+        if (g->op != IR_BRZ && g->op != IR_BRNZ)
+            continue;
+        /* the body's label, after at most a few set-up instructions */
+        int lb = gb + 1;
+        while (lb < fn->nins && lb - gb <= 8 && gj_pre_ok(&fn->ins[lb]))
+            lb++;
+        if (lb >= fn->nins || fn->ins[lb].op != IR_LABEL)
+            continue;
+        int Lbody = fn->ins[lb].label, Lexit = g->label;
+        if (Lexit < 0 || Lexit >= fn->nlabels || labpos[Lexit] <= lb + 1)
+            continue;
+        int cb = labpos[Lexit] - 1;
+        const struct ir_ins *c = &fn->ins[cb];
+        if (c->op != (g->op == IR_BRZ ? IR_BRNZ : IR_BRZ) ||
+            c->label != Lbody)
+            continue;
+        /* Not a loop inside another: the jump in is a taken branch each
+         * time the loop is entered, which for an inner loop is every trip
+         * of the outer one -- tools/bench's sort and hash ran 4-9% more
+         * cycles at -Os for it. An outermost loop is entered once. */
+        if (gj_in_loop(fn, gb, labpos))
+            continue;
+        /* The longest run that could match: back from both branches,
+         * inside the guard's block and the latch's. */
+        int max = 0;
+        while (gb - max - 1 >= 0 && cb - max - 1 > lb &&
+               gj_op_ok(&fn->ins[gb - max - 1]) &&
+               gj_op_ok(&fn->ins[cb - max - 1]))
+            max++;
+        int L = 0;
+        for (int k = max; k >= 1 && !L; k--)
+            if (gj_match(fn, gb - k, gb, cb - k, cb, tbl, nreads, &d) &&
+                gj_pre_check(fn, gb - k, gb, lb, cb, nreads, labrefs))
+                L = k;
+        if (!L)
+            continue;
+
+        /* [set-up] jmp Lt; Lbody: ...; Lt: <the copy's run>; branch */
+        int Lt = fn->nlabels++, gs = gb - L, cs = cb - L;
+        struct ibuf nb = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n < fn->nins; n++) {
+            if (newpos) newpos[n] = nb.n;
+            if (n >= gs && n < lb && n != gb)
+                continue;
+            if (n == gb) {
+                for (int q = gb + 1; q < lb; q++)
+                    *ib_push(&nb) = fn->ins[q];
+                struct ir_ins *j = ib_push(&nb);
+                j->op = IR_JMP;
+                j->label = Lt;
+                j->line = fn->ins[gb].line;
+                j->col = fn->ins[gb].col;
+                j->synth = 1;
+                continue;
+            }
+            if (n == cs) {
+                struct ir_ins *l = ib_push(&nb);
+                l->op = IR_LABEL;
+                l->label = Lt;
+                l->line = fn->ins[n].line;
+                l->col = fn->ins[n].col;
+                l->synth = 1;
+            }
+            *ib_push(&nb) = fn->ins[n];
+        }
+        if (newpos) {
+            newpos[fn->nins] = nb.n;
+            for (int v = 0; v < fn->nvars; v++) {
+                int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+                if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+                if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+            }
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nb.p;
+        fn->nins = nb.n;
+        fn->cap = nb.cap;
+        done = 1;
+        if (remarks_on() && fn->src)
+            remark_add("opt", "entered-at-test", fn->name, "licm/guard-jump",
+                       fn->file, fn->line,
+                       "a rotated loop entered at its test: %d instructions "
+                       "of guard dropped", L);
+    }
+    free(tbl);
+    free(nreads);
+    free_defs(&d);
+    free(labpos);
+    free(labrefs);
+    return done;
+}
+
+/* ==== -Os on ARM: one copy of a block's tail ==================================
+ *
+ * C repeats itself where the source does: each `case` of a switch that
+ * stores through `va_arg(ap, long *)` (scanf's store_int has five), each
+ * `return huge * copysign(huge, x)` in fdlibm, every `errno = ERANGE;
+ * return -1`. Each was its own copy of the same instructions, where
+ * clang's branch folding keeps one and jumps to it.
+ *
+ * Two blocks that end the same way -- a jump to the same label, a return
+ * of the same value, or a fall into the same label -- and whose last
+ * instructions are the same computation keep one copy of those
+ * instructions: the other jumps into the first, to a label put in front
+ * of the shared run. "The same computation" is operand for operand, where
+ * a value a run defines and only that run reads (a temporary defined
+ * once) corresponds to the other run's, and every other operand and every
+ * other definition is the same name. Plain computations, loads, stores
+ * and calls with scalar arguments only. The longest such run of at least
+ * two instructions goes first, one at a time. Last of the passes, -Os,
+ * TARGET_THUMB only. */
+static int tm_op_ok(const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_CONST: case IR_MOV: case IR_ADD: case IR_SUB: case IR_MUL:
+    case IR_DIV: case IR_MOD: case IR_AND: case IR_OR: case IR_XOR:
+    case IR_SHL: case IR_SHR: case IR_NEG: case IR_BNOT: case IR_CMP:
+    case IR_LDVAR: case IR_STVAR: case IR_ADDR: case IR_STRADDR:
+    case IR_GADDR: case IR_FADDR: case IR_LOAD: case IR_STORE: case IR_EXT:
+    case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST: case IR_SELECT:
+        return 1;
+    case IR_CALL:
+        if (i->indirect || i->retsize || i->sret_first || i->call_cmse ||
+            i->nargs > 16)
+            return 0;
+        for (int k = 0; k < i->nargs; k++)
+            if (i->argv[k].is_struct || i->argv[k].byref)
+                return 0;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int tm_same_arg(const struct ir_arg *x, const struct ir_arg *y)
+{
+    return x->is_struct == y->is_struct && x->size == y->size &&
+           x->nclass == y->nclass && x->cls[0] == y->cls[0] &&
+           x->cls[1] == y->cls[1] && x->on_stack == y->on_stack &&
+           x->stk_off == y->stk_off && x->align == y->align &&
+           x->nat_align == y->nat_align && x->natural == y->natural &&
+           x->is_float == y->is_float && x->is_int128 == y->is_int128 &&
+           x->hfa_n == y->hfa_n && x->hfa_size == y->hfa_size &&
+           x->byref == y->byref && x->copy_off == y->copy_off &&
+           x->ty == y->ty;
+}
+
+/* Everything but the operands and the destination. */
+static int tm_same_fields(const struct ir_ins *a, const struct ir_ins *b)
+{
+    if (!gj_same_fields(a, b) || a->indirect != b->indirect ||
+        a->sret_first != b->sret_first ||
+        a->call_varargs != b->call_varargs || a->call_pcs != b->call_pcs ||
+        a->call_cmse != b->call_cmse || a->call_nfixed != b->call_nfixed ||
+        a->nargs != b->nargs || a->retsize != b->retsize ||
+        a->ret_tybytes != b->ret_tybytes || a->ret_tysign != b->ret_tysign ||
+        a->ret_ptr != b->ret_ptr || a->ret_hfa_n != b->ret_hfa_n ||
+        a->ret_hfa_size != b->ret_hfa_size || a->ret_byref != b->ret_byref ||
+        a->rety != b->rety || a->retnclass != b->retnclass)
+        return 0;
+    for (int k = 0; a->op == IR_CALL && k < a->nargs; k++)
+        if (!tm_same_arg(&a->argv[k], &b->argv[k]))
+            return 0;
+    return 1;
+}
+
+/* The operands i reads, in a fixed order, without writing to i (each_read
+ * rewrites a call's argument array in place, and copies share it). */
+struct tm_rd { int *out, n; };
+static void tm_rd_cb(int *p, void *ctx)
+{
+    struct tm_rd *r = ctx;
+    if (r->n < 32)
+        r->out[r->n++] = *p;
+}
+static int tm_reads(const struct ir_ins *i, int *out)
+{
+    struct tm_rd r = { out, 0 };
+    if (i->op == IR_CALL) {
+        for (int k = 0; k < i->nargs && r.n < 32; k++)
+            out[r.n++] = i->argv[k].vreg;
+        return r.n;
+    }
+    struct ir_ins c = *i;
+    each_read(&c, tm_rd_cb, &r);
+    return r.n;
+}
+
+/* Is v defined once, inside [s, e), and read only inside [s, e] (e: the
+ * block's terminator)? Then it is the run's own and may correspond to the
+ * other run's. maxr: the last instruction reading each vreg. */
+static int tm_local(struct ir_func *fn, const struct defs *d,
+                    const int *maxr, int v, int s, int e)
+{
+    return v >= fn->nvars && v < fn->nvregs && d->cnt[v] == 1 &&
+           d->ins[v] >= s && d->ins[v] < e && maxr[v] <= e;
+}
+
+/* Do the runs [ks, ke) and [ds, de) compute the same, and their block
+ * ends (ke, de: a JMP, a RET, or the label fallen into) agree? */
+static int tm_match(struct ir_func *fn, const struct defs *d,
+                    const int *maxr, int ks, int ke, int ds, int de,
+                    int *map)
+{
+    int L = ke - ks, ok = 1, nm = 0, mk[64], md[64];
+    if (L > 64)
+        return 0;
+    for (int k = 0; k < L && ok; k++) {
+        const struct ir_ins *a = &fn->ins[ks + k], *b = &fn->ins[ds + k];
+        int ra[32], rb[32], na, nb;
+        if (!tm_op_ok(a) || !tm_op_ok(b) || !tm_same_fields(a, b)) {
+            ok = 0;
+            break;
+        }
+        na = tm_reads(a, ra);
+        nb = tm_reads(b, rb);
+        if (na != nb) { ok = 0; break; }
+        for (int q = 0; q < na && ok; q++) {
+            int x = rb[q];
+            if (x >= 0 && x < fn->nvregs && map[x] >= 0)
+                x = map[x];
+            if (x != ra[q])
+                ok = 0;
+        }
+        int da = def_target(a), db = def_target(b);
+        if (!ok)
+            break;
+        if (da < 0 || db < 0) {
+            if (da != db) ok = 0;
+            continue;
+        }
+        int la = tm_local(fn, d, maxr, da, ks, ke);
+        int lb = tm_local(fn, d, maxr, db, ds, de);
+        if (la && lb && da != db) {
+            map[db] = da;
+            md[nm] = db;
+            mk[nm++] = da;
+        } else if (la != lb || da != db) {
+            ok = 0;
+        }
+    }
+    if (ok) {
+        const struct ir_ins *a = &fn->ins[ke], *b = &fn->ins[de];
+        if ((a->op == IR_RET) != (b->op == IR_RET))
+            ok = 0;
+        else if (a->op != IR_RET)
+            ok = a->label == b->label;   /* JMP or the label fallen into */
+        else {
+            int x = b->a;
+            if (x >= 0 && x < fn->nvregs && map[x] >= 0)
+                x = map[x];
+            ok = x == a->a && a->w == b->w && a->size == b->size &&
+                 a->flt == b->flt;
+        }
+    }
+    for (int k = 0; k < nm; k++)
+        map[md[k]] = -1;
+    (void)mk;
+    return ok;
+}
+
+/* Code after an unconditional jump or return and before the next label
+ * runs never: cfgclean, retargeting a jump to a jump, leaves the jumps
+ * there, two bytes each. Only what the merge may leave (plain code and
+ * jumps). */
+static void tm_sweep(struct ir_func *fn)
+{
+    int dead = 0, k = 0;
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (newpos) newpos[n] = k;
+        if (i->op == IR_LABEL)
+            dead = 0;
+        if (dead && (tm_op_ok(i) || i->op == IR_JMP || i->op == IR_BRZ ||
+                     i->op == IR_BRNZ || i->op == IR_RET))
+            continue;
+        fn->ins[k++] = fn->ins[n];
+        if (i->op == IR_JMP || i->op == IR_RET || i->op == IR_UD2 ||
+            i->op == IR_SWITCH || i->op == IR_IGOTO)
+            dead = 1;
+    }
+    if (newpos) {
+        newpos[fn->nins] = k;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    fn->nins = k;
+}
+
+static int pass_tailmerge(struct ir_func *fn)
+{
+    int nv = fn->nvregs, N = fn->nins;
+    if (N < 6 || nv == 0)
+        return 0;
+    /* the last reader of each vreg; an asm's or anything tm_reads does not
+     * see counts as reading everything, so nothing it might read looks
+     * like a run's own */
+    int *maxr = xmalloc((size_t)nv * sizeof *maxr);
+    for (int v = 0; v < nv; v++)
+        maxr[v] = -1;
+    for (int n = 0; n < N; n++) {
+        int ops[32], k = tm_reads(&fn->ins[n], ops);
+        for (int q = 0; q < k; q++)
+            if (ops[q] >= 0 && ops[q] < nv)
+                maxr[ops[q]] = n;
+        if (fn->ins[n].op == IR_ASM || fn->ins[n].op == IR_LANDING ||
+            (fn->ins[n].op == IR_CALL && fn->ins[n].nargs > 32))
+            for (int v = 0; v < nv; v++)
+                maxr[v] = N;
+    }
+    struct defs d;
+    compute_defs(fn, &d);
+    int *map = xmalloc((size_t)nv * sizeof *map);
+    for (int v = 0; v < nv; v++)
+        map[v] = -1;
+    /* the blocks: [start, end), each after a label or a branch, ending
+     * at a JMP or a RET or where it falls into a label; one that ends in
+     * a conditional branch, a switch or a trap, or holds an asm, is not a
+     * candidate */
+    int *bs = xmalloc((size_t)N * sizeof *bs), *be = xmalloc((size_t)N * sizeof *be);
+    int nb = 0;
+    for (int n = 0; n < N; ) {
+        int s0 = n, m, ok = 1;
+        if (fn->ins[s0].op == IR_LABEL)
+            s0++;
+        for (m = s0; m < N; m++) {
+            enum ir_op op = fn->ins[m].op;
+            if (op == IR_LABEL || op == IR_JMP || op == IR_RET)
+                break;
+            if (op == IR_BRZ || op == IR_BRNZ || op == IR_SWITCH ||
+                op == IR_IGOTO || op == IR_UD2) {
+                ok = 0;
+                break;
+            }
+            if (op == IR_ASM || op == IR_LANDING)
+                ok = 0;
+        }
+        if (m >= N)
+            break;
+        if (ok && m > s0) {
+            bs[nb] = s0;
+            be[nb] = m;
+            nb++;
+        }
+        n = fn->ins[m].op == IR_LABEL ? m : m + 1;
+        if (n <= s0 - 1)
+            n = s0;
+    }
+    /* Inside a loop, only where the path through the copy takes no more
+     * branches than before: the dropped run ended in a jump, and the copy
+     * falls into the same label. Otherwise that path is a jump longer on
+     * every trip that takes it -- tools/bench's state machine, a switch
+     * in a loop, ran 2.5% more cycles at -Os for it. */
+    int *labpos = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *labpos);
+    for (int l = 0; l < fn->nlabels; l++)
+        labpos[l] = -1;
+    for (int n = 0; n < N; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < fn->nlabels)
+            labpos[fn->ins[n].label] = n;
+    char *inloop = xcalloc((size_t)(nb ? nb : 1), 1);
+    for (int x = 0; x < nb; x++)
+        inloop[x] = (char)gj_in_loop(fn, bs[x], labpos);
+    free(labpos);
+    int bestL = 1, bk = -1, bd = -1;
+    for (int x = 0; x < nb; x++)
+        for (int y = 0; y < nb; y++) {
+            if (x == y || (inloop[y] && (fn->ins[be[x]].op != IR_LABEL ||
+                                         fn->ins[be[y]].op != IR_JMP)))
+                continue;
+            int kx = be[x], dy = be[y];
+            const struct ir_ins *ex = &fn->ins[kx], *ey = &fn->ins[dy];
+            /* (tm_match decides whether the two ends agree) */
+            if ((ex->op == IR_RET) != (ey->op == IR_RET))
+                continue;
+            int L = 0;
+            while (L < be[x] - bs[x] && L < be[y] - bs[y] && L < 64 &&
+                   fn->ins[kx - L - 1].op == fn->ins[dy - L - 1].op &&
+                   tm_op_ok(&fn->ins[kx - L - 1]))
+                L++;
+            /* y keeps x's copy: x before y, so the jump goes back to a
+             * copy that is already placed; the longer run, x's first */
+            for (int k = L; k > bestL; k--)
+                if (tm_match(fn, &d, maxr, kx - k, kx, dy - k, dy, map)) {
+                    bestL = k; bk = x; bd = y;
+                    break;
+                }
+        }
+    int done = 0;
+    if (bk >= 0) {
+        int ks = be[bk] - bestL, ds = be[bd] - bestL, de = be[bd];
+        int Lk = -1, newlab = 0;
+        if (ks > 0 && fn->ins[ks - 1].op == IR_LABEL)
+            Lk = fn->ins[ks - 1].label;
+        else {
+            Lk = fn->nlabels++;
+            newlab = 1;
+        }
+        struct ibuf nbuf = { 0, 0, 0 };
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        for (int n = 0; n < fn->nins; n++) {
+            if (newpos) newpos[n] = nbuf.n;
+            if (n == ks && newlab) {
+                struct ir_ins *l = ib_push(&nbuf);
+                l->op = IR_LABEL;
+                l->label = Lk;
+                l->line = fn->ins[n].line;
+                l->col = fn->ins[n].col;
+                l->synth = 1;
+            }
+            if (n >= ds && n <= de) {
+                /* the run and its jump or return: one jump; a label it
+                 * fell into stays */
+                if (n == ds) {
+                    struct ir_ins *j = ib_push(&nbuf);
+                    j->op = IR_JMP;
+                    j->label = Lk;
+                    j->line = fn->ins[n].line;
+                    j->col = fn->ins[n].col;
+                    j->synth = 1;
+                }
+                if (fn->ins[n].op != IR_LABEL)
+                    continue;
+            }
+            *ib_push(&nbuf) = fn->ins[n];
+        }
+        if (newpos) {
+            newpos[fn->nins] = nbuf.n;
+            for (int v = 0; v < fn->nvars; v++) {
+                int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+                if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+                if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+            }
+            free(newpos);
+        }
+        free(fn->ins);
+        fn->ins = nbuf.p;
+        fn->nins = nbuf.n;
+        fn->cap = nbuf.cap;
+        done = 1;
+        if (remarks_on() && fn->src)
+            remark_add("opt", "tail-merged", fn->name, "tail-merge",
+                       fn->file, fn->line,
+                       "%d instructions shared with an identical block end",
+                       bestL);
+    }
+    free(bs); free(be);
+    free(inloop);
+    free(map);
+    free(maxr);
+    free_defs(&d);
     return done;
 }
 
@@ -13223,6 +14315,13 @@ static int g_inline_o1;
 static int g_inline_declared_only;
 void opt_set_inline_declared_only(int on) { g_inline_declared_only = on; }
 
+/* -O0: only an always_inline callee, which GCC and clang inline at every
+ * level -- CMSIS's __STATIC_FORCEINLINE register accessors are written
+ * for it, and a header may count on the body being in the caller (one
+ * reading its caller's frame or return address). Nothing else changes:
+ * no pass after it runs, so -O0's code is otherwise the same. */
+static int g_inline_always_only;
+
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
 static void inline_unit(struct ir_unit *iu)
 {
@@ -13252,6 +14351,9 @@ static void inline_unit(struct ir_unit *iu)
                     why = "callee-computes-in-__int128";
                 else if (in->callee->attr_noinline)
                     why = "callee-is-noinline";
+                else if (g_inline_always_only &&
+                         !in->callee->attr_always_inline)
+                    why = "not-always_inline-at-O0";
                 else if (in->callee->is_weak)
                     why = "callee-is-weak";   /* the link may replace it */
                 else if (g_inline_declared_only &&
@@ -13865,11 +14967,15 @@ static int pass_sroa(struct ir_func *fn, int report_refusals)
         for (int k = 0; k < nfld[L]; k++) {
             struct type *mt =
                 sroa_field_ty(fn->src->var_tys[L], F[k].off, F[k].size);
+            /* A piece no member types (an eight-byte read across two
+             * words) is the integer exactly its size: `long` is four
+             * bytes on ILP32 and `int` two on AVR, and a slot that size
+             * held half the piece -- ColdFire's backend refused the
+             * eight-byte read of a four-byte slot. (1, 2, 4 and 8 are
+             * the only sizes a piece has, and each exists everywhere.) */
             if (!mt || mt->is_volatile || mt->kind == TY_LDOUBLE ||
                 mt->kind == TY_INT128)
-                mt = ty_base(F[k].size == 8 ? TY_LONG :
-                             F[k].size == 4 ? TY_INT :
-                             F[k].size == 2 ? TY_SHORT : TY_CHAR, 0);
+                mt = ty_int_of_size(F[k].size, 0);
             vt[F[k].nl] = mt;
             va[F[k].nl] = 0;        /* a piece nothing addresses needs no more
                                      * than its type's natural alignment */
@@ -15909,6 +17015,27 @@ static void opt_func(struct ir_func *fn)
             ;
     }
     pass_sinkaddr(fn);       /* last: nothing may separate them again */
+    /* After every loop pass, at -Os on ARM: a rotated loop entered at its
+     * test instead of through a copy of it (pass_guardjump). */
+    /* ...and before that, one copy of each repeated block end
+     * (pass_tailmerge) */
+    if (edge_ok && g_opt_size && target_get() == TARGET_THUMB &&
+        !getenv("EMBCC_NO_TAILMERGE")) {
+        int guard = 0, any = 0;
+        while (guard++ < 256 && pass_tailmerge(fn))
+            any = 1;
+        /* a block left as only a jump: its branches straight to the copy */
+        if (any && g_cfgclean)
+            pass_cfgclean(fn);
+        if (any)
+            tm_sweep(fn);
+    }
+    if (g_licm && edge_ok && g_opt_size && target_get() == TARGET_THUMB &&
+        !getenv("EMBCC_NO_GUARDJUMP")) {
+        int guard = 0;
+        while (guard++ < 256 && pass_guardjump(fn))
+            ;
+    }
     if (verify) verify_func(fn, "opt");
 
     /* What the whole fixpoint came to, for this function. The per-pass
@@ -16327,12 +17454,26 @@ static int pass_x86_loadop(struct ir_func *fn)
 
 void opt_run(struct ir_unit *iu, int level)
 {
+    g_fold_unit = iu;
     int size = level == OPT_SIZE;
     g_opt_size = size;
     if (size)
         level = 2;
-    if (level < 1)
+    if (level < 1) {
+        int any = 0;
+        for (int f = 0; f < iu->nfuncs && !any; f++)
+            for (int i = 0; i < iu->funcs[f].nins && !any; i++)
+                any = iu->funcs[f].ins[i].op == IR_CALL &&
+                      iu->funcs[f].ins[i].callee &&
+                      iu->funcs[f].ins[i].callee->attr_always_inline;
+        if (any) {
+            g_inline_always_only = 1;
+            g_inline_o1 = 0;
+            inline_unit(iu);
+            g_inline_always_only = 0;
+        }
         return;
+    }
     /* -O1 is gcc's -O1: every value that can be is a register, and the
      * passes that only remove work run -- constants, dead stores, loop
      * invariants, branches made selects -- while the ones that trade

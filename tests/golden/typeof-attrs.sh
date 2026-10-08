@@ -115,11 +115,9 @@ ok 'a packed struct typedef' 'typedef struct {char a; int b;} __attribute__((pac
 ok 'several declarators'     'typedef int i __attribute__((unused)), j; i a; j b;'
 ok 'still plain'             'typedef unsigned u, *up; u a; up b;'
 
-# aligned on a typedef must NOT be quietly dropped: struct type has no
-# per-type alignment, so accepting it would put a DMA buffer wherever
-# it landed. Refuse by name instead (THE RULE).
-no 'aligned on a typedef' \
-   'typedef int i __attribute__((aligned(16))); i g;' \
-   'not supported'
+# aligned on a typedef is the type's alignment, as GCC and clang have it
+# (tests/exec/aligned-typedef.c runs it): never quietly dropped
+ok 'aligned on a typedef' \
+   'typedef int i __attribute__((aligned(16))); i g; _Static_assert(_Alignof(i) == 16, "the typedef'"'"'s");'
 
 [ "$fail" -eq 0 ] || exit 1

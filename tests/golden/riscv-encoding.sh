@@ -47,7 +47,7 @@ check_one() {
         exit 1; }
     od -An -v -tx1 "$out/bytes.bin" | tr -s ' ' '\n' | sed '/^$/d' |
         sed 's/^/0x/' | tr '\n' ' ' > "$out/bytes.hex"
-    "$MC" -triple="riscv$1" -mattr=+m --disassemble < "$out/bytes.hex" \
+    "$MC" -triple="riscv$1" -mattr=+m,+f,+d --disassemble < "$out/bytes.hex" \
         2> "$out/mc.err" | tr '\t' ' ' | tr -s ' ' |
         sed 's/^ //; s/ $//' > "$out/got.txt" || {
         echo "llvm-mc could not disassemble the emitted bytes:"

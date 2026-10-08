@@ -36,6 +36,9 @@ static int g_thumb_fpu;     /* see target_thumb_fpu */
 static int g_thumb_fpu_dp;  /* see target_thumb_fpu_dp */
 static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
+/* RISC-V's -march= and -mabi= (target_riscv_flen and the rest): the C
+ * extension on and no FPU by default, rv32imac/ilp32 and rv64imac/lp64. */
+static int g_rv_c = 1, g_rv_f, g_rv_d, g_rv_zifencei, g_rv_abi_flen;
 /* ARMv7-A in ARM state (armv7a-none-eabi): the same AAPCS32 and data model
  * as the Cortex-M levels -- which is why it is this target and not a new
  * enum value -- with the A32 instruction set. See target_arm_a32. */
@@ -326,6 +329,7 @@ int target_is_mips(void)
 }
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
+int target_atomic8_libcall(void) { return g_model[g_arch].ptr == 4; }
 int target_double_size(void)    { return g_model[g_arch].dbl; }
 int target_int_size(void)       { return g_model[g_arch].it; }
 /* XLEN is RISC-V's own name for the register width IN BITS -- 32 or 64,
@@ -337,7 +341,22 @@ int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
 int target_default_new_align(void)
 {
-    return g_arch == TARGET_THUMB ? 8 : 16;
+    switch (g_arch) {
+    case TARGET_THUMB: return 8;
+    case TARGET_X86_64: case TARGET_AARCH64: case TARGET_RISCV32:
+    case TARGET_RISCV64: case TARGET_LOONGARCH64: case TARGET_MIPS64:
+        return 16;
+    default: {
+        /* clang's rule (TargetInfo::getNewAlign): the larger of long
+         * double's and long long's alignment -- 8 on MIPS32, SPARC,
+         * PowerPC (its long double a double) and Xtensa; capped where
+         * nothing is aligned further: 4 on RX and TriCore, 2 on ColdFire,
+         * 1 on AVR. */
+        int a = g_model[g_arch].ldbl > 8 ? g_model[g_arch].ldbl : 8;
+        int m = g_model[g_arch].maxal;
+        return m && a > m ? m : a;
+    }
+    }
 }
 int target_has_sqrt(int bytes)
 {
@@ -349,6 +368,10 @@ int target_has_sqrt(int bytes)
     case TARGET_THUMB:   return target_thumb_fpu() &&
                                 (bytes == 4 ||
                                  (bytes == 8 && target_thumb_fpu_dp()));
+    /* fsqrt.s with F, fsqrt.d with D: correctly rounded, as sqrt is */
+    case TARGET_RISCV32:
+    case TARGET_RISCV64: return (bytes == 4 && target_riscv_flen() >= 32) ||
+                                (bytes == 8 && target_riscv_flen() == 64);
     default:             return 0;
     }
 }
@@ -428,13 +451,21 @@ int target_char_unsigned(void)
     return g_char_uns_override >= 0 ? g_char_uns_override
            : darwin_a64() ? 0 : g_model[g_arch].char_uns;
 }
+static int g_short_wchar;
+void target_set_short_wchar(int on) { g_short_wchar = on; }
+int target_short_wchar(void) { return g_short_wchar; }
+
 int target_wchar_size(void)
 {
+    if (g_short_wchar)
+        return 2;
     return g_arch == TARGET_XTENSA ? 2 : g_model[g_arch].it;
 }
 
 int target_wchar_unsigned(void)
 {
+    if (g_short_wchar)
+        return 1;
     return darwin_a64() ? 0 : g_model[g_arch].wchar_uns;
 }
 int target_has_int128(void)     { return g_model[g_arch].int128; }
@@ -457,6 +488,14 @@ int target_jump_tables(void)
            target_get() != TARGET_XTENSA &&
            target_get() != TARGET_RX;
 }
+/* -Os: a switch dense but for a few outlying cases gets a table over the
+ * dense run (irgen's switch_cluster). ARM only so far: measured there,
+ * where a byte table (tbb) is cheaper than the tree it replaces. */
+int target_switch_clusters(void)
+{
+    return target_get() == TARGET_THUMB;
+}
+
 int target_switch_table_min_os(void)
 {
     return target_get() == TARGET_THUMB && target_thumb_arch() >= 7 ? 4 : 6;
@@ -542,6 +581,12 @@ int target_va_list_is_pointer(void)
                                       * argument words */
     }
     return 0;
+}
+
+int target_has_frame_chain(void)
+{
+    return g_arch == TARGET_X86_64 || g_arch == TARGET_AARCH64 ||
+           g_arch == TARGET_COLDFIRE;
 }
 
 int target_widen_unsigned_fp_cvt(void)
@@ -850,10 +895,11 @@ int target_from_triple(const char *triple, enum target_arch *out,
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
             if (g_triples[i].arch == TARGET_THUMB) {
-                /* 3 in this column means ARMv8-M Mainline. It implies the
-                 * DSP extension too -- v8-M Mainline includes it -- so the
-                 * `em` flag stays set for the code that asks "may I use the
-                 * v7E-M/DSP instructions". */
+                /* 3 in this column means ARMv8-M Mainline. The DSP
+                 * extension is OPTIONAL there: the name alone does not
+                 * have it, as clang's thumbv8m.main does not (no
+                 * __ARM_FEATURE_DSP, sadd16 refused); -mcpu=cortex-m33 and
+                 * -march=armv8-m.main+dsp set the `em` flag that says so. */
                 size_t n = strlen(triple);
                 g_thumb_hf_name = n > 6 && !strcmp(triple + n - 6, "eabihf");
                 g_arm_a32 = g_triples[i].thumb_em == 7;
@@ -864,7 +910,7 @@ int target_from_triple(const char *triple, enum target_arch *out,
                     g_thumb_em = 1;
                 } else if (g_triples[i].thumb_em == 3) {
                     g_thumb_arch = 8;
-                    g_thumb_em = 1;
+                    g_thumb_em = 0;
                 } else if (g_triples[i].thumb_em == 6 ||
                            g_triples[i].thumb_em == 9) {
                     g_thumb_arch = 6;
@@ -903,10 +949,10 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
     return NULL;
 }
 
-/* ARMv7E-M rather than ARMv7-M: the DSP extension and, on an F part, an
- * FPU. The code generated is identical today -- what differs is what
- * the object reports about itself, which a consumer is entitled to
- * believe. */
+/* ARMv7E-M rather than ARMv7-M -- or on ARMv8-M Mainline, the part has
+ * the DSP extension: its macros (__ARM_FEATURE_DSP, src/arch/predef.c),
+ * its instructions in inline asm and .s files (src/arch/thumb/asm.c), and
+ * what the object reports about itself. The code generated is the same. */
 int target_thumb_em(void) { return g_thumb_em; }
 int target_arm_a32(void) { return g_arch == TARGET_THUMB && g_arm_a32; }
 int target_arm_vfp(int *d32)
@@ -1013,12 +1059,6 @@ int target_elf_machine(enum target_arch a)
     }
 }
 
-/* The C extension. EmbCC has no -march= yet, so this is on for every
- * RISC-V target -- which is what both reference compilers default to
- * (clang's -march for riscv32-unknown-elf is rv32imac) and what every
- * RISC-V microcontroller implements. When -march= exists this becomes the
- * place that reads it, and the predefined macro table (the per-width
- * predef.c, __riscv_c) has to move with it. */
 int target_mul_shift_add(long c, int *k, int *neg, int *j)
 {
     if (c <= 2)
@@ -1034,17 +1074,46 @@ int target_mul_shift_add(long c, int *k, int *neg, int *j)
     return 0;
 }
 
+/* The C extension: on unless -march= leaves out the `c` -- on by default
+ * because that is what both reference compilers default to (clang's
+ * -march for riscv32-unknown-elf is rv32imac) and what nearly every RISC-V
+ * microcontroller implements. The predefined macros (__riscv_c) follow it
+ * (src/arch/predef.c). */
 int target_riscv_rvc(void)
 {
-    return 1;
+    return g_rv_c;
 }
+int target_riscv_flen(void)
+{
+    if (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64)
+        return 0;
+    return g_rv_d ? 64 : g_rv_f ? 32 : 0;
+}
+int target_riscv_abi_flen(void)
+{
+    if (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64)
+        return 0;
+    return g_rv_abi_flen;
+}
+int target_riscv_zifencei(void) { return g_rv_zifencei; }
+void target_set_riscv_isa(int f, int d, int c, int zifencei)
+{
+    g_rv_f = f ? 1 : 0;
+    g_rv_d = d ? 1 : 0;
+    g_rv_c = c ? 1 : 0;
+    g_rv_zifencei = zifencei ? 1 : 0;
+}
+void target_set_riscv_abi_flen(int flen) { g_rv_abi_flen = flen; }
 
 unsigned long target_elf_flags(enum target_arch a)
 {
     switch (a) {
     case TARGET_THUMB:   return EF_ARM_EABI_VER5;
     case TARGET_RISCV32:
-    case TARGET_RISCV64: return target_riscv_rvc() ? EF_RISCV_RVC : 0;
+    case TARGET_RISCV64: return (target_riscv_rvc() ? EF_RISCV_RVC : 0) |
+                                (g_rv_abi_flen == 64 ? EF_RISCV_FLOAT_ABI_DOUBLE
+                                 : g_rv_abi_flen == 32 ? EF_RISCV_FLOAT_ABI_SINGLE
+                                 : EF_RISCV_FLOAT_ABI_SOFT);
     case TARGET_AVR:     return EF_AVR_ARCH_AVR5;
     /* What clang writes for -mcpu=mips32r2 -mno-abicalls: the delay
      * slots are filled (with nops), the code is not abicalls/PIC. */

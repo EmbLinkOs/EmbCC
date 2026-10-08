@@ -77,6 +77,8 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s);
 void irg_asm_mips(struct ir_func *fn, struct stmt *s);
 void irg_asm_loongarch(struct ir_func *fn, struct stmt *s);
 void irg_asm_tricore(struct ir_func *fn, struct stmt *s);
+void irg_asm_xtensa(struct ir_func *fn, struct stmt *s);
+void irg_asm_rx(struct ir_func *fn, struct stmt *s);
 void irg_asm_ppc(struct ir_func *fn, struct stmt *s);
 void irg_asm_sparc(struct ir_func *fn, struct stmt *s);
 void irg_asm_coldfire(struct ir_func *fn, struct stmt *s);

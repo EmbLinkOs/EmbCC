@@ -89,6 +89,37 @@ struct gas_target {
      * the start of each pass, and refused if still owed at its end. */
     void (*reset)(void);
     int (*open)(void);
+    /* Where the statement about to be encoded starts in its section, for
+     * a target whose PC-relative forms depend on the instruction's own
+     * address and not only on the distance (Xtensa's call and l32r round
+     * it to a word). NULL elsewhere. */
+    void (*at)(long pc);
+    /* A statement separator beyond the newline (RX's `!`), 0 for none. */
+    char line_sep;
+    /* Relaxation by levels, for a target whose branch has more lengths
+     * than two (RX: 1, 2, 3 or 4 bytes, and a pair beyond): the least form
+     * index the statement may take -- -1 in the first pass, the optimistic
+     * guess -- and, after it, the index it took. A statement's level only
+     * rises, so the passes settle. NULL elsewhere. */
+    void (*set_level)(int level);
+    int (*took_level)(void);
+    /* Code alignment's padding, GNU as's for this target; NULL for the
+     * single nops do_align writes. */
+    void (*fill)(struct code *c, long gap);
+    /* Is the statement a branch whose label, when this file defines it in
+     * the same section, is a displacement for the target to relax (RX,
+     * ColdFire)? Its symbol is relocated only when substitute() cannot
+     * resolve it; every other symbol form is relocated whoever defines
+     * it. NULL elsewhere. */
+    int (*is_transfer)(const char *stmt);
+    /* The symbol forms that are relocated WHATEVER the symbol is -- a
+     * label of this file too -- because they name its ADDRESS, which only
+     * the linker knows: SPARC's %hi()/%lo() and `set`, PowerPC's @ha/@l/@h.
+     * Asked before the statement's labels become displacements; `symform`,
+     * which also covers these, is then asked only for what substitution
+     * could not resolve (a branch or a call to another section or file),
+     * as on Xtensa. NULL elsewhere: there `symform` is asked first. */
+    int (*symform_abs)(const char *stmt, struct asm_symform *f);
 };
 
 /* Assembles `in_path` into an ET_REL object at `out_path`, for the

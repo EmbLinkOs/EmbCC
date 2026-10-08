@@ -97,32 +97,50 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "inline asm" 'inline assembly is not supported for m68k-none-elf' \
-    'int f(void){ __asm__ volatile("nop"); return 0; }'
-refc "file-scope asm" 'file-scope asm is not supported for m68k-none-elf' \
-    '__asm__(".globl x\nx: .long 0"); int f(void){ return 0; }'
-refc "an 8-byte atomic read-modify-write" 'an atomic wider than four bytes' \
-    'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
-refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
-    'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
+# assembly of every kind assembles (tests/golden/coldfire-asm.sh referees
+# it); what is outside the vocabulary is refused by name
+printf 'int f(void){ __asm__ volatile("nop"); return 0; }
+void __attribute__((naked)) g(void){ __asm__("rts"); }
+__asm__(".globl x\\nx: .long 0");
+' > "$out/asm.c"
+"$EMBCC" --target=$T -c "$out/asm.c" -o /dev/null 2> "$out/asm.err" || {
+    echo "inline, naked or file-scope assembly was refused:"; cat "$out/asm.err"
+    exit 1; }
+refc "a rotate in a template" 'ColdFire has no rotate' \
+    'void f(void){ __asm__ volatile("rol.l #1,%%d0" ::: "d0"); }'
+refc "an ISA_B instruction" 'is an ISA_B instruction' \
+    'void f(void){ __asm__ volatile("mvs.b %%d1,%%d0" ::: "d0"); }'
+# An 8-byte atomic is a call to libatomic's sized routine, as GCC's and
+# clang's are; lib/rt/atomic8.c defines them (it used to be refused).
+printf 'long long x;
+long long f(void){ return __atomic_fetch_add(&x, 1, 5); }
+long long g(void){ return __atomic_load_n(&x, 5); }
+' > "$out/at8.c"
+"$EMBCC" --target=$T -O1 -c "$out/at8.c" -o "$out/at8.o" 2> "$out/at8.err" || {
+    echo "an 8-byte atomic was refused:"; cat "$out/at8.err"; exit 1; }
+for s in __atomic_fetch_add_8 __atomic_load_8; do
+    "${EMBCC_LLVM_READELF:-llvm-readelf}" -s "$out/at8.o" | grep -q " $s\$" || {
+        echo "an 8-byte atomic is not a call to $s"; exit 1; }
+done
 refc "__int128" '__int128' \
     '__int128 f(__int128 a){ return a; }'
 refc "a frame beyond 32 KiB" 'a stack frame larger than 32 KiB' \
     'void g(char *); void f(void){ char b[40000]; g(b); }'
 printf '\t.text\n\tnop\n' > "$out/a.s"
-if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err"; then
-    echo "an assembly file was accepted"; exit 1
-fi
-grep -q 'no assembly-file support for m68k-none-elf yet: EmbCC has no ColdFire assembler' \
-    "$out/as.err" || { echo "an assembly file was refused, but not by name:"
-    cat "$out/as.err"; exit 1; }
+"$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err" || {
+    echo "an assembly file was refused:"; cat "$out/as.err"; exit 1; }
 printf 'int main() { return 0; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cc.err"; then
-    echo "a C++ unit was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for m68k-none-elf' "$out/cc.err" || {
-    echo "a C++ unit was refused, but not by name:"; cat "$out/cc.err"; exit 1; }
-echo "inline and file-scope asm, .s files, C++, wide atomics, __int128, a frame"
+grep -q 'C++ exceptions are not supported for m68k-none-elf' "$out/cc.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cc.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
+echo "rotates and ISA_B instructions in asm, C++ exceptions, wide atomics, __int128, a frame"
 echo "beyond 32 KiB and an over-aligned scalar local are refused by name"
 
 # ---- EmbLD ---------------------------------------------------------------

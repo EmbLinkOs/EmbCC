@@ -13,10 +13,11 @@
  * at (tests/harness/qrun.sh --until).
  *
  * The one privileged instruction this needs -- movec to VBR -- is written
- * as instruction WORDS into a small buffer and called, because EmbCC has
- * no ColdFire assembler: move.l 4(%sp),%d0 (0x202f 0004, refereed by
- * tests/golden/coldfire-encoding.sh), movec %d0,%vbr (0x4e7b 0801) and
- * rts (0x4e75). QEMU notices code written to memory.
+ * as instruction WORDS into a small buffer and called, as it was before
+ * EmbCC had a ColdFire assembler (and still is, so the harness compiles
+ * the same whatever an assembler change does): move.l 4(%sp),%d0 (0x202f
+ * 0004, refereed by tests/golden/coldfire-encoding.sh), movec %d0,%vbr
+ * (0x4e7b 0801) and rts (0x4e75). QEMU notices code written to memory.
  *
  * Built with -DHARNESS_LIBC for a program linked with lib/libc: then main's
  * result goes through exit(), so atexit handlers run and stdio is flushed

@@ -15,6 +15,13 @@
  *                              instruction per translation block) and
  *                              compares each instruction's TCG operations
  *                              with what the walk expects of it
+ *   tricorecheck --image-asm FILE, --check-asm LOG
+ *                              the same walk with every control transfer
+ *                              assembled from its TEXT by
+ *                              src/arch/tricore/asm.c (`jeq d4, d5, .+8`)
+ *                              rather than encoded by a call: the same
+ *                              expectations then referee the assembler's
+ *                              reading of each statement
  *   tricorecheck --refuse N    provokes encoder range check N, which must
  *                              stop the process with an internal error;
  *                              `--refuse list` prints how many there are
@@ -49,6 +56,7 @@
 
 #include "../../src/arch/code.h"
 #include "../../src/arch/tricore/emit.h"
+#include "../../src/arch/tricore/asm.h"
 
 /* ---- the image: the board's 2 MiB code RAM at 0x80000000 --------------- */
 
@@ -147,6 +155,37 @@ static void want(const char *fmt, ...)
 /* ---- the walk ------------------------------------------------------------ */
 
 static struct code C;       /* scratch for one instruction */
+/* --image-asm/--check-asm: the transfers come from their text */
+static int g_asm, g_nasm;
+
+/* The word `w` the encoder made -- or, under g_asm, the one asm.c makes
+ * of the statement written from the same operands. */
+static unsigned long ASM(unsigned long w, const char *fmt, ...)
+{
+    char text[128], err[256];
+    va_list ap;
+    struct code t = { 0 };
+    if (!g_asm)
+        return w;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof text, fmt, ap);
+    va_end(ap);
+    if (tcasm_assemble(text, &t, err, sizeof err) != 0) {
+        fprintf(stderr, "tricorecheck: the assembler refused \"%s\": %s\n",
+                text, err);
+        exit(2);
+    }
+    if (t.len != 4) {
+        fprintf(stderr, "tricorecheck: \"%s\" assembled to %d bytes\n", text,
+                t.len);
+        exit(2);
+    }
+    w = (unsigned long)t.p[0] | ((unsigned long)t.p[1] << 8) |
+        ((unsigned long)t.p[2] << 16) | ((unsigned long)t.p[3] << 24);
+    free(t.p);
+    g_nasm++;
+    return w;
+}
 static long pos = MAIN_AT;  /* where the straight-line walk is */
 
 static unsigned long one(void)
@@ -848,7 +887,12 @@ static void branches(void)
             else
                 snprintf(txt, sizeof txt, "%s %s, %s, %+ld", jname(cond),
                          areg ? A(s1) : D(s1), areg ? A(s2) : D(s2), d);
-            p = place(tc_enc_jcc(cond, s1, s2, d), d, L_BACK, txt);
+            p = place(one ? ASM(tc_enc_jcc(cond, s1, s2, d), "%s %s, .%+ld",
+                                jname(cond), A(s1), d)
+                          : ASM(tc_enc_jcc(cond, s1, s2, d), "%s %s, %s, .%+ld",
+                                jname(cond), areg ? A(s1) : D(s1),
+                                areg ? A(s2) : D(s2), d),
+                      d, L_BACK, txt);
             if (one)
                 want("brcond_i32 %s,$0x0,%s,?", A(s1), jcond(cond));
             else
@@ -872,7 +916,8 @@ static void branches(void)
                 char txt[96];
                 snprintf(txt, sizeof txt, "%s %s, %lld, %+ld", jname(cond),
                          D(s1), kk, d);
-                p = place(tc_enc_jcci(cond, s1, kk, d), d, L_BACK, txt);
+                p = place(ASM(tc_enc_jcci(cond, s1, kk, d), "%s %s, %lld, .%+ld",
+                              jname(cond), D(s1), kk, d), d, L_BACK, txt);
             }
             want("brcond_i32 %s,%s,%s,?", D(s1), K(kk), jcond(cond));
             want("mov_i32 PC,%s", K((long long)(RAM_BASE + (unsigned long)p + 4)));
@@ -883,15 +928,15 @@ static void branches(void)
         long d = FAR[k], p;
         char txt[64];
         snprintf(txt, sizeof txt, "j %+ld", d);
-        p = place(tc_enc_j(d), d, L_BACK, txt);
+        p = place(ASM(tc_enc_j(d), "j .%+ld", d), d, L_BACK, txt);
         want("mov_i32 PC,%s", K((long long)(RAM_BASE + (unsigned long)(p + d))));
         snprintf(txt, sizeof txt, "call %+ld", d);
-        p = place(tc_enc_call(d), d, L_RET, txt);
+        p = place(ASM(tc_enc_call(d), "call .%+ld", d), d, L_RET, txt);
         want("call call,$0x0,$0,env,%s",
              K((long long)(RAM_BASE + (unsigned long)p + 4)));
         want("mov_i32 PC,%s", K((long long)(RAM_BASE + (unsigned long)(p + d))));
         snprintf(txt, sizeof txt, "jl %+ld", d);
-        p = place(tc_enc_jl(d), d, L_JI_A11, txt);
+        p = place(ASM(tc_enc_jl(d), "jl .%+ld", d), d, L_JI_A11, txt);
         want("mov_i32 a11,%s", K((long long)(RAM_BASE + (unsigned long)p + 4)));
         want("mov_i32 PC,%s", K((long long)(RAM_BASE + (unsigned long)(p + d))));
     }
@@ -921,6 +966,39 @@ static void branches(void)
                 want("mov_i32 a11,%s",
                      K((long long)(RAM_BASE + (unsigned long)p + 4)));
         }
+    }
+    /* jz/jnz dA: the assembler's names for jeq/jne against the constant 0 */
+    for (int k = 0; k < 16 + 8; k++) {
+        int r = k < 16 ? k : 4;
+        long d = k < 16 ? 8 : DISP[k - 16];
+        for (int ne = 0; ne < 2; ne++) {
+            char txt[64];
+            long p;
+            snprintf(txt, sizeof txt, "%s %s, %+ld", ne ? "jnz" : "jz", D(r), d);
+            p = place(ASM(tc_enc_jcci(ne ? TC_JNE : TC_JEQ, r, 0, d),
+                          "%s %s, .%+ld", ne ? "jnz" : "jz", D(r), d),
+                      d, L_BACK, txt);
+            want("brcond_i32 %s,$0x0,%s,?", D(r), ne ? "ne" : "eq");
+            want("mov_i32 PC,%s", K((long long)(RAM_BASE + (unsigned long)p + 4)));
+            want("mov_i32 PC,%s", K((long long)(RAM_BASE + (unsigned long)(p + d))));
+        }
+    }
+    /* LOOP aB: aB -= 1; taken unless it was 0. Each register is set to 3
+     * first, so the loop branches. */
+    for (int k = 0; k < 16 + 8; k++) {
+        int b = k < 16 ? k : 3;
+        long d = k < 16 ? 8 : DISP[k - 16], p;
+        char txt[64];
+        if (b == TC_SP)
+            continue;
+        set_a(b, 3);
+        snprintf(txt, sizeof txt, "loop %s, %+ld", A(b), d);
+        p = place(ASM(tc_enc_loop(b, d), "loop %s, .%+ld", A(b), d), d,
+                  L_BACK, txt);
+        want("add_i32 %s,%s,$0xffffffff", A(b), A(b));
+        want("brcond_i32 %s,$0xffffffff,eq,?", A(b));
+        want("mov_i32 PC,%s", K((long long)(RAM_BASE + (unsigned long)(p + d))));
+        want("mov_i32 PC,%s", K((long long)(RAM_BASE + (unsigned long)p + 4)));
     }
 }
 
@@ -1332,18 +1410,27 @@ static void refuse(int n)
     case 41: tc_load16(&C, 1, 2, 1, 1); break;             /* no LD.B form */
     case 42: tc_load16(&C, 1, 2, 2, 0); break;             /* no LD.HU form */
     case 43: tc_mov16(&C, 16, 1); break;
+    case 44: tc_enc_loop(1, 3); break;                     /* odd */
+    case 45: tc_enc_loop(1, 32768); break;
     default: break;
     }
 }
-#define NREFUSE 44
+#define NREFUSE 46
 
 int main(int argc, char **argv)
 {
-    if (argc > 2 && !strcmp(argv[1], "--image")) {
+    if (argc > 2 && (!strcmp(argv[1], "--image") ||
+                     !strcmp(argv[1], "--image-asm"))) {
+        g_asm = !strcmp(argv[1], "--image-asm");
         build();
+        if (g_asm)
+            fprintf(stderr, "tricorecheck: %d transfers assembled from their "
+                            "text\n", g_nasm);
         return write_image(argv[2]);
     }
-    if (argc > 2 && !strcmp(argv[1], "--check")) {
+    if (argc > 2 && (!strcmp(argv[1], "--check") ||
+                     !strcmp(argv[1], "--check-asm"))) {
+        g_asm = !strcmp(argv[1], "--check-asm");
         build();
         return check(argv[2]);
     }

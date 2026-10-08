@@ -66,6 +66,9 @@ struct t_fn {
      * spilled r0-r3 so that one pointer walks from them into the
      * caller's stack arguments. -1 when the function is not variadic. */
     long va_regsave;
+    long entry_off;          /* the stack pointer at entry, from the frame
+                              * base: __builtin_frame_address(0), with the
+                              * pushed lr just below it */
     long va_first;       /* ... and the offset of the first UNNAMED one */
     int *label_off;      /* per label id, or -1 while unseen */
     /* cond >= T_CBZ is a cbz (T_CBZ) or cbnz (T_CBZ + 1). cz_at is where
@@ -121,6 +124,12 @@ struct t_fn {
      * one value. fl_end is -1 when there is none. */
     int fl_end, fl_reg;
     long fl_imm;
+    /* The last store of a register to a frame slot (wr): where its code
+     * ended, the register, the slot's offset and the base. A read of the
+     * same slot with nothing emitted since and no label placed is the
+     * register already (rd). ls_end is -1 when there is none. */
+    int ls_end, ls_reg, ls_fb;
+    long ls_off;
     /* Which of the scratch registers r9-r11 the prologue saves: all of
      * them until a pass has shown which the body uses. */
     unsigned scr_save;
@@ -146,6 +155,20 @@ struct t_fn {
      * live into or out of it, which it is computed from (lo_busy_map). */
     unsigned lofree;
     unsigned *lv_busy;
+
+    /* ---- the 64-bit constant pool (t_lit64 in codegen.c) --------------- */
+    /* Per instruction: 1 for an IR_CONST that loads from the pool, 0 for
+     * one built with movw/movt -- not a candidate, or out of the pool's
+     * reach on a first pass (then the pass is made again without it).
+     * NULL when the function has no candidate. */
+    char *lp_use;
+    unsigned long long *lp_val;   /* this pass's pool, in order */
+    int lp_n, lp_cap;
+    /* Once a first pass found a load out of reach: the pool's order,
+     * fixed (t_lit64_fit), which later passes keep. */
+    int lp_planned;
+    struct t_lsite { int at, ins, idx, rt, rt2; } *lp_site;
+    int lp_nsite, lp_capsite;
 
     /* ---- ARMv6-M only (v6m.c); zero at the other levels ---------------- */
     /* The literal pool being collected, and the LDRs waiting for it. */
@@ -191,6 +214,9 @@ int tcg_call_sret_bytes(const struct ir_ins *i);
 int tcg_fn_sret_bytes(const struct ir_func *fn);
 long tcg_slot_of(const struct t_fn *F, int v);
 int tcg_faddr(const struct t_fn *F, int v, long *off);
+/* The exclusion map for the allocator with a frame address read once
+ * added (codegen.c's t_faddr_excl); NULL for `base` as it is. */
+char *tcg_faddr_excl(const struct t_fn *F, const char *base);
 void tcg_want_label(struct t_fn *F, int at, int label, int cond);
 void tcg_note_call(struct t_sites *st, int at, struct func *target);
 void tcg_note_ext(struct t_sites *st, int at, struct func *callee);
@@ -209,6 +235,18 @@ int *tcg_pair_alloc(struct ir_func *fn, const char *wide, const char *excl,
                     int *used, int *nused);
 const struct ra_target *tcg_ra(void);
 int tcg_regalloc(void);
+/* r6/r7 in the ARMv6-M pool too, this attempt (gen_func_best), and how
+ * v6m.c says an instruction found no scratch register free: the attempt
+ * is thrown away. */
+int tcg_ext(void);
+void tcg_role_fail(void);
+/* Per instruction, the registers holding a value live into or out of it
+ * (lo_busy_map), and those over n..n+span with its operands (t_busy); and
+ * whether the instruction's lowering names no low register of its own
+ * (lo_op_ok). */
+unsigned *tcg_lo_busy_map(const struct t_fn *F);
+unsigned tcg_busy(const struct t_fn *F, int n, int span);
+int tcg_lo_op_ok(const struct t_fn *F, const struct ir_ins *i);
 /* -O0: the allocator runs for the temporaries, every source variable kept
  * in its slot (codegen.c's g_t_o0). */
 int tcg_o0(void);

@@ -49,7 +49,8 @@ struct expr {
     struct type *ty;      /* set by sema on every node */
     struct type *undecayed; /* sema: original array type when ty is the
                              * decayed pointer (sizeof needs it) */
-    long num;             /* EXPR_NUM; EXPR_STR: byte length incl NUL */
+    long num;             /* EXPR_NUM; EXPR_STR: element count incl NUL
+                           * (str_width bytes each) */
     double fnum;          /* EXPR_FNUM */
     int imag;             /* EXPR_FNUM: a GNU imaginary constant — its type
                            * is complex and its value 0 + fnum*i */
@@ -83,6 +84,10 @@ struct expr {
     struct expr *args[MAX_PARAMS]; /* EXPR_CALL; lhs is the callee
                            * expression (a VAR for direct calls) */
     int nargs;
+    int atomic_mo;        /* EXPR_CALL of an atomic builtin: its memory
+                           * order when sema could fold it, as 1 + the
+                           * __ATOMIC_* value (a compare-exchange's failure
+                           * order merged in); 0, not known, is seq_cst */
     struct func *callee;  /* EXPR_CALL: direct target (sema), or NULL
                            * for a call through a function pointer */
     struct expr **elems;  /* EXPR_INITLIST */
@@ -198,6 +203,10 @@ struct asm_operand {
 
 /* asm_operand.reg sentinels beyond -2 (allocatable) and -3 (an xmm). */
 #define ASM_REG_IMM     (-4)  /* aarch64: a folded immediate (is_imm) */
+#define ASM_REG_TIED    (-6)  /* Thumb: an input "N" naming output N's own
+                               * lvalue (imm = N); output N became in-out and
+                               * carries the value, and %<this> names its
+                               * register (sema.c asm_tie_inputs) */
 #define ASM_REG_INVALID (-5)  /* the constraint means nothing on this target;
                                * irgen refuses it only if the asm is actually
                                * generated — gcc accepts x86 constraints inside
@@ -252,6 +261,7 @@ struct stmt {
     const char *asm_reg;  /* STMT_DECL: a register-asm binding, `register T
                            * x __asm__("r10")` — NULL for an ordinary local */
     int user_align;       /* STMT_DECL: __attribute__((aligned(N))); 0 = none */
+    const char *section;  /* STMT_DECL: a static local's section("name") */
     int vla_sp;           /* STMT_DECL of a VLA (ty_is_vla(dty)): the hidden
                            * slot the stack pointer is saved in just before
                            * the allocation; restoring it releases the VLA */
@@ -261,6 +271,8 @@ struct stmt {
     struct expr *init, *step; /* FOR: either may be NULL */
     struct stmt *initdecl;    /* FOR: `for (int i = 0; ...)` */
     struct stmt *thn, *els;   /* IF: els may be NULL */
+    int cond_const;       /* IF: 1 the condition folds to false, 2 to true
+                           * (sema); 0 not a constant */
     struct stmt *body;    /* WHILE/FOR: the controlled statement;
                            * BLOCK: the child list */
     struct stmt *next;
@@ -359,10 +371,26 @@ struct func {
     /* __attribute__((constructor)) / ((destructor)): its address goes in
      * .init_array / .fini_array, and the startup code walks them. */
     int is_ctor, is_dtor;
-    /* __attribute__((signal)) / ((interrupt)): an interrupt handler.
-     * 1 signal, 2 interrupt (which re-enables interrupts on entry), 0 an
-     * ordinary function. Only AVR acts on it; see the attribute table. */
+    /* constructor(N) / destructor(N): N + 1, 0 for none -- the address
+     * goes in .init_array.NNNNN / .fini_array.NNNNN instead */
+    int ctor_prio, dtor_prio;
+    /* __attribute__((signal)) / ((interrupt)): an interrupt handler, 0
+     * for an ordinary function. ISR_SIGNAL and ISR_INTERRUPT are AVR's
+     * two (interrupt re-enables interrupts on entry); ISR_INTERRUPT is
+     * also the plain form everywhere else -- machine mode on RISC-V, the
+     * EIC form on MIPS. ISR_SUPERVISOR is RISC-V's interrupt("supervisor")
+     * (sret), ISR_MIPS_VECTOR + n MIPS's interrupt("vector=sw0".."hw5")
+     * (n 0..7, the interrupt line whose mask bits and below are cleared),
+     * and ISR_MASKED MIPS's keep_interrupts_masked, or-ed into either
+     * MIPS form. AVR, RISC-V and MIPS32 act on it; see the attribute
+     * table. */
     int is_isr;
+#define ISR_SIGNAL      1
+#define ISR_INTERRUPT   2
+#define ISR_SUPERVISOR  3
+#define ISR_MIPS_VECTOR 0x10
+#define ISR_MASKED      0x100
+#define ISR_KIND(v)     ((v) & 0xff)
     /* __attribute__((naked)): no prologue, no epilogue -- the body is asm
      * statements, assembled as a block of its own (src/driver/main.c). */
     int is_naked;
@@ -376,6 +404,8 @@ struct func {
      * unused, force or forbid inlining, warn at each call, warn when a
      * caller throws the result away. `vis` is an ELF visibility. */
     int attr_used, attr_unused, attr_always_inline, attr_noinline;
+    int attr_no_instrument;  /* no_instrument_function: -finstrument-functions
+                              * leaves it alone (sticky across declarations) */
     int attr_deprecated, attr_warn_unused_result;
     /* C11 6.7.4p7. This declaration said `inline` / `extern`, and the
      * function carries __attribute__((gnu_inline)). Sema folds every
@@ -577,6 +607,12 @@ struct tagdef {
     enum tag_kind kind;
     struct type *ty;      /* struct/union node; NULL for enums */
     struct tagdef *next;
+    /* The block it was declared in (0: file scope), and whether that block
+     * has closed. A closed block's tags stay on the list, for the tools
+     * that list a unit's types, and are no longer found by name: two
+     * functions may each define `union llreg_u`, as CMSIS's cmsis_gcc.h
+     * does in every __SMLALD-style intrinsic. */
+    int blk, dead;
 };
 
 /* One step of a designator after its first: `.field` or `[index]`. */

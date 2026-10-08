@@ -217,9 +217,31 @@ ones) are refused by name or handled where GCC's objects need them.
 
 By name: the FPU and `-m64bit-doubles`, big-endian data, `-mgcc-abi`,
 small data and PID (`-msmall-data-limit`, `-mpid`), interrupt and fast
-interrupt functions until the harness can check them, inline assembly
-and `.s` files (no RX assembler yet), C++ (its front end lays out LP64
-and SysV bit-fields), `__int128`, and whatever the exec corpus finds.
+interrupt functions until the harness can check them, C++ (its front end
+lays out LP64 and SysV bit-fields), `__int128`, and whatever the exec
+corpus finds. (Inline assembly and `.s` files were refused until the
+assembler below.)
+
+## The assembler
+
+src/arch/rx/asm.c parses GNU RX syntax and encodes through emit.c's
+encoders -- the ones the code generator uses, with a few variants for what
+only an assembler writes: a written `0[rN]` takes the dsp:5 form GNU as
+gives it, `mov #imm, dsp[rN]` chooses its #uimm8 form by the value as
+written, `sub #imm` beyond 0..15 is `add #-imm, rd, rd` in the li form,
+and a three-operand shift keeps its three-operand form. New encoders cover
+the auto-increment moves, the bit operations on memory and by a register,
+the string and accumulator instructions, `rtfi`, `sat`/`satr` and
+`push.b`/`.w` and `push` of memory. It serves inline asm (rx/irgen.c
+substitutes the operands as GCC's RX port prints them: `r3`, `#5`,
+`[r3]`), file-scope blocks and naked functions, and `.s`/`.S` files
+through src/as/gas.c, which gained relaxation by levels for RX's 1-to-4
+byte branches, GNU's nop padding, `!` as a statement separator and `;` as
+the comment, and section-end padding. A branch relaxes as GNU as relaxes
+it, except that a conditional branch -32768 or -32767 bytes back takes the
+`bra.a` form: GNU as's `bra.w` there is wrapped. Operands avoid r0, r5,
+r13-r15; a callee-saved register a template changes is saved by the
+prologue.
 
 ## Tests
 
@@ -229,6 +251,7 @@ and SysV bit-fields), `__int128`, and whatever the exec corpus finds.
 | `tests/golden/rx-exec.sh` | `tests/exec/*.c` on the gdbsim board at -O0, -O1, -O2 and -Os |
 | `tests/golden/rx-abi.sh` | calls in both directions against rx-elf-gcc (skipped without one), the shared embedded ABI programs and the RX-specific ones |
 | `tests/golden/rx-refuse.sh` | the object's header, the data model and bit-field layout, the accepted and refused options and constructs |
+| `tests/golden/rx-asm.sh` | the assembler's 2847-statement vocabulary byte for byte against rx-elf-as and as text against rx-elf-objdump; a .S file's linked image against GNU as's; inline asm, a naked function, a block and a .S file (EmbCC's and GNU's) on the board at -O0..-Os; 59 statements, 11 templates and 5 files refused by name |
 
 ## Status
 

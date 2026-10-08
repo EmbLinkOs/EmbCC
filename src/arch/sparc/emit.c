@@ -15,20 +15,6 @@ const char *sparc_reg_name(int r)
     return r >= 0 && r < 32 ? reg_names[r] : "?";
 }
 
-/* op = 10's op3 values not in emit.h's arithmetic enum, and op = 11's
- * (memory), as the SPARC V8 manual's appendix F names them. */
-enum {
-    O3_RDY = 0x28, O3_RDPSR = 0x29, O3_RDWIM = 0x2a, O3_RDTBR = 0x2b,
-    O3_WRY = 0x30, O3_WRPSR = 0x31, O3_WRWIM = 0x32, O3_WRTBR = 0x33,
-    O3_JMPL = 0x38, O3_RETT = 0x39, O3_TICC = 0x3a, O3_FLUSH = 0x3b,
-    O3_SAVE = 0x3c, O3_RESTORE = 0x3d
-};
-enum {
-    M_LD = 0x00, M_LDUB = 0x01, M_LDUH = 0x02, M_LDD = 0x03, M_ST = 0x04,
-    M_STB = 0x05, M_STH = 0x06, M_STD = 0x07, M_LDSB = 0x09, M_LDSH = 0x0a,
-    M_LDSTUB = 0x0d, M_SWAP = 0x0f, M_CASA = 0x3c
-};
-enum { OP2_UNIMP = 0, OP2_BICC = 2, OP2_SETHI = 4 };
 
 static void need_reg(int r)
 {
@@ -146,7 +132,7 @@ void sparc_mov(struct code *c, int rd, int rs)
 
 void sparc_sethi(struct code *c, int rd, unsigned long imm22)
 {
-    sparc_w(c, sparc_enc_f2(rd, OP2_SETHI, imm22));
+    sparc_w(c, sparc_enc_f2(rd, SP_OP2_SETHI, imm22));
 }
 
 void sparc_li(struct code *c, int rd, long long v)
@@ -176,10 +162,10 @@ int sparc_li_len(long long v)
 static int load_op3(int size, int sign)
 {
     switch (size) {
-    case 1: return sign ? M_LDSB : M_LDUB;
-    case 2: return sign ? M_LDSH : M_LDUH;
-    case 4: return M_LD;
-    case 8: return M_LDD;
+    case 1: return sign ? SPM_LDSB : SPM_LDUB;
+    case 2: return sign ? SPM_LDSH : SPM_LDUH;
+    case 4: return SPM_LD;
+    case 8: return SPM_LDD;
     default:
         internal_error("sparc: a %d-byte load", size);
         return 0;
@@ -189,10 +175,10 @@ static int load_op3(int size, int sign)
 static int store_op3(int size)
 {
     switch (size) {
-    case 1: return M_STB;
-    case 2: return M_STH;
-    case 4: return M_ST;
-    case 8: return M_STD;
+    case 1: return SPM_STB;
+    case 2: return SPM_STH;
+    case 4: return SPM_ST;
+    case 8: return SPM_STD;
     default:
         internal_error("sparc: a %d-byte store", size);
         return 0;
@@ -236,73 +222,73 @@ void sparc_store_rr(struct code *c, int rd, int base, int index, int size)
 
 void sparc_ldstub(struct code *c, int rd, int base, int off)
 {
-    sparc_w(c, sparc_enc_ri(3, rd, M_LDSTUB, base, off));
+    sparc_w(c, sparc_enc_ri(3, rd, SPM_LDSTUB, base, off));
 }
 
 void sparc_swap(struct code *c, int rd, int base, int off)
 {
-    sparc_w(c, sparc_enc_ri(3, rd, M_SWAP, base, off));
+    sparc_w(c, sparc_enc_ri(3, rd, SPM_SWAP, base, off));
 }
 
 void sparc_casa(struct code *c, int rs1, int asi, int rs2, int rd)
 {
     need_field(asi, 0, 255, "asi");
-    sparc_w(c, sparc_enc_rr(3, rd, M_CASA, rs1, rs2) |
+    sparc_w(c, sparc_enc_rr(3, rd, SPM_CASA, rs1, rs2) |
                ((unsigned long)asi << 5));
 }
 
 /* stbar is `rd %asr15, %g0` */
 void sparc_stbar(struct code *c)
 {
-    sparc_w(c, sparc_enc_rr(2, SP_G0, O3_RDY, 15, SP_G0));
+    sparc_w(c, sparc_enc_rr(2, SP_G0, SP_O3_RDY, 15, SP_G0));
 }
 
 void sparc_flush(struct code *c, int rs1, int off)
 {
-    sparc_w(c, sparc_enc_ri(2, SP_G0, O3_FLUSH, rs1, off));
+    sparc_w(c, sparc_enc_ri(2, SP_G0, SP_O3_FLUSH, rs1, off));
 }
 
 /* ---- state registers ---------------------------------------------------- */
 
 void sparc_rdy(struct code *c, int rd)
 {
-    sparc_w(c, sparc_enc_rr(2, rd, O3_RDY, SP_G0, SP_G0));
+    sparc_w(c, sparc_enc_rr(2, rd, SP_O3_RDY, SP_G0, SP_G0));
 }
 
 void sparc_rdpsr(struct code *c, int rd)
 {
-    sparc_w(c, sparc_enc_rr(2, rd, O3_RDPSR, SP_G0, SP_G0));
+    sparc_w(c, sparc_enc_rr(2, rd, SP_O3_RDPSR, SP_G0, SP_G0));
 }
 
 void sparc_rdwim(struct code *c, int rd)
 {
-    sparc_w(c, sparc_enc_rr(2, rd, O3_RDWIM, SP_G0, SP_G0));
+    sparc_w(c, sparc_enc_rr(2, rd, SP_O3_RDWIM, SP_G0, SP_G0));
 }
 
 void sparc_rdtbr(struct code *c, int rd)
 {
-    sparc_w(c, sparc_enc_rr(2, rd, O3_RDTBR, SP_G0, SP_G0));
+    sparc_w(c, sparc_enc_rr(2, rd, SP_O3_RDTBR, SP_G0, SP_G0));
 }
 
 /* The writes store rs1 XOR rs2 -- `wr %g0, r, %y` writes r. */
 void sparc_wry(struct code *c, int rs1, int rs2)
 {
-    sparc_w(c, sparc_enc_rr(2, SP_G0, O3_WRY, rs1, rs2));
+    sparc_w(c, sparc_enc_rr(2, SP_G0, SP_O3_WRY, rs1, rs2));
 }
 
 void sparc_wrpsr(struct code *c, int rs1, int rs2)
 {
-    sparc_w(c, sparc_enc_rr(2, SP_G0, O3_WRPSR, rs1, rs2));
+    sparc_w(c, sparc_enc_rr(2, SP_G0, SP_O3_WRPSR, rs1, rs2));
 }
 
 void sparc_wrwim(struct code *c, int rs1, int rs2)
 {
-    sparc_w(c, sparc_enc_rr(2, SP_G0, O3_WRWIM, rs1, rs2));
+    sparc_w(c, sparc_enc_rr(2, SP_G0, SP_O3_WRWIM, rs1, rs2));
 }
 
 void sparc_wrtbr(struct code *c, int rs1, int rs2)
 {
-    sparc_w(c, sparc_enc_rr(2, SP_G0, O3_WRTBR, rs1, rs2));
+    sparc_w(c, sparc_enc_rr(2, SP_G0, SP_O3_WRTBR, rs1, rs2));
 }
 
 /* ---- control flow ------------------------------------------------------- */
@@ -321,7 +307,7 @@ unsigned long sparc_enc_branch(int cond, int annul, long off)
                        off);
     need_field(off, -8388608L, 8388604L, "branch displacement");
     return ((unsigned long)(annul ? 1 : 0) << 29) |
-           ((unsigned long)cond << 25) | ((unsigned long)OP2_BICC << 22) |
+           ((unsigned long)cond << 25) | ((unsigned long)SP_OP2_BICC << 22) |
            ((unsigned long)(off / 4) & 0x3fffffUL);
 }
 
@@ -355,27 +341,27 @@ void sparc_call(struct code *c) { sparc_w(c, sparc_enc_call(0)); }
 
 void sparc_jmpl(struct code *c, int rd, int rs1, long long off)
 {
-    sparc_w(c, sparc_enc_ri(2, rd, O3_JMPL, rs1, off));
+    sparc_w(c, sparc_enc_ri(2, rd, SP_O3_JMPL, rs1, off));
 }
 
 void sparc_save(struct code *c, int rd, int rs1, long long imm)
 {
-    sparc_w(c, sparc_enc_ri(2, rd, O3_SAVE, rs1, imm));
+    sparc_w(c, sparc_enc_ri(2, rd, SP_O3_SAVE, rs1, imm));
 }
 
 void sparc_save_rr(struct code *c, int rd, int rs1, int rs2)
 {
-    sparc_w(c, sparc_enc_rr(2, rd, O3_SAVE, rs1, rs2));
+    sparc_w(c, sparc_enc_rr(2, rd, SP_O3_SAVE, rs1, rs2));
 }
 
 void sparc_restore(struct code *c, int rd, int rs1, int rs2)
 {
-    sparc_w(c, sparc_enc_rr(2, rd, O3_RESTORE, rs1, rs2));
+    sparc_w(c, sparc_enc_rr(2, rd, SP_O3_RESTORE, rs1, rs2));
 }
 
 void sparc_rett(struct code *c, int rs1, long long off)
 {
-    sparc_w(c, sparc_enc_ri(2, SP_G0, O3_RETT, rs1, off));
+    sparc_w(c, sparc_enc_ri(2, SP_G0, SP_O3_RETT, rs1, off));
 }
 
 void sparc_trap(struct code *c, int cond, int rs1, int imm7)
@@ -384,11 +370,11 @@ void sparc_trap(struct code *c, int cond, int rs1, int imm7)
     need_field(imm7, 0, 127, "trap number");
     need_reg(rs1);
     sparc_w(c, (2UL << 30) | ((unsigned long)cond << 25) |
-               ((unsigned long)O3_TICC << 19) | ((unsigned long)rs1 << 14) |
+               ((unsigned long)SP_O3_TICC << 19) | ((unsigned long)rs1 << 14) |
                (1UL << 13) | (unsigned long)imm7);
 }
 
 void sparc_unimp(struct code *c, unsigned long imm22)
 {
-    sparc_w(c, sparc_enc_f2(SP_G0, OP2_UNIMP, imm22));
+    sparc_w(c, sparc_enc_f2(SP_G0, SP_OP2_UNIMP, imm22));
 }

@@ -619,6 +619,7 @@ nothing on.
 | `-Wlogical-op` | `a && a` or `a \|\| a` with identical operands | `-Wextra` |
 | `-Wmaybe-uninitialized` | A local variable read on a path where only some paths wrote it | `-Wall` |
 | `-Wparentheses` | A comparison as an unparenthesized operand of `&`, `\|` or `^` | `-Wall` |
+| `-Wprio-ctor-dtor` | A `constructor` or `destructor` priority from 0 to 100, which the implementation reserves | default |
 | `-Wshadow` | A local declaration that hides a local variable, a parameter or a file-scope variable | none |
 | `-Wshift-count-overflow` | A constant shift count that is negative or not less than the operand width | `-Wall` |
 | `-Wsign-compare` | A comparison that converts a possibly negative signed operand to unsigned | `-Wextra` |
@@ -1195,7 +1196,7 @@ holds both.
 
 | Pass | Decisions | Reasons |
 |---|---|---|
-| `inline` | `inlined`, `not-inlined` | `small-enough`, `always_inline`; `callee-too-large`, `not-a-sole-callee-at-O1`, `callee-not-defined-here`, `would-be-recursive`, `callee-is-noinline`, `callee-is-weak`, `callee-is-varargs`, `callee-computes-in-__int128`, `callee-has-exception-regions`, `returns-a-struct`, `parameter-is-not-a-simple-scalar`, `returns-a-value-wider-than-a-vreg`, `callee-uses-va_start`, `callee-has-a-vla`, `callee-uses-a-computed-goto`, `callee-calls-a-struct-returning-function` |
+| `inline` | `inlined`, `not-inlined` | `small-enough`, `always_inline`; `callee-too-large`, `not-always_inline-at-O0`, `not-a-sole-callee-at-O1`, `callee-not-defined-here`, `would-be-recursive`, `callee-is-noinline`, `callee-is-weak`, `callee-is-varargs`, `callee-computes-in-__int128`, `callee-has-exception-regions`, `returns-a-struct`, `parameter-is-not-a-simple-scalar`, `returns-a-value-wider-than-a-vreg`, `callee-uses-va_start`, `callee-has-a-vla`, `callee-uses-a-computed-goto`, `callee-calls-a-struct-returning-function` |
 | `mem2reg` | `promoted-to-register`, `kept-in-memory` (one per local variable, at its declaration) | `scalar-and-never-addressed`; `address-is-taken`, `declared-volatile`, `read-is-volatile`, `write-is-volatile`, `read-is-partial-or-extending`, `write-is-partial`, `not-a-scalar-integer-pointer-or-float`, `not-4-or-8-bytes`, `type-unknown` |
 | `sroa` | `split-into-scalars`, `kept-whole` (one per aggregate local) | `address-never-escapes`; `address-escapes`, `address-held-in-a-reassigned-temp`, `declared-volatile`, `access-is-volatile`, `access-is-not-1-2-4-or-8-bytes`, `access-runs-outside-the-object`, `two-accesses-overlap-at-different-widths`, `too-many-pieces`, `too-large-to-split`, `is-a-wide-scalar`, `is-a-variable-length-array` |
 | `sccp` | `branch-always-jumps`, `branch-never-jumps` | `condition-is-a-constant` |

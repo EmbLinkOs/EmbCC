@@ -38,7 +38,7 @@
  *     -mserialize-volatile has them.
  *
  * Refused by name: a jump table (target_jump_tables keeps a dense switch
- * a decision tree), atomics wider than a word, inline asm,
+ * a decision tree), atomics wider than a word,
  * the frame and return address, a function too large for its branches or
  * its literal pool, and __int128 (which does not exist on ILP32). THE RULE.
  */
@@ -222,7 +222,7 @@ static const struct ra_target XT_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg: the s32c1i loops read through rdr */
     0,
-    0               /* asm_in_reg: there is no inline asm */
+    1               /* asm_in_reg: see IR_ASM */
 };
 
 static int g_xt_regalloc;
@@ -2301,10 +2301,31 @@ static void gen_ins(struct xt_fn *F, int n)
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG)
         need_word_atomic(F, i);
-    if (i->op == IR_FRAMEADDR)
-        xt_refuse(F, i, "__builtin_frame_address or __builtin_return_address "
-                        "(the windowed ABI keeps a caller's frame in its "
-                        "register window, not in a chain)");
+    /* Level 0 only (irgen): the windowed ABI keeps a caller's frame in
+     * its register window, not in a chain. The frame address is a1 as
+     * the function was entered (frame base + frame: entry, and movsp for
+     * a large frame, take exactly `frame` off it). The return address is
+     * a0, which the windowed code never reuses -- but its top two bits
+     * are the caller's window increment, not address bits; as GCC does,
+     * they are replaced by those of this function's own address, the
+     * 1 GiB region the call came from (an ESP32's IRAM is 0x4008xxxx, so
+     * they are not zero). */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2) {
+            xt_slli(F->t, d, XT_A0, 2);          /* a0's low 30 bits */
+            xt_srli(F->t, d, d, 2);
+            lit_load(F, TMP, LIT_FUNC, 0, F->fn->src);
+            xt_extui(F->t, TMP, TMP, 30, 2);    /* the region's two */
+            xt_slli(F->t, TMP, TMP, 30);
+            xt_alu(F->t, XT_OR, d, d, TMP);
+        } else {
+            addr_sp(F, d, F->frame);
+        }
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
 
     /* The high word of a 64-bit value, shifted: one register. */
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {
@@ -2772,9 +2793,154 @@ static void gen_ins(struct xt_fn *F, int n)
         return;
     }
 
-    case IR_ASM:
-        xt_refuse(F, i, "inline assembly");
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (xtensa/irgen.c irg_asm_xtensa)
+         * against the vocabulary in xtensa/asm.c. This only places the
+         * operands and splices the bytes -- LoongArch's lowering with the
+         * windowed registers' roles.
+         *
+         * To the allocator (ra_target.asm_in_reg) a value live across an
+         * asm keeps out of the registers it may change, which irgen
+         * recorded (ir_asm.clob): its operands', its clobbers', the
+         * template's, a windowed call's, and its scratch. The operands are
+         * values like any other, moved into and out of their registers
+         * here, each way as ONE parallel move -- one at a time would
+         * overwrite a register a later operand is still to be read from.
+         * No operand is ever in a0/a1 (the return address and sp), a7
+         * (the frame base under alloca) or a14/a15, the scratch the moves
+         * and the frame accesses below use. */
+        struct ir_asm *ia = i->asm_ir;
+        /* A continuation's value was written by the asm before it, which
+         * must be right there: nothing may run between an asm and the
+         * moment its registers are read. */
+        if (ia->cont) {
+            int k = n - 1;
+            while (k >= 0 && fn->ins[k].op == IR_ASM && fn->ins[k].asm_ir &&
+                   fn->ins[k].asm_ir->cont)
+                k--;
+            if (k < 0 || fn->ins[k].op != IR_ASM)
+                internal_error("xtensa: %s: an asm's further output is not "
+                               "right after the asm", fn->name);
+            return;
+        }
+        int vreg_[16], vdst[16], nval = 0;
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].val) {
+                vreg_[nval] = ia->out[k].reg;
+                vdst[nval++] = i->dst;
+            }
+        for (int q = n + 1; q < fn->nins && fn->ins[q].op == IR_ASM &&
+                            fn->ins[q].asm_ir && fn->ins[q].asm_ir->cont &&
+                            nval < 16; q++) {
+            vreg_[nval] = fn->ins[q].asm_ir->out[0].reg;
+            vdst[nval++] = fn->ins[q].dst;
+        }
+        /* a7 is the frame base of a function that calls alloca: every
+         * slot below is addressed through it */
+        if (F->fb == FBREG && (ia->clob >> FBREG & 1))
+            xt_refuse(F, i, "an asm that changes a7, the frame base of a "
+                            "function that calls alloca");
+        for (int k = 0; k < ia->nin; k++)
+            if (ia->in[k].reg < XT_A2 || ia->in[k].reg == FBREG ||
+                ia->in[k].reg >= SCR)
+                internal_error("xtensa: %s: an asm operand in %s", fn->name,
+                               xt_reg_name(ia->in[k].reg));
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && ia->out[k].size > 4)
+                xt_refuse(F, i, "an asm output wider than a register");
+        int naddr = 0;
+        for (int k = 0; k < ia->nout; k++)
+            naddr += !ia->out[k].val && !ia->out[k].mem;
+        if (ia->scr < 0 && naddr > 0)
+            xt_refuse(F, i, "an asm with no scratch register left around it");
+        /* In: an input's value, an "m" output's address, and a "+"
+         * output's address (its current value is loaded through it
+         * below) -- the register-resident ones as one parallel move
+         * (a14 breaks a cycle), then the rest from their slots. */
+        {
+            int pd[40], ps[40], npm = 0;
+            for (int k = 0; k < ia->nin && npm < 40; k++)
+                if (in_reg(F, ia->in[k].temp)) {
+                    pd[npm] = ia->in[k].reg;
+                    ps[npm++] = F->loc[ia->in[k].temp];
+                }
+            for (int k = 0; k < ia->nout && npm < 40; k++)
+                if (!ia->out[k].val &&
+                    (ia->out[k].mem || ia->out[k].inout) &&
+                    in_reg(F, ia->out[k].temp)) {
+                    pd[npm] = ia->out[k].reg;
+                    ps[npm++] = F->loc[ia->out[k].temp];
+                }
+            if (npm) {
+                int od[80], os[80];
+                int m = ra_parallel_move(pd, ps, npm, SCR, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    xt_refuse(F, i, "an asm whose operands cannot be moved "
+                                    "into place");
+                for (int k = 0; k < m; k++)
+                    xt_mov(t, od[k], os[k]);
+            }
+            for (int k = 0; k < ia->nin; k++)
+                if (!in_reg(F, ia->in[k].temp))
+                    rd(F, ia->in[k].temp, ia->in[k].reg);
+            for (int k = 0; k < ia->nout; k++) {
+                const struct ir_asm_op *o = &ia->out[k];
+                if (o->val || !(o->mem || o->inout))
+                    continue;
+                if (!in_reg(F, o->temp))
+                    rd(F, o->temp, o->reg);
+                /* A "+" output starts with the lvalue's CURRENT value. */
+                if (o->inout && !o->mem)
+                    xt_load(t, o->reg, o->reg, 0, o->size, 0);
+            }
+        }
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        /* Out, through an address: the address is live across the asm
+         * (regalloc.c counts it so), so it is still there. An "m" output
+         * was written BY the template through the address its register
+         * holds; storing over it would destroy what it wrote. */
+        for (int k = 0; k < ia->nout; k++) {
+            const struct ir_asm_op *o = &ia->out[k];
+            if (o->mem || o->val)
+                continue;
+            rd(F, o->temp, ia->scr);
+            xt_store(t, o->reg, ia->scr, 0, o->size);
+        }
+        /* Out, as values: each to its home -- those in memory first,
+         * while every operand register still holds what the asm left,
+         * then the register-resident ones as one parallel move. */
+        {
+            int pd[16], ps[16], npm = 0;
+            for (int k = 0; k < nval; k++) {
+                if (vdst[k] < 0)
+                    continue;
+                /* An output nothing reads has no home to fill: the
+                 * allocator may give two such dead values one register,
+                 * and two writes to it are no parallel move. */
+                if (F->usecnt && F->usecnt[vdst[k]] == 0)
+                    continue;
+                if (in_reg(F, vdst[k])) {
+                    pd[npm] = F->loc[vdst[k]];
+                    ps[npm++] = vreg_[k];
+                } else {
+                    wr(F, vdst[k], vreg_[k]);
+                }
+            }
+            if (npm) {
+                int od[32], os[32];
+                int m = ra_parallel_move(pd, ps, npm, SCR, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    xt_refuse(F, i, "an asm whose outputs cannot be moved "
+                                    "into place");
+                for (int k = 0; k < m; k++)
+                    xt_mov(t, od[k], os[k]);
+            }
+        }
         return;
+    }
 
     /* ---- atomics: s32c1i, bracketed by memw ------------------------- */
     case IR_XCHG: case IR_XADD: case IR_ARMW: {

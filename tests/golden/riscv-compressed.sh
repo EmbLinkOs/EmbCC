@@ -49,7 +49,7 @@ for w in 32 64; do
     "$out/riscvcheck" --csweep$w > "$out/mine$w.bin" 2> "$out/words$w.hex" || {
         echo "rv$w: the sweep did not run"; fail=1; continue; }
     n=$(wc -l < "$out/words$w.hex" | tr -d ' ')
-    "$MC" --disassemble -triple=riscv$w -mattr=+m "$out/words$w.hex" \
+    "$MC" --disassemble -triple=riscv$w -mattr=+m,+f,+d "$out/words$w.hex" \
         > "$out/dis$w.s" 2> "$out/dis$w.err" || {
         echo "rv$w: llvm-mc could not disassemble the sweep"
         head -3 "$out/dis$w.err"; fail=1; continue; }
@@ -58,7 +58,7 @@ for w in 32 64; do
         echo "      the generator is emitting a reserved encoding"
         grep -n 'unknown' "$out/dis$w.s" | head -3; fail=1; continue
     fi
-    "$MC" -triple=riscv$w -mattr=+m,+c -filetype=obj "$out/dis$w.s" \
+    "$MC" -triple=riscv$w -mattr=+m,+f,+d,+c -filetype=obj "$out/dis$w.s" \
         -o "$out/ref$w.o" 2> "$out/asm$w.err" || {
         echo "rv$w: llvm-mc could not reassemble it"
         head -3 "$out/asm$w.err"; fail=1; continue; }

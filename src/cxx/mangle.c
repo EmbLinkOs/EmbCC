@@ -875,6 +875,15 @@ static void mangle_type(struct mbuf *m, struct cty *t)
         if (target_get() == TARGET_AARCH64 || target_get() == TARGET_THUMB) {
             /* AAPCS and AAPCS64: struct std::__va_list */
             put_component(m, "St9__va_list");
+        } else if (target_get() == TARGET_XTENSA) {
+            /* g++'s: the record itself, by value (13__va_list_tag) */
+            int i = sub_find(m, "13__va_list_tag");
+            if (i >= 0) {
+                put_sub(m, i);
+                return;
+            }
+            put_component(m, "13__va_list_tag");
+            sub_add(m, "13__va_list_tag");
         } else if (target_va_list_is_pointer()) {
             /* RISC-V's (and the other one-pointer ones'): void * */
             mangle_type(m, ct_ptr(ct_basic(CT_VOID)));

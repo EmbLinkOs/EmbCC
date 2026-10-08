@@ -426,6 +426,13 @@ void rx_add3(struct code *c, long imm, int rs, int rd)
         rx_ri(c, RX_ADD, v, rd);
         return;
     }
+    rx_add3_li(c, v, rs, rd);
+}
+
+void rx_add3_li(struct code *c, long imm, int rs, int rd)
+{
+    long v = s32(imm);
+    reg_ok(rs); reg_ok(rd);
     code_byte(c, 0x70 | li_field(v));       /* 0111 00li rs2 rd */
     code_byte(c, rs << 4 | rd);
     li_bytes(c, v);
@@ -434,6 +441,13 @@ void rx_add3(struct code *c, long imm, int rs, int rd)
 /* ---- shifts ------------------------------------------------------------- */
 
 void rx_shift_i(struct code *c, int op, int n, int rs, int rd)
+{
+    rx_shift_i_x(c, op, n, rs, rd, 0);
+}
+
+/* `three`: the fd form even when rs == rd, as GNU as encodes a shift
+ * written with three operands. */
+void rx_shift_i_x(struct code *c, int op, int n, int rs, int rd, int three)
 {
     int k;
     reg_ok(rs); reg_ok(rd);
@@ -453,7 +467,7 @@ void rx_shift_i(struct code *c, int op, int n, int rs, int rd)
     case RX_SHLL: k = 2; break;
     default: bad("shift operation", op);
     }
-    if (rs == rd) {                          /* 0110 1kk i iiii rd */
+    if (rs == rd && !three) {                /* 0110 1kk i iiii rd */
         code_byte(c, 0x68 | k << 1 | n >> 4);
         code_byte(c, (n & 15) << 4 | rd);
         return;
@@ -482,13 +496,22 @@ void rx_ext(struct code *c, int size, int sign, int rs, int rd)
 
 void rx_load(struct code *c, int size, int sign, long dsp, int rs, int rd)
 {
+    rx_load_x(c, size, sign, dsp, rs, rd, 0);
+}
+
+/* `dsp0`: a displacement was written, so a zero one takes the dsp:5 form
+ * where that form exists, as GNU as encodes `mov.l 0[r1], r2` (a8 12) and
+ * `[r1]` without one (ec 12). */
+void rx_load_x(struct code *c, int size, int sign, long dsp, int rs, int rd,
+               int dsp0)
+{
     long u = units_of(size, dsp);
     reg_ok(rs); reg_ok(rd);
     if (size == RX_L)
         sign = 1;
     if (!sign && u > 32767)
         bad("movu displacement QEMU would read as negative", dsp);
-    if (u >= 1 && u <= 31 && rs < 8 && rd < 8) {
+    if (u >= !dsp0 && u <= 31 && rs < 8 && rd < 8) {
         /* the dsp:5 form: 10sz 1 ddd / d rs d rd (mov), 1011 s ddd ...
          * (movu) */
         int b0 = sign ? (0x8 + size) << 4 | 0x08 : 0xb0 | size << 3;
@@ -507,9 +530,14 @@ void rx_load(struct code *c, int size, int sign, long dsp, int rs, int rd)
 
 void rx_store(struct code *c, int size, int rs, long dsp, int rd)
 {
+    rx_store_x(c, size, rs, dsp, rd, 0);
+}
+
+void rx_store_x(struct code *c, int size, int rs, long dsp, int rd, int dsp0)
+{
     long u = units_of(size, dsp);
     reg_ok(rs); reg_ok(rd);
-    if (u >= 1 && u <= 31 && rs < 8 && rd < 8) {
+    if (u >= !dsp0 && u <= 31 && rs < 8 && rd < 8) {
         code_byte(c, (0x8 + size) << 4 | (int)(u >> 2));
         code_byte(c, (int)(u >> 1 & 1) << 7 | rd << 4 | (int)(u & 1) << 3 |
                      rs);
@@ -525,19 +553,32 @@ void rx_store(struct code *c, int size, int rs, long dsp, int rd)
 
 void rx_store_imm(struct code *c, int size, long imm, long dsp, int rd)
 {
+    rx_store_imm_x(c, size, imm, dsp, rd, 0, 0);
+}
+
+/* `dsp0` as rx_load_x's; `written`: the #uimm8 form is chosen by the value
+ * as the source wrote it (0..255), as GNU as chooses it -- `mov.b #-1`
+ * keeps the li form there, though its byte is the same. */
+void rx_store_imm_x(struct code *c, int size, long imm, long dsp, int rd,
+                    int dsp0, int written)
+{
     long u = units_of(size, dsp);
     long v = s32(imm);
+    int short_ok;
     reg_ok(rd);
     if (u > 32767)
         bad("mov #imm displacement QEMU would read as negative", dsp);
+    short_ok = written && imm >= 0 && imm <= 255;
     /* the value as the access stores it: .b and .w keep their low bits,
      * and the li field holds them sign-extended */
     if (size == RX_B) v = (long)(signed char)(v & 0xff);
     if (size == RX_W) v = (long)(short)(v & 0xffff);
-    if (u >= 1 && u <= 31 && rd < 8 && (unsigned long)(v & (size == RX_B ? 0xff :
-                                                  size == RX_W ? 0xffff :
-                                                  0xffffffffL)) <= 255 &&
-        (size == RX_B || v >= 0)) {
+    if (!written)
+        short_ok = (unsigned long)(v & (size == RX_B ? 0xff :
+                                        size == RX_W ? 0xffff :
+                                        0xffffffffL)) <= 255 &&
+                   (size == RX_B || v >= 0);
+    if (u >= !dsp0 && u <= 31 && rd < 8 && short_ok) {
         /* mov.size #uimm8, dsp:5[rd]: 0011 11sz d rd dddd imm8 */
         code_byte(c, 0x3c | size);
         code_byte(c, (int)(u >> 4 & 1) << 7 | rd << 4 | (int)(u & 15));
@@ -649,9 +690,26 @@ void rx_rm(struct code *c, int op, int size, int sign, long dsp, int rs,
 
 void rx_push(struct code *c, int rs)
 {
+    rx_push_sz(c, RX_L, rs);
+}
+
+void rx_push_sz(struct code *c, int size, int rs)
+{
     reg_ok(rs);
+    if (size < RX_B || size > RX_L)
+        bad("push size", size);
     code_byte(c, 0x7e);
-    code_byte(c, 0xa0 | rs);                 /* push.l: 10 sz=10 rs */
+    code_byte(c, 0x80 | size << 4 | rs);     /* push.size: 10 sz rs */
+}
+
+/* push.size dsp[rs]: 1111 01ld rs 10sz, the displacement scaled. */
+void rx_push_m(struct code *c, int size, long dsp, int rs)
+{
+    long u = units_of(size, dsp);
+    reg_ok(rs);
+    code_byte(c, 0xf4 | ld_field(u));
+    code_byte(c, rs << 4 | 0x08 | size);
+    ld_bytes(c, u);
 }
 
 void rx_pop(struct code *c, int rd)
@@ -992,4 +1050,165 @@ void rx_bmcnd(struct code *c, int cond, int bit, int rd)
     code_byte(c, 0xfd);
     code_byte(c, 0xe0 | bit);
     code_byte(c, cond << 4 | rd);
+}
+
+/* ---- what only the assembler writes ---------------------------------------
+ *
+ * Forms the code generator has no use for, which inline asm and .S files
+ * do: auto-increment moves, the bit operations on memory and by a
+ * register, the string and accumulator instructions. The field layouts
+ * are QEMU's decoder's (target/rx/insns.decode); GNU as referees the
+ * bytes (tests/golden/rx-asm.sh). */
+
+/* mov.size [rp+], rv / [-rp] (load), rv, [rp+] / [-rp] (store), and
+ * movu.b/.w [rp+], rv: fd 0010 Lad sz / fd 0011 1 ad 0 sz, then rp rv. */
+void rx_mov_pi(struct code *c, int load, int sign, int pre, int size,
+               int rp, int rv)
+{
+    reg_ok(rp); reg_ok(rv);
+    if (size < RX_B || size > RX_L || (!sign && (!load || size == RX_L)))
+        bad("auto-increment move size", size);
+    code_byte(c, 0xfd);
+    if (!sign)
+        code_byte(c, 0x38 | pre << 2 | size);
+    else
+        code_byte(c, (load ? 0x28 : 0x20) | pre << 2 | size);
+    code_byte(c, rp << 4 | rv);
+}
+
+/* BSET BCLR BTST BNOT #bit, dsp[rd].b (bit 0..7, dsp in bytes). */
+void rx_bit_m(struct code *c, int op, int bit, long dsp, int rd)
+{
+    long u = units_of(RX_B, dsp);
+    reg_ok(rd);
+    if (bit < 0 || bit > 7)
+        bad("memory bit number", bit);
+    switch (op) {
+    case RX_BSET:                       /* 1111 00ld rd 0bbb */
+        code_byte(c, 0xf0 | ld_field(u));
+        code_byte(c, rd << 4 | bit);
+        break;
+    case RX_BCLR:                       /* 1111 00ld rd 1bbb */
+        code_byte(c, 0xf0 | ld_field(u));
+        code_byte(c, rd << 4 | 0x08 | bit);
+        break;
+    case RX_BTST:                       /* 1111 01ld rd 0bbb */
+        code_byte(c, 0xf4 | ld_field(u));
+        code_byte(c, rd << 4 | bit);
+        break;
+    case RX_BNOT:                       /* fc 111bbbld rd 1111 */
+        code_byte(c, 0xfc);
+        code_byte(c, 0xe0 | bit << 2 | ld_field(u));
+        code_byte(c, rd << 4 | 0x0f);
+        break;
+    default:
+        bad("bit operation", op);
+    }
+    ld_bytes(c, u);
+}
+
+/* bmCND #bit, dsp[rd].b: fc 111bbbld rd cond. */
+void rx_bmcnd_m(struct code *c, int cond, int bit, long dsp, int rd)
+{
+    long u = units_of(RX_B, dsp);
+    reg_ok(rd);
+    if (bit < 0 || bit > 7)
+        bad("memory bit number", bit);
+    if (cond < 0 || cond > RX_NO)
+        bad("bmcnd condition", cond);
+    code_byte(c, 0xfc);
+    code_byte(c, 0xe0 | bit << 2 | ld_field(u));
+    code_byte(c, rd << 4 | cond);
+    ld_bytes(c, u);
+}
+
+/* BSET BCLR BTST BNOT rs, rd (the bit number in rs, mod 32), and
+ * rs, dsp[rd].b (mod 8): fc 0110 op.. rd rs. */
+static int bit_r_op(int op)
+{
+    switch (op) {
+    case RX_BSET: return 0x60;
+    case RX_BCLR: return 0x64;
+    case RX_BTST: return 0x68;
+    case RX_BNOT: return 0x6c;
+    default: bad("bit operation", op);
+    }
+}
+
+void rx_bit_r(struct code *c, int op, int rs, int rd)
+{
+    reg_ok(rs); reg_ok(rd);
+    code_byte(c, 0xfc);
+    code_byte(c, bit_r_op(op) | 3);
+    code_byte(c, rd << 4 | rs);
+}
+
+void rx_bit_rm(struct code *c, int op, int rs, long dsp, int rd)
+{
+    long u = units_of(RX_B, dsp);
+    reg_ok(rs); reg_ok(rd);
+    code_byte(c, 0xfc);
+    code_byte(c, bit_r_op(op) | ld_field(u));
+    code_byte(c, rd << 4 | rs);
+    ld_bytes(c, u);
+}
+
+/* The string instructions: 7f 10oo osz. */
+void rx_string(struct code *c, int op, int size)
+{
+    static const unsigned char base[] = {
+        0x80, 0x84, 0x88, 0x8c, 0x83, 0x87, 0x8b, 0x8f
+    };
+    if (op < RX_SUNTIL || op > RX_SMOVF)
+        bad("string operation", op);
+    if (op <= RX_RMPA ? size < RX_B || size > RX_L : size != RX_L)
+        bad("string operation size", size);
+    code_byte(c, 0x7f);
+    code_byte(c, base[op] | (op <= RX_RMPA ? size : 0));
+}
+
+void rx_rtfi(struct code *c) { code_byte(c, 0x7f); code_byte(c, 0x94); }
+void rx_satr(struct code *c) { code_byte(c, 0x7f); code_byte(c, 0x93); }
+void rx_sat(struct code *c, int rd) { reg_ok(rd); code_byte(c, 0x7e); code_byte(c, 0x30 | rd); }
+
+/* The accumulator: mvfachi/mvfaclo/mvfacmi rd (fd 1f 0w rd), mvtachi/
+ * mvtaclo rs (fd 17 0w rs), racw #1/#2 (fd 18 0n 0), and mulhi mullo
+ * machi maclo rs, rs2 (fd 0000 0op rs rs2). */
+void rx_mvfac(struct code *c, int which, int rd)
+{
+    reg_ok(rd);
+    if (which < 0 || which > 2)
+        bad("accumulator part", which);
+    code_byte(c, 0xfd);
+    code_byte(c, 0x1f);
+    code_byte(c, which << 4 | rd);
+}
+
+void rx_mvtac(struct code *c, int which, int rs)
+{
+    reg_ok(rs);
+    if (which < 0 || which > 1)
+        bad("accumulator part", which);
+    code_byte(c, 0xfd);
+    code_byte(c, 0x17);
+    code_byte(c, which << 4 | rs);
+}
+
+void rx_racw(struct code *c, int n)
+{
+    if (n != 1 && n != 2)
+        bad("racw shift", n);
+    code_byte(c, 0xfd);
+    code_byte(c, 0x18);
+    code_byte(c, (n - 1) << 4);
+}
+
+void rx_mac(struct code *c, int op, int rs, int rs2)
+{
+    reg_ok(rs); reg_ok(rs2);
+    if (op != 0 && op != 1 && op != 4 && op != 5)
+        bad("multiply-accumulate operation", op);
+    code_byte(c, 0xfd);
+    code_byte(c, op);
+    code_byte(c, rs << 4 | rs2);
 }

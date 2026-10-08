@@ -221,6 +221,14 @@ void xt_retw(struct code *c);
 void xt_entry(struct code *c, int s, long frame);
 void xt_movsp(struct code *c, int t, int s);
 void xt_rotw(struct code *c, int n);              /* -8..7 */
+/* The zero-overhead loops of the loop option (the ESP32 has it): loop,
+ * loopnez, loopgtz s, end. LCOUNT = s - 1, LBEG = the next instruction,
+ * LEND = end, which lies 0..255 bytes past at + 4 -- `off` is that
+ * distance, forward only. The code generator does not emit them; the
+ * assembler does, for a template or a .S file that writes one. */
+enum xt_loop { XT_LOOP, XT_LOOPNEZ, XT_LOOPGTZ };
+unsigned long xt_enc_loop(int kind, int s, long off);
+int xt_loop_reaches(long off);
 
 /* ---- the system --------------------------------------------------------- */
 
@@ -245,6 +253,12 @@ void xt_waiti(struct code *c, int level);
 void xt_rsr(struct code *c, int t, int sr);
 void xt_wsr(struct code *c, int t, int sr);
 void xt_xsr(struct code *c, int t, int sr);
+/* The user registers: rur r, ur and wur t, ur (THREADPTR, 231, is the
+ * ESP32's; the de212 has none). RUR keeps the number in s:t and its
+ * destination in r; WUR keeps it in r:s and its source in t. */
+#define XT_UR_THREADPTR 231
+void xt_rur(struct code *c, int r, int ur);
+void xt_wur(struct code *c, int t, int ur);
 
 /* The length of the instruction whose first byte is `b0`: 3, or 2 for a
  * density instruction (op0 8..13), which the decoders of -S and the

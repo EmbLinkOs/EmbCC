@@ -11,6 +11,7 @@
 #include "../backend.h"
 #include "emit.h"
 #include "../regalloc.h"
+#include "../predef.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -680,6 +681,19 @@ static char *float_vregs(struct ir_func *fn, int by_cost)
 #define BAD(v) do { int _v=(v); if (_v>=0 && _v<nv) bad[_v]=1; } while (0)
 #define SOFT(v) do { int _v=(v); if (_v>=0 && _v<nv) { \
                      if (soft) soft[_v]++; else bad[_v]=1; } } while (0)
+    /* A parameter arrives where its TYPE puts it: an integer one in a
+     * general register, whatever its later uses. `double bits(long x) {
+     * union { long l; double d; } u; u.l = x; return u.d; }` folds to
+     * returning x as a double, which marked x float -- and an integer
+     * parameter in the float class had no home the prologue could fill:
+     * an internal error at -O1. In the integer class its float uses
+     * move it with movq (x86_fld). */
+    if (fn->src)
+        for (int p = 0; p < fn->nparams && p < nv; p++) {
+            const struct type *pt = fn->src->param_tys[p];
+            if (pt && !ty_is_float(pt))
+                BAD(p);
+        }
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->flt) {
@@ -2060,10 +2074,20 @@ static void x86_param_copy(struct code *text, int dst, int base, int off,
 /* The floating-point pair of cg_load/cg_store. An xmm home and a stack
  * slot are the same value and only one of them is current, so every site
  * that touches a float vreg's slot goes through these. */
+/* A float may live in a GENERAL register: a union pun (`u.l = x; return
+ * u.d;`) is folded to the integer itself, which the allocator gave an
+ * integer home. Its bits move with movq/movd -- through its slot they
+ * would be stale, and a frameless function has no slot to read: `double
+ * bits(long x)` at -O1 was an internal error ("a frame access in a
+ * function that has no frame pointer"). */
 static void x86_fld(struct code *text, const int *sd, int v, int xmm, int w)
 {
     if (in_freg(v)) {
         if (g_floc[v] != xmm) x86_movs_reg(text, xmm, g_floc[v]);
+        return;
+    }
+    if (in_reg(v)) {
+        x86_movq_xmm_gpr(text, xmm, g_loc[v], w);
         return;
     }
     x86_movs_load(text, xmm, sd[v], w);
@@ -2075,6 +2099,10 @@ static void x86_fst(struct code *text, const int *sd, int v, int xmm, int w)
         if (g_floc[v] != xmm) x86_movs_reg(text, g_floc[v], xmm);
         return;
     }
+    if (in_reg(v)) {
+        x86_movq_gpr_xmm(text, g_loc[v], xmm, w);
+        return;
+    }
     x86_movs_store(text, xmm, sd[v], w);
 }
 
@@ -2084,6 +2112,10 @@ static void x86_fst(struct code *text, const int *sd, int v, int xmm, int w)
 static int x86_frd(struct code *text, const int *sd, int v, int scratch, int w)
 {
     if (in_freg(v)) return g_floc[v];
+    if (in_reg(v)) {
+        x86_movq_xmm_gpr(text, scratch, g_loc[v], w);
+        return scratch;
+    }
     x86_movs_load(text, scratch, sd[v], w);
     return scratch;
 }
@@ -3211,11 +3243,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
     }
 
     /* Sixteen at -O2, as clang does; none at -Os, as clang does there --
-     * a one-byte function was followed by fifteen nops. */
-    if (!target_opt_size())
-        code_align(text, 16, 0x90);
+     * a one-byte function was followed by fifteen nops. But two in C++:
+     * the Itanium ABI's pointer to member function says "virtual" with
+     * the low bit of its function address, so a member function at an odd
+     * address was called through its vtable instead (clang aligns member
+     * functions to 2 for this; every function of a C++ unit is, here). */
+    int falign = !target_opt_size() ? 16 : predef_is_cxx() ? 2 : 1;
+    if (falign > 1)
+        code_align(text, falign, 0x90);
     f->code_off = text->len;
-    f->code_align = target_opt_size() ? 1 : 16;
+    f->code_align = falign;
 
     /* The frame record, then the callee-saved registers, then the rest
      * of the frame. They go out as PUSHES: the save area is the top of
@@ -5465,6 +5502,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                          * since an xmm-homed value has no slot to read */
                         if (i->call_varargs)
                             x86_movq_gpr_xmm(text, x86_argreg(ireg), ireg, 8);
+                    } else if (in_freg(a->vreg)) {
+                        x86_movq_gpr_xmm(text, x86_argreg(ireg),
+                                         g_floc[a->vreg], a->size == 8 ? 8 : 4);
                     } else if (!in_reg(a->vreg)) {
                         x86_load_arg(text, ireg, sd[a->vreg]);
                     }
@@ -5507,6 +5547,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                 } else if (in_reg(a->vreg))
                     ireg++;              /* already placed by the parallel move */
+                else if (in_freg(a->vreg))
+                    /* An integer argument whose value lives in an xmm
+                     * register: its other uses are floating point, and a
+                     * call's integer argument is only a SOFT vote against
+                     * that (float_vregs) -- the merged `const 0` that is
+                     * both a char argument and the 0.0f of a subtraction.
+                     * It has no slot; its bits go across with movq/movd
+                     * (fuzz seeds 7306 and 7581). */
+                    x86_movq_gpr_xmm(text, x86_argreg(ireg++),
+                                     g_floc[a->vreg], a->size == 8 ? 8 : 4);
                 else
                     x86_load_arg(text, ireg++, sd[a->vreg]);
             }

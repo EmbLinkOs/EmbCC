@@ -100,10 +100,10 @@ refc "a 16-byte atomic" 'a 16-byte atomic' \
     '__int128 x; __int128 f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "a 16-byte atomic load" 'a 16-byte atomic' \
     '__int128 x; __int128 f(void){ return __atomic_load_n(&x, 5); }'
-refc "__builtin_return_address" 'n64 code keeps no frame-pointer chain' \
-    'void *f(void){ return __builtin_return_address(0); }'
-refc "__builtin_frame_address" 'n64 code keeps no frame-pointer chain' \
-    'void *f(void){ return __builtin_frame_address(0); }'
+refc "__builtin_return_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_return_address(1); }'
+refc "__builtin_frame_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_frame_address(1); }'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
 refc "a doubleword instruction in inline asm" 'is not in the MIPS vocabulary' \
@@ -120,12 +120,16 @@ fi
 grep -q 'la loads a 32-bit address' "$out/la.err" || {
     echo "la was refused, but not by name:"; cat "$out/la.err"; exit 1; }
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
-if "$EMBCC" --target=mips64-none-elf -fno-exceptions -c "$out/c.cc" -o /dev/null \
-       2> "$out/cxx.err"; then
-    echo "C++ was accepted for mips64-none-elf"; exit 1
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
+if "$EMBCC" --target=mips64-none-elf -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for mips64-none-elf' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+grep -q 'C++ exceptions are not supported for mips64-none-elf' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+"$EMBCC" --target=mips64-none-elf -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
 # ...and an __int128 variadic argument is accepted: placed at an even slot,
 # as clang's va_arg reads it (docs/internals/mips64-plan.md)
 printf '%s\n' 'void v(int, ...); void f(__int128 x){ v(1, x); }' > "$out/v.c"
@@ -133,5 +137,5 @@ printf '%s\n' 'void v(int, ...); void f(__int128 x){ v(1, x); }' > "$out/v.c"
     echo "a variadic __int128 was refused"; exit 1; }
 echo "narrow and 16-byte atomics, the frame and return address,"
 echo "interrupt functions, an over-aligned scalar, MIPS64 instructions in"
-echo "inline asm, a 32-bit la, a wide packed bit-field big-endian and C++"
+echo "inline asm, a 32-bit la, a wide packed bit-field big-endian and C++ exceptions"
 echo "big-endian are each refused by name"

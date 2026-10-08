@@ -71,6 +71,20 @@ void reset(void);
 __attribute__((section(".vectors"), used))
 void *const vectors[2] = { (void *)0x20010000u, (void *)reset };
 static volatile unsigned blk[2];
+/* MODE 4: each frame's call returns to the same `pop {r4, pc}` its caller
+ * then executes -- a branch to itself that moves sp, not an idle loop.
+ * Returns how many frames were entered (n + 1). */
+__attribute__((naked)) static unsigned depth(unsigned n, unsigned zero)
+{
+    __asm__("push {r4, lr}\n"
+            "adds r1, r1, #1\n"
+            "subs r0, r0, #1\n"
+            "bmi 2f\n"
+            "bl depth\n"
+            "1: pop {r4, pc}\n"
+            "2: movs r0, r1\n"
+            "pop {r4, pc}\n");
+}
 static void semi(unsigned op, const void *a)
 {
     __asm__ volatile("mov r0, %0\n\tmov r1, %1\n\tbkpt #0xab"
@@ -87,6 +101,9 @@ void reset(void)
 #elif MODE == 2
     for (;;)
         ;
+#elif MODE == 4
+    blk[0] = 0x20026u; blk[1] = depth(5, 0) + 40;
+    semi(0x20, (const void *)blk);
 #else
     for (volatile int i = 0;; i++)
         if (i == 1000)
@@ -94,7 +111,7 @@ void reset(void)
 #endif
 }
 EOF
-for m in 0 1 2 3; do
+for m in 0 1 2 3 4; do
     "$EMBCC" --target=thumbv7m-none-eabi -O1 -DMODE=$m -c "$e/ends.c" -o "$e/e$m.o" &&
     "$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$e/e$m.o" -o "$e/e$m.elf" ||
         fail "the end-of-run images do not build"
@@ -105,11 +122,13 @@ done
 [ $st = 3 ] && grep -q 'lockup' "$e/1.out" || { cat "$e/1.out"; fail "a fault with no handler is not a lockup (status $st)"; }
 "$EMBSIM" "$e/e2.elf" --stats --max-insns 10000000 > "$e/2.out" 2>&1; st=$?
 [ $st = 0 ] && grep -q 'nothing can interrupt' "$e/2.out" || { cat "$e/2.out"; fail "an idle loop does not end the run (status $st)"; }
+"$EMBSIM" "$e/e4.elf" --max-insns 10000000 > "$e/5.out" 2>&1; st=$?
+[ $st = 46 ] || { cat "$e/5.out"; fail "returns landing on the same pop were taken for an idle loop (status $st)"; }
 "$EMBSIM" "$e/e3.elf" --until '==MARK==' --max-insns 10000000 > "$e/3.out" 2>&1; st=$?
 [ $st = 0 ] && [ "$(grep -c MARK "$e/3.out")" = 1 ] || fail "--until does not stop at the first ==MARK== (status $st)"
 "$EMBSIM" "$e/e3.elf" --max-insns 500 > "$e/4.out" 2>&1; st=$?
 [ $st = 4 ] && grep -q '500 instructions' "$e/4.out" || { cat "$e/4.out"; fail "--max-insns 500: status $st"; }
-echo "embsim: semihosting exit, lockup, idle loop, --until and --max-insns end a run as documented"
+echo "embsim: semihosting exit, lockup, idle loop (and not a pop returning to itself), --until and --max-insns end a run as documented"
 
 x=$out/exc; mkdir -p "$x"
 # ---- 4. instruction edges the corpus never reaches ---------------------------

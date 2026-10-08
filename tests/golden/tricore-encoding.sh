@@ -35,7 +35,7 @@ out=tests/golden/out/tricore-encoding
 rm -rf "$out"; mkdir -p "$out"
 
 cc -std=c99 -Wall -Wextra -o "$out/tricorecheck" \
-   tools/tricorecheck/tricorecheck.c src/arch/tricore/emit.c \
+   tools/tricorecheck/tricorecheck.c src/arch/tricore/emit.c src/arch/tricore/asm.c \
    src/arch/code.c src/driver/util.c src/driver/diag.c src/arch/target.c \
    src/sema/type.c src/sema/ldfloat.c \
    src/platform/platform_common.c src/platform/platform_posix.c || {

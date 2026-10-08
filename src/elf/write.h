@@ -18,6 +18,12 @@ struct elfw;
  * stays a library: embas builds x86-64 objects with it while the compiler
  * driver builds whatever --target= selected. */
 struct elfw *elfw_new(int machine);
+/* The prefix C symbols carry in this object ("_" on RX, set by elfw_new);
+ * NULL for an object whose names are already the object's -- an assembled
+ * .s file, whose `_main` is written so. A name that starts with \001 is
+ * taken as it is (without the \001) whatever the prefix: a label an RX asm
+ * block defines with no underscore, which is no C name. */
+void elfw_set_sym_prefix(struct elfw *w, const char *prefix);
 /* The object's e_flags, where the machine alone does not decide them
  * (target_elf_flags). elfw_new sets ARM's EABI version itself. */
 void elfw_set_flags(struct elfw *w, unsigned long flags);

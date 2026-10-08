@@ -14,4 +14,13 @@ int tcasm_assemble(const char *text, struct code *c, char *err, size_t errlen);
  * the n characters at p name none. */
 int tcasm_reg(const char *p, int n, int *file);
 
+/* For src/as/gas.c: tcasm_assemble with gas_target's signature; a
+ * register (any file); `hi`/`lo` and a core register's name as operand
+ * words; and the statements whose operand is a symbol, with the
+ * relocation each carries (see asm.c). */
+int tcasm_encode(const char *text, struct code *c, char *err, int errlen);
+int tcasm_is_reg(const char *name, int len);
+int tcasm_is_word(const char *stmt, const char *w, int len);
+int tcasm_symform(const char *stmt, struct asm_symform *f);
+
 #endif

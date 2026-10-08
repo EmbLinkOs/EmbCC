@@ -3,7 +3,8 @@
 #
 # FreeRTOS's notify functions switch on eAction, five dense cases. Under
 # -Os a table needed six, so it was a tree of compares: `cmp r8, #2; beq;
-# cmp r8, #2; bgt; ...`, forty bytes where clang's tbh is eighteen. On
+# cmp r8, #2; bgt; ...`, forty bytes where clang's table is eighteen --
+# a tbb now, whose entries are bytes when every case is within reach. On
 # ARMv7-M a table is now four cases or more (target_switch_table_min_os):
 # its dispatch is cmp, bhs and tbh, and an entry two bytes. And a tree
 # that asks `== k` and then `> k` of one register makes the compare once:
@@ -42,9 +43,9 @@ body() {
     awk -v f="<$1>:" '$2 == f { on = 1; next } /^[0-9a-f]+ <.*>:$/ { on = 0 }
                       on && /^ *[0-9a-f]+:/' "$out/s.dis"
 }
-[ "$(body dn | grep -c tbh)" = 1 ] || {
-    echo "FAIL: five dense cases at -Os should be a tbh table:"; body dn; exit 1; }
-echo "five dense cases at -Os: a tbh table"
+[ "$(body dn | grep -c 'tbb')" = 1 ] || {
+    echo "FAIL: five dense cases at -Os should be a tbb table:"; body dn; exit 1; }
+echo "five dense cases at -Os: a tbb table (byte entries, all within reach)"
 # no compare repeated with only a branch between
 body sp | awk '{ $1 = ""; print }' | sed 's/^ *//' > "$out/sp.txt"
 awk 'prev2 != "" && $0 == prev2 && prev ~ /^b/ { bad = 1 }

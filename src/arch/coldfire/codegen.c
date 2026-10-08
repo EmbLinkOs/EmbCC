@@ -29,9 +29,12 @@
  *   * The atomics mask interrupts around a plain read-modify-write (ISA_A
  *     has no compare-and-swap), which needs supervisor mode.
  *
+ * Inline assembly is assembled in irgen (coldfire/irgen.c, against
+ * coldfire/asm.c); IR_ASM here moves its operands and splices its bytes.
+ *
  * Refused by name: a frame larger than 32 KiB, a branch beyond 32 KiB,
- * inline asm, a _Complex double result, atomics wider than four bytes,
- * __int128 (ILP32), and C++. THE RULE.
+ * a _Complex double result, atomics wider than four bytes, __int128
+ * (ILP32), and C++. THE RULE.
  */
 #include "emit.h"
 
@@ -196,7 +199,8 @@ static const struct ra_target CF_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg */
     0,
-    0               /* asm_in_reg */
+    1               /* asm_in_reg: see IR_ASM (the address class keeps the
+                     * old rule: nothing of it lives across an asm) */
 };
 
 /* ---- which values are eight bytes wide --------------------------------- */
@@ -281,6 +285,15 @@ static int cplx_regs(const struct type *t, long size)
     return size == 8 ? 2 : size == 16 ? 4 : 0;
 }
 
+/* The C++ indirect-result pointer (sret_first: the return slot of a
+ * class that is not trivially copyable, which the C++ lowering passes
+ * first) travels as a struct's result buffer does: in a1, taking no
+ * argument word. */
+static int fn_sret_first(const struct ir_func *fn)
+{
+    return fn->src && fn->src->sret_first;
+}
+
 static int fn_sret(const struct ir_func *fn)
 {
     return fn->ret_abi.is_struct && !cplx_regs(fn->ret_abi.ty,
@@ -327,7 +340,7 @@ static long out_area(const struct cf_fn *F)
         const struct ir_ins *i = &fn->ins[n];
         long stk = 0;
         if (i->op == IR_CALL) {
-            for (int k = 0; k < i->nargs; k++)
+            for (int k = i->sret_first ? 1 : 0; k < i->nargs; k++)
                 stk += arg_words(&i->argv[k]);
         } else if (cf_op_calls_helper(i)) {
             stk = 16;            /* two doubles, the most any helper takes */
@@ -374,6 +387,8 @@ static void layout(struct cf_fn *F)
     /* The parameters live where the caller put them. */
     for (int p = 0; p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
+        if (p == 0 && fn_sret_first(fn))
+            continue;            /* in a1: the sret slot, below */
         F->slot[p] = pstk + pad_of(a);
         pstk += arg_words(a);
     }
@@ -432,9 +447,11 @@ static void layout(struct cf_fn *F)
     off -= ((long)fn->scratch_bytes + 3) & ~3L;
     F->scratch_at = off;
     F->sret_slot = NOSLOT;
-    if (fn_sret(fn)) {
+    if (fn_sret(fn) || fn_sret_first(fn)) {
         off -= 4;
         F->sret_slot = off;
+        if (fn_sret_first(fn) && fn->nparams > 0 && fn->nvregs > 0)
+            F->slot[0] = off;    /* the return slot's own home */
     }
     F->tmp_slot = NOSLOT;
     if (needs_tmp(F)) {
@@ -1419,8 +1436,9 @@ static void gen_call(struct cf_fn *F, int n)
     struct code *t = F->t;
     long off = 0;
 
-    /* each argument into its words at the stack pointer */
-    for (int k = 0; k < i->nargs; k++) {
+    /* each argument into its words at the stack pointer (the C++
+     * return slot, sret_first, goes in a1 below) */
+    for (int k = i->sret_first ? 1 : 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
         need_out(F, off + arg_words(a));
         if (a->is_struct) {
@@ -1443,6 +1461,8 @@ static void gen_call(struct cf_fn *F, int n)
     }
     if (call_sret(i))
         cf_lea(t, fp_at(F->scratch_at + i->scratch), A1);
+    else if (i->sret_first && i->nargs > 0)
+        cf_move(t, 4, vea(F, i->argv[0].vreg), cf_areg(A1));
     if (i->indirect) {
         int r = areg(F, i->a, A0);
         cf_jsr(t, cf_ind(r));
@@ -2126,9 +2146,141 @@ static void gen_ins(struct cf_fn *F, int n)
         return;
     }
 
-    case IR_ASM:
-        cf_refuse(F, i, "inline assembly");
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (coldfire/irgen.c
+         * irg_asm_coldfire) against the vocabulary in coldfire/asm.c. This
+         * only places the operands and splices the bytes -- RX's and
+         * Xtensa's lowering with the m68k's two register files. The moves
+         * in and out are each ONE parallel move (a1, which no operand is
+         * given, breaks a cycle and carries a "+" output's address); no
+         * operand is ever in a1, a6 or a7. */
+        struct ir_asm *ia = i->asm_ir;
+        int vreg_[16], vdst[16], nval = 0;
+        if (ia->cont) {
+            int k = n - 1;
+            while (k >= 0 && fn->ins[k].op == IR_ASM && fn->ins[k].asm_ir &&
+                   fn->ins[k].asm_ir->cont)
+                k--;
+            if (k < 0 || fn->ins[k].op != IR_ASM)
+                internal_error("coldfire: %s: an asm's further output is not "
+                               "right after the asm", fn->name);
+            return;
+        }
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].val) {
+                vreg_[nval] = ia->out[k].reg;
+                vdst[nval++] = i->dst;
+            }
+        for (int q = n + 1; q < fn->nins && fn->ins[q].op == IR_ASM &&
+                            fn->ins[q].asm_ir && fn->ins[q].asm_ir->cont &&
+                            nval < 16; q++) {
+            vreg_[nval] = fn->ins[q].asm_ir->out[0].reg;
+            vdst[nval++] = fn->ins[q].dst;
+        }
+        for (int k = 0; k < ia->nin; k++)
+            if (ia->in[k].reg < 0 || ia->in[k].reg == A1 ||
+                ia->in[k].reg >= CF_FP)
+                internal_error("coldfire: %s: an asm operand in %s", fn->name,
+                               cf_reg_name(ia->in[k].reg));
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && ia->out[k].size > 4)
+                cf_refuse(F, i, "an asm output wider than a register");
+        {
+            int naddr = 0;
+            for (int k = 0; k < ia->nout; k++)
+                naddr += !ia->out[k].val && !ia->out[k].mem;
+            if (ia->scr < 0 && naddr > 0)
+                cf_refuse(F, i, "an asm with no address register left around "
+                                "it");
+        }
+        /* In: an input's value, an "m" output's address, a "+" output's
+         * address -- the register-resident ones as one parallel move, then
+         * the rest from their slots. */
+        {
+            int pd[40], ps[40], npm = 0;
+            for (int k = 0; k < ia->nin && npm < 40; k++)
+                if (in_reg(F, ia->in[k].temp)) {
+                    pd[npm] = ia->in[k].reg;
+                    ps[npm++] = F->loc[ia->in[k].temp];
+                }
+            for (int k = 0; k < ia->nout && npm < 40; k++)
+                if (!ia->out[k].val &&
+                    (ia->out[k].mem || ia->out[k].inout) &&
+                    in_reg(F, ia->out[k].temp)) {
+                    pd[npm] = ia->out[k].reg;
+                    ps[npm++] = F->loc[ia->out[k].temp];
+                }
+            if (npm) {
+                int od[80], os[80];
+                int m = ra_parallel_move(pd, ps, npm, A1, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    cf_refuse(F, i, "an asm whose operands cannot be moved "
+                                    "into place");
+                for (int k = 0; k < m; k++)
+                    cf_move(t, 4, reg_ea(os[k]), reg_ea(od[k]));
+            }
+            for (int k = 0; k < ia->nin; k++)
+                if (!in_reg(F, ia->in[k].temp))
+                    rd(F, ia->in[k].temp, ia->in[k].reg);
+            for (int k = 0; k < ia->nout; k++) {
+                const struct ir_asm_op *o = &ia->out[k];
+                if (o->val || !(o->mem || o->inout))
+                    continue;
+                if (!in_reg(F, o->temp))
+                    rd(F, o->temp, o->reg);
+                /* A "+" output starts with the lvalue's CURRENT value,
+                 * loaded through its address (in a1 when the operand is a
+                 * data register, which cannot hold one as a base). */
+                if (o->inout && !o->mem) {
+                    int base = o->reg;
+                    if (!CF_IS_A(base)) {
+                        cf_move(t, 4, reg_ea(o->reg), cf_areg(A1));
+                        base = A1;
+                    }
+                    cf_move(t, o->size, cf_ind(base), reg_ea(o->reg));
+                }
+            }
+        }
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        /* Out, through an address (live across the asm, so still there). */
+        for (int k = 0; k < ia->nout; k++) {
+            const struct ir_asm_op *o = &ia->out[k];
+            if (o->mem || o->val)
+                continue;
+            rd(F, o->temp, ia->scr);
+            cf_move(t, o->size, reg_ea(o->reg), cf_ind(ia->scr));
+        }
+        /* Out, as values: those in memory first, then the register-
+         * resident ones as one parallel move. */
+        {
+            int pd[16], ps[16], npm = 0;
+            for (int k = 0; k < nval; k++) {
+                /* a value nothing reads may share its home with one that
+                 * is read: it is not moved at all */
+                if (vdst[k] < 0 || (F->usecnt && F->usecnt[vdst[k]] == 0))
+                    continue;
+                if (in_reg(F, vdst[k])) {
+                    pd[npm] = F->loc[vdst[k]];
+                    ps[npm++] = vreg_[k];
+                } else {
+                    wrote(F, vdst[k], vreg_[k]);
+                }
+            }
+            if (npm) {
+                int od[32], os[32];
+                int m = ra_parallel_move(pd, ps, npm, A1, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    cf_refuse(F, i, "an asm whose outputs cannot be moved "
+                                    "into place");
+                for (int k = 0; k < m; k++)
+                    cf_move(t, 4, reg_ea(os[k]), reg_ea(od[k]));
+            }
+        }
         return;
+    }
 
     /* ---- atomics: a plain read-modify-write with interrupts masked ---- */
     case IR_XCHG: case IR_XADD: case IR_ARMW: {
@@ -2490,6 +2642,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct cf_sites *st,
                 for (int v = nl; v < fn->nvregs; v++)
                     F.loc[v] = -1;
             }
+        }
+    }
+    /* A callee-saved register an asm changes -- its clobbers, the
+     * registers its template names, its operands' -- is saved by the
+     * prologue's movem, as GCC saves it. */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_asm *ia = fn->ins[n].op == IR_ASM ? fn->ins[n].asm_ir
+                                                          : NULL;
+        if (!ia || ia->cont)
+            continue;
+        for (int r = 2; r <= 13; r++) {
+            int have = 0;
+            if (!cf_callee_saved(r) || !(ia->clob >> r & 1))
+                continue;
+            for (int k = 0; k < F.nsave; k++)
+                have |= F.used_callee[k] == r;
+            if (!have && F.nsave < 2 * RA_MAXPOOL)
+                F.used_callee[F.nsave++] = r;
         }
     }
     layout(&F);

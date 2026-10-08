@@ -26,6 +26,10 @@ extern unsigned __data_load, __data_start, __data_end;
 extern unsigned __bss_start, __bss_end;
 typedef void (*initfn)(void);
 extern initfn __init_array_start[], __init_array_end[];
+/* Espressif's g++ registers a unit's constructors in .ctors instead
+ * (tests/golden/cxx-abi-more.sh links its objects): run last first, as
+ * GCC's crtstuff does. Empty unless such an object is linked. */
+extern initfn __ctors_start[], __ctors_end[];
 
 int main(void);
 void _start(void);
@@ -59,6 +63,8 @@ void _start(void)
     for (d = &__bss_start; d < &__bss_end; )
         *d++ = 0;
     install_vectors();
+    for (initfn *f = __ctors_end; f > __ctors_start; )
+        (*--f)();
     for (initfn *f = __init_array_start; f < __init_array_end; f++)
         (*f)();
     r = main();

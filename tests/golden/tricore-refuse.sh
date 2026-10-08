@@ -85,36 +85,57 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
-    'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
-refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
-    'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
-    'void *f(void){ return __builtin_return_address(0); }'
-refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
-    'void *f(void){ return __builtin_frame_address(0); }'
+# An 8-byte atomic is a call to libatomic's sized routine, as GCC's and
+# clang's are; lib/rt/atomic8.c defines them (it used to be refused).
+printf 'long long x;
+long long f(void){ return __atomic_fetch_add(&x, 1, 5); }
+long long g(void){ return __atomic_load_n(&x, 5); }
+' > "$out/at8.c"
+"$EMBCC" --target=$T -O1 -c "$out/at8.c" -o "$out/at8.o" 2> "$out/at8.err" || {
+    echo "an 8-byte atomic was refused:"; cat "$out/at8.err"; exit 1; }
+for s in __atomic_fetch_add_8 __atomic_load_8; do
+    "${EMBCC_LLVM_READELF:-llvm-readelf}" -s "$out/at8.o" | grep -q " $s\$" || {
+        echo "an 8-byte atomic is not a call to $s"; exit 1; }
+done
+refc "__builtin_return_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_return_address(1); }'
+refc "__builtin_frame_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_frame_address(1); }'
 refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "a naked function" '__attribute__((naked)) is not supported' \
-    '__attribute__((naked)) void f(void){}'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for tricore-none-elf' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+grep -q 'C++ exceptions are not supported for tricore-none-elf' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
+# .s/.S files, file-scope blocks and naked functions are the assembler's
+# (tricore-gas.sh); what it cannot relocate is refused by name.
 printf 'nop\n' > "$out/a.s"
-if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err"; then
-    echo "a .s file was accepted"; exit 1
+"$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err" || {
+    echo "a .s file was refused:"; cat "$out/as.err"; exit 1; }
+printf '__asm__("nop");\n__attribute__((naked)) void f(void){ __asm__("ret"); }\n' \
+    > "$out/blk.c"
+"$EMBCC" --target=$T -c "$out/blk.c" -o /dev/null 2> "$out/blk.err" || {
+    echo "file-scope asm or a naked function was refused:"; cat "$out/blk.err"
+    exit 1; }
+printf '\tjeq d2, d3, elsewhere\n' > "$out/b.s"
+if "$EMBCC" --target=$T -c "$out/b.s" -o /dev/null 2> "$out/as.err"; then
+    echo "a conditional branch to an external symbol was accepted"; exit 1
 fi
-grep -q 'no assembly-file support for tricore-none-elf' "$out/as.err" || {
-    echo "a .s file was refused, but not by name:"; cat "$out/as.err"; exit 1; }
-refc "an instruction in file-scope asm" 'file-scope asm instruction "nop"' '__asm__("nop");'
-echo "narrow and 8-byte atomics, the frame and return address,"
-echo "__int128, interrupt and naked functions, an over-aligned scalar, C++"
-echo "and assembly files are each refused by name"
+grep -q 'R_TRICORE_15REL' "$out/as.err" || {
+    echo "a conditional branch to a symbol was refused, but not by name:"
+    cat "$out/as.err"; exit 1; }
+echo "narrow atomics, the frame and return address above level 0,"
+echo "__int128, interrupt functions, an over-aligned scalar, C++ exceptions and a"
+echo "conditional branch to an external symbol are each refused by name"
 
 # ---- the link -------------------------------------------------------------
 printf 'void _start(void){ for (;;) ; }\n' > "$out/s.c"

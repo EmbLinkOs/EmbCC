@@ -120,7 +120,7 @@ directory, as system directories:
 |---|---|---|
 | C++ library | `lib/libcxx/include` | `PREFIX/lib/embcc/VERSION/include/c++` |
 | C library | `lib/libc/include` | `PREFIX/lib/embcc/VERSION/include` |
-| Freestanding (`<stddef.h>`, `<stdarg.h>`, `<stdbool.h>`, `<stdint.h>`, `<limits.h>`, `<float.h>`, a declarations-only `<string.h>`, `<unwind.h>`, `<cpuid.h>`) | `include` | `PREFIX/lib/embcc/VERSION/freestanding` |
+| Freestanding (`<stddef.h>`, `<stdarg.h>`, `<stdbool.h>`, `<stdint.h>`, `<limits.h>`, `<float.h>`, a declarations-only `<string.h>`, `<unwind.h>`, `<cpuid.h>`, for Cortex-M `<arm_cmse.h>`, and for Cortex-M and ARMv7-A `<arm_acle.h>`) | `include` | `PREFIX/lib/embcc/VERSION/freestanding` |
 
 `--print-search-dirs` prints the directories found. The full search order,
 including the `include` directory beside the invoked executable, is in

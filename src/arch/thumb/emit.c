@@ -145,6 +145,60 @@ static unsigned imm_i(int e)    { return (unsigned)(e >> 11) & 1; }
 static unsigned imm_hi3(int e)  { return (unsigned)(e >> 8) & 7; }
 static unsigned imm_lo8(int e)  { return (unsigned)e & 0xff; }
 
+/* ---- the 32-bit encoding groups -------------------------------------
+ *
+ * Several encoders below are one row of the same table, and the DSP
+ * extension's instructions are more rows of it. Each group's layout is
+ * written ONCE, here, and every member names only its own op fields --
+ * so a new instruction cannot restate a register field's position
+ * differently from its neighbours (ARMv7-M ARM A5.3).
+ *
+ * Data processing (register): 1111 1010 op1 Rn | 1111 Rd op2 Rm. The
+ * register shifts (op1 0xxx, op2 0000), the extends with their rotation
+ * (op1 0xxx, op2 1 0 rot), the parallel add/subtract (op1 1xxx, op2 0 U H
+ * S), and the saturating adds, rev, rbit, sel and clz (op1 10xx, op2 10xx). */
+static void dp_reg(struct code *c, unsigned op1, unsigned op2, int rd,
+                   int rn, int rm)
+{
+    hw2(c, 0xfa00u | (op1 << 4) | (unsigned)rn,
+           0xf000u | ((unsigned)rd << 8) | (op2 << 4) | (unsigned)rm);
+}
+
+/* Multiply, multiply-accumulate and absolute difference: 1111 1011 0 op1
+ * Rn | Ra Rd op2 Rm. Ra 1111 is the non-accumulating form (mul, smuad,
+ * smulbb, smmul, usad8). */
+static void mul_grp(struct code *c, unsigned op1, unsigned op2, int rd,
+                    int rn, int rm, int ra)
+{
+    hw2(c, 0xfb00u | (op1 << 4) | (unsigned)rn,
+           ((unsigned)ra << 12) | ((unsigned)rd << 8) | (op2 << 4) |
+           (unsigned)rm);
+}
+
+/* Long multiply, long multiply-accumulate and divide: 1111 1011 1 op1 Rn
+ * | RdLo RdHi op2 Rm. The divides are this group's op2 1111, with RdLo
+ * 1111 and the quotient in the RdHi field. */
+static void lmul_grp(struct code *c, unsigned op1, unsigned op2, int rdlo,
+                     int rdhi, int rn, int rm)
+{
+    hw2(c, 0xfb80u | (op1 << 4) | (unsigned)rn,
+           ((unsigned)rdlo << 12) | ((unsigned)rdhi << 8) | (op2 << 4) |
+           (unsigned)rm);
+}
+
+/* Plain binary immediate: 1111 0 i 1 op Rn | 0 imm3 Rd imm2 x imm5, the
+ * row the bit-field extracts and the saturates share. `amt` is the
+ * five-bit amount split imm3:imm2 around Rd (the extract's lsb, the
+ * saturate's shift), `low` the bottom field (width-1, the saturate's
+ * bound). op is bits 8:4 of the first halfword. */
+static void bin_imm(struct code *c, unsigned op, int rd, int rn, int amt,
+                    unsigned low)
+{
+    unsigned imm3 = (unsigned)(amt >> 2) & 7, imm2 = (unsigned)amt & 3;
+    hw2(c, 0xf200u | (op << 4) | (unsigned)rn,
+           (imm3 << 12) | ((unsigned)rd << 8) | (imm2 << 6) | low);
+}
+
 /* ---- moves ---------------------------------------------------------- */
 
 void t_mov_reg(struct code *c, int rd, int rm)
@@ -369,10 +423,25 @@ void t_alu_reg_shift(struct code *c, int op, int rd, int rn, int rm,
 void t_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign)
 {
     A32(a32_bfx(c, rd, rn, lsb, width, sign));
-    unsigned imm3 = (unsigned)(lsb >> 2) & 7, imm2 = (unsigned)lsb & 3;
-    hw2(c, (sign ? 0xf340u : 0xf3c0u) | (unsigned)rn,
-           (imm3 << 12) | (unsigned)(rd << 8) | (imm2 << 6) |
-           (unsigned)(width - 1));
+    bin_imm(c, sign ? 0x14u : 0x1cu, rd, rn, lsb, (unsigned)(width - 1));
+}
+
+/* BFI/BFC: the same row as the extracts, op 10110; the bottom field is
+ * the msb (lsb + width - 1), and BFC is BFI with rn 1111. */
+void t_bfi(struct code *c, int rd, int rn, int lsb, int width)
+{
+    A32(a32_bfi(c, rd, rn, lsb, width));
+    bin_imm(c, 0x16u, rd, rn, lsb, (unsigned)(lsb + width - 1));
+}
+
+/* RRX: MOV (shifted register) with ROR and amount 0 -- the encoding the
+ * shift field has no other use for. MOV is ORR with rn 1111. A32 says it
+ * in its own MOV, hence the dispatch before t_alu_reg_shift's (which
+ * takes amounts 1..32 there). */
+void t_rrx(struct code *c, int rd, int rm, int s)
+{
+    A32(a32_rrx(c, rd, rm, s));
+    t_alu_reg_shift(c, T_OP_ORR, rd, 15, rm, T_SH_ROR, 0, s);
 }
 
 int t_alu_imm(struct code *c, int op, int rd, int rn, long imm, int s)
@@ -449,8 +518,7 @@ void t_shift_reg(struct code *c, int op, int rd, int rn, int rm, int s)
               (unsigned)rd);
         return;
     }
-    hw2(c, 0xfa00u | (unsigned)(op << 5) | (unsigned)(s << 4) | (unsigned)rn,
-           0xf000u | (unsigned)(rd << 8) | (unsigned)rm);
+    dp_reg(c, (unsigned)(op << 1 | s), 0, rd, rn, rm);
 }
 
 void t_mul(struct code *c, int rd, int rn, int rm)
@@ -460,35 +528,31 @@ void t_mul(struct code *c, int rd, int rn, int rm)
         hw(c, 0x4340u | (unsigned)(rn << 3) | (unsigned)rd);   /* muls */
         return;
     }
-    hw2(c, 0xfb00u | (unsigned)rn, 0xf000u | (unsigned)(rd << 8) | (unsigned)rm);
+    mul_grp(c, 0, 0, rd, rn, rm, 15);
 }
 
 void t_mla(struct code *c, int rd, int rn, int rm, int ra)
 {
     A32(a32_mla(c, rd, rn, rm, ra, 0));
-    hw2(c, 0xfb00u | (unsigned)rn,
-           (unsigned)(ra << 12) | (unsigned)(rd << 8) | (unsigned)rm);
+    mul_grp(c, 0, 0, rd, rn, rm, ra);
 }
 
 void t_mls(struct code *c, int rd, int rn, int rm, int ra)
 {
     A32(a32_mla(c, rd, rn, rm, ra, 1));
-    hw2(c, 0xfb00u | (unsigned)rn,
-           (unsigned)(ra << 12) | (unsigned)(rd << 8) | 0x10u | (unsigned)rm);
+    mul_grp(c, 0, 1, rd, rn, rm, ra);
 }
 
 void t_div(struct code *c, int rd, int rn, int rm, int sign)
 {
     A32(a32_div(c, rd, rn, rm, sign));
-    hw2(c, (sign ? 0xfb90u : 0xfbb0u) | (unsigned)rn,
-           0xf0f0u | (unsigned)(rd << 8) | (unsigned)rm);
+    lmul_grp(c, sign ? 1u : 3u, 0xfu, 15, rd, rn, rm);
 }
 
 void t_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
 {
     A32(a32_mull(c, rdlo, rdhi, rn, rm, sign));
-    hw2(c, (sign ? 0xfb80u : 0xfba0u) | (unsigned)rn,
-           (unsigned)(rdlo << 12) | (unsigned)(rdhi << 8) | (unsigned)rm);
+    lmul_grp(c, sign ? 0u : 2u, 0, rdlo, rdhi, rn, rm);
 }
 
 /* SMLAL/UMLAL T1: the long multiplies' accumulating twins, op1 one more
@@ -496,16 +560,21 @@ void t_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
 void t_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
 {
     A32(a32_mlal(c, rdlo, rdhi, rn, rm, sign));
-    hw2(c, (sign ? 0xfbc0u : 0xfbe0u) | (unsigned)rn,
-           (unsigned)(rdlo << 12) | (unsigned)(rdhi << 8) | (unsigned)rm);
+    lmul_grp(c, sign ? 4u : 6u, 0, rdlo, rdhi, rn, rm);
+}
+
+/* UMAAL T1: umlal's row with op2 0110 */
+void t_umaal(struct code *c, int rdlo, int rdhi, int rn, int rm)
+{
+    A32(a32_umaal(c, rdlo, rdhi, rn, rm));
+    lmul_grp(c, 6, 6, rdlo, rdhi, rn, rm);
 }
 
 /* SMMUL T1: 1111 1011 0101 Rn | 1111 Rd 0000 Rm (Ra = 1111) */
 void t_smmul(struct code *c, int rd, int rn, int rm)
 {
     A32(a32_smmul(c, rd, rn, rm));
-    hw2(c, 0xfb50u | (unsigned)rn,
-           0xf000u | (unsigned)(rd << 8) | (unsigned)rm);
+    mul_grp(c, 5, 0, rd, rn, rm, 15);
 }
 
 void t_cmp_reg(struct code *c, int rn, int rm)
@@ -553,35 +622,152 @@ void t_ext(struct code *c, int rd, int rm, int size, int sign)
         hw(c, base16 | (unsigned)(rm << 3) | (unsigned)rd);
         return;
     }
-    hw2(c, size == 1 ? (sign ? 0xfa4fu : 0xfa5fu)
-                     : (sign ? 0xfa0fu : 0xfa1fu),
-           0xf080u | (unsigned)(rd << 8) | (unsigned)rm);
+    t_extadd(c, rd, 15, rm, size, sign, 0);
 }
 
 void t_clz(struct code *c, int rd, int rm)
 {
     A32(a32_bitop(c, A32_CLZ, rd, rm));
-    hw2(c, 0xfab0u | (unsigned)rm, 0xf080u | (unsigned)(rd << 8) | (unsigned)rm);
+    dp_reg(c, 0xb, 8, rd, rm, rm);
+}
+
+/* The byte reversals, op 00 rev, 01 rev16, 11 revsh: the 16-bit form
+ * 1011 1010 op Rm Rd for low registers, else data processing (register)
+ * op1 1001 with op2 10 op. */
+static void rev_op(struct code *c, unsigned op, int rd, int rm)
+{
+    if (low(rd) && low(rm)) {
+        hw(c, 0xba00u | (op << 6) | (unsigned)(rm << 3) | (unsigned)rd);
+        return;
+    }
+    dp_reg(c, 9, 8u | op, rd, rm, rm);
 }
 
 void t_rev(struct code *c, int rd, int rm)
 {
     A32(a32_bitop(c, A32_REV, rd, rm));
-    if (low(rd) && low(rm)) {
-        hw(c, 0xba00u | (unsigned)(rm << 3) | (unsigned)rd);
-        return;
-    }
-    hw2(c, 0xfa90u | (unsigned)rm, 0xf080u | (unsigned)(rd << 8) | (unsigned)rm);
+    rev_op(c, 0, rd, rm);
 }
 
 void t_rev16(struct code *c, int rd, int rm)
 {
     A32(a32_bitop(c, A32_REV16, rd, rm));
-    if (low(rd) && low(rm)) {
-        hw(c, 0xba40u | (unsigned)(rm << 3) | (unsigned)rd);
-        return;
-    }
-    hw2(c, 0xfa90u | (unsigned)rm, 0xf090u | (unsigned)(rd << 8) | (unsigned)rm);
+    rev_op(c, 1, rd, rm);
+}
+
+void t_revsh(struct code *c, int rd, int rm)
+{
+    A32(a32_bitop(c, A32_REVSH, rd, rm));
+    rev_op(c, 3, rd, rm);
+}
+
+/* ---- the DSP extension ----------------------------------------------
+ *
+ * ARMv7E-M (Cortex-M4/M7) and ARMv8-M Mainline with the extension
+ * (Cortex-M33), reached from inline asm and .s files, never chosen by the
+ * code generator. ARM state numbers them in tables of its own (a32.c), to
+ * which each hands its call as every encoder here does. */
+
+/* The extends, with an add and a rotation: op1 0 halfword, 2 the two
+ * bytes into two halfwords, 4 byte; +1 unsigned. op2 is 1 0 rot. */
+void t_extadd(struct code *c, int rd, int rn, int rm, int size, int sign,
+              int rot)
+{
+    unsigned op1 = size == 2 ? 0u : size == 16 ? 2u : 4u;
+    A32(a32_extadd(c, rd, rn, rm, size, sign, rot));
+    dp_reg(c, op1 | (sign ? 0u : 1u), 8u | ((unsigned)rot >> 3), rd, rn, rm);
+}
+
+void t_parallel(struct code *c, int op, int kind, int rd, int rn, int rm)
+{
+    A32(a32_parallel(c, op, kind, rd, rn, rm));
+    dp_reg(c, 8u | (unsigned)op, (unsigned)kind, rd, rn, rm);
+}
+
+void t_qarith(struct code *c, int op, int rd, int rm, int rn)
+{
+    A32(a32_qarith(c, op, rd, rm, rn));
+    dp_reg(c, 8, 8u | (unsigned)op, rd, rn, rm);
+}
+
+void t_sel(struct code *c, int rd, int rn, int rm)
+{
+    A32(a32_sel(c, rd, rn, rm));
+    dp_reg(c, 0xa, 8, rd, rn, rm);
+}
+
+void t_smlaxy(struct code *c, int rd, int rn, int rm, int ra, int ntop,
+              int mtop)
+{
+    A32(a32_smlaxy(c, rd, rn, rm, ra, ntop, mtop));
+    mul_grp(c, 1, (unsigned)(ntop << 1 | mtop), rd, rn, rm, ra);
+}
+
+void t_smlaw(struct code *c, int rd, int rn, int rm, int ra, int mtop)
+{
+    A32(a32_smlaw(c, rd, rn, rm, ra, mtop));
+    mul_grp(c, 3, (unsigned)mtop, rd, rn, rm, ra);
+}
+
+void t_smlad(struct code *c, int rd, int rn, int rm, int ra, int sub, int x)
+{
+    A32(a32_smlad(c, rd, rn, rm, ra, sub, x));
+    mul_grp(c, sub ? 4u : 2u, (unsigned)x, rd, rn, rm, ra);
+}
+
+void t_smmla(struct code *c, int rd, int rn, int rm, int ra, int sub,
+             int round)
+{
+    A32(a32_smmla(c, rd, rn, rm, ra, sub, round));
+    mul_grp(c, sub ? 6u : 5u, (unsigned)round, rd, rn, rm, ra);
+}
+
+void t_usada8(struct code *c, int rd, int rn, int rm, int ra)
+{
+    A32(a32_usada8(c, rd, rn, rm, ra));
+    mul_grp(c, 7, 0, rd, rn, rm, ra);
+}
+
+void t_smlalxy(struct code *c, int rdlo, int rdhi, int rn, int rm, int ntop,
+               int mtop)
+{
+    A32(a32_smlalxy(c, rdlo, rdhi, rn, rm, ntop, mtop));
+    lmul_grp(c, 4, 8u | (unsigned)(ntop << 1 | mtop), rdlo, rdhi, rn, rm);
+}
+
+void t_smlald(struct code *c, int rdlo, int rdhi, int rn, int rm, int sub,
+              int x)
+{
+    A32(a32_smlald(c, rdlo, rdhi, rn, rm, sub, x));
+    lmul_grp(c, sub ? 5u : 4u, 0xcu | (unsigned)x, rdlo, rdhi, rn, rm);
+}
+
+/* SSAT 1111 0011 00 sh 0, USAT 1111 0011 10 sh 0: sh is the shift's
+ * type bit (ASR), and the bound field holds n-1 for the signed form and
+ * n for the unsigned one. sh with no shift amount is the 16-bit form. */
+void t_sat(struct code *c, int rd, int bound, int rn, int sign, int asr,
+           int amt)
+{
+    A32(a32_sat(c, rd, bound, rn, sign, asr, amt));
+    bin_imm(c, (sign ? 0x10u : 0x18u) | (asr ? 2u : 0u), rd, rn, amt,
+            (unsigned)(sign ? bound - 1 : bound));
+}
+
+void t_sat16(struct code *c, int rd, int bound, int rn, int sign)
+{
+    A32(a32_sat16(c, rd, bound, rn, sign));
+    bin_imm(c, sign ? 0x12u : 0x1au, rd, rn, 0,
+            (unsigned)(sign ? bound - 1 : bound));
+}
+
+/* PKHBT/PKHTB: the shifted-register data-processing row, op 0110 with S
+ * clear; the tb bit is the shift type's top bit (LSL 00, ASR 10), and
+ * ASR #32 is amount 0. */
+void t_pkh(struct code *c, int rd, int rn, int rm, int tb, int amt)
+{
+    A32(a32_pkh(c, rd, rn, rm, tb, amt));
+    t_alu_reg_shift(c, T_OP_PKH, rd, rn, rm, tb ? T_SH_ASR : T_SH_LSL,
+                    amt & 31, 0);
 }
 
 /* ---- memory --------------------------------------------------------- */
@@ -613,20 +799,47 @@ static unsigned wide_ldst_op(int size, int sign, int store)
     return 0xf8d0u;
 }
 
-int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
+/* LDRD/STRD (immediate) T1: 1110 100 P U 1 W L Rn | Rt Rt2 imm8, imm8
+ * counting words: offset addressing P = 1, W = 0; pre-indexed P = 1,
+ * W = 1; post-indexed P = 0, W = 1. */
+static int ldst_pair(struct code *c, int rt, int rt2, int rn, long off,
+                     int store, int p, int w)
 {
-    if (t_isa_a32) return a32_ldst_pair(c, rt, rt2, rn, off, store);
-    /* LDRD/STRD (immediate) T1, offset addressing: 1110 100 P U 1 W L Rn,
-     * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. */
-    if (rt >= T_SP || rt2 >= T_SP || rn == T_PC || (!store && rt == rt2))
-        return 0;
     if (off % 4 != 0 || off < -1020 || off > 1020)
         return 0;
     unsigned u = off >= 0 ? 1u : 0u;
     unsigned mag = (unsigned)(off >= 0 ? off : -off);
-    hw2(c, 0xe940u | (u << 7) | (store ? 0u : 0x10u) | (unsigned)rn,
+    hw2(c, 0xe840u | ((unsigned)p << 8) | (u << 7) | ((unsigned)w << 5) |
+           (store ? 0u : 0x10u) | (unsigned)rn,
            (unsigned)(rt << 12) | (unsigned)(rt2 << 8) | (mag / 4));
     return 1;
+}
+
+int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
+{
+    if (t_isa_a32) return a32_ldst_pair(c, rt, rt2, rn, off, store);
+    /* LDRD/STRD (immediate) T1, offset addressing: 1110 100 P U 1 W L Rn,
+     * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. With rn
+     * = pc it is LDRD (literal), the same fields, the offset counted from
+     * Align(pc, 4) -- a literal pool's load (t_lit64 in codegen.c). There
+     * is no store to a literal. */
+    if (rt >= T_SP || rt2 >= T_SP || (rn == T_PC && store) ||
+        (!store && rt == rt2))
+        return 0;
+    return ldst_pair(c, rt, rt2, rn, off, store, 1, 0);
+}
+
+int t_ldst_pair_any(struct code *c, int rt, int rt2, int rn, long off,
+                    int store, int idx)
+{
+    if (t_isa_a32) return a32_ldst_pair_any(c, rt, rt2, rn, off, store, idx);
+    if (rt == T_SP || rt == T_PC || rt2 == T_SP || rt2 == T_PC ||
+        (!store && rt == rt2) || (rn == T_PC && store) ||
+        (idx != T_IDX_OFF && (rn == T_PC || rn == rt || rn == rt2)))
+        return 0;
+    /* post-indexed is P = 0 with W = 1 */
+    return ldst_pair(c, rt, rt2, rn, off, store, idx != T_IDX_POST,
+                     idx != T_IDX_OFF);
 }
 
 int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
@@ -822,14 +1035,28 @@ int t_adr_w(struct code *c, int rd, int imm12)
     return at;
 }
 
+/* TBB and TBH (T1): 1110 1000 1101 Rn | 1111 0000 000H Rm, Rn = pc; H
+ * picks the halfword table. */
+static int t_tb(struct code *c, int rm, int h)
+{
+    int at = c->len;
+    hw2(c, 0xe8dfu, 0xf000u | (h ? 0x10u : 0u) | (unsigned)rm);
+    return at;
+}
+
 int t_tbh(struct code *c, int rm)
 {
     if (t_isa_a32) a32_refuse("tbh", rm);
-    /* 1110 1000 1101 1111 | 1111 0000 0001 Rm. llvm-mc: tbh [pc, r0,
-     * lsl #1] = e8df f010, [pc, r12, lsl #1] = e8df f01c. */
-    int at = c->len;
-    hw2(c, 0xe8dfu, 0xf010u | (unsigned)rm);
-    return at;
+    /* llvm-mc: tbh [pc, r0, lsl #1] = e8df f010, [pc, r12, lsl #1] =
+     * e8df f01c. */
+    return t_tb(c, rm, 1);
+}
+
+int t_tbb(struct code *c, int rm)
+{
+    if (t_isa_a32) a32_refuse("tbb", rm);
+    /* llvm-mc: tbb [pc, r0] = e8df f000 */
+    return t_tb(c, rm, 0);
 }
 
 void t_patch_hw16(struct code *c, int at, unsigned v)
@@ -1395,8 +1622,7 @@ int t_ldr_const(struct code *c, int rd, unsigned long v)
 void t_rbit(struct code *c, int rd, int rm)
 {
     A32(a32_bitop(c, A32_RBIT, rd, rm));
-    hw2(c, 0xFA90u | (unsigned)rm,
-           0xF0A0u | ((unsigned)rd << 8) | (unsigned)rm);
+    dp_reg(c, 9, 0xa, rd, rm, rm);
 }
 
 /* LDREX <Rt>, [<Rn>, #off] -- the offset is in WORDS in the encoding and
@@ -1912,7 +2138,7 @@ void t1_revsh(struct code *c, int rd, int rm)
 {
     t1_lo("revsh", rd);
     t1_lo("revsh", rm);
-    hw(c, 0xbac0u | ((unsigned)rm << 3) | (unsigned)rd);
+    t_revsh(c, rd, rm);
 }
 
 /* LDR/STR, LDRB/STRB, LDRH/STRH Rt, [Rn, #off] (T1): 011 B L imm5 Rn Rt

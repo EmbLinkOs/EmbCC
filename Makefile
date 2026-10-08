@@ -180,25 +180,30 @@ SRCS := \
 	src/arch/xtensa/emit.c \
 	src/arch/xtensa/codegen.c \
 	src/arch/xtensa/irgen.c \
+	src/arch/xtensa/asm.c \
 	src/arch/xtensa/predef.c \
 	src/arch/xtensa/predef_cxx.c \
 	src/arch/ppc/emit.c \
 	src/arch/ppc/codegen.c \
 	src/arch/ppc/irgen.c \
+	src/arch/ppc/asm.c \
 	src/arch/ppc32/predef.c \
 	src/arch/ppc32/predef_cxx.c \
 	src/arch/rx/emit.c \
 	src/arch/rx/codegen.c \
 	src/arch/rx/irgen.c \
+	src/arch/rx/asm.c \
 	src/arch/rx/predef.c \
 	src/arch/sparc/emit.c \
 	src/arch/sparc/codegen.c \
 	src/arch/sparc/irgen.c \
+	src/arch/sparc/asm.c \
 	src/arch/sparc32/predef.c \
 	src/arch/sparc32/predef_cxx.c \
 	src/arch/coldfire/emit.c \
 	src/arch/coldfire/codegen.c \
 	src/arch/coldfire/irgen.c \
+	src/arch/coldfire/asm.c \
 	src/arch/coldfire/predef.c \
 	src/arch/coldfire/predef_cxx.c \
 	src/arch/avr/emit.c \
@@ -225,7 +230,8 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
-all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim
+all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim \
+     embflash embtrace
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -285,6 +291,19 @@ embmap: tools/embmap/embmap.c
 # standalone, like embar.
 embpack: tools/embpack/embpack.c
 	$(CC) $(CFLAGS) -o $@ tools/embpack/embpack.c
+
+# embflash -- an image put into a target through the GDB remote protocol
+# (QEMU, OpenOCD, pyOCD, J-Link's GDB server, the Black Magic Probe):
+# flash erased and programmed by the server's algorithm, RAM written,
+# verified, run (tools/embflash). ISO C, POSIX sockets and termios.
+embflash: tools/embflash/embflash.c
+	$(CC) $(CFLAGS) -o $@ tools/embflash/embflash.c
+
+# embtrace -- what a program built with -finstrument-functions did: calls,
+# times, the call tree and a Chrome/Perfetto trace, from the ring lib/rt's
+# recorder (lib/rt/embtrace.c) dumps to a console (tools/embtrace). ISO C.
+embtrace: tools/embtrace/embtrace.c
+	$(CC) $(CFLAGS) -o $@ tools/embtrace/embtrace.c
 
 # embrt -- the worst-case stack of each entry point and interrupt, from
 # the compiler's frames (-fstack-usage), its call graph
@@ -388,10 +407,15 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/tricore/irgen.c src/arch/tricore/asm.c \
              src/arch/tricore/emit.c \
              src/arch/xtensa/irgen.c src/arch/xtensa/emit.c \
+             src/arch/xtensa/asm.c \
              src/arch/ppc/irgen.c src/arch/ppc/emit.c \
+             src/arch/ppc/asm.c \
              src/arch/rx/irgen.c src/arch/rx/emit.c \
+             src/arch/rx/asm.c \
              src/arch/sparc/irgen.c src/arch/sparc/emit.c \
-             src/arch/coldfire/irgen.c \
+             src/arch/sparc/asm.c \
+             src/arch/coldfire/irgen.c src/arch/coldfire/asm.c \
+             src/arch/coldfire/emit.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)
@@ -454,7 +478,7 @@ check: embcc libc-x86_64 libcxx-x86_64
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
 test: embcc embread embld embdbg embls embas embar embsvd embmap embpack \
-      embrt embsim libc-x86_64 \
+      embrt embsim embflash embtrace libc-x86_64 \
       libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
@@ -598,11 +622,15 @@ libc-linux-aarch64: embcc embar
 # tests/golden/embedded-runtime.sh uses it too, so the archive the test checks
 # is the archive that ships.
 # The -eabihf ones are the hard-float convention: its objects do not link
-# with soft-float ones, so its runtime is a separate archive.
+# with soft-float ones, so its runtime is a separate archive. RISC-V's
+# hardware-float ABIs are the same, named by the ABI under the triple's
+# directory (tools/build-rt.sh says how each is built).
+RISCV_HF := riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
+            riscv64-unknown-elf/lp64f riscv64-unknown-elf/lp64d
 RT_EMBEDDED := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
-               riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
+               riscv64-unknown-elf $(RISCV_HF) mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
                  xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
                  mips64el-none-elf mips64-none-elf
 rt-embedded: embcc embar
@@ -619,7 +647,8 @@ rt-embedded: embcc embar
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
-                 riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \
+                 riscv32-unknown-elf riscv64-unknown-elf $(RISCV_HF) \
+                 mipsel-none-elf mips-none-elf \
                  loongarch64-unknown-elf tricore-none-elf \
                  xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
                  mips64el-none-elf mips64-none-elf
@@ -773,7 +802,11 @@ libcxx: libcxx-x86_64 libcxx-aarch64
 LIBCXX_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                    thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                    thumbv8m.main-none-eabihf armv7a-none-eabi \
-                   armv7a-none-eabihf riscv32-unknown-elf
+                   armv7a-none-eabihf riscv32-unknown-elf \
+                   riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
+                   mipsel-none-elf mips-none-elf mips64-none-elf \
+                   powerpc-none-eabi sparc-none-elf m68k-none-elf \
+                   xtensa-none-elf tricore-none-elf rx-none-elf
 libcxx-embedded: embcc embar
 	@for t in $(LIBCXX_EMBEDDED); do \
 	    sh tools/build-libcxx.sh $$t $(BUILD)/libcxx/$$t || exit 1; \

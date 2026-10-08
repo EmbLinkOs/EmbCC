@@ -649,6 +649,9 @@ static struct warn_opt g_warns[] = {
      * noticing. On by default, as GCC has it: the reader should be told
      * that something they wrote had no effect. */
     { "attributes",           1,  0,    0 },
+    /* GCC's, on by default: a constructor or destructor priority of
+     * 0-100, which the implementation reserves for its own. */
+    { "prio-ctor-dtor",       1,  0,    0 },
     /* GCC puts both of these on by default too, and for the same
      * reason: the author of the declaration asked for the warning. */
     { "deprecated-declarations", 1, 0,  0 },

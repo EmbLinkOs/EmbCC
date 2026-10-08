@@ -167,6 +167,8 @@ static const char *class_sym(struct cclass *c, const char *prefix)
 
 /* ---- C types ---- */
 
+static int need_valist_tag;     /* the unit uses Xtensa's va_list record */
+
 static const char *basic_c(enum cty_kind k)
 {
     switch (k) {
@@ -175,7 +177,10 @@ static const char *basic_c(enum cty_kind k)
     case CT_CHAR: return "char";
     case CT_SCHAR: return "signed char";
     case CT_UCHAR: case CT_CHAR8: return "unsigned char";
-    case CT_WCHAR: return target_wchar_unsigned() ? "unsigned int" : "int";
+    /* (Xtensa's is a 16-bit unsigned short) */
+    case CT_WCHAR: return target_wchar_size() == 2
+                          ? (target_wchar_unsigned() ? "unsigned short" : "short")
+                          : target_wchar_unsigned() ? "unsigned int" : "int";
     case CT_CHAR16: case CT_USHORT: return "unsigned short";
     case CT_CHAR32: case CT_UINT: return "unsigned int";
     case CT_SHORT: return "short";
@@ -190,7 +195,15 @@ static const char *basic_c(enum cty_kind k)
     case CT_DOUBLE: return "double";
     case CT_LDOUBLE: return "long double";
     case CT_NULLPTR: return "void *";
-    case CT_VALIST: return "__builtin_va_list";
+    case CT_VALIST:
+        /* Xtensa's va_list is GCC's 12-byte record held by value, which
+         * the C front end's `__builtin_va_list` (a char *) is not: the
+         * record, as EmbCC's <stdarg.h> spells it for C */
+        if (target_get() == TARGET_XTENSA) {
+            need_valist_tag = 1;
+            return "struct __va_list_tag";
+        }
+        return "__builtin_va_list";
     default: return "int";
     }
 }
@@ -818,12 +831,18 @@ static char *fp_class_text(struct cexpr *e)
     char *v = cx_fmt("__cx_fc%d", u);
     /* long double: a double where it is eight bytes (ARM, Darwin), x87's
      * format on x86-64, binary128 elsewhere */
-    int ld8 = target_ldouble_size() == 8;
-    const char *min = t->k == CT_FLOAT ? "0x1p-126f"
-                      : t->k == CT_DOUBLE ? "0x1p-1022"
-                      : ld8 ? "0x1p-1022L" : "0x1p-16382L";
-    int signbyte = t->k == CT_FLOAT ? 3 : t->k == CT_DOUBLE || ld8 ? 7
-                   : target_get() == TARGET_X86_64 ? 9 : 15;
+    long fsz = ct_size(t);
+    const char *min = fsz == 4 ? (t->k == CT_FLOAT ? "0x1p-126f"
+                                  : t->k == CT_DOUBLE ? "0x1p-126"
+                                  : "0x1p-126L")
+                      : fsz == 8 ? (t->k == CT_DOUBLE ? "0x1p-1022"
+                                    : "0x1p-1022L")
+                      : "0x1p-16382L";
+    /* the sign is the top bit of the most significant byte: the first
+     * on a big-endian target, else the last -- byte 9 of x87's ten */
+    int signbyte = target_big_endian() ? 0
+                   : fsz == 16 && target_get() == TARGET_X86_64 ? 9
+                   : (int)fsz - 1;
     const char *decl = cdecl(t, v);
     char *nan = cx_fmt("(%s != %s)", v, v);
     char *fin = cx_fmt("(%s - %s == %s - %s)", v, v, v, v);
@@ -1006,7 +1025,7 @@ static char *member_text(struct cexpr *e)
  * function (with ob, that object adjusted). */
 static int arm_pmf(void)
 {
-    return target_get() == TARGET_AARCH64 || cx_arm32_abi();
+    return cx_pmf_vbit_in_adj();
 }
 
 /* &C::f as a PMF's initializer. A virtual function's is its vtable
@@ -4107,9 +4126,11 @@ static void emit_rtti(struct cclass *c)
         if (ilp32)
             sb_printf(&out_rtti, ", (void *)%ldL, (void *)%ldL", flags,
                       (long)c->nbases);
-        else
-            sb_printf(&out_rtti, ", (void *)%ldL",
-                      flags | ((long)c->nbases << 32));
+        else      /* (the flags first in memory: high on big-endian) */
+            sb_printf(&out_rtti, ", (void *)%ldL", target_big_endian()
+                      ? (long)((unsigned long)flags << 32 |
+                               (unsigned long)c->nbases)
+                      : flags | ((long)c->nbases << 32));
         for (int i = 0; i < c->nbases; i++) {
             struct cbase *b = &c->bases[i];
             /* a virtual base's offset is where the vtable holds it */
@@ -4308,6 +4329,7 @@ char *cx_emit_unit(void)
     nwork = 0;
     need_atexit = need_guard = 0;
     need_pmf = 0;
+    need_valist_tag = 0;
     any_vtable = any_pure = need_dyncast = 0;
     memset(&out_rtti, 0, sizeof out_rtti);
     memset(&out_rtti_decl, 0, sizeof out_rtti_decl);
@@ -4462,9 +4484,12 @@ char *cx_emit_unit(void)
     sb_put(&out, sb_str(&out_rtti_decl));
     sb_put(&out, sb_str(&out_rtti));
     sb_put(&out, sb_str(&out_vtables));
-    if (need_pmf || need_srcloc) {
+    if (need_pmf || need_srcloc || need_valist_tag) {
         /* whatever above names it is written first */
         struct sb pre = { 0, 0, 0 };
+        if (need_valist_tag)
+            sb_put(&pre, "struct __va_list_tag { int *__va_stk; "
+                         "int *__va_reg; int __va_ndx; };\n");
         if (need_pmf)
             sb_put(&pre, "struct __cx_pmf { void *ptr; long adj; };\n");
         if (need_srcloc)

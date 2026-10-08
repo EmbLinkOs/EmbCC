@@ -59,7 +59,7 @@ na() {
     alloca)
         echo "checks that alloca is 16-aligned; AAPCS gives 8 (__BIGGEST_ALIGNMENT__), and clang's build fails it at -O2 too" ;;
     atomics)
-        echo "__builtin_frame_address, refused by name (arm-a32-refuse.sh)" ;;
+        echo "__builtin_frame_address(1), refused by name: no frame chain (arm-a32-refuse.sh)" ;;
     *) return 1 ;;
     esac
 }

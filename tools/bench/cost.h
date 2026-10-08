@@ -8,8 +8,9 @@
  *   load or store pair 3, sdiv/udiv 7 (2 to 12 by the operands), vdiv
  *   and vsqrt 14; and a taken branch 2 more (the pipeline refill).
  *
- *   RV32 (no one core: a plain in-order pipeline): 1, a load 2, a
- *   divide or remainder 16, and a taken branch or jump 2 more.
+ *   RV32 (no one core: a plain in-order pipeline): 1, a load 2 (flw and
+ *   fld too), a divide or remainder 16, fdiv and fsqrt 16, and a taken
+ *   branch or jump 2 more.
  *
  * Each function takes an instruction's bytes (2 or 4) and returns its
  * cost, and says whether it may branch; the caller adds the 2 cycles of
@@ -133,6 +134,8 @@ static inline int rv_cost(const uint8_t *p, size_t n, int *branch)
     }
     if (op == 0x33 && (w >> 25) == 1 && ((w >> 12) & 7) >= 4)
         return 16;                                      /* div, rem */
+    if (op == 0x53 && ((w >> 27) == 0x03 || (w >> 27) == 0x0b))
+        return 16;                                      /* fdiv, fsqrt */
     return 1;
 }
 

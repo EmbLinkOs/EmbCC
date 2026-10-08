@@ -20,7 +20,11 @@ rm -rf "$out"; mkdir -p "$out"
 
 # The names `all` builds. Read from the Makefile rather than listed
 # here, so a tool added to `all` is covered without editing this file.
-tools=$(sed -n 's/^all: *//p' "$EMBCC_ROOT/Makefile" | head -1)
+# the `all` target, its backslash-continued lines joined: it outgrew one
+# line, and reading only the first gave a tool named `\` and lost the rest
+tools=$(awk '/^all:/ { f = 1 }
+             f { l = l " " $0; if ($0 !~ /\\$/) { print l; exit } }' \
+            "$EMBCC_ROOT/Makefile" | sed 's/\\//g; s/^ *all: *//')
 [ -n "$tools" ] || { echo "FAIL: could not read the `all` target"; exit 1; }
 
 # The link commands come from the Makefile so there is one source of

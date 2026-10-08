@@ -255,7 +255,10 @@ Known gaps, in the order they matter:
    address registers, so an access through a pointer in a register costs
    a `mov.a` (2 bytes) each time.
 3. **Refused by name:** jump tables (a dense switch is a compare tree),
-   `.s` files and instructions in file-scope asm, naked and interrupt
-   functions, atomics wider than a word, computed
+   interrupt functions (`.s`/`.S` files, file-scope asm and naked
+   functions are assembled since src/arch/tricore/asm.c gained the
+   control transfers and symbols; tests/golden/tricore-gas.sh), a
+   conditional branch to an external symbol (R_TRICORE_15REL), atomics
+   wider than a word, computed
    goto, `__builtin_frame_address`/`__builtin_return_address`, C++.
 4. The TC3xx FPU is not used (soft float everywhere).

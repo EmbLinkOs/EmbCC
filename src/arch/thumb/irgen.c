@@ -237,6 +237,15 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         if (op->reg == ASM_REG_INVALID)
             diag_fatal(file, s->line, "asm constraint \"%s\" is not valid for "
                                       "ARMv7-M", op->constraint);
+        /* a tied input is its output's register, assigned below */
+        if (op->reg == ASM_REG_TIED) {
+            regs[i] = ASM_REG_TIED;
+            isimm[i] = 0;
+            imms[i] = 0;
+            sizes[i] = 4;
+            names[i] = op->name;
+            continue;
+        }
         if (op->reg == ASM_REG_IMM && i < a->nout)
             diag_fatal(file, s->line, "an asm output cannot be an immediate");
         regs[i] = op->reg;
@@ -273,6 +282,9 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         regs[i] = r;
     }
 
+    for (int i = a->nout; i < nops; i++)
+        if (regs[i] == ASM_REG_TIED)
+            regs[i] = regs[a->in[i - a->nout].imm];
     char *text = t_subst(file, s->line, a->tmpl, regs, imms, isimm,
                           names, nops);
     struct code c = { 0 };
@@ -283,6 +295,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     tasm_reset();
     tasm_set_arch(target_thumb_v8m_base() ? TASM_V8M_BASE
                                               : target_thumb_arch());
+    tasm_set_dsp(target_thumb_em());
     if (tasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     if (tasm_open())
@@ -299,7 +312,8 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
     for (int i = 0; i < a->nin; i++) {
-        if (isimm[a->nout + i])
+        /* (a tied input's value arrives through its in-out output) */
+        if (isimm[a->nout + i] || a->in[i].reg == ASM_REG_TIED)
             continue;
         struct ir_asm_op *o = &ia->in[ia->nin++];
         o->reg = regs[a->nout + i];

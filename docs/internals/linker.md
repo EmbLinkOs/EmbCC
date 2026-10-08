@@ -811,6 +811,38 @@ The `+ 4` is because the field encodes a displacement from `P + 4` while
 the ABI's addend is measured from `P`: an assembler with no target writes
 `bl .` (`f7ff fffe`, displacement -4) to mean an addend of 0.
 
+#### Long-branch veneers (`arm_veneers`)
+
+A branch that does not reach, or must switch between Thumb and ARM and
+cannot (a jump, a conditional ARM call), goes through a veneer
+(the manual's [ARM long-branch veneers](../manual/tools/embld.md#arm-long-branch-veneers)).
+The pieces, all in `src/link/link.c`:
+
+- **`veneer_needed`** is the one question, asked both when veneers are
+  decided and when a branch is patched, so the two agree.
+- **`arm_veneer_scan`** runs after a layout and BEFORE
+  `finalize_symbols`, so it computes each target as its section's
+  address plus the symbol's offset (`veneer_target`). It reads the addend
+  as `apply_relocs` does (the field for `SHT_REL`), and keys a veneer by
+  the caller's output section (`sosec` under a script, the fixed group
+  otherwise), the target (a global, or an object's local symbol) and the
+  addend. It returns how many it added.
+- **`arm_veneer_place`** appends each new veneer to a synthetic
+  `.text.__embld_veneer` section per output section, made at the first
+  one: the group's last member without a script, or the last input of
+  the script's output section. Without a script it takes the callers'
+  segment, so a veneer for code in `.data` is in the image's data and
+  copied to RAM with it.
+- **The callers** lay out again while the scan adds veneers: `ls_layout`
+  around its settling loop, `embld_link` around `layout`. A veneer is
+  never removed, so this ends; after eight rounds it is an error.
+  `layout` places COMMON symbols again on each run (`was_common`).
+- **`arm_veneer_fill`** writes the bytes after the final layout, from
+  `cmse_fill`. The target's low bit says the state `bx` (or the ARMv6-M
+  `pop {r0, pc}`) enters: set for Thumb, clear for ARM.
+- **`arm_veneer_addr`** is what `apply_relocs` asks, to point a branch
+  at its veneer.
+
 ### RISC-V relocations
 
 `apply_riscv` handles both RV32 and RV64. Two helpers split a value into
@@ -1283,7 +1315,8 @@ The other range errors have messages of their own:
 
 | Message | Limit |
 |---|---|
-| `FILE: a Thumb call is more than 16MB away; this linker mints no veneers` | `bl`/`b.w`: -2^24 to 2^24 - 1 bytes |
+| `FILE: a Thumb branch is more than 16MB away, and so would be a veneer at the end of its output section` | `bl`/`b.w`: -2^24 to 2^24 - 1 bytes, after `arm_veneers` |
+| `FILE: an ARM branch is more than 32MB away, and so would be a veneer at the end of its output section` | `bl`/`b`: -2^25 to 2^25 - 1 bytes, after `arm_veneers` |
 | `` FILE: an rjmp reaches +-4KB and this target is N bytes away; this linker mints no trampolines, so the call has to be a `call` rather than an `rcall` `` | `rjmp`/`rcall`: -2048 to 2047 words |
 | `FILE: a conditional branch reaches +-126 bytes and this target is N away; it has to be an inverted branch over an rjmp` | AVR branch: -64 to 63 words |
 | `FILE: a call to an odd address 0xADDR; AVR instructions are halfword-aligned and the address is halved to a word number, so an odd one cannot be encoded` | AVR `call`/`jmp` |

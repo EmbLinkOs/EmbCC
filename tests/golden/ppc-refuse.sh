@@ -119,38 +119,61 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
-    'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
-refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
-    'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
-    'void *f(void){ return __builtin_return_address(0); }'
-refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
-    'void *f(void){ return __builtin_frame_address(0); }'
+# An 8-byte atomic is a call to libatomic's sized routine, as GCC's and
+# clang's are; lib/rt/atomic8.c defines them (it used to be refused).
+printf 'long long x;
+long long f(void){ return __atomic_fetch_add(&x, 1, 5); }
+long long g(void){ return __atomic_load_n(&x, 5); }
+' > "$out/at8.c"
+"$EMBCC" --target=$T -O1 -c "$out/at8.c" -o "$out/at8.o" 2> "$out/at8.err" || {
+    echo "an 8-byte atomic was refused:"; cat "$out/at8.err"; exit 1; }
+for s in __atomic_fetch_add_8 __atomic_load_8; do
+    "${EMBCC_LLVM_READELF:-llvm-readelf}" -s "$out/at8.o" | grep -q " $s\$" || {
+        echo "an 8-byte atomic is not a call to $s"; exit 1; }
+done
+refc "__builtin_return_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_return_address(1); }'
+refc "__builtin_frame_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_frame_address(1); }'
 refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "inline assembly" 'inline assembly is not supported for powerpc-none-eabi' \
-    'int f(void){ int r; __asm__("li %0, 1" : "=r"(r)); return r; }'
-refc "a file-scope instruction" 'file-scope asm instruction' \
-    '__asm__(".globl foo\nfoo: blr");'
+# Assembly is src/arch/ppc/asm.c's (tests/golden/ppc-asm.sh referees it):
+# inline asm with operands, a naked function, a file-scope block, a
+# compiler barrier and a .s file all compile; what is outside the
+# vocabulary is refused by name.
+for src in 'int f(void){ int r; __asm__("li %0, 1" : "=r"(r)); return r; }' \
+           'void __attribute__((naked)) f(void){ __asm__("blr"); }' \
+           '__asm__(".globl foo\nfoo: blr");' \
+           'int g; int f(void){ g = 1; __asm__ volatile("" ::: "memory"); return g; }'; do
+    printf '%s\n' "$src" > "$out/asm.c"
+    "$EMBCC" --target=$T -O2 -c "$out/asm.c" -o /dev/null 2> "$out/asm.err" || {
+        echo "assembly in C was refused: $src"; cat "$out/asm.err"; exit 1; }
+done
+refc "a floating-point instruction" 'EmbCC compiles soft float' \
+    'void f(void){ __asm__ volatile("fadd 1, 2, 3"); }'
+refc "an AltiVec instruction" 'AltiVec instruction, which the e500 does not have' \
+    'void f(void){ __asm__ volatile("vaddubm 1, 2, 3"); }'
+refc "r1 clobbered" "clobbers 'r1', which holds the stack pointer" \
+    'void f(void){ __asm__ volatile("nop" ::: "r1"); }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for powerpc-none-eabi' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+grep -q 'C++ exceptions are not supported for powerpc-none-eabi' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
 printf '\tblr\n' > "$out/a.s"
-if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err"; then
-    echo "an assembly file was accepted"; exit 1
-fi
-grep -q 'no assembly-file support for powerpc-none-eabi yet: EmbCC has no PowerPC assembler' \
-    "$out/as.err" || {
-    echo "an assembly file was refused, but not by name:"; cat "$out/as.err"; exit 1; }
-echo "narrow and 8-byte atomics, the frame and return address,"
-echo "__int128, interrupt functions, an over-aligned scalar, inline and"
-echo "file-scope assembly, .s files and C++ are each refused by name"
+"$EMBCC" --target=$T -c "$out/a.s" -o /dev/null || {
+    echo "an assembly file was refused"; exit 1; }
+echo "narrow atomics, the frame and return address above level 0,"
+echo "__int128, interrupt functions, an over-aligned scalar, floating-point"
+echo "and AltiVec assembly and C++ exceptions are each refused by name"
 
 # ---- EmbLD -------------------------------------------------------------------
 # A little-endian PowerPC object (clang's powerpcle), which embld must refuse
