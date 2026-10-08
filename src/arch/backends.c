@@ -15,6 +15,7 @@
 #include "backend.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 static const struct backend_desc g_backends[] = {
     [TARGET_X86_64] = {
@@ -79,7 +80,8 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "jal", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
-        .no_asm_text = NULL },
+        .no_asm_text = NULL,
+        .option = mips32_target_option },
     [TARGET_MIPS64] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
         .op_calls_helper = mips_op_calls_helper,
@@ -88,7 +90,8 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "jal", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
-        .no_asm_text = NULL },
+        .no_asm_text = NULL,
+        .option = mips64_target_option },
     [TARGET_LOONGARCH64] = {
         .family = "LoongArch", .codegen = codegen_unit_loongarch, .ra_at_o0 = 1,
         .op_calls_helper = la_op_calls_helper,
@@ -97,7 +100,8 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "bl", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
-        .no_asm_text = NULL },
+        .no_asm_text = NULL,
+        .option = loongarch_target_option },
     [TARGET_TRICORE] = {
         .family = "TriCore", .codegen = codegen_unit_tricore, .ra_at_o0 = 0,
         .op_calls_helper = tc_op_calls_helper,
@@ -106,7 +110,8 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
-        .no_asm_text = NULL },
+        .no_asm_text = NULL,
+        .option = tricore_target_option },
     [TARGET_XTENSA] = {
         .family = "Xtensa", .codegen = codegen_unit_xtensa, .ra_at_o0 = 0,
         .op_calls_helper = xtensa_op_calls_helper,
@@ -116,7 +121,8 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = "compile with -c (there is no Xtensa assembler here to check the text "
-                       "against)" },
+                       "against)",
+        .option = xtensa_target_option },
     [TARGET_PPC32] = {
         .family = "PowerPC", .codegen = codegen_unit_ppc, .ra_at_o0 = 0,
         .op_calls_helper = ppc_op_calls_helper,
@@ -125,7 +131,8 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "bl", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
-        .no_asm_text = NULL },
+        .no_asm_text = NULL,
+        .option = ppc_target_option },
     [TARGET_SPARC32] = {
         .family = "SPARC", .codegen = codegen_unit_sparc, .ra_at_o0 = 0,
         .op_calls_helper = sparc_op_calls_helper,
@@ -134,7 +141,8 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "call", .call_delay_slot = 1, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
-        .no_asm_text = NULL },
+        .no_asm_text = NULL,
+        .option = sparc_target_option },
     [TARGET_COLDFIRE] = {
         .family = "ColdFire", .codegen = codegen_unit_coldfire, .ra_at_o0 = 0,
         .op_calls_helper = cf_op_calls_helper,
@@ -143,7 +151,8 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 0,
         .call_insn = "jsr", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 1, .text_p2align = 2,
-        .no_asm_text = NULL },
+        .no_asm_text = NULL,
+        .option = coldfire_target_option },
     [TARGET_RX] = {
         .family = "RX", .codegen = codegen_unit_rx, .ra_at_o0 = 0,
         .op_calls_helper = rx_op_calls_helper,
@@ -153,8 +162,21 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "bsr", .call_delay_slot = 0, .sym_prefix = "_",
         .imm_prefixed = 1, .text_p2align = 2,
         .no_asm_text = "EmbCC writes no RX assembly text (use -c; .s files and "
-                       "inline asm do assemble)" },
+                       "inline asm do assemble)",
+        .option = rx_target_option },
 };
+
+int option_listed(const char *arg, const char *const *exact,
+                  const char *const *prefix)
+{
+    for (; *exact; exact++)
+        if (!strcmp(arg, *exact))
+            return 1;
+    for (; *prefix; prefix++)
+        if (!strncmp(arg, *prefix, strlen(*prefix)))
+            return 1;
+    return 0;
+}
 
 const struct backend_desc *backend_get(enum target_arch a)
 {

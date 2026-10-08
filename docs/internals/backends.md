@@ -143,8 +143,9 @@ way that relocation type's linker reads it back.
 2. A directory with `codegen.c`, `emit.c` and `irgen.c`, and a
    `codegen_unit_*` entry point.
 3. Its row in the backend registry, `src/arch/backends.c` (see [The
-   backend registry](#the-backend-registry)). The driver reads the row; it
-   has no per-target chain to extend.
+   backend registry](#the-backend-registry)), and its GCC `-m` options in
+   `src/arch/<arch>/options.c`. The driver reads the row; it has no
+   per-target chain to extend.
 4. A predefined-macro table from `tools/gen-predef.sh` (below).
 5. An encoding referee for `emit.c` (see [Encoders and their
    referees](#encoders-and-their-referees)).
@@ -227,6 +228,7 @@ know about the code generator behind it:
 | `imm_prefixed` | An asm operand that is a constant is written `#5` (RX, ColdFire) |
 | `text_p2align` | The alignment of a naked function's body (AVR: 1) |
 | `no_asm_text` | Why `-S` writes no text for it, as the refusal says; `NULL` when it does |
+| `option` | The target's own command-line options, in `src/arch/<arch>/options.c`: returns 1 when it handled the argument (accepted it, or refused it by name), 0 to let the driver try the rest. Each handler lists its options as an `exact` and a `prefix` table, checked with `option_listed()` |
 
 `backend_get(arch)` returns the row, and stops the compiler if a target
 has none. The driver selects from the row the code generator, the helper predicate,

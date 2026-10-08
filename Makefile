@@ -112,6 +112,10 @@ SRCS := \
 	src/macho/write.c \
 	src/coff/write.c \
 	src/arch/target.c src/arch/backends.c src/arch/regalloc.c \
+	src/arch/loongarch/options.c src/arch/xtensa/options.c \
+	src/arch/ppc/options.c src/arch/rx/options.c src/arch/sparc/options.c \
+	src/arch/coldfire/options.c src/arch/mips/options.c \
+	src/arch/tricore/options.c \
 	src/arch/code.c \
 	src/arch/predef.c \
 	src/arch/x86_64/irgen.c \
