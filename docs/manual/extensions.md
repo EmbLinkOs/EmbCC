@@ -1021,8 +1021,9 @@ is not a constant is seq_cst, as are the `__sync` builtins and the
 operators on an `_Atomic` object. On every other target every operation
 is sequentially consistent: the memory-order arguments are accepted and
 do not change the code. `__atomic_signal_fence` emits
-the same barrier as `__atomic_thread_fence`. No operation calls a
-library: each is inline or refused.
+the same barrier as `__atomic_thread_fence`. No operation of 1, 2 or 4
+bytes, or of 8 on a 64-bit target, calls a library; an eight-byte one on
+a 32-bit target does (below).
 
 `__atomic_always_lock_free` and `__atomic_is_lock_free` are integer
 constant expressions, usable in `_Static_assert`. The size must be a
@@ -1034,17 +1035,38 @@ does not reflect the table below.
 
 | Operation | x86-64 | AArch64 | Cortex-M | RV32 | RV64 | AVR |
 |---|---|---|---|---|---|---|
-| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4, 8 |
-| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4, 8 |
+| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4; 8 by a call | 1, 2, 4; 8 by a call | 1, 2, 4, 8 | 1, 2, 4, 8 |
+| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4; 8 by a call | 1, 2, 4; 8 by a call | 1, 2, 4, 8 | 1, 2, 4, 8 |
 | Fences | Yes | Yes | Yes | Yes | Yes | Yes (no instruction) |
 
 16-byte operations need `__int128` or a 16-byte object through the
 generic forms. Other sizes are refused, for example:
 
 ```text
-embcc: a.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]
-embcc: a.c:1: error: an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core
+embcc: a.c:1: error: an atomic access of 16 bytes is not one access on this target (it moves 8 at once): the halves could be split by an interrupt or another core
 ```
+
+#### Eight bytes on a 32-bit target
+
+Every 32-bit target -- Cortex-M, ARMv7-A, RV32, MIPS32, SPARC, PowerPC,
+ColdFire, TriCore, Xtensa and RX -- does an eight-byte atomic by calling
+libatomic's sized routine, as GCC and clang do there (none of them moves
+eight bytes atomically):
+
+| Operation | Called |
+|---|---|
+| `__atomic_load_n`, `__atomic_load`, reading an `_Atomic` | `u64 __atomic_load_8(const volatile void *p, int order)` |
+| `__atomic_store_n`, `__atomic_store`, `__sync_lock_release`, `=` | `void __atomic_store_8(volatile void *p, u64 v, int order)` |
+| `__atomic_exchange_n`, `__atomic_exchange`, `__sync_lock_test_and_set` | `u64 __atomic_exchange_8(volatile void *p, u64 v, int order)` |
+| `__atomic_compare_exchange_n`, `__atomic_compare_exchange`, the `__sync` compare-and-swaps, `*=` and the other operators without a fetch form | `bool __atomic_compare_exchange_8(volatile void *p, void *expected, u64 desired, int success, int failure)` |
+| `__atomic_fetch_OP`, `__atomic_OP_fetch`, `__sync_fetch_and_OP`, `__sync_OP_and_fetch`, `++`, `--`, `+=`, `-=`, `&=`, <code>&#124;=</code>, `^=` | `u64 __atomic_fetch_OP_8(volatile void *p, u64 v, int order)`, OP one of `add`, `sub`, `and`, `or`, `xor`, `nand` |
+
+The orders are the `__ATOMIC_*` values as the call wrote them -- a
+variable order is passed as its value -- and seq_cst (5) for the `__sync`
+builtins and the operators, except `__sync_lock_release`'s release (3),
+as clang passes them. `lib/rt` defines every one, weak, by masking
+interrupts; see [Embedded programming](embedded.md#eight-byte-atomics-on-a-32-bit-target)
+for what that does and does not cover, and how to replace them.
 
 The instructions used on each embedded target are described in
 [Embedded programming](embedded.md). `_Atomic` objects and the

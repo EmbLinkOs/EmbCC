@@ -181,8 +181,6 @@ Cortex-M (`ARMv7-M` backend):
 | Construct | Diagnostic |
 |---|---|
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
-| 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | An `asm` output wider than 4 bytes | `the ARMv7-M backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
 
 RISC-V (RV32 messages shown; RV64 names itself):
@@ -192,8 +190,6 @@ RISC-V (RV32 messages shown; RV64 names itself):
 | Any operation on `long double` | `the RV32 backend cannot lower a 128-bit value yet (function f) [ldvar w=16 size=16]` |
 | `__int128` at RV32 | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | Any operation on `__int128` at RV64 | `the RV64 backend cannot lower a 128-bit value yet (function f) [ldvar w=16 size=16]` |
-| 8-byte atomic read-modify-write at RV32 | `the RV32 backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
-| 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | An `asm` output wider than a register | `the RV32 backend cannot lower an asm output wider than a register yet (function f) [asm w=4 size=4]` |
 
 `long double` and `__int128` can still be declared and measured with
@@ -204,8 +200,6 @@ MIPS32:
 
 | Construct | Diagnostic |
 |---|---|
-| 8-byte atomic read-modify-write | `the MIPS32 backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
-| 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `-mhard-float`, `-EB`, `-mabicalls`, `-mabi=n32`, `-G8`, a core that is not MIPS32r2 | each refused by name; see [Invoking EmbCC](../manual/invoking.md#mips-options) |
@@ -686,7 +680,7 @@ dates.
 - GNU-syntax assembly files for x86-64.
 - binary128 `long double` arithmetic on RISC-V, and `__int128` at RV64.
 - Computed `goto` on Cortex-M, RISC-V, MIPS32 and AVR;
-  8-byte atomic read-modify-write and unwind tables on MIPS32.
+  unwind tables on MIPS32.
 - `__attribute__((interrupt))` on MIPS64, and GCC's MIPS
   `use_shadow_register_set` and `use_debug_exception_return`.
 - On MIPS32, a delay slot filled from anywhere but the instruction just
