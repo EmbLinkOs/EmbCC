@@ -535,6 +535,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `inline-asm-kernel` | the kernel's privileged inline-asm instructions, decoded by `objdump` |
 | `newlib-headers` | real newlib headers through the preprocessor and predefined macros |
 | `embld-link` | EmbLD links freestanding programs that run on the host |
+| `x86-disasm` | the x86-64 decoder behind `-S` and EmbDBG splits every function of tests/exec exactly as llvm-objdump does, and names x87, SSE2, cmov and bswap instead of printing `.byte` |
 | `embld-bss-align` | `__data_end` and `__bss_start` on word boundaries for ARMv6-M, ARMv7-M and RV32, with every length of `.data` from 1 to 8: a startup's word loop from an odd address faults on a core without unaligned access |
 | `embld-sections` | orphan sections gathered contiguously, with bracket symbols in both spellings |
 | `embld-b1` | EmbLD links a program against the EmbLinkOS runtime and newlib |
