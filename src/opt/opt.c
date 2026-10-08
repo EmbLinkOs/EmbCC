@@ -5823,9 +5823,28 @@ static void lcse_store_gen(int *s, int nk, const struct lkey *keys,
     }
 }
 
+/* On ARM: a load through an address temp written more than once -- a
+ * pointer a loop walks -- is keyed by that temp too, and every write of
+ * it drops the key, so `*p` read in each arm of an if-else chain is read
+ * once: printf's flag loop read its character five times. Its value is a
+ * temp written once (the load), so nothing else has to drop it. Thumb
+ * only, measured there; the other targets' output stays as it was. */
+static void lcse_kill_defs(int *s, int nk, const struct lkey *keys,
+                           const struct ir_ins *ins)
+{
+    int t = def_target(ins);
+    if (t < 0)
+        return;
+    for (int k = 0; k < nk; k++)
+        if (keys[k].op == IR_LOAD && keys[k].bkind == BASE_NONE &&
+            keys[k].a == t)
+            s[k] = -1;
+}
+
 static int pass_loadcse(struct ir_func *fn)
 {
     int nvars = fn->nvars;
+    int mdef = target_get() == TARGET_THUMB && !getenv("EMBCC_NO_LCSE_MDEF");
     if (fn->nins == 0)
         return 0;
     struct defs d;
@@ -5853,7 +5872,11 @@ static int pass_loadcse(struct ir_func *fn)
         if (in->op == IR_LDVAR && !in->vol && in->a >= 0 && in->a < nvars) {
             k.op = IR_LDVAR;
         } else if (in->op == IR_LOAD && !in->vol && in->a >= 0 &&
-                   in->a < fn->nvregs && d.cnt[in->a] == 1) {
+                   in->a < fn->nvregs &&
+                   (d.cnt[in->a] == 1 ||
+                    (mdef && in->a >= nvars && in->dst != in->a &&
+                     in->dst >= 0 && in->dst < fn->nvregs &&
+                     d.cnt[in->dst] == 1))) {
             k.op = IR_LOAD;
         } else {
             continue;
@@ -5936,6 +5959,8 @@ static int pass_loadcse(struct ir_func *fn)
                     if (ins->op == IR_STORE)
                         lcse_store_gen(s, nk, keys, ins, fn, &d);
                 }
+                if (mdef)
+                    lcse_kill_defs(s, nk, keys, ins);
                 int k = keyidx[i];
                 if (k >= 0 && s[k] < 0) s[k] = ins->dst;   /* first def of the value */
             }
@@ -5962,6 +5987,8 @@ static int pass_loadcse(struct ir_func *fn)
                 if (ins->op == IR_STORE)
                     lcse_store_gen(s, nk, keys, ins, fn, &d);
             }
+            if (mdef)
+                lcse_kill_defs(s, nk, keys, ins);
             int k = keyidx[i];
             if (k < 0) continue;
             if (s[k] >= 0 && s[k] != ins->dst) {
