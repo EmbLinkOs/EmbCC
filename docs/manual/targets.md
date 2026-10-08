@@ -1020,7 +1020,7 @@ semihosting exit.
 ### Limitations
 
 Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
-`__builtin_return_address`, `__attribute__((interrupt))` (an A-profile
+`__builtin_return_address` above level 0, `__attribute__((interrupt))` (an A-profile
 handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
 and C++ exceptions and unwind tables (C++ compiles with
 `-fno-exceptions`). Inline assembly takes the Cortex-M vocabulary in ARM state, with

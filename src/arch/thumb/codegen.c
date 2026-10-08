@@ -5777,10 +5777,27 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_CAS: case IR_CMPXCHG:
         thumb_atomic(F, i);
         return;
-    case IR_FRAMEADDR:
-        t_refuse(fn, i, "__builtin_frame_address or __builtin_return_address "
-                        "(this backend keeps no frame-pointer chain)");
+    case IR_FRAMEADDR: {
+        /* Level 0 only (irgen): this code keeps no frame-pointer chain.
+         * The frame address is the stack pointer at entry; the return
+         * address is lr as the function was entered with it -- in lr
+         * still in a function that pushes nothing (a leaf: nothing has
+         * written it), else in the word the prologue's push put just
+         * below the entry stack pointer (lr is the push's highest
+         * register). Thumb's lr carries the Thumb bit, as GCC's and
+         * clang's result does. */
+        if (i->dst < 0)
+            return;
+        int d = wreg(F, i->dst, T_ACC);
+        if (i->imm == 2 && F->nopush)
+            t_mov_reg(t, d, T_LR);
+        else if (i->imm == 2)
+            fb_ld(F, d, F->entry_off - 4, 4, 0);
+        else                            /* above r0-r3's push, if variadic */
+            fb_addr(F, d, F->entry_off + (fn->is_varargs ? 16 : 0));
+        wrote(F, i->dst, d);
         return;
+    }
     case IR_CAS16:
         t_refuse(fn, i, "a 16-byte atomic (ARMv7-M has no doubleword "
                         "exclusive, let alone a quadword one)");
@@ -6542,7 +6559,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
               (fn->ins[fn->nins - 1].op == IR_JMP ||
                fn->ins[fn->nins - 1].op == IR_UD2);
     for (i = 0; F.noret && i < fn->nins; i++)
-        if (fn->ins[i].op == IR_RET || (F.tail && F.tail[i]))
+        if (fn->ins[i].op == IR_RET || (F.tail && F.tail[i]) ||
+            /* __builtin_return_address reads the pushed lr */
+            fn->ins[i].op == IR_FRAMEADDR)
             F.noret = 0;
     push_at = F.nopush || F.noret ? -1
             : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
@@ -6583,6 +6602,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                   : F.frame + save_bytes_for(F.nsave, F.used_callee,
                                              F.scr_save) +
                     (long)F.nfsave * 4;
+        F.entry_off = base;
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
         int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
         int npstk = 0;

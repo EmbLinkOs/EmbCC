@@ -10,7 +10,8 @@
  *   frame pointer at the frame's foot, as AArch64's and PowerPC's), and
  *   a callee's is below its caller's: the stack grows down everywhere;
  * - both hold in a function with a variable-length array, whose frame
- *   is addressed from a frame register, and in a leaf.
+ *   is addressed from a frame register, in a variadic one, and in a
+ *   leaf.
  *
  * Code addresses are compared as integers: on AVR they are word
  * addresses, as its function pointers are. */
@@ -56,9 +57,20 @@ __attribute__((noinline)) static void *vla_fa(volatile char **local, void **ra)
     return __builtin_frame_address(0);
 }
 
+/* a variadic function pushes its register arguments above the saved
+ * registers (32-bit ARM): its frame address is above them too */
+__attribute__((noinline)) static void *va_fa(volatile char **local,
+                                             void **ra, int n, ...)
+{
+    volatile char x = (char)n;
+    *local = &x;
+    *ra = __builtin_return_address(0);
+    return __builtin_frame_address(0);
+}
+
 __attribute__((noinline)) static int caller(void)
 {
-    uaddr lo = (uaddr)(void *)caller, hi = lo + 2048;
+    uaddr lo = (uaddr)(void *)caller, hi = lo + 8192;
     uaddr r = (uaddr)leaf_ra();
     if (!(r > lo && r < hi))
         bad |= 2;
@@ -82,6 +94,11 @@ __attribute__((noinline)) static int caller(void)
         bad |= 64;
     if (!((uaddr)vra > lo && (uaddr)vra < hi))
         bad |= 128;
+
+    uaddr fa_va = (uaddr)va_fa(&theirs, &vra, 3, 1, 2, 3);
+    if (!NEAR(fa_va, (uaddr)theirs) || !(fa_va < fa_me) ||
+        !((uaddr)vra > lo && (uaddr)vra < hi))
+        bad |= 512;
     return mine;
 }
 
@@ -89,5 +106,5 @@ int main(void)
 {
     if (caller() != 3)
         bad |= 256;
-    return bad ? 1 + (bad & 0x3f) : 42;
+    return bad ? 1 + (bad & 0x3f) + (bad >> 9) * 64 : 42;
 }

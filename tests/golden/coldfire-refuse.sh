@@ -101,10 +101,18 @@ refc "inline asm" 'inline assembly is not supported for m68k-none-elf' \
     'int f(void){ __asm__ volatile("nop"); return 0; }'
 refc "file-scope asm" 'file-scope asm is not supported for m68k-none-elf' \
     '__asm__(".globl x\nx: .long 0"); int f(void){ return 0; }'
-refc "an 8-byte atomic read-modify-write" 'an atomic wider than four bytes' \
-    'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
-refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
-    'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
+# An 8-byte atomic is a call to libatomic's sized routine, as GCC's and
+# clang's are; lib/rt/atomic8.c defines them (it used to be refused).
+printf 'long long x;
+long long f(void){ return __atomic_fetch_add(&x, 1, 5); }
+long long g(void){ return __atomic_load_n(&x, 5); }
+' > "$out/at8.c"
+"$EMBCC" --target=$T -O1 -c "$out/at8.c" -o "$out/at8.o" 2> "$out/at8.err" || {
+    echo "an 8-byte atomic was refused:"; cat "$out/at8.err"; exit 1; }
+for s in __atomic_fetch_add_8 __atomic_load_8; do
+    "${EMBCC_LLVM_READELF:-llvm-readelf}" -s "$out/at8.o" | grep -q " $s\$" || {
+        echo "an 8-byte atomic is not a call to $s"; exit 1; }
+done
 refc "__int128" '__int128' \
     '__int128 f(__int128 a){ return a; }'
 refc "a frame beyond 32 KiB" 'a stack frame larger than 32 KiB' \
