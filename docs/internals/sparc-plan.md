@@ -178,8 +178,8 @@ class 32, big-endian, `e_flags` 0 (what clang writes for V8).
 By name: computed goto, atomics wider than a word (one and two bytes are
 a `casa` loop on the word around them),
 `__builtin_frame_address`/`__builtin_return_address`, inline assembly
-and `.s` files (there is no SPARC assembler in EmbCC yet), naked and
-interrupt functions, C++, a scalar local aligned beyond 8, a branch beyond
+and `.s` files (since assembled: src/arch/sparc/asm.c, below), naked and
+interrupt functions (naked ones since assembled too), C++, a scalar local aligned beyond 8, a branch beyond
 +-8 MiB, and every machine flag but `-mcpu=leon3` (or `v8`), `-msoft-float`
 and `-mbig-endian`.
 
@@ -192,6 +192,7 @@ and `-mbig-endian`.
 | `tests/golden/sparc-abi.sh` | EmbCC and clang objects calling each other |
 | `tests/golden/sparc-data.sh` | static data byte for byte against clang |
 | `tests/golden/sparc-refuse.sh` | the object's header, the accepted and refused options and constructs |
+| `tests/golden/sparc-asm.sh` | the assembler (src/arch/sparc/asm.c): its vocabulary against llvm-mc's bytes and llvm-objdump's mnemonics, a file's layout against clang's assembler, C with inline asm, a .S file, a file-scope block and naked functions on the board at -O0..-Os, the relocations, the refusals |
 
 ## Status
 
@@ -223,3 +224,15 @@ Known gaps, none of which miscompiles:
   lib/rt (clang passes binary128 helper operands in registers).
 - No WRY nops: as clang does for -mcpu=leon3, a divide follows `wr %y`
   directly (LEON3 has no delay on it; an older V8 part might).
+
+## The assembler (2026-10-08)
+
+src/arch/sparc/asm.c assembles the LEON3's integer unit for inline asm,
+file-scope blocks, naked functions and .s/.S files (src/as/gas.c's
+SPARC_GAS), through emit.c's format encoders and the op3 values emit.h
+names. A template's operands are `%o0`-`%o5`, `%l0`-`%l5`, `%i0`-`%i5`;
+its bytes are a barrier the delay-slot filler does not reach past, and an
+asm keeps its function from being a leaf (leaf_candidate). Two packings
+follow llvm-mc, the referee, where GNU as may choose the other operand
+field for the same value: `wr x, %y` is `wr %g0, x, %y`, and a trap on
+one register `ta %g1` is `%g0 + %g1`.

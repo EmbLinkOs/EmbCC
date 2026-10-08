@@ -23,6 +23,8 @@
 #include "../arch/loongarch/asm.h"
 #include "../arch/xtensa/asm.h"
 #include "../arch/tricore/asm.h"
+#include "../arch/sparc/asm.h"
+#include "../arch/ppc/asm.h"
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
@@ -473,6 +475,12 @@ static void do_align(struct gas *g, long boundary)
             } else if (m == EM_RISCV && !(off & 1) && left >= 2) {
                 code_byte(c, 0x01); code_byte(c, 0x00);          /* c.nop */
                 off += 2;
+            } else if ((m == EM_SPARC || m == EM_PPC) && !(off & 3) &&
+                       left >= 4) {
+                /* big-endian: sethi 0, %g0 / ori 0, 0, 0 */
+                code_byte(c, m == EM_SPARC ? 0x01 : 0x60); code_byte(c, 0);
+                code_byte(c, 0); code_byte(c, 0);                /* nop */
+                off += 4;
             } else if (m == EM_AARCH64 && !(off & 3) && left >= 4) {
                 code_byte(c, 0x1f); code_byte(c, 0x20); code_byte(c, 0x03);
                 code_byte(c, 0xd5);                              /* nop */
@@ -1312,7 +1320,16 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
      * is on RISC-V, and only an external one is relocated.) */
     if (g->tgt->symform && g->tgt->machine != EM_XTENSA) {
         struct asm_symform f;
-        if (g->tgt->symform(stmt, &f)) {
+        int (*form)(const char *, struct asm_symform *) =
+            g->tgt->symform_abs ? g->tgt->symform_abs : g->tgt->symform;
+        if (form(stmt, &f)) {
+            /* (an `.equ` constant is not an address: substitution writes
+             * its value, which the statement assembler computes with) */
+            struct sym *cs = g->tgt->symform_abs
+                             ? sym_find(g, stmt + f.sym_at, (size_t)f.sym_len)
+                             : NULL;
+            if (cs && cs->sec == SEC_ABS && !cs->alias)
+                return NULL;
             /* ...unless the operand is a NUMERIC LOCAL reference. `1b` and
              * `2f` are identifiers as far as a target's parser can tell, so
              * `rjmp 1b` was claimed here and relocated against a symbol
@@ -1598,10 +1615,12 @@ static void xt_literal_dir(struct gas *g, const char *arg, int pass)
         int bad;
         p = skip_ws((char *)p + 1);
         const char *e = p;
+        long namei = (long)(name - g->syms);
         struct gval v = gx_eval(g, &e, pass, &bad);
         long off;
         if (bad)
             return;
+        name = &g->syms[namei];   /* the value may have moved the table */
         off = xt_lit_val(g, v, 0);
         if (first < 0)
             first = off;
@@ -2719,8 +2738,12 @@ static int directive(struct gas *g, char *p, int pass)
         v = skip_ws(e);
         if (e == arg || *v != ',') { gerr(g, ".size wants NAME, SIZE"); return 1; }
         v++;
+        /* The value first: evaluating `.` makes a symbol, which may move
+         * the table, and a pointer into it taken before would be left
+         * pointing at freed memory (it wrote the size there). */
+        int ok = pass == 2 && gx_abs_now(g, &v, pass, &n, ".size");
         struct sym *sy = sym_get(g, arg, (size_t)(e - arg));
-        if (pass == 2 && gx_abs_now(g, &v, pass, &n, ".size"))
+        if (ok)
             sy->size = n;
         return 1;
     }
@@ -2784,9 +2807,11 @@ static int directive(struct gas *g, char *p, int pass)
             gerr(g, ".equiv: '%s' is already defined", sy->name);
             return 1;
         }
+        long syi = (long)(sy - g->syms);
         struct gval gv = gx_eval(g, &v, pass, &bad);
         if (bad)
             return 1;
+        sy = &g->syms[syi];      /* `.` in the value may have moved the table */
         sy->alias = NULL;
         sy->alias_add = 0;
         if (gv.sec == SEC_ABS) {
@@ -3176,12 +3201,15 @@ static int directive(struct gas *g, char *p, int pass)
          * asked for a multiple of seven. */
         if (DIR(".balign") || DIR(".balignw") || DIR(".balignl")) {
             if (v > 0) do_align(g, v);
-        } else if (DIR(".align") && g->tgt->machine == EM_XTENSA) {
-            /* ...and on Xtensa it is the byte count, a power of two, as
-             * GNU as reads it there: `.align 4` before a function */
+        } else if (DIR(".align") && (g->tgt->machine == EM_XTENSA ||
+                                     g->tgt->machine == EM_SPARC)) {
+            /* ...and on Xtensa and SPARC it is the byte count, a power of
+             * two, as GNU as reads it there: `.align 4` before a
+             * function */
             if (v <= 0 || (v & (v - 1))) {
-                gerr(g, ".align %ld: Xtensa's .align is a byte count, a "
-                        "power of two", v);
+                gerr(g, ".align %ld: %s's .align is a byte count, a "
+                        "power of two", v,
+                     g->tgt->machine == EM_SPARC ? "SPARC" : "Xtensa");
                 return 1;
             }
             do_align(g, v);
@@ -3598,7 +3626,8 @@ static const struct gas_target RISCV_GAS = {
     /* no 16-bit pointer, `.word` is four bytes, and no symbol
      * forms beyond the ones above. */
     0, 0, NULL, 0,
-    0, rvasm_is_word, NULL, NULL, NULL
+    0, rvasm_is_word, NULL, NULL, NULL,
+    NULL
 };
 
 /* ARMv7-M. `call` and `la` are RISC-V pseudos and have no ARM
@@ -3613,7 +3642,8 @@ static const struct gas_target THUMB_GAS = {
      * :lower16:/:upper16: movw/movt are tasm_symform's. `@` is ARM's line
      * comment and `#` an immediate's prefix. */
     0, 0, tasm_symform, '@',
-    1, tasm_is_word, tasm_reset, tasm_open, NULL
+    1, tasm_is_word, tasm_reset, tasm_open, NULL,
+    NULL
 };
 
 /* ARMv7-A in ARM state: the same assembler, which writes A32 under
@@ -3623,7 +3653,8 @@ static const struct gas_target A32_GAS = {
     R_ARM_CALL, 0, 0,
     R_ARM_ABS32, 0,
     0, 0, tasm_symform, '@',
-    1, tasm_is_word, tasm_reset, tasm_open, NULL
+    1, tasm_is_word, tasm_reset, tasm_open, NULL,
+    NULL
 };
 
 /* aarch64. `bl sym` carries R_AARCH64_CALL26, one instruction and one
@@ -3636,7 +3667,8 @@ static const struct gas_target A64_GAS = {
     /* no 16-bit pointer, `.word` is four bytes, and no symbol
      * forms beyond the ones above; `#` is an immediate's prefix. */
     0, 0, NULL, 0,
-    1, NULL, NULL, NULL, NULL
+    1, NULL, NULL, NULL, NULL,
+    NULL
 };
 
 /* AVR. Its symbol-bearing forms are its own -- eight of them, because a
@@ -3650,7 +3682,8 @@ static const struct gas_target AVR_GAS = {
     R_AVR_32, 0,
     R_AVR_16, 2, avrasm_symform,
     ';',         /* AVR's line comment, as GNU as sets it for this port */
-    0, NULL, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL,
+    NULL
 };
 
 /* MIPS32r2, o32. Its symbol forms -- `jal sym`, `%hi`/`%lo`, `la` -- are
@@ -3663,7 +3696,8 @@ static const struct gas_target MIPS_GAS = {
     0, 0, 0,
     R_MIPS_32, 0,
     0, 0, mipsasm_symform, 0,
-    0, mipsasm_is_word, mipsasm_reset, NULL, NULL
+    0, mipsasm_is_word, mipsasm_reset, NULL, NULL,
+    NULL
 };
 
 /* MIPS64r2, n64: the same vocabulary and forms, an ELFCLASS64 object,
@@ -3673,7 +3707,8 @@ static const struct gas_target MIPS64_GAS = {
     0, 0, 0,
     R_MIPS_32, R_MIPS_64,
     0, 0, mipsasm_symform, 0,
-    0, mipsasm_is_word, mipsasm_reset, NULL, NULL
+    0, mipsasm_is_word, mipsasm_reset, NULL, NULL,
+    NULL
 };
 
 /* LoongArch64. Its symbol forms -- b/bl, call36/tail36, la.pcrel and
@@ -3686,7 +3721,8 @@ static const struct gas_target LA_GAS = {
     0, 0, 0,
     R_LARCH_32, R_LARCH_64,
     0, 0, laasm_symform, 0,
-    0, laasm_is_word, NULL, NULL, NULL
+    0, laasm_is_word, NULL, NULL, NULL,
+    NULL
 };
 
 /* Xtensa (the ESP32's LX6, windowed). Its symbol forms -- every branch,
@@ -3701,7 +3737,8 @@ static const struct gas_target XT_GAS = {
     0, 0, 0,
     R_XTENSA_32, 0,
     0, 0, xtasm_symform, 0,
-    0, xtasm_is_word, NULL, NULL, xtasm_set_pc
+    0, xtasm_is_word, NULL, NULL, xtasm_set_pc,
+    NULL
 };
 
 /* TriCore 1.6.1. `j`/`jl`/`call sym` carry R_TRICORE_24REL; an address
@@ -3715,12 +3752,48 @@ static const struct gas_target TRICORE_GAS = {
     0, 0, 0,
     R_TRICORE_32ABS, 0,
     0, 0, tcasm_symform, 0,
-    0, tcasm_is_word, NULL, NULL, NULL
+    0, tcasm_is_word, NULL, NULL, NULL,
+    NULL
+};
+
+/* SPARC V8 (the LEON3). A call or a branch to a symbol this file does
+ * not resolve carries R_SPARC_WDISP30 / R_SPARC_WDISP22 (spasm_symform);
+ * %hi(sym), %lo(sym) and `set sym, rd` carry R_SPARC_HI22 and
+ * R_SPARC_LO10 whatever sym is (spasm_symform_abs); `.word sym` is
+ * R_SPARC_32. A register is `%`-spelt, so the word after a `%` is an
+ * operand word, as is the `a` of `,a` (is_word). `!` is the comment
+ * character and `#` one only at a line's start, as GNU as has them for
+ * SPARC -- `.type f, #function` is SPARC's spelling. */
+static const struct gas_target SPARC_GAS = {
+    EM_SPARC, 1, spasm_assemble, NULL,
+    0, 0, 0,
+    R_SPARC_32, 0,
+    0, 0, spasm_symform, '!',
+    1, spasm_is_word, NULL, NULL, NULL,
+    spasm_symform_abs
+};
+
+/* 32-bit PowerPC (the e500 and the classic cores). A branch to a symbol
+ * this file does not resolve carries R_PPC_REL24 (b, bl), R_PPC_ADDR24
+ * (ba, bla) or R_PPC_REL14 (a conditional branch), ppcasm_symform's;
+ * sym@ha, sym@h and sym@l carry R_PPC_ADDR16_HA/_HI/_LO whatever sym is
+ * (ppcasm_symform_abs); `.long sym` is R_PPC_ADDR32. rN is a register,
+ * and a CR field or bit's name, the word after `@` and an SPR's name are
+ * operand words. `.align` is an exponent, as GNU as has it here. */
+static const struct gas_target PPC_GAS = {
+    EM_PPC, 1, ppcasm_assemble, ppcasm_is_reg,
+    0, 0, 0,
+    R_PPC_ADDR32, 0,
+    0, 0, ppcasm_symform, 0,
+    0, ppcasm_is_word, NULL, NULL, NULL,
+    ppcasm_symform_abs
 };
 
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+    case TARGET_PPC32: return &PPC_GAS;
+    case TARGET_SPARC32: return &SPARC_GAS;
     case TARGET_XTENSA: return &XT_GAS;
     case TARGET_TRICORE: return &TRICORE_GAS;
     case TARGET_LOONGARCH64: return &LA_GAS;
@@ -3853,15 +3926,7 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
 
     const struct gas_target *t = target_for();
     if (!t) {
-        if (target_get() == TARGET_PPC32)
-            fprintf(stderr, "embcc: error: no assembly-file support for %s "
-                            "yet: EmbCC has no PowerPC assembler\n",
-                    target_triple_now());
-        else if (target_get() == TARGET_SPARC32)
-            fprintf(stderr, "embcc: error: no assembly-file support for %s "
-                            "yet: EmbCC has no SPARC assembler\n",
-                    target_triple_now());
-        else if (target_get() == TARGET_COLDFIRE)
+        if (target_get() == TARGET_COLDFIRE)
             fprintf(stderr, "embcc: error: no assembly-file support for %s "
                             "yet: EmbCC has no ColdFire assembler\n",
                     target_triple_now());

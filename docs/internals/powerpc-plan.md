@@ -147,6 +147,7 @@ C++ (laid out LP64 only); unwind tables.
 | `tests/golden/ppc-abi.sh` | EmbCC and clang objects calling each other (embedded-abi, mips-abi and ppc-abi pairs) at -O0 and -O2 |
 | `tests/golden/ppc-data.sh` | tests/golden/be-data.c's every object, bytes and relocations, against clang's; -g's DWARF verified with clang's bit offsets; the values printed on the board from both compilers' objects |
 | `tests/golden/ppc-refuse.sh` | the triples, the object's header, -S reassembled by llvm-mc into -c's code and relocations, the accepted and refused options and constructs, EmbLD's refusal of a little-endian object |
+| `tests/golden/ppc-asm.sh` | the assembler (src/arch/ppc/asm.c): its vocabulary against llvm-mc's bytes and llvm-objdump's mnemonics (and BO/BI where it prints bt/bf), SPR names against llvm-mc's mfNAME, a file's layout against clang's assembler, C with inline asm, a .S file, a file-scope block and naked functions on the board at -O0..-Os, the relocations, the refusals |
 | `tests/golden/predef.sh` | the `ppc32` table against clang's |
 | `tests/golden/libc-embedded.sh` | lib/libc on the board at -O0, -O2 and -Os against the same library on x86-64 |
 | `tests/golden/debug-embedded.sh` | -g verifies; frame base breg1 (breg31 under alloca); the first parameter's location is where the prologue stores r3 |
@@ -163,13 +164,26 @@ EMBCC_VERIFY=1, with each pair mode forced and with EMBCC_RA_MAXPOOL=3.
 
 Not yet, each refused by name:
 
-- **Inline and file-scope assembly, `.s` files.** There is no PowerPC
-  assembler vocabulary (an `asm.c` beside emit.c, as MIPS and LoongArch
-  have); the harness writes its few privileged instructions as words. This
-  is the first gap a real e500/e200 project meets (mtspr, wrteei, isync).
 - `__builtin_frame_address`/`__builtin_return_address` (the back chain is
   there to walk; LR's save word is the caller's frame + 4), computed goto,
   interrupt functions, unwind tables, C++.
 - Linker scripts for PowerPC images (EmbLD lays them out with
   -Ttext/-Tstack, as for MIPS).
 - isel (e500 and e200 have it; the code is portable Book E without it).
+
+## The assembler (2026-10-08)
+
+src/arch/ppc/asm.c assembles the e500's integer unit (and the classic
+cores' shared with it) for inline asm, file-scope blocks, naked functions
+and .s/.S files (src/as/gas.c's PPC_GAS), through emit.c's D, X, XO, M and
+the new B- and I-form packers, with the opcodes emit.h now names. A
+template's operands are r3-r8 and r14-r30. Since a PowerPC register is a
+bare number in GCC's text, which registers a template names is learned by
+assembling it once with its operands in placeholder registers (spelt
+`%_N`, which ppcasm_named does not count); a callee-saved one among them,
+or among the clobbers or operands, is saved by the prologue at every
+level, and a template that links (bl, bctrl, an LR write, an "lr"
+clobber) makes the function save LR (ir_asm.calls). llvm-mc's mfdear,
+mfesr and mftcr are the PPC405's SPR numbers and its mtsprg4-7 write the
+read-only copies (260-263); this assembler follows Book E and GNU as (61,
+62, 340; 276-279), and the referee checks those by number.

@@ -29,6 +29,8 @@ stated under the target.
 | [ARM Cortex-M](#arm-cortex-m) | `asm instruction "vldr" is not in the ARMv7-M vocabulary` |
 | [RISC-V](#risc-v) | `asm instruction "amoswap.w" is not in the RISC-V vocabulary` |
 | [MIPS32](#mips32) | `asm instruction "madd $t0, $t1" is not in the MIPS vocabulary` |
+| [SPARC](#sparc) | `asm instruction "popc" is SPARC V9's, and the LEON3 is a V8`, or `... is not in the SPARC vocabulary` |
+| [PowerPC](#powerpc) | `asm instruction "fadd" is a floating-point instruction: ...`, or `... is not in the PowerPC vocabulary` |
 | [AVR](#avr) | `'frobnicate' is not an AVR instruction this assembler knows (assembling "...")` |
 
 The full diagnostic carries the file and the line of the `asm` statement:
@@ -493,7 +495,7 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
+| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, SPARC, PowerPC, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
 | AArch64 ELF | directives and data only; an instruction is refused (below) |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
@@ -1825,6 +1827,256 @@ static inline unsigned cycles(void)
 }
 ```
 
+## SPARC
+
+This section applies to `sparc-none-elf` (SPARC V8, the LEON3).
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `g` | an integer register chosen by EmbCC |
+| `m` | a register chosen by EmbCC, holding the address of the operand; it is written into the template as `[%o0]`, as GCC prints a SPARC memory operand |
+| `i`, `n`, `I`-`P` | the constant, written into the template as a decimal number (`I` is GCC's signed 13-bit) |
+| `0`-`9` | an input in the register of the output it names |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Anything else, a non-constant `i` included, is refused with
+`asm constraint "a" is not valid for SPARC`. An operand is one 32-bit
+register: a `long long` one is refused (`SPARC asm operand 0 is 8 bytes`).
+A chosen register comes from `%o0`-`%o5`, then `%l0`-`%l5` and
+`%i0`-`%i5`, skipping registers listed as clobbers, named in the template
+or changed by a call in it; never a global (`%g1`-`%g4`, `%l6`, `%l7` and
+`%o7` are the code generator's scratch, `%g5`-`%g7` the system's), `%sp`,
+`%fp` or `%i7`. A register variable must be one of those (`register int x
+__asm__("o3")`); another is refused with `register variable bound to 'g1'
+is not supported for SPARC asm (use %o0-%o5, %l0-%l5 or %i0-%i5)`.
+
+### Modifiers
+
+`%cN` prints a constant operand bare, and `%rN` prints `%g0` for the
+constant 0 (as GCC's `r`). Any other modifier is refused with `asm
+template modifier '%H' is not supported for SPARC`.
+
+### Template syntax
+
+GNU SPARC syntax, as GNU as and llvm-mc read it: `op rs1, reg_or_imm,
+rd`, registers `%g0`-`%g7`, `%o0`-`%o7`, `%l0`-`%l7`, `%i0`-`%i7`,
+`%r0`-`%r31`, `%sp` and `%fp` (in an extended asm's text a literal
+register is `%%o0`); an address `[%o0 + %o1]`, `[%fp - 8]`, `[%o0 +
+%lo(0x1234)]`; a constant a C expression, or `%hi()`/`%lo()` of one. A
+branch or call target is `.+N` or `.-N` bytes from the instruction, or a
+numeric label of the template (`1:`, `1b`, `1f`). Delay slots are the
+template's own: write the instruction that fills one after the branch,
+call or `retl`; nothing is moved into or out of a template. Statements are
+separated by `;` or newlines; `!` and `//` start a comment, and `#` does
+at a line's start. A template cannot name a symbol (`"foo" names a symbol,
+and inline asm cannot reach one`): call through a register (`call %o2`),
+or write the code in a `.S` file or a file-scope block, where `call sym`,
+`%hi(sym)`, `%lo(sym)` and `set sym, rd` are relocated.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `add`, `addcc`, `addx`, `addxcc`, `sub`, `subcc`, `subx`, `subxcc`, `and`, `andcc`, `andn`, `andncc`, `or`, `orcc`, `orn`, `orncc`, `xor`, `xorcc`, `xnor`, `xnorcc`, `umul`, `umulcc`, `smul`, `smulcc`, `udiv`, `udivcc`, `sdiv`, `sdivcc`, `taddcc`, `tsubcc`, `taddcctv`, `tsubcctv`, `mulscc`, `save`, `restore` | `rs1, reg_or_imm, rd`, the immediate -4096..4095; `save`/`restore` also with none |
+| `sll`, `srl`, `sra` | `rs1, reg_or_imm, rd`, the count 0-31 |
+| `ld`, `ldub`, `lduh`, `ldsb`, `ldsh`, `ldd`, `ldstub`, `swap` | `[address], rd` (`ldd`: an even rd) |
+| `st`, `stb`, `sth`, `std` | `rd, [address]` |
+| the same with `a` (`lda`, `stba`, `swapa`...) | `[rs1 + rs2] ASI` (0-255) |
+| `casa` | `[rs1] ASI, rs2, rd` |
+| `sethi` | a 22-bit constant or `%hi(...)`, `rd` |
+| `ba`, `bn`, `bne`, `be`, `bg`, `ble`, `bge`, `bl`, `bgu`, `bleu`, `bcc`, `bcs`, `bpos`, `bneg`, `bvc`, `bvs`, `b`, `bnz`, `bz`, `bgeu`, `blu`, each also `,a` | `TARGET`, -8388608..8388604 bytes |
+| `call` | `TARGET` (+-2 GiB), or an address in registers (`jmpl ..., %o7`) |
+| `jmpl` | `address, rd` (no brackets) |
+| `jmp`, `rett`, `flush`, `iflush` | `address` |
+| `ret`, `retl`, `nop`, `stbar` | none |
+| `ta`, `tn`, `tne`, `te`, `tg`, `tle`, `tge`, `tl`, `tgu`, `tleu`, `tcc`, `tcs`, `tpos`, `tneg`, `tvc`, `tvs`, `t`, `tnz`, `tz`, `tgeu`, `tlu` | `N` (0-127), `%rs1`, `%rs1 + N`, `%rs1 + %rs2` |
+| `rd` | `%y`, `%psr`, `%wim`, `%tbr` or `%asr1`-`%asr31`, `rd` |
+| `wr` | `rs1, reg_or_imm, %y` (or another state register), or `reg_or_imm, %y` |
+| `unimp` | a 22-bit constant |
+| `mov` | `reg_or_imm, rd`; `%y` (or another state register), `rd`; `reg_or_imm, %y` |
+| `cmp`, `btst`, `bset`, `bclr`, `btog` | `rs1, reg_or_imm` / `reg_or_imm, rd` |
+| `tst`; `not`, `neg` | `rs`; `rs, rd` or `rd` |
+| `inc`, `inccc`, `dec`, `deccc` | `rd` or `imm, rd` |
+| `clr`, `clrb`, `clrh` | `rd` (`clr`) or `[address]` |
+| `set` | `value, rd`: `mov` when the value fits 13 bits, `sethi` alone when its low ten bits are 0, else `sethi` and `or` -- GNU's choice |
+
+Floating-point and coprocessor instructions are refused with `asm
+instruction "faddd" is a floating-point instruction: EmbCC compiles soft
+float, and this assembler has no floating-point vocabulary`; SPARC V9's
+(`ldx`, `membar`, `,pt`...) with `asm instruction "ldx" is SPARC V9's, and
+the LEON3 is a V8`; anything else outside the list with `asm instruction
+"foo" is not in the SPARC vocabulary`.
+
+### The register window
+
+`%sp`, `%fp` and `%i7` (the stack and frame pointers and the return
+address) may be read or written where a template names them, but they
+are never an operand's register and a clobber list naming one is refused
+(`SPARC asm clobbers '%sp', which holds this function's stack pointer;
+EmbCC does not save it around an asm`). Everything else in the window --
+the locals and the ins -- is this function's own, so nothing needs
+saving: a value live across an asm keeps out of every register the asm
+changes, which is its operands', its clobbers' and every register its
+text names, clobber list or not. A `call` (or a `jmpl` linking through
+`%o7`) in a template also changes the outs and `%g1`-`%g4`, as any call
+does, and no operand is put there.
+
+### Example
+
+```c
+static inline unsigned irq_disable(void)
+{
+    unsigned psr;
+    __asm__ volatile("rd %%psr, %0\n"
+                     " or %0, 0xf00, %%g1\n"      /* PIL 15 */
+                     " wr %%g1, %%psr\n nop\n nop\n nop"
+                     : "=r"(psr) :: "g1", "memory");
+    return psr;
+}
+
+static inline unsigned long long umul64(unsigned a, unsigned b)
+{
+    unsigned lo, hi;
+    __asm__("umul %2, %3, %0\n rd %%y, %1" : "=r"(lo), "=r"(hi)
+            : "r"(a), "r"(b));
+    return (unsigned long long)hi << 32 | lo;
+}
+```
+
+## PowerPC
+
+This section applies to `powerpc-none-eabi` (32-bit PowerPC, the e500
+and e200 and the classic cores' shared vocabulary).
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `b`, `g` | a general register chosen by EmbCC (never r0, so `b` is `r`) |
+| `m` | a register chosen by EmbCC, holding the address of the operand; it is written into the template as `0(rN)`, the D-form GCC prints |
+| `i`, `n`, `I`-`P` | the constant, written into the template as a decimal number |
+| `0`-`9` | an input in the register of the output it names |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Anything else is refused with `asm constraint "a" is not valid for
+PowerPC`; a `long long` operand with `PowerPC asm operand 0 is 8 bytes`. A
+chosen register comes from r3-r8, then r14-r30, skipping registers listed
+as clobbers, named in the template or changed by a call in it; never r0,
+r1 (the stack pointer), r2 or r13 (the EABI's small-data anchors), r9-r12
+(the code generator's scratch) or r31 (the frame base under `alloca`). A
+register variable must be one of those (`register int x
+__asm__("r5")`); another is refused with `register variable bound to 'r11'
+is not supported for PowerPC asm (use r3-r8 or r14-r30)`.
+
+### Modifiers
+
+`%UN` and `%XN` print nothing (an `"m"` operand here is always the plain
+D-form, so `lwz%U1%X1 %0, %1` is `lwz`), and `%cN` prints a constant
+bare. Any other modifier is refused with `asm template modifier '%L' is
+not supported for PowerPC`.
+
+### Template syntax
+
+GNU PowerPC syntax, as GNU as and llvm-mc read it. A register is a bare
+number in a register's place (`addi 3, 4, 1`, GCC's own spelling), `rN`
+or `%rN`, or `sp`; a CR field `crN` or a number; a CR bit a number or an
+expression of `crN`, `lt`, `gt`, `eq`, `so` and `un` (`4*cr7+eq`); a
+constant a C expression, with `@ha`, `@h` or `@l` for its halves; a
+memory operand `d(rA)`. A branch target is `.+N` or `.-N` bytes from the
+instruction, or a numeric label of the template (`1:`, `1b`, `1f`).
+Statements are separated by `;` or newlines; `#` and `//` start a
+comment. A template cannot name a symbol (`"foo" names a symbol, and
+inline asm cannot reach one`): call through CTR (`mtctr`, `bctrl`), or
+write the code in a `.S` file or a file-scope block, where `bl sym`,
+`b sym`, a conditional branch to a symbol and `sym@ha`/`@h`/`@l` are
+relocated.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `add`, `addc`, `adde`, `subf`, `subfc`, `subfe`, `mullw`, `divw`, `divwu` (each also `o`, `.`, `o.`); `mulhw`, `mulhwu` (also `.`); `sub`, `subc` (also `.`) | `rt, ra, rb` |
+| `addze`, `addme`, `subfze`, `subfme`, `neg` (also `o`, `.`, `o.`) | `rt, ra` |
+| `and`, `andc`, `or`, `orc`, `xor`, `nand`, `nor`, `eqv`, `slw`, `srw`, `sraw` (also `.`) | `ra, rs, rb` |
+| `cntlzw`, `extsb`, `extsh`, `mr`, `not` (also `.`); `srawi` (also `.`) | `ra, rs`; `ra, rs, SH` |
+| `addi`, `addis`, `addic`, `addic.`, `mulli`, `subfic`; `li`, `lis`, `la`, `subi`, `subis`, `subic`, `subic.` | `rt, ra, SIMM` (`addis`/`lis` 16 bits either way); `rt, SIMM`; `rt, d(ra)` |
+| `ori`, `oris`, `xori`, `xoris`, `andi.`, `andis.` | `ra, rs, UIMM` |
+| `rlwinm`, `rlwimi`, `rlwnm` (also `.`) | `ra, rs, SH (rb), MB, ME` |
+| `rotlwi`, `rotrwi`, `rotlw`, `slwi`, `srwi`, `clrlwi`, `clrrwi`, `extlwi`, `extrwi`, `inslwi`, `insrwi`, `clrlslwi` (also `.`) | as the ISA's table of extended mnemonics |
+| `cmpw`, `cmplw`, `cmpwi`, `cmplwi` | `[crN,] ra, rb/SIMM/UIMM` |
+| `cmp`, `cmpl`, `cmpi`, `cmpli` | `crN, 0, ra, rb/IMM` |
+| `lwz`, `lbz`, `lhz`, `lha`, `stw`, `stb`, `sth` and their `u` forms, `lmw`, `stmw` | `rt, d(ra)` |
+| `lwzx`, `lbzx`, `lhzx`, `lhax`, `stwx`, `stbx`, `sthx` and their `ux` forms, `lwbrx`, `lhbrx`, `stwbrx`, `sthbrx`, `lwarx`, `stwcx.` | `rt, ra, rb` |
+| `dcbf`, `dcbst`, `dcbt`, `dcbtst`, `dcbz`, `dcbi`, `icbi`, `tlbsx`, `tlbivax` | `ra, rb` |
+| `sync`, `msync`, `lwsync`, `eieio`, `isync`, `tlbwe`, `tlbre`, `tlbsync`, `rfi`, `rfci`, `rfmci`, `sc`, `trap`, `nop`; `mbar` | none; `[MO]` |
+| `tw`, `twi`; `tweq`, `twlt`, `twgt`, `twne`, `twle`, `twge`, `twnl`, `twng`, `twllt`, `twlgt`, `twlle`, `twlge`, `twlnl`, `twlng`, `twu` and their `i` forms | `TO, ra, rb/SIMM`; `ra, rb/SIMM` |
+| `crand`, `cror`, `crxor`, `crnand`, `crnor`, `creqv`, `crandc`, `crorc`; `crset`, `crclr`, `crmove`, `crnot`; `mcrf` | three CR bits; one or two; two CR fields |
+| `mfcr`, `mtcr`; `mtcrf` | `rt`; `FXM, rs` |
+| `isel`; `isellt`, `iselgt`, `iseleq` | `rt, ra, rb, BC`; `rt, ra, rb` |
+| `mfmsr`, `mtmsr`, `wrtee`; `wrteei` | `rt`; `0` or `1` |
+| `mfspr`, `mtspr` | `rt, SPR` / `SPR, rs`: a number 0-1023 or a name -- `xer`, `lr`, `ctr`, `dec`, `srr0`, `srr1`, `csrr0`, `csrr1`, `mcsrr0`, `mcsrr1`, `dear`, `esr`, `ivpr`, `ivor0`-`ivor15`, `ivor32`-`ivor35`, `pid`, `pid1`, `pid2`, `decar`, `tcr`, `tsr`, `tbl`, `tbu`, `tbwl`, `tbwu`, `sprg0`-`sprg7`, `usprg0`, `pvr`, `pir`, `svr`, `hid0`, `hid1`, `l1csr0`, `l1csr1`, `mmucsr0`, `mmucfg`, `bucsr`, `mas0`-`mas4`, `mas6`, `mas7`, `tlb0cfg`, `tlb1cfg`, `dbsr`, `dbcr0`-`dbcr2`, `iac1`, `iac2`, `dac1`, `dac2`, `mcsr`, `mcar`, `spefscr`, `ear`, `dsisr`, `dar`, `sdr1` |
+| `mfNAME`, `mtNAME` for each name above; `mfsprg`, `mtsprg`; `mftb`, `mftbu` | `rt` / `rs`; `rt, N` / `N, rs` (N 0-7); `rt` |
+| `b`, `bl`; `ba`, `bla` | `TARGET`, +-32 MiB; an absolute address |
+| `bc`, `bcl`, `bca`, `bcla` | `BO, BI, TARGET` (-32768..32764) |
+| `bclr`, `bclrl`, `bcctr`, `bcctrl`; `blr`, `blrl`, `bctr`, `bctrl` | `BO, BI [, BH]`; none |
+| `b<cond>` for `lt`, `le`, `eq`, `ge`, `gt`, `nl`, `ne`, `ng`, `so`, `ns`, `un`, `nu`, each also `l`, `a`, `la`, `lr`, `lrl`, `ctr`, `ctrl` | `[crN,] TARGET`, or `[crN]` |
+| `bt`, `bf` (also `l`, `a`, `la`, `lr`, `lrl`, `ctr`, `ctrl`); `bdnz`, `bdz` (also `l`, `a`, `la`, `lr`, `lrl`); `bdnzt`, `bdnzf`, `bdzt`, `bdzf` (likewise) | `BI, TARGET`; `TARGET`; `BI, TARGET` |
+
+Writing LR (`mtlr`, `mtspr lr`) or a branch that links makes the function
+save its own LR around the template; its operands and every value live
+across it then keep out of r0 and r3-r12, which a call changes. Floating
+point is refused with `asm instruction "fadd" is a floating-point
+instruction: EmbCC compiles soft float, and this assembler has no
+floating-point vocabulary`, as are AltiVec, SPE, 64-bit and string
+instructions by name; a branch-prediction suffix with `beq+: a
+branch-prediction hint (+/-) is not supported: write the branch without
+it`; anything else outside the list with `asm instruction "foo" is not in
+the PowerPC vocabulary`.
+
+### Callee-saved registers on PowerPC
+
+r14-r31 survive a call. When an asm changes one -- an operand in it, a
+clobber naming it, or the template's text naming it (a bare `li 14, 0`
+counts: EmbCC assembles the template once with its operands in
+placeholders to learn which registers it names) -- the function's prologue
+saves it and its epilogue restores it, at every optimization level. r1,
+r2 and r13 may not be clobbered (`PowerPC asm clobbers 'r1', which holds
+the stack pointer; EmbCC does not save it around an asm`), and r31 may
+not be changed in a function that calls `alloca`, where it is the frame
+base.
+
+### Example
+
+```c
+static inline unsigned irq_save(void)
+{
+    unsigned msr;
+    __asm__ volatile("mfmsr %0\n wrteei 0" : "=r"(msr) :: "memory");
+    return msr;
+}
+
+static inline void irq_restore(unsigned msr)
+{
+    __asm__ volatile("wrtee %0" :: "r"(msr) : "memory");
+}
+
+static inline int cas(int *p, int old, int new_)
+{
+    int prev;
+    __asm__ volatile("1: lwarx %0, 0, %1\n"
+                     "   cmpw %0, %2\n"
+                     "   bne 2f\n"
+                     "   stwcx. %3, 0, %1\n"
+                     "   bne 1b\n"
+                     "2:"
+                     : "=&r"(prev) : "r"(p), "r"(old), "r"(new_)
+                     : "cc", "memory");
+    return prev;
+}
+```
+
 ## AVR
 
 This section applies to the `avr` target (ATmega328P).
@@ -2016,16 +2268,18 @@ In summary, compared with GCC:
 - Only the instructions listed for each target can appear in a template,
   and a function template cannot refer to a symbol on any target.
 - `asm goto`, `asm inline` and flag-output constraints are not
-  supported, nor are matching constraints (`"0"`) except on ARM Cortex-M,
-  where the input must be the output's own lvalue. Flag outputs are not
-  always refused (see [x86-64](#x86-64) and [AArch64](#aarch64)).
-- `m` outputs do not work (except on MIPS32, where the operand's
-  register holds the address), and `m` inputs are a register holding the
+  supported, nor are matching constraints (`"0"`) except on SPARC,
+  PowerPC and ARM Cortex-M (where the input must be the output's own
+  lvalue). Flag outputs are not always refused (see [x86-64](#x86-64) and
+  [AArch64](#aarch64)).
+- `m` outputs do not work (except on MIPS32, Xtensa, SPARC and PowerPC,
+  where the operand's register holds the address), and `m` inputs are a
+  register holding the
   address rather than a memory reference.
 - On x86-64 and RISC-V, `i` and `n` give a register, not an immediate.
 - Labels inside a function template are supported only for the x86-64
-  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa and
-  TriCore;
+  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa,
+  TriCore, SPARC and PowerPC;
   elsewhere branches use numeric displacements.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at

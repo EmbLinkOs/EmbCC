@@ -102,25 +102,28 @@ refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "inline assembly" 'inline assembly is not supported for sparc-none-elf yet' \
-    'int f(void){ __asm__ volatile("nop"); return 0; }'
-refc "an asm with operands" 'inline assembly is not supported for sparc-none-elf yet' \
-    'int f(int x){ int y; __asm__("" : "=r"(y) : "r"(x)); return y; }'
-refc "a naked function" 'inline assembly is not supported for sparc-none-elf yet' \
-    'void __attribute__((naked)) f(void){ __asm__("retl; nop"); }'
-refc "a file-scope instruction" 'file-scope asm instruction' \
-    '__asm__(".globl x\nx: nop");'
-# ...but an empty asm, a compiler barrier, is accepted and emits nothing
-printf 'int g; int f(void){ g = 1; __asm__ volatile("" ::: "memory"); return g; }\n' \
-    > "$out/barrier.c"
-"$EMBCC" --target=$T -O2 -c "$out/barrier.c" -o /dev/null || {
-    echo "an empty asm (a compiler barrier) was refused"; exit 1; }
-printf 'nop\n' > "$out/a.s"
-if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/s.err"; then
-    echo "an assembly file was accepted"; exit 1
-fi
-grep -q 'no assembly-file support for sparc-none-elf yet: EmbCC has no SPARC assembler' \
-    "$out/s.err" || { echo "a .s file was refused, but not by name:"; cat "$out/s.err"; exit 1; }
+# Assembly is src/arch/sparc/asm.c's (tests/golden/sparc-asm.sh referees
+# it): inline asm with operands, a naked function, a file-scope block, a
+# compiler barrier and a .s file all compile; what is outside the
+# vocabulary is refused by name.
+for src in 'int f(void){ __asm__ volatile("nop"); return 0; }' \
+           'int f(int x){ int y; __asm__("add %1, 1, %0" : "=r"(y) : "r"(x)); return y; }' \
+           'void __attribute__((naked)) f(void){ __asm__("retl; nop"); }' \
+           '__asm__(".globl x\nx: retl\n nop");' \
+           'int g; int f(void){ g = 1; __asm__ volatile("" ::: "memory"); return g; }'; do
+    printf '%s\n' "$src" > "$out/asm.c"
+    "$EMBCC" --target=$T -O2 -c "$out/asm.c" -o /dev/null 2> "$out/asm.err" || {
+        echo "assembly in C was refused: $src"; cat "$out/asm.err"; exit 1; }
+done
+printf '\tretl\n\tnop\n' > "$out/a.s"
+"$EMBCC" --target=$T -c "$out/a.s" -o /dev/null || {
+    echo "an assembly file was refused"; exit 1; }
+refc "a floating-point instruction" 'EmbCC compiles soft float' \
+    'void f(void){ __asm__ volatile("faddd %f0, %f2, %f4"); }'
+refc "a V9 instruction" "SPARC V9's, and the LEON3 is a V8" \
+    'void f(void){ __asm__ volatile("membar 15"); }'
+refc "%sp clobbered" "clobbers '%sp', which holds" \
+    'void f(void){ __asm__ volatile("nop" ::: "%sp"); }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 # C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
 # it); exceptions, on by default, are refused by name: there are no
@@ -182,5 +185,5 @@ if command -v "$CLANG" >/dev/null 2>&1 &&
     echo "embld refuses a SPARC object's GOT relocation by name"
 fi
 echo "narrow atomics, the frame and return address above level 0,"
-echo "__int128, interrupt and naked functions, inline and file assembly, an"
+echo "__int128, interrupt functions, floating-point and V9 assembly, an"
 echo "over-aligned scalar and C++ exceptions are each refused by name"

@@ -94,6 +94,14 @@ struct gas_target {
      * address and not only on the distance (Xtensa's call and l32r round
      * it to a word). NULL elsewhere. */
     void (*at)(long pc);
+    /* The symbol forms that are relocated WHATEVER the symbol is -- a
+     * label of this file too -- because they name its ADDRESS, which only
+     * the linker knows: SPARC's %hi()/%lo() and `set`, PowerPC's @ha/@l/@h.
+     * Asked before the statement's labels become displacements; `symform`,
+     * which also covers these, is then asked only for what substitution
+     * could not resolve (a branch or a call to another section or file),
+     * as on Xtensa. NULL elsewhere: there `symform` is asked first. */
+    int (*symform_abs)(const char *stmt, struct asm_symform *f);
 };
 
 /* Assembles `in_path` into an ET_REL object at `out_path`, for the

@@ -70,8 +70,30 @@ enum sparc_op3 {
     SP_SUBCC = 0x14, SP_ANDNCC = 0x15, SP_ORNCC = 0x16, SP_XNORCC = 0x17,
     SP_ADDXCC = 0x18, SP_UMULCC = 0x1a, SP_SMULCC = 0x1b, SP_SUBXCC = 0x1c,
     SP_UDIVCC = 0x1e, SP_SDIVCC = 0x1f,
-    SP_SLL = 0x25, SP_SRL = 0x26, SP_SRA = 0x27
+    SP_SLL = 0x25, SP_SRL = 0x26, SP_SRA = 0x27,
+    /* the tagged and step forms, which only the assembler writes */
+    SP_TADDCC = 0x20, SP_TSUBCC = 0x21, SP_TADDCCTV = 0x22,
+    SP_TSUBCCTV = 0x23, SP_MULSCC = 0x24
 };
+
+/* op = 10's op3 values beyond the arithmetic, and op = 11's (memory), as
+ * the SPARC V8 manual's appendix F names them. An alternate-space access
+ * is its plain op3 | SPM_ALT, with the ASI in bits 5..12 and i = 0. */
+enum {
+    SP_O3_RDY = 0x28, SP_O3_RDPSR = 0x29, SP_O3_RDWIM = 0x2a,
+    SP_O3_RDTBR = 0x2b,
+    SP_O3_WRY = 0x30, SP_O3_WRPSR = 0x31, SP_O3_WRWIM = 0x32,
+    SP_O3_WRTBR = 0x33,
+    SP_O3_JMPL = 0x38, SP_O3_RETT = 0x39, SP_O3_TICC = 0x3a,
+    SP_O3_FLUSH = 0x3b, SP_O3_SAVE = 0x3c, SP_O3_RESTORE = 0x3d
+};
+enum {
+    SPM_LD = 0x00, SPM_LDUB = 0x01, SPM_LDUH = 0x02, SPM_LDD = 0x03,
+    SPM_ST = 0x04, SPM_STB = 0x05, SPM_STH = 0x06, SPM_STD = 0x07,
+    SPM_LDSB = 0x09, SPM_LDSH = 0x0a, SPM_LDSTUB = 0x0d, SPM_SWAP = 0x0f,
+    SPM_ALT = 0x10, SPM_CASA = 0x3c
+};
+enum { SP_OP2_UNIMP = 0, SP_OP2_BICC = 2, SP_OP2_SETHI = 4 };
 /* rd = rs1 OP rs2 */
 void sparc_alu(struct code *c, int op3, int rd, int rs1, int rs2);
 /* rd = rs1 OP simm13 (a shift: a count 0..31) */
