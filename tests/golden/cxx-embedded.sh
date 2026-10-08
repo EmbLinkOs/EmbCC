@@ -68,6 +68,34 @@ for t in thumbv7m-none-eabi armv7a-none-eabi riscv32-unknown-elf; do
         echo "$t: a C++ unit without exceptions wrote an .eh_frame"; exit 1
     fi
 done
+# The 64-bit embedded targets compile C++ but write no unwind tables
+# either: with -fno-exceptions a unit has none (RV64 once got an x86-64
+# CIE in its .eh_frame, and MIPS64 refused every C++ unit for asking for
+# tables by default), and an explicit request is refused by name -- as it
+# is for C on AVR, which also once got the x86-64 CIE.
+for t in riscv64-unknown-elf mips64el-none-elf loongarch64-unknown-elf; do
+    "$EMBCC" --target=$t -fno-exceptions -c "$out/refuse.cc" -o "$out/r.o" \
+        2> "$out/r.err" || {
+        echo "$t: C++ with -fno-exceptions does not compile:"
+        cat "$out/r.err"; exit 1; }
+    if "${READELF:-llvm-readelf}" -S "$out/r.o" | grep -q 'eh_frame'; then
+        echo "$t: a C++ unit without exceptions wrote an .eh_frame"; exit 1
+    fi
+    if "$EMBCC" --target=$t -fno-exceptions -funwind-tables \
+            -c "$out/refuse.cc" -o "$out/r.o" 2> "$out/r.err"; then
+        echo "$t: -funwind-tables was accepted"; exit 1
+    fi
+    grep -q "unwind tables are not supported for $t" "$out/r.err" || {
+        echo "$t: unwind tables refused, but not by name:"; cat "$out/r.err"
+        exit 1; }
+done
+printf 'int f(int a) { return a + 1; }\n' > "$out/plain.c"
+if "$EMBCC" --target=avr -funwind-tables -c "$out/plain.c" -o "$out/r.o" \
+        2> "$out/r.err"; then
+    echo "avr: -funwind-tables was accepted"; exit 1
+fi
+grep -q "unwind tables are not supported for avr" "$out/r.err" || {
+    echo "avr: unwind tables refused, but not by name:"; cat "$out/r.err"; exit 1; }
 for t in avr mipsel-none-elf xtensa-none-elf tricore-none-elf; do
     if "$EMBCC" --target=$t -fno-exceptions -c "$out/refuse.cc" \
             -o "$out/r.o" 2> "$out/r.err"; then
@@ -76,7 +104,8 @@ for t in avr mipsel-none-elf xtensa-none-elf tricore-none-elf; do
     grep -q "C++ is not yet supported for $t" "$out/r.err" || {
         echo "$t: C++ refused, but not by name:"; cat "$out/r.err"; exit 1; }
 done
-echo "exceptions and unwind tables on ARM and RV32, and C++ on AVR, MIPS,"
+echo "exceptions and unwind tables on ARM, RISC-V, MIPS64, LoongArch and AVR,"
+echo "and C++ on AVR, MIPS32,"
 echo "Xtensa and TriCore, are refused by name"
 
 # ---- the reference: the host's own C++ compiler, run here ----------------

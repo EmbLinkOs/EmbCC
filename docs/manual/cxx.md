@@ -25,10 +25,13 @@ On the Darwin and Windows targets C++ works with restrictions. On the
 32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
 C++ is supported without exceptions (`-fno-exceptions`), with or without
 RTTI, following the ARM C++ ABI and the Itanium ABI's 32-bit form;
-objects link with clang++'s. On `riscv64-unknown-elf` C++ is not
-supported: a unit compiles when exceptions are turned off, and is not
-tested. On AVR, MIPS32, Xtensa and TriCore EmbCC refuses to generate
-code for C++. See [Targets](#targets).
+objects link with clang++'s. On `riscv64-unknown-elf`,
+`mips64el-none-elf` and `loongarch64-unknown-elf` C++ is not supported:
+a unit compiles when exceptions are turned off (`-fno-exceptions`), and
+is not tested. With exceptions on it is refused, since EmbCC writes no
+unwind tables for these machines. On AVR, MIPS32, big-endian MIPS64,
+SPARC, PowerPC, ColdFire, Xtensa, TriCore and RX EmbCC refuses to
+generate code for C++. See [Targets](#targets).
 
 EmbCC compiles C++ by lowering it to C, which the C front end, the
 optimizer and the code generators then compile (design decision D-013 in
@@ -201,10 +204,10 @@ this:
 | `arm64-apple-darwin` | Supported | Supported | the system's C++ runtime |
 | `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
 | `x86_64-windows-gnu` | Restricted | Not supported | none |
-| `riscv64-unknown-elf` | Not supported; compiles, untested | Not supported | none |
+| `riscv64-unknown-elf`, `mips64el-none-elf`, `loongarch64-unknown-elf` | Not supported; compiles with `-fno-exceptions`, untested | Refused | none |
 | 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
 | `riscv32-unknown-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `avr`, `mipsel-none-elf`, `mips-none-elf`, `xtensa-none-elf`, `tricore-none-elf` | Refused | Not supported | none |
+| `avr`, `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `sparc-none-elf`, `powerpc-none-eabi`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Refused | Not supported | none |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
 built for `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu` and

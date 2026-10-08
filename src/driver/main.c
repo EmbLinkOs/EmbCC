@@ -2557,6 +2557,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                  (lang_cxx && (want_unwind < 0 || want_exceptions)) ||
                  (want_unwind < 0 && target_is_hosted() &&
                   target_fmt_get() == TGT_FMT_ELF);
+    /* eh_emit writes x86-64's and AArch64's tables -- their register
+     * numbers, their CFA rules -- and nothing else's. Everywhere else a C++
+     * unit's default request is dropped when nothing can read the tables
+     * (-fno-exceptions): it used to reach eh_emit on RV64, which wrote an
+     * x86-64 CIE into a RISC-V object, and to be refused on MIPS64, which
+     * stopped every C++ unit there. An explicit request, or exceptions,
+     * is refused by name below. */
+    if (unwind && ta != TARGET_X86_64 && ta != TARGET_AARCH64 && lang_cxx &&
+        want_unwind < 0 && !want_exceptions)
+        unwind = 0;
     /* The tables eh_emit writes are x86-64's and AArch64's layout, with a
      * PC-relative relocation MIPS's REL objects have no type for. */
     if (unwind && ta == TARGET_SPARC32)
@@ -2574,13 +2584,6 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                    target_triple_now(),
                    ta == TARGET_PPC32 ? "PowerPC"
                    : ta == TARGET_COLDFIRE ? "ColdFire" : "MIPS");
-    /* LoongArch: no .eh_frame yet. C++ asks for the tables by default
-     * whether or not it throws; with -fno-exceptions nothing reads them,
-     * so there they are simply not written, and only an explicit request
-     * -- or exceptions -- is refused. */
-    if (unwind && ta == TARGET_LOONGARCH64 && lang_cxx && want_unwind < 0 &&
-        !want_exceptions)
-        unwind = 0;
     if (unwind && ta == TARGET_LOONGARCH64)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "%s yet (-funwind-tables, "
@@ -2588,16 +2591,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "C++ without -fno-exceptions): EmbCC writes no "
                             "LoongArch .eh_frame",
                    target_triple_now());
-    /* 32-bit ARM and RV32: eh_emit's CFI is x86-64's and AArch64's
-     * (their register numbers, their CFA rules), not these machines', and
-     * ARM unwinds through EHABI's .ARM.exidx besides. A C++ unit asks for
-     * the tables by default; with -fno-exceptions nothing reads them, so
-     * they are not written, and only an explicit request is refused. (A
-     * C++ unit with exceptions is refused before this, by name.) */
-    if (unwind && (ta == TARGET_THUMB || ta == TARGET_RISCV32) && lang_cxx &&
-        want_unwind < 0 && !want_exceptions)
-        unwind = 0;
-    if (unwind && (ta == TARGET_THUMB || ta == TARGET_RISCV32))
+    /* 32-bit ARM unwinds through EHABI's .ARM.exidx besides. (A C++ unit
+     * with exceptions is refused before this, by name.) */
+    if (unwind && (ta == TARGET_THUMB || ta == TARGET_RISCV32 ||
+                   ta == TARGET_RISCV64))
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "%s yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
@@ -2619,6 +2616,14 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "rx-none-elf yet (-funwind-tables, "
                             "-fasynchronous-unwind-tables, -fexceptions): "
                             "EmbCC writes no RX .eh_frame");
+    /* ...and any target not named above (AVR): eh_emit would write an
+     * x86-64 CIE into its object */
+    if (unwind && ta != TARGET_X86_64 && ta != TARGET_AARCH64)
+        diag_fatal(NULL, 0, "unwind tables are not supported for "
+                            "%s yet (-funwind-tables, "
+                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "EmbCC writes .eh_frame for x86-64 and AArch64 "
+                            "only", target_triple_now());
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 

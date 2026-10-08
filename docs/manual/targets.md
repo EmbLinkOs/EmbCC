@@ -919,7 +919,7 @@ part with another bus master, defines its own.
 | 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` (ARMv6-M: `the ARMv6-M backend cannot lower an atomic wider than four bytes`; ARMv8-M Baseline: `the ARMv8-M Baseline backend cannot lower an atomic wider than four bytes (ARMv8-M Baseline has no doubleword exclusive; ...)`) |
 | on ARMv6-M, an inline asm template that uses a Thumb-2 instruction | `the ARMv6-M backend cannot lower an instruction ARMv6-M does not have (a 32-bit Thumb-2 encoding, from inline asm or the backend) yet (function f)` |
 | 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
+| C++ with exceptions (on by default), or unwind tables (`-funwind-tables`, `-fasynchronous-unwind-tables`) | `C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions`, and `unwind tables are not supported for thumbv7m-none-eabi yet (...)`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 
 An array or structure local aligned beyond 8 bytes is supported: its
 storage is carved from the stack at function entry and rounded up.
@@ -1023,7 +1023,8 @@ Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`,
 four bytes, `__builtin_frame_address` and
 `__builtin_return_address`, `__attribute__((interrupt))` (an A-profile
 handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
-and C++. Inline assembly takes the Cortex-M vocabulary in ARM state, with
+and C++ exceptions and unwind tables (C++ compiles with
+`-fno-exceptions`). Inline assembly takes the Cortex-M vocabulary in ARM state, with
 a condition on any instruction, and adds `mrs`/`msr` of `cpsr`,
 `mrc`/`mcr` and the A32 ranges of `svc`, `bkpt` and `udf`; the M-profile
 special registers, `cbz`, `tbb` and `tbh` are refused.
@@ -1148,12 +1149,10 @@ individually.
 
 | Construct | Diagnostic (RV32 shown; RV64 names itself) |
 |---|---|
-| any operation on `long double` (and at RV64 on `__int128`) | `the RV32 backend cannot lower a 128-bit value yet (function f) [ldvar w=16 size=16]` |
 | `__int128` at RV32 | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | an 8-byte atomic read-modify-write at RV32 | `the RV32 backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
 | an 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| any C++ translation unit at RV32, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for riscv32-unknown-elf: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
-| C++ code that needs a landing pad (`try`, or a destructor run during unwinding) at RV64 | `the RV64 backend cannot lower this operation yet (function f) [landing w=8 size=4]` |
+| C++ with exceptions (on by default), or unwind tables (`-funwind-tables`, `-fasynchronous-unwind-tables`) | RV32: `C++ exceptions are not supported for riscv32-unknown-elf yet: EmbCC writes no RISC-V .eh_frame; compile with -fno-exceptions`. RV64: `unwind tables are not supported for riscv64-unknown-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no RISC-V .eh_frame`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 | `__attribute__((interrupt("user")))` | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
 | an interrupt handler with parameters, or with a result | `interrupt handler 'h' takes parameters: ...`, `interrupt handler 'h' returns a value: ...` |
 | `__attribute__((interrupt))` in C++ | `__attribute__((interrupt)) is not supported in C++ yet: ...` (write the handler in C) |
