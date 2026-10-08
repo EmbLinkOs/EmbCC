@@ -457,6 +457,14 @@ int target_jump_tables(void)
            target_get() != TARGET_XTENSA &&
            target_get() != TARGET_RX;
 }
+/* -Os: a switch dense but for a few outlying cases gets a table over the
+ * dense run (irgen's switch_cluster). ARM only so far: measured there,
+ * where a byte table (tbb) is cheaper than the tree it replaces. */
+int target_switch_clusters(void)
+{
+    return target_get() == TARGET_THUMB;
+}
+
 int target_switch_table_min_os(void)
 {
     return target_get() == TARGET_THUMB && target_thumb_arch() >= 7 ? 4 : 6;
