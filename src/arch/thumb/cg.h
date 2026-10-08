@@ -66,6 +66,9 @@ struct t_fn {
      * spilled r0-r3 so that one pointer walks from them into the
      * caller's stack arguments. -1 when the function is not variadic. */
     long va_regsave;
+    long entry_off;          /* the stack pointer at entry, from the frame
+                              * base: __builtin_frame_address(0), with the
+                              * pushed lr just below it */
     long va_first;       /* ... and the offset of the first UNNAMED one */
     int *label_off;      /* per label id, or -1 while unseen */
     /* cond >= T_CBZ is a cbz (T_CBZ) or cbnz (T_CBZ + 1). cz_at is where

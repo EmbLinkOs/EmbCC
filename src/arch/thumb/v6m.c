@@ -2651,6 +2651,24 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
 
+    case IR_FRAMEADDR: {
+        /* Level 0 only (irgen), as the Thumb-2 backend: the stack pointer
+         * at entry, above the push (and r0-r3's, if variadic); the return
+         * address in lr still where nothing was pushed, else the pushed
+         * lr, the push's highest word. */
+        int d;
+        if (i->dst < 0)
+            return;
+        d = v_wreg(F, i->dst, S0);
+        if (i->imm == 2 && F->nopush)
+            t_mov_reg(t, d, T_LR);
+        else if (i->imm == 2)
+            fr_ld(F, d, F->entry_off - 4, 4, 0);
+        else
+            fr_addr(F, d, F->entry_off + (fn->is_varargs ? 16 : 0));
+        v_wr(F, i->dst, d);
+        return;
+    }
     case IR_ADDR: {
         long fo;
         int d;
@@ -3150,6 +3168,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             struct argplace pl;
             struct abi_walk w;
             long base = frame_push;
+            F.entry_off = base;
             int pmv_dst[RA_MAXPOOL * 2], pmv_src[RA_MAXPOOL * 2], npmv = 0;
             int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
             int npstk = 0;
