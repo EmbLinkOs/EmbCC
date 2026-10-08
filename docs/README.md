@@ -1,10 +1,13 @@
 # EmbCC documentation
 
-EmbCC is a C and C++ compiler with its own assembler, linker and debugger. It
-targets EmbLinkOS on x86-64, Linux, macOS, Windows, and bare-metal AArch64,
-ARMv7-M, RISC-V (RV32 and RV64) and AVR. This documentation has two parts:
-the manual is for people who compile code with EmbCC, and the internals
-reference is for people who change it.
+EmbCC is a C and C++ compiler for embedded systems, and the Emb toolchain
+is everything around it: the assembler, the linker, the debugger, the
+simulator, the flash programmer, the tracer, and the tools that size,
+pack and analyse firmware. It targets 12 families of embedded processors,
+from 8-bit AVR to 64-bit RISC-V, and also builds operating systems and
+hosted programs on x86-64 and AArch64. This documentation has two parts:
+the manual is for people who build software with the toolchain, and the
+internals reference is for people who change it.
 
 ## Using EmbCC
 

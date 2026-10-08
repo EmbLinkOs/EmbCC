@@ -49,22 +49,22 @@ static void print_version(void)
      * layout clang uses -- and only what the tree holds: the long form,
      * with what is missing, is docs/internals/status.md. */
     const char *dt = target_default_name();
-    printf("EmbCC %s (a C and C++ compiler for EmbLinkOS and embedded "
-           "boards)\n", EMBCC_VERSION);
+    printf("EmbCC %s (the Emb toolchain's C and C++ compiler, for "
+           "embedded systems and operating systems)\n", EMBCC_VERSION);
     printf("Target: %s\n", target_triple_now());
     printf("Default target: %s%s\n", dt ? dt : "x86_64-elf",
            dt ? " (as configured)" : "");
-    printf("Targets: x86-64 and AArch64 (bare metal, EmbLinkOS, Linux, "
-           "Darwin; x86-64 also Windows), Cortex-M (ARMv7-M, ARMv7E-M, "
-           "ARMv8-M Mainline), RISC-V (RV32, RV64), MIPS32 (o32, little- "
-           "and big-endian), LoongArch64 (LP64S), Xtensa (ESP32,\n"
-           "windowed ABI), PowerPC (32-bit EABI, big-endian), Renesas RX, "
-           "SPARC V8 (LEON3), ColdFire\n"
-           "(m68k, ISA_A), AVR (ATmega328P)\n");
-    printf("Languages: C11 with the GNU extensions; C++ toward C++20 on the "
-           "64-bit targets\n");
-    printf("Linker: embld, for x86-64, RV64, Cortex-M, RV32, MIPS32, LoongArch64, Xtensa, PowerPC, RX, SPARC, ColdFire and AVR images; "
-           "AArch64 and Darwin link with the platform's linker\n");
+    printf("Targets: Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M "
+           "Baseline and Mainline), ARMv7-A, RISC-V (RV32, RV64),\n"
+           "AVR (ATmega), Xtensa (ESP32, windowed ABI), TriCore, Renesas "
+           "RX, ColdFire (m68k, ISA_A), MIPS32 and MIPS64\n"
+           "(both byte orders), PowerPC (32-bit EABI), SPARC V8 (LEON3), "
+           "LoongArch64 (LP64S); x86-64 and AArch64\n"
+           "(bare metal, EmbLinkOS, Linux, Darwin; x86-64 also Windows)\n");
+    printf("Languages: C11 with the GNU extensions; C++ toward C++20 on "
+           "every target but AVR\n");
+    printf("Linker: embld, for every target's images; AArch64 and Darwin "
+           "link with the platform's linker\n");
     printf("Not yet: position-independent executables, shared libraries, "
            "dynamic linking. See docs/internals/status.md.\n");
 }
