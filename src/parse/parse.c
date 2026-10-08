@@ -38,6 +38,7 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * warn_unused_result are diagnostics the DECLARATION
                 * asks for. */
                int used, unused, always_inline, noinline, gnu_inline;
+               int no_instrument;      /* no_instrument_function */
                int deprecated, warn_unused_result;
                const char *vis;      /* visibility("...") */
                /* __attribute__((signal)) / ((interrupt)): this function is
@@ -601,8 +602,7 @@ static const struct attr_entry attr_table[] = {
     { "no_sanitize", ATTR_NOOP, "EmbCC has no sanitizers to turn off" },
     { "no_sanitize_address", ATTR_NOOP, "EmbCC has no sanitizers" },
     { "no_sanitize_undefined", ATTR_NOOP, "EmbCC has no sanitizers" },
-    { "no_instrument_function", ATTR_NOOP,
-      "EmbCC emits no instrumentation calls" },
+    { "no_instrument_function", ATTR_HONOURED, NULL },
     { "hot",       ATTR_NOOP, "EmbCC does not reorder code by frequency" },
     { "cold",      ATTR_NOOP, "EmbCC does not reorder code by frequency" },
     { "flatten",   ATTR_NOOP,
@@ -1023,6 +1023,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "unused")) out->unused = 1;
                 else if (attr_is(name, "always_inline")) out->always_inline = 1;
                 else if (attr_is(name, "noinline")) out->noinline = 1;
+                else if (attr_is(name, "no_instrument_function"))
+                    out->no_instrument = 1;
                 else if (attr_is(name, "gnu_inline")) out->gnu_inline = 1;
                 else if (attr_is(name, "deprecated")) out->deprecated = 1;
                 else if (attr_is(name, "warn_unused_result"))
@@ -5332,6 +5334,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    if (at.no_instrument) f->attr_no_instrument = 1;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
@@ -5346,6 +5349,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 f->attr_unused = at.unused;
                 f->attr_always_inline = at.always_inline;
                 f->attr_noinline = at.noinline;
+                if (at.no_instrument) f->attr_no_instrument = 1;
                 f->attr_gnu_inline = at.gnu_inline;
                 f->pcs = at.pcs;
     f->pcs = at.pcs;
@@ -5431,6 +5435,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    if (at.no_instrument) f->attr_no_instrument = 1;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
@@ -5543,6 +5548,7 @@ fn_tail:
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    if (at.no_instrument) f->attr_no_instrument = 1;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;

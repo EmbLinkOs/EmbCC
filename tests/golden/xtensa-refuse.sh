@@ -108,10 +108,18 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
-    'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
-refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
-    'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
+# An 8-byte atomic is a call to libatomic's sized routine, as GCC's and
+# clang's are; lib/rt/atomic8.c defines them (it used to be refused).
+printf 'long long x;
+long long f(void){ return __atomic_fetch_add(&x, 1, 5); }
+long long g(void){ return __atomic_load_n(&x, 5); }
+' > "$out/at8.c"
+"$EMBCC" --target=$T -O1 -c "$out/at8.c" -o "$out/at8.o" 2> "$out/at8.err" || {
+    echo "an 8-byte atomic was refused:"; cat "$out/at8.err"; exit 1; }
+for s in __atomic_fetch_add_8 __atomic_load_8; do
+    "${EMBCC_LLVM_READELF:-llvm-readelf}" -s "$out/at8.o" | grep -q " $s\$" || {
+        echo "an 8-byte atomic is not a call to $s"; exit 1; }
+done
 refc "__builtin_return_address(1)" 'only level 0' \
     'void *f(void){ return __builtin_return_address(1); }'
 refc "__builtin_frame_address(1)" 'only level 0' \
@@ -137,6 +145,6 @@ grep -q 'C++ exceptions are not supported for xtensa-none-elf' "$out/cxx.err" ||
     echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions does not compile"; exit 1; }
-echo "narrow and 8-byte atomics, the frame and return address,"
+echo "narrow atomics, the frame and return address above level 0,"
 echo "__int128, interrupt and naked functions, inline and file-scope assembly,"
 echo "a scalar aligned beyond the 16-byte stack and C++ exceptions are each refused by name"

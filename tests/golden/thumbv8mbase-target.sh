@@ -127,13 +127,14 @@ grep -q "R_ARM_THM_CALL.*__atomic_fetch_add_4" "$out/k6.dis" || {
 [ "$fail" = 0 ] && echo "a 32-bit divide is sdiv/udiv and an atomic an ldrex/strex loop, at three levels; ARMv6-M still calls"
 
 # ---- the refusals -----------------------------------------------------------------
+# Baseline has no LDREXD: an eight-byte atomic is libatomic's call, which
+# lib/rt/atomic8.c defines (it used to be refused)
 printf 'long long f(long long *p) { return __atomic_fetch_add(p, 1, __ATOMIC_SEQ_CST); }\n' > "$out/a8.c"
 if "$EMBCC" --target=$T -O1 -c "$out/a8.c" -o "$out/a8.o" 2> "$out/a8.err"; then
-    echo "an eight-byte atomic compiled, and Baseline has no LDREXD"; fail=1
+    "$OD" -dr --triple=thumbv8m.base "$out/a8.o" | grep -q "R_ARM_THM_CALL.*__atomic_fetch_add_8" || {
+        echo "an eight-byte atomic is not a call to __atomic_fetch_add_8"; fail=1; }
 else
-    grep -q "ARMv8-M Baseline backend cannot lower an atomic wider than four bytes" \
-        "$out/a8.err" || { echo "the eight-byte atomic is refused, not by name:"
-                           head -2 "$out/a8.err"; fail=1; }
+    echo "an eight-byte atomic was refused:"; head -2 "$out/a8.err"; fail=1
 fi
 if "$EMBCC" --target=$T -mfpu=fpv5-sp-d16 -mfloat-abi=hard -c "$out/f.c" \
        -o "$out/fp.o" 2> "$out/fp.err"; then
@@ -142,5 +143,5 @@ else
     grep -q "ARMv8-M Baseline core (Cortex-M23) has no FPU" "$out/fp.err" || {
         echo "-mfpu= refused, not by name:"; head -2 "$out/fp.err"; fail=1; }
 fi
-[ "$fail" = 0 ] && echo "an eight-byte atomic and an FPU are refused by name"
+[ "$fail" = 0 ] && echo "an eight-byte atomic is a call; an FPU is refused by name"
 exit $fail

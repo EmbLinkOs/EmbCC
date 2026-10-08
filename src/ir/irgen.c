@@ -3895,6 +3895,99 @@ static int g_eh_cur = -1;
 static unsigned g_san;
 
 void irgen_set_sanitize(unsigned mask) { g_san = mask; }
+
+/* ---- -finstrument-functions -------------------------------------------
+ *
+ * GCC's: every function calls
+ *
+ *   void __cyg_profile_func_enter(void *this_fn, void *call_site);
+ *   void __cyg_profile_func_exit(void *this_fn, void *call_site);
+ *
+ * on entry and before each return, call_site being its own return address
+ * (__builtin_return_address(0)). Not a function marked
+ * no_instrument_function, one whose name is on
+ * -finstrument-functions-exclude-function-list (exactly), or one defined in
+ * a file a string on -finstrument-functions-exclude-file-list is part of
+ * (a substring, as GCC matches) -- nor the two hooks themselves. lib/rt's
+ * trace.c is EmbTrace's implementation of them. */
+static int g_instr;
+static const char *g_instr_funcs, *g_instr_files;
+static int g_instr_this;            /* gen_func: this function is instrumented */
+static struct func *g_instr_fn;     /* ...and which function that is */
+
+void irgen_set_instrument(int on, const char *funcs, const char *files)
+{
+    g_instr = on;
+    g_instr_funcs = funcs;
+    g_instr_files = files;
+}
+
+/* Is `name` an item of the comma-separated `list` (exactly), or -- with
+ * `sub` -- does an item occur in it? */
+static int instr_listed(const char *list, const char *name, int sub)
+{
+    if (!list || !name)
+        return 0;
+    for (const char *p = list; *p; ) {
+        const char *e = strchr(p, ',');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n) {
+            if (sub) {
+                for (const char *q = name; strlen(q) >= n; q++)
+                    if (!strncmp(q, p, n))
+                        return 1;
+            } else if (strlen(name) == n && !strncmp(name, p, n)) {
+                return 1;
+            }
+        }
+        if (!e)
+            break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+static int instr_wanted(const struct func *f, const char *file)
+{
+    return g_instr && !f->attr_no_instrument && !f->is_naked && !f->is_isr &&
+           strcmp(f->name, "__cyg_profile_func_enter") != 0 &&
+           strcmp(f->name, "__cyg_profile_func_exit") != 0 &&
+           !instr_listed(g_instr_funcs, f->name, 0) &&
+           !instr_listed(g_instr_files, file, 1);
+}
+
+/* __builtin_return_address(0), for the hooks' call_site */
+static int emit_retaddr0(struct ir_func *fn)
+{
+    struct ir_ins *fa = emit(fn);
+    fa->op = IR_FRAMEADDR;
+    fa->dst = new_temp(fn);
+    if (!target_has_frame_chain()) {
+        fa->imm = 2;
+        fa->w = AW;
+        return fa->dst;
+    }
+    fa->w = 8;
+    int at = emit_bin(fn, IR_ADD, fa->dst, emit_const(fn, AW, AW), AW, 0);
+    return emit_load(fn, at, ty_ptr(ty_base(TY_VOID, 0)));
+}
+
+/* hook(this function, call_site) */
+static void emit_instr_call(struct ir_func *fn, struct func *f,
+                            const char *hook, int line)
+{
+    struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+    struct type *const tys[2] = { vp, vp };
+    int vals[2];
+    struct ir_ins *fa = emit(fn);
+    fa->op = IR_FADDR;
+    fa->callee = f;
+    fa->callee_sym = ir_sym_func(cur_unit, f);
+    fa->dst = new_temp(fn);
+    vals[0] = fa->dst;
+    vals[1] = emit_retaddr0(fn);
+    libatomic_call(fn, hook, ty_base(TY_VOID, 0), 2, vals, tys, line);
+}
 unsigned irgen_sanitize(void) { return g_san; }
 
 /* if (cond) trap; */
@@ -4184,6 +4277,29 @@ static int switch_dense(int n, int w, long lo, long hi)
     return range <= 4UL * (unsigned long)n + 4;
 }
 
+/* -Os on ARM: a switch that is dense but for a few cases -- strftime's
+ * letters and its '%' and '\0', printf's conversions -- is a table over
+ * the dense run with an equality test for each case outside it, where
+ * the whole span was a decision tree. The run: the most cases any window
+ * of the sorted values holds that switch_dense would take, leaving out
+ * at most a third of them (three for a small switch): each is a compare
+ * and a branch, which the tree spent on every case. */
+static int switch_cluster(int n, int w, struct stmt **cs, int *ci, int *cj)
+{
+    int best = 0;
+    if (!g_opt_size || !target_switch_clusters() || n < 6)
+        return 0;
+    for (int i = 0; i < n; i++)
+        for (int j = n - 1; j >= i + best; j--)
+            if (switch_dense(j - i + 1, w, cs[i]->cval, cs[j]->cval)) {
+                best = j - i + 1;
+                *ci = i;
+                *cj = j;
+                break;
+            }
+    return best > 0 && n - best <= (n / 3 > 3 ? n / 3 : 3);
+}
+
 static void switch_case_eq(struct ir_func *fn, int v, int w, int sign,
                            long val, int label)
 {
@@ -4404,6 +4520,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
         case STMT_RETURN: {
             struct ir_ins *i;
             int v = s->expr ? gen_expr(fn, s->expr) : -1;
+            if (g_instr_this)           /* after the value, before leaving */
+                emit_instr_call(fn, g_instr_fn, "__cyg_profile_func_exit",
+                                s->line);
             i = emit(fn);
             i->op = IR_RET;
             i->a = v;
@@ -4511,12 +4630,25 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                     }
                     cs[b1 + 1] = t;
                 }
+                int ci = 0, cj = -1;
                 if (switch_dense(n, w, cs[0]->cval, cs[n - 1]->cval))
                     switch_table(fn, v, w, sign, cs, n, cs[0]->cval,
                                  (unsigned long)cs[n - 1]->cval -
                                  (unsigned long)cs[0]->cval + 1,
                                  dflt >= 0 ? dflt : lc.brk);
-                else
+                else if (switch_cluster(n, w, cs, &ci, &cj)) {
+                    /* the few cases outside the dense run first, each
+                     * an equality test; then the run's table */
+                    for (int k = 0; k < n; k++)
+                        if (k < ci || k > cj)
+                            switch_case_eq(fn, v, w, sign, cs[k]->cval,
+                                           cs[k]->label);
+                    switch_table(fn, v, w, sign, cs + ci, cj - ci + 1,
+                                 cs[ci]->cval,
+                                 (unsigned long)cs[cj]->cval -
+                                 (unsigned long)cs[ci]->cval + 1,
+                                 dflt >= 0 ? dflt : lc.brk);
+                } else
                     switch_tree(fn, v, w, sign, cs, 0, n - 1,
                                 dflt >= 0 ? dflt : lc.brk);
                 free(cs);
@@ -4825,7 +4957,16 @@ static void gen_func(struct ir_func *fn, struct func *f)
     }
     if (f->has_label_data)
         label_data_marks(fn, f);
+    g_instr_this = instr_wanted(f, fn->file);
+    g_instr_fn = f;
+    if (g_instr_this)
+        emit_instr_call(fn, f, "__cyg_profile_func_enter", f->line);
     gen_stmt(fn, f->body, NULL);
+    /* falling off the end returns too; after a body every path of which
+     * returned, this is unreachable and goes */
+    if (g_instr_this)
+        emit_instr_call(fn, f, "__cyg_profile_func_exit", f->line);
+    g_instr_this = 0;               /* nothing after this function is it */
     /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3). After
      * a body whose every path returned this is unreachable, and goes. */
     if (!strcmp(f->name, "main") && ty_is_integer(f->ret_ty)) {

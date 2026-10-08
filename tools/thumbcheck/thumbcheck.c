@@ -255,6 +255,11 @@ int main(int argc, char **argv)
     { int at = t_adr_w(&C, 11, 0); t_patch_adr_w(&C, at, 11, 100);
                                         expect("adr.w\tr11, #100"); }
     t_alu_reg(&C, T_OP_ADD, 12, 12, 11, 0); expect("add.w\tr12, r12, r11");
+    t_ldst_pair(&C, 2, 3, T_PC, 8, 0);  expect("ldrd\tr2, r3, [pc, #8]");
+    t_ldst_pair(&C, 12, 11, T_PC, -4, 0); expect("ldrd\tr12, r11, [pc, #-4]");
+    t_ldst_pair(&C, 0, 1, T_PC, 1020, 0); expect("ldrd\tr0, r1, [pc, #1020]");
+    t_tbb(&C, 0);                       expect("tbb\t[pc, r0]");
+    t_tbb(&C, 12);                      expect("tbb\t[pc, r12]");
     t_tbh(&C, 0);                       expect("tbh\t[pc, r0, lsl #1]");
     t_tbh(&C, 12);                      expect("tbh\t[pc, r12, lsl #1]");
     t_blx(&C, 3);                       expect("blx\tr3");

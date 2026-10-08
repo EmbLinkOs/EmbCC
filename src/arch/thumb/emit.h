@@ -219,6 +219,8 @@ void t_patch_adr_w(struct code *c, int at, int rd, int imm12);
 /* tbh [pc, rm, lsl #1]: pc += 2 * halfword[rm] of the table that follows
  * (pc is the tbh's address + 4, i.e. the table). Returns where it is. */
 int  t_tbh(struct code *c, int rm);
+/* tbb [pc, rm]: the same with a byte table, entries reaching 510 bytes. */
+int  t_tbb(struct code *c, int rm);
 void t_patch_hw16(struct code *c, int at, unsigned v);     /* one halfword */
 void t_blx(struct code *c, int rm);
 void t_nop(struct code *c);

@@ -226,7 +226,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
 all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim \
-     embflash
+     embflash embtrace
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -293,6 +293,12 @@ embpack: tools/embpack/embpack.c
 # verified, run (tools/embflash). ISO C, POSIX sockets and termios.
 embflash: tools/embflash/embflash.c
 	$(CC) $(CFLAGS) -o $@ tools/embflash/embflash.c
+
+# embtrace -- what a program built with -finstrument-functions did: calls,
+# times, the call tree and a Chrome/Perfetto trace, from the ring lib/rt's
+# recorder (lib/rt/embtrace.c) dumps to a console (tools/embtrace). ISO C.
+embtrace: tools/embtrace/embtrace.c
+	$(CC) $(CFLAGS) -o $@ tools/embtrace/embtrace.c
 
 # embrt -- the worst-case stack of each entry point and interrupt, from
 # the compiler's frames (-fstack-usage), its call graph
@@ -462,7 +468,7 @@ check: embcc libc-x86_64 libcxx-x86_64
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
 test: embcc embread embld embdbg embls embas embar embsvd embmap embpack \
-      embrt embsim embflash libc-x86_64 \
+      embrt embsim embflash embtrace libc-x86_64 \
       libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 

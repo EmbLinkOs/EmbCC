@@ -5644,6 +5644,11 @@ static void merge_decls(struct unit *u)
             canon->is_isr = f->is_isr;
         }
         canon->cmse_entry |= f->cmse_entry;
+        /* no_instrument_function on any declaration: a header declares
+         * the function plainly and its definition carries the attribute
+         * (EmbTrace's own hooks, a clock) -- instrumenting one of those
+         * recursed through the hook forever */
+        canon->attr_no_instrument |= f->attr_no_instrument;
         f->absorbed = 1;
     }
 }

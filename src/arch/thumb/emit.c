@@ -617,8 +617,12 @@ int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
 {
     if (t_isa_a32) return a32_ldst_pair(c, rt, rt2, rn, off, store);
     /* LDRD/STRD (immediate) T1, offset addressing: 1110 100 P U 1 W L Rn,
-     * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. */
-    if (rt >= T_SP || rt2 >= T_SP || rn == T_PC || (!store && rt == rt2))
+     * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. With rn
+     * = pc it is LDRD (literal), the same fields, the offset counted from
+     * Align(pc, 4) -- a literal pool's load (t_lit64 in codegen.c). There
+     * is no store to a literal. */
+    if (rt >= T_SP || rt2 >= T_SP || (rn == T_PC && store) ||
+        (!store && rt == rt2))
         return 0;
     if (off % 4 != 0 || off < -1020 || off > 1020)
         return 0;
@@ -822,14 +826,28 @@ int t_adr_w(struct code *c, int rd, int imm12)
     return at;
 }
 
+/* TBB and TBH (T1): 1110 1000 1101 Rn | 1111 0000 000H Rm, Rn = pc; H
+ * picks the halfword table. */
+static int t_tb(struct code *c, int rm, int h)
+{
+    int at = c->len;
+    hw2(c, 0xe8dfu, 0xf000u | (h ? 0x10u : 0u) | (unsigned)rm);
+    return at;
+}
+
 int t_tbh(struct code *c, int rm)
 {
     if (t_isa_a32) a32_refuse("tbh", rm);
-    /* 1110 1000 1101 1111 | 1111 0000 0001 Rm. llvm-mc: tbh [pc, r0,
-     * lsl #1] = e8df f010, [pc, r12, lsl #1] = e8df f01c. */
-    int at = c->len;
-    hw2(c, 0xe8dfu, 0xf010u | (unsigned)rm);
-    return at;
+    /* llvm-mc: tbh [pc, r0, lsl #1] = e8df f010, [pc, r12, lsl #1] =
+     * e8df f01c. */
+    return t_tb(c, rm, 1);
+}
+
+int t_tbb(struct code *c, int rm)
+{
+    if (t_isa_a32) a32_refuse("tbb", rm);
+    /* llvm-mc: tbb [pc, r0] = e8df f000 */
+    return t_tb(c, rm, 0);
 }
 
 void t_patch_hw16(struct code *c, int at, unsigned v)

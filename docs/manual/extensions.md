@@ -46,7 +46,7 @@ A construct that a code generator cannot lower is refused when the
 function containing it is compiled, with a message of the form
 
 ```text
-embcc: f.c:3: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=4 size=4]
+embcc: f.c:1: error: the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]
 ```
 
 The bracketed part names the internal operation that could not be
@@ -413,6 +413,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `format(archetype, string-index, first-to-check)` | Calls are checked under [`-Wformat`](diagnostics.md#-wformat), which `-Wall` enables. The archetypes checked are `printf`, `gnu_printf`, `scanf` and `gnu_scanf`; any other (`strftime`, `strfmon`) is accepted and not checked. Both indexes are 1-based; `first-to-check` is 0 for a function that takes a `va_list` |
 | `gnu_inline` | GNU89 `inline` semantics for this function: a definition that says `extern inline` is used only for inlining and never emitted, and one that says `inline` alone is an external definition. See [Inline functions](c-language.md#inline-functions) |
 | `noinline` | The function is never inlined |
+| `no_instrument_function` | `-finstrument-functions` leaves the function alone. It counts on any declaration: a plain prototype followed by a definition with it works |
 | `noreturn`, `_Noreturn`, `[[noreturn]]` | The function does not return. A call to it ends a path for EmbCC's check that every path through a non-`void` function returns a value ([E0008](diagnostics.md#diagnostic-ids)). EmbCC does not check that the function itself never returns |
 | `nothrow` | The function throws no C++ exception: a call to it inside a C++ `try` region gets no landing pad |
 | `pcs("aapcs")`, `pcs("aapcs-vfp")` | ARM only. See [`pcs`](#pcs) |
@@ -599,7 +600,6 @@ records for each.
 | `leaf` | Nothing in EmbCC reasons across a call this way |
 | `malloc` | It says the result aliases nothing, which only an alias analysis could use |
 | `may_alias` | EmbCC does no type-based alias analysis |
-| `no_instrument_function` | EmbCC emits no instrumentation calls |
 | `no_sanitize`, `no_sanitize_address`, `no_sanitize_undefined` | EmbCC has no sanitizers of these kinds |
 | `noclone` | EmbCC never clones a function |
 | `noipa` | The only interprocedural pass is the inliner, which `always_inline` and `noinline` control |
@@ -940,7 +940,7 @@ check, as a call to a `noreturn` function does.
 |---|---|---|
 | `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All |
 | `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All |
-| `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | Any level: x86-64, AArch64, ColdFire. Level 0: RISC-V, MIPS32, MIPS64, LoongArch, SPARC, PowerPC, Xtensa, TriCore, RX, AVR |
+| `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | Any level: x86-64, AArch64, ColdFire. Level 0: Cortex-M, ARMv7-A, RISC-V, MIPS32, MIPS64, LoongArch, SPARC, PowerPC, Xtensa, TriCore, RX, AVR |
 | `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | As `__builtin_frame_address` |
 
 `level` must be a non-negative integer constant (`__builtin_frame_address
@@ -962,6 +962,7 @@ function that calls does. `__builtin_return_address(0)` is:
 
 | Target | Return address |
 |---|---|
+| Cortex-M, ARMv7-A | `lr` as the function was entered, with the Thumb bit, as GCC and clang return it: in `lr` still in a function that pushes nothing, else the pushed word |
 | RISC-V, MIPS, LoongArch, PowerPC | The return register (`ra` or `LR`) as the function was entered |
 | TriCore | `A11`, which a call keeps for the whole body |
 | SPARC | `%i7`, the address of the call itself (the return goes to `%i7 + 8`), as GCC and clang return it |
@@ -973,7 +974,7 @@ function that calls does. `__builtin_return_address(0)` is:
 
 | Target | Frame address |
 |---|---|
-| RISC-V, MIPS, LoongArch, Xtensa, TriCore | The stack pointer at entry, which is what GCC and clang return on RISC-V |
+| Cortex-M, ARMv7-A, RISC-V, MIPS, LoongArch, Xtensa, TriCore | The stack pointer at entry, which is what GCC and clang return on RISC-V. GCC and clang return the frame pointer `r7` on Cortex-M, which EmbCC's code does not keep |
 | SPARC | `%fp`, the same address |
 | RX and AVR | The stack pointer at entry, which points at, or just below, the return address the call pushed |
 | PowerPC | `r1` after the prologue, the frame's back-chain word, as GCC and clang return it |
@@ -983,11 +984,6 @@ function that calls does. `__builtin_return_address(0)` is:
 what it returns to is the trap's. AVR refuses
 `__builtin_frame_address` there too.
 
-**Cortex-M and ARMv7-A** refuse both builtins for now:
-
-```text
-embcc: r.c:1: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=4 size=4]
-```
 
 A function that calls `alloca` is never inlined.
 
