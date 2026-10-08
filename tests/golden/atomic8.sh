@@ -182,5 +182,28 @@ echo "$boards" | while read -r b t h q; do
             diff $D/order.want "$o/got-order.txt" | head -6
             fail "$b $O: a call passed the wrong memory order, or the weak runtime was not replaced"; }
     done
+    # clang's object against this runtime: its sized calls, and the
+    # generic ones it makes for an _Atomic long long
+    ct=; case $b in m3) ct=thumbv7m-none-eabi ;; rv32) ct="riscv32 -march=rv32ima -mno-relax" ;;
+                    mipsel) ct="mipsel -mcpu=mips32r2 -msoft-float -mno-abicalls -G0" ;;
+                    sparc) ct="sparc -msoft-float" ;; esac
+    if [ -n "$ct" ] && command -v clang >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        clang --target=$ct -O2 -w -ffreestanding -fno-pic -c $D/prog.c -o "$o/clang.o" ||
+            fail "$b: clang does not compile prog.c"
+        llvm-objdump -r "$o/clang.o" | grep -q '__atomic_load$' ||
+            fail "$b: clang's prog.o makes no generic __atomic_load call"
+        EMBCC_THUMB_HARNESS=$o EMBCC_RISCV_HARNESS=$o EMBCC_MIPS_HARNESS=$o \
+        EMBCC_SPARC_HARNESS=$o \
+            sh tests/harness/$h/link.sh "$o/clang.elf" "$o/clang.o" "$lib" \
+            2> "$o/err" || { head -3 "$o/err"; fail "$b: clang's prog.o does not link"; }
+        EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-20} \
+            sh tests/harness/$h/run.sh "$o/clang.elf" $( [ $b = rv32 ] && echo 32 ) 2>/dev/null | tr -d '\r' |
+            sed -n '1,/^DONE/p' > "$o/got-clang.txt"
+        cmp -s "$out/want.txt" "$o/got-clang.txt" || {
+            diff "$out/want.txt" "$o/got-clang.txt" | head -6
+            fail "$b: clang's prog.o differs from the host against this runtime"; }
+        echo "  $b: clang's object, its calls to the sized and the generic routines, runs right against lib/rt"
+    fi
     echo "  $b ($t): every eight-byte atomic as the host computes it, and the orders passed, at -O0, -O1, -O2 and -Os"
 done || exit 1

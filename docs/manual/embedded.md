@@ -1551,8 +1551,11 @@ compiled by GCC or clang that makes the same calls links against the same
 routines. (AVR does its eight-byte atomics inline, with interrupts
 masked.)
 
-`librt.a` (`lib/rt/atomic8.c`) defines them all, plus GCC's
-`__atomic_OP_fetch_8`, by masking interrupts around the access:
+`librt.a` (`lib/rt/atomic8.c`) defines them all -- plus GCC's
+`__atomic_OP_fetch_8`, and libatomic's generic `__atomic_load`,
+`__atomic_store`, `__atomic_exchange` and `__atomic_compare_exchange`,
+which take the size first and which clang calls for an `_Atomic long
+long` or `double` -- by masking interrupts around the access:
 
 | Target | Masked | Put back |
 |---|---|---|
