@@ -359,10 +359,23 @@ struct func {
     /* __attribute__((constructor)) / ((destructor)): its address goes in
      * .init_array / .fini_array, and the startup code walks them. */
     int is_ctor, is_dtor;
-    /* __attribute__((signal)) / ((interrupt)): an interrupt handler.
-     * 1 signal, 2 interrupt (which re-enables interrupts on entry), 0 an
-     * ordinary function. Only AVR acts on it; see the attribute table. */
+    /* __attribute__((signal)) / ((interrupt)): an interrupt handler, 0
+     * for an ordinary function. ISR_SIGNAL and ISR_INTERRUPT are AVR's
+     * two (interrupt re-enables interrupts on entry); ISR_INTERRUPT is
+     * also the plain form everywhere else -- machine mode on RISC-V, the
+     * EIC form on MIPS. ISR_SUPERVISOR is RISC-V's interrupt("supervisor")
+     * (sret), ISR_MIPS_VECTOR + n MIPS's interrupt("vector=sw0".."hw5")
+     * (n 0..7, the interrupt line whose mask bits and below are cleared),
+     * and ISR_MASKED MIPS's keep_interrupts_masked, or-ed into either
+     * MIPS form. AVR, RISC-V and MIPS32 act on it; see the attribute
+     * table. */
     int is_isr;
+#define ISR_SIGNAL      1
+#define ISR_INTERRUPT   2
+#define ISR_SUPERVISOR  3
+#define ISR_MIPS_VECTOR 0x10
+#define ISR_MASKED      0x100
+#define ISR_KIND(v)     ((v) & 0xff)
     /* __attribute__((naked)): no prologue, no epilogue -- the body is asm
      * statements, assembled as a block of its own (src/driver/main.c). */
     int is_naked;

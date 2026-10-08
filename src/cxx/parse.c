@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../arch/target.h"
 #include "../driver/util.h"
 
 struct cfunc *cx_curfn;
@@ -146,6 +147,18 @@ static void parse_attrs(struct attrs *a)
                              "supported in C++ yet: calls would use this "
                              "build's calling convention instead of the one "
                              "it names");
+                /* An interrupt handler, likewise: skipped, it returns with
+                 * an ordinary return and saves only the callee-saved
+                 * registers. The C front end implements it (AVR, RISC-V,
+                 * MIPS32); on a Cortex-M it changes nothing, and is
+                 * accepted. */
+                if ((attr_is(n, "interrupt") || attr_is(n, "signal")) &&
+                    !(target_get() == TARGET_THUMB && !target_arm_a32()))
+                    cx_error(cx_cur(), "__attribute__((%s)) is not "
+                             "supported in C++ yet: the handler would return "
+                             "with an ordinary return instead of the "
+                             "interrupt return, without saving the "
+                             "registers; write it in C", n);
                 cx_advance();
                 if (cx_kind() == TOK_LPAREN) {
                     if (attr_is(n, "aligned")) {
