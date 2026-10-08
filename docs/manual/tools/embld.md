@@ -500,6 +500,46 @@ embld: 'a.o' and 'b.o' disagree about the size of an enum, which changes the lay
 
 An object without an attributes section takes no part in the comparison.
 
+### ARM long-branch veneers
+
+A Thumb `bl` or `b.w` reaches ±16 MiB and an ARM `bl` or `b` ±32 MiB. A
+function run from RAM is usually farther than that from flash: an STM32's
+SRAM is at 0x20000000 and its flash at 0x08000000. So, as GNU ld does,
+`embld` sends a branch that does not reach through a VENEER, a stub that
+goes the rest of the way through a register:
+
+| From | Veneer (12 bytes) |
+|---|---|
+| Thumb, ARMv7-M and up | `movw ip, #lo; movt ip, #hi; bx ip` |
+| Thumb, ARMv6-M (no `movw`) | `push {r0, r1}; ldr r0, [pc, #4]; str r0, [sp, #4]; pop {r0, pc}`, then the address |
+| ARM | `ldr ip, [pc]; bx ip`, then the address |
+
+`ip` is the register the AAPCS gives a veneer.
+
+**Where.** The veneer goes at the end of the CALLER's output section,
+where the branch can reach it. A function in `.data` (or a script's
+`.ramfunc`) that the startup copies to RAM gets its veneers in `.data`,
+copied with it. One veneer serves every branch from one output section
+to one target.
+
+**Changing state.** `bx` takes the target's instruction state from the
+address's low bit, so a veneer also serves a branch that must switch
+between Thumb and ARM and has no encoding to do it:
+- a jump (`b.w`, `b`) either way, such as a tail call;
+- a conditional ARM call.
+
+Such a branch goes through a veneer however near its target is. A
+`bl` that switches state becomes `blx` and needs none.
+
+**Layout.** Which branches reach depends on the addresses, so the
+veneers are added after a layout. They move what follows them, so the
+layout is run again, with or without a script, until no branch needs a
+new veneer.
+
+`tests/golden/embld-veneers.sh` runs RAM code calling flash and back on
+the Cortex-M3 (with and without a script), the Cortex-M0 and ARMv7-A, and
+a clang Thumb tail call into ARM code.
+
 ### ARMv8-M secure gateway veneers
 
 An ARM input that defines a global `__acle_se_NAME` beside a global
@@ -526,15 +566,10 @@ relocatable object holding, for each veneer, a global absolute
 (`SHN_ABS`) Thumb function symbol `NAME` at the veneer's address. A
 Non-secure image links against it to call the Secure entry functions.
 
-A Thumb call (`R_ARM_THM_CALL`, `R_ARM_THM_JUMP24`) to an ABSOLUTE symbol
--- an import library's, chiefly -- that is out of a `bl`'s ±16 MiB goes
-through a long-branch veneer the linker adds to `.text`: `movw ip, #lo;
-movt ip, #hi; bx ip`, or on ARMv6-M, which has no `movw`, `push {r0,
-r1}; ldr r0, [pc, #4]; str r0, [sp, #4]; pop {r0, pc}` and the address.
-`ip` is the register the AAPCS gives a veneer. A call that reaches
-branches directly. The Non-secure code of an ARMv8-M part is usually
-that far from the Secure veneers (0x00200000 against 0x10000000 on the
-mps2-an505), so a call through the import library needs it.
+The Non-secure code of an ARMv8-M part is usually more than a `bl`'s
+16 MiB from the Secure veneers (0x00200000 against 0x10000000 on the
+mps2-an505), so a call through the import library goes through a
+[long-branch veneer](#arm-long-branch-veneers).
 
 `tests/golden/thumbv8m-cmse.sh` links a Secure and a Non-secure image
 this way and runs them on QEMU's mps2-an505.
@@ -564,7 +599,7 @@ of small-data and position-independent code are refused by name:
 `-G0`), `R_MIPS_GOT16` and `R_MIPS_CALL16` (compile without `-fPIC`).
 
 `embld` performs no linker relaxation and creates no veneers,
-trampolines or stubs, except ARMv8-M's (above). A relocated value that its field cannot hold is an
+trampolines or stubs, except ARM's (above). A relocated value that its field cannot hold is an
 error, not truncated. For these types the message names the relocation,
 the symbol, the value and the range the field holds:
 
@@ -594,7 +629,9 @@ relocation errors have messages of their own:
 
 | Message | Cause |
 |---|---|
-| `a Thumb call is more than 16MB away; this linker mints no veneers` | ARM `bl`/`b.w` out of range, to a symbol that is not absolute |
+| `a Thumb branch is more than 16MB away, and so would be a veneer at the end of its output section` | A Thumb `bl`/`b.w` whose output section is itself more than 16 MiB long |
+| `an ARM branch is more than 32MB away, and so would be a veneer at the end of its output section` | The same for an ARM `bl`/`b` and 32 MiB |
+| `the long-branch veneers do not settle: ...` | Each round of veneers put another branch out of reach, eight times |
 | `an rjmp reaches +-4KB and this target is N bytes away; ...` | AVR `rjmp`/`rcall` out of range; use `call` and `jmp` |
 | `a conditional branch reaches +-126 bytes and this target is N away; ...` | AVR conditional branch out of range |
 | `a call to an odd address 0x...; ...` | AVR `call`/`jmp` to an odd byte address |
