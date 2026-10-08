@@ -991,14 +991,37 @@ exception, the handler must advance `mepc` past the faulting instruction
 
 Atomic operations up to the register width are inline A-extension
 instructions: `atomic_fetch_add` on an `int` is one `amoadd.w.aqrl`, a
-compare-exchange is an `lr.w.aq`/`sc.w.rl` loop, and
-`atomic_thread_fence` is `fence rw, rw`. No library is involved.
+compare-exchange is an `lr.w.aqrl`/`sc.w.rl` loop, and
+`atomic_thread_fence` is `fence rw, rw`. No library is involved. Those
+are the seq_cst forms; an explicit memory order sets the `.aq` and `.rl`
+bits as clang's does (`atomic_fetch_add_explicit(p, 1,
+memory_order_relaxed)` is a bare `amoadd.w`, an acquire compare-exchange
+`lr.w.aq`/`sc.w`).
 
 A one- or two-byte atomic works on the aligned word around it, as GCC's
 and LLVM's do: AND, OR and XOR are one AMO with the other lanes neutral,
 and the rest an `lr.w`/`sc.w` loop that rewrites only its lane. That is
 atomic against the neighbouring bytes too, because a write to any of them
-breaks the reservation and the loop runs again. 64-bit atomics on RV32
+breaks the reservation and the loop runs again; a fetch-and-add on a byte
+is
+
+```text
+    andi  t4, a0, -4        # the aligned word
+    andi  t2, a0, 3
+    slli  t2, t2, 3         # the lane's shift
+    li    t5, 255
+    sll   t5, t5, t2        # the lane's mask
+    sll   t1, a1, t2        # the operand, in the lane
+1:  lr.w.aqrl t0, (t4)
+    add   t6, t0, t1
+    xor   t6, t6, t0
+    and   t6, t6, t5
+    xor   t6, t6, t0        # old ^ ((new ^ old) & mask)
+    sc.w.rl t6, t6, (t4)
+    bnez  t6, 1b
+```
+
+which is clang's sequence instruction for instruction. 64-bit atomics on RV32
 are refused (`the RV32 backend cannot lower this operation at 64 bits
 yet`).
 
@@ -1379,12 +1402,17 @@ copies its stack arguments down to the new stack pointer, where the callee
 looks for them, and the stack pointer is restored at the end of a VLA's
 scope and at the return.
 
-Atomics of one, two and four bytes compile: every read-modify-write,
-compare-exchange, and a two- or four-byte load or store. Each is done with
+Atomics of one, two, four and eight bytes compile: every
+read-modify-write, compare-exchange and test-and-set, the `_Atomic`
+operators, and a load or store of two to eight bytes. Each is done with
 interrupts masked, as avr-libc's `ATOMIC_BLOCK` does it: SREG is saved,
-`cli`, the access, SREG restored. On one core that is all the atomicity
-there is to have. A one-byte load or store is a single instruction.
-Fences compile to nothing. Eight-byte atomics are refused.
+`cli`, the access, SREG restored -- which puts the I flag back as it was,
+so an atomic inside an interrupt handler or a critical section does not
+turn interrupts on. On one core that is all the atomicity there is to
+have, and no library is called at any size (clang calls
+`__sync_fetch_and_add_8` and the like for four and eight bytes). A load
+reads and writes nothing back; a one-byte load or store is a single
+instruction. Fences compile to nothing.
 
 ## x86-64 kernels and EmbLinkOS
 

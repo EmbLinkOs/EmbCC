@@ -319,7 +319,7 @@ there.
 | `long double _Complex` | Yes | Yes | No | Yes | Yes | Yes | No | No | Yes |
 | `__int128` | Yes | Yes | Not in a function signature | Yes | Yes | No | No | Declarations and `sizeof` only | No |
 | `_Float128` | No | No | No | Yes | No | No | Declarations and `sizeof` only | Declarations and `sizeof` only | No |
-| `_Atomic` operators | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 4 bytes | Load and store 1 to 4 bytes; read-modify-write 4 bytes | Load and store 1 to 8 bytes; read-modify-write 4 and 8 bytes | Load and store of 1 byte |
+| `_Atomic` operators | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 4 bytes | 1 to 4 bytes | 1 to 8 bytes | 1 to 8 bytes, with interrupts masked |
 | `_Thread_local` | Per thread | No | No | Per thread | No | One shared instance | One shared instance | One shared instance | One shared instance |
 
 "One shared instance" means the object is placed in `.tbss` but addressed
