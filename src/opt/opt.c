@@ -14171,11 +14171,15 @@ static int pass_sroa(struct ir_func *fn, int report_refusals)
         for (int k = 0; k < nfld[L]; k++) {
             struct type *mt =
                 sroa_field_ty(fn->src->var_tys[L], F[k].off, F[k].size);
+            /* A piece no member types (an eight-byte read across two
+             * words) is the integer exactly its size: `long` is four
+             * bytes on ILP32 and `int` two on AVR, and a slot that size
+             * held half the piece -- ColdFire's backend refused the
+             * eight-byte read of a four-byte slot. (1, 2, 4 and 8 are
+             * the only sizes a piece has, and each exists everywhere.) */
             if (!mt || mt->is_volatile || mt->kind == TY_LDOUBLE ||
                 mt->kind == TY_INT128)
-                mt = ty_base(F[k].size == 8 ? TY_LONG :
-                             F[k].size == 4 ? TY_INT :
-                             F[k].size == 2 ? TY_SHORT : TY_CHAR, 0);
+                mt = ty_int_of_size(F[k].size, 0);
             vt[F[k].nl] = mt;
             va[F[k].nl] = 0;        /* a piece nothing addresses needs no more
                                      * than its type's natural alignment */
