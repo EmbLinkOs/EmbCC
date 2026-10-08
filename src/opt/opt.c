@@ -8594,10 +8594,27 @@ static int pass_tailmerge(struct ir_func *fn)
         if (n <= s0 - 1)
             n = s0;
     }
+    /* Inside a loop, only where the path through the copy takes no more
+     * branches than before: the dropped run ended in a jump, and the copy
+     * falls into the same label. Otherwise that path is a jump longer on
+     * every trip that takes it -- tools/bench's state machine, a switch
+     * in a loop, ran 2.5% more cycles at -Os for it. */
+    int *labpos = xmalloc((size_t)(fn->nlabels ? fn->nlabels : 1) * sizeof *labpos);
+    for (int l = 0; l < fn->nlabels; l++)
+        labpos[l] = -1;
+    for (int n = 0; n < N; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < fn->nlabels)
+            labpos[fn->ins[n].label] = n;
+    char *inloop = xcalloc((size_t)(nb ? nb : 1), 1);
+    for (int x = 0; x < nb; x++)
+        inloop[x] = (char)gj_in_loop(fn, bs[x], labpos);
+    free(labpos);
     int bestL = 1, bk = -1, bd = -1;
     for (int x = 0; x < nb; x++)
         for (int y = 0; y < nb; y++) {
-            if (x == y)
+            if (x == y || (inloop[y] && (fn->ins[be[x]].op != IR_LABEL ||
+                                         fn->ins[be[y]].op != IR_JMP)))
                 continue;
             int kx = be[x], dy = be[y];
             const struct ir_ins *ex = &fn->ins[kx], *ey = &fn->ins[dy];
@@ -8677,6 +8694,7 @@ static int pass_tailmerge(struct ir_func *fn)
                        bestL);
     }
     free(bs); free(be);
+    free(inloop);
     free(map);
     free(maxr);
     free_defs(&d);

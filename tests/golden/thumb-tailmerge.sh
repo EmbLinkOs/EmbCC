@@ -6,7 +6,8 @@
 # whose two blocks end in the same run must keep one copy of it; four
 # where a rule says no -- different successors, a different operand, a
 # value the run defines read after the block, a different variable
-# written -- must keep both.
+# written -- must keep both; and so must a loop's blocks where the path
+# through the shared copy would take a branch more each trip (speed).
 # Then C: scanf's store_int, five `case`s storing through
 # `va_arg(ap, long *)`, has one such store left at -Os. Corpus programs on
 # the boards (exec-boards.sh, thumb-v6m-exec.sh) check the values.
@@ -114,6 +115,32 @@ L4:
 }
 EOF
 
+# loop: inside a loop, where both runs end in a jump: the path through the copy would take one more
+cat > "$out/loop.ir" <<'EOF'
+; EmbIR
+func @loop nparams=3 nvars=3 vregs=16 labels=5 {
+L4:
+  brz.4s %2 -> L0
+  %4 = add.4s %0, #7
+  store:4s [%1], %4
+  %5 = mul.4s %0, %4
+  store:4s [%1], %5
+  jmp L2
+L0:
+  %6 = add.4s %0, #7
+  store:4s [%1], %6
+  %7 = mul.4s %0, %6
+  store:4s [%1], %7
+  jmp L2
+L3:
+  ret %0
+L2:
+  %2 = sub.4s %2, #1
+  brnz.4s %2 -> L4
+  jmp L3
+}
+EOF
+
 # def: the runs write different variables, both read after the join
 cat > "$out/def.ir" <<'EOF'
 ; EmbIR
@@ -138,11 +165,11 @@ EOF
 copies() { grep -c 'mul.4s %0' "$out/$1.out"; }
 opt pos
 [ "$(copies pos)" = 1 ] || { cat "$out/pos.out"; fail "pos: the run is still there twice"; }
-for c in exit ops local def; do
+for c in exit ops local def loop; do
     opt $c
     [ "$(copies $c)" = 2 ] || { cat "$out/$c.out"; fail "$c: merged where the runs differ"; }
 done
-echo "IR: one copy where the runs are the same, two in four shapes where they are not"
+echo "IR: one copy where the runs are the same, two in five shapes where they are not"
 
 command -v "$OBJDUMP" >/dev/null 2>&1 || { echo "SKIP the C half: no $OBJDUMP"; exit 0; }
 "$EMBCC" --target=thumbv7em-none-eabi -Os -Ilib/libc/include \
