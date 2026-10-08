@@ -267,6 +267,12 @@ its stack slot and into SSA values, which the later passes and the
 register allocator work on. A variable live across a loop or down one arm
 of an `if` becomes a value like any other.
 
+A `long double` local is promoted too, as a 16-byte value, whether it is
+x87 extended or IEEE binary128. Kept in memory, every read of one was a
+16-byte copy, and on the 32-bit binary128 targets that was most of a
+`long double` function's code. Promoting them made RISC-V's `lib/libc`
+3% smaller.
+
 A `volatile` local is never promoted. A local whose address is taken
 stays in memory, unless `sroa` first shows that the address is used only
 for loads and stores at constant offsets.

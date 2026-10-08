@@ -3053,6 +3053,14 @@ static int m2r_plain(int size, int sign, int w)
     return size == 8 || (size == 4 && !(sign && w == 8));
 }
 
+/* The width of a promoted local's value: 16 for a long double (binary128
+ * or x87, w 16 everywhere else in the IR), else 8 or 4 -- a 16-byte value
+ * copied at width 4 moved a quarter of it. */
+static int m2r_w(int size)
+{
+    return size == 16 ? 16 : size == 8 ? 8 : 4;
+}
+
 /* Emit the phi copies for edge (pred p -> block s): read every incoming value
  * into a fresh temp, then write each phi result — read-all-then-write-all, so a
  * self-referential loop phi or a swap is realised correctly. */
@@ -3084,7 +3092,7 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         for (int k = 0; k < S->nphi; k++) {
             struct ir_ins *mv = ib_push(nb);
             mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = S->phi_inc[pi][k];
-            mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
+            mv->w = m2r_w(fn->locals[S->phi_local[k]].size);
             mv->line = eline; mv->col = ecol; mv->synth = !eline;
         }
         return;
@@ -3094,13 +3102,13 @@ static void emit_edge_copies(struct ibuf *nb, struct bb *bb, int s, int p,
         tmp[k] = fn->nvregs++;
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = tmp[k]; mv->a = S->phi_inc[pi][k];
-        mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
+        mv->w = m2r_w(fn->locals[S->phi_local[k]].size);
         mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     for (int k = 0; k < S->nphi; k++) {
         struct ir_ins *mv = ib_push(nb);
         mv->op = IR_MOV; mv->dst = S->phi_res[k]; mv->a = tmp[k];
-        mv->w = fn->locals[S->phi_local[k]].size == 8 ? 8 : 4;
+        mv->w = m2r_w(fn->locals[S->phi_local[k]].size);
         mv->line = eline; mv->col = ecol; mv->synth = !eline;
     }
     free(tmp);
@@ -3181,8 +3189,16 @@ static int pass_mem2reg(struct ir_func *fn)
          * value numbering, LICM and strength reduction below cannot see. */
         int narrow = Li->is_int_or_ptr && !Li->is_int128 &&
                      (Li->size == 1 || Li->size == 2);
+        /* ...and a 16-byte long double (x87 or binary128). Kept in
+         * memory, every read was a 16-byte copy into a temp's slot and
+         * every call argument another: RV32's roundl was three times
+         * clang's size. Its copies are w 16 (m2r_w), and an undefined
+         * one's seed a pooled zero. EMBCC_NO_M2R_LD=1 keeps them in
+         * memory, for bisecting. */
+        int ld16 = Li->is_ldouble && Li->size == 16 &&
+                   !getenv("EMBCC_NO_M2R_LD");
         int promotable = Li->is_scalar_int_or_ptr || Li->is_scalar_float ||
-                         narrow;
+                         narrow || ld16;
         if (!Li->size)                          { ok[L] = 0; why[L] = "type-unknown"; }
         else if (!promotable && (Li->size == 4 || Li->size == 8))
                                                 { ok[L] = 0; why[L] = "not-a-scalar-integer-pointer-or-float"; }
@@ -3202,6 +3218,8 @@ static int pass_mem2reg(struct ir_func *fn)
             (in->vol ||
              (fn->locals[in->a].size < 4
                   ? in->size != fn->locals[in->a].size
+                  : fn->locals[in->a].size == 16
+                  ? !(in->size == 16 && in->w == 16)
                   : !m2r_plain(in->size, in->sign, in->w)) ||
              /* a narrower read of a wider local is its FIRST bytes,
               * which are the value's low end only little-endian */
@@ -3429,7 +3447,7 @@ static int pass_mem2reg(struct ir_func *fn)
                 struct ir_ins *in = &fn->ins[i];
                 if (in->op == IR_LDVAR && in->a >= 0 && in->a < nvars && prom[in->a] >= 0) {
                     int pidx = prom[in->a];
-                    int fw = in->size == 8 ? 8 : 4;
+                    int fw = m2r_w(in->size);
                     int was_float = in->flt;
                     if (fn->locals[ploc[pidx]].size < 4) {
                         /* A narrow local: the read extends the value's low
@@ -3484,6 +3502,24 @@ static int pass_mem2reg(struct ir_func *fn)
     for (int p = 0; p < nprom; p++) {   /* entry undef defs */
         if (ploc[p] < nparams)
             continue;                   /* the prologue defined it */
+        if (fn->locals[ploc[p]].size == 16) {
+            /* no IR_CONST is 16 bytes wide: the seed is a load of a
+             * pooled zero, as irgen makes every long double constant */
+            static const char zero16[16];
+            struct ir_ins *a = ib_push(&nb);
+            memset(a, 0, sizeof *a);
+            a->op = IR_STRADDR; a->dst = fn->nvregs++;
+            a->label = ir_intern_aligned(g_fold_unit, zero16, 16, 16);
+            a->a = a->b = a->c = -1; a->w = 4; a->size = 4; a->sign = 1;
+            a->callee_sym = a->glob_sym = -1; a->synth = 1;
+            int at = a->dst;
+            struct ir_ins *l = ib_push(&nb);
+            memset(l, 0, sizeof *l);
+            l->op = IR_LOAD; l->dst = undef[p]; l->a = at;
+            l->b = l->c = -1; l->size = 16; l->w = 16; l->natural = 1;
+            l->label = -1; l->callee_sym = l->glob_sym = -1; l->synth = 1;
+            continue;
+        }
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_CONST; c->dst = undef[p]; c->imm = 0;
         c->w = fn->locals[ploc[p]].size == 8 ? 8 : 4;
@@ -3510,7 +3546,7 @@ static int pass_mem2reg(struct ir_func *fn)
         struct ir_ins *c = ib_push(&nb);
         c->op = IR_MOV; c->dst = bb[0].phi_res[k];
         c->a = undef[pidx]; c->b = -1;
-        c->w = fn->locals[ploc[pidx]].size == 8 ? 8 : 4;
+        c->w = m2r_w(fn->locals[ploc[pidx]].size);
         c->synth = 1;
     }
     struct { int lbl, from, edge_pred; } *tramp = NULL; int ntramp = 0, ctramp = 0;
@@ -5770,7 +5806,7 @@ static int pass_tailrec(struct ir_func *fn)
                 tmp[k] = fn->nvregs++;
                 struct ir_ins *m = ib_push(&nb);
                 m->op = IR_MOV; m->dst = tmp[k]; m->a = argv[k];
-                m->w = fn->locals[k].size == 8 ? 8 : 4;
+                m->w = m2r_w(fn->locals[k].size);
                 m->line = c->line; m->col = c->col; m->synth = 1;
             }
             for (int k = 0; k < np; k++) {          /* then write all */
