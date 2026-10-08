@@ -237,6 +237,10 @@ struct ir_asm {
      * asm is then treated as a call. */
     unsigned long clob;
     int scr;     /* the scratch the lowering stores outputs through, or -1 */
+    /* The template calls -- or otherwise writes the link register -- so
+     * the function holding it is not a leaf: PowerPC's LR must be saved
+     * around it (ppc/irgen.c). 0 elsewhere. */
+    int calls;
 };
 
 /* A jump table: the targets of one IR_SWITCH, for index values 0..n-1; a
