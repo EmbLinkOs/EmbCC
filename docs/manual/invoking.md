@@ -1677,14 +1677,41 @@ still gets a pool entry where it needs one.)
 
 ### RISC-V options
 
+#### `-march=ISA`
+
+The instruction set, as GCC and clang spell it: `rv32` or `rv64` (the
+target's width), the base `i` -- or `g`, which is `imafd` with Zicsr and
+Zifencei -- then single-letter extensions in any order, then `_zicsr`
+and `_zifencei`. EmbCC emits I, M, A, F, D and C:
+
+- M and A are required (the code multiplies with `mul` and makes its
+  atomics with `lr`/`sc` and the AMOs);
+- F lets `float` arithmetic, comparisons, square roots and conversions
+  run on the FPU, and D the same for `double`; D needs F;
+- without C nothing is compressed and `EF_RISCV_RVC` is clear.
+
+Anything else is refused by name: `-march=rv32imafcv: the 'v' extension
+is not supported`, `-march=rv32imadc: the D extension needs F`. The
+default is `rv32imac` and `rv64imac`. The predefined macros follow
+(`__riscv_f`, `__riscv_d`, `__riscv_flen`, `__riscv_fdiv`,
+`__riscv_fsqrt`, `__riscv_zicsr`, `__riscv_zcf`, `__riscv_zcd`, and the
+compressed ones only with C), as clang defines them for the same flags.
+
 #### `-mabi=ABI`
 
-`ilp32` for RV32 and `lp64` for RV64 are accepted: EmbCC passes floating
-point in the integer registers (`__riscv_float_abi_soft`). Any other
-value -- the F and D conventions `ilp32f`, `ilp32d`, `lp64f`, `lp64d`,
-the embedded `ilp32e`, or the other width's -- is refused:
-`embcc: error: -mabi=ilp32d is not supported for riscv32-unknown-elf:
-EmbCC emits the soft-float -mabi=ilp32 convention`.
+Where floating point travels across a call: `ilp32`/`lp64` in the
+integer registers (`__riscv_float_abi_soft`), `ilp32f`/`lp64f` a float
+in `fa0`-`fa7` (`__riscv_float_abi_single`), `ilp32d`/`lp64d` a double
+too (`__riscv_float_abi_double`) -- with the psABI's flattening of small
+structs into floating-point registers. Without `-mabi=` it follows
+`-march=` as clang's does: D gives the double ABI, F alone the single
+one. A float ABI wider than the `-march=` has FPU is refused
+(`-mabi=ilp32d passes doubles in floating-point registers, and
+-march=rv32imafc has no D extension`), as are `ilp32e` and the other
+width's ABIs. Objects of two float ABIs do not link (embld refuses them),
+and the driver links a hard-float ABI's `librt.a` and `libc.a` from
+`<triple>/<abi>` (`riscv32-unknown-elf/ilp32f`), which `make rt-embedded
+libc-embedded` builds.
 
 ### MIPS options
 
@@ -1887,7 +1914,8 @@ message that names the option.
 | `-marm` | `-marm is not supported: a Cortex-M has no ARM instruction set, only Thumb` |
 | `-mno-unaligned-access` (ARM) | `-mno-unaligned-access is not supported: EmbCC's ARMv7-M code uses word and halfword loads and stores at unaligned addresses ...` |
 | `-mabi=apcs-gnu`, `-mabi=atpcs`, `-mabi=iwmmxt` (ARM) | `-mabi=apcs-gnu is not supported: EmbCC emits the AAPCS ...` |
-| `-mabi=ilp32f`, `ilp32d`, `ilp32e`, `lp64f`, `lp64d` (RISC-V) | `embcc: error: -mabi=ilp32d is not supported for riscv32-unknown-elf: EmbCC emits the soft-float -mabi=ilp32 convention` |
+| `-mabi=ilp32e`, `lp64e` (RISC-V), or a float ABI the `-march=` has no FPU for | `embcc: error: -mabi=ilp32e is not supported for riscv32-unknown-elf: EmbCC emits ilp32, ilp32f and ilp32d` |
+| `-march=` with an extension other than I, M, A, F, D, C, Zicsr, Zifencei, or without M or A (RISC-V) | `embcc: error: -march=rv32imafcv: the 'v' extension is not supported: EmbCC emits I, M, A, F, D and C` |
 | `-mbig-endian` | `embcc: error: -mbig-endian is not supported: every target EmbCC emits for is little-endian` |
 | `-fdump-rtl-*`, `-fdump-tree-*` and every other `-fdump-`; `-fcallgraph-info=` with anything but `su` | `embcc: error: -fdump-rtl-expand is not supported: it dumps GCC's internal representation, which EmbCC does not have; ...` |
 | `-fcommon` for a Mach-O or COFF target | `embcc: error: -fcommon is not supported for x86_64-apple-darwin: ...` |

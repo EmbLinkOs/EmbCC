@@ -6588,12 +6588,17 @@ static void ab_str(unsigned char **p, size_t *n, size_t *cap, const char *s)
 
 unsigned char *riscv_build_attributes(size_t *len)
 {
-    /* I, M and A -- mul/div and the lr/sc atomics are emitted -- plus C
-     * when target_riscv_rvc says so. No F or D: floating point is soft
-     * (e_flags' float ABI bits are 0 to match). */
-    const char *arch = target_xlen() == 64
-        ? (target_riscv_rvc() ? "rv64i2p1_m2p0_a2p1_c2p0" : "rv64i2p1_m2p0_a2p1")
-        : (target_riscv_rvc() ? "rv32i2p1_m2p0_a2p1_c2p0" : "rv32i2p1_m2p0_a2p1");
+    /* I, M and A -- mul/div and the lr/sc atomics are emitted -- plus F
+     * and D as -march= says (with the Zicsr they imply), C when
+     * target_riscv_rvc says so, and Zifencei when -march= named it: in
+     * clang's order. A disassembler reads this to know which
+     * instructions to decode. */
+    char arch[96];
+    int flen = target_riscv_flen();
+    snprintf(arch, sizeof arch, "rv%di2p1_m2p0_a2p1%s%s%s%s%s",
+             target_xlen(), flen ? "_f2p2" : "", flen == 64 ? "_d2p2" : "",
+             target_riscv_rvc() ? "_c2p0" : "", flen ? "_zicsr2p0" : "",
+             target_riscv_zifencei() ? "_zifencei2p0" : "");
     unsigned char *a = NULL, *o = NULL;
     size_t na = 0, ca = 0, no = 0, co = 0;
     ab_put(&a, &na, &ca, Tag_RISCV_stack_align);
