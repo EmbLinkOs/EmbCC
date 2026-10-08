@@ -16,8 +16,8 @@ rather than repeating them.
 | Board family | Triples | Startup written in | Interrupt handlers | Runtime archive |
 |---|---|---|---|---|
 | ARM Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M Mainline) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | C | `__attribute__((interrupt))` or a plain function | `librt.a` per triple |
-| RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | C, with a stack stub from EmbLD | assembly entry, C body | `librt.a` for RV32 only |
-| MIPS32 (MIPS32r2, little-endian, a PIC32's core) | `mipsel-none-elf` | C, with a stack stub from EmbLD | assembly entry (`.S` or naked), C body | `librt.a` and `libc.a` |
+| RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | C, with a stack stub from EmbLD | `__attribute__((interrupt))`, `interrupt("supervisor")`; or an assembly entry | `librt.a` for RV32 only |
+| MIPS32 (MIPS32r2, little-endian, a PIC32's core) | `mipsel-none-elf` | C, with a stack stub from EmbLD | `__attribute__((interrupt))` and its `vector=`/`keep_interrupts_masked` forms; or an assembly entry (`.S` or naked) | `librt.a` and `libc.a` |
 | AVR (ATmega328P) | `avr` | assembly | `__attribute__((signal))`, `__attribute__((interrupt))` | `librt.a` |
 | x86-64 kernel | `x86_64-elf`, `x86_64-emblink` | assembly | assembly entry, C body | none built; libgcc's names (see [below](#x86-64-kernels-and-emblinkos)) |
 
@@ -829,16 +829,76 @@ An image loaded wholly into RAM, as on QEMU's `virt` board, needs no
 `__data_start`, and the copy loop moves nothing. A part that executes
 from flash uses `-Ttext FLASH -Tdata RAM` as on Cortex-M.
 
-### Trap handlers
+### Interrupt handlers
 
-`__attribute__((interrupt))` is refused on RISC-V:
+`__attribute__((interrupt))` makes a C function a machine-mode interrupt
+handler, as with GCC and clang; `interrupt("machine")` is the same, and
+`interrupt("supervisor")` makes a supervisor-mode one:
 
-```text
-embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR it is implemented)
+```c
+#define CLINT_MTIMECMP_LO (*(volatile unsigned *)0x2004000u)
+#define CLINT_MTIMECMP_HI (*(volatile unsigned *)0x2004004u)
+#define CLINT_MTIME_LO    (*(volatile unsigned *)0x200bff8u)
+
+volatile unsigned ticks;
+
+__attribute__((interrupt)) void timer_isr(void)
+{
+    ticks++;
+    CLINT_MTIMECMP_HI = 0xffffffffu;               /* re-arm: no early match */
+    CLINT_MTIMECMP_LO = CLINT_MTIME_LO + 10000;
+    CLINT_MTIMECMP_HI = 0;
+}
+
+void timer_start(void)
+{
+    __asm__ volatile("csrw mtvec, %0" :: "r"(timer_isr));
+    CLINT_MTIMECMP_LO = CLINT_MTIME_LO + 10000;
+    CLINT_MTIMECMP_HI = 0;
+    __asm__ volatile("csrs mie, %0" :: "r"(1ul << 7));       /* MTIE */
+    __asm__ volatile("csrs mstatus, %0" :: "r"(1ul << 3));   /* MIE */
+}
 ```
 
-Write the trap entry in assembly: save the caller-saved registers, call a
-C function, restore them and return with `mret`. EmbCC assembles `.S`
+The handler saves and restores every caller-saved register it writes --
+`ra`, `t0`-`t6`, `a0`-`a7` -- and, when it calls any function (a runtime
+helper such as a soft-float routine counts), all of them; with an FPU,
+the floating-point registers a call may clobber are included on the same
+terms, at the full register width: `ft0`-`ft11` and `fa0`-`fa7`, and
+`fs0`-`fs11` too where the ABI keeps fewer bits of them than the
+registers hold (`ilp32f` on a part with D, or a soft-float ABI on a part
+with an FPU). This is clang's rule, register for register. It returns
+with `mret`, or `sret` for a supervisor-mode handler, and is placed at a
+4-byte boundary even with the C extension, because `mtvec`'s and
+`stvec`'s low two bits select the mode. `fcsr` is not saved, as by GCC and
+clang. A handler makes no tail call.
+
+A handler takes no parameters and returns `void`; anything else is
+refused, as is `interrupt("user")` (user-mode interrupts were never
+ratified) and any other argument:
+
+```text
+embcc: isr.c:3: error: interrupt handler 'isr' takes parameters: the hardware calls it, so nothing passes them, and they would be read out of whatever the interrupted code left in the argument registers
+embcc: isr.c:3: error: __attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them
+```
+
+The attribute may be on a prototype, the definition, or both; two
+different kinds on one function are refused. In C++ it is refused (`not
+supported in C++ yet`): write the handler in C.
+
+`tests/golden/riscv-isr.sh` runs a leaf handler, a calling handler, one
+with a frame larger than 2 KiB and a supervisor-mode handler (a
+delegated software interrupt the machine timer raises) against code that
+keeps a value in every caller-saved register, at RV32 and RV64, soft and
+hard float.
+
+### Trap handlers
+
+A handler that needs the trapped state -- a synchronous exception whose
+`mepc` must be advanced, or a context switch that saves the interrupted
+registers into a task's frame -- is an entry written in assembly.
+It saves the caller-saved registers, calls a C function, restores them
+and returns with `mret`. EmbCC assembles `.S`
 files for RISC-V itself, and CSRs may be named (`csrr a0, mcause`) or
 numbered (`csrr a0, 0x342`), in a `.S` file as in inline assembly.
 
@@ -951,9 +1011,10 @@ the length the compiler or assembler chose.
 
 With the C extension, functions are aligned to 2 bytes, and
 `__attribute__((aligned(4)))` on a function does not change that. An
-address that must be 4-byte aligned, such as a direct-mode `mtvec`
-target, belongs in an assembly file with `.p2align 2`, as in the trap
-entry above.
+interrupt handler is the exception: it is 4-byte aligned, as a
+direct-mode `mtvec` target must be. Any other address that must be
+4-byte aligned belongs in an assembly file with `.p2align 2`, as in the
+trap entry above.
 
 ### Runtime
 
@@ -1001,12 +1062,59 @@ the boot flash (KSEG1, `0xbfc00000`) calling program flash in KSEG0
 `jal` that does not reach (`a jal or j at ADDR to 'f' at ADDR, which is
 in another 256 MiB region`).
 
-### Exceptions and interrupts
+### Interrupt handlers
 
-`__attribute__((interrupt))` is refused on MIPS32. An exception or
-interrupt handler is an entry written in a `.S` file (or a naked
-function, or a file-scope `asm` block) that saves the registers C may
-change, calls a C function, restores them and returns with `eret`.
+`__attribute__((interrupt))` makes a C function an interrupt handler, as
+GCC defines it for MIPS32 (clang's is the same):
+
+| Spelling | Status on entry |
+|---|---|
+| `interrupt`, `interrupt("eic")` | `Cause.RIPL` copied into `Status.IPL`, for an External Interrupt Controller; interrupts re-enabled |
+| `interrupt("vector=sw0")` .. `("vector=sw1")`, `("vector=hw0")` .. `("vector=hw5")` | `IM0` up to the named line's mask bit cleared; interrupts re-enabled, so a higher line can nest |
+| `interrupt, keep_interrupts_masked` (either form) | interrupts stay disabled for the whole handler |
+
+The handler saves `EPC` and `Status` (a nested interrupt overwrites both),
+writes `Status` with `EXL`, `ERL` and `KSU` cleared as the table says,
+saves every caller-saved register it writes -- `$at`, `v0`-`v1`,
+`a0`-`a3`, `t0`-`t9`, `ra` -- and `HI`/`LO` if it multiplies or divides,
+and all of them and `gp` when it calls any function (a soft-float or
+64-bit division helper counts). It ends with `di; ehb` (unless masked),
+puts `EPC` and `Status` back and returns with `eret`. `k0` and `k1` are
+the only registers it uses unsaved, as the ABI reserves them for this.
+
+On a core without an EIC -- malta's 24Kc, a PIC32MX -- `Cause[15:10]` are
+the pending interrupt lines, so the plain form unmasks the very line
+that is pending and re-enters at once, as GCC's does: use
+`vector=hwN` (`hw5` for the CP0 timer on line 7) or
+`keep_interrupts_masked` there.
+
+```c
+__attribute__((interrupt("vector=hw5"))) void timer_isr(void)
+{
+    unsigned c;
+    ticks++;
+    __asm__ volatile("mfc0 %0, $9" : "=r"(c));             /* Count */
+    __asm__ volatile("mtc0 %0, $11" :: "r"(c + PERIOD));   /* Compare: ack */
+}
+```
+
+The handler is reached from the vector through `k0`: four words at
+`EBase + 0x180` (or at `EBase + 0x200 + n * spacing` with vectored
+interrupts, `Cause.IV`) that load its address and `jr` to it, as the
+`exc_stub` below. A handler takes no parameters and returns `void`;
+`use_shadow_register_set` and `use_debug_exception_return` are refused,
+as is the attribute in C++ and on MIPS64. `tests/golden/mips-isr.sh`
+runs a masked, a calling and a nested pair of handlers against code that
+keeps a value in every caller-saved register and `HI`/`LO`, in both byte
+orders.
+
+### Exceptions
+
+A handler for a synchronous exception (`syscall`, an address error) that
+must read or edit the trapped registers is an entry written in a `.S`
+file (or a naked function, or a file-scope `asm` block) that saves the
+registers C may change, calls a C function, restores them and returns
+with `eret`.
 `tests/golden/mips-exc/vector.S` is a complete one, run on `malta` by
 `tests/golden/mips-exc.sh`, and its shape is:
 
@@ -1301,7 +1409,7 @@ and shifts, conversions between `__int128` and floating point, and
 `x86_64-elf`; link libgcc, or compile the needed files of `lib/rt` for
 the target (see [Libraries](libraries.md#the-compiler-runtime-librt)).
 
-`__attribute__((interrupt))` is refused on x86-64, as on RISC-V. Interrupt
+`__attribute__((interrupt))` is refused on x86-64. Interrupt
 and exception entry stubs are written in assembly and call C handlers.
 EmbCC assembles NASM-syntax `.asm` files (`embcc -c isr.asm -o isr.o`, or
 the standalone [`embas`](tools/embas.md)); GNU-syntax `.s`/`.S` files are

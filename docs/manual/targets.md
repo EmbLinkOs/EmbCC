@@ -1154,6 +1154,9 @@ individually.
 | an 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | any C++ translation unit at RV32, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for riscv32-unknown-elf: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4` |
 | C++ code that needs a landing pad (`try`, or a destructor run during unwinding) at RV64 | `the RV64 backend cannot lower this operation yet (function f) [landing w=8 size=4]` |
+| `__attribute__((interrupt("user")))` | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
+| an interrupt handler with parameters, or with a result | `interrupt handler 'h' takes parameters: ...`, `interrupt handler 'h' returns a value: ...` |
+| `__attribute__((interrupt))` in C++ | `__attribute__((interrupt)) is not supported in C++ yet: ...` (write the handler in C) |
 
 An array or structure local aligned beyond 16 bytes is supported: its
 storage is carved from the stack at function entry and rounded up.
@@ -1333,7 +1336,9 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 | an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | `__builtin_frame_address`, `__builtin_return_address` | `the MIPS32 backend cannot lower __builtin_frame_address or __builtin_return_address (o32 code keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function; see [Bare metal](embedded.md#mips32)) |
+| `__attribute__((interrupt, use_shadow_register_set))` | `__attribute__((use_shadow_register_set)) is not supported: EmbCC does not switch register sets: ...` |
+| `__attribute__((interrupt, use_debug_exception_return))` | `__attribute__((use_debug_exception_return)) is not supported: the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
+| an interrupt handler with parameters, or with a result | `interrupt handler 'h' takes parameters: ...`, `interrupt handler 'h' returns a value: ...` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
 
