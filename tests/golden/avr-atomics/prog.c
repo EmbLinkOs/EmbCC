@@ -67,6 +67,16 @@ static void eight(void)
     __atomic_load(&d64, &r, __ATOMIC_ACQUIRE); put64(r);
     v = 42;
     __atomic_exchange(&d64, &v, &r, __ATOMIC_SEQ_CST); put64(r); put64(d64);
+    /* a failed compare leaves nothing on the stack: eight hundred in one
+     * frame would be 6400 bytes, three times the ATmega328P's RAM */
+    int fails = 0;
+    for (int k = 0; k < 400; k++) {
+        e = 1;
+        fails += !__atomic_compare_exchange_n(&d64, &e, 2, 0, __ATOMIC_SEQ_CST,
+                                              __ATOMIC_SEQ_CST);
+        fails += !__sync_bool_compare_and_swap(&d64, 1, 2);
+    }
+    putn(fails); put64(d64);
     sd64 = -2;
     put64((unsigned long long)__atomic_fetch_add(&sd64, -3, __ATOMIC_SEQ_CST));
     put64((unsigned long long)sd64);
