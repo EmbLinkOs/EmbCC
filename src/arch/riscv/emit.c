@@ -667,6 +667,93 @@ void rv_store(struct code *c, int rs2, int rs1, int off, int size, int xlen)
     rv_w(c, rv_enc_s(OP_STORE, f3, rs1, rs2, off));
 }
 
+/* ---- the F and D extensions ------------------------------------------- */
+
+enum { OP_LOAD_FP = 0x07, OP_STORE_FP = 0x27, OP_FP = 0x53 };
+enum { RM_RNE = 0, RM_RTZ = 1, RM_DYN = 7 };
+
+static void fp_r(struct code *c, int f5, int dbl, int rm, int rd, int rs1,
+                 int rs2)
+{
+    rv_w(c, rv_enc_r(OP_FP, rd, rm, rs1, rs2, (f5 << 2) | (dbl ? 1 : 0)));
+}
+
+void rv_fload(struct code *c, int frd, int rs1, int off, int dbl)
+{
+    rv_w(c, rv_enc_i(OP_LOAD_FP, frd, dbl ? 3 : 2, rs1, off));
+}
+
+void rv_fstore(struct code *c, int frs2, int rs1, int off, int dbl)
+{
+    rv_w(c, rv_enc_s(OP_STORE_FP, dbl ? 3 : 2, rs1, frs2, off));
+}
+
+void rv_farith(struct code *c, int op, int frd, int frs1, int frs2, int dbl)
+{
+    if (op != RV_FADD && op != RV_FSUB && op != RV_FMUL && op != RV_FDIV)
+        internal_error("riscv: %d is not fadd, fsub, fmul or fdiv", op);
+    fp_r(c, op, dbl, RM_DYN, frd, frs1, frs2);
+}
+
+void rv_fsqrt(struct code *c, int frd, int frs1, int dbl)
+{
+    fp_r(c, 0x0b, dbl, RM_DYN, frd, frs1, 0);
+}
+
+void rv_fsgnj(struct code *c, int kind, int frd, int frs1, int frs2, int dbl)
+{
+    if (kind < RV_FSGNJ || kind > RV_FSGNJX)
+        internal_error("riscv: sign injection %d is not one of the three",
+                       kind);
+    fp_r(c, 0x04, dbl, kind, frd, frs1, frs2);
+}
+
+void rv_fmv(struct code *c, int frd, int frs, int dbl)
+{
+    rv_fsgnj(c, RV_FSGNJ, frd, frs, frs, dbl);
+}
+
+void rv_fcmp(struct code *c, int kind, int rd, int frs1, int frs2, int dbl)
+{
+    if (kind < RV_FLE || kind > RV_FEQ)
+        internal_error("riscv: comparison %d is not fle, flt or feq", kind);
+    fp_r(c, 0x14, dbl, kind, rd, frs1, frs2);
+}
+
+void rv_fcvt_to_int(struct code *c, int rd, int frs1, int ity, int dbl)
+{
+    if (ity < RV_CVT_W || ity > RV_CVT_LU)
+        internal_error("riscv: conversion type %d", ity);
+    fp_r(c, 0x18, dbl, RM_RTZ, rd, frs1, ity);
+}
+
+void rv_fcvt_from_int(struct code *c, int frd, int rs1, int ity, int dbl)
+{
+    if (ity < RV_CVT_W || ity > RV_CVT_LU)
+        internal_error("riscv: conversion type %d", ity);
+    /* a 32-bit integer is exact in a double */
+    fp_r(c, 0x1a, dbl, dbl && ity <= RV_CVT_WU ? RM_RNE : RM_DYN, frd, rs1,
+         ity);
+}
+
+void rv_fcvt_fp(struct code *c, int frd, int frs1, int to_dbl)
+{
+    if (to_dbl)
+        fp_r(c, 0x08, 1, RM_RNE, frd, frs1, 0);      /* fcvt.d.s: exact */
+    else
+        fp_r(c, 0x08, 0, RM_DYN, frd, frs1, 1);      /* fcvt.s.d */
+}
+
+void rv_fmv_to_x(struct code *c, int rd, int frs1, int dbl)
+{
+    fp_r(c, 0x1c, dbl, 0, rd, frs1, 0);
+}
+
+void rv_fmv_from_x(struct code *c, int frd, int rs1, int dbl)
+{
+    fp_r(c, 0x1e, dbl, 0, frd, rs1, 0);
+}
+
 /* ---- control flow ----------------------------------------------------- */
 
 int rv_b_placeholder(struct code *c, int cond, int rs1, int rs2)

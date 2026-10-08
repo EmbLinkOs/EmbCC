@@ -167,6 +167,19 @@ struct rv_fn {
      * which is what makes every helper below fall back to the slot
      * path the backend had before it existed. */
     int *loc;
+    /* Per vreg: the FLOATING-POINT register the FP pass gave it (f0-f31),
+     * or -1; NULL without an FPU or the allocator. A value has one home:
+     * loc, floc or a slot. `fw` says how wide a value with an FP home is
+     * -- 4 a float, 8 a double -- which is what every crossing between
+     * the register files reads. */
+    int *floc;
+    char *fw;
+    int fused[32], nfsave;        /* the callee-saved FP registers it took */
+    long fsave_at;                /* ...and where the prologue saves them */
+    /* RV32 with D: eight bytes of frame a double crosses between an f
+     * register and an integer pair through (fsd, two lw), there being no
+     * 64-bit fmv at RV32 -- clang does the same. -1 when unneeded. */
+    long fx;
     int used_callee[RA_MAXPOOL];  /* the callee-saved ones it took */
     int pair_used[9], npair;      /* callee-saved pairs rv_pair_alloc took */
     int nsave;
@@ -182,6 +195,8 @@ struct rv_fn {
     char *nshr;          /* per vreg: a narrow high-word shift (narrow_shr) */
     char *sx;            /* per vreg, RV64 only: already the sign-extension
                           * of its low 32 bits (sext_map) */
+    char *f4;            /* per vreg, RV64: a float whose slot fdone writes
+                          * four bytes of (slot_bytes) */
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
     long frame;          /* total bytes sp moves down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
@@ -357,8 +372,47 @@ static int rv_ldvar_plain(int size, int sign, int w)
  * operation on a float or a double is a libgcc call. Answering this
  * wrong is invisible until a float program is optimized, which is
  * exactly where the parked ARMv7-M attempt went wrong. */
+/* Does this instruction run on the FPU? With F, the single-precision
+ * arithmetic, comparisons, square root and the conversions between a float
+ * and an integer the machine has a register for (RV32's 64-bit integers
+ * are still __floatdisf and __fixsfdi); with D the same for double and the
+ * conversions between the two. Everything else that touches floating
+ * point stays a call -- double under F alone, long double always.
+ *
+ * rv_op_calls_helper asks this first, so the allocator's idea of which
+ * instructions are calls is exactly the lowering's. */
+static int rv_fp_width_hw(int w)
+{
+    int flen = target_riscv_flen();
+    return (w == 4 && flen >= 32) || (w == 8 && flen == 64);
+}
+
+static int rv_fp_hw(const struct ir_ins *i)
+{
+    if (!target_riscv_flen())
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_NEG:
+    case IR_CMP: case IR_SQRT:
+        return i->flt && rv_fp_width_hw(i->w);
+    case IR_I2F:
+        return rv_fp_width_hw(i->w) &&
+               (i->size <= 4 || (i->size == 8 && target_xlen() == 64));
+    case IR_F2I:
+        return rv_fp_width_hw(i->size) &&
+               (i->w <= 4 || (i->w == 8 && target_xlen() == 64));
+    case IR_F2F:
+        return target_riscv_flen() == 64 &&
+               ((i->size == 4 && i->w == 8) || (i->size == 8 && i->w == 4));
+    default:
+        return 0;
+    }
+}
+
 int rv_op_calls_helper(const struct ir_ins *i)
 {
+    if (rv_fp_hw(i))
+        return 0;
     if (i->flt)
         return i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
                i->op == IR_DIV || i->op == IR_CMP;
@@ -384,6 +438,41 @@ int rv_op_calls_helper(const struct ir_ins *i)
  * it uses). */
 static void rv_abi_hints(const struct ir_func *fn, int *hint);
 
+/* ---- the floating-point register class (F and D) --------------------------
+ *
+ * ft0-ft2 are the scratch every FP lowering computes in, as t0-t2 are for
+ * the integer one, and fa0-fa7 are left out for the reason Thumb leaves
+ * s0-s15 out of its class: they carry the hard-float arguments and
+ * results, so with no value living in one, a call's argument setup and a
+ * prologue's parameter placement are moves INTO registers nothing else
+ * reads, and need no ordering. What is left: ft3-ft11, caller-saved and
+ * first, then fs0-fs11.
+ *
+ * The fs registers survive a call only under a hardware-float ABI, and
+ * only as wide as that ABI says: under ilp32/lp64 no FP register is
+ * preserved (a soft-float caller knows nothing of them), and under
+ * ilp32f/lp64f with D only the low 32 bits are -- so there, with values of
+ * both widths in one class, none is treated as callee-saved. clang
+ * spills across the call in both cases too. */
+#define RV_NFPOOL 21
+static const int RV_FPOOL[RV_NFPOOL] = {
+    3, 4, 5, 6, 7, 28, 29, 30, 31,              /* ft3-ft7, ft8-ft11 */
+    8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27  /* fs0, fs1, fs2-fs11 */
+};
+static const int *rv_fp_pool_for(const struct ir_func *fn, int *n)
+{
+    (void)fn;
+    *n = target_riscv_flen() ? RV_NFPOOL : 0;
+    return RV_FPOOL;
+}
+static int rv_fp_callee_saved(int r)
+{
+    int abi = target_riscv_abi_flen();
+    if (!abi || abi < target_riscv_flen())
+        return 0;
+    return r == 8 || r == 9 || (r >= 18 && r <= 27);
+}
+
 static const struct ra_target RISCV_RA = {
     rv_pool_for,
     rv_callee_saved,
@@ -403,9 +492,12 @@ static const struct ra_target RISCV_RA = {
     rv_op_calls_helper,
     0,            /* RISC-V is three-operand: d = a op b needs no copy */
     rv_abi_hints,
-    NULL, NULL,   /* no FP class -- soft float lives in the core registers */
-    1,            /* ...and so is allocated with them: every float lowering
-                   * here goes through rd/wr/set_args (float_in_gpr) */
+    /* The FP class, with F or D; empty without, when a float is bits in
+     * a core register and allocated with them (float_in_gpr). Every
+     * float lowering reaches a value wherever it lives -- an f register,
+     * an x register or a slot -- through rd/wr and fsrc/fdone. */
+    rv_fp_pool_for, rv_fp_callee_saved,
+    1,
     NULL, NULL,
     1,            /* atomic_in_reg: every atomic reads its address and
                    * values through rdr and writes through wreg/wr */
@@ -579,7 +671,151 @@ struct argplace {
     long stk;            /* offset in the outgoing area */
     int byref;
     long copy;           /* where the caller's private copy lives */
+    /* The hardware floating-point convention (place_one): `hf` set means
+     * none of the above applies -- nreg and nstk are 0 -- and the value
+     * travels as `nfld` fields, each an f register (fa0 + reg) or, for the
+     * integer half of a float-and-integer struct, an x register (a0 +
+     * reg), read from `off` bytes into the object, `size` bytes wide. */
+    int hf, nfld;
+    struct { int fp, reg, size; long off; } fld[2];
 };
+
+/* ---- the hardware floating-point calling convention ----------------------
+ *
+ * ilp32f/lp64f and ilp32d/lp64d (the psABI's "Hardware Floating-point
+ * Calling Convention"), with ABI_FLEN 32 or 64 -- target_riscv_abi_flen:
+ *
+ *   * a float no wider than ABI_FLEN goes in the next of fa0-fa7, and once
+ *     those are gone by the integer rules, as under ilp32/lp64;
+ *   * a struct that FLATTENS -- its fields and its arrays' elements,
+ *     nested structs opened up -- to one or two floats no wider than
+ *     ABI_FLEN, or to one such float and one integer no wider than XLEN in
+ *     either order, goes field by field: floats in fa registers, the
+ *     integer in an a register, when enough of each are left; otherwise
+ *     whole, by the integer rules. A complex counts as two floats. A union
+ *     never flattens, nor does anything with a pointer in it, and a
+ *     zero-width bit-field is ignored in a lone float's struct but ends the
+ *     two-field ones -- clang's reading, which is what was checked;
+ *   * a VARIADIC argument always takes the integer rules;
+ *   * a result comes back the same way, in fa0/fa1 and a0 -- so a struct
+ *     of two doubles at RV32, sixteen bytes, is returned in fa0 and fa1
+ *     and not through a hidden pointer, and is passed in them rather than
+ *     by reference.
+ *
+ * Read off clang (clang/lib/CodeGen/Targets/RISCV.cpp) and checked across
+ * the call against it: tests/golden/riscv-hardfloat-abi.sh. */
+struct rv_flat { int n; int fp[2]; int size[2]; long off[2]; };
+
+static int flat_add(struct rv_flat *o, int fp, int size, long off)
+{
+    if (o->n == 2)
+        return 0;
+    o->fp[o->n] = fp;
+    o->size[o->n] = size;
+    o->off[o->n] = off;
+    o->n++;
+    return 1;
+}
+
+static int flat_walk(const struct type *t, long off, struct rv_flat *o)
+{
+    int flen = target_riscv_abi_flen() / 8, xlen = target_xlen() / 8;
+    t = ty_unqual((struct type *)t);
+    if (t->kind == TY_STRUCT && t->is_complex) {
+        int esz = t->celem ? ty_size(t->celem) : 0;
+        if (!t->celem || !ty_is_float(t->celem) || esz > flen || o->n)
+            return 0;
+        flat_add(o, 1, esz, off);
+        return flat_add(o, 1, esz, off + esz);
+    }
+    if (ty_is_float(t)) {
+        if (ty_size(t) > flen)
+            return 0;
+        return flat_add(o, 1, ty_size(t), off);
+    }
+    if (ty_is_integer(t)) {
+        if (ty_size(t) > xlen || (o->n && !o->fp[0]))
+            return 0;                       /* two integers: the integer CC */
+        return flat_add(o, 0, ty_size(t), off);
+    }
+    if (t->kind == TY_ARRAY) {
+        int esz;
+        if (!t->pointee || t->count < 0)
+            return 0;
+        esz = ty_size(t->pointee);
+        for (int k = 0; k < t->count; k++)
+            if (!flat_walk(t->pointee, off + (long)k * esz, o))
+                return 0;
+        return 1;
+    }
+    if (t->kind == TY_STRUCT) {
+        int zw = 0;
+        if (!t->complete)
+            return 0;
+        if (!t->nmembers)
+            return 1;                       /* empty: nothing */
+        if (t->is_union)
+            return 0;
+        for (int k = 0; k < t->nmembers; k++) {
+            const struct member *m = &t->members[k];
+            if (m->is_bitfield) {
+                /* an integer of the field's own type, at the byte its
+                 * first bit is in -- or of XLEN bits, for a field of a
+                 * wider type that fits in them */
+                int bsz = ty_size(m->ty);
+                if (m->bit_width == 0) {
+                    zw++;
+                    continue;
+                }
+                if (bsz > xlen) {
+                    if (m->bit_width > 8 * xlen)
+                        return 0;
+                    bsz = xlen;
+                }
+                if (m->bf_bytes || (o->n && !o->fp[0]) ||
+                    !flat_add(o, 0, bsz, off + m->off + m->bit_off / 8))
+                    return 0;
+            } else if (!flat_walk(m->ty, off + m->off, o)) {
+                return 0;
+            }
+            if (o->n == 2 && zw)
+                return 0;
+        }
+        return 1;
+    }
+    return 0;                               /* a pointer, among others */
+}
+
+/* Does an aggregate of type `t` flatten for the hardware-float CC? Only
+ * the shape: whether the registers are there is the caller's. */
+static int rv_flatten(const struct type *t, struct rv_flat *o)
+{
+    o->n = 0;
+    if (!target_riscv_abi_flen() || !t || t->kind != TY_STRUCT)
+        return 0;
+    if (!flat_walk(t, 0, o) || !o->n)
+        return 0;
+    return o->n == 2 || o->fp[0];          /* not a lone integer */
+}
+
+/* How a result comes back under the hardware-float CC, or 0 for the
+ * integer rules: a scalar float in fa0, a flattening struct in fa0/fa1
+ * and a0. */
+static int rv_ret_hf(int is_struct, int is_float, int size,
+                     const struct type *ty, struct rv_flat *o)
+{
+    int abi = target_riscv_abi_flen();
+    o->n = 0;
+    if (!abi)
+        return 0;
+    if (!is_struct) {
+        if (!is_float || size * 8 > abi)
+            return 0;
+        flat_add(o, 1, size, 0);
+        return 1;
+    }
+    return rv_flatten(ty, o);
+}
 
 static void place_arg(int wb, int size, int align, int is_struct,
                       int variadic, int *narg, long *stk, struct argplace *p)
@@ -620,6 +856,74 @@ static void place_arg(int wb, int size, int align, int is_struct,
         *narg = RV_NARGREG;              /* nothing back-fills past a split */
         *stk += (long)p->nstk * wb;
     }
+}
+
+/* Does a runtime helper take or return a floating-point value of `w`
+ * bytes in an f register? Under the hardware-float CC lib/rt's helpers are
+ * ordinary functions of it -- __extendsfdf2's float arrives in fa0 and
+ * __truncdfsf2's comes back there -- exactly as clang calls them. */
+static int rv_hfw(int w)
+{
+    int abi = target_riscv_abi_flen();
+    return abi && w * 8 <= abi;
+}
+
+/* Where each argument goes, in order: the integer rules (place_arg),
+ * and before them the hardware-float ones. The walk counts the a and the
+ * fa registers apart -- a float in fa0 leaves a0 for the next integer. */
+struct rv_walk { int narg, nfarg; long stk; };
+
+static void walk_init(struct rv_walk *w, int sret)
+{
+    w->narg = sret ? 1 : 0;
+    w->nfarg = 0;
+    w->stk = 0;
+}
+
+static int arg_align(int wb, const struct ir_arg *a);
+
+static void place_one(int wb, struct rv_walk *w, const struct ir_arg *a,
+                      int variadic, struct argplace *p)
+{
+    int abi = target_riscv_abi_flen();
+    struct rv_flat fl;
+    p->hf = 0;
+    p->nfld = 0;
+    if (abi && !variadic) {
+        int ok = 0;
+        if (!a->is_struct && a->is_float && a->size * 8 <= abi) {
+            fl.n = 1;
+            fl.fp[0] = 1;
+            fl.size[0] = a->size;
+            fl.off[0] = 0;
+            ok = 1;
+        } else if (a->is_struct && rv_flatten(a->ty, &fl)) {
+            ok = 1;
+        }
+        if (ok) {
+            int nf = 0, ng;
+            for (int k = 0; k < fl.n; k++)
+                nf += fl.fp[k];
+            ng = fl.n - nf;
+            if (w->nfarg + nf <= RV_NARGREG && w->narg + ng <= RV_NARGREG) {
+                p->hf = 1;
+                p->nfld = fl.n;
+                p->reg = p->nreg = p->nstk = 0;
+                p->stk = 0;
+                p->byref = 0;
+                p->copy = 0;
+                for (int k = 0; k < fl.n; k++) {
+                    p->fld[k].fp = fl.fp[k];
+                    p->fld[k].reg = fl.fp[k] ? w->nfarg++ : w->narg++;
+                    p->fld[k].size = fl.size[k];
+                    p->fld[k].off = fl.off[k];
+                }
+                return;
+            }
+        }
+    }
+    place_arg(wb, a->size, arg_align(wb, a), a->is_struct, variadic,
+              &w->narg, &w->stk, p);
 }
 
 /* place_arg numbers the argument registers 0..7; a0 is x10. On ARM the
@@ -665,13 +969,23 @@ static long sret_bytes(int wb, int retsize)
  * is two registers and comes back in a0:a1. (`long long` at RV32 is two,
  * not more, and stays out.) A struct-returning call says retsize; any
  * other says the C type's size in ret_tybytes. */
+/* A struct the hardware-float CC returns in registers needs no pointer,
+ * however large (two doubles at RV32 are sixteen bytes). */
 static long fn_sret_bytes(int wb, const struct ir_func *fn)
 {
+    struct rv_flat fl;
+    if (rv_ret_hf(fn->ret_abi.is_struct, fn->ret_abi.is_float,
+                  fn->ret_abi.size, fn->ret_abi.ty, &fl))
+        return 0;
     return sret_bytes(wb, fn->ret_abi.size);
 }
 
 static long call_sret_bytes(int wb, const struct ir_ins *i)
 {
+    struct rv_flat fl;
+    if (rv_ret_hf(i->retsize != 0, i->flt && !i->retsize,
+                  i->retsize ? i->retsize : i->ret_tybytes, i->rety, &fl))
+        return 0;
     return sret_bytes(wb, i->retsize ? i->retsize : i->ret_tybytes);
 }
 
@@ -690,21 +1004,23 @@ static long call_sret_bytes(int wb, const struct ir_ins *i)
 static void rv_abi_hints(const struct ir_func *fn, int *hint)
 {
     int wb = target_ptr_size();
-    int narg = fn_sret_bytes(wb, fn) ? 1 : 0;
-    long stk = 0;
+    struct rv_walk wk;
     struct argplace pl;
+    struct rv_flat fl;
+    int ret_f = rv_ret_hf(fn->ret_abi.is_struct, fn->ret_abi.is_float,
+                          fn->ret_abi.size, fn->ret_abi.ty, &fl);
+    walk_init(&wk, fn_sret_bytes(wb, fn) != 0);
     for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
-        place_arg(wb, a->size, arg_align(wb, a), a->is_struct, 0,
-                  &narg, &stk, &pl);
-        if (pl.nreg == 1 && !pl.nstk && !pl.byref && !a->is_struct &&
-            a->size <= wb)
+        place_one(wb, &wk, a, 0, &pl);
+        if (!pl.hf && pl.nreg == 1 && !pl.nstk && !pl.byref &&
+            !a->is_struct && a->size <= wb)
             hint[p] = argreg(pl.reg);
     }
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
         if (i->op == IR_RET && i->a >= 0 && i->a < fn->nvregs &&
-            !fn->ret_abi.is_struct && fn->ret_abi.size <= wb)
+            !fn->ret_abi.is_struct && fn->ret_abi.size <= wb && !ret_f)
             hint[i->a] = RV_A0;
         /* A soft-float helper the lowering calls (fp_args2/fp_result):
          * its operands go in a0 and a1 and its result comes back in a0.
@@ -722,17 +1038,17 @@ static void rv_abi_hints(const struct ir_func *fn, int *hint)
         }
         if (i->op != IR_CALL)
             continue;
-        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w <= wb)
+        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w <= wb &&
+            !rv_ret_hf(0, i->flt, i->ret_tybytes, NULL, &fl))
             hint[i->dst] = RV_A0;
-        narg = call_sret_bytes(wb, i) ? 1 : 0;
-        stk = 0;
+        walk_init(&wk, call_sret_bytes(wb, i) != 0);
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(wb, a->size, arg_align(wb, a), a->is_struct,
-                      i->call_varargs && k >= i->call_nfixed,
-                      &narg, &stk, &pl);
-            if (pl.nreg == 1 && !pl.nstk && !pl.byref && !a->is_struct &&
-                a->size <= wb && a->vreg >= 0 && a->vreg < fn->nvregs)
+            place_one(wb, &wk, a, i->call_varargs && k >= i->call_nfixed,
+                      &pl);
+            if (!pl.hf && pl.nreg == 1 && !pl.nstk && !pl.byref &&
+                !a->is_struct && a->size <= wb && a->vreg >= 0 &&
+                a->vreg < fn->nvregs)
                 hint[a->vreg] = argreg(pl.reg);
         }
     }
@@ -749,19 +1065,15 @@ static long outgoing_area(const struct rv_fn *F)
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
         struct argplace pl;
-        int narg = 0;
-        long stk = 0;
+        struct rv_walk wk;
         if (i->op != IR_CALL)
             continue;
-        if (call_sret_bytes(F->w, i))
-            narg = 1;
+        walk_init(&wk, call_sret_bytes(F->w, i) != 0);
         for (int k = 0; k < i->nargs; k++)
-            place_arg(F->w, i->argv[k].size, arg_align(F->w, &i->argv[k]),
-                      i->argv[k].is_struct,
-                      i->call_varargs && k >= i->call_nfixed,
-                      &narg, &stk, &pl);
-        if (stk > most)
-            most = stk;
+            place_one(F->w, &wk, &i->argv[k],
+                      i->call_varargs && k >= i->call_nfixed, &pl);
+        if (wk.stk > most)
+            most = wk.stk;
     }
     return (most + STACK_ALIGN - 1) & ~(long)(STACK_ALIGN - 1);
 }
@@ -774,11 +1086,16 @@ static long byref_area(const struct rv_fn *F)
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
         long need = 0;
+        struct rv_walk wk;
+        struct argplace pl;
         if (i->op != IR_CALL)
             continue;
+        walk_init(&wk, call_sret_bytes(F->w, i) != 0);
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            if (a->size > 2 * F->w)
+            place_one(F->w, &wk, a, i->call_varargs && k >= i->call_nfixed,
+                      &pl);
+            if (pl.byref)
                 need = ((need + 15) & ~15L) + a->size;
         }
         if (need > most)
@@ -788,6 +1105,8 @@ static long byref_area(const struct rv_fn *F)
 }
 
 static int in_reg(const struct rv_fn *F, int v);
+static int in_freg(const struct rv_fn *F, int v);
+static int rv_needs_fx(const struct ir_func *fn);
 
 static void layout(struct rv_fn *F)
 {
@@ -824,13 +1143,13 @@ static void layout(struct rv_fn *F)
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
         for (int v = 0; v < nv; v++)
-            loc2[v] = in_reg(F, v) || (F->xlen == 32 && F->wide[v]) ||
-                      is16(F, v) ? 0 : -1;
+            loc2[v] = in_reg(F, v) || in_freg(F, v) ||
+                      (F->xlen == 32 && F->wide[v]) || is16(F, v) ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
         {
-            struct ra_slots so = { loc2, NULL, g_rv_regalloc, has_cgoto };
+            struct ra_slots so = { loc2, F->floc, g_rv_regalloc, has_cgoto };
             int *tslot = ra_coalesce_temps(fn, fn->nvars, &so, &npool);
             off = (off + F->w - 1) & ~(long)(F->w - 1);
             for (int v = fn->nvars; v < nv; v++) {
@@ -850,7 +1169,8 @@ static void layout(struct rv_fn *F)
             off += 16;
         }
         for (int v = fn->nvars; v < nv; v++) {
-            if (F->xlen != 32 || !F->wide[v] || in_reg(F, v) || is16(F, v))
+            if (F->xlen != 32 || !F->wide[v] || in_reg(F, v) ||
+                in_freg(F, v) || is16(F, v))
                 continue;
             off = (off + 7) & ~7L;
             F->slot[v] = off;
@@ -865,8 +1185,8 @@ static void layout(struct rv_fn *F)
                 int size = fn->locals[v].size ? fn->locals[v].size : F->w;
                 int align = fn->locals[v].user_align ? fn->locals[v].user_align
                           : fn->locals[v].align ? fn->locals[v].align : F->w;
-                if (in_reg(F, v) || !lref[v] ||
-                    ra_slot_dead(fn, F->loc, NULL, v, F->want_debug))
+                if (in_reg(F, v) || in_freg(F, v) || !lref[v] ||
+                    ra_slot_dead(fn, F->loc, F->floc, v, F->want_debug))
                     continue;
                 if ((size > 2 * F->w) != pass)
                     continue;
@@ -876,6 +1196,19 @@ static void layout(struct rv_fn *F)
                 off += size;
             }
         free(lref);
+    }
+    /* RV32 with D: a double's crossing between the register files */
+    F->fx = -1;
+    if (rv_needs_fx(fn)) {
+        off = (off + 7) & ~7L;
+        F->fx = off;
+        off += 8;
+    }
+    /* the callee-saved f registers the FP pass took, eight bytes each */
+    if (F->nfsave) {
+        off = (off + 7) & ~7L;
+        F->fsave_at = off;
+        off += (long)F->nfsave * 8;
     }
     /* RV32's long double helpers' by-reference operands (gen_ld32) */
     F->tfa = -1;
@@ -1007,18 +1340,107 @@ static long sslot(const struct rv_fn *F, int v)
     return F->slot[v];
 }
 
+/* ---- the floating-point registers, and crossing between the files -------
+ *
+ * A value has ONE home -- an x register (loc), an f register (floc) or a
+ * slot -- and an operation that wants it in the other file moves it
+ * across: fmv.x.w / fmv.w.x for a float, fmv.x.d / fmv.d.x for a double at
+ * RV64, and at RV32 a double between an f register and an x PAIR through
+ * the eight bytes at F->fx (fsd and two lw, or two sw and fld), there
+ * being no 64-bit move at RV32. So every integer path that reads a float's
+ * bits -- fabs, signbit, a bit cast -- is correct whatever the allocator
+ * chose, and the FP paths are correct for a value it left in an x
+ * register or a slot. */
+static int in_freg(const struct rv_fn *F, int v)
+{
+    return F->floc && v >= 0 && v < F->fn->nvregs && F->floc[v] >= 0;
+}
+
+/* A slot's bytes into or out of an f register, as ld_sp/st_sp. */
+static void fld_sp(struct rv_fn *F, int freg, long off, int dbl)
+{
+    if (rv_fits(off, 12)) {
+        rv_fload(F->t, freg, F->fb, (int)off, dbl);
+        return;
+    }
+    rv_fload(F->t, freg, sp_addr(F, off), 0, dbl);
+}
+
+static void fst_sp(struct rv_fn *F, int freg, long off, int dbl)
+{
+    if (rv_fits(off, 12)) {
+        rv_fstore(F->t, freg, F->fb, (int)off, dbl);
+        return;
+    }
+    rv_fstore(F->t, freg, sp_addr(F, off), 0, dbl);
+}
+
+static void need_fx(const struct rv_fn *F)
+{
+    if (F->fx < 0)
+        internal_error("riscv: %s: a double crosses between the register "
+                       "files at RV32 with no transfer slot", F->fn->name);
+}
+
+/* x register (or pair) <- f register, and the other way */
+static void x_from_f(struct rv_fn *F, int reg, int freg, int w)
+{
+    if (w == 8 && F->xlen == 32)
+        internal_error("riscv: %s: a double read into one x register at "
+                       "RV32", F->fn->name);
+    rv_fmv_to_x(F->t, reg, freg, w == 8);
+}
+static void f_from_x(struct rv_fn *F, int freg, int reg, int w)
+{
+    if (w == 8 && F->xlen == 32)
+        internal_error("riscv: %s: a double written from one x register at "
+                       "RV32", F->fn->name);
+    rv_fmv_from_x(F->t, freg, reg, w == 8);
+}
+static void pair_from_f(struct rv_fn *F, int lo, int hi, int freg)
+{
+    need_fx(F);
+    fst_sp(F, freg, F->fx, 1);
+    ld_sp(F, lo, F->fx, 4, 1);
+    ld_sp(F, hi, F->fx + 4, 4, 1);
+}
+static void f_from_pair(struct rv_fn *F, int freg, int lo, int hi)
+{
+    need_fx(F);
+    st_sp(F, lo, F->fx, 4);
+    st_sp(F, hi, F->fx + 4, 4);
+    fld_sp(F, freg, F->fx, 1);
+}
+
+/* At RV64 a slot holds eight bytes, sign-extended from a 32-bit value's
+ * (wr's sd) -- except a float's, which fdone writes with fsw: four bytes,
+ * so it is read back with lw, which is the same sign extension. */
+static int slot_bytes(const struct rv_fn *F, int v)
+{
+    return F->xlen == 64 && F->f4 && v >= 0 && v < F->fn->nvregs &&
+           F->f4[v] ? 4 : F->w;
+}
+
 static void rd(struct rv_fn *F, int v, int reg)
 {
+    if (in_freg(F, v)) {
+        x_from_f(F, reg, F->floc[v], F->fw[v]);
+        return;
+    }
     if (in_reg(F, v)) {
         if (F->loc[v] != reg)
             rv_mv(F->t, reg, F->loc[v]);
         return;
     }
-    ld_sp(F, reg, sslot(F, v), F->w, 1);
+    ld_sp(F, reg, sslot(F, v), slot_bytes(F, v), 1);
 }
 
 static void wr(struct rv_fn *F, int v, int reg)
 {
+    if (in_freg(F, v)) {
+        f_from_x(F, F->floc[v], reg, F->fw[v]);
+        return;
+    }
     if (in_reg(F, v)) {
         if (F->loc[v] != reg)
             rv_mv(F->t, F->loc[v], reg);
@@ -1027,6 +1449,66 @@ static void wr(struct rv_fn *F, int v, int reg)
     if (F->slot[v] < 0)
         return;
     st_sp(F, reg, sslot(F, v), F->w);
+}
+
+/* An FP operand into exactly `freg`, wherever it lives -- `dbl` its width. */
+static void fload_v(struct rv_fn *F, int v, int freg, int dbl)
+{
+    if (in_freg(F, v)) {
+        if (F->floc[v] != freg)
+            rv_fmv(F->t, freg, F->floc[v], dbl);
+        return;
+    }
+    if (in_reg(F, v)) {
+        if (dbl && F->xlen == 32)
+            f_from_pair(F, freg, F->loc[v], F->loc[v] + 1);
+        else
+            f_from_x(F, freg, F->loc[v], dbl ? 8 : 4);
+        return;
+    }
+    fld_sp(F, freg, sslot(F, v), dbl);
+}
+
+/* ...where an FP operand IS: its f register, or `scratch` loaded */
+static int fsrc(struct rv_fn *F, int v, int scratch, int dbl)
+{
+    if (in_freg(F, v))
+        return F->floc[v];
+    fload_v(F, v, scratch, dbl);
+    return scratch;
+}
+
+/* ...where to compute an FP result, and committing it from there */
+static int fdst(const struct rv_fn *F, int v, int scratch)
+{
+    return in_freg(F, v) ? F->floc[v] : scratch;
+}
+
+static void fdone(struct rv_fn *F, int v, int freg, int dbl)
+{
+    if (v < 0)
+        return;
+    if (in_freg(F, v)) {
+        if (F->floc[v] != freg)
+            rv_fmv(F->t, F->floc[v], freg, dbl);
+        return;
+    }
+    if (in_reg(F, v)) {
+        if (dbl && F->xlen == 32)
+            pair_from_f(F, F->loc[v], F->loc[v] + 1, freg);
+        else
+            x_from_f(F, F->loc[v], freg, dbl ? 8 : 4);
+        return;
+    }
+    if (F->slot[v] < 0)
+        return;
+    if (!dbl && F->xlen == 64 && slot_bytes(F, v) == 8) {
+        /* a slot the integer paths read eight bytes of: sign-extended */
+        rv_fmv_to_x(F->t, SCR2, freg, 0);
+        st_sp(F, SCR2, sslot(F, v), 8);
+        return;
+    }
+    fst_sp(F, freg, sslot(F, v), dbl);
 }
 
 /* The three that skip the move.
@@ -1043,7 +1525,7 @@ static int rdr(struct rv_fn *F, int v, int scratch)
 {
     if (in_reg(F, v))
         return F->loc[v];
-    ld_sp(F, scratch, sslot(F, v), F->w, 1);
+    rd(F, v, scratch);
     return scratch;
 }
 
@@ -1054,6 +1536,10 @@ static int wreg(struct rv_fn *F, int v, int scratch)
 
 static void wrote(struct rv_fn *F, int v, int reg)
 {
+    if (in_freg(F, v)) {
+        f_from_x(F, F->floc[v], reg, F->fw[v]);
+        return;
+    }
     if (in_reg(F, v)) {
         if (F->loc[v] != reg)
             rv_mv(F->t, F->loc[v], reg);
@@ -1096,6 +1582,10 @@ static void need16(const struct rv_fn *F, int v);
 
 static void rd64(struct rv_fn *F, int v, int lo, int hi)
 {
+    if (in_freg(F, v)) {
+        pair_from_f(F, lo, hi, F->floc[v]);
+        return;
+    }
     if (in_reg(F, v)) {
         mv2(F, lo, F->loc[v], hi, F->loc[v] + 1);
         return;
@@ -1106,6 +1596,10 @@ static void rd64(struct rv_fn *F, int v, int lo, int hi)
 
 static void wr64(struct rv_fn *F, int v, int lo, int hi)
 {
+    if (in_freg(F, v)) {
+        f_from_pair(F, F->floc[v], lo, hi);
+        return;
+    }
     if (in_reg(F, v)) {
         mv2(F, F->loc[v], lo, F->loc[v] + 1, hi);
         return;
@@ -1574,9 +2068,20 @@ static void set_args_half(struct rv_fn *F, const int *dstreg,
             rv_mv(F->t, od[k], os[k]);
     }
     /* The loads come after: they only WRITE argument registers, so by
-     * now nothing still needs the old contents of one. */
+     * now nothing still needs the old contents of one. A value in an f
+     * register crosses (fmv.x.w; a double's word at RV32 through fx). */
     for (int k = 0; k < n; k++)
-        if (!in_reg(F, vreg[k])) {
+        if (in_freg(F, vreg[k])) {
+            if (half && F->fw[vreg[k]] == 8 && F->xlen == 32) {
+                if (!half[k]) {
+                    need_fx(F);
+                    fst_sp(F, F->floc[vreg[k]], F->fx, 1);
+                }
+                ld_sp(F, dstreg[k], F->fx + 4L * half[k], 4, 1);
+            } else {
+                rd(F, vreg[k], dstreg[k]);
+            }
+        } else if (!in_reg(F, vreg[k])) {
             if (half)
                 ld_sp(F, dstreg[k], sslot(F, vreg[k]) + 4L * half[k], 4, 1);
             else
@@ -2282,8 +2787,7 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
     const struct ir_func *fn = F->fn;
     const struct ir_ins *i = &fn->ins[n], *r;
     struct argplace pl;
-    int narg = 0;
-    long stk = 0;
+    struct rv_walk wk;
 
     if (i->op != IR_CALL || i->indirect || i->call_varargs || i->retsize ||
         i->flt || getenv("EMBCC_NO_TAILCALL"))
@@ -2320,9 +2824,9 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
     }
     if (fn->has_alloca || fn->is_varargs || fn->neh)
         return 0;
+    walk_init(&wk, 0);
     for (int k = 0; k < i->nargs; k++) {
-        place_arg(F->w, i->argv[k].size, arg_align(F->w, &i->argv[k]),
-                  i->argv[k].is_struct, 0, &narg, &stk, &pl);
+        place_one(F->w, &wk, &i->argv[k], 0, &pl);
         if (pl.nstk || pl.byref)
             return 0;
     }
@@ -2337,6 +2841,9 @@ static void rv_restore(struct rv_fn *F)
     struct code *t = F->t;
     for (int k = 0; k < F->nsave; k++)
         ld_sp(F, F->used_callee[k], F->save_at + (long)k * F->w, F->w, 1);
+    for (int k = 0; k < F->nfsave; k++)
+        fld_sp(F, F->fused[k], F->fsave_at + (long)k * 8,
+               target_riscv_abi_flen() == 64);
     if (!F->leaf)
         ld_sp(F, RV_RA, F->ra_slot, F->w, 1);
     if (F->frame) {
@@ -2355,17 +2862,18 @@ static void gen_call(struct rv_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
     struct argplace pl[MAX_PARAMS];
-    int narg = 0;
-    long stk = 0, copy_at = F->byref_at;
+    struct rv_walk wk;
+    long copy_at = F->byref_at;
     long sret = call_sret_bytes(F->w, i);
+    struct rv_flat rfl;
+    int ret_hf = rv_ret_hf(i->retsize != 0, i->flt && !i->retsize,
+                           i->retsize ? i->retsize : i->ret_tybytes, i->rety,
+                           &rfl);
 
-    if (sret)
-        narg = 1;                          /* a0 holds the result's address */
+    walk_init(&wk, sret != 0);             /* a0 holds the result's address */
     for (int k = 0; k < i->nargs; k++)
-        place_arg(F->w, i->argv[k].size, arg_align(F->w, &i->argv[k]),
-                  i->argv[k].is_struct,
-                  i->call_varargs && k >= i->call_nfixed,
-                  &narg, &stk, &pl[k]);
+        place_one(F->w, &wk, &i->argv[k],
+                  i->call_varargs && k >= i->call_nfixed, &pl[k]);
 
     /* The by-reference COPIES first: the psABI makes the CALLER own them,
      * because the callee may write to its parameter -- so passing the
@@ -2438,6 +2946,27 @@ static void gen_call(struct rv_fn *F, int n)
             st_out(F, SCR, pl[k].stk, F->w);
         }
     }
+    /* The hardware-float arguments' f registers, BEFORE the integer
+     * ones: fa0-fa7 hold no value (they are outside the FP class), so
+     * writing them disturbs nothing, while a float whose home is an x
+     * register is read here -- after the parallel move below it might be
+     * gone. The integer half of a float-and-integer struct waits for the
+     * struct arguments. */
+    for (int k = 0; k < i->nargs; k++) {
+        struct ir_arg *a = &i->argv[k];
+        if (!pl[k].hf)
+            continue;
+        if (!a->is_struct) {
+            fload_v(F, a->vreg, RV_FA0 + pl[k].fld[0].reg,
+                    pl[k].fld[0].size == 8);
+            continue;
+        }
+        rd(F, a->vreg, ADDR);
+        for (int q = 0; q < pl[k].nfld; q++)
+            if (pl[k].fld[q].fp)
+                rv_fload(t, RV_FA0 + pl[k].fld[q].reg, ADDR,
+                         (int)pl[k].fld[q].off, pl[k].fld[q].size == 8);
+    }
     /* The SCALAR register arguments, all at once. This is the third of
      * the three sites regalloc.h names: the value for a0 may be sitting
      * in the register a2 is about to be given, and placing them in
@@ -2487,6 +3016,18 @@ static void gen_call(struct rv_fn *F, int n)
     }
     for (int k = 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
+        if (pl[k].hf) {
+            /* a float-and-integer struct's integer, from the struct */
+            for (int q = 0; q < pl[k].nfld; q++) {
+                if (pl[k].fld[q].fp)
+                    continue;
+                rd(F, a->vreg, ADDR);
+                rv_load(t, argreg(pl[k].fld[q].reg), ADDR,
+                        (int)pl[k].fld[q].off, pl[k].fld[q].size, 1,
+                        F->xlen);
+            }
+            continue;
+        }
         if (!pl[k].nreg)
             continue;
         if (pl[k].byref) {
@@ -2517,6 +3058,8 @@ static void gen_call(struct rv_fn *F, int n)
              * overwrite nothing the move still had to read. */
             if (pl[k].nreg == 2 && F->xlen != 32)
                 ld128(F, a->vreg, argreg(pl[k].reg), argreg(pl[k].reg + 1));
+            else if (pl[k].nreg != 2 && in_freg(F, a->vreg))
+                rd64(F, a->vreg, argreg(pl[k].reg), SCR);  /* the low word */
             else if (pl[k].nreg != 2)
                 ld_sp(F, argreg(pl[k].reg), sslot(F, a->vreg), F->w,
                       1);                        /* the low word */
@@ -2574,6 +3117,26 @@ static void gen_call(struct rv_fn *F, int n)
 
     if (i->dst < 0)
         return;
+    if (ret_hf && !i->retsize) {
+        /* a float result, in fa0 */
+        fdone(F, i->dst, RV_FA0, rfl.size[0] == 8);
+        return;
+    }
+    if (ret_hf) {
+        /* a flattened struct, in fa0/fa1 and a0, stored field by field
+         * into the scratch whose address dst receives */
+        long at = F->scratch_at + i->scratch;
+        int nf = 0, ng = 0;
+        for (int q = 0; q < rfl.n; q++) {
+            if (rfl.fp[q])
+                fst_sp(F, RV_FA0 + nf++, at + rfl.off[q], rfl.size[q] == 8);
+            else
+                st_sp(F, RV_A0 + ng++, at + rfl.off[q], rfl.size[q]);
+        }
+        addr_sp(F, ACC, at);
+        wr(F, i->dst, ACC);
+        return;
+    }
     if (i->retsize) {
         /* dst receives the scratch's ADDRESS, the contract irgen shares
          * with the other backends. A composite that fits in registers
@@ -2893,7 +3456,9 @@ static void gen_ld32(struct rv_fn *F, struct ir_ins *i)
             /* to long double: the source into a1 (a pair into a1:a2, as
              * one parallel move -- it may be in a0:a1), then the result's
              * address into a0, which nothing is still reading */
-            if (sw == 8 && F->wide[i->a]) {
+            if (i->op == IR_F2F && rv_hfw(sw)) {
+                fload_v(F, i->a, RV_FA0, sw == 8);   /* a float argument */
+            } else if (sw == 8 && F->wide[i->a]) {
                 int dr[2] = { RV_A1, RV_A2 }, vr[2], hf[2] = { 0, 1 };
                 vr[0] = vr[1] = i->a;
                 set_args_half(F, dr, vr, hf, 2);
@@ -2923,7 +3488,9 @@ static void gen_ld32(struct rv_fn *F, struct ir_ins *i)
                                : (i->sign ? "__fixtfsi" : "__fixunstfsi");
             call_helper(F, name);
             if (i->dst >= 0) {
-                if (dw == 8 && F->wide[i->dst])
+                if (i->op == IR_F2F && rv_hfw(dw))
+                    fdone(F, i->dst, RV_FA0, dw == 8);   /* a float result */
+                else if (dw == 8 && F->wide[i->dst])
                     wr64(F, i->dst, RV_A0, RV_A1);
                 else
                     wr(F, i->dst, RV_A0);
@@ -3070,6 +3637,8 @@ static void gen_ins128(struct rv_fn *F, struct ir_ins *i)
                  : dw == 8 ? "__trunctfdf2" : "__trunctfsf2";
         if (sw == 16) {
             ld128(F, i->a, RV_A0, RV_A1);
+        } else if (i->op != IR_I2F && rv_hfw(sw)) {
+            fload_v(F, i->a, RV_FA0, sw == 8);       /* a float argument */
         } else if (i->op == IR_I2F && sw <= 4) {
             /* an int or unsigned argument: sign-extended either way, the
              * psABI's rule for every 32-bit value (rd32) */
@@ -3081,6 +3650,8 @@ static void gen_ins128(struct rv_fn *F, struct ir_ins *i)
         call_helper(F, name);
         if (dw == 16)
             st128(F, i->dst, RV_A0, RV_A1);
+        else if (i->dst >= 0 && i->op != IR_F2I && rv_hfw(dw))
+            fdone(F, i->dst, RV_FA0, dw == 8);       /* a float result */
         else if (i->dst >= 0)
             wr(F, i->dst, RV_A0);
         return;
@@ -3209,6 +3780,271 @@ static void gen_ins128(struct rv_fn *F, struct ir_ins *i)
 
 /* ---- one instruction ------------------------------------------------------ */
 
+/* ---- floating point on the FPU (F, D) -------------------------------------
+ *
+ * Each operation reads its operands where they live (fsrc), computes into
+ * the result's f register or ft0 (fdst), and commits (fdone): with the
+ * operands and the result in f registers, `fadd.s fs1, fs0, ft3` and
+ * nothing else. ft0-ft2 are the scratch, never allocated.
+ *
+ * NO fused multiply-add: `a * b + c` is two roundings in C unless
+ * contraction is allowed, and EmbCC does not contract (clang does by
+ * default within an expression, -ffp-contract=on). */
+#define FT0 RV_FT0
+#define FT1 RV_FT1
+#define FT2 RV_FT2
+
+static void gen_fp(struct rv_fn *F, int n)
+{
+    struct ir_ins *i = &F->fn->ins[n];
+    struct code *t = F->t;
+    int dbl, a, b, d;
+
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+        dbl = i->w == 8;
+        if (i->imm_b)
+            rv_refuse(F, i, "a folded floating-point immediate");
+        a = fsrc(F, i->a, FT0, dbl);
+        b = fsrc(F, i->b, FT1, dbl);
+        d = fdst(F, i->dst, FT0);
+        rv_farith(t, i->op == IR_ADD ? RV_FADD : i->op == IR_SUB ? RV_FSUB
+                   : i->op == IR_MUL ? RV_FMUL : RV_FDIV, d, a, b, dbl);
+        fdone(F, i->dst, d, dbl);
+        return;
+    case IR_NEG:                 /* the sign flipped: right for -0.0, NaN */
+        dbl = i->w == 8;
+        a = fsrc(F, i->a, FT0, dbl);
+        d = fdst(F, i->dst, FT0);
+        rv_fsgnj(t, RV_FSGNJN, d, a, a, dbl);
+        fdone(F, i->dst, d, dbl);
+        return;
+    case IR_SQRT:
+        dbl = i->w == 8;
+        a = fsrc(F, i->a, FT0, dbl);
+        d = fdst(F, i->dst, FT0);
+        rv_fsqrt(t, d, a, dbl);
+        fdone(F, i->dst, d, dbl);
+        return;
+    case IR_CMP: {
+        /* feq, flt, fle -- each FALSE for an unordered pair, which is C's
+         * answer for every relation but `!=`: that one is feq inverted,
+         * true for a NaN. > and >= are < and <= with the operands
+         * swapped, as on the integer side. */
+        int kind, sw = 0, inv = 0, r;
+        struct ir_ins *nx = n + 1 < F->fn->nins ? &F->fn->ins[n + 1]
+                                                : (struct ir_ins *)0;
+        dbl = i->w == 8;
+        if (i->imm_b)
+            rv_refuse(F, i, "a folded floating-point immediate");
+        switch (i->pred) {
+        case B_EQ: kind = RV_FEQ; break;
+        case B_NE: kind = RV_FEQ; inv = 1; break;
+        case B_LT: kind = RV_FLT; break;
+        case B_LE: kind = RV_FLE; break;
+        case B_GT: kind = RV_FLT; sw = 1; break;
+        default:   kind = RV_FLE; sw = 1; break;      /* B_GE */
+        }
+        a = fsrc(F, i->a, FT0, dbl);
+        b = fsrc(F, i->b, FT1, dbl);
+        /* Read only by the branch after it: the 0 or 1 is the branch's
+         * operand, and `!=` is the inverted branch rather than an xori. */
+        if (nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
+            nx->a == i->dst && F->usecnt && i->dst >= 0 &&
+            F->usecnt[i->dst] == 1) {
+            int cond = nx->op == IR_BRNZ ? RV_BNE : RV_BEQ;
+            rv_fcmp(t, kind, SCR, sw ? b : a, sw ? a : b, dbl);
+            if (inv)
+                cond = invert_branch(cond);
+            branch_if(F, cond, SCR, RV_ZERO, nx->label);
+            F->skip_next = 1;
+            return;
+        }
+        r = wreg(F, i->dst, ACC);
+        rv_fcmp(t, kind, r, sw ? b : a, sw ? a : b, dbl);
+        if (inv)
+            rv_alu_imm(t, RV_XOR, r, r, 1, 0);
+        wrote(F, i->dst, r);
+        return;
+    }
+    case IR_I2F: {
+        /* fcvt.s.w reads the low 32 bits of its source and nothing else,
+         * so an int needs no extension at RV64; a narrower one is
+         * extended to 32 first, and a 32-bit source of a 64-bit
+         * conversion (wide_map's narrow shape) zero-extended to 64. */
+        int ity, r;
+        dbl = i->w == 8;
+        if (i->size == 8) {
+            ity = i->sign ? RV_CVT_L : RV_CVT_LU;
+            r = rdr(F, i->a, ACC);
+            if (i->a >= 0 && !F->wide[i->a] && !is16(F, i->a)) {
+                ext_reg(F, ACC, r, 4, 0);
+                r = ACC;
+                ity = RV_CVT_L;
+            }
+        } else {
+            ity = i->sign ? RV_CVT_W : RV_CVT_WU;
+            r = rdr(F, i->a, ACC);
+            if (i->size < 4) {
+                ext_reg(F, ACC, r, i->size, i->sign);
+                r = ACC;
+                ity = RV_CVT_W;
+            }
+        }
+        d = fdst(F, i->dst, FT0);
+        rv_fcvt_from_int(t, d, r, ity, dbl);
+        fdone(F, i->dst, d, dbl);
+        return;
+    }
+    case IR_F2I: {
+        /* Toward zero, as C converts. At RV64 the word forms leave the
+         * 32-bit result sign-extended -- fcvt.wu.s too -- which is the
+         * invariant a 32-bit value keeps there (sext_map counts on it). */
+        int ity = i->w == 8 ? (i->sign ? RV_CVT_L : RV_CVT_LU)
+                            : (i->sign || i->w < 4 ? RV_CVT_W : RV_CVT_WU);
+        dbl = i->size == 8;
+        a = fsrc(F, i->a, FT0, dbl);
+        d = wreg(F, i->dst, ACC);
+        rv_fcvt_to_int(t, d, a, ity, dbl);
+        wrote(F, i->dst, d);
+        return;
+    }
+    case IR_F2F:
+        a = fsrc(F, i->a, FT0, i->size == 8);
+        d = fdst(F, i->dst, FT0);
+        rv_fcvt_fp(t, d, a, i->w == 8);
+        fdone(F, i->dst, d, i->w == 8);
+        return;
+    default:
+        rv_refuse(F, i, "this floating-point operation");
+    }
+}
+
+/* The copies, loads, stores and constants of a value with an f-register
+ * home, straight between the homes: flw into it, fsw out of it, fmv
+ * between two. Returns 0 for anything else, which the integer paths
+ * lower -- correctly, since rd and wr cross between the files. */
+static int gen_fp_move(struct rv_fn *F, int n)
+{
+    struct ir_ins *i = &F->fn->ins[n];
+    struct code *t = F->t;
+    int d = i->dst, a = i->a;
+
+    if (!F->floc)
+        return 0;
+    switch (i->op) {
+    case IR_MOV: case IR_BITCAST: {
+        int w;
+        if (!in_freg(F, d) && !in_freg(F, a))
+            return 0;
+        w = in_freg(F, d) ? F->fw[d] : F->fw[a];
+        if (in_freg(F, d) && in_freg(F, a) && F->fw[d] != F->fw[a])
+            internal_error("riscv: %s: a copy between a float and a double "
+                           "in f registers", F->fn->name);
+        /* a narrowing copy of a double reads its low word: the integer
+         * paths do that, crossing */
+        if (i->w && i->w != w)
+            return 0;
+        if (in_freg(F, d))
+            fload_v(F, a, F->floc[d], w == 8);
+        else
+            fdone(F, d, F->floc[a], w == 8);
+        return 1;
+    }
+    case IR_LDVAR:
+        if (in_freg(F, a)) {
+            if (i->size != F->fw[a])
+                internal_error("riscv: %s: a %d-byte read of a %d-byte "
+                               "floating-point local", F->fn->name, i->size,
+                               F->fw[a]);
+            fdone(F, d, F->floc[a], i->size == 8);
+            return 1;
+        }
+        if (in_freg(F, d) && i->size == F->fw[d]) {
+            fload_v(F, a, F->floc[d], i->size == 8);
+            return 1;
+        }
+        return 0;
+    case IR_STVAR:
+        if (in_freg(F, d)) {
+            if (i->size != F->fw[d])
+                internal_error("riscv: %s: a %d-byte write of a %d-byte "
+                               "floating-point local", F->fn->name, i->size,
+                               F->fw[d]);
+            fload_v(F, a, F->floc[d], i->size == 8);
+            return 1;
+        }
+        if (in_freg(F, a) && i->size == F->fw[a]) {
+            fdone(F, d, F->floc[a], i->size == 8);
+            return 1;
+        }
+        return 0;
+    case IR_LOAD:
+        if (in_freg(F, d) && i->size == F->fw[d]) {
+            int ra_ = rdr(F, a, ADDR);
+            rv_fload(t, F->floc[d], ra_, i->memoff, i->size == 8);
+            return 1;
+        }
+        return 0;
+    case IR_STORE:
+        if (in_freg(F, i->b) && i->size == F->fw[i->b]) {
+            int ra_ = rdr(F, a, ADDR);
+            rv_fstore(t, F->floc[i->b], ra_, i->memoff, i->size == 8);
+            return 1;
+        }
+        return 0;
+    case IR_CONST: {
+        int fd;
+        long long bits = i->imm;
+        if (!in_freg(F, d))
+            return 0;
+        fd = F->floc[d];
+        if (F->fw[d] == 4)
+            bits = (long long)(int)(bits & 0xffffffffLL);
+        if (bits == 0) {
+            /* +0.0: from x0 -- at RV32 a double through fcvt.d.w */
+            if (F->fw[d] == 8 && F->xlen == 32)
+                rv_fcvt_from_int(t, fd, RV_ZERO, RV_CVT_W, 1);
+            else
+                rv_fmv_from_x(t, fd, RV_ZERO, F->fw[d] == 8);
+            return 1;
+        }
+        if (F->fw[d] == 8 && F->xlen == 32) {
+            rv_li(t, A_LO, (long long)(bits & 0xffffffffLL), 32);
+            rv_li(t, A_HI, (long long)((bits >> 32) & 0xffffffffLL), 32);
+            f_from_pair(F, fd, A_LO, A_HI);
+            return 1;
+        }
+        rv_li(t, ACC, bits, F->xlen);
+        rv_fmv_from_x(t, fd, ACC, F->fw[d] == 8);
+        return 1;
+    }
+    case IR_SELECT: {
+        /* dst = a ? b : c, each arm loaded straight into dst's register */
+        int take_c, done, cond, dbl;
+        if (!in_freg(F, d))
+            return 0;
+        dbl = F->fw[d] == 8;
+        if (F->xlen == 32 && i->size == 8) {
+            rd64(F, a, A_LO, A_HI);
+            rv_alu(t, RV_OR, SCR, A_LO, A_HI, 0);
+            cond = SCR;
+        } else {
+            cond = i->size == 4 ? rd32(F, a, SCR) : rdr(F, a, SCR);
+        }
+        take_c = rv_b_placeholder(t, RV_BEQ, cond, RV_ZERO);
+        fload_v(F, i->b, F->floc[d], dbl);
+        done = rv_j_placeholder(t, RV_ZERO);
+        rv_patch_b(t, take_c, t->len);
+        fload_v(F, i->c, F->floc[d], dbl);
+        rv_patch_j(t, done, t->len);
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
 static void gen_ins(struct rv_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -3237,6 +4073,13 @@ static void gen_ins(struct rv_fn *F, int n)
         }
     }
     int wordop;
+
+    if (rv_fp_hw(i)) {
+        gen_fp(F, n);
+        return;
+    }
+    if (gen_fp_move(F, n))
+        return;
 
     if (F->w16 && rv_ins128(F, i)) {
         gen_ins128(F, i);
@@ -3346,6 +4189,9 @@ static void gen_ins(struct rv_fn *F, int n)
         int k = (int)i->imm - 32, d = wreg(F, i->dst, A_LO), hi;
         if (in_reg(F, i->a)) {
             hi = F->loc[i->a] + 1;             /* the pair's high register */
+        } else if (in_freg(F, i->a)) {         /* a double: its high word */
+            rd64(F, i->a, A_LO, A_HI);
+            hi = A_HI;
         } else {
             ld_sp(F, A_HI, sslot(F, i->a) + 4, 4, 1);
             hi = A_HI;
@@ -3812,7 +4658,26 @@ static void gen_ins(struct rv_fn *F, int n)
 
     case IR_RET:
         if (i->a >= 0) {
-            if (fn->ret_abi.is_struct) {
+            struct rv_flat rfl;
+            if (rv_ret_hf(fn->ret_abi.is_struct, fn->ret_abi.is_float,
+                          fn->ret_abi.size, fn->ret_abi.ty, &rfl)) {
+                /* the hardware-float CC: a float in fa0, a flattened
+                 * struct's fields in fa0/fa1 and a0 */
+                if (!fn->ret_abi.is_struct) {
+                    fload_v(F, i->a, RV_FA0, rfl.size[0] == 8);
+                } else {
+                    int nf = 0, ng = 0;
+                    rd(F, i->a, ADDR);
+                    for (int q = 0; q < rfl.n; q++) {
+                        if (rfl.fp[q])
+                            rv_fload(t, RV_FA0 + nf++, ADDR, (int)rfl.off[q],
+                                     rfl.size[q] == 8);
+                        else
+                            rv_load(t, RV_A0 + ng++, ADDR, (int)rfl.off[q],
+                                    rfl.size[q], 1, F->xlen);
+                    }
+                }
+            } else if (fn->ret_abi.is_struct) {
                 long size = fn->ret_abi.size;
                 if (sret_bytes(F->w, (int)size)) {
                     /* Through the caller's buffer, whose address the
@@ -3957,8 +4822,10 @@ static void gen_ins(struct rv_fn *F, int n)
          * eight-byte map either, and `(float)(long)x` of an __int128 --
          * the narrowing is no instruction once copies are propagated --
          * converted its low 32 bits, zero-extended: -2 came out 2^32. */
-        if (i->op == IR_I2F && src_w == 8 && i->a >= 0 && !F->wide[i->a] &&
-            !is16(F, i->a)) {
+        if (i->op != IR_I2F && rv_hfw(src_w)) {
+            fload_v(F, i->a, RV_FA0, src_w == 8);  /* a float argument */
+        } else if (i->op == IR_I2F && src_w == 8 && i->a >= 0 &&
+                   !F->wide[i->a] && !is16(F, i->a)) {
             /* irgen USED TO convert an `unsigned int` by asking for a
              * SIGNED 64-bit conversion of it, on the grounds that "a
              * 32-bit operation zero-extends its result into the
@@ -3988,7 +4855,9 @@ static void gen_ins(struct rv_fn *F, int n)
         }
         call_helper(F, name);
         if (i->dst >= 0) {
-            if (F->xlen == 32 && F->wide[i->dst])
+            if (i->op != IR_F2I && rv_hfw(dst_w))
+                fdone(F, i->dst, RV_FA0, dst_w == 8);   /* a float result */
+            else if (F->xlen == 32 && F->wide[i->dst])
                 wr64(F, i->dst, RV_A0, RV_A1);
             else
                 wr(F, i->dst, RV_A0);
@@ -4561,13 +5430,13 @@ static const struct ra_target RV_PAIR_RA = {
 
 static void rv_pair_hints(const struct ir_func *fn, int *hint)
 {
-    int wb = 4, narg = fn_sret_bytes(wb, fn) ? 1 : 0;
-    long stk = 0;
+    int wb = 4;
+    struct rv_walk wk;
     struct argplace pl;
+    walk_init(&wk, fn_sret_bytes(wb, fn) != 0);
     for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
-        place_arg(wb, a->size, arg_align(wb, a), a->is_struct, 0,
-                  &narg, &stk, &pl);
+        place_one(wb, &wk, a, 0, &pl);
         if (a->size == 8 && pl.nreg == 2 && !a->is_struct)
             hint[p] = argreg(pl.reg);
     }
@@ -4589,13 +5458,11 @@ static void rv_pair_hints(const struct ir_func *fn, int *hint)
             continue;
         if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs && i->w == 8)
             hint[i->dst] = RV_A0;
-        narg = call_sret_bytes(wb, i) ? 1 : 0;
-        stk = 0;
+        walk_init(&wk, call_sret_bytes(wb, i) != 0);
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(wb, a->size, arg_align(wb, a), a->is_struct,
-                      i->call_varargs && k >= i->call_nfixed,
-                      &narg, &stk, &pl);
+            place_one(wb, &wk, a, i->call_varargs && k >= i->call_nfixed,
+                      &pl);
             if (a->size == 8 && pl.nreg == 2 && !a->is_struct &&
                 a->vreg >= 0 && a->vreg < fn->nvregs)
                 hint[a->vreg] = argreg(pl.reg);
@@ -4653,14 +5520,13 @@ static int *rv_pair_alloc(struct ir_func *fn, struct rv_fn *F,
             x[i->op == IR_LDVAR ? i->a : i->dst] = 1;
         }
         if (i->op == IR_CALL) {
-            int narg = call_sret_bytes(wb, i) ? 1 : 0;
-            long stk = 0;
+            struct rv_walk wk;
             struct argplace pl;
+            walk_init(&wk, call_sret_bytes(wb, i) != 0);
             for (int k = 0; k < i->nargs; k++) {
                 const struct ir_arg *a = &i->argv[k];
-                place_arg(wb, a->size, arg_align(wb, a), a->is_struct,
-                          i->call_varargs && k >= i->call_nfixed,
-                          &narg, &stk, &pl);
+                place_one(wb, &wk, a, i->call_varargs && k >= i->call_nfixed,
+                          &pl);
                 if (a->size > wb && pl.nreg != 2 && a->vreg >= 0 &&
                     a->vreg < nv)
                     x[a->vreg] = 1;
@@ -4689,6 +5555,161 @@ static int *rv_pair_alloc(struct ir_func *fn, struct rv_fn *F,
 /* The callee-saved renaming (defined with gen_func_best), and whether this
  * attempt at a function makes it. */
 static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed);
+
+/* ---- the FP class's members -----------------------------------------------
+ *
+ * Which vregs are worth an f register, and how wide each is: the operands
+ * and results of what rv_fp_hw() runs, floats and doubles passed to and
+ * returned from calls and returned by this function, and its
+ * floating-point locals -- but not a local any instruction reads or
+ * writes narrower than itself (its bytes are taken a word at a time), nor
+ * one under -g or -O0, which keep every source variable in its slot. None
+ * of it is needed for correctness: a value outside the class is reached
+ * through rd/wr and fsrc/fdone wherever it lives. A vreg asked for at two
+ * widths is left out. */
+static char *rv_float_map(const struct rv_fn *F, char **fw_out, int debug)
+{
+    const struct ir_func *fn = F->fn;
+    int nv = fn->nvregs, any = 0;
+    char *m, *fw;
+    *fw_out = NULL;
+    if (!target_riscv_flen() || nv <= 0)
+        return NULL;
+    m = xcalloc((size_t)nv, 1);
+    fw = xcalloc((size_t)nv, 1);
+#define FMARK(v, w) do { int v_ = (v), w_ = (w); \
+        if (v_ >= 0 && v_ < nv && rv_fp_width_hw(w_) && !is16(F, v_)) { \
+            if (fw[v_] && fw[v_] != w_) m[v_] = 2; \
+            else if (m[v_] != 2) { m[v_] = 1; fw[v_] = (char)w_; } \
+        } } while (0)
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (rv_fp_hw(i)) {
+            switch (i->op) {
+            case IR_I2F: FMARK(i->dst, i->w); break;
+            case IR_F2I: FMARK(i->a, i->size); break;
+            case IR_F2F: FMARK(i->dst, i->w); FMARK(i->a, i->size); break;
+            case IR_CMP:
+                FMARK(i->a, i->w);
+                if (!i->imm_b) FMARK(i->b, i->w);
+                break;
+            default:
+                FMARK(i->dst, i->w); FMARK(i->a, i->w);
+                if (!i->imm_b && i->op != IR_NEG && i->op != IR_SQRT)
+                    FMARK(i->b, i->w);
+                break;
+            }
+        } else if (i->op == IR_CALL) {
+            if (i->flt && !i->retsize)
+                FMARK(i->dst, i->w);
+            for (int k = 0; k < i->nargs; k++)
+                if (!i->argv[k].is_struct && i->argv[k].is_float)
+                    FMARK(i->argv[k].vreg, i->argv[k].size);
+        } else if (i->op == IR_RET && i->a >= 0 && fn->ret_abi.is_float &&
+                   !fn->ret_abi.is_struct) {
+            FMARK(i->a, fn->ret_abi.size);
+        }
+    }
+#undef FMARK
+    for (int v = 0; v < fn->nvars && v < nv; v++)
+        if (debug || !fn->locals[v].is_scalar_float ||
+            fn->locals[v].size != fw[v])
+            m[v] = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int v = i->op == IR_LDVAR ? i->a : i->op == IR_STVAR ? i->dst : -1;
+        if (v >= 0 && v < nv && m[v] && i->size != fw[v])
+            m[v] = 0;
+    }
+    for (int v = 0; v < nv; v++) {
+        if (m[v] != 1)
+            m[v] = 0;
+        /* at RV32 a float is never a pair, nor a double anything else */
+        if (m[v] && F->xlen == 32 && F->wide[v] != (fw[v] == 8))
+            m[v] = 0;
+        if (!m[v])
+            fw[v] = 0;
+        any |= m[v];
+    }
+    if (!any) {
+        free(m);
+        free(fw);
+        return NULL;
+    }
+    *fw_out = fw;
+    return m;
+}
+
+/* RV64: the vregs fdone may write a float's four bytes of into a slot --
+ * so rd reads them back with lw (slot_bytes). A slot that is not here
+ * gets the eight-byte, sign-extended form instead. */
+static char *rv_f4_map(const struct rv_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int nv = fn->nvregs;
+    char *m;
+    if (F->xlen != 64 || !target_riscv_flen() || nv <= 0)
+        return NULL;
+    m = xcalloc((size_t)nv, 1);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int d = i->dst;
+        if (d < 0 || d >= nv)
+            continue;
+        if ((rv_fp_hw(i) && i->w == 4 && i->op != IR_CMP && i->op != IR_F2I) ||
+            (i->op == IR_CALL && i->flt && !i->retsize && i->w == 4))
+            m[d] = 1;
+    }
+    for (int v = 0; v < fn->nvars && v < nv; v++)
+        if (fn->locals[v].is_scalar_float && fn->locals[v].size == 4)
+            m[v] = 1;
+    return m;
+}
+
+/* RV32 with D: does anything here put a double in an f register? Then
+ * the frame has F->fx, the eight bytes it crosses to an x pair through. */
+static int rv_needs_fx(const struct ir_func *fn)
+{
+    if (target_xlen() != 32 || target_riscv_flen() != 64)
+        return 0;
+    if ((fn->ret_abi.is_float && fn->ret_abi.size == 8) ||
+        fn->ret_abi.is_struct)
+        return 1;
+    for (int p = 0; p < fn->nparams; p++)
+        if (fn->param_abi[p].is_struct ||
+            (fn->param_abi[p].is_float && fn->param_abi[p].size == 8))
+            return 1;
+    for (int v = 0; v < fn->nvars; v++)
+        if (fn->locals[v].is_scalar_float && fn->locals[v].size == 8)
+            return 1;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if ((i->flt && i->w == 8) || (rv_fp_hw(i) && (i->w == 8 || i->size == 8)))
+            return 1;
+        if (i->op == IR_CALL)
+            for (int k = 0; k < i->nargs; k++)
+                if (i->argv[k].is_struct ||
+                    (i->argv[k].is_float && i->argv[k].size == 8))
+                    return 1;
+    }
+    return 0;
+}
+
+/* The FP pass's view: RISCV_RA's, less the ABI hints -- which name x
+ * registers. */
+static const struct ra_target RISCV_FRA = {
+    rv_pool_for, rv_callee_saved, rv_ldvar_plain,
+    1, 1, 1,
+    rv_op_calls_helper,
+    0,
+    NULL,
+    rv_fp_pool_for, rv_fp_callee_saved,
+    1,
+    NULL, NULL,
+    1,
+    0,
+    1
+};
 static int g_rv_lowregs = 1;
 
 static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
@@ -4716,6 +5737,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             if (F.nshr[v]) F.wide[v] = 0;
     }
     F.loc = NULL; F.nsave = 0;
+    F.floc = NULL; F.fw = NULL; F.nfsave = 0;
+    F.f4 = rv_f4_map(&F);
+    F.fx = -1;
     F.fb = RV_SP;
     if (g_rv_regalloc) {
         /* `wide` means two different things and they must not be
@@ -4745,7 +5769,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
          * DW_AT_location naming that slot is true (see regalloc.h). */
         char *pin = want_debug || g_rv_o0 ? ra_debug_pin_vars(fn)
                                           : (char *)0;
-        int *pair = xlen == 32 && g_rv_pairs ? rv_pair_alloc(fn, &F, pin)
+        /* With an FPU, the FP class's members are kept from both integer
+         * passes (the pairs and the single registers) -- one value, one
+         * home -- and handed to the FP pass after them. */
+        char *fwm = NULL;
+        char *flt = rv_float_map(&F, &fwm, want_debug || g_rv_o0);
+        char *excl = pin;
+        if (flt) {
+            excl = xcalloc((size_t)fn->nvregs, 1);
+            for (int v = 0; v < fn->nvregs; v++)
+                excl[v] = (char)(flt[v] || (pin && pin[v]));
+        }
+        int *pair = xlen == 32 && g_rv_pairs ? rv_pair_alloc(fn, &F, excl)
                                              : NULL;
         {
             /* At RV32 the eight-byte map (pairs, rv_pair_alloc) and the
@@ -4759,7 +5794,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                         ineligible[v] = F.wide[v] | F.w16[v];
                 }
             }
-            F.loc = ra_allocate(fn, &RISCV_RA, ineligible, pin,
+            F.loc = ra_allocate(fn, &RISCV_RA, ineligible, excl,
                                 F.used_callee, &F.nsave);
             if (ineligible != F.wide && ineligible != F.w16)
                 free(ineligible);
@@ -4780,6 +5815,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
         if (g_rv_lowregs && F.loc && rv_compress_enabled())
             rv_lowregs(fn, F.loc, pair_regs);
+        if (flt) {
+            F.floc = ra_allocate_fp(fn, &RISCV_FRA, F.w16, flt, F.fused,
+                                    &F.nfsave);
+            F.fw = fwm;
+            fwm = NULL;
+            free(excl);
+            free(flt);
+        }
+        free(fwm);
         free(pin);
         /* Read counts for comparison/branch fusion, with the allocator
          * on: without it every value goes through a slot and the
@@ -4802,8 +5846,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             const char *lim = getenv("EMBCC_RV_RA_MAX");
             if (lim) {
                 int n = atoi(lim);
-                for (int v = n; v < fn->nvregs; v++)
+                for (int v = n; v < fn->nvregs; v++) {
                     F.loc[v] = -1;
+                    if (F.floc)
+                        F.floc[v] = -1;
+                }
             }
         }
     }
@@ -4924,6 +5971,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         st_sp(&F, RV_RA, F.ra_slot, F.w);
     for (i = 0; i < F.nsave; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w);
+    /* the callee-saved f registers, as wide as the ABI preserves them */
+    for (i = 0; i < F.nfsave; i++)
+        fst_sp(&F, F.fused[i], F.fsave_at + (long)i * 8,
+               target_riscv_abi_flen() == 64);
     if (fn->has_alloca) {
         rv_mv(t, RV_FP, RV_SP);        /* the frame base, from here on */
         F.fb = RV_FP;
@@ -4941,20 +5992,72 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * reference reads. */
     {
         struct argplace pl;
-        int narg = 0;
-        long stk = 0;
+        struct rv_walk wk;
         long base = F.frame;       /* the caller's outgoing area */
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
         int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
         int npstk = 0;
-        if (F.sret_slot >= 0) {
+        /* fa registers into x-register homes, after the parallel move */
+        int pfx_v[MAX_PARAMS], pfx_r[MAX_PARAMS], pfx_d[MAX_PARAMS], npfx = 0;
+        walk_init(&wk, F.sret_slot >= 0);
+        if (F.sret_slot >= 0)
             st_sp(&F, argreg(0), F.sret_slot, F.w);
-            narg = 1;
-        }
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
-            place_arg(F.w, a->size, arg_align(F.w, a), a->is_struct, 0,
-                      &narg, &stk, &pl);
+            place_one(F.w, &wk, a, 0, &pl);
+            if (pl.hf) {
+                /* The hardware-float CC: a float in fa0-fa7 straight to
+                 * its home -- an f register (never an fa one) or a slot --
+                 * except an x register, which may be an argument register
+                 * the parallel move below has still to read. A flattened
+                 * struct's fields into its slot. */
+                if (!a->is_struct) {
+                    int fr = RV_FA0 + pl.fld[0].reg, dbl = pl.fld[0].size == 8;
+                    if (in_reg(&F, i)) {
+                        pfx_v[npfx] = i; pfx_r[npfx] = fr; pfx_d[npfx] = dbl;
+                        npfx++;
+                    } else {
+                        fdone(&F, i, fr, dbl);
+                    }
+                    continue;
+                }
+                for (int q = 0; q < pl.nfld; q++) {
+                    long off = sslot(&F, i) + pl.fld[q].off;
+                    if (pl.fld[q].fp) {
+                        fst_sp(&F, RV_FA0 + pl.fld[q].reg, off,
+                               pl.fld[q].size == 8);
+                    } else {
+                        struct argplace ip = pl;
+                        ip.reg = pl.fld[q].reg;
+                        st_sp(&F, param_reg(&F, &ip, 0), off, pl.fld[q].size);
+                    }
+                }
+                continue;
+            }
+            if (!a->is_struct && in_freg(&F, i)) {
+                /* By the integer rules into an f-register home -- a
+                 * float under ilp32/lp64, a double under ilp32f, or one
+                 * past fa7: read now, while the argument registers still
+                 * hold what arrived, and written where nothing else
+                 * reads. At RV32 a double's words go through fx. */
+                int fr = F.floc[i], dbl = F.fw[i] == 8;
+                if (dbl && xlen == 32) {
+                    need_fx(&F);
+                    for (int q = 0; q < 2; q++) {
+                        int r = q < pl.nreg ? param_reg(&F, &pl, q) : SCR;
+                        if (q >= pl.nreg)
+                            ld_sp(&F, SCR, base + pl.stk +
+                                  (long)(q - pl.nreg) * F.w, 4, 1);
+                        st_sp(&F, r, F.fx + 4L * q, 4);
+                    }
+                    fld_sp(&F, fr, F.fx, 1);
+                } else if (pl.nreg) {
+                    f_from_x(&F, fr, param_reg(&F, &pl, 0), dbl ? 8 : 4);
+                } else {
+                    fld_sp(&F, fr, base + pl.stk, dbl);
+                }
+                continue;
+            }
             if (pl.byref) {
                 /* What arrived is a POINTER to the caller's private
                  * copy, and the body expects the OBJECT in the local's
@@ -5111,14 +6214,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
         for (int k = 0; k < npstk; k++)
             ld_sp(&F, pstk_reg[k], pstk_off[k], F.w, 1);
+        for (int k = 0; k < npfx; k++)
+            fdone(&F, pfx_v[k], pfx_r[k], pfx_d[k]);
 
         /* Where the first UNNAMED argument sits -- simply where the named
          * ones stopped. The save area and the caller's stack arguments
          * are contiguous, so one expression covers both cases: below
          * eight named words it is inside the save area, and at eight it
-         * is exactly its end, which is the stack. */
+         * is exactly its end, which is the stack. (A float in an fa
+         * register took no a register.) */
         if (fn->is_varargs)
-            F.va_first = F.va_regsave + (long)narg * F.w + stk;
+            F.va_first = F.va_regsave + (long)wk.narg * F.w + wk.stk;
     }
 
     int tail_end = 0;        /* the body's last act is a tail call */
@@ -5232,6 +6338,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.sx);
     free(F.nshr);
     free(F.loc);
+    free(F.floc);
+    free(F.fw);
+    free(F.f4);
 }
 
 /* ---- s0 AND s1 FOR THE BUSIEST VALUES ----------------------------------

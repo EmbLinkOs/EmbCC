@@ -196,6 +196,49 @@ static void encodings(int xlen)
 
     expect("unimp");             rv_unimp(&C);
     expect("ebreak");            rv_ebreak(&C);
+
+    /* The F and D extensions: every encoder, both formats, the register
+     * file's ABI names at its boundaries, and the offsets' extremes. */
+    expect("flw fa0, 4(sp)");      rv_fload(&C, RV_FA0, RV_SP, 4, 0);
+    expect("fld fs0, -8(sp)");     rv_fload(&C, RV_FS0, RV_SP, -8, 1);
+    expect("flw ft0, 2047(a0)");   rv_fload(&C, RV_FT0, RV_A0, 2047, 0);
+    expect("fld ft11, -2048(t6)"); rv_fload(&C, 31, RV_T6, -2048, 1);
+    expect("fsw fa7, -4(sp)");     rv_fstore(&C, RV_FA0 + 7, RV_SP, -4, 0);
+    expect("fsd fs11, 2040(sp)");  rv_fstore(&C, RV_FS2 + 9, RV_SP, 2040, 1);
+    expect("fsw fs1, -2048(a5)");  rv_fstore(&C, RV_FS1, RV_A5, -2048, 0);
+    expect("fsd ft8, 0(t0)");      rv_fstore(&C, RV_FT8, RV_T0, 0, 1);
+    expect("fadd.s fa0, fa1, fa2"); rv_farith(&C, RV_FADD, RV_FA0, RV_FA0 + 1, RV_FA0 + 2, 0);
+    expect("fsub.d fs2, ft1, ft2"); rv_farith(&C, RV_FSUB, RV_FS2, RV_FT1, RV_FT2, 1);
+    expect("fmul.s ft3, fs0, fs1"); rv_farith(&C, RV_FMUL, RV_FT3, RV_FS0, RV_FS1, 0);
+    expect("fdiv.d fa0, fa0, ft0"); rv_farith(&C, RV_FDIV, RV_FA0, RV_FA0, RV_FT0, 1);
+    expect("fsqrt.s fa0, fa1");    rv_fsqrt(&C, RV_FA0, RV_FA0 + 1, 0);
+    expect("fsqrt.d ft0, fs3");    rv_fsqrt(&C, RV_FT0, RV_FS2 + 1, 1);
+    expect("fmv.s fa0, fa1");      rv_fmv(&C, RV_FA0, RV_FA0 + 1, 0);
+    expect("fmv.d fs0, fa0");      rv_fmv(&C, RV_FS0, RV_FA0, 1);
+    expect("fneg.s ft0, ft1");     rv_fsgnj(&C, RV_FSGNJN, RV_FT0, RV_FT1, RV_FT1, 0);
+    expect("fabs.d ft0, ft1");     rv_fsgnj(&C, RV_FSGNJX, RV_FT0, RV_FT1, RV_FT1, 1);
+    expect("fsgnj.s fa0, fa1, fa2"); rv_fsgnj(&C, RV_FSGNJ, RV_FA0, RV_FA0 + 1, RV_FA0 + 2, 0);
+    expect("feq.s a0, fa0, fa1");  rv_fcmp(&C, RV_FEQ, RV_A0, RV_FA0, RV_FA0 + 1, 0);
+    expect("flt.d t0, ft0, ft1");  rv_fcmp(&C, RV_FLT, RV_T0, RV_FT0, RV_FT1, 1);
+    expect("fle.s a1, fs0, fa0");  rv_fcmp(&C, RV_FLE, RV_A1, RV_FS0, RV_FA0, 0);
+    expect("fcvt.w.s a0, fa0, rtz");  rv_fcvt_to_int(&C, RV_A0, RV_FA0, RV_CVT_W, 0);
+    expect("fcvt.wu.d t0, ft0, rtz"); rv_fcvt_to_int(&C, RV_T0, RV_FT0, RV_CVT_WU, 1);
+    expect("fcvt.s.w fa0, a0");    rv_fcvt_from_int(&C, RV_FA0, RV_A0, RV_CVT_W, 0);
+    expect("fcvt.s.wu ft0, t1");   rv_fcvt_from_int(&C, RV_FT0, RV_T1, RV_CVT_WU, 0);
+    expect("fcvt.d.w fa0, a1");    rv_fcvt_from_int(&C, RV_FA0, RV_A1, RV_CVT_W, 1);
+    expect("fcvt.d.wu fa0, a0");   rv_fcvt_from_int(&C, RV_FA0, RV_A0, RV_CVT_WU, 1);
+    expect("fcvt.d.s fa0, fa1");   rv_fcvt_fp(&C, RV_FA0, RV_FA0 + 1, 1);
+    expect("fcvt.s.d ft0, fs0");   rv_fcvt_fp(&C, RV_FT0, RV_FS0, 0);
+    expect("fmv.x.w a0, fa0");     rv_fmv_to_x(&C, RV_A0, RV_FA0, 0);
+    expect("fmv.w.x ft0, t0");     rv_fmv_from_x(&C, RV_FT0, RV_T0, 0);
+    if (xlen == 64) {
+        expect("fcvt.l.s a0, fa0, rtz");  rv_fcvt_to_int(&C, RV_A0, RV_FA0, RV_CVT_L, 0);
+        expect("fcvt.lu.d a0, fa0, rtz"); rv_fcvt_to_int(&C, RV_A0, RV_FA0, RV_CVT_LU, 1);
+        expect("fcvt.s.l fa0, a0");    rv_fcvt_from_int(&C, RV_FA0, RV_A0, RV_CVT_L, 0);
+        expect("fcvt.d.lu fa0, a0");   rv_fcvt_from_int(&C, RV_FA0, RV_A0, RV_CVT_LU, 1);
+        expect("fmv.x.d a0, fa0");     rv_fmv_to_x(&C, RV_A0, RV_FA0, 1);
+        expect("fmv.d.x ft0, t0");     rv_fmv_from_x(&C, RV_FT0, RV_T0, 1);
+    }
 }
 
 /* ---- rv_li, checked by EXECUTING it ---------------------------------- */
