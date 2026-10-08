@@ -20,6 +20,10 @@ x/8xw &table
 print origin
 set var origin.x = 10
 print origin
+set $saved = $r12
+set $r12 = 0xcafe
+print/x $r12
+set $r12 = $saved
 delete
 watch counter
 continue
