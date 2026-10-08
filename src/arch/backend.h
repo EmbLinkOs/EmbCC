@@ -273,8 +273,27 @@ struct backend_desc {
     /* Why -S writes no text for it, as the refusal says; NULL when it
      * does. */
     const char *no_asm_text;
+    /* The target's own command-line options (src/arch/<arch>/options.c):
+     * 1 when ARG is one of them, which it accepts or refuses by name, 0
+     * when it is not, for the driver to try the rest. NULL: none. */
+    int (*option)(const char *arg);
 };
 
 const struct backend_desc *backend_get(enum target_arch a);
+
+/* Is ARG one of the options EXACT names, or begins with one of PREFIX?
+ * Both lists end with NULL. For the backends' option handlers. */
+int option_listed(const char *arg, const char *const *exact,
+                  const char *const *prefix);
+
+int loongarch_target_option(const char *arg);
+int xtensa_target_option(const char *arg);
+int ppc_target_option(const char *arg);
+int rx_target_option(const char *arg);
+int sparc_target_option(const char *arg);
+int coldfire_target_option(const char *arg);
+int mips32_target_option(const char *arg);
+int mips64_target_option(const char *arg);
+int tricore_target_option(const char *arg);
 
 #endif
