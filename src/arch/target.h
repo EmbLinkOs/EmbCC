@@ -284,6 +284,16 @@ int cf_op_calls_helper(const struct ir_ins *i);     /* src/arch/coldfire/codegen
  * flash, for a cast a program writes without thinking about it. */
 int target_widen_unsigned_fp_cvt(void);
 
+/* Does the code keep a chain of saved frame pointers, each beside its
+ * return address, that __builtin_frame_address(N) and
+ * __builtin_return_address(N) can walk for any N? x86-64's rbp, AArch64's
+ * x29 and ColdFire's a6 do (IR_FRAMEADDR, imm 0: the chain's start).
+ * Elsewhere only level 0 exists: IR_FRAMEADDR with imm 1, the frame
+ * address -- the stack pointer at the function's entry, which is what GCC
+ * and clang return on RISC-V -- or imm 2, the return address the
+ * function was entered with. */
+int target_has_frame_chain(void);
+
 /* Is a va_list a bare POINTER at the next variadic argument, rather than a
  * pointer to a tag that va_start builds?
  *

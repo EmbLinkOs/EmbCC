@@ -1561,10 +1561,21 @@ static void gen_ins(struct rx_fn *F, int n)
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG)
         (void)atomic_sz(F, i);
-    if (i->op == IR_FRAMEADDR)
-        rx_refuse(F, i, "__builtin_frame_address or "
-                        "__builtin_return_address (RX code keeps no "
-                        "frame-pointer chain)");
+    /* Level 0 only (irgen): RX code keeps no frame-pointer chain. The
+     * call pushed the return address, so the stack pointer at entry
+     * points at it: that is the frame address (frame base + in_base - 4,
+     * above the frame and the registers pushm saved), and the word there
+     * is the return address. */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2)
+            ld_sp(F, d, F->in_base - 4, 4, 0);
+        else
+            addr_sp(F, d, F->in_base - 4);
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
 
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {
         int k = (int)i->imm - 32, d = wreg(F, i->dst, ACC), hi;

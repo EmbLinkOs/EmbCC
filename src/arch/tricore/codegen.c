@@ -2063,11 +2063,21 @@ static void gen_ins(struct tc_fn *F, int n)
         tc_refuse(F, i, "an atomic wider than a register");
     if (i->op == IR_CAS16)
         tc_refuse(F, i, "a 16-byte atomic");
-    if (i->op == IR_FRAMEADDR)
-        tc_refuse(F, i, "__builtin_frame_address or "
-                        "__builtin_return_address (TriCore code keeps no "
-                        "frame-pointer chain; the return address is in the "
-                        "context-save area)");
+    /* Level 0 only (irgen): TriCore code keeps no frame-pointer chain,
+     * and a caller's return address is in the context-save area. This
+     * function's own is in A11 for its whole body -- a call saves the
+     * upper context, A11 with it, and the return restores it -- and its
+     * frame address is the stack pointer at entry (frame base + frame). */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2)
+            tc_mov_d(F->t, d, TC_RA);
+        else
+            addr_sp(F, d, F->frame);
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
 
     /* The high word of a 64-bit value, shifted: one register. */
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {

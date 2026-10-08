@@ -2900,9 +2900,19 @@ static void gen_ins(struct sparc_fn *F, int n)
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG)
         need_word_atomic(F, i);
-    if (i->op == IR_FRAMEADDR)
-        sparc_refuse(F, i, "__builtin_frame_address or "
-                           "__builtin_return_address");
+    /* Level 0 only (irgen). A function that asks always has its own
+     * register window (leaf_candidate), so, as clang: the frame address
+     * is %fp -- the caller's %sp, the stack pointer at entry -- and the
+     * return address is %i7, the address of the call that entered it (the
+     * return goes to %i7 + 8). */
+    if (i->op == IR_FRAMEADDR) {
+        if (i->dst >= 0) {
+            int d = wreg(F, i->dst, ACC);
+            sparc_mov(F->t, d, i->imm == 2 ? SP_I7 : SP_FP);
+            wrote(F, i->dst, d);
+        }
+        return;
+    }
 
     /* The high word of a 64-bit value, shifted: one register. */
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {

@@ -1133,7 +1133,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         case IR_CAS16:                  /* a pair operation: never */
             OPAQUE(in->a); OPAQUE(in->b); OPAQUE(in->c); break;
         case IR_FRAMEADDR:
-            OPAQUE(in->dst); break;                        /* a raw-slot result */
+            /* a raw-slot result where it starts a walk of the frame chain
+             * (imm 0: x86-64, AArch64, ColdFire); the level-0 forms (imm 1
+             * and 2) are written as each backend writes any result */
+            if (in->imm == 0)
+                OPAQUE(in->dst);
+            break;
         case IR_MEMCPY: case IR_MEMZERO:
             /* The operands are ADDRESSES, used as the copy base. A
              * backend that takes them from a register leaves nothing

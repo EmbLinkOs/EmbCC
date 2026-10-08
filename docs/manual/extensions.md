@@ -46,7 +46,7 @@ A construct that a code generator cannot lower is refused when the
 function containing it is compiled, with a message of the form
 
 ```text
-embcc: f.c:3: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]
+embcc: f.c:3: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=4 size=4]
 ```
 
 The bracketed part names the internal operation that could not be
@@ -940,15 +940,53 @@ check, as a call to a `noreturn` function does.
 |---|---|---|
 | `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All |
 | `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All |
-| `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | x86-64, AArch64 |
-| `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | x86-64, AArch64 |
+| `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | Any level: x86-64, AArch64, ColdFire. Level 0: RISC-V, MIPS32, MIPS64, LoongArch, SPARC, PowerPC, Xtensa, TriCore, RX, AVR |
+| `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | As `__builtin_frame_address` |
 
 `level` must be a non-negative integer constant (`__builtin_frame_address
-needs a non-negative constant level`). On Cortex-M, RISC-V, MIPS32 and AVR the frame
-builtins are refused:
+needs a non-negative constant level`).
+
+**A frame chain.** x86-64, AArch64 and ColdFire code keeps a chain of
+saved frame pointers, so any level can be walked.
+
+**Level 0 only.** Code for the other targets keeps no chain, and only
+the current function's own frame can be found. A higher level is
+refused:
 
 ```text
-embcc: r.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [frameaddr w=8 size=4]
+embcc: r.c:1: error: __builtin_return_address(1) is not supported on riscv32-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
+```
+
+At level 0, a function that asks for its return address saves it, as a
+function that calls does. `__builtin_return_address(0)` is:
+
+| Target | Return address |
+|---|---|
+| RISC-V, MIPS, LoongArch, PowerPC | The return register (`ra` or `LR`) as the function was entered |
+| TriCore | `A11`, which a call keeps for the whole body |
+| SPARC | `%i7`, the address of the call itself (the return goes to `%i7 + 8`), as GCC and clang return it |
+| Xtensa | `a0` with its top two bits, the windowed ABI's call increment, replaced by those of the function's own address, as GCC does |
+| RX | The word the call pushed |
+| AVR | The word address the call pushed, as an AVR function pointer holds it (2-byte program counters) |
+
+`__builtin_frame_address(0)` is:
+
+| Target | Frame address |
+|---|---|
+| RISC-V, MIPS, LoongArch, Xtensa, TriCore | The stack pointer at entry, which is what GCC and clang return on RISC-V |
+| SPARC | `%fp`, the same address |
+| RX and AVR | The stack pointer at entry, which points at, or just below, the return address the call pushed |
+| PowerPC | `r1` after the prologue, the frame's back-chain word, as GCC and clang return it |
+
+**Interrupt handlers.** In a RISC-V, MIPS or AVR interrupt handler,
+`__builtin_return_address` is refused: a handler was not called, and
+what it returns to is the trap's. AVR refuses
+`__builtin_frame_address` there too.
+
+**Cortex-M and ARMv7-A** refuse both builtins for now:
+
+```text
+embcc: r.c:1: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=4 size=4]
 ```
 
 A function that calls `alloca` is never inlined.
