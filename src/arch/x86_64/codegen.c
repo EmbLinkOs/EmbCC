@@ -680,6 +680,19 @@ static char *float_vregs(struct ir_func *fn, int by_cost)
 #define BAD(v) do { int _v=(v); if (_v>=0 && _v<nv) bad[_v]=1; } while (0)
 #define SOFT(v) do { int _v=(v); if (_v>=0 && _v<nv) { \
                      if (soft) soft[_v]++; else bad[_v]=1; } } while (0)
+    /* A parameter arrives where its TYPE puts it: an integer one in a
+     * general register, whatever its later uses. `double bits(long x) {
+     * union { long l; double d; } u; u.l = x; return u.d; }` folds to
+     * returning x as a double, which marked x float -- and an integer
+     * parameter in the float class had no home the prologue could fill:
+     * an internal error at -O1. In the integer class its float uses
+     * move it with movq (x86_fld). */
+    if (fn->src)
+        for (int p = 0; p < fn->nparams && p < nv; p++) {
+            const struct type *pt = fn->src->param_tys[p];
+            if (pt && !ty_is_float(pt))
+                BAD(p);
+        }
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->flt) {
@@ -2060,10 +2073,20 @@ static void x86_param_copy(struct code *text, int dst, int base, int off,
 /* The floating-point pair of cg_load/cg_store. An xmm home and a stack
  * slot are the same value and only one of them is current, so every site
  * that touches a float vreg's slot goes through these. */
+/* A float may live in a GENERAL register: a union pun (`u.l = x; return
+ * u.d;`) is folded to the integer itself, which the allocator gave an
+ * integer home. Its bits move with movq/movd -- through its slot they
+ * would be stale, and a frameless function has no slot to read: `double
+ * bits(long x)` at -O1 was an internal error ("a frame access in a
+ * function that has no frame pointer"). */
 static void x86_fld(struct code *text, const int *sd, int v, int xmm, int w)
 {
     if (in_freg(v)) {
         if (g_floc[v] != xmm) x86_movs_reg(text, xmm, g_floc[v]);
+        return;
+    }
+    if (in_reg(v)) {
+        x86_movq_xmm_gpr(text, xmm, g_loc[v], w);
         return;
     }
     x86_movs_load(text, xmm, sd[v], w);
@@ -2075,6 +2098,10 @@ static void x86_fst(struct code *text, const int *sd, int v, int xmm, int w)
         if (g_floc[v] != xmm) x86_movs_reg(text, g_floc[v], xmm);
         return;
     }
+    if (in_reg(v)) {
+        x86_movq_gpr_xmm(text, g_loc[v], xmm, w);
+        return;
+    }
     x86_movs_store(text, xmm, sd[v], w);
 }
 
@@ -2084,6 +2111,10 @@ static void x86_fst(struct code *text, const int *sd, int v, int xmm, int w)
 static int x86_frd(struct code *text, const int *sd, int v, int scratch, int w)
 {
     if (in_freg(v)) return g_floc[v];
+    if (in_reg(v)) {
+        x86_movq_xmm_gpr(text, scratch, g_loc[v], w);
+        return scratch;
+    }
     x86_movs_load(text, scratch, sd[v], w);
     return scratch;
 }
