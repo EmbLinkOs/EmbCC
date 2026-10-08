@@ -134,6 +134,62 @@ if command -v clang >/dev/null 2>&1; then
     echo "RISC-V -march/-mabi: $nrv combinations match clang -dM -E"
 fi
 
+# The Cortex-M parts and architectures, against clang given the same flags:
+# every __ARM_ARCH* and __ARM_FEATURE_* macro. The generated tables are the
+# bare thumbv7m and thumbv8m.main ones; -mcpu= and -march= (and the
+# thumbv7em name) move the architecture and add the DSP extension's macros
+# (__ARM_ARCH_7EM__, __ARM_FEATURE_DSP, __ARM_FEATURE_SIMD32), which
+# CMSIS's cmsis_gcc.h selects its __SADD16 ... __SMLALD on. A DSP macro on
+# a v7-M or v6-M part, or a missing one on a v7E-M part, is a difference
+# here. __ARM_FEATURE_FMA is left out of both sides: clang claims it with
+# no FPU, and EmbCC does not (src/arch/predef.c, thumb_fpu_add).
+if command -v clang >/dev/null 2>&1; then
+    tmpa=${TMPDIR:-/tmp}/predef.cm.$$
+    tmpb=${TMPDIR:-/tmp}/predef.cmref.$$
+    ncm=0
+    for combo in "thumbv7em-none-eabi" "thumbv7m-none-eabi" \
+                 "thumbv6m-none-eabi" "thumbv8m.main-none-eabi" \
+                 "thumbv8m.base-none-eabi -mcpu=cortex-m23" \
+                 "thumbv7em-none-eabihf" "thumbv7em-none-eabi -mcpu=cortex-m4" \
+                 "thumbv7em-none-eabi -mcpu=cortex-m7" \
+                 "thumbv7em-none-eabi -mcpu=cortex-m3" \
+                 "thumbv7em-none-eabi -mcpu=cortex-m0" \
+                 "thumbv7em-none-eabi -mcpu=cortex-m33" \
+                 "thumbv7m-none-eabi -mcpu=cortex-m4" \
+                 "thumbv6m-none-eabi -mcpu=cortex-m7" \
+                 "thumbv8m.main-none-eabi -mcpu=cortex-m33" \
+                 "thumbv8m.main-none-eabi -mcpu=cortex-m4" \
+                 "thumbv8m.main-none-eabihf -mcpu=cortex-m33" \
+                 "thumbv7m-none-eabi -march=armv7e-m" \
+                 "thumbv7em-none-eabi -march=armv7-m" \
+                 "thumbv7m-none-eabi -march=armv8-m.main+dsp" \
+                 "thumbv8m.main-none-eabi -march=armv8-m.main+nodsp" \
+                 "thumbv7em-none-eabi -mcpu=cortex-m4 -x c++"; do
+        set -- $combo
+        t=$1; shift
+        # shellcheck disable=SC2086
+        "$EMBCC" --target=$t "$@" -E -dM - < /dev/null 2>/dev/null |
+            grep -E '^#define __ARM_(ARCH|FEATURE)' |
+            grep -v '__ARM_FEATURE_FMA ' | LC_ALL=C sort > "$tmpa"
+        clang --target=$t "$@" -ffreestanding -E -dM - < /dev/null 2>/dev/null |
+            grep -E '^#define __ARM_(ARCH|FEATURE)' |
+            grep -v '__ARM_FEATURE_FMA ' | LC_ALL=C sort > "$tmpb"
+        # (Baseline: the five clang claims and the core lacks, as above)
+        case $t in thumbv8m.base*)
+            grep -Ev '__ARM_FEATURE_(CLZ|QBIT|SAT|NUMERIC_MAXMIN|DIRECTED_ROUNDING) ' \
+                "$tmpb" > "$tmpb.x"; mv "$tmpb.x" "$tmpb" ;;
+        esac
+        if [ ! -s "$tmpb" ] || ! cmp -s "$tmpa" "$tmpb"; then
+            echo "--target=$t $*: the ARM macros disagree with clang (< clang, > EmbCC):"
+            diff "$tmpb" "$tmpa" | head -10
+            rm -f "$tmpa" "$tmpb"; exit 1
+        fi
+        ncm=$((ncm + 1))
+    done
+    rm -f "$tmpa" "$tmpb"
+    echo "Cortex-M -mcpu/-march: $ncm combinations' __ARM_ARCH*/__ARM_FEATURE_* match clang"
+fi
+
 # -mcmse, the Secure side of ARMv8-M: __ARM_FEATURE_CMSE is 3 where the table
 # says 1, as clang defines it under the flag, at both profiles -- and the rest
 # of the table is the same.

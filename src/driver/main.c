@@ -6196,13 +6196,18 @@ int main(int argc, char **argv)
                     g_arm_cpu = v;
                     continue;
                 }
-                /* An ARMv7-M part named on an ARMv6-M triple raises the
-                 * level, as -mcpu= on the others selects the DSP set. */
-                if (target_thumb_arch() == 6 &&
+                /* The part has one architecture, whatever the triple
+                 * said, as clang takes it: -mcpu=cortex-m33 on a thumbv7em
+                 * name is ARMv8-M Mainline (__ARM_ARCH 8), and cortex-m4 on
+                 * a thumbv8m.main one is ARMv7E-M. It used to raise only an
+                 * ARMv6-M level, and the first case built v7-M code and
+                 * macros for an M33. (ARM state's triple keeps its level:
+                 * the A-profile encoder is not chosen by a Cortex-M name.) */
+                if (!target_arm_a32() &&
                     (!strcmp(v, "cortex-m3") || !strcmp(v, "cortex-m4") ||
                      !strcmp(v, "cortex-m7")))
                     target_set_thumb_arch(7);
-                if (target_thumb_arch() == 6 && !strcmp(v, "cortex-m33"))
+                if (!target_arm_a32() && !strcmp(v, "cortex-m33"))
                     target_set_thumb_arch(8);
                 if (!strcmp(v, "cortex-m3"))
                     target_set_thumb_em(0);

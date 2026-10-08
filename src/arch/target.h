@@ -330,10 +330,11 @@ int target_va_list_is_pointer(void);
  * is written. A switch with no default, as target_va_list_is_pointer is. */
 int target_anon_bitfield_aligns(void);
 
-/* ARMv7E-M (Cortex-M4/M7) rather than ARMv7-M (Cortex-M3). Set by the
- * --target= name and by -mcpu=. The instruction selection is the same
- * for both; this changes what the object SAYS it was built for, which
- * is what a linker and a debugger read. */
+/* ARMv7E-M (Cortex-M4/M7) rather than ARMv7-M (Cortex-M3), and at level 8
+ * ARMv8-M Mainline with the DSP extension (-mcpu=cortex-m33, +dsp). Set by
+ * the --target= name, -mcpu= and -march=. The instruction selection is the
+ * same either way; this decides the DSP macros, whether the assembler takes
+ * the DSP instructions, and what the object SAYS it was built for. */
 int target_thumb_em(void);
 /* The Thumb architecture level: 6 (ARMv6-M), 7 (ARMv7-M) or 8 (ARMv8-M
  * Mainline). A

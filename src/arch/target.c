@@ -887,10 +887,11 @@ int target_from_triple(const char *triple, enum target_arch *out,
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
             if (g_triples[i].arch == TARGET_THUMB) {
-                /* 3 in this column means ARMv8-M Mainline. It implies the
-                 * DSP extension too -- v8-M Mainline includes it -- so the
-                 * `em` flag stays set for the code that asks "may I use the
-                 * v7E-M/DSP instructions". */
+                /* 3 in this column means ARMv8-M Mainline. The DSP
+                 * extension is OPTIONAL there: the name alone does not
+                 * have it, as clang's thumbv8m.main does not (no
+                 * __ARM_FEATURE_DSP, sadd16 refused); -mcpu=cortex-m33 and
+                 * -march=armv8-m.main+dsp set the `em` flag that says so. */
                 size_t n = strlen(triple);
                 g_thumb_hf_name = n > 6 && !strcmp(triple + n - 6, "eabihf");
                 g_arm_a32 = g_triples[i].thumb_em == 7;
@@ -901,7 +902,7 @@ int target_from_triple(const char *triple, enum target_arch *out,
                     g_thumb_em = 1;
                 } else if (g_triples[i].thumb_em == 3) {
                     g_thumb_arch = 8;
-                    g_thumb_em = 1;
+                    g_thumb_em = 0;
                 } else if (g_triples[i].thumb_em == 6 ||
                            g_triples[i].thumb_em == 9) {
                     g_thumb_arch = 6;
@@ -940,10 +941,10 @@ const char *target_triple_of(enum target_arch a, enum target_os o)
     return NULL;
 }
 
-/* ARMv7E-M rather than ARMv7-M: the DSP extension and, on an F part, an
- * FPU. The code generated is identical today -- what differs is what
- * the object reports about itself, which a consumer is entitled to
- * believe. */
+/* ARMv7E-M rather than ARMv7-M -- or on ARMv8-M Mainline, the part has
+ * the DSP extension: its macros (__ARM_FEATURE_DSP, src/arch/predef.c),
+ * its instructions in inline asm and .s files (src/arch/thumb/asm.c), and
+ * what the object reports about itself. The code generated is the same. */
 int target_thumb_em(void) { return g_thumb_em; }
 int target_arm_a32(void) { return g_arch == TARGET_THUMB && g_arm_a32; }
 int target_arm_vfp(int *d32)
