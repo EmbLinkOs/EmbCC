@@ -922,13 +922,7 @@ static int xtensa_flag(const char *a)
 static int firmware_target(void)
 {
     return target_fmt_get() == TGT_FMT_ELF &&
-           (target_get() == TARGET_THUMB || target_get() == TARGET_AVR ||
-            target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64 ||
-            target_is_mips() || target_get() == TARGET_LOONGARCH64 ||
-            target_get() == TARGET_TRICORE ||
-            target_get() == TARGET_XTENSA || target_get() == TARGET_PPC32 ||
-            target_get() == TARGET_RX || target_get() == TARGET_SPARC32 ||
-            target_get() == TARGET_COLDFIRE);
+           backend_get(target_get())->firmware;
 }
 
 /* `embcc [prog.c] [a.o b.a -lfoo...] -o OUT`: compile the source if there
@@ -995,12 +989,9 @@ static int compile_and_link(const char *in, const char *out)
     lo.undefs = g_undefs;
     lo.nundefs = g_nundefs;
     if (fw && !lo.script && !lo.have_base) {
-        /* embld lays a script out for ARM, RISC-V and AVR only: a MIPS
-         * or LoongArch build is not sent looking for one */
-        int scripts = target_get() == TARGET_THUMB ||
-                      target_get() == TARGET_RISCV32 ||
-                      target_get() == TARGET_RISCV64 ||
-                      target_get() == TARGET_AVR;
+        /* embld lays a script out for some targets only (the registry's
+         * ld_scripts): another build is not sent looking for one */
+        int scripts = backend_get(target_get())->ld_scripts;
         fprintf(stderr,
                 "embcc: error: linking a %s image needs its memory map: %s"
                 "-Wl,-Ttext=FLASH and -Wl,-Tdata=RAM\n", target_triple_now(),
@@ -1429,12 +1420,7 @@ static int compile(const char *in, const char *out, int pp_only)
  * do AArch64's, which are data words today. */
 static int blocks_by_gas(void)
 {
-    enum target_arch a = target_get();
-    return a == TARGET_THUMB || a == TARGET_RISCV32 ||
-           a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32 ||
-           a == TARGET_LOONGARCH64 || a == TARGET_MIPS64 ||
-           a == TARGET_XTENSA || a == TARGET_TRICORE || a == TARGET_RX ||
-           a == TARGET_COLDFIRE || a == TARGET_SPARC32 || a == TARGET_PPC32;
+    return backend_get(target_get())->firmware;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1473,8 +1459,7 @@ static void naked_asm_text(struct outbuf *b, const struct func *f,
         /* %c0: the constant without a prefix -- how every operand here is
          * written, except on RX and ColdFire, whose GCCs print an immediate
          * as `#5` */
-        int bare = *p == 'c' || (target_get() != TARGET_RX &&
-                                 target_get() != TARGET_COLDFIRE);
+        int bare = *p == 'c' || !backend_get(target_get())->imm_prefixed;
         if (*p == 'c')
             p++;
         int k = -1;
@@ -1528,21 +1513,12 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
          * the asm that saves and restores the context. */
         const struct expr *e = s->kind == STMT_EXPR ? s->expr : NULL;
         if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
-            enum target_arch t = target_get();
-            /* SPARC's call has a delay slot, which a nop fills: the
+            /* the target's call (the registry's call_insn), and its delay
+             * slot filled with a nop where it has one (SPARC): the
              * statement after the call is the next asm, not its slot */
-            if (t == TARGET_SPARC32) {
-                ob_fmt(b, "call %s\nnop\n", e->callee->name);
-                continue;
-            }
-            ob_fmt(b, "%s %s%s\n", t == TARGET_THUMB ||
-                                   t == TARGET_LOONGARCH64 ||
-                                       t == TARGET_PPC32 ? "bl"
-                                   : t == TARGET_MIPS32 ||
-                                     t == TARGET_MIPS64 ? "jal"
-                                   : t == TARGET_COLDFIRE ? "jsr"
-                                   : t == TARGET_RX ? "bsr" : "call",
-                   t == TARGET_RX ? "_" : "", e->callee->name);
+            const struct backend_desc *bd = backend_get(target_get());
+            ob_fmt(b, "%s %s%s\n%s", bd->call_insn, bd->sym_prefix,
+                   e->callee->name, bd->call_delay_slot ? "nop\n" : "");
             continue;
         }
         diag_fatal(f->file, s->line,
@@ -1576,9 +1552,9 @@ static void naked_to_blocks(struct unit *u)
                        "into .text", f->name, f->section);
         struct outbuf b = { NULL, 0, 0 };
         enum target_arch t = target_get();
-        /* RX: the object's name, `_f`, as the block assembler reads it */
-        const char *up = t == TARGET_RX ? "_" : "";
-        ob_fmt(&b, ".text\n.p2align %d\n", t == TARGET_AVR ? 1 : 2);
+        /* the object's name, `_f` on RX, as the block assembler reads it */
+        const char *up = backend_get(t)->sym_prefix;
+        ob_fmt(&b, ".text\n.p2align %d\n", backend_get(t)->text_p2align);
         if (f->is_weak)
             ob_fmt(&b, ".weak %s%s\n", up, f->name);
         else if (!f->is_static)
@@ -2563,24 +2539,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -S: the same bytes, as text (src/driver/asmout.c). Everything the
      * emitter needs is in hand here -- the code, the string pool, and the
      * relocation sites the backend recorded. */
-    /* Xtensa's -S would need an assembler that reads it back, and there
-     * is none to check it against (no Xtensa llvm-mc): refused by name
-     * rather than written unverified. */
-    if (want_asm && ta == TARGET_XTENSA)
-        diag_fatal(NULL, 0, "-S is not supported for xtensa-none-elf yet: "
-                            "compile with -c (there is no Xtensa assembler "
-                            "here to check the text against)");
-    /* RX instructions are one to eight bytes with no length rule short of
-     * decoding, and EmbCC has no RX disassembler to write them as text:
-     * refused rather than written as bytes. (Its assembler reads .s
-     * files and inline asm; nothing writes RX text yet.) */
-    if (want_asm && ta == TARGET_RX)
-        diag_fatal(NULL, 0, "-S is not supported for rx-none-elf yet: EmbCC "
-                            "writes no RX assembly text (use -c; .s files and "
-                            "inline asm do assemble)");
+    /* A target with no -S text (the registry's no_asm_text: Xtensa has no
+     * assembler here to check the text against, and RX no disassembler
+     * to write it) is refused by name rather than written unverified. */
+    const char *no_asm_text = backend_get(ta)->no_asm_text;
+    if (want_asm && no_asm_text)
+        diag_fatal(NULL, 0, "-S is not supported for %s yet: %s",
+                   target_triple_now(), no_asm_text);
     /* -Wa,-a...: the listing, the same text as -S, beside the object */
     if (g_listing && !want_asm) {
-        if (ta == TARGET_XTENSA || ta == TARGET_RX) {
+        if (no_asm_text) {
             fprintf(stderr, "embcc: warning: no assembler listing for %s "
                             "(-Wa,-a...): EmbCC has no -S text for it\n",
                     target_triple_now());

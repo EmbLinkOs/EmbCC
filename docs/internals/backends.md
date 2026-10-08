@@ -220,10 +220,18 @@ know about the code generator behind it:
 | `op_calls_helper` | Whether an IR instruction becomes a runtime-helper call on this target, which the optimizer asks; `NULL` for none |
 | `unwind_unwritten` | The unwind tables the target needs and EmbCC does not write, as a refusal names them (`"RISC-V .eh_frame"`); `NULL` where `eh_emit` writes them |
 | `cxx_exceptions` | Whether a C++ unit may use exceptions: `BACKEND_CXX_EXC_OK`, `_NONE`, or `_BIG_ENDIAN` (MIPS64) |
+| `firmware` | The driver links firmware for it with embld, and its file-scope asm blocks and naked functions are read by the `.s` assembler |
+| `ld_scripts` | embld lays out a GNU linker script for it (`-T`) |
+| `call_insn`, `call_delay_slot` | A naked function's argument-less call, and whether a `nop` fills a delay slot after it (SPARC) |
+| `sym_prefix` | What a C name is called in the object and in assembly (`_` on RX) |
+| `imm_prefixed` | An asm operand that is a constant is written `#5` (RX, ColdFire) |
+| `text_p2align` | The alignment of a naked function's body (AVR: 1) |
+| `no_asm_text` | Why `-S` writes no text for it, as the refusal says; `NULL` when it does |
 
 `backend_get(arch)` returns the row, and stops the compiler if a target
-has none. The driver selects the code generator, the helper predicate
-and the unwind and exception refusals from the row. Before the registry,
+has none. The driver selects from the row the code generator, the helper predicate,
+the unwind and exception refusals, whether and how it links firmware, how
+a naked function is written out, and whether `-S` has text. Before the registry,
 these were chains of `if (ta == TARGET_...)` in the driver, nine of them
 for the unwind refusals alone, and a new backend had to extend each one.
 More of the driver's per-target knowledge moves into the row as the
