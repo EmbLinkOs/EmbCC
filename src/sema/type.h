@@ -157,6 +157,11 @@ struct type *ty_plain_char(void);
 int ty_is_plain_char(const struct type *t);
 int ty_generic_same(const struct type *a, const struct type *b);
 struct type *ty_wchar(void);
+/* A string literal's element type by its prefix: L wchar_t, U char32_t,
+ * u char16_t, none (or u8, in C) plain char. The parser's constant
+ * folder and sema both ask here, so sizeof(L"ab") folds to what sema
+ * types it as. */
+struct type *ty_str_elem(int prefix);
 /* `long long` / `unsigned long long`: eight bytes on every target. */
 struct type *ty_llong(int is_unsigned);
 /* The integer type that is exactly `size` bytes wide, or NULL if the

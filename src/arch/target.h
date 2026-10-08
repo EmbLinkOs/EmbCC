@@ -224,6 +224,11 @@ int target_wchar_unsigned(void);  /* wchar_t's signedness */
 /* wchar_t's width: int's, except on Xtensa, where GCC's xtensa-elf makes
  * it a 16-bit unsigned short (gcc/config/xtensa/elf.h). */
 int target_wchar_size(void);
+/* -fshort-wchar: wchar_t is unsigned short on every target, as GCC's and
+ * clang's flag makes it (UEFI, and some ARM code built for Windows-style
+ * UTF-16 strings). */
+void target_set_short_wchar(int on);
+int target_short_wchar(void);
 /* size_t, ptrdiff_t and wchar_t are `long` types rather than `int` ones,
  * where the two have one width: GCC's rx-elf (newlib-stdint) says
  * `long unsigned int`, `long int` and `long int`. */

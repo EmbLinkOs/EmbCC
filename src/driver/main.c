@@ -4455,6 +4455,7 @@ int main(int argc, char **argv)
      * accepted, not acted on). */
     unsigned san_mask = 0;
     int want_instr = 0;              /* -finstrument-functions */
+    int short_wchar = 0;             /* -fshort-wchar, the last one wins */
     const char *instr_funcs = NULL, *instr_files = NULL;
     int san_trap_asked = 0;
     (void)san_trap_asked;
@@ -5044,6 +5045,9 @@ int main(int argc, char **argv)
                 cpp_cmdline_define(uns ? "__CHAR_UNSIGNED__=1"
                                        : "__CHAR_UNSIGNED__", !uns);
             }
+        } else if (strcmp(argv[i], "-fshort-wchar") == 0 ||
+                   strcmp(argv[i], "-fno-short-wchar") == 0) {
+            short_wchar = argv[i][2] == 's';
         } else if (strcmp(argv[i], "-finstrument-functions") == 0) {
             want_instr = 1;
         } else if (strcmp(argv[i], "-fno-instrument-functions") == 0) {
@@ -6568,6 +6572,21 @@ int main(int argc, char **argv)
     irgen_set_sanitize(san_mask);
     irgen_set_instrument(want_instr, instr_funcs, instr_files);
     irgen_set_opt_size(opt_for_size);
+    if (short_wchar) {
+        /* wchar_t is unsigned short (sema's ty_wchar, the lexer's L""
+         * and L'' literals, C++'s wchar_t), and the macros move with it,
+         * as clang's do: the per-target tables know only the default.
+         * An ARM object says so in Tag_ABI_PCS_wchar_t (2). */
+        target_set_short_wchar(1);
+        cpp_cmdline_define("__WCHAR_TYPE__=unsigned short", 0);
+        cpp_cmdline_define("__WCHAR_MAX__=65535", 0);
+        cpp_cmdline_define("__WCHAR_MIN__=0", 0);
+        cpp_cmdline_define("__WCHAR_WIDTH__=16", 0);
+        cpp_cmdline_define("__WCHAR_UNSIGNED__=1", 0);
+        cpp_cmdline_define("__SIZEOF_WCHAR_T__=2", 0);
+        if (target_get() == TARGET_THUMB)
+            cpp_cmdline_define("__ARM_SIZEOF_WCHAR_T=2", 0);
+    }
     lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
     /* The C parser types the constants (parse.c); the C++ front end
      * types its own, and resolves overloads by them before lowering to

@@ -451,13 +451,21 @@ int target_char_unsigned(void)
     return g_char_uns_override >= 0 ? g_char_uns_override
            : darwin_a64() ? 0 : g_model[g_arch].char_uns;
 }
+static int g_short_wchar;
+void target_set_short_wchar(int on) { g_short_wchar = on; }
+int target_short_wchar(void) { return g_short_wchar; }
+
 int target_wchar_size(void)
 {
+    if (g_short_wchar)
+        return 2;
     return g_arch == TARGET_XTENSA ? 2 : g_model[g_arch].it;
 }
 
 int target_wchar_unsigned(void)
 {
+    if (g_short_wchar)
+        return 1;
     return darwin_a64() ? 0 : g_model[g_arch].wchar_uns;
 }
 int target_has_int128(void)     { return g_model[g_arch].int128; }

@@ -2163,17 +2163,16 @@ static struct type *ce_type(const struct expr *e)
          * length including the NUL and `str_width` the bytes per
          * element, so the two give the count for a wide literal as well
          * as a plain one. */
-        /* Only the plain byte literal, whose element is `char` and
-         * whose `num` is its length including the NUL. A prefixed one
-         * (L"", u"", U"") is left unanswered rather than guessed:
-         * reconstructing its element count from num and str_width here
-         * got u"ab" wrong and L"ab" zero, and a wrong sizeof is worse
-         * than the NULL this pass already returned for all of them. */
-        if (e->str_width > 1 || e->str_prefix)
+        /* sema's type exactly (ty_str_elem): `num` counts the ELEMENTS,
+         * the NUL included (lit_encode's units), and `str_width` is the
+         * bytes of each -- so sizeof(L"ab") is 3 wchar_t, whatever
+         * wchar_t is (-fshort-wchar, AVR, Xtensa). An element whose size
+         * is not the literal's width would make a wrong sizeof, which is
+         * worse than none: left unanswered. */
+        struct type *elem = ty_str_elem(e->str_prefix);
+        if (ty_size(elem) != (e->str_width ? e->str_width : 1))
             return NULL;
-        /* Plain char, as sema types it: a folded _Generic matches as
-         * strictly as sema's, and signed char is not `char`. */
-        return ty_array(ty_plain_char(), (int)e->num);
+        return ty_array(elem, (int)e->num);
     }
     case EXPR_CAST:
         return e->cast_ty;

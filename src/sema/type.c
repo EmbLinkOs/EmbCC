@@ -84,11 +84,28 @@ int ty_generic_same(const struct type *a, const struct type *b)
 
 struct type *ty_wchar(void)
 {
-    /* int-sized, but for Xtensa's 16-bit unsigned short (xtensa/elf.h) */
+    /* int-sized, but for Xtensa's 16-bit unsigned short (xtensa/elf.h),
+     * and unsigned short on every target under -fshort-wchar -- AVR's
+     * 2-byte int included, where the type, not the size, changes */
+    if (target_short_wchar())
+        return ty_base(TY_SHORT, 1);
     if (target_wchar_size() == 2 && target_int_size() != 2)
         return ty_base(TY_SHORT, target_wchar_unsigned());
     return ty_base(target_long_size_types() ? TY_LONG : TY_INT,
                    target_wchar_unsigned());
+}
+
+struct type *ty_str_elem(int prefix)
+{
+    /* By the PREFIX: L is wchar_t whatever its width (two bytes on AVR),
+     * U is char32_t and u char16_t, as __CHAR32_TYPE__ and
+     * __CHAR16_TYPE__ spell them -- on AVR unsigned long and unsigned
+     * int, where U"" was the two-byte unsigned int. */
+    int i16 = target_int_size() == 2;
+    return prefix == 'L' ? ty_wchar()
+         : prefix == 'U' ? ty_base(i16 ? TY_LONG : TY_INT, 1)
+         : prefix == 'u' ? ty_base(i16 ? TY_INT : TY_SHORT, 1)
+         : ty_plain_char();
 }
 
 struct type *ty_llong(int is_unsigned)

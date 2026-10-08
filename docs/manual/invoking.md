@@ -61,7 +61,7 @@ the full entry.
 | Section | Options |
 |---|---|
 | [Overall](#overall-options) | `-c` `-S` `-E` `-o FILE` `-j N` `-x LANG` `-fsyntax-only` `-save-temps[=cwd\|obj]` `-dumpbase NAME` `-pipe` `--emit-c` `--emit-interfaces` `--emit-empty-object FILE` `--help` `-h` `--help-warnings` `--version` `-dumpmachine` `--dump-predef` `--print-search-dirs` `--explain[=ID]` |
-| [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-ffreestanding` `-fno-builtin` `-fno-builtin-NAME` `-fwrapv` `-fno-strict-overflow` `-fstrict-aliasing` `-fno-strict-aliasing` `-fcommon` `-fno-common` `-fno-short-enums` `-fsingle-precision-constant` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
+| [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-fshort-wchar` `-fno-short-wchar` `-ffreestanding` `-fno-builtin` `-fno-builtin-NAME` `-fwrapv` `-fno-strict-overflow` `-fstrict-aliasing` `-fno-strict-aliasing` `-fcommon` `-fno-common` `-fno-short-enums` `-fsingle-precision-constant` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
 | [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fmessage-length=N` `-fdiagnostics-parseable-fixits` `--fix` `-fanalyzer` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
 | [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-funroll-loops` `-fno-unroll-loops` `-ffp-contract=off\|on\|fast` `-fno-reorder-functions` `-fremarks` `-fremarks=json` |
@@ -481,6 +481,27 @@ AArch64 targets, ARM and RISC-V; see [Targets](targets.md)). Honoured: the
 predefined macro `__CHAR_UNSIGNED__` is defined or removed to match. The
 last of the two on the command line wins.
 
+### `-fshort-wchar`, `-fno-short-wchar`
+
+`-fshort-wchar` makes `wchar_t` an `unsigned short` on every target, as
+GCC's and Clang's option does. UEFI code and ARM code written for UTF-16
+strings use it. What changes:
+- **The type.** `wchar_t` is `unsigned short`, in C and C++, and an `L""`
+  literal has 16-bit elements. A code point above U+FFFF is a surrogate
+  pair, as in a `u""` literal.
+- **The macros**, as Clang has them: `__WCHAR_TYPE__` is
+  `unsigned short`, `__WCHAR_MAX__` 65535, `__WCHAR_MIN__` 0,
+  `__WCHAR_WIDTH__` 16, `__SIZEOF_WCHAR_T__` 2, `__WCHAR_UNSIGNED__` 1,
+  and on ARM `__ARM_SIZEOF_WCHAR_T` 2. So `<wchar.h>`'s `WCHAR_MAX` is
+  65535.
+- **ARM objects** record a 2-byte `wchar_t` in their build attributes
+  (`Tag_ABI_PCS_wchar_t`).
+
+`lib/libc` is built with the target's own `wchar_t`, so its `wcs*`
+functions do not work on 16-bit strings. This is the same as GCC with a
+newlib built without the option. The last of the two options on the
+command line wins.
+
 ### `-ffreestanding`
 
 Accepted. EmbCC makes no hosted assumptions to turn off: it treats no
@@ -570,8 +591,8 @@ as GCC's option does. `-faccess-control` restores the default.
 `-fshort-enums` is [refused](#refused-options): on every target an
 enumeration is `int`-sized unless its values need a wider type (see
 [Targets](targets.md#data-models)), and a structure containing one would
-be laid out differently. `-fshort-wchar`, `-fms-extensions`, `-fno-asm`
-and `-fvisibility=...` are not accepted (unknown argument).
+be laid out differently. `-fms-extensions`, `-fno-asm` and
+`-fvisibility=...` are not accepted (unknown argument).
 
 ## Warning and diagnostic options
 

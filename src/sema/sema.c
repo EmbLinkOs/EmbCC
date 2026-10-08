@@ -1412,17 +1412,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* char[N] (or wchar_t/char16_t/char32_t[N] for a wide literal),
          * decaying to a pointer like any array (sizeof sees the array through
          * `undecayed`). e->num is the element count including the NUL. */
-        /* By the PREFIX: L is wchar_t whatever its width (two bytes on
-         * AVR), U is char32_t and u char16_t, as __CHAR32_TYPE__ and
-         * __CHAR16_TYPE__ spell them -- on AVR unsigned long and
-         * unsigned int, where U"" was the two-byte unsigned int. */
-        int i16 = target_int_size() == 2;
-        struct type *elem = e->str_prefix == 'L' ? ty_wchar()
-                          : e->str_prefix == 'U'
-                            ? ty_base(i16 ? TY_LONG : TY_INT, 1)
-                          : e->str_prefix == 'u'
-                            ? ty_base(i16 ? TY_INT : TY_SHORT, 1)
-                          : ty_plain_char();
+        struct type *elem = ty_str_elem(e->str_prefix);
         e->undecayed = ty_array(elem, (int)e->num);
         e->ty = ty_ptr(elem);
         break;

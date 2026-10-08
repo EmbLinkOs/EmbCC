@@ -141,7 +141,7 @@ unsigned char *arm_build_attributes(size_t *len)
         btag(&attrs, Tag_FP_arch, v8 || target_thumb_fpu_dp() ? 8 : 6);
     btag(&attrs, Tag_ABI_PCS_R9_use, 0);         /* r9 is an ordinary reg */
     btag(&attrs, Tag_ABI_PCS_GOT_use, 1);        /* direct: no GOT, no PIC */
-    btag(&attrs, Tag_ABI_PCS_wchar_t, 4);
+    btag(&attrs, Tag_ABI_PCS_wchar_t, target_wchar_size());   /* 2: -fshort-wchar */
     btag(&attrs, Tag_ABI_FP_denormal, 1);
     btag(&attrs, Tag_ABI_FP_exceptions, 0);
     btag(&attrs, Tag_ABI_FP_number_model, 3);    /* full IEEE 754 */

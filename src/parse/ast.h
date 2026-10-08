@@ -49,7 +49,8 @@ struct expr {
     struct type *ty;      /* set by sema on every node */
     struct type *undecayed; /* sema: original array type when ty is the
                              * decayed pointer (sizeof needs it) */
-    long num;             /* EXPR_NUM; EXPR_STR: byte length incl NUL */
+    long num;             /* EXPR_NUM; EXPR_STR: element count incl NUL
+                           * (str_width bytes each) */
     double fnum;          /* EXPR_FNUM */
     int imag;             /* EXPR_FNUM: a GNU imaginary constant — its type
                            * is complex and its value 0 + fnum*i */

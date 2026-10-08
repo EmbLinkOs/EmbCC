@@ -186,7 +186,8 @@ Notes on the table:
   `long double` are binary32 (GCC's `-m32bit-doubles`), and `size_t`,
   `ptrdiff_t` and `wchar_t` are `long` types. SPARC's binary128
   `long double` is 8-aligned. Xtensa's `wchar_t` is a 16-bit
-  `unsigned short`.
+  `unsigned short`. On every target, `-fshort-wchar` makes `wchar_t` an
+  `unsigned short` (see [Invoking](invoking.md#-fshort-wchar--fno-short-wchar)).
 - MIPS64 has LP64's sizes in the RV64 column: `long` and pointers 8/8,
   `long double` 16/16 binary128, `__int128` 16/16, a signed plain `char`
   and an `int` `wchar_t`, `__BIGGEST_ALIGNMENT__` and the stack 16 (see
