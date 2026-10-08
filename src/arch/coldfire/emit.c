@@ -678,3 +678,95 @@ void cf_unlk(struct code *c, int an)
     need_a(an, "unlk");
     cf_w(c, 0x4e58u | (unsigned)(an & 7));
 }
+
+/* ---- what only the assembler writes -----------------------------------------
+ *
+ * Forms the code generator has no use for, which inline asm and .S files
+ * do (src/arch/coldfire/asm.c): the exception return, stop and tpf, the
+ * status, condition-code and user-stack-pointer moves, movec, the bit
+ * operations, and the short bsr. Fields as the
+ * ColdFire Programmer's Reference Manual has them; QEMU's disassembler
+ * referees them (tests/golden/coldfire-asm.sh). */
+
+void cf_rte(struct code *c) { cf_w(c, 0x4e73u); }
+void cf_tpf(struct code *c) { cf_w(c, 0x51fcu); }
+
+void cf_stop(struct code *c, long imm)
+{
+    if (imm < 0 || imm > 0xffff)
+        internal_error("coldfire: stop #%ld does not fit 16 bits", imm);
+    cf_w(c, 0x4e72u);
+    cf_w(c, (unsigned)imm);
+}
+
+void cf_move_to_sr_imm(struct code *c, long imm)
+{
+    if (imm < 0 || imm > 0xffff)
+        internal_error("coldfire: move to sr #%ld does not fit 16 bits", imm);
+    cf_w(c, 0x46fcu);
+    cf_w(c, (unsigned)imm);
+}
+
+void cf_move_from_ccr(struct code *c, int dn)
+{
+    need_d(dn, "move from ccr");
+    cf_w(c, 0x42c0u | (unsigned)dn);
+}
+
+void cf_move_to_ccr(struct code *c, struct cf_ea src)
+{
+    if (src.mode != CFM_D && src.mode != CFM_IMM)
+        internal_error("coldfire: move to ccr takes Dn or #imm (mode %d)",
+                       (int)src.mode);
+    op_ea(c, 0x44c0u, &src, 2);
+}
+
+/* move.l An,%usp (to_usp) or move.l %usp,An */
+void cf_move_usp(struct code *c, int to_usp, int an)
+{
+    need_a(an, "move usp");
+    cf_w(c, (to_usp ? 0x4e60u : 0x4e68u) | (unsigned)(an & 7));
+}
+
+/* movec Rn,Rc: Rn any of d0-a7, Rc the 12-bit control register number */
+void cf_movec(struct code *c, int rn, int rc)
+{
+    if (rn < 0 || rn > 15 || rc < 0 || rc > 0xfff)
+        internal_error("coldfire: movec %d,%d", rn, rc);
+    cf_w(c, 0x4e7bu);
+    cf_w(c, (unsigned)(rn << 12) | (unsigned)rc);
+}
+
+/* btst/bchg/bclr/bset with the bit number in Dn (dn >= 0) or a constant
+ * (dn < 0, `bit`), on Dn (mod 32) or a byte in memory (mod 8). */
+void cf_bit(struct code *c, enum cf_bitop op, int dn, int bit,
+            struct cf_ea dst)
+{
+    unsigned o = (unsigned)op << 6;
+    if (dst.mode != CFM_D && !cf_ea_is_mem_alterable(&dst) &&
+        !(op == CF_BTST && (dst.mode == CFM_PCDISP || dst.mode == CFM_PCIDX ||
+                            (dst.mode == CFM_IMM && dn >= 0))))
+        internal_error("coldfire: bit operation on mode %d", (int)dst.mode);
+    if (dn >= 0) {
+        need_d(dn, "a bit number");
+        op_ea(c, 0x0100u | (unsigned)(dn << 9) | o, &dst, 1);
+        return;
+    }
+    if (bit < 0 || bit > (dst.mode == CFM_D ? 31 : 7))
+        internal_error("coldfire: bit number %d", bit);
+    if (dst.mode == CFM_IDX || dst.mode == CFM_ABSW || dst.mode == CFM_ABSL ||
+        dst.mode == CFM_PCIDX)
+        internal_error("coldfire: a static bit operation takes no mode %d",
+                       (int)dst.mode);
+    cf_w(c, 0x0800u | o | (unsigned)cf_ea_field(&dst));
+    cf_w(c, (unsigned)bit);
+    cf_ea_ext(c, &dst, 1);
+}
+
+/* bsr.b (bra.b is cf_bcc_b with CF_T). */
+void cf_bsr_b(struct code *c, long disp)
+{
+    if (disp < -128 || disp > 127 || disp == 0 || disp == -1)
+        internal_error("coldfire: short bsr displacement %ld", disp);
+    cf_w(c, 0x6100u | ((unsigned)disp & 0xff));
+}

@@ -1433,8 +1433,8 @@ static int blocks_by_gas(void)
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
            a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32 ||
            a == TARGET_LOONGARCH64 || a == TARGET_MIPS64 ||
-           a == TARGET_XTENSA || a == TARGET_TRICORE ||
-           a == TARGET_SPARC32 || a == TARGET_PPC32;
+           a == TARGET_XTENSA || a == TARGET_TRICORE || a == TARGET_RX ||
+           a == TARGET_COLDFIRE || a == TARGET_SPARC32 || a == TARGET_PPC32;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1470,9 +1470,12 @@ static void naked_asm_text(struct outbuf *b, const struct func *f,
             p++;
             continue;
         }
-        if (*p == 'c')            /* %c0: the constant without a prefix,
-                                   * which is how every operand here is
-                                   * written anyway */
+        /* %c0: the constant without a prefix -- how every operand here is
+         * written, except on RX and ColdFire, whose GCCs print an immediate
+         * as `#5` */
+        int bare = *p == 'c' || (target_get() != TARGET_RX &&
+                                 target_get() != TARGET_COLDFIRE);
+        if (*p == 'c')
             p++;
         int k = -1;
         if (*p == '[') {
@@ -1500,7 +1503,7 @@ static void naked_asm_text(struct outbuf *b, const struct func *f,
             diag_fatal(f->file, s->line, "asm template modifier '%%%c' is "
                        "not supported in a naked function", *p ? *p : ' ');
         }
-        ob_fmt(b, "%ld", a->in[k].imm);
+        ob_fmt(b, bare ? "%ld" : "#%ld", a->in[k].imm);
     }
     ob_ch(b, '\n');
 }
@@ -1532,13 +1535,14 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
                 ob_fmt(b, "call %s\nnop\n", e->callee->name);
                 continue;
             }
-            ob_fmt(b, "%s %s\n", t == TARGET_THUMB ||
-                                 t == TARGET_LOONGARCH64 ||
-                                     t == TARGET_PPC32 ? "bl"
-                                 : t == TARGET_MIPS32 ||
-                                   t == TARGET_MIPS64 ? "jal"
-                                 : t == TARGET_COLDFIRE ? "jsr" : "call",
-                   e->callee->name);
+            ob_fmt(b, "%s %s%s\n", t == TARGET_THUMB ||
+                                   t == TARGET_LOONGARCH64 ||
+                                       t == TARGET_PPC32 ? "bl"
+                                   : t == TARGET_MIPS32 ||
+                                     t == TARGET_MIPS64 ? "jal"
+                                   : t == TARGET_COLDFIRE ? "jsr"
+                                   : t == TARGET_RX ? "bsr" : "call",
+                   t == TARGET_RX ? "_" : "", e->callee->name);
             continue;
         }
         diag_fatal(f->file, s->line,
@@ -1572,22 +1576,24 @@ static void naked_to_blocks(struct unit *u)
                        "into .text", f->name, f->section);
         struct outbuf b = { NULL, 0, 0 };
         enum target_arch t = target_get();
+        /* RX: the object's name, `_f`, as the block assembler reads it */
+        const char *up = t == TARGET_RX ? "_" : "";
         ob_fmt(&b, ".text\n.p2align %d\n", t == TARGET_AVR ? 1 : 2);
         if (f->is_weak)
-            ob_fmt(&b, ".weak %s\n", f->name);
+            ob_fmt(&b, ".weak %s%s\n", up, f->name);
         else if (!f->is_static)
-            ob_fmt(&b, ".global %s\n", f->name);
-        ob_fmt(&b, ".type %s, %%function\n", f->name);
+            ob_fmt(&b, ".global %s%s\n", up, f->name);
+        ob_fmt(&b, ".type %s%s, %%function\n", up, f->name);
         if (t == TARGET_THUMB && thumb_state())
             ob_str(&b, ".thumb_func\n");
-        ob_fmt(&b, "%s:\n", f->name);
+        ob_fmt(&b, "%s%s:\n", up, f->name);
         /* a diagnostic in the body names the line of its first asm */
         int head = 0;
         for (size_t k = 0; k < b.n; k++)
             head += b.p[k] == '\n';
         const struct stmt *first = f->body;     /* the statement list */
         naked_body_text(&b, f, first);
-        ob_fmt(&b, ".size %s, .-%s\n", f->name, f->name);
+        ob_fmt(&b, ".size %s%s, .-%s%s\n", up, f->name, up, f->name);
         ob_ch(&b, '\0');
         struct topasm *ta = xcalloc(1, sizeof *ta);
         ta->tmpl = b.p;
@@ -1821,20 +1827,12 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * The placement pass further down reuses these already-assembled bytes. */
     if (blocks_by_gas())
         naked_to_blocks(u);
-    if (u->topasm && target_get() == TARGET_RX)
-        diag_fatal(in, u->topasm->line, "file-scope assembly is not "
-                   "supported for rx-none-elf yet: EmbCC has no RX "
-                   "assembler");
     for (struct topasm *ta = u->topasm; ta; ta = ta->next) {
         /* x86-64's mnemonics are what topasm.c encodes; the directives --
          * labels and .byte/.long/.quad -- are not, so on AArch64 a block
          * written as data assembles, and one written with mnemonics is
          * refused by name instead of quietly emitting x86 bytes. The
          * embedded targets have an assembler of their own. */
-        if (target_get() == TARGET_COLDFIRE)
-            diag_fatal(NULL, 0, "file-scope asm is not supported for %s "
-                       "yet: EmbCC has no ColdFire assembler",
-                       target_triple_now());
         if (blocks_by_gas()) {
             if (gas_assemble_block(ta))
                 return 1;
@@ -2685,12 +2683,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "compile with -c (there is no Xtensa assembler "
                             "here to check the text against)");
     /* RX instructions are one to eight bytes with no length rule short of
-     * decoding, and EmbCC has no RX assembler to read -S back: refused
-     * rather than written as bytes no tool here can check. */
+     * decoding, and EmbCC has no RX disassembler to write them as text:
+     * refused rather than written as bytes. (Its assembler reads .s
+     * files and inline asm; nothing writes RX text yet.) */
     if (want_asm && ta == TARGET_RX)
-        diag_fatal(NULL, 0, "-S is not supported for rx-none-elf yet: there "
-                            "is no RX assembler in EmbCC to read it back "
-                            "(use -c)");
+        diag_fatal(NULL, 0, "-S is not supported for rx-none-elf yet: EmbCC "
+                            "writes no RX assembly text (use -c; .s files and "
+                            "inline asm do assemble)");
     /* -Wa,-a...: the listing, the same text as -S, beside the object */
     if (g_listing && !want_asm) {
         if (ta == TARGET_XTENSA || ta == TARGET_RX) {

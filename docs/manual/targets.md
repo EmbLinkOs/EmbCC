@@ -1203,8 +1203,20 @@ Accepted options: `-mcpu=rx600|rx610|rx200|rx100`, `-m32bit-doubles`,
 Refused by name: `-m64bit-doubles`, `-fpu`, `-mbig-endian-data`,
 `-mgcc-abi`, a nonzero `-msmall-data-limit`, `-mpid`, a nonzero
 `-mint-register`, `-mno-allow-string-insns`, `-mas100-syntax`, unwind
-tables, `-S`, inline and file-scope assembly, and C++ exceptions (C++
-compiles with `-fno-exceptions`; see [C++](cxx.md#targets)).
+tables, `-S`, and C++ exceptions (C++ compiles with `-fno-exceptions`; see
+[C++](cxx.md#targets)).
+
+EmbCC assembles RX itself, in GNU syntax: inline `__asm__` with GCC's
+operand constraints, naked functions, file-scope blocks and `.s`/`.S`
+files, through one assembler for RXv1's integer instructions -- every form
+encoded as rx-elf-as encodes it (tests/golden/rx-asm.sh compares them
+byte for byte, and rx-elf-objdump reads each back), branches relaxed as
+GNU as relaxes them, `mov.l #sym` and branches to symbols elsewhere
+relocated (`R_RX_DIR32`, `R_RX_DIR24S/16S/8S_PCREL`). A C name is `_name`
+in assembly, as with GCC. The vocabulary, the constraints and what is
+refused (the FPU's and RXv2's instructions among them) are in
+[Inline assembly](inline-asm.md#renesas-rx) and
+[embas](tools/embas.md#rx-specifics).
 
 ## MIPS32
 
@@ -1519,6 +1531,18 @@ every later core), big-endian, soft float: GCC's `m68k-elf` with
 `-mcpu=5208`. Freestanding only. The design notes, and which facts are
 not yet checked against a real m68k compiler, are in
 [the ColdFire plan](../internals/coldfire-plan.md).
+
+EmbCC assembles ColdFire itself, in GNU as's Motorola syntax (`%` optional,
+MIT's `An@(d)` accepted): inline `__asm__` with GCC's operand constraints,
+naked functions, file-scope blocks and `.s`/`.S` files, through one
+assembler for the MCF5208's ISA_A+ -- tests/golden/coldfire-asm.sh reads
+every form back with QEMU's m68k disassembler, assembles FreeRTOS's
+ColdFire V2 port, and runs a program that uses it against a host model.
+Branches relax to .s or .w (the MCF5208 has no 32-bit branch); a `bra` or
+`bsr` to a symbol defined elsewhere is a `jmp`/`jsr` to its address
+(`R_68K_32`). The vocabulary, the constraints and what is refused are in
+[Inline assembly](inline-asm.md#coldfire) and
+[embas](tools/embas.md#coldfire-specifics).
 
 ### Triples
 
@@ -2139,8 +2163,8 @@ the entry.
 | a V9 relocation operator (`%hh`, `%lm`, `%gdop_*`...) | `this relocation operator is SPARC V9's or position-independent code's; EmbLD applies %hi/%lo (R_SPARC_HI22/LO10), call and branch displacements and data words` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
-| inline asm | `inline assembly is not supported for m68k-none-elf yet: EmbCC has no ColdFire assembler` |
-| file-scope asm, `.s` and `.S` files | `file-scope asm is not supported for m68k-none-elf yet` / `no assembly-file support` |
+| a rotate, `dbcc`, `exg`, `cas`, BCD and the FPU's instructions in asm | `rol.l: ColdFire has no rotate` (and so on, by name) |
+| ISA_B's `mvs`, `mvz`, `mov3q`, `sats`, and a 32-bit branch (`bra.l`) | `mvs.b is an ISA_B instruction, which the MCF5208 (ISA_A+) does not have: it traps as illegal there` |
 | a frame beyond 32 KiB | `a stack frame larger than 32 KiB` |
 | unwind tables | `unwind tables are not supported for m68k-none-elf yet` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for m68k-none-elf yet: EmbCC writes no ColdFire .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |

@@ -136,12 +136,19 @@ refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "inline assembly" 'inline assembly is not supported for rx-none-elf' \
-    'int f(void){ __asm__("nop"); return 0; }'
-refc "a naked function" 'inline assembly is not supported for rx-none-elf' \
-    'void __attribute__((naked)) f(void){ __asm__("rts"); }'
-refc "file-scope assembly" 'file-scope assembly is not supported for rx-none-elf' \
-    '__asm__(".global x\nx: .long 0");'
+# assembly of every kind assembles (tests/golden/rx-asm.sh referees it);
+# what is outside the vocabulary is refused by name
+printf 'int f(void){ __asm__("nop"); return 0; }
+void __attribute__((naked)) g(void){ __asm__("rts"); }
+__asm__(".global _x\\n_x: .long 0");
+' > "$out/asm.c"
+"$EMBCC" --target=$T -c "$out/asm.c" -o /dev/null 2> "$out/asm.err" || {
+    echo "inline, naked or file-scope assembly was refused:"; cat "$out/asm.err"
+    exit 1; }
+refc "an FPU instruction in a template" 'is an FPU or RXv2 instruction' \
+    'void f(void){ __asm__("fadd r1, r2"); }'
+refc "a clobbered stack pointer" "clobbers 'r0', the stack pointer" \
+    'void f(void){ __asm__ volatile("nop" ::: "r0"); }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 # C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
 # it); exceptions, on by default, are refused by name: there are no
@@ -154,5 +161,5 @@ grep -q 'C++ exceptions are not supported for rx-none-elf' "$out/cxx.err" || {
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions does not compile"; exit 1; }
 echo "the frame and return address above level 0, __int128,"
-echo "interrupt functions, an over-aligned scalar, assembly of every kind and"
-echo "C++ exceptions are each refused by name"
+echo "interrupt functions, an over-aligned scalar, FPU instructions in asm"
+echo "and C++ exceptions are each refused by name; assembly compiles"

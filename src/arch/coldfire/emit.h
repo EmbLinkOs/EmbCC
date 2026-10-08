@@ -187,4 +187,19 @@ void cf_move_from_sr(struct code *c, int dn);
 void cf_move_to_sr(struct code *c, int dn);
 void cf_unlk(struct code *c, int an);
 
+/* ---- the assembler's own (asm.c): forms the code generator never emits */
+void cf_rte(struct code *c);
+void cf_tpf(struct code *c);
+void cf_stop(struct code *c, long imm);
+void cf_move_to_sr_imm(struct code *c, long imm);
+void cf_move_from_ccr(struct code *c, int dn);
+void cf_move_to_ccr(struct code *c, struct cf_ea src);    /* Dn or #imm */
+void cf_move_usp(struct code *c, int to_usp, int an);
+void cf_movec(struct code *c, int rn, int rc);
+enum cf_bitop { CF_BTST, CF_BCHG, CF_BCLR, CF_BSET };
+/* the bit number in Dn (dn >= 0), or the constant `bit` (dn < 0) */
+void cf_bit(struct code *c, enum cf_bitop op, int dn, int bit,
+            struct cf_ea dst);
+void cf_bsr_b(struct code *c, long disp);
+
 #endif

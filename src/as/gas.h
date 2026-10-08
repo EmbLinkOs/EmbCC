@@ -94,6 +94,24 @@ struct gas_target {
      * address and not only on the distance (Xtensa's call and l32r round
      * it to a word). NULL elsewhere. */
     void (*at)(long pc);
+    /* A statement separator beyond the newline (RX's `!`), 0 for none. */
+    char line_sep;
+    /* Relaxation by levels, for a target whose branch has more lengths
+     * than two (RX: 1, 2, 3 or 4 bytes, and a pair beyond): the least form
+     * index the statement may take -- -1 in the first pass, the optimistic
+     * guess -- and, after it, the index it took. A statement's level only
+     * rises, so the passes settle. NULL elsewhere. */
+    void (*set_level)(int level);
+    int (*took_level)(void);
+    /* Code alignment's padding, GNU as's for this target; NULL for the
+     * single nops do_align writes. */
+    void (*fill)(struct code *c, long gap);
+    /* Is the statement a branch whose label, when this file defines it in
+     * the same section, is a displacement for the target to relax (RX,
+     * ColdFire)? Its symbol is relocated only when substitute() cannot
+     * resolve it; every other symbol form is relocated whoever defines
+     * it. NULL elsewhere. */
+    int (*is_transfer)(const char *stmt);
     /* The symbol forms that are relocated WHATEVER the symbol is -- a
      * label of this file too -- because they name its ADDRESS, which only
      * the linker knows: SPARC's %hi()/%lo() and `set`, PowerPC's @ha/@l/@h.

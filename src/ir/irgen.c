@@ -4530,9 +4530,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             else if (target_get() == TARGET_PPC32)
                 irg_asm_ppc(fn, s);
             else if (target_get() == TARGET_RX)
-                diag_fatal(fn->file, s->line,
-                           "inline assembly is not supported for "
-                           "rx-none-elf yet: EmbCC has no RX assembler");
+                irg_asm_rx(fn, s);
             else if (target_get() == TARGET_SPARC32)
                 irg_asm_sparc(fn, s);
             else if (target_get() == TARGET_COLDFIRE)
