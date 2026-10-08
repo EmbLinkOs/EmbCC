@@ -376,11 +376,14 @@ embcc: error: C++ exceptions are not supported for mips-none-elf yet: EmbCC writ
 ```
 
 **AVR.** EmbCC refuses to generate code for a C++ unit there, whether with
-`-c`, `-S` or `--emit-c`: the front end does not yet lay classes out for
-a 16-bit `int` and 2-byte pointers.
+`-c`, `-S` or `--emit-c`. The front end lays classes out by AVR's sizes,
+but its lowering still assumes a 32-bit `int` (integral promotions,
+enumerations, literals), a member pointer's adjustment as wide as a
+`long`, and RTTI's base offsets one pointer wide; and no AVR C++ runtime
+is built.
 
 ```text
-embcc: error: C++ is not yet supported for avr: the C++ front end does not lay classes out for a 16-bit int and 2-byte pointers
+embcc: error: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
 ```
 
 `-fsyntax-only`, which writes nothing, is accepted.

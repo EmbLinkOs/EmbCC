@@ -2165,7 +2165,7 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 | an interrupt handler with parameters | `the AVR backend cannot lower an interrupt handler with parameters: the hardware calls it, so there is no caller to pass them and they would be read out of whatever the interrupted code left in those registers yet (function __vector_3)` |
 | an interrupt handler that returns a value | ``the AVR backend cannot lower an interrupt handler that returns a value: `reti` goes back to the interrupted instruction, and nothing is there to receive it yet (function __vector_3)`` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for avr: the C++ front end does not lay classes out for a 16-bit int and 2-byte pointers` |
+| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits` |
 
 Code compiled at `-O0` is large; an ordinary program may not fit the
 part's 32 KB of flash unless built with `-O1` or above.

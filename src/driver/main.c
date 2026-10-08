@@ -1673,10 +1673,16 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         return 0;
     }
     if (lang_cxx && !syntax_only && target_get() == TARGET_AVR) {
+        /* The front end lays a class out by AVR's sizes, but its lowering
+         * still writes a 32-bit int's promotions, enumerations and
+         * literals, a `long` member-pointer adjustment and RTTI base
+         * offsets one pointer wide -- each wrong where int and pointers
+         * are 16 bits -- and no AVR C++ runtime is built. */
         fprintf(stderr,
                 "embcc: error: C++ is not yet supported for %s: the C++ "
-                "front end does not lay classes out for a 16-bit int and "
-                "2-byte pointers\n", target_triple_now());
+                "lowering assumes a 32-bit int and 4-byte pointers (integral "
+                "promotions, member pointers, RTTI), and this target's are "
+                "16 bits\n", target_triple_now());
         return 1;
     }
     if (lang_cxx && !syntax_only && want_exceptions &&
