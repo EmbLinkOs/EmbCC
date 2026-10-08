@@ -28,8 +28,10 @@ rm -rf "$out"; mkdir -p "$out"
 export EMBCC_RISCV_HARNESS
 
 any=0
+# ...and the FPU with the integer convention (rv32imafc/ilp32, rv64gc/lp64),
+# where floats travel in a registers and no f register survives a call.
 for cfg in "32 rv32imafc ilp32f" "32 rv32imafdc ilp32d" "64 rv64gc lp64d" \
-           "64 rv64imafc lp64f"; do
+           "64 rv64imafc lp64f" "32 rv32imafc ilp32" "64 rv64gc lp64"; do
     set -- $cfg
     x=$1; MARCH=$2; MABI=$3
     QEMU=${EMBCC_QEMU_RISCV:-qemu-system-riscv$x}

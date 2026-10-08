@@ -29,6 +29,14 @@ __attribute__((noinline)) void mixv(float a, double b)
  * from fa1 into fa0: b has to be read before a is written. */
 __attribute__((noinline)) void mixv2(double b, float a)
 { s_fvar(a, 1, b); }
+/* Values live across a call that uses every f register: only where the
+ * ABI preserves fs0-fs11 may they stay in them. */
+__attribute__((noinline)) float keep(float a)
+{
+    float y = a * 1.5f, z = a + 2.0f, w = a - 0.25f;
+    float r = r_pressure(a);
+    return y * z + r * w;
+}
 /* A float parameter read only as bits: it lives in an x register, and
  * reaches it from fa0 after the x registers' parallel move. */
 __attribute__((noinline)) unsigned bits_plus(int k, float x)
@@ -93,6 +101,7 @@ int main(void)
     putn((long)bits_plus(3, 2.5f)); nl();
     mixv(-1.25f, 6.5);
     mixv2(9.75, -0.5f);
+    pf(keep(1.25f)); nl();
     puts_("==END==\n");
     return 0;
 }

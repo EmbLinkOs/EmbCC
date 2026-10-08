@@ -71,3 +71,7 @@ fn_ff r_ptr(void);
  * register that a variadic call needs in an a register. */
 double r_d3(double a, double b, double c);
 void s_fvar(float f, int n, ...);
+/* Enough floats live at once that a compiler uses every f register --
+ * fs0-fs11 too, which under ilp32/lp64 no one preserves: a caller that
+ * kept a value in one across this call reads garbage back. */
+float r_pressure(float x);

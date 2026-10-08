@@ -98,5 +98,60 @@ void s_fvar(float f, int n, ...)
     nl();
 }
 
+static volatile float pv[30];
+float r_pressure(float x)
+{
+    /* thirty floats read in order (volatile) and only then combined, each
+     * with the last one read: all thirty are live at once, and no compiler
+     * holds that many in the caller-saved f registers alone */
+    for (int k = 0; k < 30; k++)
+        pv[k] = x * ((float)k + 1.5f) + (float)k;
+    float v0 = pv[0];
+    float v1 = pv[1];
+    float v2 = pv[2];
+    float v3 = pv[3];
+    float v4 = pv[4];
+    float v5 = pv[5];
+    float v6 = pv[6];
+    float v7 = pv[7];
+    float v8 = pv[8];
+    float v9 = pv[9];
+    float v10 = pv[10];
+    float v11 = pv[11];
+    float v12 = pv[12];
+    float v13 = pv[13];
+    float v14 = pv[14];
+    float v15 = pv[15];
+    float v16 = pv[16];
+    float v17 = pv[17];
+    float v18 = pv[18];
+    float v19 = pv[19];
+    float v20 = pv[20];
+    float v21 = pv[21];
+    float v22 = pv[22];
+    float v23 = pv[23];
+    float v24 = pv[24];
+    float v25 = pv[25];
+    float v26 = pv[26];
+    float v27 = pv[27];
+    float v28 = pv[28];
+    float v29 = pv[29];
+    return v0 * v29 +
+           v1 * v28 +
+           v2 * v27 +
+           v3 * v26 +
+           v4 * v25 +
+           v5 * v24 +
+           v6 * v23 +
+           v7 * v22 +
+           v8 * v21 +
+           v9 * v20 +
+           v10 * v19 +
+           v11 * v18 +
+           v12 * v17 +
+           v13 * v16 +
+           v14 * v15;
+}
+
 static float twice_plus(float a, float b) { return a + a + b; }
 fn_ff r_ptr(void) { return twice_plus; }
