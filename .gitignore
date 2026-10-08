@@ -39,4 +39,5 @@ ref/
 *.dSYM/
 /embmap
 /embpack
+/embflash
 /embrt
