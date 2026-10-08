@@ -371,6 +371,9 @@ struct func {
     /* __attribute__((constructor)) / ((destructor)): its address goes in
      * .init_array / .fini_array, and the startup code walks them. */
     int is_ctor, is_dtor;
+    /* constructor(N) / destructor(N): N + 1, 0 for none -- the address
+     * goes in .init_array.NNNNN / .fini_array.NNNNN instead */
+    int ctor_prio, dtor_prio;
     /* __attribute__((signal)) / ((interrupt)): an interrupt handler, 0
      * for an ordinary function. ISR_SIGNAL and ISR_INTERRUPT are AVR's
      * two (interrupt re-enables interrupts on entry); ISR_INTERRUPT is

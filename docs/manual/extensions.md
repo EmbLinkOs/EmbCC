@@ -426,12 +426,21 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `interrupt`, `signal` | Interrupt handlers. See [Interrupt handlers](#interrupt-handlers) |
 | `keep_interrupts_masked` | MIPS32 only, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
 
-A constructor or destructor with a priority is refused, because EmbCC
-emits one `.init_array` in source order:
-
-```text
-embcc: c.c:1: error: __attribute__((constructor(101))) is not supported: EmbCC emits one .init_array in source order and cannot honour a priority
-```
+`constructor(N)` and `destructor(N)` take a priority, as in GCC. The
+address goes in a section of its own, `.init_array.NNNNN` or
+`.fini_array.NNNNN` (`.init_array.00101` for 101), and the link orders
+the arrays:
+- EmbLD's default layout places the numbered sections ascending, ahead
+  of the plain `.init_array`, as GNU ld's default script does. A linker
+  script orders them with `KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))`
+  before `KEEP(*(.init_array))`.
+- So constructor(101) runs before constructor(200), and both before
+  every constructor without a priority. Destructors run in the reverse
+  order, since the exit code walks `.fini_array` backwards.
+- A priority from 0 to 100 is reserved for the implementation and warns
+  under `-Wprio-ctor-dtor` (on by default, as in GCC); one above 65535
+  is refused. Objects from clang, which names the sections
+  `.init_array.101`, sort with EmbCC's.
 
 Declarations of one function that disagree are refused: two different
 sections (`'f' is placed in section '.a' here and '.b' before`) or two

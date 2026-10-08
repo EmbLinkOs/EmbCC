@@ -854,23 +854,38 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
      * "aw" and @init_array give the section the same flags and TYPE the
      * writer uses; a linker gathers these by type, so @progbits here
      * would lay the pointers out as ordinary data. */
+    /* A priority's own section, `.init_array.NNNNN`, as the object writer
+     * makes it (constructor(N)): one section per priority, in the order
+     * the functions first ask for it, each holding its functions in
+     * source order. */
     static const char *const arr[2] = { ".init_array", ".fini_array" };
-    for (int pass = 0; pass < 2; pass++) {
-        int any = 0;
-        for (struct func *f = u->funcs; f; f = f->next) {
-            if (f->absorbed || !f->has_defn)
+    for (int pass = 0; pass < 2; pass++)
+        for (struct func *g = u->funcs; g; g = g->next) {
+            if (g->absorbed || !g->has_defn ||
+                !(pass == 0 ? g->is_ctor : g->is_dtor))
                 continue;
-            if (!(pass == 0 ? f->is_ctor : f->is_dtor))
+            int prio = pass == 0 ? g->ctor_prio : g->dtor_prio, seen = 0;
+            /* a priority an earlier function asked for is done */
+            for (struct func *e = u->funcs; e != g; e = e->next)
+                if (!e->absorbed && e->has_defn &&
+                    (pass == 0 ? e->is_ctor : e->is_dtor) &&
+                    (pass == 0 ? e->ctor_prio : e->dtor_prio) == prio)
+                    seen = 1;
+            if (seen)
                 continue;
-            if (!any) {
-                ob_fmt(b, "\n\t.section\t%s,\"aw\",%s%s\n\t.balign\t%d\n",
-                       arr[pass], type_sigil(), arr[pass] + 1,
-                       target_ptr_size());
-                any = 1;
-            }
-            ptr_slot(b, asym(f->name), 0, 1);
+            char nm[32];
+            if (prio)
+                snprintf(nm, sizeof nm, "%s.%05d", arr[pass], prio - 1);
+            else
+                snprintf(nm, sizeof nm, "%s", arr[pass]);
+            ob_fmt(b, "\n\t.section\t%s,\"aw\",%s%s\n\t.balign\t%d\n",
+                   nm, type_sigil(), arr[pass] + 1, target_ptr_size());
+            for (struct func *f = g; f; f = f->next)
+                if (!f->absorbed && f->has_defn &&
+                    (pass == 0 ? f->is_ctor : f->is_dtor) &&
+                    (pass == 0 ? f->ctor_prio : f->dtor_prio) == prio)
+                    ptr_slot(b, asym(f->name), 0, 1);
         }
-    }
 }
 
 /* ---- asm blocks and naked functions: Thumb, RISC-V and AVR ------------

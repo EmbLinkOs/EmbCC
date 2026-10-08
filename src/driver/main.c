@@ -1666,6 +1666,10 @@ static const char *cxx_unwind_tables_name(void)
     }
 }
 
+/* One .init_array/.fini_array section of the object: constructors
+ * (kind 0) or destructors (1) of one priority (prio: N + 1, 0 none). */
+struct ctorarr { int kind, prio, ndx, n, at; };
+
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
@@ -3431,31 +3435,54 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * SHT_INIT_ARRAY, so the same bytes under SHT_PROGBITS would be
      * laid out as ordinary data and the constructors would never run,
      * which is exactly the failure this whole path exists to fix. */
-    int nctor = 0, ndtor = 0;
+    /* A priority -- constructor(N) -- puts the address in a section of
+     * its own, `.init_array.NNNNN` (`.fini_array.NNNNN`), as GCC names it:
+     * the link orders by that name (embld's default layout; a script's
+     * SORT_BY_INIT_PRIORITY), the numbered ones ascending ahead of the
+     * plain array. So one section per kind and priority, in the order
+     * the functions first ask for it. */
+    int nctor = 0, ndtor = 0, narr = 0;
     for (struct func *f = u->funcs; f; f = f->next)
         if (!f->absorbed && f->has_defn) {
             if (f->is_ctor) nctor++;
             if (f->is_dtor) ndtor++;
         }
-    int init_ndx = 0, fini_ndx = 0;
-    unsigned char *initbuf = NULL, *finibuf = NULL;
+    struct ctorarr *arr = xcalloc((size_t)(nctor + ndtor + 1), sizeof *arr);
+    for (struct func *f = u->funcs; f; f = f->next)
+        for (int kind = 0; kind < 2 && !f->absorbed && f->has_defn; kind++) {
+            if (!(kind ? f->is_dtor : f->is_ctor))
+                continue;
+            int prio = kind ? f->dtor_prio : f->ctor_prio, k;
+            for (k = 0; k < narr; k++)
+                if (arr[k].kind == kind && arr[k].prio == prio)
+                    break;
+            if (k == narr) {
+                arr[narr].kind = kind;
+                arr[narr].prio = prio;
+                narr++;
+            }
+            arr[k].n++;
+        }
     /* One pointer per slot -- four bytes on ARMv7-M and RV32, two on AVR.
      * It was eight everywhere, so on a 32-bit part the startup's walk of
      * .init_array read the first constructor and then a zero half. */
     int ps = target_ptr_size();
-    if (nctor) {
-        initbuf = xcalloc((size_t)nctor, (size_t)ps);
-        init_ndx = elfw_add_section(w, ".init_array", SHT_INIT_ARRAY,
-                                    SHF_ALLOC | SHF_WRITE, initbuf,
-                                    (Elf64_Xword)(nctor * ps),
-                                    (Elf64_Xword)ps);
-    }
-    if (ndtor) {
-        finibuf = xcalloc((size_t)ndtor, (size_t)ps);
-        fini_ndx = elfw_add_section(w, ".fini_array", SHT_FINI_ARRAY,
-                                    SHF_ALLOC | SHF_WRITE, finibuf,
-                                    (Elf64_Xword)(ndtor * ps),
-                                    (Elf64_Xword)ps);
+    for (int k = 0; k < narr; k++) {
+        char nm[32];
+        if (arr[k].prio)
+            snprintf(nm, sizeof nm, "%s.%05d",
+                     arr[k].kind ? ".fini_array" : ".init_array",
+                     arr[k].prio - 1);
+        else
+            snprintf(nm, sizeof nm, "%s",
+                     arr[k].kind ? ".fini_array" : ".init_array");
+        arr[k].ndx = elfw_add_section(w, xstrndup(nm, strlen(nm)),
+                                      arr[k].kind ? SHT_FINI_ARRAY
+                                                  : SHT_INIT_ARRAY,
+                                      SHF_ALLOC | SHF_WRITE,
+                                      xcalloc((size_t)arr[k].n, (size_t)ps),
+                                      (Elf64_Xword)(arr[k].n * ps),
+                                      (Elf64_Xword)ps);
     }
     /* -g: the three DWARF sections (non-alloc, so no load cost; stripped
      * from a shipped image without touching the code). Their indices feed
@@ -3787,23 +3814,23 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * the section was sized in -- a priority would change it, and
      * parse.c refuses one rather than quietly running them wrong. */
     if (nctor || ndtor) {
-        int ci = 0, di = 0;
         /* a function's address at pointer width: on AVR its WORD
          * address, as for a function pointer in data */
         enum reloc_kind ck = ps == 8 ? RK_ABS64 : ps == 4 ? RK_ABS32
                                                          : RK_AVR_ABS16_PM;
-        for (struct func *f = u->funcs; f; f = f->next) {
-            if (f->absorbed || !f->has_defn)
-                continue;
-            if (f->is_ctor)
-                elfw_add_rela(w, init_ndx, (Elf64_Addr)(ci++ * ps),
+        for (struct func *f = u->funcs; f; f = f->next)
+            for (int kind = 0; kind < 2 && !f->absorbed && f->has_defn;
+                 kind++) {
+                if (!(kind ? f->is_dtor : f->is_ctor))
+                    continue;
+                int prio = kind ? f->dtor_prio : f->ctor_prio, k;
+                for (k = 0; k < narr; k++)
+                    if (arr[k].kind == kind && arr[k].prio == prio)
+                        break;
+                elfw_add_rela(w, arr[k].ndx, (Elf64_Addr)(arr[k].at++ * ps),
                               f->sym_ndx, target_reloc_type(target_get(), ck),
                               0);
-            if (f->is_dtor)
-                elfw_add_rela(w, fini_ndx, (Elf64_Addr)(di++ * ps),
-                              f->sym_ndx, target_reloc_type(target_get(), ck),
-                              0);
-        }
+            }
     }
 
     /* File-scope asm relocations against the target: a function of this
@@ -4065,6 +4092,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                       target_reloc_addend(ta, RK_DATA_PREL32, r->addend));
     }
     eh_free(&eh);
+    free(arr);
 
     int rc = elfw_write(w, out);
     elfw_free(w);

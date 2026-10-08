@@ -619,6 +619,7 @@ nothing on.
 | `-Wlogical-op` | `a && a` or `a \|\| a` with identical operands | `-Wextra` |
 | `-Wmaybe-uninitialized` | A local variable read on a path where only some paths wrote it | `-Wall` |
 | `-Wparentheses` | A comparison as an unparenthesized operand of `&`, `\|` or `^` | `-Wall` |
+| `-Wprio-ctor-dtor` | A `constructor` or `destructor` priority from 0 to 100, which the implementation reserves | default |
 | `-Wshadow` | A local declaration that hides a local variable, a parameter or a file-scope variable | none |
 | `-Wshift-count-overflow` | A constant shift count that is negative or not less than the operand width | `-Wall` |
 | `-Wsign-compare` | A comparison that converts a possibly negative signed operand to unsigned | `-Wextra` |

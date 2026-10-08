@@ -2093,27 +2093,53 @@ static Elf64_Addr align_up(Elf64_Addr v, Elf64_Xword a)
 
 /* Places every insec belonging to output section `os`, recording the
  * group's [start,end) bounds. Advances *va. */
+static unsigned long ls_init_priority(const char *name);
+
+/* The members of group `os` in placement order. Input order, except in
+ * .init_array and .fini_array, which GNU ld's default script lays out
+ * SORT_BY_INIT_PRIORITY(.init_array.*) first, then the plain arrays: a
+ * constructor(101)'s .init_array.00101 runs before a constructor(200)'s,
+ * and both before every unnumbered one (the startup walks the array in
+ * order, the exit walks .fini_array backwards). Stable: a priority's
+ * inputs stay in input order. Returns how many, in *out (caller frees). */
+static int osec_members(struct linker *l, int os, int **out)
+{
+    int n = 0, *v = xmalloc((size_t)(l->nsec + 1) * sizeof *v);
+    for (int i = 0; i < l->nsec; i++)
+        if (l->insecs[i].osec == os && !l->insecs[i].discarded)
+            v[n++] = i;
+    if (os == OSEC_INIT_ARRAY || os == OSEC_FINI_ARRAY)
+        for (int i = 1; i < n; i++) {           /* insertion: stable */
+            int x = v[i], j = i - 1;
+            unsigned long px = ls_init_priority(l->insecs[x].name);
+            while (j >= 0 && ls_init_priority(l->insecs[v[j]].name) > px) {
+                v[j + 1] = v[j];
+                j--;
+            }
+            v[j + 1] = x;
+        }
+    *out = v;
+    return n;
+}
+
 static void place_osec(struct linker *l, int os, Elf64_Addr *va,
                        struct osec_bound *b)
 {
+    int *m, n = osec_members(l, os, &m);
     /* the group starts where its first member does — the padding before
      * that member is not part of the group, or a bracket-walked table
      * would begin with it */
-    for (int i = 0; i < l->nsec; i++)
-        if (l->insecs[i].osec == os && !l->insecs[i].discarded) {
-            *va = align_up(*va, l->insecs[i].align);
-            break;
-        }
+    if (n)
+        *va = align_up(*va, l->insecs[m[0]].align);
     b[os].start = *va;
-    for (int i = 0; i < l->nsec; i++) {
-        struct insec *s = &l->insecs[i];
-        if (s->osec != os || s->discarded)
-            continue;
+    for (int k = 0; k < n; k++) {
+        struct insec *s = &l->insecs[m[k]];
         *va = align_up(*va, s->align);
         s->vaddr = *va;
         *va += s->size;
     }
     b[os].end = *va;
+    free(m);
 }
 
 /* Lay the output sections out in order into the two segments, recording
@@ -5111,6 +5137,7 @@ static int ls_class(Elf64_Xword flags, int bss)
 static struct linker *g_ls_sort_l;
 static int g_ls_sort_kind;
 
+/* `.init_array.00101`'s priority, 101; 65536 for a name without one. */
 static unsigned long ls_init_priority(const char *name)
 {
     const char *d = strrchr(name, '.');

@@ -31,6 +31,7 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * The function's address goes in .init_array/.fini_array
                 * and the startup code walks them. */
                int ctor, dtor;
+               int ctor_prio, dtor_prio;    /* priority + 1; 0: none */
                /* The hints EmbCC acts on. `used` keeps a symbol the
                 * compiler would otherwise drop; `unused` says not to
                 * warn about one; always_inline/noinline are the
@@ -1059,19 +1060,27 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 }
                 else if (attr_is(name, "constructor") ||
                          attr_is(name, "destructor")) {
-                    /* A priority orders the array, and EmbCC emits one
-                     * .init_array in source order. Accepting the
-                     * argument and ignoring it would run them in the
-                     * wrong order, which is the whole point of writing
-                     * one -- so it is refused and the plain form is
-                     * not. */
-                    if (arg >= 0)
+                    /* A priority orders the array: the object puts the
+                     * address in .init_array.NNNNN (.fini_array.NNNNN),
+                     * as GCC does, and the link sorts those ascending
+                     * ahead of the plain one (embld's default layout,
+                     * SORT_BY_INIT_PRIORITY in a script). GCC's range;
+                     * 0-100 are the implementation's, and it says so. */
+                    if (arg > 65535)
                         parse_error_line(ps, aline,
-                            "__attribute__((%s(%ld))) is not supported: "
-                            "EmbCC emits one .init_array in source order "
-                            "and cannot honour a priority", name, arg);
-                    if (attr_is(name, "constructor")) out->ctor = 1;
-                    else out->dtor = 1;
+                            "__attribute__((%s(%ld))): a priority is 0 to "
+                            "65535", name, arg);
+                    if (arg >= 0 && arg <= 100)
+                        diag_warn_opt(ps->lx.file, aline, 0, "prio-ctor-dtor",
+                            "%s priorities from 0 to 100 are reserved for "
+                            "the implementation", name);
+                    if (attr_is(name, "constructor")) {
+                        out->ctor = 1;
+                        out->ctor_prio = arg >= 0 ? (int)arg + 1 : 0;
+                    } else {
+                        out->dtor = 1;
+                        out->dtor_prio = arg >= 0 ? (int)arg + 1 : 0;
+                    }
                 }
                 else if (attr_is(name, "aligned"))
                     out->aligned = arg > 0 ? (int)arg : 16;
@@ -5357,10 +5366,12 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_first = at.fmt_first;
                 f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    f->ctor_prio = at.ctor_prio;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
     if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
+    f->dtor_prio = at.dtor_prio;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
@@ -5372,10 +5383,14 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->attr_warn_unused_result = at.warn_unused_result;
     f->vis = at.vis;
                 f->is_ctor = at.ctor;
+                f->ctor_prio = at.ctor_prio;
+    f->ctor_prio = at.ctor_prio;
                 if (at.isr) f->is_isr = at.isr;
                 if (at.naked) f->is_naked = 1;
                 if (at.cmse_entry) f->cmse_entry = 1;
                 f->is_dtor = at.dtor;
+                f->dtor_prio = at.dtor_prio;
+    f->dtor_prio = at.dtor_prio;
                 f->attr_used = at.used;
                 f->attr_unused = at.unused;
                 f->attr_always_inline = at.always_inline;
@@ -5458,10 +5473,12 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    f->ctor_prio = at.ctor_prio;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
     if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
+    f->dtor_prio = at.dtor_prio;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
@@ -5571,10 +5588,12 @@ fn_tail:
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    f->ctor_prio = at.ctor_prio;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
     if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
+    f->dtor_prio = at.dtor_prio;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;

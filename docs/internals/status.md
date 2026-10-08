@@ -328,7 +328,6 @@ implement, so they are errors:
 | `target` | `__attribute__((target)) is not supported: EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
 | `weakref` | `__attribute__((weakref)) is not supported: the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
 | `ifunc` | `__attribute__((ifunc)) is not supported: the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `constructor(N)`, `destructor(N)` | `__attribute__((constructor(101))) is not supported: EmbCC emits one .init_array in source order and cannot honour a priority` |
 | `packed` or `aligned` on an enum | `a packed or aligned enum is not supported (EmbCC's enums are always int-sized)` |
 | `alias` on a variable | `alias attribute on variable 'b' is not supported (functions take it)` |
 | `section` on an automatic variable | `section attribute on 'x', which is on the stack: only a static local can be placed in a section` (GCC refuses it too) |
