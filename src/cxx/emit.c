@@ -167,6 +167,8 @@ static const char *class_sym(struct cclass *c, const char *prefix)
 
 /* ---- C types ---- */
 
+static int need_valist_tag;     /* the unit uses Xtensa's va_list record */
+
 static const char *basic_c(enum cty_kind k)
 {
     switch (k) {
@@ -193,7 +195,15 @@ static const char *basic_c(enum cty_kind k)
     case CT_DOUBLE: return "double";
     case CT_LDOUBLE: return "long double";
     case CT_NULLPTR: return "void *";
-    case CT_VALIST: return "__builtin_va_list";
+    case CT_VALIST:
+        /* Xtensa's va_list is GCC's 12-byte record held by value, which
+         * the C front end's `__builtin_va_list` (a char *) is not: the
+         * record, as EmbCC's <stdarg.h> spells it for C */
+        if (target_get() == TARGET_XTENSA) {
+            need_valist_tag = 1;
+            return "struct __va_list_tag";
+        }
+        return "__builtin_va_list";
     default: return "int";
     }
 }
@@ -4319,6 +4329,7 @@ char *cx_emit_unit(void)
     nwork = 0;
     need_atexit = need_guard = 0;
     need_pmf = 0;
+    need_valist_tag = 0;
     any_vtable = any_pure = need_dyncast = 0;
     memset(&out_rtti, 0, sizeof out_rtti);
     memset(&out_rtti_decl, 0, sizeof out_rtti_decl);
@@ -4473,9 +4484,12 @@ char *cx_emit_unit(void)
     sb_put(&out, sb_str(&out_rtti_decl));
     sb_put(&out, sb_str(&out_rtti));
     sb_put(&out, sb_str(&out_vtables));
-    if (need_pmf || need_srcloc) {
+    if (need_pmf || need_srcloc || need_valist_tag) {
         /* whatever above names it is written first */
         struct sb pre = { 0, 0, 0 };
+        if (need_valist_tag)
+            sb_put(&pre, "struct __va_list_tag { int *__va_stk; "
+                         "int *__va_reg; int __va_ndx; };\n");
         if (need_pmf)
             sb_put(&pre, "struct __cx_pmf { void *ptr; long adj; };\n");
         if (need_srcloc)

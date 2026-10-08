@@ -394,8 +394,9 @@ long ct_size(const struct cty *t)
         return target_ptr_size();
     case CT_VALIST:
         /* x86-64's and AArch64's as a parameter (decayed); one pointer --
-         * AAPCS's struct __va_list, RISC-V's void * -- on the ILP32 ones */
-        return target_ptr_size();
+         * AAPCS's struct __va_list, RISC-V's void * -- on the ILP32 ones;
+         * Xtensa's 12-byte record, which is passed by value */
+        return target_get() == TARGET_XTENSA ? 12 : target_ptr_size();
     case CT_LDOUBLE:                 /* 8 on Darwin and ARMv7-M */
         return target_ldouble_size();
     case CT_INT128: case CT_UINT128: return 16;
