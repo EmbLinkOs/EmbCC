@@ -98,7 +98,9 @@ enum ir_op {
                 * the CFG, liveness and the allocator see through it where
                 * IR_IGOTO's unknown targets make them step aside. */
     IR_ARMW,  /* dst = *(temp a); *(temp a) = dst OP b   (atomic; size, w).
-               * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b).
+               * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b);
+               * on AVR only, 'L' for an atomic load wider than a byte:
+               * dst = *a, and nothing stored.
                * Add and subtract stay IR_XADD, which x86 does in one
                * locked instruction; these need a compare-and-swap loop. */
     IR_CAS,   /* dst = *(temp a); if dst == b then *(temp a) = c

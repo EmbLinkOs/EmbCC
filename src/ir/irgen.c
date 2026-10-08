@@ -1745,14 +1745,16 @@ static int atomic_result(struct ir_func *fn, int v, const struct type *t)
 }
 
 /* The widest object this target reads or writes in ONE access that an
- * interrupt or another core cannot split: a pointer's width -- and a byte
- * on AVR, whose 16-bit loads are two. An atomic load or store wider than
- * that would be two accesses with a window between them, so it is
- * refused, as the backends refuse a read-modify-write they cannot do. */
+ * interrupt or another core cannot split: a pointer's width. An atomic
+ * load or store wider than that would be two accesses with a window
+ * between them, so it is refused, as the backends refuse a
+ * read-modify-write they cannot do. AVR is the exception: one core, whose
+ * byte-wide accesses are made one by masking interrupts around them
+ * (avr_atomic_rmw_size), up to eight bytes. */
 static void atomic_width_ok(struct ir_func *fn, const struct type *t,
                             int line)
 {
-    int max = target_get() == TARGET_AVR ? 1 : target_ptr_size();
+    int max = target_get() == TARGET_AVR ? 8 : target_ptr_size();
     if (ty_size(t) > max)
         diag_fatal(fn->file, line,
                    "an atomic access of %d bytes is not one access on this "
@@ -1768,21 +1770,24 @@ static void atomic_width_ok(struct ir_func *fn, const struct type *t,
 static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
                       int val, const struct type *t);
 
-/* AVR moves one byte per access, so a two- or four-byte atomic load or
- * store is two or four; there it is a read-modify-write instead, which the
- * backend does with interrupts masked: a load is a fetch-or of 0, a store
- * an exchange whose old value is dropped. */
+/* AVR moves one byte per access, so a two-, four- or eight-byte atomic
+ * load or store is that many; there it is a read-modify-write instead,
+ * which the backend does with interrupts masked: a load is an IR_ARMW of
+ * 'L', which reads and stores nothing back, and a store an exchange whose
+ * old value is dropped. */
 static int avr_atomic_rmw_size(const struct type *t)
 {
-    return target_get() == TARGET_AVR &&
-           (ty_size(t) == 2 || ty_size(t) == 4) && ty_is_integer(t);
+    return target_get() == TARGET_AVR && ty_size(t) > 1 &&
+           (ty_is_integer(t) || t->kind == TY_PTR);
 }
 
 static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
                        int line)
 {
-    if (avr_atomic_rmw_size(t))
-        return atomic_rmw(fn, IR_ARMW, '|', addr, emit_const(fn, 0, ty_w(t)), t);
+    if (avr_atomic_rmw_size(t)) {
+        atomic_width_ok(fn, t, line);
+        return atomic_rmw(fn, IR_ARMW, 'L', addr, emit_const(fn, 0, ty_w(t)), t);
+    }
     atomic_width_ok(fn, t, line);
     int v = emit_load(fn, addr, t);
     fn->ins[fn->nins - 1].vol = 1;
@@ -1796,6 +1801,7 @@ static void atomic_store(struct ir_func *fn, int addr, int val,
                          const struct type *t, int line)
 {
     if (avr_atomic_rmw_size(t)) {
+        atomic_width_ok(fn, t, line);
         (void)atomic_rmw(fn, IR_XCHG, 0, addr, val, t);
         return;
     }

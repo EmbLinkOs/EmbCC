@@ -312,6 +312,8 @@ static char *avr_wide_map(struct ir_func *fn)
         case IR_NEG: case IR_BNOT:
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
+        /* an atomic's old value; not IR_CMPXCHG's, which is a flag */
+        case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS:
         /* IR_F2I belongs here even though it is lowered ABOVE the eight-byte
          * dispatch, with its own helper call: what this map decides is how
          * many bytes the DESTINATION SLOT gets, and that lowering stores
@@ -2711,6 +2713,243 @@ static int a_var_in_slot(const struct ir_func *fn, int v)
 
 /* ---- the instruction dispatch ---------------------------------------- */
 
+/* ---- atomics -------------------------------------------------------
+ *
+ * No AVR instruction is an atomic read-modify-write, so each is done with
+ * interrupts masked -- SREG saved in r0, cli, the access, SREG restored,
+ * which puts the I flag back as it was -- as avr-libc's ATOMIC_BLOCK does
+ * it: one core, so masking interrupts is all the atomicity there is to
+ * have. The same goes for an atomic load or store wider than a byte,
+ * which AVR's byte-wide memory accesses would otherwise split: irgen makes
+ * a store an exchange and a load an IR_ARMW of 'L', which reads and
+ * writes nothing back. No library call, at any size. */
+static void gen_atomic8(struct a_fn *F, const struct ir_ins *i);
+
+static void gen_atomic(struct a_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+
+    /* An atomic read-modify-write. No AVR instruction is one, so it is
+     * done with interrupts masked -- SREG saved in r0, cli, the
+     * access, SREG restored -- as avr-libc's ATOMIC_BLOCK does it: one
+     * core, so masking interrupts is all the atomicity there is to
+     * have.
+     *
+     * Every operand goes through the STACK first. A and B are the
+     * first argument registers, so an operand's home may be in the
+     * very bank another is loaded into; pushed from wherever it is and
+     * popped into place, none is read after any bank is written. And
+     * inside the window nothing touches r0 (a far slot borrows it):
+     * the compare's byte goes in r1, which no one sees until it is
+     * cleared again. */
+    int n = i->size, nb = dw(F, i), op = i->op;
+    /* an atomic load (irgen's atomic_load): no operand, no store */
+    int load = op == IR_ARMW && i->imm == 'L';
+    if (n == 8) {
+        gen_atomic8(F, i);
+        return;
+    }
+    if (n != 1 && n != 2 && n != 4)
+        a_refuse(F->fn, i, "an atomic of this size");
+    /* push_v: v's n bytes, byte 0 first, so they pop high first */
+#define PUSH_V(v, cnt) do { for (int k_ = 0; k_ < (cnt); k_++) { \
+        vld(F, 26, (v), k_, 1); avr_push(t, 26); } } while (0)
+#define POP_TO(r, cnt) do { for (int k_ = (cnt) - 1; k_ >= 0; k_--) \
+        avr_pop(t, (r) + k_); } while (0)
+    if (op == IR_CAS) {
+        PUSH_V(i->b, n);                    /* expected, stays below */
+        PUSH_V(i->a, 2);
+        PUSH_V(i->c, n);
+        POP_TO(RB, n);                      /* desired */
+        POP_TO(AVR_Z, 2);
+    } else if (op == IR_CMPXCHG) {
+        PUSH_V(i->b, 2);                    /* where expected is */
+        PUSH_V(i->a, 2);
+        PUSH_V(i->c, n);
+        POP_TO(RB, n);
+        POP_TO(AVR_Z, 2);
+        POP_TO(AVR_X, 2);
+    } else if (load) {
+        vld(F, AVR_Z, i->a, 0, 2);
+    } else {
+        PUSH_V(i->a, 2);
+        PUSH_V(i->b, n);
+        POP_TO(RB, n);                      /* the operand */
+        POP_TO(AVR_Z, 2);
+    }
+#undef PUSH_V
+#undef POP_TO
+    F->zv = -1;
+    avr_in(t, R_TMP, IO_SREG);
+    avr_bclr(t, AVR_SREG_I);
+    for (int k = 0; k < n; k++)
+        avr_ldd(t, RA + k, AVR_Z, k);       /* the old value */
+    if (op == IR_CAS || op == IR_CMPXCHG) {
+        /* old == expected, byte by byte: cp then cpc, which only
+         * ever clears Z */
+        for (int j2 = 0; j2 < n; j2++) {
+            /* the value form's expected bytes pop high first; *b's
+             * are read low first through X */
+            int k = op == IR_CAS ? n - 1 - j2 : j2;
+            if (op == IR_CAS)
+                avr_pop(t, R_ZERO);
+            else
+                avr_ld(t, R_ZERO, AVR_X, AVR_PTR_POST_INC);
+            avr_rr(t, j2 ? AVR_CPC : AVR_CP, RA + k, R_ZERO);
+        }
+        int br = avr_br(t, AVR_BR_NE, 0);
+        for (int k = 0; k < n; k++)
+            avr_std(t, AVR_Z, k, RB + k);
+        if (op == IR_CMPXCHG)
+            avr_ri(t, AVR_LDI, RB, 1);      /* swapped */
+        int j = avr_rjmp(t, 0);
+        avr_patch_br(t, br, (t->len - (br + 2)) / 2);
+        if (op == IR_CMPXCHG)
+            avr_ri(t, AVR_LDI, RB, 0);
+        avr_patch_rjmp(t, j, (t->len - (j + 2)) / 2);
+    } else if (!load) {
+        for (int k = 0; k < n; k++) {
+            switch (op == IR_ARMW ? (int)i->imm : op == IR_XADD ? '+' : 0) {
+            case '+': avr_rr(t, k ? AVR_ADC : AVR_ADD, RB + k, RA + k); break;
+            case '&': avr_rr(t, AVR_AND, RB + k, RA + k); break;
+            case '|': avr_rr(t, AVR_OR, RB + k, RA + k); break;
+            case '^': avr_rr(t, AVR_EOR, RB + k, RA + k); break;
+            case 'n':
+                avr_rr(t, AVR_AND, RB + k, RA + k);
+                avr_r1(t, AVR_COM, RB + k);
+                break;
+            default: break;                 /* exchange */
+            }
+        }
+        for (int k = 0; k < n; k++)
+            avr_std(t, AVR_Z, k, RB + k);
+    }
+    /* r1 zero again BEFORE interrupts can come back; the eor's flags
+     * are then overwritten by the SREG restored */
+    if (op == IR_CAS || op == IR_CMPXCHG)
+        avr_rr(t, AVR_EOR, R_ZERO, R_ZERO);
+    avr_out(t, IO_SREG, R_TMP);
+    if (op == IR_CMPXCHG) {
+        /* *b = what was there; X walked n past it reading */
+        avr_sbiw(t, AVR_X, n);
+        for (int k = 0; k < n; k++)
+            avr_st(t, AVR_X, RA + k, AVR_PTR_POST_INC);
+        avr_rr(t, AVR_MOV, RA, RB);         /* the flag is the result */
+        n = 1;
+    }
+    {
+        int d = dst_reg(F, i, nb);
+        int m = n < nb ? n : nb;
+        for (int k = 0; k < m; k++)
+            if (d + k != RA + k)
+                avr_rr(t, AVR_MOV, d + k, RA + k);
+        if (nb > n)
+            extend(F, d, n, op == IR_CMPXCHG ? 0 : i->sign, nb);
+        dst_done(F, i, d);
+    }
+    return;
+}
+
+/* An eight-byte atomic. The old value takes r18-r25, both scratch banks,
+ * so the operand cannot be in registers too: it waits on the stack,
+ * pushed high byte first, and is popped a byte at a time INSIDE the
+ * window -- pop, mov, ldd and std leave SREG alone, so an add's carry
+ * runs from byte to byte through them. r26 takes each popped byte and
+ * r27 each new one; a CMPXCHG, whose X points at the expected value,
+ * uses r1 instead and clears it before interrupts come back. The flag a
+ * CMPXCHG returns is made in r30, once Z is done with. */
+static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    int op = i->op, n = 8;
+    int load = op == IR_ARMW && i->imm == 'L';
+    /* v's bytes pushed high first, so they pop low first */
+#define PUSH_HI(v, cnt) do { for (int k_ = (cnt) - 1; k_ >= 0; k_--) { \
+            vld(F, 26, (v), k_, 1); avr_push(t, 26); } } while (0)
+    if (op == IR_CAS) {
+        PUSH_HI(i->c, n);                   /* desired, below */
+        PUSH_HI(i->b, n);                   /* expected, on top */
+    } else if (op == IR_CMPXCHG) {
+        PUSH_HI(i->c, n);
+        PUSH_HI(i->b, 2);                   /* where expected is */
+    } else if (!load) {
+        PUSH_HI(i->b, n);
+    }
+    PUSH_HI(i->a, 2);
+#undef PUSH_HI
+    avr_pop(t, AVR_Z);
+    avr_pop(t, AVR_Z + 1);
+    if (op == IR_CMPXCHG) {
+        avr_pop(t, AVR_X);
+        avr_pop(t, AVR_X + 1);
+    }
+    F->zv = -1;
+    avr_in(t, R_TMP, IO_SREG);
+    avr_bclr(t, AVR_SREG_I);
+    for (int k = 0; k < n; k++)
+        avr_ldd(t, RA + k, AVR_Z, k);           /* the old value */
+    if (op == IR_CAS || op == IR_CMPXCHG) {
+        /* old == expected: cp then cpc, which only ever clear Z */
+        int e = op == IR_CAS ? 26 : R_ZERO;
+        for (int k = 0; k < n; k++) {
+            if (op == IR_CAS)
+                avr_pop(t, e);
+            else
+                avr_ld(t, e, AVR_X, AVR_PTR_POST_INC);
+            avr_rr(t, k ? AVR_CPC : AVR_CP, RA + k, e);
+        }
+        int br = avr_br(t, AVR_BR_NE, 0);
+        for (int k = 0; k < n; k++) {
+            avr_pop(t, e);
+            avr_std(t, AVR_Z, k, e);
+        }
+        if (op == IR_CMPXCHG)
+            avr_ri(t, AVR_LDI, AVR_Z, 1);       /* swapped */
+        int j = avr_rjmp(t, 0);
+        avr_patch_br(t, br, (t->len - (br + 2)) / 2);
+        for (int k = 0; k < n; k++)
+            avr_pop(t, AVR_Z + 1);              /* desired, unused */
+        if (op == IR_CMPXCHG)
+            avr_ri(t, AVR_LDI, AVR_Z, 0);
+        avr_patch_rjmp(t, j, (t->len - (j + 2)) / 2);
+        if (op == IR_CMPXCHG)
+            avr_rr(t, AVR_EOR, R_ZERO, R_ZERO);
+    } else if (!load) {
+        int c = op == IR_ARMW ? (int)i->imm : op == IR_XADD ? '+' : 0;
+        for (int k = 0; k < n; k++) {
+            avr_pop(t, 26);
+            if (c) {
+                avr_rr(t, AVR_MOV, 27, RA + k);
+                switch (c) {
+                case '+': avr_rr(t, k ? AVR_ADC : AVR_ADD, 27, 26); break;
+                case '&': avr_rr(t, AVR_AND, 27, 26); break;
+                case '|': avr_rr(t, AVR_OR, 27, 26); break;
+                case '^': avr_rr(t, AVR_EOR, 27, 26); break;
+                default:                        /* nand */
+                    avr_rr(t, AVR_AND, 27, 26);
+                    avr_r1(t, AVR_COM, 27);
+                    break;
+                }
+            }
+            avr_std(t, AVR_Z, k, c ? 27 : 26);
+        }
+    }
+    avr_out(t, IO_SREG, R_TMP);
+    if (op == IR_CMPXCHG) {
+        /* *b = what was there; X walked eight past it reading */
+        avr_sbiw(t, AVR_X, n);
+        for (int k = 0; k < n; k++)
+            avr_st(t, AVR_X, RA + k, AVR_PTR_POST_INC);
+        int nb = dw(F, i), d = dst_reg(F, i, nb);
+        avr_rr(t, AVR_MOV, d, AVR_Z);
+        extend(F, d, 1, 0, nb);
+        dst_done(F, i, d);
+        return;
+    }
+    if (in_pair(F, i->dst) || F->slot[i->dst] >= 0)
+        vst(F, i->dst, 0, RA, n);
+}
+
 static void gen_ins(struct a_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -2731,6 +2970,12 @@ static void gen_ins(struct a_fn *F, int n)
     if (i->op == IR_FRAMEADDR)
         a_refuse(fn, i, "__builtin_frame_address or __builtin_return_address "
                         "(AVR code keeps no frame-pointer chain)");
+    /* at every size, before the eight-byte dispatch takes the w == 8 ones */
+    if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
+        i->op == IR_CAS || i->op == IR_CMPXCHG) {
+        gen_atomic(F, i);
+        return;
+    }
     /* A memory access's width is `size`, not `w`, and the four that use it
      * size a REGISTER RUN from it: RA is r18, so size 8 would write
      * r18..r25 and take B for the top half of the value. The w == 8
@@ -3918,120 +4163,6 @@ static void gen_ins(struct a_fn *F, int n)
         vst(F, i->dst, 0, RA, i->size);
         return;
 
-    case IR_XCHG: case IR_XADD: case IR_ARMW:
-    case IR_CAS: case IR_CMPXCHG: {
-        /* An atomic read-modify-write. No AVR instruction is one, so it is
-         * done with interrupts masked -- SREG saved in r0, cli, the
-         * access, SREG restored -- as avr-libc's ATOMIC_BLOCK does it: one
-         * core, so masking interrupts is all the atomicity there is to
-         * have.
-         *
-         * Every operand goes through the STACK first. A and B are the
-         * first argument registers, so an operand's home may be in the
-         * very bank another is loaded into; pushed from wherever it is and
-         * popped into place, none is read after any bank is written. And
-         * inside the window nothing touches r0 (a far slot borrows it):
-         * the compare's byte goes in r1, which no one sees until it is
-         * cleared again. */
-        int n = i->size, nb = dw(F, i), op = i->op;
-        if (n != 1 && n != 2 && n != 4)
-            a_refuse(fn, i, "an atomic of this size");
-        /* push_v: v's n bytes, byte 0 first, so they pop high first */
-#define PUSH_V(v, cnt) do { for (int k_ = 0; k_ < (cnt); k_++) { \
-            vld(F, 26, (v), k_, 1); avr_push(t, 26); } } while (0)
-#define POP_TO(r, cnt) do { for (int k_ = (cnt) - 1; k_ >= 0; k_--) \
-            avr_pop(t, (r) + k_); } while (0)
-        if (op == IR_CAS) {
-            PUSH_V(i->b, n);                    /* expected, stays below */
-            PUSH_V(i->a, 2);
-            PUSH_V(i->c, n);
-            POP_TO(RB, n);                      /* desired */
-            POP_TO(AVR_Z, 2);
-        } else if (op == IR_CMPXCHG) {
-            PUSH_V(i->b, 2);                    /* where expected is */
-            PUSH_V(i->a, 2);
-            PUSH_V(i->c, n);
-            POP_TO(RB, n);
-            POP_TO(AVR_Z, 2);
-            POP_TO(AVR_X, 2);
-        } else {
-            PUSH_V(i->a, 2);
-            PUSH_V(i->b, n);
-            POP_TO(RB, n);                      /* the operand */
-            POP_TO(AVR_Z, 2);
-        }
-#undef PUSH_V
-#undef POP_TO
-        F->zv = -1;
-        avr_in(t, R_TMP, IO_SREG);
-        avr_bclr(t, AVR_SREG_I);
-        for (int k = 0; k < n; k++)
-            avr_ldd(t, RA + k, AVR_Z, k);       /* the old value */
-        if (op == IR_CAS || op == IR_CMPXCHG) {
-            /* old == expected, byte by byte: cp then cpc, which only
-             * ever clears Z */
-            for (int j2 = 0; j2 < n; j2++) {
-                /* the value form's expected bytes pop high first; *b's
-                 * are read low first through X */
-                int k = op == IR_CAS ? n - 1 - j2 : j2;
-                if (op == IR_CAS)
-                    avr_pop(t, R_ZERO);
-                else
-                    avr_ld(t, R_ZERO, AVR_X, AVR_PTR_POST_INC);
-                avr_rr(t, j2 ? AVR_CPC : AVR_CP, RA + k, R_ZERO);
-            }
-            int br = avr_br(t, AVR_BR_NE, 0);
-            for (int k = 0; k < n; k++)
-                avr_std(t, AVR_Z, k, RB + k);
-            if (op == IR_CMPXCHG)
-                avr_ri(t, AVR_LDI, RB, 1);      /* swapped */
-            int j = avr_rjmp(t, 0);
-            avr_patch_br(t, br, (t->len - (br + 2)) / 2);
-            if (op == IR_CMPXCHG)
-                avr_ri(t, AVR_LDI, RB, 0);
-            avr_patch_rjmp(t, j, (t->len - (j + 2)) / 2);
-        } else {
-            for (int k = 0; k < n; k++) {
-                switch (op == IR_ARMW ? (int)i->imm : op == IR_XADD ? '+' : 0) {
-                case '+': avr_rr(t, k ? AVR_ADC : AVR_ADD, RB + k, RA + k); break;
-                case '&': avr_rr(t, AVR_AND, RB + k, RA + k); break;
-                case '|': avr_rr(t, AVR_OR, RB + k, RA + k); break;
-                case '^': avr_rr(t, AVR_EOR, RB + k, RA + k); break;
-                case 'n':
-                    avr_rr(t, AVR_AND, RB + k, RA + k);
-                    avr_r1(t, AVR_COM, RB + k);
-                    break;
-                default: break;                 /* exchange */
-                }
-            }
-            for (int k = 0; k < n; k++)
-                avr_std(t, AVR_Z, k, RB + k);
-        }
-        /* r1 zero again BEFORE interrupts can come back; the eor's flags
-         * are then overwritten by the SREG restored */
-        if (op == IR_CAS || op == IR_CMPXCHG)
-            avr_rr(t, AVR_EOR, R_ZERO, R_ZERO);
-        avr_out(t, IO_SREG, R_TMP);
-        if (op == IR_CMPXCHG) {
-            /* *b = what was there; X walked n past it reading */
-            avr_sbiw(t, AVR_X, n);
-            for (int k = 0; k < n; k++)
-                avr_st(t, AVR_X, RA + k, AVR_PTR_POST_INC);
-            avr_rr(t, AVR_MOV, RA, RB);         /* the flag is the result */
-            n = 1;
-        }
-        {
-            int d = dst_reg(F, i, nb);
-            int m = n < nb ? n : nb;
-            for (int k = 0; k < m; k++)
-                if (d + k != RA + k)
-                    avr_rr(t, AVR_MOV, d + k, RA + k);
-            if (nb > n)
-                extend(F, d, n, op == IR_CMPXCHG ? 0 : i->sign, nb);
-            dst_done(F, i, d);
-        }
-        return;
-    }
     case IR_LOAD:
         /* The pointer is two bytes: an AVR address IS two bytes, whatever
          * the IR's width class says about the vreg holding it. */
