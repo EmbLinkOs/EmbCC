@@ -2673,12 +2673,13 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                             "compile with -c (there is no Xtensa assembler "
                             "here to check the text against)");
     /* RX instructions are one to eight bytes with no length rule short of
-     * decoding, and EmbCC has no RX assembler to read -S back: refused
-     * rather than written as bytes no tool here can check. */
+     * decoding, and EmbCC has no RX disassembler to write them as text:
+     * refused rather than written as bytes. (Its assembler reads .s
+     * files and inline asm; nothing writes RX text yet.) */
     if (want_asm && ta == TARGET_RX)
-        diag_fatal(NULL, 0, "-S is not supported for rx-none-elf yet: there "
-                            "is no RX assembler in EmbCC to read it back "
-                            "(use -c)");
+        diag_fatal(NULL, 0, "-S is not supported for rx-none-elf yet: EmbCC "
+                            "writes no RX assembly text (use -c; .s files and "
+                            "inline asm do assemble)");
     /* -Wa,-a...: the listing, the same text as -S, beside the object */
     if (g_listing && !want_asm) {
         if (ta == TARGET_XTENSA || ta == TARGET_RX) {
