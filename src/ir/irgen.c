@@ -799,10 +799,14 @@ static int bf_store_v(struct ir_func *fn, int addr, const struct member *m,
 /* Place one flattened initializer leaf `ie` (value already in `v`) at address
  * `at`: a bitfield merges into its storage unit, a struct is a byte copy, any
  * other scalar a plain truncating store. Shared by declaration and compound-
- * literal initialization. */
+ * literal initialization. `objalign` is the initialized object's type's
+ * alignment: a leaf at an offset its own alignment divides, in an object
+ * at least as aligned, is natural (up to 8 -- no frame promises more). */
 static void store_init_leaf(struct ir_func *fn, int at,
-                            const struct initelem *ie, int v)
+                            const struct initelem *ie, int v, int objalign)
 {
+    int la = ty_align(ie->ty);
+    int nat = la > 0 && la <= 8 && la <= objalign && ie->off % la == 0;
     if (ie->bit_width) {
         struct member m;
         memset(&m, 0, sizeof m);
@@ -816,8 +820,12 @@ static void store_init_leaf(struct ir_func *fn, int at,
         mm->a = at;
         mm->b = v;
         mm->size = ty_size(ie->ty);
+        if (nat && struct_val_natural(ie->e))
+            mm->natural = la;
     } else {
         emit_store(fn, at, v, ie->ty);
+        if (nat)
+            fn->ins[fn->nins - 1].natural = 1;
     }
 }
 
@@ -963,6 +971,24 @@ static long fb_expmask(int w)  { return w == 4 ? (long)0x7f800000L
  * (docs/internals/big-endian.md). */
 static int local_addr(struct ir_func *fn, int v);
 
+/* fb_wide's accesses are all to the call's own long double slot, at
+ * offsets its type aligns (the halfword at 0, 8 or 14, the doublewords
+ * at 0 and 8): natural, so a backend whose wide accesses must be
+ * aligned need not build them from bytes. */
+static int fbw_load(struct ir_func *fn, int addr, const struct type *t)
+{
+    int v = emit_load(fn, addr, t);
+    fn->ins[fn->nins - 1].natural = 1;
+    return v;
+}
+
+static void fbw_store(struct ir_func *fn, int addr, int val,
+                      const struct type *t)
+{
+    emit_store(fn, addr, val, t);
+    fn->ins[fn->nins - 1].natural = 1;
+}
+
 static int fb_wide(struct ir_func *fn, struct expr *e)
 {
     const char *bn = e->name + 10;
@@ -980,18 +1006,18 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
                        emit_const(fn, x87 ? 8 : be ? 0 : 14, AW), AW, 1);
     int ysign = -1;
     if (y >= 0) {
-        emit_store(fn, slot, y, ld);
-        ysign = emit_bin(fn, IR_AND, emit_load(fn, sea, u16),
+        fbw_store(fn, slot, y, ld);
+        ysign = emit_bin(fn, IR_AND, fbw_load(fn, sea, u16),
                          emit_const(fn, 0x8000, 4), 4, 0);
     }
-    emit_store(fn, slot, x, ld);
-    int se = emit_load(fn, sea, u16);
+    fbw_store(fn, slot, x, ld);
+    int se = fbw_load(fn, sea, u16);
     if (strncmp(bn, "fabs", 4) == 0 || y >= 0) {
         int nse = emit_bin(fn, IR_AND, se, emit_const(fn, 0x7fff, 4), 4, 0);
         if (y >= 0)
             nse = emit_bin(fn, IR_OR, nse, ysign, 4, 0);
-        emit_store(fn, sea, nse, u16);
-        return emit_load(fn, slot, ld);
+        fbw_store(fn, sea, nse, u16);
+        return fbw_load(fn, slot, ld);
     }
     int sign = emit_bin(fn, IR_SHR, se, emit_const(fn, 15, 4), 4, 0);
     if (strncmp(bn, "signbit", 7) == 0)
@@ -1005,7 +1031,7 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
                         emit_cmp(fn, B_NE, ex, emit_const(fn, 0, 4), 4, 0),
                         emit_cmp(fn, B_NE, ex, emit_const(fn, 0x7fff, 4), 4, 0),
                         4, 0);
-    int lo = emit_load(fn, be ? emit_bin(fn, IR_ADD, slot,
+    int lo = fbw_load(fn, be ? emit_bin(fn, IR_ADD, slot,
                                          emit_const(fn, 8, AW), AW, 1)
                               : slot, u64);
     int frac;
@@ -1013,7 +1039,7 @@ static int fb_wide(struct ir_func *fn, struct expr *e)
         frac = emit_bin(fn, IR_AND, lo,
                         emit_const(fn, 0x7fffffffffffffffL, 8), 8, 0);
     } else {
-        int hi = emit_load(fn, be ? slot
+        int hi = fbw_load(fn, be ? slot
                                   : emit_bin(fn, IR_ADD, slot,
                                              emit_const(fn, 8, AW), AW, 1),
                            u64);
@@ -1248,7 +1274,8 @@ static int gen_complit(struct ir_func *fn, struct expr *e)
             int o = emit_const(fn, e->inits[k].off, AW);
             at = emit_bin(fn, IR_ADD, base, o, AW, 1);
         }
-        store_init_leaf(fn, at, &e->inits[k], v);
+        store_init_leaf(fn, at, &e->inits[k], v,
+                        ty_align(e->undecayed ? e->undecayed : e->ty));
     }
     return base;
 }
@@ -1318,7 +1345,11 @@ static int emit_ldconst(struct ir_func *fn, const struct ldf *v)
     i->op = IR_STRADDR;
     i->label = ir_intern_aligned(cur_unit, b, 16, 16);
     i->dst = new_temp(fn);
-    return emit_load(fn, i->dst, ty_base(TY_LDOUBLE, 0));
+    {
+        int v = emit_load(fn, i->dst, ty_base(TY_LDOUBLE, 0));
+        fn->ins[fn->nins - 1].natural = 1;    /* interned 16-aligned */
+        return v;
+    }
 }
 
 /* !x and conditions want "is zero" — comparison against a zero of the
@@ -2706,6 +2737,10 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             i->a = dst;
             i->b = src;
             i->size = ty_size(e->ty);
+            /* both ends aligned to the type, when C promises it: the
+             * alignment, which a backend copies by words or more at */
+            if (lv_natural(e->lhs) && struct_val_natural(e->rhs))
+                i->natural = ty_align(e->ty);
             return dst;
         }
         if (e->lhs->kind == EXPR_VAR && !e->lhs->gref) {
@@ -4043,7 +4078,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                         int o = emit_const(fn, s->inits[k].off, AW);
                         at = emit_bin(fn, IR_ADD, base, o, AW, 1);
                     }
-                    store_init_leaf(fn, at, &s->inits[k], v);
+                    store_init_leaf(fn, at, &s->inits[k], v,
+                                    ty_align(s->dty));
                 }
                 break;
             }
@@ -4058,6 +4094,8 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                     i->a = at;
                     i->b = v;
                     i->size = ty_size(s->dty);
+                    if (struct_val_natural(s->expr))   /* and the local is */
+                        i->natural = ty_align(s->dty);
                 } else {
                     emit_stvar(fn, s->var_index, v, s->dty);
                 }
