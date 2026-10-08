@@ -121,6 +121,12 @@ struct t_fn {
      * one value. fl_end is -1 when there is none. */
     int fl_end, fl_reg;
     long fl_imm;
+    /* The last store of a register to a frame slot (wr): where its code
+     * ended, the register, the slot's offset and the base. A read of the
+     * same slot with nothing emitted since and no label placed is the
+     * register already (rd). ls_end is -1 when there is none. */
+    int ls_end, ls_reg, ls_fb;
+    long ls_off;
     /* Which of the scratch registers r9-r11 the prologue saves: all of
      * them until a pass has shown which the body uses. */
     unsigned scr_save;

@@ -1504,6 +1504,13 @@ static void rd(struct t_fn *F, int v, int reg)
         fb_addr(F, reg, fo);
         return;
     }
+    /* `str r1, [sp, #n]` and nothing since: r1 is the value (wr) */
+    if (F->ls_end >= 0 && F->ls_end == F->t->len && F->ls_fb == F->fb &&
+        F->ls_off == F->slot[v]) {
+        if (reg != F->ls_reg)
+            t_mov_reg(F->t, reg, F->ls_reg);
+        return;
+    }
     if (!t_ldst_imm(F->t, reg, F->fb, F->slot[v], 4, 0, 0)) {
         t_mov_imm(F->t, reg, F->slot[v], 0);
         t_ldst_reg(F->t, reg, F->fb, reg, 0, 4, 0, 0);
@@ -1565,7 +1572,12 @@ static void wr(struct t_fn *F, int v, int reg)
         t_mov_imm(F->t, a, F->slot[v], 0);
         t_alu_reg(F->t, T_OP_ADD, a, F->fb, a, 0);
         ldst_must(F->t, reg, a, 0, 4, 0, 1);
+        return;
     }
+    F->ls_end = F->t->len;
+    F->ls_reg = reg;
+    F->ls_fb = F->fb;
+    F->ls_off = F->slot[v];
 }
 
 static void wrote(struct t_fn *F, int v, int reg)
@@ -1940,6 +1952,7 @@ static int invert_last_bcond(struct t_fn *F, int n, int label)
         return 0;
     cond = F->fix[F->bc_fix].cond ^ 1;
     F->t->len -= F->fix[F->bc_fix].sz;
+    F->ls_end = -1;              /* the code shrank: no store is "last" */
     /* The same ordinal, so the same size decision: the first pass made
      * this inversion too, and measured the branch it produced. */
     F->nfix--;
@@ -4012,6 +4025,7 @@ static void gen_ins(struct t_fn *F, int n)
         F->label_off[i->label] = t->len;
         F->bc_end = -1;          /* something may branch here */
         F->fl_end = -1;          /* ...with other flags */
+        F->ls_end = -1;          /* ...and other registers */
         return;
     case IR_JMP:
         /* A jump to the label that follows it is not an instruction.
@@ -6004,6 +6018,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.floc = NULL; F.nfsave = 0;
     F.bc_end = F.bc_fix = -1;
     F.fl_end = -1;
+    F.ls_end = -1;
     F.shortb = NULL; F.nshortb = 0;
     F.scr_save = T_SCR_ALL;
     F.fb = T_SP;
@@ -6230,6 +6245,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.skip_next = 0;
         F.bc_end = F.bc_fix = -1;
         F.fl_end = -1;
+        F.ls_end = -1;
         F.va_regsave = F.va_first = -1;
         F.shortb = shortb;
         F.nshortb = nshortb;
