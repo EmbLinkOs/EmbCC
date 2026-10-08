@@ -102,6 +102,14 @@ static void t_copy_block(struct code *t, int dst, int src, int copy, long size);
 /* A parallel move is given R_SCR as the register that breaks a cycle,
  * and only a move that USES it touches r9. */
 static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
+/* The cycle breaker of a parallel move that is not an asm's: r12, which
+ * no value lives in and every such move finds free (a call's argument
+ * setup reads its stack words and VFP arguments before, and its target
+ * after; a helper's arguments and the prologue's parameters likewise). r9
+ * was, and cost a push where nothing else used it; with r9-r11 as homes
+ * (g_t_ext) it is often holding a value there. An asm's operands may be
+ * r12, so its moves keep R_SCR. */
+#define T_ACC_PM 12
 
 #define A_LO T_ACC      /* r12 */
 #define A_HI T_TMP      /* r11 */
@@ -2149,7 +2157,7 @@ static void args64x2(struct t_fn *F, int va, int vb)
             }
     if (npm) {
         int od[8], os[8];
-        int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os, 8);
+        int m = ra_parallel_move(pd, ps, npm, T_ACC_PM, od, os, 8);
         if (m < 0)
             internal_error("thumb: a 64-bit helper's argument setup is not "
                            "a well-formed move");
@@ -2173,7 +2181,7 @@ static void fp_args2(struct t_fn *F, const struct ir_ins *i)
         if (in_reg(F, i->b)) { pd[npm] = T_R1; ps[npm] = F->loc[i->b]; npm++; }
         if (npm) {
             int od[8], os[8];
-            int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os, 8);
+            int m = ra_parallel_move(pd, ps, npm, T_ACC_PM, od, os, 8);
             if (m < 0)
                 internal_error("thumb: a helper's argument setup is not a "
                                "well-formed move");
@@ -4977,7 +4985,7 @@ static void gen_ins(struct t_fn *F, int n)
             }
             if (npm) {
                 int od[16], os[16];
-                int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os,
+                int m = ra_parallel_move(pd, ps, npm, T_ACC_PM, od, os,
                                          (int)(sizeof od / sizeof od[0]));
                 if (m < 0)
                     internal_error("thumb: a call's argument setup is not "
@@ -5910,9 +5918,23 @@ static unsigned t_busy(const struct t_fn *F, int n, int span)
 /* The roles from what `busy` leaves of r9-r11: TMP first, then ADDR,
  * then SCR, each its usual register when that is free; -1 for a role
  * with none left. Without g_t_ext, the fixed r11, r10 and r9. */
+static void t_roles_low(unsigned busy, unsigned low);
 static void t_roles_from(unsigned busy)
 {
+    t_roles_low(busy, 0);
+}
+
+/* ...and when r9-r11 run out, low registers from `low`: what the
+ * instruction leaves free among r0-r3 and the low registers the prologue
+ * saves anyway, for an instruction whose lowering names no low register of
+ * its own (t_role_low_ok). Returns nothing; the roles that took a low
+ * register are in g_t_role_low, which the instruction's LO scratch must
+ * not hand out again. */
+static unsigned g_t_role_low;
+static void t_roles_low(unsigned busy, unsigned low)
+{
     int fr[3], nf = 0;
+    g_t_role_low = 0;
     if (!g_t_ext) {
         g_r_tmp = 11; g_r_addr = 10; g_r_scr = 9;
         return;
@@ -5920,9 +5942,37 @@ static void t_roles_from(unsigned busy)
     for (int r = 11; r >= 9; r--)
         if (!(busy >> r & 1))
             fr[nf++] = r;
+    for (int r = 0; r < 8 && nf < 3; r++)
+        if ((low >> r & 1) && !(busy >> r & 1)) {
+            fr[nf++] = r;
+            g_t_role_low |= 1u << r;
+        }
     g_r_tmp = nf > 0 ? fr[0] : -1;
     g_r_addr = nf > 1 ? fr[1] : -1;
     g_r_scr = nf > 2 ? fr[2] : -1;
+}
+
+/* May instruction n's scratch roles be low registers? When its lowering
+ * names none of its own: lo_op_ok's set, and the 64-bit operations
+ * gen_ins64 makes inline -- arithmetic, shifts, compares, moves, loads and
+ * stores of a pair -- which take their operands where they are and work
+ * in the roles and r12. Not a call, a helper, a divide, an asm. */
+static int t_role_low_ok(const struct t_fn *F, const struct ir_ins *i)
+{
+    if (lo_op_ok(F, i))
+        return 1;
+    if (i->flt || t_op_calls_helper(i))
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR:
+    case IR_BNOT: case IR_NEG: case IR_MUL: case IR_MULW: case IR_SHL:
+    case IR_SHR: case IR_EXT: case IR_MOV: case IR_CONST: case IR_LOAD:
+    case IR_STORE: case IR_CMP: case IR_SELECT: case IR_LDVAR:
+    case IR_STVAR: case IR_BITCAST: case IR_BRZ: case IR_BRNZ:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 /* lo_free's liveness, as registers: for each instruction, lo_mark of
@@ -6546,7 +6596,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * already saved it, and it holds nothing of its own yet. */
         if (npmv) {
             int od[RA_MAXPOOL * 2], os[RA_MAXPOOL * 2];
-            int n = ra_parallel_move(pmv_dst, pmv_src, npmv, R_SCR, od, os,
+            int n = ra_parallel_move(pmv_dst, pmv_src, npmv, T_ACC_PM, od, os,
                                      (int)(sizeof od / sizeof od[0]));
             if (n < 0)
                 internal_error("thumb: %s: the prologue's parameter "
@@ -6585,9 +6635,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             if (!F.lv_busy)
                 g_t_role_fail = 1;     /* no liveness: nothing is known
                                         * free, so this attempt cannot be */
-            t_roles_from(t_busy(&F, i, 2));
+            {
+                unsigned busy = t_busy(&F, i, 2), low = 0;
+                int ok = !getenv("EMBCC_T_NOLOWROLE");
+                ok = ok && t_role_low_ok(&F, &fn->ins[i]);
+                if (ok) {
+                    low = 0xfu;
+                    for (int k = 0; k < F.nsave; k++)
+                        if (F.used_callee[k] < 8)
+                            low |= 1u << F.used_callee[k];
+                    if (F.fb == 7 || fn->has_alloca)
+                        low &= ~(1u << 7);
+                }
+                t_roles_low(busy, low);
+            }
+        } else {
+            g_t_role_low = 0;
         }
-        F.lofree = lo_free(&F, i);
+        F.lofree = lo_free(&F, i) & ~g_t_role_low;
         gen_ins(&F, i);
         F.lofree = 0;
         if (F.skip_next) {      /* the comparison emitted its branch too,
