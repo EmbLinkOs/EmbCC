@@ -1615,10 +1615,12 @@ static void xt_literal_dir(struct gas *g, const char *arg, int pass)
         int bad;
         p = skip_ws((char *)p + 1);
         const char *e = p;
+        long namei = (long)(name - g->syms);
         struct gval v = gx_eval(g, &e, pass, &bad);
         long off;
         if (bad)
             return;
+        name = &g->syms[namei];   /* the value may have moved the table */
         off = xt_lit_val(g, v, 0);
         if (first < 0)
             first = off;
@@ -2736,8 +2738,12 @@ static int directive(struct gas *g, char *p, int pass)
         v = skip_ws(e);
         if (e == arg || *v != ',') { gerr(g, ".size wants NAME, SIZE"); return 1; }
         v++;
+        /* The value first: evaluating `.` makes a symbol, which may move
+         * the table, and a pointer into it taken before would be left
+         * pointing at freed memory (it wrote the size there). */
+        int ok = pass == 2 && gx_abs_now(g, &v, pass, &n, ".size");
         struct sym *sy = sym_get(g, arg, (size_t)(e - arg));
-        if (pass == 2 && gx_abs_now(g, &v, pass, &n, ".size"))
+        if (ok)
             sy->size = n;
         return 1;
     }
@@ -2801,9 +2807,11 @@ static int directive(struct gas *g, char *p, int pass)
             gerr(g, ".equiv: '%s' is already defined", sy->name);
             return 1;
         }
+        long syi = (long)(sy - g->syms);
         struct gval gv = gx_eval(g, &v, pass, &bad);
         if (bad)
             return 1;
+        sy = &g->syms[syi];      /* `.` in the value may have moved the table */
         sy->alias = NULL;
         sy->alias_add = 0;
         if (gv.sec == SEC_ABS) {
