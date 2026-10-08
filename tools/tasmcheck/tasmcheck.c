@@ -12,17 +12,18 @@
 #include "../../src/arch/thumb/asm.h"
 
 /* --each LEVEL FILE: assemble each line of FILE on its own at that level
- * (6, 7, 8, or 9 for ARMv8-M Baseline) and print `N ok` or `N no` for
- * line N, so a test can compare what this assembler refuses with what
- * llvm-mc refuses for the same core. Each line starts outside an IT
- * block. */
-static int each(int level, const char *path)
+ * (6, 7, 8, or 9 for ARMv8-M Baseline; 7e and 8e with the DSP extension)
+ * and print `N ok` or `N no` for line N, so a test can compare what this
+ * assembler refuses with what llvm-mc refuses for the same core. Each
+ * line starts outside an IT block. */
+static int each(int level, int dsp, const char *path)
 {
     char line[512], err[512];
     FILE *f = fopen(path, "r");
     int n = 0;
     if (!f) { fprintf(stderr, "tasmcheck: cannot read %s\n", path); return 1; }
     tasm_set_arch(level);
+    tasm_set_dsp(dsp);
     while (fgets(line, sizeof line, f)) {
         struct code c = { 0 };
         line[strcspn(line, "\n")] = 0;
@@ -42,20 +43,26 @@ int main(int argc, char **argv)
     FILE *tmp;
     struct code c = { 0 };
     char err[512];
-    int list = 0, v8 = -1;
+    int list = 0, v8 = -1, dsp = 0;
 
     if (argc == 4 && strcmp(argv[1], "--each") == 0)
-        return each(atoi(argv[2]), argv[3]);
+        return each(atoi(argv[2]), strchr(argv[2], 'e') != NULL, argv[3]);
     /* --list: print the lines; --v8m-main / --v8m-base: ARMv8-M's
-     * vocabulary (tasm_vocabulary_v8m) at that level instead */
+     * vocabulary (tasm_vocabulary_v8m) at that level instead; --dsp: the
+     * DSP extension's (tasm_vocabulary_dsp), at ARMv7E-M */
     for (int k = 1; k < argc; k++) {
         if (strcmp(argv[k], "--list") == 0) list = 1;
         else if (strcmp(argv[k], "--v8m-main") == 0) v8 = 0;
         else if (strcmp(argv[k], "--v8m-base") == 0) v8 = 1;
+        else if (strcmp(argv[k], "--dsp") == 0) dsp = 1;
     }
     tmp = tmpfile();
     if (!tmp) { fprintf(stderr, "no tmpfile\n"); return 1; }
-    if (v8 >= 0) {
+    if (dsp) {
+        tasm_set_arch(7);
+        tasm_set_dsp(1);
+        tasm_vocabulary_dsp(tmp);
+    } else if (v8 >= 0) {
         tasm_set_arch(v8 ? TASM_V8M_BASE : 8);
         tasm_vocabulary_v8m(tmp, v8);
     } else {

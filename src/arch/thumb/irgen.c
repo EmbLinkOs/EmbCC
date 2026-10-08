@@ -295,6 +295,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     tasm_reset();
     tasm_set_arch(target_thumb_v8m_base() ? TASM_V8M_BASE
                                               : target_thumb_arch());
+    tasm_set_dsp(target_thumb_em());
     if (tasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
     if (tasm_open())

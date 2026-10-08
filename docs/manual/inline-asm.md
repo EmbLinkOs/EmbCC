@@ -978,8 +978,9 @@ does not have, and the ARMv8-M levels add the instructions in
 | Letter | Meaning |
 |---|---|
 | `r`, `q`, `g`, `R` | a general register chosen by EmbCC |
-| `i`, `n` | the constant, computed into a general register chosen by EmbCC |
+| `i`, `n`, `I`, `J`, `K`, `L`, `M` | a constant, written into the template as a number (`ssat %0, %1, %2` with `"I"(8)` reads `ssat r0, 8, r1`); refused when the operand is not a constant |
 | `m` | a general register chosen by EmbCC, holding the address of the operand (inputs) |
+| `0`, `1`, ... (inputs) | the output of that number: the input must be the output's own lvalue, and the pair is taken as one `+r` operand, as CMSIS's `__SMLALD` writes its accumulator; another value is refused |
 | `=`, `+`, `&` | see [Output operands](#output-operands) |
 
 Constraints are read by the same rules as on x86-64. As a result the
@@ -988,8 +989,8 @@ r0, r3, r1, r2, r6 and r7 respectively; r6 and r7 are callee-saved, so a
 function that uses `S` or `D` saves them and keeps no other value there
 (and `D` is refused in a function with a variable-length array, whose
 frame r7 addresses). Do not use these letters. `x` is accepted and produces a
-template that does not assemble. ARM letters such as `l`, `h`, `I`, `J`,
-`K`, `L`, `M`, `Q`, `t` and `w`, alone, are refused:
+template that does not assemble. ARM letters such as `l`, `h`, `Q`, `t`
+and `w`, alone, are refused:
 
 ```text
 asm constraint "=l" is not supported (EmbCC handles a/b/c/d/S/D, 'r'/'q'/'g'/'m', 'x', and a register-asm variable)
@@ -1063,6 +1064,9 @@ and is refused, as is a value the instruction cannot encode.
 | `ldrexb`, `ldrexh` `Rt, [Rn]`; `strexb`, `strexh` `Rd, Rt, [Rn]` | `Rd` neither `Rt` nor `Rn` |
 | `clrex` | none |
 | `msr apsr_nzcvq, Rn`, `msr apsr_nzcvqg, Rn` | the flags; `apsr_nzcvqg` also the DSP extension's GE bits (not on ARMv6-M or ARMv8-M Baseline) |
+| `ssat Rd, #1..32, Rn`, `usat Rd, #0..31, Rn` | an optional `lsl #0..31` or `asr #1..31` (not on ARMv6-M or ARMv8-M Baseline) |
+| `sxtb`, `sxth`, `uxtb`, `uxth` `Rd, Rm` | an optional `ror #8`, `#16` or `#24` (not on ARMv6-M or ARMv8-M Baseline, where only the 16-bit form with r0-r7 exists) |
+| The DSP extension's | see [The DSP extension](#the-dsp-extension) |
 | ARMv8-M only: `lda`, `ldab`, `ldah`, `ldaex`, `ldaexb`, `ldaexh`, `stl`, `stlb`, `stlh`, `stlex`, `stlexb`, `stlexh`, `tt`, `ttt`, `tta`, `ttat`, `sg`, `bxns`, `blxns`, and on Mainline `vlstm`, `vlldm` | see [ARMv8-M security and acquire/release instructions](#armv8-m-security-and-acquirerelease-instructions) |
 | `b`, `bl`, `beq`, `bne`, `bcs`, `bhs`, `bcc`, `blo`, `bmi`, `bpl`, `bvs`, `bvc`, `bhi`, `bls`, `bge`, `blt`, `bgt`, `ble` | `OFFSET` (even) |
 | `cbz`, `cbnz` | `Rn, OFFSET`: `Rn` r0 to r7, `OFFSET` 4 to 130, forward |
@@ -1096,9 +1100,11 @@ file is assembled as GNU as does it, see [embas](tools/embas.md#gnu-syntax-assem
 - A barrier option other than `sy` is refused with
   ``only the `sy` barrier option is supported; "ish" is not``.
 
-There is no `ldrd` or `strd`, no extend, bit-field, multiply-accumulate
-or long-multiply instruction, and no floating-point instruction beyond
-`vmov`, `vldm`/`vstm` and `vpush`/`vpop` (`vmrs`, `vmsr`, `vldr`, ...).
+There is no `ldrd` or `strd`, no bit-field instruction, no `mla`, `mls`,
+`smull`, `umull`, `smlal` or `umlal` (the DSP extension's multiplies are
+there), no `rev16`, `revsh` or `rrx`, and no floating-point instruction
+beyond `vmov`, `vldm`/`vstm` and `vpush`/`vpop` (`vmrs`, `vmsr`, `vldr`,
+...).
 
 On ARMv6-M (`thumbv6m-none-eabi`) and ARMv8-M Baseline
 (`thumbv8m.base-none-eabi`), every 32-bit encoding a statement produces is
@@ -1119,6 +1125,48 @@ with an offset, the byte and halfword forms, `clrex`), the
 acquire/release family, `tt`/`ttt`/`tta`/`ttat` and `sg`, and the 16-bit
 `cbz`, `cbnz`, `bxns` and `blxns` (see
 [Targets](targets.md#armv8-m-baseline)).
+
+### The DSP extension
+
+ARMv7E-M (`thumbv7em-none-eabi[hf]`, `-mcpu=cortex-m4` or `cortex-m7`) and
+ARMv8-M Mainline with the extension (`-mcpu=cortex-m33`,
+`-march=armv8-m.main+dsp`) have the DSP instructions, and so does EmbCC's
+assembler for them, in inline asm and in `.s` files. They are what
+CMSIS's `cmsis_gcc.h` (`__SADD16` ... `__SMLALD`, selected by
+`__ARM_FEATURE_DSP`) and EmbCC's `<arm_acle.h>` (`__sadd16`, `__smlad`,
+`__ssat`, ...: ACLE's DSP and SIMD32 intrinsics, under clang's names) are
+made of:
+
+| Instructions | Operands |
+|---|---|
+| `sadd16`, `sasx`, `ssax`, `ssub16`, `sadd8`, `ssub8`, and the same with `q`, `sh`, `u`, `uq` and `uh` in place of `s` (`qadd16`, `shsub8`, `uasx`, `uqsub16`, `uhadd8`, ...) | `Rd, Rn, Rm` |
+| `qadd`, `qsub`, `qdadd`, `qdsub` | `Rd, Rm, Rn`: `qsub rd, rm, rn` is `rd = sat(rm - rn)` |
+| `sel` | `Rd, Rn, Rm`, each byte by the GE bits |
+| `usad8`; `usada8` | `Rd, Rn, Rm`; `Rd, Rn, Rm, Ra` |
+| `smuad`, `smuadx`, `smusd`, `smusdx`, `smulbb`, `smulbt`, `smultb`, `smultt`, `smulwb`, `smulwt`, `smmul`, `smmulr` | `Rd, Rn, Rm` |
+| `smlad`, `smladx`, `smlsd`, `smlsdx`, `smlabb`, `smlabt`, `smlatb`, `smlatt`, `smlawb`, `smlawt`, `smmla`, `smmlar`, `smmls`, `smmlsr` | `Rd, Rn, Rm, Ra` |
+| `smlald`, `smlaldx`, `smlsld`, `smlsldx`, `smlalbb`, `smlalbt`, `smlaltb`, `smlaltt` | `RdLo, RdHi, Rn, Rm`, `RdLo` not `RdHi` |
+| `ssat16 Rd, #1..16, Rn`, `usat16 Rd, #0..15, Rn` | |
+| `pkhbt Rd, Rn, Rm{, lsl #0..31}`, `pkhtb Rd, Rn, Rm{, asr #1..32}` | `pkhtb` with no shift is `pkhbt Rd, Rm, Rn`, as GNU as and llvm-mc encode it |
+| `sxtb16`, `uxtb16` `Rd, Rm`; `sxtab16`, `uxtab16`, `sxtab`, `sxtah`, `uxtab`, `uxtah` `Rd, Rn, Rm` | an optional `ror #8`, `#16` or `#24` |
+
+No operand may be `sp` or `pc`. The rotation and shift keywords are
+case-insensitive and the `#` is optional, so CMSIS's
+`"sxtb16 %0, %1, ROR %2"` with an `"i"` operand assembles.
+
+On a part without the extension -- ARMv7-M, `thumbv8m.main-none-eabi`
+alone (as with clang), ARMv6-M, ARMv8-M Baseline -- each is refused by
+name, in inline asm and in a `.s` file alike, as llvm-mc refuses it:
+
+```text
+"sadd16" is an instruction of the DSP extension, which ARMv7-M lacks: it is ARMv7E-M's (-mcpu=cortex-m4, cortex-m7, --target=thumbv7em-none-eabi) and ARMv8-M Mainline's with the extension (-mcpu=cortex-m33, -march=armv8-m.main+dsp)
+```
+
+They are not in the ARM-state assembler (`armv7a-none-eabi`), which
+refuses them by name; `<arm_acle.h>` declares nothing there.
+`tests/golden/thumb-dsp.sh` checks every form against llvm-mc, byte for
+byte and by disassembly, compares the refusals core by core, and runs
+each instruction on a Cortex-M4 under QEMU against a C model of it.
 
 ### ARMv8-M security and acquire/release instructions
 
@@ -1802,14 +1850,14 @@ In summary, compared with GCC:
 
 - Only the instructions listed for each target can appear in a template,
   and a function template cannot refer to a symbol on any target.
-- `asm goto`, `asm inline`, matching constraints (`"0"`) and flag-output
-  constraints are not supported. Flag outputs are not always refused
-  (see [x86-64](#x86-64) and [AArch64](#aarch64)).
+- `asm goto`, `asm inline` and flag-output constraints are not
+  supported, nor are matching constraints (`"0"`) except on ARM Cortex-M,
+  where the input must be the output's own lvalue. Flag outputs are not
+  always refused (see [x86-64](#x86-64) and [AArch64](#aarch64)).
 - `m` outputs do not work (except on MIPS32, where the operand's
   register holds the address), and `m` inputs are a register holding the
   address rather than a memory reference.
-- On x86-64, ARM Cortex-M and RISC-V, `i` and `n` give a register, not
-  an immediate.
+- On x86-64 and RISC-V, `i` and `n` give a register, not an immediate.
 - Labels inside a function template are supported only for the x86-64
   `leaq Nf(%%rip)` form; elsewhere branches use numeric displacements.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are

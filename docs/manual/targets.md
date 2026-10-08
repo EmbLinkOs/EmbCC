@@ -539,7 +539,13 @@ or for the ARM instruction set.
 
 The architecture changes the object's build attributes, the predefined
 macros and `-dumpmachine`. The instructions generated for ARMv7-M and
-ARMv7E-M are the same: EmbCC does not use the DSP extension.
+ARMv7E-M are the same: the code generator does not use the DSP extension.
+Where the part has it -- ARMv7E-M, and ARMv8-M Mainline with
+`-mcpu=cortex-m33` or `-march=armv8-m.main+dsp` -- its instructions are
+accepted in inline asm and `.s` files and its macros are defined, which is
+what CMSIS's `cmsis_gcc.h` and CMSIS-DSP select their SIMD code on
+([Inline assembly](inline-asm.md#the-dsp-extension), `<arm_acle.h>`).
+`thumbv8m.main-none-eabi` alone has no DSP extension, as with clang.
 
 ### Options
 
@@ -838,14 +844,24 @@ The tables are those of `clang -target thumbv7m-none-eabi` and
 |---|---|---|
 | `__arm__`, `__thumb__`, `__thumb2__`, `__ARM_EABI__`, `__ARMEL__` | 1 | 1 |
 | `__ARM_ARCH` | 7 | 8 |
-| `__ARM_ARCH_7M__` / `__ARM_ARCH_8M_MAIN__` | `__ARM_ARCH_7M__` | `__ARM_ARCH_8M_MAIN__` |
+| `__ARM_ARCH_7M__` / `__ARM_ARCH_7EM__` / `__ARM_ARCH_8M_MAIN__` | `__ARM_ARCH_7M__`; `__ARM_ARCH_7EM__` on ARMv7E-M | `__ARM_ARCH_8M_MAIN__` |
+| `__ARM_FEATURE_DSP`, `__ARM_FEATURE_SIMD32` | ARMv7E-M only | with the DSP extension (`-mcpu=cortex-m33`, `+dsp`) |
+| `__ARM_FEATURE_SAT`, `__ARM_FEATURE_QBIT` | yes | yes |
 | `__ARM_ARCH_PROFILE` | `'M'` | `'M'` |
 | `__ARM_FEATURE_IDIV`, `__ARM_FEATURE_CLZ`, `__ARM_FEATURE_LDREX` (0x7) | yes | yes |
 | `__CHAR_UNSIGNED__`, `__WCHAR_UNSIGNED__` | 1 | 1 |
 | `__BIGGEST_ALIGNMENT__` | 8 | 8 |
 
-The ARMv7E-M triples define the same macros as ARMv7-M:
-`__ARM_ARCH_7EM__` and `__ARM_FEATURE_DSP` are not defined.
+ARMv7E-M (`thumbv7em-*`, `-mcpu=cortex-m4` or `cortex-m7`,
+`-march=armv7e-m`) defines `__ARM_ARCH_7EM__` in place of
+`__ARM_ARCH_7M__`, and `__ARM_FEATURE_DSP` and `__ARM_FEATURE_SIMD32`, as
+clang does; ARMv8-M Mainline adds the last two with the DSP extension.
+`-mcpu=` names the part, and the part has one architecture whatever the
+triple said: `-mcpu=cortex-m33` on a `thumbv7em` triple is ARMv8-M
+Mainline, `-mcpu=cortex-m4` on `thumbv8m.main` ARMv7E-M.
+`tests/golden/predef.sh` compares every `__ARM_ARCH*` and
+`__ARM_FEATURE_*` macro with clang's for each part and `-march=`. clang's
+`__ARM_FEATURE_FMA` is left out (below).
 
 ARMv8-M Baseline's is that of `clang -target thumbv8m.base-none-eabi
 -mcpu=cortex-m23`: `__ARM_ARCH` 8, `__ARM_ARCH_8M_BASE__`,
