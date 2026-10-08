@@ -8,8 +8,10 @@
  * the debugger made reached the program. VARIANT changes it again (81
  * for 5 on the M3), for the image `load` must replace. `spin` and `idle`
  * hold the program in a loop, and in a WFI nothing can end, until a
- * debugger that has interrupted it clears them; `trap` locks the core up
- * (an undefined instruction, and no fault handler). */
+ * debugger that has interrupted it clears them (SPIN and IDLE set them
+ * from the start, for a debugger that attaches to a running image);
+ * `trap` locks the core up (an undefined instruction, and no fault
+ * handler). */
 extern unsigned __data_load, __data_start, __data_end;
 extern unsigned __bss_start, __bss_end;
 int main(void);
@@ -31,15 +33,22 @@ typedef int real;
 #ifndef VARIANT
 #define VARIANT 0
 #endif
+#ifndef SPIN
+#define SPIN 0
+#endif
+#ifndef IDLE
+#define IDLE 0
+#endif
 
 struct pt { int x; int y; };
 
 volatile int counter;
-volatile int spin, idle, trap;
+volatile int trap;
 volatile unsigned ticks;
-int table[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+int table[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };      /* first in .data */
 struct pt origin = { 3, -4 };
 real scale = SCALE;
+volatile int spin = SPIN, idle = IDLE;
 
 static unsigned blk[2];
 

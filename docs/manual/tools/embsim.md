@@ -123,8 +123,10 @@ A run that ends at a lockup or at `--max-insns` says why on stderr.
 
 `--gdb PORT` serves the GDB remote protocol on `localhost:PORT` while the
 image runs. `--gdb-wait` holds the core at reset until a debugger
-connects, as QEMU's `-S` does; without it the image runs, and a debugger
-that connects stops it where it is. `HOST:PORT` listens on another
+connects, as QEMU's `-S` does. Without it the image runs, and a debugger
+that connects stops it where it is; an image that ends first ends EmbSim
+as without `--gdb`, but one that waits in a WFI or a loop nothing can
+interrupt waits there for the debugger. `HOST:PORT` listens on another
 address, and QEMU's `tcp::PORT` is accepted too.
 
 ```sh

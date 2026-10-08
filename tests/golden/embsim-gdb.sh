@@ -67,7 +67,7 @@ cleanup() {
     done
     for p in $ports; do
         pkill -f "tcp::$p\$" 2>/dev/null
-        pkill -f "gdb $p --gdb-wait" 2>/dev/null
+        pkill -f "gdb $p( |\$)" 2>/dev/null
     done
 }
 trap cleanup EXIT
@@ -110,13 +110,15 @@ qemu_at() {
     pids="$pids $!"
 }
 # sim_at PORT ELF EMBSIM-ARGS...: EmbSim halted at reset with its server;
-# its pid in $simpid, its status written to $simpid.st by the waiter
+# its status is written to sim.PORT.st when it ends. RUN=1: running, not
+# waiting for the debugger.
 sim_at() {
     p=$1; e=$2; shift 2
-    ( "$EMBSIM" "$e" "$@" --gdb $p --gdb-wait > "$out/sim.$p.out" 2> "$out/sim.$p.err"
+    w=--gdb-wait
+    [ "${RUN:-0}" = 1 ] && w=
+    ( "$EMBSIM" "$e" "$@" --gdb $p $w > "$out/sim.$p.out" 2> "$out/sim.$p.err"
       echo $? > "$out/sim.$p.st" ) &
-    simpid=$!
-    pids="$pids $simpid"
+    pids="$pids $!"
 }
 # sim_status PORT: EmbSim's exit status once it has ended (or "running")
 sim_status() {
@@ -152,6 +154,10 @@ want() {        # want FILE PATTERN WHAT: the transcript says it
 "$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$out/m3.o" -o "$out/m3.elf" &&
 "$EMBCC" --target=thumbv7m-none-eabi -g -O0 -DVARIANT=5 -c $src/gdb-fw.c -o "$out/m3v.o" &&
 "$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$out/m3v.o" -o "$out/m3v.elf" &&
+"$EMBCC" --target=thumbv7m-none-eabi -g -O0 -DSPIN=1 -c $src/gdb-fw.c -o "$out/m3s.o" &&
+"$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$out/m3s.o" -o "$out/m3s.elf" &&
+"$EMBCC" --target=thumbv7m-none-eabi -g -O0 -DIDLE=1 -c $src/gdb-fw.c -o "$out/m3i.o" &&
+"$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$out/m3i.o" -o "$out/m3i.elf" &&
 "$EMBCC" --target=thumbv7em-none-eabihf -g -O0 -c $src/gdb-fw.c -o "$out/m4.o" &&
 "$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$out/m4.o" -o "$out/m4.elf" ||
     fail "the images do not build"
@@ -418,3 +424,18 @@ gdb_run $ep "$out/m3.elf" "$out/detach.gdb" "$out/detach.out"
 want "$out/detach.out" '^\[Inferior 1 (process 1) detached\]' "detach"
 [ "$(sim_status $ep)" = 71 ] || fail "after detach the run did not end with 71 but $(sim_status $ep)"
 echo "embsim-gdb: a lockup stops as SIGSEGV; after detach the target runs to its end (71); kill ends EmbSim with 0"
+
+# without --gdb-wait the image runs, and a debugger attaches to it where
+# it is: in a loop, or in a WFI nothing can wake (where it waits for one)
+for v in spin:m3s idle:m3i; do
+    var=${v%%:*}; img=${v#*:}
+    printf 'set pagination off\nset confirm off\nprint %s\nset var %s = 0\ncontinue\n' \
+        "$var" "$var" > "$out/attach.gdb"
+    next_port; ep=$port
+    RUN=1 sim_at $ep "$out/$img.elf" $M3E
+    sleep 1
+    gdb_run $ep "$out/$img.elf" "$out/attach.gdb" "$out/attach.$var"
+    want "$out/attach.$var" '^\$1 = 1' "attach ($var): the image was not where it waits"
+    want "$out/attach.$var" 'exited with code 0107\]' "attach ($var): it did not run on to its end"
+done
+echo "embsim-gdb: without --gdb-wait, a debugger attaches to the running image (a loop, and a WFI nothing wakes)"

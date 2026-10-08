@@ -863,9 +863,16 @@ void gdb_serve(struct sim *s, const char *host, int port, int wait)
             g->fd = net_accept(l, -1);
         set_stop(g, 5, "");
     } else {
-        /* run, and look for a debugger as for the interrupt */
+        /* run, and look for a debugger as for the interrupt; a core that
+         * nothing can wake waits for one, as under a debugger */
         unsigned n = 0;
-        while (s->state == RUN) {
+        while (s->state == RUN || s->state == END_IDLE) {
+            if (s->state == END_IDLE) {
+                s->state = RUN;
+                while (g->fd < 0)
+                    g->fd = net_accept(l, -1);
+                break;
+            }
             sim_step(s);
             if (!(++n & 0x3fff) && (g->fd = net_accept(l, 0)) >= 0)
                 break;
