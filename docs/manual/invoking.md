@@ -64,7 +64,7 @@ the full entry.
 | [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-fshort-wchar` `-fno-short-wchar` `-ffreestanding` `-fno-builtin` `-fno-builtin-NAME` `-fwrapv` `-fno-strict-overflow` `-fstrict-aliasing` `-fno-strict-aliasing` `-fcommon` `-fno-common` `-fno-short-enums` `-fsingle-precision-constant` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
 | [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fmessage-length=N` `-fdiagnostics-parseable-fixits` `--fix` `-fanalyzer` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
-| [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-funroll-loops` `-fno-unroll-loops` `-ffp-contract=off\|on\|fast` `-fno-reorder-functions` `-fremarks` `-fremarks=json` |
+| [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-funsafe-math-optimizations` `-fno-signed-zeros` `-fno-trapping-math` `-ffinite-math-only` `-fassociative-math` `-freciprocal-math` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-funroll-loops` `-fno-unroll-loops` `-ffp-contract=off\|on\|fast` `-fno-reorder-functions` `-fremarks` `-fremarks=json` |
 | [Instrumentation](#instrumentation-options) | `-finstrument-functions` `-finstrument-functions-exclude-function-list=LIST` `-finstrument-functions-exclude-file-list=LIST` `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fcallgraph-info[=su]` `-ftime-report` `-fno-stack-protector` |
 | [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-include FILE` `-Wp,ARGS` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
@@ -271,11 +271,16 @@ be attached (`-xc++`) or the next argument (`-x c++`).
 | `c`, `cpp-output` | C |
 | `c++`, `c++-cpp-output` | C++ |
 | `none` | go back to deciding by suffix |
+| `assembler` | GNU assembly, as a `.s` file is |
+| `assembler-with-cpp` | GNU assembly, preprocessed first, as a `.S` file is |
 
-Any other value is refused with
-`embcc: error: unknown language 'LANGUAGE' for -x (c or c++)`. Assembly
-languages (`assembler`, `assembler-with-cpp`) are not accepted; use the
-`.s` or `.S` suffix instead.
+The two assembly languages are what a CubeMX-generated Makefile passes:
+it assembles its `startup_*.s` with `gcc -x assembler-with-cpp`, so the
+lowercase `.s` is preprocessed. An object or an archive given in the same
+command (`.o`, `.a`, `.obj`) is still linked, not assembled.
+
+Any other value is refused with `embcc: error: unknown language
+'LANGUAGE' for -x (c, c++, assembler or assembler-with-cpp)`.
 
 Unlike GCC, `-x` applies to the one input file wherever it appears. The
 exception is an input whose suffix EmbCC does not recognize (`prog.txt`,
@@ -928,7 +933,10 @@ budgets EmbCC's does not share (see [Optimization](optimization.md)).
 
 Accepted and without effect. Both give the compiler permission to relax
 IEEE arithmetic or to assume the math library sets no `errno`; EmbCC
-uses neither permission. `__FAST_MATH__` is not defined, so a header
+uses neither permission. So are the permissions `-ffast-math` is made
+of: `-funsafe-math-optimizations`, `-fno-signed-zeros`,
+`-fno-trapping-math`, `-ffinite-math-only`, `-fassociative-math` and
+`-freciprocal-math`. `__FAST_MATH__` is not defined, so a header
 that tests it takes its careful path, as it should for code that is not
 compiled fast-math.
 

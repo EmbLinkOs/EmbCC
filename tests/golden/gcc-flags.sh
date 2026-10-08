@@ -64,6 +64,8 @@ accept() {
 EVERYWHERE="-fno-inline-functions -finline-functions -finline-small-functions
  -fno-inline-small-functions -finline-limit=600 -fcommon -fno-common
  -fno-short-enums -fno-math-errno -ffast-math -fsingle-precision-constant
+ -funsafe-math-optimizations -fno-signed-zeros -fno-trapping-math
+ -ffinite-math-only -fassociative-math -freciprocal-math
  -fmessage-length=0 -fdiagnostics-color=always -fdiagnostics-color=never
  -fdiagnostics-color=auto -fverbose-asm -pipe -fno-pic -fno-pie
  -fno-delete-null-pointer-checks -fno-tree-loop-distribute-patterns
@@ -691,3 +693,26 @@ rm -f "$out/t.lst" "$out/t.o"
     cmp -s "$out/t.s" "$out/t.lst" || fail "the listing is not the -S text"
 refuse thumbv7em-none-eabi "is not one the integrated assembler has" -Wa,-z
 echo "-Wa,-a...=FILE writes the listing"
+
+# -x assembler-with-cpp: a CubeMX Makefile's way to assemble its
+# startup_*.s, preprocessed though the suffix is lowercase; -x assembler
+# does not preprocess; an object beside it is still an object
+printf '\t.syntax unified\n\t.thumb\n\t.text\n\t.globl s\n\t.type s, %%function\ns:\n#define SEVEN 7\n\tmovs r0, #SEVEN\n\tbx lr\n' > "$out/start.s"
+"$EMBCC" --target=thumbv7em-none-eabi -x assembler-with-cpp -c "$out/start.s" \
+    -o "$out/start.o" || fail "-x assembler-with-cpp on a .s"
+"${EMBCC_LLVM_OBJDUMP:-llvm-objdump}" -d "$out/start.o" | grep -q "movs.*r0, #0x7" ||
+    fail "-x assembler-with-cpp did not preprocess the .s"
+"$EMBCC" --target=thumbv7em-none-eabi -x assembler -c "$out/start.s" \
+    -o "$out/start2.o" 2>/dev/null &&
+    fail "-x assembler preprocessed the .s: SEVEN was defined"
+"$EMBCC" --target=thumbv7em-none-eabi -c "$out/start.s" -o "$out/start3.o" \
+    2>/dev/null && fail "a plain .s was preprocessed"
+printf 'int main(void) { return 0; }\n' > "$out/xm.c"
+"$EMBCC" --target=thumbv7em-none-eabi -c "$out/xm.c" -o "$out/xm.o" || fail "xm.c"
+"$EMBCC" --target=thumbv7em-none-eabi -x assembler-with-cpp -c "$out/start.s" \
+    "$out/xm.o" -o "$out/start4.o" > "$out/xm.err" 2>&1 ||
+    fail "-x assembler-with-cpp assembled the object beside it: $(cat "$out/xm.err")"
+grep -q "linker input unused" "$out/xm.err" ||
+    fail "the object beside -x assembler-with-cpp was not a linker input: $(cat "$out/xm.err")"
+refuse thumbv7em-none-eabi "unknown language 'assemblr'" -x assemblr
+echo "-x assembler-with-cpp preprocesses a .s, -x assembler does not, and an object stays one"

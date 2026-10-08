@@ -4124,9 +4124,19 @@ static int has_asm_suffix(const char *s)
  * `.S` is preprocessed first, as it is in every other compiler, which
  * is what lets a startup file share a header with the C beside it.
  * Returns 0, 1 for `.s`, or 2 for `.S`. */
+/* -x assembler (1) and -x assembler-with-cpp (2): the input is GNU
+ * assembly whatever its name -- a CubeMX Makefile assembles its
+ * startup_*.s with `gcc -x assembler-with-cpp`, so the .s is preprocessed.
+ * Like the rest of -x here it is one setting for the command. An object
+ * or an archive given with it is still linked: has_link_input_suffix
+ * claims those before any source suffix is asked about. */
+static int g_x_gas;
+
 static int has_gas_suffix(const char *s)
 {
     size_t n = strlen(s);
+    if (g_x_gas && s[0] != '-')
+        return g_x_gas;
     if (n <= 2 || s[n - 2] != '.') return 0;
     return s[n - 1] == 's' ? 1 : s[n - 1] == 'S' ? 2 : 0;
 }
@@ -4680,15 +4690,21 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-x", 2) == 0) {
             const char *l = argv[i][2] ? argv[i] + 2
                                        : (i + 1 < argc ? argv[++i] : "");
+            g_x_gas = 0;
             if (strcmp(l, "c++") == 0 || strcmp(l, "c++-cpp-output") == 0)
                 lang = 1;
             else if (strcmp(l, "c") == 0 || strcmp(l, "cpp-output") == 0)
                 lang = 0;
             else if (strcmp(l, "none") == 0)
                 lang = -1;
+            else if (strcmp(l, "assembler") == 0)
+                lang = -1, g_x_gas = 1;
+            else if (strcmp(l, "assembler-with-cpp") == 0)
+                lang = -1, g_x_gas = 2;
             else {
                 fprintf(stderr, "embcc: error: unknown language '%s' for "
-                                "-x (c or c++)\n", l);
+                                "-x (c, c++, assembler or "
+                                "assembler-with-cpp)\n", l);
                 return 1;
             }
         } else if (strncmp(argv[i], "-std=", 5) == 0) {
@@ -5143,6 +5159,12 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-fno-short-enums") == 0 ||
                    strcmp(argv[i], "-fno-math-errno") == 0 ||
                    strcmp(argv[i], "-ffast-math") == 0 ||
+                   strcmp(argv[i], "-funsafe-math-optimizations") == 0 ||
+                   strcmp(argv[i], "-fno-signed-zeros") == 0 ||
+                   strcmp(argv[i], "-fno-trapping-math") == 0 ||
+                   strcmp(argv[i], "-ffinite-math-only") == 0 ||
+                   strcmp(argv[i], "-fassociative-math") == 0 ||
+                   strcmp(argv[i], "-freciprocal-math") == 0 ||
                    strncmp(argv[i], "-fmessage-length=", 17) == 0 ||
                    strcmp(argv[i], "-fverbose-asm") == 0 ||
                    strcmp(argv[i], "-pipe") == 0 ||
@@ -5179,7 +5201,10 @@ int main(int argc, char **argv)
              * Permissions, which are kept by not using them:
              * -fno-math-errno, -ffast-math (no __FAST_MATH__: nothing
              * here relaxes IEEE arithmetic, and a header testing for it
-             * takes the careful path), -fmerge-constants,
+             * takes the careful path) and the permissions it is made of
+             * (-funsafe-math-optimizations, -fno-signed-zeros,
+             * -fno-trapping-math, -ffinite-math-only, -fassociative-math,
+             * -freciprocal-math), -fmerge-constants,
              * -fzero-initialized-in-bss, -fno-strict-volatile-bitfields.
              *
              * Formatting and plumbing that change no byte of the object:
