@@ -799,6 +799,14 @@ static void helper2(struct t_fn *F, const struct ir_ins *i, const char *name,
 static void cmp32(struct t_fn *F, const struct ir_ins *i)
 {
     struct code *t = F->t;
+    /* The same compare as the one a branch just took, with nothing
+     * emitted since and no label placed: the flags are there already.
+     * A switch's tree asks `== k` and then `> k` of one register, and a
+     * far `== k` is `bne` over a `b`, neither of which sets flags. */
+    if (i->imm_b && in_reg6(F, i->a) && F->fl_end >= 0 &&
+        F->fl_end == t->len && F->fl_reg == F->loc[i->a] &&
+        F->fl_imm == i->imm)
+        return;
     int ra = v_rdr(F, i->a, S0);
     if (i->imm_b) {
         long v = (long)(int)(unsigned)((unsigned long)i->imm & 0xffffffffUL);
@@ -2403,6 +2411,7 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LABEL:
         F->label_off[i->label] = t->len;
         F->bc_end = -1;
+        F->fl_end = -1;
         F->barrier = 0;
         return;
     case IR_JMP:
@@ -2557,6 +2566,13 @@ static void gen_ins(struct t_fn *F, int n)
         if (fuse) {
             v6_jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
             F->skip_next = 1;
+            /* what cmp32 may reuse: a register against an immediate */
+            F->fl_end = -1;
+            if (i->imm_b && in_reg6(F, i->a)) {
+                F->fl_end = t->len;
+                F->fl_reg = F->loc[i->a];
+                F->fl_imm = i->imm;
+            }
             return;
         }
         set_cc(F, i->dst, cond);
@@ -3229,6 +3245,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.label_off[i] = -1;
         F.skip_next = 0;
         F.bc_end = F.bc_fix = -1;
+        F.fl_end = -1;
         F.va_regsave = F.va_first = -1;
         F.nlit = F.nlsite = 0;
         F.nlrel = 0;
