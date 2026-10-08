@@ -322,6 +322,9 @@ static void data_processing(void)
                   "%s %s, %s, %s, %s", sg ? "smlal" : "umlal", R[d], R[a],
                   R[n], R[m]);
             }
+        if (d != a)
+            I("a32_umaal", (t_umaal(&C, d, a, n, m), 0),
+              "umaal %s, %s, %s, %s", R[d], R[a], R[n], R[m]);
         I("a32_smmul", (t_smmul(&C, d, n, m), 0), "smmul %s, %s, %s",
           R[d], R[n], R[m]);
         for (int sg = 0; sg < 2; sg++)
@@ -340,6 +343,9 @@ static void data_processing(void)
             I("a32_bitop", (t_rev(&C, d, m), 0), "rev %s, %s", R[d], R[m]);
             I("a32_bitop", (t_rev16(&C, d, m), 0), "rev16 %s, %s", R[d], R[m]);
             I("a32_bitop", (t_rbit(&C, d, m), 0), "rbit %s, %s", R[d], R[m]);
+            I("a32_bitop", (t_revsh(&C, d, m), 0), "revsh %s, %s", R[d], R[m]);
+            I("a32_rrx", (t_rrx(&C, d, m, 0), 0), "rrx %s, %s", R[d], R[m]);
+            I("a32_rrx", (t_rrx(&C, d, m, 1), 0), "rrxs %s, %s", R[d], R[m]);
         }
     for (int lsb = 0; lsb < 32; lsb++)
         for (int w = 1; lsb + w <= 32; w++)
@@ -348,6 +354,110 @@ static void data_processing(void)
                                     sg), 0),
                   "%s %s, %s, #%d, #%d", sg ? "sbfx" : "ubfx",
                   R[G(lsb + w)], R[G(lsb * 3 + w)], lsb, w);
+    for (int lsb = 0; lsb < 32; lsb++)
+        for (int w = 1; lsb + w <= 32; w++) {
+            I("a32_bfi", (t_bfi(&C, G(lsb + w), G(lsb * 5 + w), lsb, w), 0),
+              "bfi %s, %s, #%d, #%d", R[G(lsb + w)], R[G(lsb * 5 + w)], lsb, w);
+            I("a32_bfi", (t_bfi(&C, G(lsb * 3 + w), 15, lsb, w), 0),
+              "bfc %s, #%d, #%d", R[G(lsb * 3 + w)], lsb, w);
+        }
+}
+
+/* The DSP instructions, through the t_* encoders the Thumb DSP assembler
+ * calls: every operation with every register in each field. */
+static void sweep_dsp(void)
+{
+    static const struct { int op; const char *m; } PO[] = {
+        { T_PAR_ADD16, "add16" }, { T_PAR_ASX, "asx" }, { T_PAR_SAX, "sax" },
+        { T_PAR_SUB16, "sub16" }, { T_PAR_ADD8, "add8" }, { T_PAR_SUB8, "sub8" }
+    };
+    static const struct { int kind; const char *m; } PK[] = {
+        { T_PAR_S, "s" }, { T_PAR_Q, "q" }, { T_PAR_SH, "sh" },
+        { T_PAR_U, "u" }, { T_PAR_UQ, "uq" }, { T_PAR_UH, "uh" }
+    };
+    static const char *const QN[4] = { "qadd", "qdadd", "qsub", "qdsub" };
+    static const char *const HT = "bt";
+    for (int k = 0; k < NGPR; k++) {
+        int d = G(k), n = G(k + 5), m = G(k + 9), a = G(k + 3), h = G(k + 1);
+        for (int o = 0; o < 6; o++)
+            for (int q = 0; q < 6; q++)
+                I("a32_parallel", (t_parallel(&C, PO[o].op, PK[q].kind, d, n, m), 0),
+                  "%s%s %s, %s, %s", PK[q].m, PO[o].m, R[d], R[n], R[m]);
+        for (int q = 0; q < 4; q++)
+            I("a32_qarith", (t_qarith(&C, q, d, m, n), 0), "%s %s, %s, %s",
+              QN[q], R[d], R[m], R[n]);
+        I("a32_sel", (t_sel(&C, d, n, m), 0), "sel %s, %s, %s", R[d], R[n], R[m]);
+        for (int x = 0; x < 4; x++) {
+            int nt = x >> 1, mt = x & 1;
+            I("a32_smlaxy", (t_smlaxy(&C, d, n, m, a, nt, mt), 0),
+              "smla%c%c %s, %s, %s, %s", HT[nt], HT[mt], R[d], R[n], R[m], R[a]);
+            I("a32_smlaxy", (t_smlaxy(&C, d, n, m, 15, nt, mt), 0),
+              "smul%c%c %s, %s, %s", HT[nt], HT[mt], R[d], R[n], R[m]);
+            if (d != h)
+                I("a32_smlalxy", (t_smlalxy(&C, d, h, n, m, nt, mt), 0),
+                  "smlal%c%c %s, %s, %s, %s", HT[nt], HT[mt], R[d], R[h],
+                  R[n], R[m]);
+            I("a32_smlad", (t_smlad(&C, d, n, m, a, nt, mt), 0),
+              "sml%cd%s %s, %s, %s, %s", nt ? 's' : 'a', mt ? "x" : "",
+              R[d], R[n], R[m], R[a]);
+            I("a32_smlad", (t_smlad(&C, d, n, m, 15, nt, mt), 0),
+              "smu%cd%s %s, %s, %s", nt ? 's' : 'a', mt ? "x" : "",
+              R[d], R[n], R[m]);
+            if (d != h)
+                I("a32_smlald", (t_smlald(&C, d, h, n, m, nt, mt), 0),
+                  "sml%cld%s %s, %s, %s, %s", nt ? 's' : 'a', mt ? "x" : "",
+                  R[d], R[h], R[n], R[m]);
+            I("a32_smmla", (t_smmla(&C, d, n, m, a, nt, mt), 0),
+              "smml%c%s %s, %s, %s, %s", nt ? 's' : 'a', mt ? "r" : "",
+              R[d], R[n], R[m], R[a]);
+        }
+        for (int mt = 0; mt < 2; mt++) {
+            I("a32_smlaw", (t_smlaw(&C, d, n, m, a, mt), 0),
+              "smlaw%c %s, %s, %s, %s", HT[mt], R[d], R[n], R[m], R[a]);
+            I("a32_smlaw", (t_smlaw(&C, d, n, m, 15, mt), 0),
+              "smulw%c %s, %s, %s", HT[mt], R[d], R[n], R[m]);
+            I("a32_smmla", (t_smmla(&C, d, n, m, 15, 0, mt), 0),
+              "smmul%s %s, %s, %s", mt ? "r" : "", R[d], R[n], R[m]);
+        }
+        I("a32_usada8", (t_usada8(&C, d, n, m, a), 0), "usada8 %s, %s, %s, %s",
+          R[d], R[n], R[m], R[a]);
+        I("a32_usada8", (t_usada8(&C, d, n, m, 15), 0), "usad8 %s, %s, %s",
+          R[d], R[n], R[m]);
+        for (int sz = 0; sz < 3; sz++)
+            for (int sg = 0; sg < 2; sg++)
+                for (int rot = 0; rot < 32; rot += 8) {
+                    static const int SZ[3] = { 1, 2, 16 };
+                    static const char *const SN[3] = { "b", "h", "b16" };
+                    const char *rs = rot == 8 ? ", ror #8" : rot == 16
+                                   ? ", ror #16" : rot == 24 ? ", ror #24" : "";
+                    I("a32_extadd", (t_extadd(&C, d, n, m, SZ[sz], sg, rot), 0),
+                      "%cxta%s %s, %s, %s%s", sg ? 's' : 'u', SN[sz], R[d],
+                      R[n], R[m], rs);
+                    I("a32_extadd", (t_extadd(&C, d, 15, m, SZ[sz], sg, rot), 0),
+                      "%cxt%s %s, %s%s", sg ? 's' : 'u', SN[sz], R[d], R[m], rs);
+                }
+        for (int sg = 0; sg < 2; sg++) {
+            for (int b = sg; b <= (sg ? 32 : 31); b++) {
+                int sh = (b * 7) % 32, asr = b & 1;
+                if (asr && !sh)
+                    sh = 32;
+                I("a32_sat", (t_sat(&C, d, b, m, sg, asr, sh), 0),
+                  "%s %s, #%d, %s, %s #%d", sg ? "ssat" : "usat", R[d], b, R[m],
+                  asr ? "asr" : "lsl", sh);
+            }
+            for (int b = sg; b <= (sg ? 16 : 15); b++)
+                I("a32_sat16", (t_sat16(&C, d, b, m, sg), 0), "%s %s, #%d, %s",
+                  sg ? "ssat16" : "usat16", R[d], b, R[m]);
+        }
+        for (int amt = 0; amt < 32; amt += 3) {
+            I("a32_pkh", (t_pkh(&C, d, n, m, 0, amt), 0),
+              "pkhbt %s, %s, %s, lsl #%d", R[d], R[n], R[m], amt);
+            I("a32_pkh", (t_pkh(&C, d, n, m, 1, amt + 1), 0),
+              "pkhtb %s, %s, %s, asr #%d", R[d], R[n], R[m], amt + 1);
+        }
+        I("a32_pkh", (t_pkh(&C, d, n, m, 1, 32), 0),
+          "pkhtb %s, %s, %s, asr #32", R[d], R[n], R[m]);
+    }
 }
 
 static const char *ldst_mn(int size, int sign, int store)
@@ -421,6 +531,27 @@ static void memory(void)
                                                off, st),
                   "%s %s, %s, [%s, #%ld]", st ? "strd" : "ldrd", R[rt],
                   R[rt + 1], R[(rt + 3) % 15], off);
+    for (int rt = 0; rt < 14; rt += 2)
+        for (long off = -255; off <= 255; off += 15)
+            for (int st = 0; st < 2; st++) {
+                int n = (rt + 5) % 15;
+                I("a32_ldst_pair_any", t_ldst_pair_any(&C, rt, rt + 1, n, off,
+                                                       st, T_IDX_OFF),
+                  "%s %s, %s, [%s, #%ld]", st ? "strd" : "ldrd", R[rt],
+                  R[rt + 1], R[n], off);
+                I("a32_ldst_pair_any", t_ldst_pair_any(&C, rt, rt + 1, n, off,
+                                                       st, T_IDX_PRE),
+                  "%s %s, %s, [%s, #%ld]!", st ? "strd" : "ldrd", R[rt],
+                  R[rt + 1], R[n], off);
+                I("a32_ldst_pair_any", t_ldst_pair_any(&C, rt, rt + 1, n, off,
+                                                       st, T_IDX_POST),
+                  "%s %s, %s, [%s], #%ld", st ? "strd" : "ldrd", R[rt],
+                  R[rt + 1], R[n], off);
+                if (!st)
+                    I("a32_ldst_pair_any", t_ldst_pair_any(&C, rt, rt + 1, 15,
+                                                           off, 0, T_IDX_OFF),
+                      "ldrd %s, %s, [pc, #%ld]", R[rt], R[rt + 1], off);
+            }
     {
         static const long sp_offs[] = { 0, 4, 255, 256, 1020, 1021, 4095 };
         for (unsigned k = 0; k < sizeof sp_offs / sizeof sp_offs[0]; k++) {
@@ -734,6 +865,19 @@ static void refusals(void)
     REFUSE(t_ldst_pair(&C, 0, 1, 3, 256, 0), 0);
     REFUSE(t_ldst_pair(&C, 0, 1, 3, -256, 1), 0);
     REFUSE(t_ldst_pair(&C, 0, 1, 15, 0, 0), 0);
+    for (int idx = T_IDX_OFF; idx <= T_IDX_POST; idx++) {
+        REFUSE(t_ldst_pair_any(&C, 1, 2, 3, 0, 0, idx), 0);   /* odd */
+        REFUSE(t_ldst_pair_any(&C, 0, 2, 3, 0, 1, idx), 0);   /* not consecutive */
+        REFUSE(t_ldst_pair_any(&C, 14, 15, 3, 0, 0, idx), 0); /* lr:pc */
+        REFUSE(t_ldst_pair_any(&C, 0, 1, 3, 256, 0, idx), 0);
+        REFUSE(t_ldst_pair_any(&C, 0, 1, 3, -256, 1, idx), 0);
+        REFUSE(t_ldst_pair_any(&C, 0, 1, 15, 8, 1, idx), 0);  /* a store to pc */
+        if (idx != T_IDX_OFF) {                               /* writeback */
+            REFUSE(t_ldst_pair_any(&C, 0, 1, 15, 8, 0, idx), 0);
+            REFUSE(t_ldst_pair_any(&C, 0, 1, 0, 8, 0, idx), 0);
+            REFUSE(t_ldst_pair_any(&C, 2, 3, 3, 8, 1, idx), 0);
+        }
+    }
     REFUSE(t_ldm_stm(&C, 0, 0, 0, 0, 1), 0);
     REFUSE(t_ldm_stm(&C, 0, 0x3, 1, 0, 1), 0);    /* rn in the list, written back */
     REFUSE(t_ldm_stm(&C, 0, 0x8002, 0, 0, 0), 0); /* a store of pc */
@@ -764,6 +908,7 @@ int main(int argc, char **argv)
         die("usage: a32check [--refuse]  (bytes to stdout, assembly to stderr)");
     fprintf(stderr, "\t.syntax unified\n\t.arm\n");
     data_processing();
+    sweep_dsp();
     memory();
     control();
     system_instructions();

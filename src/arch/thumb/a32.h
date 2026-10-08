@@ -28,6 +28,8 @@
 void a32_alu_reg_shift(struct code *c, int op, int rd, int rn, int rm,
                        int type, int amount, int s);
 void a32_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign);
+void a32_bfi(struct code *c, int rd, int rn, int lsb, int width);
+void a32_rrx(struct code *c, int rd, int rm, int s);
 void a32_mov_reg(struct code *c, int rd, int rm);
 void a32_mov_imm(struct code *c, int rd, long imm, int s);
 void a32_mvn_reg(struct code *c, int rd, int rm, int s);
@@ -46,15 +48,41 @@ void a32_mla(struct code *c, int rd, int rn, int rm, int ra, int sub);
 void a32_div(struct code *c, int rd, int rn, int rm, int sign);
 void a32_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
 void a32_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
+void a32_umaal(struct code *c, int rdlo, int rdhi, int rn, int rm);
 void a32_smmul(struct code *c, int rd, int rn, int rm);
 void a32_cmp_reg(struct code *c, int rn, int rm);
 void a32_cmp_imm(struct code *c, int rn, long imm);
 void a32_tst_reg(struct code *c, int rn, int rm);
 int  a32_tst_imm(struct code *c, int rn, long imm);
 void a32_ext(struct code *c, int rd, int rm, int size, int sign);
-/* clz, rev, rev16, rbit: rd = f(rm). */
-enum { A32_CLZ, A32_REV, A32_REV16, A32_RBIT };
+/* clz, rev, rev16, rbit, revsh: rd = f(rm). */
+enum { A32_CLZ, A32_REV, A32_REV16, A32_RBIT, A32_REVSH };
 void a32_bitop(struct code *c, int which, int rd, int rm);
+
+/* The DSP and media instructions, each its t_* twin's meaning (emit.h):
+ * every ARMv7-A part has them. Reached from inline asm and .s files only. */
+void a32_extadd(struct code *c, int rd, int rn, int rm, int size, int sign,
+                int rot);
+void a32_parallel(struct code *c, int op, int kind, int rd, int rn, int rm);
+void a32_qarith(struct code *c, int op, int rd, int rm, int rn);
+void a32_sel(struct code *c, int rd, int rn, int rm);
+void a32_smlaxy(struct code *c, int rd, int rn, int rm, int ra, int ntop,
+                int mtop);
+void a32_smlaw(struct code *c, int rd, int rn, int rm, int ra, int mtop);
+void a32_smlad(struct code *c, int rd, int rn, int rm, int ra, int sub,
+               int x);
+void a32_smmla(struct code *c, int rd, int rn, int rm, int ra, int sub,
+               int round);
+void a32_usada8(struct code *c, int rd, int rn, int rm, int ra);
+void a32_smlalxy(struct code *c, int rdlo, int rdhi, int rn, int rm,
+                 int ntop, int mtop);
+void a32_smlald(struct code *c, int rdlo, int rdhi, int rn, int rm, int sub,
+                int x);
+/* ssat/usat: A32's shift also takes asr #32 (amt 32). */
+void a32_sat(struct code *c, int rd, int bound, int rn, int sign, int asr,
+             int amt);
+void a32_sat16(struct code *c, int rd, int bound, int rn, int sign);
+void a32_pkh(struct code *c, int rd, int rn, int rm, int tb, int amt);
 
 int  a32_ldst_imm(struct code *c, int rt, int rn, long off, int size,
                   int sign, int store);
@@ -62,6 +90,8 @@ int  a32_ldst_pair(struct code *c, int rt, int rt2, int rn, long off,
                    int store);
 int  a32_ldst_wb(struct code *c, int rt, int rn, long off, int size,
                  int sign, int store, int pre);
+int  a32_ldst_pair_any(struct code *c, int rt, int rt2, int rn, long off,
+                       int store, int idx);
 /* [rn, rm, lsl #shift]: a word or an unsigned byte with any shift; a
  * halfword or a signed load only with shift 0 (A32's "extra" loads and
  * stores have no shift). a32_ldst_reg_ok says which. */

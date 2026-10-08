@@ -1051,11 +1051,17 @@ and is refused, as is a value the instruction cannot encode.
 | `mov`, `movs` `Rd, Rm` or `Rd, #IMM` | any 32-bit immediate |
 | `movw`, `movt` `Rd, #IMM` | 0 to 0xffff |
 | `mvn`, `mvns` `Rd, Rm` | |
-| `clz`, `rbit`, `rev` `Rd, Rm` | |
+| `clz`, `rbit`, `rev`, `rev16`, `revsh` `Rd, Rm` | `rev16`/`revsh` swap the bytes of each halfword / of the low one, sign-extended (CMSIS's `__REV16`, `__REVSH`) |
+| `rrx`, `rrxs` `Rd, Rm` | rotate right one bit through the carry |
 | `cmp`, `tst` `Rn, Rm` or `Rn, #IMM` | |
 | `add`, `adds`, `sub`, `subs`, `and`, `ands`, `orr`, `orrs`, `eor`, `eors`, `bic`, `bics`, `adc`, `adcs`, `sbc`, `sbcs`, `rsb`, `rsbs` | `Rd, Rn, Rm` or `Rd, Rn, #IMM` (three operands) |
 | `lsl`, `lsls`, `lsr`, `lsrs`, `asr`, `asrs`, `ror`, `rors` | `Rd, Rn, Rm` or `Rd, Rn, #0..31` |
 | `mul Rd, Rn, Rm`, `udiv`, `sdiv` | |
+| `mla`, `mls` `Rd, Rn, Rm, Ra` | `Ra + Rn*Rm`, `Ra - Rn*Rm` |
+| `smull`, `umull`, `smlal`, `umlal` `RdLo, RdHi, Rn, Rm` | the 64-bit product (accumulated); `RdLo` not `RdHi`. `umaal` is the DSP extension's ([below](#the-dsp-extension)) |
+| `bfi Rd, Rn, #LSB, #WIDTH`, `bfc Rd, #LSB, #WIDTH` | insert `Rn`'s low bits into / clear a field of `Rd`; `LSB` 0 to 31, `WIDTH` 1 to 32-`LSB` |
+| `ubfx`, `sbfx` `Rd, Rn, #LSB, #WIDTH` | extract a field, zero- or sign-extended |
+| `ldrd`, `strd` `Rt, Rt2, [Rn{, #OFF}]`, `[Rn, #OFF]!` or `[Rn], #OFF` | `OFF` a multiple of 4, -1020 to 1020; `Rt` and `Rt2` not `sp` or `pc` (and different for a load); with writeback `Rn` neither `pc` nor `Rt` nor `Rt2`; `ldrd Rt, Rt2, [pc, #OFF]` is a literal |
 | `ldr`, `ldrb`, `ldrsb`, `ldrh`, `ldrsh`, `str`, `strb`, `strh` | `Rt, [Rn]` or `Rt, [Rn, #OFF]`; with writeback, `Rt, [Rn, #OFF]!` (pre-indexed) or `Rt, [Rn], #OFF` (post-indexed), `OFF` -255 to 255 and `Rn` neither `pc` nor `Rt` |
 | `ldr Rt, [pc, #OFF]` | a literal, `OFF` from the word-aligned pc, -4095 to 4095 |
 | `ldr Rt, =IMM` | any 32-bit constant, assembled as `movw` and `movt` |
@@ -1100,11 +1106,11 @@ file is assembled as GNU as does it, see [embas](tools/embas.md#gnu-syntax-assem
 - A barrier option other than `sy` is refused with
   ``only the `sy` barrier option is supported; "ish" is not``.
 
-There is no `ldrd` or `strd`, no bit-field instruction, no `mla`, `mls`,
-`smull`, `umull`, `smlal` or `umlal` (the DSP extension's multiplies are
-there), no `rev16`, `revsh` or `rrx`, and no floating-point instruction
-beyond `vmov`, `vldm`/`vstm` and `vpush`/`vpop` (`vmrs`, `vmsr`, `vldr`,
-...).
+There is no floating-point instruction beyond `vmov`, `vldm`/`vstm` and
+`vpush`/`vpop` (`vmrs`, `vmsr`, `vldr`, ...), and no doubleword exclusive
+(`ldrexd`/`strexd`), which no Cortex-M has: they are refused by name
+(`ldrexd is not an M-profile instruction: no Cortex-M core has a
+doubleword exclusive`).
 
 On ARMv6-M (`thumbv6m-none-eabi`) and ARMv8-M Baseline
 (`thumbv8m.base-none-eabi`), every 32-bit encoding a statement produces is
@@ -1119,7 +1125,10 @@ registers (`basepri`, `basepri_max`, `faultmask` and their `_ns` forms):
 "basepri" is not a special register of ARMv8-M Baseline: it is the Main Extension's
 ```
 
-ARMv6-M has `bl`, `mrs`, `msr` and the barriers; ARMv8-M Baseline adds
+So `mla`, the long multiplies, `rrx`, the bit fields, `ldrd`/`strd`, and
+`rev16`/`revsh` of a high register are refused there, as llvm-mc refuses
+them; `rev16` and `revsh` of `r0`-`r7` are the 16-bit forms every core
+has. ARMv6-M has `bl`, `mrs`, `msr` and the barriers; ARMv8-M Baseline adds
 `b.w`, `movw`, `movt`, `sdiv`, `udiv`, the exclusives (`ldrex`/`strex`
 with an offset, the byte and halfword forms, `clrex`), the
 acquire/release family, `tt`/`ttt`/`tta`/`ttat` and `sg`, and the 16-bit
@@ -1145,12 +1154,12 @@ made of:
 | `usad8`; `usada8` | `Rd, Rn, Rm`; `Rd, Rn, Rm, Ra` |
 | `smuad`, `smuadx`, `smusd`, `smusdx`, `smulbb`, `smulbt`, `smultb`, `smultt`, `smulwb`, `smulwt`, `smmul`, `smmulr` | `Rd, Rn, Rm` |
 | `smlad`, `smladx`, `smlsd`, `smlsdx`, `smlabb`, `smlabt`, `smlatb`, `smlatt`, `smlawb`, `smlawt`, `smmla`, `smmlar`, `smmls`, `smmlsr` | `Rd, Rn, Rm, Ra` |
-| `smlald`, `smlaldx`, `smlsld`, `smlsldx`, `smlalbb`, `smlalbt`, `smlaltb`, `smlaltt` | `RdLo, RdHi, Rn, Rm`, `RdLo` not `RdHi` |
+| `smlald`, `smlaldx`, `smlsld`, `smlsldx`, `smlalbb`, `smlalbt`, `smlaltb`, `smlaltt`, `umaal` | `RdLo, RdHi, Rn, Rm`, `RdLo` not `RdHi` (`umaal`: `RdHi:RdLo = Rn*Rm + RdLo + RdHi`) |
 | `ssat16 Rd, #1..16, Rn`, `usat16 Rd, #0..15, Rn` | |
 | `pkhbt Rd, Rn, Rm{, lsl #0..31}`, `pkhtb Rd, Rn, Rm{, asr #1..32}` | `pkhtb` with no shift is `pkhbt Rd, Rm, Rn`, as GNU as and llvm-mc encode it |
 | `sxtb16`, `uxtb16` `Rd, Rm`; `sxtab16`, `uxtab16`, `sxtab`, `sxtah`, `uxtab`, `uxtah` `Rd, Rn, Rm` | an optional `ror #8`, `#16` or `#24` |
 
-No operand may be `sp` or `pc`. The rotation and shift keywords are
+No operand may be `sp` or `pc` (in ARM state, `pc`). The rotation and shift keywords are
 case-insensitive and the `#` is optional, so CMSIS's
 `"sxtb16 %0, %1, ROR %2"` with an `"i"` operand assembles.
 
@@ -1162,11 +1171,39 @@ name, in inline asm and in a `.s` file alike, as llvm-mc refuses it:
 "sadd16" is an instruction of the DSP extension, which ARMv7-M lacks: it is ARMv7E-M's (-mcpu=cortex-m4, cortex-m7, --target=thumbv7em-none-eabi) and ARMv8-M Mainline's with the extension (-mcpu=cortex-m33, -march=armv8-m.main+dsp)
 ```
 
-They are not in the ARM-state assembler (`armv7a-none-eabi`), which
-refuses them by name; `<arm_acle.h>` declares nothing there.
+Every ARMv7-A part has them, and so does the ARM-state assembler
+([ARM state](#arm-state-armv7-a)), where `<arm_acle.h>` declares them too.
 `tests/golden/thumb-dsp.sh` checks every form against llvm-mc, byte for
 byte and by disassembly, compares the refusals core by core, and runs
-each instruction on a Cortex-M4 under QEMU against a C model of it.
+each instruction on a Cortex-M4 under QEMU against a C model of it;
+`tests/golden/arm-asm-more.sh` does the same for the multiplies, bit
+fields and pairs above, and for all of them in ARM state on a
+Cortex-A15.
+
+### ARM state (ARMv7-A)
+
+On `armv7a-none-eabi[hf]` inline asm and `.s` files take the vocabulary
+above, A32-encoded, the DSP extension's instructions included, with these
+differences, each as llvm-mc has it for `armv7a`:
+
+- Any instruction may carry a condition, with no IT block: `moveq r0,
+  #1`, `sadd16ne r0, r1, r2`, `ldrdlt r0, r1, [r2]`.
+- `sp` may be an operand of the DSP instructions, the multiplies, the
+  reversals, `rrx` and the bit fields; `pc` may not.
+- `ldrd`/`strd` take an even register and the next one (`r0, r1` ...
+  `r12, sp`), and an offset of -255 to 255 in every addressing form.
+- `ssat`/`usat` take `asr #32`.
+- `ldrexd Rt, Rt2, [Rn]` and `strexd Rd, Rt, Rt2, [Rn]` exist (`Rt` even,
+  `Rt2` the next; `Rd` none of the others).
+- `mrs`/`msr` name `cpsr` (and its fields), not the M-profile special
+  registers; `mrc`/`mcr` reach the system control coprocessor; `svc`,
+  `bkpt` and `udf` take A32's wider immediates; `cbz`, `cbnz`, `tbb` and
+  `tbh` are refused.
+
+A few UNPREDICTABLE forms llvm-mc assembles are refused, in either state:
+`pc` as a multiply's accumulator or a reversal's register, an `ldrd`
+writeback through `pc`, and a `strexd` status register that is one of
+its other operands.
 
 ### ARMv8-M security and acquire/release instructions
 

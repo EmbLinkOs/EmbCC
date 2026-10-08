@@ -340,6 +340,12 @@ void a32_shift_imm(struct code *c, int op, int rd, int rm, int sh, int s)
     dp_reg(c, cc, DP_MOV, s, 0, rd, sh & 31, op, rm);
 }
 
+/* RRX: MOV with ROR and the amount 0 a ROR cannot otherwise have */
+void a32_rrx(struct code *c, int rd, int rm, int s)
+{
+    dp_reg(c, cc_take(), DP_MOV, s, 0, rd, 0, T_SH_ROR, rm);
+}
+
 void a32_shift_reg(struct code *c, int op, int rd, int rn, int rm, int s)
 {
     dp_rsr(c, cc_take(), DP_MOV, s, rd, rn, op, rm);
@@ -386,84 +392,260 @@ int a32_tst_imm(struct code *c, int rn, long imm)
 
 /* ---- multiply and divide ------------------------------------------------ */
 
-/* MUL: cond 0000 000S Rd 0000 Rm 1001 Rn */
+/* The multiplies (A5.2.5): cond 0000 op S Rd Ra Rm 1001 Rn, where the long
+ * ones name RdHi in the Rd field and RdLo in the Ra field. op: 000 mul,
+ * 001 mla, 010 umaal, 011 mls, 100 umull, 101 umlal, 110 smull, 111 smlal
+ * -- bit 0 the accumulate, bit 1 the sign, as the long ones have them. */
+static void mul_grp(struct code *c, unsigned cc, unsigned op, int rd, int ra,
+                    int rm, int rn)
+{
+    word(c, cc, (unsigned long)op << 21 | (unsigned long)rd << 16 |
+                (unsigned long)ra << 12 | (unsigned long)rm << 8 | 0x90UL |
+                (unsigned long)rn);
+}
+
+/* The media instructions (A5.4): cond 011 op f16 f12 f8 op2 1 f0, op bits
+ * 24..20 and op2 bits 7..5. The parallel adds and subtracts (op 00 U op1),
+ * the packing, extending, saturating and reversing row (op 1 op1) name Rn,
+ * Rd, -, Rm; the signed multiplies (op 10 op1) and usad8 (op 11000) Rd,
+ * Ra, Rm, Rn. */
+static void media(struct code *c, unsigned cc, unsigned op, int f16, int f12,
+                  unsigned f8, unsigned op2, int f0)
+{
+    word(c, cc, 0x06000010UL | (unsigned long)op << 20 |
+                (unsigned long)f16 << 16 | (unsigned long)f12 << 12 |
+                (unsigned long)f8 << 8 | (unsigned long)op2 << 5 |
+                (unsigned long)f0);
+}
+
+/* The same row's shifted forms (pkh, ssat, usat): a shift's imm5 at bits
+ * 11..7 and its type at bit 6, where media() has f8 and op2 -- dp_reg's
+ * layout. `hi` is bits 24..16, the saturates' 5-bit bound reaching into
+ * op. */
+static void media_sh(struct code *c, unsigned cc, unsigned hi, int rd,
+                     int imm5, int type, int rm)
+{
+    media(c, cc, hi >> 4, (int)(hi & 15), rd, (unsigned)(imm5 & 31) >> 1,
+          (unsigned)((imm5 & 1) << 2 | type << 1), rm);
+}
+
+/* The halfword multiplies (A5.2.7): cond 0001 0 op1 0 Rd Ra Rm 1 M N 0 Rn,
+ * N picking rn's top half and M rm's. op1: 00 smla<x><y>, 01 smlaw<y>
+ * (N 0) and smulw<y> (N 1, Ra 0), 10 smlal<x><y> (RdHi, RdLo), 11
+ * smul<x><y> (Ra 0). */
+static void hmul(struct code *c, unsigned cc, unsigned op1, int rd, int ra,
+                 int rm, int m, int n, int rn)
+{
+    word(c, cc, 0x01000080UL | (unsigned long)op1 << 21 |
+                (unsigned long)rd << 16 | (unsigned long)ra << 12 |
+                (unsigned long)rm << 8 | (unsigned long)m << 6 |
+                (unsigned long)n << 5 | (unsigned long)rn);
+}
+
 void a32_mul(struct code *c, int rd, int rn, int rm)
 {
-    word(c, cc_take(), (unsigned long)rd << 16 | (unsigned long)rm << 8 |
-                       0x90UL | (unsigned long)rn);
+    mul_grp(c, cc_take(), 0, rd, 0, rm, rn);
 }
 
-/* MLA: cond 0000 0010 Rd Ra Rm 1001 Rn; MLS: cond 0000 0110 ... */
 void a32_mla(struct code *c, int rd, int rn, int rm, int ra, int sub)
 {
-    word(c, cc_take(), (sub ? 0x00600000UL : 0x00200000UL) |
-                       (unsigned long)rd << 16 | (unsigned long)ra << 12 |
-                       (unsigned long)rm << 8 | 0x90UL | (unsigned long)rn);
+    mul_grp(c, cc_take(), sub ? 3u : 1u, rd, ra, rm, rn);
 }
 
-/* UMULL/SMULL: cond 0000 1U00 RdHi RdLo Rm 1001 Rn */
 void a32_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
 {
-    word(c, cc_take(), (sign ? 0x00C00000UL : 0x00800000UL) |
-                       (unsigned long)rdhi << 16 | (unsigned long)rdlo << 12 |
-                       (unsigned long)rm << 8 | 0x90UL | (unsigned long)rn);
+    mul_grp(c, cc_take(), sign ? 6u : 4u, rdhi, rdlo, rm, rn);
 }
 
-/* UMLAL/SMLAL: the same with the accumulate bit (A, bit 21) */
 void a32_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign)
 {
-    word(c, cc_take(), (sign ? 0x00E00000UL : 0x00A00000UL) |
-                       (unsigned long)rdhi << 16 | (unsigned long)rdlo << 12 |
-                       (unsigned long)rm << 8 | 0x90UL | (unsigned long)rn);
+    mul_grp(c, cc_take(), sign ? 7u : 5u, rdhi, rdlo, rm, rn);
 }
 
-/* SMMUL: cond 0111 0101 Rd 1111 Rm 0001 Rn */
+void a32_umaal(struct code *c, int rdlo, int rdhi, int rn, int rm)
+{
+    mul_grp(c, cc_take(), 2, rdhi, rdlo, rm, rn);
+}
+
+/* SMMUL: the signed multiplies' op1 101, Ra 1111 */
 void a32_smmul(struct code *c, int rd, int rn, int rm)
 {
-    word(c, cc_take(), 0x0750F010UL | (unsigned long)rd << 16 |
-                       (unsigned long)rm << 8 | (unsigned long)rn);
+    media(c, cc_take(), 0x15, rd, 15, (unsigned)rm, 0, rn);
 }
 
-/* SDIV/UDIV: cond 0111 0U01 Rd 1111 Rm 0001 Rn -- the ARMv7VE (Cortex-A7,
+/* SDIV/UDIV: op1 001/011, Ra 1111 -- the ARMv7VE (Cortex-A7,
  * A15) instructions. Base ARMv7-A has neither, and the code generator
  * calls __aeabi_idiv instead; this exists for the encoder's referee and
  * for inline asm on a part that has them. */
 void a32_div(struct code *c, int rd, int rn, int rm, int sign)
 {
-    word(c, cc_take(), (sign ? 0x0710F010UL : 0x0730F010UL) |
-                       (unsigned long)rd << 16 | (unsigned long)rm << 8 |
-                       (unsigned long)rn);
+    media(c, cc_take(), sign ? 0x11u : 0x13u, rd, 15, (unsigned)rm, 0, rn);
 }
 
 /* ---- extends and bit operations ------------------------------------------ */
 
+/* The extends (A5.4.3): op 1 U s1 s0 with s 00 the two bytes into two
+ * halfwords, 10 byte, 11 halfword; op2 011, the rotation in f8's top two
+ * bits; rn 1111 is the plain extend (sxtb, uxth, sxtb16, ...). */
+void a32_extadd(struct code *c, int rd, int rn, int rm, int size, int sign,
+                int rot)
+{
+    unsigned op = 0x08u | (sign ? 0u : 4u) |
+                  (size == 16 ? 0u : size == 1 ? 2u : 3u);
+    media(c, cc_take(), op, rn, rd, (unsigned)rot >> 3 << 2, 3, rm);
+}
+
 void a32_ext(struct code *c, int rd, int rm, int size, int sign)
 {
-    unsigned long base = size == 1 ? (sign ? 0x06AF0070UL : 0x06EF0070UL)
-                                   : (sign ? 0x06BF0070UL : 0x06FF0070UL);
-    word(c, cc_take(), base | (unsigned long)rd << 12 | (unsigned long)rm);
+    a32_extadd(c, rd, 15, rm, size, sign, 0);
 }
 
+/* clz is a miscellaneous instruction of its own; the reversals are the
+ * packing row's op 01011 (rev, rev16) and 01111 (rbit, revsh), op2 001
+ * and 101. */
 void a32_bitop(struct code *c, int which, int rd, int rm)
 {
-    static const unsigned long op[4] = {
-        0x016F0F10UL,           /* clz   */
-        0x06BF0F30UL,           /* rev   */
-        0x06BF0FB0UL,           /* rev16 */
-        0x06FF0F30UL            /* rbit  */
-    };
-    word(c, cc_take(), op[which] | (unsigned long)rd << 12 | (unsigned long)rm);
+    unsigned cc = cc_take();
+    if (which == A32_CLZ) {
+        word(c, cc, 0x016F0F10UL | (unsigned long)rd << 12 |
+                    (unsigned long)rm);
+        return;
+    }
+    media(c, cc, which == A32_REV || which == A32_REV16 ? 0x0bu : 0x0fu, 15,
+          rd, 15, which == A32_REV16 || which == A32_REVSH ? 5u : 1u, rm);
 }
 
-/* UBFX/SBFX: cond 0111 1U1 widthm1 Rd lsb 101 Rn */
+/* ---- the DSP instructions ------------------------------------------------ */
+
+/* The parallel adds and subtracts (A5.4.1, A5.4.2): op 0 0 U op1, where
+ * emit.h's kind is U and the arithmetic (s/u 01, q/uq 10, sh/uh 11); op2
+ * numbers the lanes differently from Thumb's op, hence the table. */
+void a32_parallel(struct code *c, int op, int kind, int rd, int rn, int rm)
+{
+    static const unsigned char op2[7] = {
+        [T_PAR_ADD8] = 4, [T_PAR_ADD16] = 0, [T_PAR_ASX] = 1,
+        [T_PAR_SUB8] = 7, [T_PAR_SUB16] = 3, [T_PAR_SAX] = 2
+    };
+    media(c, cc_take(), (unsigned)(kind & 4) | (unsigned)((kind & 3) + 1), rn,
+          rd, 15, op2[op], rm);
+}
+
+/* QADD/QSUB/QDADD/QDSUB (A5.2.6): cond 0001 0 op 0 Rn Rd 0000 0101 Rm,
+ * op bit 1 the doubling, bit 0 the subtract -- Thumb's op (qadd 0, qdadd
+ * 1, qsub 2, qdsub 3) with its bits the other way round. */
+void a32_qarith(struct code *c, int op, int rd, int rm, int rn)
+{
+    unsigned a = (unsigned)((op & 1) << 1 | op >> 1);
+    word(c, cc_take(), 0x01000050UL | (unsigned long)a << 21 |
+                       (unsigned long)rn << 16 | (unsigned long)rd << 12 |
+                       (unsigned long)rm);
+}
+
+void a32_sel(struct code *c, int rd, int rn, int rm)
+{
+    media(c, cc_take(), 0x08, rn, rd, 15, 5, rm);
+}
+
+/* ra 15 (never an accumulator) is the multiply without one, as in emit.h:
+ * smul<x><y> is op1 11 with Ra 0. */
+void a32_smlaxy(struct code *c, int rd, int rn, int rm, int ra, int ntop,
+                int mtop)
+{
+    hmul(c, cc_take(), ra == 15 ? 3u : 0u, rd, ra == 15 ? 0 : ra, rm, mtop,
+         ntop, rn);
+}
+
+void a32_smlaw(struct code *c, int rd, int rn, int rm, int ra, int mtop)
+{
+    hmul(c, cc_take(), 1, rd, ra == 15 ? 0 : ra, rm, mtop, ra == 15, rn);
+}
+
+void a32_smlalxy(struct code *c, int rdlo, int rdhi, int rn, int rm,
+                 int ntop, int mtop)
+{
+    hmul(c, cc_take(), 2, rdhi, rdlo, rm, mtop, ntop, rn);
+}
+
+/* The signed multiplies (A5.4.4), op 1 0 op1: smlad/smlsd op1 000 (Ra 1111
+ * smuad/smusd), smlald/smlsld 100, smmla/smmls 101 (Ra 1111 smmul); op2
+ * bit 1 the subtract (for smmls, 11), bit 0 the exchange or the round. */
+void a32_smlad(struct code *c, int rd, int rn, int rm, int ra, int sub,
+               int x)
+{
+    media(c, cc_take(), 0x10, rd, ra, (unsigned)rm,
+          (unsigned)(sub << 1 | x), rn);
+}
+
+void a32_smlald(struct code *c, int rdlo, int rdhi, int rn, int rm, int sub,
+                int x)
+{
+    media(c, cc_take(), 0x14, rdhi, rdlo, (unsigned)rm,
+          (unsigned)(sub << 1 | x), rn);
+}
+
+void a32_smmla(struct code *c, int rd, int rn, int rm, int ra, int sub,
+               int round)
+{
+    media(c, cc_take(), 0x15, rd, ra, (unsigned)rm,
+          (unsigned)(sub ? 6 : 0) | (unsigned)round, rn);
+}
+
+void a32_usada8(struct code *c, int rd, int rn, int rm, int ra)
+{
+    media(c, cc_take(), 0x18, rd, ra, (unsigned)rm, 0, rn);
+}
+
+/* SSAT 0110 101 bound, USAT 0110 111 bound (bits 24..21 0101 and 0111,
+ * the 5-bit bound below), the shift as pkh's; the bound field holds n-1
+ * for the signed form and n for the unsigned, as in Thumb. ASR #32 is
+ * amount 0. */
+void a32_sat(struct code *c, int rd, int bound, int rn, int sign, int asr,
+             int amt)
+{
+    unsigned b = (unsigned)(sign ? bound - 1 : bound) & 31u;
+    media_sh(c, cc_take(), (sign ? 0xa0u : 0xe0u) | b, rd, amt, asr ? 1 : 0,
+             rn);
+}
+
+/* SSAT16/USAT16: op 01010/01110 with a 4-bit bound in f16, op2 001 */
+void a32_sat16(struct code *c, int rd, int bound, int rn, int sign)
+{
+    media(c, cc_take(), sign ? 0x0au : 0x0eu, sign ? bound - 1 : bound, rd,
+          15, 1, rn);
+}
+
+/* PKHBT/PKHTB: op 01000, the tb bit in the shift type's place */
+void a32_pkh(struct code *c, int rd, int rn, int rm, int tb, int amt)
+{
+    media_sh(c, cc_take(), 0x80u | (unsigned)rn, rd, amt, tb, rm);
+}
+
+/* The bit-field row: cond 0111 1 op hi5 Rd lsb low3 Rn -- SBFX op 01 and
+ * UBFX 11 with hi5 width-1 and low3 101, BFI op 10 with hi5 the msb and
+ * low3 001 (Rn 1111 BFC). */
+static void bitfield(struct code *c, unsigned cc, unsigned op, int hi5,
+                     int rd, int lsb, unsigned low3, int rn)
+{
+    if (lsb < 0 || hi5 < 0 || lsb > 31 || hi5 > 31)
+        a32_fail("a bit-field outside the word", lsb * 100 + hi5);
+    word(c, cc, 0x07800000UL | (unsigned long)op << 21 |
+                (unsigned long)hi5 << 16 | (unsigned long)rd << 12 |
+                (unsigned long)lsb << 7 | (unsigned long)low3 << 4 |
+                (unsigned long)rn);
+}
+
 void a32_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign)
 {
     if (lsb < 0 || width < 1 || lsb + width > 32)
         a32_fail("a bit-field outside the word", lsb * 100 + width);
-    word(c, cc_take(), (sign ? 0x07A00050UL : 0x07E00050UL) |
-                       (unsigned long)(width - 1) << 16 |
-                       (unsigned long)rd << 12 | (unsigned long)lsb << 7 |
-                       (unsigned long)rn);
+    bitfield(c, cc_take(), sign ? 1u : 3u, width - 1, rd, lsb, 5, rn);
+}
+
+void a32_bfi(struct code *c, int rd, int rn, int lsb, int width)
+{
+    if (lsb < 0 || width < 1 || lsb + width > 32)
+        a32_fail("a bit-field outside the word", lsb * 100 + width);
+    bitfield(c, cc_take(), 2, lsb + width - 1, rd, lsb, 1, rn);
 }
 
 /* ---- loads and stores ----------------------------------------------------
@@ -530,6 +712,24 @@ int a32_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
         return 0;
     cc = cc_take();
     ldst_extra(c, cc, rt, rn, off, store ? 3 : 2, 0, 1, 0);
+    return 1;
+}
+
+/* ...in any addressing form (emit.h's T_IDX_*): offset (P = 1, W = 0),
+ * pre-indexed (P = W = 1) or post-indexed (P = W = 0, as a32_ldst_wb's).
+ * With writeback rn is neither pc nor either of the pair; with rn pc,
+ * offset addressing, it is LDRD (literal). */
+int a32_ldst_pair_any(struct code *c, int rt, int rt2, int rn, long off,
+                      int store, int idx)
+{
+    unsigned cc;
+    int p = idx != T_IDX_POST, w = idx == T_IDX_PRE;
+    if ((rt & 1) || rt2 != rt + 1 || rt >= 14 || off < -255 || off > 255 ||
+        (rn == 15 && store) ||
+        (idx != T_IDX_OFF && (rn == 15 || rn == rt || rn == rt2)))
+        return 0;
+    cc = cc_take();
+    ldst_extra(c, cc, rt, rn, off, store ? 3 : 2, 0, p, w);
     return 1;
 }
 
