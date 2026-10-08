@@ -116,10 +116,25 @@ int cm_exec_prio(void)
 
 /* ---- memory ----------------------------------------------------------- */
 
+/* A watchpoint an instruction's access touches stops the instruction
+ * before the access, as a fault does, and QEMU's stub: the debugger then
+ * steps it with the watchpoint out. An access of exception entry or
+ * return is made, and the stop comes after it. */
+static int watched(u32 a, int n, int write)
+{
+    struct bus *b = &cs->sim->bus;
+    if (!b->nwatch || !bus_watch_check(b, a, n, write) || !cs->executing)
+        return 0;
+    cs->fault_exc = FAULT_WATCH;
+    return 1;
+}
+
 /* what is not plain memory, or is watched: through the bus */
 u32 cm_ld_bus(u32 a, int n)
 {
     u32 v;
+    if (watched(a, n, 0))
+        return 0;
     if (bus_read(&cs->sim->bus, a, n, &v) == 0)
         return v;
     bus_error(cs->sim->bus.fail_addr, 0);
@@ -128,6 +143,8 @@ u32 cm_ld_bus(u32 a, int n)
 
 void cm_st_bus(u32 a, int n, u32 v)
 {
+    if (watched(a, n, 1))
+        return;
     if (bus_write(&cs->sim->bus, a, n, v))
         bus_error(cs->sim->bus.fail_addr, 0);
 }
@@ -523,10 +540,12 @@ static void step(struct cpu *c)
     int was_in_it = cm_in_it();
     int run_it = !was_in_it || cm_cond_passed(cs->itstate >> 4);
     if (run_it) {
+        cs->executing = 1;
         if (size == 2)
             cm_exec16(h[0]);
         else
             cm_exec32(h[0], h[1]);
+        cs->executing = 0;
     }
     if (cs->fault_exc) {
         int exc = cs->fault_exc;
@@ -540,6 +559,13 @@ static void step(struct cpu *c)
         }
         cs->other_sp = sother;
         cs->fault_exc = 0;
+        if (exc == FAULT_WATCH) {
+            /* not run: the debugger stops here, and the instruction is
+             * counted when it does run (its --trace line comes again) */
+            s->insns--;
+            s->cycles -= cost;
+            return;
+        }
         if (exc == EXC_BUS && cs->fault_addr_valid) {
             cs->bfar = cs->fault_addr;
             bits |= 1u << 15;

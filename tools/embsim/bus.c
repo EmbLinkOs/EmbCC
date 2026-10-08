@@ -129,12 +129,11 @@ static int wr(struct bus *b, u32 a, int n, u32 v, int debug)
     return -1;
 }
 
-/* The first watchpoint an access of the core's touches. As QEMU's, the
- * address reported is the higher of the access's and the watchpoint's. */
-static void watch_check(struct bus *b, u32 a, int n, int write)
+/* Whether an access of the core's touches a watchpoint; the first one
+ * touched is recorded. As QEMU's, the address reported is the higher of
+ * the access's and the watchpoint's. */
+int bus_watch_check(struct bus *b, u32 a, int n, int write)
 {
-    if (b->watch_hit)
-        return;
     for (int i = 0; i < b->nwatch; i++) {
         struct watch *w = &b->watch[i];
         int k = w->kind;
@@ -142,25 +141,24 @@ static void watch_check(struct bus *b, u32 a, int n, int write)
             continue;
         /* the two ranges overlap */
         if (a - w->addr < w->len || w->addr - a < (u32)n) {
-            b->watch_hit = 1;
-            b->watch_kind = k;
-            b->watch_addr = a > w->addr ? a : w->addr;
-            return;
+            if (!b->watch_hit) {
+                b->watch_hit = 1;
+                b->watch_kind = k;
+                b->watch_addr = a > w->addr ? a : w->addr;
+            }
+            return 1;
         }
     }
+    return 0;
 }
 
 int bus_read(struct bus *b, u32 a, int n, u32 *v)
 {
-    if (b->nwatch)
-        watch_check(b, a, n, 0);
     return rd(b, a, n, v);
 }
 
 int bus_write(struct bus *b, u32 a, int n, u32 v)
 {
-    if (b->nwatch)
-        watch_check(b, a, n, 1);
     return wr(b, a, n, v, 0);
 }
 

@@ -16,9 +16,11 @@
  *     and the devices at their addresses. A new board is a table entry.
  *   - the run (run.c): the loop, time, the end-of-run rules and the
  *     console; semihost.c, trace.c (tracing and the counts), loader.c
- *     (the ELF image), and main.c (the command line).
+ *     (the ELF image), gdb.c (the GDB remote server, over net.h's
+ *     connection), and main.c (the command line).
  *
- * The C is ISO C99 with no dependencies beyond libm. */
+ * The C is ISO C99 with no dependencies beyond libm; net-posix.c is the
+ * one file that uses an operating system's API, behind net.h. */
 #ifndef EMBSIM_SIM_H
 #define EMBSIM_SIM_H
 
@@ -144,9 +146,13 @@ void bus_add_device(struct bus *b, u32 base, u32 size,
                     const struct dev_ops *ops, void *ctx);
 void bus_add_alias(struct bus *b, u32 base, u32 size, u32 target);
 /* The core's accesses: 0, or -1 with bus->fail_addr when nothing answers
- * at the address. They are what watchpoints see. */
+ * at the address. A store tells the snoop. */
 int bus_read(struct bus *b, u32 a, int n, u32 *v);
 int bus_write(struct bus *b, u32 a, int n, u32 v);
+/* Whether an access of the core's touches a watchpoint (1), recording
+ * the first that one did in watch_hit. The core asks before the access,
+ * so it can stop before it as QEMU's stub does. */
+int bus_watch_check(struct bus *b, u32 a, int n, int write);
 /* A debugger's: no watchpoints, no exclusive monitor, and a write to
  * flash goes in (as a flash programmer's does). */
 int bus_debug_read(struct bus *b, u32 a, int n, u32 *v);
@@ -262,8 +268,10 @@ void sim_init(struct sim *s, const struct board_desc *bd, const char *model);
 /* the memory (`ram_size`, or 0 for the board's), the image in it, and
  * the core out of reset */
 void sim_load(struct sim *s, u32 ram_size, const char *image);
-/* power-on again: memory reloaded, devices and core reset, counts zero */
-void sim_reset(struct sim *s);
+/* a reset, as the reset pin gives one: the core and the devices, and
+ * the counts back to zero; memory as it is, or (reload) the image loaded
+ * into it again */
+void sim_reset(struct sim *s, int reload);
 /* one instruction, and the budget (--max-insns) */
 void sim_step(struct sim *s);
 /* run until the end */
@@ -307,5 +315,13 @@ void trace_report(struct sim *s, const char *count_path, int stats);
 /* ---- the image (loader.c) --------------------------------------------- */
 
 void load_elf(struct sim *s, const char *path);
+
+/* ---- the GDB server (gdb.c) ------------------------------------------- */
+
+/* Serve the GDB remote protocol on `port` of `host` (0: loopback) while
+ * the run goes on; with `wait`, halted at reset until a debugger
+ * connects. Returns when the run has ended (or the debugger killed it),
+ * with s->state and s->exit_status saying how. */
+void gdb_serve(struct sim *s, const char *host, int port, int wait);
 
 #endif

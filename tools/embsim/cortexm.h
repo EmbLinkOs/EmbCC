@@ -41,6 +41,9 @@ enum { EXC_RESET = 1, EXC_NMI, EXC_HARD, EXC_MEM, EXC_BUS, EXC_USAGE,
 
 #define NEXC 256                    /* 16 system exceptions + 240 IRQs */
 
+/* fault_exc's value for an access a debugger's watchpoint stops before */
+#define FAULT_WATCH (-1)
+
 struct cm_state {
     struct cpu cpu;                 /* the interface; first */
     struct sim *sim;
@@ -73,6 +76,7 @@ struct cm_state {
     int fault_exc;
     u32 fault_bits, fault_addr;
     int fault_addr_valid;
+    int executing;                  /* in an instruction (not stacking) */
 
     /* the NVIC and the SCB */
     u8 pend[NEXC], active[NEXC], irq_en[NEXC];

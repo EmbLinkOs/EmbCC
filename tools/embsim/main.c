@@ -38,7 +38,7 @@ static void usage(void)
     fputs("usage: embsim IMAGE.elf [--board NAME] [--cpu NAME]\n"
           "              [--ram-size SIZE] [--until STRING] [--max-insns N]\n"
           "              [--stats] [--count FILE] [--trace FILE]\n"
-          "              [--no-semihosting]\n"
+          "              [--no-semihosting] [--gdb [HOST:]PORT [--gdb-wait]]\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7\n",
@@ -51,10 +51,10 @@ static struct sim sim;
 int main(int argc, char **argv)
 {
     const char *image = 0, *cpu = 0, *count_path = 0, *trace_path = 0;
-    const char *until = 0;
+    const char *until = 0, *gdb = 0;
     u32 ram_size = 0;
     u64 max_insns = 0;
-    int stats = 0, verbose = 0, semihosting = 1;
+    int stats = 0, verbose = 0, semihosting = 1, gdb_wait = 0;
     const struct board_desc *bd = &boards[0];
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -84,6 +84,10 @@ int main(int argc, char **argv)
             verbose = 1;
         else if (!strcmp(a, "--no-semihosting"))
             semihosting = 0;
+        else if (!strcmp(a, "--gdb") && more)
+            gdb = argv[++i];
+        else if (!strcmp(a, "--gdb-wait"))
+            gdb_wait = 1;
         else if (!strcmp(a, "--help") || !strcmp(a, "-h"))
             usage();
         else if (a[0] == '-')
@@ -95,6 +99,27 @@ int main(int argc, char **argv)
     }
     if (!image)
         usage();
+    char host[256];
+    int port = 0;
+    if (gdb) {
+        /* PORT, HOST:PORT, or QEMU's tcp::PORT */
+        const char *c = strrchr(gdb, ':');
+        char *e;
+        long v = strtol(c ? c + 1 : gdb, &e, 10);
+        if (*e || v <= 0 || v > 65535)
+            die("bad port in --gdb '%s'", gdb);
+        port = (int)v;
+        host[0] = 0;
+        if (c) {
+            const char *h = !strncmp(gdb, "tcp:", 4) ? gdb + 4 : gdb;
+            size_t n = (size_t)(c - h);
+            if (n >= sizeof host)
+                die("bad host in --gdb '%s'", gdb);
+            memcpy(host, h, n);
+            host[n] = 0;
+        }
+    } else if (gdb_wait)
+        die("--gdb-wait needs --gdb PORT");
 
     struct sim *s = &sim;
     sim_init(s, bd, cpu);
@@ -106,7 +131,10 @@ int main(int argc, char **argv)
         trace_open(s, trace_path);
     sim_load(s, ram_size, image);
 
-    sim_run(s);
+    if (gdb)
+        gdb_serve(s, host[0] ? host : 0, port, gdb_wait);
+    else
+        sim_run(s);
     trace_report(s, count_path, stats || verbose);
     switch (s->state) {
     case END_EXIT: return s->exit_status;

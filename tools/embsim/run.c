@@ -125,10 +125,11 @@ void sim_load(struct sim *s, u32 ram_size, const char *image)
     load(s);
 }
 
-void sim_reset(struct sim *s)
+void sim_reset(struct sim *s, int reload)
 {
-    for (int i = 0; i < s->bus.nrg; i++)
-        memset(s->bus.rg[i].mem, 0, s->bus.rg[i].size);
+    if (reload)
+        for (int i = 0; i < s->bus.nrg; i++)
+            memset(s->bus.rg[i].mem, 0, s->bus.rg[i].size);
     for (int i = 0; i < s->bus.ndev; i++)
         if (s->bus.dev[i].ops->reset)
             s->bus.dev[i].ops->reset(s->bus.dev[i].ctx);
@@ -139,7 +140,10 @@ void sim_reset(struct sim *s)
     s->end_why[0] = 0;
     s->until_at = 0;
     s->bus.watch_hit = 0;
-    load(s);
+    if (reload)
+        load(s);
+    else
+        s->cpu->ops->reset(s->cpu);
 }
 
 /* one step and the budget: the loop's body, for the GDB server's loop
