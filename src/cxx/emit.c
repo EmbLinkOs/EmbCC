@@ -4116,9 +4116,11 @@ static void emit_rtti(struct cclass *c)
         if (ilp32)
             sb_printf(&out_rtti, ", (void *)%ldL, (void *)%ldL", flags,
                       (long)c->nbases);
-        else
-            sb_printf(&out_rtti, ", (void *)%ldL",
-                      flags | ((long)c->nbases << 32));
+        else      /* (the flags first in memory: high on big-endian) */
+            sb_printf(&out_rtti, ", (void *)%ldL", target_big_endian()
+                      ? (long)((unsigned long)flags << 32 |
+                               (unsigned long)c->nbases)
+                      : flags | ((long)c->nbases << 32));
         for (int i = 0; i < c->nbases; i++) {
             struct cbase *b = &c->bases[i];
             /* a virtual base's offset is where the vtable holds it */

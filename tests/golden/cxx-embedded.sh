@@ -47,7 +47,10 @@ export EMBCC EMBLD
 # x86-64's CFI in a section typed SHT_ARM_EXIDX).
 printf 'struct A { virtual ~A(); int f(int); };\nA::~A() {}\nint A::f(int x) { return x; }\n' \
     > "$out/refuse.cc"
-for t in thumbv7m-none-eabi armv7a-none-eabi riscv32-unknown-elf; do
+for t in thumbv7m-none-eabi armv7a-none-eabi riscv32-unknown-elf \
+         mipsel-none-elf mips-none-elf mips64-none-elf powerpc-none-eabi \
+         sparc-none-elf rx-none-elf m68k-none-elf xtensa-none-elf \
+         tricore-none-elf; do
     if "$EMBCC" --target=$t -c "$out/refuse.cc" -o "$out/r.o" \
             2> "$out/r.err"; then
         echo "$t: C++ with exceptions was accepted"; exit 1
@@ -96,7 +99,7 @@ if "$EMBCC" --target=avr -funwind-tables -c "$out/plain.c" -o "$out/r.o" \
 fi
 grep -q "unwind tables are not supported for avr" "$out/r.err" || {
     echo "avr: unwind tables refused, but not by name:"; cat "$out/r.err"; exit 1; }
-for t in avr mipsel-none-elf xtensa-none-elf tricore-none-elf; do
+for t in avr; do
     if "$EMBCC" --target=$t -fno-exceptions -c "$out/refuse.cc" \
             -o "$out/r.o" 2> "$out/r.err"; then
         echo "$t: C++ was accepted for a C++ ABI nobody has checked"; exit 1
@@ -104,9 +107,9 @@ for t in avr mipsel-none-elf xtensa-none-elf tricore-none-elf; do
     grep -q "C++ is not yet supported for $t" "$out/r.err" || {
         echo "$t: C++ refused, but not by name:"; cat "$out/r.err"; exit 1; }
 done
-echo "exceptions and unwind tables on ARM, RISC-V, MIPS64, LoongArch and AVR,"
-echo "and C++ on AVR, MIPS32,"
-echo "Xtensa and TriCore, are refused by name"
+echo "exceptions and unwind tables on ARM, RISC-V, MIPS, PowerPC, SPARC, RX,"
+echo "ColdFire, Xtensa, TriCore, LoongArch and AVR, and C++ on AVR, are refused"
+echo "by name"
 
 # ---- the reference: the host's own C++ compiler, run here ----------------
 progs=
@@ -122,35 +125,79 @@ for cc in tests/cxx-embedded/*.cc; do
 done
 
 # ---- each board: its libraries and harness, then every program ----------
+# A board is its triple, the harness directory whose link.sh links it (and
+# the variable that says where that harness's boot.o and io.o were built),
+# the harness sources, and how it runs. The Cortex-M, ARM and RV32 boards
+# boot with QEMU's -kernel and a board.c that sends write() to the UART;
+# the others boot as their own exec suites do (tests/golden/*-exec.sh):
+# boot.c built with -DHARNESS_LIBC, so main's return goes through exit()
+# and stdio is flushed, and io.c's weak write() to the UART.
 boards="thumbv7m-none-eabi thumbv7em-none-eabihf thumbv6m-none-eabi
-        thumbv8m.main-none-eabi armv7a-none-eabi riscv32-unknown-elf"
+        thumbv8m.main-none-eabi armv7a-none-eabi riscv32-unknown-elf
+        mipsel-none-elf mips-none-elf powerpc-none-eabi sparc-none-elf
+        rx-none-elf m68k-none-elf xtensa-none-elf tricore-none-elf
+        mips64-none-elf"
+[ -n "${EMBCC_CXX_BOARDS:-}" ] && boards=$EMBCC_CXX_BOARDS
+# the harness: SRC (boot.c and io.c), H (link.sh and run.sh), its variable
+harness() {
+    case $1 in
+        thumbv7m*)  H=tests/harness/thumb; hv=EMBCC_THUMB_HARNESS ;;
+        thumbv7em*) H=tests/harness/thumb-m4f; hv=EMBCC_THUMB_HARNESS ;;
+        thumbv6m*)  H=tests/harness/thumb-m0; hv=EMBCC_THUMB_M0_HARNESS ;;
+        thumbv8m*)  H=tests/harness/thumb-m33; hv=EMBCC_M33_HARNESS ;;
+        armv7a*)    H=tests/harness/arm-a32; hv=EMBCC_A32_HARNESS ;;
+        riscv32*)   H=tests/harness/riscv; hv=EMBCC_RISCV_HARNESS ;;
+        mips64*)    H=tests/harness/mips64; hv=EMBCC_MIPS64_HARNESS ;;
+        mips*)      H=tests/harness/mips; hv=EMBCC_MIPS_HARNESS ;;
+        powerpc*)   H=tests/harness/ppc; hv=EMBCC_PPC_HARNESS ;;
+        sparc*)     H=tests/harness/sparc; hv=EMBCC_SPARC_HARNESS ;;
+        rx*)        H=tests/harness/rx; hv=EMBCC_RX_HARNESS ;;
+        m68k*)      H=tests/harness/coldfire; hv=EMBCC_CF_HARNESS ;;
+        xtensa*)    H=tests/harness/xtensa; hv=EMBCC_XTENSA_HARNESS ;;
+        tricore*)   H=tests/harness/tricore; hv=EMBCC_TRICORE_HARNESS ;;
+    esac
+    SRC=$H
+    case $1 in mips64*) SRC=tests/harness/mips ;; esac
+}
 for t in $boards; do
     d=$out/$t; mkdir -p "$d"
+    harness "$t"
+    flags=
     case $t in
-        thumbv7m*)  H=tests/harness/thumb; hv=EMBCC_THUMB_HARNESS; flags= ;;
-        thumbv7em*) H=tests/harness/thumb-m4f; hv=EMBCC_THUMB_HARNESS; flags= ;;
-        thumbv6m*)  H=tests/harness/thumb-m0; hv=EMBCC_THUMB_M0_HARNESS
-                    flags=-DSRAM_TOP=0x20010000u ;;
-        thumbv8m*)  H=tests/harness/thumb-m33; hv=EMBCC_M33_HARNESS; flags= ;;
-        armv7a*)    H=tests/harness/arm-a32; hv=EMBCC_A32_HARNESS; flags= ;;
-        riscv32*)   H=tests/harness/riscv; hv=EMBCC_RISCV_HARNESS; flags= ;;
+        thumbv6m*) flags=-DSRAM_TOP=0x20010000u ;;
+        thumb*|armv7a*|riscv32*) ;;
+        *) flags="-O1 -DHARNESS_LIBC" ;;
     esac
     { sh tools/build-rt.sh "$t" "$d" && sh tools/build-libc.sh "$t" "$d" &&
       sh tools/build-libcxx.sh "$t" "$d"; } > "$d/build.log" 2>&1 || {
         echo "$t: the libraries do not build:"; tail -3 "$d/build.log"
         exit 1; }
-    for f in boot io; do
-        "$EMBCC" --target="$t" $flags -c "$H/$f.c" -o "$d/$f.o" || exit 1
-    done
-    # the M0 harness's io.c already sends write() to its UART
+    "$EMBCC" --target="$t" $flags -c "$SRC/boot.c" -o "$d/boot.o" || exit 1
+    "$EMBCC" --target="$t" -O1 -c "$SRC/io.c" -o "$d/io.o" || exit 1
+    # the M0 harness's io.c already sends write() to its UART, and so do
+    # the exec suites' harnesses (a weak write)
     board=
-    if [ "$t" != thumbv6m-none-eabi ]; then
-        "$EMBCC" --target="$t" -c tests/cxx-embedded/board.c \
-            -o "$d/board.o" || exit 1
-        board=$d/board.o
-    fi
+    case $t in
+        thumbv6m*) ;;
+        thumb*|armv7a*|riscv32*)
+            "$EMBCC" --target="$t" -c tests/cxx-embedded/board.c \
+                -o "$d/board.o" || exit 1
+            board=$d/board.o ;;
+    esac
     echo "$H $hv $board" > "$d/harness"
 done
+# TriCore's UART is a QEMU plugin watching its stores
+case " $(echo $boards) " in *" tricore-none-elf "*)
+    inc=${QEMU_PLUGIN_INC:-/opt/homebrew/include}
+    cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
+       -undefined dynamic_lookup -o "$out/putc.so" \
+       tests/harness/tricore/putc.c 2>/dev/null ||
+    cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
+       -o "$out/putc.so" tests/harness/tricore/putc.c || {
+        echo "the TriCore harness's output plugin does not build"; exit 1; }
+    EMBCC_TRICORE_PLUGIN=$PWD/$out/putc.so
+    export EMBCC_TRICORE_PLUGIN ;;
+esac
 
 cat > "$out/one.sh" <<'EOF'
 # one.sh TRIPLE OPT NAME OUT: build one program for one board, run it,
@@ -180,10 +227,21 @@ case $t in
     armv7a*)    set -- qemu-system-arm -M virt -cpu cortex-a15 -m 128 \
                     -monitor none -semihosting ;;
     riscv32*)   set -- qemu-system-riscv32 -M virt -bios none -m 8 ;;
+    *)          set -- ;;
 esac
-sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" --until '==END==' \
-    "$@" -nographic -kernel "$o.elf" > "$o.raw" 2>/dev/null
-sed -n '1,/==END==/p' "$o.raw" > "$o.txt"
+if [ $# -gt 0 ]; then
+    sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" --until '==END==' \
+        "$@" -nographic -kernel "$o.elf" > "$o.raw" 2>/dev/null
+else
+    # the board's own runner, which stops at the harness's ==EXIT sentinel
+    # (after ==END==, once main has returned and exit() has run)
+    img=$o.elf
+    case $t in rx*) img=$o.bin ;; esac
+    EMBCC_QEMU_TIMEOUT=${EMBCC_QEMU_TIMEOUT:-30} sh "$H/run.sh" "$img" \
+        > "$o.raw" 2>/dev/null
+fi
+# (a board's UART may end lines with CR LF)
+tr -d '\r' < "$o.raw" | sed -n '1,/==END==/p' > "$o.txt"
 if diff "$out/host/$n.txt" "$o.txt" > "$o.diff"; then
     echo "PASS $t $opt $n"
 else
@@ -202,6 +260,10 @@ done | xargs -P "${EMBCC_JOBS:-8}" -n 4 sh "$out/one.sh" > "$out/results.txt"
 sort "$out/results.txt" | grep '^FAIL' | head -40
 pass=$(grep -c '^PASS' "$out/results.txt")
 fail=$(grep -c '^FAIL' "$out/results.txt")
+nb=$(echo $boards | wc -w)
+np=$(echo $progs | wc -w)
 echo "$pass passed, $fail failed"
-[ "$fail" = 0 ] && [ "$pass" -ge 192 ] || exit 1
-echo "C++ runs on the Cortex-M, ARM and RV32 boards as it does on the host"
+[ "$fail" = 0 ] && [ "$pass" -ge $((nb * np * 4)) ] || exit 1
+echo "C++ runs on the Cortex-M, ARM, RV32, MIPS32 (both byte orders), MIPS64"
+echo "big-endian, PowerPC, SPARC, RX, ColdFire, Xtensa and TriCore boards as it"
+echo "does on the host"
