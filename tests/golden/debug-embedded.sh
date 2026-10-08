@@ -217,7 +217,9 @@ done
 # 0x800000 up), and the frame base is Y, r28:r29, which every slot is
 # addressed from -- so a variable's DW_OP_fbreg IS the displacement in
 # the code's own `std Y+q` / `ldd Y+q`. Checked at -O0 and -O2:
-#   * p arrives in r24:r25 and the prologue stores it: `std Y+fbreg, r24`;
+#   * p arrives in r24:r25 and, at -O0 and -Og, the prologue stores it:
+#     `std Y+fbreg, r24`; at -O2 it stays in its registers, and its
+#     location is empty (-g changes no code, so nothing stores it);
 #   * at -O0, `wide` is stored to its slot by code the line table puts on
 #     line 4, where `int wide = ...` is -- a location and a line that
 #     agree with each other and with the instruction;
@@ -227,7 +229,7 @@ done
 #   * the first row is the function's own line at its entry, so a
 #     debugger takes the second as the end of the prologue.
 if command -v "$OBJDUMP" >/dev/null 2>&1; then
-    for O in 0 2; do
+    for O in 0 g 2; do
         o="$out/avr-O$O.o"
         "$EMBCC" --target=avr -g -O$O -c "$out/p.c" -o "$o" 2>/dev/null || {
             echo "FAIL avr -O$O: -g does not compile"; fail=1; continue; }
@@ -255,7 +257,9 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
                 sed 's/^ *\([0-9a-f]*\):.*/\1/'
         }
         off=$(loc p)
-        if [ -n "$off" ] && [ "$off" != empty ] &&
+        if [ $O = 2 ] && [ "$off" = empty ]; then
+            echo "  avr -O2: 'p' stays in r24:r25, and its location is empty"
+        elif [ -n "$off" ] && [ "$off" != empty ] &&
            grep -qE "std[[:space:]]+Y\+$off, r24\$" "$out/avr-O$O.dis"; then
             echo "  avr -O$O: 'p' at fbreg +$off is the slot the prologue writes (std Y+$off, r24)"
         else
@@ -285,7 +289,9 @@ if command -v "$OBJDUMP" >/dev/null 2>&1; then
     # only write its slot ever gets -- so the slot is right on entry and
     # wrong from the assignment on. Its location must be empty, or a slot
     # something writes after the prologue. `m`, never assigned, keeps its
-    # slot: there the prologue's store is the value for good.
+    # slot when it has one: there the prologue's store is the value for
+    # good. At -O2 it may instead stay in a register, with an empty
+    # location; what may never happen is a location nothing writes.
     cat > "$out/as.c" <<'CEOF'
 int tick(void);
 int bump(int n, int m)
@@ -301,7 +307,7 @@ CEOF
             off=$(grep -A2 "DW_AT_name	(\"$v\")" "$out/avr-as.di" |
                   sed -n -e 's/.*DW_OP_fbreg +\([0-9]*\).*/\1/p' \
                          -e 's/.*DW_AT_location	(<empty>).*/empty/p' | head -1)
-            [ "$off" = empty ] && [ $v = n ] && continue
+            [ "$off" = empty ] && continue
             nst=$(grep -cE "std[[:space:]]+Y\+$off, r[0-9]+\$" "$out/avr-as.dis") || nst=0
             if [ $v = n ] && [ "$nst" -lt 2 ]; then
                 echo "FAIL avr -O2: the assigned parameter 'n' is at fbreg +$off, which only the prologue writes"

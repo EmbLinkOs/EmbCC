@@ -114,6 +114,10 @@ int pass_mem2reg(struct ir_func *fn)
     int nvars = fn->nvars;
     if (nvars == 0 || fn->nins == 0)
         return 0;
+    /* -Og: every source variable stays in memory, where a debugger reads
+     * it (target_keep_vars) -- so there is nothing to promote */
+    if (target_keep_vars())
+        return 0;
 
     /* 1. Promotable locals: a scalar int/ptr of 4 or 8 bytes, never
      * address-taken, every load full-width plain.

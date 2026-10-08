@@ -658,7 +658,7 @@ static const struct ra_target THUMB_DRA = {
 /* -O2 and -Os: the allocator is on. */
 static int g_t_regalloc;
 /* -O0: the allocator runs, for the temporaries of each expression only.
- * Every source variable keeps its stack slot, pinned there as under -g,
+ * Every source variable keeps its stack slot, pinned there as at -Og,
  * so a debugger sees each one at every statement; and nothing the -O1
  * code generator does beyond that -- tail calls, folded offsets, the
  * second pair-allocation attempt -- happens. Before, every temporary
@@ -1168,7 +1168,7 @@ static int in_freg(const struct t_fn *F, int v);
  *
  * A double is not here: FPv4-SP-D16 cannot compute with one, so it is a
  * pair of core words handed to the runtime -- and on FPv5-D16, which
- * can, it is t_double_map's. Under -g a source variable stays in its
+ * can, it is t_double_map's. At -O0 and -Og a source variable stays in its
  * slot, as the integer class keeps them. */
 static char *t_float_map(const struct ir_func *fn, const char *wide,
                          int debug)
@@ -1408,19 +1408,19 @@ static void layout(struct t_fn *F)
     {
         /* Locals: those nothing names need no slot (SROA leaves whole
          * aggregates behind that way), nor one the allocator put in a
-         * register (ra_slot_dead; under -g every local keeps its slot,
+         * register (ra_slot_dead; at -O0 and -Og every local keeps its slot,
          * which is what DW_AT_location describes). Small ones first. */
-        char *lref = ra_locals_referenced(fn, F->want_debug);
+        char *lref = ra_locals_referenced(fn, F->keep_vars);
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size, align;
                 if ((F->loc && F->loc[v] >= 0) || in_freg(F, v))
                     continue;
                 if (!lref[v] ||
-                    ra_slot_dead(fn, F->loc, F->floc, v, F->want_debug))
+                    ra_slot_dead(fn, F->loc, F->floc, v, F->keep_vars))
                     continue;
                 /* (ARMv6-M's prologue, in v6m.c, stores every one) */
-                if (v < fn->nparams && !F->want_debug && !fn->is_varargs &&
+                if (v < fn->nparams && !F->keep_vars && !fn->is_varargs &&
                     !fn->has_alloca && target_thumb_arch() != 6 &&
                     !t_var_named(fn, v))
                     continue;
@@ -3912,7 +3912,7 @@ static void gen_ins(struct t_fn *F, int n)
     /* -g: a line-table row wherever the source line changes, as the
      * x86-64 and aarch64 backends record them. t->len is where this
      * instruction's code begins. */
-    if (F->want_debug && i->line) {
+    if (target_debug_info() && i->line) {
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
         if (last && last->off == t->len) {
@@ -6237,7 +6237,7 @@ static void t_vsave(struct code *t, int n, int pop)
 }
 
 static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
-                     int want_debug)
+                     int keep_vars)
 {
     struct func *f = fn->src;
     struct t_fn F;
@@ -6249,7 +6249,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * segfault this caused at -O0, where the allocator does not run. */
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
     frame_addr_map(&F);
@@ -6280,14 +6281,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          *
          * fltmap NULL: ARMv7-M's base profile has no FPU, so a float
          * lives in a core register and must stay eligible for this pool. */
-        /* Under -g every source variable stays in its frame slot, so
+        /* At -O0 and -Og every source variable stays in its frame slot, so
          * the DW_AT_location naming that slot is true. A variable in a
          * register needs a location list to describe, which is the
          * larger feature; this is exact. */
-        char *pin = want_debug || g_t_o0 ? ra_debug_pin_vars(fn)
+        char *pin = keep_vars || g_t_o0 ? ra_debug_pin_vars(fn)
                                          : (char *)0;
-        char *flt = t_float_map(fn, F.wide, want_debug || g_t_o0);
-        char *dbl = t_double_map(fn, F.wide, want_debug || g_t_o0);
+        char *flt = t_float_map(fn, F.wide, keep_vars || g_t_o0);
+        char *dbl = t_double_map(fn, F.wide, keep_vars || g_t_o0);
         /* The integer pass must not give a GPR to a value the FP pass
          * owns, and the -g pins are the same kind of "not here" -- so it
          * takes the union of the two. */
@@ -6416,7 +6417,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.tail = NULL;
     if (fn->cmse_entry)
         tcg_cmse_check_entry(fn);
-    if (g_t_regalloc && !want_debug && !g_t_o0)
+    if (g_t_regalloc && !keep_vars && !g_t_o0)
         for (i = 0; i < fn->nins; i++)
             if (t_tail_ok(fn, i)) {
                 if (!F.tail)
@@ -6492,7 +6493,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.va_regsave = F.va_first = -1;
         F.shortb = shortb;
         F.nshortb = nshortb;
-        if (want_debug) {
+        if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
         }
@@ -6520,11 +6521,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame
      * pointer (see src/debug/dwarf.c). */
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)F.slot[v];
+            fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0, F.slot[v]);
     }
     f->code_off = t->len;
     /* The prologue's scratch: not where a parameter arrives at or is
@@ -6560,7 +6561,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     /* No IR_RET and no tail call is not enough: a void function's body
      * falls off its end into the epilogue, so its last instruction must
      * be a jump or a trap too. */
-    F.noret = !F.nopush && !want_debug && !fn->is_varargs && fn->nins &&
+    F.noret = !F.nopush && !keep_vars && !fn->is_varargs && fn->nins &&
               (fn->ins[fn->nins - 1].op == IR_JMP ||
                fn->ins[fn->nins - 1].op == IR_UD2);
     for (i = 0; F.noret && i < fn->nins; i++)
@@ -7125,7 +7126,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
  * larger by it (strtod's parse_hex by 36 bytes); trying both makes it a
  * choice the bytes decide. EMBCC_T_LOWREGS=0/1 forces it. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct t_sites *st, int want_debug)
+                          struct t_sites *st, int keep_vars)
 {
     int at = t->len, ncall = st->ncall, next = st->next, nstr = st->nstr,
         ng = st->ng, nf = st->nf, nd = t->ndrange, with;
@@ -7146,7 +7147,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
      * add, as it always has. */
     void (*gen)(struct ir_func *, struct code *, struct t_sites *, int) =
         target_thumb_arch() == 6 ? v6_gen_func : gen_func;
-    if (g_t_regalloc && !want_debug && !g_t_o0 &&
+    if (g_t_regalloc && !keep_vars && !g_t_o0 &&
         !getenv("EMBCC_NO_MEMOFF")) {
         int dp = target_thumb_fpu_dp();
         char *w = dp ? (char *)0 : wide64_map(fn);
@@ -7161,8 +7162,8 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     g_t_pairs = 1;
     /* the rename is for the 16-bit encodings, which ARM state has none of */
     g_t_lowregs = lr_forced ? atoi(lr) != 0 : !t_isa_a32;
-    if (!g_t_regalloc || want_debug || g_t_o0) {
-        gen(fn, t, st, want_debug);
+    if (!g_t_regalloc || keep_vars || g_t_o0) {
+        gen(fn, t, st, keep_vars);
         g_t_lowregs = 1;
         return;
     }
@@ -7230,7 +7231,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         g_t_ext = te[a];
         g_t_role_fail = 0;
         g_t_loop_bytes = 0;
-        gen(fn, t, st, want_debug);
+        gen(fn, t, st, keep_vars);
         with = t->len - at;
         long score = with + g_t_loop_bytes;
         last = a;
@@ -7251,7 +7252,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         g_t_lowregs = tl[best];
         g_t_ext = te[best];
         g_t_role_fail = 0;
-        gen(fn, t, st, want_debug);
+        gen(fn, t, st, keep_vars);
     }
     g_t_pairs = 1;
     g_t_lowregs = 1;
@@ -7263,7 +7264,7 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
                         struct gsite **gs, int *ngs,
-                        struct fsite **fs, int *nfs, int want_debug,
+                        struct fsite **fs, int *nfs, int keep_vars,
                         int optimize, int no_sse, int regalloc)
 {
     (void)no_sse;
@@ -7298,7 +7299,7 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
         int ra = g_t_regalloc;
         if (g_t_o0 && ra_o0_too_big(&iu->funcs[n]))
             g_t_regalloc = 0;          /* see ra_o0_too_big */
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
         g_t_regalloc = ra;
     }
 

@@ -70,7 +70,7 @@ struct rx_sites {
 struct rx_fn {
     int *usecnt;
     int skip_next;
-    int want_debug;
+    int keep_vars;
     struct ir_func *fn;
     int *loc;
     int used_callee[RA_MAXPOOL];
@@ -499,14 +499,14 @@ static void layout(struct rx_fn *F)
         free(loc2);
     }
     {
-        char *lref = ra_locals_referenced(fn, F->want_debug);
+        char *lref = ra_locals_referenced(fn, F->keep_vars);
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size = fn->locals[v].size ? fn->locals[v].size : 4;
                 int align = fn->locals[v].user_align ? fn->locals[v].user_align
                           : fn->locals[v].align ? fn->locals[v].align : 4;
                 if (in_reg(F, v) || !lref[v] ||
-                    ra_slot_dead(fn, F->loc, NULL, v, F->want_debug))
+                    ra_slot_dead(fn, F->loc, NULL, v, F->keep_vars))
                     continue;
                 if ((size > 8) != pass)
                     continue;
@@ -1513,7 +1513,7 @@ static void gen_ins(struct rx_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
 
-    if (F->want_debug && fn->ins[n].line) {
+    if (target_debug_info() && fn->ins[n].line) {
         long line = fn->ins[n].line;
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
@@ -2369,7 +2369,7 @@ static int *pair_alloc(struct ir_func *fn, struct rx_fn *F, const char *pin)
 /* ---- one function --------------------------------------------------------- */
 
 static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
-                     int want_debug)
+                     int keep_vars)
 {
     struct func *f = fn->src;
     struct rx_fn F;
@@ -2377,14 +2377,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.wide = wide_map(fn);
     F.nshr = ra_narrow_hishift(fn);
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
     F.fb = RX_SP;
     if (g_rx_regalloc) {
-        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        char *pin = keep_vars ? ra_debug_pin_vars(fn) : (char *)0;
         int *pair = g_rx_pairs ? pair_alloc(fn, &F, pin) : NULL;
         F.loc = ra_allocate(fn, &RX_RATGT, F.wide, pin, F.used_callee,
                             &F.nsave);
@@ -2443,11 +2444,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
 
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);
     f->code_align = 1;
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)F.slot[v];
+            fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0, F.slot[v]);
     }
     {
     int len0 = t->len, nl0 = fn->nlines;
@@ -2651,34 +2652,34 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
 }
 
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct rx_sites *st, int want_debug)
+                          struct rx_sites *st, int keep_vars)
 {
     int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
         nf = st->nf, with;
 
-    if (g_rx_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+    if (g_rx_regalloc && !keep_vars && !getenv("EMBCC_NO_MEMOFF")) {
         char *w = wide_map(fn);
         ra_fold_memoff(fn, 0, 32767, 4, 4, w, 0, 0);
         free(w);
     }
     g_rx_pairs = 1;
-    if (!g_rx_regalloc || want_debug || getenv("EMBCC_RX_PAIRS")) {
+    if (!g_rx_regalloc || keep_vars || getenv("EMBCC_RX_PAIRS")) {
         if (getenv("EMBCC_RX_PAIRS"))
             g_rx_pairs = atoi(getenv("EMBCC_RX_PAIRS"));
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
         g_rx_pairs = 1;
         return;
     }
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     with = t->len - at;
     t->len = at; st->next = next; st->nstr = nstr; st->ng = ng; st->nf = nf;
     g_rx_pairs = 0;
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     if (t->len - at > with) {
         t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
         st->nf = nf;
         g_rx_pairs = 1;
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
     }
     g_rx_pairs = 1;
 }
@@ -2687,7 +2688,7 @@ void codegen_unit_rx(struct ir_unit *iu, struct code *text,
                      struct extcall **ext, int *next,
                      struct strsite **strs, int *nstrs,
                      struct gsite **gs, int *ngs,
-                     struct fsite **fs, int *nfs, int want_debug,
+                     struct fsite **fs, int *nfs, int keep_vars,
                      int optimize, int no_sse, int regalloc)
 {
     struct rx_sites st;
@@ -2696,7 +2697,7 @@ void codegen_unit_rx(struct ir_unit *iu, struct code *text,
     g_rx_regalloc = regalloc;
     memset(&st, 0, sizeof st);
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
     cg_resolve_strsites(iu, st.str, st.nstr);
     *ext = st.ext;   *next = st.next;
     *strs = st.str;  *nstrs = st.nstr;

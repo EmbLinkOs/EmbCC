@@ -75,7 +75,7 @@ struct la_fn {
      * do). skip_next tells the dispatch loop the branch is already out. */
     int *usecnt;
     int skip_next;
-    int want_debug;
+    int keep_vars;
     struct ir_func *fn;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when the allocator did not run. */
@@ -228,7 +228,7 @@ static const struct ra_target LOONGARCH_RA = {
 /* -O1 and up: the allocator is on. */
 static int g_la_regalloc;
 /* -O0: the allocator runs for the temporaries of each expression only,
- * every source variable pinned to its slot as under -g. */
+ * every source variable pinned to its slot as at -Og. */
 static int g_la_o0;
 
 /* ---- refusal ---------------------------------------------------------- */
@@ -619,7 +619,7 @@ static void layout(struct la_fn *F)
      * use): two whose live ranges do not overlap take one slot; a 128-bit
      * one keeps a sixteen-byte slot of its own. Then locals, small ones
      * first; one nothing names needs none (ra_locals_referenced), nor one
-     * in a register (ra_slot_dead; under -g every local keeps its slot). */
+     * in a register (ra_slot_dead; at -O0 and -Og every local keeps its slot). */
     {
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
@@ -651,14 +651,14 @@ static void layout(struct la_fn *F)
         free(loc2);
     }
     {
-        char *lref = ra_locals_referenced(fn, F->want_debug);
+        char *lref = ra_locals_referenced(fn, F->keep_vars);
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size = fn->locals[v].size ? fn->locals[v].size : F->w;
                 int align = fn->locals[v].user_align ? fn->locals[v].user_align
                           : fn->locals[v].align ? fn->locals[v].align : F->w;
                 if (in_reg(F, v) || !lref[v] ||
-                    ra_slot_dead(fn, F->loc, NULL, v, F->want_debug))
+                    ra_slot_dead(fn, F->loc, NULL, v, F->keep_vars))
                     continue;
                 if ((size > 2 * F->w) != pass)
                     continue;
@@ -2237,7 +2237,7 @@ static void gen_ins(struct la_fn *F, int n)
     /* -g: a line-table row wherever the source line changes, as the
      * other backends record them. t->len is where this instruction's
      * code begins. */
-    if (F->want_debug && F->fn->ins[n].line) {
+    if (target_debug_info() && F->fn->ins[n].line) {
         struct ir_func *dfn = F->fn;
         long line = dfn->ins[n].line;
         struct ir_line *last = dfn->nlines ? &dfn->lines[dfn->nlines - 1]
@@ -3326,7 +3326,7 @@ static int param_reg(struct la_fn *F, const struct argplace *pl, int q)
 /* ---- one function --------------------------------------------------------- */
 
 static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
-                     int want_debug)
+                     int keep_vars)
 {
     struct func *f = fn->src;
     struct la_fn F;
@@ -3337,7 +3337,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
      * paths is a segfault at -O0. */
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.w = 8;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.relax = NULL; F.nrelax = 0;
@@ -3351,10 +3352,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
          * only the sixteen-byte values are that (F.w16) -- handing it
          * the eight-byte map made every pointer and `long` ineligible on
          * RV64 once. fltmap is NULL: soft float lives in the integer
-         * registers and must stay eligible for them. Under -g (and at
-         * -O0) a source variable stays in its frame slot, so the
+         * registers and must stay eligible for them. At -O0 and -Og
+         * (keep_vars) a source variable stays in its frame slot, so the
          * DW_AT_location naming that slot is true (see regalloc.h). */
-        char *pin = want_debug || g_la_o0 ? ra_debug_pin_vars(fn)
+        char *pin = keep_vars || g_la_o0 ? ra_debug_pin_vars(fn)
                                           : (char *)0;
         F.loc = ra_allocate(fn, &LOONGARCH_RA, F.w16, pin,
                             F.used_callee, &F.nsave);
@@ -3394,7 +3395,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
     /* A tail call leaves ra alone -- it is the caller's, and the callee
      * returns with it -- so it does not make this function a non-leaf. */
     F.tail = NULL;
-    if (g_la_regalloc && !want_debug && !g_la_o0)
+    if (g_la_regalloc && !keep_vars && !g_la_o0)
         for (i = 0; i < fn->nins; i++)
             if (la_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -3449,7 +3450,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
         F.va_first = -1;
         F.relax = relax;
         F.nrelax = nrelax;
-        if (want_debug) {
+        if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
         }
@@ -3463,11 +3464,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame
      * pointer (src/debug/dwarf.c). */
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)F.slot[v];
+            fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0, F.slot[v]);
     }
     f->code_off = t->len;
 
@@ -3762,19 +3763,19 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
 /* A field's constant offset into its load or store (ld.w r, rn, k) --
  * once, before allocation -- and then the function. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct la_sites *st, int want_debug)
+                          struct la_sites *st, int keep_vars)
 {
-    if (g_la_regalloc && !want_debug && !g_la_o0 &&
+    if (g_la_regalloc && !keep_vars && !g_la_o0 &&
         !getenv("EMBCC_NO_MEMOFF"))
         ra_fold_memoff(fn, -2048, 2047, 8, 8, NULL, 0, 0);
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
 }
 
 void codegen_unit_loongarch(struct ir_unit *iu, struct code *text,
                             struct extcall **ext, int *next,
                             struct strsite **strs, int *nstrs,
                             struct gsite **gs, int *ngs,
-                            struct fsite **fs, int *nfs, int want_debug,
+                            struct fsite **fs, int *nfs, int keep_vars,
                             int optimize, int no_sse, int regalloc)
 {
     struct la_sites st;
@@ -3788,7 +3789,7 @@ void codegen_unit_loongarch(struct ir_unit *iu, struct code *text,
         int ra = g_la_regalloc;
         if (g_la_o0 && ra_o0_too_big(&iu->funcs[n]))
             g_la_regalloc = 0;     /* see ra_o0_too_big */
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
         g_la_regalloc = ra;
     }
 

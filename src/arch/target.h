@@ -471,6 +471,17 @@ void target_set(enum target_arch a);
  * backends read opt_level, which -Os leaves an ordinary number. */
 void target_set_opt_size(int on);
 int  target_opt_size(void);
+/* Whether the code keeps every source variable in its frame slot, where
+ * a debugger reads it: at -O0 and -Og. Never because of -g -- debug
+ * information describes the code and does not shape it, so -g changes
+ * no instruction (tests/golden/g-same-code.sh). The backends ask this
+ * where they used to ask whether -g was on. */
+void target_set_keep_vars(int on);
+int  target_keep_vars(void);
+/* -g: the backends record each function's line rows and where each
+ * source variable lives (ir_func.lines, ir_func.var_off). */
+void target_set_debug_info(int on);
+int  target_debug_info(void);
 
 /* The other two dimensions. Both default to the freestanding ELF answer,
  * so a caller that has never heard of them reads the world exactly as it

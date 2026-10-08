@@ -1903,11 +1903,11 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
  * that, because a slot that turns out to be live reads as garbage rather
  * than failing, and the whole point is that nothing quietly reads it. */
 int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
-                 int v, int want_debug)
+                 int v, int keep_vars)
 {
     const struct func *f = fn->src;
     int in_gp = loc && loc[v] >= 0, in_fp = floc && floc[v] >= 0;
-    if ((!in_gp && !in_fp) || f->is_varargs || fn->has_alloca || want_debug)
+    if ((!in_gp && !in_fp) || f->is_varargs || fn->has_alloca || keep_vars)
         return 0;
     const struct type *t = f->var_tys[v];
     if (t->kind == TY_STRUCT || t->kind == TY_ARRAY || ty_size(t) > 8)
@@ -1922,11 +1922,11 @@ int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
     return 1;
 }
 
-char *ra_locals_referenced(const struct ir_func *fn, int want_debug)
+char *ra_locals_referenced(const struct ir_func *fn, int keep_vars)
 {
     size_t n = (size_t)(fn->nvars > 0 ? fn->nvars : 1);
     char *r = xcalloc(n, 1);
-    if (want_debug || fn->has_alloca || (fn->src && fn->src->is_varargs)) {
+    if (keep_vars || fn->has_alloca || (fn->src && fn->src->is_varargs)) {
         memset(r, 1, n);
         return r;
     }
@@ -2182,10 +2182,41 @@ int ra_parallel_move(const int *dst, const int *src, int n, int scratch,
     return nout;
 }
 
-/* See regalloc.h: under -g the embedded backends keep every source
+/* See regalloc.h: at -O0 and -Og the embedded backends keep every source
  * variable in its frame slot, so the location expression that names
  * the slot is the truth. Temporaries are untouched -- they have no
  * name and no DW_TAG_variable, so nothing describes them. */
+/* Whether variable v's slot is where its value is, for DW_AT_location.
+ *
+ * At -O0 and -Og every variable is read and written through its slot.
+ * Optimized, mem2reg may have turned it into temporaries, and then the
+ * slot is never written: naming it would have a debugger print whatever
+ * the frame held before. A local is in its slot exactly when something
+ * still loads, stores or takes the address of it. A parameter that has a
+ * slot is stored there by the prologue, so its slot holds the value it
+ * arrived with -- right unless the body assigned it after mem2reg took it
+ * out of memory, which mem2reg records (ir_dbgvar.moved). */
+int ra_var_in_slot(const struct ir_func *fn, int v)
+{
+    for (int k = 0; k < fn->nins; k++) {
+        const struct ir_ins *in = &fn->ins[k];
+        if (((in->op == IR_LDVAR || in->op == IR_ADDR) && in->a == v) ||
+            (in->op == IR_STVAR && in->dst == v))
+            return 1;
+    }
+    if (v >= fn->nparams)
+        return 0;
+    for (int d = 0; d < fn->ndbgvars; d++)
+        if (fn->dbgvars[d].vreg == v && fn->dbgvars[d].moved)
+            return 0;
+    return 1;
+}
+
+int ra_var_home(const struct ir_func *fn, int v, int has_slot, long off)
+{
+    return has_slot && ra_var_in_slot(fn, v) ? (int)off : IR_VAR_NO_LOC;
+}
+
 char *ra_debug_pin_vars(const struct ir_func *fn)
 {
     int n = fn->nvregs ? fn->nvregs : 1;

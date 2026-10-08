@@ -2297,7 +2297,7 @@ static void gen_ins(struct t_fn *F, int n)
     struct code *t = F->t;
 
     /* -g: a line-table row wherever the source line changes. */
-    if (F->want_debug && i->line) {
+    if (target_debug_info() && i->line) {
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
         if (last && last->off == t->len) {
@@ -3255,7 +3255,7 @@ static unsigned v6_roles_push(struct t_fn *F, int n)
 }
 
 void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
-                 int want_debug)
+                 int keep_vars)
 {
     struct func *f = fn->src;
     struct t_fn F;
@@ -3265,7 +3265,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.wide = tcg_wide64_map(fn);
     tcg_frame_addr_map(&F);
     F.nshr = ra_narrow_hishift(fn);
@@ -3279,7 +3280,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     if (tcg_regalloc()) {
         /* -g, and -O0: every source variable in its slot (codegen.c's
          * g_t_o0), the temporaries in registers */
-        char *pin = want_debug || tcg_o0() ? ra_debug_pin_vars(fn)
+        char *pin = keep_vars || tcg_o0() ? ra_debug_pin_vars(fn)
                                            : (char *)0;
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = tcg_pair_alloc(fn, F.wide, pin, pused, &npused);
@@ -3360,7 +3361,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.npoint = 0;
         F.shortb = first ? NULL : cls;
         F.nshortb = first ? 0 : ncls;
-        if (want_debug) {
+        if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
         }
@@ -3370,11 +3371,12 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         while (t->len & 3)
             t_nop(t);
         f->code_align = 4;
-        if (want_debug) {
+        if (target_debug_info()) {
             int nv = fn->nvars ? fn->nvars : 1;
             fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
             for (int v = 0; v < fn->nvars; v++)
-                fn->var_off[v] = (int)F.slot[v];
+                fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0,
+                                             F.slot[v]);
         }
         f->code_off = t->len;
 

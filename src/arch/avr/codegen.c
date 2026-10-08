@@ -234,7 +234,7 @@ struct a_fn {
      * an eight-byte slot and reads four bytes of a neighbouring temporary as
      * its high half. */
     char *wide;
-    int want_debug;
+    int keep_vars;
     /* Per vreg: the low register of the PAIR the allocator gave it (r2,
      * r4, ... r16) -- or of the QUAD, two adjacent pairs (r2, r6, r10,
      * r14), for a four-byte value -- or -1 for its slot. hw[v] is how
@@ -1048,14 +1048,14 @@ static void layout(struct a_fn *F)
     for (int v = 0; v < fn->nvregs; v++)
         obj_of[v] = -1;
 
-    char *lref = ra_locals_referenced(fn, F->want_debug);
+    char *lref = ra_locals_referenced(fn, F->keep_vars);
     for (int v = 0; v < fn->nvars; v++) {
         int size = fn->locals[v].size ? fn->locals[v].size : VW;
         if (in_pair(F, v))
             continue;                  /* in its register pair: no slot */
         /* Nothing names it -- mem2reg promoted every access away, which
          * it now does for this target's two-byte locals -- so it needs no
-         * slot, and a function with none needs no frame at all. Under -g
+         * slot, and a function with none needs no frame at all. At -O0 and -Og
          * every local keeps one (ra_locals_referenced). */
         if (!lref[v] && v >= fn->nparams)
             continue;
@@ -2684,32 +2684,6 @@ static void a_line_row(struct ir_func *fn, long off, int line)
     fn->nlines++;
 }
 
-/* Whether variable v's slot is where its value is, for DW_AT_location.
- *
- * At -O0 every variable is read and written through its slot. Optimized,
- * mem2reg may have turned it into temporaries, and then the slot (the
- * layout still gives one to every variable under -g) is never written:
- * naming it would have a debugger print whatever the frame held before.
- * A local is in its slot exactly when something still loads, stores or
- * takes the address of it. A parameter is stored there by the prologue
- * whatever happens, so its slot holds the value it arrived with -- right
- * unless the body assigned it after mem2reg took it out of memory, which
- * mem2reg records (ir_dbgvar.moved). */
-static int a_var_in_slot(const struct ir_func *fn, int v)
-{
-    for (int k = 0; k < fn->nins; k++) {
-        const struct ir_ins *in = &fn->ins[k];
-        if (((in->op == IR_LDVAR || in->op == IR_ADDR) && in->a == v) ||
-            (in->op == IR_STVAR && in->dst == v))
-            return 1;
-    }
-    if (v >= fn->nparams)
-        return 0;
-    for (int d = 0; d < fn->ndbgvars; d++)
-        if (fn->dbgvars[d].vreg == v && fn->dbgvars[d].moved)
-            return 0;
-    return 1;
-}
 
 /* ---- the instruction dispatch ---------------------------------------- */
 
@@ -5419,7 +5393,7 @@ static void avr_regalloc(struct a_fn *F, int mode)
 }
 
 static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
-                     int want_debug, int ra_mode, struct avr_relax *rx)
+                     int keep_vars, int ra_mode, struct avr_relax *rx)
 {
     struct func *f = fn->src;
     struct a_fn F;
@@ -5427,7 +5401,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
     F.rx = rx;
 
     if (fn->neh)
@@ -5490,20 +5464,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
 
     f->code_off = t->len;
     f->code_align = 2;                  /* a word of flash */
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         free(fn->var_off);             /* this function generated again */
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = F.slot[v] >= 0 && a_var_in_slot(fn, v)
-                           ? (int)F.slot[v] : IR_VAR_NO_LOC;
-        /* ...and its rows recorded again, the first at its entry with
-         * the line it was declared on, as clang and avr-gcc write it: a
-         * debugger finds the end of the prologue as the SECOND row, and
-         * without this one it scanned the prologue instead -- stopping
-         * before the parameters were stored to the slots it reads. */
+            fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0, F.slot[v]);
+        /* ...and its rows recorded again. The row at the entry, with the
+         * line the function was declared on, is the DWARF writer's to add
+         * (src/debug/dwarf.c, emit_line_func), for every target. */
         fn->nlines = 0;
-        a_line_row(fn, t->len, fn->line);
     }
 
     /* ---- prologue ---- */
@@ -5686,7 +5656,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             long at = t->len;
             int first = i;
             F.tail_made = 0;
-            if (want_debug)
+            if (target_debug_info())
                 a_line_row(fn, t->len, fn->ins[i].line);
             gen_ins(&F, i);
             if (F.skip_next) {          /* the compare emitted its branch */
@@ -5829,7 +5799,7 @@ static void avr_rollback(struct code *t, struct a_sites *st,
 }
 
 static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
-                       int want_debug, int mode, const struct avr_rollback *rb)
+                       int keep_vars, int mode, const struct avr_rollback *rb)
 {
     struct avr_relax rx;
     unsigned char *pin = NULL;
@@ -5840,7 +5810,7 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
         int changed = 0;
         avr_rollback(t, st, rb);
         rx.bad = -1;
-        gen_func(fn, t, st, want_debug, mode, &rx);
+        gen_func(fn, t, st, keep_vars, mode, &rx);
         if (npin < rx.nsite) {
             pin = xrealloc(pin, (size_t)rx.nsite);
             for (; npin < rx.nsite; npin++) pin[npin] = 0;
@@ -5863,7 +5833,7 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
     if (!ok) {
         /* Never left with a thrown-away attempt in `t`: everything long. */
         avr_rollback(t, st, rb);
-        gen_func(fn, t, st, want_debug, mode, NULL);
+        gen_func(fn, t, st, keep_vars, mode, NULL);
     }
     free(rx.hint); free(rx.fits); free(pin);
     return t->len - rb->at;
@@ -5875,7 +5845,7 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
  * from at least one more class of home, so this ends; the bound is only
  * there to name a loop that did not. */
 static int avr_attempt(struct ir_func *fn, struct code *t, struct a_sites *st,
-                       int want_debug, int mode, const struct avr_rollback *rb)
+                       int keep_vars, int mode, const struct avr_rollback *rb)
 {
     int nv = fn->nvregs;
     for (int tries = 0; ; tries++) {
@@ -5883,7 +5853,7 @@ static int avr_attempt(struct ir_func *fn, struct code *t, struct a_sites *st,
         g_x_hit = g_x_alloc = 0;
         if (nv)
             memset(g_a_pend, 0, (size_t)nv);
-        len = gen_relaxed(fn, t, st, want_debug, mode, rb);
+        len = gen_relaxed(fn, t, st, keep_vars, mode, rb);
         if (g_a_xhome && g_x_hit && g_x_alloc) {
             g_a_xhome = 0;               /* X was scratch after all */
             continue;
@@ -5904,16 +5874,16 @@ static int avr_attempt(struct ir_func *fn, struct code *t, struct a_sites *st,
  * A discarded attempt is undone by truncating what it appended: the code,
  * and the four site lists, which only ever grow. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct a_sites *st, int want_debug)
+                          struct a_sites *st, int keep_vars)
 {
     struct avr_rollback rb = { t->len, st->next, st->nstr, st->ng, st->nf };
     int best = AVR_RA_NONE, best_len = 0;
     int nv = fn->nvregs;
 
-    if (!g_a_regalloc || want_debug || fn->src->is_isr ||
+    if (!g_a_regalloc || keep_vars || fn->src->is_isr ||
         (avr_knob("EMBCC_AVR_RA_ONLY") &&
          strcmp(avr_knob("EMBCC_AVR_RA_ONLY"), fn->name) != 0)) {
-        gen_relaxed(fn, t, st, want_debug, AVR_RA_NONE, &rb);
+        gen_relaxed(fn, t, st, keep_vars, AVR_RA_NONE, &rb);
         return;
     }
     /* A field's constant offset into its load or store -- `ldd r, Z+q`
@@ -5958,7 +5928,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
             /* each attempt learns its own exclusions */
             memset(g_a_novol, 0, (size_t)(nv ? nv : 1));
             memset(g_a_nohome, 0, (size_t)(nv ? nv : 1));
-            len = avr_attempt(fn, t, st, want_debug, m, &rb);
+            len = avr_attempt(fn, t, st, keep_vars, m, &rb);
             if (avr_knob("EMBCC_AVR_RA"))
                 fprintf(stderr, "%s: mode %d cap %d, %d bytes\n", fn->name,
                         m, g_a_cap, len);
@@ -5983,7 +5953,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         g_x_hit = g_x_alloc = 0;
         if (nv)
             memset(g_a_pend, 0, (size_t)nv);
-        gen_relaxed(fn, t, st, want_debug, best, &rb);
+        gen_relaxed(fn, t, st, keep_vars, best, &rb);
         if (g_x_hit && g_x_alloc)
             internal_error("avr: %s: X is a home and was used as scratch",
                            fn->name);
@@ -6006,7 +5976,7 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
                       struct extcall **ext, int *next,
                       struct strsite **strs, int *nstrs,
                       struct gsite **gs, int *ngs,
-                      struct fsite **fs, int *nfs, int want_debug,
+                      struct fsite **fs, int *nfs, int keep_vars,
                       int optimize, int no_sse, int regalloc)
 {
     struct a_sites st;
@@ -6019,7 +5989,7 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
         int ra = g_a_regalloc;
         if (g_a_o0 && ra_o0_too_big(&iu->funcs[n]))
             g_a_regalloc = 0;          /* see ra_o0_too_big */
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
         g_a_regalloc = ra;
     }
 

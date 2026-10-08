@@ -87,13 +87,15 @@ struct fsite {
  * patched once all functions are placed); external call sites are
  * returned via ext and next for the driver to relocate. The array is
  * malloc'd; caller frees. */
-/* want_debug (from -g) turns on collection of each func's (offset,line)
- * line table (ir_func.lines); off, output is byte-for-byte as before. */
+/* keep_vars (target_keep_vars: -O0 and -Og, never -g) keeps every source
+ * variable in its frame slot, where a debugger reads it. -g itself shapes
+ * no code: the backends record line rows and variable homes when
+ * target_debug_info() says so (tests/golden/g-same-code.sh). */
 void codegen_unit(struct ir_unit *iu, struct code *text,
                   struct extcall **ext, int *next,
                   struct strsite **strs, int *nstrs,
                   struct gsite **gs, int *ngs,
-                  struct fsite **fs, int *nfs, int want_debug, int optimize,
+                  struct fsite **fs, int *nfs, int keep_vars, int optimize,
                   int no_sse, int regalloc);
 
 /* The same lowering for aarch64 (AAPCS64). Same signature, same site
@@ -107,7 +109,7 @@ void codegen_unit_thumb(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
                         struct gsite **gs, int *ngs,
-                        struct fsite **fs, int *nfs, int want_debug,
+                        struct fsite **fs, int *nfs, int keep_vars,
                         int optimize, int no_sse, int regalloc);
 
 /* And for RISC-V -- ONE function for RV32 and RV64 alike, which reads
@@ -117,7 +119,7 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
                         struct gsite **gs, int *ngs,
-                        struct fsite **fs, int *nfs, int want_debug,
+                        struct fsite **fs, int *nfs, int keep_vars,
                         int optimize, int no_sse, int regalloc);
 /* The .riscv.attributes payload: the ISA string and stack alignment the
  * code was built for, as clang and gcc record them. Without it a
@@ -130,7 +132,7 @@ void codegen_unit_mips(struct ir_unit *iu, struct code *text,
                        struct extcall **ext, int *next,
                        struct strsite **strs, int *nstrs,
                        struct gsite **gs, int *ngs,
-                       struct fsite **fs, int *nfs, int want_debug,
+                       struct fsite **fs, int *nfs, int keep_vars,
                        int optimize, int no_sse, int regalloc);
 /* The 24-byte .MIPS.abiflags payload EmbCC's objects carry: MIPS32r2,
  * 32-bit GPRs, no FPU, the soft-float ABI -- clang's for the same flags. */
@@ -146,7 +148,7 @@ void codegen_unit_loongarch(struct ir_unit *iu, struct code *text,
                             struct extcall **ext, int *next,
                             struct strsite **strs, int *nstrs,
                             struct gsite **gs, int *ngs,
-                            struct fsite **fs, int *nfs, int want_debug,
+                            struct fsite **fs, int *nfs, int keep_vars,
                             int optimize, int no_sse, int regalloc);
 
 /* And for TriCore 1.6.1, the AURIX core: little-endian, soft float, the
@@ -155,7 +157,7 @@ void codegen_unit_tricore(struct ir_unit *iu, struct code *text,
                           struct extcall **ext, int *next,
                           struct strsite **strs, int *nstrs,
                           struct gsite **gs, int *ngs,
-                          struct fsite **fs, int *nfs, int want_debug,
+                          struct fsite **fs, int *nfs, int keep_vars,
                           int optimize, int no_sse, int regalloc);
 
 /* And for Xtensa, the windowed ABI of the ESP32 (LX6) and ESP32-S3
@@ -165,14 +167,14 @@ void codegen_unit_xtensa(struct ir_unit *iu, struct code *text,
                          struct extcall **ext, int *next,
                          struct strsite **strs, int *nstrs,
                          struct gsite **gs, int *ngs,
-                         struct fsite **fs, int *nfs, int want_debug,
+                         struct fsite **fs, int *nfs, int keep_vars,
                          int optimize, int no_sse, int regalloc);
 /* And for 32-bit PowerPC, the embedded EABI, big-endian, soft float. */
 void codegen_unit_ppc(struct ir_unit *iu, struct code *text,
                       struct extcall **ext, int *next,
                       struct strsite **strs, int *nstrs,
                       struct gsite **gs, int *ngs,
-                      struct fsite **fs, int *nfs, int want_debug,
+                      struct fsite **fs, int *nfs, int keep_vars,
                       int optimize, int no_sse, int regalloc);
 
 /* And for Renesas RX (RXv1), GCC's rx-elf ABI with 32-bit doubles and no
@@ -181,7 +183,7 @@ void codegen_unit_rx(struct ir_unit *iu, struct code *text,
                      struct extcall **ext, int *next,
                      struct strsite **strs, int *nstrs,
                      struct gsite **gs, int *ngs,
-                     struct fsite **fs, int *nfs, int want_debug,
+                     struct fsite **fs, int *nfs, int keep_vars,
                      int optimize, int no_sse, int regalloc);
 /* And for 32-bit SPARC V8 (LEON3), big-endian, soft float, with register
  * windows (docs/internals/sparc-plan.md). */
@@ -189,7 +191,7 @@ void codegen_unit_sparc(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
                         struct gsite **gs, int *ngs,
-                        struct fsite **fs, int *nfs, int want_debug,
+                        struct fsite **fs, int *nfs, int keep_vars,
                         int optimize, int no_sse, int regalloc);
 /* And for ColdFire (m68k-none-elf): ISA_A, big-endian, every argument on
  * the stack, soft float. */
@@ -197,7 +199,7 @@ void codegen_unit_coldfire(struct ir_unit *iu, struct code *text,
                            struct extcall **ext, int *next,
                            struct strsite **strs, int *nstrs,
                            struct gsite **gs, int *ngs,
-                           struct fsite **fs, int *nfs, int want_debug,
+                           struct fsite **fs, int *nfs, int keep_vars,
                            int optimize, int no_sse, int regalloc);
 
 /* And for AVR -- an EIGHT-bit machine, where nothing that matters fits in
@@ -208,14 +210,14 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
                       struct extcall **ext, int *next,
                       struct strsite **strs, int *nstrs,
                       struct gsite **gs, int *ngs,
-                      struct fsite **fs, int *nfs, int want_debug,
+                      struct fsite **fs, int *nfs, int keep_vars,
                       int optimize, int no_sse, int regalloc);
 
 void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
                         struct gsite **gs, int *ngs,
-                        struct fsite **fs, int *nfs, int want_debug,
+                        struct fsite **fs, int *nfs, int keep_vars,
                         int optimize, int no_sse, int regalloc);
 
 /* ---- the backend registry (src/arch/backends.c) -------------------------
@@ -237,7 +239,7 @@ struct backend_desc {
                     struct extcall **ext, int *next,
                     struct strsite **strs, int *nstrs,
                     struct gsite **gs, int *ngs,
-                    struct fsite **fs, int *nfs, int want_debug,
+                    struct fsite **fs, int *nfs, int keep_vars,
                     int optimize, int no_sse, int regalloc);
     /* The register allocator runs at -O0 too, for each expression's
      * temporaries (EMBCC_O0_NORA=1 turns it off, for bisecting). */

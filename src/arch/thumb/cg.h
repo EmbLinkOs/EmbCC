@@ -47,7 +47,7 @@ struct t_fn {
     /* A `tst` already made for the branch at instruction tst_br - 1
      * (0: none), with copies between the two: the branch only jumps. */
     int tst_br;
-    int want_debug;
+    int keep_vars;
     /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit
      * machine is an eight-byte slot and a REGISTER PAIR. Built from the
      * width of each value's DEFINING instruction, which is not the same
@@ -139,7 +139,7 @@ struct t_fn {
     /* A function that cannot return -- no IR_RET, no tail call: an RTOS
      * task's for (;;), a scheduler's start, a reset handler. No caller
      * is ever resumed, so nothing it would restore is saved: no push, no
-     * vpush, no epilogue -- only the frame. Not under -g, where a
+     * vpush, no epilogue -- only the frame. Not at -O0 or -Og, where a
      * debugger's backtrace reads the saved lr, and not for a variadic
      * function, whose register save area is a push. */
     int noret;
@@ -265,7 +265,7 @@ void tcg_cmse_check_call(const struct ir_func *fn, const struct ir_ins *i,
 
 /* One function, ARMv6-M: the counterpart of codegen.c's gen_func. */
 void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
-                 int want_debug);
+                 int keep_vars);
 /* Does this instruction become a call on ARMv6-M where it is not one on
  * ARMv7-M (a divide, a 64-bit multiply, a block copy, an atomic)? */
 int v6_op_calls_helper(const struct ir_ins *i);

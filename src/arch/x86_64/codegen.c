@@ -20,10 +20,11 @@
 #include "../../driver/remark.h"
 #include "../../driver/util.h"
 
-/* -g: when set, DWARF wants each source variable at a distinct stack location,
- * so local-slot coalescing is disabled. Defined here (used by coalesce_locals);
- * codegen_unit sets it from want_debug. Also read by the line-table pass. */
-static int g_want_debug;
+/* -O0 and -Og (target_keep_vars): every source variable has a stack
+ * location of its own, where a debugger reads it, so local-slot
+ * coalescing is off. Never because of -g, which changes no code.
+ * Defined here (used by coalesce_locals); codegen_unit sets it. */
+static int g_keep_vars;
 
 /* K13 — temporary stack-slot coalescing. At -O0 every temp (vreg >= nvars)
  * otherwise gets its own 8-byte slot, never reused, so a deep call chain's
@@ -883,7 +884,7 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
 {
     int n = fn->nvars;
     int *slot = xmalloc((size_t)(n ? n : 1) * sizeof *slot);
-    if (n == 0 || g_want_debug || g_has_cgoto || !fn->var_scope_lo) {
+    if (n == 0 || g_keep_vars || g_has_cgoto || !fn->var_scope_lo) {
         for (int i = 0; i < n; i++) slot[i] = i;   /* one slot each */
         *nslots_out = n;
         return slot;
@@ -967,12 +968,12 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
  * length of the call -- gcc and clang use it as the parameter's home, and
  * so does this: the prologue used to copy it into the frame eight bytes
  * at a time, 168 bytes for every EmbLinkOs widget call's EmProps. Not
- * under -g, where its DWARF home is a frame offset, nor on Win64, which
+ * at -O0 and -Og, where its DWARF home is a frame offset, nor on Win64, which
  * passes such an aggregate by reference. */
 static int x86_param_home_incoming(const struct func *f, int p)
 {
     enum arg_class cls[2];
-    if (target_win64_abi() || g_want_debug || !f ||
+    if (target_win64_abi() || g_keep_vars || !f ||
         p < 0 || p >= f->nparams || !f->param_tys[p])
         return 0;
     return f->param_tys[p]->kind == TY_STRUCT &&
@@ -1002,7 +1003,7 @@ static int *x86_inplace_locals(struct ir_func *fn)
 {
     struct func *f = fn->src;
     int nv = fn->nvregs, nvars = fn->nvars;
-    if (!g_regalloc || g_want_debug || fn->has_alloca || target_win64_abi() ||
+    if (!g_regalloc || g_keep_vars || fn->has_alloca || target_win64_abi() ||
         !f || nvars == 0 || nv == 0)
         return NULL;
     int *res = NULL;
@@ -1161,12 +1162,12 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
      * could live in a register: the other half of slot_dead's question,
      * and what SROA leaves behind once a split aggregate is mentioned
      * nowhere (regalloc.h). */
-    char *lref = ra_locals_referenced(fn, g_want_debug);
+    char *lref = ra_locals_referenced(fn, g_keep_vars);
     int *ssize = xcalloc((size_t)(nls ? nls : 1), sizeof *ssize);
     int *salign = xcalloc((size_t)(nls ? nls : 1), sizeof *salign);
     for (int i = 0; i < fn->nvars; i++) {
         int s = lslot[i];
-        if (!lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_want_debug))
+        if (!lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_keep_vars))
             continue;               /* in a register, or named nowhere at all */
         if (inplace && inplace[i] >= 0)
             continue;               /* in the outgoing area: placed below */
@@ -1205,7 +1206,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         soff[s] = -running;
     }
     for (int i = 0; i < fn->nvars; i++)
-        disp[i] = !lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_want_debug) ? DEAD_SLOT_OFF
+        disp[i] = !lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_keep_vars) ? DEAD_SLOT_OFF
                                                     : soff[lslot[i]];
     /* A value with an FP home has no slot either, and saying so out loud
      * is how the paths that do not know about the class get found. */
@@ -1289,7 +1290,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
                     shared = b != a && disp[b] == disp[a];
                 if (shared) continue;
             }
-            if (g_want_debug && d < fn->nvars) continue;  /* its DWARF home */
+            if (g_keep_vars && d < fn->nvars) continue;  /* its DWARF home */
             disp[d] = disp[a];
         }
         free(nwrite); free(taken);
@@ -1432,7 +1433,7 @@ static int br_short(void)
     return g_short && ord < g_nshort && g_short[ord];
 }
 
-/* g_want_debug (the -g flag) is declared near the top of the file — it is read
+/* g_keep_vars (-O0 and -Og) is declared near the top of the file — it is read
  * by coalesce_locals, which appears before this point. */
 
 /* -mno-sse: never emit an SSE/xmm instruction. A kernel built before it turns
@@ -3127,11 +3128,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
     /* -g: expose each source variable's frame slot (rbp-relative) so the
      * DWARF emitter can write DW_OP_fbreg. sd is indexed by vreg; params and
      * locals are vregs [0, nvars), which is what dbgvars reference. */
-    if (g_want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = sd[v];
+            fn->var_off[v] = sd[v] == DEAD_SLOT_OFF ? IR_VAR_NO_LOC
+                           : ra_var_home(fn, v, 1, sd[v]);
     }
 
     /* ---- can this function do without a frame entirely? ----------------
@@ -3154,7 +3156,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * registers: four or fewer, each an ordinary integer or pointer.
      * That is the SysV and the Win64 rule at once. */
     int frameless = g_regalloc && frame == 0 && nsave == 0 &&
-                    !fn->has_alloca && !f->is_varargs && !g_want_debug &&
+                    !fn->has_alloca && !f->is_varargs && !g_keep_vars &&
                     sret_slot == 0 && f->nparams <= 4;
     /* A SIBLING call is not a call here: it leaves rsp exactly as it
      * found it and jumps, and the callee sees the stack our caller
@@ -3204,7 +3206,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     g_pushonly = g_pad = 0;
     x86_no_rbp = 0;              /* the prologue below may use rbp */
     if (!frameless && g_regalloc && !fn->has_alloca && !f->is_varargs &&
-        !g_want_debug && sret_slot == 0 && f->nparams <= 4 && !fn->neh &&
+        !g_keep_vars && sret_slot == 0 && f->nparams <= 4 && !fn->neh &&
         !target_win64_abi() && target_fmt_get() == TGT_FMT_ELF &&
         fn->scratch_bytes == 0 && fn->outgoing_bytes == 0) {
         int calls = 0;
@@ -3340,7 +3342,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * via one parallel move — no home-slot store + reload. Debug builds keep the
      * slots (DWARF fbreg reads them); variadic keeps the current handling (the
      * arg registers are already spilled to the save area). */
-    int pmove = g_regalloc && g_loc && !g_want_debug && !f->is_varargs;
+    int pmove = g_regalloc && g_loc && !g_keep_vars && !f->is_varargs;
     int pmv_src[MAX_PARAMS], pmv_dst[MAX_PARAMS], npmv = 0;
     /* A STACK-passed parameter whose home is a register is loaded after
      * the shuffle below, not during the loop that collects it.
@@ -3683,7 +3685,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * offset this instruction's code begins at (the switch below emits
          * it). Multiple IR ops from one statement share a line and collapse
          * to a single row; ops with no line (0) inherit the last row. */
-        if (g_want_debug && i->line) {
+        if (target_debug_info() && i->line) {
             struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                               : (struct ir_line *)0;
             if (last && last->off == text->len) {
@@ -5989,11 +5991,11 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
                   struct extcall **ext, int *next,
                   struct strsite **strs, int *nstrs,
                   struct gsite **gs, int *ngs,
-                  struct fsite **fs, int *nfs, int want_debug, int optimize,
+                  struct fsite **fs, int *nfs, int keep_vars, int optimize,
                   int no_sse, int regalloc)
 {
     struct sites st = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    g_want_debug = want_debug;
+    g_keep_vars = keep_vars;
     /* -O2 turns on register allocation; the RAX residency cache runs alongside
      * it (keyed on vreg, so it also elides reloads of register-resident values —
      * the store-then-reload round-trips). -O0/-O1 are unchanged (regalloc off),

@@ -624,18 +624,42 @@ for fl in -Werror=implicit-function-declaration -Wimplicit-function-declaration;
 done
 echo "-Werror=implicit-function-declaration: an error, as it always was"
 
-# -Og is -O1 and -Ofast is -O3 (no fast-math): the same object.
+# -Og is -O1 with every source variable kept in its slot: it optimizes
+# (a smaller .text than -O0's), and under -g no variable is optimized
+# out. -Ofast is -O3 (no fast-math): the same object.
+cat > "$out/og.c" <<'OGEOF'
+int tick(void);
+int og(int n)
+{
+    int a = n * 3;
+    int b = a + tick();
+    int c = b - n;
+    return c * 2 + 0 * a;
+}
+OGEOF
+DWD=${EMBCC_LLVM_DWARFDUMP:-llvm-dwarfdump}
 for t in thumbv7em-none-eabi x86_64-elf; do
-    "$EMBCC" --target=$t -Og -c "$out/inl.c" -o "$out/og.o" &&
-    "$EMBCC" --target=$t -O1 -c "$out/inl.c" -o "$out/o1.o" &&
-    cmp -s "$out/og.o" "$out/o1.o" || fail "$t: -Og is not -O1"
+    "$EMBCC" --target=$t -Og -g -c "$out/og.c" -o "$out/og.o" &&
+    "$EMBCC" --target=$t -O0 -c "$out/og.c" -o "$out/o0.o" ||
+        fail "$t: og.c does not compile at -Og -g or -O0"
+    tog=$("$OD" -h "$out/og.o" | awk '$2 == ".text" { print $3 }')
+    to0=$("$OD" -h "$out/o0.o" | awk '$2 == ".text" { print $3 }')
+    [ -n "$tog" ] && [ -n "$to0" ] &&
+        [ "$(printf '%d' "0x$tog")" -lt "$(printf '%d' "0x$to0")" ] ||
+        fail "$t: -Og's .text (0x$tog bytes) is not smaller than -O0's (0x$to0)"
+    if command -v "$DWD" >/dev/null 2>&1; then
+        nloc=$("$DWD" --debug-info "$out/og.o" | grep -c 'DW_AT_location	(DW_OP_fbreg')
+        nempty=$("$DWD" --debug-info "$out/og.o" | grep -c 'DW_AT_location	(<empty>)')
+        [ "$nloc" -eq 4 ] && [ "$nempty" -eq 0 ] ||
+            fail "$t: -Og -g locates $nloc of n, a, b, c in slots ($nempty optimized out)"
+    fi
     "$EMBCC" --target=$t -Ofast -c "$out/inl.c" -o "$out/of.o" &&
     "$EMBCC" --target=$t -O3 -c "$out/inl.c" -o "$out/o3.o" &&
     cmp -s "$out/of.o" "$out/o3.o" || fail "$t: -Ofast is not -O3"
 done
 "$EMBCC" --target=x86_64-elf -Ofast -ffast-math --dump-predef |
     grep -q __FAST_MATH__ && fail "-ffast-math defined __FAST_MATH__"
-echo "-Og is -O1, -Ofast is -O3, and -ffast-math defines no __FAST_MATH__"
+echo "-Og optimizes and keeps every variable, -Ofast is -O3, and -ffast-math defines no __FAST_MATH__"
 
 # ---- GCC flags a real embedded build line passes --------------------------
 # -march=/-mtune= on a Cortex-M (CMake toolchain files), the CubeMX

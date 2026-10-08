@@ -849,8 +849,9 @@ choices in IR generation and in the backends. `-Oz` is the same as
 
 ### `-Og`
 
-The same as `-O1`: the level that removes work without reorganizing the
-program.
+Optimize for debugging: `-O1`, with every source variable kept in its
+stack slot, so a debugger reads each one where the debug information
+says it is. See [Debugging](debugging.md#optimized-code).
 
 ### `-Ofast`
 

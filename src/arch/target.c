@@ -80,6 +80,11 @@ void target_set(enum target_arch a) { g_arch = a; }
 
 static int g_opt_size;
 void target_set_opt_size(int on) { g_opt_size = on; }
+static int g_keep_vars, g_debug_info;
+void target_set_keep_vars(int on) { g_keep_vars = on ? 1 : 0; }
+int  target_keep_vars(void)       { return g_keep_vars; }
+void target_set_debug_info(int on) { g_debug_info = on ? 1 : 0; }
+int  target_debug_info(void)       { return g_debug_info; }
 int  target_opt_size(void)       { return g_opt_size; }
 
 const char *target_default_name(void)

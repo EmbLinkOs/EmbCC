@@ -198,7 +198,7 @@ struct rv_fn {
      * skip_next tells the dispatch loop the branch is already out. */
     int *usecnt;
     int skip_next;
-    int want_debug;
+    int keep_vars;
     struct ir_func *fn;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when the allocator did not run (-O0/-O1),
@@ -578,7 +578,7 @@ static const struct ra_target RISCV_RA = {
 /* -O2 and -Os: the allocator is on. */
 static int g_rv_regalloc;
 /* -O0: the allocator runs for the temporaries of each expression only,
- * every source variable pinned to its slot as under -g; see thumb's
+ * every source variable pinned to its slot as at -Og; see thumb's
  * g_t_o0. */
 static int g_rv_o0;
 
@@ -1208,7 +1208,7 @@ static void layout(struct rv_fn *F)
      * was 2384 bytes at RV64 against 128 at RV32, and FreeRTOS's timer
      * task overflowed a 2 KB stack. Then locals, small ones
      * first; one nothing names needs none (ra_locals_referenced), nor one
-     * in a register (ra_slot_dead; under -g every local keeps its slot). */
+     * in a register (ra_slot_dead; at -O0 and -Og every local keeps its slot). */
     {
         int nv = fn->nvregs, npool = 0, has_cgoto = 0;
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
@@ -1249,14 +1249,14 @@ static void layout(struct rv_fn *F)
         free(loc2);
     }
     {
-        char *lref = ra_locals_referenced(fn, F->want_debug);
+        char *lref = ra_locals_referenced(fn, F->keep_vars);
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size = fn->locals[v].size ? fn->locals[v].size : F->w;
                 int align = fn->locals[v].user_align ? fn->locals[v].user_align
                           : fn->locals[v].align ? fn->locals[v].align : F->w;
                 if (in_reg(F, v) || in_freg(F, v) || !lref[v] ||
-                    ra_slot_dead(fn, F->loc, F->floc, v, F->want_debug))
+                    ra_slot_dead(fn, F->loc, F->floc, v, F->keep_vars))
                     continue;
                 if ((size > 2 * F->w) != pass)
                     continue;
@@ -4555,7 +4555,7 @@ static void gen_ins(struct rv_fn *F, int n)
     /* -g: a line-table row wherever the source line changes, as the
      * other backends record them. t->len is where this instruction's
      * code begins. */
-    if (F->want_debug && F->fn->ins[n].line) {
+    if (target_debug_info() && F->fn->ins[n].line) {
         struct ir_func *dfn = F->fn;
         long line = dfn->ins[n].line;
         struct ir_line *last = dfn->nlines ? &dfn->lines[dfn->nlines - 1]
@@ -6106,7 +6106,7 @@ static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed);
  * returned from calls and returned by this function, and its
  * floating-point locals -- but not a local any instruction reads or
  * writes narrower than itself (its bytes are taken a word at a time), nor
- * one under -g or -O0, which keep every source variable in its slot. None
+ * one at -O0 or -Og, which keep every source variable in its slot. None
  * of it is needed for correctness: a value outside the class is reached
  * through rd/wr and fsrc/fdone wherever it lives. A vreg asked for at two
  * widths is left out. */
@@ -6401,7 +6401,7 @@ static const struct ra_target RISCV_FRA = {
 static int g_rv_lowregs = 1;
 
 static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
-                     int xlen, int want_debug)
+                     int xlen, int keep_vars)
 {
     struct func *f = fn->src;
     struct rv_fn F;
@@ -6413,7 +6413,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * version of this change did before the memset went in. */
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.xlen = xlen; F.w = xlen / 8;
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.relax = NULL; F.nrelax = 0;
@@ -6453,15 +6454,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
          * ordinary integer register and must stay ELIGIBLE for the
          * integer pool. Passing the map would exclude every float from
          * both classes and leave it with nowhere to live. */
-        /* Under -g a source variable stays in its frame slot, so the
+        /* At -O0 and -Og a source variable stays in its frame slot, so the
          * DW_AT_location naming that slot is true (see regalloc.h). */
-        char *pin = want_debug || g_rv_o0 ? ra_debug_pin_vars(fn)
+        char *pin = keep_vars || g_rv_o0 ? ra_debug_pin_vars(fn)
                                           : (char *)0;
         /* With an FPU, the FP class's members are kept from both integer
          * passes (the pairs and the single registers) -- one value, one
          * home -- and handed to the FP pass after them. */
         char *fwm = NULL;
-        char *flt = rv_float_map(&F, &fwm, want_debug || g_rv_o0);
+        char *flt = rv_float_map(&F, &fwm, keep_vars || g_rv_o0);
         char *excl = pin;
         if (flt) {
             excl = xcalloc((size_t)fn->nvregs, 1);
@@ -6559,7 +6560,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* An interrupt handler returns with mret or sret, so it makes no
      * tail call: the callee would return with ret. */
     F.isr = ISR_KIND(f->is_isr);
-    if (g_rv_regalloc && !want_debug && !g_rv_o0 && !F.isr)
+    if (g_rv_regalloc && !keep_vars && !g_rv_o0 && !F.isr)
         for (i = 0; i < fn->nins; i++)
             if (rv_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -6622,7 +6623,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         F.va_first = -1;
         F.relax = relax;
         F.nrelax = nrelax;
-        if (want_debug) {
+        if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
         }
@@ -6651,11 +6652,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame
      * pointer (src/debug/dwarf.c). */
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)F.slot[v];
+            fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0, F.slot[v]);
     }
     f->code_off = t->len;
 
@@ -7080,7 +7081,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         F.slot = NULL;
         free(F.label_off);
         F.label_off = NULL;
-        if (want_debug) {
+        if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
         }
@@ -7228,7 +7229,7 @@ static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed)
  * and the shortest kept; the first of equal sizes wins.
  * EMBCC_RV_LOWREGS=0/1 forces that choice. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct rv_sites *st, int xlen, int want_debug)
+                          struct rv_sites *st, int xlen, int keep_vars)
 {
     int at = t->len, ncall = st->ncall, next = st->next, nstr = st->nstr,
         ng = st->ng, nf = st->nf, with;
@@ -7238,7 +7239,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
 
     /* A field's constant offset into its load or store (lw r, k(rn)) --
      * once, before any attempt, and before allocation. */
-    if (g_rv_regalloc && !want_debug && !g_rv_o0 &&
+    if (g_rv_regalloc && !keep_vars && !g_rv_o0 &&
         !getenv("EMBCC_NO_MEMOFF")) {
         char *w = xlen == 32 ? wide_map(fn) : NULL;
         ra_fold_memoff(fn, -2048, 2047, xlen / 8, xlen / 8, w, 0, 0);
@@ -7248,8 +7249,8 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     int lr_forced = lr && *lr;
     g_rv_pairs = 1;
     g_rv_lowregs = lr_forced ? atoi(lr) != 0 : 1;
-    if (!g_rv_regalloc || want_debug || g_rv_o0) {
-        gen_func(fn, t, st, xlen, want_debug);
+    if (!g_rv_regalloc || keep_vars || g_rv_o0) {
+        gen_func(fn, t, st, xlen, keep_vars);
         g_rv_lowregs = 1;
         return;
     }
@@ -7276,7 +7277,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         }
         g_rv_pairs = pv[a / nl];
         g_rv_lowregs = lv[a % nl];
-        gen_func(fn, t, st, xlen, want_debug);
+        gen_func(fn, t, st, xlen, keep_vars);
         with = t->len - at;
         last = a;
         if (best < 0 || with < bestlen) {
@@ -7289,7 +7290,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         st->ng = ng; st->nf = nf;
         g_rv_pairs = pv[best / nl];
         g_rv_lowregs = lv[best % nl];
-        gen_func(fn, t, st, xlen, want_debug);
+        gen_func(fn, t, st, xlen, keep_vars);
     }
     g_rv_pairs = 1;
     g_rv_lowregs = 1;
@@ -7361,7 +7362,7 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
                         struct gsite **gs, int *ngs,
-                        struct fsite **fs, int *nfs, int want_debug,
+                        struct fsite **fs, int *nfs, int keep_vars,
                         int optimize, int no_sse, int regalloc)
 {
     struct rv_sites st;
@@ -7388,7 +7389,7 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
             int ra = g_rv_regalloc;
             if (g_rv_o0 && ra_o0_too_big(&iu->funcs[n]))
                 g_rv_regalloc = 0;     /* see ra_o0_too_big */
-            gen_func_best(&iu->funcs[n], text, &st, xlen, want_debug);
+            gen_func_best(&iu->funcs[n], text, &st, xlen, keep_vars);
             g_rv_regalloc = ra;
         }
         for (int k = 0; k < st.ncall; k++) {

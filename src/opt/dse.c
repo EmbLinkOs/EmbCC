@@ -65,7 +65,7 @@ int pass_dse(struct ir_func *fn)
                 continue;
             }
             if (ins->op == IR_STVAR && !ins->vol && ins->dst >= 0 &&
-                ins->dst < nvars && !taken[ins->dst]) {
+                ins->dst < nvars && !taken[ins->dst] && !target_keep_vars()) {
                 int killed = 0;
                 for (int k = 0; k < ns; k++)
                     if (sa[k] == -1 - ins->dst && ssz[k] == ins->size) { killed = 1; break; }

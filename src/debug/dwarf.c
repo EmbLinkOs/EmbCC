@@ -129,6 +129,7 @@
 #define DW_LNS_copy           0x01
 #define DW_LNS_advance_pc     0x02
 #define DW_LNS_advance_line   0x03
+#define DW_LNS_set_prologue_end 0x0a
 /* Extended opcodes */
 #define DW_LNE_end_sequence   0x01
 #define DW_LNE_set_address    0x02
@@ -736,6 +737,22 @@ static void emit_line_func(struct dwarf_out *out, struct dbuf *b,
     db_addr(b, 0);
 
     long cur_addr = lo, cur_line = 1;
+    /* A row at the entry, with the line the function was declared on, as
+     * gcc and clang write it, and `prologue_end` on the first row of the
+     * body. A debugger sets `break f` past the prologue -- where the
+     * parameters are where the DWARF says -- by that flag, or, an older
+     * one, at the second row; with the body's first row as the first,
+     * gdb scanned the prologue itself and stopped a statement late. */
+    int entry_row = fn->line > 0 && (fn->nlines == 0 || fn->lines[0].off > lo);
+    if (entry_row) {
+        if (fn->line != cur_line) {
+            db_u8(b, DW_LNS_advance_line);
+            db_sleb(b, fn->line - cur_line);
+            cur_line = fn->line;
+        }
+        db_u8(b, DW_LNS_copy);
+    }
+    int body = 0;                        /* prologue_end is not yet said */
     for (int r = 0; r < fn->nlines; r++) {
         long off = fn->lines[r].off, line = fn->lines[r].line;
         if (line != cur_line) {
@@ -747,6 +764,12 @@ static void emit_line_func(struct dwarf_out *out, struct dbuf *b,
             db_u8(b, DW_LNS_advance_pc);
             db_uleb(b, (unsigned long)(off - cur_addr));
             cur_addr = off;
+        }
+        /* the body's first row: past the entry row, or the entry itself
+         * when there is no prologue */
+        if (!body && (off > lo || !entry_row)) {
+            db_u8(b, DW_LNS_set_prologue_end);
+            body = 1;
         }
         db_u8(b, DW_LNS_copy);           /* append a row at (cur_addr,cur_line) */
     }

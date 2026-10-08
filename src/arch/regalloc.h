@@ -237,11 +237,11 @@ int *ra_allocate_fp(struct ir_func *fn, const struct ra_target *t,
  * where it is (cg_float_vregs) -- but the contract is just that, and
  * the reason is the caller's.
  *
- * The embedded backends pass a map of SOURCE VARIABLES under -g, so a
- * variable stays in its frame slot and the DW_AT_location that names
- * that slot is true. Describing a variable that lives in a register
- * needs a location list, which is the larger feature; pinning it to
- * memory is exact, and -g is where the trade belongs. */
+ * The embedded backends pass a map of SOURCE VARIABLES at -O0 and -Og
+ * (keep_vars), so a variable stays in its frame slot and the
+ * DW_AT_location that names that slot is true. Never because of -g, which
+ * changes no code: optimized, a variable in a register is described as
+ * optimized out (ra_var_home) until location lists describe it there. */
 int *ra_allocate(struct ir_func *fn, const struct ra_target *t,
                  const char *wide, const char *fltmap,
                  int *used_out, int *nused_out);
@@ -314,6 +314,14 @@ void ra_reserve(const struct ra_range *r, int n);
  * malloc'd, one byte per vreg; the caller frees. */
 char *ra_debug_pin_vars(const struct ir_func *fn);
 
+/* -g: where source variable v lives in the code just generated, for its
+ * DW_AT_location -- `off`, the frame-base offset of the slot the backend
+ * gave it (`has_slot`), when the code keeps its value there, and
+ * IR_VAR_NO_LOC (<optimized out>) when it does not: a variable in a
+ * register, or one the optimizer turned into temporaries. */
+int ra_var_in_slot(const struct ir_func *fn, int v);
+int ra_var_home(const struct ir_func *fn, int v, int has_slot, long off);
+
 /* What a backend knows about slot assignment that this layer does not. */
 struct ra_slots {
     /* Per-vreg physical register, or NULL when the allocator is off. A
@@ -349,7 +357,7 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
  * the aggregate itself is mentioned nowhere, and it would otherwise
  * keep its full size on the frame for the rest of the function.
  *
- * `want_debug` makes every slot referenced: -g hands the debugger an
+ * `keep_vars` makes every slot referenced: -g hands the debugger an
  * address for each variable by name, whether the code reads it or not.
  * So do a varargs function (a va_list walks the incoming area) and an
  * alloca (it moves the stack out from under the layout), both read from
@@ -367,14 +375,14 @@ void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
 /* How many times each vreg is read; `cnt` holds fn->nvregs entries. */
 void ra_count_vreg_uses(const struct ir_func *fn, int *cnt);
 
-char *ra_locals_referenced(const struct ir_func *fn, int want_debug);
+char *ra_locals_referenced(const struct ir_func *fn, int keep_vars);
 
 /* Does local `v` need a stack slot at all, given the allocation `loc`?
  * Lifted here once BOTH backends wanted it (D-011): x86-64 had carried
  * it alone, and the aarch64 frame was paying for a slot behind every
  * value the allocator had already put in a register. */
 int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
-                 int v, int want_debug);
+                 int v, int keep_vars);
 
 /* The vreg an instruction WRITES, or -1. In the shared layer because
  * liveness is: it has to agree with what the backends actually store,

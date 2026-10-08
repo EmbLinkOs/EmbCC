@@ -108,7 +108,10 @@ int pass_dce(struct ir_func *fn)
     for (int n = 0; n < nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->op == IR_STVAR) {
-            if (i->vol)
+            /* -Og: a store to a source variable is how a debugger sees
+             * it (target_keep_vars), so it stays even when unread */
+            if (i->vol || (target_keep_vars() && i->dst >= 0 &&
+                           i->dst < fn->nvars))
                 live_ins[n] = 1;
             continue;                 /* otherwise its slot decides */
         }

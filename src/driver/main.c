@@ -371,6 +371,8 @@ static int opt_level;
  * emit nearly twice the code of -O2. So the size request travels
  * separately and opt_level stays an ordinary number. */
 static int opt_for_size;
+/* -Og: -O1 with every source variable kept in its frame slot */
+static int opt_for_debug;
 
 /* -mno-sse: never emit an SSE/xmm instruction (no varargs xmm spill, no SSE
  * struct/float lowering). A kernel built before it enables CR4.OSFXSR needs
@@ -1802,6 +1804,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     remarks_enable(want_remarks || why_decision != NULL);
     struct ir_unit *iu = irgen(u);
     time_mark("IR generation");
+    /* -O0 and -Og keep every source variable in its slot, the optimizer
+     * and the backends both; -g only describes what they did. */
+    target_set_keep_vars(opt_level == 0 || opt_for_debug);
+    target_set_debug_info(want_debug);
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
     time_mark("optimization");
     target_set_opt_size(opt_for_size);
@@ -2017,7 +2023,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     {
         const struct backend_desc *bd = backend_get(ta);
         bd->codegen(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs, &fs,
-                    &nfs, want_debug, opt_level >= 1, no_sse,
+                    &nfs, target_keep_vars(), opt_level >= 1, no_sse,
                     opt_level >= 1 ||
                     (bd->ra_at_o0 && !getenv("EMBCC_O0_NORA")));
     }
@@ -4876,6 +4882,7 @@ int main(int argc, char **argv)
             /* The LAST -O wins, size mode included: `-Os -O0` kept
              * optimizing for size at -O0, and `-Os -O2` was still -Os. */
             const char *lvl = argv[i] + 2;
+            opt_for_debug = 0;
             if (lvl[0] == '\0')
                 { opt_level = 1; opt_for_size = 0; }
             else if (lvl[0] == 's' && lvl[1] == '\0')
@@ -4884,13 +4891,14 @@ int main(int argc, char **argv)
                 { opt_level = lvl[0] - '0'; opt_for_size = 0; }
             else if (lvl[0] == 'z' && lvl[1] == '\0')
                 { opt_level = 2; opt_for_size = 1; }   /* -Oz is -Os here */
-            /* -Og, "optimize for debugging": the level that removes work
-             * without moving the program around, which here is -O1.
+            /* -Og, "optimize for debugging": -O1, with every source
+             * variable kept in its frame slot (target_keep_vars), so a
+             * debugger reads each one where the DWARF says it is.
              * -Ofast is -O3 and nothing more -- GCC adds -ffast-math,
              * which EmbCC does not do (see -ffast-math below), so no
              * result can differ from -O3's. */
             else if (!strcmp(lvl, "g"))
-                { opt_level = 1; opt_for_size = 0; }
+                { opt_level = 1; opt_for_size = 0; opt_for_debug = 1; }
             else if (!strcmp(lvl, "fast"))
                 { opt_level = 3; opt_for_size = 0; }
             else {
