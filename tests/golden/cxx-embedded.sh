@@ -3,7 +3,10 @@
 # by EmbCC with -fno-exceptions -fno-rtti for a Cortex-M3 (thumbv7m), a
 # Cortex-M4F with the hard-float convention (thumbv7em-none-eabihf), a
 # Cortex-M0 (thumbv6m), a Cortex-M33 (thumbv8m.main), a Cortex-A15 in ARM
-# state (armv7a-none-eabi) and RV32 (riscv32-unknown-elf), at -O0, -O1,
+# state (armv7a-none-eabi), RV32 (riscv32-unknown-elf), MIPS32 in both
+# byte orders and big-endian MIPS64 on Malta, PowerPC (ppce500), SPARC
+# (LEON3), RX (gdbsim), ColdFire (mcf5208evb), Xtensa (sim, de212) and
+# TriCore (the test board), at -O0, -O1,
 # -O2 and -Os, linked with the embedded
 # C++ runtime (tools/build-libcxx.sh), lib/libc and lib/rt, and run under
 # QEMU -- and each must print exactly what the same source prints built
@@ -27,10 +30,10 @@ command -v "$HOSTCXX" >/dev/null 2>&1 || HOSTCXX=c++
 command -v "$HOSTCXX" >/dev/null 2>&1 || {
     echo "skipped: no host C++ compiler for the reference (EMBCC_HOST_CXX)"
     exit 0; }
-command -v qemu-system-arm >/dev/null 2>&1 &&
-    command -v qemu-system-riscv32 >/dev/null 2>&1 || {
-    echo "skipped: qemu-system-arm and qemu-system-riscv32 are needed"
-    exit 0; }
+for q in arm riscv32 mipsel mips mips64 ppc sparc rx m68k xtensa tricore; do
+    command -v qemu-system-$q >/dev/null 2>&1 || {
+        echo "skipped: qemu-system-$q is needed"; exit 0; }
+done
 
 cd "$EMBCC_ROOT"
 out=tests/golden/out/cxx-embedded
