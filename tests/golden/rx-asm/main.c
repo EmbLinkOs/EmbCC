@@ -21,6 +21,8 @@ extern int asm_var;
 int asm_div(int a, int b);
 int asm_long_branch(int x);
 int asm_tail(int x);
+void asm_trash(void);           /* writes r1-r5, r14, r15 */
+void asm_trash_saved(void);     /* writes r6-r12 */
 
 int c_helper(int x) { return x * 7 + 1; }
 
@@ -152,6 +154,29 @@ static int call_from_asm(int x)
     return r + keep;
 }
 
+/* templates that call code changing registers the templates never name:
+ * the clobber lists alone must keep the live values out of them, and the
+ * callee-saved ones must be saved for this function's caller */
+static int clobber_call(int a, int b)
+{
+    int x = a * 3, y = b + 11, z = a ^ b, w = a - b, v = a + b * 2;
+    void (*f)(void) = asm_trash, (*g)(void) = asm_trash_saved;
+    __asm__ volatile("jsr %0" :: "r"(f)
+                     : "r1", "r2", "r3", "r4", "r5", "r14", "r15", "memory",
+                       "cc");
+    __asm__ volatile("jsr %0" :: "r"(g)
+                     : "r6", "r7", "r8", "r9", "r10", "r11", "r12", "memory",
+                       "cc");
+    return x + y * 2 + z * 3 + w * 5 + v * 7;
+}
+
+__attribute__((noinline)) static int around_clobber(int a)
+{
+    int p = a * 5, q = a * 7, r = a * 11, s = a * 13, t = a + 1, u = a ^ 99;
+    int m = clobber_call(a, 3);
+    return m + p + q * 2 + r * 3 + s * 4 + t * 5 + u * 6;
+}
+
 static int multi_out(int a, int *hi)
 {
     int lo, h;
@@ -195,6 +220,9 @@ int main(void)
     check(string_copy(buf, "hello, rx", 10), 10);
     check(buf[7], 'r');
     check(call_from_asm(6), 6 * 7 + 1 + 1006);
+    check(around_clobber(9), (9 * 3 + 14 * 2 + (9 ^ 3) * 3 + 6 * 5 + 15 * 7) +
+                             45 + 63 * 2 + 99 * 3 + 117 * 4 + 10 * 5 +
+                             (9 ^ 99) * 6);
     lo = multi_out(0x1234, &hi);
     check(lo, 0x12340);
     check(hi, 0x123);

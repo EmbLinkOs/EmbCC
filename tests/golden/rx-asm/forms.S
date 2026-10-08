@@ -147,6 +147,28 @@ _asm_long_branch:			; x * 2 + 1, over 33000 bytes
 1:	add #1, r1
 	rts
 
+	.global _asm_trash
+_asm_trash:				; every caller-saved register changed
+	mov.l #0x5a5a5a01, r1
+	mov.l #0x5a5a5a02, r2
+	mov.l #0x5a5a5a03, r3
+	mov.l #0x5a5a5a04, r4
+	mov.l #0x5a5a5a05, r5
+	mov.l #0x5a5a5a0e, r14
+	mov.l #0x5a5a5a0f, r15
+	rts
+
+	.global _asm_trash_saved
+_asm_trash_saved:			; r6-r12 changed (a template says so)
+	mov.l #0x6b6b6b06, r6
+	mov.l #0x6b6b6b07, r7
+	mov.l #0x6b6b6b08, r8
+	mov.l #0x6b6b6b09, r9
+	mov.l #0x6b6b6b0a, r10
+	mov.l #0x6b6b6b0b, r11
+	mov.l #0x6b6b6b0c, r12
+	rts
+
 	.data
 	.balign 4
 	.global _asm_var

@@ -185,7 +185,7 @@ if command -v "$QEMU" >/dev/null 2>&1; then
     "$EMBCC" --target=$T -O1 -c tests/harness/rx/boot.c -o "$out/boot.o" &&
     "$EMBCC" --target=$T -O1 -c tests/harness/rx/io.c -o "$out/io.o" ||
         { echo "the harness does not compile"; exit 1; }
-    want1="42 1 0 1 33488896 19088736 21 104 31 18 9 993 203 1291 10 114 1049 74560 291 35 42"
+    want1="42 1 0 1 33488896 19088736 21 104 31 18 9 993 203 1291 10 114 1049 1842 74560 291 35 42"
     want2="14 41 14 1352 1 142 10 30 103 100 33423360 8 8 -13986 7 22"
     asms=embcc
     [ -n "$GAS" ] && asms="embcc gnu"
