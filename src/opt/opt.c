@@ -291,8 +291,54 @@ struct defs {
     int *first, *next;
 };
 
+/* A copied instruction that keeps its original: its own argument array.
+ * argv is out of line (ir.h), so a struct copy shares it, and renaming
+ * the copy's operands -- what a pass that duplicates code does next --
+ * rewrote the original's too. Fuzz seed 5023: switch threading copied a
+ * block with a call and renamed the copy, and the original call passed
+ * the copy's values (all four boards, -O2). */
+static void ins_own_args(struct ir_ins *q)
+{
+    if (q->op == IR_CALL && q->argv)
+        q->argv = ir_args_copy(q->argv, q->nargs);
+}
+
+static int cmp_args_ptr(const void *a, const void *b)
+{
+    const struct ir_ins *x = *(const struct ir_ins *const *)a;
+    const struct ir_ins *y = *(const struct ir_ins *const *)b;
+    uintptr_t p = (uintptr_t)x->argv, r = (uintptr_t)y->argv;
+    return p < r ? -1 : p > r ? 1 : (x < y ? -1 : x > y);
+}
+
+/* ...and wherever a pass left two calls sharing one anyway, the second
+ * gets its own before anything renames it: every pass that rewrites
+ * operands starts from compute_defs, so this runs ahead of them all. The
+ * order is by address only to find the pairs; which of two equal arrays
+ * is copied does not change the program. */
+static void unshare_call_args(struct ir_func *fn)
+{
+    int nc = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_CALL && fn->ins[n].argv)
+            nc++;
+    if (nc < 2)
+        return;
+    struct ir_ins **pv = xmalloc((size_t)nc * sizeof *pv);
+    nc = 0;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_CALL && fn->ins[n].argv)
+            pv[nc++] = &fn->ins[n];
+    qsort(pv, (size_t)nc, sizeof *pv, cmp_args_ptr);
+    for (int k = 1; k < nc; k++)
+        if (pv[k]->argv == pv[k - 1]->argv)
+            ins_own_args(pv[k]);
+    free(pv);
+}
+
 static void compute_defs(struct ir_func *fn, struct defs *d)
 {
+    unshare_call_args(fn);
     d->cnt = xcalloc((size_t)fn->nvregs, sizeof *d->cnt);
     d->ins = xmalloc((size_t)fn->nvregs * sizeof *d->ins);
     d->first = d->next = NULL;
@@ -7925,6 +7971,7 @@ static int rotate_one(struct ir_func *fn)
                         continue;            /* the guard's value stands */
                     struct ir_ins *c = ib_push(&nb);
                     *c = fn->ins[bb[h].start + 1 + k];
+                    ins_own_args(c);
                     struct lcopy lc = { tbl, fn->nvregs, 0 };
                     each_read(c, lcopy_cb, &lc);
                     if (map[k] >= 0)
@@ -10458,6 +10505,7 @@ static void unr_copies(struct ir_func *fn, struct ibuf *nb,
             int t = def_target(&fn->ins[n2]);
             struct ir_ins *q = ib_push(nb);
             *q = fn->ins[n2];
+            ins_own_args(q);
             struct lcopy lc = { cur, nvr, 0 };
             each_read(q, lcopy_cb, &lc);
             /* A TEMP is renamed. A frame slot -- the dst of an stvar, a
@@ -11123,6 +11171,7 @@ static void swt_emit_copy(struct swt_emit *e, int g)
                 }
                 struct ir_ins *q = ib_push(e->nb);
                 *q = *o;
+                ins_own_args(q);
                 struct lcopy lcp = { e->ren, e->nv, 0 };
                 each_read(q, lcopy_cb, &lcp);
                 int t = def_target(o);
