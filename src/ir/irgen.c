@@ -1755,11 +1755,138 @@ static void atomic_width_ok(struct ir_func *fn, const struct type *t,
                             int line)
 {
     int max = target_get() == TARGET_AVR ? 8 : target_ptr_size();
+    if (ty_size(t) == 8 && target_atomic8_libcall())
+        return;                           /* a libatomic call (below) */
     if (ty_size(t) > max)
         diag_fatal(fn->file, line,
                    "an atomic access of %d bytes is not one access on this "
                    "target (it moves %d at once): the halves could be "
                    "split by an interrupt or another core", ty_size(t), max);
+}
+
+/* ---- eight-byte atomics on a 32-bit target --------------------------
+ *
+ * No 32-bit target here moves eight bytes atomically (ARMv7-M has no
+ * LDREXD; RV32's A has no .d forms), so an eight-byte atomic is a call to
+ * libatomic's sized entry points, as GCC's and clang's are:
+ *
+ *   u64  __atomic_load_8(const volatile void *p, int order)
+ *   void __atomic_store_8(volatile void *p, u64 v, int order)
+ *   u64  __atomic_exchange_8(volatile void *p, u64 v, int order)
+ *   bool __atomic_compare_exchange_8(volatile void *p, void *expected,
+ *                                    u64 desired, int success, int failure)
+ *   u64  __atomic_fetch_{add,sub,and,or,xor,nand}_8(volatile void *p,
+ *                                                  u64 v, int order)
+ *
+ * The orders are the C __ATOMIC_* values, evaluated as written; the
+ * operators on an _Atomic object and the __sync builtins pass seq_cst
+ * (5), as clang's do, and __sync_lock_release release (3). lib/rt's
+ * atomic8.c defines all of them, weak, by masking interrupts. */
+static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
+                     int fptemp);
+
+static int atomic8_lib(const struct type *t)
+{
+    return ty_size(t) == 8 && target_atomic8_libcall();
+}
+
+static struct type *lib_u64(void) { return ty_int_of_size(8, 1); }
+static struct type *lib_ptr(void) { return ty_ptr(ty_base(TY_VOID, 0)); }
+static struct type *lib_int(void) { return ty_base(TY_INT, 0); }
+
+/* The callee, declared once per name with the prototype above. */
+static struct func *libatomic_fn(const char *name, struct type *ret, int n,
+                                 struct type *const *tys)
+{
+    static struct func *made[16];
+    static int nmade;
+    for (int k = 0; k < nmade; k++)
+        if (strcmp(made[k]->name, name) == 0)
+            return made[k];
+    struct func *f = xcalloc(1, sizeof *f);
+    f->name = name;
+    f->seq = -1;
+    f->declared = 1;
+    f->ret_ty = ret;
+    f->nparams = n;
+    for (int k = 0; k < n; k++)
+        f->param_tys[k] = tys[k];
+    if (nmade < (int)(sizeof made / sizeof made[0]))
+        made[nmade++] = f;
+    return f;
+}
+
+/* name(vals...), each of type tys[k], returning ret: an ordinary call,
+ * through the expression a source call would have been */
+static int libatomic_call(struct ir_func *fn, const char *name,
+                          struct type *ret, int n, const int *vals,
+                          struct type *const *tys, int line)
+{
+    struct expr e, a[5];
+    memset(&e, 0, sizeof e);
+    memset(a, 0, sizeof a);
+    e.kind = EXPR_CALL;
+    e.line = line;
+    e.ty = ret;
+    e.callee = libatomic_fn(name, ret, n, tys);
+    e.nargs = n;
+    for (int k = 0; k < n; k++) {
+        a[k].kind = EXPR_NUM;
+        a[k].line = line;
+        a[k].ty = tys[k];
+        e.args[k] = &a[k];
+    }
+    return emit_call(fn, &e, vals, -1);
+}
+
+/* the order argument: v, or seq_cst when v < 0 */
+static int lib_order(struct ir_func *fn, int v)
+{
+    return v >= 0 ? v : emit_const(fn, 5, 4);
+}
+
+static int lib_load8(struct ir_func *fn, int addr, int ordv, int line)
+{
+    int v[2] = { addr, lib_order(fn, ordv) };
+    struct type *t[2] = { lib_ptr(), lib_int() };
+    return libatomic_call(fn, "__atomic_load_8", lib_u64(), 2, v, t, line);
+}
+
+static void lib_store8(struct ir_func *fn, int addr, int val, int ordv,
+                       int line)
+{
+    int v[3] = { addr, val, lib_order(fn, ordv) };
+    struct type *t[3] = { lib_ptr(), lib_u64(), lib_int() };
+    (void)libatomic_call(fn, "__atomic_store_8", ty_base(TY_VOID, 0), 3, v,
+                         t, line);
+}
+
+/* IR_XCHG, IR_XADD (opc '-' for a subtraction) or IR_ARMW's opc */
+static int lib_rmw8(struct ir_func *fn, enum ir_op op, int opc, int addr,
+                    int val, int ordv, int line)
+{
+    const char *name =
+        op == IR_XCHG ? "__atomic_exchange_8"
+      : op == IR_XADD ? (opc == '-' ? "__atomic_fetch_sub_8"
+                                    : "__atomic_fetch_add_8")
+      : opc == '&' ? "__atomic_fetch_and_8"
+      : opc == '|' ? "__atomic_fetch_or_8"
+      : opc == '^' ? "__atomic_fetch_xor_8"
+      : "__atomic_fetch_nand_8";
+    int v[3] = { addr, val, lib_order(fn, ordv) };
+    struct type *t[3] = { lib_ptr(), lib_u64(), lib_int() };
+    return libatomic_call(fn, name, lib_u64(), 3, v, t, line);
+}
+
+/* the bool: *addr == *expp, then *addr = des; else *expp = *addr */
+static int lib_cmpxchg8(struct ir_func *fn, int addr, int expp, int des,
+                        int sv, int fv, int line)
+{
+    int v[5] = { addr, expp, des, lib_order(fn, sv), lib_order(fn, fv) };
+    struct type *t[5] = { lib_ptr(), lib_ptr(), lib_u64(), lib_int(),
+                          lib_int() };
+    return libatomic_call(fn, "__atomic_compare_exchange_8",
+                          ty_base(TY_BOOL, 0), 5, v, t, line);
 }
 
 /* An atomic access is never merged with another or removed: vol says so to
@@ -1782,8 +1909,10 @@ static int avr_atomic_rmw_size(const struct type *t)
 }
 
 static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
-                       int line)
+                       int line, int ordv)
 {
+    if (atomic8_lib(t))
+        return lib_load8(fn, addr, ordv, line);
     if (avr_atomic_rmw_size(t)) {
         atomic_width_ok(fn, t, line);
         return atomic_rmw(fn, IR_ARMW, 'L', addr, emit_const(fn, 0, ty_w(t)), t);
@@ -1798,8 +1927,12 @@ static int atomic_load(struct ir_func *fn, int addr, const struct type *t,
 }
 
 static void atomic_store(struct ir_func *fn, int addr, int val,
-                         const struct type *t, int line)
+                         const struct type *t, int line, int ordv)
 {
+    if (atomic8_lib(t)) {
+        lib_store8(fn, addr, val, ordv, line);
+        return;
+    }
     if (avr_atomic_rmw_size(t)) {
         atomic_width_ok(fn, t, line);
         (void)atomic_rmw(fn, IR_XCHG, 0, addr, val, t);
@@ -1815,8 +1948,17 @@ static void atomic_store(struct ir_func *fn, int addr, int val,
 }
 
 static int atomic_rmw_mo(struct ir_func *fn, enum ir_op op, int opc,
-                         int addr, int val, const struct type *t, int mo)
+                         int addr, int val, const struct type *t, int mo,
+                         int ordv, int line)
 {
+    if (atomic8_lib(t))
+        return lib_rmw8(fn, op, opc, addr, val, ordv, line);
+    if (op == IR_XADD && opc == '-') {
+        /* x86 has lock xadd; subtraction adds the negation */
+        val = emit_bin(fn, IR_SUB, emit_const(fn, 0, ty_w(t)), val,
+                       ty_w(t), 1);
+        opc = 0;
+    }
     struct ir_ins *i = emit(fn);
     i->op = op;
     i->mo = mo;
@@ -1837,7 +1979,7 @@ static int atomic_rmw_mo(struct ir_func *fn, enum ir_op op, int opc,
 static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
                       int val, const struct type *t)
 {
-    return atomic_rmw_mo(fn, op, opc, addr, val, t, IR_MO_SEQ_CST);
+    return atomic_rmw_mo(fn, op, opc, addr, val, t, IR_MO_SEQ_CST, -1, 0);
 }
 
 /* expr.atomic_mo (1 + an __ATOMIC_* value, or 0) as an IR_MO_* */
@@ -1961,7 +2103,7 @@ static void atomic_scalar_ok(struct ir_func *fn, const struct expr *lv,
 static int atomic_read(struct ir_func *fn, struct expr *e)
 {
     atomic_scalar_ok(fn, e, "reading");
-    return atomic_load(fn, gen_addr(fn, e), e->ty, e->line);
+    return atomic_load(fn, gen_addr(fn, e), e->ty, e->line, -1);
 }
 
 /* x++, x--, ++x, --x: one fetch-and-add of the step */
@@ -1972,8 +2114,14 @@ static int atomic_incdec(struct ir_func *fn, struct expr *e)
     int w = ty_w(t);
     long step = (long)e->delta * (t->kind == TY_PTR ? ty_size(t->pointee) : 1);
     int addr = gen_addr(fn, e->lhs);
-    int old = atomic_result(fn, atomic_rmw(fn, IR_XADD, 0, addr,
-                                           emit_const(fn, step, w), t), t);
+    int old;
+    if (atomic8_lib(t) && step < 0)
+        old = atomic_rmw_mo(fn, IR_XADD, '-', addr, emit_const(fn, -step, w),
+                            t, IR_MO_SEQ_CST, -1, e->line);
+    else
+        old = atomic_result(fn, atomic_rmw_mo(fn, IR_XADD, 0, addr,
+                                              emit_const(fn, step, w), t,
+                                              IR_MO_SEQ_CST, -1, e->line), t);
     int nv = atomic_result(fn, emit_bin(fn, IR_ADD, old,
                                         emit_const(fn, step, w), w,
                                         ty_signed_int(t)), t);
@@ -2007,23 +2155,39 @@ static int atomic_compound(struct ir_func *fn, struct expr *e)
             v = gen_convert(fn, rv, e->cast_ty, lt);
         }
         int old;
-        if (opc) {
-            old = atomic_rmw(fn, IR_ARMW, opc, addr, v, lt);
-        } else {
-            int add = e->op == B_SUB
-                ? emit_bin(fn, IR_SUB, emit_const(fn, 0, w), v, w, 1) : v;
-            old = atomic_rmw(fn, IR_XADD, 0, addr, add, lt);
-        }
+        if (opc)
+            old = atomic_rmw_mo(fn, IR_ARMW, opc, addr, v, lt, IR_MO_SEQ_CST,
+                                -1, e->line);
+        else
+            old = atomic_rmw_mo(fn, IR_XADD, e->op == B_SUB ? '-' : 0, addr,
+                                v, lt, IR_MO_SEQ_CST, -1, e->line);
         old = atomic_result(fn, old, lt);
         enum ir_op o = opc == '&' ? IR_AND : opc == '|' ? IR_OR
                      : opc == '^' ? IR_XOR
                      : e->op == B_SUB ? IR_SUB : IR_ADD;
         return atomic_result(fn, emit_bin(fn, o, old, v, w, sign), lt);
     }
+    if (atomic8_lib(lt)) {
+        /* clang's loop: the expected value in a local (sema's
+         * e->var_index), which a failed compare-exchange refreshes */
+        int x = e->var_index;
+        emit_stvar(fn, x, atomic_load(fn, addr, lt, e->line, -1), lt);
+        int top = new_label(fn);
+        emit_label(fn, top);
+        int res = compound_value(fn, e, emit_ldvar(fn, x, lt), rv);
+        int ok = lib_cmpxchg8(fn, addr, local_addr(fn, x), res, -1, -1,
+                              e->line);
+        emit_brz(fn, ok, 4, top);
+        return res;
+    }
     int exp = new_temp(fn);
+    /* the load BEFORE the move that reads it: emitted the other way
+     * round, the first compare-and-swap compared against garbage and
+     * only the loop's retry made it right */
+    int first = atomic_load(fn, addr, lt, e->line, -1);
     struct ir_ins *m = emit(fn);
     m->op = IR_MOV;
-    m->a = atomic_load(fn, addr, lt, e->line);
+    m->a = first;
     m->dst = exp;
     m->w = w;
     int top = new_label(fn);
@@ -2211,6 +2375,16 @@ static int gen_atomic16(struct ir_func *fn, struct expr *e,
     }
 }
 
+/* A libatomic call's order argument k, evaluated as an int: -1 (seq_cst)
+ * where there is none */
+static int lib_order_arg(struct ir_func *fn, struct expr *e, int k)
+{
+    if (k >= e->nargs)
+        return -1;
+    return gen_convert(fn, gen_expr(fn, e->args[k]), e->args[k]->ty,
+                       ty_base(TY_INT, 0));
+}
+
 static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
                       int op)
 {
@@ -2234,46 +2408,54 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
             : sz == 2  ? ty_base(TY_SHORT, 1)
             : sz == 4  ? ty_base(TY_INT, 1)
             : sz == 16 ? ty_base(TY_INT128, 1)
-                       : ty_base(TY_LONG, 1);
+                       : ty_int_of_size(8, 1);     /* long is 4 on ILP32 */
     }
     int w = ty_w(obj), sign = ty_signed_int(obj);
     int mo = ir_mo(e->atomic_mo);
+    /* a libatomic call (atomic8_lib) passes the orders as written */
+    int lib = atomic8_lib(obj);
+    int is_sync = e->name && strncmp(e->name, "__sync_", 7) == 0;
     int addr = gen_expr(fn, e->args[0]);
     if (ty_size(obj) == 16)
         return gen_atomic16(fn, e, ak, op, obj, addr);
 
     switch (ak) {
     case AK_LOAD_N:
-        return atomic_load(fn, addr, obj, e->line);
-    case AK_STORE_N:
-        atomic_store(fn, addr, atomic_value(fn, e->args[1], obj), obj,
-                     e->line);
+        return atomic_load(fn, addr, obj, e->line,
+                           lib ? lib_order_arg(fn, e, 1) : -1);
+    case AK_STORE_N: {
+        int val = atomic_value(fn, e->args[1], obj);
+        atomic_store(fn, addr, val, obj, e->line,
+                     lib ? lib_order_arg(fn, e, 2) : -1);
         return -1;
+    }
     case AK_SYNC_LOCK_RELEASE: case AK_CLEAR:
-        atomic_store(fn, addr, emit_const(fn, 0, w), obj, e->line);
+        /* __sync_lock_release is a release store (3), as clang calls it */
+        atomic_store(fn, addr, emit_const(fn, 0, w), obj, e->line,
+                     !lib ? -1 : ak == AK_CLEAR ? lib_order_arg(fn, e, 1)
+                                                : emit_const(fn, 3, 4));
         return -1;
     case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS: {
         int val = atomic_value(fn, e->args[1], obj);
+        int ov = lib && !is_sync ? lib_order_arg(fn, e, 2) : -1;
         return atomic_result(fn, atomic_rmw_mo(fn, IR_XCHG, 0, addr, val,
-                                               obj, mo), obj);
+                                               obj, mo, ov, e->line), obj);
     }
     case AK_TEST_AND_SET: {
         int old = atomic_rmw_mo(fn, IR_XCHG, 0, addr, emit_const(fn, 1, 4),
-                                obj, mo);
+                                obj, mo, -1, e->line);
         return emit_cmp(fn, B_NE, old, emit_const(fn, 0, 4), 4, 0);
     }
     case AK_FETCH_OP: case AK_OP_FETCH: {
         int val = atomic_value(fn, e->args[1], obj);
+        int ov = lib && !is_sync ? lib_order_arg(fn, e, 2) : -1;
         int old;
-        if (op == '+' || op == '-') {
-            /* x86 has lock xadd for these; subtraction adds the negation */
-            int addend = op == '-'
-                ? emit_bin(fn, IR_SUB, emit_const(fn, 0, w), val, w, 1)
-                : val;
-            old = atomic_rmw_mo(fn, IR_XADD, 0, addr, addend, obj, mo);
-        } else {
-            old = atomic_rmw_mo(fn, IR_ARMW, op, addr, val, obj, mo);
-        }
+        if (op == '+' || op == '-')
+            old = atomic_rmw_mo(fn, IR_XADD, op == '-' ? '-' : 0, addr, val,
+                                obj, mo, ov, e->line);
+        else
+            old = atomic_rmw_mo(fn, IR_ARMW, op, addr, val, obj, mo, ov,
+                                e->line);
         if (ak == AK_FETCH_OP)
             return atomic_result(fn, old, obj);
         /* OP_fetch: the new value is the old one with the operation applied
@@ -2304,6 +2486,11 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         int des = ak == AK_CMPXCHG_N
             ? atomic_value(fn, e->args[2], obj)
             : emit_load(fn, gen_expr(fn, e->args[2]), obj);  /* by pointer */
+        if (lib) {
+            int sv = lib_order_arg(fn, e, 4);
+            return lib_cmpxchg8(fn, addr, exp, des, sv,
+                                lib_order_arg(fn, e, 5), e->line);
+        }
         struct ir_ins *i = emit(fn);
         i->op = IR_CMPXCHG;
         i->mo = mo;
@@ -2318,25 +2505,39 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
     }
     case AK_LOAD: {                                   /* *ret = atomic *p */
         int ret = gen_expr(fn, e->args[1]);
-        emit_store(fn, ret, atomic_load(fn, addr, obj, e->line), obj);
+        emit_store(fn, ret, atomic_load(fn, addr, obj, e->line,
+                                        lib ? lib_order_arg(fn, e, 2) : -1),
+                   obj);
         return -1;
     }
     case AK_STORE: {                                  /* atomic *p = *val */
         int vp = gen_expr(fn, e->args[1]);
-        atomic_store(fn, addr, emit_load(fn, vp, obj), obj, e->line);
+        int val = emit_load(fn, vp, obj);
+        atomic_store(fn, addr, val, obj, e->line,
+                     lib ? lib_order_arg(fn, e, 2) : -1);
         return -1;
     }
     case AK_EXCHANGE: {                               /* *ret = xchg(p, *val) */
         int vp = gen_expr(fn, e->args[1]);
         int rp = gen_expr(fn, e->args[2]);
-        int old = atomic_rmw_mo(fn, IR_XCHG, 0, addr, emit_load(fn, vp, obj),
-                                obj, mo);
+        int val = emit_load(fn, vp, obj);
+        int old = atomic_rmw_mo(fn, IR_XCHG, 0, addr, val, obj, mo,
+                                lib ? lib_order_arg(fn, e, 3) : -1, e->line);
         emit_store(fn, rp, old, obj);
         return -1;
     }
     case AK_SYNC_VAL_CAS: case AK_SYNC_BOOL_CAS: {
         int expv = atomic_value(fn, e->args[1], obj);
         int newv = atomic_value(fn, e->args[2], obj);
+        if (lib) {
+            /* expected through a local (sema's e->var_index), as clang's
+             * is: the call leaves the value seen there */
+            emit_stvar(fn, e->var_index, expv, obj);
+            int ok = lib_cmpxchg8(fn, addr, local_addr(fn, e->var_index),
+                                  newv, -1, -1, e->line);
+            return ak == AK_SYNC_BOOL_CAS ? ok
+                                          : emit_ldvar(fn, e->var_index, obj);
+        }
         struct ir_ins *i = emit(fn);
         i->op = IR_CAS;
         i->a = addr;
@@ -2673,6 +2874,227 @@ int gen_expr(struct ir_func *fn, struct expr *e)
     return r;
 }
 
+/* The IR_CALL for call expression e, whose arguments are already the
+ * values in args[] (and, through a pointer, whose callee is in fptemp):
+ * every argument classified here, where the types still exist. A call the
+ * compiler makes itself (atomic_libcall) builds an expression for it. */
+static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
+                     int fptemp)
+{
+    struct ir_ins *i = emit(fn);
+    i->op = IR_CALL;
+    i->callee = e->callee;
+    i->callee_sym = ir_sym_func(cur_unit, e->callee);
+    i->indirect = !e->callee;
+    i->a = fptemp;
+    i->call_varargs = e->callee ? e->callee->is_varargs
+                                : e->lhs->ty->pointee->is_varargs;
+    /* Only a direct call can name one: sema refuses to take the
+     * address of a function whose pcs is not the default. */
+    i->call_pcs = e->callee ? e->callee->pcs : 0;
+    /* (a direct call to a function never is one: the attribute is on
+     * the pointed-to function TYPE, and a pointer to it is only ever
+     * called through) */
+    i->call_cmse = !e->callee && e->lhs->ty->pointee &&
+                   e->lhs->ty->pointee->cmse_ns_call;
+    i->call_nfixed = e->callee ? e->callee->nparams
+                               : e->lhs->ty->pointee->nptypes;
+    i->sret_first = e->callee ? e->callee->sret_first
+                              : e->lhs->ty->pointee->sret_first;
+    i->nargs = e->nargs;
+    i->argv = ir_args_new(e->nargs);
+
+    /* Classify every argument here, where the types still exist;
+     * codegen only places what it is told. MEMORY-class arguments
+     * are assigned offsets in this call's outgoing area, and the
+     * function's frame reserves the widest such area. */
+    int stk = 0;
+    int ireg = 0, freg = 0;
+    /* a hidden return pointer consumes rdi before anything else —
+     * unless the struct comes back in x87 registers instead */
+    if (e->ty->kind == TY_STRUCT) {
+        enum arg_class rc[2];
+        if (ty_classify(e->ty, rc) == 0 &&
+            (target_get() == TARGET_AARCH64 || !ty_x87_ret(e->ty)))
+            ireg = 1;
+    }
+    for (int k = 0; k < e->nargs; k++) {
+        struct type *at = e->args[k]->ty;
+        struct ir_arg *ar = &i->argv[k];
+        ar->vreg = args[k];
+        ar->ty = at;
+        /* The ABI question answered here, not in the backend (§9.1). */
+        ar->hfa_size = 0;
+        ar->hfa_n = ty_hfa(at, &ar->hfa_size);
+        ar->byref = ty_aapcs64_byref(at);
+        ar->align = ty_align(at);
+        ar->nat_align = ty_natural_align(at);
+        ar->is_float = ty_is_float(at);
+        ar->is_int128 = at->kind == TY_INT128;
+        ar->is_struct = at->kind == TY_STRUCT;
+        ar->natural = ar->is_struct && struct_val_natural(e->args[k]);
+        ar->size = ty_size(at);
+        ar->nclass = ty_classify(at, ar->cls);
+        ar->stk_off = 0;
+        ar->on_stack = 0;
+
+        if (target_win64_abi()) {
+            /* Microsoft x64: one SLOT per argument, four of them,
+             * and the slot is the argument's POSITION. A double in
+             * slot 1 travels in xmm1 while an integer in slot 1
+             * travels in rdx -- the two classes share the numbering
+             * instead of each counting its own, which is what makes
+             * a per-class counter produce correct code for every
+             * argument list that happens to be all one class and
+             * wrong code for the first one that is not.
+             *
+             * `ireg` is that single counter here, and `freg` is
+             * kept equal to it so the backend may read either.
+             *
+             * A struct rides in its slot only at exactly 1, 2, 4 or
+             * 8 bytes. Anything else goes by reference, with a copy
+             * the CALLER makes -- the callee may write to it. */
+            ar->byref = win64_byref(at);
+            /* Three things this convention needs that are not
+             * written yet, each refused rather than passed the
+             * System V way under a Windows triple:
+             *
+             *   A struct of any size but 1/2/4/8 travels by
+             *   reference, with a copy the CALLER makes. Passing
+             *   it in registers instead puts its first eight bytes
+             *   where the callee expects a pointer.
+             *
+             *   __int128 and long double are handled here with rsi
+             *   and rdi as scratch, and those are CALLEE-saved on
+             *   Windows -- so the sequence would return to its
+             *   caller with two of the caller's registers changed. */
+            if (ar->byref) {
+                /* The copy is the caller's, in the caller's scratch
+                 * area -- 16-aligned, because a struct may contain
+                 * something that needs it and the callee is
+                 * entitled to assume the type's alignment. */
+                fn->scratch_bytes = (fn->scratch_bytes + 15) & ~15;
+                ar->copy_off = fn->scratch_bytes;
+                fn->scratch_bytes += (ar->size + 15) & ~15;
+            }
+            /* Two types whose Windows answer is not a variation on
+             * System V's, each refused with the reason that is
+             * actually true -- a refusal that misstates why is a
+             * smaller version of the same dishonesty as passing it
+             * wrongly.
+             *
+             *   __int128 arithmetic is lowered to libgcc helper
+             *   calls (__multi3, __floattidf) whose arguments this
+             *   backend places in System V's registers. On Windows
+             *   those helpers take Microsoft's, so the call would
+             *   be wrong before the type ever is.
+             *
+             *   long double is 16 bytes on MinGW and travels BY
+             *   REFERENCE, returned through a hidden pointer like a
+             *   large aggregate. EmbCC passes it on the stack by
+             *   value and returns it in st0, which is System V's
+             *   answer to a different question. */
+            if (ar->is_int128)
+                diag_fatal(fn->file, e->line,
+                           "passing __int128 is not supported for a "
+                           "Windows target yet: EmbCC lowers its "
+                           "arithmetic to libgcc helpers whose "
+                           "arguments it places in the System V "
+                           "registers");
+            if (at->kind == TY_LDOUBLE)
+                diag_fatal(fn->file, e->line,
+                           "passing long double is not supported for "
+                           "a Windows target yet: there it travels by "
+                           "reference and returns through a hidden "
+                           "pointer, and EmbCC passes it on the stack "
+                           "by value");
+            if (ireg >= 4) {
+                ar->on_stack = 1;
+                /* Stack arguments begin ABOVE the 32 bytes of
+                 * shadow space the caller owes the callee, so the
+                 * outgoing area starts at 32 rather than 0. */
+                if (stk < 32)
+                    stk = 32;
+                ar->stk_off = stk;
+                stk += 8;
+            }
+            ireg++;
+            freg = ireg;
+            continue;
+        }
+
+        /* SysV: an argument goes on the stack when its class has no
+         * registers left for ALL of its eightbytes — the decision is
+         * made here so codegen only follows it, and the two cannot
+         * drift apart. */
+        int ni = 0, nf = 0;
+        for (int q = 0; q < ar->nclass; q++) {
+            if (ar->cls[q] == CLASS_SSE)
+                nf++;
+            else if (ar->cls[q] != CLASS_NONE)
+                ni++;
+        }
+        if (ar->nclass == 0 || ireg + ni > 6 || freg + nf > 8) {
+            ar->on_stack = 1;
+            /* a slot is aligned to the argument's own alignment, at
+             * least 8 — 16 for a long double (SysV 3.2.3) */
+            stk = ty_align(at) > 8 ? (stk + 15) & ~15 : (stk + 7) & ~7;
+            ar->stk_off = stk;
+            stk += (ar->size + 7) & ~7;
+        } else {
+            ireg += ni;
+            freg += nf;
+        }
+    }
+    /* Every Microsoft x64 call owes its callee 32 bytes of shadow
+     * space, whether or not any argument went on the stack -- the
+     * callee may spill its four register arguments there without
+     * asking. A call with two arguments reserves it too. */
+    if (target_win64_abi() && stk < 32)
+        stk = 32;
+    if (stk > fn->outgoing_bytes)
+        fn->outgoing_bytes = stk;
+
+    if (e->ty->kind == TY_STRUCT) {
+        i->ret_x87 = target_get() == TARGET_AARCH64 ? 0
+                                                    : ty_x87_ret(e->ty);
+        i->retsize = ty_size(e->ty);
+        i->rety = e->ty;
+        i->ret_hfa_size = 0;
+        i->ret_hfa_n = ty_hfa(e->ty, &i->ret_hfa_size);
+        i->ret_byref = ty_aapcs64_byref(e->ty);
+        i->retnclass = ty_classify(e->ty, i->retcls);
+        fn->scratch_bytes = (fn->scratch_bytes + 7) & ~7;
+        i->scratch = fn->scratch_bytes;
+        fn->scratch_bytes += (i->retsize + 7) & ~7;
+    }
+    i->flt = ty_is_float(e->ty);
+    /* The return TYPE's own width and signedness, which `w` below is
+     * explicitly not: see ret_tybytes in ir.h for why a machine whose
+     * return value is a run of byte registers needs both. */
+    if (e->ty->kind != TY_VOID && e->ty->kind != TY_STRUCT) {
+        i->ret_tybytes = ty_size(e->ty);
+        i->ret_tysign = ty_is_integer(e->ty) && !e->ty->is_unsigned;
+    }
+    /* TriCore returns a pointer in A2 and anything else in D2, so its
+     * caller must know which (ir_ins.ret_ptr). Set there alone: no
+     * other target reads it, and no other IR prints it. */
+    if (target_get() == TARGET_TRICORE)
+        i->ret_ptr = e->ty->kind == TY_PTR;
+    /* An integer result comes back in the whole RETURN REGISTER, so
+     * the width here is the register's and not the type's: an `int`
+     * returned on x86-64 arrives in rax and codegen reads all of
+     * it. That register is four bytes on ILP32, where saying 8
+     * would ask a 32-bit machine for a value it has nowhere to
+     * put; a type that genuinely needs eight still gets it. */
+    i->w = i->flt ? ty_size(e->ty)
+         : e->ty->kind == TY_INT128 ? 16
+         : ty_w(e->ty) > target_ptr_size() ? ty_w(e->ty)
+         : target_ptr_size();
+    i->dst = new_temp(fn);
+    return i->dst;
+}
+
 static int gen_expr_inner(struct ir_func *fn, struct expr *e)
 {
     switch (e->kind) {
@@ -2736,7 +3158,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             return bf_load_v(fn, addr, e->memb, e->ty);
         if (atomic_lv(e)) {
             atomic_scalar_ok(fn, e, "reading");
-            return atomic_load(fn, addr, e->ty, e->line);
+            return atomic_load(fn, addr, e->ty, e->line, -1);
         }
         if (e->undecayed || e->ty->kind == TY_STRUCT)
             return addr; /* array member decays; nested struct is addr */
@@ -2755,7 +3177,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             atomic_scalar_ok(fn, e->lhs, "assigning to");
             int addr = gen_addr(fn, e->lhs);
             int v = gen_expr(fn, e->rhs);
-            atomic_store(fn, addr, v, e->lhs->ty, e->line);
+            atomic_store(fn, addr, v, e->lhs->ty, e->line, -1);
             return v;
         }
         if (e->ty->kind == TY_STRUCT) {
@@ -3422,218 +3844,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             fptemp = gen_expr(fn, e->lhs);
         for (int k = 0; k < e->nargs; k++)
             args[k] = gen_expr(fn, e->args[k]);
-        struct ir_ins *i = emit(fn);
-        i->op = IR_CALL;
-        i->callee = e->callee;
-        i->callee_sym = ir_sym_func(cur_unit, e->callee);
-        i->indirect = !e->callee;
-        i->a = fptemp;
-        i->call_varargs = e->callee ? e->callee->is_varargs
-                                    : e->lhs->ty->pointee->is_varargs;
-        /* Only a direct call can name one: sema refuses to take the
-         * address of a function whose pcs is not the default. */
-        i->call_pcs = e->callee ? e->callee->pcs : 0;
-        /* (a direct call to a function never is one: the attribute is on
-         * the pointed-to function TYPE, and a pointer to it is only ever
-         * called through) */
-        i->call_cmse = !e->callee && e->lhs->ty->pointee &&
-                       e->lhs->ty->pointee->cmse_ns_call;
-        i->call_nfixed = e->callee ? e->callee->nparams
-                                   : e->lhs->ty->pointee->nptypes;
-        i->sret_first = e->callee ? e->callee->sret_first
-                                  : e->lhs->ty->pointee->sret_first;
-        i->nargs = e->nargs;
-        i->argv = ir_args_new(e->nargs);
-
-        /* Classify every argument here, where the types still exist;
-         * codegen only places what it is told. MEMORY-class arguments
-         * are assigned offsets in this call's outgoing area, and the
-         * function's frame reserves the widest such area. */
-        int stk = 0;
-        int ireg = 0, freg = 0;
-        /* a hidden return pointer consumes rdi before anything else —
-         * unless the struct comes back in x87 registers instead */
-        if (e->ty->kind == TY_STRUCT) {
-            enum arg_class rc[2];
-            if (ty_classify(e->ty, rc) == 0 &&
-                (target_get() == TARGET_AARCH64 || !ty_x87_ret(e->ty)))
-                ireg = 1;
-        }
-        for (int k = 0; k < e->nargs; k++) {
-            struct type *at = e->args[k]->ty;
-            struct ir_arg *ar = &i->argv[k];
-            ar->vreg = args[k];
-            ar->ty = at;
-            /* The ABI question answered here, not in the backend (§9.1). */
-            ar->hfa_size = 0;
-            ar->hfa_n = ty_hfa(at, &ar->hfa_size);
-            ar->byref = ty_aapcs64_byref(at);
-            ar->align = ty_align(at);
-            ar->nat_align = ty_natural_align(at);
-            ar->is_float = ty_is_float(at);
-            ar->is_int128 = at->kind == TY_INT128;
-            ar->is_struct = at->kind == TY_STRUCT;
-            ar->natural = ar->is_struct && struct_val_natural(e->args[k]);
-            ar->size = ty_size(at);
-            ar->nclass = ty_classify(at, ar->cls);
-            ar->stk_off = 0;
-            ar->on_stack = 0;
-
-            if (target_win64_abi()) {
-                /* Microsoft x64: one SLOT per argument, four of them,
-                 * and the slot is the argument's POSITION. A double in
-                 * slot 1 travels in xmm1 while an integer in slot 1
-                 * travels in rdx -- the two classes share the numbering
-                 * instead of each counting its own, which is what makes
-                 * a per-class counter produce correct code for every
-                 * argument list that happens to be all one class and
-                 * wrong code for the first one that is not.
-                 *
-                 * `ireg` is that single counter here, and `freg` is
-                 * kept equal to it so the backend may read either.
-                 *
-                 * A struct rides in its slot only at exactly 1, 2, 4 or
-                 * 8 bytes. Anything else goes by reference, with a copy
-                 * the CALLER makes -- the callee may write to it. */
-                ar->byref = win64_byref(at);
-                /* Three things this convention needs that are not
-                 * written yet, each refused rather than passed the
-                 * System V way under a Windows triple:
-                 *
-                 *   A struct of any size but 1/2/4/8 travels by
-                 *   reference, with a copy the CALLER makes. Passing
-                 *   it in registers instead puts its first eight bytes
-                 *   where the callee expects a pointer.
-                 *
-                 *   __int128 and long double are handled here with rsi
-                 *   and rdi as scratch, and those are CALLEE-saved on
-                 *   Windows -- so the sequence would return to its
-                 *   caller with two of the caller's registers changed. */
-                if (ar->byref) {
-                    /* The copy is the caller's, in the caller's scratch
-                     * area -- 16-aligned, because a struct may contain
-                     * something that needs it and the callee is
-                     * entitled to assume the type's alignment. */
-                    fn->scratch_bytes = (fn->scratch_bytes + 15) & ~15;
-                    ar->copy_off = fn->scratch_bytes;
-                    fn->scratch_bytes += (ar->size + 15) & ~15;
-                }
-                /* Two types whose Windows answer is not a variation on
-                 * System V's, each refused with the reason that is
-                 * actually true -- a refusal that misstates why is a
-                 * smaller version of the same dishonesty as passing it
-                 * wrongly.
-                 *
-                 *   __int128 arithmetic is lowered to libgcc helper
-                 *   calls (__multi3, __floattidf) whose arguments this
-                 *   backend places in System V's registers. On Windows
-                 *   those helpers take Microsoft's, so the call would
-                 *   be wrong before the type ever is.
-                 *
-                 *   long double is 16 bytes on MinGW and travels BY
-                 *   REFERENCE, returned through a hidden pointer like a
-                 *   large aggregate. EmbCC passes it on the stack by
-                 *   value and returns it in st0, which is System V's
-                 *   answer to a different question. */
-                if (ar->is_int128)
-                    diag_fatal(fn->file, e->line,
-                               "passing __int128 is not supported for a "
-                               "Windows target yet: EmbCC lowers its "
-                               "arithmetic to libgcc helpers whose "
-                               "arguments it places in the System V "
-                               "registers");
-                if (at->kind == TY_LDOUBLE)
-                    diag_fatal(fn->file, e->line,
-                               "passing long double is not supported for "
-                               "a Windows target yet: there it travels by "
-                               "reference and returns through a hidden "
-                               "pointer, and EmbCC passes it on the stack "
-                               "by value");
-                if (ireg >= 4) {
-                    ar->on_stack = 1;
-                    /* Stack arguments begin ABOVE the 32 bytes of
-                     * shadow space the caller owes the callee, so the
-                     * outgoing area starts at 32 rather than 0. */
-                    if (stk < 32)
-                        stk = 32;
-                    ar->stk_off = stk;
-                    stk += 8;
-                }
-                ireg++;
-                freg = ireg;
-                continue;
-            }
-
-            /* SysV: an argument goes on the stack when its class has no
-             * registers left for ALL of its eightbytes — the decision is
-             * made here so codegen only follows it, and the two cannot
-             * drift apart. */
-            int ni = 0, nf = 0;
-            for (int q = 0; q < ar->nclass; q++) {
-                if (ar->cls[q] == CLASS_SSE)
-                    nf++;
-                else if (ar->cls[q] != CLASS_NONE)
-                    ni++;
-            }
-            if (ar->nclass == 0 || ireg + ni > 6 || freg + nf > 8) {
-                ar->on_stack = 1;
-                /* a slot is aligned to the argument's own alignment, at
-                 * least 8 — 16 for a long double (SysV 3.2.3) */
-                stk = ty_align(at) > 8 ? (stk + 15) & ~15 : (stk + 7) & ~7;
-                ar->stk_off = stk;
-                stk += (ar->size + 7) & ~7;
-            } else {
-                ireg += ni;
-                freg += nf;
-            }
-        }
-        /* Every Microsoft x64 call owes its callee 32 bytes of shadow
-         * space, whether or not any argument went on the stack -- the
-         * callee may spill its four register arguments there without
-         * asking. A call with two arguments reserves it too. */
-        if (target_win64_abi() && stk < 32)
-            stk = 32;
-        if (stk > fn->outgoing_bytes)
-            fn->outgoing_bytes = stk;
-
-        if (e->ty->kind == TY_STRUCT) {
-            i->ret_x87 = target_get() == TARGET_AARCH64 ? 0
-                                                        : ty_x87_ret(e->ty);
-            i->retsize = ty_size(e->ty);
-            i->rety = e->ty;
-            i->ret_hfa_size = 0;
-            i->ret_hfa_n = ty_hfa(e->ty, &i->ret_hfa_size);
-            i->ret_byref = ty_aapcs64_byref(e->ty);
-            i->retnclass = ty_classify(e->ty, i->retcls);
-            fn->scratch_bytes = (fn->scratch_bytes + 7) & ~7;
-            i->scratch = fn->scratch_bytes;
-            fn->scratch_bytes += (i->retsize + 7) & ~7;
-        }
-        i->flt = ty_is_float(e->ty);
-        /* The return TYPE's own width and signedness, which `w` below is
-         * explicitly not: see ret_tybytes in ir.h for why a machine whose
-         * return value is a run of byte registers needs both. */
-        if (e->ty->kind != TY_VOID && e->ty->kind != TY_STRUCT) {
-            i->ret_tybytes = ty_size(e->ty);
-            i->ret_tysign = ty_is_integer(e->ty) && !e->ty->is_unsigned;
-        }
-        /* TriCore returns a pointer in A2 and anything else in D2, so its
-         * caller must know which (ir_ins.ret_ptr). Set there alone: no
-         * other target reads it, and no other IR prints it. */
-        if (target_get() == TARGET_TRICORE)
-            i->ret_ptr = e->ty->kind == TY_PTR;
-        /* An integer result comes back in the whole RETURN REGISTER, so
-         * the width here is the register's and not the type's: an `int`
-         * returned on x86-64 arrives in rax and codegen reads all of
-         * it. That register is four bytes on ILP32, where saying 8
-         * would ask a 32-bit machine for a value it has nowhere to
-         * put; a type that genuinely needs eight still gets it. */
-        i->w = i->flt ? ty_size(e->ty)
-             : e->ty->kind == TY_INT128 ? 16
-             : ty_w(e->ty) > target_ptr_size() ? ty_w(e->ty)
-             : target_ptr_size();
-        i->dst = new_temp(fn);
-        return i->dst;
+        return emit_call(fn, e, args, fptemp);
     }
     }
     return -1; /* unreachable; every kind returns above */

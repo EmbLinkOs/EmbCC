@@ -329,6 +329,7 @@ int target_is_mips(void)
 }
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
+int target_atomic8_libcall(void) { return g_model[g_arch].ptr == 4; }
 int target_double_size(void)    { return g_model[g_arch].dbl; }
 int target_int_size(void)       { return g_model[g_arch].it; }
 /* XLEN is RISC-V's own name for the register width IN BITS -- 32 or 64,
