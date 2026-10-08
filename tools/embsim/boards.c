@@ -43,11 +43,31 @@ const struct board_desc boards[] = {
       { { 0, KB(256), MEM_FLASH, 0 }, { 0x20000000u, KB(16), MEM_RAM, 1 } },
       { { "nrf51-uart", 0x40002000u, 0x1000 }, PERIPHERALS },
       { { 0, 0, 0 } } },
+    /* QEMU's virt, RV32 or RV64 by the image: the reset ROM where the
+     * core starts, the test device that ends a run, the CLINT, the
+     * NS16550A, and the PLIC's space reading as zero */
+    { "virt", "riscv", "riscv", 0,
+      { { 0x80000000u, MB(128), MEM_RAM, 1 } },
+      { { "virt-rom", 0x1000, 0xf000 }, { "sifive-test", 0x100000, 0x1000 },
+        { "clint", 0x2000000, 0x10000 }, { "ns16550a", 0x10000000u, 0x100 },
+        { "zero", 0x0c000000u, 0x600000 } },
+      { { 0, 0, 0 } } },
+    /* QEMU's uno, the ATmega328P: 32 KiB of flash at 0, and the data
+     * space at 0x800000 (gdb's numbering): 2 KiB of SRAM at 0x100,
+     * USART0, Timer/Counter1, the I/O registers that keep their values,
+     * and nothing above RAMEND */
+    { "uno", "avr", "atmega328p", 0,
+      { { 0, KB(32), MEM_FLASH, 0 }, { 0x800100u, KB(2), MEM_RAM, 1 } },
+      { { "avr-usart", 0x8000c0u, 7 }, { "avr-timer16", 0x800080u, 12 },
+        { "avr-io", 0x800020u, 0xe0 }, { "zero", 0x800900u, 0xf700 } },
+      { { 0, 0, 0 } } },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
 const struct core_type cores[] = {
     { "cortex-m", cortexm_create },
+    { "riscv", riscv_create },
+    { "avr", avr_create },
 };
 const int ncores = (int)(sizeof cores / sizeof cores[0]);
 
@@ -78,6 +98,13 @@ static const struct dev_type dev_types[] = {
     { "scs", &scs_ops, scs_create },
     { "dwt", &dwt_ops, dwt_create },
     { "zero", &zero_ops, no_ctx },
+    { "virt-rom", &virt_rom_ops, virt_rom_create },
+    { "sifive-test", &sifive_test_ops, sifive_test_create },
+    { "clint", &clint_ops, clint_create },
+    { "ns16550a", &ns16550a_ops, ns16550a_create },
+    { "avr-io", &avr_io_ops, avr_io_create },
+    { "avr-usart", &avr_usart_ops, avr_usart_create },
+    { "avr-timer16", &avr_timer16_ops, avr_timer16_create },
 };
 
 const struct board_desc *board_find(const char *name)

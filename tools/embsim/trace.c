@@ -29,6 +29,8 @@ void trace_report(struct sim *s, const char *count_path, int stats)
             die("cannot write %s", count_path);
         fprintf(f, "%llu\n%llu\n", (unsigned long long)s->insns,
                 (unsigned long long)s->cycles);
+        if (s->count_skips)
+            fprintf(f, "%llu\n", (unsigned long long)s->skipped);
         fclose(f);
     }
     if (stats || s->state == END_LOCKUP || s->state == END_BUDGET)

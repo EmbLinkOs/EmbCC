@@ -185,6 +185,11 @@ struct cpu_ops {
     /* make exception or interrupt `n` pending (an ARM exception number:
      * 15 is SysTick, 16 + k is external interrupt k) */
     void (*interrupt)(struct cpu *c, int n);
+    /* the program counter's GDB number (`c ADDR` and `s ADDR` set it) */
+    int pc_regnum;
+    /* the ELF classes its images may be: 1 for ELFCLASS32, 2 for
+     * ELFCLASS64, or both (RISC-V) */
+    int elf_classes;
 };
 
 struct cpu {
@@ -261,6 +266,17 @@ struct sim {
     struct device *tick[SIM_TICKERS];
     int ntick;
     int counting;                   /* devices whose clock is running */
+    /* the image, as the loader found it: its entry point, whether it is
+     * ELFCLASS64, and its e_flags (a core with more than one width or
+     * ABI reads them at reset) */
+    u64 entry;
+    int elf64;
+    u32 elf_flags;
+    /* instructions a skip passed over (AVR's CPSE, SBRC, SBRS, SBIC and
+     * SBIS): not run, so not in `insns`; with count_skips, --count's
+     * file has them as a third line */
+    u64 skipped;
+    int count_skips;
 };
 
 /* build the board with its core (`model`, or 0 for the board's own) */
