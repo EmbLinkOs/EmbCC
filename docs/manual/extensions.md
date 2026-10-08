@@ -406,7 +406,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | Attribute | Effect |
 |---|---|
 | `alias("target")` | The function is another name for `target`, which must be a function defined in the same file and not itself an alias. The declaration with `alias` cannot have a body. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
-| `always_inline` | Lifts the inliner's size limit for calls to this function. It has effect only where the inliner runs; see [Inlining](optimization.md#inlining) |
+| `always_inline` | Lifts the inliner's size limit for calls to this function, at every level including `-O0`; see [Inlining](optimization.md#inlining) |
 | `constructor`, `destructor` | The function's address is placed in `.init_array` or `.fini_array`, for the startup code to call before `main` or at exit. On a bare-metal target the program's own startup code walks the tables; see [Startup code](embedded.md#startup-code-and-the-linkers-symbols). A `static` one is kept although nothing calls it. ELF only |
 | `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`-Wdeprecated-declarations`](diagnostics.md#-wdeprecated-declarations), on by default. The message text is not printed |
 | `embcc_sret` | EmbCC's own. On the first parameter, before its type, it marks that parameter as the address of the returned aggregate, passed where the target's ABI passes it. EmbCC's C++ lowering writes it; hand-written C has no need of it |

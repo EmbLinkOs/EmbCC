@@ -14315,6 +14315,13 @@ static int g_inline_o1;
 static int g_inline_declared_only;
 void opt_set_inline_declared_only(int on) { g_inline_declared_only = on; }
 
+/* -O0: only an always_inline callee, which GCC and clang inline at every
+ * level -- CMSIS's __STATIC_FORCEINLINE register accessors are written
+ * for it, and a header may count on the body being in the caller (one
+ * reading its caller's frame or return address). Nothing else changes:
+ * no pass after it runs, so -O0's code is otherwise the same. */
+static int g_inline_always_only;
+
 /* Inline eligible calls across the unit (a bounded fixpoint per caller). */
 static void inline_unit(struct ir_unit *iu)
 {
@@ -14344,6 +14351,9 @@ static void inline_unit(struct ir_unit *iu)
                     why = "callee-computes-in-__int128";
                 else if (in->callee->attr_noinline)
                     why = "callee-is-noinline";
+                else if (g_inline_always_only &&
+                         !in->callee->attr_always_inline)
+                    why = "not-always_inline-at-O0";
                 else if (in->callee->is_weak)
                     why = "callee-is-weak";   /* the link may replace it */
                 else if (g_inline_declared_only &&
@@ -17449,8 +17459,21 @@ void opt_run(struct ir_unit *iu, int level)
     g_opt_size = size;
     if (size)
         level = 2;
-    if (level < 1)
+    if (level < 1) {
+        int any = 0;
+        for (int f = 0; f < iu->nfuncs && !any; f++)
+            for (int i = 0; i < iu->funcs[f].nins && !any; i++)
+                any = iu->funcs[f].ins[i].op == IR_CALL &&
+                      iu->funcs[f].ins[i].callee &&
+                      iu->funcs[f].ins[i].callee->attr_always_inline;
+        if (any) {
+            g_inline_always_only = 1;
+            g_inline_o1 = 0;
+            inline_unit(iu);
+            g_inline_always_only = 0;
+        }
         return;
+    }
     /* -O1 is gcc's -O1: every value that can be is a register, and the
      * passes that only remove work run -- constants, dead stores, loop
      * invariants, branches made selects -- while the ones that trade

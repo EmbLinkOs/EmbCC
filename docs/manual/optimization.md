@@ -40,8 +40,10 @@ its stack slot.
 
 Do not optimize. This is the default.
 
-The IR optimizer does not run at all, so `-f` pass options have no effect
-at this level. Every source variable -- every local and parameter --
+The IR optimizer does not run, so `-f` pass options have no effect at
+this level. The one exception is the inliner, which copies in each call to
+an `always_inline` function and nothing else, as GCC and Clang do at
+`-O0`. Every source variable -- every local and parameter --
 lives in its stack slot and is stored there by every assignment, so it
 is in memory at all times, which is what a debugger wants (see
 [Debugging](debugging.md)).
@@ -178,7 +180,7 @@ the command line: `-fno-sccp -O2` and `-O2 -fno-sccp` are the same.
 | Attribute inference, read-only `static` propagation | | yes | yes | yes |
 | Register allocation, tail calls (code generator) | | yes | yes | yes |
 | `gcse`, `pre`, `tail-recursion`, `idiom` | | | yes | yes |
-| `inline` | | single caller or `always_inline` | yes | yes, budget 6 |
+| `inline` | `always_inline` only | single caller or `always_inline` | yes | yes, budget 6 |
 | `vectorize` | | | x86-64 only | |
 | `unroll`, `switch-thread` | | | yes | |
 | 16-byte function alignment (x86-64, AArch64) | yes | yes | yes | |
@@ -606,6 +608,8 @@ At `-O2` and `-Os` these also run:
 ## Inlining
 
 The inliner runs at `-O1` and above, before the per-function passes. At
+`-O0` it runs too, for `always_inline` functions only (the reason code
+for any other call is `not-always_inline-at-O0`). At
 `-O1` it inlines only a `static` function with a single caller and an
 `always_inline` function (the reason code for any other call is
 `not-a-sole-callee-at-O1`). Sizes are counted in EmbIR instructions, as
