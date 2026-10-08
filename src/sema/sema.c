@@ -5285,6 +5285,35 @@ static void check_func(struct unit *u, struct func *f)
     struct scope sc = { 0, 0, 0, 0 };
     g_cx_sc = &sc;       /* complex lowering adds its temps here */
 
+    /* An interrupt handler on RISC-V or MIPS: the hardware calls it, so
+     * there is no caller to pass arguments -- they would be read out of
+     * whatever the interrupted code left in a0 -- and nobody to receive a
+     * result, which would be written over the interrupted code's a0. GCC
+     * and clang ignore the attribute with a warning; ignoring it here
+     * would return with `ret` into the middle of the interrupted code, so
+     * both are refused. (AVR's backend refuses the same two itself.) */
+    if (f->is_isr && (target_get() == TARGET_RISCV32 ||
+                      target_get() == TARGET_RISCV64 ||
+                      target_get() == TARGET_MIPS32)) {
+        if (f->nparams || f->is_varargs)
+            sema_error_line(u, f->line,
+                "interrupt handler '%s' takes parameters: the hardware "
+                "calls it, so nothing passes them, and they would be read "
+                "out of whatever the interrupted code left in the argument "
+                "registers", f->name);
+        if (f->ret_ty->kind != TY_VOID)
+            sema_error_line(u, f->line,
+                "interrupt handler '%s' returns a value: the interrupt "
+                "return goes back to the interrupted instruction, and "
+                "nothing there receives it -- it must return void",
+                f->name);
+        if (target_get() == TARGET_MIPS32 && !ISR_KIND(f->is_isr))
+            sema_error_line(u, f->line,
+                "'%s' is keep_interrupts_masked but not an interrupt "
+                "handler: the modifier needs __attribute__((interrupt))",
+                f->name);
+    }
+
     for (int i = 0; i < f->nparams; i++) {
         if (scope_find(&sc, f->params[i]) >= 0)
             sema_error_line(u, f->line,
@@ -5549,6 +5578,18 @@ static void merge_decls(struct unit *u)
         /* naked on the prototype and not on the definition is how
          * FreeRTOS's ports write it */
         canon->is_naked |= f->is_naked;
+        /* An interrupt handler is one on any declaration -- a prototype
+         * without the attribute and a definition with it were compiled
+         * as an ordinary function, returning with `ret` -- and one kind:
+         * the return instruction depends on which. */
+        if (f->is_isr) {
+            if (canon->is_isr && canon->is_isr != f->is_isr)
+                sema_error_line(u, f->line,
+                           "'%s' is declared as a different kind of "
+                           "interrupt handler than on line %d", f->name,
+                           canon->line);
+            canon->is_isr = f->is_isr;
+        }
         canon->cmse_entry |= f->cmse_entry;
         f->absorbed = 1;
     }

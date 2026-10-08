@@ -208,6 +208,10 @@ int rv_patch_b_checked(struct code *c, int at, int target);
 
 void rv_jalr(struct code *c, int rd, int rs1, int off);
 void rv_ret(struct code *c);                    /* jalr zero, 0(ra) */
+/* An interrupt handler's return: mret (machine mode) or, with
+ * `supervisor`, sret -- SYSTEM instructions whose funct12 is 0x302 and
+ * 0x102, the same packer as every I-type, and never compressed. */
+void rv_xret(struct code *c, int supervisor);
 
 /* A call to a symbol the linker will resolve: `auipc ra, 0` + `jalr ra`,
  * the pair that ONE R_RISCV_CALL relocation patches. Returns the offset of

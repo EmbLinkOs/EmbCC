@@ -243,6 +243,14 @@ struct rv_fn {
     const signed char *relax;
     int nrelax;
     int nfix, capfix;
+    /* An interrupt handler (rv_isr_grow): ISR_INTERRUPT or ISR_SUPERVISOR,
+     * 0 for an ordinary function. isr_x and isr_f are the caller-saved
+     * registers it saves, as bit masks -- every one it writes, or all of
+     * them when it calls -- in isr_bytes at the top of the frame, from
+     * isr_at. */
+    int isr;
+    unsigned long isr_x, isr_f;
+    long isr_at, isr_bytes;
 };
 
 /* ---- the register allocator's view of this machine ---------------------
@@ -1300,7 +1308,9 @@ static void layout(struct rv_fn *F)
      * stack ones. Whatever padding the alignment needs lands below them,
      * where nothing depends on it. */
     {
-        int raw = F->leaf ? 0 : F->w;
+        /* An interrupt handler keeps ra with the other caller-saved
+         * registers it saves (isr_x), not in a slot of its own. */
+        int raw = F->leaf || F->isr ? 0 : F->w;
         long need = off + raw + (long)F->nsave * F->w
                   + (fn->is_varargs ? (long)RV_NARGREG * F->w : 0);
         F->frame = (need + STACK_ALIGN - 1) & ~(long)(STACK_ALIGN - 1);
@@ -1316,6 +1326,21 @@ static void layout(struct rv_fn *F)
          * needed none pays for none, which is what makes the
          * caller-saved-first preference order worth having. */
         F->save_at = F->ra_slot - (long)F->nsave * F->w;
+    }
+    /* An interrupt handler's saves, at the very top: sixteen-byte
+     * aligned, so nothing below moves with how many there are, and
+     * the first thing stored -- before anything is written. */
+    F->isr_at = F->frame;
+    F->isr_bytes = 0;
+    if (F->isr) {
+        int nx = 0, nf = 0;
+        for (int r = 0; r < 32; r++) {
+            nx += (int)(F->isr_x >> r & 1);
+            nf += (int)(F->isr_f >> r & 1);
+        }
+        F->isr_bytes = ((long)nx * F->w + (long)nf * (target_riscv_flen() / 8)
+                        + STACK_ALIGN - 1) & ~(long)(STACK_ALIGN - 1);
+        F->frame += F->isr_bytes;
     }
     F->va_first = -1;
 }
@@ -2969,6 +2994,260 @@ static void rv_restore(struct rv_fn *F)
             rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
         }
     }
+}
+
+/* ---- interrupt handlers ------------------------------------------------
+ *
+ * __attribute__((interrupt)) / interrupt("machine") / ("supervisor"), as
+ * GCC and clang define them. The trap arrives between two instructions
+ * of code that had values in every register, so the handler must leave
+ * every register as it found it -- not just the callee-saved ones an
+ * ordinary function keeps. The callee-saved ones are kept the ordinary
+ * way; the rest are saved and restored here:
+ *
+ *   - each caller-saved integer register the handler WRITES (ra, t0-t6,
+ *     a0-a7), and each floating-point register a call may clobber, any
+ *     part of (rv_isr_fcand);
+ *   - ALL of them, integer and floating point, when it calls anything:
+ *     the callee may use any of them and saves none. A runtime helper
+ *     (soft-float, a multiply on a part without M) is a call too.
+ *
+ * clang's rule, register for register (tests/golden/riscv-isr.sh checks
+ * the set against it), and it returns as clang does: mret, or sret for
+ * a supervisor-mode handler. fcsr is not saved, as by neither compiler.
+ *
+ * What a handler WRITES is read off the bytes it compiled to, not
+ * predicted: the scratch registers, the far-slot base, a large frame's
+ * size, an asm template's own registers are all written by code the
+ * allocator never sees, and a rule that listed them would be the
+ * thing that goes stale. gen_func emits the handler, decodes what its
+ * instructions write (rv_scan_writes), and emits it again saving those,
+ * until a pass writes nothing outside the set -- which the next pass
+ * changes nothing about, because the saves sit at the top of the frame
+ * and every slot the body addresses is below them.
+ *
+ * The handler is four-byte aligned whatever the C extension allows:
+ * mtvec and stvec take an address whose low two bits are the mode, so a
+ * two-aligned handler would be entered two bytes early. */
+
+/* The integer registers a call may clobber: ra, t0-t2, a0-a7, t3-t6. */
+static int rv_isr_xcand(int r)
+{
+    return r == RV_RA || (r >= RV_T0 && r <= RV_T2) ||
+           (r >= RV_A0 && r <= RV_A7) || r >= RV_T3;
+}
+
+/* The f registers a call may clobber any part of: ft0-ft11 and fa0-fa7,
+ * and all 32 when the ABI keeps fewer bits of fs0-fs11 than the
+ * registers hold (ilp32f on a D part, or a soft-float ABI with an FPU) --
+ * rv_fp_callee_saved's own rule. */
+static int rv_isr_fcand(int r)
+{
+    return !rv_fp_callee_saved(r);
+}
+
+/* The registers one instruction writes, or might: an encoding not
+ * recognised is taken to write its rd field in both files. */
+static void rv_writes32(unsigned long w, unsigned long *xw, unsigned long *fw)
+{
+    int rd = (int)(w >> 7) & 31;
+    switch (w & 0x7f) {
+    case 0x37: case 0x17: case 0x6f: case 0x67:     /* lui auipc jal jalr */
+    case 0x13: case 0x1b: case 0x33: case 0x3b:     /* OP(-IMM)(-32) */
+    case 0x03: case 0x2f:                           /* loads, AMOs */
+        *xw |= 1UL << rd;
+        break;
+    case 0x73:                                      /* csrr* (not *ret) */
+        if ((w >> 12 & 7) != 0)
+            *xw |= 1UL << rd;
+        break;
+    case 0x07: case 0x43: case 0x47: case 0x4b: case 0x4f:
+        *fw |= 1UL << rd;                           /* flw/fld, fmadd.. */
+        break;
+    case 0x53: {
+        int f5 = (int)(w >> 27) & 31;
+        /* compares, fcvt to an integer, fmv.x/fclass: an x register */
+        if (f5 == 0x14 || f5 == 0x18 || f5 == 0x1c)
+            *xw |= 1UL << rd;
+        else
+            *fw |= 1UL << rd;
+        break;
+    }
+    case 0x23: case 0x27: case 0x63: case 0x0f:     /* stores, branches */
+        break;
+    default:
+        *xw |= 1UL << rd;
+        *fw |= 1UL << rd;
+        break;
+    }
+}
+
+static void rv_writes16(unsigned h, int xlen, unsigned long *xw,
+                        unsigned long *fw)
+{
+    int f3 = (int)(h >> 13) & 7, rd = (int)(h >> 7) & 31;
+    int rdp = 8 + (int)((h >> 2) & 7), rdp9 = 8 + (int)((h >> 7) & 7);
+    switch (h & 3) {
+    case 0:
+        if (f3 == 0 || f3 == 2 || (f3 == 3 && xlen == 64))
+            *xw |= 1UL << rdp;                 /* addi4spn lw ld */
+        else if (f3 == 1 || f3 == 3)
+            *fw |= 1UL << rdp;                 /* fld flw */
+        else if (f3 == 4) {
+            *xw |= 1UL << rdp;
+            *fw |= 1UL << rdp;
+        }
+        break;                                 /* 5-7: stores */
+    case 1:
+        if (f3 == 1 && xlen == 32)
+            *xw |= 1UL << RV_RA;               /* c.jal */
+        else if (f3 <= 3)
+            *xw |= 1UL << rd;                  /* addi addiw li lui */
+        else if (f3 == 4)
+            *xw |= 1UL << rdp9;                /* the ALU group */
+        break;                                 /* 5-7: j beqz bnez */
+    default:
+        if (f3 == 0 || f3 == 2 || (f3 == 3 && xlen == 64))
+            *xw |= 1UL << rd;                  /* slli lwsp ldsp */
+        else if (f3 == 1 || f3 == 3)
+            *fw |= 1UL << rd;                  /* fldsp flwsp */
+        else if (f3 == 4) {
+            int rs2 = (int)(h >> 2) & 31;
+            if (rs2)
+                *xw |= 1UL << rd;              /* mv add */
+            else if ((h >> 12 & 1) && rd)
+                *xw |= 1UL << RV_RA;           /* jalr (jr writes none) */
+        }
+        break;                                 /* 5-7: stores to sp */
+    }
+}
+
+/* What the instructions in [from, to) of F's code write. A jump table's
+ * words are data and skipped. */
+static void rv_scan_writes(const struct rv_fn *F, int from, int to,
+                           unsigned long *xw, unsigned long *fw)
+{
+    const unsigned char *p = F->t->p;
+    int at = from;
+    while (at < to) {
+        int data = 0;
+        for (int k = 0; k < F->nfix && !data; k++)
+            data = F->fix[k].kind == FX_TAB && F->fix[k].at == at;
+        if (data) {
+            at += 4;
+            continue;
+        }
+        unsigned h = (unsigned)p[at] | (unsigned)p[at + 1] << 8;
+        if ((h & 3) != 3) {
+            rv_writes16(h, F->xlen, xw, fw);
+            at += 2;
+            continue;
+        }
+        rv_writes32((unsigned long)h |
+                    ((unsigned long)p[at + 2] | (unsigned long)p[at + 3] << 8)
+                    << 16, xw, fw);
+        at += 4;
+    }
+    *xw &= ~1UL;
+}
+
+/* After a pass: what must the handler save, from what it wrote? Returns
+ * 1 when that is more than this pass saved, and gen_func goes again. */
+static int rv_isr_grow(struct rv_fn *F)
+{
+    unsigned long xw = 0, fw = 0, x = 0, f = 0;
+    rv_scan_writes(F, F->fn->src->code_off, F->t->len, &xw, &fw);
+    /* A call -- in the IR, to a helper, or in an asm template, which
+     * writes ra -- clobbers whatever the callee likes. */
+    int calls = !F->leaf || (xw >> RV_RA & 1);
+    for (int r = 0; r < 32; r++) {
+        if (r && rv_isr_xcand(r) && (calls || (xw >> r & 1)))
+            x |= 1UL << r;
+        if (target_riscv_flen() && rv_isr_fcand(r) &&
+            (calls || (fw >> r & 1)))
+            f |= 1UL << r;
+    }
+    if (!(x & ~F->isr_x) && !(f & ~F->isr_f))
+        return 0;
+    F->isr_x |= x;
+    F->isr_f |= f;
+    return 1;
+}
+
+/* The saves (store) or the restores, at base + their offsets from sp:
+ * integer registers from the top down in register order, as clang lays
+ * them out, then the f registers at the full FLEN. */
+static void rv_isr_regs(struct rv_fn *F, long base, int store)
+{
+    struct code *t = F->t;
+    long off = base + F->isr_bytes;
+    int fl = target_riscv_flen();
+    for (int r = 1; r < 32; r++)
+        if (F->isr_x >> r & 1) {
+            off -= F->w;
+            if (store)
+                rv_store(t, r, RV_SP, (int)off, F->w, F->xlen);
+            else
+                rv_load(t, r, RV_SP, (int)off, F->w, 1, F->xlen);
+        }
+    for (int r = 0; r < 32; r++)
+        if (F->isr_f >> r & 1) {
+            off -= fl / 8;
+            if (store)
+                rv_fstore(t, r, RV_SP, (int)off, fl == 64);
+            else
+                rv_fload(t, r, RV_SP, (int)off, fl == 64);
+        }
+}
+
+/* sp += d, through t0 when d is past addi's reach: only ever after the
+ * saves, or before the restores, so t0 is the handler's to use. */
+static void rv_isr_sp(struct rv_fn *F, long d)
+{
+    if (!d)
+        return;
+    if (rv_fits(d, 12)) {
+        rv_alu_imm(F->t, RV_ADD, RV_SP, RV_SP, (int)d, 0);
+        return;
+    }
+    rv_li(F->t, RV_T0, d, F->xlen);
+    rv_alu(F->t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
+}
+
+/* The prologue's first act: the saves, before anything is written. A
+ * frame addi reaches is one adjustment with the saves at its top; a
+ * larger one is made in two, the saves first, so the li that builds its
+ * size writes a t0 already saved. */
+static void rv_isr_prologue(struct rv_fn *F)
+{
+    if (rv_fits(-F->frame, 12)) {
+        rv_isr_sp(F, -F->frame);
+        rv_isr_regs(F, F->isr_at, 1);
+        return;
+    }
+    rv_isr_sp(F, -F->isr_bytes);
+    rv_isr_regs(F, 0, 1);
+    rv_isr_sp(F, -(F->frame - F->isr_bytes));
+}
+
+/* ...and the epilogue: the callee-saved restores, the frame, the saves
+ * and mret or sret. */
+static void rv_isr_epilogue(struct rv_fn *F)
+{
+    for (int k = 0; k < F->nsave; k++)
+        ld_sp(F, F->used_callee[k], F->save_at + (long)k * F->w, F->w, 1);
+    for (int k = 0; k < F->nfsave; k++)
+        fld_sp(F, F->fused[k], F->fsave_at + (long)k * 8,
+               target_riscv_abi_flen() == 64);
+    if (rv_fits(F->frame, 12)) {
+        rv_isr_regs(F, F->isr_at, 0);
+        rv_isr_sp(F, F->frame);
+    } else {
+        rv_isr_sp(F, F->frame - F->isr_bytes);
+        rv_isr_regs(F, 0, 0);
+        rv_isr_sp(F, F->isr_bytes);
+    }
+    rv_xret(F->t, F->isr == ISR_SUPERVISOR);
 }
 
 static void gen_call(struct rv_fn *F, int n)
@@ -6197,7 +6476,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* A tail call leaves ra alone -- it is the caller's, and the callee
      * returns with it -- so it does not make this function a non-leaf. */
     F.tail = NULL;
-    if (g_rv_regalloc && !want_debug && !g_rv_o0)
+    /* An interrupt handler returns with mret or sret, so it makes no
+     * tail call: the callee would return with ret. */
+    F.isr = ISR_KIND(f->is_isr);
+    if (g_rv_regalloc && !want_debug && !g_rv_o0 && !F.isr)
         for (i = 0; i < fn->nins; i++)
             if (rv_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -6275,13 +6557,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
      * c.unimp that rounded each function up to four was two bytes of
      * nothing after about one function in two -- 236 bytes across lib/libc's
      * non-math code. */
-    if (!rv_compress_enabled()) {
+    /* An interrupt handler is four-aligned with it too: mtvec's low
+     * two bits are its mode, not its address (see rv_isr_grow). */
+    if (!rv_compress_enabled() || F.isr) {
         if (t->len & 3)
             rv_cunimp(t);
         while (t->len & 3)
             rv_unimp(t);
     }
-    f->code_align = rv_compress_enabled() ? 2 : 4;
+    f->code_align = rv_compress_enabled() && !F.isr ? 2 : 4;
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame
      * pointer (src/debug/dwarf.c). */
@@ -6296,7 +6580,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* The prologue. `addi sp, sp, -frame` reaches 2047 bytes; a larger
      * frame builds the constant first, and t0 is free to do it in because
      * no argument has been touched yet. */
-    if (F.frame) {
+    if (F.isr) {
+        rv_isr_prologue(&F);
+    } else if (F.frame) {
         if (rv_fits(-F.frame, 12)) {
             rv_alu_imm(t, RV_ADD, RV_SP, RV_SP, (int)-F.frame, 0);
         } else {
@@ -6304,7 +6590,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
         }
     }
-    if (!F.leaf)
+    if (!F.leaf && !F.isr)
         st_sp(&F, RV_RA, F.ra_slot, F.w);
     for (i = 0; i < F.nsave; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * F.w, F.w);
@@ -6618,8 +6904,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         rv_mv(t, RV_SP, RV_FP);
         F.fb = RV_SP;
     }
-    rv_restore(&F);
-    rv_ret(t);
+    if (F.isr) {
+        rv_isr_epilogue(&F);
+    } else {
+        rv_restore(&F);
+        rv_ret(t);
+    }
     }
 
     for (i = 0; i < F.nfix; i++) {
@@ -6690,7 +6980,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }                                   /* the passes */
     free(relax);
     }
-    if (F.fx_lazy && F.fx_missed) {
+    /* An interrupt handler is emitted again until it saves everything it
+     * writes (rv_isr_grow) -- once more than it would be otherwise, for
+     * any handler that writes a register. */
+    int isr_grew = F.isr && rv_isr_grow(&F);
+    if ((F.fx_lazy && F.fx_missed) || isr_grew) {
         t->len = fx_len0;
         fn->nlines = fx_nl0;
         F.st->ncall = fx_sc0; F.st->next = fx_se0; F.st->nstr = fx_ss0;
@@ -6708,8 +7002,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             free(fn->var_off);
             fn->var_off = NULL;
         }
-        F.fx_lazy = 0;
-        F.fx_missed = 0;
+        if (F.fx_missed) {
+            F.fx_lazy = 0;
+            F.fx_missed = 0;
+        }
         goto fx_again;
     }
 

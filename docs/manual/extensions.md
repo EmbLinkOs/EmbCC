@@ -423,6 +423,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `warn_unused_result`, `[[nodiscard]]` | Discarding the result warns under [`-Wunused-result`](diagnostics.md#-wunused-result), on by default |
 | `weak` | On a definition, the symbol is weak and another definition overrides it at link time. On a declaration, the reference is weak: the function's address is null if no definition is linked. `weak` on any declaration of a function makes it weak |
 | `interrupt`, `signal` | Interrupt handlers. See [Interrupt handlers](#interrupt-handlers) |
+| `keep_interrupts_masked` | MIPS32 only, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
 
 A constructor or destructor with a priority is refused, because EmbCC
 emits one `.init_array` in source order:
@@ -637,13 +638,16 @@ supported: REASON`:
 |---|---|
 | `cleanup` | `the cleanup function would never run` |
 | `ifunc` | `the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `interrupt` | On x86-64, AArch64 and RISC-V; see [Interrupt handlers](#interrupt-handlers) |
+| `interrupt` | On every target but Cortex-M, AVR, RISC-V and MIPS32; see [Interrupt handlers](#interrupt-handlers) |
+| `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` (on every target but MIPS32) |
 | `mode` | `the declaration would keep its written type, so a typedef that asks for a specific width would silently get another` |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
 | `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
 | `sysv_abi` | `the arguments would be passed in the other convention's registers` |
 | `target` | `EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
+| `use_debug_exception_return` | `the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
+| `use_shadow_register_set` | `EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
 | `transparent_union` | `the union would be passed as a union rather than as its first member, which is a different calling convention` |
 | `vector_size` | `the type would stay a scalar: ...`; see [Vector extensions](#vector-extensions) |
 | `weakref` | `the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
@@ -676,18 +680,26 @@ vector table, a startup routine and handlers for each board is in
 |---|---|---|
 | AVR | Implemented. The handler saves `r0`, `SREG`, `r1`, the call-clobbered registers and the frame pointer, clears `r1`, re-enables interrupts with `sei` on entry, and returns with `reti` | Implemented, as `interrupt` without the `sei`: interrupts stay disabled in the body |
 | Cortex-M | Accepted; the code is the same as without it, because the processor saves the caller-saved registers on exception entry and an ordinary return performs the exception return. An argument such as `interrupt("IRQ")` is accepted | Refused |
-| RISC-V, x86-64, AArch64 | Refused | Refused |
+| RISC-V | Implemented, with `"machine"` (the default, returning with `mret`) and `"supervisor"` (`sret`). The handler saves the caller-saved registers it writes, and all of them, floating point included, when it calls; it is 4-byte aligned. `"user"` is refused | Refused |
+| MIPS32 | Implemented, with `"eic"` (the default), `"vector=sw0"`..`"vector=hw5"` and `keep_interrupts_masked`. The handler saves `EPC`, `Status`, the caller-saved registers it writes and `HI`/`LO`, all of them and `gp` when it calls, and returns with `eret`. `use_shadow_register_set` and `use_debug_exception_return` are refused | Refused |
+| x86-64, AArch64, MIPS64 and the other targets | Refused | Refused |
 
-The refusals read:
+On RISC-V and MIPS32 a handler with parameters or a non-`void` result is
+refused, and so is a function given two different kinds; the attribute
+may be on a prototype, on the definition or on both. In C++ the attribute
+is refused except on Cortex-M. The refusals read:
 
 ```text
-embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR it is implemented)
+embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
 embcc: isr.c:2: error: __attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does
+embcc: isr.c:2: error: interrupt handler 'isr' takes parameters: the hardware calls it, so nothing passes them, and they would be read out of whatever the interrupted code left in the argument registers
+embcc: isr.c:2: error: interrupt handler 'isr' returns a value: the interrupt return goes back to the interrupted instruction, and nothing there receives it -- it must return void
 ```
 
-On RISC-V, write the trap entry in assembly and call a C function from
-it; see [Trap handlers](embedded.md#trap-handlers). For the AVR vector
-names (`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
+How to install a handler on each board, and what each one saves, is in
+[Embedded programming](embedded.md): [RISC-V](embedded.md#interrupt-handlers-1)
+and [MIPS32](embedded.md#interrupt-handlers-2). For the AVR vector names
+(`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
 
 `naked` is supported on ARM Cortex-M, RISC-V and AVR, where the body is
 assembled as a block of the target's assembly; see

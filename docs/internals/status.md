@@ -319,7 +319,12 @@ implement, so they are errors:
 | Attribute | Diagnostic |
 |---|---|
 | `naked` (x86-64 and AArch64; supported on Cortex-M, RISC-V, MIPS32 and AVR) | `__attribute__((naked)) is not supported: on this target the body could only be assembled by the file-scope assembler's few instructions; it is supported on the ARM, RISC-V, MIPS and AVR targets` |
-| `interrupt` (except on Cortex-M and AVR) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR it is implemented)` |
+| `interrupt` (except on Cortex-M, AVR, RISC-V and MIPS32) | `__attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)` |
+| `interrupt("user")` (RISC-V) | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
+| `keep_interrupts_masked` (except on MIPS32) | `__attribute__((keep_interrupts_masked)) is not supported: it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` |
+| `use_shadow_register_set` | `__attribute__((use_shadow_register_set)) is not supported: EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
+| `use_debug_exception_return` | `__attribute__((use_debug_exception_return)) is not supported: the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
+| `interrupt`, `signal` in C++ (except `interrupt` on Cortex-M) | `__attribute__((interrupt)) is not supported in C++ yet: the handler would return with an ordinary return instead of the interrupt return, without saving the registers; write it in C` |
 | `signal` (except on AVR) | `__attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does` |
 | `cleanup` | `__attribute__((cleanup)) is not supported: the cleanup function would never run` |
 | `ms_abi` | `__attribute__((ms_abi)) is not supported: the arguments would be passed in System V's registers` |
@@ -682,8 +687,9 @@ dates.
 - GNU-syntax assembly files for x86-64.
 - binary128 `long double` arithmetic on RISC-V, and `__int128` at RV64.
 - Computed `goto` on Cortex-M, RISC-V, MIPS32 and AVR;
-  8-byte atomic read-modify-write, unwind tables and
-  `__attribute__((interrupt))` on MIPS32.
+  8-byte atomic read-modify-write and unwind tables on MIPS32.
+- `__attribute__((interrupt))` on MIPS64, and GCC's MIPS
+  `use_shadow_register_set` and `use_debug_exception_return`.
 - On MIPS32, a delay slot filled from anywhere but the instruction just
   before the transfer (the branch target's first instruction, or one
   from before the `slt` a compare-and-branch needs).

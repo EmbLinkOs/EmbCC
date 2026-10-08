@@ -941,6 +941,12 @@ void rv_jalr(struct code *c, int rd, int rs1, int off)
 
 void rv_ret(struct code *c) { rv_jalr(c, RV_ZERO, RV_RA, 0); }
 
+void rv_xret(struct code *c, int supervisor)
+{
+    rv_w(c, rv_enc_i(OP_SYSTEM, RV_ZERO, 0, RV_ZERO,
+                     supervisor ? 0x102 : 0x302));
+}
+
 /* auipc rd, 0 ; addi rd, rd, 0 -- the two halves of a PC-relative
  * address, both immediates left for a relocation. Returns the offset of
  * the auipc; the addi is four bytes after it.

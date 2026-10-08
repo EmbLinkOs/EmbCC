@@ -532,6 +532,13 @@ void asm_emit_unit(struct outbuf *b, const char *srcname, struct unit *u,
                    asym(f->name));
         if (arm_thumb())
             ob_fmt(b, "\t.thumb_func\n");
+        /* A RISC-V interrupt handler is four-aligned with the C
+         * extension too (mtvec's low bits are its mode): the padding is
+         * already in the bytes above, and this raises the SECTION's
+         * alignment, which an assembler otherwise leaves at two. */
+        if (f->src->is_isr && (target_get() == TARGET_RISCV32 ||
+                               target_get() == TARGET_RISCV64))
+            ob_str(b, "\t.p2align\t2\n");
         ob_fmt(b, "\t.type\t%s, %sfunction\n%s:\n", asym(f->name),
                type_sigil(), asym(f->name));
 

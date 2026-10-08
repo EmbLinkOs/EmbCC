@@ -561,8 +561,22 @@ static const struct attr_entry attr_table[] = {
     { "interrupt", ATTR_REFUSED,
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
-      "(on ARMv7-M it needs neither, and is accepted; on AVR it is "
-      "implemented)" },
+      "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and "
+      "MIPS32 it is implemented)" },
+    /* GCC's MIPS interrupt modifiers. keep_interrupts_masked is the one
+     * whose meaning is a matter of two bits of the Status word the
+     * prologue writes anyway (IE cleared with EXL, and no IPL), so MIPS32
+     * honours it; the other two change where the handler's registers or
+     * its return come from, and are refused there too. */
+    { "keep_interrupts_masked", ATTR_REFUSED,
+      "it modifies a MIPS interrupt handler, and only the MIPS32 target "
+      "implements those" },
+    { "use_shadow_register_set", ATTR_REFUSED,
+      "EmbCC does not switch register sets: the handler would save into "
+      "and run on a shadow set's stack pointer it never read with rdpgpr" },
+    { "use_debug_exception_return", ATTR_REFUSED,
+      "the handler would return with eret where the debug exception "
+      "needs deret, and save DEPC as EPC" },
     /* avr-gcc's other spelling, and the one avr-libc's ISR() macro
      * expands to. `signal` leaves interrupts disabled in the body and
      * `interrupt` re-enables them on entry -- one `sei` apart. Refused
@@ -750,6 +764,47 @@ static void cmse_call_leftover(struct parser *ps)
     }
 }
 
+/* interrupt's argument: which kind of handler, as struct func's is_isr
+ * says. RISC-V's are GCC's and clang's -- "machine" (the default, mret)
+ * and "supervisor" (sret); MIPS's are "eic" (the default) and
+ * "vector=sw0".."vector=hw5", as both compilers spell them. Anything
+ * else is refused rather than read as the default: a handler for the
+ * wrong mode returns with the wrong instruction. Elsewhere the argument
+ * is not read, as before. */
+static int isr_kind(struct parser *ps, int line, const char *arg)
+{
+    enum target_arch a = target_get();
+    if (a == TARGET_RISCV32 || a == TARGET_RISCV64) {
+        if (!arg || !strcmp(arg, "machine"))
+            return ISR_INTERRUPT;
+        if (!strcmp(arg, "supervisor"))
+            return ISR_SUPERVISOR;
+        if (!strcmp(arg, "user"))
+            parse_error_line(ps, line,
+                "__attribute__((interrupt(\"user\"))) is not supported: "
+                "user-mode interrupts (the N extension and its uret) were "
+                "never ratified and are gone from the privileged spec, and "
+                "GCC and clang no longer accept them");
+        parse_error_line(ps, line,
+            "interrupt wants \"machine\" or \"supervisor\" on RISC-V, "
+            "not \"%s\"", arg);
+    }
+    if (a == TARGET_MIPS32) {
+        static const char *const vec[8] = { "sw0", "sw1", "hw0", "hw1",
+                                            "hw2", "hw3", "hw4", "hw5" };
+        if (!arg || !strcmp(arg, "eic"))
+            return ISR_INTERRUPT;
+        if (!strncmp(arg, "vector=", 7))
+            for (int k = 0; k < 8; k++)
+                if (!strcmp(arg + 7, vec[k]))
+                    return ISR_MIPS_VECTOR + k;
+        parse_error_line(ps, line,
+            "interrupt wants \"eic\" or \"vector=sw0\" .. "
+            "\"vector=hw5\" on MIPS, not \"%s\"", arg);
+    }
+    return ISR_INTERRUPT;
+}
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
     /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
@@ -880,6 +935,12 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                          !(attr_is(name, "interrupt") &&
                            target_get() == TARGET_THUMB &&
                            !target_arm_a32()) &&
+                         !(attr_is(name, "interrupt") &&
+                           (target_get() == TARGET_RISCV32 ||
+                            target_get() == TARGET_RISCV64 ||
+                            target_get() == TARGET_MIPS32)) &&
+                         !(attr_is(name, "keep_interrupts_masked") &&
+                           target_get() == TARGET_MIPS32) &&
                          !(attr_is(name, "naked") &&
                            target_get() != TARGET_X86_64 &&
                            target_get() != TARGET_AARCH64 &&
@@ -945,7 +1006,16 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "signal")) out->isr = 1;
                 else if (attr_is(name, "naked")) out->naked = 1;
-                else if (attr_is(name, "interrupt")) out->isr = 2;
+                else if (attr_is(name, "interrupt")) {
+                    int k = isr_kind(ps, aline, sarg);
+                    if (ISR_KIND(out->isr) && ISR_KIND(out->isr) != k)
+                        parse_error_line(ps, aline,
+                            "two different interrupt attributes on one "
+                            "declaration");
+                    out->isr = (out->isr & ISR_MASKED) | k;
+                }
+                else if (attr_is(name, "keep_interrupts_masked"))
+                    out->isr |= ISR_MASKED;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
                 else if (attr_is(name, "nothrow")) out->nothrow = 1;
                 else if (attr_is(name, "embcc_sret")) out->sret = 1;
