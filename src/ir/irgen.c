@@ -1154,6 +1154,21 @@ static int stmts_define_label(const struct stmt *s, const char *name)
     return 0;
 }
 
+/* Can a jump reach into statement s from outside it: a label, or a case
+ * or default of a switch around it? */
+static int stmts_have_labels(const struct stmt *s)
+{
+    for (; s; s = s->next) {
+        if (s->kind == STMT_LABEL || s->kind == STMT_CASE ||
+            s->kind == STMT_DEFAULT)
+            return 1;
+        if (stmts_have_labels(s->body) || stmts_have_labels(s->thn) ||
+            stmts_have_labels(s->els) || stmts_have_labels(s->initdecl))
+            return 1;
+    }
+    return 0;
+}
+
 /* The address of an lvalue (or of a struct-typed expression — struct
  * "values" are represented by their address, since sema bars them from
  * every value context). */
@@ -4539,6 +4554,17 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             break;
         }
         case STMT_IF: {
+            /* A condition that folds to a constant, and an arm no jump can
+             * enter: only the other arm is generated, as clang does at
+             * every level. It is what lets a header guard an asm whose "i"
+             * operand is a constant only when inlined -- CMSIS's
+             * `if (__builtin_constant_p(rotate) && ...) asm(... "i"(rotate))`
+             * in __SXTB16_RORn -- whose dead arm could not be assembled. */
+            if (s->cond_const &&
+                !stmts_have_labels(s->cond_const == 1 ? s->thn : s->els)) {
+                gen_stmt(fn, s->cond_const == 1 ? s->els : s->thn, loop);
+                break;
+            }
             int l_else = new_label(fn);
             int cw;
             int c = truth(fn, gen_expr(fn, s->cond), s->cond->ty, &cw);

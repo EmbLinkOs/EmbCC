@@ -202,6 +202,10 @@ struct asm_operand {
 
 /* asm_operand.reg sentinels beyond -2 (allocatable) and -3 (an xmm). */
 #define ASM_REG_IMM     (-4)  /* aarch64: a folded immediate (is_imm) */
+#define ASM_REG_TIED    (-6)  /* Thumb: an input "N" naming output N's own
+                               * lvalue (imm = N); output N became in-out and
+                               * carries the value, and %<this> names its
+                               * register (sema.c asm_tie_inputs) */
 #define ASM_REG_INVALID (-5)  /* the constraint means nothing on this target;
                                * irgen refuses it only if the asm is actually
                                * generated — gcc accepts x86 constraints inside
@@ -265,6 +269,8 @@ struct stmt {
     struct expr *init, *step; /* FOR: either may be NULL */
     struct stmt *initdecl;    /* FOR: `for (int i = 0; ...)` */
     struct stmt *thn, *els;   /* IF: els may be NULL */
+    int cond_const;       /* IF: 1 the condition folds to false, 2 to true
+                           * (sema); 0 not a constant */
     struct stmt *body;    /* WHILE/FOR: the controlled statement;
                            * BLOCK: the child list */
     struct stmt *next;
@@ -596,6 +602,12 @@ struct tagdef {
     enum tag_kind kind;
     struct type *ty;      /* struct/union node; NULL for enums */
     struct tagdef *next;
+    /* The block it was declared in (0: file scope), and whether that block
+     * has closed. A closed block's tags stay on the list, for the tools
+     * that list a unit's types, and are no longer found by name: two
+     * functions may each define `union llreg_u`, as CMSIS's cmsis_gcc.h
+     * does in every __SMLALD-style intrinsic. */
+    int blk, dead;
 };
 
 /* One step of a designator after its first: `.field` or `[index]`. */

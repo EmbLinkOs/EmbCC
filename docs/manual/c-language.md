@@ -426,6 +426,13 @@ error: define enums at file scope (block-scope type definitions are not supporte
 ```
 
 An untagged structure in a cast, `(struct { int a; } *)p`, is accepted.
+
+A structure, union or enumeration tag declared in a block belongs to that
+block, as the standard specifies: two functions may each define
+`union u`, and an inner block's `struct s { ... }` declares a new type
+that hides an outer `struct s` until the block ends (CMSIS's
+`cmsis_gcc.h` defines `union llreg_u` inside each of its 64-bit DSP
+intrinsics).
 A local variable or a parameter may share its name with a typedef name
 or with an enumeration constant declared before it, and hides it, as the
 standard specifies. That includes an array bound:

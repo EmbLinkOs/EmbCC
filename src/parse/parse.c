@@ -101,6 +101,9 @@ struct parser {
     int semi_line, semi_col;      /* where the last missing ';' was reported,
                                    * so the same one cannot repeat */
     struct tagdef *tags;
+    /* the block a tag declared now belongs to (0 file scope), and the last
+     * block number handed out: see struct tagdef */
+    int tag_blk, tag_blk_seq;
     struct typedefent *typedefs;
     struct econst **econst_tail;
     int seq;              /* current top-level item, for econst seq */
@@ -168,9 +171,23 @@ static void advance(struct parser *ps)
 static struct tagdef *find_tag(struct parser *ps, const char *tag)
 {
     for (struct tagdef *t = ps->tags; t; t = t->next)
-        if (strcmp(t->tag, tag) == 0)
+        if (!t->dead && strcmp(t->tag, tag) == 0)
             return t;
     return NULL;
+}
+
+/* A new tag, in the block being parsed. */
+static struct tagdef *push_tag(struct parser *ps, const char *tag,
+                               enum tag_kind kind, struct type *ty)
+{
+    struct tagdef *td = xcalloc(1, sizeof *td);
+    td->tag = tag;
+    td->kind = kind;
+    td->ty = ty;
+    td->blk = ps->tag_blk;
+    td->next = ps->tags;
+    ps->tags = td;
+    return td;
 }
 
 static struct type *find_typedef(struct parser *ps, const char *name)
@@ -1505,14 +1522,8 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                            "define enums at file scope");
             parse_enum_body(ps, under);
         }
-        if (tag && !find_tag(ps, tag)) {
-            struct tagdef *td = xcalloc(1, sizeof *td);
-            td->tag = tag;
-            td->kind = kind;
-            td->ty = under;
-            td->next = ps->tags;
-            ps->tags = td;
-        }
+        if (tag && !find_tag(ps, tag))
+            push_tag(ps, tag, kind, under);
         return under;
     }
 
@@ -1532,6 +1543,12 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
         struct tagdef *etd = NULL;
         if (tag) {
             struct tagdef *td = find_tag(ps, tag);
+            /* A definition in an inner block declares a NEW type, hiding
+             * the outer one for the rest of the block (C11 6.7.2.3p4) --
+             * not a redefinition, and not a completion of an outer
+             * `struct s;` either. */
+            if (td && td->blk != ps->tag_blk)
+                td = NULL;
             if (td) {
                 if (td->kind != kind)
                     parse_error_line(ps, line,
@@ -1541,13 +1558,9 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                                "redefinition of '%s'", tag);
                 t = td->ty;
             } else {
-                td = xcalloc(1, sizeof *td);
-                td->tag = tag;
-                td->kind = kind;
-                if (kind != TAG_ENUM)
-                    td->ty = ty_struct(tag, kind == TAG_UNION);
-                td->next = ps->tags;
-                ps->tags = td;
+                td = push_tag(ps, tag, kind,
+                              kind != TAG_ENUM
+                              ? ty_struct(tag, kind == TAG_UNION) : NULL);
                 t = td->ty;
             }
             etd = td;
@@ -1584,13 +1597,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
     if (kind == TAG_ENUM)
         parse_error_line(ps, line, "unknown enum '%s'", tag);
     /* Forward reference: an incomplete struct, fine behind a pointer */
-    td = xcalloc(1, sizeof *td);
-    td->tag = tag;
-    td->kind = kind;
-    td->ty = ty_struct(tag, kind == TAG_UNION);
-    td->next = ps->tags;
-    ps->tags = td;
-    return td->ty;
+    return push_tag(ps, tag, kind, ty_struct(tag, kind == TAG_UNION))->ty;
 }
 
 /* Consumes a type specifier if one starts here, else returns NULL with
@@ -3925,13 +3932,25 @@ static struct stmt *parse_controlled(struct parser *ps)
     return parse_stmt(ps, 0);
 }
 
+/* A block's tags leave scope with it (struct tagdef). */
+static void close_tags(struct parser *ps, struct tagdef *mark, int outer)
+{
+    for (struct tagdef *t = ps->tags; t && t != mark; t = t->next)
+        t->dead = 1;
+    ps->tag_blk = outer;
+}
+
 static struct stmt *parse_block(struct parser *ps)
 {
     struct stmt *s = new_stmt(STMT_BLOCK, cur(ps)->line, cur(ps)->col);
     int lmark = ps->nlmap;
     int fmark = g_nfold_locals;     /* the block's locals leave with it */
+    struct tagdef *tmark;
+    int tblk = ps->tag_blk;
     ps->blkdepth++;
     expect(ps, TOK_LBRACE, "'{'");
+    tmark = ps->tags;
+    ps->tag_blk = ++ps->tag_blk_seq;
     struct stmt **volatile tail = &s->body;
     while (cur(ps)->kind != TOK_RBRACE) {
         if (cur(ps)->kind == TOK_EOF) {
@@ -3943,6 +3962,7 @@ static struct stmt *parse_block(struct parser *ps)
             ps->nlmap = lmark;
             g_nfold_locals = fmark;
             ps->blkdepth--;
+            close_tags(ps, tmark, tblk);
             return s;
         }
         jmp_buf jb, *save = ps->recover;
@@ -3964,6 +3984,7 @@ static struct stmt *parse_block(struct parser *ps)
     ps->nlmap = lmark;
     g_nfold_locals = fmark;
     ps->blkdepth--;
+    close_tags(ps, tmark, tblk);
     return s;
 }
 
