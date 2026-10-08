@@ -4274,6 +4274,29 @@ static int switch_dense(int n, int w, long lo, long hi)
     return range <= 4UL * (unsigned long)n + 4;
 }
 
+/* -Os on ARM: a switch that is dense but for a few cases -- strftime's
+ * letters and its '%' and '\0', printf's conversions -- is a table over
+ * the dense run with an equality test for each case outside it, where
+ * the whole span was a decision tree. The run: the most cases any window
+ * of the sorted values holds that switch_dense would take, leaving out
+ * at most a third of them (three for a small switch): each is a compare
+ * and a branch, which the tree spent on every case. */
+static int switch_cluster(int n, int w, struct stmt **cs, int *ci, int *cj)
+{
+    int best = 0;
+    if (!g_opt_size || !target_switch_clusters() || n < 6)
+        return 0;
+    for (int i = 0; i < n; i++)
+        for (int j = n - 1; j >= i + best; j--)
+            if (switch_dense(j - i + 1, w, cs[i]->cval, cs[j]->cval)) {
+                best = j - i + 1;
+                *ci = i;
+                *cj = j;
+                break;
+            }
+    return best > 0 && n - best <= (n / 3 > 3 ? n / 3 : 3);
+}
+
 static void switch_case_eq(struct ir_func *fn, int v, int w, int sign,
                            long val, int label)
 {
@@ -4604,12 +4627,25 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
                     }
                     cs[b1 + 1] = t;
                 }
+                int ci = 0, cj = -1;
                 if (switch_dense(n, w, cs[0]->cval, cs[n - 1]->cval))
                     switch_table(fn, v, w, sign, cs, n, cs[0]->cval,
                                  (unsigned long)cs[n - 1]->cval -
                                  (unsigned long)cs[0]->cval + 1,
                                  dflt >= 0 ? dflt : lc.brk);
-                else
+                else if (switch_cluster(n, w, cs, &ci, &cj)) {
+                    /* the few cases outside the dense run first, each
+                     * an equality test; then the run's table */
+                    for (int k = 0; k < n; k++)
+                        if (k < ci || k > cj)
+                            switch_case_eq(fn, v, w, sign, cs[k]->cval,
+                                           cs[k]->label);
+                    switch_table(fn, v, w, sign, cs + ci, cj - ci + 1,
+                                 cs[ci]->cval,
+                                 (unsigned long)cs[cj]->cval -
+                                 (unsigned long)cs[ci]->cval + 1,
+                                 dflt >= 0 ? dflt : lc.brk);
+                } else
                     switch_tree(fn, v, w, sign, cs, 0, n - 1,
                                 dflt >= 0 ? dflt : lc.brk);
                 free(cs);

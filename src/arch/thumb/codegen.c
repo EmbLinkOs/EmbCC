@@ -102,7 +102,19 @@ static void t_copy_block(struct code *t, int dst, int src, int copy, long size);
 /* A parallel move is given R_SCR as the register that breaks a cycle,
  * and only a move that USES it touches r9. */
 static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
+/* The cycle breaker of a parallel move that is not an asm's: r12, which
+ * no value lives in and every such move finds free (a call's argument
+ * setup reads its stack words and VFP arguments before, and its target
+ * after; a helper's arguments and the prologue's parameters likewise). r9
+ * was, and cost a push where nothing else used it; with r9-r11 as homes
+ * (g_t_ext) it is often holding a value there. An asm's operands may be
+ * r12, so its moves keep R_SCR. */
+#define T_ACC_PM 12
 
+/* Their numbers, for comparing a register against one (R_*'s reason). */
+#define B_LO_N R_ADDR
+#define B_HI_N R_SCR
+#define A_HI_N R_TMP
 #define A_LO T_ACC      /* r12 */
 #define A_HI T_TMP      /* r11 */
 #define B_LO T_ADDR     /* r10 */
@@ -212,8 +224,25 @@ static const int T6_POOL_VA[2] = { 4, 5 };
 static const int T6_POOL_FB[5] = { 0, 1, 2, 3, 4 };
 static const int T6_POOL_VA_FB[1] = { 4 };
 
+/* With r6 and r7 as well (g_t_ext on ARMv6-M): all eight low registers,
+ * and the lowering's two scratch registers taken per instruction from
+ * whatever holds nothing there (v6m.c's v6_roles). r5 stays out where it
+ * is a VLA's frame base. */
+static const int T6_POOL_EXT[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+static const int T6_POOL_VA_EXT[4] = { 4, 5, 6, 7 };
+static const int T6_POOL_FB_EXT[7] = { 0, 1, 2, 3, 4, 6, 7 };
+static const int T6_POOL_VA_FB_EXT[3] = { 4, 6, 7 };
+
 static const int *t_pool_base(const struct ir_func *fn, int *n)
 {
+    if (target_thumb_arch() == 6 && g_t_ext) {
+        if (fn->has_alloca) {
+            *n = fn->is_varargs ? 3 : 7;
+            return fn->is_varargs ? T6_POOL_VA_FB_EXT : T6_POOL_FB_EXT;
+        }
+        *n = fn->is_varargs ? 4 : 8;
+        return fn->is_varargs ? T6_POOL_VA_EXT : T6_POOL_EXT;
+    }
     if (target_thumb_arch() == 6) {
         if (fn->has_alloca) {
             *n = fn->is_varargs ? 1 : 5;
@@ -1469,6 +1498,7 @@ static long slot_of(const struct t_fn *F, int v)
 }
 
 static int faddr(const struct t_fn *F, int v, long *off);
+static unsigned lo_free_at(const struct t_fn *F, int n);
 
 static void rd(struct t_fn *F, int v, int reg)
 {
@@ -1484,6 +1514,13 @@ static void rd(struct t_fn *F, int v, int reg)
     long fo;
     if (faddr(F, v, &fo)) {
         fb_addr(F, reg, fo);
+        return;
+    }
+    /* `str r1, [sp, #n]` and nothing since: r1 is the value (wr) */
+    if (F->ls_end >= 0 && F->ls_end == F->t->len && F->ls_fb == F->fb &&
+        F->ls_off == F->slot[v]) {
+        if (reg != F->ls_reg)
+            t_mov_reg(F->t, reg, F->ls_reg);
         return;
     }
     if (!t_ldst_imm(F->t, reg, F->fb, F->slot[v], 4, 0, 0)) {
@@ -1547,7 +1584,12 @@ static void wr(struct t_fn *F, int v, int reg)
         t_mov_imm(F->t, a, F->slot[v], 0);
         t_alu_reg(F->t, T_OP_ADD, a, F->fb, a, 0);
         ldst_must(F->t, reg, a, 0, 4, 0, 1);
+        return;
     }
+    F->ls_end = F->t->len;
+    F->ls_reg = reg;
+    F->ls_fb = F->fb;
+    F->ls_off = F->slot[v];
 }
 
 static void wrote(struct t_fn *F, int v, int reg)
@@ -1732,6 +1774,43 @@ static void frame_addr_map(struct t_fn *F)
     F->fscr = fs;
 }
 
+/* A local's address read once -- `f(&x)`, a struct copied once -- needs
+ * no register: it is the frame base and an offset, built where it is
+ * read (faddr), straight into an argument register. Given a register,
+ * it was made early in whatever register was free and moved, and it took
+ * the register from something that lives longer. NULL when no temp is
+ * such (and `base`, the exclusions already made, stands). ARMv6-M's six
+ * or eight registers only: on ARMv7-M it measured 18 bytes worse over
+ * lib/libc, where its loads fold the frame offset already. */
+static char *t_faddr_excl(const struct t_fn *F, const char *base)
+{
+    const struct ir_ins *ins = F->fn->ins;
+    int nv = F->fn->nvregs, any = 0;
+    if (!F->fvar || !nv || getenv("EMBCC_T_NOFAEXCL"))
+        return NULL;
+    int *uc = xcalloc((size_t)nv, sizeof *uc);
+    ra_count_vreg_uses(F->fn, uc);
+    char *x = xcalloc((size_t)nv, 1);
+    for (int v = 0; v < nv; v++) {
+        x[v] = base ? base[v] : 0;
+        if ((F->fvar[v] >= 0 || F->fscr[v] >= 0) && uc[v] <= 1) {
+            x[v] = 1;
+            any = 1;
+        }
+    }
+    (void)ins;
+    free(uc);
+    if (!any) {
+        free(x);
+        return NULL;
+    }
+    return x;
+}
+char *tcg_faddr_excl(const struct t_fn *F, const char *base)
+{
+    return t_faddr_excl(F, base);
+}
+
 /* frame base + off, into `rd`: t_add_sp where the frame base is sp. */
 static void fb_addr(struct t_fn *F, int rd, long off)
 {
@@ -1841,6 +1920,8 @@ static void t_copy_block(struct code *t, int dst, int src, int copy, long size)
 #define T_TBH 98               /* a tbh table's halfword: cz_at holds the pc
                                 * it is relative to, the halfword becomes
                                 * (target - pc) / 2 */
+#define T_TBB 96               /* a tbb table's byte: as T_TBH, a byte
+                                * (target - pc) / 2, so 510 forward */
 #define T_LADDR 97             /* &&label: a movw/movt pair into register
                                 * `ins`, added to pc at cz_at */
 
@@ -1920,6 +2001,7 @@ static int invert_last_bcond(struct t_fn *F, int n, int label)
         return 0;
     cond = F->fix[F->bc_fix].cond ^ 1;
     F->t->len -= F->fix[F->bc_fix].sz;
+    F->ls_end = -1;              /* the code shrank: no store is "last" */
     /* The same ordinal, so the same size decision: the first pass made
      * this inversion too, and measured the branch it produced. */
     F->nfix--;
@@ -2116,7 +2198,7 @@ static void args64x2(struct t_fn *F, int va, int vb)
             }
     if (npm) {
         int od[8], os[8];
-        int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os, 8);
+        int m = ra_parallel_move(pd, ps, npm, T_ACC_PM, od, os, 8);
         if (m < 0)
             internal_error("thumb: a 64-bit helper's argument setup is not "
                            "a well-formed move");
@@ -2128,8 +2210,46 @@ static void args64x2(struct t_fn *F, int va, int vb)
             rd64(F, v[k], 2 * k, 2 * k + 1);
 }
 
-static void fp_args2(struct t_fn *F, const struct ir_ins *i)
+/* The moves a two-operand helper's setup takes with its operands in
+ * this order: the parallel move's length, a load or a pair for each one
+ * in memory not counted (the same either way). */
+static int fp_args_cost(const struct t_fn *F, int va, int vb, int w)
 {
+    int pd[4], ps[4], npm = 0, v[2] = { va, vb }, od[8], os[8];
+    for (int k = 0; k < 2; k++)
+        if (in_reg(F, v[k]))
+            for (int q = 0; q < (w == 8 ? 2 : 1); q++) {
+                pd[npm] = (w == 8 ? 2 * k : k) + q;
+                ps[npm] = F->loc[v[k]] + q;
+                npm++;
+            }
+    return npm ? ra_parallel_move(pd, ps, npm, 12, od, os, 8) : 0;
+}
+
+/* a + b and a * b may call the helper as (b, a) when that takes fewer
+ * moves: the last result is in r0:r1, and `y + x*x` wants it in r2:r3 --
+ * six moves through r12 the other way round. IEEE addition and
+ * multiplication commute (which NaN comes back is not specified). */
+static int fp_swap_args(const struct t_fn *F, const struct ir_ins *i)
+{
+    if ((i->op != IR_ADD && i->op != IR_MUL) || i->imm_b ||
+        i->a == i->b || getenv("EMBCC_T_NOFPSWAP"))
+        return 0;
+    return fp_args_cost(F, i->b, i->a, i->w) <
+           fp_args_cost(F, i->a, i->b, i->w);
+}
+
+static void fp_args2(struct t_fn *F, const struct ir_ins *i0)
+{
+    /* the swap is the instruction with its operands exchanged; the
+     * setup below never knows */
+    struct ir_ins sw = *i0;
+    const struct ir_ins *i = i0;
+    if (fp_swap_args(F, i0)) {
+        sw.a = i0->b;
+        sw.b = i0->a;
+        i = &sw;
+    }
     if (i->w == 8) {
         args64x2(F, i->a, i->b);
         return;
@@ -2140,7 +2260,7 @@ static void fp_args2(struct t_fn *F, const struct ir_ins *i)
         if (in_reg(F, i->b)) { pd[npm] = T_R1; ps[npm] = F->loc[i->b]; npm++; }
         if (npm) {
             int od[8], os[8];
-            int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os, 8);
+            int m = ra_parallel_move(pd, ps, npm, T_ACC_PM, od, os, 8);
             if (m < 0)
                 internal_error("thumb: a helper's argument setup is not a "
                                "well-formed move");
@@ -2489,6 +2609,217 @@ static int copy64_d(struct t_fn *F, int dst, int src)
     return 0;
 }
 
+/* ---- THE 64-BIT CONSTANT POOL ------------------------------------------
+ *
+ * A double or a long long constant built in registers is two movw/movt
+ * pairs, sixteen bytes, where clang loads it from a literal pool:
+ * `ldrd r2, r3, [pc, #n]`, four bytes, and eight of data shared by every
+ * load of the same value in the function. Over lib/libc that was 548
+ * constants and 5748 bytes, 1500 of them saved by the pool -- fdlibm is
+ * made of such constants.
+ *
+ * Only where it is shorter: 1.0 is `movs r0, #0; movs r1, #0; movt r1,
+ * #0x3ff0`, eight bytes, and a value used once must cost more than twelve
+ * in registers to be worth its pool slot (t_lit64_plan). The pool sits
+ * after the function's last instruction, word-aligned and marked as data;
+ * LDRD (literal) reaches 1020 bytes forward of Align(pc, 4). Reach is
+ * measured on the first pass, whose code is the longest -- later passes
+ * only shrink what lies between a load and the pool -- and a constant
+ * that does not reach is built in registers on a first pass made again
+ * (which can only push others out of reach in turn, so that repeats until
+ * none is). ARM state keeps movw/movt. */
+static unsigned t_mov_imm_len(int rd, long v)
+{
+    struct code c;
+    unsigned n;
+    memset(&c, 0, sizeof c);
+    t_mov_imm_dead_flags(&c, rd, v);
+    n = (unsigned)c.len;
+    free(c.p);
+    free(c.drange);
+    return n;
+}
+
+static void t_lit64_plan(struct t_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int nins = fn->nins, any = 0;
+    F->lp_use = NULL;
+    if (t_isa_a32 || nins == 0 || getenv("EMBCC_T_NOLIT64"))
+        return;
+    char *cand = xcalloc((size_t)nins, 1);
+    unsigned *cost = xcalloc((size_t)nins, sizeof *cost);
+    for (int n = 0; n < nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_CONST || i->w != 8 || i->dst < 0 ||
+            i->dst >= fn->nvregs || !F->wide[i->dst] || in_freg(F, i->dst))
+            continue;
+        int lo = in_reg(F, i->dst) ? F->loc[i->dst] : 12;
+        int hi = in_reg(F, i->dst) ? F->loc[i->dst] + 1 : 11;
+        cand[n] = 1;
+        cost[n] = t_mov_imm_len(lo, (long)(i->imm & 0xffffffffL)) +
+                  t_mov_imm_len(hi, (long)((i->imm >> 32) & 0xffffffffL));
+    }
+    /* by value: the pool when its loads and its slot are shorter than
+     * building every one of them */
+    for (int n = 0; n < nins; n++) {
+        if (cand[n] != 1)
+            continue;
+        long long v = fn->ins[n].imm;
+        unsigned built = 0, cnt = 0;
+        for (int m = n; m < nins; m++)
+            if (cand[m] == 1 && fn->ins[m].imm == v) {
+                built += cost[m];
+                cnt++;
+            }
+        int pool = 4 * cnt + 8 < built;
+        for (int m = n; m < nins; m++)
+            if (cand[m] == 1 && fn->ins[m].imm == v)
+                cand[m] = pool ? 2 : 3;
+        any |= pool;
+    }
+    if (any) {
+        F->lp_use = xcalloc((size_t)nins, 1);
+        for (int n = 0; n < nins; n++)
+            F->lp_use[n] = cand[n] == 2;
+    }
+    free(cand);
+    free(cost);
+}
+
+/* `ldrd lo, hi, [pc, #?]` for the constant v: its slot in this pass's
+ * pool, and the site t_lit64_flush patches. */
+static void t_lit64_load(struct t_fn *F, int n, int lo, int hi,
+                         unsigned long long v)
+{
+    int k;
+    for (k = 0; k < F->lp_n; k++)
+        if (F->lp_val[k] == v)
+            break;
+    if (k == F->lp_n && F->lp_planned)
+        internal_error("thumb: %s: a constant not in the planned pool",
+                       F->fn->name);
+    if (k == F->lp_n) {
+        if (F->lp_n == F->lp_cap) {
+            F->lp_cap = F->lp_cap ? F->lp_cap * 2 : 8;
+            F->lp_val = xrealloc(F->lp_val,
+                                 (size_t)F->lp_cap * sizeof *F->lp_val);
+        }
+        F->lp_val[F->lp_n++] = v;
+    }
+    if (F->lp_nsite == F->lp_capsite) {
+        F->lp_capsite = F->lp_capsite ? F->lp_capsite * 2 : 8;
+        F->lp_site = xrealloc(F->lp_site,
+                              (size_t)F->lp_capsite * sizeof *F->lp_site);
+    }
+    struct t_lsite *s = &F->lp_site[F->lp_nsite++];
+    s->at = F->t->len;
+    s->ins = n;
+    s->idx = k;
+    s->rt = lo;
+    s->rt2 = hi;
+    if (!t_ldst_pair(F->t, lo, hi, T_PC, 0, 0))
+        internal_error("thumb: %s: a literal ldrd into r%d:r%d",
+                       F->fn->name, lo, hi);
+}
+
+/* What fits, when not everything did: walking back from the last load,
+ * keep a constant when its load reaches its slot -- the code after the
+ * load, plus twelve bytes for each later constant already given up (a
+ * movw/movt pair for each of its words where the ldrd was four), plus its
+ * slot -- and give it up otherwise. Slots go in that order, so the loads
+ * nearest the end get the nearest slots, and one value keeps one slot.
+ * An estimate from this pass's positions, which are the longest any pass
+ * has (and twelve is the most a give-up grows by); the pass made again
+ * measures exactly. */
+static void t_lit64_fit(struct t_fn *F, int pool)
+{
+    int ns = F->lp_nsite, nv = 0;
+    unsigned long long *val = xmalloc((size_t)(ns ? ns : 1) * sizeof *val);
+    long extra = 0;
+    for (int k = ns - 1; k >= 0; k--) {
+        const struct t_lsite *s = &F->lp_site[k];
+        unsigned long long v = F->lp_val[s->idx];
+        int slot;
+        for (slot = 0; slot < nv; slot++)
+            if (val[slot] == v)
+                break;
+        long d = (long)pool - ((s->at + 4) & ~3L) + extra + 8L * slot;
+        if (d <= 1020 - 8) {
+            if (slot == nv)
+                val[nv++] = v;
+        } else {
+            F->lp_use[s->ins] = 0;
+            extra += 12;
+        }
+    }
+    for (int k = 0; k < nv; k++)
+        F->lp_val[k] = val[k];
+    F->lp_n = nv;
+    F->lp_planned = 1;
+    free(val);
+}
+
+/* Drop the planned slots no load uses any more (a later first pass gave
+ * one up), keeping the order: a slot only moves nearer. */
+static void t_lit64_compact(struct t_fn *F)
+{
+    int nv = 0;
+    for (int k = 0; k < F->lp_n; k++) {
+        int used = 0;
+        for (int m = 0; m < F->lp_nsite && !used; m++)
+            used = F->lp_site[m].idx == k && F->lp_use[F->lp_site[m].ins];
+        if (used)
+            F->lp_val[nv++] = F->lp_val[k];
+    }
+    F->lp_n = nv;
+}
+
+/* The pool after the function's code, and every load patched to reach
+ * it. 0 when one does not: then t_lit64_fit (or, once planned, the load
+ * alone) gives constants up to be built in registers, and the caller
+ * makes the first pass again. */
+static int t_lit64_flush(struct t_fn *F, int pass)
+{
+    struct code *t = F->t;
+    int ok = 1;
+    if (!F->lp_n)
+        return 1;
+    while (t->len & 3)
+        t_nop(t);
+    int pool = t->len;
+    for (int k = 0; k < F->lp_n; k++) {
+        code_u32(t, (unsigned long)(F->lp_val[k] & 0xffffffffULL));
+        code_u32(t, (unsigned long)(F->lp_val[k] >> 32));
+    }
+    code_mark_data(t, pool, t->len);
+    for (int k = 0; k < F->lp_nsite; k++) {
+        const struct t_lsite *s = &F->lp_site[k];
+        long off = (long)pool + 8L * s->idx - ((s->at + 4) & ~3L);
+        struct code c;
+        memset(&c, 0, sizeof c);
+        if (off >= 0 && t_ldst_pair(&c, s->rt, s->rt2, T_PC, off, 0)) {
+            memcpy(t->p + s->at, c.p, 4);
+        } else if (pass == 0) {
+            if (F->lp_planned)
+                F->lp_use[s->ins] = 0;
+            ok = 0;
+        } else {
+            internal_error("thumb: %s: a literal ldrd no longer reaches its "
+                           "pool", F->fn->name);
+        }
+        free(c.p);
+        free(c.drange);
+    }
+    if (!ok) {
+        if (F->lp_planned)
+            t_lit64_compact(F);
+        else
+            t_lit64_fit(F, pool);
+    }
+    return ok;
+}
+
 static int gen_ins64(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -2507,6 +2838,11 @@ static int gen_ins64(struct t_fn *F, int n)
         /* Built where it lives when that is a pair. */
         int lo = in_reg(F, i->dst) ? F->loc[i->dst] : A_LO;
         int hi = in_reg(F, i->dst) ? F->loc[i->dst] + 1 : A_HI;
+        if (F->lp_use && F->lp_use[n]) {
+            t_lit64_load(F, n, lo, hi, (unsigned long long)i->imm);
+            wr64(F, i->dst, lo, hi);
+            return 1;
+        }
         /* no flag survives from one IR instruction to the next (the
          * 32-bit IR_CONST says why), so a half that fits eight bits in a
          * low register is a two-byte movs */
@@ -2688,18 +3024,59 @@ static int gen_ins64(struct t_fn *F, int n)
         return 1;
     }
 
-    case IR_MUL:
+    case IR_MUL: {
         /* (a_hi:a_lo) * (b_hi:b_lo), keeping 64 bits: the two cross
          * products contribute only to the high word, and the low
-         * product's carry comes out of umull's own high half. */
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
-        t_mul(t, B_HI, A_LO, B_HI);              /* a_lo * b_hi */
-        t_mla(t, B_HI, A_HI, B_LO, B_HI);        /* += a_hi * b_lo */
-        t_mull(t, A_LO, A_HI, A_LO, B_LO, 0);    /* a_lo * b_lo */
-        t_alu_reg(t, T_OP_ADD, A_HI, A_HI, B_HI, 0);
-        wr64(F, i->dst, A_LO, A_HI);
+         * product's carry comes out of umull's own high half.
+         *
+         * Each operand where it is -- a pair is read in place, where it
+         * was copied into A and B first -- and a constant whose high word
+         * is zero (`x * 33`) has no a_lo * b_hi term at all. The cross
+         * products go into a register none of the operands or the result
+         * is in, then umull writes the result and the sum lands on its
+         * high word. */
+        int al, ah, bl, bh = -1, dl, dh, tt = -1;
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
+        if (i->imm_b && ((unsigned long)i->imm >> 32) == 0) {
+            int c[3] = { B_LO_N, B_HI_N, A_HI_N }, k;
+            for (k = 0; k < 3 && (c[k] == al || c[k] == ah); k++)
+                ;
+            bl = t_scr(c[k]);
+            t_mov_imm_dead_flags(t, bl, (long)(i->imm & 0xffffffffL));
+        } else {
+            srcb64(F, i, &bl, &bh);
+        }
+        dst64(F, i->dst, &dl, &dh);
+        {
+            int c[5] = { 12, B_LO_N, B_HI_N, A_HI_N, -2 }, k;
+            for (k = 0; k < 4 && tt < 0; k++)
+                if (c[k] != al && c[k] != ah && c[k] != bl && c[k] != bh &&
+                    c[k] != dl && c[k] != dh)
+                    tt = c[k] == 12 ? 12 : t_scr(c[k]);
+            /* every scratch taken: b's high word, when it is a copy, is
+             * read by the first multiply and then free (the old shape) */
+            if (tt < 0 && bh >= 0 && !(i->b >= 0 && !i->imm_b &&
+                                       in_reg(F, i->b)))
+                tt = bh;
+            /* with r9-r11 as homes a role may have no register here:
+             * that fails the attempt, as any role would */
+            if (tt < 0 && g_t_ext)
+                tt = t_scr(-1);
+            if (tt < 0)
+                internal_error("thumb: %s: no register for a 64-bit "
+                               "multiply's cross products", fn->name);
+        }
+        if (bh >= 0) {
+            t_mul(t, tt, al, bh);                /* a_lo * b_hi */
+            t_mla(t, tt, ah, bl, tt);            /* += a_hi * b_lo */
+        } else {
+            t_mul(t, tt, ah, bl);                /* a_hi * b_lo */
+        }
+        t_mull(t, dl, dh, al, bl, 0);            /* a_lo * b_lo */
+        t_alu_reg(t, T_OP_ADD, dh, dh, tt, 0);
+        wr64(F, i->dst, dl, dh);
         return 1;
+    }
 
     case IR_SHL: case IR_SHR: {
         int op = i->op == IR_SHL ? T_SH_LSL
@@ -3624,10 +4001,42 @@ static void gen_ins(struct t_fn *F, int n)
         }
         if (i->op == IR_CMP) {
             int cond;
-            fp_args2(F, i);
-            call_helper(F, fp_cmp_name(i->pred, i->w));
+            /* A branch on the answer and nothing else reading it takes
+             * the helper's flags straight, as the integer compare does
+             * (IR_CMP below): the helpers answer an unordered pair the
+             * way that makes the predicate false, so the inverse
+             * condition is exactly "not (a pred b)" and BRZ may use it.
+             * The 0/1 never exists -- `ite; movs #1; movs #0; cbz` was
+             * eight bytes after every soft-float compare. */
+            struct ir_ins *nx = n + 1 < fn->nins ? &fn->ins[n + 1]
+                                                 : (struct ir_ins *)0;
+            int fuse = nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
+                       nx->a == i->dst && nx->w != 8 && F->usecnt &&
+                       F->usecnt[i->dst] == 1;
+            /* a < b is b > a, and so on: the cheaper way round, as an
+             * add's (fp_swap_args). The helpers answer an unordered pair
+             * "false" for every predicate, so the mirror is exact. */
+            struct ir_ins sw = *i;
+            const struct ir_ins *ci = i;
+            if (!i->imm_b && i->a != i->b &&
+                fp_args_cost(F, i->b, i->a, i->w) <
+                fp_args_cost(F, i->a, i->b, i->w)) {
+                sw.a = i->b;
+                sw.b = i->a;
+                sw.pred = i->pred == B_LT ? B_GT : i->pred == B_GT ? B_LT
+                        : i->pred == B_LE ? B_GE : i->pred == B_GE ? B_LE
+                        : i->pred;
+                ci = &sw;
+            }
+            fp_args2(F, ci);
+            call_helper(F, fp_cmp_name(ci->pred, ci->w));
             t_cmp_imm(t, T_R0, 0);
-            cond = cond_for(i->pred, 1);      /* the helper's signed answer */
+            cond = cond_for(ci->pred, 1);     /* the helper's signed answer */
+            if (fuse) {
+                jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
+                F->skip_next = 1;
+                return;
+            }
             set_cc(F, i->dst, cond);
             return;
         }
@@ -3759,6 +4168,7 @@ static void gen_ins(struct t_fn *F, int n)
         F->label_off[i->label] = t->len;
         F->bc_end = -1;          /* something may branch here */
         F->fl_end = -1;          /* ...with other flags */
+        F->ls_end = -1;          /* ...and other registers */
         return;
     case IR_JMP:
         /* A jump to the label that follows it is not an instruction.
@@ -3861,7 +4271,39 @@ static void gen_ins(struct t_fn *F, int n)
             if ((bx->op == IR_BRZ || bx->op == IR_BRNZ) &&
                 bx->a == i->dst && bx->w == 4) {
                 int ra_ = rdr(F, i->a, T_ACC);
-                if (!i->imm_b) {
+                /* The low m bits, shifted to the top of a free low
+                 * register, `lsls r3, r0, #32-m`: two bytes where tst.w is
+                 * four, Z the same answer. One bit k, shifted to bit 31,
+                 * `lsls r3, r0, #31-k`: its N is the bit (Z would be bits
+                 * 0..k together), so the branch is on mi/pl. Only with the
+                 * branch right after, which takes the condition. */
+                unsigned long mk = (unsigned long)i->imm & 0xffffffffUL;
+                int sh = -1, onebit = 0;
+                if (i->imm_b && mk && !(mk & (mk - 1))) {
+                    for (sh = 31; !(mk >> (31 - sh) & 1); sh--)
+                        ;
+                    onebit = 1;
+                } else if (i->imm_b && mk && mk != 0xffffffffUL &&
+                           !(mk & (mk + 1))) {
+                    int m = 0;
+                    while (mk >> m) m++;
+                    sh = 32 - m;
+                }
+                /* (bit 31 is the sign: `cmp r0, #0`, no register; a
+                 * shift of 0 would be a move) */
+                if (sh >= 0 && k == n + 1 && ra_ < 8 &&
+                    (F->lofree || (onebit && sh == 0)) &&
+                    !t_isa_a32 && !getenv("EMBCC_T_NOLSLSTST")) {
+                    if (sh == 0)
+                        t_cmp_imm(t, ra_, 0);
+                    else
+                        t_shift_imm(t, T_SH_LSL, lo_take(F), ra_, sh, 1);
+                    jump_if(F, onebit ? (bx->op == IR_BRZ ? T_PL : T_MI)
+                                      : (bx->op == IR_BRZ ? T_EQ : T_NE),
+                            bx->label);
+                    F->skip_next = 1;
+                    return;
+                } else if (!i->imm_b) {
                     t_tst_reg(t, ra_, rdr(F, i->b, T_TMP));
                 } else if (!t_tst_imm(t, ra_, i->imm)) {
                     int sb = LO(F, T_TMP);
@@ -3929,9 +4371,13 @@ static void gen_ins(struct t_fn *F, int n)
          * 16-bit ones: `adds r0, #1` is two bytes where `addw` is four. */
         if (i->imm_b && i->op != IR_MUL) {
             int lo = d < 8 && ra_ < 8;
+            /* x + -1 is x - 1: the 16-bit forms by magnitude */
+            long mg = i->imm < 0 ? -i->imm : i->imm;
+            int opm = (i->op == IR_ADD) == (i->imm >= 0) ? T_OP_ADD
+                                                          : T_OP_SUB;
             if ((i->op == IR_ADD || i->op == IR_SUB) && lo &&
-                i->imm >= 0 && (i->imm <= 7 || (d == ra_ && i->imm <= 255))) {
-                t_alu_imm(t, op, d, ra_, i->imm, 1);
+                (mg <= 7 || (d == ra_ && mg <= 255))) {
+                t_alu_imm(t, opm, d, ra_, mg, 1);
             /* addw/subw reach any 0..4095 where the modified immediate
              * reaches only what it can rotate into place, and almost
              * every constant folded here is a small offset. */
@@ -4590,6 +5036,19 @@ static void gen_ins(struct t_fn *F, int n)
          * VFP registers. place_one knows which convention is in force. */
         for (int k = 0; k < i->nargs; k++)
             place_one(&w, &i->argv[k], &pl[k]);
+        /* The stack words go through low registers where the call has
+         * any free (lo_free_at): `ldr r2, [sp, #n]; str r2, [sp]` is
+         * four bytes where the same through r12 is eight, and a value
+         * already in a register is stored from it -- it was moved to
+         * r12 first, six bytes for every stack argument. Nothing below
+         * writes r0-r3 until the stack words are all down. */
+        unsigned cfree = lo_free_at(F, n);
+        int cs0 = -1, cs1 = -1;
+        for (int r = 0; r < 8; r++)
+            if (cfree >> r & 1) {
+                if (cs0 < 0) cs0 = r;
+                else if (cs1 < 0) cs1 = r;
+            }
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
             if (!pl[k].nstk)
@@ -4597,7 +5056,14 @@ static void gen_ins(struct t_fn *F, int n)
             /* A composite's vreg holds its ADDRESS; a scalar's holds
              * the value, and a scalar never splits. */
             if (a->is_struct) {
-                rd(F, a->vreg, T_ADDR);
+                /* A local's address is the frame base and an offset:
+                 * no register for it at all. */
+                long fo = 0;
+                int fa = faddr(F, a->vreg, &fo);
+                int base = fa ? F->fb : cs1 >= 0 ? cs1 : T_ADDR;
+                int dr = cs0 >= 0 ? cs0 : T_ACC;
+                if (!fa)
+                    rd(F, a->vreg, base);
                 for (int q = 0; q < pl[k].nstk; q++) {
                     long off = (long)(pl[k].nreg + q) * 4;
                     int last = off + 4 > a->size;
@@ -4606,26 +5072,40 @@ static void gen_ins(struct t_fn *F, int n)
                      * object would be a load nothing put there. */
                     if (last && (a->size & 3)) {
                         for (long b = off; b < a->size; b++) {
-                            ldst_must(t, T_ACC, T_ADDR, b, 1, 0, 0);
+                            if (fa) fb_ld(F, dr, fo + b, 1, 0);
+                            else ldst_must(t, dr, base, b, 1, 0, 0);
                             /* the outgoing area is at the live sp, which
                              * after a VLA is not the frame base */
-                            ldst_must(t, T_ACC, T_SP,
+                            ldst_must(t, dr, T_SP,
                                        pl[k].stk + (long)q * 4 + (b - off),
                                        1, 0, 1);
                         }
                     } else {
-                        ldst_must(t, T_ACC, T_ADDR, off, 4, 0, 0);
-                        ldst_must(t, T_ACC, T_SP, pl[k].stk + (long)q * 4,
+                        if (fa) fb_ld(F, dr, fo + off, 4, 0);
+                        else ldst_must(t, dr, base, off, 4, 0, 0);
+                        ldst_must(t, dr, T_SP, pl[k].stk + (long)q * 4,
                                    4, 0, 1);
                     }
                 }
             } else if (a->size > 4) {
-                rd64(F, a->vreg, T_ACC, T_TMP);
-                ldst_must(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
-                ldst_must(t, T_TMP, T_SP, pl[k].stk + 4, 4, 0, 1);
+                if (in_reg(F, a->vreg)) {
+                    int r = F->loc[a->vreg];
+                    if (!t_ldst_pair(t, r, r + 1, T_SP, pl[k].stk, 1)) {
+                        ldst_must(t, r, T_SP, pl[k].stk, 4, 0, 1);
+                        ldst_must(t, r + 1, T_SP, pl[k].stk + 4, 4, 0, 1);
+                    }
+                } else {
+                    int lo = cs0 >= 0 && cs1 >= 0 ? cs0 : T_ACC;
+                    int hi = cs0 >= 0 && cs1 >= 0 ? cs1 : T_TMP;
+                    rd64(F, a->vreg, lo, hi);
+                    ldst_must(t, lo, T_SP, pl[k].stk, 4, 0, 1);
+                    ldst_must(t, hi, T_SP, pl[k].stk + 4, 4, 0, 1);
+                }
             } else {
-                rd(F, a->vreg, T_ACC);
-                ldst_must(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
+                int r = in_reg(F, a->vreg) ? F->loc[a->vreg]
+                                           : cs0 >= 0 ? cs0 : T_ACC;
+                rd(F, a->vreg, r);
+                ldst_must(t, r, T_SP, pl[k].stk, 4, 0, 1);
             }
         }
         /* The VFP arguments next, while every vreg is still where the
@@ -4676,7 +5156,7 @@ static void gen_ins(struct t_fn *F, int n)
             }
             if (npm) {
                 int od[16], os[16];
-                int m = ra_parallel_move(pd, ps, npm, R_SCR, od, os,
+                int m = ra_parallel_move(pd, ps, npm, T_ACC_PM, od, os,
                                          (int)(sizeof od / sizeof od[0]));
                 if (m < 0)
                     internal_error("thumb: a call's argument setup is not "
@@ -4815,6 +5295,28 @@ static void gen_ins(struct t_fn *F, int n)
              * copied to the buffer the caller named, whose address is
              * also what r0 must hold at the return. */
             long n = fn->ret_abi.size;
+            if (F->sret_slot >= 0 && n <= t_block_straight()) {
+                /* Nothing is live past a return, so r0-r3 are this
+                 * copy's: the buffer's address straight into r0, where
+                 * it has to be anyway, the source in r1 unless it is a
+                 * local (the frame base and an offset), and the words
+                 * through r2 -- every access a two-byte one where r10,
+                 * r11 and r12 made each of them four, and no reload of
+                 * r0 after. */
+                long fo = 0, k = 0;
+                int fa = faddr(F, i->a, &fo);
+                if (!fa)
+                    rd(F, i->a, T_R1);
+                fb_ld(F, T_R0, F->sret_slot, 4, 0);
+                for (; k < n; ) {
+                    int sz = k + 4 <= n ? 4 : 1;
+                    if (fa) fb_ld(F, T_R2, fo + k, sz, 0);
+                    else ldst_must(t, T_R2, T_R1, k, sz, 0, 0);
+                    ldst_must(t, T_R2, T_R0, k, sz, 0, 1);
+                    k += sz;
+                }
+                goto ret_epilogue;
+            }
             rd(F, i->a, T_ADDR);
             if (F->sret_slot >= 0) {
                 fb_ld(F, T_TMP, F->sret_slot, 4, 0);
@@ -5198,6 +5700,23 @@ static void gen_ins(struct t_fn *F, int n)
         for (int k = 0; k < n; k++)
             if (F->label_off[fn->jt[i->jt].labels[k]] >= 0)
                 ahead = 0;
+        /* ...and with byte entries, `tbb [pc, rI]`, when every case is
+         * within 510 bytes of it: half the table, which is what clang
+         * picks. A first pass that finds one further marks the switch
+         * (no_tbh 3) and is made again with tbh. */
+        if (ahead && !(F->no_tbh && F->no_tbh[n_ins] == 3)) {
+            int at = t_tbb(t, ri);
+            for (int k = 0; k < n; k++) {
+                want_label(F, t->len, fn->jt[i->jt].labels[k], T_TBB);
+                F->fix[F->nfix - 1].cz_at = at + 4;
+                F->fix[F->nfix - 1].ins = n_ins;
+                code_byte(t, 0);
+            }
+            if (n & 1)
+                code_byte(t, 0);           /* the next instruction's halfword */
+            code_mark_data(t, at + 4, t->len);
+            return;
+        }
         if (ahead) {
             int at = t_tbh(t, ri);
             for (int k = 0; k < n; k++) {
@@ -5514,6 +6033,30 @@ static void lo_mark(int v, void *ctx)
         b->busy |= 2u << F->loc[v];     /* the pair's high register */
 }
 
+/* lo_free's answer for instruction n whatever its op, over n alone. For
+ * a lowering that writes its scratch before it touches any register of
+ * its own: a call's stack arguments are stored before the argument
+ * registers are loaded, so a register holding nothing live into or out
+ * of the call, and none of its operands, is free for them. */
+static unsigned lo_free_at(const struct t_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    struct lo_busy b;
+    unsigned avail = 0xfu;
+    if (!F->lv_busy)
+        return 0;
+    for (int k = 0; k < F->nsave; k++)
+        if (F->used_callee[k] < 8)
+            avail |= 1u << F->used_callee[k];
+    if (F->fb == 7 || fn->has_alloca)
+        avail &= ~(1u << 7);
+    b.F = F;
+    b.busy = F->lv_busy[n];
+    ra_each_use(&fn->ins[n], lo_mark, &b);
+    lo_mark(fn->ins[n].dst, &b);
+    return avail & ~b.busy;
+}
+
 static unsigned lo_free(const struct t_fn *F, int n)
 {
     const struct ir_func *fn = F->fn;
@@ -5563,9 +6106,23 @@ static unsigned t_busy(const struct t_fn *F, int n, int span)
 /* The roles from what `busy` leaves of r9-r11: TMP first, then ADDR,
  * then SCR, each its usual register when that is free; -1 for a role
  * with none left. Without g_t_ext, the fixed r11, r10 and r9. */
+static void t_roles_low(unsigned busy, unsigned low);
 static void t_roles_from(unsigned busy)
 {
+    t_roles_low(busy, 0);
+}
+
+/* ...and when r9-r11 run out, low registers from `low`: what the
+ * instruction leaves free among r0-r3 and the low registers the prologue
+ * saves anyway, for an instruction whose lowering names no low register of
+ * its own (t_role_low_ok). Returns nothing; the roles that took a low
+ * register are in g_t_role_low, which the instruction's LO scratch must
+ * not hand out again. */
+static unsigned g_t_role_low;
+static void t_roles_low(unsigned busy, unsigned low)
+{
     int fr[3], nf = 0;
+    g_t_role_low = 0;
     if (!g_t_ext) {
         g_r_tmp = 11; g_r_addr = 10; g_r_scr = 9;
         return;
@@ -5573,9 +6130,37 @@ static void t_roles_from(unsigned busy)
     for (int r = 11; r >= 9; r--)
         if (!(busy >> r & 1))
             fr[nf++] = r;
+    for (int r = 0; r < 8 && nf < 3; r++)
+        if ((low >> r & 1) && !(busy >> r & 1)) {
+            fr[nf++] = r;
+            g_t_role_low |= 1u << r;
+        }
     g_r_tmp = nf > 0 ? fr[0] : -1;
     g_r_addr = nf > 1 ? fr[1] : -1;
     g_r_scr = nf > 2 ? fr[2] : -1;
+}
+
+/* May instruction n's scratch roles be low registers? When its lowering
+ * names none of its own: lo_op_ok's set, and the 64-bit operations
+ * gen_ins64 makes inline -- arithmetic, shifts, compares, moves, loads and
+ * stores of a pair -- which take their operands where they are and work
+ * in the roles and r12. Not a call, a helper, a divide, an asm. */
+static int t_role_low_ok(const struct t_fn *F, const struct ir_ins *i)
+{
+    if (lo_op_ok(F, i))
+        return 1;
+    if (i->flt || t_op_calls_helper(i))
+        return 0;
+    switch (i->op) {
+    case IR_ADD: case IR_SUB: case IR_AND: case IR_OR: case IR_XOR:
+    case IR_BNOT: case IR_NEG: case IR_MUL: case IR_MULW: case IR_SHL:
+    case IR_SHR: case IR_EXT: case IR_MOV: case IR_CONST: case IR_LOAD:
+    case IR_STORE: case IR_CMP: case IR_SELECT: case IR_LDVAR:
+    case IR_STVAR: case IR_BITCAST: case IR_BRZ: case IR_BRNZ:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 /* lo_free's liveness, as registers: for each instruction, lo_mark of
@@ -5671,6 +6256,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.floc = NULL; F.nfsave = 0;
     F.bc_end = F.bc_fix = -1;
     F.fl_end = -1;
+    F.ls_end = -1;
     F.shortb = NULL; F.nshortb = 0;
     F.scr_save = T_SCR_ALL;
     F.fb = T_SP;
@@ -5852,6 +6438,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     layout(&F);
     if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO"))
         F.lv_busy = lo_busy_map(&F);
+    t_lit64_plan(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
      * jumps to so the frame size is written down once. */
@@ -5876,6 +6463,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     int restarted = 0;           /* a first pass made again: reset as for a later one */
     for (int pass = 0; pass < 3; pass++) {
     int redo0 = 0;
+    if (!F.lp_planned)
+        F.lp_n = 0;              /* else the planned order (t_lit64_fit) */
+    F.lp_nsite = 0;
     g_t_scr_used = 0;
     t_roles_from(0);            /* r9-r11, or all three free */
     F.fb = T_SP;                 /* until the prologue sets r7 */
@@ -5893,6 +6483,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.skip_next = 0;
         F.bc_end = F.bc_fix = -1;
         F.fl_end = -1;
+        F.ls_end = -1;
         F.va_regsave = F.va_first = -1;
         F.shortb = shortb;
         F.nshortb = nshortb;
@@ -6173,10 +6764,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             for (int q = 0; q < pl.nstk; q++) {
                 long src = base + pl.stk + (long)q * 4;
                 long dst = F.slot[i] + (long)(pl.nreg + q) * 4;
-                fb_ld(&F, T_ACC, src, 4, 0);
-                if (!t_ldst_imm(t, T_ACC, F.fb, dst, 4, 0, 1)) {
+                /* Through a low register the prologue has just pushed
+                 * when there is one: nothing has been put in it yet --
+                 * the parameters bound for r4-r7 move after this loop --
+                 * and `ldr r4, [sp, #n]; str r4, [sp, #m]` is four
+                 * bytes where the same through r12 is eight. */
+                int ds = T_ACC;
+                for (int k = 0; k < F.nsave && ds == T_ACC; k++)
+                    if (F.used_callee[k] >= 4 && F.used_callee[k] < 8 &&
+                        !(F.used_callee[k] == 7 &&
+                          (F.fb == 7 || fn->has_alloca)))
+                        ds = F.used_callee[k];
+                fb_ld(&F, ds, src, 4, 0);
+                if (!t_ldst_imm(t, ds, F.fb, dst, 4, 0, 1)) {
                     fb_addr(&F, T_ADDR, dst);
-                    ldst_must(t, T_ACC, T_ADDR, 0, 4, 0, 1);
+                    ldst_must(t, ds, T_ADDR, 0, 4, 0, 1);
                 }
             }
         }
@@ -6185,7 +6787,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
          * already saved it, and it holds nothing of its own yet. */
         if (npmv) {
             int od[RA_MAXPOOL * 2], os[RA_MAXPOOL * 2];
-            int n = ra_parallel_move(pmv_dst, pmv_src, npmv, R_SCR, od, os,
+            int n = ra_parallel_move(pmv_dst, pmv_src, npmv, T_ACC_PM, od, os,
                                      (int)(sizeof od / sizeof od[0]));
             if (n < 0)
                 internal_error("thumb: %s: the prologue's parameter "
@@ -6224,9 +6826,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             if (!F.lv_busy)
                 g_t_role_fail = 1;     /* no liveness: nothing is known
                                         * free, so this attempt cannot be */
-            t_roles_from(t_busy(&F, i, 2));
+            {
+                unsigned busy = t_busy(&F, i, 2), low = 0;
+                int ok = !getenv("EMBCC_T_NOLOWROLE");
+                ok = ok && t_role_low_ok(&F, &fn->ins[i]);
+                if (ok) {
+                    low = 0xfu;
+                    for (int k = 0; k < F.nsave; k++)
+                        if (F.used_callee[k] < 8)
+                            low |= 1u << F.used_callee[k];
+                    if (F.fb == 7 || fn->has_alloca)
+                        low &= ~(1u << 7);
+                }
+                t_roles_low(busy, low);
+            }
+        } else {
+            g_t_role_low = 0;
         }
-        F.lofree = lo_free(&F, i);
+        F.lofree = lo_free(&F, i) & ~g_t_role_low;
         gen_ins(&F, i);
         F.lofree = 0;
         if (F.skip_next) {      /* the comparison emitted its branch too,
@@ -6295,6 +6912,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     }                                   /* the epilogue */
 
+    if (!t_lit64_flush(&F, pass))
+        redo0 = 1;                  /* a constant out of reach: again */
     for (i = 0; i < F.nfix; i++) {
         int target = F.label_off[F.fix[i].label];
         if (target < 0) {
@@ -6318,6 +6937,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             memcpy(t->p + F.fix[i].at, pair.p, (size_t)pair.len);
             free(pair.p);
             free(pair.drange);
+        } else if (F.fix[i].cond == T_TBB) {
+            long d = (long)target - F.fix[i].cz_at;
+            if (d < 0 || d > 2L * 255 || (d & 1)) {
+                /* tbh for that switch, from a first pass made again: 4
+                 * while this pass's other entries for it land here */
+                if (pass == 0 && F.fix[i].ins >= 0 &&
+                    (F.no_tbh[F.fix[i].ins] == 0 ||
+                     F.no_tbh[F.fix[i].ins] == 4)) {
+                    F.no_tbh[F.fix[i].ins] = 4;
+                    redo0 = 1;
+                    continue;
+                }
+                internal_error("thumb: %s: a tbb entry cannot reach its "
+                               "label", fn->name);
+            }
+            t->p[F.fix[i].at] = (unsigned char)(d / 2);
         } else if (F.fix[i].cond == T_TBH) {
             long d = (long)target - F.fix[i].cz_at;
             if (d < 0 || d > 2L * 65535 || (d & 1)) {
@@ -6377,6 +7012,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         for (i = 0; i < fn->nins; i++)
             if (F.no_tbh[i] == 2)
                 F.no_tbh[i] = 1;
+            else if (F.no_tbh[i] == 4)
+                F.no_tbh[i] = 3;
         restarted = 1;
         pass = -1;
         continue;
@@ -6464,6 +7101,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.fscr);
     free(F.floc);
     free(F.lv_busy);
+    free(F.lp_use);
+    free(F.lp_val);
+    free(F.lp_site);
 }
 
 /* With the allocator on and no FPU, a function is generated with the pair
@@ -6553,7 +7193,14 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     if (!lr_forced && target_thumb_arch() != 6 && !t_isa_a32)
         lv[nl++] = 0;
     const char *ek = getenv("EMBCC_T_EXT");
-    int ext_ok = target_thumb_arch() != 6 && !(ek && *ek && atoi(ek) == 0);
+    /* ARMv6-M too, unless an asm is in the function: its operands may be
+     * pinned to r6 and r7 (the letters S and D), which v6m.c's fixed
+     * scratch layout assumes are never a value's home. */
+    int has_asm = 0;
+    for (int k = 0; k < fn->nins; k++)
+        has_asm |= fn->ins[k].op == IR_ASM;
+    int ext_ok = (target_thumb_arch() != 6 || !has_asm) &&
+                 !(ek && *ek && atoi(ek) == 0);
     /* EMBCC_T_EXT=1: an attempt with r9-r11 wins whenever one succeeds,
      * whatever its size, so tests can drive the path. */
     int ext_pref = ext_ok && ek && *ek && atoi(ek) != 0;
@@ -6829,6 +7476,11 @@ int *tcg_pair_alloc(struct ir_func *fn, const char *wide, const char *excl,
 }
 const struct ra_target *tcg_ra(void) { return &THUMB_RA; }
 int tcg_regalloc(void) { return g_t_regalloc; }
+int tcg_ext(void) { return g_t_ext; }
+void tcg_role_fail(void) { g_t_role_fail = 1; }
+unsigned *tcg_lo_busy_map(const struct t_fn *F) { return lo_busy_map(F); }
+unsigned tcg_busy(const struct t_fn *F, int n, int span) { return t_busy(F, n, span); }
+int tcg_lo_op_ok(const struct t_fn *F, const struct ir_ins *i) { return lo_op_ok(F, i); }
 int tcg_o0(void) { return g_t_o0; }
 int tcg_pairs(void) { return g_t_pairs; }
 void tcg_reset_taken(void) { g_t_taken = 0; }

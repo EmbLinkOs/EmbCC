@@ -243,6 +243,7 @@ void target_set_jump_tables(int on);   /* -f[no-]jump-tables */
 /* Under -Os, the fewest cases a dense switch needs to be a table rather
  * than a tree of compares: 4 where the dispatch is ARMv7-M's cmp, bhs,
  * tbh and two bytes an entry; 6 elsewhere. */
+int target_switch_clusters(void);
 int target_switch_table_min_os(void);
 /* Does the current backend lower this op to a CALL of a runtime helper
  * (soft-float arithmetic, a 64-bit divide, an __int128 op)? The
