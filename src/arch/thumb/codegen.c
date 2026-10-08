@@ -111,6 +111,10 @@ static int pm_reg(int r) { return r == R_SCR ? t_scr(r) : r; }
  * r12, so its moves keep R_SCR. */
 #define T_ACC_PM 12
 
+/* Their numbers, for comparing a register against one (R_*'s reason). */
+#define B_LO_N R_ADDR
+#define B_HI_N R_SCR
+#define A_HI_N R_TMP
 #define A_LO T_ACC      /* r12 */
 #define A_HI T_TMP      /* r11 */
 #define B_LO T_ADDR     /* r10 */
@@ -2945,18 +2949,59 @@ static int gen_ins64(struct t_fn *F, int n)
         return 1;
     }
 
-    case IR_MUL:
+    case IR_MUL: {
         /* (a_hi:a_lo) * (b_hi:b_lo), keeping 64 bits: the two cross
          * products contribute only to the high word, and the low
-         * product's carry comes out of umull's own high half. */
-        rd64(F, i->a, A_LO, A_HI);
-        operand_b64(F, i, B_LO, B_HI);
-        t_mul(t, B_HI, A_LO, B_HI);              /* a_lo * b_hi */
-        t_mla(t, B_HI, A_HI, B_LO, B_HI);        /* += a_hi * b_lo */
-        t_mull(t, A_LO, A_HI, A_LO, B_LO, 0);    /* a_lo * b_lo */
-        t_alu_reg(t, T_OP_ADD, A_HI, A_HI, B_HI, 0);
-        wr64(F, i->dst, A_LO, A_HI);
+         * product's carry comes out of umull's own high half.
+         *
+         * Each operand where it is -- a pair is read in place, where it
+         * was copied into A and B first -- and a constant whose high word
+         * is zero (`x * 33`) has no a_lo * b_hi term at all. The cross
+         * products go into a register none of the operands or the result
+         * is in, then umull writes the result and the sum lands on its
+         * high word. */
+        int al, ah, bl, bh = -1, dl, dh, tt = -1;
+        src64(F, i->a, A_LO, R_TMP, &al, &ah);
+        if (i->imm_b && ((unsigned long)i->imm >> 32) == 0) {
+            int c[3] = { B_LO_N, B_HI_N, A_HI_N }, k;
+            for (k = 0; k < 3 && (c[k] == al || c[k] == ah); k++)
+                ;
+            bl = t_scr(c[k]);
+            t_mov_imm_dead_flags(t, bl, (long)(i->imm & 0xffffffffL));
+        } else {
+            srcb64(F, i, &bl, &bh);
+        }
+        dst64(F, i->dst, &dl, &dh);
+        {
+            int c[5] = { 12, B_LO_N, B_HI_N, A_HI_N, -2 }, k;
+            for (k = 0; k < 4 && tt < 0; k++)
+                if (c[k] != al && c[k] != ah && c[k] != bl && c[k] != bh &&
+                    c[k] != dl && c[k] != dh)
+                    tt = c[k] == 12 ? 12 : t_scr(c[k]);
+            /* every scratch taken: b's high word, when it is a copy, is
+             * read by the first multiply and then free (the old shape) */
+            if (tt < 0 && bh >= 0 && !(i->b >= 0 && !i->imm_b &&
+                                       in_reg(F, i->b)))
+                tt = bh;
+            /* with r9-r11 as homes a role may have no register here:
+             * that fails the attempt, as any role would */
+            if (tt < 0 && g_t_ext)
+                tt = t_scr(-1);
+            if (tt < 0)
+                internal_error("thumb: %s: no register for a 64-bit "
+                               "multiply's cross products", fn->name);
+        }
+        if (bh >= 0) {
+            t_mul(t, tt, al, bh);                /* a_lo * b_hi */
+            t_mla(t, tt, ah, bl, tt);            /* += a_hi * b_lo */
+        } else {
+            t_mul(t, tt, ah, bl);                /* a_hi * b_lo */
+        }
+        t_mull(t, dl, dh, al, bl, 0);            /* a_lo * b_lo */
+        t_alu_reg(t, T_OP_ADD, dh, dh, tt, 0);
+        wr64(F, i->dst, dl, dh);
         return 1;
+    }
 
     case IR_SHL: case IR_SHR: {
         int op = i->op == IR_SHL ? T_SH_LSL
