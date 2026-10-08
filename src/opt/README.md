@@ -1,9 +1,13 @@
 # src/opt
 
 IR-level optimizer — per-function passes over EmbIR, run at `-O1` and above
-(`opt_run`), iterated to a fixpoint. Register allocation and stack-slot
-coalescing are **not** here — they need the frame/register model and live in
-the backends in `../arch/<arch>/codegen.c`. This module is purely IR→IR.
+(`opt_run`), iterated to a fixpoint. `opt.c` is the pass manager and each pass
+is a file of its own; `opt_int.h` declares what they share. The file list is in
+[docs/internals/optimizer.md](../../docs/internals/optimizer.md#the-files).
+
+Register allocation and stack-slot coalescing are **not** here — they need the
+frame/register model and live in the backends in `../arch/<arch>/codegen.c`.
+This module is purely IR→IR.
 
 Two families. The **local** passes are proven safe by EmbIR's single-assignment
 temporaries: a vreg with exactly one definition holds an invariant value, so no

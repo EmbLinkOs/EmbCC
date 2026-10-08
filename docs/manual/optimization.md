@@ -388,7 +388,7 @@ A loop over arrays reached through a pointer is not vectorized.
 
 Default: on at `-O2` for x86-64. Off at `-Os`.
 
-<!-- BUG, reported to the lead: vec_op_char (opt.c) does not check
+<!-- BUG, reported to the lead: vec_op_char (src/opt/vectorize.c) does not check
      i->flt, so `float a[N], b[N], c[N]; a[i] = b[i] + c[i]` with a
      constant N is vectorized with paddd (integer add) on x86-64 at -O2.
      Seen with embcc inspect ir v.c -O2 / llvm-objdump. The note below

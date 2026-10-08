@@ -63,6 +63,48 @@ endif
 # (selection, the backend contract, the code buffer), then one directory per
 # architecture — everything x86-64-only under x86_64/, aarch64-only under
 # aarch64/ (src/arch/README.md; docs/manual/targets.md for what each supports).
+# The optimizer: the pass manager (opt.c) and one file per pass.
+OPT_SRCS := src/opt/opt.c \
+	src/opt/alias.c \
+	src/opt/attrs.c \
+	src/opt/cfg.c \
+	src/opt/cfgclean.c \
+	src/opt/copyprop.c \
+	src/opt/dce.c \
+	src/opt/divmagic.c \
+	src/opt/dse.c \
+	src/opt/fold.c \
+	src/opt/gcse.c \
+	src/opt/guardjump.c \
+	src/opt/idiom.c \
+	src/opt/ifconv.c \
+	src/opt/immfold.c \
+	src/opt/inline.c \
+	src/opt/ivsr.c \
+	src/opt/joincopies.c \
+	src/opt/latch.c \
+	src/opt/licm.c \
+	src/opt/loadcse.c \
+	src/opt/lvn.c \
+	src/opt/mem2reg.c \
+	src/opt/memfwd.c \
+	src/opt/pre.c \
+	src/opt/rangecheck.c \
+	src/opt/reassoc.c \
+	src/opt/rotate.c \
+	src/opt/sccp.c \
+	src/opt/sink.c \
+	src/opt/splitloops.c \
+	src/opt/sroa.c \
+	src/opt/swthread.c \
+	src/opt/tailmerge.c \
+	src/opt/tailrec.c \
+	src/opt/unroll.c \
+	src/opt/util.c \
+	src/opt/vectorize.c \
+	src/opt/verify.c \
+	src/opt/x86loadop.c
+
 SRCS := \
 	$(PLATFORM_SRCS) \
 	src/driver/main.c \
@@ -105,7 +147,7 @@ SRCS := \
 	src/ir/irgen.c \
 	src/ir/irprint.c \
 	src/ir/irparse.c \
-	src/opt/opt.c \
+	$(OPT_SRCS) \
 	src/debug/dwarf.c \
 	src/debug/eh.c \
 	src/elf/write.c \
@@ -408,7 +450,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
-             src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
+             $(OPT_SRCS) src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
              src/arch/code.c src/arch/regalloc.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \

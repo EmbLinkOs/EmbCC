@@ -1,6 +1,14 @@
 # Redesign: from EmbLinkOS's compiler to an embedded toolchain
 
-Status: **proposal, for approval.** Nothing here has moved yet.
+Status: **approved 2026-10-08, in progress.** Done so far:
+- branding: the README, the documentation index, the overview, `--version`;
+- `verify/fuzz`: the fuzzers in the tree;
+- EmbSim phase 1: modules, and a GDB server;
+- the backend registry (`src/arch/backends.c`) and each target's `-m`
+  options in `src/arch/<arch>/options.c`;
+- the optimizer split: `src/opt/opt.c` is the pass manager and each pass
+  is a file of its own (40 files instead of one of 17,551 lines), with
+  the compiler's output byte-identical.
 
 ## Why
 
@@ -119,7 +127,8 @@ In order of value:
 2. **The optimizer as passes.** A small pass manager with one file per
    pass. Each pass has its documented contract, its `-f` switch and its
    remarks. `opt.c` becomes about a dozen files. Byte-identity
-   guarantees the split changes nothing.
+   guarantees the split changes nothing. *(Done: 40 files, see
+   [The optimizer](optimizer.md#the-files).)*
 3. **The backend interface.** The parts every backend repeats move into
    shared code with per-target hooks:
    - argument placement (`place_arg`), parallel moves, the frame layout;

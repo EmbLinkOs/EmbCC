@@ -428,7 +428,7 @@ int target_thumb_hf_name(void);
 
 /* Thumb's answer to "may the optimizer fold this constant into op's
  * immediate operand" (arch/thumb/codegen.c). Asked only by the optimizer
- * (opt.c), which is linked only into embcc: target.c is also linked into
+ * (src/opt), which is linked only into embcc: target.c is also linked into
  * the standalone encoding checkers, which carry no backend, so it must
  * not name one. */
 int thumb_imm_foldable(int op, long imm);

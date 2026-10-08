@@ -1,6 +1,6 @@
 # The optimizer
 
-This page describes `src/opt/opt.c`, the IR-to-IR optimizer that runs
+This page describes `src/opt/`, the IR-to-IR optimizer that runs
 between IR generation and code generation. It covers the order in which
 the passes run, what each pass does and what it requires, the analyses
 they share, how the `-O` levels and `-f<pass>` flags select them, the IR
@@ -13,6 +13,56 @@ The optimizer is purely IR to IR. Register allocation, stack-slot
 sharing and instruction selection belong to the backends; see
 [Register allocation](register-allocation.md) and
 [Backends](backends.md).
+
+## The files
+
+`src/opt/opt.c` is the pass manager, and each pass is a file of its own.
+What the files share is declared in `src/opt/opt_int.h`, which only
+`src/opt` includes; the rest of the compiler includes `opt.h`.
+
+| File | What is in it |
+|---|---|
+| `opt.c` | The pass table (`g_pass`, `-f<name>`), `opt_func` (the order of the passes), `opt_run` (the levels, the unit-level steps) |
+| `opt_int.h` | Declarations shared between the files |
+| `util.c` | Operation classes (`writes_temp`, `is_pure`), the operand and label walkers (`each_read`, `each_label`), definitions (`compute_defs`), known constants, the instruction buffer (`ib_push`) |
+| `cfg.c` | Basic blocks, reverse postorder, dominators, dominance frontiers, natural loops, and `opt_cfg_dump` |
+| `alias.c` | Alias analysis: which object and which bytes a memory access touches |
+| `fold.c` | Constant folding, known-zero bits, block-local constants, `long double` constants |
+| `lvn.c` | Local value numbering and the value table GCSE shares |
+| `copyprop.c` | Copy propagation, global and block-local |
+| `dce.c` | Dead-code elimination |
+| `mem2reg.c` | SSA construction and destruction for promotable locals |
+| `reassoc.c` | Reassociation, and a constant index folded into the address |
+| `gcse.c` | Dominator-scoped global CSE |
+| `divmagic.c` | Division by a constant, the widening multiply, divisibility tests, a remainder from its quotient |
+| `ifconv.c` | If-conversion to selects |
+| `cfgclean.c` | Jump threading and block merging |
+| `tailrec.c` | Tail recursion into a loop |
+| `attrs.c` | Inferring which functions are `pure` or `const`, so a call to one stops being a barrier |
+| `dse.c` | Dead-store elimination |
+| `loadcse.c` | Global redundant-load elimination |
+| `pre.c` | Partial redundancy elimination |
+| `licm.c` | Loop-invariant code motion, memory promotion in loops |
+| `rotate.c` | Loop rotation |
+| `guardjump.c` | -Os on Cortex-M: entering a rotated loop at its test |
+| `tailmerge.c` | -Os on ARM: one copy of identical block tails |
+| `vectorize.c` | Automatic vectorization |
+| `idiom.c` | Copy and clear loops, recognised as `memcpy` and `memzero` |
+| `ivsr.c` | Induction-variable strength reduction |
+| `unroll.c` | Loop unrolling |
+| `swthread.c` | Switch threading |
+| `sccp.c` | Conditional constant propagation, unreachable blocks |
+| `memfwd.c` | Store forwarding, read-only globals, union punning |
+| `immfold.c` | Sinking constants to their uses, immediate operands, sign tests, narrowed stores |
+| `inline.c` | The inliner |
+| `sroa.c` | Scalar replacement of aggregates, compare-exchange locals |
+| `verify.c` | The IR verifier (`EMBCC_VERIFY`) |
+| `splitloops.c` | Splitting a live range around a loop |
+| `rangecheck.c` | Two-sided range checks |
+| `joincopies.c` | Coalescing a join's copies |
+| `sink.c` | Moving an update or an address next to its use |
+| `latch.c` | A loop's back-edge copies, and copies a jump takes with it |
+| `x86loadop.c` | x86-64: a load moved into the operation it feeds |
 
 ## Where the optimizer runs
 
@@ -45,7 +95,7 @@ After `opt_run` returns, and only at `-O1` and above, the driver removes
 `static` functions that no root reaches (roots are non-`static`
 functions, constructors and destructors, `__attribute__((used))`
 functions, targets named by top-level asm, and functions whose address
-appears in a static initializer). This is not part of `opt.c`, but it is
+appears in a static initializer). This is not part of `src/opt`, but it is
 what deletes a callee that the inliner absorbed.
 
 ### Inspecting the result
@@ -947,10 +997,14 @@ compare `embcc inspect ir` output with and without the suspect pass.
 
 ## Adding a pass
 
-1. Write `static int pass_NAME(struct ir_func *fn)` that returns nonzero
+1. Write `int pass_NAME(struct ir_func *fn)` in `src/opt/NAME.c`, which
+   includes `opt_int.h`, and declare it there. It returns nonzero
    exactly when it changed the function. A pass that reports a change
-   when it made none prevents convergence.
-2. Decide where it runs, using the rules in [The order](#the-order). A
+   when it made none prevents convergence. Add the file to `OPT_SRCS`
+   in the Makefile and regenerate `build.ebm`
+   (`sh tools/gen-embbuild-manifest.sh > build.ebm`).
+2. Decide where it runs in `opt_func` (`opt.c`), using the rules in
+   [The order](#the-order). A
    pass in the inner fixpoint must not undo what another inner pass does.
    A pass in the outer round must be followed by the cleanup it needs and
    must set `outer = 1` when it changes something.
@@ -984,14 +1038,14 @@ To find the sites, search for an existing operation of the same shape:
 `IR_SWITCH` and `IR_IGOTO` for terminators, `IR_UD2` for an instruction
 with no successor.
 
-In `src/opt/opt.c`:
+In `src/opt/`:
 
-- `writes_temp`, `is_pure`, `def_target` and `compute_defs` (what it
-  defines);
-- `each_read` (what it reads) and `each_label` (which labels it names);
-- `writes_memory`, `vn_key`, `gcse_numberable`, `lcse_kills_mem` (memory
-  effects and value numbering);
-- `build_cfg` (block leaders and successors);
+- `util.c`: `writes_temp`, `is_pure`, `def_target` and `compute_defs`
+  (what it defines), `each_read` (what it reads) and `each_label` (which
+  labels it names);
+- `writes_memory`, `vn_key` (`lvn.c`), `gcse_numberable` (`gcse.c`),
+  `lcse_kills_mem` (`loadcse.c`): memory effects and value numbering;
+- `build_cfg` (`cfg.c`): block leaders and successors;
 - `pass_mem2reg` (its terminator test and per-edge phi copies);
 - `pass_cfgclean` (label forwarding, reachability, code after an
   unconditional transfer);
@@ -1001,7 +1055,7 @@ In `src/opt/opt.c`:
   `pass_splitloops`, `pass_sinkaddr`;
 - the inliner: `inlinable`, `remap_ins` (including the label offset) and
   table copying in `inline_call`;
-- `verify_func`.
+- `verify_func` (`verify.c`).
 
 In `src/arch/regalloc.c`: `ra_ins_def`, `ra_each_use`, the successor
 computation in `ra_live_compute` (a terminator has no fall-through

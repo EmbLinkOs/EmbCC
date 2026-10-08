@@ -1974,7 +1974,7 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
         struct ir_ins *in = &fn->ins[i];
         int vs[4]; int nv = 0;
         vs[nv++] = in->dst; vs[nv++] = in->a; vs[nv++] = in->b;
-        /* `c` names a value only for these (opt.c, each_read): elsewhere
+        /* `c` names a value only for these (src/opt/util.c, each_read): elsewhere
          * it is 0 -- irgen's emit and the optimizer's ins_blank leave it
          * there -- or a vector shift's constant count. Read regardless,
          * it made every instruction a reference to vreg 0, which in a

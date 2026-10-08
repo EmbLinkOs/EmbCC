@@ -301,7 +301,7 @@ calls() {
 }
 for t in thumbv7em-none-eabi riscv32-unknown-elf x86_64-elf aarch64-elf avr; do
     for o in -O2 -Os; do
-        # AVR's -Os budget copies nothing this size (opt.c), so there is
+        # AVR's -Os budget copies nothing this size (src/opt/inline.c), so there is
         # no inlining there for the flag to stop
         [ $t = avr ] && [ $o = -Os ] && continue
         [ "$(calls $t $o helper)" = 0 ] ||
