@@ -165,7 +165,23 @@ enum ir_op {
                 * which is why it takes a half at a time -- and why a
                 * widening sum needs two accumulators. */
 
-    IR_OPCOUNT    /* not an opcode: the table size, so print and parse can
+    /* ---- the 32x32->64 multiply, for the 32-bit machines -----------
+     *
+     * Both read their operands as 32-bit values, whatever `w` says, and
+     * `sign` says how: 1 signed by signed, 0 unsigned by unsigned. They
+     * exist because the IR's only multiply keeps the low half at its
+     * width, so a 32-bit machine that HAS a widening multiply (umull,
+     * mulhu, multu, mulhwu, umul and %y...) had to be handed a 64-bit
+     * multiply of two extended values -- four multiplies on RV32 -- or,
+     * for a division by a constant, nothing at all. Emitted only where
+     * target_has_mulh() says the backend lowers them; the folders take
+     * them by the same definition (fold_bin). */
+    IR_MULH,   /* dst = the HIGH 32 bits of the 64-bit product a * b
+                * (w 4, sign) -- mulh/mulhu, smull/umull's high register */
+    IR_MULW,   /* dst = the whole 64-bit product of 32-bit a and b
+                * (w 8, sign) -- mul + mulh, smull/umull, mult/multu */
+
+    IR_OPCOUNT   /* not an opcode: the table size, so print and parse can
                    * agree on how many there are */
 };
 
@@ -328,7 +344,14 @@ struct ir_ins {
                                 * (a Homogeneous Floating-point Aggregate
                                 * travels in v registers), which the SysV
                                 * classes above cannot express */
-    } argv[MAX_PARAMS];
+    } *argv;                 /* IR_CALL: nargs of them, out of line. They
+                              * were MAX_PARAMS inline in EVERY instruction
+                              * -- 2.6 KB of an ir_ins's 2.8 -- and each pass
+                              * that rebuilds a function copies all of it.
+                              * A call's array is its own: an instruction
+                              * copied while the original stays (the
+                              * inliner) takes ir_args_copy, and the verifier
+                              * refuses two live calls sharing one. */
     int nargs;
     /* IR_CALL returning a struct: its size, classification, and the
      * caller-side scratch the result lands in. nclass 0 means MEMORY,
@@ -575,6 +598,9 @@ void ir_print_unit(struct outbuf *b, const struct ir_unit *u);
 void ir_print_func(struct outbuf *b, const struct ir_func *f);
 /* An opcode's mnemonic, so a diagnostic can name the instruction. */
 const char *ir_opname(enum ir_op op);
+/* A call's argument array of its own, with n entries (at least one) */
+struct ir_arg *ir_args_new(int n);
+struct ir_arg *ir_args_copy(const struct ir_arg *a, int n);
 /* The inverse, for the parser (src/ir/irparse.c): -1 when unknown. */
 int ir_op_from_name(const char *n);
 /* Read EmbIR back from its textual form (src/ir/irparse.c). `text` is

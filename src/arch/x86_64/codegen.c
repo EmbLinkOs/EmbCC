@@ -5825,6 +5825,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_mov_reg_reg(text, REG_RAX, REG_RDX);
             cg_store(text, sd, i->b, 8);
             break;
+        case IR_MULH: case IR_MULW:
+            /* the 32-bit machines' widening multiply: a 64-bit target
+             * multiplies the extended values (target_has_mulh) */
+            internal_error("a 32-bit widening multiply reached the x86-64 "
+                           "code generator");
+            break;
         case IR_OPCOUNT:                 /* not an opcode (ir.h) */
             internal_error("IR_OPCOUNT reached code generation");
         }

@@ -45,6 +45,7 @@ int ra_ins_def(const struct ir_ins *in)
      * across it. */
     case IR_VLOAD: case IR_VBIN: case IR_VSPLAT: case IR_VREDADD:
     case IR_VWIDEN: case IR_SELECT:
+    case IR_MULH: case IR_MULW:
         return in->dst;
     case IR_ASM:              /* its `val` output's value, or -1 */
         return in->dst;
@@ -85,6 +86,7 @@ void ra_each_use(const struct ir_ins *s, void (*cb)(int v, void *ctx),
     case IR_CMP: case IR_STORE: case IR_MEMCPY: case IR_MEMZERO:
     case IR_XCHG: case IR_XADD: case IR_ARMW:
     case IR_VSTORE: case IR_VBIN:
+    case IR_MULH: case IR_MULW:
         U(s->a); U(s->b); break;
     case IR_CMPXCHG: case IR_CAS: case IR_CAS16: case IR_SELECT:
         U(s->a); U(s->b); U(s->c); break;
@@ -1142,9 +1144,9 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             /* A struct or float return reads its slot raw on every
              * backend; a scalar one only where the backend can take it
              * from a register. */
-            if (fn->ret_abi.is_struct ||
-                (in->flt && !t->float_in_gpr && !t->fp_reads_gpr
-                     ? !fp : !t->ret_scalar_in_reg))
+            if (fn->ret_abi.is_struct ? t->memcpy_addr_in_reg < 2
+                : in->flt && !t->float_in_gpr && !t->fp_reads_gpr
+                     ? !fp : !t->ret_scalar_in_reg)
                 OPAQUE(in->a);
             break;
         case IR_CALL:
@@ -1164,11 +1166,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * everywhere. A scalar-integer one is moved straight into
              * its argument register only by a backend that knows how. */
             for (int k = 0; k < in->nargs; k++)
-                if (in->argv[k].is_struct ||
-                    (in->argv[k].cls[0] == CLASS_SSE && !t->float_in_gpr
-                         ? !fp : !t->call_int_arg_in_reg))
+                if (in->argv[k].is_struct ? t->memcpy_addr_in_reg < 2
+                    : in->argv[k].cls[0] == CLASS_SSE && !t->float_in_gpr
+                         ? !fp : !t->call_int_arg_in_reg)
                     OPAQUE(in->argv[k].vreg);
-            if (in->retsize || (in->flt && !t->float_in_gpr ? !fp : 0))
+            if (in->retsize ? t->memcpy_addr_in_reg < 2
+                : in->flt && !t->float_in_gpr ? !fp : 0)
                 OPAQUE(in->dst);                     /* float/struct result */
             break;
         case IR_ASM:
@@ -1965,7 +1968,16 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
     for (int i = 0; i < nins; i++) {
         struct ir_ins *in = &fn->ins[i];
         int vs[4]; int nv = 0;
-        vs[nv++] = in->dst; vs[nv++] = in->a; vs[nv++] = in->b; vs[nv++] = in->c;
+        vs[nv++] = in->dst; vs[nv++] = in->a; vs[nv++] = in->b;
+        /* `c` names a value only for these (opt.c, each_read): elsewhere
+         * it is 0 -- irgen's emit and the optimizer's ins_blank leave it
+         * there -- or a vector shift's constant count. Read regardless,
+         * it made every instruction a reference to vreg 0, which in a
+         * function with no locals or parameters is a temp: `double m(void)
+         * { return 2.0 * 3.0; }` kept a 16-byte frame on x86-64 for it. */
+        if (in->op == IR_CMPXCHG || in->op == IR_CAS || in->op == IR_CAS16 ||
+            in->op == IR_SELECT)
+            vs[nv++] = in->c;
         for (int j = 0; j < nv; j++) {
             int v = vs[j];
             if (v >= nvars && v < nvr) {
@@ -2198,6 +2210,8 @@ static int nhs_reader(const struct ir_func *fn, const struct ir_ins *i,
     case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
     case IR_CMP: case IR_BRZ: case IR_BRNZ: case IR_NEG: case IR_BNOT:
         return i->w == 4 && !i->flt;
+    case IR_MULH: case IR_MULW:     /* 32-bit operands at either width */
+        return 1;
     case IR_MOV:
         return i->w == 4;
     case IR_EXT:

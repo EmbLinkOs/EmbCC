@@ -214,6 +214,7 @@ static char *wide_map(struct ir_func *fn)
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
+        case IR_MULW:             /* two words in, a 64-bit product out */
             w[i->dst] = 1;
             break;
         default:
@@ -1148,6 +1149,22 @@ static int gen_ins64(struct rx_fn *F, int n)
         rx_rr(t, RX_ADD, SCR, A_HI);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
+    case IR_MULW: {
+        /* emul/emulu: rd:rd+1 = rd * src, the whole product of two words.
+         * Into the result's own pair when it has one; b first, into SCR
+         * when the pair is where it lives, since a is copied over it. */
+        int dl = in_reg(F, i->dst) ? F->loc[i->dst] : A_LO, rb_;
+        if (in_reg(F, i->b) && F->loc[i->b] != dl && F->loc[i->b] != dl + 1) {
+            rb_ = F->loc[i->b];
+        } else {
+            rd(F, i->b, SCR);
+            rb_ = SCR;
+        }
+        rd(F, i->a, dl);
+        rx_rr(t, i->sign ? RX_EMUL : RX_EMULU, rb_, dl);
+        wr64(F, i->dst, dl, dl + 1);
+        return 1;
+    }
     case IR_NEG:
         rx_ri(t, RX_MOV, 0, A_LO);
         rx_ri(t, RX_MOV, 0, A_HI);
@@ -1669,6 +1686,17 @@ static void gen_ins(struct rx_fn *F, int n)
             op_b(F, op, i, d, other_scr(d));
         }
         wrote(F, i->dst, d);
+        return;
+    }
+    case IR_MULH: {
+        /* the high word of a 32 x 32 product: emul(u) into r14:r15, and
+         * r15 -- neither ever holds a value across an instruction */
+        int rb_ = in_reg(F, i->b) ? F->loc[i->b] : SCR;
+        if (rb_ == SCR)
+            rd(F, i->b, SCR);
+        rd(F, i->a, A_LO);
+        rx_rr(t, i->sign ? RX_EMUL : RX_EMULU, rb_, A_LO);
+        wrote(F, i->dst, A_HI);
         return;
     }
     case IR_DIV: case IR_MOD: {

@@ -45,6 +45,8 @@ void a32_mul(struct code *c, int rd, int rn, int rm);
 void a32_mla(struct code *c, int rd, int rn, int rm, int ra, int sub);
 void a32_div(struct code *c, int rd, int rn, int rm, int sign);
 void a32_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
+void a32_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
+void a32_smmul(struct code *c, int rd, int rn, int rm);
 void a32_cmp_reg(struct code *c, int rn, int rm);
 void a32_cmp_imm(struct code *c, int rn, long imm);
 void a32_tst_reg(struct code *c, int rn, int rm);

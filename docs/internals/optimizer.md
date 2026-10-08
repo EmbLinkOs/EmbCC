@@ -188,7 +188,7 @@ comparison against a constant into an interval.
 
 ## The passes by name
 
-Seventeen passes can be switched individually. They are listed in the
+Eighteen passes can be switched individually. They are listed in the
 `g_pass[]` table, which is the single list read by `-f<name>`,
 `-fno-<name>` and the `-O` levels. `opt_set_pass()` marks a pass
 `forced`, and `pass_default()` does not override a forced pass, so an
@@ -215,6 +215,7 @@ flag can also turn on a pass at a level that leaves it off, for example
 | `unroll` | `pass_unroll` | `-O2` | yes |
 | `pre` | `pass_pre` | `-O2` | no |
 | `switch-thread` | `pass_swthread` | `-O2` | yes |
+| `licm-mem` | the memory half of `pass_licm` (`lmem_build`, `licm_promote`) | `-O1` | no |
 
 A name that is not in the table is not a pass flag, and the driver
 reports `embcc: error: unknown argument '-fno-NAME'`.
@@ -675,7 +676,44 @@ when `is_pure` holds (so DIV, MOD and LOAD never move) and every operand
 is defined outside the loop or by something already being hoisted.
 `IR_LDVAR` moves only when the loop never writes the slot and its address
 is never taken. Loops are processed innermost first, one per call. A loop
-whose header is fallen into from inside the loop is refused.
+whose header is fallen into from inside the loop is refused. A switch
+entering the header from outside has its table entries retargeted to the
+preheader too (`lp_retarget_entries`).
+
+The memory half (`licm-mem`, on with `licm`) works from `lmem_build`, a
+summary of what the loop does to memory: every access whose bytes the
+alias analysis can describe (`mem_access`, `slot_access`, `obj_access`),
+the calls, and whether there is a BARRIER -- inline asm, a fence, any
+atomic, any volatile access (an atomic load is a volatile load, with no
+fence beside it on RISC-V or x86-64), or an op it does not know. Then:
+
+- **A load moves** when it is not volatile or `__flash`, its address is
+  invariant, there is no barrier, no write in the loop can overlap it
+  (`acc_overlap`), every call is proven by `infer_attrs` to write no
+  memory, and running it before the loop cannot fault where the program
+  did not: (R1) its block dominates every latch and exiting block and the
+  loop has no call; or (R2) it reads a global or frame slot at a constant
+  offset inside the object (not weak, not in a named section, defined
+  here); or (R3) the block the preheader follows already loaded the same
+  bytes with nothing that could unmap them since -- a rotated loop's
+  guard. An address-taken slot's `IR_LDVAR` moves under the same memory
+  rule (a slot cannot fault). Remark `opt/licm/load`.
+- **A location is promoted** (`licm_promote`) when nothing is left to
+  hoist from the loop: one `(base, offset, size)` that the loop stores,
+  with no barrier, every call proven to read and write nothing, every
+  other access unable to overlap it, no stored value or call argument
+  based on its address, and a store to it dominating every exiting block
+  (so the exit store never writes on a path that did not; a loop with no
+  exit is refused). When the loop also reads it, the preheader load obeys
+  R1-R3. A frame slot only when its scope is the whole function. The
+  loads become copies of a new temp, the stores assignments to it
+  (`IR_EXT` back to what a load reads when narrower than the load), and
+  every exit edge stores it -- before a `jmp`, after a fall-through, or
+  in a trampoline after a branch. Remark `opt/licm/promote`.
+
+`tests/golden/licm-mem.sh` checks both on the IR, including the twelve
+shapes that must not move; `tests/exec/licm-mem.c` runs the cases a run
+can tell apart.
 
 **`pass_idiom`** (`idiom`; `edge_ok`). A loop with a constant trip count
 that stores a constant into every element, or copies one array to

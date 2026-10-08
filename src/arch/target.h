@@ -201,6 +201,13 @@ int target_stack_align(void);
  * instruction: SSE and A64 for float and double, a Cortex-M FPU for
  * float. Elsewhere __builtin_sqrt is a call to the libm function. */
 int target_has_sqrt(int bytes);
+/* Whether the backend lowers IR_MULH and IR_MULW -- the high half of a
+ * 32x32 multiply, and the whole 64-bit product -- which a 32-bit target
+ * with a widening multiply does in one or two instructions. Only there
+ * does the optimizer emit them: division by a constant becomes a
+ * multiply by its reciprocal, and `(int64_t)a * b` stops being a 64x64
+ * multiply. A target without one keeps the divide (or its helper). */
+int target_has_mulh(void);
 int target_ldouble_size(void);    /* 16, or 8 where it is just a double */
 int target_char_unsigned(void);   /* plain `char` with no signed/unsigned */
 

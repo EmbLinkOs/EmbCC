@@ -87,7 +87,12 @@ struct ra_target {
      * backend wearing a hat. */
     int call_int_arg_in_reg;   /* a scalar-integer call argument */
     int ret_scalar_in_reg;     /* a scalar return value */
-    int memcpy_addr_in_reg;    /* IR_MEMCPY / IR_MEMZERO address operands */
+    int memcpy_addr_in_reg;    /* IR_MEMCPY / IR_MEMZERO address operands;
+                                * 2: every AGGREGATE address as well -- a
+                                * struct argument's, the struct an IR_RET
+                                * returns, a struct-returning call's result
+                                * (SPARC: an `add %fp`, a store and a load
+                                * around each struct return before) */
 
     /* Does this instruction lower to a runtime-helper CALL that the IR
      * does not show as one? May be NULL for a backend with none.

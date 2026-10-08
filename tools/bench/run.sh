@@ -69,7 +69,11 @@ int main(void)
     prog_main();
     putn((long)bench_result); puts_("\n");
     *(volatile unsigned *)0x100000u = 0x5555u;
-    for (;;) ;
+    /* wfi, not a spin: QEMU takes the test device's exit a little
+     * later than the store, by the host's clock, and a spinning hart
+     * was counted for every turn meanwhile -- RV32 counts of identical
+     * code wandered by 10%. Halted, it executes nothing. */
+    for (;;) __asm__ volatile("wfi");
 }
 EOT
             ;;

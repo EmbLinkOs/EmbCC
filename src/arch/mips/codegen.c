@@ -341,6 +341,7 @@ static char *wide_map(struct ir_func *fn)
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
+        case IR_MULW:             /* two words in, a 64-bit product out */
             w[i->dst] = 1;
             break;
         default:
@@ -2220,6 +2221,19 @@ static int gen_ins64(struct mips_fn *F, int n)
         mips_mv(t, A_LO, SCR);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
+    case IR_MULW: {
+        /* mult/multu: the whole 64-bit product of two words in HI:LO,
+         * read out a half at a time (MIPS32 only: target_has_mulh) */
+        int ra_ = rdr(F, i->a, B_LO), rb_ = rdr(F, i->b, B_HI), dl, dh;
+        if (g_m64)
+            mips_refuse(F, i, "a 32-bit widening multiply at MIPS64");
+        mips_muldiv(t, i->sign ? MIPS_MULT : MIPS_MULTU, ra_, rb_);
+        dst64(F, i->dst, &dl, &dh);
+        mips_mflo(t, dl);
+        mips_mfhi(t, dh);
+        wr64(F, i->dst, dl, dh);
+        return 1;
+    }
     case IR_NEG: {
         int al, ah, dl, dh;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
@@ -3004,6 +3018,17 @@ static void gen_ins(struct mips_fn *F, int n)
             }
         }
         wrote(F, i->dst, rd_);
+        return;
+    }
+    case IR_MULH: {
+        /* The high word of a 32 x 32 product, from HI (MIPS32 only) */
+        int ra_ = rdr(F, i->a, ACC), rb_ = rdr(F, i->b, TMP), d;
+        if (g_m64)
+            mips_refuse(F, i, "a 32-bit high multiply at MIPS64");
+        mips_muldiv(t, i->sign ? MIPS_MULT : MIPS_MULTU, ra_, rb_);
+        d = wreg(F, i->dst, ACC);
+        mips_mfhi(t, d);
+        wrote(F, i->dst, d);
         return;
     }
     case IR_DIV: case IR_MOD: {

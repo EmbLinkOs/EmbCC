@@ -366,6 +366,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `mips-atomics` | one- and two-byte atomics at every place in their word on MIPS32 and MIPS64, both byte orders and every level: the little-endian boards against the host, the big-endian ones against clang's build on the same board; the compare-and-swap macros |
 | `ppc-atomics` | one- and two-byte atomics at every place in their word on the ppce500 board at every level, against clang's build on the same board; the `lwarx`/`stwcx.` loop in the object; the compare-and-swap macros |
 | `sparc-atomics` | one- and two-byte atomics at every place in their word on the leon3_generic board at every level, against clang's build (a `casa` loop too) on the same board; the `casa` loop in the object |
+| `sparc-slots` | the SPARC delay slots read back with llvm-objdump: no cc-setter in a conditional branch's slot, no `%o7` in a call's, no jump target written in its own; lib/libc's nops at most two thirds of what the filling off leaves; a leaf's `retl`, a restore moving the return value, an annulled if/else arm (`tests/golden/sparc-exec/slots.c`, run on the board by sparc-exec, computes through each hazard) |
 | `tricore-atomics` | one- and two-byte atomics at every place in their word on the tricore_testboard at every level, against the host; the compare-and-swap macros |
 | `xtensa-atomics` | one- and two-byte atomics at every place in their word on the de212 sim board at every level, against the host; the compare-and-swap macros |
 | `loongarch-refuse` | the triples, the object header and flags, `-S` reassembled, the options accepted and refused, the constructs refused by name, the objects `embld` refuses |
@@ -444,6 +445,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `vectorize` | auto-vectorization fires and computes the same checksums as `-O0`, `-O1` and gcc |
 | `tailcall` | sibling calls run in constant stack |
 | `frameless` | leaves with no frame, and the conditions that make it safe |
+| `time-report` | `-ftime-report` reports every phase and a total on stderr, and the object is the same with or without it |
 | `branches` | short branch encodings where they reach |
 | `parallel-move` | `ra_parallel_move` simulated over every small shape (`tools/pmovecheck`) |
 | `remarks` | optimization remarks and `embcc why`: different causes give different reasons |

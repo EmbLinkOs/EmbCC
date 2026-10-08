@@ -470,6 +470,7 @@ static char *wide_map(struct ir_func *fn)
         case IR_NEG: case IR_BNOT:
         case IR_LDVAR: case IR_LOAD: case IR_EXT: case IR_CALL:
         case IR_SELECT: case IR_BSWAP:
+        case IR_MULW:             /* two 32-bit operands, a 64-bit result */
         /* The conversions' `w` is their RESULT's width too. */
         case IR_I2F: case IR_F2I: case IR_F2F: case IR_BITCAST:
             w[i->dst] = 1;
@@ -2084,6 +2085,28 @@ static int gen_ins64(struct rv_fn *F, int n)
         rv_mv(t, A_HI, SCR2);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
+    case IR_MULW: {
+        /* 32 x 32 -> 64: mulh(u) for the high word and mul for the low,
+         * the pair the ISA manual suggests fusing -- high first, into a
+         * register neither operand is in, so the second still reads
+         * both. The operands are single words, wherever they live. */
+        int ra_ = rdr(F, i->a, B_LO), rb_ = rdr(F, i->b, B_HI), dl, dh;
+        int hop = i->sign ? RV_MULH : RV_MULHU;
+        dst64(F, i->dst, &dl, &dh);
+        if (dh != ra_ && dh != rb_) {
+            rv_muldiv(t, hop, dh, ra_, rb_, 0);
+            rv_muldiv(t, RV_MUL, dl, ra_, rb_, 0);
+        } else if (dl != ra_ && dl != rb_) {
+            rv_muldiv(t, RV_MUL, dl, ra_, rb_, 0);
+            rv_muldiv(t, hop, dh, ra_, rb_, 0);
+        } else {
+            rv_muldiv(t, hop, SCR, ra_, rb_, 0);
+            rv_muldiv(t, RV_MUL, dl, ra_, rb_, 0);
+            rv_mv(t, dh, SCR);
+        }
+        wr64(F, i->dst, dl, dh);
+        return 1;
+    }
     case IR_NEG: {
         int al, ah, dl, dh;
         src64(F, i->a, A_LO, A_HI, &al, &ah);
@@ -3467,6 +3490,17 @@ static void gen_ins(struct rv_fn *F, int n)
                 rv_alu(t, op, rd_, ra_, rb_, logical ? 0 : wordop);
         }
         wrote(F, i->dst, rd_);
+        return;
+    }
+    case IR_MULH: {
+        /* The high word of a 32 x 32 product (division by a constant) --
+         * RV32 only; target_has_mulh keeps it from RV64. */
+        int ra_ = rdr(F, i->a, ACC), rb_ = rdr(F, i->b, TMP);
+        int d = wreg(F, i->dst, ACC);
+        if (F->xlen != 32)
+            rv_refuse(F, i, "a 32-bit high multiply at RV64");
+        rv_muldiv(t, i->sign ? RV_MULH : RV_MULHU, d, ra_, rb_, 0);
+        wrote(F, i->dst, d);
         return;
     }
     case IR_DIV: case IR_MOD: {

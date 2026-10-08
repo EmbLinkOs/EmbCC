@@ -349,7 +349,8 @@ static void parse_ins(struct p *p, char *first, const char *rest)
             in->a = vreg(p, word(p));
             break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
-        case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR: {
+        case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+        case IR_MULH: case IR_MULW: {
             char *wa = word(p);
             wa[strlen(wa) - 1] = 0;    /* the comma */
             in->a = vreg(p, wa);
@@ -447,6 +448,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                 perr(p, "@name or [%vreg] as the call target");
             }
             /* the argument list, `%1, %2)` possibly split across words */
+            in->argv = ir_args_new(MAX_PARAMS);
             char *arg = lp + 1;
             for (;;) {
                 while (*arg == ' ' || *arg == ',')
@@ -455,6 +457,8 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                     break;
                 if (*arg != '%')
                     perr(p, "a %vreg argument");
+                if (in->nargs >= MAX_PARAMS)
+                    perr(p, "at most MAX_PARAMS arguments");
                 in->argv[in->nargs++].vreg = (int)strtol(arg + 1, &arg, 10);
                 while (*arg == ',' || *arg == ' ')
                     arg++;
