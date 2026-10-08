@@ -4192,6 +4192,45 @@ static void need_atomic_object(struct unit *u, struct expr *e, struct type *t,
                 "bytes, not %s", e->lhs->name, ty_name(t));
 }
 
+/* An atomic builtin's memory order, for expr.atomic_mo: 1 + the
+ * __ATOMIC_* value when the argument folds to one, else 0 (seq_cst, the
+ * strongest, is always right). A compare-exchange's failure order is
+ * merged into its success order, as clang does: a failure that acquires
+ * makes a relaxed success acquire and a release one acq_rel, and a
+ * seq_cst failure makes it seq_cst. The __sync forms are all seq_cst, as
+ * clang has them -- lock_test_and_set too, which GCC documents as only an
+ * acquire. */
+static int atomic_order(const struct expr *e, enum atomic_kind ak,
+                        int is_sync)
+{
+    int at = -1, fail_at = -1;
+    long s = 5, f = -1;
+    switch (ak) {
+    case AK_LOAD_N: case AK_TEST_AND_SET: case AK_CLEAR: at = 1; break;
+    case AK_STORE_N: case AK_EXCHANGE_N: case AK_LOAD: case AK_STORE:
+        at = 2; break;
+    case AK_FETCH_OP: case AK_OP_FETCH: at = is_sync ? -1 : 2; break;
+    case AK_EXCHANGE: at = 3; break;
+    case AK_CMPXCHG_N: case AK_CMPXCHG: at = 4; fail_at = 5; break;
+    default: break;
+    }
+    if (at < 0)
+        return 0;
+    if (at >= e->nargs || !const_fold(e->args[at], &s) || s < 0 || s > 5)
+        return 0;
+    if (s == 1)
+        s = 2;                                  /* consume is acquire */
+    if (fail_at >= 0 && fail_at < e->nargs) {
+        if (!const_fold(e->args[fail_at], &f))
+            return 0;
+        if (f == 5)
+            s = 5;
+        else if (f == 1 || f == 2)
+            s = s == 0 ? 2 : s == 3 ? 4 : s;
+    }
+    return (int)s + 1;
+}
+
 /* Types a call to an atomic builtin (see atomic_builtin). */
 static void check_atomic_call(struct unit *u, struct func *f,
                               struct scope *sc, struct expr *e,
@@ -4220,6 +4259,7 @@ static void check_atomic_call(struct unit *u, struct func *f,
         sema_error_at(u, e->line, e->col, "%s takes %d arguments, not %d",
                 name, want, e->nargs);
     e->name = name;
+    e->atomic_mo = atomic_order(e, ak, is_sync);
 
     if (ak == AK_THREAD_FENCE || ak == AK_SIGNAL_FENCE) {
         e->ty = ty_base(TY_VOID, 0);

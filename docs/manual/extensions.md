@@ -1011,9 +1011,16 @@ on an integer or pointer of 1, 2, 4, 8 or 16 bytes, not double`. The
 `__sync` builtins accept, and ignore, the trailing list of variables
 GCC allows.
 
-Every operation is sequentially consistent. The memory-order arguments
-are accepted and do not change the code: `__ATOMIC_RELAXED` produces the
-same instructions as `__ATOMIC_SEQ_CST`. `__atomic_signal_fence` emits
+On RISC-V the memory order of a read-modify-write or compare-exchange
+selects its `.aq` and `.rl` bits as clang's does: relaxed is bare,
+acquire `.aq`, release `.rl`, and acq_rel and seq_cst `.aqrl` on an AMO;
+an `lr`/`sc` loop takes the acquire on the `lr` and the release on the
+`sc`, and seq_cst is `lr.aqrl`/`sc.rl`. A compare-exchange's failure
+order strengthens its success order, as clang merges them. An order that
+is not a constant is seq_cst, as are the `__sync` builtins and the
+operators on an `_Atomic` object. On every other target every operation
+is sequentially consistent: the memory-order arguments are accepted and
+do not change the code. `__atomic_signal_fence` emits
 the same barrier as `__atomic_thread_fence`. No operation calls a
 library: each is inline or refused.
 
@@ -1027,8 +1034,8 @@ does not reflect the table below.
 
 | Operation | x86-64 | AArch64 | Cortex-M | RV32 | RV64 | AVR |
 |---|---|---|---|---|---|---|
-| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4 |
-| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4 |
+| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4, 8 |
+| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4, 8 |
 | Fences | Yes | Yes | Yes | Yes | Yes | Yes (no instruction) |
 
 16-byte operations need `__int128` or a 16-byte object through the
