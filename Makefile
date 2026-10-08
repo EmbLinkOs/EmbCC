@@ -318,9 +318,22 @@ embrt: tools/embrt/embrt.c
 
 # embsim -- a Cortex-M simulator: runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
-# table tools/bench uses (tools/bench/cost.h). ISO C and libm.
-embsim: tools/embsim/embsim.c tools/bench/cost.h
-	$(CC) $(CFLAGS) -o $@ tools/embsim/embsim.c -lm
+# table tools/bench uses (tools/bench/cost.h). ISO C and libm; the
+# modules are tools/embsim/sim.h's (docs/internals/embsim.md). The GDB
+# server's connection is net-posix.c; net-none.c builds it without one.
+EMBSIM_NET ?= tools/embsim/net-posix.c
+EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
+               tools/embsim/boards.c tools/embsim/loader.c \
+               tools/embsim/semihost.c tools/embsim/trace.c \
+               tools/embsim/cortexm.c tools/embsim/cortexm-thumb.c \
+               tools/embsim/cortexm-fpu.c tools/embsim/scs.c \
+               tools/embsim/systick.c tools/embsim/dwt.c \
+               tools/embsim/uart-pl011.c tools/embsim/uart-cmsdk.c \
+               tools/embsim/uart-nrf51.c tools/embsim/gdb.c $(EMBSIM_NET)
+EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h \
+               tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h
+embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS)
+	$(CC) $(CFLAGS) -o $@ $(EMBSIM_SRCS) -lm
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \

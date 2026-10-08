@@ -1,9 +1,12 @@
 # embsim — run a Cortex-M image without a board
 
-`embsim` runs a linked ELF image the way a Cortex-M part does. It is one
-ISO C file with no dependencies, so it builds on any machine, including
-one without QEMU. It counts the instructions it executes and estimates
-the cycles they take. This page is the command reference.
+`embsim` runs a linked ELF image the way a Cortex-M part does. It is ISO
+C with no dependencies, so it builds on any machine, including one
+without QEMU. It counts the instructions it executes and estimates the
+cycles they take, and gdb, lldb or embdbg can debug the image while it
+runs. This page is the command reference; how EmbSim is built inside,
+and how to add a core, a peripheral or a board, is
+[EmbSim's internals](../../internals/embsim.md).
 
 ## Synopsis
 
@@ -11,6 +14,7 @@ the cycles they take. This page is the command reference.
 embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--until STRING] [--max-insns N] [--stats]
                  [--count FILE] [--trace FILE] [--no-semihosting]
+                 [--gdb [HOST:]PORT [--gdb-wait]]
 ```
 
 ```sh
@@ -115,6 +119,73 @@ handles:
 
 A run that ends at a lockup or at `--max-insns` says why on stderr.
 
+## Debugging: `--gdb`
+
+`--gdb PORT` serves the GDB remote protocol on `localhost:PORT` while the
+image runs. `--gdb-wait` holds the core at reset until a debugger
+connects, as QEMU's `-S` does. Without it the image runs, and a debugger
+that connects stops it where it is; an image that ends first ends EmbSim
+as without `--gdb`, but one that waits in a WFI or a loop nothing can
+interrupt waits there for the debugger. `HOST:PORT` listens on another
+address, and QEMU's `tcp::PORT` is accepted too.
+
+```sh
+embsim fw.elf --board mps2-an386 --gdb 1234 --gdb-wait &
+gdb fw.elf -ex 'target remote localhost:1234'
+lldb fw.elf -o 'gdb-remote localhost:1234'
+embdbg fw.elf remote 1234
+```
+
+The server answers as QEMU's stub does, so a debugger sees the same
+machine on either, and a script written for one runs on the other:
+
+- **Registers.** r0 to r12, sp, lr, pc and xpsr; d0 to d15 and fpscr on
+  a core with an FPU (gdb shows s0 to s31 from them); and msp, psp,
+  primask, control, and on ARMv7-M basepri and faultmask. The target
+  description gdb reads has the FPU only when the core has one.
+- **Breakpoints**, software and hardware alike. The server keeps them;
+  it never writes into the image, so they work in flash.
+- **Watchpoints**: `watch`, `rwatch` and `awatch`. As on QEMU, the
+  target stops before the access, and gdb steps it.
+- **Stepping**: `stepi` runs one instruction. An exception that is
+  pending is taken first, so a step can stop at a handler's first
+  instruction.
+- **Interrupting** (Ctrl-C, the protocol's 0x03). The server looks for
+  it every 16384 instructions.
+- **Memory** reads and writes, and `load`. The server gives gdb a memory
+  map from the board: flash, RAM, and the device space. gdb programs
+  the flash with it, and uses hardware breakpoints there (it says so
+  once: "automatically using hardware breakpoints").
+- `kill` ends EmbSim with status 0. `detach` leaves the image running to
+  its end, as a board does when the probe lets go; EmbSim then exits as
+  without a debugger.
+
+A run under a debugger ends differently:
+
+| What happens | What the debugger sees |
+|---|---|
+| the image exits (semihosting, a reset request, `--until`, `--max-insns`) | the program exited, with the status of the table above |
+| the core locks up | a stop with SIGSEGV, at the lockup |
+| a WFI or a loop that nothing can interrupt | nothing: the core waits, as a part does, until the debugger interrupts it |
+
+Time is the core's estimated cycles, with or without a debugger: a run
+stopped at a breakpoint and continued has the counts of one that never
+stopped. A WFI the debugger interrupts completes when it is resumed, as
+on a part (halting wakes the core; QEMU's stays asleep).
+
+### `monitor` commands
+
+| Command | Action |
+|---|---|
+| `monitor reset` | reset the core and the devices, as the reset pin does. Memory keeps what is in it, so an image gdb loaded stays, and the counts start again |
+| `monitor reload` | load IMAGE.elf into memory again, then reset |
+| `monitor stats` | the instructions run and the estimated cycles |
+| `monitor insns`, `monitor cycles` | each alone, as a number |
+| `monitor help` | the list |
+
+`monitor insns` at a breakpoint is the number `--max-insns` would stop
+a run without a debugger at, one instruction before it.
+
 ## Not modelled yet
 
 - The MPU (MemManage faults).
@@ -154,6 +225,14 @@ extended frame. Its output must be QEMU's, and the record in
 
 **The ends of a run.** The exit status, the lockup, the idle loop,
 `--until` and `--max-insns`.
+
+**The GDB server.** `tests/golden/embsim-gdb.sh` runs the same gdb
+session, on the same image, on QEMU's stub and on EmbSim's server, on
+the M3 and on the M4 with its FPU, and the transcripts must be the same:
+breakpoints, steps, registers, memory, a variable changed, watchpoints,
+and the run to its exit. It does the same with an interrupted run, with
+lldb, with embdbg and with gdb's `load`, and checks the `monitor`
+counts against a run without a debugger.
 
 Writing that test found one QEMU bug. On the mps2-an386, QEMU resumes a
 divide that trapped with the instructions before it in its translation
