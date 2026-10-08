@@ -2965,11 +2965,35 @@ static void gen_ins(struct a_fn *F, int n)
      * such path say so where they are. */
     if (i->w == 16)
         a_refuse(fn, i, "a 128-bit value");
-    /* named here, before the eight-byte test below would call it "this
-     * operation at 64 bits": its w is a host pointer's */
-    if (i->op == IR_FRAMEADDR)
-        a_refuse(fn, i, "__builtin_frame_address or __builtin_return_address "
-                        "(AVR code keeps no frame-pointer chain)");
+    /* Level 0 only (irgen): AVR code keeps no frame-pointer chain. The
+     * call pushed the return address above the saved Y (see "the frame"),
+     * a WORD address, high byte at the lower address -- which is what a
+     * function pointer holds here -- and the stack pointer at entry is
+     * the byte below it: the frame address. A function that asks always
+     * sets up Y. An interrupt handler pushes more above Y, and what it
+     * returns to was not a call. */
+    if (i->op == IR_FRAMEADDR) {
+        if (fn->src && fn->src->is_isr)
+            a_refuse(fn, i, "__builtin_frame_address or "
+                            "__builtin_return_address in an interrupt "
+                            "handler");
+        int nb = dw(F, i), d = addr_reg(F, i);
+        long hi = F->frame + F->in_at - 2;   /* the return address's high */
+        if (!nb)
+            return;
+        if (i->imm == 2) {
+            ld_slot(F, d + 1, hi, 1);
+            ld_slot(F, d, hi + 1, 1);
+        } else {
+            y_to(F, d);
+            add_const16(F, d, hi - 1);
+        }
+        if (nb > 2)
+            extend(F, d, 2, 0, nb);
+        if (d == RA)
+            wr4(F, i->dst, RA);
+        return;
+    }
     /* at every size, before the eight-byte dispatch takes the w == 8 ones */
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG) {
@@ -5524,6 +5548,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
         long stk = 0;
         F.use_y = f->is_isr || fn->is_varargs || F.frame != 0 ||
                   F.sret_slot >= 0 || fn->has_alloca;
+        /* __builtin_frame_address / _return_address read above Y */
+        for (i = 0; i < fn->nins && !F.use_y; i++)
+            if (fn->ins[i].op == IR_FRAMEADDR)
+                F.use_y = 1;
         if (fn_sret_bytes(fn)) place_arg(2, &cursor, &stk, &pl);
         for (i = 0; i < fn->nparams && !F.use_y; i++) {
             place_arg(fn->param_abi[i].size, &cursor, &stk, &pl);

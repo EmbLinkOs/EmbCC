@@ -112,9 +112,13 @@ enum ir_op {
                * (x86-64's lock cmpxchg16b, aarch64's exclusive pair;
                * a full barrier both) — irgen builds the other atomics of
                * an __int128 as loops of it */
-    IR_FRAMEADDR, /* dst = this function's frame pointer (rbp / x29), which
-                   * on both targets points at [saved fp][return address] —
-                   * the base of __builtin_frame_address/_return_address */
+    IR_FRAMEADDR, /* imm 0: dst = this function's frame pointer (rbp /
+                   * x29 / a6), which points at [saved fp][return address]
+                   * — the base of __builtin_frame_address/_return_address.
+                   * Where there is no such chain (target_has_frame_chain),
+                   * level 0 only: imm 1, the frame address (sp at entry);
+                   * imm 2, the return address the function was entered
+                   * with */
     IR_ALLOCA,    /* dst = a fresh 16-aligned block of `a` bytes on the
                    * stack, above the outgoing-argument area (a VLA) */
     IR_SPSAVE,    /* dst = the stack pointer */

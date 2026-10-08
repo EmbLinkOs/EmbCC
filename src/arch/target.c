@@ -551,6 +551,12 @@ int target_va_list_is_pointer(void)
     return 0;
 }
 
+int target_has_frame_chain(void)
+{
+    return g_arch == TARGET_X86_64 || g_arch == TARGET_AARCH64 ||
+           g_arch == TARGET_COLDFIRE;
+}
+
 int target_widen_unsigned_fp_cvt(void)
 {
     return g_arch == TARGET_X86_64 || g_arch == TARGET_AARCH64;

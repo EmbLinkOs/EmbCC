@@ -66,7 +66,7 @@ na() {
     alignas-decl)
         echo "a 16-aligned scalar local, refused by name above the 8-byte SPARC stack (as on Thumb)" ;;
     atomics)
-        echo "__builtin_frame_address, refused by name (sparc-refuse.sh)" ;;
+        echo "__builtin_frame_address(1), refused by name: no frame chain (sparc-refuse.sh)" ;;
     atomics-reg)
         echo "a 64-bit long (0x123456789abcdef0L in a long: it exits 4 on ILP32); its 1- and 2-byte atomics run in sparc-atomics.sh" ;;
     volatile-local-longjmp)

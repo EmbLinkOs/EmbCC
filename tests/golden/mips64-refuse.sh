@@ -100,10 +100,10 @@ refc "a 16-byte atomic" 'a 16-byte atomic' \
     '__int128 x; __int128 f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "a 16-byte atomic load" 'a 16-byte atomic' \
     '__int128 x; __int128 f(void){ return __atomic_load_n(&x, 5); }'
-refc "__builtin_return_address" 'n64 code keeps no frame-pointer chain' \
-    'void *f(void){ return __builtin_return_address(0); }'
-refc "__builtin_frame_address" 'n64 code keeps no frame-pointer chain' \
-    'void *f(void){ return __builtin_frame_address(0); }'
+refc "__builtin_return_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_return_address(1); }'
+refc "__builtin_frame_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_frame_address(1); }'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
 refc "a doubleword instruction in inline asm" 'is not in the MIPS vocabulary' \

@@ -1918,9 +1918,21 @@ static void gen_ins(struct ppc_fn *F, int n)
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG)
         need_word_atomic(F, i);
-    if (i->op == IR_FRAMEADDR)
-        ppc_refuse(F, i, "__builtin_frame_address or "
-                         "__builtin_return_address");
+    /* Level 0 only (irgen), as GCC and clang: the frame address is r1
+     * once the prologue has made the frame -- the back chain's word --
+     * and the return address is LR as the function was entered with it,
+     * from the save word at frame+4 (a function that asks saves LR, as
+     * one that calls does). */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2)
+            ld_sp(F, d, F->frame + 4, 4, 0);
+        else
+            addr_sp(F, d, 0);
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
 
     /* The high word of a 64-bit value, shifted: one register. */
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {
@@ -2920,7 +2932,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
     for (i = 0; i < fn->nins; i++)
         if ((fn->ins[i].op == IR_CALL && !(F.tail && F.tail[i])) ||
             fn->ins[i].op == IR_SWITCH ||
-            ppc_op_calls_helper(&fn->ins[i]))
+            ppc_op_calls_helper(&fn->ins[i]) ||
+            /* __builtin_return_address reads LR's save word */
+            (fn->ins[i].op == IR_FRAMEADDR && fn->ins[i].imm == 2))
             F.leaf = 0;
     layout(&F);
 

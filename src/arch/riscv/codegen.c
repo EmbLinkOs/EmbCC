@@ -4667,11 +4667,25 @@ static void gen_ins(struct rv_fn *F, int n)
         rv_refuse(F, i, "this floating-point operation");
     }
 
-    /* named here, before the pair test below would call it "this
-     * operation at 64 bits": its w is a host pointer's */
-    if (i->op == IR_FRAMEADDR)
-        rv_refuse(F, i, "__builtin_frame_address or __builtin_return_address "
-                        "(RISC-V code keeps no frame-pointer chain)");
+    /* __builtin_frame_address(0): the stack pointer at entry, which is
+     * where the frame ends -- what GCC and clang return, their s0 being
+     * that sp. __builtin_return_address(0): ra as the function was
+     * entered with it, from the slot the prologue saved it in (a function
+     * that asks is never a leaf). An interrupt handler was not called:
+     * what it returns to is mepc's, and ra is the interrupted code's. */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2 && F->isr)
+            rv_refuse(F, i, "__builtin_return_address in an interrupt handler "
+                            "(it was not called; mepc holds where it returns)");
+        if (i->imm == 2)
+            ld_sp(F, d, F->ra_slot, F->w, 1);
+        else
+            addr_sp(F, d, F->frame);
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
 
     /* (At RV64 a call or a return of one is gen_call's and IR_RET's.) */
     if (i->w > 8 &&
@@ -6557,7 +6571,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
              !fn->ins[i].asm_ir->cont &&
              (!fn->ins[i].asm_ir->clob ||
               (fn->ins[i].asm_ir->clob >> 1 & 1))) ||
-            rv_op_calls_helper(&fn->ins[i]))
+            rv_op_calls_helper(&fn->ins[i]) ||
+            /* __builtin_return_address reads ra's slot */
+            (fn->ins[i].op == IR_FRAMEADDR && fn->ins[i].imm == 2))
             F.leaf = 0;
     /* The first attempt leaves fx out where it might not be needed
      * (F.fx_lazy); one that needs it after all is emitted again. */

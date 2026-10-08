@@ -3403,6 +3403,25 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
              * stop (the frame address) or read the return address beside
              * it — [fp] is the caller's fp and [fp+8] the return address,
              * on both targets. */
+            int ret = strcmp(e->name, "__builtin_return_address") == 0;
+            if (!target_has_frame_chain()) {
+                /* Level 0 only: the backend knows where its own frame
+                 * starts and where it kept the return address, and
+                 * nothing links one frame to the next. */
+                if (e->num != 0)
+                    diag_fatal(fn->file, e->line,
+                               "%s(%ld) is not supported on %s: code for "
+                               "this target keeps no frame-pointer chain, so "
+                               "only level 0 (this function's own frame) "
+                               "can be found", e->name, e->num,
+                               target_triple_now());
+                struct ir_ins *fa = emit(fn);
+                fa->op = IR_FRAMEADDR;
+                fa->imm = ret ? 2 : 1;
+                fa->w = AW;
+                fa->dst = new_temp(fn);
+                return fa->dst;
+            }
             struct ir_ins *fa = emit(fn);
             fa->op = IR_FRAMEADDR;
             fa->w = 8;
@@ -3410,7 +3429,7 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
             int fp = fa->dst;
             for (long k = 0; k < e->num; k++)
                 fp = emit_load(fn, fp, e->ty);
-            if (strcmp(e->name, "__builtin_frame_address") == 0)
+            if (!ret)
                 return fp;
             int at = emit_bin(fn, IR_ADD, fp,
                               emit_const(fn, AW, AW), AW, 0);

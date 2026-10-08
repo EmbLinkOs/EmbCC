@@ -3120,15 +3120,26 @@ static void gen_ins(struct mips_fn *F, int n)
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG)
         need_word_atomic(F, i);
-    /* o32 keeps no frame-pointer chain to walk, and a function's own
-     * return address is in ra only until its first call. */
-    if (i->op == IR_FRAMEADDR)
-        mips_refuse(F, i, g_m64 ? "__builtin_frame_address or "
-                                  "__builtin_return_address (n64 code keeps "
-                                  "no frame-pointer chain)"
-                                : "__builtin_frame_address or "
-                                  "__builtin_return_address (o32 code keeps "
-                                  "no frame-pointer chain)");
+    /* o32 and n64 code keep no frame-pointer chain, so only level 0
+     * (irgen): the frame address is the stack pointer at entry (frame
+     * base + frame), and the return address is ra as the function was
+     * entered with it, from its slot -- a function that asks saves it,
+     * as one that calls does. An interrupt handler was not called: it
+     * returns to EPC, and ra is the interrupted code's. */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2 && F->isr)
+            mips_refuse(F, i, "__builtin_return_address in an interrupt "
+                              "handler (it was not called; EPC holds where "
+                              "it returns)");
+        if (i->imm == 2)
+            ld_sp(F, d, F->ra_slot, W, 1);
+        else
+            addr_sp(F, d, F->frame);
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
     if (i->op == IR_CAS16)
         mips_refuse(F, i, "a 16-byte atomic (MIPS64's lld/scd are a "
                           "doubleword; there is no 128-bit ll/sc)");
@@ -4351,7 +4362,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     F.leaf = 1;
     for (i = 0; i < fn->nins; i++)
         if ((fn->ins[i].op == IR_CALL && !(F.tail && F.tail[i])) ||
-            fn->ins[i].op == IR_ASM || mips_op_calls_helper(&fn->ins[i]))
+            fn->ins[i].op == IR_ASM || mips_op_calls_helper(&fn->ins[i]) ||
+            /* __builtin_return_address reads ra's slot */
+            (fn->ins[i].op == IR_FRAMEADDR && fn->ins[i].imm == 2))
             F.leaf = 0;
     layout(&F);
 

@@ -2338,12 +2338,21 @@ static void gen_ins(struct la_fn *F, int n)
     if (i->op == IR_CAS16)
         la_refuse(F, i, "a sixteen-byte atomic (the LA64 base ISA has no "
                         "128-bit ll/sc or am* instruction)");
-    /* The code keeps no frame-pointer chain to walk, and a function's
-     * own return address is in ra only until its first call. */
-    if (i->op == IR_FRAMEADDR)
-        la_refuse(F, i, "__builtin_frame_address or "
-                        "__builtin_return_address (EmbCC's LoongArch code "
-                        "keeps no frame-pointer chain)");
+    /* The code keeps no frame-pointer chain, so only level 0 (irgen):
+     * the frame address is the stack pointer at entry (frame base +
+     * frame), and the return address is ra as the function was entered
+     * with it, from its slot -- a function that asks saves it, as one
+     * that calls does. */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2)
+            ld_sp(F, d, F->ra_slot, F->w, 1);
+        else
+            addr_sp(F, d, F->frame);
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
 
     /* (A call or a return of one is gen_call's and IR_RET's.) */
     if (i->w > 8 &&
@@ -3397,7 +3406,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct la_sites *st,
              !fn->ins[i].asm_ir->cont &&
              (!fn->ins[i].asm_ir->clob ||
               (fn->ins[i].asm_ir->clob >> 1 & 1))) ||
-            la_op_calls_helper(&fn->ins[i]))
+            la_op_calls_helper(&fn->ins[i]) ||
+            /* __builtin_return_address reads ra's slot */
+            (fn->ins[i].op == IR_FRAMEADDR && fn->ins[i].imm == 2))
             F.leaf = 0;
     layout(&F);
 
