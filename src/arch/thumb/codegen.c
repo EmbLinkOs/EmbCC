@@ -3976,10 +3976,25 @@ static void gen_ins(struct t_fn *F, int n)
             int fuse = nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
                        nx->a == i->dst && nx->w != 8 && F->usecnt &&
                        F->usecnt[i->dst] == 1;
-            fp_args2(F, i);
-            call_helper(F, fp_cmp_name(i->pred, i->w));
+            /* a < b is b > a, and so on: the cheaper way round, as an
+             * add's (fp_swap_args). The helpers answer an unordered pair
+             * "false" for every predicate, so the mirror is exact. */
+            struct ir_ins sw = *i;
+            const struct ir_ins *ci = i;
+            if (!i->imm_b && i->a != i->b &&
+                fp_args_cost(F, i->b, i->a, i->w) <
+                fp_args_cost(F, i->a, i->b, i->w)) {
+                sw.a = i->b;
+                sw.b = i->a;
+                sw.pred = i->pred == B_LT ? B_GT : i->pred == B_GT ? B_LT
+                        : i->pred == B_LE ? B_GE : i->pred == B_GE ? B_LE
+                        : i->pred;
+                ci = &sw;
+            }
+            fp_args2(F, ci);
+            call_helper(F, fp_cmp_name(ci->pred, ci->w));
             t_cmp_imm(t, T_R0, 0);
-            cond = cond_for(i->pred, 1);      /* the helper's signed answer */
+            cond = cond_for(ci->pred, 1);     /* the helper's signed answer */
             if (fuse) {
                 jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
                 F->skip_next = 1;

@@ -2355,15 +2355,26 @@ static void gen_ins(struct t_fn *F, int n)
             return;
         }
         if (i->op == IR_CMP) {
-            int cond = tcg_cond_for(i->pred, 1);   /* the helper's signed answer */
+            /* a < b as b > a when that is fewer moves (codegen.c's float
+             * compare says why the mirror is exact) */
+            enum binop pred = i->pred;
+            int va = i->a, vb = i->b;
+            if (!i->imm_b && va != vb &&
+                v6_args_cost(F, vb, va, ww) < v6_args_cost(F, va, vb, ww)) {
+                va = i->b;
+                vb = i->a;
+                pred = pred == B_LT ? B_GT : pred == B_GT ? B_LT
+                     : pred == B_LE ? B_GE : pred == B_GE ? B_LE : pred;
+            }
+            int cond = tcg_cond_for(pred, 1);      /* the helper's signed answer */
             struct ir_ins *nx = n + 1 < fn->nins ? &fn->ins[n + 1] : NULL;
             int vr[2], nw[2], dst[2];
             long kv[2] = { 0, 0 };
-            vr[0] = i->a; vr[1] = i->b;
+            vr[0] = va; vr[1] = vb;
             nw[0] = nw[1] = ww;
             dst[0] = 0; dst[1] = ww == 2 ? 2 : 1;
             call_args(F, 2, vr, nw, dst, kv);
-            tcg_call_helper(F, tcg_fp_cmp_name(i->pred, i->w));
+            tcg_call_helper(F, tcg_fp_cmp_name(pred, i->w));
             t1_cmp_imm(t, T_R0, 0);
             if (nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
                 nx->a == i->dst && nx->w != 8 && F->usecnt &&

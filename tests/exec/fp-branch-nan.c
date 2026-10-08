@@ -21,6 +21,36 @@ BR(double, dge, >=) BR(double, deq, ==) BR(double, dne, !=)
 BR(float, flt, <) BR(float, fle, <=) BR(float, fgt, >)
 BR(float, fge, >=) BR(float, feq, ==) BR(float, fne, !=)
 
+/* The right operand just computed by a call, so it is in r0:r1 (r0) where
+ * the helper wants the left one: the compare is made the other way round
+ * (b > a for a < b), which must give the same answer, NaN included. */
+static volatile double vgot;
+static volatile float fgot;
+__attribute__((noinline)) double dget(double x) { return x + vgot; }
+__attribute__((noinline)) float fget(float x) { return x + fgot; }
+__attribute__((noinline)) int dmirror(double a, double b)
+{
+    int r = 0;
+    if (a < dget(b)) r |= 1;
+    if (a <= dget(b)) r |= 2;
+    if (a > dget(b)) r |= 4;
+    if (a >= dget(b)) r |= 8;
+    if (a == dget(b)) r |= 16;
+    if (a != dget(b)) r |= 32;
+    return r;
+}
+__attribute__((noinline)) int fmirror(float a, float b)
+{
+    int r = 0;
+    if (a < fget(b)) r |= 1;
+    if (a <= fget(b)) r |= 2;
+    if (a > fget(b)) r |= 4;
+    if (a >= fget(b)) r |= 8;
+    if (a == fget(b)) r |= 16;
+    if (a != fget(b)) r |= 32;
+    return r;
+}
+
 /* the expected answer of `a op b` for ordered a, b, and for a NaN */
 static int want(int op, double a, double b, int nan)
 {
@@ -59,5 +89,14 @@ int main(void)
             if (ft[op](fa[k], fb[k]) != w) bad |= 4;
             if (ff[op](fa[k], fb[k]) != !w) bad |= 8;
         }
+    for (int k = 0; k < 5; k++) {
+        int dw = 0, fw = 0;
+        for (int op = 0; op < 6; op++) {
+            dw |= want(op, da[k], db[k], nan[k]) << op;
+            fw |= want(op, fa[k], fb[k], nan[k]) << op;
+        }
+        if (dmirror(da[k], db[k]) != dw) bad |= 16;
+        if (fmirror(fa[k], fb[k]) != fw) bad |= 32;
+    }
     return bad ? bad : 42;
 }
