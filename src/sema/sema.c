@@ -649,8 +649,7 @@ static void merge_bits(char *p, int unit, int nb, struct w128 val,
         p[16] |= (char)w_shr(val, 128 - bit_off, 0).lo;
 }
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
-                       struct stmt *s, int in_loop, int in_switch,
-                       int at_sw_level);
+                       struct stmt *s, int in_loop, int in_switch);
 
 /* Nonzero while lowering a static initializer (a file-scope global or a
  * static local). A compound literal met here has static storage: it becomes
@@ -1893,7 +1892,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* GNU statement expression: check the block, then its value is the
          * last statement when that is an expression statement, else void.
          * The block shares the function's flat scope (as any block does). */
-        check_stmt(u, f, sc, e->body, 0, 0, 0);
+        check_stmt(u, f, sc, e->body, 0, 0);
         struct stmt *last = NULL;
         for (struct stmt *s = e->body->body; s; s = s->next)
             last = s;
@@ -3311,12 +3310,39 @@ static struct ldf *const_fold_ld(const struct expr *e)
 }
 
 /* The statement list a switch dispatches over: its body, unwrapped when
- * it is the usual brace block. Case markers must live at THIS level. */
+ * it is the usual brace block. */
 struct stmt *switch_stmts(struct stmt *body)
 {
     if (body && body->kind == STMT_BLOCK)
         return body->body;
     return body;
+}
+
+static void switch_labels_walk(struct stmt *s, struct stmt ***out, int *n,
+                               int *cap)
+{
+    for (; s; s = s->next) {
+        if (s->kind == STMT_CASE || s->kind == STMT_DEFAULT) {
+            if (*n == *cap) {
+                *cap = *cap ? 2 * *cap : 16;
+                *out = xrealloc(*out, (size_t)*cap * sizeof **out);
+            }
+            (*out)[(*n)++] = s;
+        }
+        if (s->kind == STMT_SWITCH)
+            continue;               /* its markers are its own */
+        switch_labels_walk(s->body, out, n, cap);
+        switch_labels_walk(s->thn, out, n, cap);
+        switch_labels_walk(s->els, out, n, cap);
+    }
+}
+
+int switch_labels(struct stmt *body, struct stmt ***out)
+{
+    int n = 0, cap = 0;
+    *out = NULL;
+    switch_labels_walk(body, out, &n, &cap);
+    return n;
 }
 
 /* Flattens an initializer against its target type into (offset, type,
@@ -4806,8 +4832,7 @@ static int case_cmp(const void *x, const void *y)
 }
 
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
-                       struct stmt *s_in, int in_loop, int in_switch,
-                       int at_sw_level)
+                       struct stmt *s_in, int in_loop, int in_switch)
 {
     /* Each statement is a recovery point: an error in one is reported and
      * the next is still checked. What a failed statement already added to
@@ -4834,12 +4859,12 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             break;
         case STMT_CASE:
         case STMT_DEFAULT:
-            if (!at_sw_level)
-                sema_error_at(u, s->line, s->col,
-                           "'%s' must appear directly in its switch body "
-                           "(labels inside a nested block are not "
-                           "supported)",
-                           s->kind == STMT_CASE ? "case" : "default");
+            /* anywhere in the switch's body, as C allows: a nested
+             * block, an if, a loop (Duff's device) -- switch_labels finds
+             * it there, and irgen emits its label where it stands */
+            if (!in_switch)
+                sema_error_at(u, s->line, s->col, "'%s' outside of a switch",
+                              s->kind == STMT_CASE ? "case" : "default");
             if (s->kind == STMT_CASE) {
                 check_expr(u, f, sc, s->expr);
                 need_integer(u, s->expr, "a case label");
@@ -4853,7 +4878,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, s->cond);
             need_integer(u, s->cond, "'switch'");
             struct stmt *list = switch_stmts(s->body);
-            check_stmt(u, f, sc, list, in_loop, 1, 1);
+            check_stmt(u, f, sc, list, in_loop, 1);
             /* duplicate labels and a second default are parse-time
              * errors, not a runtime coin flip about which one wins.
              * Whether there is any duplicate is asked of the sorted
@@ -4861,35 +4886,39 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
              * was the slowest thing in compiling a switch of 8000 cases.
              * Only when there is one does the pairwise walk run, so the
              * errors come out as they always did. */
+            struct stmt **lab;
+            int nlab = switch_labels(s->body, &lab);
             int ndefault = 0, ncase = 0, dup = 0;
-            for (struct stmt *a = list; a; a = a->next)
-                ncase += a->kind == STMT_CASE;
+            for (int i = 0; i < nlab; i++)
+                ncase += lab[i]->kind == STMT_CASE;
             if (ncase > 1) {
                 long *cv = xmalloc((size_t)ncase * sizeof *cv);
                 int k = 0;
-                for (struct stmt *a = list; a; a = a->next)
-                    if (a->kind == STMT_CASE)
-                        cv[k++] = a->cval;
+                for (int i = 0; i < nlab; i++)
+                    if (lab[i]->kind == STMT_CASE)
+                        cv[k++] = lab[i]->cval;
                 qsort(cv, (size_t)ncase, sizeof *cv, case_cmp);
                 for (k = 1; k < ncase && !dup; k++)
                     dup = cv[k] == cv[k - 1];
                 free(cv);
             }
-            for (struct stmt *a = list; a; a = a->next) {
+            for (int i = 0; i < nlab; i++) {
+                struct stmt *a = lab[i];
                 if (a->kind == STMT_DEFAULT && ++ndefault > 1)
                     sema_error_line(u, a->line,
                                "a switch can have only one 'default'");
                 if (a->kind != STMT_CASE || !dup)
                     continue;
-                for (struct stmt *b = a->next; b; b = b->next)
-                    if (b->kind == STMT_CASE && b->cval == a->cval)
-                        sema_error_line(u, b->line,
-                                   "duplicate case label %ld", b->cval);
+                for (int j = i + 1; j < nlab; j++)
+                    if (lab[j]->kind == STMT_CASE && lab[j]->cval == a->cval)
+                        sema_error_line(u, lab[j]->line,
+                                   "duplicate case label %ld", lab[j]->cval);
             }
+            free(lab);
             break;
         }
         case STMT_DO:
-            check_stmt(u, f, sc, s->body, 1, in_switch, 0);
+            check_stmt(u, f, sc, s->body, 1, in_switch);
             check_expr(u, f, sc, s->cond);
             if (ty_is_complex(s->cond->ty) && cx_lowering())
                 s->cond = cx_truth(s->cond);
@@ -5250,9 +5279,9 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 s->cond_const = fold_is_exact(s->cond) &&
                                 const_fold(s->cond, &cv) ? (cv ? 2 : 1) : 0;
             }
-            check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->thn, in_loop, in_switch);
             if (s->els)
-                check_stmt(u, f, sc, s->els, in_loop, in_switch, 0);
+                check_stmt(u, f, sc, s->els, in_loop, in_switch);
             break;
         case STMT_WHILE:
             check_expr(u, f, sc, s->cond);
@@ -5260,7 +5289,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 s->cond = cx_truth(s->cond);
             else
                 need_scalar(u, s->cond, "'while'");
-            check_stmt(u, f, sc, s->body, 1, in_switch, 0);
+            check_stmt(u, f, sc, s->body, 1, in_switch);
             break;
         case STMT_FOR: {
             /* `for (int i = ...)` scopes i to the loop, so sibling
@@ -5268,7 +5297,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             int mark = sc->n, prev = sc->block_start;
             sc->block_start = mark;
             if (s->initdecl)
-                check_stmt(u, f, sc, s->initdecl, in_loop, in_switch, 0);
+                check_stmt(u, f, sc, s->initdecl, in_loop, in_switch);
             if (s->init)
                 check_expr(u, f, sc, s->init);
             if (s->cond) { /* NULL = forever, left by 'break' */
@@ -5280,7 +5309,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             }
             if (s->step)
                 check_expr(u, f, sc, s->step);
-            check_stmt(u, f, sc, s->body, 1, in_switch, 0);
+            check_stmt(u, f, sc, s->body, 1, in_switch);
             for (int i = mark; i < sc->n; i++)
                 sc->vars[i].active = 0;
             sc->block_start = prev;
@@ -5289,7 +5318,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
         case STMT_BLOCK: {
             int mark = sc->n, prev = sc->block_start;
             sc->block_start = mark;
-            check_stmt(u, f, sc, s->body, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->body, in_loop, in_switch);
             for (int i = mark; i < sc->n; i++)
                 sc->vars[i].active = 0; /* the block closed */
             sc->block_start = prev;
@@ -5297,10 +5326,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
         }
         case STMT_LABEL:
             /* the labeled statement is checked in the label's own context */
-            check_stmt(u, f, sc, s->body, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->body, in_loop, in_switch);
             break;
         case STMT_EHREGION:
-            check_stmt(u, f, sc, s->body, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->body, in_loop, in_switch);
             check_expr(u, f, sc, s->expr);
             check_expr(u, f, sc, s->cond);
             if (!is_lvalue(s->expr) || s->expr->ty->kind != TY_PTR)
@@ -5320,7 +5349,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                             "typeinfo object", a->name);
                 a->ti->used = 1;
             }
-            check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->thn, in_loop, in_switch);
             break;
         case STMT_GOTO:
             /* target existence is validated function-wide at codegen */
@@ -5412,13 +5441,15 @@ static int stmt_returns(struct stmt *s)
          * last statement returning rules out. Anything reached earlier
          * either returns or falls through toward it. */
         struct stmt *list = switch_stmts(s->body);
+        struct stmt **lab;
+        int nlab = switch_labels(s->body, &lab);
         int has_default = 0;
         struct stmt *last = NULL;
-        for (struct stmt *a = list; a; a = a->next) {
-            if (a->kind == STMT_DEFAULT)
-                has_default = 1;
+        for (int i = 0; i < nlab; i++)
+            has_default |= lab[i]->kind == STMT_DEFAULT;
+        free(lab);
+        for (struct stmt *a = list; a; a = a->next)
             last = a;
-        }
         if (!has_default || has_own_break(list) || !last)
             return 0;
         return stmt_returns(last);
@@ -5517,7 +5548,7 @@ static void check_func(struct unit *u, struct func *f)
             f->has_vm_params = 1;
         }
 
-    check_stmt(u, f, &sc, f->body, 0, 0, 0);
+    check_stmt(u, f, &sc, f->body, 0, 0);
 
     /* main is the exception the language makes: reaching its closing
      * brace returns 0 (C99 5.1.2.2.3), and irgen says so. Refusing it

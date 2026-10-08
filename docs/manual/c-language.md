@@ -366,6 +366,15 @@ to `exit`, `_Exit`, `abort`, `__builtin_unreachable` or
 `__builtin_trap`. `embcc --explain E0008` describes the rule; see
 [Diagnostics](diagnostics.md#t6).
 
+### Case labels in nested statements
+
+A `case` or `default` label can be anywhere in its `switch` statement's
+body: in a nested block, in an `if`, or inside a loop, which the `switch`
+then enters in the middle (Duff's device). This follows C11 6.8.4.2. A
+nested `switch` has its own labels. Duplicate values and a second
+`default` are errors at any nesting depth, and a label with no `switch`
+around it is an error (`'case' outside of a switch`).
+
 ### Empty parameter lists
 
 A function declarator with an empty parameter list, `int f();`, declares

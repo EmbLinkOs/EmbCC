@@ -36,10 +36,18 @@ check() { # name source expected-message-grep [extra flags]
 
 check case-outside-switch \
     'int main(void) { case 1: return 0; }' \
-    "directly in its switch body"
-check case-nested-in-block \
-    'int main(void) { int x = 1; switch (x) { { case 1: return 1; } } return 0; }' \
-    "directly in its switch body"
+    "'case' outside of a switch"
+check default-outside-switch \
+    'int main(void) { { default: return 0; } }' \
+    "'default' outside of a switch"
+# a label in a nested block is the switch's (tests/exec/case-nested.c), so
+# its duplicates are found across the nesting too
+check duplicate-case-nested \
+    'int main(void) { int x = 1; switch (x) { case 1: { case 1: return 1; } } return 0; }' \
+    "duplicate case label 1"
+check two-defaults-nested \
+    'int main(void) { int x = 1; switch (x) { default: if (x) { default: return 1; } } return 0; }' \
+    "only one .default."
 check duplicate-case \
     'int main(void) { int x = 1; switch (x) { case 2: break; case 2: break; } return 0; }' \
     "duplicate case label 2"
@@ -323,14 +331,14 @@ for t in aarch64-elf thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf; do
 done
 echo "case nolink: a board image with no memory map, or an AArch64 one, is refused by name"
 
-# C++ follows the target's data model and C++ ABI on 32-bit ARM and RV32
-# (tests/golden/cxx-embedded.sh); on the other narrow targets -- AVR's
-# two-byte pointers, MIPS, Xtensa, TriCore -- nobody has checked a vtable
-# or a mangled name, so code generation is refused by name there, except
-# for a check that writes nothing. On ARM and RV32 exceptions are refused
-# by name: there are no unwind tables for them.
+# C++ follows the target's data model and C++ ABI on every 32-bit target
+# but AVR (tests/golden/cxx-embedded.sh runs it on ARM, RV32, MIPS, Xtensa,
+# TriCore and the rest); on AVR -- two-byte int and pointers, which the C++
+# lowering does not handle -- code generation is refused by name, except
+# for a check that writes nothing. Elsewhere exceptions are refused by
+# name: there are no unwind tables for them.
 printf 'long f(long x) { return x + (long)sizeof(long); }\n' > "$out_dir/ilp.cpp"
-for t in avr mipsel-none-elf xtensa-none-elf tricore-none-elf; do
+for t in avr; do
     if err=$("$EMBCC" --target=$t -fno-exceptions -c "$out_dir/ilp.cpp" \
              -o "$out_dir/ilp.o" 2>&1); then
         echo "case cxx-not-lp64 $t: compiled C++ for an unchecked C++ ABI"; exit 1
@@ -338,7 +346,8 @@ for t in avr mipsel-none-elf xtensa-none-elf tricore-none-elf; do
     echo "$err" | grep -q "C++ is not yet supported for $t" || {
         echo "case cxx-not-lp64 $t: wrong diagnostic:"; echo "$err"; exit 1; }
 done
-for t in thumbv7em-none-eabi riscv32-unknown-elf; do
+for t in thumbv7em-none-eabi riscv32-unknown-elf mipsel-none-elf \
+         xtensa-none-elf tricore-none-elf; do
     if err=$("$EMBCC" --target=$t -c "$out_dir/ilp.cpp" \
              -o "$out_dir/ilp.o" 2>&1); then
         echo "case cxx-not-lp64 $t: compiled C++ with exceptions"; exit 1
@@ -353,7 +362,7 @@ done
 "$EMBCC" --target=avr -fsyntax-only "$out_dir/ilp.cpp" || {
     echo "case cxx-not-lp64: -fsyntax-only, which writes nothing, was refused"
     exit 1; }
-echo "case cxx-not-lp64: C++ for an unchecked C++ ABI, and exceptions on ARM and RV32, are refused by name"
+echo "case cxx-not-lp64: C++ on AVR, and exceptions on the other 32-bit targets, are refused by name"
 
 # File-scope asm: AArch64's blocks are read by the x86-64 vocabulary's
 # assembler (src/arch/x86_64/topasm.c), so an instruction in one is
@@ -659,14 +668,15 @@ check coff-section-variable \
     "variable's section attribute is not supported for COFF" \
     --target=x86_64-windows-gnu
 
-# The frame builtins are refused by NAME where the code keeps no frame
-# chain. On RISC-V and AVR the eight-byte check met them first (their w is
-# a host pointer's) and the message said "this operation at 64 bits".
+# The frame builtins above level 0 are refused by NAME where the code
+# keeps no frame chain (level 0 works everywhere: tests/exec/
+# frame-builtins.c). On RISC-V and AVR the eight-byte check once met them
+# first (their w is a host pointer's) and said "this operation at 64 bits".
 for t in riscv32-unknown-elf riscv64-unknown-elf avr; do
     check "frame-builtins-$t" \
-        'void *f(void) { return __builtin_frame_address(0); }
-void *g(void) { return __builtin_return_address(0); }
+        'void *f(void) { return __builtin_frame_address(1); }
+void *g(void) { return __builtin_return_address(1); }
 int main(void) { return 0; }' \
-        "__builtin_frame_address or __builtin_return_address" \
+        "__builtin_frame_address(1) is not supported on" \
         "--target=$t"
 done

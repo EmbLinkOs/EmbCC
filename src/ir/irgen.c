@@ -4620,23 +4620,27 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
 
             /* Every case gets its label first, because the tree below
              * visits them in VALUE order and the bodies are emitted in
-             * source order. */
+             * source order. A marker may be anywhere in the body -- a
+             * nested block, an if, a loop entered in its middle (Duff's
+             * device): its label is emitted where it stands, so a jump
+             * to it is a jump into that statement, as C says. */
+            struct stmt **lab;
+            int nlab = switch_labels(s->body, &lab);
             int ncase = 0;
-            for (struct stmt *c = list; c; c = c->next) {
-                if (c->kind == STMT_DEFAULT) {
-                    c->label = new_label(fn);
+            for (int k = 0; k < nlab; k++) {
+                struct stmt *c = lab[k];
+                c->label = new_label(fn);
+                if (c->kind == STMT_DEFAULT)
                     dflt = c->label;
-                } else if (c->kind == STMT_CASE) {
-                    c->label = new_label(fn);
+                else
                     ncase++;
-                }
             }
             if (ncase) {
                 struct stmt **cs = xmalloc((size_t)ncase * sizeof *cs);
                 int n = 0;
-                for (struct stmt *c = list; c; c = c->next)
-                    if (c->kind == STMT_CASE)
-                        cs[n++] = c;
+                for (int k = 0; k < nlab; k++)
+                    if (lab[k]->kind == STMT_CASE)
+                        cs[n++] = lab[k];
                 /* Insertion sort by value: the case list of a real
                  * switch is short, and a stable order keeps the emitted
                  * code the same from run to run (R4). Duplicate values
@@ -4679,6 +4683,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             } else {
                 emit_jmp(fn, dflt >= 0 ? dflt : lc.brk);
             }
+            free(lab);
             gen_stmt(fn, list, &lc); /* fallthrough is just: no jumps */
             emit_label(fn, lc.brk);
             break;
