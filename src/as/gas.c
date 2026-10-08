@@ -3183,6 +3183,13 @@ static int write_object(struct gas *g, const char *out_path)
      * object, which EmbLD checks */
     if (g->tgt->machine == EM_LOONGARCH)
         elfw_set_flags(w, target_elf_flags(target_get()));
+    /* RISC-V: the float ABI -mabi= names, as GNU as records it. Without
+     * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD
+     * refused to link it with the C it was written for. (Not RVC: this
+     * assembler does not compress.) */
+    if (g->tgt->machine == EM_RISCV)
+        elfw_set_flags(w, target_elf_flags(target_get()) &
+                          EF_RISCV_FLOAT_ABI_MASK);
     if (g->tgt->machine == EM_MIPS) {
         unsigned char af[24];
         elfw_set_flags(w, target_elf_flags(target_get()));
