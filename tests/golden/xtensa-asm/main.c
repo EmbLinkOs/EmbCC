@@ -100,6 +100,16 @@ int main(void)
         putn(r);
     }
     {
+        /* EmbCC's own guarantee, beyond GCC's: a windowed call changes
+         * the callee's window -- a8-a15 for callx8 -- whether or not the
+         * clobber list says so, and nothing live is kept there */
+        int r, k1 = x + 1, k2 = y * 3, k3 = x * y, k4 = x - y;
+        __asm__ volatile("mov a10, %1\n callx8 %2\n mov %0, a10"
+                         : "=r"(r) : "r"(x), "r"(c_twice));
+        putn(r);
+        putn(k1 + k2 + k3 + k4);
+    }
+    {
         int a = x * 3, b = y * 7, c = x - y, d = x + 11, e = y * y, f = x ^ y;
         __asm__ volatile("movi a2, 0; movi a3, 0; movi a4, 0; movi a5, 0\n"
                          "movi a6, 0; movi a8, 0; movi a9, 0; movi a10, 0\n"

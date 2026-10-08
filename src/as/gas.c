@@ -160,13 +160,15 @@ static void gerr(struct gas *g, const char *fmt, ...)
 
 static void advance(struct gas *g, long n);
 
-/* An encoding error (see deferr): on Xtensa, in pass two, kept until the
- * layout is known to be final; reported at once anywhere else. */
+/* An encoding error (see deferr): on Xtensa kept until the layout is
+ * known to be final -- pass one's is never, since a label behind it may
+ * still move -- and reported at once anywhere else. */
 static void gerr_enc(struct gas *g, int pass, const char *what,
                      const char *msg)
 {
     char buf[512];
-    if (g->tgt->machine != EM_XTENSA || pass != 2) {
+    (void)pass;
+    if (g->tgt->machine != EM_XTENSA) {
         gerr(g, "%s%s", what, msg);
         return;
     }

@@ -287,9 +287,14 @@ static int need_target(const struct tok *t, int raw, long long *rel,
         *rel = 0;
         return 0;
     }
-    if (!tok_target(t, rel))
+    if (!tok_target(t, rel)) {
+        if (isalpha((unsigned char)t->s[0]) || t->s[0] == '_')
+            FAIL("%s: \"%.*s\" is a symbol, and inline asm cannot reach one: "
+                 "a template carries no relocation (call or jump through a "
+                 "register, or write it in a .S file)", what, t->len, t->s);
         FAIL("%s: \"%.*s\" is not a branch target (a label, or .+N bytes "
              "from the instruction)", what, t->len, t->s);
+    }
     return 0;
 }
 
@@ -650,8 +655,10 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
         return 0;
     }
     if (IS("j")) {
-        if (n != 2 || need_target(&t[1], raw, &rel, mn, err, errlen))
+        if (n != 2)
             FAIL("j takes a target");
+        if (need_target(&t[1], raw, &rel, mn, err, errlen))
+            return -1;
         rel = raw ? 0 : rel - 4;
         if (!xt_j_reaches((long)rel))
             FAIL("j target %+lld bytes away is out of reach (128 KiB)",
@@ -662,8 +669,10 @@ static int stmt_body(const char *stmt, int len, struct code *out, long pc,
     if (IS("call0") || IS("call4") || IS("call8") || IS("call12")) {
         int inc = (int)(strtol(mn + 4, NULL, 10) / 4);
         long target;
-        if (n != 2 || need_target(&t[1], raw, &rel, mn, err, errlen))
+        if (n != 2)
             FAIL("%s takes a target", mn);
+        if (need_target(&t[1], raw, &rel, mn, err, errlen))
+            return -1;
         if (raw) {
             xt_call(out, inc);
             return 0;
