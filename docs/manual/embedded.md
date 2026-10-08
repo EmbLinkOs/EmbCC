@@ -772,12 +772,17 @@ The port's three hard parts are the same for any kernel:
 
 `riscv32-unknown-elf` and `riscv64-unknown-elf` generate code for the
 RV32IMAC and RV64IMAC instruction sets with the soft-float ABIs (`ilp32`
-and `lp64`) and the `medany` code model. There is no `-march=` or
-`-mabi=` option (`embcc: error: unknown argument '-march=rv32imac'`):
-the M, A and C extensions are always used, so EmbCC's output does not run
-on a core without them. The predefined macros say so (`__riscv_a`,
-`__riscv_c`, `__riscv_compressed`, `__riscv_float_abi_soft`,
-`__riscv_cmodel_medany`).
+and `lp64`) and the `medany` code model by default. `-march=` and
+`-mabi=` select the F and D extensions and their calling conventions --
+`-march=rv32imafc -mabi=ilp32f` for an ESP32-P4 or CH32V3 class part,
+`-march=rv64gc -mabi=lp64d` -- or leave out C; M and A are always used,
+so EmbCC's output does not run on a core without them. A program built
+for F or D must turn the FPU on before its first floating-point
+instruction (`mstatus.FS`, which is 0 at reset: `csrs mstatus, 0x2000`
+in machine mode); `tests/harness/riscv/boot.c` does. The predefined
+macros say what was chosen (`__riscv_a`, `__riscv_c`,
+`__riscv_compressed`, `__riscv_flen`, `__riscv_float_abi_single`,
+`__riscv_cmodel_medany`, ...).
 
 Plain `char` is unsigned. `long double` is 16 bytes (binary128) and has
 no arithmetic: any operation on one, like any 128-bit integer on RV64, is

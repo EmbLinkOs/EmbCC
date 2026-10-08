@@ -1,5 +1,5 @@
 #!/bin/sh
-# tools/bench/run.sh [-O2|-Os] [m4|rv32 ...] -- EmbCC against clang on the
+# tools/bench/run.sh [-O2|-Os] [m4|rv32|rv32f|rv64d ...] -- EmbCC against clang on the
 # boards, by guest instructions executed and by estimated cycles
 # (tools/bench/icount.c says how they are estimated).
 #
@@ -28,18 +28,29 @@ cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
    -undefined dynamic_lookup -o "$plug" "$here/icount.c" 2>/dev/null ||
 cc -shared -fPIC -O2 -I"$inc" $(pkg-config --cflags glib-2.0 2>/dev/null) \
    -o "$plug" "$here/icount.c" || { echo "cannot build the counting plugin"; exit 1; }
-names="crc sort matrix list interp hash text state fixed"
+names="crc sort matrix list interp hash text state fixed ffir fmatrix fvec dpoly"
 
 for b in $boards; do
+    EF=; V=
     case $b in
         m4) T=thumbv7em-none-eabi; X="-mcpu=cortex-m4 -mfloat-abi=soft"
             Q="qemu-system-arm -M mps2-an386 -cpu cortex-m4 -semihosting" ;;
         rv32) T=riscv32-unknown-elf; X="-march=rv32imac -mabi=ilp32 -mno-relax"
             Q="qemu-system-riscv32 -M virt -bios none -m 8" ;;
+        # The F extension and its ABI (an rv32imafc part): EmbCC and clang
+        # given the same -march/-mabi, clang no fused multiply-adds, as
+        # EmbCC emits none -- the checksums are of the results' bits.
+        rv32f) T=riscv32-unknown-elf; EF="-march=rv32imafc -mabi=ilp32f"
+            X="$EF -mno-relax -ffp-contract=off"
+            Q="qemu-system-riscv32 -M virt -bios none -m 8" ;;
+        rv64d) T=riscv64-unknown-elf; EF="-march=rv64gc -mabi=lp64d"
+            X="$EF -mno-relax -ffp-contract=off -mcmodel=medany"
+            Q="qemu-system-riscv64 -M virt -bios none -m 8" ;;
         *) echo "unknown board $b"; continue ;;
     esac
     L=$out/$b; mkdir -p "$L"
-    { sh tools/build-rt.sh $T "$L" && sh tools/build-libc.sh $T "$L"; } > "$L/build.log" 2>&1 ||
+    case $b in rv32f) V=/ilp32f ;; rv64d) V=/lp64d ;; esac
+    { sh tools/build-rt.sh $T$V "$L" && sh tools/build-libc.sh $T$V "$L"; } > "$L/build.log" 2>&1 ||
         { echo "$b: the runtime does not build"; continue; }
     case $b in
         m4) for f in boot io; do "$EMBCC" --target=$T -DSRAM_TOP=0x20400000u \
@@ -59,7 +70,7 @@ int main(void)
 }
 EOT
             ;;
-        rv32) for f in boot io; do "$EMBCC" --target=$T \
+        rv*) for f in boot io; do "$EMBCC" --target=$T $EF \
                 -c tests/harness/riscv/$f.c -o "$L/$f.o"; done
             cat > "$L/drv.c" <<'EOT'
 int prog_main(void); void putn(long v); void puts_(const char *s);
@@ -78,7 +89,7 @@ int main(void)
 EOT
             ;;
     esac
-    "$EMBCC" --target=$T -O1 -c "$L/drv.c" -o "$L/drv.o"
+    "$EMBCC" --target=$T $EF -O1 -c "$L/drv.c" -o "$L/drv.o"
     echo "== $b $opt: EmbCC / clang, by instructions executed and by estimated cycles"
     k=1
     for name in $names; do
@@ -86,7 +97,7 @@ EOT
           for n in 2 6; do
             o=$L/$name-$c-$n
             if [ $c = embcc ]; then
-                "$EMBCC" --target=$T $opt -DKERNEL=$k -DN=$n -Dmain=prog_main \
+                "$EMBCC" --target=$T $EF $opt -DKERNEL=$k -DN=$n -Dmain=prog_main \
                     -c tools/bench/workload.c -o $o.o
             else
                 clang --target=$T $X $opt -ffreestanding -w -DKERNEL=$k -DN=$n \
@@ -95,7 +106,7 @@ EOT
             case $b in
                 m4) EMBCC_THUMB_HARNESS=$L sh tests/harness/thumb-m4f/link.sh \
                         $o.elf $o.o "$L/drv.o" "$L/libc.a" "$L/librt.a" ;;
-                rv32) EMBCC_RISCV_HARNESS=$L sh tests/harness/riscv/link.sh \
+                rv*) EMBCC_RISCV_HARNESS=$L sh tests/harness/riscv/link.sh \
                         $o.elf $o.o "$L/drv.o" "$L/libc.a" "$L/librt.a" ;;
             esac > $o.lerr 2>&1 || { echo "$name: $c does not link: $(head -1 $o.lerr)"; continue 3; }
             sh tests/harness/qrun.sh 60 $Q -nographic -plugin "$plug,out=$o.n" \

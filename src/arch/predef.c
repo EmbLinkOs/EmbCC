@@ -294,6 +294,68 @@ static const struct predef_macro thumb_cmse_add[] = {
     { "__ARM_FEATURE_CMSE", "3" },
 };
 
+/* RISC-V's -march= and -mabi= (src/driver/main.c riscv_float_resolve).
+ * The generated tables are rv32imac/ilp32 and rv64imac/lp64; these are the
+ * macros clang changes from there, read off `clang -dM` for every
+ * combination (tests/golden/predef.sh checks each against it): F brings
+ * __riscv_f, fdiv, fsqrt, flen and Zicsr, D __riscv_d and flen 64, the
+ * hardware-float ABIs replace __riscv_float_abi_soft, and C with F or D
+ * the compressed loads and stores of Zcf (RV32 only) and Zcd. Without C
+ * the compressed macros go. */
+static int riscv_on(void)
+{
+    return target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64;
+}
+
+static int riscv_changes(void)
+{
+    return riscv_on() && (target_riscv_flen() || !target_riscv_rvc() ||
+                          target_riscv_zifencei());
+}
+
+static int riscv_drops(const char *name)
+{
+    if (!riscv_on())
+        return 0;
+    if (target_riscv_abi_flen() && strcmp(name, "__riscv_float_abi_soft") == 0)
+        return 1;
+    return !target_riscv_rvc() &&
+           (strcmp(name, "__riscv_c") == 0 ||
+            strcmp(name, "__riscv_compressed") == 0 ||
+            strcmp(name, "__riscv_zca") == 0);
+}
+
+static int riscv_adds(struct predef_macro *out)
+{
+    int n = 0, flen = target_riscv_flen(), abi = target_riscv_abi_flen();
+    int c = target_riscv_rvc();
+    if (flen) {
+        out[n].name = "__riscv_f";      out[n++].value = "2002000";
+        out[n].name = "__riscv_fdiv";   out[n++].value = "1";
+        out[n].name = "__riscv_fsqrt";  out[n++].value = "1";
+        out[n].name = "__riscv_flen";   out[n++].value = flen == 64 ? "64" : "32";
+        out[n].name = "__riscv_zicsr";  out[n++].value = "2000000";
+    }
+    if (flen == 64) {
+        out[n].name = "__riscv_d";      out[n++].value = "2002000";
+    }
+    if (abi) {
+        out[n].name = abi == 64 ? "__riscv_float_abi_double"
+                                : "__riscv_float_abi_single";
+        out[n++].value = "1";
+    }
+    if (c && flen && target_get() == TARGET_RISCV32) {
+        out[n].name = "__riscv_zcf";    out[n++].value = "1000000";
+    }
+    if (c && flen == 64) {
+        out[n].name = "__riscv_zcd";    out[n++].value = "1000000";
+    }
+    if (target_riscv_zifencei()) {
+        out[n].name = "__riscv_zifencei"; out[n++].value = "2000000";
+    }
+    return n;
+}
+
 static int thumb_fpu_drops(const char *name)
 {
     if (target_get() != TARGET_THUMB || !target_thumb_fpu())
@@ -320,7 +382,7 @@ static int contradicted(const char *name)
                 return 1;               /* replaced below */
     }
     return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
-           thumb_fpu_drops(name) ||
+           thumb_fpu_drops(name) || riscv_drops(name) ||
            (target_thumb_cmse() && strcmp(name, "__ARM_FEATURE_CMSE") == 0);
 }
 
@@ -354,7 +416,8 @@ const struct predef_macro *predef_table(int *count)
      * depends on. */
     int fpu = target_get() == TARGET_THUMB && target_thumb_fpu();
     int cmse = target_thumb_cmse();
-    if (!os && !fpu && !cmse && target_fmt_get() == TGT_FMT_ELF) {
+    int rv = riscv_changes();
+    if (!os && !fpu && !cmse && !rv && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -362,7 +425,7 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos + 8 + ndarwin_a64_model) *
+        merged = xmalloc((size_t)(narch + nos + 20 + ndarwin_a64_model) *
                          sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
@@ -374,6 +437,8 @@ const struct predef_macro *predef_table(int *count)
                 merged[nmerged++] = darwin_a64_model[i];
         if (cmse)
             merged[nmerged++] = thumb_cmse_add[0];
+        if (rv)
+            nmerged += riscv_adds(merged + nmerged);
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;

@@ -179,6 +179,13 @@ typedef struct {
  * which a disassembler reads as <unknown> and a core without the
  * extension traps on. Bits 2:1 are the float ABI, whose 0 means SOFT. */
 #define EF_RISCV_RVC 0x0001
+/* ...and the float ABI field: which registers carry floating point across
+ * a call. SINGLE is ilp32f/lp64f (a float in fa0-fa7), DOUBLE ilp32d/lp64d
+ * (a double too). Objects of two float ABIs do not link. */
+#define EF_RISCV_FLOAT_ABI_MASK   0x0006
+#define EF_RISCV_FLOAT_ABI_SOFT   0x0000
+#define EF_RISCV_FLOAT_ABI_SINGLE 0x0002
+#define EF_RISCV_FLOAT_ABI_DOUBLE 0x0004
 /* AVR's e_flags carry the architecture in the low seven bits; avr5 is the
  * ATmega328P's (__AVR_ARCH__ 5), and 0 reads as avr0 -- a core without
  * mul, movw or the 16-bit adiw/sbiw. */

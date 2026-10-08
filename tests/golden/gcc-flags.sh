@@ -123,9 +123,16 @@ for t in $THUMB; do
     done
     refuse $t "-mno-unaligned-access is not supported" -mno-unaligned-access
 done
-refuse riscv32-unknown-elf "-mabi=ilp32d is not supported" -mabi=ilp32d
+refuse riscv32-unknown-elf "-march=rv32imac has no D extension" -mabi=ilp32d
 refuse riscv32-unknown-elf "-mabi=ilp32e is not supported" -mabi=ilp32e
-refuse riscv64-unknown-elf "-mabi=lp64d is not supported" -mabi=lp64d
+refuse riscv64-unknown-elf "-march=rv64imac has no D extension" -mabi=lp64d
+refuse riscv32-unknown-elf "has no F extension" -march=rv32imac -mabi=ilp32f
+refuse riscv32-unknown-elf "the D extension needs F" -march=rv32imadc
+refuse riscv32-unknown-elf "the 'v' extension is not supported" -march=rv32imafcv
+refuse riscv32-unknown-elf "the 'zba' extension is not supported" -march=rv32imac_zba
+refuse riscv32-unknown-elf "EmbCC needs the M extension" -march=rv32iac
+refuse riscv32-unknown-elf "use --target=riscv64-unknown-elf" -march=rv64gc
+refuse riscv64-unknown-elf "is a 32-bit ABI" -march=rv64gc -mabi=ilp32d
 refuse riscv32-unknown-elf "is an ARM option" -mthumb-interwork
 refuse x86_64-elf "is an ARM option" -mslow-flash-data
 refuse x86_64-apple-darwin "-fcommon is not supported for" -fcommon

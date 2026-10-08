@@ -26,7 +26,7 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 | [Apple arm64](#apple-arm64) | `aarch64-apple-darwin` | Mach-O | Apple arm64 | the system linker |
 | [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
 | [ARMv7-A](#armv7-a) | `armv7a-none-eabi`, `armv7a-none-eabihf` | ELF32 | AAPCS, AAPCS-VFP | `embld` |
-| [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32` / `lp64` | `embld` |
+| [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32`/`lp64` and the F and D conventions (`-mabi=`) | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
 | [MIPS64](#mips64) | `mips64el-none-elf`, `mips64-none-elf` | ELF64 | n64, soft float | `embld` |
@@ -1037,23 +1037,54 @@ special registers, `cbz`, `tbb` and `tbh` are refused.
 | `riscv32-unknown-elf` | `riscv32`, `riscv32-elf`, `rv32` | RV32IMAC | `ilp32` |
 | `riscv64-unknown-elf` | `riscv64`, `riscv64-elf`, `rv64` | RV64IMAC | `lp64` |
 
-Both are freestanding. One code generator serves both widths.
+Both are freestanding. One code generator serves both widths. The ISA
+and ABI columns are the defaults; `-march=` and `-mabi=`
+([invoking](invoking.md#risc-v-options)) select the F and D extensions
+and their calling conventions.
 
 ### Extensions
-
-The instruction set is fixed; there is no `-march=` or `-mabi=`.
 
 | Extension | Use |
 |---|---|
 | I | The base integer instruction set. |
-| M | Multiply and divide. At RV32, 64-bit division is a call (`__divdi3` and family). |
-| A | Atomic read-modify-write: `amoadd`, `amoor` and the other AMOs, and `lr`/`sc` loops for compare-and-swap, on 4-byte (and at RV64, 8-byte) objects. Memory barriers are `fence rw, rw`. |
-| C | Compressed instructions, emitted wherever an encoding allows. The object's `e_flags` has `EF_RISCV_RVC` set. |
+| M | Multiply and divide. At RV32, 64-bit division is a call (`__divdi3` and family). Required. |
+| A | Atomic read-modify-write: `amoadd`, `amoor` and the other AMOs, and `lr`/`sc` loops for compare-and-swap, on 4-byte (and at RV64, 8-byte) objects. Memory barriers are `fence rw, rw`. Required. |
+| F | With `-march=...f...`: `float` add, subtract, multiply, divide, square root, comparisons and conversions to and from the integers a register holds are instructions (`fadd.s`, `feq.s`, `fcvt.w.s` ... ); a float lives in an f register (`ft3`-`ft11`, and `fs0`-`fs11` where the ABI preserves them). |
+| D | With `-march=...d...` (or `g`): the same for `double`, and the conversions between the two. At RV32 a double crosses to an integer register pair through eight bytes of frame. |
+| C | Compressed instructions, emitted wherever an encoding allows (unless `-march=` leaves out `c`). The object's `e_flags` has `EF_RISCV_RVC` set. |
 
-There is no F or D extension: every floating-point operation is a call to
-a soft-float helper (`__addsf3`, `__adddf3`, ...). The objects carry a
+Without F a floating-point operation is a call to a soft-float helper
+(`__addsf3`, `__adddf3`, ...); with F alone so is every `double` one; and
+the 64-bit integer conversions at RV32 and everything on `long double`
+are calls with D too. No fused multiply-add is emitted: C rounds `a * b +
+c` twice, and EmbCC does not contract. The objects carry a
 `.riscv.attributes` section (`rv32i2p1_m2p0_a2p1_c2p0` or the RV64
-equivalent, stack alignment 16).
+equivalent, stack alignment 16), and `e_flags` the float ABI.
+
+### Calling convention: the hardware-float ABIs
+
+`-mabi=ilp32f`/`lp64f` and `ilp32d`/`lp64d` follow the psABI's hardware
+floating-point convention, with ABI_FLEN 32 or 64, checked against clang
+across the call (`tests/golden/riscv-hf-abi.sh`):
+
+- a `float` (and with the `d` ABIs a `double`) goes in the next of
+  `fa0`-`fa7`, and once those are gone by the integer rules below;
+- a structure that flattens -- nested structures and arrays opened up --
+  to one or two floating-point fields no wider than ABI_FLEN, or one such
+  field and one integer no wider than XLEN in either order, goes field by
+  field in `fa` and `a` registers when enough of both are left, and
+  whole by the integer rules otherwise; a complex number counts as two
+  fields. Unions, pointers, two integers, three fields and wider types
+  never flatten. A zero-width bit-field is ignored beside a lone float
+  and ends a two-field structure, as clang has it;
+- variadic arguments always take the integer rules;
+- results come back the same way in `fa0`/`fa1` and `a0` -- a structure
+  of two doubles at RV32 too, rather than through a hidden pointer;
+- `fs0`-`fs11` are callee-saved, as wide as the ABI (`fsw` under the
+  `f` ABIs, `fsd` under the `d` ones).
+
+The runtime helpers (`__extendsfdf2`, `__floatdisf`, `__trunctfdf2` ...)
+take and return their floating-point values the same way.
 
 ### Calling convention: RISC-V psABI, soft float
 
@@ -1065,7 +1096,9 @@ equivalent, stack alignment 16).
 - An aggregate of up to 2×XLEN bits is passed in up to two registers; a
   larger one is passed by reference to a copy.
 - `float` and `double` are passed and returned in integer registers, as
-  the `ilp32` and `lp64` soft-float ABIs require.
+  the `ilp32` and `lp64` soft-float ABIs require -- with an FPU too
+  (`-march=rv32imafc -mabi=ilp32`), whose f registers are then all
+  caller-saved.
 - At RV64, a 32-bit integer in a register is kept sign-extended to 64
   bits, `unsigned int` included, as the psABI requires: arguments and
   results of 32-bit type are passed that way, in registers and on the
@@ -1096,7 +1129,12 @@ From `clang -target riscv32-unknown-elf` and `riscv64-unknown-elf`:
 `__riscv_muldiv`, `__riscv_atomic`, `__riscv_compressed`,
 `__riscv_float_abi_soft`, `__riscv_cmodel_medany`, `__CHAR_UNSIGNED__`,
 `_ILP32`/`__ILP32__` or `_LP64`/`__LP64__`. `__SIZEOF_INT128__` is
-defined at RV64 only.
+defined at RV64 only. `-march=` and `-mabi=` change them as clang's do:
+`__riscv_f`, `__riscv_d`, `__riscv_flen`, `__riscv_fdiv`,
+`__riscv_fsqrt`, `__riscv_zicsr`, `__riscv_zcf` (RV32), `__riscv_zcd`,
+`__riscv_zifencei`, `__riscv_float_abi_single` or `_double` in place of
+`_soft`, and no compressed macros without C (`tests/golden/predef.sh`
+checks sixteen combinations).
 
 ### Runtime
 

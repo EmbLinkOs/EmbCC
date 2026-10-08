@@ -140,10 +140,14 @@ refflags() {
         # operation as a call.
         armv7a)  [ -n "${EMBCC_REF_GCC_ARMV7A:-}" ] || \
                      echo "-target armv7a-none-eabi -mfloat-abi=soft -ffreestanding" ;;
+        # EMBCC_PREDEF_RV_MARCH / _MABI ask for another -march/-mabi --
+        # tests/golden/predef.sh checks the hardware-float combinations
+        # (rv32imafc/ilp32f, rv64gc/lp64d, ...) against clang with them;
+        # the generated tables stay the integer ones.
         riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
-                     echo "-target riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
+                     echo "-target riscv32-unknown-elf -march=${EMBCC_PREDEF_RV_MARCH:-rv32imac} -mabi=${EMBCC_PREDEF_RV_MABI:-ilp32} -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
-                     echo "-target riscv64-unknown-elf -march=rv64imac -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
+                     echo "-target riscv64-unknown-elf -march=${EMBCC_PREDEF_RV_MARCH:-rv64imac} -mabi=${EMBCC_PREDEF_RV_MABI:-lp64} -mcmodel=medany -ffreestanding" ;;
         # AVR names the PART, not just the architecture: __AVR_ATmega328P__
         # and the __AVR_HAVE_* feature macros all come from -mmcu=, and a
         # header that tests them is how AVR code is normally written. The
