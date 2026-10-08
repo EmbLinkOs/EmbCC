@@ -135,11 +135,16 @@ refc "a naked function" 'inline assembly is not supported for xtensa-none-elf' \
 refc "a file-scope instruction" 'file-scope asm instruction' \
     '__asm__(".globl x\nx: nop");'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for xtensa-none-elf' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+grep -q 'C++ exceptions are not supported for xtensa-none-elf' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
 echo "narrow atomics, the frame and return address above level 0,"
 echo "__int128, interrupt and naked functions, inline and file-scope assembly,"
-echo "a scalar aligned beyond the 16-byte stack and C++ are each refused by name"
+echo "a scalar aligned beyond the 16-byte stack and C++ exceptions are each refused by name"

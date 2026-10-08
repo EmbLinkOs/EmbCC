@@ -340,9 +340,29 @@ static int arg_byref(const struct ir_arg *a)
     return a->is_struct || a->size > 8;
 }
 
-static void place_arg(const struct ir_arg *a, int *word, struct argplace *p)
+/* sret: this is the C++ indirect-result pointer (sret_first: the return
+ * slot of a class that is not trivially copyable, which the C++ lowering
+ * passes first). The SPARC V8 ABI passes it as it passes a C struct's
+ * result buffer: in the struct-return word, %sp+64, taking no argument
+ * word -- as clang++ and g++ do. */
+static int fn_sret_first(const struct ir_func *fn)
+{
+    return fn->src && fn->src->sret_first;
+}
+
+static void place_arg(const struct ir_arg *a, int sret, int *word,
+                      struct argplace *p)
 {
     int byref = arg_byref(a);
+    if (sret) {
+        p->byref = 0;
+        p->copy = -1;
+        p->reg = NARGREG;
+        p->nreg = 0;
+        p->nstk = 1;
+        p->stk = SRET;
+        return;
+    }
     int words = byref ? 1 : (a->size + 3) / 4;
     int w = *word;
     p->byref = byref;
@@ -384,6 +404,8 @@ static int ret_reg_words(const struct type *t)
  * a long double? */
 static int fn_sret(const struct ir_func *fn)
 {
+    if (fn_sret_first(fn))
+        return 1;
     if (fn->ret_abi.is_struct)
         return ret_reg_words(fn->ret_abi.ty) == 0;
     return fn->ret_abi.size == 16;
@@ -408,7 +430,7 @@ static void sparc_abi_hints(const struct ir_func *fn, int *hint)
     struct argplace pl;
     for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
-        place_arg(a, &word, &pl);
+        place_arg(a, p == 0 && fn_sret_first(fn), &word, &pl);
         if (pl.nreg == 1 && !pl.nstk && !pl.byref && a->size <= 4 &&
             !fn->is_varargs)
             hint[p] = in_reg_n(pl.reg);
@@ -436,7 +458,7 @@ static void sparc_abi_hints(const struct ir_func *fn, int *hint)
         word = 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(a, &word, &pl);
+            place_arg(a, k == 0 && i->sret_first, &word, &pl);
             /* not over a parameter's own register (or an earlier
              * call's): a value that lives across this call cannot take
              * an %o register, and the fallback was any free one */
@@ -470,7 +492,7 @@ static long outgoing_area(const struct sparc_fn *F)
         if (i->op != IR_CALL)
             continue;
         for (int k = 0; k < i->nargs; k++)
-            place_arg(&i->argv[k], &word, &pl);
+            place_arg(&i->argv[k], k == 0 && i->sret_first, &word, &pl);
         end = word > NARGREG ? ARG_STK + 4L * (word - NARGREG) : 0;
         if (end > most)
             most = end;
@@ -1527,7 +1549,7 @@ static void const_remat(struct sparc_fn *F)
             struct argplace pl;
             for (int k = 0; k < i->nargs; k++) {
                 const struct ir_arg *a = &i->argv[k];
-                place_arg(a, &word, &pl);
+                place_arg(a, k == 0 && i->sret_first, &word, &pl);
                 if (!pl.byref && !pl.nstk && a->vreg >= 0 && a->vreg < nv)
                     site[a->vreg]++;
             }
@@ -2428,7 +2450,7 @@ static void gen_call(struct sparc_fn *F, int n)
     if (rw < 0)
         sparc_refuse(F, i, "a call returning a _Complex of this type");
     for (int k = 0; k < i->nargs; k++)
-        place_arg(&i->argv[k], &word, &pl[k]);
+        place_arg(&i->argv[k], k == 0 && i->sret_first, &word, &pl[k]);
 
     /* The by-reference COPIES first: the caller owns them, because the
      * callee may write its parameter. */
@@ -2526,6 +2548,10 @@ static void gen_call(struct sparc_fn *F, int n)
     }
     if (sret)
         sparc_unimp(t, (unsigned long)call_sret_size(i) & 0xfff);
+    else if (i->sret_first)
+        /* the C++ return slot's call: the callee returns past this, as
+         * a struct-returning one does; the size is the class's */
+        sparc_unimp(t, (unsigned long)i->sret_size & 0xfff);
 
     if (i->dst < 0)
         return;
@@ -3688,7 +3714,7 @@ static void sparc_pair_hints(const struct ir_func *fn, int *hint)
     struct argplace pl;
     for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
-        place_arg(a, &word, &pl);
+        place_arg(a, p == 0 && fn_sret_first(fn), &word, &pl);
         if (a->size == 8 && pl.nreg == 2 && !pl.byref && !(pl.reg & 1) &&
             !fn->is_varargs)
             hint[p] = in_reg_n(pl.reg);
@@ -3715,7 +3741,7 @@ static void sparc_pair_hints(const struct ir_func *fn, int *hint)
         word = 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(a, &word, &pl);
+            place_arg(a, k == 0 && i->sret_first, &word, &pl);
             if (a->size == 8 && pl.nreg == 2 && !pl.byref && !(pl.reg & 1) &&
                 a->vreg >= 0 && a->vreg < fn->nvregs && hint[a->vreg] < 0)
                 hint[a->vreg] = out_reg(pl.reg);
@@ -3912,7 +3938,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
         int npstk = 0;
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
-            place_arg(a, &word, &pl);
+            place_arg(a, i == 0 && fn_sret_first(fn), &word, &pl);
             if (pl.byref) {
                 /* the word is the address of the caller's copy; the body
                  * expects the object in the parameter's own slot */
@@ -4073,7 +4099,7 @@ static int leaf_candidate(const struct ir_func *fn)
     if (fn->is_varargs || fn->has_alloca || fn_sret(fn) || !fn->src)
         return 0;
     for (int p = 0; p < fn->nparams; p++) {
-        place_arg(&fn->param_abi[p], &word, &pl);
+        place_arg(&fn->param_abi[p], p == 0 && fn_sret_first(fn), &word, &pl);
         if (pl.byref || pl.nstk)
             return 0;
     }

@@ -341,7 +341,22 @@ int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
 int target_default_new_align(void)
 {
-    return g_arch == TARGET_THUMB ? 8 : 16;
+    switch (g_arch) {
+    case TARGET_THUMB: return 8;
+    case TARGET_X86_64: case TARGET_AARCH64: case TARGET_RISCV32:
+    case TARGET_RISCV64: case TARGET_LOONGARCH64: case TARGET_MIPS64:
+        return 16;
+    default: {
+        /* clang's rule (TargetInfo::getNewAlign): the larger of long
+         * double's and long long's alignment -- 8 on MIPS32, SPARC,
+         * PowerPC (its long double a double) and Xtensa; capped where
+         * nothing is aligned further: 4 on RX and TriCore, 2 on ColdFire,
+         * 1 on AVR. */
+        int a = g_model[g_arch].ldbl > 8 ? g_model[g_arch].ldbl : 8;
+        int m = g_model[g_arch].maxal;
+        return m && a > m ? m : a;
+    }
+    }
 }
 int target_has_sqrt(int bytes)
 {

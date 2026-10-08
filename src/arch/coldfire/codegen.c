@@ -281,6 +281,15 @@ static int cplx_regs(const struct type *t, long size)
     return size == 8 ? 2 : size == 16 ? 4 : 0;
 }
 
+/* The C++ indirect-result pointer (sret_first: the return slot of a
+ * class that is not trivially copyable, which the C++ lowering passes
+ * first) travels as a struct's result buffer does: in a1, taking no
+ * argument word. */
+static int fn_sret_first(const struct ir_func *fn)
+{
+    return fn->src && fn->src->sret_first;
+}
+
 static int fn_sret(const struct ir_func *fn)
 {
     return fn->ret_abi.is_struct && !cplx_regs(fn->ret_abi.ty,
@@ -327,7 +336,7 @@ static long out_area(const struct cf_fn *F)
         const struct ir_ins *i = &fn->ins[n];
         long stk = 0;
         if (i->op == IR_CALL) {
-            for (int k = 0; k < i->nargs; k++)
+            for (int k = i->sret_first ? 1 : 0; k < i->nargs; k++)
                 stk += arg_words(&i->argv[k]);
         } else if (cf_op_calls_helper(i)) {
             stk = 16;            /* two doubles, the most any helper takes */
@@ -374,6 +383,8 @@ static void layout(struct cf_fn *F)
     /* The parameters live where the caller put them. */
     for (int p = 0; p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
+        if (p == 0 && fn_sret_first(fn))
+            continue;            /* in a1: the sret slot, below */
         F->slot[p] = pstk + pad_of(a);
         pstk += arg_words(a);
     }
@@ -432,9 +443,11 @@ static void layout(struct cf_fn *F)
     off -= ((long)fn->scratch_bytes + 3) & ~3L;
     F->scratch_at = off;
     F->sret_slot = NOSLOT;
-    if (fn_sret(fn)) {
+    if (fn_sret(fn) || fn_sret_first(fn)) {
         off -= 4;
         F->sret_slot = off;
+        if (fn_sret_first(fn) && fn->nparams > 0 && fn->nvregs > 0)
+            F->slot[0] = off;    /* the return slot's own home */
     }
     F->tmp_slot = NOSLOT;
     if (needs_tmp(F)) {
@@ -1419,8 +1432,9 @@ static void gen_call(struct cf_fn *F, int n)
     struct code *t = F->t;
     long off = 0;
 
-    /* each argument into its words at the stack pointer */
-    for (int k = 0; k < i->nargs; k++) {
+    /* each argument into its words at the stack pointer (the C++
+     * return slot, sret_first, goes in a1 below) */
+    for (int k = i->sret_first ? 1 : 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
         need_out(F, off + arg_words(a));
         if (a->is_struct) {
@@ -1443,6 +1457,8 @@ static void gen_call(struct cf_fn *F, int n)
     }
     if (call_sret(i))
         cf_lea(t, fp_at(F->scratch_at + i->scratch), A1);
+    else if (i->sret_first && i->nargs > 0)
+        cf_move(t, 4, vea(F, i->argv[0].vreg), cf_areg(A1));
     if (i->indirect) {
         int r = areg(F, i->a, A0);
         cf_jsr(t, cf_ind(r));

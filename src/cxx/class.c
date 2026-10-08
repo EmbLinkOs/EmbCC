@@ -232,8 +232,10 @@ static void layout(struct cclass *c)
         c->primary_virt = c->primary != NULL;
     }
     if (c->primary_virt || (c->dynamic && !c->primary)) {
-        /* the vptr, at 0 (the primary virtual base's, or the class's) */
-        size = align = cx_ptr_size();
+        /* the vptr, at 0 (the primary virtual base's, or the class's),
+         * aligned as a pointer is (one byte on AVR, two on ColdFire) */
+        size = cx_ptr_size();
+        align = ct_align(ct_ptr(ct_basic(CT_VOID)));
         bits = 8 * size;
     }
     /* the primary base first, at 0; then the other bases in order */
@@ -265,13 +267,74 @@ static void layout(struct cclass *c)
             if (ba > align)
                 align = ba;
         }
+    /* RX lays bit-fields out as Microsoft does (target_ms_bitfields; the
+     * C front end's ms_struct_layout, which this follows): a run of
+     * bit-fields whose types have one size shares a unit of that type;
+     * anything else ends the run, and the rest of its unit is skipped. */
+    int ms = target_ms_bitfields() && !c->packed && !c->is_union;
+    int ms_prev = 0;                  /* in a run: its latest bit-field's */
+    long ms_prev_size = 0, ms_prev_w = 0, ms_rem = 0, ms_unit = 0;
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
         struct cty *t = fl->type;
         long fs = ct_is_ref(t) ? cx_ptr_size() : ct_size(t);
-        long fa = ct_is_ref(t) ? cx_ptr_size() : ct_align(t);
+        long fa = ct_is_ref(t) ? ct_align(ct_ptr(ct_basic(CT_VOID)))
+                               : ct_align(t);
         if (c->packed)
             fa = 1;
+        if (ms) {
+            long tsize = fs * 8;
+            long w = fl->bitwidth >= 0 ? fl->bitwidth : tsize;
+            int isbf = fl->bitwidth >= 0, saved = ms_prev;
+            long saved_size = ms_prev_size;
+            if (fl->bitwidth < 0 && fl->align_attr > fa)
+                fa = fl->align_attr;
+            if (!isbf || w != 0 || (ms_prev && ms_prev_w != 0))
+                if (fa > align)
+                    align = fa;
+            int cont = 0;
+            if (ms_prev) {
+                if (isbf && w && ms_prev_w && tsize == ms_prev_size) {
+                    if (ms_rem < w) {             /* out of bits */
+                        bits += ms_rem;
+                        ms_unit = bits;
+                        ms_prev_w = w;
+                        ms_rem = tsize < w ? 0 : tsize - w;
+                    } else {
+                        ms_rem -= w;
+                    }
+                    cont = 1;
+                } else {
+                    if (ms_prev_w)
+                        bits += ms_rem;           /* use up the unit */
+                    else
+                        saved = 0;
+                    if (!isbf || w == 0)
+                        ms_prev = 0;
+                }
+            }
+            if (!cont && (!isbf || (saved ? tsize != saved_size : w != 0))) {
+                ms_rem = tsize < w ? 0 : tsize - w;
+                if (isbf)
+                    bits = (bits + fa * 8 - 1) / (fa * 8) * (fa * 8);
+                ms_unit = bits;
+                ms_prev = 0;
+            }
+            if (isbf) {
+                fl->off = ms_unit / 8;
+                fl->bitpos = bits;
+                if (!ms_prev) {
+                    ms_prev = 1;
+                    ms_prev_size = tsize;
+                    ms_prev_w = w;
+                }
+                bits += w;
+                if (w && i == c->nfields - 1)
+                    bits += ms_rem;
+                continue;
+            }
+            /* a member that is not a bit-field: placed below, as always */
+        }
         if (fl->bitwidth < 0 && fl->align_attr > fa)
             fa = fl->align_attr;      /* alignas / aligned: even packed */
         if (c->is_union) {
@@ -295,8 +358,15 @@ static void layout(struct cclass *c)
                 fl->bitpos = bits;
                 continue;
             }
-            if (!c->packed && bits / unit != (bits + w - 1) / unit)
-                bits = (bits + unit - 1) / unit * unit;
+            /* GCC's excess_unit_span, as the C front end applies it: a
+             * field may not span more alignment units of its type than
+             * the type itself does -- "within one storage unit" where the
+             * alignment is the size, but where it is capped (AVR, ColdFire,
+             * RX, TriCore) a field may straddle the smaller units */
+            long abits = fa * 8;
+            if (!c->packed &&
+                (bits % abits + w + abits - 1) / abits > unit / abits)
+                bits = (bits + abits - 1) / abits * abits;
             fl->off = bits / 8 / fa * fa;
             fl->bitpos = bits;
             bits += w;
@@ -769,9 +839,13 @@ static int plain_layout(struct cclass *c)
         struct cfield *fl = c->fields[i];
         struct cty *t = fl->type;
         long fs = ct_is_ref(t) ? cx_ptr_size() : ct_size(t);
-        long fa = ct_is_ref(t) ? cx_ptr_size() : ct_align(t);
+        long fa = ct_is_ref(t) ? ct_align(ct_ptr(ct_basic(CT_VOID)))
+                               : ct_align(t);
         if (c->packed)
             fa = 1;
+        /* (RX's Microsoft bit-fields: spelled out, not simulated here) */
+        if (fl->bitwidth >= 0 && target_ms_bitfields() && !c->packed)
+            return 0;
         if (fl->bitwidth < 0 && fl->align_attr > fa)
             fa = fl->align_attr;      /* alignas / aligned: even packed */
         if (fl->bitwidth >= 0) {
@@ -780,8 +854,10 @@ static int plain_layout(struct cclass *c)
                 bits = (bits + fa * 8 - 1) / (fa * 8) * (fa * 8);
                 continue;
             }
-            if (!c->packed && bits / unit != (bits + w - 1) / unit)
-                bits = (bits + unit - 1) / unit * unit;
+            long abits = fa * 8;      /* (as layout() places it) */
+            if (!c->packed &&
+                (bits % abits + w + abits - 1) / abits > unit / abits)
+                bits = (bits + abits - 1) / abits * abits;
             bits += w;
             continue;
         }

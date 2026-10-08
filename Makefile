@@ -793,7 +793,10 @@ LIBCXX_EMBEDDED := thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                    thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                    thumbv8m.main-none-eabihf armv7a-none-eabi \
                    armv7a-none-eabihf riscv32-unknown-elf \
-                   riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d
+                   riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
+                   mipsel-none-elf mips-none-elf mips64-none-elf \
+                   powerpc-none-eabi sparc-none-elf m68k-none-elf \
+                   xtensa-none-elf tricore-none-elf rx-none-elf
 libcxx-embedded: embcc embar
 	@for t in $(LIBCXX_EMBEDDED); do \
 	    sh tools/build-libcxx.sh $$t $(BUILD)/libcxx/$$t || exit 1; \

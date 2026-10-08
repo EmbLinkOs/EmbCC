@@ -108,11 +108,16 @@ refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
 refc "a naked function" '__attribute__((naked)) is not supported' \
     '__attribute__((naked)) void f(void){}'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for tricore-none-elf' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+grep -q 'C++ exceptions are not supported for tricore-none-elf' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
 printf 'nop\n' > "$out/a.s"
 if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err"; then
     echo "a .s file was accepted"; exit 1
@@ -121,7 +126,7 @@ grep -q 'no assembly-file support for tricore-none-elf' "$out/as.err" || {
     echo "a .s file was refused, but not by name:"; cat "$out/as.err"; exit 1; }
 refc "an instruction in file-scope asm" 'file-scope asm instruction "nop"' '__asm__("nop");'
 echo "narrow atomics, the frame and return address above level 0,"
-echo "__int128, interrupt and naked functions, an over-aligned scalar, C++"
+echo "__int128, interrupt and naked functions, an over-aligned scalar, C++ exceptions"
 echo "and assembly files are each refused by name"
 
 # ---- the link -------------------------------------------------------------
