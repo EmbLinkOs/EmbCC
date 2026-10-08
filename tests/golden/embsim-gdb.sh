@@ -80,7 +80,7 @@ command -v "$GDB" >/dev/null 2>&1 || { echo "skipped: no gdb"; exit 0; }
 command -v "$QA" >/dev/null 2>&1 || { echo "skipped: no $QA to referee with"; exit 0; }
 [ -x "$EMBSIM" ] || fail "$EMBSIM is not built (make embsim)"
 
-port=$(( 31000 + ($$ % 1000) * 32 ))     # 21 used
+port=$(( 31000 + ($$ % 1000) * 40 ))     # 35 used
 next_port() { port=$((port + 1)); ports="$ports $port"; }
 
 # bounded SECONDS OUT CMD...: CMD with its output in OUT (its input from
@@ -554,4 +554,90 @@ EOT
     echo "embsim-gdb: rv32: a trap with nowhere to go stops as SIGSEGV"
 else
     echo "embsim-gdb: no qemu-system-riscv32/64 or no RISC-V gdb: the RISC-V checks did not run"
+fi
+
+# ---- 8. AVR --------------------------------------------------------------------------
+# gdb-fw.c for the ATmega328P, with the AVR harness (whose boot calls main
+# and then waits for ever: the session ends at main's return, printing
+# what main returns, and kills the target). The session is the M-profile
+# one without the watchpoints -- QEMU's AVR stub closes the connection at
+# the first -- and with SREG and the PC where it prints the core's own
+# registers.
+QAVR=${EMBCC_QEMU_AVR:-qemu-system-avr}
+# qemu_avr PORT ELF: QEMU's uno halted at reset with its stub
+qemu_avr() {
+    sh tests/harness/qrun.sh 120 "$QAVR" -M uno -nographic -bios "$2" \
+        -S -gdb "tcp::$1" > /dev/null 2>&1 &
+    pids="$pids $!"
+}
+if command -v "$QAVR" >/dev/null 2>&1 &&
+   "$GDB" -nx -batch -ex 'set architecture avr:5' 2>&1 | grep -q 'avr:5'; then
+    AH=$out/avr-h; mkdir -p "$AH"
+    "$EMBCC" --target=avr -c tests/harness/avr/boot.S -o "$AH/boot.o" &&
+    "$EMBCC" --target=avr -Os -c tests/harness/avr/io.c -o "$AH/io.o" &&
+    "$EMBCC" --target=avr -Os -c lib/rt/avr.c -o "$AH/rt.o" &&
+    "$EMBCC" --target=avr -g -O0 -c $src/gdb-fw.c -o "$out/avr.o" &&
+    EMBCC_AVR_HARNESS=$AH sh tests/harness/avr/link.sh "$out/avr.elf" "$out/avr.o" \
+        > /dev/null 2>&1 || fail "the AVR image does not build"
+    "$EMBSIM" "$out/avr.elf" --board uno > /dev/null 2>&1 ||
+        fail "avr.elf does not run to the harness's loop on EmbSim"
+    ret=$(grep -n '^    return acc;' $src/gdb-fw.c | cut -d: -f1)
+    awk -v ret="$ret" '
+        /^(watch|rwatch|awatch) / { skip = 1; next }
+        skip && ($0 == "continue" || $0 == "bt") { next }
+        { skip = 0 }
+        $0 == "print $xpsr" { l[n++] = "print $sreg"; next }
+        $0 == "print $msp" { l[n++] = "print/x $pc"; next }
+        $0 == "print $psp" || $0 == "print $control" || $0 == "print $primask" { next }
+        $0 == "info all-registers" { l[n++] = "info registers"; next }
+        { l[n++] = $0 }
+        END { for (i = 0; i < n - 1; i++) print l[i]
+              print "break gdb-fw.c:" ret; print "continue"; print "print acc"; print "kill" }
+    ' "$out/session.gdb" > "$out/avr-session.gdb"
+    next_port; qp=$port; next_port; ep=$port
+    qemu_avr $qp "$out/avr.elf"
+    sim_at $ep "$out/avr.elf" --board uno
+    gdb_run $qp "$out/avr.elf" "$out/avr-session.gdb" "$out/avr.gdb-qemu"
+    gdb_run $ep "$out/avr.elf" "$out/avr-session.gdb" "$out/avr.gdb-embsim"
+    same avr.gdb "$out/avr.gdb-qemu" $qp "$out/avr.gdb-embsim" $ep
+    t=$out/avr.gdb-embsim
+    want "$t" '^0x00000000 in __vectors ()' "avr: not stopped at the reset vector"
+    want "$t" '^Breakpoint 1, compute (a=0, b=2)' "avr: no stop at compute(0, 2)"
+    want "$t" '^Value returned is \$1 = 1' "avr: finish did not return 1"
+    want "$t" '^\$3 = {x = 10, y = -4}' "avr: the variable was not changed"
+    want "$t" '^SREG  ' "avr: no SREG among the registers"
+    want "$t" '= 92$' "avr: main did not see the variable written (acc 92)"
+    want "$t" '^\[Inferior 1 (process 1) killed\]' "avr: kill"
+    [ "$(sim_status $ep)" = 0 ] || fail "avr: kill: EmbSim's status is $(sim_status $ep), not 0"
+    echo "embsim-gdb: avr: gdb's session on EmbSim is its session on QEMU ($(wc -l < "$out/avr.gdb.qemu" | tr -d ' ') lines): breakpoints, finish, steps, registers, memory, a variable written and seen"
+
+    # interrupting the running target: in a loop, and asleep
+    next_port; qp=$port; next_port; ep=$port
+    qemu_avr $qp "$out/avr.elf"
+    sim_at $ep "$out/avr.elf" --board uno
+    interrupt_run $qp "$out/avr.elf" "$out/avrint.qemu-raw"
+    interrupt_run $ep "$out/avr.elf" "$out/avrint.embsim-raw"
+    for w in qemu embsim; do
+        sed 's/^0x[0-9a-f]* in main ()/main ()/' "$out/avrint.$w-raw" > "$out/avrint.$w"
+    done
+    same avr-interrupt "$out/avrint.qemu" $qp "$out/avrint.embsim" $ep
+    [ "$(grep -c '^Program received signal SIGINT' "$out/avrint.embsim")" = 2 ] ||
+        { cat "$out/avrint.embsim"; fail "avr interrupt: two SIGINT stops expected"; }
+    echo "embsim-gdb: avr: interrupting the target (0x03), in a loop and asleep, as on QEMU"
+
+    # EmbSim only: the counts at a breakpoint, the description
+    next_port; ep=$port
+    sim_at $ep "$out/avr.elf" --board uno
+    gdb_run $ep "$out/avr.elf" "$out/monitor.gdb" "$out/monitor.avr"
+    t=$out/monitor.avr
+    n=$(sed -n '/^Breakpoint 1, sum_table/,$p' "$t" | grep -m1 '^[0-9][0-9]*$')
+    c=$(sed -n '/^Breakpoint 1, sum_table/,$p' "$t" | grep '^[0-9][0-9]*$' | sed -n 2p)
+    [ -n "$n" ] && [ -n "$c" ] || { cat "$t"; fail "avr: no counts from the monitor"; }
+    "$EMBSIM" "$out/avr.elf" --board uno --max-insns $n --count "$out/count.avr" > /dev/null 2>&1
+    [ "$(sed -n 2p "$out/count.avr")" = "$c" ] ||
+        fail "avr: $n instructions are $(sed -n 2p "$out/count.avr") cycles without a debugger, $c with"
+    want "$t" 'org.gnu.gdb.avr.cpu' "avr: the target description"
+    echo "embsim-gdb: avr: $n instructions and $c cycles to the breakpoint, as a run without a debugger counts them; the target description"
+else
+    echo "embsim-gdb: no qemu-system-avr or no AVR gdb: the AVR checks did not run"
 fi

@@ -3,7 +3,8 @@
  * for the M4 with its FPU (float `real`), so neither needs lib/rt; and
  * for RISC-V, RV32 soft-float (integer) and RV64 with D (float), where
  * reset is entered from embld's -Tstack stub and the test device ends
- * the run.
+ * the run; and for the AVR, where the harness's boot calls main and
+ * waits for ever after it (an `int` there is 16 bits).
  *
  * main's result is the exit status (semihosting's SYS_EXIT_EXTENDED, or
  * the test device's code): 71 with an integer `real` and 65 with a float
@@ -21,7 +22,7 @@ extern unsigned __bss_start, __bss_end;
 int main(void);
 void reset(void);
 
-#ifndef __riscv
+#if !defined(__riscv) && !defined(__AVR__)
 __attribute__((section(".vectors"), used))
 void *const vectors[2] = { (void *)0x20010000u, (void *)reset };
 #endif
@@ -56,7 +57,7 @@ struct pt origin = { 3, -4 };
 real scale = SCALE;
 volatile int spin = SPIN, idle = IDLE;
 
-#ifndef __riscv
+#if !defined(__riscv) && !defined(__AVR__)
 static unsigned blk[2];
 
 static void semi(unsigned op, const void *a)
@@ -96,12 +97,18 @@ int main(void)
     acc += sum_table(8);
     acc += (int)fmix((real)origin.x, QUARTER);
     while (spin) ticks++;
+#ifdef __AVR__
+    *(volatile unsigned char *)0x53 = 1;        /* SMCR.SE */
+    while (idle) __asm__ volatile("sleep");
+#else
     while (idle) __asm__ volatile("wfi");
+#endif
     if (trap)
         __builtin_trap();
     return acc;
 }
 
+#ifndef __AVR__
 void reset(void)
 {
     unsigned *d = &__data_start, *s = &__data_load;
@@ -125,3 +132,4 @@ void reset(void)
     for (;;)
         ;
 }
+#endif
