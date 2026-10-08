@@ -696,11 +696,13 @@ static int session(struct gdb *g)
                     q = "";
             }
             if (*q) {
-                u8 b[4];
+                /* the address into the program counter, at its width */
+                u8 b[16];
                 u32 a = hexnum(&q);
-                b[0] = (u8)a; b[1] = (u8)(a >> 8);
-                b[2] = (u8)(a >> 16); b[3] = (u8)(a >> 24);
-                c->ops->reg_write(c, 15, b);
+                int sz = c->ops->reg_read(c, c->ops->pc_regnum, b);
+                for (int i = 0; i < sz; i++)
+                    b[i] = (u8)(i < 4 ? a >> (8 * i) : 0);
+                c->ops->reg_write(c, c->ops->pc_regnum, b);
             }
             int why = resume(g, p[0] == 's' || p[0] == 'S');
             if (why == STOP_LOST)

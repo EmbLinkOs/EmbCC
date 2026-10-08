@@ -16,6 +16,12 @@
  * instruction also gets a cost, from the table in cost.h (which EmbSim
  * shares, so the simulator and the plugin charge the same).
  *
+ * With `stop=ADDR` the counts written are those at the first block that
+ * starts at ADDR: a run's own end, for a machine whose exit QEMU takes
+ * its time over (virt's test device stops QEMU from its main loop, while
+ * the guest spins on in its last loop) or that never exits at all (the
+ * AVR), so the count is exact where the total would not be.
+ *
  * Neither model is cycle-accurate -- there are no wait states, no load-use
  * stalls, no flash -- but both charge the things a compiler chooses
  * between. Static costs are added per translation block, inline, as the
@@ -45,6 +51,9 @@ struct tb_end {
 };
 static const struct tb_end *prev_tb;
 static uint64_t taken;
+/* stop=ADDR: the counts when a block first starts there */
+static uint64_t stop_addr, stop_count, stop_cost;
+static int stop_set, stopped;
 
 static void tb_exec(unsigned int vcpu, void *ud)
 {
@@ -53,6 +62,11 @@ static void tb_exec(unsigned int vcpu, void *ud)
     if (prev_tb && prev_tb->branch && e->start != prev_tb->fall)
         taken++;
     prev_tb = e;
+    if (stop_set && !stopped && e->start == stop_addr) {
+        stopped = 1;
+        stop_count = qemu_plugin_u64_sum(count);
+        stop_cost = qemu_plugin_u64_sum(cost) + 2 * taken;
+    }
 }
 
 static void tb_trans(struct qemu_plugin_tb *tb, void *p)
@@ -87,6 +101,10 @@ static void at_exit(void *p)
     (void)p;
     uint64_t total = qemu_plugin_u64_sum(count);
     uint64_t cyc = qemu_plugin_u64_sum(cost) + 2 * taken;
+    if (stopped) {
+        total = stop_count;
+        cyc = stop_cost;
+    }
     FILE *f = out_path[0] ? fopen(out_path, "w") : stderr;
     if (f) {
         fprintf(f, "%llu\n%llu\n", (unsigned long long)total,
@@ -104,11 +122,16 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
 {
     is_arm = info && info->target_name &&
              strncmp(info->target_name, "arm", 3) == 0;
-    for (int i = 0; i < argc; i++)
+    for (int i = 0; i < argc; i++) {
         if (strncmp(argv[i], "out=", 4) == 0) {
             strncpy(out_path, argv[i] + 4, sizeof out_path - 1);
             out_path[sizeof out_path - 1] = 0;
         }
+        if (strncmp(argv[i], "stop=", 5) == 0) {
+            stop_addr = strtoull(argv[i] + 5, NULL, 0);
+            stop_set = 1;
+        }
+    }
     counts = qemu_plugin_scoreboard_new(sizeof(uint64_t));
     count = qemu_plugin_scoreboard_u64(counts);
     costs = qemu_plugin_scoreboard_new(sizeof(uint64_t));

@@ -854,7 +854,7 @@ static const char *cpu_gdb_xml(struct cpu *c, const char *annex)
 static const struct cpu_ops cortexm_ops = {
     "cortex-m", 40, "an ARM image",
     cpu_reset, step, cpu_pc, cpu_reg_read, cpu_reg_write,
-    cpu_gdb_g_regs, cpu_gdb_xml, 2, cpu_interrupt,
+    cpu_gdb_g_regs, cpu_gdb_xml, 2, cpu_interrupt, 15, 1,
 };
 
 /* the core of a board: the model, its NVIC's priority bits, and its own
