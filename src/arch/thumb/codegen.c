@@ -3841,10 +3841,27 @@ static void gen_ins(struct t_fn *F, int n)
         }
         if (i->op == IR_CMP) {
             int cond;
+            /* A branch on the answer and nothing else reading it takes
+             * the helper's flags straight, as the integer compare does
+             * (IR_CMP below): the helpers answer an unordered pair the
+             * way that makes the predicate false, so the inverse
+             * condition is exactly "not (a pred b)" and BRZ may use it.
+             * The 0/1 never exists -- `ite; movs #1; movs #0; cbz` was
+             * eight bytes after every soft-float compare. */
+            struct ir_ins *nx = n + 1 < fn->nins ? &fn->ins[n + 1]
+                                                 : (struct ir_ins *)0;
+            int fuse = nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
+                       nx->a == i->dst && nx->w != 8 && F->usecnt &&
+                       F->usecnt[i->dst] == 1;
             fp_args2(F, i);
             call_helper(F, fp_cmp_name(i->pred, i->w));
             t_cmp_imm(t, T_R0, 0);
             cond = cond_for(i->pred, 1);      /* the helper's signed answer */
+            if (fuse) {
+                jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
+                F->skip_next = 1;
+                return;
+            }
             set_cc(F, i->dst, cond);
             return;
         }
