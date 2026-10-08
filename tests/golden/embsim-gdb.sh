@@ -80,7 +80,7 @@ command -v "$GDB" >/dev/null 2>&1 || { echo "skipped: no gdb"; exit 0; }
 command -v "$QA" >/dev/null 2>&1 || { echo "skipped: no $QA to referee with"; exit 0; }
 [ -x "$EMBSIM" ] || fail "$EMBSIM is not built (make embsim)"
 
-port=$(( 31000 + ($$ % 1000) * 40 ))     # 35 used
+port=$(( 31000 + ($$ % 1000) * 40 ))     # 36 used
 next_port() { port=$((port + 1)); ports="$ports $port"; }
 
 # bounded SECONDS OUT CMD...: CMD with its output in OUT (its input from
@@ -638,6 +638,19 @@ if command -v "$QAVR" >/dev/null 2>&1 &&
         fail "avr: $n instructions are $(sed -n 2p "$out/count.avr") cycles without a debugger, $c with"
     want "$t" 'org.gnu.gdb.avr.cpu' "avr: the target description"
     echo "embsim-gdb: avr: $n instructions and $c cycles to the breakpoint, as a run without a debugger counts them; the target description"
+
+    # EmbSim only: a write watchpoint, which stops after the store as
+    # gdb's AVR target expects (QEMU's stub has none to compare with)
+    printf 'set pagination off\nset confirm off\nbreak compute\ncontinue\ndelete\nwatch counter\ncontinue\ncontinue\ndelete\nbreak gdb-fw.c:%s\ncontinue\nprint acc\nkill\n' \
+        "$ret" > "$out/avrwatch.gdb"
+    next_port; ep=$port
+    sim_at $ep "$out/avr.elf" --board uno
+    gdb_run $ep "$out/avr.elf" "$out/avrwatch.gdb" "$out/avrwatch.out"
+    t=$out/avrwatch.out
+    want "$t" '^New value = 3' "avr: the write watchpoint's first stop"
+    want "$t" '^New value = 11' "avr: the write watchpoint's second stop"
+    want "$t" '= 71$' "avr: main's result after the watchpoints (acc 71)"
+    echo "embsim-gdb: avr: a write watchpoint stops twice, after each store"
 else
     echo "embsim-gdb: no qemu-system-avr or no AVR gdb: the AVR checks did not run"
 fi
