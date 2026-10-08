@@ -115,6 +115,8 @@ echo "by name"
 progs=
 for cc in tests/cxx-embedded/*.cc; do
     n=$(basename "$cc" .cc)
+    # (EMBCC_CXX_PROGS: only these programs, for a quick run)
+    case " ${EMBCC_CXX_PROGS:-$n} " in *" $n "*) ;; *) continue ;; esac
     progs="$progs $n"
     "$HOSTCXX" -std=c++20 -w -o "$out/host/$n" "$cc" || {
         echo "$n: the host's $HOSTCXX does not build it"; exit 1; }
