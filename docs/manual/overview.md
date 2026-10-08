@@ -9,17 +9,20 @@ full. To build EmbCC and compile a first program, go on to
 
 ## What EmbCC is
 
-EmbCC is a compiler for C and C++ together with its own preprocessor,
-assemblers, linker, debugger and supporting tools. It produces code for:
+EmbCC is a compiler for C and C++ for embedded systems. Together with
+its own preprocessor, assemblers, linker, debugger, simulator and
+supporting tools, it makes up the Emb toolchain. It produces code for:
 
-- EmbLinkOS on x86-64, the primary target, and bare-metal x86-64;
-- AArch64, bare metal and EmbLinkOS;
-- ARM Cortex-M microcontrollers (ARMv7-M, ARMv7E-M and ARMv8-M Mainline,
-  in Thumb state);
-- RISC-V microcontrollers, RV32 and RV64;
-- the AVR ATmega328P;
-- Linux on x86-64 and AArch64, macOS (Mach-O) and Windows (COFF), with
-  the limits listed under [Targets at a glance](#targets-at-a-glance).
+- Arm Cortex-M microcontrollers (ARMv6-M, ARMv7-M, ARMv7E-M with DSP,
+  and ARMv8-M Baseline and Mainline with TrustZone-M), and ARMv7-A;
+- RISC-V, RV32 and RV64, with the F and D extensions;
+- AVR (ATmega);
+- Xtensa (ESP32 class), Infineon TriCore, Renesas RX, NXP ColdFire,
+  MIPS32 and MIPS64, PowerPC, SPARC V8 (LEON3) and LoongArch64;
+- operating systems and hosted programs: bare-metal x86-64 and AArch64
+  (EmbLinkOS among them), Linux on x86-64 and AArch64, macOS (Mach-O)
+  and Windows (COFF), with the limits listed under
+  [Targets at a glance](#targets-at-a-glance).
 
 EmbCC runs on macOS and Linux. It is written in C99, and it compiles its
 own sources.
@@ -39,7 +42,7 @@ toolchain on the host.
 line:
 
 ```text
-EmbCC 1.0.0-m2.complete — C compiler for EmbLinkOS, target x86_64-elf
+EmbCC 1.0.0-m2.complete (the Emb toolchain's C and C++ compiler, for embedded systems and operating systems)
 ```
 
 ## Components
