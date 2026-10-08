@@ -1,7 +1,7 @@
 /* The SPARC (LEON3, QEMU leon3_generic) test harness: a startup, the
  * register-window trap handlers, and a way to stop -- in C, with the few
- * privileged instructions as hand-encoded words (EmbCC has no SPARC
- * assembler yet).
+ * privileged instructions as hand-encoded words (written before EmbCC had
+ * a SPARC assembler, and kept so the harness does not test what it runs).
  *
  * QEMU loads the image (-kernel) into RAM at its link address and starts
  * it from its own little boot loader, which enables the APBUART and jumps

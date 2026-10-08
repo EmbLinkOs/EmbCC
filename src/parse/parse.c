@@ -2566,6 +2566,14 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
         ndims++;
         expect(ps, TOK_RBRACKET, "']'");
     }
+    /* Elements of a typedef aligned beyond its size (`typedef int A8
+     * __attribute__((aligned(8)))`) cannot all be aligned: the second
+     * would sit at 4. GCC and clang refuse the array; so does this. */
+    if (ndims && t->align_ovr && ty_size(t) > 0 && ty_size(t) % ty_align(t))
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "the size of an array element of type %s (%d bytes) is "
+                   "not a multiple of its alignment (%d bytes)",
+                   ty_name(t), ty_size(t), ty_align(t));
     /* Innermost first. Once any dimension is variable, every dimension
      * outside it is too — `int a[3][n]` is 3 rows of a run-time size — so
      * each becomes a VLA node (with its constant as the length). */
@@ -4197,11 +4205,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * a block-scope typedef's must not change the layout */
         struct attrs bat = { 0 };
         struct type *base = parse_type_spec_attrs(ps, 1, &bat);
-        if (is_td && (bat.aligned || bat.packed))
+        if (is_td && bat.packed)
             parse_error_at(ps, t->line, t->col,
-                       "an aligned or packed attribute on a block-scope "
-                       "typedef is not supported; declare the typedef at "
-                       "file scope");
+                       "a packed attribute on a typedef's name is not "
+                       "supported: put it on the struct it names");
         int spec_const = ps->spec_const;
         if (!base)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -4223,6 +4230,18 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 if (!tname)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "typedef needs a name, got %s", tok_describe(cur(ps)));
+                /* the trailing attribute, before the name is entered: an
+                 * alignment is the type's, as at file scope */
+                struct attrs tat = bat;
+                tat.packed = 0;
+                if (at_attribute(ps))
+                    parse_attributes(ps, &tat);
+                if (tat.packed)
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                               "a packed attribute on a typedef's name is not "
+                               "supported: put it on the struct it names");
+                if (tat.aligned)
+                    tt = ty_aligned(tt, tat.aligned);
                 struct type *prev = find_typedef(ps, tname);
                 if (prev && !ty_equal(prev, tt))
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -4272,17 +4291,6 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                  * missing definition a link error) */
                 struct attrs xat = { 0 };
                 parse_attributes(ps, &xat);
-            }
-            if (is_td) {
-                /* a trailing attribute on a block-scope typedef: one
-                 * that changes the layout is refused, not dropped */
-                struct attrs tat = { 0 };
-                parse_attributes(ps, &tat);
-                if (tat.aligned || tat.packed)
-                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                               "an aligned or packed attribute on a "
-                               "block-scope typedef is not supported; "
-                               "declare the typedef at file scope");
             }
             if (cur(ps)->kind == TOK_COMMA) { advance(ps); continue; }
             break;
@@ -5236,21 +5244,15 @@ static void parse_top(struct parser *ps, struct unit *u,
             if (at_attribute(ps))
                 parse_attributes(ps, &tdone);
             pcs_not_here(ps, &tdone, "a typedef");
-            /* An alignment on the NAME cannot be honoured: struct type
-             * has no per-type alignment override, so the typedef would
-             * silently name a type of ordinary alignment and a DMA
-             * buffer declared through it would sit wherever it landed.
-             * Refuse by name (THE RULE) rather than misalign quietly.
-             * A struct or union that carries its own aligned/packed is
-             * unaffected -- that is applied where the struct is
-             * defined, and reaches this typedef through the type. */
-            if (tdone.aligned && tdone.aligned > ty_align(tt))
-                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                           "__attribute__((aligned(%d))) on a typedef is not "
-                           "supported: EmbCC carries alignment on objects and "
-                           "on struct definitions, not on a type name; put it "
-                           "on the declaration that uses '%s'",
-                           tdone.aligned, tname);
+            /* An alignment on the NAME is the type's, larger or smaller
+             * than its own, with its size unchanged -- GCC's and clang's
+             * rule: `typedef uint8_t buf_t[64] __attribute__((aligned(4)))`
+             * for a DMA buffer, `typedef int una __attribute__((aligned(1)))`
+             * for an unaligned access (irgen's lv_natural). A struct or
+             * union that carries its own aligned/packed is unaffected --
+             * that is applied where the struct is defined. */
+            if (tdone.aligned)
+                tt = ty_aligned(tt, tdone.aligned);
             struct type *prev = find_typedef(ps, tname);
             if (prev && !ty_equal(prev, tt))
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,

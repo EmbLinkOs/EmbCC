@@ -48,6 +48,12 @@ check duplicate-case-nested \
 check two-defaults-nested \
     'int main(void) { int x = 1; switch (x) { default: if (x) { default: return 1; } } return 0; }' \
     "only one .default."
+# an aligned typedef is the type's alignment (tests/exec/aligned-typedef.c);
+# an array of one aligned beyond its size could not align its second
+# element, and GCC and clang refuse it
+check aligned-typedef-array \
+    'typedef int A8 __attribute__((aligned(8))); A8 arr[3];' \
+    "is not a multiple of its alignment"
 check duplicate-case \
     'int main(void) { int x = 1; switch (x) { case 2: break; case 2: break; } return 0; }' \
     "duplicate case label 2"

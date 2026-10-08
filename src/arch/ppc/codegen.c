@@ -26,8 +26,9 @@
  *   * No delay slots, and misaligned accesses are the hardware's.
  *
  * Refused by name: atomics wider than a word,
- * __builtin_frame_address/return_address, inline asm (for now), a branch
- * beyond +-32 MiB, and __int128 (ILP32). THE RULE.
+ * __builtin_frame_address/return_address, a branch beyond +-32 MiB, and
+ * __int128 (ILP32). Inline asm is assembled by ppc/asm.c and placed here
+ * (IR_ASM). THE RULE.
  */
 #include "emit.h"
 
@@ -189,7 +190,7 @@ static const struct ra_target PPC_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg */
     0,
-    0               /* asm_in_reg */
+    1               /* asm_in_reg: see IR_ASM */
 };
 
 static int g_ppc_regalloc;
@@ -2399,9 +2400,136 @@ static void gen_ins(struct ppc_fn *F, int n)
         return;
     }
 
-    case IR_ASM:
-        ppc_refuse(F, i, "inline assembly");
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (ppc/irgen.c irg_asm_ppc)
+         * against the vocabulary in ppc/asm.c. This only places the
+         * operands and splices the bytes -- the SPARC and Xtensa
+         * lowering. To the allocator (ra_target.asm_in_reg) a value live
+         * across an asm keeps out of the registers it may change
+         * (ir_asm.clob); a callee-saved one among those is saved by the
+         * prologue (gen_func), and a template that links makes this
+         * function save LR. Each way the operands move as ONE parallel
+         * move. No operand is ever in r0, r1, r2, r9-r13 or r31: the
+         * scratch, the stack pointer, the EABI anchors and the frame base
+         * under alloca. */
+        struct ir_asm *ia = i->asm_ir;
+        int vreg_[16], vdst[16], nval = 0;
+        if (!ia)
+            return;
+        if (ia->cont) {
+            int k = n - 1;
+            while (k >= 0 && fn->ins[k].op == IR_ASM && fn->ins[k].asm_ir &&
+                   fn->ins[k].asm_ir->cont)
+                k--;
+            if (k < 0 || fn->ins[k].op != IR_ASM)
+                internal_error("ppc: %s: an asm's further output is not "
+                               "right after the asm", fn->name);
+            return;
+        }
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].val) {
+                vreg_[nval] = ia->out[k].reg;
+                vdst[nval++] = i->dst;
+            }
+        for (int q = n + 1; q < fn->nins && fn->ins[q].op == IR_ASM &&
+                            fn->ins[q].asm_ir && fn->ins[q].asm_ir->cont &&
+                            nval < 16; q++) {
+            vreg_[nval] = fn->ins[q].asm_ir->out[0].reg;
+            vdst[nval++] = fn->ins[q].dst;
+        }
+        /* r31 is the frame base of a function that calls alloca: every
+         * slot below is addressed through it */
+        if (F->fb == 31 && (ia->clob >> 31 & 1))
+            ppc_refuse(F, i, "an asm that changes r31, the frame base of a "
+                             "function that calls alloca");
+        for (int k = 0; k < ia->nin; k++)
+            if (!((ia->in[k].reg >= 3 && ia->in[k].reg <= 8) ||
+                  (ia->in[k].reg >= 14 && ia->in[k].reg <= 30)))
+                internal_error("ppc: %s: an asm operand in r%d", fn->name,
+                               ia->in[k].reg);
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && ia->out[k].size > 4)
+                ppc_refuse(F, i, "an asm output wider than a register");
+        {
+            int naddr = 0;
+            for (int k = 0; k < ia->nout; k++)
+                naddr += !ia->out[k].val && !ia->out[k].mem;
+            if (ia->scr < 0 && naddr > 0)
+                ppc_refuse(F, i, "an asm with no scratch register left "
+                                 "around it");
+        }
+        {
+            int pd[40], ps[40], npm = 0;
+            for (int k = 0; k < ia->nin && npm < 40; k++)
+                if (in_reg(F, ia->in[k].temp)) {
+                    pd[npm] = ia->in[k].reg;
+                    ps[npm++] = reg_of(F, ia->in[k].temp);
+                }
+            for (int k = 0; k < ia->nout && npm < 40; k++)
+                if (!ia->out[k].val &&
+                    (ia->out[k].mem || ia->out[k].inout) &&
+                    in_reg(F, ia->out[k].temp)) {
+                    pd[npm] = ia->out[k].reg;
+                    ps[npm++] = reg_of(F, ia->out[k].temp);
+                }
+            if (npm) {
+                int od[80], os[80];
+                int m = ra_parallel_move(pd, ps, npm, SCR, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    ppc_refuse(F, i, "an asm whose operands cannot be moved "
+                                     "into place");
+                for (int k = 0; k < m; k++)
+                    ppc_mr(t, od[k], os[k]);
+            }
+            for (int k = 0; k < ia->nin; k++)
+                if (!in_reg(F, ia->in[k].temp))
+                    rd(F, ia->in[k].temp, ia->in[k].reg);
+            for (int k = 0; k < ia->nout; k++) {
+                const struct ir_asm_op *o = &ia->out[k];
+                if (o->val || !(o->mem || o->inout))
+                    continue;
+                if (!in_reg(F, o->temp))
+                    rd(F, o->temp, o->reg);
+                /* A "+" output starts with the lvalue's CURRENT value. */
+                if (o->inout && !o->mem)
+                    ppc_load(t, o->reg, o->reg, 0, o->size, 0);
+            }
+        }
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        for (int k = 0; k < ia->nout; k++) {
+            const struct ir_asm_op *o = &ia->out[k];
+            if (o->mem || o->val)
+                continue;
+            rd(F, o->temp, ia->scr);
+            ppc_store(t, o->reg, ia->scr, 0, o->size);
+        }
+        {
+            int pd[16], ps[16], npm = 0;
+            for (int k = 0; k < nval; k++) {
+                if (vdst[k] < 0)
+                    continue;
+                if (in_reg(F, vdst[k])) {
+                    pd[npm] = reg_of(F, vdst[k]);
+                    ps[npm++] = vreg_[k];
+                } else {
+                    wr(F, vdst[k], vreg_[k]);
+                }
+            }
+            if (npm) {
+                int od[32], os[32];
+                int m = ra_parallel_move(pd, ps, npm, SCR, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    ppc_refuse(F, i, "an asm whose outputs cannot be moved "
+                                     "into place");
+                for (int k = 0; k < m; k++)
+                    ppc_mr(t, od[k], os[k]);
+            }
+        }
         return;
+    }
 
     /* ---- atomics: lwarx/stwcx. loops, bracketed by sync --------------- */
     case IR_XCHG: case IR_XADD: case IR_ARMW: {
@@ -2920,6 +3048,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
         if (!seen)
             F.used_callee[F.nsave++] = 31;
     }
+    /* A callee-saved register an asm changes -- one it names, clobbers or
+     * puts an operand in -- is this function's to preserve, at every
+     * optimisation level (the allocator only knows the ones it gave). */
+    for (i = 0; i < fn->nins; i++) {
+        const struct ir_asm *ia = fn->ins[i].op == IR_ASM ? fn->ins[i].asm_ir
+                                                          : NULL;
+        if (!ia || ia->cont)
+            continue;
+        for (int r = 14; r <= 31; r++) {
+            int seen = 0;
+            if (!(ia->clob >> r & 1))
+                continue;
+            for (int j = 0; j < F.nsave; j++)
+                seen |= F.used_callee[j] == r;
+            if (!seen)
+                F.used_callee[F.nsave++] = r;
+        }
+    }
     F.tail = NULL;
     if (g_ppc_regalloc && !want_debug)
         for (i = 0; i < fn->nins; i++)
@@ -2934,7 +3080,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
             fn->ins[i].op == IR_SWITCH ||
             ppc_op_calls_helper(&fn->ins[i]) ||
             /* __builtin_return_address reads LR's save word */
-            (fn->ins[i].op == IR_FRAMEADDR && fn->ins[i].imm == 2))
+            (fn->ins[i].op == IR_FRAMEADDR && fn->ins[i].imm == 2) ||
+            /* an asm that calls changes LR */
+            (fn->ins[i].op == IR_ASM && fn->ins[i].asm_ir &&
+             fn->ins[i].asm_ir->calls))
             F.leaf = 0;
     layout(&F);
 

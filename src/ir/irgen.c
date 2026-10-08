@@ -111,7 +111,10 @@ void ir_locals_fill(struct ir_func *fn, struct func *f, int nvars)
         if (!t)
             continue;
         L->size = ty_size(t);
-        L->align = ty_align(t);
+        /* a parameter's slot is the calling convention's, and its value
+         * arrives as a whole register: a typedef's alignment is a local's
+         * only (sema's var_indirect skips parameters likewise) */
+        L->align = i < f->nparams ? ty_own_align(t) : ty_align(t);
         L->user_align = f->var_aligns ? f->var_aligns[i] : 0;
         L->is_volatile = t->is_volatile;
         L->is_ldouble = ty_is_xldouble(t);
@@ -403,6 +406,11 @@ static int emit_gaddr(struct ir_func *fn, struct global *g)
  * only as aligned as the object it is a member of. */
 static int lv_natural(const struct expr *e)
 {
+    /* through a typedef aligned BELOW its type's own alignment --
+     * `typedef int u32_una __attribute__((aligned(1)))`, the idiom for an
+     * unaligned access -- the address promises only that */
+    if (e->ty && e->ty->align_ovr && e->ty->align_ovr < ty_natural_align(e->ty))
+        return 0;
     switch (e->kind) {
     case EXPR_VAR:
         return 1;
@@ -2945,7 +2953,7 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
         ar->hfa_size = 0;
         ar->hfa_n = ty_hfa(at, &ar->hfa_size);
         ar->byref = ty_aapcs64_byref(at);
-        ar->align = ty_align(at);
+        ar->align = ty_own_align(at);    /* the ABI's, not a typedef's */
         ar->nat_align = ty_natural_align(at);
         ar->is_float = ty_is_float(at);
         ar->is_int128 = at->kind == TY_INT128;
@@ -3360,7 +3368,9 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         i->size = ty_size(e->ty);
         i->sign = ty_signed_int(e->ty);
         i->w = ty_w(e->ty);
-        i->natural = 1;        /* C: an object of this type is aligned */
+        /* C: an object of this type is aligned -- to what the type says,
+         * which through a typedef aligned below it is less (lv_natural) */
+        i->natural = lv_natural(e);
         /* `*p` with p a pointer to volatile is the READ of a device
          * register, and each one has to happen. This load was built by
          * hand and never said so, while emit_load did: at -O2 two reads
@@ -4924,7 +4934,7 @@ static void gen_func(struct ir_func *fn, struct func *f)
             struct ir_arg *a = &fn->param_abi[k];
             a->vreg = k;
             a->size = pt ? ty_size(pt) : 0;
-            a->align = pt ? ty_align(pt) : 1;
+            a->align = pt ? ty_own_align(pt) : 1;
             a->nat_align = pt ? ty_natural_align(pt) : 1;
             a->is_struct = pt && pt->kind == TY_STRUCT;
             a->is_float = pt && ty_is_float(pt);

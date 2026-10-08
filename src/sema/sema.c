@@ -20,6 +20,8 @@
 #include "../arch/xtensa/asm.h"
 #include "../arch/rx/asm.h"
 #include "../arch/coldfire/asm.h"
+#include "../arch/sparc/asm.h"
+#include "../arch/ppc/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
@@ -4768,6 +4770,79 @@ static int asm_resolve_reg_xtensa(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* The common shape of the embedded resolvers: a register when any of
+ * `regs` is among the constraint's letters, else a folded constant when
+ * one of `imms` is, else nothing this target knows. */
+static int asm_resolve_reg_letters(struct asm_operand *op, const char *c,
+                                   const char *regs, const char *imms)
+{
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (strchr(regs, *p)) has_r = 1;
+        if (strchr(imms, *p)) has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    return has_r ? -2 : ASM_REG_INVALID;
+}
+
+/* SPARC: "r" and "g" a register, "m" a register holding the lvalue's
+ * address (written `[%o0]`), "i", "n" and GCC's SPARC constant letters
+ * (I a signed 13-bit, J zero, K a sethi constant, L, M, N, O, P) a
+ * constant, and a digit the register of the output it names. A register
+ * variable must name a register irgen's pool hands out: %o0-%o5,
+ * %l0-%l5 or %i0-%i5 -- not a global, the stack or frame pointer, the
+ * return address or the code generator's scratch. */
+static int asm_resolve_reg_sparc(struct unit *u, struct stmt *s,
+                                 struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = spasm_gpr(rn, (int)strlen(rn));
+        if (!((r >= 8 && r <= 13) || (r >= 16 && r <= 21) ||
+              (r >= 24 && r <= 29)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "SPARC asm (use %%o0-%%o5, %%l0-%%l5 or %%i0-%%i5)", rn);
+        return r;
+    }
+    if (*c >= '0' && *c <= '9')
+        return -2;                       /* tied to an output: irgen's */
+    return asm_resolve_reg_letters(op, c, "rgm", "inIJKLMNOP");
+}
+
+/* PowerPC: "r", "b" (a base register other than r0, which no operand is
+ * ever given) and "g" a register, "m" a register holding the lvalue's
+ * address (written `0(rN)`), "i", "n" and GCC's PowerPC constant letters
+ * (I a signed 16-bit, K an unsigned one, L a shifted one, M, N, O, P) a
+ * constant, and a digit the register of the output it names. A register
+ * variable must name a register irgen's pool hands out: r3-r8 or
+ * r14-r30 -- not r0, r1, r2, r13, the code generator's scratch r9-r12,
+ * or r31 (the frame base under alloca). */
+static int asm_resolve_reg_ppc(struct unit *u, struct stmt *s,
+                               struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = ppcasm_gpr(rn, (int)strlen(rn));
+        if (!((r >= 3 && r <= 8) || (r >= 14 && r <= 30)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "PowerPC asm (use r3-r8 or r14-r30)", rn);
+        return r;
+    }
+    if (*c >= '0' && *c <= '9')
+        return -2;                       /* tied to an output: irgen's */
+    return asm_resolve_reg_letters(op, c, "rbgm", "inIJKLMNOP");
+}
+
 /* RX: "r" and "g" a register, "m" a register holding the lvalue's
  * address (written `[rN]`), "i", "n" and GCC's RX constant
  * constraints (Int08, Sint08, Sint16, Sint24, Uint04, and the I-P
@@ -4883,6 +4958,10 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_rx(u, s, op, c);
     if (target_get() == TARGET_COLDFIRE)
         return asm_resolve_reg_coldfire(u, s, op, c);
+    if (target_get() == TARGET_SPARC32)
+        return asm_resolve_reg_sparc(u, s, op, c);
+    if (target_get() == TARGET_PPC32)
+        return asm_resolve_reg_ppc(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

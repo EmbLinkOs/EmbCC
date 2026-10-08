@@ -459,7 +459,7 @@ not supported (functions take it)`.
 | `packed` | `struct`, `union` | Every member's alignment becomes 1: no padding between members, and the structure's alignment is 1. A member's own `aligned(N)` still applies |
 | `aligned(N)` | `struct`, `union` | The type's alignment is raised to at least `N`, and its size is rounded up to a multiple of it |
 | `aligned(N)` | a member | The member's alignment is raised to at least `N`, which raises the structure's |
-| `aligned(N)` | `typedef` | Refused when `N` exceeds the type's alignment; accepted with no effect otherwise. See below |
+| `aligned(N)` | `typedef` | The type's alignment becomes `N`, larger or smaller than its own; its size does not change. See below |
 | `packed`, `aligned` | `enum` | Refused: `a packed or aligned enum is not supported (EmbCC's enums are always int-sized)` |
 | `deprecated` | a type | Accepted; using the type does not warn |
 | `may_alias` | a type | Accepted with no effect; EmbCC performs no type-based alias analysis |
@@ -468,16 +468,26 @@ not supported (functions take it)`.
 member, before or after its declarator, it is accepted and has no
 effect.
 
-An alignment on a `typedef` name larger than the type's own is refused,
-because EmbCC carries alignment on objects and on structure
-definitions, not on a type name:
+An alignment on a `typedef` name is the type's, as in GCC and Clang. It
+can be larger or smaller than the type's own, and the size does not
+change:
+- `typedef uint8_t dma_buf_t[64] __attribute__((aligned(32)));` places
+  every `dma_buf_t` object on a 32-byte boundary.
+- `typedef uint32_t u32_una __attribute__((aligned(1)));` is the idiom
+  for an unaligned access. Through a `u32_una *`, EmbCC reads and writes
+  as it does a packed structure's member: byte by byte where the core
+  would trap on a misaligned word (Cortex-M0, SPARC, MIPS).
+- A structure member of such a type is placed by that alignment, so
+  `struct { char c; u32_una x; }` is five bytes.
 
-```text
-embcc: t.c:1: error: __attribute__((aligned(16))) on a typedef is not supported: EmbCC carries alignment on objects and on struct definitions, not on a type name; put it on the declaration that uses 'i16'
-```
+An array of a type whose alignment is greater than its size is refused,
+as GCC and Clang refuse it, since its second element could not be
+aligned. A function parameter of such a type is passed, and has its
+address, as its type would without the attribute.
 
-A `typedef` of a structure that carries its own `aligned` or `packed`
-keeps that layout.
+A `packed` attribute on a `typedef` name, rather than on the structure
+it names, is refused inside a function. A `typedef` of a structure that
+carries its own `aligned` or `packed` keeps that layout.
 
 ### Statement and label attributes
 

@@ -329,7 +329,6 @@ implement, so they are errors:
 | `weakref` | `__attribute__((weakref)) is not supported: the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
 | `ifunc` | `__attribute__((ifunc)) is not supported: the resolver would never run and calls would go to it rather than to the implementation it picks` |
 | `constructor(N)`, `destructor(N)` | `__attribute__((constructor(101))) is not supported: EmbCC emits one .init_array in source order and cannot honour a priority` |
-| `aligned` on a typedef | `__attribute__((aligned(16))) on a typedef is not supported: EmbCC carries alignment on objects and on struct definitions, not on a type name; put it on the declaration that uses 'i16'` |
 | `packed` or `aligned` on an enum | `a packed or aligned enum is not supported (EmbCC's enums are always int-sized)` |
 | `alias` on a variable | `alias attribute on variable 'b' is not supported (functions take it)` |
 | `section` on a block-scope variable | `section attribute on block-scope 'x' is not supported — declare it at file scope` |

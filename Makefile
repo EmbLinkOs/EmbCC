@@ -186,6 +186,7 @@ SRCS := \
 	src/arch/ppc/emit.c \
 	src/arch/ppc/codegen.c \
 	src/arch/ppc/irgen.c \
+	src/arch/ppc/asm.c \
 	src/arch/ppc32/predef.c \
 	src/arch/ppc32/predef_cxx.c \
 	src/arch/rx/emit.c \
@@ -196,6 +197,7 @@ SRCS := \
 	src/arch/sparc/emit.c \
 	src/arch/sparc/codegen.c \
 	src/arch/sparc/irgen.c \
+	src/arch/sparc/asm.c \
 	src/arch/sparc32/predef.c \
 	src/arch/sparc32/predef_cxx.c \
 	src/arch/coldfire/emit.c \
@@ -407,9 +409,11 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/xtensa/irgen.c src/arch/xtensa/emit.c \
              src/arch/xtensa/asm.c \
              src/arch/ppc/irgen.c src/arch/ppc/emit.c \
+             src/arch/ppc/asm.c \
              src/arch/rx/irgen.c src/arch/rx/emit.c \
              src/arch/rx/asm.c \
              src/arch/sparc/irgen.c src/arch/sparc/emit.c \
+             src/arch/sparc/asm.c \
              src/arch/coldfire/irgen.c src/arch/coldfire/asm.c \
              src/arch/coldfire/emit.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c

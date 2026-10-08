@@ -1434,7 +1434,7 @@ static int blocks_by_gas(void)
            a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32 ||
            a == TARGET_LOONGARCH64 || a == TARGET_MIPS64 ||
            a == TARGET_XTENSA || a == TARGET_TRICORE || a == TARGET_RX ||
-           a == TARGET_COLDFIRE;
+           a == TARGET_COLDFIRE || a == TARGET_SPARC32 || a == TARGET_PPC32;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1529,6 +1529,12 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         const struct expr *e = s->kind == STMT_EXPR ? s->expr : NULL;
         if (e && e->kind == EXPR_CALL && e->callee && e->nargs == 0) {
             enum target_arch t = target_get();
+            /* SPARC's call has a delay slot, which a nop fills: the
+             * statement after the call is the next asm, not its slot */
+            if (t == TARGET_SPARC32) {
+                ob_fmt(b, "call %s\nnop\n", e->callee->name);
+                continue;
+            }
             ob_fmt(b, "%s %s%s\n", t == TARGET_THUMB ||
                                    t == TARGET_LOONGARCH64 ||
                                        t == TARGET_PPC32 ? "bl"
