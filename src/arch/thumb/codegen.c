@@ -2173,8 +2173,46 @@ static void args64x2(struct t_fn *F, int va, int vb)
             rd64(F, v[k], 2 * k, 2 * k + 1);
 }
 
-static void fp_args2(struct t_fn *F, const struct ir_ins *i)
+/* The moves a two-operand helper's setup takes with its operands in
+ * this order: the parallel move's length, a load or a pair for each one
+ * in memory not counted (the same either way). */
+static int fp_args_cost(const struct t_fn *F, int va, int vb, int w)
 {
+    int pd[4], ps[4], npm = 0, v[2] = { va, vb }, od[8], os[8];
+    for (int k = 0; k < 2; k++)
+        if (in_reg(F, v[k]))
+            for (int q = 0; q < (w == 8 ? 2 : 1); q++) {
+                pd[npm] = (w == 8 ? 2 * k : k) + q;
+                ps[npm] = F->loc[v[k]] + q;
+                npm++;
+            }
+    return npm ? ra_parallel_move(pd, ps, npm, 12, od, os, 8) : 0;
+}
+
+/* a + b and a * b may call the helper as (b, a) when that takes fewer
+ * moves: the last result is in r0:r1, and `y + x*x` wants it in r2:r3 --
+ * six moves through r12 the other way round. IEEE addition and
+ * multiplication commute (which NaN comes back is not specified). */
+static int fp_swap_args(const struct t_fn *F, const struct ir_ins *i)
+{
+    if ((i->op != IR_ADD && i->op != IR_MUL) || i->imm_b ||
+        i->a == i->b || getenv("EMBCC_T_NOFPSWAP"))
+        return 0;
+    return fp_args_cost(F, i->b, i->a, i->w) <
+           fp_args_cost(F, i->a, i->b, i->w);
+}
+
+static void fp_args2(struct t_fn *F, const struct ir_ins *i0)
+{
+    /* the swap is the instruction with its operands exchanged; the
+     * setup below never knows */
+    struct ir_ins sw = *i0;
+    const struct ir_ins *i = i0;
+    if (fp_swap_args(F, i0)) {
+        sw.a = i0->b;
+        sw.b = i0->a;
+        i = &sw;
+    }
     if (i->w == 8) {
         args64x2(F, i->a, i->b);
         return;

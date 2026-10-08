@@ -766,6 +766,21 @@ static void call_args(struct t_fn *F, int n, const int *vr, const int *nw,
     }
 }
 
+/* The parallel move a two-operand helper's setup makes with its operands
+ * in this order (call_args), as a count. */
+static int v6_args_cost(const struct t_fn *F, int va, int vb, int ww)
+{
+    int pd[4], ps[4], npm = 0, v[2] = { va, vb }, od[8], os[8];
+    for (int k = 0; k < 2; k++)
+        if (in_reg6(F, v[k]))
+            for (int q = 0; q < ww; q++) {
+                pd[npm] = (ww == 2 ? 2 * k : k) + q;
+                ps[npm] = F->loc[v[k]] + q;
+                npm++;
+            }
+    return npm ? ra_parallel_move(pd, ps, npm, IP, od, os, 8) : 0;
+}
+
 /* dst = op(a, b) by a runtime routine: one or two words each. `bw` 0 for
  * a constant second operand (i->imm). The result comes back in r0 (r0:r1
  * for `rw` 2), or r1 for `rsel` (the remainder of __aeabi_idivmod). */
@@ -2301,6 +2316,17 @@ static void gen_ins(struct t_fn *F, int n)
         if (name) {
             if (i->imm_b)
                 v6_refuse(fn, i, "a folded floating-point immediate");
+            /* a + b and a * b as (b, a) when that is fewer moves, as on
+             * ARMv7-M (codegen.c's fp_swap_args) */
+            if ((i->op == IR_ADD || i->op == IR_MUL) && i->a != i->b &&
+                v6_args_cost(F, i->b, i->a, ww) <
+                v6_args_cost(F, i->a, i->b, ww)) {
+                struct ir_ins sw = *i;
+                sw.a = i->b;
+                sw.b = i->a;
+                helper2(F, &sw, name, ww, ww, ww, 0);
+                return;
+            }
             helper2(F, i, name, ww, ww, ww, 0);
             return;
         }
