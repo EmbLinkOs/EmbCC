@@ -648,8 +648,9 @@ generator with what ARMv8-M Baseline adds where it replaces a call:
   division is still `__divdi3` and the others.
 - a 1-, 2- or 4-byte atomic read-modify-write or compare-and-swap is a
   `ldrex`/`strex` (`b`, `h`) loop between two `dmb`s, as on ARMv7-M. The
-  `__GCC_ATOMIC_*_LOCK_FREE` values are 2. An 8-byte atomic is refused:
-  Baseline has no `ldrexd`.
+  `__GCC_ATOMIC_*_LOCK_FREE` values are 2. Baseline has no `ldrexd`, so
+  an 8-byte atomic is a call to `__atomic_*_8` (`lib/rt`), as on every
+  32-bit target.
 
 Everything else is ARMv6-M's: Thumb-1 data processing on r0-r7, literal
 pools for constants and addresses (clang keeps them for this core too),
@@ -916,9 +917,7 @@ part with another bus master, defines its own.
 | Construct | Diagnostic |
 |---|---|
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| 8-byte atomic read-modify-write | `the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` (ARMv6-M: `the ARMv6-M backend cannot lower an atomic wider than four bytes`; ARMv8-M Baseline: `the ARMv8-M Baseline backend cannot lower an atomic wider than four bytes (ARMv8-M Baseline has no doubleword exclusive; ...)`) |
 | on ARMv6-M, an inline asm template that uses a Thumb-2 instruction | `the ARMv6-M backend cannot lower an instruction ARMv6-M does not have (a 32-bit Thumb-2 encoding, from inline asm or the backend) yet (function f)` |
-| 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | C++ with exceptions (on by default), or unwind tables (`-funwind-tables`, `-fasynchronous-unwind-tables`) | `C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions`, and `unwind tables are not supported for thumbv7m-none-eabi yet (...)`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 
 An array or structure local aligned beyond 8 bytes is supported: its
@@ -1007,7 +1006,8 @@ clang's for `--target=armv7a-none-eabi -mfloat-abi=soft`: `__arm__`,
 `__ARM_ARCH_ISA_ARM`, `__ARM_EABI__`, `__SOFTFP__`, `__ARM_FEATURE_DSP`,
 `__ARM_FEATURE_UNALIGNED`, `__ARM_FEATURE_LDREX 0xf`; no `__thumb__`, no
 `__ARM_FEATURE_IDIV`, no `__ARM_FP`. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8`
-is left out, as an 8-byte atomic is refused.
+is left out: an 8-byte atomic is a call to `__atomic_*_8` (`lib/rt`),
+where clang inlines an `ldrexd`/`strexd` loop.
 
 ### Runtime
 
@@ -1019,8 +1019,7 @@ semihosting exit.
 
 ### Limitations
 
-Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), an atomic wider than
-four bytes, `__builtin_frame_address` and
+Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
 `__builtin_return_address`, `__attribute__((interrupt))` (an A-profile
 handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
 and C++ exceptions and unwind tables (C++ compiles with
@@ -1150,8 +1149,6 @@ individually.
 | Construct | Diagnostic (RV32 shown; RV64 names itself) |
 |---|---|
 | `__int128` at RV32 | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| an 8-byte atomic read-modify-write at RV32 | `the RV32 backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]` |
-| an 8-byte atomic load or store at RV32 | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | C++ with exceptions (on by default), or unwind tables (`-funwind-tables`, `-fasynchronous-unwind-tables`) | RV32: `C++ exceptions are not supported for riscv32-unknown-elf yet: EmbCC writes no RISC-V .eh_frame; compile with -fno-exceptions`. RV64: `unwind tables are not supported for riscv64-unknown-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no RISC-V .eh_frame`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 | `__attribute__((interrupt("user")))` | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
 | an interrupt handler with parameters, or with a result | `interrupt handler 'h' takes parameters: ...`, `interrupt handler 'h' returns a value: ...` |
@@ -1331,8 +1328,6 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 
 | Construct | Diagnostic |
 |---|---|
-| an 8-byte atomic read-modify-write | `the MIPS32 backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
-| an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on mipsel-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt, use_shadow_register_set))` | `__attribute__((use_shadow_register_set)) is not supported: EmbCC does not switch register sets: ...` |
@@ -1999,15 +1994,12 @@ the entry.
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on loongarch64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
-| an 8-byte atomic | `the TriCore backend cannot lower an atomic wider than a register yet`; a load or store: `an atomic access of 8 bytes is not one access on this target ...` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target ...` |
 | `__attribute__((interrupt))`, `__attribute__((naked))` | `__attribute__((...)) is not supported: ...` |
 | `.s` and `.S` files | `no assembly-file support for tricore-none-elf yet ...` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
 | any C++ translation unit | `C++ is not yet supported for tricore-none-elf: ...` |
-| an 8-byte atomic read-modify-write | `the Xtensa backend cannot lower an atomic wider than a register yet (function f) [...]` |
-| an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | inline assembly, `__attribute__((naked))` | `inline assembly is not supported for xtensa-none-elf yet (EmbCC has no Xtensa assembler vocabulary)` |
 | a file-scope `asm` instruction | `file-scope asm instruction "nop": EmbCC assembles instructions for x86-64 only. ...` |
@@ -2016,8 +2008,6 @@ the entry.
 | `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for xtensa-none-elf: ...` |
-| an 8-byte atomic read-modify-write | `the SPARC backend cannot lower an atomic wider than a register yet (function f) [xadd w=8 size=8]` |
-| an 8-byte atomic load or store | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): ...` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
@@ -2027,7 +2017,6 @@ the entry.
 | any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for sparc-none-elf: ...` |
 | inline asm | `inline assembly is not supported for m68k-none-elf yet: EmbCC has no ColdFire assembler` |
 | file-scope asm, `.s` and `.S` files | `file-scope asm is not supported for m68k-none-elf yet` / `no assembly-file support` |
-| an atomic of 8 bytes | `an atomic wider than four bytes` |
 | a frame beyond 32 KiB | `a stack frame larger than 32 KiB` |
 | unwind tables | `unwind tables are not supported for m68k-none-elf yet` |
 | C++ | refused, as on every ILP32 target |

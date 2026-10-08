@@ -1962,6 +1962,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col,
                        "compound assignment needs an lvalue");
         need_modifiable(u, e->lhs, e->line, e->col, "assignment");
+        /* an eight-byte _Atomic `x op= v` whose op is a compare-exchange
+         * loop of libatomic calls keeps the expected value in a local */
+        if (e->lhs->ty->is_atomic && ty_size(e->lhs->ty) == 8 &&
+            target_atomic8_libcall())
+            e->var_index = scope_add(sc, "<atomic expected>",
+                                     e->lhs->ty, NULL);
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
             *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);
@@ -4310,6 +4316,13 @@ static void check_atomic_call(struct unit *u, struct func *f,
                         k + 1, name, ty_size(obj));
         }
     }
+    /* An eight-byte __sync compare-and-swap that is a libatomic call
+     * (target_atomic8_libcall) passes the expected value by address:
+     * irgen keeps it in a hidden local. */
+    if ((ak == AK_SYNC_VAL_CAS || ak == AK_SYNC_BOOL_CAS) &&
+        ty_size(obj) == 8 && target_atomic8_libcall())
+        e->var_index = scope_add(sc, "<atomic expected>",
+                                 ty_int_of_size(8, 1), NULL);
     switch (ak) {
     case AK_STORE_N: case AK_LOAD: case AK_STORE: case AK_EXCHANGE:
     case AK_SYNC_LOCK_RELEASE:

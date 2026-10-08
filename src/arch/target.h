@@ -185,6 +185,10 @@ enum target_fmt {
  * answer because it is not aarch64.
  */
 int target_ptr_size(void);        /* 8 on LP64, 4 on ILP32 */
+/* An eight-byte atomic is a call to libatomic's __atomic_*_8 (irgen),
+ * which lib/rt/atomic8.c provides: every 32-bit target, none of which
+ * moves eight bytes atomically. AVR does its own with interrupts masked. */
+int target_atomic8_libcall(void);
 int target_long_size(void);       /* likewise; long long is always 8 */
 int target_double_size(void);      /* 8, or 4 on AVR */
 int target_int_size(void);

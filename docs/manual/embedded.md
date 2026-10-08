@@ -466,12 +466,9 @@ section needs (`mrs`/`msr` on `PRIMASK`, `BASEPRI` and the others,
 ### Atomics
 
 32-bit and narrower atomic operations are inline: `ldrex`/`strex` loops
-with `dmb` barriers. 64-bit atomic read-modify-write operations are
-refused:
-
-```text
-embcc: atom.c:6: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function bump64) [xadd w=8 size=8]
-```
+with `dmb` barriers. A 64-bit atomic is a call to `__atomic_*_8`, which
+`lib/rt` implements with PRIMASK set; see
+[Eight-byte atomics on a 32-bit target](#eight-byte-atomics-on-a-32-bit-target).
 
 ### Enabling the FPU
 
@@ -1021,9 +1018,10 @@ is
     bnez  t6, 1b
 ```
 
-which is clang's sequence instruction for instruction. 64-bit atomics on RV32
-are refused (`the RV32 backend cannot lower this operation at 64 bits
-yet`).
+which is clang's sequence instruction for instruction. A 64-bit atomic on
+RV32 is a call to `__atomic_*_8`, which `lib/rt` implements with
+`mstatus.MIE` clear; see
+[Eight-byte atomics on a 32-bit target](#eight-byte-atomics-on-a-32-bit-target).
 
 ### The C extension
 
@@ -1221,9 +1219,13 @@ vocabulary yet.
 bracketed by `sync`. An atomic load of 4 bytes or fewer is one `lw`
 (`lhu`, `lbu`) followed by `sync`, and an atomic store one `sw` (`sh`,
 `sb`) with a `sync` before and after: never the two-instruction
-`lwl`/`lwr` form a packed member gets, which an interrupt could split. A read-modify-write of a 1- or 2-byte object, and any 8-byte
-atomic, is refused by name. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is
-defined, and the 1-, 2- and 8-byte forms are not.
+`lwl`/`lwr` form a packed member gets, which an interrupt could split. A
+1- or 2-byte read-modify-write is an `ll`/`sc` loop on the aligned word
+around it that rewrites only its lane. An 8-byte atomic is a call to
+`__atomic_*_8`, which `lib/rt` implements with `di`/`ei`; see
+[Eight-byte atomics on a 32-bit target](#eight-byte-atomics-on-a-32-bit-target).
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined, and
+`_8` is not.
 
 ### Runtime
 
@@ -1533,6 +1535,71 @@ define what the compiled code refers to: `operator new` and `operator
 delete` if it uses them, `__cxa_pure_virtual` for abstract classes, and
 `__cxa_atexit` and `__dso_handle` for static objects with destructors.
 See [C++](cxx.md).
+
+## Eight-byte atomics on a 32-bit target
+
+No 32-bit target moves eight bytes atomically -- ARMv7-M and ARMv8-M
+Baseline have no `ldrexd`, RV32's A extension no `.d` forms -- so on every
+one (Cortex-M, ARMv7-A, RV32, MIPS32, SPARC, PowerPC, ColdFire, TriCore,
+Xtensa, RX) an eight-byte atomic is a call to libatomic's sized routine,
+exactly as GCC and clang make it: `__atomic_load_8`, `__atomic_store_8`,
+`__atomic_exchange_8`, `__atomic_compare_exchange_8` and
+`__atomic_fetch_{add,sub,and,or,xor,nand}_8`, with the memory order as
+the last argument(s). The names, arguments and orders are listed in
+[Extensions](extensions.md#eight-bytes-on-a-32-bit-target). An object
+compiled by GCC or clang that makes the same calls links against the same
+routines. (AVR does its eight-byte atomics inline, with interrupts
+masked.)
+
+`librt.a` (`lib/rt/atomic8.c`) defines them all -- plus GCC's
+`__atomic_OP_fetch_8`, and libatomic's generic `__atomic_load`,
+`__atomic_store`, `__atomic_exchange` and `__atomic_compare_exchange`,
+which take the size first and which clang calls for an `_Atomic long
+long` or `double` -- by masking interrupts around the access:
+
+| Target | Masked | Put back |
+|---|---|---|
+| Cortex-M | `cpsid i` (PRIMASK) | `msr primask` with the saved value |
+| ARMv7-A | `cpsid i` (CPSR.I) | `msr cpsr_c` with the saved value |
+| RV32 | `csrrci mstatus, 8` (MIE) | `csrs mstatus` only if MIE was set |
+| MIPS32 | `di` (Status.IE) | `ei` only if IE was set |
+| SPARC | PSR.PIL at 15 | the saved PIL |
+| PowerPC | MSR[EE] clear | the saved EE |
+| ColdFire | SR's mask at 7 | the saved mask |
+| TriCore | `disable` (ICR.IE) | `enable` only if IE was set |
+| Xtensa | `rsil 15` (PS.INTLEVEL) | `wsr ps` with the saved PS |
+| RX | `clrpsw i` | `setpsw i` only if I was set |
+
+The mask is saved and put back as it was, never simply enabled, so a call
+inside an interrupt handler or a critical section leaves interrupts
+masked. With interrupts masked the memory-order argument changes nothing.
+On SPARC, PowerPC, ColdFire, Xtensa and RX, where EmbCC has no inline
+assembler yet, the two mask routines are machine code
+(`lib/rt/atomic8.h`), checked against the backends' encoders and llvm-mc
+by `tests/golden/atomic8.sh`.
+
+**What this does not cover.** Masking interrupts makes the operation
+atomic on ONE core with no other bus master writing the object:
+
+- It is not atomic against a second core or a DMA engine. A multi-core
+  part (the RP2040, the ESP32's two cores, an AURIX with several TriCore
+  CPUs) needs a lock that both cores honour.
+- The instructions are privileged: machine mode on RISC-V, supervisor
+  mode on SPARC, PowerPC, ColdFire and RX, privileged mode on Cortex-M
+  (CPSID is ignored in unprivileged thread mode, so the operation is not
+  atomic there), kernel mode on MIPS. Code running in user mode traps or
+  silently loses atomicity.
+- An interrupt of a priority that masking does not reach -- a Cortex-M
+  fault or NMI, a SPARC level-15 interrupt -- can still run in the
+  middle.
+
+Every routine is **weak**, so a program, an RTOS or a vendor SDK replaces
+them by defining its own: the RP2040's Pico SDK defines
+`__atomic_*_8` with its hardware spinlocks, and an RTOS whose tasks run
+unprivileged defines them with its own critical section. Define all the
+routines you use, with the signatures in
+[Extensions](extensions.md#eight-bytes-on-a-32-bit-target);
+`tests/golden/atomic8/order.c` is an example that replaces every one.
 
 ## Running images under QEMU
 

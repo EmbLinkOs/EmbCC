@@ -56,8 +56,9 @@ check riscv32-unknown-elf "--mattr=+a,+m,+c" 'amo(add|or)\.w' 'lr\.w' 'fence'
 check aarch64-elf "" '(ld[a]?xr|ldadd|ldset)' '(ld[a]?xr|cas)' 'dmb'
 check x86_64-elf "" 'lock' 'lock' ''
 # What a target cannot do in one access is refused, not done in pieces:
-# an 8-byte atomic on a 32-bit core (the __atomic builtin's load was two
-# plain loads), a floating _Atomic's read-modify-write.
+# a 16-byte _Atomic, a floating _Atomic's read-modify-write. An 8-byte
+# atomic on a 32-bit core is a libatomic call (the __atomic builtin's load
+# was once two plain loads): the call must be there.
 refuse() {
     T=$1 SRC=$2 MSG=$3
     printf '%s\n' "$SRC" > "$out/r.c"
@@ -68,9 +69,20 @@ refuse() {
         fail=1
     fi
 }
-refuse thumbv7m-none-eabi '_Atomic long long y; long long f(void) { return y; }' \
-       "not one access"
-refuse thumbv7m-none-eabi 'long long y; long long f(void) { return __atomic_load_n(&y, 5); }' \
+calls() {
+    T=$1 SRC=$2 FN=$3
+    printf '%s\n' "$SRC" > "$out/r.c"
+    if ! "$EMBCC" --target=$T -O2 -c "$out/r.c" -o "$out/r.o" 2> "$out/r.txt"; then
+        echo "FAIL $T: did not compile: $SRC"; sed 's/^/     | /' "$out/r.txt"; fail=1
+    elif ! llvm-objdump -r "$out/r.o" | grep -q " $FN\$"; then
+        echo "FAIL $T: no call to $FN: $SRC"; fail=1
+    fi
+}
+calls thumbv7m-none-eabi '_Atomic long long y; long long f(void) { return y; }' \
+       __atomic_load_8
+calls thumbv7m-none-eabi 'long long y; long long f(void) { return __atomic_load_n(&y, 5); }' \
+       __atomic_load_8
+refuse x86_64-elf '_Atomic __int128 y; __int128 f(void) { return y; }' \
        "not one access"
 refuse x86_64-elf '_Atomic double d; void f(void) { d += 1.0; }' \
        "integers and pointers only"
@@ -78,4 +90,5 @@ refuse x86_64-elf '_Atomic double d; void f(void) { d += 1.0; }' \
 echo "x++, x += v and x |= v on an _Atomic int are one atomic
 read-modify-write, x *= v a compare-and-swap, and a seq_cst load and
 store carry their barriers, on Thumb, RISC-V, aarch64 and x86-64 at -O0,
--O2 and -Os; an access a target cannot make in one go is refused"
+-O2 and -Os; an 8-byte one on a 32-bit core is a libatomic call, and an
+access a target cannot make in one go is refused"
