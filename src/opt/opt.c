@@ -870,6 +870,32 @@ static int lk_get(const struct lkconst *k, int v, int w, long *out)
     return 1;
 }
 
+/* May `ext.8 x` become `mov.8 x` when x is known zero above the
+ * extension's size? Where a register is 64 bits, yes: a 32-bit value sits
+ * in it extended, as every 64-bit backend keeps it. Where an eight-byte
+ * value is a register PAIR -- every target with pointers narrower than 8
+ * -- only if x itself is eight bytes wide wherever it is defined: a
+ * four-byte x has no high word, and the copy read whatever the pair's
+ * other register held. That was fuzz seed 927: `l0 = (u64)a0` became an
+ * eight-byte copy of a four-byte byte-extension, wrong on SPARC, RV32,
+ * Cortex-M and MIPS at -O1 and up, right on x86-64 and AArch64. */
+static int kz_copy_wide_ok(struct ir_func *fn, struct defs *d,
+                           const struct ir_ins *i)
+{
+    if (i->w != 8 || target_ptr_size() >= 8)
+        return 1;
+    if (i->a < fn->nparams)
+        return 0;                       /* its width is the ABI's question */
+    int any = 0;
+    for (int n = d->first[i->a]; n >= 0; n = d->next[n]) {
+        const struct ir_ins *in = &fn->ins[n];
+        if (in->op == IR_STVAR ? in->size != 8 : in->w != 8)
+            return 0;
+        any = 1;
+    }
+    return any;
+}
+
 static int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -1056,7 +1082,8 @@ static int pass_fold(struct ir_func *fn)
                 unsigned long wm = i->w == 8 ? ~0UL : 0xffffffffUL;
                 unsigned long keep =
                     (1UL << (8 * i->size - (i->sign ? 1 : 0))) - 1;
-                if ((wm & ~keep & ~known_zero(fn, &d, i->a, i->w, 0)) == 0) {
+                if ((wm & ~keep & ~known_zero(fn, &d, i->a, i->w, 0)) == 0 &&
+                    kz_copy_wide_ok(fn, &d, i)) {
                     to_mov(i, i->a);
                     changed = 1;
                 }
