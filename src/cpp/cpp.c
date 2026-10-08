@@ -44,6 +44,8 @@ static void tb_putc(struct tbuf *b, char c) { tb_putn(b, &c, 1); }
 
 /* ---- macro table ---- */
 
+static int g_dump_macros;              /* -dM: print the macros, not the text */
+
 struct macro {
     const char *name;
     int is_func;
@@ -2485,5 +2487,39 @@ char *cpp_process(const char *path, const char *src,
         cpp.depth--;
     }
     process_file(&cpp, path, src, &out, -1);
+    if (g_dump_macros) {
+        /* -dM: the output is every macro defined once the file has been
+         * read -- the predefined ones, -D's and the file's own -- one
+         * #define each, as GCC prints them (most recent first; GCC's
+         * order is its hash table's, so no order is promised) */
+        struct tbuf d = { 0, 0, 0 };
+        for (struct macro *m = cpp.macros; m; m = m->next) {
+            tb_puts(&d, "#define ");
+            tb_puts(&d, m->name);
+            if (m->is_func) {
+                tb_putc(&d, '(');
+                for (int k = 0; k < m->nparams; k++) {
+                    if (k) tb_putc(&d, ',');
+                    if (m->is_varargs && k == m->nparams - 1 &&
+                        !strcmp(m->params[k], "__VA_ARGS__"))
+                        tb_puts(&d, "...");
+                    else {
+                        tb_puts(&d, m->params[k]);
+                        if (m->is_varargs && k == m->nparams - 1)
+                            tb_puts(&d, "...");
+                    }
+                }
+                tb_putc(&d, ')');
+            }
+            if (m->body && *m->body) {
+                tb_putc(&d, ' ');
+                tb_puts(&d, m->body);
+            }
+            tb_putc(&d, '\n');
+        }
+        return d.p ? d.p : xstrndup("", 0);
+    }
     return out.p ? out.p : xstrndup("", 0);
 }
+
+void cpp_set_dump_macros(int on) { g_dump_macros = on; }

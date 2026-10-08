@@ -31,6 +31,9 @@ void cpp_set_cxx_std(int year, int strict);
 void cpp_set_cxx_char8(int on);             /* -fchar8_t */
 /* -DNAME[=VALUE] (undef 0) or -UNAME (undef 1), before cpp_process */
 void cpp_cmdline_define(const char *text, int undef);
+/* -dM: cpp_process returns the macros defined at the end of the file, a
+ * #define each, instead of the preprocessed text (GCC's -E -dM) */
+void cpp_set_dump_macros(int on);
 /* -include FILE: read as if the main file began with #include "FILE",
  * looked for in the working directory and then on the include path. */
 void cpp_preinclude(const char *file);

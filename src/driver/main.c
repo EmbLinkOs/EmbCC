@@ -259,6 +259,18 @@ static int emit_empty_object(const char *path)
 
 static char *read_file(const char *path)
 {
+    /* `-`: standard input, as `echo | cc -E -dM -` reads it */
+    if (strcmp(path, "-") == 0) {
+        size_t cap = 4096, n = 0, r;
+        char *b = xmalloc(cap);
+        while ((r = fread(b + n, 1, cap - n - 1, stdin)) > 0) {
+            n += r;
+            if (cap - n < 2)
+                b = xrealloc(b, cap *= 2);
+        }
+        b[n] = 0;
+        return b;
+    }
     char *buf = src_read(path, NULL);   /* a source: the provider may own it */
     if (!buf)
         diag_fatal(path, 0, "cannot open file");
@@ -434,6 +446,11 @@ static void time_report(void)
 static const char *inspect_stage;
 /* -S: emit the assembly the backend produced, rather than an object. */
 static int want_asm;
+/* -Wa,-a[cdghlmns][=FILE]: GNU as's listing, which a CubeMX Makefile asks
+ * for on every compile. It is the -S text of the object's own bytes,
+ * written beside the object: to FILE, or to standard output when no
+ * option names one (as GNU as does). NULL: none asked for. */
+static const char *g_listing;
 /* --emit-interfaces: the USRs and interface hashes of what this unit
  * provides and observes (§8.2, §21). */
 static int want_iface;
@@ -2644,6 +2661,25 @@ static int compile_unit(const char *in, const char *out, int pp_only)
         diag_fatal(NULL, 0, "-S is not supported for rx-none-elf yet: there "
                             "is no RX assembler in EmbCC to read it back "
                             "(use -c)");
+    /* -Wa,-a...: the listing, the same text as -S, beside the object */
+    if (g_listing && !want_asm) {
+        if (ta == TARGET_XTENSA || ta == TARGET_RX) {
+            fprintf(stderr, "embcc: warning: no assembler listing for %s "
+                            "(-Wa,-a...): EmbCC has no -S text for it\n",
+                    target_triple_now());
+        } else {
+            struct outbuf lb = { NULL, 0, 0 };
+            asm_emit_unit(&lb, in, u, iu, (const unsigned char *)text.p,
+                          text.len, (const unsigned char *)rodata,
+                          ext, next, strs, nstrs, gs, ngs, fs, nfs);
+            int lrc = strcmp(g_listing, "-")
+                      ? plat_write_file(g_listing, lb.p, lb.n)
+                      : (fwrite(lb.p, 1, lb.n, stdout), 0);
+            if (lrc != 0)
+                diag_fatal(g_listing, 0, "cannot write the listing");
+            ob_free(&lb);
+        }
+    }
     if (want_asm) {
         /* Every target, now. What -S emits is the OBJECT's bytes as
          * .byte directives with the relocations attached explicitly --
@@ -4202,6 +4238,9 @@ static const char *g_arm_fpu;
 static const char *g_arm_float_abi;
 static const char *g_arm_cpu;
 static int g_arm_cmse;             /* -mcmse was given */
+/* The unit -march='s +fp, +fp.dp or +nofp names: the FPU when -mfpu= is
+ * not given (or is auto), as GCC takes the pair. */
+static const char *g_arm_march_fpu;
 
 /* What the two ARM float flags mean together, decided once every argument has
  * been seen.
@@ -4283,6 +4322,8 @@ static void arm_float_resolve(void)
     const char *hf_fpu = target_thumb_arch() >= 8 ? "fpv5-sp-d16"
                        : m7 ? "fpv5-d16" : "fpv4-sp-d16";
     const char *abi = g_arm_float_abi ? g_arm_float_abi : hf ? "hard" : "soft";
+    if ((!g_arm_fpu || !strcmp(g_arm_fpu, "auto")) && g_arm_march_fpu)
+        g_arm_fpu = g_arm_march_fpu;
     if (!g_arm_fpu && hf)
         g_arm_fpu = hf_fpu;
     int fpu_named = g_arm_fpu && strcmp(g_arm_fpu, "none") != 0 &&
@@ -4700,6 +4741,10 @@ int main(int argc, char **argv)
             }
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             emit_c_only = 1;
+        } else if (strcmp(argv[i], "-dM") == 0) {
+            /* with -E: the macros defined at the end of preprocessing,
+             * not the text (build systems ask the compiler this way) */
+            cpp_set_dump_macros(1);
         } else if (strcmp(argv[i], "-E") == 0) {
             pp_only = 1;
         } else if (strcmp(argv[i], "-ggdb") == 0 ||
@@ -4829,6 +4874,23 @@ int main(int argc, char **argv)
             for (char *t = list; t; ) {
                 char *c = strchr(t, ',');
                 if (c) *c = '\0';
+                /* -a[cdghlmns][=FILE]: a listing */
+                if (t[0] == '-' && t[1] == 'a') {
+                    const char *q = t + 2;
+                    while (*q && strchr("cdghlmns", *q))
+                        q++;
+                    if (*q == '=' && q[1]) {
+                        g_listing = xstrndup(q + 1, strlen(q + 1));
+                        t = c ? c + 1 : NULL;
+                        continue;
+                    }
+                    if (!*q) {
+                        if (!g_listing)
+                            g_listing = "-";
+                        t = c ? c + 1 : NULL;
+                        continue;
+                    }
+                }
                 if (*t && strcmp(t, "--noexecstack") && strcmp(t, "-g") &&
                     strncmp(t, "--gdwarf", 8) && strcmp(t, "-mrelax")) {
                     fprintf(stderr, "embcc: error: assembler option '%s' is "
@@ -5000,6 +5062,28 @@ int main(int argc, char **argv)
              *
              * The opposite spellings are NOT accepted, because those
              * would be promises: see the refusals below. */
+        } else if (strcmp(argv[i], "-fno-ident") == 0 ||
+                   strcmp(argv[i], "-fident") == 0 ||
+                   strcmp(argv[i], "-fno-reorder-functions") == 0 ||
+                   strcmp(argv[i], "-freorder-functions") == 0 ||
+                   strcmp(argv[i], "-ffp-contract=off") == 0 ||
+                   strcmp(argv[i], "-ffp-contract=on") == 0 ||
+                   strcmp(argv[i], "-ffp-contract=fast") == 0) {
+            /* What EmbCC does already, or a permission it may decline:
+             *
+             *   -f[no-]ident        it writes no .comment identifying
+             *                       itself either way
+             *   -f[no-]reorder-functions  functions stay in source
+             *                       order; there are no hot or cold
+             *                       subsections to move them to
+             *   -ffp-contract=      it never fuses a multiply and an add
+             *                       (an fma is only __builtin_fma's), so
+             *                       off is kept and on/fast only permit */
+        } else if (strcmp(argv[i], "-funroll-loops") == 0 ||
+                   strcmp(argv[i], "-funroll-all-loops") == 0 ||
+                   strcmp(argv[i], "-fno-unroll-loops") == 0) {
+            /* GCC's names for the unroll pass (-funroll, -fno-unroll) */
+            opt_set_pass("unroll", argv[i][2] != 'n');
         } else if (strcmp(argv[i], "-fcommon") == 0 ||
                    strcmp(argv[i], "-fno-common") == 0) {
             /* -fno-common is the default: a tentative definition is a
@@ -5861,6 +5945,9 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "-mcpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfpu=", 6) == 0 ||
                    strncmp(argv[i], "-mfloat-abi=", 12) == 0 ||
+                   ((strncmp(argv[i], "-march=", 7) == 0 ||
+                     strncmp(argv[i], "-mtune=", 7) == 0) &&
+                    target_get() == TARGET_THUMB) ||
                    strcmp(argv[i], "-mthumb") == 0 ||
                    strcmp(argv[i], "-marm") == 0 ||
                    strcmp(argv[i], "-mthumb-interwork") == 0 ||
@@ -5894,6 +5981,24 @@ int main(int argc, char **argv)
             if (target_arm_a32()) {
                 if (strcmp(argv[i], "-marm") == 0)
                     continue;
+                /* -march=armv7-a (with GCC's +ext spellings, whose units
+                 * -mfpu= and arm_float_resolve decide) and -mtune= for a
+                 * Cortex-A: scheduling, which EmbCC does not tune */
+                if (strncmp(argv[i], "-march=", 7) == 0) {
+                    if (strncmp(v, "armv7-a", 7) != 0 &&
+                        strncmp(v, "armv7ve", 7) != 0)
+                        diag_fatal(NULL, 0, "-march=%s is not supported on "
+                                   "%s: EmbCC emits ARMv7-A code there "
+                                   "(-march=armv7-a)", v, target_triple_now());
+                    continue;
+                }
+                if (strncmp(argv[i], "-mtune=", 7) == 0) {
+                    if (strncmp(v, "cortex-a", 8) != 0 &&
+                        strcmp(v, "generic-armv7-a") != 0)
+                        diag_fatal(NULL, 0, "-mtune=%s is not a Cortex-A core",
+                                   v);
+                    continue;
+                }
                 if (strcmp(argv[i], "-mthumb") == 0)
                     diag_fatal(NULL, 0, "-mthumb is not supported on %s: "
                                "EmbCC emits ARM (A32) code for a Cortex-A; "
@@ -5978,6 +6083,75 @@ int main(int argc, char **argv)
                            "(packed struct members; copies and by-value "
                            "passing of structs aligned below 4), which the "
                            "architecture allows and this flag forbids");
+            /* -mtune= picks a core to schedule for, which EmbCC does
+             * not do: any Cortex-M part is accepted, and changes nothing. */
+            if (strncmp(argv[i], "-mtune=", 7) == 0) {
+                static const char *const parts[] = {
+                    "cortex-m0", "cortex-m0plus", "cortex-m1", "cortex-m3",
+                    "cortex-m4", "cortex-m7", "cortex-m23", "cortex-m33",
+                    "cortex-m35p", "cortex-m55", "cortex-m85",
+                    "generic-armv7-m", "generic-armv7e-m", NULL
+                };
+                int ok = 0;
+                for (int k = 0; parts[k]; k++)
+                    ok |= !strcmp(v, parts[k]);
+                if (!ok)
+                    diag_fatal(NULL, 0, "-mtune=%s is not a Cortex-M core", v);
+                continue;
+            }
+            /* -march= selects the level as -mcpu= does, with GCC's
+             * extension spellings: +fp, +fp.dp and +nofp name the unit
+             * (which -mfpu= overrides), +dsp and +nodsp the DSP set on
+             * ARMv8-M Mainline. */
+            if (strncmp(argv[i], "-march=", 7) == 0) {
+                const char *plus = strchr(v, '+');
+                size_t bl = plus ? (size_t)(plus - v) : strlen(v);
+                int arch, em = 0, base8 = 0;
+                if ((bl == 7 && !strncmp(v, "armv6-m", 7)) ||
+                    (bl == 8 && !strncmp(v, "armv6s-m", 8)))
+                    arch = 6;
+                else if (bl == 7 && !strncmp(v, "armv7-m", 7))
+                    arch = 7;
+                else if (bl == 8 && !strncmp(v, "armv7e-m", 8))
+                    arch = 7, em = 1;
+                else if (bl == 12 && !strncmp(v, "armv8-m.base", 12))
+                    arch = 6, base8 = 1;
+                else if (bl == 12 && !strncmp(v, "armv8-m.main", 12))
+                    arch = 8;
+                else
+                    diag_fatal(NULL, 0, "-march=%.*s is not an architecture "
+                               "EmbCC emits for a Cortex-M: armv6-m, "
+                               "armv6s-m, armv7-m, armv7e-m, armv8-m.base, "
+                               "armv8-m.main", (int)bl, v);
+                for (const char *x = plus; x && *x; ) {
+                    const char *e = strchr(x + 1, '+');
+                    size_t n = e ? (size_t)(e - x) : strlen(x);
+                    if (n == 3 && !strncmp(x, "+fp", 3) && arch >= 7)
+                        g_arm_march_fpu = arch == 8 ? "fpv5-sp-d16"
+                                                    : "fpv4-sp-d16";
+                    else if (n == 6 && !strncmp(x, "+fp.dp", 6) && arch >= 7)
+                        g_arm_march_fpu = "fpv5-d16";
+                    else if (n == 5 && !strncmp(x, "+nofp", 5))
+                        g_arm_march_fpu = "none";
+                    else if (n == 4 && !strncmp(x, "+dsp", 4) && arch == 8)
+                        em = 1;
+                    else if (n == 6 && !strncmp(x, "+nodsp", 6) && arch == 8)
+                        em = 0;
+                    else
+                        diag_fatal(NULL, 0, "-march=%s: the extension '%.*s' "
+                                   "is not one EmbCC emits for that "
+                                   "architecture (+fp, +fp.dp, +nofp, and +dsp "
+                                   "or +nodsp on armv8-m.main)", v, (int)n, x);
+                    x = e;
+                }
+                if (base8) {
+                    target_set_thumb_v8m_base();
+                } else {
+                    target_set_thumb_arch(arch);
+                    target_set_thumb_em(em);
+                }
+                continue;
+            }
             if (strncmp(argv[i], "-mcpu=", 6) == 0) {
                 /* Only the parts whose ISA this backend really emits.
                  * An F part is refused by name rather than accepted and
@@ -6276,7 +6450,8 @@ int main(int argc, char **argv)
         } else if (has_c_suffix(argv[i]) || has_asm_suffix(argv[i]) ||
                    has_gas_suffix(argv[i]) ||
                    has_cxx_suffix(argv[i]) || has_ir_suffix(argv[i]) ||
-                   (lang >= 0 && argv[i][0] != '-')) {
+                   (lang >= 0 && argv[i][0] != '-') ||
+                   strcmp(argv[i], "-") == 0) {
             if (g_nsrc == MAX_SRCS) {
                 fprintf(stderr, "embcc: error: more than %d source files\n",
                         MAX_SRCS);
@@ -6295,6 +6470,14 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Standard input has no suffix to say what it is: GCC wants -E
+     * (which reads it as C) or -x, and so does this. */
+    for (int k = 0; k < g_nsrc; k++)
+        if (strcmp(g_srcs[k], "-") == 0 && !pp_only && lang < 0) {
+            fprintf(stderr, "embcc: error: -E or -x required when input is "
+                            "from standard input\n");
+            return 1;
+        }
     arm_float_resolve();
     riscv_float_resolve();
     /* -mcmse with the FPU in use: an entry function would have to clear

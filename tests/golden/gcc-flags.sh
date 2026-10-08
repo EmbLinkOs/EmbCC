@@ -634,3 +634,60 @@ done
 "$EMBCC" --target=x86_64-elf -Ofast -ffast-math --dump-predef |
     grep -q __FAST_MATH__ && fail "-ffast-math defined __FAST_MATH__"
 echo "-Og is -O1, -Ofast is -O3, and -ffast-math defines no __FAST_MATH__"
+
+# ---- GCC flags a real embedded build line passes --------------------------
+# -march=/-mtune= on a Cortex-M (CMake toolchain files), the CubeMX
+# Makefile's assembler listing, -E -dM from standard input (how build
+# systems read a compiler's macros), and flags EmbCC satisfies already.
+accept thumbv7em-none-eabi "-mtune=cortex-m4 -mtune=cortex-m0plus -fno-ident
+ -fident -fno-reorder-functions -freorder-functions -ffp-contract=off
+ -ffp-contract=on -ffp-contract=fast -funroll-loops -fno-unroll-loops"
+accept armv7a-none-eabi "-march=armv7-a -mtune=cortex-a7"
+refuse thumbv7em-none-eabi "is not a Cortex-M core" -mtune=pentium
+refuse thumbv7em-none-eabi "is not an architecture EmbCC emits" -march=armv9-a
+refuse thumbv7em-none-eabi "the extension '+mve'" -march=armv7e-m+mve
+refuse armv7a-none-eabi "EmbCC emits ARMv7-A code" -march=armv8-a
+# -march= selects the level, as -mcpu= does, and +fp/+fp.dp the unit
+macros() { "$EMBCC" --target=$1 $2 -E -dM - </dev/null; }
+for c in "armv6-m|__ARM_ARCH_6M__ 1" "armv7-m|__ARM_ARCH_7M__ 1" \
+         "armv8-m.base|__ARM_ARCH_8M_BASE__ 1" \
+         "armv8-m.main|__ARM_ARCH_8M_MAIN__ 1"; do
+    m=${c%%|*}; want=${c#*|}
+    macros thumbv7m-none-eabi -march=$m | grep -q "^#define $want\$" ||
+        fail "-march=$m does not define $want"
+done
+macros thumbv7m-none-eabi "-march=armv7e-m+fp -mfloat-abi=hard" |
+    grep -q "^#define __ARM_FP 0x4$" || fail "-march=armv7e-m+fp is not FPv4-SP"
+macros thumbv7m-none-eabi "-march=armv7e-m+fp.dp -mfloat-abi=hard" |
+    grep -q "^#define __ARM_FP 0xc$" || fail "-march=armv7e-m+fp.dp is not FPv5-D16"
+macros thumbv7m-none-eabi "-march=armv7e-m+fp -mfpu=fpv5-d16 -mfloat-abi=hard" |
+    grep -q "^#define __ARM_FP 0xc$" || fail "-mfpu= did not override -march='s +fp"
+macros thumbv7m-none-eabi "-march=armv8-m.main+fp -mfloat-abi=hard" |
+    grep -q "^#define __ARM_FP 0x4$" || fail "-march=armv8-m.main+fp is not FPv5-SP"
+echo "-march= and -mtune= on Cortex-M and ARMv7-A"
+# -E -dM: every macro at the end of the file, a #define each, also from stdin
+printf '#define SQ(x) ((x)*(x))\n#define V(f, ...) g(f, __VA_ARGS__)\n#define E\n' > "$out/dm.c"
+"$EMBCC" --target=thumbv7em-none-eabi -E -dM "$out/dm.c" > "$out/dm.out" ||
+    fail "-E -dM"
+for l in "#define SQ(x) ((x)*(x))" "#define V(f,...) g(f, __VA_ARGS__)" \
+         "#define E" "#define __ARM_ARCH_7M__ 1"; do
+    grep -qxF "$l" "$out/dm.out" || fail "-E -dM lacks: $l"
+done
+printf 'int x;\n' | "$EMBCC" --target=riscv32-unknown-elf -E -dM - |
+    grep -q "^#define __riscv 1$" || fail "-E -dM - (standard input)"
+printf 'int y(void) { return 7; }\n' | "$EMBCC" --target=riscv32-unknown-elf \
+    -x c -c - -o "$out/stdin.o" || fail "-x c -c - (standard input)"
+printf 'int x;\n' | "$EMBCC" --target=riscv32-unknown-elf -c - -o /dev/null \
+    2> "$out/stdin.err" && fail "standard input without -E or -x was taken"
+grep -q "\-E or -x required when input is from standard input" "$out/stdin.err" ||
+    fail "standard input without -E or -x: $(cat "$out/stdin.err")"
+echo "-E -dM, and standard input with -E or -x"
+# -Wa,-a...=FILE: the listing, which is the -S text, beside the object
+rm -f "$out/t.lst" "$out/t.o"
+"$EMBCC" --target=thumbv7em-none-eabi -O2 -c "$out/t.c" -o "$out/t.o" \
+    -Wa,-a,-ad,-alms="$out/t.lst" || fail "-Wa,-a,-ad,-alms="
+[ -s "$out/t.o" ] || fail "-Wa,-alms= left no object"
+"$EMBCC" --target=thumbv7em-none-eabi -O2 -S "$out/t.c" -o "$out/t.s" &&
+    cmp -s "$out/t.s" "$out/t.lst" || fail "the listing is not the -S text"
+refuse thumbv7em-none-eabi "is not one the integrated assembler has" -Wa,-z
+echo "-Wa,-a...=FILE writes the listing"

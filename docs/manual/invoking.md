@@ -64,13 +64,13 @@ the full entry.
 | [Language](#c-and-c-language-options) | `-std=STD` `-fsigned-char` `-funsigned-char` `-ffreestanding` `-fno-builtin` `-fno-builtin-NAME` `-fwrapv` `-fno-strict-overflow` `-fstrict-aliasing` `-fno-strict-aliasing` `-fcommon` `-fno-common` `-fno-short-enums` `-fsingle-precision-constant` `-fchar8_t` `-fexceptions` `-fno-exceptions` `-frtti` `-fno-rtti` `-faccess-control` `-fno-access-control` |
 | [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fmessage-length=N` `-fdiagnostics-parseable-fixits` `--fix` `-fanalyzer` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
-| [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-fremarks` `-fremarks=json` |
+| [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-funroll-loops` `-fno-unroll-loops` `-ffp-contract=off\|on\|fast` `-fno-reorder-functions` `-fremarks` `-fremarks=json` |
 | [Instrumentation](#instrumentation-options) | `-finstrument-functions` `-finstrument-functions-exclude-function-list=LIST` `-finstrument-functions-exclude-file-list=LIST` `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fcallgraph-info[=su]` `-ftime-report` `-fno-stack-protector` |
 | [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-include FILE` `-Wp,ARGS` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
 | [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` `-specs=FILE` |
 | [Code generation](#code-generation-options) | `-funwind-tables` `-fasynchronous-unwind-tables` `-fno-unwind-tables` `-fno-asynchronous-unwind-tables` `-fomit-frame-pointer` `-fno-omit-frame-pointer` `-fno-plt` `-fno-pic` `-fno-pie` `-fno-jump-tables` `-fjump-tables` `-fno-zero-initialized-in-bss` `-fstrict-volatile-bitfields` `-fno-strict-volatile-bitfields` `-fverbose-asm` `-ffunction-sections` `-fdata-sections` |
-| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-mcmse` `-mfpu=FPU` `-mfloat-abi=ABI` `-mabi=ABI` `-mthumb-interwork` `-mno-thumb-interwork` `-munaligned-access` `-mslow-flash-data` `-mlittle-endian`; on MIPS `-mcpu=CPU` `-march=CPU` `-mabi=32` `-msoft-float` `-EL` `-mno-abicalls` `-G0` |
+| [Machine options](#machine-dependent-options) | `-mno-sse` `-mno-sse2` `-mgeneral-regs-only` `-mno-mmx` `-mno-80387` `-mno-red-zone` `-mcmodel=MODEL` `-mthumb` `-marm` `-mcpu=CPU` `-march=ARCH` `-mtune=CPU` `-mcmse` `-mfpu=FPU` `-mfloat-abi=ABI` `-mabi=ABI` `-mthumb-interwork` `-mno-thumb-interwork` `-munaligned-access` `-mslow-flash-data` `-mlittle-endian`; on MIPS `-mcpu=CPU` `-march=CPU` `-mabi=32` `-msoft-float` `-EL` `-mno-abicalls` `-G0` |
 | [Target](#target-selection) | `--target=TRIPLE` |
 | [Developer](#developer-and-inspection-options) | `inspect` `why` `-fremarks` `--emit-interfaces` `--explain` |
 | [Refused](#refused-options) | `-fPIC` `-fpic` `-fPIE` `-fpie` `-shared` `-static-pie` `-flto` `-fshort-enums` `-fprofile*` `--coverage` `-fcoverage-mapping` `-pg` `-fstack-protector*` `-fstack-clash-protection` `-fcf-protection*` `-fsanitize*` (other than the forms above) `-gdwarf-N` (N not 2 to 4) `-gsplit-dwarf` `-gz` `-mno-unaligned-access` `-mbig-endian` `-mabi=` (other values) `-fdump-*` |
@@ -201,6 +201,17 @@ files. For a `.asm` file it is refused with
 
 Combined with `-M` or `-MM`, `-E` prints only the dependency rule (see
 [`-M`](#-m)).
+
+With `-dM`, `-E` prints every macro defined at the end of the file
+instead of the text. That covers the predefined macros, those from `-D`,
+and the file's own, one `#define` each, as GCC prints them. GCC promises
+no order, and neither does EmbCC.
+
+**Standard input.** The input `-` is read from standard input, so the
+usual way to ask a compiler for its macros works:
+`echo | embcc --target=thumbv7em-none-eabi -E -dM -`. As with GCC,
+standard input is C under `-E`, and otherwise needs `-x` to say what it
+is: `-E or -x required when input is from standard input`.
 
 ### `-save-temps`, `-save-temps=cwd`, `-save-temps=obj`
 
@@ -853,8 +864,26 @@ on its own. The pass names are:
 
 An `-f` or `-fno-` option that is not a pass name and not listed elsewhere
 on this page is an unknown argument. GCC's pass options are accepted only
-where this page lists them (below); `-funroll-loops` and
-`-ftree-vectorize`, for example, are not.
+where this page lists them (below); `-ftree-vectorize`, for example, is
+not.
+
+### `-funroll-loops`, `-fno-unroll-loops`, `-funroll-all-loops`
+
+GCC's names for the `unroll` pass (`-funroll`, `-fno-unroll`). The pass
+is on by default at `-O2`. `-funroll-loops` turns it on at `-O1` and
+`-Os` too.
+
+### `-ffp-contract=off`, `-ffp-contract=on`, `-ffp-contract=fast`
+
+EmbCC never fuses a multiply and an add into one instruction; an `fma`
+is only ever `__builtin_fma`'s. So `off` is kept, and `on` and `fast`,
+which only permit fusing, change nothing.
+
+### `-fno-reorder-functions`, `-freorder-functions`, `-fno-ident`, `-fident`
+
+What EmbCC does anyway:
+- functions stay in source order, with no hot or cold subsections;
+- no `.comment` section identifies the compiler.
 
 ### `-fno-inline-functions`, `-finline-functions`
 
@@ -1317,12 +1346,19 @@ current directory (`boot/start.S` gives `start.o`).
 ### `-Wa,ARGS`
 
 Options for the assembler, separated by commas. The integrated assembler
-takes no options, so only those that change nothing it writes are
-accepted: `--noexecstack`, `-g`, any option beginning with `--gdwarf`, and
-`-mrelax`. Any other is refused, and nothing is compiled:
+takes no options. Accepted:
+- `--noexecstack`, `-g`, any option beginning with `--gdwarf`, and
+  `-mrelax`, which change nothing it writes;
+- GNU as's listing options `-a[cdghlmns][=FILE]`, as an STM32CubeMX
+  Makefile passes them (`-Wa,-a,-ad,-alms=build/main.lst`). The listing is
+  the `-S` text of the object's own bytes, written beside the object to
+  `FILE`, or to standard output when no option names a file. Xtensa and
+  RX, which have no `-S` text, warn and write none.
+
+Any other option is refused, and nothing is compiled:
 
 ```text
-embcc: error: assembler option '-adhln' is not one the integrated assembler has
+embcc: error: assembler option '-z' is not one the integrated assembler has
 ```
 
 The options are checked on every invocation, whatever the input file.
@@ -1608,6 +1644,29 @@ between ARMv7-M and ARMv8-M; that level comes from the triple
 
 `cortex-m23` selects ARMv8-M Baseline on any ARM triple, as
 `thumbv8m.base-none-eabi` does ([Targets](targets.md#armv8-m-baseline)).
+
+#### `-march=ARCH`, `-mtune=CPU`
+
+`-march=` selects the level as `-mcpu=` does:
+- `armv6-m` and `armv6s-m` give ARMv6-M;
+- `armv7-m` gives ARMv7-M, and `armv7e-m` ARMv7E-M;
+- `armv8-m.base` gives ARMv8-M Baseline, and `armv8-m.main` ARMv8-M
+  Mainline.
+
+GCC's extensions are accepted after `+`:
+- `+fp` names the architecture's single-precision unit: FPv4-SP-D16, or
+  FPv5-SP-D16 on ARMv8-M;
+- `+fp.dp` names FPv5-D16, and `+nofp` none;
+- `+dsp` and `+nodsp` apply on `armv8-m.main`.
+
+The unit is used when `-mfpu=` is not given or is `auto`, and
+`-mfloat-abi=` decides whether it is used at all, as with GCC. Any other
+architecture or extension is refused by name.
+
+`-mtune=` chooses a core to schedule for, which EmbCC does not do. Any
+Cortex-M core is accepted and changes nothing; anything else is refused.
+On `armv7a-none-eabi`, `-march=armv7-a` and any `-mtune=cortex-a*` are
+accepted.
 
 Any other `CPU` is refused: `-mcpu=cortex-m55 is not a part EmbCC knows:
 it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23),
