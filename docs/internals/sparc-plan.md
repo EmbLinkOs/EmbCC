@@ -25,11 +25,15 @@ SPARC gcc here.
   and the locals and ins survive every call it makes with no saving at
   all. A call clobbers `%o0`-`%o5`, `%o7` (the return address) and the
   globals.
-- **Every function EmbCC emits does `save`** (`save %sp, -frame, %sp`;
-  a frame beyond 4095 bytes is built in `%g1` first) and returns with
-  `ret; restore` (`jmpl %i7+8, %g0` with `restore` in its delay slot).
-  clang's leaf functions skip the `save` and use the outs directly
-  (`retl`); that is an optimization for later and changes nothing at the
+- **A function does `save`** (`save %sp, -frame, %sp`; a frame beyond
+  4095 bytes is built in `%g1` first) and returns with `ret; restore`
+  (`jmpl %i7+8, %g0` with `restore` in its delay slot; a return value's
+  add or move into `%i0` becomes the restore's own operation, `restore
+  x, %g0, %o0`). A LEAF -- no call, no stack -- skips the `save` as
+  clang's do: it is generated with the ins as its only registers and no
+  window, checked word by word (only `%g0`-`%g4` and `%i0`-`%i5` named, no
+  frame, call, save or restore; `leaf_fix`), its ins renamed the outs,
+  and it returns with `retl` (`jmpl %o7+8`). Nothing changes at the
   interface.
 - The register allocator's pool is `%o0`-`%o5` (caller-saved), then
   `%l0`-`%l5` and `%i0`-`%i5` (preserved by the window, so they cost
@@ -90,10 +94,20 @@ result without a branch: unsigned `<` is `addx %g0, 0, d` after the `cmp`
 (the carry), signed ones are `mov 0, d; b<cond>,a .+8; mov 1, d` (the
 annulled slot runs only when the branch is taken).
 
-Every branch, call and jump has a DELAY SLOT, as on MIPS. The first
-backend fills every slot with a `nop` except where an instruction is
-part of the idiom (`ret; restore`, the annulled `mov 1`, the `sll` in a
-jump table's `call .+8`). A branch's
+Every branch, call and jump has a DELAY SLOT, as on MIPS. A slot takes
+an instruction from up to three before its transfer (take_slot): one
+that commutes with those it moves past -- registers, the condition codes
+and `%y` all counted, and not two memory accesses one of which stores --
+whose result the transfer does not read (no `cmp` into a conditional
+branch's slot), that touches no `%o7` when the transfer is a call, and
+with no label, landing, loop top, transfer, prologue or relocation site
+between it and the transfer. A backward branch with nothing to take gets
+a copy of its target's first instruction (annulled when conditional) and
+goes to the one after. An if/else arm of one instruction becomes the
+inverse branch, annulled, with the arm in its slot. Otherwise the slot
+is a `nop`; the idioms keep theirs (`ret; restore`, the annulled `mov
+1`, the `sll` in a jump table's `call .+8`). tests/golden/sparc-slots.sh
+reads the slots back. A branch's
 22-bit displacement is counted in words from the branch itself (+-8 MiB);
 a function whose branch does not reach is refused by name. `call` has a
 30-bit displacement and reaches the whole address space.
@@ -195,10 +209,10 @@ board what it prints on x86-64 (libc-embedded), and -g verifies
 
 Known gaps, none of which miscompiles:
 
-- Every delay slot is a nop (except `ret; restore` and the annulled `mov`
-  of a 0/1 result), and every function opens a window even when it is a
-  leaf; clang fills slots and leaves leaves windowless. Both are size and
-  speed, not correctness.
+- A slot only takes from the instructions just before its transfer (and
+  a backward branch's target); clang also hoists from the fall-through
+  path and fills forward branches from their targets. Size and speed,
+  not correctness.
 - A local struct asking for alignment beyond 8 is placed at 8, as on MIPS
   (no SPARC instruction needs more); an over-aligned scalar is refused.
 - No assembler: inline assembly with instructions, naked functions and

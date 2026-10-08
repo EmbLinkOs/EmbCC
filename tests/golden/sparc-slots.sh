@@ -5,7 +5,9 @@
 # may not --
 #
 #   - a conditional branch reads the condition codes, so no cmp, tst or
-#     other cc-setting instruction is in its slot;
+#     other cc-setting instruction is in its slot (unless it is annulled:
+#     then the slot runs only once the branch is taken, as a copy of its
+#     target's first instruction does);
 #   - a call writes %o7 before its slot runs, so the slot of a call (to a
 #     symbol or through a register) neither reads nor writes %o7;
 #   - a jump or call through a register reads it, so the slot never
@@ -44,7 +46,7 @@ check() {
     function lastop(l,   o, n, a) { o = ops(l); n = split(o, a, ", *"); return a[n] }
     {
         m = mn($0)
-        if (pm ~ /^b(e|ne|l|le|g|ge|lu|leu|gu|cs|cc|neg|pos|vs|vc)(,a)?$/ &&
+        if (pm ~ /^b(e|ne|l|le|g|ge|lu|leu|gu|cs|cc|neg|pos|vs|vc)$/ &&
             (m == "cmp" || m == "tst" || m == "btst" || m ~ /cc$/))
             print "a cc-setting instruction in a conditional branch slot: " p " / " $0
         if (pm == "call" && $0 ~ /%o7/)
