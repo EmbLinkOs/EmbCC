@@ -180,6 +180,7 @@ SRCS := \
 	src/arch/xtensa/emit.c \
 	src/arch/xtensa/codegen.c \
 	src/arch/xtensa/irgen.c \
+	src/arch/xtensa/asm.c \
 	src/arch/xtensa/predef.c \
 	src/arch/xtensa/predef_cxx.c \
 	src/arch/ppc/emit.c \
@@ -402,6 +403,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/tricore/irgen.c src/arch/tricore/asm.c \
              src/arch/tricore/emit.c \
              src/arch/xtensa/irgen.c src/arch/xtensa/emit.c \
+             src/arch/xtensa/asm.c \
              src/arch/ppc/irgen.c src/arch/ppc/emit.c \
              src/arch/rx/irgen.c src/arch/rx/emit.c \
              src/arch/sparc/irgen.c src/arch/sparc/emit.c \

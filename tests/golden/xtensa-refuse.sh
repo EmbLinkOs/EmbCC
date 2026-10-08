@@ -128,12 +128,18 @@ refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "inline assembly" 'inline assembly is not supported for xtensa-none-elf' \
-    'int f(int x){ __asm__ volatile("nop"); return x; }'
-refc "a naked function" 'inline assembly is not supported for xtensa-none-elf' \
-    'void __attribute__((naked)) f(void){ __asm__("retw"); }'
-refc "a file-scope instruction" 'file-scope asm instruction' \
-    '__asm__(".globl x\nx: nop");'
+# Inline, naked and file-scope assembly are the assembler's
+# (xtensa-asm.sh); what it cannot do is refused by name.
+printf 'int f(int x){ __asm__ volatile("nop"); return x; }\n' > "$out/asm.c"
+printf 'void __attribute__((naked)) g(void){ __asm__("entry a1, 32"); __asm__("retw"); }\n' >> "$out/asm.c"
+printf '__asm__(".globl x\\n.align 4\\nx: entry a1, 32\\n retw");\n' >> "$out/asm.c"
+"$EMBCC" --target=$T -c "$out/asm.c" -o /dev/null 2> "$out/asm.err" || {
+    echo "inline, naked or file-scope assembly was refused:"; cat "$out/asm.err"
+    exit 1; }
+refc "a call0 in inline assembly" 'call0 in Xtensa asm writes a0' \
+    'void f(void){ __asm__ volatile("call0 .+4"); }'
+refc "a density instruction" 'density option' \
+    'void f(void){ __asm__ volatile("ret.n"); }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 # C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
 # it); exceptions, on by default, are refused by name: there are no
@@ -146,5 +152,5 @@ grep -q 'C++ exceptions are not supported for xtensa-none-elf' "$out/cxx.err" ||
 "$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
     echo "C++ with -fno-exceptions does not compile"; exit 1; }
 echo "narrow atomics, the frame and return address above level 0,"
-echo "__int128, interrupt and naked functions, inline and file-scope assembly,"
+echo "__int128, interrupt functions, call0 and density forms in inline asm,"
 echo "a scalar aligned beyond the 16-byte stack and C++ exceptions are each refused by name"

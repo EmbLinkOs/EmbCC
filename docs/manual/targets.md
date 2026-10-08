@@ -1724,6 +1724,52 @@ stub that sets `sp` over a valid bottom frame, sets `PS` (window
 exceptions on, level 0) and `WINDOWSTART`, and calls the entry with
 `callx8`.
 
+### Assembly
+
+`embcc -c` assembles `.s` and `.S` files for Xtensa, and file-scope `asm`
+blocks and `__attribute__((naked))` functions are assembled the same way,
+in GNU as's Xtensa syntax. The vocabulary is the ESP32's: the core ALU,
+shift and SAR instructions, the MUL32/DIV32 and MIN/MAX options, the
+loads and stores, `movi`, `mov`, `addi`, `addmi`, every branch form (two
+registers, against zero, against a `b4const`, `bbci`/`bbsi` and their
+`.l` spellings), the zero-overhead loops, `j`, `jx`, `call0/4/8/12`,
+`callx0/4/8/12`, `ret`, `retw`, `entry`, `movsp`, `rotw`, `rsr`/`wsr`/`xsr`
+by the ESP32's special-register names (`ps`, `epc1`-`epc7`,
+`excsave1`-`excsave7`, `eps2`-`eps7`, `intenable`, `interrupt`, `intset`,
+`intclear`, `ccount`, `ccompare0`-`2`, `vecbase`, `sar`, `windowbase`,
+`windowstart`, `lbeg`, `lend`, `lcount`, `scompare1`, `atomctl`,
+`exccause`, `excvaddr`, `depc`, `prid`, `cpenable`, `misc0`-`3`, ...) with
+GNU's read/write rules, or by number, or as `rsr.ps`; `rur`/`wur` of
+`threadptr`, `rsil`, `waiti`, the syncs, `memw`, `extw`, `break`, `ill`,
+`rfe`, `rfde`, `rfi`, `rfwo`, `rfwu`, `syscall`, `simcall`, `s32c1i`,
+`l32ai`, `s32ri`, `l32e` and `s32e`. GNU's `_` prefix is accepted. The
+density option's `.n` forms are refused by name (no instruction here is
+16 bits), as is anything else outside the list.
+
+A symbol is a target of a branch, a loop, `j`, `callN` or `l32r` with
+`R_XTENSA_SLOT0_OP`, and a `.word` with `R_XTENSA_32`. `movi aN, sym` -- or
+a constant `movi` cannot hold -- is an `l32r` of a literal, and
+`.literal NAME, X, ...` names literals of its own; the literals go where
+GNU as's `--text-section-literals` puts them: in the latest pool placed
+before the code, at the start of the section, at each
+`.literal_position`, and before the labels of each function's `entry`.
+`.align` counts bytes, as GNU as's does for Xtensa. `.begin`/`.end` blocks
+that only restrict relaxation (`no-transform`, `literal_prefix`,
+`schedule`, ...) are accepted; `.begin longcalls` and
+`absolute-literals` would change the code and are refused.
+`tests/golden/xtensa-asm.sh` checks every form against QEMU's de212
+disassembler and Espressif's GNU as, and a file's layout against GNU as's.
+
+In inline asm a register operand is written `a10`, an `"m"` operand
+`a10, 0`; the constraint letters are `r`, `a`, `g`, `m`, `i`, `n` and
+GCC's `I`-`P`. No operand is put in `a0`/`a1` (the return address and the
+stack pointer), `a7` or `a14`/`a15`; a clobber list may not name `a0` or
+`a1`; a template's `call4`/`call8`/`call12` (or `callx`) clobbers the
+callee's window -- `a4`/`a8`/`a12` up to `a15` -- whatever the clobber list
+says, and `call0`/`callx0`, which would write `a0`, are refused. A
+template may use numeric labels (`1:`, `1b`, `1f`); it cannot name a
+symbol, since its bytes carry no relocation.
+
 ### Predefined macros
 
 From Espressif's `xtensa-esp32-elf-gcc` 16.1: `__xtensa__`, `__XTENSA__`,
@@ -1906,9 +1952,25 @@ core registers by name or number, `isync`, `dsync`, `syscall`,
 `swap.w`, `cmpswap.w` and the indirect jumps and calls. Constraints:
 `d`/`r` a data register, `a` an address register, `m` an address register
 holding the operand's address (written `[%0]`), `i` a constant; register
-variables bound to `d0`-`d7` or `a2`-`a7`. There is no assembler for
-`.s` files and no instructions in file-scope `asm`; naked functions are
-refused.
+variables bound to `d0`-`d7` or `a2`-`a7`.
+
+The same vocabulary has the control transfers: `j`, `jl` and `call` (+-16
+MiB), the conditional branches `jeq`, `jne`, `jlt`, `jlt.u`, `jge`,
+`jge.u` against a register or a 4-bit constant, `jz`/`jnz` (jeq/jne
+against 0), `jeq.a`, `jne.a`, `jz.a`, `jnz.a` and `loop` (+-32 KiB), each
+to `.+N`/`.-N` or, in a template, a numeric label (`1:`, `1b`, `1f`).
+`embcc -c` assembles `.s` and `.S` files, and file-scope `asm` blocks and
+`__attribute__((naked))` functions are assembled the same way, in GNU
+syntax with optional `%` on registers; there `j`/`jl`/`call sym` carry
+`R_TRICORE_24REL`, an address is `movh`/`movh.a` with `hi:sym` or
+`%hi(sym)` (`R_TRICORE_HIADJ`) and `addi` with `lo:sym` or `%lo(sym)`
+(`R_TRICORE_LO`) or `lea`, a load or a store with `[aB]lo:sym`
+(`R_TRICORE_LO2`), and `.word sym` is `R_TRICORE_32ABS`. A conditional
+branch or `loop` reaches only a label of its own section (`embld` does not
+apply `R_TRICORE_15REL`), and is refused by name with a symbol defined
+elsewhere. `tests/golden/tricore-gas.sh` runs every transfer, assembled
+from its text, through QEMU's TriCore translator (tricore-encoding.sh's
+referee), and a `.S` file with C on the board.
 
 ### Predefined macros
 
@@ -2002,13 +2064,14 @@ the entry.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target ...` |
-| `__attribute__((interrupt))`, `__attribute__((naked))` | `__attribute__((...)) is not supported: ...` |
-| `.s` and `.S` files | `no assembly-file support for tricore-none-elf yet ...` |
+| `__attribute__((interrupt))` | `__attribute__((...)) is not supported: ...` |
+| a conditional branch or `loop` to a symbol defined elsewhere (`.s`, `.S`, file-scope `asm`) | `a conditional branch or loop reaches only a label of its own section: its 15-bit displacement (R_TRICORE_15REL) is not one embld applies; branch over a j` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
-| inline assembly, `__attribute__((naked))` | `inline assembly is not supported for xtensa-none-elf yet (EmbCC has no Xtensa assembler vocabulary)` |
-| a file-scope `asm` instruction | `file-scope asm instruction "nop": EmbCC assembles instructions for x86-64 only. ...` |
+| `call0` or `callx0` in inline asm | `call0 in Xtensa asm writes a0, which holds this function's return address under the windowed ABI: call a windowed function with call8/callx8` |
+| a density (`.n`) instruction | `ret.n is a 16-bit instruction of the density option, which this assembler does not emit: write ret, its 24-bit form` |
+| `.begin longcalls` | `.begin longcalls is not supported: a long call is an l32r and a callx, which this assembler does not make of a call; write them` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |

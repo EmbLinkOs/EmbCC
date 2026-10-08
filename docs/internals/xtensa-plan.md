@@ -201,8 +201,8 @@ the ESP32 objects.
 
 By name: `__int128` (no 128-bit type on ILP32), atomics wider than a word
 (one and two bytes are an s32c1i loop on the word around them), computed goto, `__builtin_frame_address`
-and `__builtin_return_address`, inline and file-scope assembly, naked and
-interrupt functions, tail calls (the windowed ABI has none), C++, `-S`
+and `__builtin_return_address`, interrupt functions (inline, file-scope
+and naked assembly and `.s`/`.S` files came later, with src/arch/xtensa/asm.c), tail calls (the windowed ABI has none), C++, `-S`
 (no Xtensa assembler to read it back), a function over 128 KiB, and every
 machine flag except `-mabi=windowed`, `-mlongcalls`/`-mno-longcalls`
 (calls are direct either way; the linker refuses one out of reach),
@@ -213,6 +213,7 @@ machine flag except `-mabi=windowed`, `-mlongcalls`/`-mno-longcalls`
 | Test | What it checks |
 | --- | --- |
 | `tests/golden/xtensa-encoding.sh` | every encoder form decoded by QEMU's de212 disassembler; the constant sequences executed; every range check |
+| `tests/golden/xtensa-asm.sh` | the assembler's vocabulary decoded by QEMU's de212 and byte-compared with Espressif's GNU as; a file's layout (literal pools, `.align`, relocations) linked against GNU as's; inline asm and a `.S` file on the de212; the refusals |
 | `tests/golden/xtensa-exec.sh` | `tests/exec/*.c` on the de212 at -O0, -O1, -O2 and -Os |
 | `tests/golden/xtensa-abi.sh` | calls in both directions against Espressif's GCC (skipped without it) |
 | `tests/golden/xtensa-refuse.sh` | the object's header, the accepted and refused options and constructs |

@@ -700,6 +700,17 @@ void xt_rotw(struct code *c, int n)
     xt_w(c, xt_enc_rrr(OP0_QRST, OP1_RST0, 4, 8, 0, n & 15));
 }
 
+int xt_loop_reaches(long off) { return off >= 0 && off <= 255; }
+
+/* BRI8 with n = 3, m = 1 (BI1's LOOPGRP), r = 8, 9 or 10 */
+unsigned long xt_enc_loop(int kind, int s, long off)
+{
+    need_reg(s);
+    need_field(kind, XT_LOOP, XT_LOOPGTZ, "loop kind");
+    need_field(off, 0, 255, "loop end displacement");
+    return xt_enc_bri8(OP0_SI, 3, 1, s, 8 + kind, (unsigned)off);
+}
+
 /* ---- the system ---------------------------------------------------------------- */
 
 void xt_nop(struct code *c)     { st0(c, 2, 0, 15); }
@@ -754,6 +765,20 @@ static void sr_op(struct code *c, int op1, int op2, int t, int sr)
 void xt_rsr(struct code *c, int t, int sr) { sr_op(c, OP1_RST3, 0, t, sr); }
 void xt_wsr(struct code *c, int t, int sr) { sr_op(c, OP1_RST3, 1, t, sr); }
 void xt_xsr(struct code *c, int t, int sr) { sr_op(c, OP1_RST1, 6, t, sr); }
+
+void xt_rur(struct code *c, int r, int ur)
+{
+    need_reg(r);
+    need_field(ur, 0, 255, "user register");
+    xt_w(c, xt_enc_rrr(OP0_QRST, OP1_RST3, 14, r, ur >> 4, ur & 15));
+}
+
+void xt_wur(struct code *c, int t, int ur)
+{
+    need_reg(t);
+    need_field(ur, 0, 255, "user register");
+    xt_w(c, xt_enc_rrr(OP0_QRST, OP1_RST3, 15, ur >> 4, ur & 15, t));
+}
 
 int xt_insn_len(int b0)
 {

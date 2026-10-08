@@ -405,7 +405,7 @@ label (`name:`).
 
 How a block is assembled depends on the target:
 
-- **ARM Cortex-M, RISC-V, MIPS32 and AVR.** The block is read by the assembler
+- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore and AVR.** The block is read by the assembler
   that reads a `.s` file, so it holds the target's own instructions; see
   [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr).
 - **x86-64 and AArch64.** The block is read by a small fixed vocabulary
@@ -493,7 +493,7 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| ARM Cortex-M, RISC-V, MIPS32, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
+| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
 | AArch64 ELF | directives and data only; an instruction is refused (below) |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
@@ -1612,6 +1612,134 @@ static inline void irq_disable(void)
 }
 ```
 
+## Xtensa
+
+This section applies to `xtensa-none-elf` (the ESP32's LX6 and the
+ESP32-S3's LX7, windowed ABI).
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `a`, `g` | an address register chosen by EmbCC (`a` is GCC's Xtensa letter for them) |
+| `m` | an address register chosen by EmbCC, holding the address of the operand; it is written into the template as `aN, 0`, the base and offset a load or store takes |
+| `i`, `n`, `I`-`P` | the constant, written into the template as a decimal number |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Anything else, a non-constant `i` included, is refused with
+`asm constraint "b" is not valid for Xtensa`. An operand is one 32-bit
+register: a `long long` one is refused (`Xtensa asm operand 0 is 8
+bytes`). A chosen register comes from `a10`-`a13`, then `a2`-`a6` and
+`a8`-`a9`, skipping registers listed as clobbers, named in the template or
+changed by a call in it; never `a0` or `a1` (the return address and the
+stack pointer), `a7` (the frame base of a function that calls `alloca`) or
+`a14`/`a15` (the code generator's scratch). A register variable must be
+one of those (`register int x __asm__("a10")`); another is refused with
+`register variable bound to 'a7' is not supported for Xtensa asm (use
+a2-a6 or a8-a13)`.
+
+### Modifiers
+
+None. `%N` prints the register (`a10`) or the constant; any modifier is
+refused with `asm template modifier '%x' is not supported for Xtensa`.
+
+### Template syntax
+
+GNU Xtensa syntax, as Espressif's GNU as reads it. Registers are `a0` to
+`a15`, and `sp` is `a1`. Every operand is written out: a load or store is
+`l32i a2, a3, 8`, and an offset or immediate may be a constant expression.
+A branch, loop, `j`, `callN` or `l32r` target is `.+N` or `.-N` bytes from
+the instruction, or a numeric label of the template (`1:` referred to as
+`1b` or `1f`); a named label is refused, since one template may be emitted
+more than once. A special register is named as GNU as names it (`rsr a2,
+ps`, `rsr.ps a2`, `wsr a3, intenable`) or by number (`rsr a2, 230`).
+Statements are separated by `;` or newlines; `#` and `//` start a
+comment.
+
+A template cannot name a symbol: its bytes carry no relocation, so
+`call8 f` is refused (`"f" is a symbol, and inline asm cannot reach one`)
+-- call through a register with `callx8`, or write the code in a `.S`
+file or a [file-scope block](#on-cortex-m-risc-v-mips32-and-avr), where
+symbols, `movi aN, sym` and `.literal` work. For the same reason `call`
+and `l32r` to a `.+N` target are refused in a template: their encoding
+depends on the instruction's own address, rounded to a word, which a
+template does not know. `movi` takes a 12-bit signed constant; a larger
+one is an `"r"` operand.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `nop`, `ill`, `isync`, `rsync`, `esync`, `dsync`, `memw`, `extw`, `rfe`, `rfde`, `rfwo`, `rfwu`, `syscall`, `simcall`, `ret`, `retw` | none |
+| `add`, `sub`, `and`, `or`, `xor`, `addx2/4/8`, `subx2/4/8`, `mull`, `mul16u`, `mul16s`, `quos`, `quou`, `rems`, `remu`, `min`, `max`, `minu`, `maxu`, `moveqz`, `movnez`, `movltz`, `movgez`, `src` | `ar, as, at` |
+| `mov ar, as`; `neg`, `abs ar, at`; `nsa`, `nsau at, as`; `sll ar, as`; `srl`, `sra ar, at`; `movsp at, as` | |
+| `ssl`, `ssr`, `ssa8l`, `jx`, `callx0`, `callx4`, `callx8`, `callx12` | `as` |
+| `movi at, IMM` | -2048 to 2047 |
+| `addi at, as, IMM`; `addmi at, as, IMM` | -128 to 127; a multiple of 256 in -32768..32512 |
+| `slli ar, as, SA`; `srli`, `srai ar, at, SA`; `ssai SA`; `extui ar, at, SHIFT, BITS` | 1-31; 0-15 and 0-31; 0-31; 0-31 and 1-16 |
+| `sext`, `clamps ar, as, B` | 7 to 22 |
+| `l8ui`, `l16ui`, `l16si`, `l32i`, `s8i`, `s16i`, `s32i`, `l32ai`, `s32ri`, `s32c1i` | `at, as, OFF`, scaled by the size: 0-255, even 0-510, a multiple of 4 in 0-1020 |
+| `l32e`, `s32e` | `at, as, OFF`, a multiple of 4 in -64..-4 |
+| `l32r at, TARGET` | 4 to 262144 bytes back (in a file or block only) |
+| `beq`, `bne`, `blt`, `bge`, `bltu`, `bgeu`, `bany`, `bnone`, `ball`, `bnall`, `bbc`, `bbs` | `as, at, TARGET`, -124..131 from the branch |
+| `beqz`, `bnez`, `bltz`, `bgez` | `as, TARGET`, -2044..2051 |
+| `beqi`, `bnei`, `blti`, `bgei` / `bltui`, `bgeui` | `as, K, TARGET`, K one of -1, 1-8, 10, 12, 16, 32, 64, 128, 256 / 2-8, 10, 12, 16, 32, 64, 128, 256, 32768, 65536 |
+| `bbci`, `bbsi` (and `bbci.l`, `bbsi.l`) | `as, BIT, TARGET` |
+| `loop`, `loopnez`, `loopgtz` | `as, END`, 4..259 bytes past the loop instruction |
+| `j TARGET`; `call0`, `call4`, `call8`, `call12 TARGET` | +-128 KiB; +-512 KiB to a word-aligned target (in a file or block only) |
+| `entry as, FRAME` | a multiple of 8 in 0..32760 |
+| `rotw N`; `rsil at, LEVEL`; `waiti LEVEL`; `rfi LEVEL`; `break S, T` | -8..7; 0-15; 0-15; 1-15; 0-15 each |
+| `rsr`, `wsr`, `xsr at, SR` (or `rsr.SR at`) | the ESP32's special registers by name -- `ps`, `epc1`-`epc7`, `eps2`-`eps7`, `excsave1`-`excsave7`, `depc`, `exccause`, `excvaddr`, `intenable`, `interrupt`, `intset`, `intclear`, `ccount`, `ccompare0`-`2`, `vecbase`, `sar`, `lbeg`, `lend`, `lcount`, `scompare1`, `atomctl`, `windowbase`, `windowstart`, `prid`, `cpenable`, `br`, `acclo`, `acchi`, `m0`-`m3`, `memctl`, `ddr`, `ibreakenable`, `ibreaka0/1`, `dbreaka0/1`, `dbreakc0/1`, `icount`, `icountlevel`, `debugcause`, `configid0/1`, `misc0`-`3`, `mmid` -- with GNU's read/write/exchange rules (`intset` is write-only, `prid` read-only), or by number 0-255 |
+| `rur`, `wur at, threadptr` (or `rur.threadptr at`) | |
+
+A leading `_` (GNU's "do not transform") is accepted on any of them. The
+density option's 16-bit forms are refused with `ret.n is a 16-bit
+instruction of the density option, which this assembler does not emit:
+write ret, its 24-bit form`; anything else outside the list with
+`asm instruction "ssa8b a2" is not in the Xtensa vocabulary`.
+
+### The register window
+
+Under the windowed ABI `a0` holds the return address and `a1` the stack
+pointer. A template may read or write them where it names them, but they
+are never an operand's register and a clobber list naming either is
+refused (`Xtensa asm clobbers 'a0', which holds this function's return
+address under the windowed ABI; EmbCC does not save it around an asm`).
+`a2`-`a15` belong to this function's window and nothing needs saving: a
+value live across an asm keeps out of every register the asm changes --
+its operands', its clobbers' and the template's.
+
+A call in a template is a windowed call. `call8`/`callx8` hands its
+callee the window from `a8`, which the callee may change, so `a8`-`a15`
+are clobbered -- as `call4` clobbers `a4`-`a15` and `call12` `a12`-`a15` --
+whether or not the clobber list says so, and no operand is put there.
+`call0`/`callx0` would write `a0` and are refused (`callx0 in Xtensa asm
+writes a0, which holds this function's return address under the windowed
+ABI`).
+
+### Example
+
+```c
+static inline unsigned irq_save(void)
+{
+    unsigned ps;
+    __asm__ volatile("rsil %0, 3" : "=r"(ps) :: "memory");
+    return ps;
+}
+
+static inline void irq_restore(unsigned ps)
+{
+    __asm__ volatile("wsr %0, ps\n rsync" :: "r"(ps) : "memory");
+}
+
+static inline unsigned cycles(void)
+{
+    unsigned c;
+    __asm__ volatile("rsr %0, ccount" : "=r"(c));
+    return c;
+}
+```
+
 ## AVR
 
 This section applies to the `avr` target (ATmega328P).
@@ -1811,7 +1939,9 @@ In summary, compared with GCC:
 - On x86-64, ARM Cortex-M and RISC-V, `i` and `n` give a register, not
   an immediate.
 - Labels inside a function template are supported only for the x86-64
-  `leaq Nf(%%rip)` form; elsewhere branches use numeric displacements.
+  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa and
+  TriCore;
+  elsewhere branches use numeric displacements.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at
   file scope on any target.

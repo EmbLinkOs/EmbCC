@@ -22,10 +22,25 @@
  *   st.b st.h st.w  [aB]off, dA                 st.a [aB]off, aA
  *   swap.w [aB]off, dA   cmpswap.w [aB]off, eA
  *   ji aA  calli aA  jli aA
+ *   j jl call  TARGET                         (+-16 MiB)
+ *   jeq jne jlt jlt.u jge jge.u  dA, dB|K4, TARGET
+ *   jz jnz dA, TARGET    jeq.a jne.a aA, aB, TARGET
+ *   jz.a jnz.a aA, TARGET                     loop aB, TARGET
+ *                                             (+-32 KiB)
+ *
+ * A TARGET is `.+N` / `.-N`, the distance in bytes from the instruction --
+ * what src/as/gas.c writes for a label -- or, in a template, a numeric
+ * label of its own (`1:`, `1b`, `1f`). In a .s/.S file or a file-scope
+ * block, tcasm_symform gives j, jl and call a symbol (R_TRICORE_24REL),
+ * and movh, movh.a, addi, lea and the BOL loads and stores an address's
+ * halves: `hi:sym`/`%hi(sym)` (R_TRICORE_HIADJ) and `lo:sym`/`%lo(sym)`
+ * (R_TRICORE_LO, or LO2 in a [aB]offset).
  *
  * A form outside this list is refused by name, never guessed at. */
 #include "asm.h"
 #include "emit.h"
+#include "../asmexpr.h"
+#include "../../elf/elf.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -132,6 +147,20 @@ static int memop(struct tok t, int *ab, long long *off)
             return 0;
     }
     return 1;
+}
+
+/* A transfer's target: `.`, `.+N` or `.-N`, bytes from this
+ * instruction. */
+static int target(struct tok t, long long *off)
+{
+    if (t.n == 1 && t.p[0] == '.') {
+        *off = 0;
+        return 1;
+    }
+    /* (`.+0+8`, as the file assembler writes `.+8` after a `.`) */
+    if (t.n >= 3 && t.p[0] == '.' && (t.p[1] == '+' || t.p[1] == '-'))
+        return asm_const_expr(t.p + 1, t.n - 1, off);
+    return 0;
 }
 
 static int reg_of(struct tok t, int file)
@@ -321,6 +350,85 @@ static int one(const struct stmt *s, struct code *c, char *err, size_t errlen)
         tc_cmpswap_w(c, a, b, off);
         return 0;
     }
+    /* ---- PC-relative transfers ---- */
+    if (teq(m, "j") || teq(m, "jl") || teq(m, "call")) {
+        if (n != 1)
+            BAD();
+        if (!target(s->op[0], &off)) {
+            snprintf(err, errlen, "TriCore asm: '%.*s %.*s': a target is a "
+                     "label, .+N or .-N%s", m.n, m.p, s->op[0].n, s->op[0].p,
+                     isalpha((unsigned char)s->op[0].p[0]) ||
+                     s->op[0].p[0] == '_'
+                     ? " (a symbol needs a relocation, which an inline "
+                       "template cannot carry: write it in a .S file, or "
+                       "call through a register with calli)" : "");
+            return -1;
+        }
+        if ((off & 1) || off < -16777216LL || off > 16777214LL) {
+            snprintf(err, errlen, "TriCore asm: '%.*s' target %+lld is not "
+                     "an even distance within +-16 MiB", m.n, m.p, off);
+            return -1;
+        }
+        tc_w(c, teq(m, "j") ? tc_enc_j((long)off) : teq(m, "jl")
+                ? tc_enc_jl((long)off) : tc_enc_call((long)off));
+        return 0;
+    }
+    {
+        static const struct { const char *nm; int cond; } brs[] = {
+            { "jeq", TC_JEQ }, { "jne", TC_JNE }, { "jlt", TC_JLT },
+            { "jlt.u", TC_JLTU }, { "jge", TC_JGE }, { "jge.u", TC_JGEU },
+            { "jeq.a", TC_JEQ_A }, { "jne.a", TC_JNE_A },
+            { "jz.a", TC_JZ_A }, { "jnz.a", TC_JNZ_A },
+            { "jz", -1 }, { "jnz", -2 }, { "loop", -3 }
+        };
+        for (unsigned j = 0; j < sizeof brs / sizeof brs[0]; j++) {
+            int cond = brs[j].cond, one_reg, areg;
+            if (!teq(m, brs[j].nm))
+                continue;
+            one_reg = cond < 0 || cond == TC_JZ_A || cond == TC_JNZ_A;
+            areg = cond == -3 || cond >= TC_JEQ_A;
+            if (n != (one_reg ? 2 : 3) ||
+                (a = reg_of(s->op[0], areg ? 'a' : 'd')) < 0)
+                BAD();
+            if (!target(s->op[n - 1], &off)) {
+                snprintf(err, errlen, "TriCore asm: '%.*s': \"%.*s\" is not a "
+                         "branch target (a label, .+N or .-N)%s", m.n, m.p,
+                         s->op[n - 1].n, s->op[n - 1].p,
+                         isalpha((unsigned char)s->op[n - 1].p[0])
+                         ? "; a conditional branch reaches only this file's "
+                           "own labels" : "");
+                return -1;
+            }
+            if ((off & 1) || off < -32768 || off > 32766) {
+                snprintf(err, errlen, "TriCore asm: '%.*s' target %+lld is "
+                         "not an even distance within -32768..32766", m.n,
+                         m.p, off);
+                return -1;
+            }
+            if (cond == -3) {
+                tc_w(c, tc_enc_loop(a, (long)off));
+            } else if (cond < 0) {
+                tc_w(c, tc_enc_jcci(cond == -1 ? TC_JEQ : TC_JNE, a, 0,
+                                    (long)off));
+            } else if (one_reg) {
+                tc_w(c, tc_enc_jcc(cond, a, 0, (long)off));
+            } else if ((b = reg_of(s->op[1], areg ? 'a' : 'd')) >= 0) {
+                tc_w(c, tc_enc_jcc(cond, a, b, (long)off));
+            } else if (!areg && number(s->op[1], &k)) {
+                if (!tc_jcci_ok(cond, k)) {
+                    snprintf(err, errlen, "TriCore asm: '%.*s' constant %lld "
+                             "does not fit its 4 bits (%s)", m.n, m.p, k,
+                             cond == TC_JLTU || cond == TC_JGEU ? "0..15"
+                                                                : "-8..7");
+                    return -1;
+                }
+                tc_w(c, tc_enc_jcci(cond, a, k, (long)off));
+            } else {
+                BAD();
+            }
+            return 0;
+        }
+    }
     if (teq(m, "ji") || teq(m, "calli") || teq(m, "jli")) {
         if (n != 1 || (a = reg_of(s->op[0], 'a')) < 0) BAD();
         if (teq(m, "ji")) tc_ji(c, a);
@@ -334,42 +442,383 @@ static int one(const struct stmt *s, struct code *c, char *err, size_t errlen)
 #undef BAD
 }
 
-int tcasm_assemble(const char *text, struct code *c, char *err, size_t errlen)
+/* One statement, tokenised and assembled. */
+static int stmt_text(const char *p, const char *e, struct code *c, char *err,
+                     size_t errlen)
 {
+    struct stmt s;
+    struct tok line = trim(p, e);
+    const char *q = line.p, *end = line.p + line.n;
+    memset(&s, 0, sizeof s);
+    if (!line.n)
+        return 0;
+    while (q < end && !isspace((unsigned char)*q)) q++;
+    s.mn = trim(line.p, q);
+    while (q < end) {
+        const char *st = q;
+        int depth = 0;
+        while (q < end && (depth || *q != ',')) {
+            if (*q == '[') depth++;
+            if (*q == ']') depth--;
+            q++;
+        }
+        if (s.nop == MAXOPS) {
+            snprintf(err, errlen, "TriCore asm: too many operands "
+                     "in '%.*s'", line.n, line.p);
+            return -1;
+        }
+        s.op[s.nop++] = trim(st, q);
+        if (q < end) q++;
+    }
+    /* a refusal tcasm_symform wrote for a form it recognised */
+    if (s.mn.n && s.mn.p[0] == '\001') {
+        snprintf(err, errlen, "%.*s", line.n - 1, line.p + 1);
+        return -1;
+    }
+    return one(&s, c, err, errlen);
+}
+
+/* ---- a template ----------------------------------------------------------
+ *
+ * Its statements, with GCC's numeric labels resolved: `1:` defines the
+ * next instance of label 1, `1b` is the latest one at or before the
+ * statement and `1f` the next one after it. The statements are assembled
+ * once with every reference at `.+0` to learn where each starts, then for
+ * good. */
+#define MAXSTMT 256
+struct tstm { const char *p, *e; int lab[4], nlab; long off; };
+
+static int split_stmts(const char *text, struct tstm *st, char *err,
+                       size_t errlen)
+{
+    int ns = 0;
     const char *p = text;
     while (*p) {
         const char *e = p;
-        struct stmt s;
         while (*e && *e != '\n' && *e != ';')
             e++;
-        {
-            struct tok line = trim(p, e);
-            const char *q = line.p, *end = line.p + line.n;
-            memset(&s, 0, sizeof s);
-            if (line.n) {
-                while (q < end && !isspace((unsigned char)*q)) q++;
-                s.mn = trim(line.p, q);
-                while (q < end) {
-                    const char *st = q;
-                    int depth = 0;
-                    while (q < end && (depth || *q != ',')) {
-                        if (*q == '[') depth++;
-                        if (*q == ']') depth--;
-                        q++;
-                    }
-                    if (s.nop == MAXOPS) {
-                        snprintf(err, errlen, "TriCore asm: too many operands "
-                                 "in '%.*s'", line.n, line.p);
-                        return -1;
-                    }
-                    s.op[s.nop++] = trim(st, q);
-                    if (q < end) q++;
-                }
-                if (one(&s, c, err, errlen))
-                    return -1;
-            }
+        if (ns == MAXSTMT) {
+            snprintf(err, errlen, "TriCore asm: a template of more than %d "
+                     "statements", MAXSTMT);
+            return -1;
         }
+        st[ns].nlab = 0;
+        for (;;) {
+            const char *q = p, *k;
+            while (q < e && isspace((unsigned char)*q)) q++;
+            k = q;
+            while (k < e && (isalnum((unsigned char)*k) || *k == '_' ||
+                             *k == '.'))
+                k++;
+            if (k == q || k >= e || *k != ':')
+                break;
+            for (const char *d = q; d < k; d++)
+                if (!isdigit((unsigned char)*d)) {
+                    snprintf(err, errlen, "TriCore asm: label '%.*s' in a "
+                             "template: a template's labels are numeric (1:, "
+                             "used as 1b or 1f), since one template may be "
+                             "emitted more than once", (int)(k - q), q);
+                    return -1;
+                }
+            if (st[ns].nlab == 4) {
+                snprintf(err, errlen, "TriCore asm: more than four labels on "
+                         "one statement");
+                return -1;
+            }
+            st[ns].lab[st[ns].nlab++] = atoi(q);
+            p = k + 1;
+        }
+        st[ns].p = p;
+        st[ns].e = e;
+        ns++;
         p = *e ? e + 1 : e;
+    }
+    return ns;
+}
+
+/* Statement k with each `Nb`/`Nf` written as `.+D` (D 0 when `measure`). */
+static int resolve(const struct tstm *st, int ns, int k, int measure,
+                   char *buf, int cap, char *err, size_t errlen)
+{
+    const char *s = st[k].p;
+    int len = (int)(st[k].e - st[k].p), o = 0;
+    for (int i = 0; i < len; ) {
+        int j = i;
+        long target = -1;
+        int mid = i > 0 && (isalnum((unsigned char)s[i - 1]) ||
+                            s[i - 1] == '_' || s[i - 1] == '.');
+        while (j < len && isdigit((unsigned char)s[j]))
+            j++;
+        if (!mid && j > i && j < len && (s[j] == 'b' || s[j] == 'f') &&
+            (j + 1 >= len || !(isalnum((unsigned char)s[j + 1]) ||
+                               s[j + 1] == '_'))) {
+            int lab = atoi(s + i), fwd = s[j] == 'f';
+            for (int q = fwd ? k + 1 : k; q >= 0 && q < ns && target < 0;
+                 q += fwd ? 1 : -1)
+                for (int m = 0; m < st[q].nlab; m++)
+                    if (st[q].lab[m] == lab)
+                        target = st[q].off;
+            if (target < 0) {
+                snprintf(err, errlen, "TriCore asm: '%.*s' refers to no label "
+                         "%d %s it in the template", j + 1 - i, s + i, lab,
+                         fwd ? "after" : "before");
+                return -1;
+            }
+            o += snprintf(buf + o, (size_t)(cap - o), ".%+ld",
+                          measure ? 0L : target - st[k].off);
+            i = j + 1;
+        } else {
+            if (j == i)
+                j = i + 1;
+            while (i < j && o < cap - 24)
+                buf[o++] = s[i++];
+        }
+        if (o >= cap - 24) {
+            snprintf(err, errlen, "TriCore asm: a statement too long");
+            return -1;
+        }
+    }
+    buf[o] = 0;
+    return o;
+}
+
+int tcasm_assemble(const char *text, struct code *c, char *err, size_t errlen)
+{
+    static struct tstm st[MAXSTMT];
+    int ns = split_stmts(text, st, err, errlen);
+    long off = 0;
+    if (ns < 0)
+        return -1;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int k = 0; k < ns; k++) {
+            char buf[512];
+            int len = resolve(st, ns, k, pass == 0, buf, (int)sizeof buf, err,
+                              errlen);
+            struct code tmp = { 0 };
+            if (len < 0)
+                return -1;
+            if (pass == 0) {
+                /* a placeholder that does not encode (a loop's `.+0` does)
+                 * is still one 32-bit instruction */
+                char e2[16];
+                st[k].off = off;
+                if (stmt_text(buf, buf + len, &tmp, e2, sizeof e2) == 0)
+                    off += tmp.len;
+                else
+                    off += 4;
+                free(tmp.p);
+                continue;
+            }
+            if (stmt_text(buf, buf + len, c, err, errlen))
+                return -1;
+        }
+    }
+    return 0;
+}
+
+/* ---- for the file assembler (src/as/gas.c) ---------------------------- */
+
+int tcasm_encode(const char *text, struct code *c, char *err, int errlen)
+{
+    return tcasm_assemble(text, c, err, (size_t)(errlen > 0 ? errlen : 1));
+}
+
+int tcasm_is_reg(const char *name, int len)
+{
+    int f;
+    return tcasm_reg(name, len, &f);
+}
+
+/* `hi`/`lo` before a `:`, or after a `%`, is an operator; a core register's
+ * name is an operand of mtcr/mfcr. */
+int tcasm_is_word(const char *stmt, const char *w, int len)
+{
+    const char *p = stmt;
+    struct tok t;
+    if ((len == 2 && (!strncmp(w, "hi", 2) || !strncmp(w, "lo", 2))) &&
+        (w[2] == ':' || (w > stmt && w[-1] == '%')))
+        return 1;
+    while (isspace((unsigned char)*p)) p++;
+    t.p = p;
+    while (*p && !isspace((unsigned char)*p)) p++;
+    t.n = (int)(p - t.p);
+    if (teq(t, "mtcr") || teq(t, "mfcr")) {
+        struct tok x;
+        x.p = w;
+        x.n = len;
+        for (unsigned k = 0; k < sizeof csfrs / sizeof csfrs[0]; k++)
+            if (teq(x, csfrs[k].nm))
+                return 1;
+    }
+    return 0;
+}
+
+static int refuse_form(struct asm_symform *f, const char *stmt,
+                       const char *word, int wlen, const char *why)
+{
+    f->sym_at = (int)(word - stmt);
+    f->sym_len = wlen;
+    f->addend = 0;
+    f->nsites = 0;
+    snprintf(f->encode, sizeof f->encode, "\001%s", why);
+    return 1;
+}
+
+/* A symbol at p, then an optional +K/-K: the length consumed, or 0. */
+static int sym_at(const char *p, int *slen, long *add)
+{
+    int n = 0;
+    if (!(isalpha((unsigned char)p[0]) || p[0] == '_' ||
+          (p[0] == '.' && (isalpha((unsigned char)p[1]) || p[1] == '_'))))
+        return 0;
+    while (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '.' ||
+           p[n] == '$')
+        n++;
+    {
+        int f;
+        if (tcasm_reg(p, n, &f) >= 0)
+            return 0;
+    }
+    *slen = n;
+    *add = 0;
+    if (p[n] == '+' || p[n] == '-') {
+        char *e;
+        long k = strtol(p + n + 1, &e, 0);
+        if (e == p + n + 1)
+            return 0;
+        *add = p[n] == '-' ? -k : k;
+        n = (int)(e - p);
+    }
+    return n;
+}
+
+/* The statements whose operand is a SYMBOL, each rewritten with a zero in
+ * its place and the relocation it carries:
+ *
+ *   j, jl, call SYM                       R_TRICORE_24REL
+ *   movh dC / movh.a aC, hi:SYM           R_TRICORE_HIADJ  (or %hi(SYM))
+ *   addi dC, dA, lo:SYM                   R_TRICORE_LO     (or %lo(SYM))
+ *   lea aC, [aB]lo:SYM, and the loads and stores with [aB]lo:SYM
+ *                                         R_TRICORE_LO2
+ *
+ * A conditional branch or a loop to a symbol is refused: its 15-bit
+ * displacement (R_TRICORE_15REL) is not one embld applies. */
+int tcasm_symform(const char *stmt, struct asm_symform *f)
+{
+    const char *p = stmt, *m, *o, *c;
+    int mlen, slen, n;
+    long add;
+    struct tok mt;
+    while (isspace((unsigned char)*p)) p++;
+    m = p;
+    while (*p && !isspace((unsigned char)*p)) p++;
+    mlen = (int)(p - m);
+    mt.p = m;
+    mt.n = mlen;
+    while (isspace((unsigned char)*p)) p++;
+    memset(f, 0, sizeof *f);
+    if (!mlen)
+        return 0;
+    if (teq(mt, "j") || teq(mt, "jl") || teq(mt, "call")) {
+        n = sym_at(p, &slen, &add);
+        {
+            const char *r = p + n;
+            while (isspace((unsigned char)*r)) r++;
+            if (!n || *r)
+                return 0;
+        }
+        f->sym_at = (int)(p - stmt);
+        f->sym_len = slen;
+        f->addend = add;
+        snprintf(f->encode, sizeof f->encode, "%.*s .+0", mlen, m);
+        f->site[0].reloc = R_TRICORE_24REL;
+        f->nsites = 1;
+        return 1;
+    }
+    /* hi:/lo: and %hi()/%lo() */
+    for (o = p; *o; o++) {
+        int hi, pct = 0, k;
+        const char *sp;
+        if (!strncmp(o, "hi:", 3) || !strncmp(o, "lo:", 3)) {
+            sp = o + 3;
+        } else if (!strncmp(o, "%hi(", 4) || !strncmp(o, "%lo(", 4)) {
+            sp = o + 4;
+            pct = 1;
+        } else {
+            continue;
+        }
+        if (o > stmt && (isalnum((unsigned char)o[-1]) || o[-1] == '_'))
+            continue;
+        hi = o[pct] == 'h';
+        n = sym_at(sp, &slen, &add);
+        if (!n)
+            return 0;                   /* a number's: refused by one() */
+        k = n;
+        if (pct) {
+            if (sp[k] != ')')
+                return 0;
+            k++;
+        }
+        c = sp + k;
+        {
+            /* the last operand -- but a store's [aB]lo:SYM comes first */
+            const char *r = c;
+            while (isspace((unsigned char)*r)) r++;
+            if (*r && !(*r == ',' && o > stmt && o[-1] == ']'))
+                return refuse_form(f, stmt, sp, slen, "an address half is "
+                                   "a whole operand");
+        }
+        f->sym_at = (int)(sp - stmt);
+        f->sym_len = slen;
+        f->addend = add;
+        if (hi) {
+            if (!teq(mt, "movh") && !teq(mt, "movh.a"))
+                return refuse_form(f, stmt, sp, slen, "hi:SYM (%hi) is "
+                                   "movh's or movh.a's operand");
+            f->site[0].reloc = R_TRICORE_HIADJ;
+        } else if (teq(mt, "addi")) {
+            f->site[0].reloc = R_TRICORE_LO;
+        } else if (o > stmt && o[-1] == ']' &&
+                   (teq(mt, "lea") || teq(mt, "ld.a") || teq(mt, "st.a") ||
+                    teq(mt, "ld.b") || teq(mt, "ld.bu") || teq(mt, "ld.h") ||
+                    teq(mt, "ld.hu") || teq(mt, "ld.w") || teq(mt, "st.b") ||
+                    teq(mt, "st.h") || teq(mt, "st.w"))) {
+            f->site[0].reloc = R_TRICORE_LO2;
+        } else if (o > stmt && o[-1] == ']') {
+            /* st.* puts the memory operand first: [aB]lo:SYM, dA */
+            return refuse_form(f, stmt, sp, slen, "lo:SYM in a memory "
+                               "operand belongs to lea or a load or store "
+                               "with a 16-bit offset");
+        } else {
+            return refuse_form(f, stmt, sp, slen, "lo:SYM (%lo) is addi's "
+                               "operand, or a [aB] offset's");
+        }
+        snprintf(f->encode, sizeof f->encode, "%.*s0%s", (int)(o - stmt), stmt,
+                 c);
+        f->nsites = 1;
+        return 1;
+    }
+    /* a conditional branch or a loop to a symbol */
+    {
+        static const char *const brs[] = { "jeq", "jne", "jlt", "jlt.u",
+            "jge", "jge.u", "jeq.a", "jne.a", "jz.a", "jnz.a", "jz", "jnz",
+            "loop", NULL };
+        for (int k = 0; brs[k]; k++)
+            if (teq(mt, brs[k])) {
+                const char *last = p;
+                for (c = p; *c; c++)
+                    if (*c == ',')
+                        last = c + 1;
+                while (isspace((unsigned char)*last)) last++;
+                n = sym_at(last, &slen, &add);
+                if (!n)
+                    return 0;
+                return refuse_form(f, stmt, last, slen, "a conditional branch "
+                                   "or loop reaches only a label of its own "
+                                   "section: its 15-bit displacement "
+                                   "(R_TRICORE_15REL) is not one embld "
+                                   "applies; branch over a j");
+            }
     }
     return 0;
 }

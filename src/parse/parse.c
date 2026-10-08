@@ -943,8 +943,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                            target_get() == TARGET_MIPS32) &&
                          !(attr_is(name, "naked") &&
                            target_get() != TARGET_X86_64 &&
-                           target_get() != TARGET_AARCH64 &&
-                           target_get() != TARGET_TRICORE) &&
+                           target_get() != TARGET_AARCH64) &&
                          !((attr_is(name, "interrupt") ||
                             attr_is(name, "signal")) &&
                            target_get() == TARGET_AVR))
