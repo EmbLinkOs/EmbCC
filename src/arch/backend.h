@@ -218,4 +218,42 @@ void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
                         struct fsite **fs, int *nfs, int want_debug,
                         int optimize, int no_sse, int regalloc);
 
+/* ---- the backend registry (src/arch/backends.c) -------------------------
+ *
+ * One row per enum target_arch: what the driver needs to know about the
+ * code generator behind it. Adding a backend is adding its row. */
+
+/* Whether a C++ unit with exceptions can be compiled: the target writes no
+ * unwind tables (NONE), or none big-endian (BIG_ENDIAN: MIPS64's
+ * little-endian objects carry none and need none -- see cxx.md). */
+enum { BACKEND_CXX_EXC_OK = 0, BACKEND_CXX_EXC_NONE = 1,
+       BACKEND_CXX_EXC_BIG_ENDIAN = 2 };
+
+struct backend_desc {
+    /* The family's name in messages ("RX", "PowerPC"). */
+    const char *family;
+    /* The code generator: lowers a unit of EmbIR to machine code. */
+    void (*codegen)(struct ir_unit *iu, struct code *text,
+                    struct extcall **ext, int *next,
+                    struct strsite **strs, int *nstrs,
+                    struct gsite **gs, int *ngs,
+                    struct fsite **fs, int *nfs, int want_debug,
+                    int optimize, int no_sse, int regalloc);
+    /* The register allocator runs at -O0 too, for each expression's
+     * temporaries (EMBCC_O0_NORA=1 turns it off, for bisecting). */
+    int ra_at_o0;
+    /* Does this IR instruction become a runtime-helper call here? The
+     * optimizer asks, to keep values out of caller-saved registers across
+     * one. NULL: none does (x86-64), or the backend answers otherwise. */
+    int (*op_calls_helper)(const struct ir_ins *i);
+    /* The unwind tables the target would need and EmbCC does not write,
+     * as a refusal names them ("RISC-V .eh_frame"); NULL when eh_emit
+     * writes them (x86-64, AArch64). */
+    const char *unwind_unwritten;
+    /* BACKEND_CXX_EXC_*: may a C++ unit use exceptions? */
+    int cxx_exceptions;
+};
+
+const struct backend_desc *backend_get(enum target_arch a);
+
 #endif

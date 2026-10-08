@@ -111,7 +111,7 @@ SRCS := \
 	src/elf/write.c \
 	src/macho/write.c \
 	src/coff/write.c \
-	src/arch/target.c src/arch/regalloc.c \
+	src/arch/target.c src/arch/backends.c src/arch/regalloc.c \
 	src/arch/code.c \
 	src/arch/predef.c \
 	src/arch/x86_64/irgen.c \

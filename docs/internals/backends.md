@@ -141,13 +141,16 @@ way that relocation type's linker reads it back.
    build fails until each is given), rows in `g_triples[]`, and the
    relocation mappings.
 2. A directory with `codegen.c`, `emit.c` and `irgen.c`, and a
-   `codegen_unit_*` entry point the driver calls.
-3. A predefined-macro table from `tools/gen-predef.sh` (below).
-4. An encoding referee for `emit.c` (see [Encoders and their
+   `codegen_unit_*` entry point.
+3. Its row in the backend registry, `src/arch/backends.c` (see [The
+   backend registry](#the-backend-registry)). The driver reads the row; it
+   has no per-target chain to extend.
+4. A predefined-macro table from `tools/gen-predef.sh` (below).
+5. An encoding referee for `emit.c` (see [Encoders and their
    referees](#encoders-and-their-referees)).
-5. A QEMU harness under `tests/harness/<arch>/`, and the target in the
+6. A QEMU harness under `tests/harness/<arch>/`, and the target in the
    test suite. See [Testing](testing.md).
-6. A new source file also has to be added to the build lists, including
+7. A new source file also has to be added to the build lists, including
    `EMBLS_SRCS`; otherwise `make test` fails at its build step.
 
 ## Predefined macros
@@ -203,12 +206,38 @@ generated tables cannot know:
 `tools/gen-predef.sh --reference ARCH` when the reference compiler is
 installed.
 
+## The backend registry
+
+`src/arch/backends.c` has one row per `enum target_arch` (a `struct
+backend_desc`, declared in `backend.h`), holding what the driver needs to
+know about the code generator behind it:
+
+| Field | What it says |
+|---|---|
+| `family` | The family's name in messages (`"RX"`, `"PowerPC"`) |
+| `codegen` | The code generator's entry point (below) |
+| `ra_at_o0` | The register allocator also runs at `-O0`, for each expression's temporaries (`EMBCC_O0_NORA=1` turns it off) |
+| `op_calls_helper` | Whether an IR instruction becomes a runtime-helper call on this target, which the optimizer asks; `NULL` for none |
+| `unwind_unwritten` | The unwind tables the target needs and EmbCC does not write, as a refusal names them (`"RISC-V .eh_frame"`); `NULL` where `eh_emit` writes them |
+| `cxx_exceptions` | Whether a C++ unit may use exceptions: `BACKEND_CXX_EXC_OK`, `_NONE`, or `_BIG_ENDIAN` (MIPS64) |
+
+`backend_get(arch)` returns the row, and stops the compiler if a target
+has none. The driver selects the code generator, the helper predicate
+and the unwind and exception refusals from the row. Before the registry,
+these were chains of `if (ta == TARGET_...)` in the driver, nine of them
+for the unwind refusals alone, and a new backend had to extend each one.
+More of the driver's per-target knowledge moves into the row as the
+redesign proceeds ([Redesign](redesign.md)).
+
 ## The backend contract
 
 `backend.h` declares one entry point per backend, all with the same
 signature: `codegen_unit` (x86-64), `codegen_unit_arm64`,
 `codegen_unit_thumb`, `codegen_unit_riscv` (both widths),
-`codegen_unit_mips` and `codegen_unit_avr`. Each takes the optimized `struct ir_unit` and
+`codegen_unit_mips` (both widths), `codegen_unit_loongarch`,
+`codegen_unit_tricore`, `codegen_unit_xtensa`, `codegen_unit_ppc`,
+`codegen_unit_rx`, `codegen_unit_sparc`, `codegen_unit_coldfire` and
+`codegen_unit_avr`. Each takes the optimized `struct ir_unit` and
 returns:
 
 - the unit's `.text` in a `struct code`, with each function's

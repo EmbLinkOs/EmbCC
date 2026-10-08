@@ -1642,34 +1642,14 @@ static int assemble_file(const char *in, const char *out)
  * compile a unit with no landing pad either way; see cxx.md.) */
 static int cxx_exceptions_unwritten(void)
 {
-    switch (target_get()) {
-    case TARGET_THUMB: case TARGET_RISCV32: case TARGET_MIPS32:
-    case TARGET_SPARC32: case TARGET_PPC32: case TARGET_COLDFIRE:
-    case TARGET_XTENSA: case TARGET_TRICORE: case TARGET_RX:
-    case TARGET_AVR:
-        return 1;
-    case TARGET_MIPS64:
-        return target_big_endian();
-    default:
-        return 0;
-    }
+    int c = backend_get(target_get())->cxx_exceptions;
+    return c == BACKEND_CXX_EXC_NONE ||
+           (c == BACKEND_CXX_EXC_BIG_ENDIAN && target_big_endian());
 }
 
 static const char *cxx_unwind_tables_name(void)
 {
-    switch (target_get()) {
-    case TARGET_THUMB:    return "ARM EHABI unwind tables (.ARM.exidx)";
-    case TARGET_RISCV32:  return "RISC-V .eh_frame";
-    case TARGET_MIPS32:
-    case TARGET_MIPS64:   return "MIPS .eh_frame";
-    case TARGET_SPARC32:  return "SPARC .eh_frame";
-    case TARGET_PPC32:    return "PowerPC .eh_frame";
-    case TARGET_COLDFIRE: return "ColdFire .eh_frame";
-    case TARGET_XTENSA:   return "Xtensa .eh_frame";
-    case TARGET_TRICORE:  return "TriCore .eh_frame";
-    case TARGET_RX:       return "RX .eh_frame";
-    default:              return "AVR .eh_frame";
-    }
+    return backend_get(target_get())->unwind_unwritten;
 }
 
 /* One .init_array/.fini_array section of the object: constructors
@@ -2075,66 +2055,19 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     struct fsite *fs;
     int next, nstrs, ngs, nfs;
     enum target_arch ta = target_get();
-    /* Which machine. Four backends behind this and five targets: RISC-V
-     * is ONE code generator for both widths, because the instruction set
-     * is the same at both and only the data model differs (D-016). */
-    if (ta == TARGET_AVR)
-        codegen_unit_avr(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                         &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                         opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
-    /* AVR, Thumb and RISC-V allocate at -O0 too, for the temporaries of
-     * each expression, every source variable pinned to its slot (the
-     * backends' g_a_o0 / g_t_o0 / g_rv_o0). EMBCC_O0_NORA=1 is the old
-     * -O0, for bisecting a difference. */
-    else if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64)
-        codegen_unit_riscv(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                           opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
-    else if (ta == TARGET_XTENSA)
-        codegen_unit_xtensa(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                            &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                            opt_level >= 1);
-    else if (ta == TARGET_RX)
-        codegen_unit_rx(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                        &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                        opt_level >= 1);
-    else if (ta == TARGET_MIPS32 || ta == TARGET_MIPS64)
-        codegen_unit_mips(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                          &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                          opt_level >= 1);
-    else if (ta == TARGET_LOONGARCH64)
-        codegen_unit_loongarch(iu, &text, &ext, &next, &strs, &nstrs, &gs,
-                               &ngs, &fs, &nfs, want_debug, opt_level >= 1,
-                               no_sse,
-                               opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
-    else if (ta == TARGET_TRICORE)
-        codegen_unit_tricore(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                             &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                             opt_level >= 1);
-    else if (ta == TARGET_PPC32)
-        codegen_unit_ppc(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                         &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                         opt_level >= 1);
-    else if (ta == TARGET_SPARC32)
-        codegen_unit_sparc(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                           opt_level >= 1);
-    else if (ta == TARGET_COLDFIRE)
-        codegen_unit_coldfire(iu, &text, &ext, &next, &strs, &nstrs, &gs,
-                              &ngs, &fs, &nfs, want_debug, opt_level >= 1,
-                              no_sse, opt_level >= 1);
-    else if (ta == TARGET_THUMB)
-        codegen_unit_thumb(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                           opt_level >= 1 || !getenv("EMBCC_O0_NORA"));
-    else if (ta == TARGET_AARCH64)
-        codegen_unit_arm64(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                           &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                           opt_level >= 1);
-    else
-        codegen_unit(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs,
-                     &fs, &nfs, want_debug, opt_level >= 1, no_sse,
-                     opt_level >= 1);
+    /* Which machine: the registry's row (src/arch/backends.c). RISC-V is
+     * ONE code generator for both widths, because the instruction set is
+     * the same at both and only the data model differs (D-016), and so is
+     * MIPS. Backends whose ra_at_o0 is set allocate at -O0 too, for each
+     * expression's temporaries, every source variable pinned to its slot;
+     * EMBCC_O0_NORA=1 is the old -O0, for bisecting a difference. */
+    {
+        const struct backend_desc *bd = backend_get(ta);
+        bd->codegen(iu, &text, &ext, &next, &strs, &nstrs, &gs, &ngs, &fs,
+                    &nfs, want_debug, opt_level >= 1, no_sse,
+                    opt_level >= 1 ||
+                    (bd->ra_at_o0 && !getenv("EMBCC_O0_NORA")));
+    }
     time_mark("code generation");
     resolve_label_data(u);
 
@@ -2609,66 +2542,21 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * x86-64 CIE into a RISC-V object, and to be refused on MIPS64, which
      * stopped every C++ unit there. An explicit request, or exceptions,
      * is refused by name below. */
-    if (unwind && ta != TARGET_X86_64 && ta != TARGET_AARCH64 && lang_cxx &&
-        want_unwind < 0 && !want_exceptions)
+    const char *unwritten = backend_get(ta)->unwind_unwritten;
+    if (unwind && unwritten && lang_cxx && want_unwind < 0 && !want_exceptions)
         unwind = 0;
-    /* The tables eh_emit writes are x86-64's and AArch64's layout, with a
-     * PC-relative relocation MIPS's REL objects have no type for. */
-    if (unwind && ta == TARGET_SPARC32)
+    /* An explicit request, or C++ with exceptions, where the tables are
+     * not written: refused by name, naming the tables (the registry's
+     * row). eh_emit would write an x86-64 CIE into the object. */
+    if (unwind && unwritten)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
                             "%s yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no SPARC .eh_frame",
-                   target_triple_now());
-    if (unwind && (ta == TARGET_MIPS32 || ta == TARGET_MIPS64 ||
-                   ta == TARGET_PPC32 || ta == TARGET_COLDFIRE))
-        diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "%s yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no %s .eh_frame",
-                   target_triple_now(),
-                   ta == TARGET_PPC32 ? "PowerPC"
-                   : ta == TARGET_COLDFIRE ? "ColdFire" : "MIPS");
-    if (unwind && ta == TARGET_LOONGARCH64)
-        diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "%s yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions, and "
-                            "C++ without -fno-exceptions): EmbCC writes no "
-                            "LoongArch .eh_frame",
-                   target_triple_now());
-    /* 32-bit ARM unwinds through EHABI's .ARM.exidx besides. (A C++ unit
-     * with exceptions is refused before this, by name.) */
-    if (unwind && (ta == TARGET_THUMB || ta == TARGET_RISCV32 ||
-                   ta == TARGET_RISCV64))
-        diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "%s yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions): "
+                            "-fasynchronous-unwind-tables, -fexceptions%s): "
                             "EmbCC writes no %s",
-                   target_triple_now(), ta == TARGET_THUMB
-                   ? "ARM unwind tables (.ARM.exidx)" : "RISC-V .eh_frame");
-    if (unwind && ta == TARGET_TRICORE)
-        diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "tricore-none-elf yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no TriCore .eh_frame");
-    if (unwind && ta == TARGET_XTENSA)
-        diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "xtensa-none-elf yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no Xtensa .eh_frame");
-    if (unwind && ta == TARGET_RX)
-        diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "rx-none-elf yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes no RX .eh_frame");
-    /* ...and any target not named above (AVR): eh_emit would write an
-     * x86-64 CIE into its object */
-    if (unwind && ta != TARGET_X86_64 && ta != TARGET_AARCH64)
-        diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "%s yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions): "
-                            "EmbCC writes .eh_frame for x86-64 and AArch64 "
-                            "only", target_triple_now());
+                   target_triple_now(),
+                   lang_cxx && want_exceptions
+                       ? ", and C++ without -fno-exceptions" : "",
+                   unwritten);
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
 
@@ -4642,18 +4530,7 @@ int main(int argc, char **argv)
          * optimizer asks the encoder which constants an instruction can
          * carry (thumb_imm_foldable) long before code generation. */
         t_isa_a32 = target_arm_a32();
-        target_set_calls_helper(a == TARGET_THUMB ? t_op_calls_helper
-                              : a == TARGET_RISCV32 || a == TARGET_RISCV64 ? rv_op_calls_helper
-                              : a == TARGET_MIPS32 || a == TARGET_MIPS64
-                                ? mips_op_calls_helper
-                              : a == TARGET_LOONGARCH64 ? la_op_calls_helper
-                              : a == TARGET_TRICORE ? tc_op_calls_helper
-                              : a == TARGET_XTENSA ? xtensa_op_calls_helper
-                              : a == TARGET_PPC32 ? ppc_op_calls_helper
-                              : a == TARGET_RX ? rx_op_calls_helper
-                              : a == TARGET_SPARC32 ? sparc_op_calls_helper
-                              : a == TARGET_COLDFIRE ? cf_op_calls_helper
-                              : a == TARGET_AARCH64 ? a64_op_calls_helper : NULL);
+        target_set_calls_helper(backend_get(a)->op_calls_helper);
         /* the MIPS encoder's byte order, for the code generator and the
          * inline and file-scope assemblers alike */
         mips_set_big_endian(target_big_endian());
