@@ -213,12 +213,17 @@ compiler. Its roadmap:
 4. **Throughout:** EmbSim phases 2-4, and compiler feature work
    (`_Float16`, `asm goto`, C++ exceptions on embedded targets).
 
-## Decisions needed
+## Decisions (2026-10-08)
 
-1. The layout above (or changes to it).
-2. The product name: keep "EmbCC" plus "the Emb toolchain", or a new
-   name.
-3. The default target. Today it is `x86_64-elf`, which EmbLinkOS relies
-   on. The proposal keeps it, and has the documentation always name
-   `--target`. The alternative is to require `--target` for
-   cross-compiling and default to the host.
+1. **Layout:** approved as proposed. The move happens once #116 and
+   `embsim-gdb` have merged.
+2. **Name:** EmbCC stays the compiler's name, and the suite is "the Emb
+   toolchain". The binaries keep their `emb*` names.
+3. **Default target:** the host, as with gcc and clang. Plain `embcc
+   file.c` will build for the machine it runs on, and cross-compiling
+   names `--target`. This lands with the test suite's update, and only
+   after EmbLinkOS stops relying on the old default. EmbLinkOS's
+   Makefile calls `$(HOST_EMBCC) -c ...` with no `--target`, so it
+   needs `--target=x86_64-elf` there, or `EMBCC_DEFAULT_TARGET=x86_64-elf`
+   in its environment, which EmbCC already honours. That one-line change
+   is EmbLinkOS's, made on its side.
