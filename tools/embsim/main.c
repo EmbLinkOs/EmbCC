@@ -1,15 +1,17 @@
 /* embsim -- an instruction-set simulator: run a firmware image without a
  * board.
  *
- * It runs an ELF image the way the part does -- a Cortex-M or a RISC-V
- * core -- on a model of one of the boards QEMU models, so an image built
- * for QEMU runs unchanged, and QEMU referees the simulator:
- * tests/golden/embsim.sh and embsim-riscv.sh run the exec corpus on
- * both, and the output and the instruction count must be the same. It
+ * It runs an ELF image the way the part does -- a Cortex-M, a RISC-V
+ * core or an AVR -- on a model of one of the boards QEMU models, so an
+ * image built for QEMU runs unchanged, and QEMU referees the simulator:
+ * tests/golden/embsim.sh, embsim-riscv.sh and embsim-avr.sh run the exec
+ * corpus on both, and the output and the instruction count must be the
+ * same. It
  * counts the instructions it executes and estimates their cycles with
- * the table tools/bench uses (tools/bench/cost.h); the timers (SysTick,
- * DWT's CYCCNT, the CLINT's mtime) advance by that estimate, so a timed
- * run gives the same answer every time.
+ * the table tools/bench uses (tools/bench/cost.h) -- on the AVR, exactly
+ * -- and the timers (SysTick, DWT's CYCCNT, the CLINT's mtime, the AVR's
+ * Timer/Counter1) advance by it, so a timed run gives the same answer
+ * every time.
  *
  * This file is the command line. sim.h says how the rest is put
  * together; docs/manual/tools/embsim.md is the user's reference and
@@ -41,9 +43,9 @@ static void usage(void)
           "              [--stats] [--count FILE] [--trace FILE]\n"
           "              [--no-semihosting] [--gdb [HOST:]PORT [--gdb-wait]]\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
-          "        mps2-an500, microbit, virt (RISC-V)\n"
+          "        mps2-an500, microbit, virt (RISC-V), uno (AVR)\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7;\n"
-          "        rv32, rv64 (virt's default: the image's width)\n",
+          "        rv32, rv64 (virt's default: the image's width); atmega328p\n",
           stderr);
     exit(2);
 }

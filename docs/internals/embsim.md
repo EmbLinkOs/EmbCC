@@ -36,6 +36,9 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `riscv-fpu.c` | F and D, on IEEE arithmetic of its own |
 | `clint.c` | the RISC-V core's CLINT: msip, mtimecmp, mtime |
 | `virt-rom.c`, `sifive-test.c`, `uart-16550.c` | virt's reset ROM, test device and UART |
+| `avr.h` | the AVR core's state, and the interrupt-source interface of its peripherals |
+| `avr.c` | the AVR core: the instruction set, SREG, the data space, interrupts, SLEEP, step, reset, its CPU interface |
+| `avr-io.c`, `avr-usart.c`, `avr-timer16.c` | the ATmega328P's I/O registers, USART0, Timer/Counter1 |
 | `devices.h` | the create functions `boards.c` builds boards from |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
@@ -172,6 +175,21 @@ is expanded (`rvc_expand`) to the instruction it stands for and run as
 that. A debugger's watchpoint raises `TRAP_WATCH` before the access: the
 instruction is not run and not counted, and gdb steps it.
 
+The AVR core's is `struct avr_state` (`avr.h`). Its program counter
+counts words; `pc` in the CPU interface is the byte address, as gdb
+has it. The data space is on the bus at `AVR_DATA` (0x800000) plus the
+data address: the core answers for the registers and SP and SREG itself
+(and puts them on the bus for a debugger's accesses), and the rest is
+the board's. A peripheral's interrupt is a source,
+`avr_irq_source(s, vector, pending, ack, ctx)`: the core asks `pending`
+which vectors are requested, and `ack` is the hardware clearing the
+flag as the vector is entered. A peripheral calls `avr_irq_changed`
+when one of its flags or enables changes, and the core takes the lowest
+vector requested. The exact cycles are the table (`avr_cost`) plus what
+`step` adds for a taken branch, a skip and an interrupt's entry; an
+instruction a skip passes over goes into `s->skipped` (a core that
+skips sets `s->count_skips`, and --count's file gets a third line).
+
 ## Adding a peripheral
 
 1. Write `tools/embsim/NAME.c`: a context struct, the `struct dev_ops`
@@ -260,8 +278,11 @@ or with its own file for the six functions of `net.h`.
   RV32 and RV64, soft- and hard-float, 2425 programs to the instruction
   and the cycle; `rv-isa.c`'s instruction edges against QEMU; the ends
   of a run.
+- `tests/golden/embsim-avr.sh`: the AVR core on uno: 580 corpus
+  programs to the instruction, `avr-isa`'s edges against QEMU,
+  `avr-cycles.S`'s cycles against the datasheet, the ends of a run.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
-  the Cortex-M and on RISC-V.
+  the Cortex-M, on RISC-V and on the AVR.
 - A change that must not change behaviour (a refactor, a speed-up)
   should also compare the binary before and after on every corpus image
   and every board: stdout, stderr with `--stats`, the exit status, the

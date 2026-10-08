@@ -1,9 +1,9 @@
 # embsim — run a firmware image without a board
 
 `embsim` runs a linked ELF image the way the part does: a Cortex-M
-(ARMv6-M, ARMv7-M) or a RISC-V core (RV32 and RV64, IMAFDC). It is ISO
-C with no dependencies, so it builds on any machine, including one
-without QEMU. It counts the instructions it executes and estimates the
+(ARMv6-M, ARMv7-M), a RISC-V core (RV32 and RV64, IMAFDC) or an AVR
+(the ATmega328P). It is ISO C with no dependencies, so it builds on any
+machine, including one without QEMU. It counts the instructions it executes and estimates the
 cycles they take, and gdb, lldb or embdbg can debug the image while it
 runs. This page is the command reference; how EmbSim is built inside,
 and how to add a core, a peripheral or a board, is
@@ -26,6 +26,10 @@ embsim fw.elf --board mps2-an386 --stats
 embcc --target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -O2 -c main.c
 embld -e _start -Ttext 0x80000000 -Tstack 0x80800000 boot.o io.o main.o -o fw.elf
 embsim fw.elf --board virt --stats
+
+embcc --target=avr -Os -c main.c
+embld -e __vectors -Ttext 0 -Tdata 0x100 boot.o io.o main.o librt.a -o fw.elf
+embsim fw.elf --board uno --stats
 ```
 
 ## The boards
@@ -41,17 +45,23 @@ built for QEMU runs unchanged.
 | `mps2-an500` | Cortex-M7 with FPv5 (double) | as `mps2-an385` | CMSDK |
 | `microbit` | Cortex-M0 | 256 KiB flash at 0, 16 KiB SRAM at `0x20000000` | nRF51 at `0x40002000` |
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
+| `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
 
 - `--cpu` runs another core on the board: `cortex-m0`, `cortex-m0plus`,
   `cortex-m3`, `cortex-m4` or `cortex-m7` on the Cortex-M boards; `rv32`
   or `rv64` on `virt`, which otherwise takes the image's width (an
-  ELFCLASS64 image is RV64).
+  ELFCLASS64 image is RV64); `atmega328p` on `uno`.
 - `--ram-size` changes the size of the SRAM at `0x20000000`, or of
   virt's RAM (the harness's QEMU runs give it `-m 8`, so
   `--ram-size 8M` is the same machine).
 - virt also has QEMU's reset ROM at `0x1000`, the SiFive test device at
   `0x100000` that ends a run, and the CLINT at `0x2000000`; the PLIC's
   space reads as zero and ignores writes.
+- On `uno` the AVR's data space is at `0x800000` on EmbSim's bus, as gdb
+  numbers it: the registers at `0x800000`, the I/O registers from
+  `0x800020`, the SRAM from `0x800100` (`--ram-size` resizes it), and
+  flash at 0. Timer/Counter1 is there too, and the other I/O registers
+  keep what is written.
 - A segment of the image outside the board's memory gets memory of its
   own, so a link script for a similar part still runs.
 - Flash on the lm3s6965 and the micro:bit ignores stores, as flash does.
@@ -138,6 +148,48 @@ built for QEMU runs unchanged.
   Another CSR, or a write to a read-only one, is an illegal
   instruction.
 
+## What it models: the AVR
+
+- **The instruction set.** The ATmega328P's: the classic AVR core with
+  the multiplies (MUL, MULS, MULSU, FMUL, FMULS, FMULSU), MOVW, LPM
+  Rd,Z and LPM Rd,Z+, and JMP and CALL; a 16-bit program counter, so a
+  call pushes two bytes (big-endian on the stack, as the part does).
+  SREG's H, S, V, N, Z and C are the instruction set manual's for every
+  instruction, SBC, SBCI and CPC leaving Z set only when it was. An
+  instruction the part does not have -- ELPM, EIJMP, EICALL, the
+  XMEGA's -- and SPM, which is not modelled, end the run as a lockup
+  that names it.
+- **Memory.** The register file, SP and SREG in the data space (LD from
+  address 30 reads r30); X, Y and Z with pre-decrement, post-increment
+  and displacement; program memory read by LPM. The program counter
+  wraps at 32 KiB, as the part's does.
+- **Reset.** The core starts at 0, the reset vector, with SP at RAMEND
+  (0x08FF) and SREG 0 (QEMU's starts with I set; the harness clears
+  SREG before it matters).
+- **Interrupts.** The vector table at 0, two words a vector; the lowest
+  vector requested is taken when I is set, with the return address
+  pushed, I cleared and the source's flag cleared; after SEI and after
+  RETI one more instruction runs first. USART0's data-register-empty and
+  transmit-complete, and Timer/Counter1's capture, compare A and B and
+  overflow, are the sources.
+- **SLEEP**, when SMCR.SE is set, waits for an interrupt: it skips ahead
+  to the device that will request one, and ends the run when nothing
+  can (or I is clear). Every sleep mode is treated as Idle. BREAK is a
+  NOP, as on a part whose on-chip debugging is off; WDR is a NOP.
+- **USART0** sends what is written to UDR0 when the transmitter is on
+  (UCSR0B.TXEN0); UDRE0 is always set, and TXC0 is set at once.
+- **Timer/Counter1** counts the core's cycles through its prescaler,
+  which runs free as the part's does, in every waveform mode: normal,
+  CTC with OCR1A or ICR1 as TOP, fast PWM and the dual-slope modes,
+  setting TOV1, OCF1A, OCF1B and ICF1 where the datasheet says; a flag
+  is cleared by writing it a one, or by entering its vector; the 16-bit
+  registers go through TEMP.
+- **Cycles are exact.** Each instruction takes the datasheet's cycles
+  ("Instruction Set Summary"): a taken branch one more, a skip one more
+  over a one-word instruction and two over a two-word one, an
+  interrupt's entry four, and four more when it wakes SLEEP. The part
+  has no wait states, so this is the count the silicon takes.
+
 ## Counting
 
 Each instruction gets the cost in `tools/bench/cost.h`, the table
@@ -151,20 +203,24 @@ taken branch or jump.
 - `--count FILE` writes them as two lines, the format of the bench's
   QEMU plugin, so either can feed `tools/bench`.
 
-The estimate is a model, not a cycle-accurate core: there are no wait
-states and no pipeline stalls. It charges the things a compiler chooses
-between.
+On the Cortex-M and RISC-V the estimate is a model, not a
+cycle-accurate core: there are no wait states and no pipeline stalls. It
+charges the things a compiler chooses between. On the AVR it is the
+datasheet's count (above). On the AVR `--count`'s file has a third
+line: the instructions a skip passed over, which are not run and are
+not in the count (QEMU's plugin counts them; see below).
 
 `--trace FILE` writes the address and halfwords of every instruction
 executed (`-` for stderr); on RISC-V, the instruction as one word, or
-as one halfword for a compressed one.
+as one halfword for a compressed one; on the AVR, its one or two
+words, at the byte address.
 
 ## Output, and the end of a run
 
 The board's UART writes to stdout. The UART must be enabled as on the
-part: CMSDK's CTRL, and the nRF51's ENABLE and STARTTX. The NS16550A
-sends what is written to THR, and its LSR always says the transmitter
-is empty.
+part: CMSDK's CTRL, the nRF51's ENABLE and STARTTX, the AVR's TXEN0.
+The NS16550A sends what is written to THR, and its LSR always says the
+transmitter is empty.
 
 On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 `--no-semihosting` is given. It handles:
@@ -180,8 +236,9 @@ On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 | the image stores 0x3333 to the test device | the upper halfword stored |
 | the image requests a reset (AIRCR.SYSRESETREQ) | 0 |
 | a branch to itself, or a WFI, that no exception or interrupt can interrupt | 0 |
+| an AVR SLEEP that nothing can wake (the AVR harness ends in such a loop) | 0 |
 | the output contains `--until`'s string | 0 |
-| the core locks up (a RISC-V trap whose vector cannot be fetched) | 3 |
+| the core locks up (a RISC-V trap whose vector cannot be fetched; an AVR instruction the part does not have) | 3 |
 | `--max-insns` instructions have run | 4 |
 | the image cannot be loaded, or an option is wrong | 2 |
 
@@ -215,11 +272,16 @@ machine on either, and a script written for one runs on the other:
   CSRs EmbSim has (fflags, frm and fcsr among them), each numbered as
   QEMU's stub numbers it (a CSR is 66 plus its number). QEMU's
   description lists the supervisor's and hypervisor's CSRs too, which
-  EmbSim does not have, so `info all-registers` differs there.
+  EmbSim does not have, so `info all-registers` differs there. On the
+  AVR: r0 to r31, SREG, SP and the PC (a byte address), and memory as
+  gdb's AVR target numbers it -- flash at 0, the data space at
+  `0x800000`.
 - **Breakpoints**, software and hardware alike. The server keeps them;
   it never writes into the image, so they work in flash.
 - **Watchpoints**: `watch`, `rwatch` and `awatch`. As on QEMU, the
-  target stops before the access, and gdb steps it.
+  target stops before the access, and gdb steps it (on the AVR, after
+  it, as gdb's AVR target expects; QEMU's AVR stub has no working
+  watchpoints to referee them against).
 - **Stepping**: `stepi` runs one instruction. An exception that is
   pending is taken first, so a step can stop at a handler's first
   instruction.
@@ -271,6 +333,17 @@ On the Cortex-M:
 
 Each instruction among these is a UsageFault, so a run that needs one
 stops at a named fault rather than computing something wrong.
+
+On the AVR:
+- Timer/Counter0 and 2, SPI, TWI, the ADC, the analog comparator, EEPROM,
+  the watchdog, the external and pin-change interrupts, the USART's
+  receiver, and the power reduction register. Their registers keep what
+  is written (on QEMU they read as zero), and their interrupts never
+  come.
+- The output-compare pins and input capture from a pin.
+- Self-programming (SPM) and the boot section; the other AVR parts (the
+  ATmega2560's 3-byte program counter, ELPM and RAMPZ).
+- The sleep modes beyond Idle.
 
 On RISC-V:
 - Supervisor mode and virtual memory, and the hypervisor.
@@ -337,3 +410,19 @@ values with its flags. And the ends of a run: the test device, the
 lockup, the idle loop and WFI, the timer interrupt waking WFI.
 `embsim-gdb.sh` runs its gdb session on RV32 and RV64 against QEMU's
 virt stub too.
+
+**AVR.** `tests/golden/embsim-avr.sh` does the same on QEMU's uno: the
+exec corpus at -O0, -O2 and -Os, every program that builds for the AVR
+without libc (580), with the output and the instruction count QEMU
+gives. QEMU's AVR runs a block again from a data access it must redo,
+so the plugin counts its instructions one at a time, skipping a repeat
+of the same instruction (which only a jump to itself does honestly);
+and it counts an instruction a skip passes over, which EmbSim counts
+apart. QEMU has no cycle model, so `tests/golden/embsim/avr-cycles.S`
+holds the cycles to the datasheet: each of its lines says what it
+takes, and EmbSim's count must add up to it. `avr-isa.S` and
+`avr-isa.c` print the edges -- SREG after every arithmetic instruction
+over a table of operands, the multiplies, the 16-bit forms, the skips,
+the branches, the addressing modes, LPM, Timer/Counter1's interrupt --
+which must be QEMU's. And `embsim-gdb.sh` runs its gdb session on the
+AVR against QEMU's uno stub.
