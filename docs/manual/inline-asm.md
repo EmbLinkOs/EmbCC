@@ -1321,6 +1321,7 @@ not implement, and `lwu` is encoded as `lw`.
 | Memory protection | `pmpcfg0`, `pmpcfg1` (RV32 only), `pmpaddr0`, `pmpaddr1` |
 | Supervisor | `sstatus`, `sie`, `stvec`, `scounteren`, `sscratch`, `sepc`, `scause`, `stval`, `sip`, `satp` |
 | Counters | `cycle`, `time`, `instret`, and `cycleh`, `timeh`, `instreth` (RV32 only) |
+| Machine counters | `mcycle`, `minstret`, `mcountinhibit`, and `mcycleh`, `minstreth` (RV32 only) |
 
 An RV32-only CSR at RV64 is refused with `CSR "cycleh" exists only on RV32`,
 and an unknown name or a number out of range with

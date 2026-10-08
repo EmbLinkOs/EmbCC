@@ -89,6 +89,11 @@ static const struct csr csrs[] = {
     { "scounteren", 0x106, 0 },
     { "sscratch", 0x140, 0 }, { "sepc",  0x141, 0 }, { "scause", 0x142, 0 },
     { "stval",    0x143, 0 }, { "sip",   0x144, 0 }, { "satp",   0x180, 0 },
+    /* machine counters: what a trace's clock or a cycle count reads in
+     * machine mode, where cycle/instret need mcounteren to be readable */
+    { "mcycle", 0xb00, 0 }, { "minstret", 0xb02, 0 },
+    { "mcycleh", 0xb80, 1 }, { "minstreth", 0xb82, 1 },
+    { "mcountinhibit", 0x320, 0 },
     /* unprivileged counters, which a timing loop reads */
     { "cycle", 0xc00, 0 }, { "time", 0xc01, 0 }, { "instret", 0xc02, 0 },
     { "cycleh", 0xc80, 1 }, { "timeh", 0xc81, 1 }, { "instreth", 0xc82, 1 },
