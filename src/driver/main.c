@@ -1433,7 +1433,8 @@ static int blocks_by_gas(void)
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
            a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32 ||
            a == TARGET_LOONGARCH64 || a == TARGET_MIPS64 ||
-           a == TARGET_XTENSA || a == TARGET_TRICORE || a == TARGET_RX;
+           a == TARGET_XTENSA || a == TARGET_TRICORE || a == TARGET_RX ||
+           a == TARGET_COLDFIRE;
 }
 
 /* One asm statement of a naked function, its operands written in: only
@@ -1470,8 +1471,10 @@ static void naked_asm_text(struct outbuf *b, const struct func *f,
             continue;
         }
         /* %c0: the constant without a prefix -- how every operand here is
-         * written, except on RX, whose GCC prints an immediate as `#5` */
-        int bare = *p == 'c' || target_get() != TARGET_RX;
+         * written, except on RX and ColdFire, whose GCCs print an immediate
+         * as `#5` */
+        int bare = *p == 'c' || (target_get() != TARGET_RX &&
+                                 target_get() != TARGET_COLDFIRE);
         if (*p == 'c')
             p++;
         int k = -1;
@@ -1820,10 +1823,6 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * written as data assembles, and one written with mnemonics is
          * refused by name instead of quietly emitting x86 bytes. The
          * embedded targets have an assembler of their own. */
-        if (target_get() == TARGET_COLDFIRE)
-            diag_fatal(NULL, 0, "file-scope asm is not supported for %s "
-                       "yet: EmbCC has no ColdFire assembler",
-                       target_triple_now());
         if (blocks_by_gas()) {
             if (gas_assemble_block(ta))
                 return 1;

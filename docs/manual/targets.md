@@ -1532,6 +1532,18 @@ every later core), big-endian, soft float: GCC's `m68k-elf` with
 not yet checked against a real m68k compiler, are in
 [the ColdFire plan](../internals/coldfire-plan.md).
 
+EmbCC assembles ColdFire itself, in GNU as's Motorola syntax (`%` optional,
+MIT's `An@(d)` accepted): inline `__asm__` with GCC's operand constraints,
+naked functions, file-scope blocks and `.s`/`.S` files, through one
+assembler for the MCF5208's ISA_A+ -- tests/golden/coldfire-asm.sh reads
+every form back with QEMU's m68k disassembler, assembles FreeRTOS's
+ColdFire V2 port, and runs a program that uses it against a host model.
+Branches relax to .s or .w (the MCF5208 has no 32-bit branch); a `bra` or
+`bsr` to a symbol defined elsewhere is a `jmp`/`jsr` to its address
+(`R_68K_32`). The vocabulary, the constraints and what is refused are in
+[Inline assembly](inline-asm.md#coldfire) and
+[embas](tools/embas.md#coldfire-specifics).
+
 ### Triples
 
 | Triple | Accepted aliases | ISA | ABI |
@@ -2116,8 +2128,8 @@ the entry.
 | a `.s` or `.S` file | `no assembly-file support for sparc-none-elf yet: EmbCC has no SPARC assembler` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
-| inline asm | `inline assembly is not supported for m68k-none-elf yet: EmbCC has no ColdFire assembler` |
-| file-scope asm, `.s` and `.S` files | `file-scope asm is not supported for m68k-none-elf yet` / `no assembly-file support` |
+| a rotate, `dbcc`, `exg`, `cas`, BCD and the FPU's instructions in asm | `rol.l: ColdFire has no rotate` (and so on, by name) |
+| ISA_B's `mvs`, `mvz`, `mov3q`, `sats`, and a 32-bit branch (`bra.l`) | `mvs.b is an ISA_B instruction, which the MCF5208 (ISA_A+) does not have: it traps as illegal there` |
 | a frame beyond 32 KiB | `a stack frame larger than 32 KiB` |
 | unwind tables | `unwind tables are not supported for m68k-none-elf yet` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for m68k-none-elf yet: EmbCC writes no ColdFire .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |

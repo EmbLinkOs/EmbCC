@@ -220,6 +220,7 @@ commits say:
 | `tests/golden/coldfire-exec.sh` | `tests/exec/*.c` on the mcf5208evb at -O0, -O1, -O2 and -Os: 200 of 200 at every level, 22 of them judged against clang's big-endian MIPS32 status for an LP64 or little-endian assumption, 1 against the value the m68k's 2-byte alignment gives, 16 not applicable |
 | `tests/golden/coldfire-abi.sh` | caller and callee in separate units, -O0/-O2 in all four pairings, against the host's output: the shared embedded programs and the m68k-specific ones |
 | `tests/golden/coldfire-refuse.sh` | the triples, the object header and relocations, the accepted and refused options and constructs, EmbLD's refusals |
+| `tests/golden/coldfire-asm.sh` | the assembler: 4137 statements in every spelling read back by QEMU's m68k disassembler, the same bytes from a .s file, FreeRTOS's ColdFire V2 portasm.S, the symbol forms' relocations, inline asm, a naked function, a block and a .S file on the board at -O0..-Os against a host model, 61 statements, 11 templates and 5 files refused by name |
 | `tests/golden/libc-embedded.sh` | lib/libc on the board equals x86-64's at -O0, -O2, -Os |
 | `tests/golden/debug-embedded.sh` | `-g`: `llvm-dwarfdump --verify`, the frame base (breg14, a6), address size, pointer DIEs |
 
@@ -235,13 +236,32 @@ Known gaps, in the order they matter:
    (written by hand) and `wchar_t`'s spelling are GCC's m68k port as
    remembered. `coldfire-abi.sh` makes the convention one convention;
    only m68k-elf-gcc can say it is GCC's.
-2. **Refused by name:** inline asm, file-scope asm and `.s` files (there
-   is no ColdFire assembler), 8-byte atomics, a frame beyond 32 KiB,
-   unwind tables, C++ (as on every ILP32 target), and a scalar local
-   aligned beyond the 4-byte stack.
+2. **Refused by name:** a frame beyond 32 KiB, unwind tables, C++ (as on
+   every ILP32 target), and a scalar local aligned beyond the 4-byte
+   stack. (Inline asm, file-scope asm and `.s` files were, until the
+   assembler below; 8-byte atomics are now libatomic calls.)
 3. **Code size**: every function links a6 and a 64-bit value always lives
    in its frame slot (there is no pair allocation); constants and
    addresses are 6-byte operands where GCC would use shorter forms; a
    64-bit shift by most constants is a call.
 4. ISA_A+ and ISA_B forms (`mvs`/`mvz`, `mov3q`, `byterev`, `cmp.b/.w`)
    are not used, so the code runs on every ColdFire core with a divider.
+
+## The assembler
+
+src/arch/coldfire/asm.c parses GNU as's Motorola syntax (the `%` optional,
+either case, MIT's `An@(d)` too) and encodes through emit.c's encoders,
+with new ones for what only an assembler writes: `rte`, `stop`, `tpf`, the
+moves of `%sr` (from an immediate), `%ccr` and `%usp`, `movec`, the bit
+instructions and `bsr.s`. It serves inline asm (coldfire/irgen.c
+substitutes `%d2`, `%a2`, `#5`, `(%a2)`, as GCC's m68k port prints them),
+file-scope blocks and naked functions, and `.s`/`.S` files through
+src/as/gas.c (`|` comments, `.align` in bytes, `.word` two bytes, nop
+padding, `.s`/`.w` branch relaxation). The MCF5208 -- QEMU's m5208 --
+traps on ISA_B's `mvs`/`mvz` and on 32-bit branches, so those are refused,
+and a `bra`/`bsr` to a symbol defined elsewhere is a `jmp`/`jsr` to its
+address. QEMU's disassembler is the referee (there is no m68k assembler
+here): every statement of the vocabulary reads back as written, and a
+program on the board matches a host model of the same computations.
+Operands avoid a1 (the lowering's own), a6 and a7; a callee-saved register
+an asm changes is saved by the prologue.

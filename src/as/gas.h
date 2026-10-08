@@ -106,6 +106,12 @@ struct gas_target {
     /* Code alignment's padding, GNU as's for this target; NULL for the
      * single nops do_align writes. */
     void (*fill)(struct code *c, long gap);
+    /* Is the statement a branch whose label, when this file defines it in
+     * the same section, is a displacement for the target to relax (RX,
+     * ColdFire)? Its symbol is relocated only when substitute() cannot
+     * resolve it; every other symbol form is relocated whoever defines
+     * it. NULL elsewhere. */
+    int (*is_transfer)(const char *stmt);
 };
 
 /* Assembles `in_path` into an ET_REL object at `out_path`, for the

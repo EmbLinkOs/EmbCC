@@ -405,7 +405,7 @@ label (`name:`).
 
 How a block is assembled depends on the target:
 
-- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, RX and AVR.** The block is read by the assembler
+- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, RX, ColdFire and AVR.** The block is read by the assembler
   that reads a `.s` file, so it holds the target's own instructions; see
   [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr).
 - **x86-64 and AArch64.** The block is read by a small fixed vocabulary
@@ -493,7 +493,7 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, RX, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
+| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, RX, ColdFire, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
 | AArch64 ELF | directives and data only; an instruction is refused (below) |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
@@ -1962,6 +1962,134 @@ static inline void set_usp(void *sp)
 }
 ```
 
+## ColdFire
+
+This section applies to `m68k-none-elf` (ColdFire ISA_A+, the MCF5208).
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `d`, `r`, `g` | a data register chosen by EmbCC |
+| `a` | an address register chosen by EmbCC |
+| `m` | an address register chosen by EmbCC, holding the address of the operand; it is written into the template as `(%aN)` |
+| `i`, `n`, `I`-`P` | the constant, written into the template as `#N`, as GCC's m68k port prints it |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Anything else, a non-constant `i` included, is refused with
+`asm constraint "b" is not valid for ColdFire`. An operand is one 32-bit
+register: a `long long` one is refused (`ColdFire asm operand 0 is 8
+bytes`), and so is an output narrower than a long in an address register,
+which ColdFire moves only whole. A chosen data register comes from `d0`,
+`d1`, then `d2`-`d7`, an address register from `a0`, then `a2`-`a5`,
+skipping registers listed as clobbers or named in the template; never
+`a1` (the lowering's own), `a6` (the frame pointer) or `a7` (the stack
+pointer). A register variable must be one of those
+(`register int x __asm__("d2")`); another is refused with `register
+variable bound to 'a1' is not supported for ColdFire asm (use d0-d7, a0 or
+a2-a5)`.
+
+### Modifiers
+
+None. `%N` prints the register (`%d2`), the constant (`#5`) or the memory
+operand (`(%a2)`); `%%` is a `%`, so a register the template names is
+written `%%d0` in extended asm (basic asm keeps its text: `%d0`). In a
+[naked function](#naked-functions) `%cN` prints a constant without its
+`#`.
+
+### Template syntax
+
+GNU as's Motorola syntax, as m68k-elf GCC writes it: registers `%d0`-`%d7`,
+`%a0`-`%a7`, `%fp` (`%a6`) and `%sp` (`%a7`) -- the `%` optional and either
+case, as GNU as takes them (`move.w SR,D7`) -- immediates `#expr`, and the
+effective addresses `(An)`, `(An)+`, `-(An)`, `(d,An)` or `d(An)`,
+`(d,An,Xi.l*s)`, `(d,%pc)`, `(xxx).w`, `(xxx).l` or a bare address, and
+MIT's `An@`, `An@+`, `An@-`, `An@(d)` and `An@(d,Xi:l:s)`. Sizes are
+suffixes; where an instruction has a choice and none is written it is
+`.w`, as GNU as defaults (`move`, `mulu`), and `.l` where ColdFire has
+only that (`add`). As GNU as does, `move.l #n,Dn` with n in -128..127 is
+`moveq` and `add`/`sub #1..8` is `addq`/`subq`. A branch target is `.+N`
+or `.-N` bytes from the branch, or a numeric label of the template (`1:`
+referred to as `1b` or `1f`); a branch without a size takes `.s` or `.w`,
+whichever reaches. Statements are separated by newlines or `;`; `|`
+starts a comment, as does `#` at the start of a line.
+
+A template cannot name a symbol: its bytes carry no relocation, so `jsr f`
+is refused (`"f" is a symbol, and inline asm cannot reach one`) -- pass
+the address as an `"a"` operand and `jsr (%0)`, or write the code in a
+`.S` file or a [file-scope block](#on-cortex-m-risc-v-mips32-and-avr),
+where symbols relocate.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `nop`, `rts`, `rte`, `tpf`, `halt`, `illegal` | none |
+| `move.b`, `move.w`, `move.l`, `movea.w`, `movea.l` | `<ea>,<ea>` in the pairs ColdFire encodes: no source with an extension word into an indexed or absolute destination, no indexed, absolute or immediate source into anything but a register, `(An)`, `(An)+` or `-(An)` |
+| `move.w %sr,Dn`; `move.w Dn,%sr`, `move.w #imm,%sr`; the same with `%ccr`; `move.l %usp,An`, `move.l An,%usp` | |
+| `moveq` | `#-128..127,Dn` |
+| `lea`, `pea`, `jmp`, `jsr` | a control address: `(An)`, `(d,An)`, `(d,An,Xi)`, absolute, `%pc`-relative |
+| `add`, `sub`, `and`, `or`, `cmp` (`.l`) | `<ea>,Dn`; `Dn,<mem>` (not `cmp`); `#imm,Dn`; `<ea>,An` (`add`, `sub`, `cmp`: `adda`/`suba`/`cmpa`) |
+| `eor.l` | `Dn,Dn`; `Dn,<mem>`; `#imm,Dn` |
+| `adda`, `suba`, `cmpa`; `addi`, `subi`, `andi`, `ori`, `eori`, `cmpi` (`.l`) | `<ea>,An`; `#imm,Dn` |
+| `addq`, `subq` (`.l`) | `#1..8,<ea>` |
+| `addx`, `subx` (`.l`) | `Dy,Dx` |
+| `neg`, `negx`, `not` (`.l`); `swap`; `ext.w`, `ext.l`, `extb.l` | `Dn` |
+| `clr`, `tst` (`.b`, `.w`, `.l`) | a data register or memory |
+| `asl`, `asr`, `lsl`, `lsr` (`.l`) | `#1..8,Dn`; `Dx,Dn` |
+| `muls`, `mulu` (`.w`, `.l`) | `<ea>,Dn` (`.l`: `Dn`, `(An)`, `(An)+`, `-(An)`, `(d16,An)`) |
+| `divs.l`, `divu.l`; `rems.l`, `remu.l` | `<ea>,Dq`; `<ea>,Dr:Dq` (the same modes as `mul.l`) |
+| `scc` (`st`, `sf`, `shi` ... `sle`, `shs`, `slo`) | `Dn` |
+| `bra`, `bsr`, `bcc` (`.s`, `.w`) | `TARGET`; `cc` one of `hi`, `ls`, `cc`/`hs`, `cs`/`lo`, `ne`, `eq`, `vc`, `vs`, `pl`, `mi`, `ge`, `lt`, `gt`, `le` |
+| `link` (`.w`); `unlk` | `An,#-32768..32767`; `An` |
+| `movem.l` | a register list (`%d2-%d7/%a2-%a5`) and `(An)` or `(d16,An)`, either way |
+| `movec` | `Rn,Rc`, Rc one of `%cacr`, `%asid`, `%acr0`-`%acr3`, `%mmubar`, `%vbr`, `%rombar`, `%rambar`, `%mbar` |
+| `trap #0..15`; `stop #imm16` | |
+| `btst`, `bchg`, `bclr`, `bset` | `#0..31,Dn` or `Dx,Dn`; `#0..7,<mem>` (`(An)`, `(An)+`, `-(An)`, `(d16,An)`) or `Dx,<mem>` |
+
+What ColdFire lacks is refused by name: `rol.l: ColdFire has no rotate`,
+`dbra: ColdFire has no dbcc`, `exg`, `cas`, `chk`, BCD, the FPU's
+instructions, the MAC's; ISA_B's `mvs`, `mvz`, `mov3q` and `sats` and a
+32-bit branch, on which the MCF5208 traps; a byte or word `add`
+(`add.w: ColdFire's arithmetic and logic are .l only`); a predecrement
+`movem`; anything else with `asm instruction "frob" is not in the ColdFire
+vocabulary`.
+
+### Callee-saved registers
+
+`d2`-`d7` and `a2`-`a6` are callee-saved. A template may change any
+register except `a6` and `a7` when it says so -- in its clobber list, or by
+naming the register in the template, which counts as a clobber here even
+when the list does not say it: a value live across the asm keeps out of
+every register the asm changes, and a callee-saved one among them is
+saved by the function's prologue (`movem.l`), as GCC saves it. A clobber
+list naming `%sp` or `%fp` is refused (`ColdFire asm clobbers 'sp', the
+stack pointer; EmbCC does not save it around an asm`). A call from a
+template (`jsr (%0)`) must list the caller-saved registers it changes,
+`d0`, `d1`, `a0` and `a1`, as with GCC.
+
+### Example
+
+```c
+static inline unsigned short irq_save(void)
+{
+    unsigned short sr;
+    __asm__ volatile("move.w %%sr,%0\n\tmove.w #0x2700,%%sr"
+                     : "=d"(sr) :: "memory");
+    return sr;
+}
+
+static inline void irq_restore(unsigned short sr)
+{
+    __asm__ volatile("move.w %0,%%sr" :: "d"(sr) : "memory");
+}
+
+static inline void set_vbr(void *table)
+{
+    __asm__ volatile("movec %0,%%vbr" :: "a"(table));
+}
+```
+
 ## AVR
 
 This section applies to the `avr` target (ATmega328P).
@@ -2162,7 +2290,7 @@ In summary, compared with GCC:
 - On x86-64 and RISC-V, `i` and `n` give a register, not an immediate.
 - Labels inside a function template are supported only for the x86-64
   `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa,
-  TriCore and RX;
+  TriCore, RX and ColdFire;
   elsewhere branches use numeric displacements.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at

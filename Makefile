@@ -201,6 +201,7 @@ SRCS := \
 	src/arch/coldfire/emit.c \
 	src/arch/coldfire/codegen.c \
 	src/arch/coldfire/irgen.c \
+	src/arch/coldfire/asm.c \
 	src/arch/coldfire/predef.c \
 	src/arch/coldfire/predef_cxx.c \
 	src/arch/avr/emit.c \
@@ -409,7 +410,8 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/rx/irgen.c src/arch/rx/emit.c \
              src/arch/rx/asm.c \
              src/arch/sparc/irgen.c src/arch/sparc/emit.c \
-             src/arch/coldfire/irgen.c \
+             src/arch/coldfire/irgen.c src/arch/coldfire/asm.c \
+             src/arch/coldfire/emit.c \
              src/arch/avr/asm.c src/arch/avr/irgen.c src/arch/avr/emit.c
 embls: $(EMBLS_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(EMBLS_SRCS)

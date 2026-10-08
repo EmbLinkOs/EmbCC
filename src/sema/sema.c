@@ -19,6 +19,7 @@
 #include "../arch/tricore/asm.h"
 #include "../arch/xtensa/asm.h"
 #include "../arch/rx/asm.h"
+#include "../arch/coldfire/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
@@ -4811,6 +4812,47 @@ static int asm_resolve_reg_rx(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* ColdFire: "d", "r" and "g" a data register (-2), "a" an address register
+ * and "m" one holding the lvalue's address, written `(%aN)` (-3), "i",
+ * "n" and GCC's m68k constant letters I-P a constant. A register variable
+ * must name a register irgen's pools hand out: d0-d7, a0 or a2-a5 -- not
+ * a1 (the lowering's own), a6 (the frame pointer) or a7 (the stack
+ * pointer). */
+static int asm_resolve_reg_coldfire(struct unit *u, struct stmt *s,
+                                    struct asm_operand *op, const char *c)
+{
+    int has_d = 0, has_a = 0, has_i = 0;
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = cfasm_gpr(rn, (int)strlen(rn));
+        if (r < 0 || r == 9 || r >= 14)
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "ColdFire asm (use d0-d7, a0 or a2-a5)", rn);
+        return r;
+    }
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'd') has_d = 1;
+        if (*p == 'a' || *p == 'm') has_a = 1;
+        if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+            has_i = 1;
+    }
+    if (has_i && !has_d && !has_a) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_d)
+        return -2;
+    if (has_a)
+        return -3;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -4839,6 +4881,8 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_xtensa(u, s, op, c);
     if (target_get() == TARGET_RX)
         return asm_resolve_reg_rx(u, s, op, c);
+    if (target_get() == TARGET_COLDFIRE)
+        return asm_resolve_reg_coldfire(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

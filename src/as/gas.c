@@ -24,6 +24,7 @@
 #include "../arch/xtensa/asm.h"
 #include "../arch/tricore/asm.h"
 #include "../arch/rx/asm.h"
+#include "../arch/coldfire/asm.h"
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
@@ -171,7 +172,8 @@ static void gerr_enc(struct gas *g, int pass, const char *what,
 {
     char buf[512];
     (void)pass;
-    if (g->tgt->machine != EM_XTENSA && g->tgt->machine != EM_RX) {
+    if (g->tgt->machine != EM_XTENSA && g->tgt->machine != EM_RX &&
+        g->tgt->machine != EM_68K) {
         gerr(g, "%s%s", what, msg);
         return;
     }
@@ -1323,11 +1325,11 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
      * GNU as relaxes it; `mov.l #sym, rd` is an address, and relocated
      * whoever defines the symbol -- unless .equ made it a number.) */
     if (g->tgt->symform && g->tgt->machine != EM_XTENSA &&
-        !(g->tgt->machine == EM_RX && rxasm_is_transfer(stmt))) {
+        !(g->tgt->is_transfer && g->tgt->is_transfer(stmt))) {
         struct asm_symform f;
         if (g->tgt->symform(stmt, &f) &&
-            !(g->tgt->machine == EM_RX && sym_find(g, stmt + f.sym_at,
-                                                   (size_t)f.sym_len) &&
+            !(g->tgt->is_transfer && sym_find(g, stmt + f.sym_at,
+                                              (size_t)f.sym_len) &&
               sym_find(g, stmt + f.sym_at, (size_t)f.sym_len)->sec ==
                   SEC_ABS)) {
             /* ...unless the operand is a NUMERIC LOCAL reference. `1b` and
@@ -3207,13 +3209,16 @@ static int directive(struct gas *g, char *p, int pass)
         if (DIR(".balign") || DIR(".balignw") || DIR(".balignl")) {
             if (v > 0) do_align(g, v);
         } else if (DIR(".align") && (g->tgt->machine == EM_XTENSA ||
-                                     g->tgt->machine == EM_RX)) {
-            /* ...and on Xtensa and RX it is the byte count, a power of
-             * two, as GNU as reads it there: `.align 4` before a function */
+                                     g->tgt->machine == EM_RX ||
+                                     g->tgt->machine == EM_68K)) {
+            /* ...and on Xtensa, RX and m68k it is the byte count, a power
+             * of two, as GNU as reads it there: `.align 4` before a
+             * function */
             if (v <= 0 || (v & (v - 1))) {
                 gerr(g, ".align %ld: %s's .align is a byte count, a "
                         "power of two", v,
-                     g->tgt->machine == EM_RX ? "RX" : "Xtensa");
+                     g->tgt->machine == EM_RX ? "RX"
+                     : g->tgt->machine == EM_68K ? "ColdFire" : "Xtensa");
                 return 1;
             }
             do_align(g, v);
@@ -3603,7 +3608,8 @@ static int write_object(struct gas *g, const char *out_path)
     /* LoongArch: the soft-float LP64S, object ABI v1 flags of a compiled
      * object, which EmbLD checks */
     if (g->tgt->machine == EM_LOONGARCH || g->tgt->machine == EM_XTENSA ||
-        g->tgt->machine == EM_TRICORE || g->tgt->machine == EM_RX)
+        g->tgt->machine == EM_TRICORE || g->tgt->machine == EM_RX ||
+        g->tgt->machine == EM_68K)
         elfw_set_flags(w, target_elf_flags(target_get()));
     /* RISC-V: the float ABI -mabi= names, as GNU as records it. Without
      * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD
@@ -3644,7 +3650,7 @@ static const struct gas_target RISCV_GAS = {
      * forms beyond the ones above. */
     0, 0, NULL, 0,
     0, rvasm_is_word, NULL, NULL, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* ARMv7-M. `call` and `la` are RISC-V pseudos and have no ARM
@@ -3660,7 +3666,7 @@ static const struct gas_target THUMB_GAS = {
      * comment and `#` an immediate's prefix. */
     0, 0, tasm_symform, '@',
     1, tasm_is_word, tasm_reset, tasm_open, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* ARMv7-A in ARM state: the same assembler, which writes A32 under
@@ -3671,7 +3677,7 @@ static const struct gas_target A32_GAS = {
     R_ARM_ABS32, 0,
     0, 0, tasm_symform, '@',
     1, tasm_is_word, tasm_reset, tasm_open, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* aarch64. `bl sym` carries R_AARCH64_CALL26, one instruction and one
@@ -3685,7 +3691,7 @@ static const struct gas_target A64_GAS = {
      * forms beyond the ones above; `#` is an immediate's prefix. */
     0, 0, NULL, 0,
     1, NULL, NULL, NULL, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* AVR. Its symbol-bearing forms are its own -- eight of them, because a
@@ -3700,7 +3706,7 @@ static const struct gas_target AVR_GAS = {
     R_AVR_16, 2, avrasm_symform,
     ';',         /* AVR's line comment, as GNU as sets it for this port */
     0, NULL, NULL, NULL, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* MIPS32r2, o32. Its symbol forms -- `jal sym`, `%hi`/`%lo`, `la` -- are
@@ -3714,7 +3720,7 @@ static const struct gas_target MIPS_GAS = {
     R_MIPS_32, 0,
     0, 0, mipsasm_symform, 0,
     0, mipsasm_is_word, mipsasm_reset, NULL, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* MIPS64r2, n64: the same vocabulary and forms, an ELFCLASS64 object,
@@ -3725,7 +3731,7 @@ static const struct gas_target MIPS64_GAS = {
     R_MIPS_32, R_MIPS_64,
     0, 0, mipsasm_symform, 0,
     0, mipsasm_is_word, mipsasm_reset, NULL, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* LoongArch64. Its symbol forms -- b/bl, call36/tail36, la.pcrel and
@@ -3739,7 +3745,7 @@ static const struct gas_target LA_GAS = {
     R_LARCH_32, R_LARCH_64,
     0, 0, laasm_symform, 0,
     0, laasm_is_word, NULL, NULL, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* Xtensa (the ESP32's LX6, windowed). Its symbol forms -- every branch,
@@ -3755,7 +3761,7 @@ static const struct gas_target XT_GAS = {
     R_XTENSA_32, 0,
     0, 0, xtasm_symform, 0,
     0, xtasm_is_word, NULL, NULL, xtasm_set_pc,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* TriCore 1.6.1. `j`/`jl`/`call sym` carry R_TRICORE_24REL; an address
@@ -3770,7 +3776,7 @@ static const struct gas_target TRICORE_GAS = {
     R_TRICORE_32ABS, 0,
     0, 0, tcasm_symform, 0,
     0, tcasm_is_word, NULL, NULL, NULL,
-    0, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL
 };
 
 /* RX (RXv1). Its symbol forms are rxasm_symform's: `mov.l #sym, rd`
@@ -3787,12 +3793,33 @@ static const struct gas_target RX_GAS = {
     R_RX_DIR32, 0,
     0, 0, rxasm_symform, ';',
     1, rxasm_is_word, NULL, NULL, NULL,
-    '!', rxasm_set_level, rxasm_took_level, rxasm_fill
+    '!', rxasm_set_level, rxasm_took_level, rxasm_fill,
+    rxasm_is_transfer
+};
+
+/* ColdFire (ISA_A+, the MCF5208's), big-endian. Its symbol forms are
+ * cfasm_symform's: a branch to a symbol defined elsewhere (bra/bsr as
+ * jmp/jsr to its address, R_68K_32; bcc and a written .w as .w,
+ * R_68K_PC16), and an absolute operand or #immediate that is a symbol
+ * (jsr, jmp, lea, pea, move: R_68K_32); `.long sym` is R_68K_32 and `.word
+ * sym` -- two bytes, as GNU as makes .word for m68k -- R_68K_16. `|` is the
+ * line comment and `#` an immediate's prefix; %sr, %ccr, %usp, %pc, the
+ * control registers and an index's size are operand words; branches relax
+ * .s/.w; code is padded with nops. */
+static const struct gas_target CF_GAS = {
+    EM_68K, 1, cfasm_encode, cfasm_is_reg,
+    0, 0, 0,
+    R_68K_32, 0,
+    R_68K_16, 2, cfasm_symform, '|',
+    1, cfasm_is_word, NULL, NULL, NULL,
+    0, cfasm_set_level, cfasm_took_level, cfasm_fill,
+    cfasm_is_transfer
 };
 
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+    case TARGET_COLDFIRE: return &CF_GAS;
     case TARGET_RX: return &RX_GAS;
     case TARGET_XTENSA: return &XT_GAS;
     case TARGET_TRICORE: return &TRICORE_GAS;
@@ -3933,10 +3960,6 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
         else if (target_get() == TARGET_SPARC32)
             fprintf(stderr, "embcc: error: no assembly-file support for %s "
                             "yet: EmbCC has no SPARC assembler\n",
-                    target_triple_now());
-        else if (target_get() == TARGET_COLDFIRE)
-            fprintf(stderr, "embcc: error: no assembly-file support for %s "
-                            "yet: EmbCC has no ColdFire assembler\n",
                     target_triple_now());
         else
             fprintf(stderr, "embcc: error: no assembly-file support for %s "
