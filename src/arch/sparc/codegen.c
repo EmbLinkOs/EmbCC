@@ -94,6 +94,9 @@ struct sparc_fn {
     char *nshr;          /* per vreg: a narrow high-word shift (narrow_shr) */
     int *last;           /* per vreg: its live range's last instruction, when
                           * there are long doubles (tf_operand); or NULL */
+    char *remat;         /* per vreg: a constant made where it is an argument
+                          * (const_remat), or NULL */
+    long long *rematv;   /* ...its value */
     long *slot;          /* per vreg: byte offset from %sp after the save */
     long frame;          /* bytes the save moves %sp down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
@@ -1133,10 +1136,59 @@ static void want_label(struct sparc_fn *F, int at, int label)
     F->nfix++;
 }
 
+/* Is any relocation site of the unit at `off`? The lists are in offset
+ * order, so each is read back from its end. */
+static int site_at(const struct sparc_fn *F, int off)
+{
+    const struct sparc_sites *st = F->st;
+    for (int k = st->next - 1; k >= 0 && st->ext[k].patch_off >= off; k--)
+        if (st->ext[k].patch_off == off) return 1;
+    for (int k = st->nstr - 1; k >= 0 && st->str[k].patch_off >= off; k--)
+        if (st->str[k].patch_off == off) return 1;
+    for (int k = st->ng - 1; k >= 0 && st->g[k].patch_off >= off; k--)
+        if (st->g[k].patch_off == off) return 1;
+    for (int k = st->nf - 1; k >= 0 && st->f[k].patch_off >= off; k--)
+        if (st->f[k].patch_off == off) return 1;
+    for (int k = 0; k < F->nfix; k++)
+        if (F->fix[k].at == off) return 1;
+    return 0;
+}
+
+/* A branch BACK to a label already placed, whose slot found nothing to
+ * take: the slot gets a copy of the label's first instruction and the
+ * branch goes to the one after it -- the classic target fill, annulled
+ * when conditional so the copy runs only when it is taken. Either way
+ * the copy runs exactly where the label's own would have, before the
+ * rest of the target; it needs only to be an ordinary instruction (not a
+ * transfer's slot, not a relocation site) with one after it. As short
+ * as a nop, and one instruction less per trip round a loop. */
+static int target_fill(struct sparc_fn *F, int cond, int label)
+{
+    struct code *t = F->t;
+    int L = F->label_off[label], at;
+    struct sdec d;
+    unsigned long w;
+    if (!F->fill || L < 0 || L + 8 > t->len || L < F->fn->src->code_off + 4)
+        return 0;
+    w = sparc_rdw(t, L);
+    if (!slot_decode(w, &d) || is_dcti(sparc_rdw(t, L - 4)) || site_at(F, L))
+        return 0;
+    at = sparc_b_placeholder(t, cond, cond != SP_BA);
+    sparc_w(t, w);
+    F->barrier = t->len;
+    if (!sparc_patch_b(t, at, L + 4))
+        sparc_refuse(F, NULL, "a branch beyond +-8 MiB (the function is too "
+                              "large)");
+    return 1;
+}
+
 static void branch_to(struct sparc_fn *F, int cond, int label)
 {
     long slot = take_slot(F, cond_reads(cond), 0);
-    int at = sparc_b_placeholder(F->t, cond, 0);
+    int at;
+    if (slot < 0 && target_fill(F, cond, label))
+        return;
+    at = sparc_b_placeholder(F->t, cond, 0);
     put_slot(F, slot);
     want_label(F, at, label);
 }
@@ -1201,9 +1253,10 @@ static void ret_restore(struct sparc_fn *F)
  * `ba; nop`, and one transfer instead of two. */
 static void ret_or_jump(struct sparc_fn *F)
 {
-    long slot;
-    if (!g_sp_leaf && restore_fusable(F) < 0 &&
-        (slot = take_slot(F, 0, 0)) >= 0) {
+    long slot = -1;
+    if (!g_sp_leaf && restore_fusable(F) < 0)
+        slot = take_slot(F, 0, 0);
+    if (slot >= 0) {
         int at = sparc_b_placeholder(F->t, SP_BA, 0);
         put_slot(F, slot);
         want_label(F, at, F->fn->nlabels);
@@ -1437,6 +1490,86 @@ static const char *fp_cmp_name(enum binop pred, int w)
     }
 }
 
+/* ---- constants made where they are passed --------------------------------
+ *
+ * A constant whose one reader passes it -- a call's register argument,
+ * a soft-float or 64-bit-divide helper's operand -- is not made where the
+ * IR defines it but in its argument register, after the argument setup's
+ * parallel move: the register it would have held between the two is
+ * free, and the move does not have to shuffle it (fdlibm's coefficients
+ * went %o0 -> %l7 -> %o2 around each helper). One whose reader stores it
+ * is made at the store, and a zero is %g0 there. Only a temp with exactly
+ * one definition, an IR_CONST, and exactly one read, at such a place. */
+static int is_remat(const struct sparc_fn *F, int v)
+{
+    return F->remat && v >= 0 && v < F->fn->nvregs && F->remat[v];
+}
+
+static void const_remat(struct sparc_fn *F)
+{
+    struct ir_func *fn = F->fn;
+    int nv = fn->nvregs;
+    int *ndef, *site;
+    if (!F->usecnt || !nv)
+        return;
+    ndef = xcalloc((size_t)nv, sizeof *ndef);
+    site = xcalloc((size_t)nv, sizeof *site);
+    F->remat = xcalloc((size_t)nv, 1);
+    F->rematv = xcalloc((size_t)nv, sizeof *F->rematv);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int d = ra_ins_def(i);
+        if (d >= 0 && d < nv)
+            ndef[d]++;
+        if (i->op == IR_CALL) {
+            int word = 0;
+            struct argplace pl;
+            for (int k = 0; k < i->nargs; k++) {
+                const struct ir_arg *a = &i->argv[k];
+                place_arg(a, &word, &pl);
+                if (!pl.byref && !pl.nstk && a->vreg >= 0 && a->vreg < nv)
+                    site[a->vreg]++;
+            }
+        } else if (i->op == IR_STORE && i->size <= 8 && i->b >= 0 &&
+                   i->b < nv) {
+            site[i->b]++;
+        } else if (i->op == IR_STVAR && i->size <= 4 && i->a >= 0 &&
+                   i->a < nv && !is_wide(F, i->a)) {
+            site[i->a]++;
+        } else if (i->op != IR_CALL && sparc_op_calls_helper(i) &&
+                   !i->imm_b && i->w != 16 && i->size != 16 &&
+                   (i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+                    i->op == IR_DIV || i->op == IR_MOD || i->op == IR_CMP)) {
+            if (i->a >= 0 && i->a < nv) site[i->a]++;
+            if (i->b >= 0 && i->b < nv) site[i->b]++;
+        }
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int v = i->dst;
+        if (i->op != IR_CONST || v < fn->nvars || v >= nv || ndef[v] != 1 ||
+            F->usecnt[v] != 1 || site[v] != 1 || is16(F, v))
+            continue;
+        F->remat[v] = 1;
+        F->rematv[v] = is_wide(F, v) ? (long long)i->imm : imm_val(i);
+    }
+    free(ndef);
+    free(site);
+}
+
+/* The register holding word `hi` (1: the high one of a 64-bit constant)
+ * of rematerialized constant v: %g0 for a zero, else `scratch` loaded. */
+static int remat_reg(struct sparc_fn *F, int v, int scratch, int hi)
+{
+    long long c = F->rematv[v];
+    unsigned long w = (unsigned long)((hi && is_wide(F, v) ? c >> 32 : c) &
+                                      0xffffffffL);
+    if (!w)
+        return SP_G0;
+    sparc_li(F->t, scratch, (long long)w);
+    return scratch;
+}
+
 /* Put n vregs into the registers a helper (or a call) expects, all at
  * once: the register-to-register edges as one parallel move (SCR breaks
  * a cycle), then the loads, which only write. `half` (may be NULL) picks
@@ -1448,7 +1581,7 @@ static void set_args_half(struct sparc_fn *F, const int *dstreg,
     int pd[RA_MAXPOOL], ps[RA_MAXPOOL], npm = 0;
 
     for (int k = 0; k < n; k++)
-        if (in_reg(F, vreg[k])) {
+        if (in_reg(F, vreg[k]) && !is_remat(F, vreg[k])) {
             pd[npm] = dstreg[k];
             ps[npm] = !half ? reg_of(F, vreg[k])
                     : !is_wide(F, vreg[k]) ? F->loc[vreg[k]]
@@ -1466,11 +1599,19 @@ static void set_args_half(struct sparc_fn *F, const int *dstreg,
             sparc_mov(F->t, od[k], os[k]);
     }
     for (int k = 0; k < n; k++)
-        if (!in_reg(F, vreg[k]))
+        if (!in_reg(F, vreg[k]) && !is_remat(F, vreg[k]))
             ld_sp(F, dstreg[k],
                   !half ? slot32(F, vreg[k])
                   : !is_wide(F, vreg[k]) ? slot32(F, vreg[k])
                   : sslot(F, vreg[k]) + (half[k] ? WHI : WLO), 4, 0);
+    for (int k = 0; k < n; k++)
+        if (is_remat(F, vreg[k])) {
+            long long c = F->rematv[vreg[k]];
+            sparc_li(F->t, dstreg[k],
+                     half && half[k] && is_wide(F, vreg[k])
+                         ? (long long)((c >> 32) & 0xffffffffL)
+                         : (long long)(c & 0xffffffffL));
+        }
 }
 
 static void set_args(struct sparc_fn *F, const int *dstreg, const int *vreg,
@@ -1738,6 +1879,8 @@ static int gen_ins64(struct sparc_fn *F, int n)
     switch (i->op) {
     case IR_CONST: {
         int lo, hi;
+        if (is_remat(F, i->dst))
+            return 1;                    /* made where it is passed */
         dst64(F, i->dst, &lo, &hi);
         sparc_li(t, lo, (long long)(i->imm & 0xffffffffL));
         sparc_li(t, hi, (long long)((i->imm >> 32) & 0xffffffffL));
@@ -1915,7 +2058,12 @@ static int gen_ins64(struct sparc_fn *F, int n)
     }
     case IR_STORE: {
         int addr = rdr(F, i->a, ADDR), lo, hi;
-        src64(F, i->b, A_LO, A_HI, &lo, &hi);
+        if (is_remat(F, i->b)) {
+            lo = remat_reg(F, i->b, A_LO, 0);
+            hi = remat_reg(F, i->b, A_HI, 1);
+        } else {
+            src64(F, i->b, A_LO, A_HI, &lo, &hi);
+        }
         if (i->size == 8) {
             st_any(F, hi, addr, (int)i->memoff + WHI, 4, i->natural);
             st_any(F, lo, addr, (int)i->memoff + WLO, 4, i->natural);
@@ -1948,6 +2096,32 @@ static int gen_ins64(struct sparc_fn *F, int n)
     }
 }
 
+/* A soft-float comparison's answer, the helper's %o0 against 0 (signed,
+ * as cc_to_reg reads it), branched on at once when its only reader is
+ * the BRZ/BRNZ right after it: no 0/1 made and tested again. */
+static void cond_branch(struct sparc_fn *F, int m, int cond, int label);
+
+static int fcmp_branch(struct sparc_fn *F, int n)
+{
+    struct ir_func *fn = F->fn;
+    const struct ir_ins *i = &fn->ins[n], *nx;
+    int cond;
+    if (n + 1 >= fn->nins || !F->usecnt || i->dst < 0 ||
+        i->dst >= fn->nvregs || F->usecnt[i->dst] != 1)
+        return 0;
+    nx = &fn->ins[n + 1];
+    if ((nx->op != IR_BRZ && nx->op != IR_BRNZ) || nx->a != i->dst ||
+        nx->w > 4)
+        return 0;
+    sparc_alu(F->t, SP_SUBCC, SP_G0, SP_O0, SP_G0);
+    cond = pred_cond(i->pred, 1);
+    if (nx->op == IR_BRZ)
+        cond = sparc_cond_invert(cond);
+    cond_branch(F, n + 2, cond, nx->label);
+    F->skip_next = 1;
+    return 1;
+}
+
 /* ---- long double: binary128, by reference ----------------------------------
  *
  * A long double lives in its sixteen-byte slot (cg_wide_vregs) and never in
@@ -1961,6 +2135,15 @@ static void copy16(struct sparc_fn *F, long to, long from)
 {
     if (to == from)
         return;
+    if (!(to & 7) && !(from & 7)) {
+        /* both 8-aligned from the 8-aligned %sp: doublewords through the
+         * even pair %l6:%l7 */
+        for (int q = 0; q < 16; q += 8) {
+            ld_sp(F, SCR2, from + q, 8, 0);
+            st_sp(F, SCR2, to + q, 8);
+        }
+        return;
+    }
     for (int q = 0; q < 16; q += 4) {
         ld_sp(F, A_LO, from + q, 4, 0);
         st_sp(F, A_LO, to + q, 4);
@@ -2162,6 +2345,8 @@ static void gen_ld(struct sparc_fn *F, struct ir_ins *i)
         tf_operand(F, i, i->a, 0, SP_O0, i->b);
         tf_operand(F, i, i->b, 16, SP_O1, i->a);
         call_helper(F, tf_cmp_name(i->pred));
+        if (fcmp_branch(F, (int)(i - F->fn->ins)))
+            return;
         {
             int d = wreg(F, i->dst, ACC);
             cmp_to_reg(F, i->pred, 1, SP_O0, SP_G0, d);
@@ -2682,6 +2867,8 @@ static void gen_ins(struct sparc_fn *F, int n)
         if (i->op == IR_CMP) {
             fp_args2(F, i);
             call_helper(F, fp_cmp_name(i->pred, i->w));
+            if (fcmp_branch(F, n))
+                return;
             {
                 int d = wreg(F, i->dst, ACC);
                 sparc_alu(t, SP_SUBCC, SP_G0, SP_O0, SP_G0);
@@ -2774,6 +2961,8 @@ static void gen_ins(struct sparc_fn *F, int n)
         return;
     case IR_CONST: {
         int d = wreg(F, i->dst, ACC);
+        if (is_remat(F, i->dst))
+            return;                      /* made where it is passed */
         sparc_li(t, d, imm_val(i));
         wrote(F, i->dst, d);
         return;
@@ -2985,7 +3174,17 @@ static void gen_ins(struct sparc_fn *F, int n)
         return;
     }
     case IR_STVAR: {
-        int src = rdr(F, i->a, ACC);
+        int src;
+        if (is_remat(F, i->a) && in_reg(F, i->dst)) {
+            /* the constant, as the narrow store's extension leaves it */
+            int k = 32 - 8 * (i->size < 4 ? i->size : 4);
+            long long c = F->rematv[i->a];
+            c = k ? (long long)((int)((unsigned)c << k) >> k) : c;
+            sparc_li(t, reg_of(F, i->dst), c);
+            return;
+        }
+        src = is_remat(F, i->a) ? remat_reg(F, i->a, ACC, 0)
+                                : rdr(F, i->a, ACC);
         if (in_reg(F, i->dst)) {
             if (i->size >= 4) {
                 if (reg_of(F, i->dst) != src)
@@ -3007,7 +3206,8 @@ static void gen_ins(struct sparc_fn *F, int n)
     }
     case IR_STORE: {
         int addr = rdr(F, i->a, ADDR);
-        int val = rdr(F, i->b, ACC);
+        int val = is_remat(F, i->b) ? remat_reg(F, i->b, ACC, 0)
+                                    : rdr(F, i->b, ACC);
         st_any(F, val, addr, (int)i->memoff, i->size, i->natural);
         return;
     }
@@ -3057,7 +3257,8 @@ static void gen_ins(struct sparc_fn *F, int n)
     {
         int db = rdr(F, i->a, ADDR);
         int sb = i->op == IR_MEMCPY ? rdr(F, i->b, TMP) : TMP;
-        copy_block(F, i->op == IR_MEMCPY, i->size, i->natural >= 4 ? 4 : 1,
+        copy_block(F, i->op == IR_MEMCPY, i->size,
+                   i->natural >= 8 ? 8 : i->natural >= 4 ? 4 : 1,
                    sb, 0, db, 0);
     }
         return;
@@ -3090,11 +3291,13 @@ static void gen_ins(struct sparc_fn *F, int n)
                         ld_fp(F, SP_I0, SRET, 4, 0);
                 }
             } else if (fn->ret_abi.size == 16) {
+                /* into the caller's long double: 8-aligned (the ABI's
+                 * alignment of the type), as the slot is */
                 need16(F, i->a);
                 ld_fp(F, ADDR, SRET, 4, 0);
-                for (int q = 0; q < 16; q += 4) {
-                    ld_sp(F, A_LO, sslot(F, i->a) + q, 4, 0);
-                    sparc_store(t, A_LO, ADDR, q, 4);
+                for (int q = 0; q < 16; q += 8) {
+                    ld_sp(F, SCR2, sslot(F, i->a) + q, 8, 0);
+                    sparc_store(t, SCR2, ADDR, q, 8);
                 }
                 sparc_mov(t, SP_I0, ADDR);
             } else if (F->wide[i->a] && fn->ret_abi.size <= 4) {
@@ -3621,6 +3824,8 @@ static void gen_func(struct ir_func *fn, struct code *t,
             F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
             ra_count_vreg_uses(fn, F.usecnt);
         }
+        if (!want_debug && !getenv("EMBCC_SPARC_NO_REMAT"))
+            const_remat(&F);
         {
             const char *lim = getenv("EMBCC_SPARC_RA_MAX");
             if (lim) {
@@ -3685,6 +3890,14 @@ static void gen_func(struct ir_func *fn, struct code *t,
                 if (a->is_struct) {
                     copy_block(&F, 1, a->size, a->align, src, 0, SP_FP,
                                fpo(&F, sslot(&F, i)));
+                } else if (a->size == 16 && a->align >= 8 &&
+                           !(sslot(&F, i) & 7)) {
+                    /* a long double: the caller's copy is one, 8-aligned
+                     * by the ABI, as the slot is */
+                    for (int q = 0; q < 16; q += 8) {
+                        sparc_load(t, SCR2, src, q, 8, 0);
+                        st_sp(&F, SCR2, sslot(&F, i) + q, 8);
+                    }
                 } else {
                     for (int q = 0; q < a->size; q += 4) {
                         sparc_load(t, A_LO, src, q, 4, 0);
@@ -3804,6 +4017,8 @@ static void gen_func(struct ir_func *fn, struct code *t,
     free(F.w16);
     free(F.nshr);
     free(F.last);
+    free(F.remat);
+    free(F.rematv);
     free(F.loc);
 }
 
