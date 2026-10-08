@@ -2155,7 +2155,9 @@ static void gen_ins(struct rx_fn *F, int n)
         {
             int pd[16], ps[16], npm = 0;
             for (int k = 0; k < nval; k++) {
-                if (vdst[k] < 0)
+                /* a value nothing reads may share its home with one that
+                 * is read: it is not moved at all */
+                if (vdst[k] < 0 || (F->usecnt && F->usecnt[vdst[k]] == 0))
                     continue;
                 if (in_reg(F, vdst[k])) {
                     pd[npm] = F->loc[vdst[k]];

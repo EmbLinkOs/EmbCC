@@ -978,7 +978,8 @@ static int stmt_body(const char *s, int len, struct code *out, char *err,
         rx_bit_m(out, c, (int)a->v, (long)b->v, b->r);
         return 0;
     }
-    if (strncmp(st.mn, "bm", 2) == 0 && (c = cond_after(st.mn, 2)) >= 0) {
+    c = strncmp(st.mn, "bm", 2) == 0 ? cond_after(st.mn, 2) : -1;
+    if (c >= 0) {
         const struct opd *b = &st.o[1];
         if (st.sfx || need_n(&st, 2, err, errlen))
             return -1;
@@ -994,7 +995,8 @@ static int stmt_body(const char *s, int len, struct code *out, char *err,
         rx_bmcnd_m(out, c, (int)st.o[0].v, (long)b->v, b->r);
         return 0;
     }
-    if (strncmp(st.mn, "sc", 2) == 0 && (c = cond_after(st.mn, 2)) >= 0) {
+    c = strncmp(st.mn, "sc", 2) == 0 ? cond_after(st.mn, 2) : -1;
+    if (c >= 0) {
         if (st.sfx != 'l' || need_n(&st, 1, err, errlen) ||
             need_reg(&st, 0, err, errlen))
             FAIL("%s: the form here is sc%s.l rd (the memory forms are not in "
@@ -1002,7 +1004,8 @@ static int stmt_body(const char *s, int len, struct code *out, char *err,
         rx_scc(out, c, st.o[0].r);
         return 0;
     }
-    if (st.mn[0] == 'b' && (c = cond_after(st.mn, 1)) >= 0)
+    c = st.mn[0] == 'b' ? cond_after(st.mn, 1) : -1;
+    if (c >= 0)
         return do_branch(&st, out, c == RX_EQ || c == RX_NE ? BF_BEQNE : BF_BCND,
                          c, raw, err, errlen);
 
@@ -1375,11 +1378,12 @@ int rxasm_symform(const char *stmt, struct asm_symform *f)
         f->nsites = 1;
         return 1;
     }
+    c = mn[0] == 'b' ? cond_after(mn, 1) : -1;
     if (!strcmp(mn, "bra"))
         fam = BF_BRA;
     else if (!strcmp(mn, "bsr"))
         fam = BF_BSR;
-    else if (mn[0] == 'b' && (c = cond_after(mn, 1)) >= 0)
+    else if (c >= 0)
         fam = c == RX_EQ || c == RX_NE ? BF_BEQNE : BF_BCND;
     else
         return 0;
