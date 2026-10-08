@@ -4188,10 +4188,6 @@ static void riscv_float_resolve(void)
                        abi == 64 ? "D" : "F", rv64 ? "rv64" : "rv32",
                        abi == 64 ? "imafdc" : "imafc");
     }
-    if (abi && !getenv("EMBCC_RV_HARDFLOAT_WIP") && !g_want_dump_predef)
-        diag_fatal(NULL, 0, "-mabi=%s%s (the hardware floating-point "
-                   "calling convention) is not implemented yet",
-                   rv64 ? "lp64" : "ilp32", abi == 64 ? "d" : "f");
     target_set_riscv_isa(f, d, c, zifencei);
     target_set_riscv_abi_flen(abi);
 }

@@ -598,11 +598,15 @@ libc-linux-aarch64: embcc embar
 # tests/golden/embedded-runtime.sh uses it too, so the archive the test checks
 # is the archive that ships.
 # The -eabihf ones are the hard-float convention: its objects do not link
-# with soft-float ones, so its runtime is a separate archive.
+# with soft-float ones, so its runtime is a separate archive. RISC-V's
+# hardware-float ABIs are the same, named by the ABI under the triple's
+# directory (tools/build-rt.sh says how each is built).
+RISCV_HF := riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
+            riscv64-unknown-elf/lp64f riscv64-unknown-elf/lp64d
 RT_EMBEDDED := avr thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf riscv32-unknown-elf \
-               riscv64-unknown-elf mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
+               riscv64-unknown-elf $(RISCV_HF) mipsel-none-elf mips-none-elf loongarch64-unknown-elf tricore-none-elf \
                  xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
                  mips64el-none-elf mips64-none-elf
 rt-embedded: embcc embar
@@ -619,7 +623,8 @@ rt-embedded: embcc embar
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
-                 riscv32-unknown-elf riscv64-unknown-elf mipsel-none-elf mips-none-elf \
+                 riscv32-unknown-elf riscv64-unknown-elf $(RISCV_HF) \
+                 mipsel-none-elf mips-none-elf \
                  loongarch64-unknown-elf tricore-none-elf \
                  xtensa-none-elf powerpc-none-eabi rx-none-elf sparc-none-elf m68k-none-elf \
                  mips64el-none-elf mips64-none-elf

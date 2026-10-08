@@ -1382,19 +1382,24 @@ static void need_fx(const struct rv_fn *F)
                        "files at RV32 with no transfer slot", F->fn->name);
 }
 
+/* The instruction being lowered, for the internal errors below. */
+static const struct ir_ins *g_rv_cur;
+
 /* x register (or pair) <- f register, and the other way */
 static void x_from_f(struct rv_fn *F, int reg, int freg, int w)
 {
     if (w == 8 && F->xlen == 32)
         internal_error("riscv: %s: a double read into one x register at "
-                       "RV32", F->fn->name);
+                       "RV32 (%s)", F->fn->name,
+                       g_rv_cur ? ir_opname(g_rv_cur->op) : "?");
     rv_fmv_to_x(F->t, reg, freg, w == 8);
 }
 static void f_from_x(struct rv_fn *F, int freg, int reg, int w)
 {
     if (w == 8 && F->xlen == 32)
         internal_error("riscv: %s: a double written from one x register at "
-                       "RV32", F->fn->name);
+                       "RV32 (%s)", F->fn->name,
+                       g_rv_cur ? ir_opname(g_rv_cur->op) : "?");
     rv_fmv_from_x(F->t, freg, reg, w == 8);
 }
 static void pair_from_f(struct rv_fn *F, int lo, int hi, int freg)
@@ -1424,6 +1429,15 @@ static int slot_bytes(const struct rv_fn *F, int v)
 static void rd(struct rv_fn *F, int v, int reg)
 {
     if (in_freg(F, v)) {
+        /* A narrow read of a double at RV32 -- after copy propagation any
+         * operation may read a wide value at its own width -- is its LOW
+         * word, as of a pair or a slot. */
+        if (F->fw[v] == 8 && F->xlen == 32) {
+            need_fx(F);
+            fst_sp(F, F->floc[v], F->fx, 1);
+            ld_sp(F, reg, F->fx, 4, 1);
+            return;
+        }
         x_from_f(F, reg, F->floc[v], F->fw[v]);
         return;
     }
@@ -4051,6 +4065,8 @@ static void gen_ins(struct rv_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
 
+    g_rv_cur = i;
+
     /* -g: a line-table row wherever the source line changes, as the
      * other backends record them. t->len is where this instruction's
      * code begins. */
@@ -5684,7 +5700,10 @@ static int rv_needs_fx(const struct ir_func *fn)
             return 1;
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
-        if ((i->flt && i->w == 8) || (rv_fp_hw(i) && (i->w == 8 || i->size == 8)))
+        /* a conversion's double may be a helper's, in fa0 */
+        if ((i->flt && i->w == 8) ||
+            ((i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F) &&
+             (i->w == 8 || i->size == 8)))
             return 1;
         if (i->op == IR_CALL)
             for (int k = 0; k < i->nargs; k++)
