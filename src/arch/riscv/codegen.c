@@ -5626,18 +5626,21 @@ static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed);
 /* Which vregs an INTEGER operation reads -- not an FP one, nor a copy, a
  * load's or store's value, a select's arm, a return or a float argument,
  * which take a value wherever it lives. */
+struct rv_cnt { int *m; int nv; };
+
 static void rv_int_use_cb(int v, void *ctx)
 {
-    struct { char *m; int nv; } *c = ctx;
+    struct rv_cnt *c = ctx;
     if (v >= 0 && v < c->nv)
-        c->m[v] = 1;
+        c->m[v]++;
 }
 
-static char *rv_int_uses(const struct ir_func *fn)
+/* ...counted, per vreg */
+static int *rv_int_uses(const struct ir_func *fn)
 {
-    struct { char *m; int nv; } c;
+    struct rv_cnt c;
     c.nv = fn->nvregs;
-    c.m = xcalloc((size_t)(c.nv ? c.nv : 1), 1);
+    c.m = xcalloc((size_t)(c.nv ? c.nv : 1), sizeof *c.m);
     for (int n = 0; n < fn->nins; n++) {
         const struct ir_ins *i = &fn->ins[n];
         if (rv_fp_hw(i))
@@ -5721,14 +5724,46 @@ static char *rv_float_map(const struct rv_fn *F, char **fw_out, int debug)
      * one vreg -- keeps its x register: in an f register every integer
      * use would cross with an fmv, and the float uses cross the other
      * way only where it is used as a float. */
+    /* And by cost, the way aarch64 places a value both kinds of
+     * operation touch (cg_float_vregs_by_cost): in an f register each
+     * integer read crosses with an fmv, in an x register each
+     * floating-point read and write does. fdlibm's doubles are read word
+     * by word (GET_HIGH_WORD) as often as they are computed with. */
     {
-        char *iu = rv_int_uses(fn);
+        int *iu = rv_int_uses(fn);
+        int *fu = xcalloc((size_t)nv, sizeof *fu);
+#define FUSE(v) do { int v_ = (v); if (v_ >= 0 && v_ < nv) fu[v_]++; } while (0)
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (rv_fp_hw(i)) {
+                if (i->op != IR_I2F) FUSE(i->a);
+                if (!i->imm_b && i->op != IR_I2F && i->op != IR_F2I &&
+                    i->op != IR_F2F && i->op != IR_NEG && i->op != IR_SQRT)
+                    FUSE(i->b);
+                if (i->op != IR_CMP && i->op != IR_F2I) FUSE(i->dst);
+            } else if (i->op == IR_CALL) {
+                if (i->flt && !i->retsize) FUSE(i->dst);
+                for (int k = 0; k < i->nargs; k++)
+                    if (!i->argv[k].is_struct && i->argv[k].is_float)
+                        FUSE(i->argv[k].vreg);
+            } else if (i->op == IR_RET && fn->ret_abi.is_float) {
+                FUSE(i->a);
+            }
+        }
+#undef FUSE
+        for (int p = 0; p < fn->nparams && p < nv; p++)
+            if (fn->param_abi[p].is_float && !fn->param_abi[p].is_struct)
+                fu[p]++;                    /* arriving in fa0-fa7 */
         for (int n = 0; n < fn->nins; n++) {
             const struct ir_ins *i = &fn->ins[n];
             if (i->op == IR_CONST && i->dst >= 0 && i->dst < nv &&
                 iu[i->dst])
                 m[i->dst] = 0;
         }
+        for (int v = 0; v < nv; v++)
+            if (m[v] && iu[v] > fu[v])
+                m[v] = 0;
+        free(fu);
         free(iu);
     }
     for (int v = 0; v < nv; v++) {

@@ -447,6 +447,12 @@ static int csweep(int xlen)
                         csweep_one(rv_enc_i(0x03, rd, 3, rs, im), xlen);
                         csweep_one(rv_enc_s(0x23, 3, rs, rd, im), xlen);
                     }
+                    /* the FP loads and stores (Zcf at RV32, Zcd): rd is
+                     * an f register, numbered as the x ones are */
+                    csweep_one(rv_enc_i(0x07, rd, 2, rs, im), xlen);
+                    csweep_one(rv_enc_s(0x27, 2, rs, rd, im), xlen);
+                    csweep_one(rv_enc_i(0x07, rd, 3, rs, im), xlen);
+                    csweep_one(rv_enc_s(0x27, 3, rs, rd, im), xlen);
                 }
                 /* jalr with a zero displacement (c.jr / c.jalr / ret) */
                 if (im == 0)

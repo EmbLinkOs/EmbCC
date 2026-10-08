@@ -344,6 +344,70 @@ unsigned rv_compress(unsigned long w, int xlen)
         }
         return 0;
 
+    case 0x07:                                                  /* LOAD-FP */
+        /* Zcd's c.fld/c.fldsp and, at RV32 only, Zcf's c.flw/c.flwsp --
+         * c.ld's and c.lw's layouts at other funct3s (at RV64 the flw
+         * slots ARE c.ld's). C with F or D is Zcf/Zcd: this instruction
+         * is only ever emitted where the FPU is. */
+        if (f3 == 3) {                                          /* fld */
+            if (rs1 == 2 && immi >= 0 && immi < 512 && (immi & 7) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x2002u | (((i >> 6) & 7) << 2) | (((i >> 3) & 3) << 5) |
+                       (((i >> 5) & 1) << 12) | ((unsigned)rd << 7);
+            }
+            if (rdc >= 0 && rs1c >= 0 && immi >= 0 && immi < 256 &&
+                (immi & 7) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x2000u | ((unsigned)rdc << 2) | (((i >> 6) & 3) << 5) |
+                       ((unsigned)rs1c << 7) | (((i >> 3) & 7) << 10);
+            }
+        }
+        if (f3 == 2 && xlen == 32) {                            /* flw */
+            if (rs1 == 2 && immi >= 0 && immi < 256 && (immi & 3) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x6002u | (((i >> 6) & 3) << 2) | (((i >> 2) & 7) << 4) |
+                       (((i >> 5) & 1) << 12) | ((unsigned)rd << 7);
+            }
+            if (rdc >= 0 && rs1c >= 0 && immi >= 0 && immi < 128 &&
+                (immi & 3) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x6000u | ((unsigned)rdc << 2) | (((i >> 6) & 1) << 5) |
+                       (((i >> 2) & 1) << 6) | ((unsigned)rs1c << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+        }
+        return 0;
+
+    case 0x27:                                                  /* STORE-FP */
+        if (f3 == 3) {                                          /* fsd */
+            if (rs1 == 2 && imms >= 0 && imms < 512 && (imms & 7) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xa002u | ((unsigned)rs2 << 2) | (((i >> 6) & 7) << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+            if (rs1c >= 0 && rs2c >= 0 && imms >= 0 && imms < 256 &&
+                (imms & 7) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xa000u | ((unsigned)rs2c << 2) | (((i >> 6) & 3) << 5) |
+                       ((unsigned)rs1c << 7) | (((i >> 3) & 7) << 10);
+            }
+        }
+        if (f3 == 2 && xlen == 32) {                            /* fsw */
+            if (rs1 == 2 && imms >= 0 && imms < 256 && (imms & 3) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xe002u | ((unsigned)rs2 << 2) | (((i >> 6) & 3) << 7) |
+                       (((i >> 2) & 0xf) << 9);
+            }
+            if (rs1c >= 0 && rs2c >= 0 && imms >= 0 && imms < 128 &&
+                (imms & 3) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xe000u | ((unsigned)rs2c << 2) | (((i >> 6) & 1) << 5) |
+                       (((i >> 2) & 1) << 6) | ((unsigned)rs1c << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+        }
+        return 0;
+
     case 0x67:                                                  /* JALR */
         /* c.jr / c.jalr, only with a zero displacement. `ret` is
          * jalr x0, 0(ra) and becomes c.jr ra, which is two bytes off
