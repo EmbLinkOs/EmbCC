@@ -22,6 +22,10 @@ enum {
     EXC_STORE_ACCESS = 7, EXC_ECALL_U = 8, EXC_ECALL_M = 11
 };
 
+/* not a trap: a debugger's watchpoint stops the instruction before its
+ * access, which is not made, and the instruction is not counted */
+#define TRAP_WATCH (~0ull)
+
 /* interrupts: mcause's code, and its bit in mip and mie */
 #define IRQ_MSI 3
 #define IRQ_MTI 7

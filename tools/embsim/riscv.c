@@ -65,8 +65,9 @@ static void trap_enter(u64 cause, u64 tval, int intr)
 
 /* ---- memory ------------------------------------------------------------- */
 
-/* A load or store of the core's. A watchpoint is recorded and the access
- * made: QEMU's stub stops a RISC-V core after the instruction. */
+/* A load or store of the core's. A debugger's watchpoint stops the
+ * instruction before the access, as QEMU's stub does (gdb then steps it
+ * with the watchpoint out). */
 u64 rv_load(u64 a, int n)
 {
     struct bus *b = &rs->sim->bus;
@@ -77,8 +78,10 @@ u64 rv_load(u64 a, int n)
         return 0;
     }
     u32 a32 = (u32)a;
-    if (b->nwatch)
-        bus_watch_check(b, a32, n, 0);
+    if (b->nwatch && bus_watch_check(b, a32, n, 0)) {
+        rv_trap(TRAP_WATCH, 0);
+        return 0;
+    }
     struct region *r = bus_region(b, a32, (u32)n);
     u64 v = 0;
     if (r) {
@@ -111,8 +114,10 @@ void rv_store(u64 a, int n, u64 v)
         return;
     }
     u32 a32 = (u32)a;
-    if (b->nwatch)
-        bus_watch_check(b, a32, n, 1);
+    if (b->nwatch && bus_watch_check(b, a32, n, 1)) {
+        rv_trap(TRAP_WATCH, 0);
+        return;
+    }
     struct region *r = bus_region(b, a32, (u32)n);
     if (r) {
         if (!r->rom) {
@@ -554,7 +559,8 @@ static void amo(u32 i, u32 rd, u32 f3, u64 a, u64 b)
         if (ok) {
             u64 cur = rv_load(a, n);
             if (rs->trap) {
-                rs->cause = EXC_STORE_ACCESS;
+                if (rs->cause == EXC_LOAD_ACCESS)
+                    rs->cause = EXC_STORE_ACCESS;
                 return;
             }
             ok = cur == rs->resv_val;
@@ -569,7 +575,8 @@ static void amo(u32 i, u32 rd, u32 f3, u64 a, u64 b)
     }
     u64 old = rv_load(a, n);
     if (rs->trap) {
-        rs->cause = EXC_STORE_ACCESS;           /* an AMO's fault */
+        if (rs->cause == EXC_LOAD_ACCESS)
+            rs->cause = EXC_STORE_ACCESS;       /* an AMO's fault */
         return;
     }
     s64 so = n == 4 ? (s32)(u32)old : (s64)old;
@@ -1007,6 +1014,13 @@ static void step(struct cpu *c)
             rv_illegal();
     }
     if (rs->trap) {
+        if (rs->cause == TRAP_WATCH) {
+            /* not run: the debugger stops here, and the instruction is
+             * counted when it does run */
+            s->insns--;
+            s->cycles -= cost;
+            return;
+        }
         trap_enter(rs->cause, rs->tval, 0);
         return;
     }
