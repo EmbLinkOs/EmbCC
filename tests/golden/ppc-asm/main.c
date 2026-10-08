@@ -67,6 +67,21 @@ __attribute__((naked)) void naked_bump(void)
 
 __attribute__((noinline)) int seed(int k) { return k + counter - 40; }
 
+/* lmw 29 writes r29, r30 and r31 and names only r29: the clobber list alone
+ * keeps the values live across it -- eighteen, crossing calls, so they
+ * want r14-r31 -- out of r30 and r31, and has the prologue save them */
+int minus3[3] = { -1, -1, -1 };
+#define V(n) int v##n = seed(k + n);
+#define W(n) + n * v##n
+__attribute__((noinline)) int lmw_clobbers(int k)
+{
+    V(1) V(2) V(3) V(4) V(5) V(6) V(7) V(8) V(9) V(10) V(11) V(12) V(13)
+    V(14) V(15) V(16) V(17) V(18)
+    __asm__ volatile("lmw 29, 0(%0)" :: "r"(minus3) : "r30", "r31", "memory");
+    return 0 W(1) W(2) W(3) W(4) W(5) W(6) W(7) W(8) W(9) W(10) W(11) W(12)
+             W(13) W(14) W(15) W(16) W(17) W(18);
+}
+
 int main(void)
 {
     int n = seed(10), s = 0, v, w, mem = 1234, buf[4] = { 0, 0, 0, 0 };
@@ -142,6 +157,7 @@ int main(void)
         putn(a + 10 * b + 100 * c + 1000 * d + 10000 * e + 100000 * f +
              1000000 * g + 10000000 * h);
     }
+    putn(lmw_clobbers(0));
     puts_("\n");
     putn(pp_add(40, 2));
     putn(pp_call(1));

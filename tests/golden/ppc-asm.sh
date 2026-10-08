@@ -193,7 +193,7 @@ if command -v "$QEMU" >/dev/null 2>&1; then
     "$EMBCC" --target=$T -O1 -c tests/harness/ppc/boot.c -o "$out/boot.o" &&
     "$EMBCC" --target=$T -O1 -c tests/harness/ppc/io.c -o "$out/io.o" ||
         { echo "the harness does not compile"; exit 1; }
-    want1="0 77 78 79 55 2 0 1234 55 -32748 32769 48 54 124076833 37 23 87654321"
+    want1="0 77 78 79 55 2 0 1234 55 -32748 32769 48 54 124076833 37 23 87654321 2109"
     want2="42 43 55 110 2 42 -1 1 7 1 11 -4 3 142 1 -5 4 1 42 8 56 42 5 77 77 77 -32314 1 50 3 4658 42 42 6"
     asms=embcc
     if [ -n "$CLANG" ]; then

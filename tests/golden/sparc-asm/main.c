@@ -66,6 +66,22 @@ __attribute__((naked)) void naked_bump(void)
 
 __attribute__((noinline)) int seed(int k) { return k + counter - 40; }
 
+/* ldd writes the odd register of its pair, which the template never names:
+ * only the clobber list keeps the values live across it (they cross calls,
+ * so they want the window's own registers) out of %l1, %l3 and %l5 */
+int minus2[2] __attribute__((aligned(8))) = { -1, -1 };
+__attribute__((noinline)) int pair_clobbers(int k)
+{
+    int a = seed(k + 1), b = seed(k + 2), c = seed(k + 3), d = seed(k + 4);
+    int e = seed(k + 5), f = seed(k + 6), g = seed(k + 7), h = seed(k + 8);
+    __asm__ volatile("ldd [%0], %%o0\n ldd [%0], %%o2\n ldd [%0], %%o4\n"
+                     "ldd [%0], %%l0\n ldd [%0], %%l2\n ldd [%0], %%l4"
+                     :: "r"(minus2)
+                     : "o1", "o3", "o5", "l1", "l3", "l5", "memory");
+    return a + 10 * b + 100 * c + 1000 * d + 10000 * e + 100000 * f +
+           1000000 * g + 10000000 * h;
+}
+
 int main(void)
 {
     int n = seed(10), s = 0, v, w, mem = 1234, buf[4] = { 0, 0, 0, 0 };
@@ -133,6 +149,7 @@ int main(void)
         putn(a + 10 * b + 100 * c + 1000 * d + 10000 * e + 100000 * f +
              1000000 * g + 10000000 * h);
     }
+    putn(pair_clobbers(0));
     puts_("\n");
     putn(sp_add(40, 2));
     putn(sp_call(1));
