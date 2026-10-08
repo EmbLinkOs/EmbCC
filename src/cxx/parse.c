@@ -4552,14 +4552,16 @@ static void parse_namespace(void)
     memset(&na, 0, sizeof na);
     parse_attrs(&na);
     const char *names[16];
+    int inl[16] = { 0 };            /* `namespace a::inline b` (C++20) */
     int nn = 0;
     if (cx_kind() == TOK_IDENT) {
         names[nn++] = cx_cur()->t.text;
         cx_advance();
         while (cx_accept(TOK_COLONCOLON)) {
-            cx_accept(TOK_KW_INLINE);
+            int this_inline = cx_accept(TOK_KW_INLINE);
             if (cx_kind() != TOK_IDENT || nn == 16)
                 cx_error(cx_cur(), "expected a namespace name");
+            inl[nn] = this_inline;
             names[nn++] = cx_cur()->t.text;
             cx_advance();
         }
@@ -4604,7 +4606,7 @@ static void parse_namespace(void)
         if (!y) {
             y = scope_add(cx_scope, CS_NAMESPACE, names[i]);
             y->ns = scope_new(SC_NAMESPACE, names[i], cx_scope);
-            if (is_inline && i == nn - 1) {
+            if ((is_inline && i == nn - 1) || inl[i]) {
                 y->ns->is_inline = 1;
                 cx_scope->usings = xrealloc(cx_scope->usings,
                                             (size_t)(cx_scope->nusings + 1) *
@@ -4614,6 +4616,10 @@ static void parse_namespace(void)
         }
         cx_scope = y->ns;
         opened = 1;
+        if (inl[i] && !y->ns->is_inline)
+            cx_error(at, "namespace '%s' was not declared inline, and an "
+                         "inline namespace must be inline where it is "
+                         "first declared", names[i]);
         if (i == nn - 1 && y->ns->is_inline)   /* (else ignored, as g++) */
             tags_from(&y->ns->abi_tags, &y->ns->nabi_tags, &na);
     }
@@ -5239,6 +5245,94 @@ static struct cstmt *decl_of(struct cvar *v, const struct ctok *at)
  * begin-expr being __range for an array, __range.begin() for a class
  * with begin or end members, else begin(__range) by argument-dependent
  * lookup (and end alike). s is the S_FOR. */
+static int at_decl_stmt(void);
+static struct cstmt *expr_stmt(void);
+
+/* An init-statement ahead -- `if (init; cond)`, `switch (init; cond)` --
+ * is a `;` at the outer level before the `)` that closes the condition.
+ * If there is one, parse it (a declaration, or an expression statement)
+ * and return it; else NULL, with nothing consumed. */
+static struct cstmt *parse_init_statement(void)
+{
+    int depth = 0, has_init = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET)
+            depth++;
+        else if (k == TOK_RPAREN || k == TOK_RBRACE || k == TOK_RBRACKET) {
+            if (depth-- == 0)
+                break;
+        } else if (k == TOK_SEMI && depth == 0) {
+            has_init = 1;
+            break;
+        }
+    }
+    if (!has_init)
+        return NULL;
+    struct cstmt *init = NULL;
+    if (at_decl_stmt())
+        parse_declaration(0, &init);
+    else
+        init = expr_stmt();
+    return init;
+}
+
+/* a then b, as one list of statements (`more`) */
+static struct cstmt *chain_stmts(struct cstmt *a, struct cstmt *b)
+{
+    if (!a)
+        return b;
+    struct cstmt *l = a;
+    while (l->more)
+        l = l->more;
+    l->more = b;
+    return a;
+}
+
+/* The `:` of a range-based for at the outer level of the parentheses, from
+ * here to their `)`, or -1 if a `;` comes first. */
+static int range_for_colon(void)
+{
+    int depth = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET)
+            depth++;
+        else if (k == TOK_RPAREN || k == TOK_RBRACE || k == TOK_RBRACKET) {
+            if (depth-- == 0)
+                return -1;
+        } else if (depth == 0 && k == TOK_SEMI)
+            return -1;
+        else if (depth == 0 && k == TOK_COLON)
+            return i;
+    }
+    return -1;
+}
+
+/* `for (init; decl : range)`: one `;` at the outer level, then a `:` at the
+ * outer level before the `)`. Returns that `:`'s index, else -1. */
+static int range_for_after_init(void)
+{
+    int depth = 0;
+    for (int i = cx_pos; i < cx_ntoks; i++) {
+        enum tok_kind k = cx_toks[i].t.kind;
+        if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET)
+            depth++;
+        else if (k == TOK_RPAREN || k == TOK_RBRACE || k == TOK_RBRACKET) {
+            if (depth-- == 0)
+                return -1;
+        } else if (depth == 0 && k == TOK_SEMI) {
+            int save = cx_pos;
+            cx_pos = i + 1;
+            int c = range_for_colon();
+            cx_pos = save;
+            return c;
+        } else if (depth == 0 && k == TOK_COLON)
+            return -1;               /* an ordinary range-for */
+    }
+    return -1;
+}
+
 static void parse_range_for(struct cstmt *s, const struct ctok *at,
                             int colon)
 {
@@ -5743,44 +5837,9 @@ static struct cstmt *parse_stmt_or_none(void)
         scope_push(SC_BLOCK, NULL);
         struct cstmt *decl = NULL;
         /* C++17 init-statement: if (init; cond) */
-        int save = cx_pos;
-        int has_init = 0;
-        {
-            int depth = 0;
-            for (int i = cx_pos; i < cx_ntoks; i++) {
-                enum tok_kind k = cx_toks[i].t.kind;
-                if (k == TOK_LPAREN || k == TOK_LBRACE || k == TOK_LBRACKET)
-                    depth++;
-                else if (k == TOK_RPAREN || k == TOK_RBRACE ||
-                         k == TOK_RBRACKET) {
-                    if (depth-- == 0)
-                        break;
-                } else if (k == TOK_SEMI && depth == 0) {
-                    has_init = 1;
-                    break;
-                }
-            }
-        }
-        cx_pos = save;
-        struct cstmt *init = NULL;
-        if (has_init) {
-            if (at_decl_stmt())
-                parse_declaration(0, &init);
-            else
-                init = expr_stmt();
-        }
+        struct cstmt *init = parse_init_statement();
         s->e = convert_bool(parse_condition(&decl), "an if condition");
-        if (decl) {
-            if (init) {
-                struct cstmt *l = init;
-                while (l->more)
-                    l = l->more;
-                l->more = decl;
-            } else {
-                init = decl;
-            }
-        }
-        s->init = init;
+        s->init = chain_stmts(init, decl);
         cx_expect(TOK_RPAREN, "')' after the condition");
         if (is_constexpr) {
             /* the condition a constant; the other branch discarded —
@@ -5836,6 +5895,21 @@ static struct cstmt *parse_stmt_or_none(void)
         cx_advance();
         cx_expect(TOK_LPAREN, "'(' after for");
         scope_push(SC_BLOCK, NULL);
+        /* C++20 range-for with an init-statement: for (init; decl : range).
+         * The init runs once, before the range is evaluated, so it goes
+         * ahead of the range-for's own declarations. */
+        int rcolon = range_for_after_init();
+        if (rcolon >= 0) {
+            struct cstmt *init = parse_init_statement();
+            int colon = range_for_colon();
+            if (colon < 0)
+                cx_error(at, "expected 'declaration : range' after the "
+                             "init-statement of a range-based for");
+            parse_range_for(s, at, colon);
+            s->init = chain_stmts(init, s->init);
+            scope_pop();
+            return s;
+        }
         if (cx_kind() == TOK_SEMI) {
             cx_advance();
         } else if (at_decl_stmt()) {
@@ -5876,7 +5950,10 @@ static struct cstmt *parse_stmt_or_none(void)
         cx_advance();
         cx_expect(TOK_LPAREN, "'(' after switch");
         scope_push(SC_BLOCK, NULL);
-        struct cexpr *e = rvalue(parse_condition(&s->init));
+        /* C++17 init-statement: switch (init; cond), as `if` takes it */
+        struct cstmt *sinit = parse_init_statement(), *sdecl = NULL;
+        struct cexpr *e = rvalue(parse_condition(&sdecl));
+        s->init = chain_stmts(sinit, sdecl);
         if (e->t->k == CT_CLASS)          /* its one conversion to one */
             e = rvalue(convert(e, ct_basic(CT_LONG), "a switch"));
         if (!ct_is_integer(e->t))

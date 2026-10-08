@@ -4991,7 +4991,8 @@ static struct cexpr *parse_primary(void)
         enum cty_kind k;
         if (t->char_lit)
             k = t->str_prefix == 'L' ? CT_WCHAR : t->str_prefix == 'u'
-                ? CT_CHAR16 : t->str_prefix == 'U' ? CT_CHAR32 : CT_CHAR;
+                ? CT_CHAR16 : t->str_prefix == 'U' ? CT_CHAR32
+                : t->str_prefix == '8' ? CT_CHAR8 : CT_CHAR;
         else if (t->num_llong)
             k = t->num_uns ? CT_ULLONG : CT_LLONG;
         else if (t->num_long)
@@ -5111,6 +5112,25 @@ static struct cexpr *parse_primary(void)
     }
     case TOK_CX_THROW:
         return parse_throw();
+    case TOK_CX_AUTO:
+        /* C++23 auto(x) / auto{x}: a prvalue copy of x, of x's type
+         * decayed -- the type an `auto` variable initialized from it
+         * would have. */
+        if (cx_kind_at(1) == TOK_LPAREN || cx_kind_at(1) == TOK_LBRACE) {
+            cx_advance();
+            int brace = cx_kind() == TOK_LBRACE;
+            cx_advance();
+            struct cexpr *x = expr_parse_assign();
+            cx_expect(brace ? TOK_RBRACE : TOK_RPAREN,
+                      brace ? "'}' after auto{x}" : "')' after auto(x)");
+            struct cty *t = ct_unqual(ct_decay(ct_strip_ref(x->t)));
+            if (t->k != CT_CLASS)
+                return cast_to(t, x, CAST_C, at);
+            return init_object(t, INIT_DIRECT, &x, 1, at);
+        }
+        cx_error(at, "expected an expression before 'auto' (an expression "
+                     "begins with auto only as auto(x) or auto{x})");
+        return NULL;
     case TOK_LBRACKET:
         return parse_lambda();
     case TOK_CX_REQUIRES:

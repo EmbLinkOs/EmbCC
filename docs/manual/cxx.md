@@ -431,7 +431,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Structured bindings | Partial | Arrays, data members, tuple-like classes; in declarations and range-`for`; `static`; captured by lambdas. Members of a base class: `binding the members of a base of 'D' is not supported yet`. At namespace scope: `a structured binding at namespace scope is not supported yet` |
 | `if constexpr` | Supported | The discarded branch is not instantiated. |
 | `if` with an initializer | Supported | |
-| `switch` with an initializer | Not supported | `expected ')' before ';'` |
+| `switch` with an initializer | Supported | `switch (init; cond)`, with a declaration in the condition too. |
 | Fold expressions | Supported | All four forms. |
 | Inline variables | Supported | |
 | Nested namespace definitions (`namespace a::b`) | Supported | |
@@ -446,7 +446,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `[[fallthrough]]`, `[[maybe_unused]]`, `[[nodiscard]]` | Supported | `[[nodiscard]]` is accepted; discarding the value is not diagnosed. |
 | Aggregates with base classes | Supported | |
 | `auto x{1}` deduces `int` | Supported | |
-| `u8` character literals | Not supported | `'u8' was not declared in this scope` |
+| `u8` character literals | Supported | Of type `char8_t` in every mode, as a `u8` string is; one UTF-8 code unit, so `u8'\u00e9'` is refused by name. |
 | Removal of dynamic exception specifications and `register` | Not enforced | `throw(T)` and `register` are accepted. |
 
 ### C++20
@@ -471,12 +471,12 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `constexpr` virtual functions; `try` in `constexpr` functions | Supported | |
 | `constexpr` dynamic allocation; changing a union's active member in a constant expression | Not supported | The expression is not a constant expression. |
 | Parenthesized aggregate initialization | Supported | |
-| Range-based `for` with an initializer | Not supported | `expected '(' before 'x'` |
+| Range-based `for` with an initializer | Supported | The initializer runs once, before the range is evaluated. |
 | ADL for a function template called with explicit template arguments | Not supported | `'f' was not declared in this scope` |
 | Class template argument deduction for aggregates | Supported | |
 | Class template argument deduction for alias templates | Not supported | `expected a declaration before 'W'` |
 | Default member initializers for bit-fields | Supported | |
-| `namespace a::inline b` | Not supported | The members are not found: `'v' was not declared in this scope` |
+| `namespace a::inline b` | Supported | Reopening a namespace as inline that was first declared otherwise is refused, as the standard requires. |
 | `typename` optional in more contexts | Supported | |
 | `__VA_OPT__` | Supported | |
 | `std::source_location` | Supported | Through `__builtin_source_location`; a default argument gives the caller's position. |
@@ -494,7 +494,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `#elifdef`, `#elifndef` | Supported | |
 | `[[assume]]` | Accepted | |
 | Multidimensional subscript operator | Not supported | `'M' has no viable operator[]` |
-| `auto(x)` | Not supported | `expected an expression before 'auto'` |
+| `auto(x)`, `auto{x}` | Supported | A prvalue copy of `x`, of its decayed type. |
 
 ## Notes on partial support
 
