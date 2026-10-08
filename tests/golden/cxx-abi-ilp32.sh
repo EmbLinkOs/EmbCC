@@ -65,8 +65,16 @@ grep -q '^rtti ' "$out/host-rtti.txt" || {
     echo "the host RTTI reference prints no rtti line"; exit 1; }
 
 fail=0
-for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf; do
+for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf \
+         riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d; do
     d=$out/$t; mkdir -p "$d"
+    # RV32's hardware-float ABIs (TRIPLE/ABI, tools/build-rt.sh): EmbCC
+    # given the -march/-mabi, clang++ the same without C
+    tt=${t%%/*}; ef=
+    case $t in
+        */ilp32f) ef="-march=rv32imafc -mabi=ilp32f" ;;
+        */ilp32d) ef="-march=rv32imafdc -mabi=ilp32d" ;;
+    esac
     case $t in
         thumbv7m*)
             H=tests/harness/thumb; hv=EMBCC_THUMB_HARNESS
@@ -76,6 +84,14 @@ for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf; do
             H=tests/harness/thumb-m4f; hv=EMBCC_THUMB_HARNESS
             CL="--target=$t -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard"
             set -- qemu-system-arm -M mps2-an386 -cpu cortex-m4 ;;
+        riscv32*/ilp32f)
+            H=tests/harness/riscv; hv=EMBCC_RISCV_HARNESS
+            CL="--target=$tt -march=rv32imaf -mabi=ilp32f -mno-relax -ffp-contract=off"
+            set -- qemu-system-riscv32 -M virt -bios none -m 8 ;;
+        riscv32*/ilp32d)
+            H=tests/harness/riscv; hv=EMBCC_RISCV_HARNESS
+            CL="--target=$tt -march=rv32imafd -mabi=ilp32d -mno-relax -ffp-contract=off"
+            set -- qemu-system-riscv32 -M virt -bios none -m 8 ;;
         riscv32*)
             H=tests/harness/riscv; hv=EMBCC_RISCV_HARNESS
             CL="--target=$t -march=rv32imac -mabi=ilp32 -mno-relax"
@@ -86,9 +102,11 @@ for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf; do
         echo "$t: the libraries do not build:"; tail -3 "$d/build.log"
         exit 1; }
     for f in boot io; do
-        "$EMBCC" --target="$t" -c "$H/$f.c" -o "$d/$f.o" || exit 1
+        # shellcheck disable=SC2086
+        "$EMBCC" --target="$tt" $ef -c "$H/$f.c" -o "$d/$f.o" || exit 1
     done
-    "$EMBCC" --target="$t" -c tests/cxx-embedded/board.c -o "$d/board.o" ||
+    # shellcheck disable=SC2086
+    "$EMBCC" --target="$tt" $ef -c tests/cxx-embedded/board.c -o "$d/board.o" ||
         exit 1
     # clang++ over EmbCC's C library headers, as a firmware build would be
     CL="$CL -std=c++20 -fno-exceptions -nostdlibinc
@@ -109,7 +127,8 @@ for t in thumbv7m-none-eabi thumbv7em-none-eabihf riscv32-unknown-elf; do
                 if [ "$side" = a ]; then who=$sa; else who=$sb; fi
                 rm -f "$d/$side.$tag.o"
                 if [ "$who" = e ]; then
-                    "$EMBCC" --target="$t" $opt -fno-exceptions $rtti \
+                    # shellcheck disable=SC2086
+                    "$EMBCC" --target="$tt" $ef $opt -fno-exceptions $rtti \
                         -Ilib/libc/include -c "$D/side_$side.cc" \
                         -o "$d/$side.$tag.o"
                 else

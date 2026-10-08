@@ -512,7 +512,30 @@ exception flags), and the result replaces the instruction as an integer
 folds to the infinity the machine produces. Nothing is folded when an
 operand or the result is a NaN, because which NaN an invalid operation
 produces, and how a payload propagates, differ between machines.
-`long double` (`w` 16) is never folded.
+
+A 16-byte `long double` is folded by `ld_fold`: `+`, `-`, `*`, `/`,
+negation, and conversions to and from `float`, `double` and the
+integers.
+- **Format.** It is x87 extended on x86-64 and IEEE binary128 elsewhere,
+  too wide for `IR_CONST`. A constant is a `load.16` of a `straddr` into
+  `.rodata`, and the folded result becomes one more such constant.
+- **Arithmetic.** It is `sema/ldfloat`'s: exact, then rounded once to the
+  target's format. Conversions to `float` and `double` are rounded once
+  from the exact value.
+- **Constants it recognizes.** A pool constant is used only if its bytes
+  are what `ldf_encode` writes for its value, so an x87 unnormal is not
+  read as a number. NaN is never folded.
+- **Locals.** Inside one block, a value stored to a 16-byte local whose
+  address is never taken is known when it is read back. mem2reg does not
+  promote those locals.
+- **At -Os on binary128 targets,** a widening of a constant to `long
+  double` is left as its library call, which is smaller than the
+  constant and its load.
+
+`pass_dce` removes a load that nothing reads when its address is a
+string-pool constant and it reads inside it: that cannot fault. This is
+what drops the operands' loads after a fold. Pool entries nothing
+refers to any more stay in `.rodata`.
 
 **`pass_reassoc`**. `(x op c1) op c2` becomes `x op (c1 op c2)` when both
 operations are the same kind and both other operands are constants. Only

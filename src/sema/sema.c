@@ -1962,6 +1962,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col,
                        "compound assignment needs an lvalue");
         need_modifiable(u, e->lhs, e->line, e->col, "assignment");
+        /* an eight-byte _Atomic `x op= v` whose op is a compare-exchange
+         * loop of libatomic calls keeps the expected value in a local */
+        if (e->lhs->ty->is_atomic && ty_size(e->lhs->ty) == 8 &&
+            target_atomic8_libcall())
+            e->var_index = scope_add(sc, "<atomic expected>",
+                                     e->lhs->ty, NULL);
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
             *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);
@@ -4192,6 +4198,45 @@ static void need_atomic_object(struct unit *u, struct expr *e, struct type *t,
                 "bytes, not %s", e->lhs->name, ty_name(t));
 }
 
+/* An atomic builtin's memory order, for expr.atomic_mo: 1 + the
+ * __ATOMIC_* value when the argument folds to one, else 0 (seq_cst, the
+ * strongest, is always right). A compare-exchange's failure order is
+ * merged into its success order, as clang does: a failure that acquires
+ * makes a relaxed success acquire and a release one acq_rel, and a
+ * seq_cst failure makes it seq_cst. The __sync forms are all seq_cst, as
+ * clang has them -- lock_test_and_set too, which GCC documents as only an
+ * acquire. */
+static int atomic_order(const struct expr *e, enum atomic_kind ak,
+                        int is_sync)
+{
+    int at = -1, fail_at = -1;
+    long s = 5, f = -1;
+    switch (ak) {
+    case AK_LOAD_N: case AK_TEST_AND_SET: case AK_CLEAR: at = 1; break;
+    case AK_STORE_N: case AK_EXCHANGE_N: case AK_LOAD: case AK_STORE:
+        at = 2; break;
+    case AK_FETCH_OP: case AK_OP_FETCH: at = is_sync ? -1 : 2; break;
+    case AK_EXCHANGE: at = 3; break;
+    case AK_CMPXCHG_N: case AK_CMPXCHG: at = 4; fail_at = 5; break;
+    default: break;
+    }
+    if (at < 0)
+        return 0;
+    if (at >= e->nargs || !const_fold(e->args[at], &s) || s < 0 || s > 5)
+        return 0;
+    if (s == 1)
+        s = 2;                                  /* consume is acquire */
+    if (fail_at >= 0 && fail_at < e->nargs) {
+        if (!const_fold(e->args[fail_at], &f))
+            return 0;
+        if (f == 5)
+            s = 5;
+        else if (f == 1 || f == 2)
+            s = s == 0 ? 2 : s == 3 ? 4 : s;
+    }
+    return (int)s + 1;
+}
+
 /* Types a call to an atomic builtin (see atomic_builtin). */
 static void check_atomic_call(struct unit *u, struct func *f,
                               struct scope *sc, struct expr *e,
@@ -4220,6 +4265,7 @@ static void check_atomic_call(struct unit *u, struct func *f,
         sema_error_at(u, e->line, e->col, "%s takes %d arguments, not %d",
                 name, want, e->nargs);
     e->name = name;
+    e->atomic_mo = atomic_order(e, ak, is_sync);
 
     if (ak == AK_THREAD_FENCE || ak == AK_SIGNAL_FENCE) {
         e->ty = ty_base(TY_VOID, 0);
@@ -4270,6 +4316,13 @@ static void check_atomic_call(struct unit *u, struct func *f,
                         k + 1, name, ty_size(obj));
         }
     }
+    /* An eight-byte __sync compare-and-swap that is a libatomic call
+     * (target_atomic8_libcall) passes the expected value by address:
+     * irgen keeps it in a hidden local. */
+    if ((ak == AK_SYNC_VAL_CAS || ak == AK_SYNC_BOOL_CAS) &&
+        ty_size(obj) == 8 && target_atomic8_libcall())
+        e->var_index = scope_add(sc, "<atomic expected>",
+                                 ty_int_of_size(8, 1), NULL);
     switch (ak) {
     case AK_STORE_N: case AK_LOAD: case AK_STORE: case AK_EXCHANGE:
     case AK_SYNC_LOCK_RELEASE:
@@ -5285,6 +5338,35 @@ static void check_func(struct unit *u, struct func *f)
     struct scope sc = { 0, 0, 0, 0 };
     g_cx_sc = &sc;       /* complex lowering adds its temps here */
 
+    /* An interrupt handler on RISC-V or MIPS: the hardware calls it, so
+     * there is no caller to pass arguments -- they would be read out of
+     * whatever the interrupted code left in a0 -- and nobody to receive a
+     * result, which would be written over the interrupted code's a0. GCC
+     * and clang ignore the attribute with a warning; ignoring it here
+     * would return with `ret` into the middle of the interrupted code, so
+     * both are refused. (AVR's backend refuses the same two itself.) */
+    if (f->is_isr && (target_get() == TARGET_RISCV32 ||
+                      target_get() == TARGET_RISCV64 ||
+                      target_get() == TARGET_MIPS32)) {
+        if (f->nparams || f->is_varargs)
+            sema_error_line(u, f->line,
+                "interrupt handler '%s' takes parameters: the hardware "
+                "calls it, so nothing passes them, and they would be read "
+                "out of whatever the interrupted code left in the argument "
+                "registers", f->name);
+        if (f->ret_ty->kind != TY_VOID)
+            sema_error_line(u, f->line,
+                "interrupt handler '%s' returns a value: the interrupt "
+                "return goes back to the interrupted instruction, and "
+                "nothing there receives it -- it must return void",
+                f->name);
+        if (target_get() == TARGET_MIPS32 && !ISR_KIND(f->is_isr))
+            sema_error_line(u, f->line,
+                "'%s' is keep_interrupts_masked but not an interrupt "
+                "handler: the modifier needs __attribute__((interrupt))",
+                f->name);
+    }
+
     for (int i = 0; i < f->nparams; i++) {
         if (scope_find(&sc, f->params[i]) >= 0)
             sema_error_line(u, f->line,
@@ -5549,6 +5631,18 @@ static void merge_decls(struct unit *u)
         /* naked on the prototype and not on the definition is how
          * FreeRTOS's ports write it */
         canon->is_naked |= f->is_naked;
+        /* An interrupt handler is one on any declaration -- a prototype
+         * without the attribute and a definition with it were compiled
+         * as an ordinary function, returning with `ret` -- and one kind:
+         * the return instruction depends on which. */
+        if (f->is_isr) {
+            if (canon->is_isr && canon->is_isr != f->is_isr)
+                sema_error_line(u, f->line,
+                           "'%s' is declared as a different kind of "
+                           "interrupt handler than on line %d", f->name,
+                           canon->line);
+            canon->is_isr = f->is_isr;
+        }
         canon->cmse_entry |= f->cmse_entry;
         f->absorbed = 1;
     }

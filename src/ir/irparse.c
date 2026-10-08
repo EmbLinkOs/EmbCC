@@ -404,7 +404,12 @@ static void parse_ins(struct p *p, char *first, const char *rest)
         case IR_ALLOCA:
             in->a = vreg(p, word(p));
             break;
-        case IR_SPSAVE: case IR_FRAMEADDR: case IR_LANDING:
+        case IR_FRAMEADDR:
+            /* level 0 on a target with no frame chain: the frame
+             * address (frame0) or the return address (ret0) */
+            in->imm = eat(p, "ret0") ? 2 : eat(p, "frame0") ? 1 : 0;
+            break;
+        case IR_SPSAVE: case IR_LANDING:
             break;
         case IR_LABELADDR:
             in->label = labelno(p, word(p));

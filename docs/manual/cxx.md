@@ -25,10 +25,13 @@ On the Darwin and Windows targets C++ works with restrictions. On the
 32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
 C++ is supported without exceptions (`-fno-exceptions`), with or without
 RTTI, following the ARM C++ ABI and the Itanium ABI's 32-bit form;
-objects link with clang++'s. On `riscv64-unknown-elf` C++ is not
-supported: a unit compiles when exceptions are turned off, and is not
-tested. On AVR, MIPS32, Xtensa and TriCore EmbCC refuses to generate
-code for C++. See [Targets](#targets).
+objects link with clang++'s. On `riscv64-unknown-elf`,
+`mips64el-none-elf` and `loongarch64-unknown-elf` C++ is not supported:
+a unit compiles when exceptions are turned off (`-fno-exceptions`), and
+is not tested. With exceptions on it is refused, since EmbCC writes no
+unwind tables for these machines. On AVR, MIPS32, big-endian MIPS64,
+SPARC, PowerPC, ColdFire, Xtensa, TriCore and RX EmbCC refuses to
+generate code for C++. See [Targets](#targets).
 
 EmbCC compiles C++ by lowering it to C, which the C front end, the
 optimizer and the code generators then compile (design decision D-013 in
@@ -201,10 +204,10 @@ this:
 | `arm64-apple-darwin` | Supported | Supported | the system's C++ runtime |
 | `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
 | `x86_64-windows-gnu` | Restricted | Not supported | none |
-| `riscv64-unknown-elf` | Not supported; compiles, untested | Not supported | none |
+| `riscv64-unknown-elf`, `mips64el-none-elf`, `loongarch64-unknown-elf` | Not supported; compiles with `-fno-exceptions`, untested | Refused | none |
 | 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
 | `riscv32-unknown-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `avr`, `mipsel-none-elf`, `mips-none-elf`, `xtensa-none-elf`, `tricore-none-elf` | Refused | Not supported | none |
+| `avr`, `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `sparc-none-elf`, `powerpc-none-eabi`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Refused | Not supported | none |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
 built for `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu` and
@@ -431,7 +434,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Structured bindings | Partial | Arrays, data members, tuple-like classes; in declarations and range-`for`; `static`; captured by lambdas. Members of a base class: `binding the members of a base of 'D' is not supported yet`. At namespace scope: `a structured binding at namespace scope is not supported yet` |
 | `if constexpr` | Supported | The discarded branch is not instantiated. |
 | `if` with an initializer | Supported | |
-| `switch` with an initializer | Not supported | `expected ')' before ';'` |
+| `switch` with an initializer | Supported | `switch (init; cond)`, with a declaration in the condition too. |
 | Fold expressions | Supported | All four forms. |
 | Inline variables | Supported | |
 | Nested namespace definitions (`namespace a::b`) | Supported | |
@@ -446,7 +449,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `[[fallthrough]]`, `[[maybe_unused]]`, `[[nodiscard]]` | Supported | `[[nodiscard]]` is accepted; discarding the value is not diagnosed. |
 | Aggregates with base classes | Supported | |
 | `auto x{1}` deduces `int` | Supported | |
-| `u8` character literals | Not supported | `'u8' was not declared in this scope` |
+| `u8` character literals | Supported | Of type `char8_t` in every mode, as a `u8` string is; one UTF-8 code unit, so `u8'\u00e9'` is refused by name. |
 | Removal of dynamic exception specifications and `register` | Not enforced | `throw(T)` and `register` are accepted. |
 
 ### C++20
@@ -471,12 +474,12 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `constexpr` virtual functions; `try` in `constexpr` functions | Supported | |
 | `constexpr` dynamic allocation; changing a union's active member in a constant expression | Not supported | The expression is not a constant expression. |
 | Parenthesized aggregate initialization | Supported | |
-| Range-based `for` with an initializer | Not supported | `expected '(' before 'x'` |
+| Range-based `for` with an initializer | Supported | The initializer runs once, before the range is evaluated. |
 | ADL for a function template called with explicit template arguments | Not supported | `'f' was not declared in this scope` |
 | Class template argument deduction for aggregates | Supported | |
 | Class template argument deduction for alias templates | Not supported | `expected a declaration before 'W'` |
 | Default member initializers for bit-fields | Supported | |
-| `namespace a::inline b` | Not supported | The members are not found: `'v' was not declared in this scope` |
+| `namespace a::inline b` | Supported | Reopening a namespace as inline that was first declared otherwise is refused, as the standard requires. |
 | `typename` optional in more contexts | Supported | |
 | `__VA_OPT__` | Supported | |
 | `std::source_location` | Supported | Through `__builtin_source_location`; a default argument gives the caller's position. |
@@ -494,7 +497,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `#elifdef`, `#elifndef` | Supported | |
 | `[[assume]]` | Accepted | |
 | Multidimensional subscript operator | Not supported | `'M' has no viable operator[]` |
-| `auto(x)` | Not supported | `expected an expression before 'auto'` |
+| `auto(x)`, `auto{x}` | Supported | A prvalue copy of `x`, of its decayed type. |
 
 ## Notes on partial support
 

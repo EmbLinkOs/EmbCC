@@ -156,6 +156,14 @@ struct mips_fn {
      * fills at all (not under -g, whose line rows name offsets). */
     int barrier;
     int fill;
+    /* An interrupt handler (mips_isr_grow): struct func's is_isr, 0 for
+     * an ordinary function. isr_x is the caller-saved registers it saves
+     * (a mask), isr_hilo whether HI and LO are among them; with EPC and
+     * Status they fill isr_bytes at the top of the frame, from isr_at. */
+    int isr;
+    unsigned long isr_x;
+    int isr_hilo;
+    long isr_at, isr_bytes;
 };
 
 /* ---- the allocator's view of this machine ------------------------------
@@ -736,13 +744,27 @@ static void layout(struct mips_fn *F)
         off += W;
     }
     {
-        int raw = F->leaf ? 0 : W;
+        /* an interrupt handler keeps ra with what it saves (isr_x) */
+        int raw = F->leaf || F->isr ? 0 : W;
         long vsz = g_m64 && fn->is_varargs ? 64 : 0;
         long need = off + raw + (long)F->nsave * W + vsz;
         F->frame = (need + STACK_ALIGN - 1) & ~(long)(STACK_ALIGN - 1);
         F->ra_slot = F->frame - vsz - raw;
         F->save_at = F->ra_slot - (long)F->nsave * W;
         F->va_base = g_m64 ? F->frame - 64 : F->frame;
+    }
+    /* An interrupt handler's saves, at the very top, so nothing below
+     * moves with how many there are: EPC and Status, the registers, and
+     * HI and LO. */
+    F->isr_at = F->frame;
+    F->isr_bytes = 0;
+    if (F->isr) {
+        int n = 2 + (F->isr_hilo ? 2 : 0);
+        for (int r = 0; r < 32; r++)
+            n += (int)(F->isr_x >> r & 1);
+        F->isr_bytes = ((long)n * 4 + STACK_ALIGN - 1) &
+                       ~(long)(STACK_ALIGN - 1);
+        F->frame += F->isr_bytes;
     }
     F->va_first = -1;
 }
@@ -2444,6 +2466,265 @@ static void mips_restore(struct mips_fn *F, int ret)
     }
 }
 
+/* ---- interrupt handlers ------------------------------------------------
+ *
+ * __attribute__((interrupt)) as GCC defines it for MIPS32 -- clang's is
+ * the same -- with GCC's keep_interrupts_masked. The exception arrives
+ * between two instructions of code with a value in every register, so
+ * the handler leaves every register as it found it: the callee-saved
+ * ones the ordinary way, and here
+ *
+ *   - each caller-saved register it WRITES -- at, v0-v1, a0-a3, t0-t9,
+ *     ra -- and HI and LO if it writes either (a multiply or divide);
+ *   - ALL of them, gp too, when it calls anything (soft float and the
+ *     64-bit divisions are helper calls), which may use any of them.
+ *
+ * What it writes is decoded from the instructions it compiled to
+ * (mips_scan_writes), and it is emitted again until it saves all of it,
+ * as on RISC-V (riscv/codegen.c rv_isr_grow, which says why).
+ *
+ * It saves EPC and Status, because it runs with interrupts enabled again
+ * and a nested one overwrites both: GCC's sequence, k0 and k1 being the
+ * registers the ABI leaves to exception code --
+ *
+ *   mfc0 k0, Cause ; mfc0 k1, EPC ; addiu sp, sp, -frame ; sw k1, EPC
+ *   mfc0 k1, Status ; ext k0, k0, 10, 6 ; sw k1, Status
+ *   ins k1, k0, 10, 6        the RIPL as the new IPL ("eic", the default)
+ *   ins k1, zero, 8, n+1     or IM0..IMn cleared ("vector=sw0".."hw5")
+ *   ins k1, zero, 1, 4       KSU, ERL, EXL cleared: interrupts on
+ *   mtc0 k1, Status ; the saves ... the restores
+ *   di ; ehb ; EPC and Status back ; eret
+ *
+ * keep_interrupts_masked clears IE as well (ins k1, zero, 0, 5), reads
+ * no Cause and needs no di. HI and LO go through k0, so they are saved
+ * BEFORE the mtc0 that lets a nested interrupt in and restored AFTER the
+ * di: a nested handler's own prologue writes k0. (clang stores them
+ * after the mtc0 -- a nested interrupt between its mfhi k0 and sw k0
+ * saves the wrong HI -- and stores EPC and Status before it moves sp,
+ * into the interrupted code's stack; neither is copied here.)
+ *
+ * The plain form copies Cause.RIPL into Status.IPL, which is what an
+ * External Interrupt Controller's priority level means; on a core
+ * without one (malta's 24Kc) those bits are the pending lines, so a
+ * handler there wants vector=hwN or keep_interrupts_masked -- as with
+ * GCC. MIPS32r2 only: ext, ins, di and ehb are r2 instructions, and GCC
+ * refuses the attribute below r2 too. */
+
+/* The registers a call may clobber: at, v0-v1, a0-a3, t0-t9, ra. */
+static int mips_isr_cand(int r)
+{
+    return (r >= MIPS_AT && r <= MIPS_T7) || r == MIPS_T8 || r == MIPS_T9 ||
+           r == MIPS_RA;
+}
+
+/* What one word writes: a GPR mask, and whether HI or LO. A word not
+ * recognised is taken to write its rt and rd fields. */
+static void mips_writes(unsigned long w, unsigned long *xw, int *hilo)
+{
+    int op = (int)(w >> 26), rs = (int)(w >> 21) & 31,
+        rt = (int)(w >> 16) & 31, rd = (int)(w >> 11) & 31,
+        fn = (int)(w & 63);
+    switch (op) {
+    case 0x00:                                      /* SPECIAL */
+        if (fn == 0x11 || fn == 0x13 || (fn >= 0x18 && fn <= 0x1f))
+            *hilo = 1;                              /* mthi mtlo mult div */
+        else if (fn != 0x08 && fn != 0x0c && fn != 0x0d && fn != 0x0f &&
+                 (fn & 0x38) != 0x30)               /* jr syscall break sync
+                                                     * traps: none */
+            *xw |= 1UL << rd;
+        break;
+    case 0x1c:                                      /* SPECIAL2 */
+        if (fn <= 0x05)                             /* madd(u) mul msub(u) */
+            *hilo = 1;
+        if (fn == 0x02 || fn >= 0x20)               /* mul clz clo */
+            *xw |= 1UL << rd;
+        break;
+    case 0x01:                                      /* REGIMM */
+        if (rt & 0x10)
+            *xw |= 1UL << MIPS_RA;                  /* bltzal bgezal */
+        break;
+    case 0x03:                                      /* jal */
+        *xw |= 1UL << MIPS_RA;
+        break;
+    case 0x02: case 0x04: case 0x05: case 0x06: case 0x07:
+    case 0x14: case 0x15: case 0x16: case 0x17:     /* j, branches */
+    case 0x28: case 0x29: case 0x2a: case 0x2b: case 0x2e:
+    case 0x2c: case 0x2d: case 0x3f: case 0x2f: case 0x33:
+    case 0x31: case 0x35: case 0x39: case 0x3d:     /* stores cache pref */
+        break;
+    case 0x10:                                      /* COP0 */
+        if (rs == 0x00 || rs == 0x01 || rs == 0x0b)
+            *xw |= 1UL << rt;                       /* mfc0 dmfc0 di ei */
+        break;
+    case 0x1f:                                      /* SPECIAL3 */
+        if (fn <= 0x07 || fn == 0x3b)               /* (d)ext* (d)ins* rdhwr:
+                                                     * rd is a bit position */
+            *xw |= 1UL << rt;
+        else if (fn == 0x20 || fn == 0x24)          /* seb seh wsbh */
+            *xw |= 1UL << rd;
+        else
+            *xw |= 1UL << rt | 1UL << rd;
+        break;
+    default:                                        /* I-type ALU, loads,
+                                                     * sc, and the rest */
+        *xw |= 1UL << rt;
+        if (op == 0x11 || op == 0x12)
+            *xw |= 1UL << rd;
+        break;
+    }
+}
+
+static void mips_scan_writes(const struct mips_fn *F, int from, int to,
+                             unsigned long *xw, int *hilo)
+{
+    for (int at = from; at + 4 <= to; at += 4) {
+        int data = 0;
+        for (int k = 0; k < F->nfix && !data; k++)
+            data = F->fix[k].kind == FX_TAB && F->fix[k].at == at;
+        if (!data)
+            mips_writes(mips_rdw(F->t, at), xw, hilo);
+    }
+    *xw &= ~1UL;
+}
+
+/* After an attempt: what must the handler save? 1 when that is more than
+ * this attempt saved, and gen_func goes again. */
+static int mips_isr_grow(struct mips_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    unsigned long xw = 0, x = 0;
+    int hilo = 0, calls = 0;
+    mips_scan_writes(F, fn->src->code_off, F->t->len, &xw, &hilo);
+    /* A call: in the IR, to a helper, or in an asm template (it writes
+     * ra). An asm is not a call by itself here, as it is for the leaf
+     * test: what its template writes is in xw. */
+    for (int i = 0; i < fn->nins; i++)
+        if (fn->ins[i].op == IR_CALL || mips_op_calls_helper(&fn->ins[i]))
+            calls = 1;
+    calls |= (int)(xw >> MIPS_RA & 1);
+    for (int r = 0; r < 32; r++)
+        if (mips_isr_cand(r) && (calls || (xw >> r & 1)))
+            x |= 1UL << r;
+    if (calls) {
+        x |= 1UL << MIPS_GP;
+        hilo = 1;
+    }
+    if (!(x & ~F->isr_x) && (!hilo || F->isr_hilo))
+        return 0;
+    F->isr_x |= x;
+    F->isr_hilo |= hilo;
+    return 1;
+}
+
+/* The registers' saves or restores, below EPC and Status at the top of
+ * the area at `base`: GPRs from the top down in register order. */
+static void mips_isr_gprs(struct mips_fn *F, long base, int store)
+{
+    long off = base + F->isr_bytes - 8;
+    for (int r = 1; r < 32; r++)
+        if (F->isr_x >> r & 1) {
+            off -= 4;
+            if (store)
+                mips_store(F->t, r, MIPS_SP, (int)off, 4);
+            else
+                mips_load(F->t, r, MIPS_SP, (int)off, 4, 1);
+        }
+}
+
+/* HI and LO, at the bottom of the area, through k0. */
+static void mips_isr_hilo(struct mips_fn *F, long base, int store)
+{
+    struct code *t = F->t;
+    if (!F->isr_hilo)
+        return;
+    if (store) {
+        mips_mfhi(t, MIPS_K0);
+        mips_store(t, MIPS_K0, MIPS_SP, (int)base + 4, 4);
+        mips_mflo(t, MIPS_K0);
+        mips_store(t, MIPS_K0, MIPS_SP, (int)base, 4);
+    } else {
+        mips_load(t, MIPS_K0, MIPS_SP, (int)base + 4, 4, 1);
+        mips_mthi(t, MIPS_K0);
+        mips_load(t, MIPS_K0, MIPS_SP, (int)base, 4, 1);
+        mips_mtlo(t, MIPS_K0);
+    }
+}
+
+/* sp += d, through t0 past addiu's reach: only after the saves or
+ * before the restores, so t0 is the handler's own. */
+static void mips_isr_sp(struct mips_fn *F, long d)
+{
+    if (!d)
+        return;
+    if (fits16(d)) {
+        mips_alu_imm(F->t, MIPS_ADDIU, MIPS_SP, MIPS_SP, d);
+        return;
+    }
+    mips_li(F->t, A_LO, d);
+    mips_alu(F->t, MIPS_ADDU, MIPS_SP, MIPS_SP, A_LO);
+}
+
+/* (the lowest of the area's words: LO, when HI and LO are saved) */
+static long mips_isr_base(const struct mips_fn *F)
+{
+    return fits16(F->frame + 4) ? F->isr_at : 0;
+}
+
+static void mips_isr_prologue(struct mips_fn *F)
+{
+    struct code *t = F->t;
+    int kind = ISR_KIND(F->isr), masked = (F->isr & ISR_MASKED) != 0;
+    int eic = kind == ISR_INTERRUPT && !masked;
+    long base = mips_isr_base(F), top = base + F->isr_bytes;
+    if (eic)
+        mips_mfc0(t, MIPS_K0, 13, 0);                 /* Cause */
+    mips_mfc0(t, MIPS_K1, 14, 0);                     /* EPC */
+    mips_isr_sp(F, base ? -F->frame : -F->isr_bytes);
+    mips_store(t, MIPS_K1, MIPS_SP, (int)top - 4, 4);
+    mips_mfc0(t, MIPS_K1, 12, 0);                     /* Status */
+    if (eic)
+        mips_ext(t, MIPS_K0, MIPS_K0, 10, 6);         /* RIPL */
+    mips_store(t, MIPS_K1, MIPS_SP, (int)top - 8, 4);
+    if (eic)
+        mips_ins(t, MIPS_K1, MIPS_K0, 10, 6);         /* IPL = RIPL */
+    else if (!masked)
+        mips_ins(t, MIPS_K1, MIPS_ZERO, 8,
+                 kind - ISR_MIPS_VECTOR + 1);         /* IM0..IMn */
+    if (masked)
+        mips_ins(t, MIPS_K1, MIPS_ZERO, 0, 5);        /* IE EXL ERL KSU */
+    else
+        mips_ins(t, MIPS_K1, MIPS_ZERO, 1, 4);        /* EXL ERL KSU */
+    mips_isr_hilo(F, base, 1);           /* through k0: before the mtc0 */
+    mips_mtc0(t, MIPS_K1, 12, 0);
+    mips_isr_gprs(F, base, 1);
+    if (!base)
+        mips_isr_sp(F, -(F->frame - F->isr_bytes));
+}
+
+static void mips_isr_epilogue(struct mips_fn *F)
+{
+    struct code *t = F->t;
+    int masked = (F->isr & ISR_MASKED) != 0;
+    long base = mips_isr_base(F), top = base + F->isr_bytes;
+    for (int k = 0; k < F->nsave; k++)
+        ld_sp(F, F->used_callee[k], F->save_at + (long)k * W, W, 1);
+    if (!base)
+        mips_isr_sp(F, F->frame - F->isr_bytes);
+    mips_isr_gprs(F, base, 0);
+    if (!masked) {
+        mips_di(t, MIPS_ZERO);
+        mips_ehb(t);
+    }
+    mips_isr_hilo(F, base, 0);           /* through k0: after the di */
+    mips_load(t, MIPS_K1, MIPS_SP, (int)top - 4, 4, 1);
+    mips_mtc0(t, MIPS_K1, 14, 0);
+    mips_load(t, MIPS_K1, MIPS_SP, (int)top - 8, 4, 1);
+    mips_isr_sp(F, base ? F->frame : F->isr_bytes);
+    mips_mtc0(t, MIPS_K1, 12, 0);
+    mips_eret(t);
+    F->barrier = t->len;
+}
+
 /* The last, partial word of a composite in a register: its bytes, packed
  * from the lowest address up, as clang packs them -- the first byte the
  * word's least significant little-endian, its MOST significant
@@ -2839,15 +3120,26 @@ static void gen_ins(struct mips_fn *F, int n)
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG)
         need_word_atomic(F, i);
-    /* o32 keeps no frame-pointer chain to walk, and a function's own
-     * return address is in ra only until its first call. */
-    if (i->op == IR_FRAMEADDR)
-        mips_refuse(F, i, g_m64 ? "__builtin_frame_address or "
-                                  "__builtin_return_address (n64 code keeps "
-                                  "no frame-pointer chain)"
-                                : "__builtin_frame_address or "
-                                  "__builtin_return_address (o32 code keeps "
-                                  "no frame-pointer chain)");
+    /* o32 and n64 code keep no frame-pointer chain, so only level 0
+     * (irgen): the frame address is the stack pointer at entry (frame
+     * base + frame), and the return address is ra as the function was
+     * entered with it, from its slot -- a function that asks saves it,
+     * as one that calls does. An interrupt handler was not called: it
+     * returns to EPC, and ra is the interrupted code's. */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2 && F->isr)
+            mips_refuse(F, i, "__builtin_return_address in an interrupt "
+                              "handler (it was not called; EPC holds where "
+                              "it returns)");
+        if (i->imm == 2)
+            ld_sp(F, d, F->ra_slot, W, 1);
+        else
+            addr_sp(F, d, F->frame);
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
     if (i->op == IR_CAS16)
         mips_refuse(F, i, "a 16-byte atomic (MIPS64's lld/scd are a "
                           "doubleword; there is no 128-bit ll/sc)");
@@ -4057,7 +4349,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
         F.used_callee[F.nsave++] = MIPS_FP;
     F.tail = NULL;
     F.sx = g_m64 ? sext_map(&F) : NULL;
-    if (g_mips_regalloc && !want_debug)
+    /* an interrupt handler returns with eret: no tail call, whose callee
+     * would return with jr ra */
+    F.isr = f->is_isr;
+    if (g_mips_regalloc && !want_debug && !F.isr)
         for (i = 0; i < fn->nins; i++)
             if (mips_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -4067,7 +4362,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     F.leaf = 1;
     for (i = 0; i < fn->nins; i++)
         if ((fn->ins[i].op == IR_CALL && !(F.tail && F.tail[i])) ||
-            fn->ins[i].op == IR_ASM || mips_op_calls_helper(&fn->ins[i]))
+            fn->ins[i].op == IR_ASM || mips_op_calls_helper(&fn->ins[i]) ||
+            /* __builtin_return_address reads ra's slot */
+            (fn->ins[i].op == IR_FRAMEADDR && fn->ins[i].imm == 2))
             F.leaf = 0;
     layout(&F);
 
@@ -4111,7 +4408,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
 
     /* The prologue. t0 builds a large frame's size: no argument has been
      * touched yet. */
-    if (F.frame) {
+    if (F.isr) {
+        mips_isr_prologue(&F);
+    } else if (F.frame) {
         if (fits16(-F.frame)) {
             mips_alu_imm(t, P_ADDIU, MIPS_SP, MIPS_SP, -F.frame);
         } else {
@@ -4119,7 +4418,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
             mips_alu(t, P_ADDU, MIPS_SP, MIPS_SP, A_LO);
         }
     }
-    if (!F.leaf)
+    if (!F.leaf && !F.isr)
         st_sp(&F, MIPS_RA, F.ra_slot, W);
     for (i = 0; i < F.nsave; i++)
         st_sp(&F, F.used_callee[i], F.save_at + (long)i * W, W);
@@ -4276,7 +4575,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                 mips_mv(t, MIPS_SP, MIPS_FP);
                 F.fb = MIPS_SP;
             }
-            mips_restore(&F, 1);
+            if (F.isr)
+                mips_isr_epilogue(&F);
+            else
+                mips_restore(&F, 1);
             F.barrier = t->len;
         }
     }
@@ -4312,6 +4614,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
             longb[i] = 1;
             nfail++;
         }
+    }
+    /* An interrupt handler goes again until it saves everything it
+     * writes (mips_isr_grow), with the frame laid out for the saves. */
+    if (!nfail && F.isr && mips_isr_grow(&F)) {
+        free(F.slot);
+        layout(&F);
+        continue;
     }
     if (!nfail)
         break;

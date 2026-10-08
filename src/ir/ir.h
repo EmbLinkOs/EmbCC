@@ -98,7 +98,9 @@ enum ir_op {
                 * the CFG, liveness and the allocator see through it where
                 * IR_IGOTO's unknown targets make them step aside. */
     IR_ARMW,  /* dst = *(temp a); *(temp a) = dst OP b   (atomic; size, w).
-               * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b).
+               * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b);
+               * on AVR only, 'L' for an atomic load wider than a byte:
+               * dst = *a, and nothing stored.
                * Add and subtract stay IR_XADD, which x86 does in one
                * locked instruction; these need a compare-and-swap loop. */
     IR_CAS,   /* dst = *(temp a); if dst == b then *(temp a) = c
@@ -110,9 +112,13 @@ enum ir_op {
                * (x86-64's lock cmpxchg16b, aarch64's exclusive pair;
                * a full barrier both) — irgen builds the other atomics of
                * an __int128 as loops of it */
-    IR_FRAMEADDR, /* dst = this function's frame pointer (rbp / x29), which
-                   * on both targets points at [saved fp][return address] —
-                   * the base of __builtin_frame_address/_return_address */
+    IR_FRAMEADDR, /* imm 0: dst = this function's frame pointer (rbp /
+                   * x29 / a6), which points at [saved fp][return address]
+                   * — the base of __builtin_frame_address/_return_address.
+                   * Where there is no such chain (target_has_frame_chain),
+                   * level 0 only: imm 1, the frame address (sp at entry);
+                   * imm 2, the return address the function was entered
+                   * with */
     IR_ALLOCA,    /* dst = a fresh 16-aligned block of `a` bytes on the
                    * stack, above the outgoing-argument area (a VLA) */
     IR_SPSAVE,    /* dst = the stack pointer */
@@ -240,6 +246,14 @@ struct ir_asm {
  * once for all of them. */
 struct ir_jt { int n; int *labels; };
 
+/* An atomic read-modify-write's memory order (ir_ins.mo). Consume is
+ * acquire; seq_cst is 0, so an instruction built without one is the
+ * strongest. RISC-V maps them to .aq and .rl as clang does. */
+enum {
+    IR_MO_SEQ_CST = 0, IR_MO_RELAXED, IR_MO_ACQUIRE, IR_MO_RELEASE,
+    IR_MO_ACQ_REL
+};
+
 struct ir_ins {
     enum ir_op op;
     /* Where this instruction came from (R3). `line` is the statement or
@@ -253,6 +267,10 @@ struct ir_ins {
     int synth;
     int dst, a, b;
     int c;                   /* IR_CMPXCHG: the third operand (desired value) */
+    int mo;                  /* IR_XCHG/XADD/ARMW/CAS/CMPXCHG: the memory
+                              * order, IR_MO_*. 0 -- what every hand-built
+                              * one has -- is seq_cst, the strongest; a
+                              * backend may always treat any as seq_cst */
     int w;                   /* 4 or 8: operation width class */
     int size;                /* 1/2/4/8: memory width for LD/ST/EXT */
     int sign;                /* signed variant of the op */

@@ -313,7 +313,8 @@ static void print_ins(struct outbuf *b, const struct ir_unit *u,
         ob_fmt(b, "sprestore %%%d", i->a);
         break;
     case IR_FRAMEADDR:
-        ob_fmt(b, "%%%d = frameaddr", i->dst);
+        ob_fmt(b, "%%%d = frameaddr%s", i->dst,
+               i->imm == 2 ? " ret0" : i->imm == 1 ? " frame0" : "");
         break;
     case IR_LANDING:
         ob_fmt(b, "%%%d, %%%d = landing", i->dst, i->b);

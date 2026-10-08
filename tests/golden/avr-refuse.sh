@@ -56,10 +56,10 @@ refuses() {                       # refuses <name> <expected phrase> <source>
 
 refuses "an 8-byte asm operand" "an asm operand of 8 bytes" \
     'long long f(void){ long long x; __asm__("" : "=r"(x)); return x; }'
-refuses "__builtin_frame_address" "__builtin_frame_address or __builtin_return_address" \
-    'void *f(void){ return __builtin_frame_address(0); }'
-refuses "__builtin_return_address" "__builtin_frame_address or __builtin_return_address" \
-    'void *f(void){ return __builtin_return_address(0); }'
+refuses "__builtin_frame_address(1)" "only level 0" \
+    'void *f(void){ return __builtin_frame_address(1); }'
+refuses "__builtin_return_address(1)" "only level 0" \
+    'void *f(void){ return __builtin_return_address(1); }'
 
 echo "all $n unsupported constructs are refused, and each diagnostic names
 which one -- so nothing here can be mistaken for code that works"

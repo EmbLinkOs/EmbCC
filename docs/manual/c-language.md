@@ -319,7 +319,7 @@ there.
 | `long double _Complex` | Yes | Yes | No | Yes | Yes | Yes | No | No | Yes |
 | `__int128` | Yes | Yes | Not in a function signature | Yes | Yes | No | No | Declarations and `sizeof` only | No |
 | `_Float128` | No | No | No | Yes | No | No | Declarations and `sizeof` only | Declarations and `sizeof` only | No |
-| `_Atomic` operators | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 4 bytes | Load and store 1 to 4 bytes; read-modify-write 4 bytes | Load and store 1 to 8 bytes; read-modify-write 4 and 8 bytes | Load and store of 1 byte |
+| `_Atomic` operators | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes; 8 by a `lib/rt` call | 1 to 8 bytes; 8 by a `lib/rt` call | 1 to 8 bytes | 1 to 8 bytes, with interrupts masked |
 | `_Thread_local` | Per thread | No | No | Per thread | No | One shared instance | One shared instance | One shared instance | One shared instance |
 
 "One shared instance" means the object is placed in `.tbss` but addressed
@@ -336,7 +336,7 @@ The errors for the "No" entries:
 | `__int128` on a 32-bit target or AVR | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `_Float128` on x86-64 | `` _Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type `` |
 | `_Float128` where `long double` is not 16 bytes | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
-| An `_Atomic` object wider than the machine moves at once | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
+| An `_Atomic` object wider than the machine moves at once (16 bytes) | `an atomic access of 16 bytes is not one access on this target (it moves 8 at once): the halves could be split by an interrupt or another core` |
 | `_Thread_local` on macOS | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
 | `_Thread_local` on Windows | `__thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit` |
 | `va_arg` of a structure on Windows | `va_arg of a struct is not supported for a Windows target yet` |

@@ -61,7 +61,7 @@ na() {
     preprocessor)
         echo "#errors unless the target is x86-64 or AArch64" ;;
     atomics|atomics-reg|int128-atomic)
-        echo "1-, 2- and 16-byte atomics and __builtin_frame_address, refused by name (mips64-refuse.sh)" ;;
+        echo "1-, 2- and 16-byte atomics and __builtin_frame_address(1), refused by name: no frame chain (mips64-refuse.sh)" ;;
     volatile-local-longjmp)
         echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     packed-wide-bitfields)

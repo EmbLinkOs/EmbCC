@@ -55,7 +55,13 @@
  * without its SPE (-msoft-float). SPARC says it with SOFT_FLOAT,
  * clang's and GCC's -msoft-float. ColdFire is soft float when
  * __mcffpu__ is not defined. */
-#if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
+/* RISC-V asks the FPU and not the ABI: __riscv_flen is undefined without
+ * F, and 32 with F alone -- where every double routine is still needed,
+ * and the conversions between the widths (the binary32 ones compile too,
+ * and nothing calls them). With D the FPU does all of it but RV32's 64-bit
+ * integer conversions, below. */
+#if (defined(__riscv) && (!defined(__riscv_flen) || __riscv_flen == 32)) || \
+    defined(__SOFTFP__) || \
     defined(__mips_soft_float) || defined(__loongarch_soft_float) || \
     defined(__tricore__) || defined(__XTENSA__) || \
     (defined(__PPC__) && defined(_SOFT_FLOAT)) || \
@@ -72,7 +78,8 @@
  * part and are still this file's, and the rest is not compiled. Without
  * them `(long long)d` would not link there; with the rest, every M7 image
  * that converted one long long would carry the whole of binary64 too. */
-#if defined(SOFTFP_ALL) || defined(__arm__)
+#if defined(SOFTFP_ALL) || defined(__arm__) || \
+    (defined(__riscv) && __riscv_xlen == 32)
 #define SOFTFP_INT64 1
 #endif
 

@@ -11,6 +11,13 @@
 #   a7     armv7a-none-eabi, ARM (A32) state, on virt's Cortex-A15
 #   rv32   riscv32-unknown-elf on virt
 #   rv64   riscv64-unknown-elf on virt
+#   rv32f  the same with the F extension and its ABI, -march=rv32imafc
+#          -mabi=ilp32f -- an ESP32-P4 or CH32V3 class part -- linked with
+#          the ilp32f runtime and libc (build/libc/<triple>/ilp32f)
+#   rv32d  -march=rv32imafdc -mabi=ilp32d: doubles in f registers at RV32
+#   rv64d  -march=rv64gc -mabi=lp64d
+#
+# EMBCC_BOARDS="rv32f rv64d" runs just those.
 #
 # The corpus ran on these only by hand, and on ARMv6-M through
 # thumb-v6m-exec; `make test` ran it on x86-64 and AArch64, which share
@@ -44,8 +51,9 @@ export EMBCC EMBLD
 
 boards=
 command -v "$QA" >/dev/null 2>&1 && boards="$boards m4 m4hf a7"
-command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32"
-command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64"
+command -v "$Q32" >/dev/null 2>&1 && boards="$boards rv32 rv32f rv32d"
+command -v "$Q64" >/dev/null 2>&1 && boards="$boards rv64 rv64d"
+[ -n "${EMBCC_BOARDS:-}" ] && boards=" $EMBCC_BOARDS"
 [ -n "$boards" ] || { echo "SKIP: no qemu-system-arm or -riscv32/64"; exit 0; }
 
 triple() {
@@ -53,8 +61,25 @@ triple() {
         m4) echo thumbv7em-none-eabi ;;
         m4hf) echo thumbv7em-none-eabihf ;;
         a7) echo armv7a-none-eabi ;;
-        rv32) echo riscv32-unknown-elf ;;
-        rv64) echo riscv64-unknown-elf ;;
+        rv32|rv32f|rv32d) echo riscv32-unknown-elf ;;
+        rv64|rv64d) echo riscv64-unknown-elf ;;
+    esac
+}
+# The -march/-mabi a board adds, and the runtime variant they link with
+# (tools/build-rt.sh: TRIPLE/ABI)
+flags() {
+    case $1 in
+        rv32f) echo "-march=rv32imafc -mabi=ilp32f" ;;
+        rv32d) echo "-march=rv32imafdc -mabi=ilp32d" ;;
+        rv64d) echo "-march=rv64gc -mabi=lp64d" ;;
+    esac
+}
+variant() {
+    case $1 in
+        rv32f) echo riscv32-unknown-elf/ilp32f ;;
+        rv32d) echo riscv32-unknown-elf/ilp32d ;;
+        rv64d) echo riscv64-unknown-elf/lp64d ;;
+        *) triple "$1" ;;
     esac
 }
 
@@ -96,8 +121,9 @@ int main(void)
 EOT
 
 for b in $boards; do
-    T=$(triple $b); L=$out/$b; mkdir -p "$L"
-    { sh tools/build-rt.sh $T "$L" && sh tools/build-libc.sh $T "$L"; } \
+    T=$(triple $b); L=$out/$b; mkdir -p "$L"; FL=$(flags $b)
+    { sh tools/build-rt.sh "$(variant $b)" "$L" &&
+      sh tools/build-libc.sh "$(variant $b)" "$L"; } \
         > "$L/build.log" 2>&1 || {
         echo "FAIL: lib/rt or lib/libc does not build for $T:"
         tail -3 "$L/build.log"; exit 1; }
@@ -114,10 +140,12 @@ for b in $boards; do
             done
             "$EMBCC" --target=$T -O1 -c "$out/drv-a7.c" -o "$L/drv.o" ;;
         rv*) for f in boot io; do
-                "$EMBCC" --target=$T -c tests/harness/riscv/$f.c \
+                # shellcheck disable=SC2086
+                "$EMBCC" --target=$T $FL -c tests/harness/riscv/$f.c \
                     -o "$L/$f.o" || { echo "FAIL: the RISC-V harness"; exit 1; }
             done
-            "$EMBCC" --target=$T -O1 -c "$out/drv-rv.c" -o "$L/drv.o" ;;
+            # shellcheck disable=SC2086
+            "$EMBCC" --target=$T $FL -O1 -c "$out/drv-rv.c" -o "$L/drv.o" ;;
     esac || { echo "FAIL: the driver does not compile for $T"; exit 1; }
 done
 
@@ -148,7 +176,7 @@ cat > "$out/one.sh" <<'EOT'
 c=$1; opt=$2; b=$3; out=$4
 name=$(basename "$c" .c)
 case $b in
-    m4|m4hf|a7|rv32) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
+    m4|m4hf|a7|rv32*) case "$SKIP32" in *" $name "*) exit 0 ;; esac ;;
 esac
 case $b in
     a7) case "$SKIPA7" in *" $name "*) exit 0 ;; esac ;;
@@ -163,6 +191,9 @@ case $b in
     a7) T=armv7a-none-eabi ;;
     rv32) T=riscv32-unknown-elf ;;
     rv64) T=riscv64-unknown-elf ;;
+    rv32f) T="riscv32-unknown-elf -march=rv32imafc -mabi=ilp32f" ;;
+    rv32d) T="riscv32-unknown-elf -march=rv32imafdc -mabi=ilp32d" ;;
+    rv64d) T="riscv64-unknown-elf -march=rv64gc -mabi=lp64d" ;;
 esac
 L=$out/$b; o=$out/p/$name-$b$opt
 if ! "$EMBCC" --target=$T $opt -Dmain=prog_main -Ilib/libc/include \
@@ -185,9 +216,9 @@ case $b in
     a7) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$QA" \
             -M virt -cpu cortex-a15 -m 128 -semihosting -nographic \
             -monitor none -kernel $o.elf > $o.txt 2>&1 ;;
-    rv32) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
+    rv32*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q32" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
-    rv64) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \
+    rv64*) sh tests/harness/qrun.sh "${EMBCC_QEMU_TIMEOUT:-30}" "$Q64" \
             -M virt -bios none -nographic -m 8 -kernel $o.elf > $o.txt 2>&1 ;;
 esac
 got=$?

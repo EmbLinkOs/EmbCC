@@ -123,10 +123,10 @@ refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
     'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
 refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
     'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
-    'void *f(void){ return __builtin_return_address(0); }'
-refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
-    'void *f(void){ return __builtin_frame_address(0); }'
+refc "__builtin_return_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_return_address(1); }'
+refc "__builtin_frame_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_frame_address(1); }'
 refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \

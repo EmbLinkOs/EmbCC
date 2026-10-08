@@ -37,6 +37,14 @@ void _start(void);
 void _start(void)
 {
     unsigned *d = &__data_start, *s = &__data_load;
+#ifdef __riscv_flen
+    /* An image built for the F or D extension (-march=rv32imafc,
+     * rv64gc...): the FPU is OFF at reset -- mstatus.FS is 0, and the
+     * first floating-point instruction is an illegal-instruction trap.
+     * FS = Initial (bits 14:13 = 01) turns it on. Before anything else
+     * runs, since a constructor may compute in floating point too. */
+    __asm__ volatile("csrs mstatus, %0" : : "r"(0x2000u));
+#endif
     while (d < &__data_end)
         *d++ = *s++;
     for (d = &__bss_start; d < &__bss_end; )

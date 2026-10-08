@@ -46,7 +46,7 @@ A construct that a code generator cannot lower is refused when the
 function containing it is compiled, with a message of the form
 
 ```text
-embcc: f.c:3: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=8 size=4]
+embcc: f.c:3: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=4 size=4]
 ```
 
 The bracketed part names the internal operation that could not be
@@ -423,6 +423,7 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `warn_unused_result`, `[[nodiscard]]` | Discarding the result warns under [`-Wunused-result`](diagnostics.md#-wunused-result), on by default |
 | `weak` | On a definition, the symbol is weak and another definition overrides it at link time. On a declaration, the reference is weak: the function's address is null if no definition is linked. `weak` on any declaration of a function makes it weak |
 | `interrupt`, `signal` | Interrupt handlers. See [Interrupt handlers](#interrupt-handlers) |
+| `keep_interrupts_masked` | MIPS32 only, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
 
 A constructor or destructor with a priority is refused, because EmbCC
 emits one `.init_array` in source order:
@@ -637,13 +638,16 @@ supported: REASON`:
 |---|---|
 | `cleanup` | `the cleanup function would never run` |
 | `ifunc` | `the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `interrupt` | On x86-64, AArch64 and RISC-V; see [Interrupt handlers](#interrupt-handlers) |
+| `interrupt` | On every target but Cortex-M, AVR, RISC-V and MIPS32; see [Interrupt handlers](#interrupt-handlers) |
+| `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` (on every target but MIPS32) |
 | `mode` | `the declaration would keep its written type, so a typedef that asks for a specific width would silently get another` |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
 | `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
 | `sysv_abi` | `the arguments would be passed in the other convention's registers` |
 | `target` | `EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
+| `use_debug_exception_return` | `the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
+| `use_shadow_register_set` | `EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
 | `transparent_union` | `the union would be passed as a union rather than as its first member, which is a different calling convention` |
 | `vector_size` | `the type would stay a scalar: ...`; see [Vector extensions](#vector-extensions) |
 | `weakref` | `the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
@@ -676,18 +680,26 @@ vector table, a startup routine and handlers for each board is in
 |---|---|---|
 | AVR | Implemented. The handler saves `r0`, `SREG`, `r1`, the call-clobbered registers and the frame pointer, clears `r1`, re-enables interrupts with `sei` on entry, and returns with `reti` | Implemented, as `interrupt` without the `sei`: interrupts stay disabled in the body |
 | Cortex-M | Accepted; the code is the same as without it, because the processor saves the caller-saved registers on exception entry and an ordinary return performs the exception return. An argument such as `interrupt("IRQ")` is accepted | Refused |
-| RISC-V, x86-64, AArch64 | Refused | Refused |
+| RISC-V | Implemented, with `"machine"` (the default, returning with `mret`) and `"supervisor"` (`sret`). The handler saves the caller-saved registers it writes, and all of them, floating point included, when it calls; it is 4-byte aligned. `"user"` is refused | Refused |
+| MIPS32 | Implemented, with `"eic"` (the default), `"vector=sw0"`..`"vector=hw5"` and `keep_interrupts_masked`. The handler saves `EPC`, `Status`, the caller-saved registers it writes and `HI`/`LO`, all of them and `gp` when it calls, and returns with `eret`. `use_shadow_register_set` and `use_debug_exception_return` are refused | Refused |
+| x86-64, AArch64, MIPS64 and the other targets | Refused | Refused |
 
-The refusals read:
+On RISC-V and MIPS32 a handler with parameters or a non-`void` result is
+refused, and so is a function given two different kinds; the attribute
+may be on a prototype, on the definition or on both. In C++ the attribute
+is refused except on Cortex-M. The refusals read:
 
 ```text
-embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR it is implemented)
+embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
 embcc: isr.c:2: error: __attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does
+embcc: isr.c:2: error: interrupt handler 'isr' takes parameters: the hardware calls it, so nothing passes them, and they would be read out of whatever the interrupted code left in the argument registers
+embcc: isr.c:2: error: interrupt handler 'isr' returns a value: the interrupt return goes back to the interrupted instruction, and nothing there receives it -- it must return void
 ```
 
-On RISC-V, write the trap entry in assembly and call a C function from
-it; see [Trap handlers](embedded.md#trap-handlers). For the AVR vector
-names (`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
+How to install a handler on each board, and what each one saves, is in
+[Embedded programming](embedded.md): [RISC-V](embedded.md#interrupt-handlers-1)
+and [MIPS32](embedded.md#interrupt-handlers-2). For the AVR vector names
+(`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
 
 `naked` is supported on ARM Cortex-M, RISC-V and AVR, where the body is
 assembled as a block of the target's assembly; see
@@ -928,15 +940,53 @@ check, as a call to a `noreturn` function does.
 |---|---|---|
 | `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All |
 | `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All |
-| `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | x86-64, AArch64 |
-| `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | x86-64, AArch64 |
+| `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | Any level: x86-64, AArch64, ColdFire. Level 0: RISC-V, MIPS32, MIPS64, LoongArch, SPARC, PowerPC, Xtensa, TriCore, RX, AVR |
+| `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | As `__builtin_frame_address` |
 
 `level` must be a non-negative integer constant (`__builtin_frame_address
-needs a non-negative constant level`). On Cortex-M, RISC-V, MIPS32 and AVR the frame
-builtins are refused:
+needs a non-negative constant level`).
+
+**A frame chain.** x86-64, AArch64 and ColdFire code keeps a chain of
+saved frame pointers, so any level can be walked.
+
+**Level 0 only.** Code for the other targets keeps no chain, and only
+the current function's own frame can be found. A higher level is
+refused:
 
 ```text
-embcc: r.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [frameaddr w=8 size=4]
+embcc: r.c:1: error: __builtin_return_address(1) is not supported on riscv32-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
+```
+
+At level 0, a function that asks for its return address saves it, as a
+function that calls does. `__builtin_return_address(0)` is:
+
+| Target | Return address |
+|---|---|
+| RISC-V, MIPS, LoongArch, PowerPC | The return register (`ra` or `LR`) as the function was entered |
+| TriCore | `A11`, which a call keeps for the whole body |
+| SPARC | `%i7`, the address of the call itself (the return goes to `%i7 + 8`), as GCC and clang return it |
+| Xtensa | `a0` with its top two bits, the windowed ABI's call increment, replaced by those of the function's own address, as GCC does |
+| RX | The word the call pushed |
+| AVR | The word address the call pushed, as an AVR function pointer holds it (2-byte program counters) |
+
+`__builtin_frame_address(0)` is:
+
+| Target | Frame address |
+|---|---|
+| RISC-V, MIPS, LoongArch, Xtensa, TriCore | The stack pointer at entry, which is what GCC and clang return on RISC-V |
+| SPARC | `%fp`, the same address |
+| RX and AVR | The stack pointer at entry, which points at, or just below, the return address the call pushed |
+| PowerPC | `r1` after the prologue, the frame's back-chain word, as GCC and clang return it |
+
+**Interrupt handlers.** In a RISC-V, MIPS or AVR interrupt handler,
+`__builtin_return_address` is refused: a handler was not called, and
+what it returns to is the trap's. AVR refuses
+`__builtin_frame_address` there too.
+
+**Cortex-M and ARMv7-A** refuse both builtins for now:
+
+```text
+embcc: r.c:1: error: the ARMv7-M backend cannot lower __builtin_frame_address or __builtin_return_address (this backend keeps no frame-pointer chain) yet (function f) [frameaddr w=4 size=4]
 ```
 
 A function that calls `alloca` is never inlined.
@@ -999,11 +1049,19 @@ on an integer or pointer of 1, 2, 4, 8 or 16 bytes, not double`. The
 `__sync` builtins accept, and ignore, the trailing list of variables
 GCC allows.
 
-Every operation is sequentially consistent. The memory-order arguments
-are accepted and do not change the code: `__ATOMIC_RELAXED` produces the
-same instructions as `__ATOMIC_SEQ_CST`. `__atomic_signal_fence` emits
-the same barrier as `__atomic_thread_fence`. No operation calls a
-library: each is inline or refused.
+On RISC-V the memory order of a read-modify-write or compare-exchange
+selects its `.aq` and `.rl` bits as clang's does: relaxed is bare,
+acquire `.aq`, release `.rl`, and acq_rel and seq_cst `.aqrl` on an AMO;
+an `lr`/`sc` loop takes the acquire on the `lr` and the release on the
+`sc`, and seq_cst is `lr.aqrl`/`sc.rl`. A compare-exchange's failure
+order strengthens its success order, as clang merges them. An order that
+is not a constant is seq_cst, as are the `__sync` builtins and the
+operators on an `_Atomic` object. On every other target every operation
+is sequentially consistent: the memory-order arguments are accepted and
+do not change the code. `__atomic_signal_fence` emits
+the same barrier as `__atomic_thread_fence`. No operation of 1, 2 or 4
+bytes, or of 8 on a 64-bit target, calls a library; an eight-byte one on
+a 32-bit target does (below).
 
 `__atomic_always_lock_free` and `__atomic_is_lock_free` are integer
 constant expressions, usable in `_Static_assert`. The size must be a
@@ -1015,17 +1073,38 @@ does not reflect the table below.
 
 | Operation | x86-64 | AArch64 | Cortex-M | RV32 | RV64 | AVR |
 |---|---|---|---|---|---|---|
-| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4 |
-| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1, 2, 4 |
+| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4; 8 by a call | 1, 2, 4; 8 by a call | 1, 2, 4, 8 | 1, 2, 4, 8 |
+| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4; 8 by a call | 1, 2, 4; 8 by a call | 1, 2, 4, 8 | 1, 2, 4, 8 |
 | Fences | Yes | Yes | Yes | Yes | Yes | Yes (no instruction) |
 
 16-byte operations need `__int128` or a 16-byte object through the
 generic forms. Other sizes are refused, for example:
 
 ```text
-embcc: a.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]
-embcc: a.c:1: error: an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core
+embcc: a.c:1: error: an atomic access of 16 bytes is not one access on this target (it moves 8 at once): the halves could be split by an interrupt or another core
 ```
+
+#### Eight bytes on a 32-bit target
+
+Every 32-bit target -- Cortex-M, ARMv7-A, RV32, MIPS32, SPARC, PowerPC,
+ColdFire, TriCore, Xtensa and RX -- does an eight-byte atomic by calling
+libatomic's sized routine, as GCC and clang do there (none of them moves
+eight bytes atomically):
+
+| Operation | Called |
+|---|---|
+| `__atomic_load_n`, `__atomic_load`, reading an `_Atomic` | `u64 __atomic_load_8(const volatile void *p, int order)` |
+| `__atomic_store_n`, `__atomic_store`, `__sync_lock_release`, `=` | `void __atomic_store_8(volatile void *p, u64 v, int order)` |
+| `__atomic_exchange_n`, `__atomic_exchange`, `__sync_lock_test_and_set` | `u64 __atomic_exchange_8(volatile void *p, u64 v, int order)` |
+| `__atomic_compare_exchange_n`, `__atomic_compare_exchange`, the `__sync` compare-and-swaps, `*=` and the other operators without a fetch form | `bool __atomic_compare_exchange_8(volatile void *p, void *expected, u64 desired, int success, int failure)` |
+| `__atomic_fetch_OP`, `__atomic_OP_fetch`, `__sync_fetch_and_OP`, `__sync_OP_and_fetch`, `++`, `--`, `+=`, `-=`, `&=`, <code>&#124;=</code>, `^=` | `u64 __atomic_fetch_OP_8(volatile void *p, u64 v, int order)`, OP one of `add`, `sub`, `and`, `or`, `xor`, `nand` |
+
+The orders are the `__ATOMIC_*` values as the call wrote them -- a
+variable order is passed as its value -- and seq_cst (5) for the `__sync`
+builtins and the operators, except `__sync_lock_release`'s release (3),
+as clang passes them. `lib/rt` defines every one, weak, by masking
+interrupts; see [Embedded programming](embedded.md#eight-byte-atomics-on-a-32-bit-target)
+for what that does and does not cover, and how to replace them.
 
 The instructions used on each embedded target are described in
 [Embedded programming](embedded.md). `_Atomic` objects and the

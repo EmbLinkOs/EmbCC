@@ -70,7 +70,7 @@ na() {
     alignas-decl)
         echo "a 16-aligned scalar local, refused by name above the 8-byte o32 stack (as on Thumb)" ;;
     atomics|atomics-reg)
-        echo "1- and 2-byte atomics and __builtin_frame_address, refused by name (mips-refuse.sh)" ;;
+        echo "1- and 2-byte atomics and __builtin_frame_address(1), refused by name: no frame chain (mips-refuse.sh)" ;;
     volatile-local-longjmp)
         echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     *) return 1 ;;

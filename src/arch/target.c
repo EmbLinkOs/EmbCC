@@ -36,6 +36,9 @@ static int g_thumb_fpu;     /* see target_thumb_fpu */
 static int g_thumb_fpu_dp;  /* see target_thumb_fpu_dp */
 static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
+/* RISC-V's -march= and -mabi= (target_riscv_flen and the rest): the C
+ * extension on and no FPU by default, rv32imac/ilp32 and rv64imac/lp64. */
+static int g_rv_c = 1, g_rv_f, g_rv_d, g_rv_zifencei, g_rv_abi_flen;
 /* ARMv7-A in ARM state (armv7a-none-eabi): the same AAPCS32 and data model
  * as the Cortex-M levels -- which is why it is this target and not a new
  * enum value -- with the A32 instruction set. See target_arm_a32. */
@@ -326,6 +329,7 @@ int target_is_mips(void)
 }
 
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
+int target_atomic8_libcall(void) { return g_model[g_arch].ptr == 4; }
 int target_double_size(void)    { return g_model[g_arch].dbl; }
 int target_int_size(void)       { return g_model[g_arch].it; }
 /* XLEN is RISC-V's own name for the register width IN BITS -- 32 or 64,
@@ -349,6 +353,10 @@ int target_has_sqrt(int bytes)
     case TARGET_THUMB:   return target_thumb_fpu() &&
                                 (bytes == 4 ||
                                  (bytes == 8 && target_thumb_fpu_dp()));
+    /* fsqrt.s with F, fsqrt.d with D: correctly rounded, as sqrt is */
+    case TARGET_RISCV32:
+    case TARGET_RISCV64: return (bytes == 4 && target_riscv_flen() >= 32) ||
+                                (bytes == 8 && target_riscv_flen() == 64);
     default:             return 0;
     }
 }
@@ -550,6 +558,12 @@ int target_va_list_is_pointer(void)
                                       * argument words */
     }
     return 0;
+}
+
+int target_has_frame_chain(void)
+{
+    return g_arch == TARGET_X86_64 || g_arch == TARGET_AARCH64 ||
+           g_arch == TARGET_COLDFIRE;
 }
 
 int target_widen_unsigned_fp_cvt(void)
@@ -1021,12 +1035,6 @@ int target_elf_machine(enum target_arch a)
     }
 }
 
-/* The C extension. EmbCC has no -march= yet, so this is on for every
- * RISC-V target -- which is what both reference compilers default to
- * (clang's -march for riscv32-unknown-elf is rv32imac) and what every
- * RISC-V microcontroller implements. When -march= exists this becomes the
- * place that reads it, and the predefined macro table (the per-width
- * predef.c, __riscv_c) has to move with it. */
 int target_mul_shift_add(long c, int *k, int *neg, int *j)
 {
     if (c <= 2)
@@ -1042,17 +1050,46 @@ int target_mul_shift_add(long c, int *k, int *neg, int *j)
     return 0;
 }
 
+/* The C extension: on unless -march= leaves out the `c` -- on by default
+ * because that is what both reference compilers default to (clang's
+ * -march for riscv32-unknown-elf is rv32imac) and what nearly every RISC-V
+ * microcontroller implements. The predefined macros (__riscv_c) follow it
+ * (src/arch/predef.c). */
 int target_riscv_rvc(void)
 {
-    return 1;
+    return g_rv_c;
 }
+int target_riscv_flen(void)
+{
+    if (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64)
+        return 0;
+    return g_rv_d ? 64 : g_rv_f ? 32 : 0;
+}
+int target_riscv_abi_flen(void)
+{
+    if (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64)
+        return 0;
+    return g_rv_abi_flen;
+}
+int target_riscv_zifencei(void) { return g_rv_zifencei; }
+void target_set_riscv_isa(int f, int d, int c, int zifencei)
+{
+    g_rv_f = f ? 1 : 0;
+    g_rv_d = d ? 1 : 0;
+    g_rv_c = c ? 1 : 0;
+    g_rv_zifencei = zifencei ? 1 : 0;
+}
+void target_set_riscv_abi_flen(int flen) { g_rv_abi_flen = flen; }
 
 unsigned long target_elf_flags(enum target_arch a)
 {
     switch (a) {
     case TARGET_THUMB:   return EF_ARM_EABI_VER5;
     case TARGET_RISCV32:
-    case TARGET_RISCV64: return target_riscv_rvc() ? EF_RISCV_RVC : 0;
+    case TARGET_RISCV64: return (target_riscv_rvc() ? EF_RISCV_RVC : 0) |
+                                (g_rv_abi_flen == 64 ? EF_RISCV_FLOAT_ABI_DOUBLE
+                                 : g_rv_abi_flen == 32 ? EF_RISCV_FLOAT_ABI_SINGLE
+                                 : EF_RISCV_FLOAT_ABI_SOFT);
     case TARGET_AVR:     return EF_AVR_ARCH_AVR5;
     /* What clang writes for -mcpu=mips32r2 -mno-abicalls: the delay
      * slots are filled (with nops), the code is not abicalls/PIC. */

@@ -154,7 +154,8 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
         int sz = (op == 0x80) ? 1 : opsz;
         int r = modrm(code, &i, rex, sz, 0, rm);
         long imm; 
-        if (op == 0x81) { imm = rd_s32(code + i); i += 4; }
+        if (op == 0x81 && opsz == 2) { imm = (short)(code[i] | (code[i + 1] << 8)); i += 2; }
+        else if (op == 0x81) { imm = rd_s32(code + i); i += 4; }
         else { imm = (signed char)code[i]; i += 1; }
         sprintf(out, "%s    $0x%lx,%s", GRP1[r & 7], imm & 0xffffffffUL, rm);
         return i;
@@ -173,6 +174,7 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
         int r = modrm(code, &i, rex, sz, 0, rm); (void)r;
         long imm; 
         if (op == 0xc6) { imm = code[i]; i += 1; }
+        else if (opsz == 2) { imm = code[i] | (code[i + 1] << 8); i += 2; }
         else { imm = rd_s32(code + i); i += 4; }
         sprintf(out, "mov    $0x%lx,%s", imm & 0xffffffffUL, rm);
         return i;
@@ -238,6 +240,81 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
     if (op == 0xcd) { int imm = code[i++]; sprintf(out, "int    $0x%x", imm); return i; }
     if (op == 0xf4) { sprintf(out, "hlt"); return i; }
 
+    /* ---- string operations, which memcpy and memset lower to ---- */
+    if (op == 0xa4 || op == 0xa5 || op == 0xaa || op == 0xab ||
+        op == 0xac || op == 0xad) {
+        char w = (op & 1) ? ((rex & 8) ? 'q' : pfx66 ? 'w' : 'l') : 'b';
+        const char *acc = (op & 1) ? ((rex & 8) ? "rax" : pfx66 ? "ax" : "eax")
+                                   : "al";
+        const char *r = rep == 0xf3 ? "rep " : "";
+        if (op <= 0xa5)
+            sprintf(out, "%smovs%c (%%rsi),%%es:(%%rdi)", r, w);
+        else if (op <= 0xab)
+            sprintf(out, "%sstos%c %%%s,%%es:(%%rdi)", r, w, acc);
+        else
+            sprintf(out, "%slods%c (%%rsi),%%%s", r, w, acc);
+        return i;
+    }
+
+    /* ---- x87, which long double is: D8-DF and a ModRM ---- */
+    if (op >= 0xd8 && op <= 0xdf && i < n) {
+        unsigned char m = code[i];
+        int reg = (m >> 3) & 7, sti = m & 7;
+        if ((m >> 6) != 3) {
+            static const char *const MEM[8][8] = {
+                [1] = { "flds", 0, "fsts", "fstps", 0, "fldcw", 0, "fnstcw" },
+                [3] = { "fildl", 0, "fistl", "fistpl", 0, "fldt", 0, "fstpt" },
+                [5] = { "fldl", 0, "fstl", "fstpl", 0, 0, 0, 0 },
+                [7] = { "filds", 0, 0, 0, 0, "fildll", 0, "fistpll" },
+            };
+            const char *mn = MEM[op - 0xd8][reg];
+            if (mn) {
+                (void)modrm(code, &i, rex, 8, 0, rm);
+                sprintf(out, "%-6s %s", mn, rm);
+                return i;
+            }
+        } else {
+            const char *mn = 0;
+            char opnd[24] = "";
+            switch (op) {
+            case 0xd9:
+                if (m >= 0xc0 && m <= 0xc7) { mn = "fld"; sprintf(opnd, "%%st(%d)", sti); }
+                else if (m >= 0xc8 && m <= 0xcf) { mn = "fxch"; sprintf(opnd, "%%st(%d)", sti); }
+                else if (m == 0xe0) mn = "fchs";
+                else if (m == 0xe1) mn = "fabs";
+                else if (m == 0xe8) mn = "fld1";
+                else if (m == 0xee) mn = "fldz";
+                break;
+            case 0xda:
+                if (m == 0xe9) mn = "fucompp";
+                break;
+            case 0xdb:
+                if (m >= 0xe8 && m <= 0xef) { mn = "fucomi"; sprintf(opnd, "%%st(%d),%%st", sti); }
+                break;
+            case 0xdd:
+                if (m >= 0xd0 && m <= 0xd7) { mn = "fst"; sprintf(opnd, "%%st(%d)", sti); }
+                else if (m >= 0xd8 && m <= 0xdf) { mn = "fstp"; sprintf(opnd, "%%st(%d)", sti); }
+                break;
+            case 0xde: {
+                static const char *const P[8] = { "faddp", "fmulp", 0, 0,
+                                                  "fsubp", "fsubrp", "fdivp", "fdivrp" };
+                mn = P[reg];
+                if (mn) sprintf(opnd, "%%st,%%st(%d)", sti);
+                break;
+            }
+            case 0xdf:
+                if (m >= 0xe8 && m <= 0xef) { mn = "fucompi"; sprintf(opnd, "%%st(%d),%%st", sti); }
+                break;
+            }
+            if (mn) {
+                i++;
+                if (opnd[0]) sprintf(out, "%-6s %s", mn, opnd);
+                else         sprintf(out, "%s", mn);
+                return i;
+            }
+        }
+    }
+
     /* ---- two-byte 0F opcodes ---- */
     if (op == 0x0f) {
         unsigned char o2 = code[i++];
@@ -259,6 +336,83 @@ int embdbg_decode_one(const unsigned char *code, int n, unsigned long addr,
         if (o2 == 0x1f) { int r = modrm(code, &i, rex, opsz, 0, rm); (void)r;
             sprintf(out, "nop    %s", rm); return i; }
         if (o2 == 0xa2) { sprintf(out, "cpuid"); return i; }
+        if (o2 >= 0x40 && o2 <= 0x4f) { int r = modrm(code, &i, rex, opsz, 0, rm);
+            sprintf(out, "cmov%-4s %s,%%%s", CC[o2 - 0x40], rm, regname(opsz, r));
+            return i; }
+        if (o2 >= 0xc8 && o2 <= 0xcf) {            /* bswap: the register in the opcode */
+            int r = (o2 - 0xc8) | ((rex & 1) ? 8 : 0);
+            sprintf(out, "bswap  %%%s", regname(opsz == 8 ? 8 : 4, r)); return i; }
+        if (o2 == 0xa4 || o2 == 0xa5 || o2 == 0xac || o2 == 0xad) {
+            int r = modrm(code, &i, rex, opsz, 0, rm);       /* shld / shrd */
+            const char *mn = o2 < 0xac ? "shld" : "shrd";
+            if (o2 == 0xa4 || o2 == 0xac) { int imm = code[i++];
+                sprintf(out, "%s   $0x%x,%%%s,%s", mn, imm, regname(opsz, r), rm); }
+            else
+                sprintf(out, "%s   %%cl,%%%s,%s", mn, regname(opsz, r), rm);
+            return i; }
+        /* movd/movq between a general register (or memory) and an xmm:
+         * 66 0F 6E loads the xmm, 66 0F 7E stores it -- REX.W picks the
+         * quadword. F3 0F 7E is movq xmm/m64 into an xmm. */
+        if ((o2 == 0x6e || o2 == 0x7e) && pfx66) {
+            int q = (rex & 8) != 0;
+            int r = modrm(code, &i, rex, q ? 8 : 4, 0, rm);
+            if (o2 == 0x6e)
+                sprintf(out, "mov%c   %s,%%xmm%d", q ? 'q' : 'd', rm, r);
+            else
+                sprintf(out, "mov%c   %%xmm%d,%s", q ? 'q' : 'd', r, rm);
+            return i; }
+        if (o2 == 0x7e && rep == 0xf3) { int r = modrm(code, &i, rex, 8, 1, rm);
+            sprintf(out, "movq   %s,%%xmm%d", rm, r); return i; }
+        if (o2 == 0xd6 && pfx66) { int r = modrm(code, &i, rex, 8, 1, rm);
+            sprintf(out, "movq   %%xmm%d,%s", r, rm); return i; }
+        /* SSE2 packed integer, 66 0F: the vectorizer's vocabulary */
+        if (pfx66) {
+            static const struct { unsigned char o; const char *mn; } P[] = {
+                {0x60,"punpcklbw"}, {0x61,"punpcklwd"}, {0x62,"punpckldq"},
+                {0x68,"punpckhbw"}, {0x69,"punpckhwd"}, {0x6a,"punpckhdq"},
+                {0x6c,"punpcklqdq"}, {0x6d,"punpckhqdq"},
+                {0x64,"pcmpgtb"}, {0x65,"pcmpgtw"}, {0x66,"pcmpgtd"},
+                {0x74,"pcmpeqb"}, {0x75,"pcmpeqw"}, {0x76,"pcmpeqd"},
+                {0xd4,"paddq"}, {0xd5,"pmullw"}, {0xdb,"pand"}, {0xdf,"pandn"},
+                {0xeb,"por"}, {0xf4,"pmuludq"}, {0xf8,"psubb"}, {0xf9,"psubw"},
+                {0xfa,"psubd"}, {0xfb,"psubq"}, {0xfc,"paddb"}, {0xfd,"paddw"},
+                {0xfe,"paddd"},
+            };
+            for (unsigned k = 0; k < sizeof P / sizeof P[0]; k++)
+                if (o2 == P[k].o) {
+                    int r = modrm(code, &i, rex, 16, 1, rm);
+                    sprintf(out, "%-6s %s,%%xmm%d", P[k].mn, rm, r);
+                    return i;
+                }
+            if (o2 == 0x70) {                      /* pshufd $imm */
+                int r = modrm(code, &i, rex, 16, 1, rm);
+                int imm = code[i++];
+                sprintf(out, "pshufd $0x%x,%s,%%xmm%d", imm, rm, r);
+                return i;
+            }
+            if ((o2 == 0x71 || o2 == 0x72 || o2 == 0x73) && i < n &&
+                (code[i] >> 6) == 3) {             /* shift by an immediate */
+                static const char *const SH[3][8] = {
+                    { 0, 0, "psrlw", 0, "psraw", 0, "psllw", 0 },
+                    { 0, 0, "psrld", 0, "psrad", 0, "pslld", 0 },
+                    { 0, 0, "psrlq", "psrldq", 0, 0, "psllq", "pslldq" },
+                };
+                const char *mn = SH[o2 - 0x71][(code[i] >> 3) & 7];
+                if (mn) {
+                    int x = (code[i] & 7) | ((rex & 1) ? 8 : 0);
+                    i++;
+                    int imm = code[i++];
+                    sprintf(out, "%-6s $0x%x,%%xmm%d", mn, imm, x);
+                    return i;
+                }
+            }
+        }
+        if ((o2 == 0x6f || o2 == 0x7f) && (pfx66 || rep == 0xf3)) {
+            const char *mn = pfx66 ? "movdqa" : "movdqu";
+            int r = modrm(code, &i, rex, 16, 1, rm);
+            if (o2 == 0x6f) sprintf(out, "%s %s,%%xmm%d", mn, rm, r);
+            else            sprintf(out, "%s %%xmm%d,%s", mn, r, rm);
+            return i; }
         if (o2 == 0xb0 || o2 == 0xb1 || o2 == 0xc0 || o2 == 0xc1) {
             int sz = (o2 & 1) ? opsz : 1;           /* cmpxchg / xadd */
             int r = modrm(code, &i, rex, sz, 0, rm);

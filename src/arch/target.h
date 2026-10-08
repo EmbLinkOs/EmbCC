@@ -185,6 +185,10 @@ enum target_fmt {
  * answer because it is not aarch64.
  */
 int target_ptr_size(void);        /* 8 on LP64, 4 on ILP32 */
+/* An eight-byte atomic is a call to libatomic's __atomic_*_8 (irgen),
+ * which lib/rt/atomic8.c provides: every 32-bit target, none of which
+ * moves eight bytes atomically. AVR does its own with interrupts masked. */
+int target_atomic8_libcall(void);
 int target_long_size(void);       /* likewise; long long is always 8 */
 int target_double_size(void);      /* 8, or 4 on AVR */
 int target_int_size(void);
@@ -284,6 +288,16 @@ int cf_op_calls_helper(const struct ir_ins *i);     /* src/arch/coldfire/codegen
  * lib/rt/avrfpi64.c into the image: 8.5 KB, on a part with 32768 bytes of
  * flash, for a cast a program writes without thinking about it. */
 int target_widen_unsigned_fp_cvt(void);
+
+/* Does the code keep a chain of saved frame pointers, each beside its
+ * return address, that __builtin_frame_address(N) and
+ * __builtin_return_address(N) can walk for any N? x86-64's rbp, AArch64's
+ * x29 and ColdFire's a6 do (IR_FRAMEADDR, imm 0: the chain's start).
+ * Elsewhere only level 0 exists: IR_FRAMEADDR with imm 1, the frame
+ * address -- the stack pointer at the function's entry, which is what GCC
+ * and clang return on RISC-V -- or imm 2, the return address the
+ * function was entered with. */
+int target_has_frame_chain(void);
 
 /* Is a va_list a bare POINTER at the next variadic argument, rather than a
  * pointer to a tag that va_start builds?
@@ -797,6 +811,19 @@ unsigned long target_elf_flags(enum target_arch a);
 /* Does RISC-V code use the C extension? The one answer the code generator
  * and the object's e_flags both read. */
 int target_riscv_rvc(void);
+/* The FPU -march= names: 0 none, 32 the F extension, 64 F and D -- the
+ * registers' width, which is __riscv_flen. Which instructions may be
+ * EMITTED. */
+int target_riscv_flen(void);
+/* ...and the float ABI -mabi= names, independent of it as -mfloat-abi is
+ * of -mfpu on ARM: 0 ilp32/lp64 (floating point in the integer
+ * registers), 32 ilp32f/lp64f (a float in fa0-fa7), 64 ilp32d/lp64d (a
+ * double too). Never above target_riscv_flen(). */
+int target_riscv_abi_flen(void);
+/* -march= named Zifencei (or `g`): only __riscv_zifencei reads it. */
+int target_riscv_zifencei(void);
+void target_set_riscv_isa(int f, int d, int c, int zifencei);
+void target_set_riscv_abi_flen(int flen);
 
 /* Does this target's object carry REL relocations -- the addend stored in
  * the field it relocates -- rather than RELA? o32 MIPS does, as the ABI

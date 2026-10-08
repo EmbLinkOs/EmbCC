@@ -2301,10 +2301,31 @@ static void gen_ins(struct xt_fn *F, int n)
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
         i->op == IR_CAS || i->op == IR_CMPXCHG)
         need_word_atomic(F, i);
-    if (i->op == IR_FRAMEADDR)
-        xt_refuse(F, i, "__builtin_frame_address or __builtin_return_address "
-                        "(the windowed ABI keeps a caller's frame in its "
-                        "register window, not in a chain)");
+    /* Level 0 only (irgen): the windowed ABI keeps a caller's frame in
+     * its register window, not in a chain. The frame address is a1 as
+     * the function was entered (frame base + frame: entry, and movsp for
+     * a large frame, take exactly `frame` off it). The return address is
+     * a0, which the windowed code never reuses -- but its top two bits
+     * are the caller's window increment, not address bits; as GCC does,
+     * they are replaced by those of this function's own address, the
+     * 1 GiB region the call came from (an ESP32's IRAM is 0x4008xxxx, so
+     * they are not zero). */
+    if (i->op == IR_FRAMEADDR) {
+        int d = i->dst >= 0 ? wreg(F, i->dst, ACC) : ACC;
+        if (i->imm == 2) {
+            xt_slli(F->t, d, XT_A0, 2);          /* a0's low 30 bits */
+            xt_srli(F->t, d, d, 2);
+            lit_load(F, TMP, LIT_FUNC, 0, F->fn->src);
+            xt_extui(F->t, TMP, TMP, 30, 2);    /* the region's two */
+            xt_slli(F->t, TMP, TMP, 30);
+            xt_alu(F->t, XT_OR, d, d, TMP);
+        } else {
+            addr_sp(F, d, F->frame);
+        }
+        if (i->dst >= 0)
+            wrote(F, i->dst, d);
+        return;
+    }
 
     /* The high word of a 64-bit value, shifted: one register. */
     if (i->op == IR_SHR && F->nshr && i->dst >= 0 && F->nshr[i->dst]) {

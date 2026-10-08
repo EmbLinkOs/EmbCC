@@ -208,6 +208,10 @@ int rv_patch_b_checked(struct code *c, int at, int target);
 
 void rv_jalr(struct code *c, int rd, int rs1, int off);
 void rv_ret(struct code *c);                    /* jalr zero, 0(ra) */
+/* An interrupt handler's return: mret (machine mode) or, with
+ * `supervisor`, sret -- SYSTEM instructions whose funct12 is 0x302 and
+ * 0x102, the same packer as every I-type, and never compressed. */
+void rv_xret(struct code *c, int supervisor);
 
 /* A call to a symbol the linker will resolve: `auipc ra, 0` + `jalr ra`,
  * the pair that ONE R_RISCV_CALL relocation patches. Returns the offset of
@@ -215,6 +219,56 @@ void rv_ret(struct code *c);                    /* jalr zero, 0(ra) */
  * the same relocation and carries no site of its own. */
 int rv_call_placeholder(struct code *c);
 int rv_tail_placeholder(struct code *c);
+
+/* ---- the F and D extensions ----------------------------------------------
+ *
+ * Thirty-two floating-point registers f0-f31, numbered 0-31 here as the
+ * integer ones are; each is FLEN wide (32 with F alone, 64 with D) and
+ * holds a float or a double. A float in a 64-bit register is NaN-BOXED --
+ * its upper half all ones -- which flw and fmv.w.x do and every
+ * single-precision instruction checks, so a float only ever enters one by
+ * those two.
+ *
+ * One encoding shape for nearly everything: OP-FP (0x53), an R-type whose
+ * funct7 is funct5 << 2 | fmt, fmt 0 for single and 1 for double, with the
+ * rounding mode in funct3 where the operation rounds. `dbl` picks fmt
+ * throughout. The rounding mode is DYN (the fcsr's, round-to-nearest-even
+ * after reset) for arithmetic, RTZ for a conversion to an integer -- C's
+ * truncation -- and RNE for the conversions that are always exact
+ * (fcvt.d.s, fcvt.d.w), which is what llvm-mc writes for those. */
+enum {
+    RV_FT0 = 0, RV_FT1 = 1, RV_FT2 = 2, RV_FT3 = 3,
+    RV_FS0 = 8, RV_FS1 = 9,
+    RV_FA0 = 10,                 /* fa0-fa7: f10-f17, the argument registers */
+    RV_FS2 = 18,                 /* fs2-fs11: f18-f27 */
+    RV_FT8 = 28                  /* ft8-ft11: f28-f31 */
+};
+void rv_fload(struct code *c, int frd, int rs1, int off, int dbl);    /* flw/fld */
+void rv_fstore(struct code *c, int frs2, int rs1, int off, int dbl);  /* fsw/fsd */
+/* fadd, fsub, fmul, fdiv: the funct5 values */
+enum { RV_FADD = 0x00, RV_FSUB = 0x01, RV_FMUL = 0x02, RV_FDIV = 0x03 };
+void rv_farith(struct code *c, int op, int frd, int frs1, int frs2, int dbl);
+void rv_fsqrt(struct code *c, int frd, int frs1, int dbl);
+/* sign injection: fsgnj frd, frs, frs is fmv; fsgnjn is fneg, fsgnjx fabs */
+enum { RV_FSGNJ = 0, RV_FSGNJN = 1, RV_FSGNJX = 2 };
+void rv_fsgnj(struct code *c, int kind, int frd, int frs1, int frs2, int dbl);
+void rv_fmv(struct code *c, int frd, int frs, int dbl);              /* fmv.s/.d */
+/* rd = (frs1 OP frs2), 0 or 1, in an INTEGER register. Each is false for
+ * an unordered pair, which is C's answer for every relation but != */
+enum { RV_FLE = 0, RV_FLT = 1, RV_FEQ = 2 };
+void rv_fcmp(struct code *c, int kind, int rd, int frs1, int frs2, int dbl);
+/* The integer side of a conversion: 0 a signed word, 1 an unsigned one,
+ * 2 a signed doubleword and 3 an unsigned one (RV64 only). */
+enum { RV_CVT_W = 0, RV_CVT_WU = 1, RV_CVT_L = 2, RV_CVT_LU = 3 };
+void rv_fcvt_to_int(struct code *c, int rd, int frs1, int ity, int dbl);
+void rv_fcvt_from_int(struct code *c, int frd, int rs1, int ity, int dbl);
+/* fcvt.d.s (to_dbl) or fcvt.s.d */
+void rv_fcvt_fp(struct code *c, int frd, int frs1, int to_dbl);
+/* fmv.x.w / fmv.x.d: the bits into an integer register (fmv.x.w
+ * sign-extends at RV64, which is the 32-bit value's invariant there);
+ * fmv.w.x / fmv.d.x the other way. The .d forms are RV64 only. */
+void rv_fmv_to_x(struct code *c, int rd, int frs1, int dbl);
+void rv_fmv_from_x(struct code *c, int frd, int rs1, int dbl);
 
 /* ---- traps ------------------------------------------------------------ */
 

@@ -52,7 +52,7 @@ na() {
     volatile-local-longjmp)
         echo "setjmp/longjmp, which lib/libc implements for x86-64 and AArch64 only" ;;
     atomics)
-        echo "__builtin_frame_address and __builtin_return_address, refused by name (loongarch-refuse.sh)" ;;
+        echo "__builtin_frame_address(1), refused by name: no frame chain (loongarch-refuse.sh)" ;;
     int128-atomic)
         echo "a 16-byte compare-and-swap, which the LA64 base ISA has no instruction for, refused by name" ;;
     *) return 1 ;;
