@@ -413,7 +413,7 @@ virt stub too.
 
 **AVR.** `tests/golden/embsim-avr.sh` does the same on QEMU's uno: the
 exec corpus at -O0, -O2 and -Os, every program that builds for the AVR
-without libc (580), with the output and the instruction count QEMU
+without libc (some 580; a few more or fewer as QEMU finishes the longest in time), with the output and the instruction count QEMU
 gives. QEMU's AVR runs a block again from a data access it must redo,
 so the plugin counts its instructions one at a time, skipping a repeat
 of the same instruction (which only a jump to itself does honestly);

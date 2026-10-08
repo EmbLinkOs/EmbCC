@@ -278,7 +278,7 @@ or with its own file for the six functions of `net.h`.
   RV32 and RV64, soft- and hard-float, 2425 programs to the instruction
   and the cycle; `rv-isa.c`'s instruction edges against QEMU; the ends
   of a run.
-- `tests/golden/embsim-avr.sh`: the AVR core on uno: 580 corpus
+- `tests/golden/embsim-avr.sh`: the AVR core on uno: some 580 corpus
   programs to the instruction, `avr-isa`'s edges against QEMU,
   `avr-cycles.S`'s cycles against the datasheet, the ends of a run.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
