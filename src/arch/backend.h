@@ -252,6 +252,27 @@ struct backend_desc {
     const char *unwind_unwritten;
     /* BACKEND_CXX_EXC_*: may a C++ unit use exceptions? */
     int cxx_exceptions;
+    /* The driver links firmware for it with embld, from a memory map the
+     * build gives (-T, or -Wl,-Ttext=...); and a file-scope asm block or
+     * a naked function is read by the .s file assembler (src/as/gas.c).
+     * 0 for x86-64 and AArch64. */
+    int firmware;
+    /* embld lays out a GNU linker script for it (-T). */
+    int ld_scripts;
+    /* A naked function's argument-less call: the mnemonic, and whether a
+     * delay slot follows (SPARC: filled with a nop). */
+    const char *call_insn;
+    int call_delay_slot;
+    /* What a C name is called in the object and in assembly (RX: `_f`). */
+    const char *sym_prefix;
+    /* An asm operand that is a constant is written `#5`, not `5` (RX and
+     * ColdFire, as their GCCs print one). */
+    int imm_prefixed;
+    /* .p2align of a naked function's body (AVR: 1, a 16-bit word). */
+    int text_p2align;
+    /* Why -S writes no text for it, as the refusal says; NULL when it
+     * does. */
+    const char *no_asm_text;
 };
 
 const struct backend_desc *backend_get(enum target_arch a);
