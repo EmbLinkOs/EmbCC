@@ -25,13 +25,16 @@ On the Darwin and Windows targets C++ works with restrictions. On the
 32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
 C++ is supported without exceptions (`-fno-exceptions`), with or without
 RTTI, following the ARM C++ ABI and the Itanium ABI's 32-bit form;
-objects link with clang++'s. On `riscv64-unknown-elf`,
-`mips64el-none-elf` and `loongarch64-unknown-elf` C++ is not supported:
-a unit compiles when exceptions are turned off (`-fno-exceptions`), and
-is not tested. With exceptions on it is refused, since EmbCC writes no
-unwind tables for these machines. On AVR, MIPS32, big-endian MIPS64,
-SPARC, PowerPC, ColdFire, Xtensa, TriCore and RX EmbCC refuses to
-generate code for C++. See [Targets](#targets).
+objects link with clang++'s. The same holds on MIPS32 (both byte
+orders), big-endian MIPS64, PowerPC, SPARC, ColdFire, Xtensa, TriCore and
+RX, with the generic Itanium ABI laid out by each target's data model and
+byte order; on MIPS, SPARC and PowerPC objects link with clang++'s, and on
+Xtensa with g++'s. On `riscv64-unknown-elf`, `mips64el-none-elf` and
+`loongarch64-unknown-elf` C++ is not supported: a unit compiles when
+exceptions are turned off (`-fno-exceptions`), and is not tested. With
+exceptions on it is refused, since EmbCC writes no unwind tables for these
+machines. On AVR EmbCC refuses to generate code for C++. See
+[Targets](#targets).
 
 EmbCC compiles C++ by lowering it to C, which the C front end, the
 optimizer and the code generators then compile (design decision D-013 in
@@ -192,8 +195,13 @@ this:
   and `ptrdiff_t` is `int` (and are mangled `j` and `i`). `long double`
   has the target's size and alignment: 16 bytes on x86-64, on AArch64
   ELF and Linux, and on RISC-V, and 8 on `arm64-apple-darwin` and 32-bit
-  ARM. A target whose C++ ABI is not implemented refuses C++ code
-  generation; see [Targets](#targets).
+  ARM. On the other embedded targets `int`, `wchar_t`, `double` and the
+  alignments are the target's too: a 16-bit `wchar_t` on Xtensa, a 4-byte
+  `double` on RX, nothing aligned beyond 2 bytes on ColdFire or beyond 4
+  on RX and TriCore, bit-fields in RX's Microsoft layout, and objects in
+  the target's byte order, which the constant evaluator follows. A target
+  whose C++ ABI is not implemented refuses C++ code generation; see
+  [Targets](#targets).
 
 ## Targets
 
@@ -207,7 +215,8 @@ this:
 | `riscv64-unknown-elf`, `mips64el-none-elf`, `loongarch64-unknown-elf` | Not supported; compiles with `-fno-exceptions`, untested | Refused | none |
 | 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
 | `riscv32-unknown-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `avr`, `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `sparc-none-elf`, `powerpc-none-eabi`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Refused | Not supported | none |
+| `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `avr` | Refused | Not supported | none |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
 built for `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu` and
@@ -308,12 +317,70 @@ refused the same way (`unwind tables are not supported for TRIPLE yet
 C++ unit writes no `.eh_frame`. RTTI is on by default; `-fno-rtti`
 leaves out the type-information objects and the code that reads them.
 
-**AVR, MIPS32, Xtensa and TriCore.** The C++ ABI of these targets is not
-implemented, and EmbCC refuses to generate code for a C++ unit there,
-whether with `-c`, `-S` or `--emit-c`:
+**MIPS, PowerPC, SPARC, ColdFire, Xtensa, TriCore and RX.** C++ is
+compiled without exceptions for `mipsel-none-elf`, `mips-none-elf`,
+`mips64-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`,
+`m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf` and
+`rx-none-elf`: the same subset as on 32-bit ARM and RV32, with and without
+RTTI. The objects follow the generic Itanium C++ ABI (constructors return
+nothing, a 64-bit guard whose first byte says initialized, the array
+cookie in the `size_t` before the elements, `__cxa_atexit`), laid out by
+the target's data model and in its byte order -- all but MIPS32
+little-endian, Xtensa, TriCore and RX are big-endian:
+
+| | MIPS32 | MIPS64 | PowerPC | SPARC | ColdFire | Xtensa | TriCore | RX |
+|---|---|---|---|---|---|---|---|---|
+| `size_t` | `unsigned int` | `unsigned long` | `unsigned long` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned long` |
+| a virtual member function pointer is flagged in | `adj` | `adj` | `ptr` | `ptr` | `ptr` | `ptr` | `ptr` | `adj` |
+| the return slot of a class that is not trivially copyable | `$a0` | `$a0` | `r3` | the struct-return word (`%sp+64`), and `unimp` after the call | `a1` | `a2` | `a4` | `r15` |
+| `__STDCPP_DEFAULT_NEW_ALIGNMENT__` | 8 | 16 | 8 | 8 | 2 | 8 | 4 | 4 |
+| `va_list` mangled as | `Pv` | `Pv` | `P13__va_list_tag` | `Pv` | `Pv` | `13__va_list_tag` | `Pv` | `Pv` |
+
+A virtual member function pointer is flagged in `adj` (its `ptr` the
+vtable offset, `adj` twice the adjustment plus 1) on MIPS, as clang and
+g++ do there, and on RX, whose functions may start at an odd address;
+elsewhere `ptr` is the vtable offset plus 1. `size_t` is `unsigned long`
+on PowerPC as clang's `powerpc-none-eabi` says (`_Znwm`), and on RX as
+GCC's `rx-elf` does.
+
+`tests/golden/cxx-abi-more.sh` links EmbCC objects with clang++'s both
+ways on MIPS32 (both byte orders), MIPS64 and SPARC and PowerPC, and with
+g++'s on Xtensa (Espressif's GCC for the `de212` core), as
+`tests/golden/cxx-abi-ilp32.sh` does for ARM and RV32: virtual calls,
+thunks and virtual bases, mangled names, member pointers, guards, array
+cookies, a class returned by value through its return slot and, with
+RTTI, `dynamic_cast` and `typeid` on the other compiler's `type_info`.
+One difference remains on MIPS64, and it is in the C calling convention,
+not the C++ ABI: a `float` passed on the stack goes in the last four bytes
+of its eight-byte slot, where clang and g++ put it in the first four.
+The return slot travels where each target's C convention puts a
+struct's result buffer, as clang++ and g++ pass it. ColdFire, TriCore and
+RX have no C++ compiler here to compare with; there the same test links
+EmbCC's units with each other, at every level and with RTTI. g++ for
+Xtensa registers a unit's constructors in `.ctors` rather than
+`.init_array`; a startup that links its objects runs both
+(`__ctors_start` to `__ctors_end`, last first), as the Xtensa harness
+does.
+
+`tests/golden/cxx-embedded.sh` runs every `tests/cxx-embedded` program on
+each of these boards under QEMU (Malta for MIPS, `ppce500`, LEON3,
+`mcf5208evb`, the Xtensa `sim` board, the TriCore test board and RX's
+`gdbsim`) at `-O0`, `-O1`, `-O2` and `-Os`, and each prints what the host's
+clang++ build prints. The run-time library is the embedded `libcxx.a`, as
+above (without `__aeabi_atexit`'s caller, which is ARM's). Exceptions are
+refused by name, as on ARM, because EmbCC writes no unwind tables for
+these machines:
 
 ```text
-embcc: error: C++ is not yet supported for avr: the C++ front end follows the C++ ABI of x86-64, AArch64, 32-bit ARM and riscv32, and this target's (2-byte pointers) is not implemented
+embcc: error: C++ exceptions are not supported for mips-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with -fno-exceptions
+```
+
+**AVR.** EmbCC refuses to generate code for a C++ unit there, whether with
+`-c`, `-S` or `--emit-c`: the front end does not yet lay classes out for
+a 16-bit `int` and 2-byte pointers.
+
+```text
+embcc: error: C++ is not yet supported for avr: the C++ front end does not lay classes out for a 16-bit int and 2-byte pointers
 ```
 
 `-fsyntax-only`, which writes nothing, is accepted.

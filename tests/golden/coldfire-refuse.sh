@@ -117,12 +117,17 @@ grep -q 'no assembly-file support for m68k-none-elf yet: EmbCC has no ColdFire a
     "$out/as.err" || { echo "an assembly file was refused, but not by name:"
     cat "$out/as.err"; exit 1; }
 printf 'int main() { return 0; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cc.err"; then
-    echo "a C++ unit was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for m68k-none-elf' "$out/cc.err" || {
-    echo "a C++ unit was refused, but not by name:"; cat "$out/cc.err"; exit 1; }
-echo "inline and file-scope asm, .s files, C++, wide atomics, __int128, a frame"
+grep -q 'C++ exceptions are not supported for m68k-none-elf' "$out/cc.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cc.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
+echo "inline and file-scope asm, .s files, C++ exceptions, wide atomics, __int128, a frame"
 echo "beyond 32 KiB and an over-aligned scalar local are refused by name"
 
 # ---- EmbLD ---------------------------------------------------------------

@@ -44,29 +44,32 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 | x86-64 Windows | Objects only; warns on every compile | SSE2 | Refused | 1, 2, 4, 8, 16 bytes | Refused | Refused |
 | AArch64 ELF, EmbLinkOS, Linux | Supported | FP/SIMD; `long double` in software | DWARF | 1, 2, 4, 8, 16 bytes | Local-exec TLS | Yes, with exceptions |
 | Apple arm64 | Objects for the system linker | FP/SIMD | Refused | 1, 2, 4, 8, 16 bytes | Refused | Yes, with exceptions |
-| Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
-| Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
-| ARMv7-A (A32), soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
-| ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
-| RV32 | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Refused |
+| Cortex-M, soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
+| Cortex-M, FPU | Bare metal | Single-precision VFP; `double` in software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
+| ARMv7-A (A32), soft float | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
+| ARMv7-A (A32), VFP | Bare metal | VFPv3/VFPv4, single and double | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
+| RV32 | Bare metal | Software | DWARF | 1, 2, 4 bytes | One shared instance | Without exceptions |
 | RV64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
 | AVR (ATmega328P) | Bare metal | Software, 4-byte `double` | DWARF, 4-byte addresses | 1, 2, 4, 8 bytes (interrupts masked) | One shared instance | Refused |
-| MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
-| MIPS64r2 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Refused big-endian; little-endian compiles without exceptions and unwind tables, untested |
+| MIPS32r2 (PIC32-class) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
+| MIPS64r2 | Bare metal | Software | DWARF | 4, 8 bytes | One shared instance | Without exceptions (little-endian untested) |
 | LoongArch64 | Bare metal | Software | DWARF | 1, 2, 4, 8 bytes | One shared instance | Without exceptions |
-| TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
-| Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Refused |
-| Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | One shared instance | Refused |
-| SPARC V8 (LEON3) | Bare metal | Software; `long double` binary128 | DWARF | 4 bytes | One shared instance | Refused |
-| ColdFire ISA_A (MCF5208-class) | Bare metal | Software | DWARF | 1, 2, 4 bytes (interrupts masked; supervisor mode) | One shared instance | Refused |
+| TriCore 1.6.1 (AURIX) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
+| Xtensa (ESP32, ESP32-S3) | Bare metal | Software | DWARF | 4 bytes | One shared instance | Without exceptions |
+| Renesas RX (RXv1) | Bare metal | Software, 4-byte `double` | DWARF | 1, 2, 4 bytes (interrupts masked) | One shared instance | Without exceptions |
+| SPARC V8 (LEON3) | Bare metal | Software; `long double` binary128 | DWARF | 4 bytes | One shared instance | Without exceptions |
+| ColdFire ISA_A (MCF5208-class) | Bare metal | Software | DWARF | 1, 2, 4 bytes (interrupts masked; supervisor mode) | One shared instance | Without exceptions |
 
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
 thread. "Refused" under C++ means a C++ unit is not compiled for that
 target (`-fsyntax-only` still checks it); the diagnostic is in the
-target's Limitations. "Without exceptions" means code that needs a
-landing pad (a `try` block, or a destructor that must run during
-unwinding) does not compile; build C++ for RV64 with `-fno-exceptions`.
+target's Limitations. "Without exceptions" means C++ is compiled with
+`-fno-exceptions`; see [C++](cxx.md#targets). With exceptions on, the
+32-bit embedded targets and big-endian MIPS64 refuse the unit by name;
+on RV64, LoongArch and little-endian MIPS64 code that needs a landing
+pad (a `try` block, or a destructor that must run during unwinding) does
+not compile.
 
 ## Selecting a target
 
@@ -1180,7 +1183,8 @@ Accepted options: `-mcpu=rx600|rx610|rx200|rx100`, `-m32bit-doubles`,
 Refused by name: `-m64bit-doubles`, `-fpu`, `-mbig-endian-data`,
 `-mgcc-abi`, a nonzero `-msmall-data-limit`, `-mpid`, a nonzero
 `-mint-register`, `-mno-allow-string-insns`, `-mas100-syntax`, unwind
-tables, `-S`, inline and file-scope assembly, and C++.
+tables, `-S`, inline and file-scope assembly, and C++ exceptions (C++
+compiles with `-fno-exceptions`; see [C++](cxx.md#targets)).
 
 ## MIPS32
 
@@ -1334,7 +1338,7 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 | `__attribute__((interrupt, use_debug_exception_return))` | `__attribute__((use_debug_exception_return)) is not supported: the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
 | an interrupt handler with parameters, or with a result | `interrupt handler 'h' takes parameters: ...`, `interrupt handler 'h' returns a value: ...` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
-| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for mipsel-none-elf: ...` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for mipsel-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 
 ## MIPS64
 
@@ -1467,7 +1471,7 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are defined.
 | `la` in a `.s` file or file-scope `asm` | `la loads a 32-bit address, and a MIPS64 address is 64 bits (nor are %highest and %higher assembled here): load it from a .dword holding the symbol` |
 | reading a packed bit-field over more than 8 bytes, big-endian | `a packed bit-field 'v' across 9 bytes is not supported on a big-endian target (mips64-none-elf)` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mips64el-none-elf yet (...): EmbCC writes no MIPS .eh_frame` |
-| a C++ translation unit for `mips64-none-elf` | `C++ is not yet supported for mips64-none-elf: the C++ constant evaluator lays memory out little-endian, and this target is big-endian` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for mips64-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 
 ## LoongArch64
 
@@ -1999,7 +2003,7 @@ the entry.
 | `__attribute__((interrupt))`, `__attribute__((naked))` | `__attribute__((...)) is not supported: ...` |
 | `.s` and `.S` files | `no assembly-file support for tricore-none-elf yet ...` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
-| any C++ translation unit | `C++ is not yet supported for tricore-none-elf: ...` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | inline assembly, `__attribute__((naked))` | `inline assembly is not supported for xtensa-none-elf yet (EmbCC has no Xtensa assembler vocabulary)` |
 | a file-scope `asm` instruction | `file-scope asm instruction "nop": EmbCC assembles instructions for x86-64 only. ...` |
@@ -2007,19 +2011,19 @@ the entry.
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
-| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for xtensa-none-elf: ...` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for xtensa-none-elf yet: EmbCC writes no Xtensa .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | inline assembly, a naked function | `inline assembly is not supported for sparc-none-elf yet: EmbCC has no SPARC assembler (...)` |
 | a `.s` or `.S` file | `no assembly-file support for sparc-none-elf yet: EmbCC has no SPARC assembler` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
-| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for sparc-none-elf: ...` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 | inline asm | `inline assembly is not supported for m68k-none-elf yet: EmbCC has no ColdFire assembler` |
 | file-scope asm, `.s` and `.S` files | `file-scope asm is not supported for m68k-none-elf yet` / `no assembly-file support` |
 | a frame beyond 32 KiB | `a stack frame larger than 32 KiB` |
 | unwind tables | `unwind tables are not supported for m68k-none-elf yet` |
-| C++ | refused, as on every ILP32 target |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for m68k-none-elf yet: EmbCC writes no ColdFire .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 
 ## AVR
 
@@ -2161,7 +2165,7 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 | an interrupt handler with parameters | `the AVR backend cannot lower an interrupt handler with parameters: the hardware calls it, so there is no caller to pass them and they would be read out of whatever the interrupted code left in those registers yet (function __vector_3)` |
 | an interrupt handler that returns a value | ``the AVR backend cannot lower an interrupt handler that returns a value: `reti` goes back to the interrupted instruction, and nothing is there to receive it yet (function __vector_3)`` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for avr: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 2` |
+| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for avr: the C++ front end does not lay classes out for a 16-bit int and 2-byte pointers` |
 
 Code compiled at `-O0` is large; an ordinary program may not fit the
 part's 32 KB of flash unless built with `-O1` or above.

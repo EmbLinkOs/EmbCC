@@ -120,11 +120,16 @@ refc "__int128" '__int128 does not exist on this target' \
 refc "an interrupt handler with a parameter" "interrupt handler 'f' takes parameters" \
     'void __attribute__((interrupt)) f(int x){ (void)x; }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for mipsel-none-elf' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+grep -q 'C++ exceptions are not supported for mipsel-none-elf' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
 echo "narrow and 8-byte atomics, the frame and return address,"
-echo "__int128, an interrupt handler with parameters, an over-aligned scalar and C++ are each"
+echo "__int128, an interrupt handler with parameters, an over-aligned scalar and C++ exceptions are each"
 echo "refused by name (assembly is mips-gas.sh's and mips-exc.sh's)"

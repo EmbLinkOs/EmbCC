@@ -114,11 +114,16 @@ fi
 grep -q 'no assembly-file support for sparc-none-elf yet: EmbCC has no SPARC assembler' \
     "$out/s.err" || { echo "a .s file was refused, but not by name:"; cat "$out/s.err"; exit 1; }
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for sparc-none-elf' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+grep -q 'C++ exceptions are not supported for sparc-none-elf' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
 
 # ---- -S ------------------------------------------------------------------------
 # The assembly EmbCC writes for SPARC is its words as .byte and its
@@ -170,4 +175,4 @@ if command -v "$CLANG" >/dev/null 2>&1 &&
 fi
 echo "narrow and 8-byte atomics, the frame and return address,"
 echo "__int128, interrupt and naked functions, inline and file assembly, an"
-echo "over-aligned scalar and C++ are each refused by name"
+echo "over-aligned scalar and C++ exceptions are each refused by name"
