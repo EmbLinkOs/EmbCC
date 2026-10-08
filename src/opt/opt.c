@@ -25,6 +25,7 @@
 #define PTRW (target_ptr_size())
 #include "../driver/remark.h"
 #include "../driver/util.h"
+#include "../sema/ldfloat.h"
 
 /* What the quiet passes did, counted per function.
  *
@@ -942,6 +943,229 @@ static int kz_copy_wide_ok(struct ir_func *fn, struct defs *d,
     return any;
 }
 
+/* ---- long double constants ----
+ *
+ * A long double is 16 bytes -- x87 extended on x86-64, IEEE binary128 on
+ * AArch64, RV64, MIPS64, SPARC and the rest -- too wide for IR_CONST, so
+ * irgen keeps each constant in .rodata and loads it (`load.16 [straddr
+ * strN]`). fold_fp never saw one: `2.0L * 3.0L` was a multiply at run
+ * time, an x87 fmul through three slots or a __multf3 call, and a loop
+ * `for (64) b *= 2.0L` unrolled to 64 of them.
+ *
+ * The arithmetic is sema/ldfloat's: each operation exact, then rounded
+ * once to the target's format, round-to-nearest-even -- what the target's
+ * x87 (precision control at 64 bits, as every x86-64 ABI EmbCC targets
+ * leaves it) or its binary128 library computes. NaN is never folded, as
+ * fold_fp does not: which NaN an operation makes is the machine's choice.
+ *
+ * A value is known when its single definition is such a load, or one
+ * this pass folded (ldf_val), or -- inside one block -- when it was just
+ * read from a 16-byte local the function never takes the address of,
+ * after a known value was stored there: an unrolled `b *= 2.0L` keeps b in
+ * its slot, since mem2reg does not promote 16-byte locals.
+ *
+ * A folded result becomes `load.16 [p]` with p a new `straddr` of the
+ * result's interned bytes; the straddrs are inserted when the pass ends
+ * (ld_insert), and the operands' loads are left for dead-code removal. */
+static struct ir_unit *g_fold_unit;     /* where pass_fold interns */
+static int g_opt_size;                  /* -Os, set by opt_run (below) */
+
+struct ldfold {
+    struct ldf **val;          /* per vreg: folded by this pass */
+    struct ldf **kval;         /* per vreg: known in this block (kgen) */
+    int *kgen;
+    struct ldf **vval;         /* per local: holds this, in this block */
+    int *vgen;
+    char *vok;                 /* per local: 16 bytes, never addressed */
+    int nv, nvars;
+    /* the straddrs to insert: before instruction at[k], p[k] = str lab[k] */
+    int *at, *p, *lab, n, cap;
+};
+
+/* The value a 16-byte .rodata constant holds -- only if its bytes are
+ * exactly what ldf_encode makes of that value, so an encoding x87 would
+ * load as something else (an unnormal, a pseudo-denormal) or a NaN is
+ * not mistaken for a number. */
+static struct ldf *ld_of_str(int label)
+{
+    if (!g_fold_unit || label < 0 || label >= g_fold_unit->nstrs)
+        return NULL;
+    const struct ir_str *s = &g_fold_unit->strs[label];
+    if (s->len != 16 || !s->bytes)
+        return NULL;
+    enum ldf_fmt fmt = ldf_target_fmt();
+    unsigned char b[16], back[16];
+    int be = target_big_endian();
+    for (int k = 0; k < 16; k++)
+        b[k] = (unsigned char)s->bytes[be ? 15 - k : k];
+    struct ldf *v = ldf_from_bytes(b, fmt);
+    if (!v || ldf_cmp(v, v) == LDF_UNORDERED)
+        return NULL;
+    ldf_encode(v, fmt, back);
+    if (memcmp(b, back, fmt == LDF_X87 ? 10 : 16) != 0)
+        return NULL;
+    return v;
+}
+
+/* Is v a long double constant here (instruction-order position n)? */
+static struct ldf *ld_known(struct ir_func *fn, struct defs *d,
+                            const struct ldfold *L, int gen, int v)
+{
+    if (v < 0 || v >= L->nv)
+        return NULL;
+    if (L->val[v] && d->cnt[v] == 1)
+        return L->val[v];
+    if (L->kgen[v] == gen && L->kval[v])
+        return L->kval[v];
+    if (d->cnt[v] != 1 || d->ins[v] < 0)
+        return NULL;
+    const struct ir_ins *ld = &fn->ins[d->ins[v]];
+    if (ld->op != IR_LOAD || ld->size != 16 || ld->w != 16 || ld->vol ||
+        ld->flash || ld->memoff || ld->a < 0 || ld->a >= L->nv ||
+        d->cnt[ld->a] != 1 || d->ins[ld->a] < 0)
+        return NULL;
+    const struct ir_ins *sa = &fn->ins[d->ins[ld->a]];
+    return sa->op == IR_STRADDR ? ld_of_str(sa->label) : NULL;
+}
+
+/* What instruction i, just executed, tells the block about 16-byte
+ * locals and the values read from them. */
+static void ld_note(struct ir_func *fn, struct defs *d, struct ldfold *L,
+                    int gen, const struct ir_ins *i)
+{
+    if (i->op == IR_STVAR && i->dst >= 0 && i->dst < L->nvars) {
+        struct ldf *x = L->vok[i->dst] && i->size == 16 && !i->vol
+                        ? ld_known(fn, d, L, gen, i->a) : NULL;
+        L->vval[i->dst] = x;
+        L->vgen[i->dst] = x ? gen : 0;
+        return;
+    }
+    int t = def_target(i);
+    if (t < 0 || t >= L->nv)
+        return;
+    if (i->op == IR_LDVAR && i->a >= 0 && i->a < L->nvars && L->vok[i->a] &&
+        i->size == 16 && i->w == 16 && !i->vol && L->vgen[i->a] == gen &&
+        L->vval[i->a]) {
+        L->kval[t] = L->vval[i->a];
+        L->kgen[t] = gen;
+    } else {
+        L->kgen[t] = 0;
+    }
+}
+
+/* Turn i into a load of the constant x, its straddr to come before
+ * instruction n. */
+static void ld_become(struct ir_func *fn, struct ldfold *L, struct ir_ins *i,
+                      int n, struct ldf *x)
+{
+    unsigned char *b = xcalloc(1, 16);
+    ldf_encode_target(x, ldf_target_fmt(), b);
+    int lab = ir_intern_aligned(g_fold_unit, (const char *)b, 16, 16);
+    int p = fn->nvregs++;
+    if (L->n == L->cap) {
+        L->cap = L->cap ? 2 * L->cap : 8;
+        L->at = xrealloc(L->at, (size_t)L->cap * sizeof *L->at);
+        L->p = xrealloc(L->p, (size_t)L->cap * sizeof *L->p);
+        L->lab = xrealloc(L->lab, (size_t)L->cap * sizeof *L->lab);
+    }
+    L->at[L->n] = n; L->p[L->n] = p; L->lab[L->n] = lab; L->n++;
+    int dst = i->dst, line = i->line, col = i->col, synth = i->synth;
+    memset(i, 0, sizeof *i);
+    i->op = IR_LOAD;
+    i->dst = dst; i->a = p; i->b = i->c = -1;
+    i->size = 16; i->w = 16; i->natural = 1;
+    i->pred = B_ADD; i->label = -1; i->callee_sym = i->glob_sym = -1;
+    i->line = line; i->col = col; i->synth = synth;
+    if (dst >= 0 && dst < L->nv)
+        L->val[dst] = x;
+}
+
+/* A float or double's bits as an exact ldf; NULL if it is a NaN. */
+static struct ldf *ld_from_bits(long A, int size)
+{
+    double v = fc_bits_to(A, size);
+    return v == v ? ldf_from_double(v) : NULL;
+}
+
+/* Fold i if it is long double arithmetic or a conversion to or from one
+ * on constants. Returns 1 if it changed. */
+static int ld_fold(struct ir_func *fn, struct defs *d, struct ldfold *L,
+                   struct lkconst *lk, struct ir_ins *i, int n)
+{
+    enum ldf_fmt fmt = ldf_target_fmt();
+    int gen = lk->gen;
+    if (fmt != LDF_X87 && fmt != LDF_QUAD)
+        return 0;
+    if (i->flt && i->w == 16 &&
+        (i->op == IR_ADD || i->op == IR_SUB || i->op == IR_MUL ||
+         i->op == IR_DIV || i->op == IR_NEG)) {
+        struct ldf *a = ld_known(fn, d, L, gen, i->a), *b = NULL, *r;
+        if (!a || (i->op != IR_NEG && !(b = ld_known(fn, d, L, gen, i->b))))
+            return 0;
+        r = i->op == IR_NEG ? ldf_neg(a)
+          : ldf_binop(i->op == IR_ADD ? '+' : i->op == IR_SUB ? '-'
+                      : i->op == IR_MUL ? '*' : '/', a, b, fmt);
+        if (!r || ldf_cmp(r, r) == LDF_UNORDERED)
+            return 0;
+        ld_become(fn, L, i, n, r);
+        return 1;
+    }
+    /* long double -> float or double: one rounding, from the exact value */
+    if (i->op == IR_F2F && i->size == 16 && (i->w == 4 || i->w == 8)) {
+        struct ldf *a = ld_known(fn, d, L, gen, i->a);
+        unsigned char b[8];
+        if (!a)
+            return 0;
+        enum ldf_fmt to = i->w == 4 ? LDF_FLOAT : LDF_DOUBLE;
+        ldf_encode(ldf_round(a, to), to, b);
+        unsigned long bits = 0;
+        for (int k = 0; k < i->w; k++)
+            bits |= (unsigned long)b[k] << (8 * k);
+        to_const(i, i->w == 4 ? (long)(unsigned int)bits : (long)bits);
+        i->flt = 0;
+        return 1;
+    }
+    /* A widening of a constant to binary128 is a library call of eight
+     * bytes or so, and its folded form a sixteen-byte constant and the
+     * load of it: at -Os the call is kept. (x87 loads either way.) */
+    if (g_opt_size && fmt == LDF_QUAD &&
+        (i->op == IR_I2F || i->op == IR_F2F) && i->w == 16)
+        return 0;
+    /* float or double -> long double: exact */
+    if (i->op == IR_F2F && i->w == 16 && (i->size == 4 || i->size == 8)) {
+        long A;
+        struct ldf *x;
+        if (!get_const(fn, d, i->a, &A) && !lk_get(lk, i->a, i->size, &A))
+            return 0;
+        if (!(x = ld_from_bits(A, i->size)))
+            return 0;
+        ld_become(fn, L, i, n, x);
+        return 1;
+    }
+    /* an integer -> long double: rounded once (a 64-bit integer does not
+     * fit binary64, and x87's 64-bit significand holds it exactly) */
+    if (i->op == IR_I2F && i->w == 16 && (i->size == 4 || i->size == 8)) {
+        long A;
+        int wide = 0;                       /* known as an 8-byte value */
+        if (get_const(fn, d, i->a, &A))
+            wide = fn->ins[d->ins[i->a]].w == 8;
+        else if (lk_get(lk, i->a, i->size, &A))
+            wide = i->size == 8;
+        else
+            return 0;
+        /* as fold_cvt (see there), unless the constant is 8 bytes itself */
+        if (i->size == 8 && !wide && target_widen_unsigned_fp_cvt() &&
+            (A < 0 || A > 0x7fffffffL))
+            return 0;
+        long v = fold_ext(A, i->size, i->sign, 8);
+        ld_become(fn, L, i, n, ldf_round(ldf_from_int(v, !i->sign), fmt));
+        return 1;
+    }
+    return 0;
+}
+
+static void ld_insert(struct ir_func *fn, struct ldfold *L);
+
 static int pass_fold(struct ir_func *fn)
 {
     struct defs d;
@@ -957,14 +1181,35 @@ static int pass_fold(struct ir_func *fn)
         xmalloc((size_t)fn->nvregs * sizeof(long)),
         xmalloc((size_t)fn->nvregs * sizeof(int)), 1, fn->nvregs
     };
+    int nv0 = fn->nvregs, nl = fn->nvars > 0 ? fn->nvars : 1;
+    struct ldfold L = {
+        xcalloc((size_t)nv0, sizeof(struct ldf *)),
+        xcalloc((size_t)nv0, sizeof(struct ldf *)),
+        xcalloc((size_t)nv0, sizeof(int)),
+        xcalloc((size_t)nl, sizeof(struct ldf *)),
+        xcalloc((size_t)nl, sizeof(int)),
+        xcalloc((size_t)nl, 1), nv0, fn->nvars, NULL, NULL, NULL, 0, 0
+    };
+    for (int v = 0; v < fn->nvars; v++)
+        L.vok[v] = fn->locals[v].is_ldouble && !fn->locals[v].is_volatile;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_ADDR && fn->ins[n].a >= 0 &&
+            fn->ins[n].a < fn->nvars)
+            L.vok[fn->ins[n].a] = 0;
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         /* What the previous instruction left, in its final form: one
          * this loop has just folded to a constant is a constant. */
-        if (n > 0)
+        if (n > 0) {
             lk_note(&lk, &fn->ins[n - 1]);
+            ld_note(fn, &d, &L, lk.gen, &fn->ins[n - 1]);
+        }
         if (i->op == IR_LABEL)
             lk.gen++;
+        if (ld_fold(fn, &d, &L, &lk, i, n)) {
+            changed = 1;
+            continue;
+        }
         if (i->flt) {
             /* never as an integer -- as a float, from bit patterns. An
              * operand is a constant when it has one definition that is
@@ -1355,6 +1600,10 @@ static int pass_fold(struct ir_func *fn)
     free(lk.gen_of); free(lk.val); free(lk.w);
     free(use);
     free_defs(&d);
+    if (L.n)
+        ld_insert(fn, &L);
+    free(L.val); free(L.kval); free(L.kgen); free(L.vval); free(L.vgen);
+    free(L.vok); free(L.at); free(L.p); free(L.lab);
     return changed;
 }
 
@@ -2000,6 +2249,25 @@ static void mark_cb(int *p, void *ctx)
  * one step backwards through code that runs forwards -- a chain of 4000
  * joins, each copy read by the next, took 4000 sweeps. Both compute the
  * least set closed under the two rules, so they mark the same set. */
+/* A load is not pure -- it may fault -- except one of a string
+ * constant's own bytes: its address is the constant's (one straddr) and
+ * it reads inside it, which is .rodata the program cannot unmap. Those
+ * are what a folded long double leaves behind (ld_fold), and a string's
+ * byte read and dropped. */
+static int rodata_load(const struct ir_func *fn, const int *dhead,
+                       const int *dnext, const struct ir_ins *i)
+{
+    if (i->op != IR_LOAD || i->vol || i->flash || def_target(i) < 0 ||
+        !g_fold_unit || i->a < 0 || i->a >= fn->nvregs)
+        return 0;
+    int n = dhead[i->a];
+    if (n < 0 || dnext[n] >= 0 || fn->ins[n].op != IR_STRADDR)
+        return 0;
+    int lab = fn->ins[n].label;
+    return lab >= 0 && lab < g_fold_unit->nstrs && i->memoff >= 0 &&
+           i->size > 0 && i->memoff + i->size <= g_fold_unit->strs[lab].len;
+}
+
 static int pass_dce(struct ir_func *fn)
 {
     int nins = fn->nins, nvr = fn->nvregs;
@@ -2046,6 +2314,8 @@ static int pass_dce(struct ir_func *fn)
         /* a volatile local's read happens even when nothing uses it:
          * `(void)v;` is a read the program asked for */
         if (is_pure(i->op) && def_target(i) >= 0 && !i->vol)
+            continue;
+        if (rodata_load(fn, dhead, dnext, i))
             continue;
         live_ins[n] = 1;
     }
@@ -2169,6 +2439,42 @@ static struct ir_ins *ib_push(struct ibuf *b)
     ins_blank(i);
     return i;
 }
+
+/* Insert the straddrs ld_become asked for, each before its instruction. */
+static void ld_insert(struct ir_func *fn, struct ldfold *L)
+{
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    int k = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        if (newpos) newpos[n] = nb.n;
+        while (k < L->n && L->at[k] == n) {
+            struct ir_ins *e = ib_push(&nb);
+            memset(e, 0, sizeof *e);
+            e->op = IR_STRADDR;
+            e->dst = L->p[k]; e->label = L->lab[k];
+            e->a = e->b = e->c = -1;
+            e->w = 4; e->size = 4; e->sign = 1; e->pred = B_ADD;
+            e->callee_sym = e->glob_sym = -1;
+            e->line = fn->ins[n].line; e->col = fn->ins[n].col; e->synth = 1;
+            k++;
+        }
+        *ib_push(&nb) = fn->ins[n];
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < fn->nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+}
+
 
 /* ==== reassociation ========================================================
  *
@@ -16327,6 +16633,7 @@ static int pass_x86_loadop(struct ir_func *fn)
 
 void opt_run(struct ir_unit *iu, int level)
 {
+    g_fold_unit = iu;
     int size = level == OPT_SIZE;
     g_opt_size = size;
     if (size)
