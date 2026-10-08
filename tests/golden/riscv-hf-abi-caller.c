@@ -15,6 +15,25 @@ static void pd(double d)
 { union { double d; unsigned long long u; } x; x.d = d; hx(x.u); }
 static void nl(void) { writec('\n'); }
 
+/* Arriving in fa0/fa1 and leaving swapped: a cycle in the f registers'
+ * parallel move. And three doubles rotated. */
+__attribute__((noinline)) float swap2(float a, float b) { return r_float(b, a); }
+__attribute__((noinline)) double rot3(double a, double b, double c)
+{ return r_d3(c, a, b); }
+/* A float that arrives in fa1 and is passed variadically (in a registers)
+ * beside one passed in fa0: staged out of the f registers before they
+ * move. */
+__attribute__((noinline)) void mixv(float a, double b)
+{ s_var(3, (double)a, 7, b); }
+/* b arrives in fa0 and leaves variadically in a registers, while a moves
+ * from fa1 into fa0: b has to be read before a is written. */
+__attribute__((noinline)) void mixv2(double b, float a)
+{ s_fvar(a, 1, b); }
+/* A float parameter read only as bits: it lives in an x register, and
+ * reaches it from fa0 after the x registers' parallel move. */
+__attribute__((noinline)) unsigned bits_plus(int k, float x)
+{ union { float f; unsigned u; } c; c.f = x; return c.u + (unsigned)k; }
+
 int main(void)
 {
     static int seven = 7;
@@ -70,6 +89,10 @@ int main(void)
     { cd r = r_cd2(17); putn(r.c); pd(r.d); }
     pf(r_ptr()(1.5f, 0.25f));
     nl();
+    pf(swap2(1.5f, 0.25f)); pd(rot3(1.0, 2.0, 3.0));
+    putn((long)bits_plus(3, 2.5f)); nl();
+    mixv(-1.25f, 6.5);
+    mixv2(9.75, -0.5f);
     puts_("==END==\n");
     return 0;
 }

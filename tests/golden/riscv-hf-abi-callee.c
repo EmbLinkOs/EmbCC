@@ -85,5 +85,18 @@ double _Complex r_cd(double a)
 { double _Complex r; __real__ r = -a; __imag__ r = a * 0.5; return r; }
 cd r_cd2(int k) { cd r; r.c = (char)k; r.d = (double)k / 8.0; return r; }
 
+double r_d3(double a, double b, double c) { return a * 100.0 + b * 10.0 + c; }
+
+void s_fvar(float f, int n, ...)
+{
+    va_list ap;
+    va_start(ap, n);
+    pf(f);
+    while (n--)
+        pd(va_arg(ap, double));
+    va_end(ap);
+    nl();
+}
+
 static float twice_plus(float a, float b) { return a + a + b; }
 fn_ff r_ptr(void) { return twice_plus; }

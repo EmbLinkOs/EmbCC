@@ -65,3 +65,9 @@ cd r_cd2(int k);
 
 typedef float (*fn_ff)(float, float);
 fn_ff r_ptr(void);
+
+/* The caller's side of the parallel moves: arguments that arrive in fa
+ * registers and leave in each other's (a cycle), and a float in an fa
+ * register that a variadic call needs in an a register. */
+double r_d3(double a, double b, double c);
+void s_fvar(float f, int n, ...);

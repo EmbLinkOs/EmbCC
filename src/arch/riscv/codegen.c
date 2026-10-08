@@ -180,6 +180,14 @@ struct rv_fn {
      * register and an integer pair through (fsd, two lw), there being no
      * 64-bit fmv at RV32 -- clang does the same. -1 when unneeded. */
     long fx;
+    /* Staging for a value in an fa register an x register must receive
+     * at a call or in the prologue: the f registers' parallel move may
+     * overwrite it before the x registers' runs, so it is stored here
+     * first (fstage, eight bytes each) and loaded from here after. The
+     * values staged at the call being set up: stg_v[k] at stg_off[k]. */
+    long fstage;
+    int stg_v[MAX_PARAMS], nstg;
+    long stg_off[MAX_PARAMS];
     int used_callee[RA_MAXPOOL];  /* the callee-saved ones it took */
     int pair_used[9], npair;      /* callee-saved pairs rv_pair_alloc took */
     int nsave;
@@ -441,12 +449,13 @@ static void rv_abi_hints(const struct ir_func *fn, int *hint);
 /* ---- the floating-point register class (F and D) --------------------------
  *
  * ft0-ft2 are the scratch every FP lowering computes in, as t0-t2 are for
- * the integer one, and fa0-fa7 are left out for the reason Thumb leaves
- * s0-s15 out of its class: they carry the hard-float arguments and
- * results, so with no value living in one, a call's argument setup and a
- * prologue's parameter placement are moves INTO registers nothing else
- * reads, and need no ordering. What is left: ft3-ft11, caller-saved and
- * first, then fs0-fs11.
+ * the integer one. The class is ft3-ft6 and fa0-fa7, caller-saved and
+ * first, then fs0-fs11 -- twenty-four, the allocator's most (RA_MAXPOOL);
+ * ft7-ft11 are left over. fa0-fa7 are in it so that a float argument can
+ * live where it arrives and a result be computed where it is returned
+ * (rv_fp_hints): a call's argument setup and a prologue's parameter
+ * placement are then PARALLEL MOVES among the f registers, as they are
+ * among the x ones.
  *
  * The fs registers survive a call only under a hardware-float ABI, and
  * only as wide as that ABI says: under ilp32/lp64 no FP register is
@@ -454,11 +463,13 @@ static void rv_abi_hints(const struct ir_func *fn, int *hint);
  * ilp32f/lp64f with D only the low 32 bits are -- so there, with values of
  * both widths in one class, none is treated as callee-saved. clang
  * spills across the call in both cases too. */
-#define RV_NFPOOL 21
+#define RV_NFPOOL 24
 static const int RV_FPOOL[RV_NFPOOL] = {
-    3, 4, 5, 6, 7, 28, 29, 30, 31,              /* ft3-ft7, ft8-ft11 */
+    3, 4, 5, 6,                                  /* ft3-ft6 */
+    10, 11, 12, 13, 14, 15, 16, 17,              /* fa0-fa7 */
     8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27  /* fs0, fs1, fs2-fs11 */
 };
+static int is_fa(int r) { return r >= RV_FA0 && r < RV_FA0 + 8; }
 static const int *rv_fp_pool_for(const struct ir_func *fn, int *n)
 {
     (void)fn;
@@ -1211,6 +1222,44 @@ static void layout(struct rv_fn *F)
         off = (off + 7) & ~7L;
         F->fx = off;
         off += 8;
+    }
+    /* fa registers staged for x registers (F->fstage): the most any
+     * call or the prologue needs */
+    F->fstage = -1;
+    {
+        int most = 0, k;
+        struct rv_walk wk;
+        struct argplace pl;
+        walk_init(&wk, fn_sret_bytes(F->w, fn) != 0);
+        k = 0;
+        for (int p = 0; p < fn->nparams; p++) {
+            place_one(F->w, &wk, &fn->param_abi[p], 0, &pl);
+            if (pl.hf && !fn->param_abi[p].is_struct && in_reg(F, p))
+                k++;
+        }
+        most = k;
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op != IR_CALL)
+                continue;
+            walk_init(&wk, call_sret_bytes(F->w, i) != 0);
+            k = 0;
+            for (int a = 0; a < i->nargs; a++) {
+                int v = i->argv[a].vreg;
+                place_one(F->w, &wk, &i->argv[a],
+                          i->call_varargs && a >= i->call_nfixed, &pl);
+                if (!pl.hf && !pl.byref && !i->argv[a].is_struct &&
+                    pl.nreg && in_freg(F, v) && is_fa(F->floc[v]))
+                    k++;
+            }
+            if (k > most)
+                most = k;
+        }
+        if (most) {
+            off = (off + 7) & ~7L;
+            F->fstage = off;
+            off += 8L * most;
+        }
     }
     /* the callee-saved f registers the FP pass took, eight bytes each */
     if (F->nfsave) {
@@ -2068,6 +2117,14 @@ static const char *fp_cmp_name(enum binop pred, int w)
  * where it is passed (rv_pair_alloc), so the halves of one operand and the
  * words of another are edges of the SAME move: loading a0:a1 first and
  * then a2:a3 would overwrite a b that lives in a0:a1 before it was read. */
+static int stg_find(const struct rv_fn *F, int v)
+{
+    for (int k = 0; k < F->nstg; k++)
+        if (F->stg_v[k] == v)
+            return k;
+    return -1;
+}
+
 static void set_args_half(struct rv_fn *F, const int *dstreg,
                           const int *vreg, const int *half, int n)
 {
@@ -2093,7 +2150,15 @@ static void set_args_half(struct rv_fn *F, const int *dstreg,
      * now nothing still needs the old contents of one. A value in an f
      * register crosses (fmv.x.w; a double's word at RV32 through fx). */
     for (int k = 0; k < n; k++)
-        if (in_freg(F, vreg[k])) {
+        if (in_freg(F, vreg[k]) && stg_find(F, vreg[k]) >= 0) {
+            /* staged out of its fa register before the f registers moved */
+            long off = F->stg_off[stg_find(F, vreg[k])];
+            int w8 = F->fw[vreg[k]] == 8;
+            if (half)
+                ld_sp(F, dstreg[k], off + 4L * half[k], 4, 1);
+            else
+                ld_sp(F, dstreg[k], off, w8 ? F->w : 4, 1);
+        } else if (in_freg(F, vreg[k])) {
             if (half && F->fw[vreg[k]] == 8 && F->xlen == 32) {
                 if (!half[k]) {
                     need_fx(F);
@@ -2107,7 +2172,8 @@ static void set_args_half(struct rv_fn *F, const int *dstreg,
             if (half)
                 ld_sp(F, dstreg[k], sslot(F, vreg[k]) + 4L * half[k], 4, 1);
             else
-                ld_sp(F, dstreg[k], sslot(F, vreg[k]), F->w, 1);
+                ld_sp(F, dstreg[k], sslot(F, vreg[k]),
+                      slot_bytes(F, vreg[k]), 1);
         }
 }
 
@@ -2795,6 +2861,24 @@ static int gen_ins64(struct rv_fn *F, int n)
     }
 }
 
+/* `fd[k] <- fs[k]` among the f registers, as one parallel move
+ * (ra_parallel_move; ft0 breaks a cycle). With D every move is fmv.d,
+ * which copies a NaN-boxed float as exactly as a double. */
+static void fp_parallel_move(struct rv_fn *F, const int *fd, const int *fs,
+                             int n)
+{
+    int od[RA_MAXPOOL * 2], os[RA_MAXPOOL * 2], m;
+    if (!n)
+        return;
+    m = ra_parallel_move(fd, fs, n, RV_FT0, od, os,
+                         (int)(sizeof od / sizeof od[0]));
+    if (m < 0)
+        internal_error("riscv: %s: the f registers' parallel move is not "
+                       "well formed", F->fn->name);
+    for (int k = 0; k < m; k++)
+        rv_fmv(F->t, od[k], os[k], target_riscv_flen() == 64);
+}
+
 /* ---- one call ------------------------------------------------------------ */
 
 /* Can the call at n be a TAIL call: the frame torn down first and the
@@ -2969,18 +3053,49 @@ static void gen_call(struct rv_fn *F, int n)
         }
     }
     /* The hardware-float arguments' f registers, BEFORE the integer
-     * ones: fa0-fa7 hold no value (they are outside the FP class), so
-     * writing them disturbs nothing, while a float whose home is an x
-     * register is read here -- after the parallel move below it might be
-     * gone. The integer half of a float-and-integer struct waits for the
-     * struct arguments. */
+     * ones -- a float whose home is an x register is read here, before
+     * the x registers' parallel move below can overwrite it.
+     *
+     * First, a value in an fa register that an x register must receive (a
+     * variadic double, a float past fa7) is STAGED to the frame: the f
+     * registers' parallel move may write over it. Then that move, every
+     * float argument already in an f register into its fa one; then the
+     * rest, which only write fa registers nothing still reads -- a float
+     * from an x register or a slot, a flattened struct's fields. The
+     * integer half of a float-and-integer struct waits for the struct
+     * arguments. */
+    F->nstg = 0;
+    for (int k = 0; k < i->nargs; k++) {
+        int v = i->argv[k].vreg;
+        if (pl[k].hf || pl[k].byref || i->argv[k].is_struct ||
+            !pl[k].nreg || !in_freg(F, v) || !is_fa(F->floc[v]) ||
+            stg_find(F, v) >= 0)
+            continue;
+        F->stg_v[F->nstg] = v;
+        F->stg_off[F->nstg] = F->fstage + 8L * F->nstg;
+        fst_sp(F, F->floc[v], F->stg_off[F->nstg], F->fw[v] == 8);
+        F->nstg++;
+    }
+    {
+        int fd[MAX_PARAMS], fs[MAX_PARAMS], nf = 0;
+        for (int k = 0; k < i->nargs; k++) {
+            int v = i->argv[k].vreg;
+            if (pl[k].hf && !i->argv[k].is_struct && in_freg(F, v)) {
+                fd[nf] = RV_FA0 + pl[k].fld[0].reg;
+                fs[nf] = F->floc[v];
+                nf++;
+            }
+        }
+        fp_parallel_move(F, fd, fs, nf);
+    }
     for (int k = 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
         if (!pl[k].hf)
             continue;
         if (!a->is_struct) {
-            fload_v(F, a->vreg, RV_FA0 + pl[k].fld[0].reg,
-                    pl[k].fld[0].size == 8);
+            if (!in_freg(F, a->vreg))
+                fload_v(F, a->vreg, RV_FA0 + pl[k].fld[0].reg,
+                        pl[k].fld[0].size == 8);
             continue;
         }
         rd(F, a->vreg, ADDR);
@@ -3080,6 +3195,9 @@ static void gen_call(struct rv_fn *F, int n)
              * overwrite nothing the move still had to read. */
             if (pl[k].nreg == 2 && F->xlen != 32)
                 ld128(F, a->vreg, argreg(pl[k].reg), argreg(pl[k].reg + 1));
+            else if (pl[k].nreg != 2 && stg_find(F, a->vreg) >= 0)
+                ld_sp(F, argreg(pl[k].reg),             /* the low word */
+                      F->stg_off[stg_find(F, a->vreg)], 4, 1);
             else if (pl[k].nreg != 2 && in_freg(F, a->vreg))
                 rd64(F, a->vreg, argreg(pl[k].reg), SCR);  /* the low word */
             else if (pl[k].nreg != 2)
@@ -3101,6 +3219,7 @@ static void gen_call(struct rv_fn *F, int n)
                           ? F->slot[i->dst] : F->tfa + 32);
     }
 
+    F->nstg = 0;
     if (F->tail && F->tail[n]) {
         /* The frame down, then a JUMP: the callee returns straight to
          * this function's caller, with ra as it came in. t1 carries the
@@ -5843,14 +5962,67 @@ static int rv_needs_fx(const struct ir_func *fn)
     return 0;
 }
 
-/* The FP pass's view: RISCV_RA's, less the ABI hints -- which name x
- * registers. */
+/* Where the hardware-float convention would put each FP value: a
+ * parameter in the fa register it arrives in, a call's float arguments in
+ * theirs, a float result -- of this function, of a call, of a runtime
+ * helper -- in fa0, and a helper's float operand there too. Only
+ * preferences, as rv_abi_hints' are for the x registers: the parallel
+ * moves at the prologue and each call are what is correct. */
+static void rv_fp_hints(const struct ir_func *fn, int *hint)
+{
+    int wb = target_ptr_size();
+    struct rv_walk wk;
+    struct argplace pl;
+    struct rv_flat fl;
+    if (!target_riscv_abi_flen())
+        return;
+    walk_init(&wk, fn_sret_bytes(wb, fn) != 0);
+    for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
+        const struct ir_arg *a = &fn->param_abi[p];
+        place_one(wb, &wk, a, 0, &pl);
+        if (pl.hf && !a->is_struct)
+            hint[p] = RV_FA0 + pl.fld[0].reg;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op == IR_RET && i->a >= 0 && i->a < fn->nvregs &&
+            rv_ret_hf(fn->ret_abi.is_struct, fn->ret_abi.is_float,
+                      fn->ret_abi.size, fn->ret_abi.ty, &fl) &&
+            !fn->ret_abi.is_struct && hint[i->a] < 0)
+            hint[i->a] = RV_FA0;
+        if ((i->op == IR_I2F || i->op == IR_F2I || i->op == IR_F2F) &&
+            !rv_fp_hw(i)) {
+            if (i->op != IR_I2F && rv_hfw(i->size) && i->a >= 0 &&
+                i->a < fn->nvregs && hint[i->a] < 0)
+                hint[i->a] = RV_FA0;
+            if (i->op != IR_F2I && rv_hfw(i->w) && i->dst >= 0 &&
+                i->dst < fn->nvregs && hint[i->dst] < 0)
+                hint[i->dst] = RV_FA0;
+        }
+        if (i->op != IR_CALL)
+            continue;
+        if (!i->retsize && i->dst >= 0 && i->dst < fn->nvregs &&
+            rv_ret_hf(0, i->flt, i->ret_tybytes, NULL, &fl))
+            hint[i->dst] = RV_FA0;
+        walk_init(&wk, call_sret_bytes(wb, i) != 0);
+        for (int k = 0; k < i->nargs; k++) {
+            const struct ir_arg *a = &i->argv[k];
+            place_one(wb, &wk, a, i->call_varargs && k >= i->call_nfixed,
+                      &pl);
+            if (pl.hf && !a->is_struct && a->vreg >= 0 &&
+                a->vreg < fn->nvregs)
+                hint[a->vreg] = RV_FA0 + pl.fld[0].reg;
+        }
+    }
+}
+
+/* The FP pass's view: RISCV_RA's, with the f-register hints. */
 static const struct ra_target RISCV_FRA = {
     rv_pool_for, rv_callee_saved, rv_ldvar_plain,
     1, 1, 1,
     rv_op_calls_helper,
     0,
-    NULL,
+    rv_fp_hints,
     rv_fp_pool_for, rv_fp_callee_saved,
     1,
     NULL, NULL,
@@ -6145,8 +6317,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
         int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
         int npstk = 0;
-        /* fa registers into x-register homes, after the parallel move */
-        int pfx_v[MAX_PARAMS], pfx_r[MAX_PARAMS], pfx_d[MAX_PARAMS], npfx = 0;
+        /* fa registers into f-register homes: one parallel move */
+        int pfm_d[MAX_PARAMS], pfm_s[MAX_PARAMS], npfm = 0;
+        /* fa registers into x-register homes, staged through the frame
+         * (F.fstage) and loaded after the x registers' parallel move */
+        int pfx_v[MAX_PARAMS], pfx_d[MAX_PARAMS], npfx = 0;
+        /* integer-rules parameters into f-register homes, after the f
+         * registers' parallel move (a home may be an fa register still
+         * to be read) and before the x registers' */
+        int plate_v[MAX_PARAMS], nplate = 0;
+        struct argplace plate_pl[MAX_PARAMS];
         walk_init(&wk, F.sret_slot >= 0);
         if (F.sret_slot >= 0)
             st_sp(&F, argreg(0), F.sret_slot, F.w);
@@ -6161,8 +6341,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                  * struct's fields into its slot. */
                 if (!a->is_struct) {
                     int fr = RV_FA0 + pl.fld[0].reg, dbl = pl.fld[0].size == 8;
-                    if (in_reg(&F, i)) {
-                        pfx_v[npfx] = i; pfx_r[npfx] = fr; pfx_d[npfx] = dbl;
+                    if (in_freg(&F, i)) {
+                        pfm_d[npfm] = F.floc[i];
+                        pfm_s[npfm] = fr;
+                        npfm++;
+                    } else if (in_reg(&F, i)) {
+                        fst_sp(&F, fr, F.fstage + 8L * npfx, dbl);
+                        pfx_v[npfx] = i; pfx_d[npfx] = dbl;
                         npfx++;
                     } else {
                         fdone(&F, i, fr, dbl);
@@ -6183,27 +6368,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 continue;
             }
             if (!a->is_struct && in_freg(&F, i)) {
-                /* By the integer rules into an f-register home -- a
-                 * float under ilp32/lp64, a double under ilp32f, or one
-                 * past fa7: read now, while the argument registers still
-                 * hold what arrived, and written where nothing else
-                 * reads. At RV32 a double's words go through fx. */
-                int fr = F.floc[i], dbl = F.fw[i] == 8;
-                if (dbl && xlen == 32) {
-                    need_fx(&F);
-                    for (int q = 0; q < 2; q++) {
-                        int r = q < pl.nreg ? param_reg(&F, &pl, q) : SCR;
-                        if (q >= pl.nreg)
-                            ld_sp(&F, SCR, base + pl.stk +
-                                  (long)(q - pl.nreg) * F.w, 4, 1);
-                        st_sp(&F, r, F.fx + 4L * q, 4);
-                    }
-                    fld_sp(&F, fr, F.fx, 1);
-                } else if (pl.nreg) {
-                    f_from_x(&F, fr, param_reg(&F, &pl, 0), dbl ? 8 : 4);
-                } else {
-                    fld_sp(&F, fr, base + pl.stk, dbl);
-                }
+                plate_v[nplate] = i;
+                plate_pl[nplate] = pl;
+                nplate++;
                 continue;
             }
             if (pl.byref) {
@@ -6344,6 +6511,32 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                 }
             }
         }
+        /* The f registers' parallel move, then the parameters that came
+         * by the integer rules into f-register homes -- a float under
+         * ilp32/lp64, a double under ilp32f, one past fa7: read while the
+         * argument registers still hold what arrived, written where
+         * nothing else still reads. At RV32 a double's words go through
+         * fx. */
+        fp_parallel_move(&F, pfm_d, pfm_s, npfm);
+        for (int k = 0; k < nplate; k++) {
+            int p = plate_v[k], fr = F.floc[p], dbl = F.fw[p] == 8;
+            struct argplace *pp = &plate_pl[k];
+            if (dbl && xlen == 32) {
+                need_fx(&F);
+                for (int q = 0; q < 2; q++) {
+                    int r = q < pp->nreg ? param_reg(&F, pp, q) : SCR;
+                    if (q >= pp->nreg)
+                        ld_sp(&F, SCR, base + pp->stk +
+                              (long)(q - pp->nreg) * F.w, 4, 1);
+                    st_sp(&F, r, F.fx + 4L * q, 4);
+                }
+                fld_sp(&F, fr, F.fx, 1);
+            } else if (pp->nreg) {
+                f_from_x(&F, fr, param_reg(&F, pp, 0), dbl ? 8 : 4);
+            } else {
+                fld_sp(&F, fr, base + pp->stk, dbl);
+            }
+        }
         /* The parallel move, now that every parameter has been placed:
          * the register-to-register edges first, in an order that
          * destroys nothing, and then the loads -- which only WRITE
@@ -6362,8 +6555,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         }
         for (int k = 0; k < npstk; k++)
             ld_sp(&F, pstk_reg[k], pstk_off[k], F.w, 1);
-        for (int k = 0; k < npfx; k++)
-            fdone(&F, pfx_v[k], pfx_r[k], pfx_d[k]);
+        for (int k = 0; k < npfx; k++) {
+            int p = pfx_v[k];
+            long off = F.fstage + 8L * k;
+            if (pfx_d[k] && xlen == 32) {
+                ld_sp(&F, F.loc[p], off, 4, 1);
+                ld_sp(&F, F.loc[p] + 1, off + 4, 4, 1);
+            } else {
+                ld_sp(&F, F.loc[p], off, pfx_d[k] ? 8 : 4, 1);
+            }
+        }
 
         /* Where the first UNNAMED argument sits -- simply where the named
          * ones stopped. The save area and the caller's stack arguments
