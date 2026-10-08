@@ -3739,9 +3739,11 @@ static const struct gas_target *target_for(void)
 static void gas_run(struct gas *g, struct gexp *gx, const char *text,
                     const char *path)
 {
-    if (g->tgt->machine == EM_ARM)
+    if (g->tgt->machine == EM_ARM) {
         tasm_set_arch(target_thumb_v8m_base() ? TASM_V8M_BASE
                                               : target_thumb_arch());
+        tasm_set_dsp(target_thumb_em());
+    }
     /* The macro language first, then pass 1 places the labels and pass 2
      * encodes with the displacements they give. Two passes and not one
      * because a branch forward names a label the assembler has not

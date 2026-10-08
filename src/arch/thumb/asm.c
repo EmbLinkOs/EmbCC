@@ -100,6 +100,13 @@ static const struct sysreg sysregs_v8m[] = {
 static int g_arch = 7;
 void tasm_set_arch(int level) { g_arch = level; }
 
+/* The DSP extension: ARMv7E-M, and ARMv8-M Mainline with it. Told by the
+ * caller as the level is; off unless it says so, so a caller that forgets
+ * refuses sadd16 rather than assembling it for a Cortex-M3. */
+static int g_dsp;
+void tasm_set_dsp(int on) { g_dsp = on ? 1 : 0; }
+static int dsp_ok(void) { return g_dsp && (g_arch == 7 || g_arch == 8); }
+
 /* Either ARMv8-M profile: the security extension, the acquire/release
  * forms and the stack-limit registers. */
 static int arch_v8m(void) { return g_arch == 8 || g_arch == TASM_V8M_BASE; }
@@ -749,6 +756,283 @@ static int v8m_stmt(const struct tok *t, int n, struct code *out,
     return 0;
 }
 
+/* ---- the DSP extension, the saturates and the extends --------------
+ *
+ * What CMSIS's __SADD16 ... __SMLALD and ACLE's <arm_acle.h> wrap: the
+ * parallel arithmetic, the halfword and dual multiplies, the saturating
+ * adds, sel, the packs, and the extends with an add or a rotation -- the
+ * DSP extension of ARMv7E-M and of ARMv8-M Mainline with it -- plus
+ * ssat/usat and the plain extends, which every Thumb-2 core has and which
+ * share the parsing.
+ *
+ * The parallel ones are a prefix (the arithmetic: s, q, sh, u, uq, uh)
+ * and an operation (add16 ... sub8), two tables, so that what each half
+ * encodes is said once. The rest are one table whose columns are the
+ * encoder's arguments. */
+static const struct { const char *name; int kind; } par_kind[] = {
+    { "s", T_PAR_S }, { "q", T_PAR_Q }, { "sh", T_PAR_SH },
+    { "u", T_PAR_U }, { "uq", T_PAR_UQ }, { "uh", T_PAR_UH }, { NULL, 0 }
+};
+static const struct { const char *name; int op; } par_op[] = {
+    { "add16", T_PAR_ADD16 }, { "asx", T_PAR_ASX }, { "sax", T_PAR_SAX },
+    { "sub16", T_PAR_SUB16 }, { "add8", T_PAR_ADD8 }, { "sub8", T_PAR_SUB8 },
+    { NULL, 0 }
+};
+
+enum { DF_Q, DF_SEL, DF_SMLAXY, DF_SMLAW, DF_SMLAD, DF_SMMLA, DF_USADA8,
+       DF_SMLALXY, DF_SMLALD, DF_EXT, DF_EXTA, DF_SAT, DF_SAT16, DF_PKH };
+/* a, b: the encoder's own small arguments (see each form below); acc: the
+ * accumulating form, with Ra; dsp: the DSP extension's, not Thumb-2's */
+struct dsp_ent { const char *name; int form, a, b, acc, dsp; };
+static const struct dsp_ent dsp_tab[] = {
+    /* qadd rd, rm, rn: a is the op (t_qarith) */
+    { "qadd", DF_Q, 0, 0, 0, 1 }, { "qdadd", DF_Q, 1, 0, 0, 1 },
+    { "qsub", DF_Q, 2, 0, 0, 1 }, { "qdsub", DF_Q, 3, 0, 0, 1 },
+    { "sel", DF_SEL, 0, 0, 0, 1 },
+    /* a: rn's top half, b: rm's */
+    { "smlabb", DF_SMLAXY, 0, 0, 1, 1 }, { "smlabt", DF_SMLAXY, 0, 1, 1, 1 },
+    { "smlatb", DF_SMLAXY, 1, 0, 1, 1 }, { "smlatt", DF_SMLAXY, 1, 1, 1, 1 },
+    { "smulbb", DF_SMLAXY, 0, 0, 0, 1 }, { "smulbt", DF_SMLAXY, 0, 1, 0, 1 },
+    { "smultb", DF_SMLAXY, 1, 0, 0, 1 }, { "smultt", DF_SMLAXY, 1, 1, 0, 1 },
+    { "smlawb", DF_SMLAW, 0, 0, 1, 1 }, { "smlawt", DF_SMLAW, 0, 1, 1, 1 },
+    { "smulwb", DF_SMLAW, 0, 0, 0, 1 }, { "smulwt", DF_SMLAW, 0, 1, 0, 1 },
+    /* a: subtract, b: exchange rm's halves */
+    { "smlad", DF_SMLAD, 0, 0, 1, 1 }, { "smladx", DF_SMLAD, 0, 1, 1, 1 },
+    { "smlsd", DF_SMLAD, 1, 0, 1, 1 }, { "smlsdx", DF_SMLAD, 1, 1, 1, 1 },
+    { "smuad", DF_SMLAD, 0, 0, 0, 1 }, { "smuadx", DF_SMLAD, 0, 1, 0, 1 },
+    { "smusd", DF_SMLAD, 1, 0, 0, 1 }, { "smusdx", DF_SMLAD, 1, 1, 0, 1 },
+    /* a: subtract, b: round */
+    { "smmla", DF_SMMLA, 0, 0, 1, 1 }, { "smmlar", DF_SMMLA, 0, 1, 1, 1 },
+    { "smmls", DF_SMMLA, 1, 0, 1, 1 }, { "smmlsr", DF_SMMLA, 1, 1, 1, 1 },
+    { "smmul", DF_SMMLA, 0, 0, 0, 1 }, { "smmulr", DF_SMMLA, 0, 1, 0, 1 },
+    { "usada8", DF_USADA8, 0, 0, 1, 1 }, { "usad8", DF_USADA8, 0, 0, 0, 1 },
+    /* rdlo, rdhi, rn, rm; a and b as smla<x><y>'s, and as smlad's */
+    { "smlalbb", DF_SMLALXY, 0, 0, 1, 1 }, { "smlalbt", DF_SMLALXY, 0, 1, 1, 1 },
+    { "smlaltb", DF_SMLALXY, 1, 0, 1, 1 }, { "smlaltt", DF_SMLALXY, 1, 1, 1, 1 },
+    { "smlald", DF_SMLALD, 0, 0, 1, 1 }, { "smlaldx", DF_SMLALD, 0, 1, 1, 1 },
+    { "smlsld", DF_SMLALD, 1, 0, 1, 1 }, { "smlsldx", DF_SMLALD, 1, 1, 1, 1 },
+    /* a: size (1 byte, 2 halfword, 16 two bytes), b: signed */
+    { "sxtb16", DF_EXT, 16, 1, 0, 1 }, { "uxtb16", DF_EXT, 16, 0, 0, 1 },
+    { "sxtb", DF_EXT, 1, 1, 0, 0 }, { "uxtb", DF_EXT, 1, 0, 0, 0 },
+    { "sxth", DF_EXT, 2, 1, 0, 0 }, { "uxth", DF_EXT, 2, 0, 0, 0 },
+    { "sxtab16", DF_EXTA, 16, 1, 0, 1 }, { "uxtab16", DF_EXTA, 16, 0, 0, 1 },
+    { "sxtab", DF_EXTA, 1, 1, 0, 1 }, { "uxtab", DF_EXTA, 1, 0, 0, 1 },
+    { "sxtah", DF_EXTA, 2, 1, 0, 1 }, { "uxtah", DF_EXTA, 2, 0, 0, 1 },
+    /* b: signed */
+    { "ssat", DF_SAT, 0, 1, 0, 0 }, { "usat", DF_SAT, 0, 0, 0, 0 },
+    { "ssat16", DF_SAT16, 0, 1, 0, 1 }, { "usat16", DF_SAT16, 0, 0, 0, 1 },
+    /* a: tb */
+    { "pkhbt", DF_PKH, 0, 0, 0, 1 }, { "pkhtb", DF_PKH, 1, 0, 0, 1 },
+    { NULL, 0, 0, 0, 0, 0 }
+};
+
+/* A register these instructions may name: never sp or pc, which are
+ * UNPREDICTABLE in every one of them (llvm-mc: r0-r12 or r14). */
+static int dsp_reg(const struct tok *t)
+{
+    int r = tok_reg(t);
+    return r == 13 || r == 15 ? -2 : r;
+}
+
+/* An optional trailing `<kw> #amount` at t[at] (and t[at+1]): `ror #8`,
+ * `lsl #3`, or CMSIS's `ROR 8` (inline asm substitutes an immediate
+ * without the #). 1 with *amt set (0 when absent), 0 when malformed. */
+static int tok_shift(const struct tok *t, int n, int at, const char *kw,
+                     long *amt)
+{
+    *amt = 0;
+    if (n == at)
+        return 1;
+    if (n == at + 2 && tok_is(&t[at], kw))
+        return tok_imm(&t[at + 1], amt);
+    /* `ror #8` kept as one token when the amount is an expression */
+    if (n == at + 1 && t[at].len > 4 && same_nocase(t[at].s, kw, 3) &&
+        isspace((unsigned char)t[at].s[3])) {
+        struct tok v = { t[at].s + 4, t[at].len - 4 };
+        while (v.len && isspace((unsigned char)*v.s)) { v.s++; v.len--; }
+        return tok_imm(&v, amt);
+    }
+    return 0;
+}
+
+static int dsp_stmt(const struct tok *t, int n, struct code *out,
+                    char *err, int errlen)
+{
+    const struct dsp_ent *e = NULL;
+    int par_k = -1, par_o = -1, r[4], nreg;
+    long imm = 0, amt = 0;
+    for (int k = 0; par_kind[k].name && par_o < 0; k++) {
+        int pl = (int)strlen(par_kind[k].name);
+        if (t[0].len <= pl || strncmp(t[0].s, par_kind[k].name, (size_t)pl))
+            continue;
+        for (int o = 0; par_op[o].name; o++) {
+            struct tok rest = { t[0].s + pl, t[0].len - pl };
+            if (mnemonic_is(&rest, par_op[o].name)) {
+                par_k = k;
+                par_o = o;
+                break;
+            }
+        }
+    }
+    if (par_o < 0) {
+        for (e = dsp_tab; e->name; e++)
+            if (mnemonic_is(&t[0], e->name))
+                break;
+        if (!e->name)
+            return 1;
+    }
+    if (par_o >= 0 || e->dsp) {
+        if (t_isa_a32)
+            FAIL("\"%.*s\" is a DSP instruction, and EmbCC's ARM-state (A32) "
+                 "assembler does not have them: only its Thumb one does",
+                 t[0].len, t[0].s);
+        if (!dsp_ok())
+            FAIL("\"%.*s\" is an instruction of the DSP extension, which %s "
+                 "lacks: it is ARMv7E-M's (-mcpu=cortex-m4, cortex-m7, "
+                 "--target=thumbv7em-none-eabi) and ARMv8-M Mainline's with "
+                 "the extension (-mcpu=cortex-m33, -march=armv8-m.main+dsp)",
+                 t[0].len, t[0].s,
+                 g_arch == 6 ? "ARMv6-M" : g_arch == TASM_V8M_BASE
+                 ? "ARMv8-M Baseline" : g_arch == 8 ? "this ARMv8-M Mainline "
+                 "target" : "ARMv7-M");
+    }
+    if (par_o >= 0) {
+        for (int k = 0; k < 3; k++)
+            r[k] = n == 4 ? dsp_reg(&t[k + 1]) : -1;
+        if (n != 4 || r[0] < 0 || r[1] < 0 || r[2] < 0)
+            FAIL("\"%.*s\" wants three registers, none of them sp or pc",
+                 t[0].len, t[0].s);
+        t_parallel(out, par_op[par_o].op, par_kind[par_k].kind, r[0], r[1],
+                   r[2]);
+        return 0;
+    }
+
+    /* the plain extends, which ARM state has too */
+    if (e->form == DF_EXT && t_isa_a32) {
+        int rd = n == 3 ? tok_reg(&t[1]) : -1, rm = n == 3 ? tok_reg(&t[2]) : -1;
+        if (rd < 0 || rm < 0 || rd == 15 || rm == 15)
+            FAIL("%s wants two registers, and no rotation in ARM state",
+                 e->name);
+        t_ext(out, rd, rm, e->a, e->b);
+        return 0;
+    }
+    if (t_isa_a32)
+        FAIL("\"%.*s\" is not in EmbCC's ARM-state (A32) assembler: only its "
+             "Thumb one has it", t[0].len, t[0].s);
+
+    switch (e->form) {
+    case DF_EXT: case DF_EXTA: {
+        nreg = e->form == DF_EXTA ? 3 : 2;
+        for (int k = 0; k < nreg; k++)
+            r[k] = n > nreg ? dsp_reg(&t[k + 1]) : -1;
+        if (n <= nreg || r[0] < 0 || r[1] < 0 || (nreg == 3 && r[2] < 0) ||
+            !tok_shift(t, n, nreg + 1, "ror", &amt))
+            FAIL("%s wants %s registers (not sp or pc) and an optional "
+                 "`ror #8|16|24`", e->name, nreg == 3 ? "three" : "two");
+        if (amt != 0 && amt != 8 && amt != 16 && amt != 24)
+            FAIL("%s: the rotation is 8, 16 or 24, not %ld", e->name, amt);
+        /* (a Thumb-1 core's 16-bit extend has no rotation field, not even
+         * for `ror #0`, as llvm-mc reads it) */
+        if (arch_thumb1() && n > nreg + 1)
+            FAIL("%s: %s's extends take no rotation", e->name,
+                 g_arch == 6 ? "ARMv6-M" : "ARMv8-M Baseline");
+        /* the 16-bit form where there is one, as GNU as and llvm-mc take
+         * it: an ARMv6-M core has only that one */
+        if (nreg == 2 && e->a != 16 && amt == 0 && r[0] < 8 && r[1] < 8)
+            t_ext(out, r[0], r[1], e->a, e->b);
+        else
+            t_extadd(out, r[0], nreg == 3 ? r[1] : 15, r[nreg - 1], e->a,
+                     e->b, (int)amt);
+        return 0;
+    }
+    case DF_SAT: case DF_SAT16: {
+        long lo = e->b ? 1 : 0, hi = e->form == DF_SAT ? (e->b ? 32 : 31)
+                                                       : (e->b ? 16 : 15);
+        int asr = 0;
+        r[0] = n >= 4 ? dsp_reg(&t[1]) : -1;
+        r[1] = n >= 4 ? dsp_reg(&t[3]) : -1;
+        if (n < 4 || r[0] < 0 || r[1] < 0 || !tok_imm(&t[2], &imm))
+            FAIL("%s wants a register, #bound and a register (not sp or pc)%s",
+                 e->name, e->form == DF_SAT ? ", then lsl or asr #n" : "");
+        if (imm < lo || imm > hi)
+            FAIL("%s: the bound is %ld..%ld, not %ld", e->name, lo, hi, imm);
+        if (e->form == DF_SAT16) {
+            if (n != 4)
+                FAIL("%s takes no shift", e->name);
+            t_sat16(out, r[0], (int)imm, r[1], e->b);
+            return 0;
+        }
+        if (n > 4 && !tok_shift(t, n, 4, "lsl", &amt)) {
+            asr = 1;
+            if (!tok_shift(t, n, 4, "asr", &amt))
+                FAIL("%s: the shift is lsl #0..31 or asr #1..31", e->name);
+        }
+        if (amt < asr || amt > 31)
+            FAIL("%s: the shift is lsl #0..31 or asr #1..31, not %s #%ld",
+                 e->name, asr ? "asr" : "lsl", amt);
+        t_sat(out, r[0], (int)imm, r[1], e->b, asr, (int)amt);
+        return 0;
+    }
+    case DF_PKH: {
+        for (int k = 0; k < 3; k++)
+            r[k] = n >= 4 ? dsp_reg(&t[k + 1]) : -1;
+        if (n < 4 || r[0] < 0 || r[1] < 0 || r[2] < 0 ||
+            !tok_shift(t, n, 4, e->a ? "asr" : "lsl", &amt))
+            FAIL("%s wants three registers (not sp or pc) and an optional "
+                 "`%s`", e->name, e->a ? "asr #1..32" : "lsl #0..31");
+        /* pkhtb with no shift is pkhbt with the sources the other way
+         * round: the top half of rn and the bottom of rm, as llvm-mc and
+         * GNU as encode it (asr #0 is not an encoding: amount 0 is #32) */
+        if (e->a && n == 4) {
+            t_pkh(out, r[0], r[2], r[1], 0, 0);
+            return 0;
+        }
+        if (e->a ? (amt < 1 || amt > 32) : (amt < 0 || amt > 31))
+            FAIL("%s: the shift is %s, not %ld", e->name,
+                 e->a ? "asr #1..32" : "lsl #0..31", amt);
+        t_pkh(out, r[0], r[1], r[2], e->a, (int)amt);
+        return 0;
+    }
+    default:
+        break;
+    }
+
+    /* the rest: registers only, three or four (the multiplies' Ra, the
+     * long ones' RdLo, RdHi, Rn, Rm) */
+    nreg = e->form == DF_Q || e->form == DF_SEL ? 3
+         : e->form == DF_SMLALXY || e->form == DF_SMLALD ? 4 : 3 + e->acc;
+    for (int k = 0; k < nreg; k++)
+        r[k] = n == nreg + 1 ? dsp_reg(&t[k + 1]) : -1;
+    for (int k = 0; k < nreg; k++)
+        if (r[k] < 0)
+            FAIL("\"%.*s\" wants %s registers, none of them sp or pc",
+                 t[0].len, t[0].s, nreg == 4 ? "four" : "three");
+    switch (e->form) {
+    case DF_Q:      t_qarith(out, e->a, r[0], r[1], r[2]); break;
+    case DF_SEL:    t_sel(out, r[0], r[1], r[2]); break;
+    case DF_SMLAXY: t_smlaxy(out, r[0], r[1], r[2], e->acc ? r[3] : 15,
+                             e->a, e->b); break;
+    case DF_SMLAW:  t_smlaw(out, r[0], r[1], r[2], e->acc ? r[3] : 15, e->b);
+                    break;
+    case DF_SMLAD:  t_smlad(out, r[0], r[1], r[2], e->acc ? r[3] : 15, e->a,
+                            e->b); break;
+    case DF_SMMLA:  t_smmla(out, r[0], r[1], r[2], e->acc ? r[3] : 15, e->a,
+                            e->b); break;
+    case DF_USADA8: t_usada8(out, r[0], r[1], r[2], e->acc ? r[3] : 15);
+                    break;
+    default:
+        /* RdLo and RdHi the same register is UNPREDICTABLE */
+        if (r[0] == r[1])
+            FAIL("%s: RdLo and RdHi must be different registers", e->name);
+        if (e->form == DF_SMLALXY)
+            t_smlalxy(out, r[0], r[1], r[2], r[3], e->a, e->b);
+        else
+            t_smlald(out, r[0], r[1], r[2], r[3], e->a, e->b);
+        break;
+    }
+    return 0;
+}
+
 static int one_stmt(const char *stmt, int len, struct code *out,
                     char *err, int errlen)
 {
@@ -842,6 +1126,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
 
     {
         int r = v8m_stmt(t, n, out, err, errlen);
+        if (r == 1)
+            r = dsp_stmt(t, n, out, err, errlen);
         if (r != 1)
             return r;
     }
@@ -1828,4 +2114,70 @@ void tasm_vocabulary(FILE *f)
                "\tmovle r0, r8\n");
     fprintf(f, "\tit eq\n\tvstmdbeq r0!, {s16-s31}\n");
     fprintf(f, "\tit ne\n\tbxne lr\n");
+}
+
+/* The DSP extension's vocabulary, ssat/usat and the extends, for
+ * tests/golden/thumb-dsp.sh: every entry of par_kind x par_op and of
+ * dsp_tab, with each of r0-r12 and lr in every register field (rotated so
+ * the fields differ), and the immediates at their ends and between. */
+void tasm_vocabulary_dsp(FILE *f)
+{
+    static const char *const sat_sh[] = {
+        "", ", lsl #0", ", lsl #1", ", lsl #17", ", lsl #31", ", asr #1",
+        ", asr #16", ", asr #31", NULL
+    };
+    static const char *const rot[] = {
+        "", ", ror #8", ", ror #16", ", ror #24", NULL
+    };
+    for (int k = 0; par_kind[k].name; k++)
+        for (int o = 0; par_op[o].name; o++)
+            for (int a = 0; v8_regs[a]; a++)
+                fprintf(f, "\t%s%s %s, %s, %s\n", par_kind[k].name,
+                        par_op[o].name, v8_regs[a], v8_regs[(a + 5) % 14],
+                        v8_regs[(a + 9) % 14]);
+    for (const struct dsp_ent *e = dsp_tab; e->name; e++)
+        for (int a = 0; v8_regs[a]; a++) {
+            const char *rd = v8_regs[a], *rn = v8_regs[(a + 5) % 14];
+            const char *rm = v8_regs[(a + 9) % 14], *ra = v8_regs[(a + 3) % 14];
+            switch (e->form) {
+            case DF_EXT:
+                fprintf(f, "\t%s %s, %s%s\n", e->name, rd, rm, rot[a % 4]);
+                break;
+            case DF_EXTA:
+                fprintf(f, "\t%s %s, %s, %s%s\n", e->name, rd, rn, rm,
+                        rot[a % 4]);
+                break;
+            case DF_SAT:
+                fprintf(f, "\t%s %s, #%d, %s%s\n", e->name, rd,
+                        e->b ? 1 + a * 31 / 13 : a * 31 / 13, rm,
+                        sat_sh[a % 8]);
+                break;
+            case DF_SAT16:
+                fprintf(f, "\t%s %s, #%d, %s\n", e->name, rd,
+                        e->b ? 1 + a * 15 / 13 : a * 15 / 13, rm);
+                break;
+            case DF_PKH:
+                if (a % 4 == 0)
+                    fprintf(f, "\t%s %s, %s, %s\n", e->name, rd, rn, rm);
+                else
+                    fprintf(f, "\t%s %s, %s, %s, %s #%d\n", e->name, rd, rn,
+                            rm, e->a ? "asr" : "lsl",
+                            e->a ? 1 + (a * 31) / 13 : (a * 31) / 13);
+                break;
+            case DF_SMLALXY: case DF_SMLALD:
+                fprintf(f, "\t%s %s, %s, %s, %s\n", e->name, rd,
+                        v8_regs[(a + 1) % 14], rn, rm);
+                break;
+            default:
+                if (e->acc)
+                    fprintf(f, "\t%s %s, %s, %s, %s\n", e->name, rd, rn, rm,
+                            ra);
+                else
+                    fprintf(f, "\t%s %s, %s, %s\n", e->name, rd, rn, rm);
+                break;
+            }
+        }
+    /* the plain extends' narrow form: low registers, no rotation */
+    fprintf(f, "\tsxtb r0, r7\n\tuxtb r6, r1\n\tsxth r3, r4\n\tuxth r7, r7\n");
+    fprintf(f, "\tsxtb r0, r1, ror #0\n\tpkhbt r1, r2, r3, lsl #0\n");
 }

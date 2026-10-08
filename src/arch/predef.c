@@ -356,6 +356,33 @@ static int riscv_adds(struct predef_macro *out)
     return n;
 }
 
+/* The DSP extension: ARMv7E-M (Cortex-M4/M7), and ARMv8-M Mainline with
+ * it (Cortex-M33, -march=armv8-m.main+dsp). The generated tables are
+ * clang's thumbv7m and thumbv8m.main, neither of which has it; these are
+ * what clang adds for -mcpu=cortex-m4 or cortex-m33, read off its -dM
+ * (tests/golden/predef.sh compares every Cortex-M part against it). On
+ * v7E-M the architecture macro is a different NAME, so __ARM_ARCH_7M__
+ * goes: CMSIS's cmsis_gcc.h selects __SSAT and the DSP intrinsics on
+ * __ARM_ARCH_7EM__ and __ARM_FEATURE_DSP, and without them a CMSIS-DSP
+ * build took its plain-C fallbacks or did not build.
+ *
+ * __ARM_FEATURE_FMA, which clang also adds, is left out for the reason
+ * thumb_fpu_add gives. ARMv7-A (A32) has its own table, already with them. */
+static const struct predef_macro thumb_dsp_add[] = {
+    { "__ARM_FEATURE_DSP", "1" },
+    { "__ARM_FEATURE_SIMD32", "1" },
+};
+static const struct predef_macro thumb_v7em_add[] = {
+    { "__ARM_ARCH_7EM__", "1" },
+};
+
+static int thumb_dsp(void)
+{
+    return target_get() == TARGET_THUMB && !target_arm_a32() &&
+           target_thumb_em() &&
+           (target_thumb_arch() == 7 || target_thumb_arch() >= 8);
+}
+
 static int thumb_fpu_drops(const char *name)
 {
     if (target_get() != TARGET_THUMB || !target_thumb_fpu())
@@ -383,6 +410,8 @@ static int contradicted(const char *name)
     }
     return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
            thumb_fpu_drops(name) || riscv_drops(name) ||
+           (thumb_dsp() && target_thumb_arch() == 7 &&
+            strcmp(name, "__ARM_ARCH_7M__") == 0) ||
            (target_thumb_cmse() && strcmp(name, "__ARM_FEATURE_CMSE") == 0);
 }
 
@@ -417,7 +446,8 @@ const struct predef_macro *predef_table(int *count)
     int fpu = target_get() == TARGET_THUMB && target_thumb_fpu();
     int cmse = target_thumb_cmse();
     int rv = riscv_changes();
-    if (!os && !fpu && !cmse && !rv && target_fmt_get() == TGT_FMT_ELF) {
+    int dsp = thumb_dsp();
+    if (!os && !fpu && !cmse && !rv && !dsp && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -437,6 +467,11 @@ const struct predef_macro *predef_table(int *count)
                 merged[nmerged++] = darwin_a64_model[i];
         if (cmse)
             merged[nmerged++] = thumb_cmse_add[0];
+        if (dsp && target_thumb_arch() == 7)
+            merged[nmerged++] = thumb_v7em_add[0];
+        if (dsp)
+            for (size_t i = 0; i < sizeof thumb_dsp_add / sizeof *thumb_dsp_add; i++)
+                merged[nmerged++] = thumb_dsp_add[i];
         if (rv)
             nmerged += riscv_adds(merged + nmerged);
         if (fpu && target_arm_a32()) {

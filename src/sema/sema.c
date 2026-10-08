@@ -1249,6 +1249,93 @@ static int same_operand(const struct expr *a, const struct expr *b)
     }
 }
 
+/* Is const_fold's answer for e exact: every node an integer or a pointer
+ * that a long holds? A wider one -- __int128, where `(u128)0 - 1 !=
+ * W(~0, ~0)` is false -- or a floating one is folded in 64 bits or not at
+ * all, which is fine for an array bound's diagnostics and wrong for
+ * deciding which arm of an if is never generated. */
+static int fold_is_exact(const struct expr *e)
+{
+    if (!e)
+        return 1;
+    if (!e->ty || !(ty_is_integer(e->ty) || e->ty->kind == TY_PTR) ||
+        ty_size(e->ty) > 8)
+        return 0;
+    if (e->kind == EXPR_COND && !fold_is_exact(e->args[0]))
+        return 0;
+    if (e->kind == EXPR_CALL)
+        return 0;
+    return fold_is_exact(e->lhs) && fold_is_exact(e->rhs);
+}
+
+/* Do two operands name the same object, with nothing to evaluate twice: a
+ * variable and member, constant-subscript and dereference chains off one. */
+static int asm_same_lvalue(const struct expr *a, const struct expr *b)
+{
+    if (!a || !b || a->kind != b->kind)
+        return 0;
+    switch (a->kind) {
+    case EXPR_VAR:
+        return a->name && b->name && !strcmp(a->name, b->name) &&
+               a->var_index == b->var_index && a->gref == b->gref;
+    case EXPR_NUM:
+        return a->num == b->num;
+    case EXPR_MEMBER:
+        return a->name && b->name && !strcmp(a->name, b->name) &&
+               a->is_arrow == b->is_arrow && asm_same_lvalue(a->lhs, b->lhs);
+    case EXPR_DEREF:
+        return asm_same_lvalue(a->rhs, b->rhs);
+    case EXPR_CAST:
+        return a->ty == b->ty && asm_same_lvalue(a->rhs, b->rhs);
+    case EXPR_BINOP:
+        return a->op == b->op && (a->op == B_ADD || a->op == B_SUB) &&
+               asm_same_lvalue(a->lhs, b->lhs) &&
+               asm_same_lvalue(a->rhs, b->rhs);
+    default:
+        return 0;
+    }
+}
+
+/* A matching constraint, `"0"(x)` with output 0 `"=r"(x)`: the input is
+ * the output's starting value, in its register. On Thumb, where it is taken
+ * as the in-out `"+r"(x)` it means -- CMSIS's __SMLALD writes its 64-bit
+ * accumulator so, `"=r"(llr.w32[0]), "=r"(llr.w32[1]) : ... "0"(llr.w32[0]),
+ * "1"(llr.w32[1])`. An input naming some OTHER value is refused by name:
+ * it would need a copy into the output first, which nothing here makes. */
+static void asm_tie_inputs(struct unit *u, struct stmt *s)
+{
+    struct asm_stmt *a = s->asm_s;
+    if (target_get() != TARGET_THUMB)
+        return;
+    for (int i = 0; i < a->nin; i++) {
+        const char *c = a->in[i].constraint;
+        int n = 0, k = 0;
+        if (c[0] < '0' || c[0] > '9')
+            continue;
+        for (; c[k] >= '0' && c[k] <= '9'; k++)
+            n = n * 10 + (c[k] - '0');
+        if (c[k] || n >= a->nout)
+            sema_error_at(u, s->line, s->col, "asm input constraint \"%s\" "
+                          "names no output", c);
+        if (a->out[n].constraint[0] != '=' && a->out[n].constraint[0] != '+')
+            continue;                        /* (refused with the output) */
+        if (!asm_same_lvalue(a->in[i].expr, a->out[n].expr))
+            sema_error_at(u, s->line, s->col, "asm input %d is tied to output "
+                          "%d (\"%s\") but is another value; EmbCC takes a "
+                          "matching constraint only on the output's own "
+                          "lvalue, as \"+r\" says", i, n, c);
+        if (a->out[n].constraint[0] == '=') {
+            size_t len = strlen(a->out[n].constraint);
+            char *pc = xmalloc(len + 1);
+            memcpy(pc, a->out[n].constraint, len + 1);
+            pc[0] = '+';
+            a->out[n].constraint = pc;
+        }
+        a->in[i].reg = ASM_REG_TIED;
+        a->in[i].imm = n;
+    }
+}
+
 static void warn_binop_shape(struct unit *u, struct expr *e,
                              struct type *lt, struct type *rt)
 {
@@ -5145,6 +5232,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 check_expr(u, f, sc, a->in[i].expr);
                 a->in[i].reg = asm_resolve_reg(u, s, &a->in[i], 0);
             }
+            asm_tie_inputs(u, s);
             /* the template is assembled in irgen, once -2 (allocatable)
              * operands have been assigned registers */
             break;
@@ -5156,6 +5244,11 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             else {
                 need_scalar(u, s->cond, "'if'");
                 warn_truth_shape(u, s->cond, "branch");
+            }
+            {
+                long cv;
+                s->cond_const = fold_is_exact(s->cond) &&
+                                const_fold(s->cond, &cv) ? (cv ? 2 : 1) : 0;
             }
             check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
             if (s->els)

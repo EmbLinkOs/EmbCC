@@ -670,7 +670,7 @@ printf '#define SQ(x) ((x)*(x))\n#define V(f, ...) g(f, __VA_ARGS__)\n#define E\
 "$EMBCC" --target=thumbv7em-none-eabi -E -dM "$out/dm.c" > "$out/dm.out" ||
     fail "-E -dM"
 for l in "#define SQ(x) ((x)*(x))" "#define V(f,...) g(f, __VA_ARGS__)" \
-         "#define E" "#define __ARM_ARCH_7M__ 1"; do
+         "#define E" "#define __ARM_ARCH_7EM__ 1"; do
     grep -qxF "$l" "$out/dm.out" || fail "-E -dM lacks: $l"
 done
 printf 'int x;\n' | "$EMBCC" --target=riscv32-unknown-elf -E -dM - |

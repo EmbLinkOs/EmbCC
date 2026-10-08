@@ -350,7 +350,8 @@ void iface_emit(struct outbuf *b, struct unit *u)
             reach_type(g->ty, &s, 0);
 
     for (const struct tagdef *t = u->tags; t; t = t->next) {
-        if (!t->tag)
+        /* (a block's own types are no part of the interface) */
+        if (!t->tag || t->blk)
             continue;
         int reached = 0;
         for (int i = 0; i < s.n; i++)

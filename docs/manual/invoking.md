@@ -1657,11 +1657,13 @@ only Thumb`.
 #### `-mcpu=CPU`
 
 Select the processor. `cortex-m0`, `cortex-m0plus` and `cortex-m1`
-select ARMv6-M (Thumb-1) code on any ARM triple. `cortex-m4`,
-`cortex-m7` and `cortex-m33` select ARMv7E-M code (with the DSP
-extension); `cortex-m3` selects ARMv7-M code. `-mcpu=` does not move
-between ARMv7-M and ARMv8-M; that level comes from the triple
-(`thumbv8m.main-none-eabi`).
+select ARMv6-M (Thumb-1) code on any ARM triple. `cortex-m4` and
+`cortex-m7` select ARMv7E-M (with the DSP extension), `cortex-m3`
+ARMv7-M, and `cortex-m33` ARMv8-M Mainline with the DSP extension, on any
+Thumb triple, as clang takes them: the part has one architecture, whatever
+the triple said. The DSP extension defines `__ARM_FEATURE_DSP` and lets
+inline asm and `.s` files use its instructions
+([Inline assembly](inline-asm.md#the-dsp-extension)).
 
 `cortex-m23` selects ARMv8-M Baseline on any ARM triple, as
 `thumbv8m.base-none-eabi` does ([Targets](targets.md#armv8-m-baseline)).
@@ -1678,7 +1680,8 @@ GCC's extensions are accepted after `+`:
 - `+fp` names the architecture's single-precision unit: FPv4-SP-D16, or
   FPv5-SP-D16 on ARMv8-M;
 - `+fp.dp` names FPv5-D16, and `+nofp` none;
-- `+dsp` and `+nodsp` apply on `armv8-m.main`.
+- `+dsp` and `+nodsp` apply on `armv8-m.main`, which without `+dsp` (as
+  the bare `thumbv8m.main-none-eabi` triple) has no DSP extension.
 
 The unit is used when `-mfpu=` is not given or is `auto`, and
 `-mfloat-abi=` decides whether it is used at all, as with GCC. Any other
