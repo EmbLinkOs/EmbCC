@@ -454,6 +454,16 @@ static int arg_align(const struct ir_arg *a)
     return a->size > 4 ? 8 : 4;
 }
 
+/* The bytes of a stack word a scalar argument occupies: the whole word,
+ * except a float at big-endian n64, which GCC pads UPWARD -- its four
+ * bytes are the doubleword's first, where an integer's (extended to the
+ * whole doubleword) are its last -- and clang places and reads it there.
+ * A variadic float was promoted to double, so this is only a named one. */
+static int stk_scalar_size(const struct ir_arg *a)
+{
+    return g_m64 && g_be && a->is_float && a->size == 4 ? 4 : W;
+}
+
 /* ...and a call's argument k, which at n64 may be VARIADIC: an unnamed
  * __int128 starts at an even slot, as clang's va_arg and GCC both read
  * it, where clang places a named one at any slot (and its own variadic
@@ -2811,7 +2821,7 @@ static void gen_call(struct mips_fn *F, int n)
             int r;
             rd(F, a->vreg, SCR);
             r = a->size <= 4 ? sext32(F, a->vreg, SCR, SCR) : SCR;
-            st_out(F, r, pl[k].stk, W);
+            st_out(F, r, pl[k].stk, stk_scalar_size(a));
         }
     }
     /* The scalar register arguments, all at once: a value for a0 may be
@@ -4443,7 +4453,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
         long blk = 0;
         long base = F.frame;          /* the caller's outgoing block */
         int pmv_dst[RA_MAXPOOL], pmv_src[RA_MAXPOOL], npmv = 0;
-        int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
+        int pstk_reg[RA_MAXPOOL], pstk_sz[RA_MAXPOOL];
+        long pstk_off[RA_MAXPOOL];
         int npstk = 0;
         if (F.sret_slot >= 0) {
             st_sp(&F, argreg(0), F.sret_slot, W);
@@ -4467,6 +4478,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                             pstk_off[npstk] = q < pl.nreg
                                 ? F.va_base + (long)W * (pl.reg + q)
                                 : base + pl.stk + (long)W * (q - pl.nreg);
+                            pstk_sz[npstk] = W;
                             npstk++;
                         }
                     }
@@ -4488,6 +4500,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                      * registers (no argument register) cannot disturb */
                     pstk_reg[npstk] = reg_of(&F, i);
                     pstk_off[npstk] = F.va_base + (long)W * pl.reg;
+                    pstk_sz[npstk] = W;
                     npstk++;
                 } else if (pl.nreg) {
                     if (F.slot[i] >= 0)
@@ -4498,9 +4511,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                 } else if (in_reg(&F, i)) {
                     pstk_reg[npstk] = reg_of(&F, i);
                     pstk_off[npstk] = base + pl.stk;
+                    pstk_sz[npstk] = stk_scalar_size(a);
                     npstk++;
                 } else if (F.slot[i] >= 0) {
-                    ld_sp(&F, SCR, base + pl.stk, W, 1);
+                    ld_sp(&F, SCR, base + pl.stk, stk_scalar_size(a), 1);
                     st_sp(&F, SCR, slot32(&F, i), W);
                 }
                 continue;
@@ -4539,7 +4553,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
                 mips_mv(t, od[k], os[k]);
         }
         for (int k = 0; k < npstk; k++)
-            ld_sp(&F, pstk_reg[k], pstk_off[k], W, 1);
+            ld_sp(&F, pstk_reg[k], pstk_off[k], pstk_sz[k], 1);
         /* where the first unnamed argument is: where the named ones end */
         if (fn->is_varargs)
             F.va_first = F.va_base + blk;

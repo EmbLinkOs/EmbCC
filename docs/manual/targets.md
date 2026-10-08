@@ -1389,7 +1389,9 @@ the stack is 16-byte aligned.
   split between `a7` and the stack when it straddles them.
 - A 32-bit value, `unsigned` included, travels and is returned
   sign-extended to 64 bits; a `float` as its bits, a `double` as a `long`
-  does.
+  does. A `float` on the stack is the exception: GCC pads it upward, so
+  big-endian its four bytes are its slot's first, where an `int`'s are
+  its last.
 - A scalar result comes back in `v0`, an `__int128` in `v0:v1`, and a
   `long double` in `v0` and `a0` (its first doubleword in memory in
   `v0`). A structure or union of at most 16 bytes comes back in `v0:v1` as

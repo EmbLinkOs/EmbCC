@@ -10,6 +10,8 @@
  *     caller's sp with no home area;
  *   - a 32-bit value travels SIGN-EXTENDED, unsigned too, both ways;
  *   - soft float: a float and a double travel as an int and a long do,
+ *     except a float on the STACK, which is padded upward: its four bytes
+ *     are the doubleword's first, where an int's are its last big-endian;
  *     and a long double (binary128) as an even-aligned register pair --
  *     where an __int128 takes the next slot, aligned or not (clang);
  *   - a composite of any size by value, packed as `ld` reads it (a short
@@ -46,6 +48,8 @@ double many_d(double a, double b, double c, double d, double e, double f,
 int many_i(int a, int b, int c, int d, int e, int f, int g, int h, int i,
            unsigned j);
 float fmul3(float a, float b, float c);
+float many_f(long a, long b, long c, long d, long e, long f, long g, long h,
+             float i, int j, float k);
 unsigned uret(unsigned a, unsigned b);
 int is_max(unsigned u);
 long sext_back(int x);

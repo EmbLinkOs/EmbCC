@@ -16,6 +16,7 @@ int main(void)
     putd(many_d(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10));
     putn(many_i(1, 2, 3, 4, 5, 6, 7, 8, 9, 0xffffffffu));
     putf(fmul3(1.5f, 2.0f, -3.0f));
+    putf(many_f(1, 2, 3, 4, 5, 6, 7, 8, 1.5f, -3, 0.25f));
     { static volatile unsigned a = 1, b = 2;
       unsigned r = uret(a, b); putn(r == 0xffffffffu); putn(is_max(r)); putn((long)r); }
     putn(sext_back(-7)); putn(sext_back(0x7fffffff));
