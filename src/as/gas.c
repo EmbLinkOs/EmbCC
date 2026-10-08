@@ -22,6 +22,7 @@
 #include "../arch/mips/asm.h"
 #include "../arch/loongarch/asm.h"
 #include "../arch/xtensa/asm.h"
+#include "../arch/tricore/asm.h"
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
@@ -3556,7 +3557,8 @@ static int write_object(struct gas *g, const char *out_path)
      * across the objects it links */
     /* LoongArch: the soft-float LP64S, object ABI v1 flags of a compiled
      * object, which EmbLD checks */
-    if (g->tgt->machine == EM_LOONGARCH || g->tgt->machine == EM_XTENSA)
+    if (g->tgt->machine == EM_LOONGARCH || g->tgt->machine == EM_XTENSA ||
+        g->tgt->machine == EM_TRICORE)
         elfw_set_flags(w, target_elf_flags(target_get()));
     /* RISC-V: the float ABI -mabi= names, as GNU as records it. Without
      * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD
@@ -3702,10 +3704,25 @@ static const struct gas_target XT_GAS = {
     0, xtasm_is_word, NULL, NULL, xtasm_set_pc
 };
 
+/* TriCore 1.6.1. `j`/`jl`/`call sym` carry R_TRICORE_24REL; an address
+ * is movh/movh.a with hi:sym (R_TRICORE_HIADJ) and addi with lo:sym
+ * (R_TRICORE_LO) or lea, a load or a store with [aB]lo:sym
+ * (R_TRICORE_LO2) -- tcasm_symform's, as are GNU's %hi()/%lo() spellings;
+ * `.word sym` is R_TRICORE_32ABS. `hi`, `lo` and a core register's name
+ * are operand words. */
+static const struct gas_target TRICORE_GAS = {
+    EM_TRICORE, 1, tcasm_encode, tcasm_is_reg,
+    0, 0, 0,
+    R_TRICORE_32ABS, 0,
+    0, 0, tcasm_symform, 0,
+    0, tcasm_is_word, NULL, NULL, NULL
+};
+
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
     case TARGET_XTENSA: return &XT_GAS;
+    case TARGET_TRICORE: return &TRICORE_GAS;
     case TARGET_LOONGARCH64: return &LA_GAS;
     case TARGET_MIPS32: return &MIPS_GAS;
     case TARGET_MIPS64: return &MIPS64_GAS;
@@ -3849,11 +3866,6 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
         else if (target_get() == TARGET_RX)
             fprintf(stderr, "embcc: error: no assembly-file support for %s "
                             "yet: EmbCC has no RX assembler\n",
-                    target_triple_now());
-        else if (target_get() == TARGET_TRICORE)
-            fprintf(stderr, "embcc: error: no assembly-file support for %s "
-                            "yet: its inline-asm vocabulary has no branches, "
-                            "calls or symbols, which a file needs\n",
                     target_triple_now());
         else
             fprintf(stderr, "embcc: error: no assembly-file support for %s "

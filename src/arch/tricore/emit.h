@@ -235,6 +235,10 @@ void tc_j0(struct code *c);
 unsigned long tc_enc_call(long off);
 /* JL: jump and link (A11 = the return address), no context saved. */
 unsigned long tc_enc_jl(long off);
+/* LOOP aB, off: aB -= 1, and while it was not 0 branch by off (a halfword
+ * multiple, -32768..32766 bytes from the LOOP) -- the counted loop GCC
+ * emits for a known trip count. */
+unsigned long tc_enc_loop(int ab, long off);
 void tc_ji(struct code *c, int aa);
 void tc_jli(struct code *c, int aa);
 void tc_calli(struct code *c, int aa);

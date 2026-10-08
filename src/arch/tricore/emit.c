@@ -58,7 +58,7 @@ enum {
     OPC_BOL_ST_H = 0xf9, OPC_BOL_LEA = 0xd9,
     /* the branches: op2 (bit 31) picks the second of each pair */
     OPC_BRR_JEQ = 0x5f, OPC_BRR_JLT = 0x3f, OPC_BRR_JGE = 0x7f,
-    OPC_BRR_JEQ_A = 0x7d, OPC_BRR_JZ_A = 0xbd,
+    OPC_BRR_JEQ_A = 0x7d, OPC_BRR_JZ_A = 0xbd, OPC_BRR_LOOP = 0xfd,
     OPC_BRC_JEQ = 0xdf, OPC_BRC_JLT = 0xbf, OPC_BRC_JGE = 0xff,
     OPC_B_J = 0x1d, OPC_B_CALL = 0x6d, OPC_B_JL = 0x5d
 };
@@ -817,6 +817,12 @@ int tc_jcci_placeholder(struct code *c, int cond, int s1, long long k4)
 unsigned long tc_enc_j(long off)    { return tc_enc_b(OPC_B_J, disp24(off)); }
 unsigned long tc_enc_call(long off) { return tc_enc_b(OPC_B_CALL, disp24(off)); }
 unsigned long tc_enc_jl(long off)   { return tc_enc_b(OPC_B_JL, disp24(off)); }
+
+/* LOOP: BRR with op2 0 (1 is LOOPU), the address register in s2 */
+unsigned long tc_enc_loop(int ab, long off)
+{
+    return tc_enc_brr(OPC_BRR_LOOP, 0, 0, ab, disp15(off));
+}
 
 int tc_j_placeholder(struct code *c)
 {

@@ -1416,7 +1416,7 @@ static int blocks_by_gas(void)
     return a == TARGET_THUMB || a == TARGET_RISCV32 ||
            a == TARGET_RISCV64 || a == TARGET_AVR || a == TARGET_MIPS32 ||
            a == TARGET_LOONGARCH64 || a == TARGET_MIPS64 ||
-           a == TARGET_XTENSA;
+           a == TARGET_XTENSA || a == TARGET_TRICORE;
 }
 
 /* One asm statement of a naked function, its operands written in: only
