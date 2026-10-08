@@ -1,0 +1,29 @@
+load 0 
+load 1 
+store 3 
+exchange 4 
+compare_exchange 5 2 
+compare_exchange 3 0 
+fetch_add 2 
+fetch_sub 3 
+fetch_and 0 
+fetch_or 5 
+fetch_xor 4 
+fetch_nand 2 
+fetch_sub 0 
+fetch_add 2 
+fetch_add 5 
+compare_exchange 5 5 
+exchange 5 
+store 3 
+load 2 
+store 3 
+compare_exchange 4 0 
+fetch_add 5 
+fetch_sub 5 
+load 5 
+compare_exchange 5 5 
+store 5 
+load 5 
+fetch_add 3 
+DONE
