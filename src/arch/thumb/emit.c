@@ -617,8 +617,12 @@ int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store)
 {
     if (t_isa_a32) return a32_ldst_pair(c, rt, rt2, rn, off, store);
     /* LDRD/STRD (immediate) T1, offset addressing: 1110 100 P U 1 W L Rn,
-     * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. */
-    if (rt >= T_SP || rt2 >= T_SP || rn == T_PC || (!store && rt == rt2))
+     * then Rt Rt2 imm8, with P = 1 and W = 0; imm8 counts words. With rn
+     * = pc it is LDRD (literal), the same fields, the offset counted from
+     * Align(pc, 4) -- a literal pool's load (t_lit64 in codegen.c). There
+     * is no store to a literal. */
+    if (rt >= T_SP || rt2 >= T_SP || (rn == T_PC && store) ||
+        (!store && rt == rt2))
         return 0;
     if (off % 4 != 0 || off < -1020 || off > 1020)
         return 0;

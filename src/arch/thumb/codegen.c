@@ -2490,6 +2490,217 @@ static int copy64_d(struct t_fn *F, int dst, int src)
     return 0;
 }
 
+/* ---- THE 64-BIT CONSTANT POOL ------------------------------------------
+ *
+ * A double or a long long constant built in registers is two movw/movt
+ * pairs, sixteen bytes, where clang loads it from a literal pool:
+ * `ldrd r2, r3, [pc, #n]`, four bytes, and eight of data shared by every
+ * load of the same value in the function. Over lib/libc that was 548
+ * constants and 5748 bytes, 1500 of them saved by the pool -- fdlibm is
+ * made of such constants.
+ *
+ * Only where it is shorter: 1.0 is `movs r0, #0; movs r1, #0; movt r1,
+ * #0x3ff0`, eight bytes, and a value used once must cost more than twelve
+ * in registers to be worth its pool slot (t_lit64_plan). The pool sits
+ * after the function's last instruction, word-aligned and marked as data;
+ * LDRD (literal) reaches 1020 bytes forward of Align(pc, 4). Reach is
+ * measured on the first pass, whose code is the longest -- later passes
+ * only shrink what lies between a load and the pool -- and a constant
+ * that does not reach is built in registers on a first pass made again
+ * (which can only push others out of reach in turn, so that repeats until
+ * none is). ARM state keeps movw/movt. */
+static unsigned t_mov_imm_len(int rd, long v)
+{
+    struct code c;
+    unsigned n;
+    memset(&c, 0, sizeof c);
+    t_mov_imm_dead_flags(&c, rd, v);
+    n = (unsigned)c.len;
+    free(c.p);
+    free(c.drange);
+    return n;
+}
+
+static void t_lit64_plan(struct t_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int nins = fn->nins, any = 0;
+    F->lp_use = NULL;
+    if (t_isa_a32 || nins == 0 || getenv("EMBCC_T_NOLIT64"))
+        return;
+    char *cand = xcalloc((size_t)nins, 1);
+    unsigned *cost = xcalloc((size_t)nins, sizeof *cost);
+    for (int n = 0; n < nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_CONST || i->w != 8 || i->dst < 0 ||
+            i->dst >= fn->nvregs || !F->wide[i->dst] || in_freg(F, i->dst))
+            continue;
+        int lo = in_reg(F, i->dst) ? F->loc[i->dst] : 12;
+        int hi = in_reg(F, i->dst) ? F->loc[i->dst] + 1 : 11;
+        cand[n] = 1;
+        cost[n] = t_mov_imm_len(lo, (long)(i->imm & 0xffffffffL)) +
+                  t_mov_imm_len(hi, (long)((i->imm >> 32) & 0xffffffffL));
+    }
+    /* by value: the pool when its loads and its slot are shorter than
+     * building every one of them */
+    for (int n = 0; n < nins; n++) {
+        if (cand[n] != 1)
+            continue;
+        long long v = fn->ins[n].imm;
+        unsigned built = 0, cnt = 0;
+        for (int m = n; m < nins; m++)
+            if (cand[m] == 1 && fn->ins[m].imm == v) {
+                built += cost[m];
+                cnt++;
+            }
+        int pool = 4 * cnt + 8 < built;
+        for (int m = n; m < nins; m++)
+            if (cand[m] == 1 && fn->ins[m].imm == v)
+                cand[m] = pool ? 2 : 3;
+        any |= pool;
+    }
+    if (any) {
+        F->lp_use = xcalloc((size_t)nins, 1);
+        for (int n = 0; n < nins; n++)
+            F->lp_use[n] = cand[n] == 2;
+    }
+    free(cand);
+    free(cost);
+}
+
+/* `ldrd lo, hi, [pc, #?]` for the constant v: its slot in this pass's
+ * pool, and the site t_lit64_flush patches. */
+static void t_lit64_load(struct t_fn *F, int n, int lo, int hi,
+                         unsigned long long v)
+{
+    int k;
+    for (k = 0; k < F->lp_n; k++)
+        if (F->lp_val[k] == v)
+            break;
+    if (k == F->lp_n && F->lp_planned)
+        internal_error("thumb: %s: a constant not in the planned pool",
+                       F->fn->name);
+    if (k == F->lp_n) {
+        if (F->lp_n == F->lp_cap) {
+            F->lp_cap = F->lp_cap ? F->lp_cap * 2 : 8;
+            F->lp_val = xrealloc(F->lp_val,
+                                 (size_t)F->lp_cap * sizeof *F->lp_val);
+        }
+        F->lp_val[F->lp_n++] = v;
+    }
+    if (F->lp_nsite == F->lp_capsite) {
+        F->lp_capsite = F->lp_capsite ? F->lp_capsite * 2 : 8;
+        F->lp_site = xrealloc(F->lp_site,
+                              (size_t)F->lp_capsite * sizeof *F->lp_site);
+    }
+    struct t_lsite *s = &F->lp_site[F->lp_nsite++];
+    s->at = F->t->len;
+    s->ins = n;
+    s->idx = k;
+    s->rt = lo;
+    s->rt2 = hi;
+    if (!t_ldst_pair(F->t, lo, hi, T_PC, 0, 0))
+        internal_error("thumb: %s: a literal ldrd into r%d:r%d",
+                       F->fn->name, lo, hi);
+}
+
+/* What fits, when not everything did: walking back from the last load,
+ * keep a constant when its load reaches its slot -- the code after the
+ * load, plus twelve bytes for each later constant already given up (a
+ * movw/movt pair for each of its words where the ldrd was four), plus its
+ * slot -- and give it up otherwise. Slots go in that order, so the loads
+ * nearest the end get the nearest slots, and one value keeps one slot.
+ * An estimate from this pass's positions, which are the longest any pass
+ * has (and twelve is the most a give-up grows by); the pass made again
+ * measures exactly. */
+static void t_lit64_fit(struct t_fn *F, int pool)
+{
+    int ns = F->lp_nsite, nv = 0;
+    unsigned long long *val = xmalloc((size_t)(ns ? ns : 1) * sizeof *val);
+    long extra = 0;
+    for (int k = ns - 1; k >= 0; k--) {
+        const struct t_lsite *s = &F->lp_site[k];
+        unsigned long long v = F->lp_val[s->idx];
+        int slot;
+        for (slot = 0; slot < nv; slot++)
+            if (val[slot] == v)
+                break;
+        long d = (long)pool - ((s->at + 4) & ~3L) + extra + 8L * slot;
+        if (d <= 1020 - 8) {
+            if (slot == nv)
+                val[nv++] = v;
+        } else {
+            F->lp_use[s->ins] = 0;
+            extra += 12;
+        }
+    }
+    for (int k = 0; k < nv; k++)
+        F->lp_val[k] = val[k];
+    F->lp_n = nv;
+    F->lp_planned = 1;
+    free(val);
+}
+
+/* Drop the planned slots no load uses any more (a later first pass gave
+ * one up), keeping the order: a slot only moves nearer. */
+static void t_lit64_compact(struct t_fn *F)
+{
+    int nv = 0;
+    for (int k = 0; k < F->lp_n; k++) {
+        int used = 0;
+        for (int m = 0; m < F->lp_nsite && !used; m++)
+            used = F->lp_site[m].idx == k && F->lp_use[F->lp_site[m].ins];
+        if (used)
+            F->lp_val[nv++] = F->lp_val[k];
+    }
+    F->lp_n = nv;
+}
+
+/* The pool after the function's code, and every load patched to reach
+ * it. 0 when one does not: then t_lit64_fit (or, once planned, the load
+ * alone) gives constants up to be built in registers, and the caller
+ * makes the first pass again. */
+static int t_lit64_flush(struct t_fn *F, int pass)
+{
+    struct code *t = F->t;
+    int ok = 1;
+    if (!F->lp_n)
+        return 1;
+    while (t->len & 3)
+        t_nop(t);
+    int pool = t->len;
+    for (int k = 0; k < F->lp_n; k++) {
+        code_u32(t, (unsigned long)(F->lp_val[k] & 0xffffffffULL));
+        code_u32(t, (unsigned long)(F->lp_val[k] >> 32));
+    }
+    code_mark_data(t, pool, t->len);
+    for (int k = 0; k < F->lp_nsite; k++) {
+        const struct t_lsite *s = &F->lp_site[k];
+        long off = (long)pool + 8L * s->idx - ((s->at + 4) & ~3L);
+        struct code c;
+        memset(&c, 0, sizeof c);
+        if (off >= 0 && t_ldst_pair(&c, s->rt, s->rt2, T_PC, off, 0)) {
+            memcpy(t->p + s->at, c.p, 4);
+        } else if (pass == 0) {
+            if (F->lp_planned)
+                F->lp_use[s->ins] = 0;
+            ok = 0;
+        } else {
+            internal_error("thumb: %s: a literal ldrd no longer reaches its "
+                           "pool", F->fn->name);
+        }
+        free(c.p);
+        free(c.drange);
+    }
+    if (!ok) {
+        if (F->lp_planned)
+            t_lit64_compact(F);
+        else
+            t_lit64_fit(F, pool);
+    }
+    return ok;
+}
+
 static int gen_ins64(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -2508,6 +2719,11 @@ static int gen_ins64(struct t_fn *F, int n)
         /* Built where it lives when that is a pair. */
         int lo = in_reg(F, i->dst) ? F->loc[i->dst] : A_LO;
         int hi = in_reg(F, i->dst) ? F->loc[i->dst] + 1 : A_HI;
+        if (F->lp_use && F->lp_use[n]) {
+            t_lit64_load(F, n, lo, hi, (unsigned long long)i->imm);
+            wr64(F, i->dst, lo, hi);
+            return 1;
+        }
         /* no flag survives from one IR instruction to the next (the
          * 32-bit IR_CONST says why), so a half that fits eight bits in a
          * low register is a two-byte movs */
@@ -5916,6 +6132,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     layout(&F);
     if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO"))
         F.lv_busy = lo_busy_map(&F);
+    t_lit64_plan(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
      * jumps to so the frame size is written down once. */
@@ -5940,6 +6157,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     int restarted = 0;           /* a first pass made again: reset as for a later one */
     for (int pass = 0; pass < 3; pass++) {
     int redo0 = 0;
+    if (!F.lp_planned)
+        F.lp_n = 0;              /* else the planned order (t_lit64_fit) */
+    F.lp_nsite = 0;
     g_t_scr_used = 0;
     t_roles_from(0);            /* r9-r11, or all three free */
     F.fb = T_SP;                 /* until the prologue sets r7 */
@@ -6367,6 +6587,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     }                                   /* the epilogue */
 
+    if (!t_lit64_flush(&F, pass))
+        redo0 = 1;                  /* a constant out of reach: again */
     for (i = 0; i < F.nfix; i++) {
         int target = F.label_off[F.fix[i].label];
         if (target < 0) {
@@ -6536,6 +6758,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.fscr);
     free(F.floc);
     free(F.lv_busy);
+    free(F.lp_use);
+    free(F.lp_val);
+    free(F.lp_site);
 }
 
 /* With the allocator on and no FPU, a function is generated with the pair

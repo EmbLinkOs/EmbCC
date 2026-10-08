@@ -147,6 +147,20 @@ struct t_fn {
     unsigned lofree;
     unsigned *lv_busy;
 
+    /* ---- the 64-bit constant pool (t_lit64 in codegen.c) --------------- */
+    /* Per instruction: 1 for an IR_CONST that loads from the pool, 0 for
+     * one built with movw/movt -- not a candidate, or out of the pool's
+     * reach on a first pass (then the pass is made again without it).
+     * NULL when the function has no candidate. */
+    char *lp_use;
+    unsigned long long *lp_val;   /* this pass's pool, in order */
+    int lp_n, lp_cap;
+    /* Once a first pass found a load out of reach: the pool's order,
+     * fixed (t_lit64_fit), which later passes keep. */
+    int lp_planned;
+    struct t_lsite { int at, ins, idx, rt, rt2; } *lp_site;
+    int lp_nsite, lp_capsite;
+
     /* ---- ARMv6-M only (v6m.c); zero at the other levels ---------------- */
     /* The literal pool being collected, and the LDRs waiting for it. */
     struct v6_lit *lit;

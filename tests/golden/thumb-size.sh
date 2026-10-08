@@ -11,7 +11,11 @@
 #   - a composite returned in memory is copied to the caller's buffer
 #     through r0-r2: the copy names none of r9-r12;
 #   - a parameter that arrives on the stack is copied to its slot through
-#     a pushed low register, not r12.
+#     a pushed low register, not r12;
+#   - a 64-bit constant that costs more than twelve bytes to build is
+#     `ldrd rlo, rhi, [pc, #n]` from a pool after the function, one slot
+#     per value, and the ones out of the ldrd's reach are still built
+#     (tests/exec/lit64-pool.c, whose values the boards check).
 set -u
 echo "TEST-MARKER thumb-size"
 . "$(dirname "$0")/../lib.sh"
@@ -44,4 +48,14 @@ for f in many stk7; do
         cat "$out/$f.dis"; fail "$f: a stack parameter copied through r12"
     fi
 done
+
+"$EMBCC" --target=thumbv7em-none-eabi -Os -c tests/exec/lit64-pool.c \
+    -o "$out/p.o" || fail "compile lit64-pool.c"
+for f in mix shared poly; do dis "$out/p.o" $f > "$out/$f.dis"; done
+lit() { grep -c 'ldrd.*\[pc' "$out/$1.dis"; }
+[ "$(lit shared)" -ge 3 ] || { cat "$out/shared.dis"; fail "shared: the repeated constant is not loaded from the pool"; }
+[ "$(grep -c '\.word\|ldrd.*\[pc' "$out/shared.dis")" -ge 3 ] || fail "shared: no pool"
+[ "$(lit poly)" -ge 4 ] || { cat "$out/poly.dis"; fail "poly: its doubles are not loaded from the pool"; }
+[ "$(lit mix)" -ge 20 ] || fail "mix: fewer than 20 constants from the pool"
+grep -q 'movt' "$out/mix.dis" || fail "mix: every constant in the pool, though most are out of reach"
 echo "thumb-size: stack arguments, stack parameters and returned composites use low registers"
