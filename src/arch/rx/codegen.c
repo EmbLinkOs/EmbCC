@@ -32,8 +32,11 @@
  * word of the A pair), r15 (TMP, its high word) and r5 (SCR). r15 also
  * carries a call's hidden result pointer, set last.
  *
+ * Inline assembly is assembled in irgen (rx/irgen.c, against rx/asm.c);
+ * IR_ASM here moves its operands in and out and splices its bytes.
+ *
  * Refused by name: a jump table (target_jump_tables keeps a dense
- * switch a decision tree), inline assembly, __int128,
+ * switch a decision tree), __int128,
  * __builtin_frame_address, and a frame beyond what the encodings reach.
  * THE RULE.
  */
@@ -160,7 +163,7 @@ static const struct ra_target RX_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg */
     0,
-    0               /* asm_in_reg */
+    1               /* asm_in_reg: see IR_ASM */
 };
 
 static const struct ra_target RX_PAIR_RA = {
@@ -2034,9 +2037,146 @@ static void gen_ins(struct rx_fn *F, int n)
         return;
     }
 
-    case IR_ASM:
-        rx_refuse(F, i, "inline assembly (there is no RX assembler in EmbCC "
-                        "yet)");
+    case IR_ASM: {
+        /* Extended asm, assembled in irgen (rx/irgen.c irg_asm_rx) against
+         * the vocabulary in rx/asm.c. This only places the operands and
+         * splices the bytes -- Xtensa's lowering with RX's registers.
+         *
+         * To the allocator (ra_target.asm_in_reg) a value live across an
+         * asm keeps out of the registers it may change, which irgen
+         * recorded (ir_asm.clob); a callee-saved one among them the
+         * prologue saves. The operands are values like any other, moved
+         * into and out of their registers here, each way as ONE parallel
+         * move (ACC breaks a cycle). No operand is ever in r0 (sp), r5,
+         * r14 or r15 (the scratch these moves and the frame accesses use)
+         * or r13 (the frame base under alloca). */
+        struct ir_asm *ia = i->asm_ir;
+        int vreg_[16], vdst[16], nval = 0;
+        /* A continuation's value was written by the asm before it, which
+         * must be right there. */
+        if (ia->cont) {
+            int k = n - 1;
+            while (k >= 0 && fn->ins[k].op == IR_ASM && fn->ins[k].asm_ir &&
+                   fn->ins[k].asm_ir->cont)
+                k--;
+            if (k < 0 || fn->ins[k].op != IR_ASM)
+                internal_error("rx: %s: an asm's further output is not "
+                               "right after the asm", fn->name);
+            return;
+        }
+        for (int k = 0; k < ia->nout; k++)
+            if (ia->out[k].val) {
+                vreg_[nval] = ia->out[k].reg;
+                vdst[nval++] = i->dst;
+            }
+        for (int q = n + 1; q < fn->nins && fn->ins[q].op == IR_ASM &&
+                            fn->ins[q].asm_ir && fn->ins[q].asm_ir->cont &&
+                            nval < 16; q++) {
+            vreg_[nval] = fn->ins[q].asm_ir->out[0].reg;
+            vdst[nval++] = fn->ins[q].dst;
+        }
+        if (F->fb == FBREG && (ia->clob >> FBREG & 1))
+            rx_refuse(F, i, "an asm that changes r13, the frame base of a "
+                            "function that calls alloca");
+        for (int k = 0; k < ia->nin; k++)
+            if (ia->in[k].reg < RX_R1 || ia->in[k].reg == SCR ||
+                ia->in[k].reg >= FBREG)
+                internal_error("rx: %s: an asm operand in r%d", fn->name,
+                               ia->in[k].reg);
+        for (int k = 0; k < ia->nout; k++)
+            if (!ia->out[k].mem && ia->out[k].size > 4)
+                rx_refuse(F, i, "an asm output wider than a register");
+        {
+            int naddr = 0;
+            for (int k = 0; k < ia->nout; k++)
+                naddr += !ia->out[k].val && !ia->out[k].mem;
+            if (ia->scr < 0 && naddr > 0)
+                rx_refuse(F, i, "an asm with no scratch register left around "
+                                "it");
+        }
+        /* In: an input's value, an "m" output's address, and a "+"
+         * output's address (its current value is loaded through it
+         * below) -- the register-resident ones as one parallel move, then
+         * the rest from their slots. */
+        {
+            int pd[40], ps[40], npm = 0;
+            for (int k = 0; k < ia->nin && npm < 40; k++)
+                if (in_reg(F, ia->in[k].temp)) {
+                    pd[npm] = ia->in[k].reg;
+                    ps[npm++] = F->loc[ia->in[k].temp];
+                }
+            for (int k = 0; k < ia->nout && npm < 40; k++)
+                if (!ia->out[k].val &&
+                    (ia->out[k].mem || ia->out[k].inout) &&
+                    in_reg(F, ia->out[k].temp)) {
+                    pd[npm] = ia->out[k].reg;
+                    ps[npm++] = F->loc[ia->out[k].temp];
+                }
+            if (npm) {
+                int od[80], os[80];
+                int m = ra_parallel_move(pd, ps, npm, ACC, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    rx_refuse(F, i, "an asm whose operands cannot be moved "
+                                    "into place");
+                for (int k = 0; k < m; k++)
+                    mv(F, od[k], os[k]);
+            }
+            for (int k = 0; k < ia->nin; k++)
+                if (!in_reg(F, ia->in[k].temp))
+                    rd(F, ia->in[k].temp, ia->in[k].reg);
+            for (int k = 0; k < ia->nout; k++) {
+                const struct ir_asm_op *o = &ia->out[k];
+                if (o->val || !(o->mem || o->inout))
+                    continue;
+                if (!in_reg(F, o->temp))
+                    rd(F, o->temp, o->reg);
+                /* A "+" output starts with the lvalue's CURRENT value. */
+                if (o->inout && !o->mem)
+                    ld_base(F, o->reg, o->reg, 0, o->size, 1);
+            }
+        }
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        /* Out, through an address: the address is live across the asm
+         * (regalloc.c counts it so), so it is still there. An "m" output
+         * was written BY the template through the address its register
+         * holds. */
+        for (int k = 0; k < ia->nout; k++) {
+            const struct ir_asm_op *o = &ia->out[k];
+            if (o->mem || o->val)
+                continue;
+            rd(F, o->temp, ia->scr);
+            st_base(F, o->reg, ia->scr, 0, o->size);
+        }
+        /* Out, as values: each to its home -- those in memory first,
+         * while every operand register still holds what the asm left,
+         * then the register-resident ones as one parallel move. */
+        {
+            int pd[16], ps[16], npm = 0;
+            for (int k = 0; k < nval; k++) {
+                if (vdst[k] < 0)
+                    continue;
+                if (in_reg(F, vdst[k])) {
+                    pd[npm] = F->loc[vdst[k]];
+                    ps[npm++] = vreg_[k];
+                } else {
+                    wr(F, vdst[k], vreg_[k]);
+                }
+            }
+            if (npm) {
+                int od[32], os[32];
+                int m = ra_parallel_move(pd, ps, npm, ACC, od, os,
+                                         (int)(sizeof od / sizeof od[0]));
+                if (m < 0)
+                    rx_refuse(F, i, "an asm whose outputs cannot be moved "
+                                    "into place");
+                for (int k = 0; k < m; k++)
+                    mv(F, od[k], os[k]);
+            }
+        }
+        return;
+    }
 
     /* ---- atomics, with the interrupts masked -------------------------- */
     case IR_XCHG: case IR_XADD: case IR_ARMW: {
@@ -2267,6 +2407,24 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
                 for (int v = nl; v < fn->nvregs; v++)
                     F.loc[v] = -1;
             }
+        }
+    }
+    /* A callee-saved register an asm changes (its clobbers, the registers
+     * its template names, its operands') is saved by the prologue, as GCC
+     * saves it: the frame's pushm covers r6 up to the highest. */
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_asm *ia = fn->ins[n].op == IR_ASM ? fn->ins[n].asm_ir
+                                                          : NULL;
+        if (!ia || ia->cont)
+            continue;
+        for (int r = RX_R6; r <= RX_R13; r++) {
+            int have = 0;
+            if (!(ia->clob >> r & 1))
+                continue;
+            for (int k = 0; k < F.nsave; k++)
+                have |= F.used_callee[k] == r;
+            if (!have && F.nsave < RA_MAXPOOL)
+                F.used_callee[F.nsave++] = r;
         }
     }
     /* only the callee-saved ones are pushed */

@@ -1203,8 +1203,20 @@ Accepted options: `-mcpu=rx600|rx610|rx200|rx100`, `-m32bit-doubles`,
 Refused by name: `-m64bit-doubles`, `-fpu`, `-mbig-endian-data`,
 `-mgcc-abi`, a nonzero `-msmall-data-limit`, `-mpid`, a nonzero
 `-mint-register`, `-mno-allow-string-insns`, `-mas100-syntax`, unwind
-tables, `-S`, inline and file-scope assembly, and C++ exceptions (C++
-compiles with `-fno-exceptions`; see [C++](cxx.md#targets)).
+tables, `-S`, and C++ exceptions (C++ compiles with `-fno-exceptions`; see
+[C++](cxx.md#targets)).
+
+EmbCC assembles RX itself, in GNU syntax: inline `__asm__` with GCC's
+operand constraints, naked functions, file-scope blocks and `.s`/`.S`
+files, through one assembler for RXv1's integer instructions -- every form
+encoded as rx-elf-as encodes it (tests/golden/rx-asm.sh compares them
+byte for byte, and rx-elf-objdump reads each back), branches relaxed as
+GNU as relaxes them, `mov.l #sym` and branches to symbols elsewhere
+relocated (`R_RX_DIR32`, `R_RX_DIR24S/16S/8S_PCREL`). A C name is `_name`
+in assembly, as with GCC. The vocabulary, the constraints and what is
+refused (the FPU's and RXv2's instructions among them) are in
+[Inline assembly](inline-asm.md#renesas-rx) and
+[embas](tools/embas.md#rx-specifics).
 
 ## MIPS32
 

@@ -97,11 +97,15 @@ void rx_rrr(struct code *c, int op, int rs, int rs2, int rd);
 /* rd = rs + imm (`add #imm, rs, rd`), any 32-bit imm. */
 void rx_add3(struct code *c, long imm, int rs, int rd);
 int  rx_add3_len(long imm, int rs, int rd);
+/* ...always in that form, even when rs == rd and imm fits #uimm4: how GNU
+ * as writes `sub #imm, rd` for an imm outside 0..15 (add #-imm, rd, rd). */
+void rx_add3_li(struct code *c, long imm, int rs, int rd);
 
 /* ---- shifts by a constant ---------------------------------------------
  * SHLL SHLR SHAR #n, rs, rd (n 0..31; the two-byte form when rs == rd),
  * ROTL ROTR #n, rd. */
 void rx_shift_i(struct code *c, int op, int n, int rs, int rd);
+void rx_shift_i_x(struct code *c, int op, int n, int rs, int rd, int three);
 
 /* ---- extensions ---------------------------------------------------------
  * mov.b/mov.w rs, rd (sign-extend), movu.b/movu.w rs, rd (zero). */
@@ -118,6 +122,14 @@ void rx_load(struct code *c, int size, int sign, long dsp, int rs, int rd);
 void rx_store(struct code *c, int size, int rs, long dsp, int rd);
 /* mov.size #imm, dsp[rd]: the value's low `size` bytes stored. */
 void rx_store_imm(struct code *c, int size, long imm, long dsp, int rd);
+/* The same, as the assembler writes them (src/arch/rx/asm.c): `dsp0` says
+ * a displacement was written, so `0[r1]` takes the dsp:5 form GNU as gives
+ * it; `written` chooses mov #imm's #uimm8 form by the value as written. */
+void rx_load_x(struct code *c, int size, int sign, long dsp, int rs, int rd,
+               int dsp0);
+void rx_store_x(struct code *c, int size, int rs, long dsp, int rd, int dsp0);
+void rx_store_imm_x(struct code *c, int size, long imm, long dsp, int rd,
+                    int dsp0, int written);
 /* [ri, rb]: the address is rb + ri * the access size. */
 void rx_load_idx(struct code *c, int size, int sign, int ri, int rb, int rd);
 void rx_store_idx(struct code *c, int size, int rs, int ri, int rb);
@@ -130,6 +142,8 @@ int  rx_rm_ok(int op, int size, int sign, long dsp);
 
 /* ---- the stack ---------------------------------------------------------- */
 void rx_push(struct code *c, int rs);
+void rx_push_sz(struct code *c, int size, int rs);       /* push.b/.w/.l */
+void rx_push_m(struct code *c, int size, long dsp, int rs);
 void rx_pop(struct code *c, int rd);
 void rx_pushm(struct code *c, int rs, int rs2);    /* rs < rs2, rs >= 1 */
 void rx_popm(struct code *c, int rd, int rd2);
@@ -208,6 +222,31 @@ enum { RX_BSET, RX_BCLR, RX_BTST, RX_BNOT };
 void rx_bit_i(struct code *c, int op, int bit, int rd);
 /* bmCND #bit, rd: the bit set when the condition holds, else cleared. */
 void rx_bmcnd(struct code *c, int cond, int bit, int rd);
+
+/* ---- the assembler's own (asm.c): forms the code generator never emits */
+/* mov.size [rp+]/[-rp], rv (load), rv, [rp+]/[-rp] (store), movu.b/.w
+ * [rp+]/[-rp], rv (sign 0); `pre` is the [-rp] form. */
+void rx_mov_pi(struct code *c, int load, int sign, int pre, int size,
+               int rp, int rv);
+/* BSET BCLR BTST BNOT #bit, dsp[rd].b; bmCND #bit, dsp[rd].b; and by a
+ * register: rs, rd and rs, dsp[rd].b. dsp in bytes. */
+void rx_bit_m(struct code *c, int op, int bit, long dsp, int rd);
+void rx_bmcnd_m(struct code *c, int cond, int bit, long dsp, int rd);
+void rx_bit_r(struct code *c, int op, int rs, int rd);
+void rx_bit_rm(struct code *c, int op, int rs, long dsp, int rd);
+/* suntil swhile sstr rmpa (sized), scmpu smovu smovb smovf (not). */
+enum { RX_SUNTIL, RX_SWHILE, RX_SSTR, RX_RMPA, RX_SCMPU, RX_SMOVU,
+       RX_SMOVB, RX_SMOVF };
+void rx_string(struct code *c, int op, int size);
+void rx_rtfi(struct code *c);
+void rx_satr(struct code *c);
+void rx_sat(struct code *c, int rd);
+/* the accumulator: part 0 hi, 1 lo, 2 mi; racw #1/#2; op 0 mulhi,
+ * 1 mullo, 4 machi, 5 maclo */
+void rx_mvfac(struct code *c, int which, int rd);
+void rx_mvtac(struct code *c, int which, int rs);
+void rx_racw(struct code *c, int n);
+void rx_mac(struct code *c, int op, int rs, int rs2);
 
 /* The shortest `mov.l #imm, rd`'s length, and the number of bytes an
  * immediate's li field takes (1..4). */

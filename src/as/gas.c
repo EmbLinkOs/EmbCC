@@ -23,6 +23,7 @@
 #include "../arch/loongarch/asm.h"
 #include "../arch/xtensa/asm.h"
 #include "../arch/tricore/asm.h"
+#include "../arch/rx/asm.h"
 #include "../arch/backend.h"
 #include "../parse/ast.h"
 
@@ -161,15 +162,16 @@ static void gerr(struct gas *g, const char *fmt, ...)
 
 static void advance(struct gas *g, long n);
 
-/* An encoding error (see deferr): on Xtensa kept until the layout is
- * known to be final -- pass one's is never, since a label behind it may
- * still move -- and reported at once anywhere else. */
+/* An encoding error (see deferr): on Xtensa and RX kept until the layout
+ * is known to be final -- pass one's is never, since a label behind it may
+ * still move (an RX branch's explicit size may not reach until its
+ * neighbours have settled) -- and reported at once anywhere else. */
 static void gerr_enc(struct gas *g, int pass, const char *what,
                      const char *msg)
 {
     char buf[512];
     (void)pass;
-    if (g->tgt->machine != EM_XTENSA) {
+    if (g->tgt->machine != EM_XTENSA && g->tgt->machine != EM_RX) {
         gerr(g, "%s%s", what, msg);
         return;
     }
@@ -358,8 +360,10 @@ static void sec_init(struct gas *g)
         sec_defaults(sec_name[i], &ty, &fl);
         sec_add(g, sec_name[i], strlen(sec_name[i]), ty, fl);
     }
-    /* code gets four, as it always has here, and data eight */
-    g->secs[SEC_TEXT].align = 4;
+    /* code gets four, as it always has here, and data eight -- except on
+     * RX, whose code is a byte stream: one, as GNU as gives it, so that
+     * a .S file links where GNU as's object of it links */
+    g->secs[SEC_TEXT].align = g->tgt && g->tgt->machine == EM_RX ? 1 : 4;
 }
 
 static int sec_is_nobits(struct gas *g, int k)
@@ -457,6 +461,11 @@ static void do_align(struct gas *g, long boundary)
     if (g->secs[g->cur].flags & SHF_EXECINSTR) {
         int m = g->tgt->machine;
         struct code *c = &g->secs[g->cur].c;
+        if (g->tgt->fill) {
+            if (off % boundary)
+                g->tgt->fill(c, boundary - off % boundary);
+            return;
+        }
         while (off % boundary) {
             long left = boundary - off % boundary;
             if (m == EM_ARM && t_isa_a32 && !(off & 3) && left >= 4) {
@@ -1310,9 +1319,17 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
     /* (Xtensa's are offered only what substitute() could not resolve: a
      * branch or a call to a label of this section is a displacement, as it
      * is on RISC-V, and only an external one is relocated.) */
-    if (g->tgt->symform && g->tgt->machine != EM_XTENSA) {
+    /* (RX's likewise: a branch to a label of this section is relaxed, as
+     * GNU as relaxes it; `mov.l #sym, rd` is an address, and relocated
+     * whoever defines the symbol -- unless .equ made it a number.) */
+    if (g->tgt->symform && g->tgt->machine != EM_XTENSA &&
+        !(g->tgt->machine == EM_RX && rxasm_is_transfer(stmt))) {
         struct asm_symform f;
-        if (g->tgt->symform(stmt, &f)) {
+        if (g->tgt->symform(stmt, &f) &&
+            !(g->tgt->machine == EM_RX && sym_find(g, stmt + f.sym_at,
+                                                   (size_t)f.sym_len) &&
+              sym_find(g, stmt + f.sym_at, (size_t)f.sym_len)->sec ==
+                  SEC_ABS)) {
             /* ...unless the operand is a NUMERIC LOCAL reference. `1b` and
              * `2f` are identifiers as far as a target's parser can tell, so
              * `rjmp 1b` was claimed here and relocated against a symbol
@@ -1733,7 +1750,17 @@ static void instruction(struct gas *g, char *stmt, int pass)
     }
     if (g->tgt->at)
         g->tgt->at(pc);
+    if (g->tgt->set_level)
+        g->tgt->set_level(pass == 1 ? -1 : g->wide[g->li]);
     int erc = g->tgt->encode(text, &tmp, err, sizeof err);
+    if (g->tgt->set_level) {
+        int took = g->tgt->took_level();
+        if (pass == 2 && erc == 0 && took > g->wide[g->li]) {
+            g->wide[g->li] = (char)took;   /* never shorter again: passes settle */
+            g->grew = 1;
+        }
+        g->tgt->set_level(0);
+    }
     if (g->tgt->machine == EM_ARM) {
         if (tasm_took_wide() && !g->wide[g->li]) {
             g->wide[g->li] = 1;      /* wide from now on, so passes settle */
@@ -2392,12 +2419,15 @@ static void gx_text(struct gexp *x, char *text, const char *path, int base)
         for (;;) {
             char *semi = NULL;
             int q = 0;
-            if (g->tgt->comment_char != ';')
-                for (char *k = s; *k; k++) {
-                    if (q) { if (*k == '\\' && k[1]) k++; else if (*k == q) q = 0; continue; }
-                    if (*k == '"' || *k == '\'') { q = *k; continue; }
-                    if (*k == ';') { semi = k; break; }
+            for (char *k = s; *k; k++) {
+                if (q) { if (*k == '\\' && k[1]) k++; else if (*k == q) q = 0; continue; }
+                if (*k == '"' || *k == '\'') { q = *k; continue; }
+                if ((*k == ';' && g->tgt->comment_char != ';') ||
+                    (g->tgt->line_sep && *k == g->tgt->line_sep)) {
+                    semi = k;
+                    break;
                 }
+            }
             if (n == cap) {
                 cap = cap ? cap * 2 : 256;
                 in = xrealloc(in, (size_t)cap * sizeof *in);
@@ -3176,12 +3206,14 @@ static int directive(struct gas *g, char *p, int pass)
          * asked for a multiple of seven. */
         if (DIR(".balign") || DIR(".balignw") || DIR(".balignl")) {
             if (v > 0) do_align(g, v);
-        } else if (DIR(".align") && g->tgt->machine == EM_XTENSA) {
-            /* ...and on Xtensa it is the byte count, a power of two, as
-             * GNU as reads it there: `.align 4` before a function */
+        } else if (DIR(".align") && (g->tgt->machine == EM_XTENSA ||
+                                     g->tgt->machine == EM_RX)) {
+            /* ...and on Xtensa and RX it is the byte count, a power of
+             * two, as GNU as reads it there: `.align 4` before a function */
             if (v <= 0 || (v & (v - 1))) {
-                gerr(g, ".align %ld: Xtensa's .align is a byte count, a "
-                        "power of two", v);
+                gerr(g, ".align %ld: %s's .align is a byte count, a "
+                        "power of two", v,
+                     g->tgt->machine == EM_RX ? "RX" : "Xtensa");
                 return 1;
             }
             do_align(g, v);
@@ -3364,6 +3396,16 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
         }
         g->cur = save;
     }
+    /* RX: each section padded to its alignment, as GNU as pads it (its
+     * -no-pad-sections not given) -- code with its nops, data with zeros */
+    if (g->tgt->machine == EM_RX) {
+        int save = g->cur;
+        for (int k = 0; k < g->nsecs; k++) {
+            g->cur = k;
+            do_align(g, g->secs[k].align);
+        }
+        g->cur = save;
+    }
     if (g->tgt->open && g->tgt->open())
         gerr(g, "an IT block is still owed instructions at the end of the "
                 "file");
@@ -3376,6 +3418,9 @@ static void pass_over(struct gas *g, const struct gline *lines, int nlines,
 static int write_object(struct gas *g, const char *out_path)
 {
     struct elfw *w = elfw_new(g->tgt->machine);
+    /* An assembly file's names are the object's: RX's `_main` is written
+     * with its underscore, which the writer must not add again. */
+    elfw_set_sym_prefix(w, NULL);
     int *ndx = xcalloc((size_t)g->nsecs, sizeof *ndx);
     char *used = xcalloc((size_t)g->nsecs, 1);
     int i;
@@ -3558,7 +3603,7 @@ static int write_object(struct gas *g, const char *out_path)
     /* LoongArch: the soft-float LP64S, object ABI v1 flags of a compiled
      * object, which EmbLD checks */
     if (g->tgt->machine == EM_LOONGARCH || g->tgt->machine == EM_XTENSA ||
-        g->tgt->machine == EM_TRICORE)
+        g->tgt->machine == EM_TRICORE || g->tgt->machine == EM_RX)
         elfw_set_flags(w, target_elf_flags(target_get()));
     /* RISC-V: the float ABI -mabi= names, as GNU as records it. Without
      * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD
@@ -3598,7 +3643,8 @@ static const struct gas_target RISCV_GAS = {
     /* no 16-bit pointer, `.word` is four bytes, and no symbol
      * forms beyond the ones above. */
     0, 0, NULL, 0,
-    0, rvasm_is_word, NULL, NULL, NULL
+    0, rvasm_is_word, NULL, NULL, NULL,
+    0, NULL, NULL, NULL
 };
 
 /* ARMv7-M. `call` and `la` are RISC-V pseudos and have no ARM
@@ -3613,7 +3659,8 @@ static const struct gas_target THUMB_GAS = {
      * :lower16:/:upper16: movw/movt are tasm_symform's. `@` is ARM's line
      * comment and `#` an immediate's prefix. */
     0, 0, tasm_symform, '@',
-    1, tasm_is_word, tasm_reset, tasm_open, NULL
+    1, tasm_is_word, tasm_reset, tasm_open, NULL,
+    0, NULL, NULL, NULL
 };
 
 /* ARMv7-A in ARM state: the same assembler, which writes A32 under
@@ -3623,7 +3670,8 @@ static const struct gas_target A32_GAS = {
     R_ARM_CALL, 0, 0,
     R_ARM_ABS32, 0,
     0, 0, tasm_symform, '@',
-    1, tasm_is_word, tasm_reset, tasm_open, NULL
+    1, tasm_is_word, tasm_reset, tasm_open, NULL,
+    0, NULL, NULL, NULL
 };
 
 /* aarch64. `bl sym` carries R_AARCH64_CALL26, one instruction and one
@@ -3636,7 +3684,8 @@ static const struct gas_target A64_GAS = {
     /* no 16-bit pointer, `.word` is four bytes, and no symbol
      * forms beyond the ones above; `#` is an immediate's prefix. */
     0, 0, NULL, 0,
-    1, NULL, NULL, NULL, NULL
+    1, NULL, NULL, NULL, NULL,
+    0, NULL, NULL, NULL
 };
 
 /* AVR. Its symbol-bearing forms are its own -- eight of them, because a
@@ -3650,7 +3699,8 @@ static const struct gas_target AVR_GAS = {
     R_AVR_32, 0,
     R_AVR_16, 2, avrasm_symform,
     ';',         /* AVR's line comment, as GNU as sets it for this port */
-    0, NULL, NULL, NULL, NULL
+    0, NULL, NULL, NULL, NULL,
+    0, NULL, NULL, NULL
 };
 
 /* MIPS32r2, o32. Its symbol forms -- `jal sym`, `%hi`/`%lo`, `la` -- are
@@ -3663,7 +3713,8 @@ static const struct gas_target MIPS_GAS = {
     0, 0, 0,
     R_MIPS_32, 0,
     0, 0, mipsasm_symform, 0,
-    0, mipsasm_is_word, mipsasm_reset, NULL, NULL
+    0, mipsasm_is_word, mipsasm_reset, NULL, NULL,
+    0, NULL, NULL, NULL
 };
 
 /* MIPS64r2, n64: the same vocabulary and forms, an ELFCLASS64 object,
@@ -3673,7 +3724,8 @@ static const struct gas_target MIPS64_GAS = {
     0, 0, 0,
     R_MIPS_32, R_MIPS_64,
     0, 0, mipsasm_symform, 0,
-    0, mipsasm_is_word, mipsasm_reset, NULL, NULL
+    0, mipsasm_is_word, mipsasm_reset, NULL, NULL,
+    0, NULL, NULL, NULL
 };
 
 /* LoongArch64. Its symbol forms -- b/bl, call36/tail36, la.pcrel and
@@ -3686,7 +3738,8 @@ static const struct gas_target LA_GAS = {
     0, 0, 0,
     R_LARCH_32, R_LARCH_64,
     0, 0, laasm_symform, 0,
-    0, laasm_is_word, NULL, NULL, NULL
+    0, laasm_is_word, NULL, NULL, NULL,
+    0, NULL, NULL, NULL
 };
 
 /* Xtensa (the ESP32's LX6, windowed). Its symbol forms -- every branch,
@@ -3701,7 +3754,8 @@ static const struct gas_target XT_GAS = {
     0, 0, 0,
     R_XTENSA_32, 0,
     0, 0, xtasm_symform, 0,
-    0, xtasm_is_word, NULL, NULL, xtasm_set_pc
+    0, xtasm_is_word, NULL, NULL, xtasm_set_pc,
+    0, NULL, NULL, NULL
 };
 
 /* TriCore 1.6.1. `j`/`jl`/`call sym` carry R_TRICORE_24REL; an address
@@ -3715,12 +3769,31 @@ static const struct gas_target TRICORE_GAS = {
     0, 0, 0,
     R_TRICORE_32ABS, 0,
     0, 0, tcasm_symform, 0,
-    0, tcasm_is_word, NULL, NULL, NULL
+    0, tcasm_is_word, NULL, NULL, NULL,
+    0, NULL, NULL, NULL
+};
+
+/* RX (RXv1). Its symbol forms are rxasm_symform's: `mov.l #sym, rd`
+ * (R_RX_DIR32), and a branch to a symbol defined elsewhere (bra/bsr .a
+ * R_RX_DIR24S_PCREL, beq/bne .w R_RX_DIR16S_PCREL, another condition .b
+ * R_RX_DIR8S_PCREL); `.long`/`.word sym` -- four bytes, as GNU as makes
+ * .word here -- are R_RX_DIR32. `;` is the line comment, `!` separates
+ * statements and `#` is an immediate's prefix; a control register, a PSW
+ * flag and a memex size are operand words; branches relax by levels, and
+ * code is padded with GNU as's RX nops. */
+static const struct gas_target RX_GAS = {
+    EM_RX, 1, rxasm_encode, rxasm_is_reg,
+    0, 0, 0,
+    R_RX_DIR32, 0,
+    0, 0, rxasm_symform, ';',
+    1, rxasm_is_word, NULL, NULL, NULL,
+    '!', rxasm_set_level, rxasm_took_level, rxasm_fill
 };
 
 static const struct gas_target *target_for(void)
 {
     switch (target_get()) {
+    case TARGET_RX: return &RX_GAS;
     case TARGET_XTENSA: return &XT_GAS;
     case TARGET_TRICORE: return &TRICORE_GAS;
     case TARGET_LOONGARCH64: return &LA_GAS;
@@ -3865,10 +3938,6 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
             fprintf(stderr, "embcc: error: no assembly-file support for %s "
                             "yet: EmbCC has no ColdFire assembler\n",
                     target_triple_now());
-        else if (target_get() == TARGET_RX)
-            fprintf(stderr, "embcc: error: no assembly-file support for %s "
-                            "yet: EmbCC has no RX assembler\n",
-                    target_triple_now());
         else
             fprintf(stderr, "embcc: error: no assembly-file support for %s "
                             "yet\n", target_triple_now());
@@ -3894,6 +3963,24 @@ int gas_assemble(const char *in_path, const char *out_path, int preprocess,
     if (text != src) free(text);
     free(src);
     return rc;
+}
+
+/* A name the block uses, as the driver knows names: on RX a C symbol is
+ * `_name` in the object and `name` to the compiler, which adds the
+ * underscore when it writes the object -- so `_name` here is C's `name`,
+ * and any other name is passed through untouched (elfw's \001). */
+static char *block_name(const struct gas_target *t, const char *name)
+{
+    size_t n = strlen(name);
+    char *s;
+    if (t->machine != EM_RX)
+        return xstrndup(name, n);
+    if (name[0] == '_' && name[1])
+        return xstrndup(name + 1, n - 1);
+    s = xmalloc(n + 2);
+    s[0] = '\001';
+    memcpy(s + 1, name, n + 1);
+    return s;
 }
 
 /* ---- a block for the compiler ----------------------------------------
@@ -3967,7 +4054,7 @@ int gas_assemble_block(struct topasm *ta)
             if (!s->is_global && !strncmp(s->name, ".L", 2))
                 continue;
             struct asmsym *as = &ta->syms[ta->nsyms++];
-            as->name = xstrndup(s->name, strlen(s->name));
+            as->name = block_name(t, s->name);
             as->off = (int)s->value;
             as->is_global = s->is_global;
             as->is_weak = s->is_weak;
@@ -4000,7 +4087,7 @@ int gas_assemble_block(struct topasm *ta)
                     f->type == R_ARM_ABS32)
                     r->addend |= 1;
             } else {
-                r->target = xstrndup(f->sym, strlen(f->sym));
+                r->target = block_name(t, f->sym);
             }
         }
         /* where the data in it is ($d), for the disassemblers */

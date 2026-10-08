@@ -405,7 +405,7 @@ label (`name:`).
 
 How a block is assembled depends on the target:
 
-- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore and AVR.** The block is read by the assembler
+- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, RX and AVR.** The block is read by the assembler
   that reads a `.s` file, so it holds the target's own instructions; see
   [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr).
 - **x86-64 and AArch64.** The block is read by a small fixed vocabulary
@@ -493,7 +493,7 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
+| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, RX, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
 | AArch64 ELF | directives and data only; an instruction is refused (below) |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
@@ -1825,6 +1825,143 @@ static inline unsigned cycles(void)
 }
 ```
 
+## Renesas RX
+
+This section applies to `rx-none-elf` (RXv1: the RX600/RX610, RX100 and
+RX200 cores).
+
+### Constraints
+
+| Letter | Meaning |
+|---|---|
+| `r`, `g` | a general register chosen by EmbCC |
+| `m` | a general register chosen by EmbCC, holding the address of the operand; it is written into the template as `[rN]`, the memory operand an RX instruction takes |
+| `i`, `n`, `I`-`P`, and GCC's `Int08`, `Sint08`, `Sint16`, `Sint24`, `Uint04` | the constant, written into the template as `#N`, as GCC's RX port prints it |
+| `=`, `+`, `&` | see [Output operands](#output-operands) |
+
+Anything else, a non-constant `i` included, is refused with
+`asm constraint "b" is not valid for RX`. An operand is one 32-bit
+register: a `long long` one is refused (`RX asm operand 0 is 8 bytes`).
+A chosen register comes from `r1`-`r4`, then `r6`-`r12`, skipping
+registers listed as clobbers or named in the template; never `r0` (the
+stack pointer), `r5`, `r14` or `r15` (the code generator's scratch) or
+`r13` (the frame base of a function that calls `alloca`). A register
+variable must be one of those (`register int x __asm__("r1")`); another is
+refused with `register variable bound to 'r5' is not supported for RX asm
+(use r1-r4 or r6-r12)`.
+
+### Modifiers
+
+None. `%N` prints the register (`r3`), the constant (`#5`) or the memory
+operand (`[r3]`); any modifier is refused with `asm template modifier
+'%x' is not supported for RX`. In a [naked function](#naked-functions)
+`%cN` prints a constant without its `#`.
+
+### Template syntax
+
+GNU RX syntax, as rx-elf-as reads it. Registers are `r0` to `r15` (GNU has
+no `sp`), immediates `#expr`, memory `[rN]`, `dsp[rN]`, `[ri, rb]`,
+`[rN+]` and `[-rN]`, with `.b`, `.w`, `.l`, `.ub` or `.uw` after a memex
+source (`add 4[r1].w, r2`); a displacement is in bytes, a multiple of the
+access size. A branch target is `.+N` or `.-N` bytes from the branch, or
+a numeric label of the template (`1:` referred to as `1b` or `1f`); a
+named label is refused, since one template may be emitted more than once.
+A branch written without a size takes the shortest form that reaches, as
+GNU as relaxes it: `bra` `.s`/`.b`/`.w`/`.a`, `bsr` `.w`/`.a`,
+`beq`/`bne` `.s`/`.b`/`.w` and then the inverse condition over a
+`bra.a`, any other condition `.b` and then its inverse over a `bra.w` or
+`bra.a` (`bgt far` is `ble.b .+5; bra.w far`). Statements are separated by
+newlines or `!`; `;` starts a comment (GNU's RX comment character), as
+does `#` at the start of a line.
+
+A template cannot name a symbol: its bytes carry no relocation, so
+`bsr _f` and `mov.l #_x, r1` are refused (`"_f" is a symbol, and inline
+asm cannot reach one`) -- pass the address as an `"r"` operand and `jsr`
+through it, or write the code in a `.S` file or a
+[file-scope block](#on-cortex-m-risc-v-mips32-and-avr), where symbols
+relocate. There, as with GCC, a C name carries the RX underscore:
+`bsr _c_function`, `.global _asm_function`.
+
+### Instructions
+
+| Instruction | Operands |
+|---|---|
+| `nop`, `rts`, `rte`, `rtfi`, `wait`, `brk`, `satr` | none |
+| `mov.b`, `mov.w`, `mov.l` (`mov` is `mov.l`) | `rs, rd` (`.b`/`.w` sign-extend); `#imm, rd` (`.l`); `dsp[rs], rd`; `rs, dsp[rd]`; `#imm, dsp[rd]`; `[ri, rb], rd`; `rs, [ri, rb]`; `[rs+], rd`; `[-rs], rd`; `rs, [rd+]`; `rs, [-rd]` |
+| `movu.b`, `movu.w` | `rs, rd`; `dsp[rs], rd`; `[ri, rb], rd`; `[rs+], rd`; `[-rs], rd` |
+| `add`, `sub`, `and`, `or`, `mul` | `rs, rd`; `#imm, rd`; `src, rd` (memex); `rs, rs2, rd`; `add #imm, rs, rd` |
+| `cmp`, `xor`, `tst`, `max`, `min`, `div`, `divu`, `emul`, `emulu` | `rs, rd`; `#imm, rd`; `src, rd` (memex) |
+| `adc`, `sbb` | `rs, rd`; `#imm, rd`; `dsp[rs].l, rd` |
+| `neg`, `not`, `abs` | `rd`; `rs, rd` |
+| `xchg` | `rs, rd`; `src, rd` (memex) |
+| `stz`, `stnz` | `#imm, rd` |
+| `shll`, `shlr`, `shar` | `#0-31, rd`; `#0-31, rs, rd`; `rs, rd` |
+| `rotl`, `rotr` | `#0-31, rd`; `rs, rd` |
+| `rolc`, `rorc`, `sat` | `rd` |
+| `revl`, `revw` | `rs, rd` |
+| `push.b`, `push.w`, `push.l` (`push` is `push.l`); `pop` | `rs` or `dsp[rs]`; `rd` |
+| `pushm`, `popm` | `rN-rM`, 1 <= N <= M |
+| `pushc`, `popc`; `mvfc cr, rd`; `mvtc rs, cr`; `mvtc #imm, cr` | `psw`, `pc` (not written), `usp`, `fpsw`, `bpsw`, `bpc`, `isp`, `fintv`, `intb` |
+| `setpsw`, `clrpsw` | `c`, `z`, `s`, `o`, `i`, `u` |
+| `mvtipl #0-15`; `int #0-255` | |
+| `bra` (`.s`, `.b`, `.w`, `.a`), `bsr` (`.w`, `.a`) | `TARGET`; `bra.l`/`bsr.l rs` (and `bra`/`bsr rs`) |
+| `bCND` (`.s` and `.w` for `eq`/`ne`, `.b` for all) | `TARGET`; CND one of `eq`/`z`, `ne`/`nz`, `geu`/`c`, `ltu`/`nc`, `gtu`, `leu`, `pz`, `n`, `ge`, `lt`, `gt`, `le`, `o`, `no` |
+| `jmp`, `jsr` | `rs` |
+| `rtsd` | `#0-1020` (a multiple of 4); `#bytes, rN-rM` |
+| `bset`, `bclr`, `btst`, `bnot` | `#0-31, rd`; `#0-7, dsp[rd].b`; `rs, rd`; `rs, dsp[rd].b` |
+| `bmCND` | `#0-31, rd`; `#0-7, dsp[rd].b` |
+| `scCND.l` | `rd` |
+| `suntil`, `swhile`, `sstr`, `rmpa` (`.b`, `.w`, `.l`); `scmpu`, `smovu`, `smovb`, `smovf` | none |
+| `mvfachi`, `mvfaclo`, `mvfacmi`; `mvtachi`, `mvtaclo` | `rd`; `rs` |
+| `racw #1-2`; `mulhi`, `mullo`, `machi`, `maclo` | ; `rs, rs2` |
+
+An immediate is any 32-bit value, signed or unsigned (`sub` and `sbb`,
+which GNU as negates and inverts, take a signed one). A memex source
+defaults to `.l`; its displacement is unsigned, scaled by the size and at
+most 65535 units -- 32767 for `movu` and for `mov #imm, dsp[rd]`, whose
+field QEMU reads signed. Each form is encoded as GNU as encodes it, the
+shortest field that holds the value: tests/golden/rx-asm.sh assembles
+every one of them with rx-elf-as and must get the same bytes. The FPU's
+instructions (`fadd`, `itof`, ...) and RXv2's are refused with `fadd is an
+FPU or RXv2 instruction, which is not in EmbCC's RX vocabulary`; a
+memory-to-memory `mov` and the memory forms of `scCND` are refused by
+name; anything else outside the list with `asm instruction "frob" is not
+in the RX vocabulary`.
+
+### Callee-saved registers
+
+`r6`-`r13` are callee-saved. A template may change any register except
+`r0` when it says so -- in its clobber list, or by naming the register in
+the template, which counts as a clobber here even when the list does not
+say it (beyond what GCC promises): a value live across the asm keeps out
+of every register the asm changes, and a callee-saved one among them is
+saved by the function's prologue (`pushm r6-rN`), as GCC saves it. A
+clobber list naming `r0` is refused (`RX asm clobbers 'r0', the stack
+pointer; EmbCC does not save it around an asm`). A call from a template
+(`jsr %1`) must list the caller-saved registers it changes, `r1`-`r5`,
+`r14` and `r15`, as with GCC.
+
+### Example
+
+```c
+static inline unsigned irq_save(void)
+{
+    unsigned psw;
+    __asm__ volatile("mvfc psw, %0\n\tclrpsw i" : "=r"(psw) :: "memory");
+    return psw;
+}
+
+static inline void irq_restore(unsigned psw)
+{
+    __asm__ volatile("mvtc %0, psw" :: "r"(psw) : "memory");
+}
+
+static inline void set_usp(void *sp)
+{
+    __asm__ volatile("mvtc %0, usp" :: "r"(sp));
+}
+```
+
 ## AVR
 
 This section applies to the `avr` target (ATmega328P).
@@ -2024,8 +2161,8 @@ In summary, compared with GCC:
   address rather than a memory reference.
 - On x86-64 and RISC-V, `i` and `n` give a register, not an immediate.
 - Labels inside a function template are supported only for the x86-64
-  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa and
-  TriCore;
+  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa,
+  TriCore and RX;
   elsewhere branches use numeric displacements.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at

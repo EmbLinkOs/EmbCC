@@ -94,6 +94,18 @@ struct gas_target {
      * address and not only on the distance (Xtensa's call and l32r round
      * it to a word). NULL elsewhere. */
     void (*at)(long pc);
+    /* A statement separator beyond the newline (RX's `!`), 0 for none. */
+    char line_sep;
+    /* Relaxation by levels, for a target whose branch has more lengths
+     * than two (RX: 1, 2, 3 or 4 bytes, and a pair beyond): the least form
+     * index the statement may take -- -1 in the first pass, the optimistic
+     * guess -- and, after it, the index it took. A statement's level only
+     * rises, so the passes settle. NULL elsewhere. */
+    void (*set_level)(int level);
+    int (*took_level)(void);
+    /* Code alignment's padding, GNU as's for this target; NULL for the
+     * single nops do_align writes. */
+    void (*fill)(struct code *c, long gap);
 };
 
 /* Assembles `in_path` into an ET_REL object at `out_path`, for the

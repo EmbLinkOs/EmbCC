@@ -151,6 +151,11 @@ struct elfw *elfw_new(int machine)
     return w;
 }
 
+void elfw_set_sym_prefix(struct elfw *w, const char *prefix)
+{
+    w->sym_prefix = prefix;
+}
+
 void elfw_set_flags(struct elfw *w, unsigned long flags)
 {
     w->eflags = (Elf64_Word)flags;
@@ -239,7 +244,9 @@ int elfw_add_symbol(struct elfw *w, const char *name, Elf64_Addr value,
 
     Elf64_Sym sym;
     memset(&sym, 0, sizeof sym);
-    if (name && *name && w->sym_prefix &&
+    if (name && name[0] == '\001') {
+        sym.st_name = strtab_add(&w->strtab, name + 1);
+    } else if (name && *name && w->sym_prefix &&
         (ELF64_ST_TYPE(info) == STT_FUNC || ELF64_ST_TYPE(info) == STT_OBJECT ||
          ELF64_ST_TYPE(info) == STT_NOTYPE || ELF64_ST_TYPE(info) == STT_TLS) &&
         name[0] != '$' && name[0] != '.') {
