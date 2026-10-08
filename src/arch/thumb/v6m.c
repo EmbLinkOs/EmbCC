@@ -1813,11 +1813,15 @@ static void v8b_atomic(struct t_fn *F, int n)
          * value at *b and the value seen written back there */
         int p = -1, exp, des, old, st, fail, done;
         unsigned av = rbit(addr);
-        exp = tmp_get(F, av);
-        av |= rbit(exp);
+        /* the pointer first: a value with no register (a frame address,
+         * read once) is built in S1, which tmp_get hands out first */
         if (i->op == IR_CMPXCHG) {
             p = v_rdr(F, i->b, S1);
             av |= rbit(p);
+        }
+        exp = tmp_get(F, av);
+        av |= rbit(exp);
+        if (i->op == IR_CMPXCHG) {
             if (p == exp)
                 internal_error("thumb: %s: a compare-and-swap's registers",
                                fn->name);
