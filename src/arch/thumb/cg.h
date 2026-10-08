@@ -223,6 +223,18 @@ int *tcg_pair_alloc(struct ir_func *fn, const char *wide, const char *excl,
                     int *used, int *nused);
 const struct ra_target *tcg_ra(void);
 int tcg_regalloc(void);
+/* r6/r7 in the ARMv6-M pool too, this attempt (gen_func_best), and how
+ * v6m.c says an instruction found no scratch register free: the attempt
+ * is thrown away. */
+int tcg_ext(void);
+void tcg_role_fail(void);
+/* Per instruction, the registers holding a value live into or out of it
+ * (lo_busy_map), and those over n..n+span with its operands (t_busy); and
+ * whether the instruction's lowering names no low register of its own
+ * (lo_op_ok). */
+unsigned *tcg_lo_busy_map(const struct t_fn *F);
+unsigned tcg_busy(const struct t_fn *F, int n, int span);
+int tcg_lo_op_ok(const struct t_fn *F, const struct ir_ins *i);
 /* -O0: the allocator runs for the temporaries, every source variable kept
  * in its slot (codegen.c's g_t_o0). */
 int tcg_o0(void);

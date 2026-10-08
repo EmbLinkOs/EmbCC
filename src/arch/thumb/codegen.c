@@ -212,8 +212,25 @@ static const int T6_POOL_VA[2] = { 4, 5 };
 static const int T6_POOL_FB[5] = { 0, 1, 2, 3, 4 };
 static const int T6_POOL_VA_FB[1] = { 4 };
 
+/* With r6 and r7 as well (g_t_ext on ARMv6-M): all eight low registers,
+ * and the lowering's two scratch registers taken per instruction from
+ * whatever holds nothing there (v6m.c's v6_roles). r5 stays out where it
+ * is a VLA's frame base. */
+static const int T6_POOL_EXT[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+static const int T6_POOL_VA_EXT[4] = { 4, 5, 6, 7 };
+static const int T6_POOL_FB_EXT[7] = { 0, 1, 2, 3, 4, 6, 7 };
+static const int T6_POOL_VA_FB_EXT[3] = { 4, 6, 7 };
+
 static const int *t_pool_base(const struct ir_func *fn, int *n)
 {
+    if (target_thumb_arch() == 6 && g_t_ext) {
+        if (fn->has_alloca) {
+            *n = fn->is_varargs ? 3 : 7;
+            return fn->is_varargs ? T6_POOL_VA_FB_EXT : T6_POOL_FB_EXT;
+        }
+        *n = fn->is_varargs ? 4 : 8;
+        return fn->is_varargs ? T6_POOL_VA_EXT : T6_POOL_EXT;
+    }
     if (target_thumb_arch() == 6) {
         if (fn->has_alloca) {
             *n = fn->is_varargs ? 1 : 5;
@@ -6867,7 +6884,14 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     if (!lr_forced && target_thumb_arch() != 6 && !t_isa_a32)
         lv[nl++] = 0;
     const char *ek = getenv("EMBCC_T_EXT");
-    int ext_ok = target_thumb_arch() != 6 && !(ek && *ek && atoi(ek) == 0);
+    /* ARMv6-M too, unless an asm is in the function: its operands may be
+     * pinned to r6 and r7 (the letters S and D), which v6m.c's fixed
+     * scratch layout assumes are never a value's home. */
+    int has_asm = 0;
+    for (int k = 0; k < fn->nins; k++)
+        has_asm |= fn->ins[k].op == IR_ASM;
+    int ext_ok = (target_thumb_arch() != 6 || !has_asm) &&
+                 !(ek && *ek && atoi(ek) == 0);
     /* EMBCC_T_EXT=1: an attempt with r9-r11 wins whenever one succeeds,
      * whatever its size, so tests can drive the path. */
     int ext_pref = ext_ok && ek && *ek && atoi(ek) != 0;
@@ -7143,6 +7167,11 @@ int *tcg_pair_alloc(struct ir_func *fn, const char *wide, const char *excl,
 }
 const struct ra_target *tcg_ra(void) { return &THUMB_RA; }
 int tcg_regalloc(void) { return g_t_regalloc; }
+int tcg_ext(void) { return g_t_ext; }
+void tcg_role_fail(void) { g_t_role_fail = 1; }
+unsigned *tcg_lo_busy_map(const struct t_fn *F) { return lo_busy_map(F); }
+unsigned tcg_busy(const struct t_fn *F, int n, int span) { return t_busy(F, n, span); }
+int tcg_lo_op_ok(const struct t_fn *F, const struct ir_ins *i) { return lo_op_ok(F, i); }
 int tcg_o0(void) { return g_t_o0; }
 int tcg_pairs(void) { return g_t_pairs; }
 void tcg_reset_taken(void) { g_t_taken = 0; }

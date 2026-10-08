@@ -69,11 +69,32 @@
 #include "../target.h"
 #include "../../driver/util.h"
 
-#define S0 6
-#define S1 7
 #define IP 12
 #define FB6 5              /* the frame base where sp moves (a VLA) */
-#define SCR_BOTH ((1u << S0) | (1u << S1))
+/* The two scratch registers. r6 and r7 -- unless r6 and r7 are in the
+ * allocator's pool as well (tcg_ext, one of gen_func_best's attempts):
+ * then each instruction takes two registers that hold nothing there
+ * (v6_roles), and -1 for one it could not find, which fails the attempt
+ * the moment the lowering asks for it (v6_role). The prologue and the
+ * epilogue, where nothing but the arguments and the result is live, keep
+ * r6 and r7. */
+static int g6_s0 = 6, g6_s1 = 7;
+static int v6_role(int k)
+{
+    int r = k ? g6_s1 : g6_s0;
+    if (r < 0) {
+        tcg_role_fail();
+        return k ? 7 : 6;          /* what it emits is thrown away */
+    }
+    return r;
+}
+#define S0 v6_role(0)
+#define S1 v6_role(1)
+/* The callee-saved low registers a scratch may be: r6/r7 with the fixed
+ * pair; with the per-instruction roles, any of r4-r7 not otherwise saved
+ * (the prologue then saves it, as it does r6/r7). */
+#define SCR_BOTH ((1u << 6) | (1u << 7))
+#define SCR_SET (tcg_ext() ? 0xf0u : SCR_BOTH)
 
 /* The size classes of a branch to a label (fix.ins), smallest first. */
 enum { BC_SHORT = 0, BC_MED = 1, BC_FAR = 2 };
@@ -135,7 +156,7 @@ static int in_reg6(const struct t_fn *F, int v)
  * when a pass has used them. */
 static int sc(struct t_fn *F, int r)
 {
-    if (r == S0 || r == S1)
+    if (r >= 4 && r <= 7)           /* r6/r7, or a role among r4-r7 */
         F->v6_used |= 1u << r;
     return r;
 }
@@ -151,20 +172,27 @@ static void mov(struct t_fn *F, int d, int s)
  * reverse order. */
 static int tmp_get(struct t_fn *F, unsigned avoid)
 {
-    static const int order[] = { S1, S0, 0, 1, 2, 3, 4, 5 };
+    /* the roles first (nothing is in them), then the rest pushed: r0-r5
+     * -- and r6/r7 too when they may be homes */
+    int order[8], no = 0;
+    if (g6_s1 >= 0) order[no++] = g6_s1;
+    if (g6_s0 >= 0) order[no++] = g6_s0;
+    for (int r = 0; r < (tcg_ext() ? 8 : 6); r++)
+        if (r != g6_s0 && r != g6_s1 && no < 8)
+            order[no++] = r;
     avoid |= F->tbusy | F->ins_mask;
     if (F->fb == FB6)
         avoid |= 1u << FB6;
-    for (unsigned k = 0; k < sizeof order / sizeof order[0]; k++) {
+    for (int k = 0; k < no; k++) {
         int r = order[k];
-        if (avoid & (1u << r))
+        if (r < 0 || (avoid & (1u << r)))
             continue;
         if (F->ntmp >= 6)
             internal_error("thumb: %s: too many v6 temporaries",
                            F->fn->name);
         F->tbusy |= 1u << r;
         F->tmp_reg[F->ntmp] = r;
-        F->tmp_pushed[F->ntmp] = r != S0 && r != S1;
+        F->tmp_pushed[F->ntmp] = r != g6_s0 && r != g6_s1;
         if (F->tmp_pushed[F->ntmp]) {
             t1_push(F->t, 1u << r);
             F->spb += 4;
@@ -1854,7 +1882,7 @@ static void gen_atomic(struct t_fn *F, int n)
             t1_movs_imm(t, T_R3, 0);
             t1_movs_imm(t, sc(F, S0), 5);
             t1_movs_imm(t, sc(F, S1), 5);
-            t1_push(t, SCR_BOTH);
+            t1_push(t, (1u << S0) | (1u << S1));
             tcg_call_helper(F, name);
             t1_sp_adjust(t, 8, 0);
         } else {
@@ -1959,7 +1987,7 @@ static void gen_asm(struct t_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
     struct ir_asm *ia = i->asm_ir;
-    static const int brks[3] = { IP, S0, S1 };
+    static const int brks[3] = { IP, 6, 7 };   /* (no asm with tcg_ext) */
     int vreg_[16], vdst[16], nval = 0, brk = -1;
     unsigned opm;
 
@@ -2967,7 +2995,7 @@ static void v6_scan(struct t_fn *F, int from)
 
 static unsigned save_mask6(const struct t_fn *F, unsigned scr)
 {
-    unsigned m = (scr & SCR_BOTH) | (1u << T_LR);
+    unsigned m = (scr & SCR_SET) | (1u << T_LR);
     int c = 0;
     for (int k = 0; k < F->nsave; k++)
         m |= 1u << F->used_callee[k];
@@ -2999,8 +3027,8 @@ static void sp_frame(struct t_fn *F, long frame, int sub)
         }
         return;
     }
-    k32_nf(F, sc(F, S0), sub ? (0UL - (unsigned long)frame) : (unsigned long)frame);
-    t1_add_hi(t, T_SP, S0);
+    k32_nf(F, sc(F, 6), sub ? (0UL - (unsigned long)frame) : (unsigned long)frame);
+    t1_add_hi(t, T_SP, 6);
 }
 
 static void ins_mask_of(int v, void *ctx)
@@ -3011,6 +3039,105 @@ static void ins_mask_of(int v, void *ctx)
         if (F->wide[v])
             F->ins_mask |= 2u << F->loc[v];
     }
+}
+
+/* The scratch pair for instruction n when r6/r7 are homes (tcg_ext): two
+ * low registers holding no value live into or out of n..n+2 and none it
+ * reads or writes (tcg_busy -- the span covers what its lowering emits
+ * ahead, skip_next). r0-r3 only for an instruction whose lowering names no
+ * low register of its own (tcg_lo_op_ok: a call, a helper, a 64-bit value
+ * put arguments and pairs in fixed ones); r4-r7 for any, the ones the
+ * prologue already saves first -- another is saved for it, as r6/r7 are
+ * (sc). Never the frame base. */
+static void ins_mask_of(int v, void *ctx);
+static void ins_mask_of_ext(int v, void *ctx) { ins_mask_of(v, ctx); }
+
+/* A call whose lowering (gen_call) uses its scratch only for the stack
+ * arguments, which it stores before any argument register is loaded: no
+ * composite argument in registers (read through S1 after the move), no
+ * indirect target (read through S0 after it), no composite result (the
+ * scratch after the call). Then r0-r3 that hold nothing at the call serve
+ * as well as r6/r7. */
+static int v6_call_lo_ok(const struct ir_ins *i)
+{
+    if (i->op != IR_CALL || i->indirect || i->retsize)
+        return 0;
+    for (int k = 0; k < i->nargs; k++)
+        if (i->argv[k].is_struct)
+            return 0;
+    return 1;
+}
+
+static void v6_roles(struct t_fn *F, int n)
+{
+    unsigned busy = F->lv_busy ? tcg_busy(F, n, 2) : 0xffu;
+    unsigned saved = 0;            /* by the allocator: the same every pass */
+    int cand[8], nc = 0;
+    if (F->fn->has_alloca)
+        busy |= 1u << FB6;
+    for (int k = 0; k < F->nsave; k++)
+        saved |= 1u << F->used_callee[k];
+    if (tcg_lo_op_ok(F, &F->fn->ins[n]) || v6_call_lo_ok(&F->fn->ins[n]))
+        for (int r = 0; r < 4; r++)
+            if (!(busy >> r & 1))
+                cand[nc++] = r;
+    for (int pass = 0; pass < 2; pass++)
+        for (int r = 7; r >= 4; r--)
+            if (!(busy >> r & 1) && ((saved >> r & 1) != 0) == (pass == 0))
+                cand[nc++] = r;
+    g6_s0 = nc > 0 ? cand[0] : -1;
+    g6_s1 = nc > 1 ? cand[1] : -1;
+}
+
+/* No free register for a role: for a plain computation (tcg_lo_op_ok, and
+ * neither a branch nor followed by one its lowering might fuse), one that
+ * nothing it reads or writes is in, pushed before it and popped after --
+ * as tmp_get does, sp-relative offsets adding F->spb meanwhile. Not
+ * around a call (its stack arguments are at sp, and sp must stay
+ * eight-aligned), nor a branch (the pop would not run where it goes).
+ * Returns the registers pushed; 0 when the attempt is better failed. */
+static unsigned v6_roles_push(struct t_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    unsigned ops = 0, pushed = 0;
+    if (g6_s0 >= 0 && g6_s1 >= 0)
+        return 0;
+    for (int m = n; m <= n + 2 && m < fn->nins; m++) {
+        enum ir_op op = fn->ins[m].op;
+        if (op == IR_BRZ || op == IR_BRNZ || op == IR_JMP || op == IR_RET ||
+            op == IR_SWITCH || op == IR_IGOTO || op == IR_LABEL ||
+            op == IR_MEMCPY || op == IR_MEMZERO || op == IR_CALL ||
+            op == IR_UD2)
+            return 0;
+    }
+    if (!tcg_lo_op_ok(F, &fn->ins[n]))
+        return 0;
+    {
+        /* the registers of the values n..n+2 name: not liveness, only
+         * what the lowering reads and writes */
+        unsigned keep = F->ins_mask;
+        F->ins_mask = 0;
+        for (int m = n; m <= n + 2 && m < fn->nins; m++) {
+            ra_each_use(&fn->ins[m], ins_mask_of_ext, F);
+            ins_mask_of_ext(fn->ins[m].dst, F);
+        }
+        ops = F->ins_mask;
+        F->ins_mask = keep;
+    }
+    if (fn->has_alloca)
+        ops |= 1u << FB6;
+    for (int r = 7; r >= 0 && (g6_s0 < 0 || g6_s1 < 0); r--) {
+        if ((ops >> r & 1) || r == g6_s0 || r == g6_s1)
+            continue;
+        pushed |= 1u << r;
+        if (g6_s0 < 0) g6_s0 = r; else g6_s1 = r;
+    }
+    if (g6_s0 < 0 || g6_s1 < 0)
+        return 0;
+    t1_push(F->t, pushed);
+    for (unsigned b = pushed; b; b &= b - 1)
+        F->spb += 4;
+    return pushed;
 }
 
 void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
@@ -3032,8 +3159,9 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (F.nshr[v]) F.wide[v] = 0;
     F.va_regsave = F.va_first = -1;
     F.bc_end = F.bc_fix = -1;
-    F.scr_save = SCR_BOTH;
+    F.scr_save = SCR_SET;
     F.fb = T_SP;
+    g6_s0 = 6; g6_s1 = 7;
     if (tcg_regalloc()) {
         /* -g, and -O0: every source variable in its slot (codegen.c's
          * g_t_o0), the temporaries in registers */
@@ -3076,6 +3204,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             t_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
     tcg_layout(&F);
+    if (tcg_ext() && F.loc && fn->nins && fn->nvregs)
+        F.lv_busy = tcg_lo_busy_map(&F);
+    else if (tcg_ext())
+        tcg_role_fail();           /* nothing is known free */
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);
     F.no_tbh = xcalloc((size_t)fn->nins + 1, 1);
 
@@ -3130,12 +3262,13 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         f->code_off = t->len;
 
         /* ---- prologue ---- */
+        g6_s0 = 6; g6_s1 = 7;              /* the prologue's */
         if (F.frame > 1016)
-            F.scr_save |= 1u << S0;         /* sp_frame's register */
+            F.scr_save |= 1u << 6;          /* sp_frame's register */
         if (F.far_mode)
             F.leaf = 0;                     /* BL is a branch: lr is spent */
         F.nopush = F.leaf && !F.nsave && !F.frame && !fn->is_varargs &&
-                   !fn->has_alloca && !(F.scr_save & SCR_BOTH);
+                   !fn->has_alloca && !(F.scr_save & SCR_SET);
         if (fn->is_varargs)
             t1_push(t, 0xfu);
         if (!F.nopush)
@@ -3207,8 +3340,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                     long src = base + pl.stk + (long)q * 4;
                     long dst = F.slot[i] + (long)(pl.nreg + q) * 4;
                     pool_point(&F, 64, 0);
-                    fr_ld(&F, sc(&F, S0), src, 4, 0);
-                    fr_st(&F, S0, dst, 4, 0xfu | (1u << S0));
+                    fr_ld(&F, sc(&F, 6), src, 4, 0);
+                    fr_st(&F, 6, dst, 4, 0xfu | (1u << 6));
                 }
             }
             if (npmv) {
@@ -3231,11 +3364,21 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* ---- body ---- */
         for (i = 0; i < fn->nins; i++) {
             pool_point(&F, v6_est(&F, i), 1);
+            unsigned rpush = 0;
             F.ins_mask = 0;
             ra_each_use(&fn->ins[i], ins_mask_of, &F);
             ins_mask_of(fn->ins[i].dst, &F);
+            if (tcg_ext()) {
+                v6_roles(&F, i);
+                rpush = v6_roles_push(&F, i);
+            }
             F.tbusy = 0;
             gen_ins(&F, i);
+            if (rpush) {
+                t1_pop(t, rpush);
+                for (unsigned b = rpush; b; b &= b - 1)
+                    F.spb -= 4;
+            }
             if (F.ntmp || F.spb)
                 internal_error("thumb: %s: instruction %d left %d temporaries",
                                fn->name, i, F.ntmp);
@@ -3246,6 +3389,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         }
 
         /* ---- epilogue ---- */
+        g6_s0 = 6; g6_s1 = 7;
         F.label_off[fn->nlabels] = t->len;
         F.ins_mask = 0;
         if (fn->has_alloca)
@@ -3339,7 +3483,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             free(cls);
             cls = NULL;
             ncls = 0;
-            F.scr_save = SCR_BOTH;
+            F.scr_save = SCR_SET;
             continue;
         }
 
@@ -3384,14 +3528,14 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 /* An asm writes neither: its operands are r0-r3 and r12
                  * (sema), irgen refuses a template or clobber list naming
                  * r4-r11, and gen_asm takes them through sc()/tmp_get. */
-                unsigned used = F.v6_used & SCR_BOTH;
+                unsigned used = F.v6_used & SCR_SET;
                 int scr_changed = 0;
                 if (F.frame > 1016)
-                    used |= 1u << S0;
+                    used |= 1u << 6;
                 if (used & ~F.scr_save) {
                     /* a pass used a scratch register it did not save:
                      * again, saving both */
-                    F.scr_save = SCR_BOTH;
+                    F.scr_save = SCR_SET;
                     scr_changed = 1;
                 } else if (used != F.scr_save && first) {
                     F.scr_save = used;
@@ -3417,6 +3561,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                      (fn->is_varargs ? 16 : 0);
     free(cls);
     free(F.usecnt);
+    free(F.lv_busy);
     free(F.slot);
     cg_note_labels(fn, F.label_off);
     free(F.label_off);
