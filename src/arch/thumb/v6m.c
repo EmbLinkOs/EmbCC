@@ -2127,6 +2127,11 @@ static void gen_asm(struct t_fn *F, int n)
             long fo;
             if (v < 0)
                 continue;
+            /* nothing reads it: no home to fill (and a dead value may
+             * share its register with another, which no move can fill
+             * twice) */
+            if (F->usecnt && F->usecnt[v] == 0)
+                continue;
             if (in_reg6(F, v)) {
                 pd[npm] = F->loc[v];
                 ps[npm++] = r;

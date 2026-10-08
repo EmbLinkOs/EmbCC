@@ -2916,6 +2916,11 @@ static void gen_ins(struct xt_fn *F, int n)
             for (int k = 0; k < nval; k++) {
                 if (vdst[k] < 0)
                     continue;
+                /* An output nothing reads has no home to fill: the
+                 * allocator may give two such dead values one register,
+                 * and two writes to it are no parallel move. */
+                if (F->usecnt && F->usecnt[vdst[k]] == 0)
+                    continue;
                 if (in_reg(F, vdst[k])) {
                     pd[npm] = F->loc[vdst[k]];
                     ps[npm++] = vreg_[k];
