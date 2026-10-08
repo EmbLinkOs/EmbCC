@@ -312,7 +312,7 @@ embtrace: tools/embtrace/embtrace.c
 embrt: tools/embrt/embrt.c
 	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
 
-# embsim -- a simulator (Cortex-M, RISC-V): runs an image on a model of the board
+# embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
 # table tools/bench uses (tools/bench/cost.h). ISO C and libm; the
 # modules are tools/embsim/sim.h's (docs/internals/embsim.md). The GDB
@@ -328,8 +328,11 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/uart-nrf51.c tools/embsim/riscv.c \
                tools/embsim/riscv-fpu.c tools/embsim/clint.c \
                tools/embsim/uart-16550.c tools/embsim/sifive-test.c \
-               tools/embsim/virt-rom.c tools/embsim/gdb.c $(EMBSIM_NET)
+               tools/embsim/virt-rom.c tools/embsim/avr.c \
+               tools/embsim/avr-io.c tools/embsim/avr-usart.c \
+               tools/embsim/avr-timer16.c tools/embsim/gdb.c $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
+               tools/embsim/avr.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h
 embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS)
 	$(CC) $(CFLAGS) -o $@ $(EMBSIM_SRCS) -lm

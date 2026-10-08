@@ -52,12 +52,22 @@ const struct board_desc boards[] = {
         { "clint", 0x2000000, 0x10000 }, { "ns16550a", 0x10000000u, 0x100 },
         { "zero", 0x0c000000u, 0x600000 } },
       { { 0, 0, 0 } } },
+    /* QEMU's uno, the ATmega328P: 32 KiB of flash at 0, and the data
+     * space at 0x800000 (gdb's numbering): 2 KiB of SRAM at 0x100,
+     * USART0, Timer/Counter1, the I/O registers that keep their values,
+     * and nothing above RAMEND */
+    { "uno", "avr", "atmega328p", 0,
+      { { 0, KB(32), MEM_FLASH, 0 }, { 0x800100u, KB(2), MEM_RAM, 1 } },
+      { { "avr-usart", 0x8000c0u, 7 }, { "avr-timer16", 0x800080u, 12 },
+        { "avr-io", 0x800020u, 0xe0 }, { "zero", 0x800900u, 0xf700 } },
+      { { 0, 0, 0 } } },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
 const struct core_type cores[] = {
     { "cortex-m", cortexm_create },
     { "riscv", riscv_create },
+    { "avr", avr_create },
 };
 const int ncores = (int)(sizeof cores / sizeof cores[0]);
 
@@ -92,6 +102,9 @@ static const struct dev_type dev_types[] = {
     { "sifive-test", &sifive_test_ops, sifive_test_create },
     { "clint", &clint_ops, clint_create },
     { "ns16550a", &ns16550a_ops, ns16550a_create },
+    { "avr-io", &avr_io_ops, avr_io_create },
+    { "avr-usart", &avr_usart_ops, avr_usart_create },
+    { "avr-timer16", &avr_timer16_ops, avr_timer16_create },
 };
 
 const struct board_desc *board_find(const char *name)
