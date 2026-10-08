@@ -902,11 +902,13 @@ static long obj_slot(const struct mips_fn *F, int v)
     if (g_be && v < F->fn->nvars) {
         const struct ir_local *L = &F->fn->locals[v];
         /* ...unless it asked for an alignment its own size does not
-         * give (`_Alignas(16) char`): then at the slot's start, which is
-         * aligned. Nothing writes such a local as a whole word -- a
-         * parameter cannot carry an alignment specifier. */
+         * give (`_Alignas(16) char`, or a typedef's aligned(8) on a
+         * four-byte int): then at the slot's start, which is aligned.
+         * Nothing writes such a local as a whole word -- a parameter
+         * cannot carry an alignment specifier, and irgen gives one its
+         * type's own alignment. */
         if ((L->is_int_or_ptr || L->is_scalar_float) && L->size > 0 &&
-            L->size < W && L->user_align <= L->size)
+            L->size < W && L->user_align <= L->size && L->align <= L->size)
             return sslot(F, v) + W - L->size;
     }
     return sslot(F, v);
