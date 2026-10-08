@@ -296,6 +296,8 @@ struct ir_ins {
     int indirect;            /* IR_CALL through a function pointer */
     int sret_first;          /* IR_CALL: argument 0 is the indirect-result
                               * pointer (type.h sret_first) */
+    int sret_size;           /* ...and the size of the object it points at
+                              * (SPARC's unimp after the call), or 0 */
     int call_varargs;        /* al = 0 needed at the call */
     int memoff;              /* IR_LOAD/IR_STORE: a constant byte offset
                               * added to the address -- set only by a

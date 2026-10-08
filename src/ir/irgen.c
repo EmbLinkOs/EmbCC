@@ -2901,6 +2901,9 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
                                : e->lhs->ty->pointee->nptypes;
     i->sret_first = e->callee ? e->callee->sret_first
                               : e->lhs->ty->pointee->sret_first;
+    if (i->sret_first && e->nargs > 0 && e->args[0]->ty->kind == TY_PTR &&
+        e->args[0]->ty->pointee)
+        i->sret_size = ty_size(e->args[0]->ty->pointee);
     i->nargs = e->nargs;
     i->argv = ir_args_new(e->nargs);
 
