@@ -17,7 +17,8 @@
  * The few privileged instructions this needs -- mtspr to the MMU assist
  * registers and the interrupt vector registers, tlbwe, mfspr of SRR0, ESR
  * and DEAR -- are written as instruction WORDS into small buffers and
- * called, because EmbCC has no PowerPC inline assembler yet. Each word's
+ * called (written before EmbCC had a PowerPC assembler, and kept so the
+ * harness does not depend on what it is used to test). Each word's
  * encoding is llvm-mc's (tests/golden/ppc-encoding.sh referees the same
  * fields in src/arch/ppc/emit.c). QEMU notices code written to memory;
  * real hardware would want a dcbst/icbi first.

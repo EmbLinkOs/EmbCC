@@ -259,7 +259,7 @@ isr_common:
 
 `embas` reads NASM syntax for x86-64 only. Assembly in GNU syntax is
 assembled by `embcc` itself, for the ARM (Thumb), AArch64, RISC-V, MIPS32,
-LoongArch64, Xtensa, TriCore and AVR targets:
+LoongArch64, Xtensa, TriCore, SPARC, PowerPC and AVR targets:
 
 ```sh
 embcc --target=thumbv7m-none-eabi -c startup.S -o startup.o
@@ -281,8 +281,9 @@ relocations -- which `tests/golden/gas-gnu.sh` checks.
 ### Source
 
 - **Comments.** `/* ... */` anywhere, also across lines; `#` and `//`;
-  `@` on ARM and `;` on AVR. On ARM and AArch64, `#` is an immediate's
-  prefix and starts a comment only as a line's first character.
+  `@` on ARM, `!` on SPARC and `;` on AVR. On ARM, AArch64 and SPARC, `#`
+  starts a comment only as a line's first character (an immediate's
+  prefix on ARM, `#function` in SPARC's `.type`).
 - **Statements.** `;` separates two statements on one line (not on AVR,
   where it is the comment). Any number of `label:` may precede one.
   Numeric local labels `0:` to `9:` are referred to as `1b` and `1f`.
@@ -312,7 +313,7 @@ addresses otherwise is refused.
 | `.space N[, FILL]`, `.zero N`, `.skip N[, FILL]` | `N` bytes of `FILL` (0), or reserved space in a NOBITS section |
 | `.fill REPEAT[, SIZE[, VALUE]]` | `REPEAT` values of `SIZE` bytes |
 | `.org OFFSET` | advance to `OFFSET` in this section |
-| `.align N`, `.p2align N` (and `w`/`l` variants) | align to 2^`N` bytes; code is padded with the target's no-op (with zeros on Xtensa, whose instructions are three bytes). On Xtensa `.align N` counts bytes, a power of two, as GNU as reads it there |
+| `.align N`, `.p2align N` (and `w`/`l` variants) | align to 2^`N` bytes; code is padded with the target's no-op (with zeros on Xtensa, whose instructions are three bytes). On Xtensa and SPARC `.align N` counts bytes, a power of two, as GNU as reads it there |
 | `.balign N` (and `w`/`l` variants) | align to `N` bytes |
 | `.equ NAME, EXPR`, `.set NAME, EXPR`, `NAME = EXPR`, `.equiv NAME, EXPR` | define `NAME`: absolute for a value, an alias for an address; it may name a label further down |
 | `.thumb_set NAME, EXPR` | as `.set`, and `NAME` is a Thumb function (how a startup file aliases weak handlers to its default one) |
@@ -368,6 +369,8 @@ instruction forms that carry a relocation:
 | ARM | `bl SYMBOL`, `b SYMBOL`, `ldr REG, =SYMBOL`, `movw`/`movt` with `#:lower16:`/`#:upper16:` |
 | AArch64 | `bl SYMBOL` |
 | AVR | `call`, `jmp`, `rcall`, `rjmp` and conditional branches to a symbol; `lds`/`sts` with a symbol address; `ldi REG, lo8(SYMBOL)`, `hi8(...)`, `pm_lo8(...)`, `pm_hi8(...)`, and `lo8(gs(SYMBOL))`, `hi8(gs(SYMBOL))` |
+| SPARC | `call SYMBOL` (`R_SPARC_WDISP30`), a branch to one (`R_SPARC_WDISP22`); `sethi %hi(SYMBOL)` and any `%lo(SYMBOL)` operand -- an `or`, an `add`, a load's or store's offset -- (`R_SPARC_HI22`, `R_SPARC_LO10`), and `set SYMBOL, REG` (both), relocated even for a label of this file |
+| PowerPC | `b`, `bl` (`R_PPC_REL24`), `ba`, `bla` (`R_PPC_ADDR24`) and a conditional branch (`R_PPC_REL14`) to a symbol; `SYMBOL@ha`, `@h` and `@l` in any 16-bit immediate or offset (`R_PPC_ADDR16_HA`, `_HI`, `_LO`), relocated even for a label of this file |
 
 Any other use is refused, for example
 `"STATEMENT" names 'NAME', which is not defined in this file, in a form this target's assembler cannot relocate`.

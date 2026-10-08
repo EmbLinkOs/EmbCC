@@ -1852,12 +1852,46 @@ counted from the top of the word (big-endian). Test-and-set stores 1, as
 
 ### Assembly
 
-There is no SPARC assembler in EmbCC yet: an `asm` statement with an
-instruction or an operand, a naked function, file-scope instructions and
-`.s` files are refused by name. An empty `asm` (a compiler barrier) is
-accepted. `-S` writes the instructions as `.byte` and their relocations as
-`.reloc` with SPARC's names, which llvm-mc assembles back into the same
-object.
+`embcc -c` assembles `.s` and `.S` files for SPARC, and inline `asm`,
+file-scope `asm` blocks and `__attribute__((naked))` functions are
+assembled the same way, in GNU as's SPARC syntax (registers `%g0`-`%i7`,
+`%r0`-`%r31`, `%sp`, `%fp`). The vocabulary is the LEON3's integer unit:
+the ALU in its register and 13-bit immediate forms, with the
+condition-code, tagged and `mulscc` forms, `umul`/`smul`/`udiv`/`sdiv`,
+`save`/`restore`; every load and store (`ld`, `ldub`, `lduh`, `ldsb`,
+`ldsh`, `ldd`, `st`, `stb`, `sth`, `std`, `ldstub`, `swap`) and its
+alternate-space form (`lda [rs1 + rs2] ASI, rd`), LEON's `casa`; `sethi`
+with `%hi()` and `%lo()`; every `Bicc` with its `,a` annul bit; `call`,
+`jmpl`, `rett`; `rd`/`wr` of `%y`, `%psr`, `%wim`, `%tbr` and
+`%asr1`-`%asr31`; every `Ticc`; `flush`, `stbar`, `unimp`, `nop`; and
+GNU's synthetic instructions -- `mov` (to and from the state registers
+too), `cmp`, `tst`, `not`, `neg`, `inc`/`dec`(`cc`), `clr`/`clrb`/`clrh`,
+`btst`, `bset`, `bclr`, `btog`, `set`, `jmp`, `ret`, `retl`, `b` and the
+condition synonyms (`bnz`, `bz`, `bgeu`, `blu`). Delay slots are the
+programmer's: nothing is reordered or filled. Floating-point and
+coprocessor instructions and SPARC V9's forms (`,pt`, `%xcc`, `ldx`,
+`membar`...) are refused by name.
+
+A call or a branch to a symbol defined elsewhere carries
+`R_SPARC_WDISP30`/`WDISP22`; `%hi(sym)`, `%lo(sym)` and `set sym, rd`
+carry `R_SPARC_HI22`/`LO10` (for a label of the same file too, whose
+address the linker decides), and `.word sym` `R_SPARC_32`. `.align`
+counts bytes, `!` starts a comment and `#` one at a line's start, as GNU as
+has them for SPARC. `tests/golden/sparc-asm.sh` checks every form against
+llvm-mc byte for byte and against llvm-objdump's mnemonic, a file's layout
+against clang's assembler, and runs C and assembly together on QEMU's
+`leon3_generic`.
+
+In inline asm a register operand is written `%o0`, an `"m"` operand
+`[%o0]`; the constraint letters are `r`, `g`, `m`, `i`, `n`, GCC's `I`-`P`
+and a digit (an input tied to an output). Operands go in `%o0`-`%o5`,
+`%l0`-`%l5` and `%i0`-`%i5` -- never a global, `%sp`/`%fp`, `%o7`, `%i7` or
+`%l6`/`%l7` -- and a clobber list may not name `%sp`, `%fp` or `%i7`. A
+value live across an asm keeps out of every register the asm changes: its
+operands', its clobbers', the ones its text names and, when it calls
+(`call`, or `jmpl` into `%o7`), the outs and `%g1`-`%g4`. `-S` writes the
+instructions as `.byte` and their relocations as `.reloc` with SPARC's
+names, which llvm-mc assembles back into the same object.
 
 ### Predefined macros
 
@@ -2080,8 +2114,9 @@ the entry.
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
-| inline assembly, a naked function | `inline assembly is not supported for sparc-none-elf yet: EmbCC has no SPARC assembler (...)` |
-| a `.s` or `.S` file | `no assembly-file support for sparc-none-elf yet: EmbCC has no SPARC assembler` |
+| a floating-point, coprocessor or V9 instruction in asm | `asm instruction "faddd" is a floating-point instruction: EmbCC compiles soft float, and this assembler has no floating-point vocabulary` / `asm instruction "ldx" is SPARC V9's, and the LEON3 is a V8` |
+| `%sp`, `%fp` or `%i7` in an asm's clobber list | `SPARC asm clobbers '%sp', which holds this function's stack pointer; EmbCC does not save it around an asm` |
+| a V9 relocation operator (`%hh`, `%lm`, `%gdop_*`...) | `this relocation operator is SPARC V9's or position-independent code's; EmbLD applies %hi/%lo (R_SPARC_HI22/LO10), call and branch displacements and data words` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
 | C++ with exceptions (on by default) | `C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
 | inline asm | `inline assembly is not supported for m68k-none-elf yet: EmbCC has no ColdFire assembler` |
