@@ -5496,6 +5496,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                          * since an xmm-homed value has no slot to read */
                         if (i->call_varargs)
                             x86_movq_gpr_xmm(text, x86_argreg(ireg), ireg, 8);
+                    } else if (in_freg(a->vreg)) {
+                        x86_movq_gpr_xmm(text, x86_argreg(ireg),
+                                         g_floc[a->vreg], a->size == 8 ? 8 : 4);
                     } else if (!in_reg(a->vreg)) {
                         x86_load_arg(text, ireg, sd[a->vreg]);
                     }
@@ -5538,6 +5541,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                 } else if (in_reg(a->vreg))
                     ireg++;              /* already placed by the parallel move */
+                else if (in_freg(a->vreg))
+                    /* An integer argument whose value lives in an xmm
+                     * register: its other uses are floating point, and a
+                     * call's integer argument is only a SOFT vote against
+                     * that (float_vregs) -- the merged `const 0` that is
+                     * both a char argument and the 0.0f of a subtraction.
+                     * It has no slot; its bits go across with movq/movd
+                     * (fuzz seeds 7306 and 7581). */
+                    x86_movq_gpr_xmm(text, x86_argreg(ireg++),
+                                     g_floc[a->vreg], a->size == 8 ? 8 : 4);
                 else
                     x86_load_arg(text, ireg++, sd[a->vreg]);
             }
