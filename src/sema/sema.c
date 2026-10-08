@@ -1248,6 +1248,25 @@ static int same_operand(const struct expr *a, const struct expr *b)
     }
 }
 
+/* Is const_fold's answer for e exact: every node an integer or a pointer
+ * that a long holds? A wider one -- __int128, where `(u128)0 - 1 !=
+ * W(~0, ~0)` is false -- or a floating one is folded in 64 bits or not at
+ * all, which is fine for an array bound's diagnostics and wrong for
+ * deciding which arm of an if is never generated. */
+static int fold_is_exact(const struct expr *e)
+{
+    if (!e)
+        return 1;
+    if (!e->ty || !(ty_is_integer(e->ty) || e->ty->kind == TY_PTR) ||
+        ty_size(e->ty) > 8)
+        return 0;
+    if (e->kind == EXPR_COND && !fold_is_exact(e->args[0]))
+        return 0;
+    if (e->kind == EXPR_CALL)
+        return 0;
+    return fold_is_exact(e->lhs) && fold_is_exact(e->rhs);
+}
+
 /* Do two operands name the same object, with nothing to evaluate twice: a
  * variable and member, constant-subscript and dereference chains off one. */
 static int asm_same_lvalue(const struct expr *a, const struct expr *b)
@@ -5196,7 +5215,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             }
             {
                 long cv;
-                s->cond_const = ty_is_integer(s->cond->ty) &&
+                s->cond_const = fold_is_exact(s->cond) &&
                                 const_fold(s->cond, &cv) ? (cv ? 2 : 1) : 0;
             }
             check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
