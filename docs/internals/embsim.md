@@ -31,10 +31,16 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `scs.c` | the system control space: the NVIC's and the SCB's registers |
 | `systick.c`, `dwt.c` | SysTick, DWT's cycle counter |
 | `uart-pl011.c`, `uart-cmsdk.c`, `uart-nrf51.c` | the boards' UARTs |
+| `riscv.h` | the RISC-V core's state, shared by its files |
+| `riscv.c` | the RISC-V core: memory, traps, the CSRs, the integer, atomic and compressed instructions, step, reset, its CPU interface |
+| `riscv-fpu.c` | F and D, on IEEE arithmetic of its own |
+| `clint.c` | the RISC-V core's CLINT: msip, mtimecmp, mtime |
+| `virt-rom.c`, `sifive-test.c`, `uart-16550.c` | virt's reset ROM, test device and UART |
 | `devices.h` | the create functions `boards.c` builds boards from |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
-the bench uses in QEMU, so the two estimates cannot drift.
+the bench uses in QEMU, so the two estimates cannot drift (`arm_cost`,
+`rv_cost`).
 
 ## How a run goes
 
@@ -81,6 +87,8 @@ struct cpu_ops {
     const char *(*gdb_xml)(struct cpu *c, const char *annex);
     int bp_kind;                    /* Z0's kind: the breakpoint's size */
     void (*interrupt)(struct cpu *c, int n);   /* make exception n pending */
+    int pc_regnum;                  /* the pc's GDB number: `c ADDR` sets it */
+    int elf_classes;                /* 1: ELFCLASS32, 2: ELFCLASS64, 3: both */
 };
 ```
 
@@ -89,6 +97,10 @@ pointer to its ops), so the run loop and the GDB server hold a `struct
 cpu *` and know nothing else about it. `step` counts what it runs into
 `s->insns` and `s->cycles`, writes the `--trace` line (`trace_insn`), and
 calls `sim_advance` with the instruction's cost.
+
+The loader records the image's entry point, class (`s->elf64`) and
+e_flags in `struct sim` before the core's `reset`, which is where a core
+with more than one width (RISC-V) takes its width from the image.
 
 The Cortex-M's state is `struct cm_state` (`cortexm.h`). Its files reach
 it through `cs`, which every entry point of the interface sets, so the
@@ -150,6 +162,16 @@ struct board_desc {
 to the core after loading, and is flash in the memory map the GDB server
 gives (gdb then programs it with `load`).
 
+The RISC-V core's is `struct rv_state` (`riscv.h`), reached through
+`rs` the same way. Registers hold XLEN bits (an RV32 value zero-extended
+in its u64; `rv_xl` and `rv_sx` take a value to the width, unsigned and
+signed). An instruction raises a trap with `rv_trap` and does nothing
+more: every register write (`rv_wx`) and store comes after the access
+that could fault, so there is nothing to undo. A compressed instruction
+is expanded (`rvc_expand`) to the instruction it stands for and run as
+that. A debugger's watchpoint raises `TRAP_WATCH` before the access: the
+instruction is not run and not counted, and gdb steps it.
+
 ## Adding a peripheral
 
 1. Write `tools/embsim/NAME.c`: a context struct, the `struct dev_ops`
@@ -165,11 +187,16 @@ gives (gdb then programs it with `load`).
    `boards.c`, and the file to `EMBSIM_SRCS` in the Makefile.
 4. Put it on a board: an entry in that board's `dev` list.
 
+A device that belongs to a core -- the Cortex-M's system control space
+and SysTick, the RISC-V core's CLINT -- includes the core's header and
+works on its state; its create function checks the board's core is its
+own (`riscv_is`).
+
 ## Adding a board
 
 An entry in `boards[]` in `boards.c`: the name, the core and its model,
-the NVIC's priority bits, the memory, the devices and the bit-band
-aliases. Add it to `--help`'s list in `main.c` and to the manual's table.
+the NVIC's priority bits (0 for a core without one), the memory, the
+devices and the bit-band aliases. Add it to `--help`'s list in `main.c` and to the manual's table.
 If QEMU models the board, give `tests/golden/embsim.sh` a configuration
 for it, so QEMU referees the new board on the whole exec corpus.
 
@@ -229,7 +256,12 @@ or with its own file for the six functions of `net.h`.
 - `tests/golden/embsim.sh`: the exec corpus on QEMU and EmbSim on five
   cores; output, status, and (four of them) the instruction and cycle
   counts must be the same. The exception and instruction-edge programs.
-- `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub.
+- `tests/golden/embsim-riscv.sh`: the same for the RISC-V core on virt,
+  RV32 and RV64, soft- and hard-float, 2425 programs to the instruction
+  and the cycle; `rv-isa.c`'s instruction edges against QEMU; the ends
+  of a run.
+- `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
+  the Cortex-M and on RISC-V.
 - A change that must not change behaviour (a refactor, a speed-up)
   should also compare the binary before and after on every corpus image
   and every board: stdout, stderr with `--stats`, the exit status, the

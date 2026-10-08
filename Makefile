@@ -312,7 +312,7 @@ embtrace: tools/embtrace/embtrace.c
 embrt: tools/embrt/embrt.c
 	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
 
-# embsim -- a Cortex-M simulator: runs an image on a model of the board
+# embsim -- a simulator (Cortex-M, RISC-V): runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
 # table tools/bench uses (tools/bench/cost.h). ISO C and libm; the
 # modules are tools/embsim/sim.h's (docs/internals/embsim.md). The GDB

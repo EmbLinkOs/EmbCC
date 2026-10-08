@@ -39,7 +39,7 @@ Start with the [overview](manual/overview.md) and
 | `embmap` | [Where an image's flash and RAM go: sections, regions, symbols, files, two builds](manual/tools/embmap.md) |
 | `embpack` | [A linked image as bin, Intel HEX, S-records or UF2, with a CRC and a manifest](manual/tools/embpack.md) |
 | `embrt` | [The worst-case stack of each entry point and interrupt, proved from the compiler's frames and call graph](manual/tools/embrt.md) |
-| `embsim` | [A Cortex-M simulator: run an image without a board](manual/tools/embsim.md) |
+| `embsim` | [A simulator (Cortex-M, RISC-V): run an image without a board](manual/tools/embsim.md) |
 | `embflash` | [An image put into a target through the GDB remote protocol: QEMU, OpenOCD, pyOCD, J-Link, Black Magic Probe](manual/tools/embflash.md) |
 | `embtrace` | [Function-level tracing on the target: calls, times, the call tree and a Perfetto trace, from -finstrument-functions](manual/tools/embtrace.md) |
 | `embdbg` | [The debugger](manual/tools/embdbg.md) |
