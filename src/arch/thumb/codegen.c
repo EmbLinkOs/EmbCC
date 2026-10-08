@@ -1859,6 +1859,8 @@ static void t_copy_block(struct code *t, int dst, int src, int copy, long size)
 #define T_TBH 98               /* a tbh table's halfword: cz_at holds the pc
                                 * it is relative to, the halfword becomes
                                 * (target - pc) / 2 */
+#define T_TBB 96               /* a tbb table's byte: as T_TBH, a byte
+                                * (target - pc) / 2, so 510 forward */
 #define T_LADDR 97             /* &&label: a movw/movt pair into register
                                 * `ins`, added to pc at cz_at */
 
@@ -5505,6 +5507,23 @@ static void gen_ins(struct t_fn *F, int n)
         for (int k = 0; k < n; k++)
             if (F->label_off[fn->jt[i->jt].labels[k]] >= 0)
                 ahead = 0;
+        /* ...and with byte entries, `tbb [pc, rI]`, when every case is
+         * within 510 bytes of it: half the table, which is what clang
+         * picks. A first pass that finds one further marks the switch
+         * (no_tbh 3) and is made again with tbh. */
+        if (ahead && !(F->no_tbh && F->no_tbh[n_ins] == 3)) {
+            int at = t_tbb(t, ri);
+            for (int k = 0; k < n; k++) {
+                want_label(F, t->len, fn->jt[i->jt].labels[k], T_TBB);
+                F->fix[F->nfix - 1].cz_at = at + 4;
+                F->fix[F->nfix - 1].ins = n_ins;
+                code_byte(t, 0);
+            }
+            if (n & 1)
+                code_byte(t, 0);           /* the next instruction's halfword */
+            code_mark_data(t, at + 4, t->len);
+            return;
+        }
         if (ahead) {
             int at = t_tbh(t, ri);
             for (int k = 0; k < n; k++) {
@@ -6646,6 +6665,22 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             memcpy(t->p + F.fix[i].at, pair.p, (size_t)pair.len);
             free(pair.p);
             free(pair.drange);
+        } else if (F.fix[i].cond == T_TBB) {
+            long d = (long)target - F.fix[i].cz_at;
+            if (d < 0 || d > 2L * 255 || (d & 1)) {
+                /* tbh for that switch, from a first pass made again: 4
+                 * while this pass's other entries for it land here */
+                if (pass == 0 && F.fix[i].ins >= 0 &&
+                    (F.no_tbh[F.fix[i].ins] == 0 ||
+                     F.no_tbh[F.fix[i].ins] == 4)) {
+                    F.no_tbh[F.fix[i].ins] = 4;
+                    redo0 = 1;
+                    continue;
+                }
+                internal_error("thumb: %s: a tbb entry cannot reach its "
+                               "label", fn->name);
+            }
+            t->p[F.fix[i].at] = (unsigned char)(d / 2);
         } else if (F.fix[i].cond == T_TBH) {
             long d = (long)target - F.fix[i].cz_at;
             if (d < 0 || d > 2L * 65535 || (d & 1)) {
@@ -6705,6 +6740,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         for (i = 0; i < fn->nins; i++)
             if (F.no_tbh[i] == 2)
                 F.no_tbh[i] = 1;
+            else if (F.no_tbh[i] == 4)
+                F.no_tbh[i] = 3;
         restarted = 1;
         pass = -1;
         continue;
