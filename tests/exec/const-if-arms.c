@@ -32,7 +32,7 @@ int main(void)
     T(-8 >> 1 == -4);
     T(0xffffffffffffffffUL / 3 == 0x5555555555555555UL);
     F(0xffffffffu + 1u);             /* wraps to 0 */
-    T(0xffffffffu + 1UL);            /* does not */
+    T(0xffffffffu + 1ULL);           /* does not: long long is 64 bits everywhere */
     T((long long)-1 < 1);
     F((unsigned long long)-1 < 1);
     T(sizeof(long long) == 8 && 2 > 1);
