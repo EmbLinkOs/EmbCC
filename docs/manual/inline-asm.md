@@ -405,7 +405,7 @@ label (`name:`).
 
 How a block is assembled depends on the target:
 
-- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa and AVR.** The block is read by the assembler
+- **ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore and AVR.** The block is read by the assembler
   that reads a `.s` file, so it holds the target's own instructions; see
   [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr).
 - **x86-64 and AArch64.** The block is read by a small fixed vocabulary
@@ -493,7 +493,7 @@ __asm__(".global _start\n"
 | Target | What a file-scope block may contain |
 |---|---|
 | x86-64 ELF (`x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu`) | everything above |
-| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
+| ARM Cortex-M, RISC-V, MIPS32, LoongArch64, Xtensa, TriCore, AVR | the target's instructions and the GNU assembler's directives; see [On Cortex-M, RISC-V, MIPS32 and AVR](#on-cortex-m-risc-v-mips32-and-avr) |
 | AArch64 ELF | directives and data only; an instruction is refused (below) |
 | `x86_64-apple-darwin` | a block with a label or a symbol reference is refused (below) |
 | `aarch64-apple-darwin` | directives and data only, and a block with a label or a symbol reference is refused (below) |
@@ -1939,7 +1939,8 @@ In summary, compared with GCC:
 - On x86-64, ARM Cortex-M and RISC-V, `i` and `n` give a register, not
   an immediate.
 - Labels inside a function template are supported only for the x86-64
-  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa;
+  `leaq Nf(%%rip)` form and as numeric labels (`1:`, `1b`) on Xtensa and
+  TriCore;
   elsewhere branches use numeric displacements.
 - Register variables are not supported on ARM Cortex-M and RISC-V, are
   limited to x0-x11 and x13-x15 on AArch64, and are not supported at

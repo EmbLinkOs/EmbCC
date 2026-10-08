@@ -1946,9 +1946,25 @@ core registers by name or number, `isync`, `dsync`, `syscall`,
 `swap.w`, `cmpswap.w` and the indirect jumps and calls. Constraints:
 `d`/`r` a data register, `a` an address register, `m` an address register
 holding the operand's address (written `[%0]`), `i` a constant; register
-variables bound to `d0`-`d7` or `a2`-`a7`. There is no assembler for
-`.s` files and no instructions in file-scope `asm`; naked functions are
-refused.
+variables bound to `d0`-`d7` or `a2`-`a7`.
+
+The same vocabulary has the control transfers: `j`, `jl` and `call` (+-16
+MiB), the conditional branches `jeq`, `jne`, `jlt`, `jlt.u`, `jge`,
+`jge.u` against a register or a 4-bit constant, `jz`/`jnz` (jeq/jne
+against 0), `jeq.a`, `jne.a`, `jz.a`, `jnz.a` and `loop` (+-32 KiB), each
+to `.+N`/`.-N` or, in a template, a numeric label (`1:`, `1b`, `1f`).
+`embcc -c` assembles `.s` and `.S` files, and file-scope `asm` blocks and
+`__attribute__((naked))` functions are assembled the same way, in GNU
+syntax with optional `%` on registers; there `j`/`jl`/`call sym` carry
+`R_TRICORE_24REL`, an address is `movh`/`movh.a` with `hi:sym` or
+`%hi(sym)` (`R_TRICORE_HIADJ`) and `addi` with `lo:sym` or `%lo(sym)`
+(`R_TRICORE_LO`) or `lea`, a load or a store with `[aB]lo:sym`
+(`R_TRICORE_LO2`), and `.word sym` is `R_TRICORE_32ABS`. A conditional
+branch or `loop` reaches only a label of its own section (`embld` does not
+apply `R_TRICORE_15REL`), and is refused by name with a symbol defined
+elsewhere. `tests/golden/tricore-gas.sh` runs every transfer, assembled
+from its text, through QEMU's TriCore translator (tricore-encoding.sh's
+referee), and a `.S` file with C on the board.
 
 ### Predefined macros
 
@@ -2042,8 +2058,8 @@ the entry.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target ...` |
-| `__attribute__((interrupt))`, `__attribute__((naked))` | `__attribute__((...)) is not supported: ...` |
-| `.s` and `.S` files | `no assembly-file support for tricore-none-elf yet ...` |
+| `__attribute__((interrupt))` | `__attribute__((...)) is not supported: ...` |
+| a conditional branch or `loop` to a symbol defined elsewhere (`.s`, `.S`, file-scope `asm`) | `a conditional branch or loop reaches only a label of its own section: its 15-bit displacement (R_TRICORE_15REL) is not one embld applies; branch over a j` |
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
 | any C++ translation unit | `C++ is not yet supported for tricore-none-elf: ...` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
