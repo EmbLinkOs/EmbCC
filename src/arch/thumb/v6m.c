@@ -2489,6 +2489,40 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_AND: case IR_OR: case IR_XOR: case IR_MUL: {
+        /* `if (x & BIT)`: the bit shifted to bit 31 of a scratch, `lsls
+         * r7, r0, #31-k; bmi` -- four bytes where the mask, the and and
+         * the compare were eight; `if (x & LOWMASK)` the same with Z.
+         * Only with the branch right after and nothing else reading the
+         * result (codegen.c's ARMv7-M test says why N, not Z). */
+        if (i->op == IR_AND && i->imm_b && n + 1 < fn->nins &&
+            F->usecnt && F->usecnt[i->dst] == 1 &&
+            (fn->ins[n + 1].op == IR_BRZ || fn->ins[n + 1].op == IR_BRNZ) &&
+            fn->ins[n + 1].a == i->dst && fn->ins[n + 1].w == 4) {
+            unsigned long mk = (unsigned long)i->imm & 0xffffffffUL;
+            const struct ir_ins *bx = &fn->ins[n + 1];
+            int sh = -1, onebit = 0;
+            if (mk && !(mk & (mk - 1))) {
+                for (sh = 31; !(mk >> (31 - sh) & 1); sh--)
+                    ;
+                onebit = 1;
+            } else if (mk && mk != 0xffffffffUL && !(mk & (mk + 1))) {
+                int m = 0;
+                while (mk >> m) m++;
+                sh = 32 - m;
+            }
+            if (sh >= 0) {
+                int ra = v_rdr(F, i->a, S0);
+                if (sh == 0)
+                    t1_cmp_imm(t, ra, 0);
+                else
+                    t1_shift_imm(t, T_SH_LSL, sc(F, S1), ra, sh);
+                v6_jump_if(F, onebit ? (bx->op == IR_BRZ ? T_PL : T_MI)
+                                     : (bx->op == IR_BRZ ? T_EQ : T_NE),
+                           bx->label);
+                F->skip_next = 1;
+                return;
+            }
+        }
         int ra = v_rdr(F, i->a, S0), d = v_wreg(F, i->dst, S0), rb;
         if (i->imm_b) {
             unsigned long c = (unsigned long)i->imm & 0xffffffffUL;

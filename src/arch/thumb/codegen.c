@@ -4271,7 +4271,39 @@ static void gen_ins(struct t_fn *F, int n)
             if ((bx->op == IR_BRZ || bx->op == IR_BRNZ) &&
                 bx->a == i->dst && bx->w == 4) {
                 int ra_ = rdr(F, i->a, T_ACC);
-                if (!i->imm_b) {
+                /* The low m bits, shifted to the top of a free low
+                 * register, `lsls r3, r0, #32-m`: two bytes where tst.w is
+                 * four, Z the same answer. One bit k, shifted to bit 31,
+                 * `lsls r3, r0, #31-k`: its N is the bit (Z would be bits
+                 * 0..k together), so the branch is on mi/pl. Only with the
+                 * branch right after, which takes the condition. */
+                unsigned long mk = (unsigned long)i->imm & 0xffffffffUL;
+                int sh = -1, onebit = 0;
+                if (i->imm_b && mk && !(mk & (mk - 1))) {
+                    for (sh = 31; !(mk >> (31 - sh) & 1); sh--)
+                        ;
+                    onebit = 1;
+                } else if (i->imm_b && mk && mk != 0xffffffffUL &&
+                           !(mk & (mk + 1))) {
+                    int m = 0;
+                    while (mk >> m) m++;
+                    sh = 32 - m;
+                }
+                /* (bit 31 is the sign: `cmp r0, #0`, no register; a
+                 * shift of 0 would be a move) */
+                if (sh >= 0 && k == n + 1 && ra_ < 8 &&
+                    (F->lofree || (onebit && sh == 0)) &&
+                    !t_isa_a32 && !getenv("EMBCC_T_NOLSLSTST")) {
+                    if (sh == 0)
+                        t_cmp_imm(t, ra_, 0);
+                    else
+                        t_shift_imm(t, T_SH_LSL, lo_take(F), ra_, sh, 1);
+                    jump_if(F, onebit ? (bx->op == IR_BRZ ? T_PL : T_MI)
+                                      : (bx->op == IR_BRZ ? T_EQ : T_NE),
+                            bx->label);
+                    F->skip_next = 1;
+                    return;
+                } else if (!i->imm_b) {
                     t_tst_reg(t, ra_, rdr(F, i->b, T_TMP));
                 } else if (!t_tst_imm(t, ra_, i->imm)) {
                     int sb = LO(F, T_TMP);
