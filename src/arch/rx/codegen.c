@@ -262,6 +262,7 @@ struct argplace {
     int reg, nreg;       /* first argument register index (0..3), count */
     int onstk;
     long stk;            /* its offset in the stack block */
+    int sret;            /* the C++ return slot: in r15 (place_arg) */
 };
 
 static int aggregate(const struct ir_arg *a)
@@ -269,14 +270,21 @@ static int aggregate(const struct ir_arg *a)
     return a->is_struct && !(a->ty && a->ty->is_complex);
 }
 
-static void place_arg(const struct ir_arg *a, int named, long *cum,
-                      long *stk, struct argplace *p)
+/* sret: this is the C++ indirect-result pointer (sret_first: the return
+ * slot of a class that is not trivially copyable, which the C++ lowering
+ * passes first). GCC passes it as it passes a struct's result buffer: in
+ * r15, taking no argument register or stack word. */
+static void place_arg(const struct ir_arg *a, int named, int sret,
+                      long *cum, long *stk, struct argplace *p)
 {
     long size = a->size, words = (size + 3) / 4;
     p->nreg = 0;
     p->reg = 0;
     p->onstk = 0;
     p->stk = 0;
+    p->sret = sret;
+    if (sret)
+        return;
     if (size >= 1 && named && *cum + words * 4 <= 16 &&
         !(aggregate(a) && size % 4)) {
         p->reg = (int)(*cum / 4);
@@ -323,6 +331,11 @@ static int ret_in_regs(const struct type *t, long size)
     return size >= 1 && size <= 16 && size % 4 == 0;
 }
 
+static int fn_sret_first(const struct ir_func *fn)
+{
+    return fn->src && fn->src->sret_first;
+}
+
 static int fn_sret(const struct ir_func *fn)
 {
     return fn->ret_abi.is_struct &&
@@ -340,7 +353,7 @@ static void rx_abi_hints(const struct ir_func *fn, int *hint)
     struct argplace pl;
     for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
-        place_arg(a, param_named(fn, p), &cum, &stk, &pl);
+        place_arg(a, param_named(fn, p), p == 0 && fn_sret_first(fn), &cum, &stk, &pl);
         if (pl.nreg == 1 && !a->is_struct && a->size <= 4)
             hint[p] = argreg(pl.reg);
     }
@@ -365,7 +378,7 @@ static void rx_abi_hints(const struct ir_func *fn, int *hint)
         cum = 0; stk = 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(a, call_named(i, k), &cum, &stk, &pl);
+            place_arg(a, call_named(i, k), k == 0 && i->sret_first, &cum, &stk, &pl);
             if (pl.nreg == 1 && !a->is_struct && a->size <= 4 &&
                 a->vreg >= 0 && a->vreg < fn->nvregs)
                 hint[a->vreg] = argreg(pl.reg);
@@ -379,7 +392,7 @@ static void rx_pair_hints(const struct ir_func *fn, int *hint)
     struct argplace pl;
     for (int p = 0; fn->src && p < fn->nparams && p < fn->nvregs; p++) {
         const struct ir_arg *a = &fn->param_abi[p];
-        place_arg(a, param_named(fn, p), &cum, &stk, &pl);
+        place_arg(a, param_named(fn, p), p == 0 && fn_sret_first(fn), &cum, &stk, &pl);
         if (a->size == 8 && pl.nreg == 2 && !a->is_struct &&
             (pl.reg == 0 || pl.reg == 2))
             hint[p] = argreg(pl.reg);
@@ -405,7 +418,7 @@ static void rx_pair_hints(const struct ir_func *fn, int *hint)
         cum = 0; stk = 0;
         for (int k = 0; k < i->nargs; k++) {
             const struct ir_arg *a = &i->argv[k];
-            place_arg(a, call_named(i, k), &cum, &stk, &pl);
+            place_arg(a, call_named(i, k), k == 0 && i->sret_first, &cum, &stk, &pl);
             if (a->size == 8 && pl.nreg == 2 && !a->is_struct &&
                 (pl.reg == 0 || pl.reg == 2) &&
                 a->vreg >= 0 && a->vreg < fn->nvregs)
@@ -436,7 +449,7 @@ static long outgoing_area(const struct rx_fn *F)
         if (i->op != IR_CALL)
             continue;
         for (int k = 0; k < i->nargs; k++)
-            place_arg(&i->argv[k], call_named(i, k), &cum, &stk, &pl);
+            place_arg(&i->argv[k], call_named(i, k), k == 0 && i->sret_first, &cum, &stk, &pl);
         if (stk > most)
             most = stk;
     }
@@ -504,7 +517,7 @@ static void layout(struct rx_fn *F)
     F->scratch_at = (off + 7) & ~7L;
     off = F->scratch_at + fn->scratch_bytes;
     F->sret_slot = -1;
-    if (fn_sret(fn)) {
+    if (fn_sret(fn) || fn_sret_first(fn)) {
         off = (off + 3) & ~3L;
         F->sret_slot = off;
         off += 4;
@@ -1303,7 +1316,7 @@ static void gen_call(struct rx_fn *F, int n)
     int sret = call_sret(i);
 
     for (int k = 0; k < i->nargs; k++)
-        place_arg(&i->argv[k], call_named(i, k), &cum, &stk, &pl[k]);
+        place_arg(&i->argv[k], call_named(i, k), k == 0 && i->sret_first, &cum, &stk, &pl[k]);
 
     /* The stacked arguments first, through the scratches. */
     for (int k = 0; k < i->nargs; k++) {
@@ -1377,6 +1390,8 @@ static void gen_call(struct rx_fn *F, int n)
     }
     if (sret)
         addr_sp(F, RX_R15, F->scratch_at + i->scratch);
+    else if (i->sret_first && i->nargs > 0)
+        rd(F, i->argv[0].vreg, RX_R15);       /* the C++ return slot */
 
     if (i->indirect)
         rx_jsr(t, SCR);
@@ -2318,7 +2333,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rx_sites *st,
             st_sp(&F, RX_R15, F.sret_slot, 4);
         for (i = 0; i < fn->nparams; i++) {
             struct ir_arg *a = &fn->param_abi[i];
-            place_arg(a, param_named(fn, i), &cum, &stk, &pl);
+            place_arg(a, param_named(fn, i), i == 0 && fn_sret_first(fn), &cum, &stk, &pl);
+            if (pl.sret) {
+                /* the C++ return slot: r15, kept in the sret slot */
+                if (in_reg(&F, i)) {
+                    pstk_reg[npstk] = F.loc[i];
+                    pstk_off[npstk] = F.sret_slot;
+                    pstk_size[npstk] = 4;
+                    npstk++;
+                } else if (F.slot[i] >= 0) {
+                    ld_sp(&F, SCR, F.sret_slot, 4, 1);
+                    st_sp(&F, SCR, sslot(&F, i), 4);
+                }
+                continue;
+            }
             if (!a->is_struct) {
                 int sz = a->size >= 4 ? 4 : a->size;
                 if (a->size > 4 && in_reg(&F, i)) {
