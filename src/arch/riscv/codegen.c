@@ -180,6 +180,11 @@ struct rv_fn {
      * register and an integer pair through (fsd, two lw), there being no
      * 64-bit fmv at RV32 -- clang does the same. -1 when unneeded. */
     long fx;
+    /* fx is first left out (fx_lazy) and the function emitted without
+     * it: most functions that might cross a double never do, and the
+     * slot cost them a frame. A crossing that finds none sets fx_missed,
+     * and gen_func emits the function again with it. */
+    int fx_lazy, fx_missed;
     /* Staging for a value in an fa register an x register must receive
      * at a call or in the prologue: the f registers' parallel move may
      * overwrite it before the x registers' runs, so it is stored here
@@ -1218,7 +1223,7 @@ static void layout(struct rv_fn *F)
     }
     /* RV32 with D: a double's crossing between the register files */
     F->fx = -1;
-    if (rv_needs_fx(fn)) {
+    if (rv_needs_fx(fn) && !F->fx_lazy) {
         off = (off + 7) & ~7L;
         F->fx = off;
         off += 8;
@@ -1432,8 +1437,12 @@ static void fst_sp(struct rv_fn *F, int freg, long off, int dbl)
     rv_fstore(F->t, freg, sp_addr(F, off), 0, dbl);
 }
 
-static void need_fx(const struct rv_fn *F)
+static void need_fx(struct rv_fn *F)
 {
+    if (F->fx < 0 && F->fx_lazy) {
+        F->fx_missed = 1;           /* emitted again, with it (gen_func) */
+        return;
+    }
     if (F->fx < 0)
         internal_error("riscv: %s: a double crosses between the register "
                        "files at RV32 with no transfer slot", F->fn->name);
@@ -6207,6 +6216,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
               (fn->ins[i].asm_ir->clob >> 1 & 1))) ||
             rv_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
+    /* The first attempt leaves fx out where it might not be needed
+     * (F.fx_lazy); one that needs it after all is emitted again. */
+    int fx_len0 = t->len, fx_nl0 = fn->nlines;
+    int fx_sc0 = F.st->ncall, fx_se0 = F.st->next, fx_ss0 = F.st->nstr,
+        fx_sg0 = F.st->ng, fx_sf0 = F.st->nf;
+    F.fx_lazy = rv_needs_fx(fn);
+    F.fx_missed = 0;
+  fx_again:
     layout(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -6672,6 +6689,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
     }                                   /* the passes */
     free(relax);
+    }
+    if (F.fx_lazy && F.fx_missed) {
+        t->len = fx_len0;
+        fn->nlines = fx_nl0;
+        F.st->ncall = fx_sc0; F.st->next = fx_se0; F.st->nstr = fx_ss0;
+        F.st->ng = fx_sg0; F.st->nf = fx_sf0;
+        F.nfix = 0;
+        F.skip_next = 0;
+        F.va_first = -1;
+        F.relax = NULL;
+        F.nrelax = 0;
+        free(F.slot);
+        F.slot = NULL;
+        free(F.label_off);
+        F.label_off = NULL;
+        if (want_debug) {
+            free(fn->var_off);
+            fn->var_off = NULL;
+        }
+        F.fx_lazy = 0;
+        F.fx_missed = 0;
+        goto fx_again;
     }
 
     f->code_len = t->len - f->code_off;
