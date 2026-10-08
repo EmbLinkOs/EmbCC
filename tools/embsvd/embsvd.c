@@ -35,1625 +35,17 @@
  * name rather than written approximately: a header whose offsets are
  * wrong compiles and then drives the wrong register.
  *
+ * The reading is svd.c's, which embsim shares; this file is what is
+ * written from it.
+ *
  * ISO C and standalone, like embar: no part of the compiler is needed.
  */
 #include <ctype.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static const char *g_file = "?";
-
-static void die(const char *fmt, ...)
-{
-    va_list ap;
-    fprintf(stderr, "embsvd: %s: ", g_file);
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-    fputc('\n', stderr);
-    exit(1);
-}
-
-static void *xalloc(size_t n)
-{
-    void *p = calloc(1, n ? n : 1);
-    if (!p) {
-        fprintf(stderr, "embsvd: out of memory\n");
-        exit(1);
-    }
-    return p;
-}
-
-static void *xgrow(void *p, size_t n)
-{
-    p = realloc(p, n ? n : 1);
-    if (!p) {
-        fprintf(stderr, "embsvd: out of memory\n");
-        exit(1);
-    }
-    return p;
-}
-
-static char *xdup(const char *s, size_t n)
-{
-    char *r = xalloc(n + 1);
-    memcpy(r, s, n);
-    return r;
-}
-
-/* ---- a small XML reader ---------------------------------------------
- *
- * Enough of XML for SVD: elements, attributes, text, comments,
- * processing instructions, a DOCTYPE, CDATA and the five predefined
- * entities plus numeric ones. No namespaces are interpreted (an
- * attribute's prefix stays in its name). */
-
-struct xattr { char *name, *value; };
-struct xnode {
-    char *name;
-    char *text;                 /* the text directly inside, trimmed */
-    struct xattr *attr;
-    int nattr;
-    struct xnode **kid;
-    int nkid, capkid;
-    int line;
-    const struct xnode *from;   /* derivedFrom: the element this was made from */
-    int resolving;
-};
-
-struct xp { const char *s, *p; int line; };
-
-static void xp_adv(struct xp *x, size_t n)
-{
-    while (n-- && *x->p) {
-        if (*x->p == '\n')
-            x->line++;
-        x->p++;
-    }
-}
-
-static void xp_skip_ws(struct xp *x)
-{
-    while (*x->p && isspace((unsigned char)*x->p))
-        xp_adv(x, 1);
-}
-
-/* append text [a, a+n) with entities decoded to *buf */
-static void xp_text(char **buf, size_t *len, const char *a, size_t n)
-{
-    *buf = xgrow(*buf, *len + n + 1);
-    for (size_t i = 0; i < n; i++) {
-        if (a[i] != '&') {
-            (*buf)[(*len)++] = a[i];
-            continue;
-        }
-        const char *semi = memchr(a + i, ';', n - i);
-        if (!semi) {
-            (*buf)[(*len)++] = a[i];
-            continue;
-        }
-        size_t el = (size_t)(semi - (a + i)) + 1;
-        unsigned long c = 0;
-        if (el == 5 && !strncmp(a + i, "&amp;", 5)) c = '&';
-        else if (el == 4 && !strncmp(a + i, "&lt;", 4)) c = '<';
-        else if (el == 4 && !strncmp(a + i, "&gt;", 4)) c = '>';
-        else if (el == 6 && !strncmp(a + i, "&quot;", 6)) c = '"';
-        else if (el == 6 && !strncmp(a + i, "&apos;", 6)) c = '\'';
-        else if (a[i + 1] == '#')
-            c = a[i + 2] == 'x' ? strtoul(a + i + 3, NULL, 16)
-                                : strtoul(a + i + 2, NULL, 10);
-        if (!c || c > 0x7f) {
-            /* not ASCII: kept as written, it is only ever a description */
-            (*buf)[(*len)++] = a[i];
-            continue;
-        }
-        (*buf)[(*len)++] = (char)c;
-        i += el - 1;
-    }
-    (*buf)[*len] = 0;
-}
-
-static struct xnode *xp_element(struct xp *x);
-
-static void xp_misc(struct xp *x)
-{
-    for (;;) {
-        xp_skip_ws(x);
-        if (!strncmp(x->p, "<?", 2)) {
-            const char *e = strstr(x->p, "?>");
-            if (!e) die("line %d: an unclosed <?", x->line);
-            xp_adv(x, (size_t)(e - x->p) + 2);
-        } else if (!strncmp(x->p, "<!--", 4)) {
-            const char *e = strstr(x->p, "-->");
-            if (!e) die("line %d: an unclosed comment", x->line);
-            xp_adv(x, (size_t)(e - x->p) + 3);
-        } else if (!strncmp(x->p, "<!DOCTYPE", 9)) {
-            const char *e = strchr(x->p, '>');
-            if (!e) die("line %d: an unclosed DOCTYPE", x->line);
-            xp_adv(x, (size_t)(e - x->p) + 1);
-        } else {
-            return;
-        }
-    }
-}
-
-static char *xp_name(struct xp *x)
-{
-    const char *a = x->p;
-    while (*x->p && (isalnum((unsigned char)*x->p) || strchr("_:-.", *x->p)))
-        xp_adv(x, 1);
-    if (x->p == a)
-        die("line %d: a name was expected, found '%.10s'", x->line, a);
-    return xdup(a, (size_t)(x->p - a));
-}
-
-static struct xnode *xp_element(struct xp *x)
-{
-    if (*x->p != '<')
-        die("line %d: an element was expected", x->line);
-    struct xnode *n = xalloc(sizeof *n);
-    n->line = x->line;
-    xp_adv(x, 1);
-    n->name = xp_name(x);
-    for (;;) {
-        xp_skip_ws(x);
-        if (!strncmp(x->p, "/>", 2)) {
-            xp_adv(x, 2);
-            return n;
-        }
-        if (*x->p == '>') {
-            xp_adv(x, 1);
-            break;
-        }
-        char *an = xp_name(x);
-        xp_skip_ws(x);
-        if (*x->p != '=')
-            die("line %d: attribute %s has no value", x->line, an);
-        xp_adv(x, 1);
-        xp_skip_ws(x);
-        char q = *x->p;
-        if (q != '"' && q != '\'')
-            die("line %d: attribute %s's value is not quoted", x->line, an);
-        xp_adv(x, 1);
-        const char *a = x->p;
-        while (*x->p && *x->p != q)
-            xp_adv(x, 1);
-        if (!*x->p)
-            die("line %d: attribute %s's value is not closed", x->line, an);
-        char *v = NULL;
-        size_t vl = 0;
-        xp_text(&v, &vl, a, (size_t)(x->p - a));
-        xp_adv(x, 1);
-        n->attr = xgrow(n->attr, (size_t)(n->nattr + 1) * sizeof *n->attr);
-        n->attr[n->nattr].name = an;
-        n->attr[n->nattr].value = v ? v : xdup("", 0);
-        n->nattr++;
-    }
-    char *text = NULL;
-    size_t tl = 0;
-    for (;;) {
-        if (!*x->p)
-            die("line %d: <%s> is not closed", n->line, n->name);
-        if (!strncmp(x->p, "</", 2)) {
-            xp_adv(x, 2);
-            char *cn = xp_name(x);
-            if (strcmp(cn, n->name))
-                die("line %d: </%s> closes <%s> of line %d", x->line, cn,
-                    n->name, n->line);
-            free(cn);
-            xp_skip_ws(x);
-            if (*x->p != '>')
-                die("line %d: '>' was expected", x->line);
-            xp_adv(x, 1);
-            break;
-        }
-        if (!strncmp(x->p, "<!--", 4)) {
-            const char *e = strstr(x->p, "-->");
-            if (!e) die("line %d: an unclosed comment", x->line);
-            xp_adv(x, (size_t)(e - x->p) + 3);
-        } else if (!strncmp(x->p, "<![CDATA[", 9)) {
-            const char *e = strstr(x->p, "]]>");
-            if (!e) die("line %d: an unclosed CDATA", x->line);
-            text = xgrow(text, tl + (size_t)(e - x->p) + 1);
-            memcpy(text + tl, x->p + 9, (size_t)(e - x->p) - 9);
-            tl += (size_t)(e - x->p) - 9;
-            text[tl] = 0;
-            xp_adv(x, (size_t)(e - x->p) + 3);
-        } else if (!strncmp(x->p, "<?", 2)) {
-            const char *e = strstr(x->p, "?>");
-            if (!e) die("line %d: an unclosed <?", x->line);
-            xp_adv(x, (size_t)(e - x->p) + 2);
-        } else if (*x->p == '<') {
-            struct xnode *k = xp_element(x);
-            if (n->nkid == n->capkid) {
-                n->capkid = n->capkid ? 2 * n->capkid : 4;
-                n->kid = xgrow(n->kid, (size_t)n->capkid * sizeof *n->kid);
-            }
-            n->kid[n->nkid++] = k;
-        } else {
-            const char *a = x->p;
-            while (*x->p && *x->p != '<')
-                xp_adv(x, 1);
-            xp_text(&text, &tl, a, (size_t)(x->p - a));
-        }
-    }
-    /* trimmed, and runs of white space made one: SVD descriptions are
-     * wrapped at whatever column the vendor's tool chose */
-    if (text) {
-        size_t o = 0;
-        int sp = 0;
-        for (size_t i = 0; i < tl; i++) {
-            if (isspace((unsigned char)text[i])) {
-                sp = o > 0;
-                continue;
-            }
-            if (sp)
-                text[o++] = ' ';
-            sp = 0;
-            text[o++] = text[i];
-        }
-        text[o] = 0;
-    }
-    n->text = text;
-    return n;
-}
-
-static struct xnode *xml_parse(const char *s)
-{
-    struct xp x = { s, s, 1 };
-    xp_misc(&x);
-    struct xnode *root = xp_element(&x);
-    xp_misc(&x);
-    xp_skip_ws(&x);
-    if (*x.p)
-        die("line %d: text after the document's end", x.line);
-    return root;
-}
-
-static struct xnode *kid(const struct xnode *n, const char *name)
-{
-    for (int i = 0; n && i < n->nkid; i++)
-        if (!strcmp(n->kid[i]->name, name))
-            return n->kid[i];
-    return NULL;
-}
-
-static const char *kidtext(const struct xnode *n, const char *name)
-{
-    const struct xnode *k = kid(n, name);
-    return k && k->text ? k->text : NULL;
-}
-
-static const char *attr(const struct xnode *n, const char *name)
-{
-    for (int i = 0; n && i < n->nattr; i++)
-        if (!strcmp(n->attr[i].name, name))
-            return n->attr[i].value;
-    return NULL;
-}
-
-/* SVD's scaledNonNegativeInteger: decimal, 0x hex, #binary, with an
- * optional k/M/G multiplier */
-static unsigned long long svd_num(const char *s, const char *what, int line)
-{
-    if (!s)
-        die("line %d: %s is missing", line, what);
-    while (isspace((unsigned char)*s))
-        s++;
-    unsigned long long v = 0;
-    char *e;
-    if (*s == '#') {
-        for (s++; *s == '0' || *s == '1'; s++)
-            v = v * 2 + (unsigned)(*s - '0');
-        e = (char *)s;
-    } else {
-        v = strtoull(s, &e, (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
-                                 ? 16 : 10);
-        if (e == s)
-            die("line %d: %s '%s' is not a number", line, what, s);
-    }
-    switch (*e) {
-    case 'k': case 'K': v <<= 10; e++; break;
-    case 'm': case 'M': v <<= 20; e++; break;
-    case 'g': case 'G': v <<= 30; e++; break;
-    default: break;
-    }
-    while (isspace((unsigned char)*e))
-        e++;
-    if (*e)
-        die("line %d: %s '%s' is not a number", line, what, s);
-    return v;
-}
-
-/* ---- derivedFrom, resolved in the XML ---------------------------------
- *
- * A register, cluster, field or enumeratedValues derivedFrom another is
- * that element with what the derived one says written over it: element by
- * element, the derived one's children replace the base's of the same
- * name, and the rest are inherited. It is done on the XML, before
- * anything is read, so the reader below never sees a derivedFrom except a
- * peripheral's (which shares the base's struct, below). */
-
-static struct xnode *g_periphs;         /* <peripherals> */
-
-static void xadd(struct xnode *n, struct xnode *k)
-{
-    if (n->nkid == n->capkid) {
-        n->capkid = n->capkid ? 2 * n->capkid : 4;
-        n->kid = xgrow(n->kid, (size_t)n->capkid * sizeof *n->kid);
-    }
-    n->kid[n->nkid++] = k;
-}
-
-/* NAME with [%s] or %s taken out: what a derivedFrom path calls it */
-static char *plain_name(const char *s)
-{
-    char *o = xalloc(strlen(s) + 1);
-    size_t n = 0;
-    for (; *s; s++) {
-        if (!strncmp(s, "[%s]", 4)) {
-            s += 3;
-            continue;
-        }
-        if (!strncmp(s, "%s", 2)) {
-            s++;
-            continue;
-        }
-        o[n++] = *s;
-    }
-    o[n] = 0;
-    return o;
-}
-
-static int name_is(const struct xnode *n, const char *want, size_t wl)
-{
-    const char *nm = kidtext(n, "name");
-    if (!nm)
-        return 0;
-    if (strlen(nm) == wl && !strncmp(nm, want, wl))
-        return 1;
-    char *p = plain_name(nm);
-    int r = strlen(p) == wl && !strncmp(p, want, wl);
-    free(p);
-    return r;
-}
-
-static int is_dim_elem(const char *e)
-{
-    return !strcmp(e, "dim") || !strcmp(e, "dimIncrement") ||
-           !strcmp(e, "dimIndex") || !strcmp(e, "dimName") ||
-           !strcmp(e, "dimArrayIndex");
-}
-
-static int is_bit_elem(const char *e)
-{
-    return !strcmp(e, "bitOffset") || !strcmp(e, "bitWidth") ||
-           !strcmp(e, "lsb") || !strcmp(e, "msb") || !strcmp(e, "bitRange");
-}
-
-/* a field's bit position, as far as f says it: 1 the lsb, 2 the width */
-static int field_bits(const struct xnode *f, long *lsb, long *width)
-{
-    int got = 0;
-    unsigned msb, l;
-    if (kidtext(f, "bitRange")) {
-        if (sscanf(kidtext(f, "bitRange"), " [%u:%u]", &msb, &l) != 2)
-            die("line %d: bitRange '%s'", f->line, kidtext(f, "bitRange"));
-        *lsb = (long)l;
-        *width = (long)msb - (long)l + 1;
-        return 3;
-    }
-    if (kidtext(f, "lsb") && kidtext(f, "msb")) {
-        *lsb = (long)svd_num(kidtext(f, "lsb"), "lsb", f->line);
-        *width = (long)svd_num(kidtext(f, "msb"), "msb", f->line) - *lsb + 1;
-        return 3;
-    }
-    if (kidtext(f, "bitOffset")) {
-        *lsb = (long)svd_num(kidtext(f, "bitOffset"), "bitOffset", f->line);
-        got |= 1;
-    }
-    if (kidtext(f, "bitWidth")) {
-        *width = (long)svd_num(kidtext(f, "bitWidth"), "bitWidth", f->line);
-        got |= 2;
-    }
-    return got;
-}
-
-static struct xnode *xleaf(const char *name, long v, int line)
-{
-    struct xnode *n = xalloc(sizeof *n);
-    char b[24];
-    n->name = (char *)name;
-    snprintf(b, sizeof b, "%ld", v);
-    n->text = xdup(b, strlen(b));
-    n->line = line;
-    return n;
-}
-
-static struct xnode *merge(const struct xnode *base, const struct xnode *d)
-{
-    struct xnode *n = xalloc(sizeof *n);
-    n->name = d->name;
-    n->text = d->text;
-    n->line = d->line;
-    n->from = base;
-    for (int i = 0; i < d->nattr; i++)
-        if (strcmp(d->attr[i].name, "derivedFrom")) {
-            n->attr = xgrow(n->attr, (size_t)(n->nattr + 1) * sizeof *n->attr);
-            n->attr[n->nattr++] = d->attr[i];
-        }
-    /* an array's dim comes with it only if the new name still has a %s
-     * for it: TimerCtrl1 derivedFrom an array is one register */
-    const char *dn = kidtext(d, "name");
-    int keepdim = dn && strstr(dn, "%s");
-    /* a field's position is one thing written three ways: a derived
-     * field that moves it keeps the base's width unless it says one */
-    long lsb = 0, width = 1, dl = 0, dw = 1;
-    int bits = !strcmp(d->name, "field") ? field_bits(d, &dl, &dw) : 0;
-    if (bits) {
-        field_bits(base, &lsb, &width);
-        xadd(n, xleaf("bitOffset", bits & 1 ? dl : lsb, d->line));
-        xadd(n, xleaf("bitWidth", bits & 2 ? dw : width, d->line));
-    }
-    for (int i = 0; i < base->nkid; i++) {
-        struct xnode *k = base->kid[i];
-        if (!keepdim && is_dim_elem(k->name))
-            continue;
-        if (bits && is_bit_elem(k->name))
-            continue;
-        if (strcmp(k->name, "enumeratedValue") && kid(d, k->name))
-            continue;
-        xadd(n, k);
-    }
-    for (int i = 0; i < d->nkid; i++)
-        if (!bits || !is_bit_elem(d->kid[i]->name))
-            xadd(n, d->kid[i]);
-    return n;
-}
-
-static struct xnode *find_periph(const char *s, size_t l)
-{
-    for (int i = 0; i < g_periphs->nkid; i++)
-        if (!strcmp(g_periphs->kid[i]->name, "peripheral") &&
-            name_is(g_periphs->kid[i], s, l))
-            return g_periphs->kid[i];
-    return NULL;
-}
-
-static int find_kid(const struct xnode *c, const char *tag, const char *s,
-                    size_t l)
-{
-    for (int i = 0; c && i < c->nkid; i++)
-        if (!strcmp(c->kid[i]->name, tag) && name_is(c->kid[i], s, l))
-            return i;
-    return -1;
-}
-
-static struct xnode *resolve_at(struct xnode *c, int i, int depth);
-
-/* the element a derivedFrom names: in the same scope by its name, or by
- * the full path PERIPHERAL.CLUSTER...NAME */
-static struct xnode *lookup(struct xnode *c, const char *tag,
-                            const char *path, int line, int depth)
-{
-    const char *dot = strchr(path, '.');
-    if (!dot) {
-        int i = find_kid(c, tag, path, strlen(path));
-        if (i < 0)
-            die("line %d: derivedFrom=\"%s\": there is no %s %s beside it "
-                "(another scope is named PERIPHERAL.%s)", line, path, tag,
-                path, path);
-        return resolve_at(c, i, depth + 1);
-    }
-    struct xnode *p = find_periph(path, (size_t)(dot - path));
-    if (!p)
-        die("line %d: derivedFrom=\"%s\": there is no peripheral %.*s", line,
-            path, (int)(dot - path), path);
-    for (int hops = 0; !kid(p, "registers") && attr(p, "derivedFrom"); hops++) {
-        const char *b = attr(p, "derivedFrom");
-        if (hops > 64 || !(p = find_periph(b, strlen(b))))
-            die("line %d: derivedFrom=\"%s\": the peripheral's registers "
-                "cannot be found", line, path);
-    }
-    c = kid(p, "registers");
-    for (const char *s = dot + 1;; s = dot + 1) {
-        dot = strchr(s, '.');
-        size_t l = dot ? (size_t)(dot - s) : strlen(s);
-        int i;
-        if (!dot) {
-            i = find_kid(c, tag, s, l);
-            if (i < 0)
-                die("line %d: derivedFrom=\"%s\": there is no %s %.*s there",
-                    line, path, tag, (int)l, s);
-            return resolve_at(c, i, depth + 1);
-        }
-        if ((i = find_kid(c, "cluster", s, l)) >= 0) {
-            c = resolve_at(c, i, depth + 1);
-        } else if (!strcmp(tag, "field") &&
-                   (i = find_kid(c, "register", s, l)) >= 0) {
-            c = kid(resolve_at(c, i, depth + 1), "fields");
-        } else {
-            die("line %d: derivedFrom=\"%s\": there is no cluster %.*s there",
-                line, path, (int)l, s);
-        }
-    }
-}
-
-/* c->kid[i], with its derivedFrom resolved and written back */
-static struct xnode *resolve_at(struct xnode *c, int i, int depth)
-{
-    struct xnode *n = c->kid[i];
-    const char *df = attr(n, "derivedFrom");
-    if (!df)
-        return n;
-    const char *nm = kidtext(n, "name");
-    if (n->resolving || depth > 64)
-        die("line %d: %s %s: derivedFrom goes round in a circle", n->line,
-            n->name, nm ? nm : "?");
-    if (!strcmp(n->name, "cluster") && (kid(n, "register") || kid(n, "cluster")))
-        die("line %d: cluster %s is derivedFrom %s and has registers of its "
-            "own; merging the two is not supported yet", n->line,
-            nm ? nm : "?", df);
-    n->resolving = 1;
-    struct xnode *b = lookup(c, n->name, df, n->line, depth);
-    n->resolving = 0;
-    struct xnode *m = merge(b, n);
-    c->kid[i] = m;
-    return m;
-}
-
-/* an enumeratedValues derivedFrom another is found by its name (the last
- * part of a path), in the same peripheral first, then anywhere */
-static struct xnode *find_enums(struct xnode *n, const char *name, size_t l,
-                                const struct xnode *self)
-{
-    if (!strcmp(n->name, "enumeratedValues") && n != self && name_is(n, name, l))
-        return n;
-    for (int i = 0; i < n->nkid; i++) {
-        struct xnode *r = find_enums(n->kid[i], name, l, self);
-        if (r)
-            return r;
-    }
-    return NULL;
-}
-
-static void resolve_enums(struct xnode *f, struct xnode *periph, int depth)
-{
-    for (int i = 0; i < f->nkid; i++) {
-        struct xnode *e = f->kid[i];
-        const char *df = attr(e, "derivedFrom");
-        if (strcmp(e->name, "enumeratedValues") || !df)
-            continue;
-        if (depth > 64)
-            die("line %d: enumeratedValues derivedFrom goes round in a circle",
-                e->line);
-        const char *last = strrchr(df, '.');
-        last = last ? last + 1 : df;
-        struct xnode *b = find_enums(periph, last, strlen(last), e);
-        if (!b)
-            b = find_enums(g_periphs, last, strlen(last), e);
-        if (!b)
-            die("line %d: enumeratedValues derivedFrom=\"%s\": there are none "
-                "of that name", e->line, df);
-        if (attr(b, "derivedFrom")) {
-            struct xnode tmp;
-            memset(&tmp, 0, sizeof tmp);
-            tmp.name = "field";
-            tmp.kid = &b;
-            tmp.nkid = tmp.capkid = 1;
-            resolve_enums(&tmp, periph, depth + 1);
-            b = tmp.kid[0];
-        }
-        f->kid[i] = merge(b, e);
-    }
-}
-
-static void resolve_walk(struct xnode *c, struct xnode *periph, int depth)
-{
-    if (depth > 32)
-        die("line %d: clusters nested more than 32 deep", c->line);
-    for (int i = 0; i < c->nkid; i++) {
-        const char *t = c->kid[i]->name;
-        if (strcmp(t, "register") && strcmp(t, "cluster"))
-            continue;
-        struct xnode *k = resolve_at(c, i, 0);
-        if (!strcmp(t, "cluster")) {
-            resolve_walk(k, periph, depth + 1);
-            continue;
-        }
-        struct xnode *fs = kid(k, "fields");
-        for (int j = 0; fs && j < fs->nkid; j++)
-            if (!strcmp(fs->kid[j]->name, "field"))
-                resolve_enums(resolve_at(fs, j, 0), periph, 0);
-    }
-}
-
-/* ---- the device ------------------------------------------------------ */
-
-struct props {                  /* what a register inherits */
-    int size;
-    const char *acc;
-    unsigned long long reset, rmask;
-    int rmask_set;
-};
-struct enumval {
-    const char *name, *desc, *usage;
-    unsigned long long value, care;   /* care: the bits that are not x */
-    int isdef;
-};
-struct field {
-    const char *name, *desc, *acc;
-    int lsb, width;
-    struct enumval *ev;
-    int nev;
-};
-/* a register or a cluster, as the SVD describes it: an array is one node */
-struct node {
-    int cluster;
-    const char *name;           /* as written: may hold %s or [%s] */
-    const char *desc, *alt;
-    unsigned long long off;     /* from the enclosing cluster or peripheral */
-    int dim;                    /* elements, or 0 when it is not an array */
-    unsigned long long inc;
-    char **idx;                 /* each element's dimIndex name */
-    int bracket;                /* NAME[%s] */
-    int line;
-    /* a register */
-    int size, access;           /* bits; 0 rw, 1 read-only, 2 write-only */
-    const char *acc;
-    unsigned long long reset, rmask;
-    struct field *f;
-    int nf;
-    /* a cluster */
-    struct node *kid;
-    int nkid;
-    struct node *type;          /* whose struct it is: its own, or shared */
-    char *tname;                /* that struct's name, less _Type */
-    const struct xnode *key;    /* where its registers were read from */
-    struct props pr;
-    unsigned long long tsize, tend;
-    unsigned talign;
-    int sized, locked, emitted;
-};
-struct irq { const char *name, *desc; int value; };
-struct ablock { unsigned long long off, size; const char *usage; };
-struct periph {
-    const char *name, *desc, *group, *derived;
-    char *tname;                /* its struct's name, less _Type */
-    unsigned long long base;
-    struct node *kid;
-    int nkid;
-    struct periph *layout;      /* whose registers these are */
-    struct xnode *node;
-    struct ablock *ab;
-    int nab;
-    struct irq *irq;            /* its own interrupts */
-    int nirq;
-};
-struct device {
-    const char *name, *vendor, *version, *desc, *prefix;
-    const char *cpu, *cpurev, *endian;
-    int aub, width, has_cpu, prio_bits, fpu, fpu_dp, mpu, vendor_systick;
-    int num_irq;
-    struct periph *p;
-    int np;
-    struct irq *irq;
-    int nirq;
-};
-
-static struct node **g_types;   /* every cluster struct, to share and to name */
-static int g_ntypes;
-
-static const char *const access_names[] = {
-    "read-write", "read-only", "write-only", "writeOnce", "read-writeOnce",
-};
-
-/* an SVD access type, in its schema spelling (Nordic writes
- * read-writeonce), or die */
-static const char *access_canon(const char *a, int line)
-{
-    for (size_t i = 0; i < sizeof access_names / sizeof access_names[0]; i++) {
-        const char *s = access_names[i], *t = a;
-        while (*s && tolower((unsigned char)*s) == tolower((unsigned char)*t))
-            s++, t++;
-        if (!*s && !*t)
-            return access_names[i];
-    }
-    die("line %d: access '%s' is not an SVD access type", line, a);
-    return NULL;
-}
-
-/* 0 read-write, 1 read-only, 2 write-only (and writeOnce) */
-static int access_of(const char *canon)
-{
-    return !strcmp(canon, "read-only") ? 1
-         : !strcmp(canon, "write-only") || !strcmp(canon, "writeOnce") ? 2 : 0;
-}
-
-static int svd_bool(const char *s)
-{
-    return s && (!strcmp(s, "true") || !strcmp(s, "1"));
-}
-
-static struct props props_in(const struct xnode *n, struct props p)
-{
-    if (kidtext(n, "size"))
-        p.size = (int)svd_num(kidtext(n, "size"), "size", n->line);
-    if (kidtext(n, "access")) {
-        p.acc = access_canon(kidtext(n, "access"), n->line);
-    }
-    if (kidtext(n, "resetValue"))
-        p.reset = svd_num(kidtext(n, "resetValue"), "resetValue", n->line);
-    if (kidtext(n, "resetMask")) {
-        p.rmask = svd_num(kidtext(n, "resetMask"), "resetMask", n->line);
-        p.rmask_set = 1;
-    }
-    return p;
-}
-
-/* NAME%s with "with" for the %s; strip makes NAME[%s] NAMEwith */
-static char *subst(const char *name, const char *with, int strip)
-{
-    const char *pct = strstr(name, "%s");
-    size_t pre = (size_t)(pct - name), post = 2;
-    if (strip && pct > name && pct[-1] == '[' && pct[2] == ']') {
-        pre--;
-        post++;
-    }
-    char *o = xalloc(strlen(name) + strlen(with) + 1);
-    memcpy(o, name, pre);
-    strcpy(o + pre, with);
-    strcat(o, pct + post);
-    return o;
-}
-
-/* the names dimIndex gives the elements: A,B,C or 0-7 or A-D, else 0..n-1 */
-static char **dim_names(const char *t, int n, int line)
-{
-    char **v = xalloc((size_t)n * sizeof *v);
-    if (!t) {
-        for (int k = 0; k < n; k++) {
-            char b[24];
-            snprintf(b, sizeof b, "%d", k);
-            v[k] = xdup(b, strlen(b));
-        }
-        return v;
-    }
-    int lo, hi;
-    char c1, c2;
-    if (strchr(t, ',')) {
-        const char *q = t;
-        for (int k = 0; k < n; k++) {
-            if (!q)
-                die("line %d: dimIndex '%s' names fewer than %d", line, t, n);
-            while (isspace((unsigned char)*q))
-                q++;
-            size_t l = strcspn(q, ",");
-            while (l && isspace((unsigned char)q[l - 1]))
-                l--;
-            v[k] = xdup(q, l);
-            q = strchr(q, ',');
-            if (q)
-                q++;
-        }
-        if (q)
-            die("line %d: dimIndex '%s' names more than %d", line, t, n);
-    } else if (sscanf(t, "%d-%d", &lo, &hi) == 2) {
-        if (hi - lo + 1 != n)
-            die("line %d: dimIndex '%s' names %d, dim is %d", line, t,
-                hi - lo + 1, n);
-        for (int k = 0; k < n; k++) {
-            char b[24];
-            snprintf(b, sizeof b, "%d", lo + k);
-            v[k] = xdup(b, strlen(b));
-        }
-    } else if (sscanf(t, " %c-%c", &c1, &c2) == 2 &&
-               isalpha((unsigned char)c1) && isalpha((unsigned char)c2)) {
-        if (c2 - c1 + 1 != n)
-            die("line %d: dimIndex '%s' names %d, dim is %d", line, t,
-                c2 - c1 + 1, n);
-        for (int k = 0; k < n; k++) {
-            char b[2] = { (char)(c1 + k), 0 };
-            v[k] = xdup(b, 1);
-        }
-    } else if (n == 1 && !strchr(t, '-')) {
-        v[0] = xdup(t, strlen(t));
-    } else {
-        die("line %d: dimIndex '%s' is not a list, nor a range like 0-7 or "
-            "A-D", line, t);
-    }
-    return v;
-}
-
-/* dim, dimIncrement and dimIndex of a register, cluster or peripheral */
-static void read_dim(const struct xnode *x, const char *what, const char *name,
-                     int *dim, unsigned long long *inc, int *bracket,
-                     char ***idx)
-{
-    const char *d = kidtext(x, "dim");
-    const char *pct = strstr(name, "%s");
-    *dim = 0;
-    *bracket = 0;
-    if (!d) {
-        if (pct)
-            die("line %d: %s %s has a %%s in its name but no <dim>", x->line,
-                what, name);
-        return;
-    }
-    unsigned long long n = svd_num(d, "dim", x->line);
-    if (n < 1 || n > 65536)
-        die("line %d: %s %s: dim %llu", x->line, what, name, n);
-    *dim = (int)n;
-    *inc = svd_num(kidtext(x, "dimIncrement"), "dimIncrement", x->line);
-    if (!pct)
-        die("line %d: %s array %s has no %%s in its name", x->line, what, name);
-    if (strstr(pct + 2, "%s"))
-        die("line %d: %s %s has two %%s in its name", x->line, what, name);
-    *bracket = pct > name && pct[-1] == '[' && pct[2] == ']';
-    if (*bracket && pct[3])
-        die("line %d: %s %s: [%%s] is only understood at the end of a name",
-            x->line, what, name);
-    *idx = dim_names(kidtext(x, "dimIndex"), *dim, x->line);
-}
-
-/* an enumeratedValue's value: a number, or #binary with x for "any" */
-static void enum_value(struct enumval *e, const char *s, int line)
-{
-    while (isspace((unsigned char)*s) || *s == '+')
-        s++;
-    int bin = *s == '#' || (s[0] == '0' && (s[1] == 'b' || s[1] == 'B'));
-    if (!bin) {
-        e->value = svd_num(s, "enumeratedValue value", line);
-        e->care = ~0ULL;
-        return;
-    }
-    s += *s == '#' ? 1 : 2;
-    e->value = 0;
-    e->care = 0;
-    int n = 0;
-    for (; *s && !isspace((unsigned char)*s); s++, n++) {
-        e->value <<= 1;
-        e->care <<= 1;
-        if (*s == '1' || *s == '0') {
-            e->value |= (unsigned)(*s - '0');
-            e->care |= 1;
-        } else if (*s != 'x' && *s != 'X') {
-            die("line %d: enumeratedValue value: '%c' is not 0, 1 or x", line,
-                *s);
-        }
-    }
-    if (!n)
-        die("line %d: an enumeratedValue value with no digits", line);
-    if (n < 64)
-        e->care |= ~0ULL << n;
-}
-
-static void add_field(struct node *r, struct field *fd, int line)
-{
-    if (fd->width < 1 || fd->lsb < 0 || fd->lsb + fd->width > r->size)
-        die("line %d: field %s.%s, bits %d..%d, is outside the %d-bit "
-            "register", line, r->name, fd->name, fd->lsb,
-            fd->lsb + fd->width - 1, r->size);
-    r->f = xgrow(r->f, (size_t)(r->nf + 1) * sizeof *r->f);
-    r->f[r->nf++] = *fd;
-}
-
-/* The fields of <register>, by bitOffset/bitWidth, lsb/msb or
- * bitRange [msb:lsb]; a dim array of them is expanded. */
-static void read_fields(struct node *r, const struct xnode *rn)
-{
-    const struct xnode *fs = kid(rn, "fields");
-    for (int i = 0; fs && i < fs->nkid; i++) {
-        const struct xnode *f = fs->kid[i];
-        if (strcmp(f->name, "field"))
-            continue;
-        struct field fd;
-        memset(&fd, 0, sizeof fd);
-        fd.name = kidtext(f, "name");
-        fd.desc = kidtext(f, "description");
-        if (!fd.name)
-            die("line %d: a field without a name", f->line);
-        fd.acc = kidtext(f, "access") ? access_canon(kidtext(f, "access"),
-                                                     f->line) : r->acc;
-        if (kidtext(f, "bitOffset")) {
-            fd.lsb = (int)svd_num(kidtext(f, "bitOffset"), "bitOffset", f->line);
-            fd.width = kidtext(f, "bitWidth")
-                ? (int)svd_num(kidtext(f, "bitWidth"), "bitWidth", f->line) : 1;
-        } else if (kidtext(f, "lsb")) {
-            fd.lsb = (int)svd_num(kidtext(f, "lsb"), "lsb", f->line);
-            fd.width = (int)svd_num(kidtext(f, "msb"), "msb", f->line) - fd.lsb + 1;
-        } else if (kidtext(f, "bitRange")) {
-            unsigned msb, lsb;
-            if (sscanf(kidtext(f, "bitRange"), " [%u:%u]", &msb, &lsb) != 2)
-                die("line %d: bitRange '%s'", f->line, kidtext(f, "bitRange"));
-            fd.lsb = (int)lsb;
-            fd.width = (int)msb - (int)lsb + 1;
-        } else {
-            die("line %d: field %s has no bit position", f->line, fd.name);
-        }
-        for (int k = 0; k < f->nkid; k++) {
-            const struct xnode *ev = f->kid[k];
-            if (strcmp(ev->name, "enumeratedValues"))
-                continue;
-            const char *usage = kidtext(ev, "usage");
-            for (int m = 0; m < ev->nkid; m++) {
-                const struct xnode *v = ev->kid[m];
-                if (strcmp(v->name, "enumeratedValue"))
-                    continue;
-                struct enumval e;
-                memset(&e, 0, sizeof e);
-                e.name = kidtext(v, "name");
-                e.desc = kidtext(v, "description");
-                e.usage = usage ? usage : "read-write";
-                e.isdef = svd_bool(kidtext(v, "isDefault"));
-                if (!e.name)
-                    die("line %d: an enumeratedValue without a name", v->line);
-                if (kidtext(v, "value"))
-                    enum_value(&e, kidtext(v, "value"), v->line);
-                else if (!e.isdef)
-                    die("line %d: enumeratedValue %s has no value", v->line,
-                        e.name);
-                fd.ev = xgrow(fd.ev, (size_t)(fd.nev + 1) * sizeof *fd.ev);
-                fd.ev[fd.nev++] = e;
-            }
-        }
-        int dim, bracket;
-        unsigned long long inc = 0;
-        char **idx = NULL;
-        read_dim(f, "field", fd.name, &dim, &inc, &bracket, &idx);
-        if (!dim) {
-            add_field(r, &fd, f->line);
-            continue;
-        }
-        for (int k = 0; k < dim; k++) {
-            struct field c = fd;
-            c.name = subst(fd.name, idx[k], 1);
-            c.lsb = fd.lsb + k * (int)inc;
-            add_field(r, &c, f->line);
-        }
-    }
-}
-
-static void read_nodes(struct node **kids, int *nkid, const struct xnode *c,
-                       struct props pr, const char *tbase, int depth);
-
-static void read_register(struct node *r, const struct xnode *x,
-                          struct props pr)
-{
-    r->line = x->line;
-    r->name = kidtext(x, "name");
-    if (!r->name)
-        die("line %d: a register without a name", x->line);
-    r->desc = kidtext(x, "description");
-    r->off = svd_num(kidtext(x, "addressOffset"), "addressOffset", x->line);
-    pr = props_in(x, pr);
-    r->size = pr.size;
-    if (r->size != 8 && r->size != 16 && r->size != 32 && r->size != 64)
-        die("line %d: register %s is %d bits wide", x->line, r->name, r->size);
-    r->acc = pr.acc ? pr.acc : "read-write";
-    r->access = access_of(r->acc);
-    r->reset = pr.reset;
-    r->rmask = pr.rmask_set ? pr.rmask
-             : r->size == 64 ? ~0ULL : (1ULL << r->size) - 1;
-    r->alt = kidtext(x, "alternateRegister");
-    if (!r->alt)
-        r->alt = kidtext(x, "alternateGroup");
-    read_dim(x, "register", r->name, &r->dim, &r->inc, &r->bracket, &r->idx);
-    read_fields(r, x);
-}
-
-/* what a derived element's registers were copied from */
-static const struct xnode *content_key(const struct xnode *x)
-{
-    while (x->from)
-        x = x->from;
-    return x;
-}
-
-static int props_eq(const struct props *a, const struct props *b)
-{
-    return a->size == b->size && a->reset == b->reset &&
-           a->rmask_set == b->rmask_set && a->rmask == b->rmask &&
-           (a->acc == b->acc || (a->acc && b->acc && !strcmp(a->acc, b->acc)));
-}
-
-static void read_cluster(struct node *c, const struct xnode *x,
-                         struct props pr, const char *pbase, int depth)
-{
-    c->cluster = 1;
-    c->line = x->line;
-    c->name = kidtext(x, "name");
-    if (!c->name)
-        die("line %d: a cluster without a name", x->line);
-    c->desc = kidtext(x, "description");
-    c->off = svd_num(kidtext(x, "addressOffset"), "addressOffset", x->line);
-    c->alt = kidtext(x, "alternateCluster");
-    read_dim(x, "cluster", c->name, &c->dim, &c->inc, &c->bracket, &c->idx);
-    pr = props_in(x, pr);
-    /* its struct: headerStructName, else dimName, else the enclosing
-     * struct's name and its own, as svdconv names it */
-    const char *h = kidtext(x, "headerStructName");
-    if (!h)
-        h = kidtext(x, "dimName");
-    char *pn = plain_name(c->name);
-    if (h) {
-        c->tname = xdup(h, strlen(h));
-    } else {
-        size_t tl = strlen(pbase) + strlen(pn) + 2;
-        c->tname = xalloc(tl);
-        snprintf(c->tname, tl, "%s_%s", pbase, pn);
-    }
-    free(pn);
-    for (char *q = c->tname; *q; q++)
-        if (!isalnum((unsigned char)*q))
-            *q = '_';
-    /* a cluster derivedFrom another, with the same registers read the same
-     * way, is the same struct */
-    c->key = content_key(x);
-    c->pr = pr;
-    for (int i = 0; i < g_ntypes; i++)
-        if (g_types[i]->key == c->key && props_eq(&g_types[i]->pr, &pr)) {
-            c->type = g_types[i];
-            return;
-        }
-    for (int i = 0; i < g_ntypes; i++)
-        if (!strcmp(g_types[i]->tname, c->tname))
-            die("line %d: cluster %s and the one at line %d would both be "
-                "struct %s_Type, with different registers", x->line, c->name,
-                g_types[i]->line, c->tname);
-    c->type = c;
-    g_types = xgrow(g_types, (size_t)(g_ntypes + 1) * sizeof *g_types);
-    g_types[g_ntypes++] = c;
-    read_nodes(&c->kid, &c->nkid, x, pr, c->tname, depth + 1);
-}
-
-static void read_nodes(struct node **kids, int *nkid, const struct xnode *c,
-                       struct props pr, const char *tbase, int depth)
-{
-    int n = 0;
-    for (int i = 0; i < c->nkid; i++)
-        if (!strcmp(c->kid[i]->name, "register") ||
-            !strcmp(c->kid[i]->name, "cluster"))
-            n++;
-    *kids = xalloc((size_t)n * sizeof **kids);
-    *nkid = 0;
-    for (int i = 0; i < c->nkid; i++) {
-        const struct xnode *k = c->kid[i];
-        if (!strcmp(k->name, "register"))
-            read_register(&(*kids)[(*nkid)++], k, pr);
-        else if (!strcmp(k->name, "cluster"))
-            read_cluster(&(*kids)[(*nkid)++], k, pr, tbase, depth);
-    }
-}
-
-static void add_irq(struct device *d, struct periph *p, const struct xnode *in)
-{
-    struct irq q;
-    q.name = kidtext(in, "name");
-    q.desc = kidtext(in, "description");
-    if (!q.name)
-        die("line %d: an interrupt without a name", in->line);
-    q.value = (int)svd_num(kidtext(in, "value"), "value", in->line);
-    p->irq = xgrow(p->irq, (size_t)(p->nirq + 1) * sizeof *p->irq);
-    p->irq[p->nirq++] = q;
-    for (int j = 0; j < d->nirq; j++)
-        if (!strcmp(d->irq[j].name, q.name)) {
-            if (d->irq[j].value != q.value)
-                die("line %d: interrupt %s is %d here and %d before", in->line,
-                    q.name, q.value, d->irq[j].value);
-            return;
-        }
-    d->irq = xgrow(d->irq, (size_t)(d->nirq + 1) * sizeof *d->irq);
-    d->irq[d->nirq++] = q;
-}
-
-static struct device *read_device(struct xnode *root)
-{
-    if (strcmp(root->name, "device"))
-        die("the document is <%s>, not an SVD <device>", root->name);
-    struct device *d = xalloc(sizeof *d);
-    d->name = kidtext(root, "name");
-    d->vendor = kidtext(root, "vendor");
-    d->version = kidtext(root, "version");
-    d->desc = kidtext(root, "description");
-    d->prefix = kidtext(root, "headerDefinitionsPrefix");
-    if (!d->name)
-        die("the device has no name");
-    d->aub = kidtext(root, "addressUnitBits")
-        ? (int)svd_num(kidtext(root, "addressUnitBits"), "addressUnitBits",
-                       root->line) : 8;
-    if (d->aub != 8)
-        die("addressUnitBits is %d: offsets in units of other than 8 bits "
-            "are not supported", d->aub);
-    d->width = kidtext(root, "width")
-        ? (int)svd_num(kidtext(root, "width"), "width", root->line) : 32;
-    const struct xnode *cpu = kid(root, "cpu");
-    if (cpu) {
-        d->has_cpu = 1;
-        d->cpu = kidtext(cpu, "name");
-        d->cpurev = kidtext(cpu, "revision");
-        d->endian = kidtext(cpu, "endian");
-        d->prio_bits = kidtext(cpu, "nvicPrioBits")
-            ? (int)svd_num(kidtext(cpu, "nvicPrioBits"), "nvicPrioBits",
-                           cpu->line) : 0;
-        d->fpu = svd_bool(kidtext(cpu, "fpuPresent"));
-        d->fpu_dp = svd_bool(kidtext(cpu, "fpuDP"));
-        d->mpu = svd_bool(kidtext(cpu, "mpuPresent"));
-        d->vendor_systick = svd_bool(kidtext(cpu, "vendorSystickConfig"));
-        d->num_irq = kidtext(cpu, "deviceNumInterrupts")
-            ? (int)svd_num(kidtext(cpu, "deviceNumInterrupts"),
-                           "deviceNumInterrupts", cpu->line) : -1;
-    }
-    struct props dpr;
-    memset(&dpr, 0, sizeof dpr);
-    dpr.size = 32;
-    dpr = props_in(root, dpr);
-
-    struct xnode *ps = kid(root, "peripherals");
-    if (!ps)
-        die("the device has no <peripherals>");
-    g_periphs = ps;
-    for (int i = 0; i < ps->nkid; i++)
-        if (!strcmp(ps->kid[i]->name, "peripheral") && kid(ps->kid[i], "registers"))
-            resolve_walk(kid(ps->kid[i], "registers"), ps->kid[i], 0);
-
-    int cap = 0;
-    for (int i = 0; i < ps->nkid; i++)
-        if (!strcmp(ps->kid[i]->name, "peripheral"))
-            cap += kidtext(ps->kid[i], "dim")
-                ? (int)svd_num(kidtext(ps->kid[i], "dim"), "dim",
-                               ps->kid[i]->line) : 1;
-    d->p = xalloc((size_t)(cap + 1) * sizeof *d->p);
-    for (int i = 0; i < ps->nkid; i++) {
-        struct xnode *pn = ps->kid[i];
-        if (strcmp(pn->name, "peripheral"))
-            continue;
-        struct periph *p = &d->p[d->np++];
-        p->node = pn;
-        p->name = kidtext(pn, "name");
-        if (!p->name)
-            die("line %d: a peripheral without a name", pn->line);
-        p->desc = kidtext(pn, "description");
-        p->group = kidtext(pn, "groupName");
-        p->derived = attr(pn, "derivedFrom");
-        p->base = svd_num(kidtext(pn, "baseAddress"), "baseAddress", pn->line);
-        const char *h = kidtext(pn, "headerStructName");
-        char *t = plain_name(h ? h : p->name);
-        for (char *q = t; *q; q++)
-            if (!isalnum((unsigned char)*q))
-                *q = '_';
-        p->tname = t;
-        for (int k = 0; k < pn->nkid; k++) {
-            const struct xnode *a = pn->kid[k];
-            if (!strcmp(a->name, "interrupt"))
-                add_irq(d, p, a);
-            if (!strcmp(a->name, "addressBlock")) {
-                struct ablock b;
-                b.off = svd_num(kidtext(a, "offset"), "offset", a->line);
-                b.size = svd_num(kidtext(a, "size"), "size", a->line);
-                b.usage = kidtext(a, "usage");
-                p->ab = xgrow(p->ab, (size_t)(p->nab + 1) * sizeof *p->ab);
-                p->ab[p->nab++] = b;
-            }
-        }
-        const struct xnode *rs = kid(pn, "registers");
-        if (rs)
-            read_nodes(&p->kid, &p->nkid, rs, props_in(pn, dpr), p->tname, 0);
-        /* a peripheral array, TIMER%s: one peripheral per element, all
-         * with the first one's registers */
-        int dim, bracket;
-        unsigned long long inc = 0;
-        char **idx = NULL;
-        read_dim(pn, "peripheral", p->name, &dim, &inc, &bracket, &idx);
-        if (dim && bracket)
-            die("line %d: peripheral %s: an array of peripherals written "
-                "[%%s] is not supported yet (NAME%%s is)", pn->line, p->name);
-        if (dim) {
-            struct periph first = *p;
-            for (int k = 0; k < dim; k++) {
-                struct periph *e = &d->p[d->np - 1 + k];
-                *e = first;
-                e->name = subst(first.name, idx[k], 0);
-                e->base = first.base + (unsigned long long)k * inc;
-                if (k) {
-                    e->derived = d->p[d->np - 1].name;
-                    e->kid = NULL;
-                    e->nkid = 0;
-                    e->irq = NULL;
-                    e->nirq = 0;
-                }
-            }
-            d->np += dim - 1;
-        }
-    }
-    /* derivedFrom: the registers, and what else was not said, are the
-     * base's; a chain is followed to its end */
-    for (int i = 0; i < d->np; i++) {
-        struct periph *p = &d->p[i];
-        struct periph *b = p;
-        for (int hops = 0; b->derived; hops++) {
-            if (b->nkid)
-                die("line %d: %s is derivedFrom %s and has registers of its "
-                    "own; merging the two is not supported yet",
-                    b->node->line, b->name, b->derived);
-            struct periph *nb = NULL;
-            for (int j = 0; j < d->np; j++)
-                if (!strcmp(d->p[j].name, b->derived))
-                    nb = &d->p[j];
-            if (!nb)
-                die("line %d: %s is derivedFrom %s, which is not in the file",
-                    b->node->line, b->name, b->derived);
-            if (hops > d->np)
-                die("%s: derivedFrom goes round in a circle", p->name);
-            b = nb;
-        }
-        p->layout = b;
-        if (!p->desc) p->desc = p->layout->desc;
-        if (!p->group) p->group = p->layout->group;
-        if (!p->nab) {
-            p->ab = p->layout->ab;
-            p->nab = p->layout->nab;
-        }
-    }
-    for (int i = 0; i < d->np; i++) {
-        struct periph *p = &d->p[i];
-        if (p->layout != p)
-            continue;
-        if (!p->nkid)
-            fprintf(stderr, "embsvd: %s: warning: peripheral %s has no "
-                    "registers\n", g_file, p->name);
-        for (int j = 0; j < i; j++)
-            if (d->p[j].layout == &d->p[j] && !strcmp(d->p[j].tname, p->tname))
-                die("line %d: peripherals %s and %s would both be struct "
-                    "%s_Type, with registers of their own", p->node->line,
-                    d->p[j].name, p->name, p->tname);
-        /* headerDefinitionsPrefix is put on a peripheral's struct, not on
-         * a cluster's: Nordic's CRACEN cluster and NRF_CRACEN_Type */
-        size_t pl = d->prefix ? strlen(d->prefix) : 0;
-        for (int j = 0; j < g_ntypes; j++)
-            if (!strncmp(g_types[j]->tname, d->prefix ? d->prefix : "", pl) &&
-                !strcmp(g_types[j]->tname + pl, p->tname))
-                die("line %d: peripheral %s and cluster %s (line %d) would "
-                    "both be struct %s_Type", p->node->line, p->name,
-                    g_types[j]->name, g_types[j]->line, p->tname);
-    }
-    return d;
-}
-
-/* ---- the layout --------------------------------------------------------
- *
- * Every struct -- a peripheral's, a cluster's -- is laid out from its
- * members' offsets, as svdconv lays it out: a gap is a uint8_t RESERVED
- * array, members at one offset that are each other's alternates are a
- * union, and an array is a C array when its elements are packed:
- *
- *   NAME[%s], dimIncrement the element's size   NAME[dim]
- *   NAME[%s], a cluster whose struct is smaller  the struct is padded to
- *                                                dimIncrement: NAME[dim]
- *   NAME[%s], a register with a larger increment NAME0, NAME1, ... apart
- *   NAME%s                                       NAMEa, NAMEb, ... apart
- *
- * What C cannot place where the SVD says -- a register off its natural
- * alignment, elements closer together than their size -- is refused. */
-
-struct mem {
-    const struct node *n;
-    char *name;                 /* the C member's */
-    unsigned long long off, bytes;
-    int count;                  /* a C array's length, or 0 */
-    int k;                      /* the element, of an array split apart */
-    int seq;
-};
-
-static unsigned long long elem_bytes(const struct node *n)
-{
-    return n->cluster ? n->type->tsize : (unsigned long long)n->size / 8;
-}
-
-static unsigned elem_align(const struct node *n)
-{
-    return n->cluster ? n->type->talign : (unsigned)n->size / 8;
-}
-
-/* is this array one C array? */
-static int carray(const struct node *n)
-{
-    return n->dim && n->bracket && n->inc == elem_bytes(n);
-}
-
-static int mem_cmp(const void *a, const void *b)
-{
-    const struct mem *x = a, *y = b;
-    if (x->off != y->off)
-        return x->off < y->off ? -1 : 1;
-    return x->seq - y->seq;
-}
-
-static struct mem *members(const struct node *kids, int nkid, int *nm)
-{
-    int cap = 0;
-    for (int i = 0; i < nkid; i++)
-        cap += carray(&kids[i]) || !kids[i].dim ? 1 : kids[i].dim;
-    struct mem *m = xalloc((size_t)(cap + 1) * sizeof *m);
-    int n = 0;
-    for (int i = 0; i < nkid; i++) {
-        const struct node *k = &kids[i];
-        if (!k->dim || carray(k)) {
-            m[n].n = k;
-            m[n].name = k->dim ? plain_name(k->name) : xdup(k->name, strlen(k->name));
-            m[n].off = k->off;
-            m[n].count = k->dim;
-            m[n].bytes = k->dim ? k->inc * (unsigned long long)k->dim
-                                : elem_bytes(k);
-            m[n].k = -1;
-            m[n].seq = n;
-            n++;
-            continue;
-        }
-        if (k->inc < elem_bytes(k))
-            die("line %d: array %s: its elements are %llu bytes but %llu "
-                "apart, so they overlap", k->line, k->name, elem_bytes(k),
-                k->inc);
-        for (int e = 0; e < k->dim; e++) {
-            m[n].n = k;
-            m[n].name = subst(k->name, k->idx[e], 1);
-            m[n].off = k->off + (unsigned long long)e * k->inc;
-            m[n].count = 0;
-            m[n].bytes = elem_bytes(k);
-            m[n].k = e;
-            m[n].seq = n;
-            n++;
-        }
-    }
-    qsort(m, (size_t)n, sizeof *m, mem_cmp);
-    *nm = n;
-    return m;
-}
-
-static void free_members(struct mem *m, int n)
-{
-    for (int i = 0; i < n; i++)
-        free(m[i].name);
-    free(m);
-}
-
-/* may two members share an offset? alternates may, and so may a
- * read-only and a write-only register (svdconv makes them a union) */
-static int may_share(const struct node *a, const struct node *b)
-{
-    if (a->alt || b->alt)
-        return 1;
-    return !a->cluster && !b->cluster &&
-           ((a->access == 1 && b->access == 2) || (a->access == 2 && b->access == 1));
-}
-
-static const char *ctype_of(int bits)
-{
-    return bits == 8 ? "uint8_t" : bits == 16 ? "uint16_t"
-         : bits == 64 ? "uint64_t" : "uint32_t";
-}
-
-static const char *qual_of(int access)
-{
-    return access == 1 ? "__I " : access == 2 ? "__O " : "__IO";
-}
-
-/* a C identifier from an SVD name: what is not alphanumeric becomes _ */
-static const char *ident(const char *s)
-{
-    static char buf[4][256];
-    static int at;
-    char *o = buf[at++ & 3];
-    size_t i = 0;
-    for (; s[i] && i < 255; i++)
-        o[i] = isalnum((unsigned char)s[i]) ? s[i] : '_';
-    o[i] = 0;
-    return o;
-}
-
-static void put_desc(FILE *f, const char *s)
-{
-    for (; *s; s++)
-        if (!(s[0] == '*' && s[1] == '/'))
-            fputc(*s, f);
-}
-
-/* Lay out one struct's members: check them, and with f print them.
- * Returns where the last one ends; *align is the struct's alignment. */
-static unsigned long long lay(const struct node *kids, int nkid, FILE *f,
-                              const char *what, unsigned *align, int *nres)
-{
-    int n;
-    struct mem *m = members(kids, nkid, &n);
-    unsigned long long at = 0;
-    unsigned al = 1;
-    for (int i = 0; i < n; ) {
-        int j = i + 1;
-        while (j < n && m[j].off == m[i].off)
-            j++;
-        if (m[i].off < at)
-            die("line %d: %s.%s at offset 0x%llx overlaps the register "
-                "before it", m[i].n->line, what, m[i].name, m[i].off);
-        for (int k = i; k < j; k++) {
-            unsigned a = elem_align(m[k].n);
-            if (a > al)
-                al = a;
-            if (m[k].off % a)
-                die("line %d: %s.%s at offset 0x%llx is not aligned to its "
-                    "%u bytes, so a C struct cannot put it there", m[k].n->line,
-                    what, m[k].name, m[k].off, a);
-        }
-        /* SVD says which register is another's alternate view; two at
-         * one offset that do not say so are a mistake in the file */
-        for (int k = i + 1; k < j; k++)
-            if (!may_share(m[k].n, m[i].n))
-                die("line %d: %s.%s at offset 0x%llx overlaps %s, and "
-                    "neither is the other's alternateRegister", m[k].n->line,
-                    what, m[k].name, m[k].off, m[i].name);
-        if (f && m[i].off > at)
-            fprintf(f, "  uint8_t RESERVED%d[%llu];\n", (*nres)++, m[i].off - at);
-        unsigned long long end = m[i].off;
-        if (f && j - i > 1)
-            fprintf(f, "  union {\n");
-        for (int k = i; k < j; k++) {
-            const struct node *r = m[k].n;
-            if (f) {
-                if (r->cluster)
-                    fprintf(f, "%s  __IO %s_Type %s", j - i > 1 ? "  " : "",
-                            r->type->tname, ident(m[k].name));
-                else
-                    fprintf(f, "%s  %s %s %s", j - i > 1 ? "  " : "",
-                            qual_of(r->access), ctype_of(r->size),
-                            ident(m[k].name));
-                if (m[k].count)
-                    fprintf(f, "[%d]", m[k].count);
-                fprintf(f, ";  /*!< 0x%03llx", m[k].off);
-                if (r->desc) {
-                    fputs(": ", f);
-                    put_desc(f, r->desc);
-                }
-                fputs(" */\n", f);
-            }
-            if (m[k].off + m[k].bytes > end)
-                end = m[k].off + m[k].bytes;
-        }
-        if (f && j - i > 1)
-            fprintf(f, "  };\n");
-        at = end;
-        i = j;
-    }
-    free_members(m, n);
-    *align = al;
-    return at;
-}
-
-/* Size every cluster struct under kids, innermost first, padding one to
- * the increment of the NAME[%s] array it makes. */
-static void size_types(const struct node *kids, int nkid)
-{
-    for (int i = 0; i < nkid; i++) {
-        const struct node *k = &kids[i];
-        if (!k->cluster)
-            continue;
-        struct node *t = k->type;
-        if (!t->sized) {
-            t->sized = 1;
-            size_types(t->kid, t->nkid);
-            t->tend = lay(t->kid, t->nkid, NULL, t->tname, &t->talign, NULL);
-            t->tsize = (t->tend + t->talign - 1) / t->talign * t->talign;
-            if (!t->tsize)
-                die("line %d: cluster %s has no registers", t->line, t->name);
-        }
-        if (k->dim && k->bracket && k->inc > t->tsize && !t->locked &&
-            k->inc % t->talign == 0)
-            t->tsize = k->inc;
-        t->locked = 1;
-    }
-}
-
-/* ---- the registers, flattened -------------------------------------------
- *
- * Every register of a peripheral, each element of every array, with where
- * it is (from the peripheral's base) and how C reaches it. --json and
- * --show print these. */
-
-struct flat {
-    const struct node *r;
-    char *name, *path;
-    int idx[40];
-    int nidx;
-    unsigned long long off;
-};
-struct flats { struct flat *v; int n, cap; };
-
-static void flatten(const struct node *kids, int nkid, const char *pre,
-                    int *idx, int nidx, unsigned long long at, struct flats *o)
-{
-    for (int i = 0; i < nkid; i++) {
-        const struct node *k = &kids[i];
-        int cnt = k->dim ? k->dim : 1;
-        for (int e = 0; e < cnt; e++) {
-            unsigned long long off = at + k->off +
-                (k->dim ? (unsigned long long)e * k->inc : 0);
-            /* the C member: NAME, NAME[e], or the element's own name */
-            char *seg = !k->dim ? xdup(k->name, strlen(k->name))
-                      : carray(k) ? plain_name(k->name)
-                      : subst(k->name, k->idx[e], 1);
-            size_t pl = (pre ? strlen(pre) : 0) + strlen(seg) + 16;
-            char *path = xalloc(pl);
-            snprintf(path, pl, "%s%s%s", pre ? pre : "", pre ? "." : "",
-                     ident(seg));
-            if (carray(k))
-                snprintf(path + strlen(path), pl - strlen(path), "[%d]", e);
-            free(seg);
-            if (k->dim) {
-                if (nidx >= 40)
-                    die("line %d: arrays nested too deep", k->line);
-                idx[nidx] = e;
-            }
-            int ni = nidx + (k->dim ? 1 : 0);
-            if (k->cluster) {
-                flatten(k->type->kid, k->type->nkid, path, idx, ni, off, o);
-                free(path);
-                continue;
-            }
-            if (o->n == o->cap) {
-                o->cap = o->cap ? 2 * o->cap : 64;
-                o->v = xgrow(o->v, (size_t)o->cap * sizeof *o->v);
-            }
-            struct flat *fl = &o->v[o->n++];
-            fl->r = k;
-            fl->name = k->dim ? subst(k->name, k->idx[e], 0)
-                              : xdup(k->name, strlen(k->name));
-            fl->path = path;
-            memcpy(fl->idx, idx, (size_t)ni * sizeof *idx);
-            fl->nidx = ni;
-            fl->off = off;
-        }
-    }
-}
-
-static int flat_cmp(const void *a, const void *b)
-{
-    const struct flat *x = a, *y = b;
-    if (x->off != y->off)
-        return x->off < y->off ? -1 : 1;
-    return x->r->line - y->r->line;
-}
-
-static struct flats flat_regs(const struct periph *p, int sorted)
-{
-    struct flats o;
-    int idx[40];
-    memset(&o, 0, sizeof o);
-    flatten(p->layout->kid, p->layout->nkid, NULL, idx, 0, 0, &o);
-    if (sorted)
-        qsort(o.v, (size_t)o.n, sizeof *o.v, flat_cmp);
-    return o;
-}
-
-static void free_flats(struct flats *o)
-{
-    for (int i = 0; i < o->n; i++) {
-        free(o->v[i].name);
-        free(o->v[i].path);
-    }
-    free(o->v);
-}
-
-/* every struct sized and checked, before any output is written: what
- * one output refuses, they all refuse */
-static void size_device(struct device *d)
-{
-    for (int i = 0; i < d->np; i++)
-        if (d->p[i].layout == &d->p[i]) {
-            unsigned al;
-            size_types(d->p[i].kid, d->p[i].nkid);
-            lay(d->p[i].kid, d->p[i].nkid, NULL, d->p[i].name, &al, NULL);
-        }
-}
+#include "svd.h"
 
 /* ---- the header -------------------------------------------------------- */
 
@@ -1683,14 +75,14 @@ static const struct core_exc core_excs[] = {
 
 /* ARMv6-M and ARMv8-M Baseline have no MemManage, BusFault, UsageFault
  * or DebugMonitor exception */
-static int cpu_baseline(const struct device *d)
+static int cpu_baseline(const struct svd_device *d)
 {
     return d->cpu && (!strncmp(d->cpu, "CM0", 3) || !strcmp(d->cpu, "CM1") ||
                       !strcmp(d->cpu, "CM23"));
 }
 
 /* CMSIS's core header for the SVD's cpu name */
-static const char *core_header(const struct device *d)
+static const char *core_header(const struct svd_device *d)
 {
     static const struct { const char *svd, *h, *rev; } m[] = {
         { "CM0", "core_cm0.h", "__CM0_REV" },
@@ -1711,7 +103,7 @@ static const char *core_header(const struct device *d)
     return NULL;
 }
 
-static const char *core_rev_macro(const struct device *d)
+static const char *core_rev_macro(const struct svd_device *d)
 {
     static char buf[32];
     const char *h = core_header(d);
@@ -1738,61 +130,61 @@ static unsigned cpu_rev_value(const char *rev)
  * them would define NVIC_Type and SCB_HFSR_FORCED_Msk a second time, so
  * they are left out, as svdconv leaves them out. 0xE0042000 and up is the
  * vendor's own (ST's DBGMCU) and stays. */
-static int cmsis_core_periph(const struct periph *p)
+static int cmsis_core_periph(const struct svd_periph *p)
 {
     return p->base >= 0xE0000000ULL && p->base < 0xE0042000ULL;
 }
 
 static int irq_cmp(const void *a, const void *b)
 {
-    return ((const struct irq *)a)->value - ((const struct irq *)b)->value;
+    return ((const struct svd_irq *)a)->value - ((const struct svd_irq *)b)->value;
 }
 
 
 /* every cluster struct under kids, innermost first, each once */
-static void write_types(FILE *f, const struct node *kids, int nkid)
+static void write_types(FILE *f, const struct svd_node *kids, int nkid)
 {
     for (int i = 0; i < nkid; i++) {
-        struct node *t = kids[i].type;
+        struct svd_node *t = kids[i].type;
         if (!kids[i].cluster || t->emitted)
             continue;
         t->emitted = 1;
         write_types(f, t->kid, t->nkid);
-        char *pl = plain_name(t->name);
+        char *pl = svd_plain_name(t->name);
         fprintf(f, "/* %s%s", pl, t->desc ? ": " : "");
         if (t->desc)
-            put_desc(f, t->desc);
+            svd_put_desc(f, t->desc);
         fprintf(f, " */\ntypedef struct {\n");
         free(pl);
         unsigned al;
         int nres = 0;
-        unsigned long long end = lay(t->kid, t->nkid, f, t->tname, &al, &nres);
+        unsigned long long end = svd_lay(t->kid, t->nkid, f, t->tname, &al, &nres);
         if (t->tsize > end)
             fprintf(f, "  uint8_t RESERVED%d[%llu];\n", nres, t->tsize - end);
         fprintf(f, "} %s_Type;  /* %llu bytes */\n\n", t->tname, t->tsize);
     }
 }
 
-static void write_struct(FILE *f, const struct device *d, const struct periph *p)
+static void write_struct(FILE *f, const struct svd_device *d, const struct svd_periph *p)
 {
     write_types(f, p->kid, p->nkid);
     fprintf(f, "/* %s%s%s */\ntypedef struct {\n", p->name,
             p->desc ? ": " : "", p->desc ? p->desc : "");
     unsigned al;
     int nres = 0;
-    lay(p->kid, p->nkid, f, p->name, &al, &nres);
+    svd_lay(p->kid, p->nkid, f, p->name, &al, &nres);
     fprintf(f, "} %s%s_Type;\n\n", d->prefix ? d->prefix : "", p->tname);
 }
 
 static void field_macros(FILE *f, const char *base, const char *reg,
-                         const struct node *r)
+                         const struct svd_node *r)
 {
     for (int m = 0; m < r->nf; m++) {
-        const struct field *fd = &r->f[m];
+        const struct svd_field *fd = &r->f[m];
         char pre[768];
-        snprintf(pre, sizeof pre, "%s_%s_", base, ident(reg));
+        snprintf(pre, sizeof pre, "%s_%s_", base, svd_ident(reg));
         snprintf(pre + strlen(pre), sizeof pre - strlen(pre), "%s",
-                 ident(fd->name));
+                 svd_ident(fd->name));
         unsigned long long mask = fd->width >= 64 ? ~0ULL
             : ((1ULL << fd->width) - 1);
         fprintf(f, "#define %s_Pos %dU\n", pre, fd->lsb);
@@ -1802,27 +194,27 @@ static void field_macros(FILE *f, const char *base, const char *reg,
 
 /* every field of a struct: STRUCT_REG_FIELD_Pos and _Msk; then the
  * clusters' structs' own, each once */
-static void write_macros(FILE *f, const char *base, const struct node *kids,
+static void write_macros(FILE *f, const char *base, const struct svd_node *kids,
                          int nkid)
 {
     for (int i = 0; i < nkid; i++) {
-        const struct node *r = &kids[i];
+        const struct svd_node *r = &kids[i];
         if (r->cluster)
             continue;
         if (r->dim && !r->bracket) {
             for (int e = 0; e < r->dim; e++) {
-                char *nm = subst(r->name, r->idx[e], 0);
+                char *nm = svd_subst(r->name, r->idx[e], 0);
                 field_macros(f, base, nm, r);
                 free(nm);
             }
         } else {
-            char *nm = plain_name(r->name);
+            char *nm = svd_plain_name(r->name);
             field_macros(f, base, nm, r);
             free(nm);
         }
     }
     for (int i = 0; i < nkid; i++) {
-        struct node *t = kids[i].type;
+        struct svd_node *t = kids[i].type;
         if (!kids[i].cluster || t->emitted == 2)
             continue;
         t->emitted = 2;
@@ -1830,15 +222,15 @@ static void write_macros(FILE *f, const char *base, const struct node *kids,
     }
 }
 
-static void write_header(FILE *f, const struct device *d, int cmsis)
+static void write_header(FILE *f, const struct svd_device *d, int cmsis)
 {
     const char *pfx = d->prefix ? d->prefix : "";
     char guard[256];
-    snprintf(guard, sizeof guard, "%s_H", ident(d->name));
+    snprintf(guard, sizeof guard, "%s_H", svd_ident(d->name));
     for (char *q = guard; *q; q++)
         *q = (char)toupper((unsigned char)*q);
     fprintf(f, "/* %s: generated by embsvd from %s. Do not edit.\n", d->name,
-            g_file);
+            svd_file);
     if (d->desc)
         fprintf(f, " * %s\n", d->desc);
     fprintf(f, " */\n#ifndef %s\n#define %s\n\n#include <stdint.h>\n\n",
@@ -1846,7 +238,7 @@ static void write_header(FILE *f, const struct device *d, int cmsis)
     fprintf(f, "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
 
     /* the interrupt numbers */
-    struct irq *q = xalloc((size_t)(d->nirq + 1) * sizeof *q);
+    struct svd_irq *q = svd_alloc((size_t)(d->nirq + 1) * sizeof *q);
     memcpy(q, d->irq, (size_t)d->nirq * sizeof *q);
     qsort(q, (size_t)d->nirq, sizeof *q, irq_cmp);
     fprintf(f, "typedef enum {\n");
@@ -1855,7 +247,7 @@ static void write_header(FILE *f, const struct device *d, int cmsis)
         if (!base || core_excs[i].m0)
             fprintf(f, "  %s_IRQn = %d,\n", core_excs[i].irq, core_excs[i].n);
     for (int i = 0; i < d->nirq; i++) {
-        fprintf(f, "  %s_IRQn = %d,", ident(q[i].name), q[i].value);
+        fprintf(f, "  %s_IRQn = %d,", svd_ident(q[i].name), q[i].value);
         comment(f, q[i].desc);
         fputc('\n', f);
     }
@@ -1865,7 +257,7 @@ static void write_header(FILE *f, const struct device *d, int cmsis)
     if (cmsis) {
         const char *h = core_header(d);
         if (!h)
-            die("cpu '%s' has no CMSIS core header that embsvd knows; "
+            svd_die("cpu '%s' has no CMSIS core header that embsvd knows; "
                 "--no-cmsis writes the header without one",
                 d->cpu ? d->cpu : "(none)");
         fprintf(f, "#define %s 0x%04xU\n", core_rev_macro(d),
@@ -1901,18 +293,18 @@ static void write_header(FILE *f, const struct device *d, int cmsis)
     for (int i = 0; i < d->np; i++)
         if (!SKIP(&d->p[i]))
             fprintf(f, "#define %s%s_BASE 0x%08llxUL\n", pfx,
-                    ident(d->p[i].name), d->p[i].base);
+                    svd_ident(d->p[i].name), d->p[i].base);
     fputc('\n', f);
     for (int i = 0; i < d->np; i++)
         if (d->p[i].layout->nkid && !SKIP(&d->p[i]) && !SKIP(d->p[i].layout))
             fprintf(f, "#define %s%s ((%s%s_Type *)%s%s_BASE)\n", pfx,
-                    ident(d->p[i].name), pfx, d->p[i].layout->tname, pfx,
-                    ident(d->p[i].name));
+                    svd_ident(d->p[i].name), pfx, d->p[i].layout->tname, pfx,
+                    svd_ident(d->p[i].name));
     fputc('\n', f);
 
     /* every field: LAYOUT_REG_FIELD_Pos and _Msk */
     for (int i = 0; i < d->np; i++) {
-        const struct periph *p = &d->p[i];
+        const struct svd_periph *p = &d->p[i];
         if (p->layout == p && !SKIP(p))
             write_macros(f, p->tname, p->kid, p->nkid);
     }
@@ -1922,7 +314,7 @@ static void write_header(FILE *f, const struct device *d, int cmsis)
 
 /* ---- the startup --------------------------------------------------------- */
 
-static void write_startup(FILE *f, const struct device *d)
+static void write_startup(FILE *f, const struct svd_device *d)
 {
     int base = cpu_baseline(d), max = -1;
     for (int i = 0; i < d->nirq; i++)
@@ -1935,7 +327,7 @@ static void write_startup(FILE *f, const struct device *d)
             " * Reset_Handler that copies .data from flash, zeroes .bss, calls\n"
             " * SystemInit if the program has one, runs the constructors and\n"
             " * calls main -- by the symbols the generated linker script\n"
-            " * defines. */\n", d->name, g_file);
+            " * defines. */\n", d->name, svd_file);
     fprintf(f, "extern unsigned long _sidata[], _sdata[], _edata[], _sbss[], "
                "_ebss[], _estack[];\n"
                "extern void (*__init_array_start[])(void);\n"
@@ -1950,7 +342,7 @@ static void write_startup(FILE *f, const struct device *d)
                     core_excs[i].handler);
     for (int i = 0; i < d->nirq; i++)
         fprintf(f, "void %s_IRQHandler(void) __attribute__((weak, alias(\"Default_Handler\")));\n",
-                ident(d->irq[i].name));
+                svd_ident(d->irq[i].name));
     fprintf(f, "\n__attribute__((section(\".isr_vector\"), used))\n"
                "void (*const g_pfnVectors[%d])(void) = {\n"
                "    (void (*)(void))_estack,\n    Reset_Handler,\n", 16 + max + 1);
@@ -1970,7 +362,7 @@ static void write_startup(FILE *f, const struct device *d)
             if (d->irq[i].value == v)
                 s = d->irq[i].name;
         if (s)
-            fprintf(f, "    %s_IRQHandler,         /* %d */\n", ident(s), v);
+            fprintf(f, "    %s_IRQHandler,         /* %d */\n", svd_ident(s), v);
         else
             fprintf(f, "    0,                     /* %d */\n", v);
     }
@@ -1993,14 +385,14 @@ static void parse_region(const char *s, unsigned long long *org,
 {
     const char *c = strchr(s, ':');
     if (!c)
-        die("%s wants ORIGIN:LENGTH, as in 0x08000000:1M", what);
+        svd_die("%s wants ORIGIN:LENGTH, as in 0x08000000:1M", what);
     char a[64];
     snprintf(a, sizeof a, "%.*s", (int)(c - s), s);
     *org = svd_num(a, what, 0);
     *len = svd_num(c + 1, what, 0);
 }
 
-static void write_ld(FILE *f, const struct device *d, const char *flash,
+static void write_ld(FILE *f, const struct svd_device *d, const char *flash,
                      const char *ram)
 {
     unsigned long long fo, fl, ro, rl;
@@ -2040,19 +432,19 @@ static void write_ld(FILE *f, const struct device *d, const char *flash,
 
 /* ---- listing ----------------------------------------------------------------- */
 
-static void list_device(const struct device *d)
+static void list_device(const struct svd_device *d)
 {
     printf("%s: %s, %d peripherals, %d interrupts\n", d->name,
            d->cpu ? d->cpu : "(no cpu)", d->np, d->nirq);
     for (int i = 0; i < d->np; i++) {
-        const struct periph *p = &d->p[i];
+        const struct svd_periph *p = &d->p[i];
         printf("  %-12s 0x%08llx", p->name, p->base);
         if (p->layout != p) {
             printf("  like %s", p->layout->name);
         } else {
-            struct flats fl = flat_regs(p, 0);
+            struct svd_flats fl = svd_flat_regs(p, 0);
             printf("  %d registers", fl.n);
-            free_flats(&fl);
+            svd_free_flats(&fl);
         }
         if (p->desc)
             printf("  %s", p->desc);
@@ -2060,26 +452,26 @@ static void list_device(const struct device *d)
     }
 }
 
-static void show_periph(const struct device *d, const char *name)
+static void show_periph(const struct svd_device *d, const char *name)
 {
-    const struct periph *p = NULL;
+    const struct svd_periph *p = NULL;
     for (int i = 0; i < d->np; i++)
         if (!strcmp(d->p[i].name, name))
             p = &d->p[i];
     if (!p)
-        die("there is no peripheral %s (--list names them)", name);
+        svd_die("there is no peripheral %s (--list names them)", name);
     printf("%s at 0x%08llx%s%s\n", p->name, p->base, p->desc ? ": " : "",
            p->desc ? p->desc : "");
-    struct flats fl = flat_regs(p, 1);
+    struct svd_flats fl = svd_flat_regs(p, 1);
     for (int k = 0; k < fl.n; k++) {
-        const struct flat *x = &fl.v[k];
-        const struct node *r = x->r;
+        const struct svd_flat *x = &fl.v[k];
+        const struct svd_node *r = x->r;
         printf("  0x%08llx  +0x%03llx  %-14s %2d bits  %s  reset 0x%llx%s%s\n",
                p->base + x->off, x->off, x->path, r->size,
                r->access == 1 ? "ro" : r->access == 2 ? "wo" : "rw",
                r->reset, r->desc ? "  " : "", r->desc ? r->desc : "");
         for (int m = 0; m < r->nf; m++) {
-            const struct field *fd = &r->f[m];
+            const struct svd_field *fd = &r->f[m];
             if (fd->width == 1)
                 printf("      [%d]     %s\n", fd->lsb, fd->name);
             else
@@ -2088,7 +480,7 @@ static void show_periph(const struct device *d, const char *name)
                        fd->name);
         }
     }
-    free_flats(&fl);
+    svd_free_flats(&fl);
 }
 
 /* ---- the hardware, as JSON --------------------------------------------------
@@ -2127,7 +519,7 @@ static const char *jb(int b)
     return b ? "true" : "false";
 }
 
-static void json_irqs(FILE *f, const struct irq *q, int n, const char *ind)
+static void json_irqs(FILE *f, const struct svd_irq *q, int n, const char *ind)
 {
     fputc('[', f);
     for (int i = 0; i < n; i++) {
@@ -2142,7 +534,7 @@ static void json_irqs(FILE *f, const struct irq *q, int n, const char *ind)
     fputc(']', f);
 }
 
-static void json_field(FILE *f, const struct field *fd)
+static void json_field(FILE *f, const struct svd_field *fd)
 {
     fputs("{\"name\": ", f);
     js(f, fd->name);
@@ -2153,7 +545,7 @@ static void json_field(FILE *f, const struct field *fd)
     js(f, fd->desc);
     fputs(", \"enumeratedValues\": [", f);
     for (int i = 0; i < fd->nev; i++) {
-        const struct enumval *e = &fd->ev[i];
+        const struct svd_enumval *e = &fd->ev[i];
         fprintf(f, "%s{\"name\": ", i ? ", " : "");
         js(f, e->name);
         /* "care": the bits of the field a #1x0 value fixes */
@@ -2174,7 +566,7 @@ static void json_field(FILE *f, const struct field *fd)
     fputs("]}", f);
 }
 
-static void write_json(FILE *f, const struct device *d, const char *flash,
+static void write_json(FILE *f, const struct svd_device *d, const char *flash,
                        const char *ram);
 
 static void parse_region(const char *s, unsigned long long *org,
@@ -2189,11 +581,11 @@ static void json_memory(FILE *f, const char *name, const char *spec,
             "\"access\": \"%s\"}", first ? "" : ",", name, o, l, acc);
 }
 
-static void write_json(FILE *f, const struct device *d, const char *flash,
+static void write_json(FILE *f, const struct svd_device *d, const char *flash,
                        const char *ram)
 {
     fprintf(f, "{\n  \"schema\": 1,\n  \"generator\": \"embsvd\",\n  \"source\": ");
-    js(f, g_file);
+    js(f, svd_file);
     fputs(",\n  \"device\": {\"name\": ", f);
     js(f, d->name);
     fputs(", \"vendor\": ", f);
@@ -2231,7 +623,7 @@ static void write_json(FILE *f, const struct device *d, const char *flash,
         json_memory(f, "RAM", ram, "rwx", "--ram", !flash);
     fputs(flash || ram ? "\n  ],\n" : "],\n", f);
 
-    struct irq *q = xalloc((size_t)(d->nirq + 1) * sizeof *q);
+    struct svd_irq *q = svd_alloc((size_t)(d->nirq + 1) * sizeof *q);
     memcpy(q, d->irq, (size_t)d->nirq * sizeof *q);
     qsort(q, (size_t)d->nirq, sizeof *q, irq_cmp);
     fputs("  \"interrupts\": ", f);
@@ -2240,7 +632,7 @@ static void write_json(FILE *f, const struct device *d, const char *flash,
 
     fputs(",\n  \"peripherals\": [", f);
     for (int i = 0; i < d->np; i++) {
-        const struct periph *p = &d->p[i];
+        const struct svd_periph *p = &d->p[i];
         fprintf(f, "%s\n    {\"name\": ", i ? "," : "");
         js(f, p->name);
         fputs(", \"description\": ", f);
@@ -2261,10 +653,10 @@ static void write_json(FILE *f, const struct device *d, const char *flash,
         fputs("],\n      \"interrupts\": ", f);
         json_irqs(f, p->irq, p->nirq, "        ");
         fputs(",\n      \"registers\": [", f);
-        struct flats fl = flat_regs(p, 1);
+        struct svd_flats fl = svd_flat_regs(p, 1);
         for (int k = 0; k < fl.n; k++) {
-            const struct flat *x = &fl.v[k];
-            const struct node *r = x->r;
+            const struct svd_flat *x = &fl.v[k];
+            const struct svd_node *r = x->r;
             fprintf(f, "%s\n        {\"name\": ", k ? "," : "");
             js(f, x->name);
             fputs(", \"path\": ", f);
@@ -2290,35 +682,13 @@ static void write_json(FILE *f, const struct device *d, const char *flash,
             }
             fputs("]}", f);
         }
-        free_flats(&fl);
+        svd_free_flats(&fl);
         fputs(fl.n ? "\n      ]}" : "]}", f);
     }
     fputs("\n  ]\n}\n", f);
 }
 
 /* ---- main ---------------------------------------------------------------- */
-
-static char *read_all(const char *path)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        die("cannot open it");
-    size_t cap = 1 << 20, n = 0;
-    char *b = xalloc(cap);
-    for (;;) {
-        if (n + 65536 > cap)
-            b = xgrow(b, cap *= 2);
-        size_t got = fread(b + n, 1, cap - n - 1, f);
-        n += got;
-        if (got == 0)
-            break;
-    }
-    fclose(f);
-    b[n] = 0;
-    if (strlen(b) != n)
-        die("it has a NUL byte in it: not an SVD file");
-    return b;
-}
 
 static FILE *open_out(const char *path)
 {
@@ -2395,10 +765,7 @@ int main(int argc, char **argv)
                         "peripherals, not the memories\n");
         return 2;
     }
-    g_file = in;
-    char *text = read_all(in);
-    struct device *d = read_device(xml_parse(text));
-    size_device(d);
+    struct svd_device *d = svd_load(in);
     if (prio) {
         int n = atoi(prio);
         if (n < 2 || n > 8) {

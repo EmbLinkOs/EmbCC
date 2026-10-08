@@ -322,8 +322,8 @@ embar: tools/embar/embar.c
 # embsvd -- a device's register database from its CMSIS-SVD file: the
 # device header, a startup file and a linker script (tools/embsvd). ISO C
 # and standalone, like embar.
-embsvd: tools/embsvd/embsvd.c
-	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
+embsvd: tools/embsvd/embsvd.c tools/embsvd/svd.c tools/embsvd/svd.h
+	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c tools/embsvd/svd.c
 
 # embmap -- where an image's flash and RAM go: sections, regions, the
 # biggest symbols, the bytes by input file from a map, and the growth
