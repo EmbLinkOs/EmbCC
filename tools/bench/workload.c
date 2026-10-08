@@ -268,6 +268,102 @@ static u32 k_fixed(int n)
     return sum;
 }
 
+/* The floating-point kernels: what a part with an FPU (a Cortex-M4F, an
+ * rv32imafc core) is bought for. Each checksum is of the results' BITS,
+ * so the two compilers must round every operation identically -- no
+ * contraction into fused multiply-adds (clang's -ffp-contract=off), and
+ * no reassociation. On a soft-float build each operation is a call. */
+static u32 fbits(float f) { union { float f; u32 u; } x; x.f = f; return x.u; }
+
+/* 10. A single-precision FIR filter and a biquad, as a DSP loop does. */
+static float ffir_x[256], ffir_h[16];
+static u32 k_ffir(int n)
+{
+    u32 sum = 0;
+    for (int i = 0; i < 16; i++) ffir_h[i] = (float)(i * 1234 % 8000 - 4000) * (1.0f / 32768.0f);
+    for (int r = 0; r < n * 2; r++) {
+        for (int i = 0; i < 256; i++) ffir_x[i] = (float)((i * 37 + r) % 2048) * 0.01f - 10.0f;
+        float y1 = 0.0f, y2 = 0.0f;
+        for (int i = 15; i < 256; i++) {
+            float acc = 0.0f;
+            for (int k = 0; k < 16; k++) acc += ffir_x[i - k] * ffir_h[k];
+            float y = acc + 0.915f * y1 - 0.427f * y2;
+            if (y > 100.0f) y = 100.0f;
+            if (y < -100.0f) y = -100.0f;
+            y2 = y1; y1 = y;
+            sum += fbits(y);
+        }
+    }
+    return sum;
+}
+
+/* 11. A single-precision matrix product, 16 by 16, accumulated. */
+static float fm_a[16][16], fm_b[16][16], fm_c[16][16];
+static u32 k_fmatrix(int n)
+{
+    u32 sum = 0;
+    for (int i = 0; i < 16; i++)
+        for (int j = 0; j < 16; j++) {
+            fm_a[i][j] = (float)((i * 7 + j * 3) % 11) * 0.25f - 1.0f;
+            fm_b[i][j] = (float)((i * 5 + j * 9) % 13) * 0.125f;
+        }
+    for (int r = 0; r < n; r++) {
+        for (int i = 0; i < 16; i++)
+            for (int j = 0; j < 16; j++) {
+                float s = 0.0f;
+                for (int k = 0; k < 16; k++) s += fm_a[i][k] * fm_b[k][j];
+                fm_c[i][j] = s;
+            }
+        for (int i = 0; i < 16; i++) {
+            sum += fbits(fm_c[i][(i + r) & 15]);
+            fm_a[i][r & 15] = fm_c[i][i] * 0.0625f;
+        }
+    }
+    return sum;
+}
+
+/* 12. Particles: positions, velocities and a 1/r falloff -- divides and
+ * comparisons and conversions to integer, as a control loop has. */
+static float pv_x[64], pv_y[64], pv_vx[64], pv_vy[64];
+static u32 k_fvec(int n)
+{
+    u32 sum = 0;
+    for (int i = 0; i < 64; i++) {
+        pv_x[i] = (float)(i % 8) - 3.5f; pv_y[i] = (float)(i / 8) - 3.5f;
+        pv_vx[i] = 0.0f; pv_vy[i] = 0.0f;
+    }
+    for (int r = 0; r < n * 6; r++) {
+        for (int i = 0; i < 64; i++) {
+            float d2 = pv_x[i] * pv_x[i] + pv_y[i] * pv_y[i] + 0.5f;
+            float f = 1.0f / d2;
+            pv_vx[i] = pv_vx[i] * 0.99f - pv_x[i] * f * 0.01f;
+            pv_vy[i] = pv_vy[i] * 0.99f - pv_y[i] * f * 0.01f;
+            pv_x[i] += pv_vx[i];
+            pv_y[i] += pv_vy[i];
+            if (pv_x[i] > 8.0f || pv_x[i] < -8.0f) pv_vx[i] = -pv_vx[i];
+            sum += (u32)(int)(pv_x[i] * 1000.0f) + fbits(f);
+        }
+    }
+    return sum;
+}
+
+/* 13. Double precision: a polynomial by Horner's rule and a running sum
+ * -- an RV32 or M4F part with F alone does these in software. */
+static u32 k_dpoly(int n)
+{
+    u32 sum = 0;
+    double acc = 0.0;
+    for (int r = 0; r < n * 40; r++) {
+        double x = (double)(r % 97) * 0.03125 - 1.5;
+        double p = ((((0.0083 * x - 0.041) * x + 0.166) * x - 0.5) * x + 1.0) * x;
+        acc += p / (1.0 + x * x);
+        union { double d; unsigned long long u; } b;
+        b.d = acc;
+        sum += (u32)b.u ^ (u32)(b.u >> 32);
+    }
+    return sum;
+}
+
 int main(void)
 {
     u32 r = 0;
@@ -289,6 +385,14 @@ int main(void)
     r = k_state(N);
 #elif KERNEL == 9
     r = k_fixed(N);
+#elif KERNEL == 10
+    r = k_ffir(N);
+#elif KERNEL == 11
+    r = k_fmatrix(N);
+#elif KERNEL == 12
+    r = k_fvec(N);
+#elif KERNEL == 13
+    r = k_dpoly(N);
 #endif
     bench_result = r;
     return (int)(r & 0x7f);

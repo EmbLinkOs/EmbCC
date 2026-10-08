@@ -463,6 +463,14 @@ static const int *rv_fp_pool_for(const struct ir_func *fn, int *n)
 {
     (void)fn;
     *n = target_riscv_flen() ? RV_NFPOOL : 0;
+    /* EMBCC_RA_MAXPOOL squeezes this class too (regalloc.c squeezes the
+     * integer one), so the exec goldens reach the paths that read an FP
+     * value from its slot beside ones in f registers. */
+    if (*n && getenv("EMBCC_RA_MAXPOOL")) {
+        int m = atoi(getenv("EMBCC_RA_MAXPOOL"));
+        if (m >= 0 && m < *n)
+            *n = m;
+    }
     return RV_FPOOL;
 }
 static int rv_fp_callee_saved(int r)
