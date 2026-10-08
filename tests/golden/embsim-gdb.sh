@@ -439,3 +439,119 @@ for v in spin:m3s idle:m3i; do
     want "$out/attach.$var" 'exited with code 0107\]' "attach ($var): it did not run on to its end"
 done
 echo "embsim-gdb: without --gdb-wait, a debugger attaches to the running image (a loop, and a WFI nothing wakes)"
+
+# ---- 7. RISC-V ---------------------------------------------------------------------
+# gdb-fw.c for RV32 (soft-float: an integer `real`) and RV64 with D (a
+# float one) on virt, QEMU's stub against EmbSim's. The session is the
+# M-profile one with RISC-V's registers where it names the core's own:
+# mstatus, mcause, mtvec, priv and mie, and the general and float groups
+# for every register (the CSR group is QEMU's long list of the
+# supervisor's and hypervisor's, which EmbSim does not have).
+Q32=${EMBCC_QEMU_RISCV32:-qemu-system-riscv32}
+Q64=${EMBCC_QEMU_RISCV64:-qemu-system-riscv64}
+# qemu_rv PORT QEMU ELF: QEMU's virt halted at reset with its stub
+qemu_rv() {
+    sh tests/harness/qrun.sh 120 "$2" -M virt -bios none -m 8 -nographic \
+        -kernel "$3" -S -gdb "tcp::$1" > /dev/null 2>&1 &
+    pids="$pids $!"
+}
+if command -v "$Q32" >/dev/null 2>&1 && command -v "$Q64" >/dev/null 2>&1 &&
+   "$GDB" -nx -batch -ex 'set architecture riscv:rv64' 2>&1 | grep -q 'riscv:rv64'; then
+    RVE="--board virt --ram-size 8M"
+    RUN=0                       # a function's prefix assignment above can persist
+    "$EMBCC" --target=riscv32-unknown-elf -g -O0 -c $src/gdb-fw.c -o "$out/rv32.o" &&
+    "$EMBLD" -e reset -Ttext 0x80000000 -Tstack 0x80800000 "$out/rv32.o" -o "$out/rv32.elf" &&
+    "$EMBCC" --target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -g -O0 \
+        -c $src/gdb-fw.c -o "$out/rv64.o" &&
+    "$EMBLD" -e reset -Ttext 0x80000000 -Tstack 0x80800000 "$out/rv64.o" -o "$out/rv64.elf" ||
+        fail "the RISC-V images do not build"
+    # shellcheck disable=SC2086
+    "$EMBSIM" "$out/rv32.elf" $RVE > /dev/null 2>&1; st=$?
+    [ $st = 71 ] || fail "rv32.elf exits $st without a debugger, not 71"
+    # shellcheck disable=SC2086
+    "$EMBSIM" "$out/rv64.elf" $RVE > /dev/null 2>&1; st=$?
+    [ $st = 65 ] || fail "rv64.elf exits $st without a debugger, not 65"
+    sed -e 's/^print \$xpsr$/print $mstatus/' -e 's/^print \$msp$/print $mcause/' \
+        -e 's/^print \$psp$/print $mtvec/' -e 's/^print \$control$/print $priv/' \
+        -e 's/^print \$primask$/print $mie/' \
+        -e 's/^info all-registers$/info registers\
+info registers float/' "$out/session.gdb" > "$out/rv-session.gdb"
+    for cfg in "rv32|$Q32|0134" "rv64|$Q64|0114"; do
+        IFS='|' read tag q code <<EOT
+$cfg
+EOT
+        next_port; qp=$port; next_port; ep=$port
+        qemu_rv $qp "$q" "$out/$tag.elf"
+        # shellcheck disable=SC2086
+        sim_at $ep "$out/$tag.elf" $RVE
+        gdb_run $qp "$out/$tag.elf" "$out/rv-session.gdb" "$out/$tag.gdb-qemu"
+        gdb_run $ep "$out/$tag.elf" "$out/rv-session.gdb" "$out/$tag.gdb-embsim"
+        same "$tag.gdb" "$out/$tag.gdb-qemu" $qp "$out/$tag.gdb-embsim" $ep
+        t=$out/$tag.gdb-embsim
+        want "$t" '^0x0*1000 in ?? ()' "$tag: not stopped at the reset ROM"
+        want "$t" '^Breakpoint 1, compute (a=0, b=2)' "$tag: no stop at compute(0, 2)"
+        want "$t" '^Value returned is \$1 = 1' "$tag: finish did not return 1"
+        want "$t" '^\$3 = {x = 10, y = -4}' "$tag: the variable was not changed"
+        want "$t" '^New value = 11' "$tag: the write watchpoint did not stop twice"
+        want "$t" '^Hardware read watchpoint 3: table\[3\]' "$tag: no read watchpoint stop"
+        want "$t" '^Value = 4' "$tag: the read watchpoint's value"
+        want "$t" '^Hardware access (read/write) watchpoint 5: scale' "$tag: no access watchpoint stop"
+        want "$t" '^a0  ' "$tag: no general registers"
+        want "$t" '^fcsr  ' "$tag: no floating-point registers"
+        want "$t" "exited with code $code\]" "$tag: the program did not run on to exit $code"
+        [ "$(sim_status $ep)" = $((0$code)) ] ||
+            fail "$tag: EmbSim's exit status is $(sim_status $ep), not $((0$code))"
+        echo "embsim-gdb: $tag: gdb's session on EmbSim is its session on QEMU ($(wc -l < "$out/$tag.gdb.qemu" | tr -d ' ') lines): breakpoints, steps, registers (the FPU's), memory, a variable written, write, read and access watchpoints"
+    done
+
+    # interrupting the running target, in a loop and in a WFI nothing wakes
+    next_port; qp=$port; next_port; ep=$port
+    qemu_rv $qp "$Q64" "$out/rv64.elf"
+    # shellcheck disable=SC2086
+    sim_at $ep "$out/rv64.elf" $RVE
+    interrupt_run $qp "$out/rv64.elf" "$out/rvint.qemu-raw"
+    interrupt_run $ep "$out/rv64.elf" "$out/rvint.embsim-raw"
+    for w in qemu embsim; do
+        sed 's/^0x[0-9a-f]* in main ()/main ()/' "$out/rvint.$w-raw" > "$out/rvint.$w"
+    done
+    same rv-interrupt "$out/rvint.qemu" $qp "$out/rvint.embsim" $ep
+    [ "$(grep -c '^Program received signal SIGINT' "$out/rvint.embsim")" = 2 ] ||
+        { cat "$out/rvint.embsim"; fail "rv64 interrupt: two SIGINT stops expected"; }
+    echo "embsim-gdb: rv64: interrupting the target (0x03), in a loop and in a WFI nothing can wake, as on QEMU"
+
+    # EmbSim only: the counts at a breakpoint, the target description
+    next_port; ep=$port
+    # shellcheck disable=SC2086
+    sim_at $ep "$out/rv64.elf" $RVE
+    gdb_run $ep "$out/rv64.elf" "$out/monitor.gdb" "$out/monitor.rv64"
+    t=$out/monitor.rv64
+    n=$(sed -n '/^Breakpoint 1, sum_table/,$p' "$t" | grep -m1 '^[0-9][0-9]*$')
+    c=$(sed -n '/^Breakpoint 1, sum_table/,$p' "$t" | grep '^[0-9][0-9]*$' | sed -n 2p)
+    bp=$(sed -n 's/^Breakpoint 1 at \(0x[0-9a-f]*\): .*/\1/p' "$t")
+    [ -n "$n" ] && [ -n "$c" ] && [ -n "$bp" ] || { cat "$t"; fail "rv64: no counts from the monitor"; }
+    # shellcheck disable=SC2086
+    "$EMBSIM" "$out/rv64.elf" $RVE --max-insns $n --count "$out/count.rv64" > /dev/null 2>&1
+    [ "$(sed -n 2p "$out/count.rv64")" = "$c" ] ||
+        fail "rv64: $n instructions are $(sed -n 2p "$out/count.rv64") cycles without a debugger, $c with"
+    # shellcheck disable=SC2086
+    "$EMBSIM" "$out/rv64.elf" $RVE --max-insns $((n + 1)) --trace "$out/trace.rv64" > /dev/null 2>&1
+    last=0x$(tail -1 "$out/trace.rv64" | cut -d: -f1 | sed 's/^0*//')
+    [ $((last)) = $((bp)) ] ||
+        fail "rv64: instruction $((n + 1)) is at $last, not at the breakpoint $bp"
+    want "$t" 'org.gnu.gdb.riscv.cpu' "rv64: the target description"
+    want "$t" 'org.gnu.gdb.riscv.fpu' "rv64: the FPU in the target description"
+    want "$t" 'name="mcycle"' "rv64: mcycle in the target description"
+    want "$t" '0x0000000080000000 0x0000000080800000 rw nocache' "rv64: RAM is not in the memory map"
+    echo "embsim-gdb: rv64: $n instructions and $c cycles to the breakpoint, as a run without a debugger counts them; the target description and the memory map"
+
+    # a trap with nowhere to go is a SIGSEGV stop
+    next_port; ep=$port
+    # shellcheck disable=SC2086
+    sim_at $ep "$out/rv32.elf" $RVE
+    gdb_run $ep "$out/rv32.elf" "$out/lockup.gdb" "$out/rvlockup.out"
+    [ "$(grep -c '^Program received signal SIGSEGV' "$out/rvlockup.out")" = 2 ] ||
+        { cat "$out/rvlockup.out"; fail "rv32: a trap with nowhere to go is not a SIGSEGV stop, twice"; }
+    echo "embsim-gdb: rv32: a trap with nowhere to go stops as SIGSEGV"
+else
+    echo "embsim-gdb: no qemu-system-riscv32/64 or no RISC-V gdb: the RISC-V checks did not run"
+fi
