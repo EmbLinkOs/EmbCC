@@ -17,6 +17,7 @@
 #include "../arch/mips/asm.h"
 #include "../arch/loongarch/asm.h"
 #include "../arch/tricore/asm.h"
+#include "../arch/xtensa/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
@@ -4623,6 +4624,45 @@ static int asm_resolve_reg_la(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* Xtensa: "r", "a" (GCC's letter for the address registers, which are
+ * Xtensa's general ones) and "g" a register, "m" a register holding the
+ * lvalue's address (written `aN, 0`), "i", "n" and GCC's Xtensa constant
+ * letters I-P a constant. A register variable must name a register
+ * irgen's pool hands out: a2-a6 and a8-a13 -- not a0 or a1 (the return
+ * address and the stack pointer), a7 (the frame base under alloca) or
+ * a14/a15 (the code generator's scratch). */
+static int asm_resolve_reg_xtensa(struct unit *u, struct stmt *s,
+                                  struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = xtasm_gpr(rn, (int)strlen(rn));
+        if (!((r >= 2 && r <= 6) || (r >= 8 && r <= 13)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "Xtensa asm (use a2-a6 or a8-a13)", rn);
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'a' || *p == 'g' || *p == 'm') has_r = 1;
+        if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+            has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -4647,6 +4687,8 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_la(u, s, op, c);
     if (target_get() == TARGET_TRICORE)
         return asm_resolve_reg_tricore(u, s, op, c);
+    if (target_get() == TARGET_XTENSA)
+        return asm_resolve_reg_xtensa(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)

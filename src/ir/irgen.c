@@ -4498,9 +4498,7 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             else if (target_get() == TARGET_TRICORE)
                 irg_asm_tricore(fn, s);
             else if (target_get() == TARGET_XTENSA)
-                diag_fatal(fn->file, s->line, "inline assembly is not "
-                           "supported for xtensa-none-elf yet (EmbCC has no "
-                           "Xtensa assembler vocabulary)");
+                irg_asm_xtensa(fn, s);
             else if (target_get() == TARGET_PPC32)
                 irg_asm_ppc(fn, s);
             else if (target_get() == TARGET_RX)

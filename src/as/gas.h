@@ -89,6 +89,11 @@ struct gas_target {
      * the start of each pass, and refused if still owed at its end. */
     void (*reset)(void);
     int (*open)(void);
+    /* Where the statement about to be encoded starts in its section, for
+     * a target whose PC-relative forms depend on the instruction's own
+     * address and not only on the distance (Xtensa's call and l32r round
+     * it to a word). NULL elsewhere. */
+    void (*at)(long pc);
 };
 
 /* Assembles `in_path` into an ET_REL object at `out_path`, for the
