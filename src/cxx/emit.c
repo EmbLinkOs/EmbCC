@@ -175,7 +175,10 @@ static const char *basic_c(enum cty_kind k)
     case CT_CHAR: return "char";
     case CT_SCHAR: return "signed char";
     case CT_UCHAR: case CT_CHAR8: return "unsigned char";
-    case CT_WCHAR: return target_wchar_unsigned() ? "unsigned int" : "int";
+    /* (Xtensa's is a 16-bit unsigned short) */
+    case CT_WCHAR: return target_wchar_size() == 2
+                          ? (target_wchar_unsigned() ? "unsigned short" : "short")
+                          : target_wchar_unsigned() ? "unsigned int" : "int";
     case CT_CHAR16: case CT_USHORT: return "unsigned short";
     case CT_CHAR32: case CT_UINT: return "unsigned int";
     case CT_SHORT: return "short";
@@ -818,12 +821,18 @@ static char *fp_class_text(struct cexpr *e)
     char *v = cx_fmt("__cx_fc%d", u);
     /* long double: a double where it is eight bytes (ARM, Darwin), x87's
      * format on x86-64, binary128 elsewhere */
-    int ld8 = target_ldouble_size() == 8;
-    const char *min = t->k == CT_FLOAT ? "0x1p-126f"
-                      : t->k == CT_DOUBLE ? "0x1p-1022"
-                      : ld8 ? "0x1p-1022L" : "0x1p-16382L";
-    int signbyte = t->k == CT_FLOAT ? 3 : t->k == CT_DOUBLE || ld8 ? 7
-                   : target_get() == TARGET_X86_64 ? 9 : 15;
+    long fsz = ct_size(t);
+    const char *min = fsz == 4 ? (t->k == CT_FLOAT ? "0x1p-126f"
+                                  : t->k == CT_DOUBLE ? "0x1p-126"
+                                  : "0x1p-126L")
+                      : fsz == 8 ? (t->k == CT_DOUBLE ? "0x1p-1022"
+                                    : "0x1p-1022L")
+                      : "0x1p-16382L";
+    /* the sign is the top bit of the most significant byte: the first
+     * on a big-endian target, else the last -- byte 9 of x87's ten */
+    int signbyte = target_big_endian() ? 0
+                   : fsz == 16 && target_get() == TARGET_X86_64 ? 9
+                   : (int)fsz - 1;
     const char *decl = cdecl(t, v);
     char *nan = cx_fmt("(%s != %s)", v, v);
     char *fin = cx_fmt("(%s - %s == %s - %s)", v, v, v, v);
@@ -1006,7 +1015,7 @@ static char *member_text(struct cexpr *e)
  * function (with ob, that object adjusted). */
 static int arm_pmf(void)
 {
-    return target_get() == TARGET_AARCH64 || cx_arm32_abi();
+    return cx_pmf_vbit_in_adj();
 }
 
 /* &C::f as a PMF's initializer. A virtual function's is its vtable

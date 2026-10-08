@@ -154,6 +154,7 @@ struct cty *ct_size_t(void);   /* the target's: unsigned long, unsigned int */
 struct cty *ct_ptrdiff_t(void);              /* long, int */
 int cx_ptr_size(void);                       /* bytes in a pointer */
 int cx_arm32_abi(void);                      /* the ARM C++ ABI's variants */
+int cx_pmf_vbit_in_adj(void);         /* a virtual PMF is flagged in adj */
 long cx_array_cookie(const struct cty *elem);   /* new[]'s header bytes */
 struct cty *cx_implicit_align_val_t(void);   /* std::align_val_t, declared */
 

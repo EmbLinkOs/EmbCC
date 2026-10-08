@@ -8,25 +8,47 @@
 #include <stdint.h>
 
 // ---- the data model, as relations ----
+// Where the target caps every alignment (nothing beyond 2 on ColdFire, 4
+// on RX and TriCore, 1 on AVR) a long long is aligned to the cap; and
+// RX's and AVR's double is binary32, four bytes.
+#if defined(__AVR__)
+#define LL_ALIGN 1
+#elif defined(__mcoldfire__)
+#define LL_ALIGN 2
+#elif defined(__RX__) || defined(__TRICORE__)
+#define LL_ALIGN 4
+#else
+#define LL_ALIGN 8
+#endif
+#if defined(__RX_32BIT_DOUBLES__) || defined(__AVR__)
+#define DBL_SIZE 4
+#else
+#define DBL_SIZE 8
+#endif
 static_assert(sizeof(size_t) == sizeof(void *), "size_t is pointer-sized");
 static_assert(sizeof(ptrdiff_t) == sizeof(void *), "ptrdiff_t too");
 static_assert(sizeof(intptr_t) == sizeof(void *), "intptr_t too");
 static_assert(sizeof(long) >= sizeof(int), "long");
-static_assert(sizeof(long long) == 8 && alignof(long long) == 8, "ll");
-static_assert(sizeof(double) == 8 && alignof(double) == 8, "double");
+static_assert(sizeof(long long) == 8 && alignof(long long) == LL_ALIGN, "ll");
+static_assert(sizeof(double) == DBL_SIZE &&
+              alignof(double) == (DBL_SIZE < LL_ALIGN ? DBL_SIZE : LL_ALIGN),
+              "double");
 static_assert(sizeof(int &) == sizeof(int), "a reference is its object");
 static_assert(sizeof(decltype(sizeof 0)) == sizeof(size_t), "sizeof's type");
 
 struct WithRef { char c; int &r; };
-static_assert(sizeof(WithRef) == 2 * sizeof(void *), "a reference member");
+static_assert(sizeof(WithRef) == sizeof(void *) + alignof(void *),
+              "a reference member");
 struct Poly { virtual ~Poly() {} char c; };
-static_assert(sizeof(Poly) == 2 * sizeof(void *), "vptr plus a char");
+static_assert(sizeof(Poly) == sizeof(void *) + alignof(void *),
+              "vptr plus a char");
 static_assert(alignof(Poly) == alignof(void *), "aligned as the vptr");
 struct M { void f(); virtual void g(); };
 static_assert(sizeof(&M::f) == 2 * sizeof(void *), "PMF: two words");
 static_assert(sizeof(int M::*) == sizeof(ptrdiff_t), "pointer to data");
 struct LL { char c; long long x; };
-static_assert(sizeof(LL) == 16 && offsetof(LL, x) == 8, "long long aligned");
+static_assert(sizeof(LL) == 8 + LL_ALIGN && offsetof(LL, x) == LL_ALIGN,
+              "long long aligned");
 
 // ---- templates ----
 template <typename T> constexpr T max_of(T a, T b) { return a > b ? a : b; }

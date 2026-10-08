@@ -2418,9 +2418,15 @@ char *cpp_process(const char *path, const char *src,
         if (cxx_strict)
             define_macro(&boot, "__STRICT_ANSI__ 1");
         if (si >= 3)                            /* (aligned new: C++17) */
-            define_macro(&boot, target_default_new_align() == 8
+            define_macro(&boot, target_default_new_align() == 16
+                                ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 16"
+                                : target_default_new_align() == 8
                                 ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 8"
-                                : "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 16");
+                                : target_default_new_align() == 4
+                                ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 4"
+                                : target_default_new_align() == 2
+                                ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 2"
+                                : "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 1");
         if (cxx_char8 && si < 4)                /* -fchar8_t before C++20 */
             define_macro(&boot, "__cpp_char8_t 202207L");
         /* C++ units present as g++ to the headers: libstdc++ is GCC's

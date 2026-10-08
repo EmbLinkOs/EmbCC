@@ -1605,6 +1605,42 @@ static int assemble_file(const char *in, const char *out)
     return gas_assemble(in, out, kind == 2, incdirs, nincdirs);
 }
 
+/* The embedded targets whose C++ is compiled without exceptions only:
+ * EmbCC writes no unwind tables for them, so a C++ unit with exceptions
+ * on is refused by name. (RV64, MIPS64 little-endian and LoongArch
+ * compile a unit with no landing pad either way; see cxx.md.) */
+static int cxx_exceptions_unwritten(void)
+{
+    switch (target_get()) {
+    case TARGET_THUMB: case TARGET_RISCV32: case TARGET_MIPS32:
+    case TARGET_SPARC32: case TARGET_PPC32: case TARGET_COLDFIRE:
+    case TARGET_XTENSA: case TARGET_TRICORE: case TARGET_RX:
+    case TARGET_AVR:
+        return 1;
+    case TARGET_MIPS64:
+        return target_big_endian();
+    default:
+        return 0;
+    }
+}
+
+static const char *cxx_unwind_tables_name(void)
+{
+    switch (target_get()) {
+    case TARGET_THUMB:    return "ARM EHABI unwind tables (.ARM.exidx)";
+    case TARGET_RISCV32:  return "RISC-V .eh_frame";
+    case TARGET_MIPS32:
+    case TARGET_MIPS64:   return "MIPS .eh_frame";
+    case TARGET_SPARC32:  return "SPARC .eh_frame";
+    case TARGET_PPC32:    return "PowerPC .eh_frame";
+    case TARGET_COLDFIRE: return "ColdFire .eh_frame";
+    case TARGET_XTENSA:   return "Xtensa .eh_frame";
+    case TARGET_TRICORE:  return "TriCore .eh_frame";
+    case TARGET_RX:       return "RX .eh_frame";
+    default:              return "AVR .eh_frame";
+    }
+}
+
 static int compile_unit(const char *in, const char *out, int pp_only)
 {
     char *src = read_file(in);
@@ -1636,48 +1672,24 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             fputs(pp, stdout);
         return 0;
     }
-    if (lang_cxx && !syntax_only && target_ptr_size() != 8 &&
-        target_get() != TARGET_THUMB && target_get() != TARGET_RISCV32) {
-        /* The C++ front end lays types out itself (src/cxx/type.c) by the
-         * target's data model, and follows the Itanium C++ ABI's 32-bit
-         * form -- with the ARM C++ ABI's changes on ARM. That is checked
-         * against clang on 32-bit ARM and RV32 only; on the other 32-bit
-         * targets nobody has compared a vtable, a guard or a mangled
-         * name, and AVR's two-byte pointers and one-byte alignment are a
-         * data model the front end has never laid a class out for. */
+    if (lang_cxx && !syntax_only && target_get() == TARGET_AVR) {
         fprintf(stderr,
                 "embcc: error: C++ is not yet supported for %s: the C++ "
-                "front end follows the C++ ABI of x86-64, AArch64, 32-bit "
-                "ARM and riscv32, and this target's (%d-byte pointers) is "
-                "not implemented\n",
-                target_triple_now(), target_ptr_size());
+                "front end does not lay classes out for a 16-bit int and "
+                "2-byte pointers\n", target_triple_now());
         return 1;
     }
     if (lang_cxx && !syntax_only && want_exceptions &&
-        (target_get() == TARGET_THUMB || target_get() == TARGET_RISCV32)) {
+        cxx_exceptions_unwritten()) {
         /* Exceptions need the unwinder's tables and a personality routine
-         * reading them: ARM EHABI's .ARM.exidx on ARM, DWARF .eh_frame on
-         * RV32. EmbCC writes neither for these machines yet, so a throw
-         * could never be caught -- refused rather than compiled into
-         * landing pads nothing would reach. */
+         * reading them: ARM EHABI's .ARM.exidx on ARM, DWARF .eh_frame
+         * elsewhere. EmbCC writes neither for these machines yet, so a
+         * throw could never be caught -- refused rather than compiled
+         * into landing pads nothing would reach. */
         fprintf(stderr,
                 "embcc: error: C++ exceptions are not supported for %s yet: "
                 "EmbCC writes no %s; compile with -fno-exceptions\n",
-                target_triple_now(), target_get() == TARGET_THUMB
-                ? "ARM EHABI unwind tables (.ARM.exidx)"
-                : "RISC-V .eh_frame");
-        return 1;
-    }
-    if (lang_cxx && !syntax_only && target_big_endian()) {
-        /* The C++ constant evaluator (src/cxx/consteval.c) models an
-         * object's bytes little-endian, and a literal's bytes come in in
-         * the target's order (lit_encode): a constexpr read of a big-endian
-         * u"" literal would see each unit byte-swapped. Refused until it
-         * reads memory in the target's order. */
-        fprintf(stderr,
-                "embcc: error: C++ is not yet supported for %s: the C++ "
-                "constant evaluator lays memory out little-endian, and this "
-                "target is big-endian\n", target_triple_now());
+                target_triple_now(), cxx_unwind_tables_name());
         return 1;
     }
     if (lang_cxx) {
