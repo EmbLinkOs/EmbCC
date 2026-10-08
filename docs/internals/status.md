@@ -331,7 +331,7 @@ implement, so they are errors:
 | `constructor(N)`, `destructor(N)` | `__attribute__((constructor(101))) is not supported: EmbCC emits one .init_array in source order and cannot honour a priority` |
 | `packed` or `aligned` on an enum | `a packed or aligned enum is not supported (EmbCC's enums are always int-sized)` |
 | `alias` on a variable | `alias attribute on variable 'b' is not supported (functions take it)` |
-| `section` on a block-scope variable | `section attribute on block-scope 'x' is not supported — declare it at file scope` |
+| `section` on an automatic variable | `section attribute on 'x', which is on the stack: only a static local can be placed in a section` (GCC refuses it too) |
 
 `error` and `warning` are accepted with a warning that the check they
 request will not happen:

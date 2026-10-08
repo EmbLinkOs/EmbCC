@@ -261,6 +261,7 @@ struct stmt {
     const char *asm_reg;  /* STMT_DECL: a register-asm binding, `register T
                            * x __asm__("r10")` — NULL for an ordinary local */
     int user_align;       /* STMT_DECL: __attribute__((aligned(N))); 0 = none */
+    const char *section;  /* STMT_DECL: a static local's section("name") */
     int vla_sp;           /* STMT_DECL of a VLA (ty_is_vla(dty)): the hidden
                            * slot the stack pointer is saved in just before
                            * the allocation; restoring it releases the VLA */

@@ -4552,11 +4552,21 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 parse_attributes(ps, &lat);
                 pcs_not_here(ps, &lat, "a variable");
                 pcs_not_here(ps, &lead, "a variable");
-                if (lat.section)
-                    parse_error_line(ps, s->line,
-                               "section attribute on block-scope '%s' is "
-                               "not supported — declare it at file scope",
-                               dname);
+                /* A static local is an object of static storage, and
+                 * goes where its section attribute says, as GCC puts it
+                 * (`static uint32_t boots __attribute__((section(
+                 * ".noinit")))` in a reset handler); sema's global takes
+                 * it. An automatic one lives on the stack: GCC refuses
+                 * it, and so does this. */
+                {
+                    const char *sec = lat.section ? lat.section : lead.section;
+                    if (sec && !local_static)
+                        parse_error_line(ps, s->line,
+                                   "section attribute on '%s', which is on "
+                                   "the stack: only a static local can be "
+                                   "placed in a section", dname);
+                    s->section = sec;
+                }
                 if (lead.aligned > lat.aligned)
                     lat.aligned = lead.aligned;
                 s->user_align = lat.aligned > decl_alignas

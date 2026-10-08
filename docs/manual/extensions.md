@@ -560,10 +560,14 @@ whose code is in more than one section describes it with
 `DW_AT_ranges`. A function and a variable cannot share a section name (`section '.shared' holds a function, and 'd' cannot share
 it: one is code, the other data`).
 
-`section` on a block-scope variable is refused:
+`section` on a `static` local places it as on a file-scope object, as
+GCC does: `static uint32_t boots __attribute__((section(".noinit")));`
+inside a reset handler goes to `.noinit`, under the local symbol
+`function.boots`. On an automatic variable, which lives on the stack, it
+is refused:
 
 ```text
-embcc: s.c:1: error: section attribute on block-scope 'x' is not supported — declare it at file scope
+embcc: s.c:1: error: section attribute on 'x', which is on the stack: only a static local can be placed in a section
 ```
 
 On a structure member it is accepted and has no effect.

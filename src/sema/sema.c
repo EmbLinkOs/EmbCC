@@ -5235,6 +5235,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                  * whatever alignment .bss happened to have, and nothing
                  * said so. */
                 g->user_align = s->user_align;
+                g->section = s->section;      /* .noinit, .ccmram... */
                 g->defined = 1;
                 g->used = 1;
                 /* Aggregates arrive pre-flattened in s->inits; a scalar's
