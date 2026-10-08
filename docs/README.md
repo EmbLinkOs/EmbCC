@@ -64,6 +64,7 @@ Start with the [architecture](internals/architecture.md) and the
 | [ARMv6-M plan](internals/armv6m-plan.md) | What a Cortex-M0 code generator needs from the Thumb backend, and the order to build it in |
 | [Object files](internals/object-formats.md) | ELF, Mach-O, COFF and EMBX writers |
 | [Linker](internals/linker.md) | How `embld` resolves, lays out and relocates |
+| [EmbSim](internals/embsim.md) | The simulator's modules and interfaces, its GDB server, and how to add a core, a peripheral or a board |
 | [Testing](internals/testing.md) | The test suites, the boards, and how to add a test |
 | [Contributing](internals/contributing.md) | Conventions, the review checklist, commit style |
 | [Design decisions](internals/decisions.md) | The decision record (D-001 …) |
