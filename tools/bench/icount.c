@@ -22,6 +22,16 @@
  * the guest spins on in its last loop) or that never exits at all (the
  * AVR), so the count is exact where the total would not be.
  *
+ * On the AVR, instructions are counted one by one, not by blocks: QEMU
+ * runs a block again from an access to the data space it must redo
+ * (its TLB fill for the registers and I/O restarts the instruction), so
+ * a block's count added as it starts counts some instructions twice.
+ * The rerun shows as the same instruction twice in a row, which only a
+ * jump to itself does honestly, so a repeat is not counted. An
+ * instruction a skip passes over is counted (QEMU runs it in its block
+ * under a condition); the cycles are the datasheet's, but the skip's are
+ * not seen, so only EmbSim's AVR cycles are exact.
+ *
  * Neither model is cycle-accurate -- there are no wait states, no load-use
  * stalls, no flash -- but both charge the things a compiler chooses
  * between. Static costs are added per translation block, inline, as the
@@ -41,7 +51,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 static struct qemu_plugin_scoreboard *counts, *costs;
 static qemu_plugin_u64 count, cost;
 static char out_path[1024];
-static int is_arm;
+static int is_arm, is_avr;
 
 /* What a block ends in, for the next one to judge: whether its last
  * instruction can branch, and where execution goes when it does not. */
@@ -55,6 +65,29 @@ static uint64_t taken;
 static uint64_t stop_addr, stop_count, stop_cost;
 static int stop_set, stopped;
 
+/* the AVR's instructions, counted one at a time */
+struct avr_insn {
+    uint64_t vaddr, cost;
+    int self;                       /* a jump to itself */
+};
+static uint64_t avr_last = ~0ull, avr_count, avr_cycles;
+
+static void avr_exec(unsigned int vcpu, void *ud)
+{
+    (void)vcpu;
+    const struct avr_insn *in = ud;
+    if (in->vaddr == avr_last && !in->self)
+        return;                     /* a block run again from here */
+    avr_last = in->vaddr;
+    if (stop_set && !stopped && in->vaddr == stop_addr) {
+        stopped = 1;
+        stop_count = avr_count;
+        stop_cost = avr_cycles + taken;
+    }
+    avr_count++;
+    avr_cycles += in->cost;
+}
+
 static void tb_exec(unsigned int vcpu, void *ud)
 {
     (void)vcpu;
@@ -62,10 +95,10 @@ static void tb_exec(unsigned int vcpu, void *ud)
     if (prev_tb && prev_tb->branch && e->start != prev_tb->fall)
         taken++;
     prev_tb = e;
-    if (stop_set && !stopped && e->start == stop_addr) {
+    if (stop_set && !stopped && !is_avr && e->start == stop_addr) {
         stopped = 1;
         stop_count = qemu_plugin_u64_sum(count);
-        stop_cost = qemu_plugin_u64_sum(cost) + 2 * taken;
+        stop_cost = qemu_plugin_u64_sum(cost) + (is_avr ? 1 : 2) * taken;
     }
 }
 
@@ -81,8 +114,20 @@ static void tb_trans(struct qemu_plugin_tb *tb, void *p)
         uint8_t b[4] = { 0, 0, 0, 0 };
         size_t sz = qemu_plugin_insn_size(in);
         qemu_plugin_insn_data(in, b, sz < 4 ? sz : 4);
-        int br;
-        c += is_arm ? arm_cost(b, sz, &br) : rv_cost(b, sz, &br);
+        int br, ic;
+        ic = is_arm ? arm_cost(b, sz, &br) : is_avr ? avr_cost(b, sz, &br)
+                                               : rv_cost(b, sz, &br);
+        c += (uint64_t)ic;
+        if (is_avr) {
+            struct avr_insn *a = calloc(1, sizeof *a);
+            unsigned w = b[0] | b[1] << 8;
+            a->vaddr = qemu_plugin_insn_vaddr(in);
+            a->cost = (uint64_t)ic;
+            a->self = w == 0xcfff ||                    /* rjmp . */
+                      ((w & 0xf800) == 0xf000 && ((w >> 3) & 0x7f) == 0x7f);
+            qemu_plugin_register_vcpu_insn_exec_cb(in, avr_exec,
+                                                   QEMU_PLUGIN_CB_NO_REGS, a);
+        }
         if (k == n - 1) {
             e->branch = br;
             e->fall = qemu_plugin_insn_vaddr(in) + sz;
@@ -100,7 +145,11 @@ static void at_exit(void *p)
 {
     (void)p;
     uint64_t total = qemu_plugin_u64_sum(count);
-    uint64_t cyc = qemu_plugin_u64_sum(cost) + 2 * taken;
+    uint64_t cyc = qemu_plugin_u64_sum(cost) + (is_avr ? 1 : 2) * taken;
+    if (is_avr) {
+        total = avr_count;
+        cyc = avr_cycles + taken;
+    }
     if (stopped) {
         total = stop_count;
         cyc = stop_cost;
@@ -122,6 +171,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
 {
     is_arm = info && info->target_name &&
              strncmp(info->target_name, "arm", 3) == 0;
+    is_avr = info && info->target_name &&
+             strncmp(info->target_name, "avr", 3) == 0;
     for (int i = 0; i < argc; i++) {
         if (strncmp(argv[i], "out=", 4) == 0) {
             strncpy(out_path, argv[i] + 4, sizeof out_path - 1);
