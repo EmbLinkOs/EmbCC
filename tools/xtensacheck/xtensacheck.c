@@ -285,6 +285,15 @@ static void vocab(void)
     }
     for (j = -8; j < 8; j++)
         V(xt_rotw(&C, j), "rotw\t%d", j);
+    /* the zero-overhead loops: their end 0..255 bytes past at + 4 */
+    for (k = 0; k < 3; k++)
+        for (j = 0; j < 6; j++) {
+            static const char *const ln[] = { "loop", "loopnez", "loopgtz" };
+            static const long lo[] = { 0, 1, 3, 64, 254, 255 };
+            int s = (j * 5 + k * 3 + 2) % NR;
+            V(xt_w(&C, xt_enc_loop(k, s, lo[j])), "%s\ta%d, 0x%lx", ln[k], s,
+              PC + 4 + (unsigned long)lo[j]);
+        }
     for (k = 0; k < (int)(sizeof srs / sizeof srs[0]); k++) {
         int t = (k * 5 + 3) % NR;
         V(xt_rsr(&C, t, srs[k].sr), "rsr.%s\ta%d", srs[k].nm, t);
@@ -680,7 +689,7 @@ static int check_li(void)
 /* Every range check is load-bearing: the field is narrower than the C
  * type the caller passes, and a truncated value is a real instruction
  * that does something else. */
-#define NREFUSE 40
+#define NREFUSE 43
 static void refuse(int n)
 {
     struct code c = { 0 };
@@ -725,6 +734,9 @@ static void refuse(int n)
     case 37: xt_rotw(&c, 8); break;
     case 38: xt_w(&c, xt_enc_bbi(0, 2, 32, 0)); break;
     case 39: xt_rsr(&c, 2, 256); break;
+    case 40: xt_w(&c, xt_enc_loop(XT_LOOP, 2, -1)); break;
+    case 41: xt_w(&c, xt_enc_loop(XT_LOOPGTZ, 2, 256)); break;
+    case 42: xt_rur(&c, 2, 256); break;
     default: printf("no refusal %d\n", n); exit(2);
     }
     printf("refusal %d did not fire; %d bytes were emitted\n", n, c.len);
