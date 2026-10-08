@@ -498,9 +498,11 @@ check attr-ms-abi \
 # which orders the array in a way one .init_array in source order cannot
 # express. Accepting the number and ignoring it would run them in the
 # wrong order, which is the entire reason for writing one.
+# constructor(N) is honoured (tests/golden/ctor-priority.sh); a priority
+# past GCC's range is not one
 check attr-constructor-priority \
-    '__attribute__((constructor(101))) static void f(void) { }' \
-    "cannot honour a priority"
+    '__attribute__((constructor(70000))) static void f(void) { }' \
+    "a priority is 0 to 65535"
 
 # An attribute EmbCC has never heard of is warned about and ignored,
 # which is GCC's behaviour and the thing that would have caught

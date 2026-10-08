@@ -3071,8 +3071,13 @@ static void step(void)
         exc_return(exc_return_value);
         return;
     }
-    if (pc_written && npc == pc && !in_it() && state == RUN) {
-        /* a branch to itself: the end unless an exception can come */
+    if (pc_written && npc == pc && !in_it() && state == RUN &&
+        memcmp(snap, R, 15 * sizeof R[0]) == 0) {
+        /* a branch to itself that changed nothing else: the end unless an
+         * exception can come. A `pop {.., pc}` that lands on itself is
+         * not one -- a recursive function's last frame returns to the
+         * same pop in its caller, with sp moved on -- and nor is any
+         * jump to itself that wrote a register. */
         int can = (st_csr & 3) == 3;
         for (int n = 2; n < NEXC && !can; n++)
             if (pend[n])
