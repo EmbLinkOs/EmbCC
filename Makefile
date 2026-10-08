@@ -504,6 +504,10 @@ embdbg: tools/embdbg/embdbg.c tools/embdbg/remote.c tools/embdbg/remote.h \
 	$(CC) $(CFLAGS) -o $@ tools/embdbg/embdbg.c tools/embdbg/remote.c \
 	    src/arch/x86_64/disasm.c
 
+# The target database is #included by target.c, and nothing else tracks
+# header dependencies, so say this one.
+$(BUILD)/arch/target.o: $(wildcard src/targets/*.def)
+
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<

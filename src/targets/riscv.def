@@ -1,0 +1,26 @@
+/* RISC-V: the triples that name it and its data models. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* The RISC-V psABI. Unsigned char like the ARM ones, but a SIGNED
+ * wchar_t -- which is why those are two columns and not one -- and
+ * a binary128 long double at both widths. Read off
+ * `clang -target riscv{32,64}-unknown-elf -dM`. */
+DATA_MODEL(RISCV32, .ptr = 4, .lng = 4, .it = 4, .dbl = 8, .ldbl = 16,
+           .char_uns = 1, .wchar_uns = 0, .int128 = 0, .maxal = 0)
+
+DATA_MODEL(RISCV64, .ptr = 8, .lng = 8, .it = 4, .dbl = 8, .ldbl = 16,
+           .char_uns = 1, .wchar_uns = 0, .int128 = 1, .maxal = 0)
+
+/* RISC-V, bare metal. `-unknown-elf` is the spelling the reference
+ * toolchains use and the one a project's existing --target= string
+ * will say; the short forms are accepted because everyone writes
+ * them. Freestanding only for now, as ARMv7-M is: a hosted RISC-V
+ * needs an OS underneath and EmbLinkOS does not run there yet. */
+TRIPLE("riscv32-unknown-elf",       RISCV32,     NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("riscv32",                   RISCV32,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("riscv32-elf",               RISCV32,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("rv32",                      RISCV32,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("riscv64-unknown-elf",       RISCV64,     NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("riscv64",                   RISCV64,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("riscv64-elf",               RISCV64,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("rv64",                      RISCV64,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)

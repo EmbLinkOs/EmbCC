@@ -15,7 +15,7 @@ changing EmbCC. Register allocation, which all five share, is in
 
 | Path | Contents |
 |---|---|
-| `target.c`, `target.h` | the target model: triples, data model, ABI questions, relocation kinds |
+| `target.c`, `target.h` | the target model: triples and data model (read from the target database, `src/targets/`), ABI questions, relocation kinds |
 | `backend.h` | the contract a backend implements |
 | `code.c`, `code.h` | the machine-code buffer every encoder writes into |
 | `predef.c`, `predef.h` | which predefined-macro table the target uses |
@@ -50,14 +50,15 @@ A target has three independent dimensions: the architecture
 `TARGET_RISCV32`, `TARGET_RISCV64`, `TARGET_AVR`, `TARGET_MIPS32`), the operating system
 (`enum target_os`: none, EmbLinkOS, Linux, Darwin, Windows), and the
 object format (`enum target_fmt`: ELF, Mach-O, COFF). The accepted
-triples are an explicit table, `g_triples[]` in `target.c`, not a cross
+triples are an explicit table, the `TRIPLE` rows of the target database
+(`src/targets/<family>.def`, read into `g_triples[]` in `target.c`), not a cross
 product, so a combination that does not exist cannot be accepted by
 accident. Each row is marked canonical (the spelling `-dumpmachine` and
 diagnostics print) or an alias. A name not in the table is refused.
 
-The Thumb rows also carry the sub-architecture: ARMv7-M, ARMv7E-M
-(`thumb_em`), or ARMv8-M Mainline (`g_thumb_arch` 8), and whether the
-name was an `-eabihf` one. These are a level on one target, not separate
+The ARM rows also carry the sub-architecture (ARMv7-M, ARMv7E-M, ARMv8-M
+Mainline and Baseline, ARMv6-M, ARMv7-A) and whether the name is an
+`-eabihf` one, and a MIPS row its byte order. These are a level on one target, not separate
 targets, because the data model and calling convention are the same.
 
 When no `--target=` is given, `target_apply_default()` applies, in order:
@@ -66,8 +67,8 @@ When no `--target=` is given, `target_apply_default()` applies, in order:
 
 ### The data model
 
-`g_model[]` holds one row per architecture, and each question has a
-function:
+`g_model[]` holds one row per architecture, the `DATA_MODEL` rows of the
+target database, and each question has a function:
 
 | Function | x86-64 | AArch64 | Thumb | RV32 | RV64 | AVR | MIPS32 |
 |---|---|---|---|---|---|---|---|
@@ -137,9 +138,11 @@ way that relocation type's linker reads it back.
 
 ### Adding a target
 
-1. A row in `g_model[]`, an answer in every `switch` in `target.c` (the
-   build fails until each is given), rows in `g_triples[]`, and the
-   relocation mappings.
+1. Its family file in the target database, `src/targets/<family>.def`,
+   with a `DATA_MODEL` row and its `TRIPLE` rows, and the file's line in
+   `src/targets/targets.def`. Then an answer in every `switch` in
+   `target.c` (the build fails until each is given), and the relocation
+   mappings.
 2. A directory with `codegen.c`, `emit.c` and `irgen.c`, and a
    `codegen_unit_*` entry point.
 3. Its row in the backend registry, `src/arch/backends.c` (see [The

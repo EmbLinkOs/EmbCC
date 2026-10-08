@@ -8,7 +8,9 @@ Status: **approved 2026-10-08, in progress.** Done so far:
   options in `src/arch/<arch>/options.c`;
 - the optimizer split: `src/opt/opt.c` is the pass manager and each pass
   is a file of its own (40 files instead of one of 17,551 lines), with
-  the compiler's output byte-identical.
+  the compiler's output byte-identical;
+- the target database, first step: the triples and the data models are
+  rows in `src/targets/<family>.def` instead of tables in `target.c`.
 
 ## Why
 
