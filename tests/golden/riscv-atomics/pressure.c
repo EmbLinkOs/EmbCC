@@ -28,12 +28,32 @@ __attribute__((noinline)) long many_cas(long a, long b, long c, long d, long e,
     return a + b + c + d + e + f + g + h + x * 7 + y * 11 + o;
 }
 
+/* a frame past the 12-bit offsets, so a value in a slot is reached
+ * through t6, which the sequences also use (run with EMBCC_RA_MAXPOOL=0
+ * too, every value in a slot) */
+__attribute__((noinline)) long far_frame(unsigned short *p, unsigned short e,
+                                         unsigned short d, unsigned char *q)
+{
+    volatile char big[5000];
+    big[0] = 1; big[4999] = 2;
+    unsigned short o = __sync_val_compare_and_swap(p, e, d);
+    unsigned short x = e;
+    int ok = __atomic_compare_exchange_n(p, &x, 7, 0, __ATOMIC_SEQ_CST,
+                                         __ATOMIC_SEQ_CST);
+    unsigned char n = __atomic_fetch_nand(q, 0x3c, __ATOMIC_ACQUIRE);
+    return o * 1000L + x * 10 + ok + n + big[0] + big[4999];
+}
+
 int main(void)
 {
     u.w = 0x11223344u;
     putn(many(1, 2, 3, 4, 5, 6, 7, 8, &u.b[2], 0x05));
     putn((long)(u.w >> 16)); putn((long)(u.w & 0xffff));
     putn(many_cas(1, 2, 3, 4, 5, 6, 7, 8, &u.h[1], 0x1127, 0xBEEF));
+    putn((long)(u.w >> 16)); putn((long)(u.w & 0xffff));
+    putn(far_frame(&u.h[0], 0x3344, 0x1234, &u.b[3]));
+    putn((long)(u.w >> 16)); putn((long)(u.w & 0xffff));
+    putn(far_frame(&u.h[1], u.h[1], 0x4321, &u.b[1]));
     putn((long)(u.w >> 16)); putn((long)(u.w & 0xffff));
     puts_("\nDONE\n");
     return 0;
