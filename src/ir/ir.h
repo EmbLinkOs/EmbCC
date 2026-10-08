@@ -600,6 +600,9 @@ struct ir_unit *irgen(struct unit *u);
  * the point on a board. */
 enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4 };
 void irgen_set_sanitize(unsigned mask);
+/* -finstrument-functions, with GCC's two exclusion lists (comma-separated;
+ * either may be NULL) */
+void irgen_set_instrument(int on, const char *funcs, const char *files);
 void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
 /* A new table of n entries (all -1) in fn; its index. */
 int ir_jt_add(struct ir_func *fn, int n);

@@ -4394,6 +4394,8 @@ int main(int argc, char **argv)
      * asked for by name (it is the only mode, so this only has to be
      * accepted, not acted on). */
     unsigned san_mask = 0;
+    int want_instr = 0;              /* -finstrument-functions */
+    const char *instr_funcs = NULL, *instr_files = NULL;
     int san_trap_asked = 0;
     (void)san_trap_asked;
     const char *input = NULL, *output = NULL;
@@ -4961,6 +4963,18 @@ int main(int argc, char **argv)
                 cpp_cmdline_define(uns ? "__CHAR_UNSIGNED__=1"
                                        : "__CHAR_UNSIGNED__", !uns);
             }
+        } else if (strcmp(argv[i], "-finstrument-functions") == 0) {
+            want_instr = 1;
+        } else if (strcmp(argv[i], "-fno-instrument-functions") == 0) {
+            want_instr = 0;
+        } else if (strncmp(argv[i],
+                           "-finstrument-functions-exclude-function-list=",
+                           45) == 0) {
+            instr_funcs = argv[i] + 45;
+        } else if (strncmp(argv[i],
+                           "-finstrument-functions-exclude-file-list=",
+                           41) == 0) {
+            instr_files = argv[i] + 41;
         } else if (strcmp(argv[i], "-ffreestanding") == 0 ||
                    strcmp(argv[i], "-fno-builtin") == 0 ||
                    strcmp(argv[i], "-fno-strict-aliasing") == 0 ||
@@ -6350,6 +6364,7 @@ int main(int argc, char **argv)
      * optimizer folds away the ones whose operands it knows -- a
      * constant non-zero divisor leaves nothing behind. */
     irgen_set_sanitize(san_mask);
+    irgen_set_instrument(want_instr, instr_funcs, instr_files);
     irgen_set_opt_size(opt_for_size);
     lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
     /* The C parser types the constants (parse.c); the C++ front end

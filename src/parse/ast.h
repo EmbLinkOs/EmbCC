@@ -393,6 +393,8 @@ struct func {
      * unused, force or forbid inlining, warn at each call, warn when a
      * caller throws the result away. `vis` is an ELF visibility. */
     int attr_used, attr_unused, attr_always_inline, attr_noinline;
+    int attr_no_instrument;  /* no_instrument_function: -finstrument-functions
+                              * leaves it alone (sticky across declarations) */
     int attr_deprecated, attr_warn_unused_result;
     /* C11 6.7.4p7. This declaration said `inline` / `extern`, and the
      * function carries __attribute__((gnu_inline)). Sema folds every

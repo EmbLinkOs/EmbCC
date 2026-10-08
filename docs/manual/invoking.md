@@ -65,7 +65,7 @@ the full entry.
 | [Diagnostics](#warning-and-diagnostic-options) | `-w` `-Werror` `-Wno-error` `-Werror=NAME` `-Wno-error=NAME` `-Wall` `-Wextra` `-W` `-WNAME` `-Wno-NAME` `-Wsystem-headers` `-pedantic` `-pedantic-errors` `-fdiagnostics-format=FMT` `-fdiagnostics-color[=WHEN]` `-fno-diagnostics-color` `-fmax-errors=N` `-fmessage-length=N` `-fdiagnostics-parseable-fixits` `--fix` `-fanalyzer` |
 | [Debugging](#debugging-options) | `-g` `-g1` `-g2` `-g3` `-ggdb` `-gdwarf` `-gdwarf-2` `-gdwarf-3` `-gdwarf-4` |
 | [Optimization](#optimization-options) | `-O` `-O0` `-O1` `-O2` `-O3` `-Os` `-Oz` `-Og` `-Ofast` `-fPASS` `-fno-PASS` `-fno-inline-functions` `-finline-functions` `-finline-small-functions` `-fno-inline-small-functions` `-finline-limit=N` `-ffast-math` `-fno-math-errno` `-fno-delete-null-pointer-checks` `-fno-tree-loop-distribute-patterns` `-fmerge-constants` `-fno-isolate-erroneous-paths-dereference` `-fno-move-loop-invariants` `-fno-ipa-sra` `-fno-lto` `-fremarks` `-fremarks=json` |
-| [Instrumentation](#instrumentation-options) | `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fcallgraph-info[=su]` `-ftime-report` `-fno-stack-protector` |
+| [Instrumentation](#instrumentation-options) | `-finstrument-functions` `-finstrument-functions-exclude-function-list=LIST` `-finstrument-functions-exclude-file-list=LIST` `-fsanitize=LIST` `-fno-sanitize=LIST` `-fsanitize-trap[=LIST]` `-fsanitize-undefined-trap-on-error` `-fstack-usage` `-fcallgraph-info[=su]` `-ftime-report` `-fno-stack-protector` |
 | [Preprocessor](#preprocessor-options) | `-D NAME[=VALUE]` `-U NAME` `-include FILE` `-Wp,ARGS` `-M` `-MM` `-MD` `-MMD` `-MF FILE` `-MT TARGET` `-MQ TARGET` `-MP` |
 | [Directory search](#directory-search-options) | `-I DIR` `-isystem DIR` `-nostdinc` |
 | [Assembling and linking](#assembler-and-linker-options) | (input suffixes `.s` `.S` `.asm`) `-Wa,ARGS` `-Wl,ARGS` `-Xlinker ARG` `-specs=FILE` |
@@ -929,6 +929,39 @@ the keys `pass`, `decision`, `subject`, `reason`, `detail` and
 also [`embcc why`](#embcc-why-decision-subject-file-option).
 
 ## Instrumentation options
+
+### `-finstrument-functions`, `-fno-instrument-functions`
+
+GCC's: every function calls
+
+```c
+void __cyg_profile_func_enter(void *this_fn, void *call_site);
+void __cyg_profile_func_exit(void *this_fn, void *call_site);
+```
+
+on entry and before each return. `this_fn` is the function's address and
+`call_site` its return address (`__builtin_return_address(0)`). A return
+calls the exit hook after its value is computed. An inlined function
+keeps its calls.
+
+Left alone:
+- a function marked `no_instrument_function` on any of its declarations;
+- `naked` functions and interrupt handlers;
+- the two hooks themselves.
+
+`lib/rt` defines both hooks, weak, as EmbTrace's recorder: a ring of
+events that `embtrace_dump()` writes out for `embtrace` on the host. See
+[embtrace](tools/embtrace.md). A program that defines the hooks itself
+replaces them.
+
+### `-finstrument-functions-exclude-function-list=LIST`, `-finstrument-functions-exclude-file-list=LIST`
+
+`LIST` is comma-separated.
+- **Function list:** a function whose name is on it, exactly, is not
+  instrumented.
+- **File list:** a function is not instrumented when any item occurs in
+  the path of the file that defines it. The match is a substring, as
+  GCC's is, so `lib2` matches `src/lib2.c`.
 
 ### `-fsanitize=LIST`, `-fno-sanitize=LIST`
 

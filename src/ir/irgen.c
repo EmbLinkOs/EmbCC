@@ -3892,6 +3892,99 @@ static int g_eh_cur = -1;
 static unsigned g_san;
 
 void irgen_set_sanitize(unsigned mask) { g_san = mask; }
+
+/* ---- -finstrument-functions -------------------------------------------
+ *
+ * GCC's: every function calls
+ *
+ *   void __cyg_profile_func_enter(void *this_fn, void *call_site);
+ *   void __cyg_profile_func_exit(void *this_fn, void *call_site);
+ *
+ * on entry and before each return, call_site being its own return address
+ * (__builtin_return_address(0)). Not a function marked
+ * no_instrument_function, one whose name is on
+ * -finstrument-functions-exclude-function-list (exactly), or one defined in
+ * a file a string on -finstrument-functions-exclude-file-list is part of
+ * (a substring, as GCC matches) -- nor the two hooks themselves. lib/rt's
+ * trace.c is EmbTrace's implementation of them. */
+static int g_instr;
+static const char *g_instr_funcs, *g_instr_files;
+static int g_instr_this;            /* gen_func: this function is instrumented */
+static struct func *g_instr_fn;     /* ...and which function that is */
+
+void irgen_set_instrument(int on, const char *funcs, const char *files)
+{
+    g_instr = on;
+    g_instr_funcs = funcs;
+    g_instr_files = files;
+}
+
+/* Is `name` an item of the comma-separated `list` (exactly), or -- with
+ * `sub` -- does an item occur in it? */
+static int instr_listed(const char *list, const char *name, int sub)
+{
+    if (!list || !name)
+        return 0;
+    for (const char *p = list; *p; ) {
+        const char *e = strchr(p, ',');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (n) {
+            if (sub) {
+                for (const char *q = name; strlen(q) >= n; q++)
+                    if (!strncmp(q, p, n))
+                        return 1;
+            } else if (strlen(name) == n && !strncmp(name, p, n)) {
+                return 1;
+            }
+        }
+        if (!e)
+            break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+static int instr_wanted(const struct func *f, const char *file)
+{
+    return g_instr && !f->attr_no_instrument && !f->is_naked && !f->is_isr &&
+           strcmp(f->name, "__cyg_profile_func_enter") != 0 &&
+           strcmp(f->name, "__cyg_profile_func_exit") != 0 &&
+           !instr_listed(g_instr_funcs, f->name, 0) &&
+           !instr_listed(g_instr_files, file, 1);
+}
+
+/* __builtin_return_address(0), for the hooks' call_site */
+static int emit_retaddr0(struct ir_func *fn)
+{
+    struct ir_ins *fa = emit(fn);
+    fa->op = IR_FRAMEADDR;
+    fa->dst = new_temp(fn);
+    if (!target_has_frame_chain()) {
+        fa->imm = 2;
+        fa->w = AW;
+        return fa->dst;
+    }
+    fa->w = 8;
+    int at = emit_bin(fn, IR_ADD, fa->dst, emit_const(fn, AW, AW), AW, 0);
+    return emit_load(fn, at, ty_ptr(ty_base(TY_VOID, 0)));
+}
+
+/* hook(this function, call_site) */
+static void emit_instr_call(struct ir_func *fn, struct func *f,
+                            const char *hook, int line)
+{
+    struct type *vp = ty_ptr(ty_base(TY_VOID, 0));
+    struct type *const tys[2] = { vp, vp };
+    int vals[2];
+    struct ir_ins *fa = emit(fn);
+    fa->op = IR_FADDR;
+    fa->callee = f;
+    fa->callee_sym = ir_sym_func(cur_unit, f);
+    fa->dst = new_temp(fn);
+    vals[0] = fa->dst;
+    vals[1] = emit_retaddr0(fn);
+    libatomic_call(fn, hook, ty_base(TY_VOID, 0), 2, vals, tys, line);
+}
 unsigned irgen_sanitize(void) { return g_san; }
 
 /* if (cond) trap; */
@@ -4401,6 +4494,9 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
         case STMT_RETURN: {
             struct ir_ins *i;
             int v = s->expr ? gen_expr(fn, s->expr) : -1;
+            if (g_instr_this)           /* after the value, before leaving */
+                emit_instr_call(fn, g_instr_fn, "__cyg_profile_func_exit",
+                                s->line);
             i = emit(fn);
             i->op = IR_RET;
             i->a = v;
@@ -4822,7 +4918,16 @@ static void gen_func(struct ir_func *fn, struct func *f)
     }
     if (f->has_label_data)
         label_data_marks(fn, f);
+    g_instr_this = instr_wanted(f, fn->file);
+    g_instr_fn = f;
+    if (g_instr_this)
+        emit_instr_call(fn, f, "__cyg_profile_func_enter", f->line);
     gen_stmt(fn, f->body, NULL);
+    /* falling off the end returns too; after a body every path of which
+     * returned, this is unreachable and goes */
+    if (g_instr_this)
+        emit_instr_call(fn, f, "__cyg_profile_func_exit", f->line);
+    g_instr_this = 0;               /* nothing after this function is it */
     /* main that reaches its closing brace returns 0 (C99 5.1.2.2.3). After
      * a body whose every path returned this is unreachable, and goes. */
     if (!strcmp(f->name, "main") && ty_is_integer(f->ret_ty)) {
