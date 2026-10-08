@@ -3942,6 +3942,45 @@ static void gen_fp(struct rv_fn *F, int n)
     }
 }
 
+/* The unit being compiled: a floating-point constant goes into its
+ * .rodata (ir_intern_aligned), which the driver lays out after code
+ * generation. */
+static struct ir_unit *g_rv_iu;
+
+/* A floating-point constant into f register `fd`: from .rodata --
+ * `auipc` and `flw`/`fld`, the pair one R_RISCV_PCREL_HI20/LO12_I
+ * relocates, as clang does -- unless it is one `lui` away (a float whose
+ * low twelve bits are clear), when that and an fmv are as short and need
+ * no load. A double at RV64 was up to eight instructions of li. */
+static void fconst(struct rv_fn *F, int fd, long long bits, int w)
+{
+    struct code *t = F->t;
+    if (w == 4 && rv_li_len(bits, F->xlen) <= 4) {
+        rv_li(t, ACC, bits, F->xlen);
+        rv_fmv_from_x(t, fd, ACC, 0);
+        return;
+    }
+    if (!g_rv_iu)
+        internal_error("riscv: a floating-point constant with no unit");
+    {
+        unsigned char *b = xmalloc(8);
+        int idx, at, rvc = rv_compress_enabled();
+        for (int k = 0; k < w; k++)
+            b[k] = (unsigned char)((unsigned long long)bits >> (8 * k));
+        idx = ir_intern_aligned(g_rv_iu, (const char *)b, w, w);
+        if (g_rv_iu->strs[idx].bytes != (const char *)b)
+            free(b);
+        /* the pair is patched as one: neither half may change size */
+        rv_set_compress(0, F->xlen);
+        at = t->len;
+        rv_auipc(t, ACC, 0);
+        rv_fload(t, fd, ACC, 0, w == 8);
+        rv_set_compress(rvc, F->xlen);
+        note_str(F->st, at, idx, RK_RISCV_PCREL_HI20);
+        note_str(F->st, at + 4, idx, RK_RISCV_PCREL_LO12_I);
+    }
+}
+
 /* The copies, loads, stores and constants of a value with an f-register
  * home, straight between the homes: flw into it, fsw out of it, fmv
  * between two. Returns 0 for anything else, which the integer paths
@@ -4031,14 +4070,7 @@ static int gen_fp_move(struct rv_fn *F, int n)
                 rv_fmv_from_x(t, fd, RV_ZERO, F->fw[d] == 8);
             return 1;
         }
-        if (F->fw[d] == 8 && F->xlen == 32) {
-            rv_li(t, A_LO, (long long)(bits & 0xffffffffLL), 32);
-            rv_li(t, A_HI, (long long)((bits >> 32) & 0xffffffffLL), 32);
-            f_from_pair(F, fd, A_LO, A_HI);
-            return 1;
-        }
-        rv_li(t, ACC, bits, F->xlen);
-        rv_fmv_from_x(t, fd, ACC, F->fw[d] == 8);
+        fconst(F, fd, bits, F->fw[d]);
         return 1;
     }
     case IR_SELECT: {
@@ -5591,6 +5623,46 @@ static void rv_lowregs(const struct ir_func *fn, int *loc, unsigned long fixed);
  * of it is needed for correctness: a value outside the class is reached
  * through rd/wr and fsrc/fdone wherever it lives. A vreg asked for at two
  * widths is left out. */
+/* Which vregs an INTEGER operation reads -- not an FP one, nor a copy, a
+ * load's or store's value, a select's arm, a return or a float argument,
+ * which take a value wherever it lives. */
+static void rv_int_use_cb(int v, void *ctx)
+{
+    struct { char *m; int nv; } *c = ctx;
+    if (v >= 0 && v < c->nv)
+        c->m[v] = 1;
+}
+
+static char *rv_int_uses(const struct ir_func *fn)
+{
+    struct { char *m; int nv; } c;
+    c.nv = fn->nvregs;
+    c.m = xcalloc((size_t)(c.nv ? c.nv : 1), 1);
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (rv_fp_hw(i))
+            continue;
+        switch (i->op) {
+        case IR_MOV: case IR_BITCAST: case IR_RET: case IR_LDVAR:
+        case IR_STVAR:
+            continue;
+        case IR_LOAD: case IR_STORE: case IR_SELECT:
+            rv_int_use_cb(i->a, &c);
+            continue;
+        case IR_CALL:
+            if (i->indirect)
+                rv_int_use_cb(i->a, &c);
+            for (int k = 0; k < i->nargs; k++)
+                if (i->argv[k].is_struct || !i->argv[k].is_float)
+                    rv_int_use_cb(i->argv[k].vreg, &c);
+            continue;
+        default:
+            ra_each_use(i, rv_int_use_cb, &c);
+        }
+    }
+    return c.m;
+}
+
 static char *rv_float_map(const struct rv_fn *F, char **fw_out, int debug)
 {
     const struct ir_func *fn = F->fn;
@@ -5644,6 +5716,20 @@ static char *rv_float_map(const struct rv_fn *F, char **fw_out, int debug)
         int v = i->op == IR_LDVAR ? i->a : i->op == IR_STVAR ? i->dst : -1;
         if (v >= 0 && v < nv && m[v] && i->size != fw[v])
             m[v] = 0;
+    }
+    /* A constant integer code reads too -- the optimizer gives 0 and 0.0f
+     * one vreg -- keeps its x register: in an f register every integer
+     * use would cross with an fmv, and the float uses cross the other
+     * way only where it is used as a float. */
+    {
+        char *iu = rv_int_uses(fn);
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            if (i->op == IR_CONST && i->dst >= 0 && i->dst < nv &&
+                iu[i->dst])
+                m[i->dst] = 0;
+        }
+        free(iu);
     }
     for (int v = 0; v < nv; v++) {
         if (m[v] != 1)
@@ -6634,6 +6720,7 @@ void codegen_unit_riscv(struct ir_unit *iu, struct code *text,
      * read as well. */
     rv_set_compress(target_riscv_rvc(), xlen);
     g_rv_regalloc = regalloc;
+    g_rv_iu = iu;
     memset(&st, 0, sizeof st);
 
     int text0 = text->len;
