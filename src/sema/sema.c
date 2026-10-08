@@ -5649,6 +5649,11 @@ static void merge_decls(struct unit *u)
          * (EmbTrace's own hooks, a clock) -- instrumenting one of those
          * recursed through the hook forever */
         canon->attr_no_instrument |= f->attr_no_instrument;
+        /* and noinline and always_inline likewise: GCC takes either from
+         * any declaration, and a definition after a plain prototype is
+         * the usual place for noinline -- which was inlined */
+        canon->attr_noinline |= f->attr_noinline;
+        canon->attr_always_inline |= f->attr_always_inline;
         f->absorbed = 1;
     }
 }
