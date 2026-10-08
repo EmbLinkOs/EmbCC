@@ -91,5 +91,10 @@ void tasm_set_dsp(int on);
  * registers and immediates each field takes, for the referee
  * (tests/golden/thumb-dsp.sh): one line each. */
 void tasm_vocabulary_dsp(FILE *f);
+/* The multiplies, rev16/revsh, rrx, the bit fields and ldrd/strd (and in
+ * ARM state the doubleword exclusives), the same way, for
+ * tests/golden/arm-asm-more.sh. Both vocabularies are ARM state's when
+ * t_isa_a32 is set. */
+void tasm_vocabulary_more(FILE *f);
 
 #endif

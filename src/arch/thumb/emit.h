@@ -83,6 +83,12 @@ void t_alu_reg_shift(struct code *c, int op, int rd, int rn, int rm,
 /* rd = rn's bits lsb .. lsb+width-1, at the bottom, zero- or sign-extended:
  * ubfx / sbfx. width is 1..32-lsb. */
 void t_bfx(struct code *c, int rd, int rn, int lsb, int width, int sign);
+/* rd's bits lsb .. lsb+width-1 = rn's bottom `width` bits, the rest of rd
+ * kept: bfi; with rn 15, those bits of rd cleared: bfc. width is
+ * 1..32-lsb. */
+void t_bfi(struct code *c, int rd, int rn, int lsb, int width);
+/* rd = rm rotated right one bit through the carry: rrx (rrxs with `s`). */
+void t_rrx(struct code *c, int rd, int rm, int s);
 
 /* ---- moves ---------------------------------------------------------- */
 
@@ -145,6 +151,9 @@ void t_div(struct code *c, int rd, int rn, int rm, int sign);
 void t_mull(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
 /* rdhi:rdlo += rn * rm, 64 bits (smlal/umlal) */
 void t_mlal(struct code *c, int rdlo, int rdhi, int rn, int rm, int sign);
+/* rdhi:rdlo = rn * rm + rdlo + rdhi, unsigned (umaal): the DSP
+ * extension's on a Cortex-M, every ARMv7-A part's. */
+void t_umaal(struct code *c, int rdlo, int rdhi, int rn, int rm);
 /* rd = the high word of the signed rn * rm: smmul, emitted in ARM state
  * only (the Cortex-M levels select alike for v7-M, which lacks it; its
  * Thumb form was checked against llvm-mc's thumbv7em by hand) */
@@ -161,10 +170,12 @@ void t_clz(struct code *c, int rd, int rm);
 void t_rev(struct code *c, int rd, int rm);
 /* rd = rm with the bytes of each halfword swapped. */
 void t_rev16(struct code *c, int rd, int rm);
+/* rd = the low halfword of rm with its bytes swapped, sign-extended. */
+void t_revsh(struct code *c, int rd, int rm);
 
 /* ---- the DSP extension (ARMv7E-M; ARMv8-M Mainline with +dsp) -------
- * Thumb encodings only; each aborts in ARM state, where the assembler
- * refuses the mnemonics first. Register operands are never sp or pc
+ * Every ARMv7-A part has them too: in ARM state each hands its call to its
+ * A32 twin (a32.c). Register operands are never pc, nor in Thumb state sp
  * (UNPREDICTABLE), which the assembler checks. */
 
 /* rd = rn + extend(rm ror rot), rot 0/8/16/24: size 1 sxtab/uxtab, 2
@@ -233,6 +244,14 @@ int t_ldst_imm(struct code *c, int rt, int rn, long off, int size, int sign,
  * form cannot say it. The address must be word-aligned: ARMv7-M faults on
  * an unaligned ldrd/strd where two ldr would not. */
 int t_ldst_pair(struct code *c, int rt, int rt2, int rn, long off, int store);
+/* ...as the assembler takes it: in any addressing form (T_IDX_OFF [rn,
+ * #off], T_IDX_PRE [rn, #off]!, T_IDX_POST [rn], #off), and with lr in
+ * the pair. With writeback rn is neither pc nor rt nor rt2; a store's rn
+ * is never pc. In ARM state rt is even and rt2 rt + 1, and |off| is at
+ * most 255. 0, writing nothing, when the form cannot say it. */
+enum { T_IDX_OFF = 0, T_IDX_PRE = 1, T_IDX_POST = 2 };
+int t_ldst_pair_any(struct code *c, int rt, int rt2, int rn, long off,
+                    int store, int idx);
 /* With writeback: pre != 0 is [rn, #off]!, 0 is [rn], #off. 0 when it
  * cannot be encoded (|off| > 255, rn pc or rt). */
 int t_ldst_wb(struct code *c, int rt, int rn, long off, int size, int sign,

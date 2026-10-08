@@ -159,11 +159,10 @@ for t in "thumbv7em-none-eabi" "thumbv7em-none-eabihf" "thumbv7m-none-eabi -mcpu
     "$EMBCC" --target=$t -c "$out/ia.c" -o "$out/ia.o" 2> "$out/ia.err" ||
         { cat "$out/ia.err"; fail "inline sadd16 does not compile for $t"; }
 done
-if "$EMBCC" --target=armv7a-none-eabi -c "$out/ia.c" -o "$out/ia.o" 2> "$out/ia.err"; then
-    fail "inline sadd16 compiled for ARM state, which EmbCC cannot assemble it in"
-fi
-grep -q "ARM-state" "$out/ia.err" || { cat "$out/ia.err"; fail "the ARM-state refusal does not say why"; }
-echo "inline asm takes them on v7E-M and v8-M+DSP, and refuses them by name elsewhere"
+# (and ARM state, where every ARMv7-A part has them: arm-asm-more.sh)
+"$EMBCC" --target=armv7a-none-eabi -c "$out/ia.c" -o "$out/ia.o" 2> "$out/ia.err" ||
+    { cat "$out/ia.err"; fail "inline sadd16 does not compile for ARM state"; }
+echo "inline asm takes them on v7E-M, v8-M+DSP and ARMv7-A, and refuses them by name elsewhere"
 
 # ---- 3. the results, on a Cortex-M4 ------------------------------------------
 command -v "$QEMU" >/dev/null 2>&1 || { echo "SKIP the runs: $QEMU absent"; exit 0; }

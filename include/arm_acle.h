@@ -1,21 +1,20 @@
 /* EmbCC's <arm_acle.h>: the DSP and SIMD32 part of ACLE (the Arm C
  * Language Extensions) -- the saturating, packing, parallel and dual-16-bit
  * multiply intrinsics -- under the names and signatures clang's header gives
- * them, for the Cortex-M parts that have the instructions.
+ * them, for the Cortex-M parts that have the instructions and for ARMv7-A
+ * in ARM state (armv7a-none-eabi).
  *
- * Each intrinsic is one instruction of EmbCC's Thumb assembler in an inline
- * asm template, where clang calls a __builtin_arm_*; the guards are ACLE's:
- * __ARM_FEATURE_SAT (every ARMv7-M and ARMv8-M Mainline part) for __ssat and
- * __usat, __ARM_FEATURE_DSP and __ARM_FEATURE_SIMD32 (ARMv7E-M, -mcpu=
- * cortex-m4/m7; ARMv8-M Mainline with the extension, -mcpu=cortex-m33) for
- * the rest. On a part without them the names are simply not declared, as
- * with clang.
+ * Each intrinsic is one instruction of EmbCC's ARM assembler (Thumb or ARM
+ * state, the same templates) in an inline asm template, where clang calls a
+ * __builtin_arm_*; the guards are ACLE's: __ARM_FEATURE_SAT (every ARMv7-M,
+ * ARMv8-M Mainline and ARMv7-A part) for __ssat and __usat,
+ * __ARM_FEATURE_DSP and __ARM_FEATURE_SIMD32 (ARMv7E-M, -mcpu=cortex-m4/m7;
+ * ARMv8-M Mainline with the extension, -mcpu=cortex-m33; ARMv7-A) for the
+ * rest. On a part without them the names are simply not declared, as with
+ * clang.
  *
  * Not here yet: ACLE's other sections (barriers, hints, __clz, __rev and the
- * rest, the coprocessor and system-register intrinsics), and every intrinsic
- * in ARM state (armv7a-none-eabi), whose assembler lacks these instructions:
- * there the header declares nothing, since EmbCC assembles an inline
- * function's asm whether or not it is called.
+ * rest, the coprocessor and system-register intrinsics).
  * __ssat, __usat, __ssat16 and __usat16 take their bound as a constant, as
  * the instructions do, so they are macros.
  */
@@ -28,7 +27,7 @@
 extern "C" {
 #endif
 
-#if defined(__thumb__)
+#if defined(__arm__)
 #define __ACLE_INL static __inline__ __attribute__((__always_inline__))
 #define __ACLE_2(r, name, insn, ta, tb) \
     __ACLE_INL r name(ta __a, tb __b) { \
@@ -171,7 +170,7 @@ __ACLE_2(int32_t, __smusdx, "smusdx", int16x2_t, int16x2_t)
 #undef __ACLE_2
 #undef __ACLE_3
 #undef __ACLE_L
-#endif /* __thumb__ */
+#endif /* __arm__ */
 
 #ifdef __cplusplus
 }

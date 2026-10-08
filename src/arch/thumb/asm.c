@@ -826,12 +826,29 @@ static const struct dsp_ent dsp_tab[] = {
     { NULL, 0, 0, 0, 0, 0 }
 };
 
-/* A register these instructions may name: never sp or pc, which are
- * UNPREDICTABLE in every one of them (llvm-mc: r0-r12 or r14). */
+/* A register these instructions may name: never pc, and in Thumb state
+ * never sp either -- UNPREDICTABLE in every one of them (llvm-mc: r0-r12
+ * or r14; in ARM state r0-r14). */
 static int dsp_reg(const struct tok *t)
 {
     int r = tok_reg(t);
-    return r == 13 || r == 15 ? -2 : r;
+    return r == 15 || (r == 13 && !t_isa_a32) ? -2 : r;
+}
+
+/* ...and what the messages call the registers dsp_reg refuses */
+static const char *dsp_noreg(void) { return t_isa_a32 ? "pc" : "sp or pc"; }
+
+/* A DSP instruction on a Thumb core without the extension. */
+static int dsp_refuse(const struct tok *t, char *err, int errlen)
+{
+    FAIL("\"%.*s\" is an instruction of the DSP extension, which %s "
+         "lacks: it is ARMv7E-M's (-mcpu=cortex-m4, cortex-m7, "
+         "--target=thumbv7em-none-eabi) and ARMv8-M Mainline's with "
+         "the extension (-mcpu=cortex-m33, -march=armv8-m.main+dsp)",
+         t[0].len, t[0].s,
+         g_arch == 6 ? "ARMv6-M" : g_arch == TASM_V8M_BASE
+         ? "ARMv8-M Baseline" : g_arch == 8 ? "this ARMv8-M Mainline "
+         "target" : "ARMv7-M");
 }
 
 /* An optional trailing `<kw> #amount` at t[at] (and t[at+1]): `ror #8`,
@@ -881,44 +898,19 @@ static int dsp_stmt(const struct tok *t, int n, struct code *out,
         if (!e->name)
             return 1;
     }
-    if (par_o >= 0 || e->dsp) {
-        if (t_isa_a32)
-            FAIL("\"%.*s\" is a DSP instruction, and EmbCC's ARM-state (A32) "
-                 "assembler does not have them: only its Thumb one does",
-                 t[0].len, t[0].s);
-        if (!dsp_ok())
-            FAIL("\"%.*s\" is an instruction of the DSP extension, which %s "
-                 "lacks: it is ARMv7E-M's (-mcpu=cortex-m4, cortex-m7, "
-                 "--target=thumbv7em-none-eabi) and ARMv8-M Mainline's with "
-                 "the extension (-mcpu=cortex-m33, -march=armv8-m.main+dsp)",
-                 t[0].len, t[0].s,
-                 g_arch == 6 ? "ARMv6-M" : g_arch == TASM_V8M_BASE
-                 ? "ARMv8-M Baseline" : g_arch == 8 ? "this ARMv8-M Mainline "
-                 "target" : "ARMv7-M");
-    }
+    /* (every ARMv7-A part has the extension) */
+    if ((par_o >= 0 || e->dsp) && !t_isa_a32 && !dsp_ok())
+        return dsp_refuse(t, err, errlen);
     if (par_o >= 0) {
         for (int k = 0; k < 3; k++)
             r[k] = n == 4 ? dsp_reg(&t[k + 1]) : -1;
         if (n != 4 || r[0] < 0 || r[1] < 0 || r[2] < 0)
-            FAIL("\"%.*s\" wants three registers, none of them sp or pc",
-                 t[0].len, t[0].s);
+            FAIL("\"%.*s\" wants three registers, none of them %s",
+                 t[0].len, t[0].s, dsp_noreg());
         t_parallel(out, par_op[par_o].op, par_kind[par_k].kind, r[0], r[1],
                    r[2]);
         return 0;
     }
-
-    /* the plain extends, which ARM state has too */
-    if (e->form == DF_EXT && t_isa_a32) {
-        int rd = n == 3 ? tok_reg(&t[1]) : -1, rm = n == 3 ? tok_reg(&t[2]) : -1;
-        if (rd < 0 || rm < 0 || rd == 15 || rm == 15)
-            FAIL("%s wants two registers, and no rotation in ARM state",
-                 e->name);
-        t_ext(out, rd, rm, e->a, e->b);
-        return 0;
-    }
-    if (t_isa_a32)
-        FAIL("\"%.*s\" is not in EmbCC's ARM-state (A32) assembler: only its "
-             "Thumb one has it", t[0].len, t[0].s);
 
     switch (e->form) {
     case DF_EXT: case DF_EXTA: {
@@ -927,13 +919,14 @@ static int dsp_stmt(const struct tok *t, int n, struct code *out,
             r[k] = n > nreg ? dsp_reg(&t[k + 1]) : -1;
         if (n <= nreg || r[0] < 0 || r[1] < 0 || (nreg == 3 && r[2] < 0) ||
             !tok_shift(t, n, nreg + 1, "ror", &amt))
-            FAIL("%s wants %s registers (not sp or pc) and an optional "
-                 "`ror #8|16|24`", e->name, nreg == 3 ? "three" : "two");
+            FAIL("%s wants %s registers (not %s) and an optional "
+                 "`ror #8|16|24`", e->name, nreg == 3 ? "three" : "two",
+                 dsp_noreg());
         if (amt != 0 && amt != 8 && amt != 16 && amt != 24)
             FAIL("%s: the rotation is 8, 16 or 24, not %ld", e->name, amt);
         /* (a Thumb-1 core's 16-bit extend has no rotation field, not even
          * for `ror #0`, as llvm-mc reads it) */
-        if (arch_thumb1() && n > nreg + 1)
+        if (arch_thumb1() && !t_isa_a32 && n > nreg + 1)
             FAIL("%s: %s's extends take no rotation", e->name,
                  g_arch == 6 ? "ARMv6-M" : "ARMv8-M Baseline");
         /* the 16-bit form where there is one, as GNU as and llvm-mc take
@@ -952,8 +945,9 @@ static int dsp_stmt(const struct tok *t, int n, struct code *out,
         r[0] = n >= 4 ? dsp_reg(&t[1]) : -1;
         r[1] = n >= 4 ? dsp_reg(&t[3]) : -1;
         if (n < 4 || r[0] < 0 || r[1] < 0 || !tok_imm(&t[2], &imm))
-            FAIL("%s wants a register, #bound and a register (not sp or pc)%s",
-                 e->name, e->form == DF_SAT ? ", then lsl or asr #n" : "");
+            FAIL("%s wants a register, #bound and a register (not %s)%s",
+                 e->name, dsp_noreg(),
+                 e->form == DF_SAT ? ", then lsl or asr #n" : "");
         if (imm < lo || imm > hi)
             FAIL("%s: the bound is %ld..%ld, not %ld", e->name, lo, hi, imm);
         if (e->form == DF_SAT16) {
@@ -967,9 +961,11 @@ static int dsp_stmt(const struct tok *t, int n, struct code *out,
             if (!tok_shift(t, n, 4, "asr", &amt))
                 FAIL("%s: the shift is lsl #0..31 or asr #1..31", e->name);
         }
-        if (amt < asr || amt > 31)
-            FAIL("%s: the shift is lsl #0..31 or asr #1..31, not %s #%ld",
-                 e->name, asr ? "asr" : "lsl", amt);
+        /* (ARM state's asr reaches 32, amount 0, which in Thumb state is
+         * the 16-bit form's encoding) */
+        if (amt < asr || amt > (asr && t_isa_a32 ? 32 : 31))
+            FAIL("%s: the shift is lsl #0..31 or asr #1..%d, not %s #%ld",
+                 e->name, t_isa_a32 ? 32 : 31, asr ? "asr" : "lsl", amt);
         t_sat(out, r[0], (int)imm, r[1], e->b, asr, (int)amt);
         return 0;
     }
@@ -978,8 +974,9 @@ static int dsp_stmt(const struct tok *t, int n, struct code *out,
             r[k] = n >= 4 ? dsp_reg(&t[k + 1]) : -1;
         if (n < 4 || r[0] < 0 || r[1] < 0 || r[2] < 0 ||
             !tok_shift(t, n, 4, e->a ? "asr" : "lsl", &amt))
-            FAIL("%s wants three registers (not sp or pc) and an optional "
-                 "`%s`", e->name, e->a ? "asr #1..32" : "lsl #0..31");
+            FAIL("%s wants three registers (not %s) and an optional "
+                 "`%s`", e->name, dsp_noreg(),
+                 e->a ? "asr #1..32" : "lsl #0..31");
         /* pkhtb with no shift is pkhbt with the sources the other way
          * round: the top half of rn and the bottom of rm, as llvm-mc and
          * GNU as encode it (asr #0 is not an encoding: amount 0 is #32) */
@@ -1005,8 +1002,8 @@ static int dsp_stmt(const struct tok *t, int n, struct code *out,
         r[k] = n == nreg + 1 ? dsp_reg(&t[k + 1]) : -1;
     for (int k = 0; k < nreg; k++)
         if (r[k] < 0)
-            FAIL("\"%.*s\" wants %s registers, none of them sp or pc",
-                 t[0].len, t[0].s, nreg == 4 ? "four" : "three");
+            FAIL("\"%.*s\" wants %s registers, none of them %s",
+                 t[0].len, t[0].s, nreg == 4 ? "four" : "three", dsp_noreg());
     switch (e->form) {
     case DF_Q:      t_qarith(out, e->a, r[0], r[1], r[2]); break;
     case DF_SEL:    t_sel(out, r[0], r[1], r[2]); break;
@@ -1029,6 +1026,170 @@ static int dsp_stmt(const struct tok *t, int n, struct code *out,
         else
             t_smlald(out, r[0], r[1], r[2], r[3], e->a, e->b);
         break;
+    }
+    return 0;
+}
+
+/* ---- the multiplies, reversals, bit fields and pairs ----------------
+ *
+ * What CMSIS and hand-written asm reach for beyond the DSP extension: mla
+ * and mls, the long multiplies (and umaal, which on a Cortex-M is the
+ * extension's), rev16 and revsh (CMSIS's __REV16 and __REVSH), rrx, the
+ * bit-field inserts and extracts, ldrd/strd in each addressing form, and
+ * in ARM state the doubleword exclusives. Each goes out through the
+ * encoder the code generator uses (emit.c), so the two cannot disagree;
+ * on a Thumb-1 core (ARMv6-M, ARMv8-M Baseline) tasm_assemble then
+ * refuses the 32-bit forms by name, as llvm-mc refuses them. */
+enum { MF_MLA, MF_LMUL, MF_REV, MF_RRX, MF_BFI, MF_BFX, MF_LDRD, MF_LDREXD,
+       MF_STREXD };
+/* a: mls (MF_MLA); smull 0, umull 1, smlal 2, umlal 3, umaal 4 (MF_LMUL);
+ * revsh (MF_REV); S (MF_RRX); bfc (MF_BFI); signed (MF_BFX); store
+ * (MF_LDRD). dsp: the DSP extension's on a Cortex-M. */
+struct more_ent { const char *name; int form, a, dsp; };
+static const struct more_ent more_tab[] = {
+    { "mla", MF_MLA, 0, 0 }, { "mls", MF_MLA, 1, 0 },
+    { "smull", MF_LMUL, 0, 0 }, { "umull", MF_LMUL, 1, 0 },
+    { "smlal", MF_LMUL, 2, 0 }, { "umlal", MF_LMUL, 3, 0 },
+    { "umaal", MF_LMUL, 4, 1 },
+    { "rev16", MF_REV, 0, 0 }, { "revsh", MF_REV, 1, 0 },
+    { "rrx", MF_RRX, 0, 0 }, { "rrxs", MF_RRX, 1, 0 },
+    { "bfi", MF_BFI, 0, 0 }, { "bfc", MF_BFI, 1, 0 },
+    { "sbfx", MF_BFX, 1, 0 }, { "ubfx", MF_BFX, 0, 0 },
+    { "ldrd", MF_LDRD, 0, 0 }, { "strd", MF_LDRD, 1, 0 },
+    { "ldrexd", MF_LDREXD, 0, 0 }, { "strexd", MF_STREXD, 0, 0 },
+    { NULL, 0, 0, 0 }
+};
+
+/* ldrd/strd rt, rt2, then [rn{, #off}]{!} or [rn], #off. */
+static int pair_stmt(const struct more_ent *e, const struct tok *t, int n,
+                     struct code *out, char *err, int errlen)
+{
+    int rt = n >= 4 ? tok_reg(&t[1]) : -1, rt2 = n >= 4 ? tok_reg(&t[2]) : -1;
+    int rn, wb = 0, post = n == 5, ok;
+    long off = 0;
+    struct tok m = n >= 4 ? t[3] : t[0];
+    if (m.len > 1 && m.s[m.len - 1] == '!') {
+        wb = 1;
+        m.len--;
+    }
+    if (n < 4 || n > 5 || rt < 0 || rt2 < 0 || !tok_mem(&m, &rn, &off) ||
+        (post && (wb || off != 0 || !tok_imm(&t[4], &off))))
+        FAIL("%s wants two registers and [rn{, #off}]{!} or [rn], #off",
+             e->name);
+    if (t_isa_a32) {
+        if ((rt & 1) || rt == 14 || rt2 != rt + 1)
+            FAIL("%s: in ARM state the pair is an even register and the next "
+                 "one (r0, r1 ... r12, sp), not %s, %s", e->name,
+                 t_reg_name(rt), t_reg_name(rt2));
+    } else if (rt == 13 || rt == 15 || rt2 == 13 || rt2 == 15) {
+        FAIL("%s: sp and pc are not its registers", e->name);
+    } else if (!e->a && rt == rt2) {
+        FAIL("%s: the two registers it loads must differ", e->name);
+    }
+    if ((wb || post) && (rn == 15 || rn == rt || rn == rt2))
+        FAIL("%s with writeback: the base must be neither pc nor one of the "
+             "pair", e->name);
+    if (rn == 15 && e->a)
+        FAIL("%s: there is no store to a pc-relative address", e->name);
+    ok = t_ldst_pair_any(out, rt, rt2, rn, off, e->a,
+                         post ? T_IDX_POST : wb ? T_IDX_PRE : T_IDX_OFF);
+    if (!ok)
+        FAIL("%s: the offset is %s, not %ld", e->name, t_isa_a32
+             ? "-255..255" : "a multiple of 4 in -1020..1020", off);
+    return 0;
+}
+
+static int more_stmt(const struct tok *t, int n, struct code *out,
+                     char *err, int errlen)
+{
+    const struct more_ent *e;
+    int r[4];
+    long lsb, width;
+    for (e = more_tab; e->name; e++)
+        if (mnemonic_is(&t[0], e->name))
+            break;
+    if (!e->name)
+        return 1;
+    if (e->dsp && !t_isa_a32 && !dsp_ok())
+        return dsp_refuse(t, err, errlen);
+    switch (e->form) {
+    case MF_MLA: case MF_LMUL:
+        for (int k = 0; k < 4; k++)
+            r[k] = n == 5 ? dsp_reg(&t[k + 1]) : -1;
+        if (r[0] < 0 || r[1] < 0 || r[2] < 0 || r[3] < 0)
+            FAIL("%s wants four registers, none of them %s", e->name,
+                 dsp_noreg());
+        if (e->form == MF_MLA) {
+            if (e->a) t_mls(out, r[0], r[1], r[2], r[3]);
+            else      t_mla(out, r[0], r[1], r[2], r[3]);
+            return 0;
+        }
+        /* RdLo and RdHi the same register is UNPREDICTABLE */
+        if (r[0] == r[1])
+            FAIL("%s: RdLo and RdHi must be different registers", e->name);
+        if (e->a == 4)
+            t_umaal(out, r[0], r[1], r[2], r[3]);
+        else if (e->a < 2)
+            t_mull(out, r[0], r[1], r[2], r[3], e->a == 0);
+        else
+            t_mlal(out, r[0], r[1], r[2], r[3], e->a == 2);
+        return 0;
+    case MF_REV: case MF_RRX:
+        r[0] = n == 3 ? dsp_reg(&t[1]) : -1;
+        r[1] = n == 3 ? dsp_reg(&t[2]) : -1;
+        if (r[0] < 0 || r[1] < 0)
+            FAIL("%s wants two registers, neither of them %s", e->name,
+                 dsp_noreg());
+        if (e->form == MF_RRX) t_rrx(out, r[0], r[1], e->a);
+        else if (e->a)         t_revsh(out, r[0], r[1]);
+        else                   t_rev16(out, r[0], r[1]);
+        return 0;
+    case MF_BFI: case MF_BFX: {
+        int nr = e->form == MF_BFI && e->a ? 1 : 2;     /* bfc: rd alone */
+        for (int k = 0; k < nr; k++)
+            r[k] = n == nr + 3 ? dsp_reg(&t[k + 1]) : -1;
+        if (r[0] < 0 || (nr == 2 && r[1] < 0) || !tok_imm(&t[nr + 1], &lsb) ||
+            !tok_imm(&t[nr + 2], &width))
+            FAIL("%s wants %s (not %s), #lsb and #width", e->name,
+                 nr == 1 ? "a register" : "two registers", dsp_noreg());
+        if (lsb < 0 || lsb > 31 || width < 1 || width > 32 - lsb)
+            FAIL("%s: the field is lsb 0..31 and width 1..32-lsb, not #%ld, "
+                 "#%ld", e->name, lsb, width);
+        if (e->form == MF_BFX)
+            t_bfx(out, r[0], r[1], (int)lsb, (int)width, e->a);
+        else
+            t_bfi(out, r[0], nr == 1 ? 15 : r[1], (int)lsb, (int)width);
+        return 0;
+    }
+    case MF_LDRD:
+        return pair_stmt(e, t, n, out, err, errlen);
+    default:
+        break;
+    }
+    /* ldrexd rt, rt2, [rn] / strexd rd, rt, rt2, [rn] */
+    if (!t_isa_a32)
+        FAIL("%s is not an M-profile instruction: no Cortex-M core has a "
+             "doubleword exclusive", e->name);
+    {
+        int st = e->form == MF_STREXD, rd = st && n == 5 ? tok_reg(&t[1]) : 0;
+        int rt = n == 4 + st ? tok_reg(&t[1 + st]) : -1;
+        int rt2 = n == 4 + st ? tok_reg(&t[2 + st]) : -1, rn;
+        long off;
+        if (rt < 0 || rt2 < 0 || rd < 0 || !tok_mem(&t[3 + st], &rn, &off) ||
+            off != 0)
+            FAIL("%s wants %s and a [reg] address with no offset", e->name,
+                 st ? "three registers" : "two registers");
+        if ((rt & 1) || rt == 14 || rt2 != rt + 1)
+            FAIL("%s: the pair is an even register and the next one (r0, r1 "
+                 "... r12, sp), not %s, %s", e->name, t_reg_name(rt),
+                 t_reg_name(rt2));
+        if (rn == 15 || rd == 15)
+            FAIL("%s: pc is not its register", e->name);
+        if (st && (rd == rn || rd == rt || rd == rt2))
+            FAIL("%s: the status register must differ from the others",
+                 e->name);
+        if (st) a32_strex(out, rd, rt, rn, 8);
+        else    a32_ldrex(out, rt, rn, 8);
     }
     return 0;
 }
@@ -1128,6 +1289,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
         int r = v8m_stmt(t, n, out, err, errlen);
         if (r == 1)
             r = dsp_stmt(t, n, out, err, errlen);
+        if (r == 1)
+            r = more_stmt(t, n, out, err, errlen);
         if (r != 1)
             return r;
     }
@@ -2180,4 +2343,110 @@ void tasm_vocabulary_dsp(FILE *f)
     /* the plain extends' narrow form: low registers, no rotation */
     fprintf(f, "\tsxtb r0, r7\n\tuxtb r6, r1\n\tsxth r3, r4\n\tuxth r7, r7\n");
     fprintf(f, "\tsxtb r0, r1, ror #0\n\tpkhbt r1, r2, r3, lsl #0\n");
+    if (!t_isa_a32)
+        return;
+    /* ARM state's own: sp as an operand, the saturates' asr #32, and a
+     * condition on the instruction itself */
+    fprintf(f, "\tsadd16 sp, r1, r2\n\tuqsub8 r0, sp, r2\n\tqadd r3, r4, sp\n"
+               "\tsmlad r0, sp, r2, sp\n\tsmlalbb sp, r1, r2, r3\n"
+               "\tsxtab16 sp, r1, sp, ror #8\n\tsxtb r0, sp\n"
+               "\tpkhtb r0, sp, r1, asr #32\n\tssat16 sp, #4, sp\n"
+               "\tsel sp, r1, sp\n\tusada8 sp, sp, r2, sp\n"
+               "\tssat r0, #8, r1, asr #32\n\tusat lr, #31, r2, asr #32\n");
+    fprintf(f, "\tsadd16eq r0, r1, r2\n\tsmladxne r0, r1, r2, r3\n"
+               "\tssatgt r0, #8, r1, lsl #4\n\tsxtabhi r0, r1, r2, ror #8\n"
+               "\tsmlalbble r0, r1, r2, r3\n\tqdsubmi r4, r5, r6\n"
+               "\tuhsaxpl r7, r8, r9\n\tpkhtbvs r1, r2, r3, asr #3\n"
+               "\tsmmlsrlt r1, r2, r3, r4\n\tsxtb16ls r5, r6, ror #24\n");
+}
+
+/* The multiplies, reversals, bit fields and pairs of more_tab, for
+ * tests/golden/arm-asm-more.sh: each entry with r0-r12 and lr in every
+ * register field (rotated so the fields differ), the bit fields and
+ * offsets at their ends and between. In ARM state (t_isa_a32) the pairs
+ * are even registers and the next, the offsets A32's, and the
+ * doubleword exclusives and some conditions are there too. */
+void tasm_vocabulary_more(FILE *f)
+{
+    static const long toff[] = { 8, -1020, 1020, -4, 252, -256, 4, 64 };
+    static const long aoff[] = { 8, -255, 255, -1, 254, -128, 3, 77 };
+    int a32 = t_isa_a32;
+    for (const struct more_ent *e = more_tab; e->name; e++)
+        for (int a = 0; v8_regs[a]; a++) {
+            const char *rd = v8_regs[a], *rn = v8_regs[(a + 5) % 14];
+            const char *rm = v8_regs[(a + 9) % 14], *ra = v8_regs[(a + 3) % 14];
+            int lsb = a * 31 / 13, width = 1 + (a * 7) % (32 - lsb);
+            switch (e->form) {
+            case MF_MLA:
+                fprintf(f, "\t%s %s, %s, %s, %s\n", e->name, rd, rn, rm, ra);
+                break;
+            case MF_LMUL:
+                fprintf(f, "\t%s %s, %s, %s, %s\n", e->name, rd,
+                        v8_regs[(a + 1) % 14], rn, rm);
+                break;
+            case MF_REV: case MF_RRX:
+                fprintf(f, "\t%s %s, %s\n", e->name, rd, rm);
+                break;
+            case MF_BFI:
+                if (e->a)
+                    fprintf(f, "\t%s %s, #%d, #%d\n", e->name, rd, lsb, width);
+                else
+                    fprintf(f, "\t%s %s, %s, #%d, #%d\n", e->name, rd, rn, lsb,
+                            width);
+                break;
+            case MF_BFX:
+                fprintf(f, "\t%s %s, %s, #%d, #%d\n", e->name, rd, rn, lsb,
+                        width);
+                break;
+            case MF_LDRD: {
+                /* Thumb: any two (different) registers; ARM: rN, rN+1 */
+                int t1 = a32 ? 2 * (a % 7) : a, t2 = a32 ? t1 + 1 : (a + 6) % 14;
+                const char *base = v8_regs[(t1 + (a32 ? 5 : 3)) % 14];
+                long off = a32 ? aoff[a % 8] : toff[a % 8];
+                const char *r1 = a32 ? reg_name[t1] : v8_regs[t1];
+                const char *r2 = a32 ? reg_name[t2] : v8_regs[t2];
+                switch (a % 4) {
+                case 0: fprintf(f, "\t%s %s, %s, [%s]\n", e->name, r1, r2, base);
+                        break;
+                case 1: fprintf(f, "\t%s %s, %s, [%s, #%ld]\n", e->name, r1, r2,
+                                base, off); break;
+                case 2: fprintf(f, "\t%s %s, %s, [%s, #%ld]!\n", e->name, r1,
+                                r2, base, off); break;
+                default: fprintf(f, "\t%s %s, %s, [%s], #%ld\n", e->name, r1,
+                                 r2, base, off); break;
+                }
+                break;
+            }
+            default:
+                if (!a32)
+                    break;
+                if (e->form == MF_LDREXD)
+                    fprintf(f, "\t%s %s, %s, [%s]\n", e->name,
+                            reg_name[2 * (a % 7)], reg_name[2 * (a % 7) + 1],
+                            v8_regs[(2 * (a % 7) + 5) % 14]);
+                else
+                    fprintf(f, "\t%s %s, %s, %s, [%s]\n", e->name,
+                            v8_regs[(2 * (a % 7) + 2) % 14],
+                            reg_name[2 * (a % 7)], reg_name[2 * (a % 7) + 1],
+                            v8_regs[(2 * (a % 7) + 5) % 14]);
+                break;
+            }
+        }
+    /* the 16-bit forms of rev16 and revsh, and the ends of the fields */
+    fprintf(f, "\trev16 r0, r7\n\trevsh r6, r1\n\trev16 r3, r3\n"
+               "\tbfi r0, r1, #0, #32\n\tbfc r2, #31, #1\n"
+               "\tsbfx r3, r4, #0, #32\n\tubfx r5, r6, #31, #1\n"
+               "\tldrd r0, r1, [sp, #8]\n\tstrd r2, r3, [sp, #-16]!\n");
+    fprintf(f, "\tldrd r0, r1, [pc, #8]\n\tldrd r4, r5, [pc, #%d]\n",
+            a32 ? -255 : -1020);
+    if (!a32)
+        return;
+    fprintf(f, "\tmla sp, sp, sp, sp\n\tumull r0, sp, r1, r2\n"
+               "\trrx sp, sp\n\trev16 sp, r0\n\tbfi sp, sp, #4, #8\n"
+               "\tldrd r12, sp, [r0, #-4]\n");
+    fprintf(f, "\tmlaeq r0, r1, r2, r3\n\tumaalne r0, r1, r2, r3\n"
+               "\trrxsgt r4, r5\n\trevshlt r6, r7\n\tbfcge r8, #4, #4\n"
+               "\tubfxhi r9, r10, #3, #9\n\tldrdls r0, r1, [r2, #-8]!\n"
+               "\tstrdmi r2, r3, [r4], #16\n\tldrexdpl r4, r5, [r6]\n"
+               "\tstrexdvs r7, r8, r9, [r10]\n\tsmlalvc r1, r2, r3, r4\n");
 }

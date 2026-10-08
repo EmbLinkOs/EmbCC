@@ -1043,10 +1043,13 @@ Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`,
 `__builtin_return_address` above level 0, `__attribute__((interrupt))` (an A-profile
 handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
 and C++ exceptions and unwind tables (C++ compiles with
-`-fno-exceptions`). Inline assembly takes the Cortex-M vocabulary in ARM state, with
-a condition on any instruction, and adds `mrs`/`msr` of `cpsr`,
-`mrc`/`mcr` and the A32 ranges of `svc`, `bkpt` and `udf`; the M-profile
-special registers, `cbz`, `tbb` and `tbh` are refused.
+`-fno-exceptions`). Inline assembly and `.s` files take the Cortex-M
+vocabulary in ARM state -- the DSP extension's instructions (which every
+ARMv7-A part has) included, with `<arm_acle.h>` -- with a condition on any
+instruction, and add `mrs`/`msr` of `cpsr`, `mrc`/`mcr`, `ldrexd`/`strexd`
+and the A32 ranges of `svc`, `bkpt` and `udf`; the M-profile special
+registers, `cbz`, `tbb` and `tbh` are refused
+([Inline assembly](inline-asm.md#arm-state-armv7-a)).
 
 ## RISC-V
 
