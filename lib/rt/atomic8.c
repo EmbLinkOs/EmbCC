@@ -11,6 +11,9 @@
  *   u64  __atomic_fetch_{add,sub,and,or,xor,nand}_8(volatile void *p,
  *                                                  u64 v, int order)
  *   u64  __atomic_{add,sub,and,or,xor,nand}_fetch_8(...)  (GCC calls these)
+ *   and libatomic's generic __atomic_load, __atomic_store,
+ *   __atomic_exchange and __atomic_compare_exchange, which take the size
+ *   first (clang calls these for an _Atomic long long or double)
  *
  * Each is atomic by MASKING INTERRUPTS on the core it runs on: the mask
  * is saved, interrupts are turned off, the eight bytes are read and
@@ -241,5 +244,84 @@ WEAK _Bool __atomic_compare_exchange_8(volatile void *p, void *expected,
         *e = old;
     return ok;
 }
+
+/* ---- libatomic's generic forms ------------------------------------------
+ *
+ * clang calls these, which take the object's size, for an _Atomic object
+ * it does not count as lock-free -- an _Atomic long long or double on
+ * these targets -- so an object of clang's links here too. Any size, a
+ * byte at a time through volatile pointers (which no optimizer turns into
+ * a call). Their names are builtins to the compiler, so they are defined
+ * under internal ones and named by alias. */
+typedef __SIZE_TYPE__ rt_size;
+typedef volatile unsigned char vbyte;
+
+static void gen_load(rt_size n, const volatile void *p, void *ret, int order)
+{
+    const vbyte *s = (const vbyte *)p;
+    vbyte *d = (vbyte *)ret;
+    u32 m = irq_off();
+    (void)order;
+    for (rt_size k = 0; k < n; k++)
+        d[k] = s[k];
+    irq_restore(m);
+}
+
+static void gen_store(rt_size n, volatile void *p, void *val, int order)
+{
+    vbyte *d = (vbyte *)p;
+    const vbyte *s = (const vbyte *)val;
+    u32 m = irq_off();
+    (void)order;
+    for (rt_size k = 0; k < n; k++)
+        d[k] = s[k];
+    irq_restore(m);
+}
+
+/* byte by byte, so `ret` may be `val` */
+static void gen_exchange(rt_size n, volatile void *p, void *val, void *ret,
+                         int order)
+{
+    vbyte *q = (vbyte *)p, *v = (vbyte *)val, *r = (vbyte *)ret;
+    u32 m = irq_off();
+    (void)order;
+    for (rt_size k = 0; k < n; k++) {
+        unsigned char t = q[k];
+        q[k] = v[k];
+        r[k] = t;
+    }
+    irq_restore(m);
+}
+
+static _Bool gen_cmpxchg(rt_size n, volatile void *p, void *expected,
+                         void *desired, int success, int failure)
+{
+    vbyte *q = (vbyte *)p, *e = (vbyte *)expected, *d = (vbyte *)desired;
+    _Bool ok = 1;
+    u32 m = irq_off();
+    (void)success;
+    (void)failure;
+    for (rt_size k = 0; k < n; k++)
+        if (q[k] != e[k])
+            ok = 0;
+    for (rt_size k = 0; k < n; k++) {
+        if (ok)
+            q[k] = d[k];
+        else
+            e[k] = q[k];
+    }
+    irq_restore(m);
+    return ok;
+}
+
+void __atomic_load(rt_size n, const volatile void *p, void *ret, int order)
+    __attribute__((weak, alias("gen_load")));
+void __atomic_store(rt_size n, volatile void *p, void *val, int order)
+    __attribute__((weak, alias("gen_store")));
+void __atomic_exchange(rt_size n, volatile void *p, void *val, void *ret,
+                       int order) __attribute__((weak, alias("gen_exchange")));
+_Bool __atomic_compare_exchange(rt_size n, volatile void *p, void *expected,
+                                void *desired, int success, int failure)
+    __attribute__((weak, alias("gen_cmpxchg")));
 
 #endif /* __SIZEOF_POINTER__ == 4 */
