@@ -83,6 +83,10 @@ struct expr {
     struct expr *args[MAX_PARAMS]; /* EXPR_CALL; lhs is the callee
                            * expression (a VAR for direct calls) */
     int nargs;
+    int atomic_mo;        /* EXPR_CALL of an atomic builtin: its memory
+                           * order when sema could fold it, as 1 + the
+                           * __ATOMIC_* value (a compare-exchange's failure
+                           * order merged in); 0, not known, is seq_cst */
     struct func *callee;  /* EXPR_CALL: direct target (sema), or NULL
                            * for a call through a function pointer */
     struct expr **elems;  /* EXPR_INITLIST */

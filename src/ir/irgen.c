@@ -1808,11 +1808,12 @@ static void atomic_store(struct ir_func *fn, int addr, int val,
     emit(fn)->op = IR_FENCE;              /* seq_cst: published before what follows */
 }
 
-static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
-                      int val, const struct type *t)
+static int atomic_rmw_mo(struct ir_func *fn, enum ir_op op, int opc,
+                         int addr, int val, const struct type *t, int mo)
 {
     struct ir_ins *i = emit(fn);
     i->op = op;
+    i->mo = mo;
     i->a = addr;
     i->b = val;
     i->imm = opc;
@@ -1824,6 +1825,25 @@ static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
     i->sign = ty_signed_int(t);
     i->dst = new_temp(fn);
     return i->dst;
+}
+
+/* ...seq_cst, as the operators on an _Atomic object are */
+static int atomic_rmw(struct ir_func *fn, enum ir_op op, int opc, int addr,
+                      int val, const struct type *t)
+{
+    return atomic_rmw_mo(fn, op, opc, addr, val, t, IR_MO_SEQ_CST);
+}
+
+/* expr.atomic_mo (1 + an __ATOMIC_* value, or 0) as an IR_MO_* */
+static int ir_mo(int m)
+{
+    switch (m) {
+    case 1: return IR_MO_RELAXED;
+    case 2: case 3: return IR_MO_ACQUIRE;
+    case 4: return IR_MO_RELEASE;
+    case 5: return IR_MO_ACQ_REL;
+    default: return IR_MO_SEQ_CST;
+    }
 }
 
 /* The value argument, converted to the atomic object's type first — so
@@ -2211,6 +2231,7 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
                        : ty_base(TY_LONG, 1);
     }
     int w = ty_w(obj), sign = ty_signed_int(obj);
+    int mo = ir_mo(e->atomic_mo);
     int addr = gen_expr(fn, e->args[0]);
     if (ty_size(obj) == 16)
         return gen_atomic16(fn, e, ak, op, obj, addr);
@@ -2227,11 +2248,12 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
         return -1;
     case AK_EXCHANGE_N: case AK_SYNC_LOCK_TAS: {
         int val = atomic_value(fn, e->args[1], obj);
-        return atomic_result(fn, atomic_rmw(fn, IR_XCHG, 0, addr, val, obj),
-                             obj);
+        return atomic_result(fn, atomic_rmw_mo(fn, IR_XCHG, 0, addr, val,
+                                               obj, mo), obj);
     }
     case AK_TEST_AND_SET: {
-        int old = atomic_rmw(fn, IR_XCHG, 0, addr, emit_const(fn, 1, 4), obj);
+        int old = atomic_rmw_mo(fn, IR_XCHG, 0, addr, emit_const(fn, 1, 4),
+                                obj, mo);
         return emit_cmp(fn, B_NE, old, emit_const(fn, 0, 4), 4, 0);
     }
     case AK_FETCH_OP: case AK_OP_FETCH: {
@@ -2242,9 +2264,9 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
             int addend = op == '-'
                 ? emit_bin(fn, IR_SUB, emit_const(fn, 0, w), val, w, 1)
                 : val;
-            old = atomic_rmw(fn, IR_XADD, 0, addr, addend, obj);
+            old = atomic_rmw_mo(fn, IR_XADD, 0, addr, addend, obj, mo);
         } else {
-            old = atomic_rmw(fn, IR_ARMW, op, addr, val, obj);
+            old = atomic_rmw_mo(fn, IR_ARMW, op, addr, val, obj, mo);
         }
         if (ak == AK_FETCH_OP)
             return atomic_result(fn, old, obj);
@@ -2278,6 +2300,7 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
             : emit_load(fn, gen_expr(fn, e->args[2]), obj);  /* by pointer */
         struct ir_ins *i = emit(fn);
         i->op = IR_CMPXCHG;
+        i->mo = mo;
         i->a = addr;
         i->b = exp;
         i->c = des;
@@ -2300,7 +2323,8 @@ static int gen_atomic(struct ir_func *fn, struct expr *e, enum atomic_kind ak,
     case AK_EXCHANGE: {                               /* *ret = xchg(p, *val) */
         int vp = gen_expr(fn, e->args[1]);
         int rp = gen_expr(fn, e->args[2]);
-        int old = atomic_rmw(fn, IR_XCHG, 0, addr, emit_load(fn, vp, obj), obj);
+        int old = atomic_rmw_mo(fn, IR_XCHG, 0, addr, emit_load(fn, vp, obj),
+                                obj, mo);
         emit_store(fn, rp, old, obj);
         return -1;
     }

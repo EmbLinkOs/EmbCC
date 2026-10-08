@@ -75,6 +75,39 @@ static void copy_block_at(struct rv_fn *F, int copy, long size, int step,
  * small tests all passed. */
 #define FAR  RV_T6
 
+/* ---- memory orders --------------------------------------------------
+ *
+ * An atomic's C memory order (ir_ins.mo) as the A extension's aq and rl
+ * bits, as clang maps them: an AMO is .aq for acquire, .rl for release,
+ * .aqrl for acq_rel and seq_cst, and bare for relaxed; an LR/SC loop puts
+ * the acquire on the lr and the release on the sc, and a seq_cst one is
+ * lr.aqrl / sc.rl -- the RISC-V ISA manual's mapping (its Table A.6), the
+ * lr's release keeping it after an earlier seq_cst store. */
+static int amo_ord(const struct ir_ins *i)
+{
+    switch (i->mo) {
+    case IR_MO_RELAXED: return RV_ORD_RELAXED;
+    case IR_MO_ACQUIRE: return RV_ORD_AQ;
+    case IR_MO_RELEASE: return RV_ORD_RL;
+    default:            return RV_ORD_AQRL;
+    }
+}
+
+static int lr_ord(const struct ir_ins *i)
+{
+    switch (i->mo) {
+    case IR_MO_RELAXED: case IR_MO_RELEASE: return RV_ORD_RELAXED;
+    case IR_MO_ACQUIRE: case IR_MO_ACQ_REL: return RV_ORD_AQ;
+    default:                                return RV_ORD_AQRL;
+    }
+}
+
+static int sc_ord(const struct ir_ins *i)
+{
+    return i->mo == IR_MO_RELAXED || i->mo == IR_MO_ACQUIRE
+        ? RV_ORD_RELAXED : RV_ORD_RL;
+}
+
 /* ---- one- and two-byte atomics --------------------------------------
  *
  * The A extension has no byte or halfword forms, so a narrow atomic works
@@ -91,53 +124,58 @@ static void copy_block_at(struct rv_fn *F, int copy, long size, int step,
  * which is atomic against the neighbouring bytes too: a write to any of
  * them between the lr and the sc breaks the reservation, and the loop
  * starts again with their new values. Little-endian, so the lane of
- * address a is bits 8*(a & 3) up. The registers: SUB_OLD the word read,
- * SUB_SH the lane's shift, SUB_AL the aligned address, SUB_MK the lane's
- * mask, and FAR for what each step computes -- no slot is touched inside
- * the loop, so FAR's own job does not arise until it is over. */
+ * address a is bits 8*(a & 3) up.
+ *
+ * Only the six scratch registers, t0-t2 and t4-t6: t3 is in the
+ * allocator's pool, so a value living across the atomic -- its own
+ * operand, even -- may be there. That takes one register fewer than
+ * clang's compare-and-swap, which it gives back two ways: the loop's
+ * merge on success is old ^ (expected ^ desired), since the lane then
+ * holds `expected` exactly, and the shift is computed again from the
+ * address after the loop. SUB_OLD the word read, SUB_AL the aligned
+ * address, SUB_MK the lane's mask, FAR what each step computes -- no slot
+ * is touched inside the loop, so FAR's own job does not arise until it is
+ * over. */
 #define SUB_OLD RV_T0
-#define SUB_V   RV_T1
-#define SUB_V2  RV_T2
-#define SUB_SH  RV_T3
+#define SUB_V   RV_T1           /* the operand, or the expected lane */
+#define SUB_X   RV_T2           /* the shift; a CAS's expected ^ desired */
 #define SUB_AL  RV_T4
 #define SUB_MK  RV_T5
 
-/* SUB_SH, SUB_AL and SUB_MK for an aw-byte lane at `addr` */
-static void sub_lane(struct code *t, int addr, int aw, int xlen)
+/* SUB_AL, `sh` = the lane's shift, and SUB_MK, for an aw-byte lane at
+ * `addr`, which may be `sh` itself */
+static void sub_lane(struct code *t, int addr, int sh, int aw, int xlen)
 {
-    rv_alu_imm(t, RV_AND, SUB_SH, addr, 3, 0);
-    rv_shift_imm(t, RV_SLL, SUB_SH, SUB_SH, 3, 0, xlen);
     rv_alu_imm(t, RV_AND, SUB_AL, addr, -4, 0);
+    rv_alu_imm(t, RV_AND, sh, addr, 3, 0);
+    rv_shift_imm(t, RV_SLL, sh, sh, 3, 0, xlen);
     rv_li(t, SUB_MK, aw == 1 ? 0xff : 0xffff, xlen);
-    rv_alu(t, RV_SLL, SUB_MK, SUB_MK, SUB_SH, 0);
+    rv_alu(t, RV_SLL, SUB_MK, SUB_MK, sh, 0);
 }
 
-/* reg = (src << shift) & mask: a value moved into the lane */
-static void sub_in(struct code *t, int reg, int src)
+/* `reg` = the aw-byte lane at bit `sh` of `reg`, at bit 0, extended as
+ * `sign` says */
+static void sub_out(struct code *t, int reg, int sh, int aw, int sign,
+                    int xlen)
 {
-    rv_alu(t, RV_SLL, reg, src, SUB_SH, 0);
-    rv_alu(t, RV_AND, reg, reg, SUB_MK, 0);
-}
-
-/* SUB_OLD = the lane of SUB_OLD, at bit 0, extended as `sign` says */
-static void sub_out(struct code *t, int aw, int sign, int xlen)
-{
-    rv_alu(t, RV_AND, SUB_OLD, SUB_OLD, SUB_MK, 0);
-    rv_alu(t, RV_SRL, SUB_OLD, SUB_OLD, SUB_SH, 0);
-    if (sign) {
-        int k = xlen - 8 * aw;
-        rv_shift_imm(t, RV_SLL, SUB_OLD, SUB_OLD, k, 0, xlen);
-        rv_shift_imm(t, RV_SRA, SUB_OLD, SUB_OLD, k, 0, xlen);
+    int k = xlen - 8 * aw;
+    rv_alu(t, RV_SRL, reg, reg, sh, 0);
+    if (aw == 1 && !sign) {
+        rv_alu_imm(t, RV_AND, reg, reg, 0xff, 0);
+        return;
     }
+    rv_shift_imm(t, RV_SLL, reg, reg, k, 0, xlen);
+    rv_shift_imm(t, sign ? RV_SRA : RV_SRL, reg, reg, k, 0, xlen);
 }
 
-/* merged = old ^ ((new ^ old) & mask), then sc and retry from `top` */
-static void sub_commit(struct code *t, int new_reg, int top)
+/* FAR = the merged word, from `new_reg`, which may be FAR itself; then
+ * sc and retry from `top` */
+static void sub_commit(struct code *t, int new_reg, int top, int ord)
 {
     rv_alu(t, RV_XOR, FAR, new_reg, SUB_OLD, 0);
     rv_alu(t, RV_AND, FAR, FAR, SUB_MK, 0);
     rv_alu(t, RV_XOR, FAR, FAR, SUB_OLD, 0);
-    rv_amo(t, RV_SC, FAR, SUB_AL, FAR, RV_ORD_RL, 0);
+    rv_amo(t, RV_SC, FAR, SUB_AL, FAR, ord, 0);
     int br = rv_b_placeholder(t, RV_BNE, FAR, RV_ZERO);
     rv_patch_b(t, br, top);
 }
@@ -5505,35 +5543,39 @@ static void gen_ins(struct rv_fn *F, int n)
         int aw = i->size;
         int addr, val, dst;
         if (aw == 1 || aw == 2) {
-            /* the word around it: see sub_lane */
+            /* the word around it: see sub_lane. The shift is SUB_X
+             * throughout, the address dead once it is made. */
             addr = rdr(F, i->a, ADDR);
+            sub_lane(t, addr, SUB_X, aw, F->xlen);
             val = rdr(F, i->b, TMP);
-            sub_lane(t, addr, aw, F->xlen);
-            sub_in(t, SUB_V, val);                 /* the operand, in lane */
+            rv_alu(t, RV_SLL, SUB_V, val, SUB_X, 0);   /* the operand, in lane */
             int op = i->op == IR_ARMW ? (int)i->imm : 0;
             if (op == '|' || op == '^') {
                 /* the other lanes of the operand are 0: unchanged */
+                rv_alu(t, RV_AND, SUB_V, SUB_V, SUB_MK, 0);
                 rv_amo(t, op == '|' ? RV_AMOOR : RV_AMOXOR, SUB_OLD, SUB_AL,
-                       SUB_V, RV_ORD_AQRL, 0);
+                       SUB_V, amo_ord(i), 0);
             } else if (op == '&') {
                 /* ...and for AND, 1 */
-                rv_alu_imm(t, RV_XOR, SUB_V2, SUB_MK, -1, 0);
-                rv_alu(t, RV_OR, SUB_V, SUB_V, SUB_V2, 0);
-                rv_amo(t, RV_AMOAND, SUB_OLD, SUB_AL, SUB_V, RV_ORD_AQRL, 0);
+                rv_alu_imm(t, RV_XOR, FAR, SUB_MK, -1, 0);
+                rv_alu(t, RV_OR, SUB_V, SUB_V, FAR, 0);
+                rv_amo(t, RV_AMOAND, SUB_OLD, SUB_AL, SUB_V, amo_ord(i), 0);
             } else {
+                /* the new lane in FAR; what it leaves above the lane, the
+                 * merge masks off */
                 int top = t->len;
-                rv_amo(t, RV_LR, SUB_OLD, SUB_AL, RV_ZERO, RV_ORD_AQ, 0);
+                rv_amo(t, RV_LR, SUB_OLD, SUB_AL, RV_ZERO, lr_ord(i), 0);
                 if (i->op == IR_XCHG)
-                    rv_mv(t, SUB_V2, SUB_V);
+                    rv_mv(t, FAR, SUB_V);
                 else if (i->op == IR_XADD)
-                    rv_alu(t, RV_ADD, SUB_V2, SUB_OLD, SUB_V, 0);
+                    rv_alu(t, RV_ADD, FAR, SUB_OLD, SUB_V, 0);
                 else {                              /* nand */
-                    rv_alu(t, RV_AND, SUB_V2, SUB_OLD, SUB_V, 0);
-                    rv_alu_imm(t, RV_XOR, SUB_V2, SUB_V2, -1, 0);
+                    rv_alu(t, RV_AND, FAR, SUB_OLD, SUB_V, 0);
+                    rv_alu_imm(t, RV_XOR, FAR, FAR, -1, 0);
                 }
-                sub_commit(t, SUB_V2, top);
+                sub_commit(t, FAR, top, sc_ord(i));
             }
-            sub_out(t, aw, i->sign, F->xlen);
+            sub_out(t, SUB_OLD, SUB_X, aw, i->sign, F->xlen);
             wrote(F, i->dst, SUB_OLD);
             return;
         }
@@ -5550,9 +5592,9 @@ static void gen_ins(struct rv_fn *F, int n)
         if (dst == addr || dst == val)
             dst = ACC;
         if (i->op == IR_XCHG)
-            rv_amo(t, RV_AMOSWAP, dst, addr, val, RV_ORD_AQRL, aw == 8);
+            rv_amo(t, RV_AMOSWAP, dst, addr, val, amo_ord(i), aw == 8);
         else if (i->op == IR_XADD)
-            rv_amo(t, RV_AMOADD, dst, addr, val, RV_ORD_AQRL, aw == 8);
+            rv_amo(t, RV_AMOADD, dst, addr, val, amo_ord(i), aw == 8);
         else {
             /* IR_ARMW's operation is a character in `imm`. Three of the four
              * are single instructions; NAND is not -- there is no amonand --
@@ -5567,10 +5609,10 @@ static void gen_ins(struct rv_fn *F, int n)
                  * which is also the shape every CAS below has. */
                 {
                     int top = t->len;
-                    rv_amo(t, RV_LR, dst, addr, RV_ZERO, RV_ORD_AQ, aw == 8);
+                    rv_amo(t, RV_LR, dst, addr, RV_ZERO, lr_ord(i), aw == 8);
                     rv_alu(t, RV_AND, SCR, dst, val, 0);
                     rv_alu_imm(t, RV_XOR, SCR, SCR, -1, 0);    /* xori -1 = ~ */
-                    rv_amo(t, RV_SC, SCR2, addr, SCR, RV_ORD_RL, aw == 8);
+                    rv_amo(t, RV_SC, SCR2, addr, SCR, sc_ord(i), aw == 8);
                     /* sc writes 0 on success; retry while non-zero. */
                     {
                         int br = rv_b_placeholder(t, RV_BNE, SCR2, RV_ZERO);
@@ -5580,7 +5622,7 @@ static void gen_ins(struct rv_fn *F, int n)
                 wrote(F, i->dst, dst);
                 return;
             }
-            rv_amo(t, op, dst, addr, val, RV_ORD_AQRL, aw == 8);
+            rv_amo(t, op, dst, addr, val, amo_ord(i), aw == 8);
         }
         wrote(F, i->dst, dst);
         return;
@@ -5604,35 +5646,54 @@ static void gen_ins(struct rv_fn *F, int n)
         int aw = i->size;
         int addr, exp, des, seen, out_br, top, sc_br;
         if (aw == 1 || aw == 2) {
-            /* the word around it (sub_lane): compare this lane only */
+            /* the word around it (sub_lane): compare this lane only.
+             * SUB_V is the expected lane and SUB_X expected ^ desired, so
+             * that on a match the merged word is old ^ SUB_X; the shift,
+             * in SUB_OLD until the loop takes it, is made again after. */
             addr = rdr(F, i->a, ADDR);
-            sub_lane(t, addr, aw, F->xlen);
+            sub_lane(t, addr, SUB_OLD, aw, F->xlen);
             if (i->op == IR_CAS) {
-                sub_in(t, SUB_V, rdr(F, i->b, TMP));
+                int e = rdr(F, i->b, TMP);
+                if (e != SUB_V)
+                    rv_mv(t, SUB_V, e);
             } else {
                 int p = rdr(F, i->b, TMP);
                 rv_load(t, SUB_V, p, 0, aw, 0, F->xlen);
-                sub_in(t, SUB_V, SUB_V);
             }
-            sub_in(t, SUB_V2, rdr(F, i->c, SUB_V2));
+            rv_alu(t, RV_XOR, SUB_X, rdr(F, i->c, SUB_X), SUB_V, 0);
+            rv_alu(t, RV_SLL, SUB_X, SUB_X, SUB_OLD, 0);
+            rv_alu(t, RV_AND, SUB_X, SUB_X, SUB_MK, 0);
+            rv_alu(t, RV_SLL, SUB_V, SUB_V, SUB_OLD, 0);
+            rv_alu(t, RV_AND, SUB_V, SUB_V, SUB_MK, 0);
             top = t->len;
-            rv_amo(t, RV_LR, SUB_OLD, SUB_AL, RV_ZERO, RV_ORD_AQ, 0);
+            rv_amo(t, RV_LR, SUB_OLD, SUB_AL, RV_ZERO, lr_ord(i), 0);
             rv_alu(t, RV_AND, FAR, SUB_OLD, SUB_MK, 0);
             out_br = rv_b_placeholder(t, RV_BNE, FAR, SUB_V);
-            sub_commit(t, SUB_V2, top);
+            rv_alu(t, RV_XOR, FAR, SUB_OLD, SUB_X, 0);
+            rv_amo(t, RV_SC, FAR, SUB_AL, FAR, sc_ord(i), 0);
+            sc_br = rv_b_placeholder(t, RV_BNE, FAR, RV_ZERO);
+            rv_patch_b(t, sc_br, top);
             rv_patch_b(t, out_br, t->len);
+            /* the lane seen, at bit 0, by the shift made again into
+             * SUB_AL; a CMPXCHG's bool first, from the lanes compared,
+             * into SUB_MK */
+            if (i->op == IR_CMPXCHG) {
+                rv_alu(t, RV_AND, SUB_OLD, SUB_OLD, SUB_MK, 0);
+                rv_alu(t, RV_XOR, SUB_MK, SUB_OLD, SUB_V, 0);
+                rv_alu_imm(t, RV_SLTU, SUB_MK, SUB_MK, 1, 0);
+            }
+            addr = rdr(F, i->a, ADDR);
+            rv_alu_imm(t, RV_AND, SUB_AL, addr, 3, 0);
+            rv_shift_imm(t, RV_SLL, SUB_AL, SUB_AL, 3, 0, F->xlen);
             if (i->op == IR_CAS) {
-                sub_out(t, aw, i->sign, F->xlen);
+                sub_out(t, SUB_OLD, SUB_AL, aw, i->sign, F->xlen);
                 wr(F, i->dst, SUB_OLD);
             } else {
-                /* the bool, from the lanes compared; then *b = seen */
-                rv_alu(t, RV_AND, SUB_V2, SUB_OLD, SUB_MK, 0);
-                rv_alu(t, RV_XOR, SUB_V2, SUB_V2, SUB_V, 0);
-                rv_alu_imm(t, RV_SLTU, SUB_V2, SUB_V2, 1, 0);
-                sub_out(t, aw, 0, F->xlen);
+                /* *b = the lane seen; the bool is the result */
+                rv_alu(t, RV_SRL, SUB_OLD, SUB_OLD, SUB_AL, 0);
                 int p = rdr(F, i->b, TMP);
                 rv_store(t, SUB_OLD, p, 0, aw, F->xlen);
-                wr(F, i->dst, SUB_V2);
+                wr(F, i->dst, SUB_MK);
             }
             return;
         }
@@ -5651,9 +5712,9 @@ static void gen_ins(struct rv_fn *F, int n)
         des = rdr(F, i->c, SCR2);
         seen = ACC;
         top = t->len;
-        rv_amo(t, RV_LR, seen, addr, RV_ZERO, RV_ORD_AQ, aw == 8);
+        rv_amo(t, RV_LR, seen, addr, RV_ZERO, lr_ord(i), aw == 8);
         out_br = rv_b_placeholder(t, RV_BNE, seen, exp);
-        rv_amo(t, RV_SC, FAR, addr, des, RV_ORD_RL, aw == 8);
+        rv_amo(t, RV_SC, FAR, addr, des, sc_ord(i), aw == 8);
         sc_br = rv_b_placeholder(t, RV_BNE, FAR, RV_ZERO);
         rv_patch_b(t, sc_br, top);
         rv_patch_b(t, out_br, t->len);

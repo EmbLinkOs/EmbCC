@@ -240,6 +240,14 @@ struct ir_asm {
  * once for all of them. */
 struct ir_jt { int n; int *labels; };
 
+/* An atomic read-modify-write's memory order (ir_ins.mo). Consume is
+ * acquire; seq_cst is 0, so an instruction built without one is the
+ * strongest. RISC-V maps them to .aq and .rl as clang does. */
+enum {
+    IR_MO_SEQ_CST = 0, IR_MO_RELAXED, IR_MO_ACQUIRE, IR_MO_RELEASE,
+    IR_MO_ACQ_REL
+};
+
 struct ir_ins {
     enum ir_op op;
     /* Where this instruction came from (R3). `line` is the statement or
@@ -253,6 +261,10 @@ struct ir_ins {
     int synth;
     int dst, a, b;
     int c;                   /* IR_CMPXCHG: the third operand (desired value) */
+    int mo;                  /* IR_XCHG/XADD/ARMW/CAS/CMPXCHG: the memory
+                              * order, IR_MO_*. 0 -- what every hand-built
+                              * one has -- is seq_cst, the strongest; a
+                              * backend may always treat any as seq_cst */
     int w;                   /* 4 or 8: operation width class */
     int size;                /* 1/2/4/8: memory width for LD/ST/EXT */
     int sign;                /* signed variant of the op */
