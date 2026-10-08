@@ -11,6 +11,7 @@
 #include "../backend.h"
 #include "emit.h"
 #include "../regalloc.h"
+#include "../predef.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -3242,11 +3243,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
     }
 
     /* Sixteen at -O2, as clang does; none at -Os, as clang does there --
-     * a one-byte function was followed by fifteen nops. */
-    if (!target_opt_size())
-        code_align(text, 16, 0x90);
+     * a one-byte function was followed by fifteen nops. But two in C++:
+     * the Itanium ABI's pointer to member function says "virtual" with
+     * the low bit of its function address, so a member function at an odd
+     * address was called through its vtable instead (clang aligns member
+     * functions to 2 for this; every function of a C++ unit is, here). */
+    int falign = !target_opt_size() ? 16 : predef_is_cxx() ? 2 : 1;
+    if (falign > 1)
+        code_align(text, falign, 0x90);
     f->code_off = text->len;
-    f->code_align = target_opt_size() ? 1 : 16;
+    f->code_align = falign;
 
     /* The frame record, then the callee-saved registers, then the rest
      * of the frame. They go out as PUSHES: the save area is the top of
