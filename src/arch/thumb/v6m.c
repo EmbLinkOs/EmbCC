@@ -3222,8 +3222,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                                            : (char *)0;
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = tcg_pair_alloc(fn, F.wide, pin, pused, &npused);
-        F.loc = ra_allocate(fn, tcg_ra(), F.wide, pin, F.used_callee,
+        char *fx = tcg_faddr_excl(&F, pin);
+        F.loc = ra_allocate(fn, tcg_ra(), F.wide, fx ? fx : pin, F.used_callee,
                             &F.nsave);
+        free(fx);
         tcg_reset_taken();
         if (pair) {
             for (int v = 0; v < fn->nvregs; v++)

@@ -1774,6 +1774,43 @@ static void frame_addr_map(struct t_fn *F)
     F->fscr = fs;
 }
 
+/* A local's address read once -- `f(&x)`, a struct copied once -- needs
+ * no register: it is the frame base and an offset, built where it is
+ * read (faddr), straight into an argument register. Given a register,
+ * it was made early in whatever register was free and moved, and it took
+ * the register from something that lives longer. NULL when no temp is
+ * such (and `base`, the exclusions already made, stands). ARMv6-M's six
+ * or eight registers only: on ARMv7-M it measured 18 bytes worse over
+ * lib/libc, where its loads fold the frame offset already. */
+static char *t_faddr_excl(const struct t_fn *F, const char *base)
+{
+    const struct ir_ins *ins = F->fn->ins;
+    int nv = F->fn->nvregs, any = 0;
+    if (!F->fvar || !nv || getenv("EMBCC_T_NOFAEXCL"))
+        return NULL;
+    int *uc = xcalloc((size_t)nv, sizeof *uc);
+    ra_count_vreg_uses(F->fn, uc);
+    char *x = xcalloc((size_t)nv, 1);
+    for (int v = 0; v < nv; v++) {
+        x[v] = base ? base[v] : 0;
+        if ((F->fvar[v] >= 0 || F->fscr[v] >= 0) && uc[v] <= 1) {
+            x[v] = 1;
+            any = 1;
+        }
+    }
+    (void)ins;
+    free(uc);
+    if (!any) {
+        free(x);
+        return NULL;
+    }
+    return x;
+}
+char *tcg_faddr_excl(const struct t_fn *F, const char *base)
+{
+    return t_faddr_excl(F, base);
+}
+
 /* frame base + off, into `rd`: t_add_sp where the frame base is sp. */
 static void fb_addr(struct t_fn *F, int rd, long off)
 {
@@ -4302,9 +4339,13 @@ static void gen_ins(struct t_fn *F, int n)
          * 16-bit ones: `adds r0, #1` is two bytes where `addw` is four. */
         if (i->imm_b && i->op != IR_MUL) {
             int lo = d < 8 && ra_ < 8;
+            /* x + -1 is x - 1: the 16-bit forms by magnitude */
+            long mg = i->imm < 0 ? -i->imm : i->imm;
+            int opm = (i->op == IR_ADD) == (i->imm >= 0) ? T_OP_ADD
+                                                          : T_OP_SUB;
             if ((i->op == IR_ADD || i->op == IR_SUB) && lo &&
-                i->imm >= 0 && (i->imm <= 7 || (d == ra_ && i->imm <= 255))) {
-                t_alu_imm(t, op, d, ra_, i->imm, 1);
+                (mg <= 7 || (d == ra_ && mg <= 255))) {
+                t_alu_imm(t, opm, d, ra_, mg, 1);
             /* addw/subw reach any 0..4095 where the modified immediate
              * reaches only what it can rotate into place, and almost
              * every constant folded here is a small offset. */

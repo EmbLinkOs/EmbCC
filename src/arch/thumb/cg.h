@@ -211,6 +211,9 @@ int tcg_call_sret_bytes(const struct ir_ins *i);
 int tcg_fn_sret_bytes(const struct ir_func *fn);
 long tcg_slot_of(const struct t_fn *F, int v);
 int tcg_faddr(const struct t_fn *F, int v, long *off);
+/* The exclusion map for the allocator with a frame address read once
+ * added (codegen.c's t_faddr_excl); NULL for `base` as it is. */
+char *tcg_faddr_excl(const struct t_fn *F, const char *base);
 void tcg_want_label(struct t_fn *F, int at, int label, int cond);
 void tcg_note_call(struct t_sites *st, int at, struct func *target);
 void tcg_note_ext(struct t_sites *st, int at, struct func *callee);
