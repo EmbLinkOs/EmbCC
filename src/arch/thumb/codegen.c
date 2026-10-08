@@ -1469,6 +1469,7 @@ static long slot_of(const struct t_fn *F, int v)
 }
 
 static int faddr(const struct t_fn *F, int v, long *off);
+static unsigned lo_free_at(const struct t_fn *F, int n);
 
 static void rd(struct t_fn *F, int v, int reg)
 {
@@ -4590,6 +4591,19 @@ static void gen_ins(struct t_fn *F, int n)
          * VFP registers. place_one knows which convention is in force. */
         for (int k = 0; k < i->nargs; k++)
             place_one(&w, &i->argv[k], &pl[k]);
+        /* The stack words go through low registers where the call has
+         * any free (lo_free_at): `ldr r2, [sp, #n]; str r2, [sp]` is
+         * four bytes where the same through r12 is eight, and a value
+         * already in a register is stored from it -- it was moved to
+         * r12 first, six bytes for every stack argument. Nothing below
+         * writes r0-r3 until the stack words are all down. */
+        unsigned cfree = lo_free_at(F, n);
+        int cs0 = -1, cs1 = -1;
+        for (int r = 0; r < 8; r++)
+            if (cfree >> r & 1) {
+                if (cs0 < 0) cs0 = r;
+                else if (cs1 < 0) cs1 = r;
+            }
         for (int k = 0; k < i->nargs; k++) {
             struct ir_arg *a = &i->argv[k];
             if (!pl[k].nstk)
@@ -4597,7 +4611,14 @@ static void gen_ins(struct t_fn *F, int n)
             /* A composite's vreg holds its ADDRESS; a scalar's holds
              * the value, and a scalar never splits. */
             if (a->is_struct) {
-                rd(F, a->vreg, T_ADDR);
+                /* A local's address is the frame base and an offset:
+                 * no register for it at all. */
+                long fo = 0;
+                int fa = faddr(F, a->vreg, &fo);
+                int base = fa ? F->fb : cs1 >= 0 ? cs1 : T_ADDR;
+                int dr = cs0 >= 0 ? cs0 : T_ACC;
+                if (!fa)
+                    rd(F, a->vreg, base);
                 for (int q = 0; q < pl[k].nstk; q++) {
                     long off = (long)(pl[k].nreg + q) * 4;
                     int last = off + 4 > a->size;
@@ -4606,26 +4627,40 @@ static void gen_ins(struct t_fn *F, int n)
                      * object would be a load nothing put there. */
                     if (last && (a->size & 3)) {
                         for (long b = off; b < a->size; b++) {
-                            ldst_must(t, T_ACC, T_ADDR, b, 1, 0, 0);
+                            if (fa) fb_ld(F, dr, fo + b, 1, 0);
+                            else ldst_must(t, dr, base, b, 1, 0, 0);
                             /* the outgoing area is at the live sp, which
                              * after a VLA is not the frame base */
-                            ldst_must(t, T_ACC, T_SP,
+                            ldst_must(t, dr, T_SP,
                                        pl[k].stk + (long)q * 4 + (b - off),
                                        1, 0, 1);
                         }
                     } else {
-                        ldst_must(t, T_ACC, T_ADDR, off, 4, 0, 0);
-                        ldst_must(t, T_ACC, T_SP, pl[k].stk + (long)q * 4,
+                        if (fa) fb_ld(F, dr, fo + off, 4, 0);
+                        else ldst_must(t, dr, base, off, 4, 0, 0);
+                        ldst_must(t, dr, T_SP, pl[k].stk + (long)q * 4,
                                    4, 0, 1);
                     }
                 }
             } else if (a->size > 4) {
-                rd64(F, a->vreg, T_ACC, T_TMP);
-                ldst_must(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
-                ldst_must(t, T_TMP, T_SP, pl[k].stk + 4, 4, 0, 1);
+                if (in_reg(F, a->vreg)) {
+                    int r = F->loc[a->vreg];
+                    if (!t_ldst_pair(t, r, r + 1, T_SP, pl[k].stk, 1)) {
+                        ldst_must(t, r, T_SP, pl[k].stk, 4, 0, 1);
+                        ldst_must(t, r + 1, T_SP, pl[k].stk + 4, 4, 0, 1);
+                    }
+                } else {
+                    int lo = cs0 >= 0 && cs1 >= 0 ? cs0 : T_ACC;
+                    int hi = cs0 >= 0 && cs1 >= 0 ? cs1 : T_TMP;
+                    rd64(F, a->vreg, lo, hi);
+                    ldst_must(t, lo, T_SP, pl[k].stk, 4, 0, 1);
+                    ldst_must(t, hi, T_SP, pl[k].stk + 4, 4, 0, 1);
+                }
             } else {
-                rd(F, a->vreg, T_ACC);
-                ldst_must(t, T_ACC, T_SP, pl[k].stk, 4, 0, 1);
+                int r = in_reg(F, a->vreg) ? F->loc[a->vreg]
+                                           : cs0 >= 0 ? cs0 : T_ACC;
+                rd(F, a->vreg, r);
+                ldst_must(t, r, T_SP, pl[k].stk, 4, 0, 1);
             }
         }
         /* The VFP arguments next, while every vreg is still where the
@@ -4815,6 +4850,28 @@ static void gen_ins(struct t_fn *F, int n)
              * copied to the buffer the caller named, whose address is
              * also what r0 must hold at the return. */
             long n = fn->ret_abi.size;
+            if (F->sret_slot >= 0 && n <= t_block_straight()) {
+                /* Nothing is live past a return, so r0-r3 are this
+                 * copy's: the buffer's address straight into r0, where
+                 * it has to be anyway, the source in r1 unless it is a
+                 * local (the frame base and an offset), and the words
+                 * through r2 -- every access a two-byte one where r10,
+                 * r11 and r12 made each of them four, and no reload of
+                 * r0 after. */
+                long fo = 0, k = 0;
+                int fa = faddr(F, i->a, &fo);
+                if (!fa)
+                    rd(F, i->a, T_R1);
+                fb_ld(F, T_R0, F->sret_slot, 4, 0);
+                for (; k < n; ) {
+                    int sz = k + 4 <= n ? 4 : 1;
+                    if (fa) fb_ld(F, T_R2, fo + k, sz, 0);
+                    else ldst_must(t, T_R2, T_R1, k, sz, 0, 0);
+                    ldst_must(t, T_R2, T_R0, k, sz, 0, 1);
+                    k += sz;
+                }
+                goto ret_epilogue;
+            }
             rd(F, i->a, T_ADDR);
             if (F->sret_slot >= 0) {
                 fb_ld(F, T_TMP, F->sret_slot, 4, 0);
@@ -5497,6 +5554,30 @@ static void lo_mark(int v, void *ctx)
         b->busy |= 2u << F->loc[v];     /* the pair's high register */
 }
 
+/* lo_free's answer for instruction n whatever its op, over n alone. For
+ * a lowering that writes its scratch before it touches any register of
+ * its own: a call's stack arguments are stored before the argument
+ * registers are loaded, so a register holding nothing live into or out
+ * of the call, and none of its operands, is free for them. */
+static unsigned lo_free_at(const struct t_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    struct lo_busy b;
+    unsigned avail = 0xfu;
+    if (!F->lv_busy)
+        return 0;
+    for (int k = 0; k < F->nsave; k++)
+        if (F->used_callee[k] < 8)
+            avail |= 1u << F->used_callee[k];
+    if (F->fb == 7 || fn->has_alloca)
+        avail &= ~(1u << 7);
+    b.F = F;
+    b.busy = F->lv_busy[n];
+    ra_each_use(&fn->ins[n], lo_mark, &b);
+    lo_mark(fn->ins[n].dst, &b);
+    return avail & ~b.busy;
+}
+
 static unsigned lo_free(const struct t_fn *F, int n)
 {
     const struct ir_func *fn = F->fn;
@@ -6153,10 +6234,21 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             for (int q = 0; q < pl.nstk; q++) {
                 long src = base + pl.stk + (long)q * 4;
                 long dst = F.slot[i] + (long)(pl.nreg + q) * 4;
-                fb_ld(&F, T_ACC, src, 4, 0);
-                if (!t_ldst_imm(t, T_ACC, F.fb, dst, 4, 0, 1)) {
+                /* Through a low register the prologue has just pushed
+                 * when there is one: nothing has been put in it yet --
+                 * the parameters bound for r4-r7 move after this loop --
+                 * and `ldr r4, [sp, #n]; str r4, [sp, #m]` is four
+                 * bytes where the same through r12 is eight. */
+                int ds = T_ACC;
+                for (int k = 0; k < F.nsave && ds == T_ACC; k++)
+                    if (F.used_callee[k] >= 4 && F.used_callee[k] < 8 &&
+                        !(F.used_callee[k] == 7 &&
+                          (F.fb == 7 || fn->has_alloca)))
+                        ds = F.used_callee[k];
+                fb_ld(&F, ds, src, 4, 0);
+                if (!t_ldst_imm(t, ds, F.fb, dst, 4, 0, 1)) {
                     fb_addr(&F, T_ADDR, dst);
-                    ldst_must(t, T_ACC, T_ADDR, 0, 4, 0, 1);
+                    ldst_must(t, ds, T_ADDR, 0, 4, 0, 1);
                 }
             }
         }
