@@ -1718,6 +1718,52 @@ stub that sets `sp` over a valid bottom frame, sets `PS` (window
 exceptions on, level 0) and `WINDOWSTART`, and calls the entry with
 `callx8`.
 
+### Assembly
+
+`embcc -c` assembles `.s` and `.S` files for Xtensa, and file-scope `asm`
+blocks and `__attribute__((naked))` functions are assembled the same way,
+in GNU as's Xtensa syntax. The vocabulary is the ESP32's: the core ALU,
+shift and SAR instructions, the MUL32/DIV32 and MIN/MAX options, the
+loads and stores, `movi`, `mov`, `addi`, `addmi`, every branch form (two
+registers, against zero, against a `b4const`, `bbci`/`bbsi` and their
+`.l` spellings), the zero-overhead loops, `j`, `jx`, `call0/4/8/12`,
+`callx0/4/8/12`, `ret`, `retw`, `entry`, `movsp`, `rotw`, `rsr`/`wsr`/`xsr`
+by the ESP32's special-register names (`ps`, `epc1`-`epc7`,
+`excsave1`-`excsave7`, `eps2`-`eps7`, `intenable`, `interrupt`, `intset`,
+`intclear`, `ccount`, `ccompare0`-`2`, `vecbase`, `sar`, `windowbase`,
+`windowstart`, `lbeg`, `lend`, `lcount`, `scompare1`, `atomctl`,
+`exccause`, `excvaddr`, `depc`, `prid`, `cpenable`, `misc0`-`3`, ...) with
+GNU's read/write rules, or by number, or as `rsr.ps`; `rur`/`wur` of
+`threadptr`, `rsil`, `waiti`, the syncs, `memw`, `extw`, `break`, `ill`,
+`rfe`, `rfde`, `rfi`, `rfwo`, `rfwu`, `syscall`, `simcall`, `s32c1i`,
+`l32ai`, `s32ri`, `l32e` and `s32e`. GNU's `_` prefix is accepted. The
+density option's `.n` forms are refused by name (no instruction here is
+16 bits), as is anything else outside the list.
+
+A symbol is a target of a branch, a loop, `j`, `callN` or `l32r` with
+`R_XTENSA_SLOT0_OP`, and a `.word` with `R_XTENSA_32`. `movi aN, sym` -- or
+a constant `movi` cannot hold -- is an `l32r` of a literal, and
+`.literal NAME, X, ...` names literals of its own; the literals go where
+GNU as's `--text-section-literals` puts them: in the latest pool placed
+before the code, at the start of the section, at each
+`.literal_position`, and before the labels of each function's `entry`.
+`.align` counts bytes, as GNU as's does for Xtensa. `.begin`/`.end` blocks
+that only restrict relaxation (`no-transform`, `literal_prefix`,
+`schedule`, ...) are accepted; `.begin longcalls` and
+`absolute-literals` would change the code and are refused.
+`tests/golden/xtensa-asm.sh` checks every form against QEMU's de212
+disassembler and Espressif's GNU as, and a file's layout against GNU as's.
+
+In inline asm a register operand is written `a10`, an `"m"` operand
+`a10, 0`; the constraint letters are `r`, `a`, `g`, `m`, `i`, `n` and
+GCC's `I`-`P`. No operand is put in `a0`/`a1` (the return address and the
+stack pointer), `a7` or `a14`/`a15`; a clobber list may not name `a0` or
+`a1`; a template's `call4`/`call8`/`call12` (or `callx`) clobbers the
+callee's window -- `a4`/`a8`/`a12` up to `a15` -- whatever the clobber list
+says, and `call0`/`callx0`, which would write `a0`, are refused. A
+template may use numeric labels (`1:`, `1b`, `1f`); it cannot name a
+symbol, since its bytes carry no relocation.
+
 ### Predefined macros
 
 From Espressif's `xtensa-esp32-elf-gcc` 16.1: `__xtensa__`, `__XTENSA__`,
@@ -2001,8 +2047,9 @@ the entry.
 | `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
 | any C++ translation unit | `C++ is not yet supported for tricore-none-elf: ...` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
-| inline assembly, `__attribute__((naked))` | `inline assembly is not supported for xtensa-none-elf yet (EmbCC has no Xtensa assembler vocabulary)` |
-| a file-scope `asm` instruction | `file-scope asm instruction "nop": EmbCC assembles instructions for x86-64 only. ...` |
+| `call0` or `callx0` in inline asm | `call0 in Xtensa asm writes a0, which holds this function's return address under the windowed ABI: call a windowed function with call8/callx8` |
+| a density (`.n`) instruction | `ret.n is a 16-bit instruction of the density option, which this assembler does not emit: write ret, its 24-bit form` |
+| `.begin longcalls` | `.begin longcalls is not supported: a long call is an l32r and a callx, which this assembler does not make of a call; write them` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |

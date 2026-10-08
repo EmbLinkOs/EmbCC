@@ -258,8 +258,8 @@ isr_common:
 ## GNU-SYNTAX ASSEMBLY
 
 `embas` reads NASM syntax for x86-64 only. Assembly in GNU syntax is
-assembled by `embcc` itself, for the ARM (Thumb), AArch64, RISC-V, MIPS32
-and AVR targets:
+assembled by `embcc` itself, for the ARM (Thumb), AArch64, RISC-V, MIPS32,
+LoongArch64, Xtensa and AVR targets:
 
 ```sh
 embcc --target=thumbv7m-none-eabi -c startup.S -o startup.o
@@ -312,7 +312,7 @@ addresses otherwise is refused.
 | `.space N[, FILL]`, `.zero N`, `.skip N[, FILL]` | `N` bytes of `FILL` (0), or reserved space in a NOBITS section |
 | `.fill REPEAT[, SIZE[, VALUE]]` | `REPEAT` values of `SIZE` bytes |
 | `.org OFFSET` | advance to `OFFSET` in this section |
-| `.align N`, `.p2align N` (and `w`/`l` variants) | align to 2^`N` bytes; code is padded with the target's no-op |
+| `.align N`, `.p2align N` (and `w`/`l` variants) | align to 2^`N` bytes; code is padded with the target's no-op (with zeros on Xtensa, whose instructions are three bytes). On Xtensa `.align N` counts bytes, a power of two, as GNU as reads it there |
 | `.balign N` (and `w`/`l` variants) | align to `N` bytes |
 | `.equ NAME, EXPR`, `.set NAME, EXPR`, `NAME = EXPR`, `.equiv NAME, EXPR` | define `NAME`: absolute for a value, an alias for an address; it may name a label further down |
 | `.thumb_set NAME, EXPR` | as `.set`, and `NAME` is a Thumb function (how a startup file aliases weak handlers to its default one) |
@@ -322,11 +322,13 @@ addresses otherwise is refused.
 | `.lcomm NAME, SIZE[, ALIGN]`, `.comm ...` | reserve space in `.bss` (`.comm` makes it global) |
 | `.inst`, `.inst.n`, `.inst.w` | an instruction by its encoding |
 | `.ltorg`, `.pool` | place the literal pool here (ARM) |
+| `.literal_position`, `.literal NAME, EXPR, ...` | Xtensa: a literal pool here; words in the current pool, `NAME` on the first. A section's pools are at its start, at each `.literal_position` and before the labels of each `entry`, and `movi aN, EXPR` whose value is a symbol or wider than 12 bits loads from the latest one -- as GNU as's `--text-section-literals` places them |
+| `.begin NAME`, `.end NAME` | Xtensa: GNU as's relaxation blocks; `no-transform`, `literal_prefix`, `schedule`, `density`, `target-align` and their `no-` forms are accepted (nothing here relaxes), `longcalls` and `absolute-literals` refused |
 | `.macro NAME [PARAMS]` ... `.endm`, `.purgem`, `.exitm` | a macro: parameters with `=default`, `:req` or `:vararg`, used as `\name`; `\@` counts expansions and `\()` separates |
 | `.rept N`, `.irp SYM, A, B...`, `.irpc SYM, CHARS` ... `.endr` | repetition |
 | `.if EXPR`, `.ifdef`, `.ifndef`, `.ifeq`, `.ifne`, `.ifgt`, `.ifge`, `.iflt`, `.ifle`, `.ifb`, `.ifnb`, `.ifc`, `.ifnc`, `.ifeqs`, `.ifnes`, `.else`, `.elseif`, `.endif` | conditional assembly, decided from values known where the `.if` stands (numbers and earlier `.equ`/`.set`; not a label's address) |
 | `.include "FILE"` | the file, found as given or beside this one |
-| `.end` | the rest of the file is not assembled |
+| `.end` | the rest of the file is not assembled (on MIPS `.end f` and on Xtensa `.end NAME` close a block instead) |
 | `.error "MSG"`, `.warning "MSG"`, `.print "MSG"` | a diagnostic |
 | `.cpu`, `.arch`, `.arch_extension`, `.fpu`, `.syntax`, `.thumb`, `.code 16`, `.eabi_attribute`, `.object_arch`, `.file`, `.ident`, `.loc`, `.cfi_*`, `.attribute`, `.option` | accepted; the target comes from `--target`/`-mcpu` |
 | `.fnstart`, `.fnend`, `.cantunwind`, `.save`, `.vsave`, `.setfp`, `.pad`, `.movsp`, `.personality`, `.personalityindex`, `.handlerdata`, `.unwind_raw` | accepted; no unwind table is written (an exception unwinding through this code stops) |
