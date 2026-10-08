@@ -313,7 +313,7 @@ embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC
 
 An explicit `-funwind-tables` or `-fasynchronous-unwind-tables` is
 refused the same way (`unwind tables are not supported for TRIPLE yet
-... EmbCC writes no ARM unwind tables (.ARM.exidx)`), and without it a
+... EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)`), and without it a
 C++ unit writes no `.eh_frame`. RTTI is on by default; `-fno-rtti`
 leaves out the type-information objects and the code that reads them.
 
