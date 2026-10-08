@@ -72,7 +72,7 @@ na() {
 # the status rx-elf-gcc 16.2.0 -nofpu's code exits with on this board.
 rxref() {
     case $1 in
-    attr-layout|c-extras2|complex|fp-bits|long-double|stdc-version|structs)
+    attr-layout|c-extras2|complex|fp-bits|long-double|stdc-version|structs|union-pun-params)
         echo 1 ;;
     frontend-gaps|gnu-attr-positions) echo 2 ;;
     float-truth|static-local-init|u64-float) echo 3 ;;
