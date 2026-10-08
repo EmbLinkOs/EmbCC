@@ -325,8 +325,11 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/cortexm-fpu.c tools/embsim/scs.c \
                tools/embsim/systick.c tools/embsim/dwt.c \
                tools/embsim/uart-pl011.c tools/embsim/uart-cmsdk.c \
-               tools/embsim/uart-nrf51.c tools/embsim/gdb.c $(EMBSIM_NET)
-EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h \
+               tools/embsim/uart-nrf51.c tools/embsim/riscv.c \
+               tools/embsim/riscv-fpu.c tools/embsim/clint.c \
+               tools/embsim/uart-16550.c tools/embsim/sifive-test.c \
+               tools/embsim/virt-rom.c tools/embsim/gdb.c $(EMBSIM_NET)
+EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h
 embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS)
 	$(CC) $(CFLAGS) -o $@ $(EMBSIM_SRCS) -lm

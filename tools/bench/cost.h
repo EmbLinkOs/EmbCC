@@ -9,8 +9,13 @@
  *   and vsqrt 14; and a taken branch 2 more (the pipeline refill).
  *
  *   RV32 (no one core: a plain in-order pipeline): 1, a load 2 (flw and
- *   fld too), a divide or remainder 16, fdiv and fsqrt 16, and a taken
- *   branch or jump 2 more.
+ *   fld too, and their compressed forms), a divide or remainder 16, fdiv
+ *   and fsqrt 16, and a taken branch or jump 2 more.
+ *
+ *   RV64: the same table, the same pipeline at 64 bits -- ld and c.ld are
+ *   loads, and divw, divuw, remw and remuw divides like the rest; a
+ *   64-bit divide is charged as a 32-bit one (a model of the choices a
+ *   compiler makes, not of one core).
  *
  * Each function takes an instruction's bytes (2 or 4) and returns its
  * cost, and says whether it may branch; the caller adds the 2 cycles of
@@ -111,15 +116,15 @@ static inline int rv_cost(const uint8_t *p, size_t n, int *branch)
     *branch = 0;
     if (n == 2) {
         unsigned h = p[0] | p[1] << 8, q = h & 3, f3 = h >> 13;
-        if (q == 0)
-            return f3 == 2 || f3 == 3 ? 2 : 1;          /* c.lw / c.flw */
+        if (q == 0)                                 /* c.fld c.lw c.flw/c.ld */
+            return f3 >= 1 && f3 <= 3 ? 2 : 1;
         if (q == 1) {
             if (f3 == 1 || f3 == 5 || f3 == 6 || f3 == 7)
                 *branch = 1;                            /* c.jal c.j c.b*z */
             return 1;
         }
-        if (f3 == 2 || f3 == 3)                         /* c.lwsp */
-            return 2;
+        if (f3 >= 1 && f3 <= 3)                         /* c.fldsp c.lwsp */
+            return 2;                                   /* c.flwsp/c.ldsp */
         if (f3 == 4 && ((h >> 2) & 0x1f) == 0 && ((h >> 7) & 0x1f))
             *branch = 1;                                /* c.jr, c.jalr */
         return 1;
@@ -132,8 +137,8 @@ static inline int rv_cost(const uint8_t *p, size_t n, int *branch)
         *branch = 1;
         return 1;
     }
-    if (op == 0x33 && (w >> 25) == 1 && ((w >> 12) & 7) >= 4)
-        return 16;                                      /* div, rem */
+    if ((op == 0x33 || op == 0x3b) && (w >> 25) == 1 && ((w >> 12) & 7) >= 4)
+        return 16;                                      /* div, rem (and w) */
     if (op == 0x53 && ((w >> 27) == 0x03 || (w >> 27) == 0x0b))
         return 16;                                      /* fdiv, fsqrt */
     return 1;

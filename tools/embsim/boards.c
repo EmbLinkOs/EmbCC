@@ -43,11 +43,21 @@ const struct board_desc boards[] = {
       { { 0, KB(256), MEM_FLASH, 0 }, { 0x20000000u, KB(16), MEM_RAM, 1 } },
       { { "nrf51-uart", 0x40002000u, 0x1000 }, PERIPHERALS },
       { { 0, 0, 0 } } },
+    /* QEMU's virt, RV32 or RV64 by the image: the reset ROM where the
+     * core starts, the test device that ends a run, the CLINT, the
+     * NS16550A, and the PLIC's space reading as zero */
+    { "virt", "riscv", "riscv", 0,
+      { { 0x80000000u, MB(128), MEM_RAM, 1 } },
+      { { "virt-rom", 0x1000, 0xf000 }, { "sifive-test", 0x100000, 0x1000 },
+        { "clint", 0x2000000, 0x10000 }, { "ns16550a", 0x10000000u, 0x100 },
+        { "zero", 0x0c000000u, 0x600000 } },
+      { { 0, 0, 0 } } },
 };
 const int nboards = (int)(sizeof boards / sizeof boards[0]);
 
 const struct core_type cores[] = {
     { "cortex-m", cortexm_create },
+    { "riscv", riscv_create },
 };
 const int ncores = (int)(sizeof cores / sizeof cores[0]);
 
@@ -78,6 +88,10 @@ static const struct dev_type dev_types[] = {
     { "scs", &scs_ops, scs_create },
     { "dwt", &dwt_ops, dwt_create },
     { "zero", &zero_ops, no_ctx },
+    { "virt-rom", &virt_rom_ops, virt_rom_create },
+    { "sifive-test", &sifive_test_ops, sifive_test_create },
+    { "clint", &clint_ops, clint_create },
+    { "ns16550a", &ns16550a_ops, ns16550a_create },
 };
 
 const struct board_desc *board_find(const char *name)
