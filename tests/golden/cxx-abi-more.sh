@@ -132,6 +132,7 @@ for t in $boards; do
         *)    CL="$CL -std=c++20 -fno-exceptions -nostdlibinc
                   -isystem lib/libcxx/include -isystem lib/libc/include -w -c" ;;
     esac
+    refname=${REF:-EmbCC}; refname=${refname##*/}
     combos="e:e e:c c:e c:c rt:e:e rt:e:c rt:c:e"
     [ -n "$REF" ] || combos="e:e rt:e:e"
     n=0 known=0
@@ -214,9 +215,9 @@ for t in $boards; do
     [ "$known" = 0 ] ||
         echo "$t: $known mixed pairings differ in detail::mix only: a float on the stack (a C ABI difference)"
     [ "$fail" = 0 ] && [ "$known" = 0 ] &&
-        echo "$t: $n pairings of EmbCC and ${REF:+${REF##*/}}${REF:-EmbCC} agree with the host"
+        echo "$t: $n pairings of EmbCC and $refname agree with the host"
     [ "$fail" = 0 ] && [ "$known" != 0 ] &&
-        echo "$t: $n pairings of EmbCC and ${REF:+${REF##*/}}${REF:-EmbCC}, all but that line agree with the host"
+        echo "$t: $n pairings of EmbCC and $refname, all but that line agree with the host"
 done
 [ "$fail" = 0 ] || exit 1
 echo "EmbCC's C++ and clang++'s call each other on MIPS, SPARC and PowerPC, and"
