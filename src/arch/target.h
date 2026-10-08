@@ -796,6 +796,19 @@ unsigned long target_elf_flags(enum target_arch a);
 /* Does RISC-V code use the C extension? The one answer the code generator
  * and the object's e_flags both read. */
 int target_riscv_rvc(void);
+/* The FPU -march= names: 0 none, 32 the F extension, 64 F and D -- the
+ * registers' width, which is __riscv_flen. Which instructions may be
+ * EMITTED. */
+int target_riscv_flen(void);
+/* ...and the float ABI -mabi= names, independent of it as -mfloat-abi is
+ * of -mfpu on ARM: 0 ilp32/lp64 (floating point in the integer
+ * registers), 32 ilp32f/lp64f (a float in fa0-fa7), 64 ilp32d/lp64d (a
+ * double too). Never above target_riscv_flen(). */
+int target_riscv_abi_flen(void);
+/* -march= named Zifencei (or `g`): only __riscv_zifencei reads it. */
+int target_riscv_zifencei(void);
+void target_set_riscv_isa(int f, int d, int c, int zifencei);
+void target_set_riscv_abi_flen(int flen);
 
 /* Does this target's object carry REL relocations -- the addend stored in
  * the field it relocates -- rather than RELA? o32 MIPS does, as the ABI

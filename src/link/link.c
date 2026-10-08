@@ -1468,9 +1468,23 @@ static void add_object(struct linker *l, struct object *o)
             o->big_endian ? "big" : "little",
             l->big_endian ? "big" : "little");
     }
-    if (o->machine == EM_RISCV)
-        l->eflags |= o->eflags & EF_RISCV_RVC;
-    else if (o->machine == EM_MIPS)
+    if (o->machine == EM_RISCV) {
+        /* The float ABI is every object's or none's: an ilp32f caller
+         * leaves a float argument in fa0 and an ilp32 callee reads a0. The
+         * first object decides, as for the machine. */
+        unsigned long fa = o->eflags & EF_RISCV_FLOAT_ABI_MASK;
+        static const char *const fname[] = { "soft-float (ilp32/lp64)",
+            "single-float (ilp32f/lp64f)", "double-float (ilp32d/lp64d)",
+            "quad-float" };
+        if (l->nobj && fa != (l->eflags & EF_RISCV_FLOAT_ABI_MASK))
+            die("%s: a %s object, and the ones before it are %s: they "
+                "disagree about which registers carry floating-point "
+                "arguments, so every call between them would read one the "
+                "caller never wrote. Build both with the same -mabi=",
+                o->name, fname[fa >> 1],
+                fname[(l->eflags & EF_RISCV_FLOAT_ABI_MASK) >> 1]);
+        l->eflags |= (o->eflags & EF_RISCV_RVC) | fa;
+    } else if (o->machine == EM_MIPS)
         /* the architecture and the ABI, from the first object; NOREORDER
          * is a property of each object's code and not of the image */
         l->eflags = l->eflags ? l->eflags

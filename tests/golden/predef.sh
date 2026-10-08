@@ -94,6 +94,46 @@ for arch in x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 r
     fi
 done
 
+# RISC-V's -march= and -mabi=: every hardware-float combination, and the C
+# extension left out, against clang given the same two flags (the macros
+# are a promise about the code: __riscv_flen says what the FPU is, and
+# __riscv_float_abi_* where floating point is passed). Without -mabi= the
+# ABI follows -march= as clang's does. Sorted: the overrides are appended.
+if command -v clang >/dev/null 2>&1; then
+    tmpa=${TMPDIR:-/tmp}/predef.rv.$$
+    tmpb=${TMPDIR:-/tmp}/predef.rvref.$$
+    nrv=0
+    for combo in "32 rv32imafc ilp32f" "32 rv32imafc ilp32" "32 rv32imafdc ilp32d" \
+                 "32 rv32imafdc ilp32f" "32 rv32gc ilp32d" "32 rv32imaf ilp32f" \
+                 "32 rv32ima ilp32" "32 rv32imafdc_zicsr_zifencei ilp32d" \
+                 "32 rv32imafc -" "32 rv32gc -" \
+                 "64 rv64gc lp64d" "64 rv64imafc lp64f" "64 rv64imafdc lp64" \
+                 "64 rv64imafdc lp64f" "64 rv64ima lp64" "64 rv64gc -"; do
+        set -- $combo
+        abiflag="-mabi=$3"; refabi=$3
+        if [ "$3" = - ]; then
+            abiflag=""
+            case $2 in *d*|rv*g*) refabi=$( [ $1 = 32 ] && echo ilp32d || echo lp64d ) ;;
+                       *f*) refabi=$( [ $1 = 32 ] && echo ilp32f || echo lp64f ) ;;
+            esac
+        fi
+        # shellcheck disable=SC2086
+        "$EMBCC" --target=riscv$1-unknown-elf -march=$2 $abiflag \
+            --dump-predef | LC_ALL=C sort > "$tmpa" || {
+            echo "riscv$1 -march=$2 $abiflag: --dump-predef failed"; exit 1; }
+        EMBCC_PREDEF_RV_MARCH=$2 EMBCC_PREDEF_RV_MABI=$refabi \
+            sh tools/gen-predef.sh --reference riscv$1 | LC_ALL=C sort > "$tmpb"
+        if ! cmp -s "$tmpa" "$tmpb"; then
+            echo "riscv$1 -march=$2 $abiflag disagrees with clang:"
+            diff "$tmpb" "$tmpa" | head -20
+            rm -f "$tmpa" "$tmpb"; exit 1
+        fi
+        nrv=$((nrv + 1))
+    done
+    rm -f "$tmpa" "$tmpb"
+    echo "RISC-V -march/-mabi: $nrv combinations match clang -dM -E"
+fi
+
 # -mcmse, the Secure side of ARMv8-M: __ARM_FEATURE_CMSE is 3 where the table
 # says 1, as clang defines it under the flag, at both profiles -- and the rest
 # of the table is the same.
