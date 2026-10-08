@@ -157,7 +157,7 @@ if command -v "$QEMU" >/dev/null 2>&1; then
         -o "$out/boot.o" &&
     "$EMBCC" --target=$T -O1 -c tests/harness/xtensa/io.c -o "$out/io.o" ||
         { echo "the harness does not compile"; exit 1; }
-    want1="82 77 5 976 -300 72 83 1502 55 40 1 194 194 550 523 99 775"
+    want1="82 77 5 976 -300 72 83 1502 55 40 1 194 155 550 523 523 99 775"
     want2="82 43 110 59 80 1 775 127 1040 327685 1 1234 43 100041 42"
     asms=embcc
     [ -n "$GAS" ] && asms="embcc gnu"

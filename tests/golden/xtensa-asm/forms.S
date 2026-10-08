@@ -183,6 +183,30 @@ asm_lit:
         retw
         .size   asm_lit, . - asm_lit
 
+/* int asm_trash(int x): x + 1, having written every other register of
+ * its window -- its caller's a11-a15 under a call8 */
+        .align  4
+        .global asm_trash
+        .type   asm_trash, @function
+asm_trash:
+        entry   a1, FRAME
+        addi    a2, a2, 1
+        movi    a3, -1
+        movi    a4, -1
+        movi    a5, -1
+        movi    a6, -1
+        movi    a7, -1
+        movi    a8, -1
+        movi    a9, -1
+        movi    a10, -1
+        movi    a11, -1
+        movi    a12, -1
+        movi    a13, -1
+        movi    a14, -1
+        movi    a15, -1
+        retw
+        .size   asm_trash, . - asm_trash
+
         .section .text.other, "ax", @progbits
         .literal_position
 /* int asm_other(int x): x * 0x10001, in a section of its own */
