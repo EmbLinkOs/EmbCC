@@ -28,6 +28,7 @@ echo "m3 thumbv7m-none-eabi thumb EMBCC_THUMB_HARNESS qemu-system-arm -M lm3s696
 m23 thumbv8m.base-none-eabi thumb-m23 EMBCC_M23_HARNESS qemu-system-arm -M mps2-an505 -cpu cortex-m33 -icount shift=2
 rv32 riscv32-unknown-elf riscv EMBCC_RISCV_HARNESS qemu-system-riscv32 -M virt -bios none -m 8 -icount shift=0" |
 while read -r b t h hv q m; do
+    [ -n "${EMBCC_BOARDS:-}" ] && case " $EMBCC_BOARDS " in *" $b "*) ;; *) continue ;; esac
     command -v "$q" >/dev/null 2>&1 || { echo "  (SKIP $b: no $q)"; continue; }
     lib=build/libc/$t/librt.a
     [ -f "$lib" ] || fail "$b: no $lib (make rt-embedded)"
