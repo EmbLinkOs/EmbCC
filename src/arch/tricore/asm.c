@@ -39,6 +39,7 @@
  * A form outside this list is refused by name, never guessed at. */
 #include "asm.h"
 #include "emit.h"
+#include "../asmexpr.h"
 #include "../../elf/elf.h"
 
 #include <ctype.h>
@@ -156,12 +157,9 @@ static int target(struct tok t, long long *off)
         *off = 0;
         return 1;
     }
-    if (t.n >= 3 && t.p[0] == '.' && (t.p[1] == '+' || t.p[1] == '-')) {
-        struct tok r = t;
-        r.p++;
-        r.n--;
-        return number(r, off);
-    }
+    /* (`.+0+8`, as the file assembler writes `.+8` after a `.`) */
+    if (t.n >= 3 && t.p[0] == '.' && (t.p[1] == '+' || t.p[1] == '-'))
+        return asm_const_expr(t.p + 1, t.n - 1, off);
     return 0;
 }
 

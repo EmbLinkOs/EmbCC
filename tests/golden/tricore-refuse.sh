@@ -105,24 +105,32 @@ refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
 refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
     'void __attribute__((interrupt)) f(void){}'
-refc "a naked function" '__attribute__((naked)) is not supported' \
-    '__attribute__((naked)) void f(void){}'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
     echo "C++ was accepted"; exit 1
 fi
 grep -q 'C++ is not yet supported for tricore-none-elf' "$out/cxx.err" || {
     echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+# .s/.S files, file-scope blocks and naked functions are the assembler's
+# (tricore-gas.sh); what it cannot relocate is refused by name.
 printf 'nop\n' > "$out/a.s"
-if "$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err"; then
-    echo "a .s file was accepted"; exit 1
+"$EMBCC" --target=$T -c "$out/a.s" -o /dev/null 2> "$out/as.err" || {
+    echo "a .s file was refused:"; cat "$out/as.err"; exit 1; }
+printf '__asm__("nop");\n__attribute__((naked)) void f(void){ __asm__("ret"); }\n' \
+    > "$out/blk.c"
+"$EMBCC" --target=$T -c "$out/blk.c" -o /dev/null 2> "$out/blk.err" || {
+    echo "file-scope asm or a naked function was refused:"; cat "$out/blk.err"
+    exit 1; }
+printf '\tjeq d2, d3, elsewhere\n' > "$out/b.s"
+if "$EMBCC" --target=$T -c "$out/b.s" -o /dev/null 2> "$out/as.err"; then
+    echo "a conditional branch to an external symbol was accepted"; exit 1
 fi
-grep -q 'no assembly-file support for tricore-none-elf' "$out/as.err" || {
-    echo "a .s file was refused, but not by name:"; cat "$out/as.err"; exit 1; }
-refc "an instruction in file-scope asm" 'file-scope asm instruction "nop"' '__asm__("nop");'
+grep -q 'R_TRICORE_15REL' "$out/as.err" || {
+    echo "a conditional branch to a symbol was refused, but not by name:"
+    cat "$out/as.err"; exit 1; }
 echo "narrow atomics, the frame and return address above level 0,"
-echo "__int128, interrupt and naked functions, an over-aligned scalar, C++"
-echo "and assembly files are each refused by name"
+echo "__int128, interrupt functions, an over-aligned scalar, C++ and a"
+echo "conditional branch to an external symbol are each refused by name"
 
 # ---- the link -------------------------------------------------------------
 printf 'void _start(void){ for (;;) ; }\n' > "$out/s.c"
