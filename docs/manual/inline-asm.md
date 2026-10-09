@@ -299,10 +299,9 @@ structure's size into an object file:
 ```
 
 These directives are read on x86-64, AArch64, ARM (Cortex-M and ARM
-state), RISC-V, AVR, MIPS32 and LoongArch64. On ARMv6-M and ARMv8-M
-Baseline an alignment larger than two bytes, and on MIPS32 and
-LoongArch64 one larger than four, is refused (`the asm aligns to 4 bytes,
-which ARMv6-M inline asm does not do yet`). On Xtensa, SPARC, PowerPC,
+state), RISC-V, AVR, MIPS32 and LoongArch64. On MIPS32 and LoongArch64
+an alignment larger than four bytes is refused (`the asm aligns to 8
+bytes, which MIPS inline asm does not do yet`). On Xtensa, SPARC, PowerPC,
 TriCore, RX and ColdFire a template takes no directive yet.
 
 ### Constraint strings

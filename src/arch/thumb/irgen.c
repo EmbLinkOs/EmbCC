@@ -330,9 +330,7 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
         diag_fatal(file, s->line, "the asm ends inside an IT block, which "
                    "would make the compiler's next instructions conditional");
     /* Its alignments: those no larger than an instruction's settle here;
-     * the ARMv7-M backend pads the rest where the template lands. The
-     * ARMv6-M one (v6m.c) copies the bytes as they are, so there a larger
-     * one is refused rather than padded for the wrong place. */
+     * the backend pads the rest where the template lands. */
     {
         int v6 = target_thumb_arch() == 6 && !t_isa_a32;
         int fill = t_isa_a32 ? CODE_FILL_A32
@@ -341,12 +339,6 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
                                    sizeof err);
         if (open < 0)
             diag_fatal(file, s->line, "%s", err);
-        if (open && v6)
-            diag_fatal(file, s->line, "the asm aligns to %d bytes, which "
-                       "%s inline asm does not do yet: only alignment to "
-                       "2 bytes, which every instruction has", open,
-                       target_thumb_v8m_base() ? "ARMv8-M Baseline"
-                                               : "ARMv6-M");
     }
     int calls = t_template_calls(text);
     free(text);

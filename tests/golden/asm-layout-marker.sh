@@ -25,10 +25,6 @@
 # taken, followed by real code, RUNS on QEMU: the code after the probes is
 # reached by the branch around them, so it must sit on an instruction
 # boundary -- what the padding is for.
-#
-# ARMv6-M and ARMv8-M Baseline refuse the probe by name for now: their
-# backend (src/arch/thumb/v6m.c) copies a template's bytes as they are,
-# and does not yet pad an alignment where the template lands.
 set -u
 echo "TEST-MARKER asm-layout-marker"
 . "$(dirname "$0")/../lib.sh"
@@ -77,6 +73,8 @@ for spec in \
     "aarch64-elf .text nop 24_8 6_2" \
     "arm64-apple-darwin __TEXT,__text nop 24_8 6_2" \
     "thumbv7em-none-eabi .text nop 24_8 6_2" \
+    "thumbv6m-none-eabi .text nop 24_8 6_2" \
+    "thumbv8m.base-none-eabi .text nop 24_8 6_2" \
     "armv7a-none-eabi .text nop 24_8 6_2" \
     "riscv32-unknown-elf .text .2byte_1 24_8 6_2" \
     "riscv64-unknown-elf .text .2byte_1 24_8 6_2" \
@@ -149,6 +147,7 @@ echo "the probes say 'a 24 8' and 'b 6 2' ('a 11 1', 'b 6 1' on AVR), a .p2align
 # must start on four (x86-64 at -Os starts one anywhere), and the section
 # say so.
 for spec in "x86_64-elf .byte_0x90" "aarch64-elf nop" "thumbv7em-none-eabi nop" \
+            "thumbv6m-none-eabi nop" \
             "armv7a-none-eabi nop" "riscv32-unknown-elf .2byte_1" \
             "riscv64-unknown-elf .2byte_1" "avr nop"; do
     set -- $spec
@@ -169,17 +168,6 @@ for spec in "x86_64-elf .byte_0x90" "aarch64-elf nop" "thumbv7em-none-eabi nop" 
 done
 echo "in a section of its own, a function holding the probes starts on four, and so do they"
 
-# ARMv6-M and ARMv8-M Baseline: refused by name, not padded for nowhere
-for t in thumbv6m thumbv8m.base; do
-    if "$EMBCC" --target=$t-none-eabi "-DSTEP=\"nop\"" -I"$out" -c "$out/probe.c" \
-         -o "$out/v6.o" 2> "$out/err"; then
-        echo "$t: the probe compiled, which this backend cannot pad yet -- update this test"
-        exit 1
-    fi
-    grep -q "does not do yet" "$out/err" || {
-        echo "$t: the probe is refused without saying why:"; head -3 "$out/err"; exit 1; }
-done
-echo "ARMv6-M and ARMv8-M Baseline refuse the probe's .p2align 2 by name"
 
 # %c0 on the targets whose templates take no strings yet: the constant
 # alone, so an instruction written with it is the one written with the
@@ -263,6 +251,31 @@ if command -v "$QEMU" >/dev/null 2>&1; then
     echo "Cortex-M: the code after the probes runs at -O0, -O1, -O2 and -Os"
 else
     echo "SKIP the Cortex-M run: $QEMU absent"
+fi
+if command -v "$QEMU" >/dev/null 2>&1 &&
+   "$QEMU" -M help 2>/dev/null | grep -q microbit; then
+    T=thumbv6m-none-eabi
+    d="$out/m0"; mkdir -p "$d"
+    sh tools/build-rt.sh $T "$d" > "$d/build.log" 2>&1 || {
+        echo "lib/rt does not build for $T:"; tail -3 "$d/build.log"; exit 1; }
+    for f in boot io; do
+        "$EMBCC" --target=$T -O1 -c tests/harness/thumb-m0/$f.c -o "$d/$f.o" ||
+            { echo "the Cortex-M0 harness does not compile"; exit 1; }
+    done
+    for opt in -O0 -O1 -O2 -Os; do
+        "$EMBCC" --target=$T $opt "-DSTEP=\"nop\"" -I"$out" -c "$out/run.c" \
+            -o "$d/r$opt.o" || { echo "$T $opt: does not compile"; exit 1; }
+        EMBCC_THUMB_M0_HARNESS="$d" sh tests/harness/thumb-m0/link.sh \
+            "$d/r$opt.elf" "$d/r$opt.o" "$d/librt.a" ||
+            { echo "$T $opt: does not link"; exit 1; }
+        sh tests/harness/thumb-m0/run.sh "$d/r$opt.elf" > "$d/r$opt.txt" 2>&1
+        got=$(tr -d '\r\n' < "$d/r$opt.txt" | sed 's/==END==.*//')
+        [ "$got" = "40 40 " ] || {
+            echo "$T $opt: the code after the probes computed '$got', wanted '40 40 '"
+            exit 1; }
+    done
+    ran=$((ran + 1))
+    echo "Cortex-M0: the code after the probes runs at -O0, -O1, -O2 and -Os"
 fi
 for w in 32 64; do
     QEMU=${EMBCC_QEMU_RISCV:-qemu-system-riscv$w}

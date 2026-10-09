@@ -119,13 +119,11 @@ EOF
         "$out/dirs.txt" || exit 1
     asmdir_referee "$out" armv7a-none-eabi "-triple=armv7a" nop 4 \
         "$out/dirs.txt" || exit 1
-    # ARMv6-M and ARMv8-M Baseline copy a template as it is (v6m.c), so
-    # only what pads the same anywhere -- to two -- is theirs yet
-    { grep -v 'align' "$out/dirs.txt"; echo '.ascii "q"'; echo '.p2align 1'
-      echo '.byte 3'; echo '.balign 2, 0x77'; } > "$out/dirs1.txt"
+    # ARMv6-M and ARMv8-M Baseline: their own backend (v6m.c), and their
+    # own nop, mov r8, r8
     for t in thumbv6m thumbv8m.base; do
         asmdir_referee "$out" $t-none-eabi "-triple=$t" nop 2 \
-            "$out/dirs1.txt" || exit 1
+            "$out/dirs.txt" || exit 1
     done
 else
     echo "SKIP the encoding half: llvm-mc/llvm-objcopy not found"
@@ -272,8 +270,6 @@ echo "inline data: a symbol, an out-of-range value, .half and data in an IT bloc
 
 # %c prints a constant, and a register operand is not one; a string or an
 # alignment is not an instruction an IT block's condition can apply to;
-# and on ARMv6-M an alignment the template cannot settle by itself is
-# refused, where padding it for the wrong place would be silent.
 printf 'int f(int x){ __asm__ volatile(".byte %%c0" : : "r"(x)); return x; }\n' > "$out/c.c"
 if "$EMBCC" --target=$T -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
     echo "%c of a register operand was accepted"; exit 1
@@ -286,14 +282,6 @@ if "$EMBCC" --target=$T -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
 fi
 grep -q "inside an IT block" "$out/c.err" || {
     echo "the refusal of a string in an IT block does not say why:"; cat "$out/c.err"; exit 1; }
-printf 'void f(void){ __asm__ volatile(".ascii \\"abc\\"; .p2align 2"); }\n' > "$out/c.c"
-for t in thumbv6m thumbv8m.base; do
-    if "$EMBCC" --target=$t-none-eabi -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
-        echo "$t: an alignment to four was accepted, and padded for nowhere"; exit 1
-    fi
-    grep -q "does not do yet" "$out/c.err" || {
-        echo "$t: the refusal of .p2align 2 does not say why:"; cat "$out/c.err"; exit 1; }
-done
 # more than .text's sixteen, a byte count that is no power of two, an
 # escape no assembler reads, a string that is not one
 cat > "$out/c.c" <<'CEOF'
@@ -315,7 +303,7 @@ for c in c c2 c3 c4; do
     grep -q 'at most 16\|not a power of two\|not an escape\|not a quoted string' "$out/c.err" || {
         echo "the refusal of $(cat "$out/$c.c") does not say why:"; cat "$out/c.err"; exit 1; }
 done
-echo "%c on a register, a string in an IT block, .p2align 2 on ARMv6-M, more than 16, a bad escape are refused"
+echo "%c on a register, a string in an IT block, more than 16, a bad escape are refused"
 
 # x86's constraint letters mean nothing here: "S" pinned the operand to
 # x86 register 6, r6, which is callee-saved and was not saved; and a

@@ -2772,13 +2772,18 @@ static void gen_asm(struct t_fn *F, int n)
         }
     }
     {
+        /* The bytes, padded at each alignment (`.p2align 2`) for where
+         * they land, and the template's data (`.short`, `.ascii`...)
+         * marked: bytes v6_scan must not read as instructions, and a
+         * disassembler sees as data. Its padding can grow by up to its
+         * slack when the code before it shrinks on a later pass: that
+         * much, two bytes a pad, for a branch measured across it. */
         int base = t->len;
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
-        /* the template's data (`.short`, `.word`...): bytes v6_scan
-         * must not read as instructions, and a disassembler sees as data */
-        for (int k = 0; k + 1 < ia->ndrange; k += 2)
-            code_mark_data(t, base + ia->drange[k], base + ia->drange[k + 1]);
+        code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
+                     ia->arange, ia->narange, CODE_FILL_THUMB1);
+        for (int k = code_asm_align_slack(ia->arange, ia->narange); k > 0;
+             k -= 2)
+            note_pad(F, base);
     }
     /* Out, through an address: the address is live across the asm, out of
      * what it changes (regalloc.c), so a register still holds it. An "m"
@@ -3707,7 +3712,8 @@ static long v6_est(const struct t_fn *F, int n)
     case IR_ASM: {
         /* a continuation emits nothing; its asm moves its output */
         const struct ir_asm *ia = i->asm_ir;
-        long e = 96 + ia->codelen + 32L * (ia->nin + ia->nout);
+        long e = 96 + ia->codelen + 32L * (ia->nin + ia->nout) +
+                 code_asm_align_slack(ia->arange, ia->narange);
         if (ia->cont)
             return 0;
         for (int q = n + 1; q < F->fn->nins && F->fn->ins[q].op == IR_ASM &&
@@ -4200,6 +4206,18 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         while (t->len & 3)
             t_nop(t);
         f->code_align = 4;
+        /* ...or more, for an asm that aligns its own bytes (`.p2align
+         * 3`): in a section of its own the buffer's offsets are then the
+         * section's */
+        for (int k = 0; k < fn->nins; k++) {
+            const struct ir_asm *ia = fn->ins[k].op == IR_ASM
+                                    ? fn->ins[k].asm_ir : NULL;
+            int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+            while (m > f->code_align && t->len % m)
+                t_nop(t);
+            if (m > f->code_align)
+                f->code_align = m;
+        }
         if (target_debug_info()) {
             int nv = fn->nvars ? fn->nvars : 1;
             fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
