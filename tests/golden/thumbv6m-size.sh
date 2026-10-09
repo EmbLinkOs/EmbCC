@@ -254,6 +254,21 @@ for f in lt64 eq64 nz64 sel64; do
     fi
 done
 
+# ---- a jump to the next instruction ----------------------------------------
+# p(c) ? c + 32 : c -- the else arm is no code (c is already in its
+# register), so the then arm's jump over it lands on the next
+# instruction: none is made.
+cat > "$out/nj.c" <<'EOF'
+extern int p(int);
+int tl(int c) { return p(c) ? c + 32 : c; }
+EOF
+cc6 "$out/nj.c" "$out/nj.o"
+dis "$out/nj.o" tl > "$out/tl.dis"
+# (a B's offset is from its address + 4: to the next one is -2)
+if grep -Eq '[[:space:]]b[[:space:]].*imm = #-0x2$' "$out/tl.dis"; then
+    cat "$out/tl.dis"; fail "tl: a jump to the instruction after it"
+fi
+
 # ---- trampolines ----------------------------------------------------------
 # Six compares branch to one label 600 bytes on: one `b<!c> 1f; b err`
 # pair, and the other five a single b<c> to that pair's jump.

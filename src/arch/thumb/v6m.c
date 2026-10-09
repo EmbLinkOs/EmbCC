@@ -100,6 +100,14 @@ static int v6_role(int k)
 
 /* The size classes of a branch to a label (fix.ins), smallest first. */
 enum { BC_SHORT = 0, BC_MED = 1, BC_FAR = 2 };
+/* ...and an unconditional jump to where the code after it begins -- the
+ * blocks between are empty (a copy that is no move, a constant made at
+ * its reads) -- which is no bytes at all. A first pass emits it; the
+ * measuring finds it so (BC_NONE), and the passes after keep it so: no
+ * code can appear between it and its label once there was none. Its fix
+ * stays, at the place it would have been, so the branches keep their
+ * ordinals. */
+#define BC_NONE 3
 /* TRAMPOLINES: a conditional branch whose label is out of its +-256
  * bytes is `b<!c> 1f; b label; 1:` -- unless an unconditional jump to
  * the same label is within them: then it is one `b<c>` to that jump,
@@ -247,7 +255,7 @@ static int v6_far_bl(const struct t_fn *F, int at)
     if (!F->far_mode)
         return 0;
     for (int k = 0; k < F->nfix; k++)
-        if (F->fix[k].at == at)
+        if (F->fix[k].at == at && F->fix[k].ins == BC_FAR)
             return 1;
     return 0;
 }
@@ -1178,7 +1186,9 @@ static int v6_branch(struct t_fn *F, int cond, int label)
     struct code *t = F->t;
     int k = F->nfix, cls = class_of(F, k, cond), start = t->len, at, skip;
     rc_snap(F, label);
-    if (cond < 0) {
+    if (cond < 0 && cls == BC_NONE) {
+        at = t->len;
+    } else if (cond < 0) {
         at = cls == BC_FAR ? t_bl(t) : t_b16(t);
     } else if (cls == BC_SHORT) {
         at = t_bcond16(t, cond);
@@ -4410,6 +4420,12 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             int target = F.label_off[F.fix[i].label];
             if (g6_tramp_on && i < g6_ntramp && g6_tramp[i] >= 0)
                 target = F.fix[g6_tramp[i]].at;      /* its trampoline */
+            if (F.fix[i].cond < 0 && F.fix[i].ins == BC_NONE) {
+                if (target != F.fix[i].at)
+                    internal_error("thumb: %s: code between a jump left out "
+                                   "and its label", fn->name);
+                continue;
+            }
             if (target < 0)
                 internal_error("thumb: %s: label %d was never placed",
                                fn->name, F.fix[i].label);
@@ -4485,6 +4501,13 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                     nc[i] = BC_SHORT;
                     continue;
                 }
+                if (F.fix[i].cond < 0 &&
+                    F.label_off[F.fix[i].label] == F.fix[i].cz_at + F.fix[i].sz) {
+                    if (F.fix[i].ins != BC_NONE)
+                        changed = 1;
+                    nc[i] = BC_NONE;                 /* a jump to the next */
+                    continue;
+                }
                 target = F.label_off[F.fix[i].label];
                 s = F.fix[i].cz_at;
                 for (k = 0; k < F.npads; k++)
@@ -4531,7 +4554,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                     for (int j = 0; j < F.nfix; j++) {
                         int tj = F.fix[j].at, sl = 0;
                         if (j == i || F.fix[j].label != F.fix[i].label ||
-                            F.fix[j].cond >= V6_TBH ||
+                            F.fix[j].cond >= V6_TBH || nc[j] == BC_NONE ||
                             (F.fix[j].cond >= 0 &&
                              (nc[j] == BC_SHORT || nt[j] >= 0)))
                             continue;
