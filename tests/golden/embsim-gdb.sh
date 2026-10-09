@@ -231,12 +231,24 @@ interrupt_run() {       # PORT ELF OUT [SCRIPT]
         -x "${4:-$out/interrupt.gdb}" > "$3" 2>&1 &
     gp=$!
     pids="$pids $gp"
+    # Each ^C once the session has reached the point it is meant for: the
+    # first after the stop at main, the second after the first ^C's stop.
+    # On a fixed two-second clock a loaded machine (make test's parallel
+    # jobs) sent the first while gdb was still loading its Python module,
+    # and the transcripts differed. Batch-mode gdb prints no "Continuing.",
+    # so these two lines are the marks.
     for k in 1 2; do
-        sleep 2
+        if [ $k = 1 ]; then mark='^Breakpoint 1, '; else mark='^Program received signal SIGINT'; fi
+        i=0
+        while ! grep -q "$mark" "$3" 2>/dev/null &&
+              kill -0 $gp 2>/dev/null && [ $i -lt 600 ]; do
+            sleep 0.1; i=$((i + 1))
+        done
+        sleep 1
         kill -INT $gp 2>/dev/null
     done
     i=0
-    while kill -0 $gp 2>/dev/null && [ $i -lt 100 ]; do sleep 0.2; i=$((i + 1)); done
+    while kill -0 $gp 2>/dev/null && [ $i -lt 300 ]; do sleep 0.2; i=$((i + 1)); done
     kill -9 $gp 2>/dev/null
 }
 next_port; qp=$port; next_port; ep=$port
