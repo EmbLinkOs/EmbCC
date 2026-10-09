@@ -254,6 +254,8 @@ struct rv_fn {
     long byref_at;       /* where the by-reference argument copies go */
     long sret_slot;      /* where the hidden result pointer is kept, or -1 */
     long ra_slot;        /* where the return address is saved */
+    /* -g: where each prologue step ends (rv_record_cfi); -1: none */
+    int cfi_frame_end, cfi_saves_end, cfi_fp_end;
     /* The register every frame slot is addressed from: sp, except in a
      * function with a variable-length array, where sp moves at run time
      * and s0 holds the frame base (see IR_ALLOCA). */
@@ -6400,6 +6402,42 @@ static const struct ra_target RISCV_FRA = {
 };
 static int g_rv_lowregs = 1;
 
+/* -g: the prologue as call frame information. The DWARF registers are
+ * the psABI's: x0-x31 as 0-31 and f0-f31 as 32-63. Every save is
+ * sp-relative after the one `addi sp`, so a register saved at sp + off
+ * is at CFA - frame + off; the saves are recorded where the last of them
+ * ends (before its store, a register still holds the caller's value,
+ * which is the CIE's rule). An interrupt handler's prologue is its own
+ * (rv_isr_prologue), and is left without an FDE rather than given a
+ * wrong one. */
+static void rv_record_cfi(struct rv_fn *F, long code_off)
+{
+    struct ir_func *fn = F->fn;
+    int i;
+    fn->ncfi = 0;
+    if (F->isr) {
+        fn->ncfi = -1;
+        return;
+    }
+    if (F->cfi_frame_end >= 0)
+        ir_cfi_add(fn, (int)(F->cfi_frame_end - code_off),
+                   IR_CFI_CFA_OFFSET, 0, F->frame);
+    if (F->cfi_saves_end >= 0) {
+        int at = (int)(F->cfi_saves_end - code_off);
+        if (!F->leaf)
+            ir_cfi_add(fn, at, IR_CFI_SAVED, RV_RA, F->ra_slot - F->frame);
+        for (i = 0; i < F->nsave; i++)
+            ir_cfi_add(fn, at, IR_CFI_SAVED, F->used_callee[i],
+                       F->save_at + (long)i * F->w - F->frame);
+        for (i = 0; i < F->nfsave; i++)
+            ir_cfi_add(fn, at, IR_CFI_SAVED, 32 + F->fused[i],
+                       F->fsave_at + (long)i * 8 - F->frame);
+    }
+    if (F->cfi_fp_end >= 0)
+        ir_cfi_add(fn, (int)(F->cfi_fp_end - code_off), IR_CFI_CFA_REG,
+                   RV_FP, F->frame);
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
                      int xlen, int keep_vars)
 {
@@ -6663,6 +6701,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     /* The prologue. `addi sp, sp, -frame` reaches 2047 bytes; a larger
      * frame builds the constant first, and t0 is free to do it in because
      * no argument has been touched yet. */
+    F.cfi_frame_end = F.cfi_saves_end = F.cfi_fp_end = -1;
     if (F.isr) {
         rv_isr_prologue(&F);
     } else if (F.frame) {
@@ -6672,6 +6711,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             rv_li(t, RV_T0, -F.frame, xlen);
             rv_alu(t, RV_ADD, RV_SP, RV_SP, RV_T0, 0);
         }
+        F.cfi_frame_end = t->len;
     }
     if (!F.leaf && !F.isr)
         st_sp(&F, RV_RA, F.ra_slot, F.w);
@@ -6681,9 +6721,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     for (i = 0; i < F.nfsave; i++)
         fst_sp(&F, F.fused[i], F.fsave_at + (long)i * 8,
                target_riscv_abi_flen() == 64);
+    F.cfi_saves_end = t->len;
     if (fn->has_alloca) {
         rv_mv(t, RV_FP, RV_SP);        /* the frame base, from here on */
         F.fb = RV_FP;
+        F.cfi_fp_end = t->len;
     }
 
     /* A variadic function spills EVERY argument register, named ones
@@ -7093,6 +7135,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
+    if (target_debug_info())
+        rv_record_cfi(&F, f->code_off);
     f->stack_bytes = (int)F.frame;     /* what -fstack-usage reports */
     free(F.usecnt);
     free(F.tail);

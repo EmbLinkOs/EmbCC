@@ -9,10 +9,12 @@ extern unsigned __bss_start, __bss_end;
 int main(void);
 void reset(void);
 
+#ifndef __riscv
 __attribute__((section(".vectors"), used))
 void *const vectors[2] = { (void *)0x20010000u, (void *)reset };
+#endif
 
-#ifdef __ARM_FP
+#if defined(__ARM_FP) || defined(__riscv_flen)
 typedef float real;
 #else
 typedef int real;
@@ -46,10 +48,18 @@ __attribute__((noinline)) int outer(int n)
 
 int main(void)
 {
+    /* A callee-saved float register holds pi in main's frame: whoever
+     * saves it below says where in its CFI, so a debugger in leaf reads
+     * it back there -- s16 on ARM, fs0 on RISC-V. */
 #ifdef __ARM_FP
-    /* s16, callee-saved, holds pi in outer's frame: mid's vpush saves it
-     * and its CFI says where, so a debugger in leaf reads it back there */
     __asm__ volatile("vmov s16, %0" : : "r"(0x40490fdbu) : "s16");
+#endif
+#ifdef __riscv_flen
+    {
+        static const float pi = 3.14159274f;
+        void set_fs0(const float *p);           /* setfs0.s */
+        set_fs0(&pi);
+    }
 #endif
     return outer(2) & 0x7f;
 }
@@ -59,6 +69,9 @@ void reset(void)
     unsigned *d = &__data_start, *s = &__data_load;
 #ifdef __ARM_FP
     *(volatile unsigned *)0xE000ED88u |= 0xFu << 20;    /* CPACR: the FPU */
+#endif
+#ifdef __riscv_flen
+    __asm__ volatile("csrs mstatus, %0" : : "r"(0x2000u));  /* FS: the FPU */
 #endif
     while (d < &__data_end)
         *d++ = *s++;

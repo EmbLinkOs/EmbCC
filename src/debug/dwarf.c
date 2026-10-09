@@ -775,7 +775,9 @@ static void emit_frame(struct dwarf_out *out, struct dbuf *b,
     for (int n = 0; n < iu->nfuncs; n++) {
         struct ir_func *fn = &iu->funcs[n];
         struct func *f = fn->src;
-        if (!f || f->code_len <= 0)
+        /* ncfi -1: a function the backend cannot describe (an interrupt
+         * handler's own prologue) -- no FDE, rather than a wrong one */
+        if (!f || f->code_len <= 0 || fn->ncfi < 0)
             continue;
         long lo = f->code_off + f->code_entry;
         int fde = b->len;

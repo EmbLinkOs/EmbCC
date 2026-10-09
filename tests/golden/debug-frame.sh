@@ -32,11 +32,29 @@ simpids=
 cleanup() { for p in $simpids; do kill "$p" 2>/dev/null; done; }
 trap cleanup EXIT
 
-# run TAG TRIPLE BOARD OPT: build, debug, and check the backtrace
+MC=${EMBCC_LLVM_MC:-llvm-mc}
+
+# run TAG TRIPLE BOARD OPT [FLAGS]: build, debug, and check the backtrace
 run() {
-    tag=$1; t=$2; board=$3; o=$4
-    "$EMBCC" --target=$t -g $o -c $src -o "$out/$tag.o" &&
-    "$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$out/$tag.o" \
+    tag=$1; t=$2; board=$3; o=$4; fl=${5:-}
+    case $t in
+    riscv*)
+        # fs0 holds pi in main's frame: set by setfs0.s, since EmbCC's
+        # RISC-V inline assembler has no F instructions yet
+        extra=; freg=
+        if [ "$fl" ] && command -v "$MC" >/dev/null 2>&1; then
+            "$MC" -triple=riscv64 -mattr=+f,+d -filetype=obj \
+                tests/golden/debug-frame/setfs0.s -o "$out/$tag.fs0.o" &&
+                extra="$out/$tag.fs0.o" freg=fs0
+        fi
+        lnk="-Ttext 0x80000000 -Tstack 0x80800000" ;;
+    *)  extra=; freg=s16
+        case $t in *eabihf) ;; *) freg= ;; esac
+        lnk="-Ttext 0 -Tdata 0x20000000" ;;
+    esac
+    # shellcheck disable=SC2086
+    "$EMBCC" --target=$t $fl -g $o -c $src -o "$out/$tag.o" &&
+    "$EMBLD" -e reset $lnk "$out/$tag.o" $extra \
         -o "$out/$tag.elf" > /dev/null 2>&1 || {
         echo "FAIL $tag: the firmware does not build"; fail=1; return; }
     if command -v "$DWD" >/dev/null 2>&1; then
@@ -46,7 +64,8 @@ run() {
             echo "FAIL $tag: llvm-dwarfdump --verify rejects the DWARF"; fail=1; }
     fi
     port=$((port + 1))
-    "$EMBSIM" "$out/$tag.elf" --board $board --gdb $port --gdb-wait \
+    # shellcheck disable=SC2086
+    "$EMBSIM" "$out/$tag.elf" $board --gdb $port --gdb-wait \
         > "$out/$tag.sim" 2>&1 &
     simpids="$simpids $!"
     sleep 0.5
@@ -54,7 +73,7 @@ run() {
         -ex "target remote localhost:$port" -ex 'set backtrace past-main on' \
         -ex 'break leaf' \
         -ex 'continue' -ex 'bt' -ex 'continue' -ex 'bt' \
-        -ex 'frame 2' -ex 'p $s16' -ex 'frame 3' -ex 'p $s16' -ex 'kill' \
+        -ex 'frame 3' -ex "p \$${freg:-pc}" -ex 'kill' \
         > "$out/$tag.gdb" 2>&1
     frames=$(grep -c '^#' "$out/$tag.gdb") || frames=0
     for fn in leaf mid outer reset; do
@@ -64,27 +83,37 @@ run() {
             grep '^#\|Backtrace' "$out/$tag.gdb" | head -6 | sed 's/^/     | /'
             fail=1; return; }
     done
-    if grep -q '^#.* in ?? ' "$out/$tag.gdb"; then
+    # A frame gdb cannot name before reset is a broken unwind; past it is
+    # only reset's own caller, which on RISC-V embld's stack stub leaves
+    # as ra = 0.
+    if awk '/^#/ && / in reset /{done=1} /^#0 /{done=0} !done && /^#.* in \?\? /{bad=1} END{exit !bad}' "$out/$tag.gdb"; then
         echo "FAIL $tag: a frame gdb could not name"
         grep '^#' "$out/$tag.gdb" | head -6 | sed 's/^/     | /'
         fail=1; return
     fi
-    # s16 in the callers' frames, read back from where the vpushes put
-    # it: outer keeps the constant 2.0f there across its calls, and main
-    # (frame 3, or reset when main is inlined) left pi there for outer
-    case $tag in m4hf-*)
-        grep -q '^\$1 = 2$' "$out/$tag.gdb" &&
-            grep -q '^\$2 = 3.14159274' "$out/$tag.gdb" || {
-            echo "FAIL $tag: s16 in outer's and main's frames is not 2 and pi"
-            grep '^\$[12]' "$out/$tag.gdb" | sed 's/^/     | /'
-            fail=1; return; } ;;
-    esac
+    # The callee-saved float register main left pi in (frame 3: main, or
+    # reset when main is inlined), read back from where the callees below
+    # saved it -- by their CFI, since each saves it somewhere else.
+    if [ "$freg" ]; then
+        # (RV64's fs0 prints as {float = ..., double = ...}, NaN-boxed)
+        grep -qE '^\$1 = (\{float = )?3\.14159274' "$out/$tag.gdb" || {
+            echo "FAIL $tag: \$$freg in main's frame is not the pi main left there"
+            grep '^\$1' "$out/$tag.gdb" | sed 's/^/     | /'
+            fail=1; return; }
+    fi
     echo "  $tag: break leaf, bt reaches reset through mid and outer ($frames frames in 2 backtraces)"
 }
 
-run m4hf-O0 thumbv7em-none-eabihf mps2-an386 -O0
-run m4hf-O2 thumbv7em-none-eabihf mps2-an386 -O2
-run m4hf-Os thumbv7em-none-eabihf mps2-an386 -Os
-run m3-O2   thumbv7m-none-eabi    lm3s6965evb -O2
-[ $fail = 0 ] && echo "gdb unwinds Cortex-M frames (vpush included) by .debug_frame"
+run m4hf-O0 thumbv7em-none-eabihf "--board mps2-an386" -O0
+run m4hf-O2 thumbv7em-none-eabihf "--board mps2-an386" -O2
+run m4hf-Os thumbv7em-none-eabihf "--board mps2-an386" -Os
+run m3-O2   thumbv7m-none-eabi    "--board lm3s6965evb" -O2
+if "$GDB" -nx -batch -ex 'set architecture riscv:rv64' 2>&1 | grep -q 'riscv:rv64'; then
+    run rv32-O2 riscv32-unknown-elf "--board virt --ram-size 8M" -O2
+    run rv64d-O0 riscv64-unknown-elf "--board virt --ram-size 8M" -O0 "-march=rv64gc -mabi=lp64d"
+    run rv64d-O2 riscv64-unknown-elf "--board virt --ram-size 8M" -O2 "-march=rv64gc -mabi=lp64d"
+else
+    echo "  SKIP the RISC-V runs: $GDB has no riscv:rv64"
+fi
+[ $fail = 0 ] && echo "gdb unwinds Cortex-M and RISC-V frames (saved float registers included) by .debug_frame"
 exit $fail

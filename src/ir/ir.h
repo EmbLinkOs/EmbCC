@@ -661,7 +661,8 @@ int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
 
 /* Append one prologue step to fn's call frame information (-g). A
  * backend records its prologue once the function is final; ncfi = 0
- * starts it again. */
+ * starts it again, and ncfi = -1 says it cannot describe the function
+ * (no FDE). */
 void ir_cfi_add(struct ir_func *fn, int off, int kind, int reg, long val);
 
 #endif

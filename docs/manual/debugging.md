@@ -68,7 +68,7 @@ relocation section:
 | `.debug_abbrev` | Abbreviations for `.debug_info` |
 | `.debug_info` | One compile unit: functions, parameters, local variables, types |
 | `.debug_line` | The line-number table |
-| `.debug_frame` | Call frame information, on Thumb (see [Call frames and unwinding](#call-frames-and-unwinding)) |
+| `.debug_frame` | Call frame information, on Thumb and RISC-V (see [Call frames and unwinding](#call-frames-and-unwinding)) |
 
 `.debug_ranges` is added when the unit's code is in several sections.
 They are not allocated: they occupy no memory in the running program.
@@ -202,15 +202,18 @@ without `-g`.
 A debugger finds a function's caller in one of these ways, depending on
 the target:
 
-- **Thumb: `.debug_frame`.** With `-g`, every function has call frame
-  information in `.debug_frame`: where the caller's frame is, and where
-  the return address and each saved register went, step by step through
-  the prologue (`push`, `vpush`, the frame's `sub sp`, and `r7` as the
-  frame base in a function with `alloca` or a variable-length array). A
-  debugger unwinds by it on every Cortex-M and ARMv7-A target and at
-  every level, through floating-point frames too, and reads a caller's
-  saved registers back, an `s` or `d` register included.
-  `tests/golden/debug-frame.sh` backtraces through such frames with gdb.
+- **Thumb and RISC-V: `.debug_frame`.** With `-g`, every function has
+  call frame information in `.debug_frame`: where the caller's frame is,
+  and where the return address and each saved register went, step by
+  step through the prologue. On Thumb that is `push`, `vpush`, the
+  frame's `sub sp`, and `r7` as the frame base in a function with
+  `alloca` or a variable-length array. On RISC-V it is the `addi sp`, the
+  stores of `ra` and the saved `s` and `fs` registers, and `s0` as the
+  frame base. A debugger unwinds by it at every level, through
+  floating-point frames too, and reads a caller's saved registers back,
+  float registers included. `tests/golden/debug-frame.sh` backtraces
+  through such frames with gdb. A RISC-V interrupt handler has no
+  entry.
 - **x86-64 and AArch64: frame records.** At `-O0` and `-Og` every
   function keeps a frame record (`rbp`, or `x29` and `x30`), so the chain
   of frame pointers leads from each frame to its caller. Optimized, a
@@ -224,8 +227,8 @@ the target:
   `-fno-asynchronous-unwind-tables` turn them off. They describe frames
   correctly only on x86-64 and AArch64 (see
   [Known problems](#known-problems)).
-- **RISC-V and the other embedded targets.** No `.debug_frame` yet; the
-  debugger analyzes the function's prologue. gdb does this for RISC-V.
+- **The other embedded targets.** No `.debug_frame` yet; the debugger
+  analyzes the function's prologue.
 - **AVR.** `Y` is a frame pointer, but nothing records where the return
   address is above it; gdb analyzes the prologue, which follows
   avr-gcc's.
