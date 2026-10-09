@@ -52,6 +52,26 @@ int fold_bin(enum ir_op op, long A, long B, int w, int sign,
         r = sign ? (unsigned long)((long)p >> 32) : p >> 32;
         break;
     }
+    /* A division of two constants, which `sizeof a / sizeof a[0]` is
+     * wherever it is not an integer constant expression the front end
+     * folds -- a udiv on every target, and a __udivsi3 call on AVR,
+     * where there is no divide. C truncates toward zero, as this does.
+     * Never by zero, and never the one signed quotient that overflows
+     * (MIN / -1): both trap on some machines, and the program must see
+     * that happen where it did. 32 and 64 bits only, the widths the
+     * operands are read at here. */
+    case IR_DIV: case IR_MOD:
+        if ((w != 4 && w != 8) || ub == 0)
+            return 0;
+        if (sign) {
+            long min = w == 8 ? (long)(1UL << 63) : (long)INT32_MIN;
+            if (sa == min && sb == -1)
+                return 0;
+            r = (unsigned long)(op == IR_DIV ? sa / sb : sa % sb);
+        } else {
+            r = op == IR_DIV ? ua / ub : ua % ub;
+        }
+        break;
     case IR_AND: r = ua & ub; break;
     case IR_OR:  r = ua | ub; break;
     case IR_XOR: r = ua ^ ub; break;
@@ -947,7 +967,7 @@ int pass_fold(struct ir_func *fn)
         case IR_ADD: case IR_SUB: case IR_MUL:
         case IR_AND: case IR_OR: case IR_XOR:
         case IR_SHL: case IR_SHR: case IR_CMP:
-        case IR_DIV: case IR_MOD:   /* not const-folded (÷0), but strength-reduced */
+        case IR_DIV: case IR_MOD:   /* folded unless by zero (fold_bin) */
             break;
         default:
             continue;
