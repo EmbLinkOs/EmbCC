@@ -3326,8 +3326,9 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * from a shipped image without touching the code). Their indices feed
      * the relocation-target lookup below. */
     static const char *const dwsec_name[DWARF_NSEC] =
-        { ".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges" };
-    int dwsec_ndx[DWARF_NSEC] = { 0, 0, 0, 0 };
+        { ".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges",
+          ".debug_frame" };
+    int dwsec_ndx[DWARF_NSEC] = { 0, 0, 0, 0, 0 };
     if (want_debug)
         for (int s = 0; s < DWARF_NSEC; s++)
             if (dw.seclen[s])     /* .debug_ranges only when split */
@@ -3444,7 +3445,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -g: STT_SECTION symbols for the debug sections, so the line/info
      * fields can relocate against them (DWTGT_ABBREV/DWTGT_LINE). Added here
      * in the local block — the writer refuses a local after any global. */
-    int dwsym[DWARF_NSEC] = { 0, 0, 0, 0 };
+    int dwsym[DWARF_NSEC] = { 0, 0, 0, 0, 0 };
     if (want_debug)
         for (int s = 0; s < DWARF_NSEC; s++)
             if (dwsec_ndx[s])
@@ -3878,6 +3879,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
             struct dwarf_reloc *r = &dw.relocs[i];
             int sym = r->target == DWTGT_ABBREV ? dwsym[DWSEC_ABBREV]
                     : r->target == DWTGT_RANGES ? dwsym[DWSEC_RANGES]
+                    : r->target == DWTGT_FRAME  ? dwsym[DWSEC_FRAME]
                     :                             dwsym[DWSEC_LINE];
             long add = r->addend;
             /* A code address is in whichever section its function is

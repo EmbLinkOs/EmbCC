@@ -6236,6 +6236,47 @@ static void t_vsave(struct code *t, int n, int pop)
         t_vpush_s(t, 16, n, pop);
 }
 
+/* -g: the prologue as call frame information, from the steps gen_func
+ * recorded and the push mask as finally patched. The DWARF registers are
+ * AAPCS32's: r0-r15 as 0-15, d0-d31 as 256-287 (the s registers are
+ * saved in pairs, s16 and s17 being d8). A push stores the lowest
+ * register lowest, so each register's slot is a word above the last. */
+static void t_record_cfi(struct t_fn *F, long code_off)
+{
+    struct ir_func *fn = F->fn;
+    long cfa = 0;
+    fn->ncfi = 0;
+    if (F->cfi_va_end >= 0) {
+        cfa += 16;
+        ir_cfi_add(fn, (int)(F->cfi_va_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
+    }
+    if (F->cfi_push_end >= 0) {
+        unsigned mask = save_mask_for(F->nsave, F->used_callee, F->scr_save);
+        int n = 0;
+        for (int r = 0; r < 16; r++)
+            n += (mask >> r) & 1;
+        cfa += 4L * n;
+        int at = (int)(F->cfi_push_end - code_off), k = 0;
+        ir_cfi_add(fn, at, IR_CFI_CFA_OFFSET, 0, cfa);
+        for (int r = 0; r < 16; r++)
+            if ((mask >> r) & 1)
+                ir_cfi_add(fn, at, IR_CFI_SAVED, r, -cfa + 4L * k++);
+    }
+    if (F->cfi_vsave_end >= 0) {
+        cfa += 4L * F->nfsave;
+        int at = (int)(F->cfi_vsave_end - code_off);
+        ir_cfi_add(fn, at, IR_CFI_CFA_OFFSET, 0, cfa);
+        for (int k = 0; k < F->nfsave / 2; k++)
+            ir_cfi_add(fn, at, IR_CFI_SAVED, 256 + 8 + k, -cfa + 8L * k);
+    }
+    if (F->cfi_frame_end >= 0) {
+        cfa += F->frame;
+        ir_cfi_add(fn, (int)(F->cfi_frame_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
+    }
+    if (F->cfi_fp_end >= 0)
+        ir_cfi_add(fn, (int)(F->cfi_fp_end - code_off), IR_CFI_CFA_REG, 7, cfa);
+}
+
 static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                      int keep_vars)
 {
@@ -6545,8 +6586,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
      * below the caller's stack arguments and a single pointer walks
      * from r0's copy straight into them. AAPCS32 needs no more than
      * that: a variadic argument is placed exactly like a named one. */
-    if (fn->is_varargs)
+    F.cfi_va_end = F.cfi_push_end = F.cfi_vsave_end = -1;
+    F.cfi_frame_end = F.cfi_fp_end = -1;
+    if (fn->is_varargs) {
         t_push(t, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
+        F.cfi_va_end = t->len;
+    }
     /* The mask is decided HERE, not patched at the end: its register
      * COUNT sets how far sp moves, which every stack-parameter offset
      * below is measured from. F.nsave is already known -- ra_allocate
@@ -6571,18 +6616,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.noret = 0;
     push_at = F.nopush || F.noret ? -1
             : t_push(t, save_mask_for(F.nsave, F.used_callee, F.scr_save));
-    if (F.nfsave && !F.noret)
+    if (push_at >= 0)
+        F.cfi_push_end = t->len;
+    if (F.nfsave && !F.noret) {
         t_vsave(t, F.nfsave, 0);
+        F.cfi_vsave_end = t->len;
+    }
     /* The mask is PATCHED at the end with whatever callee-saved
      * registers the allocator turned out to take: a `push` encodes them
      * as a bitmask, so growing the set costs no extra instruction, and
      * emitting the push before the body is what lets the frame layout be
      * decided first. This is what t_patch_push exists for. */
-    if (F.frame)
+    if (F.frame) {
         t_sp_adjust(t, F.frame, 1);
+        F.cfi_frame_end = t->len;
+    }
     if (fn->has_alloca) {
         t_mov_reg(t, 7, T_SP);             /* the frame base, from here on */
         F.fb = 7;
+        F.cfi_fp_end = t->len;
     }
 
     /* The parameters arrive in r0-r3 and on the stack above the saved
@@ -7082,6 +7134,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
 
     f->code_len = t->len - f->code_off;
+    if (target_debug_info())
+        t_record_cfi(&F, f->code_off);
     /* What -fstack-usage reports: the registers the prologue pushed
      * plus everything sub sp reserved -- and a variadic function's
      * register save area, r0-r3, which it pushes first and apart from

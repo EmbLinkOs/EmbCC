@@ -439,6 +439,15 @@ struct ir_csite {
  * emitter, which brackets each function's rows with set_address/end_sequence
  * using the function's code_off/code_len (on struct func). */
 struct ir_line { int off; int line; };
+/* -g: one step of a function's prologue, as call frame information
+ * (src/debug/dwarf.c writes .debug_frame from these). `off` is the byte
+ * offset from the function's start where the step has taken effect. */
+enum {
+    IR_CFI_CFA_OFFSET,   /* the CFA is now the CFA register + val */
+    IR_CFI_CFA_REG,      /* the CFA is now DWARF register `reg` + val */
+    IR_CFI_SAVED         /* DWARF register `reg` is saved at CFA + val */
+};
+struct ir_cfi { int off, kind, reg; long val; };
 
 /* -g: a source-level variable (parameter or local). Its storage is the frame
  * slot of vreg `vreg`; irgen records name/vreg/type, codegen fills the slot's
@@ -525,6 +534,8 @@ struct ir_func {
     int njt, jtcap;
     struct ir_line *lines;   /* -g: (offset, line) rows in .text order */
     int nlines, linecap;
+    struct ir_cfi *cfi;      /* -g: the prologue's steps (ir_cfi_add) */
+    int ncfi, cficap;
     struct ir_dbgvar *dbgvars; /* -g: params + locals (irgen) */
     int ndbgvars, dbgvarcap;
     int *var_off;            /* -g: rbp-relative slot offset per vreg (codegen) */
@@ -647,5 +658,10 @@ int ir_intern_string(struct ir_unit *iu, const char *bytes, int len);
 /* ...at an offset that is a multiple of `align` (a power of two, <= 16). */
 int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
                       int align);
+
+/* Append one prologue step to fn's call frame information (-g). A
+ * backend records its prologue once the function is final; ncfi = 0
+ * starts it again. */
+void ir_cfi_add(struct ir_func *fn, int off, int kind, int reg, long val);
 
 #endif

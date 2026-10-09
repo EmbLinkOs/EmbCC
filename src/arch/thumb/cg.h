@@ -143,6 +143,9 @@ struct t_fn {
      * debugger's backtrace reads the saved lr, and not for a variadic
      * function, whose register save area is a push. */
     int noret;
+    /* -g: where each prologue step ends, for the call frame information
+     * (t_record_cfi); -1 when the function has no such step */
+    int cfi_va_end, cfi_push_end, cfi_vsave_end, cfi_frame_end, cfi_fp_end;
     /* Per instruction: an IR_CALL made as a TAIL call (t_tail_ok). NULL
      * when there are none. */
     char *tail;

@@ -279,6 +279,11 @@ struct backend_desc {
      * 1 when ARG is one of them, which it accepts or refuses by name, 0
      * when it is not, for the driver to try the rest. NULL: none. */
     int (*option)(const char *arg);
+    /* -g's call frame information (.debug_frame, src/debug/dwarf.c):
+     * the DWARF numbers of the stack pointer and of the register the
+     * return address arrives in, for a backend that records its prologue
+     * (ir_cfi_add). 0 for frame_ra: no .debug_frame for this target. */
+    int frame_sp, frame_ra;
 };
 
 const struct backend_desc *backend_get(enum target_arch a);

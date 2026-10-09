@@ -60,7 +60,7 @@ for reproducible builds, because no directory is recorded.
 
 ### Sections
 
-An object compiled with `-g` has three DWARF sections, each with its
+An object compiled with `-g` has these DWARF sections, each with its
 relocation section:
 
 | Section | Contents |
@@ -68,12 +68,12 @@ relocation section:
 | `.debug_abbrev` | Abbreviations for `.debug_info` |
 | `.debug_info` | One compile unit: functions, parameters, local variables, types |
 | `.debug_line` | The line-number table |
+| `.debug_frame` | Call frame information, on Thumb (see [Call frames and unwinding](#call-frames-and-unwinding)) |
 
+`.debug_ranges` is added when the unit's code is in several sections.
 They are not allocated: they occupy no memory in the running program.
-EmbCC emits no `.debug_str`, `.debug_aranges`, `.debug_ranges`,
-`.debug_loc`, `.debug_frame` or `.debug_macro`. Call-frame information,
-when there is any, is in `.eh_frame`; see
-[Call frames and unwinding](#call-frames-and-unwinding).
+EmbCC emits no `.debug_str`, `.debug_aranges`, `.debug_loc` or
+`.debug_macro`.
 
 The 32-bit DWARF format is used. The address size is the target's
 pointer size: 8 on x86-64, AArch64 and RV64, 4 on Thumb and RV32. AVR's
@@ -199,12 +199,23 @@ without `-g`.
 
 ## Call frames and unwinding
 
-EmbCC emits no `.debug_frame`. A debugger finds a function's caller in
-one of three ways, depending on the target:
+A debugger finds a function's caller in one of these ways, depending on
+the target:
 
-- **x86-64 and AArch64.** With `-g`, every function keeps a frame record
-  (`rbp`, or `x29` and `x30`), so the chain of frame pointers leads from
-  each frame to its caller.
+- **Thumb: `.debug_frame`.** With `-g`, every function has call frame
+  information in `.debug_frame`: where the caller's frame is, and where
+  the return address and each saved register went, step by step through
+  the prologue (`push`, `vpush`, the frame's `sub sp`, and `r7` as the
+  frame base in a function with `alloca` or a variable-length array). A
+  debugger unwinds by it on every Cortex-M and ARMv7-A target and at
+  every level, through floating-point frames too, and reads a caller's
+  saved registers back, an `s` or `d` register included.
+  `tests/golden/debug-frame.sh` backtraces through such frames with gdb.
+- **x86-64 and AArch64: frame records.** At `-O0` and `-Og` every
+  function keeps a frame record (`rbp`, or `x29` and `x30`), so the chain
+  of frame pointers leads from each frame to its caller. Optimized, a
+  leaf may have no frame record; the debugger then analyzes the
+  function's prologue.
 - **`.eh_frame`.** When unwind tables are enabled, each function has an
   `.eh_frame` entry describing its frame, which a debugger also uses.
   Unwind tables are on for C++, with `-funwind-tables`,
@@ -213,8 +224,8 @@ one of three ways, depending on the target:
   `-fno-asynchronous-unwind-tables` turn them off. They describe frames
   correctly only on x86-64 and AArch64 (see
   [Known problems](#known-problems)).
-- **Thumb and RISC-V.** No frame pointer and no correct `.eh_frame`; the
-  debugger analyzes the function's prologue. gdb does this for both.
+- **RISC-V and the other embedded targets.** No `.debug_frame` yet; the
+  debugger analyzes the function's prologue. gdb does this for RISC-V.
 - **AVR.** `Y` is a frame pointer, but nothing records where the return
   address is above it; gdb analyzes the prologue, which follows
   avr-gcc's.
