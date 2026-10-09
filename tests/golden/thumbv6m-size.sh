@@ -214,4 +214,23 @@ for f in eq0 ne0 eqk ner neg nneg ltu geu gtu leu feq dne; do
     fi
 done
 
+# ...and so is a symbol's address: its pool word at each call, never a
+# stack slot.
+cat > "$out/ra.c" <<'EOF'
+extern void w(const char *, int, int);
+extern int tab[];
+void addrs(int a, int b)
+{
+    w((const char *)tab, a, 1);
+    w((const char *)tab, b, 2);
+    w((const char *)tab, a + b, 3);
+    w((const char *)tab, a - b, 4);
+}
+EOF
+EMBCC_RA_MAXPOOL=4 "$EMBCC" --target=$T -Os -c "$out/ra.c" -o "$out/ra.o" ||
+    fail "compile ra.c"
+dis "$out/ra.o" addrs > "$out/addrs.dis"
+[ "$(grep -c 'ldr[[:space:]]*r0, \[pc' "$out/addrs.dis")" -eq 4 ] ||
+    { cat "$out/addrs.dis"; fail "addrs: tab's address is not made at each of its four reads"; }
+
 echo "thumbv6m-size: va_arg is a word load; a slot's value is read from the register that holds it; a constant is made where it is read; a comparison's value has no branch"

@@ -601,8 +601,9 @@ static void t_abi_hints(const struct ir_func *fn, int *hint);
  * or mov/mvn of a modified immediate) is made again at each read when it
  * has no register, rather than stored to a slot and loaded back. Flagless
  * because a read may come after a lowering's own compare. On ARMv6-M
- * (v6m.c) every 32-bit constant is: a literal load is flagless, one
- * instruction, and the size of the slot load it replaces. */
+ * (v6m.c) every 32-bit constant is, and a symbol's address: each is a
+ * literal load there, flagless, one instruction, and the size of the
+ * slot load it replaces. */
 static int g_t_noremat = -1;
 
 static int t_remat_ok(const struct ir_ins *i)
@@ -610,7 +611,12 @@ static int t_remat_ok(const struct ir_ins *i)
     unsigned long v = (unsigned long)i->imm & 0xffffffffUL;
     if (g_t_noremat < 0)
         g_t_noremat = getenv("EMBCC_T_NOREMAT") != NULL;
-    if (g_t_noremat || i->op != IR_CONST || i->flt || i->w > 4)
+    if (g_t_noremat)
+        return 0;
+    if (target_thumb_arch() == 6 &&
+        (i->op == IR_GADDR || i->op == IR_STRADDR || i->op == IR_FADDR))
+        return 1;
+    if (i->op != IR_CONST || i->flt || i->w > 4)
         return 0;
     if (target_thumb_arch() == 6)
         return 1;

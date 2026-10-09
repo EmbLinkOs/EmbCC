@@ -830,6 +830,29 @@ static void remat_k(struct t_fn *F, int reg, long k)
 
 static void v_rd_(struct t_fn *F, int v, int reg);
 
+/* Per vreg made where it is read (F->remat): the instruction defining it
+ * -- a constant, or a symbol's address, which is its pool word. */
+static int *g6_rmdef;
+
+static void remat_rd(struct t_fn *F, int v, int reg)
+{
+    const struct ir_ins *di = &F->fn->ins[g6_rmdef[v]];
+    switch (di->op) {
+    case IR_STRADDR:
+        lit_load(F, reg, LIT_STR, (unsigned long)di->label, NULL);
+        break;
+    case IR_GADDR:
+        lit_load(F, reg, LIT_GLOB, 0, di->glob);
+        break;
+    case IR_FADDR:
+        lit_load(F, reg, LIT_FN, 0, di->callee);
+        break;
+    default:
+        remat_k(F, reg, F->remat_v[v]);
+        break;
+    }
+}
+
 /* v into exactly `reg` (r0-r7). Flag-free -- except a constant made where
  * nothing but reads came before it (g6_fdead), which keeps that so. */
 static void v_rd(struct t_fn *F, int v, int reg)
@@ -844,7 +867,7 @@ static void v_rd_(struct t_fn *F, int v, int reg)
 {
     long fo;
     if (F->remat && v >= 0 && F->remat[v]) {
-        remat_k(F, reg, F->remat_v[v]);
+        remat_rd(F, v, reg);
         return;
     }
     if (in_reg6(F, v)) {
@@ -3462,7 +3485,10 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_STRADDR: case IR_GADDR: case IR_FADDR: {
-        int d = v_wreg(F, i->dst, S0);
+        int d;
+        if (F->remat && i->dst >= 0 && F->remat[i->dst])
+            return;                     /* made where it is read (v_rd) */
+        d = v_wreg(F, i->dst, S0);
         if (i->op == IR_STRADDR)
             lit_load(F, d, LIT_STR, (unsigned long)i->label, NULL);
         else if (i->op == IR_GADDR)
@@ -4011,7 +4037,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             t_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
     /* REMATERIALIZATION: a temporary whose one definition is a constant
-     * (the allocator's remat_ok) and that got no register is made where
+     * or a symbol's address (the allocator's remat_ok: one literal load,
+     * flag-free) and that got no register is made where
      * it is read, and has no slot: LICM hoists a loop's constants to its
      * preheader, and each was stored there and loaded at every use. As
      * codegen.c's, not at -O0/-Og, where every value keeps its slot. */
@@ -4026,10 +4053,14 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             }
             F.remat[v] = 1;
         }
+        if (F.remat)
+            g6_rmdef = xcalloc((size_t)fn->nvregs, sizeof *g6_rmdef);
         for (i = 0; F.remat && i < fn->nins; i++) {
             int d = fn->ins[i].dst;
-            if (fn->ins[i].op == IR_CONST && d >= 0 && d < fn->nvregs &&
-                F.remat[d])
+            if (d < 0 || d >= fn->nvregs || !F.remat[d])
+                continue;
+            g6_rmdef[d] = i;
+            if (fn->ins[i].op == IR_CONST)
                 F.remat_v[d] = (long)fn->ins[i].imm;
         }
         free(rm);
@@ -4519,6 +4550,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.pads);
     free(F.remat);
     free(F.remat_v);
+    free(g6_rmdef);
+    g6_rmdef = NULL;
     free((char *)g6_atk);
     g6_atk = NULL;
     free(g6_vmiss);
