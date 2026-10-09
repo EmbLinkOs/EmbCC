@@ -2217,6 +2217,32 @@ static void jump_if(struct t_fn *F, int cond, int label)
  * (nothing can arrive between the two), and L1 is where control goes
  * next. ARM inverts a condition by its low bit; the float conditions
  * were chosen so that is exact for an unordered result too. */
+/* Does control reach `label` from the end of instruction n with nothing
+ * emitted on the way -- only labels, and copies between a register and
+ * itself? The else-arm of `x < 0 ? -x : x` is `mov %1, %0` with both in
+ * r0, and the then-arm's jump over it was `b` to the next instruction. */
+static int t_falls_to(const struct t_fn *F, int n, int label)
+{
+    const struct ir_func *fn = F->fn;
+    for (int m = n + 1; m < fn->nins; m++) {
+        const struct ir_ins *in = &fn->ins[m];
+        if (in->op == IR_LABEL) {
+            if (in->label == label)
+                return 1;
+            continue;
+        }
+        if ((in->op == IR_MOV || in->op == IR_BITCAST) && in->dst >= 0 &&
+            in_reg(F, in->dst) && in_reg(F, in->a) &&
+            F->loc[in->dst] == F->loc[in->a] &&
+            !F->wide[in->dst] && !F->wide[in->a] &&
+            !in_freg(F, in->dst) && !in_freg(F, in->a) &&
+            !getenv("EMBCC_T_NOFALLS"))
+            continue;
+        return 0;
+    }
+    return 0;
+}
+
 static int invert_last_bcond(struct t_fn *F, int n, int label)
 {
     struct ir_func *fn = F->fn;
@@ -4401,9 +4427,9 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_JMP:
         /* A jump to the label that follows it is not an instruction.
          * Four bytes each and the IR is full of them, because every
-         * `if` without an `else` ends in one. */
-        if (n + 1 < fn->nins && fn->ins[n + 1].op == IR_LABEL &&
-            fn->ins[n + 1].label == i->label)
+         * `if` without an `else` ends in one. Nor is one over code that
+         * emits nothing (t_falls_to). */
+        if (t_falls_to(F, n, i->label))
             return;
         if (!invert_last_bcond(F, n, i->label))
             jump_to(F, i->label);
@@ -4878,17 +4904,23 @@ static void gen_ins(struct t_fn *F, int n)
         wrote(F, i->dst, d);
         return;
     }
+    /* No flag value survives into an instruction (save tst_br's), so
+     * between low registers these are the 2-byte flag-setting forms:
+     * `negs` and `mvns` where `rsb.w` and `mvn.w` were four. */
     case IR_NEG: {
         int sa = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
-        t_alu_imm(t, T_OP_RSB, d, sa, 0, 0);
+        if (d < 8 && sa < 8 && !F->tst_br && !t_isa_a32)
+            t1_negs(t, d, sa);
+        else
+            t_alu_imm(t, T_OP_RSB, d, sa, 0, 0);
         wrote(F, i->dst, d);
         return;
     }
     case IR_BNOT: {
         int sa = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
-        t_mvn_reg(t, d, sa, 0);
+        t_mvn_reg(t, d, sa, d < 8 && sa < 8 && !F->tst_br && !t_isa_a32);
         wrote(F, i->dst, d);
         return;
     }
