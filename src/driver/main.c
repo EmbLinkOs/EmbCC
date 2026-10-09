@@ -3407,37 +3407,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                                 (Elf64_Half)dn);
         }
     }
-    if (ta == TARGET_THUMB) {
-        /* ARM BUILD ATTRIBUTES. What the object was built for, and the
-         * only place downstream that can refuse a combination which
-         * cannot work: ld compares Tag_ABI_VFP_args to stop a
-         * soft-float object linking against a hard-float one. With no
-         * section at all there was nothing to compare, so that link
-         * succeeded and the callee read its arguments from registers the
-         * caller never wrote. See src/arch/thumb/attrs.h. */
-        size_t alen = 0;
-        unsigned char *ab = arm_build_attributes(&alen);
-        elfw_add_section(w, ".ARM.attributes", SHT_ARM_ATTRIBUTES, 0,
-                         ab, (Elf64_Xword)alen, 1);
-        free(ab);
-    }
-    if (ta == TARGET_RISCV32 || ta == TARGET_RISCV64) {
-        size_t alen = 0;
-        unsigned char *ab = riscv_build_attributes(&alen);
-        elfw_add_section(w, ".riscv.attributes", SHT_RISCV_ATTRIBUTES, 0,
-                         ab, (Elf64_Xword)alen, 1);
-        free(ab);
-    }
-    if (ta == TARGET_MIPS32 || ta == TARGET_MIPS64) {
-        /* The ABI flags clang's objects carry: what ISA and register
-         * sizes the code needs and which floating-point ABI it was
-         * compiled for (soft), so a linker can refuse to mix it with a
-         * hard-float object. src/arch/mips/codegen.c. */
-        unsigned char af[24];
-        mips_build_abiflags(af);
-        elfw_add_section(w, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC,
-                         af, (Elf64_Xword)sizeof af, 8);
-    }
+    /* What the object says about itself: ARM's build attributes,
+     * RISC-V's ISA string, MIPS's ABI flags (the registry's elf_notes,
+     * src/arch/backends.c -- the assembler writes the same). */
+    if (backend_get(ta)->elf_notes)
+        backend_get(ta)->elf_notes(w);
     int rodata_sym = 0;
     if (rodata)
         rodata_sym = elfw_add_symbol(w, "", 0, 0,

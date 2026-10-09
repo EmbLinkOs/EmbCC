@@ -13,9 +13,51 @@
  * backends stay where they are (src/arch/<arch>/), and target.c keeps the
  * data model. */
 #include "backend.h"
+#include "thumb/attrs.h"
+#include "../elf/elf.h"
+#include "../elf/write.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+/* ---- the notes an object carries about itself (elf_notes) ---------- */
+
+/* ARM's build attributes: what the object was built for, and the only
+ * place downstream that can refuse a combination which cannot work --
+ * ld compares Tag_ABI_VFP_args to stop a soft-float object linking
+ * against a hard-float one. With no section at all there was nothing to
+ * compare, so that link succeeded and the callee read its arguments from
+ * registers the caller never wrote. See src/arch/thumb/attrs.h. */
+static void arm_elf_notes(struct elfw *w)
+{
+    size_t alen = 0;
+    unsigned char *ab = arm_build_attributes(&alen);
+    elfw_add_section(w, ".ARM.attributes", SHT_ARM_ATTRIBUTES, 0,
+                     ab, (Elf64_Xword)alen, 1);
+    free(ab);
+}
+
+/* RISC-V's: the ISA the -march= names (riscv_build_attributes); without
+ * it a disassembler knows only RV32I and C. */
+static void riscv_elf_notes(struct elfw *w)
+{
+    size_t alen = 0;
+    unsigned char *ab = riscv_build_attributes(&alen);
+    elfw_add_section(w, ".riscv.attributes", SHT_RISCV_ATTRIBUTES, 0,
+                     ab, (Elf64_Xword)alen, 1);
+    free(ab);
+}
+
+/* MIPS's ABI flags, as clang's objects carry them: the ISA and register
+ * sizes the code needs and the floating-point ABI (soft), so a linker
+ * can refuse to mix it with a hard-float object. */
+static void mips_elf_notes(struct elfw *w)
+{
+    unsigned char af[24];
+    mips_build_abiflags(af);
+    elfw_add_section(w, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC,
+                     af, (Elf64_Xword)sizeof af, 8);
+}
 
 static const struct backend_desc g_backends[] = {
     [TARGET_X86_64] = {
@@ -47,7 +89,8 @@ static const struct backend_desc g_backends[] = {
         .no_asm_text = NULL,
         .option = thumb_target_option,
         .options_done = thumb_options_done,
-        .frame_sp = 13, .frame_ra = 14 },     /* sp, lr */
+        .frame_sp = 13, .frame_ra = 14,     /* sp, lr */
+        .elf_notes = arm_elf_notes },
     [TARGET_RISCV32] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
@@ -59,7 +102,8 @@ static const struct backend_desc g_backends[] = {
         .no_asm_text = NULL,
         .option = riscv_target_option,
         .options_done = riscv_options_done,
-        .frame_sp = 2, .frame_ra = 1 },      /* sp, ra */
+        .frame_sp = 2, .frame_ra = 1,       /* sp, ra */
+        .elf_notes = riscv_elf_notes },
     [TARGET_RISCV64] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
         .op_calls_helper = rv_op_calls_helper,
@@ -71,7 +115,8 @@ static const struct backend_desc g_backends[] = {
         .no_asm_text = NULL,
         .option = riscv_target_option,
         .options_done = riscv_options_done,
-        .frame_sp = 2, .frame_ra = 1 },      /* sp, ra */
+        .frame_sp = 2, .frame_ra = 1,       /* sp, ra */
+        .elf_notes = riscv_elf_notes },
     [TARGET_AVR] = {
         .family = "AVR", .codegen = codegen_unit_avr, .ra_at_o0 = 1,
         .op_calls_helper = NULL,
@@ -90,7 +135,8 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "jal", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
-        .option = mips32_target_option },
+        .option = mips32_target_option,
+        .elf_notes = mips_elf_notes },
     [TARGET_MIPS64] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
         .op_calls_helper = mips_op_calls_helper,
@@ -100,7 +146,8 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "jal", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
-        .option = mips64_target_option },
+        .option = mips64_target_option,
+        .elf_notes = mips_elf_notes },
     [TARGET_LOONGARCH64] = {
         .family = "LoongArch", .codegen = codegen_unit_loongarch, .ra_at_o0 = 1,
         .op_calls_helper = la_op_calls_helper,

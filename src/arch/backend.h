@@ -231,6 +231,7 @@ void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
 enum { BACKEND_CXX_EXC_OK = 0, BACKEND_CXX_EXC_NONE = 1,
        BACKEND_CXX_EXC_BIG_ENDIAN = 2 };
 
+struct elfw;
 struct backend_desc {
     /* The family's name in messages ("RX", "PowerPC"). */
     const char *family;
@@ -282,6 +283,11 @@ struct backend_desc {
     /* ...and, once every argument has been read, what those options
      * meant together (an FPU and a float ABI given in either order). */
     void (*options_done)(void);
+    /* The sections an ELF object for this target carries about itself --
+     * ARM's build attributes, RISC-V's ISA string, MIPS's ABI flags --
+     * added by the compiler's object writer and the assembler's alike
+     * (src/driver/main.c, src/as/gas.c). NULL: none. */
+    void (*elf_notes)(struct elfw *w);
     /* -g's call frame information (.debug_frame, src/debug/dwarf.c):
      * the DWARF numbers of the stack pointer and of the register the
      * return address arrives in, for a backend that records its prologue

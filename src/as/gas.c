@@ -3639,32 +3639,17 @@ static int write_object(struct gas *g, const char *out_path)
      * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD
      * refused to link it with the C it was written for. (Not RVC: this
      * assembler does not compress.) */
-    if (g->tgt->machine == EM_RISCV) {
-        /* ...and the ISA the -march= names, as a compiled object says it
-         * (riscv_build_attributes): without it a disassembler knows only
-         * RV32I and C, and showed a .S's fsd and fmadd.d as <unknown> */
-        size_t alen = 0;
-        unsigned char *ab = riscv_build_attributes(&alen);
+    if (g->tgt->machine == EM_RISCV)
         elfw_set_flags(w, target_elf_flags(target_get()) &
                           EF_RISCV_FLOAT_ABI_MASK);
-        elfw_add_section(w, ".riscv.attributes", SHT_RISCV_ATTRIBUTES, 0, ab,
-                         (Elf64_Xword)alen, 1);
-        free(ab);
-    }
-    if (g->tgt->machine == EM_MIPS) {
-        unsigned char af[24];
+    if (g->tgt->machine == EM_MIPS)
         elfw_set_flags(w, target_elf_flags(target_get()));
-        mips_build_abiflags(af);
-        elfw_add_section(w, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC,
-                         af, (Elf64_Xword)sizeof af, 8);
-    }
-    if (g->tgt->machine == EM_ARM) {
-        size_t alen = 0;
-        unsigned char *ab = arm_build_attributes(&alen);
-        elfw_add_section(w, ".ARM.attributes", SHT_ARM_ATTRIBUTES, 0, ab,
-                         (Elf64_Xword)alen, 1);
-        free(ab);
-    }
+    /* ...and what the object says about itself, as a compiled one does
+     * (the registry's elf_notes): ARM's build attributes, RISC-V's ISA
+     * string -- without it a disassembler knows only RV32I and C, and
+     * showed a .S's fsd as <unknown> -- and MIPS's ABI flags */
+    if (backend_get(target_get())->elf_notes)
+        backend_get(target_get())->elf_notes(w);
     free(used);
     if (g->errors) { elfw_free(w); free(ndx); return 1; }
     int rc = elfw_write(w, out_path);
