@@ -5767,10 +5767,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
      * of it, and a frame that does not fit shows up as a program that
      * produces no output at all. */
     /* The frame, the pairs and Y the prologue pushed, the return address
-     * the call pushed, and the most the body pushes on top of all that
-     * for a moment (t_push). */
+     * the call (or the interrupt) pushed, and the most the body pushes
+     * on top of all that for a moment (t_push). A handler's prologue also
+     * pushes everything in ISR_SAVE but Y (counted above), and SREG. */
     f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ +
                      2 /* the return address */ + F.tpeak;
+    if (f->is_isr)
+        f->stack_bytes += (int)(sizeof ISR_SAVE / sizeof ISR_SAVE[0]) - 2 + 1;
     f->code_len = t->len - f->code_off;
     if (F.rx) {
         struct avr_relax *rx = F.rx;

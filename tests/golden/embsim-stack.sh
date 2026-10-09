@@ -7,10 +7,10 @@
 #     -O1 -fstack-usage on the Cortex-M3, RV32 and the AVR, with the
 #     harness's own .su files:
 #       - each function's measured frame is its .su frame, exactly --
-#         the harness's too: on the AVR io.c's putn, whose `push r31` /
-#         `pop r31` around an immediate loaded into a low register is a
-#         byte of its frame (on the AVR but the interrupt handler: see
-#         below);
+#         the harness's too, and on the AVR the interrupt handler's, whose
+#         prologue saves r0, SREG, r1, r18-r27, r30 and r31 besides Y
+#         (31 bytes), and io.c's putn, whose `push r31` / `pop r31` around
+#         an immediate loaded into a low register is a byte of its frame;
 #       - the stack's depth is the sum of the .su frames along the
 #         deepest path prof.c has, and every function's depth is at most
 #         it;
@@ -29,10 +29,6 @@
 #       - shallow, no overflow: the run ends as it would.
 #  3. tests/golden/embsim/exc.c: a thread on the PSP takes an SVC, whose
 #     eight-word frame is the process stack's 32 bytes.
-# On the AVR, EmbCC's .su file understates a frame, which the report
-# flags above the static bound and this test leaves out of the .su
-# comparison (a finding for the compiler): a signal handler's leaves out
-# the registers its prologue saves (r0, SREG, r1, r18-r27, r30, r31).
 set -u
 echo "TEST-MARKER embsim-stack"
 . "$(dirname "$0")/../lib.sh"
@@ -122,10 +118,6 @@ profile_stack() {
         set -- $(row "$out/$tag.stack" "$fn")
         [ $# = 6 ] || continue          # never ran
         nsu=$((nsu + 1))
-        if [ "$fn" = "$isr" ] && [ $tag = avr ]; then
-            [ "$3" -gt "$bytes" ] || { echo "FAIL avr: $fn's frame $3, not above its .su $bytes (has EmbCC's .su been fixed? update this test)"; fail=1; }
-            continue
-        fi
         [ "$3" = "$bytes" ] || { echo "FAIL $tag: $fn's frame was $3 bytes, its .su says $bytes"; fail=1; }
     done < "$out/$tag.su"
     # every function that ran and has a .su line was compared: prof.c's
@@ -140,7 +132,7 @@ profile_stack() {
     case $tag in
     m3) want=$(( $(fr reset) + $(fr main) + $(fr putn) + $(fr writec) )) ;;
     rv32) want=$(( $(fr _start) + $(fr main) + 5 * $(fr rec) )) ;;
-    avr) want=$(( $(fr main) + $(fr spin) + 31 )) ;;   # the handler: 31, as measured
+    avr) want=$(( $(fr main) + $(fr spin) + $(fr $isr) )) ;;
     esac
     got=$(sed -n 's/.*: \([0-9]*\) bytes used.*/\1/p' "$out/$tag.stack" | head -1)
     [ "$got" = "$want" ] || { echo "FAIL $tag: the stack went $got bytes deep; the deepest path's frames add up to $want"; fail=1; }
