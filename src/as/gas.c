@@ -18,6 +18,7 @@
 #include "../arch/thumb/asm.h"
 #include "../arch/thumb/emit.h"
 #include "../arch/thumb/attrs.h"
+#include "../arch/backend.h"
 #include "../arch/aarch64/asm.h"
 #include "../arch/mips/asm.h"
 #include "../arch/loongarch/asm.h"
@@ -3638,9 +3639,18 @@ static int write_object(struct gas *g, const char *out_path)
      * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD
      * refused to link it with the C it was written for. (Not RVC: this
      * assembler does not compress.) */
-    if (g->tgt->machine == EM_RISCV)
+    if (g->tgt->machine == EM_RISCV) {
+        /* ...and the ISA the -march= names, as a compiled object says it
+         * (riscv_build_attributes): without it a disassembler knows only
+         * RV32I and C, and showed a .S's fsd and fmadd.d as <unknown> */
+        size_t alen = 0;
+        unsigned char *ab = riscv_build_attributes(&alen);
         elfw_set_flags(w, target_elf_flags(target_get()) &
                           EF_RISCV_FLOAT_ABI_MASK);
+        elfw_add_section(w, ".riscv.attributes", SHT_RISCV_ATTRIBUTES, 0, ab,
+                         (Elf64_Xword)alen, 1);
+        free(ab);
+    }
     if (g->tgt->machine == EM_MIPS) {
         unsigned char af[24];
         elfw_set_flags(w, target_elf_flags(target_get()));

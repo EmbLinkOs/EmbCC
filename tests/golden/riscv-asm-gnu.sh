@@ -114,6 +114,10 @@ for o in fp fpm; do
         awk -F'\t' 'NF >= 3 { print $2, $3 }' > "$out/$o.dis"
 done
 [ -s "$out/fpm.dis" ] || fail "llvm-mc's fp.S has no code"
+# The object says which ISA it is for (.riscv.attributes), as a compiled
+# one does: a disassembler told nothing decodes no F instruction.
+"$OBJDUMP" -d "$out/fp.o" | grep -q 'fsd	fs0' ||
+    fail "fp.o carries no .riscv.attributes naming F and D (fsd is <unknown>)"
 diff "$out/fpm.dis" "$out/fp.dis" || fail "an F/D form assembled differently from llvm-mc"
 "$EMBCC" --target=riscv32-unknown-elf -c "$out/fp.S" -o "$out/fp32.o" 2> "$out/fp32.err" &&
     fail "fsd assembled for rv32imac, which has no D"
