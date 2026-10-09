@@ -398,7 +398,8 @@ static const struct ra_target X86_RA = {
         * values where they live, and loads only one left in a slot
         * (x86_atomic_addr, x86_atomic_val, cg_load) */
     0, /* fp_reads_gpr */
-    0  /* asm_in_reg: a template may name a callee-saved register */
+    0, /* asm_in_reg: a template may name a callee-saved register */
+    NULL  /* remat_ok */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----

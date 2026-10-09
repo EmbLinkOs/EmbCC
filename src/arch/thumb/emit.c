@@ -341,6 +341,12 @@ void t_mov_imm(struct code *c, int rd, long imm, int s)
                    (imm_hi3(e) << 12) | (unsigned)(rd << 8) | imm_lo8(e));
             return;
         }
+        e = encode_imm(~v & 0xffffffffUL);
+        if (e >= 0) {           /* MVN (immediate): ~1, -256, 0xffff00ff */
+            hw2(c, 0xf06fu | (imm_i(e) << 10) | (unsigned)(s << 4),
+                   (imm_hi3(e) << 12) | (unsigned)(rd << 8) | imm_lo8(e));
+            return;
+        }
     }
     /* movw then movt; with the flags dead, a low half of eight bits
      * into r0-r7 is the two-byte movs (a double's low half is often 0) */

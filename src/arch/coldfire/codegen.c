@@ -199,8 +199,9 @@ static const struct ra_target CF_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg */
     0,
-    1               /* asm_in_reg: see IR_ASM (the address class keeps the
+    1,              /* asm_in_reg: see IR_ASM (the address class keeps the
                      * old rule: nothing of it lives across an asm) */
+    NULL  /* remat_ok */
 };
 
 /* ---- which values are eight bytes wide --------------------------------- */

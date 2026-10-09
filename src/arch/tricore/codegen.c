@@ -198,7 +198,8 @@ static const struct ra_target TC_RATGT = {
     0,              /* atomic_in_reg: the atomics read their operands
                      * through rd/rda, but are left in memory for now */
     0,
-    0               /* asm_in_reg: inline asm is refused */
+    0,              /* asm_in_reg: inline asm is refused */
+    NULL  /* remat_ok */
 };
 
 static int g_tc_regalloc;
@@ -2855,7 +2856,8 @@ static const struct ra_target TC_PAIR_RA = {
     NULL, NULL,
     0,
     0,
-    0               /* asm_in_reg */
+    0,              /* asm_in_reg */
+    NULL  /* remat_ok */
 };
 
 static void tc_pair_hints(const struct ir_func *fn, int *hint)

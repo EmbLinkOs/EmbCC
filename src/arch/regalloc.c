@@ -595,6 +595,27 @@ static void ra_depth_cb(int v, void *ctx)
     if (v >= 0 && v < c->nvr && c->vdep[v] < c->d) c->vdep[v] = c->d;
 }
 
+char *ra_remat_map(const struct ir_func *fn,
+                   int (*ok)(const struct ir_ins *def))
+{
+    int nv = fn->nvregs;
+    char *m = xcalloc((size_t)(nv ? nv : 1), 1);
+    int *at = xmalloc((size_t)(nv ? nv : 1) * sizeof *at);
+    for (int v = 0; v < nv; v++)
+        at[v] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        int d = in->op == IR_STVAR ? in->dst : ra_ins_def(in);
+        if (d < 0 || d >= nv)
+            continue;
+        at[d] = at[d] == -1 ? n : -2;           /* -2: more than one */
+    }
+    for (int v = 0; v < nv; v++)
+        m[v] = at[v] >= 0 && ok(&fn->ins[at[v]]);
+    free(at);
+    return m;
+}
+
 static void ra_cost_cb(int v, void *ctx)
 {
     struct ra_costacc *c = ctx;
@@ -1574,6 +1595,25 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
             ra_each_use(in, ra_cost_cb, &ca);
             ra_cost_cb(in->op == IR_STVAR ? in->dst : ra_ins_def(in), &ca);
         }
+    }
+
+    /* A node all of whose values are rebuilt where they are read
+     * (remat_ok) spills for a move per read, where any other spills for a
+     * store and a load per read: its cost is a quarter. LICM hoists the
+     * constants of a loop body to its preheader, and each then held a
+     * register across the whole loop or, spilled at full cost, was
+     * stored and reloaded -- `ldr r2, [sp, #36]` for a 1. */
+    if (t->remat_ok && !getenv("EMBCC_RA_NOREMAT")) {
+        char *rm = ra_remat_map(fn, t->remat_ok);
+        char *mixed = xcalloc((size_t)(E ? E : 1), 1);
+        for (int v = 0; v < nvr; v++)
+            if (eof[v] >= 0 && !rm[v])
+                mixed[ra_find(alias, eof[v])] = 1;
+        for (int e = 0; e < E; e++)
+            if (!mixed[e] && cost[e])
+                cost[e] = (cost[e] + 3) / 4;
+        free(mixed);
+        free(rm);
     }
 
     /* Chaitin-Briggs simplify order. Repeatedly remove a node of degree < NCALLEE

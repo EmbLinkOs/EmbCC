@@ -574,7 +574,8 @@ static const struct ra_target RISCV_RA = {
     1,            /* atomic_in_reg: every atomic reads its address and
                    * values through rdr and writes through wreg/wr */
     0,            /* fp_reads_gpr: floats are already general (above) */
-    1             /* asm_in_reg: see IR_ASM */
+    1,            /* asm_in_reg: see IR_ASM */
+    NULL  /* remat_ok */
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -5970,7 +5971,8 @@ static const struct ra_target RV_PAIR_RA = {
     NULL, NULL,
     1,
     0,
-    0
+    0,
+    NULL
 };
 
 static void rv_pair_hints(const struct ir_func *fn, int *hint)
@@ -6398,7 +6400,8 @@ static const struct ra_target RISCV_FRA = {
     NULL, NULL,
     1,
     0,
-    1
+    1,
+    NULL
 };
 static int g_rv_lowregs = 1;
 

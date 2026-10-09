@@ -213,7 +213,22 @@ struct ra_target {
      * by name needs. The floating-point class keeps that rule always: a
      * template may name a callee-saved FP register. */
     int asm_in_reg;
+
+    /* Can the value this instruction defines be REBUILT where it is
+     * read -- a constant one instruction makes -- rather than stored to
+     * a slot and loaded back? A value whose one definition is such costs
+     * a move at each read when it has no register, not a store and
+     * loads, so it is the one to spill first; the backend's codegen
+     * must then make it at each read (ra_remat_map). NULL: none can. */
+    int (*remat_ok)(const struct ir_ins *def);
 };
+
+/* Per vreg, 1 when it has exactly one definition and `ok` says that
+ * definition can be rebuilt at each read: the remat_ok question asked of
+ * the whole function. A temp written on two paths (a merge) is not one,
+ * whatever each write is. xcalloc'd, nvregs long. */
+char *ra_remat_map(const struct ir_func *fn,
+                   int (*ok)(const struct ir_ins *def));
 
 /* Assign a register to every eligible vreg of `fn`, or -1 for one that
  * stays in memory. `wide` (may be NULL) marks vregs holding a value too

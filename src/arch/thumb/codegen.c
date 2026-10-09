@@ -597,6 +597,22 @@ static int t_dldvar_plain(int size, int sign, int w)
  * below place_arg, whose answer it uses rather than restating. */
 static void t_abi_hints(const struct ir_func *fn, int *hint);
 
+/* REMATERIALIZATION: a constant one flagless instruction makes (movw,
+ * or mov/mvn of a modified immediate) is made again at each read when it
+ * has no register, rather than stored to a slot and loaded back. Flagless
+ * because a read may come after a lowering's own compare. */
+static int g_t_noremat = -1;
+
+static int t_remat_ok(const struct ir_ins *i)
+{
+    unsigned long v = (unsigned long)i->imm & 0xffffffffUL;
+    if (g_t_noremat < 0)
+        g_t_noremat = getenv("EMBCC_T_NOREMAT") != NULL;
+    /* ARMv6-M (v6m.c) shares the allocator and makes no constant again */
+    return !g_t_noremat && target_thumb_arch() != 6 && i->op == IR_CONST && !i->flt && i->w <= 4 &&
+           (v <= 0xffff || t_it_imm_ok((long)i->imm));
+}
+
 static const struct ra_target THUMB_RA = {
     t_pool_for,
     t_callee_saved,
@@ -630,7 +646,8 @@ static const struct ra_target THUMB_RA = {
     1,            /* atomic_in_reg: thumb_atomic reads through rdr and
                    * writes through wr/wreg */
     0,            /* fp_reads_gpr */
-    1             /* asm_in_reg: see IR_ASM */
+    1,            /* asm_in_reg: see IR_ASM */
+    t_remat_ok
 };
 
 /* The D class's view of the same machine. Only the FP fields matter to
@@ -652,7 +669,8 @@ static const struct ra_target THUMB_DRA = {
     NULL, NULL,
     1,            /* atomic_in_reg */
     0,            /* fp_reads_gpr */
-    1             /* asm_in_reg: the FP class keeps out of asm regardless */
+    1,            /* asm_in_reg: the FP class keeps out of asm regardless */
+    NULL  /* remat_ok */
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -1360,7 +1378,8 @@ static void layout(struct t_fn *F)
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
         for (int v = 0; v < nv; v++)
             loc2[v] = (F->loc && F->loc[v] >= 0) || F->wide[v] ||
-                      (F->selimm && F->selimm[v]) ? 0 : -1;
+                      (F->selimm && F->selimm[v]) ||
+                      (F->remat && F->remat[v]) ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
@@ -1500,7 +1519,27 @@ static long slot_of(const struct t_fn *F, int v)
 static int faddr(const struct t_fn *F, int v, long *off);
 static unsigned lo_free_at(const struct t_fn *F, int n);
 
+/* The low register holding a copy of v's slot here (rc_try), or -1. */
+static int rc_hit(const struct t_fn *F, int v)
+{
+    if (!F->rc_on || v < 0 || F->rc_reg[v] < 0 || F->rc_end[v] < F->rc_cur)
+        return -1;
+    return F->rc_reg[v];
+}
+
+static void rd_(struct t_fn *F, int v, int reg);
+
+/* rd, keeping flags_dead_at: a read made where the instruction has
+ * emitted nothing but reads leaves the flags as dead as it found them. */
 static void rd(struct t_fn *F, int v, int reg)
+{
+    int dead = F->t->len == F->flags_dead_at;
+    rd_(F, v, reg);
+    if (dead)
+        F->flags_dead_at = F->t->len;
+}
+
+static void rd_(struct t_fn *F, int v, int reg)
 {
     if (in_freg(F, v)) {
         t_vmov_core(F->t, F->floc[v], reg, 0);
@@ -1509,6 +1548,17 @@ static void rd(struct t_fn *F, int v, int reg)
     if (in_reg(F, v)) {
         if (F->loc[v] != reg)
             t_mov_reg(F->t, reg, F->loc[v]);
+        return;
+    }
+    if (F->remat && F->remat[v]) {
+        t_mov_imm(F->t, reg, F->remat_v[v],
+                  F->flags_dead_ins || F->t->len == F->flags_dead_at);
+        return;
+    }
+    int rc = rc_hit(F, v);
+    if (rc >= 0) {
+        if (rc != reg)
+            t_mov_reg(F->t, reg, rc);
         return;
     }
     long fo;
@@ -1543,6 +1593,180 @@ static int lo_take(struct t_fn *F)
  * the high one named. A macro for the reason rdr is one below. */
 #define LO(F, scratch) ((F)->lofree ? lo_take(F) : (scratch))
 
+/* ---- RELOAD CACHE ------------------------------------------------------
+ *
+ * A value the allocator left in memory is loaded from its slot at every
+ * read: a switch value before each case's compare, a format pointer in
+ * each arm. When reads of it follow this one, the first read loads it
+ * into a low register that is free across the whole stretch (lo_free),
+ * and the later reads use that register. Until the stretch ends the
+ * register is kept out of every instruction's scratch (lofree) and roles
+ * (t_roles_low). The slot stays the value's home, so a path that
+ * addresses the slot directly still reads the truth.
+ *
+ * The stretch is a run of instructions in order, from this read: it ends
+ * before anything that writes the value, and before any instruction
+ * whose lowering names a low register of its own (lo_op_ok: a call, a
+ * helper, a 64-bit path). Jumps out of it are free. A label inside it is
+ * allowed only when every jump to it is inside it too, so the one way
+ * into the stretch is through this read -- and a loop's back edge pulls
+ * the end of the stretch out to the jump (rc_labels). */
+#define RC_REACH 64
+
+static int lo_op_ok(const struct t_fn *F, const struct ir_ins *i);
+static unsigned lo_free(const struct t_fn *F, int n);
+static unsigned t_busy(const struct t_fn *F, int n, int span);
+
+/* The registers a cache holds across instruction n. */
+static unsigned rc_held(const struct t_fn *F, int n)
+{
+    unsigned m = 0;
+    for (int k = 0; k < F->rc_n; k++)
+        if (F->rc_end[F->rc_v[k]] >= n)
+            m |= 1u << F->rc_reg[F->rc_v[k]];
+    return m;
+}
+
+/* Forget the caches whose last read came before instruction n. */
+static void rc_expire(struct t_fn *F, int n)
+{
+    int k = 0;
+    while (k < F->rc_n) {
+        int v = F->rc_v[k];
+        if (F->rc_end[v] < n) {
+            F->rc_reg[v] = -1;
+            F->rc_v[k] = F->rc_v[--F->rc_n];
+        } else {
+            k++;
+        }
+    }
+}
+
+/* Which jumps reach each label: rc_lmin and rc_lmax, the first and last
+ * IR_JMP/IR_BRZ/IR_BRNZ to it -- or rc_lmin -1 when anything else can
+ * get there, so no stretch takes it in. */
+static void rc_labels(struct t_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int nl = fn->nlabels, igoto = 0, l, k, n;
+    for (l = 0; l < nl; l++) {
+        F->rc_lmin[l] = fn->nins;
+        F->rc_lmax[l] = -1;
+    }
+    for (n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        switch (i->op) {
+        case IR_JMP: case IR_BRZ: case IR_BRNZ:
+            if (i->label >= 0 && i->label < nl) {
+                if (F->rc_lmin[i->label] > n && F->rc_lmin[i->label] >= 0)
+                    F->rc_lmin[i->label] = n;
+                if (F->rc_lmax[i->label] < n)
+                    F->rc_lmax[i->label] = n;
+            }
+            break;
+        case IR_SWITCH:
+            for (k = -1; k < fn->jt[i->jt].n; k++) {
+                l = k < 0 ? i->label : fn->jt[i->jt].labels[k];
+                if (l >= 0 && l < nl)
+                    F->rc_lmin[l] = -1;
+            }
+            break;
+        case IR_LABELADDR:
+            if (i->label >= 0 && i->label < nl)
+                F->rc_lmin[i->label] = -1;
+            break;
+        case IR_IGOTO:
+            igoto = 1;
+            break;
+        default:
+            break;
+        }
+    }
+    for (k = 0; k < fn->neh; k++)
+        if (fn->eh[k].lp_label >= 0 && fn->eh[k].lp_label < nl)
+            F->rc_lmin[fn->eh[k].lp_label] = -1;
+    for (l = 0; igoto && l < nl; l++)
+        F->rc_lmin[l] = -1;
+}
+
+static void rc_reset(struct t_fn *F)
+{
+    F->rc_n = 0;
+    F->rc_cur = 0;
+    for (int v = 0; F->rc_on && v < F->fn->nvregs; v++)
+        F->rc_reg[v] = -1;
+}
+
+struct rc_use { int v, hit; };
+
+static void rc_use_cb(int u, void *ctx)
+{
+    struct rc_use *c = ctx;
+    if (u == c->v)
+        c->hit = 1;
+}
+
+/* v's register for this read, loaded into it now when a cache pays; -1
+ * when the read is from the slot as before. */
+static int rc_try(struct t_fn *F, int v)
+{
+    const struct ir_func *fn = F->fn;
+    int n = F->rc_cur, last = -1, r, m;
+    unsigned avail;
+    long fo;
+    if (!F->rc_on || v < 0 || v >= fn->nvregs)
+        return -1;
+    if (F->rc_reg[v] >= 0)
+        return rc_hit(F, v);
+    avail = F->lofree;
+    if (!avail || F->rc_n == 8 || in_freg(F, v) || F->wide[v] ||
+        F->slot[v] < 0 || faddr(F, v, &fo) || fn->ins[n].dst == v)
+        return -1;
+    int stop, end, k;
+    for (m = n + 1; m < fn->nins && m <= n + RC_REACH; m++) {
+        const struct ir_ins *i = &fn->ins[m];
+        struct rc_use c = { v, 0 };
+        if (i->dst == v)
+            break;
+        if (i->op == IR_LABEL) {
+            if (i->label < 0 || i->label >= fn->nlabels ||
+                F->rc_lmin[i->label] < n)
+                break;
+        } else if (i->op != IR_JMP && !lo_op_ok(F, i)) {
+            break;
+        }
+        ra_each_use(i, rc_use_cb, &c);
+        if (c.hit)
+            last = m;
+    }
+    stop = m;
+    /* A jump back to a label in the stretch, from after its last read,
+     * makes the stretch reach the jump: the register must still hold
+     * the value when the loop comes round. */
+    end = last;
+    for (k = n + 1; last >= 0 && k <= end && end < stop; k++)
+        if (fn->ins[k].op == IR_LABEL && F->rc_lmax[fn->ins[k].label] > end)
+            end = F->rc_lmax[fn->ins[k].label];
+    if (last < 0 || end >= stop)
+        return -1;
+    for (m = n + 1; m <= end && avail; m++) {
+        const struct ir_ins *i = &fn->ins[m];
+        unsigned f = i->op == IR_LABEL || i->op == IR_JMP
+                     ? ~t_busy(F, m, 1) : lo_free(F, m);
+        avail &= f & ~rc_held(F, m);
+    }
+    if (!avail)
+        return -1;
+    for (r = 0; !(avail & (1u << r)); r++)
+        ;
+    rd(F, v, r);
+    F->lofree &= ~(1u << r);
+    F->rc_reg[v] = r;
+    F->rc_end[v] = end;
+    F->rc_v[F->rc_n++] = v;
+    return r;
+}
+
 /* `rdr` says where a value already IS; `wreg` where to compute a result;
  * `wrote` commits it only if that was a scratch. */
 static int rdr_(struct t_fn *F, int v, int scratch)
@@ -1559,12 +1783,16 @@ static int rdr_(struct t_fn *F, int v, int scratch)
  * already in a register -- so a leaf that never touched r10 still pushed
  * and popped it, and lost its `bx lr`. */
 #define rdr(F, v, scratch) \
-    (in_reg((F), (v)) ? (F)->loc[(v)] : rdr_((F), (v), LO((F), (scratch))))
+    (in_reg((F), (v)) ? (F)->loc[(v)] : \
+     rc_try((F), (v)) >= 0 ? (F)->rc_reg[(v)] : \
+     rdr_((F), (v), LO((F), (scratch))))
 #define wreg(F, v, scratch) \
     (in_reg((F), (v)) ? (F)->loc[(v)] : LO((F), (scratch)))
 
 static void wr(struct t_fn *F, int v, int reg)
 {
+    if (rc_hit(F, v) >= 0)
+        F->rc_end[v] = -1;      /* a new value: the copy is stale */
     if (in_freg(F, v)) {
         t_vmov_core(F->t, F->floc[v], reg, 1);
         return;
@@ -4183,6 +4411,8 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_CONST: {
         if (t_sel_imm(F, i->dst))
             return;             /* the select moves it (t_select_imms) */
+        if (F->remat && i->dst >= 0 && F->remat[i->dst])
+            return;             /* made where it is read (rd) */
         /* Build the constant in the destination's OWN register when it
          * has one. Going through T_ACC and copying cost two extra
          * instructions on the commonest operation there is, and the
@@ -5969,7 +6199,8 @@ static const struct ra_target THUMB_PAIR_RA = {
     NULL, NULL,
     0, /* atomic_in_reg */
     0, /* fp_reads_gpr */
-    0  /* asm_in_reg: a pair live across an asm stays in memory */
+    0, /* asm_in_reg: a pair live across an asm stays in memory */
+    NULL  /* remat_ok */
 };
 
 /* The pair pass: a vreg -> low register map, or NULL for none. Fills
@@ -6584,9 +6815,42 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             fn->ins[i].op == IR_ARMW || fn->ins[i].op == IR_CAS ||
             fn->ins[i].op == IR_CMPXCHG)
             F.leaf = 0;
+    /* The constants with no register that are made where they are read:
+     * temps only, and not at -O0 or -Og, where every value has a slot. */
+    if (F.loc && !F.keep_vars && fn->nvregs) {
+        char *rm = ra_remat_map(fn, t_remat_ok);
+        for (int v = 0; v < fn->nvregs; v++) {
+            if (!rm[v] || v < fn->nvars || in_reg(&F, v) || in_freg(&F, v) ||
+                F.wide[v] || t_sel_imm(&F, v))
+                continue;
+            if (!F.remat) {
+                F.remat = xcalloc((size_t)fn->nvregs, 1);
+                F.remat_v = xcalloc((size_t)fn->nvregs, sizeof *F.remat_v);
+            }
+            F.remat[v] = 1;
+        }
+        for (int n = 0; F.remat && n < fn->nins; n++) {
+            int d = fn->ins[n].dst;
+            if (fn->ins[n].op == IR_CONST && d >= 0 && d < fn->nvregs &&
+                F.remat[d])
+                F.remat_v[d] = (long)fn->ins[n].imm;
+        }
+        free(rm);
+    }
     layout(&F);
     if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO"))
         F.lv_busy = lo_busy_map(&F);
+    /* Not at -O0 or -Og, where a debugger may write a variable's slot
+     * between two reads. */
+    if (F.lv_busy && !F.keep_vars && !getenv("EMBCC_T_NORC")) {
+        F.rc_on = 1;
+        F.rc_reg = xmalloc((size_t)fn->nvregs * 2 * sizeof *F.rc_reg);
+        F.rc_end = F.rc_reg + fn->nvregs;
+        F.rc_lmin = xmalloc((size_t)(fn->nlabels + 1) * 2 *
+                            sizeof *F.rc_lmin);
+        F.rc_lmax = F.rc_lmin + fn->nlabels + 1;
+        rc_labels(&F);
+    }
     t_lit64_plan(&F);
 
     /* One more label than the IR has: the epilogue, which every IR_RET
@@ -6977,17 +7241,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
 
     int tail_end = 0;        /* the body's last act is a tail call */
+    rc_reset(&F);
     int *ldepth = target_opt_size() ? (int *)0 : t_loop_depth(fn);
     g_t_loop_bytes = 0;
     for (i = 0; i < fn->nins; i++) {
         int was_tail = F.tail && F.tail[i] && F.nopush;
         int len0 = t->len, i0 = i;
+        F.rc_cur = i;
+        rc_expire(&F, i);
         if (g_t_ext) {
             if (!F.lv_busy)
                 g_t_role_fail = 1;     /* no liveness: nothing is known
                                         * free, so this attempt cannot be */
             {
-                unsigned busy = t_busy(&F, i, 2), low = 0;
+                unsigned busy = t_busy(&F, i, 2) | rc_held(&F, i), low = 0;
                 int ok = !getenv("EMBCC_T_NOLOWROLE");
                 ok = ok && t_role_low_ok(&F, &fn->ins[i]);
                 if (ok) {
@@ -7003,7 +7270,13 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         } else {
             g_t_role_low = 0;
         }
-        F.lofree = lo_free(&F, i) & ~g_t_role_low;
+        F.lofree = lo_free(&F, i) & ~g_t_role_low & ~rc_held(&F, i);
+        /* No flag value survives into an instruction, save a tst made
+         * for a branch past copies (tst_br). */
+        F.flags_dead_at = F.tst_br ? -1 : t->len;
+        F.flags_dead_ins = !F.tst_br && (fn->ins[i].op == IR_CALL ||
+                                         fn->ins[i].op == IR_STORE ||
+                                         fn->ins[i].op == IR_RET);
         gen_ins(&F, i);
         F.lofree = 0;
         if (F.skip_next) {      /* the comparison emitted its branch too,
@@ -7263,6 +7536,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.fscr);
     free(F.floc);
     free(F.lv_busy);
+    free(F.rc_reg);
+    free(F.remat);
+    free(F.remat_v);
+    free(F.rc_lmin);
     free(F.lp_use);
     free(F.lp_val);
     free(F.lp_site);

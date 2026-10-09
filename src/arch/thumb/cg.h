@@ -159,6 +159,29 @@ struct t_fn {
      * live into or out of it, which it is computed from (lo_busy_map). */
     unsigned lofree;
     unsigned *lv_busy;
+    /* RELOAD CACHE (rc_try): per vreg, the low register a value that
+     * lives in memory was loaded into for the reads that follow -- -1 for
+     * none -- and the last instruction that reads it there; rc_v lists
+     * the vregs with one. rc_cur is the instruction being emitted, rc_on
+     * 0 when the function makes none. Per label, the first and last
+     * instruction that jumps to it, rc_lmin -1 when something else can
+     * (a switch, &&label, a landing pad): rc_labels. */
+    int *rc_reg, *rc_end;
+    /* Per vreg: 1 for a constant with no register that is made where it
+     * is read (t_remat_ok), its value in remat_v; NULL for none. Such a
+     * value has no slot, and its IR_CONST emits nothing. */
+    char *remat;
+    long *remat_v;
+    /* Where the code of the instruction being emitted is still nothing
+     * but reads of its operands (rd), so the flags hold nothing it set:
+     * -1 when they may hold something already (tst_br). A constant made
+     * there may be `movs`. */
+    int flags_dead_at;
+    /* ...and an instruction whose whole lowering tests nothing -- a
+     * call, a store, a return -- has dead flags throughout. */
+    int flags_dead_ins;
+    int *rc_lmin, *rc_lmax;
+    int rc_v[8], rc_n, rc_cur, rc_on;
 
     /* ---- the 64-bit constant pool (t_lit64 in codegen.c) --------------- */
     /* Per instruction: 1 for an IR_CONST that loads from the pool, 0 for

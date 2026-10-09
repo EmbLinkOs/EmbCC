@@ -190,7 +190,8 @@ static const struct ra_target PPC_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg */
     0,
-    1               /* asm_in_reg: see IR_ASM */
+    1,              /* asm_in_reg: see IR_ASM */
+    NULL  /* remat_ok */
 };
 
 static int g_ppc_regalloc;
@@ -2869,7 +2870,8 @@ static const struct ra_target PPC_PAIR_RA = {
     NULL, NULL,
     1,
     0,
-    0
+    0,
+    NULL
 };
 
 static void ppc_pair_hints(const struct ir_func *fn, int *hint)

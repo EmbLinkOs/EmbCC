@@ -237,7 +237,8 @@ static const struct ra_target SPARC_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg: the casa/swap lowerings read through rdr */
     0,
-    1               /* asm_in_reg: see IR_ASM */
+    1,              /* asm_in_reg: see IR_ASM */
+    NULL  /* remat_ok */
 };
 
 static int g_sp_regalloc;
@@ -3844,7 +3845,8 @@ static const struct ra_target SPARC_PAIR_RA = {
     NULL, NULL,
     1,
     0,
-    0
+    0,
+    NULL
 };
 
 static void sparc_pair_hints(const struct ir_func *fn, int *hint)

@@ -5085,7 +5085,8 @@ static const struct ra_target AVR_RA = {
     a_ext_plain,
     0, /* atomic_in_reg */
     0, /* fp_reads_gpr */
-    0  /* asm_in_reg */
+    0, /* asm_in_reg */
+    NULL  /* remat_ok */
 };
 
 /* The lowest register any call this function makes -- the IR's, and the

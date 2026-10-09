@@ -222,7 +222,8 @@ static const struct ra_target XT_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg: the s32c1i loops read through rdr */
     0,
-    1               /* asm_in_reg: see IR_ASM */
+    1,              /* asm_in_reg: see IR_ASM */
+    NULL  /* remat_ok */
 };
 
 static int g_xt_regalloc;
@@ -3086,7 +3087,8 @@ static const struct ra_target XT_PAIR_RA = {
     NULL, NULL,
     1,
     0,
-    0
+    0,
+    NULL
 };
 
 static void xt_pair_hints(const struct ir_func *fn, int *hint)

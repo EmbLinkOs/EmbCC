@@ -163,7 +163,8 @@ static const struct ra_target RX_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg */
     0,
-    1               /* asm_in_reg: see IR_ASM */
+    1,              /* asm_in_reg: see IR_ASM */
+    NULL  /* remat_ok */
 };
 
 static const struct ra_target RX_PAIR_RA = {
@@ -177,7 +178,8 @@ static const struct ra_target RX_PAIR_RA = {
     NULL, NULL,
     1,
     0,
-    0
+    0,
+    NULL
 };
 
 static int g_rx_regalloc;
