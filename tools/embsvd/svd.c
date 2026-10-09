@@ -858,6 +858,12 @@ static void read_fields(struct svd_node *r, const struct xnode *rn)
             svd_die("line %d: a field without a name", f->line);
         fd.acc = kidtext(f, "access") ? access_canon(kidtext(f, "access"),
                                                      f->line) : r->acc;
+        fd.mwv = kidtext(f, "modifiedWriteValues");
+        if (!fd.mwv)
+            fd.mwv = r->mwv;
+        fd.ract = kidtext(f, "readAction");
+        if (!fd.ract)
+            fd.ract = r->ract;
         if (kidtext(f, "bitOffset")) {
             fd.lsb = (int)svd_num(kidtext(f, "bitOffset"), "bitOffset", f->line);
             fd.width = kidtext(f, "bitWidth")
@@ -938,6 +944,8 @@ static void read_register(struct svd_node *r, const struct xnode *x,
     r->reset = pr.reset;
     r->rmask = pr.rmask_set ? pr.rmask
              : r->size == 64 ? ~0ULL : (1ULL << r->size) - 1;
+    r->mwv = kidtext(x, "modifiedWriteValues");
+    r->ract = kidtext(x, "readAction");
     r->alt = kidtext(x, "alternateRegister");
     if (!r->alt)
         r->alt = kidtext(x, "alternateGroup");

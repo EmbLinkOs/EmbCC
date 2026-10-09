@@ -31,6 +31,9 @@ struct svd_enumval {
 };
 struct svd_field {
     const char *name, *desc, *acc;
+    /* modifiedWriteValues and readAction as written, the register's when
+     * the field has none, or 0 */
+    const char *mwv, *ract;
     int lsb, width;
     struct svd_enumval *ev;
     int nev;
@@ -49,6 +52,7 @@ struct svd_node {
     /* a register */
     int size, access;           /* bits; 0 rw, 1 read-only, 2 write-only */
     const char *acc;
+    const char *mwv, *ract;     /* modifiedWriteValues, readAction, or 0 */
     unsigned long long reset, rmask;
     struct svd_field *f;
     int nf;
