@@ -62,6 +62,13 @@ if [ -s "$out/embsim.cmd" ]; then
     grep -q -- ' -g ' "$out/embsim.cmd" ||
         { echo "FAIL embsim: its recipe dropped -g"; fail=1; }
 fi
+# ...and rebuilt when the Makefile changes, or an ./embsim linked before
+# -O2 was the default (or with another EMBSIM_OPT) is kept: the rule's
+# prerequisites, from make's own database (-p), must name the Makefile
+( cd "$EMBCC_ROOT" && make -pn embsim 2> /dev/null ) |
+    awk '/^embsim:/ { for (i = 2; i <= NF; i++) if ($i == "Makefile") ok = 1 }
+         END { exit !ok }' ||
+    { echo "FAIL embsim: its rule does not depend on the Makefile, so EMBSIM_OPT changes leave ./embsim as it was"; fail=1; }
 
 [ "$fail" -eq 0 ] || exit 1
 echo "  every tool in \`make all\` builds ($(echo $tools | wc -w | tr -d ' ') of them)"

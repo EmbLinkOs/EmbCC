@@ -394,9 +394,11 @@ EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
 # Optimized, unlike the other tools: a simulator's speed is the tests'
 # and the user's time, and -O2 runs a busy loop 2.5 (M3) to 3.6 (AVR)
 # times as fast as no -O. -g stays (it is in CFLAGS); `make EMBSIM_OPT=`
-# builds it unoptimized to debug.
+# builds it unoptimized to debug. On the Makefile too, so that a change
+# here (EMBSIM_OPT's default, the list) rebuilds it: without that, an
+# ./embsim built before -O2 was the default stayed unoptimized.
 EMBSIM_OPT ?= -O2
-embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS)
+embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS) Makefile
 	$(CC) $(CFLAGS) $(EMBSIM_OPT) -o $@ $(EMBSIM_SRCS) -lm
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
