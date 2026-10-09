@@ -29,6 +29,18 @@
 #       - shallow, no overflow: the run ends as it would.
 #  3. tests/golden/embsim/exc.c: a thread on the PSP takes an SVC, whose
 #     eight-word frame is the process stack's 32 bytes.
+#  4. tests/golden/embsim-an/su.c (atomics of every size, a 64-bit
+#     multiply by a constant, a large struct by value, many arguments,
+#     varargs, a handler that calls, a VLA and alloca) at -O0, -O1, -O2
+#     and -Os on the M3, RV32 and the AVR:
+#       - it prints the same sum everywhere -- on the AVR, a handler
+#         whose call loaded r10-r17 once returned through the wrong
+#         bytes, its epilogue never popping them;
+#       - every function that ran and is "static" in its .su took exactly
+#         its .su frame: the AVR's atomics push their operands, its
+#         constants into r10-r17 borrow a pushed r31, its handler saves
+#         seventeen registers;
+#       - the VLA's and alloca's functions say "dynamic", and went deeper.
 set -u
 echo "TEST-MARKER embsim-stack"
 . "$(dirname "$0")/../lib.sh"
@@ -68,7 +80,8 @@ link() {
     rv32) H=EMBCC_RISCV_HARNESS; l=riscv ;;
     avr) H=EMBCC_AVR_HARNESS; l=avr ;;
     esac
-    env "$H=$out/$1" sh tests/harness/$l/link.sh "$2" "$3" > /dev/null 2>&1
+    lt=$1; shift
+    env "$H=$out/$lt" sh tests/harness/$l/link.sh "$@" > /dev/null 2>&1
 }
 
 # su FILE...: "function bytes" from .su files
@@ -228,6 +241,55 @@ if "$EMBCC" --target=thumbv7m-none-eabi -O2 -c tests/golden/embsim/exc.c -o "$x.
 else
     echo "FAIL exc: exc.c does not build"; fail=1
 fi
+
+# ---- 4. su.c, at each level ---------------------------------------------------
+f0=$fail
+sh tools/build-rt.sh thumbv7m-none-eabi "$out/rt-m3" > "$out/rt-m3.log" 2>&1 &&
+sh tools/build-rt.sh riscv32-unknown-elf "$out/rt-rv32" > "$out/rt-rv32.log" 2>&1 || {
+    echo "FAIL: the runtimes for su.c do not build"; fail=1; }
+cp "$out/avr/librt.a" "$out/rt-avr.a" 2> /dev/null
+cp "$out/rt-m3/librt.a" "$out/rt-m3.a" 2> /dev/null
+cp "$out/rt-rv32/librt.a" "$out/rt-rv32.a" 2> /dev/null
+nsu=0
+for tag in m3 rv32 avr; do
+    case $tag in
+    m3) t=thumbv7m-none-eabi; b="--board lm3s6965evb"; isr=tick ;;
+    rv32) t=riscv32-unknown-elf; b="--board virt --ram-size 8M"; isr=tick ;;
+    avr) t=avr; b="--board uno"; isr=__vector_11 ;;
+    esac
+    for opt in -O0 -O1 -O2 -Os; do
+        d=$out/su-$tag$opt; mkdir -p "$d"
+        "$EMBCC" --target=$t $opt -fstack-usage -c tests/golden/embsim-an/su.c -o "$d/su.o" &&
+        link $tag "$d/su.elf" "$d/su.o" "$out/rt-$tag.a" || {
+            echo "FAIL $tag $opt: su.c does not build"; fail=1; continue; }
+        sus="$out/$tag/io.su $d/su.su"
+        # shellcheck disable=SC2086
+        "$EMBSIM" "$d/su.elf" $b --max-insns 10000000 --stack-report="$d/stack" \
+            $sus > "$d/out" 2>&1
+        read -r sum _ < "$d/out"
+        [ "$sum" = -1294966737 ] || {
+            echo "FAIL $tag $opt: su.c printed '$sum', not -1294966737:"
+            sed 's/^/     | /' "$d/out" | head -3; fail=1; }
+        cat $sus | awk -F'\t' '{ n = split($1, p, ":"); print p[n], $2, $3 }' > "$d/su"
+        while read -r fn bytes q; do
+            set -- $(row "$d/stack" "$fn")
+            [ $# = 6 ] || continue          # never ran
+            nsu=$((nsu + 1))
+            case $fn in
+            vla|dyn)
+                [ "$q" = dynamic ] && [ "$3" -gt "$bytes" ] || {
+                    echo "FAIL $tag $opt: $fn's .su says $bytes $q, it took $3"; fail=1; } ;;
+            *)
+                [ "$q" = static ] && [ "$3" = "$bytes" ] || {
+                    echo "FAIL $tag $opt: $fn's frame was $3 bytes, its .su says $bytes $q"; fail=1; } ;;
+            esac
+        done < "$d/su"
+        for fn in at8 at16 at32 at64 mulk mkbig sumbig many va vla dyn bump $isr; do
+            [ -n "$(row "$d/stack" "$fn")" ] || { echo "FAIL $tag $opt: no row for $fn"; fail=1; }
+        done
+    done
+done
+[ $fail = "$f0" ] && echo "  su.c: the same sum, and $nsu static frames as the .su files say, at four levels on three cores; the VLA and alloca dynamic"
 
 "$EMBSIM" "$out/m3.elf" --stack-su x.su > "$out/bad.out" 2>&1
 [ $? = 2 ] && grep -q 'are for --stack-report' "$out/bad.out" || {

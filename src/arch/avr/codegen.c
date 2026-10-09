@@ -5719,6 +5719,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             add_const16(&F, AVR_Y, F.frame);
         if (F.frame || fn->has_alloca)
             set_sp_from_y(t);
+        /* The pairs the prologue pushed after isr_prologue's registers
+         * (r8-r17 a call's arguments are loaded into): popped first.
+         * Leaving them on the stack popped Y, Z, X and the rest from
+         * the wrong bytes, and reti returned to one of them. */
+        for (i = F.nsave - 1; i >= 0; i--) {
+            avr_pop(t, F.used_callee[i] + 1);
+            avr_pop(t, F.used_callee[i]);
+        }
         isr_epilogue(t);
     } else {
         a_teardown(&F);
