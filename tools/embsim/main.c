@@ -48,6 +48,8 @@ static void usage(void)
           "              [--coverage FILE [--coverage-format=text|lcov]]\n"
           "              [--profile[=FILE] [--profile-format=report|collapsed|\n"
           "               collapsed-insns]]\n"
+          "              [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]\n"
+          "              [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]\n"
           "       embsim --svd FILE.svd --svd-map\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
@@ -66,7 +68,10 @@ int main(int argc, char **argv)
     const char *until = 0, *gdb = 0, *svd = 0, *trace_periph = 0;
     const char *coverage = 0, *profile = 0;
     int svd_map = 0, tracing_periph = 0, board_given = 0, cov_lcov = 0;
-    int profiling = 0, prof_fmt = 0;
+    int profiling = 0, prof_fmt = 0, stk_report = 0;
+    const char *stk_path = 0, *stk_limit = 0, *stk_embrt = 0;
+    const char **su = calloc((size_t)argc, sizeof *su);
+    int nsu = 0;
     u32 ram_size = 0;
     u64 max_insns = 0;
     int stats = 0, verbose = 0, semihosting = 1, gdb_wait = 0;
@@ -136,7 +141,19 @@ int main(int argc, char **argv)
             else
                 die("--profile-format is report, collapsed or collapsed-insns, "
                     "not '%s'", f);
-        } else if (!strcmp(a, "--help") || !strcmp(a, "-h"))
+        } else if (!strcmp(a, "--stack-report"))
+            stk_report = 1, stk_path = 0;
+        else if (!strncmp(a, "--stack-report=", 15))
+            stk_report = 1, stk_path = a + 15;
+        else if (!strcmp(a, "--stack-limit") && more)
+            stk_limit = argv[++i];
+        else if (!strcmp(a, "--stack-su") && more)
+            su[nsu++] = argv[++i];
+        else if (!strcmp(a, "--stack-embrt") && more)
+            stk_embrt = argv[++i];
+        else if (a[0] != '-' && strlen(a) > 3 && !strcmp(a + strlen(a) - 3, ".su"))
+            su[nsu++] = a;              /* embsim fw.elf --stack-report *.su */
+        else if (!strcmp(a, "--help") || !strcmp(a, "-h"))
             usage();
         else if (a[0] == '-')
             die("unknown option '%s'", a);
@@ -204,8 +221,10 @@ int main(int argc, char **argv)
     if (trace_path)
         trace_open(s, trace_path);
     sim_load(s, ram_size, image);
-    if (coverage || profiling) {
-        struct analysis *an = an_create(s, profiling);
+    if ((nsu || stk_embrt) && !stk_report)
+        die("--stack-su and --stack-embrt are for --stack-report");
+    if (coverage || profiling || stk_report || stk_limit) {
+        struct analysis *an = an_create(s, profiling || stk_report || stk_limit);
         if (coverage) {
             an->cov_path = coverage;
             an->cov_lcov = cov_lcov;
@@ -214,6 +233,17 @@ int main(int argc, char **argv)
         an->prof = profiling;
         an->prof_path = profile && *profile && strcmp(profile, "-") ? profile : 0;
         an->prof_fmt = prof_fmt;
+        if (stk_report || stk_limit) {
+            an->stk = 1;
+            an->stk_report = stk_report;
+            an->stk_path = stk_path && *stk_path && strcmp(stk_path, "-") ? stk_path : 0;
+            an->stk_limit_arg = stk_limit;
+            an->su_path = su;
+            an->nsu_path = nsu;
+            an->embrt_path = stk_embrt;
+            stk_init(an);
+            stk_read_static(an);
+        }
     }
 
     if (gdb)

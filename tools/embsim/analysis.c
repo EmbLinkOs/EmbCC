@@ -110,6 +110,28 @@ static int kind_avr(struct sim *s, u32 pc, int *size)
     return K_OTHER;
 }
 
+int an_sps(struct analysis *a, u32 *msp, u32 *psp)
+{
+    if (a->arch == AN_ARM) {
+        struct cm_state *k = (struct cm_state *)a->s->cpu;
+        *msp = k->psp_active ? k->other_sp : k->R[13];
+        *psp = k->psp_active ? k->R[13] : k->other_sp;
+        return k->psp_active;
+    }
+    *msp = an_sp(a);
+    *psp = 0;
+    return 0;
+}
+
+int an_data_sym(struct analysis *a, const char *name, u32 *v)
+{
+    if (!image_sym(a->img, name, v))
+        return 0;
+    if (a->arch == AN_AVR && *v < 0x10000)
+        *v += AVR_DATA;
+    return 1;
+}
+
 u32 an_sp(struct analysis *a)
 {
     switch (a->arch) {
@@ -225,6 +247,7 @@ static void push(struct analysis *a, int parent, u32 ret, u32 target, int exc)
     struct an_frame *f = &a->fr[a->nfr++];
     f->ret = ret;
     f->sp = an_sp(a);
+    f->min = f->sp;
     f->exc = exc;
     f->vec = target;
     if (exc)
@@ -235,11 +258,19 @@ static void push(struct analysis *a, int parent, u32 ret, u32 target, int exc)
 
 /* a transfer that may be a return, to `to`: the frame that returns there,
  * above the innermost exception's, is popped with the frames above it */
+static void pop_to(struct analysis *a, int k)
+{
+    if (a->stk)
+        for (int i = a->nfr - 1; i >= k; i--)
+            stk_pop(a, i);
+    a->nfr = k;
+}
+
 static void ret_to(struct analysis *a, u32 to)
 {
     for (int i = a->nfr - 1; i >= 0 && !a->fr[i].exc; i--)
         if (a->fr[i].ret == to) {
-            a->nfr = i;
+            pop_to(a, i);
             return;
         }
 }
@@ -258,7 +289,7 @@ static void follow(struct analysis *a, int node, u32 pc1, int ran)
                 while (k >= 0 && !a->fr[k].exc)
                     k--;
                 if (k >= 0)
-                    a->nfr = k;
+                    pop_to(a, k);
                 node = a->nfr ? a->fr[a->nfr - 1].node : 0;
             }
         }
@@ -325,6 +356,12 @@ void an_step(struct sim *s)
          * return it made */
         a->node[node].insns += s->insns - i0;
         a->node[node].cycles += s->cycles - c0;
+        if (a->stk) {
+            int entered = 0;
+            for (int i = 0; i < a->nev; i++)
+                entered |= a->ev[i].what == EV_ENTRY;
+            stk_step(a, ran, entered, a->kind != K_CALL);
+        }
         follow(a, node, c->ops->pc(c), ran);
     }
     if (s->max_insns && s->insns >= s->max_insns && s->state == RUN)
@@ -356,4 +393,6 @@ void an_finish(struct sim *s)
         cov_report(a);
     if (a->prof)
         prof_report(a);
+    if (a->stk)
+        stk_report(a);
 }

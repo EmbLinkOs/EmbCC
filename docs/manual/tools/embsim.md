@@ -21,6 +21,8 @@ embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--svd FILE.svd] [--trace-periph[=NAME,...]]
                  [--coverage FILE [--coverage-format=text|lcov]]
                  [--profile[=FILE] [--profile-format=report|collapsed|collapsed-insns]]
+                 [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]
+                 [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]
 embsim --svd FILE.svd --svd-map
 ```
 
@@ -413,6 +415,7 @@ On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 | an AVR SLEEP that nothing can wake (the AVR harness ends in such a loop) | 0 |
 | the output contains `--until`'s string | 0 |
 | the core locks up (a RISC-V trap whose vector cannot be fetched; an AVR instruction the part does not have) | 3 |
+| the stack overflows, with `--stack-report` or `--stack-limit` | 3 |
 | `--max-insns` instructions have run | 4 |
 | the image cannot be loaded, or an option is wrong | 2 |
 
@@ -557,6 +560,74 @@ reset;main;spin;tick 21
 embsim fw.elf --profile=fw.folded --profile-format=collapsed
 flamegraph.pl fw.folded > fw.svg
 ```
+
+### The stacks: `--stack-report` and `--stack-limit`
+
+`--stack-report` writes, when the run ends, how deep each stack went and
+which functions took it there (on stderr; `--stack-report=FILE` to a
+file). Give it the `.su` files `-fstack-usage` wrote (`--stack-su FILE`,
+or simply the files: an argument ending in `.su` is one), and embrt's
+`--json` report (`--stack-embrt FILE`), and their numbers go beside the
+run's:
+
+```sh
+embcc --target=thumbv7m-none-eabi -O1 -fstack-usage -fcallgraph-info=su -c *.c
+embrt *.o --entry main --isr SysTick_Handler --json > bound.json
+embsim fw.elf --stack-report --stack-embrt bound.json *.su
+```
+
+```text
+embsim stack: fw.elf
+main stack (MSP): top 0x20010000, deepest 0x2000ffa0: 96 bytes used of 65216 (down to 0x20000140, _end)
+process stack (PSP): not used
+by function, deepest first (bytes; frame and incl from the function's entry):
+  function                    deepest   depth   frame     .su    incl   embrt
+  writec                   0x2000ffa0      96      16      16      16       -
+  rec                      0x2000ffa8      88       8       8      40       -
+  putn                     0x2000ffb0      80      32      32      48      48
+  tick                     0x2000ffb0      80       0       0       0       0
+  main                     0x2000ffd0      48      24      24      72    none
+the run stayed within the static numbers
+```
+
+- **The stacks.** The main stack's high-water mark, and on a Cortex-M
+  the process stack's (when a thread ran on the PSP; each is read as
+  the core banks it). The top is the stack pointer's highest value (on
+  a Cortex-M, the reset value from the vector table too). The region
+  runs down to the stack's limit: `--stack-limit`, else the link's
+  `__stack_limit` (`__StackLimit`, `_sstack`), else the end of `.data`
+  and `.bss` (`_end`, `__bss_end`, `_ebss`, `end`), else the bottom of
+  the RAM the stack is in.
+- **deepest**, **depth**: the lowest sp while the function was running,
+  and how far that is below the top.
+- **frame**: the most the function moved sp below its entry -- the
+  number `-fstack-usage` gives, beside it as **.su**. On the AVR the
+  call's two-byte return address is the callee's, as avr-gcc's and
+  EmbCC's `.su` count it.
+- **incl**: the most the stack went below the function's entry while it
+  was on the stack, its callees' frames included and the interrupts that
+  came meanwhile not -- the number embrt bounds for an entry point,
+  beside it as **embrt** (`none` where embrt finds no bound, such as
+  recursion).
+- A frame or a depth above its static number is marked `ABOVE THE
+  STATIC BOUND`: the static analysis missed something, and the last line
+  says so.
+- On RISC-V and the AVR there is one stack pointer: a program that
+  switches stacks (an RTOS's tasks) is measured over all of them.
+
+**An overflow ends the run.** With `--stack-report` or `--stack-limit
+ADDR` (or a symbol's name), the main stack going below its limit -- past
+`--stack-limit` or `__stack_limit`, or, with neither, into `.bss` and
+`.data` -- stops the run at the instruction that moved sp there, as a
+part with a stack guard would fault, with status 3:
+
+```text
+embsim: stack overflow: sp 0x2000f7f8 is below the stack limit 0x2000f800 (__stack_limit), at deep (ovf.c:9); 354 instructions, 573 cycles (est.)
+embsim: stack overflow: sp 0x1ffffff0 is below the end of .data and .bss 0x20000004 (_end), at deep+0x2 (ovf.c:9); 10046 instructions, 16432 cycles (est.)
+```
+
+An exception's entry that stacks past the limit is reported as one (`in
+an exception's entry, at` the instruction it interrupted).
 
 ## Debugging: `--gdb`
 
@@ -743,6 +814,11 @@ report and in both collapsed forms, each function's self instructions
 must be what the `--trace` of the run gives it by llvm-nm's symbols, and
 the calls, the paths and the inclusive counts must be prof.c's; and
 `exc.c`'s handlers must be entered as often as it counts.
+`tests/golden/embsim-stack.sh` measures prof.c's stacks: each frame must
+be the `.su` file's, the depth the sum of the deepest path's frames, and
+the inclusive depths of the functions embrt bounds embrt's bounds; and it
+overflows `ovf.c`'s recursion past `__stack_limit`, `--stack-limit` and
+into `.bss`, where the run must stop at the push that crossed.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32

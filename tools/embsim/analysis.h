@@ -27,6 +27,7 @@ struct an_frame {
     int node;                       /* its call path (struct an_node) */
     int exc;                        /* an exception's (its number + 1) */
     u32 vec;                        /* an exception's: the vector's jump */
+    u32 min;                        /* the lowest sp while it was on the stack */
 };
 
 /* a call path: a function, called along its parent's path. The counts
@@ -71,6 +72,31 @@ struct analysis {
     int prof;
     const char *prof_path;          /* 0: stderr */
     int prof_fmt;                   /* 0 the report; collapsed by 1 cycles, 2 insns */
+
+    /* ---- the stacks (stack.c) ---- */
+    int stk;                        /* measured: --stack-report or --stack-limit */
+    int stk_report;                 /* the report wanted */
+    const char *stk_path;           /* 0: stderr */
+    const char *stk_limit_arg;      /* --stack-limit's ADDR or SYMBOL */
+    u32 stk_limit;                  /* --stack-limit or the link's */
+    const char *stk_limit_why;      /* where it came from, or 0: none */
+    u32 stk_check, stk_checked_top; /* the overflow's limit, for the top */
+    const char *stk_check_why;
+    int stk_check_data;             /* the limit is the end of .data/.bss */
+    u32 msp_top, msp_min, psp_top, psp_min;
+    int psp_used;
+    u32 *fn_minsp, *fn_frame, *fn_incl;   /* by function, nfn + 1 */
+    int tail_fn;                    /* a function entered by a jump, not a call */
+    u32 tail_sp;                    /* and sp at its first instruction */
+    int ovf, ovf_entry;             /* the overflow, when there was one */
+    u32 ovf_pc, ovf_sp;
+    const char **su_path;           /* --stack-su files */
+    int nsu_path;
+    const char *embrt_path;         /* --stack-embrt */
+    struct su { char *name; long bytes; int dynamic; } *su;
+    int nsu;
+    struct rt { char *name; long bytes; } *rt;
+    int nrt;
 };
 
 /* the analyses on for this run (from main.c's options), after sim_load;
@@ -84,6 +110,12 @@ void an_finish(struct sim *s);
 int an_fn(struct analysis *a, u32 pc);
 /* the stack pointer, as an address on the bus */
 u32 an_sp(struct analysis *a);
+/* the main and the process stack pointers (a Cortex-M's MSP and PSP; sp
+ * and 0 elsewhere), and whether the PSP is the one in use */
+int an_sps(struct analysis *a, u32 *msp, u32 *psp);
+/* a symbol of the data space, as an address on the bus (the AVR's data
+ * space is at AVR_DATA there) */
+int an_data_sym(struct analysis *a, const char *name, u32 *v);
 
 /* coverage.c */
 void cov_init(struct analysis *a);
@@ -91,5 +123,16 @@ void cov_report(struct analysis *a);
 
 /* profile.c */
 void prof_report(struct analysis *a);
+
+/* stack.c */
+void stk_init(struct analysis *a);
+void stk_read_static(struct analysis *a);
+/* after a step: whether an instruction ran, whether an exception was
+ * entered, whether the step may count toward the function's own frame */
+void stk_step(struct analysis *a, int ran, int entered, int sample_frame);
+void stk_entered(struct analysis *a, u32 pc1, int called);
+/* frame i of the shadow stack is over */
+void stk_pop(struct analysis *a, int i);
+void stk_report(struct analysis *a);
 
 #endif

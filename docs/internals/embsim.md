@@ -48,6 +48,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `analysis.h`, `analysis.c` | the step the analyses watch, and the shadow stack of the program's calls |
 | `coverage.c` | `--coverage`: the counts per instruction, the report and lcov's tracefile |
 | `profile.c` | `--profile`: the counts per call path, the report and the collapsed stacks |
+| `stack.c` | `--stack-report`, `--stack-limit`: the stacks' high-water marks, frames by function, `.su` and embrt's bounds, the overflow |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
 the bench uses in QEMU, so the two estimates cannot drift (`arm_cost`,
@@ -389,6 +390,8 @@ or with its own file for the six functions of `net.h`.
   from clang's DWARF 5.
 - `tests/golden/embsim-profile.sh`: `--profile` against a program of
   known calls, an interrupt among them, and the `--trace` of its run.
+- `tests/golden/embsim-stack.sh`: `--stack-report` against `.su` files
+  and embrt, and overflows past a limit and into `.bss`.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
   the Cortex-M, on RISC-V and on the AVR.
 - `tests/golden/embsim-svd.sh`: the register file over a test SVD,
