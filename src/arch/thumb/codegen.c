@@ -7681,8 +7681,13 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         int dp = target_thumb_fpu_dp();
         char *w = dp ? (char *)0 : wide64_map(fn);
         /* ARMv6-M's immediate offsets are five bits of the access size:
-         * 124 for a word is the most any of them reaches. */
-        ra_fold_memoff(fn, 0, target_thumb_arch() == 6 ? 124 : 4095, 4,
+         * 124 for a word is the most any of them reaches. ARMv7-M reaches
+         * back 255 bytes too (t_ldst_imm's T4 form): `x[i - k]` once its
+         * -2k is the address's (pass_idxoff); every path that takes a
+         * memoff falls back to an add when its own form cannot. */
+        ra_fold_memoff(fn, target_thumb_arch() == 6 || getenv("EMBCC_T_NONEGOFF")
+                           ? 0 : -255,
+                       target_thumb_arch() == 6 ? 124 : 4095, 4,
                        dp ? 8 : 4, w, 1, 31);
         free(w);
     }

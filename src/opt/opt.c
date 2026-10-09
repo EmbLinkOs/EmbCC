@@ -402,6 +402,9 @@ static void opt_func(struct ir_func *fn)
              * is the shape this turns into four independent adds. */
             changed |= pass_reassoc(fn);
             changed |= pass_lvn(fn);
+            /* ...and an unrolled filter's x[i - 1], x[i - 2], ...: the
+             * offsets into the loads, the base shared */
+            changed |= pass_idxoff(fn);
             changed |= pass_copyprop(fn);
             changed |= pass_copyprop_local(fn);
             changed |= pass_dce(fn);

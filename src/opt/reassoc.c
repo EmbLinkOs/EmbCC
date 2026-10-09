@@ -197,11 +197,22 @@ int pass_reassoc(struct ir_func *fn)
  * must `i - 1`. When it is wanted anyway -- `prog[pc++]` reads at the
  * new pc -- the rewrite keeps it and adds the shared base besides, and
  * the interpreter ran 1.2% slower than with no rewrite at all. The
- * displacement is kept within 255 bytes either way. */
+ * displacement is kept within 255 bytes either way.
+ *
+ * Thumb-2 too, but only for addresses that SHARE the new base: two or
+ * more of `a[i - k]` with the same a, i and scale. Each was a subtract
+ * and a scaled load, and N of them become one add and N loads with a
+ * displacement -- an unrolled filter's `x[i - k] * h[k]`, sixteen taps,
+ * lost fifteen instructions a sample. A lone one is the case that only
+ * moved work around. Not ARMv6-M, whose loads take no negative
+ * displacement. */
 int pass_idxoff(struct ir_func *fn)
 {
+    int grouped = target_get() == TARGET_THUMB &&
+                  target_thumb_arch() != 6 && !getenv("EMBCC_NO_IDXOFF_T");
     if (fn->nins == 0 || getenv("EMBCC_NO_IDXOFF") ||
-        (target_get() != TARGET_RISCV32 && target_get() != TARGET_RISCV64))
+        (target_get() != TARGET_RISCV32 && target_get() != TARGET_RISCV64 &&
+         !grouped))
         return 0;
     int nv = fn->nvregs;
     struct defs d;
@@ -260,6 +271,24 @@ int pass_idxoff(struct ir_func *fn)
         }
     }
     free(use); free(ause);
+    /* Thumb: a candidate alone in its group (base, index, scale) stays */
+    if (any && grouped) {
+        any = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            int mates = 0;
+            if (!doit[n])
+                continue;
+            for (int m = 0; m < fn->nins && !mates; m++)
+                mates = m != n && (doit[m] & 1) && rb[m] == rb[n] &&
+                        rx[m] == rx[n] && rk[m] == rk[n];
+            if (mates)
+                doit[n] |= 2;           /* kept */
+        }
+        for (int n = 0; n < fn->nins; n++) {
+            doit[n] = (char)(doit[n] == 3);
+            any |= doit[n];
+        }
+    }
     if (!any) {
         free(rb); free(rx); free(rk); free(rc); free(doit); free_defs(&d);
         return 0;
