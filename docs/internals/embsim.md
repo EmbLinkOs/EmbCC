@@ -47,6 +47,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `image.h`, `image.c` | the image's symbols, code ranges, DWARF line table and `.debug_frame`, for the analyses |
 | `analysis.h`, `analysis.c` | the step the analyses watch, and the shadow stack of the program's calls |
 | `coverage.c` | `--coverage`: the counts per instruction, the report and lcov's tracefile |
+| `profile.c` | `--profile`: the counts per call path, the report and the collapsed stacks |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
 the bench uses in QEMU, so the two estimates cannot drift (`arm_cost`,
@@ -93,6 +94,13 @@ core executes it (`analysis.c` says which), and the cores tell it what
 no instruction shows: `an_exc_entry` when an exception or interrupt is
 entered, `an_exc_return` when the handler returns. Each is one test of
 `s->an` in the core, where it was 0 before.
+
+The shadow stack's frames each name a call path (`struct an_node`): a
+function, reached along its parent's path. Each step's instructions and
+cycles go to the path the pc is on before the step makes its call or
+return -- the top frame's, or a path below it when the pc has left the
+frame's function (a tail call) -- so every count is in exactly one path,
+and the profile's totals are `--stats`' by construction.
 
 `image.c` reads the ELF a second time, apart from the loader, for what
 the analyses need: the functions (STT_FUNC, and labels in the code for
@@ -379,6 +387,8 @@ or with its own file for the six functions of `net.h`.
 - `tests/golden/embsim-coverage.sh`: `--coverage` against a program
   whose lines carry the counts they must get, on the three cores and
   from clang's DWARF 5.
+- `tests/golden/embsim-profile.sh`: `--profile` against a program of
+  known calls, an interrupt among them, and the `--trace` of its run.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
   the Cortex-M, on RISC-V and on the AVR.
 - `tests/golden/embsim-svd.sh`: the register file over a test SVD,

@@ -46,6 +46,8 @@ static void usage(void)
           "              [--no-semihosting] [--gdb [HOST:]PORT [--gdb-wait]]\n"
           "              [--svd FILE.svd] [--trace-periph[=NAME,...]]\n"
           "              [--coverage FILE [--coverage-format=text|lcov]]\n"
+          "              [--profile[=FILE] [--profile-format=report|collapsed|\n"
+          "               collapsed-insns]]\n"
           "       embsim --svd FILE.svd --svd-map\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
@@ -62,8 +64,9 @@ int main(int argc, char **argv)
 {
     const char *image = 0, *cpu = 0, *count_path = 0, *trace_path = 0;
     const char *until = 0, *gdb = 0, *svd = 0, *trace_periph = 0;
-    const char *coverage = 0;
+    const char *coverage = 0, *profile = 0;
     int svd_map = 0, tracing_periph = 0, board_given = 0, cov_lcov = 0;
+    int profiling = 0, prof_fmt = 0;
     u32 ram_size = 0;
     u64 max_insns = 0;
     int stats = 0, verbose = 0, semihosting = 1, gdb_wait = 0;
@@ -118,6 +121,21 @@ int main(int argc, char **argv)
                 cov_lcov = 0;
             else
                 die("--coverage-format is text or lcov, not '%s'", a + 18);
+        } else if (!strcmp(a, "--profile"))
+            profiling = 1, profile = 0;
+        else if (!strncmp(a, "--profile=", 10))
+            profiling = 1, profile = a + 10;
+        else if (!strncmp(a, "--profile-format=", 17)) {
+            const char *f = a + 17;
+            if (!strcmp(f, "report"))
+                prof_fmt = 0;
+            else if (!strcmp(f, "collapsed"))
+                prof_fmt = 1;
+            else if (!strcmp(f, "collapsed-insns"))
+                prof_fmt = 2;
+            else
+                die("--profile-format is report, collapsed or collapsed-insns, "
+                    "not '%s'", f);
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h"))
             usage();
         else if (a[0] == '-')
@@ -186,11 +204,16 @@ int main(int argc, char **argv)
     if (trace_path)
         trace_open(s, trace_path);
     sim_load(s, ram_size, image);
-    if (coverage) {
-        struct analysis *an = an_create(s, 0);
-        an->cov_path = coverage;
-        an->cov_lcov = cov_lcov;
-        cov_init(an);
+    if (coverage || profiling) {
+        struct analysis *an = an_create(s, profiling);
+        if (coverage) {
+            an->cov_path = coverage;
+            an->cov_lcov = cov_lcov;
+            cov_init(an);
+        }
+        an->prof = profiling;
+        an->prof_path = profile && *profile && strcmp(profile, "-") ? profile : 0;
+        an->prof_fmt = prof_fmt;
     }
 
     if (gdb)

@@ -66,6 +66,11 @@ struct analysis {
     const char *cov_path;
     int cov_lcov;
     u64 *cov[IMG_CODE];             /* a count per halfword of code */
+
+    /* ---- the profile (profile.c) ---- */
+    int prof;
+    const char *prof_path;          /* 0: stderr */
+    int prof_fmt;                   /* 0 the report; collapsed by 1 cycles, 2 insns */
 };
 
 /* the analyses on for this run (from main.c's options), after sim_load;
@@ -83,5 +88,8 @@ u32 an_sp(struct analysis *a);
 /* coverage.c */
 void cov_init(struct analysis *a);
 void cov_report(struct analysis *a);
+
+/* profile.c */
+void prof_report(struct analysis *a);
 
 #endif

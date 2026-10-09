@@ -354,4 +354,6 @@ void an_finish(struct sim *s)
     struct analysis *a = s->an;
     if (a->cov_path)
         cov_report(a);
+    if (a->prof)
+        prof_report(a);
 }

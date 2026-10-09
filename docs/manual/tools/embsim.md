@@ -20,6 +20,7 @@ embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--gdb [HOST:]PORT [--gdb-wait]]
                  [--svd FILE.svd] [--trace-periph[=NAME,...]]
                  [--coverage FILE [--coverage-format=text|lcov]]
+                 [--profile[=FILE] [--profile-format=report|collapsed|collapsed-insns]]
 embsim --svd FILE.svd --svd-map
 ```
 
@@ -492,6 +493,71 @@ total: 14 of 17 lines (82.4%), 5 of 7 functions (71.4%)
   `FNDA`, `FNF`, `FNH`, `DA`, `LF`, `LH`), which genhtml, Codecov,
   Coveralls and most CI services read.
 
+### Profiling: `--profile`
+
+`--profile` writes, when the run ends, the instructions and estimated
+cycles each function took, on stderr; `--profile=FILE` to a file.
+
+```text
+embsim profile: fw.elf, 2809 instructions, 4164 cycles (est.)
+  self insns  self cycles   self   incl insns  incl cycles   incl     calls  function
+        1320         1920  46.1%         1338         1941  46.6%        30  spin
+         995         1330  31.9%         2809         4164 100.0%         0  reset
+         224          410   9.8%         1814         2834  68.1%         1  main
+         129          231   5.5%          174          311   7.5%         2  putn
+          29           77   1.8%           29           77   1.8%         5  rec
+          30           42   1.0%           30           42   1.0%         6  leaf
+          18           21   0.5%           18           21   0.5%         3  tick
+...
+        2809         4164 100.0%                                             (total)
+```
+
+- **self** is what ran in the function itself; **incl** adds what its
+  callees ran, and its interrupt handlers' when an interrupt came while
+  it was on the stack. A recursive function's inclusive counts each
+  instruction once. **calls** is how often a call, or an exception's
+  entry, reached it.
+- **The counts add up exactly to `--stats`' totals.** Each step of the
+  run goes to one function, whatever it costs: a taken branch's extra
+  cycles, a WFI's or a SLEEP's wait (to the function that waited), an
+  AVR interrupt's four entry cycles (to the code it interrupted).
+- Code no symbol covers (QEMU's reset ROM on virt) is `[unknown]`.
+
+EmbSim follows the calls and returns as the core executes them, which
+needs no frame pointer and no debug information:
+
+| Core | Calls | Returns |
+|---|---|---|
+| Cortex-M | `bl`, `blx` | `bx`, `pop {..., pc}`, `ldm` with the pc, `ldr pc`, `mov pc` |
+| RISC-V | `jal` and `jalr` that link (`ra` or `t0`), `c.jal`, `c.jalr` | `jalr` and `c.jr` that do not |
+| AVR | `call`, `rcall`, `icall` | `ret` |
+
+A return is one when it lands where a call on the stack returns to:
+that call's frame and the ones above it end, so a tail call (a branch to
+another function, which then returns for both) leaves the stack right,
+and the function it branched to is shown as called from the one that
+branched. An exception's entry is a frame too, and its return (an
+EXC_RETURN, `mret`, `reti`) ends it wherever the handler returns to.
+Where the vector table holds a jump (the AVR's, RISC-V's vectored mode)
+the handler is the jump's target, and the jump counts as the handler's.
+
+`--profile-format=collapsed` writes the call paths instead, one a line
+with its cycles (`collapsed-insns`: its instructions), the format
+flamegraph.pl, speedscope and inferno read:
+
+```text
+reset;main;a 36
+reset;main;a;leaf 21
+reset;main;rec;rec;rec 16
+reset;main;spin 1920
+reset;main;spin;tick 21
+```
+
+```sh
+embsim fw.elf --profile=fw.folded --profile-format=collapsed
+flamegraph.pl fw.folded > fw.svg
+```
+
 ## Debugging: `--gdb`
 
 `--gdb PORT` serves the GDB remote protocol on `localhost:PORT` while the
@@ -669,6 +735,14 @@ with the times it runs, at -O0 -g on the M3, RV32 and the AVR, and with
 clang (DWARF 5); the report and the lcov tracefile must give exactly the
 marks, line for line, the run must be the same with and without
 `--coverage`, and an image without `-g` must give its functions.
+`tests/golden/embsim-profile.sh` profiles `embsim-an/prof.c`, whose
+calls are known (a loop's, recursion five deep, a call through a pointer,
+a timer interrupt), on the M3, RV32 with and without compressed
+instructions, and the AVR: the counts must add up to `--stats`' in the
+report and in both collapsed forms, each function's self instructions
+must be what the `--trace` of the run gives it by llvm-nm's symbols, and
+the calls, the paths and the inclusive counts must be prof.c's; and
+`exc.c`'s handlers must be entered as often as it counts.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32
