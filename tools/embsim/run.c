@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "sim.h"
+#include "svd-map.h"
 
 void die(const char *fmt, ...)
 {
@@ -80,7 +81,8 @@ int sim_next_event(struct sim *s, u32 *cycles)
     return any;
 }
 
-void sim_init(struct sim *s, const struct board_desc *bd, const char *model)
+void sim_init(struct sim *s, const struct board_desc *bd, const char *model,
+              const char *svd)
 {
     memset(s, 0, sizeof *s);
     s->board = bd;
@@ -94,8 +96,28 @@ void sim_init(struct sim *s, const struct board_desc *bd, const char *model)
         model = bd->cpu;
     if (!ct || !ct->create(s, model, bd))
         die("unknown cpu '%s'", model);
-    for (int i = 0; i < 6 && bd->dev[i].type; i++)
+    /* the SVD's peripherals go before the board's space that reads as
+     * zero, so where they are, they answer; and at the end with no such
+     * space */
+    if (!svd && bd->svd) {
+        svd = svd_search(bd->svd);
+        if (!svd)
+            die("the %s board's peripherals are %s's: give its path with "
+                "--svd FILE, or a directory holding it in EMBSIM_SVD_PATH",
+                bd->name, bd->svd);
+    }
+    struct svdmap *m = svd ? svdmap_create(s, svd) : 0;
+    for (int i = 0; i < 6 && bd->dev[i].type; i++) {
+        if (m && !strcmp(bd->dev[i].type, "zero")) {
+            svdmap_add(s, m);
+            m = 0;
+        }
         sim_add_device(s, &bd->dev[i]);
+    }
+    if (m)
+        svdmap_add(s, m);
+    if (s->svd)
+        svdmap_models(s, s->svd, bd->models);
     for (int i = 0; i < 2 && bd->bitband[i].size; i++)
         bus_add_alias(&s->bus, bd->bitband[i].base, bd->bitband[i].size,
                       bd->bitband[i].target);
@@ -117,10 +139,13 @@ void sim_load(struct sim *s, u32 ram_size, const char *image)
 {
     const struct board_desc *bd = s->board;
     for (int i = 0; i < 4 && bd->mem[i].size; i++)
-        bus_add_region(&s->bus, bd->mem[i].base,
-                       bd->mem[i].main_ram && ram_size ? ram_size
-                                                       : bd->mem[i].size,
-                       bd->mem[i].kind);
+        if (bd->mem[i].kind == MEM_ALIAS)
+            bus_add_mirror(&s->bus, bd->mem[i].base, bd->mem[i].target);
+        else
+            bus_add_region(&s->bus, bd->mem[i].base,
+                           bd->mem[i].main_ram && ram_size ? ram_size
+                                                           : bd->mem[i].size,
+                           bd->mem[i].kind);
     s->image = image;
     load(s);
 }
