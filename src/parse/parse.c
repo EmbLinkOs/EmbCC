@@ -2390,6 +2390,59 @@ static const struct expr *generic_choice(const struct expr *e)
     return chosen ? chosen : deflt;
 }
 
+/* The address an lvalue designates when it is a constant: a member of an
+ * object at a constant address, `((T *)C)->m.n[i]`. With C 0 it is the
+ * classic offsetof, `((size_t)&((T *)0)->m)`, which headers written for no
+ * particular compiler spell -- the macOS SDK's for one without __GNUC__,
+ * and many a vendor HAL's -- and gcc and clang fold it in a constant
+ * expression. *ty is the lvalue's type. */
+static int addr_fold(const struct expr *e, long *out, struct type **ty)
+{
+    long a, i;
+    struct type *t;
+    switch (e->kind) {
+    case EXPR_MEMBER: {
+        struct type *st;
+        if (e->is_arrow) {
+            const struct expr *b = e->lhs;
+            if (b->kind != EXPR_CAST || !b->cast_ty ||
+                b->cast_ty->kind != TY_PTR || !size_fold(b->rhs, &a))
+                return 0;
+            st = b->cast_ty->pointee;
+        } else if (!addr_fold(e->lhs, &a, &st)) {
+            return 0;
+        }
+        if (!st || st->kind != TY_STRUCT || !st->complete)
+            return 0;
+        long moff = 0;
+        struct member *m = ty_find_member_deep(st, e->name, &moff);
+        if (!m || m->is_bitfield)
+            return 0;
+        *out = a + moff;
+        *ty = m->ty;
+        return 1;
+    }
+    case EXPR_DEREF:
+        /* a[i] is *(a + i): an array member, indexed by a constant */
+        if (e->rhs->kind == EXPR_BINOP && e->rhs->op == B_ADD) {
+            const struct expr *x = e->rhs->lhs, *y = e->rhs->rhs;
+            if (!addr_fold(x, &a, &t)) {
+                const struct expr *z = x; x = y; y = z;
+                if (!addr_fold(x, &a, &t))
+                    return 0;
+            }
+            if (t->kind != TY_ARRAY || !size_fold(y, &i))
+                return 0;
+            *out = a + i * ty_size(t->pointee);
+            *ty = t->pointee;
+            return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 static int size_fold(const struct expr *e, long *out)
 {
     long a, b;
@@ -2425,6 +2478,14 @@ static int size_fold(const struct expr *e, long *out)
         return 1;
     }
     case EXPR_CAST:
+        if (e->rhs->kind == EXPR_ADDR && e->cast_ty &&
+            ty_is_integer(e->cast_ty)) {
+            struct type *t;
+            if (!addr_fold(e->rhs->rhs, out, &t))
+                return 0;
+            *out = cast_fold_value(e->cast_ty, *out);
+            return 1;
+        }
         if (!size_fold(e->rhs, out))
             return 0;
         *out = cast_fold_value(e->cast_ty, *out);
