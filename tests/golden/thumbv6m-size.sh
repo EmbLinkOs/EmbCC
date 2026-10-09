@@ -143,6 +143,17 @@ dead=$(awk '/\tstr\t.*\[sp/ { s[$NF] = 1 } /\tldr\t.*\[sp/ { l[$NF] = 1 }
            "$out/chain.dis")
 [ "$dead" = 0 ] || { cat "$out/chain.dis"
     fail "chain: $dead stack slots stored and never loaded"; }
+# The high word of a 64-bit value in a slot, read alone ((int)(x >> 32)),
+# is loaded into the register the result goes to, not a scratch and a
+# copy (tests/exec/spill-hiword.c's hw, whose values the boards check).
+"$EMBCC" --target=$T -Os -c tests/exec/spill-hiword.c -o "$out/hw.o" ||
+    fail "compile spill-hiword.c"
+dis "$out/hw.o" hw > "$out/hw.dis"
+if awk '/\tldr\t.*\[sp/ { r = $3; sub(",", "", r); next }
+        /\tmov\t/ && r != "" { s = $4; if (s == r) bad = 1 } { r = "" }
+        END { exit !bad }' "$out/hw.dis"; then
+    cat "$out/hw.dis"; fail "hw: a high word loaded into a scratch and copied"
+fi
 "$EMBCC" --target=$T -Os -Ilib/libc/include -c lib/libc/src/stdlib/strtol.c \
     -o "$out/strtol.o" || fail "compile strtol.c"
 dis "$out/strtol.o" conv > "$out/conv.dis"

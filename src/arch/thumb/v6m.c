@@ -3046,9 +3046,10 @@ static void gen_ins(struct t_fn *F, int n)
                    rc_find(F, F->slot[i->a] + 4) >= 0) {
             hi = rc_find(F, F->slot[i->a] + 4);
         } else {
-            fr_ld(F, sc(F, S1), tcg_slot_of(F, i->a) + 4, 4, 0);
+            /* straight into the result's register, shifted there */
+            fr_ld(F, d, tcg_slot_of(F, i->a) + 4, 4, 0);
             rc_missed(i->a);
-            hi = S1;
+            hi = d;
         }
         if (k)
             t1_shift_imm(t, i->sign ? T_SH_ASR : T_SH_LSR, d, hi, k);
