@@ -1025,13 +1025,14 @@ static int one_stmt(const char *stmt, int len, struct code *out,
      * -- a template cannot see the surrounding function's labels.
      */
     {
-        static const struct { const char *name; int f3; } br[] = {
-            { "beq", 0 }, { "bne", 1 }, { "blt", 4 }, { "bge", 5 },
-            { "bltu", 6 }, { "bgeu", 7 }
+        /* `bgt`/`ble` and their unsigned forms are blt/bge with the
+         * operands swapped, which is how the ISA spells them at all */
+        static const struct { const char *name; int f3; int swap; } br[] = {
+            { "beq", 0, 0 }, { "bne", 1, 0 }, { "blt", 4, 0 }, { "bge", 5, 0 },
+            { "bltu", 6, 0 }, { "bgeu", 7, 0 },
+            { "bgt", 4, 1 }, { "ble", 5, 1 }, { "bgtu", 6, 1 }, { "bleu", 7, 1 }
         };
-        /* The zero-comparison pseudos, each one of the above against x0.
-         * `bgt`/`ble` and their unsigned forms swap the operands, which
-         * is how the ISA spells them at all. */
+        /* The zero-comparison pseudos, each one of the above against x0. */
         static const struct { const char *name; int f3; int zfirst; } brz[] = {
             { "beqz", 0, 0 }, { "bnez", 1, 0 }, { "bltz", 4, 0 },
             { "bgez", 5, 0 }, { "blez", 5, 1 }, { "bgtz", 4, 1 }
@@ -1048,7 +1049,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                 if (!tok_imm(&t[3], &v)) FAIL("%s wants an offset", br[k].name);
                 if ((v & 1) || !rv_fits(v, 13))
                     FAIL("%s offset %lld is odd or out of range", br[k].name, v);
-                rv_w(out, rv_enc_b(OP_BRANCH, br[k].f3, r1, r2, (int)v));
+                rv_w(out, rv_enc_b(OP_BRANCH, br[k].f3, br[k].swap ? r2 : r1,
+                                   br[k].swap ? r1 : r2, (int)v));
                 return 0;
             }
         for (unsigned k = 0; k < sizeof brz / sizeof brz[0]; k++)
