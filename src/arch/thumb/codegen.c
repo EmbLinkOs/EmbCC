@@ -1472,7 +1472,8 @@ static void layout(struct t_fn *F)
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size, align;
-                if ((F->loc && F->loc[v] >= 0) || in_freg(F, v))
+                if ((F->loc && F->loc[v] >= 0) || in_freg(F, v) ||
+                    v == F->nrvo)
                     continue;
                 if (!lref[v] ||
                     ra_slot_dead(fn, F->loc, F->floc, v, F->keep_vars))
@@ -2013,6 +2014,7 @@ static void frame_addr_map(struct t_fn *F)
     int nv = fn->nvregs;
     F->fvar = NULL;
     F->fscr = NULL;
+    F->nrvo = -1;           /* gen_func decides (t_nrvo_local); v6m.c not */
     if (!nv)
         return;
     int *fv = xmalloc((size_t)nv * sizeof *fv);
@@ -2039,6 +2041,45 @@ static void frame_addr_map(struct t_fn *F)
     free(nd);
     F->fvar = fv;
     F->fscr = fs;
+}
+
+/* THE RETURNED LOCAL IN THE CALLER'S BUFFER. `div_t r; r.quot = ...;
+ * r.rem = ...; return r;` built r on the frame and copied it to the
+ * buffer the caller passed: 32 bytes for div where clang's 14 store
+ * straight into it. When every return gives back the same local -- of
+ * the returned size, not volatile, named only by its address -- that
+ * local IS the buffer: its address is the hidden pointer, loaded from
+ * where the prologue kept it, it has no slot, and the return copies
+ * nothing. The ABIs let a callee write its result early (the caller's
+ * buffer is no object the callee can otherwise reach), which is what
+ * gcc and clang rely on for the same rewrite. Not at -O0 or -Og, where
+ * the debugger reads the local in the frame. */
+static int t_nrvo_local(const struct t_fn *F)
+{
+    const struct ir_func *fn = F->fn;
+    int L = -1;
+    if (F->keep_vars || !fn_sret_bytes(fn) || !F->fvar ||
+        getenv("EMBCC_T_NONRVO"))
+        return -1;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        int l;
+        if (i->op != IR_RET)
+            continue;
+        if (i->a < 0 || i->a >= fn->nvregs || (l = F->fvar[i->a]) < 0 ||
+            (L >= 0 && l != L))
+            return -1;
+        L = l;
+    }
+    if (L < 0 || L >= fn->nvars || fn->locals[L].is_volatile ||
+        fn->locals[L].size != fn->ret_abi.size)
+        return -1;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if ((i->op == IR_LDVAR && i->a == L) || (i->op == IR_STVAR && i->dst == L))
+            return -1;
+    }
+    return L;
 }
 
 /* A local's address read once -- `f(&x)`, a struct copied once -- needs
@@ -5294,6 +5335,12 @@ static void gen_ins(struct t_fn *F, int n)
 
     case IR_ADDR: {
         long fo;
+        if (i->a == F->nrvo && F->sret_slot >= 0) {
+            int d = wreg(F, i->dst, T_ACC);
+            fb_ld(F, d, F->sret_slot, 4, 0);    /* the caller's buffer */
+            wrote(F, i->dst, d);
+            return;
+        }
         if (faddr(F, i->dst, &fo))
             return;                    /* recomputed where it is read */
         int d = wreg(F, i->dst, T_ACC);
@@ -5667,6 +5714,11 @@ static void gen_ins(struct t_fn *F, int n)
             } else {
                 vfp_load(F, i->a, 0);
             }
+            goto ret_epilogue;
+        }
+        if (i->a >= 0 && fn->ret_abi.size && fn->ret_abi.is_struct &&
+            F->nrvo >= 0 && F->sret_slot >= 0) {
+            fb_ld(F, T_R0, F->sret_slot, 4, 0);  /* built in place */
             goto ret_epilogue;
         }
         if (i->a >= 0 && fn->ret_abi.size && fn->ret_abi.is_struct) {
@@ -6717,6 +6769,10 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.fix = NULL; F.nfix = F.capfix = 0;
     F.wide = wide64_map(fn);
     frame_addr_map(&F);
+    F.nrvo = t_nrvo_local(&F);
+    for (int v = 0; F.nrvo >= 0 && v < fn->nvregs; v++)
+        if (F.fvar[v] == F.nrvo)
+            F.fvar[v] = -1;     /* the hidden pointer, not the frame */
     F.nshr = ra_narrow_hishift(fn);
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
@@ -6730,6 +6786,18 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.scr_save = T_SCR_ALL;
     F.fb = T_SP;
     F.leaf = F.nopush = 0;
+    /* The returns of a local built in place (t_nrvo_local) read nothing:
+     * hidden from the allocator, which would otherwise keep the local's
+     * address in memory for a return's raw copy -- put back after it. */
+    int *nrvo_ret = NULL;
+    if (F.nrvo >= 0) {
+        nrvo_ret = xmalloc((size_t)fn->nins * sizeof *nrvo_ret);
+        for (i = 0; i < fn->nins; i++) {
+            nrvo_ret[i] = fn->ins[i].a;
+            if (fn->ins[i].op == IR_RET)
+                fn->ins[i].a = -1;
+        }
+    }
     if (g_t_regalloc) {
         /* nsave is what the allocator REPORTS it took, and the prologue
          * pushes exactly that -- so the two must be computed together.
@@ -6932,6 +7000,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 F.remat_v[d] = (long)fn->ins[n].imm;
         }
         free(rm);
+    }
+    if (nrvo_ret) {
+        for (i = 0; i < fn->nins; i++)
+            if (fn->ins[i].op == IR_RET)
+                fn->ins[i].a = nrvo_ret[i];
+        free(nrvo_ret);
     }
     layout(&F);
     if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO"))

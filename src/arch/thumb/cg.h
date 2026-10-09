@@ -96,6 +96,9 @@ struct t_fn {
      * recomputed where it is read and addressed through directly,
      * never stored to a slot and loaded back. */
     int *fvar;
+    /* The local every return gives back, built in the caller's buffer
+     * instead of the frame (t_nrvo_local); -1 for none. */
+    int nrvo;
     long *fscr;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when it did not run (-O0/-O1). */
