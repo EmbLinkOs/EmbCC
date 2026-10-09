@@ -233,6 +233,27 @@ dis "$out/ra.o" addrs > "$out/addrs.dis"
 [ "$(grep -c 'ldr[[:space:]]*r0, \[pc' "$out/addrs.dis")" -eq 4 ] ||
     { cat "$out/addrs.dis"; fail "addrs: tab's address is not made at each of its four reads"; }
 
+# ---- 64-bit tests ---------------------------------------------------------
+# A 64-bit operand loaded into temporaries of the instruction's own is
+# tested in them: `orrs lo, hi`, `cmp lo, blo; sbcs hi, bhi`, the halves
+# EORed in place -- not copied into a third register first (which, with
+# everything in memory, cost a push and a pop as well).
+cat > "$out/w64.c" <<'EOF'
+int lt64(const long long *p) { return p[0] < p[1]; }
+int eq64(const long long *p) { return p[0] == p[1]; }
+int nz64(const long long *p) { if (p[0]) return 3; return 5; }
+long long sel64(const long long *p) { return p[0] ? p[1] : p[2]; }
+EOF
+EMBCC_RA_MAXPOOL=0 "$EMBCC" --target=$T -Os -c "$out/w64.c" -o "$out/w64.o" ||
+    fail "compile w64.c"
+for f in lt64 eq64 nz64 sel64; do
+    dis "$out/w64.o" $f > "$out/$f.dis"
+    if awk '/\tmov\t/ { m = 1; next } /\t(sbcs|orrs|eors)\t/ && m { bad = 1 } { m = 0 }
+            END { exit !bad }' "$out/$f.dis"; then
+        cat "$out/$f.dis"; fail "$f: a 64-bit operand copied before its test"
+    fi
+done
+
 # ---- trampolines ----------------------------------------------------------
 # Six compares branch to one label 600 bytes on: one `b<!c> 1f; b err`
 # pair, and the other five a single b<c> to that pair's jump.

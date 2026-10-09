@@ -1571,6 +1571,23 @@ static void put64(struct t_fn *F, const struct h64 *h)
     }
 }
 
+/* Z = (a == 0) for a 64-bit a: ORRS of its halves -- into its low half
+ * when it is in temporaries of this instruction's own (src64 loaded it),
+ * else into one more. */
+static void zero64(struct t_fn *F, const struct h64 *a)
+{
+    if (a->own) {
+        t1_alu_reg(F->t, T_OP_ORR, a->lo, a->hi);
+        return;
+    }
+    {
+        int x = tmp_get(F, 0);
+        mov(F, x, a->lo);
+        t1_alu_reg(F->t, T_OP_ORR, x, a->hi);
+        tmp_put(F, x);
+    }
+}
+
 /* rdn = rdn OP rm for the two-operand forms, d = a OP b in general. */
 static void alu2(struct t_fn *F, int op, int d, int a, int b, int comm)
 {
@@ -1604,10 +1621,7 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
          (sign && (pred == B_LT || pred == B_GE)))) {
         src64(F, i->a, &a);
         if (pred == B_EQ || pred == B_NE) {
-            x = tmp_get(F, 0);
-            mov(F, x, a.lo);
-            t1_alu_reg(t, T_OP_ORR, x, a.hi);
-            tmp_put(F, x);
+            zero64(F, &a);
             put64(F, &a);
             return pred == B_EQ ? T_EQ : T_NE;
         }
@@ -1626,22 +1640,36 @@ static int cmp64(struct t_fn *F, const struct ir_ins *i, enum binop pred,
         pred = pred == B_GT ? B_LT : B_GE;
     }
     if (pred == B_EQ || pred == B_NE) {
-        x = tmp_get(F, 0);
-        y = tmp_get(F, 0);
-        mov(F, x, a.lo);
-        t1_alu_reg(t, T_OP_EOR, x, b.lo);
-        mov(F, y, a.hi);
-        t1_alu_reg(t, T_OP_EOR, y, b.hi);
-        t1_alu_reg(t, T_OP_ORR, x, y);
-        tmp_put(F, y);
-        tmp_put(F, x);
+        /* the halves' differences ORed: into one operand's own
+         * temporaries where it has them */
+        const struct h64 *o = a.own ? &a : b.own ? &b : NULL;
+        if (o) {
+            const struct h64 *p = o == &a ? &b : &a;
+            t1_alu_reg(t, T_OP_EOR, o->lo, p->lo);
+            t1_alu_reg(t, T_OP_EOR, o->hi, p->hi);
+            t1_alu_reg(t, T_OP_ORR, o->lo, o->hi);
+        } else {
+            x = tmp_get(F, 0);
+            y = tmp_get(F, 0);
+            mov(F, x, a.lo);
+            t1_alu_reg(t, T_OP_EOR, x, b.lo);
+            mov(F, y, a.hi);
+            t1_alu_reg(t, T_OP_EOR, y, b.hi);
+            t1_alu_reg(t, T_OP_ORR, x, y);
+            tmp_put(F, y);
+            tmp_put(F, x);
+        }
         cond = pred == B_EQ ? T_EQ : T_NE;
     } else {
-        x = tmp_get(F, 0);
         t1_cmp_reg(t, a.lo, b.lo);
-        mov(F, x, a.hi);                    /* MOV keeps the carry */
-        t1_alu_reg(t, T_OP_SBC, x, b.hi);
-        tmp_put(F, x);
+        if (a.own) {
+            t1_alu_reg(t, T_OP_SBC, a.hi, b.hi);  /* a's own: spent */
+        } else {
+            x = tmp_get(F, 0);
+            mov(F, x, a.hi);                /* MOV keeps the carry */
+            t1_alu_reg(t, T_OP_SBC, x, b.hi);
+            tmp_put(F, x);
+        }
         cond = pred == B_LT ? (sign ? T_LT : T_CC) : (sign ? T_GE : T_CS);
     }
     /* released in the reverse of the order acquired, whatever the swap */
@@ -2004,12 +2032,7 @@ static int gen_ins64(struct t_fn *F, int n)
         int take_c, done;
         if (i->size == 8) {
             src64(F, i->a, &a);
-            {
-                int x = tmp_get(F, 0);
-                mov(F, x, a.lo);
-                t1_alu_reg(t, T_OP_ORR, x, a.hi);
-                tmp_put(F, x);
-            }
+            zero64(F, &a);
             put64(F, &a);
         } else {
             t1_cmp_imm(t, v_rdr(F, i->a, S0), 0);
@@ -3337,12 +3360,8 @@ static void gen_ins(struct t_fn *F, int n)
         int take_c, done, d;
         if (i->size == 8) {
             struct h64 a;
-            int x;
             src64(F, i->a, &a);
-            x = tmp_get(F, 0);
-            mov(F, x, a.lo);
-            t1_alu_reg(t, T_OP_ORR, x, a.hi);
-            tmp_put(F, x);
+            zero64(F, &a);
             put64(F, &a);
         } else {
             t1_cmp_imm(t, v_rdr(F, i->a, S0), 0);
@@ -3360,12 +3379,8 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_BRZ: case IR_BRNZ:
         if (i->w == 8) {
             struct h64 a;
-            int x;
             src64(F, i->a, &a);
-            x = tmp_get(F, 0);
-            mov(F, x, a.lo);
-            t1_alu_reg(t, T_OP_ORR, x, a.hi);
-            tmp_put(F, x);
+            zero64(F, &a);
             put64(F, &a);
         } else {
             t1_cmp_imm(t, v_rdr(F, i->a, S0), 0);
