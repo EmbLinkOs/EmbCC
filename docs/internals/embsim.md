@@ -8,7 +8,8 @@ peripheral or a board. The command reference is
 EmbSim is ISO C99 with no dependencies beyond libm, built warning-free
 with the project's flags (`-std=c99 -Wall -Wextra -Werror`), and each
 file but the network one compiles with EmbCC itself. Everything is in
-`tools/embsim/`, so the directory can move as a unit.
+`tools/embsim/`, but for the SVD reader it shares with embsvd
+(`tools/embsvd/svd.c`), so the two directories move together.
 
 ## The parts
 
@@ -39,6 +40,9 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `avr.h` | the AVR core's state, and the interrupt-source interface of its peripherals |
 | `avr.c` | the AVR core: the instruction set, SREG, the data space, interrupts, SLEEP, step, reset, its CPU interface |
 | `avr-io.c`, `avr-usart.c`, `avr-timer16.c` | the ATmega328P's I/O registers, USART0, Timer/Counter1 |
+| `svd-map.h`, `svd-map.c` | an SVD file's peripherals as a register file on the bus (`--svd`), `--trace-periph`, `--svd-map`, and the interface of the models over it |
+| `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
+| `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers |
 | `devices.h` | the create functions `boards.c` builds boards from |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
@@ -51,7 +55,10 @@ the bench uses in QEMU, so the two estimates cannot drift (`arm_cost`,
 
 1. `sim_init`: the board's core (its `create` function, which also puts
    the core's own devices on the bus), then the board's devices and
-   bit-band aliases.
+   bit-band aliases. With an SVD file (`--svd`, or the board's own,
+   found in `EMBSIM_SVD_PATH`), the file is read and its register file
+   goes on the bus before the board's space that reads as zero, and the
+   board's models are put over its peripherals.
 2. `trace_open`, for `--trace`.
 3. `sim_load`: the board's memory regions, the image (`load_elf`), the
    flash made read-only to the core, and the core's power-on reset.
@@ -141,6 +148,10 @@ struct dev_ops {
 ```
 
 `off` is the offset from the device's base and `n` the access's size.
+A hook that cannot take the access calls `bus_fault(bus)`, and the core
+takes the bus fault it takes where nothing answers. `bus->debug` is set
+while the access is a debugger's, which a device with read side effects
+leaves alone.
 What a narrower access does to a word register is the device's choice:
 the system control space and SysTick read the word and shift it, and
 write the word with the other bytes zero, except the byte-accessible
@@ -158,12 +169,15 @@ struct board_desc {
     struct mem_desc mem[4];         /* base, size, MEM_RAM or MEM_FLASH, main_ram */
     struct dev_desc dev[6];         /* type, base, size */
     struct alias bitband[2];        /* base, size, target */
+    const char *svd;                /* "STM32F405.svd", or 0 */
+    const struct model_desc *models;   /* { "USART*", "stm32-usart" }, ... */
 };
 ```
 
 `main_ram` marks the region `--ram-size` resizes. `MEM_FLASH` is read-only
 to the core after loading, and is flash in the memory map the GDB server
-gives (gdb then programs it with `load`).
+gives (gdb then programs it with `load`). `MEM_ALIAS` is a second address
+for the region at `target`: the STM32's flash at 0.
 
 The RISC-V core's is `struct rv_state` (`riscv.h`), reached through
 `rs` the same way. Registers hold XLEN bits (an RV32 value zero-extended
@@ -209,6 +223,67 @@ A device that belongs to a core -- the Cortex-M's system control space
 and SysTick, the RISC-V core's CLINT -- includes the core's header and
 works on its state; its create function checks the board's core is its
 own (`riscv_is`).
+
+## The SVD's register file, and adding a peripheral model
+
+`svd-map.c` reads an SVD file with embsvd's reader and makes each
+register of each peripheral a `struct rf_reg`: its address and size, its
+value and reset value, and its fields with their access,
+modifiedWriteValues and readAction (`struct rf_field`). The registers
+are sorted by address in one array, which an access finds by binary
+search; a register at an address an earlier one has is left out (an
+alternate). One device on the bus covers the span; it finds the register
+an access touches, and sends the access to that register's peripheral
+(`struct rf_periph`): to its model's `read` and `write` hooks if it has
+one, else to the register file's own. A clock gate, set by a model on
+another peripheral (`p->gate`, the RCC's enable bit), stops the access
+before either.
+
+A model is a `struct dev_ops` over one peripheral. It does not replace
+the register file; it wraps it:
+
+```c
+static void usart_write(void *ctx, u32 off, int n, u32 v)
+{
+    struct usart *u = ctx;
+    rf_write(u->p, off, n, v);                  /* as the SVD says */
+    if (off == rf_off(u->dr) && (u->cr1->value & u->ue) &&
+        (u->cr1->value & u->te)) {
+        sim_out(u->s, (int)(v & 0xff));         /* what the part does */
+        rf_hw(u->sr, u->sr->value | u->txe | u->tc);
+    }
+    update_irq(u);
+}
+```
+
+1. Write `tools/embsim/NAME.c` (`stm32-usart.c` is a small one to start
+   from): a context, the `struct dev_ops`, and `void *NAME_create(struct
+   sim *s, struct rf_periph *p)`. The create function finds its registers
+   and fields by the SVD's names (`rf_reg(p, "SR")`, `rf_mask(r, "TXE")`)
+   and returns 0 when they are not there: a peripheral of another layout
+   that the board's name pattern also matches keeps the plain register
+   file. It may correct the file: `rf_set_reset` for a wrong reset value,
+   `rf_set_mwv` for flags the file calls read-write that are rc_w0 or
+   rc_w1.
+2. The hooks: `read` and `write` call `rf_read` and `rf_write`, then do
+   what the hardware does. A change the hardware makes goes through
+   `rf_hw(reg, value)`, so `--trace-periph` shows it as an `H` line; a
+   counter that changes every cycle may set `reg->value` directly (the
+   timer's CNT), and is then not traced. `reset` sets the model's own
+   state; the registers are back at their reset values before it is
+   called. The interrupt is `rf_irq(p, "_UP")` (the SVD's, by name) and
+   `rf_interrupt(p, irq)`.
+3. A model that keeps time has `tick` and `next_event` hooks, and calls
+   `rf_clock(p, &running, on)` when its clock starts and stops; only a
+   running model is ticked, so fourteen stopped timers cost nothing.
+4. Declare it in `devices.h`, add it to `model_types[]` in `boards.c` and
+   to `EMBSIM_SRCS` in the Makefile, and to a board's `models`: the SVD's
+   peripheral names it applies to, with `*` for any characters. Models
+   are created in the list's order, so one that others depend on (RCC,
+   which sets the clock gates) comes first.
+5. Test it as `tests/golden/embsim-svd.sh` tests the STM32F405's: a
+   firmware that prints the registers, run on QEMU where QEMU models the
+   peripheral, and held to the reference manual where it does not.
 
 ## Adding a board
 
@@ -283,6 +358,11 @@ or with its own file for the six functions of `net.h`.
   `avr-cycles.S`'s cycles against the datasheet, the ends of a run.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
   the Cortex-M, on RISC-V and on the AVR.
+- `tests/golden/embsim-svd.sh`: the register file over a test SVD,
+  against the specification's values; the STM32F405's models against
+  QEMU's netduinoplus2 and RM0090. `embsim-svd-all.sh`: every SVD in
+  `$EMBREF/svd` mapped, each register where `svdref.py` puts it.
+- `tests/golden/svd-*.sh`: embsvd, whose reader EmbSim shares.
 - A change that must not change behaviour (a refactor, a speed-up)
   should also compare the binary before and after on every corpus image
   and every board: stdout, stderr with `--stats`, the exit status, the

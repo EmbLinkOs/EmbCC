@@ -322,8 +322,8 @@ embar: tools/embar/embar.c
 # embsvd -- a device's register database from its CMSIS-SVD file: the
 # device header, a startup file and a linker script (tools/embsvd). ISO C
 # and standalone, like embar.
-embsvd: tools/embsvd/embsvd.c
-	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
+embsvd: tools/embsvd/embsvd.c tools/embsvd/svd.c tools/embsvd/svd.h
+	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c tools/embsvd/svd.c
 
 # embmap -- where an image's flash and RAM go: sections, regions, the
 # biggest symbols, the bytes by input file from a map, and the growth
@@ -376,10 +376,14 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/uart-16550.c tools/embsim/sifive-test.c \
                tools/embsim/virt-rom.c tools/embsim/avr.c \
                tools/embsim/avr-io.c tools/embsim/avr-usart.c \
-               tools/embsim/avr-timer16.c tools/embsim/gdb.c $(EMBSIM_NET)
+               tools/embsim/avr-timer16.c tools/embsim/gdb.c \
+               tools/embsim/svd-map.c tools/embsvd/svd.c \
+               tools/embsim/stm32-rcc.c tools/embsim/stm32-gpio.c \
+               tools/embsim/stm32-usart.c tools/embsim/stm32-tim.c $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
-               tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h
+               tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
+               tools/embsim/svd-map.h tools/embsvd/svd.h
 embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS)
 	$(CC) $(CFLAGS) -o $@ $(EMBSIM_SRCS) -lm
 

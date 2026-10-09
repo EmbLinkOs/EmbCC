@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "sim.h"
+#include "svd-map.h"
 
 static u32 parse_size(const char *s)
 {
@@ -42,8 +43,11 @@ static void usage(void)
           "              [--ram-size SIZE] [--until STRING] [--max-insns N]\n"
           "              [--stats] [--count FILE] [--trace FILE]\n"
           "              [--no-semihosting] [--gdb [HOST:]PORT [--gdb-wait]]\n"
+          "              [--svd FILE.svd] [--trace-periph[=NAME,...]]\n"
+          "       embsim --svd FILE.svd --svd-map\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
-          "        mps2-an500, microbit, virt (RISC-V), uno (AVR)\n"
+          "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
+          "        EMBSIM_SVD_PATH), virt (RISC-V), uno (AVR)\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7;\n"
           "        rv32, rv64 (virt's default: the image's width); atmega328p\n",
           stderr);
@@ -55,7 +59,8 @@ static struct sim sim;
 int main(int argc, char **argv)
 {
     const char *image = 0, *cpu = 0, *count_path = 0, *trace_path = 0;
-    const char *until = 0, *gdb = 0;
+    const char *until = 0, *gdb = 0, *svd = 0, *trace_periph = 0;
+    int svd_map = 0, tracing_periph = 0, board_given = 0;
     u32 ram_size = 0;
     u64 max_insns = 0;
     int stats = 0, verbose = 0, semihosting = 1, gdb_wait = 0;
@@ -68,6 +73,7 @@ int main(int argc, char **argv)
             bd = board_find(nm);
             if (!bd)
                 die("unknown board '%s'", nm);
+            board_given = 1;
         } else if (!strcmp(a, "--cpu") && more)
             cpu = argv[++i];
         else if (!strcmp(a, "--ram-size") && more)
@@ -92,6 +98,14 @@ int main(int argc, char **argv)
             gdb = argv[++i];
         else if (!strcmp(a, "--gdb-wait"))
             gdb_wait = 1;
+        else if (!strcmp(a, "--svd") && more)
+            svd = argv[++i];
+        else if (!strcmp(a, "--svd-map"))
+            svd_map = 1;
+        else if (!strcmp(a, "--trace-periph"))
+            tracing_periph = 1, trace_periph = 0;
+        else if (!strncmp(a, "--trace-periph=", 15))
+            tracing_periph = 1, trace_periph = a + 15;
         else if (!strcmp(a, "--help") || !strcmp(a, "-h"))
             usage();
         else if (a[0] == '-')
@@ -100,6 +114,27 @@ int main(int argc, char **argv)
             image = a;
         else
             die("one image at a time ('%s' and '%s')", image, a);
+    }
+    if (svd && !board_given) {
+        /* --svd STM32F405.svd is the stm32f405's */
+        const char *b = strrchr(svd, '/');
+        b = b ? b + 1 : svd;
+        for (int i = 0; i < nboards; i++) {
+            const char *n = boards[i].svd;
+            size_t k = 0;
+            while (n && n[k] && b[k] &&
+                   (n[k] | 0x20) == (b[k] | 0x20))
+                k++;
+            if (n && !n[k] && !b[k])
+                bd = &boards[i];
+        }
+    }
+    if (svd_map) {
+        if (!svd && !bd->svd)
+            die("--svd-map needs --svd FILE, or a board with an SVD");
+        sim_init(&sim, bd, cpu, svd);
+        svdmap_print(sim.svd, stdout);
+        return 0;
     }
     if (!image)
         usage();
@@ -126,7 +161,12 @@ int main(int argc, char **argv)
         die("--gdb-wait needs --gdb PORT");
 
     struct sim *s = &sim;
-    sim_init(s, bd, cpu);
+    sim_init(s, bd, cpu, svd);
+    if (tracing_periph) {
+        if (!s->svd)
+            die("--trace-periph needs --svd FILE: the names are the SVD's");
+        svdmap_trace(s->svd, trace_periph);
+    }
     s->until = until;
     s->until_len = until ? strlen(until) : 0;
     s->max_insns = max_insns;

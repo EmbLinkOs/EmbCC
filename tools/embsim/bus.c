@@ -10,7 +10,8 @@
  *      space, a UART inside the peripheral space that reads as zero) is
  *      added first.
  * Nothing answering is a bus error, which the core turns into its fault
- * (bus->fail_addr says where). */
+ * (bus->fail_addr says where); so is a device refusing the access
+ * (bus_fault: the SVD's register file, where no register is). */
 #include <stdlib.h>
 #include <string.h>
 
@@ -43,6 +44,18 @@ void bus_add_device(struct bus *b, u32 base, u32 size,
     b->dev[b->ndev].ops = ops;
     b->dev[b->ndev].ctx = ctx;
     b->ndev++;
+}
+
+void bus_add_mirror(struct bus *b, u32 base, u32 target)
+{
+    struct region *t = bus_region(b, target, 1);
+    if (!t)
+        die("no memory at 0x%08x for a mirror at 0x%08x", target, base);
+    if (b->nrg == BUS_REGIONS)
+        die("too many memory regions");
+    b->rg[b->nrg] = *t;
+    b->rg[b->nrg].base = base;
+    b->nrg++;
 }
 
 void bus_add_alias(struct bus *b, u32 base, u32 size, u32 target)
@@ -94,6 +107,11 @@ static int rd(struct bus *b, u32 a, int n, u32 *v)
     struct device *d = device_of(b, a);
     if (d) {
         x = d->ops->read ? d->ops->read(d->ctx, a - d->base, n) : 0;
+        if (b->dev_fault) {
+            b->dev_fault = 0;
+            b->fail_addr = a;
+            return -1;
+        }
         *v = n == 4 ? x : x & ((1u << (8 * n)) - 1);
         return 0;
     }
@@ -123,6 +141,11 @@ static int wr(struct bus *b, u32 a, int n, u32 v, int debug)
     if (d) {
         if (d->ops->write)
             d->ops->write(d->ctx, a - d->base, n, v);
+        if (b->dev_fault) {
+            b->dev_fault = 0;
+            b->fail_addr = a;
+            return -1;
+        }
         return 0;
     }
     b->fail_addr = a;
@@ -162,14 +185,22 @@ int bus_write(struct bus *b, u32 a, int n, u32 v)
     return wr(b, a, n, v, 0);
 }
 
+/* b->debug tells a device the access is the debugger's: no side effect
+ * of a read, no trace */
 int bus_debug_read(struct bus *b, u32 a, int n, u32 *v)
 {
-    return rd(b, a, n, v);
+    b->debug = 1;
+    int r = rd(b, a, n, v);
+    b->debug = 0;
+    return r;
 }
 
 int bus_debug_write(struct bus *b, u32 a, int n, u32 v)
 {
-    return wr(b, a, n, v, 1);
+    b->debug = 1;
+    int r = wr(b, a, n, v, 1);
+    b->debug = 0;
+    return r;
 }
 
 int bus_watch_add(struct bus *b, int kind, u32 addr, u32 len)

@@ -14,6 +14,9 @@
  *     DWT are devices.
  *   - boards as data (boards.c): a core, its options, the memory regions
  *     and the devices at their addresses. A new board is a table entry.
+ *   - an SVD file's peripherals as a register file on the bus, and the
+ *     behavioural models over it by the SVD's names (svd-map.h; the
+ *     STM32's are stm32-*.c).
  *   - the run (run.c): the loop, time, the end-of-run rules and the
  *     console; semihost.c, trace.c (tracing and the counts), loader.c
  *     (the ELF image), gdb.c (the GDB remote server, over net.h's
@@ -43,7 +46,9 @@ void die(const char *fmt, ...);
 
 /* ---- the bus (bus.c) -------------------------------------------------- */
 
-enum { MEM_RAM, MEM_FLASH };
+/* MEM_ALIAS: another name for the region at a board's `target` (the
+ * STM32's flash, seen at 0 as well as at 0x08000000) */
+enum { MEM_RAM, MEM_FLASH, MEM_ALIAS };
 
 struct region {
     u32 base, size;
@@ -108,6 +113,8 @@ struct bus {
     int nwatch;
     int watch_hit, watch_kind;      /* the first watchpoint the core hit */
     u32 watch_addr;
+    int debug;                      /* the access is a debugger's */
+    int dev_fault;                  /* the device refused it: bus_fault */
 };
 
 void bus_add_region(struct bus *b, u32 base, u32 size, int kind);
@@ -145,6 +152,14 @@ static inline void mem_wr_le(u8 *p, int n, u32 v)
 void bus_add_device(struct bus *b, u32 base, u32 size,
                     const struct dev_ops *ops, void *ctx);
 void bus_add_alias(struct bus *b, u32 base, u32 size, u32 target);
+/* a second name for the memory region holding `target`, at `base` */
+void bus_add_mirror(struct bus *b, u32 base, u32 target);
+/* a device's read or write hook refuses the access in progress: the
+ * core takes its bus fault, as when nothing answers */
+static inline void bus_fault(struct bus *b)
+{
+    b->dev_fault = 1;
+}
 /* The core's accesses: 0, or -1 with bus->fail_addr when nothing answers
  * at the address. A store tells the snoop. */
 int bus_read(struct bus *b, u32 a, int n, u32 *v);
@@ -200,8 +215,9 @@ struct cpu {
 
 struct mem_desc {
     u32 base, size;
-    int kind;                       /* MEM_RAM or MEM_FLASH */
+    int kind;                       /* MEM_RAM, MEM_FLASH or MEM_ALIAS */
     int main_ram;                   /* the one --ram-size resizes */
+    u32 target;                     /* MEM_ALIAS: the region it names */
 };
 
 struct dev_desc {
@@ -217,6 +233,19 @@ struct board_desc {
     struct mem_desc mem[4];         /* ends with a size of 0 */
     struct dev_desc dev[6];         /* ends with a type of 0 */
     struct alias bitband[2];        /* ends with a size of 0 */
+    /* the part's CMSIS-SVD file, by its name: its peripherals' registers
+     * are on the bus (svd-map.c), found with --svd or EMBSIM_SVD_PATH */
+    const char *svd;
+    /* the behavioural models layered over those registers, by the SVD's
+     * peripheral names; ends with a name of 0 */
+    const struct model_desc *models;
+};
+
+/* a model for the SVD's peripherals whose names match `periph` (a `*`
+ * matches any characters) */
+struct model_desc {
+    const char *periph;
+    const char *model;              /* a name in boards.c's model list */
 };
 
 struct core_type {
@@ -238,6 +267,10 @@ extern const struct core_type cores[];
 extern const int ncores;
 const struct board_desc *board_find(const char *name);
 void sim_add_device(struct sim *s, const struct dev_desc *d);
+/* a device on the bus, keeping time if it has a clock (a tick or a
+ * next_event hook) */
+void sim_add_dev(struct sim *s, u32 base, u32 size, const struct dev_ops *ops,
+                 void *ctx);
 
 /* ---- the run (run.c) -------------------------------------------------- */
 
@@ -277,10 +310,15 @@ struct sim {
      * file has them as a third line */
     u64 skipped;
     int count_skips;
+    /* the SVD's register file (svd-map.c), or 0 */
+    struct svdmap *svd;
 };
 
-/* build the board with its core (`model`, or 0 for the board's own) */
-void sim_init(struct sim *s, const struct board_desc *bd, const char *model);
+/* build the board with its core (`model`, or 0 for the board's own),
+ * and with the peripherals of an SVD file (`svd`, or 0 for the board's
+ * own, if it has one) */
+void sim_init(struct sim *s, const struct board_desc *bd, const char *model,
+              const char *svd);
 /* the memory (`ram_size`, or 0 for the board's), the image in it, and
  * the core out of reset */
 void sim_load(struct sim *s, u32 ram_size, const char *image);
