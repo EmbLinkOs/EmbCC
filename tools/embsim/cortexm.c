@@ -333,6 +333,8 @@ static void exc_entry(int n, u32 ret)
         cs->tbit = 1;
     }
     cs->pc = v & ~1u;
+    if (cs->sim->an)
+        an_exc_entry(cs->sim, (u32)n, ret);
 }
 
 /* A synchronous fault, or SVC: taken at once, escalated to HardFault when
@@ -430,6 +432,8 @@ static void exc_return(u32 ret)
     cs->ipsr = to_thread ? 0 : (x & 0x1ff);
     cs->excl_valid = 0;
     cs->pc = ra & ~1u;
+    if (cs->sim->an)
+        an_exc_return(cs->sim);
 }
 
 /* ---- semihosting ------------------------------------------------------ */

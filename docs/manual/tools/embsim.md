@@ -19,6 +19,7 @@ embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--count FILE] [--trace FILE] [--no-semihosting]
                  [--gdb [HOST:]PORT [--gdb-wait]]
                  [--svd FILE.svd] [--trace-periph[=NAME,...]]
+                 [--coverage FILE [--coverage-format=text|lcov]]
 embsim --svd FILE.svd --svd-map
 ```
 
@@ -416,6 +417,81 @@ On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 
 A run that ends at a lockup or at `--max-insns` says why on stderr.
 
+## Testing and analysis
+
+These are the measurements a firmware's CI wants of a run, and what a
+debugging session wants after one. Each is an option; a run without
+them is exactly the run it always was, and with them the program's
+output, its exit status and its counts do not change.
+
+They read the image's symbol table, and its DWARF when it was built
+with `-g`: the line table for source lines. EmbCC, GCC and clang images
+alike (DWARF 2 to 5).
+
+### Coverage: `--coverage`
+
+`--coverage FILE` counts each instruction the run executes, and at the
+end writes which source lines and functions ran, and how often (`-` for
+stderr):
+
+```sh
+embcc --target=thumbv7m-none-eabi -O0 -g -c main.c
+embsim fw.elf --coverage fw.cov
+embsim fw.elf --coverage fw.info --coverage-format=lcov
+genhtml fw.info -o coverage-html
+```
+
+The report is gcov's layout, file by file: a summary, each function and
+the times it was entered, and the source with each line's count
+(`#####`: code that never ran; `-`: no code).
+
+```text
+tests/golden/embsim-an/cov.c: 14 of 17 lines (82.4%), 2 of 3 functions (66.7%)
+  function never_called (line 17): 0
+  function classify (line 22): 5
+  function main (line 32): 1
+    #####:   17:static int never_called(int x)
+        -:   18:{
+    #####:   19:    return x * 3;
+        -:   20:}
+        -:   21:
+        5:   22:static int classify(int v)
+        -:   23:{
+        5:   24:    int r = 1;
+        5:   25:    if (v < 0)
+        1:   26:        r = -1;
+        4:   27:    else if (v == 0)
+        1:   28:        r = 0;
+        5:   29:    return r;
+...
+        6:   35:    for (int i = 0; i < 5; i++)
+        5:   36:        sum += classify(i - 1);
+        1:   37:    if (sum > 100)
+    #####:   38:        sum = never_called(sum);
+
+total: 14 of 17 lines (82.4%), 5 of 7 functions (71.4%)
+```
+
+- A line has code when the line table gives it addresses in the image's
+  executable segments. Its count is that of its most-executed
+  instruction: the times it ran, for straight-line code. A `for` line
+  counts its test (6 for 5 turns). A line that holds code shared by
+  several statements counts them all: at -O0 a function's epilogue is
+  usually on its last `return`, which then counts every return.
+- A function's count is its first instruction's: the times it was
+  entered. A function inlined everywhere counts 0, and its lines count
+  where they were inlined.
+- The source is read from the path the line table gives (relative to
+  the directory EmbSim runs in); when it cannot be, the lines with code
+  are listed alone.
+- Without `-g` there is no line table: the report has the functions
+  alone, from the symbol table, with a warning.
+- Functions with no line information (a startup file built without
+  `-g`, the C library) are listed apart, and count in the total.
+- `--coverage-format=lcov` writes lcov's tracefile instead (`SF`, `FN`,
+  `FNDA`, `FNF`, `FNH`, `DA`, `LF`, `LH`), which genhtml, Codecov,
+  Coveralls and most CI services read.
+
 ## Debugging: `--gdb`
 
 `--gdb PORT` serves the GDB remote protocol on `localhost:PORT` while the
@@ -586,6 +662,13 @@ the register, and RM0090's (a record) where it does not or differs.
 `tests/golden/embsim-svd-all.sh` maps every SVD file in `$EMBREF/svd`
 (ST's and Nordic's) and holds each register's address and size to a
 second reading of the file in Python.
+
+**Analysis.** `tests/golden/embsim-coverage.sh` builds
+`tests/golden/embsim-an/cov.c`, whose every line with code is marked
+with the times it runs, at -O0 -g on the M3, RV32 and the AVR, and with
+clang (DWARF 5); the report and the lcov tracefile must give exactly the
+marks, line for line, the run must be the same with and without
+`--coverage`, and an image without `-g` must give its functions.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32

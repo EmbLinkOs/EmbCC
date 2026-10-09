@@ -61,6 +61,9 @@ static void trap_enter(u64 cause, u64 tval, int intr)
     rs->resv = 0;
     u64 base = rs->mtvec & ~(u64)3;
     rs->pc = intr && (rs->mtvec & 1) ? base + 4 * cause : base;
+    if (rs->sim->an)
+        an_exc_entry(rs->sim, (u32)cause | (intr ? 0x80000000u : 0),
+                     (u32)rs->mepc);
 }
 
 /* ---- memory ------------------------------------------------------------- */
@@ -651,6 +654,8 @@ static void sys_insn(u32 i, u32 rd, u32 f3)
         rs->mstatus = st;
         rs->priv = mpp;
         jump(rs->mepc);
+        if (rs->sim->an)
+            an_exc_return(rs->sim);
         return;
     }
     case 0x10500073:                            /* WFI */

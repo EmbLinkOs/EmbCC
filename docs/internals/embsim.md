@@ -44,6 +44,9 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
 | `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers |
 | `devices.h` | the create functions `boards.c` builds boards from |
+| `image.h`, `image.c` | the image's symbols, code ranges, DWARF line table and `.debug_frame`, for the analyses |
+| `analysis.h`, `analysis.c` | the step the analyses watch, and the shadow stack of the program's calls |
+| `coverage.c` | `--coverage`: the counts per instruction, the report and lcov's tracefile |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
 the bench uses in QEMU, so the two estimates cannot drift (`arm_cost`,
@@ -78,6 +81,23 @@ estimated cost. Devices that keep time are told after each instruction
 `sim_next_event` when a device will next raise an interrupt and skips
 ahead to it; when none will, the run is idle. Nothing reads the host's
 clock: a run gives the same counts every time, under a debugger too.
+
+**The analyses** (`--coverage` and the rest) watch the run through
+`an_step`, which `sim_run` and `sim_step` call instead of the core's
+step when `s->an` is set, so a run without them is the loop it always
+was. `an_step` notes the pc and the counts, steps the core, and gives
+each analysis the instruction that ran (`s->insns` moved) and what it
+cost (the change in `s->cycles`). It follows the program's calls and
+returns on a shadow stack, recognizing them by the instruction as the
+core executes it (`analysis.c` says which), and the cores tell it what
+no instruction shows: `an_exc_entry` when an exception or interrupt is
+entered, `an_exc_return` when the handler returns. Each is one test of
+`s->an` in the core, where it was 0 before.
+
+`image.c` reads the ELF a second time, apart from the loader, for what
+the analyses need: the functions (STT_FUNC, and labels in the code for
+assembly), the line table as address ranges, and the call frame
+information. None of it is read without an analysis.
 
 ## The interfaces
 
@@ -356,6 +376,9 @@ or with its own file for the six functions of `net.h`.
 - `tests/golden/embsim-avr.sh`: the AVR core on uno: some 580 corpus
   programs to the instruction, `avr-isa`'s edges against QEMU,
   `avr-cycles.S`'s cycles against the datasheet, the ends of a run.
+- `tests/golden/embsim-coverage.sh`: `--coverage` against a program
+  whose lines carry the counts they must get, on the three cores and
+  from clang's DWARF 5.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
   the Cortex-M, on RISC-V and on the AVR.
 - `tests/golden/embsim-svd.sh`: the register file over a test SVD,

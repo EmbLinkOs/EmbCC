@@ -312,6 +312,9 @@ struct sim {
     int count_skips;
     /* the SVD's register file (svd-map.c), or 0 */
     struct svdmap *svd;
+    /* the analyses watching the run (analysis.h), or 0: when set, the
+     * run steps through an_step */
+    struct analysis *an;
 };
 
 /* build the board with its core (`model`, or 0 for the board's own),
@@ -341,6 +344,17 @@ void sim_advance(struct sim *s, u32 cycles);
 void sim_clock(struct sim *s, int *running, int on);
 /* 1 and the cycles to the next device interrupt, or 0 when none is due */
 int sim_next_event(struct sim *s, u32 *cycles);
+
+/* ---- the analyses (analysis.c) ---------------------------------------- */
+
+/* one step with the analyses watching, and the budget: sim_step's and
+ * sim_run's when s->an is set */
+void an_step(struct sim *s);
+/* a core, while s->an is set: exception `n` (an ARM exception number, a
+ * RISC-V mcause, an AVR vector) was entered and returns to `ret`; the
+ * handler returned */
+void an_exc_entry(struct sim *s, u32 n, u32 ret);
+void an_exc_return(struct sim *s);
 
 /* ---- semihosting (semihost.c) ----------------------------------------- */
 

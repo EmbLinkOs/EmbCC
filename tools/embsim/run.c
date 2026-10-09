@@ -175,6 +175,10 @@ void sim_reset(struct sim *s, int reload)
  * too */
 void sim_step(struct sim *s)
 {
+    if (s->an) {
+        an_step(s);
+        return;
+    }
     s->cpu->ops->step(s->cpu);
     if (s->max_insns && s->insns >= s->max_insns && s->state == RUN)
         sim_end(s, END_BUDGET, "--max-insns: %llu instructions run",
@@ -185,6 +189,11 @@ void sim_run(struct sim *s)
 {
     struct cpu *c = s->cpu;
     void (*step)(struct cpu *) = c->ops->step;
+    if (s->an) {
+        while (s->state == RUN)
+            an_step(s);
+        return;
+    }
     while (s->state == RUN) {
         step(c);
         if (s->max_insns && s->insns >= s->max_insns && s->state == RUN)

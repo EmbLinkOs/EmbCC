@@ -379,11 +379,14 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/avr-timer16.c tools/embsim/gdb.c \
                tools/embsim/svd-map.c tools/embsvd/svd.c \
                tools/embsim/stm32-rcc.c tools/embsim/stm32-gpio.c \
-               tools/embsim/stm32-usart.c tools/embsim/stm32-tim.c $(EMBSIM_NET)
+               tools/embsim/stm32-usart.c tools/embsim/stm32-tim.c \
+               tools/embsim/image.c tools/embsim/analysis.c \
+               tools/embsim/coverage.c $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
-               tools/embsim/svd-map.h tools/embsvd/svd.h
+               tools/embsim/svd-map.h tools/embsvd/svd.h \
+               tools/embsim/image.h tools/embsim/analysis.h
 embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS)
 	$(CC) $(CFLAGS) -o $@ $(EMBSIM_SRCS) -lm
 
