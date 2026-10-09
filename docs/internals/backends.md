@@ -974,7 +974,7 @@ an aggregate). A variadic call always uses the base convention.
 `pcs("aapcs")` selects the base convention for one function;
 `pcs("aapcs-vfp")` without an FPU is an error.
 
-**Float ABI selection** (`arm_float_resolve` in the driver):
+**Float ABI selection** (`thumb_options_done`, `src/arch/thumb/options.c`):
 `-mfloat-abi=soft` (the default) emits no FPU instructions;
 `softfp` uses the FPU with the base convention; `hard` uses the FPU and
 AAPCS-VFP. `-mfpu=` accepts `fpv4-sp-d16` and `fpv5-d16` (ARMv7E-M; the

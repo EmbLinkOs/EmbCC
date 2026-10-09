@@ -45,6 +45,8 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "bl", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
+        .option = thumb_target_option,
+        .options_done = thumb_options_done,
         .frame_sp = 13, .frame_ra = 14 },     /* sp, lr */
     [TARGET_RISCV32] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
@@ -55,6 +57,8 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
+        .option = riscv_target_option,
+        .options_done = riscv_options_done,
         .frame_sp = 2, .frame_ra = 1 },      /* sp, ra */
     [TARGET_RISCV64] = {
         .family = "RISC-V", .codegen = codegen_unit_riscv, .ra_at_o0 = 1,
@@ -65,6 +69,8 @@ static const struct backend_desc g_backends[] = {
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 2,
         .no_asm_text = NULL,
+        .option = riscv_target_option,
+        .options_done = riscv_options_done,
         .frame_sp = 2, .frame_ra = 1 },      /* sp, ra */
     [TARGET_AVR] = {
         .family = "AVR", .codegen = codegen_unit_avr, .ra_at_o0 = 1,

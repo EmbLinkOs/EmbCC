@@ -362,7 +362,8 @@ driver sets it in this order:
    compiler with a configured default makes the same code as one given
    that target by `--target=`. Thumb, RISC-V and AArch64 have one;
    x86-64 and AVR have none.
-4. After all options, `arm_float_resolve` settles the Thumb FPU and
+4. After all options, the target's `options_done` hook (Thumb's
+   `thumb_options_done`, in `src/arch/thumb/options.c`) settles the FPU and
    float ABI from `-mfpu=`, `-mfloat-abi=` and an `-eabihf` triple.
 
 Everything downstream reads the result through `target.h`: the data

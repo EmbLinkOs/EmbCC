@@ -279,6 +279,9 @@ struct backend_desc {
      * 1 when ARG is one of them, which it accepts or refuses by name, 0
      * when it is not, for the driver to try the rest. NULL: none. */
     int (*option)(const char *arg);
+    /* ...and, once every argument has been read, what those options
+     * meant together (an FPU and a float ABI given in either order). */
+    void (*options_done)(void);
     /* -g's call frame information (.debug_frame, src/debug/dwarf.c):
      * the DWARF numbers of the stack pointer and of the register the
      * return address arrives in, for a backend that records its prologue
@@ -302,5 +305,9 @@ int coldfire_target_option(const char *arg);
 int mips32_target_option(const char *arg);
 int mips64_target_option(const char *arg);
 int tricore_target_option(const char *arg);
+int thumb_target_option(const char *arg);
+void thumb_options_done(void);
+int riscv_target_option(const char *arg);
+void riscv_options_done(void);
 
 #endif

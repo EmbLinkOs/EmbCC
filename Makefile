@@ -158,6 +158,7 @@ SRCS := \
 	src/arch/ppc/options.c src/arch/rx/options.c src/arch/sparc/options.c \
 	src/arch/coldfire/options.c src/arch/mips/options.c \
 	src/arch/tricore/options.c \
+	src/arch/thumb/options.c src/arch/riscv/options.c \
 	src/arch/code.c \
 	src/arch/predef.c \
 	src/arch/x86_64/irgen.c \

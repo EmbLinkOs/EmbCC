@@ -294,7 +294,7 @@ static const struct predef_macro thumb_cmse_add[] = {
     { "__ARM_FEATURE_CMSE", "3" },
 };
 
-/* RISC-V's -march= and -mabi= (src/driver/main.c riscv_float_resolve).
+/* RISC-V's -march= and -mabi= (src/arch/riscv/options.c, riscv_options_done).
  * The generated tables are rv32imac/ilp32 and rv64imac/lp64; these are the
  * macros clang changes from there, read off `clang -dM` for every
  * combination (tests/golden/predef.sh checks each against it): F brings
