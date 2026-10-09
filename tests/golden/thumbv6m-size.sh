@@ -103,6 +103,27 @@ for f in chain chain2 chain3; do
     [ "$on" -lt "$off" ] || { dis "$out/sc.o" $f
         fail "$f: $on instructions with the slot cache, $off without"; }
 done
+# At a label every jump to which comes before it, what holds is what holds
+# on every way in: x is stored from r1 at the end of both arms, and the
+# add after the join reads r1.
+cat > "$out/pick.c" <<'EOF'
+extern int g(int);
+int pick(int a, int b, int c)
+{
+    int x;
+    if (c)
+        x = g(a) + 1;
+    else
+        x = g(b) + 2;
+    return g(x + 7) + x;
+}
+EOF
+EMBCC_RA_MAXPOOL=2 "$EMBCC" --target=$T -Os -c "$out/pick.c" -o "$out/pick.o" ||
+    fail "compile pick.c"
+dis "$out/pick.o" pick > "$out/pick.dis"
+nsp=$(grep -cE 'ldr[[:space:]].*\[sp' "$out/pick.dis") || nsp=0
+[ "$nsp" -le 2 ] || { cat "$out/pick.dis"
+    fail "pick: x is loaded at the join though both arms leave it in a register"; }
 "$EMBCC" --target=$T -Os -Ilib/libc/include -c lib/libc/src/stdlib/strtol.c \
     -o "$out/strtol.o" || fail "compile strtol.c"
 dis "$out/strtol.o" conv > "$out/conv.dis"

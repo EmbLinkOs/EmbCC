@@ -188,7 +188,11 @@ static void mov(struct t_fn *F, int d, int s)
  * a register any of them writes, or a call clobbers, ends the entry. So a
  * lowering that takes a scratch, a pushed temporary, a parallel move or an
  * argument register needs no bookkeeping here. The rest is control flow:
- *   - every label empties the cache: code is entered there from elsewhere;
+ *   - a label is entered from elsewhere: what holds there is what holds
+ *     on every way in -- the fall-through and each jump to it, whose
+ *     state is taken where the jump is emitted (rc_snap) -- and nothing
+ *     at a label some jump reaches from below (a loop's head), from a
+ *     table or by address (g6_lfwd);
  *   - an entry begins only where everything emitted for the instruction
  *     so far is straight-line, so it dominates what follows (a select's
  *     arm, or the code after a loop's exit test, never starts one);
@@ -211,6 +215,14 @@ static void rc_reset(void)
     for (int r = 0; r < 8; r++)
         g6_rc_off[r] = -1;
 }
+
+/* Per label: 1 when every jump to it comes before it and is a branch this
+ * file emits through v6_branch -- no switch table, no &&label -- so the
+ * cache at it can be what holds on every way in. With the state each
+ * jump saw (g6_lsnap, 8 per label: the offset each register held, -1 for
+ * none) and whether one has been seen this pass. */
+static char *g6_lfwd, *g6_lseen;
+static long *g6_lsnap;
 
 /* EMBCC_V6_NOSLOTCACHE=1: no entry is ever made (tests, bisecting). */
 static int rc_off(void)
@@ -382,6 +394,52 @@ static void rc_note(const struct t_fn *F, int r, long off)
         return;
     g6_rc_off[r] = off;
     g6_rc_at[r] = F->t->len;
+}
+
+static int rc_find(const struct t_fn *F, long off);
+
+/* What each register holds now, checked: off[r], or -1. */
+static void rc_state(const struct t_fn *F, long *off)
+{
+    for (int r = 0; r < 8; r++)
+        off[r] = g6_rc_off[r] >= 0 && rc_find(F, g6_rc_off[r]) == r
+                 ? g6_rc_off[r] : -1;
+}
+
+/* A jump to `label` is emitted here: what holds now is what holds at the
+ * label, as far as this way in goes. */
+static void rc_snap(const struct t_fn *F, int label)
+{
+    long cur[8], *s;
+    if (!g6_lfwd || label < 0 || label >= F->fn->nlabels || !g6_lfwd[label])
+        return;
+    s = g6_lsnap + 8L * label;
+    rc_state(F, cur);
+    for (int r = 0; r < 8; r++)
+        s[r] = !g6_lseen[label] || s[r] == cur[r] ? cur[r] : -1;
+    g6_lseen[label] = 1;
+}
+
+/* At `label`: what holds on every way in (the fall-through unless the
+ * code before ends in a jump), from here on; nothing where some way in is
+ * not known. */
+static void rc_label(const struct t_fn *F, int label)
+{
+    long cur[8], *s;
+    int ft = !F->barrier;
+    if (!g6_lfwd || label < 0 || label >= F->fn->nlabels || !g6_lfwd[label]) {
+        rc_reset();
+        return;
+    }
+    s = g6_lsnap + 8L * label;
+    rc_state(F, cur);
+    for (int r = 0; r < 8; r++) {
+        long o = ft ? cur[r] : -1;
+        if (g6_lseen[label])
+            o = !ft || o == s[r] ? s[r] : -1;
+        g6_rc_off[r] = o;
+        g6_rc_at[r] = F->t->len;
+    }
 }
 
 /* A register holding the frame word at off now, or -1. */
@@ -1007,6 +1065,7 @@ static int v6_branch(struct t_fn *F, int cond, int label)
 {
     struct code *t = F->t;
     int k = F->nfix, cls = class_of(F, k, cond), start = t->len, at, skip;
+    rc_snap(F, label);
     if (cond < 0) {
         at = cls == BC_FAR ? t_bl(t) : t_b16(t);
     } else if (cls == BC_SHORT) {
@@ -1052,7 +1111,9 @@ static int v6_invert_last(struct t_fn *F, int n, int label)
         return 0;
     cond = F->fix[F->bc_fix].cond ^ 1;
     F->t->len -= F->fix[F->bc_fix].sz;
-    rc_reset();
+    for (int r = 0; r < 8; r++)         /* begun after the branch removed */
+        if (g6_rc_at[r] > F->t->len)
+            g6_rc_off[r] = -1;
     if (g6_ins_at > F->t->len)
         g6_ins_at = F->t->len;
     F->nfix--;
@@ -2821,7 +2882,7 @@ static void gen_ins(struct t_fn *F, int n)
     switch (i->op) {
     case IR_LABEL:
         F->label_off[i->label] = t->len;
-        rc_reset();
+        rc_label(F, i->label);
         F->bc_end = -1;
         F->fl_end = -1;
         F->barrier = 0;
@@ -3772,6 +3833,41 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 atk[fn->ins[i].a] = 1;
         g6_atk = atk;
     }
+    {
+        /* the labels every jump to which comes before them (g6_lfwd) */
+        int nl = fn->nlabels;
+        int *pos = xmalloc((size_t)(nl + 1) * sizeof *pos);
+        char *fwd = xmalloc((size_t)nl + 1);
+        for (int l = 0; l <= nl; l++) {
+            pos[l] = -1;
+            fwd[l] = 1;
+        }
+        for (i = 0; i < fn->nins; i++)
+            if (fn->ins[i].op == IR_LABEL && fn->ins[i].label >= 0 &&
+                fn->ins[i].label < nl)
+                pos[fn->ins[i].label] = i;
+        for (i = 0; i < fn->nins; i++) {
+            const struct ir_ins *in = &fn->ins[i];
+            int l = in->label;
+            if (in->op == IR_SWITCH)
+                for (int k = 0; k < fn->jt[in->jt].n; k++) {
+                    int tl = fn->jt[in->jt].labels[k];
+                    if (tl >= 0 && tl < nl)
+                        fwd[tl] = 0;
+                }
+            if (in->op != IR_JMP && in->op != IR_BRZ && in->op != IR_BRNZ &&
+                in->op != IR_SWITCH && in->op != IR_LABELADDR)
+                continue;
+            if (l < 0 || l >= nl)
+                continue;
+            if (in->op == IR_LABELADDR || pos[l] < 0 || pos[l] < i)
+                fwd[l] = 0;
+        }
+        free(pos);
+        g6_lfwd = fwd;
+        g6_lseen = xcalloc((size_t)nl + 1, 1);
+        g6_lsnap = xmalloc((size_t)(nl + 1) * 8 * sizeof *g6_lsnap);
+    }
 
     {
     int len0 = t->len, nl0 = fn->nlines, nd0 = t->ndrange;
@@ -3828,6 +3924,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* ---- prologue ---- */
         g6_s0 = 6; g6_s1 = 7;              /* the prologue's */
         rc_reset();
+        if (g6_lseen)
+            memset(g6_lseen, 0, (size_t)fn->nlabels + 1);
         g6_ins_at = t->len;
         g6_fdead = -1;
         g6_fdead_ins = 0;
@@ -4180,5 +4278,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.remat_v);
     free((char *)g6_atk);
     g6_atk = NULL;
+    free(g6_lfwd);
+    free(g6_lseen);
+    free(g6_lsnap);
+    g6_lfwd = g6_lseen = NULL;
+    g6_lsnap = NULL;
     g6_cur = NULL;
 }
