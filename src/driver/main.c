@@ -1489,6 +1489,13 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         }
         if (s->kind == STMT_EXPR && !s->expr)
             continue;                         /* `;` */
+        /* `(void)param;` says the asm uses the parameter and computes
+         * nothing, so it is no code; GCC takes it in a naked function, and
+         * a port written for GCC uses it to quiet -Wunused-parameter. */
+        if (s->kind == STMT_EXPR && s->expr->kind == EXPR_CAST &&
+            s->expr->cast_ty && s->expr->cast_ty->kind == TY_VOID &&
+            s->expr->rhs && s->expr->rhs->kind == EXPR_VAR)
+            continue;
         /* A call with no arguments is its call instruction: AVR's
          * FreeRTOS port calls the scheduler from its naked yield between
          * the asm that saves and restores the context. */
@@ -5230,13 +5237,16 @@ int main(int argc, char **argv)
             incdirs[nincdirs++] = dir;
         } else if ((argv[i][0] == '-' && argv[i][1] == 'l') ||
                    (argv[i][0] == '-' && argv[i][1] == 'L') ||
-                   !strcmp(argv[i], "-T") || !strcmp(argv[i], "-e") ||
-                   !strcmp(argv[i], "-u")) {
-            /* the link's own options, as gcc takes them: -lNAME and
-             * -L DIR (attached or not), -T SCRIPT, -e SYM, -u SYM */
+                   (argv[i][0] == '-' && argv[i][1] == 'T' &&
+                    strncmp(argv[i] + 2, "text=", 5) &&
+                    strncmp(argv[i] + 2, "data=", 5) &&
+                    strncmp(argv[i] + 2, "bss=", 4)) ||
+                   !strcmp(argv[i], "-e") || !strcmp(argv[i], "-u")) {
+            /* the link's own options, as gcc takes them: -lNAME, -L DIR
+             * and -T SCRIPT (attached or not), -e SYM, -u SYM */
             char opt = argv[i][1];
             int at = i;
-            const char *v = (opt == 'l' || opt == 'L') && argv[i][2]
+            const char *v = (opt == 'l' || opt == 'L' || opt == 'T') && argv[i][2]
                 ? argv[i] + 2 : (i + 1 < argc ? argv[++i] : NULL);
             if (!v || !*v) {
                 fprintf(stderr, "embcc: -%c needs a%s\n", opt,
