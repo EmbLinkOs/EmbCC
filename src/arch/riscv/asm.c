@@ -683,6 +683,67 @@ static int fp_stmt(const struct tok *t, int n, struct code *out,
 #define FAIL(...)  do { snprintf(err, (size_t)errlen, __VA_ARGS__); \
                         return -1; } while (0)
 
+/* ---- data directives ------------------------------------------------------
+ *
+ * `.word 0x0000100f` in a template: an instruction this vocabulary does
+ * not have yet, written as its bytes, or a constant a trap handler finds
+ * beside its code. The sizes are GNU as's for RISC-V -- `.half` two,
+ * `.word` four, `.dword` eight -- and the generic spellings with them.
+ * Constants only, each GNU as's range for its width (a signed or an
+ * unsigned value that fits); a symbol would need a relocation, which an
+ * inline asm here has no way to carry. A .s file's are src/as/gas.c's
+ * and never reach this. 0 when stmt is not one, 1 when it was emitted. */
+static const struct { const char *name; int size; } data_dir[] = {
+    { ".byte", 1 },
+    { ".half", 2 }, { ".short", 2 }, { ".hword", 2 }, { ".2byte", 2 },
+    { ".word", 4 }, { ".long", 4 }, { ".int", 4 }, { ".4byte", 4 },
+    { ".dword", 8 }, { ".quad", 8 }, { ".8byte", 8 },
+    { NULL, 0 }
+};
+
+static int data_stmt(const char *stmt, int len, struct code *out,
+                     char *err, int errlen)
+{
+    int i = 0, d, m, size = 0;
+    while (i < len && isspace((unsigned char)stmt[i]))
+        i++;
+    d = i;
+    for (m = i; m < len && !isspace((unsigned char)stmt[m]); m++) {}
+    for (int k = 0; data_dir[k].name; k++)
+        if ((int)strlen(data_dir[k].name) == m - i &&
+            strncmp(stmt + i, data_dir[k].name, (size_t)(m - i)) == 0)
+            size = data_dir[k].size;
+    if (!size)
+        return 0;
+    /* the values, one per comma, each a constant expression */
+    for (i = m; i < len; ) {
+        int s, e, depth = 0;
+        long long v;
+        while (i < len && isspace((unsigned char)stmt[i]))
+            i++;
+        if (i >= len)
+            break;
+        for (s = i; i < len && (depth > 0 || stmt[i] != ','); i++) {
+            if (stmt[i] == '(') depth++;
+            else if (stmt[i] == ')') depth--;
+        }
+        for (e = i; e > s && isspace((unsigned char)stmt[e - 1]); e--) {}
+        if (e == s || !asm_const_expr(stmt + s, e - s, &v))
+            FAIL("\"%.*s\" in %.*s is not a constant: inline asm data takes "
+                 "numbers, and a symbol would need a relocation",
+                 e - s, stmt + s, m - d, stmt + d);
+        if (size < 8 && (v < -(1LL << (8 * size - 1)) ||
+                         v > (long long)((1ULL << (8 * size)) - 1)))
+            FAIL("%lld does not fit in %d byte%s", v, size,
+                 size == 1 ? "" : "s");
+        for (int b = 0; b < size; b++)
+            code_byte(out, (int)(((unsigned long long)v >> (8 * b)) & 0xff));
+        if (i < len)
+            i++;                        /* the comma */
+    }
+    return 1;
+}
+
 static int one_stmt(const char *stmt, int len, struct code *out,
                     char *err, int errlen)
 {
@@ -692,6 +753,11 @@ static int one_stmt(const char *stmt, int len, struct code *out,
 
     if (n == 0)
         return 0;                       /* blank or comment-only */
+    {
+        int r = data_stmt(stmt, len, out, err, errlen);
+        if (r)
+            return r < 0 ? -1 : 0;
+    }
 
     {
         int r = fp_stmt(t, n, out, err, errlen);
@@ -1262,4 +1328,13 @@ void rvasm_vocabulary(FILE *f)
         if (nfmt == 2 && target_xlen() == 64)
             fprintf(f, "\tfmv.x.d a0, fa0\n\tfmv.d.x ft11, s11\n");
     }
+    /* The data directives, last: each spelling, both ends of each
+     * width's range and an expression -- 60 bytes, so whatever follows
+     * stays aligned. */
+    fprintf(f, "\t.byte 255, -128, 0x7f, 0\n\t.half -32768, 0xffff\n");
+    fprintf(f, "\t.short 1\n\t.hword -2\n\t.2byte 0x1234, 7\n");
+    fprintf(f, "\t.word 0x12345678, -2147483648\n\t.long 4294967295\n");
+    fprintf(f, "\t.int (1 << 20) | 0x13\n\t.4byte 0x0000100f\n");
+    fprintf(f, "\t.dword 0x123456789abcdef0\n\t.quad -1\n");
+    fprintf(f, "\t.8byte 5\n");
 }
