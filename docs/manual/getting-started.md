@@ -231,14 +231,19 @@ also need `make libcxx-linux-x86_64`.
 
 ### macOS
 
-On macOS, EmbCC writes Mach-O objects and the system linker links them.
-On Apple silicon:
+On macOS, EmbCC writes Mach-O objects and links them with Apple's
+linker (`/usr/bin/ld`, from the Command Line Tools), as clang does. On
+Apple silicon:
 
 ```sh
-./embcc --target=aarch64-apple-darwin -O2 -c hello.c -o hello.o
-cc hello.o -o hello
+./embcc --target=aarch64-apple-darwin -O2 hello.c -o hello
 ./hello
 ```
+
+The link takes `-L`, `-l`, `-framework NAME` and `-Wl,` options;
+`-Wl,--gc-sections` and `-Wl,-Map=FILE` are passed as ld64's
+`-dead_strip` and `-map FILE`. `EMBCC_SHOW_LINK=1` prints the linker's
+command line.
 
 On an Intel Mac use `--target=x86_64-apple-darwin`. The driver also takes
 Apple's spelling of the same choice, `-arch arm64` or `-arch x86_64`, and
@@ -249,8 +254,9 @@ The headers are the macOS SDK's, so a program sees the C library it links
 against, POSIX headers such as `<pthread.h>` and `<unistd.h>` included.
 EmbCC uses the SDK named by `-isysroot`, else by `$SDKROOT`, else the
 Command Line Tools or Xcode SDK. A few SDK headers are corrected for a
-compiler that does not define `__GNUC__` (`include/darwin/`). `-g` is not
-supported for the Darwin targets. See [Targets](targets.md).
+compiler that does not define `__GNUC__` (`include/darwin/`). `-g` gives
+a warning and no debug information for the Darwin targets. See
+[Targets](targets.md).
 
 ### Bare-metal x86-64 and EmbLinkOS
 

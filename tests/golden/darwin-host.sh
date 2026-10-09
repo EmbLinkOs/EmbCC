@@ -149,3 +149,32 @@ for O in -O0 -O2; do
     diff "$out/want.txt" "$out/got.txt" || fail "prog $O printed differently from clang's build"
 done
 echo "darwin-host: threads, fork/waitpid, varargs into the SDK's vsnprintf and <math.h> run as clang's build at -O0 and -O2: $(cat "$out/got.txt")"
+
+# ---- 4. EmbCC links it -------------------------------------------------------
+# Through Apple's linker, as clang does: one command from sources to a
+# program, two sources and a static library, -l, -framework, and GNU's
+# --gc-sections and -Map= in ld64's spelling.
+printf 'int helper(int x) { return x * 2; }\n' > "$out/h.c"
+printf '#include <stdio.h>\nint helper(int);\nint lib_fn(void);\nint main(void) { printf("%%d\\n", helper(20) + lib_fn()); return 0; }\n' > "$out/m.c"
+printf 'int lib_fn(void) { return 2; }\n' > "$out/l.c"
+"$EMBCC" -arch arm64 -c "$out/l.c" -o "$out/l.o" || fail "l.c"
+ar rcs "$out/libl.a" "$out/l.o" 2> /dev/null || fail "ar"
+"$EMBCC" -arch arm64 -O2 "$out/m.c" "$out/h.c" -L"$out" -ll -lm \
+    -framework CoreFoundation -Wl,--gc-sections "-Wl,-Map=$out/m.map" \
+    -o "$out/m" 2> "$out/m.err" || { cat "$out/m.err"; fail "embcc linking a Darwin program"; }
+[ "$("$out/m")" = 42 ] || fail "the program EmbCC linked printed $("$out/m")"
+[ -s "$out/m.map" ] || fail "-Wl,-Map= wrote no map"
+otool -L "$out/m" 2> /dev/null | grep -q CoreFoundation ||
+    fail "-framework CoreFoundation is not among the program's libraries"
+"$EMBCC" -arch arm64 -pthread -O2 "$out/prog.c" -o "$out/prog2" 2> "$out/p2.err" ||
+    { cat "$out/p2.err"; fail "embcc linking prog.c"; }
+"$out/prog2" > "$out/got2.txt" && diff "$out/want.txt" "$out/got2.txt" ||
+    fail "prog.c linked by EmbCC printed differently"
+# -g: a warning, no debug information, and the same code
+"$EMBCC" -arch arm64 -O2 -g -c "$out/h.c" -o "$out/hg.o" 2> "$out/g.err" ||
+    { cat "$out/g.err"; fail "-g stopped a Darwin compile"; }
+grep -q 'warning: -g: no debug information for aarch64-apple-darwin' "$out/g.err" ||
+    { cat "$out/g.err"; fail "-g on Darwin gave no warning"; }
+"$EMBCC" -arch arm64 -O2 -c "$out/h.c" -o "$out/h0.o"
+cmp -s "$out/hg.o" "$out/h0.o" || fail "-g changed a Darwin object"
+echo "darwin-host: EmbCC links Darwin programs (sources, -L/-l, -framework, --gc-sections, -Map); -g warns and changes nothing"

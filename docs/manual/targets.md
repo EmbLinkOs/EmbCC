@@ -320,7 +320,7 @@ Darwin triples, each with its own diagnostic:
 
 | Construct | Diagnostic |
 |---|---|
-| `-g` | `-g is not supported for a Darwin target yet: its DWARF goes in a __DWARF segment this does not write, and emitting the ELF layout under a Mach-O name would be worse than refusing` |
+| `-g` | Warning, and the object is compiled without debug information: `-g: no debug information for aarch64-apple-darwin yet; d.c is compiled without it` |
 | `__thread` | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
 | `__attribute__((constructor))`, `destructor` | `__attribute__((constructor)) is not supported for a Darwin target yet: it needs a __DATA,__mod_init_func section this Mach-O writer does not emit` |
 | file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped` |

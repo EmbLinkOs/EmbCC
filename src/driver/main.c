@@ -935,8 +935,12 @@ static int firmware_target(void)
  * -Wl,-Ttext/-Tdata. There is no default, because a firmware image
  * linked to a guessed map runs, wrongly. -nostdlib leaves out libc and
  * librt, -nodefaultlibs too, and -nostartfiles crt1. */
+static int darwin_link(const char *in, const char *exe);
+
 static int compile_and_link(const char *in, const char *out)
 {
+    if (target_os_get() == TGT_OS_DARWIN)
+        return darwin_link(in, out);
     int fw = firmware_target();
     if (!fw && (target_get() != TARGET_X86_64 ||
                 target_fmt_get() != TGT_FMT_ELF)) {
@@ -1596,6 +1600,137 @@ static const char *darwin_sdk(void)
     return NULL;
 }
 
+/* ---- linking for macOS ------------------------------------------------
+ *
+ * EmbCC writes Mach-O objects and embld links ELF, so a Darwin program is
+ * linked by Apple's linker, ld64 (/usr/bin/ld), as clang links it. It comes
+ * with the Command Line Tools, which also hold the SDK a Darwin compile
+ * reads its headers from. The command is clang's: the architecture, the
+ * oldest macOS to run on (-mmacosx-version-min=, else 11.0 for arm64 and
+ * 10.13 for x86-64) and the SDK's version, the SDK as the library root,
+ * the objects and libraries in command-line order, -L directories, the
+ * -Wl options (GNU's --gc-sections and -Map= in ld64's spelling, -dead_strip
+ * and -map; anything else as written), then libSystem -- the C library,
+ * threads and the math library in one -- and libc++ for C++. */
+static const char *g_macos_min;
+
+/* The SDK's version, from SDKSettings.json's "Version": what ld64 records
+ * as the SDK the program was built against. */
+static void darwin_sdk_version(const char *sdk, char *out, size_t cap)
+{
+    char path[1100], buf[8192];
+    snprintf(out, cap, "%s", g_macos_min ? g_macos_min : "11.0");
+    snprintf(path, sizeof path, "%s/SDKSettings.json", sdk);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    const char *v = strstr(buf, "\"Version\"");
+    if (!v || !(v = strchr(v + 9, '"')))
+        return;
+    size_t k = 0;
+    for (v++; *v && *v != '"' && k + 1 < cap; v++)
+        out[k++] = *v;
+    out[k] = 0;
+}
+
+static int darwin_link(const char *in, const char *exe)
+{
+    const char *sdk = darwin_sdk();
+    if (!sdk) {
+        fprintf(stderr, "embcc: error: linking for %s needs the macOS SDK "
+                        "and its linker: install the Command Line Tools "
+                        "(xcode-select --install), or name an SDK with "
+                        "-isysroot\n", target_triple_now());
+        return 1;
+    }
+    if (!plat_file_exists("/usr/bin/ld")) {
+        fprintf(stderr, "embcc: error: linking for %s needs Apple's linker, "
+                        "/usr/bin/ld (the Command Line Tools)\n",
+                target_triple_now());
+        return 1;
+    }
+    char obj[1100];
+    snprintf(obj, sizeof obj, "%s.embcc-tmp.o", exe);
+    if (in) {
+        int rc = has_gas_suffix(in) ? assemble_file(in, obj)
+                                    : compile(in, obj, 0);
+        if (rc != 0)
+            return rc;
+    }
+    int arm64 = target_get() == TARGET_AARCH64;
+    char sdkver[64];
+    darwin_sdk_version(sdk, sdkver, sizeof sdkver);
+    const char *argv[600];
+    int n = 0;
+    argv[n++] = "/usr/bin/ld";
+    argv[n++] = "-arch";
+    argv[n++] = arm64 ? "arm64" : "x86_64";
+    argv[n++] = "-platform_version";
+    argv[n++] = "macos";
+    argv[n++] = g_macos_min ? g_macos_min : arm64 ? "11.0" : "10.13";
+    argv[n++] = sdkver;
+    argv[n++] = "-syslibroot";
+    argv[n++] = sdk;
+    argv[n++] = "-o";
+    argv[n++] = exe;
+    if (g_entry) {
+        argv[n++] = "-e";
+        argv[n++] = g_entry;
+    }
+    for (int k = 0; k < g_nlibdirs && n < 560; k++) {
+        argv[n++] = "-L";
+        argv[n++] = g_libdirs[k];
+    }
+    if (in)
+        argv[n++] = obj;
+    for (int k = 0; k < g_nlink_in && n < 560; k++) {
+        const char *a = g_link_in[k];
+        if (!strncmp(a, "-framework ", 11)) {
+            argv[n++] = "-framework";
+            argv[n++] = a + 11;
+        } else {
+            argv[n++] = a;
+        }
+    }
+    for (int k = 0; k < g_nwl && n < 590; k++) {
+        const char *a = g_wl[k];
+        if (!strcmp(a, "--gc-sections")) {
+            argv[n++] = "-dead_strip";
+        } else if (!strncmp(a, "-Map=", 5) || !strncmp(a, "--Map=", 6)) {
+            argv[n++] = "-map";
+            argv[n++] = strchr(a, '=') + 1;
+        } else if (!strcmp(a, "--no-gc-sections") ||
+                   !strcmp(a, "--as-needed") ||
+                   !strcmp(a, "--no-as-needed")) {
+            /* GNU ld's defaults and their opposites: nothing in ld64 */
+        } else {
+            argv[n++] = a;
+        }
+    }
+    if (!g_nostdlib && !g_nodefaultlibs) {
+        if (g_link_cxx || (in && lang_cxx))
+            argv[n++] = "-lc++";
+        argv[n++] = "-lSystem";
+    }
+    argv[n] = NULL;
+    if (plat_getenv("EMBCC_SHOW_LINK")) {
+        for (int k = 0; k < n; k++)
+            fprintf(stderr, "%s%s", k ? " " : "", argv[k]);
+        fputc('\n', stderr);
+    }
+    int rc = 1, which;
+    if (plat_run_start(argv) < 0)
+        fprintf(stderr, "embcc: error: could not run /usr/bin/ld\n");
+    else
+        rc = plat_run_wait(&which);
+    if (in)
+        remove(obj);
+    return rc;
+}
+
 /* Asm labels that rename a symbol, now that nothing reads a function's
  * name for what it is (a builtin, main, setjmp): the object's name. ELF
  * and COFF take the label as written. Mach-O prefixes its own underscore,
@@ -1895,6 +2030,17 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     /* -O0 and -Og keep every source variable in its slot, the optimizer
      * and the backends both; -g only describes what they did. */
     target_set_keep_vars(opt_level == 0 || opt_for_debug);
+    /* Darwin's DWARF goes in a __DWARF segment this does not write yet,
+     * and the ELF layout under a Mach-O name would be worse than none.
+     * The code is the same with or without -g (backends ignore it), so
+     * the object is written without debug information, and the build is
+     * told so -- not stopped: every CMake Debug build passes -g. */
+    if (want_debug && target_fmt_get() == TGT_FMT_MACHO) {
+        fprintf(stderr, "embcc: warning: -g: no debug information for %s "
+                        "yet; %s is compiled without it\n",
+                target_triple_now(), in);
+        want_debug = 0;
+    }
     target_set_debug_info(want_debug);
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
     time_mark("optimization");
@@ -2684,12 +2830,6 @@ static int compile_unit(const char *in, const char *out, int pp_only)
                            "not supported for %s output", f->name,
                            target_fmt_name(target_fmt_get()));
     if (target_fmt_get() == TGT_FMT_MACHO) {
-        if (want_debug)
-            diag_fatal(in, 0,
-                       "-g is not supported for a Darwin target yet: its "
-                       "DWARF goes in a __DWARF segment this does not "
-                       "write, and emitting the ELF layout under a Mach-O "
-                       "name would be worse than refusing");
         /* A file-scope asm block's BYTES reach __text below, but its
          * labels and relocations are written by the ELF path further
          * down and have no Mach-O counterpart yet. Leaving that alone
@@ -5215,8 +5355,21 @@ int main(int argc, char **argv)
             g_isysroot = argv[++i];
         } else if (strncmp(argv[i], "-mmacosx-version-min=", 21) == 0 ||
                    strncmp(argv[i], "-mmacos-version-min=", 20) == 0) {
-            /* the oldest macOS to run on: only availability attributes
-             * read it, and they are not checked */
+            /* the oldest macOS to run on: the linker records it
+             * (darwin_link); availability attributes are not checked */
+            g_macos_min = strchr(argv[i], '=') + 1;
+        } else if (strcmp(argv[i], "-framework") == 0 && i + 1 < argc) {
+            /* an Apple framework, for the Darwin link: kept in order with
+             * the other link inputs, as one `-framework NAME` word */
+            size_t ln = strlen(argv[i + 1]) + 12;
+            char *w = xmalloc(ln);
+            snprintf(w, ln, "-framework %s", argv[i + 1]);
+            g_child_skip[i] = g_child_skip[i + 1] = 1;
+            if (g_nlink_in < 256) {
+                g_link_argi[g_nlink_in] = i;
+                g_link_in[g_nlink_in++] = w;
+            }
+            i++;
         } else if (strcmp(argv[i], "--print-search-dirs") == 0) {
             paths_print_search_dirs();
             return 0;
@@ -5461,8 +5614,12 @@ int main(int argc, char **argv)
     /* EmbCC's own freestanding headers (stddef, stdarg, stdbool, float)
      * ship beside the binary, so <stdarg.h> resolves with no -I — exactly
      * as a compiler finds its own headers. Appended last, below every -I,
-     * so a project header of the same name still wins. */
-    if (nincdirs < MAX_INCDIRS) {
+     * so a project header of the same name still wins. Not for a Darwin
+     * target, whose order is the SDK's and is set in full by
+     * incdirs_with_defaults: from the source tree this put EmbCC's
+     * <stddef.h> before the SDK's, so the tree's compiler and an installed
+     * one read different headers. */
+    if (nincdirs < MAX_INCDIRS && target_os_get() != TGT_OS_DARWIN) {
         static char selfinc[4096];
         const char *slash = strrchr(argv[0], '/');
         if (slash)

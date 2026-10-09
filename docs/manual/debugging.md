@@ -176,13 +176,20 @@ a debugger can find its address but not its type.
 | Thumb (Cortex-M) | Yes | |
 | RISC-V, RV32 and RV64 | Yes | Tested with gdb under QEMU (RV32). See [Known problems](#known-problems). |
 | AVR | Yes | Tested with gdb and with EmbDBG under QEMU (`-M uno`). |
-| Any Darwin target (Mach-O) | Refused | |
+| Any Darwin target (Mach-O) | No | Compiled without debug information, with a warning. |
 | Any Windows target (COFF) | Refused | |
 
-For Darwin and Windows targets the compilation stops:
+For a Darwin target, `-g` gives a warning and the object has no debug
+information; the code is the same either way. Its DWARF belongs in a
+`__DWARF` segment that EmbCC does not write yet:
 
 ```text
-embcc: d.c: error: -g is not supported for a Darwin target yet: its DWARF goes in a __DWARF segment this does not write, and emitting the ELF layout under a Mach-O name would be worse than refusing
+embcc: warning: -g: no debug information for aarch64-apple-darwin yet; d.c is compiled without it
+```
+
+For a Windows target the compilation stops:
+
+```text
 embcc: d.c: error: -g is not supported for a Windows target yet: its debug information goes in CodeView records this does not write, and emitting DWARF under a COFF name would be worse than refusing
 ```
 
