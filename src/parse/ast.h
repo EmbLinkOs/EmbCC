@@ -293,6 +293,7 @@ struct stmt {
  * program we accept means the same thing to gcc). */
 struct global {
     const char *name;
+    const char *asm_name;       /* see struct func */
     const char *file;     /* where THIS declaration was written — a
                            * header, usually, and not the unit's name */
     int line;
@@ -355,6 +356,9 @@ struct global {
 
 struct func {
     const char *name;
+    /* An asm label that renames the symbol (`__asm("section$start$...")`):
+     * what the object names it, applied after optimization; NULL for none */
+    const char *asm_name;
     const char *file;     /* see struct global */
     int line;
     int name_line, name_col;  /* see struct global */

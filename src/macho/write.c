@@ -197,6 +197,10 @@ static int add_sym2(struct machow *w, const char *name, int prefix,
     struct nlist_64 n;
     memset(&n, 0, sizeof n);
     n.n_strx = (uint32_t)w->strtab.len;
+    if (name && name[0] == '\1') {
+        name++;                 /* an asm label's exact symbol */
+        prefix = 0;
+    }
     if (name && *name) {
         if (prefix)
             buf_append(&w->strtab, "_", 1);

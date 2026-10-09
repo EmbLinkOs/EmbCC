@@ -20,6 +20,7 @@
 
 struct attrs { int packed; int aligned; int weak; int noreturn;
                const char *section;
+               const char *asm_name; /* a renaming asm label (asm_label) */
                int sret; /* embcc_sret on a parameter (type.h sret_first) */
                int nothrow;
                /* format(archetype, string-index, first-to-check): 1 printf,
@@ -143,6 +144,7 @@ struct parser {
      * pointed AT rather than at the function's line -- an editor renaming
      * one has to edit the name, not the first column of the signature. */
     int decl_name_line, decl_name_col;
+    const char *decl_name;      /* ...and the name itself (asm labels) */
     int fn_plines[MAX_PARAMS], fn_pcols[MAX_PARAMS];
     int fn_punused[MAX_PARAMS]; /* each parameter's __attribute__((unused)) */
     /* An `unused` met in a declarator's qualifier position
@@ -823,6 +825,30 @@ static int isr_kind(struct parser *ps, int line, const char *arg)
     return ISR_INTERRUPT;
 }
 
+/* An asm label -- `int fputs(const char *, FILE *) __asm("_" "fputs");`,
+ * the GNU extension that gives a declaration its symbol. The macOS SDK
+ * writes one on most of libc (__DARWIN_ALIAS), glibc's __REDIRECT too.
+ * One that spells the name the declaration already has, in the target's
+ * symbol convention (Mach-O's leading underscore), changes nothing. One
+ * that renames the symbol is kept (attrs.asm_name, then func/global's) and
+ * applied after optimization (apply_asm_names): the macOS port of an RTOS
+ * names the linker's section bounds `section$start$__DATA_CONST$...`. */
+static char *parse_str_literal(struct parser *ps, const char *what);
+
+static const char *asm_label(struct parser *ps)
+{
+    advance(ps);
+    expect(ps, TOK_LPAREN, "'(' after an asm label");
+    const char *lab = parse_str_literal(ps, "an asm label's symbol name");
+    expect(ps, TOK_RPAREN, "')' after an asm label");
+    const char *plain = lab;
+    if (target_fmt_get() == TGT_FMT_MACHO && plain[0] == '_')
+        plain++;
+    if (ps->decl_name && strcmp(plain, ps->decl_name) == 0)
+        return NULL;            /* the name it has anyway */
+    return lab;
+}
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
     /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
@@ -836,6 +862,11 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             advance(ps);
             expect(ps, TOK_LPAREN, "'(' after __attribute__");
             expect(ps, TOK_LPAREN, "a second '(' after __attribute__");
+        } else if (cur(ps)->kind == TOK_KW_ASM) {
+            const char *lab = asm_label(ps);
+            if (lab)
+                out->asm_name = lab;
+            continue;
         } else if (cur(ps)->kind == TOK_LBRACKET) {
             /* One `[` is a subscript or an array bound; two in a row
              * is a C23 attribute. No peek helper here, so: look, and
@@ -1322,6 +1353,7 @@ static struct type *declarator(struct parser *ps, struct type *base,
             *obj_const = top;
         ps->decl_name_line = cur(ps)->line;
         ps->decl_name_col = cur(ps)->col;
+        ps->decl_name = cur(ps)->text;
         advance(ps);
     }
     if (nested && cur(ps)->kind == TOK_LPAREN)
@@ -1390,6 +1422,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     /* The declarator being parsed has its name already: the parameters'
      * own declarators must not leave theirs in its place. */
     int name_line = ps->decl_name_line, name_col = ps->decl_name_col;
+    const char *name_txt = ps->decl_name;
     /* A pending cmse_nonsecure_call belongs to THIS function type, not to
      * one among its parameters' types. */
     int cmse_call = ps->cmse_call_pending;
@@ -1480,6 +1513,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     ps->vla_ok = saved_vla_ok;
     ps->decl_name_line = name_line;
     ps->decl_name_col = name_col;
+    ps->decl_name = name_txt;
     struct type *ft = ty_func(ret, pt, n, varargs);
     ft->sret_first = sret;
     ft->cmse_ns_call = cmse_call;
@@ -5434,6 +5468,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 parse_error_line(ps, gline,
                            "a variable cannot have a function type — "
                            "did you mean a function pointer (*)?");
+            ps->decl_name = gname;
             parse_attributes(ps, &at); /* int x __attribute__((weak)) = ... */
             int gnl = ps->decl_name_line, gnc = ps->decl_name_col;
             struct global *g = parse_global(ps, gt, gname, gline,
@@ -5443,6 +5478,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
             pcs_not_here(ps, &at, "a variable");
             g->is_weak = at.weak;
+            g->asm_name = at.asm_name;
             g->attr_used = at.used;
             g->attr_unused = at.unused;
             g->attr_deprecated = at.deprecated;
@@ -5584,8 +5620,10 @@ static void parse_top(struct parser *ps, struct unit *u,
 
 fn_tail:
     /* trailing attributes: void f(void) __attribute__((noreturn/weak)) */
+    ps->decl_name = f->name;        /* not the last parameter's */
     parse_attributes(ps, &at);
     f->is_weak = at.weak;
+    f->asm_name = at.asm_name;
     /* Trailing is GCC's usual spelling for these two -- `void die(void)
      * __attribute__((noreturn));` -- and they were parsed here and then
      * dropped, so only the leading form ever reached the func node. */
@@ -5669,6 +5707,7 @@ fn_tail:
                 parse_attributes(ps, &at);
                 pcs_not_here(ps, &at, "a variable");
                 g->is_weak = at.weak;
+                g->asm_name = at.asm_name;
                 g->attr_used = at.used;
                 g->attr_unused = at.unused;
                 g->attr_deprecated = at.deprecated;

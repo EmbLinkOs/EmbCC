@@ -5990,6 +5990,9 @@ static void merge_decls(struct unit *u)
          * (EmbTrace's own hooks, a clock) -- instrumenting one of those
          * recursed through the hook forever */
         canon->attr_no_instrument |= f->attr_no_instrument;
+        /* an asm label on any declaration names the symbol */
+        if (!canon->asm_name)
+            canon->asm_name = f->asm_name;
         /* and noinline and always_inline likewise: GCC takes either from
          * any declaration, and a definition after a plain prototype is
          * the usual place for noinline -- which was inlined */
@@ -6076,6 +6079,8 @@ static void merge_globals(struct unit *u)
         if (!g->is_extern)
             canon->is_const = g->is_const;
         canon->is_weak |= g->is_weak;
+        if (!canon->asm_name)
+            canon->asm_name = g->asm_name;
         if (g->section) {
             if (canon->section && strcmp(canon->section, g->section) != 0) {
                 diag_error_at(g->file, g->line, 0,

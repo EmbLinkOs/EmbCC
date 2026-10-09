@@ -211,6 +211,10 @@ static const struct predef_macro os_darwin[] = {
  * its entries of the same name, with clang's values for
  * arm64-apple-macos; __CHAR_UNSIGNED__ is dropped (contradicted). */
 static const struct predef_macro darwin_a64_model[] = {
+    /* Apple's name for the architecture: the macOS SDK's sys/cdefs.h
+     * stops with "Unsupported architecture" without it */
+    { "__arm64__", "1" },
+    { "__arm64", "1" },
     { "__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__" },
     { "__LDBL_DECIMAL_DIG__", "17" },
     { "__LDBL_DENORM_MIN__", "4.9406564584124654e-324L" },
