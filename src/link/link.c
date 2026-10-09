@@ -3596,6 +3596,98 @@ static void apply_avr(struct linker *l, struct object *o, unsigned type,
     case R_AVR_HI8_LDI_GS:
         avr_patch_ldi_at(loc, (int)((V >> 9) & 0xff));
         return;
+    /* The rest of the psABI's `ldi` forms, as avr-gcc and clang write
+     * them: hh8 and ms8 (bits 23:16, 31:24), the _NEG forms of
+     * lo8(-(x)) (the value negated first), and the _PM forms of a
+     * program-space address, halved to a word -- an odd one cannot be a
+     * word, as binutils refuses it too. The computations are binutils'
+     * (elf32-avr.c, avr_final_link_relocate). */
+    case R_AVR_HH8_LDI:
+        avr_patch_ldi_at(loc, (int)((V >> 16) & 0xff));
+        return;
+    case R_AVR_MS8_LDI:
+        avr_patch_ldi_at(loc, (int)((V >> 24) & 0xff));
+        return;
+    case R_AVR_LO8_LDI_NEG:
+        avr_patch_ldi_at(loc, (int)(-V & 0xff));
+        return;
+    case R_AVR_HI8_LDI_NEG:
+        avr_patch_ldi_at(loc, (int)((-V >> 8) & 0xff));
+        return;
+    case R_AVR_HH8_LDI_NEG:
+        avr_patch_ldi_at(loc, (int)((-V >> 16) & 0xff));
+        return;
+    case R_AVR_MS8_LDI_NEG:
+        avr_patch_ldi_at(loc, (int)((-V >> 24) & 0xff));
+        return;
+    case R_AVR_LO8_LDI_PM: case R_AVR_HI8_LDI_PM: case R_AVR_HH8_LDI_PM:
+    case R_AVR_LO8_LDI_PM_NEG: case R_AVR_HI8_LDI_PM_NEG:
+    case R_AVR_HH8_LDI_PM_NEG: {
+        int neg = type >= R_AVR_LO8_LDI_PM_NEG;
+        int sh = 8 * ((type - (neg ? R_AVR_LO8_LDI_PM_NEG : R_AVR_LO8_LDI_PM)));
+        long long x = neg ? -V : V;
+        if (x & 1)
+            die("%s: pm_lo8/pm_hi8 of the odd address 0x%llx; a program "
+                "address is a word number, which an odd byte address is "
+                "not", o->name, (unsigned long long)V);
+        avr_patch_ldi_at(loc, (int)(((x >> 1) >> sh) & 0xff));
+        return;
+    }
+    case R_AVR_LDI:
+        if (V < -128 || V > 255)
+            die("%s: an ldi of %lld, which is not a byte", o->name, V);
+        avr_patch_ldi_at(loc, (int)(V & 0xff));
+        return;
+    /* ldd/std's six-bit displacement and adiw/sbiw's six-bit immediate:
+     * unsigned, and a value out of range is an error, not a mask. */
+    case R_AVR_6:
+        if (V < 0 || V > 63)
+            die("%s: a displacement of %lld for ldd/std, which reach 0..63",
+                o->name, V);
+        avr_patch_q6_at(loc, (int)V);
+        return;
+    case R_AVR_6_ADIW:
+        if (V < 0 || V > 63)
+            die("%s: an adiw/sbiw immediate of %lld, which must be 0..63",
+                o->name, V);
+        avr_patch_k6_at(loc, (int)V);
+        return;
+    /* in/out reach I/O addresses 0..63, sbi/cbi/sbic/sbis only 0..31 */
+    case R_AVR_PORT6:
+        if (V < 0 || V > 63)
+            die("%s: in/out of I/O address %lld, which is outside 0..63",
+                o->name, V);
+        avr_patch_io6_at(loc, (int)V);
+        return;
+    case R_AVR_PORT5:
+        if (V < 0 || V > 31)
+            die("%s: sbi/cbi of I/O address %lld, which is outside 0..31",
+                o->name, V);
+        avr_patch_io5_at(loc, (int)V);
+        return;
+    /* A byte of data: the value, or its low, high or third byte. */
+    case R_AVR_8:
+        if (V < -128 || V > 255)
+            die("%s: a .byte of %lld, which does not fit", o->name, V);
+        *loc = (unsigned char)(V & 0xff);
+        return;
+    case R_AVR_8_LO8:
+        *loc = (unsigned char)(V & 0xff);
+        return;
+    case R_AVR_8_HI8:
+        *loc = (unsigned char)((V >> 8) & 0xff);
+        return;
+    case R_AVR_8_HLO8:
+        *loc = (unsigned char)((V >> 16) & 0xff);
+        return;
+    case R_AVR_32_PCREL:
+        put32(loc, (unsigned int)(V - (long long)P));
+        return;
+    /* What an assembler writes when it expects a RELAXING linker to
+     * shorten the code between two labels: the difference is already in
+     * the section. This linker never relaxes, so it stays right. */
+    case R_AVR_DIFF8: case R_AVR_DIFF16: case R_AVR_DIFF32:
+        return;
     case R_AVR_CALL:
         if (V & 1)
             die("%s: a call to an odd address 0x%llx; AVR instructions are "
