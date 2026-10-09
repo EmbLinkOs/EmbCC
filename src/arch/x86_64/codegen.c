@@ -3253,6 +3253,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * address was called through its vtable instead (clang aligns member
      * functions to 2 for this; every function of a C++ unit is, here). */
     int falign = !target_opt_size() ? 16 : predef_is_cxx() ? 2 : 1;
+    /* An asm that aligns its own bytes (`.p2align 3`) starts the function
+     * on that, so that in a section of its own the buffer's offsets are
+     * the section's. */
+    for (int k = 0; k < fn->nins; k++) {
+        const struct ir_asm *ia = fn->ins[k].op == IR_ASM ? fn->ins[k].asm_ir
+                                                          : NULL;
+        int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+        if (m > falign)
+            falign = m;
+    }
     if (falign > 1)
         code_align(text, falign, 0x90);
     f->code_off = text->len;
@@ -5736,8 +5746,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 if (ia->out[k].mem && ia->out[k].reg < 16)
                     x86_load_reg_mem(text, ia->out[k].reg, REG_RBP,
                                      sd[ia->out[k].temp], 8);
-            for (int k = 0; k < ia->codelen; k++)
-                code_byte(text, ia->code[k]);
+            /* the bytes, padded at each alignment for where they land */
+            code_put_asm(text, ia->code, ia->codelen, ia->drange,
+                         ia->ndrange, ia->arange, ia->narange, CODE_FILL_X86);
             /* The address scratch must not be an OUTPUT register, or loading
              * it would clobber a result before it is stored (e.g. cpuid's
              * four a/b/c/d outputs). Pick one free of every operand. Only GPR

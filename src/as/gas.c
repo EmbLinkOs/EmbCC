@@ -1182,8 +1182,11 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
             return 1;
         }
     }
-    int is_call = g->tgt->machine == EM_RISCV &&
-                  strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]);
+    /* `tail sym` is `call`'s pair through t1, with no link */
+    int is_tail = g->tgt->machine == EM_RISCV &&
+                  strncmp(p, "tail", 4) == 0 && isspace((unsigned char)p[4]);
+    int is_call = is_tail || (g->tgt->machine == EM_RISCV &&
+                  strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4]));
     int is_la = g->tgt->machine == EM_RISCV &&
                 strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2]);
     /* `lw rd, sym` is RISC-V's pair too; MIPS's is its own symform's */
@@ -1224,6 +1227,38 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         free(tmp.p);
         return 1;
     }
+    /* RISC-V's jump or branch to a label in another section or another
+     * file -- an RTOS port's context switch jumps between the sections of
+     * its .S -- is the one instruction with its offset left to the linker:
+     * R_RISCV_JAL for `j sym`, `jal sym` and `jal rd, sym`, R_RISCV_BRANCH
+     * for a conditional branch, as GNU as writes them. */
+    if (g->tgt->machine == EM_RISCV && !is_call && !is_la) {
+        size_t m = 0;
+        while (p[m] && !isspace((unsigned char)p[m])) m++;
+        int jal = (m == 1 && p[0] == 'j') || (m == 3 && !strncmp(p, "jal", 3));
+        int br = p[0] == 'b' && m >= 3 && m <= 4;
+        const char *c = strrchr(p, ',');
+        const char *last = skip_ws((char *)(c ? c + 1 : p + m));
+        size_t en = strlen(ext), ln = 0;
+        while (last[ln] && is_symc((unsigned char)last[ln])) ln++;
+        if ((jal || br) && ln == en && !strncmp(last, ext, en) &&
+            !*skip_ws((char *)(last + ln))) {
+            char buf[128];
+            struct code tmp = { 0 };
+            char err[256];
+            snprintf(buf, sizeof buf, "%.*s.+0", (int)(last - p), p);
+            if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
+                gerr(g, "%s", err);
+            } else {
+                if (pass == 2)
+                    fix_add(g, g->cur, pc, ext,
+                            jal ? R_RISCV_JAL : R_RISCV_BRANCH, 0);
+                emit_bytes(g, (const unsigned char *)tmp.p, tmp.len);
+            }
+            free(tmp.p);
+            return 1;
+        }
+    }
     if (!is_call && !is_la)
         return 0;
     if (pass == 2) {
@@ -1261,7 +1296,7 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         char buf[128];
         struct code tmp = { 0 };
         char err[256];
-        const char *rd = "ra";
+        const char *rd = is_tail ? "t1" : "ra";
         char rdbuf[16];
         if (is_la) {
             const char *q = skip_ws((char *)p + (ld_len ? ld_len : 2));
@@ -1278,7 +1313,8 @@ static int extern_form(struct gas *g, const char *stmt, long pc, int pass,
         if (ld_len)
             snprintf(buf, sizeof buf, "%.*s %s, 0(%s)", ld_len, p, rd, rd);
         else
-            snprintf(buf, sizeof buf, is_call ? "jalr ra, 0(ra)"
+            snprintf(buf, sizeof buf, is_tail ? "jalr zero, 0(t1)"
+                                    : is_call ? "jalr ra, 0(ra)"
                                               : "addi %s, %s, 0", rd, rd);
         if (g->tgt->encode(buf, &tmp, err, sizeof err) != 0) {
             gerr(g, "%s", err); free(tmp.p); return 1;
@@ -1362,11 +1398,12 @@ static const char *pseudo_symbol(struct gas *g, const char *stmt)
      * (MIPS's) is its own symform's */
     int ld_len = g->tgt->machine == EM_RISCV ? rv_load_sym(g, p) : 0;
     if (g->tgt->machine != EM_RISCV ||
-        !((strncmp(p, "call", 4) == 0 && isspace((unsigned char)p[4])) ||
+        !(((strncmp(p, "call", 4) == 0 || strncmp(p, "tail", 4) == 0) &&
+           isspace((unsigned char)p[4])) ||
           (strncmp(p, "la", 2) == 0 && isspace((unsigned char)p[2])) ||
           ld_len))
         return NULL;
-    q = p + (ld_len ? ld_len : p[1] == 'a' && p[2] != 'l' ? 2 : 4);
+    q = p + (ld_len ? ld_len : p[0] == 'l' ? 2 : 4);   /* la; call, tail */
     q = skip_ws((char *)q);
     if (*p == 'l') {                /* la/lw rd, sym -- skip rd */
         while (*q && is_symc((unsigned char)*q)) q++;

@@ -1454,6 +1454,48 @@ static void warn_binop_shape(struct unit *u, struct expr *e,
     }
 }
 
+/* Whether a checked signed integer expression can never be negative, so
+ * -Wsign-compare has nothing to say about it. The usual case is a narrow
+ * unsigned value promoted to int, `(flags & MASK) != 0u` with a uint8_t
+ * flags: the promotion zero-extends, and & with it, | and ^ of two such
+ * values, >>, / and % keep the sign bit clear. gcc and clang judge it the
+ * same way. */
+static int sc_nonneg(const struct expr *e)
+{
+    long v;
+    if (const_fold(e, &v))
+        return v >= 0;
+    switch (e->kind) {
+    case EXPR_CAST:
+        if (!ty_is_integer(e->rhs->ty))
+            return 0;
+        if (e->rhs->ty->is_unsigned || e->rhs->ty->kind == TY_BOOL)
+            return ty_size(e->rhs->ty) < ty_size(e->ty);
+        return ty_size(e->rhs->ty) <= ty_size(e->ty) && sc_nonneg(e->rhs);
+    case EXPR_NOT:
+        return 1;
+    case EXPR_BINOP:
+        switch (e->op) {
+        case B_EQ: case B_NE: case B_LT: case B_LE: case B_GT: case B_GE:
+        case B_LAND: case B_LOR:
+            return 1;
+        case B_AND:
+            return sc_nonneg(e->lhs) || sc_nonneg(e->rhs);
+        case B_OR: case B_XOR: case B_DIV:
+            return sc_nonneg(e->lhs) && sc_nonneg(e->rhs);
+        case B_SHR: case B_MOD:
+            return sc_nonneg(e->lhs);
+        default:
+            return 0;
+        }
+    case EXPR_COND:
+        return sc_nonneg(e->lhs) && sc_nonneg(e->rhs);
+    case EXPR_COMMA:
+        return sc_nonneg(e->rhs);
+    default:
+        return 0;
+    }
+}
 
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
@@ -2375,15 +2417,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 /* -Wsign-compare: the conversion the standard prescribes
                  * turns the signed side unsigned, so a negative value
                  * compares as a very large one. Only worth saying when the
-                 * signed side really can be negative — a constant that is
-                 * not is converted at compile time and means what it
-                 * says. */
+                 * signed side really can be negative (sc_nonneg). */
                 if (ty_is_integer(lt) && ty_is_integer(rt) &&
                     ty_signed_int(lt) != ty_signed_int(rt) &&
                     !ty_signed_int(ct)) {
                     struct expr *se = ty_signed_int(lt) ? e->lhs : e->rhs;
-                    long v;
-                    if (!(const_fold(se, &v) && v >= 0))
+                    if (!sc_nonneg(se))
                         diag_warn_opt(diag_file(u), e->line, e->col, "sign-compare",
                                       "comparison between %s and %s",
                                       ty_name(lt), ty_name(rt));
@@ -2898,8 +2937,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        "this call needs %s%d argument%s, got %d",
                        ft->is_varargs ? "at least " : "", ft->nptypes,
                        ft->nptypes == 1 ? "" : "s", e->nargs);
+        /* A call makes a value of the return type and copies each
+         * argument, so all of them must be complete (C11 6.5.2.2p1, p4):
+         * a call through `extern struct S k(struct S);` passed and returned
+         * nothing at all. _Float16 is such a type (parse.c). */
+        if (ft->ret->kind == TY_STRUCT && !ft->ret->complete)
+            sema_error_at(u, e->line, e->col,
+                       "calling %s%s%swith incomplete return type %s",
+                       e->callee ? "'" : "a function ",
+                       e->callee ? e->callee->name : "",
+                       e->callee ? "' " : "", ty_name(ft->ret));
         for (int i = 0; i < e->nargs; i++) {
             check_expr(u, f, sc, e->args[i]);
+            if (e->args[i]->ty->kind == TY_STRUCT && !e->args[i]->ty->complete)
+                sema_error_at(u, e->args[i]->line, e->args[i]->col,
+                           "argument %d has incomplete type %s", i + 1,
+                           ty_name(e->args[i]->ty));
             if (e->args[i]->ty->kind != TY_STRUCT)
                 need_scalar(u, e->args[i], "an argument");
             if (i < ft->nptypes)
@@ -4972,6 +5025,23 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         if (r >= 0)
             return r;
     }
+    /* An "i" or "n" operand still gets a register (below), but a constant
+     * one keeps its VALUE too: `%c0` in a directive prints it, gcc's way
+     * of writing a constant into the text (`.ascii "->SIZE %c0"`). */
+    {
+        int imm = 0, other = 0;
+        long v;
+        for (const char *p = c; *p; p++) {
+            if (*p == 'i' || *p == 'n')
+                imm = 1;
+            else if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))
+                other = 1;
+        }
+        if (imm && !other && const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+        }
+    }
     for (const char *p = c; *p; p++)             /* else allocate a register */
         if (*p == 'r' || *p == 'q' || *p == 'g' || *p == 'm' || *p == 'R' ||
             *p == 'i' || *p == 'n')
@@ -5976,6 +6046,9 @@ static void merge_decls(struct unit *u)
          * (EmbTrace's own hooks, a clock) -- instrumenting one of those
          * recursed through the hook forever */
         canon->attr_no_instrument |= f->attr_no_instrument;
+        /* an asm label on any declaration names the symbol */
+        if (!canon->asm_name)
+            canon->asm_name = f->asm_name;
         /* and noinline and always_inline likewise: GCC takes either from
          * any declaration, and a definition after a plain prototype is
          * the usual place for noinline -- which was inlined */
@@ -6062,6 +6135,8 @@ static void merge_globals(struct unit *u)
         if (!g->is_extern)
             canon->is_const = g->is_const;
         canon->is_weak |= g->is_weak;
+        if (!canon->asm_name)
+            canon->asm_name = g->asm_name;
         if (g->section) {
             if (canon->section && strcmp(canon->section, g->section) != 0) {
                 diag_error_at(g->file, g->line, 0,

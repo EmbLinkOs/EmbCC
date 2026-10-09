@@ -600,7 +600,10 @@ static void t_abi_hints(const struct ir_func *fn, int *hint);
 /* REMATERIALIZATION: a constant one flagless instruction makes (movw,
  * or mov/mvn of a modified immediate) is made again at each read when it
  * has no register, rather than stored to a slot and loaded back. Flagless
- * because a read may come after a lowering's own compare. */
+ * because a read may come after a lowering's own compare. On ARMv6-M
+ * (v6m.c) every 32-bit constant is, and a symbol's address: each is a
+ * literal load there, flagless, one instruction, and the size of the
+ * slot load it replaces. */
 static int g_t_noremat = -1;
 
 static int t_remat_ok(const struct ir_ins *i)
@@ -608,9 +611,16 @@ static int t_remat_ok(const struct ir_ins *i)
     unsigned long v = (unsigned long)i->imm & 0xffffffffUL;
     if (g_t_noremat < 0)
         g_t_noremat = getenv("EMBCC_T_NOREMAT") != NULL;
-    /* ARMv6-M (v6m.c) shares the allocator and makes no constant again */
-    return !g_t_noremat && target_thumb_arch() != 6 && i->op == IR_CONST && !i->flt && i->w <= 4 &&
-           (v <= 0xffff || t_it_imm_ok((long)i->imm));
+    if (g_t_noremat)
+        return 0;
+    if (target_thumb_arch() == 6 &&
+        (i->op == IR_GADDR || i->op == IR_STRADDR || i->op == IR_FADDR))
+        return 1;
+    if (i->op != IR_CONST || i->flt || i->w > 4)
+        return 0;
+    if (target_thumb_arch() == 6)
+        return 1;
+    return v <= 0xffff || t_it_imm_ok((long)i->imm);
 }
 
 /* An indirect call's target in a register: IR_CALL reads it before the
@@ -6033,8 +6043,11 @@ static void gen_ins(struct t_fn *F, int n)
                     ldst_must(t, o->reg, o->reg, 0, o->size, 0, 0);
             }
         }
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
+        /* the bytes, padded at each alignment for where they land, and
+         * their data marked: ARM's $d and $t mapping symbols */
+        code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
+                     ia->arange, ia->narange,
+                     t_isa_a32 ? CODE_FILL_A32 : CODE_FILL_THUMB2);
         /* Out, through an address: the address is live across the asm
          * (regalloc.c counts it as crossing), so it is still there. An
          * "m" output was written BY the template through the address its
@@ -7065,6 +7078,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     int nshortb = 0;
     F.no_tbh = xcalloc((size_t)fn->nins + 1, 1);
     int restarted = 0;           /* a first pass made again: reset as for a later one */
+    /* An asm that aligns its bytes (`.p2align 3`) pads by where it lands,
+     * so when the code before it shrinks it can GROW: a distance measured
+     * across it on the first pass may be longer on the next by this much,
+     * and a branch made short has to reach anyway. 0 without one. */
+    int asm_sl = 0;
+    for (i = 0; i < fn->nins; i++)
+        if (fn->ins[i].op == IR_ASM && fn->ins[i].asm_ir)
+            asm_sl += code_asm_align_slack(fn->ins[i].asm_ir->arange,
+                                           fn->ins[i].asm_ir->narange);
     for (int pass = 0; pass < 3; pass++) {
     int redo0 = 0;
     if (!F.lp_planned)
@@ -7111,8 +7133,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     {
         int al = t_isa_a32 ? 3 : 1;
         for (int k = 0; k < fn->nins; k++)
-            if (fn->ins[k].op == IR_ASM)
-                al = 3;
+            if (fn->ins[k].op == IR_ASM) {
+                /* ...and one that aligns its own bytes (`.p2align 3`)
+                 * starts on that, so that in a section of its own the
+                 * buffer's offsets are the section's */
+                const struct ir_asm *ia = fn->ins[k].asm_ir;
+                int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+                al |= 3;
+                if (m - 1 > al)
+                    al = m - 1;
+            }
         while (t->len & al)
             t_nop(t);
         f->code_align = al + 1;
@@ -7564,7 +7594,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             free(pair.drange);
         } else if (F.fix[i].cond == T_TBB) {
             long d = (long)target - F.fix[i].cz_at;
-            if (d < 0 || d > 2L * 255 || (d & 1)) {
+            if (d < 0 || d > 2L * 255 - (pass ? 0 : asm_sl) || (d & 1)) {
                 /* tbh for that switch, from a first pass made again: 4
                  * while this pass's other entries for it land here */
                 if (pass == 0 && F.fix[i].ins >= 0 &&
@@ -7580,7 +7610,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             t->p[F.fix[i].at] = (unsigned char)(d / 2);
         } else if (F.fix[i].cond == T_TBH) {
             long d = (long)target - F.fix[i].cz_at;
-            if (d < 0 || d > 2L * 65535 || (d & 1)) {
+            if (d < 0 || d > 2L * 65535 - (pass ? 0 : asm_sl) || (d & 1)) {
                 /* A tbh entry is a halfword count: 128 KB forward and no
                  * more, which a large function at -O0 passes. On the
                  * first pass that switch is marked for the word table and
@@ -7649,8 +7679,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         shortb = xcalloc((size_t)(nshortb ? nshortb : 1), 1);
         for (i = 0; i < F.nfix; i++) {
             long d = (long)F.label_off[F.fix[i].label] - F.fix[i].at - 4;
-            shortb[i] = F.fix[i].cond < 0 ? (d >= -2048 && d <= 2046)
-                                          : (d >= -256 && d <= 254);
+            shortb[i] = F.fix[i].cond < 0
+                ? (d >= -2048 + asm_sl && d <= 2046 - asm_sl)
+                : (d >= -256 + asm_sl && d <= 254 - asm_sl);
             /* ARM state: one branch form, and no cbz */
             if (t_isa_a32) {
                 shortb[i] = 0;
@@ -7669,7 +7700,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                           F.fix[i].cz_at - 4;
                 long gap = (long)F.label_off[F.fix[i].label] -
                            (F.fix[i].at + F.fix[i].sz);
-                if (dz >= 0 && dz <= 126 && gap >= 2)
+                if (dz >= 0 && dz <= 126 - asm_sl && gap >= 2 + asm_sl)
                     shortb[i] = 2;
             }
             any |= shortb[i];

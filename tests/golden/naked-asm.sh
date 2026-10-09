@@ -142,6 +142,19 @@ refuse x86_64-elf '__asm volatile("ret");' '__attribute__((naked)) is not suppor
 refuse aarch64-elf '__asm volatile("ret");' '__attribute__((naked)) is not supported'
 echo "naked-asm: a C statement, a register operand, an output, and naked off the embedded targets are refused"
 
+# `(void)a;` computes nothing: GCC takes it in a naked function, and a port
+# written for GCC uses it to quiet -Wunused-parameter (EmbLinkRTOS's Cortex-M
+# FPU fill does). It is no code; the asm is the whole body. Anything more
+# than a bare name is still refused.
+printf 'void f(unsigned a) __attribute__((naked));\nvoid f(unsigned a) { (void)a; __asm volatile("adds r0, #1\\n bx lr"); }\n' \
+    > "$out/v.c"
+"$EMBCC" --target=$T -Wall -Wextra -Werror -c "$out/v.c" -o "$out/v.o" 2> "$out/v.err" ||
+    { cat "$out/v.err"; fail "(void)a in a naked function was refused"; }
+[ "$(llvm-objdump -d "$out/v.o" | grep -cE '^ +[0-9a-f]+:')" = 2 ] ||
+    { llvm-objdump -d "$out/v.o"; fail "(void)a made code"; }
+refuse $T '(void)(a + 1); __asm volatile("bx lr");' 'not an asm or a call with no arguments'
+echo "naked-asm: (void)param is no code, and (void) of an expression is still refused"
+
 # ---- RISC-V ---------------------------------------------------------------
 cat > "$out/rv.c" <<'EOF'
 void puts_(const char *s);

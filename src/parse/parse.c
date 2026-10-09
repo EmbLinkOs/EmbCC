@@ -20,6 +20,7 @@
 
 struct attrs { int packed; int aligned; int weak; int noreturn;
                const char *section;
+               const char *asm_name; /* a renaming asm label (asm_label) */
                int sret; /* embcc_sret on a parameter (type.h sret_first) */
                int nothrow;
                /* format(archetype, string-index, first-to-check): 1 printf,
@@ -143,6 +144,7 @@ struct parser {
      * pointed AT rather than at the function's line -- an editor renaming
      * one has to edit the name, not the first column of the signature. */
     int decl_name_line, decl_name_col;
+    const char *decl_name;      /* ...and the name itself (asm labels) */
     int fn_plines[MAX_PARAMS], fn_pcols[MAX_PARAMS];
     int fn_punused[MAX_PARAMS]; /* each parameter's __attribute__((unused)) */
     /* An `unused` met in a declarator's qualifier position
@@ -823,6 +825,30 @@ static int isr_kind(struct parser *ps, int line, const char *arg)
     return ISR_INTERRUPT;
 }
 
+/* An asm label -- `int fputs(const char *, FILE *) __asm("_" "fputs");`,
+ * the GNU extension that gives a declaration its symbol. The macOS SDK
+ * writes one on most of libc (__DARWIN_ALIAS), glibc's __REDIRECT too.
+ * One that spells the name the declaration already has, in the target's
+ * symbol convention (Mach-O's leading underscore), changes nothing. One
+ * that renames the symbol is kept (attrs.asm_name, then func/global's) and
+ * applied after optimization (apply_asm_names): the macOS port of an RTOS
+ * names the linker's section bounds `section$start$__DATA_CONST$...`. */
+static char *parse_str_literal(struct parser *ps, const char *what);
+
+static const char *asm_label(struct parser *ps)
+{
+    advance(ps);
+    expect(ps, TOK_LPAREN, "'(' after an asm label");
+    const char *lab = parse_str_literal(ps, "an asm label's symbol name");
+    expect(ps, TOK_RPAREN, "')' after an asm label");
+    const char *plain = lab;
+    if (target_fmt_get() == TGT_FMT_MACHO && plain[0] == '_')
+        plain++;
+    if (ps->decl_name && strcmp(plain, ps->decl_name) == 0)
+        return NULL;            /* the name it has anyway */
+    return lab;
+}
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
     /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
@@ -836,6 +862,11 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             advance(ps);
             expect(ps, TOK_LPAREN, "'(' after __attribute__");
             expect(ps, TOK_LPAREN, "a second '(' after __attribute__");
+        } else if (cur(ps)->kind == TOK_KW_ASM) {
+            const char *lab = asm_label(ps);
+            if (lab)
+                out->asm_name = lab;
+            continue;
         } else if (cur(ps)->kind == TOK_LBRACKET) {
             /* One `[` is a subscript or an array bound; two in a row
              * is a C23 attribute. No peek helper here, so: look, and
@@ -1322,6 +1353,7 @@ static struct type *declarator(struct parser *ps, struct type *base,
             *obj_const = top;
         ps->decl_name_line = cur(ps)->line;
         ps->decl_name_col = cur(ps)->col;
+        ps->decl_name = cur(ps)->text;
         advance(ps);
     }
     if (nested && cur(ps)->kind == TOK_LPAREN)
@@ -1390,6 +1422,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     /* The declarator being parsed has its name already: the parameters'
      * own declarators must not leave theirs in its place. */
     int name_line = ps->decl_name_line, name_col = ps->decl_name_col;
+    const char *name_txt = ps->decl_name;
     /* A pending cmse_nonsecure_call belongs to THIS function type, not to
      * one among its parameters' types. */
     int cmse_call = ps->cmse_call_pending;
@@ -1480,6 +1513,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     ps->vla_ok = saved_vla_ok;
     ps->decl_name_line = name_line;
     ps->decl_name_col = name_col;
+    ps->decl_name = name_txt;
     struct type *ft = ty_func(ret, pt, n, varargs);
     ft->sret_first = sret;
     ft->cmse_ns_call = cmse_call;
@@ -1882,13 +1916,20 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
          * a new TY_ kind through ty_size, ty_align, the usual arithmetic
          * conversions, the IR's three float conversions and all four
          * backends, plus __extendhfsf2/__truncsfhf2 on the soft-float
-         * ones -- not a spelling. Saying so beats storing it as a float
-         * and silently giving 24 bits of mantissa where the program
-         * asked for 11 (THE RULE). */
-        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                   "_Float16/__fp16 is not supported: EmbCC has no 16-bit "
-                   "floating-point type, and widening it to `float` would "
-                   "give 24 bits of mantissa where the program asked for 11");
+         * ones -- not a spelling. Storing it as a float would silently
+         * give 24 bits of mantissa where the program asked for 11 (THE
+         * RULE). So it is an INCOMPLETE type: a declaration may name it
+         * -- macOS's <math.h> declares __fabsf16 and its kin
+         * unconditionally -- and a value of it cannot exist. A call, an
+         * object, a sizeof or a cast is refused as for any incomplete
+         * type, naming _Float16. */
+        if (any > 1)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Float16 cannot combine with other specifiers");
+        static struct type *f16;
+        if (!f16)
+            f16 = ty_struct("_Float16", 0);
+        return f16;
     }
     if (nf128) {
         if (any > 1)
@@ -5136,6 +5177,36 @@ static void parse_weak(struct parser *ps)
     ps->unit->weaks = w;
 }
 
+/* A function prototype that shares a declaration with other declarators,
+ * after the first: `g(double)` in `extern double f(double), g(double);` or
+ * `f(int)` in `extern int a, f(int);`. ps is at its '('. */
+static struct func *sibling_proto(struct parser *ps, struct type *dty,
+                                  const char *name, int line, int col,
+                                  int seq, int is_static, int is_inline,
+                                  int is_extern)
+{
+    struct type *fty = parse_fn_params(ps, dty);
+    struct func *g = xcalloc(1, sizeof *g);
+    g->is_static = is_static;
+    g->decl_inline = is_inline;
+    g->decl_extern = is_extern;
+    g->ret_ty = fty->ret;
+    g->name = name;
+    g->file = ps->lx.file;
+    g->line = line;
+    g->name_line = line;
+    g->name_col = col;
+    g->seq = seq;
+    g->nparams = fty->nptypes;
+    for (int i = 0; i < fty->nptypes; i++) {
+        g->param_tys[i] = fty->ptypes[i];
+        g->params[i] = NULL;  /* unnamed prototype parameters */
+    }
+    g->is_varargs = fty->is_varargs;
+    g->sret_first = fty->sret_first;
+    return g;
+}
+
 static void parse_top(struct parser *ps, struct unit *u,
                       struct func ***ftail, struct global ***gtail,
                       int seq)
@@ -5351,6 +5422,18 @@ static void parse_top(struct parser *ps, struct unit *u,
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a name before %s",
                            tok_describe(cur(ps)));
+            if (!first && cur(ps)->kind == TOK_LPAREN) {
+                /* a function after an object: `extern int a, f(int);` --
+                 * the declarator above stopped at the name */
+                **ftail = sibling_proto(ps, gt, gname, ps->decl_name_line,
+                                        ps->decl_name_col, seq, is_static,
+                                        is_inline, is_extern);
+                *ftail = &(**ftail)->next;
+                if (cur(ps)->kind != TOK_COMMA)
+                    break;
+                advance(ps);
+                continue;
+            }
             if (gt->kind == TY_FUNC && first) {
                 /* a function whose declarator is parenthesized: it
                  * returns a pointer to a function or to an array
@@ -5427,6 +5510,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                 parse_error_line(ps, gline,
                            "a variable cannot have a function type — "
                            "did you mean a function pointer (*)?");
+            ps->decl_name = gname;
             parse_attributes(ps, &at); /* int x __attribute__((weak)) = ... */
             int gnl = ps->decl_name_line, gnc = ps->decl_name_col;
             struct global *g = parse_global(ps, gt, gname, gline,
@@ -5436,6 +5520,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             parse_attributes(ps, &at); /* trailing: T x[] __attribute__((weak)) */
             pcs_not_here(ps, &at, "a variable");
             g->is_weak = at.weak;
+            g->asm_name = at.asm_name;
             g->attr_used = at.used;
             g->attr_unused = at.unused;
             g->attr_deprecated = at.deprecated;
@@ -5577,8 +5662,10 @@ static void parse_top(struct parser *ps, struct unit *u,
 
 fn_tail:
     /* trailing attributes: void f(void) __attribute__((noreturn/weak)) */
+    ps->decl_name = f->name;        /* not the last parameter's */
     parse_attributes(ps, &at);
     f->is_weak = at.weak;
+    f->asm_name = at.asm_name;
     /* Trailing is GCC's usual spelling for these two -- `void die(void)
      * __attribute__((noreturn));` -- and they were parsed here and then
      * dropped, so only the leading form ever reached the func node. */
@@ -5630,30 +5717,15 @@ fn_tail:
             advance(ps);
             if (cur(ps)->kind == TOK_LPAREN) {
                 /* a sibling function prototype: `g(double)` */
-                struct type *fty = parse_fn_params(ps, dty);
-                struct func *g = xcalloc(1, sizeof *g);
-                g->is_static = is_static;
-                g->decl_inline = is_inline;
-                g->decl_extern = is_extern;
-                g->ret_ty = fty->ret;
-                g->name = dname;
-                g->file = ps->lx.file;
-                g->line = dline;
-                g->name_line = dline;
-                g->name_col = dcol;
-                g->seq = seq;
-                g->nparams = fty->nptypes;
-                for (int i = 0; i < fty->nptypes; i++) {
-                    g->param_tys[i] = fty->ptypes[i];
-                    g->params[i] = NULL;  /* unnamed prototype parameters */
-                }
-                g->is_varargs = fty->is_varargs;
-                g->sret_first = fty->sret_first;
+                struct func *g = sibling_proto(ps, dty, dname, dline, dcol,
+                                               seq, is_static, is_inline,
+                                               is_extern);
                 **ftail = g;
                 *ftail = &g->next;
             } else {
                 /* a sibling variable: `x`, `*p`, `a[10]`, with optional init */
                 struct type *vty = parse_array_dims(ps, dty);
+                ps->decl_name = dname;
                 parse_attributes(ps, &at);
                 struct global *g = parse_global(ps, vty, dname, dline,
                                                 is_static, is_extern);
@@ -5662,6 +5734,7 @@ fn_tail:
                 parse_attributes(ps, &at);
                 pcs_not_here(ps, &at, "a variable");
                 g->is_weak = at.weak;
+                g->asm_name = at.asm_name;
                 g->attr_used = at.used;
                 g->attr_unused = at.unused;
                 g->attr_deprecated = at.deprecated;

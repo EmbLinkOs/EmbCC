@@ -325,3 +325,43 @@ SRC
 grep -q "unused parameter 'y'" "$out/up.err" || {
     echo "FAIL: -Wunused-parameter should name y alone:"; cat "$out/up.err"; exit 1; }
 echo "and a parameter marked unused, before, inside or after its declarator, is not reported"
+
+# 8. -Wsign-compare speaks only when the signed side can be negative. A
+#    narrow unsigned value promoted to int is not -- `(flags & MASK) != 0u`
+#    with a uint8_t flags, a kernel's every flag test -- and neither is a &
+#    with such a value, or a shift, a comparison or a ! of one. EmbLinkRTOS
+#    stopped at 50 of these under -Werror; gcc and clang say nothing.
+cat > "$out/sc.c" << 'EOF2'
+typedef unsigned char u8;
+struct o { u8 flags; signed char s; unsigned short h; };
+int f(struct o *q, int i, unsigned u) {
+    int n = 0;
+    if ((q->flags & 1u) != 0u) n++;
+    if ((q->flags & (u8)1) != 0u) n++;
+    if ((q->flags >> 2) == u) n++;
+    if (q->s == u) n++;
+    if ((q->s & 3) == u) n++;
+    if (i == u) n++;
+    if ((i | q->flags) == u) n++;
+    if ((q->h ^ q->flags) < u) n++;
+    if ((i != 0) == u) n++;
+    if ((i ? q->h : q->flags) > u) n++;
+    if ((i ? q->h : i) > u) n++;
+    if (-q->flags < u) n++;
+    return n;
+}
+EOF2
+"$EMBCC" --target="$TARGET" -Wsign-compare -fsyntax-only "$out/sc.c" 2> "$out/sc.txt" || true
+lines=$(grep -o 'sc.c:[0-9]*' "$out/sc.txt" | cut -d: -f2 | sort -n | tr '\n' ' ')
+[ "$lines" = "8 10 11 15 16 " ] || {
+    sed "s|$out/||" "$out/sc.txt"
+    echo "FAIL: -Wsign-compare at lines '$lines', expected '8 10 11 15 16 '"; exit 1; }
+if command -v clang > /dev/null 2>&1; then
+    clang -fsyntax-only -Wsign-compare "$out/sc.c" 2> "$out/sc-clang.txt" || true
+    cl=$(grep -o 'sc.c:[0-9]*' "$out/sc-clang.txt" | cut -d: -f2 | sort -n | tr '\n' ' ')
+    [ "$cl" = "$lines" ] || {
+        echo "FAIL: clang warns at lines '$cl', EmbCC at '$lines'"; exit 1; }
+    echo "-Wsign-compare: the five lines clang warns on, and none of the seven it does not"
+else
+    echo "-Wsign-compare: lines 8 10 11 15 16 only (no clang to referee)"
+fi

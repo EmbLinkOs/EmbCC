@@ -199,3 +199,47 @@ fi
 grep -q "'z' is used uninitialized" "$out/voidcast.txt" || {
     echo "FAIL: a real read next to a (void) cast was not reported"; exit 1; }
 echo "and (void)x is not a read, while z + 1 still is"
+
+# ---- loops that run at least once, or leave only by break -----------------
+# A do-while tests its condition AFTER the body, so what the body wrote is
+# what the test reads; `for (;;)` and `while (1)` leave only by a break, never
+# by falling out before the body ran. The walk once tested a do-while's
+# condition as if at the loop top and let an endless loop fall out unrun:
+# a kernel's seqlock read (`do { s1 = seq; ...; s2 = seq; } while (s1 != s2)`)
+# warned for s1 and s2 under -Werror, and so did `for (;;) { s = v; if (s)
+# break; } return s;`. gcc and clang are silent on all of these.
+cat > "$out/loops.c" << 'EOF2'
+extern volatile unsigned seq, val;
+unsigned seqlock(void) {
+    unsigned s1, s2, t;
+    do { s1 = seq; t = val; s2 = seq; } while (s1 != s2 || (s1 & 1u) != 0u);
+    return t;
+}
+unsigned endless(void) { unsigned s; for (;;) { s = val; if (s) break; } return s; }
+unsigned forever(void) { unsigned s; while (1) { s = val; if (s > 3) break; } return s; }
+unsigned dowrite(void) { unsigned s; do s = val; while (!s); return s; }
+EOF2
+"$EMBCC" -fsyntax-only -Wall "$out/loops.c" 2> "$out/loops.txt" || true
+if grep -q "uninitialized" "$out/loops.txt"; then
+    sed "s|$out/||" "$out/loops.txt"
+    echo "FAIL: a loop that runs at least once was read as one that may not"; exit 1
+fi
+# ...but the same shapes with a path around the write still warn: a break
+# before it, a continue that reaches the test without it.
+cat > "$out/loops-bad.c" << 'EOF2'
+extern volatile unsigned val;
+unsigned a(void) { unsigned s; do { if (val) break; s = val; } while (s); return s; }
+unsigned b(void) { unsigned s; for (;;) { if (val) break; s = val; } return s; }
+unsigned c(void) { unsigned s; do { if (val) continue; s = val; } while (s); return 0; }
+unsigned d(void) { unsigned s; do { val = 1; } while (s); return 0; }
+EOF2
+"$EMBCC" -fsyntax-only -Wall "$out/loops-bad.c" 2> "$out/loops-bad.txt" || true
+for spec in "2:maybe-uninitialized" "3:maybe-uninitialized" \
+            "4:maybe-uninitialized" "5:uninitialized"; do
+    line=${spec%%:*}; opt=${spec#*:}
+    grep -q "loops-bad.c:$line:.*'s' .*uninitialized \[-W$opt\]" "$out/loops-bad.txt" ||
+        { sed "s|$out/||" "$out/loops-bad.txt"
+          echo "FAIL: expected 's' at line $line as -W$opt"; exit 1; }
+done
+echo "silent on a seqlock do-while and on loops left only by break; still
+warns when a break or a continue goes around the write"

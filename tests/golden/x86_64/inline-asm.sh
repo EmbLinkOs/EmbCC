@@ -111,3 +111,82 @@ echo "$ad" | grep -q '0f a2'          || { echo "MISSING: cpuid (0f a2)"; f3=1; 
 echo "$ad" | grep -q '48 0f c7 f0'    || { echo "MISSING: rdrand %rax (48 0f c7 f0)"; f3=1; }
 echo "$ad" | grep -q '0f 92 c1'       || { echo "MISSING: setc %cl (0f 92 c1)"; f3=1; }
 [ "$f3" -eq 0 ] && echo "advanced asm: cpuid/rdrand/setc + %-subst correct" || exit 1
+
+# Strings, alignments, data and %c in a template, against llvm-mc for the
+# three objects x86-64 has: ELF, Mach-O and COFF. .ascii/.asciz/.string,
+# .p2align/.balign/.align with and without a fill and a maximum -- .align
+# a byte count in ELF and COFF and a power of two in Mach-O, as GNU as
+# and llvm-mc read it -- .byte to .quad (.word is two bytes here), and
+# constants written in with %c0, as Linux's asm-offsets writes them. Each
+# was "asm instruction \".ascii\" not supported". llvm-mc's bytes at all
+# sixteen phases in the section (tests/harness/asmdir.sh): its long nops
+# where it pads, decided where the template lands.
+MC=${EMBCC_LLVM_MC:-llvm-mc}
+LOBJCOPY=${EMBCC_LLVM_OBJCOPY:-llvm-objcopy}
+if command -v "$MC" >/dev/null 2>&1 && command -v "$LOBJCOPY" >/dev/null 2>&1
+then
+    cat > "$out/dirs.txt" <<'EOF'
+.ascii "->EMB_PROBE s %c1 %c0"
+.p2align 2
+.ascii "abc"
+.p2align 3
+.asciz "hi", "x"
+.byte 0x55
+.p2align 4
+.string "\t\"q\\\101\x42\0z"
+.balign 8
+.byte 1, 255, -128, %c0, %c1
+.p2align 3, 0x5a
+.byte 7
+.p2align 4,,5
+.byte 9
+.p2align 4,,15
+.ascii "a;b#c//d"
+.word 0x1234, %c0
+.value 7
+.short 9
+.long 0x12345678
+.int 1
+.quad -2
+.8byte 3
+.p2align 2
+EOF
+    { cat "$out/dirs.txt"; echo '.byte 1'; echo '.align 8'; } > "$out/dirs-b.txt"
+    { cat "$out/dirs.txt"; echo '.byte 1'; echo '.align 3'; } > "$out/dirs-m.txt"
+    # (the -Wwindows-abi note mingw's objects carry is not the point here)
+    if ( OBJCOPY=$LOBJCOPY
+         . tests/harness/asmdir.sh
+         asmdir_referee "$out" x86_64-elf "-triple=x86_64" ".byte 0x90" 1 \
+             "$out/dirs-b.txt" &&
+         asmdir_referee "$out" x86_64-w64-mingw32 "-triple=x86_64-w64-mingw32" \
+             ".byte 0x90" 1 "$out/dirs-b.txt" &&
+         asmdir_referee "$out" x86_64-apple-darwin \
+             "-triple=x86_64-apple-darwin" ".byte 0x90" 1 "$out/dirs-m.txt" \
+             __TEXT,__text ) > "$out/dirs.log" 2>&1
+    then
+        grep -v 'windows-abi' "$out/dirs.log"
+    else
+        grep -v 'windows-abi' "$out/dirs.log"; exit 1
+    fi
+    # a constant named only as %c0 is text: no register is loaded with it
+    cat > "$out/c.c" <<'CEOF'
+void probe(void) { __asm__ volatile(".ascii \"->S %c0\"\n.p2align 2" : : "i"(0x1234567)); }
+CEOF
+    "$EMBCC" -O2 -c "$out/c.c" -o "$out/c.o" || { echo "%c0 did not compile"; exit 1; }
+    if llvm-objdump -d "$out/c.o" | grep -qi '1234567'; then
+        echo "a %c0 constant was loaded into a register:"; llvm-objdump -d "$out/c.o"; exit 1
+    fi
+    strings -a "$out/c.o" | grep -q -- '->S 19088743' || {
+        echo "%c0 did not write the constant into the string"; exit 1; }
+    for b in '".byte %c0" : : "r"(x)' '".byte %0" : : "i"(5)'; do
+        printf 'int f(int x){ __asm__ volatile(%s); return x; }\n' "$b" > "$out/c.c"
+        if "$EMBCC" -c "$out/c.c" -o /dev/null 2> "$out/c.err"; then
+            echo "inline asm accepted: $b"; exit 1
+        fi
+        grep -q 'names a register operand\|is not a constant' "$out/c.err" || {
+            echo "the refusal of $b does not say why:"; cat "$out/c.err"; exit 1; }
+    done
+    echo "a %c0 constant is text and loads no register; %c of a register and \$5 in .byte are refused"
+else
+    echo "SKIP the directives against llvm-mc: llvm-mc not found"
+fi

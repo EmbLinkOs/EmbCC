@@ -30,6 +30,12 @@ typedef struct __va_list_tag {
     int __va_ndx;
 } __gnuc_va_list;
 typedef __gnuc_va_list va_list;
+#elif defined(__APPLE__)
+/* Darwin: the SDK names its own va_list, `void *` for a compiler without
+ * __GNUC__ (arm/_types.h, i386/_types.h), and <stdio.h> typedefs it again
+ * after <stdarg.h> -- a char * here made that a conflicting redefinition */
+typedef void *va_list;
+typedef void *__gnuc_va_list;
 #else
 typedef char *va_list;
 typedef char *__gnuc_va_list;

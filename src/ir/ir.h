@@ -226,6 +226,12 @@ struct ir_asm {
      * none, which is every target but Thumb's. */
     const int *drange;
     int ndrange;
+    /* Its alignments (`.p2align 2`) whose padding depends on where the
+     * bytes land, as struct code's arange: the backend copies the
+     * template with code_put_asm, which pads them there. NULL, 0 when
+     * there are none, or on a target whose backend does not. */
+    const int *arange;
+    int narange;
     struct ir_asm_op *in;
     int nin;
     struct ir_asm_op *out;

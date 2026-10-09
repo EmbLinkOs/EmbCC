@@ -903,6 +903,12 @@ const char *ty_name(const struct type *t)
             base = structbuf;
             break;
         }
+        /* _Float16 is an incomplete struct of that tag (parse.c), which
+         * no program can spell: the name is a keyword */
+        if (t->tag && !strcmp(t->tag, "_Float16")) {
+            base = "_Float16";
+            break;
+        }
         snprintf(structbuf, sizeof structbuf, "%s %s",
                  t->is_union ? "union" : "struct",
                  t->tag ? t->tag : "<anonymous>");

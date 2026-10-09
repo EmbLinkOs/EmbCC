@@ -361,6 +361,8 @@ static char *sec_named(const char *pfx, const char *name)
 /* -nostdinc: do not add EmbCC's own header directories. A freestanding
  * build that supplies its own headers needs to be able to say so. */
 static int no_stdinc;
+/* -isysroot DIR: the macOS SDK a Darwin target's headers come from */
+static const char *g_isysroot;
 
 /* -O level. 0 (the default) runs no optimizer, so output is byte-for-byte
  * as before — the property the self-host fixed point rests on. */
@@ -1487,6 +1489,13 @@ static void naked_body_text(struct outbuf *b, const struct func *f,
         }
         if (s->kind == STMT_EXPR && !s->expr)
             continue;                         /* `;` */
+        /* `(void)param;` says the asm uses the parameter and computes
+         * nothing, so it is no code; GCC takes it in a naked function, and
+         * a port written for GCC uses it to quiet -Wunused-parameter. */
+        if (s->kind == STMT_EXPR && s->expr->kind == EXPR_CAST &&
+            s->expr->cast_ty && s->expr->cast_ty->kind == TY_VOID &&
+            s->expr->rhs && s->expr->rhs->kind == EXPR_VAR)
+            continue;
         /* A call with no arguments is its call instruction: AVR's
          * FreeRTOS port calls the scheduler from its naked yield between
          * the asm that saves and restores the context. */
@@ -1560,15 +1569,94 @@ static void naked_to_blocks(struct unit *u)
     }
 }
 
+/* The macOS SDK for a Darwin target, as clang finds it: -isysroot, else
+ * $SDKROOT, else the Command Line Tools' or Xcode's. NULL when there is
+ * none -- then a Darwin compile needs its -isystem. */
+static const char *darwin_sdk(void)
+{
+    static const char *const known[] = {
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/"
+        "MacOSX.platform/Developer/SDKs/MacOSX.sdk",
+    };
+    if (g_isysroot)
+        return g_isysroot;
+    const char *env = getenv("SDKROOT");
+    if (env && *env)
+        return env;
+    for (unsigned k = 0; k < sizeof known / sizeof known[0]; k++) {
+        char probe[1024];
+        snprintf(probe, sizeof probe, "%s/usr/include/stdio.h", known[k]);
+        FILE *f = fopen(probe, "r");
+        if (f) {
+            fclose(f);
+            return known[k];
+        }
+    }
+    return NULL;
+}
+
+/* Asm labels that rename a symbol, now that nothing reads a function's
+ * name for what it is (a builtin, main, setjmp): the object's name. ELF
+ * and COFF take the label as written. Mach-O prefixes its own underscore,
+ * so `_x` is x; any other label is the symbol exactly, which the Mach-O
+ * writer is told by a leading \1 (LLVM's spelling of the same thing). */
+static const char *asm_link_name(const char *lab)
+{
+    if (target_fmt_get() != TGT_FMT_MACHO)
+        return lab;
+    if (lab[0] == '_')
+        return lab + 1;
+    size_t n = strlen(lab);
+    char *raw = xmalloc(n + 2);
+    raw[0] = '\1';
+    memcpy(raw + 1, lab, n + 1);
+    return raw;
+}
+
+static void apply_asm_names(struct unit *u)
+{
+    for (struct func *f = u->funcs; f; f = f->next)
+        if (f->asm_name)
+            f->name = asm_link_name(f->asm_name);
+    for (struct global *g = u->globals; g; g = g->next)
+        if (g->asm_name)
+            g->name = asm_link_name(g->asm_name);
+}
+
 /* EmbCC's own headers after every -I the caller gave, once, and marked
- * system (compile_unit says why). */
+ * system (compile_unit says why). For a Darwin target the C library is
+ * Apple's: EmbCC's fixes to a few of its headers, the SDK's usr/include,
+ * and then only EmbCC's freestanding headers (<stddef.h>, <stdarg.h>...),
+ * which the SDK leaves to the compiler -- never EmbCC's own libc, which is
+ * not the one linked. */
 static int g_incdirs_done;
 static void incdirs_with_defaults(void)
 {
     if (g_incdirs_done)
         return;
     g_incdirs_done = 1;
-    if (!no_stdinc) {
+    if (!no_stdinc && target_os_get() == TGT_OS_DARWIN && darwin_sdk()) {
+        static char sdkinc[1024], fixinc[1024];
+        int ndef = 0;
+        const char *const *def = paths_default_includes(&ndef);
+        snprintf(sdkinc, sizeof sdkinc, "%s/usr/include", darwin_sdk());
+        /* first, the few SDK headers EmbCC corrects (include/darwin:
+         * each is an #include_next of Apple's and a fix after it) */
+        if (ndef > 0 && nincdirs < MAX_INCDIRS) {
+            snprintf(fixinc, sizeof fixinc, "%s/darwin", def[ndef - 1]);
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = fixinc;
+        }
+        if (nincdirs < MAX_INCDIRS) {
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = sdkinc;
+        }
+        if (ndef > 0 && nincdirs < MAX_INCDIRS) {
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = def[ndef - 1];    /* freestanding */
+        }
+    } else if (!no_stdinc) {
         int ndef = 0;
         const char *const *def = paths_default_includes(&ndef);
         for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
@@ -1811,6 +1899,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
     opt_run(iu, opt_for_size ? OPT_SIZE : opt_level);
     time_mark("optimization");
     target_set_opt_size(opt_for_size);
+    apply_asm_names(u);
 
     /* An inline definition (C11 6.7.4p7, decided by sema) has done its
      * job once the optimizer has had the chance to inline it: it is
@@ -4157,6 +4246,36 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    /* Apple's driver names the machine with -arch: arm64 or x86_64 is the
+     * macOS target, unless a --target= says otherwise (CMake on a Mac
+     * passes -arch to every compile). */
+    {
+        int have_target = 0;
+        const char *arch = NULL;
+        for (int i = 1; i < argc; i++) {
+            if (strncmp(argv[i], "--target=", 9) == 0)
+                have_target = 1;
+            else if (strcmp(argv[i], "-arch") == 0 && i + 1 < argc)
+                arch = argv[++i];
+        }
+        if (arch && !have_target) {
+            enum target_arch a;
+            enum target_os os;
+            enum target_fmt fmt;
+            const char *tri = !strcmp(arch, "arm64") || !strcmp(arch, "arm64e") ||
+                              !strcmp(arch, "aarch64") ? "aarch64-apple-darwin"
+                            : !strcmp(arch, "x86_64") ? "x86_64-apple-darwin"
+                            : NULL;
+            if (!tri || !target_from_triple(tri, &a, &os, &fmt)) {
+                fprintf(stderr, "embcc: error: unknown -arch '%s' (arm64 or "
+                                "x86_64)\n", arch);
+                return 1;
+            }
+            target_set(a);
+            target_os_set(os);
+            target_fmt_set(fmt);
+        }
+    }
     /* Scanned ahead of everything else: --version and --dump-predef must
      * describe the target that was asked for, not the default. */
     for (int i = 1; i < argc; i++) {
@@ -4741,6 +4860,9 @@ int main(int argc, char **argv)
                    strncmp(argv[i], "-fmessage-length=", 17) == 0 ||
                    strcmp(argv[i], "-fverbose-asm") == 0 ||
                    strcmp(argv[i], "-pipe") == 0 ||
+                   /* threads are the C library's: libSystem has them on
+                    * macOS, and a hosted ELF link names -lpthread */
+                   strcmp(argv[i], "-pthread") == 0 ||
                    strcmp(argv[i], "-fno-pic") == 0 ||
                    strcmp(argv[i], "-fno-PIC") == 0 ||
                    strcmp(argv[i], "-fno-pie") == 0 ||
@@ -5083,6 +5205,18 @@ int main(int argc, char **argv)
             incdirs[nincdirs++] = dir;
         } else if (strcmp(argv[i], "-nostdinc") == 0) {
             no_stdinc = 1;
+        } else if (strcmp(argv[i], "-arch") == 0) {
+            i++;                /* applied in the pre-scan */
+        } else if (strcmp(argv[i], "-isysroot") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "embcc: -isysroot needs a directory\n");
+                return 1;
+            }
+            g_isysroot = argv[++i];
+        } else if (strncmp(argv[i], "-mmacosx-version-min=", 21) == 0 ||
+                   strncmp(argv[i], "-mmacos-version-min=", 20) == 0) {
+            /* the oldest macOS to run on: only availability attributes
+             * read it, and they are not checked */
         } else if (strcmp(argv[i], "--print-search-dirs") == 0) {
             paths_print_search_dirs();
             return 0;
@@ -5103,13 +5237,16 @@ int main(int argc, char **argv)
             incdirs[nincdirs++] = dir;
         } else if ((argv[i][0] == '-' && argv[i][1] == 'l') ||
                    (argv[i][0] == '-' && argv[i][1] == 'L') ||
-                   !strcmp(argv[i], "-T") || !strcmp(argv[i], "-e") ||
-                   !strcmp(argv[i], "-u")) {
-            /* the link's own options, as gcc takes them: -lNAME and
-             * -L DIR (attached or not), -T SCRIPT, -e SYM, -u SYM */
+                   (argv[i][0] == '-' && argv[i][1] == 'T' &&
+                    strncmp(argv[i] + 2, "text=", 5) &&
+                    strncmp(argv[i] + 2, "data=", 5) &&
+                    strncmp(argv[i] + 2, "bss=", 4)) ||
+                   !strcmp(argv[i], "-e") || !strcmp(argv[i], "-u")) {
+            /* the link's own options, as gcc takes them: -lNAME, -L DIR
+             * and -T SCRIPT (attached or not), -e SYM, -u SYM */
             char opt = argv[i][1];
             int at = i;
-            const char *v = (opt == 'l' || opt == 'L') && argv[i][2]
+            const char *v = (opt == 'l' || opt == 'L' || opt == 'T') && argv[i][2]
                 ? argv[i] + 2 : (i + 1 < argc ? argv[++i] : NULL);
             if (!v || !*v) {
                 fprintf(stderr, "embcc: -%c needs a%s\n", opt,

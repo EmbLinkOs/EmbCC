@@ -279,7 +279,7 @@ C17's value, `201710L`.
 | `_Decimal32`, `_Decimal64`, `_Decimal128` | Not supported | `expected a type before '_Decimal32'` |
 | `_Float32`, `_Float64` | Partial | The same types as `float` and `double`. The `f32` and `f64` constant suffixes are refused: `malformed floating constant`. |
 | `_Float128` | Partial | The same type as `long double` where that is IEEE binary128. See [Target-dependent features](#target-dependent-features). |
-| `_Float16` | Not supported | `` _Float16/__fp16 is not supported: EmbCC has no 16-bit floating-point type, and widening it to `float` would give 24 bits of mantissa where the program asked for 11 `` |
+| `_Float16` | Partial | An incomplete type: a declaration may name it (macOS's `<math.h>` declares `__fabsf16` and its kin), but there is no 16-bit floating-point value. An object, `sizeof`, a cast or a call is refused: `'h' has incomplete type _Float16`. Widening it to `float` would give 24 bits of mantissa where the program asked for 11. |
 | `_Float32x`, `_Float64x` | Not supported | `expected a type before '_Float32x'` |
 | `unreachable()` in `<stddef.h>` | Not supported | Not defined: `'unreachable' is not declared in 'f' — for a call, add a prototype or define it first [E0001]`. `__builtin_unreachable()` is available. |
 | Width macros `INT_WIDTH`, `INT8_WIDTH`, ... | Not supported | Not defined by `<limits.h>` or `<stdint.h>`. |

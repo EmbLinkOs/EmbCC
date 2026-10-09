@@ -240,14 +240,17 @@ cc hello.o -o hello
 ./hello
 ```
 
-On an Intel Mac use `--target=x86_64-apple-darwin`. The headers come from
-EmbCC's own C library, while the program links against the macOS C
-library. Function calls such as `printf` and `malloc` work across that
-boundary; the C library's data objects do not, because the two libraries
-name them differently. A program that uses `stdout` or `stderr` fails at
-the link with `Undefined symbols for architecture arm64: "_stdout"`.
-`-g` is not supported for the Darwin targets. See
-[Targets](targets.md).
+On an Intel Mac use `--target=x86_64-apple-darwin`. The driver also takes
+Apple's spelling of the same choice, `-arch arm64` or `-arch x86_64`, and
+the other flags Apple's toolchain and CMake pass: `-isysroot DIR`,
+`-mmacosx-version-min=V` (ignored) and `-pthread`.
+
+The headers are the macOS SDK's, so a program sees the C library it links
+against, POSIX headers such as `<pthread.h>` and `<unistd.h>` included.
+EmbCC uses the SDK named by `-isysroot`, else by `$SDKROOT`, else the
+Command Line Tools or Xcode SDK. A few SDK headers are corrected for a
+compiler that does not define `__GNUC__` (`include/darwin/`). `-g` is not
+supported for the Darwin targets. See [Targets](targets.md).
 
 ### Bare-metal x86-64 and EmbLinkOS
 

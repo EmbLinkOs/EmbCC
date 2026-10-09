@@ -228,21 +228,81 @@ The modifiers each target accepts between `%` and the operand are:
 
 | Modifier | Meaning | Targets |
 |---|---|---|
+| `%cN`, `%c[NAME]` | the value of a constant (`"i"`, `"n"`) operand alone, with no `#` or `$`: `-5` | every target; refused for a register operand (`%c0 names a register operand`) |
 | `%wN`, `%w[NAME]` | the 32-bit name of the register (`w9`) | AArch64 |
 | `%xN`, `%x[NAME]` | the 64-bit name of the register (`x9`) | AArch64 |
 | `%AN` .. `%DN` | byte 0 to 3 of a multi-register operand | AVR |
 | `%aN` | the operand as a pointer register: `X`, `Y` or `Z` | AVR |
 
-No other modifier is supported. x86-64 has none at all: GCC's `%b`,
-`%h`, `%w`, `%k` and `%q` are refused there with
-`asm: expected a %N operand in "..."`. The generic `%c`, `%n`, `%l`,
-`%P` and `%=` are refused on every target; outside x86-64 the
-diagnostic is `asm template modifier '%c' is not supported for aarch64`
+No other modifier is supported. On x86-64, `%c` is read only in a
+directive (below); GCC's `%b`, `%h`, `%w`, `%k` and `%q` are refused
+there with `asm: expected a %N operand in "..."`. The generic `%n`,
+`%l`, `%P` and `%=` are refused on every target; outside x86-64 the
+diagnostic is `asm template modifier '%n' is not supported for aarch64`
 (with `ARMv7-M`, `RISC-V` or `AVR` in place of `aarch64`).
+
+On x86-64, a constant operand that the template names only as `%c` is
+text: no register is allocated or loaded for it.
 
 A register that the template names directly (`%%rsi` on x86-64, `x0` on
 AArch64, `r0` on ARM, `a0` on RISC-V, `r24` on AVR) is never given to an
 operand.
+
+### Directives in a template
+
+Beside its instructions, a template may hold data and alignment, written
+as GNU `as` writes them:
+
+| Directive | Emits |
+|---|---|
+| `.ascii "S"[, "S"...]` | the bytes of each string |
+| `.asciz "S"`, `.string "S"` | each string followed by a NUL byte |
+| `.byte`, `.short`, `.word`, `.long`, `.quad` and the other data directives | each comma-separated constant expression at the directive's size |
+| `.p2align N[, FILL[, MAX]]` | padding to a multiple of 2^N bytes |
+| `.balign N[, FILL[, MAX]]` | padding to a multiple of N bytes (a power of two) |
+| `.align N[, FILL[, MAX]]` | as `.balign N` on x86-64 in ELF and COFF objects, as `.p2align N` everywhere else, including AVR, where GNU `as` reads it that way |
+
+Strings take the escapes `\b`, `\f`, `\n`, `\r`, `\t`, `\"`, `\\`, an
+octal `\NNN` and a hex `\xHH`. A `;`, `#`, `@` or `//` inside a string is
+part of the string. A data value must be a constant that fits the
+directive's size, signed or unsigned; a symbol is refused, because an
+inline template cannot carry a relocation.
+
+The data directive's size follows the target's assembler: `.word` is two
+bytes on x86-64 and AVR and four elsewhere; `.half` and `.dword` exist on
+RISC-V; `.hword`, `.xword` and `.dword` on AArch64.
+
+Padding is decided where the template lands in its section, not relative
+to the template: `.p2align 2` after an 18-byte string pads to the next
+multiple of four in `.text`. Without a fill value, the padding is the
+target's nop, as llvm-mc pads code (x86-64's long nops, AArch64's `nop`
+after zero bytes up to a word, Thumb's `nop`, RISC-V's `c.nop` and
+`nop`, zero bytes on AVR). A function holding such a template starts on
+that alignment, so the padding is also right when the function is in a
+section of its own (`-ffunction-sections`). The largest alignment is 16
+bytes, the alignment of `.text`.
+
+Data that would leave the next instruction off an instruction boundary,
+such as `.byte 7` alone on Arm or RISC-V, is followed by zero bytes up to
+one, as GNU `as` does on AArch64.
+
+On ARM and AArch64, the data and the padding after it are marked with
+`$d` mapping symbols, so a disassembler shows them as data.
+
+This is how Linux's `asm-offsets` and similar layout probes write a
+structure's size into an object file:
+
+```c
+#define LAYOUT(name, size, align) \
+    __asm__ volatile("\n.ascii \"->PROBE " #name " %c0 %c1\"\n.p2align 2\n" \
+                     : : "i"(size), "i"(align))
+```
+
+These directives are read on x86-64, AArch64, ARM (Cortex-M and ARM
+state), RISC-V, AVR, MIPS32 and LoongArch64. On MIPS32 and LoongArch64
+an alignment larger than four bytes is refused (`the asm aligns to 8
+bytes, which MIPS inline asm does not do yet`). On Xtensa, SPARC, PowerPC,
+TriCore, RX and ColdFire a template takes no directive yet.
 
 ### Constraint strings
 
@@ -2563,8 +2623,10 @@ unsigned char next_byte(const unsigned char **pp)
 
 In summary, compared with GCC:
 
-- Only the instructions listed for each target can appear in a template,
-  and a function template cannot refer to a symbol on any target.
+- Only the instructions listed for each target, and the directives
+  under [Directives in a template](#directives-in-a-template), can appear
+  in a template, and a function template cannot refer to a symbol on any
+  target.
 - `asm goto`, `asm inline` and flag-output constraints are not
   supported, nor are matching constraints (`"0"`) except on SPARC,
   PowerPC and ARM Cortex-M (where the input must be the output's own

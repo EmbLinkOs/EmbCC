@@ -65,6 +65,37 @@ then
         exit 1
     fi
     echo "$(wc -l < "$out/v.s" | tr -d ' ') asm statements encode as llvm-mc does"
+
+    # Strings, alignments to four, data and %c in a template (tests/
+    # harness/asmdir.sh) -- Linux's asm-offsets and EmbLinkRTOS's layout
+    # probes -- against llvm-mc's bytes, in this byte order: data words
+    # are the target's, and the padding to a word is zeros
+    . tests/harness/asmdir.sh
+    cat > "$out/dirs.txt" <<'EOF'
+.ascii "->EMB_PROBE s %c1 %c0"
+.p2align 2
+.ascii "abc"
+.align 2
+.asciz "hi", "x"
+.byte 0x55
+.balign 4
+.string "\t\"q\\\101\x42\0z"
+.p2align 2, 0x5a
+.byte 1, 255, -128, %c0, %c1
+.p2align 2,,2
+.byte 7
+.p2align 2,,3
+.ascii "a;b#c//d"
+.hword 0x1234, %c0
+.short 7
+.word 0x12345678
+.4byte 1
+.dword -2
+.8byte 3
+.p2align 2
+EOF
+    asmdir_referee "$out" $T "-triple=$MT -mcpu=mips32r2" nop 4 "$out/dirs.txt" ||
+        exit 1
 else
     echo "SKIP the encoding half: no llvm-mc with a MIPS target"
 fi
@@ -192,6 +223,10 @@ refuse "a template that writes callee-saved s1" "register '\$s1'" \
     'void f(void){ __asm__ volatile("move $s1, $zero"); }'
 refuse "an addiu immediate beyond 16 bits" 'does not fit' \
     'int f(int a){ int r; __asm__("addiu %0, %1, 40000" : "=r"(r) : "r"(a)); return r; }'
+refuse "%c of a register operand" 'names a register operand' \
+    'int f(int x){ __asm__ volatile(".byte %c0" : : "r"(x)); return x; }'
+refuse "an alignment past an instruction's four" 'does not do yet' \
+    'void f(void){ __asm__ volatile(".ascii \"abc\"; .p2align 3"); }'
 echo "an unknown instruction, gas's neg and two-operand div, x86 constraints,"
 echo "callee-saved registers and an oversized immediate are refused by name"
 

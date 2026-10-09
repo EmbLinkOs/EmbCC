@@ -256,7 +256,7 @@ supported. This section lists what is not.
 
 | Construct | Diagnostic |
 |---|---|
-| `_Float16`, `__fp16` | ``_Float16/__fp16 is not supported: EmbCC has no 16-bit floating-point type, and widening it to `float` would give 24 bits of mantissa where the program asked for 11`` |
+| An object, `sizeof`, cast or call of `_Float16`, `__fp16` (a declaration may name it) | `'h' has incomplete type _Float16`, `sizeof of incomplete _Float16`, `cannot cast to _Float16`, `calling 'g' with incomplete return type _Float16` |
 | `_Float128`, `__float128` on x86-64 | ``_Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type`` |
 | `_Float128` on Cortex-M, AVR and Apple arm64 | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
 | `_BitInt(N)` | `expected a type before '_BitInt'` |

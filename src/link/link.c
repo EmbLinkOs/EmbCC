@@ -1295,7 +1295,7 @@ static void add_entry_stub(struct linker *l)
 
 static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
 {
-    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0 };
+    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0, NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
     if (l->machine == EM_ARM) {
@@ -2408,6 +2408,34 @@ static void define_end_symbols(struct linker *l, Elf64_Addr image_end)
     define_linker_symbol(l, "end", image_end);
     define_linker_symbol(l, "__bss_end", image_end);
     define_linker_symbol(l, "__kernel_end", image_end);
+}
+
+/* `end` and `_end` under a linker script, for a C library's sbrk: newlib's
+ * reads `end`, EmbCC's own `_end`, and a script often names only the one
+ * its libc wanted. Each stands in for the other; a script naming neither
+ * gets the end of its last writable output section, where .bss ends. Only
+ * a name something refers to and nothing defines is given a value. */
+static void ls_end_symbols(struct linker *l, const struct ls_script *sc)
+{
+    struct symbol *a = sym_find(l, "_end"), *b = sym_find(l, "end");
+    int ad = a && a->defined, bd = b && b->defined;
+    struct symbol *want = !ad && a ? a : !bd && b ? b : NULL;
+    if (!want)
+        return;
+    Elf64_Addr v = 0;
+    if (ad || bd) {
+        v = (ad ? a : b)->value;
+    } else {
+        for (int k = 0; k < sc->nosec; k++) {
+            const struct ls_osec *o = &sc->osecs[k];
+            if (o->laid && !o->discard && o->write &&
+                (Elf64_Addr)(o->vma + o->size) > v)
+                v = (Elf64_Addr)(o->vma + o->size);
+        }
+    }
+    define_linker_symbol(l, want->name, v);
+    if (want == a && b && !b->defined)
+        define_linker_symbol(l, "end", v);
 }
 
 /* What a firmware startup needs to bring RAM up, provided by the linker
@@ -6983,6 +7011,7 @@ int embld_link(const char **inputs, int ninputs, const char *out,
             define_linker_symbol(&l, xstrndup(sym, strlen(sym)),
                                  (Elf64_Addr)(o->vma + o->size));
         }
+        ls_end_symbols(&l, sc);
         arm_attrs_check(&l);
         Elf64_Addr ev = 0;
         struct symbol *e = sym_find(&l, l.entry);
