@@ -571,6 +571,19 @@ static int rv_remat_ok(const struct ir_ins *i)
     return rv_li_len(v, i->w == 4 ? 32 : 64) <= 4;
 }
 
+/* An indirect call's target in a register: gen_call reads it before the
+ * argument setup, which writes the argument and scratch registers. A
+ * callee-saved one is still there at the jalr; any other goes to ra
+ * first -- saved by the prologue, and the call's own to overwrite. */
+static int rv_call_target_ok(const struct ir_ins *i)
+{
+    static int off = -1;
+    (void)i;
+    if (off < 0)
+        off = getenv("EMBCC_RV_NOINDREG") != NULL;
+    return !off;
+}
+
 static const struct ra_target RISCV_RA = {
     rv_pool_for,
     rv_callee_saved,
@@ -601,7 +614,8 @@ static const struct ra_target RISCV_RA = {
                    * values through rdr and writes through wreg/wr */
     0,            /* fp_reads_gpr: floats are already general (above) */
     1,            /* asm_in_reg: see IR_ASM */
-    rv_remat_ok
+    rv_remat_ok,
+    rv_call_target_ok
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -3001,6 +3015,47 @@ static void fp_parallel_move(struct rv_fn *F, const int *fd, const int *fs,
  * whose address could have escaped into the callee, no struct result --
  * and the IR_RET right after returns exactly what the call returned, at
  * the same width and in the same register class. */
+static int rv_call_target_ok(const struct ir_ins *i);
+
+/* Can the argument setup of call i write register r? It fills the
+ * argument registers the call uses (a0 too, for a hidden result
+ * pointer) and moves through the t registers; a struct or a float
+ * argument is staged in ways this does not follow, so with one, every
+ * register but the callee-saved ones is taken as written. */
+static int rv_setup_writes(const struct rv_fn *F, const struct ir_ins *i,
+                           int r)
+{
+    struct argplace pl;
+    struct rv_walk wk;
+    int a = r - RV_A0;
+    if (rv_callee_saved(r))
+        return 0;
+    if (a < 0 || a > 7 || (a == 0 && call_sret_bytes(F->w, i)))
+        return 1;
+    walk_init(&wk, call_sret_bytes(F->w, i) != 0);
+    for (int k = 0; k < i->nargs; k++) {
+        if (i->argv[k].is_struct || i->argv[k].is_float)
+            return 1;
+        place_one(F->w, &wk, &i->argv[k], 0, &pl);
+        if (pl.nreg && a >= pl.reg && a < pl.reg + pl.nreg)
+            return 1;
+    }
+    return 0;
+}
+
+/* An indirect tail call jumps to its target where the setup and the
+ * restores leave it. The restores reload the callee-saved registers and
+ * ra, so of the registers the setup does not write, only the argument
+ * registers survive both. */
+static int rv_ind_tail_reg(const struct rv_fn *F, const struct ir_ins *i)
+{
+    int r;
+    if (!rv_call_target_ok(i) || !in_reg(F, i->a))
+        return 0;
+    r = F->loc[i->a];
+    return r >= RV_A0 && r <= RV_A0 + 7 && !rv_setup_writes(F, i, r);
+}
+
 static int rv_tail_ok(const struct rv_fn *F, int n)
 {
     const struct ir_func *fn = F->fn;
@@ -3008,7 +3063,8 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
     struct argplace pl;
     struct rv_walk wk;
 
-    if (i->op != IR_CALL || i->indirect || i->call_varargs || i->retsize ||
+    if (i->op != IR_CALL || (i->indirect && !rv_ind_tail_reg(F, i)) ||
+        i->call_varargs || i->retsize ||
         i->flt || getenv("EMBCC_NO_TAILCALL"))
         return 0;
     if (fn->ret_abi.is_struct || fn->ret_abi.is_float)
@@ -3027,18 +3083,24 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
             return 0;
     }
     {
-        int nret = 0;
+        int nret = 0, calls = 0;
         for (int k = 0; k < fn->nins; k++) {
             enum ir_op op = fn->ins[k].op;
             if (op == IR_ADDR || op == IR_VA_START)
                 return 0;
             nret += op == IR_RET;
+            /* a call no return follows, or a helper: ra is saved */
+            calls += (op == IR_CALL && (k + 1 >= fn->nins ||
+                                        fn->ins[k + 1].op != IR_RET)) ||
+                     rv_op_calls_helper(&fn->ins[k]);
         }
         /* ...and the function's ONLY return: elsewhere the restores
          * here would sit beside the epilogue's, which a tail call
          * pays for with its copy. Measured over the libc corpus, that
-         * rule is the smaller of the two. */
-        if (nret > 1)
+         * rule is the smaller of the two. Unless there is nothing to
+         * restore: no saved register, and no other call to save ra for
+         * -- `return c < 0x80 ? isdigit(c) : 0;` (pass_retdup). */
+        if (nret > 1 && (calls || F->nsave || F->nfsave))
             return 0;
     }
     if (fn->has_alloca || fn->is_varargs || fn->neh)
@@ -3334,6 +3396,16 @@ static void gen_call(struct rv_fn *F, int n)
     struct ir_func *fn = F->fn;
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
+    /* An indirect target in a register, where the setup cannot reach it
+     * (rv_call_target_ok); -1 when it is loaded at the jalr. */
+    int tgt = -1;
+    if (i->indirect && in_reg(F, i->a)) {
+        tgt = F->loc[i->a];
+        if (rv_setup_writes(F, i, tgt) && !(F->tail && F->tail[n])) {
+            rv_mv(t, RV_RA, tgt);
+            tgt = RV_RA;
+        }
+    }
     struct argplace pl[MAX_PARAMS];
     struct rv_walk wk;
     long copy_at = F->byref_at;
@@ -3592,7 +3664,9 @@ static void gen_call(struct rv_fn *F, int n)
          * this function's caller, with ra as it came in. t1 carries the
          * far form's address, and nothing is live in it by now. */
         rv_restore(F);
-        if (cg_call_local(fn->src, i->callee) && g_rv_short_calls) {
+        if (i->indirect) {
+            rv_jalr(t, RV_ZERO, tgt, 0);    /* where the setup left it */
+        } else if (cg_call_local(fn->src, i->callee) && g_rv_short_calls) {
             note_call(F->st, t->len, i->callee);
             F->st->call[F->st->ncall - 1].jal = 1;
             F->st->call[F->st->ncall - 1].tail = 1;
@@ -3609,10 +3683,13 @@ static void gen_call(struct rv_fn *F, int n)
         return;
     }
     if (i->indirect) {
-        /* The target is read BEFORE nothing -- the arguments are already
-         * in place, and SCR is not one of them. */
-        rd(F, i->a, SCR);
-        rv_jalr(t, RV_RA, SCR, 0);
+        /* In memory, the target is read last -- the arguments are
+         * already in place, and SCR is not one of them. */
+        if (tgt < 0) {
+            rd(F, i->a, SCR);
+            tgt = SCR;
+        }
+        rv_jalr(t, RV_RA, tgt, 0);
     } else if (cg_call_local(fn->src, i->callee) && g_rv_short_calls) {
         note_call(F->st, t->len, i->callee);
         F->st->call[F->st->ncall - 1].jal = 1;
@@ -6012,6 +6089,7 @@ static const struct ra_target RV_PAIR_RA = {
     1,
     0,
     0,
+    NULL,
     NULL
 };
 
@@ -6441,6 +6519,7 @@ static const struct ra_target RISCV_FRA = {
     1,
     0,
     1,
+    NULL,
     NULL
 };
 static int g_rv_lowregs = 1;

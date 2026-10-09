@@ -474,6 +474,8 @@ static void opt_func(struct ir_func *fn)
         while (guard++ < 256 && pass_guardjump(fn))
             ;
     }
+    if (edge_ok)
+        pass_retdup(fn);     /* last: the tail merge would share them */
     if (verify) verify_func(fn, "opt");
 
     /* What the whole fixpoint came to, for this function. The per-pass

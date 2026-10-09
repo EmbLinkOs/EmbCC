@@ -613,6 +613,18 @@ static int t_remat_ok(const struct ir_ins *i)
            (v <= 0xffff || t_it_imm_ok((long)i->imm));
 }
 
+/* An indirect call's target in a register: IR_CALL reads it before the
+ * argument setup can overwrite it. Not ARMv6-M (v6m.c shares the
+ * allocator and reads the target last), nor a CMSE call, which clears
+ * registers on its own path. */
+static int t_call_target_ok(const struct ir_ins *i)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("EMBCC_T_NOINDREG") != NULL;
+    return !off && target_thumb_arch() != 6 && !i->call_cmse;
+}
+
 static const struct ra_target THUMB_RA = {
     t_pool_for,
     t_callee_saved,
@@ -647,7 +659,8 @@ static const struct ra_target THUMB_RA = {
                    * writes through wr/wreg */
     0,            /* fp_reads_gpr */
     1,            /* asm_in_reg: see IR_ASM */
-    t_remat_ok
+    t_remat_ok,
+    t_call_target_ok
 };
 
 /* The D class's view of the same machine. Only the FP fields matter to
@@ -670,7 +683,8 @@ static const struct ra_target THUMB_DRA = {
     1,            /* atomic_in_reg */
     0,            /* fp_reads_gpr */
     1,            /* asm_in_reg: the FP class keeps out of asm regardless */
-    NULL  /* remat_ok */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -1008,6 +1022,30 @@ static int fn_sret_bytes(const struct ir_func *fn)
 }
 
 static int call_sret_bytes(const struct ir_ins *i);
+static int t_call_target_ok(const struct ir_ins *i);
+
+/* Does the argument setup of the call at n write register r? It fills
+ * the argument registers the call uses (r0 too, last, for a hidden result
+ * pointer), loads a struct argument's words through T_ACC and T_ADDR, and
+ * breaks a cycle of moves through r12. An indirect target in any other
+ * register is still there at the branch. */
+static int t_setup_writes(const struct ir_ins *i, int r)
+{
+    struct argplace pl;
+    struct abi_walk w;
+    int sret = call_sret_bytes(i) != 0;
+    if (r == T_ACC_PM || (sret && r == T_R0))
+        return 1;
+    walk_init(&w, sret, i->call_varargs, i->call_pcs);
+    for (int k = 0; k < i->nargs; k++) {
+        place_one(&w, &i->argv[k], &pl);
+        if (i->argv[k].is_struct)
+            return 1;
+        if (pl.nreg && r >= pl.reg && r < pl.reg + pl.nreg)
+            return 1;
+    }
+    return 0;
+}
 
 /* Can the call at n be a TAIL call -- the frame torn down, then `b.w` to
  * the callee, which returns straight to this function's caller? Only when
@@ -1023,7 +1061,8 @@ static int t_tail_ok(const struct ir_func *fn, int n)
     struct abi_walk w;
     int esz;
 
-    if (i->op != IR_CALL || i->indirect || i->call_varargs || i->retsize ||
+    if (i->op != IR_CALL || (i->indirect && !t_call_target_ok(i)) ||
+        i->call_varargs || i->retsize ||
         i->flt || call_sret_bytes(i) || call_ret_vfp(i, &esz) ||
         getenv("EMBCC_NO_TAILCALL"))
         return 0;
@@ -2217,6 +2256,32 @@ static void jump_if(struct t_fn *F, int cond, int label)
  * (nothing can arrive between the two), and L1 is where control goes
  * next. ARM inverts a condition by its low bit; the float conditions
  * were chosen so that is exact for an unordered result too. */
+/* Does control reach `label` from the end of instruction n with nothing
+ * emitted on the way -- only labels, and copies between a register and
+ * itself? The else-arm of `x < 0 ? -x : x` is `mov %1, %0` with both in
+ * r0, and the then-arm's jump over it was `b` to the next instruction. */
+static int t_falls_to(const struct t_fn *F, int n, int label)
+{
+    const struct ir_func *fn = F->fn;
+    for (int m = n + 1; m < fn->nins; m++) {
+        const struct ir_ins *in = &fn->ins[m];
+        if (in->op == IR_LABEL) {
+            if (in->label == label)
+                return 1;
+            continue;
+        }
+        if ((in->op == IR_MOV || in->op == IR_BITCAST) && in->dst >= 0 &&
+            in_reg(F, in->dst) && in_reg(F, in->a) &&
+            F->loc[in->dst] == F->loc[in->a] &&
+            !F->wide[in->dst] && !F->wide[in->a] &&
+            !in_freg(F, in->dst) && !in_freg(F, in->a) &&
+            !getenv("EMBCC_T_NOFALLS"))
+            continue;
+        return 0;
+    }
+    return 0;
+}
+
 static int invert_last_bcond(struct t_fn *F, int n, int label)
 {
     struct ir_func *fn = F->fn;
@@ -4401,9 +4466,9 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_JMP:
         /* A jump to the label that follows it is not an instruction.
          * Four bytes each and the IR is full of them, because every
-         * `if` without an `else` ends in one. */
-        if (n + 1 < fn->nins && fn->ins[n + 1].op == IR_LABEL &&
-            fn->ins[n + 1].label == i->label)
+         * `if` without an `else` ends in one. Nor is one over code that
+         * emits nothing (t_falls_to). */
+        if (t_falls_to(F, n, i->label))
             return;
         if (!invert_last_bcond(F, n, i->label))
             jump_to(F, i->label);
@@ -4878,17 +4943,23 @@ static void gen_ins(struct t_fn *F, int n)
         wrote(F, i->dst, d);
         return;
     }
+    /* No flag value survives into an instruction (save tst_br's), so
+     * between low registers these are the 2-byte flag-setting forms:
+     * `negs` and `mvns` where `rsb.w` and `mvn.w` were four. */
     case IR_NEG: {
         int sa = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
-        t_alu_imm(t, T_OP_RSB, d, sa, 0, 0);
+        if (d < 8 && sa < 8 && !F->tst_br && !t_isa_a32)
+            t1_negs(t, d, sa);
+        else
+            t_alu_imm(t, T_OP_RSB, d, sa, 0, 0);
         wrote(F, i->dst, d);
         return;
     }
     case IR_BNOT: {
         int sa = rdr(F, i->a, T_ACC);
         int d = wreg(F, i->dst, T_ACC);
-        t_mvn_reg(t, d, sa, 0);
+        t_mvn_reg(t, d, sa, d < 8 && sa < 8 && !F->tst_br && !t_isa_a32);
         wrote(F, i->dst, d);
         return;
     }
@@ -5334,6 +5405,18 @@ static void gen_ins(struct t_fn *F, int n)
          * already in a register is stored from it -- it was moved to
          * r12 first, six bytes for every stack argument. Nothing below
          * writes r0-r3 until the stack words are all down. */
+        /* An indirect target in a register is called from it. The setup
+         * below writes r0-r3, and r12 breaks its cycles: a target in one
+         * of those goes to lr first -- saved by the prologue, and the
+         * call's own to overwrite. */
+        int tgt = -1;
+        if (i->indirect && !i->call_cmse && in_reg(F, i->a)) {
+            tgt = F->loc[i->a];
+            if (t_setup_writes(i, tgt)) {
+                t_mov_reg(t, T_LR, tgt);
+                tgt = T_LR;
+            }
+        }
         unsigned cfree = lo_free_at(F, n);
         int cs0 = -1, cs1 = -1;
         for (int r = 0; r < 8; r++)
@@ -5501,7 +5584,9 @@ static void gen_ins(struct t_fn *F, int n)
              * would have to put lr back, and `pop.w {..., lr}; b.w` is
              * two bytes more than `bl; pop {..., pc}`; and since every
              * push saves lr, the ordinary call there is sound. */
-            if (cg_call_local(F->fn->src, i->callee)) {
+            if (i->indirect) {
+                t_bx(t, tgt);           /* where the setup left it */
+            } else if (cg_call_local(F->fn->src, i->callee)) {
                 note_call(F->st, t_b(t), i->callee);
                 F->st->call[F->st->ncall - 1].tail = 1;
             } else {
@@ -5522,8 +5607,11 @@ static void gen_ins(struct t_fn *F, int n)
                 (i->ret_tybytes == 1 || i->ret_tybytes == 2))
                 t_ext(t, T_R0, T_R0, i->ret_tybytes, i->ret_tysign);
         } else if (i->indirect) {
-            rd(F, i->a, T_ACC);
-            t_blx(t, T_ACC);
+            if (tgt < 0) {
+                rd(F, i->a, T_ACC);
+                tgt = T_ACC;
+            }
+            t_blx(t, tgt);
         } else if (cg_call_local(F->fn->src, i->callee)) {
             note_call(F->st, t_bl(t), i->callee);
         } else {
@@ -6200,7 +6288,8 @@ static const struct ra_target THUMB_PAIR_RA = {
     0, /* atomic_in_reg */
     0, /* fp_reads_gpr */
     0, /* asm_in_reg: a pair live across an asm stays in memory */
-    NULL  /* remat_ok */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 /* The pair pass: a vreg -> low register map, or NULL for none. Fills
@@ -6791,9 +6880,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     F.tail = NULL;
     if (fn->cmse_entry)
         tcg_cmse_check_entry(fn);
+    /* An indirect one branches to its target where the setup leaves
+     * it: in a register the setup does not write, and not lr, which
+     * holds the return address the callee is to go back to. */
     if (g_t_regalloc && !keep_vars && !g_t_o0)
         for (i = 0; i < fn->nins; i++)
-            if (t_tail_ok(fn, i)) {
+            if (t_tail_ok(fn, i) &&
+                (!fn->ins[i].indirect ||
+                 (in_reg(&F, fn->ins[i].a) &&
+                  F.loc[fn->ins[i].a] != T_LR &&
+                  !t_setup_writes(&fn->ins[i], F.loc[fn->ins[i].a])))) {
                 if (!F.tail)
                     F.tail = xcalloc((size_t)fn->nins, 1);
                 F.tail[i] = 1;

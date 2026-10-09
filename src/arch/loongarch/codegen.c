@@ -223,7 +223,8 @@ static const struct ra_target LOONGARCH_RA = {
                    * values through rdr and writes through wreg/wr */
     0,            /* fp_reads_gpr: floats are already general (above) */
     1,            /* asm_in_reg: see IR_ASM */
-    NULL  /* remat_ok */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 /* -O1 and up: the allocator is on. */
