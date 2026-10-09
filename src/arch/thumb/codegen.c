@@ -6033,8 +6033,17 @@ static void gen_ins(struct t_fn *F, int n)
                     ldst_must(t, o->reg, o->reg, 0, o->size, 0, 0);
             }
         }
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
+        {
+            int base = t->len;
+            for (int k = 0; k < ia->codelen; k++)
+                code_byte(t, ia->code[k]);
+            /* the template's data (`.short`, `.word`...): $d around it in
+             * the object, as v6m.c marks it, so a disassembler and a
+             * debugger see data and not an instruction */
+            for (int k = 0; k + 1 < ia->ndrange; k += 2)
+                code_mark_data(t, base + ia->drange[k],
+                               base + ia->drange[k + 1]);
+        }
         /* Out, through an address: the address is live across the asm
          * (regalloc.c counts it as crossing), so it is still there. An
          * "m" output was written BY the template through the address its

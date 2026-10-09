@@ -261,3 +261,21 @@ if "$EMBCC" --target=$T -c "$out/movs-big.c" -o /dev/null 2>/dev/null; then
     echo "movs of an immediate no MOVS encodes was accepted"; exit 1
 fi
 echo "movs and mvns set the flags, or are refused"
+
+# Data in a template is data in the object: a $d mapping symbol where it
+# starts and $t where the code resumes, on ARMv7-M as on ARMv6-M -- or a
+# disassembler and a debugger read the word as instructions.
+printf 'int raw(int x){ __asm__ volatile("adds %%0, #1\\n .word 0x12345678\\n adds %%0, #2" : "+r"(x)); return x; }\n' \
+    > "$out/dmap.c"
+for tt in thumbv7em-none-eabi thumbv6m-none-eabi; do
+    "$EMBCC" --target=$tt -O2 -c "$out/dmap.c" -o "$out/dmap.o" || {
+        echo "$tt: the data template does not compile"; exit 1; }
+    llvm-objdump -d "$out/dmap.o" > "$out/dmap.dis"
+    grep -q '\.word.*0x12345678' "$out/dmap.dis" || {
+        echo "$tt: the template's .word is not marked as data:"
+        cat "$out/dmap.dis"; exit 1; }
+    grep -qE 'adds[[:space:]]+r[0-7], #0x2' "$out/dmap.dis" || {
+        echo "$tt: the code after the template's data is not marked as code:"
+        cat "$out/dmap.dis"; exit 1; }
+done
+echo "a template's data is \$d in the object and the code after it \$t, on ARMv7-M and ARMv6-M"
