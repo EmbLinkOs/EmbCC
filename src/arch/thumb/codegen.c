@@ -2066,8 +2066,10 @@ static int t_nrvo_local(const struct t_fn *F)
         int l;
         if (i->op != IR_RET)
             continue;
-        if (i->a < 0 || i->a >= fn->nvregs || (l = F->fvar[i->a]) < 0 ||
-            (L >= 0 && l != L))
+        if (i->a < 0 || i->a >= fn->nvregs)
+            return -1;
+        l = F->fvar[i->a];
+        if (l < 0 || (L >= 0 && l != L))
             return -1;
         L = l;
     }
