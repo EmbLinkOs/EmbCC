@@ -134,6 +134,15 @@ dis "$out/pick2.o" pick2 > "$out/pick2.dis"
 nsp=$(grep -cE 'ldr[[:space:]].*\[sp' "$out/pick2.dis") || nsp=0
 [ "$nsp" -le 1 ] || { cat "$out/pick2.dis"
     fail "pick2: loading c into the role that holds x loads x again"; }
+# A spill store none of whose reads loads it is left out: chain's x is
+# read from r6 on both sides of the call (r6 survives it), so nothing
+# stores x -- every stack store's slot is loaded somewhere.
+dis "$out/sc.o" chain > "$out/chain.dis"
+dead=$(awk '/\tstr\t.*\[sp/ { s[$NF] = 1 } /\tldr\t.*\[sp/ { l[$NF] = 1 }
+            END { n = 0; for (k in s) if (!(k in l)) n++; print n }' \
+           "$out/chain.dis")
+[ "$dead" = 0 ] || { cat "$out/chain.dis"
+    fail "chain: $dead stack slots stored and never loaded"; }
 "$EMBCC" --target=$T -Os -Ilib/libc/include -c lib/libc/src/stdlib/strtol.c \
     -o "$out/strtol.o" || fail "compile strtol.c"
 dis "$out/strtol.o" conv > "$out/conv.dis"

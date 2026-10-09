@@ -740,15 +740,55 @@ static void fr_st(struct t_fn *F, int rv, long off, int size, unsigned avoid)
 
 /* ---- values ------------------------------------------------------------- */
 
-/* reg = the frame word at off (a slot v6_rc_ok admits): a copy of a
+/* DEAD SPILL STORES: a temporary every read of which the slot cache
+ * answered, in a pass, needs its slot written by none of its stores --
+ * the register each one is made from holds it wherever it is read. The
+ * next pass leaves those stores out (and still notes the register, so
+ * the reads find it); the cache decides nothing from a store's bytes, so
+ * every read hits again -- unless a first pass (a far-mode restart) puts
+ * a pool island somewhere else, which empties the cache. A read that
+ * misses (g6_elide_bad) means wrong code: the pass is made again with
+ * that value's stores back, for good. Per
+ * vreg: read from memory this pass (g6_vmiss), stores left out
+ * (g6_velide), and never to be (g6_noelide). */
+static char *g6_vmiss, *g6_velide, *g6_noelide;
+static int g6_elide_bad;
+
+static void rc_missed(int v)
+{
+    if (v < 0 || !g6_vmiss)
+        return;
+    g6_vmiss[v] = 1;
+    if (g6_velide[v])
+        g6_elide_bad = 1;
+}
+
+static int rc_elide(const struct t_fn *F, int v)
+{
+    return v >= F->fn->nvars && g6_velide && g6_velide[v];
+}
+
+/* A store left out: what keys on the code having grown since a point --
+ * a branch v6_invert_last may take back (bc_end), flags cmp32 may reuse
+ * (fl_end) -- decides as if it had been made, so a pass leaving out
+ * stores makes the same branches as the pass it learned from. */
+static void rc_elided(struct t_fn *F, long off, int size)
+{
+    rc_drop(off, size);
+    F->bc_end = -1;
+    F->fl_end = -1;
+}
+
+/* reg = v's frame word at off (a slot v6_rc_ok admits): a copy of a
  * register the slot cache says holds it, or a load. Flag-free. */
-static void slot_rd(struct t_fn *F, int reg, long off)
+static void slot_rd(struct t_fn *F, int v, int reg, long off)
 {
     int c = rc_find(F, off);
     if (c >= 0) {
         mov(F, reg, c);
     } else {
         fr_ld(F, reg, off, 4, 0);
+        rc_missed(v);
     }
     rc_note(F, reg, off);
 }
@@ -816,7 +856,7 @@ static void v_rd_(struct t_fn *F, int v, int reg)
         return;
     }
     if (v6_rc_ok(F, v)) {
-        slot_rd(F, reg, F->slot[v]);
+        slot_rd(F, v, reg, F->slot[v]);
         return;
     }
     fr_ld(F, reg, tcg_slot_of(F, v), 4, 0);
@@ -922,7 +962,10 @@ static void v_wr(struct t_fn *F, int v, int reg)
     if (F->slot[v] < 0 || tcg_faddr(F, v, &fo))
         return;
     (void)tcg_slot_of(F, v);
-    fr_st(F, reg, F->slot[v], 4, 0);
+    if (rc_elide(F, v))
+        rc_elided(F, F->slot[v], 4);
+    else
+        fr_st(F, reg, F->slot[v], 4, 0);
     if (v6_rc_ok(F, v))
         rc_note(F, reg, F->slot[v]);
 }
@@ -956,8 +999,8 @@ static void v_rd64(struct t_fn *F, int v, int lo, int hi)
     }
     (void)tcg_slot_of(F, v);
     if (v6_rc_ok(F, v)) {
-        slot_rd(F, lo, F->slot[v]);
-        slot_rd(F, hi, F->slot[v] + 4);
+        slot_rd(F, v, lo, F->slot[v]);
+        slot_rd(F, v, hi, F->slot[v] + 4);
         return;
     }
     fr_ld(F, lo, F->slot[v], 4, 0);
@@ -975,8 +1018,12 @@ static void v_wr64(struct t_fn *F, int v, int lo, int hi)
     (void)tcg_slot_of(F, v);
     if (F->slot[v] < 0)
         return;
-    fr_st(F, lo, F->slot[v], 4, 1u << hi);
-    fr_st(F, hi, F->slot[v] + 4, 4, 1u << lo);
+    if (rc_elide(F, v)) {
+        rc_elided(F, F->slot[v], 8);
+    } else {
+        fr_st(F, lo, F->slot[v], 4, 1u << hi);
+        fr_st(F, hi, F->slot[v] + 4, 4, 1u << lo);
+    }
     if (v6_rc_ok(F, v)) {
         rc_note(F, lo, F->slot[v]);
         rc_note(F, hi, F->slot[v] + 4);
@@ -3000,6 +3047,7 @@ static void gen_ins(struct t_fn *F, int n)
             hi = rc_find(F, F->slot[i->a] + 4);
         } else {
             fr_ld(F, sc(F, S1), tcg_slot_of(F, i->a) + 4, 4, 0);
+            rc_missed(i->a);
             hi = S1;
         }
         if (k)
@@ -3308,7 +3356,7 @@ static void gen_ins(struct t_fn *F, int n)
             if (c >= 0 && i->size < 4) {
                 t1_ext(t, d, c, i->size, i->sign);
             } else {
-                slot_rd(F, d, F->slot[i->a]);
+                slot_rd(F, i->a, d, F->slot[i->a]);
                 if (i->size < 4)
                     t1_ext(t, d, d, i->size, i->sign);
             }
@@ -3331,7 +3379,10 @@ static void gen_ins(struct t_fn *F, int n)
             long s = tcg_slot_of(F, i->dst);
             int whole = i->dst >= fn->nvars ||
                         i->size >= fn->locals[i->dst].size;
-            fr_st(F, src, s, whole ? 4 : i->size, 0);
+            if (whole && rc_elide(F, i->dst))
+                rc_elided(F, s, 4);
+            else
+                fr_st(F, src, s, whole ? 4 : i->size, 0);
             if (whole && v6_rc_ok(F, i->dst))
                 rc_note(F, src, s);
         }
@@ -4033,6 +4084,12 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         g6_lseen = xcalloc((size_t)nl + 1, 1);
         g6_lsnap = xmalloc((size_t)(nl + 1) * 8 * sizeof *g6_lsnap);
     }
+    {
+        size_t nv = (size_t)(fn->nvregs ? fn->nvregs : 1);
+        g6_vmiss = xcalloc(nv, 1);
+        g6_velide = xcalloc(nv, 1);
+        g6_noelide = xcalloc(nv, 1);
+    }
 
     {
     int len0 = t->len, nl0 = fn->nlines, nd0 = t->ndrange;
@@ -4089,6 +4146,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* ---- prologue ---- */
         g6_s0 = 6; g6_s1 = 7;              /* the prologue's */
         rc_reset();
+        memset(g6_vmiss, 0, (size_t)(fn->nvregs ? fn->nvregs : 1));
+        g6_elide_bad = 0;
         if (g6_lseen)
             memset(g6_lseen, 0, (size_t)fn->nlabels + 1);
         g6_ins_at = t->len;
@@ -4401,6 +4460,24 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                     F.scr_save = used;
                     scr_changed = 1;
                 }
+                /* the temporaries no read found in memory this pass: their
+                 * stores go next pass (see g6_velide) */
+                if (tcg_regalloc() && !rc_off() && pass < 9) {
+                    for (int v = fn->nvars; v < fn->nvregs; v++) {
+                        if (g6_velide[v] && g6_vmiss[v]) {
+                            g6_velide[v] = 0;
+                            g6_noelide[v] = 1;
+                            changed = 1;
+                        } else if (!g6_velide[v] && !g6_vmiss[v] &&
+                                   !g6_noelide[v] && v6_rc_ok(&F, v)) {
+                            g6_velide[v] = 1;
+                            changed = 1;
+                        }
+                    }
+                } else if (g6_elide_bad) {
+                    internal_error("thumb: %s: a spill store left out was "
+                                   "read", fn->name);
+                }
                 if (!tcg_regalloc() || (!changed && !scr_changed)) {
                     free(nc);
                     break;
@@ -4443,6 +4520,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.remat_v);
     free((char *)g6_atk);
     g6_atk = NULL;
+    free(g6_vmiss);
+    free(g6_velide);
+    free(g6_noelide);
+    g6_vmiss = g6_velide = g6_noelide = NULL;
     free(g6_lfwd);
     free(g6_lseen);
     free(g6_lsnap);
