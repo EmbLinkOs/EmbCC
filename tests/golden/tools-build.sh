@@ -53,5 +53,15 @@ for t in $tools; do
     fi
 done
 
+# embsim is built optimized (EMBSIM_OPT, -O2): a simulator's speed is
+# every test's that runs one, and without -O it ran a busy loop about
+# three times slower. Still with -g, as every tool here is.
+if [ -s "$out/embsim.cmd" ]; then
+    grep -Eq -- ' -O[1-3s]? ' "$out/embsim.cmd" ||
+        { echo "FAIL embsim: its recipe has no -O:"; cut -c1-100 "$out/embsim.cmd"; fail=1; }
+    grep -q -- ' -g ' "$out/embsim.cmd" ||
+        { echo "FAIL embsim: its recipe dropped -g"; fail=1; }
+fi
+
 [ "$fail" -eq 0 ] || exit 1
 echo "  every tool in \`make all\` builds ($(echo $tools | wc -w | tr -d ' ') of them)"

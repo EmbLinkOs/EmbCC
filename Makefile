@@ -391,8 +391,13 @@ EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
                tools/embsim/image.h tools/embsim/analysis.h \
                tools/embsim/disasm.h
+# Optimized, unlike the other tools: a simulator's speed is the tests'
+# and the user's time, and -O2 runs a busy loop 2.5 (M3) to 3.6 (AVR)
+# times as fast as no -O. -g stays (it is in CFLAGS); `make EMBSIM_OPT=`
+# builds it unoptimized to debug.
+EMBSIM_OPT ?= -O2
 embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS)
-	$(CC) $(CFLAGS) -o $@ $(EMBSIM_SRCS) -lm
+	$(CC) $(CFLAGS) $(EMBSIM_OPT) -o $@ $(EMBSIM_SRCS) -lm
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
