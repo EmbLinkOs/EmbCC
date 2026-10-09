@@ -26,6 +26,11 @@
 static int lfds[MAXL][2];               /* the listeners' sockets */
 static int nl;
 
+int net_file_ready(FILE *f)
+{
+    return net_ready(fileno(f), 0);
+}
+
 int net_listen(const char *host, int port)
 {
     struct addrinfo hints, *res, *a;

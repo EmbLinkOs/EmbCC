@@ -310,6 +310,8 @@ void an_exc_entry(struct sim *s, u32 n, u32 ret)
     struct analysis *a = s->an;
     if (a->fault)
         fault_entry(a, n, ret);
+    if (s->rec)
+        rec_exc(s, n);
     if (a->nev < 4) {
         a->ev[a->nev].what = EV_ENTRY;
         a->ev[a->nev].n = n;
@@ -369,6 +371,12 @@ void an_step(struct sim *s)
     if (s->max_insns && s->insns >= s->max_insns && s->state == RUN)
         sim_end(s, END_BUDGET, "--max-insns: %llu instructions run",
                 (unsigned long long)s->insns);
+    /* a step that did nothing (a debugger's watchpoint stopped it) is
+     * not one: a run without the debugger never takes it */
+    if (ran || s->cycles != c0 || c->ops->pc(c) != pc0 || s->state != RUN)
+        a->steps++;
+    if (s->rec)
+        rec_step(s);
 }
 
 struct analysis *an_create(struct sim *s, int calls)

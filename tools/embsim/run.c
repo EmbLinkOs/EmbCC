@@ -40,6 +40,8 @@ void sim_end(struct sim *s, int state, const char *fmt, ...)
 void sim_out(struct sim *s, int c)
 {
     putchar(c);
+    if (s->rec)
+        rec_out(s, c);
     if (s->until) {
         /* a plain prefix automaton is enough for the sentinels harnesses
          * print: restart the match at this byte when it breaks */
@@ -56,6 +58,16 @@ void sim_advance(struct sim *s, u32 cycles)
 {
     for (int i = 0; i < s->ntick_fn; i++)
         s->tick_fn[i](s->tick_ctx[i], cycles);
+}
+
+void sim_rx_port(struct sim *s, int (*room)(void *ctx),
+                 void (*put)(void *ctx, int c), void *ctx)
+{
+    if (s->rx.room)
+        return;
+    s->rx.room = room;
+    s->rx.put = put;
+    s->rx.ctx = ctx;
 }
 
 void sim_clock(struct sim *s, int *running, int on)

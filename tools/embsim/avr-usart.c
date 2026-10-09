@@ -2,9 +2,14 @@
  * to UDR0 with the transmitter on (UCSR0B's TXEN0) is sent at once, so
  * the data register is always empty (UCSR0A's UDRE0) and the transmit
  * completes then (TXC0, cleared by writing it a one or by entering its
- * vector). The receiver never has anything. Its interrupts are the
- * data register empty (vector 19) and transmit complete (20), as
- * UCSR0B enables them. */
+ * vector). Its interrupts are the data register empty (vector 19) and
+ * transmit complete (20), as UCSR0B enables them.
+ *
+ * The receiver is connected only when the run has an input (--input, or
+ * the replay of one; s->rx_on): with RXEN0 a byte arriving waits in UDR0
+ * and sets RXC0, and with RXCIE0 requests the receive-complete vector
+ * (18); reading UDR0 takes it and clears RXC0. Without an input it never
+ * has anything. */
 #include <stdlib.h>
 
 #include "avr.h"
@@ -13,10 +18,12 @@
 enum { UCSRA, UCSRB, UCSRC, RES, UBRRL, UBRRH, UDR };
 #define UDRE 0x20
 #define TXC 0x40
+#define RXC 0x80
 
 struct usart {
     struct sim *sim;
     u8 a, b, c, brrl, brrh;
+    u8 rx;
 };
 
 static u8 rd(struct usart *u, u32 off)
@@ -27,6 +34,15 @@ static u8 rd(struct usart *u, u32 off)
     case UCSRC: return u->c;
     case UBRRL: return u->brrl;
     case UBRRH: return u->brrh;
+    case UDR:
+        if (u->a & RXC) {
+            u8 v = u->rx;
+            if (!u->sim->bus.debug) {
+                u->a &= (u8)~RXC;
+                avr_irq_changed(u->sim);
+            }
+            return v;
+        }
     }
     return 0;                                   /* UDR: nothing received */
 }
@@ -35,7 +51,8 @@ static void wr(struct usart *u, u32 off, u8 v)
 {
     switch (off) {
     case UCSRA:
-        /* TXC is cleared by a one; U2X and MPCM are written */
+        /* TXC is cleared by a one; U2X and MPCM are written; RXC is
+         * the receiver's */
         u->a = (u8)((u->a & ~3u) | (v & 3));
         if (v & TXC)
             u->a &= (u8)~TXC;
@@ -77,11 +94,14 @@ static void usart_reset(void *ctx)
     u->brrl = u->brrh = 0;
 }
 
-/* data register empty (19): UDRIE0 and UDRE0; transmit complete (20):
- * TXCIE0 and TXC0, which entering the vector clears */
+/* receive complete (18): RXCIE0 and RXC0; data register empty (19):
+ * UDRIE0 and UDRE0; transmit complete (20): TXCIE0 and TXC0, which
+ * entering the vector clears */
 static int usart_pending(void *ctx, int vec)
 {
     struct usart *u = ctx;
+    if (vec == 18)
+        return (u->b & 0x80) && (u->a & RXC);
     if (vec == 19)
         return (u->b & 0x20) && (u->a & UDRE);
     return (u->b & 0x40) && (u->a & TXC);
@@ -92,6 +112,20 @@ static void usart_ack(void *ctx, int vec)
     struct usart *u = ctx;
     if (vec == 20)
         u->a &= (u8)~TXC;
+}
+
+static int usart_room(void *ctx)
+{
+    struct usart *u = ctx;
+    return (u->b & 0x10) && !(u->a & RXC);     /* RXEN0, and UDR0 empty */
+}
+
+static void usart_put(void *ctx, int c)
+{
+    struct usart *u = ctx;
+    u->rx = (u8)c;
+    u->a |= RXC;
+    avr_irq_changed(u->sim);
 }
 
 const struct dev_ops avr_usart_ops = {
@@ -108,5 +142,7 @@ void *avr_usart_create(struct sim *s, const struct dev_desc *d)
     usart_reset(u);
     avr_irq_source(s, 19, usart_pending, 0, u);
     avr_irq_source(s, 20, usart_pending, usart_ack, u);
+    avr_irq_source(s, 18, usart_pending, 0, u);   /* RXC0: only with an input */
+    sim_rx_port(s, usart_room, usart_put, u);
     return u;
 }

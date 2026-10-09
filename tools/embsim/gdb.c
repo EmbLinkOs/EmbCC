@@ -276,6 +276,7 @@ static int resume(struct gdb *g, int step)
             /* Nothing can interrupt the core: as a part asleep in WFI,
              * it waits for the debugger. */
             s->state = RUN;
+            rec_wake(s);
             if (step)
                 return STOP_TRAP;
             for (;;) {
@@ -387,6 +388,7 @@ static int mem_read(struct gdb *g, u32 a, u8 *b, int len)
 static int mem_write(struct gdb *g, u32 a, const u8 *b, int len)
 {
     struct bus *bus = &g->s->bus;
+    rec_mem(g->s, a, b, len);
     for (int i = 0; i < len;) {
         u32 x = a + (u32)i, v = 0;
         int n = (len - i >= 4 && !(x & 3)) ? 4 : (len - i >= 2 && !(x & 1)) ? 2 : 1;
@@ -520,6 +522,7 @@ static void monitor(struct gdb *g, const char *hex)
                    "cycles        the estimated cycles so far\n");
     } else if (!strcmp(cmd, "reset") || !strcmp(cmd, "reload")) {
         int reload = cmd[2] == 'l';
+        rec_reset(s, reload);
         sim_reset(s, reload);
         set_stop(g, 5, "");
         mon_out(g, reload ? "embsim: the image reloaded, and reset\n"
@@ -603,6 +606,7 @@ static int session(struct gdb *g)
                     ok = 0;
                 else {
                     c->ops->reg_write(c, *r, b);
+                    rec_reg(s, *r, b, sz);
                     q += 2 * sz;
                 }
             }
@@ -625,6 +629,7 @@ static int session(struct gdb *g)
                 send(g, "E14");
             else {
                 c->ops->reg_write(c, n, b);
+                rec_reg(s, n, b, sz);
                 send(g, "OK");
             }
             continue;
@@ -703,6 +708,7 @@ static int session(struct gdb *g)
                 for (int i = 0; i < sz; i++)
                     b[i] = (u8)(i < 4 ? a >> (8 * i) : 0);
                 c->ops->reg_write(c, c->ops->pc_regnum, b);
+                rec_reg(s, c->ops->pc_regnum, b, sz);
             }
             int why = resume(g, p[0] == 's' || p[0] == 'S');
             if (why == STOP_LOST)
@@ -736,6 +742,14 @@ static int session(struct gdb *g)
                 int bad = 0;
                 for (u32 i = 0; i < len && !bad; i++)
                     bad = bus_debug_write(&s->bus, a + i, 1, 0xff) != 0;
+                if (!bad && s->rec && len) {
+                    u8 *ff = malloc(len);
+                    if (!ff)
+                        die("out of memory");
+                    memset(ff, 0xff, len);
+                    rec_mem(s, a, ff, (int)len);
+                    free(ff);
+                }
                 send(g, bad ? "E01" : "OK");
             } else if (!strncmp(p, "vFlashWrite:", 12)) {
                 const char *q = p + 12;
@@ -871,6 +885,7 @@ void gdb_serve(struct sim *s, const char *host, int port, int wait)
         while (s->state == RUN || s->state == END_IDLE) {
             if (s->state == END_IDLE) {
                 s->state = RUN;
+                rec_wake(s);
                 while (g->fd < 0)
                     g->fd = net_accept(l, -1);
                 break;
@@ -886,6 +901,7 @@ void gdb_serve(struct sim *s, const char *host, int port, int wait)
     int how = session(g);
     net_close(g->fd);
     if (how == END_KILL) {
+        rec_kill(s);
         s->exit_status = 0;
         sim_end(s, END_EXIT, "the debugger killed it");
     } else if (how == END_DETACH || how == END_LOST) {

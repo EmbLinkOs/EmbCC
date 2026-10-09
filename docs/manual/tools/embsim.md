@@ -23,7 +23,8 @@ embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--profile[=FILE] [--profile-format=report|collapsed|collapsed-insns]]
                  [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]
                  [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]
-                 [--fault-report[=FILE]]
+                 [--fault-report[=FILE]] [--input FILE|-] [--record FILE]
+embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] [...]
 embsim --svd FILE.svd --svd-map
 ```
 
@@ -248,7 +249,8 @@ Over its registers, four models, found by the SVD's names (`RCC`,
   `0x00c00000`); a write to DR with CR1's UE and TE set sends the byte
   to stdout at once, so TXE stays set and TC sets; TC, RXNE, LBD and CTS
   are cleared by writing 0; the TXE, TC and RXNE interrupts are raised
-  through the NVIC when enabled. Reception is not modelled.
+  through the NVIC when enabled. Reception is not modelled (the board's
+  console for `--input` is the core's boards' UARTs, above).
 - **TIM1-14**, their time base: CNT counts up while CEN is set, one
   count per PSC + 1 clocks of the timer's clock; past ARR it returns to
   0 and that is an update event: UIF, and the interrupt with UIE (the
@@ -397,7 +399,8 @@ words, at the byte address.
 The board's UART writes to stdout. The UART must be enabled as on the
 part: CMSDK's CTRL, the nRF51's ENABLE and STARTTX, the AVR's TXEN0.
 The NS16550A sends what is written to THR, and its LSR always says the
-transmitter is empty.
+transmitter is empty. Its receiver has nothing, unless the run has an
+input (`--input`, [below](#record-and-replay---input---record---replay)).
 
 On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 `--no-semihosting` is given. It handles:
@@ -418,6 +421,7 @@ On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 | the core locks up (a RISC-V trap whose vector cannot be fetched; an AVR instruction the part does not have) | 3 |
 | the stack overflows, with `--stack-report` or `--stack-limit` | 3 |
 | `--max-insns` instructions have run | 4 |
+| `--replay`: the run is not the recording's | 5 |
 | the image cannot be loaded, or an option is wrong | 2 |
 
 A run that ends at a lockup or at `--max-insns` says why on stderr.
@@ -697,6 +701,95 @@ there in both cases, and for every fault a program handles too (a test
 that provokes faults gets one report each), which as a default would be
 noise.
 
+### Record and replay: `--input`, `--record`, `--replay`
+
+`--input FILE` connects FILE (`-`: stdin) to the board's UART receiver:
+the PL011 of the lm3s6965evb, the CMSDK UART of the MPS2 boards, virt's
+NS16550A and the AVR's USART0.
+
+| UART | A byte arriving | Its interrupt |
+|---|---|---|
+| PL011 | waits in DR; FR's RXFE clears; RIS's RXRIS sets | with IMSC's RXIM: IRQ 5; reading DR or ICR clears it |
+| CMSDK | with CTRL's RX enable: waits in DATA; STATE's RX full sets | with CTRL's RX interrupt enable: INTSTATUS bit 1, IRQ 0 |
+| NS16550A | waits in RBR; LSR's DR sets | none (virt's PLIC is not modelled): poll LSR |
+| USART0 | with RXEN0: waits in UDR0; UCSR0A's RXC0 sets | with RXCIE0: vector 18 |
+
+A byte arrives when the host has one: the receiver is offered the next
+every 4096 steps while it is empty, and when the core would sleep with
+nothing else to wake it, the run waits for the host instead of ending.
+Typing into stdin makes an interactive console. Where the host's bytes
+fall in the run depends on the host -- how fast the pipe delivers, when
+a person types -- and a program that counts its own time sees different
+counts each run:
+
+```text
+$ (printf ab; sleep 0.3; printf cd; sleep 0.3; printf q) | embsim rr.elf --input -
+got a at tick 261
+got b at tick 591
+got c at tick 12463
+got d at tick 12785
+got q at tick 24650
+```
+
+That is what `--record FILE` is for. It writes everything that came from
+outside the machine, each with the step it came at, and the run's end:
+
+- the bytes the UART received (`rx`), and the core it woke when it had
+  to wait for one (`wake`);
+- semihosting's SYS_READC, a byte of the host's stdin (`readc`);
+- a debugger's register and memory writes (`reg`, `mem`, gdb's `load`
+  and flash erases among them), its `monitor reset` and `reload`, the
+  core it wakes from a sleep nothing else would end, and its `kill`;
+- every exception and interrupt the core entered, with its step and
+  instruction count (`exc`), which a replay checks: a run of the same one
+  at a constant stride -- a timer's tick waking an idle loop while the
+  run waits for the host -- is one line, so the record grows with what
+  the program does, not with how long a person takes to type;
+- the machine: the image (and a hash of it), the board, the core, the
+  RAM size, the SVD file, semihosting, `--max-insns` and `--until`;
+- the end: the steps, the instructions and cycles, how the run ended
+  and its status, a hash of the registers and memory, and the output's
+  length and hash.
+
+There is no time to record: every counter and timer EmbSim has runs on
+the core's estimated cycles, never on the host's clock. A step is a
+call of the core's step that did something; one a watchpoint stops
+before its access does nothing, and a run without the debugger never
+takes it.
+
+```text
+@1232 1231 exc 15 x 261 +11 +10
+@4096 3835 rx 61
+@4099 3837 exc 21
+@4575 4312 exc 15 x 329 +11 +10
+...
+@1189 1189 mem 20000084 29000000
+@1189 1189 reg 0 64000000
+end 270912 246621 242911779 1 0 669cb360efc5d2fd 34 022fc4ec611bf39b
+```
+
+`--replay FILE` runs the recording again: the same machine (an option
+that shapes it may be given only as the recording has it; the image is
+the recording's unless named, and must hash the same), the recorded
+inputs at the recorded steps, no host input and no debugger. Its output,
+its `--count` and `--stats`, its exit status and its final state are the
+recorded run's; it says so on stderr, or where the two went apart, with
+status 5:
+
+```text
+embsim: replay: the run is the recording's (270912 steps, 246621 instructions, 17 events)
+embsim: replay diverged at step 4097 (3836 instructions): rx: the recording is at 3835 instructions here
+embsim: replay diverged: the run ended at
+  steps, instructions, cycles, state, status, the state's hash, the output's bytes and hash:
+  this run's:      164410 149801 146072424 1 0 c9f06dca0cedf591 99 a408e13e96d3cf61
+  the recording's: 164410 149801 146072424 1 0 c9f06dca0cedf591 99 30e7262b9dcebd41
+```
+
+A recorded debugging session -- breakpoints, `set var`, a register
+changed, a watchpoint -- replays without the debugger, so a run that
+went wrong once under gdb can be run again, and `--trace`d, `--profile`d
+or debugged again, exactly as it went.
+
 ## Debugging: `--gdb`
 
 `--gdb PORT` serves the GDB remote protocol on `localhost:PORT` while the
@@ -797,8 +890,9 @@ stops at a named fault rather than computing something wrong.
 
 On the AVR:
 - Timer/Counter0 and 2, SPI, TWI, the ADC, the analog comparator, EEPROM,
-  the watchdog, the external and pin-change interrupts, the USART's
-  receiver, and the power reduction register. Their registers keep what
+  the watchdog, the external and pin-change interrupts, and the power
+  reduction register (the USART's receiver is, with `--input`). Their
+  registers keep what
   is written (on QEMU they read as zero), and their interrupts never
   come.
 - The output-compare pins and input capture from a pin.
@@ -894,6 +988,13 @@ illegal instruction -- and holds each report to the fault: the status
 registers' words, the faulting instruction's mnemonic against
 llvm-objdump's, the backtrace against the source lines marked in
 fault.c, the handler; and the run must be the same without the report.
+`tests/golden/embsim-replay.sh` feeds `rr.c` bytes through a pipe with
+pauses, on the PL011 (by interrupt, with SysTick and without), the
+CMSDK UART, the NS16550A and the AVR's USART0, and through SYS_READC;
+records each run, replays it with other bytes on stdin, and requires the
+same output, `--count`, `--stats` and status; replays a gdb session's
+writes and watchpoint without gdb; and refuses a record with a byte
+changed, a byte a step late, another image or another board.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32

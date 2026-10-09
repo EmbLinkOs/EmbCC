@@ -51,6 +51,7 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `stack.c` | `--stack-report`, `--stack-limit`: the stacks' high-water marks, frames by function, `.su` and embrt's bounds, the overflow |
 | `fault.c` | `--fault-report`: a fault decoded at its entry, the stacked frame, the backtrace by `.debug_frame` (or the shadow stack) |
 | `disasm.h`, `disasm.c` | one Thumb or RISC-V instruction as text, for the fault report |
+| `record.c` | `--input`, `--record`, `--replay`: the UART's input, the record of a run's inputs, the replay |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
 the bench uses in QEMU, so the two estimates cannot drift (`arm_cost`,
@@ -104,6 +105,18 @@ cycles go to the path the pc is on before the step makes its call or
 return -- the top frame's, or a path below it when the pc has left the
 frame's function (a tail call) -- so every count is in exactly one path,
 and the profile's totals are `--stats`' by construction.
+
+**The inputs.** What comes from outside the machine goes through
+`record.c`: the console UART offers its receiver with `sim_rx_port` (a
+model's `room` and `put`, live only while `s->rx_on`), semihosting's
+SYS_READC calls `sim_readc`, the GDB server tells `rec_reg`, `rec_mem`,
+`rec_wake`, `rec_reset` and `rec_kill` what the debugger did, and
+`sim_out` hashes the output. A recording's events are stamped with
+`an_step`'s count of steps that did something; those that happen within
+a step (an exception, a SYS_READC) with the step in progress. A new
+source of input -- another UART, a GPIO pin driven from outside -- must
+come through here, or a replay of a run that used it will not be the
+run.
 
 `image.c` reads the ELF a second time, apart from the loader, for what
 the analyses need: the functions (STT_FUNC, and labels in the code for
@@ -396,6 +409,8 @@ or with its own file for the six functions of `net.h`.
   and embrt, and overflows past a limit and into `.bss`.
 - `tests/golden/embsim-fault.sh`: `--fault-report` on faults of known
   cause and call chain, on the M3 and RV32.
+- `tests/golden/embsim-replay.sh`: `--input` on every receiver, and runs
+  recorded with input from a pipe, SYS_READC and a debugger, replayed.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
   the Cortex-M, on RISC-V and on the AVR.
 - `tests/golden/embsim-svd.sh`: the register file over a test SVD,

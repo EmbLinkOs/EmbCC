@@ -51,6 +51,8 @@ static void usage(void)
           "              [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]\n"
           "              [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]\n"
           "              [--fault-report[=FILE]]\n"
+          "              [--input FILE|-] [--record FILE]\n"
+          "       embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] ...\n"
           "       embsim --svd FILE.svd --svd-map\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
           "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
@@ -71,7 +73,8 @@ int main(int argc, char **argv)
     int svd_map = 0, tracing_periph = 0, board_given = 0, cov_lcov = 0;
     int profiling = 0, prof_fmt = 0, stk_report = 0;
     const char *stk_path = 0, *stk_limit = 0, *stk_embrt = 0, *fault_path = 0;
-    int fault_report = 0;
+    int fault_report = 0, semi_given = 0;
+    const char *input = 0, *record = 0, *replay = 0;
     const char **su = calloc((size_t)argc, sizeof *su);
     int nsu = 0;
     u32 ram_size = 0;
@@ -106,7 +109,7 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--verbose") || !strcmp(a, "-v"))
             verbose = 1;
         else if (!strcmp(a, "--no-semihosting"))
-            semihosting = 0;
+            semihosting = 0, semi_given = 1;
         else if (!strcmp(a, "--gdb") && more)
             gdb = argv[++i];
         else if (!strcmp(a, "--gdb-wait"))
@@ -143,7 +146,13 @@ int main(int argc, char **argv)
             else
                 die("--profile-format is report, collapsed or collapsed-insns, "
                     "not '%s'", f);
-        } else if (!strcmp(a, "--fault-report"))
+        } else if (!strcmp(a, "--input") && more)
+            input = argv[++i];
+        else if (!strcmp(a, "--record") && more)
+            record = argv[++i];
+        else if (!strcmp(a, "--replay") && more)
+            replay = argv[++i];
+        else if (!strcmp(a, "--fault-report"))
             fault_report = 1, fault_path = 0;
         else if (!strncmp(a, "--fault-report=", 15))
             fault_report = 1, fault_path = a + 15;
@@ -167,6 +176,43 @@ int main(int argc, char **argv)
             image = a;
         else
             die("one image at a time ('%s' and '%s')", image, a);
+    }
+    /* --replay: the machine is the recording's; an option that shapes it
+     * must say what the recording says, or be left out */
+    struct rec *rp = 0;
+    struct rec_machine rm;
+    if (replay) {
+        if (input || record || gdb)
+            die("--replay takes the run's inputs from the recording: not with "
+                "--input, --record or --gdb");
+        rp = rec_load(replay, &rm);
+        if (!image)
+            image = rm.image;
+        if (board_given && strcmp(bd->name, rm.board))
+            die("--board %s: the recording ran on %s", bd->name, rm.board);
+        bd = board_find(rm.board);
+        if (!bd)
+            die("the recording's board '%s' is not one of EmbSim's", rm.board);
+        board_given = 1;
+        if (cpu && (!rm.cpu || strcmp(cpu, rm.cpu)))
+            die("--cpu %s: the recording ran %s", cpu, rm.cpu ? rm.cpu : "the board's");
+        cpu = rm.cpu;
+        if (ram_size && ram_size != rm.ram_size)
+            die("--ram-size: the recording ran with %lu", (unsigned long)rm.ram_size);
+        ram_size = rm.ram_size;
+        if (svd && (!rm.svd || strcmp(svd, rm.svd)))
+            die("--svd %s: the recording ran with %s", svd, rm.svd ? rm.svd : "none");
+        svd = rm.svd;
+        if (semi_given && semihosting != rm.semihosting)
+            die("--no-semihosting: the recording ran with semihosting");
+        semihosting = rm.semihosting;
+        if (max_insns && max_insns != rm.max_insns)
+            die("--max-insns: the recording ran with %llu", (unsigned long long)rm.max_insns);
+        max_insns = rm.max_insns;
+        if (until && (!rm.until || strcmp(until, rm.until)))
+            die("--until: the recording ran with %s", rm.until ? rm.until : "none");
+        until = rm.until;
+        rec_check_image(image, &rm);
     }
     if (svd && !board_given) {
         /* --svd STM32F405.svd is the stm32f405's */
@@ -229,7 +275,8 @@ int main(int argc, char **argv)
     sim_load(s, ram_size, image);
     if ((nsu || stk_embrt) && !stk_report)
         die("--stack-su and --stack-embrt are for --stack-report");
-    if (coverage || profiling || stk_report || stk_limit || fault_report) {
+    if (coverage || profiling || stk_report || stk_limit || fault_report ||
+        input || record || rp) {
         struct analysis *an = an_create(s, profiling || stk_report || stk_limit ||
                                                fault_report);
         if (coverage) {
@@ -259,6 +306,27 @@ int main(int argc, char **argv)
             stk_init(an);
             stk_read_static(an);
         }
+        if (rp)
+            rec_attach(s, rp, &rm);
+        else if (input || record)
+            rec_create(s);
+        if (input)
+            rec_input(s, input);
+        if (record) {
+            struct rec_machine w;
+            memset(&w, 0, sizeof w);
+            w.image = image;
+            w.board = bd->name;
+            w.cpu = cpu;
+            w.ram_size = ram_size;
+            w.svd = svd;
+            w.semihosting = semihosting;
+            w.max_insns = max_insns;
+            w.until = until;
+            rec_record(s, record, &w);
+        }
+        if (s->rec)
+            rec_start(s);
     }
 
     if (gdb)
@@ -266,6 +334,8 @@ int main(int argc, char **argv)
     else
         sim_run(s);
     trace_report(s, count_path, stats || verbose);
+    if (s->rec)
+        rec_finish(s);
     if (s->an)
         an_finish(s);
     switch (s->state) {

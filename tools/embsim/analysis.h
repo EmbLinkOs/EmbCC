@@ -102,6 +102,20 @@ struct analysis {
     int fault;
     FILE *fault_out;                /* 0: stderr */
     int faults;                     /* reported */
+
+    /* ---- record and replay (record.c) ---- */
+    u64 steps;                      /* the steps that did something */
+};
+
+/* the machine a recording ran: the image and the options that shape a
+ * run */
+struct rec_machine {
+    const char *image;
+    u64 image_hash;
+    const char *board, *cpu, *svd, *until;
+    u32 ram_size;
+    int semihosting, input;
+    u64 max_insns;
 };
 
 /* the analyses on for this run (from main.c's options), after sim_load;
@@ -143,5 +157,21 @@ void stk_report(struct analysis *a);
 /* fault.c: exception n entered (an_exc_entry's), and the run's end */
 void fault_entry(struct analysis *a, u32 n, u32 ret);
 void fault_end(struct analysis *a);
+
+/* record.c: a recorder (--input, --record) on s, and its input */
+struct rec *rec_create(struct sim *s);
+void rec_input(struct sim *s, const char *path);
+void rec_record(struct sim *s, const char *path, const struct rec_machine *m);
+/* --replay: a recording's machine and events, read before the machine
+ * is built; then put on it */
+struct rec *rec_load(const char *path, struct rec_machine *m);
+void rec_attach(struct sim *s, struct rec *r, const struct rec_machine *m);
+void rec_check_image(const char *path, const struct rec_machine *m);
+/* the events before the first step; after each step; an exception's
+ * entry; and the end */
+void rec_start(struct sim *s);
+void rec_step(struct sim *s);
+void rec_exc(struct sim *s, u32 n);
+void rec_finish(struct sim *s);
 
 #endif

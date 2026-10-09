@@ -278,6 +278,15 @@ enum { RUN, END_EXIT, END_LOCKUP, END_IDLE, END_UNTIL, END_BUDGET };
 
 #define SIM_TICKERS 8
 
+/* the console UART's receiver (sim_rx_port): whether it can take a byte
+ * now, and a byte arriving. Connected only for a run with an input
+ * (--input, or --replay of one): s->rx_on. */
+struct rx_port {
+    int (*room)(void *ctx);
+    void (*put)(void *ctx, int c);
+    void *ctx;
+};
+
 struct sim {
     struct bus bus;
     struct cpu *cpu;
@@ -315,6 +324,11 @@ struct sim {
     /* the analyses watching the run (analysis.h), or 0: when set, the
      * run steps through an_step */
     struct analysis *an;
+    /* the UART's receiver, and whether an input is connected to it */
+    struct rx_port rx;
+    int rx_on;
+    /* the record of the run's inputs, or its replay (record.c), or 0 */
+    struct rec *rec;
 };
 
 /* build the board with its core (`model`, or 0 for the board's own),
@@ -355,6 +369,23 @@ void an_step(struct sim *s);
  * handler returned */
 void an_exc_entry(struct sim *s, u32 n, u32 ret);
 void an_exc_return(struct sim *s);
+
+/* ---- the run's inputs (record.c) ------------------------------------ */
+
+/* the board's console UART offers its receiver (the first to call it) */
+void sim_rx_port(struct sim *s, int (*room)(void *ctx),
+                 void (*put)(void *ctx, int c), void *ctx);
+/* semihosting's SYS_READC: a byte of the host's stdin, or EOF;
+ * recorded, or replayed */
+int sim_readc(struct sim *s);
+/* what a debugger did, for --record (each a no-op without it) */
+void rec_reg(struct sim *s, int n, const u8 *b, int len);
+void rec_mem(struct sim *s, u32 a, const u8 *b, int len);
+void rec_wake(struct sim *s);
+void rec_reset(struct sim *s, int reload);
+void rec_kill(struct sim *s);
+/* a byte of the program's output, which the record's end hashes */
+void rec_out(struct sim *s, int c);
 
 /* ---- semihosting (semihost.c) ----------------------------------------- */
 
