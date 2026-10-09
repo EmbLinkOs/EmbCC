@@ -57,8 +57,7 @@ int main(void)
 #ifdef __riscv_flen
     {
         static const float pi = 3.14159274f;
-        void set_fs0(const float *p);           /* setfs0.s */
-        set_fs0(&pi);
+        __asm__ volatile("flw fs0, 0(%0)" : : "r"(&pi) : "fs0", "memory");
     }
 #endif
     return outer(2) & 0x7f;

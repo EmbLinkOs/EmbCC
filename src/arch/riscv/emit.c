@@ -742,6 +742,24 @@ static void fp_r(struct code *c, int f5, int dbl, int rm, int rd, int rs1,
     rv_w(c, rv_enc_r(OP_FP, rd, rm, rs1, rs2, (f5 << 2) | (dbl ? 1 : 0)));
 }
 
+/* The same, with the funct5 and the rounding mode spelled out: what the
+ * inline assembler (asm.c) writes every OP-FP instruction through. */
+void rv_fp_r(struct code *c, int f5, int dbl, int rm, int rd, int rs1, int rs2)
+{
+    fp_r(c, f5, dbl, rm, rd, rs1, rs2);
+}
+
+/* fmadd/fmsub/fnmsub/fnmadd: R4-type, rs3 in bits 31:27 and the format
+ * in 26:25. `op` is the major opcode (0x43, 0x47, 0x4b, 0x4f). */
+void rv_fp_r4(struct code *c, int op, int dbl, int rm, int rd, int rs1,
+              int rs2, int rs3)
+{
+    rv_w(c, (unsigned long)op | (unsigned long)rd << 7 |
+            (unsigned long)rm << 12 | (unsigned long)rs1 << 15 |
+            (unsigned long)rs2 << 20 | (unsigned long)(dbl ? 1 : 0) << 25 |
+            (unsigned long)rs3 << 27);
+}
+
 void rv_fload(struct code *c, int frd, int rs1, int off, int dbl)
 {
     rv_w(c, rv_enc_i(OP_LOAD_FP, frd, dbl ? 3 : 2, rs1, off));

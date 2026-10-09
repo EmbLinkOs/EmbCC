@@ -42,7 +42,7 @@ then
         "$out/rvasmcheck" bytes "$tag" > "$out/$tag.bin" 2> "$out/$tag.err" || {
             echo "$tag: the assembler refused its own vocabulary:"
             head -3 "$out/$tag.err"; exit 1; }
-        "$MC" -triple="riscv$w" -mattr=+m -filetype=obj "$out/$tag.s" \
+        "$MC" -triple="riscv$w" -mattr=+m,+f,+d -filetype=obj "$out/$tag.s" \
             -o "$out/$tag.o" 2> "$out/$tag.mc" || {
             echo "$tag: llvm-mc rejected the vocabulary -- an entry claims an"
             echo "        instruction that does not exist:"

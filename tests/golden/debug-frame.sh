@@ -32,21 +32,13 @@ simpids=
 cleanup() { for p in $simpids; do kill "$p" 2>/dev/null; done; }
 trap cleanup EXIT
 
-MC=${EMBCC_LLVM_MC:-llvm-mc}
-
 # run TAG TRIPLE BOARD OPT [FLAGS]: build, debug, and check the backtrace
 run() {
     tag=$1; t=$2; board=$3; o=$4; fl=${5:-}
     case $t in
     riscv*)
-        # fs0 holds pi in main's frame: set by setfs0.s, since EmbCC's
-        # RISC-V inline assembler has no F instructions yet
         extra=; freg=
-        if [ "$fl" ] && command -v "$MC" >/dev/null 2>&1; then
-            "$MC" -triple=riscv64 -mattr=+f,+d -filetype=obj \
-                tests/golden/debug-frame/setfs0.s -o "$out/$tag.fs0.o" &&
-                extra="$out/$tag.fs0.o" freg=fs0
-        fi
+        [ "$fl" ] && freg=fs0       # an FPU: main leaves pi in fs0
         lnk="-Ttext 0x80000000 -Tstack 0x80800000" ;;
     *)  extra=; freg=s16
         case $t in *eabihf) ;; *) freg= ;; esac
