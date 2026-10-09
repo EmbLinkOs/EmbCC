@@ -429,6 +429,20 @@ int target_switch_clusters(void)
     return target_get() == TARGET_THUMB;
 }
 
+/* -O2: the fewest cases worth a table. A RISC-V table is eight
+ * instructions -- the bound check, auipc, the scaled index, the load,
+ * the add and the jump -- where four cases are two or three compares
+ * down a tree; the workload's protocol parser dispatched its four
+ * states through one on every byte (LLVM's RISC-V minimum is five too).
+ * ARM's tbb/tbh is a compare and one instruction. */
+int target_switch_table_min(void)
+{
+    if ((target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64) &&
+        !plat_getenv("EMBCC_RV_SWITCH4"))
+        return 5;
+    return 4;
+}
+
 int target_switch_table_min_os(void)
 {
     return target_get() == TARGET_THUMB && target_thumb_arch() >= 7 ? 4 : 6;

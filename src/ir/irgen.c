@@ -4293,7 +4293,8 @@ static int switch_dense(int n, int w, long lo, long hi)
     unsigned long range = (unsigned long)hi - (unsigned long)lo + 1;
     /* a value wider than a register (long long on ARMv7-M, RV32) stays
      * on the tree: the 32-bit backends lower nothing at 64 bits here */
-    if (n < 4 || range == 0 || range > 4096 || !target_jump_tables() ||
+    if (n < target_switch_table_min() || range == 0 || range > 4096 ||
+        !target_jump_tables() ||
         w > target_ptr_size())
         return 0;
     if (g_opt_size)
