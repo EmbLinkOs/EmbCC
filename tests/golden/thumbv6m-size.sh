@@ -233,4 +233,26 @@ dis "$out/ra.o" addrs > "$out/addrs.dis"
 [ "$(grep -c 'ldr[[:space:]]*r0, \[pc' "$out/addrs.dis")" -eq 4 ] ||
     { cat "$out/addrs.dis"; fail "addrs: tab's address is not made at each of its four reads"; }
 
+# ---- trampolines ----------------------------------------------------------
+# Six compares branch to one label 600 bytes on: one `b<!c> 1f; b err`
+# pair, and the other five a single b<c> to that pair's jump.
+{
+    echo "extern void big(int);"
+    echo "int far(int c, int x)"
+    echo "{"
+    for k in 1 3 5 7 9 11; do echo "    if (c == $k) goto err;"; done
+    k=0
+    while [ $k -lt 80 ]; do echo "    big(x + $k);"; k=$((k + 1)); done
+    echo "    return x;"
+    echo "err:"
+    echo "    return -1;"
+    echo "}"
+} > "$out/far.c"
+cc6 "$out/far.c" "$out/far.o"
+dis "$out/far.o" far > "$out/far.dis"
+pairs=$(awk '/\tb(eq|ne)\t/ { c = 1; next } /\tb\t/ && c { n++ } { c = 0 }
+             END { print n + 0 }' "$out/far.dis")
+[ "$pairs" -le 1 ] || { cat "$out/far.dis"
+    fail "far: $pairs conditional branches over a jump, where one does"; }
+
 echo "thumbv6m-size: va_arg is a word load; a slot's value is read from the register that holds it; a constant is made where it is read; a comparison's value has no branch"

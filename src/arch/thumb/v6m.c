@@ -100,6 +100,14 @@ static int v6_role(int k)
 
 /* The size classes of a branch to a label (fix.ins), smallest first. */
 enum { BC_SHORT = 0, BC_MED = 1, BC_FAR = 2 };
+/* TRAMPOLINES: a conditional branch whose label is out of its +-256
+ * bytes is `b<!c> 1f; b label; 1:` -- unless an unconditional jump to
+ * the same label is within them: then it is one `b<c>` to that jump,
+ * which goes on to the label. A switch's tree of compares, each to the
+ * same far case, was a pair apiece. Per branch (by its ordinal, like the
+ * size classes), the jump it goes through, or -1; decided by measuring,
+ * used by the passes after (not a first pass), each keeping it. */
+static int *g6_tramp, g6_ntramp, g6_tramp_on;
 /* Fix kinds beside codegen.c's T_TAB (99): a switch table's byte or
  * halfword entry, (target - base) / 2 where cz_at holds the base. */
 #define T_TAB  99
@@ -4156,6 +4164,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.npoint = 0;
         F.shortb = first ? NULL : cls;
         F.nshortb = first ? 0 : ncls;
+        g6_tramp_on = !first;
         if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
@@ -4384,6 +4393,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* ---- patching ---- */
         for (i = 0; i < F.nfix; i++) {
             int target = F.label_off[F.fix[i].label];
+            if (g6_tramp_on && i < g6_ntramp && g6_tramp[i] >= 0)
+                target = F.fix[g6_tramp[i]].at;      /* its trampoline */
             if (target < 0)
                 internal_error("thumb: %s: label %d was never placed",
                                fn->name, F.fix[i].label);
@@ -4434,6 +4445,9 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             free(cls);
             cls = NULL;
             ncls = 0;
+            free(g6_tramp);
+            g6_tramp = NULL;
+            g6_ntramp = 0;
             F.scr_save = SCR_SET;
             continue;
         }
@@ -4442,11 +4456,18 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         {
             int changed = 0;
             char *nc = xcalloc((size_t)(F.nfix ? F.nfix : 1), 1);
+            int *nt = xmalloc((size_t)(F.nfix ? F.nfix : 1) * sizeof *nt);
             for (i = 0; i < F.nfix; i++) {
                 int c = F.fix[i].ins, target, s, slack = 0, k;
                 long d;
+                nt[i] = -1;
                 if (F.fix[i].cond >= V6_TBH) {     /* a table entry */
                     nc[i] = 0;
+                    continue;
+                }
+                if (g6_tramp_on && i < g6_ntramp && g6_tramp[i] >= 0) {
+                    nt[i] = g6_tramp[i];             /* kept: only nearer */
+                    nc[i] = BC_SHORT;
                     continue;
                 }
                 target = F.label_off[F.fix[i].label];
@@ -4474,6 +4495,58 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 nc[i] = (char)c;
                 if (c != F.fix[i].ins)
                     changed = 1;
+            }
+            {
+                /* Trampolines: for each conditional branch still a pair,
+                 * the nearest jump to its label in reach -- an
+                 * unconditional one, or the jump half of another pair
+                 * that stays one (that pair is then held to its size:
+                 * pinned) -- and none through a branch that is itself
+                 * one's trampoline. One that is a jump anyway goes first. */
+                char *pin = xcalloc((size_t)(F.nfix ? F.nfix : 1), 1);
+                for (i = 0; i < F.nfix; i++)
+                    if (nt[i] >= 0)
+                        pin[nt[i]] = 1;
+                for (i = 0; i < F.nfix; i++) {
+                    int s = F.fix[i].cz_at;
+                    long best = 0, d;
+                    if (F.fix[i].cond < 0 || F.fix[i].cond >= V6_TBH ||
+                        nc[i] == BC_SHORT || nt[i] >= 0 || pin[i])
+                        continue;
+                    for (int j = 0; j < F.nfix; j++) {
+                        int tj = F.fix[j].at, sl = 0;
+                        if (j == i || F.fix[j].label != F.fix[i].label ||
+                            F.fix[j].cond >= V6_TBH ||
+                            (F.fix[j].cond >= 0 &&
+                             (nc[j] == BC_SHORT || nt[j] >= 0)))
+                            continue;
+                        for (int k = 0; k < F.npads; k++)
+                            if ((F.pads[k] > s && F.pads[k] < tj) ||
+                                (F.pads[k] < s && F.pads[k] > tj))
+                                sl += 2;
+                        d = (long)tj - (s + 4);
+                        if (d < -256 + sl || d > 254 - sl)
+                            continue;
+                        /* a jump that is one anyway (unconditional, or
+                         * already pinned) before one pinned for this */
+                        d = (d < 0 ? -d : d) +
+                            (F.fix[j].cond >= 0 && !pin[j] ? 1024 : 0);
+                        if (nt[i] < 0 || d < best) {
+                            nt[i] = j;
+                            best = d;
+                        }
+                    }
+                    if (nt[i] >= 0) {
+                        nc[i] = BC_SHORT;
+                        pin[nt[i]] = 1;
+                        changed = 1;
+                    }
+                }
+                /* a pinned pair keeps its size, so its jump stays */
+                for (i = 0; i < F.nfix; i++)
+                    if (pin[i] && F.fix[i].cond >= 0)
+                        nc[i] = (char)F.fix[i].ins;
+                free(pin);
             }
             {
                 /* An asm writes neither: its operands are r0-r3 and r12
@@ -4512,12 +4585,16 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 }
                 if (!tcg_regalloc() || (!changed && !scr_changed)) {
                     free(nc);
+                    free(nt);
                     break;
                 }
             }
             free(cls);
             cls = nc;
             ncls = F.nfix;
+            free(g6_tramp);
+            g6_tramp = nt;
+            g6_ntramp = F.nfix;
             first = 0;
         }
     }
@@ -4548,6 +4625,9 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.lsite);
     free(F.lrel);
     free(F.pads);
+    free(g6_tramp);
+    g6_tramp = NULL;
+    g6_ntramp = g6_tramp_on = 0;
     free(F.remat);
     free(F.remat_v);
     free(g6_rmdef);
