@@ -600,7 +600,9 @@ static void t_abi_hints(const struct ir_func *fn, int *hint);
 /* REMATERIALIZATION: a constant one flagless instruction makes (movw,
  * or mov/mvn of a modified immediate) is made again at each read when it
  * has no register, rather than stored to a slot and loaded back. Flagless
- * because a read may come after a lowering's own compare. */
+ * because a read may come after a lowering's own compare. On ARMv6-M
+ * (v6m.c) every 32-bit constant is: a literal load is flagless, one
+ * instruction, and the size of the slot load it replaces. */
 static int g_t_noremat = -1;
 
 static int t_remat_ok(const struct ir_ins *i)
@@ -608,9 +610,11 @@ static int t_remat_ok(const struct ir_ins *i)
     unsigned long v = (unsigned long)i->imm & 0xffffffffUL;
     if (g_t_noremat < 0)
         g_t_noremat = getenv("EMBCC_T_NOREMAT") != NULL;
-    /* ARMv6-M (v6m.c) shares the allocator and makes no constant again */
-    return !g_t_noremat && target_thumb_arch() != 6 && i->op == IR_CONST && !i->flt && i->w <= 4 &&
-           (v <= 0xffff || t_it_imm_ok((long)i->imm));
+    if (g_t_noremat || i->op != IR_CONST || i->flt || i->w > 4)
+        return 0;
+    if (target_thumb_arch() == 6)
+        return 1;
+    return v <= 0xffff || t_it_imm_ok((long)i->imm);
 }
 
 /* An indirect call's target in a register: IR_CALL reads it before the

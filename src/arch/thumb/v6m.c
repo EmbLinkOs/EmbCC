@@ -695,10 +695,60 @@ static void slot_rd(struct t_fn *F, int reg, long off)
     rc_note(F, reg, off);
 }
 
-/* v into exactly `reg` (r0-r7). Flag-free. */
+/* Where the code of the instruction being lowered is still nothing but
+ * reads of its operands (v_rd): the flags hold nothing it set, so a
+ * constant made there may be MOVS. No flag value survives from one IR
+ * instruction to the next (the file's header). */
+static int g6_fdead;
+/* ...and an instruction whose whole lowering tests nothing -- a call, a
+ * store, a return, a helper's call -- has dead flags throughout (as
+ * codegen.c's flags_dead_ins). */
+static int g6_fdead_ins;
+
+static int v6_flagless_ins(const struct ir_ins *i)
+{
+    switch (i->op) {
+    case IR_CALL: case IR_STORE: case IR_STVAR: case IR_RET:
+    case IR_MEMCPY: case IR_MEMZERO: case IR_I2F: case IR_F2I: case IR_F2F:
+        return 1;
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+        return i->flt;
+    default:
+        return 0;
+    }
+}
+
+/* reg = the constant k of a value made where it is read (F->remat): MOVS
+ * where the flags are dead and it fits, else its pool word -- a literal
+ * load is flag-free, and the same size as the slot load it replaces. */
+static void remat_k(struct t_fn *F, int reg, long k)
+{
+    unsigned long v = (unsigned long)k & 0xffffffffUL;
+    if (v <= 255 && (g6_fdead_ins || F->t->len == g6_fdead))
+        t1_movs_imm(F->t, reg, (long)v);
+    else
+        k32_nf(F, reg, v);
+}
+
+static void v_rd_(struct t_fn *F, int v, int reg);
+
+/* v into exactly `reg` (r0-r7). Flag-free -- except a constant made where
+ * nothing but reads came before it (g6_fdead), which keeps that so. */
 static void v_rd(struct t_fn *F, int v, int reg)
 {
+    int dead = F->t->len == g6_fdead;
+    v_rd_(F, v, reg);
+    if (dead)
+        g6_fdead = F->t->len;
+}
+
+static void v_rd_(struct t_fn *F, int v, int reg)
+{
     long fo;
+    if (F->remat && v >= 0 && F->remat[v]) {
+        remat_k(F, reg, F->remat_v[v]);
+        return;
+    }
     if (in_reg6(F, v)) {
         mov(F, reg, F->loc[v]);
         return;
@@ -2784,7 +2834,10 @@ static void gen_ins(struct t_fn *F, int n)
             v6_jump_to(F, i->label);
         return;
     case IR_CONST: {
-        int d = v_wreg(F, i->dst, S0);
+        int d;
+        if (F->remat && i->dst >= 0 && F->remat[i->dst])
+            return;                     /* made where it is read (v_rd) */
+        d = v_wreg(F, i->dst, S0);
         k32(F, d, (unsigned long)i->imm);
         v_wr(F, i->dst, d);
         return;
@@ -3679,6 +3732,30 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
               (fn->ins[i].asm_ir->clob >> 14 & 1))) ||
             t_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
+    /* REMATERIALIZATION: a temporary whose one definition is a constant
+     * (the allocator's remat_ok) and that got no register is made where
+     * it is read, and has no slot: LICM hoists a loop's constants to its
+     * preheader, and each was stored there and loaded at every use. As
+     * codegen.c's, not at -O0/-Og, where every value keeps its slot. */
+    if (F.loc && !F.keep_vars && fn->nvregs && tcg_ra()->remat_ok) {
+        char *rm = ra_remat_map(fn, tcg_ra()->remat_ok);
+        for (int v = fn->nvars; v < fn->nvregs; v++) {
+            if (!rm[v] || in_reg6(&F, v) || F.wide[v])
+                continue;
+            if (!F.remat) {
+                F.remat = xcalloc((size_t)fn->nvregs, 1);
+                F.remat_v = xcalloc((size_t)fn->nvregs, sizeof *F.remat_v);
+            }
+            F.remat[v] = 1;
+        }
+        for (i = 0; F.remat && i < fn->nins; i++) {
+            int d = fn->ins[i].dst;
+            if (fn->ins[i].op == IR_CONST && d >= 0 && d < fn->nvregs &&
+                F.remat[d])
+                F.remat_v[d] = (long)fn->ins[i].imm;
+        }
+        free(rm);
+    }
     tcg_layout(&F);
     if (tcg_ext() && F.loc && fn->nins && fn->nvregs)
         F.lv_busy = tcg_lo_busy_map(&F);
@@ -3752,6 +3829,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         g6_s0 = 6; g6_s1 = 7;              /* the prologue's */
         rc_reset();
         g6_ins_at = t->len;
+        g6_fdead = -1;
+        g6_fdead_ins = 0;
         g6_cur = NULL;
         if (F.frame > 1016)
             F.scr_save |= 1u << 6;          /* sp_frame's register */
@@ -3884,6 +3963,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 g6_s1 = 7;
             }
             g6_ins_at = t->len;
+            g6_fdead = t->len;
+            g6_fdead_ins = v6_flagless_ins(&fn->ins[i]);
             g6_role_n = 0;
             g6_cur = &fn->ins[i];
             gen_ins(&F, i);
@@ -3904,6 +3985,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* ---- epilogue ---- */
         g6_s0 = 6; g6_s1 = 7;
         g6_cur = NULL;
+        g6_fdead = -1;
+        g6_fdead_ins = 0;
         F.label_off[fn->nlabels] = t->len;
         F.ins_mask = 0;
         if (fn->has_alloca)
@@ -4093,6 +4176,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.lsite);
     free(F.lrel);
     free(F.pads);
+    free(F.remat);
+    free(F.remat_v);
     free((char *)g6_atk);
     g6_atk = NULL;
     g6_cur = NULL;

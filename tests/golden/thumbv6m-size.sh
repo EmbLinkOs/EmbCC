@@ -11,6 +11,8 @@
 #     calls at a pool of two registers (EMBCC_RA_MAXPOOL), against the
 #     same build with EMBCC_V6_NOSLOTCACHE=1, and on strtol's conv, whose
 #     values crossing calls outnumber the callee-saved registers.
+#   - rematerialization: a constant with no register is made where it is
+#     read (a MOVS, or its pool word), never stored to a slot.
 set -u
 echo "TEST-MARKER thumbv6m-size"
 . "$(dirname "$0")/../lib.sh"
@@ -108,4 +110,30 @@ nsp=$(grep -cE '(ldr|str)[a-z]*[[:space:]].*\[sp' "$out/conv.dis") || nsp=0
 [ "$nsp" -le 70 ] ||
     fail "strtol's conv makes $nsp stack accesses (80 before the slot cache)"
 
-echo "thumbv6m-size: va_arg is a word load; a slot's value is read from the register that holds it"
+# ---- rematerialization ----------------------------------------------------
+# A constant with no register is made where it is read, never stored to a
+# slot: at a pool of r0-r3 the 1000 every call passes (one value, after
+# value numbering) has none, and with EMBCC_T_NOREMAT=1 it is built once,
+# stored, and loaded at each call.
+cat > "$out/rm.c" <<'EOF'
+extern void w(const char *, int, int);
+void three(const char *s, const char *t, int a, int b)
+{
+    w(s, 1000, a);
+    w(t, 1000, b);
+    w(s, 1000, a + b);
+    w(t, 1000, a - b);
+}
+EOF
+EMBCC_RA_MAXPOOL=4 "$EMBCC" --target=$T -Os -c "$out/rm.c" -o "$out/rm.o" ||
+    fail "compile rm.c"
+EMBCC_T_NOREMAT=1 EMBCC_RA_MAXPOOL=4 "$EMBCC" --target=$T -Os \
+    -c "$out/rm.c" -o "$out/rm0.o" || fail "compile rm.c without remat"
+dis "$out/rm.o" three > "$out/three.dis"
+on=$(ninsn "$out/rm.o" three); off=$(ninsn "$out/rm0.o" three)
+[ "$on" -lt "$off" ] || { cat "$out/three.dis"
+    fail "three: $on instructions made again where read, $off stored"; }
+[ "$(grep -c 'ldr[[:space:]]*r1, \[pc' "$out/three.dis")" -eq 4 ] ||
+    { cat "$out/three.dis"; fail "three: 1000 is not made at each of its four reads"; }
+
+echo "thumbv6m-size: va_arg is a word load; a slot's value is read from the register that holds it; a constant is made where it is read"
