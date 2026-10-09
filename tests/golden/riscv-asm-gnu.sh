@@ -88,4 +88,40 @@ for xl in 32 64; do
     diff "$out/ldc$xl.dis" "$out/ld$xl.dis" ||
         fail "rv$xl: a load from a symbol differs from clang's"
 done
-echo "riscv-asm-gnu: a .S with an -I header, .extern, expressions, spaced addresses, csr immediates and loads from symbols assemble as llvm-mc and clang do"
+# An RTOS port's floating-point context: saving and restoring fs0-fs11
+# and fcsr, as FreeRTOS's RISC-V port does with an FPU. The float
+# registers and rounding modes are operand WORDS here, not symbols.
+cat > "$out/fp.S" <<'FPEOF'
+.text
+.globl save_fpu
+save_fpu:
+    fsd fs0, 0( a0 )
+    fsd fs11, 11 * 8( a0 )
+    frcsr t0
+    sw t0, 96(a0)
+    fld fs0, 0(a1)
+    fscsr t0
+    fmadd.d fa0, fa1, fa2, fa3, rtz
+    fcvt.w.d a0, fa0, rtz
+    ret
+FPEOF
+"$EMBCC" --target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -c "$out/fp.S" \
+    -o "$out/fp.o" || fail "an FPU context save did not assemble"
+"$MC" -triple=riscv64 -mattr=+m,+f,+d -filetype=obj "$out/fp.S" -o "$out/fpm.o" ||
+    fail "llvm-mc rejected fp.S"
+for o in fp fpm; do
+    "$OBJDUMP" -d --mattr=+f,+d "$out/$o.o" | sed -n '/<save_fpu>:/,$p' |
+        awk -F'\t' 'NF >= 3 { print $2, $3 }' > "$out/$o.dis"
+done
+[ -s "$out/fpm.dis" ] || fail "llvm-mc's fp.S has no code"
+# The object says which ISA it is for (.riscv.attributes), as a compiled
+# one does: a disassembler told nothing decodes no F instruction.
+"$OBJDUMP" -d "$out/fp.o" | grep -q 'fsd	fs0' ||
+    fail "fp.o carries no .riscv.attributes naming F and D (fsd is <unknown>)"
+diff "$out/fpm.dis" "$out/fp.dis" || fail "an F/D form assembled differently from llvm-mc"
+"$EMBCC" --target=riscv32-unknown-elf -c "$out/fp.S" -o "$out/fp32.o" 2> "$out/fp32.err" &&
+    fail "fsd assembled for rv32imac, which has no D"
+grep -q 'fsd needs the D extension' "$out/fp32.err" ||
+    fail "the refusal of fsd without D does not say why: $(head -1 "$out/fp32.err")"
+
+echo "riscv-asm-gnu: a .S with an -I header, .extern, expressions, spaced addresses, csr immediates, loads from symbols and an FPU context save assemble as llvm-mc and clang do"

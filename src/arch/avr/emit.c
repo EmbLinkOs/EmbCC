@@ -58,6 +58,31 @@ void avr_r1(struct code *c, enum avr_r1 op, int d)
     hw(c, 0x9400u | ((unsigned)(d & 0x1f) << 4) | (unsigned)op);
 }
 
+/* ---- the scattered operand fields -----------------------------------
+ *
+ * Four operands are split across their instruction word. These place
+ * each one, for the encoders below and for the linker, which patches the
+ * same fields through a relocation (src/link/link.c, apply_avr): one
+ * definition of each layout, so an encoder and a relocation cannot
+ * disagree about where the bits go. */
+unsigned avr_q6_field(int q)     /* ldd/std displacement: q at 13, 11:10, 2:0 */
+{
+    return ((unsigned)(q & 0x20) << 8) | ((unsigned)(q & 0x18) << 7) |
+           (unsigned)(q & 0x07);
+}
+unsigned avr_k6_field(int k)     /* adiw/sbiw immediate: K at 7:6, 3:0 */
+{
+    return ((unsigned)(k & 0x30) << 2) | (unsigned)(k & 0x0f);
+}
+unsigned avr_io6_field(int a)    /* in/out address: A at 10:9, 3:0 */
+{
+    return ((unsigned)(a & 0x30) << 5) | (unsigned)(a & 0x0f);
+}
+unsigned avr_io5_field(int a)    /* sbi/cbi/sbic/sbis address: A at 7:3 */
+{
+    return (unsigned)(a & 0x1f) << 3;
+}
+
 /* ---- 16-bit constant add/subtract, and the 16-bit move ---------------
  *
  * adiw/sbiw: 1001 011s KKdd KKKK. `dd` is (d-24)/2, so the ONLY
@@ -75,8 +100,7 @@ static void adiw_sbiw(struct code *c, unsigned base, int d, int k)
      * (r24, 3) and (r30, 63), which is what my first two hand-checks
      * happened to be; tools/avrcheck's (r26, 1) is what told them
      * apart. */
-    hw(c, base | ((unsigned)(k & 0x30) << 2) |
-          ((unsigned)((d - 24) / 2) << 4) | (unsigned)(k & 0x0f));
+    hw(c, base | avr_k6_field(k) | ((unsigned)((d - 24) / 2) << 4));
 }
 
 void avr_adiw(struct code *c, int d, int k) { adiw_sbiw(c, 0x9600u, d, k); }
@@ -164,8 +188,7 @@ static void ldd_std(struct code *c, unsigned base, int d, int ptr, int q)
     else { bad("a displaced access off X (only Y and Z have one)", ptr); return; }
     if (q < 0 || q > 63) bad("a displacement outside 0..63", q);
     if (d < 0 || d > 31) bad("a register outside r0-r31", d);
-    hw(c, base | ((unsigned)(q & 0x20) << 8) | ((unsigned)(q & 0x18) << 7) |
-          ((unsigned)(d & 0x1f) << 4) | (y << 3) | (unsigned)(q & 0x07));
+    hw(c, base | avr_q6_field(q) | ((unsigned)(d & 0x1f) << 4) | (y << 3));
 }
 
 void avr_ldd(struct code *c, int d, int ptr, int q)
@@ -204,16 +227,14 @@ void avr_in(struct code *c, int d, int addr)
 {
     if (addr < 0 || addr > 63) bad("an I/O address outside 0..63", addr);
     if (d < 0 || d > 31) bad("a register outside r0-r31", d);
-    hw(c, 0xB000u | ((unsigned)(addr & 0x30) << 5) |
-          ((unsigned)(d & 0x1f) << 4) | (unsigned)(addr & 0x0f));
+    hw(c, 0xB000u | avr_io6_field(addr) | ((unsigned)(d & 0x1f) << 4));
 }
 
 void avr_out(struct code *c, int addr, int r)
 {
     if (addr < 0 || addr > 63) bad("an I/O address outside 0..63", addr);
     if (r < 0 || r > 31) bad("a register outside r0-r31", r);
-    hw(c, 0xB800u | ((unsigned)(addr & 0x30) << 5) |
-          ((unsigned)(r & 0x1f) << 4) | (unsigned)(addr & 0x0f));
+    hw(c, 0xB800u | avr_io6_field(addr) | ((unsigned)(r & 0x1f) << 4));
 }
 
 /* cbi/sbi reach only the LOW 32 I/O addresses, not all 64 -- a
@@ -224,7 +245,7 @@ static void cbi_sbi(struct code *c, unsigned base, int addr, int bit)
     if (addr < 0 || addr > 31)
         bad("cbi/sbi above I/O address 31 (they reach only the low 32)", addr);
     if (bit < 0 || bit > 7) bad("a bit number outside 0..7", bit);
-    hw(c, base | ((unsigned)(addr & 0x1f) << 3) | (unsigned)(bit & 7));
+    hw(c, base | avr_io5_field(addr) | (unsigned)(bit & 7));
 }
 
 void avr_cbi(struct code *c, int addr, int bit) { cbi_sbi(c, 0x9800u, addr, bit); }
@@ -309,6 +330,24 @@ void avr_patch_ldi_at(unsigned char *p, int k)
 {
     wrhw(p, (rdhw(p) & ~0x0F0Fu) | (((unsigned)k & 0xf0u) << 4) |
             ((unsigned)k & 0x0fu));
+}
+
+/* The scattered fields, patched in place by a relocation. */
+void avr_patch_q6_at(unsigned char *p, int q)
+{
+    wrhw(p, (rdhw(p) & ~avr_q6_field(0x3f)) | avr_q6_field(q));
+}
+void avr_patch_k6_at(unsigned char *p, int k)
+{
+    wrhw(p, (rdhw(p) & ~avr_k6_field(0x3f)) | avr_k6_field(k));
+}
+void avr_patch_io6_at(unsigned char *p, int a)
+{
+    wrhw(p, (rdhw(p) & ~avr_io6_field(0x3f)) | avr_io6_field(a));
+}
+void avr_patch_io5_at(unsigned char *p, int a)
+{
+    wrhw(p, (rdhw(p) & ~avr_io5_field(0x1f)) | avr_io5_field(a));
 }
 
 /* The 22-bit word address of a 32-bit jmp/call: bits 21:17 at the first

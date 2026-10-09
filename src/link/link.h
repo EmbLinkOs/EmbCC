@@ -66,6 +66,13 @@ struct link_opts {
      * symbol as before. */
     unsigned long stack_top;
     int have_stack;
+    /* TriCore: the context-save areas, [csa_start, csa_end), which the
+     * -Tstack stub links into the free list before the first CALL (every
+     * CALL takes one, and with none the first traps). Both 64-byte
+     * aligned and within the first 4 MiB of one 256 MiB segment, which is
+     * all a link word can name. --csa START:END. */
+    unsigned long csa_start, csa_end;
+    int have_csa;
     /* -T SCRIPT: a GNU ld linker script lays the image out (ARM and
      * RISC-V; src/link/ldscript.h has what it supports). The directories
      * its INPUT/GROUP/INCLUDE names are looked up in (-L), symbols to
@@ -88,6 +95,11 @@ struct link_opts {
      * full each MEMORY region of the script is, in ld's table. */
     const char *map_file;
     int print_memory_usage;
+    /* ARMv8-M CMSE (link.c): the secure gateway veneers are made whenever
+     * an input has __acle_se_ symbols; --cmse-implib with --out-implib=FILE
+     * also writes the import library a Non-secure image links against. */
+    int cmse_implib;
+    const char *out_implib;
 };
 
 /* Links inputs[0..n) into an ET_EXEC at `out`. Inputs are object files

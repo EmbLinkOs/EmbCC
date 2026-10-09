@@ -432,7 +432,7 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
  * rejected break/continue outside any loop. */
 
 /* What the aarch64 lowerings take as an immediate without building the
- * constant first -- asked by the optimizer before it folds one (opt.c's
+ * constant first -- asked by the optimizer before it folds one (src/opt/immfold.c's
  * target_imm_foldable). This target used to answer "everything", and a
  * constant no instruction can hold was then rebuilt at its use: FNV-1a's
  * multiplier 16777619 by a mov and a movk on every byte of every string

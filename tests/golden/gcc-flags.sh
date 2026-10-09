@@ -64,6 +64,8 @@ accept() {
 EVERYWHERE="-fno-inline-functions -finline-functions -finline-small-functions
  -fno-inline-small-functions -finline-limit=600 -fcommon -fno-common
  -fno-short-enums -fno-math-errno -ffast-math -fsingle-precision-constant
+ -funsafe-math-optimizations -fno-signed-zeros -fno-trapping-math
+ -ffinite-math-only -fassociative-math -freciprocal-math
  -fmessage-length=0 -fdiagnostics-color=always -fdiagnostics-color=never
  -fdiagnostics-color=auto -fverbose-asm -pipe -fno-pic -fno-pie
  -fno-delete-null-pointer-checks -fno-tree-loop-distribute-patterns
@@ -111,10 +113,10 @@ refuse() {
     [ ! -e "$out/r.o" ] || fail "$* on $t refused but wrote an object"
 }
 for t in $ALL; do
-    refuse $t "every target EmbCC emits for is little-endian" -mbig-endian
+    refuse $t "which is little-endian" -mbig-endian
     refuse $t "dumps GCC's internal representation" -fdump-rtl-expand
     refuse $t "dumps GCC's internal representation" -fdump-tree-all
-    refuse $t "dumps GCC's internal representation" -fcallgraph-info=su
+    refuse $t "dumps GCC's internal representation" -fcallgraph-info=da
 done
 for t in $THUMB; do
     for abi in apcs-gnu atpcs iwmmxt; do
@@ -123,9 +125,16 @@ for t in $THUMB; do
     done
     refuse $t "-mno-unaligned-access is not supported" -mno-unaligned-access
 done
-refuse riscv32-unknown-elf "-mabi=ilp32d is not supported" -mabi=ilp32d
+refuse riscv32-unknown-elf "-march=rv32imac has no D extension" -mabi=ilp32d
 refuse riscv32-unknown-elf "-mabi=ilp32e is not supported" -mabi=ilp32e
-refuse riscv64-unknown-elf "-mabi=lp64d is not supported" -mabi=lp64d
+refuse riscv64-unknown-elf "-march=rv64imac has no D extension" -mabi=lp64d
+refuse riscv32-unknown-elf "has no F extension" -march=rv32imac -mabi=ilp32f
+refuse riscv32-unknown-elf "the D extension needs F" -march=rv32imadc
+refuse riscv32-unknown-elf "the 'v' extension is not supported" -march=rv32imafcv
+refuse riscv32-unknown-elf "the 'zba' extension is not supported" -march=rv32imac_zba
+refuse riscv32-unknown-elf "EmbCC needs the M extension" -march=rv32iac
+refuse riscv32-unknown-elf "use --target=riscv64-unknown-elf" -march=rv64gc
+refuse riscv64-unknown-elf "is a 32-bit ABI" -march=rv64gc -mabi=ilp32d
 refuse riscv32-unknown-elf "is an ARM option" -mthumb-interwork
 refuse x86_64-elf "is an ARM option" -mslow-flash-data
 refuse x86_64-apple-darwin "-fcommon is not supported for" -fcommon
@@ -292,7 +301,7 @@ calls() {
 }
 for t in thumbv7em-none-eabi riscv32-unknown-elf x86_64-elf aarch64-elf avr; do
     for o in -O2 -Os; do
-        # AVR's -Os budget copies nothing this size (opt.c), so there is
+        # AVR's -Os budget copies nothing this size (src/opt/inline.c), so there is
         # no inlining there for the flag to stop
         [ $t = avr ] && [ $o = -Os ] && continue
         [ "$(calls $t $o helper)" = 0 ] ||
@@ -585,7 +594,10 @@ for t in $ALL; do
 done
 echo "-fno-tree-loop-distribute-patterns: no loop or copy becomes a call"
 
-# -fno-short-enums and -mlittle-endian describe every target as it is.
+# -fno-short-enums and -mlittle-endian describe every target here as it is
+# (each is little-endian; mips-none-elf, the big-endian one, is
+# mips-refuse.sh's, where -mlittle-endian is refused and -mbig-endian
+# accepted).
 cat > "$out/en.c" <<'EOF'
 enum e { A, B };
 _Static_assert(sizeof(enum e) == sizeof(int), "an enum is int-sized");
@@ -595,7 +607,7 @@ for t in $ALL; do
     "$EMBCC" --target=$t -fno-short-enums -mlittle-endian -c "$out/en.c" \
         -o "$out/en.o" || fail "$t: an enum is not int, or not little-endian"
 done
-echo "-fno-short-enums and -mlittle-endian: what every target already is"
+echo "-fno-short-enums and -mlittle-endian: what every target here already is"
 
 # -Werror=implicit-function-declaration: an implicit declaration is an
 # error anyway, and the flag no longer claims the warning is missing.
@@ -612,15 +624,119 @@ for fl in -Werror=implicit-function-declaration -Wimplicit-function-declaration;
 done
 echo "-Werror=implicit-function-declaration: an error, as it always was"
 
-# -Og is -O1 and -Ofast is -O3 (no fast-math): the same object.
+# -Og is -O1 with every source variable kept in its slot: it optimizes
+# (a smaller .text than -O0's), and under -g no variable is optimized
+# out. -Ofast is -O3 (no fast-math): the same object.
+cat > "$out/og.c" <<'OGEOF'
+int tick(void);
+int og(int n)
+{
+    int a = n * 3;
+    int b = a + tick();
+    int c = b - n;
+    return c * 2 + 0 * a;
+}
+OGEOF
+DWD=${EMBCC_LLVM_DWARFDUMP:-llvm-dwarfdump}
 for t in thumbv7em-none-eabi x86_64-elf; do
-    "$EMBCC" --target=$t -Og -c "$out/inl.c" -o "$out/og.o" &&
-    "$EMBCC" --target=$t -O1 -c "$out/inl.c" -o "$out/o1.o" &&
-    cmp -s "$out/og.o" "$out/o1.o" || fail "$t: -Og is not -O1"
+    "$EMBCC" --target=$t -Og -g -c "$out/og.c" -o "$out/og.o" &&
+    "$EMBCC" --target=$t -O0 -c "$out/og.c" -o "$out/o0.o" ||
+        fail "$t: og.c does not compile at -Og -g or -O0"
+    tog=$("$OD" -h "$out/og.o" | awk '$2 == ".text" { print $3 }')
+    to0=$("$OD" -h "$out/o0.o" | awk '$2 == ".text" { print $3 }')
+    [ -n "$tog" ] && [ -n "$to0" ] &&
+        [ "$(printf '%d' "0x$tog")" -lt "$(printf '%d' "0x$to0")" ] ||
+        fail "$t: -Og's .text (0x$tog bytes) is not smaller than -O0's (0x$to0)"
+    if command -v "$DWD" >/dev/null 2>&1; then
+        nloc=$("$DWD" --debug-info "$out/og.o" | grep -c 'DW_AT_location	(DW_OP_fbreg')
+        nempty=$("$DWD" --debug-info "$out/og.o" | grep -c 'DW_AT_location	(<empty>)')
+        [ "$nloc" -eq 4 ] && [ "$nempty" -eq 0 ] ||
+            fail "$t: -Og -g locates $nloc of n, a, b, c in slots ($nempty optimized out)"
+    fi
     "$EMBCC" --target=$t -Ofast -c "$out/inl.c" -o "$out/of.o" &&
     "$EMBCC" --target=$t -O3 -c "$out/inl.c" -o "$out/o3.o" &&
     cmp -s "$out/of.o" "$out/o3.o" || fail "$t: -Ofast is not -O3"
 done
 "$EMBCC" --target=x86_64-elf -Ofast -ffast-math --dump-predef |
     grep -q __FAST_MATH__ && fail "-ffast-math defined __FAST_MATH__"
-echo "-Og is -O1, -Ofast is -O3, and -ffast-math defines no __FAST_MATH__"
+echo "-Og optimizes and keeps every variable, -Ofast is -O3, and -ffast-math defines no __FAST_MATH__"
+
+# ---- GCC flags a real embedded build line passes --------------------------
+# -march=/-mtune= on a Cortex-M (CMake toolchain files), the CubeMX
+# Makefile's assembler listing, -E -dM from standard input (how build
+# systems read a compiler's macros), and flags EmbCC satisfies already.
+accept thumbv7em-none-eabi "-mtune=cortex-m4 -mtune=cortex-m0plus -fno-ident
+ -fident -fno-reorder-functions -freorder-functions -ffp-contract=off
+ -ffp-contract=on -ffp-contract=fast -funroll-loops -fno-unroll-loops"
+accept armv7a-none-eabi "-march=armv7-a -mtune=cortex-a7"
+refuse thumbv7em-none-eabi "is not a Cortex-M core" -mtune=pentium
+refuse thumbv7em-none-eabi "is not an architecture EmbCC emits" -march=armv9-a
+refuse thumbv7em-none-eabi "the extension '+mve'" -march=armv7e-m+mve
+refuse armv7a-none-eabi "EmbCC emits ARMv7-A code" -march=armv8-a
+# -march= selects the level, as -mcpu= does, and +fp/+fp.dp the unit
+macros() { "$EMBCC" --target=$1 $2 -E -dM - </dev/null; }
+for c in "armv6-m|__ARM_ARCH_6M__ 1" "armv7-m|__ARM_ARCH_7M__ 1" \
+         "armv8-m.base|__ARM_ARCH_8M_BASE__ 1" \
+         "armv8-m.main|__ARM_ARCH_8M_MAIN__ 1"; do
+    m=${c%%|*}; want=${c#*|}
+    macros thumbv7m-none-eabi -march=$m | grep -q "^#define $want\$" ||
+        fail "-march=$m does not define $want"
+done
+macros thumbv7m-none-eabi "-march=armv7e-m+fp -mfloat-abi=hard" |
+    grep -q "^#define __ARM_FP 0x4$" || fail "-march=armv7e-m+fp is not FPv4-SP"
+macros thumbv7m-none-eabi "-march=armv7e-m+fp.dp -mfloat-abi=hard" |
+    grep -q "^#define __ARM_FP 0xc$" || fail "-march=armv7e-m+fp.dp is not FPv5-D16"
+macros thumbv7m-none-eabi "-march=armv7e-m+fp -mfpu=fpv5-d16 -mfloat-abi=hard" |
+    grep -q "^#define __ARM_FP 0xc$" || fail "-mfpu= did not override -march='s +fp"
+macros thumbv7m-none-eabi "-march=armv8-m.main+fp -mfloat-abi=hard" |
+    grep -q "^#define __ARM_FP 0x4$" || fail "-march=armv8-m.main+fp is not FPv5-SP"
+echo "-march= and -mtune= on Cortex-M and ARMv7-A"
+# -E -dM: every macro at the end of the file, a #define each, also from stdin
+printf '#define SQ(x) ((x)*(x))\n#define V(f, ...) g(f, __VA_ARGS__)\n#define E\n' > "$out/dm.c"
+"$EMBCC" --target=thumbv7em-none-eabi -E -dM "$out/dm.c" > "$out/dm.out" ||
+    fail "-E -dM"
+for l in "#define SQ(x) ((x)*(x))" "#define V(f,...) g(f, __VA_ARGS__)" \
+         "#define E" "#define __ARM_ARCH_7EM__ 1"; do
+    grep -qxF "$l" "$out/dm.out" || fail "-E -dM lacks: $l"
+done
+printf 'int x;\n' | "$EMBCC" --target=riscv32-unknown-elf -E -dM - |
+    grep -q "^#define __riscv 1$" || fail "-E -dM - (standard input)"
+printf 'int y(void) { return 7; }\n' | "$EMBCC" --target=riscv32-unknown-elf \
+    -x c -c - -o "$out/stdin.o" || fail "-x c -c - (standard input)"
+printf 'int x;\n' | "$EMBCC" --target=riscv32-unknown-elf -c - -o /dev/null \
+    2> "$out/stdin.err" && fail "standard input without -E or -x was taken"
+grep -q "\-E or -x required when input is from standard input" "$out/stdin.err" ||
+    fail "standard input without -E or -x: $(cat "$out/stdin.err")"
+echo "-E -dM, and standard input with -E or -x"
+# -Wa,-a...=FILE: the listing, which is the -S text, beside the object
+rm -f "$out/t.lst" "$out/t.o"
+"$EMBCC" --target=thumbv7em-none-eabi -O2 -c "$out/t.c" -o "$out/t.o" \
+    -Wa,-a,-ad,-alms="$out/t.lst" || fail "-Wa,-a,-ad,-alms="
+[ -s "$out/t.o" ] || fail "-Wa,-alms= left no object"
+"$EMBCC" --target=thumbv7em-none-eabi -O2 -S "$out/t.c" -o "$out/t.s" &&
+    cmp -s "$out/t.s" "$out/t.lst" || fail "the listing is not the -S text"
+refuse thumbv7em-none-eabi "is not one the integrated assembler has" -Wa,-z
+echo "-Wa,-a...=FILE writes the listing"
+
+# -x assembler-with-cpp: a CubeMX Makefile's way to assemble its
+# startup_*.s, preprocessed though the suffix is lowercase; -x assembler
+# does not preprocess; an object beside it is still an object
+printf '\t.syntax unified\n\t.thumb\n\t.text\n\t.globl s\n\t.type s, %%function\ns:\n#define SEVEN 7\n\tmovs r0, #SEVEN\n\tbx lr\n' > "$out/start.s"
+"$EMBCC" --target=thumbv7em-none-eabi -x assembler-with-cpp -c "$out/start.s" \
+    -o "$out/start.o" || fail "-x assembler-with-cpp on a .s"
+"${EMBCC_LLVM_OBJDUMP:-llvm-objdump}" -d "$out/start.o" | grep -q "movs.*r0, #0x7" ||
+    fail "-x assembler-with-cpp did not preprocess the .s"
+"$EMBCC" --target=thumbv7em-none-eabi -x assembler -c "$out/start.s" \
+    -o "$out/start2.o" 2>/dev/null &&
+    fail "-x assembler preprocessed the .s: SEVEN was defined"
+"$EMBCC" --target=thumbv7em-none-eabi -c "$out/start.s" -o "$out/start3.o" \
+    2>/dev/null && fail "a plain .s was preprocessed"
+printf 'int main(void) { return 0; }\n' > "$out/xm.c"
+"$EMBCC" --target=thumbv7em-none-eabi -c "$out/xm.c" -o "$out/xm.o" || fail "xm.c"
+"$EMBCC" --target=thumbv7em-none-eabi -x assembler-with-cpp -c "$out/start.s" \
+    "$out/xm.o" -o "$out/start4.o" > "$out/xm.err" 2>&1 ||
+    fail "-x assembler-with-cpp assembled the object beside it: $(cat "$out/xm.err")"
+grep -q "linker input unused" "$out/xm.err" ||
+    fail "the object beside -x assembler-with-cpp was not a linker input: $(cat "$out/xm.err")"
+refuse thumbv7em-none-eabi "unknown language 'assemblr'" -x assemblr
+echo "-x assembler-with-cpp preprocesses a .s, -x assembler does not, and an object stays one"

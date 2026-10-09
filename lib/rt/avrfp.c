@@ -68,7 +68,9 @@
  * NaNs, with the quiet bit set on a produced NaN. No exception flags: this
  * machine has no FPSCR to raise them in, and the ABI tag says so.
  */
-#ifdef __AVR__
+/* RX too: GCC rx-elf's double is binary32 (-m32bit-doubles), so it needs
+ * exactly this native binary32 and no binary64. */
+#if defined(__AVR__) || defined(__RX__)
 
 #include "avrfp.h"
 
@@ -185,4 +187,4 @@ float __avrfp_round(int s, u32 m, int e, int sticky)
  * translation unit has to contain at least one declaration. */
 typedef int embcc_rt_avrfp_is_not_this_target;
 
-#endif /* __AVR__ */
+#endif /* __AVR__ || __RX__ */

@@ -1,5 +1,5 @@
 /* An extension of an extension, and of a narrow load, at every pairing of
- * kinds and widths. The optimizer folds these chains (opt.c, IR_EXT), and
+ * kinds and widths. The optimizer folds these chains (src/opt/fold.c, IR_EXT), and
  * the fold is only a copy when the outer extension leaves the inner's
  * result as it was: WIDER than the inner, that holds when the inner
  * zero-extended or both sign-extend, and not for a zero-extension of a

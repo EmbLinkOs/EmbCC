@@ -76,6 +76,7 @@ fail=0
 for spec in "x86_64-elf:x86_64:" \
             "aarch64-elf:aarch64:" \
             "thumbv7m-none-eabi:thumbv7m:" \
+            "armv7a-none-eabi:armv7a:" \
             "riscv32-unknown-elf:riscv32:-mattr=+m" \
             "riscv64-unknown-elf:riscv64:-mattr=+m" \
             "avr:avr:-mcpu=atmega328p"; do
@@ -112,7 +113,12 @@ for spec in "x86_64-elf:x86_64:" \
     # object keeps it in the relocation (RELA); the relocations below
     # cover both.
     for sec in .data .rodata .init_array .text.hot .ramfunc; do
-        [ "$mc" = thumbv7m ] && [ $sec = .data -o $sec = .rodata ] && continue
+        [ "$mc" = thumbv7m -o "$mc" = armv7a ] &&
+            [ $sec = .data -o $sec = .rodata ] && continue
+        # (and in ARM state an assembler rewrites a word naming a static
+        # function as its section plus an offset, kept in the bytes; a
+        # Thumb function's symbol it keeps, for its bit)
+        [ "$mc" = armv7a ] && [ $sec = .init_array ] && continue
         "$OBJCOPY" -O binary --only-section=$sec "$d/direct.o" "$d/a.bin" 2>/dev/null
         "$OBJCOPY" -O binary --only-section=$sec "$d/reasm.o" "$d/b.bin" 2>/dev/null
         cmp -s "$d/a.bin" "$d/b.bin" || {
@@ -149,6 +155,18 @@ if [ "$n" -gt 0 ] && [ "$bad" -eq 0 ]; then
     echo "  riscv64: every instruction line is 4 bytes wide ($n of them)"
 else
     echo "FAIL riscv64: instruction grouping is wrong ($n four-byte, $bad single-byte)"
+    fail=1
+fi
+
+# ARMv7-A is fixed 32-bit too (A32), and grouped by Thumb's halfword rule
+# it put each relocation two bytes into the instruction before its own.
+a7=$out/armv7a-none-eabi/u.s
+n=$(grep -c '^	\.reloc	\.-4, R_ARM_' "$a7" 2>/dev/null) || n=0
+bad=$(grep -c '^	\.reloc	\.-[^4],' "$a7" 2>/dev/null) || bad=0
+if [ "$n" -gt 0 ] && [ "$bad" -eq 0 ]; then
+    echo "  armv7a: every relocation is on its own 4-byte instruction ($n of them)"
+else
+    echo "FAIL armv7a: instruction grouping is wrong ($n relocations at .-4, $bad elsewhere)"
     fail=1
 fi
 

@@ -3,6 +3,7 @@
 # backend (lib/libc/os/baremetal/backend.c).
 #
 #   usage: tools/build-libc.sh TRIPLE OUTDIR    -> OUTDIR/libc.a
+#          TRIPLE may be riscv32-unknown-elf/ilp32f and the like (below)
 #
 # The portable sources are every target's library verbatim; the backend is
 # the part with no operating system under it, and it needs nothing from the
@@ -17,6 +18,21 @@
 set -eu
 triple=$1
 out=$2
+# A RISC-V hardware-float ABI's library is named TRIPLE/ABI
+# (riscv32-unknown-elf/ilp32f): built with that -mabi and the -march it
+# needs, into the directory the driver looks in for it -- objects of two
+# float ABIs do not link (src/driver/main.c lib_triple).
+flags=
+case $triple in
+    */*) abi=${triple#*/}; triple=${triple%%/*}
+         case $abi in
+             ilp32f) flags="-march=rv32imafc -mabi=ilp32f" ;;
+             ilp32d) flags="-march=rv32imafdc -mabi=ilp32d" ;;
+             lp64f)  flags="-march=rv64imafc -mabi=lp64f" ;;
+             lp64d)  flags="-march=rv64imafdc -mabi=lp64d" ;;
+             *) echo "$0: no library variant '$abi' for $triple" >&2; exit 1 ;;
+         esac ;;
+esac
 here=$(cd "$(dirname "$0")/.." && pwd)
 EMBCC=${EMBCC:-$here/embcc}
 AR=${EMBCC_AR:-./embar}
@@ -28,7 +44,8 @@ mkdir -p "$out/c"
 for f in "$here"/lib/libc/src/*/*.c "$here"/lib/libc/src/math/fdlibm/*.c \
          "$here"/lib/libc/os/baremetal/backend.c; do
     o=$(echo "${f#$here/}" | tr / _ | sed 's/\.c$/.o/')
-    "$EMBCC" --target="$triple" -Os -I"$here/lib/libc/include" \
+    # shellcheck disable=SC2086
+    "$EMBCC" --target="$triple" $flags -Os -I"$here/lib/libc/include" \
         -I"$here/lib/libc/src/math" -c "$f" -o "$out/c/$o" || {
         echo "build-libc: ${f#$here/} does not compile for $triple" >&2
         exit 1; }

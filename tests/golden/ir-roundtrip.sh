@@ -143,3 +143,36 @@ grep -q "add\." "$out/opt0.txt" ||
 ! grep -q "add\." "$out/opt2.txt" && grep -qE "const\.4s? 5(\s*;.*)?$" "$out/opt2.txt" ||
     { cat "$out/opt2.txt"; echo "FAIL: -O2 should have folded 2 + 3 in the parsed IR"; exit 1; }
 echo "with -O2, parsed IR goes through the optimizer: 2 + 3 comes back as 5"
+
+# ---- the 32-bit machines' multiplies ----------------------------------------
+# mulh (the high word of a 32x32 product) and mulw (the whole product of
+# two 32-bit values) appear only where target_has_mulh says the backend
+# lowers them, so they are printed from RV32 and read back; and parsed
+# with -O2, a pair of constants folds by the definition the backends
+# implement -- the high word signed or not, the product sign- or
+# zero-extended. -7 * 0x92492493 is the case that tells all four apart.
+cat > "$out/mh.c" <<'EOF'
+unsigned d7(unsigned x) { return x / 7; }
+int s5(int x) { return x / 5; }
+long long smul(int a, int b) { return (long long)a * b; }
+unsigned long long umul(unsigned a, unsigned b) { return (unsigned long long)a * b; }
+EOF
+"$EMBCC" inspect ir -O2 --target=riscv32-unknown-elf "$out/mh.c" > "$out/mh.ir" &&
+"$EMBCC" inspect ir --target=riscv32-unknown-elf "$out/mh.ir" > "$out/mh2.ir" &&
+cmp "$out/mh.ir" "$out/mh2.ir" || {
+    diff "$out/mh.ir" "$out/mh2.ir" | head; echo "FAIL: mulh/mulw do not round-trip"; exit 1; }
+for want in " = mulh\.4 " " = mulh\.4s " " = mulw\.8 " " = mulw\.8s "; do
+    grep -qE "$want" "$out/mh.ir" || { cat "$out/mh.ir"; echo "FAIL: no '$want' at RV32"; exit 1; }
+done
+mhfold() {                      # mhfold OP WIDTH WANT
+    printf '; EmbIR\nfunc @f nparams=0 nvars=0 vregs=3 labels=0 {\n  %%0 = const.4 -7\n  %%1 = const.4 -1840700269\n  %%2 = %s %%0, %%1\n  ret %%2\n}\n' \
+        "$1" > "$out/mf.ir"
+    "$EMBCC" inspect ir -O2 --target=riscv32-unknown-elf "$out/mf.ir" > "$out/mf.txt" 2>&1 &&
+    ! grep -q "mul" "$out/mf.txt" && grep -qE "const\.$2s? $3(\s*;.*)?$" "$out/mf.txt" || {
+        cat "$out/mf.txt"; echo "FAIL: $1 of -7 and 0x92492493 should fold to $3"; exit 1; }
+}
+mhfold mulh.4s 4 2
+mhfold mulh.4 4 -1840700274
+mhfold mulw.8s 8 12884901883
+mhfold mulw.8 8 -7905747474273271813
+echo "mulh and mulw round-trip from RV32, and fold signed and unsigned as defined"

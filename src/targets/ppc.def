@@ -1,0 +1,17 @@
+/* PowerPC: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* The PowerPC EABI (clang --target=powerpc-none-eabi -mcpu=e500
+ * -mno-spe -msoft-float -mlong-double-64 -dM): ILP32, an UNSIGNED char,
+ * a signed int wchar_t, long double the 8-byte double, no __int128. */
+DATA_MODEL(PPC32, .ptr = 4, .lng = 4, .it = 4, .dbl = 8, .ldbl = 8,
+           .char_uns = 1, .wchar_uns = 0, .int128 = 0, .maxal = 0, .big_endian = 1)
+
+/* 32-bit PowerPC, the embedded EABI, big-endian, soft float: an
+ * e500/e200-class core. `-none-eabi` is clang's and GCC's spelling
+ * (powerpc-eabi is the GNU target name). Bare metal only. */
+TRIPLE("powerpc-none-eabi",         PPC32,       NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("powerpc-unknown-eabi",      PPC32,       NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("powerpc-eabi",              PPC32,       NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("powerpc",                   PPC32,       NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("ppc",                       PPC32,       NONE,    ELF,   ALIAS,     BASE,         PLAIN)

@@ -2093,7 +2093,8 @@ static struct cty *align_val_type(void)
 long over_alignment(struct cty *t)
 {
     long al = ct_align(t);
-    return al > 16 && align_val_type() ? al : 0;   /* (the default new's) */
+    return al > target_default_new_align() &&
+           (align_val_type() || cx_implicit_align_val_t()) ? al : 0;
 }
 
 /* The allocation functions an allocation of t looks at: its class's (they
@@ -3321,10 +3322,25 @@ static struct cexpr *comma(struct cexpr *l, struct cexpr *r)
     return ex2(E_COMMA, r->t, r->vc, l, r);
 }
 
+/* An arm of ?: naming one function, not a set to choose from: that
+ * function's address (`w ? mul : add`, `w ? &C::f : &C::g`). The arms of
+ * ?: are not converted to a target type, so nothing else would ever pick
+ * it, and the set reached C unresolved. */
+static struct cexpr *cond_arm(struct cexpr *x)
+{
+    if (x->k != E_OVL || x->fn->next || x->fn->tmpl)
+        return x;
+    if (x->memptr)
+        return convert(x, ct_mptr(x->fn->cls, x->fn->type), "?:");
+    return rvalue(x);
+}
+
 static struct cexpr *conditional(struct cexpr *c, struct cexpr *a,
                                  struct cexpr *b)
 {
     c = convert_bool(c, "?:");
+    a = cond_arm(a);
+    b = cond_arm(b);
     struct cty *at = a->t, *bt = b->t;
     struct cexpr *e = ex_new(E_COND, NULL, VC_PRVALUE);
     e->line = c->line;
@@ -3817,7 +3833,7 @@ static struct cexpr *parse_new(const struct ctok *at, int global)
         e->count = convert(count, ct_size_t(), "an array new's size");
         e->init = init_object(t, form, NULL, 0, at);
         if (elem->k == CT_CLASS && class_dtor(elem->cls))
-            e->cookie = ct_align(elem) > 8 ? ct_align(elem) : 8;
+            e->cookie = cx_array_cookie(elem);
     } else {
         e->init = init_object(t, form, args, na, at);
     }
@@ -3882,7 +3898,7 @@ static struct cexpr *parse_delete(const struct ctok *at, int global)
                      ct_name(t));
         e->dtor = class_dtor(t->cls);
         if (arr && e->dtor)
-            e->cookie = ct_align(t) > 8 ? ct_align(t) : 8;
+            e->cookie = cx_array_cookie(t);
     }
     /* g++ calls the sized forms where it knows the size, the aligned
      * ones for an over-aligned type */
@@ -3925,7 +3941,8 @@ static const char *powi_fn(const char *n)
     if (!strcmp(n, "powif"))
         return "__powisf2";
     if (!strcmp(n, "powil"))
-        return target_get() == TARGET_AARCH64 ? "__powitf2" : "__powixf2";
+        return target_ldouble_size() == 8 ? "__powidf2"
+               : target_get() == TARGET_X86_64 ? "__powixf2" : "__powitf2";
     return NULL;
 }
 
@@ -3935,7 +3952,7 @@ int cxx_has_builtin(const char *name)
         if (lib_sig(name + 10) || powi_fn(name + 10))
             return 1;
         if (rdrand_width(name + 10) || !strcmp(name + 10, "ia32_pause"))
-            return target_get() != TARGET_AARCH64;
+            return target_get() == TARGET_X86_64;
         static const char *const special[] = {
             "offsetof", "is_constant_evaluated", "addressof", "launder",
             "expect", "constant_p", "va_arg", "coro_done", "coro_resume",
@@ -4435,7 +4452,7 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
     }
     if (!strcmp(n, "ia32_pause")) {
         /* the spin-wait hint: pause (emit.c) */
-        if (target_get() == TARGET_AARCH64)
+        if (target_get() != TARGET_X86_64)
             cx_error(at, "'%s' is an x86 builtin", name);
         struct cexpr *e = ex_new(E_BUILTIN, ct_basic(CT_VOID), VC_PRVALUE);
         e->name = name;
@@ -4447,7 +4464,7 @@ static struct cexpr *parse_builtin(const char *name, const struct ctok *at)
     if (rdrand_width(n)) {
         /* x86's rdrand/rdseed: a random value stored, 1 when there was
          * one (emit.c writes the instruction) */
-        if (target_get() == TARGET_AARCH64)
+        if (target_get() != TARGET_X86_64)
             cx_error(at, "'%s' is an x86 builtin", name);
         if (na != 1)
             cx_error(at, "'%s' takes one pointer", name);
@@ -4974,7 +4991,8 @@ static struct cexpr *parse_primary(void)
         enum cty_kind k;
         if (t->char_lit)
             k = t->str_prefix == 'L' ? CT_WCHAR : t->str_prefix == 'u'
-                ? CT_CHAR16 : t->str_prefix == 'U' ? CT_CHAR32 : CT_CHAR;
+                ? CT_CHAR16 : t->str_prefix == 'U' ? CT_CHAR32
+                : t->str_prefix == '8' ? CT_CHAR8 : CT_CHAR;
         else if (t->num_llong)
             k = t->num_uns ? CT_ULLONG : CT_LLONG;
         else if (t->num_long)
@@ -5094,6 +5112,25 @@ static struct cexpr *parse_primary(void)
     }
     case TOK_CX_THROW:
         return parse_throw();
+    case TOK_CX_AUTO:
+        /* C++23 auto(x) / auto{x}: a prvalue copy of x, of x's type
+         * decayed -- the type an `auto` variable initialized from it
+         * would have. */
+        if (cx_kind_at(1) == TOK_LPAREN || cx_kind_at(1) == TOK_LBRACE) {
+            cx_advance();
+            int brace = cx_kind() == TOK_LBRACE;
+            cx_advance();
+            struct cexpr *x = expr_parse_assign();
+            cx_expect(brace ? TOK_RBRACE : TOK_RPAREN,
+                      brace ? "'}' after auto{x}" : "')' after auto(x)");
+            struct cty *t = ct_unqual(ct_decay(ct_strip_ref(x->t)));
+            if (t->k != CT_CLASS)
+                return cast_to(t, x, CAST_C, at);
+            return init_object(t, INIT_DIRECT, &x, 1, at);
+        }
+        cx_error(at, "expected an expression before 'auto' (an expression "
+                     "begins with auto only as auto(x) or auto{x})");
+        return NULL;
     case TOK_LBRACKET:
         return parse_lambda();
     case TOK_CX_REQUIRES:

@@ -22,7 +22,7 @@ Every triple each name covers is listed in [Targets](targets.md).
 | x86-64 | `x86_64-elf`, `x86_64-emblink`, `x86_64-linux-gnu` | LP64 |
 | Apple arm64 | `aarch64-apple-darwin` | LP64, Apple's variant |
 | AArch64 | `aarch64-elf`, `aarch64-emblink`, `aarch64-linux-gnu` | LP64 |
-| Cortex-M | `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | ILP32 |
+| Cortex-M | `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]` | ILP32 |
 | RV32 | `riscv32-unknown-elf` | ILP32 |
 | RV64 | `riscv64-unknown-elf` | LP64 |
 | AVR | `avr` | 16-bit `int` and pointers |
@@ -978,20 +978,10 @@ expression:
 - for objects with static storage duration, at least up to 4096 (the
   section is given the alignment);
 - for structure members, which raises the structure's alignment;
-- for local arrays, structures and unions on every target except AVR.
+- for local variables of any type on every target. One aligned beyond
+  the stack's alignment (16 bytes, 8 on Cortex-M, none on AVR) is placed
+  in storage carved at function entry and rounded up.
 
-A local scalar may be aligned up to the stack's alignment, which is 16
-bytes, or 8 on Cortex-M. A larger alignment is refused:
-
-```text
-embcc: f.c:1:32: error: 'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar
-```
-
-On AVR a local with an alignment greater than 1 is refused:
-
-```text
-embcc: f.c:7: error: the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)
-```
 
 Valid alignments are powers of two. Any other value is refused, by
 `_Alignas` and by the `aligned` attribute; `_Alignas(0)` is accepted and

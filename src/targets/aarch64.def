@@ -1,0 +1,22 @@
+/* AArch64: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* AAPCS64: LP64, UNSIGNED char and wchar_t, binary128 long double */
+DATA_MODEL(AARCH64, .ptr = 8, .lng = 8, .it = 4, .dbl = 8, .ldbl = 16,
+           .char_uns = 1, .wchar_uns = 1, .int128 = 1, .maxal = 0)
+
+/* freestanding */
+TRIPLE("aarch64-elf",               AARCH64,     NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("aarch64",                   AARCH64,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("arm64",                     AARCH64,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("aarch64-none-elf",          AARCH64,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+
+/* EmbLinkOS (see x86.def) */
+TRIPLE("aarch64-emblink",           AARCH64,     EMBLINK, ELF,   CANONICAL, BASE,         PLAIN)
+
+/* hosted: someone else's libc and linker (D-014) */
+TRIPLE("aarch64-linux-gnu",         AARCH64,     LINUX,   ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("aarch64-linux",             AARCH64,     LINUX,   ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("aarch64-apple-darwin",      AARCH64,     DARWIN,  MACHO, CANONICAL, BASE,         PLAIN)
+TRIPLE("arm64-apple-darwin",        AARCH64,     DARWIN,  MACHO, ALIAS,     BASE,         PLAIN)
+TRIPLE("aarch64-darwin",            AARCH64,     DARWIN,  MACHO, ALIAS,     BASE,         PLAIN)

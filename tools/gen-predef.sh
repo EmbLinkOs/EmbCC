@@ -12,7 +12,10 @@
 #                                                    (what tests/golden/predef.sh
 #                                                    compares --dump-predef with)
 #
-#   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m riscv32 riscv64 avr mips32
+#   ARCH is one of: x86_64 aarch64 thumb thumbv6m thumbv8m thumbv8mbase armv7a riscv32 riscv64 avr mips32
+#                   mips32eb ppc32 sparc32 mips64 mips64eb
+#                   loongarch64
+#                   xtensa rx
 #
 # The EMBEDDED targets -- `thumb` (ARMv7-M, Cortex-M) and the two RISC-V
 # widths -- are taken from CLANG rather than gcc, because clang carries
@@ -73,19 +76,22 @@ set -eu
 # __clang__/__llvm__ join the list for the same reason __GNUC__ is on it:
 # EmbCC is not clang either, and a header that believes it is will take a
 # path built on builtins this compiler does not have.
-#   __ARM_FEATURE_CMSE       clang defines it for every ARMv8-M target,
-#        because the security extension is part of the architecture. EmbCC
-#        cannot emit for it: a non-secure entry function needs the linker to
-#        mint a secure gateway veneer, and embld does not. A header that sees
-#        this macro writes __attribute__((cmse_nonsecure_entry)), so leaving
-#        it in advertises a feature whose use would then fail somewhere else
-#        entirely -- the same reason __riscv_v_intrinsic is filtered.
-EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__|__riscv_v_intrinsic|__ARM_FEATURE_CMSE)'
+#
+# __ARM_FEATURE_CMSE is NOT excluded: clang defines it as 1 for every ARMv8-M
+# target (the TT instruction, which <arm_cmse.h> reads through cmse_TT), and
+# EmbCC has both -- and with -mcmse src/arch/predef.c makes it 3, the Secure
+# side, as clang does. It was filtered while embld minted no secure gateway
+# veneer, so that a header seeing it would not write a cmse_nonsecure_entry
+# that then failed somewhere else.
+EXCLUDE='^#define (__GNUC|__VERSION__|__STDC|__BITINT_MAXWIDTH__|__clang|__llvm__|__riscv_v_intrinsic)'
 
 refgcc() {
     gccvar=$(echo "EMBCC_REF_GCC_$1" | tr '[:lower:]' '[:upper:]')
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32) eval "echo \${$gccvar:-clang}" ;;
+        thumb|thumbv6m|thumbv8m|thumbv8mbase|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|ppc32|sparc32) eval "echo \${$gccvar:-clang}" ;;
+        # Xtensa: Espressif's own GCC for the ESP32 (crosstool-NG release
+        # esp-16.1.0_20260609), there being no Xtensa target in clang.
+        xtensa)  eval "echo \${$gccvar:-xtensa-esp32-elf-gcc}" ;;
         *)                     eval "echo \${$gccvar:-$1-elf-gcc}" ;;
     esac
 }
@@ -122,10 +128,26 @@ refflags() {
                      echo "-target thumbv6m-none-eabi -ffreestanding" ;;
         thumbv8m) [ -n "${EMBCC_REF_GCC_THUMBV8M:-}" ] || \
                      echo "-target thumbv8m.main-none-eabi -mfloat-abi=soft -ffreestanding" ;;
+        # ARMv8-M Baseline (Cortex-M23): its own table, as v6m and v8m have.
+        # No FPU exists for it either. Its lock-free values are 2: the
+        # exclusives are there, and the backend inlines a one-, two- or
+        # four-byte atomic as an ldrex/strex loop (v6m.c).
+        thumbv8mbase) [ -n "${EMBCC_REF_GCC_THUMBV8MBASE:-}" ] || \
+                     echo "-target thumbv8m.base-none-eabi -mcpu=cortex-m23 -ffreestanding" ;;
+        # ARMv7-A in ARM state. -mfloat-abi=soft for the reason thumbv8m
+        # takes it: clang's default for this triple is VFPv3 with NEON
+        # (__ARM_FP, __ARM_NEON), and the backend does every float
+        # operation as a call.
+        armv7a)  [ -n "${EMBCC_REF_GCC_ARMV7A:-}" ] || \
+                     echo "-target armv7a-none-eabi -mfloat-abi=soft -ffreestanding" ;;
+        # EMBCC_PREDEF_RV_MARCH / _MABI ask for another -march/-mabi --
+        # tests/golden/predef.sh checks the hardware-float combinations
+        # (rv32imafc/ilp32f, rv64gc/lp64d, ...) against clang with them;
+        # the generated tables stay the integer ones.
         riscv32) [ -n "${EMBCC_REF_GCC_RISCV32:-}" ] || \
-                     echo "-target riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -mcmodel=medany -ffreestanding" ;;
+                     echo "-target riscv32-unknown-elf -march=${EMBCC_PREDEF_RV_MARCH:-rv32imac} -mabi=${EMBCC_PREDEF_RV_MABI:-ilp32} -mcmodel=medany -ffreestanding" ;;
         riscv64) [ -n "${EMBCC_REF_GCC_RISCV64:-}" ] || \
-                     echo "-target riscv64-unknown-elf -march=rv64imac -mabi=lp64 -mcmodel=medany -ffreestanding" ;;
+                     echo "-target riscv64-unknown-elf -march=${EMBCC_PREDEF_RV_MARCH:-rv64imac} -mabi=${EMBCC_PREDEF_RV_MABI:-lp64} -mcmodel=medany -ffreestanding" ;;
         # AVR names the PART, not just the architecture: __AVR_ATmega328P__
         # and the __AVR_HAVE_* feature macros all come from -mmcu=, and a
         # header that tests them is how AVR code is normally written. The
@@ -141,6 +163,38 @@ refflags() {
         # flag changes.
         mips32)  [ -n "${EMBCC_REF_GCC_MIPS32:-}" ] || \
                      echo "-target mipsel-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # The same core BIG-endian (mips-none-elf): its own table, as the
+        # byte-order macros (__BYTE_ORDER__, __BIG_ENDIAN__, MIPSEB and the
+        # _MIPSEB family) are the generated answer, not a patch on mipsel's.
+        mips32eb) [ -n "${EMBCC_REF_GCC_MIPS32EB:-}" ] || \
+                     echo "-target mips-unknown-elf -mcpu=mips32r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # MIPS64r2, n64, soft float, both byte orders (mips64el-none-elf
+        # and mips64-none-elf): -mno-abicalls for the reason mips32 takes
+        # it -- absolute addresses, jal, no $gp.
+        mips64)  [ -n "${EMBCC_REF_GCC_MIPS64:-}" ] || \
+                     echo "-target mips64el-unknown-elf -mcpu=mips64r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        mips64eb) [ -n "${EMBCC_REF_GCC_MIPS64EB:-}" ] || \
+                     echo "-target mips64-unknown-elf -mcpu=mips64r2 -msoft-float -mno-abicalls -ffreestanding" ;;
+        # LoongArch64, LP64S. -msoft-float is -mabi=lp64s AND -mfpu=none:
+        # with the ABI alone clang still claims __loongarch_frlen 64 and the
+        # LSX vector unit (__loongarch_sx), hardware the soft-float code
+        # never touches.
+        loongarch64) [ -n "${EMBCC_REF_GCC_LOONGARCH64:-}" ] || \
+                     echo "-target loongarch64-unknown-elf -msoft-float -ffreestanding" ;;
+        # 32-bit PowerPC, the embedded EABI: an e500-class core WITHOUT
+        # SPE (-mcpu=e500 alone defines __SPE__ and claims instructions the
+        # backend never emits), soft float, and the 8-byte long double
+        # e500 code has (-mcpu=ppc's default is the IBM double-double).
+        ppc32)   [ -n "${EMBCC_REF_GCC_PPC32:-}" ] || \
+                     echo "-target powerpc-none-eabi -mcpu=e500 -mno-spe -msoft-float -mlong-double-64 -ffreestanding" ;;
+        # Renesas RX: GCC's own rx-elf-gcc (there is no RX clang), with
+        # -nofpu because EmbCC's RX code is soft float -- the default
+        # -fpu would claim __RX_FPU_INSNS__ and __FINITE_MATH_ONLY__ 1.
+        rx)      echo "-nofpu" ;;
+        # SPARC V8 as Gaisler's LEON3 implements it, soft float: what the
+        # backend emits (src/arch/sparc/, docs/internals/sparc-plan.md).
+        sparc32) [ -n "${EMBCC_REF_GCC_SPARC32:-}" ] || \
+                     echo "-target sparc-none-elf -mcpu=leon3 -msoft-float -ffreestanding" ;;
         *)       ;;
     esac
 }
@@ -148,20 +202,39 @@ refflags() {
 # Per-ARCH exclusions, for a macro that is legitimate on one target and an
 # overclaim on another.
 #
-# RISC-V: __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 and _2 claim one- and two-byte
-# atomics. The A extension has no such instruction -- it provides .w and, at
-# RV64, .d and nothing narrower -- so the backend refuses them rather than
-# doing a read-modify-write of the containing word, which would not be atomic
-# against a neighbouring byte. gcc answers these by calling libatomic; EmbCC
-# has no such library, so claiming them would make a program compile and then
-# fail to link. _4 (and _8 at RV64) stay: those are real.
+# RISC-V claims every compare-and-swap width it has: the A extension's .w
+# and .d, and one and two bytes through an LR/SC loop on the word around
+# them (the backend's sub_lane), as GCC's and LLVM's are. RV32 has no
+# eight-byte form.
 exclude_arch() {
     case "$1" in
-        riscv32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2|8)' ;;
-        riscv64) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
-        # MIPS32's ll/sc are word-sized, and the backend refuses a one- or
-        # two-byte atomic exactly as RISC-V's does (no libatomic here).
-        mips32)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_(1|2)' ;;
+        riscv32) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8' ;;
+        # MIPS claims one and two bytes the same way, through an ll/sc loop
+        # on the word around them (the backend's sub_lane), and MIPS64 the
+        # doubleword with lld/scd; it has no sixteen-byte form.
+        mips64|mips64eb) echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16' ;;
+        # (LoongArch64 claims all four: its backend makes a one- or two-byte
+        # atomic an ll.w/sc.w loop on the word, as clang does.)
+        # ARMv7-A has ldrexd/strexd, so clang claims an eight-byte
+        # compare-and-swap; the backend refuses an eight-byte atomic by name
+        # (as on ARMv7-M, which has no ldrexd), so this does not claim it.
+        armv7a)  echo '^#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8' ;;
+        # ARMv8-M Baseline: clang defines the ARMv8 feature macros it has
+        # for every v8 architecture, and five of them claim what Baseline
+        # does not have -- CLZ, the saturating instructions (SAT) and the
+        # Q flag they set (QBIT) are Thumb-2 DSP-class instructions this
+        # core lacks, and NUMERIC_MAXMIN and DIRECTED_ROUNDING are VFP
+        # instructions on a core with no FPU. GCC defines none of the five
+        # for armv8-m.base. A program that tests __ARM_FEATURE_CLZ and
+        # writes `clz` in asm would get an UNDEFINED instruction.
+        thumbv8mbase) echo '^#define __ARM_FEATURE_(CLZ|QBIT|SAT|NUMERIC_MAXMIN|DIRECTED_ROUNDING) ' ;;
+        # (Xtensa claims one and two bytes too: s32c1i is word-sized, and
+        # its backend makes them an s32c1i loop on the word. The table is
+        # the ESP32's -- xtensa-esp32-elf-gcc, which has no -msoft-float:
+        # the float ABI is the same either way, every float in the address
+        # registers.)
+        # (PowerPC claims one and two bytes too: lbarx/lharx are not Book
+        # E's, so its backend makes them a lwarx/stwcx. loop on the word.)
         *)       echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
@@ -195,8 +268,19 @@ EXCLUDE_CXX='^#define (__GNUG__|__cpp_|__EXCEPTIONS|__GXX_RTTI|__GXX_CONSTEXPR_A
 
 refgxx() {
     case "$1" in
-        thumb|thumbv6m|thumbv8m|riscv32|riscv64|mips32) refgcc "$1" | sed 's/clang$/clang++/' ;;
+        thumb|thumbv6m|thumbv8m|thumbv8mbase|armv7a|riscv32|riscv64|mips32|mips32eb|mips64|mips64eb|loongarch64|ppc32|sparc32) refgcc "$1" | sed 's/clang$/clang++/' ;;
         *)                     refgcc "$1" | sed 's/gcc$/g++/' ;;
+    esac
+}
+
+# The per-arch exclusions the C++ table takes too. Only Baseline's: they
+# are claims about INSTRUCTIONS, which a C++ program reads the same way.
+# (The atomics ones above have never been applied to the C++ tables, and
+# changing those tables is a separate decision.)
+exclude_arch_cxx() {
+    case "$1" in
+        thumbv8mbase) exclude_arch "$1" ;;
+        *)            echo 'ZZZ_NO_SUCH_MACRO_ZZZ' ;;
     esac
 }
 
@@ -204,7 +288,8 @@ reference_cxx() {
     # shellcheck disable=SC2046
     { "$(refgxx "$1")" $(refflags "$1") -std=gnu++20 -x c++ -dM -E - \
         </dev/null; computed; } \
-        | LC_ALL=C sort -u | grep -v -E "$EXCLUDE" | grep -v -E "$EXCLUDE_CXX"
+        | LC_ALL=C sort -u | grep -v -E "$EXCLUDE" | grep -v -E "$EXCLUDE_CXX" \
+        | grep -v -E "$(exclude_arch_cxx "$1")"
 }
 
 if [ "${1:-}" = --reference ]; then
@@ -215,6 +300,32 @@ if [ "${1:-}" = --reference-cxx ]; then
     reference_cxx "${2:?usage: gen-predef.sh --reference-cxx ARCH}"
     exit 0
 fi
+
+# C only: the target refuses C++ (RX: no g++ was built for the reference).
+gen_c() {
+    arch=$1
+    GCC=$(refgcc "$arch")
+    OUT="$(dirname "$0")/../src/arch/$arch/predef.c"
+    command -v "$GCC" >/dev/null 2>&1 || {
+        echo "gen-predef: reference compiler '$GCC' not found" >&2; exit 1; }
+    {
+        echo "/* Generated by tools/gen-predef.sh from \`$("$GCC" $(refflags "$arch") -dumpmachine) $(basename "$GCC") $("$GCC" -dumpversion) $(refflags "$arch") -dM -E\`."
+        echo "   Do not edit by hand; rerun the script (ARCHITECTURE.md §5). */"
+        echo
+        echo "#include \"../predef.h\""
+        echo
+        echo "const struct predef_macro predef_macros_$arch[] = {"
+        reference "$arch" \
+            | sed -e 's/^#define \([^ ]*\) \(.*\)$/\1\x01\2/' \
+            | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+            | sed -e 's/^\(.*\)\x01\(.*\)$/    { "\1", "\2" },/'
+        echo "};"
+        echo
+        echo "const int predef_macro_count_$arch ="
+        echo "    (int)(sizeof predef_macros_$arch / sizeof predef_macros_$arch[0]);"
+    } > "$OUT"
+    echo "gen-predef: wrote $OUT ($(grep -c '{ "' "$OUT") macros)"
+}
 
 gen() {
     arch=$1
@@ -274,12 +385,22 @@ case "${1:-both}" in
     thumb)   gen thumb ;;
     thumbv6m) gen thumbv6m ;;
     thumbv8m) gen thumbv8m ;;
+    thumbv8mbase) gen thumbv8mbase ;;
+    armv7a)  gen armv7a ;;
     riscv32) gen riscv32 ;;
     riscv64) gen riscv64 ;;
     avr)     gen avr ;;
     mips32)  gen mips32 ;;
-    both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen riscv32
-              gen riscv64; gen avr; gen mips32 ;;
-    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|riscv32|riscv64|avr|mips32]" >&2
+    mips32eb) gen mips32eb ;;
+    mips64)  gen mips64 ;;
+    mips64eb) gen mips64eb ;;
+    loongarch64) gen loongarch64 ;;
+    xtensa)  gen xtensa ;;
+    ppc32)   gen ppc32 ;;
+    rx)      gen_c rx ;;
+    sparc32) gen sparc32 ;;
+    both|all) gen x86_64; gen aarch64; gen thumb; gen thumbv6m; gen thumbv8m; gen thumbv8mbase; gen armv7a; gen riscv32
+              gen riscv64; gen avr; gen mips32; gen mips32eb; gen mips64; gen mips64eb; gen loongarch64; gen xtensa; gen ppc32; gen sparc32 ;;
+    *) echo "usage: $0 [x86_64|aarch64|thumb|thumbv6m|thumbv8m|thumbv8mbase|armv7a|riscv32|riscv64|avr|mips32|mips32eb|mips64|mips64eb|loongarch64|xtensa|ppc32|rx|sparc32]" >&2
        exit 1 ;;
 esac

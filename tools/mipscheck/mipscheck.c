@@ -48,8 +48,12 @@ static struct code C;
             exit(2);                                                        \
         }                                                                   \
         snprintf(txt_, sizeof txt_, __VA_ARGS__);                           \
-        printf("%s|%02x%02x%02x%02x\n", txt_, C.p[at_ + 3], C.p[at_ + 2],   \
-               C.p[at_ + 1], C.p[at_]);                                     \
+        if (mips_big_endian())          /* the bytes in memory order */     \
+            printf("%s|%02x%02x%02x%02x\n", txt_, C.p[at_], C.p[at_ + 1],   \
+                   C.p[at_ + 2], C.p[at_ + 3]);                             \
+        else                            /* the word, its high byte first */ \
+            printf("%s|%02x%02x%02x%02x\n", txt_, C.p[at_ + 3],             \
+                   C.p[at_ + 2], C.p[at_ + 1], C.p[at_]);                   \
     } while (0)
 
 static const int R[] = { 0, 1, 2, 3, 4, 5, 7, 8, 12, 15, 16, 21, 23, 24,
@@ -208,6 +212,89 @@ static void vocab(void)
     }
 }
 
+/* MIPS64's doubleword forms (--64): the shifts at every amount class
+ * (below 32, the *32 forms, 63), the three field encodings of dext and
+ * dins at their edges, the doubleword loads and stores. */
+static void vocab64(void)
+{
+    static const struct { int op; const char *nm; } alu[] = {
+        { MIPS_DADDU, "daddu" }, { MIPS_DSUBU, "dsubu" },
+        { MIPS_DSLLV, "dsllv" }, { MIPS_DSRLV, "dsrlv" },
+        { MIPS_DSRAV, "dsrav" }, { MIPS_DROTRV, "drotrv" }
+    };
+    static const struct { int op; const char *nm; } shi[] = {
+        { MIPS_DSLL, "dsll" }, { MIPS_DSRL, "dsrl" }, { MIPS_DSRA, "dsra" },
+        { MIPS_DROTR, "drotr" }
+    };
+    static const struct { int op; const char *nm; } md[] = {
+        { MIPS_DMULT, "dmult" }, { MIPS_DMULTU, "dmultu" },
+        { MIPS_DDIV, "ddiv $zero," }, { MIPS_DDIVU, "ddivu $zero," }
+    };
+    static const int sas[] = { 0, 1, 16, 31, 32, 33, 40, 63 };
+    static const long long offs[] = { -32768, -8, -1, 0, 1, 8, 255, 32767 };
+    /* (pos, size): dext, dextm (size > 32), dextu (pos >= 32), and dins,
+     * dinsm (end >= 32), dinsu */
+    static const int bit[][2] = { { 0, 1 }, { 0, 32 }, { 31, 1 }, { 4, 8 },
+                                  { 0, 33 }, { 0, 64 }, { 31, 33 },
+                                  { 8, 40 }, { 32, 1 }, { 32, 32 },
+                                  { 63, 1 }, { 40, 16 }, { 16, 32 },
+                                  { 1, 31 }, { 31, 2 } };
+    int k, j;
+    for (k = 0; k < (int)(sizeof alu / sizeof alu[0]); k++)
+        for (j = 0; j < NR; j++) {
+            int d = R[j], a = R[(j + 5) % NR], b = R[(j + 11) % NR];
+            V(mips_alu(&C, alu[k].op, d, a, b), "%s $%d, $%d, $%d",
+              alu[k].nm, d, a, b);
+        }
+    for (j = 0; j < NSIMM; j++) {
+        int t = R[j % NR], s = R[(j + 7) % NR];
+        V(mips_alu_imm(&C, MIPS_DADDIU, t, s, SIMM[j]), "daddiu $%d, $%d, %lld",
+          t, s, SIMM[j]);
+    }
+    for (k = 0; k < (int)(sizeof shi / sizeof shi[0]); k++)
+        for (j = 0; j < (int)(sizeof sas / sizeof sas[0]); j++) {
+            int d = R[(j * 3 + k) % NR], t = R[(j * 5 + 2) % NR];
+            V(mips_shift_imm(&C, shi[k].op, d, t, sas[j]), "%s $%d, $%d, %d",
+              shi[k].nm, d, t, sas[j]);
+        }
+    for (k = 0; k < (int)(sizeof md / sizeof md[0]); k++)
+        for (j = 0; j < NR; j++) {
+            int a = R[j], b = R[(j + 3) % NR];
+            V(mips_muldiv(&C, md[k].op, a, b), "%s $%d, $%d", md[k].nm, a, b);
+        }
+    for (j = 0; j < NR; j++) {
+        int r = R[j], s = R[(j + 9) % NR], d = R[(j + 4) % NR];
+        V(mips_dclz(&C, r, s), "dclz $%d, $%d", r, s);
+        V(mips_dclo(&C, r, s), "dclo $%d, $%d", r, s);
+        V(mips_dsbh(&C, r, s), "dsbh $%d, $%d", r, s);
+        V(mips_dshd(&C, r, s), "dshd $%d, $%d", r, s);
+        V(mips_dmfc0(&C, r, d, j % 8), "dmfc0 $%d, $%d, %d", r, d, j % 8);
+        V(mips_dmtc0(&C, r, d, j % 8), "dmtc0 $%d, $%d, %d", r, d, j % 8);
+    }
+    for (k = 0; k < (int)(sizeof bit / sizeof bit[0]); k++) {
+        int t = R[(k + 2) % NR], s = R[(k + 13) % NR];
+        V(mips_dext(&C, t, s, bit[k][0], bit[k][1]), "%s $%d, $%d, %d, %d",
+          bit[k][0] >= 32 ? "dextu" : bit[k][1] > 32 ? "dextm" : "dext",
+          t, s, bit[k][0], bit[k][1]);
+        V(mips_dins(&C, t, s, bit[k][0], bit[k][1]), "%s $%d, $%d, %d, %d",
+          bit[k][0] >= 32 ? "dinsu" : bit[k][0] + bit[k][1] > 32 ? "dinsm"
+                                                               : "dins",
+          t, s, bit[k][0], bit[k][1]);
+    }
+    for (j = 0; j < (int)(sizeof offs / sizeof offs[0]); j++) {
+        int t = R[(j + 6) % NR], b = R[(j + 1) % NR];
+        V(mips_load(&C, t, b, (int)offs[j], 8, 1), "ld $%d, %lld($%d)", t, offs[j], b);
+        V(mips_store(&C, t, b, (int)offs[j], 8), "sd $%d, %lld($%d)", t, offs[j], b);
+        V(mips_lwu(&C, t, b, (int)offs[j]), "lwu $%d, %lld($%d)", t, offs[j], b);
+        V(mips_ldl(&C, t, b, (int)offs[j]), "ldl $%d, %lld($%d)", t, offs[j], b);
+        V(mips_ldr(&C, t, b, (int)offs[j]), "ldr $%d, %lld($%d)", t, offs[j], b);
+        V(mips_sdl(&C, t, b, (int)offs[j]), "sdl $%d, %lld($%d)", t, offs[j], b);
+        V(mips_sdr(&C, t, b, (int)offs[j]), "sdr $%d, %lld($%d)", t, offs[j], b);
+        V(mips_lld(&C, t, b, (int)offs[j]), "lld $%d, %lld($%d)", t, offs[j], b);
+        V(mips_scd(&C, t, b, (int)offs[j]), "scd $%d, %lld($%d)", t, offs[j], b);
+    }
+}
+
 /* ---- mips_li, executed ------------------------------------------------ */
 
 /* The three instructions mips_li may emit, evaluated: addiu rd, $0, imm;
@@ -217,10 +304,7 @@ static int run_li(const struct code *c, int rd, unsigned long *out)
 {
     unsigned long reg[32] = { 0 };
     for (int p = 0; p + 4 <= c->len; p += 4) {
-        unsigned long w = (unsigned long)c->p[p] |
-                          ((unsigned long)c->p[p + 1] << 8) |
-                          ((unsigned long)c->p[p + 2] << 16) |
-                          ((unsigned long)c->p[p + 3] << 24);
+        unsigned long w = mips_get_word(c->p + p);
         unsigned op = (unsigned)(w >> 26), rs = (unsigned)(w >> 21) & 31,
                  rt = (unsigned)(w >> 16) & 31, imm = (unsigned)w & 0xffff;
         unsigned long simm = imm & 0x8000 ? (0xffff0000UL | imm) : imm;
@@ -279,6 +363,90 @@ static int check_li(void)
     return 0;
 }
 
+/* mips_li64, executed: a 64-bit register file and the instructions
+ * mips_li64 may emit -- lui, addiu, ori, dsll(32), dext 0,32 -- with the
+ * MIPS64 semantics (lui and addiu sign-extend their 32-bit result). */
+static int run_li64(const struct code *c, int rd, unsigned long long *out)
+{
+    unsigned long long reg[32] = { 0 };
+    for (int p = 0; p + 4 <= c->len; p += 4) {
+        unsigned long w = mips_get_word(c->p + p);
+        unsigned op = (unsigned)(w >> 26), rs = (unsigned)(w >> 21) & 31,
+                 rt = (unsigned)(w >> 16) & 31, rdd = (unsigned)(w >> 11) & 31,
+                 sa = (unsigned)(w >> 6) & 31, fn = (unsigned)w & 63,
+                 imm = (unsigned)w & 0xffff;
+        long long simm = (short)imm;
+        if (op == 0x09) {                                  /* addiu */
+            reg[rt] = (unsigned long long)(long long)(int)(unsigned)
+                      (reg[rs] + (unsigned long long)simm);
+        } else if (op == 0x0d) {                           /* ori */
+            reg[rt] = reg[rs] | imm;
+        } else if (op == 0x0f) {                           /* lui */
+            reg[rt] = (unsigned long long)(long long)(int)(imm << 16);
+        } else if (op == 0 && rs == 0 && fn == 0x38) {     /* dsll */
+            reg[rdd] = reg[rt] << sa;
+        } else if (op == 0 && rs == 0 && fn == 0x3c) {     /* dsll32 */
+            reg[rdd] = reg[rt] << (sa + 32);
+        } else if (op == 0x1f && fn == 0x03 && sa == 0 && rdd == 31) {
+            reg[rt] = reg[rs] & 0xffffffffULL;             /* dext 0, 32 */
+        } else {
+            printf("li64: unexpected instruction 0x%08lx\n", w);
+            return 0;
+        }
+        reg[0] = 0;
+    }
+    *out = reg[rd];
+    return 1;
+}
+
+static int check_li64(void)
+{
+    static const long long fixed[] = {
+        0, 1, -1, 0x7fffffffLL, 0x80000000LL, 0xffffffffLL, 0x100000000LL,
+        -2147483649LL, 0x123456789abcdef0LL, (long long)0x8000000000000000ULL,
+        0x7fffffffffffffffLL, 0xffffffff80100000LL, 0x0000ffff00000000LL,
+        0x00000000ffff0000LL, 0x0001000000000001LL, 0x1234000000000000LL,
+        (long long)0xfedcba9876543210ULL, 0x00000000bf000900LL
+    };
+    int n = 0, nfix = (int)(sizeof fixed / sizeof fixed[0]);
+    unsigned long long s = 88172645463325252ULL;
+    for (int k = 0; k < nfix + 20000; k++) {
+        long long v;
+        struct code c = { 0 };
+        unsigned long long got;
+        if (k < nfix) {
+            v = fixed[k];
+        } else {
+            s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+            v = (long long)s;
+            switch (k & 7) {             /* the shapes that take shortcuts */
+            case 1: v &= 0xffffffffLL; break;
+            case 2: v = (long long)((unsigned long long)v << (k % 48)); break;
+            case 3: v >>= (k % 60); break;
+            case 4: v &= (long long)0xffff0000ffff0000ULL; break;
+            default: break;
+            }
+        }
+        mips_li64(&c, 9, v);
+        if (!run_li64(&c, 9, &got))
+            return 1;
+        if (got != (unsigned long long)v) {
+            printf("li64 0x%llx computed 0x%llx\n", (unsigned long long)v, got);
+            return 1;
+        }
+        if (c.len != mips_li64_len(v) || c.len > 24) {
+            printf("li64 0x%llx is %d bytes, mips_li64_len said %d\n",
+                   (unsigned long long)v, c.len, mips_li64_len(v));
+            return 1;
+        }
+        free(c.p);
+        n++;
+    }
+    printf("%d mips_li64 sequences each compute the value asked for, in at "
+           "most six instructions\n", n);
+    return 0;
+}
+
 /* ---- the refusals ----------------------------------------------------- */
 
 /* Every range check is load-bearing: the field is narrower than the C
@@ -286,10 +454,31 @@ static int check_li(void)
  * does something else. Each is provoked here by number, and the golden
  * test checks the process stops rather than emits. */
 #define NREFUSE 21
+/* ...and with --64, the doubleword forms' own checks (NREFUSE64 more),
+ * while the first NREFUSE are run with the switch OFF -- where every
+ * doubleword instruction must be refused too, the cases from 21 on. */
+#define NREFUSE64 14
 static void refuse(int n)
 {
     struct code c = { 0 };
+    mips_set_64(n >= NREFUSE + 7);     /* the MIPS32 checks with it off */
     switch (n) {
+    /* the switch off: a doubleword instruction in a MIPS32 object */
+    case 21: mips_load(&c, 2, 29, 0, 8, 1); break;
+    case 22: mips_alu(&c, MIPS_DADDU, 2, 3, 4); break;
+    case 23: mips_shift_imm(&c, MIPS_DSLL, 2, 3, 1); break;
+    case 24: mips_alu_imm(&c, MIPS_DADDIU, 2, 3, 1); break;
+    case 25: mips_dext(&c, 2, 3, 0, 32); break;
+    case 26: mips_li64(&c, 2, 0x100000000LL); break;
+    case 27: mips_muldiv(&c, MIPS_DMULTU, 2, 3); break;
+    /* the switch on: the doubleword ranges */
+    case 28: mips_shift_imm(&c, MIPS_DSLL, 2, 3, 64); break;
+    case 29: mips_dext(&c, 2, 3, 32, 33); break;
+    case 30: mips_dins(&c, 2, 3, 1, 64); break;
+    case 31: mips_dext(&c, 2, 3, 0, 0); break;
+    case 32: mips_alu_imm(&c, MIPS_DADDIU, 2, 3, 32768); break;
+    case 33: mips_ldl(&c, 2, 29, -32769); break;
+    case 34: mips_load(&c, 2, 29, 0, 16, 1); break;
     case 0:  mips_alu_imm(&c, MIPS_ADDIU, 2, 3, 32768); break;
     case 1:  mips_alu_imm(&c, MIPS_ADDIU, 2, 3, -32769); break;
     case 2:  mips_alu_imm(&c, MIPS_ANDI, 2, 3, -1); break;
@@ -319,19 +508,34 @@ static void refuse(int n)
 
 int main(int argc, char **argv)
 {
+    /* --be: big-endian (mips-none-elf), the bytes compared in memory
+     * order against llvm-mc's for mips-unknown-elf */
+    if (argc > 1 && !strcmp(argv[1], "--be")) {
+        mips_set_big_endian(1);
+        argc--;
+        argv++;
+    }
+    /* --64: MIPS64r2 (mips64el, mips64): the doubleword forms too */
+    if (argc > 1 && !strcmp(argv[1], "--64")) {
+        mips_set_64(1);
+        argc--;
+        argv++;
+    }
     if (argc > 1 && !strcmp(argv[1], "--vocab")) {
         vocab();
+        if (mips_is_64())
+            vocab64();
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "--li"))
-        return check_li();
+        return mips_is_64() ? check_li64() : check_li();
     if (argc > 1 && !strcmp(argv[1], "--refuse")) {
         if (argc > 2 && !strcmp(argv[2], "list")) {
-            printf("%d\n", NREFUSE);
+            printf("%d\n", mips_is_64() ? NREFUSE + NREFUSE64 : NREFUSE);
             return 0;
         }
         refuse(argc > 2 ? atoi(argv[2]) : -1);
     }
-    fprintf(stderr, "usage: mipscheck --vocab | --li | --refuse N|list\n");
+    fprintf(stderr, "usage: mipscheck [--be] [--64] --vocab | --li | --refuse N|list\n");
     return 2;
 }

@@ -327,6 +327,15 @@ clang's AVR struct convention is not avr-gcc's.
 | `riscv-relax` | branch and jump relaxation at the reach limits |
 | `riscv-atomics` | the A extension at both widths |
 
+### Renesas RX
+
+| Test | Checks |
+|---|---|
+| `rx-encoding` | every encoder form decoded by QEMU's RX disassembler (its monitor's `x/Ni`) as the instruction meant and from the length emitted; byte for byte against GNU as when an rx-elf binutils is installed; every range check provoked |
+| `rx-exec` | `tests/exec/*.c` on QEMU `gdbsim-r5f562n8` at `-O0`, `-O1`, `-O2`, `-Os`, linked with lib/libc and lib/rt built for RX; the programs whose expected value assumes LP64 or a binary64 double against the status rx-elf-gcc's code exits with (recorded) |
+| `rx-abi` | EmbCC and rx-elf-gcc calling each other: the shared embedded ABI pairing and the RX-specific one (`rx-abi-*.c`); skipped without an rx-elf-gcc |
+| `rx-refuse` | the object's header, the data model and Microsoft bit-field layout, the options and constructs refused by name |
+
 ### MIPS32
 
 | Test | Checks |
@@ -340,10 +349,30 @@ clang's AVR struct convention is not avr-gcc's.
 | `mips-slots` | delay-slot filling on `malta` at `-O1`..`-Os`: instructions that write a branch's operand, touch `$ra` under a `jal`, write `jalr`'s target, or sit behind a label (the epilogue's included) stay put; argument setup moves; some call's slot must be filled |
 | `mips-switch` | jump tables in a leaf (its `$ra` kept across the `bal`) and a calling function, values below, inside and above the range, `-O0`..`-Os` on `malta`; the dispatch must be in the object |
 | `mips-exc` | a general exception handler in a `.S` file on `malta`: syscalls from a naked function return the handler's values, the CP0 timer interrupts a register-heavy loop under `-icount` without changing its result, a file-scope asm function calls C; at `-O0` to `-Os` |
-| `mips-refuse` | the object header and flags, the MIPS options accepted and refused, the constructs refused by name (atomics, computed goto, frame builtins, `__int128`, `interrupt`, unwind tables, C++) |
+| `mips-refuse` | the object header and flags, the MIPS options accepted and refused, the constructs refused by name (atomics, frame builtins, `__int128`, `interrupt`, unwind tables, C++) |
 | `mips-access` | atomic, volatile, `op=`, `++` and `va_arg` accesses are single `lw`/`sw`/`lhu`/`sh` (disassembled at `-O0` and `-O2`); packed members are still split, and run right at a misaligned address on the board, in an image whose `.data` ends mid-word |
 
 `libc-embedded` and `debug-embedded` include `mipsel-none-elf` too.
+
+### LoongArch64
+
+| Test | Checks |
+|---|---|
+| `loongarch-encoding` | every encoder form against `llvm-mc -show-encoding`, word by word, every register in every field; 6000 `la_li` constants against llvm-mc's own `li.d` expansion and executed; every range check provoked |
+| `loongarch-exec` | `tests/exec/*.c` on QEMU `virt` at `-O0`, `-O1`, `-O2`, `-Os`, linked with lib/libc and lib/rt built for loongarch64 |
+| `loongarch-abi` | EmbCC and clang (`loongarch64-unknown-elf -msoft-float`, its default medium code model and GOT accesses) calling each other: the shared embedded pairing, the 128-bit one and the LP64S one (`loongarch-abi-*.c`) |
+| `loongarch-asm` | the assembler's vocabulary against `llvm-mc`, pseudos included; a C program of inline asm, a file-scope block and a naked function linked with a `.S` file (assembled by EmbCC and by clang) on the board; `-S` reassembled; the refusals |
+| `loongarch-atomics` | one- and two-byte atomics at every place in their word on the board, the neighbours untouched; the `ll.w`/`sc.w` loop in the object |
+| `mips-atomics` | one- and two-byte atomics at every place in their word on MIPS32 and MIPS64, both byte orders and every level: the little-endian boards against the host, the big-endian ones against clang's build on the same board; the compare-and-swap macros |
+| `ppc-atomics` | one- and two-byte atomics at every place in their word on the ppce500 board at every level, against clang's build on the same board; the `lwarx`/`stwcx.` loop in the object; the compare-and-swap macros |
+| `sparc-atomics` | one- and two-byte atomics at every place in their word on the leon3_generic board at every level, against clang's build (a `casa` loop too) on the same board; the `casa` loop in the object |
+| `sparc-slots` | the SPARC delay slots read back with llvm-objdump: no cc-setter in a conditional branch's slot, no `%o7` in a call's, no jump target written in its own; lib/libc's nops at most two thirds of what the filling off leaves; a leaf's `retl`, a restore moving the return value, an annulled if/else arm (`tests/golden/sparc-exec/slots.c`, run on the board by sparc-exec, computes through each hazard) |
+| `tricore-atomics` | one- and two-byte atomics at every place in their word on the tricore_testboard at every level, against the host; the compare-and-swap macros |
+| `xtensa-atomics` | one- and two-byte atomics at every place in their word on the de212 sim board at every level, against the host; the compare-and-swap macros |
+| `loongarch-refuse` | the triples, the object header and flags, `-S` reassembled, the options accepted and refused, the constructs refused by name, the objects `embld` refuses |
+
+`libc-embedded`, `debug-embedded`, `embedded-runtime` and `predef` include
+`loongarch64-unknown-elf` too.
 
 ### AVR
 
@@ -353,8 +382,10 @@ clang's AVR struct convention is not avr-gcc's.
 | `avr-encoding` | the instruction vocabulary against `llvm-mc`, including decoding EmbCC's bytes back for branch forms |
 | `avr-asm` | EmbCC's AVR assembler against `llvm-mc` |
 | `avr-exec` | programs run on the ATmega328P board against the same source run on the host |
+| `avr-alloca` | variable-length arrays, `alloca` and aligned locals on the ATmega328P against the host, at every level and every forced allocation mode: stack arguments after each (direct, indirect, variadic), 300 VLA scopes, a 400-call loop and a frameless alloca function, any of which overruns the 2 KiB if sp is not given back |
 | `avr-abi` | the calling convention against avr-libc's documented rules, with hand-written assembly on the other side |
 | `avr-calleesave` | every function preserves r2-r17 and Y |
+| `avr-cgoto` | the computed-goto programs of `tests/exec` on the part at every level and allocation mode, and their label addresses as word (`gs`, `pm`) relocations |
 | `avr-float` | software binary32 on the part, bit for bit against the host |
 | `avr-softfp-host` | the same float routines built for the host, against native float |
 | `avr-inline-asm` | operand constraint classes, byte modifiers, refusals |
@@ -414,6 +445,7 @@ clang's AVR struct convention is not avr-gcc's.
 | `vectorize` | auto-vectorization fires and computes the same checksums as `-O0`, `-O1` and gcc |
 | `tailcall` | sibling calls run in constant stack |
 | `frameless` | leaves with no frame, and the conditions that make it safe |
+| `time-report` | `-ftime-report` reports every phase and a total on stderr, and the object is the same with or without it |
 | `branches` | short branch encodings where they reach |
 | `parallel-move` | `ra_parallel_move` simulated over every small shape (`tools/pmovecheck`) |
 | `remarks` | optimization remarks and `embcc why`: different causes give different reasons |
@@ -503,6 +535,8 @@ clang's AVR struct convention is not avr-gcc's.
 | `inline-asm-kernel` | the kernel's privileged inline-asm instructions, decoded by `objdump` |
 | `newlib-headers` | real newlib headers through the preprocessor and predefined macros |
 | `embld-link` | EmbLD links freestanding programs that run on the host |
+| `x86-disasm` | the x86-64 decoder behind `-S` and EmbDBG splits every function of tests/exec exactly as llvm-objdump does, and names x87, SSE2, cmov and bswap instead of printing `.byte` |
+| `embld-bss-align` | `__data_end` and `__bss_start` on word boundaries for ARMv6-M, ARMv7-M and RV32, with every length of `.data` from 1 to 8: a startup's word loop from an odd address faults on a core without unaligned access |
 | `embld-sections` | orphan sections gathered contiguously, with bracket symbols in both spellings |
 | `embld-b1` | EmbLD links a program against the EmbLinkOS runtime and newlib |
 | `embld-embdbg` | EmbLD writes the `.embdbg` sidecar at link time |
@@ -572,6 +606,14 @@ the FPGA UART at 0xbf000900 (the third serial port), reports an exception
 as `==FAULT cause N epc ... badvaddr ...==`, and ends with `==EXIT n==`
 and a write to the FPGA's SOFTRES register, which `-no-reboot` turns into
 QEMU's exit.
+
+`tests/harness/loongarch` boots on QEMU `virt` (`-kernel`, direct address
+mode): the image is linked at 0x1000000, above the boot information and
+device tree QEMU keeps in the first 2 MiB, writes the UART at 0x1fe001e0
+(the first serial port), reports an exception as `==FAULT ecode N subcode
+N era ... badv ...==` through a `b` written into a 4 KiB-aligned page that
+EENTRY points at, and ends with `==EXIT n ==` and the ACPI GED's
+power-off (0x34 to 0x100e001c).
 
 `tests/harness/qrun.sh SECONDS [--until TEXT] CMD...` runs QEMU under a
 hard timeout. With `--until TEXT` it polls the guest's output and kills

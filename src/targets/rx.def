@@ -1,0 +1,17 @@
+/* Renesas RX: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* RX (rx-elf-gcc -nofpu -dM): ILP32 with an UNSIGNED char, a signed
+ * `long int` wchar_t, double and long double both binary32 (GCC's
+ * -m32bit-doubles default), no __int128, and nothing aligned beyond
+ * 4 (__BIGGEST_ALIGNMENT__ 4: a long long is 4-aligned). */
+DATA_MODEL(RX, .ptr = 4, .lng = 4, .it = 4, .dbl = 4, .ldbl = 4,
+           .char_uns = 1, .wchar_uns = 0, .int128 = 0, .maxal = 4)
+
+/* Renesas RX (RXv1: RX600/RX610, RX100/RX200), little-endian. GCC's
+ * triple is rx-elf; -none-elf is the canonical spelling here, as for
+ * the other bare-metal targets. */
+TRIPLE("rx-none-elf",               RX,          NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("rx-elf",                    RX,          NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("rx-unknown-elf",            RX,          NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("rx",                        RX,          NONE,    ELF,   ALIAS,     BASE,         PLAIN)

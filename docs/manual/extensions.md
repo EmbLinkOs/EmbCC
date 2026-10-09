@@ -46,7 +46,7 @@ A construct that a code generator cannot lower is refused when the
 function containing it is compiled, with a message of the form
 
 ```text
-embcc: f.c:2: error: the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]
+embcc: f.c:1: error: the MIPS64 backend cannot lower a 16-byte atomic (MIPS64's lld/scd are a doubleword; there is no 128-bit ll/sc) yet (function f) [cas16 w=16 size=16]
 ```
 
 The bracketed part names the internal operation that could not be
@@ -73,7 +73,7 @@ operators](#feature-test-operators), with the limits described there.
 | [Statement expressions](#statement-expressions) `({ ... })` | Supported |
 | [`typeof`, `__typeof__`, `__typeof`, `typeof_unqual`](#typeof) | Supported for a type name and for most expressions |
 | [`__auto_type`](#__auto_type) | Supported at block scope |
-| [Labels as values and computed `goto`](#labels-as-values-and-computed-goto) | x86-64 and AArch64 only |
+| [Labels as values and computed `goto`](#labels-as-values-and-computed-goto) | Supported, in static tables too |
 | [Local labels](#local-labels) (`__label__`) | Supported |
 | [Case ranges](#case-ranges) (`case 1 ... 5:`) | Supported |
 | [Designated range initializers](#designated-range-initializers) (`[2 ... 5] = x`) | Supported |
@@ -178,24 +178,41 @@ sub:
 }
 ```
 
-This is supported on x86-64 and AArch64. The other code generators
-refuse it:
+This is supported on every target. A label's address is a code
+address, the same kind of value a function pointer holds: on Cortex-M
+it has bit 0 set (Thumb state, ready for `bx`), and on AVR it is a
+word address in program memory, as `gs()` makes it.
 
-| Target | Diagnostic |
-|---|---|
-| Cortex-M | `the ARMv7-M backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| RV32 | `the RV32 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| RV64 | `the RV64 backend cannot lower a computed goto yet (function f) [labeladdr w=4 size=4]` |
-| AVR | `the AVR backend cannot lower labeladdr yet (function f) [labeladdr w=4 size=4]` |
+A label address may also initialize an object with static storage
+duration inside its function, which is how a threaded interpreter
+keeps its dispatch table, and the difference of two label addresses is
+a constant there, as in GCC:
 
-On every target, a label address cannot initialize an object with
-static storage duration, so the table above must be an automatic
-array. A `static` table is refused with `a static initializer must be a
-constant, a string literal, or the address of a global`. The difference
-of two label addresses (`&&b - &&a`) is refused as `arithmetic on void
-*`. A label whose address is taken must be defined (`label 'x' used but
-not defined`). A function that contains a computed `goto` is never
-inlined; see [Inlining](optimization.md#inlining).
+```c
+int step(int op)
+{
+    static void *const table[] = { &&add, &&sub };
+    static const int off[] = { &&add - &&add, &&sub - &&add };
+    if (op < 0)
+        goto *(&&add + off[-op - 1]);
+    goto *table[op];
+add:
+    return 1;
+sub:
+    return 2;
+}
+```
+
+Arithmetic on a label address -- `&&b - &&a`, `&&a + n` -- is in bytes,
+as on a `char *` (on AVR, in words, since the address is one); `void *`
+arithmetic is still refused anywhere else (`arithmetic on void *`). A
+label address cannot initialize an object outside its function: at
+file scope it is refused with `a static initializer must be a constant,
+a string literal, or the address of a global`. A label whose address is
+taken must be defined (`label 'x' used but not defined`). A function
+that contains a computed `goto` is never inlined; see
+[Inlining](optimization.md#inlining). C++ refuses both forms (see
+[C++](cxx.md)).
 
 ### Local labels
 
@@ -334,8 +351,10 @@ attribute means the same in both.
 
 An attribute may appear:
 
-- at the start of a declaration, before or among the declaration
-  specifiers;
+- at the start of a declaration, or among its specifiers, after a
+  storage class or a qualifier (`static const __attribute__((aligned(4)))
+  char t[4];`), at any scope, and so in a structure member's or a
+  parameter's specifiers;
 - after a declarator, including after a function's parameter list;
 - after `struct`, `union` or `enum`, before the tag, or after the closing
   brace of the definition (not between the tag and `{`);
@@ -356,7 +375,10 @@ These positions are not accepted:
 - on an enumerator: `expected '}' before '__attribute__'`;
 - after the `*` of a structure member's declarator, for an attribute
   that changes layout or linkage:
-  `__attribute__((weak)) is not supported in this position (after a declarator it is; on a struct or union, put it right after the keyword or after the closing '}')`.
+  `__attribute__((weak)) is not supported in this position (after a declarator it is; on a struct or union, put it right after the keyword or after the closing '}')`;
+- in the type name of a cast or `sizeof`, for an attribute that changes
+  layout or linkage, which has no declaration there to apply to:
+  `__attribute__((aligned)) is not supported in a type name: there is no declaration here to carry it`.
 
 ### How EmbCC treats an attribute
 
@@ -384,13 +406,14 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | Attribute | Effect |
 |---|---|
 | `alias("target")` | The function is another name for `target`, which must be a function defined in the same file and not itself an alias. The declaration with `alias` cannot have a body. Combine with `weak` for a weak alias. ELF only; see [Object formats](#object-formats) |
-| `always_inline` | Lifts the inliner's size limit for calls to this function. It has effect only where the inliner runs; see [Inlining](optimization.md#inlining) |
+| `always_inline` | Lifts the inliner's size limit for calls to this function, at every level including `-O0`; see [Inlining](optimization.md#inlining) |
 | `constructor`, `destructor` | The function's address is placed in `.init_array` or `.fini_array`, for the startup code to call before `main` or at exit. On a bare-metal target the program's own startup code walks the tables; see [Startup code](embedded.md#startup-code-and-the-linkers-symbols). A `static` one is kept although nothing calls it. ELF only |
 | `deprecated`, `deprecated("message")` | A call, a read, or taking the address warns under [`-Wdeprecated-declarations`](diagnostics.md#-wdeprecated-declarations), on by default. The message text is not printed |
 | `embcc_sret` | EmbCC's own. On the first parameter, before its type, it marks that parameter as the address of the returned aggregate, passed where the target's ABI passes it. EmbCC's C++ lowering writes it; hand-written C has no need of it |
 | `format(archetype, string-index, first-to-check)` | Calls are checked under [`-Wformat`](diagnostics.md#-wformat), which `-Wall` enables. The archetypes checked are `printf`, `gnu_printf`, `scanf` and `gnu_scanf`; any other (`strftime`, `strfmon`) is accepted and not checked. Both indexes are 1-based; `first-to-check` is 0 for a function that takes a `va_list` |
 | `gnu_inline` | GNU89 `inline` semantics for this function: a definition that says `extern inline` is used only for inlining and never emitted, and one that says `inline` alone is an external definition. See [Inline functions](c-language.md#inline-functions) |
 | `noinline` | The function is never inlined |
+| `no_instrument_function` | `-finstrument-functions` leaves the function alone. It counts on any declaration: a plain prototype followed by a definition with it works |
 | `noreturn`, `_Noreturn`, `[[noreturn]]` | The function does not return. A call to it ends a path for EmbCC's check that every path through a non-`void` function returns a value ([E0008](diagnostics.md#diagnostic-ids)). EmbCC does not check that the function itself never returns |
 | `nothrow` | The function throws no C++ exception: a call to it inside a C++ `try` region gets no landing pad |
 | `pcs("aapcs")`, `pcs("aapcs-vfp")` | ARM only. See [`pcs`](#pcs) |
@@ -401,13 +424,23 @@ embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is 
 | `warn_unused_result`, `[[nodiscard]]` | Discarding the result warns under [`-Wunused-result`](diagnostics.md#-wunused-result), on by default |
 | `weak` | On a definition, the symbol is weak and another definition overrides it at link time. On a declaration, the reference is weak: the function's address is null if no definition is linked. `weak` on any declaration of a function makes it weak |
 | `interrupt`, `signal` | Interrupt handlers. See [Interrupt handlers](#interrupt-handlers) |
+| `keep_interrupts_masked` | MIPS32 only, with `interrupt`: interrupts stay disabled in the handler. See [Interrupt handlers](#interrupt-handlers) |
 
-A constructor or destructor with a priority is refused, because EmbCC
-emits one `.init_array` in source order:
-
-```text
-embcc: c.c:1: error: __attribute__((constructor(101))) is not supported: EmbCC emits one .init_array in source order and cannot honour a priority
-```
+`constructor(N)` and `destructor(N)` take a priority, as in GCC. The
+address goes in a section of its own, `.init_array.NNNNN` or
+`.fini_array.NNNNN` (`.init_array.00101` for 101), and the link orders
+the arrays:
+- EmbLD's default layout places the numbered sections ascending, ahead
+  of the plain `.init_array`, as GNU ld's default script does. A linker
+  script orders them with `KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))`
+  before `KEEP(*(.init_array))`.
+- So constructor(101) runs before constructor(200), and both before
+  every constructor without a priority. Destructors run in the reverse
+  order, since the exit code walks `.fini_array` backwards.
+- A priority from 0 to 100 is reserved for the implementation and warns
+  under `-Wprio-ctor-dtor` (on by default, as in GCC); one above 65535
+  is refused. Objects from clang, which names the sections
+  `.init_array.101`, sort with EmbCC's.
 
 Declarations of one function that disagree are refused: two different
 sections (`'f' is placed in section '.a' here and '.b' before`) or two
@@ -435,7 +468,7 @@ not supported (functions take it)`.
 | `packed` | `struct`, `union` | Every member's alignment becomes 1: no padding between members, and the structure's alignment is 1. A member's own `aligned(N)` still applies |
 | `aligned(N)` | `struct`, `union` | The type's alignment is raised to at least `N`, and its size is rounded up to a multiple of it |
 | `aligned(N)` | a member | The member's alignment is raised to at least `N`, which raises the structure's |
-| `aligned(N)` | `typedef` | Refused when `N` exceeds the type's alignment; accepted with no effect otherwise. See below |
+| `aligned(N)` | `typedef` | The type's alignment becomes `N`, larger or smaller than its own; its size does not change. See below |
 | `packed`, `aligned` | `enum` | Refused: `a packed or aligned enum is not supported (EmbCC's enums are always int-sized)` |
 | `deprecated` | a type | Accepted; using the type does not warn |
 | `may_alias` | a type | Accepted with no effect; EmbCC performs no type-based alias analysis |
@@ -444,16 +477,26 @@ not supported (functions take it)`.
 member, before or after its declarator, it is accepted and has no
 effect.
 
-An alignment on a `typedef` name larger than the type's own is refused,
-because EmbCC carries alignment on objects and on structure
-definitions, not on a type name:
+An alignment on a `typedef` name is the type's, as in GCC and Clang. It
+can be larger or smaller than the type's own, and the size does not
+change:
+- `typedef uint8_t dma_buf_t[64] __attribute__((aligned(32)));` places
+  every `dma_buf_t` object on a 32-byte boundary.
+- `typedef uint32_t u32_una __attribute__((aligned(1)));` is the idiom
+  for an unaligned access. Through a `u32_una *`, EmbCC reads and writes
+  as it does a packed structure's member: byte by byte where the core
+  would trap on a misaligned word (Cortex-M0, SPARC, MIPS).
+- A structure member of such a type is placed by that alignment, so
+  `struct { char c; u32_una x; }` is five bytes.
 
-```text
-embcc: t.c:1: error: __attribute__((aligned(16))) on a typedef is not supported: EmbCC carries alignment on objects and on struct definitions, not on a type name; put it on the declaration that uses 'i16'
-```
+An array of a type whose alignment is greater than its size is refused,
+as GCC and Clang refuse it, since its second element could not be
+aligned. A function parameter of such a type is passed, and has its
+address, as its type would without the attribute.
 
-A `typedef` of a structure that carries its own `aligned` or `packed`
-keeps that layout.
+A `packed` attribute on a `typedef` name, rather than on the structure
+it names, is refused inside a function. A `typedef` of a structure that
+carries its own `aligned` or `packed` keeps that layout.
 
 ### Statement and label attributes
 
@@ -484,21 +527,16 @@ embcc: a.c:1: error: aligned wants a constant power of two
 two`), except that `_Alignas(0)` is accepted and has no effect, as C11
 specifies.
 
-A local array, structure or union whose alignment exceeds what the
-stack pointer guarantees (16 bytes on x86-64, AArch64 and RISC-V, 8 on
-Cortex-M) is placed in storage that EmbCC aligns at function entry, so
-its address has the requested alignment at any call depth. A local of
-scalar type with such an alignment is refused:
+A local whose alignment exceeds what the stack pointer guarantees (16
+bytes on x86-64, AArch64 and RISC-V, 8 on Cortex-M) is placed in storage
+that EmbCC aligns at function entry, so its address has the requested
+alignment at any call depth. That holds for a scalar as well as an
+array, structure or union; a scalar so aligned is read and written in
+that storage, as a variable whose address is taken is, rather than kept
+in a register.
 
-```text
-embcc: f.c:2:20: error: 'x' needs 64-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar
-```
-
-On AVR, a local variable cannot be given an alignment:
-
-```text
-embcc: f.c:1: error: the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)
-```
+On AVR, whose stack pointer has no alignment at all, every local with
+an alignment greater than 1 is placed that way.
 
 `_Alignas` and `#pragma pack` interact with `aligned` as in GCC: the
 stricter of `aligned(N)` and `_Alignas(N)` applies, and `#pragma
@@ -531,10 +569,14 @@ whose code is in more than one section describes it with
 `DW_AT_ranges`. A function and a variable cannot share a section name (`section '.shared' holds a function, and 'd' cannot share
 it: one is code, the other data`).
 
-`section` on a block-scope variable is refused:
+`section` on a `static` local places it as on a file-scope object, as
+GCC does: `static uint32_t boots __attribute__((section(".noinit")));`
+inside a reset handler goes to `.noinit`, under the local symbol
+`function.boots`. On an automatic variable, which lives on the stack, it
+is refused:
 
 ```text
-embcc: s.c:1: error: section attribute on block-scope 'x' is not supported — declare it at file scope
+embcc: s.c:1: error: section attribute on 'x', which is on the stack: only a static local can be placed in a section
 ```
 
 On a structure member it is accepted and has no effect.
@@ -581,7 +623,6 @@ records for each.
 | `leaf` | Nothing in EmbCC reasons across a call this way |
 | `malloc` | It says the result aliases nothing, which only an alias analysis could use |
 | `may_alias` | EmbCC does no type-based alias analysis |
-| `no_instrument_function` | EmbCC emits no instrumentation calls |
 | `no_sanitize`, `no_sanitize_address`, `no_sanitize_undefined` | EmbCC has no sanitizers of these kinds |
 | `noclone` | EmbCC never clones a function |
 | `noipa` | The only interprocedural pass is the inliner, which `always_inline` and `noinline` control |
@@ -620,13 +661,16 @@ supported: REASON`:
 |---|---|
 | `cleanup` | `the cleanup function would never run` |
 | `ifunc` | `the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `interrupt` | On x86-64, AArch64 and RISC-V; see [Interrupt handlers](#interrupt-handlers) |
+| `interrupt` | On every target but Cortex-M, AVR, RISC-V and MIPS32; see [Interrupt handlers](#interrupt-handlers) |
+| `keep_interrupts_masked` | `it modifies a MIPS interrupt handler, and only the MIPS32 target implements those` (on every target but MIPS32) |
 | `mode` | `the declaration would keep its written type, so a typedef that asks for a specific width would silently get another` |
 | `ms_abi` | `the arguments would be passed in System V's registers` |
 | `naked` | On x86-64 and AArch64; see [Naked functions](inline-asm.md#naked-functions) |
 | `signal` | On every target but AVR; see [Interrupt handlers](#interrupt-handlers) |
 | `sysv_abi` | `the arguments would be passed in the other convention's registers` |
 | `target` | `EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
+| `use_debug_exception_return` | `the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
+| `use_shadow_register_set` | `EmbCC does not switch register sets: the handler would save into and run on a shadow set's stack pointer it never read with rdpgpr` |
 | `transparent_union` | `the union would be passed as a union rather than as its first member, which is a different calling convention` |
 | `vector_size` | `the type would stay a scalar: ...`; see [Vector extensions](#vector-extensions) |
 | `weakref` | `the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
@@ -659,18 +703,26 @@ vector table, a startup routine and handlers for each board is in
 |---|---|---|
 | AVR | Implemented. The handler saves `r0`, `SREG`, `r1`, the call-clobbered registers and the frame pointer, clears `r1`, re-enables interrupts with `sei` on entry, and returns with `reti` | Implemented, as `interrupt` without the `sei`: interrupts stay disabled in the body |
 | Cortex-M | Accepted; the code is the same as without it, because the processor saves the caller-saved registers on exception entry and an ordinary return performs the exception return. An argument such as `interrupt("IRQ")` is accepted | Refused |
-| RISC-V, x86-64, AArch64 | Refused | Refused |
+| RISC-V | Implemented, with `"machine"` (the default, returning with `mret`) and `"supervisor"` (`sret`). The handler saves the caller-saved registers it writes, and all of them, floating point included, when it calls; it is 4-byte aligned. `"user"` is refused | Refused |
+| MIPS32 | Implemented, with `"eic"` (the default), `"vector=sw0"`..`"vector=hw5"` and `keep_interrupts_masked`. The handler saves `EPC`, `Status`, the caller-saved registers it writes and `HI`/`LO`, all of them and `gp` when it calls, and returns with `eret`. `use_shadow_register_set` and `use_debug_exception_return` are refused | Refused |
+| x86-64, AArch64, MIPS64 and the other targets | Refused | Refused |
 
-The refusals read:
+On RISC-V and MIPS32 a handler with parameters or a non-`void` result is
+refused, and so is a function given two different kinds; the attribute
+may be on a prototype, on the definition or on both. In C++ the attribute
+is refused except on Cortex-M. The refusals read:
 
 ```text
-embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR it is implemented)
+embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and MIPS32 it is implemented)
 embcc: isr.c:2: error: __attribute__((signal)) is not supported: an interrupt handler needs the machine's own return instruction and every register saved, which only the AVR backend does
+embcc: isr.c:2: error: interrupt handler 'isr' takes parameters: the hardware calls it, so nothing passes them, and they would be read out of whatever the interrupted code left in the argument registers
+embcc: isr.c:2: error: interrupt handler 'isr' returns a value: the interrupt return goes back to the interrupted instruction, and nothing there receives it -- it must return void
 ```
 
-On RISC-V, write the trap entry in assembly and call a C function from
-it; see [Trap handlers](embedded.md#trap-handlers). For the AVR vector
-names (`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
+How to install a handler on each board, and what each one saves, is in
+[Embedded programming](embedded.md): [RISC-V](embedded.md#interrupt-handlers-1)
+and [MIPS32](embedded.md#interrupt-handlers-2). For the AVR vector names
+(`__vector_N`), see [AVR](embedded.md#avr-atmega328p).
 
 `naked` is supported on ARM Cortex-M, RISC-V and AVR, where the body is
 assembled as a block of the target's assembly; see
@@ -710,20 +762,14 @@ The target of `alias` must be defined in the same file.
 
 ### AVR program memory
 
-EmbCC has no address-space qualifiers. On AVR, `__flash` is predefined
-as `__attribute__((__address_space__(1)))`, and that attribute is not
-one EmbCC knows, so it is ignored with a warning:
-
-```text
-embcc: fl.c:1: warning: attribute '__address_space__' is not one EmbCC knows, and is ignored [-Wattributes]
-```
-
-The object is placed with ordinary data and copied to SRAM at startup.
-`__flash` written after `const` (`const __flash char s[]`) or in a
-parameter's type is a syntax error (`expected a type before
-'__attribute__'`). `__memx` is not defined. `__attribute__((progmem))`
-is ignored with the same warning. To keep data in flash and read it,
-see [Data in program memory](embedded.md#data-in-program-memory).
+On AVR, `__flash` is GCC's address space 1: `const` data kept in
+program memory and read with `lpm`. It is predefined as clang defines
+it, `__attribute__((__address_space__(1)))`, and EmbCC takes that
+attribute as a qualifier wherever `const` may stand. See
+[Data in program memory](embedded.md#data-in-program-memory) for the
+rules. Another address space, or address space 1 on another target, is
+refused by name. `__memx` is not defined. `__attribute__((progmem))` is
+ignored with a `-Wattributes` warning.
 
 The predefined macros `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`,
 `__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and
@@ -915,20 +961,52 @@ check, as a call to a `noreturn` function does.
 
 | Builtin | Result | Targets |
 |---|---|---|
-| `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All but AVR |
-| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All but AVR |
-| `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | x86-64, AArch64 |
-| `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | x86-64, AArch64 |
+| `__builtin_alloca(size)` | A pointer to `size` bytes in the current function's frame, freed when the function returns | All |
+| `__builtin_alloca_with_align(size, align)` | As `__builtin_alloca`, aligned to `align` bits, which must be a constant power of two of at least 8 | All |
+| `__builtin_frame_address(level)` | The frame address of the current function (`level` 0) or of a caller, found by following the saved frame pointers | Any level: x86-64, AArch64, ColdFire. Level 0: Cortex-M, ARMv7-A, RISC-V, MIPS32, MIPS64, LoongArch, SPARC, PowerPC, Xtensa, TriCore, RX, AVR |
+| `__builtin_return_address(level)` | The return address of the current function (`level` 0) or of a caller | As `__builtin_frame_address` |
 
 `level` must be a non-negative integer constant (`__builtin_frame_address
-needs a non-negative constant level`). On AVR, `alloca` is refused as a
-variable-length array is (`the AVR backend cannot lower a variable-length
-array yet (function f)`). On Cortex-M, RISC-V, MIPS32 and AVR the frame
-builtins are refused:
+needs a non-negative constant level`).
+
+**A frame chain.** x86-64, AArch64 and ColdFire code keeps a chain of
+saved frame pointers, so any level can be walked.
+
+**Level 0 only.** Code for the other targets keeps no chain, and only
+the current function's own frame can be found. A higher level is
+refused:
 
 ```text
-embcc: r.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [frameaddr w=8 size=4]
+embcc: r.c:1: error: __builtin_return_address(1) is not supported on riscv32-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found
 ```
+
+At level 0, a function that asks for its return address saves it, as a
+function that calls does. `__builtin_return_address(0)` is:
+
+| Target | Return address |
+|---|---|
+| Cortex-M, ARMv7-A | `lr` as the function was entered, with the Thumb bit, as GCC and clang return it: in `lr` still in a function that pushes nothing, else the pushed word |
+| RISC-V, MIPS, LoongArch, PowerPC | The return register (`ra` or `LR`) as the function was entered |
+| TriCore | `A11`, which a call keeps for the whole body |
+| SPARC | `%i7`, the address of the call itself (the return goes to `%i7 + 8`), as GCC and clang return it |
+| Xtensa | `a0` with its top two bits, the windowed ABI's call increment, replaced by those of the function's own address, as GCC does |
+| RX | The word the call pushed |
+| AVR | The word address the call pushed, as an AVR function pointer holds it (2-byte program counters) |
+
+`__builtin_frame_address(0)` is:
+
+| Target | Frame address |
+|---|---|
+| Cortex-M, ARMv7-A, RISC-V, MIPS, LoongArch, Xtensa, TriCore | The stack pointer at entry, which is what GCC and clang return on RISC-V. GCC and clang return the frame pointer `r7` on Cortex-M, which EmbCC's code does not keep |
+| SPARC | `%fp`, the same address |
+| RX and AVR | The stack pointer at entry, which points at, or just below, the return address the call pushed |
+| PowerPC | `r1` after the prologue, the frame's back-chain word, as GCC and clang return it |
+
+**Interrupt handlers.** In a RISC-V, MIPS or AVR interrupt handler,
+`__builtin_return_address` is refused: a handler was not called, and
+what it returns to is the trap's. AVR refuses
+`__builtin_frame_address` there too.
+
 
 A function that calls `alloca` is never inlined.
 
@@ -990,11 +1068,19 @@ on an integer or pointer of 1, 2, 4, 8 or 16 bytes, not double`. The
 `__sync` builtins accept, and ignore, the trailing list of variables
 GCC allows.
 
-Every operation is sequentially consistent. The memory-order arguments
-are accepted and do not change the code: `__ATOMIC_RELAXED` produces the
-same instructions as `__ATOMIC_SEQ_CST`. `__atomic_signal_fence` emits
-the same barrier as `__atomic_thread_fence`. No operation calls a
-library: each is inline or refused.
+On RISC-V the memory order of a read-modify-write or compare-exchange
+selects its `.aq` and `.rl` bits as clang's does: relaxed is bare,
+acquire `.aq`, release `.rl`, and acq_rel and seq_cst `.aqrl` on an AMO;
+an `lr`/`sc` loop takes the acquire on the `lr` and the release on the
+`sc`, and seq_cst is `lr.aqrl`/`sc.rl`. A compare-exchange's failure
+order strengthens its success order, as clang merges them. An order that
+is not a constant is seq_cst, as are the `__sync` builtins and the
+operators on an `_Atomic` object. On every other target every operation
+is sequentially consistent: the memory-order arguments are accepted and
+do not change the code. `__atomic_signal_fence` emits
+the same barrier as `__atomic_thread_fence`. No operation of 1, 2 or 4
+bytes, or of 8 on a 64-bit target, calls a library; an eight-byte one on
+a 32-bit target does (below).
 
 `__atomic_always_lock_free` and `__atomic_is_lock_free` are integer
 constant expressions, usable in `_Static_assert`. The size must be a
@@ -1006,19 +1092,38 @@ does not reflect the table below.
 
 | Operation | x86-64 | AArch64 | Cortex-M | RV32 | RV64 | AVR |
 |---|---|---|---|---|---|---|
-| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 1, 2, 4 | 1, 2, 4, 8 | 1 |
-| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4 | 4 | 4, 8 | None |
+| Load, store | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4; 8 by a call | 1, 2, 4; 8 by a call | 1, 2, 4, 8 | 1, 2, 4, 8 |
+| Exchange, fetch-and-op, compare-exchange, test-and-set | 1, 2, 4, 8, 16 | 1, 2, 4, 8, 16 | 1, 2, 4; 8 by a call | 1, 2, 4; 8 by a call | 1, 2, 4, 8 | 1, 2, 4, 8 |
 | Fences | Yes | Yes | Yes | Yes | Yes | Yes (no instruction) |
 
 16-byte operations need `__int128` or a 16-byte object through the
 generic forms. Other sizes are refused, for example:
 
 ```text
-embcc: a.c:1: error: the RV32 backend cannot lower an atomic narrower than four bytes (the A extension has no such form, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [xadd w=4 size=1]
-embcc: a.c:1: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function f) [xadd w=8 size=8]
-embcc: a.c:1: error: an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core
-embcc: a.c:1: error: the AVR backend cannot lower xadd yet (function f) [xadd w=4 size=2]
+embcc: a.c:1: error: an atomic access of 16 bytes is not one access on this target (it moves 8 at once): the halves could be split by an interrupt or another core
 ```
+
+#### Eight bytes on a 32-bit target
+
+Every 32-bit target -- Cortex-M, ARMv7-A, RV32, MIPS32, SPARC, PowerPC,
+ColdFire, TriCore, Xtensa and RX -- does an eight-byte atomic by calling
+libatomic's sized routine, as GCC and clang do there (none of them moves
+eight bytes atomically):
+
+| Operation | Called |
+|---|---|
+| `__atomic_load_n`, `__atomic_load`, reading an `_Atomic` | `u64 __atomic_load_8(const volatile void *p, int order)` |
+| `__atomic_store_n`, `__atomic_store`, `__sync_lock_release`, `=` | `void __atomic_store_8(volatile void *p, u64 v, int order)` |
+| `__atomic_exchange_n`, `__atomic_exchange`, `__sync_lock_test_and_set` | `u64 __atomic_exchange_8(volatile void *p, u64 v, int order)` |
+| `__atomic_compare_exchange_n`, `__atomic_compare_exchange`, the `__sync` compare-and-swaps, `*=` and the other operators without a fetch form | `bool __atomic_compare_exchange_8(volatile void *p, void *expected, u64 desired, int success, int failure)` |
+| `__atomic_fetch_OP`, `__atomic_OP_fetch`, `__sync_fetch_and_OP`, `__sync_OP_and_fetch`, `++`, `--`, `+=`, `-=`, `&=`, <code>&#124;=</code>, `^=` | `u64 __atomic_fetch_OP_8(volatile void *p, u64 v, int order)`, OP one of `add`, `sub`, `and`, `or`, `xor`, `nand` |
+
+The orders are the `__ATOMIC_*` values as the call wrote them -- a
+variable order is passed as its value -- and seq_cst (5) for the `__sync`
+builtins and the operators, except `__sync_lock_release`'s release (3),
+as clang passes them. `lib/rt` defines every one, weak, by masking
+interrupts; see [Embedded programming](embedded.md#eight-byte-atomics-on-a-32-bit-target)
+for what that does and does not cover, and how to replace them.
 
 The instructions used on each embedded target are described in
 [Embedded programming](embedded.md). `_Atomic` objects and the

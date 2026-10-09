@@ -21,10 +21,20 @@ by g++ and with libstdc++, and exceptions propagate between the two. The
 headers and the sources of GCC's libstdc++ compile with EmbCC. EmbCC
 also ships its own C++ runtime and standard library (`lib/libcxx`).
 
-On the Darwin and Windows targets C++ works with restrictions. On
-`riscv64-unknown-elf` it is not supported: a unit compiles when
-exceptions are turned off, and is not tested. On the Cortex-M, RV32 and AVR targets
-EmbCC refuses to generate code for C++. See [Targets](#targets).
+On the Darwin and Windows targets C++ works with restrictions. On the
+32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
+C++ is supported without exceptions (`-fno-exceptions`), with or without
+RTTI, following the ARM C++ ABI and the Itanium ABI's 32-bit form;
+objects link with clang++'s. The same holds on MIPS32 (both byte
+orders), big-endian MIPS64, PowerPC, SPARC, ColdFire, Xtensa, TriCore and
+RX, with the generic Itanium ABI laid out by each target's data model and
+byte order; on MIPS, SPARC and PowerPC objects link with clang++'s, and on
+Xtensa with g++'s. On `riscv64-unknown-elf`, `mips64el-none-elf` and
+`loongarch64-unknown-elf` C++ is not supported: a unit compiles when
+exceptions are turned off (`-fno-exceptions`), and is not tested. With
+exceptions on it is refused, since EmbCC writes no unwind tables for these
+machines. On AVR EmbCC refuses to generate code for C++. See
+[Targets](#targets).
 
 EmbCC compiles C++ by lowering it to C, which the C front end, the
 optimizer and the code generators then compile (design decision D-013 in
@@ -179,12 +189,18 @@ this:
   by the length of its name and the name (`_C5Shape`). Line numbers refer
   to the C++ source. See [Debugging](debugging.md).
 - **Data model.** The C++ front end computes `sizeof`, `alignof`, class
-  layout and constant expressions itself, for a target whose `long` and
-  pointers are 8 bytes: `int` and `wchar_t` are 4 bytes; `long`,
-  `long long`, `double` and pointers 8. `long double` has the target's
-  size and alignment: 16 bytes on x86-64, on AArch64 ELF and Linux, and
-  on RISC-V, and 8 on `arm64-apple-darwin`. A target whose `long` or
-  pointers are not 8 bytes refuses C++ code generation; see
+  layout and constant expressions itself, by the target's data model, as
+  the C front end does: `long` and pointers are 8 bytes on the 64-bit
+  targets and 4 on 32-bit ARM and RV32, where `size_t` is `unsigned int`
+  and `ptrdiff_t` is `int` (and are mangled `j` and `i`). `long double`
+  has the target's size and alignment: 16 bytes on x86-64, on AArch64
+  ELF and Linux, and on RISC-V, and 8 on `arm64-apple-darwin` and 32-bit
+  ARM. On the other embedded targets `int`, `wchar_t`, `double` and the
+  alignments are the target's too: a 16-bit `wchar_t` on Xtensa, a 4-byte
+  `double` on RX, nothing aligned beyond 2 bytes on ColdFire or beyond 4
+  on RX and TriCore, bit-fields in RX's Microsoft layout, and objects in
+  the target's byte order, which the constant evaluator follows. A target
+  whose C++ ABI is not implemented refuses C++ code generation; see
   [Targets](#targets).
 
 ## Targets
@@ -196,8 +212,11 @@ this:
 | `arm64-apple-darwin` | Supported | Supported | the system's C++ runtime |
 | `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
 | `x86_64-windows-gnu` | Restricted | Not supported | none |
-| `riscv64-unknown-elf` | Not supported; compiles, untested | Not supported | none |
-| Cortex-M (`thumbv7m-none-eabi`, ...), `riscv32-unknown-elf`, `avr` | Refused | Not supported | none |
+| `riscv64-unknown-elf`, `mips64el-none-elf`, `loongarch64-unknown-elf` | Not supported; compiles with `-fno-exceptions`, untested | Refused | none |
+| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `riscv32-unknown-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `avr` | Refused | Not supported | none |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
 built for `x86_64-elf`, `aarch64-elf`, `x86_64-linux-gnu` and
@@ -236,18 +255,138 @@ The dynamic initialization of namespace-scope objects is not registered
 in the COFF object, so it does not run. See [Windows](targets.md#windows-coff)
 for the other limits of that target.
 
-**Cortex-M, RV32 and AVR.** The C++ front end lays out types for 8-byte
-`long` and pointers (see [Data model](#how-c-is-compiled) above), and
-these targets have a 4-byte `long` and 4-byte pointers (2-byte on AVR).
-EmbCC refuses to generate code for a C++ unit there, whether with `-c`,
-`-S` or `--emit-c`:
+**32-bit ARM and RV32.** C++ is compiled for the Cortex-M targets, ARM
+state (`armv7a-none-eabi`) and `riscv32-unknown-elf` without exceptions:
+the subset firmware and RTOS wrappers are written in --
+classes, constructors and destructors, virtual functions and abstract
+classes, multiple and virtual inheritance, templates, namespaces,
+references, operator overloading, `constexpr`, static objects with
+constructors, function-local statics, placement `new`, `new[]` and
+`delete[]`, pointers to members and lambdas, and with RTTI `typeid` and
+`dynamic_cast`. The objects follow the
+Itanium C++ ABI's 32-bit form, and on ARM the ARM C++ ABI's changes to
+it:
+
+| | ARM (EABI) | RV32 |
+|---|---|---|
+| `size_t`, `ptrdiff_t` | `unsigned int`, `int` (`_Znwj`) | `unsigned int`, `int` (`_Znwj`) |
+| vtable entries, offsets | 4 bytes | 4 bytes |
+| constructors, complete and base-object destructors | return `this` | return nothing |
+| pointer to member function | `{ ptr, adj }`: a virtual one's `ptr` is the vtable offset and `adj` is twice the adjustment plus 1 | `{ ptr, adj }`: a virtual one's `ptr` is the vtable offset plus 1 |
+| guard variable | 32 bits; initialized when bit 0 is set | 64 bits; initialized when the first byte is non-zero |
+| array cookie | 8 bytes at the start of the allocation: the element size, then the count | the count, in the 4 bytes before the elements |
+| static destructors registered with | `__aeabi_atexit` | `__cxa_atexit` |
+| `__STDCPP_DEFAULT_NEW_ALIGNMENT__` | 8 | 16 |
+| `va_list` mangled as | `St9__va_list` | `Pv` |
+
+Each of these is checked against clang++: `tests/golden/cxx-abi-ilp32.sh`
+links EmbCC and clang++ objects calling each other both ways on a
+Cortex-M3, a Cortex-M4F and RV32, and compares what the two compilers
+say about sizes, offsets, cookies and the data the ABI lays out, and with
+RTTI casts across classes whose `type_info` the other compiler wrote. clang++
+itself registers static destructors with `__cxa_atexit` on ARM; the
+runtime provides both.
+
+The run-time support is the embedded `libcxx.a`, built by `make
+libcxx-embedded` (`tools/build-libcxx.sh TRIPLE OUTDIR`) into
+`build/libcxx/TRIPLE/`: `operator new` and `operator delete` over
+`malloc` (weak, so a program may replace any of them), the guard
+functions `__cxa_guard_acquire`, `__cxa_guard_release` and
+`__cxa_guard_abort`, `__cxa_pure_virtual`, `__aeabi_atexit` and
+`__dso_handle`; for RTTI `std::type_info`, the `__cxxabiv1` type-information
+classes and `__dynamic_cast`; and `__cxa_bad_cast` and `__cxa_bad_typeid`,
+which stop the program (`__builtin_trap`), there being no exception to
+throw: a failed `dynamic_cast` to a reference, or `typeid` of `*p` with
+`p` null. `__cxa_atexit` is in the target's `libc.a`. Link it
+before `libc.a` and `librt.a`. The startup code must run the
+constructors in `.init_array` (between `__init_array_start` and
+`__init_array_end`) before `main`, as the test harnesses' startups do.
+Static destructors run only if the program calls `exit`.
+
+Exceptions are refused, because EmbCC writes no ARM EHABI unwind tables
+(`.ARM.exidx`) and no RISC-V `.eh_frame`. Exceptions are on by default,
+so a C++ unit compiled without `-fno-exceptions` stops with:
 
 ```text
-embcc: error: C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4
+embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions
 ```
 
-`-fsyntax-only`, which writes nothing, is accepted. It checks the unit
-with the front end's sizes, not the target's: `sizeof(long)` is 8 there.
+An explicit `-funwind-tables` or `-fasynchronous-unwind-tables` is
+refused the same way (`unwind tables are not supported for TRIPLE yet
+... EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)`), and without it a
+C++ unit writes no `.eh_frame`. RTTI is on by default; `-fno-rtti`
+leaves out the type-information objects and the code that reads them.
+
+**MIPS, PowerPC, SPARC, ColdFire, Xtensa, TriCore and RX.** C++ is
+compiled without exceptions for `mipsel-none-elf`, `mips-none-elf`,
+`mips64-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`,
+`m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf` and
+`rx-none-elf`: the same subset as on 32-bit ARM and RV32, with and without
+RTTI. The objects follow the generic Itanium C++ ABI (constructors return
+nothing, a 64-bit guard whose first byte says initialized, the array
+cookie in the `size_t` before the elements, `__cxa_atexit`), laid out by
+the target's data model and in its byte order -- all but MIPS32
+little-endian, Xtensa, TriCore and RX are big-endian:
+
+| | MIPS32 | MIPS64 | PowerPC | SPARC | ColdFire | Xtensa | TriCore | RX |
+|---|---|---|---|---|---|---|---|---|
+| `size_t` | `unsigned int` | `unsigned long` | `unsigned long` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned int` | `unsigned long` |
+| a virtual member function pointer is flagged in | `adj` | `adj` | `ptr` | `ptr` | `ptr` | `ptr` | `ptr` | `adj` |
+| the return slot of a class that is not trivially copyable | `$a0` | `$a0` | `r3` | the struct-return word (`%sp+64`), and `unimp` after the call | `a1` | `a2` | `a4` | `r15` |
+| `__STDCPP_DEFAULT_NEW_ALIGNMENT__` | 8 | 16 | 8 | 8 | 2 | 8 | 4 | 4 |
+| `va_list` mangled as | `Pv` | `Pv` | `P13__va_list_tag` | `Pv` | `Pv` | `13__va_list_tag` | `Pv` | `Pv` |
+
+A virtual member function pointer is flagged in `adj` (its `ptr` the
+vtable offset, `adj` twice the adjustment plus 1) on MIPS, as clang and
+g++ do there, and on RX, whose functions may start at an odd address;
+elsewhere `ptr` is the vtable offset plus 1. `size_t` is `unsigned long`
+on PowerPC as clang's `powerpc-none-eabi` says (`_Znwm`), and on RX as
+GCC's `rx-elf` does.
+
+`tests/golden/cxx-abi-more.sh` links EmbCC objects with clang++'s both
+ways on MIPS32 (both byte orders), MIPS64 and SPARC and PowerPC, and with
+g++'s on Xtensa (Espressif's GCC for the `de212` core), as
+`tests/golden/cxx-abi-ilp32.sh` does for ARM and RV32: virtual calls,
+thunks and virtual bases, mangled names, member pointers, guards, array
+cookies, a class returned by value through its return slot and, with
+RTTI, `dynamic_cast` and `typeid` on the other compiler's `type_info`.
+One difference remains on MIPS64, and it is in the C calling convention,
+not the C++ ABI: a `float` passed on the stack goes in the last four bytes
+of its eight-byte slot, where clang and g++ put it in the first four.
+The return slot travels where each target's C convention puts a
+struct's result buffer, as clang++ and g++ pass it. ColdFire, TriCore and
+RX have no C++ compiler here to compare with; there the same test links
+EmbCC's units with each other, at every level and with RTTI. g++ for
+Xtensa registers a unit's constructors in `.ctors` rather than
+`.init_array`; a startup that links its objects runs both
+(`__ctors_start` to `__ctors_end`, last first), as the Xtensa harness
+does.
+
+`tests/golden/cxx-embedded.sh` runs every `tests/cxx-embedded` program on
+each of these boards under QEMU (Malta for MIPS, `ppce500`, LEON3,
+`mcf5208evb`, the Xtensa `sim` board, the TriCore test board and RX's
+`gdbsim`) at `-O0`, `-O1`, `-O2` and `-Os`, and each prints what the host's
+clang++ build prints. The run-time library is the embedded `libcxx.a`, as
+above (without `__aeabi_atexit`'s caller, which is ARM's). Exceptions are
+refused by name, as on ARM, because EmbCC writes no unwind tables for
+these machines:
+
+```text
+embcc: error: C++ exceptions are not supported for mips-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with -fno-exceptions
+```
+
+**AVR.** EmbCC refuses to generate code for a C++ unit there, whether with
+`-c`, `-S` or `--emit-c`. The front end lays classes out by AVR's sizes,
+but its lowering still assumes a 32-bit `int` (integral promotions,
+enumerations, literals), a member pointer's adjustment as wide as a
+`long`, and RTTI's base offsets one pointer wide; and no AVR C++ runtime
+is built.
+
+```text
+embcc: error: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
+```
+
+`-fsyntax-only`, which writes nothing, is accepted.
 
 **`riscv64-unknown-elf`.** The front end's data model is the target's,
 and a C++ unit compiles, but C++ is not supported there:
@@ -365,7 +504,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Structured bindings | Partial | Arrays, data members, tuple-like classes; in declarations and range-`for`; `static`; captured by lambdas. Members of a base class: `binding the members of a base of 'D' is not supported yet`. At namespace scope: `a structured binding at namespace scope is not supported yet` |
 | `if constexpr` | Supported | The discarded branch is not instantiated. |
 | `if` with an initializer | Supported | |
-| `switch` with an initializer | Not supported | `expected ')' before ';'` |
+| `switch` with an initializer | Supported | `switch (init; cond)`, with a declaration in the condition too. |
 | Fold expressions | Supported | All four forms. |
 | Inline variables | Supported | |
 | Nested namespace definitions (`namespace a::b`) | Supported | |
@@ -380,7 +519,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `[[fallthrough]]`, `[[maybe_unused]]`, `[[nodiscard]]` | Supported | `[[nodiscard]]` is accepted; discarding the value is not diagnosed. |
 | Aggregates with base classes | Supported | |
 | `auto x{1}` deduces `int` | Supported | |
-| `u8` character literals | Not supported | `'u8' was not declared in this scope` |
+| `u8` character literals | Supported | Of type `char8_t` in every mode, as a `u8` string is; one UTF-8 code unit, so `u8'\u00e9'` is refused by name. |
 | Removal of dynamic exception specifications and `register` | Not enforced | `throw(T)` and `register` are accepted. |
 
 ### C++20
@@ -405,12 +544,12 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `constexpr` virtual functions; `try` in `constexpr` functions | Supported | |
 | `constexpr` dynamic allocation; changing a union's active member in a constant expression | Not supported | The expression is not a constant expression. |
 | Parenthesized aggregate initialization | Supported | |
-| Range-based `for` with an initializer | Not supported | `expected '(' before 'x'` |
+| Range-based `for` with an initializer | Supported | The initializer runs once, before the range is evaluated. |
 | ADL for a function template called with explicit template arguments | Not supported | `'f' was not declared in this scope` |
 | Class template argument deduction for aggregates | Supported | |
 | Class template argument deduction for alias templates | Not supported | `expected a declaration before 'W'` |
 | Default member initializers for bit-fields | Supported | |
-| `namespace a::inline b` | Not supported | The members are not found: `'v' was not declared in this scope` |
+| `namespace a::inline b` | Supported | Reopening a namespace as inline that was first declared otherwise is refused, as the standard requires. |
 | `typename` optional in more contexts | Supported | |
 | `__VA_OPT__` | Supported | |
 | `std::source_location` | Supported | Through `__builtin_source_location`; a default argument gives the caller's position. |
@@ -428,7 +567,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | `#elifdef`, `#elifndef` | Supported | |
 | `[[assume]]` | Accepted | |
 | Multidimensional subscript operator | Not supported | `'M' has no viable operator[]` |
-| `auto(x)` | Not supported | `expected an expression before 'auto'` |
+| `auto(x)`, `auto{x}` | Supported | A prvalue copy of `x`, of its decayed type. |
 
 ## Notes on partial support
 

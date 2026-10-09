@@ -142,18 +142,16 @@ t=$(grep -c R_ARM_THM_MOVT_ABS "$out/rel.txt" || true)
     exit 1; }
 echo "ARM relocations, $w movw/movt pairs and an ABS32 in .data"
 
-# THE RULE: what the backend has not got, it refuses by name.
-refuses() {
-    printf '%s\n' "$2" > "$out/no.c"
-    if "$EMBCC" --target=$T -c "$out/no.c" -o "$out/no.o" 2>"$out/no.err"; then
-        echo "$1 was accepted by a backend that cannot lower it"; exit 1
-    fi
-    grep -q "cannot lower" "$out/no.err" || {
-        echo "$1 failed, but not with the backend's own refusal:"
-        cat "$out/no.err"; exit 1; }
-}
-refuses "a computed goto"   'void f(int i){ void *t[] = { &&a, &&b }; goto *t[i & 1]; a: return; b: return; }'
-echo "a computed goto refuses by name"
+# A computed goto: &&label is pc-relative (movw/movt, add rD, pc), so it
+# needs no relocation at all; what it computes is tests/exec's
+# computed-goto*.c's to check.
+printf '%s\n' 'int f(int i){ void *t[] = { &&a, &&b }; goto *t[i & 1]; a: return 1; b: return 2; }' > "$out/cg.c"
+"$EMBCC" --target=$T -O2 -c "$out/cg.c" -o "$out/cg.o" ||
+    { echo "a computed goto does not compile"; exit 1; }
+"$RE" -r "$out/cg.o" > "$out/cg.rel"
+! grep -q R_ARM "$out/cg.rel" || {
+    echo "a label address took a relocation:"; cat "$out/cg.rel"; exit 1; }
+echo "a computed goto's label addresses need no relocation"
 # long double is a double on ARM EABI and is lowered as one now; what it
 # computes is tests/golden/ldouble-same.sh's to check.
 printf 'long double f(long double a){return a*a;}\n' > "$out/ld.c"
@@ -312,22 +310,27 @@ grep -q '^<geta>:.*ldrd' "$out/pk.s" && grep -q '^<seta>:.*strd' "$out/pk.s" || 
     cat "$out/pk.s"; exit 1; }
 echo "a 64-bit value moves as one ldrd/strd, never on a packed member"
 
-# Under -g every local is pinned to a slot, which is what makes
-# DW_AT_location naming that slot true. If the skip ever fires here, the
-# debugger is told where a variable is not.
+# -g changes no code (tests/golden/g-same-code.sh), so what pins a local
+# to its slot is -Og, not -g: there each one must have its DW_OP_fbreg
+# location. At -Os a local is in its slot or described as optimized out
+# (an empty location) -- never a slot nothing writes.
 if command -v llvm-dwarfdump > /dev/null 2>&1; then
     printf 'int f(int a, int b){ int s = a + b; return s * 2; }\n' \
         > "$out/g.c"
-    "$EMBCC" --target=$T -Os -g -c "$out/g.c" -o "$out/g.o" || {
-        echo "the -g file does not compile"; exit 1; }
-    llvm-dwarfdump "$out/g.o" > "$out/g.dw" 2>&1
-    for v in a b s; do
-        grep -A3 "DW_AT_name	(\"$v\")" "$out/g.dw" |
-            grep -q 'DW_AT_location.*DW_OP_fbreg' || {
-            echo "-g: '$v' has no frame location, so the skip fired under -g"
-            exit 1; }
+    for o in -Og -Os; do
+        "$EMBCC" --target=$T $o -g -c "$out/g.c" -o "$out/g.o" || {
+            echo "the -g file does not compile at $o"; exit 1; }
+        llvm-dwarfdump "$out/g.o" > "$out/g.dw" 2>&1
+        for v in a b s; do
+            loc=$(grep -A3 "DW_AT_name	(\"$v\")" "$out/g.dw" | grep 'DW_AT_location')
+            case $o,$loc in
+            -Og,*DW_OP_fbreg*) ;;
+            -Os,*DW_OP_fbreg*|-Os,*'<empty>'*) ;;
+            *) echo "-g $o: '$v' has the location '$loc'"; exit 1 ;;
+            esac
+        done
     done
-    echo "-g pins every local to a slot, and each has a DW_OP_fbreg location"
+    echo "-Og keeps every local in its slot (DW_OP_fbreg); -Os says where, or optimized out"
 else
     echo "SKIP the -g half: no llvm-dwarfdump"
 fi

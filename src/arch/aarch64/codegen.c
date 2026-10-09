@@ -257,7 +257,9 @@ static const struct ra_target A64_RA = {
     0, /* atomic_in_reg */
     1, /* fp_reads_gpr: fld_slot, fst_slot, frd, fwrote and fmove fmov a
         * general-register home across */
-    0  /* asm_in_reg */
+    0, /* asm_in_reg */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 
@@ -608,7 +610,7 @@ struct a64_frame {
  * side of rbp. */
 
 static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
-                          int want_debug)
+                          int keep_vars)
 {
     struct func *f = fn->src;
     long *disp = xmalloc((size_t)(fn->nvregs ? fn->nvregs : 1) * sizeof *disp);
@@ -671,14 +673,14 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
      * SROA leaves exactly that behind once a split aggregate is
      * mentioned nowhere, and it would otherwise keep its full size on
      * the frame for the rest of the function. */
-    char *lref = ra_locals_referenced(fn, want_debug);
+    char *lref = ra_locals_referenced(fn, keep_vars);
     for (int v = 0; v < fn->nvars; v++) {
         /* ...and one the allocator put in a REGISTER needs none either.
          * Every read of such a local now goes through ld_slot/rd, which
          * take it from that register, so the eight bytes behind it were
          * being reserved and never touched: `add3` carried a 64-byte
          * frame for three parameters that never left x20-x22. */
-        if (!lref[v] || ra_slot_dead(fn, g_a64_loc, g_a64_floc, v, want_debug)) {
+        if (!lref[v] || ra_slot_dead(fn, g_a64_loc, g_a64_floc, v, keep_vars)) {
             disp[v] = A64_DEAD_SLOT;
             continue;
         }
@@ -760,7 +762,7 @@ static long *layout_frame(struct ir_func *fn, struct a64_frame *fr,
             if (in->op == IR_LDVAR && in->size != 16) continue;
             if (nwrite[d] != 1 || nwrite[a] != 1) continue;
             if (taken[a] || taken[d]) continue;
-            if (want_debug && d < fn->nvars) continue;   /* its DWARF home */
+            if (keep_vars && d < fn->nvars) continue;   /* its DWARF home */
             disp[d] = disp[a];
         }
         free(nwrite); free(taken);
@@ -1941,7 +1943,7 @@ static struct a64_afold a64_afold_build(struct ir_func *fn, const long *sd)
 }
 
 static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
-                     int want_debug)
+                     int keep_vars)
 {
     struct func *f = fn->src;
 
@@ -1985,7 +1987,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             (void)nfsave;
         }
     }
-    long *sd = layout_frame(fn, &fr, want_debug);
+    long *sd = layout_frame(fn, &fr, keep_vars);
     g_a64_afold = a64_afold_build(fn, sd);
     /* Room for the callee-saved registers the allocator took. Eight
      * bytes each, rounded to sixteen: AAPCS64 wants sp 16-aligned at
@@ -1997,11 +1999,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     /* -g: each source variable's slot relative to the DWARF frame base,
      * x29. The prologue leaves sp (and x19, which pins it in a function
      * with a VLA) exactly fr.size below x29, and slots are sp-relative. */
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)(sd[v] - fr.size);
+            fn->var_off[v] = sd[v] == A64_DEAD_SLOT ? IR_VAR_NO_LOC
+                           : ra_var_home(fn, v, 1, sd[v] - fr.size);
     }
 
     /* Sixteen for the fetch unit's sake, as clang does at -O2; at -Os the
@@ -2021,7 +2024,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
      * is found through x29, and not where anything could read the frame:
      * -g, a VLA, va_start, EH, asm, the frame-address builtins. */
     g_a64_cheap_teardown = fr.size == 0 && !nsave;
-    int frameless = g_a64_regalloc && !want_debug && fr.size == 0 &&
+    int frameless = g_a64_regalloc && !keep_vars && fr.size == 0 &&
                     !nsave && !fn->has_alloca && !f->is_varargs && !fn->neh;
     /* A TAIL call is not a call here: `b` leaves x30 and sp as they were
      * at entry, and the callee returns straight to our caller. A function
@@ -2029,7 +2032,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     for (int n = 0; n < fn->nins && frameless; n++) {
         const struct ir_ins *i = &fn->ins[n];
         if ((i->op == IR_CALL &&
-             !(g_a64_regalloc && !want_debug && a64_tail_ok(fn, n))) ||
+             !(g_a64_regalloc && !keep_vars && a64_tail_ok(fn, n))) ||
             i->op == IR_ASM || i->op == IR_ALLOCA ||
             i->op == IR_VA_START || i->op == IR_FRAMEADDR ||
             i->op == IR_SPSAVE || i->op == IR_SPRESTORE ||
@@ -2302,7 +2305,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         /* -g: a line-table row wherever the source line changes, exactly
          * as the x86 backend records them (t->len is where this
          * instruction's code starts). */
-        if (want_debug && i->line) {
+        if (target_debug_info() && i->line) {
             struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                               : (struct ir_line *)0;
             if (last && last->off == t->len) {
@@ -3237,7 +3240,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             if (i->retsize && i->ret_byref)
                 addr_of(t, A64_SRET, FB, fr.scratch + i->scratch);
 
-            if (g_a64_regalloc && !want_debug && a64_tail_ok(fn, n)) {
+            if (g_a64_regalloc && !keep_vars && a64_tail_ok(fn, n)) {
                 /* The epilogue's restores and frame record, then `b`. */
                 for (int k = 0; k < nsave; k++) {
                     int pair = k + 1 < nsave &&
@@ -3558,6 +3561,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
             a64_add_imm(t, A64_SP, A64_ACC, 0, 8);    /* mov sp, x9 */
             break;
         case IR_LABELADDR: {
+            if (cg_label_mark(i))       /* static data's marker: no code */
+                break;
             /* &&label. adr gives the label's RUN-TIME address directly,
              * and its ±1 MiB reach covers any function EmbCC will emit. */
             struct a64_fix fx;
@@ -3680,6 +3685,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
     free(usecnt);
     free(g_a64_afold.ok); free(g_a64_afold.disp);
     g_a64_afold.ok = NULL; g_a64_afold.disp = NULL;
+    cg_note_labels(fn, loff);
     free(loff); free(fix); free(retfix); free(sd);
 }
 
@@ -3689,7 +3695,7 @@ void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
                         struct gsite **gs, int *ngs,
-                        struct fsite **fs, int *nfs, int want_debug,
+                        struct fsite **fs, int *nfs, int keep_vars,
                         int optimize, int no_sse, int regalloc)
 {
     (void)optimize;   /* the IR arrives already optimized; this backend has
@@ -3706,7 +3712,7 @@ void codegen_unit_arm64(struct ir_unit *iu, struct code *text,
     st.f = NULL;    st.nf = st.capf = 0;
 
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func(&iu->funcs[n], text, &st, want_debug);
+        gen_func(&iu->funcs[n], text, &st, keep_vars);
 
     /* Intra-unit calls resolve here, now that every function is placed. */
     for (int n = 0; n < st.ncall; n++)

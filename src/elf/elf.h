@@ -6,8 +6,9 @@
  * is defined — this file grows with the writer, it is not a mirror of the
  * spec.
  *
- * Layouts follow the System V gABI, ELF64, little-endian (the only target,
- * TARGET_ABI.md).
+ * Layouts follow the System V gABI, as host structures: the writers lay
+ * them out little-endian, and swap every field for a big-endian target
+ * (src/elf/write.c, EmbLD's image writer).
  */
 #ifndef EMBCC_ELF_ELF_H
 #define EMBCC_ELF_ELF_H
@@ -178,6 +179,13 @@ typedef struct {
  * which a disassembler reads as <unknown> and a core without the
  * extension traps on. Bits 2:1 are the float ABI, whose 0 means SOFT. */
 #define EF_RISCV_RVC 0x0001
+/* ...and the float ABI field: which registers carry floating point across
+ * a call. SINGLE is ilp32f/lp64f (a float in fa0-fa7), DOUBLE ilp32d/lp64d
+ * (a double too). Objects of two float ABIs do not link. */
+#define EF_RISCV_FLOAT_ABI_MASK   0x0006
+#define EF_RISCV_FLOAT_ABI_SOFT   0x0000
+#define EF_RISCV_FLOAT_ABI_SINGLE 0x0002
+#define EF_RISCV_FLOAT_ABI_DOUBLE 0x0004
 /* AVR's e_flags carry the architecture in the low seven bits; avr5 is the
  * ATmega328P's (__AVR_ARCH__ 5), and 0 reads as avr0 -- a core without
  * mul, movw or the 16-bit adiw/sbiw. */
@@ -265,6 +273,14 @@ typedef struct {
 /* The exception index table's self-relative pointer: 31 bits of signed
  * offset, the top bit reserved to say what the entry holds. */
 #define R_ARM_PREL31          42
+/* ARM (A32) state, armv7a-none-eabi: `bl` and `b`/`b<c>` with a 24-bit
+ * word offset from the instruction + 8, and the movw/movt pair whose
+ * 16-bit immediate is split imm4:imm12 -- different bits from the Thumb
+ * types above, for the same four acts. */
+#define R_ARM_CALL            28
+#define R_ARM_JUMP24          29
+#define R_ARM_MOVW_ABS_NC     43
+#define R_ARM_MOVT_ABS        44
 
 /* RISC-V relocations (psABI), the ones an object from this compiler
  * needs.
@@ -326,6 +342,7 @@ typedef struct {
 #define ELFMAG3       'F'
 #define ELFCLASS64    2
 #define ELFDATA2LSB   1
+#define ELFDATA2MSB   2     /* big-endian: mips-none-elf */
 #define EV_CURRENT    1
 
 /* e_type — ET_REL until the integrated linker lands (ROADMAP M3);
@@ -357,6 +374,29 @@ typedef struct {
 /* AVR, from the ELF machine registry. */
 #define EM_AVR 83
 
+/* Renesas RX, from the ELF machine registry, and the relocation types
+ * and e_flags binutils' include/elf/rx.h defines. EmbCC writes DIR32 and
+ * DIR24S_PCREL; the 16- and 8-bit PC-relative ones are what GNU as writes
+ * for bsr.w/bra.w and bCND.b against another section's symbol. A
+ * PC-relative field is measured from the opcode, one byte before it
+ * (docs/internals/rx-plan.md). */
+#define EM_RX 173
+#define R_RX_NONE          0x00
+#define R_RX_DIR32         0x01
+#define R_RX_DIR24S        0x02
+#define R_RX_DIR16         0x03
+#define R_RX_DIR16U        0x04
+#define R_RX_DIR16S        0x05
+#define R_RX_DIR8          0x06
+#define R_RX_DIR8U         0x07
+#define R_RX_DIR8S         0x08
+#define R_RX_DIR24S_PCREL  0x09
+#define R_RX_DIR16S_PCREL  0x0a
+#define R_RX_DIR8S_PCREL   0x0b
+#define R_RX_RH_RELAX      0x2d
+#define E_FLAG_RX_64BIT_DOUBLES 0x01
+#define E_FLAG_RX_ABI           0x08
+
 /* MIPS, from the ELF machine registry: one number for every width and
  * byte order (the class and EI_DATA say which). */
 #define EM_MIPS 8
@@ -370,6 +410,7 @@ typedef struct {
 #define EF_MIPS_CPIC       0x00000004
 #define EF_MIPS_ABI_O32    0x00001000
 #define EF_MIPS_ARCH_32R2  0x70000000
+#define EF_MIPS_ARCH_64R2  0x80000000
 #define EF_MIPS_ARCH_MASK  0xf0000000
 
 /* The o32 relocation types EmbCC writes and EmbLD applies. o32 objects
@@ -390,8 +431,202 @@ typedef struct {
 #define R_MIPS_PC16     10
 #define R_MIPS_CALL16   11
 #define R_MIPS_GPREL32  12
+#define R_MIPS_64       18
+#define R_MIPS_GOT_DISP 19
+#define R_MIPS_GOT_PAGE 20
+#define R_MIPS_GOT_OFST 21
+#define R_MIPS_SUB      24
+#define R_MIPS_HIGHER   28
+#define R_MIPS_HIGHEST  29
 #define R_MIPS_JALR     37
 #define R_MIPS_PC32    248
+
+/* LoongArch, from the ELF machine registry: one number for LA32 and LA64
+ * (the class says which). */
+#define EM_LOONGARCH 258
+
+/* LoongArch e_flags, read off clang's objects: the base ABI's float
+ * flavour in bits 2:0 (1 soft, 2 single, 3 double) and the object ABI
+ * version in bits 7:6 (v1, which clang writes). */
+#define EF_LOONGARCH_ABI_SOFT_FLOAT   0x01
+#define EF_LOONGARCH_ABI_SINGLE_FLOAT 0x02
+#define EF_LOONGARCH_ABI_DOUBLE_FLOAT 0x03
+#define EF_LOONGARCH_ABI_MASK         0x07
+#define EF_LOONGARCH_OBJABI_V1        0x40
+#define EF_LOONGARCH_OBJABI_MASK      0xc0
+
+/* LoongArch relocation types (RELA), read off `llvm-readobj -r` on an
+ * object llvm-mc assembled from each operator (docs/internals/
+ * loongarch64-plan.md): the ones EmbCC writes, and the ones clang's
+ * objects carry, which EmbLD applies or refuses by name. */
+#define R_LARCH_NONE           0
+#define R_LARCH_32             1
+#define R_LARCH_64             2
+#define R_LARCH_ADD8          47
+#define R_LARCH_ADD16         48
+#define R_LARCH_ADD24         49
+#define R_LARCH_ADD32         50
+#define R_LARCH_ADD64         51
+#define R_LARCH_SUB8          52
+#define R_LARCH_SUB16         53
+#define R_LARCH_SUB24         54
+#define R_LARCH_SUB32         55
+#define R_LARCH_SUB64         56
+#define R_LARCH_B16           64
+#define R_LARCH_B21           65
+#define R_LARCH_B26           66
+#define R_LARCH_ABS_HI20      67
+#define R_LARCH_ABS_LO12      68
+#define R_LARCH_ABS64_LO20    69
+#define R_LARCH_ABS64_HI12    70
+#define R_LARCH_PCALA_HI20    71
+#define R_LARCH_PCALA_LO12    72
+#define R_LARCH_PCALA64_LO20  73
+#define R_LARCH_PCALA64_HI12  74
+#define R_LARCH_GOT_PC_HI20   75
+#define R_LARCH_GOT_PC_LO12   76
+#define R_LARCH_GOT64_PC_LO20 77
+#define R_LARCH_GOT64_PC_HI12 78
+#define R_LARCH_GOT_HI20      79
+#define R_LARCH_GOT_LO12      80
+#define R_LARCH_32_PCREL      99
+#define R_LARCH_RELAX        100
+#define R_LARCH_ALIGN        102
+#define R_LARCH_PCREL20_S2   103
+#define R_LARCH_ADD6         105
+#define R_LARCH_SUB6         106
+#define R_LARCH_ADD_ULEB128  107
+#define R_LARCH_SUB_ULEB128  108
+#define R_LARCH_64_PCREL     109
+#define R_LARCH_CALL36       110
+/* Infineon TriCore, from the ELF machine registry. */
+#define EM_TRICORE 44
+
+/* TriCore e_flags: the core architecture the code needs. The TriCore
+ * EABI's value for TriCore 1.6.1 as remembered -- there is no TriCore
+ * toolchain here to read it off (docs/internals/tricore-plan.md). */
+#define EF_TRICORE_V1_6_1   0x00200000
+#define EF_TRICORE_CORE_MASK 0xfff00000
+
+/* The TriCore relocation types EmbCC writes and EmbLD applies, numbered
+ * as the TriCore EABI's table is remembered (unverified, as above). All
+ * RELA. HIADJ is the high half of an address rounded by 0x8000, because
+ * the low half (LO for an ADDI, LO2 for a LEA, load or store) is
+ * sign-extended where it is added; 24REL is CALL's and J's halfword
+ * displacement. The rest are named so EmbLD can refuse them by name. */
+#define R_TRICORE_NONE      0
+#define R_TRICORE_32REL     1
+#define R_TRICORE_32ABS     2
+#define R_TRICORE_24REL     3
+#define R_TRICORE_24ABS     4
+#define R_TRICORE_16SM      5
+#define R_TRICORE_HIADJ     6
+#define R_TRICORE_LO        7
+#define R_TRICORE_LO2       8
+#define R_TRICORE_18ABS     9
+#define R_TRICORE_10SM     10
+#define R_TRICORE_15REL    11
+/* Xtensa, from the ELF machine registry, and the e_flags GNU as writes
+ * for the ESP32's objects (binutils include/elf/xtensa.h): the code uses
+ * the Xtensa instruction set (XT_INSN) and its literals (XT_LIT); the
+ * low nibble, the machine variant, is 0. */
+#define EM_XTENSA 94
+#define EF_XTENSA_XT_INSN  0x00000100
+#define EF_XTENSA_XT_LIT   0x00000200
+
+/* The Xtensa relocation types (RELA). EmbCC writes R_XTENSA_32 on its
+ * literal-pool words and SLOT0_OP on each call8; GNU as also puts SLOT0_OP
+ * on branches, j and l32r against a symbol in another section, and
+ * ASM_EXPAND as a relaxation hint, which a linker may ignore. The rest are
+ * named so EmbLD can refuse them by name. */
+#define R_XTENSA_NONE        0
+#define R_XTENSA_32          1
+#define R_XTENSA_RTLD        2
+#define R_XTENSA_GLOB_DAT    3
+#define R_XTENSA_JMP_SLOT    4
+#define R_XTENSA_RELATIVE    5
+#define R_XTENSA_PLT         6
+#define R_XTENSA_OP0         8
+#define R_XTENSA_OP1         9
+#define R_XTENSA_OP2        10
+#define R_XTENSA_ASM_EXPAND 11
+#define R_XTENSA_ASM_SIMPLIFY 12
+#define R_XTENSA_32_PCREL   14
+#define R_XTENSA_DIFF8      17
+#define R_XTENSA_DIFF16     18
+#define R_XTENSA_DIFF32     19
+#define R_XTENSA_SLOT0_OP   20
+#define R_XTENSA_SLOT0_ALT  35
+/* 32-bit PowerPC, from the ELF machine registry; big-endian only here.
+ * clang's powerpc-none-eabi objects carry e_flags 0. */
+#define EM_PPC 20
+
+/* The PowerPC (SVR4/EABI) relocation types: RELA, the addend in the
+ * entry. HA is the high half ADJUSTED -- ((S + A + 0x8000) >> 16) --
+ * because the low half is sign-extended where it is added; REL24 is
+ * b/bl's word displacement and REL14 bc's. The small-data and GOT types
+ * are named so EmbLD can refuse them by name. */
+#define R_PPC_NONE          0
+#define R_PPC_ADDR32        1
+#define R_PPC_ADDR24        2
+#define R_PPC_ADDR16        3
+#define R_PPC_ADDR16_LO     4
+#define R_PPC_ADDR16_HI     5
+#define R_PPC_ADDR16_HA     6
+#define R_PPC_ADDR14        7
+#define R_PPC_REL24         10
+#define R_PPC_REL14         11
+#define R_PPC_GOT16         14
+#define R_PPC_PLTREL24      18
+#define R_PPC_REL32         26
+#define R_PPC_SDAREL16      32
+#define R_PPC_EMB_SDA21     109
+/* SPARC, from the ELF machine registry (EM_SPARC32PLUS, 18, is V8+ and
+ * not this). clang's sparc-none-elf objects carry e_flags 0. */
+#define EM_SPARC 2
+
+/* The SPARC relocation types: RELA, the addend in the entry. HI22 is
+ * sethi's (S + A) >> 10 and LO10 the low ten bits an `or` or a load's
+ * offset adds back; WDISP30 is call's word displacement and WDISP22 a
+ * branch's. The GOT and PC-relative-address types are named so EmbLD can
+ * refuse them by name. */
+#define R_SPARC_NONE      0
+#define R_SPARC_8         1
+#define R_SPARC_16        2
+#define R_SPARC_32        3
+#define R_SPARC_DISP8     4
+#define R_SPARC_DISP16    5
+#define R_SPARC_DISP32    6
+#define R_SPARC_WDISP30   7
+#define R_SPARC_WDISP22   8
+#define R_SPARC_HI22      9
+#define R_SPARC_22       10
+#define R_SPARC_13       11
+#define R_SPARC_LO10     12
+#define R_SPARC_GOT10    13
+#define R_SPARC_GOT13    14
+#define R_SPARC_GOT22    15
+#define R_SPARC_PC10     16
+#define R_SPARC_PC22     17
+#define R_SPARC_WPLT30   18
+#define R_SPARC_UA32     23
+/* Motorola 68000 and ColdFire, from the ELF machine registry; big-endian.
+ * e_flags' low byte says which ColdFire ISA (binutils' include/elf/m68k.h):
+ * EmbCC's objects are ISA_A with the hardware divide. */
+#define EM_68K 4
+#define EF_M68K_CF_ISA_A 0x02
+/* The m68k relocation types: RELA, the addend in the entry. EmbCC writes
+ * R_68K_32 for every address and call; the PC-relative and the GOT/PLT
+ * forms are named so EmbLD can link or refuse them by name. */
+#define R_68K_NONE      0
+#define R_68K_32        1
+#define R_68K_16        2
+#define R_68K_8         3
+#define R_68K_PC32      4
+#define R_68K_PC16      5
+#define R_68K_PC8       6
+#define R_68K_GOT32     7
+#define R_68K_PLT32     13
 
 /* AVR relocation types. Read off llvm-mc's own output rather than a
  * table: `llvm-readobj -r` on an object assembled from call/ldi/.word
@@ -404,9 +639,34 @@ typedef struct {
 #define R_AVR_16_PM         5
 #define R_AVR_LO8_LDI       6
 #define R_AVR_HI8_LDI       7
+#define R_AVR_HH8_LDI       8
+#define R_AVR_LO8_LDI_NEG   9
+#define R_AVR_HI8_LDI_NEG   10
+#define R_AVR_HH8_LDI_NEG   11
+#define R_AVR_LO8_LDI_PM    12
+#define R_AVR_HI8_LDI_PM    13
+#define R_AVR_HH8_LDI_PM    14
+#define R_AVR_LO8_LDI_PM_NEG 15
+#define R_AVR_HI8_LDI_PM_NEG 16
+#define R_AVR_HH8_LDI_PM_NEG 17
 #define R_AVR_CALL          18
+#define R_AVR_LDI           19
+#define R_AVR_6             20
+#define R_AVR_6_ADIW        21
+#define R_AVR_MS8_LDI       22
+#define R_AVR_MS8_LDI_NEG   23
 #define R_AVR_LO8_LDI_GS    24
 #define R_AVR_HI8_LDI_GS    25
+#define R_AVR_8             26
+#define R_AVR_8_LO8         27
+#define R_AVR_8_HI8         28
+#define R_AVR_8_HLO8        29
+#define R_AVR_DIFF8         30
+#define R_AVR_DIFF16        31
+#define R_AVR_DIFF32        32
+#define R_AVR_PORT6         34
+#define R_AVR_PORT5         35
+#define R_AVR_32_PCREL      36
 
 #define SHT_PROGBITS  1
 /* ARM's build-attributes section. A processor-specific type, so it is
@@ -419,6 +679,7 @@ typedef struct {
  * bare-metal image. */
 #define SHT_MIPS_REGINFO  0x70000006
 #define SHT_MIPS_ABIFLAGS 0x7000002a
+#define SHT_MIPS_OPTIONS  0x7000000d
 #define SHT_SYMTAB    2
 #define SHT_STRTAB    3
 #define SHT_RELA      4

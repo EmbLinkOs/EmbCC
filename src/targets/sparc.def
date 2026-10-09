@@ -1,0 +1,18 @@
+/* SPARC V8: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* SPARC V8 (clang --target=sparc-none-elf -mcpu=leon3 -dM): ILP32, a
+ * SIGNED char and wchar_t, a binary128 long double -- and nothing
+ * aligned beyond 8 (__BIGGEST_ALIGNMENT__ 8: _Alignof(long double) is
+ * 8), which is the cap column's second use after AVR's 1. */
+DATA_MODEL(SPARC32, .ptr = 4, .lng = 4, .it = 4, .dbl = 8, .ldbl = 16,
+           .char_uns = 0, .wchar_uns = 0, .int128 = 0, .maxal = 8, .big_endian = 1)
+
+/* 32-bit SPARC V8, big-endian, soft float: Gaisler's LEON3. Bare
+ * metal only; `sparc-none-elf` is clang's spelling (sparc-elf the GNU
+ * target name, sparc-gaisler-elf BCC's). */
+TRIPLE("sparc-none-elf",            SPARC32,     NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("sparc-unknown-elf",         SPARC32,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("sparc-elf",                 SPARC32,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("sparc-gaisler-elf",         SPARC32,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("sparc",                     SPARC32,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)

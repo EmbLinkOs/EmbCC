@@ -399,9 +399,7 @@ char *lit_encode(const struct litch *lc, int n, int width, long *nunits,
 #define PUT(val)                                                            \
     do {                                                                    \
         unsigned long pv_ = (val);                                          \
-        for (int b_ = 0; b_ < width; b_++)                                  \
-            out[(size_t)u * (size_t)width + (size_t)b_] =                   \
-                (unsigned char)(pv_ >> (8 * b_));                           \
+        target_put_uint(out + (size_t)u * (size_t)width, width, pv_);       \
         u++;                                                                \
     } while (0)
     for (int i = 0; i < n; i++) {
@@ -457,6 +455,22 @@ long lit_char_value(struct litch c, int pfx, int *uns, const char *file,
         if (target_char_unsigned())
             return (long)b;
         return b > 0x7F ? (long)b - 0x100 : (long)b;
+    }
+    if (pfx == '8') {
+        /* u8'c': a single UTF-8 code unit, so U+0000..U+007F */
+        if (!c.raw && c.v > 0x7F)
+            diag_fatal(file, line, "U+%04lX needs more than one UTF-8 code "
+                       "unit and cannot be one u8'' constant", c.v);
+        *uns = 1;
+        return (long)(c.v & 0xFF);
+    }
+    if (pfx == 'L' && target_wchar_size() == 2 && target_wchar_unsigned()) {
+        /* a 16-bit unsigned wchar_t (Xtensa): the low 16 bits, as GCC */
+        if (c.v > 0xFFFF)
+            fprintf(stderr, "embcc: %s:%d: warning: character constant out "
+                    "of range for a 16-bit wchar_t; truncated, as gcc "
+                    "does\n", file, line);
+        return (long)(c.v & 0xFFFF);          /* wchar_t promotes to int */
     }
     if (pfx == 'u') {
         if (!c.raw && c.v > 0xFFFF)
@@ -735,8 +749,10 @@ void lex_next(struct lexer *lx)
             /* U"" is UTF-32. L"" is wchar_t, which is int-sized: two
              * bytes on AVR, where four-byte elements made p[1] of an
              * L"xyz" read the high half of 'x'. */
-            w = q[0] == 'L' ? target_int_size() : 4; adv = 1;
-        } else if (q[0] == 'u' && q[1] == '8' && q[2] == '"') {
+            w = q[0] == 'L' ? target_wchar_size() : 4; adv = 1;
+        } else if (q[0] == 'u' && q[1] == '8' && (q[2] == '"' ||
+                   (q[2] == '\'' && lx->cxx))) {
+            /* u8'c' is C++17's (char8_t from C++20): one UTF-8 code unit */
             w = 1; adv = 2;
         } else if (q[0] == 'u' && (q[1] == '"' || q[1] == '\'')) {
             w = 2; adv = 1;

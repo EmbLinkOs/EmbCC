@@ -11,6 +11,7 @@
 #include "../backend.h"
 #include "emit.h"
 #include "../regalloc.h"
+#include "../predef.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,10 +20,11 @@
 #include "../../driver/remark.h"
 #include "../../driver/util.h"
 
-/* -g: when set, DWARF wants each source variable at a distinct stack location,
- * so local-slot coalescing is disabled. Defined here (used by coalesce_locals);
- * codegen_unit sets it from want_debug. Also read by the line-table pass. */
-static int g_want_debug;
+/* -O0 and -Og (target_keep_vars): every source variable has a stack
+ * location of its own, where a debugger reads it, so local-slot
+ * coalescing is off. Never because of -g, which changes no code.
+ * Defined here (used by coalesce_locals); codegen_unit sets it. */
+static int g_keep_vars;
 
 /* K13 — temporary stack-slot coalescing. At -O0 every temp (vreg >= nvars)
  * otherwise gets its own 8-byte slot, never reused, so a deep call chain's
@@ -396,7 +398,9 @@ static const struct ra_target X86_RA = {
         * values where they live, and loads only one left in a slot
         * (x86_atomic_addr, x86_atomic_val, cg_load) */
     0, /* fp_reads_gpr */
-    0  /* asm_in_reg: a template may name a callee-saved register */
+    0, /* asm_in_reg: a template may name a callee-saved register */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 /* ---- long double: 16-byte values and the x87 unit ----
@@ -512,7 +516,8 @@ void cg_resolve_strsites(struct ir_unit *iu, struct strsite *s, int n)
          * an offset -- a jump too far for AVR's 12-bit rjmp, relocated
          * against the section symbol. Everything else here is a string index
          * into the unit's pool. */
-        if (s[k].kind == RK_AVR_TEXT_CALL || s[k].kind == RK_MIPS_TEXT26)
+        if (s[k].kind == RK_AVR_TEXT_CALL || s[k].kind == RK_MIPS_TEXT26 ||
+            s[k].kind == RK_XTENSA_TEXT32)
             continue;
         s[k].str_off = iu->strs[s[k].str_off].off;
     }
@@ -536,6 +541,28 @@ int cg_call_local(const struct func *caller, const struct func *callee)
     const char *a = caller && caller->section ? caller->section : "";
     const char *b = callee->section ? callee->section : "";
     return strcmp(a, b) == 0;
+}
+
+int cg_label_mark(const struct ir_ins *i)
+{
+    return i->op == IR_LABELADDR && i->vol;
+}
+
+void cg_note_labels(struct ir_func *fn, const int *label_off)
+{
+    struct func *f = fn->src;
+    if (!f || !f->label_pos)
+        return;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (!cg_label_mark(i) || i->imm < 0 || i->imm >= f->nlabel_pos)
+            continue;
+        if (i->label < 0 || i->label >= fn->nlabels || label_off[i->label] < 0)
+            internal_error("%s: a label static data takes the address of "
+                           "was never placed", fn->name);
+        f->label_pos[i->imm] =
+            (long)label_off[i->label] - (f->code_off + f->code_entry);
+    }
 }
 
 /* Can this load, store, ldvar or stvar move its value as a float or a
@@ -657,6 +684,19 @@ static char *float_vregs(struct ir_func *fn, int by_cost)
 #define BAD(v) do { int _v=(v); if (_v>=0 && _v<nv) bad[_v]=1; } while (0)
 #define SOFT(v) do { int _v=(v); if (_v>=0 && _v<nv) { \
                      if (soft) soft[_v]++; else bad[_v]=1; } } while (0)
+    /* A parameter arrives where its TYPE puts it: an integer one in a
+     * general register, whatever its later uses. `double bits(long x) {
+     * union { long l; double d; } u; u.l = x; return u.d; }` folds to
+     * returning x as a double, which marked x float -- and an integer
+     * parameter in the float class had no home the prologue could fill:
+     * an internal error at -O1. In the integer class its float uses
+     * move it with movq (x86_fld). */
+    if (fn->src)
+        for (int p = 0; p < fn->nparams && p < nv; p++) {
+            const struct type *pt = fn->src->param_tys[p];
+            if (pt && !ty_is_float(pt))
+                BAD(p);
+        }
     for (int n = 0; n < fn->nins; n++) {
         struct ir_ins *i = &fn->ins[n];
         if (i->flt) {
@@ -846,7 +886,7 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
 {
     int n = fn->nvars;
     int *slot = xmalloc((size_t)(n ? n : 1) * sizeof *slot);
-    if (n == 0 || g_want_debug || g_has_cgoto || !fn->var_scope_lo) {
+    if (n == 0 || g_keep_vars || g_has_cgoto || !fn->var_scope_lo) {
         for (int i = 0; i < n; i++) slot[i] = i;   /* one slot each */
         *nslots_out = n;
         return slot;
@@ -930,12 +970,12 @@ static int *coalesce_locals(struct ir_func *fn, int *nslots_out)
  * length of the call -- gcc and clang use it as the parameter's home, and
  * so does this: the prologue used to copy it into the frame eight bytes
  * at a time, 168 bytes for every EmbLinkOs widget call's EmProps. Not
- * under -g, where its DWARF home is a frame offset, nor on Win64, which
+ * at -O0 and -Og, where its DWARF home is a frame offset, nor on Win64, which
  * passes such an aggregate by reference. */
 static int x86_param_home_incoming(const struct func *f, int p)
 {
     enum arg_class cls[2];
-    if (target_win64_abi() || g_want_debug || !f ||
+    if (target_win64_abi() || g_keep_vars || !f ||
         p < 0 || p >= f->nparams || !f->param_tys[p])
         return 0;
     return f->param_tys[p]->kind == TY_STRUCT &&
@@ -965,7 +1005,7 @@ static int *x86_inplace_locals(struct ir_func *fn)
 {
     struct func *f = fn->src;
     int nv = fn->nvregs, nvars = fn->nvars;
-    if (!g_regalloc || g_want_debug || fn->has_alloca || target_win64_abi() ||
+    if (!g_regalloc || g_keep_vars || fn->has_alloca || target_win64_abi() ||
         !f || nvars == 0 || nv == 0)
         return NULL;
     int *res = NULL;
@@ -1124,12 +1164,12 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
      * could live in a register: the other half of slot_dead's question,
      * and what SROA leaves behind once a split aggregate is mentioned
      * nowhere (regalloc.h). */
-    char *lref = ra_locals_referenced(fn, g_want_debug);
+    char *lref = ra_locals_referenced(fn, g_keep_vars);
     int *ssize = xcalloc((size_t)(nls ? nls : 1), sizeof *ssize);
     int *salign = xcalloc((size_t)(nls ? nls : 1), sizeof *salign);
     for (int i = 0; i < fn->nvars; i++) {
         int s = lslot[i];
-        if (!lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_want_debug))
+        if (!lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_keep_vars))
             continue;               /* in a register, or named nowhere at all */
         if (inplace && inplace[i] >= 0)
             continue;               /* in the outgoing area: placed below */
@@ -1168,7 +1208,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
         soff[s] = -running;
     }
     for (int i = 0; i < fn->nvars; i++)
-        disp[i] = !lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_want_debug) ? DEAD_SLOT_OFF
+        disp[i] = !lref[i] || ra_slot_dead(fn, loc, g_floc, i, g_keep_vars) ? DEAD_SLOT_OFF
                                                     : soff[lslot[i]];
     /* A value with an FP home has no slot either, and saying so out loud
      * is how the paths that do not know about the class get found. */
@@ -1252,7 +1292,7 @@ static int *layout_frame(struct ir_func *fn, int *frame_out,
                     shared = b != a && disp[b] == disp[a];
                 if (shared) continue;
             }
-            if (g_want_debug && d < fn->nvars) continue;  /* its DWARF home */
+            if (g_keep_vars && d < fn->nvars) continue;  /* its DWARF home */
             disp[d] = disp[a];
         }
         free(nwrite); free(taken);
@@ -1395,7 +1435,7 @@ static int br_short(void)
     return g_short && ord < g_nshort && g_short[ord];
 }
 
-/* g_want_debug (the -g flag) is declared near the top of the file — it is read
+/* g_keep_vars (-O0 and -Og) is declared near the top of the file — it is read
  * by coalesce_locals, which appears before this point. */
 
 /* -mno-sse: never emit an SSE/xmm instruction. A kernel built before it turns
@@ -2037,10 +2077,20 @@ static void x86_param_copy(struct code *text, int dst, int base, int off,
 /* The floating-point pair of cg_load/cg_store. An xmm home and a stack
  * slot are the same value and only one of them is current, so every site
  * that touches a float vreg's slot goes through these. */
+/* A float may live in a GENERAL register: a union pun (`u.l = x; return
+ * u.d;`) is folded to the integer itself, which the allocator gave an
+ * integer home. Its bits move with movq/movd -- through its slot they
+ * would be stale, and a frameless function has no slot to read: `double
+ * bits(long x)` at -O1 was an internal error ("a frame access in a
+ * function that has no frame pointer"). */
 static void x86_fld(struct code *text, const int *sd, int v, int xmm, int w)
 {
     if (in_freg(v)) {
         if (g_floc[v] != xmm) x86_movs_reg(text, xmm, g_floc[v]);
+        return;
+    }
+    if (in_reg(v)) {
+        x86_movq_xmm_gpr(text, xmm, g_loc[v], w);
         return;
     }
     x86_movs_load(text, xmm, sd[v], w);
@@ -2052,6 +2102,10 @@ static void x86_fst(struct code *text, const int *sd, int v, int xmm, int w)
         if (g_floc[v] != xmm) x86_movs_reg(text, g_floc[v], xmm);
         return;
     }
+    if (in_reg(v)) {
+        x86_movq_gpr_xmm(text, g_loc[v], xmm, w);
+        return;
+    }
     x86_movs_store(text, xmm, sd[v], w);
 }
 
@@ -2061,6 +2115,10 @@ static void x86_fst(struct code *text, const int *sd, int v, int xmm, int w)
 static int x86_frd(struct code *text, const int *sd, int v, int scratch, int w)
 {
     if (in_freg(v)) return g_floc[v];
+    if (in_reg(v)) {
+        x86_movq_xmm_gpr(text, scratch, g_loc[v], w);
+        return scratch;
+    }
     x86_movs_load(text, scratch, sd[v], w);
     return scratch;
 }
@@ -3072,11 +3130,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
     /* -g: expose each source variable's frame slot (rbp-relative) so the
      * DWARF emitter can write DW_OP_fbreg. sd is indexed by vreg; params and
      * locals are vregs [0, nvars), which is what dbgvars reference. */
-    if (g_want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = sd[v];
+            fn->var_off[v] = sd[v] == DEAD_SLOT_OFF ? IR_VAR_NO_LOC
+                           : ra_var_home(fn, v, 1, sd[v]);
     }
 
     /* ---- can this function do without a frame entirely? ----------------
@@ -3099,7 +3158,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * registers: four or fewer, each an ordinary integer or pointer.
      * That is the SysV and the Win64 rule at once. */
     int frameless = g_regalloc && frame == 0 && nsave == 0 &&
-                    !fn->has_alloca && !f->is_varargs && !g_want_debug &&
+                    !fn->has_alloca && !f->is_varargs && !g_keep_vars &&
                     sret_slot == 0 && f->nparams <= 4;
     /* A SIBLING call is not a call here: it leaves rsp exactly as it
      * found it and jumps, and the callee sees the stack our caller
@@ -3149,7 +3208,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
     g_pushonly = g_pad = 0;
     x86_no_rbp = 0;              /* the prologue below may use rbp */
     if (!frameless && g_regalloc && !fn->has_alloca && !f->is_varargs &&
-        !g_want_debug && sret_slot == 0 && f->nparams <= 4 && !fn->neh &&
+        !g_keep_vars && sret_slot == 0 && f->nparams <= 4 && !fn->neh &&
         !target_win64_abi() && target_fmt_get() == TGT_FMT_ELF &&
         fn->scratch_bytes == 0 && fn->outgoing_bytes == 0) {
         int calls = 0;
@@ -3188,11 +3247,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
     }
 
     /* Sixteen at -O2, as clang does; none at -Os, as clang does there --
-     * a one-byte function was followed by fifteen nops. */
-    if (!target_opt_size())
-        code_align(text, 16, 0x90);
+     * a one-byte function was followed by fifteen nops. But two in C++:
+     * the Itanium ABI's pointer to member function says "virtual" with
+     * the low bit of its function address, so a member function at an odd
+     * address was called through its vtable instead (clang aligns member
+     * functions to 2 for this; every function of a C++ unit is, here). */
+    int falign = !target_opt_size() ? 16 : predef_is_cxx() ? 2 : 1;
+    if (falign > 1)
+        code_align(text, falign, 0x90);
     f->code_off = text->len;
-    f->code_align = target_opt_size() ? 1 : 16;
+    f->code_align = falign;
 
     /* The frame record, then the callee-saved registers, then the rest
      * of the frame. They go out as PUSHES: the save area is the top of
@@ -3280,7 +3344,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
      * via one parallel move — no home-slot store + reload. Debug builds keep the
      * slots (DWARF fbreg reads them); variadic keeps the current handling (the
      * arg registers are already spilled to the save area). */
-    int pmove = g_regalloc && g_loc && !g_want_debug && !f->is_varargs;
+    int pmove = g_regalloc && g_loc && !g_keep_vars && !f->is_varargs;
     int pmv_src[MAX_PARAMS], pmv_dst[MAX_PARAMS], npmv = 0;
     /* A STACK-passed parameter whose home is a register is loaded after
      * the shuffle below, not during the loop that collects it.
@@ -3623,7 +3687,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
          * offset this instruction's code begins at (the switch below emits
          * it). Multiple IR ops from one statement share a line and collapse
          * to a single row; ops with no line (0) inherit the last row. */
-        if (g_want_debug && i->line) {
+        if (target_debug_info() && i->line) {
             struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                               : (struct ir_line *)0;
             if (last && last->off == text->len) {
@@ -5086,6 +5150,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
             break;
         }
         case IR_LABELADDR: {
+            if (cg_label_mark(i))       /* static data's marker: no code */
+                break;
             /* dst = &&label: `lea rax,[rip+disp32]`, the disp32 patched to the
              * label's code offset via the SAME list and formula as a rel32
              * branch (target - (patch_off + 4)). */
@@ -5440,6 +5506,9 @@ static void gen_func(struct ir_func *fn, struct code *text,
                          * since an xmm-homed value has no slot to read */
                         if (i->call_varargs)
                             x86_movq_gpr_xmm(text, x86_argreg(ireg), ireg, 8);
+                    } else if (in_freg(a->vreg)) {
+                        x86_movq_gpr_xmm(text, x86_argreg(ireg),
+                                         g_floc[a->vreg], a->size == 8 ? 8 : 4);
                     } else if (!in_reg(a->vreg)) {
                         x86_load_arg(text, ireg, sd[a->vreg]);
                     }
@@ -5482,6 +5551,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     }
                 } else if (in_reg(a->vreg))
                     ireg++;              /* already placed by the parallel move */
+                else if (in_freg(a->vreg))
+                    /* An integer argument whose value lives in an xmm
+                     * register: its other uses are floating point, and a
+                     * call's integer argument is only a SOFT vote against
+                     * that (float_vregs) -- the merged `const 0` that is
+                     * both a char argument and the 0.0f of a subtraction.
+                     * It has no slot; its bits go across with movq/movd
+                     * (fuzz seeds 7306 and 7581). */
+                    x86_movq_gpr_xmm(text, x86_argreg(ireg++),
+                                     g_floc[a->vreg], a->size == 8 ? 8 : 4);
                 else
                     x86_load_arg(text, ireg++, sd[a->vreg]);
             }
@@ -5800,6 +5879,12 @@ static void gen_func(struct ir_func *fn, struct code *text,
             x86_mov_reg_reg(text, REG_RAX, REG_RDX);
             cg_store(text, sd, i->b, 8);
             break;
+        case IR_MULH: case IR_MULW:
+            /* the 32-bit machines' widening multiply: a 64-bit target
+             * multiplies the extended values (target_has_mulh) */
+            internal_error("a 32-bit widening multiply reached the x86-64 "
+                           "code generator");
+            break;
         case IR_OPCOUNT:                 /* not an opcode (ir.h) */
             internal_error("IR_OPCOUNT reached code generation");
         }
@@ -5885,6 +5970,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                      (unsigned long)(unsigned int)(int)rel);
     }
     free(brs);
+    cg_note_labels(fn, label_off);
     free(label_off);
     afold_free(&g_afold);
     g_afold.ok = NULL; g_afold.disp = NULL;
@@ -5907,11 +5993,11 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
                   struct extcall **ext, int *next,
                   struct strsite **strs, int *nstrs,
                   struct gsite **gs, int *ngs,
-                  struct fsite **fs, int *nfs, int want_debug, int optimize,
+                  struct fsite **fs, int *nfs, int keep_vars, int optimize,
                   int no_sse, int regalloc)
 {
     struct sites st = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    g_want_debug = want_debug;
+    g_keep_vars = keep_vars;
     /* -O2 turns on register allocation; the RAX residency cache runs alongside
      * it (keyed on vreg, so it also elides reloads of register-resident values —
      * the store-then-reload round-trips). -O0/-O1 are unchanged (regalloc off),

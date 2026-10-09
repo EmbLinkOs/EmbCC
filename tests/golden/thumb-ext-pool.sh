@@ -108,3 +108,31 @@ for opt in -O1 -O2 -Os; do
     agree float-ref float$opt
 done
 echo "stress, int64, cmp64, float with r9-r11 allocatable: agree at -O1, -O2, -Os"
+
+# Exec programs whose shapes put the roles under pressure, built with the
+# r9-r11 attempt forced: there the roles also come from free LOW registers
+# for an instruction whose lowering names none (a call, whose struct
+# argument is read through a role while r0-r3 are loaded, must not get
+# one), and r12 breaks a parallel move's cycles. Each returns 42.
+cat > "$out/drv.c" <<'EOT'
+int prog_main(void);
+extern void puts_(const char *s);
+extern void putn(long v);
+int main(void) { putn(prog_main()); puts_("\n==END==\n"); return 0; }
+EOT
+"$EMBCC" --target=$T -O1 -c "$out/drv.c" -o "$out/drv.o" || {
+    echo "FAIL: the driver does not compile"; exit 1; }
+n=0
+for p in pressure-roles struct-arg-inplace size-shapes lit64-pool fp-branch-nan; do
+    for opt in -O2 -Os; do
+        EMBCC_T_EXT=1 "$EMBCC" --target=$T $opt -Dmain=prog_main \
+            -c tests/exec/$p.c -o "$out/x-$p$opt.o" || {
+            echo "FAIL: $p at $opt does not compile"; exit 1; }
+        run x-$p$opt "$out/x-$p$opt.o" "$out/drv.o" "$out/softfp.o" "$out/int64.o"
+        grep -q '^42[^0-9]*$' "$out/x-$p$opt.txt" || {
+            echo "FAIL: $p at $opt with r9-r11 allocatable:"; head -3 "$out/x-$p$opt.txt"; exit 1; }
+        n=$((n + 1))
+    done
+done
+echo "$n exec programs with r9-r11 allocatable return 42"
+

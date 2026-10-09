@@ -678,3 +678,20 @@ long ldf_to_long(const struct ldf *a)
     }
     return a->neg ? -(long)mag : (long)mag;
 }
+
+int ldf_encode_target(const struct ldf *a, enum ldf_fmt fmt,
+                      unsigned char *out)
+{
+    int n = fmt == LDF_FLOAT ? 4 : fmt == LDF_DOUBLE ? 8 : 16;
+    ldf_encode(a, fmt, out);
+    if (target_big_endian()) {
+        if (fmt == LDF_X87)
+            internal_error("an x87 long double on a big-endian target");
+        for (int k = 0; k < n / 2; k++) {
+            unsigned char c = out[k];
+            out[k] = out[n - 1 - k];
+            out[n - 1 - k] = c;
+        }
+    }
+    return n;
+}

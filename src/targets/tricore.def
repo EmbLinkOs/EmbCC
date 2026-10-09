@@ -1,0 +1,18 @@
+/* TriCore: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* The TriCore EABI as remembered (unverified; no TriCore compiler
+ * here): ILP32, a SIGNED char, a signed int wchar_t, long double the
+ * same 8-byte double, no __int128 -- and nothing aligned beyond a
+ * word, since a TriCore doubleword access needs only that: long long
+ * and double are 4-aligned (maxal 4). */
+DATA_MODEL(TRICORE, .ptr = 4, .lng = 4, .it = 4, .dbl = 8, .ldbl = 8,
+           .char_uns = 0, .wchar_uns = 0, .int128 = 0, .maxal = 4)
+
+/* Infineon TriCore 1.6.1 (AURIX TC2xx, and the subset of TC3xx's
+ * 1.6.2 it shares), little-endian, soft float. `tricore-elf` is the
+ * GNU spelling HighTec's toolchain uses. */
+TRIPLE("tricore-none-elf",          TRICORE,     NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("tricore-elf",               TRICORE,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("tricore-unknown-elf",       TRICORE,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("tricore",                   TRICORE,     NONE,    ELF,   ALIAS,     BASE,         PLAIN)

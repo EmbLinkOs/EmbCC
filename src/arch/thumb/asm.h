@@ -65,14 +65,40 @@ int tasm_symform(const char *stmt, struct asm_symform *f);
  * hand the SAME lines to llvm-mc and compare. Generated from the tables
  * themselves: an entry added here cannot escape the referee. */
 void tasm_vocabulary(FILE *f);
+/* ... and its data directives alone (.byte, .short, .word, .quad and the
+ * other spellings), which every level takes: what tests/golden/thumb-asm.sh
+ * also assembles for ARMv6-M and ARMv8-M Baseline */
+void tasm_vocabulary_data(FILE *f);
+/* ARMv8-M's: Mainline's additions to the above (base 0), or every 32-bit
+ * instruction ARMv8-M Baseline has (base 1). */
+void tasm_vocabulary_v8m(FILE *f, int base);
 
 /* Branch relaxation for the file assembler: force the wide form for the
  * next statement, and ask whether a branch went wide on its own. */
 void tasm_set_wide(int wide);
 int tasm_took_wide(void);
 
-/* The architecture level the next statements are for: 7 (ARMv7-M) or 8
- * (ARMv8-M Mainline), which adds the stack-limit registers. */
+/* The architecture level the next statements are for: 6 (ARMv6-M), 7
+ * (ARMv7-M), 8 (ARMv8-M Mainline) or TASM_V8M_BASE. ARMv8-M adds the
+ * stack-limit registers, the security extension and the acquire/release
+ * forms; at the two Thumb-1 levels every 32-bit encoding a statement makes
+ * is checked against what the core has. */
 void tasm_set_arch(int level);
+/* tasm_set_arch's value for ARMv8-M Baseline: the Thumb-1 level (6) with
+ * Baseline's 32-bit instructions and the security extension. */
+#define TASM_V8M_BASE 9
+/* Whether the core has the DSP extension (ARMv7E-M; ARMv8-M Mainline
+ * with it): sadd16, smlad, pkhbt and the rest are refused without it, as
+ * llvm-mc refuses them. Off until a caller says otherwise. */
+void tasm_set_dsp(int on);
+/* The DSP extension's instructions, ssat/usat and the extends, across the
+ * registers and immediates each field takes, for the referee
+ * (tests/golden/thumb-dsp.sh): one line each. */
+void tasm_vocabulary_dsp(FILE *f);
+/* The multiplies, rev16/revsh, rrx, the bit fields and ldrd/strd (and in
+ * ARM state the doubleword exclusives), the same way, for
+ * tests/golden/arm-asm-more.sh. Both vocabularies are ARM state's when
+ * t_isa_a32 is set. */
+void tasm_vocabulary_more(FILE *f);
 
 #endif

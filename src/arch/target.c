@@ -22,18 +22,69 @@ static int g_thumb_em;      /* --target=thumbv7em-*: see target_thumb_em */
  * a superset), the predefined macros, and two .ARM.attributes tags. A
  * second enum value would duplicate a data model to express none of that. */
 static int g_thumb_arch = 7;
+/* ARMv8-M Baseline (Cortex-M23): level 6 -- the ARMv6-M instruction
+ * selection, v6m.c, and everything else level 6 means (no FPU, no IT, an
+ * unaligned access faults) -- with what Baseline adds on top: the
+ * divides, the exclusives, MOVW/MOVT, CBZ and B.W, and the security
+ * extension. A flag beside the level rather than a level of its own,
+ * because nearly every question asked of level 6 has the same answer
+ * here; the few that differ ask target_thumb_v8m_base(). */
+static int g_thumb_v8b;
+/* -mcmse: the Secure-side build of ARMv8-M's security extension. */
+static int g_thumb_cmse;
 static int g_thumb_fpu;     /* see target_thumb_fpu */
 static int g_thumb_fpu_dp;  /* see target_thumb_fpu_dp */
 static int g_thumb_hard;    /* see target_thumb_hard_abi */
 static int g_thumb_hf_name; /* the triple asked for was an -eabihf one */
+/* RISC-V's -march= and -mabi= (target_riscv_flen and the rest): the C
+ * extension on and no FPU by default, rv32imac/ilp32 and rv64imac/lp64. */
+static int g_rv_c = 1, g_rv_f, g_rv_d, g_rv_zifencei, g_rv_abi_flen;
+/* ARMv7-A in ARM state (armv7a-none-eabi): the same AAPCS32 and data model
+ * as the Cortex-M levels -- which is why it is this target and not a new
+ * enum value -- with the A32 instruction set. See target_arm_a32. */
+static int g_arm_a32;
+/* ...and its floating-point unit, when -mfpu= names one: 3 or 4 for VFPv3
+ * or VFPv4, `d32` for the 32-register file (the D16 units have 16). Only
+ * read when target_thumb_fpu() says the code uses an FPU. */
+static int g_arm_vfp = 3, g_arm_vfp_d32;
 static enum target_os   g_os   = TGT_OS_NONE;
 static enum target_fmt  g_fmt  = TGT_FMT_ELF;
+/* The target's byte order: 1 for big-endian (mips-none-elf), 0 for every
+ * other target. Set with the triple, and by -EB/-EL on MIPS. */
+static int g_big_endian;
+
+int target_big_endian(void) { return g_big_endian; }
+void target_set_big_endian(int on) { g_big_endian = on ? 1 : 0; }
+
+void target_put_uint(unsigned char *p, int n, unsigned long long v)
+{
+    for (int b = 0; b < n; b++)
+        p[g_big_endian ? n - 1 - b : b] = (unsigned char)(v >> (8 * b));
+}
+
+unsigned long long target_get_uint(const unsigned char *p, int n)
+{
+    unsigned long long v = 0;
+    for (int b = 0; b < n; b++)
+        v |= (unsigned long long)p[g_big_endian ? n - 1 - b : b] << (8 * b);
+    return v;
+}
+
+int target_byte_shift(int off, int size, int whole)
+{
+    return 8 * (g_big_endian ? whole - off - size : off);
+}
 
 enum target_arch target_get(void) { return g_arch; }
 void target_set(enum target_arch a) { g_arch = a; }
 
 static int g_opt_size;
 void target_set_opt_size(int on) { g_opt_size = on; }
+static int g_keep_vars, g_debug_info;
+void target_set_keep_vars(int on) { g_keep_vars = on ? 1 : 0; }
+int  target_keep_vars(void)       { return g_keep_vars; }
+void target_set_debug_info(int on) { g_debug_info = on ? 1 : 0; }
+int  target_debug_info(void)       { return g_debug_info; }
 int  target_opt_size(void)       { return g_opt_size; }
 
 const char *target_default_name(void)
@@ -72,6 +123,11 @@ int target_insn_len(const unsigned char *p, int avail)
         return 0;                               /* 48-bit and wider: unused */
 
     case TARGET_THUMB: {
+        /* ARM state (armv7a): one word, always -- grouped by the Thumb
+         * rule below, -S put each relocation two bytes into the
+         * instruction before its own. */
+        if (g_arm_a32)
+            return avail >= 4 ? 4 : 0;
         /* Thumb-2: a first halfword whose top five bits are 0b11101,
          * 0b11110 or 0b11111 introduces a 32-bit instruction; everything
          * else is one halfword (ARMv7-M ARM, A5.1). */
@@ -97,8 +153,41 @@ int target_insn_len(const unsigned char *p, int avail)
     }
 
     case TARGET_MIPS32:
-        /* MIPS32 is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
+    case TARGET_MIPS64:
+        /* MIPS is fixed 32-bit; microMIPS and MIPS16e are not emitted. */
         return avail >= 4 ? 4 : 0;
+
+    case TARGET_LOONGARCH64:
+        /* LoongArch is fixed 32-bit, with no compressed forms at all. */
+        return avail >= 4 ? 4 : 0;
+    case TARGET_TRICORE:
+        /* Bit 0 of the first byte: set for a 32-bit instruction, clear
+         * for a 16-bit one (TriCore 1.6 architecture manual, vol. 2). */
+        if (p[0] & 1)
+            return avail >= 4 ? 4 : 0;
+        return avail >= 2 ? 2 : 0;
+    case TARGET_XTENSA: {
+        /* Three bytes, or two for a density instruction: op0 (the low
+         * nibble of the first byte) 8..13. EmbCC emits only the
+         * three-byte forms, and a literal pool's words are data. */
+        int n = (p[0] & 15) >= 8 && (p[0] & 15) <= 13 ? 2 : 3;
+        return avail >= n ? n : 0;
+    }
+    case TARGET_PPC32:
+        /* Book E PowerPC is fixed 32-bit; VLE is refused, not emitted. */
+        return avail >= 4 ? 4 : 0;
+    case TARGET_RX:
+        /* One to eight bytes, and no rule short of decoding: as x86. */
+        return 0;
+    case TARGET_SPARC32:
+        /* SPARC V8 is fixed 32-bit. */
+        return avail >= 4 ? 4 : 0;
+    case TARGET_COLDFIRE:
+        /* One to five 16-bit words, decided by the operation word and its
+         * effective addresses. -S groups the stream by word: its bytes are
+         * written as data either way, and there is no m68k assembler here
+         * to read the text back. */
+        return avail >= 2 ? 2 : 0;
 
     case TARGET_X86_64:
     default:
@@ -133,8 +222,9 @@ void target_os_set(enum target_os o)   { g_os = o; }
 void target_fmt_set(enum target_fmt f) { g_fmt = f; }
 
 /* The data model. One table rather than a switch per question, so a
- * new architecture is one row and the compiler will not build until
- * every column of it is filled in. */
+ * new architecture is one row -- its DATA_MODEL in the target database,
+ * src/targets/<family>.def, where each row says where its numbers were
+ * read from. */
 static const struct data_model {
     /* `dbl` is here because AVR's `double` is FOUR bytes -- avr-gcc's
      * documented default, and confirmed against clang --target=avr. Every
@@ -154,54 +244,25 @@ static const struct data_model {
      * `struct { char c; int i; }` was four bytes on AVR where avr-gcc makes
      * it three: a struct shared with avr-gcc-built code, laid over a
      * register block or sent down a wire came out a different shape. */
+    /* `big_endian` is the byte order of an architecture that has only
+     * one; MIPS, which has both, takes it from the triple (BE). */
     int ptr, lng, it, dbl, ldbl, char_uns, wchar_uns, int128, maxal;
+    int big_endian;
 } g_model[] = {
-    /* x86-64 System V: LP64, signed char, x87 long double in 16 bytes */
-    [TARGET_X86_64]  = { 8, 8, 4, 8, 16, 0, 0, 1, 0 },
-    /* AAPCS64: LP64, UNSIGNED char and wchar_t, binary128 long double */
-    [TARGET_AARCH64] = { 8, 8, 4, 8, 16, 1, 1, 1, 0 },
-    /* AAPCS (32-bit, EABI): ILP32, unsigned char and wchar_t, and a
-     * long double that is an ordinary IEEE double -- checked against
-     * clang -target thumbv7m-none-eabi -dM, which gives
-     * __SIZEOF_LONG_DOUBLE__ 8 and __LDBL_MANT_DIG__ 53. long long
-     * stays 8, and is 8-ALIGNED, which is where a 32-bit ABI most
-     * often surprises: __BIGGEST_ALIGNMENT__ is 8, not 4. */
-    [TARGET_THUMB]   = { 4, 4, 4, 8, 8, 1, 1, 0, 0 },
-    /* The RISC-V psABI. Unsigned char like the ARM ones, but a SIGNED
-     * wchar_t -- which is why those are two columns and not one -- and
-     * a binary128 long double at both widths. Read off
-     * `clang -target riscv{32,64}-unknown-elf -dM`. */
-    [TARGET_RISCV32] = { 4, 4, 4, 8, 16, 1, 0, 0, 0 },
-    [TARGET_RISCV64] = { 8, 8, 4, 8, 16, 1, 0, 1, 0 },
-    /* AVR (avr-gcc's ABI, measured against clang --target=avr
-     * -mmcu=atmega328p): 16-bit pointers -- the first target here where
-     * a pointer is NARROWER than a long -- a four-byte double, and no
-     * __int128 on an 8-bit machine.
-     *
-     * `char` is SIGNED here, which is what clang --target=avr does and
-     * what the generated predefined-macro table therefore says. It is
-     * very likely NOT what avr-gcc does -- avr-gcc is documented as
-     * defaulting to -funsigned-char -- but there is no avr-gcc on this
-     * machine to check, and the alternative was to set the model from
-     * recollection and hand-edit a GENERATED table to agree with it.
-     *
-     * So: the compiler is self-consistent, every part of it verifiable
-     * against something real, and the open question is written down
-     * rather than guessed. Settling it needs a real avr-gcc, and it
-     * matters before the kernel is built: char's default signedness
-     * changes what `char c = 200; c > 0` answers, though not the ABI.
-     *
-     * `long double` is four bytes too: the same type as double, which is
-     * the same type as float. There is no wider floating point on this
-     * machine. */
-    [TARGET_AVR]     = { 2, 4, 2, 4,  4, 0, 0, 0, 1 },
-    /* o32 (clang --target=mipsel-unknown-elf -dM): ILP32, a SIGNED char
-     * -- unlike the ARM and RISC-V targets beside it -- a signed int
-     * wchar_t, long double the same 8-byte double, and no __int128. */
-    [TARGET_MIPS32]  = { 4, 4, 4, 8,  8, 0, 0, 0, 0 },
+#define TRIPLE(name, arch, os, fmt, kind, sub, flag)
+#define DATA_MODEL(arch, ...) [TARGET_##arch] = { __VA_ARGS__ },
+#include "../targets/targets.def"
+#undef TRIPLE
+#undef DATA_MODEL
 };
 
+int target_is_mips(void)
+{
+    return g_arch == TARGET_MIPS32 || g_arch == TARGET_MIPS64;
+}
+
 int target_ptr_size(void)       { return g_model[g_arch].ptr; }
+int target_atomic8_libcall(void) { return g_model[g_arch].ptr == 4; }
 int target_double_size(void)    { return g_model[g_arch].dbl; }
 int target_int_size(void)       { return g_model[g_arch].it; }
 /* XLEN is RISC-V's own name for the register width IN BITS -- 32 or 64,
@@ -211,6 +272,25 @@ int target_int_size(void)       { return g_model[g_arch].it; }
 int target_xlen(void)           { return g_model[g_arch].ptr * 8; }
 int target_long_size(void)      { return g_model[g_arch].lng; }
 int target_max_scalar_align(void) { return g_model[g_arch].maxal; }
+int target_default_new_align(void)
+{
+    switch (g_arch) {
+    case TARGET_THUMB: return 8;
+    case TARGET_X86_64: case TARGET_AARCH64: case TARGET_RISCV32:
+    case TARGET_RISCV64: case TARGET_LOONGARCH64: case TARGET_MIPS64:
+        return 16;
+    default: {
+        /* clang's rule (TargetInfo::getNewAlign): the larger of long
+         * double's and long long's alignment -- 8 on MIPS32, SPARC,
+         * PowerPC (its long double a double) and Xtensa; capped where
+         * nothing is aligned further: 4 on RX and TriCore, 2 on ColdFire,
+         * 1 on AVR. */
+        int a = g_model[g_arch].ldbl > 8 ? g_model[g_arch].ldbl : 8;
+        int m = g_model[g_arch].maxal;
+        return m && a > m ? m : a;
+    }
+    }
+}
 int target_has_sqrt(int bytes)
 {
     switch (g_arch) {
@@ -221,8 +301,48 @@ int target_has_sqrt(int bytes)
     case TARGET_THUMB:   return target_thumb_fpu() &&
                                 (bytes == 4 ||
                                  (bytes == 8 && target_thumb_fpu_dp()));
+    /* fsqrt.s with F, fsqrt.d with D: correctly rounded, as sqrt is */
+    case TARGET_RISCV32:
+    case TARGET_RISCV64: return (bytes == 4 && target_riscv_flen() >= 32) ||
+                                (bytes == 8 && target_riscv_flen() == 64);
     default:             return 0;
     }
+}
+
+int target_has_mulh(void)
+{
+    switch (g_arch) {
+    /* A 64-bit register holds the whole product of two 32-bit values,
+     * so these take the ordinary 64-bit multiply and never see one. */
+    case TARGET_X86_64:
+    case TARGET_AARCH64:
+    case TARGET_RISCV64:
+    case TARGET_LOONGARCH64:
+    case TARGET_MIPS64:
+        return 0;
+    /* RV32IM: mulh, mulhu (the M extension is always present here) */
+    case TARGET_RISCV32: return 1;
+    /* umull and smull from ARMv7-M up, and in ARM state; ARMv6-M and
+     * ARMv8-M Baseline have only the 32-bit muls */
+    case TARGET_THUMB:   return target_thumb_arch() >= 7 &&
+                                !target_thumb_v8m_base();
+    /* mult/multu and HI */
+    case TARGET_MIPS32:  return 1;
+    case TARGET_TRICORE: return 1;    /* MUL and MUL.U into an E register */
+    case TARGET_PPC32:   return 1;    /* mulhw, mulhwu */
+    case TARGET_RX:      return 1;    /* emul, emulu */
+    case TARGET_SPARC32: return 1;    /* umul and smul, and %y */
+    /* Xtensa's high multiplies (mulsh, muluh) are the MUL32_HIGH option,
+     * which the ESP32 has and the de212 core EmbCC is tested on does not
+     * (docs/internals/xtensa-plan.md): its quou and remu stay. ColdFire
+     * has only the 32-bit muls.l and mulu.l -- the 64-bit result forms
+     * are the 68020's -- and AVR none at all. */
+    case TARGET_XTENSA:
+    case TARGET_COLDFIRE:
+    case TARGET_AVR:
+        return 0;
+    }
+    return 0;
 }
 
 int target_stack_align(void)
@@ -230,6 +350,10 @@ int target_stack_align(void)
     switch (g_arch) {
     case TARGET_THUMB: return 8;        /* AAPCS32 at a public interface */
     case TARGET_MIPS32: return 8;       /* o32 */
+    case TARGET_TRICORE: return 8;      /* the TriCore EABI */
+    case TARGET_RX:     return 4;       /* STACK_BOUNDARY 32 */
+    case TARGET_SPARC32: return 8;      /* the SPARC V8 ABI */
+    case TARGET_COLDFIRE: return 4;     /* ColdFire's preferred boundary */
     case TARGET_AVR:   return 1;
     default:           return 16;       /* SysV, AAPCS64, RISC-V psABI */
     }
@@ -260,8 +384,21 @@ int target_char_unsigned(void)
     return g_char_uns_override >= 0 ? g_char_uns_override
            : darwin_a64() ? 0 : g_model[g_arch].char_uns;
 }
+static int g_short_wchar;
+void target_set_short_wchar(int on) { g_short_wchar = on; }
+int target_short_wchar(void) { return g_short_wchar; }
+
+int target_wchar_size(void)
+{
+    if (g_short_wchar)
+        return 2;
+    return g_arch == TARGET_XTENSA ? 2 : g_model[g_arch].it;
+}
+
 int target_wchar_unsigned(void)
 {
+    if (g_short_wchar)
+        return 1;
     return darwin_a64() ? 0 : g_model[g_arch].wchar_uns;
 }
 int target_has_int128(void)     { return g_model[g_arch].int128; }
@@ -273,10 +410,39 @@ int target_has_int128(void)     { return g_model[g_arch].int128; }
  * the promise. */
 static int g_no_jump_tables;
 void target_set_jump_tables(int on) { g_no_jump_tables = !on; }
+/* TriCore and Xtensa keep the decision tree for now: a table needs its
+ * own address (TriCore: a HI/LO2 pair against .text or a JL; Xtensa: the
+ * base from a literal and a jx), and neither lowering is written --
+ * IR_SWITCH is refused by name if one ever arrives. */
 int target_jump_tables(void)
 {
-    return !g_no_jump_tables && target_get() != TARGET_AVR;
+    return !g_no_jump_tables && target_get() != TARGET_AVR &&
+           target_get() != TARGET_TRICORE &&
+           target_get() != TARGET_XTENSA &&
+           target_get() != TARGET_RX;
 }
+/* -Os: a switch dense but for a few outlying cases gets a table over the
+ * dense run (irgen's switch_cluster). ARM only so far: measured there,
+ * where a byte table (tbb) is cheaper than the tree it replaces. */
+int target_switch_clusters(void)
+{
+    return target_get() == TARGET_THUMB;
+}
+
+/* -O2: the fewest cases worth a table. A RISC-V table is eight
+ * instructions -- the bound check, auipc, the scaled index, the load,
+ * the add and the jump -- where four cases are two or three compares
+ * down a tree; the workload's protocol parser dispatched its four
+ * states through one on every byte (LLVM's RISC-V minimum is five too).
+ * ARM's tbb/tbh is a compare and one instruction. */
+int target_switch_table_min(void)
+{
+    if ((target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64) &&
+        !plat_getenv("EMBCC_RV_SWITCH4"))
+        return 5;
+    return 4;
+}
+
 int target_switch_table_min_os(void)
 {
     return target_get() == TARGET_THUMB && target_thumb_arch() >= 7 ? 4 : 6;
@@ -305,9 +471,29 @@ int target_anon_bitfield_aligns(void)
     /* o32: `struct { char c; int :4; char d; }` is 3 bytes in clang, and
      * `int :0` moves d to offset 4 without making the struct 4-aligned */
     case TARGET_MIPS32:  return 0;
+    case TARGET_MIPS64:  return 0;   /* n64: as o32 (clang) */
+    /* LoongArch psABI: `struct { char c; int :0; char d; }` is 5 bytes in
+     * clang, aligned 1 */
+    case TARGET_LOONGARCH64: return 0;
+    case TARGET_TRICORE: return 0;   /* as GCC lays them out (unverified) */
+    /* GCC's generic rule (PCC_BITFIELD_TYPE_MATTERS, no ABI override) */
+    case TARGET_XTENSA:  return 0;
+    /* SVR4 PowerPC: `struct { char c; int :4; char d; }` is 3 bytes in
+     * clang, aligned 1 */
+    case TARGET_PPC32:   return 0;
+    /* RX: the Microsoft layout, where an unnamed bit-field's type raises
+     * the struct's alignment like a named one's (stor-layout.cc) */
+    case TARGET_RX:      return 1;
+    /* SPARC: `struct { char c; int :4; char d; }` is 3 bytes in clang */
+    case TARGET_SPARC32: return 0;
+    /* m68k: only named members align a structure (and nothing beyond 2) */
+    case TARGET_COLDFIRE: return 0;
     }
     return 0;
 }
+
+int target_long_size_types(void) { return g_arch == TARGET_RX; }
+int target_ms_bitfields(void)    { return g_arch == TARGET_RX; }
 
 int target_va_list_is_pointer(void)
 {
@@ -325,8 +511,29 @@ int target_va_list_is_pointer(void)
     case TARGET_RISCV64: return 1;   /* RISC-V psABI: void * */
     case TARGET_AVR:     return 1;   /* avr-gcc: char * */
     case TARGET_MIPS32:  return 1;   /* o32: void *, over the home area */
+    case TARGET_MIPS64:  return 1;   /* n64: void *, over the save area */
+    case TARGET_LOONGARCH64: return 1;   /* LoongArch psABI: void * */
+    case TARGET_TRICORE: return 1;   /* char *, over the caller's stack words */
+    /* GCC's 12-byte record, held by value -- not a pointer to one, and not
+     * a tag va_copy needs: a copy is the record's assignment (irgen) */
+    case TARGET_XTENSA:  return 0;
+    /* SVR4 PowerPC: a 12-byte record (the GPR count, the FPR count, the
+     * overflow area and the register save area) that va_start builds and
+     * va_arg advances; `va_list` is a pointer to it, which is what clang's
+     * one-element array decays to when it is passed */
+    case TARGET_PPC32:   return 0;
+    case TARGET_RX:      return 1;   /* char *, over the stacked arguments */
+    case TARGET_SPARC32: return 1;   /* void *, over the home area */
+    case TARGET_COLDFIRE: return 1;  /* m68k: char *, over the caller's
+                                      * argument words */
     }
     return 0;
+}
+
+int target_has_frame_chain(void)
+{
+    return g_arch == TARGET_X86_64 || g_arch == TARGET_AARCH64 ||
+           g_arch == TARGET_COLDFIRE;
 }
 
 int target_widen_unsigned_fp_cvt(void)
@@ -362,154 +569,38 @@ const char *target_fmt_name(enum target_fmt f)
     }
 }
 
-/* Every triple this compiler accepts, and what each one means.
+/* Every triple this compiler accepts, and what each one means: the
+ * TRIPLE rows of the target database (src/targets/targets.def says how
+ * one reads).
  *
- * Explicit rather than assembled from an architecture list crossed with
- * an OS list, because the cross product contains combinations that do
- * not exist (aarch64-windows-gnu) and combinations this compiler cannot
- * yet write. A table that can only name what is real cannot accidentally
- * accept what is not, and THE RULE is that an unknown target is refused
- * loudly rather than approximated.
- *
- * `canon` marks the spelling the compiler prints back; the rest are
- * aliases it merely accepts, so --version and diagnostics always give
- * one name for one target.
- */
-/* ARMv7E-M (Cortex-M4/M7) is the same instruction set as v7-M plus the
+ * ARMv7E-M (Cortex-M4/M7) is the same instruction set as v7-M plus the
  * DSP extension and an optional FPU. It used to be accepted as a name
  * that meant v7-M, which was one silent substitution: -dumpmachine
  * answered `thumbv7m-none-eabi` for a v7em request, and the object's
  * Tag_CPU_arch said v7 where the part is v7E-M. A consumer reading that
- * attribute is told the wrong architecture. So the name now carries
- * state, even though the code generated for the two is still identical
- * -- what differs is what the object SAYS about itself. */
+ * attribute is told the wrong architecture. So the name carries the
+ * sub-architecture, even where the code generated is the same -- what
+ * differs is what the object SAYS about itself. */
+enum { TRIPLE_ALIAS, TRIPLE_CANONICAL };
+enum triple_sub { SUB_BASE, SUB_ARM_V7EM, SUB_ARM_V8M_MAIN, SUB_ARM_V6M,
+                  SUB_ARM_V8M_BASE, SUB_ARM_V7A };
+enum { TFLAG_PLAIN, TFLAG_HF, TFLAG_BE };
 static const struct triple {
     const char *name;
     enum target_arch arch;
     enum target_os os;
     enum target_fmt fmt;
-    int canon;         /* 1 the canonical name; 2 the v7E-M one; 3 the v8-M
-                        * Mainline one; 6 the ARMv6-M one -- see
-                        * target_triple_of */
-    int thumb_em;      /* 1 ARMv7E-M rather than ARMv7-M; 3 ARMv8-M Mainline;
-                        * 6 ARMv6-M */
+    int canonical;
+    enum triple_sub sub;
+    int flag;
 } g_triples[] = {
-    /* freestanding: bare metal and EmbLinkOS (the default) */
-    { "x86_64-elf",        TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
-    { "x86_64",            TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
-    { "x86_64-none-elf",   TARGET_X86_64,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
-    { "aarch64-elf",       TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
-    { "aarch64",           TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
-    { "arm64",             TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
-    { "aarch64-none-elf",  TARGET_AARCH64, TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
-
-    /* ARMv7-M, the Cortex-M line. Freestanding is the only thing it can
-     * be: a microcontroller has no operating system under the code, so
-     * there is no `thumbv7m-linux` row to add later and no hosted
-     * spelling of this target that would mean anything. `-none-eabi` is
-     * the canonical name because that is what every other toolchain
-     * calls it and what a project's existing --target= string will say.
-     *
-     * v7em (Cortex-M4/M7) is the same instruction set plus DSP and an
-     * optional FPU; it is accepted as a name now and will differ from
-     * v7m only once -mfpu selects hardware floating point. */
-    { "thumbv7m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   1, 0 },
-    { "thumbv7m",           TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
-    { "thumbv7em-none-eabi",TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   2, 1 },
-    { "thumbv7em",          TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 1 },
-    { "armv7em-none-eabi",  TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 1 },
-    { "armv7m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
-    { "arm-none-eabi",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 0 },
-
-    /* ARMv6-M: Cortex-M0, M0+ and M1. The same data model and AAPCS32
-     * again, so a level on this target (6); what changes is that the
-     * instruction set is Thumb-1 plus BL, MRS, MSR and the barriers, and
-     * that an unaligned access faults. ARMv8-M Baseline (Cortex-M23) is a
-     * different subset -- it has CBZ, MOVW and the divides -- and stays
-     * refused until it is selected for. */
-    { "thumbv6m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   6, 6 },
-    { "thumbv6m",           TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 6 },
-    { "armv6m-none-eabi",   TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 6 },
-
-    /* ARMv8-M Mainline: Cortex-M33, the RTOS requirements' third target,
-     * and the RP2350's core. The same data model and the same AAPCS32 as
-     * ARMv7-M, so it is a LEVEL on this target and not a new one (see
-     * g_thumb_arch). `thumb_em` is 3 here, which the reader below turns
-     * into level 8 -- the column already carried "which architecture
-     * variant" and this is one more value of it rather than a second
-     * column saying the same thing twice.
-     *
-     * The DSP extension and the FPU are what -mcpu/-mfpu select, exactly
-     * as on v7em; the security extension (TrustZone-M) is refused by name
-     * because an object that used it would need the linker to place a
-     * secure gateway veneer, which embld does not mint. */
-    /*                                                          canon, em */
-    { "thumbv8m.main-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 3, 3 },
-    { "thumbv8m.main",      TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 3 },
-    { "thumbv8m-none-eabi", TARGET_THUMB,  TGT_OS_NONE,    TGT_FMT_ELF,   0, 3 },
-    { "armv8m.main-none-eabi", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF,    0, 3 },
-
-    /* The hard-float spellings, as LLVM and Rust name them: the part's
-     * FPU (FPv4-SP-D16 on a Cortex-M4F, FPv5-SP-D16 on a Cortex-M33) and
-     * floating point passed in its registers. Canon 4 and 5 are these
-     * two, so -dumpmachine and the runtime's directory say which
-     * convention a build uses -- a hard-float and a soft-float object do
-     * not link, so their runtimes cannot share a name. -mfloat-abi= and
-     * -mfpu= still override what the name implies. */
-    { "thumbv7em-none-eabihf", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF,    4, 1 },
-    { "thumbv8m.main-none-eabihf", TARGET_THUMB, TGT_OS_NONE, TGT_FMT_ELF, 5, 3 },
-
-    /* RISC-V, bare metal. `-unknown-elf` is the spelling the reference
-     * toolchains use and the one a project's existing --target= string
-     * will say; the short forms are accepted because everyone writes
-     * them. Freestanding only for now, as ARMv7-M is: a hosted RISC-V
-     * needs an OS underneath and EmbLinkOS does not run there yet. */
-    { "riscv32-unknown-elf", TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
-    { "riscv32",             TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "riscv32-elf",         TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "rv32",                TARGET_RISCV32, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "riscv64-unknown-elf", TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
-    { "riscv64",             TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "riscv64-elf",         TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "rv64",                TARGET_RISCV64, TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-
-    /* AVR. `avr` is the canonical spelling because that is what every
-     * other toolchain calls the target and what a project's --target=
-     * string will say; the part is selected with -mmcu=, as avr-gcc and
-     * clang both do, and not by a triple per device. Freestanding is the
-     * only thing an 8-bit microcontroller can be. */
-    { "avr",                 TARGET_AVR,     TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
-    { "avr-none-elf",        TARGET_AVR,     TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "avr-elf",             TARGET_AVR,     TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "avr-unknown-none",    TARGET_AVR,     TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-
-    /* MIPS32r2, little-endian, o32, soft float: a PIC32's core. Bare metal
-     * only, like every microcontroller here. `-none-elf` is the canonical
-     * spelling; `-unknown-elf` is clang's, and what a project that already
-     * builds with clang will say. */
-    { "mipsel-none-elf",     TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   1, 0 },
-    { "mipsel-unknown-elf",  TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "mipsel-elf",          TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-    { "mipsel",              TARGET_MIPS32,  TGT_OS_NONE,   TGT_FMT_ELF,   0, 0 },
-
-    /* EmbLinkOS: the primary product target (vision §5.2). Its objects
-     * are ELF; `embld --embx` turns them into a native image at LINK
-     * time, which is why the format column says ELF and not EMBX. */
-    { "x86_64-emblink",    TARGET_X86_64,  TGT_OS_EMBLINK,  TGT_FMT_ELF,   1, 0 },
-    { "aarch64-emblink",   TARGET_AARCH64, TGT_OS_EMBLINK,  TGT_FMT_ELF,   1, 0 },
-
-    /* hosted: someone else's libc and linker (D-014) */
-    { "x86_64-linux-gnu",  TARGET_X86_64,  TGT_OS_LINUX,   TGT_FMT_ELF,   1, 0 },
-    { "x86_64-linux",      TARGET_X86_64,  TGT_OS_LINUX,   TGT_FMT_ELF,   0, 0 },
-    { "aarch64-linux-gnu", TARGET_AARCH64, TGT_OS_LINUX,   TGT_FMT_ELF,   1, 0 },
-    { "aarch64-linux",     TARGET_AARCH64, TGT_OS_LINUX,   TGT_FMT_ELF,   0, 0 },
-    { "x86_64-apple-darwin",  TARGET_X86_64,  TGT_OS_DARWIN, TGT_FMT_MACHO, 1, 0 },
-    { "x86_64-darwin",        TARGET_X86_64,  TGT_OS_DARWIN, TGT_FMT_MACHO, 0, 0 },
-    { "aarch64-apple-darwin", TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 1, 0 },
-    { "arm64-apple-darwin",   TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 0, 0 },
-    { "aarch64-darwin",       TARGET_AARCH64, TGT_OS_DARWIN, TGT_FMT_MACHO, 0, 0 },
-    { "x86_64-windows-gnu",   TARGET_X86_64,  TGT_OS_WINDOWS, TGT_FMT_COFF, 1, 0 },
-    { "x86_64-w64-mingw32",   TARGET_X86_64,  TGT_OS_WINDOWS, TGT_FMT_COFF, 0, 0 },
+#define TRIPLE(name, arch, os, fmt, kind, sub, flag)                          \
+    { name, TARGET_##arch, TGT_OS_##os, TGT_FMT_##fmt, TRIPLE_##kind,        \
+      SUB_##sub, TFLAG_##flag },
+#define DATA_MODEL(arch, ...)
+#include "../targets/targets.def"
+#undef TRIPLE
+#undef DATA_MODEL
 };
 static const int g_ntriples = (int)(sizeof g_triples / sizeof g_triples[0]);
 
@@ -521,25 +612,35 @@ int target_from_triple(const char *triple, enum target_arch *out,
             if (out) *out = g_triples[i].arch;
             if (os)  *os  = g_triples[i].os;
             if (fmt) *fmt = g_triples[i].fmt;
+            /* Byte order travels with the name too: the architecture's
+             * own, or the triple's on one that has both (MIPS). */
+            const struct triple *t = &g_triples[i];
+            g_big_endian = t->flag == TFLAG_BE || g_model[t->arch].big_endian;
             /* The ARM sub-architecture travels with the name, so
              * -dumpmachine and the object's Tag_CPU_arch both answer
              * what was ASKED for rather than the base profile. */
-            if (g_triples[i].arch == TARGET_THUMB) {
-                /* 3 in this column means ARMv8-M Mainline. It implies the
-                 * DSP extension too -- v8-M Mainline includes it -- so the
-                 * `em` flag stays set for the code that asks "may I use the
-                 * v7E-M/DSP instructions". */
+            if (t->arch == TARGET_THUMB) {
+                /* The DSP extension is OPTIONAL on ARMv8-M Mainline: the
+                 * name alone does not have it, as clang's thumbv8m.main
+                 * does not (no __ARM_FEATURE_DSP, sadd16 refused);
+                 * -mcpu=cortex-m33 and -march=armv8-m.main+dsp set the
+                 * `em` flag that says so. */
                 size_t n = strlen(triple);
                 g_thumb_hf_name = n > 6 && !strcmp(triple + n - 6, "eabihf");
-                if (g_triples[i].thumb_em == 3) {
-                    g_thumb_arch = 8;
-                    g_thumb_em = 1;
-                } else if (g_triples[i].thumb_em == 6) {
-                    g_thumb_arch = 6;
-                    g_thumb_em = 0;
-                } else {
-                    g_thumb_arch = 7;
-                    g_thumb_em = g_triples[i].thumb_em;
+                g_arm_a32 = t->sub == SUB_ARM_V7A;
+                g_thumb_v8b = t->sub == SUB_ARM_V8M_BASE;
+                switch (t->sub) {
+                case SUB_ARM_V7A:       /* v7-A has the DSP instructions v7E-M adds */
+                    g_thumb_arch = 7; g_thumb_em = 1; break;
+                case SUB_ARM_V8M_MAIN:
+                    g_thumb_arch = 8; g_thumb_em = 0; break;
+                case SUB_ARM_V6M:
+                case SUB_ARM_V8M_BASE:
+                    g_thumb_arch = 6; g_thumb_em = 0; break;
+                case SUB_ARM_V7EM:
+                    g_thumb_arch = 7; g_thumb_em = 1; break;
+                default:
+                    g_thumb_arch = 7; g_thumb_em = 0; break;
                 }
             }
             return 1;
@@ -547,32 +648,59 @@ int target_from_triple(const char *triple, enum target_arch *out,
     return 0;
 }
 
-const char *target_triple_of(enum target_arch a, enum target_os o)
+static const char *canonical_name(enum target_arch a, enum target_os o,
+                                  enum triple_sub sub, int flag)
 {
-    /* canon 2 is the ARMv7E-M spelling and canon 3 the ARMv8-M Mainline
-     * one: the canonical name for this arch/os pair depends on the
-     * sub-architecture as well, which is the only place that is true. */
-    int want = 1;
-    if (a == TARGET_THUMB)
-        want = g_thumb_arch >= 8 ? (g_thumb_hard ? 5 : 3)
-             : g_thumb_arch == 6 ? 6
-             : g_thumb_em ? (g_thumb_hard ? 4 : 2) : 1;
     for (int i = 0; i < g_ntriples; i++)
-        if (g_triples[i].canon == want && g_triples[i].arch == a &&
-            g_triples[i].os == o)
-            return g_triples[i].name;
-    for (int i = 0; i < g_ntriples; i++)
-        if (g_triples[i].canon == 1 && g_triples[i].arch == a &&
-            g_triples[i].os == o)
+        if (g_triples[i].canonical && g_triples[i].arch == a &&
+            g_triples[i].os == o && g_triples[i].sub == sub &&
+            g_triples[i].flag == flag)
             return g_triples[i].name;
     return NULL;
 }
 
-/* ARMv7E-M rather than ARMv7-M: the DSP extension and, on an F part, an
- * FPU. The code generated is identical today -- what differs is what
- * the object reports about itself, which a consumer is entitled to
- * believe. */
+const char *target_triple_of(enum target_arch a, enum target_os o)
+{
+    /* The canonical name for this arch/os pair depends on the
+     * sub-architecture, the float convention and the byte order as well:
+     * the ARM state and MIPS's -EB choose among canonical rows. */
+    enum triple_sub sub = SUB_BASE;
+    int flag = TFLAG_PLAIN;
+    if (a == TARGET_THUMB) {
+        sub = g_arm_a32 ? SUB_ARM_V7A
+            : g_thumb_arch >= 8 ? SUB_ARM_V8M_MAIN
+            : g_thumb_arch == 6 ? (g_thumb_v8b ? SUB_ARM_V8M_BASE : SUB_ARM_V6M)
+            : g_thumb_em ? SUB_ARM_V7EM : SUB_BASE;
+        if (g_thumb_hard)
+            flag = TFLAG_HF;
+    }
+    if (g_big_endian && !g_model[a].big_endian)
+        flag = TFLAG_BE;
+    const char *n = canonical_name(a, o, sub, flag);
+    if (!n && flag == TFLAG_HF)        /* no hard-float spelling: v6-M, v8-M Baseline */
+        n = canonical_name(a, o, sub, TFLAG_PLAIN);
+    if (!n)
+        n = canonical_name(a, o, SUB_BASE, TFLAG_PLAIN);
+    return n;
+}
+
+/* ARMv7E-M rather than ARMv7-M -- or on ARMv8-M Mainline, the part has
+ * the DSP extension: its macros (__ARM_FEATURE_DSP, src/arch/predef.c),
+ * its instructions in inline asm and .s files (src/arch/thumb/asm.c), and
+ * what the object reports about itself. The code generated is the same. */
 int target_thumb_em(void) { return g_thumb_em; }
+int target_arm_a32(void) { return g_arch == TARGET_THUMB && g_arm_a32; }
+int target_arm_vfp(int *d32)
+{
+    if (d32)
+        *d32 = g_arm_vfp_d32;
+    return g_arm_vfp;
+}
+void target_set_arm_vfp(int version, int d32)
+{
+    g_arm_vfp = version;
+    g_arm_vfp_d32 = d32 ? 1 : 0;
+}
 int target_thumb_arch(void) { return g_thumb_arch; }
 int target_object_align(int is_array, long size, int align)
 {
@@ -585,7 +713,28 @@ int target_string_align(int width)
 {
     return width > 1 ? width : 1;
 }
-void target_set_thumb_arch(int lvl) { g_thumb_arch = lvl; }
+void target_set_thumb_arch(int lvl)
+{
+    g_thumb_arch = lvl;
+    g_thumb_v8b = 0;
+}
+int target_thumb_v8m_base(void)
+{
+    return g_arch == TARGET_THUMB && g_thumb_arch == 6 && g_thumb_v8b;
+}
+void target_set_thumb_v8m_base(void)
+{
+    g_thumb_arch = 6;
+    g_thumb_v8b = 1;
+    g_thumb_em = 0;
+}
+int target_thumb_v8m(void)
+{
+    return g_arch == TARGET_THUMB && !g_arm_a32 &&
+           (g_thumb_arch >= 8 || (g_thumb_arch == 6 && g_thumb_v8b));
+}
+int target_thumb_cmse(void) { return target_thumb_v8m() && g_thumb_cmse; }
+void target_set_thumb_cmse(int on) { g_thumb_cmse = on ? 1 : 0; }
 int target_thumb_fpu(void) { return g_thumb_fpu; }
 void target_set_thumb_fpu(int on) { g_thumb_fpu = on ? 1 : 0; }
 int target_thumb_fpu_dp(void) { return g_thumb_fpu && g_thumb_fpu_dp; }
@@ -632,17 +781,19 @@ int target_elf_machine(enum target_arch a)
     case TARGET_RISCV32:
     case TARGET_RISCV64: return EM_RISCV;
     case TARGET_AVR:     return EM_AVR;
-    case TARGET_MIPS32:  return EM_MIPS;
+    case TARGET_MIPS32:
+    case TARGET_MIPS64:  return EM_MIPS;
+    case TARGET_LOONGARCH64: return EM_LOONGARCH;
+    case TARGET_TRICORE: return EM_TRICORE;
+    case TARGET_XTENSA:  return EM_XTENSA;
+    case TARGET_PPC32:   return EM_PPC;
+    case TARGET_RX:      return EM_RX;
+    case TARGET_SPARC32: return EM_SPARC;
+    case TARGET_COLDFIRE: return EM_68K;
     default:             return EM_X86_64;
     }
 }
 
-/* The C extension. EmbCC has no -march= yet, so this is on for every
- * RISC-V target -- which is what both reference compilers default to
- * (clang's -march for riscv32-unknown-elf is rv32imac) and what every
- * RISC-V microcontroller implements. When -march= exists this becomes the
- * place that reads it, and the predefined macro table (the per-width
- * predef.c, __riscv_c) has to move with it. */
 int target_mul_shift_add(long c, int *k, int *neg, int *j)
 {
     if (c <= 2)
@@ -658,22 +809,65 @@ int target_mul_shift_add(long c, int *k, int *neg, int *j)
     return 0;
 }
 
+/* The C extension: on unless -march= leaves out the `c` -- on by default
+ * because that is what both reference compilers default to (clang's
+ * -march for riscv32-unknown-elf is rv32imac) and what nearly every RISC-V
+ * microcontroller implements. The predefined macros (__riscv_c) follow it
+ * (src/arch/predef.c). */
 int target_riscv_rvc(void)
 {
-    return 1;
+    return g_rv_c;
 }
+int target_riscv_flen(void)
+{
+    if (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64)
+        return 0;
+    return g_rv_d ? 64 : g_rv_f ? 32 : 0;
+}
+int target_riscv_abi_flen(void)
+{
+    if (g_arch != TARGET_RISCV32 && g_arch != TARGET_RISCV64)
+        return 0;
+    return g_rv_abi_flen;
+}
+int target_riscv_zifencei(void) { return g_rv_zifencei; }
+void target_set_riscv_isa(int f, int d, int c, int zifencei)
+{
+    g_rv_f = f ? 1 : 0;
+    g_rv_d = d ? 1 : 0;
+    g_rv_c = c ? 1 : 0;
+    g_rv_zifencei = zifencei ? 1 : 0;
+}
+void target_set_riscv_abi_flen(int flen) { g_rv_abi_flen = flen; }
 
 unsigned long target_elf_flags(enum target_arch a)
 {
     switch (a) {
     case TARGET_THUMB:   return EF_ARM_EABI_VER5;
     case TARGET_RISCV32:
-    case TARGET_RISCV64: return target_riscv_rvc() ? EF_RISCV_RVC : 0;
+    case TARGET_RISCV64: return (target_riscv_rvc() ? EF_RISCV_RVC : 0) |
+                                (g_rv_abi_flen == 64 ? EF_RISCV_FLOAT_ABI_DOUBLE
+                                 : g_rv_abi_flen == 32 ? EF_RISCV_FLOAT_ABI_SINGLE
+                                 : EF_RISCV_FLOAT_ABI_SOFT);
     case TARGET_AVR:     return EF_AVR_ARCH_AVR5;
     /* What clang writes for -mcpu=mips32r2 -mno-abicalls: the delay
      * slots are filled (with nops), the code is not abicalls/PIC. */
     case TARGET_MIPS32:  return EF_MIPS_ARCH_32R2 | EF_MIPS_ABI_O32 |
                                 EF_MIPS_NOREORDER;
+    /* ...and for mips64r2 n64: no ABI field (ELFCLASS64 is n64) */
+    case TARGET_MIPS64:  return EF_MIPS_ARCH_64R2 | EF_MIPS_NOREORDER;
+    /* what clang writes for -mabi=lp64s: the soft-float base ABI, object
+     * ABI v1 */
+    case TARGET_LOONGARCH64: return EF_LOONGARCH_ABI_SOFT_FLOAT |
+                                    EF_LOONGARCH_OBJABI_V1;
+    case TARGET_TRICORE: return EF_TRICORE_V1_6_1;
+    /* What GNU as writes for the ESP32's objects: XT_INSN | XT_LIT */
+    case TARGET_XTENSA:  return EF_XTENSA_XT_INSN | EF_XTENSA_XT_LIT;
+    /* what GNU as writes for GCC's -m32bit-doubles -mrx-abi */
+    case TARGET_RX:      return E_FLAG_RX_ABI;
+    /* binutils' ISA_A with the hardware divide, no MAC, no FPU: what the
+     * code uses, which every ColdFire core with a divider executes */
+    case TARGET_COLDFIRE: return EF_M68K_CF_ISA_A;
     default:             return 0;
     }
 }
@@ -683,18 +877,15 @@ int target_elf_uses_rel(enum target_arch a)
     return a == TARGET_MIPS32;
 }
 
-static void put_le32(unsigned char *p, unsigned long v)
+/* The field is a word in the TARGET's order: an o32 object is either. */
+static void put_w32(unsigned char *p, unsigned long v)
 {
-    p[0] = (unsigned char)v;
-    p[1] = (unsigned char)(v >> 8);
-    p[2] = (unsigned char)(v >> 16);
-    p[3] = (unsigned char)(v >> 24);
+    target_put_uint(p, 4, v);
 }
 
-static unsigned long get_le32(const unsigned char *p)
+static unsigned long get_w32(const unsigned char *p)
 {
-    return (unsigned long)p[0] | ((unsigned long)p[1] << 8) |
-           ((unsigned long)p[2] << 16) | ((unsigned long)p[3] << 24);
+    return (unsigned long)target_get_uint(p, 4);
 }
 
 int target_rel_put_addend(enum target_arch a, int type, unsigned char *field,
@@ -703,30 +894,30 @@ int target_rel_put_addend(enum target_arch a, int type, unsigned char *field,
     unsigned long w;
     if (a != TARGET_MIPS32)
         return 0;
-    w = get_le32(field);
+    w = get_w32(field);
     switch (type) {
     case R_MIPS_NONE:
         return 1;
     case R_MIPS_32:
-        put_le32(field, (unsigned long)addend & 0xffffffffUL);
+        put_w32(field, (unsigned long)addend & 0xffffffffUL);
         return 1;
     case R_MIPS_26:
         /* the field holds a WORD index: A >> 2 */
-        put_le32(field, (w & 0xfc000000UL) |
+        put_w32(field, (w & 0xfc000000UL) |
                         (((unsigned long)addend >> 2) & 0x3ffffffUL));
         return 1;
     case R_MIPS_HI16:
         /* AHI, rounded so that AHI << 16 plus the LO16's sign-extended
          * half gives back the whole addend */
-        put_le32(field, (w & 0xffff0000UL) |
+        put_w32(field, (w & 0xffff0000UL) |
                         (((unsigned long)(addend + 0x8000) >> 16) & 0xffffUL));
         return 1;
     case R_MIPS_LO16:
-        put_le32(field, (w & 0xffff0000UL) |
+        put_w32(field, (w & 0xffff0000UL) |
                         ((unsigned long)addend & 0xffffUL));
         return 1;
     case R_MIPS_PC16:
-        put_le32(field, (w & 0xffff0000UL) |
+        put_w32(field, (w & 0xffff0000UL) |
                         (((unsigned long)addend >> 2) & 0xffffUL));
         return 1;
     default:
@@ -744,12 +935,15 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
          * field is the split 11+11 offset a `bl` encodes there and not
          * the ARM-state 24-bit one. A linker told CALL would patch the
          * wrong bits of the right instruction. */
-        case RK_CALL:        return R_ARM_THM_CALL;
-        case RK_TAIL:        return R_ARM_THM_JUMP24;
+        /* ARM state (armv7a): the same acts, the A32 instructions' fields */
+        case RK_CALL:        return g_arm_a32 ? R_ARM_CALL : R_ARM_THM_CALL;
+        case RK_TAIL:        return g_arm_a32 ? R_ARM_JUMP24 : R_ARM_THM_JUMP24;
         case RK_ABS32:       return R_ARM_ABS32;
         case RK_DATA_PREL32: return R_ARM_REL32;
-        case RK_THM_MOVW:    return R_ARM_THM_MOVW_ABS_NC;
-        case RK_THM_MOVT:    return R_ARM_THM_MOVT_ABS;
+        case RK_THM_MOVW:    return g_arm_a32 ? R_ARM_MOVW_ABS_NC
+                                              : R_ARM_THM_MOVW_ABS_NC;
+        case RK_THM_MOVT:    return g_arm_a32 ? R_ARM_MOVT_ABS
+                                              : R_ARM_THM_MOVT_ABS;
         /* No ABS64: a 32-bit target has no 64-bit address to relocate,
          * and asking for one is a bug upstream rather than a kind this
          * table is merely missing. */
@@ -773,6 +967,32 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         default:             return -1;
         }
     }
+    if (a == TARGET_LOONGARCH64) {
+        switch (k) {
+        /* bl and b alike: a 26-bit word offset, +-128 MiB -- the normal
+         * code model (docs/internals/loongarch64-plan.md) */
+        case RK_CALL:          return R_LARCH_B26;
+        case RK_LA_PCALA_HI20: return R_LARCH_PCALA_HI20;
+        case RK_LA_PCALA_LO12: return R_LARCH_PCALA_LO12;
+        case RK_ABS32:         return R_LARCH_32;
+        case RK_ABS64:         return R_LARCH_64;
+        case RK_DATA_PREL32:   return R_LARCH_32_PCREL;
+        default:               return -1;
+        }
+    }
+    if (a == TARGET_MIPS64) {
+        switch (k) {
+        case RK_CALL:         return R_MIPS_26;
+        case RK_MIPS_HIGHEST: return R_MIPS_HIGHEST;
+        case RK_MIPS_HIGHER:  return R_MIPS_HIGHER;
+        case RK_MIPS_HI16:    return R_MIPS_HI16;
+        case RK_MIPS_LO16:    return R_MIPS_LO16;
+        case RK_MIPS_TEXT26:  return R_MIPS_26;
+        case RK_ABS32:        return R_MIPS_32;
+        case RK_ABS64:        return R_MIPS_64;
+        default:              return -1;
+        }
+    }
     if (a == TARGET_MIPS32) {
         switch (k) {
         /* jal and j alike: a 26-bit word index within the 256 MiB region
@@ -782,6 +1002,68 @@ int target_reloc_type(enum target_arch a, enum reloc_kind k)
         case RK_MIPS_LO16:   return R_MIPS_LO16;
         case RK_MIPS_TEXT26: return R_MIPS_26;
         case RK_ABS32:       return R_MIPS_32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_TRICORE) {
+        switch (k) {
+        /* CALL and J alike: a halfword displacement in 24 bits */
+        case RK_CALL:        return R_TRICORE_24REL;
+        case RK_TRICORE_HI:  return R_TRICORE_HIADJ;
+        case RK_TRICORE_LO:  return R_TRICORE_LO;
+        case RK_TRICORE_LO2: return R_TRICORE_LO2;
+        case RK_ABS32:       return R_TRICORE_32ABS;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_XTENSA) {
+        switch (k) {
+        /* call8's offset, which a linker decodes the opcode to find */
+        case RK_CALL:        return R_XTENSA_SLOT0_OP;
+        /* a literal-pool word, a data pointer, a DWARF offset */
+        case RK_ABS32:       return R_XTENSA_32;
+        case RK_XTENSA_TEXT32: return R_XTENSA_32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_PPC32) {
+        switch (k) {
+        /* bl and b alike: a 24-bit word displacement from the branch */
+        case RK_CALL:          return R_PPC_REL24;
+        case RK_PPC_ADDR16_HA: return R_PPC_ADDR16_HA;
+        case RK_PPC_ADDR16_LO: return R_PPC_ADDR16_LO;
+        case RK_ABS32:         return R_PPC_ADDR32;
+        case RK_DATA_PREL32:   return R_PPC_REL32;
+        default:               return -1;
+        }
+    }
+    if (a == TARGET_RX) {
+        switch (k) {
+        /* bsr.a's 24-bit field, measured from its opcode */
+        case RK_CALL:        return R_RX_DIR24S_PCREL;
+        case RK_ABS32:       return R_RX_DIR32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_SPARC32) {
+        switch (k) {
+        /* call: a 30-bit word displacement from the call itself */
+        case RK_CALL:        return R_SPARC_WDISP30;
+        case RK_SPARC_HI22:  return R_SPARC_HI22;
+        case RK_SPARC_LO10:  return R_SPARC_LO10;
+        case RK_ABS32:       return R_SPARC_32;
+        case RK_DATA_PREL32: return R_SPARC_DISP32;
+        default:             return -1;
+        }
+    }
+    if (a == TARGET_COLDFIRE) {
+        switch (k) {
+        /* jsr and jmp to an absolute address, and every address operand:
+         * the 32-bit field in the extension words */
+        case RK_CALL:        return R_68K_32;
+        case RK_TAIL:        return R_68K_32;
+        case RK_ABS32:       return R_68K_32;
+        case RK_DATA_PREL32: return R_68K_PC32;
         default:             return -1;
         }
     }
@@ -897,7 +1179,10 @@ long target_reloc_addend(enum target_arch a, enum reloc_kind k, long bias)
 {
     if (a == TARGET_AARCH64 || a == TARGET_THUMB ||
         a == TARGET_RISCV32 || a == TARGET_RISCV64 || a == TARGET_AVR ||
-        a == TARGET_MIPS32)
+        a == TARGET_MIPS32 || a == TARGET_LOONGARCH64 ||
+        a == TARGET_TRICORE || a == TARGET_XTENSA || a == TARGET_PPC32 ||
+        a == TARGET_RX || a == TARGET_SPARC32 ||
+        a == TARGET_COLDFIRE || a == TARGET_MIPS64)
         return bias;              /* ARM and RISC-V fields are relative to
                                    * the instruction itself, so no
                                    * end-of-instruction bias. On RISC-V
@@ -946,6 +1231,41 @@ static const struct reloc_spelling {
     { EM_RISCV, R_RISCV_HI20,          "R_RISCV_HI20" },
     { EM_RISCV, R_RISCV_LO12_I,        "R_RISCV_LO12_I" },
     { EM_RISCV, R_RISCV_LO12_S,        "R_RISCV_LO12_S" },
+    { EM_LOONGARCH, R_LARCH_NONE,      "R_LARCH_NONE" },
+    { EM_LOONGARCH, R_LARCH_32,        "R_LARCH_32" },
+    { EM_LOONGARCH, R_LARCH_64,        "R_LARCH_64" },
+    { EM_LOONGARCH, R_LARCH_B16,       "R_LARCH_B16" },
+    { EM_LOONGARCH, R_LARCH_B21,       "R_LARCH_B21" },
+    { EM_LOONGARCH, R_LARCH_B26,       "R_LARCH_B26" },
+    { EM_LOONGARCH, R_LARCH_PCALA_HI20, "R_LARCH_PCALA_HI20" },
+    { EM_LOONGARCH, R_LARCH_PCALA_LO12, "R_LARCH_PCALA_LO12" },
+    { EM_LOONGARCH, R_LARCH_CALL36,    "R_LARCH_CALL36" },
+    { EM_LOONGARCH, R_LARCH_32_PCREL,  "R_LARCH_32_PCREL" },
+    { EM_PPC,   R_PPC_NONE,            "R_PPC_NONE" },
+    { EM_PPC,   R_PPC_ADDR32,          "R_PPC_ADDR32" },
+    { EM_PPC,   R_PPC_ADDR16_LO,       "R_PPC_ADDR16_LO" },
+    { EM_PPC,   R_PPC_ADDR16_HI,       "R_PPC_ADDR16_HI" },
+    { EM_PPC,   R_PPC_ADDR16_HA,       "R_PPC_ADDR16_HA" },
+    { EM_PPC,   R_PPC_REL24,           "R_PPC_REL24" },
+    { EM_PPC,   R_PPC_REL14,           "R_PPC_REL14" },
+    { EM_PPC,   R_PPC_REL32,           "R_PPC_REL32" },
+    { EM_RX,    R_RX_NONE,             "R_RX_NONE" },
+    { EM_RX,    R_RX_DIR32,            "R_RX_DIR32" },
+    { EM_RX,    R_RX_DIR24S_PCREL,     "R_RX_DIR24S_PCREL" },
+    { EM_RX,    R_RX_DIR16S_PCREL,     "R_RX_DIR16S_PCREL" },
+    { EM_RX,    R_RX_DIR8S_PCREL,      "R_RX_DIR8S_PCREL" },
+    { EM_SPARC, R_SPARC_NONE,          "R_SPARC_NONE" },
+    { EM_SPARC, R_SPARC_32,            "R_SPARC_32" },
+    { EM_SPARC, R_SPARC_DISP32,        "R_SPARC_DISP32" },
+    { EM_SPARC, R_SPARC_WDISP30,       "R_SPARC_WDISP30" },
+    { EM_SPARC, R_SPARC_WDISP22,       "R_SPARC_WDISP22" },
+    { EM_SPARC, R_SPARC_HI22,          "R_SPARC_HI22" },
+    { EM_SPARC, R_SPARC_LO10,          "R_SPARC_LO10" },
+    { EM_68K,   R_68K_NONE,            "R_68K_NONE" },
+    { EM_68K,   R_68K_32,              "R_68K_32" },
+    { EM_68K,   R_68K_16,              "R_68K_16" },
+    { EM_68K,   R_68K_PC32,            "R_68K_PC32" },
+    { EM_68K,   R_68K_PC16,            "R_68K_PC16" },
     { EM_AVR,   R_AVR_NONE,            "R_AVR_NONE" },
     { EM_AVR,   R_AVR_32,              "R_AVR_32" },
     { EM_AVR,   R_AVR_7_PCREL,         "R_AVR_7_PCREL" },
@@ -957,6 +1277,41 @@ static const struct reloc_spelling {
     { EM_AVR,   R_AVR_CALL,            "R_AVR_CALL" },
     { EM_AVR,   R_AVR_LO8_LDI_GS,      "R_AVR_LO8_LDI_GS" },
     { EM_AVR,   R_AVR_HI8_LDI_GS,      "R_AVR_HI8_LDI_GS" },
+    { EM_AVR,   R_AVR_HH8_LDI,      "R_AVR_HH8_LDI" },
+    { EM_AVR,   R_AVR_LO8_LDI_NEG,  "R_AVR_LO8_LDI_NEG" },
+    { EM_AVR,   R_AVR_HI8_LDI_NEG,  "R_AVR_HI8_LDI_NEG" },
+    { EM_AVR,   R_AVR_HH8_LDI_NEG,  "R_AVR_HH8_LDI_NEG" },
+    { EM_AVR,   R_AVR_LO8_LDI_PM,   "R_AVR_LO8_LDI_PM" },
+    { EM_AVR,   R_AVR_HI8_LDI_PM,   "R_AVR_HI8_LDI_PM" },
+    { EM_AVR,   R_AVR_HH8_LDI_PM,   "R_AVR_HH8_LDI_PM" },
+    { EM_AVR,   R_AVR_LO8_LDI_PM_NEG, "R_AVR_LO8_LDI_PM_NEG" },
+    { EM_AVR,   R_AVR_HI8_LDI_PM_NEG, "R_AVR_HI8_LDI_PM_NEG" },
+    { EM_AVR,   R_AVR_HH8_LDI_PM_NEG, "R_AVR_HH8_LDI_PM_NEG" },
+    { EM_AVR,   R_AVR_LDI,          "R_AVR_LDI" },
+    { EM_AVR,   R_AVR_6,            "R_AVR_6" },
+    { EM_AVR,   R_AVR_6_ADIW,       "R_AVR_6_ADIW" },
+    { EM_AVR,   R_AVR_MS8_LDI,      "R_AVR_MS8_LDI" },
+    { EM_AVR,   R_AVR_MS8_LDI_NEG,  "R_AVR_MS8_LDI_NEG" },
+    { EM_AVR,   R_AVR_8,            "R_AVR_8" },
+    { EM_AVR,   R_AVR_8_LO8,        "R_AVR_8_LO8" },
+    { EM_AVR,   R_AVR_8_HI8,        "R_AVR_8_HI8" },
+    { EM_AVR,   R_AVR_8_HLO8,       "R_AVR_8_HLO8" },
+    { EM_AVR,   R_AVR_DIFF8,        "R_AVR_DIFF8" },
+    { EM_AVR,   R_AVR_DIFF16,       "R_AVR_DIFF16" },
+    { EM_AVR,   R_AVR_DIFF32,       "R_AVR_DIFF32" },
+    { EM_AVR,   R_AVR_PORT6,        "R_AVR_PORT6" },
+    { EM_AVR,   R_AVR_PORT5,        "R_AVR_PORT5" },
+    { EM_AVR,   R_AVR_32_PCREL,     "R_AVR_32_PCREL" },
+    { EM_TRICORE, R_TRICORE_NONE,      "R_TRICORE_NONE" },
+    { EM_TRICORE, R_TRICORE_32ABS,     "R_TRICORE_32ABS" },
+    { EM_TRICORE, R_TRICORE_24REL,     "R_TRICORE_24REL" },
+    { EM_TRICORE, R_TRICORE_HIADJ,     "R_TRICORE_HIADJ" },
+    { EM_TRICORE, R_TRICORE_LO,        "R_TRICORE_LO" },
+    { EM_TRICORE, R_TRICORE_LO2,       "R_TRICORE_LO2" },
+    { EM_XTENSA, R_XTENSA_NONE,        "R_XTENSA_NONE" },
+    { EM_XTENSA, R_XTENSA_32,          "R_XTENSA_32" },
+    { EM_XTENSA, R_XTENSA_ASM_EXPAND,  "R_XTENSA_ASM_EXPAND" },
+    { EM_XTENSA, R_XTENSA_SLOT0_OP,    "R_XTENSA_SLOT0_OP" },
 };
 
 const char *target_reloc_name(enum target_arch a, int type)

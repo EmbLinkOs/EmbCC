@@ -8,15 +8,22 @@
 # at -O0..-Os, each object must contain the dispatch (a bal), and the
 # program must print what the cases say on malta.
 set -u
-echo "TEST-MARKER mips-switch"
+# Run BIG-endian (mips-none-elf) as tests/golden/mips-be-switch.sh, which sets
+# MIPS_BE=1.
+if [ "${MIPS_BE:-0}" = 1 ]; then
+    NAME=mips-be-switch T=mips-none-elf MT=mips-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    NAME=mips-switch T=mipsel-none-elf MT=mipsel-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
+echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
 
-QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
 OD=${EMBCC_LLVM_OBJDUMP:-llvm-objdump}
 command -v "$QEMU" >/dev/null 2>&1 || { echo "skipped: $QEMU not found"; exit 0; }
-T=mipsel-none-elf
 EMBCC=${EMBCC:-./embcc}
-out=tests/golden/out/mips-switch
+out=tests/golden/out/$NAME
 rm -rf "$out"; mkdir -p "$out"
 export EMBCC_MIPS_HARNESS="$PWD/$out"
 for f in boot io; do

@@ -14,6 +14,21 @@
  * each finished function and refuses it, by name, if anything else got
  * in -- an inline asm template included.
  *
+ * ---- ARMv8-M Baseline ----------------------------------------------------
+ *
+ * The Cortex-M23 runs this same selection (target_thumb_v8m_base), with
+ * what Baseline adds to ARMv6-M turned on where it replaces a call: a
+ * 32-bit divide is SDIV/UDIV (and a remainder the quotient times the
+ * divisor taken from the dividend -- there is no MLS), and a one-, two- or
+ * four-byte atomic is an LDREX/STREX loop between two DMBs, as on ARMv7-M,
+ * instead of a call to lib/rt's interrupt-masking __atomic_* routines.
+ * v6_scan then admits Baseline's 32-bit encodings as well -- the divides,
+ * the exclusives and the acquire/release forms, MOVW/MOVT, B.W, CLREX, TT
+ * and SG -- and CBZ/CBNZ; still no IT and no other Thumb-2 form. A
+ * cmse_nonsecure_entry function and a cmse_nonsecure_call are lowered
+ * here too (-mcmse; see gen_ret and gen_call). Constants and addresses
+ * stay in literal pools, as clang keeps them for this core.
+ *
  * ---- registers ---------------------------------------------------------
  *
  * Only r0-r7 compute. r6 and r7 are this lowering's two scratch registers
@@ -54,11 +69,32 @@
 #include "../target.h"
 #include "../../driver/util.h"
 
-#define S0 6
-#define S1 7
 #define IP 12
 #define FB6 5              /* the frame base where sp moves (a VLA) */
-#define SCR_BOTH ((1u << S0) | (1u << S1))
+/* The two scratch registers. r6 and r7 -- unless r6 and r7 are in the
+ * allocator's pool as well (tcg_ext, one of gen_func_best's attempts):
+ * then each instruction takes two registers that hold nothing there
+ * (v6_roles), and -1 for one it could not find, which fails the attempt
+ * the moment the lowering asks for it (v6_role). The prologue and the
+ * epilogue, where nothing but the arguments and the result is live, keep
+ * r6 and r7. */
+static int g6_s0 = 6, g6_s1 = 7;
+static int v6_role(int k)
+{
+    int r = k ? g6_s1 : g6_s0;
+    if (r < 0) {
+        tcg_role_fail();
+        return k ? 7 : 6;          /* what it emits is thrown away */
+    }
+    return r;
+}
+#define S0 v6_role(0)
+#define S1 v6_role(1)
+/* The callee-saved low registers a scratch may be: r6/r7 with the fixed
+ * pair; with the per-instruction roles, any of r4-r7 not otherwise saved
+ * (the prologue then saves it, as it does r6/r7). */
+#define SCR_BOTH ((1u << 6) | (1u << 7))
+#define SCR_SET (tcg_ext() ? 0xf0u : SCR_BOTH)
 
 /* The size classes of a branch to a label (fix.ins), smallest first. */
 enum { BC_SHORT = 0, BC_MED = 1, BC_FAR = 2 };
@@ -81,9 +117,10 @@ static void v6_refuse(const struct ir_func *fn, const struct ir_ins *i,
         snprintf(op, sizeof op, " [%s w=%d size=%d]", ir_opname(i->op),
                  i->w, i->size);
     fprintf(stderr,
-            "embcc: %s:%d: error: the ARMv6-M backend cannot lower %s yet "
+            "embcc: %s:%d: error: the %s backend cannot lower %s yet "
             "(function %s)%s\n",
-            fn->file ? fn->file : "?", i ? i->line : fn->line, what,
+            fn->file ? fn->file : "?", i ? i->line : fn->line,
+            target_thumb_v8m_base() ? "ARMv8-M Baseline" : "ARMv6-M", what,
             fn->name, op);
     exit(1);
 }
@@ -92,7 +129,8 @@ int v6_op_calls_helper(const struct ir_ins *i)
 {
     switch (i->op) {
     case IR_DIV: case IR_MOD:
-        return !i->flt;
+        /* ARMv8-M Baseline divides 32 bits in hardware */
+        return !i->flt && (i->w == 8 || !target_thumb_v8m_base());
     case IR_MUL:
         return !i->flt && i->w == 8;
     case IR_SHL: case IR_SHR:
@@ -100,7 +138,8 @@ int v6_op_calls_helper(const struct ir_ins *i)
     case IR_MEMCPY: case IR_MEMZERO:
         return i->size > V6_INLINE_COPY;
     case IR_XCHG: case IR_XADD: case IR_ARMW: case IR_CAS: case IR_CMPXCHG:
-        return 1;
+        /* ...and has the exclusives (an eight-byte one is refused) */
+        return !target_thumb_v8m_base();
     default:
         return 0;
     }
@@ -117,7 +156,7 @@ static int in_reg6(const struct t_fn *F, int v)
  * when a pass has used them. */
 static int sc(struct t_fn *F, int r)
 {
-    if (r == S0 || r == S1)
+    if (r >= 4 && r <= 7)           /* r6/r7, or a role among r4-r7 */
         F->v6_used |= 1u << r;
     return r;
 }
@@ -133,20 +172,27 @@ static void mov(struct t_fn *F, int d, int s)
  * reverse order. */
 static int tmp_get(struct t_fn *F, unsigned avoid)
 {
-    static const int order[] = { S1, S0, 0, 1, 2, 3, 4, 5 };
+    /* the roles first (nothing is in them), then the rest pushed: r0-r5
+     * -- and r6/r7 too when they may be homes */
+    int order[8], no = 0;
+    if (g6_s1 >= 0) order[no++] = g6_s1;
+    if (g6_s0 >= 0) order[no++] = g6_s0;
+    for (int r = 0; r < (tcg_ext() ? 8 : 6); r++)
+        if (r != g6_s0 && r != g6_s1 && no < 8)
+            order[no++] = r;
     avoid |= F->tbusy | F->ins_mask;
     if (F->fb == FB6)
         avoid |= 1u << FB6;
-    for (unsigned k = 0; k < sizeof order / sizeof order[0]; k++) {
+    for (int k = 0; k < no; k++) {
         int r = order[k];
-        if (avoid & (1u << r))
+        if (r < 0 || (avoid & (1u << r)))
             continue;
         if (F->ntmp >= 6)
             internal_error("thumb: %s: too many v6 temporaries",
                            F->fn->name);
         F->tbusy |= 1u << r;
         F->tmp_reg[F->ntmp] = r;
-        F->tmp_pushed[F->ntmp] = r != S0 && r != S1;
+        F->tmp_pushed[F->ntmp] = r != g6_s0 && r != g6_s1;
         if (F->tmp_pushed[F->ntmp]) {
             t1_push(F->t, 1u << r);
             F->spb += 4;
@@ -176,7 +222,9 @@ static void tmp_put(struct t_fn *F, int r)
 
 /* ---- the literal pool ---------------------------------------------------- */
 
-enum { LIT_K, LIT_STR, LIT_GLOB, LIT_FN };
+/* LIT_LREL: &&label's word, (label | 1) - pc at its `add rD, pc`; v
+ * is its index in F->lrel, so no two share a word. */
+enum { LIT_K, LIT_STR, LIT_GLOB, LIT_FN, LIT_LREL };
 struct v6_lit { int kind; unsigned long v; const void *p; };
 struct v6_lsite { int at, k; };
 
@@ -248,6 +296,13 @@ static void pool_dump(struct t_fn *F, int branch)
             break;
         case LIT_FN:
             tcg_note_fn(F->st, t->len, (struct func *)l->p, RK_ABS32);
+            code_u32(t, 0);
+            break;
+        case LIT_LREL:
+            /* the jump table's word, (target | 1) - base, with the add's
+             * pc as the base: patched with the branches */
+            tcg_want_label(F, t->len, F->lrel[2 * l->v], T_TAB);
+            F->fix[F->nfix - 1].cz_at = F->lrel[2 * l->v + 1] + 4;
             code_u32(t, 0);
             break;
         default:
@@ -711,6 +766,21 @@ static void call_args(struct t_fn *F, int n, const int *vr, const int *nw,
     }
 }
 
+/* The parallel move a two-operand helper's setup makes with its operands
+ * in this order (call_args), as a count. */
+static int v6_args_cost(const struct t_fn *F, int va, int vb, int ww)
+{
+    int pd[4], ps[4], npm = 0, v[2] = { va, vb }, od[8], os[8];
+    for (int k = 0; k < 2; k++)
+        if (in_reg6(F, v[k]))
+            for (int q = 0; q < ww; q++) {
+                pd[npm] = (ww == 2 ? 2 * k : k) + q;
+                ps[npm] = F->loc[v[k]] + q;
+                npm++;
+            }
+    return npm ? ra_parallel_move(pd, ps, npm, IP, od, os, 8) : 0;
+}
+
 /* dst = op(a, b) by a runtime routine: one or two words each. `bw` 0 for
  * a constant second operand (i->imm). The result comes back in r0 (r0:r1
  * for `rw` 2), or r1 for `rsel` (the remainder of __aeabi_idivmod). */
@@ -744,6 +814,14 @@ static void helper2(struct t_fn *F, const struct ir_ins *i, const char *name,
 static void cmp32(struct t_fn *F, const struct ir_ins *i)
 {
     struct code *t = F->t;
+    /* The same compare as the one a branch just took, with nothing
+     * emitted since and no label placed: the flags are there already.
+     * A switch's tree asks `== k` and then `> k` of one register, and a
+     * far `== k` is `bne` over a `b`, neither of which sets flags. */
+    if (i->imm_b && in_reg6(F, i->a) && F->fl_end >= 0 &&
+        F->fl_end == t->len && F->fl_reg == F->loc[i->a] &&
+        F->fl_imm == i->imm)
+        return;
     int ra = v_rdr(F, i->a, S0);
     if (i->imm_b) {
         long v = (long)(int)(unsigned)((unsigned long)i->imm & 0xffffffffUL);
@@ -1339,7 +1417,10 @@ static void gen_call(struct t_fn *F, int n)
     for (int k = 0; k < i->nargs; k++)
         tcg_place_one(&w, &i->argv[k], &pl[k]);
     /* The stack words first: writing one needs scratch registers, and once
-     * r0-r3 are loaded only r6 and r7 are left. */
+     * r0-r3 are loaded only r6 and r7 are left. A struct's words are read
+     * at its type's alignment only where irgen promises the address has it
+     * (ir_arg.natural): a packed struct's member may be anywhere, and LDR
+     * faults on a misaligned address here. */
     for (int k = 0; k < i->nargs; k++) {
         struct ir_arg *a = &i->argv[k];
         if (pl[k].vfp >= 0 && pl[k].nvfp)
@@ -1353,7 +1434,8 @@ static void gen_call(struct t_fn *F, int n)
                 int nb = a->size - off < 4 ? (int)(a->size - off) : 4;
                 pool_point(F, 96, 0);
                 F->tbusy |= 1u << S1;
-                agg_word(F, sc(F, S0), S1, off, nb, a->align);
+                agg_word(F, sc(F, S0), S1, off, nb,
+                         a->natural ? a->align : 1);
                 F->tbusy &= ~(1u << S1);
                 sp_st(F, S0, pl[k].stk + (long)q * 4, 1u << S1);
             }
@@ -1402,7 +1484,8 @@ static void gen_call(struct t_fn *F, int n)
             for (int q = 0; q < pl[k].nreg; q++) {
                 long off = (long)q * 4;
                 int nb = a->size - off < 4 ? (int)(a->size - off) : 4;
-                agg_word(F, pl[k].reg + q, S1, off, nb, a->align);
+                agg_word(F, pl[k].reg + q, S1, off, nb,
+                         a->natural ? a->align : 1);
             }
             F->tbusy &= ~(1u << S1);
         } else if (a->size > 4) {
@@ -1413,7 +1496,36 @@ static void gen_call(struct t_fn *F, int n)
     }
     if (sret)
         fr_addr(F, T_R0, F->scratch_at + i->scratch);
-    if (i->indirect) {
+    if (i->indirect && i->call_cmse) {
+        /* CMSE's call into the Non-secure state (codegen.c says why each
+         * step), in Thumb-1: r4-r7 pushed, then r8-r11 through them; the
+         * target's bit 0 cleared in r4 (BICS takes low registers only);
+         * every register but the arguments overwritten with it, and the
+         * flags; BLXNS; and r8-r11, r4-r7 back. No VLSTM: Baseline has
+         * no FPU. */
+        tcg_cmse_check_call(fn, i, &w, sret);
+        v_rd(F, i->a, sc(F, S0));
+        t_mov_reg(t, IP, S0);
+        t1_push(t, 0xf0u);
+        for (int r = 4; r < 8; r++)
+            t_mov_reg(t, r, r + 4);
+        t1_push(t, 0xf0u);
+        t_mov_reg(t, 4, IP);
+        t1_movs_imm(t, 5, 1);
+        t1_alu_reg(t, T_OP_BIC, 4, 5);
+        for (int r = w.ncrn; r < 13; r++)
+            if (r != 4)
+                t_mov_reg(t, r, 4);
+        t_msr_apsr(t, 4, 0);
+        t_bxns(t, 4, 1);
+        t1_pop(t, 0xf0u);
+        for (int r = 4; r < 8; r++)
+            t_mov_reg(t, r + 4, r);
+        t1_pop(t, 0xf0u);
+        if (i->dst >= 0 && !i->retsize &&
+            (i->ret_tybytes == 1 || i->ret_tybytes == 2))
+            t1_ext(t, T_R0, T_R0, i->ret_tybytes, i->ret_tysign);
+    } else if (i->indirect) {
         v_rd(F, i->a, sc(F, S0));
         t_blx(t, S0);
     } else if (cg_call_local(fn->src, i->callee)) {
@@ -1454,7 +1566,9 @@ static void gen_ret(struct t_fn *F, int n)
     struct code *t = F->t;
     if (i->a >= 0 && fn->ret_abi.size && fn->ret_abi.is_struct) {
         long sz = fn->ret_abi.size;
-        int al = fn->ret_abi.align ? fn->ret_abi.align : 1;
+        /* the value's address need not be aligned: a packed struct's
+         * member (irgen's IR_RET natural), and LDR faults on ARMv6-M */
+        int al = i->natural && fn->ret_abi.align ? fn->ret_abi.align : 1;
         if (F->sret_slot >= 0) {
             /* Copied to the buffer the caller named. r0-r3 hold nothing
              * at a return, so they carry the copy: r0 the destination, r1
@@ -1627,6 +1741,142 @@ static const char *const cas_names[2][3] = {
       "__atomic_compare_exchange_4" },
 };
 
+/* ARMv8-M Baseline: the exclusives, so codegen.c's loop (thumb_atomic),
+ * in low registers:
+ *
+ *      dmb
+ *   1: ldrex{b,h}  old, [addr]
+ *      <new from old>
+ *      strex{b,h}  st, new, [addr]
+ *      cmp  st, #0
+ *      bne  1b
+ *      dmb
+ *
+ * Every operand is in a register before the loop: a load from the frame
+ * between the LDREX and the STREX is a memory access the architecture
+ * allows to clear the reservation. The temporaries are taken before the
+ * loop too, so a pushed one is pushed outside it. */
+static unsigned rbit(int r) { return 1u << r; }
+
+static void v8b_atomic(struct t_fn *F, int n)
+{
+    struct ir_func *fn = F->fn;
+    struct ir_ins *i = &fn->ins[n];
+    struct code *t = F->t;
+    int sz = i->size, addr, top, br;
+    if (sz != 1 && sz != 2 && sz != 4)
+        v6_refuse(fn, i, "an atomic wider than four bytes (ARMv8-M Baseline "
+                         "has no doubleword exclusive; clang calls "
+                         "__atomic_*_8 for these)");
+#define LDX(rt) (sz == 4 ? t_ldrex(t, (rt), addr, 0) \
+                         : t_ldrexbh(t, (rt), addr, sz))
+#define STX(st, rt) (sz == 4 ? t_strex(t, (st), (rt), addr, 0) \
+                             : t_strexbh(t, (st), (rt), addr, sz))
+    addr = v_rdr(F, i->a, S0);
+    if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW) {
+        int val = v_rdr(F, i->b, S1), old, st, nw;
+        unsigned av = rbit(addr) | rbit(val);
+        old = tmp_get(F, av);
+        st = tmp_get(F, av | rbit(old));
+        nw = i->op == IR_XCHG ? val
+           : tmp_get(F, av | rbit(old) | rbit(st));
+        if (i->op == IR_ARMW && i->imm != '&' && i->imm != '|' &&
+            i->imm != '^' && i->imm != 'n')
+            v6_refuse(fn, i, "an atomic read-modify-write of this operation");
+        t_barrier(t, T_BAR_DMB);
+        top = t->len;
+        LDX(old);
+        if (i->op == IR_XADD) {
+            t1_addsub_reg(t, T_OP_ADD, nw, old, val);
+        } else if (i->op == IR_ARMW) {
+            mov(F, nw, old);
+            t1_alu_reg(t, i->imm == '|' ? T_OP_ORR : i->imm == '^' ? T_OP_EOR
+                                                    : T_OP_AND, nw, val);
+            if (i->imm == 'n')
+                t1_mvns(t, nw, nw);
+        }
+        STX(st, nw);
+        t1_cmp_imm(t, st, 0);
+        br = bc16(F, T_NE);
+        if (!t_patch_bcond16(t, br, top))
+            internal_error("thumb: an atomic's retry loop is out of reach");
+        t_barrier(t, T_BAR_DMB);
+        if (sz < 4 && i->sign)
+            t1_ext(t, old, old, sz, 1);
+        v_wr(F, i->dst, old);
+        if (nw != val)
+            tmp_put(F, nw);
+        tmp_put(F, st);
+        tmp_put(F, old);
+    } else {
+        /* compare-and-swap: IR_CAS by value, IR_CMPXCHG with the expected
+         * value at *b and the value seen written back there */
+        int p = -1, exp, des, old, st, fail, done;
+        unsigned av = rbit(addr);
+        /* the pointer first: a value with no register (a frame address,
+         * read once) is built in S1, which tmp_get hands out first */
+        if (i->op == IR_CMPXCHG) {
+            p = v_rdr(F, i->b, S1);
+            av |= rbit(p);
+        }
+        exp = tmp_get(F, av);
+        av |= rbit(exp);
+        if (i->op == IR_CMPXCHG) {
+            if (p == exp)
+                internal_error("thumb: %s: a compare-and-swap's registers",
+                               fn->name);
+            t1_ldst_imm(t, exp, p, 0, sz, 0);        /* zero-extended */
+        } else {
+            v_rd(F, i->b, exp);
+            if (sz < 4)
+                t1_ext(t, exp, exp, sz, 0);
+        }
+        des = tmp_get(F, av);
+        av |= rbit(des);
+        v_rd(F, i->c, des);
+        old = tmp_get(F, av);
+        av |= rbit(old);
+        st = tmp_get(F, av);
+        t_barrier(t, T_BAR_DMB);
+        top = t->len;
+        LDX(old);
+        t1_cmp_reg(t, old, exp);
+        fail = bc16(F, T_NE);
+        STX(st, des);
+        t1_cmp_imm(t, st, 0);
+        br = bc16(F, T_NE);
+        done = b16(F);
+        if (!t_patch_bcond16(t, br, top))
+            internal_error("thumb: a compare-and-swap loop is out of reach");
+        bc16_here(F, fail);
+        t_clrex(t);                  /* the failed path holds a reservation */
+        b16_here(F, done);
+        t_barrier(t, T_BAR_DMB);
+        if (i->op == IR_CMPXCHG) {
+            /* *b = the value seen; the result is whether it matched. The
+             * temporaries go first (a pop leaves the flags alone), as
+             * set_cc may need a register of its own. */
+            t1_ldst_imm(t, old, p, 0, sz, 1);
+            t1_cmp_reg(t, old, exp);
+            tmp_put(F, st);
+            tmp_put(F, old);
+            tmp_put(F, des);
+            tmp_put(F, exp);
+            set_cc(F, i->dst, T_EQ);
+        } else {
+            if (sz < 4 && i->sign)
+                t1_ext(t, old, old, sz, 1);
+            v_wr(F, i->dst, old);
+            tmp_put(F, st);
+            tmp_put(F, old);
+            tmp_put(F, des);
+            tmp_put(F, exp);
+        }
+    }
+#undef LDX
+#undef STX
+}
+
 static void gen_atomic(struct t_fn *F, int n)
 {
     struct ir_func *fn = F->fn;
@@ -1636,6 +1886,10 @@ static void gen_atomic(struct t_fn *F, int n)
     int vr[3], nw[3] = { 1, 1, 1 }, dst[3] = { 0, 1, 2 };
     long kv[3] = { 0, 0, 0 };
     const char *name;
+    if (target_thumb_v8m_base()) {
+        v8b_atomic(F, n);
+        return;
+    }
     if (sz != 1 && sz != 2 && sz != 4)
         v6_refuse(fn, i, "an atomic wider than four bytes (ARMv6-M has no "
                          "exclusives; it calls __atomic_* for these)");
@@ -1655,7 +1909,7 @@ static void gen_atomic(struct t_fn *F, int n)
             t1_movs_imm(t, T_R3, 0);
             t1_movs_imm(t, sc(F, S0), 5);
             t1_movs_imm(t, sc(F, S1), 5);
-            t1_push(t, SCR_BOTH);
+            t1_push(t, (1u << S0) | (1u << S1));
             tcg_call_helper(F, name);
             t1_sp_adjust(t, 8, 0);
         } else {
@@ -1760,7 +2014,7 @@ static void gen_asm(struct t_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
     struct ir_asm *ia = i->asm_ir;
-    static const int brks[3] = { IP, S0, S1 };
+    static const int brks[3] = { IP, 6, 7 };   /* (no asm with tcg_ext) */
     int vreg_[16], vdst[16], nval = 0, brk = -1;
     unsigned opm;
 
@@ -1831,8 +2085,15 @@ static void gen_asm(struct t_fn *F, int n)
                 asm_cur(F, o->reg, o->size, opm);
         }
     }
-    for (int k = 0; k < ia->codelen; k++)
-        code_byte(t, ia->code[k]);
+    {
+        int base = t->len;
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        /* the template's data (`.short`, `.word`...): bytes v6_scan
+         * must not read as instructions, and a disassembler sees as data */
+        for (int k = 0; k + 1 < ia->ndrange; k += 2)
+            code_mark_data(t, base + ia->drange[k], base + ia->drange[k + 1]);
+    }
     /* Out, through an address: the address is live across the asm, out of
      * what it changes (regalloc.c), so a register still holds it. An "m"
      * output was written BY the template through the address its register
@@ -1872,6 +2133,11 @@ static void gen_asm(struct t_fn *F, int n)
             int v = vdst[k], r = vreg_[k], x = -1;
             long fo;
             if (v < 0)
+                continue;
+            /* nothing reads it: no home to fill (and a dead value may
+             * share its register with another, which no move can fill
+             * twice) */
+            if (F->usecnt && F->usecnt[v] == 0)
                 continue;
             if (in_reg6(F, v)) {
                 pd[npm] = F->loc[v];
@@ -2038,7 +2304,7 @@ static void gen_ins(struct t_fn *F, int n)
     struct code *t = F->t;
 
     /* -g: a line-table row wherever the source line changes. */
-    if (F->want_debug && i->line) {
+    if (target_debug_info() && i->line) {
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
         if (last && last->off == t->len) {
@@ -2066,6 +2332,17 @@ static void gen_ins(struct t_fn *F, int n)
         if (name) {
             if (i->imm_b)
                 v6_refuse(fn, i, "a folded floating-point immediate");
+            /* a + b and a * b as (b, a) when that is fewer moves, as on
+             * ARMv7-M (codegen.c's fp_swap_args) */
+            if ((i->op == IR_ADD || i->op == IR_MUL) && i->a != i->b &&
+                v6_args_cost(F, i->b, i->a, ww) <
+                v6_args_cost(F, i->a, i->b, ww)) {
+                struct ir_ins sw = *i;
+                sw.a = i->b;
+                sw.b = i->a;
+                helper2(F, &sw, name, ww, ww, ww, 0);
+                return;
+            }
             helper2(F, i, name, ww, ww, ww, 0);
             return;
         }
@@ -2094,15 +2371,26 @@ static void gen_ins(struct t_fn *F, int n)
             return;
         }
         if (i->op == IR_CMP) {
-            int cond = tcg_cond_for(i->pred, 1);   /* the helper's signed answer */
+            /* a < b as b > a when that is fewer moves (codegen.c's float
+             * compare says why the mirror is exact) */
+            enum binop pred = i->pred;
+            int va = i->a, vb = i->b;
+            if (!i->imm_b && va != vb &&
+                v6_args_cost(F, vb, va, ww) < v6_args_cost(F, va, vb, ww)) {
+                va = i->b;
+                vb = i->a;
+                pred = pred == B_LT ? B_GT : pred == B_GT ? B_LT
+                     : pred == B_LE ? B_GE : pred == B_GE ? B_LE : pred;
+            }
+            int cond = tcg_cond_for(pred, 1);      /* the helper's signed answer */
             struct ir_ins *nx = n + 1 < fn->nins ? &fn->ins[n + 1] : NULL;
             int vr[2], nw[2], dst[2];
             long kv[2] = { 0, 0 };
-            vr[0] = i->a; vr[1] = i->b;
+            vr[0] = va; vr[1] = vb;
             nw[0] = nw[1] = ww;
             dst[0] = 0; dst[1] = ww == 2 ? 2 : 1;
             call_args(F, 2, vr, nw, dst, kv);
-            tcg_call_helper(F, tcg_fp_cmp_name(i->pred, i->w));
+            tcg_call_helper(F, tcg_fp_cmp_name(pred, i->w));
             t1_cmp_imm(t, T_R0, 0);
             if (nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
                 nx->a == i->dst && nx->w != 8 && F->usecnt &&
@@ -2154,6 +2442,13 @@ static void gen_ins(struct t_fn *F, int n)
             break;
         default: break;
         }
+        /* an eight-byte atomic is refused by name there */
+        if (wide && (i->op == IR_XCHG || i->op == IR_XADD ||
+                     i->op == IR_ARMW || i->op == IR_CAS ||
+                     i->op == IR_CMPXCHG)) {
+            gen_atomic(F, n);
+            return;
+        }
         if (wide && i->op != IR_CMP && i->op != IR_BRZ &&
             i->op != IR_BRNZ && i->op != IR_CALL && i->op != IR_RET &&
             i->op != IR_I2F && i->op != IR_F2I && i->op != IR_F2F) {
@@ -2169,6 +2464,7 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LABEL:
         F->label_off[i->label] = t->len;
         F->bc_end = -1;
+        F->fl_end = -1;
         F->barrier = 0;
         return;
     case IR_JMP:
@@ -2209,6 +2505,40 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_AND: case IR_OR: case IR_XOR: case IR_MUL: {
+        /* `if (x & BIT)`: the bit shifted to bit 31 of a scratch, `lsls
+         * r7, r0, #31-k; bmi` -- four bytes where the mask, the and and
+         * the compare were eight; `if (x & LOWMASK)` the same with Z.
+         * Only with the branch right after and nothing else reading the
+         * result (codegen.c's ARMv7-M test says why N, not Z). */
+        if (i->op == IR_AND && i->imm_b && n + 1 < fn->nins &&
+            F->usecnt && F->usecnt[i->dst] == 1 &&
+            (fn->ins[n + 1].op == IR_BRZ || fn->ins[n + 1].op == IR_BRNZ) &&
+            fn->ins[n + 1].a == i->dst && fn->ins[n + 1].w == 4) {
+            unsigned long mk = (unsigned long)i->imm & 0xffffffffUL;
+            const struct ir_ins *bx = &fn->ins[n + 1];
+            int sh = -1, onebit = 0;
+            if (mk && !(mk & (mk - 1))) {
+                for (sh = 31; !(mk >> (31 - sh) & 1); sh--)
+                    ;
+                onebit = 1;
+            } else if (mk && mk != 0xffffffffUL && !(mk & (mk + 1))) {
+                int m = 0;
+                while (mk >> m) m++;
+                sh = 32 - m;
+            }
+            if (sh >= 0) {
+                int ra = v_rdr(F, i->a, S0);
+                if (sh == 0)
+                    t1_cmp_imm(t, ra, 0);
+                else
+                    t1_shift_imm(t, T_SH_LSL, sc(F, S1), ra, sh);
+                v6_jump_if(F, onebit ? (bx->op == IR_BRZ ? T_PL : T_MI)
+                                     : (bx->op == IR_BRZ ? T_EQ : T_NE),
+                           bx->label);
+                F->skip_next = 1;
+                return;
+            }
+        }
         int ra = v_rdr(F, i->a, S0), d = v_wreg(F, i->dst, S0), rb;
         if (i->imm_b) {
             unsigned long c = (unsigned long)i->imm & 0xffffffffUL;
@@ -2230,6 +2560,29 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
     case IR_DIV: case IR_MOD:
+        /* ARMv8-M Baseline: SDIV/UDIV, and a remainder as clang makes it
+         * there, a - (a / b) * b, with MULS and SUBS -- no MLS. */
+        if (target_thumb_v8m_base()) {
+            int ra = v_rdr(F, i->a, S0), rb, d, q;
+            if (i->imm_b) {
+                k32(F, sc(F, S1), (unsigned long)i->imm);
+                rb = S1;
+            } else {
+                rb = v_rdr(F, i->b, S1);
+            }
+            d = v_wreg(F, i->dst, S0);
+            if (i->op == IR_DIV) {
+                t_div(t, d, ra, rb, i->sign);
+            } else {
+                q = tmp_get(F, rbit(ra) | rbit(rb) | rbit(d));
+                t_div(t, q, ra, rb, i->sign);
+                t1_muls(t, q, rb);
+                t1_addsub_reg(t, T_OP_SUB, d, ra, q);
+                tmp_put(F, q);
+            }
+            v_wr(F, i->dst, d);
+            return;
+        }
         /* No divide instruction: the RTABI routines. __aeabi_idivmod
          * leaves the quotient in r0 and the remainder in r1. */
         helper2(F, i, i->op == IR_DIV
@@ -2300,6 +2653,13 @@ static void gen_ins(struct t_fn *F, int n)
         if (fuse) {
             v6_jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1), nx->label);
             F->skip_next = 1;
+            /* what cmp32 may reuse: a register against an immediate */
+            F->fl_end = -1;
+            if (i->imm_b && in_reg6(F, i->a)) {
+                F->fl_end = t->len;
+                F->fl_reg = F->loc[i->a];
+                F->fl_imm = i->imm;
+            }
             return;
         }
         set_cc(F, i->dst, cond);
@@ -2422,6 +2782,24 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     }
 
+    case IR_FRAMEADDR: {
+        /* Level 0 only (irgen), as the Thumb-2 backend: the stack pointer
+         * at entry, above the push (and r0-r3's, if variadic); the return
+         * address in lr still where nothing was pushed, else the pushed
+         * lr, the push's highest word. */
+        int d;
+        if (i->dst < 0)
+            return;
+        d = v_wreg(F, i->dst, S0);
+        if (i->imm == 2 && F->nopush)
+            t_mov_reg(t, d, T_LR);
+        else if (i->imm == 2)
+            fr_ld(F, d, F->entry_off - 4, 4, 0);
+        else
+            fr_addr(F, d, F->entry_off + (fn->is_varargs ? 16 : 0));
+        v_wr(F, i->dst, d);
+        return;
+    }
     case IR_ADDR: {
         long fo;
         int d;
@@ -2566,8 +2944,28 @@ static void gen_ins(struct t_fn *F, int n)
     case IR_LANDING:
         v6_refuse(fn, i, "an exception landing pad");
         return;
-    case IR_IGOTO: case IR_LABELADDR:
-        v6_refuse(fn, i, "a computed goto");
+    case IR_LABELADDR: {
+        if (cg_label_mark(i))       /* static data's marker: no code */
+            return;
+        /* &&label, PC-relative and with no relocation: a pool word of
+         * the label's distance from the pc an `add` reads, Thumb bit
+         * included --
+         *     ldr rD, =(label | 1) - (1f + 4) ; 1: add rD, pc
+         * -- as the word jump table makes the same sum for bx. */
+        int d = v_wreg(F, i->dst, S0), k = F->nlrel++;
+        if (k * 2 + 2 > F->caplrel) {
+            F->caplrel = F->caplrel ? F->caplrel * 2 : 16;
+            F->lrel = xrealloc(F->lrel, (size_t)F->caplrel * sizeof *F->lrel);
+        }
+        lit_load(F, d, LIT_LREL, (unsigned long)k, NULL);
+        F->lrel[2 * k] = i->label;
+        F->lrel[2 * k + 1] = t->len;
+        t1_add_hi(t, d, T_PC);
+        v_wr(F, i->dst, d);
+        return;
+    }
+    case IR_IGOTO:
+        t_bx(t, v_rdr(F, i->a, S0));
         return;
     case IR_CAS16:
         v6_refuse(fn, i, "a 16-byte atomic");
@@ -2663,19 +3061,15 @@ static void pool_point(struct t_fn *F, long est, int natural)
  * not BL, MRS, MSR, DMB, DSB or ISB, an IT block, or a CBZ/CBNZ would be
  * UNDEFINED on the core. A lowering that reached an ARMv7-M encoder, or an
  * inline asm template that used Thumb-2, stops the function here by name
- * rather than at a HardFault. */
+ * rather than at a HardFault.
+ *
+ * ARMv8-M Baseline has CBZ/CBNZ and more 32-bit ones as well, each matched
+ * on its fixed bits by t_thumb1_ok32 (emit.c), which the assembler asks
+ * too; tests/golden/thumbv8mbase-encoding.sh checks that set against
+ * llvm-mc. */
 static int v6_ok32(unsigned h, unsigned h2)
 {
-    if ((h & 0xf800u) == 0xf000u && (h2 & 0xd000u) == 0xd000u)
-        return 1;                                    /* BL */
-    if (h == 0xf3efu && (h2 & 0xf000u) == 0x8000u)
-        return 1;                                    /* MRS */
-    if ((h & 0xfff0u) == 0xf380u && (h2 & 0xff00u) == 0x8800u)
-        return 1;                                    /* MSR */
-    if (h == 0xf3bfu && (h2 & 0xff0fu) == 0x8f0fu &&
-        ((h2 >> 4) & 0xf) >= 4 && ((h2 >> 4) & 0xf) <= 6)
-        return 1;                                    /* DSB, DMB, ISB */
-    return 0;
+    return t_thumb1_ok32(h, h2, target_thumb_v8m_base());
 }
 
 static void v6_scan(struct t_fn *F, int from)
@@ -2697,14 +3091,21 @@ static void v6_scan(struct t_fn *F, int from)
             unsigned h2 = at + 3 < t->len
                 ? (unsigned)(t->p[at + 2] | t->p[at + 3] << 8) : 0;
             if (!v6_ok32(h, h2))
-                v6_refuse(F->fn, NULL, "an instruction ARMv6-M does not have "
-                          "(a 32-bit Thumb-2 encoding, from inline asm or "
-                          "the backend)");
+                v6_refuse(F->fn, NULL, target_thumb_v8m_base()
+                          ? "an instruction ARMv8-M Baseline does not have "
+                            "(a 32-bit Thumb-2 encoding, from inline asm or "
+                            "the backend)"
+                          : "an instruction ARMv6-M does not have "
+                            "(a 32-bit Thumb-2 encoding, from inline asm or "
+                            "the backend)");
             at += 4;
             continue;
         }
-        if (((h & 0xff00u) == 0xbf00u && (h & 0xfu)) ||    /* IT */
-            (h & 0xf500u) == 0xb100u)                      /* CBZ/CBNZ */
+        if ((h & 0xff00u) == 0xbf00u && (h & 0xfu))       /* IT */
+            v6_refuse(F->fn, NULL, target_thumb_v8m_base()
+                      ? "an IT block, which ARMv8-M Baseline does not have"
+                      : "an IT block or CBZ, which ARMv6-M does not have");
+        if ((h & 0xf500u) == 0xb100u && !target_thumb_v8m_base())  /* CBZ */
             v6_refuse(F->fn, NULL, "an IT block or CBZ, which ARMv6-M does "
                       "not have");
         at += 2;
@@ -2715,7 +3116,7 @@ static void v6_scan(struct t_fn *F, int from)
 
 static unsigned save_mask6(const struct t_fn *F, unsigned scr)
 {
-    unsigned m = (scr & SCR_BOTH) | (1u << T_LR);
+    unsigned m = (scr & SCR_SET) | (1u << T_LR);
     int c = 0;
     for (int k = 0; k < F->nsave; k++)
         m |= 1u << F->used_callee[k];
@@ -2747,8 +3148,8 @@ static void sp_frame(struct t_fn *F, long frame, int sub)
         }
         return;
     }
-    k32_nf(F, sc(F, S0), sub ? (0UL - (unsigned long)frame) : (unsigned long)frame);
-    t1_add_hi(t, T_SP, S0);
+    k32_nf(F, sc(F, 6), sub ? (0UL - (unsigned long)frame) : (unsigned long)frame);
+    t1_add_hi(t, T_SP, 6);
 }
 
 static void ins_mask_of(int v, void *ctx)
@@ -2761,8 +3162,138 @@ static void ins_mask_of(int v, void *ctx)
     }
 }
 
+/* The scratch pair for instruction n when r6/r7 are homes (tcg_ext): two
+ * low registers holding no value live into or out of n..n+2 and none it
+ * reads or writes (tcg_busy -- the span covers what its lowering emits
+ * ahead, skip_next). r0-r3 only for an instruction whose lowering names no
+ * low register of its own (tcg_lo_op_ok: a call, a helper, a 64-bit value
+ * put arguments and pairs in fixed ones); r4-r7 for any, the ones the
+ * prologue already saves first -- another is saved for it, as r6/r7 are
+ * (sc). Never the frame base. */
+static void ins_mask_of(int v, void *ctx);
+static void ins_mask_of_ext(int v, void *ctx) { ins_mask_of(v, ctx); }
+
+/* A call whose lowering (gen_call) uses its scratch only for the stack
+ * arguments, which it stores before any argument register is loaded: no
+ * composite argument in registers (read through S1 after the move), no
+ * indirect target (read through S0 after it), no composite result (the
+ * scratch after the call). Then r0-r3 that hold nothing at the call serve
+ * as well as r6/r7. */
+static int v6_call_lo_ok(const struct ir_ins *i)
+{
+    if (i->op != IR_CALL || i->indirect || i->retsize)
+        return 0;
+    for (int k = 0; k < i->nargs; k++)
+        if (i->argv[k].is_struct)
+            return 0;
+    return 1;
+}
+
+static void v6_roles(struct t_fn *F, int n)
+{
+    unsigned busy = F->lv_busy ? tcg_busy(F, n, 2) : 0xffu;
+    unsigned saved = 0;            /* by the allocator: the same every pass */
+    int cand[8], nc = 0;
+    if (F->fn->has_alloca)
+        busy |= 1u << FB6;
+    for (int k = 0; k < F->nsave; k++)
+        saved |= 1u << F->used_callee[k];
+    if (tcg_lo_op_ok(F, &F->fn->ins[n]) || v6_call_lo_ok(&F->fn->ins[n]))
+        for (int r = 0; r < 4; r++)
+            if (!(busy >> r & 1))
+                cand[nc++] = r;
+    for (int pass = 0; pass < 2; pass++)
+        for (int r = 7; r >= 4; r--)
+            if (!(busy >> r & 1) && ((saved >> r & 1) != 0) == (pass == 0))
+                cand[nc++] = r;
+    g6_s0 = nc > 0 ? cand[0] : -1;
+    g6_s1 = nc > 1 ? cand[1] : -1;
+}
+
+/* No free register for a role: for a plain computation (tcg_lo_op_ok, and
+ * neither a branch nor followed by one its lowering might fuse), one that
+ * nothing it reads or writes is in, pushed before it and popped after --
+ * as tmp_get does, sp-relative offsets adding F->spb meanwhile. Not
+ * around a call (its stack arguments are at sp, and sp must stay
+ * eight-aligned), nor a branch (the pop would not run where it goes).
+ * Returns the registers pushed; 0 when the attempt is better failed. */
+static unsigned v6_roles_push(struct t_fn *F, int n)
+{
+    const struct ir_func *fn = F->fn;
+    unsigned ops = 0, pushed = 0;
+    if (g6_s0 >= 0 && g6_s1 >= 0)
+        return 0;
+    for (int m = n; m <= n + 2 && m < fn->nins; m++) {
+        enum ir_op op = fn->ins[m].op;
+        if (op == IR_BRZ || op == IR_BRNZ || op == IR_JMP || op == IR_RET ||
+            op == IR_SWITCH || op == IR_IGOTO || op == IR_LABEL ||
+            op == IR_MEMCPY || op == IR_MEMZERO || op == IR_CALL ||
+            op == IR_UD2)
+            return 0;
+    }
+    if (!tcg_lo_op_ok(F, &fn->ins[n]))
+        return 0;
+    {
+        /* the registers of the values n..n+2 name: not liveness, only
+         * what the lowering reads and writes */
+        unsigned keep = F->ins_mask;
+        F->ins_mask = 0;
+        for (int m = n; m <= n + 2 && m < fn->nins; m++) {
+            ra_each_use(&fn->ins[m], ins_mask_of_ext, F);
+            ins_mask_of_ext(fn->ins[m].dst, F);
+        }
+        ops = F->ins_mask;
+        F->ins_mask = keep;
+    }
+    if (fn->has_alloca)
+        ops |= 1u << FB6;
+    for (int r = 7; r >= 0 && (g6_s0 < 0 || g6_s1 < 0); r--) {
+        if ((ops >> r & 1) || r == g6_s0 || r == g6_s1)
+            continue;
+        pushed |= 1u << r;
+        if (g6_s0 < 0) g6_s0 = r; else g6_s1 = r;
+    }
+    if (g6_s0 < 0 || g6_s1 < 0)
+        return 0;
+    t1_push(F->t, pushed);
+    for (unsigned b = pushed; b; b &= b - 1)
+        F->spb += 4;
+    return pushed;
+}
+
+/* -g: the prologue as call frame information, as t_record_cfi does it
+ * for ARMv7-M: the variadic save area, the push (low registers and lr,
+ * the lowest at the lowest address), the frame's sub sp, and r5 as the
+ * frame base where sp moves. */
+static void v6_record_cfi(struct t_fn *F, long code_off)
+{
+    struct ir_func *fn = F->fn;
+    long cfa = 0;
+    fn->ncfi = 0;
+    if (F->cfi_va_end >= 0) {
+        cfa += 16;
+        ir_cfi_add(fn, (int)(F->cfi_va_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
+    }
+    if (F->cfi_push_end >= 0) {
+        int at = (int)(F->cfi_push_end - code_off), n = 0, k = 0;
+        for (int r = 0; r < 16; r++)
+            n += (F->cfi_push_mask >> r) & 1;
+        cfa += 4L * n;
+        ir_cfi_add(fn, at, IR_CFI_CFA_OFFSET, 0, cfa);
+        for (int r = 0; r < 16; r++)
+            if ((F->cfi_push_mask >> r) & 1)
+                ir_cfi_add(fn, at, IR_CFI_SAVED, r, -cfa + 4L * k++);
+    }
+    if (F->cfi_frame_end >= 0) {
+        cfa += F->frame;
+        ir_cfi_add(fn, (int)(F->cfi_frame_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
+    }
+    if (F->cfi_fp_end >= 0)
+        ir_cfi_add(fn, (int)(F->cfi_fp_end - code_off), IR_CFI_CFA_REG, FB6, cfa);
+}
+
 void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
-                 int want_debug)
+                 int keep_vars)
 {
     struct func *f = fn->src;
     struct t_fn F;
@@ -2772,7 +3303,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.wide = tcg_wide64_map(fn);
     tcg_frame_addr_map(&F);
     F.nshr = ra_narrow_hishift(fn);
@@ -2780,17 +3312,20 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         if (F.nshr[v]) F.wide[v] = 0;
     F.va_regsave = F.va_first = -1;
     F.bc_end = F.bc_fix = -1;
-    F.scr_save = SCR_BOTH;
+    F.scr_save = SCR_SET;
     F.fb = T_SP;
+    g6_s0 = 6; g6_s1 = 7;
     if (tcg_regalloc()) {
         /* -g, and -O0: every source variable in its slot (codegen.c's
          * g_t_o0), the temporaries in registers */
-        char *pin = want_debug || tcg_o0() ? ra_debug_pin_vars(fn)
+        char *pin = keep_vars || tcg_o0() ? ra_debug_pin_vars(fn)
                                            : (char *)0;
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = tcg_pair_alloc(fn, F.wide, pin, pused, &npused);
-        F.loc = ra_allocate(fn, tcg_ra(), F.wide, pin, F.used_callee,
+        char *fx = tcg_faddr_excl(&F, pin);
+        F.loc = ra_allocate(fn, tcg_ra(), F.wide, fx ? fx : pin, F.used_callee,
                             &F.nsave);
+        free(fx);
         tcg_reset_taken();
         if (pair) {
             for (int v = 0; v < fn->nvregs; v++)
@@ -2809,6 +3344,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     if (fn->has_alloca)
         F.used_callee[F.nsave++] = FB6;
+    if (fn->cmse_entry)
+        tcg_cmse_check_entry(fn);
     /* A leaf: nothing calls, the lowering's own calls included. An asm
      * writes lr when its template calls or names it, which irgen recorded
      * (ir_asm.clob); one whose clobbers are unknown might. */
@@ -2822,6 +3359,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             t_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
     tcg_layout(&F);
+    if (tcg_ext() && F.loc && fn->nins && fn->nvregs)
+        F.lv_busy = tcg_lo_busy_map(&F);
+    else if (tcg_ext())
+        tcg_role_fail();           /* nothing is known free */
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);
     F.no_tbh = xcalloc((size_t)fn->nins + 1, 1);
 
@@ -2843,8 +3384,10 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.label_off[i] = -1;
         F.skip_next = 0;
         F.bc_end = F.bc_fix = -1;
+        F.fl_end = -1;
         F.va_regsave = F.va_first = -1;
         F.nlit = F.nlsite = 0;
+        F.nlrel = 0;
         F.npads = 0;
         F.spb = 0;
         F.ntmp = 0;
@@ -2856,7 +3399,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.npoint = 0;
         F.shortb = first ? NULL : cls;
         F.nshortb = first ? 0 : ncls;
-        if (want_debug) {
+        if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
         }
@@ -2866,35 +3409,49 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         while (t->len & 3)
             t_nop(t);
         f->code_align = 4;
-        if (want_debug) {
+        if (target_debug_info()) {
             int nv = fn->nvars ? fn->nvars : 1;
             fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
             for (int v = 0; v < fn->nvars; v++)
-                fn->var_off[v] = (int)F.slot[v];
+                fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0,
+                                             F.slot[v]);
         }
         f->code_off = t->len;
 
         /* ---- prologue ---- */
+        g6_s0 = 6; g6_s1 = 7;              /* the prologue's */
         if (F.frame > 1016)
-            F.scr_save |= 1u << S0;         /* sp_frame's register */
+            F.scr_save |= 1u << 6;          /* sp_frame's register */
         if (F.far_mode)
             F.leaf = 0;                     /* BL is a branch: lr is spent */
         F.nopush = F.leaf && !F.nsave && !F.frame && !fn->is_varargs &&
-                   !fn->has_alloca && !(F.scr_save & SCR_BOTH);
-        if (fn->is_varargs)
+                   !fn->has_alloca && !(F.scr_save & SCR_SET);
+        F.cfi_va_end = F.cfi_push_end = F.cfi_vsave_end = -1;
+        F.cfi_frame_end = F.cfi_fp_end = -1;
+        if (fn->is_varargs) {
             t1_push(t, 0xfu);
-        if (!F.nopush)
-            t1_push(t, save_mask6(&F, F.scr_save));
-        sp_frame(&F, F.frame, 1);
+            F.cfi_va_end = t->len;
+        }
+        if (!F.nopush) {
+            F.cfi_push_mask = save_mask6(&F, F.scr_save);
+            t1_push(t, F.cfi_push_mask);
+            F.cfi_push_end = t->len;
+        }
+        if (F.frame) {
+            sp_frame(&F, F.frame, 1);
+            F.cfi_frame_end = t->len;
+        }
         if (fn->has_alloca) {
             t_mov_reg(t, FB6, T_SP);
             F.fb = FB6;
+            F.cfi_fp_end = t->len;
         }
         frame_push = F.nopush ? 0 : F.frame + mask_bytes(save_mask6(&F, F.scr_save));
         {
             struct argplace pl;
             struct abi_walk w;
             long base = frame_push;
+            F.entry_off = base;
             int pmv_dst[RA_MAXPOOL * 2], pmv_src[RA_MAXPOOL * 2], npmv = 0;
             int pstk_reg[RA_MAXPOOL]; long pstk_off[RA_MAXPOOL];
             int npstk = 0;
@@ -2952,8 +3509,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                     long src = base + pl.stk + (long)q * 4;
                     long dst = F.slot[i] + (long)(pl.nreg + q) * 4;
                     pool_point(&F, 64, 0);
-                    fr_ld(&F, sc(&F, S0), src, 4, 0);
-                    fr_st(&F, S0, dst, 4, 0xfu | (1u << S0));
+                    fr_ld(&F, sc(&F, 6), src, 4, 0);
+                    fr_st(&F, 6, dst, 4, 0xfu | (1u << 6));
                 }
             }
             if (npmv) {
@@ -2976,11 +3533,21 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         /* ---- body ---- */
         for (i = 0; i < fn->nins; i++) {
             pool_point(&F, v6_est(&F, i), 1);
+            unsigned rpush = 0;
             F.ins_mask = 0;
             ra_each_use(&fn->ins[i], ins_mask_of, &F);
             ins_mask_of(fn->ins[i].dst, &F);
+            if (tcg_ext()) {
+                v6_roles(&F, i);
+                rpush = v6_roles_push(&F, i);
+            }
             F.tbusy = 0;
             gen_ins(&F, i);
+            if (rpush) {
+                t1_pop(t, rpush);
+                for (unsigned b = rpush; b; b &= b - 1)
+                    F.spb -= 4;
+            }
             if (F.ntmp || F.spb)
                 internal_error("thumb: %s: instruction %d left %d temporaries",
                                fn->name, i, F.ntmp);
@@ -2991,12 +3558,30 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         }
 
         /* ---- epilogue ---- */
+        g6_s0 = 6; g6_s1 = 7;
         F.label_off[fn->nlabels] = t->len;
         F.ins_mask = 0;
         if (fn->has_alloca)
             t_mov_reg(t, T_SP, FB6);
         sp_frame(&F, F.frame, 0);
-        if (F.nopush) {
+        if (fn->cmse_entry) {
+            /* CMSE: back to the Non-secure state (codegen.c's
+             * cmse_entry_return). POP cannot name lr here, so the return
+             * address comes off into r3 -- which is cleared anyway -- and
+             * every cleared register then takes lr's value. */
+            if (!F.nopush) {
+                unsigned mask = save_mask6(&F, F.scr_save);
+                if (mask & ~(1u << T_LR))
+                    t1_pop(t, mask & ~(1u << T_LR));
+                t1_pop(t, 1u << 3);
+                t_mov_reg(t, T_LR, 3);
+            }
+            for (int r = tcg_cmse_ret_regs(fn); r < 4; r++)
+                t_mov_reg(t, r, T_LR);
+            t_mov_reg(t, IP, T_LR);
+            t_msr_apsr(t, T_LR, 0);
+            t_bxns(t, T_LR, 0);
+        } else if (F.nopush) {
             t_bx(t, T_LR);
         } else {
             unsigned mask = save_mask6(&F, F.scr_save);
@@ -3067,7 +3652,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             free(cls);
             cls = NULL;
             ncls = 0;
-            F.scr_save = SCR_BOTH;
+            F.scr_save = SCR_SET;
             continue;
         }
 
@@ -3112,14 +3697,14 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 /* An asm writes neither: its operands are r0-r3 and r12
                  * (sema), irgen refuses a template or clobber list naming
                  * r4-r11, and gen_asm takes them through sc()/tmp_get. */
-                unsigned used = F.v6_used & SCR_BOTH;
+                unsigned used = F.v6_used & SCR_SET;
                 int scr_changed = 0;
                 if (F.frame > 1016)
-                    used |= 1u << S0;
+                    used |= 1u << 6;
                 if (used & ~F.scr_save) {
                     /* a pass used a scratch register it did not save:
                      * again, saving both */
-                    F.scr_save = SCR_BOTH;
+                    F.scr_save = SCR_SET;
                     scr_changed = 1;
                 } else if (used != F.scr_save && first) {
                     F.scr_save = used;
@@ -3139,11 +3724,17 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     v6_scan(&F, f->code_off);
     f->code_len = t->len - f->code_off;
-    f->stack_bytes = F.nopush ? 0 : (int)(F.frame +
-                                          mask_bytes(save_mask6(&F, F.scr_save)));
+    if (target_debug_info())
+        v6_record_cfi(&F, f->code_off);
+    /* ...and the variadic register save area pushed before it */
+    f->stack_bytes = (F.nopush ? 0 : (int)(F.frame +
+                                           mask_bytes(save_mask6(&F, F.scr_save)))) +
+                     (fn->is_varargs ? 16 : 0);
     free(cls);
     free(F.usecnt);
+    free(F.lv_busy);
     free(F.slot);
+    cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
     free(F.wide);
@@ -3155,5 +3746,6 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.no_tbh);
     free(F.lit);
     free(F.lsite);
+    free(F.lrel);
     free(F.pads);
 }

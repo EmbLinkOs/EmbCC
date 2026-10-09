@@ -16,6 +16,11 @@
  */
 extern unsigned __data_load, __data_start, __data_end;
 extern unsigned __bss_start, __bss_end;
+/* The static constructors -- a C++ namespace-scope object's, a C
+ * __attribute__((constructor)) -- which embld gathers into .init_array
+ * between these two symbols. */
+typedef void (*initfn)(void);
+extern initfn __init_array_start[], __init_array_end[];
 
 int main(void);
 void _start(void);
@@ -32,10 +37,20 @@ void _start(void);
 void _start(void)
 {
     unsigned *d = &__data_start, *s = &__data_load;
+#ifdef __riscv_flen
+    /* An image built for the F or D extension (-march=rv32imafc,
+     * rv64gc...): the FPU is OFF at reset -- mstatus.FS is 0, and the
+     * first floating-point instruction is an illegal-instruction trap.
+     * FS = Initial (bits 14:13 = 01) turns it on. Before anything else
+     * runs, since a constructor may compute in floating point too. */
+    __asm__ volatile("csrs mstatus, %0" : : "r"(0x2000u));
+#endif
     while (d < &__data_end)
         *d++ = *s++;
     for (d = &__bss_start; d < &__bss_end; )
         *d++ = 0;
+    for (initfn *f = __init_array_start; f < __init_array_end; f++)
+        (*f)();
     main();
     SIFIVE_TEST = TEST_PASS;
     for (;;)

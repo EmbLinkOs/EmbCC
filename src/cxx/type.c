@@ -158,8 +158,64 @@ int ct_dependent(const struct cty *t)
     }
 }
 
-struct cty *ct_size_t(void) { return ct_basic(CT_ULONG); }
-struct cty *ct_ptrdiff_t(void) { return ct_basic(CT_LONG); }
+/* size_t and ptrdiff_t are the target's (its C++ __SIZE_TYPE__ and
+ * __PTRDIFF_TYPE__): unsigned long and long on the 64-bit targets,
+ * unsigned int and int on most 32-bit ones (ARM EABI, RV32, MIPS o32,
+ * SPARC, ColdFire, Xtensa, TriCore) and on AVR -- the type, not only the
+ * width, since it is mangled (_Znwm on x86-64, _Znwj on ARM), though long
+ * is as wide as int there. RX (GCC's newlib-stdint) and bare-metal
+ * PowerPC (clang's powerpc-none-eabi, whose predefined macros these are)
+ * spell them `long` at four bytes: _Znwm. */
+static int size_t_is_long(void)
+{
+    return target_ptr_size() == 8 || target_long_size_types() ||
+           target_get() == TARGET_PPC32;
+}
+struct cty *ct_size_t(void)
+{
+    return ct_basic(size_t_is_long() ? CT_ULONG : CT_UINT);
+}
+struct cty *ct_ptrdiff_t(void)
+{
+    return ct_basic(size_t_is_long() ? CT_LONG : CT_INT);
+}
+
+int cx_ptr_size(void) { return target_ptr_size(); }
+
+/* The ARM C++ ABI (IHI 0041) on 32-bit ARM: constructors and destructors
+ * return `this`, 32-bit guards that test bit 0, two-word array cookies,
+ * __aeabi_atexit. AArch64's C++ ABI is the generic one but for its
+ * member-function pointers (emit.c's arm_pmf). */
+int cx_arm32_abi(void) { return target_get() == TARGET_THUMB; }
+
+/* Where a pointer to member function says it is virtual (Itanium 2.3):
+ * the generic ABI flags the low bit of ptr, which works only where no
+ * function's address is odd. ARM's C++ ABI moves the flag to the low bit
+ * of adj (ptr is then the vtable offset, adj twice the adjustment), and
+ * AArch64 and MIPS follow it (clang's GenericAArch64 and GenericMIPS,
+ * g++'s TARGET_PTRMEMFUNC_VBIT_LOCATION) -- as must any target whose
+ * functions may sit at odd addresses: RX, whose code is byte-aligned, and
+ * AVR, whose function pointers are word addresses. */
+int cx_pmf_vbit_in_adj(void)
+{
+    switch (target_get()) {
+    case TARGET_AARCH64: case TARGET_THUMB: case TARGET_MIPS32:
+    case TARGET_MIPS64: case TARGET_RX: case TARGET_AVR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* The bytes an array new puts before the elements of a type with a
+ * destructor (Itanium 2.7): the count in a size_t, the whole padded to
+ * the element's alignment. ARM's cookie is two words, the element size
+ * and then the count, at the start of the allocation. */
+long cx_array_cookie(const struct cty *elem)
+{
+    long c = cx_arm32_abi() ? 8 : target_ptr_size(), al = ct_align(elem);
+    return al > c ? al : c;
+}
 
 struct cty *ct_strip_ref(struct cty *t)
 {
@@ -322,12 +378,25 @@ long ct_size(const struct cty *t)
     case CT_BOOL: case CT_CHAR: case CT_SCHAR: case CT_UCHAR: case CT_CHAR8:
         return 1;
     case CT_SHORT: case CT_USHORT: case CT_CHAR16: return 2;
-    case CT_INT: case CT_UINT: case CT_WCHAR: case CT_CHAR32: case CT_FLOAT:
+    /* int is two bytes on AVR; wchar_t is a 16-bit unsigned short on
+     * Xtensa (target_wchar_size) */
+    case CT_INT: case CT_UINT: return target_int_size();
+    case CT_WCHAR: return target_wchar_size();
+    case CT_CHAR32: case CT_FLOAT:
         return 4;
-    case CT_LONG: case CT_ULONG: case CT_LLONG: case CT_ULLONG:
-    case CT_DOUBLE: case CT_PTR: case CT_NULLPTR: case CT_LREF: case CT_RREF:
-    case CT_VALIST:
+    case CT_LONG: case CT_ULONG:
+        return target_long_size();
+    case CT_LLONG: case CT_ULLONG:
         return 8;
+    case CT_DOUBLE:
+        return target_double_size();
+    case CT_PTR: case CT_NULLPTR: case CT_LREF: case CT_RREF:
+        return target_ptr_size();
+    case CT_VALIST:
+        /* x86-64's and AArch64's as a parameter (decayed); one pointer --
+         * AAPCS's struct __va_list, RISC-V's void * -- on the ILP32 ones;
+         * Xtensa's 12-byte record, which is passed by value */
+        return target_get() == TARGET_XTENSA ? 12 : target_ptr_size();
     case CT_LDOUBLE:                 /* 8 on Darwin and ARMv7-M */
         return target_ldouble_size();
     case CT_INT128: case CT_UINT128: return 16;
@@ -336,7 +405,7 @@ long ct_size(const struct cty *t)
     case CT_CLASS: return t->cls->size;
     case CT_ENUM: return ct_size(t->en->underlying);
     case CT_FUNC: return 1;
-    case CT_MPTR: return t->to->k == CT_FUNC ? 16 : 8;
+    case CT_MPTR: return (t->to->k == CT_FUNC ? 2 : 1) * target_ptr_size();
     case CT_AUTO: case CT_TPARAM: case CT_TID: case CT_DEP: return 0;
     }
     return 0;
@@ -351,8 +420,15 @@ long ct_align(const struct cty *t)
     case CT_CLASS: return t->cls->align;
     case CT_ENUM: return ct_align(t->en->underlying);
     case CT_FUNC: case CT_VOID: return 1;
-    case CT_MPTR: return 8;
-    default: return ct_size(t);
+    default: {
+        /* A scalar is aligned to its size, capped where the target says
+         * so, as the C front end's ty_align does: nothing beyond 1 on AVR,
+         * 2 on ColdFire, 4 on RX and TriCore, 8 on SPARC (its 16-byte long
+         * double). A pointer to member is aligned as a pointer is. */
+        long a = t->k == CT_MPTR ? target_ptr_size() : ct_size(t);
+        long m = target_max_scalar_align();
+        return m && a > m ? m : a;
+    }
     }
 }
 

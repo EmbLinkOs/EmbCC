@@ -964,6 +964,14 @@ int mipsasm_symform(const char *stmt, struct asm_symform *f)
         n = sym_operand(o, &slen, &add);
         if (!n || *skip_sp(o + n))
             return 0;
+        /* MIPS64: an address is 64 bits, and lui/addiu make only the
+         * sign extension of 32 (GNU as warns and widens; neither here) */
+        if (mips_is_64())
+            return refuse_form(f, stmt, o, slen,
+                               "la loads a 32-bit address, and a MIPS64 "
+                               "address is 64 bits (nor are %highest and "
+                               "%higher assembled here): load it from a "
+                               ".dword holding the symbol");
         f->sym_at = (int)(o - stmt);
         f->sym_len = slen;
         f->addend = add;

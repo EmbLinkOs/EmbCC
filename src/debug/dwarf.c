@@ -57,6 +57,7 @@
 #define DW_ATE_unsigned_char  0x08
 /* location/frame-base operations */
 #define DW_OP_fbreg           0x91
+#define DW_OP_addr            0x03
 #define DW_OP_reg6            0x56   /* rbp — EmbCC's x86-64 frame pointer */
 #define DW_OP_reg29           0x6d   /* x29 — its aarch64 frame pointer */
 /* DW_OP_bregN is 0x70 + N, and takes a signed offset. The embedded
@@ -69,7 +70,34 @@
 #define DW_REG_FB_ARM         7      /* r7: the frame base under alloca */
 #define DW_REG_FB_RISCV       8      /* x8, s0: the same */
 #define DW_REG_SP_MIPS        29     /* $29 */
+#define DW_REG_SP_RX          0      /* r0 */
+#define DW_REG_FB_RX          13     /* r13: the frame base under alloca */
 #define DW_REG_FB_MIPS        30     /* $30, fp/s8: the same */
+#define DW_REG_SP_LA           3     /* $r3, sp: LoongArch numbers r0-r31 0-31 */
+#define DW_REG_FB_LA          22     /* $r22, fp: the VLA frame base */
+/* TriCore, as GCC for TriCore numbers its registers (unverified: D0-D15
+ * are 0-15 and A0-A15 16-31): A10, the stack pointer, and A14, the frame
+ * base the backend keeps under alloca. */
+#define DW_REG_SP_TRICORE     26
+#define DW_REG_FB_TRICORE     30
+#define DW_REG_SP_XTENSA      1      /* a1 */
+#define DW_REG_FB_XTENSA      7      /* a7: sp at entry, under alloca */
+#define DW_REG_SP_PPC         1      /* r1 */
+#define DW_REG_FB_PPC         31     /* r31: the frame base under alloca */
+#define DW_REG_FP_SPARC       30     /* %i6, %fp: every SPARC slot's base */
+#define DW_REG_FB_M68K        14     /* a6: every ColdFire function links it */
+/* AVR numbers r0-r31 0-31 (GCC and LLVM agree; GCC's SP is 32). The frame
+ * base is Y, r28:r29, which the prologue points one byte below the frame
+ * and every slot is addressed from -- `ldd r24, Y+5` -- so `breg28 + 0`
+ * makes each slot's DW_OP_fbreg offset the displacement the code uses. A
+ * debugger reads the pointer-sized r28 as the pair, r29 the high byte. */
+#define DW_REG_FB_AVR         28
+/* What a data address is to a debugger on AVR. Data memory is a separate
+ * space from program memory and both start at 0, so GDB, avr-gcc's
+ * DWARF and QEMU's gdb stub all put data at 0x800000 up: `m800100,2`
+ * reads SRAM at 0x100, where `m100,2` reads flash. A global's DW_OP_addr
+ * carries the offset, and the code addresses carry none. */
+#define AVR_DATA_SPACE        0x800000L
 
 /* Abbreviation codes, shared by emit_abbrev and emit_info. Two each for
  * parameter/variable and pointer: the "with type" form carries DW_AT_type,
@@ -101,16 +129,21 @@
 #define DW_LNS_copy           0x01
 #define DW_LNS_advance_pc     0x02
 #define DW_LNS_advance_line   0x03
+#define DW_LNS_const_add_pc   0x08
+#define DW_LNS_set_prologue_end 0x0a
 /* Extended opcodes */
 #define DW_LNE_end_sequence   0x01
 #define DW_LNE_set_address    0x02
 
-/* line-program special-opcode parameters (we do NOT use special opcodes —
- * advance_line + advance_pc + copy is enough and always correct — but the
- * header must still declare them consistently for a reader). */
+/* line-program special-opcode parameters: gcc's and clang's. A special
+ * opcode is one byte that advances the address by 0..17 and the line by
+ * -5..+8 and appends a row -- what advance_line, advance_pc and copy say
+ * in five or more (line_row). */
 #define LINE_BASE   (-5)
 #define LINE_RANGE  14
 #define OPCODE_BASE 13
+/* the address advance of opcode 255 with no line advance: const_add_pc's */
+#define MAX_SPECIAL_ADDR ((255 - OPCODE_BASE) / LINE_RANGE)
 
 /* --- a growable byte buffer, one per section --- */
 struct dbuf { unsigned char *p; int len, cap; };
@@ -128,21 +161,26 @@ static void db_u8(struct dbuf *b, unsigned v)
     db_need(b, 1);
     b->p[b->len++] = (unsigned char)(v & 0xff);
 }
+/* Every multi-byte field in the target's byte order: DWARF is read by a
+ * debugger of THAT machine (a big-endian target's sections are big-endian
+ * throughout, as clang writes them). */
+static void db_un(struct dbuf *b, int n, unsigned long v)
+{
+    db_need(b, n);
+    target_put_uint(b->p + b->len, n, v);
+    b->len += n;
+}
 static void db_u16(struct dbuf *b, unsigned v)
 {
-    db_u8(b, v); db_u8(b, v >> 8);
+    db_un(b, 2, v & 0xffff);
 }
 static void db_u32(struct dbuf *b, unsigned long v)
 {
-    db_u8(b, (unsigned)v); db_u8(b, (unsigned)(v >> 8));
-    db_u8(b, (unsigned)(v >> 16)); db_u8(b, (unsigned)(v >> 24));
+    db_un(b, 4, v & 0xffffffffUL);
 }
 static void db_u64(struct dbuf *b, unsigned long v)
 {
-    /* `long` is 64-bit on x86_64-elf (and on the host), so a single unsigned
-     * long spans the field — EmbCC's subset has no `long long`. */
-    db_u32(b, v & 0xffffffffUL);
-    db_u32(b, (v >> 32) & 0xffffffffUL);
+    db_un(b, 8, v);
 }
 static void db_str(struct dbuf *b, const char *s)
 {
@@ -188,6 +226,7 @@ static void reloc(struct dwarf_out *out, int in_sec, int at_off, int width,
     r->target = target;
     r->addend = addend;
     r->end = 0;
+    r->glob = NULL;
 }
 
 /* The same for the address one past a function's code (dwarf.h). */
@@ -326,10 +365,7 @@ static int base_encoding(struct type *t)
 
 static void db_patch_u32(struct dbuf *b, int at, unsigned long v)
 {
-    b->p[at + 0] = (unsigned char)v;
-    b->p[at + 1] = (unsigned char)(v >> 8);
-    b->p[at + 2] = (unsigned char)(v >> 16);
-    b->p[at + 3] = (unsigned char)(v >> 24);
+    target_put_uint(b->p + at, 4, v & 0xffffffffUL);
 }
 
 static int type_is_open(struct typemap *m, struct type *t)
@@ -434,7 +470,10 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
                 db_uleb(b, AB_MEMBER_BF);
                 db_str(b, mb->name);
                 db_u32(b, (unsigned long)mt);
-                db_u32(b, (unsigned long)(mb->off * 8 + mb->bit_off));
+                db_u32(b, (unsigned long)(mb->off * 8 +
+                    ty_bf_mempos(mb->bit_off, mb->bit_width,
+                                 8 * (mb->bf_bytes ? mb->bf_bytes
+                                                   : ty_size(mb->ty)))));
                 db_u8(b, mb->bit_width);
             } else {
                 db_uleb(b, AB_MEMBER);
@@ -461,25 +500,77 @@ static int ensure_type(struct dbuf *b, struct typemap *m, struct type *t)
  * address_size; emitting eight everywhere was fine while every target
  * was 64-bit and is simply wrong on ARMv7-M and RV32 -- a debugger
  * reads the next field out of the second half of the address. */
+/* AVR's pointer is two bytes, and its DWARF addresses are four, as
+ * avr-gcc writes them: a code address is a BYTE address in program
+ * memory, past 64K on the larger parts (an ATmega2560 has 256K of
+ * flash), and a data address is 0x800000 up (AVR_DATA_SPACE), so neither
+ * fits the pointer. Two-byte addresses were also simply wrong here: this
+ * wrote EIGHT bytes for anything that was not four, so an AVR CU said
+ * address_size 2 and carried eight-byte fields, and a reader lost the
+ * thread at the first one -- the whole unit decoded as empty. */
 static int addr_bytes(void)
 {
+    if (target_get() == TARGET_AVR) return 4;
     return target_ptr_size();
 }
 
 static void db_addr(struct dbuf *b, unsigned long v)
 {
-    if (addr_bytes() == 4) db_u32(b, v);
-    else                   db_u64(b, v);
+    if (addr_bytes() == 2)      db_u16(b, (unsigned)v);
+    else if (addr_bytes() == 4) db_u32(b, v);
+    else                        db_u64(b, v);
 }
 
 static void loc_fbreg(struct dbuf *b, long off)
 {
     struct dbuf e = { 0, 0, 0 };
+    /* No location: an EMPTY expression, which DWARF defines as "present
+     * in the source, not in the object code" (DWARF 4, 2.6.1.1.4) -- an
+     * optimized-out variable, and not a slot nothing writes. */
+    if (off == IR_VAR_NO_LOC) {
+        db_uleb(b, 0);
+        return;
+    }
     db_u8(&e, DW_OP_fbreg);
     db_sleb(&e, off);
     db_uleb(b, (unsigned long)e.len);
     for (int i = 0; i < e.len; i++) db_u8(b, e.p[i]);
     free(e.p);
+}
+
+/* The unit's global variables, as CU-level DW_TAG_variable DIEs located
+ * by DW_OP_addr -- a relocation against the object's own symbol, so the
+ * address is wherever the linker puts it. Without them a debugger had a
+ * global's address from the symbol table and nothing to say what it was.
+ *
+ * Only what this unit DEFINES (an extern is described by the unit that
+ * owns it), not thread-local (its address is per thread, an expression
+ * this writer does not have), and only a type this writer can describe
+ * -- the rule ensure_type keeps: no confidently-wrong type. A function's
+ * static local is a global too, under a compiler-made name with a dot,
+ * and is left out: its name is not one the programmer could ask for. */
+static void emit_globals(struct dwarf_out *out, struct dbuf *b,
+                         struct typemap *tm, struct ir_unit *iu)
+{
+    if (!iu->src)
+        return;
+    for (struct global *g = iu->src->globals; g; g = g->next) {
+        if (g->absorbed || !g->defined || g->is_tls || !g->name ||
+            strchr(g->name, '.'))
+            continue;
+        int toff = ensure_type(b, tm, g->ty);
+        if (toff < 0)
+            continue;
+        db_uleb(b, AB_VAR_T);
+        db_str(b, g->name);
+        db_u32(b, (unsigned long)toff);
+        db_uleb(b, (unsigned long)(1 + addr_bytes()));
+        db_u8(b, DW_OP_addr);
+        reloc(out, DWSEC_INFO, b->len, addr_bytes(), DWTGT_GLOBAL,
+              target_get() == TARGET_AVR ? AVR_DATA_SPACE : 0);
+        out->relocs[out->nrelocs - 1].glob = g;
+        db_addr(b, 0);
+    }
 }
 
 /* --- .debug_info: a compile_unit with children — the type DIEs, then one
@@ -524,11 +615,15 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
         for (int v = 0; v < iu->funcs[n].ndbgvars; v++)
             (void)ensure_type(b, &tm, iu->funcs[n].dbgvars[v].ty);
     }
+    emit_globals(out, b, &tm, iu);
 
     for (int n = 0; n < iu->nfuncs; n++) {
         struct ir_func *fn = &iu->funcs[n];
         if (fn->src->code_len <= 0) continue;
-        long lo = fn->src->code_off, hi = lo + fn->src->code_len;
+        /* the function starts at its entry, past an Xtensa literal pool
+         * (code_entry, 0 elsewhere) */
+        long lo = fn->src->code_off + fn->src->code_entry;
+        long hi = fn->src->code_off + fn->src->code_len;
 
         int rtoff = type_lookup(&tm, fn->src->ret_ty);
         db_uleb(b, rtoff >= 0 ? AB_SUBPROGRAM_T : AB_SUBPROGRAM);
@@ -555,17 +650,51 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
          * the first allocation on. */
         {
             enum target_arch a = target_get();
-            if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
-                a == TARGET_RISCV64 || a == TARGET_MIPS32) {
+            if (a == TARGET_AVR) {
+                /* Y, which the AVR backend always uses as its frame
+                 * pointer (a VLA it refuses): breg28 + 0 */
+                db_uleb(b, 2);
+                db_u8(b, DW_OP_breg(DW_REG_FB_AVR));
+                db_u8(b, 0);
+            } else if (a == TARGET_COLDFIRE) {
+                /* the slots are a6-relative in every function */
+                db_uleb(b, 2);
+                db_u8(b, DW_OP_breg(DW_REG_FB_M68K));
+                db_u8(b, 0);
+            } else if (a == TARGET_SPARC32) {
+                /* SPARC: every slot is addressed from %fp, which never
+                 * moves (src/arch/sparc/codegen.c), alloca or not */
+                db_uleb(b, 2);
+                db_u8(b, DW_OP_breg(DW_REG_FP_SPARC));
+                db_u8(b, 0);
+            } else if (a == TARGET_THUMB || a == TARGET_RISCV32 ||
+                a == TARGET_RISCV64 || a == TARGET_MIPS32 ||
+                a == TARGET_LOONGARCH64 || a == TARGET_TRICORE ||
+                a == TARGET_XTENSA || a == TARGET_PPC32 ||
+                a == TARGET_RX || a == TARGET_MIPS64) {
                 struct dbuf e = { 0, 0, 0 };
-                int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32;
+                int thumb = a == TARGET_THUMB, mips = a == TARGET_MIPS32 ||
+                                                a == TARGET_MIPS64;
+                int la = a == TARGET_LOONGARCH64, tc = a == TARGET_TRICORE;
+                int xt = a == TARGET_XTENSA, ppc = a == TARGET_PPC32;
+                int rx = a == TARGET_RX;
                 db_u8(&e, DW_OP_breg(fn->has_alloca
                                      ? (thumb ? DW_REG_FB_ARM
                                         : mips ? DW_REG_FB_MIPS
-                                               : DW_REG_FB_RISCV)
+                                        : la ? DW_REG_FB_LA
+                                        : tc ? DW_REG_FB_TRICORE
+                                        : xt ? DW_REG_FB_XTENSA
+                                        : ppc ? DW_REG_FB_PPC
+                                        : rx ? DW_REG_FB_RX
+                                             : DW_REG_FB_RISCV)
                                      : (thumb ? DW_REG_SP_ARM
                                         : mips ? DW_REG_SP_MIPS
-                                               : DW_REG_SP_RISCV)));
+                                        : la ? DW_REG_SP_LA
+                                        : tc ? DW_REG_SP_TRICORE
+                                        : xt ? DW_REG_SP_XTENSA
+                                        : ppc ? DW_REG_SP_PPC
+                                        : rx ? DW_REG_SP_RX
+                                             : DW_REG_SP_RISCV)));
                 db_sleb(&e, 0);
                 db_uleb(b, (unsigned long)e.len);
                 for (int k = 0; k < e.len; k++) db_u8(b, e.p[k]);
@@ -593,10 +722,159 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     free(tm.k); free(tm.off); free(tm.fix);
 
     unsigned long ulen = (unsigned long)(b->len - after_len);
-    b->p[len_at + 0] = (unsigned char)ulen;
-    b->p[len_at + 1] = (unsigned char)(ulen >> 8);
-    b->p[len_at + 2] = (unsigned char)(ulen >> 16);
-    b->p[len_at + 3] = (unsigned char)(ulen >> 24);
+    db_patch_u32(b, len_at, ulen);
+}
+
+/* ---- call frame information (.debug_frame) --------------------------
+ *
+ * What lets a debugger unwind: for every function, where the caller's
+ * frame is (the CFA) and where the return address and each saved
+ * register went, from the prologue steps the backend recorded
+ * (ir_cfi_add). Without it gdb guessed by reading the prologue's
+ * instructions, and lost the thread at a Cortex-M4's vpush.
+ *
+ * One CIE: at a function's entry the CFA is the stack pointer and the
+ * return address is still in its register (the backend registry's
+ * frame_sp and frame_ra). Then one FDE per function, advancing to each
+ * recorded step. Version 1 (what gcc and clang write in .debug_frame),
+ * code alignment 1 and data alignment -1, so every offset is in bytes. A
+ * function that recorded nothing -- a leaf that saves nothing -- still has
+ * an FDE: the CIE's rule is right for all of it. */
+#define DW_CFA_advance_loc1     0x02
+#define DW_CFA_advance_loc2     0x03
+#define DW_CFA_advance_loc4     0x04
+#define DW_CFA_offset_extended  0x05
+#define DW_CFA_def_cfa          0x0c
+#define DW_CFA_def_cfa_offset   0x0e
+#define DW_CFA_offset_extended_sf 0x11
+#define DW_CFA_nop              0x00
+
+static void frame_pad(struct dbuf *b, int start)
+{
+    while ((b->len - start) % addr_bytes())
+        db_u8(b, DW_CFA_nop);
+    db_patch_u32(b, start, (unsigned long)(b->len - start - 4));
+}
+
+static void emit_frame(struct dwarf_out *out, struct dbuf *b,
+                       struct ir_unit *iu)
+{
+    if (!out->frame_ra)
+        return;
+    int cie = b->len;
+    db_u32(b, 0);                        /* length, patched */
+    db_u32(b, 0xffffffffUL);             /* CIE_id */
+    db_u8(b, 1);                         /* version */
+    db_u8(b, 0);                         /* augmentation "" */
+    db_uleb(b, 1);                       /* code_alignment_factor */
+    db_sleb(b, -1);                      /* data_alignment_factor */
+    db_u8(b, (unsigned)out->frame_ra);   /* return_address_register */
+    db_u8(b, DW_CFA_def_cfa);            /* at entry: CFA = sp + 0 */
+    db_uleb(b, (unsigned long)out->frame_sp);
+    db_uleb(b, 0);
+    frame_pad(b, cie);
+
+    for (int n = 0; n < iu->nfuncs; n++) {
+        struct ir_func *fn = &iu->funcs[n];
+        struct func *f = fn->src;
+        /* ncfi -1: a function the backend cannot describe (an interrupt
+         * handler's own prologue) -- no FDE, rather than a wrong one */
+        if (!f || f->code_len <= 0 || fn->ncfi < 0)
+            continue;
+        long lo = f->code_off + f->code_entry;
+        int fde = b->len;
+        db_u32(b, 0);                    /* length, patched */
+        reloc(out, DWSEC_FRAME, b->len, 4, DWTGT_FRAME, cie);
+        db_u32(b, 0);                    /* CIE_pointer */
+        reloc(out, DWSEC_FRAME, b->len, addr_bytes(), DWTGT_TEXT, lo);
+        db_addr(b, 0);                   /* initial_location */
+        db_addr(b, (unsigned long)(f->code_len - f->code_entry));
+        long at = 0, cfa_reg = out->frame_sp, cfa = 0;
+        for (int k = 0; k < fn->ncfi; k++) {
+            const struct ir_cfi *c = &fn->cfi[k];
+            long to = c->off - f->code_entry, d = to - at;
+            if (d > 0) {
+                if (d < 64)         db_u8(b, 0x40 | (unsigned)d);
+                else if (d < 256)   { db_u8(b, DW_CFA_advance_loc1); db_u8(b, (unsigned)d); }
+                else if (d < 65536) { db_u8(b, DW_CFA_advance_loc2);
+                                      db_u8(b, (unsigned)(d & 0xff));
+                                      db_u8(b, (unsigned)(d >> 8)); }
+                else                { db_u8(b, DW_CFA_advance_loc4); db_u32(b, (unsigned long)d); }
+                at = to;
+            }
+            switch (c->kind) {
+            case IR_CFI_CFA_OFFSET:
+                cfa = c->val;
+                db_u8(b, DW_CFA_def_cfa_offset);
+                db_uleb(b, (unsigned long)cfa);
+                break;
+            case IR_CFI_CFA_REG:
+                cfa_reg = c->reg;
+                cfa = c->val;
+                db_u8(b, DW_CFA_def_cfa);
+                db_uleb(b, (unsigned long)cfa_reg);
+                db_uleb(b, (unsigned long)cfa);
+                break;
+            case IR_CFI_SAVED:
+                /* data alignment -1: the factored offset is -val */
+                if (c->val <= 0 && c->reg < 64) {
+                    db_u8(b, 0x80 | (unsigned)c->reg);
+                    db_uleb(b, (unsigned long)-c->val);
+                } else if (c->val <= 0) {
+                    db_u8(b, DW_CFA_offset_extended);
+                    db_uleb(b, (unsigned long)c->reg);
+                    db_uleb(b, (unsigned long)-c->val);
+                } else {
+                    db_u8(b, DW_CFA_offset_extended_sf);
+                    db_uleb(b, (unsigned long)c->reg);
+                    db_sleb(b, -c->val);
+                }
+                break;
+            }
+        }
+        (void)cfa_reg;
+        frame_pad(b, fde);
+    }
+}
+
+/* A row at (addr, line), from the state machine at (*cur_addr, *cur_line),
+ * as gcc and clang encode one (LLVM's MCDwarfLineAddr::encode): a line
+ * advance outside a special opcode's -5..+8 is an advance_line of its own;
+ * then one special opcode when the address advance fits in it, or
+ * const_add_pc and one when it fits in the two, or advance_pc and one; a
+ * row that moves neither is a copy. prologue_end is set first: the row
+ * the special opcode (or copy) appends carries it, and clears it. */
+static void line_row(struct dbuf *b, long *cur_addr, long *cur_line,
+                     long addr, long line, int prologue_end)
+{
+    long dl = line - *cur_line, da = addr - *cur_addr;
+    if (dl < LINE_BASE || dl >= LINE_BASE + LINE_RANGE) {
+        db_u8(b, DW_LNS_advance_line);
+        db_sleb(b, dl);
+        dl = 0;
+    }
+    if (prologue_end)
+        db_u8(b, DW_LNS_set_prologue_end);
+    *cur_addr = addr;
+    *cur_line = line;
+    if (dl == 0 && da == 0) {
+        db_u8(b, DW_LNS_copy);
+        return;
+    }
+    long op = dl - LINE_BASE + OPCODE_BASE;     /* no address advance */
+    if (da >= 0 && op + da * LINE_RANGE <= 255) {
+        db_u8(b, (int)(op + da * LINE_RANGE));
+        return;
+    }
+    if (da >= MAX_SPECIAL_ADDR &&
+        op + (da - MAX_SPECIAL_ADDR) * LINE_RANGE <= 255) {
+        db_u8(b, DW_LNS_const_add_pc);
+        db_u8(b, (int)(op + (da - MAX_SPECIAL_ADDR) * LINE_RANGE));
+        return;
+    }
+    db_u8(b, DW_LNS_advance_pc);
+    db_uleb(b, (unsigned long)da);
+    db_u8(b, (int)op);
 }
 
 /* One function's rows, bracketed by set_address .. end_sequence. Offsets are
@@ -605,7 +883,7 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
 static void emit_line_func(struct dwarf_out *out, struct dbuf *b,
                            struct ir_func *fn)
 {
-    long lo = fn->src->code_off;
+    long lo = fn->src->code_off + fn->src->code_entry;
     long hi = fn->src->code_off + fn->src->code_len;
 
     /* DW_LNE_set_address <.text address, relocated, 4 or 8 bytes> */
@@ -615,19 +893,24 @@ static void emit_line_func(struct dwarf_out *out, struct dbuf *b,
     db_addr(b, 0);
 
     long cur_addr = lo, cur_line = 1;
+    /* A row at the entry, with the line the function was declared on, as
+     * gcc and clang write it, and `prologue_end` on the first row of the
+     * body. A debugger sets `break f` past the prologue -- where the
+     * parameters are where the DWARF says -- by that flag, or, an older
+     * one, at the second row; with the body's first row as the first,
+     * gdb scanned the prologue itself and stopped a statement late. */
+    int entry_row = fn->line > 0 && (fn->nlines == 0 || fn->lines[0].off > lo);
+    if (entry_row)
+        line_row(b, &cur_addr, &cur_line, lo, fn->line, 0);
+    int body = 0;                        /* prologue_end is not yet said */
     for (int r = 0; r < fn->nlines; r++) {
         long off = fn->lines[r].off, line = fn->lines[r].line;
-        if (line != cur_line) {
-            db_u8(b, DW_LNS_advance_line);
-            db_sleb(b, line - cur_line);
-            cur_line = line;
-        }
-        if (off != cur_addr) {
-            db_u8(b, DW_LNS_advance_pc);
-            db_uleb(b, (unsigned long)(off - cur_addr));
-            cur_addr = off;
-        }
-        db_u8(b, DW_LNS_copy);           /* append a row at (cur_addr,cur_line) */
+        /* the body's first row: past the entry row, or the entry itself
+         * when there is no prologue */
+        int pe = !body && (off > lo || !entry_row);
+        if (pe)
+            body = 1;
+        line_row(b, &cur_addr, &cur_line, off, line, pe);
     }
     /* advance to the function end and close the sequence */
     if (hi != cur_addr) {
@@ -667,20 +950,14 @@ static void emit_line(struct dwarf_out *out, struct dbuf *b,
 
     /* backpatch header_length (bytes from here to end of header) */
     unsigned long hlen = (unsigned long)(b->len - after_hdr_len);
-    b->p[hdr_len_at + 0] = (unsigned char)hlen;
-    b->p[hdr_len_at + 1] = (unsigned char)(hlen >> 8);
-    b->p[hdr_len_at + 2] = (unsigned char)(hlen >> 16);
-    b->p[hdr_len_at + 3] = (unsigned char)(hlen >> 24);
+    db_patch_u32(b, hdr_len_at, hlen);
 
     for (int n = 0; n < iu->nfuncs; n++)
         if (iu->funcs[n].src->code_len > 0)
             emit_line_func(out, b, &iu->funcs[n]);
 
     unsigned long ulen = (unsigned long)(b->len - after_len);
-    b->p[len_at + 0] = (unsigned char)ulen;
-    b->p[len_at + 1] = (unsigned char)(ulen >> 8);
-    b->p[len_at + 2] = (unsigned char)(ulen >> 16);
-    b->p[len_at + 3] = (unsigned char)(ulen >> 24);
+    db_patch_u32(b, len_at, ulen);
 }
 
 static void emit_all(struct ir_unit *iu, const char *filename,
@@ -702,8 +979,9 @@ static void emit_all(struct ir_unit *iu, const char *filename,
     }
 
     struct dbuf ab = { 0, 0, 0 }, in = { 0, 0, 0 }, ln = { 0, 0, 0 },
-                rg = { 0, 0, 0 };
+                rg = { 0, 0, 0 }, fr = { 0, 0, 0 };
     emit_abbrev(&ab);
+    emit_frame(out, &fr, iu);
     emit_info(out, &in, iu, filename, lo, hi, split);
     emit_line(out, &ln, iu, filename);
     if (split) {
@@ -726,6 +1004,20 @@ static void emit_all(struct ir_unit *iu, const char *filename,
     out->sec[DWSEC_INFO]   = in.p; out->seclen[DWSEC_INFO]   = in.len;
     out->sec[DWSEC_LINE]   = ln.p; out->seclen[DWSEC_LINE]   = ln.len;
     out->sec[DWSEC_RANGES] = rg.p; out->seclen[DWSEC_RANGES] = rg.len;
+    out->sec[DWSEC_FRAME]  = fr.p; out->seclen[DWSEC_FRAME]  = fr.len;
+}
+
+void ir_cfi_add(struct ir_func *fn, int off, int kind, int reg, long val)
+{
+    if (fn->ncfi == fn->cficap) {
+        fn->cficap = fn->cficap ? fn->cficap * 2 : 8;
+        fn->cfi = xrealloc(fn->cfi, (size_t)fn->cficap * sizeof *fn->cfi);
+    }
+    struct ir_cfi *c = &fn->cfi[fn->ncfi++];
+    c->off = off;
+    c->kind = kind;
+    c->reg = reg;
+    c->val = val;
 }
 
 void dwarf_emit(struct ir_unit *iu, const char *filename,

@@ -9,17 +9,20 @@ full. To build EmbCC and compile a first program, go on to
 
 ## What EmbCC is
 
-EmbCC is a compiler for C and C++ together with its own preprocessor,
-assemblers, linker, debugger and supporting tools. It produces code for:
+EmbCC is a compiler for C and C++ for embedded systems. Together with
+its own preprocessor, assemblers, linker, debugger, simulator and
+supporting tools, it makes up the Emb toolchain. It produces code for:
 
-- EmbLinkOS on x86-64, the primary target, and bare-metal x86-64;
-- AArch64, bare metal and EmbLinkOS;
-- ARM Cortex-M microcontrollers (ARMv7-M, ARMv7E-M and ARMv8-M Mainline,
-  in Thumb state);
-- RISC-V microcontrollers, RV32 and RV64;
-- the AVR ATmega328P;
-- Linux on x86-64 and AArch64, macOS (Mach-O) and Windows (COFF), with
-  the limits listed under [Targets at a glance](#targets-at-a-glance).
+- Arm Cortex-M microcontrollers (ARMv6-M, ARMv7-M, ARMv7E-M with DSP,
+  and ARMv8-M Baseline and Mainline with TrustZone-M), and ARMv7-A;
+- RISC-V, RV32 and RV64, with the F and D extensions;
+- AVR (ATmega);
+- Xtensa (ESP32 class), Infineon TriCore, Renesas RX, NXP ColdFire,
+  MIPS32 and MIPS64, PowerPC, SPARC V8 (LEON3) and LoongArch64;
+- operating systems and hosted programs: bare-metal x86-64 and AArch64
+  (EmbLinkOS among them), Linux on x86-64 and AArch64, macOS (Mach-O)
+  and Windows (COFF), with the limits listed under
+  [Targets at a glance](#targets-at-a-glance).
 
 EmbCC runs on macOS and Linux. It is written in C99, and it compiles its
 own sources.
@@ -39,7 +42,7 @@ toolchain on the host.
 line:
 
 ```text
-EmbCC 1.0.0-m2.complete — C compiler for EmbLinkOS, target x86_64-elf
+EmbCC 1.0.0-m2.complete (the Emb toolchain's C and C++ compiler, for embedded systems and operating systems)
 ```
 
 ## Components
@@ -200,14 +203,14 @@ exact list of accepted names is under
 [`-std=STANDARD`](invoking.md#-stdstandard).
 
 C is supported on every target. C++ is supported on the x86-64 and
-AArch64 targets, with restrictions on macOS and Windows. The C++ front
-end lays out types for 8-byte `long` and pointers, so on Cortex-M, RV32
-and AVR EmbCC refuses to generate code for a C++ unit
+AArch64 targets, with restrictions on macOS and Windows, and on 32-bit
+ARM (Cortex-M and ARM state) and RV32 without exceptions, with
+a small runtime (`make libcxx-embedded`). On AVR, MIPS32, Xtensa and
+TriCore EmbCC refuses to generate code for a C++ unit
 (`embcc: error: C++ is not yet supported for TRIPLE: ...`); `-fsyntax-only`
 still checks one. On RV64 a C++ unit compiles when exceptions are
-turned off, but C++ is not supported or tested there. There is no C++
-library for any of these targets. See [Targets](cxx.md#targets) in the
-C++ page.
+turned off, but C++ is not supported or tested there. See
+[Targets](cxx.md#targets) in the C++ page.
 
 The language pages give the details:
 

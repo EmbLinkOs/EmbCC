@@ -167,16 +167,20 @@ static const char *class_sym(struct cclass *c, const char *prefix)
 
 /* ---- C types ---- */
 
+static int need_valist_tag;     /* the unit uses Xtensa's va_list record */
+
 static const char *basic_c(enum cty_kind k)
 {
-    int arm = target_get() == TARGET_AARCH64;
     switch (k) {
     case CT_VOID: return "void";
     case CT_BOOL: return "_Bool";
     case CT_CHAR: return "char";
     case CT_SCHAR: return "signed char";
     case CT_UCHAR: case CT_CHAR8: return "unsigned char";
-    case CT_WCHAR: return arm ? "unsigned int" : "int";
+    /* (Xtensa's is a 16-bit unsigned short) */
+    case CT_WCHAR: return target_wchar_size() == 2
+                          ? (target_wchar_unsigned() ? "unsigned short" : "short")
+                          : target_wchar_unsigned() ? "unsigned int" : "int";
     case CT_CHAR16: case CT_USHORT: return "unsigned short";
     case CT_CHAR32: case CT_UINT: return "unsigned int";
     case CT_SHORT: return "short";
@@ -191,7 +195,15 @@ static const char *basic_c(enum cty_kind k)
     case CT_DOUBLE: return "double";
     case CT_LDOUBLE: return "long double";
     case CT_NULLPTR: return "void *";
-    case CT_VALIST: return "__builtin_va_list";
+    case CT_VALIST:
+        /* Xtensa's va_list is GCC's 12-byte record held by value, which
+         * the C front end's `__builtin_va_list` (a char *) is not: the
+         * record, as EmbCC's <stdarg.h> spells it for C */
+        if (target_get() == TARGET_XTENSA) {
+            need_valist_tag = 1;
+            return "struct __va_list_tag";
+        }
+        return "__builtin_va_list";
     default: return "int";
     }
 }
@@ -369,16 +381,20 @@ static char *int_lit(long v, struct cty *t)
     case CT_UINT: case CT_CHAR32:
         return cx_fmt("%luU", (unsigned long)v & 0xffffffffUL);
     case CT_WCHAR:
-        if (target_get() == TARGET_AARCH64)
+        if (target_wchar_unsigned())
             return cx_fmt("%luU", (unsigned long)v & 0xffffffffUL);
         break;
     case CT_LONG: case CT_LLONG: {
         const char *suf = t->k == CT_LONG ? "L" : "LL";
         if (v == LONG_MIN)
             return cx_fmt("(-9223372036854775807%s-1)", suf);
+        if (v == INT_MIN && t->k == CT_LONG && target_long_size() == 4)
+            return "(-2147483647L-1)";  /* (2147483648L would be long long) */
         return v < 0 ? cx_fmt("(%ld%s)", v, suf) : cx_fmt("%ld%s", v, suf);
     }
     case CT_ULONG:
+        if (target_long_size() == 4)
+            return cx_fmt("%luUL", (unsigned long)v & 0xffffffffUL);
         return cx_fmt("%luUL", (unsigned long)v);
     case CT_ULLONG:
         return cx_fmt("%luULL", (unsigned long)v);
@@ -430,9 +446,7 @@ static char *str_lit(struct cexpr *e)
     sb_printf(&b, "%s\"", pfx);
     const unsigned char *p = (const unsigned char *)e->text;
     for (long i = 0; i < e->slen - 1; i++) {
-        unsigned long v = 0;
-        for (int k = 0; k < w; k++)
-            v |= (unsigned long)p[i * w + k] << (8 * k);
+        unsigned long v = (unsigned long)target_get_uint(p + i * w, w);
         if (w == 1) {
             if (v >= 0x20 && v < 0x7f && v != '"' && v != '\\' && v != '?')
                 sb_printf(&b, "%c", (int)v);
@@ -815,10 +829,20 @@ static char *fp_class_text(struct cexpr *e)
         t = ct_basic(CT_DOUBLE);
     int u = cx_uid();
     char *v = cx_fmt("__cx_fc%d", u);
-    const char *min = t->k == CT_FLOAT ? "0x1p-126f"
-                      : t->k == CT_DOUBLE ? "0x1p-1022" : "0x1p-16382L";
-    int signbyte = t->k == CT_FLOAT ? 3 : t->k == CT_DOUBLE ? 7
-                   : target_get() == TARGET_AARCH64 ? 15 : 9;
+    /* long double: a double where it is eight bytes (ARM, Darwin), x87's
+     * format on x86-64, binary128 elsewhere */
+    long fsz = ct_size(t);
+    const char *min = fsz == 4 ? (t->k == CT_FLOAT ? "0x1p-126f"
+                                  : t->k == CT_DOUBLE ? "0x1p-126"
+                                  : "0x1p-126L")
+                      : fsz == 8 ? (t->k == CT_DOUBLE ? "0x1p-1022"
+                                    : "0x1p-1022L")
+                      : "0x1p-16382L";
+    /* the sign is the top bit of the most significant byte: the first
+     * on a big-endian target, else the last -- byte 9 of x87's ten */
+    int signbyte = target_big_endian() ? 0
+                   : fsz == 16 && target_get() == TARGET_X86_64 ? 9
+                   : (int)fsz - 1;
     const char *decl = cdecl(t, v);
     char *nan = cx_fmt("(%s != %s)", v, v);
     char *fin = cx_fmt("(%s - %s == %s - %s)", v, v, v, v);
@@ -1001,7 +1025,20 @@ static char *member_text(struct cexpr *e)
  * function (with ob, that object adjusted). */
 static int arm_pmf(void)
 {
-    return target_get() == TARGET_AARCH64;
+    return cx_pmf_vbit_in_adj();
+}
+
+/* &C::f as a PMF's initializer. A virtual function's is its vtable
+ * offset, flagged (pmf_fn): called, the object's override. */
+static char *pmf_init(struct cfunc *f)
+{
+    if (f->is_virtual && !f->is_static && f->vslot >= 0) {
+        long off = (long)f->vslot * cx_ptr_size();
+        return arm_pmf() ? cx_fmt("{ (void *)%ldL, 1 }", off)
+                         : cx_fmt("{ (void *)%ldL, 0 }", off + 1);
+    }
+    need_fn(f);
+    return cx_fmt("{ (void *)%s, 0 }", fn_name(f, 1));
 }
 
 static char *pmf_this(const char *m, const char *o)
@@ -1112,9 +1149,13 @@ static char *new_text(struct cexpr *e)
     for (int i = 1; i < e->na; i++)
         sb_printf(&b, ", %s", ev(e->a[i]));
     sb_put(&b, "); ");
-    if (e->cookie)
+    if (e->cookie && cx_arm32_abi())
+        /* ARM: the element size, then the count, at the start */
+        sb_printf(&b, "((unsigned long *)%s)[0] = %ldUL; "
+                      "((unsigned long *)%s)[1] = %s; ", m, ct_size(el), m, n);
+    else if (e->cookie)       /* the count, just before the elements */
         sb_printf(&b, "*(unsigned long *)(%s + %ldUL) = %s; ", m,
-                  e->cookie - 8, n);
+                  e->cookie - (long)cx_ptr_size(), n);
     sb_printf(&b, "%s = (%s)(%s + %ldUL); ", cdecl(pt, p), ctype(pt), m,
               e->cookie);
     if (e->init)
@@ -1168,10 +1209,12 @@ static char *delete_text(struct cexpr *e)
                                e->ival));
     } else if (e->cookie) {
         need_fn(e->dtor);
+        /* the count: the cookie's last word (ARM: its second) */
+        long at = cx_arm32_abi() ? e->cookie - 4 : cx_ptr_size();
         sb_printf(&b, "unsigned long __cx_n%d = *(unsigned long *)((char *)"
-                      "%s - 8); for (unsigned long __cx_i%d = __cx_n%d; "
-                      "__cx_i%d-- > 0; ) %s(&%s[__cx_i%d]); ", u, p, u, u, u,
-                  fn_name(e->dtor, 1), p, u);
+                      "%s - %ld); for (unsigned long __cx_i%d = __cx_n%d; "
+                      "__cx_i%d-- > 0; ) %s(&%s[__cx_i%d]); ", u, p, at, u, u,
+                  u, fn_name(e->dtor, 1), p, u);
         sb_printf(&b, "%s((char *)%s - %ldUL%s); ", fn_name(e->fn, 1), p,
                   e->cookie,
                   dealloc_rest(e->fn, cx_fmt("__cx_n%d * %ldUL + %ldUL", u,
@@ -1226,17 +1269,7 @@ static char *ev(struct cexpr *e)
         if (e->field)
             return cx_fmt("%ldL", e->field->off);
         need_pmf = 1;
-        if (e->fn->is_virtual && !e->fn->is_static && e->fn->vslot >= 0)
-            /* a virtual function's: its vtable offset, flagged (pmf_fn) —
-             * called, the object's override */
-            return arm_pmf()
-                   ? cx_fmt("((struct __cx_pmf){ (void *)%ldL, 1 })",
-                            (long)e->fn->vslot * 8)
-                   : cx_fmt("((struct __cx_pmf){ (void *)%ldL, 0 })",
-                            (long)e->fn->vslot * 8 + 1);
-        need_fn(e->fn);
-        return cx_fmt("((struct __cx_pmf){ (void *)%s, 0 })",
-                      fn_name(e->fn, 1));
+        return cx_fmt("((struct __cx_pmf)%s)", pmf_init(e->fn));
     case E_PMEM: case E_TYPEID:
         return elv(e);
     case E_DYNCAST: {
@@ -2170,10 +2203,8 @@ static char *cinit_text(struct cty *t, struct cexpr *e)
         return (t->k == CT_CLASS || t->k == CT_ARRAY) ? "{0}" : "0";
     if (e->k == E_CONSTRUCT)
         return "{0}";
-    if (e->k == E_MEMPTR && e->fn) {
-        need_fn(e->fn);
-        return cx_fmt("{ (void *)%s, 0 }", fn_name(e->fn, 1));
-    }
+    if (e->k == E_MEMPTR && e->fn)
+        return pmf_init(e->fn);
     if (e->k == E_CAST && ct_is_pmf(e->t) && e->a[0]->t->k != CT_MPTR)
         return "{ 0, 0 }";
     long fv;
@@ -2484,6 +2515,33 @@ static void local_static_names(struct cvar *v, char **guard)
     }
 }
 
+/* A guard variable (Itanium 2.8): 64 bits, initialized when its first
+ * byte is non-zero; on 32-bit ARM 32 bits, initialized when bit 0 is set
+ * (the ARM C++ ABI, 3.2.3). */
+static const char *guard_ctype(void)
+{
+    return cx_arm32_abi() ? "int" : "long long";
+}
+
+static char *guard_unset(const char *g)
+{
+    return cx_arm32_abi() ? cx_fmt("(*(volatile unsigned char *)&%s & 1) == 0",
+                                   g)
+                          : cx_fmt("*(volatile char *)&%s == 0", g);
+}
+
+/* The registration of obj's destructor d: __aeabi_atexit on 32-bit ARM,
+ * whose ABI names it (its arguments are __cxa_atexit's first two the
+ * other way round), else __cxa_atexit. */
+static char *atexit_call(const char *d, const char *obj)
+{
+    if (cx_arm32_abi())
+        return cx_fmt("__aeabi_atexit(%s, (void (*)(void *))%s, "
+                      "&__dso_handle);\n", obj, d);
+    return cx_fmt("__cxa_atexit((void (*)(void *))%s, %s, &__dso_handle);\n",
+                  d, obj);
+}
+
 static int need_guard_init(struct cvar *v)
 {
     struct cty *t = v->type;
@@ -2513,18 +2571,18 @@ static void emit_local_static(struct sb *b, struct cstmt *s)
         sb_printf(&out_vars, "__attribute__((weak)) %s%s;\n",
                   cdecl(t, v->cname), init_c);
         if (dyn || dtor)
-            sb_printf(&out_vars, "__attribute__((weak)) long long %s;\n",
-                      guard);
+            sb_printf(&out_vars, "__attribute__((weak)) %s %s;\n",
+                      guard_ctype(), guard);
     } else {
         sb_printf(b, "static %s%s;\n", cdecl(t, v->cname), init_c);
         if (dyn || dtor)
-            sb_printf(b, "static long long %s;\n", guard);
+            sb_printf(b, "static %s %s;\n", guard_ctype(), guard);
     }
     if (!dyn && !dtor)
         return;
     need_guard = 1;
-    sb_printf(b, "if (*(volatile char *)&%s == 0 && __cxa_guard_acquire(&%s)) "
-                 "{\n", guard, guard);
+    sb_printf(b, "if (%s && __cxa_guard_acquire(&%s)) {\n", guard_unset(guard),
+              guard);
     /* an initializer that throws leaves it to be tried again */
     int lp = dyn && eh_on ? eh_open(b) : -1;
     if (dyn)
@@ -2535,8 +2593,7 @@ static void emit_local_static(struct sb *b, struct cstmt *s)
         struct cfunc *d = class_dtor((t->k == CT_ARRAY ? t->to : t)->cls);
         if (t->k == CT_CLASS && d) {
             need_atexit = 1;
-            sb_printf(b, "__cxa_atexit((void (*)(void *))%s, &%s, "
-                         "&__dso_handle);\n", fn_name(d, 1), v->cname);
+            sb_put(b, atexit_call(fn_name(d, 1), cx_fmt("&%s", v->cname)));
         }
     }
     sb_printf(b, "__cxa_guard_release(&%s);\n}\n", guard);
@@ -2967,7 +3024,8 @@ static void emit_stmt(struct sb *b, struct cstmt *s)
                 full_stmt(b, s->e);
             run_cleans(b, 0);
             sb_put(b, cur_fn->is_dtor ? "goto __cx_dtor_end; }\n"
-                                      : "return; }\n");
+                      : cur_fn->is_ctor && cx_arm32_abi() ? "return this; }\n"
+                      : "return; }\n");
             return;
         }
         if (class_indirect(rt)) {
@@ -3033,6 +3091,15 @@ static void emit_block_items(struct sb *b, struct cstmt *first)
  * whether the object is complete (their shared body). */
 static int hdr_vtt;
 
+/* On 32-bit ARM a constructor and a complete or base-object destructor
+ * return `this` (the ARM C++ ABI, 3.1.5); a deleting destructor returns
+ * nothing, nor does a thunk (its result is not used). */
+static int this_returned(const struct cfunc *f, const char *name)
+{
+    return cx_arm32_abi() && (f->is_ctor || f->is_dtor) &&
+           (!f->is_dtor || name != f->cname0);
+}
+
 static char *func_header(struct cfunc *f, const char *name, int named)
 {
     struct sb p = { 0, 0, 0 };
@@ -3071,6 +3138,8 @@ static char *func_header(struct cfunc *f, const char *name, int named)
         sb_put(&p, any ? ", ..." : "...");
     else if (!any)
         sb_put(&p, "void");
+    if (this_returned(f, name))
+        return cx_fmt("void *%s(%s)", name, sb_str(&p));
     struct cty *rt = sret ? ct_ptr(ft->to) : ft->to;
     if (rt->k == CT_PTR && (rt->to->k == CT_FUNC || rt->to->k == CT_ARRAY)) {
         /* C's parser takes a function returning a pointer to a function
@@ -3587,6 +3656,8 @@ static void emit_function(struct cfunc *f)
     if (!f->cls && !f->c_linkage && f->owner == cx_global &&
         strcmp(f->name, "main") == 0)
         sb_put(&b, "return 0;\n");
+    const char *ret_this = special && cx_arm32_abi() ? "return this;\n" : "";
+    sb_put(&b, ret_this);
     sb_put(&b, "}\n");
     if (fn_eh) {
         /* the landing pads' exception pointer and selector */
@@ -3603,12 +3674,12 @@ static void emit_function(struct cfunc *f)
             sb_printf(&args, ", %s", f->params && f->params[i]
                       ? f->params[i]->cname : cx_fmt("__cx_p%d", i));
         hdr_vtt = 1;
-        sb_printf(&b, "%s%s%s\n{\n%s(this, __cx_vtt, 0%s);\n}\n", st, sec,
-                  func_header(f, name, 1), body, sb_str(&args));
+        sb_printf(&b, "%s%s%s\n{\n%s(this, __cx_vtt, 0%s);\n%s}\n", st, sec,
+                  func_header(f, name, 1), body, sb_str(&args), ret_this);
         need_vtable(c);
-        sb_printf(&b, "%s%s%s\n{\n%s(this, %s, 1%s);\n}\n", st, sec,
+        sb_printf(&b, "%s%s%s\n{\n%s(this, %s, 1%s);\n%s}\n", st, sec,
                   func_header(f, fn_name(f, 1), 1), body,
-                  class_sym(c, "_ZTT"), sb_str(&args));
+                  class_sym(c, "_ZTT"), sb_str(&args), ret_this);
     } else if (special) {
         /* the complete-object variant: the same, no virtual bases */
         struct sb args = { 0, 0, 0 };
@@ -3616,8 +3687,9 @@ static void emit_function(struct cfunc *f)
         for (int i = 0; i < f->type->np; i++)
             sb_printf(&args, ", %s", f->params && f->params[i]
                       ? f->params[i]->cname : cx_fmt("__cx_p%d", i));
-        sb_printf(&b, "%s%s%s\n{\n%s(%s);\n}\n", st, sec,
-                  func_header(f, fn_name(f, 1), 1), name, sb_str(&args));
+        sb_printf(&b, "%s%s%s\n{\n%s(%s);\n%s}\n", st, sec,
+                  func_header(f, fn_name(f, 1), 1), name, sb_str(&args),
+                  ret_this);
     }
     if (special) {
         if (f->is_dtor && f->is_virtual) {
@@ -3678,9 +3750,10 @@ static void emit_gvar(struct cvar *v)
         strncmp(v->cname, "_Z", 2) == 0 &&
         (dyn || (t->k == CT_CLASS && class_dtor(t->cls)))) {
         guard = cx_fmt("_ZGV%s", v->cname + 2);
-        sb_printf(&out_vars, "__attribute__((weak)) long long %s;\n", guard);
-        sb_printf(&out_init, "if (!*(volatile char *)&%s) {\n"
-                             "*(volatile char *)&%s = 1;\n", guard, guard);
+        sb_printf(&out_vars, "__attribute__((weak)) %s %s;\n",
+                  guard_ctype(), guard);
+        sb_printf(&out_init, "if (%s) {\n*(volatile char *)&%s = 1;\n",
+                  guard_unset(guard), guard);
     }
     if (dyn) {
         line_marker(&out_init, v->line, v->file);
@@ -3691,9 +3764,8 @@ static void emit_gvar(struct cvar *v)
         if (d) {
             need_fn(d);
             need_atexit = 1;
-            sb_printf(&out_init, "__cxa_atexit((void (*)(void *))%s, &%s, "
-                                 "&__dso_handle);\n", fn_name(d, 1),
-                      v->cname);
+            sb_put(&out_init, atexit_call(fn_name(d, 1),
+                                          cx_fmt("&%s", v->cname)));
         }
     } else if (t->k == CT_ARRAY) {
         char *d = destroy_text(cx_fmt("&%s", v->cname), t);
@@ -3757,7 +3829,7 @@ static void emit_explicit_struct(struct sb *out, struct cclass *c)
                                        c->nvbases + 2) * sizeof *it);
     int n = 0;
     if (c->dynamic && !c->primary)
-        it[n++] = (struct item){ 0, 8, "void *__cx_vptr" };
+        it[n++] = (struct item){ 0, cx_ptr_size(), "void *__cx_vptr" };
     for (int i = 0; i < c->nbases; i++) {
         struct cclass *b = c->bases[i].cls;
         if (b->empty || c->bases[i].is_virtual)
@@ -3776,7 +3848,7 @@ static void emit_explicit_struct(struct sb *out, struct cclass *c)
     }
     for (int i = 0; i < c->nfields; i++) {
         struct cfield *fl = c->fields[i];
-        long sz = ct_is_ref(fl->type) ? 8 : ct_size(fl->type);
+        long sz = ct_is_ref(fl->type) ? cx_ptr_size() : ct_size(fl->type);
         if (fl->bitwidth >= 0) {
             /* a run of bit-fields: C bit-fields in the packed struct,
              * unnamed ones filling the gaps to where the layout put each */
@@ -3945,7 +4017,7 @@ static const char *simple_typeinfo(struct cty *t, const char *abi_class)
     sb_printf(&out_rtti, "__attribute__((weak)) char _ZTS%s[] = \"%s\";\n",
               m, m);
     sb_printf(&out_rtti, "__attribute__((weak)) void *%s[2] = { (void *)"
-                         "((char *)_ZTVN10__cxxabiv1%sE + 16), "
+                         "((char *)_ZTVN10__cxxabiv1%sE + 2 * sizeof (void *)), "
                          "(void *)_ZTS%s };\n", sym, abi_class, m);
     return sym;
 }
@@ -3971,7 +4043,7 @@ static const char *ptr_typeinfo(struct cty *t)
               internal ? "static " : "extern ", sym);
     sb_printf(&out_rtti, "%schar _ZTS%s[] = \"%s\";\n", st, m, m);
     sb_printf(&out_rtti, "%svoid *%s[4] = { (void *)((char *)"
-                         "_ZTVN10__cxxabiv119__pointer_type_infoE + 16), "
+                         "_ZTVN10__cxxabiv119__pointer_type_infoE + 2 * sizeof (void *)), "
                          "(void *)_ZTS%s, (void *)%ldL, (void *)%s };\n",
               st, sym, m, flags, cls);
     return sym;
@@ -3997,7 +4069,7 @@ static const char *mptr_typeinfo(struct cty *t)
               m, m);
     sb_printf(&out_rtti, "__attribute__((weak)) void *%s[5] = { (void *)"
               "((char *)_ZTVN10__cxxabiv129__pointer_to_member_type_infoE"
-              " + 16), (void *)_ZTS%s, (void *)%ldL, (void *)%s, "
+              " + 2 * sizeof (void *)), (void *)_ZTS%s, (void *)%ldL, (void *)%s, "
               "(void *)%s };\n", sym, m, flags, pointee, cls);
     return sym;
 }
@@ -4026,7 +4098,10 @@ static void emit_rtti(struct cclass *c)
     const char *kind = c->nbases == 0 ? "17__class_type_info"
                        : si ? "20__si_class_type_info"
                        : "21__vmi_class_type_info";
-    int words = c->nbases == 0 ? 2 : si ? 3 : 3 + 2 * c->nbases;
+    /* __vmi_class_type_info's two unsigned ints (flags, base count) are
+     * one word where a pointer is eight bytes and two where it is four */
+    int ilp32 = cx_ptr_size() == 4;
+    int words = c->nbases == 0 ? 2 : si ? 3 : 3 + ilp32 + 2 * c->nbases;
     if (home == 0) {
         sb_printf(&out_rtti_decl, "extern void *%s[];\n", ti);
         return;
@@ -4041,15 +4116,21 @@ static void emit_rtti(struct cclass *c)
                                             : mangle_class_name(c);
     sb_printf(&out_rtti, "%schar %s[] = \"%s\";\n", st, ts, mangled);
     sb_printf(&out_rtti, "%svoid *%s[%d] = { (void *)((char *)"
-                         "_ZTVN10__cxxabiv1%sE + 16), (void *)%s", st, ti,
+                         "_ZTVN10__cxxabiv1%sE + 2 * sizeof (void *)), (void *)%s", st, ti,
               words, kind, ts);
     if (si) {
         sb_printf(&out_rtti, ", (void *)%s", class_sym(c->bases[0].cls,
                                                        "_ZTI"));
     } else if (c->nbases) {
         long flags = class_rtti_flags(c);
-        sb_printf(&out_rtti, ", (void *)%ldL",
-                  flags | ((long)c->nbases << 32));
+        if (ilp32)
+            sb_printf(&out_rtti, ", (void *)%ldL, (void *)%ldL", flags,
+                      (long)c->nbases);
+        else      /* (the flags first in memory: high on big-endian) */
+            sb_printf(&out_rtti, ", (void *)%ldL", target_big_endian()
+                      ? (long)((unsigned long)flags << 32 |
+                               (unsigned long)c->nbases)
+                      : flags | ((long)c->nbases << 32));
         for (int i = 0; i < c->nbases; i++) {
             struct cbase *b = &c->bases[i];
             /* a virtual base's offset is where the vtable holds it */
@@ -4101,6 +4182,7 @@ static const char *thunk_for(struct cfunc *f, int deleting, long delta,
         sb_printf(&args, ", %s", cx_fmt("__cx_p%d", i));
     struct cfunc tmp = *f;
     tmp.params = NULL;                 /* the thunk's own parameter names */
+    tmp.is_ctor = tmp.is_dtor = 0;     /* (returns nothing: this_returned) */
     const char *st = class_internal(c) ? "static " : "__attribute__((weak)) ";
     sb_printf(&out_decls, "%s%s;\n", class_internal(c) ? "static " : "",
               func_header(&tmp, name, 0));
@@ -4224,13 +4306,13 @@ static void emit_fundamental_tinfos(void)
         sb_printf(&out_rtti, "%schar _ZTS%s[] = \"%s\";\n", w, c, c);
         sb_printf(&out_rtti, "%svoid *_ZTI%s[2] = { (void *)((char *)"
                              "_ZTVN10__cxxabiv123__fundamental_type_infoE + "
-                             "16), (void *)_ZTS%s };\n", w, c, c);
+                             "2 * sizeof (void *)), (void *)_ZTS%s };\n", w, c, c);
         for (int k = 0; k < 2; k++) {
             const char *m = cx_fmt("%s%s", k ? "PK" : "P", c);
             sb_printf(&out_rtti, "%schar _ZTS%s[] = \"%s\";\n", w, m, m);
             sb_printf(&out_rtti, "%svoid *_ZTI%s[4] = { (void *)((char *)"
                                  "_ZTVN10__cxxabiv119__pointer_type_infoE + "
-                                 "16), (void *)_ZTS%s, (void *)%dL, "
+                                 "2 * sizeof (void *)), (void *)_ZTS%s, (void *)%dL, "
                                  "(void *)_ZTI%s };\n", w, m, m, k, c);
         }
     }
@@ -4247,6 +4329,7 @@ char *cx_emit_unit(void)
     nwork = 0;
     need_atexit = need_guard = 0;
     need_pmf = 0;
+    need_valist_tag = 0;
     any_vtable = any_pure = need_dyncast = 0;
     memset(&out_rtti, 0, sizeof out_rtti);
     memset(&out_rtti_decl, 0, sizeof out_rtti_decl);
@@ -4340,12 +4423,16 @@ char *cx_emit_unit(void)
         sb_put(&out, ";\n");
     }
     if (need_atexit || need_guard || out_init.len)
-        sb_put(&out, "extern void *__dso_handle;\n"
-                     "int __cxa_atexit(void (*)(void *), void *, void *);\n");
+        sb_put(&out, cx_arm32_abi()
+                     ? "extern void *__dso_handle;\n"
+                       "int __aeabi_atexit(void *, void (*)(void *), void *);\n"
+                     : "extern void *__dso_handle;\n"
+                       "int __cxa_atexit(void (*)(void *), void *, void *);\n");
     if (need_guard)
-        sb_put(&out, "int __cxa_guard_acquire(long long *);\n"
-                     "void __cxa_guard_release(long long *);\n"
-                     "void __cxa_guard_abort(long long *);\n");
+        sb_printf(&out, "int __cxa_guard_acquire(%s *);\n"
+                        "void __cxa_guard_release(%s *);\n"
+                        "void __cxa_guard_abort(%s *);\n", guard_ctype(),
+                  guard_ctype(), guard_ctype());
     /* __builtin_memset/memcpy are the libc functions to the C side, which
      * wants them declared */
     const char *parts[] = { sb_str(&out_code), sb_str(&out_vars),
@@ -4397,9 +4484,12 @@ char *cx_emit_unit(void)
     sb_put(&out, sb_str(&out_rtti_decl));
     sb_put(&out, sb_str(&out_rtti));
     sb_put(&out, sb_str(&out_vtables));
-    if (need_pmf || need_srcloc) {
+    if (need_pmf || need_srcloc || need_valist_tag) {
         /* whatever above names it is written first */
         struct sb pre = { 0, 0, 0 };
+        if (need_valist_tag)
+            sb_put(&pre, "struct __va_list_tag { int *__va_stk; "
+                         "int *__va_reg; int __va_ndx; };\n");
         if (need_pmf)
             sb_put(&pre, "struct __cx_pmf { void *ptr; long adj; };\n");
         if (need_srcloc)

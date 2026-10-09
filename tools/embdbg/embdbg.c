@@ -58,6 +58,9 @@
 #define DW_TAG_variable         0x34
 #define DW_TAG_base_type        0x24
 #define DW_TAG_pointer_type     0x0f
+#define DW_TAG_structure_type   0x13
+#define DW_TAG_union_type       0x17
+#define DW_TAG_array_type       0x01
 #define DW_AT_name              0x03
 #define DW_AT_byte_size         0x0b
 #define DW_AT_encoding          0x3e
@@ -75,6 +78,10 @@
 #define DW_FORM_sec_offset      0x17
 #define DW_FORM_exprloc         0x18
 #define DW_OP_fbreg             0x91
+#define DW_OP_addr              0x03
+#define DW_OP_reg0              0x50
+#define DW_OP_breg0             0x70
+#define DW_AT_frame_base        0x40
 
 static void die(const char *msg) { fprintf(stderr, "embdbg: %s\n", msg); exit(1); }
 
@@ -125,9 +132,17 @@ struct func { const char *name; unsigned long addr, size; };
 struct row  { unsigned long addr; int file, line; int end; };
 
 /* .debug_info DIEs, decoded to what an inspector needs. */
-struct dtype { unsigned long off; int is_ptr; const char *name; int size; int enc; unsigned long pointee; };
+struct dtype { unsigned long off; int is_ptr; const char *name; int size; int enc; unsigned long pointee;
+               int agg; /* 1 struct, 2 union, 3 array: printed as bytes */ };
 struct dvar  { const char *name; int is_param; unsigned long type_off; long fbreg; int has_loc; };
-struct dfunc { const char *name; unsigned long lo, hi; struct dvar *vars; int nvars; };
+/* fb_reg: the DWARF register DW_AT_frame_base names (-1: none read), with
+ * fb_off added -- or, fb_isreg, the register's value as it stands. gone[]:
+ * the variables the compiler says are optimized out here. */
+struct dfunc { const char *name; unsigned long lo, hi; struct dvar *vars; int nvars;
+               int fb_reg, fb_isreg; long fb_off; const char **gone; int ngone; };
+/* A global variable: its name, its address as DW_OP_addr gives it (on AVR
+ * a data-space address, 0x800000 up), and its type. */
+struct dglob { const char *name; unsigned long addr, type_off; };
 
 struct img {
     unsigned char *b; long len;
@@ -137,6 +152,7 @@ struct img {
     char **files; int nfiles;   /* file_names[1..], index 1-based in DWARF */
     struct dtype *types; int ntypes;
     struct dfunc *dfn; int ndfn;
+    struct dglob *globs; int nglobs;
 };
 
 static struct sec *find_sec(struct img *m, const char *name)
@@ -217,8 +233,46 @@ static const char *frame_base_name(struct img *m)
     case 183: return "x29";     /* EM_AARCH64 */
     case 40:  return "r7";      /* EM_ARM */
     case 243: return "s0";      /* EM_RISCV */
+    case 83:  return "Y";       /* EM_AVR: r28:r29 */
     default:  return "rbp";
     }
+}
+
+/* The register a function's DW_AT_frame_base actually names, when the
+ * DWARF said (a .embdbg does not keep it): `sp` on Thumb and RISC-V, `Y`
+ * on AVR -- not the register the machine would use as a frame pointer,
+ * which is what frame_base_name() can only guess. */
+static const char *fb_label(struct img *m, const struct dfunc *d)
+{
+    static const char *const x86[16] = {
+        "rax", "rdx", "rcx", "rbx", "rsi", "rdi", "rbp", "rsp",
+        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+    static const char *const rv[32] = {
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+        "s0",   "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+        "a6",   "a7", "s2", "s3", "s4", "s5", "s6", "s7",
+        "s8",   "s9", "s10", "s11", "t3", "t4", "t5", "t6" };
+    static char buf[8];
+    Elf64_Ehdr *e = (Elf64_Ehdr *)m->b;
+    int n = d ? d->fb_reg : -1;
+    if (n < 0 || m->len < 20 || memcmp(m->b, "\177ELF", 4) != 0)
+        return frame_base_name(m);
+    switch (e->e_machine) {
+    case 62:  return n < 16 ? x86[n] : frame_base_name(m);   /* EM_X86_64 */
+    case 243: return n < 32 ? rv[n] : frame_base_name(m);    /* EM_RISCV */
+    case 83:  return n == 28 ? "Y" : frame_base_name(m);     /* EM_AVR */
+    case 40:                                                  /* EM_ARM */
+        if (n == 13) return "sp";
+        break;
+    case 183:                                                 /* EM_AARCH64 */
+        if (n == 31) return "sp";
+        snprintf(buf, sizeof buf, "x%d", n);
+        return buf;
+    default:
+        return frame_base_name(m);
+    }
+    snprintf(buf, sizeof buf, "r%d", n);
+    return buf;
 }
 
 static void load_funcs(struct img *m)
@@ -269,11 +323,35 @@ static unsigned long reloc_lookup(struct img *m, const char *rela, unsigned long
     struct sec *r = find_sec(m, rela);
     *found = 0;
     if (!r) return 0;
+    /* An ELF32 object's entries are Elf32_Rela -- twelve bytes, not the
+     * twenty-four of Elf64_Rela -- and reading them as the wider form
+     * found no field of a 32-bit object's DWARF at all. */
+    if (img_is32(m)) {
+        Elf32_Rela *rel = (Elf32_Rela *)r->data;
+        int n = (int)(r->size / sizeof *rel);
+        for (int i = 0; i < n; i++)
+            if (rel[i].r_offset == off) {
+                *found = 1;
+                return (unsigned long)(long)rel[i].r_addend;
+            }
+        return 0;
+    }
     Elf64_Rela *rel = (Elf64_Rela *)r->data;
     int n = (int)(r->size / sizeof *rel);
     for (int i = 0; i < n; i++)
         if (rel[i].r_offset == off) { *found = 1; return (unsigned long)rel[i].r_addend; }
     return 0;
+}
+
+/* An address field of `size` bytes: two, four or eight. Not always eight:
+ * a linked 32-bit image keeps four-byte addresses in place (an object has
+ * zeros there and the value in a relocation), and reading eight took the
+ * next field in as the address's high half. */
+static unsigned long addr_field(const unsigned char *p, int size)
+{
+    if (size == 2) return u16(p);
+    if (size == 4) return u32(p);
+    return u64(p);
 }
 
 static void add_row(struct img *m, unsigned long addr, int file, int line, int end)
@@ -286,6 +364,11 @@ static void add_row(struct img *m, unsigned long addr, int file, int line, int e
     m->nrows++;
 }
 
+/* Every line-number program in the section -- one per compilation unit,
+ * which a linked image has several of. Each unit's file table is appended
+ * to the image's, and its rows' file numbers moved up past the units
+ * before it: a second unit used to REPLACE the first one's files, so
+ * every row of the first named a file of the last. */
 static void decode_lines(struct img *m)
 {
     struct sec *ls = find_sec(m, ".debug_line");
@@ -293,11 +376,14 @@ static void decode_lines(struct img *m)
     const unsigned char *p = ls->data;
     int i = 0, n = (int)ls->size;
 
-    while (i < n) {
+    m->nfiles = 1; m->files = calloc(1, sizeof(char *));  /* index 0 unused */
+    while (i + 4 <= n) {
         int unit_start = i;
         unsigned long ulen = u32(p + i); i += 4;
         int unit_end = unit_start + 4 + (int)ulen;
+        if (ulen == 0 || unit_end > n) break;
         unsigned ver = (unsigned)u16(p + i); i += 2;
+        if (ver < 2 || ver > 4) { i = unit_end; continue; }  /* DWARF 5: not ours */
         unsigned long hlen = u32(p + i); i += 4;
         int prog = i + (int)hlen;
         unsigned min_inst = p[i++];
@@ -313,7 +399,7 @@ static void decode_lines(struct img *m)
             i++;
         }
         i++;
-        m->nfiles = 1; m->files = calloc(1, sizeof(char *));  /* index 0 unused */
+        int fbase = m->nfiles - 1;         /* this unit's file 1 is fbase + 1 */
         while (p[i]) {
             const char *name = (const char *)(p + i);
             while (p[i]) i++;
@@ -334,15 +420,16 @@ static void decode_lines(struct img *m)
                 if (sub == DW_LNE_set_address) {
                     int found;
                     unsigned long a = reloc_lookup(m, ".rela.debug_line", (unsigned long)i, &found);
-                    addr = found ? (unsigned long)((long)a + g_addr_bias) : u64(p + i);
+                    addr = found ? (unsigned long)((long)a + g_addr_bias)
+                                 : addr_field(p + i, len - 1);
                 } else if (sub == DW_LNE_end_sequence) {
-                    add_row(m, addr, file, line, 1);
+                    add_row(m, addr, fbase + file, line, 1);
                     addr = 0; file = 1; line = 1;
                 }
                 i = nexti;
             } else if (op < opcode_base) {
                 switch (op) {
-                case DW_LNS_copy:            add_row(m, addr, file, line, 0); break;
+                case DW_LNS_copy:            add_row(m, addr, fbase + file, line, 0); break;
                 case DW_LNS_advance_pc:      addr += uleb(p, &i) * min_inst; break;
                 case DW_LNS_advance_line:    line += (int)sleb(p, &i); break;
                 case DW_LNS_set_file:        file = (int)uleb(p, &i); break;
@@ -357,16 +444,42 @@ static void decode_lines(struct img *m)
                 unsigned adj = op - opcode_base;
                 addr += (adj / line_range) * min_inst;
                 line += line_base + (int)(adj % line_range);
-                add_row(m, addr, file, line, 0);
+                add_row(m, addr, fbase + file, line, 0);
             }
         }
         i = unit_end;
     }
 }
 
-/* --- .debug_info + .debug_abbrev: functions with their params/locals and the
- * scalar types EmbCC describes. Scoped to the forms the emitter writes. --- */
+/* --- .debug_info + .debug_abbrev: functions with their params/locals, the
+ * unit's global variables, and the types EmbCC describes. Scoped to the
+ * forms the emitter writes, over EVERY unit in the section (a linked image
+ * has one per object): each unit's abbreviations are its own, and a
+ * DW_FORM_ref4 counts from the start of its unit. --- */
 struct abbrev { int tag, children; int at[24], form[24]; int n; };
+
+static void read_abbrevs(const struct sec *as, unsigned long at, struct abbrev *ab)
+{
+    const unsigned char *p = as->data;
+    int i = (int)at, n = (int)as->size;
+    memset(ab, 0, 64 * sizeof *ab);
+    while (i < n) {
+        int code = (int)uleb(p, &i);
+        if (code == 0) break;              /* end of this unit's table */
+        if (code >= 64) return;
+        ab[code].tag = (int)uleb(p, &i);
+        ab[code].children = p[i++];
+        for (;;) {
+            int at2 = (int)uleb(p, &i), form = (int)uleb(p, &i);
+            if (at2 == 0 && form == 0) break;
+            if (ab[code].n < 24) {
+                ab[code].at[ab[code].n] = at2;
+                ab[code].form[ab[code].n] = form;
+                ab[code].n++;
+            }
+        }
+    }
+}
 
 static void decode_info(struct img *m)
 {
@@ -375,110 +488,148 @@ static void decode_info(struct img *m)
     if (!is || !as) return;
 
     struct abbrev ab[64];
-    memset(ab, 0, sizeof ab);
-    { const unsigned char *p = as->data; int i = 0, n = (int)as->size;
-      while (i < n) {
-          int code = (int)uleb(p, &i);
-          if (code == 0) break;            /* end of this (single) CU's table */
-          if (code >= 64) return;
-          ab[code].tag = (int)uleb(p, &i);
-          ab[code].children = p[i++];
-          for (;;) {
-              int at = (int)uleb(p, &i), form = (int)uleb(p, &i);
-              if (at == 0 && form == 0) break;
-              if (ab[code].n < 24) {
-                  ab[code].at[ab[code].n] = at;
-                  ab[code].form[ab[code].n] = form;
-                  ab[code].n++;
-              }
-          }
-      }
-    }
+    const unsigned char *p = is->data;
+    int n = (int)is->size, cu = 0;
 
-    const unsigned char *p = is->data; int i = 0, n = (int)is->size;
-    i += 4;                                /* unit_length */
-    i += 2;                                /* version */
-    i += 4;                                /* debug_abbrev_offset */
-    i += 1;                                /* address_size */
-    struct dfunc *cur = NULL;
+    while (cu + 11 <= n) {
+        unsigned long ulen = u32(p + cu);
+        int end = cu + 4 + (int)ulen;
+        unsigned ver = (unsigned)u16(p + cu + 4);
+        if (ulen == 0 || end > n) break;
+        if (ver < 2 || ver > 4) { cu = end; continue; }   /* DWARF 5: not ours */
+        int found;
+        unsigned long aoff = reloc_lookup(m, ".rela.debug_info",
+                                          (unsigned long)(cu + 6), &found);
+        if (!found) aoff = u32(p + cu + 6);
+        int asz = p[cu + 10];
+        read_abbrevs(as, aoff, ab);
 
-    while (i < n) {
-        int die_off = i;                   /* ref4 targets this (CU starts at 0) */
-        int code = (int)uleb(p, &i);
-        if (code == 0) continue;           /* end-of-children marker */
-        if (code >= 64 || ab[code].tag == 0) break;
-        struct abbrev *a = &ab[code];
-
-        const char *name = NULL;
-        unsigned long low = 0, high = 0, tref = 0;
-        long fb = 0; int hasloc = 0, size = 0, enc = 0;
-        for (int k = 0; k < a->n; k++) {
-            int at = a->at[k], form = a->form[k];
-            unsigned long secoff = (unsigned long)i;
-            switch (form) {
-            case DW_FORM_string: {
-                const char *s = (const char *)(p + i);
-                while (p[i]) i++;
-                i++;
-                if (at == DW_AT_name) name = s;
-                break; }
-            case DW_FORM_data1: {
-                int v = p[i++];
-                if (at == DW_AT_byte_size) size = v;
-                else if (at == DW_AT_encoding) enc = v;
-                break; }
-            case DW_FORM_data2:                    i += 2; break;
-            case DW_FORM_data4:
-            case DW_FORM_sec_offset:               i += 4; break;
-            case DW_FORM_ref4: {
-                unsigned long v = u32(p + i); i += 4;
-                if (at == DW_AT_type) tref = v;
-                break; }
-            case DW_FORM_addr: {
-                int found;
-                unsigned long v = reloc_lookup(m, ".rela.debug_info", secoff, &found);
-                if (found) v = (unsigned long)((long)v + g_addr_bias);
-                else v = u64(p + i);
-                i += 8;
-                if (at == DW_AT_low_pc) low = v;
-                else if (at == DW_AT_high_pc) high = v;
-                break; }
-            case DW_FORM_exprloc: {
-                int len = (int)uleb(p, &i), st = i;
-                if (at == DW_AT_location && len >= 1 && p[st] == DW_OP_fbreg) {
-                    int j = st + 1; fb = sleb(p, &j); hasloc = 1;
-                }
-                i = st + len;
-                break; }
-            case DW_FORM_block1: { int len = p[i++]; i += len; break; }
-            default: i = n; break;         /* unknown form: cannot size safely */
+        int i = cu + 11, depth = 0;
+        struct dfunc *cur = NULL;
+        while (i < end) {
+            int die_off = i;               /* a ref4 is cu + its value */
+            int code = (int)uleb(p, &i);
+            if (code == 0) {               /* end of a DIE's children */
+                if (--depth < 2) cur = NULL;
+                if (depth <= 0) break;
+                continue;
             }
-        }
+            if (code >= 64 || ab[code].tag == 0) { i = end; break; }
+            struct abbrev *a = &ab[code];
 
-        if (a->tag == DW_TAG_base_type || a->tag == DW_TAG_pointer_type) {
-            m->types = realloc(m->types, (size_t)(m->ntypes + 1) * sizeof *m->types);
-            struct dtype *t = &m->types[m->ntypes++];
-            t->off = (unsigned long)die_off;
-            t->is_ptr = (a->tag == DW_TAG_pointer_type);
-            t->name = name;
-            t->size = t->is_ptr ? 8 : size;
-            t->enc = enc;
-            t->pointee = tref;
-        } else if (a->tag == DW_TAG_subprogram) {
-            m->dfn = realloc(m->dfn, (size_t)(m->ndfn + 1) * sizeof *m->dfn);
-            cur = &m->dfn[m->ndfn++];
-            cur->name = name; cur->lo = low; cur->hi = high;
-            cur->vars = NULL; cur->nvars = 0;
-        } else if ((a->tag == DW_TAG_formal_parameter || a->tag == DW_TAG_variable)
-                   && cur && hasloc) {
-            cur->vars = realloc(cur->vars, (size_t)(cur->nvars + 1) * sizeof *cur->vars);
-            struct dvar *v = &cur->vars[cur->nvars++];
-            v->name = name;
-            v->is_param = (a->tag == DW_TAG_formal_parameter);
-            v->type_off = tref;
-            v->fbreg = fb;
-            v->has_loc = hasloc;
+            const char *name = NULL;
+            unsigned long low = 0, high = 0, tref = 0, gaddr = 0;
+            long fb = 0, fboff = 0;
+            int hasloc = 0, emptyloc = 0, gloc = 0, size = 0, enc = 0;
+            int fbreg = -1, fbisreg = 0;
+            for (int k = 0; k < a->n; k++) {
+                int at = a->at[k], form = a->form[k];
+                unsigned long secoff = (unsigned long)i;
+                switch (form) {
+                case DW_FORM_string: {
+                    const char *s = (const char *)(p + i);
+                    while (p[i]) i++;
+                    i++;
+                    if (at == DW_AT_name) name = s;
+                    break; }
+                case DW_FORM_data1: {
+                    int v = p[i++];
+                    if (at == DW_AT_byte_size) size = v;
+                    else if (at == DW_AT_encoding) enc = v;
+                    break; }
+                case DW_FORM_data2:                    i += 2; break;
+                case DW_FORM_data4: {
+                    unsigned long v = u32(p + i); i += 4;
+                    if (at == DW_AT_byte_size) size = (int)v;
+                    break; }
+                case DW_FORM_sec_offset:               i += 4; break;
+                case DW_FORM_ref4: {
+                    unsigned long v = u32(p + i); i += 4;
+                    if (at == DW_AT_type) tref = (unsigned long)cu + v;
+                    break; }
+                case DW_FORM_addr: {
+                    int fnd;
+                    unsigned long v = reloc_lookup(m, ".rela.debug_info", secoff, &fnd);
+                    if (fnd) v = (unsigned long)((long)v + g_addr_bias);
+                    else v = addr_field(p + i, asz);
+                    i += asz;
+                    if (at == DW_AT_low_pc) low = v;
+                    else if (at == DW_AT_high_pc) high = v;
+                    break; }
+                case DW_FORM_exprloc: {
+                    int len = (int)uleb(p, &i), st = i;
+                    if (at == DW_AT_location && len == 0) {
+                        emptyloc = 1;      /* optimized out */
+                    } else if (at == DW_AT_location && p[st] == DW_OP_fbreg) {
+                        int j = st + 1; fb = sleb(p, &j); hasloc = 1;
+                    } else if (at == DW_AT_location && p[st] == DW_OP_addr &&
+                               len == 1 + asz) {
+                        int fnd;
+                        unsigned long v = reloc_lookup(m, ".rela.debug_info",
+                                                       (unsigned long)(st + 1), &fnd);
+                        gaddr = fnd ? v : addr_field(p + st + 1, asz);
+                        gloc = 1;
+                    } else if (at == DW_AT_frame_base && len >= 1) {
+                        /* DW_OP_regN: the register's value is the base;
+                         * DW_OP_bregN off: the register plus off. */
+                        int op = p[st], j = st + 1;
+                        if (op >= DW_OP_reg0 && op <= DW_OP_reg0 + 31) {
+                            fbreg = op - DW_OP_reg0; fbisreg = 1;
+                        } else if (op >= DW_OP_breg0 && op <= DW_OP_breg0 + 31) {
+                            fbreg = op - DW_OP_breg0; fboff = sleb(p, &j);
+                        }
+                    }
+                    i = st + len;
+                    break; }
+                case DW_FORM_block1: { int len = p[i++]; i += len; break; }
+                default: i = end; break;   /* unknown form: cannot size safely */
+                }
+            }
+
+            if (a->tag == DW_TAG_base_type || a->tag == DW_TAG_pointer_type ||
+                a->tag == DW_TAG_structure_type || a->tag == DW_TAG_union_type ||
+                a->tag == DW_TAG_array_type) {
+                m->types = realloc(m->types, (size_t)(m->ntypes + 1) * sizeof *m->types);
+                struct dtype *t = &m->types[m->ntypes++];
+                memset(t, 0, sizeof *t);
+                t->off = (unsigned long)die_off;
+                t->is_ptr = (a->tag == DW_TAG_pointer_type);
+                t->agg = a->tag == DW_TAG_structure_type ? 1
+                       : a->tag == DW_TAG_union_type ? 2
+                       : a->tag == DW_TAG_array_type ? 3 : 0;
+                t->name = name;
+                t->size = t->is_ptr && !size ? 8 : size;
+                t->enc = enc;
+                t->pointee = tref;
+            } else if (a->tag == DW_TAG_subprogram) {
+                m->dfn = realloc(m->dfn, (size_t)(m->ndfn + 1) * sizeof *m->dfn);
+                cur = &m->dfn[m->ndfn++];
+                memset(cur, 0, sizeof *cur);
+                cur->name = name; cur->lo = low; cur->hi = high;
+                cur->fb_reg = fbreg; cur->fb_off = fboff; cur->fb_isreg = fbisreg;
+            } else if ((a->tag == DW_TAG_formal_parameter || a->tag == DW_TAG_variable)
+                       && cur && depth >= 2 && emptyloc && name) {
+                cur->gone = realloc(cur->gone, (size_t)(cur->ngone + 1) * sizeof *cur->gone);
+                cur->gone[cur->ngone++] = name;
+            } else if ((a->tag == DW_TAG_formal_parameter || a->tag == DW_TAG_variable)
+                       && cur && depth >= 2 && hasloc) {
+                cur->vars = realloc(cur->vars, (size_t)(cur->nvars + 1) * sizeof *cur->vars);
+                struct dvar *v = &cur->vars[cur->nvars++];
+                v->name = name;
+                v->is_param = (a->tag == DW_TAG_formal_parameter);
+                v->type_off = tref;
+                v->fbreg = fb;
+                v->has_loc = hasloc;
+            } else if (a->tag == DW_TAG_variable && depth == 1 && gloc && name) {
+                m->globs = realloc(m->globs, (size_t)(m->nglobs + 1) * sizeof *m->globs);
+                m->globs[m->nglobs].name = name;
+                m->globs[m->nglobs].addr = gaddr;
+                m->globs[m->nglobs].type_off = tref;
+                m->nglobs++;
+            }
+            if (a->children) depth++;
         }
+        cu = end;
     }
 }
 
@@ -650,7 +801,7 @@ static void list_vars(struct img *m, const struct dfunc *d)
         printf("    %-5s %-14s %-8s @ %s%+ld\n",
                v->is_param ? "param" : "local",
                type_name(m, v->type_off), v->name,
-               frame_base_name(m), v->fbreg);
+               fb_label(m, d), v->fbreg);
     }
 }
 
@@ -1234,6 +1385,7 @@ static void load_embdbg(struct img *m)
         unsigned first = u32(e+24), vc = u32(e+28);
         struct dfunc *d = &m->dfn[m->ndfn++];
         d->name = nm; d->lo = lo; d->hi = hi; d->nvars = (int)vc; d->vars = NULL;
+        d->fb_reg = -1;
         if (vc) d->vars = calloc((size_t)vc, sizeof *d->vars);
         for (unsigned v = 0; v < vc; v++) {
             const unsigned char *r = varsb + (first+v)*40;
@@ -1332,7 +1484,7 @@ static int build_detail(struct img *m, const struct dfunc *d,
         snprintf(lines[n++], 256, "  %-5s %-12s %-8s @ %s%+ld",
                  dv->is_param ? "param" : "local",
                  type_name(m, dv->type_off), dv->name,
-                 frame_base_name(m), dv->fbreg);
+                 fb_label(m, d), dv->fbreg);
     }
     return n;
 }
@@ -1700,8 +1852,171 @@ static const char *live_arch(struct img *m, int *wb)
     case 183: return "aarch64";          /* EM_AARCH64 */
     case 40:  return "arm";              /* EM_ARM */
     case 243: return cls32 ? "riscv32" : "riscv64";
+    case 83:  *wb = 1; return "avr";     /* EM_AVR: one-byte registers */
     default:  return "x86_64";
     }
+}
+
+/* ---- reading variables off a live target ------------------------------
+ *
+ * A local is at frame base + its DW_OP_fbreg offset; the frame base is the
+ * register DW_AT_frame_base names (plus its offset), read from the stub
+ * now. A global is at its DW_OP_addr. What the stub is then asked for is
+ * a DATA address -- which on AVR is not the number the code uses: data
+ * memory is its own space, and QEMU's stub (like GDB) puts it at 0x800000
+ * up, below which `m` reads flash. A frame address is a bare 16-bit Y + q,
+ * so it is moved up; a global's DW_OP_addr already carries the offset. */
+#define AVR_DATA_SPACE 0x800000UL
+
+static int live_pc(struct live *L, unsigned long *pc);
+
+static unsigned long live_data_addr(struct live *L, unsigned long a)
+{
+    if (strcmp(L->arch, "avr") == 0 && a < AVR_DATA_SPACE)
+        return a + AVR_DATA_SPACE;
+    return a;
+}
+
+/* The value of DWARF register n, as a pointer -- each architecture numbers
+ * its registers for DWARF its own way, and the stub's table is by name. */
+static int live_dwreg(struct live *L, int n, unsigned long *out)
+{
+    static const char *const x86[16] = {
+        "rax", "rdx", "rcx", "rbx", "rsi", "rdi", "rbp", "rsp",
+        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+    char nm[16];
+    const char *name = NULL;
+    unsigned long long v, hi;
+    if (rsp_read_regs(&L->r) < 0) return -1;
+    if (strcmp(L->arch, "avr") == 0) {
+        /* AVR's pointer registers are PAIRS, rN the low byte and rN+1 the
+         * high one, and DWARF names the pair by its low register: breg28
+         * is Y, r28:r29. Reading r28 alone took Y's low byte for all of it. */
+        if (n < 0 || n > 30) return -1;
+        snprintf(nm, sizeof nm, "r%d", n);
+        if (rsp_reg(&L->r, L->tab, nm, &v) < 0) return -1;
+        snprintf(nm, sizeof nm, "r%d", n + 1);
+        if (rsp_reg(&L->r, L->tab, nm, &hi) < 0) return -1;
+        *out = (unsigned long)(v | (hi << 8));
+        return 0;
+    }
+    if (strcmp(L->arch, "x86_64") == 0) {
+        name = n >= 0 && n < 16 ? x86[n] : NULL;
+    } else if (strcmp(L->arch, "aarch64") == 0) {
+        if (n == 31) name = "sp";
+        else if (n >= 0 && n < 31) { snprintf(nm, sizeof nm, "x%d", n); name = nm; }
+    } else {
+        /* ARM r0-r15 and RISC-V x0-x31 are the tables' first entries, in
+         * DWARF order */
+        int lim = strcmp(L->arch, "arm") == 0 ? 16 : 32;
+        if (n >= 0 && n < lim) name = L->tab[n].name;
+    }
+    if (!name || rsp_reg(&L->r, L->tab, name, &v) < 0) return -1;
+    *out = (unsigned long)v;
+    return 0;
+}
+
+static const struct dtype *type_at(struct img *m, unsigned long off)
+{
+    for (int i = 0; i < m->ntypes; i++)
+        if (m->types[i].off == off) return &m->types[i];
+    return NULL;
+}
+
+/* A value's bytes as its type says: a base type by its encoding and size, a
+ * pointer in hex, an aggregate as its bytes. Little-endian, as every
+ * target this client talks to is. */
+static void print_value(struct img *m, unsigned long toff,
+                        const unsigned char *b, int n)
+{
+    const struct dtype *t = type_at(m, toff);
+    unsigned long long u = 0;
+    for (int i = n - 1; i >= 0 && i < 8; i--) u = (u << 8) | b[i];
+    if (!t || t->agg) {
+        printf("{");
+        for (int i = 0; i < n; i++) printf(" %02x", b[i]);
+        printf(" }");
+        return;
+    }
+    if (t->is_ptr) { printf("0x%llx", u); return; }
+    if (t->enc == 4 && n == 4) { float f; memcpy(&f, b, 4); printf("%g", (double)f); return; }
+    if (t->enc == 4 && n == 8) { double d; memcpy(&d, b, 8); printf("%g", d); return; }
+    if (t->enc == 5 || t->enc == 6) {         /* signed, signed char */
+        long long sv = (long long)u;
+        if (n < 8 && (u >> (8 * n - 1)) & 1) sv = (long long)(u | (~0ULL << (8 * n)));
+        printf("%lld", sv);
+        return;
+    }
+    printf("%llu", u);
+}
+
+static int var_size(struct img *m, unsigned long toff)
+{
+    const struct dtype *t = type_at(m, toff);
+    return t && t->size > 0 ? t->size : 4;
+}
+
+/* Read and print NAME: a parameter or local of the function the pc is in,
+ * else a global. Returns 0 if it named something. */
+static int live_print(struct live *L, const char *name)
+{
+    unsigned long pc;
+    unsigned char buf[256];
+    if (live_pc(L, &pc) < 0) { printf("embdbg: cannot read the pc\n"); return -1; }
+    const struct dfunc *d = dfunc_at(L->m, pc);
+    for (int k = 0; d && k < d->nvars; k++) {
+        const struct dvar *v = &d->vars[k];
+        unsigned long base;
+        if (strcmp(v->name, name) != 0) continue;
+        if (d->fb_reg < 0 || live_dwreg(L, d->fb_reg, &base) < 0) {
+            printf("embdbg: %s: no frame base to locate it by\n", name);
+            return -1;
+        }
+        if (!d->fb_isreg) base += (unsigned long)d->fb_off;
+        int n = var_size(L->m, v->type_off);
+        if (n > (int)sizeof buf) n = (int)sizeof buf;
+        unsigned long a = live_data_addr(L, base + (unsigned long)v->fbreg);
+        if (rsp_read_mem(&L->r, a, buf, n) < n) {
+            printf("embdbg: cannot read %s at 0x%lx\n", name, a);
+            return -1;
+        }
+        printf("%s = ", name);
+        print_value(L->m, v->type_off, buf, n);
+        printf("\n");
+        return 0;
+    }
+    for (int k = 0; d && k < d->ngone; k++)
+        if (strcmp(d->gone[k], name) == 0) {
+            printf("%s = <optimized out>\n", name);
+            return 0;
+        }
+    for (int k = 0; k < L->m->nglobs; k++) {
+        const struct dglob *g = &L->m->globs[k];
+        if (strcmp(g->name, name) != 0) continue;
+        int n = var_size(L->m, g->type_off);
+        if (n > (int)sizeof buf) n = (int)sizeof buf;
+        unsigned long a = live_data_addr(L, g->addr);
+        if (rsp_read_mem(&L->r, a, buf, n) < n) {
+            printf("embdbg: cannot read %s at 0x%lx\n", name, a);
+            return -1;
+        }
+        printf("%s = ", name);
+        print_value(L->m, g->type_off, buf, n);
+        printf("\n");
+        return 0;
+    }
+    printf("embdbg: no variable '%s' here\n", name);
+    return -1;
+}
+
+static void live_locals(struct live *L)
+{
+    unsigned long pc;
+    if (live_pc(L, &pc) < 0) return;
+    const struct dfunc *d = dfunc_at(L->m, pc);
+    if (!d) { printf("embdbg: no scope information here\n"); return; }
+    for (int k = 0; k < d->nvars; k++) live_print(L, d->vars[k].name);
+    for (int k = 0; k < d->ngone; k++) printf("%s = <optimized out>\n", d->gone[k]);
 }
 
 static int live_pc(struct live *L, unsigned long *pc)
@@ -1794,14 +2109,15 @@ static void live_step_line(struct live *L)
 static void live_regs(struct live *L)
 {
     if (rsp_read_regs(&L->r) < 0) { printf("embdbg: cannot read registers\n"); return; }
-    int col = 0;
+    /* AVR's 35 registers are mostly one byte: eight to a row */
+    int col = 0, per = strcmp(L->arch, "avr") == 0 ? 8 : 4;
     for (const struct rsp_regdef *d = L->tab; d->name; d++) {
         unsigned long long v;
         if (rsp_reg(&L->r, L->tab, d->name, &v) < 0) continue;
         printf("%-5s %0*llx%s", d->name, d->size * 2, v,
-               (++col % 4) ? "  " : "\n");
+               (++col % per) ? "  " : "\n");
     }
-    if (col % 4) printf("\n");
+    if (col % per) printf("\n");
 }
 
 /* A backtrace, as far as this target honestly allows.
@@ -1820,6 +2136,14 @@ static void live_bt(struct live *L)
     if (live_pc(L, &pc) < 0) return;
     printf("  #0  0x%lx  ", pc); print_loc(L->m, pc); printf("\n");
 
+    if (strcmp(L->arch, "avr") == 0) {
+        /* The return address is on the stack above the frame, the saved
+         * registers and Y -- at a distance only the frame's size gives,
+         * and nothing in the DWARF says it. */
+        printf("  (no deeper: -g emits no .debug_frame for AVR yet, so where\n"
+               "   the return address sits above Y is not recorded)\n");
+        return;
+    }
     if (strcmp(L->arch, "x86_64") != 0) {
         if (rsp_reg(&L->r, L->tab, strcmp(L->arch, "arm") == 0 ? "lr" : "ra",
                     &ra) == 0 && ra) {
@@ -1867,6 +2191,26 @@ static void live_mem(struct live *L, const char *as, const char *ls)
     }
 }
 
+/* Off a breakpoint before running on. A stub that implements a software
+ * breakpoint with a trap instruction (OpenOCD does, on a real part) traps
+ * again at once when resumed AT it; so the breakpoint under the pc is
+ * taken out, one instruction stepped, and put back. Returns -1 if the
+ * target was lost, 1 if it exited, else 0. */
+static int live_step_off(struct live *L)
+{
+    unsigned long pc;
+    int sig = 0, rc = 0, at = -1;
+    if (live_pc(L, &pc) < 0) return 0;
+    for (int i = 0; i < L->nbp; i++)
+        if (L->bp[i].active && L->bp[i].addr == pc) at = i;
+    if (at < 0) return 0;
+    rsp_break(&L->r, L->bp[at].addr, L->bp[at].len, 0);
+    if (rsp_step(&L->r, &sig) < 0) rc = -1;
+    else if (sig < 0) rc = 1;
+    if (rc == 0) rsp_break(&L->r, L->bp[at].addr, L->bp[at].len, 1);
+    return rc;
+}
+
 static void cmd_remote(struct img *m, int argc, char **argv)
 {
     struct live L;
@@ -1911,6 +2255,25 @@ static void cmd_remote(struct img *m, int argc, char **argv)
         if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) break;
         if (!strcmp(cmd, "where") || !strcmp(cmd, "w")) { live_where(&L); continue; }
         if (!strcmp(cmd, "regs")) { live_regs(&L); continue; }
+        if (!strcmp(cmd, "print") || !strcmp(cmd, "p")) {
+            if (nf < 2) printf("embdbg: print needs a variable's name\n");
+            else live_print(&L, a1);
+            continue;
+        }
+        if (!strcmp(cmd, "locals") ||
+            (!strcmp(cmd, "info") && nf >= 2 && !strcmp(a1, "locals"))) {
+            live_locals(&L);
+            continue;
+        }
+        if (!strcmp(cmd, "set")) {
+            /* set REG VALUE: a register, by the name `regs` shows */
+            if (nf < 3) { printf("embdbg: set needs a register and a value\n"); continue; }
+            if (rsp_write_reg(&L.r, L.tab, a1, strtoull(a2, NULL, 0)) < 0)
+                printf("embdbg: could not write %s\n", a1);
+            else
+                printf("%s = 0x%llx\n", a1, strtoull(a2, NULL, 0));
+            continue;
+        }
         if (!strcmp(cmd, "bt")) { live_bt(&L); continue; }
         if (!strcmp(cmd, "mem")) {
             if (nf < 2) printf("embdbg: mem needs an address\n");
@@ -1925,10 +2288,12 @@ static void cmd_remote(struct img *m, int argc, char **argv)
                 continue;
             }
             /* The length is the instruction the stub replaces. Four is
-             * right for aarch64 and RISC-V, two for Thumb, and one is
-             * what a variable-length machine wants. */
+             * right for aarch64 and RISC-V, two for Thumb and AVR (whose
+             * `break` is one word), and one is what a variable-length
+             * machine wants. */
             int blen = !strcmp(L.arch, "x86_64") ? 1
-                     : !strcmp(L.arch, "arm")    ? 2 : 4;
+                     : !strcmp(L.arch, "arm") || !strcmp(L.arch, "avr") ? 2
+                     : 4;
             int rc = rsp_break(&L.r, addr, blen, 1);
             if (rc == -2) { printf("embdbg: this stub has no software breakpoints\n"); continue; }
             if (rc < 0)   { printf("embdbg: the stub refused a breakpoint at 0x%lx\n", addr); continue; }
@@ -1955,6 +2320,11 @@ static void cmd_remote(struct img *m, int argc, char **argv)
             !strcmp(cmd, "stepi") || !strcmp(cmd, "si")) {
             if (!L.running) { printf("the target has exited\n"); continue; }
             int sig = 0;
+            if (strcmp(cmd, "stepi") && strcmp(cmd, "si")) {
+                int off = live_step_off(&L);
+                if (off < 0) { printf("embdbg: lost the target\n"); break; }
+                if (off > 0) { printf("the target exited\n"); L.running = 0; continue; }
+            }
             if (!strcmp(cmd, "continue") || !strcmp(cmd, "c")) {
                 if (rsp_cont(&L.r, &sig) < 0) { printf("embdbg: lost the target\n"); break; }
             } else if (!strcmp(cmd, "stepi") || !strcmp(cmd, "si")) {
@@ -1969,8 +2339,8 @@ static void cmd_remote(struct img *m, int argc, char **argv)
             continue;
         }
         printf("embdbg: unknown command '%s' "
-               "(break continue step stepi where bt regs mem delete quit)\n",
-               cmd);
+               "(break continue step stepi where bt regs set print locals "
+               "mem delete quit)\n", cmd);
     }
     rsp_close(&L.r);
 }
@@ -2088,7 +2458,7 @@ static void emit_kernel(struct img *m, const char *elfpath, const char *out)
         d->name = m->fn[i].name;
         d->lo = m->fn[i].addr;
         d->hi = m->fn[i].addr + m->fn[i].size;
-        d->vars = NULL; d->nvars = 0;
+        d->vars = NULL; d->nvars = 0; d->fb_reg = -1;
     }
     qsort(m->dfn, (size_t)m->ndfn, sizeof *m->dfn, cmp_dfn_lo);
 

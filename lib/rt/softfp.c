@@ -46,9 +46,27 @@
  * defined, and an FPU build then linked a soft-float build of this file
  * -- which works until the objects must agree about the float ABI. */
 /* MIPS says it with __mips_soft_float (-msoft-float, which is o32 on a
- * PIC32-class core with no FPU). */
-#if defined(__riscv_float_abi_soft) || defined(__SOFTFP__) || \
-    defined(__mips_soft_float) || \
+ * PIC32-class core with no FPU), and LoongArch with __loongarch_soft_float
+ * (LP64S). TriCore code from EmbCC is soft float on every core (the TC3xx
+ * FPU is not used yet), so __tricore__ alone says it; and EmbCC's Xtensa
+ * code is soft float on any core, with or without the ESP32's FPU: the
+ * ABI keeps floats in the address registers either way, and the backend
+ * calls these. PowerPC says it with _SOFT_FLOAT: an e500 or e200 core
+ * without its SPE (-msoft-float). SPARC says it with SOFT_FLOAT,
+ * clang's and GCC's -msoft-float. ColdFire is soft float when
+ * __mcffpu__ is not defined. */
+/* RISC-V asks the FPU and not the ABI: __riscv_flen is undefined without
+ * F, and 32 with F alone -- where every double routine is still needed,
+ * and the conversions between the widths (the binary32 ones compile too,
+ * and nothing calls them). With D the FPU does all of it but RV32's 64-bit
+ * integer conversions, below. */
+#if (defined(__riscv) && (!defined(__riscv_flen) || __riscv_flen == 32)) || \
+    defined(__SOFTFP__) || \
+    defined(__mips_soft_float) || defined(__loongarch_soft_float) || \
+    defined(__tricore__) || defined(__XTENSA__) || \
+    (defined(__PPC__) && defined(_SOFT_FLOAT)) || \
+    (defined(__sparc__) && defined(SOFT_FLOAT)) || \
+    (defined(__mcoldfire__) && !defined(__mcffpu__)) || \
     (defined(__arm__) && (!defined(__ARM_FP) || !(__ARM_FP & 8)))
 #define SOFTFP_ALL 1
 #endif
@@ -60,7 +78,8 @@
  * part and are still this file's, and the rest is not compiled. Without
  * them `(long long)d` would not link there; with the rest, every M7 image
  * that converted one long long would carry the whole of binary64 too. */
-#if defined(SOFTFP_ALL) || defined(__arm__)
+#if defined(SOFTFP_ALL) || defined(__arm__) || \
+    (defined(__riscv) && __riscv_xlen == 32)
 #define SOFTFP_INT64 1
 #endif
 

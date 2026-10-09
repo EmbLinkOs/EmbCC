@@ -20,9 +20,11 @@ exactly as it was given on the command line. Compiling the same file
 under the same relative name, with the same options, gives the same
 bytes in any directory; an absolute file name is recorded as such.
 
-`-g` can be combined with any `-O` level. See
+`-g` can be combined with any `-O` level, and it never changes the
+generated code (see [`-g` does not change the generated
+code](#-g-does-not-change-the-generated-code)). See
 [Optimized code](#optimized-code) for what a debugger can rely on above
-`-O0`.
+`-O0` and `-Og`.
 
 ### `-ggdb`, `-g1`, `-g2`, `-g3`, `-gdwarf`, `-gdwarf-2`, `-gdwarf-3`, `-gdwarf-4`
 
@@ -58,7 +60,7 @@ for reproducible builds, because no directory is recorded.
 
 ### Sections
 
-An object compiled with `-g` has three DWARF sections, each with its
+An object compiled with `-g` has these DWARF sections, each with its
 relocation section:
 
 | Section | Contents |
@@ -66,15 +68,18 @@ relocation section:
 | `.debug_abbrev` | Abbreviations for `.debug_info` |
 | `.debug_info` | One compile unit: functions, parameters, local variables, types |
 | `.debug_line` | The line-number table |
+| `.debug_frame` | Call frame information, on Thumb and RISC-V (see [Call frames and unwinding](#call-frames-and-unwinding)) |
 
+`.debug_ranges` is added when the unit's code is in several sections.
 They are not allocated: they occupy no memory in the running program.
-EmbCC emits no `.debug_str`, `.debug_aranges`, `.debug_ranges`,
-`.debug_loc`, `.debug_frame` or `.debug_macro`. Call-frame information,
-when there is any, is in `.eh_frame`; see
-[Call frames and unwinding](#call-frames-and-unwinding).
+EmbCC emits no `.debug_str`, `.debug_aranges`, `.debug_loc` or
+`.debug_macro`.
 
 The 32-bit DWARF format is used. The address size is the target's
-pointer size: 8 on x86-64, AArch64 and RV64, 4 on Thumb and RV32.
+pointer size: 8 on x86-64, AArch64 and RV64, 4 on Thumb and RV32. AVR's
+is 4, as avr-gcc's is, although its pointers are 2 bytes: a code address
+there is a byte address in flash, and a data address is `0x800000` plus
+the SRAM address (see [Targets](targets.md#debugging)).
 
 ### Compile unit
 
@@ -89,7 +94,10 @@ pointer size: 8 on x86-64, AArch64 and RV64, 4 on Thumb and RV32.
 
 ### Line table
 
-The line table maps each instruction address to a source line. A new
+The line table maps each instruction address to a source line. Each
+function's first row is at its entry address, with the line the
+function is declared on; the first row of its body carries
+`prologue_end`, which is where a debugger puts `break FUNCTION`. A new
 row starts wherever the source line changes. Every row is a statement
 boundary (`is_stmt`). Columns are not recorded.
 
@@ -114,13 +122,16 @@ The frame base, against which every variable's location is given:
 | AArch64 | `DW_OP_reg29` (`x29`) |
 | Thumb | `DW_OP_breg13 0` (`sp`); `DW_OP_breg7 0` (`r7`) in a function with `alloca`, a variable-length array or an over-aligned local, which addresses its frame from `r7` |
 | RISC-V | `DW_OP_breg2 0` (`sp`); `DW_OP_breg8 0` (`s0`) in such a function |
+| AVR | `DW_OP_breg28 0` (`Y`, the pair `r28:r29`), which the prologue points one byte below the frame: a variable at `DW_OP_fbreg 5` is the one the code addresses as `Y+5` |
 
 ### Variables
 
 Every parameter and every local variable of a function is described,
-with its name, its type and a location that is a single offset from the
-frame base (`DW_OP_fbreg`). There are no location lists and no
-register locations.
+with its name, its type and a location. The location is a single offset
+from the frame base (`DW_OP_fbreg`) when the variable lives in its
+stack slot, and empty (`<optimized out>`) when the optimized code keeps
+it somewhere else (see [Optimized code](#optimized-code)). There are no
+location lists and no register locations yet.
 
 An array or structure aligned beyond what the stack guarantees (for
 example `char buf[64] __attribute__((aligned(64)))`) is stored in a
@@ -134,9 +145,12 @@ function, with no `DW_TAG_lexical_block`: the debugger sees all of a
 function's variables at once, including ones whose block has not been
 entered or has ended.
 
-Global variables and `static` local variables are not described. A
-debugger can still find a global by its symbol, but does not know its
-type.
+Each global variable the unit defines is a `DW_TAG_variable` child of
+the compile unit, with its name, its type and a `DW_OP_addr` location
+relocated against its own symbol. Thread-local variables, `static` local
+variables and variables only declared (`extern`) are not described; a
+`static` local is in the symbol table as `FUNCTION.NAME` (`f.cnt`), so
+a debugger can find its address but not its type.
 
 ### Types
 
@@ -161,7 +175,7 @@ type.
 | AArch64 (ELF) | Yes | Tested with gdb under QEMU. |
 | Thumb (Cortex-M) | Yes | |
 | RISC-V, RV32 and RV64 | Yes | Tested with gdb under QEMU (RV32). See [Known problems](#known-problems). |
-| AVR | Accepted, not usable | No line table rows and an unreadable `.debug_info`. |
+| AVR | Yes | Tested with gdb and with EmbDBG under QEMU (`-M uno`). |
 | Any Darwin target (Mach-O) | Refused | |
 | Any Windows target (COFF) | Refused | |
 
@@ -185,12 +199,26 @@ without `-g`.
 
 ## Call frames and unwinding
 
-EmbCC emits no `.debug_frame`. A debugger finds a function's caller in
-one of three ways, depending on the target:
+A debugger finds a function's caller in one of these ways, depending on
+the target:
 
-- **x86-64 and AArch64.** With `-g`, every function keeps a frame record
-  (`rbp`, or `x29` and `x30`), so the chain of frame pointers leads from
-  each frame to its caller.
+- **Thumb and RISC-V: `.debug_frame`.** With `-g`, every function has
+  call frame information in `.debug_frame`: where the caller's frame is,
+  and where the return address and each saved register went, step by
+  step through the prologue. On Thumb that is `push`, `vpush`, the
+  frame's `sub sp`, and `r7` as the frame base in a function with
+  `alloca` or a variable-length array (`r5` on ARMv6-M). On RISC-V it is the `addi sp`, the
+  stores of `ra` and the saved `s` and `fs` registers, and `s0` as the
+  frame base. A debugger unwinds by it at every level, through
+  floating-point frames too, and reads a caller's saved registers back,
+  float registers included. `tests/golden/debug-frame.sh` backtraces
+  through such frames with gdb. A RISC-V interrupt handler has no
+  entry.
+- **x86-64 and AArch64: frame records.** At `-O0` and `-Og` every
+  function keeps a frame record (`rbp`, or `x29` and `x30`), so the chain
+  of frame pointers leads from each frame to its caller. Optimized, a
+  leaf may have no frame record; the debugger then analyzes the
+  function's prologue.
 - **`.eh_frame`.** When unwind tables are enabled, each function has an
   `.eh_frame` entry describing its frame, which a debugger also uses.
   Unwind tables are on for C++, with `-funwind-tables`,
@@ -199,8 +227,11 @@ one of three ways, depending on the target:
   `-fno-asynchronous-unwind-tables` turn them off. They describe frames
   correctly only on x86-64 and AArch64 (see
   [Known problems](#known-problems)).
-- **Thumb and RISC-V.** No frame pointer and no correct `.eh_frame`; the
-  debugger analyzes the function's prologue. gdb does this for both.
+- **The other embedded targets.** No `.debug_frame` yet; the debugger
+  analyzes the function's prologue.
+- **AVR.** `Y` is a frame pointer, but nothing records where the return
+  address is above it; gdb analyzes the prologue, which follows
+  avr-gcc's.
 
 ## Frame pointers
 
@@ -216,58 +247,56 @@ have no effect.
 
 See [Optimization](optimization.md#frame-pointer) for AVR.
 
-## How `-g` changes the generated code
+## `-g` does not change the generated code
 
-EmbCC does not generate the same code with and without `-g`. To keep
-each variable at the location its DWARF names, `-g` turns off the
-following:
+The code, data, symbols and relocations of an object are the same with
+and without `-g`, at every optimization level and on every target. `-g`
+only adds the debug sections. So the image you debug is the image you
+ship: build once with `-g`, flash the stripped copy, and debug it with
+the unstripped ELF.
 
-| Target | Turned off by `-g` |
-|---|---|
-| x86-64 | Sharing one stack slot between variables that are not live at the same time (all levels); frameless and push-only functions; moving parameters straight into allocated registers (`-O1` and above). |
-| AArch64 | Frameless leaf functions and tail calls (`-O1` and above). |
-| Thumb | Choosing between register-pair and no-pair allocation, folding constant offsets into loads and stores, and tail calls (`-O1` and above). Variables the optimizer leaves in memory are not given registers. |
-| RISC-V | Tail calls (`-O1` and above). Variables the optimizer leaves in memory are not given registers. |
-| AVR | Register allocation, entirely (`-O1` and above). |
-
-On every target, a variable that is never referenced still gets a stack
-slot under `-g`.
-
-The difference is largest on AVR, where `-O2 -g` code can be about twice
-the size of `-O2` code, and on x86-64 at `-O0`, where every variable gets
-its own slot. Measure size and speed without `-g`.
+`tests/golden/g-same-code.sh` checks this. It compiles programs for
+every target at `-O0`, `-O1`, `-O2`, `-Os` and `-Og`, with and without
+`-g`, and requires the two objects to be identical once their debug
+sections are stripped.
 
 ## Optimized code
 
-At `-O0`, every variable lives in its stack slot for its whole lifetime,
-each statement is a separate sequence of instructions, and the debug
-information is accurate. Debug at `-O0` when you can. EmbCC has no
-`-Og`.
+At `-O0` and `-Og`, every variable lives in its stack slot for its whole
+lifetime, and the debug information names that slot. `-Og` is `-O1`
+with this one difference: the optimizer still removes work, but every
+source variable stays in memory, where a debugger reads it.
 
-At `-O1` and above, the debug information still describes every
-variable at its stack slot, but the optimizer no longer keeps every
-value there:
+At `-O1` and above, the optimizer keeps many variables in registers, or
+turns them into temporaries that no longer exist as one value. Such a
+variable's location is empty, which the debugger prints as
+`<optimized out>`. Variables that remain in their slot have that slot's
+location, which is always right:
 
-- `mem2reg` moves local variables into registers. The variable's slot is
-  then never written, and the debugger shows whatever the slot holds:
-  usually a stale or uninitialized value. There is no "optimized out"
-  marker.
-- Parameters are stored to their slots on entry to the function, so the
-  debugger shows each parameter's value at entry, even after the
-  function has changed it.
+- A local the code still reads or writes in memory is in its slot.
+- A parameter that has a slot is stored there on entry, so the slot
+  holds the value it arrived with. Once the function assigns it after the
+  optimizer has taken it out of memory, its location is empty instead.
 - A `volatile` local is the exception at every level: it is never
   promoted, forwarded or given a register, so its slot always holds its
   current value.
+
+There are no location lists yet: a variable in a register is described
+as optimized out, rather than as being in that register.
+
+Also, at `-O1` and above:
+
 - Inlined functions have no frame of their own: a backtrace shows the
   caller, and the line table moves between the caller's lines and the
   inlined function's lines.
-- Tail calls (x86-64 from `-O1`, even with `-g`) replace the caller's frame
-  with the callee's, so the caller is missing from a backtrace.
+- Tail calls replace the caller's frame with the callee's, so the caller
+  is missing from a backtrace.
 - Loops may be rotated, unrolled or vectorized, so stepping visits the
   loop's lines in an order that does not match the source.
 
-Line-table breakpoints and backtraces remain usable in optimized code;
-variable values do not. Use [`embcc inspect ir`](optimization.md#seeing-what-the-optimizer-did)
+Line-table breakpoints and backtraces remain usable in optimized code.
+For variable values, debug at `-O0` or `-Og`, or use
+[`embcc inspect ir`](optimization.md#seeing-what-the-optimizer-did)
 to see what became of a variable.
 
 ## Debug information in a linked image
@@ -307,7 +336,7 @@ for flashing does not contain the debug sections in any case.
 
 The DWARF EmbCC emits is read by gdb and lldb. The test suite checks it
 with `llvm-dwarfdump --verify` and with gdb sessions against QEMU on
-x86-64, AArch64 and RISC-V.
+x86-64, AArch64, RISC-V and AVR.
 
 ### A program on the host
 
@@ -352,6 +381,7 @@ Then use gdb as usual: `break scale`, `continue`, `info args`, `next`,
 | Thumb, Cortex-M4F | `qemu-system-arm -M mps2-an386` | `arm` |
 | Thumb, Cortex-M33 | `qemu-system-arm -M mps2-an505` | `arm` |
 | RISC-V | `qemu-system-riscv32` / `qemu-system-riscv64 -M virt -bios none` | `riscv:rv32` / `riscv:rv64` |
+| AVR | `qemu-system-avr -M uno -bios IMAGE` | `avr` |
 
 On x86-64, the test suite uses hardware breakpoints (`hbreak`), because
 the boot loader writes the code after the debugger has attached and
@@ -377,17 +407,13 @@ qemu-system-riscv64 -M virt -bios none -nographic -m 8 -kernel fw.elf -S -gdb tc
 embdbg fw.elf remote :3333
 ```
 
-`remote` supports x86-64, AArch64, Thumb, RV32 and RV64, not AVR. See
+`remote` supports x86-64, AArch64, Thumb, RV32, RV64 and AVR. See
 [EmbDBG](tools/embdbg.md) for its commands.
 
 ## Known problems
 
 These are defects in the current implementation, not intended behavior.
 
-- **AVR.** `-g` is accepted, but no line-table rows are emitted, the
-  frame base is wrong, and `.debug_info` declares a 2-byte address size
-  while writing 8-byte addresses, so debuggers cannot read past the
-  compile unit. `-g` also turns off register allocation at `-O1` and above.
 - **Unwind tables on Thumb, RISC-V and AVR.** `-funwind-tables` (and C++
   at RV64, the one of these targets that compiles C++) produce an
   `.eh_frame` in the x86-64 layout on these targets, which does not

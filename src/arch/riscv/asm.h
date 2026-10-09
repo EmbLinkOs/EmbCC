@@ -37,6 +37,8 @@ int rvasm_assemble(const char *text, struct code *out, char *err, int errlen);
  * tp, t0-t6, s0-s11, a0-a7, and fp for s0). -1 for anything else. Used
  * for `register T v __asm__("a0")` variables and for clobber lists. */
 int rvasm_gpr(const char *name, int len);
+/* ...and a float register: f0..f31, or ft0-ft11, fs0-fs11, fa0-fa7. */
+int rvasm_fpr(const char *name, int len);
 
 /* For the file assembler: is `w` an operand word of this statement -- a
  * CSR name after a csr instruction, a fence's iorw set -- rather than a

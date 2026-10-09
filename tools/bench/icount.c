@@ -13,17 +13,26 @@
  * skips one, so by count a branch always wins, while on a Cortex-M4 the
  * taken branch costs two cycles more than the move it skipped; and a
  * divide counts one where it takes up to twelve cycles. So each
- * instruction also gets a cost:
+ * instruction also gets a cost, from the table in cost.h (which EmbSim
+ * shares, so the simulator and the plugin charge the same).
  *
- *   Cortex-M4 (the Technical Reference Manual's table, simplified): 1,
- *   a load 2, a load or store multiple (push, pop) 1 + the registers, a
- *   load or store pair 3, sdiv/udiv 7 (2 to 12 by the operands), vdiv
- *   and vsqrt 14; and a taken branch 2 more (the pipeline refill).
+ * With `stop=ADDR` the counts written are those at the first block that
+ * starts at ADDR: a run's own end, for a machine whose exit QEMU takes
+ * its time over (virt's test device stops QEMU from its main loop, while
+ * the guest spins on in its last loop) or that never exits at all (the
+ * AVR), so the count is exact where the total would not be.
  *
- *   RV32 (no one core: a plain in-order pipeline): 1, a load 2, a
- *   divide or remainder 16, and a taken branch or jump 2 more.
+ * On the AVR, instructions are counted one by one, not by blocks: QEMU
+ * runs a block again from an access to the data space it must redo
+ * (its TLB fill for the registers and I/O restarts the instruction), so
+ * a block's count added as it starts counts some instructions twice.
+ * The rerun shows as the same instruction twice in a row, which only a
+ * jump to itself does honestly, so a repeat is not counted. An
+ * instruction a skip passes over is counted (QEMU runs it in its block
+ * under a condition); the cycles are the datasheet's, but the skip's are
+ * not seen, so only EmbSim's AVR cycles are exact.
  *
- * Neither is a simulator -- there are no wait states, no load-use
+ * Neither model is cycle-accurate -- there are no wait states, no load-use
  * stalls, no flash -- but both charge the things a compiler chooses
  * between. Static costs are added per translation block, inline, as the
  * count is; whether a block's last branch was taken is seen from where
@@ -35,12 +44,14 @@
 #include <string.h>
 #include <qemu-plugin.h>
 
+#include "cost.h"
+
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 static struct qemu_plugin_scoreboard *counts, *costs;
 static qemu_plugin_u64 count, cost;
 static char out_path[1024];
-static int is_arm;
+static int is_arm, is_avr;
 
 /* What a block ends in, for the next one to judge: whether its last
  * instruction can branch, and where execution goes when it does not. */
@@ -50,122 +61,31 @@ struct tb_end {
 };
 static const struct tb_end *prev_tb;
 static uint64_t taken;
+/* stop=ADDR: the counts when a block first starts there */
+static uint64_t stop_addr, stop_count, stop_cost;
+static int stop_set, stopped;
 
-static int popcount16(unsigned v)
-{
-    int n = 0;
-    for (v &= 0xffff; v; v &= v - 1)
-        n++;
-    return n;
-}
+/* the AVR's instructions, counted one at a time */
+struct avr_insn {
+    uint64_t vaddr, cost;
+    int self;                       /* a jump to itself */
+};
+static uint64_t avr_last = ~0ull, avr_count, avr_cycles;
 
-/* A Thumb instruction's cost and whether it may branch. */
-static int arm_cost(const uint8_t *p, size_t n, int *branch)
+static void avr_exec(unsigned int vcpu, void *ud)
 {
-    unsigned h1 = p[0] | p[1] << 8;
-    *branch = 0;
-    if (n == 2) {
-        if ((h1 & 0xff00) == 0x4700) {                  /* bx, blx */
-            *branch = 1;
-            return 1;
-        }
-        if ((h1 & 0xf800) == 0x4800)                    /* ldr literal */
-            return 2;
-        if ((h1 & 0xf000) == 0x5000)                    /* ld/st register */
-            return ((h1 >> 9) & 7) >= 3 ? 2 : 1;
-        if ((h1 & 0xe000) == 0x6000 || (h1 & 0xf000) == 0x8000 ||
-            (h1 & 0xf000) == 0x9000)                    /* ld/st immediate */
-            return h1 & 0x0800 ? 2 : 1;
-        if ((h1 & 0xfe00) == 0xb400)                    /* push */
-            return 1 + popcount16(h1 & 0x1ff);
-        if ((h1 & 0xfe00) == 0xbc00) {                  /* pop */
-            *branch = (h1 & 0x100) != 0;
-            return 1 + popcount16(h1 & 0x1ff);
-        }
-        if ((h1 & 0xf000) == 0xc000)                    /* stm, ldm */
-            return 1 + popcount16(h1 & 0xff);
-        if ((h1 & 0xf500) == 0xb100) {                  /* cbz, cbnz */
-            *branch = 1;
-            return 1;
-        }
-        if ((h1 & 0xf000) == 0xd000 && (h1 & 0x0e00) != 0x0e00) {
-            *branch = 1;                                /* b<cond> */
-            return 1;
-        }
-        if ((h1 & 0xf800) == 0xe000) {                  /* b */
-            *branch = 1;
-            return 1;
-        }
-        return 1;
+    (void)vcpu;
+    const struct avr_insn *in = ud;
+    if (in->vaddr == avr_last && !in->self)
+        return;                     /* a block run again from here */
+    avr_last = in->vaddr;
+    if (stop_set && !stopped && in->vaddr == stop_addr) {
+        stopped = 1;
+        stop_count = avr_count;
+        stop_cost = avr_cycles + taken;
     }
-    unsigned h2 = p[2] | p[3] << 8;
-    if ((h1 & 0xf800) == 0xf000 && (h2 & 0x8000)) {
-        /* b, bl and the miscellaneous control space; only the branches
-         * have bit 12 or a condition outside 111x */
-        if ((h2 & 0x5000) || (h1 & 0x0380) != 0x0380)
-            *branch = 1;
-        return 1;
-    }
-    if ((h1 & 0xfff0) == 0xe8d0 && (h2 & 0xffe0) == 0xf000) {
-        *branch = 1;                                    /* tbb, tbh */
-        return 2;
-    }
-    if ((h1 & 0xfe40) == 0xe800) {                      /* ldm, stm */
-        if ((h1 & 0x0010) && (h2 & 0x8000))
-            *branch = 1;                                /* pop.w {.., pc} */
-        return 1 + popcount16(h2);
-    }
-    if ((h1 & 0xfff0) == 0xe850)                        /* ldrex */
-        return 2;
-    if ((h1 & 0xfe40) == 0xe840 && (h1 & 0x0120))       /* ldrd, strd */
-        return 3;
-    if ((h1 & 0xfe00) == 0xf800) {                      /* ld/st single */
-        if ((h1 & 0x0010) && (h2 & 0xf000) == 0xf000 &&
-            ((h1 >> 5) & 3) == 2)
-            *branch = 1;                                /* ldr pc */
-        return h1 & 0x0010 ? 2 : 1;
-    }
-    if ((h1 & 0xffd0) == 0xfb90)                        /* sdiv, udiv */
-        return 7;
-    if ((h1 & 0xfe10) == 0xec10 && (h1 & 0x0100))       /* vldr, vldm */
-        return 2;
-    if ((h1 & 0xffb0) == 0xee80 && (h2 & 0x0e50) == 0x0a00)
-        return 14;                                      /* vdiv */
-    if ((h1 & 0xffbf) == 0xeeb1 && (h2 & 0x0ed0) == 0x0ac0)
-        return 14;                                      /* vsqrt */
-    return 1;
-}
-
-/* A RISC-V instruction's cost and whether it may branch (with C). */
-static int rv_cost(const uint8_t *p, size_t n, int *branch)
-{
-    *branch = 0;
-    if (n == 2) {
-        unsigned h = p[0] | p[1] << 8, q = h & 3, f3 = h >> 13;
-        if (q == 0)
-            return f3 == 2 || f3 == 3 ? 2 : 1;          /* c.lw / c.flw */
-        if (q == 1) {
-            if (f3 == 1 || f3 == 5 || f3 == 6 || f3 == 7)
-                *branch = 1;                            /* c.jal c.j c.b*z */
-            return 1;
-        }
-        if (f3 == 2 || f3 == 3)                         /* c.lwsp */
-            return 2;
-        if (f3 == 4 && ((h >> 2) & 0x1f) == 0 && ((h >> 7) & 0x1f))
-            *branch = 1;                                /* c.jr, c.jalr */
-        return 1;
-    }
-    uint32_t w = p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
-    unsigned op = w & 0x7f;
-    if (op == 0x03 || op == 0x07)                       /* loads */
-        return 2;
-    if (op == 0x63 || op == 0x6f || op == 0x67) {       /* b*, jal, jalr */
-        *branch = 1;
-        return 1;
-    }
-    if (op == 0x33 && (w >> 25) == 1 && ((w >> 12) & 7) >= 4)
-        return 16;                                      /* div, rem */
-    return 1;
+    avr_count++;
+    avr_cycles += in->cost;
 }
 
 static void tb_exec(unsigned int vcpu, void *ud)
@@ -175,6 +95,11 @@ static void tb_exec(unsigned int vcpu, void *ud)
     if (prev_tb && prev_tb->branch && e->start != prev_tb->fall)
         taken++;
     prev_tb = e;
+    if (stop_set && !stopped && !is_avr && e->start == stop_addr) {
+        stopped = 1;
+        stop_count = qemu_plugin_u64_sum(count);
+        stop_cost = qemu_plugin_u64_sum(cost) + (is_avr ? 1 : 2) * taken;
+    }
 }
 
 static void tb_trans(struct qemu_plugin_tb *tb, void *p)
@@ -189,8 +114,20 @@ static void tb_trans(struct qemu_plugin_tb *tb, void *p)
         uint8_t b[4] = { 0, 0, 0, 0 };
         size_t sz = qemu_plugin_insn_size(in);
         qemu_plugin_insn_data(in, b, sz < 4 ? sz : 4);
-        int br;
-        c += is_arm ? arm_cost(b, sz, &br) : rv_cost(b, sz, &br);
+        int br, ic;
+        ic = is_arm ? arm_cost(b, sz, &br) : is_avr ? avr_cost(b, sz, &br)
+                                               : rv_cost(b, sz, &br);
+        c += (uint64_t)ic;
+        if (is_avr) {
+            struct avr_insn *a = calloc(1, sizeof *a);
+            unsigned w = b[0] | b[1] << 8;
+            a->vaddr = qemu_plugin_insn_vaddr(in);
+            a->cost = (uint64_t)ic;
+            a->self = w == 0xcfff ||                    /* rjmp . */
+                      ((w & 0xf800) == 0xf000 && ((w >> 3) & 0x7f) == 0x7f);
+            qemu_plugin_register_vcpu_insn_exec_cb(in, avr_exec,
+                                                   QEMU_PLUGIN_CB_NO_REGS, a);
+        }
         if (k == n - 1) {
             e->branch = br;
             e->fall = qemu_plugin_insn_vaddr(in) + sz;
@@ -208,7 +145,15 @@ static void at_exit(void *p)
 {
     (void)p;
     uint64_t total = qemu_plugin_u64_sum(count);
-    uint64_t cyc = qemu_plugin_u64_sum(cost) + 2 * taken;
+    uint64_t cyc = qemu_plugin_u64_sum(cost) + (is_avr ? 1 : 2) * taken;
+    if (is_avr) {
+        total = avr_count;
+        cyc = avr_cycles + taken;
+    }
+    if (stopped) {
+        total = stop_count;
+        cyc = stop_cost;
+    }
     FILE *f = out_path[0] ? fopen(out_path, "w") : stderr;
     if (f) {
         fprintf(f, "%llu\n%llu\n", (unsigned long long)total,
@@ -226,11 +171,18 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
 {
     is_arm = info && info->target_name &&
              strncmp(info->target_name, "arm", 3) == 0;
-    for (int i = 0; i < argc; i++)
+    is_avr = info && info->target_name &&
+             strncmp(info->target_name, "avr", 3) == 0;
+    for (int i = 0; i < argc; i++) {
         if (strncmp(argv[i], "out=", 4) == 0) {
             strncpy(out_path, argv[i] + 4, sizeof out_path - 1);
             out_path[sizeof out_path - 1] = 0;
         }
+        if (strncmp(argv[i], "stop=", 5) == 0) {
+            stop_addr = strtoull(argv[i] + 5, NULL, 0);
+            stop_set = 1;
+        }
+    }
     counts = qemu_plugin_scoreboard_new(sizeof(uint64_t));
     count = qemu_plugin_scoreboard_u64(counts);
     costs = qemu_plugin_scoreboard_new(sizeof(uint64_t));

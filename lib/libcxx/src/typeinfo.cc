@@ -79,9 +79,10 @@ static const void *vptr_of(const type_info *t)
     return *reinterpret_cast<const void *const *>(t);
 }
 
-/* The address point of a class's vtable: two prefix words in. */
+/* The address point of a class's vtable: two prefix words in (offset to
+ * top and the type_info: 16 bytes on LP64, 8 on ILP32). */
 #define ADDR_POINT(sym) \
-    (reinterpret_cast<const void *>(reinterpret_cast<const char *>(sym) + 16))
+    (reinterpret_cast<const void *>(reinterpret_cast<const char *>(sym) + 2 * sizeof(void *)))
 
 extern "C" {
 extern void *_ZTVN10__cxxabiv117__class_type_infoE[];

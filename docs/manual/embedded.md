@@ -16,8 +16,8 @@ rather than repeating them.
 | Board family | Triples | Startup written in | Interrupt handlers | Runtime archive |
 |---|---|---|---|---|
 | ARM Cortex-M (ARMv6-M, ARMv7-M, ARMv7E-M, ARMv8-M Mainline) | `thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | C | `__attribute__((interrupt))` or a plain function | `librt.a` per triple |
-| RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | C, with a stack stub from EmbLD | assembly entry, C body | `librt.a` for RV32 only |
-| MIPS32 (MIPS32r2, little-endian, a PIC32's core) | `mipsel-none-elf` | C, with a stack stub from EmbLD | assembly entry (`.S` or naked), C body | `librt.a` and `libc.a` |
+| RISC-V | `riscv32-unknown-elf`, `riscv64-unknown-elf` | C, with a stack stub from EmbLD | `__attribute__((interrupt))`, `interrupt("supervisor")`; or an assembly entry | `librt.a` for RV32 only |
+| MIPS32 (MIPS32r2, little-endian, a PIC32's core) | `mipsel-none-elf` | C, with a stack stub from EmbLD | `__attribute__((interrupt))` and its `vector=`/`keep_interrupts_masked` forms; or an assembly entry (`.S` or naked) | `librt.a` and `libc.a` |
 | AVR (ATmega328P) | `avr` | assembly | `__attribute__((signal))`, `__attribute__((interrupt))` | `librt.a` |
 | x86-64 kernel | `x86_64-elf`, `x86_64-emblink` | assembly | assembly entry, C body | none built; libgcc's names (see [below](#x86-64-kernels-and-emblinkos)) |
 
@@ -369,17 +369,17 @@ table above, region by region. The details are in
 | Part | Triple | Notes |
 |---|---|---|
 | Cortex-M0, M0+, M1 | `thumbv6m-none-eabi`, or `-mcpu=cortex-m0` (`m0plus`, `m1`) on any ARM triple | Thumb-1; divide, 64-bit multiply and atomics are `librt.a` calls |
+| Cortex-M23 | `thumbv8m.base-none-eabi`, or `-mcpu=cortex-m23` on any ARM triple | Thumb-1 with `sdiv`/`udiv` and exclusives; 64-bit multiply and shifts are `librt.a` calls; TrustZone with `-mcmse` |
 | Cortex-M3 | `thumbv7m-none-eabi` | no FPU |
 | Cortex-M4, M7 without FPU use | `thumbv7em-none-eabi` | soft-float |
 | Cortex-M4F | `thumbv7em-none-eabihf`, or `thumbv7em-none-eabi -mfpu=fpv4-sp-d16 -mfloat-abi=hard` | single-precision FPU, hard-float convention |
 | Cortex-M7 | `thumbv7em-none-eabihf -mcpu=cortex-m7`, or `thumbv7em-none-eabi -mfpu=fpv5-d16 -mfloat-abi=hard` | double-precision FPU (FPv5-D16), hard-float convention |
-| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16 |
+| Cortex-M33 | `thumbv8m.main-none-eabi`; `thumbv8m.main-none-eabihf` for the FPU | FPv5-SP-D16; TrustZone with `-mcmse` (soft float) |
 
-`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m3`,
-`cortex-m4`, `cortex-m7` and `cortex-m33` select the sub-architecture as
-GCC's options do. `-mcpu=cortex-m23` is refused: an ARMv8-M Baseline part
-is a different subset, and EmbCC emits neither ARMv6-M nor ARMv7-M code
-it can run. `-mthumb` is
+`-mcpu=cortex-m0`, `cortex-m0plus`, `cortex-m1`, `cortex-m23`,
+`cortex-m3`, `cortex-m4`, `cortex-m7` and `cortex-m33` select the
+sub-architecture as GCC's options do. The Secure side of a TrustZone-M
+build is `-mcmse` ([Targets](targets.md#trustzone-m-cmse)). `-mthumb` is
 accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
@@ -466,12 +466,9 @@ section needs (`mrs`/`msr` on `PRIMASK`, `BASEPRI` and the others,
 ### Atomics
 
 32-bit and narrower atomic operations are inline: `ldrex`/`strex` loops
-with `dmb` barriers. 64-bit atomic read-modify-write operations are
-refused:
-
-```text
-embcc: atom.c:6: error: the ARMv7-M backend cannot lower this operation at 64 bits yet (function bump64) [xadd w=8 size=8]
-```
+with `dmb` barriers. A 64-bit atomic is a call to `__atomic_*_8`, which
+`lib/rt` implements with PRIMASK set; see
+[Eight-byte atomics on a 32-bit target](#eight-byte-atomics-on-a-32-bit-target).
 
 ### Enabling the FPU
 
@@ -627,9 +624,12 @@ embsvd STM32F405.svd --header STM32F405.h --startup startup.c \
 
 The header has CMSIS's shape -- `USART1->CR1`, `USART1_IRQn`,
 `RCC_APB2ENR_USART1EN_Msk` -- and includes CMSIS-Core for the SVD's
-core. `embsvd --show USART1` prints the registers and their fields.
+core. `embsvd --show USART1` prints the registers and their fields, and
+`embsvd --json` describes the whole device -- every register at its
+absolute address, with its fields -- for tools rather than compilers.
 `tests/golden/svd-stm32f405.sh` checks the generated layout against ST's
-own header, and runs a firmware built from the generated files.
+own header, and runs a firmware built from the generated files;
+`tests/golden/svd-clusters.sh` checks clusters, arrays and the JSON.
 
 ### Stopping and printing under a debugger or emulator
 
@@ -769,12 +769,17 @@ The port's three hard parts are the same for any kernel:
 
 `riscv32-unknown-elf` and `riscv64-unknown-elf` generate code for the
 RV32IMAC and RV64IMAC instruction sets with the soft-float ABIs (`ilp32`
-and `lp64`) and the `medany` code model. There is no `-march=` or
-`-mabi=` option (`embcc: error: unknown argument '-march=rv32imac'`):
-the M, A and C extensions are always used, so EmbCC's output does not run
-on a core without them. The predefined macros say so (`__riscv_a`,
-`__riscv_c`, `__riscv_compressed`, `__riscv_float_abi_soft`,
-`__riscv_cmodel_medany`).
+and `lp64`) and the `medany` code model by default. `-march=` and
+`-mabi=` select the F and D extensions and their calling conventions --
+`-march=rv32imafc -mabi=ilp32f` for an ESP32-P4 or CH32V3 class part,
+`-march=rv64gc -mabi=lp64d` -- or leave out C; M and A are always used,
+so EmbCC's output does not run on a core without them. A program built
+for F or D must turn the FPU on before its first floating-point
+instruction (`mstatus.FS`, which is 0 at reset: `csrs mstatus, 0x2000`
+in machine mode); `tests/harness/riscv/boot.c` does. The predefined
+macros say what was chosen (`__riscv_a`, `__riscv_c`,
+`__riscv_compressed`, `__riscv_flen`, `__riscv_float_abi_single`,
+`__riscv_cmodel_medany`, ...).
 
 Plain `char` is unsigned. `long double` is 16 bytes (binary128) and has
 no arithmetic: any operation on one, like any 128-bit integer on RV64, is
@@ -821,16 +826,76 @@ An image loaded wholly into RAM, as on QEMU's `virt` board, needs no
 `__data_start`, and the copy loop moves nothing. A part that executes
 from flash uses `-Ttext FLASH -Tdata RAM` as on Cortex-M.
 
-### Trap handlers
+### Interrupt handlers
 
-`__attribute__((interrupt))` is refused on RISC-V:
+`__attribute__((interrupt))` makes a C function a machine-mode interrupt
+handler, as with GCC and clang; `interrupt("machine")` is the same, and
+`interrupt("supervisor")` makes a supervisor-mode one:
 
-```text
-embcc: isr.c:2: error: __attribute__((interrupt)) is not supported: the handler would return with an ordinary return instead of the interrupt return the CPU needs, and without saving the registers (on ARMv7-M it needs neither, and is accepted; on AVR it is implemented)
+```c
+#define CLINT_MTIMECMP_LO (*(volatile unsigned *)0x2004000u)
+#define CLINT_MTIMECMP_HI (*(volatile unsigned *)0x2004004u)
+#define CLINT_MTIME_LO    (*(volatile unsigned *)0x200bff8u)
+
+volatile unsigned ticks;
+
+__attribute__((interrupt)) void timer_isr(void)
+{
+    ticks++;
+    CLINT_MTIMECMP_HI = 0xffffffffu;               /* re-arm: no early match */
+    CLINT_MTIMECMP_LO = CLINT_MTIME_LO + 10000;
+    CLINT_MTIMECMP_HI = 0;
+}
+
+void timer_start(void)
+{
+    __asm__ volatile("csrw mtvec, %0" :: "r"(timer_isr));
+    CLINT_MTIMECMP_LO = CLINT_MTIME_LO + 10000;
+    CLINT_MTIMECMP_HI = 0;
+    __asm__ volatile("csrs mie, %0" :: "r"(1ul << 7));       /* MTIE */
+    __asm__ volatile("csrs mstatus, %0" :: "r"(1ul << 3));   /* MIE */
+}
 ```
 
-Write the trap entry in assembly: save the caller-saved registers, call a
-C function, restore them and return with `mret`. EmbCC assembles `.S`
+The handler saves and restores every caller-saved register it writes --
+`ra`, `t0`-`t6`, `a0`-`a7` -- and, when it calls any function (a runtime
+helper such as a soft-float routine counts), all of them; with an FPU,
+the floating-point registers a call may clobber are included on the same
+terms, at the full register width: `ft0`-`ft11` and `fa0`-`fa7`, and
+`fs0`-`fs11` too where the ABI keeps fewer bits of them than the
+registers hold (`ilp32f` on a part with D, or a soft-float ABI on a part
+with an FPU). This is clang's rule, register for register. It returns
+with `mret`, or `sret` for a supervisor-mode handler, and is placed at a
+4-byte boundary even with the C extension, because `mtvec`'s and
+`stvec`'s low two bits select the mode. `fcsr` is not saved, as by GCC and
+clang. A handler makes no tail call.
+
+A handler takes no parameters and returns `void`; anything else is
+refused, as is `interrupt("user")` (user-mode interrupts were never
+ratified) and any other argument:
+
+```text
+embcc: isr.c:3: error: interrupt handler 'isr' takes parameters: the hardware calls it, so nothing passes them, and they would be read out of whatever the interrupted code left in the argument registers
+embcc: isr.c:3: error: __attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them
+```
+
+The attribute may be on a prototype, the definition, or both; two
+different kinds on one function are refused. In C++ it is refused (`not
+supported in C++ yet`): write the handler in C.
+
+`tests/golden/riscv-isr.sh` runs a leaf handler, a calling handler, one
+with a frame larger than 2 KiB and a supervisor-mode handler (a
+delegated software interrupt the machine timer raises) against code that
+keeps a value in every caller-saved register, at RV32 and RV64, soft and
+hard float.
+
+### Trap handlers
+
+A handler that needs the trapped state -- a synchronous exception whose
+`mepc` must be advanced, or a context switch that saves the interrupted
+registers into a task's frame -- is an entry written in assembly.
+It saves the caller-saved registers, calls a C function, restores them
+and returns with `mret`. EmbCC assembles `.S`
 files for RISC-V itself, and CSRs may be named (`csrr a0, mcause`) or
 numbered (`csrr a0, 0x342`), in a `.S` file as in inline assembly.
 
@@ -923,10 +988,40 @@ exception, the handler must advance `mepc` past the faulting instruction
 
 Atomic operations up to the register width are inline A-extension
 instructions: `atomic_fetch_add` on an `int` is one `amoadd.w.aqrl`, a
-compare-exchange is an `lr.w.aq`/`sc.w.rl` loop, and
-`atomic_thread_fence` is `fence rw, rw`. No library is involved. 64-bit
-atomics on RV32 are refused (`the RV32 backend cannot lower this
-operation at 64 bits yet`).
+compare-exchange is an `lr.w.aqrl`/`sc.w.rl` loop, and
+`atomic_thread_fence` is `fence rw, rw`. No library is involved. Those
+are the seq_cst forms; an explicit memory order sets the `.aq` and `.rl`
+bits as clang's does (`atomic_fetch_add_explicit(p, 1,
+memory_order_relaxed)` is a bare `amoadd.w`, an acquire compare-exchange
+`lr.w.aq`/`sc.w`).
+
+A one- or two-byte atomic works on the aligned word around it, as GCC's
+and LLVM's do: AND, OR and XOR are one AMO with the other lanes neutral,
+and the rest an `lr.w`/`sc.w` loop that rewrites only its lane. That is
+atomic against the neighbouring bytes too, because a write to any of them
+breaks the reservation and the loop runs again; a fetch-and-add on a byte
+is
+
+```text
+    andi  t4, a0, -4        # the aligned word
+    andi  t2, a0, 3
+    slli  t2, t2, 3         # the lane's shift
+    li    t5, 255
+    sll   t5, t5, t2        # the lane's mask
+    sll   t1, a1, t2        # the operand, in the lane
+1:  lr.w.aqrl t0, (t4)
+    add   t6, t0, t1
+    xor   t6, t6, t0
+    and   t6, t6, t5
+    xor   t6, t6, t0        # old ^ ((new ^ old) & mask)
+    sc.w.rl t6, t6, (t4)
+    bnez  t6, 1b
+```
+
+which is clang's sequence instruction for instruction. A 64-bit atomic on
+RV32 is a call to `__atomic_*_8`, which `lib/rt` implements with
+`mstatus.MIE` clear; see
+[Eight-byte atomics on a 32-bit target](#eight-byte-atomics-on-a-32-bit-target).
 
 ### The C extension
 
@@ -937,9 +1032,10 @@ the length the compiler or assembler chose.
 
 With the C extension, functions are aligned to 2 bytes, and
 `__attribute__((aligned(4)))` on a function does not change that. An
-address that must be 4-byte aligned, such as a direct-mode `mtvec`
-target, belongs in an assembly file with `.p2align 2`, as in the trap
-entry above.
+interrupt handler is the exception: it is 4-byte aligned, as a
+direct-mode `mtvec` target must be. Any other address that must be
+4-byte aligned belongs in an assembly file with `.p2align 2`, as in the
+trap entry above.
 
 ### Runtime
 
@@ -987,12 +1083,59 @@ the boot flash (KSEG1, `0xbfc00000`) calling program flash in KSEG0
 `jal` that does not reach (`a jal or j at ADDR to 'f' at ADDR, which is
 in another 256 MiB region`).
 
-### Exceptions and interrupts
+### Interrupt handlers
 
-`__attribute__((interrupt))` is refused on MIPS32. An exception or
-interrupt handler is an entry written in a `.S` file (or a naked
-function, or a file-scope `asm` block) that saves the registers C may
-change, calls a C function, restores them and returns with `eret`.
+`__attribute__((interrupt))` makes a C function an interrupt handler, as
+GCC defines it for MIPS32 (clang's is the same):
+
+| Spelling | Status on entry |
+|---|---|
+| `interrupt`, `interrupt("eic")` | `Cause.RIPL` copied into `Status.IPL`, for an External Interrupt Controller; interrupts re-enabled |
+| `interrupt("vector=sw0")` .. `("vector=sw1")`, `("vector=hw0")` .. `("vector=hw5")` | `IM0` up to the named line's mask bit cleared; interrupts re-enabled, so a higher line can nest |
+| `interrupt, keep_interrupts_masked` (either form) | interrupts stay disabled for the whole handler |
+
+The handler saves `EPC` and `Status` (a nested interrupt overwrites both),
+writes `Status` with `EXL`, `ERL` and `KSU` cleared as the table says,
+saves every caller-saved register it writes -- `$at`, `v0`-`v1`,
+`a0`-`a3`, `t0`-`t9`, `ra` -- and `HI`/`LO` if it multiplies or divides,
+and all of them and `gp` when it calls any function (a soft-float or
+64-bit division helper counts). It ends with `di; ehb` (unless masked),
+puts `EPC` and `Status` back and returns with `eret`. `k0` and `k1` are
+the only registers it uses unsaved, as the ABI reserves them for this.
+
+On a core without an EIC -- malta's 24Kc, a PIC32MX -- `Cause[15:10]` are
+the pending interrupt lines, so the plain form unmasks the very line
+that is pending and re-enters at once, as GCC's does: use
+`vector=hwN` (`hw5` for the CP0 timer on line 7) or
+`keep_interrupts_masked` there.
+
+```c
+__attribute__((interrupt("vector=hw5"))) void timer_isr(void)
+{
+    unsigned c;
+    ticks++;
+    __asm__ volatile("mfc0 %0, $9" : "=r"(c));             /* Count */
+    __asm__ volatile("mtc0 %0, $11" :: "r"(c + PERIOD));   /* Compare: ack */
+}
+```
+
+The handler is reached from the vector through `k0`: four words at
+`EBase + 0x180` (or at `EBase + 0x200 + n * spacing` with vectored
+interrupts, `Cause.IV`) that load its address and `jr` to it, as the
+`exc_stub` below. A handler takes no parameters and returns `void`;
+`use_shadow_register_set` and `use_debug_exception_return` are refused,
+as is the attribute in C++ and on MIPS64. `tests/golden/mips-isr.sh`
+runs a masked, a calling and a nested pair of handlers against code that
+keeps a value in every caller-saved register and `HI`/`LO`, in both byte
+orders.
+
+### Exceptions
+
+A handler for a synchronous exception (`syscall`, an address error) that
+must read or edit the trapped registers is an entry written in a `.S`
+file (or a naked function, or a file-scope `asm` block) that saves the
+registers C may change, calls a C function, restores them and returns
+with `eret`.
 `tests/golden/mips-exc/vector.S` is a complete one, run on `malta` by
 `tests/golden/mips-exc.sh`, and its shape is:
 
@@ -1076,9 +1219,13 @@ vocabulary yet.
 bracketed by `sync`. An atomic load of 4 bytes or fewer is one `lw`
 (`lhu`, `lbu`) followed by `sync`, and an atomic store one `sw` (`sh`,
 `sb`) with a `sync` before and after: never the two-instruction
-`lwl`/`lwr` form a packed member gets, which an interrupt could split. A read-modify-write of a 1- or 2-byte object, and any 8-byte
-atomic, is refused by name. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4` is
-defined, and the 1-, 2- and 8-byte forms are not.
+`lwl`/`lwr` form a packed member gets, which an interrupt could split. A
+1- or 2-byte read-modify-write is an `ll`/`sc` loop on the aligned word
+around it that rewrites only its lane. An 8-byte atomic is a call to
+`__atomic_*_8`, which `lib/rt` implements with `di`/`ei`; see
+[Eight-byte atomics on a 32-bit target](#eight-byte-atomics-on-a-32-bit-target).
+`__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined, and
+`_8` is not.
 
 ### Runtime
 
@@ -1181,32 +1328,45 @@ can be interrupted. Interrupts are enabled globally with
 
 ### Data in program memory
 
-EmbCC has no address-space qualifiers. `__flash` is predefined, as
-`__attribute__((__address_space__(1)))`, but the attribute is ignored
-with a warning, and so is `__attribute__((progmem))`:
-
-```text
-embcc: flash3.c:1: warning: attribute 'progmem' is not one EmbCC knows, and is ignored [-Wattributes]
-```
-
-Such data goes to `.rodata` and is copied to SRAM like any other `const`
-data. To keep a table in flash only, place it in a `.text` section and
-read it with `lpm` through inline assembly:
+`__flash` keeps `const` data in program memory instead of copying it to
+SRAM at start-up, as avr-gcc's does. On a part with 2 KiB of SRAM, every
+table that stays in flash is RAM the program gets back.
 
 ```c
-__attribute__((section(".text"))) const char banner[] = "from flash\n";
+static const __flash char banner[] = "ready\n";
+static const __flash unsigned char crc8_table[256] = { 0x00, 0x07, /* ... */ };
 
-static unsigned char flash_byte(const char *p)
+static void puts_P(const __flash char *s)
 {
-    unsigned char r;
-    __asm__ volatile("lpm %0, Z" : "=r"(r) : "z"(p));
-    return r;
+    char c;
+    while ((c = *s++) != 0)
+        uart_putc(c);
 }
 ```
 
-Never dereference such an object directly: a C access compiles to `ld`,
-which reads SRAM at the same address. A section with any other name that
-is not `.text` or `.text.*` is placed in RAM.
+A read through a `__flash` lvalue compiles to `lpm` through Z. That
+includes an element of a `__flash` array, a member of a `__flash` struct,
+and `*p` for a `const __flash T *p`. The object goes to `.progmem.data`.
+EmbLD places that in flash with the code, and so do avr-libc's linker
+scripts (`*(.progmem*)` in `.text`).
+
+The rules are GCC's, and each is refused by name:
+
+- A `__flash` object must be `const` and have static storage: at file
+  scope, or `static` in a function. Program memory is written when the
+  part is flashed, not by the program.
+- A store through a `__flash` lvalue is refused.
+- A `__flash` pointer and a generic pointer are in different address
+  spaces. Converting one to the other needs a cast: a generic pointer to
+  a flash address would read SRAM at the same number.
+- A whole `__flash` struct cannot be copied yet (`struct pin p =
+  pins[i];`). Read its members instead.
+
+`__flash` may stand wherever `const` can, before or after the type, and
+after a `*` for a pointer that is itself in flash
+(`const __flash char *const __flash names[]`). `__memx` and avr-libc's
+`PROGMEM` attribute are not supported. `__attribute__((progmem))` is
+ignored with a `-Wattributes` warning, and the data goes to SRAM.
 
 ### The calling convention
 
@@ -1236,16 +1396,25 @@ floating-point operation is a call into the binary32 routines (`__addsf3`,
 `__mulsf3`, `__divsf3`, `__ltsf2`, `__fixsfsi`, ...). EmbCC does not call
 avr-gcc's `__divmodsi4` family, and its `librt.a` does not define it.
 
-### What is refused
+### The stack
 
-| Construct | Diagnostic |
-|---|---|
-| Variable-length arrays | `the AVR backend cannot lower a variable-length array yet` |
-| Atomic read-modify-write (`atomic_fetch_add`, compare-exchange, ...) | `the AVR backend cannot lower xadd yet` |
-| Atomic load or store wider than one byte | `an atomic access of 2 bytes is not one access on this target (it moves 1 at once): the halves could be split by an interrupt or another core` |
+Variable-length arrays, `alloca` and locals with an alignment move the
+stack pointer below the frame, which stays at Y. A call made after one
+copies its stack arguments down to the new stack pointer, where the callee
+looks for them, and the stack pointer is restored at the end of a VLA's
+scope and at the return.
 
-One-byte atomic loads and stores are single instructions and compile;
-fences compile to nothing.
+Atomics of one, two, four and eight bytes compile: every
+read-modify-write, compare-exchange and test-and-set, the `_Atomic`
+operators, and a load or store of two to eight bytes. Each is done with
+interrupts masked, as avr-libc's `ATOMIC_BLOCK` does it: SREG is saved,
+`cli`, the access, SREG restored -- which puts the I flag back as it was,
+so an atomic inside an interrupt handler or a critical section does not
+turn interrupts on. On one core that is all the atomicity there is to
+have, and no library is called at any size (clang calls
+`__sync_fetch_and_add_8` and the like for four and eight bytes). A load
+reads and writes nothing back; a one-byte load or store is a single
+instruction. Fences compile to nothing.
 
 ## x86-64 kernels and EmbLinkOS
 
@@ -1270,7 +1439,7 @@ and shifts, conversions between `__int128` and floating point, and
 `x86_64-elf`; link libgcc, or compile the needed files of `lib/rt` for
 the target (see [Libraries](libraries.md#the-compiler-runtime-librt)).
 
-`__attribute__((interrupt))` is refused on x86-64, as on RISC-V. Interrupt
+`__attribute__((interrupt))` is refused on x86-64. Interrupt
 and exception entry stubs are written in assembly and call C handlers.
 EmbCC assembles NASM-syntax `.asm` files (`embcc -c isr.asm -o isr.o`, or
 the standalone [`embas`](tools/embas.md)); GNU-syntax `.s`/`.S` files are
@@ -1316,16 +1485,40 @@ cross toolchain; only the program under test comes from EmbCC.
 
 ## C++ on the embedded targets
 
-EmbCC's C++ front end lays out classes for a target whose `long` and
-pointers are 8 bytes. On the Cortex-M targets, RV32, MIPS32 and AVR it
-refuses to generate code for a C++ unit:
+C++ is compiled for the 32-bit ARM targets (the Cortex-M triples and
+`armv7a-none-eabi`) and for `riscv32-unknown-elf` without exceptions,
+with or without RTTI. A firmware build looks like this:
 
-```text
-embcc: error: C++ is not yet supported for thumbv7m-none-eabi: the C++ front end lays out types for 8-byte long and pointers, and this target's long is 4 bytes and its pointers 4
+```sh
+embcc --target=thumbv7em-none-eabihf -Os -fno-exceptions -fno-rtti \
+      -c driver.cc -o driver.o
+embld -e reset -Ttext 0x0 -Tdata 0x20000000 boot.o driver.o \
+      build/libcxx/thumbv7em-none-eabihf/libcxx.a \
+      build/libc/thumbv7em-none-eabihf/libc.a \
+      build/libc/thumbv7em-none-eabihf/librt.a -o image.elf
 ```
 
-`-fsyntax-only`, `-E`, `-M` and `-MM` still accept C++ there; `-c`, `-S`,
-`--emit-c` and `--emit-interfaces` do not.
+The startup code must call the functions between `__init_array_start`
+and `__init_array_end` before `main`: that is where the constructors of
+namespace-scope objects are. `make libcxx-embedded` builds the C++
+runtime (`operator new` and `delete`, the guard functions,
+`__aeabi_atexit`, the RTTI classes and `__dynamic_cast`); objects follow the ARM C++ ABI and link with
+clang++'s. Exceptions are refused by name, as there are no unwind tables
+for these machines:
+
+```text
+embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions
+```
+
+On AVR, MIPS32, Xtensa and TriCore EmbCC refuses to generate code for a
+C++ unit:
+
+```text
+embcc: error: C++ is not yet supported for avr: the C++ front end follows the C++ ABI of x86-64, AArch64, 32-bit ARM and riscv32, and this target's (2-byte pointers) is not implemented
+```
+
+`-fsyntax-only`, `-E`, `-M` and `-MM` still accept C++ there. See
+[C++ targets](cxx.md#targets) for what the ABI is on each target.
 
 C++ compiles for `riscv64-unknown-elf`, but no C++ runtime is built for
 it. Code that needs a landing pad (a `try` block, or a local
@@ -1342,6 +1535,71 @@ define what the compiled code refers to: `operator new` and `operator
 delete` if it uses them, `__cxa_pure_virtual` for abstract classes, and
 `__cxa_atexit` and `__dso_handle` for static objects with destructors.
 See [C++](cxx.md).
+
+## Eight-byte atomics on a 32-bit target
+
+No 32-bit target moves eight bytes atomically -- ARMv7-M and ARMv8-M
+Baseline have no `ldrexd`, RV32's A extension no `.d` forms -- so on every
+one (Cortex-M, ARMv7-A, RV32, MIPS32, SPARC, PowerPC, ColdFire, TriCore,
+Xtensa, RX) an eight-byte atomic is a call to libatomic's sized routine,
+exactly as GCC and clang make it: `__atomic_load_8`, `__atomic_store_8`,
+`__atomic_exchange_8`, `__atomic_compare_exchange_8` and
+`__atomic_fetch_{add,sub,and,or,xor,nand}_8`, with the memory order as
+the last argument(s). The names, arguments and orders are listed in
+[Extensions](extensions.md#eight-bytes-on-a-32-bit-target). An object
+compiled by GCC or clang that makes the same calls links against the same
+routines. (AVR does its eight-byte atomics inline, with interrupts
+masked.)
+
+`librt.a` (`lib/rt/atomic8.c`) defines them all -- plus GCC's
+`__atomic_OP_fetch_8`, and libatomic's generic `__atomic_load`,
+`__atomic_store`, `__atomic_exchange` and `__atomic_compare_exchange`,
+which take the size first and which clang calls for an `_Atomic long
+long` or `double` -- by masking interrupts around the access:
+
+| Target | Masked | Put back |
+|---|---|---|
+| Cortex-M | `cpsid i` (PRIMASK) | `msr primask` with the saved value |
+| ARMv7-A | `cpsid i` (CPSR.I) | `msr cpsr_c` with the saved value |
+| RV32 | `csrrci mstatus, 8` (MIE) | `csrs mstatus` only if MIE was set |
+| MIPS32 | `di` (Status.IE) | `ei` only if IE was set |
+| SPARC | PSR.PIL at 15 | the saved PIL |
+| PowerPC | MSR[EE] clear | the saved EE |
+| ColdFire | SR's mask at 7 | the saved mask |
+| TriCore | `disable` (ICR.IE) | `enable` only if IE was set |
+| Xtensa | `rsil 15` (PS.INTLEVEL) | `wsr ps` with the saved PS |
+| RX | `clrpsw i` | `setpsw i` only if I was set |
+
+The mask is saved and put back as it was, never simply enabled, so a call
+inside an interrupt handler or a critical section leaves interrupts
+masked. With interrupts masked the memory-order argument changes nothing.
+On SPARC, PowerPC, ColdFire, Xtensa and RX, where EmbCC has no inline
+assembler yet, the two mask routines are machine code
+(`lib/rt/atomic8.h`), checked against the backends' encoders and llvm-mc
+by `tests/golden/atomic8.sh`.
+
+**What this does not cover.** Masking interrupts makes the operation
+atomic on ONE core with no other bus master writing the object:
+
+- It is not atomic against a second core or a DMA engine. A multi-core
+  part (the RP2040, the ESP32's two cores, an AURIX with several TriCore
+  CPUs) needs a lock that both cores honour.
+- The instructions are privileged: machine mode on RISC-V, supervisor
+  mode on SPARC, PowerPC, ColdFire and RX, privileged mode on Cortex-M
+  (CPSID is ignored in unprivileged thread mode, so the operation is not
+  atomic there), kernel mode on MIPS. Code running in user mode traps or
+  silently loses atomicity.
+- An interrupt of a priority that masking does not reach -- a Cortex-M
+  fault or NMI, a SPARC level-15 interrupt -- can still run in the
+  middle.
+
+Every routine is **weak**, so a program, an RTOS or a vendor SDK replaces
+them by defining its own: the RP2040's Pico SDK defines
+`__atomic_*_8` with its hardware spinlocks, and an RTOS whose tasks run
+unprivileged defines them with its own critical section. Define all the
+routines you use, with the signatures in
+[Extensions](extensions.md#eight-bytes-on-a-32-bit-target);
+`tests/golden/atomic8/order.c` is an example that replaces every one.
 
 ## Running images under QEMU
 

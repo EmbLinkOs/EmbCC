@@ -53,8 +53,13 @@ refuses() {                       # refuses <name> <expected phrase> <source>
 # Byte swaps were here, and are lowered to shifts and masks now; avr-exec.sh
 # runs them against the host. What remains is named rather than lumped
 # under "unsupported".
-refuses "a variable-length array" "variable-length array" \
-    'int f(int n) { char a[n]; a[0] = 1; return a[0]; }'
+
+refuses "an 8-byte asm operand" "an asm operand of 8 bytes" \
+    'long long f(void){ long long x; __asm__("" : "=r"(x)); return x; }'
+refuses "__builtin_frame_address(1)" "only level 0" \
+    'void *f(void){ return __builtin_frame_address(1); }'
+refuses "__builtin_return_address(1)" "only level 0" \
+    'void *f(void){ return __builtin_return_address(1); }'
 
 echo "all $n unsupported constructs are refused, and each diagnostic names
 which one -- so nothing here can be mistaken for code that works"

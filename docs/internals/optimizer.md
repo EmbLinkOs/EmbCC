@@ -1,6 +1,6 @@
 # The optimizer
 
-This page describes `src/opt/opt.c`, the IR-to-IR optimizer that runs
+This page describes `src/opt/`, the IR-to-IR optimizer that runs
 between IR generation and code generation. It covers the order in which
 the passes run, what each pass does and what it requires, the analyses
 they share, how the `-O` levels and `-f<pass>` flags select them, the IR
@@ -13,6 +13,56 @@ The optimizer is purely IR to IR. Register allocation, stack-slot
 sharing and instruction selection belong to the backends; see
 [Register allocation](register-allocation.md) and
 [Backends](backends.md).
+
+## The files
+
+`src/opt/opt.c` is the pass manager, and each pass is a file of its own.
+What the files share is declared in `src/opt/opt_int.h`, which only
+`src/opt` includes; the rest of the compiler includes `opt.h`.
+
+| File | What is in it |
+|---|---|
+| `opt.c` | The pass table (`g_pass`, `-f<name>`), `opt_func` (the order of the passes), `opt_run` (the levels, the unit-level steps) |
+| `opt_int.h` | Declarations shared between the files |
+| `util.c` | Operation classes (`writes_temp`, `is_pure`), the operand and label walkers (`each_read`, `each_label`), definitions (`compute_defs`), known constants, the instruction buffer (`ib_push`) |
+| `cfg.c` | Basic blocks, reverse postorder, dominators, dominance frontiers, natural loops, and `opt_cfg_dump` |
+| `alias.c` | Alias analysis: which object and which bytes a memory access touches |
+| `fold.c` | Constant folding, known-zero bits, block-local constants, `long double` constants |
+| `lvn.c` | Local value numbering and the value table GCSE shares |
+| `copyprop.c` | Copy propagation, global and block-local |
+| `dce.c` | Dead-code elimination |
+| `mem2reg.c` | SSA construction and destruction for promotable locals |
+| `reassoc.c` | Reassociation, and a constant index folded into the address |
+| `gcse.c` | Dominator-scoped global CSE |
+| `divmagic.c` | Division by a constant, the widening multiply, divisibility tests, a remainder from its quotient |
+| `ifconv.c` | If-conversion to selects |
+| `cfgclean.c` | Jump threading and block merging |
+| `tailrec.c` | Tail recursion into a loop |
+| `attrs.c` | Inferring which functions are `pure` or `const`, so a call to one stops being a barrier |
+| `dse.c` | Dead-store elimination |
+| `loadcse.c` | Global redundant-load elimination |
+| `pre.c` | Partial redundancy elimination |
+| `licm.c` | Loop-invariant code motion, memory promotion in loops |
+| `rotate.c` | Loop rotation |
+| `guardjump.c` | -Os on Cortex-M: entering a rotated loop at its test |
+| `tailmerge.c` | -Os on ARM: one copy of identical block tails |
+| `vectorize.c` | Automatic vectorization |
+| `idiom.c` | Copy and clear loops, recognised as `memcpy` and `memzero` |
+| `ivsr.c` | Induction-variable strength reduction |
+| `unroll.c` | Loop unrolling |
+| `swthread.c` | Switch threading |
+| `sccp.c` | Conditional constant propagation, unreachable blocks |
+| `memfwd.c` | Store forwarding, read-only globals, union punning |
+| `immfold.c` | Sinking constants to their uses, immediate operands, sign tests, narrowed stores |
+| `inline.c` | The inliner |
+| `sroa.c` | Scalar replacement of aggregates, compare-exchange locals |
+| `verify.c` | The IR verifier (`EMBCC_VERIFY`) |
+| `splitloops.c` | Splitting a live range around a loop |
+| `rangecheck.c` | Two-sided range checks |
+| `joincopies.c` | Coalescing a join's copies |
+| `sink.c` | Moving an update or an address next to its use |
+| `latch.c` | A loop's back-edge copies, and copies a jump takes with it |
+| `x86loadop.c` | x86-64: a load moved into the operation it feeds |
 
 ## Where the optimizer runs
 
@@ -45,7 +95,7 @@ After `opt_run` returns, and only at `-O1` and above, the driver removes
 `static` functions that no root reaches (roots are non-`static`
 functions, constructors and destructors, `__attribute__((used))`
 functions, targets named by top-level asm, and functions whose address
-appears in a static initializer). This is not part of `opt.c`, but it is
+appears in a static initializer). This is not part of `src/opt`, but it is
 what deletes a callee that the inliner absorbed.
 
 ### Inspecting the result
@@ -188,7 +238,7 @@ comparison against a constant into an interval.
 
 ## The passes by name
 
-Seventeen passes can be switched individually. They are listed in the
+Eighteen passes can be switched individually. They are listed in the
 `g_pass[]` table, which is the single list read by `-f<name>`,
 `-fno-<name>` and the `-O` levels. `opt_set_pass()` marks a pass
 `forced`, and `pass_default()` does not override a forced pass, so an
@@ -215,6 +265,7 @@ flag can also turn on a pass at a level that leaves it off, for example
 | `unroll` | `pass_unroll` | `-O2` | yes |
 | `pre` | `pass_pre` | `-O2` | no |
 | `switch-thread` | `pass_swthread` | `-O2` | yes |
+| `licm-mem` | the memory half of `pass_licm` (`lmem_build`, `licm_promote`) | `-O1` | no |
 
 A name that is not in the table is not a pass flag, and the driver
 reports `embcc: error: unknown argument '-fno-NAME'`.
@@ -511,7 +562,30 @@ exception flags), and the result replaces the instruction as an integer
 folds to the infinity the machine produces. Nothing is folded when an
 operand or the result is a NaN, because which NaN an invalid operation
 produces, and how a payload propagates, differ between machines.
-`long double` (`w` 16) is never folded.
+
+A 16-byte `long double` is folded by `ld_fold`: `+`, `-`, `*`, `/`,
+negation, and conversions to and from `float`, `double` and the
+integers.
+- **Format.** It is x87 extended on x86-64 and IEEE binary128 elsewhere,
+  too wide for `IR_CONST`. A constant is a `load.16` of a `straddr` into
+  `.rodata`, and the folded result becomes one more such constant.
+- **Arithmetic.** It is `sema/ldfloat`'s: exact, then rounded once to the
+  target's format. Conversions to `float` and `double` are rounded once
+  from the exact value.
+- **Constants it recognizes.** A pool constant is used only if its bytes
+  are what `ldf_encode` writes for its value, so an x87 unnormal is not
+  read as a number. NaN is never folded.
+- **Locals.** Inside one block, a value stored to a 16-byte local whose
+  address is never taken is known when it is read back. mem2reg does not
+  promote those locals.
+- **At -Os on binary128 targets,** a widening of a constant to `long
+  double` is left as its library call, which is smaller than the
+  constant and its load.
+
+`pass_dce` removes a load that nothing reads when its address is a
+string-pool constant and it reads inside it: that cannot fault. This is
+what drops the operands' loads after a fold. Pool entries nothing
+refers to any more stay in `.rodata`.
 
 **`pass_reassoc`**. `(x op c1) op c2` becomes `x op (c1 op c2)` when both
 operations are the same kind and both other operands are constants. Only
@@ -675,7 +749,44 @@ when `is_pure` holds (so DIV, MOD and LOAD never move) and every operand
 is defined outside the loop or by something already being hoisted.
 `IR_LDVAR` moves only when the loop never writes the slot and its address
 is never taken. Loops are processed innermost first, one per call. A loop
-whose header is fallen into from inside the loop is refused.
+whose header is fallen into from inside the loop is refused. A switch
+entering the header from outside has its table entries retargeted to the
+preheader too (`lp_retarget_entries`).
+
+The memory half (`licm-mem`, on with `licm`) works from `lmem_build`, a
+summary of what the loop does to memory: every access whose bytes the
+alias analysis can describe (`mem_access`, `slot_access`, `obj_access`),
+the calls, and whether there is a BARRIER -- inline asm, a fence, any
+atomic, any volatile access (an atomic load is a volatile load, with no
+fence beside it on RISC-V or x86-64), or an op it does not know. Then:
+
+- **A load moves** when it is not volatile or `__flash`, its address is
+  invariant, there is no barrier, no write in the loop can overlap it
+  (`acc_overlap`), every call is proven by `infer_attrs` to write no
+  memory, and running it before the loop cannot fault where the program
+  did not: (R1) its block dominates every latch and exiting block and the
+  loop has no call; or (R2) it reads a global or frame slot at a constant
+  offset inside the object (not weak, not in a named section, defined
+  here); or (R3) the block the preheader follows already loaded the same
+  bytes with nothing that could unmap them since -- a rotated loop's
+  guard. An address-taken slot's `IR_LDVAR` moves under the same memory
+  rule (a slot cannot fault). Remark `opt/licm/load`.
+- **A location is promoted** (`licm_promote`) when nothing is left to
+  hoist from the loop: one `(base, offset, size)` that the loop stores,
+  with no barrier, every call proven to read and write nothing, every
+  other access unable to overlap it, no stored value or call argument
+  based on its address, and a store to it dominating every exiting block
+  (so the exit store never writes on a path that did not; a loop with no
+  exit is refused). When the loop also reads it, the preheader load obeys
+  R1-R3. A frame slot only when its scope is the whole function. The
+  loads become copies of a new temp, the stores assignments to it
+  (`IR_EXT` back to what a load reads when narrower than the load), and
+  every exit edge stores it -- before a `jmp`, after a fall-through, or
+  in a trampoline after a branch. Remark `opt/licm/promote`.
+
+`tests/golden/licm-mem.sh` checks both on the IR, including the twelve
+shapes that must not move; `tests/exec/licm-mem.c` runs the cases a run
+can tell apart.
 
 **`pass_idiom`** (`idiom`; `edge_ok`). A loop with a constant trip count
 that stores a constant into every element, or copies one array to
@@ -886,10 +997,14 @@ compare `embcc inspect ir` output with and without the suspect pass.
 
 ## Adding a pass
 
-1. Write `static int pass_NAME(struct ir_func *fn)` that returns nonzero
+1. Write `int pass_NAME(struct ir_func *fn)` in `src/opt/NAME.c`, which
+   includes `opt_int.h`, and declare it there. It returns nonzero
    exactly when it changed the function. A pass that reports a change
-   when it made none prevents convergence.
-2. Decide where it runs, using the rules in [The order](#the-order). A
+   when it made none prevents convergence. Add the file to `OPT_SRCS`
+   in the Makefile and regenerate `build.ebm`
+   (`sh tools/gen-embbuild-manifest.sh > build.ebm`).
+2. Decide where it runs in `opt_func` (`opt.c`), using the rules in
+   [The order](#the-order). A
    pass in the inner fixpoint must not undo what another inner pass does.
    A pass in the outer round must be followed by the cleanup it needs and
    must set `outer = 1` when it changes something.
@@ -923,14 +1038,14 @@ To find the sites, search for an existing operation of the same shape:
 `IR_SWITCH` and `IR_IGOTO` for terminators, `IR_UD2` for an instruction
 with no successor.
 
-In `src/opt/opt.c`:
+In `src/opt/`:
 
-- `writes_temp`, `is_pure`, `def_target` and `compute_defs` (what it
-  defines);
-- `each_read` (what it reads) and `each_label` (which labels it names);
-- `writes_memory`, `vn_key`, `gcse_numberable`, `lcse_kills_mem` (memory
-  effects and value numbering);
-- `build_cfg` (block leaders and successors);
+- `util.c`: `writes_temp`, `is_pure`, `def_target` and `compute_defs`
+  (what it defines), `each_read` (what it reads) and `each_label` (which
+  labels it names);
+- `writes_memory`, `vn_key` (`lvn.c`), `gcse_numberable` (`gcse.c`),
+  `lcse_kills_mem` (`loadcse.c`): memory effects and value numbering;
+- `build_cfg` (`cfg.c`): block leaders and successors;
 - `pass_mem2reg` (its terminator test and per-edge phi copies);
 - `pass_cfgclean` (label forwarding, reachability, code after an
   unconditional transfer);
@@ -940,7 +1055,7 @@ In `src/opt/opt.c`:
   `pass_splitloops`, `pass_sinkaddr`;
 - the inliner: `inlinable`, `remap_ins` (including the label offset) and
   table copying in `inline_call`;
-- `verify_func`.
+- `verify_func` (`verify.c`).
 
 In `src/arch/regalloc.c`: `ra_ins_def`, `ra_each_use`, the successor
 computation in `ra_live_compute` (a terminator has no fall-through

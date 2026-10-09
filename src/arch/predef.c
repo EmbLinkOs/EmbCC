@@ -29,6 +29,14 @@ static const struct predef_macro *arch_table(int *count)
                 *count = predef_macro_count_cxx_thumbv8m;
                 return predef_macros_cxx_thumbv8m;
             }
+            if (target_arm_a32()) {
+                *count = predef_macro_count_cxx_armv7a;
+                return predef_macros_cxx_armv7a;
+            }
+            if (target_thumb_v8m_base()) {
+                *count = predef_macro_count_cxx_thumbv8mbase;
+                return predef_macros_cxx_thumbv8mbase;
+            }
             if (target_thumb_arch() == 6) {
                 *count = predef_macro_count_cxx_thumbv6m;
                 return predef_macros_cxx_thumbv6m;
@@ -45,8 +53,40 @@ static const struct predef_macro *arch_table(int *count)
             *count = predef_macro_count_cxx_avr;
             return predef_macros_cxx_avr;
         case TARGET_MIPS32:
+            if (target_big_endian()) {
+                *count = predef_macro_count_cxx_mips32eb;
+                return predef_macros_cxx_mips32eb;
+            }
             *count = predef_macro_count_cxx_mips32;
             return predef_macros_cxx_mips32;
+        case TARGET_MIPS64:
+            if (target_big_endian()) {
+                *count = predef_macro_count_cxx_mips64eb;
+                return predef_macros_cxx_mips64eb;
+            }
+            *count = predef_macro_count_cxx_mips64;
+            return predef_macros_cxx_mips64;
+        case TARGET_LOONGARCH64:
+            *count = predef_macro_count_cxx_loongarch64;
+            return predef_macros_cxx_loongarch64;
+        case TARGET_TRICORE:
+            *count = predef_macro_count_cxx_tricore;
+            return predef_macros_cxx_tricore;
+        case TARGET_XTENSA:
+            *count = predef_macro_count_cxx_xtensa;
+            return predef_macros_cxx_xtensa;
+        case TARGET_PPC32:
+            *count = predef_macro_count_cxx_ppc32;
+            return predef_macros_cxx_ppc32;
+        case TARGET_RX:                 /* C++ is refused for RX */
+            *count = predef_macro_count_rx;
+            return predef_macros_rx;
+        case TARGET_SPARC32:
+            *count = predef_macro_count_cxx_sparc32;
+            return predef_macros_cxx_sparc32;
+        case TARGET_COLDFIRE:
+            *count = predef_macro_count_cxx_coldfire;
+            return predef_macros_cxx_coldfire;
         default:
             *count = predef_macro_count_cxx_x86_64;
             return predef_macros_cxx_x86_64;
@@ -60,6 +100,14 @@ static const struct predef_macro *arch_table(int *count)
         if (target_thumb_arch() >= 8) {
             *count = predef_macro_count_thumbv8m;
             return predef_macros_thumbv8m;
+        }
+        if (target_arm_a32()) {
+            *count = predef_macro_count_armv7a;
+            return predef_macros_armv7a;
+        }
+        if (target_thumb_v8m_base()) {
+            *count = predef_macro_count_thumbv8mbase;
+            return predef_macros_thumbv8mbase;
         }
         if (target_thumb_arch() == 6) {
             *count = predef_macro_count_thumbv6m;
@@ -77,8 +125,40 @@ static const struct predef_macro *arch_table(int *count)
         *count = predef_macro_count_avr;
         return predef_macros_avr;
     case TARGET_MIPS32:
+        if (target_big_endian()) {
+            *count = predef_macro_count_mips32eb;
+            return predef_macros_mips32eb;
+        }
         *count = predef_macro_count_mips32;
         return predef_macros_mips32;
+    case TARGET_MIPS64:
+        if (target_big_endian()) {
+            *count = predef_macro_count_mips64eb;
+            return predef_macros_mips64eb;
+        }
+        *count = predef_macro_count_mips64;
+        return predef_macros_mips64;
+    case TARGET_LOONGARCH64:
+        *count = predef_macro_count_loongarch64;
+        return predef_macros_loongarch64;
+    case TARGET_TRICORE:
+        *count = predef_macro_count_tricore;
+        return predef_macros_tricore;
+    case TARGET_XTENSA:
+        *count = predef_macro_count_xtensa;
+        return predef_macros_xtensa;
+    case TARGET_PPC32:
+        *count = predef_macro_count_ppc32;
+        return predef_macros_ppc32;
+    case TARGET_RX:
+        *count = predef_macro_count_rx;
+        return predef_macros_rx;
+    case TARGET_SPARC32:
+        *count = predef_macro_count_sparc32;
+        return predef_macros_sparc32;
+    case TARGET_COLDFIRE:
+        *count = predef_macro_count_coldfire;
+        return predef_macros_coldfire;
     default:
         *count = predef_macro_count_x86_64;
         return predef_macros_x86_64;
@@ -196,6 +276,112 @@ static const struct predef_macro thumb_fpu_add[] = {
 static const struct predef_macro thumb_fp_dp[] = { { "__ARM_FP", "0xc" } };
 static const struct predef_macro thumb_fpv5_add[] = { { "__ARM_FPV5__", "1" } };
 static const struct predef_macro thumb_hard_add[] = { { "__ARM_PCS_VFP", "1" } };
+/* ARMv7-A's units, as clang defines them for -mfpu=vfpv3[-d16] (0xc:
+ * single and double) and vfpv4[-d16] (0xe: half as well, and the fused
+ * multiply-add). No FPv5 and no NEON. */
+static const struct predef_macro a32_vfp3_add[] = {
+    { "__ARM_FP", "0xc" }, { "__ARM_VFPV2__", "1" }, { "__ARM_VFPV3__", "1" },
+};
+static const struct predef_macro a32_vfp4_add[] = {
+    { "__ARM_FP", "0xe" }, { "__ARM_VFPV2__", "1" }, { "__ARM_VFPV3__", "1" },
+    { "__ARM_VFPV4__", "1" }, { "__ARM_FEATURE_FMA", "1" },
+};
+
+/* -mcmse: the Secure side. ACLE's __ARM_FEATURE_CMSE is a bit set -- 1 the
+ * TT instruction (every ARMv8-M table says that much), 2 compiling for the
+ * Secure state -- and clang defines 3 under the flag. */
+static const struct predef_macro thumb_cmse_add[] = {
+    { "__ARM_FEATURE_CMSE", "3" },
+};
+
+/* RISC-V's -march= and -mabi= (src/arch/riscv/options.c, riscv_options_done).
+ * The generated tables are rv32imac/ilp32 and rv64imac/lp64; these are the
+ * macros clang changes from there, read off `clang -dM` for every
+ * combination (tests/golden/predef.sh checks each against it): F brings
+ * __riscv_f, fdiv, fsqrt, flen and Zicsr, D __riscv_d and flen 64, the
+ * hardware-float ABIs replace __riscv_float_abi_soft, and C with F or D
+ * the compressed loads and stores of Zcf (RV32 only) and Zcd. Without C
+ * the compressed macros go. */
+static int riscv_on(void)
+{
+    return target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64;
+}
+
+static int riscv_changes(void)
+{
+    return riscv_on() && (target_riscv_flen() || !target_riscv_rvc() ||
+                          target_riscv_zifencei());
+}
+
+static int riscv_drops(const char *name)
+{
+    if (!riscv_on())
+        return 0;
+    if (target_riscv_abi_flen() && strcmp(name, "__riscv_float_abi_soft") == 0)
+        return 1;
+    return !target_riscv_rvc() &&
+           (strcmp(name, "__riscv_c") == 0 ||
+            strcmp(name, "__riscv_compressed") == 0 ||
+            strcmp(name, "__riscv_zca") == 0);
+}
+
+static int riscv_adds(struct predef_macro *out)
+{
+    int n = 0, flen = target_riscv_flen(), abi = target_riscv_abi_flen();
+    int c = target_riscv_rvc();
+    if (flen) {
+        out[n].name = "__riscv_f";      out[n++].value = "2002000";
+        out[n].name = "__riscv_fdiv";   out[n++].value = "1";
+        out[n].name = "__riscv_fsqrt";  out[n++].value = "1";
+        out[n].name = "__riscv_flen";   out[n++].value = flen == 64 ? "64" : "32";
+        out[n].name = "__riscv_zicsr";  out[n++].value = "2000000";
+    }
+    if (flen == 64) {
+        out[n].name = "__riscv_d";      out[n++].value = "2002000";
+    }
+    if (abi) {
+        out[n].name = abi == 64 ? "__riscv_float_abi_double"
+                                : "__riscv_float_abi_single";
+        out[n++].value = "1";
+    }
+    if (c && flen && target_get() == TARGET_RISCV32) {
+        out[n].name = "__riscv_zcf";    out[n++].value = "1000000";
+    }
+    if (c && flen == 64) {
+        out[n].name = "__riscv_zcd";    out[n++].value = "1000000";
+    }
+    if (target_riscv_zifencei()) {
+        out[n].name = "__riscv_zifencei"; out[n++].value = "2000000";
+    }
+    return n;
+}
+
+/* The DSP extension: ARMv7E-M (Cortex-M4/M7), and ARMv8-M Mainline with
+ * it (Cortex-M33, -march=armv8-m.main+dsp). The generated tables are
+ * clang's thumbv7m and thumbv8m.main, neither of which has it; these are
+ * what clang adds for -mcpu=cortex-m4 or cortex-m33, read off its -dM
+ * (tests/golden/predef.sh compares every Cortex-M part against it). On
+ * v7E-M the architecture macro is a different NAME, so __ARM_ARCH_7M__
+ * goes: CMSIS's cmsis_gcc.h selects __SSAT and the DSP intrinsics on
+ * __ARM_ARCH_7EM__ and __ARM_FEATURE_DSP, and without them a CMSIS-DSP
+ * build took its plain-C fallbacks or did not build.
+ *
+ * __ARM_FEATURE_FMA, which clang also adds, is left out for the reason
+ * thumb_fpu_add gives. ARMv7-A (A32) has its own table, already with them. */
+static const struct predef_macro thumb_dsp_add[] = {
+    { "__ARM_FEATURE_DSP", "1" },
+    { "__ARM_FEATURE_SIMD32", "1" },
+};
+static const struct predef_macro thumb_v7em_add[] = {
+    { "__ARM_ARCH_7EM__", "1" },
+};
+
+static int thumb_dsp(void)
+{
+    return target_get() == TARGET_THUMB && !target_arm_a32() &&
+           target_thumb_em() &&
+           (target_thumb_arch() == 7 || target_thumb_arch() >= 8);
+}
 
 static int thumb_fpu_drops(const char *name)
 {
@@ -223,7 +409,10 @@ static int contradicted(const char *name)
                 return 1;               /* replaced below */
     }
     return (target_fmt_get() != TGT_FMT_ELF && strcmp(name, "__ELF__") == 0) ||
-           thumb_fpu_drops(name);
+           thumb_fpu_drops(name) || riscv_drops(name) ||
+           (thumb_dsp() && target_thumb_arch() == 7 &&
+            strcmp(name, "__ARM_ARCH_7M__") == 0) ||
+           (target_thumb_cmse() && strcmp(name, "__ARM_FEATURE_CMSE") == 0);
 }
 
 const struct predef_macro *predef_table(int *count)
@@ -255,7 +444,10 @@ const struct predef_macro *predef_table(int *count)
      * filtering, nothing to go wrong in the path that everything else
      * depends on. */
     int fpu = target_get() == TARGET_THUMB && target_thumb_fpu();
-    if (!os && !fpu && target_fmt_get() == TGT_FMT_ELF) {
+    int cmse = target_thumb_cmse();
+    int rv = riscv_changes();
+    int dsp = thumb_dsp();
+    if (!os && !fpu && !cmse && !rv && !dsp && target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -263,7 +455,7 @@ const struct predef_macro *predef_table(int *count)
     static struct predef_macro *merged;
     static int nmerged;
     if (!merged) {
-        merged = xmalloc((size_t)(narch + nos + 8 + ndarwin_a64_model) *
+        merged = xmalloc((size_t)(narch + nos + 20 + ndarwin_a64_model) *
                          sizeof *merged);
         for (int i = 0; i < narch; i++)
             if (!contradicted(arch[i].name))
@@ -273,7 +465,25 @@ const struct predef_macro *predef_table(int *count)
         if (darwin_a64())
             for (int i = 0; i < ndarwin_a64_model; i++)
                 merged[nmerged++] = darwin_a64_model[i];
-        if (fpu) {
+        if (cmse)
+            merged[nmerged++] = thumb_cmse_add[0];
+        if (dsp && target_thumb_arch() == 7)
+            merged[nmerged++] = thumb_v7em_add[0];
+        if (dsp)
+            for (size_t i = 0; i < sizeof thumb_dsp_add / sizeof *thumb_dsp_add; i++)
+                merged[nmerged++] = thumb_dsp_add[i];
+        if (rv)
+            nmerged += riscv_adds(merged + nmerged);
+        if (fpu && target_arm_a32()) {
+            int v4 = target_arm_vfp(NULL) == 4;
+            const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;
+            int nadd = v4 ? (int)(sizeof a32_vfp4_add / sizeof *a32_vfp4_add)
+                          : (int)(sizeof a32_vfp3_add / sizeof *a32_vfp3_add);
+            for (int i = 0; i < nadd; i++)
+                merged[nmerged++] = add[i];
+            if (target_thumb_hard_abi())
+                merged[nmerged++] = thumb_hard_add[0];
+        } else if (fpu) {
             for (size_t i = 0; i < sizeof thumb_fpu_add / sizeof *thumb_fpu_add; i++) {
                 if (i == 0 && target_thumb_fpu_dp())
                     merged[nmerged++] = thumb_fp_dp[0];

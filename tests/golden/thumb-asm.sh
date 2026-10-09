@@ -9,6 +9,11 @@
 #    as `add` with the flag-setting bit clear, so a program that wrote
 #    `adds` to set the flags for a following branch got an `add` that set
 #    nothing. It assembled, it ran, and it took the wrong branch.
+#    Its data directives (.byte, .short, .word, .quad and the other GNU
+#    as ARM spellings) are in it too, and the same lines in a C template
+#    must come out of the compiler as llvm-mc's bytes at ARMv7E-M,
+#    ARMv6-M and ARMv8-M Baseline -- on the last two, a .short holding a
+#    Thumb-2 halfword is data, not an instruction those cores lack.
 #
 # 2. THE OPERANDS, by RUNNING a program whose answers depend on the
 #    caller's values reaching the registers the template names, on QEMU,
@@ -30,7 +35,7 @@ if command -v "$MC" >/dev/null 2>&1 && command -v "$OBJCOPY" >/dev/null 2>&1
 then
     cc -std=c99 -Wall -Wextra -o "$out/tasmcheck" \
        tools/tasmcheck/tasmcheck.c src/arch/thumb/asm.c \
-       src/arch/thumb/emit.c src/arch/code.c src/driver/util.c \
+       src/arch/thumb/emit.c src/arch/thumb/a32.c src/arch/code.c src/driver/util.c \
        src/driver/diag.c src/platform/platform_common.c src/platform/platform_posix.c || {
         echo "tasmcheck did not build"; exit 1; }
     "$out/tasmcheck" --list > "$out/v.s" || {
@@ -53,6 +58,32 @@ then
         exit 1
     fi
     echo "$(wc -l < "$out/v.s" | tr -d ' ') instructions encode as llvm-mc does"
+
+    # the data directives in a C template, through the compiler, at
+    # each level the assembler serves: llvm-mc's bytes, in the function
+    grep -E '^[[:space:]]+\.(byte|short|hword|2byte|word|long|int|4byte|quad|8byte) ' \
+        "$out/v.s" > "$out/data.s"
+    [ "$(wc -l < "$out/data.s")" -ge 10 ] || {
+        echo "the vocabulary has no data directives"; exit 1; }
+    { printf 'void f(void)\n{\n    __asm__ volatile(\n'
+      sed 's/^[[:space:]]*/        "/; s/$/\\n"/' "$out/data.s"
+      printf '    );\n}\n'; } > "$out/data.c"
+    hex() { od -An -tx1 "$1" | tr -d ' \n'; }
+    for t in thumbv7em thumbv6m thumbv8m.base; do
+        "$EMBCC" --target=$t-none-eabi -O2 -c "$out/data.c" -o "$out/data-$t.o" 2> "$out/data-$t.err" || {
+            echo "$t: a template of data does not compile:"; head -2 "$out/data-$t.err"; exit 1; }
+        "$OBJCOPY" -O binary --only-section=.text "$out/data-$t.o" "$out/data-$t.bin"
+        "$MC" -triple=$t -filetype=obj "$out/data.s" -o "$out/data-$t.ref.o" &&
+        "$OBJCOPY" -O binary --only-section=.text "$out/data-$t.ref.o" "$out/data-$t.ref" || {
+            echo "$t: llvm-mc rejected the data directives"; exit 1; }
+        case $(hex "$out/data-$t.bin") in
+        *"$(hex "$out/data-$t.ref")"*) ;;
+        *) echo "$t: the template's data is not llvm-mc's bytes:"
+           echo "     | ours   $(hex "$out/data-$t.bin")"
+           echo "     | theirs $(hex "$out/data-$t.ref")"; exit 1 ;;
+        esac
+    done
+    echo "data directives in a template are llvm-mc's bytes at ARMv7E-M, ARMv6-M and ARMv8-M Baseline"
 else
     echo "SKIP the encoding half: llvm-mc/llvm-objcopy not found"
 fi
@@ -113,6 +144,15 @@ static int pinned(int a)
 static int memout(int k)
 { int v = 0; __asm__ volatile("str %1, [%0]" : "=m"(v) : "r"(k)); return v; }
 
+/* Instructions written as their bytes: adds r0, #1 as a .short, adds r0,
+ * #2 as two .bytes, and adds r0, #2 then adds r0, #1 as one .4byte, on
+ * the r0 the register variable pins. The data directives were refused,
+ * "not in the ARMv7-M vocabulary". */
+static int raw(int a)
+{ register int x __asm__("r0") = a;
+  __asm__(".short 0x3001\n\t.byte 0x02, 0x30; .4byte 0x30013002"
+          : "+r"(x) : : "cc"); return x; }
+
 int main(void)
 {
     putn(add3(20, 22));        /* 42 */
@@ -125,6 +165,7 @@ int main(void)
     putn(addk(33));            /* 42 */
     putn(pinned(40));          /* 42 */
     putn(memout(42));          /* 42 */
+    putn(raw(36));             /* 36 + 1 + 2 + 2 + 1 = 42 */
     puts_("\n==END==\n");
     return 0;
 }
@@ -143,7 +184,7 @@ for opt in -O0 -O1 -O2 -Os; do
         { echo "$opt: could not link"; exit 1; }
     sh tests/harness/thumb/run.sh "$out/a$opt.elf" > "$out/a$opt.txt" 2>&1
     got=$(tr -d '\n' < "$out/a$opt.txt" | sed 's/==END==.*//')
-    want="42 40 42 10 42 41 11 42 42 42 "
+    want="42 40 42 10 42 41 11 42 42 42 42 "
     [ "$got" = "$want" ] || {
         echo "$opt: inline asm computed '$got', wanted '$want'"; exit 1; }
 done
@@ -167,6 +208,24 @@ fi
 grep -q "callee-saved" "$out/cs.err" || {
     echo "the refusal does not say why:"; cat "$out/cs.err"; exit 1; }
 echo "an unknown instruction and a callee-saved clobber are refused by name"
+
+# Inline data is constants, in range: a symbol would need a relocation an
+# inline asm cannot carry, a value too wide for its directive is an error
+# in GNU as and llvm-mc alike, RISC-V's .half is no ARM directive, and an
+# IT block's slots are for instructions.
+for d in ".word handler" ".byte 256" ".short -32769" ".word 0x100000000" \
+         ".half 1" "it eq; .short 0xbf00"; do
+    printf 'void f(void){ __asm__ volatile("%s"); }\n' "$d" > "$out/data.c"
+    if "$EMBCC" --target=$T -c "$out/data.c" -o /dev/null 2> "$out/data.err"; then
+        echo "inline asm accepted: $d"; exit 1
+    fi
+    grep -q 'is not a constant\|does not fit in\|not in the ARMv7-M vocabulary\|inside an IT block' "$out/data.err" || {
+        echo "the refusal of '$d' does not say why:"; cat "$out/data.err"; exit 1; }
+done
+printf 'void f(void){ __asm__ volatile(".byte -128, 255; .short -32768, 65535; .quad -1"); }\n' > "$out/data.c"
+"$EMBCC" --target=$T -c "$out/data.c" -o /dev/null || {
+    echo "inline asm refused data at the ends of its range"; exit 1; }
+echo "inline data: a symbol, an out-of-range value, .half and data in an IT block are refused"
 
 # x86's constraint letters mean nothing here: "S" pinned the operand to
 # x86 register 6, r6, which is callee-saved and was not saved; and a

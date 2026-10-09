@@ -47,7 +47,7 @@ struct t_fn {
     /* A `tst` already made for the branch at instruction tst_br - 1
      * (0: none), with copies between the two: the branch only jumps. */
     int tst_br;
-    int want_debug;
+    int keep_vars;
     /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit
      * machine is an eight-byte slot and a REGISTER PAIR. Built from the
      * width of each value's DEFINING instruction, which is not the same
@@ -66,6 +66,9 @@ struct t_fn {
      * spilled r0-r3 so that one pointer walks from them into the
      * caller's stack arguments. -1 when the function is not variadic. */
     long va_regsave;
+    long entry_off;          /* the stack pointer at entry, from the frame
+                              * base: __builtin_frame_address(0), with the
+                              * pushed lr just below it */
     long va_first;       /* ... and the offset of the first UNNAMED one */
     int *label_off;      /* per label id, or -1 while unseen */
     /* cond >= T_CBZ is a cbz (T_CBZ) or cbnz (T_CBZ + 1). cz_at is where
@@ -93,6 +96,9 @@ struct t_fn {
      * recomputed where it is read and addressed through directly,
      * never stored to a slot and loaded back. */
     int *fvar;
+    /* The local every return gives back, built in the caller's buffer
+     * instead of the frame (t_nrvo_local); -1 for none. */
+    int nrvo;
     long *fscr;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when it did not run (-O0/-O1). */
@@ -121,6 +127,12 @@ struct t_fn {
      * one value. fl_end is -1 when there is none. */
     int fl_end, fl_reg;
     long fl_imm;
+    /* The last store of a register to a frame slot (wr): where its code
+     * ended, the register, the slot's offset and the base. A read of the
+     * same slot with nothing emitted since and no label placed is the
+     * register already (rd). ls_end is -1 when there is none. */
+    int ls_end, ls_reg, ls_fb;
+    long ls_off;
     /* Which of the scratch registers r9-r11 the prologue saves: all of
      * them until a pass has shown which the body uses. */
     unsigned scr_save;
@@ -130,10 +142,14 @@ struct t_fn {
     /* A function that cannot return -- no IR_RET, no tail call: an RTOS
      * task's for (;;), a scheduler's start, a reset handler. No caller
      * is ever resumed, so nothing it would restore is saved: no push, no
-     * vpush, no epilogue -- only the frame. Not under -g, where a
+     * vpush, no epilogue -- only the frame. Not at -O0 or -Og, where a
      * debugger's backtrace reads the saved lr, and not for a variadic
      * function, whose register save area is a push. */
     int noret;
+    /* -g: where each prologue step ends, for the call frame information
+     * (t_record_cfi); -1 when the function has no such step */
+    int cfi_va_end, cfi_push_end, cfi_vsave_end, cfi_frame_end, cfi_fp_end;
+    unsigned cfi_push_mask;     /* ARMv6-M: the registers its push saved */
     /* Per instruction: an IR_CALL made as a TAIL call (t_tail_ok). NULL
      * when there are none. */
     char *tail;
@@ -146,6 +162,43 @@ struct t_fn {
      * live into or out of it, which it is computed from (lo_busy_map). */
     unsigned lofree;
     unsigned *lv_busy;
+    /* RELOAD CACHE (rc_try): per vreg, the low register a value that
+     * lives in memory was loaded into for the reads that follow -- -1 for
+     * none -- and the last instruction that reads it there; rc_v lists
+     * the vregs with one. rc_cur is the instruction being emitted, rc_on
+     * 0 when the function makes none. Per label, the first and last
+     * instruction that jumps to it, rc_lmin -1 when something else can
+     * (a switch, &&label, a landing pad): rc_labels. */
+    int *rc_reg, *rc_end;
+    /* Per vreg: 1 for a constant with no register that is made where it
+     * is read (t_remat_ok), its value in remat_v; NULL for none. Such a
+     * value has no slot, and its IR_CONST emits nothing. */
+    char *remat;
+    long *remat_v;
+    /* Where the code of the instruction being emitted is still nothing
+     * but reads of its operands (rd), so the flags hold nothing it set:
+     * -1 when they may hold something already (tst_br). A constant made
+     * there may be `movs`. */
+    int flags_dead_at;
+    /* ...and an instruction whose whole lowering tests nothing -- a
+     * call, a store, a return -- has dead flags throughout. */
+    int flags_dead_ins;
+    int *rc_lmin, *rc_lmax;
+    int rc_v[8], rc_n, rc_cur, rc_on;
+
+    /* ---- the 64-bit constant pool (t_lit64 in codegen.c) --------------- */
+    /* Per instruction: 1 for an IR_CONST that loads from the pool, 0 for
+     * one built with movw/movt -- not a candidate, or out of the pool's
+     * reach on a first pass (then the pass is made again without it).
+     * NULL when the function has no candidate. */
+    char *lp_use;
+    unsigned long long *lp_val;   /* this pass's pool, in order */
+    int lp_n, lp_cap;
+    /* Once a first pass found a load out of reach: the pool's order,
+     * fixed (t_lit64_fit), which later passes keep. */
+    int lp_planned;
+    struct t_lsite { int at, ins, idx, rt, rt2; } *lp_site;
+    int lp_nsite, lp_capsite;
 
     /* ---- ARMv6-M only (v6m.c); zero at the other levels ---------------- */
     /* The literal pool being collected, and the LDRs waiting for it. */
@@ -153,6 +206,10 @@ struct t_fn {
     int nlit, caplit;
     struct v6_lsite *lsite;
     int nlsite, caplsite;
+    /* Per &&label this pass, in order: its label and the `add rD, pc`
+     * its pool word is relative to (lrel[2k], lrel[2k + 1]). */
+    int *lrel;
+    int nlrel, caplrel;
     /* Per pool point (pool_point in v6m.c, in emission order): an island
      * there -- 1 with a branch around it, 2 where the code before ends in
      * an unconditional transfer. The first pass of each layout decides;
@@ -187,6 +244,9 @@ int tcg_call_sret_bytes(const struct ir_ins *i);
 int tcg_fn_sret_bytes(const struct ir_func *fn);
 long tcg_slot_of(const struct t_fn *F, int v);
 int tcg_faddr(const struct t_fn *F, int v, long *off);
+/* The exclusion map for the allocator with a frame address read once
+ * added (codegen.c's t_faddr_excl); NULL for `base` as it is. */
+char *tcg_faddr_excl(const struct t_fn *F, const char *base);
 void tcg_want_label(struct t_fn *F, int at, int label, int cond);
 void tcg_note_call(struct t_sites *st, int at, struct func *target);
 void tcg_note_ext(struct t_sites *st, int at, struct func *callee);
@@ -205,17 +265,37 @@ int *tcg_pair_alloc(struct ir_func *fn, const char *wide, const char *excl,
                     int *used, int *nused);
 const struct ra_target *tcg_ra(void);
 int tcg_regalloc(void);
+/* r6/r7 in the ARMv6-M pool too, this attempt (gen_func_best), and how
+ * v6m.c says an instruction found no scratch register free: the attempt
+ * is thrown away. */
+int tcg_ext(void);
+void tcg_role_fail(void);
+/* Per instruction, the registers holding a value live into or out of it
+ * (lo_busy_map), and those over n..n+span with its operands (t_busy); and
+ * whether the instruction's lowering names no low register of its own
+ * (lo_op_ok). */
+unsigned *tcg_lo_busy_map(const struct t_fn *F);
+unsigned tcg_busy(const struct t_fn *F, int n, int span);
+int tcg_lo_op_ok(const struct t_fn *F, const struct ir_ins *i);
 /* -O0: the allocator runs for the temporaries, every source variable kept
  * in its slot (codegen.c's g_t_o0). */
 int tcg_o0(void);
 int tcg_pairs(void);
 void tcg_reset_taken(void);
 
+/* CMSE (-mcmse), for both lowerings: the refusals, and how many core
+ * registers an entry function's result occupies. */
+void tcg_cmse_fail(const struct ir_func *fn, int line, const char *what);
+int tcg_cmse_ret_regs(const struct ir_func *fn);
+void tcg_cmse_check_entry(const struct ir_func *fn);
+void tcg_cmse_check_call(const struct ir_func *fn, const struct ir_ins *i,
+                         const struct abi_walk *w, long sret);
+
 /* ---- exported by v6m.c ------------------------------------------------- */
 
 /* One function, ARMv6-M: the counterpart of codegen.c's gen_func. */
 void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
-                 int want_debug);
+                 int keep_vars);
 /* Does this instruction become a call on ARMv6-M where it is not one on
  * ARMv7-M (a divide, a 64-bit multiply, a block copy, an atomic)? */
 int v6_op_calls_helper(const struct ir_ins *i);

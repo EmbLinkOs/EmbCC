@@ -18,9 +18,15 @@ void sema_set_gnu89_inline(int on);
 int sema_error_count(void);
 
 /* The statement list a switch dispatches over: its body, unwrapped when
- * it is the usual brace block. Shared with irgen so both agree on which
- * statements carry the case markers. */
+ * it is the usual brace block. */
 struct stmt *switch_stmts(struct stmt *body);
+/* Every case and default marker of a switch, in source order, wherever it
+ * is in the body -- in a nested block, an if, a loop (Duff's device) --
+ * but not a nested switch's, which are that switch's. Returns how many,
+ * with the markers in *out (xmalloc'd, NULL when none; the caller frees).
+ * Shared with irgen so both agree on which markers a switch dispatches
+ * to. */
+int switch_labels(struct stmt *body, struct stmt ***out);
 
 /* The GCC atomic builtins — the __atomic_* family and the older __sync_*
  * one. Classified in ONE place so sema (which types a call) and irgen (which

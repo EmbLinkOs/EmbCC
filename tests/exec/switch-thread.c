@@ -1,6 +1,6 @@
 /* State machines whose switch the optimizer threads: an arm that sets
  * the state to a constant jumps straight to that state's case, through a
- * copy of the loop's own latch and exit tests (opt.c, switch threading).
+ * copy of the loop's own latch and exit tests (src/opt/swthread.c).
  * Each machine is checked against the same machine written with if/else
  * and no switch, over inputs that visit every transition -- the
  * CoreMark tokenizer; cases that start at 10 (so the operand is

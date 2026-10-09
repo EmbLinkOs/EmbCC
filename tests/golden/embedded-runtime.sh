@@ -44,11 +44,13 @@ shared=$(grep -ohE '"__(mul|div)(sc|dc)3"' src/sema/sema.c | tr -d '"' | sort -u
 fail=0
 checked=0
 for triple in avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
-              thumbv8m.main-none-eabi riscv32-unknown-elf riscv64-unknown-elf; do
+              thumbv8m.main-none-eabi riscv32-unknown-elf riscv64-unknown-elf \
+              loongarch64-unknown-elf; do
     case $triple in
         avr)     be=avr ;;
         thumb*)  be=thumb ;;
         riscv*)  be=riscv ;;
+        loongarch*) be=loongarch ;;
     esac
     d=$out/$triple
     sh tools/build-rt.sh "$triple" "$d" 2> "$d.err" || {
@@ -104,6 +106,54 @@ for triple in avr thumbv6m-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
         n=$(echo "$names" | wc -l | tr -d ' ')
         echo "$triple: all $n routines the $be backend can call are in librt.a$once"
     fi
+done
+
+# RISC-V's hardware-float variants (TRIPLE/ABI, built with that ABI's
+# -march: tools/build-rt.sh). Which helpers the backend calls depends on the
+# -march there -- with D, none of binary64's -- so instead of the names in
+# its source, what it actually calls: every __ helper referenced by the
+# variant's own libc.a and by the float, long double and 64-bit programs,
+# compiled for it, must be in its librt.a. And what the FPU does must NOT
+# be called: no __adddf3 and its family where there is D, no binary32 one
+# where there is F -- a helper the hardware replaces is a helper the
+# backend should have stopped emitting.
+for v in riscv32-unknown-elf/ilp32f riscv32-unknown-elf/ilp32d \
+         riscv64-unknown-elf/lp64f riscv64-unknown-elf/lp64d; do
+    d=$out/$v; mkdir -p "$d"
+    case $v in
+        */ilp32f) fl="-march=rv32imafc -mabi=ilp32f"; hw='sf' ;;
+        */ilp32d) fl="-march=rv32imafdc -mabi=ilp32d"; hw='sf|df' ;;
+        */lp64f)  fl="-march=rv64imafc -mabi=lp64f"; hw='sf' ;;
+        */lp64d)  fl="-march=rv64imafdc -mabi=lp64d"; hw='sf|df' ;;
+    esac
+    { sh tools/build-rt.sh "$v" "$d" && sh tools/build-libc.sh "$v" "$d"; } \
+        > "$d/build.log" 2>&1 || {
+        echo "$v: the runtime or the libc does not build:"; tail -3 "$d/build.log"
+        fail=1; continue; }
+    t=${v%%/*}
+    for f in embedded-float embedded-ldouble embedded-int64; do
+        # shellcheck disable=SC2086
+        "$EMBCC" --target=$t $fl -O2 -c "tests/golden/$f.c" -o "$d/$f.o" || {
+            echo "$v: tests/golden/$f.c does not compile"; fail=1; }
+    done
+    llvm-nm --defined-only "$d/librt.a" "$d/libc.a" 2>/dev/null |
+        awk '$2 == "T" || $2 == "W" { print $3 }' | sort -u > "$d/present"
+    llvm-nm --undefined-only "$d/libc.a" "$d"/*.o 2>/dev/null |
+        awk '{ print $NF }' | grep -E "$pat" | sort -u > "$d/called"
+    missing=$(comm -23 "$d/called" "$d/present" | tr '\n' ' ')
+    if [ -n "$missing" ]; then
+        echo "$v: called and not in its librt.a: $missing"; fail=1
+    fi
+    # the arithmetic, comparisons and 32-bit conversions the FPU does
+    soft=$(grep -E "^__(add|sub|mul|div|neg|eq|ne|lt|le|gt|ge|unord)($hw)[23]\$|^__(fix|fixuns)($hw)si\$|^__float(un)?si($hw)\$" "$d/called" | tr '\n' ' ')
+    case $v in */ilp32d|*/lp64d)
+        soft="$soft$(grep -E '^__(extendsfdf2|truncdfsf2)$' "$d/called" | tr '\n' ' ')" ;;
+    esac
+    if [ -n "$soft" ]; then
+        echo "$v: still calls helpers the FPU replaces: $soft"; fail=1
+    fi
+    [ -z "$missing" ] && [ -z "$soft" ] &&
+        echo "$v: the $(wc -l < "$d/called" | tr -d ' ') helpers its libc and programs call are in its librt.a, and none the FPU does"
 done
 
 [ "$fail" -eq 0 ] || exit 1

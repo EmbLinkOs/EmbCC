@@ -1,0 +1,36 @@
+/* AVR: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* AVR (avr-gcc's ABI, measured against clang --target=avr
+ * -mmcu=atmega328p): 16-bit pointers -- the first target here where
+ * a pointer is NARROWER than a long -- a four-byte double, and no
+ * __int128 on an 8-bit machine.
+ *
+ * `char` is SIGNED here, which is what clang --target=avr does and
+ * what the generated predefined-macro table therefore says. It is
+ * very likely NOT what avr-gcc does -- avr-gcc is documented as
+ * defaulting to -funsigned-char -- but there is no avr-gcc on this
+ * machine to check, and the alternative was to set the model from
+ * recollection and hand-edit a GENERATED table to agree with it.
+ *
+ * So: the compiler is self-consistent, every part of it verifiable
+ * against something real, and the open question is written down
+ * rather than guessed. Settling it needs a real avr-gcc, and it
+ * matters before the kernel is built: char's default signedness
+ * changes what `char c = 200; c > 0` answers, though not the ABI.
+ *
+ * `long double` is four bytes too: the same type as double, which is
+ * the same type as float. There is no wider floating point on this
+ * machine. */
+DATA_MODEL(AVR, .ptr = 2, .lng = 4, .it = 2, .dbl = 4, .ldbl = 4,
+           .char_uns = 0, .wchar_uns = 0, .int128 = 0, .maxal = 1)
+
+/* AVR. `avr` is the canonical spelling because that is what every
+ * other toolchain calls the target and what a project's --target=
+ * string will say; the part is selected with -mmcu=, as avr-gcc and
+ * clang both do, and not by a triple per device. Freestanding is the
+ * only thing an 8-bit microcontroller can be. */
+TRIPLE("avr",                       AVR,         NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("avr-none-elf",              AVR,         NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("avr-elf",                   AVR,         NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("avr-unknown-none",          AVR,         NONE,    ELF,   ALIAS,     BASE,         PLAIN)

@@ -55,7 +55,7 @@ rm -f "$out/c.elf"
 if err=$("$EMBCC" $T "$out/s.c" -o "$out/c.elf" -Wl,-T,link.ld 2>&1); then
     echo "FAIL: -Wl,-T for x86-64 was accepted"; exit 1
 fi
-echo "$err" | grep -q "a linker script (-T) is for an ARM or RISC-V image" || {
+echo "$err" | grep -q "a linker script (-T) is for an ARM, RISC-V or AVR image" || {
     echo "FAIL: -Wl,-T for x86-64 refused without naming why:"; echo "$err"; exit 1; }
 [ ! -e "$out/c.elf" ] || { echo "FAIL: -Wl,-T refused but $out/c.elf written"; exit 1; }
 # ...but a compile that does not link ignores them, as GCC's does.

@@ -72,9 +72,14 @@ leaves no registers). See [Stress testing](#stress-testing-with-embcc_ra_maxpool
 block by backward dataflow: for each vreg, from the blocks that read it
 before writing it, back through predecessors to the blocks that write
 it. An instruction's successors are the next instruction (except after
-`IR_JMP`, `IR_RET`, `IR_UD2` and `IR_SWITCH`), the target of `IR_JMP`,
-`IR_BRZ` and `IR_BRNZ`, and the default and every table entry of
-`IR_SWITCH`; a block ends after each of those and starts at each label.
+`IR_JMP`, `IR_RET`, `IR_UD2`, `IR_SWITCH` and `IR_IGOTO`), the target of
+`IR_JMP`, `IR_BRZ` and `IR_BRNZ`, the default and every table entry of
+`IR_SWITCH`, and for `IR_IGOTO` every label an `IR_LABELADDR` in the
+function names; a block ends after each of those and starts at each
+label. (`IR_IGOTO` used to fall through: a value read only at a label a
+computed goto jumped back to looked dead after its last read, and its
+register went to the next value -- harmless only where the backend kept
+such a function out of the allocator, as x86-64 and AArch64 still do.)
 What an instruction reads comes from `ra_each_use` and what it defines
 from `ra_ins_def`; these are the shared operand switches, and they must
 agree with what the backends actually load and store.

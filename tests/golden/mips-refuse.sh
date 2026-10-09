@@ -22,9 +22,11 @@ for t in mipsel-none-elf mipsel-unknown-elf mipsel-elf mipsel; do
     m=$("$EMBCC" --target=$t -dumpmachine) || { echo "--target=$t refused"; exit 1; }
     [ "$m" = mipsel-none-elf ] || { echo "--target=$t is '$m'"; exit 1; }
 done
-if "$EMBCC" --target=mips-none-elf -dumpmachine > /dev/null 2>&1; then
-    echo "big-endian mips-none-elf was accepted"; exit 1
-fi
+# ...and big-endian, the same core (docs/internals/big-endian.md)
+for t in mips-none-elf mips-unknown-elf mips-elf mips; do
+    m=$("$EMBCC" --target=$t -dumpmachine) || { echo "--target=$t refused"; exit 1; }
+    [ "$m" = mips-none-elf ] || { echo "--target=$t is '$m'"; exit 1; }
+done
 printf 'int f(int x) { return x + 1; }\n' > "$out/f.c"
 "$EMBCC" --target=$T -c "$out/f.c" -o "$out/f.o" || { echo "-c failed"; exit 1; }
 if command -v "$RE" >/dev/null 2>&1; then
@@ -43,6 +45,15 @@ if command -v "$RE" >/dev/null 2>&1; then
     "$RE" -S "$out/r.o" | grep -q '\.rel\.text *REL ' || {
         echo "the relocations are not REL (.rel.text), as o32 requires"; exit 1; }
     echo "an ELF32 little-endian EM_MIPS object, e_flags 0x70001001, REL, soft float"
+    "$EMBCC" --target=mips-none-elf -c "$out/r.c" -o "$out/rb.o" &&
+    "$RE" -h -S -A "$out/rb.o" > "$out/rb.hdr" || exit 1
+    grep -q 'Data:.*big endian' "$out/rb.hdr" &&
+    grep -q 'Flags:.*0x70001001' "$out/rb.hdr" &&
+    grep -q '\.rel\.text *REL ' "$out/rb.hdr" &&
+    grep -q 'FP ABI: Soft float' "$out/rb.hdr" || {
+        echo "the mips-none-elf object is not ELF32 big-endian o32 REL soft float:"
+        grep -E 'Data|Flags|rel|FP ABI' "$out/rb.hdr"; exit 1; }
+    echo "and mips-none-elf's the same, big-endian"
 fi
 
 # ---- the options -----------------------------------------------------------
@@ -71,7 +82,20 @@ for o in -funwind-tables -fasynchronous-unwind-tables -fexceptions; do
 done
 "$EMBCC" --target=$T -fno-asynchronous-unwind-tables -c "$out/f.c" -o /dev/null || {
     echo "-fno-asynchronous-unwind-tables was refused"; exit 1; }
+refopt -mbig-endian 'little-endian'
+for o in -EB -mbig-endian; do
+    "$EMBCC" --target=mips-none-elf $o -c "$out/f.c" -o /dev/null 2> "$out/opt.err" || {
+        echo "$o was refused for mips-none-elf:"; cat "$out/opt.err"; exit 1; }
+done
+for o in -EL -mlittle-endian; do
+    if "$EMBCC" --target=mips-none-elf $o -c "$out/f.c" -o /dev/null 2> "$out/opt.err"; then
+        echo "$o was accepted for mips-none-elf"; exit 1
+    fi
+    grep -q 'big-endian' "$out/opt.err" || {
+        echo "$o was refused for mips-none-elf, but not by name:"; cat "$out/opt.err"; exit 1; }
+done
 echo "the MIPS32r2/o32/soft-float/-mno-abicalls/-G0 flags are accepted, others refused"
+echo "(and the byte order only as the triple says it)"
 
 # ---- the constructs ----------------------------------------------------------
 refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
@@ -83,32 +107,37 @@ refc() {            # refc WHAT PATTERN SOURCE [FLAGS]
     grep -q -- "$2" "$out/bad.err" || {
         echo "$1 was refused, but not by name:"; cat "$out/bad.err"; exit 1; }
 }
-refc "a 1-byte atomic" 'an atomic narrower than four bytes' \
-    'char c; int f(void){ return __atomic_fetch_add(&c, 1, 5); }'
-refc "a 2-byte compare-and-swap" 'an atomic narrower than four bytes' \
-    'short s; int f(void){ short e = 0; return __atomic_compare_exchange_n(&s, &e, 1, 0, 5, 5); }'
-refc "an 8-byte atomic read-modify-write" 'an atomic wider than a register' \
-    'long long x; long long f(void){ return __atomic_fetch_add(&x, 1, 5); }'
-refc "an 8-byte atomic load" 'an atomic access of 8 bytes is not one access' \
-    'long long x; long long f(void){ return __atomic_load_n(&x, 5); }'
-refc "a computed goto" 'a computed goto' \
-    'int f(int i){ void *t[2]; t[0] = &&a; t[1] = &&b; goto *t[i]; a: return 1; b: return 2; }'
-refc "__builtin_return_address" '__builtin_frame_address or __builtin_return_address' \
-    'void *f(void){ return __builtin_return_address(0); }'
-refc "__builtin_frame_address" '__builtin_frame_address or __builtin_return_address' \
-    'void *f(void){ return __builtin_frame_address(0); }'
+# An 8-byte atomic is a call to libatomic's sized routine, as GCC's and
+# clang's are; lib/rt/atomic8.c defines them (it used to be refused).
+printf 'long long x;
+long long f(void){ return __atomic_fetch_add(&x, 1, 5); }
+long long g(void){ return __atomic_load_n(&x, 5); }
+' > "$out/at8.c"
+"$EMBCC" --target=$T -O1 -c "$out/at8.c" -o "$out/at8.o" 2> "$out/at8.err" || {
+    echo "an 8-byte atomic was refused:"; cat "$out/at8.err"; exit 1; }
+for s in __atomic_fetch_add_8 __atomic_load_8; do
+    "${EMBCC_LLVM_READELF:-llvm-readelf}" -s "$out/at8.o" | grep -q " $s\$" || {
+        echo "an 8-byte atomic is not a call to $s"; exit 1; }
+done
+refc "__builtin_return_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_return_address(1); }'
+refc "__builtin_frame_address(1)" 'only level 0' \
+    'void *f(void){ return __builtin_frame_address(1); }'
 refc "__int128" '__int128 does not exist on this target' \
     '__int128 x;'
-refc "an interrupt handler" '__attribute__((interrupt)) is not supported' \
-    'void __attribute__((interrupt)) f(void){}'
-refc "a 16-aligned scalar local" 'needs 16-byte alignment and the stack only guarantees 8' \
-    'int f(void){ _Alignas(16) int x = 1; return x; }'
+refc "an interrupt handler with a parameter" "interrupt handler 'f' takes parameters" \
+    'void __attribute__((interrupt)) f(int x){ (void)x; }'
 printf 'int f(int x) { return x; }\n' > "$out/c.cc"
+# C++ compiles here without exceptions (tests/golden/cxx-embedded.sh runs
+# it); exceptions, on by default, are refused by name: there are no
+# unwind tables for this target
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
-    echo "C++ was accepted"; exit 1
+    echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q 'C++ is not yet supported for mipsel-none-elf' "$out/cxx.err" || {
-    echo "C++ was refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
-echo "narrow and 8-byte atomics, computed goto, the frame and return address,"
-echo "__int128, interrupt functions, an over-aligned scalar and C++ are each"
+grep -q 'C++ exceptions are not supported for mipsel-none-elf' "$out/cxx.err" || {
+    echo "C++ exceptions were refused, but not by name:"; cat "$out/cxx.err"; exit 1; }
+"$EMBCC" --target=$T -fno-exceptions -c "$out/c.cc" -o /dev/null || {
+    echo "C++ with -fno-exceptions does not compile"; exit 1; }
+echo "narrow atomics, the frame and return address above level 0,"
+echo "__int128, an interrupt handler with parameters, an over-aligned scalar and C++ exceptions are each"
 echo "refused by name (assembly is mips-gas.sh's and mips-exc.sh's)"

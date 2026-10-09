@@ -1,0 +1,18 @@
+/* ColdFire (m68k): the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* ColdFire as GCC's m68k-elf lays it out (docs/internals/coldfire-plan.md,
+ * unverified -- there is no m68k compiler here): ILP32, a SIGNED char
+ * and wchar_t, long double the 8-byte double, no __int128, and NOTHING
+ * aligned beyond two bytes (BIGGEST_ALIGNMENT 16 bits without
+ * -malign-int): an int in a struct may sit at offset 2. */
+DATA_MODEL(COLDFIRE, .ptr = 4, .lng = 4, .it = 4, .dbl = 8, .ldbl = 8,
+           .char_uns = 0, .wchar_uns = 0, .int128 = 0, .maxal = 2, .big_endian = 1)
+
+/* ColdFire: GCC's target name is m68k-elf with -mcpu=5208; EmbCC's
+ * m68k is ColdFire ISA_A only (the 68000/68020 family proper is
+ * refused by -mcpu). Big-endian, bare metal. */
+TRIPLE("m68k-none-elf",             COLDFIRE,    NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("m68k-unknown-elf",          COLDFIRE,    NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("m68k-elf",                  COLDFIRE,    NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("m68k",                      COLDFIRE,    NONE,    ELF,   ALIAS,     BASE,         PLAIN)

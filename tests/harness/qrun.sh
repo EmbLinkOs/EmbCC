@@ -47,6 +47,7 @@
 # caller is bounded by the timeout as before; the CPU cap ends an orphan.
 #
 # usage: qrun.sh <seconds> [--until TEXT] <command> [args...]
+#        (EMBCC_QRUN_TERM=1: with --until, stop QEMU with TERM first)
 #                                          -> the guest's exit status
 timeout=$1; shift
 capped() {
@@ -80,6 +81,20 @@ if [ -n "$until_text" ]; then
         sleep 0.2
         i=$((i + 1))
     done
+    # With EMBCC_QRUN_TERM=1, TERM first and KILL after a second: QEMU
+    # takes a TERM as a clean shutdown, so what it writes at exit is
+    # written -- a TCG plugin's results (tools/bench/icount.c), which an
+    # AVR run, never exiting on its own, has no other way to get. (QEMU
+    # says so on stderr, "terminating on signal 15", which is why it is
+    # asked for rather than done for every caller.)
+    if [ -n "${EMBCC_QRUN_TERM:-}" ]; then
+        kill -TERM "$qpid" 2>/dev/null
+        j=0
+        while [ "$j" -lt 10 ] && kill -0 "$qpid" 2>/dev/null; do
+            sleep 0.1
+            j=$((j + 1))
+        done
+    fi
     kill -9 "$qpid" 2>/dev/null
     wait "$qpid" 2>/dev/null
     cat "$tmp"

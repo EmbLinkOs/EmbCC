@@ -175,6 +175,7 @@ static void split_mnemonic(char *m, char **base, struct ir_ins *in)
         else if (*s == 's') in->sign = 1;
         else if (*s == 'f') in->flt = 1;
         else if (*s == 'v') in->vol = 1;
+        else if (*s == 'p') in->flash = 1;
     }
 }
 
@@ -348,7 +349,8 @@ static void parse_ins(struct p *p, char *first, const char *rest)
             in->a = vreg(p, word(p));
             break;
         case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
-        case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR: {
+        case IR_AND: case IR_OR: case IR_XOR: case IR_SHL: case IR_SHR:
+        case IR_MULH: case IR_MULW: {
             char *wa = word(p);
             wa[strlen(wa) - 1] = 0;    /* the comma */
             in->a = vreg(p, wa);
@@ -402,10 +404,22 @@ static void parse_ins(struct p *p, char *first, const char *rest)
         case IR_ALLOCA:
             in->a = vreg(p, word(p));
             break;
-        case IR_SPSAVE: case IR_FRAMEADDR: case IR_LANDING:
+        case IR_FRAMEADDR:
+            /* level 0 on a target with no frame chain: the frame
+             * address (frame0) or the return address (ret0) */
+            in->imm = eat(p, "ret0") ? 2 : eat(p, "frame0") ? 1 : 0;
+            break;
+        case IR_SPSAVE: case IR_LANDING:
             break;
         case IR_LABELADDR:
             in->label = labelno(p, word(p));
+            if (eat(p, "data")) {          /* static data's marker */
+                char *k = word(p);
+                if (!k)
+                    perr(p, "a label-data slot");
+                in->vol = 1;
+                in->imm = strtol(k, NULL, 10);
+            }
             break;
         case IR_XCHG: case IR_XADD: case IR_CAS: case IR_CAS16:
         case IR_ARMW: case IR_CMPXCHG: {
@@ -439,6 +453,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                 perr(p, "@name or [%vreg] as the call target");
             }
             /* the argument list, `%1, %2)` possibly split across words */
+            in->argv = ir_args_new(MAX_PARAMS);
             char *arg = lp + 1;
             for (;;) {
                 while (*arg == ' ' || *arg == ',')
@@ -447,6 +462,8 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                     break;
                 if (*arg != '%')
                     perr(p, "a %vreg argument");
+                if (in->nargs >= MAX_PARAMS)
+                    perr(p, "at most MAX_PARAMS arguments");
                 in->argv[in->nargs++].vreg = (int)strtol(arg + 1, &arg, 10);
                 while (*arg == ',' || *arg == ' ')
                     arg++;
@@ -472,6 +489,7 @@ static void parse_ins(struct p *p, char *first, const char *rest)
                     in->call_nfixed = atoi(va + 8);
             }
             in->sret_first = has_flag(rest, "sret");
+            in->ret_ptr = has_flag(rest, "ptrret");
             break;
         }
         case IR_VLOAD: case IR_VSPLAT: case IR_VREDADD: {
@@ -647,8 +665,11 @@ struct ir_unit *ir_parse(const char *file, char *text)
         if (!strcmp(w, "}")) { p.fn = NULL; continue; }
         if (!strcmp(w, "local")) { parse_local(&p, keep); continue; }
         if (!strncmp(w, "str", 3) && w[3] >= '0' && w[3] <= '9') {
-            /* strN = "...": the bytes, unescaped */
-            const char *q = strchr(keep, '"');
+            /* strN = "...": the bytes, unescaped -- read from the line
+             * itself, past the word, and not from `keep`, whose 2048 bytes
+             * cut a long string short (driver/main.c's help text, once
+             * xtensa-none-elf was added to it) */
+            const char *q = strchr(p.cur, '"');
             if (!q)
                 perr(&p, "a quoted string after strN =");
             struct outbuf b = { NULL, 0, 0 };

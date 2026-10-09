@@ -32,7 +32,16 @@ struct member {
     struct type *ty;
     int off;              /* byte offset; for a bitfield, of its storage unit */
     int is_bitfield;
-    int bit_off;          /* bitfield: bit position within the storage unit */
+    /* bitfield: its shift within the storage unit -- the bit, counted from
+     * the LEAST significant end of the unit as a load of it reads it, at
+     * which the field's own least significant bit lies. Where that is in
+     * memory depends on the byte order: on a little-endian target the
+     * field allocated first is at the low end of its unit, on a big-endian
+     * one at the HIGH end (gcc's layout either way), so a field's position
+     * in memory order is ty_bf_mempos(). The byte-at-a-time forms below
+     * (bf_bytes) count from the least significant end of that many bytes
+     * read as one integer in the target's order. */
+    int bit_off;
     int bit_width;        /* bitfield: width in bits (0 = zero-width separator) */
     int bf_bytes;         /* bitfield of a packed struct crossing its type's
                            * storage unit: off/bit_off are its first byte and
@@ -40,6 +49,15 @@ struct member {
                            * time over this many bytes (0: a unit access) */
     int user_align;       /* __attribute__((aligned(N))) on the member; 0 = none */
 };
+
+/* A bit-field's first bit in MEMORY order -- bits from the first byte of
+ * its unit, most significant bit of each byte first on a big-endian
+ * target and least significant first on a little-endian one, so that
+ * consecutive fields have consecutive positions -- given its shift
+ * (bit_off), width and unit width in bits (8 * bf_bytes, or 8 * the size
+ * of its type). What DWARF's DW_AT_data_bit_offset and an extent in bytes
+ * are measured in; the same number as bit_off on a little-endian target. */
+int ty_bf_mempos(int bit_off, int bit_width, int unit_bits);
 
 struct type {
     enum ty_kind kind;
@@ -61,6 +79,17 @@ struct type {
     int is_const;           /* `const`-qualified: an lvalue of this type may
                              * not be assigned (sema). A copy, like a
                              * volatile one. Ignored by ty_equal. */
+    int is_flash;           /* AVR's `__flash`, GCC's address space 1: the
+                             * object is in program memory and is read with
+                             * LPM through a 16-bit program-space address. A
+                             * copy, like const; an array's elements carry it
+                             * too. Ignored by ty_equal; sema keeps pointers to
+                             * the two spaces apart. */
+    int align_ovr;          /* a typedef's __attribute__((aligned(N))): the
+                             * type's alignment is N, larger or smaller than
+                             * its own, and its size is unchanged (GCC's and
+                             * clang's rule). 0: none. A copy (ty_aligned),
+                             * like const; ignored by ty_equal. */
     /* A struct's qualified copies, on the original, linked by qnext: a
      * copy made while the struct was incomplete (`const struct T *p;`
      * before T's body) is brought up to date when the body arrives. */
@@ -106,6 +135,11 @@ struct type {
     struct type *ptypes[MAX_PARAMS];
     int nptypes;
     int is_varargs;
+    int cmse_ns_call;       /* __attribute__((cmse_nonsecure_call)) under
+                             * -mcmse: a call through a pointer to this
+                             * type enters the Non-secure state (BLXNS),
+                             * with every register and flag that could
+                             * carry a secret cleared first */
     int sret_first;         /* the first parameter is the ABI's indirect-
                              * result pointer (__attribute__((embcc_sret)),
                              * which C++ lowering writes): aarch64 passes it
@@ -128,6 +162,11 @@ struct type *ty_plain_char(void);
 int ty_is_plain_char(const struct type *t);
 int ty_generic_same(const struct type *a, const struct type *b);
 struct type *ty_wchar(void);
+/* A string literal's element type by its prefix: L wchar_t, U char32_t,
+ * u char16_t, none (or u8, in C) plain char. The parser's constant
+ * folder and sema both ask here, so sizeof(L"ab") folds to what sema
+ * types it as. */
+struct type *ty_str_elem(int prefix);
 /* `long long` / `unsigned long long`: eight bytes on every target. */
 struct type *ty_llong(int is_unsigned);
 /* The integer type that is exactly `size` bytes wide, or NULL if the
@@ -148,6 +187,9 @@ struct type *ty_ptrdiff_t(void);
 struct type *ty_volatile(struct type *t);
 /* A copy of `t` marked `const`, the same way. */
 struct type *ty_const(struct type *t);
+/* A copy of t whose alignment is `align` (a typedef's aligned attribute). */
+struct type *ty_aligned(struct type *t, int align);
+struct type *ty_flash(struct type *t);   /* AVR __flash: program memory */
 /* `t` without its own qualifiers (const, volatile, _Atomic): the
  * original a qualified copy points at. A pointee's stay. */
 struct type *ty_unqual(struct type *t);
@@ -190,10 +232,15 @@ struct type *ty_func(struct type *ret, struct type **ptypes, int n,
 void ty_struct_layout(struct type *t, struct member *members, int n,
                       int packed, int user_align, int pack);
 struct member *ty_find_member(struct type *t, const char *name);
+struct member *ty_find_member_deep(struct type *t, const char *name, long *off);
 
 int ty_size(const struct type *t);          /* bytes; void has none */
 int ty_align(const struct type *t);
 int ty_natural_align(const struct type *t);
+/* The alignment before a typedef's aligned attribute (align_ovr): what
+ * the calling convention places an argument by. GCC's and clang's
+ * aligned typedef moves an object, not an argument slot. */
+int ty_own_align(const struct type *t);
 int ty_equal(const struct type *a, const struct type *b);
 int ty_is_integer(const struct type *t);
 int ty_is_float(const struct type *t);

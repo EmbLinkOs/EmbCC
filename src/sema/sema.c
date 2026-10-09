@@ -15,6 +15,13 @@
 #include "../arch/avr/asm.h"
 #include "../arch/riscv/asm.h"
 #include "../arch/mips/asm.h"
+#include "../arch/loongarch/asm.h"
+#include "../arch/tricore/asm.h"
+#include "../arch/xtensa/asm.h"
+#include "../arch/rx/asm.h"
+#include "../arch/coldfire/asm.h"
+#include "../arch/sparc/asm.h"
+#include "../arch/ppc/asm.h"
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
@@ -422,6 +429,35 @@ static void need_arith(struct unit *u, struct expr *e, const char *what)
  * through their 64-bit form. */
 static struct expr *cx_cast(struct expr *x, struct type *to);
 
+/* Is an object of this type in AVR's program memory: __flash itself, or
+ * an array of __flash elements. */
+static int ty_in_flash(const struct type *t)
+{
+    while (t && t->kind == TY_ARRAY && !t->is_flash)
+        t = t->pointee;
+    return t && t->is_flash;
+}
+
+/* A __flash object is in .progmem.data, which the linker keeps in flash
+ * with the code (avr-libc's scripts: `*(.progmem*)` in .text), and is
+ * read with LPM. Flash is written when the part is programmed, never by
+ * the program, so the object must be const, as GCC requires; and one
+ * per thread is not something flash can hold. */
+static void flash_object(struct unit *u, struct global *g)
+{
+    if (!ty_in_flash(g->ty))
+        return;
+    if (!g->is_const && !g->is_extern)
+        sema_error_line(u, g->line, "'%s' is __flash and must be const: "
+                        "program memory is written when the part is "
+                        "flashed, not by the program", g->name);
+    if (g->is_tls)
+        sema_error_line(u, g->line, "'%s' cannot be both __flash and "
+                        "thread-local", g->name);
+    if (!g->section)
+        g->section = ".progmem.data";
+}
+
 static struct expr *convert_assign(struct unit *u, struct expr *rhs,
                                    struct type *to, const char *ctx)
 {
@@ -430,6 +466,12 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
         (ty_is_complex(rhs->ty) && (ty_is_arith(to) || to->kind == TY_BOOL)))
         return cx_cast(rhs, to);
     if (to->kind == TY_STRUCT || rhs->ty->kind == TY_STRUCT) {
+        /* a struct is copied as its bytes, by a copy that reads RAM;
+         * from program memory that would be the wrong bytes */
+        if (rhs->ty->is_flash)
+            sema_error_id(u, rhs->line, rhs->col, "E0003",
+                          "%s: copying a whole __flash %s is not supported "
+                          "yet; read its members", ctx, ty_name(rhs->ty));
         if (!ty_equal(to, rhs->ty))
             sema_error_id(u, rhs->line, rhs->col, "E0003",
                           "%s: cannot convert %s to %s",
@@ -444,6 +486,16 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
     if (ty_is_arith(to) && ty_is_arith(rhs->ty))
         return mk_cast(rhs, to);
     if (to->kind == TY_PTR) {
+        /* AVR: a __flash pointer is a program-memory address, which a
+         * generic pointer's loads would read from RAM -- the bytes at the
+         * same number in the other address space. GCC makes it an error
+         * too; a cast says the program means it. */
+        if (rhs->ty->kind == TY_PTR && !is_null_const(rhs) &&
+            rhs->ty->pointee->is_flash != to->pointee->is_flash)
+            sema_error_id(u, rhs->line, rhs->col, "E0003",
+                          "%s: cannot convert %s to %s: __flash and generic "
+                          "pointers are in different address spaces",
+                          ctx, ty_name(rhs->ty), ty_name(to));
         /* `char *s = some_const_char_ptr;` drops the pointee's const, and
          * a store through s then writes a read-only object: GCC warns
          * (-Wdiscarded-qualifiers, on by default), and so does this. */
@@ -511,6 +563,12 @@ static void need_modifiable(struct unit *u, const struct expr *e,
                             int line, int col, const char *what)
 {
     const struct type *t = e->undecayed ? e->undecayed : e->ty;
+    /* AVR program memory: a store would be a data-space write to the
+     * same number, which is some other object in RAM */
+    if (t && t->is_flash)
+        sema_error_at(u, line, col, "%s of a __flash location: program "
+                      "memory is written when the part is flashed, not by "
+                      "the program", what);
     if (!t || !(t->is_const || has_const_member(t)))
         return;
     const char *nm = e->kind == EXPR_VAR ? e->name
@@ -558,25 +616,44 @@ static int init_overhang(struct unit *u, int line, const char *what,
                          struct type *ty, const struct initelem *v, int n,
                          int is_static);
 
-/* A bit-field's value merged into its storage unit's nb bytes at p
- * (they start zeroed, so OR is enough and neighbours are kept): its low
- * `width` bits, at bit_off of p[0] — 17 bytes for a packed __int128's at
- * bit 1..7, the last one past what 128 bits hold. */
-static void merge_bits(char *p, int nb, struct w128 val, int bit_off,
-                       int width)
+/* A bit-field's value merged into its storage unit at p (the bytes start
+ * zeroed, so OR is enough and neighbours are kept): its low `width` bits,
+ * at bit_off of the unit's `unit` bytes read as one integer in the
+ * target's order (type.h) -- 17 bytes for a packed __int128's at bit
+ * 1..7, the last one past what 128 bits hold. Only the first nb of the
+ * unit's bytes are the object's (bf_span), and only they are written: on
+ * a big-endian target the field's bytes are the unit's FIRST, its high
+ * end. */
+static void merge_bits(char *p, int unit, int nb, struct w128 val,
+                       int bit_off, int width)
 {
     struct w128 mask = w_shr(w_make(~0UL, ~0UL), 128 - width, 0);
     val.lo &= mask.lo;
     val.hi &= mask.hi;
     struct w128 lo = w_shl(val, bit_off);
+    if (target_big_endian()) {
+        /* byte b of the value (from the least significant end) is the
+         * unit's byte unit-1-b; a 17-byte unit's top byte is what the
+         * shift carried past 128 bits */
+        for (int b = 0; b < unit; b++) {
+            unsigned long byte;
+            if (unit - 1 - b >= nb)
+                continue;
+            if (b < 16)
+                byte = (b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7));
+            else
+                byte = bit_off ? w_shr(val, 128 - bit_off, 0).lo : 0;
+            p[unit - 1 - b] |= (char)byte;
+        }
+        return;
+    }
     for (int b = 0; b < nb && b < 16; b++)
         p[b] |= (char)((b < 8 ? lo.lo : lo.hi) >> (8 * (b & 7)));
     if (nb == 17 && bit_off)
         p[16] |= (char)w_shr(val, 128 - bit_off, 0).lo;
 }
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
-                       struct stmt *s, int in_loop, int in_switch,
-                       int at_sw_level);
+                       struct stmt *s, int in_loop, int in_switch);
 
 /* Nonzero while lowering a static initializer (a file-scope global or a
  * static local). A compound literal met here has static storage: it becomes
@@ -809,6 +886,10 @@ static struct func *cx_helper(int div, struct type *T)
         if (lf == LDF_QUAD)        k = 6 + div;
         else if (lf == LDF_DOUBLE) k = 2 + div;
     }
+    /* A four-byte double or long double (AVR's, RX's) is binary32, and
+     * its helpers are the `s` pair, as GCC calls them there. */
+    if (ty_size(T) == 4)
+        k = div;
     static const char *const names[8] = {
         "__mulsc3", "__divsc3", "__muldc3", "__divdc3",
         "__mulxc3", "__divxc3", "__multc3", "__divtc3" };
@@ -1171,6 +1252,93 @@ static int same_operand(const struct expr *a, const struct expr *b)
     }
 }
 
+/* Is const_fold's answer for e exact: every node an integer or a pointer
+ * that a long holds? A wider one -- __int128, where `(u128)0 - 1 !=
+ * W(~0, ~0)` is false -- or a floating one is folded in 64 bits or not at
+ * all, which is fine for an array bound's diagnostics and wrong for
+ * deciding which arm of an if is never generated. */
+static int fold_is_exact(const struct expr *e)
+{
+    if (!e)
+        return 1;
+    if (!e->ty || !(ty_is_integer(e->ty) || e->ty->kind == TY_PTR) ||
+        ty_size(e->ty) > 8)
+        return 0;
+    if (e->kind == EXPR_COND && !fold_is_exact(e->args[0]))
+        return 0;
+    if (e->kind == EXPR_CALL)
+        return 0;
+    return fold_is_exact(e->lhs) && fold_is_exact(e->rhs);
+}
+
+/* Do two operands name the same object, with nothing to evaluate twice: a
+ * variable and member, constant-subscript and dereference chains off one. */
+static int asm_same_lvalue(const struct expr *a, const struct expr *b)
+{
+    if (!a || !b || a->kind != b->kind)
+        return 0;
+    switch (a->kind) {
+    case EXPR_VAR:
+        return a->name && b->name && !strcmp(a->name, b->name) &&
+               a->var_index == b->var_index && a->gref == b->gref;
+    case EXPR_NUM:
+        return a->num == b->num;
+    case EXPR_MEMBER:
+        return a->name && b->name && !strcmp(a->name, b->name) &&
+               a->is_arrow == b->is_arrow && asm_same_lvalue(a->lhs, b->lhs);
+    case EXPR_DEREF:
+        return asm_same_lvalue(a->rhs, b->rhs);
+    case EXPR_CAST:
+        return a->ty == b->ty && asm_same_lvalue(a->rhs, b->rhs);
+    case EXPR_BINOP:
+        return a->op == b->op && (a->op == B_ADD || a->op == B_SUB) &&
+               asm_same_lvalue(a->lhs, b->lhs) &&
+               asm_same_lvalue(a->rhs, b->rhs);
+    default:
+        return 0;
+    }
+}
+
+/* A matching constraint, `"0"(x)` with output 0 `"=r"(x)`: the input is
+ * the output's starting value, in its register. On Thumb, where it is taken
+ * as the in-out `"+r"(x)` it means -- CMSIS's __SMLALD writes its 64-bit
+ * accumulator so, `"=r"(llr.w32[0]), "=r"(llr.w32[1]) : ... "0"(llr.w32[0]),
+ * "1"(llr.w32[1])`. An input naming some OTHER value is refused by name:
+ * it would need a copy into the output first, which nothing here makes. */
+static void asm_tie_inputs(struct unit *u, struct stmt *s)
+{
+    struct asm_stmt *a = s->asm_s;
+    if (target_get() != TARGET_THUMB)
+        return;
+    for (int i = 0; i < a->nin; i++) {
+        const char *c = a->in[i].constraint;
+        int n = 0, k = 0;
+        if (c[0] < '0' || c[0] > '9')
+            continue;
+        for (; c[k] >= '0' && c[k] <= '9'; k++)
+            n = n * 10 + (c[k] - '0');
+        if (c[k] || n >= a->nout)
+            sema_error_at(u, s->line, s->col, "asm input constraint \"%s\" "
+                          "names no output", c);
+        if (a->out[n].constraint[0] != '=' && a->out[n].constraint[0] != '+')
+            continue;                        /* (refused with the output) */
+        if (!asm_same_lvalue(a->in[i].expr, a->out[n].expr))
+            sema_error_at(u, s->line, s->col, "asm input %d is tied to output "
+                          "%d (\"%s\") but is another value; EmbCC takes a "
+                          "matching constraint only on the output's own "
+                          "lvalue, as \"+r\" says", i, n, c);
+        if (a->out[n].constraint[0] == '=') {
+            size_t len = strlen(a->out[n].constraint);
+            char *pc = xmalloc(len + 1);
+            memcpy(pc, a->out[n].constraint, len + 1);
+            pc[0] = '+';
+            a->out[n].constraint = pc;
+        }
+        a->in[i].reg = ASM_REG_TIED;
+        a->in[i].imm = n;
+    }
+}
+
 static void warn_binop_shape(struct unit *u, struct expr *e,
                              struct type *lt, struct type *rt)
 {
@@ -1334,17 +1502,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* char[N] (or wchar_t/char16_t/char32_t[N] for a wide literal),
          * decaying to a pointer like any array (sizeof sees the array through
          * `undecayed`). e->num is the element count including the NUL. */
-        /* By the PREFIX: L is wchar_t whatever its width (two bytes on
-         * AVR), U is char32_t and u char16_t, as __CHAR32_TYPE__ and
-         * __CHAR16_TYPE__ spell them -- on AVR unsigned long and
-         * unsigned int, where U"" was the two-byte unsigned int. */
-        int i16 = target_int_size() == 2;
-        struct type *elem = e->str_prefix == 'L' ? ty_wchar()
-                          : e->str_prefix == 'U'
-                            ? ty_base(i16 ? TY_LONG : TY_INT, 1)
-                          : e->str_prefix == 'u'
-                            ? ty_base(i16 ? TY_INT : TY_SHORT, 1)
-                          : ty_plain_char();
+        struct type *elem = ty_str_elem(e->str_prefix);
         e->undecayed = ty_array(elem, (int)e->num);
         e->ty = ty_ptr(elem);
         break;
@@ -1738,7 +1896,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* GNU statement expression: check the block, then its value is the
          * last statement when that is an expression statement, else void.
          * The block shares the function's flat scope (as any block does). */
-        check_stmt(u, f, sc, e->body, 0, 0, 0);
+        check_stmt(u, f, sc, e->body, 0, 0);
         struct stmt *last = NULL;
         for (struct stmt *s = e->body->body; s; s = s->next)
             last = s;
@@ -1885,6 +2043,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col,
                        "compound assignment needs an lvalue");
         need_modifiable(u, e->lhs, e->line, e->col, "assignment");
+        /* an eight-byte _Atomic `x op= v` whose op is a compare-exchange
+         * loop of libatomic calls keeps the expected value in a local */
+        if (e->lhs->ty->is_atomic && ty_size(e->lhs->ty) == 8 &&
+            target_atomic8_libcall())
+            e->var_index = scope_add(sc, "<atomic expected>",
+                                     e->lhs->ty, NULL);
         if ((ty_is_complex(e->lhs->ty) || ty_is_complex(e->rhs->ty)) &&
             cx_lowering()) {
             *e = *cx_update(u, e->lhs, e->op, e->rhs, 0);
@@ -2000,6 +2164,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         /* and of a const one const: `cs.a = 1` assigns a const object */
         if (base->is_const && !e->ty->is_const)
             e->ty = ty_const(e->ty);
+        /* and of a __flash one in flash: its bytes are read with LPM */
+        if (base->is_flash && !e->ty->is_flash)
+            e->ty = ty_flash(e->ty);
         if (e->ty->kind == TY_ARRAY) {
             e->undecayed = e->ty;
             e->ty = ty_ptr(e->ty->pointee);
@@ -2128,6 +2295,19 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         case B_ADD:
         case B_SUB: {
             int lp = lt->kind == TY_PTR, rp = rt->kind == TY_PTR;
+            /* GNU C's label arithmetic: `&&b - &&a` is the distance in
+             * bytes and `&&a + n` an address n bytes on, as GCC computes
+             * them on its void * (whose size it takes as 1). Only on
+             * label addresses: a void * anywhere else is still refused
+             * below. */
+            if (lp && e->lhs->kind == EXPR_LABELADDR) {
+                lt = ty_ptr(ty_base(TY_CHAR, 0));
+                e->lhs = mk_cast(e->lhs, lt);
+            }
+            if (rp && e->rhs->kind == EXPR_LABELADDR) {
+                rt = ty_ptr(ty_base(TY_CHAR, 0));
+                e->rhs = mk_cast(e->rhs, rt);
+            }
             if (lp && rp) {
                 if (e->op == B_ADD)
                     sema_error_at(u, e->line, e->col,
@@ -2275,7 +2455,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
              * an assignment and never looks at this -- and on AVR, where
              * long[4] is sixteen bytes, it was a 16-byte buffer that a
              * 24-byte copy ran eight bytes past. */
-            if (is_copy && !target_va_list_is_pointer())
+            if (is_copy && !target_va_list_is_pointer() &&
+                target_get() != TARGET_XTENSA)
                 e->var_index = scope_add(sc, "<va_copy tag>",
                                          ty_array(ty_base(TY_LONG, 0), 4),
                                          NULL);
@@ -3133,12 +3314,39 @@ static struct ldf *const_fold_ld(const struct expr *e)
 }
 
 /* The statement list a switch dispatches over: its body, unwrapped when
- * it is the usual brace block. Case markers must live at THIS level. */
+ * it is the usual brace block. */
 struct stmt *switch_stmts(struct stmt *body)
 {
     if (body && body->kind == STMT_BLOCK)
         return body->body;
     return body;
+}
+
+static void switch_labels_walk(struct stmt *s, struct stmt ***out, int *n,
+                               int *cap)
+{
+    for (; s; s = s->next) {
+        if (s->kind == STMT_CASE || s->kind == STMT_DEFAULT) {
+            if (*n == *cap) {
+                *cap = *cap ? 2 * *cap : 16;
+                *out = xrealloc(*out, (size_t)*cap * sizeof **out);
+            }
+            (*out)[(*n)++] = s;
+        }
+        if (s->kind == STMT_SWITCH)
+            continue;               /* its markers are its own */
+        switch_labels_walk(s->body, out, n, cap);
+        switch_labels_walk(s->thn, out, n, cap);
+        switch_labels_walk(s->els, out, n, cap);
+    }
+}
+
+int switch_labels(struct stmt *body, struct stmt ***out)
+{
+    int n = 0, cap = 0;
+    *out = NULL;
+    switch_labels_walk(body, out, &n, &cap);
+    return n;
 }
 
 /* Flattens an initializer against its target type into (offset, type,
@@ -3436,12 +3644,11 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
                     struct expr *ch = xcalloc(1, sizeof *ch);
                     ch->kind = EXPR_NUM;
                     ch->line = init->line;
-                    /* element i: esz little-endian bytes (lit_encode) */
-                    unsigned long uv = 0;
-                    for (int b = 0; b < esz; b++)
-                        uv |= (unsigned long)(unsigned char)
-                              init->name[(size_t)i * (size_t)esz + (size_t)b]
-                              << (8 * b);
+                    /* element i: esz bytes in the target's order
+                     * (lit_encode) */
+                    unsigned long uv = (unsigned long)target_get_uint(
+                        (const unsigned char *)init->name +
+                        (size_t)i * (size_t)esz, esz);
                     ch->num = (long)uv;
                     ch->ty = ty->pointee;
                     init_push(out, off + i * esz, ty->pointee, ch);
@@ -3508,6 +3715,15 @@ static int flatten_sized(struct unit *u, struct func *f, struct scope *sc,
     return n;
 }
 
+/* GNU C: a static local's initializer may hold `&&label`, the address
+ * of a label of the function it is in -- g_label_fn, while that
+ * initializer is lowered. resolve_addr answers one with the function as
+ * *ft and the label in g_addr_label (its addend being the label's offset,
+ * which only codegen knows). */
+static struct func *g_label_fn;
+static const char *g_addr_label;
+static int g_addr_label_line;
+
 /* Resolve a constant-address expression (the value of a pointer slot in a
  * static initializer) to a target global/function plus a byte addend:
  * `&g`, a decayed array/function, `&arr[i]`, `&g.field`, `p + n`. Returns 1
@@ -3519,6 +3735,12 @@ static int resolve_addr(struct expr *e, struct global **gt,
         e = e->rhs;
     if (!e)
         return 0;
+    if (e->kind == EXPR_LABELADDR && g_label_fn) {
+        *ft = g_label_fn;
+        g_addr_label = e->name;
+        g_addr_label_line = e->line;
+        return 1;
+    }
     if (e->kind == EXPR_VAR && e->gref) { *gt = e->gref; return 1; }
     if (e->kind == EXPR_VAR && e->fref) { *ft = e->fref; return 1; }
     /* A dereference whose RESULT is an array loads nothing: an array
@@ -3615,8 +3837,12 @@ static int init_overhang(struct unit *u, int line, const char *what,
         /* a bit-field reaches as far as its bits do, not as far as its
          * declared type: AVR packs an `unsigned` (2 bytes) field into a
          * one-byte struct */
-        int w = v[k].bit_width ? (v[k].bit_off + v[k].bit_width + 7) / 8
-                               : ty_size(v[k].ty);
+        int w = v[k].bit_width
+              ? (ty_bf_mempos(v[k].bit_off, v[k].bit_width,
+                              8 * (v[k].bf_bytes ? v[k].bf_bytes
+                                                 : ty_size(v[k].ty))) +
+                 v[k].bit_width + 7) / 8
+              : ty_size(v[k].ty);
         if (v[k].off + w > end)
             end = v[k].off + w;
     }
@@ -3644,6 +3870,35 @@ static int bf_span(int nb, int off, int size)
     return off + nb > size ? size - off : nb;
 }
 
+/* `&&b - &&a` (each side perhaps cast, or offset by a constant): both
+ * labels of g_label_fn, and the constant part. */
+static int label_diff(struct expr *e, const char **lb, const char **la,
+                      int *line, long *add)
+{
+    struct global *gt = NULL;
+    struct func *fb = NULL, *fa = NULL;
+    long ab = 0, aa = 0;
+    while (e && e->kind == EXPR_CAST)
+        e = e->rhs;
+    if (!g_label_fn || !e || e->kind != EXPR_BINOP || e->op != B_SUB ||
+        !e->ty || e->ty->kind == TY_PTR)
+        return 0;
+    g_addr_label = NULL;
+    if (!resolve_addr(e->lhs, &gt, &fb, &ab) || gt || !g_addr_label)
+        return 0;
+    *lb = g_addr_label;
+    *line = g_addr_label_line;
+    g_addr_label = NULL;
+    if (!resolve_addr(e->rhs, &gt, &fa, &aa) || gt || !g_addr_label)
+        return 0;
+    *la = g_addr_label;
+    *add = ab - aa;
+    return 1;
+}
+
+static struct glabeldiff *g_ldiff;    /* lower_static_bytes' label diffs */
+static int g_nldiff, g_capldiff;
+
 static void lower_static_bytes(struct unit *u, int line, int size,
                                struct initelem *v, int n,
                                const char **out_bytes,
@@ -3652,15 +3907,43 @@ static void lower_static_bytes(struct unit *u, int line, int size,
     char *bytes = xcalloc(1, (size_t)(size ? size : 1));
     struct greloc *rel = NULL;
     int nrel = 0, caprel = 0;
+    g_nldiff = 0;
     for (int k = 0; k < n; k++) {
         struct expr *core = v[k].e;
         while (core && core->kind == EXPR_CAST)
             core = core->rhs;
+        /* GNU C: `&&b - &&a`, an integer only codegen knows -- written
+         * into the image by the driver, not relocated (glabeldiff). */
+        {
+            const char *lb, *la;
+            int ll;
+            long ad;
+            if (ty_is_integer(v[k].ty) && !v[k].bit_width &&
+                label_diff(core, &lb, &la, &ll, &ad)) {
+                if (g_nldiff == g_capldiff) {
+                    g_capldiff = g_capldiff ? g_capldiff * 2 : 8;
+                    g_ldiff = xrealloc(g_ldiff, (size_t)g_capldiff *
+                                                sizeof *g_ldiff);
+                }
+                struct glabeldiff *d = &g_ldiff[g_nldiff++];
+                memset(d, 0, sizeof *d);
+                d->off = v[k].off;
+                d->size = ty_size(v[k].ty);
+                d->fn = g_label_fn;
+                d->label = lb;
+                d->minus = la;
+                d->line = ll;
+                d->slot = d->minus_slot = -1;
+                d->addend = ad;
+                continue;
+            }
+        }
         /* The address of a global: `&g`, or an array/function global that
          * decayed to a pointer (`char **environ = embk_empty_env`). */
         struct global *gt = NULL;
         struct func *ft = NULL;
         long addend = 0;
+        g_addr_label = NULL;
         if (core && core->kind != EXPR_STR)
             resolve_addr(core, &gt, &ft, &addend);
         /* An integer exactly as wide as a pointer holds an address as
@@ -3687,6 +3970,10 @@ static void lower_static_bytes(struct unit *u, int line, int size,
             rel[nrel].gtarget = gt;
             rel[nrel].ftarget = ft;
             rel[nrel].addend = addend;
+            /* &&label: the function plus an offset codegen fills in */
+            rel[nrel].label = ft ? g_addr_label : NULL;
+            rel[nrel].label_line = g_addr_label_line;
+            rel[nrel].label_slot = -1;
             nrel++;
             continue;
         }
@@ -3694,7 +3981,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
         /* A complex slot: both parts folded in its element's format */
         if (ty_is_complex(v[k].ty)) {
             struct type *el = v[k].ty->celem;
-            enum ldf_fmt fmt = el->kind == TY_FLOAT ? LDF_FLOAT
+            /* (a four-byte double -- AVR's, RX's -- is binary32) */
+            enum ldf_fmt fmt = el->kind == TY_FLOAT || ty_size(el) == 4
+                             ? LDF_FLOAT
                              : el->kind == TY_DOUBLE ? LDF_DOUBLE
                              : ldf_target_fmt();
             struct ldf *re, *im;
@@ -3705,9 +3994,9 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "scaling by a real");
             int esz = ty_size(el);
             unsigned char pb[16];
-            ldf_encode(re, fmt, pb);
+            ldf_encode_target(re, fmt, pb);
             memcpy(bytes + v[k].off, pb, (size_t)esz);
-            ldf_encode(im, fmt, pb);
+            ldf_encode_target(im, fmt, pb);
             memcpy(bytes + v[k].off + esz, pb, (size_t)esz);
             continue;
         }
@@ -3719,12 +4008,18 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static long double initializer must be a "
                            "constant expression");
             unsigned char lb[16];
-            ldf_encode(x, ldf_target_fmt(), lb);
-            memcpy(bytes + v[k].off, lb, 16);
+            int lz = ldf_encode_target(x, ldf_target_fmt(), lb);
+            if (lz > sz)
+                lz = sz;
+            /* the format's bytes and no more: 8 where long double is a
+             * double (16 copied the rest of lb, never written, over the
+             * next member or past the image) */
+            memcpy(bytes + v[k].off, lb, (size_t)lz);
             continue;
         }
         /* A float/double slot: fold to the value, store its IEEE-754 bit
-         * pattern (4 bytes for float, 8 for double), little-endian. */
+         * pattern (4 bytes for float, 8 for double), in the target's
+         * byte order. */
         if (ty_is_float(v[k].ty)) {
             double dv;
             if (!const_fold_f(v[k].e, &dv))
@@ -3732,14 +4027,14 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "a static float initializer must be a constant "
                            "expression");
             unsigned long ubits;
-            if (v[k].ty->kind == TY_FLOAT) {
+            if (v[k].ty->kind == TY_FLOAT || sz == 4) {
+                /* float, or a double that is binary32 (AVR, RX) */
                 float fv = (float)dv; unsigned int u32;
                 memcpy(&u32, &fv, 4); ubits = u32;
             } else {
                 memcpy(&ubits, &dv, 8);
             }
-            for (int b = 0; b < sz; b++)
-                bytes[v[k].off + b] = (char)(ubits >> (8 * b));
+            target_put_uint((unsigned char *)bytes + v[k].off, sz, ubits);
             continue;
         }
         if (v[k].ty->kind == TY_INT128) {
@@ -3750,15 +4045,17 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                            "expression");
             if (v[k].bit_width) {
                 merge_bits(bytes + v[k].off,
+                           v[k].bf_bytes ? v[k].bf_bytes : 16,
                            bf_span(v[k].bf_bytes ? v[k].bf_bytes : 16,
                                    v[k].off, size), w,
                            v[k].bit_off, v[k].bit_width);
                 continue;
             }
-            for (int b = 0; b < 8; b++) {
-                bytes[v[k].off + b] = (char)(w.lo >> (8 * b));
-                bytes[v[k].off + 8 + b] = (char)(w.hi >> (8 * b));
-            }
+            /* the low half first little-endian, the high one big */
+            target_put_uint((unsigned char *)bytes + v[k].off +
+                            (target_big_endian() ? 8 : 0), 8, w.lo);
+            target_put_uint((unsigned char *)bytes + v[k].off +
+                            (target_big_endian() ? 0 : 8), 8, w.hi);
             continue;
         }
         long cv;
@@ -3768,14 +4065,15 @@ static void lower_static_bytes(struct unit *u, int line, int size,
                        "string literal, or the address of a global");
         if (v[k].bit_width) {
             merge_bits(bytes + v[k].off,
+                       v[k].bf_bytes ? v[k].bf_bytes : sz,
                        bf_span(v[k].bf_bytes ? v[k].bf_bytes : sz,
                                v[k].off, size),
                        w_make((unsigned long)cv, 0), v[k].bit_off,
                        v[k].bit_width);
             continue;
         }
-        for (int b = 0; b < sz; b++)
-            bytes[v[k].off + b] = (char)((unsigned long)cv >> (8 * b));
+        target_put_uint((unsigned char *)bytes + v[k].off, sz,
+                        (unsigned long)cv);
     }
     *out_bytes = bytes;
     *out_rel = rel;
@@ -4008,6 +4306,45 @@ static void need_atomic_object(struct unit *u, struct expr *e, struct type *t,
                 "bytes, not %s", e->lhs->name, ty_name(t));
 }
 
+/* An atomic builtin's memory order, for expr.atomic_mo: 1 + the
+ * __ATOMIC_* value when the argument folds to one, else 0 (seq_cst, the
+ * strongest, is always right). A compare-exchange's failure order is
+ * merged into its success order, as clang does: a failure that acquires
+ * makes a relaxed success acquire and a release one acq_rel, and a
+ * seq_cst failure makes it seq_cst. The __sync forms are all seq_cst, as
+ * clang has them -- lock_test_and_set too, which GCC documents as only an
+ * acquire. */
+static int atomic_order(const struct expr *e, enum atomic_kind ak,
+                        int is_sync)
+{
+    int at = -1, fail_at = -1;
+    long s = 5, f = -1;
+    switch (ak) {
+    case AK_LOAD_N: case AK_TEST_AND_SET: case AK_CLEAR: at = 1; break;
+    case AK_STORE_N: case AK_EXCHANGE_N: case AK_LOAD: case AK_STORE:
+        at = 2; break;
+    case AK_FETCH_OP: case AK_OP_FETCH: at = is_sync ? -1 : 2; break;
+    case AK_EXCHANGE: at = 3; break;
+    case AK_CMPXCHG_N: case AK_CMPXCHG: at = 4; fail_at = 5; break;
+    default: break;
+    }
+    if (at < 0)
+        return 0;
+    if (at >= e->nargs || !const_fold(e->args[at], &s) || s < 0 || s > 5)
+        return 0;
+    if (s == 1)
+        s = 2;                                  /* consume is acquire */
+    if (fail_at >= 0 && fail_at < e->nargs) {
+        if (!const_fold(e->args[fail_at], &f))
+            return 0;
+        if (f == 5)
+            s = 5;
+        else if (f == 1 || f == 2)
+            s = s == 0 ? 2 : s == 3 ? 4 : s;
+    }
+    return (int)s + 1;
+}
+
 /* Types a call to an atomic builtin (see atomic_builtin). */
 static void check_atomic_call(struct unit *u, struct func *f,
                               struct scope *sc, struct expr *e,
@@ -4036,6 +4373,7 @@ static void check_atomic_call(struct unit *u, struct func *f,
         sema_error_at(u, e->line, e->col, "%s takes %d arguments, not %d",
                 name, want, e->nargs);
     e->name = name;
+    e->atomic_mo = atomic_order(e, ak, is_sync);
 
     if (ak == AK_THREAD_FENCE || ak == AK_SIGNAL_FENCE) {
         e->ty = ty_base(TY_VOID, 0);
@@ -4086,6 +4424,13 @@ static void check_atomic_call(struct unit *u, struct func *f,
                         k + 1, name, ty_size(obj));
         }
     }
+    /* An eight-byte __sync compare-and-swap that is a libatomic call
+     * (target_atomic8_libcall) passes the expected value by address:
+     * irgen keeps it in a hidden local. */
+    if ((ak == AK_SYNC_VAL_CAS || ak == AK_SYNC_BOOL_CAS) &&
+        ty_size(obj) == 8 && target_atomic8_libcall())
+        e->var_index = scope_add(sc, "<atomic expected>",
+                                 ty_int_of_size(8, 1), NULL);
     switch (ak) {
     case AK_STORE_N: case AK_LOAD: case AK_STORE: case AK_EXCHANGE:
     case AK_SYNC_LOCK_RELEASE:
@@ -4310,6 +4655,279 @@ static int asm_resolve_reg_mips(struct unit *u, struct stmt *s,
     return ASM_REG_INVALID;
 }
 
+/* TriCore: "d", "r" and "g" a data register (-2), "a" and "m" an address
+ * register (-3: "m" holds the lvalue's address, written [%0]), "i" and
+ * "n" a constant; a register variable its register, an address register
+ * numbered 16 + n (tricore/irgen.c). */
+static int asm_resolve_reg_tricore(struct unit *u, struct stmt *s,
+                                   struct asm_operand *op, const char *c)
+{
+    int has_d = 0, has_a = 0, has_i = 0;
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int f, r = tcasm_reg(rn, (int)strlen(rn), &f);
+        if (r < 0 || f == 'e' || (f == 'd' && r > 7) ||
+            (f == 'a' && (r < 2 || r > 7)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "TriCore asm (use d0-d7 or a2-a7)", rn);
+        return f == 'a' ? 16 + r : r;
+    }
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'd') has_d = 1;
+        if (*p == 'a' || *p == 'm') has_a = 1;
+        if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+            has_i = 1;
+    }
+    if (has_i && !has_d && !has_a) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_d)
+        return -2;
+    if (has_a)
+        return -3;
+    return ASM_REG_INVALID;
+}
+
+/* LoongArch: the same three kinds of operand. A register variable must
+ * name a register irgen's pool hands out -- the caller-saved a0-a7 and
+ * t0-t8 ($r4-$r20) -- and the constant letters are gcc's LoongArch ones
+ * (I a signed 12-bit, K an unsigned 12-bit, J zero) as well as i and n. */
+static int asm_resolve_reg_la(struct unit *u, struct stmt *s,
+                              struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = laasm_gpr(rn, (int)strlen(rn));
+        if (!(r >= 4 && r <= 20))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "LoongArch asm (use a0-a7 or t0-t8)", rn);
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'm') has_r = 1;
+        if (*p == 'i' || *p == 'n' || *p == 'I' || *p == 'J' || *p == 'K')
+            has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
+/* Xtensa: "r", "a" (GCC's letter for the address registers, which are
+ * Xtensa's general ones) and "g" a register, "m" a register holding the
+ * lvalue's address (written `aN, 0`), "i", "n" and GCC's Xtensa constant
+ * letters I-P a constant. A register variable must name a register
+ * irgen's pool hands out: a2-a6 and a8-a13 -- not a0 or a1 (the return
+ * address and the stack pointer), a7 (the frame base under alloca) or
+ * a14/a15 (the code generator's scratch). */
+static int asm_resolve_reg_xtensa(struct unit *u, struct stmt *s,
+                                  struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = xtasm_gpr(rn, (int)strlen(rn));
+        if (!((r >= 2 && r <= 6) || (r >= 8 && r <= 13)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "Xtensa asm (use a2-a6 or a8-a13)", rn);
+        return r;
+    }
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'a' || *p == 'g' || *p == 'm') has_r = 1;
+        if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+            has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
+/* The common shape of the embedded resolvers: a register when any of
+ * `regs` is among the constraint's letters, else a folded constant when
+ * one of `imms` is, else nothing this target knows. */
+static int asm_resolve_reg_letters(struct asm_operand *op, const char *c,
+                                   const char *regs, const char *imms)
+{
+    int has_r = 0, has_i = 0;
+    for (const char *p = c; *p; p++) {
+        if (strchr(regs, *p)) has_r = 1;
+        if (strchr(imms, *p)) has_i = 1;
+    }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    return has_r ? -2 : ASM_REG_INVALID;
+}
+
+/* SPARC: "r" and "g" a register, "m" a register holding the lvalue's
+ * address (written `[%o0]`), "i", "n" and GCC's SPARC constant letters
+ * (I a signed 13-bit, J zero, K a sethi constant, L, M, N, O, P) a
+ * constant, and a digit the register of the output it names. A register
+ * variable must name a register irgen's pool hands out: %o0-%o5,
+ * %l0-%l5 or %i0-%i5 -- not a global, the stack or frame pointer, the
+ * return address or the code generator's scratch. */
+static int asm_resolve_reg_sparc(struct unit *u, struct stmt *s,
+                                 struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = spasm_gpr(rn, (int)strlen(rn));
+        if (!((r >= 8 && r <= 13) || (r >= 16 && r <= 21) ||
+              (r >= 24 && r <= 29)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "SPARC asm (use %%o0-%%o5, %%l0-%%l5 or %%i0-%%i5)", rn);
+        return r;
+    }
+    if (*c >= '0' && *c <= '9')
+        return -2;                       /* tied to an output: irgen's */
+    return asm_resolve_reg_letters(op, c, "rgm", "inIJKLMNOP");
+}
+
+/* PowerPC: "r", "b" (a base register other than r0, which no operand is
+ * ever given) and "g" a register, "m" a register holding the lvalue's
+ * address (written `0(rN)`), "i", "n" and GCC's PowerPC constant letters
+ * (I a signed 16-bit, K an unsigned one, L a shifted one, M, N, O, P) a
+ * constant, and a digit the register of the output it names. A register
+ * variable must name a register irgen's pool hands out: r3-r8 or
+ * r14-r30 -- not r0, r1, r2, r13, the code generator's scratch r9-r12,
+ * or r31 (the frame base under alloca). */
+static int asm_resolve_reg_ppc(struct unit *u, struct stmt *s,
+                               struct asm_operand *op, const char *c)
+{
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = ppcasm_gpr(rn, (int)strlen(rn));
+        if (!((r >= 3 && r <= 8) || (r >= 14 && r <= 30)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "PowerPC asm (use r3-r8 or r14-r30)", rn);
+        return r;
+    }
+    if (*c >= '0' && *c <= '9')
+        return -2;                       /* tied to an output: irgen's */
+    return asm_resolve_reg_letters(op, c, "rbgm", "inIJKLMNOP");
+}
+
+/* RX: "r" and "g" a register, "m" a register holding the lvalue's
+ * address (written `[rN]`), "i", "n" and GCC's RX constant
+ * constraints (Int08, Sint08, Sint16, Sint24, Uint04, and the I-P
+ * letters) a constant. A register variable must name a register irgen's
+ * pool hands out: r1-r4 or r6-r12 -- not r0 (the stack pointer), r5, r14
+ * or r15 (the code generator's scratch) or r13 (the frame base under
+ * alloca). */
+static int asm_resolve_reg_rx(struct unit *u, struct stmt *s,
+                              struct asm_operand *op, const char *c)
+{
+    int has_r = 0, has_i = 0;
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = rxasm_gpr(rn, (int)strlen(rn));
+        if (!((r >= 1 && r <= 4) || (r >= 6 && r <= 12)))
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "RX asm (use r1-r4 or r6-r12)", rn);
+        return r;
+    }
+    if (!strncmp(c, "Int08", 5) || !strncmp(c, "Sint08", 6) ||
+        !strncmp(c, "Sint16", 6) || !strncmp(c, "Sint24", 6) ||
+        !strncmp(c, "Uint04", 6))
+        has_i = 1;
+    else
+        for (const char *p = c; *p; p++) {
+            if (*p == 'r' || *p == 'g' || *p == 'm') has_r = 1;
+            if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+                has_i = 1;
+        }
+    if (has_i && !has_r) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_r)
+        return -2;
+    return ASM_REG_INVALID;
+}
+
+/* ColdFire: "d", "r" and "g" a data register (-2), "a" an address register
+ * and "m" one holding the lvalue's address, written `(%aN)` (-3), "i",
+ * "n" and GCC's m68k constant letters I-P a constant. A register variable
+ * must name a register irgen's pools hand out: d0-d7, a0 or a2-a5 -- not
+ * a1 (the lowering's own), a6 (the frame pointer) or a7 (the stack
+ * pointer). */
+static int asm_resolve_reg_coldfire(struct unit *u, struct stmt *s,
+                                    struct asm_operand *op, const char *c)
+{
+    int has_d = 0, has_a = 0, has_i = 0;
+    if (op->expr->kind == EXPR_VAR && op->expr->asm_reg) {
+        const char *rn = op->expr->asm_reg;
+        int r = cfasm_gpr(rn, (int)strlen(rn));
+        if (r < 0 || r == 9 || r >= 14)
+            sema_error_at(u, s->line, s->col,
+                    "register variable bound to '%s' is not supported for "
+                    "ColdFire asm (use d0-d7, a0 or a2-a5)", rn);
+        return r;
+    }
+    for (const char *p = c; *p; p++) {
+        if (*p == 'r' || *p == 'g' || *p == 'd') has_d = 1;
+        if (*p == 'a' || *p == 'm') has_a = 1;
+        if (*p == 'i' || *p == 'n' || (*p >= 'I' && *p <= 'P'))
+            has_i = 1;
+    }
+    if (has_i && !has_d && !has_a) {
+        long v;
+        if (const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+            return ASM_REG_IMM;
+        }
+        return ASM_REG_INVALID;
+    }
+    if (has_d)
+        return -2;
+    if (has_a)
+        return -3;
+    return ASM_REG_INVALID;
+}
+
 static int asm_resolve_reg(struct unit *u, struct stmt *s,
                            struct asm_operand *op, int is_out)
 {
@@ -4328,8 +4946,22 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         return asm_resolve_reg_ilp32(u, s, op, c, 0);
     if (target_get() == TARGET_RISCV32 || target_get() == TARGET_RISCV64)
         return asm_resolve_reg_ilp32(u, s, op, c, 1);
-    if (target_get() == TARGET_MIPS32)
+    if (target_is_mips())
         return asm_resolve_reg_mips(u, s, op, c);
+    if (target_get() == TARGET_LOONGARCH64)
+        return asm_resolve_reg_la(u, s, op, c);
+    if (target_get() == TARGET_TRICORE)
+        return asm_resolve_reg_tricore(u, s, op, c);
+    if (target_get() == TARGET_XTENSA)
+        return asm_resolve_reg_xtensa(u, s, op, c);
+    if (target_get() == TARGET_RX)
+        return asm_resolve_reg_rx(u, s, op, c);
+    if (target_get() == TARGET_COLDFIRE)
+        return asm_resolve_reg_coldfire(u, s, op, c);
+    if (target_get() == TARGET_SPARC32)
+        return asm_resolve_reg_sparc(u, s, op, c);
+    if (target_get() == TARGET_PPC32)
+        return asm_resolve_reg_ppc(u, s, op, c);
     for (const char *p = c; *p; p++) {           /* a fixed register wins */
         int r = asm_fixed_letter(*p);
         if (r >= 0)
@@ -4370,8 +5002,7 @@ static int case_cmp(const void *x, const void *y)
 }
 
 static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
-                       struct stmt *s_in, int in_loop, int in_switch,
-                       int at_sw_level)
+                       struct stmt *s_in, int in_loop, int in_switch)
 {
     /* Each statement is a recovery point: an error in one is reported and
      * the next is still checked. What a failed statement already added to
@@ -4398,12 +5029,12 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             break;
         case STMT_CASE:
         case STMT_DEFAULT:
-            if (!at_sw_level)
-                sema_error_at(u, s->line, s->col,
-                           "'%s' must appear directly in its switch body "
-                           "(labels inside a nested block are not "
-                           "supported)",
-                           s->kind == STMT_CASE ? "case" : "default");
+            /* anywhere in the switch's body, as C allows: a nested
+             * block, an if, a loop (Duff's device) -- switch_labels finds
+             * it there, and irgen emits its label where it stands */
+            if (!in_switch)
+                sema_error_at(u, s->line, s->col, "'%s' outside of a switch",
+                              s->kind == STMT_CASE ? "case" : "default");
             if (s->kind == STMT_CASE) {
                 check_expr(u, f, sc, s->expr);
                 need_integer(u, s->expr, "a case label");
@@ -4417,7 +5048,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             check_expr(u, f, sc, s->cond);
             need_integer(u, s->cond, "'switch'");
             struct stmt *list = switch_stmts(s->body);
-            check_stmt(u, f, sc, list, in_loop, 1, 1);
+            check_stmt(u, f, sc, list, in_loop, 1);
             /* duplicate labels and a second default are parse-time
              * errors, not a runtime coin flip about which one wins.
              * Whether there is any duplicate is asked of the sorted
@@ -4425,35 +5056,39 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
              * was the slowest thing in compiling a switch of 8000 cases.
              * Only when there is one does the pairwise walk run, so the
              * errors come out as they always did. */
+            struct stmt **lab;
+            int nlab = switch_labels(s->body, &lab);
             int ndefault = 0, ncase = 0, dup = 0;
-            for (struct stmt *a = list; a; a = a->next)
-                ncase += a->kind == STMT_CASE;
+            for (int i = 0; i < nlab; i++)
+                ncase += lab[i]->kind == STMT_CASE;
             if (ncase > 1) {
                 long *cv = xmalloc((size_t)ncase * sizeof *cv);
                 int k = 0;
-                for (struct stmt *a = list; a; a = a->next)
-                    if (a->kind == STMT_CASE)
-                        cv[k++] = a->cval;
+                for (int i = 0; i < nlab; i++)
+                    if (lab[i]->kind == STMT_CASE)
+                        cv[k++] = lab[i]->cval;
                 qsort(cv, (size_t)ncase, sizeof *cv, case_cmp);
                 for (k = 1; k < ncase && !dup; k++)
                     dup = cv[k] == cv[k - 1];
                 free(cv);
             }
-            for (struct stmt *a = list; a; a = a->next) {
+            for (int i = 0; i < nlab; i++) {
+                struct stmt *a = lab[i];
                 if (a->kind == STMT_DEFAULT && ++ndefault > 1)
                     sema_error_line(u, a->line,
                                "a switch can have only one 'default'");
                 if (a->kind != STMT_CASE || !dup)
                     continue;
-                for (struct stmt *b = a->next; b; b = b->next)
-                    if (b->kind == STMT_CASE && b->cval == a->cval)
-                        sema_error_line(u, b->line,
-                                   "duplicate case label %ld", b->cval);
+                for (int j = i + 1; j < nlab; j++)
+                    if (lab[j]->kind == STMT_CASE && lab[j]->cval == a->cval)
+                        sema_error_line(u, lab[j]->line,
+                                   "duplicate case label %ld", lab[j]->cval);
             }
+            free(lab);
             break;
         }
         case STMT_DO:
-            check_stmt(u, f, sc, s->body, 1, in_switch, 0);
+            check_stmt(u, f, sc, s->body, 1, in_switch);
             check_expr(u, f, sc, s->cond);
             if (ty_is_complex(s->cond->ty) && cx_lowering())
                 s->cond = cx_truth(s->cond);
@@ -4465,6 +5100,13 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 vla_prepare(u, f, sc, s->dty);   /* its size slots */
                 break;
             }
+            /* an automatic object lives on the stack, in RAM; only one
+             * with static storage can be in program memory */
+            if (!s->is_static && !s->is_extern &&
+                s->dty && s->dty->kind != TY_FUNC && ty_in_flash(s->dty))
+                sema_error_line(u, s->line, "'%s' is __flash and must be "
+                                "static: an automatic object is on the stack, "
+                                "in RAM", s->name);
             if (s->is_extern) {
                 /* block-scope extern: no storage here, external linkage. Register
                  * the unit global/function (safe now -- parsing is done, so the
@@ -4670,6 +5312,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->ty = s->dty;
                 g->is_static = 1;
                 g->is_const = s->obj_const;   /* a lookup table: .rodata */
+                flash_object(u, g);
                 /* `static __thread` inside a function is still one
                  * object per thread -- the scope decides who can NAME
                  * it, not how many there are. */
@@ -4683,6 +5326,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                  * whatever alignment .bss happened to have, and nothing
                  * said so. */
                 g->user_align = s->user_align;
+                g->section = s->section;      /* .noinit, .ccmram... */
                 g->defined = 1;
                 g->used = 1;
                 /* Aggregates arrive pre-flattened in s->inits; a scalar's
@@ -4707,9 +5351,23 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     snprintf(what, sizeof what, "'%s'", s->name);
                     g->fam_extra = init_overhang(u, s->line, what, s->dty,
                                                  iv, in, 1);
+                    g_label_fn = f;
                     lower_static_bytes(u, s->line, global_size(g), iv, in,
                                        &g->init_bytes, &g->relocs,
                                        &g->nrelocs);
+                    g_label_fn = NULL;
+                    if (g_nldiff) {
+                        g->ldiffs = xmalloc((size_t)g_nldiff *
+                                            sizeof *g->ldiffs);
+                        memcpy(g->ldiffs, g_ldiff,
+                               (size_t)g_nldiff * sizeof *g->ldiffs);
+                        g->nldiffs = g_nldiff;
+                    }
+                    for (int r = 0; r < g->nrelocs; r++)
+                        if (g->relocs[r].label)
+                            f->has_label_data = 1;
+                    if (g->nldiffs)
+                        f->has_label_data = 1;
                     g->init_len = global_size(g);
                     g->has_init = 1;
                 }
@@ -4774,6 +5432,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 check_expr(u, f, sc, a->in[i].expr);
                 a->in[i].reg = asm_resolve_reg(u, s, &a->in[i], 0);
             }
+            asm_tie_inputs(u, s);
             /* the template is assembled in irgen, once -2 (allocatable)
              * operands have been assigned registers */
             break;
@@ -4786,9 +5445,14 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 need_scalar(u, s->cond, "'if'");
                 warn_truth_shape(u, s->cond, "branch");
             }
-            check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
+            {
+                long cv;
+                s->cond_const = fold_is_exact(s->cond) &&
+                                const_fold(s->cond, &cv) ? (cv ? 2 : 1) : 0;
+            }
+            check_stmt(u, f, sc, s->thn, in_loop, in_switch);
             if (s->els)
-                check_stmt(u, f, sc, s->els, in_loop, in_switch, 0);
+                check_stmt(u, f, sc, s->els, in_loop, in_switch);
             break;
         case STMT_WHILE:
             check_expr(u, f, sc, s->cond);
@@ -4796,7 +5460,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 s->cond = cx_truth(s->cond);
             else
                 need_scalar(u, s->cond, "'while'");
-            check_stmt(u, f, sc, s->body, 1, in_switch, 0);
+            check_stmt(u, f, sc, s->body, 1, in_switch);
             break;
         case STMT_FOR: {
             /* `for (int i = ...)` scopes i to the loop, so sibling
@@ -4804,7 +5468,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             int mark = sc->n, prev = sc->block_start;
             sc->block_start = mark;
             if (s->initdecl)
-                check_stmt(u, f, sc, s->initdecl, in_loop, in_switch, 0);
+                check_stmt(u, f, sc, s->initdecl, in_loop, in_switch);
             if (s->init)
                 check_expr(u, f, sc, s->init);
             if (s->cond) { /* NULL = forever, left by 'break' */
@@ -4816,7 +5480,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             }
             if (s->step)
                 check_expr(u, f, sc, s->step);
-            check_stmt(u, f, sc, s->body, 1, in_switch, 0);
+            check_stmt(u, f, sc, s->body, 1, in_switch);
             for (int i = mark; i < sc->n; i++)
                 sc->vars[i].active = 0;
             sc->block_start = prev;
@@ -4825,7 +5489,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
         case STMT_BLOCK: {
             int mark = sc->n, prev = sc->block_start;
             sc->block_start = mark;
-            check_stmt(u, f, sc, s->body, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->body, in_loop, in_switch);
             for (int i = mark; i < sc->n; i++)
                 sc->vars[i].active = 0; /* the block closed */
             sc->block_start = prev;
@@ -4833,10 +5497,10 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
         }
         case STMT_LABEL:
             /* the labeled statement is checked in the label's own context */
-            check_stmt(u, f, sc, s->body, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->body, in_loop, in_switch);
             break;
         case STMT_EHREGION:
-            check_stmt(u, f, sc, s->body, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->body, in_loop, in_switch);
             check_expr(u, f, sc, s->expr);
             check_expr(u, f, sc, s->cond);
             if (!is_lvalue(s->expr) || s->expr->ty->kind != TY_PTR)
@@ -4856,7 +5520,7 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                             "typeinfo object", a->name);
                 a->ti->used = 1;
             }
-            check_stmt(u, f, sc, s->thn, in_loop, in_switch, 0);
+            check_stmt(u, f, sc, s->thn, in_loop, in_switch);
             break;
         case STMT_GOTO:
             /* target existence is validated function-wide at codegen */
@@ -4948,13 +5612,15 @@ static int stmt_returns(struct stmt *s)
          * last statement returning rules out. Anything reached earlier
          * either returns or falls through toward it. */
         struct stmt *list = switch_stmts(s->body);
+        struct stmt **lab;
+        int nlab = switch_labels(s->body, &lab);
         int has_default = 0;
         struct stmt *last = NULL;
-        for (struct stmt *a = list; a; a = a->next) {
-            if (a->kind == STMT_DEFAULT)
-                has_default = 1;
+        for (int i = 0; i < nlab; i++)
+            has_default |= lab[i]->kind == STMT_DEFAULT;
+        free(lab);
+        for (struct stmt *a = list; a; a = a->next)
             last = a;
-        }
         if (!has_default || has_own_break(list) || !last)
             return 0;
         return stmt_returns(last);
@@ -4999,6 +5665,35 @@ static void check_func(struct unit *u, struct func *f)
     struct scope sc = { 0, 0, 0, 0 };
     g_cx_sc = &sc;       /* complex lowering adds its temps here */
 
+    /* An interrupt handler on RISC-V or MIPS: the hardware calls it, so
+     * there is no caller to pass arguments -- they would be read out of
+     * whatever the interrupted code left in a0 -- and nobody to receive a
+     * result, which would be written over the interrupted code's a0. GCC
+     * and clang ignore the attribute with a warning; ignoring it here
+     * would return with `ret` into the middle of the interrupted code, so
+     * both are refused. (AVR's backend refuses the same two itself.) */
+    if (f->is_isr && (target_get() == TARGET_RISCV32 ||
+                      target_get() == TARGET_RISCV64 ||
+                      target_get() == TARGET_MIPS32)) {
+        if (f->nparams || f->is_varargs)
+            sema_error_line(u, f->line,
+                "interrupt handler '%s' takes parameters: the hardware "
+                "calls it, so nothing passes them, and they would be read "
+                "out of whatever the interrupted code left in the argument "
+                "registers", f->name);
+        if (f->ret_ty->kind != TY_VOID)
+            sema_error_line(u, f->line,
+                "interrupt handler '%s' returns a value: the interrupt "
+                "return goes back to the interrupted instruction, and "
+                "nothing there receives it -- it must return void",
+                f->name);
+        if (target_get() == TARGET_MIPS32 && !ISR_KIND(f->is_isr))
+            sema_error_line(u, f->line,
+                "'%s' is keep_interrupts_masked but not an interrupt "
+                "handler: the modifier needs __attribute__((interrupt))",
+                f->name);
+    }
+
     for (int i = 0; i < f->nparams; i++) {
         if (scope_find(&sc, f->params[i]) >= 0)
             sema_error_line(u, f->line,
@@ -5024,7 +5719,7 @@ static void check_func(struct unit *u, struct func *f)
             f->has_vm_params = 1;
         }
 
-    check_stmt(u, f, &sc, f->body, 0, 0, 0);
+    check_stmt(u, f, &sc, f->body, 0, 0);
 
     /* main is the exception the language makes: reaching its closing
      * brace returns 0 (C99 5.1.2.2.3), and irgen says so. Refusing it
@@ -5109,26 +5804,23 @@ static void check_func(struct unit *u, struct func *f)
      * pointer plus it, and sp is only ever 16-aligned (8 on AAPCS32):
      * Thumb and RISC-V put `char buf[64] __attribute__((aligned(64)))`
      * at whatever sp gave them, silently, and x86-64 and aarch64 refused
-     * it. An aggregate gets storage of its own instead (var_indirect);
-     * a scalar so aligned is refused by name. AVR keeps its own refusal
-     * of any aligned local. */
+     * it. Such a local gets storage of its own instead (var_indirect),
+     * a scalar as well as an aggregate: irgen reads and writes a scalar
+     * there rather than in its slot. One bound to a register by
+     * `register ... __asm__("r")` keeps the register. On AVR, whose
+     * stack promises no alignment at all, that is any aligned local. */
     f->var_indirect = NULL;
     f->var_ind_align = NULL;
-    for (int i = f->nparams; i < sc.n && target_get() != TARGET_AVR; i++) {
+    for (int i = f->nparams; i < sc.n; i++) {
         struct type *t = f->var_tys[i];
-        if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t))
+        if (sc.vars[i].g || sc.vars[i].fdecl || !t || ty_is_vla(t) ||
+            sc.vars[i].asm_reg)
             continue;
         int al = ty_align(t);
         if (f->var_aligns[i] > al)
             al = f->var_aligns[i];
         if (al <= target_stack_align())
             continue;
-        if (t->kind != TY_STRUCT && t->kind != TY_ARRAY)
-            sema_error_at(u, sc.vars[i].line, sc.vars[i].col,
-                          "'%s' needs %d-byte alignment and the stack only "
-                          "guarantees %d: supported for an array or a "
-                          "struct, not yet for a scalar", sc.vars[i].name,
-                          al, target_stack_align());
         if (!f->var_indirect) {
             f->var_indirect = xcalloc((size_t)sc.n, sizeof *f->var_indirect);
             f->var_ind_align = xcalloc((size_t)sc.n,
@@ -5266,6 +5958,29 @@ static void merge_decls(struct unit *u)
         /* naked on the prototype and not on the definition is how
          * FreeRTOS's ports write it */
         canon->is_naked |= f->is_naked;
+        /* An interrupt handler is one on any declaration -- a prototype
+         * without the attribute and a definition with it were compiled
+         * as an ordinary function, returning with `ret` -- and one kind:
+         * the return instruction depends on which. */
+        if (f->is_isr) {
+            if (canon->is_isr && canon->is_isr != f->is_isr)
+                sema_error_line(u, f->line,
+                           "'%s' is declared as a different kind of "
+                           "interrupt handler than on line %d", f->name,
+                           canon->line);
+            canon->is_isr = f->is_isr;
+        }
+        canon->cmse_entry |= f->cmse_entry;
+        /* no_instrument_function on any declaration: a header declares
+         * the function plainly and its definition carries the attribute
+         * (EmbTrace's own hooks, a clock) -- instrumenting one of those
+         * recursed through the hook forever */
+        canon->attr_no_instrument |= f->attr_no_instrument;
+        /* and noinline and always_inline likewise: GCC takes either from
+         * any declaration, and a definition after a plain prototype is
+         * the usual place for noinline -- which was inlined */
+        canon->attr_noinline |= f->attr_noinline;
+        canon->attr_always_inline |= f->attr_always_inline;
         f->absorbed = 1;
     }
 }
@@ -5279,6 +5994,7 @@ static void merge_globals(struct unit *u)
     for (struct global *g = u->globals; g; g = g->next) {
         if (g->absorbed)
             continue;
+        flash_object(u, g);
         struct global *canon = find_global(u, g->name);
         if (find_func(u, g->name))
             sema_error_line(u, g->line,
@@ -5358,6 +6074,34 @@ static void merge_globals(struct unit *u)
             canon->section = g->section;
         }
         g->absorbed = 1;
+    }
+}
+
+/* A cmse_nonsecure_entry function is entered from the Non-secure state
+ * through the SG veneer the linker builds from its __acle_se_ symbol, so
+ * it has to have one: internal linkage would leave nothing to build it
+ * from, and a function the Non-secure side cannot reach while the Secure
+ * side believes it is guarded is worse than a refusal. A variadic one is
+ * refused as clang refuses it: its arguments are on the Non-secure
+ * stack. It is kept like a `used` function -- nothing in this image need
+ * call it -- and never inlined, so its own epilogue is the only way out. */
+static void check_cmse_entries(struct unit *u)
+{
+    for (struct func *f = u->funcs; f; f = f->next) {
+        if (f->absorbed || !f->cmse_entry)
+            continue;
+        if (f->is_static)
+            sema_error_line(u, f->line, "cmse_nonsecure_entry function "
+                            "'%s' has internal linkage: the Non-secure state "
+                            "enters it through a veneer the linker makes from "
+                            "its global symbol", f->name);
+        if (f->is_varargs)
+            sema_error_line(u, f->line, "cmse_nonsecure_entry function "
+                            "'%s' is variadic, and its unnamed arguments would "
+                            "be on the Non-secure stack", f->name);
+        f->used = 1;
+        f->attr_used = 1;
+        f->attr_noinline = 1;
     }
 }
 
@@ -5455,6 +6199,7 @@ void sema_check(struct unit *u)
     merge_decls(u);
     decide_inline_only(u);
     check_aliases(u);
+    check_cmse_entries(u);
     merge_globals(u);
     check_econst_names(u);
     lower_globals(u);

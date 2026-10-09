@@ -46,16 +46,17 @@ static void u8(struct eh_buf *b, unsigned v)
     b->p[b->len++] = (unsigned char)v;
 }
 
+/* Fields in the target's byte order (an unwinder reads them natively). */
 static void u32(struct eh_buf *b, unsigned long v)
 {
-    for (int i = 0; i < 4; i++)
-        u8(b, (unsigned)(v >> (8 * i)) & 0xff);
+    need(b, 4);
+    target_put_uint(b->p + b->len, 4, v & 0xffffffffUL);
+    b->len += 4;
 }
 
 static void patch32(struct eh_buf *b, int at, unsigned long v)
 {
-    for (int i = 0; i < 4; i++)
-        b->p[at + i] = (unsigned char)((v >> (8 * i)) & 0xff);
+    target_put_uint(b->p + at, 4, v & 0xffffffffUL);
 }
 
 static void uleb(struct eh_buf *b, unsigned long v)
@@ -138,8 +139,9 @@ static void advance(struct eh_buf *b, int *at, int to, int code_align)
         u8(b, (unsigned)d);
     } else if (d < 65536) {
         u8(b, CFA_advance_loc2);
-        u8(b, (unsigned)d & 0xff);
-        u8(b, (unsigned)(d >> 8));
+        need(b, 2);
+        target_put_uint(b->p + b->len, 2, d);
+        b->len += 2;
     } else {
         u8(b, CFA_advance_loc4);
         u32(b, d);

@@ -48,7 +48,8 @@ input and target.
 Target-dependent behaviour is a question asked by name of
 `src/arch/target.h` (`target_ptr_size()`, `target_char_unsigned()`,
 `target_va_list_is_pointer()`, ...); the data model comes from
-`g_model[]` in `target.c`, one row per architecture
+`g_model[]` in `target.c`, one row per architecture, read from the target
+database in `src/targets/`
 ([D-012](decisions.md#d-012)). New target-dependent behaviour is a new
 function there, not a test of `target_get()` where it is needed. Such
 tests do remain outside `src/arch/`, in `src/parse/parse.c`,
@@ -353,7 +354,7 @@ driver sets it in this order:
    other options are parsed, so that `--version`, `-dumpmachine` and
    `--dump-predef` describe the requested target.
    `target_from_triple` looks the name up in `g_triples[]`, the explicit
-   table of accepted spellings; an unknown name is refused with
+   table of accepted spellings (the target database's `TRIPLE` rows); an unknown name is refused with
    `embcc: error: unknown target 'NAME'` and the list of known triples.
    Once the scan is done, the backend's "this operation calls a runtime
    helper" predicate is installed for the optimizer
@@ -361,7 +362,8 @@ driver sets it in this order:
    compiler with a configured default makes the same code as one given
    that target by `--target=`. Thumb, RISC-V and AArch64 have one;
    x86-64 and AVR have none.
-4. After all options, `arm_float_resolve` settles the Thumb FPU and
+4. After all options, the target's `options_done` hook (Thumb's
+   `thumb_options_done`, in `src/arch/thumb/options.c`) settles the FPU and
    float ABI from `-mfpu=`, `-mfloat-abi=` and an `-eabihf` triple.
 
 Everything downstream reads the result through `target.h`: the data

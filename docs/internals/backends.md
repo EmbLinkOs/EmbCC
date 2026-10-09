@@ -15,7 +15,7 @@ changing EmbCC. Register allocation, which all five share, is in
 
 | Path | Contents |
 |---|---|
-| `target.c`, `target.h` | the target model: triples, data model, ABI questions, relocation kinds |
+| `target.c`, `target.h` | the target model: triples and data model (read from the target database, `src/targets/`), ABI questions, relocation kinds |
 | `backend.h` | the contract a backend implements |
 | `code.c`, `code.h` | the machine-code buffer every encoder writes into |
 | `predef.c`, `predef.h` | which predefined-macro table the target uses |
@@ -28,6 +28,8 @@ changing EmbCC. Register allocation, which all five share, is in
 | `riscv32/`, `riscv64/` | the two RISC-V predefined-macro tables only |
 | `mips/` | MIPS32r2 (mipsel, o32): `codegen.c`, `emit.c`, `asm.c`, `irgen.c` |
 | `mips32/` | its predefined-macro tables |
+| `loongarch/` | LoongArch64 (LP64S): `codegen.c`, `emit.c`, `asm.c`, `irgen.c` |
+| `loongarch64/` | its predefined-macro tables |
 | `avr/` | AVR (ATmega328P): `codegen.c`, `emit.c`, `asm.c`, `irgen.c`, `predef*.c` |
 
 Each `irgen.c` holds the target's share of IR generation: `va_arg`,
@@ -48,14 +50,15 @@ A target has three independent dimensions: the architecture
 `TARGET_RISCV32`, `TARGET_RISCV64`, `TARGET_AVR`, `TARGET_MIPS32`), the operating system
 (`enum target_os`: none, EmbLinkOS, Linux, Darwin, Windows), and the
 object format (`enum target_fmt`: ELF, Mach-O, COFF). The accepted
-triples are an explicit table, `g_triples[]` in `target.c`, not a cross
+triples are an explicit table, the `TRIPLE` rows of the target database
+(`src/targets/<family>.def`, read into `g_triples[]` in `target.c`), not a cross
 product, so a combination that does not exist cannot be accepted by
 accident. Each row is marked canonical (the spelling `-dumpmachine` and
 diagnostics print) or an alias. A name not in the table is refused.
 
-The Thumb rows also carry the sub-architecture: ARMv7-M, ARMv7E-M
-(`thumb_em`), or ARMv8-M Mainline (`g_thumb_arch` 8), and whether the
-name was an `-eabihf` one. These are a level on one target, not separate
+The ARM rows also carry the sub-architecture (ARMv7-M, ARMv7E-M, ARMv8-M
+Mainline and Baseline, ARMv6-M, ARMv7-A) and whether the name is an
+`-eabihf` one, and a MIPS row its byte order. These are a level on one target, not separate
 targets, because the data model and calling convention are the same.
 
 When no `--target=` is given, `target_apply_default()` applies, in order:
@@ -64,8 +67,8 @@ When no `--target=` is given, `target_apply_default()` applies, in order:
 
 ### The data model
 
-`g_model[]` holds one row per architecture, and each question has a
-function:
+`g_model[]` holds one row per architecture, the `DATA_MODEL` rows of the
+target database, and each question has a function:
 
 | Function | x86-64 | AArch64 | Thumb | RV32 | RV64 | AVR | MIPS32 |
 |---|---|---|---|---|---|---|---|
@@ -135,17 +138,23 @@ way that relocation type's linker reads it back.
 
 ### Adding a target
 
-1. A row in `g_model[]`, an answer in every `switch` in `target.c` (the
-   build fails until each is given), rows in `g_triples[]`, and the
-   relocation mappings.
+1. Its family file in the target database, `src/targets/<family>.def`,
+   with a `DATA_MODEL` row and its `TRIPLE` rows, and the file's line in
+   `src/targets/targets.def`. Then an answer in every `switch` in
+   `target.c` (the build fails until each is given), and the relocation
+   mappings.
 2. A directory with `codegen.c`, `emit.c` and `irgen.c`, and a
-   `codegen_unit_*` entry point the driver calls.
-3. A predefined-macro table from `tools/gen-predef.sh` (below).
-4. An encoding referee for `emit.c` (see [Encoders and their
+   `codegen_unit_*` entry point.
+3. Its row in the backend registry, `src/arch/backends.c` (see [The
+   backend registry](#the-backend-registry)), and its GCC `-m` options in
+   `src/arch/<arch>/options.c`. The driver reads the row; it has no
+   per-target chain to extend.
+4. A predefined-macro table from `tools/gen-predef.sh` (below).
+5. An encoding referee for `emit.c` (see [Encoders and their
    referees](#encoders-and-their-referees)).
-5. A QEMU harness under `tests/harness/<arch>/`, and the target in the
+6. A QEMU harness under `tests/harness/<arch>/`, and the target in the
    test suite. See [Testing](testing.md).
-6. A new source file also has to be added to the build lists, including
+7. A new source file also has to be added to the build lists, including
    `EMBLS_SRCS`; otherwise `make test` fails at its build step.
 
 ## Predefined macros
@@ -201,12 +210,47 @@ generated tables cannot know:
 `tools/gen-predef.sh --reference ARCH` when the reference compiler is
 installed.
 
+## The backend registry
+
+`src/arch/backends.c` has one row per `enum target_arch` (a `struct
+backend_desc`, declared in `backend.h`), holding what the driver needs to
+know about the code generator behind it:
+
+| Field | What it says |
+|---|---|
+| `family` | The family's name in messages (`"RX"`, `"PowerPC"`) |
+| `codegen` | The code generator's entry point (below) |
+| `ra_at_o0` | The register allocator also runs at `-O0`, for each expression's temporaries (`EMBCC_O0_NORA=1` turns it off) |
+| `op_calls_helper` | Whether an IR instruction becomes a runtime-helper call on this target, which the optimizer asks; `NULL` for none |
+| `unwind_unwritten` | The unwind tables the target needs and EmbCC does not write, as a refusal names them (`"RISC-V .eh_frame"`); `NULL` where `eh_emit` writes them |
+| `cxx_exceptions` | Whether a C++ unit may use exceptions: `BACKEND_CXX_EXC_OK`, `_NONE`, or `_BIG_ENDIAN` (MIPS64) |
+| `firmware` | The driver links firmware for it with embld, and its file-scope asm blocks and naked functions are read by the `.s` assembler |
+| `ld_scripts` | embld lays out a GNU linker script for it (`-T`) |
+| `call_insn`, `call_delay_slot` | A naked function's argument-less call, and whether a `nop` fills a delay slot after it (SPARC) |
+| `sym_prefix` | What a C name is called in the object and in assembly (`_` on RX) |
+| `imm_prefixed` | An asm operand that is a constant is written `#5` (RX, ColdFire) |
+| `text_p2align` | The alignment of a naked function's body (AVR: 1) |
+| `no_asm_text` | Why `-S` writes no text for it, as the refusal says; `NULL` when it does |
+| `option` | The target's own command-line options, in `src/arch/<arch>/options.c`: returns 1 when it handled the argument (accepted it, or refused it by name), 0 to let the driver try the rest. Each handler lists its options as an `exact` and a `prefix` table, checked with `option_listed()` |
+
+`backend_get(arch)` returns the row, and stops the compiler if a target
+has none. The driver selects from the row the code generator, the helper predicate,
+the unwind and exception refusals, whether and how it links firmware, how
+a naked function is written out, and whether `-S` has text. Before the registry,
+these were chains of `if (ta == TARGET_...)` in the driver, nine of them
+for the unwind refusals alone, and a new backend had to extend each one.
+More of the driver's per-target knowledge moves into the row as the
+redesign proceeds ([Redesign](redesign.md)).
+
 ## The backend contract
 
 `backend.h` declares one entry point per backend, all with the same
 signature: `codegen_unit` (x86-64), `codegen_unit_arm64`,
 `codegen_unit_thumb`, `codegen_unit_riscv` (both widths),
-`codegen_unit_mips` and `codegen_unit_avr`. Each takes the optimized `struct ir_unit` and
+`codegen_unit_mips` (both widths), `codegen_unit_loongarch`,
+`codegen_unit_tricore`, `codegen_unit_xtensa`, `codegen_unit_ppc`,
+`codegen_unit_rx`, `codegen_unit_sparc`, `codegen_unit_coldfire` and
+`codegen_unit_avr`. Each takes the optimized `struct ir_unit` and
 returns:
 
 - the unit's `.text` in a `struct code`, with each function's
@@ -303,6 +347,8 @@ bytes, with an LLVM or GNU tool.
 | RISC-V `asm.c` | `tests/golden/riscv-asm.sh` | `tools/rvasmcheck` | `llvm-mc -mattr=+m` | bytes |
 | MIPS `emit.c` | `tests/golden/mips-encoding.sh` | `tools/mipscheck` (`--vocab`, `--li`, `--refuse`) | `llvm-mc -triple=mipsel-unknown-elf -mcpu=mips32r2 -show-encoding` | each word, every register in every field; `--li` executes `mips_li` sequences; `--refuse` checks the range checks fire |
 | MIPS `asm.c` | `tests/golden/mips-asm.sh` | `tools/mipsasmcheck` | `llvm-mc` | bytes; and `-S` reassembled by llvm-mc against `-c`'s object |
+| LoongArch `emit.c` | `tests/golden/loongarch-encoding.sh` | `tools/lacheck` (`--vocab`, `--li`, `--run-li`, `--refuse`) | `llvm-mc --triple=loongarch64 -show-encoding` | each word, every register in every field; `--li` against llvm-mc's `li.d`; `--run-li` executes the sequences; `--refuse` checks the range checks fire |
+| LoongArch `asm.c` | `tests/golden/loongarch-asm.sh` | `tools/laasmcheck` | `llvm-mc` | each statement's words, pseudos included; and `-S` reassembled |
 | AVR `emit.c` | `tests/golden/avr-encoding.sh` | `tools/avrcheck` | `llvm-mc -triple=avr -mcpu=atmega328p` | bytes for the vocabulary; PC-relative forms disassembled and compared as text; `--writes` checks the decoder `avr_insn_writes` |
 | AVR `asm.c` | `tests/golden/avr-asm.sh` | `tools/avrasmcheck` | `llvm-mc` | bytes; PC-relative forms as text |
 
@@ -857,9 +903,14 @@ written with `wreg`/`wr`/`wrote`; `rd64`/`wr64` handle register pairs.
   bytes) subtracts the size rounded to 8 from `sp`.
 - **Byte swaps** arrive as shifts and masks: IR generation emits no
   `IR_BSWAP` for ARMv7-M.
-- **Refused**: computed `goto`, exception landing pads, 128-bit values,
-  `long double` operations the target lacks, and anything else not
-  handled, with the backend's refusal message. `IR_UD2` is `udf #0`.
+- **Computed goto**: `&&label` is pc-relative with no relocation,
+  `movw`/`movt rD, #(label | 1) - (pc)` then `add rD, pc` (in ARM state
+  `add rD, pc, rD` and no Thumb bit; on ARMv6-M and v8-M Baseline the
+  distance is a literal-pool word), patched once the label is placed;
+  `goto *p` is `bx p`.
+- **Refused**: exception landing pads, 128-bit values, `long double`
+  operations the target lacks, and anything else not handled, with the
+  backend's refusal message. `IR_UD2` is `udf #0`.
 
 ### Frame layout
 
@@ -923,7 +974,7 @@ an aggregate). A variadic call always uses the base convention.
 `pcs("aapcs")` selects the base convention for one function;
 `pcs("aapcs-vfp")` without an FPU is an error.
 
-**Float ABI selection** (`arm_float_resolve` in the driver):
+**Float ABI selection** (`thumb_options_done`, `src/arch/thumb/options.c`):
 `-mfloat-abi=soft` (the default) emits no FPU instructions;
 `softfp` uses the FPU with the base convention; `hard` uses the FPU and
 AAPCS-VFP. `-mfpu=` accepts `fpv4-sp-d16` and `fpv5-d16` (ARMv7E-M; the
@@ -1132,7 +1183,10 @@ Operands are read with `rdr` and written with `wreg`/`wrote`;
 - **Byte swaps** are `IR_BSWAP` only at RV64; at RV32 IR generation
   builds them from shifts and masks.
 - **Block copies** are straight-line up to 2040 bytes and a loop beyond.
-- **Refused**: computed `goto` and 128-bit values. `IR_UD2` is `unimp`.
+- **Computed goto**: `&&label` is `auipc`/`addi` (never compressed)
+  patched with the label's distance, no relocation; `goto *p` is
+  `jalr zero, 0(p)`.
+- **Refused**: 128-bit values. `IR_UD2` is `unimp`.
 
 **32-bit values at RV64.** The psABI keeps a 32-bit value in a register
 as its sign extension, unsigned values included (`0xffffffffu` is all
@@ -1318,8 +1372,11 @@ differences below.
 - **Select** is `movn`. **Byte swap** is `wsbh` and `rotr`.
 - **`IR_ALLOCA`** rounds to 16 and keeps `sp` 16-aligned, and the frame is
   addressed from `fp` in such a function.
-- **Refused**: computed `goto`, `IR_SWITCH` (`target_jump_tables()` is
-  false for MIPS), `IR_FRAMEADDR`, 128-bit values.
+- **Computed goto**: `&&label` is the function's own address as
+  `IR_FADDR` takes it (`lui`/`addiu`, or MIPS64's four pieces) plus the
+  label's offset as the relocation's addend; `goto *p` is `jr p` and a
+  `nop`.
+- **Refused**: `IR_FRAMEADDR`, 128-bit values.
 
 ### Frame and calling convention
 
@@ -1368,6 +1425,43 @@ inputs and drops it and `.reginfo`, and refuses the GOT and gp-relative
 relocations by name. `-Tstack` emits `li sp` and a `jr` to the entry
 through `$t9`.
 
+## LoongArch64
+
+`src/arch/loongarch/codegen.c`, entry point `codegen_unit_loongarch`, for
+`loongarch64-unknown-elf`: LA64, LP64S (soft float). The facts it rests on
+are in [the LoongArch64 plan](loongarch64-plan.md). The file began as a
+copy of RV64's code generator, because the LP64 calling conventions are
+the same rule for rule, with the RV32 machinery removed (register pairs,
+64-bit-at-RV32 lowering, RV32's long double, the C extension) and every
+instruction re-selected; a copy, so that nothing here can move RISC-V.
+
+- **Registers.** t0, t1, t2, t4, t5 and t6 are the scratches (t6 only for
+  sp plus a far offset); the allocator's pool is a0-a7, t3, t7, t8, then
+  fp and s0-s8. `r21` and `tp` are never named. A function with a VLA
+  addresses its frame from fp.
+- **Immediates.** addi, slti, sltui, the loads and stores take a signed
+  12-bit field; andi, ori and xori an unsigned one, so `la_imm_foldable`
+  folds an AND/OR/XOR constant only in 0..4095, `not` is `nor rd, rj,
+  zero`, and an alloca rounds down with two shifts. Constants are
+  LoongArchMatInt's sequences (`la_li`).
+- **32-bit values** stay sign-extended (`sext_map`, `rd32`), as at RV64;
+  div.w/mod.w/div.wu/mod.wu read their operands through `rd32` because
+  they are undefined otherwise.
+- **Branches** are emitted short (beq-family +-128 KiB, beqz/bnez +-4
+  MiB); a function in which one does not reach is generated again with
+  that one the long form (the inverse branch over a `b`).
+- **Calls** are `bl` (`R_LARCH_B26`), within the unit patched directly;
+  addresses `pcalau12i`/`addi.d` (`RK_LA_PCALA_HI20`/`LO12`, both against
+  the symbol). A jump table is found by `pcaddi` and indexed by `alsl.d`.
+- **Select** is maskeqz/masknez/or; **bswap** is revb plus a bstrpick.
+- **Atomics** are `am*_db` and `ll`/`sc` loops between `dbar 0`s; a one-
+  or two-byte one is an ll.w/sc.w loop on its word (`la_atomic_narrow`).
+- **Inline asm** is substituted in `loongarch/irgen.c` and assembled by
+  `loongarch/asm.c`; the operand moves are RISC-V's.
+
+`tools/lacheck` and `tools/laasmcheck` referee `emit.c` and `asm.c`
+against llvm-mc (tests/golden/loongarch-encoding.sh, loongarch-asm.sh).
+
 ## AVR
 
 `src/arch/avr/codegen.c`, entry point `codegen_unit_avr`. Target `avr`
@@ -1415,9 +1509,13 @@ with it.
 - **Refused** with the backend's message: 128-bit values, a memory
   access wider than four bytes, a VLA, an exception region, an aligned
   local, returns wider than 8 bytes, and every operation without a
-  lowering by its IR name (`switch`, `igoto`, `labeladdr`, `bswap`,
-  atomics wider than one byte). IR generation does not emit `IR_BSWAP`
-  for AVR; a byte swap arrives as shifts and masks.
+  lowering by its IR name (`switch`, `bswap`, atomics wider than one
+  byte). IR generation does not emit `IR_BSWAP` for AVR; a byte swap
+  arrives as shifts and masks.
+- **Computed goto**: `&&label` is a word address, as a function pointer
+  is: `ldi lo8(gs(f+L))`, `ldi hi8(gs(f+L))` against the function's own
+  symbol with the label's byte offset `L` as the addend; `goto *p` loads
+  `Z` and is `ijmp`.
 
 The compiler never emits `lpm`: the linker places `.rodata` in the data
 segment, and the startup code copies `.data` and `.rodata` from flash.

@@ -1,0 +1,90 @@
+/* 32-bit ARM, the Cortex-M profiles and ARMv7-A: the triples that name
+ * it and its data model. Part of the target database;
+ * src/targets/targets.def says how a row reads. */
+
+/* AAPCS (32-bit, EABI): ILP32, unsigned char and wchar_t, and a
+ * long double that is an ordinary IEEE double -- checked against
+ * clang -target thumbv7m-none-eabi -dM, which gives
+ * __SIZEOF_LONG_DOUBLE__ 8 and __LDBL_MANT_DIG__ 53. long long
+ * stays 8, and is 8-ALIGNED, which is where a 32-bit ABI most
+ * often surprises: __BIGGEST_ALIGNMENT__ is 8, not 4. */
+DATA_MODEL(THUMB, .ptr = 4, .lng = 4, .it = 4, .dbl = 8, .ldbl = 8,
+           .char_uns = 1, .wchar_uns = 1, .int128 = 0, .maxal = 0)
+
+/* ARMv7-M, the Cortex-M line. Freestanding is the only thing it can
+ * be: a microcontroller has no operating system under the code, so
+ * there is no `thumbv7m-linux` row to add later and no hosted
+ * spelling of this target that would mean anything. `-none-eabi` is
+ * the canonical name because that is what every other toolchain
+ * calls it and what a project's existing --target= string will say.
+ *
+ * v7em (Cortex-M4/M7) is the same instruction set plus DSP and an
+ * optional FPU; it is accepted as a name now and will differ from
+ * v7m only once -mfpu selects hardware floating point. */
+TRIPLE("thumbv7m-none-eabi",        THUMB,       NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("thumbv7m",                  THUMB,       NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("thumbv7em-none-eabi",       THUMB,       NONE,    ELF,   CANONICAL, ARM_V7EM,     PLAIN)
+TRIPLE("thumbv7em",                 THUMB,       NONE,    ELF,   ALIAS,     ARM_V7EM,     PLAIN)
+TRIPLE("armv7em-none-eabi",         THUMB,       NONE,    ELF,   ALIAS,     ARM_V7EM,     PLAIN)
+TRIPLE("armv7m-none-eabi",          THUMB,       NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("arm-none-eabi",             THUMB,       NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+
+/* ARMv6-M: Cortex-M0, M0+ and M1. The same data model and AAPCS32
+ * again, so a level on this target (6); what changes is that the
+ * instruction set is Thumb-1 plus BL, MRS, MSR and the barriers, and
+ * that an unaligned access faults. ARMv8-M Baseline (Cortex-M23) is a
+ * different subset -- it has CBZ, MOVW and the divides -- and stays
+ * refused until it is selected for. */
+TRIPLE("thumbv6m-none-eabi",        THUMB,       NONE,    ELF,   CANONICAL, ARM_V6M,      PLAIN)
+TRIPLE("thumbv6m",                  THUMB,       NONE,    ELF,   ALIAS,     ARM_V6M,      PLAIN)
+TRIPLE("armv6m-none-eabi",          THUMB,       NONE,    ELF,   ALIAS,     ARM_V6M,      PLAIN)
+
+/* ARMv8-M Baseline: Cortex-M23, the low end of ARMv8-M. ARMv6-M's
+ * instruction set and data model plus the divides, the exclusives,
+ * MOVW/MOVT, CBZ/CBNZ, B.W and the security extension, so it is
+ * level 6 with a flag (g_thumb_v8b): sub-architecture ARM_V8M_BASE. */
+TRIPLE("thumbv8m.base-none-eabi",   THUMB,       NONE,    ELF,   CANONICAL, ARM_V8M_BASE, PLAIN)
+TRIPLE("thumbv8m.base",             THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_BASE, PLAIN)
+TRIPLE("armv8m.base-none-eabi",     THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_BASE, PLAIN)
+
+/* ARMv8-M Mainline: Cortex-M33, the RTOS requirements' third target,
+ * and the RP2350's core. The same data model and the same AAPCS32 as
+ * ARMv7-M, so it is a LEVEL on this target and not a new one (see
+ * g_thumb_arch): sub-architecture ARM_V8M_MAIN, which target.c turns
+ * into level 8.
+ *
+ * The DSP extension and the FPU are what -mcpu/-mfpu select, exactly
+ * as on v7em; the security extension (TrustZone-M) is -mcmse, for the
+ * Secure side, and embld mints the secure gateway veneers. */
+TRIPLE("thumbv8m.main-none-eabi",   THUMB,       NONE,    ELF,   CANONICAL, ARM_V8M_MAIN, PLAIN)
+TRIPLE("thumbv8m.main",             THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
+TRIPLE("thumbv8m-none-eabi",        THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
+TRIPLE("armv8m.main-none-eabi",     THUMB,       NONE,    ELF,   ALIAS,     ARM_V8M_MAIN, PLAIN)
+
+/* The hard-float spellings, as LLVM and Rust name them: the part's
+ * FPU (FPv4-SP-D16 on a Cortex-M4F, FPv5-SP-D16 on a Cortex-M33) and
+ * floating point passed in its registers. These are canonical names
+ * of their own (HF), so -dumpmachine and the runtime's directory say which
+ * convention a build uses -- a hard-float and a soft-float object do
+ * not link, so their runtimes cannot share a name. -mfloat-abi= and
+ * -mfpu= still override what the name implies. */
+TRIPLE("thumbv7em-none-eabihf",     THUMB,       NONE,    ELF,   CANONICAL, ARM_V7EM,     HF)
+
+/* ARMv7-A in ARM state: a Cortex-A (A7, A8, A9, A15), or a Cortex-R
+ * running A32. The same ILP32 data model and AAPCS32 as the Cortex-M
+ * levels, so a level of this target and not a new one; what differs
+ * is the instruction set the encoder writes (src/arch/thumb/a32.c,
+ * docs/internals/arm-a32-plan.md) and that base ARMv7-A has no
+ * divide. `armv7-none-eabi` is clang's spelling of the same thing. */
+TRIPLE("armv7a-none-eabi",          THUMB,       NONE,    ELF,   CANONICAL, ARM_V7A,      PLAIN)
+TRIPLE("armv7a",                    THUMB,       NONE,    ELF,   ALIAS,     ARM_V7A,      PLAIN)
+TRIPLE("armv7-none-eabi",           THUMB,       NONE,    ELF,   ALIAS,     ARM_V7A,      PLAIN)
+TRIPLE("armv7a-unknown-none-eabi",  THUMB,       NONE,    ELF,   ALIAS,     ARM_V7A,      PLAIN)
+
+/* ...with VFP and the hard-float convention: -mfpu=vfpv3-d16 and
+ * -mfloat-abi=hard unless a flag says otherwise. */
+TRIPLE("armv7a-none-eabihf",        THUMB,       NONE,    ELF,   CANONICAL, ARM_V7A,      HF)
+TRIPLE("armv7a-unknown-none-eabihf", THUMB,      NONE,    ELF,   ALIAS,     ARM_V7A,      HF)
+
+/* ARMv8-M Mainline with the hard-float convention (see thumbv7em-none-eabihf). */
+TRIPLE("thumbv8m.main-none-eabihf", THUMB,       NONE,    ELF,   CANONICAL, ARM_V8M_MAIN, HF)

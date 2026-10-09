@@ -40,8 +40,10 @@ its stack slot.
 
 Do not optimize. This is the default.
 
-The IR optimizer does not run at all, so `-f` pass options have no effect
-at this level. Every source variable -- every local and parameter --
+The IR optimizer does not run, so `-f` pass options have no effect at
+this level. The one exception is the inliner, which copies in each call to
+an `always_inline` function and nothing else, as GCC and Clang do at
+`-O0`. Every source variable -- every local and parameter --
 lives in its stack slot and is stored there by every assignment, so it
 is in memory at all times, which is what a debugger wants (see
 [Debugging](debugging.md)).
@@ -140,16 +142,24 @@ Register allocation and tail calls are the same as at `-O2`.
 
 Accepted, and identical to `-Os`.
 
+### `-Og`
+
+Optimize for debugging: `-O1`, with every source variable kept in its
+stack slot, where a debugger reads it. See
+[Debugging](debugging.md#optimized-code).
+
+### `-Ofast`
+
+The same as `-O3`. GCC's `-Ofast` adds `-ffast-math`, which EmbCC does
+not do.
+
 ### Spellings EmbCC does not accept
 
-`-Og`, `-Ofast` and any level above 3 are refused:
+Any level above 3 is refused:
 
 ```text
-embcc: unknown optimization flag '-Og'
+embcc: unknown optimization flag '-O4'
 ```
-
-There is no "optimize for debugging" level. Use `-O0` with `-g`; see
-[Debugging](debugging.md#optimized-code).
 
 ### Combining `-O` options
 
@@ -178,7 +188,7 @@ the command line: `-fno-sccp -O2` and `-O2 -fno-sccp` are the same.
 | Attribute inference, read-only `static` propagation | | yes | yes | yes |
 | Register allocation, tail calls (code generator) | | yes | yes | yes |
 | `gcse`, `pre`, `tail-recursion`, `idiom` | | | yes | yes |
-| `inline` | | single caller or `always_inline` | yes | yes, budget 6 |
+| `inline` | `always_inline` only | single caller or `always_inline` | yes | yes, budget 6 |
 | `vectorize` | | | x86-64 only | |
 | `unroll`, `switch-thread` | | | yes | |
 | 16-byte function alignment (x86-64, AArch64) | yes | yes | yes | |
@@ -188,7 +198,7 @@ the command line: `-fno-sccp -O2` and `-O2 -fno-sccp` are the same.
 ### `-fNAME`, `-fno-NAME`
 
 Turn the optimizer pass `NAME` on or off. `NAME` is one of the
-seventeen names below. The level sets each pass's default, and an
+eighteen names below. The level sets each pass's default, and an
 explicit option overrides the level wherever it appears on the command
 line.
 
@@ -245,6 +255,7 @@ The table lists every pass. The entries that follow describe each one.
 | `unroll` | `-O2` | Loop unrolling |
 | `pre` | `-O2`, `-Os` | Partial redundancy elimination |
 | `switch-thread` | `-O2` | State machines jump straight to the next case |
+| `licm-mem` | `-O1`, `-O2`, `-Os` | Loads out of loops; a variable in memory kept in a register across one |
 
 Two kinds of function get less than the full pipeline at any level:
 
@@ -265,6 +276,12 @@ Promote every scalar local variable whose address is never taken out of
 its stack slot and into SSA values, which the later passes and the
 register allocator work on. A variable live across a loop or down one arm
 of an `if` becomes a value like any other.
+
+A `long double` local is promoted too, as a 16-byte value, whether it is
+x87 extended or IEEE binary128. Kept in memory, every read of one was a
+16-byte copy, and on the 32-bit binary128 targets that was most of a
+`long double` function's code. Promoting them made RISC-V's `lib/libc`
+3% smaller.
 
 A `volatile` local is never promoted. A local whose address is taken
 stays in memory, unless `sroa` first shows that the address is used only
@@ -326,6 +343,18 @@ The loop passes:
   cannot fault are moved, so a load through a pointer, a division and a
   remainder stay in the loop. A read of a local variable is moved only
   when nothing in the loop writes it and its address is never taken.
+- **Memory in loops** (`-fno-licm-mem` turns off just this). A load
+  whose address does not change is moved in front of the loop when
+  nothing in the loop can write those bytes -- no store that may reach
+  them, no call that may write memory, and no inline asm, atomic or
+  volatile access anywhere in the loop -- and when moving it cannot
+  fault: the loop would have executed it anyway, or it reads a global or
+  a local inside its bounds. A location the loop both writes and reads,
+  such as `p->count++` or a global sum, is kept in a register instead
+  when nothing else in the loop can reach it, the loop calls nothing that
+  touches memory, and every way out of the loop has just stored it; it
+  is stored once on each way out. `volatile` and `_Atomic` objects are
+  never moved or kept, and nothing moves across an access to one.
 - **Induction-variable strength reduction.** An array access `a[i]` in a
   loop is turned into a pointer that advances by the element size each
   iteration.
@@ -367,7 +396,7 @@ A loop over arrays reached through a pointer is not vectorized.
 
 Default: on at `-O2` for x86-64. Off at `-Os`.
 
-<!-- BUG, reported to the lead: vec_op_char (opt.c) does not check
+<!-- BUG, reported to the lead: vec_op_char (src/opt/vectorize.c) does not check
      i->flt, so `float a[N], b[N], c[N]; a[i] = b[i] + c[i]` with a
      constant N is vectorized with paddd (integer add) on x86-64 at -O2.
      Seen with embcc inspect ir v.c -O2 / llvm-objdump. The note below
@@ -587,6 +616,8 @@ At `-O2` and `-Os` these also run:
 ## Inlining
 
 The inliner runs at `-O1` and above, before the per-function passes. At
+`-O0` it runs too, for `always_inline` functions only (the reason code
+for any other call is `not-always_inline-at-O0`). At
 `-O1` it inlines only a `static` function with a single caller and an
 `always_inline` function (the reason code for any other call is
 `not-a-sole-callee-at-O1`). Sizes are counted in EmbIR instructions, as
@@ -660,7 +691,8 @@ At `-O1` and above, every code generator:
 - **allocates registers** to values, including callee-saved registers,
   which are then saved and restored. On x86-64 and AArch64, a function
   with computed `goto` or a C++ exception region is compiled without
-  register allocation;
+  register allocation; on the other targets one with computed `goto`
+  is allocated like any other;
 - **folds a constant offset** into a load or store addressing mode;
 - **makes tail calls**: a call immediately followed by a return of its
   value becomes a jump, under the conditions in the table below.
@@ -935,8 +967,8 @@ Write the generated code as an assembly file. See
 
 | GCC or Clang option | EmbCC |
 |---|---|
-| `-Og` | Not accepted. Use `-O0 -g`. |
-| `-Ofast` | Not accepted. |
+| `-Og` | Accepted: `-O1` with every source variable kept in its stack slot. |
+| `-Ofast` | Accepted, same as `-O3`. |
 | `-O3` | Accepted, same as `-O2`. |
 | `-Oz` | Accepted, same as `-Os`. |
 | `-fno-inline`, `-finline` | Same meaning. |

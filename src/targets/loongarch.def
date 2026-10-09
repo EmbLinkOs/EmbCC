@@ -1,0 +1,16 @@
+/* LoongArch64: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* LP64S (clang --target=loongarch64-unknown-elf -msoft-float -dM): LP64
+ * like RV64, a binary128 long double and __int128 -- but a SIGNED
+ * char, which RISC-V's is not, and a signed int wchar_t. */
+DATA_MODEL(LOONGARCH64, .ptr = 8, .lng = 8, .it = 4, .dbl = 8, .ldbl = 16,
+           .char_uns = 0, .wchar_uns = 0, .int128 = 1, .maxal = 0)
+
+/* LoongArch64, LP64S (soft float), bare metal. `-unknown-elf` is
+ * clang's spelling and the canonical one; the short forms are accepted
+ * because everyone writes them. */
+TRIPLE("loongarch64-unknown-elf",   LOONGARCH64, NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("loongarch64-none-elf",      LOONGARCH64, NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("loongarch64-elf",           LOONGARCH64, NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("loongarch64",               LOONGARCH64, NONE,    ELF,   ALIAS,     BASE,         PLAIN)

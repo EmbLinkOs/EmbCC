@@ -55,10 +55,18 @@ extern const struct predef_macro predef_macros_cxx_thumbv8m[];
 extern const int predef_macro_count_cxx_thumbv8m;
 /* ARMv6-M (Cortex-M0/M0+/M1): Thumb-1, no divide, no exclusives, no
  * unaligned access -- its own table, generated like the other two. */
+extern const struct predef_macro predef_macros_thumbv8mbase[];
+extern const int predef_macro_count_thumbv8mbase;
+extern const struct predef_macro predef_macros_cxx_thumbv8mbase[];
+extern const int predef_macro_count_cxx_thumbv8mbase;
 extern const struct predef_macro predef_macros_thumbv6m[];
 extern const int predef_macro_count_thumbv6m;
 extern const struct predef_macro predef_macros_cxx_thumbv6m[];
 extern const int predef_macro_count_cxx_thumbv6m;
+extern const struct predef_macro predef_macros_armv7a[];
+extern const int predef_macro_count_armv7a;
+extern const struct predef_macro predef_macros_cxx_armv7a[];
+extern const int predef_macro_count_cxx_armv7a;
 extern const struct predef_macro predef_macros_riscv32[];
 extern const int predef_macro_count_riscv32;
 extern const struct predef_macro predef_macros_cxx_riscv32[];
@@ -71,6 +79,55 @@ extern const struct predef_macro predef_macros_mips32[];
 extern const int predef_macro_count_mips32;
 extern const struct predef_macro predef_macros_cxx_mips32[];
 extern const int predef_macro_count_cxx_mips32;
+/* ...and big-endian (mips-none-elf), generated from clang's own answer for
+ * mips-unknown-elf: the byte-order macros are the difference. */
+extern const struct predef_macro predef_macros_mips32eb[];
+extern const int predef_macro_count_mips32eb;
+extern const struct predef_macro predef_macros_cxx_mips32eb[];
+extern const int predef_macro_count_cxx_mips32eb;
+/* MIPS64r2 n64, little- (mips64) and big-endian (mips64eb). */
+extern const struct predef_macro predef_macros_mips64[];
+extern const int predef_macro_count_mips64;
+extern const struct predef_macro predef_macros_cxx_mips64[];
+extern const int predef_macro_count_cxx_mips64;
+extern const struct predef_macro predef_macros_mips64eb[];
+extern const int predef_macro_count_mips64eb;
+extern const struct predef_macro predef_macros_cxx_mips64eb[];
+extern const int predef_macro_count_cxx_mips64eb;
+extern const struct predef_macro predef_macros_loongarch64[];
+extern const int predef_macro_count_loongarch64;
+extern const struct predef_macro predef_macros_cxx_loongarch64[];
+extern const int predef_macro_count_cxx_loongarch64;
+extern const struct predef_macro predef_macros_tricore[];
+extern const int predef_macro_count_tricore;
+extern const struct predef_macro predef_macros_cxx_tricore[];
+extern const int predef_macro_count_cxx_tricore;
+/* Xtensa (the ESP32), from Espressif's xtensa-esp32-elf-gcc. */
+extern const struct predef_macro predef_macros_xtensa[];
+extern const int predef_macro_count_xtensa;
+extern const struct predef_macro predef_macros_cxx_xtensa[];
+extern const int predef_macro_count_cxx_xtensa;
+/* 32-bit PowerPC, the EABI: clang's for powerpc-none-eabi -mcpu=e500
+ * -mno-spe -msoft-float -mlong-double-64. */
+extern const struct predef_macro predef_macros_ppc32[];
+extern const int predef_macro_count_ppc32;
+extern const struct predef_macro predef_macros_cxx_ppc32[];
+extern const int predef_macro_count_cxx_ppc32;
+/* Renesas RX: C only (EmbCC refuses C++ for RX), from rx-elf-gcc -nofpu. */
+extern const struct predef_macro predef_macros_rx[];
+extern const int predef_macro_count_rx;
+/* 32-bit SPARC V8, LEON3: clang's for sparc-none-elf -mcpu=leon3
+ * -msoft-float. */
+extern const struct predef_macro predef_macros_sparc32[];
+extern const int predef_macro_count_sparc32;
+extern const struct predef_macro predef_macros_cxx_sparc32[];
+extern const int predef_macro_count_cxx_sparc32;
+/* ColdFire (m68k-none-elf): written by hand, there being no m68k compiler
+ * here to generate it from (src/arch/coldfire/predef.c says what from). */
+extern const struct predef_macro predef_macros_coldfire[];
+extern const int predef_macro_count_coldfire;
+extern const struct predef_macro predef_macros_cxx_coldfire[];
+extern const int predef_macro_count_cxx_coldfire;
 
 /* AVR (ATmega328P). Generated like the others, from the reference
  * compiler's own answer for the triple. */

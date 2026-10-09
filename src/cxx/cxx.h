@@ -150,8 +150,13 @@ struct cty *ct_class(struct cclass *c);
 struct cty *ct_enum(struct cenum *e);
 struct cty *ct_mptr(struct cclass *c, struct cty *member);
 int ct_is_pmf(const struct cty *t);          /* a pointer to member function */
-struct cty *ct_size_t(void);                 /* unsigned long */
-struct cty *ct_ptrdiff_t(void);              /* long */
+struct cty *ct_size_t(void);   /* the target's: unsigned long, unsigned int */
+struct cty *ct_ptrdiff_t(void);              /* long, int */
+int cx_ptr_size(void);                       /* bytes in a pointer */
+int cx_arm32_abi(void);                      /* the ARM C++ ABI's variants */
+int cx_pmf_vbit_in_adj(void);         /* a virtual PMF is flagged in adj */
+long cx_array_cookie(const struct cty *elem);   /* new[]'s header bytes */
+struct cty *cx_implicit_align_val_t(void);   /* std::align_val_t, declared */
 
 int ct_same(const struct cty *a, const struct cty *b);          /* incl. quals */
 int targ_same(const struct ctarg *a, const struct ctarg *b);

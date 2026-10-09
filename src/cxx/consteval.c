@@ -2,9 +2,10 @@
  * constexpr functions included — an interpreter over the front-end's own
  * trees, the ones emit.c writes as C.
  *
- * An object is a block of bytes laid out as the target lays it out (both
- * targets are little-endian), so members, bases and array elements are
- * offsets, and copying an object is copying its bytes. A pointer is a
+ * An object is a block of bytes laid out as the target lays it out, in
+ * the target's byte order (a literal's bytes come in that order, from
+ * lit_encode), so members, bases and array elements are offsets, and
+ * copying an object is copying its bytes. A pointer is a
  * block and an offset in it (or a function); stored in an object, it is
  * the index of a handle holding the two, so a copied object's pointers
  * still point where they did. Each local of a call gets a block of its
@@ -40,6 +41,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../arch/target.h"
 #include "../driver/util.h"
 #include "../sema/ldfloat.h"
 #include "../sema/w128.h"
@@ -322,14 +324,26 @@ static int scalar_kind(const struct cty *t)
     return 0;
 }
 
-/* a bit-field's bytes: from its first, as many as its bits reach */
+/* a bit-field's bytes: from its first, as many as its bits reach, as one
+ * number in the target's byte order */
 static struct w128 bits_read(struct cptr p, int nb)
 {
     unsigned char *q = p.blk->b + p.off;
     struct w128 w = w_make(0, 0);
-    for (int i = nb - 1; i >= 0; i--)
-        w = w_shl(w, 8), w.lo |= q[i];
+    int be = target_big_endian();
+    for (int i = 0; i < nb; i++)
+        w = w_shl(w, 8), w.lo |= q[be ? i : nb - 1 - i];
     return w;
+}
+
+/* where in that number a bit-field's lowest bit is: bo bits up on a
+ * little-endian target, whose fields fill each unit from its least
+ * significant bit; from the top on a big-endian one, whose fields fill it
+ * from the most significant (bo counting from the first byte's top bit),
+ * as the C front end lays them (ty_bf_mempos) */
+static int bits_shift(struct cptr p, int nb)
+{
+    return target_big_endian() ? nb * 8 - p.bo - p.bw : p.bo;
 }
 
 static struct cval load_bits(struct cptr p, const struct cty *t)
@@ -338,7 +352,7 @@ static struct cval load_bits(struct cptr p, const struct cty *t)
     if (nb > 16)
         no();
     check_range(p, nb, 0);
-    struct w128 w = w_shr(bits_read(p, nb), p.bo, 0);
+    struct w128 w = w_shr(bits_read(p, nb), bits_shift(p, nb), 0);
     w = w_shr(w_shl(w, 128 - p.bw), 128 - p.bw,
               ct_is_signed(t) && t->k != CT_BOOL);
     return fit(v_w(w), t);
@@ -349,30 +363,39 @@ static struct cval load(struct cptr p, const struct cty *t)
     if (p.bw)
         return load_bits(p, t);
     int k = scalar_kind(t);
-    long n = ct_is_ref(t) ? 8 : ct_size(t);
+    long n = ct_is_ref(t) ? cx_ptr_size() : ct_size(t);
     check_range(p, n, 0);
     unsigned char *q = p.blk->b + p.off;
     if (k == V_FLT) {
         if (n == 4) {
+            unsigned int b = (unsigned int)target_get_uint(q, 4);
             float f;
-            memcpy(&f, q, 4);
+            memcpy(&f, &b, 4);
             return v_flt(f);
         }
-        if (n > 8)
+        if (n > 8) {
             /* A long double in memory, decoded from the TARGET's format
              * (x87 80-bit or binary128) rather than read as a double --
              * which would not be a narrower answer but a wrong one, since
-             * the low eight bytes of either format are not a double. */
-            return v_ldf(ldf_from_bytes(q, ldf_target_fmt()));
+             * the low eight bytes of either format are not a double.
+             * (ldf_from_bytes reads them least significant first.) */
+            unsigned char le[16];
+            for (long i = 0; i < n && i < 16; i++)
+                le[i] = q[target_big_endian() ? n - 1 - i : i];
+            return v_ldf(ldf_from_bytes(le, ldf_target_fmt()));
+        }
+        unsigned long long b = target_get_uint(q, 8);
         double d;
-        memcpy(&d, q, 8);
+        memcpy(&d, &b, 8);
         return v_flt(d);
     }
+    /* the target's byte order: u the low eight bytes' value, uh the high
+     * eight's (an __int128's) */
     unsigned long u = 0, uh = 0;
     for (long i = (n > 8 ? 8 : n) - 1; i >= 0; i--)
-        u = u << 8 | q[i];
+        u = u << 8 | q[target_big_endian() ? n - 1 - i : i];
     for (long i = n - 1; i >= 8; i--)
-        uh = uh << 8 | q[i];
+        uh = uh << 8 | q[target_big_endian() ? n - 1 - i : i];
     if (k == V_PTR)
         return v_ptr(get_handle((long)u));
     if (n == 16)
@@ -464,39 +487,52 @@ static void store(struct cptr p, const struct cty *t, struct cval v)
         check_range(p, nb, 1);
         struct w128 ones = w_make(~0UL, ~0UL);
         struct w128 fm = w_shr(ones, 128 - p.bw, 0);
-        struct w128 m = w_shl(fm, p.bo), x = w_of(v);
-        x = w_shl(w_make(x.lo & fm.lo, x.hi & fm.hi), p.bo);
+        int sh = bits_shift(p, nb);
+        struct w128 m = w_shl(fm, sh), x = w_of(v);
+        x = w_shl(w_make(x.lo & fm.lo, x.hi & fm.hi), sh);
         struct w128 w = bits_read(p, nb);
         w = w_make((w.lo & ~m.lo) | x.lo, (w.hi & ~m.hi) | x.hi);
         unsigned char *q = p.blk->b + p.off;
+        int be = target_big_endian();
         for (int i = 0; i < nb; i++, w = w_shr(w, 8, 0))
-            q[i] = (unsigned char)w.lo;
+            q[be ? nb - 1 - i : i] = (unsigned char)w.lo;
         return;
     }
-    long n = ct_is_ref(t) ? 8 : ct_size(t);
+    long n = ct_is_ref(t) ? cx_ptr_size() : ct_size(t);
     check_range(p, n, 1);
     unsigned char *q = p.blk->b + p.off;
+    int be = target_big_endian();
     if (v.k == V_FLT) {
         if (n == 4) {
             float f = (float)v.f;
-            memcpy(q, &f, 4);
+            unsigned int b;
+            memcpy(&b, &f, 4);
+            target_put_uint(q, 4, b);
         } else if (n > 8) {
             /* A long double takes the target's own encoding, all sixteen
              * bytes of it. Writing the double half would leave the object
-             * holding a bit pattern that is not the value stored. */
-            ldf_encode(as_ldf(v), ldf_target_fmt(), q);
+             * holding a bit pattern that is not the value stored.
+             * (ldf_encode writes them least significant first.) */
+            unsigned char le[16];
+            ldf_encode(as_ldf(v), ldf_target_fmt(), le);
+            for (long i = 0; i < n && i < 16; i++)
+                q[be ? n - 1 - i : i] = le[i];
         } else {
-            memcpy(q, &v.f, 8);
+            unsigned long long b;
+            memcpy(&b, &v.f, 8);
+            target_put_uint(q, 8, b);
         }
         return;
     }
+    /* in the target's byte order: byte i of the value is q[i] on a
+     * little-endian target and q[n - 1 - i] on a big-endian one */
     unsigned long u = v.k == V_PTR ? (unsigned long)put_handle(v.p)
                                    : (unsigned long)v.i;
     for (long i = 0; i < n && i < 8; i++, u >>= 8)
-        q[i] = (unsigned char)u;
+        q[be ? n - 1 - i : i] = (unsigned char)u;
     u = (unsigned long)v.hi;
     for (long i = 8; i < n; i++, u >>= 8)
-        q[i] = (unsigned char)u;
+        q[be ? n - 1 - i : i] = (unsigned char)u;
 }
 
 static void copy_bytes(struct cptr to, struct cptr from, long n)

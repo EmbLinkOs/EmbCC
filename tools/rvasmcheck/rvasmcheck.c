@@ -24,6 +24,8 @@ int main(int argc, char **argv)
      * exist only at RV64, and asking for them at RV32 is refused. */
     target_set((argc > 2 && strcmp(argv[2], "rv32") == 0)
                    ? TARGET_RISCV32 : TARGET_RISCV64);
+    /* ...and the F and D forms with the extensions on (rv64gc) */
+    target_set_riscv_isa(1, 1, target_riscv_rvc(), 1);
 
     tmp = tmpfile();
     if (!tmp) { fprintf(stderr, "no tmpfile\n"); return 1; }

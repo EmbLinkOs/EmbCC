@@ -344,6 +344,70 @@ unsigned rv_compress(unsigned long w, int xlen)
         }
         return 0;
 
+    case 0x07:                                                  /* LOAD-FP */
+        /* Zcd's c.fld/c.fldsp and, at RV32 only, Zcf's c.flw/c.flwsp --
+         * c.ld's and c.lw's layouts at other funct3s (at RV64 the flw
+         * slots ARE c.ld's). C with F or D is Zcf/Zcd: this instruction
+         * is only ever emitted where the FPU is. */
+        if (f3 == 3) {                                          /* fld */
+            if (rs1 == 2 && immi >= 0 && immi < 512 && (immi & 7) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x2002u | (((i >> 6) & 7) << 2) | (((i >> 3) & 3) << 5) |
+                       (((i >> 5) & 1) << 12) | ((unsigned)rd << 7);
+            }
+            if (rdc >= 0 && rs1c >= 0 && immi >= 0 && immi < 256 &&
+                (immi & 7) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x2000u | ((unsigned)rdc << 2) | (((i >> 6) & 3) << 5) |
+                       ((unsigned)rs1c << 7) | (((i >> 3) & 7) << 10);
+            }
+        }
+        if (f3 == 2 && xlen == 32) {                            /* flw */
+            if (rs1 == 2 && immi >= 0 && immi < 256 && (immi & 3) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x6002u | (((i >> 6) & 3) << 2) | (((i >> 2) & 7) << 4) |
+                       (((i >> 5) & 1) << 12) | ((unsigned)rd << 7);
+            }
+            if (rdc >= 0 && rs1c >= 0 && immi >= 0 && immi < 128 &&
+                (immi & 3) == 0) {
+                unsigned i = (unsigned)immi;
+                return 0x6000u | ((unsigned)rdc << 2) | (((i >> 6) & 1) << 5) |
+                       (((i >> 2) & 1) << 6) | ((unsigned)rs1c << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+        }
+        return 0;
+
+    case 0x27:                                                  /* STORE-FP */
+        if (f3 == 3) {                                          /* fsd */
+            if (rs1 == 2 && imms >= 0 && imms < 512 && (imms & 7) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xa002u | ((unsigned)rs2 << 2) | (((i >> 6) & 7) << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+            if (rs1c >= 0 && rs2c >= 0 && imms >= 0 && imms < 256 &&
+                (imms & 7) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xa000u | ((unsigned)rs2c << 2) | (((i >> 6) & 3) << 5) |
+                       ((unsigned)rs1c << 7) | (((i >> 3) & 7) << 10);
+            }
+        }
+        if (f3 == 2 && xlen == 32) {                            /* fsw */
+            if (rs1 == 2 && imms >= 0 && imms < 256 && (imms & 3) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xe002u | ((unsigned)rs2 << 2) | (((i >> 6) & 3) << 7) |
+                       (((i >> 2) & 0xf) << 9);
+            }
+            if (rs1c >= 0 && rs2c >= 0 && imms >= 0 && imms < 128 &&
+                (imms & 3) == 0) {
+                unsigned i = (unsigned)imms;
+                return 0xe000u | ((unsigned)rs2c << 2) | (((i >> 6) & 1) << 5) |
+                       (((i >> 2) & 1) << 6) | ((unsigned)rs1c << 7) |
+                       (((i >> 3) & 7) << 10);
+            }
+        }
+        return 0;
+
     case 0x67:                                                  /* JALR */
         /* c.jr / c.jalr, only with a zero displacement. `ret` is
          * jalr x0, 0(ra) and becomes c.jr ra, which is two bytes off
@@ -667,6 +731,111 @@ void rv_store(struct code *c, int rs2, int rs1, int off, int size, int xlen)
     rv_w(c, rv_enc_s(OP_STORE, f3, rs1, rs2, off));
 }
 
+/* ---- the F and D extensions ------------------------------------------- */
+
+enum { OP_LOAD_FP = 0x07, OP_STORE_FP = 0x27, OP_FP = 0x53 };
+enum { RM_RNE = 0, RM_RTZ = 1, RM_DYN = 7 };
+
+static void fp_r(struct code *c, int f5, int dbl, int rm, int rd, int rs1,
+                 int rs2)
+{
+    rv_w(c, rv_enc_r(OP_FP, rd, rm, rs1, rs2, (f5 << 2) | (dbl ? 1 : 0)));
+}
+
+/* The same, with the funct5 and the rounding mode spelled out: what the
+ * inline assembler (asm.c) writes every OP-FP instruction through. */
+void rv_fp_r(struct code *c, int f5, int dbl, int rm, int rd, int rs1, int rs2)
+{
+    fp_r(c, f5, dbl, rm, rd, rs1, rs2);
+}
+
+/* fmadd/fmsub/fnmsub/fnmadd: R4-type, rs3 in bits 31:27 and the format
+ * in 26:25. `op` is the major opcode (0x43, 0x47, 0x4b, 0x4f). */
+void rv_fp_r4(struct code *c, int op, int dbl, int rm, int rd, int rs1,
+              int rs2, int rs3)
+{
+    rv_w(c, (unsigned long)op | (unsigned long)rd << 7 |
+            (unsigned long)rm << 12 | (unsigned long)rs1 << 15 |
+            (unsigned long)rs2 << 20 | (unsigned long)(dbl ? 1 : 0) << 25 |
+            (unsigned long)rs3 << 27);
+}
+
+void rv_fload(struct code *c, int frd, int rs1, int off, int dbl)
+{
+    rv_w(c, rv_enc_i(OP_LOAD_FP, frd, dbl ? 3 : 2, rs1, off));
+}
+
+void rv_fstore(struct code *c, int frs2, int rs1, int off, int dbl)
+{
+    rv_w(c, rv_enc_s(OP_STORE_FP, dbl ? 3 : 2, rs1, frs2, off));
+}
+
+void rv_farith(struct code *c, int op, int frd, int frs1, int frs2, int dbl)
+{
+    if (op != RV_FADD && op != RV_FSUB && op != RV_FMUL && op != RV_FDIV)
+        internal_error("riscv: %d is not fadd, fsub, fmul or fdiv", op);
+    fp_r(c, op, dbl, RM_DYN, frd, frs1, frs2);
+}
+
+void rv_fsqrt(struct code *c, int frd, int frs1, int dbl)
+{
+    fp_r(c, 0x0b, dbl, RM_DYN, frd, frs1, 0);
+}
+
+void rv_fsgnj(struct code *c, int kind, int frd, int frs1, int frs2, int dbl)
+{
+    if (kind < RV_FSGNJ || kind > RV_FSGNJX)
+        internal_error("riscv: sign injection %d is not one of the three",
+                       kind);
+    fp_r(c, 0x04, dbl, kind, frd, frs1, frs2);
+}
+
+void rv_fmv(struct code *c, int frd, int frs, int dbl)
+{
+    rv_fsgnj(c, RV_FSGNJ, frd, frs, frs, dbl);
+}
+
+void rv_fcmp(struct code *c, int kind, int rd, int frs1, int frs2, int dbl)
+{
+    if (kind < RV_FLE || kind > RV_FEQ)
+        internal_error("riscv: comparison %d is not fle, flt or feq", kind);
+    fp_r(c, 0x14, dbl, kind, rd, frs1, frs2);
+}
+
+void rv_fcvt_to_int(struct code *c, int rd, int frs1, int ity, int dbl)
+{
+    if (ity < RV_CVT_W || ity > RV_CVT_LU)
+        internal_error("riscv: conversion type %d", ity);
+    fp_r(c, 0x18, dbl, RM_RTZ, rd, frs1, ity);
+}
+
+void rv_fcvt_from_int(struct code *c, int frd, int rs1, int ity, int dbl)
+{
+    if (ity < RV_CVT_W || ity > RV_CVT_LU)
+        internal_error("riscv: conversion type %d", ity);
+    /* a 32-bit integer is exact in a double */
+    fp_r(c, 0x1a, dbl, dbl && ity <= RV_CVT_WU ? RM_RNE : RM_DYN, frd, rs1,
+         ity);
+}
+
+void rv_fcvt_fp(struct code *c, int frd, int frs1, int to_dbl)
+{
+    if (to_dbl)
+        fp_r(c, 0x08, 1, RM_RNE, frd, frs1, 0);      /* fcvt.d.s: exact */
+    else
+        fp_r(c, 0x08, 0, RM_DYN, frd, frs1, 1);      /* fcvt.s.d */
+}
+
+void rv_fmv_to_x(struct code *c, int rd, int frs1, int dbl)
+{
+    fp_r(c, 0x1c, dbl, 0, rd, frs1, 0);
+}
+
+void rv_fmv_from_x(struct code *c, int frd, int rs1, int dbl)
+{
+    fp_r(c, 0x1e, dbl, 0, frd, rs1, 0);
+}
+
 /* ---- control flow ----------------------------------------------------- */
 
 int rv_b_placeholder(struct code *c, int cond, int rs1, int rs2)
@@ -790,6 +959,12 @@ void rv_jalr(struct code *c, int rd, int rs1, int off)
 
 void rv_ret(struct code *c) { rv_jalr(c, RV_ZERO, RV_RA, 0); }
 
+void rv_xret(struct code *c, int supervisor)
+{
+    rv_w(c, rv_enc_i(OP_SYSTEM, RV_ZERO, 0, RV_ZERO,
+                     supervisor ? 0x102 : 0x302));
+}
+
 /* auipc rd, 0 ; addi rd, rd, 0 -- the two halves of a PC-relative
  * address, both immediates left for a relocation. Returns the offset of
  * the auipc; the addi is four bytes after it.
@@ -810,6 +985,24 @@ int rv_pcrel_pair(struct code *c, int rd)
     rv_alu_imm(c, RV_ADD, rd, rd, 0, 0);
     g_rvc = save_rvc;
     return at;
+}
+
+void rv_patch_pcrel_pair(struct code *c, int at, int target)
+{
+    long d = (long)target - at;
+    for (int k = 0; k < 2; k++) {
+        int o = at + 4 * k;
+        unsigned long w = (unsigned long)c->p[o] |
+                          ((unsigned long)c->p[o + 1] << 8) |
+                          ((unsigned long)c->p[o + 2] << 16) |
+                          ((unsigned long)c->p[o + 3] << 24);
+        /* keep the opcode and registers; replace the immediate only */
+        if (k == 0)
+            w = (w & 0xfffUL) | rv_enc_u(0, 0, hi20_of(d));
+        else
+            w = (w & 0xfffffUL) | rv_enc_i(0, 0, 0, 0, lo12_of(d));
+        code_patch32(c, o, w);
+    }
 }
 
 int rv_call_placeholder(struct code *c)

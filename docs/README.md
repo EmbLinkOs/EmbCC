@@ -1,10 +1,13 @@
 # EmbCC documentation
 
-EmbCC is a C and C++ compiler with its own assembler, linker and debugger. It
-targets EmbLinkOS on x86-64, Linux, macOS, Windows, and bare-metal AArch64,
-ARMv7-M, RISC-V (RV32 and RV64) and AVR. This documentation has two parts:
-the manual is for people who compile code with EmbCC, and the internals
-reference is for people who change it.
+EmbCC is a C and C++ compiler for embedded systems, and the Emb toolchain
+is everything around it: the assembler, the linker, the debugger, the
+simulator, the flash programmer, the tracer, and the tools that size,
+pack and analyse firmware. It targets 12 families of embedded processors,
+from 8-bit AVR to 64-bit RISC-V, and also builds operating systems and
+hosted programs on x86-64 and AArch64. This documentation has two parts:
+the manual is for people who build software with the toolchain, and the
+internals reference is for people who change it.
 
 ## Using EmbCC
 
@@ -36,6 +39,12 @@ Start with the [overview](manual/overview.md) and
 | `embas` | [The NASM-syntax assembler](manual/tools/embas.md) |
 | `embar` | [The archiver](manual/tools/embar.md) |
 | `embsvd` | [A device's header, startup and linker script from its SVD file](manual/tools/embsvd.md) |
+| `embmap` | [Where an image's flash and RAM go: sections, regions, symbols, files, two builds](manual/tools/embmap.md) |
+| `embpack` | [A linked image as bin, Intel HEX, S-records or UF2, with a CRC and a manifest](manual/tools/embpack.md) |
+| `embrt` | [The worst-case stack of each entry point and interrupt, proved from the compiler's frames and call graph](manual/tools/embrt.md) |
+| `embsim` | [A simulator (Cortex-M, RISC-V, AVR): run an image without a board](manual/tools/embsim.md) |
+| `embflash` | [An image put into a target through the GDB remote protocol: QEMU, OpenOCD, pyOCD, J-Link, Black Magic Probe](manual/tools/embflash.md) |
+| `embtrace` | [Function-level tracing on the target: calls, times, the call tree and a Perfetto trace, from -finstrument-functions](manual/tools/embtrace.md) |
 | `embdbg` | [The debugger](manual/tools/embdbg.md) |
 | `embread` | [The EMBX image reader](manual/tools/embread.md) |
 | `embls` | [The language server](manual/tools/embls.md) |
@@ -58,6 +67,7 @@ Start with the [architecture](internals/architecture.md) and the
 | [ARMv6-M plan](internals/armv6m-plan.md) | What a Cortex-M0 code generator needs from the Thumb backend, and the order to build it in |
 | [Object files](internals/object-formats.md) | ELF, Mach-O, COFF and EMBX writers |
 | [Linker](internals/linker.md) | How `embld` resolves, lays out and relocates |
+| [EmbSim](internals/embsim.md) | The simulator's modules and interfaces, its GDB server, and how to add a core, a peripheral or a board |
 | [Testing](internals/testing.md) | The test suites, the boards, and how to add a test |
 | [Contributing](internals/contributing.md) | Conventions, the review checklist, commit style |
 | [Design decisions](internals/decisions.md) | The decision record (D-001 …) |

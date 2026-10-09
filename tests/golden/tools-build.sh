@@ -20,7 +20,11 @@ rm -rf "$out"; mkdir -p "$out"
 
 # The names `all` builds. Read from the Makefile rather than listed
 # here, so a tool added to `all` is covered without editing this file.
-tools=$(sed -n 's/^all: *//p' "$EMBCC_ROOT/Makefile" | head -1)
+# the `all` target, its backslash-continued lines joined: it outgrew one
+# line, and reading only the first gave a tool named `\` and lost the rest
+tools=$(awk '/^all:/ { f = 1 }
+             f { l = l " " $0; if ($0 !~ /\\$/) { print l; exit } }' \
+            "$EMBCC_ROOT/Makefile" | sed 's/\\//g; s/^ *all: *//')
 [ -n "$tools" ] || { echo "FAIL: could not read the `all` target"; exit 1; }
 
 # The link commands come from the Makefile so there is one source of
@@ -48,6 +52,23 @@ for t in $tools; do
         fail=1
     fi
 done
+
+# embsim is built optimized (EMBSIM_OPT, -O2): a simulator's speed is
+# every test's that runs one, and without -O it ran a busy loop about
+# three times slower. Still with -g, as every tool here is.
+if [ -s "$out/embsim.cmd" ]; then
+    grep -Eq -- ' -O[1-3s]? ' "$out/embsim.cmd" ||
+        { echo "FAIL embsim: its recipe has no -O:"; cut -c1-100 "$out/embsim.cmd"; fail=1; }
+    grep -q -- ' -g ' "$out/embsim.cmd" ||
+        { echo "FAIL embsim: its recipe dropped -g"; fail=1; }
+fi
+# ...and rebuilt when the Makefile changes, or an ./embsim linked before
+# -O2 was the default (or with another EMBSIM_OPT) is kept: the rule's
+# prerequisites, from make's own database (-p), must name the Makefile
+( cd "$EMBCC_ROOT" && make -pn embsim 2> /dev/null ) |
+    awk '/^embsim:/ { for (i = 2; i <= NF; i++) if ($i == "Makefile") ok = 1 }
+         END { exit !ok }' ||
+    { echo "FAIL embsim: its rule does not depend on the Makefile, so EMBSIM_OPT changes leave ./embsim as it was"; fail=1; }
 
 [ "$fail" -eq 0 ] || exit 1
 echo "  every tool in \`make all\` builds ($(echo $tools | wc -w | tr -d ' ') of them)"

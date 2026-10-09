@@ -26,13 +26,14 @@
  * is a macro, not an enum terminator: EmbCC's own subset (which must compile
  * this file for self-hosting) folds only integer literals, not enum
  * constants, in an array bound. */
-#define DWARF_NSEC 4
-enum { DWSEC_ABBREV, DWSEC_INFO, DWSEC_LINE, DWSEC_RANGES };
+#define DWARF_NSEC 5
+enum { DWSEC_ABBREV, DWSEC_INFO, DWSEC_LINE, DWSEC_RANGES, DWSEC_FRAME };
 
 /* What a relocation binds against — the driver resolves each to the matching
  * section symbol (STT_SECTION). DWTGT_TEXT is the code the addresses point
  * into; the rest are self-references between debug sections. */
-enum { DWTGT_TEXT, DWTGT_ABBREV, DWTGT_LINE, DWTGT_RANGES };
+enum { DWTGT_TEXT, DWTGT_ABBREV, DWTGT_LINE, DWTGT_RANGES, DWTGT_GLOBAL,
+       DWTGT_FRAME };
 
 struct dwarf_reloc {
     int in_sec;      /* DWSEC_* the field lives in */
@@ -40,6 +41,9 @@ struct dwarf_reloc {
     int width;       /* 4 or 8 — selects R_X86_64_32 vs R_X86_64_64 */
     int target;      /* DWTGT_* — which section symbol to bind against */
     long addend;
+    /* DWTGT_GLOBAL: the object whose symbol the field binds to (a global
+     * variable's DW_OP_addr), the driver resolving its symbol index. */
+    struct global *glob;
     /* DWTGT_TEXT: the address is an END, one past a function's last
      * byte. In a unit whose functions are in sections of their own that
      * is where the NEXT section's code begins in the code buffer, so the
@@ -52,6 +56,12 @@ struct dwarf_out {
     int seclen[DWARF_NSEC];
     struct dwarf_reloc *relocs;
     int nrelocs, reloccap;
+    /* Set by the caller before dwarf_emit: the DWARF numbers of the stack
+     * pointer and of the return address's register, for .debug_frame
+     * (the backend registry's frame_sp and frame_ra); frame_ra 0 writes
+     * no .debug_frame. Passed in rather than looked up, so this file
+     * needs no backend linked beside it (embls links it alone). */
+    int frame_sp, frame_ra;
 };
 
 /* Build the debug sections for iu into out (caller zero-inits out). filename

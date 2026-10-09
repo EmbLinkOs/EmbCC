@@ -9,6 +9,7 @@
 #include "../driver/util.h"
 #include "../lex/lex.h"
 #include "../arch/predef.h"
+#include "../arch/target.h"
 #include "../sema/sema.h"
 
 /* C11 5.2.4.1 requires 127. The list is allocated per macro, so the
@@ -42,6 +43,8 @@ static void tb_puts(struct tbuf *b, const char *s) { tb_putn(b, s, strlen(s)); }
 static void tb_putc(struct tbuf *b, char c) { tb_putn(b, &c, 1); }
 
 /* ---- macro table ---- */
+
+static int g_dump_macros;              /* -dM: print the macros, not the text */
 
 struct macro {
     const char *name;
@@ -2417,7 +2420,15 @@ char *cpp_process(const char *path, const char *src,
         if (cxx_strict)
             define_macro(&boot, "__STRICT_ANSI__ 1");
         if (si >= 3)                            /* (aligned new: C++17) */
-            define_macro(&boot, "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 16");
+            define_macro(&boot, target_default_new_align() == 16
+                                ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 16"
+                                : target_default_new_align() == 8
+                                ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 8"
+                                : target_default_new_align() == 4
+                                ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 4"
+                                : target_default_new_align() == 2
+                                ? "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 2"
+                                : "__STDCPP_DEFAULT_NEW_ALIGNMENT__ 1");
         if (cxx_char8 && si < 4)                /* -fchar8_t before C++20 */
             define_macro(&boot, "__cpp_char8_t 202207L");
         /* C++ units present as g++ to the headers: libstdc++ is GCC's
@@ -2482,5 +2493,39 @@ char *cpp_process(const char *path, const char *src,
         cpp.depth--;
     }
     process_file(&cpp, path, src, &out, -1);
+    if (g_dump_macros) {
+        /* -dM: the output is every macro defined once the file has been
+         * read -- the predefined ones, -D's and the file's own -- one
+         * #define each, as GCC prints them (most recent first; GCC's
+         * order is its hash table's, so no order is promised) */
+        struct tbuf d = { 0, 0, 0 };
+        for (struct macro *m = cpp.macros; m; m = m->next) {
+            tb_puts(&d, "#define ");
+            tb_puts(&d, m->name);
+            if (m->is_func) {
+                tb_putc(&d, '(');
+                for (int k = 0; k < m->nparams; k++) {
+                    if (k) tb_putc(&d, ',');
+                    if (m->is_varargs && k == m->nparams - 1 &&
+                        !strcmp(m->params[k], "__VA_ARGS__"))
+                        tb_puts(&d, "...");
+                    else {
+                        tb_puts(&d, m->params[k]);
+                        if (m->is_varargs && k == m->nparams - 1)
+                            tb_puts(&d, "...");
+                    }
+                }
+                tb_putc(&d, ')');
+            }
+            if (m->body && *m->body) {
+                tb_putc(&d, ' ');
+                tb_puts(&d, m->body);
+            }
+            tb_putc(&d, '\n');
+        }
+        return d.p ? d.p : xstrndup("", 0);
+    }
     return out.p ? out.p : xstrndup("", 0);
 }
+
+void cpp_set_dump_macros(int on) { g_dump_macros = on; }

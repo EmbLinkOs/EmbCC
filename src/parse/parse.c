@@ -31,6 +31,7 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * The function's address goes in .init_array/.fini_array
                 * and the startup code walks them. */
                int ctor, dtor;
+               int ctor_prio, dtor_prio;    /* priority + 1; 0: none */
                /* The hints EmbCC acts on. `used` keeps a symbol the
                 * compiler would otherwise drop; `unused` says not to
                 * warn about one; always_inline/noinline are the
@@ -38,6 +39,7 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * warn_unused_result are diagnostics the DECLARATION
                 * asks for. */
                int used, unused, always_inline, noinline, gnu_inline;
+               int no_instrument;      /* no_instrument_function */
                int deprecated, warn_unused_result;
                const char *vis;      /* visibility("...") */
                /* __attribute__((signal)) / ((interrupt)): this function is
@@ -62,6 +64,9 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                 * (src/driver: it is assembled as a block). Last, for the
                 * reason isr gives. */
                int naked;
+               /* cmse_nonsecure_entry (-mcmse): see struct func. Last, for
+                * the reason isr gives. */
+               int cmse_entry;
 };
 
 struct parser {
@@ -71,6 +76,7 @@ struct parser {
      * The type carries const too (ty_const); this says whether a
      * declared OBJECT is read-only, which decides where it is placed. */
     int spec_const, q_top;
+    int lead_flash;     /* a __flash before the specifiers, for parse_type_spec */
     /* `#pragma pack`: the maximum member alignment a struct defined now
      * gets (0: none), and the values `push` saved */
     int pack_cur, npack;
@@ -96,6 +102,9 @@ struct parser {
     int semi_line, semi_col;      /* where the last missing ';' was reported,
                                    * so the same one cannot repeat */
     struct tagdef *tags;
+    /* the block a tag declared now belongs to (0 file scope), and the last
+     * block number handed out: see struct tagdef */
+    int tag_blk, tag_blk_seq;
     struct typedefent *typedefs;
     struct econst **econst_tail;
     int seq;              /* current top-level item, for econst seq */
@@ -118,6 +127,18 @@ struct parser {
      * because then there really is nowhere for it to go. */
     struct attrs attr_slot;
     int attr_carry_on;
+    /* An attribute among the declaration specifiers -- `static const
+     * __attribute__((aligned(4))) char t[4]`, as GCC takes it -- belongs
+     * to the declaration. One that wants it calls parse_type_spec_attrs,
+     * which seeds spec_slot with its attributes so far (spec_want) and
+     * reads them back from spec_out. parse_type_spec saves the slot of
+     * any declaration around it, so a struct body's members keep their
+     * own. By value, as attr_slot is: an error's longjmp leaves nothing
+     * pointing into a dead frame. Where no declaration asked -- a cast,
+     * sizeof -- spec_on is clear, and spec_attr refuses an attribute
+     * that would change layout or linkage. */
+    struct attrs spec_slot, spec_seed, spec_out;
+    int spec_on, spec_want;
     /* Where the last declarator's name token was, so a parameter can be
      * pointed AT rather than at the function's line -- an editor renaming
      * one has to edit the name, not the first column of the signature. */
@@ -128,6 +149,11 @@ struct parser {
      * (`int __attribute__((unused)) x`, `char *__attribute__((unused)) p`):
      * the declaration being parsed takes it. */
     int stars_unused;
+    /* __attribute__((cmse_nonsecure_call)) seen and not yet given to the
+     * function type it belongs to: the next function declarator takes it
+     * (fn_suffix), and a declaration that ends with it still pending put
+     * it where there is no function type to carry it. */
+    int cmse_call_pending, cmse_call_line;
     const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
                            * function declarator inside parentheses
                            * (`(*f(int a))[3]`) */
@@ -146,9 +172,23 @@ static void advance(struct parser *ps)
 static struct tagdef *find_tag(struct parser *ps, const char *tag)
 {
     for (struct tagdef *t = ps->tags; t; t = t->next)
-        if (strcmp(t->tag, tag) == 0)
+        if (!t->dead && strcmp(t->tag, tag) == 0)
             return t;
     return NULL;
+}
+
+/* A new tag, in the block being parsed. */
+static struct tagdef *push_tag(struct parser *ps, const char *tag,
+                               enum tag_kind kind, struct type *ty)
+{
+    struct tagdef *td = xcalloc(1, sizeof *td);
+    td->tag = tag;
+    td->kind = kind;
+    td->ty = ty;
+    td->blk = ps->tag_blk;
+    td->next = ps->tags;
+    ps->tags = td;
+    return td;
 }
 
 static struct type *find_typedef(struct parser *ps, const char *name)
@@ -221,8 +261,13 @@ static void parse_error_line(struct parser *ps, int line, const char *fmt, ...)
     fatal_unwind();
 }
 
+static void cmse_call_leftover(struct parser *ps);
+
 static void expect(struct parser *ps, enum tok_kind kind, const char *what)
 {
+    /* a declaration's end: see cmse_call_leftover */
+    if (kind == TOK_SEMI)
+        cmse_call_leftover(ps);
     if (cur(ps)->kind == kind) {
         advance(ps);
         return;
@@ -303,11 +348,64 @@ static int tok_is_type_start(enum tok_kind k)
 #define Q_VOL    1
 #define Q_CONST  2
 #define Q_ATOMIC 4
+#define Q_FLASH  8
+
+static int attr_is(const char *n, const char *base);
+
+/* AVR's `__flash`, which this target's predefined macro spells as clang
+ * does, `__attribute__((__address_space__(1)))`: a qualifier, wherever
+ * const may stand. Consumes it and returns Q_FLASH when the attribute
+ * here is exactly that; leaves any other attribute where it is. Address
+ * space 0 is the generic one; any other number is refused by name. */
+static int addr_space_qual(struct parser *ps)
+{
+    if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
+        return 0;
+    struct lexer save = ps->lx;
+    advance(ps);
+    if (cur(ps)->kind == TOK_LPAREN) {
+        advance(ps);
+        if (cur(ps)->kind == TOK_LPAREN) {
+            advance(ps);
+            if (cur(ps)->kind == TOK_IDENT &&
+                attr_is(cur(ps)->text, "address_space")) {
+                int line = cur(ps)->line;
+                advance(ps);
+                expect(ps, TOK_LPAREN, "'(' after address_space");
+                if (cur(ps)->kind != TOK_NUM)
+                    parse_error_line(ps, line, "address_space takes a number");
+                long n = cur(ps)->num;
+                advance(ps);
+                expect(ps, TOK_RPAREN, "')' after the address space");
+                expect(ps, TOK_RPAREN, "')' closing __attribute__");
+                expect(ps, TOK_RPAREN, "')' closing __attribute__");
+                if (n == 0)
+                    return 0;
+                if (n != 1 || target_get() != TARGET_AVR)
+                    parse_error_line(ps, line, "address space %ld is not "
+                                     "supported for %s: EmbCC has AVR's "
+                                     "__flash, address space 1, alone",
+                                     n, target_triple_now());
+                return Q_FLASH;
+            }
+        }
+    }
+    ps->lx = save;
+    return 0;
+}
+
 static int skip_quals(struct parser *ps)
 {
     int vol = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
+        if (k == TOK_KW_ATTRIBUTE) {
+            int q = addr_space_qual(ps);
+            if (!q)
+                break;
+            vol |= q;
+            continue;
+        }
         if (k == TOK_KW_CONST) { vol |= Q_CONST; advance(ps); continue; }
         if (k == TOK_KW_RESTRICT) { advance(ps); continue; }
         if (k == TOK_KW_VOLATILE) { vol |= Q_VOL; advance(ps); continue; }
@@ -332,6 +430,18 @@ static int at_type_start(struct parser *ps)
 {
     if (tok_is_type_start(cur(ps)->kind))
         return 1;
+    /* a type name may begin with __flash: `(const __flash char *)p` is
+     * spelled `(__flash const char *)p` too. Looked at, not taken. */
+    if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+        struct lexer save = ps->lx;
+        int q = addr_space_qual(ps);
+        int type = q && (tok_is_type_start(cur(ps)->kind) ||
+                         (cur(ps)->kind == TOK_IDENT &&
+                          find_typedef(ps, cur(ps)->text) != NULL));
+        ps->lx = save;
+        if (type)
+            return 1;
+    }
     return cur(ps)->kind == TOK_IDENT &&
            (find_typedef(ps, cur(ps)->text) != NULL ||
             /* C23 `auto`, which begins a declaration although it names
@@ -444,6 +554,10 @@ static const struct attr_entry attr_table[] = {
      * function uses. What every runtime library puts on its helpers so
      * they keep the base convention under -mfloat-abi=hard. */
     { "pcs",           ATTR_HONOURED, NULL },
+    /* ARMv8-M's security extension, ACLE's CMSE, under -mcmse (the Secure
+     * side): checked below. */
+    { "cmse_nonsecure_entry", ATTR_HONOURED, NULL },
+    { "cmse_nonsecure_call",  ATTR_HONOURED, NULL },
 
     /* ---- refused ---- */
     /* Honoured on the embedded targets, whose assembler reads the body as
@@ -466,8 +580,22 @@ static const struct attr_entry attr_table[] = {
     { "interrupt", ATTR_REFUSED,
       "the handler would return with an ordinary return instead of the "
       "interrupt return the CPU needs, and without saving the registers "
-      "(on ARMv7-M it needs neither, and is accepted; on AVR it is "
-      "implemented)" },
+      "(on ARMv7-M it needs neither, and is accepted; on AVR, RISC-V and "
+      "MIPS32 it is implemented)" },
+    /* GCC's MIPS interrupt modifiers. keep_interrupts_masked is the one
+     * whose meaning is a matter of two bits of the Status word the
+     * prologue writes anyway (IE cleared with EXL, and no IPL), so MIPS32
+     * honours it; the other two change where the handler's registers or
+     * its return come from, and are refused there too. */
+    { "keep_interrupts_masked", ATTR_REFUSED,
+      "it modifies a MIPS interrupt handler, and only the MIPS32 target "
+      "implements those" },
+    { "use_shadow_register_set", ATTR_REFUSED,
+      "EmbCC does not switch register sets: the handler would save into "
+      "and run on a shadow set's stack pointer it never read with rdpgpr" },
+    { "use_debug_exception_return", ATTR_REFUSED,
+      "the handler would return with eret where the debug exception "
+      "needs deret, and save DEPC as EPC" },
     /* avr-gcc's other spelling, and the one avr-libc's ISR() macro
      * expands to. `signal` leaves interrupts disabled in the body and
      * `interrupt` re-enables them on entry -- one `sei` apart. Refused
@@ -492,8 +620,7 @@ static const struct attr_entry attr_table[] = {
     { "no_sanitize", ATTR_NOOP, "EmbCC has no sanitizers to turn off" },
     { "no_sanitize_address", ATTR_NOOP, "EmbCC has no sanitizers" },
     { "no_sanitize_undefined", ATTR_NOOP, "EmbCC has no sanitizers" },
-    { "no_instrument_function", ATTR_NOOP,
-      "EmbCC emits no instrumentation calls" },
+    { "no_instrument_function", ATTR_HONOURED, NULL },
     { "hot",       ATTR_NOOP, "EmbCC does not reorder code by frequency" },
     { "cold",      ATTR_NOOP, "EmbCC does not reorder code by frequency" },
     { "flatten",   ATTR_NOOP,
@@ -638,6 +765,64 @@ static void pcs_not_here(struct parser *ps, const struct attrs *a,
 static struct expr *parse_cond(struct parser *ps);
 static int size_fold(const struct expr *e, long *out);
 
+/* A cmse_nonsecure_call still pending when its declaration is complete
+ * had no function type after it to attach to -- `int __attribute__((
+ * cmse_nonsecure_call)) x;`, or after the declarator -- and dropping it
+ * would make a call that should clear the registers and BLXNS an ordinary
+ * BLX into the Non-secure state's code. */
+static void cmse_call_leftover(struct parser *ps)
+{
+    if (ps->cmse_call_pending) {
+        ps->cmse_call_pending = 0;
+        parse_error_line(ps, ps->cmse_call_line,
+            "cmse_nonsecure_call applies to a function type, written among "
+            "the specifiers before its declarator: `typedef int "
+            "__attribute__((cmse_nonsecure_call)) ns_fn(int);` or `void "
+            "__attribute__((cmse_nonsecure_call)) (*fp)(void);`");
+    }
+}
+
+/* interrupt's argument: which kind of handler, as struct func's is_isr
+ * says. RISC-V's are GCC's and clang's -- "machine" (the default, mret)
+ * and "supervisor" (sret); MIPS's are "eic" (the default) and
+ * "vector=sw0".."vector=hw5", as both compilers spell them. Anything
+ * else is refused rather than read as the default: a handler for the
+ * wrong mode returns with the wrong instruction. Elsewhere the argument
+ * is not read, as before. */
+static int isr_kind(struct parser *ps, int line, const char *arg)
+{
+    enum target_arch a = target_get();
+    if (a == TARGET_RISCV32 || a == TARGET_RISCV64) {
+        if (!arg || !strcmp(arg, "machine"))
+            return ISR_INTERRUPT;
+        if (!strcmp(arg, "supervisor"))
+            return ISR_SUPERVISOR;
+        if (!strcmp(arg, "user"))
+            parse_error_line(ps, line,
+                "__attribute__((interrupt(\"user\"))) is not supported: "
+                "user-mode interrupts (the N extension and its uret) were "
+                "never ratified and are gone from the privileged spec, and "
+                "GCC and clang no longer accept them");
+        parse_error_line(ps, line,
+            "interrupt wants \"machine\" or \"supervisor\" on RISC-V, "
+            "not \"%s\"", arg);
+    }
+    if (a == TARGET_MIPS32) {
+        static const char *const vec[8] = { "sw0", "sw1", "hw0", "hw1",
+                                            "hw2", "hw3", "hw4", "hw5" };
+        if (!arg || !strcmp(arg, "eic"))
+            return ISR_INTERRUPT;
+        if (!strncmp(arg, "vector=", 7))
+            for (int k = 0; k < 8; k++)
+                if (!strcmp(arg + 7, vec[k]))
+                    return ISR_MIPS_VECTOR + k;
+        parse_error_line(ps, line,
+            "interrupt wants \"eic\" or \"vector=sw0\" .. "
+            "\"vector=hw5\" on MIPS, not \"%s\"", arg);
+    }
+    return ISR_INTERRUPT;
+}
+
 static void parse_attributes(struct parser *ps, struct attrs *out)
 {
     /* Two spellings, one body. C23 writes `[[noreturn]]` where GNU
@@ -766,7 +951,14 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                         "ignored", name);
                 else if (ae->disp == ATTR_REFUSED &&
                          !(attr_is(name, "interrupt") &&
-                           target_get() == TARGET_THUMB) &&
+                           target_get() == TARGET_THUMB &&
+                           !target_arm_a32()) &&
+                         !(attr_is(name, "interrupt") &&
+                           (target_get() == TARGET_RISCV32 ||
+                            target_get() == TARGET_RISCV64 ||
+                            target_get() == TARGET_MIPS32)) &&
+                         !(attr_is(name, "keep_interrupts_masked") &&
+                           target_get() == TARGET_MIPS32) &&
                          !(attr_is(name, "naked") &&
                            target_get() != TARGET_X86_64 &&
                            target_get() != TARGET_AARCH64) &&
@@ -780,6 +972,28 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                     diag_warn_opt(ps->lx.file, aline, 0, "attributes",
                         "__attribute__((%s)) is accepted but does nothing "
                         "here: %s", name, ae->why);
+            }
+            /* CMSE. Without -mcmse there is no Secure side to build, and
+             * both are ignored with a warning, as clang and GCC do: the
+             * function or the call is then an ordinary one, which is what
+             * a Non-secure build of the same header needs. */
+            if (name && (attr_is(name, "cmse_nonsecure_entry") ||
+                         attr_is(name, "cmse_nonsecure_call"))) {
+                int entry = attr_is(name, "cmse_nonsecure_entry");
+                if (!target_thumb_cmse())
+                    diag_warn_opt(ps->lx.file, aline, 0, "attributes",
+                        "__attribute__((%s)) is ignored without -mcmse "
+                        "(the Secure side of an ARMv8-M build)", name);
+                else if (entry && !out)
+                    parse_error_line(ps, aline,
+                        "cmse_nonsecure_entry is only supported on a "
+                        "function declaration");
+                else if (entry)
+                    out->cmse_entry = 1;
+                else {
+                    ps->cmse_call_pending = 1;
+                    ps->cmse_call_line = aline;
+                }
             }
             if (name && attr_is(name, "pcs")) {
                 int v = sarg && !strcmp(sarg, "aapcs") ? 1
@@ -809,7 +1023,16 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "signal")) out->isr = 1;
                 else if (attr_is(name, "naked")) out->naked = 1;
-                else if (attr_is(name, "interrupt")) out->isr = 2;
+                else if (attr_is(name, "interrupt")) {
+                    int k = isr_kind(ps, aline, sarg);
+                    if (ISR_KIND(out->isr) && ISR_KIND(out->isr) != k)
+                        parse_error_line(ps, aline,
+                            "two different interrupt attributes on one "
+                            "declaration");
+                    out->isr = (out->isr & ISR_MASKED) | k;
+                }
+                else if (attr_is(name, "keep_interrupts_masked"))
+                    out->isr |= ISR_MASKED;
                 else if (attr_is(name, "noreturn")) out->noreturn = 1;
                 else if (attr_is(name, "nothrow")) out->nothrow = 1;
                 else if (attr_is(name, "embcc_sret")) out->sret = 1;
@@ -817,6 +1040,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "unused")) out->unused = 1;
                 else if (attr_is(name, "always_inline")) out->always_inline = 1;
                 else if (attr_is(name, "noinline")) out->noinline = 1;
+                else if (attr_is(name, "no_instrument_function"))
+                    out->no_instrument = 1;
                 else if (attr_is(name, "gnu_inline")) out->gnu_inline = 1;
                 else if (attr_is(name, "deprecated")) out->deprecated = 1;
                 else if (attr_is(name, "warn_unused_result"))
@@ -835,19 +1060,27 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 }
                 else if (attr_is(name, "constructor") ||
                          attr_is(name, "destructor")) {
-                    /* A priority orders the array, and EmbCC emits one
-                     * .init_array in source order. Accepting the
-                     * argument and ignoring it would run them in the
-                     * wrong order, which is the whole point of writing
-                     * one -- so it is refused and the plain form is
-                     * not. */
-                    if (arg >= 0)
+                    /* A priority orders the array: the object puts the
+                     * address in .init_array.NNNNN (.fini_array.NNNNN),
+                     * as GCC does, and the link sorts those ascending
+                     * ahead of the plain one (embld's default layout,
+                     * SORT_BY_INIT_PRIORITY in a script). GCC's range;
+                     * 0-100 are the implementation's, and it says so. */
+                    if (arg > 65535)
                         parse_error_line(ps, aline,
-                            "__attribute__((%s(%ld))) is not supported: "
-                            "EmbCC emits one .init_array in source order "
-                            "and cannot honour a priority", name, arg);
-                    if (attr_is(name, "constructor")) out->ctor = 1;
-                    else out->dtor = 1;
+                            "__attribute__((%s(%ld))): a priority is 0 to "
+                            "65535", name, arg);
+                    if (arg >= 0 && arg <= 100)
+                        diag_warn_opt(ps->lx.file, aline, 0, "prio-ctor-dtor",
+                            "%s priorities from 0 to 100 are reserved for "
+                            "the implementation", name);
+                    if (attr_is(name, "constructor")) {
+                        out->ctor = 1;
+                        out->ctor_prio = arg >= 0 ? (int)arg + 1 : 0;
+                    } else {
+                        out->dtor = 1;
+                        out->dtor_prio = arg >= 0 ? (int)arg + 1 : 0;
+                    }
                 }
                 else if (attr_is(name, "aligned"))
                     out->aligned = arg > 0 ? (int)arg : 16;
@@ -931,6 +1164,8 @@ static const struct expr *generic_choice(const struct expr *e);
 static struct type *parse_array_dims(struct parser *ps, struct type *t);
 static struct expr *new_expr(enum expr_kind kind, int line, int col);
 static struct type *parse_type_spec(struct parser *ps, int allow_body);
+static struct type *parse_type_spec_attrs(struct parser *ps, int allow_body,
+                                          struct attrs *a);
 static void parse_static_assert(struct parser *ps);
 static int at_pack(struct parser *ps);
 static int parse_constexpr(struct parser *ps);
@@ -1126,6 +1361,8 @@ static struct type *parse_type_name(struct parser *ps, struct type *base)
  * and only on the first parameter. */
 static int param_sret_attr(struct parser *ps, int index, int *unused)
 {
+    while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
+        ps->lead_flash = 1;            /* `__flash char *p` */
     if (cur(ps)->kind != TOK_KW_ATTRIBUTE)
         return 0;
     struct token *at = cur(ps);
@@ -1153,6 +1390,10 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     /* The declarator being parsed has its name already: the parameters'
      * own declarators must not leave theirs in its place. */
     int name_line = ps->decl_name_line, name_col = ps->decl_name_col;
+    /* A pending cmse_nonsecure_call belongs to THIS function type, not to
+     * one among its parameters' types. */
+    int cmse_call = ps->cmse_call_pending;
+    ps->cmse_call_pending = 0;
     expect(ps, TOK_LPAREN, "'('");
     int saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
@@ -1184,13 +1425,18 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
              * The last was a syntax error, and `unused` was dropped from
              * all three, so -Wunused-parameter still fired. */
             ps->stars_unused = 0;
+            while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
+                ps->lead_flash = 1;    /* `__flash char *p` */
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
             }
-            struct type *spec = parse_type_spec(ps, 0);
+            struct attrs sat = { 0 };
+            struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            pcs_not_here(ps, &sat, "a parameter");
+            unused |= sat.unused;
             if (!spec)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a parameter type before %s",
@@ -1230,11 +1476,13 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
         }
     }
     expect(ps, TOK_RPAREN, "')'");
+    cmse_call_leftover(ps);             /* one a parameter could not take */
     ps->vla_ok = saved_vla_ok;
     ps->decl_name_line = name_line;
     ps->decl_name_col = name_col;
     struct type *ft = ty_func(ret, pt, n, varargs);
     ft->sret_first = sret;
+    ft->cmse_ns_call = cmse_call;
     return ft;
 }
 
@@ -1282,14 +1530,8 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                            "define enums at file scope");
             parse_enum_body(ps, under);
         }
-        if (tag && !find_tag(ps, tag)) {
-            struct tagdef *td = xcalloc(1, sizeof *td);
-            td->tag = tag;
-            td->kind = kind;
-            td->ty = under;
-            td->next = ps->tags;
-            ps->tags = td;
-        }
+        if (tag && !find_tag(ps, tag))
+            push_tag(ps, tag, kind, under);
         return under;
     }
 
@@ -1309,6 +1551,12 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
         struct tagdef *etd = NULL;
         if (tag) {
             struct tagdef *td = find_tag(ps, tag);
+            /* A definition in an inner block declares a NEW type, hiding
+             * the outer one for the rest of the block (C11 6.7.2.3p4) --
+             * not a redefinition, and not a completion of an outer
+             * `struct s;` either. */
+            if (td && td->blk != ps->tag_blk)
+                td = NULL;
             if (td) {
                 if (td->kind != kind)
                     parse_error_line(ps, line,
@@ -1318,13 +1566,9 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                                "redefinition of '%s'", tag);
                 t = td->ty;
             } else {
-                td = xcalloc(1, sizeof *td);
-                td->tag = tag;
-                td->kind = kind;
-                if (kind != TAG_ENUM)
-                    td->ty = ty_struct(tag, kind == TAG_UNION);
-                td->next = ps->tags;
-                ps->tags = td;
+                td = push_tag(ps, tag, kind,
+                              kind != TAG_ENUM
+                              ? ty_struct(tag, kind == TAG_UNION) : NULL);
                 t = td->ty;
             }
             etd = td;
@@ -1361,13 +1605,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
     if (kind == TAG_ENUM)
         parse_error_line(ps, line, "unknown enum '%s'", tag);
     /* Forward reference: an incomplete struct, fine behind a pointer */
-    td = xcalloc(1, sizeof *td);
-    td->tag = tag;
-    td->kind = kind;
-    td->ty = ty_struct(tag, kind == TAG_UNION);
-    td->next = ps->tags;
-    ps->tags = td;
-    return td->ty;
+    return push_tag(ps, tag, kind, ty_struct(tag, kind == TAG_UNION))->ty;
 }
 
 /* Consumes a type specifier if one starts here, else returns NULL with
@@ -1379,15 +1617,71 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
 static struct type *parse_type_spec(struct parser *ps, int allow_body)
 {
     int q = 0;
-    struct type *t = parse_type_spec_inner(ps, allow_body, &q);
+    struct attrs outer = ps->spec_slot;
+    int outer_on = ps->spec_on;
+    ps->spec_on = ps->spec_want;
+    ps->spec_want = 0;
+    if (ps->spec_on)
+        ps->spec_slot = ps->spec_seed;
+    else
+        memset(&ps->spec_slot, 0, sizeof ps->spec_slot);
+    /* a __flash written before the storage class (`__flash static
+     * const char t[]`), where the declaration's own attribute parse met
+     * it: this declaration's, so taken before a struct body's members
+     * can parse a type of their own */
+    if (ps->lead_flash) {
+        ps->lead_flash = 0;
+        q |= Q_FLASH;
+    }
+    int q2 = 0;
+    struct type *t = parse_type_spec_inner(ps, allow_body, &q2);
+    q |= q2;
+    ps->spec_out = ps->spec_slot;
+    ps->spec_slot = outer;
+    ps->spec_on = outer_on;
     /* set AFTER the inner parse, which may hold types of its own (a
      * struct body, typeof): these are this declaration's specifiers */
     ps->spec_const = ps->q_top = (q & Q_CONST) != 0;
     if (t && (q & Q_CONST))
         t = ty_const(t);      /* so does const: _Generic and sema see it */
+    if (t && (q & Q_FLASH))
+        t = ty_flash(t);      /* program memory: every read is an LPM */
     if (t && (q & Q_ATOMIC))
         return ty_atomic(t);
     return (t && (q & Q_VOL)) ? ty_volatile(t) : t;   /* volatile reaches the type */
+}
+
+/* parse_type_spec for a declaration, whose attributes *a gains the ones
+ * written among its specifiers */
+static struct type *parse_type_spec_attrs(struct parser *ps, int allow_body,
+                                          struct attrs *a)
+{
+    ps->spec_seed = *a;
+    ps->spec_want = 1;
+    struct type *t = parse_type_spec(ps, allow_body);
+    *a = ps->spec_out;
+    return t;
+}
+
+/* An __attribute__ among the specifiers, before the type: the
+ * declaration's (see spec_slot), or, in a type name, kept only when
+ * dropping it changes nothing -- the rule parse_stars applies. */
+static void spec_attr(struct parser *ps)
+{
+    struct token *at_tok = cur(ps);
+    struct attrs a = { 0 };
+    if (ps->spec_on) {
+        parse_attributes(ps, &ps->spec_slot);
+        return;
+    }
+    parse_attributes(ps, &a);
+    if (a.packed || a.aligned || a.weak || a.noreturn || a.section || a.pcs)
+        parse_error_at(ps, at_tok->line, at_tok->col,
+                "__attribute__((%s)) is not supported in a type name: "
+                "there is no declaration here to carry it",
+                a.packed ? "packed" : a.aligned ? "aligned"
+                : a.weak ? "weak" : a.noreturn ? "noreturn"
+                : a.section ? "section" : "pcs");
 }
 
 /* `_Alignas(N)` / `_Alignas(type-name)` — a C11 alignment specifier among the
@@ -1425,6 +1719,10 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
                                           int *vol)
 {
     *vol = skip_quals(ps);
+    while (cur(ps)->kind == TOK_KW_ATTRIBUTE) {   /* `const __attribute__((x)) int` */
+        spec_attr(ps);
+        *vol |= skip_quals(ps);
+    }
     consume_alignas(ps);
     /* GNU `typeof(x)` / `typeof(type)` — the type of an expression (never
      * evaluated, like sizeof) or a type-name. The expression's type is resolved
@@ -1542,6 +1840,13 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             advance(ps); continue;
         }
         else if (k == TOK_KW_ALIGNAS) { consume_alignas(ps); continue; }
+        else if (k == TOK_KW_ATTRIBUTE) {   /* __flash after a type spec */
+            int q = addr_space_qual(ps);
+            if (!q)
+                break;
+            *vol |= q;
+            continue;
+        }
         else if (k == TOK_KW_ATOMIC) {   /* qualifier form after a type spec */
             struct lexer save = ps->lx;
             advance(ps);
@@ -1697,6 +2002,8 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
          * every use. That volatile was dropped, so a loop polling a
          * pointer an interrupt handler advances read it once. */
         int q = skip_quals(ps);
+        if (q & Q_FLASH)
+            t = ty_flash(t);
         if (q & Q_ATOMIC)
             t = ty_atomic(t);
         else if (q & Q_VOL)
@@ -1872,17 +2179,16 @@ static struct type *ce_type(const struct expr *e)
          * length including the NUL and `str_width` the bytes per
          * element, so the two give the count for a wide literal as well
          * as a plain one. */
-        /* Only the plain byte literal, whose element is `char` and
-         * whose `num` is its length including the NUL. A prefixed one
-         * (L"", u"", U"") is left unanswered rather than guessed:
-         * reconstructing its element count from num and str_width here
-         * got u"ab" wrong and L"ab" zero, and a wrong sizeof is worse
-         * than the NULL this pass already returned for all of them. */
-        if (e->str_width > 1 || e->str_prefix)
+        /* sema's type exactly (ty_str_elem): `num` counts the ELEMENTS,
+         * the NUL included (lit_encode's units), and `str_width` is the
+         * bytes of each -- so sizeof(L"ab") is 3 wchar_t, whatever
+         * wchar_t is (-fshort-wchar, AVR, Xtensa). An element whose size
+         * is not the literal's width would make a wrong sizeof, which is
+         * worse than none: left unanswered. */
+        struct type *elem = ty_str_elem(e->str_prefix);
+        if (ty_size(elem) != (e->str_width ? e->str_width : 1))
             return NULL;
-        /* Plain char, as sema types it: a folded _Generic matches as
-         * strictly as sema's, and signed char is not `char`. */
-        return ty_array(ty_plain_char(), (int)e->num);
+        return ty_array(elem, (int)e->num);
     }
     case EXPR_CAST:
         return e->cast_ty;
@@ -2005,7 +2311,8 @@ static struct type *ce_type(const struct expr *e)
                         ? (bt->kind == TY_PTR ? bt->pointee : NULL) : bt;
         if (!st || st->kind != TY_STRUCT || !st->complete)
             return NULL;
-        struct member *m = ty_find_member(st, e->name);
+        long moff;
+        struct member *m = ty_find_member_deep(st, e->name, &moff);
         return m ? m->ty : NULL;
     }
     default:
@@ -2268,6 +2575,14 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
         ndims++;
         expect(ps, TOK_RBRACKET, "']'");
     }
+    /* Elements of a typedef aligned beyond its size (`typedef int A8
+     * __attribute__((aligned(8)))`) cannot all be aligned: the second
+     * would sit at 4. GCC and clang refuse the array; so does this. */
+    if (ndims && t->align_ovr && ty_size(t) > 0 && ty_size(t) % ty_align(t))
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                   "the size of an array element of type %s (%d bytes) is "
+                   "not a multiple of its alignment (%d bytes)",
+                   ty_name(t), ty_size(t), ty_align(t));
     /* Innermost first. Once any dimension is variable, every dimension
      * outside it is too — `int a[3][n]` is 3 rows of a run-time size — so
      * each becomes a VLA node (with its constant as the length). */
@@ -2315,9 +2630,9 @@ static struct type *parse_struct_body(struct parser *ps, struct type *t,
          * to theirs. gcc and clang accept both; this refused the first. */
         struct attrs lmat = { 0 };
         parse_attributes(ps, &lmat);
-        pcs_not_here(ps, &lmat, "a member");
         /* allow_body: nested struct/union definitions are legal C */
-        struct type *spec = parse_type_spec(ps, 1);
+        struct type *spec = parse_type_spec_attrs(ps, 1, &lmat);
+        pcs_not_here(ps, &lmat, "a member");
         if (!spec)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a member type before %s",
@@ -2902,7 +3217,9 @@ static struct expr *parse_primary(struct parser *ps)
                 if (cur(ps)->kind != TOK_IDENT)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "expected a member name in offsetof");
-                struct member *m2 = ty_find_member(ty, cur(ps)->text);
+                long moff = 0;
+                struct member *m2 = ty_find_member_deep(ty, cur(ps)->text,
+                                                        &moff);
                 if (!m2)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "%s has no member '%s'", ty_name(ty),
@@ -2913,7 +3230,7 @@ static struct expr *parse_primary(struct parser *ps)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "offsetof cannot name the bit-field '%s'",
                                cur(ps)->text);
-                off += m2->off;
+                off += moff;
                 ty = m2->ty;
                 advance(ps);
                 while (cur(ps)->kind == TOK_LBRACKET) {
@@ -3630,13 +3947,25 @@ static struct stmt *parse_controlled(struct parser *ps)
     return parse_stmt(ps, 0);
 }
 
+/* A block's tags leave scope with it (struct tagdef). */
+static void close_tags(struct parser *ps, struct tagdef *mark, int outer)
+{
+    for (struct tagdef *t = ps->tags; t && t != mark; t = t->next)
+        t->dead = 1;
+    ps->tag_blk = outer;
+}
+
 static struct stmt *parse_block(struct parser *ps)
 {
     struct stmt *s = new_stmt(STMT_BLOCK, cur(ps)->line, cur(ps)->col);
     int lmark = ps->nlmap;
     int fmark = g_nfold_locals;     /* the block's locals leave with it */
+    struct tagdef *tmark;
+    int tblk = ps->tag_blk;
     ps->blkdepth++;
     expect(ps, TOK_LBRACE, "'{'");
+    tmark = ps->tags;
+    ps->tag_blk = ++ps->tag_blk_seq;
     struct stmt **volatile tail = &s->body;
     while (cur(ps)->kind != TOK_RBRACE) {
         if (cur(ps)->kind == TOK_EOF) {
@@ -3648,6 +3977,7 @@ static struct stmt *parse_block(struct parser *ps)
             ps->nlmap = lmark;
             g_nfold_locals = fmark;
             ps->blkdepth--;
+            close_tags(ps, tmark, tblk);
             return s;
         }
         jmp_buf jb, *save = ps->recover;
@@ -3669,6 +3999,7 @@ static struct stmt *parse_block(struct parser *ps)
     ps->nlmap = lmark;
     g_nfold_locals = fmark;
     ps->blkdepth--;
+    close_tags(ps, tmark, tblk);
     return s;
 }
 
@@ -3878,7 +4209,15 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                        "wrap it in braces");
         int is_td = t->kind == TOK_KW_TYPEDEF;
         advance(ps);
-        struct type *base = parse_type_spec(ps, 1);
+        /* attributes among the specifiers, as the trailing ones below:
+         * the extern's are a promise about the definition elsewhere, and
+         * a block-scope typedef's must not change the layout */
+        struct attrs bat = { 0 };
+        struct type *base = parse_type_spec_attrs(ps, 1, &bat);
+        if (is_td && bat.packed)
+            parse_error_at(ps, t->line, t->col,
+                       "a packed attribute on a typedef's name is not "
+                       "supported: put it on the struct it names");
         int spec_const = ps->spec_const;
         if (!base)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -3894,9 +4233,24 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 int tconst;
                 struct type *tt = parse_declarator_c(ps, base, &tname,
                                                      spec_const, &tconst);
+                /* `typedef int fn(int);` (see the file-scope typedef) */
+                if (tname && cur(ps)->kind == TOK_LPAREN)
+                    tt = parse_fn_params(ps, tt);
                 if (!tname)
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                                "typedef needs a name, got %s", tok_describe(cur(ps)));
+                /* the trailing attribute, before the name is entered: an
+                 * alignment is the type's, as at file scope */
+                struct attrs tat = bat;
+                tat.packed = 0;
+                if (at_attribute(ps))
+                    parse_attributes(ps, &tat);
+                if (tat.packed)
+                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                               "a packed attribute on a typedef's name is not "
+                               "supported: put it on the struct it names");
+                if (tat.aligned)
+                    tt = ty_aligned(tt, tat.aligned);
                 struct type *prev = find_typedef(ps, tname);
                 if (prev && !ty_equal(prev, tt))
                     parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -3947,17 +4301,6 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 struct attrs xat = { 0 };
                 parse_attributes(ps, &xat);
             }
-            if (is_td) {
-                /* a trailing attribute on a block-scope typedef: one
-                 * that changes the layout is refused, not dropped */
-                struct attrs tat = { 0 };
-                parse_attributes(ps, &tat);
-                if (tat.aligned || tat.packed)
-                    parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                               "an aligned or packed attribute on a "
-                               "block-scope typedef is not supported; "
-                               "declare the typedef at file scope");
-            }
             if (cur(ps)->kind == TOK_COMMA) { advance(ps); continue; }
             break;
         }
@@ -3975,6 +4318,10 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
      * failed with "expected a statement". The attributes are merged
      * with any trailing ones at the declarator below. */
     struct attrs lead = { 0 };
+    while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps)) {
+        ps->lead_flash = 1;        /* `__flash static const char t[]` */
+        t = cur(ps);
+    }
     if (at_attribute(ps)) {
         parse_attributes(ps, &lead);
         t = cur(ps);
@@ -4006,9 +4353,21 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * from a declaration the standard spells out. */
         while (cur(ps)->kind == TOK_KW_STATIC ||
                cur(ps)->kind == TOK_KW_THREAD ||
-               cur(ps)->kind == TOK_KW_ALIGNAS) {
+               cur(ps)->kind == TOK_KW_ALIGNAS ||
+               cur(ps)->kind == TOK_KW_ATTRIBUTE) {
             if (cur(ps)->kind == TOK_KW_ALIGNAS) {
                 consume_alignas(ps);       /* accumulates ps->alignas_out */
+                continue;
+            }
+            if (cur(ps)->kind == TOK_KW_ATTRIBUTE) {
+                /* `static __attribute__((aligned(4))) char t[4]`; a
+                 * __flash here is the type's, and parse_type_spec's */
+                struct lexer asave = ps->lx;
+                if (addr_space_qual(ps)) {
+                    ps->lx = asave;
+                    break;
+                }
+                parse_attributes(ps, &lead);
                 continue;
             }
             if (cur(ps)->kind == TOK_KW_STATIC)
@@ -4127,7 +4486,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * the one flat tag namespace EmbCC keeps -- fine for the anonymous
          * types real code uses here; a same-named tag in two scopes is the
          * documented limitation, not a miscompile. */
-        struct type *base = parse_type_spec(ps, 1);
+        struct type *base = parse_type_spec_attrs(ps, 1, &lead);
         int spec_const = ps->spec_const;
         /* every declarator takes the declaration's _Alignas, not only
          * the first */
@@ -4202,11 +4561,21 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                 parse_attributes(ps, &lat);
                 pcs_not_here(ps, &lat, "a variable");
                 pcs_not_here(ps, &lead, "a variable");
-                if (lat.section)
-                    parse_error_line(ps, s->line,
-                               "section attribute on block-scope '%s' is "
-                               "not supported — declare it at file scope",
-                               dname);
+                /* A static local is an object of static storage, and
+                 * goes where its section attribute says, as GCC puts it
+                 * (`static uint32_t boots __attribute__((section(
+                 * ".noinit")))` in a reset handler); sema's global takes
+                 * it. An automatic one lives on the stack: GCC refuses
+                 * it, and so does this. */
+                {
+                    const char *sec = lat.section ? lat.section : lead.section;
+                    if (sec && !local_static)
+                        parse_error_line(ps, s->line,
+                                   "section attribute on '%s', which is on "
+                                   "the stack: only a static local can be "
+                                   "placed in a section", dname);
+                    s->section = sec;
+                }
                 if (lead.aligned > lat.aligned)
                     lat.aligned = lead.aligned;
                 s->user_align = lat.aligned > decl_alignas
@@ -4833,6 +5202,8 @@ static void parse_top(struct parser *ps, struct unit *u,
              * legal and mean what they say. */
             is_tls = 1;
             advance(ps);
+        } else if (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps)) {
+            ps->lead_flash = 1;    /* `__flash const char t[]` */
         } else if (at_attribute(ps)) {
             parse_attributes(ps, &at); /* leading __attribute__((weak)) etc. */
         } else if (cur(ps)->kind == TOK_KW_ALIGNAS) {
@@ -4866,7 +5237,7 @@ static void parse_top(struct parser *ps, struct unit *u,
         struct attrs tdat = { 0 };
         if (at_attribute(ps))
             parse_attributes(ps, &tdat);
-        struct type *tbase = parse_type_spec(ps, 1);
+        struct type *tbase = parse_type_spec_attrs(ps, 1, &tdat);
         int spec_const = ps->spec_const;
         if (!tbase)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -4876,6 +5247,14 @@ static void parse_top(struct parser *ps, struct unit *u,
             int tconst;
             struct type *tt = parse_declarator_c(ps, tbase, &tname,
                                                  spec_const, &tconst);
+            /* `typedef int fn(int);`: a FUNCTION type's name. The
+             * declarator reads `(params)` after a name only inside
+             * parentheses; here, as for a function declaration, the
+             * caller does. CMSE's `typedef void
+             * __attribute__((cmse_nonsecure_call)) ns_fn(void);` is this
+             * shape, and it was a syntax error. */
+            if (tname && cur(ps)->kind == TOK_LPAREN)
+                tt = parse_fn_params(ps, tt);
             if (!tname)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "typedef needs a name, got %s",
@@ -4884,21 +5263,15 @@ static void parse_top(struct parser *ps, struct unit *u,
             if (at_attribute(ps))
                 parse_attributes(ps, &tdone);
             pcs_not_here(ps, &tdone, "a typedef");
-            /* An alignment on the NAME cannot be honoured: struct type
-             * has no per-type alignment override, so the typedef would
-             * silently name a type of ordinary alignment and a DMA
-             * buffer declared through it would sit wherever it landed.
-             * Refuse by name (THE RULE) rather than misalign quietly.
-             * A struct or union that carries its own aligned/packed is
-             * unaffected -- that is applied where the struct is
-             * defined, and reaches this typedef through the type. */
-            if (tdone.aligned && tdone.aligned > ty_align(tt))
-                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                           "__attribute__((aligned(%d))) on a typedef is not "
-                           "supported: EmbCC carries alignment on objects and "
-                           "on struct definitions, not on a type name; put it "
-                           "on the declaration that uses '%s'",
-                           tdone.aligned, tname);
+            /* An alignment on the NAME is the type's, larger or smaller
+             * than its own, with its size unchanged -- GCC's and clang's
+             * rule: `typedef uint8_t buf_t[64] __attribute__((aligned(4)))`
+             * for a DMA buffer, `typedef int una __attribute__((aligned(1)))`
+             * for an unaligned access (irgen's lv_natural). A struct or
+             * union that carries its own aligned/packed is unaffected --
+             * that is applied where the struct is defined. */
+            if (tdone.aligned)
+                tt = ty_aligned(tt, tdone.aligned);
             struct type *prev = find_typedef(ps, tname);
             if (prev && !ty_equal(prev, tt))
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -4921,7 +5294,7 @@ static void parse_top(struct parser *ps, struct unit *u,
     }
     if (cur(ps)->kind == TOK_IDENT)
         reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
-    struct type *base = parse_type_spec(ps, 1);
+    struct type *base = parse_type_spec_attrs(ps, 1, &at);
     int spec_const = ps->spec_const;
     if (!base)
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
@@ -4993,26 +5366,36 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_first = at.fmt_first;
                 f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    f->ctor_prio = at.ctor_prio;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
+    if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
+    f->dtor_prio = at.dtor_prio;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    if (at.no_instrument) f->attr_no_instrument = 1;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
     f->attr_warn_unused_result = at.warn_unused_result;
     f->vis = at.vis;
                 f->is_ctor = at.ctor;
+                f->ctor_prio = at.ctor_prio;
+    f->ctor_prio = at.ctor_prio;
                 if (at.isr) f->is_isr = at.isr;
                 if (at.naked) f->is_naked = 1;
+                if (at.cmse_entry) f->cmse_entry = 1;
                 f->is_dtor = at.dtor;
+                f->dtor_prio = at.dtor_prio;
+    f->dtor_prio = at.dtor_prio;
                 f->attr_used = at.used;
                 f->attr_unused = at.unused;
                 f->attr_always_inline = at.always_inline;
                 f->attr_noinline = at.noinline;
+                if (at.no_instrument) f->attr_no_instrument = 1;
                 f->attr_gnu_inline = at.gnu_inline;
                 f->pcs = at.pcs;
     f->pcs = at.pcs;
@@ -5090,13 +5473,17 @@ static void parse_top(struct parser *ps, struct unit *u,
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    f->ctor_prio = at.ctor_prio;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
+    if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
+    f->dtor_prio = at.dtor_prio;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    if (at.no_instrument) f->attr_no_instrument = 1;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;
@@ -5139,13 +5526,18 @@ static void parse_top(struct parser *ps, struct unit *u,
             /* Attributes before the type, between it and the name, and
              * after the name, as in parse_fn_params_named. */
             ps->stars_unused = 0;
+            while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
+                ps->lead_flash = 1;    /* `__flash char *p` */
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
                 pcs_not_here(ps, &pat, "a parameter");
                 unused |= pat.unused;
             }
-            struct type *spec = parse_type_spec(ps, 0);
+            struct attrs sat = { 0 };
+            struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            pcs_not_here(ps, &sat, "a parameter");
+            unused |= sat.unused;
             if (!spec)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a parameter type before %s",
@@ -5196,13 +5588,17 @@ fn_tail:
     f->fmt_first = at.fmt_first;
     f->is_nothrow = at.nothrow;
     f->is_ctor = at.ctor;
+    f->ctor_prio = at.ctor_prio;
     if (at.isr) f->is_isr = at.isr;
     if (at.naked) f->is_naked = 1;
+    if (at.cmse_entry) f->cmse_entry = 1;
     f->is_dtor = at.dtor;
+    f->dtor_prio = at.dtor_prio;
     f->attr_used = at.used;
     f->attr_unused = at.unused;
     f->attr_always_inline = at.always_inline;
     f->attr_noinline = at.noinline;
+    if (at.no_instrument) f->attr_no_instrument = 1;
     f->attr_gnu_inline = at.gnu_inline;
     f->pcs = at.pcs;
     f->attr_deprecated = at.deprecated;

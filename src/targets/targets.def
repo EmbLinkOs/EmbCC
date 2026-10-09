@@ -1,0 +1,52 @@
+/* The target database: what EmbCC knows about each target as data, one
+ * file per family. src/arch/target.c reads it; a backend keeps only the
+ * code that is genuinely per-architecture.
+ *
+ * A family file holds two kinds of row.
+ *
+ * DATA_MODEL(ARCH, .field = value, ...) -- one per `enum target_arch`
+ * (src/arch/target.h), the sizes and signedness C sees:
+ *   ptr, lng, it, dbl, ldbl  bytes in a pointer, long, int, double and
+ *                            long double;
+ *   char_uns, wchar_uns      1 when char, wchar_t are unsigned;
+ *   int128                   1 when __int128 exists;
+ *   maxal                    a cap on any scalar's alignment, 0 for none;
+ *   big_endian               1 for a big-endian-only architecture.
+ * A field left out is 0.
+ *
+ * TRIPLE(name, ARCH, OS, FORMAT, KIND, SUB, FLAG) -- one per spelling
+ * --target accepts:
+ *   ARCH    the `enum target_arch` without TARGET_;
+ *   OS      NONE (freestanding), EMBLINK, LINUX, DARWIN or WINDOWS;
+ *   FORMAT  the object file: ELF, MACHO or COFF;
+ *   KIND    CANONICAL for the one spelling the compiler prints back
+ *           (-dumpmachine, diagnostics, the runtime's directory), ALIAS
+ *           for another spelling it accepts;
+ *   SUB     the sub-architecture the name selects: BASE, or on ARM
+ *           ARM_V7EM, ARM_V8M_MAIN, ARM_V6M, ARM_V8M_BASE, ARM_V7A;
+ *   FLAG    PLAIN, HF (ARM's hard-float convention) or BE (big-endian,
+ *           on an architecture with both byte orders).
+ * Each (ARCH, OS, SUB, FLAG) has at most one CANONICAL row.
+ *
+ * The triples are explicit rather than an architecture list crossed with
+ * an OS list, because the cross product contains combinations that do
+ * not exist (aarch64-windows-gnu) and combinations this compiler cannot
+ * yet write. A table that can only name what is real cannot accidentally
+ * accept what is not: an unknown target is refused loudly rather than
+ * approximated.
+ *
+ * A new family is a new file here and a line below, in the order
+ * an unknown --target lists them. */
+#include "x86.def"
+#include "aarch64.def"
+#include "arm.def"
+#include "riscv.def"
+#include "avr.def"
+#include "mips.def"
+#include "loongarch.def"
+#include "tricore.def"
+#include "xtensa.def"
+#include "ppc.def"
+#include "rx.def"
+#include "sparc.def"
+#include "m68k.def"

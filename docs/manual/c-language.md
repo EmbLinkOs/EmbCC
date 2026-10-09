@@ -319,7 +319,7 @@ there.
 | `long double _Complex` | Yes | Yes | No | Yes | Yes | Yes | No | No | Yes |
 | `__int128` | Yes | Yes | Not in a function signature | Yes | Yes | No | No | Declarations and `sizeof` only | No |
 | `_Float128` | No | No | No | Yes | No | No | Declarations and `sizeof` only | Declarations and `sizeof` only | No |
-| `_Atomic` operators | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 4 bytes | Load and store 1 to 4 bytes; read-modify-write 4 bytes | Load and store 1 to 8 bytes; read-modify-write 4 and 8 bytes | Load and store of 1 byte |
+| `_Atomic` operators | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes | 1 to 8 bytes; 8 by a `lib/rt` call | 1 to 8 bytes; 8 by a `lib/rt` call | 1 to 8 bytes | 1 to 8 bytes, with interrupts masked |
 | `_Thread_local` | Per thread | No | No | Per thread | No | One shared instance | One shared instance | One shared instance | One shared instance |
 
 "One shared instance" means the object is placed in `.tbss` but addressed
@@ -329,7 +329,6 @@ The errors for the "No" entries:
 
 | Case | Diagnostic |
 |---|---|
-| A VLA on AVR | `the AVR backend cannot lower a variable-length array yet (function f)` |
 | `long double` or `_Float128` arithmetic on RISC-V, `__int128` arithmetic on RV64 | `the RV64 backend cannot lower a 128-bit value yet (function f) [...]` (`RV32` on RV32) |
 | `long double` in a signature on Windows | `long double in the signature of 'f' is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
 | `long double _Complex` arithmetic on Windows | `passing long double is not supported for a Windows target yet: there it travels by reference and returns through a hidden pointer, and EmbCC passes it on the stack by value` |
@@ -337,9 +336,7 @@ The errors for the "No" entries:
 | `__int128` on a 32-bit target or AVR | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `_Float128` on x86-64 | `` _Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type `` |
 | `_Float128` where `long double` is not 16 bytes | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
-| An `_Atomic` object wider than the machine moves at once | `an atomic access of 8 bytes is not one access on this target (it moves 4 at once): the halves could be split by an interrupt or another core` |
-| An atomic read-modify-write narrower than 4 bytes on RISC-V | `the RV32 backend cannot lower an atomic narrower than four bytes (the A extension has no such form, and a read-modify-write of the containing word is not atomic against its neighbours) yet (function f) [...]` |
-| An atomic read-modify-write on AVR | `the AVR backend cannot lower xadd yet (function f) [...]` |
+| An `_Atomic` object wider than the machine moves at once (16 bytes) | `an atomic access of 16 bytes is not one access on this target (it moves 8 at once): the halves could be split by an interrupt or another core` |
 | `_Thread_local` on macOS | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
 | `_Thread_local` on Windows | `__thread is not supported for a Windows target yet: Windows reaches a thread-local through a _tls_index and a TLS directory this writer does not emit` |
 | `va_arg` of a structure on Windows | `va_arg of a struct is not supported for a Windows target yet` |
@@ -368,6 +365,15 @@ A path also ends at an infinite loop, at a call to a function declared
 to `exit`, `_Exit`, `abort`, `__builtin_unreachable` or
 `__builtin_trap`. `embcc --explain E0008` describes the rule; see
 [Diagnostics](diagnostics.md#t6).
+
+### Case labels in nested statements
+
+A `case` or `default` label can be anywhere in its `switch` statement's
+body: in a nested block, in an `if`, or inside a loop, which the `switch`
+then enters in the middle (Duff's device). This follows C11 6.8.4.2. A
+nested `switch` has its own labels. Duplicate values and a second
+`default` are errors at any nesting depth, and a label with no `switch`
+around it is an error (`'case' outside of a switch`).
 
 ### Empty parameter lists
 
@@ -429,6 +435,13 @@ error: define enums at file scope (block-scope type definitions are not supporte
 ```
 
 An untagged structure in a cast, `(struct { int a; } *)p`, is accepted.
+
+A structure, union or enumeration tag declared in a block belongs to that
+block, as the standard specifies: two functions may each define
+`union u`, and an inner block's `struct s { ... }` declares a new type
+that hides an outer `struct s` until the block ends (CMSIS's
+`cmsis_gcc.h` defines `union llreg_u` inside each of its 64-bit DSP
+intrinsics).
 A local variable or a parameter may share its name with a typedef name
 or with an enumeration constant declared before it, and hides it, as the
 standard specifies. That includes an array bound:
@@ -577,7 +590,6 @@ Refused:
 | A VLA at file scope or as a structure member | `array size must be a constant expression here (a variable length array can only be a local variable or a parameter)` |
 | `static int a[n];` | `static 'a' cannot have a variably modified type (int[*])` |
 | `int a[n] = { 1 };`, `int a[n] = {};` | `variable length array 'a' cannot be initialized` |
-| Any VLA on AVR | `the AVR backend cannot lower a variable-length array yet (function f)` |
 
 A `goto` or `switch` that jumps into the scope of a VLA is not
 diagnosed, although the standard requires a diagnostic.
@@ -668,8 +680,7 @@ EmbCC limits, are handled as follows:
 | An alignment that is not a power of two, `_Alignas(3)` | Refused: `_Alignas requires a constant power of two`. |
 | An alignment weaker than the type's, `_Alignas(1) int` | Not diagnosed. The type's own alignment is kept. |
 | `_Alignas` in a typedef or on a parameter | Not diagnosed. |
-| An automatic scalar aligned beyond the stack's alignment, `_Alignas(32) int x;` | Refused: `'x' needs 32-byte alignment and the stack only guarantees 16: supported for an array or a struct, not yet for a scalar` |
-| On AVR, an alignment greater than 1 on an automatic object | Refused: `the AVR backend cannot lower a local with __attribute__((aligned)): AVR's stack pointer has no known alignment, so a frame slot cannot be given one yet (function f)` |
+| An automatic object aligned beyond the stack's alignment, `_Alignas(32) int x;` | Supported, scalar or aggregate: its storage is carved from the stack at function entry and rounded up to the alignment, so its address has it at any call depth. A scalar so aligned lives in that storage rather than in a register. |
 
 `_Alignof` applied to an expression is a GNU extension; see
 [Extensions](extensions.md).

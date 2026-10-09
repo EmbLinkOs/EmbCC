@@ -98,7 +98,9 @@ enum ir_op {
                 * the CFG, liveness and the allocator see through it where
                 * IR_IGOTO's unknown targets make them step aside. */
     IR_ARMW,  /* dst = *(temp a); *(temp a) = dst OP b   (atomic; size, w).
-               * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b).
+               * OP is in `imm`: '&' '|' '^', or 'n' for nand = ~(dst & b);
+               * on AVR only, 'L' for an atomic load wider than a byte:
+               * dst = *a, and nothing stored.
                * Add and subtract stay IR_XADD, which x86 does in one
                * locked instruction; these need a compare-and-swap loop. */
     IR_CAS,   /* dst = *(temp a); if dst == b then *(temp a) = c
@@ -110,9 +112,13 @@ enum ir_op {
                * (x86-64's lock cmpxchg16b, aarch64's exclusive pair;
                * a full barrier both) — irgen builds the other atomics of
                * an __int128 as loops of it */
-    IR_FRAMEADDR, /* dst = this function's frame pointer (rbp / x29), which
-                   * on both targets points at [saved fp][return address] —
-                   * the base of __builtin_frame_address/_return_address */
+    IR_FRAMEADDR, /* imm 0: dst = this function's frame pointer (rbp /
+                   * x29 / a6), which points at [saved fp][return address]
+                   * — the base of __builtin_frame_address/_return_address.
+                   * Where there is no such chain (target_has_frame_chain),
+                   * level 0 only: imm 1, the frame address (sp at entry);
+                   * imm 2, the return address the function was entered
+                   * with */
     IR_ALLOCA,    /* dst = a fresh 16-aligned block of `a` bytes on the
                    * stack, above the outgoing-argument area (a VLA) */
     IR_SPSAVE,    /* dst = the stack pointer */
@@ -165,7 +171,23 @@ enum ir_op {
                 * which is why it takes a half at a time -- and why a
                 * widening sum needs two accumulators. */
 
-    IR_OPCOUNT    /* not an opcode: the table size, so print and parse can
+    /* ---- the 32x32->64 multiply, for the 32-bit machines -----------
+     *
+     * Both read their operands as 32-bit values, whatever `w` says, and
+     * `sign` says how: 1 signed by signed, 0 unsigned by unsigned. They
+     * exist because the IR's only multiply keeps the low half at its
+     * width, so a 32-bit machine that HAS a widening multiply (umull,
+     * mulhu, multu, mulhwu, umul and %y...) had to be handed a 64-bit
+     * multiply of two extended values -- four multiplies on RV32 -- or,
+     * for a division by a constant, nothing at all. Emitted only where
+     * target_has_mulh() says the backend lowers them; the folders take
+     * them by the same definition (fold_bin). */
+    IR_MULH,   /* dst = the HIGH 32 bits of the 64-bit product a * b
+                * (w 4, sign) -- mulh/mulhu, smull/umull's high register */
+    IR_MULW,   /* dst = the whole 64-bit product of 32-bit a and b
+                * (w 8, sign) -- mul + mulh, smull/umull, mult/multu */
+
+    IR_OPCOUNT   /* not an opcode: the table size, so print and parse can
                    * agree on how many there are */
 };
 
@@ -197,6 +219,13 @@ struct ir_asm_op {
 struct ir_asm {
     const unsigned char *code;   /* assembled template bytes */
     int codelen;
+    /* [start, end) pairs of DATA in code -- a template's `.word` and the
+     * like -- as struct code's drange, which a backend that copies the
+     * bytes into its function may carry over (the ARMv6-M one does, so
+     * its scan for Thumb-2 instructions passes over them). NULL, 0 for
+     * none, which is every target but Thumb's. */
+    const int *drange;
+    int ndrange;
     struct ir_asm_op *in;
     int nin;
     struct ir_asm_op *out;
@@ -215,6 +244,10 @@ struct ir_asm {
      * asm is then treated as a call. */
     unsigned long clob;
     int scr;     /* the scratch the lowering stores outputs through, or -1 */
+    /* The template calls -- or otherwise writes the link register -- so
+     * the function holding it is not a leaf: PowerPC's LR must be saved
+     * around it (ppc/irgen.c). 0 elsewhere. */
+    int calls;
 };
 
 /* A jump table: the targets of one IR_SWITCH, for index values 0..n-1; a
@@ -223,6 +256,14 @@ struct ir_asm {
  * copy of one wants, since a pass that retargets labels rewrites the table
  * once for all of them. */
 struct ir_jt { int n; int *labels; };
+
+/* An atomic read-modify-write's memory order (ir_ins.mo). Consume is
+ * acquire; seq_cst is 0, so an instruction built without one is the
+ * strongest. RISC-V maps them to .aq and .rl as clang does. */
+enum {
+    IR_MO_SEQ_CST = 0, IR_MO_RELAXED, IR_MO_ACQUIRE, IR_MO_RELEASE,
+    IR_MO_ACQ_REL
+};
 
 struct ir_ins {
     enum ir_op op;
@@ -237,12 +278,19 @@ struct ir_ins {
     int synth;
     int dst, a, b;
     int c;                   /* IR_CMPXCHG: the third operand (desired value) */
+    int mo;                  /* IR_XCHG/XADD/ARMW/CAS/CMPXCHG: the memory
+                              * order, IR_MO_*. 0 -- what every hand-built
+                              * one has -- is seq_cst, the strongest; a
+                              * backend may always treat any as seq_cst */
     int w;                   /* 4 or 8: operation width class */
     int size;                /* 1/2/4/8: memory width for LD/ST/EXT */
     int sign;                /* signed variant of the op */
     int flt;                 /* operate in xmm at width w (SSE scalar) */
     int vol;                 /* LOAD/STORE/LDVAR/STVAR: a `volatile` access —
                               * the optimizer must never CSE or remove it (MMIO) */
+    int flash;               /* LOAD: from AVR program memory (__flash), read
+                              * with LPM. Set with vol, so no pass folds it into
+                              * an ordinary load or a memcpy (irgen emit_load) */
     long imm;                /* IR_CONST; also the folded value when imm_b */
     int imm_b;               /* ADD/SUB/AND/OR/XOR/CMP: operand b is the constant
                               * in `imm` (an immediate), not vreg b — set by the
@@ -259,6 +307,8 @@ struct ir_ins {
     int indirect;            /* IR_CALL through a function pointer */
     int sret_first;          /* IR_CALL: argument 0 is the indirect-result
                               * pointer (type.h sret_first) */
+    int sret_size;           /* ...and the size of the object it points at
+                              * (SPARC's unimp after the call), or 0 */
     int call_varargs;        /* al = 0 needed at the call */
     int memoff;              /* IR_LOAD/IR_STORE: a constant byte offset
                               * added to the address -- set only by a
@@ -275,6 +325,10 @@ struct ir_ins {
                               * a misaligned address must not use them. */
     int call_pcs;            /* IR_CALL: the callee's pcs attribute (ARM;
                               * see target_pcs_vfp) */
+    int call_cmse;           /* IR_CALL, indirect: through a pointer to a
+                              * cmse_nonsecure_call function type (-mcmse):
+                              * the registers and flags are cleared and the
+                              * branch is a BLXNS (src/arch/thumb) */
     int call_nfixed;         /* IR_CALL: how many NAMED parameters the
                               * callee has. Needed because Darwin's
                               * arm64 passes every argument past them on
@@ -301,6 +355,11 @@ struct ir_ins {
          * reads these instead of walking `ty`. */
         int align;
         int nat_align;       /* ty_natural_align; 0 when not filled: align */
+        /* A struct argument: its address (vreg) is aligned to its type,
+         * because C promises it there -- 0 for a packed struct's member,
+         * and for anything irgen did not say. A backend whose aligned-only
+         * loads fault (Xtensa) reads a 0 one a byte at a time. */
+        int natural;
         int is_float;
         int is_int128;
         int hfa_n, hfa_size;
@@ -316,7 +375,14 @@ struct ir_ins {
                                 * (a Homogeneous Floating-point Aggregate
                                 * travels in v registers), which the SysV
                                 * classes above cannot express */
-    } argv[MAX_PARAMS];
+    } *argv;                 /* IR_CALL: nargs of them, out of line. They
+                              * were MAX_PARAMS inline in EVERY instruction
+                              * -- 2.6 KB of an ir_ins's 2.8 -- and each pass
+                              * that rebuilds a function copies all of it.
+                              * A call's array is its own: an instruction
+                              * copied while the original stays (the
+                              * inliner) takes ir_args_copy, and the verifier
+                              * refuses two live calls sharing one. */
     int nargs;
     /* IR_CALL returning a struct: its size, classification, and the
      * caller-side scratch the result lands in. nclass 0 means MEMORY,
@@ -337,6 +403,9 @@ struct ir_ins {
      * where the type still exists (§9.1). Zero size means "no scalar
      * result" -- a void call, or a struct, which retsize describes. */
     int ret_tybytes, ret_tysign;
+    /* TriCore: the call's result is a POINTER, which comes back in the
+     * address register A2 rather than in D2 (irgen sets it there only). */
+    int ret_ptr;
     /* The same, for the value a call returns. */
     int ret_hfa_n, ret_hfa_size;
     int ret_byref;
@@ -377,6 +446,15 @@ struct ir_csite {
  * emitter, which brackets each function's rows with set_address/end_sequence
  * using the function's code_off/code_len (on struct func). */
 struct ir_line { int off; int line; };
+/* -g: one step of a function's prologue, as call frame information
+ * (src/debug/dwarf.c writes .debug_frame from these). `off` is the byte
+ * offset from the function's start where the step has taken effect. */
+enum {
+    IR_CFI_CFA_OFFSET,   /* the CFA is now the CFA register + val */
+    IR_CFI_CFA_REG,      /* the CFA is now DWARF register `reg` + val */
+    IR_CFI_SAVED         /* DWARF register `reg` is saved at CFA + val */
+};
+struct ir_cfi { int off, kind, reg; long val; };
 
 /* -g: a source-level variable (parameter or local). Its storage is the frame
  * slot of vreg `vreg`; irgen records name/vreg/type, codegen fills the slot's
@@ -392,6 +470,12 @@ struct ir_dbgvar {
     int is_param;
     struct type *ty;
     int line, col;
+    /* mem2reg took this variable out of memory although something
+     * assigned it: its slot no longer follows it. Its only reader is a
+     * backend deciding whether the slot is a true DW_AT_location -- for a
+     * parameter, whose slot the prologue still writes, that is the one
+     * thing that says the value there went stale. */
+    int moved;
 };
 
 /* What EmbIR needs to know about one frame slot's type, decided at irgen
@@ -439,6 +523,7 @@ struct ir_func {
     /* The function's own return type, classified as a call's is. */
     struct ir_arg ret_abi;
     int pcs;                 /* its own pcs attribute (ARM) */
+    int cmse_entry;          /* cmse_nonsecure_entry (-mcmse; struct func) */
 
     struct func *src;        /* code_off/len; the types not yet interned */
     int nvregs;
@@ -456,9 +541,17 @@ struct ir_func {
     int njt, jtcap;
     struct ir_line *lines;   /* -g: (offset, line) rows in .text order */
     int nlines, linecap;
+    struct ir_cfi *cfi;      /* -g: the prologue's steps (ir_cfi_add) */
+    int ncfi, cficap;
     struct ir_dbgvar *dbgvars; /* -g: params + locals (irgen) */
     int ndbgvars, dbgvarcap;
     int *var_off;            /* -g: rbp-relative slot offset per vreg (codegen) */
+/* A var_off for a variable with NO location: its slot is never written in
+ * the code the function became (the optimizer kept the value in a
+ * temporary). The DIE then says so with an empty location -- a debugger
+ * prints <optimized out> -- rather than naming a slot that holds whatever
+ * was there before. */
+#define IR_VAR_NO_LOC (-0x7fffffff)
     /* Per-LOCAL lexical scope, as a half-open instruction range [lo, hi) (irgen).
      * Two locals whose scopes are disjoint never coexist — a stack pointer used
      * past its scope is UB — so codegen may give them one stack slot. Params and
@@ -531,6 +624,9 @@ struct ir_unit *irgen(struct unit *u);
  * the point on a board. */
 enum { SAN_OVERFLOW = 1, SAN_DIVIDE = 2, SAN_SHIFT = 4 };
 void irgen_set_sanitize(unsigned mask);
+/* -finstrument-functions, with GCC's two exclusion lists (comma-separated;
+ * either may be NULL) */
+void irgen_set_instrument(int on, const char *funcs, const char *files);
 void irgen_set_opt_size(int on);       /* -Os: a switch table must be denser */
 /* A new table of n entries (all -1) in fn; its index. */
 int ir_jt_add(struct ir_func *fn, int n);
@@ -547,6 +643,9 @@ void ir_print_unit(struct outbuf *b, const struct ir_unit *u);
 void ir_print_func(struct outbuf *b, const struct ir_func *f);
 /* An opcode's mnemonic, so a diagnostic can name the instruction. */
 const char *ir_opname(enum ir_op op);
+/* A call's argument array of its own, with n entries (at least one) */
+struct ir_arg *ir_args_new(int n);
+struct ir_arg *ir_args_copy(const struct ir_arg *a, int n);
 /* The inverse, for the parser (src/ir/irparse.c): -1 when unknown. */
 int ir_op_from_name(const char *n);
 /* Read EmbIR back from its textual form (src/ir/irparse.c). `text` is
@@ -566,5 +665,11 @@ int ir_intern_string(struct ir_unit *iu, const char *bytes, int len);
 /* ...at an offset that is a multiple of `align` (a power of two, <= 16). */
 int ir_intern_aligned(struct ir_unit *iu, const char *bytes, int len,
                       int align);
+
+/* Append one prologue step to fn's call frame information (-g). A
+ * backend records its prologue once the function is final; ncfi = 0
+ * starts it again, and ncfi = -1 says it cannot describe the function
+ * (no FDE). */
+void ir_cfi_add(struct ir_func *fn, int off, int kind, int reg, long val);
 
 #endif

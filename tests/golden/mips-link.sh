@@ -21,27 +21,34 @@
 #     object linked with soft-float ones, a HI16 with no LO16, and a
 #     linker script (-T), which EmbLD lays out for ARM and RISC-V only.
 set -u
-echo "TEST-MARKER mips-link"
+# Run BIG-endian (mips-none-elf) as tests/golden/mips-be-link.sh, which sets
+# MIPS_BE=1.
+if [ "${MIPS_BE:-0}" = 1 ]; then
+    NAME=mips-be-link T=mips-none-elf MT=mips-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPSEB:-qemu-system-mips}
+else
+    NAME=mips-link T=mipsel-none-elf MT=mipsel-unknown-elf
+    QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
+fi
+echo "TEST-MARKER $NAME"
 . "$(dirname "$0")/../lib.sh"
 
-QEMU=${EMBCC_QEMU_MIPS:-qemu-system-mipsel}
 MC=${EMBCC_LLVM_MC:-llvm-mc}
 command -v "$QEMU" >/dev/null 2>&1 || { echo "skipped: $QEMU not found"; exit 0; }
 command -v "$MC" >/dev/null 2>&1 || { echo "skipped: llvm-mc not found"; exit 0; }
-"$MC" -triple=mipsel-unknown-elf -mcpu=mips32r2 /dev/null -o /dev/null \
+"$MC" -triple=$MT -mcpu=mips32r2 /dev/null -o /dev/null \
     2>/dev/null || { echo "skipped: this llvm-mc has no MIPS target"; exit 0; }
 
-T=mipsel-none-elf
 EMBCC=${EMBCC:-./embcc}
 EMBLD=${EMBLD:-./embld}
-out=tests/golden/out/mips-link
+out=tests/golden/out/$NAME
 rm -rf "$out"; mkdir -p "$out"
 export EMBCC_MIPS_HARNESS="$PWD/$out"
 for f in boot io; do
     "$EMBCC" --target=$T -O1 -c "tests/harness/mips/$f.c" -o "$out/$f.o" || {
         echo "the harness does not compile"; exit 1; }
 done
-mc() { "$MC" -triple=mipsel-unknown-elf -mcpu=mips32r2 -mattr=+soft-float \
+mc() { "$MC" -triple=$MT -mcpu=mips32r2 -mattr=+soft-float \
            -filetype=obj "$@"; }
 
 # ---- 1. the AHL rule ------------------------------------------------------
@@ -159,7 +166,7 @@ mc "$out/gp.s" -o "$out/gp.o" || { echo "llvm-mc rejected gp.s"; exit 1; }
 refuse "gp-relative small data" "R_MIPS_GPREL16" "$out/boot.o" "$out/io.o" \
     "$out/gp.o" "$out/far.o"
 printf '.text\n.globl g\ng: jr $ra\nnop\n' > "$out/hard.s"
-"$MC" -triple=mipsel-unknown-elf -mcpu=mips32r2 -filetype=obj \
+"$MC" -triple=$MT -mcpu=mips32r2 -filetype=obj \
     "$out/hard.s" -o "$out/hard.o" || { echo "llvm-mc rejected hard.s"; exit 1; }
 refuse "a hard-float object with soft-float ones" "floating-point ABI" \
     "$out/boot.o" "$out/io.o" "$out/far.o" "$out/hard.o"
@@ -176,7 +183,7 @@ if "$EMBLD" -T "$out/s.ld" -e _start "$out/boot.o" "$out/io.o" "$out/far.o" \
        -o "$out/s.elf" > "$out/s.txt" 2>&1; then
     echo "embld linked a MIPS image by a linker script"; exit 1
 fi
-grep -q 'a linker script is supported for ARM and RISC-V images only' \
+grep -q 'a linker script is supported for ARM, RISC-V and AVR images only' \
     "$out/s.txt" || {
     echo "embld refused a MIPS linker script, but not by name:"
     cat "$out/s.txt"; exit 1; }

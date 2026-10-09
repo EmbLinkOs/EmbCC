@@ -24,6 +24,70 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* n64 (MIPS64): every argument takes whole doublewords, named or not, and
+ * a variadic callee spills a1..a7 just below its incoming stack words,
+ * so the list is again one block and va_list a bare pointer. A type
+ * aligned to 16 (a long double, an aligned struct) starts at an even
+ * doubleword -- clang's va_arg rounds the pointer up to 16 for it, and
+ * the saved registers are 16-aligned where an even one is. A scalar
+ * narrower than eight bytes was passed extended to the whole doubleword,
+ * so big-endian its bytes are the slot's LAST ones; a struct is its own
+ * bytes from the slot's start in either order. */
+static int va_arg_n64(struct ir_func *fn, struct expr *e)
+{
+    struct type *rt = e->ty;
+    int flt = ty_is_float(rt);
+    struct type *ptr = ty_int_of_size(8, 1);
+    long size = ty_size(rt);
+    long align = ty_align(rt);
+    long step;
+    int apa = gen_addr(fn, e->lhs);
+    int cur = emit_load(fn, apa, ptr);
+    int sdst;
+
+    irg_mark_natural(fn, e->lhs);
+    sdst = rt->kind == TY_STRUCT ? irg_va_struct_slot(fn, e) : -1;
+    if (flt && rt->kind == TY_FLOAT)            /* promoted to double */
+        size = align = 8;
+    if (align >= 16)
+        cur = emit_bin(fn, IR_AND,
+                       emit_bin(fn, IR_ADD, cur, emit_const(fn, 15, 8), 8, 1),
+                       emit_const(fn, -16, 8), 8, 1);
+    {
+        int addr = new_temp(fn), at;
+        emit_mov(fn, addr, cur);
+        step = (size + 7) & ~7L;
+        emit_store(fn, apa,
+                   emit_bin(fn, IR_ADD, addr, emit_const(fn, step, 8), 8, 1),
+                   ptr);
+        irg_mark_natural(fn, e->lhs);
+        if (sdst >= 0) {
+            irg_va_copy(fn, sdst, 0, addr, ty_size(rt));
+            return sdst;
+        }
+        if (flt && rt->kind == TY_FLOAT) {
+            int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
+            struct ir_ins *cv;
+            fn->ins[fn->nins - 1].natural = 1;
+            cv = emit(fn);
+            cv->op = IR_F2F;
+            cv->a = v;
+            cv->size = 8;
+            cv->w = 4;
+            cv->dst = new_temp(fn);
+            return cv->dst;
+        }
+        at = addr;
+        if (target_big_endian() && size < 8)
+            at = emit_bin(fn, IR_ADD, addr, emit_const(fn, 8 - size, 8), 8, 1);
+        {
+            int v = emit_load(fn, at, rt);
+            fn->ins[fn->nins - 1].natural = 1;
+            return v;
+        }
+    }
+}
+
 int irg_va_arg_mips(struct ir_func *fn, struct expr *e)
 {
     struct type *rt = e->ty;
@@ -33,6 +97,8 @@ int irg_va_arg_mips(struct ir_func *fn, struct expr *e)
     long align = ty_align(rt);
     long step;
 
+    if (target_get() == TARGET_MIPS64)
+        return va_arg_n64(fn, e);
     /* Every access here is natural (ir_ins.natural), so no lwl/lwr: the
      * va_list is a pointer object, as aligned as its lvalue is, and each
      * argument slot is a whole word, or eight bytes rounded to 8. */

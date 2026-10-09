@@ -20,6 +20,16 @@
  * `char *` underneath in the C the C++ becomes */
 typedef __builtin_va_list va_list;
 typedef __builtin_va_list __gnuc_va_list;
+#elif defined(__XTENSA__)
+/* Xtensa: GCC's record, held BY VALUE (xtensa_build_builtin_va_list), so a
+ * va_list passes between EmbCC's objects and GCC's -- vprintf, and the
+ * ESP-IDF's esp_log_writev -- as the three words GCC's callee expects. */
+typedef struct __va_list_tag {
+    int *__va_stk;
+    int *__va_reg;
+    int __va_ndx;
+} __gnuc_va_list;
+typedef __gnuc_va_list va_list;
 #else
 typedef char *va_list;
 typedef char *__gnuc_va_list;

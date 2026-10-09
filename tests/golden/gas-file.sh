@@ -142,6 +142,41 @@ else
     grep -q 'frobnicate' "$out/b2.txt" || {
         echo "FAIL: the refusal does not name the directive"; fail=1; }
 fi
+# A number too wide for its data directive is an error naming it, as in
+# llvm-mc and GNU as: `.byte 256` assembled to 0, silently. Each width's
+# signed and unsigned ends are taken -- -128..255 for a byte -- and so is
+# AVR's two-byte .word up to 65535, but not 65536.
+for cfg in "riscv32-unknown-elf|.byte 256" "riscv32-unknown-elf|.byte -129" \
+           "riscv32-unknown-elf|.half 65536" "riscv32-unknown-elf|.short -32769" \
+           "riscv32-unknown-elf|.word 0x100000000" "riscv32-unknown-elf|.4byte -2147483649" \
+           "thumbv7m-none-eabi|.2byte 0x10000" "avr|.word 65536"; do
+    tt=${cfg%%|*}; d=${cfg#*|}
+    printf '    .data\n    .byte 1\n    %s\n' "$d" > "$out/wide.s"
+    if "$EMBCC" --target=$tt -c "$out/wide.s" -o /dev/null 2> "$out/wide.txt"; then
+        echo "FAIL $tt: '$d' was accepted"; fail=1
+    else
+        grep -q 'does not fit in' "$out/wide.txt" || {
+            echo "FAIL $tt: the refusal of '$d' does not say why:"
+            sed 's/^/     | /' "$out/wide.txt" | head -2; fail=1; }
+    fi
+done
+printf '    .data\n    .byte -128, 255\n    .half -32768, 65535\n    .word -2147483648, 4294967295\n    .quad -1, 0xffffffffffffffff\n' > "$out/ends.s"
+if "$EMBCC" --target=riscv32-unknown-elf -c "$out/ends.s" -o "$out/ends.o" 2> "$out/ends.txt"; then
+    if command -v llvm-mc > /dev/null 2>&1 && command -v llvm-objcopy > /dev/null 2>&1; then
+        llvm-mc -triple=riscv32 -filetype=obj "$out/ends.s" -o "$out/ends-ref.o" &&
+        llvm-objcopy -O binary --only-section=.data "$out/ends.o" "$out/ends.bin" &&
+        llvm-objcopy -O binary --only-section=.data "$out/ends-ref.o" "$out/ends-ref.bin" &&
+        cmp -s "$out/ends.bin" "$out/ends-ref.bin" || {
+            echo "FAIL: the ends of each width's range are not llvm-mc's bytes"; fail=1; }
+    fi
+else
+    echo "FAIL: the ends of each width's range are refused:"
+    sed 's/^/     | /' "$out/ends.txt" | head -2; fail=1
+fi
+printf '    .data\n    .word 65535, -32768\n' > "$out/avrw.s"
+"$EMBCC" --target=avr -c "$out/avrw.s" -o /dev/null 2> /dev/null || {
+    echo "FAIL avr: a two-byte .word refuses 65535 or -32768"; fail=1; }
+[ "$fail" -eq 0 ] && echo "  a value too wide for its directive is refused, the ends of each width taken"
 # ARMv7-M, whose startup file is a vector table rather than a stack
 # setup: the first word is the initial SP and the second the reset
 # handler's ADDRESS, which is a relocation into .text from .text.

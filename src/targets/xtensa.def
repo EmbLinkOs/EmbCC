@@ -1,0 +1,20 @@
+/* Xtensa: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* Xtensa (xtensa-esp32-elf-gcc -dM): ILP32, UNSIGNED char, a 16-bit
+ * UNSIGNED wchar_t (target_wchar_size), long double the 8-byte
+ * double, and no __int128. */
+DATA_MODEL(XTENSA, .ptr = 4, .lng = 4, .it = 4, .dbl = 8, .ldbl = 8,
+           .char_uns = 1, .wchar_uns = 1, .int128 = 0, .maxal = 0)
+
+/* Xtensa, little-endian, windowed ABI: the ESP32 (LX6) and ESP32-S3
+ * (LX7). `-none-elf` is the canonical spelling; the -esp* ones are
+ * Espressif's toolchains' names, which a project already built with
+ * them will say. One instruction set for all of them (the subset
+ * the plan names), so one target. */
+TRIPLE("xtensa-none-elf",           XTENSA,      NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("xtensa-esp32-elf",          XTENSA,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("xtensa-esp32s3-elf",        XTENSA,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("xtensa-esp-elf",            XTENSA,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("xtensa-elf",                XTENSA,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("xtensa",                    XTENSA,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
