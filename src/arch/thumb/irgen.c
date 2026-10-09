@@ -28,6 +28,22 @@
 #include "../target.h"
 #include "../../sema/type.h"
 
+/* The load of a variadic argument just emitted: from the argument area,
+ * which AAPCS32 keeps word-aligned and an eight-byte argument eight-
+ * aligned (rounded up below), so it is NATURAL. Unmarked, ARMv6-M -- which
+ * faults on an unaligned word -- read every va_arg(ap, int) a byte at a
+ * time: thirteen instructions for one LDR, twenty of them in vformat.
+ * Only there (v6m.c, Baseline's too): ARMv7-M's LDR takes any address,
+ * and the flag also steers the passes that compare two accesses (tail
+ * merging), so marking it there would change code that gains nothing. */
+static int va_load_natural(struct ir_func *fn, int v)
+{
+    if (target_thumb_arch() == 6 && fn->nins &&
+        fn->ins[fn->nins - 1].op == IR_LOAD)
+        fn->ins[fn->nins - 1].natural = 1;
+    return v;
+}
+
 int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
 {
     struct type *rt = e->ty;
@@ -73,7 +89,8 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
         if (flt) {
             /* Read the double that was passed, then narrow if the
              * program asked for a float. */
-            int v = emit_load(fn, addr, ty_base(TY_DOUBLE, 0));
+            int v = va_load_natural(fn, emit_load(fn, addr,
+                                                  ty_base(TY_DOUBLE, 0)));
             if (rt->kind == TY_FLOAT) {
                 struct ir_ins *cv = emit(fn);
                 cv->op = IR_F2F;
@@ -85,7 +102,7 @@ int irg_va_arg_thumb(struct ir_func *fn, struct expr *e)
             }
             return v;
         }
-        return emit_load(fn, addr, rt);
+        return va_load_natural(fn, emit_load(fn, addr, rt));
     }
 }
 /* ---- inline assembly ----------------------------------------------------
