@@ -715,6 +715,7 @@ static int data_stmt(const char *stmt, int len, struct code *out,
             size = data_dir[k].size;
     if (!size)
         return 0;
+    int at = out->len;
     /* the values, one per comma, each a constant expression */
     for (i = m; i < len; ) {
         int s, e, depth = 0;
@@ -741,6 +742,8 @@ static int data_stmt(const char *stmt, int len, struct code *out,
         if (i < len)
             i++;                        /* the comma */
     }
+    /* data: what a disassembler and -S show as data */
+    code_mark_data(out, at, out->len);
     return 1;
 }
 
@@ -1209,18 +1212,18 @@ int rvasm_assemble(const char *text, struct code *out, char *err, int errlen)
     err[0] = 0;
     while (*p) {
         const char *start = p;
-        int len;
-        while (*p && *p != ';' && *p != '\n')
-            p++;
-        len = (int)(p - start);
-        /* Strip a comment: '#' anywhere, or "//". */
-        for (int i = 0; i < len; i++)
-            if (start[i] == '#' || (start[i] == '/' && i + 1 < len &&
-                                    start[i + 1] == '/')) {
-                len = i;
-                break;
-            }
-        if (one_stmt(start, len, out, err, errlen) != 0)
+        int len, r;
+        /* Strip a comment: '#' anywhere, or "//" -- but not inside a
+         * .ascii string, nor a `;` there */
+        p += asm_stmt_len(p, ";");
+        len = asm_cut_comment(start, (int)(p - start), "#", 1);
+        /* .ascii/.asciz/.string, and the alignments, whose padding the
+         * backend decides where the bytes land */
+        {
+            static const struct asm_dirs dirs = { NULL, 0, 0 };
+            r = code_asm_directive(start, len, out, &dirs, err, errlen);
+        }
+        if (r < 0 || (!r && one_stmt(start, len, out, err, errlen) != 0))
             return -1;
         if (*p)
             p++;

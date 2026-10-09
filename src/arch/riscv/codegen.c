@@ -5616,8 +5616,9 @@ static void gen_ins(struct rv_fn *F, int n)
                     rv_load(t, o->reg, o->reg, 0, o->size, 0, F->xlen);
             }
         }
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
+        /* the bytes, padded at each alignment for where they land */
+        code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
+                     ia->arange, ia->narange, CODE_FILL_RISCV);
         /* Out, through an address: the address is live across the asm
          * (regalloc.c counts it so), so it is still there. An "m" output
          * was written BY the template through the address its register
@@ -6791,6 +6792,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         sg0 = F.st->ng, sf0 = F.st->nf;
     signed char *relax = NULL;
     int nrelax = 0;
+    /* An asm that aligns its bytes pads by where it lands, so when the
+     * code before it shrinks it can GROW: a branch measured short across
+     * it on the first pass must still reach by this much. 0 without one. */
+    int asm_sl = 0;
+    for (i = 0; i < fn->nins; i++)
+        if (fn->ins[i].op == IR_ASM && fn->ins[i].asm_ir)
+            asm_sl += code_asm_align_slack(fn->ins[i].asm_ir->arange,
+                                           fn->ins[i].asm_ir->narange);
     for (int pass = 0; pass < 2; pass++) {
     F.fb = RV_SP;
     if (pass) {
@@ -6831,6 +6840,25 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             rv_unimp(t);
     }
     f->code_align = rv_compress_enabled() && !F.isr ? 2 : 4;
+    /* An asm that aligns its own bytes (`.p2align 3`): the function starts
+     * on that, so that in a section of its own the buffer's offsets are
+     * the section's. The padding before it is never run. */
+    for (i = 0; i < fn->nins; i++) {
+        const struct ir_asm *ia = fn->ins[i].op == IR_ASM ? fn->ins[i].asm_ir
+                                                          : NULL;
+        int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+        if (m > f->code_align) {
+            if (t->len & 1)
+                internal_error("riscv: %s starts off a halfword", fn->name);
+            while (t->len % m) {
+                if (t->len & 2)
+                    rv_cunimp(t);
+                else
+                    rv_unimp(t);
+            }
+            f->code_align = m;
+        }
+    }
     /* -g: each source variable's slot, which IS its offset from the
      * DWARF frame base -- sp, because this backend keeps no frame
      * pointer (src/debug/dwarf.c). */
@@ -7229,14 +7257,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
             }
             if (F.fix[i].kind == FX_J) {
                 long d = tgt - F.fix[i].at;
-                relax[i] = d >= -2048 && d <= 2046 ? FX_CJ : FX_J;
+                relax[i] = d >= -2048 + asm_sl && d <= 2046 - asm_sl
+                         ? FX_CJ : FX_J;
             } else {
                 long d = tgt - F.fix[i].bat;
                 int c = F.fix[i].cond, r1 = F.fix[i].rs1;
                 if ((c == RV_BEQ || c == RV_BNE) && F.fix[i].rs2 == RV_ZERO &&
-                    r1 >= 8 && r1 <= 15 && d >= -256 && d <= 254)
+                    r1 >= 8 && r1 <= 15 && d >= -256 + asm_sl &&
+                    d <= 254 - asm_sl)
                     relax[i] = FX_CB;
-                else if (d >= -4096 && d <= 4094)
+                else if (d >= -4096 + asm_sl && d <= 4094 - asm_sl)
                     relax[i] = FX_B;
                 else
                     relax[i] = FX_LONG;

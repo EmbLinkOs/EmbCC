@@ -983,24 +983,32 @@ int avrasm_assemble(const char *text, struct code *out, char *err, int errlen)
                 p++;
             continue;
         }
-        while (*p && *p != '\n' && *p != '\r') {
-            if (*p == ';') break;
-            if (p[0] == '/' && p[1] == '/')
-                break;
-            if (n < (int)sizeof buf - 1)
-                buf[n++] = *p;
-            p++;
+        {
+            /* the statement, less its comment -- neither of which ends
+             * inside a .ascii string */
+            int sl = asm_stmt_len(p, "\r");
+            int len = asm_cut_comment(p, sl, ";", 1);
+            static const struct asm_dirs dirs = { asm_data_avr, 0, 0 };
+            int r;
+            while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t'))
+                len--;
+            /* .ascii/.asciz/.string, the data directives (.word is two
+             * bytes here) and the alignments, whose padding the backend
+             * decides where the bytes land */
+            r = code_asm_directive(p, len, out, &dirs, err, errlen);
+            if (r < 0)
+                return -1;
+            if (!r) {
+                n = len < (int)sizeof buf - 1 ? len : (int)sizeof buf - 1;
+                memcpy(buf, p, (size_t)n);
+                buf[n] = '\0';
+                if (n)
+                    one(&a, buf);
+                if (a.failed)
+                    return -1;
+            }
+            p += sl;
         }
-        while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\t'))
-            n--;
-        buf[n] = '\0';
-        if (n)
-            one(&a, buf);
-        if (a.failed)
-            return -1;
-        if (*p == ';' || (p[0] == '/' && p[1] == '/'))
-            while (*p && *p != '\n')
-                p++;
     }
     return 0;
 }

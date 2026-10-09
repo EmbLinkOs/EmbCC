@@ -4972,6 +4972,23 @@ static int asm_resolve_reg(struct unit *u, struct stmt *s,
         if (r >= 0)
             return r;
     }
+    /* An "i" or "n" operand still gets a register (below), but a constant
+     * one keeps its VALUE too: `%c0` in a directive prints it, gcc's way
+     * of writing a constant into the text (`.ascii "->SIZE %c0"`). */
+    {
+        int imm = 0, other = 0;
+        long v;
+        for (const char *p = c; *p; p++) {
+            if (*p == 'i' || *p == 'n')
+                imm = 1;
+            else if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))
+                other = 1;
+        }
+        if (imm && !other && const_fold(op->expr, &v)) {
+            op->is_imm = 1;
+            op->imm = v;
+        }
+    }
     for (const char *p = c; *p; p++)             /* else allocate a register */
         if (*p == 'r' || *p == 'q' || *p == 'g' || *p == 'm' || *p == 'R' ||
             *p == 'i' || *p == 'n')
