@@ -15,6 +15,16 @@
 /embar
 /embsvd
 /embsim
+/embpack
+/embmap
+/embflash
+/embtrace
+/embrt
+/embcc-ar
+/embcc-ranlib
+/embcc-objcopy
+/embcc-size
+/embcc-nm
 /embcc-stage1
 /embcc-stage2
 

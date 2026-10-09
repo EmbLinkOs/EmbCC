@@ -231,6 +231,9 @@ For people compiling code with EmbCC:
 - [Getting started](getting-started.md): building and installing EmbCC,
   a first program, and cross-compiling for each board.
 - [Invoking EmbCC](invoking.md): every command-line option.
+- [Build systems](build-systems.md): the CMake toolchain file, and the
+  GCC names (`arm-none-eabi-gcc`, `-objcopy`, `-size`...) for a project
+  whose build is written for a GCC toolchain.
 - [Targets](targets.md): each target's triples, options, ABI, predefined
   macros and limitations.
 - [Embedded programming](embedded.md): start-up code, interrupts,

@@ -278,7 +278,17 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
 all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim \
-     embflash embtrace
+     embflash embtrace binutils-names
+
+# The binutils a build names, answered by EmbCC's own tools under the
+# names CMake and a Makefile call them by: embar is ar and ranlib, embpack
+# is objcopy for the image formats, embmap is size and nm. Each tool
+# chooses its behaviour by the name it was called by.
+BINUTILS_NAMES := ar:embar ranlib:embar objcopy:embpack size:embmap nm:embmap
+binutils-names: embar embpack embmap
+	@for p in $(BINUTILS_NAMES); do \
+	    ln -sf $${p#*:} embcc-$${p%%:*}; \
+	done
 
 # Which host layer the last link used (PLATFORM and PROCESS). Switching
 # either leaves every object up to date, so without this `make
@@ -785,6 +795,17 @@ install-files:
 	    cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \
 	    chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t; \
 	done
+	@for t in $(EXTRA_TOOLS); do \
+	    if [ -f $$t ]; then cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \
+	        chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t; fi; \
+	done
+	@for p in $(BINUTILS_NAMES); do \
+	    [ -f $(DESTDIR)$(PREFIX)/bin/$${p#*:} ] && \
+	        ln -sf $${p#*:} $(DESTDIR)$(PREFIX)/bin/embcc-$${p%%:*}; \
+	    true; \
+	done
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake
+	@cp cmake/embcc.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
 	@mkdir -p $(LIBROOT)/include $(LIBROOT)/include/c++ \
 	          $(LIBROOT)/freestanding
 	@cp -R lib/libc/include/. $(LIBROOT)/include/
@@ -811,12 +832,35 @@ install-files:
 	@echo "           $(LIBROOT)/"
 	@echo "check it with: $(DESTDIR)$(PREFIX)/bin/embcc --print-search-dirs"
 
+# The tools beyond the compiler's own set, installed when they were built.
+EXTRA_TOOLS := embpack embmap embsim embsvd embflash embtrace embrt
+
+# A GCC cross toolchain's names, for a project that names its compiler
+# that way: `make install-gnu TRIPLES="arm-none-eabi riscv64-unknown-elf"`
+# links <triple>-gcc and -cc to embcc (which reads the target from its
+# name), -ar and -ranlib to embar, -objcopy to embpack, -size and -nm to
+# embmap. An existing toolchain file or Makefile then builds with EmbCC
+# with only PATH changed.
+TRIPLES ?= arm-none-eabi riscv64-unknown-elf riscv32-unknown-elf avr
+install-gnu: install-files
+	@for tr in $(TRIPLES); do \
+	    for p in gcc:embcc cc:embcc $(BINUTILS_NAMES); do \
+	        ln -sf $${p#*:} $(DESTDIR)$(PREFIX)/bin/$$tr-$${p%%:*}; \
+	    done; \
+	    echo "installed: $(DESTDIR)$(PREFIX)/bin/$$tr-gcc and its binutils"; \
+	done
+
 # Removes exactly what install wrote, and the versioned directory with
 # it -- never $(PREFIX)/lib/embcc itself, which may hold another version.
 uninstall:
-	@for t in embcc embld embas embread embdbg embls embidx embar; do \
+	@for t in embcc embld embas embread embdbg embls embidx embar \
+	          $(EXTRA_TOOLS); do \
 	    rm -f $(DESTDIR)$(PREFIX)/bin/$$t; \
 	done
+	@for p in $(BINUTILS_NAMES); do \
+	    rm -f $(DESTDIR)$(PREFIX)/bin/embcc-$${p%%:*}; \
+	done
+	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
 	@rm -rf $(LIBROOT)
 	@echo "removed EmbCC $(VERSION) from $(DESTDIR)$(PREFIX)"
 

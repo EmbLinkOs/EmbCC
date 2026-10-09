@@ -842,6 +842,13 @@ static int apply_wl(struct link_opts *lo)
              * objects to need or not, refuses an
              * undefined symbol anyway, and the symbols it keeps change
              * no byte that runs */
+        } else if (!strcmp(a, "--no-warn-rwx-segments") ||
+                   !strcmp(a, "--warn-rwx-segments") ||
+                   !strcmp(a, "--no-warn-execstack") ||
+                   !strcmp(a, "--warn-execstack")) {
+            /* binutils 2.39's warnings about an image's permissions, and
+             * the switches that silence them (a bare-metal script whose
+             * RAM is rwx sets the first): diagnostics, not the image */
         } else if (!strcmp(a, "-z") && k + 1 < g_nwl &&
                    (!strcmp(g_wl[k + 1], "noexecstack") ||
                     !strcmp(g_wl[k + 1], "relro") ||
@@ -4384,6 +4391,53 @@ int main(int argc, char **argv)
             for (int t = 0; t < target_triple_count(); t++)
                 fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
             return 1;
+        }
+    }
+    /* Called by a GCC cross compiler's name -- arm-none-eabi-gcc,
+     * riscv64-unknown-elf-gcc, avr-gcc, through a link to this program --
+     * the name says the target, as it does for clang. A project's toolchain
+     * file and Makefile then work unchanged: they name the compiler, and
+     * the archiver and the rest by the same prefix (`make install-gnu`).
+     * A --target= on the command line still decides. */
+    {
+        static const char *const drv[] = {
+            "gcc", "cc", "g++", "c++", "clang", "clang++", "embcc"
+        };
+        const char *b = strrchr(argv[0], '/');
+        b = b ? b + 1 : argv[0];
+        /* arm-none-eabi-gcc-13.2: the version is not part of the name */
+        size_t bl = strlen(b);
+        const char *v = strrchr(b, '-');
+        if (v && v[1] && strspn(v + 1, "0123456789.") == strlen(v + 1))
+            bl = (size_t)(v - b);
+        const char *dash = NULL;
+        for (size_t k = bl; k > 0; k--)
+            if (b[k - 1] == '-') {
+                dash = b + k - 1;
+                break;
+            }
+        int is_drv = 0;
+        for (size_t k = 0; dash && k < sizeof drv / sizeof drv[0]; k++)
+            if (strlen(drv[k]) == bl - (size_t)(dash + 1 - b) &&
+                !strncmp(dash + 1, drv[k], strlen(drv[k])))
+                is_drv = 1;
+        if (is_drv && dash > b) {
+            char tri[128];
+            enum target_arch a;
+            enum target_os os;
+            enum target_fmt fmt;
+            snprintf(tri, sizeof tri, "%.*s", (int)(dash - b), b);
+            if (!target_from_triple(tri, &a, &os, &fmt)) {
+                fprintf(stderr, "embcc: error: called as '%s', and '%s' is "
+                                "not a target EmbCC knows; they are:\n",
+                        b, tri);
+                for (int t = 0; t < target_triple_count(); t++)
+                    fprintf(stderr, "embcc:   %s\n", target_triple_name(t));
+                return 1;
+            }
+            target_set(a);
+            target_os_set(os);
+            target_fmt_set(fmt);
         }
     }
     /* Apple's driver names the machine with -arch: arm64 or x86_64 is the

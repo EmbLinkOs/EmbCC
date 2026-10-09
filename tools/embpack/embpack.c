@@ -24,6 +24,13 @@
  * CRC of the whole binary after it. --manifest writes what was packed --
  * the segments, sizes, entry point, CRC-32 and SHA-256 -- as JSON.
  *
+ * Called by a name ending in `objcopy` (embcc-objcopy, arm-none-eabi-objcopy)
+ * it reads objcopy's command line for the image formats a firmware build
+ * asks it for -- `objcopy -O ihex -R .eeprom IN OUT`, `-O binary`, `-O
+ * srec`, -j, --gap-fill, --pad-to -- so a Makefile or a CMake post-build
+ * step written for binutils runs unchanged. An ELF-to-ELF copy is not
+ * something this writes, and is refused by name.
+ *
  * ISO C and standalone, like embmap. docs/manual/tools/embpack.md is the
  * reference. */
 #include <stdio.h>
@@ -125,6 +132,32 @@ static int seg_by_lma(const void *a, const void *b)
     return x->lma < y->lma ? -1 : x->lma > y->lma;
 }
 
+/* objcopy's -R and -j, each a name or a pattern with `*` and `?` */
+static const char *g_rm[64], *g_only[64];
+static int g_nrm, g_nonly;
+
+static int glob_match(const char *pat, const char *s)
+{
+    if (!*pat)
+        return !*s;
+    if (*pat == '*')
+        return glob_match(pat + 1, s) || (*s && glob_match(pat, s + 1));
+    return *s && (*pat == '?' || *pat == *s) && glob_match(pat + 1, s + 1);
+}
+
+static int section_wanted(const char *name)
+{
+    for (int k = 0; k < g_nrm; k++)
+        if (glob_match(g_rm[k], name))
+            return 0;
+    if (!g_nonly)
+        return 1;
+    for (int k = 0; k < g_nonly; k++)
+        if (glob_match(g_only[k], name))
+            return 1;
+    return 0;
+}
+
 static void load(const char *path)
 {
     g_buf = slurp(path, &g_len);
@@ -181,8 +214,11 @@ static void load(const char *path)
             continue;
         if (off + size > g_len)
             die("%s: a section runs past the end of the file", path);
+        const char *nm = strat((size_t)(shstr + rd(o, 4)));
+        if (!section_wanted(nm))
+            continue;
         struct seg *s = &g_seg[g_nseg++];
-        s->name = strat((size_t)(shstr + rd(o, 4)));
+        s->name = nm;
         s->lma = to_lma(addr);
         s->size = size;
         s->off = (size_t)off;
@@ -364,6 +400,10 @@ static void out_bin(void)
  * record (type 04) whenever the upper 16 bits change, the start linear
  * address (type 05) for a 32-bit entry, and the end record. Only stored
  * bytes are written; the gaps stay absent rather than filled. */
+/* A record's line ending: LF, or CRLF as binutils' writers end each
+ * Intel HEX and S-record line (objcopy mode writes their bytes). */
+static const char *g_eol = "\n";
+
 static void hex_rec(int type, unsigned addr, const unsigned char *p, int n)
 {
     unsigned sum = (unsigned)n + (addr >> 8) + (addr & 0xff) + (unsigned)type;
@@ -372,7 +412,7 @@ static void hex_rec(int type, unsigned addr, const unsigned char *p, int n)
         fprintf(g_out, "%02X", p[k]);
         sum += p[k];
     }
-    fprintf(g_out, "%02X\n", (0x100 - (sum & 0xff)) & 0xff);
+    fprintf(g_out, "%02X%s", (0x100 - (sum & 0xff)) & 0xff, g_eol);
 }
 
 static void out_hex(void)
@@ -406,7 +446,7 @@ static void out_hex(void)
         wr(e, g_entry & 0xffffffffu, 4, 1);
         hex_rec(5, 0, e, 4);
     }
-    fprintf(g_out, ":00000001FF\n");
+    fprintf(g_out, ":00000001FF%s", g_eol);
 }
 
 /* Motorola S-records: an S0 header, S3 data records with 32-bit addresses
@@ -425,7 +465,7 @@ static void srec_rec(int type, u64 addr, int alen, const unsigned char *p,
         fprintf(g_out, "%02X", p[k]);
         sum += p[k];
     }
-    fprintf(g_out, "%02X\n", (~sum) & 0xff);
+    fprintf(g_out, "%02X%s", (~sum) & 0xff, g_eol);
 }
 
 static void out_srec(const char *name)
@@ -536,6 +576,86 @@ static void usage(void)
     exit(2);
 }
 
+/* objcopy's spelling of an option's value: `-O ihex`, `-Oihex`,
+ * `--output-target=ihex` or `--output-target ihex`. */
+static const char *opt_val(int argc, char **argv, int *i, const char *sh,
+                           const char *lo)
+{
+    const char *a = argv[*i];
+    size_t ln = strlen(lo);
+    if (sh && !strcmp(a, sh))
+        return *i + 1 < argc ? argv[++*i] : NULL;
+    if (sh && !strncmp(a, sh, strlen(sh)) && a[strlen(sh)])
+        return a + strlen(sh);
+    if (!strncmp(a, lo, ln) && a[ln] == '=')
+        return a + ln + 1;
+    if (!strcmp(a, lo))
+        return *i + 1 < argc ? argv[++*i] : NULL;
+    return NULL;
+}
+
+/* The objcopy command line, as far as an image format goes. */
+static int objcopy_main(int argc, char **argv, const char **image,
+                        const char **out, const char **fmt, int *fill,
+                        u64 *pad_addr, int *has_pad)
+{
+    const char *me = strrchr(argv[0], '/') ? strrchr(argv[0], '/') + 1
+                                            : argv[0];
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i], *v;
+        u64 n;
+        if ((v = opt_val(argc, argv, &i, "-O", "--output-target"))) {
+            *fmt = !strcmp(v, "binary") ? "bin" : !strcmp(v, "ihex") ? "hex"
+                 : !strcmp(v, "srec") ? "srec" : NULL;
+            if (!*fmt)
+                die("-O %s: this objcopy writes binary, ihex and srec images "
+                    "(an ELF-to-ELF copy is not something it does)", v);
+        } else if ((v = opt_val(argc, argv, &i, "-I", "--input-target"))) {
+            if (strncmp(v, "elf", 3) != 0)
+                die("-I %s: the input is an ELF image", v);
+        } else if ((v = opt_val(argc, argv, &i, "-R", "--remove-section"))) {
+            if (g_nrm < 64) g_rm[g_nrm++] = v;
+        } else if ((v = opt_val(argc, argv, &i, "-j", "--only-section"))) {
+            if (g_nonly < 64) g_only[g_nonly++] = v;
+        } else if ((v = opt_val(argc, argv, &i, NULL, "--gap-fill"))) {
+            if (!parse_size(v, &n) || n > 255)
+                die("--gap-fill %s: a byte value, 0 to 0xff", v);
+            *fill = (int)n;
+        } else if ((v = opt_val(argc, argv, &i, NULL, "--pad-to"))) {
+            if (!parse_size(v, pad_addr))
+                die("--pad-to %s: an address", v);
+            *has_pad = 1;
+        } else if (!strcmp(a, "-S") || !strcmp(a, "--strip-all") ||
+                   !strcmp(a, "-g") || !strcmp(a, "--strip-debug") ||
+                   !strcmp(a, "--strip-unneeded") || !strcmp(a, "-v") ||
+                   !strcmp(a, "--verbose") || !strcmp(a, "-p") ||
+                   !strcmp(a, "--preserve-dates")) {
+            /* an image has no symbols or debug info to strip */
+        } else if (!strcmp(a, "--version")) {
+            printf("%s (EmbCC embpack) -- objcopy's image formats\n", me);
+            exit(0);
+        } else if (a[0] == '-' && a[1]) {
+            die("%s: an option this objcopy does not take (it writes "
+                "binary, ihex and srec images: -O, -R, -j, --gap-fill, "
+                "--pad-to)", a);
+        } else if (!*image) {
+            *image = a;
+        } else if (!*out) {
+            *out = a;
+        } else {
+            die("one input and one output (%s)", a);
+        }
+    }
+    if (!*image)
+        die("%s", "usage: objcopy -O binary|ihex|srec [-R SECTION] "
+                  "[-j SECTION] [--gap-fill BYTE] [--pad-to ADDR] IN OUT");
+    if (!*fmt || !*out)
+        die("%s: an ELF-to-ELF copy (no -O, or no output file) is not "
+            "something this objcopy does; it writes binary, ihex and srec "
+            "images", *image);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *image = NULL, *out = NULL, *fmt = NULL, *crcsym = NULL,
@@ -543,6 +663,15 @@ int main(int argc, char **argv)
     int fill = 0, append_crc = 0;
     u64 pad_to = 0;
     u32 family = 0;
+    u64 pad_addr = 0;
+    int has_pad = 0;
+    size_t n0 = strlen(argv[0]);
+    if (n0 >= 7 && !strcmp(argv[0] + n0 - 7, "objcopy")) {
+        objcopy_main(argc, argv, &image, &out, &fmt, &fill, &pad_addr,
+                     &has_pad);
+        g_eol = "\r\n";
+        argc = 1;                       /* the loop below reads nothing */
+    }
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         u64 v;
@@ -597,6 +726,9 @@ int main(int argc, char **argv)
             fmt);
 
     load(image);
+    /* objcopy's --pad-to is an address: the image runs up to it */
+    if (has_pad && pad_addr > g_seg[g_nseg - 1].lma + g_seg[g_nseg - 1].size)
+        pad_to = pad_addr - g_seg[0].lma;
     flatten(fill, pad_to);
 
     /* --crc32: the CRC of every stored byte but the symbol's own four,
