@@ -124,6 +124,16 @@ dis "$out/pick.o" pick > "$out/pick.dis"
 nsp=$(grep -cE 'ldr[[:space:]].*\[sp' "$out/pick.dis") || nsp=0
 [ "$nsp" -le 2 ] || { cat "$out/pick.dis"
     fail "pick: x is loaded at the join though both arms leave it in a register"; }
+# A load goes into the scratch role that holds nothing the instruction
+# reads: x * c after the join, with x in r6 and the fixed roles (r6, r7),
+# loads c into r7 and keeps x.
+sed 's/g(x + 7)/g(x * c)/; s/pick(/pick2(/' "$out/pick.c" > "$out/pick2.c"
+EMBCC_T_EXT=0 EMBCC_RA_MAXPOOL=2 "$EMBCC" --target=$T -Os -c "$out/pick2.c" \
+    -o "$out/pick2.o" || fail "compile pick2.c"
+dis "$out/pick2.o" pick2 > "$out/pick2.dis"
+nsp=$(grep -cE 'ldr[[:space:]].*\[sp' "$out/pick2.dis") || nsp=0
+[ "$nsp" -le 1 ] || { cat "$out/pick2.dis"
+    fail "pick2: loading c into the role that holds x loads x again"; }
 "$EMBCC" --target=$T -Os -Ilib/libc/include -c lib/libc/src/stdlib/strtol.c \
     -o "$out/strtol.o" || fail "compile strtol.c"
 dis "$out/strtol.o" conv > "$out/conv.dis"

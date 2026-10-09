@@ -838,6 +838,29 @@ static int rc_usable(const struct t_fn *F, int c)
     return 1;
 }
 
+/* How much the slot cache would lose were r overwritten: 2 when it holds
+ * the slot of an operand of the instruction being lowered (one still to
+ * be read, very likely), 1 when it holds some other slot, 0 for nothing. */
+struct rc_opnd { const struct t_fn *F; long off; int hit; };
+static void rc_opnd_cb(int v, void *ctx)
+{
+    struct rc_opnd *o = ctx;
+    if (v6_rc_ok(o->F, v) && o->F->slot[v] == o->off)
+        o->hit = 1;
+}
+static int rc_worth(const struct t_fn *F, int r)
+{
+    struct rc_opnd o;
+    if (r < 0 || r > 7 || g6_rc_off[r] < 0 || rc_find(F, g6_rc_off[r]) != r)
+        return 0;
+    o.F = F;
+    o.off = g6_rc_off[r];
+    o.hit = 0;
+    if (g6_cur)
+        ra_each_use(g6_cur, rc_opnd_cb, &o);
+    return o.hit ? 2 : 1;
+}
+
 /* Where v is: its register, or `scr` loaded with it -- or a register the
  * slot cache found it in. When that is the OTHER role and no role has
  * been named yet this instruction but this one (the call's own
@@ -864,6 +887,17 @@ static int v_rdr(struct t_fn *F, int v, int scr)
         if (rc_usable(F, c)) {
             F->tbusy |= 1u << c;
             return c;
+        }
+    } else if (g6_role_n == 1 && g6_s0 >= 0 && g6_s1 >= 0 &&
+               (scr == g6_s0 || scr == g6_s1)) {
+        /* a load: into the role whose contents the cache misses least
+         * (the roles trade places, as above) */
+        int o = scr == g6_s0 ? g6_s1 : g6_s0;
+        if (rc_worth(F, scr) > rc_worth(F, o)) {
+            int x = g6_s0;
+            g6_s0 = g6_s1;
+            g6_s1 = x;
+            scr = o;
         }
     }
     v_rd(F, v, sc(F, scr));
