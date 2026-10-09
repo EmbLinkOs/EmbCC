@@ -3027,18 +3027,24 @@ static int rv_tail_ok(const struct rv_fn *F, int n)
             return 0;
     }
     {
-        int nret = 0;
+        int nret = 0, calls = 0;
         for (int k = 0; k < fn->nins; k++) {
             enum ir_op op = fn->ins[k].op;
             if (op == IR_ADDR || op == IR_VA_START)
                 return 0;
             nret += op == IR_RET;
+            /* a call no return follows, or a helper: ra is saved */
+            calls += (op == IR_CALL && (k + 1 >= fn->nins ||
+                                        fn->ins[k + 1].op != IR_RET)) ||
+                     rv_op_calls_helper(&fn->ins[k]);
         }
         /* ...and the function's ONLY return: elsewhere the restores
          * here would sit beside the epilogue's, which a tail call
          * pays for with its copy. Measured over the libc corpus, that
-         * rule is the smaller of the two. */
-        if (nret > 1)
+         * rule is the smaller of the two. Unless there is nothing to
+         * restore: no saved register, and no other call to save ra for
+         * -- `return c < 0x80 ? isdigit(c) : 0;` (pass_retdup). */
+        if (nret > 1 && (calls || F->nsave || F->nfsave))
             return 0;
     }
     if (fn->has_alloca || fn->is_varargs || fn->neh)

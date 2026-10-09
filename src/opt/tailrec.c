@@ -153,3 +153,52 @@ int pass_tailrec(struct ir_func *fn)
     g_did.tailrec++;
     return 1;
 }
+
+/* ---- a returned call's return, copied to it ---------------------------
+ *
+ * `return c < 0x80 ? isdigit(c) : 0;` reaches its one `ret` from both
+ * arms, so the call's arm is call, jump, and the return at the join:
+ *
+ *        %1 = call @isdigit(%0)          %1 = call @isdigit(%0)
+ *        jmp L1                    ->    ret %1
+ *      L0: %1 = const 0                L0: %1 = const 0
+ *      L1: ret %1                      L1: ret %1
+ *
+ * A backend makes a TAIL call only of a call the return follows, so the
+ * copy is what lets this one leave by a branch with no frame: clang's
+ * iswdigit is four instructions and EmbCC's was eleven on RISC-V. Only
+ * after a call whose value is the one returned (or a call in a function
+ * returning nothing); elsewhere a copied return could add a move into
+ * the return register for nothing. Last, after the tail merge, which
+ * would otherwise share the two returns again. */
+int pass_retdup(struct ir_func *fn)
+{
+    int changed = 0, nl = fn->nlabels;
+    int *at;
+    if (nl <= 0 || getenv("EMBCC_NO_RETDUP"))
+        return 0;
+    at = xmalloc((size_t)nl * sizeof *at);
+    for (int l = 0; l < nl; l++)
+        at[l] = -1;
+    for (int n = 0; n < fn->nins; n++)
+        if (fn->ins[n].op == IR_LABEL && fn->ins[n].label >= 0 &&
+            fn->ins[n].label < nl)
+            at[fn->ins[n].label] = n;
+    for (int n = 1; n < fn->nins; n++) {
+        const struct ir_ins *j = &fn->ins[n], *c = &fn->ins[n - 1];
+        int m;
+        if (j->op != IR_JMP || c->op != IR_CALL || j->label < 0 ||
+            j->label >= nl || at[j->label] < 0)
+            continue;
+        m = at[j->label];
+        while (m < fn->nins && fn->ins[m].op == IR_LABEL)
+            m++;
+        if (m >= fn->nins || fn->ins[m].op != IR_RET ||
+            (fn->ins[m].a >= 0 && fn->ins[m].a != c->dst))
+            continue;
+        fn->ins[n] = fn->ins[m];
+        changed = 1;
+    }
+    free(at);
+    return changed;
+}
