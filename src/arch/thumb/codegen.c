@@ -1729,10 +1729,18 @@ static void rc_labels(struct t_fn *F)
         F->rc_lmin[l] = -1;
 }
 
+/* No cache, and nothing known of the flags: at the start of every pass,
+ * BEFORE its prologue, whose parameter reads go through rd. Reset only at
+ * the body, a pass's prologue read what the last pass left -- or, on the
+ * first, uninitialized memory -- and could take a parameter from a
+ * register that did not hold it; a pass whose prologue then grew made a
+ * 64-bit literal planned to reach its pool miss it (fuzz seed 7227). */
 static void rc_reset(struct t_fn *F)
 {
     F->rc_n = 0;
     F->rc_cur = 0;
+    F->flags_dead_at = -1;
+    F->flags_dead_ins = 0;
     for (int v = 0; F->rc_on && v < F->fn->nvregs; v++)
         F->rc_reg[v] = -1;
 }
@@ -3059,6 +3067,15 @@ static void t_lit64_load(struct t_fn *F, int n, int lo, int hi,
                        F->fn->name, lo, hi);
 }
 
+/* How far a first pass lets an ldrd reach for its slot's START: ldrd's
+ * 1020 less the slot, less 4. A later pass only shortens the code, but a
+ * load's base is its address rounded down to a word: two bytes saved
+ * before the load and none after it put its base four bytes further from
+ * the pool, so a first pass that used the last four bytes made a later
+ * one miss (fuzz seed 7227, once an unrelated change moved the function
+ * by two bytes). */
+#define T_LIT64_REACH (1020 - 8 - 4)
+
 /* What fits, when not everything did: walking back from the last load,
  * keep a constant when its load reaches its slot -- the code after the
  * load, plus twelve bytes for each later constant already given up (a
@@ -3081,7 +3098,7 @@ static void t_lit64_fit(struct t_fn *F, int pool)
             if (val[slot] == v)
                 break;
         long d = (long)pool - ((s->at + 4) & ~3L) + extra + 8L * slot;
-        if (d <= 1020 - 8) {
+        if (d <= T_LIT64_REACH) {
             if (slot == nv)
                 val[nv++] = v;
         } else {
@@ -3134,7 +3151,8 @@ static int t_lit64_flush(struct t_fn *F, int pass)
         long off = (long)pool + 8L * s->idx - ((s->at + 4) & ~3L);
         struct code c;
         memset(&c, 0, sizeof c);
-        if (off >= 0 && t_ldst_pair(&c, s->rt, s->rt2, T_PC, off, 0)) {
+        if (off >= 0 && (pass || off <= T_LIT64_REACH + 8) &&
+            t_ldst_pair(&c, s->rt, s->rt2, T_PC, off, 0)) {
             memcpy(t->p + s->at, c.p, 4);
         } else if (pass == 0) {
             if (F->lp_planned)
@@ -7018,6 +7036,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.rc_on = 1;
         F.rc_reg = xmalloc((size_t)fn->nvregs * 2 * sizeof *F.rc_reg);
         F.rc_end = F.rc_reg + fn->nvregs;
+        rc_reset(&F);
         F.rc_lmin = xmalloc((size_t)(fn->nlabels + 1) * 2 *
                             sizeof *F.rc_lmin);
         F.rc_lmax = F.rc_lmin + fn->nlabels + 1;
@@ -7069,6 +7088,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.bc_end = F.bc_fix = -1;
         F.fl_end = -1;
         F.ls_end = -1;
+        rc_reset(&F);
         F.va_regsave = F.va_first = -1;
         F.shortb = shortb;
         F.nshortb = nshortb;
