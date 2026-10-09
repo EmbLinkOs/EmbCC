@@ -249,9 +249,14 @@ int pass_idxoff(struct ir_func *fn)
                 continue;
             struct ir_ins *sh = &fn->ins[d.ins[sv]];
             int y; long k;
-            if (sh->op != IR_SHL || sh->w != i->w ||
-                !as_op_const(fn, &d, sh, &y, &k) || k < 0 || k > 3)
+            if ((sh->op == IR_ADD || sh->op == IR_SUB) && !sh->flt &&
+                !getenv("EMBCC_NO_IDXOFF0")) {
+                y = sv;         /* a byte array's index: no scale */
+                k = 0;
+            } else if (sh->op != IR_SHL || sh->w != i->w ||
+                       !as_op_const(fn, &d, sh, &y, &k) || k < 0 || k > 3) {
                 continue;
+            }
             if (y < 0 || y >= nv || d.cnt[y] != 1 || d.ins[y] < 0 ||
                 use[y] != 1)
                 continue;
@@ -303,19 +308,25 @@ int pass_idxoff(struct ir_func *fn)
             continue;
         }
         struct ir_ins o = fn->ins[n];
-        int w = o.w, kk = fn->nvregs++, t = fn->nvregs++;
+        int w = o.w, t = rx[n];
         int q = fn->nvregs++, cc = fn->nvregs++;
-        struct ir_ins *e = ib_push(&nb);
-        memset(e, 0, sizeof *e);
-        e->op = IR_CONST; e->dst = kk; e->imm = rk[n]; e->w = w;
-        e->a = e->b = -1; e->line = o.line; e->col = o.col; e->synth = 1;
-        e = ib_push(&nb);
-        memset(e, 0, sizeof *e);
-        e->op = IR_SHL; e->dst = t; e->a = rx[n]; e->b = kk; e->w = w;
-        e->line = o.line; e->col = o.col; e->synth = 1;
+        struct ir_ins *e;
+        if (rk[n]) {            /* a scaled index; a byte one is x itself */
+            int kk = fn->nvregs++;
+            t = fn->nvregs++;
+            e = ib_push(&nb);
+            memset(e, 0, sizeof *e);
+            e->op = IR_CONST; e->dst = kk; e->imm = rk[n]; e->w = w;
+            e->a = e->b = -1; e->line = o.line; e->col = o.col; e->synth = 1;
+            e = ib_push(&nb);
+            memset(e, 0, sizeof *e);
+            e->op = IR_SHL; e->dst = t; e->a = rx[n]; e->b = kk; e->w = w;
+            e->line = o.line; e->col = o.col; e->synth = 1;
+        }
         e = ib_push(&nb);
         memset(e, 0, sizeof *e);
         e->op = IR_ADD; e->dst = q; e->a = rb[n]; e->b = t; e->w = w;
+        e->sign = o.sign;       /* as `a[i]`'s own add, which it may be */
         e->line = o.line; e->col = o.col; e->synth = 1;
         e = ib_push(&nb);
         memset(e, 0, sizeof *e);
