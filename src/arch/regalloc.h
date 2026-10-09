@@ -221,6 +221,12 @@ struct ra_target {
      * loads, so it is the one to spill first; the backend's codegen
      * must then make it at each read (ra_remat_map). NULL: none can. */
     int (*remat_ok)(const struct ir_ins *def);
+
+    /* May this INDIRECT call's target live in a register? Only when the
+     * backend reads it where the argument setup cannot have overwritten
+     * it (see IR_CALL in ra_allocate); NULL: never, and it stays in
+     * memory, one load at the call. */
+    int (*call_target_in_reg)(const struct ir_ins *call);
 };
 
 /* Per vreg, 1 when it has exactly one definition and `ok` says that

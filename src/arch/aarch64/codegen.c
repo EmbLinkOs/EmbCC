@@ -258,7 +258,8 @@ static const struct ra_target A64_RA = {
     1, /* fp_reads_gpr: fld_slot, fst_slot, frd, fwrote and fmove fmov a
         * general-register home across */
     0, /* asm_in_reg */
-    NULL  /* remat_ok */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 

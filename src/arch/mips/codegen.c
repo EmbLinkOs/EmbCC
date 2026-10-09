@@ -305,7 +305,8 @@ static const struct ra_target MIPS_RATGT = {
     0,
     0,              /* asm_in_reg: an asm's operands go through memory, as
                      * on x86-64, AArch64 and AVR (regalloc.h) */
-    NULL  /* remat_ok */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 static int g_mips_regalloc;
@@ -4190,7 +4191,8 @@ static const struct ra_target MIPS_PAIR_RA = {
     1,
     0,
     0,              /* asm_in_reg */
-    NULL  /* remat_ok */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 static void mips_pair_hints(const struct ir_func *fn, int *hint)

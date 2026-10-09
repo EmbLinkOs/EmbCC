@@ -1186,8 +1186,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * calling whatever argument 0 happened to be.
              *
              * Keeping it in memory costs one load at an indirect call
-             * and needs no backend to get an ordering right. */
-            if (in->indirect) OPAQUE(in->a);
+             * and needs no backend to get an ordering right -- unless the
+             * backend says it does (call_target_in_reg): Thumb-2 moves a
+             * target out of r0-r3 into lr before the setup. */
+            if (in->indirect &&
+                !(t->call_target_in_reg && t->call_target_in_reg(in)))
+                OPAQUE(in->a);
             /* A struct or float (SSE) argument loads its slot raw
              * everywhere. A scalar-integer one is moved straight into
              * its argument register only by a backend that knows how. */
