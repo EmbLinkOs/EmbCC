@@ -4249,6 +4249,41 @@ static void gen_ins(struct t_fn *F, int n)
                 return;
             }
         }
+        /* A mask whose only reader is `!= 0` right after it, as a 0 or 1
+         * (`(cls(c) & MASK) != 0`, every is*() of ctype): `ands d, a, #k`
+         * sets the flags and `it ne; mov d, #1` leaves the 0 that is
+         * there -- eight bytes, where the and, a compare and both movs of
+         * an ITE were twelve. Not when the compare feeds a branch or a
+         * select, which take its flags as they are (tst, below). */
+        if (i->op == IR_AND && !i->flt && i->w == 4 && i->dst >= 0 &&
+            !F->wide[i->dst] && F->usecnt && F->usecnt[i->dst] == 1 &&
+            n + 1 < fn->nins && !F->wide[i->a] && !t_isa_a32 &&
+            (i->imm_b ? t_imm_ok(i->imm) : !F->wide[i->b])) {
+            const struct ir_ins *nx = &fn->ins[n + 1];
+            const struct ir_ins *n2 = n + 2 < fn->nins ? &fn->ins[n + 2]
+                                                       : (const struct ir_ins *)0;
+            int feeds = n2 && nx->dst >= 0 &&
+                        ((n2->op == IR_BRZ || n2->op == IR_BRNZ ||
+                          n2->op == IR_SELECT) && n2->a == nx->dst);
+            if (nx->op == IR_CMP && nx->a == i->dst && nx->imm_b &&
+                nx->imm == 0 && nx->pred == B_NE && nx->w == 4 &&
+                nx->dst >= 0 && !feeds) {
+                int ra_ = rdr(F, i->a, T_ACC);
+                int rb_ = i->imm_b ? -1 : rdr(F, i->b, T_TMP);
+                int d = wreg(F, nx->dst, T_ACC);
+                if (d < 8) {
+                    if (i->imm_b)
+                        t_alu_imm(t, T_OP_AND, d, ra_, i->imm, 1);
+                    else
+                        t_alu_reg(t, T_OP_AND, d, ra_, rb_, 1);
+                    t_set_ne_low(t, d);
+                    F->fl_end = -1;
+                    wrote(F, nx->dst, d);
+                    F->skip_next = 1;
+                    return;
+                }
+            }
+        }
         /* A mask whose only reader is a branch: `tst a, #k; bne` sets the
          * flags from a & k and keeps nothing, where `and r, a, #k; cmp r,
          * #0; bne` was three instructions and a register -- every `if (x
@@ -4678,6 +4713,33 @@ static void gen_ins(struct t_fn *F, int n)
             }
             set_cc(F, i->dst, cond);
             return;
+        }
+        /* `x != 0` and `x == 0` as a 0 or 1, as clang writes them: the
+         * copy sets the flags (`movs d, x`, or the compare when x is in d
+         * already) and `it ne; mov d, #1` leaves the 0 that is there --
+         * and `clz d, x; lsrs d, d, #5` for ==, 1 only for a zero. Six
+         * bytes, where a compare and both movs of an ITE are eight. */
+        if (!fuse && !selfuse && i->imm_b && i->imm == 0 && !t_isa_a32 &&
+            (i->pred == B_NE || i->pred == B_EQ)) {
+            int sa = rdr(F, i->a, T_ACC);
+            int d = wreg(F, i->dst, T_ACC);
+            if (i->pred == B_NE && d < 8) {
+                if (d == sa)
+                    t_cmp_imm(t, sa, 0);
+                else
+                    t_movs_reg(t, d, sa);
+                t_set_ne_low(t, d);
+                F->fl_end = -1;
+                wrote(F, i->dst, d);
+                return;
+            }
+            if (i->pred == B_EQ) {
+                t_clz(t, d, sa);
+                t_shift_imm(t, T_SH_LSR, d, d, 5, d < 8);
+                F->fl_end = -1;
+                wrote(F, i->dst, d);
+                return;
+            }
         }
         if (fuse && i->imm_b && in_reg(F, i->a) && F->fl_end == t->len &&
             F->fl_reg == F->loc[i->a] && F->fl_imm == i->imm) {

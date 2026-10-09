@@ -1431,6 +1431,15 @@ void t_setcc_low(struct code *c, int cond, int rd)
     hw(c, 0x2000u | (unsigned)(rd << 8));
 }
 
+/* `it ne; mov rd, #1`: the 1 of `x != 0` where rd already holds x (or a
+ * copy of it whose movs set the flags), so the 0 is there already --
+ * four bytes, the IT block's mov a 16-bit one inside it. */
+void t_set_ne_low(struct code *c, int rd)
+{
+    hw(c, 0xbf00u | (unsigned)(T_NE << 4) | 8u);
+    hw(c, 0x2000u | (unsigned)(rd << 8) | 1u);
+}
+
 /* ---- the system instructions -------------------------------------------
  *
  * Each field layout is written once, here, and checked by thumbcheck.
