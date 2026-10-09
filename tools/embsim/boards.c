@@ -29,6 +29,16 @@
                    { 0x20000000u, MB(4), MEM_RAM, 1, 0 }, \
                    { 0x60000000u, MB(16), MEM_RAM, 0, 0 } }
 
+/* the STM32's models, over ST's SVD (svd-map.h) */
+static const struct model_desc stm32_models[] = {
+    { "RCC", "stm32-rcc" },         /* first: the others' clock gates */
+    { "GPIO*", "stm32-gpio" },
+    { "USART*", "stm32-usart" },
+    { "UART*", "stm32-usart" },
+    { "TIM*", "stm32-tim" },
+    { 0, 0 },
+};
+
 const struct board_desc boards[] = {
     { "lm3s6965evb", "cortex-m", "cortex-m3", 3,
       { { 0, KB(256), MEM_FLASH, 0, 0 }, { 0x20000000u, KB(64), MEM_RAM, 1, 0 } },
@@ -44,6 +54,17 @@ const struct board_desc boards[] = {
       { { 0, KB(256), MEM_FLASH, 0, 0 }, { 0x20000000u, KB(16), MEM_RAM, 1, 0 } },
       { { "nrf51-uart", 0x40002000u, 0x1000 }, PERIPHERALS },
       { { 0, 0, 0 } }, 0, 0 },
+    /* an STM32F405, as QEMU's netduinoplus2 has it: 1 MiB of flash at
+     * 0x08000000, seen at 0 too, where the core finds its vector table;
+     * 128 KiB of SRAM and 64 KiB of CCM RAM. The peripherals are ST's
+     * SVD's, with models for RCC, GPIO, the USARTs and the timers */
+    { "stm32f405", "cortex-m", "cortex-m4", 4,
+      { { 0x08000000u, MB(1), MEM_FLASH, 0, 0 },
+        { 0, MB(1), MEM_ALIAS, 0, 0x08000000u },
+        { 0x20000000u, KB(128), MEM_RAM, 1, 0 },
+        { 0x10000000u, KB(64), MEM_RAM, 0, 0 } },
+      { { 0, 0, 0 } },
+      BITBAND, "STM32F405.svd", stm32_models },
     /* QEMU's virt, RV32 or RV64 by the image: the reset ROM where the
      * core starts, the test device that ends a run, the CLINT, the
      * NS16550A, and the PLIC's space reading as zero */
@@ -111,6 +132,10 @@ static const struct dev_type dev_types[] = {
 /* ---- the peripheral models, over an SVD's registers (svd-map.h) -------- */
 
 static const struct model_type model_types[] = {
+    { "stm32-rcc", &stm32_rcc_ops, stm32_rcc_create },
+    { "stm32-gpio", &stm32_gpio_ops, stm32_gpio_create },
+    { "stm32-usart", &stm32_usart_ops, stm32_usart_create },
+    { "stm32-tim", &stm32_tim_ops, stm32_tim_create },
     { 0, 0, 0 },
 };
 

@@ -377,7 +377,9 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/virt-rom.c tools/embsim/avr.c \
                tools/embsim/avr-io.c tools/embsim/avr-usart.c \
                tools/embsim/avr-timer16.c tools/embsim/gdb.c \
-               tools/embsim/svd-map.c tools/embsvd/svd.c $(EMBSIM_NET)
+               tools/embsim/svd-map.c tools/embsvd/svd.c \
+               tools/embsim/stm32-rcc.c tools/embsim/stm32-gpio.c \
+               tools/embsim/stm32-usart.c tools/embsim/stm32-tim.c $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \

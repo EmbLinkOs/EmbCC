@@ -46,7 +46,8 @@ static void usage(void)
           "              [--svd FILE.svd] [--trace-periph[=NAME,...]]\n"
           "       embsim --svd FILE.svd --svd-map\n"
           "boards: lm3s6965evb (default), mps2-an385, mps2-an386,\n"
-          "        mps2-an500, microbit, virt (RISC-V), uno (AVR)\n"
+          "        mps2-an500, microbit, stm32f405 (its SVD: --svd or\n"
+          "        EMBSIM_SVD_PATH), virt (RISC-V), uno (AVR)\n"
           "cpus:   cortex-m0, cortex-m0plus, cortex-m3, cortex-m4, cortex-m7;\n"
           "        rv32, rv64 (virt's default: the image's width); atmega328p\n",
           stderr);

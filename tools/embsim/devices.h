@@ -36,4 +36,13 @@ void *avr_io_create(struct sim *s, const struct dev_desc *d);
 void *avr_usart_create(struct sim *s, const struct dev_desc *d);
 void *avr_timer16_create(struct sim *s, const struct dev_desc *d);
 
+/* the STM32's peripheral models, over its SVD's registers (svd-map.h) */
+struct rf_periph;
+extern const struct dev_ops stm32_rcc_ops, stm32_gpio_ops, stm32_usart_ops;
+extern const struct dev_ops stm32_tim_ops;
+void *stm32_rcc_create(struct sim *s, struct rf_periph *p);
+void *stm32_gpio_create(struct sim *s, struct rf_periph *p);
+void *stm32_usart_create(struct sim *s, struct rf_periph *p);
+void *stm32_tim_create(struct sim *s, struct rf_periph *p);
+
 #endif
