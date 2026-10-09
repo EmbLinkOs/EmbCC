@@ -3052,6 +3052,17 @@ static int directive(struct gas *g, char *p, int pass)
             if (!bad && pm && width != 2)
                 gerr(g, "\"%s\": a program-memory address is two bytes",
                      one), bad = 1;
+            /* A number too wide for its slot is an error, as llvm-mc and
+             * GNU as make it: `.byte 256` assembled to 0 here, and a table
+             * of them to nothing anyone wrote. Its width's signed or
+             * unsigned range, -128..255 for a byte. */
+            if (!bad && !pm && gv.sec == SEC_ABS && !gv.unknown && width < 8) {
+                long long lo = -(1LL << (8 * width - 1));
+                long long hi = (long long)((1ULL << (8 * width)) - 1);
+                if ((long long)gv.v < lo || (long long)gv.v > hi)
+                    gerr(g, "\"%s\" is %ld, which does not fit in %d byte%s",
+                         one, gv.v, width, width == 1 ? "" : "s"), bad = 1;
+            }
             if (!bad && pm && gv.sec == SEC_ABS) {
                 emit_int(g, gv.v >> 1, width);
             } else if (bad || gv.sec == SEC_ABS || gv.unknown) {

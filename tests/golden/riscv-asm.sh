@@ -8,7 +8,10 @@
 #    no referee is a guess, and this one already caught two: a bare
 #    `fence` emitted as `fence rw, rw` (which orders memory but not
 #    device I/O, so a barrier written for an MMIO register would not have
-#    ordered it), and four CSRs that exist only on RV32.
+#    ordered it), and four CSRs that exist only on RV32. Its data
+#    directives (.byte, .half, .word, .dword and the generic spellings)
+#    are in it too, and the same lines as a .s file must give the same
+#    bytes through the file assembler.
 #
 # 2. THE OPERANDS. Encoding the template right is half of it; the other
 #    half is putting the caller's values in the registers the template
@@ -57,6 +60,17 @@ then
             exit 1
         fi
         echo "$tag: $(wc -l < "$out/$tag.s" | tr -d ' ') instructions encode as llvm-mc does"
+        # the data directives as a .s file: src/as/gas.c's, the same bytes
+        grep -E '^[[:space:]]+\.(byte|half|short|hword|2byte|word|long|int|4byte|dword|quad|8byte) ' \
+            "$out/$tag.s" > "$out/$tag-data.s"
+        [ "$(wc -l < "$out/$tag-data.s")" -ge 12 ] || {
+            echo "$tag: the vocabulary has no data directives"; exit 1; }
+        "$MC" -triple="riscv$w" -filetype=obj "$out/$tag-data.s" -o "$out/$tag-data.ref.o" &&
+        "$OBJCOPY" -O binary --only-section=.text "$out/$tag-data.ref.o" "$out/$tag-data.ref" &&
+        "$EMBCC" --target=riscv$w-unknown-elf -c "$out/$tag-data.s" -o "$out/$tag-data.o" &&
+        "$OBJCOPY" -O binary --only-section=.text "$out/$tag-data.o" "$out/$tag-data.bin" &&
+        cmp -s "$out/$tag-data.bin" "$out/$tag-data.ref" || {
+            echo "$tag: a .s file's data directives differ from llvm-mc's"; exit 1; }
     done
 else
     echo "SKIP the encoding half: llvm-mc/llvm-objcopy not found"
@@ -101,6 +115,15 @@ static int pinned(int a)
 { register int y __asm__("a3") = a; int r;
   __asm__("addi %0, %1, 2" : "=r"(r) : "r"(y)); return r; }
 
+/* An instruction written as its bytes: `.4byte` is addi a0, a0, 1,
+ * a `.half` pair is addi a0, a0, 2 again, and `.byte`s add 3 -- each
+ * on the a0 the register variable pins. The data directives were
+ * refused, "not in the RISC-V vocabulary". */
+static int raw(int a)
+{ register int x __asm__("a0") = a;
+  __asm__(".4byte 0x00150513\n\t.half 0x0513, 0x0025; .byte 0x13, 0x05, 0x35, 0x00"
+          : "+r"(x)); return x; }
+
 /* An "m" output: its register holds the ADDRESS the template writes
  * through, and nothing loaded it -- the store went wherever the register
  * last pointed. */
@@ -118,6 +141,7 @@ int main(void)
     putn(addk(33));            /* 42 */
     putn(pinned(40));          /* 42 */
     putn(memout(42));          /* 42 */
+    putn(raw(36));             /* 36 + 1 + 2 + 3 = 42 */
     puts_("\n==END==\n");
     return 0;
 }
@@ -144,7 +168,7 @@ for w in 32 64; do
         # The answers are all 42 but one, and they are checked as a whole
         # line so a single wrong operand fails rather than averaging out.
         got=$(tr -d '\n' < "$d/a$opt.txt" | sed 's/==END==.*//')
-        want="42 40 42 0 42 41 42 42 42 "
+        want="42 40 42 0 42 41 42 42 42 42 "
         [ "$got" = "$want" ] || {
             echo "rv$w $opt: inline asm computed '$got', wanted '$want'"
             exit 1; }
@@ -175,6 +199,23 @@ fi
 "$EMBCC" --target=riscv32-unknown-elf -c "$out/csr.c" -o /dev/null || {
     echo "cycleh was refused at RV32, where it does exist"; exit 1; }
 echo "an unknown instruction and an RV32-only CSR are each refused by name"
+
+# Inline data is constants, in range: a symbol would need a relocation
+# an inline asm cannot carry, and a value too wide for its directive is
+# an error in GNU as and llvm-mc alike rather than its low bytes.
+for d in ".word handler" ".byte 256" ".half -32769" ".word 0x100000000"; do
+    printf 'void f(void){ __asm__ volatile("%s"); }\n' "$d" > "$out/data.c"
+    if "$EMBCC" --target=riscv32-unknown-elf -c "$out/data.c" -o /dev/null \
+         2> "$out/data.err"; then
+        echo "inline asm accepted: $d"; exit 1
+    fi
+    grep -q "is not a constant\|does not fit in" "$out/data.err" || {
+        echo "the refusal of '$d' does not say why:"; cat "$out/data.err"; exit 1; }
+done
+printf 'void f(void){ __asm__ volatile(".byte -128, 255; .dword -1"); }\n' > "$out/data.c"
+"$EMBCC" --target=riscv32-unknown-elf -c "$out/data.c" -o /dev/null || {
+    echo "inline asm refused data at the ends of its range"; exit 1; }
+echo "inline data: a symbol and an out-of-range value are refused, the ends of the range taken"
 
 # x86's constraint letters mean nothing here. "=a" pinned the output to
 # x86 register 0 -- x0, the zero register -- and the result was lost

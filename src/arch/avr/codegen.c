@@ -254,6 +254,12 @@ struct a_fn {
     int *usecnt;         /* reads per vreg, for compare/branch fusion */
     int skip_next;
     int use_y;           /* the frame pointer is set up (see the prologue) */       /* the compare emitted the branch that follows */
+    /* The body's TRANSIENT pushes (t_push): a byte or a run of bytes
+     * pushed and popped again inside one instruction's code -- ldi4's
+     * borrowed r31, an atomic's operands. tdepth is how far the current
+     * instruction's are above the frame, tpeak the most any reached:
+     * -fstack-usage adds it, since sp really goes that far below. */
+    int tdepth, tpeak;
 };
 
 /* A value's width in bytes: eight when the map says so, four otherwise. */
@@ -1868,6 +1874,24 @@ static void extend(struct a_fn *F, int r, int from, int sign, int to)
     fill_run(F->t, r + from + 1, to - from - 1, r + from);
 }
 
+/* ---- transient pushes ------------------------------------------------ */
+
+/* A push the body pops again before its instruction's code ends, counted
+ * for -fstack-usage (a_fn.tpeak): the frame's number is what the stack
+ * must hold, and a byte pushed under it is a byte it must hold too. */
+static void t_push(struct a_fn *F, int r)
+{
+    avr_push(F->t, r);
+    if (++F->tdepth > F->tpeak)
+        F->tpeak = F->tdepth;
+}
+
+static void t_pop(struct a_fn *F, int r)
+{
+    avr_pop(F->t, r);
+    F->tdepth--;
+}
+
 /* ---- constants ------------------------------------------------------- */
 
 static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
@@ -1896,7 +1920,7 @@ static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
              * mov leave SREG alone, so this is safe inside a carry chain
              * too, and nothing live in Z is disturbed. */
             if (!borrowed) {
-                avr_push(F->t, 31);
+                t_push(F, 31);
                 borrowed = 1;
             }
             avr_ri(F->t, AVR_LDI, 31, b);
@@ -1904,7 +1928,7 @@ static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
         }
     }
     if (borrowed)
-        avr_pop(F->t, 31);
+        t_pop(F, 31);
 }
 
 /* ---- labels and branches --------------------------------------------- */
@@ -2727,9 +2751,9 @@ static void gen_atomic(struct a_fn *F, const struct ir_ins *i)
         a_refuse(F->fn, i, "an atomic of this size");
     /* push_v: v's n bytes, byte 0 first, so they pop high first */
 #define PUSH_V(v, cnt) do { for (int k_ = 0; k_ < (cnt); k_++) { \
-        vld(F, 26, (v), k_, 1); avr_push(t, 26); } } while (0)
+        vld(F, 26, (v), k_, 1); t_push(F, 26); } } while (0)
 #define POP_TO(r, cnt) do { for (int k_ = (cnt) - 1; k_ >= 0; k_--) \
-        avr_pop(t, (r) + k_); } while (0)
+        t_pop(F, (r) + k_); } while (0)
     if (op == IR_CAS) {
         PUSH_V(i->b, n);                    /* expected, stays below */
         PUSH_V(i->a, 2);
@@ -2766,7 +2790,7 @@ static void gen_atomic(struct a_fn *F, const struct ir_ins *i)
              * are read low first through X */
             int k = op == IR_CAS ? n - 1 - j2 : j2;
             if (op == IR_CAS)
-                avr_pop(t, R_ZERO);
+                t_pop(F, R_ZERO);
             else
                 avr_ld(t, R_ZERO, AVR_X, AVR_PTR_POST_INC);
             avr_rr(t, j2 ? AVR_CPC : AVR_CP, RA + k, R_ZERO);
@@ -2839,7 +2863,7 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
     int load = op == IR_ARMW && i->imm == 'L';
     /* v's bytes pushed high first, so they pop low first */
 #define PUSH_HI(v, cnt) do { for (int k_ = (cnt) - 1; k_ >= 0; k_--) { \
-            vld(F, 26, (v), k_, 1); avr_push(t, 26); } } while (0)
+            vld(F, 26, (v), k_, 1); t_push(F, 26); } } while (0)
     if (op == IR_CAS) {
         PUSH_HI(i->c, n);                   /* desired, below */
         PUSH_HI(i->b, n);                   /* expected, on top */
@@ -2851,11 +2875,11 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
     }
     PUSH_HI(i->a, 2);
 #undef PUSH_HI
-    avr_pop(t, AVR_Z);
-    avr_pop(t, AVR_Z + 1);
+    t_pop(F, AVR_Z);
+    t_pop(F, AVR_Z + 1);
     if (op == IR_CMPXCHG) {
-        avr_pop(t, AVR_X);
-        avr_pop(t, AVR_X + 1);
+        t_pop(F, AVR_X);
+        t_pop(F, AVR_X + 1);
     }
     F->zv = -1;
     avr_in(t, R_TMP, IO_SREG);
@@ -2867,14 +2891,14 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
         int e = op == IR_CAS ? 26 : R_ZERO;
         for (int k = 0; k < n; k++) {
             if (op == IR_CAS)
-                avr_pop(t, e);
+                t_pop(F, e);
             else
                 avr_ld(t, e, AVR_X, AVR_PTR_POST_INC);
             avr_rr(t, k ? AVR_CPC : AVR_CP, RA + k, e);
         }
         int br = avr_br(t, AVR_BR_NE, 0);
         for (int k = 0; k < n; k++) {
-            avr_pop(t, e);
+            t_pop(F, e);
             avr_std(t, AVR_Z, k, e);
         }
         if (op == IR_CMPXCHG)
@@ -2882,7 +2906,7 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
         int j = avr_rjmp(t, 0);
         avr_patch_br(t, br, (t->len - (br + 2)) / 2);
         for (int k = 0; k < n; k++)
-            avr_pop(t, AVR_Z + 1);              /* desired, unused */
+            t_pop(F, AVR_Z + 1);              /* desired, unused */
         if (op == IR_CMPXCHG)
             avr_ri(t, AVR_LDI, AVR_Z, 0);
         avr_patch_rjmp(t, j, (t->len - (j + 2)) / 2);
@@ -2891,7 +2915,7 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
     } else if (!load) {
         int c = op == IR_ARMW ? (int)i->imm : op == IR_XADD ? '+' : 0;
         for (int k = 0; k < n; k++) {
-            avr_pop(t, 26);
+            t_pop(F, 26);
             if (c) {
                 avr_rr(t, AVR_MOV, 27, RA + k);
                 switch (c) {
@@ -5664,6 +5688,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             F.tail_made = 0;
             if (target_debug_info())
                 a_line_row(fn, t->len, fn->ins[i].line);
+            F.tdepth = 0;
             gen_ins(&F, i);
             if (F.skip_next) {          /* the compare emitted its branch */
                 F.skip_next = 0;
@@ -5695,6 +5720,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             add_const16(&F, AVR_Y, F.frame);
         if (F.frame || fn->has_alloca)
             set_sp_from_y(t);
+        /* The pairs the prologue pushed after isr_prologue's registers
+         * (r8-r17 a call's arguments are loaded into): popped first.
+         * Leaving them on the stack popped Y, Z, X and the rest from
+         * the wrong bytes, and reti returned to one of them. */
+        for (i = F.nsave - 1; i >= 0; i--) {
+            avr_pop(t, F.used_callee[i] + 1);
+            avr_pop(t, F.used_callee[i]);
+        }
         isr_epilogue(t);
     } else {
         a_teardown(&F);
@@ -5742,8 +5775,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
      * part has 2 KB of SRAM total, every temporary here takes four bytes
      * of it, and a frame that does not fit shows up as a program that
      * produces no output at all. */
-    f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ + 2 /* the return
-                                       * address the call pushed */;
+    /* The frame, the pairs and Y the prologue pushed, the return address
+     * the call (or the interrupt) pushed, and the most the body pushes
+     * on top of all that for a moment (t_push). A handler's prologue also
+     * pushes everything in ISR_SAVE but Y (counted above), and SREG. */
+    f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ +
+                     2 /* the return address */ + F.tpeak;
+    if (f->is_isr)
+        f->stack_bytes += (int)(sizeof ISR_SAVE / sizeof ISR_SAVE[0]) - 2 + 1;
     f->code_len = t->len - f->code_off;
     if (F.rx) {
         struct avr_relax *rx = F.rx;
