@@ -1454,6 +1454,48 @@ static void warn_binop_shape(struct unit *u, struct expr *e,
     }
 }
 
+/* Whether a checked signed integer expression can never be negative, so
+ * -Wsign-compare has nothing to say about it. The usual case is a narrow
+ * unsigned value promoted to int, `(flags & MASK) != 0u` with a uint8_t
+ * flags: the promotion zero-extends, and & with it, | and ^ of two such
+ * values, >>, / and % keep the sign bit clear. gcc and clang judge it the
+ * same way. */
+static int sc_nonneg(const struct expr *e)
+{
+    long v;
+    if (const_fold(e, &v))
+        return v >= 0;
+    switch (e->kind) {
+    case EXPR_CAST:
+        if (!ty_is_integer(e->rhs->ty))
+            return 0;
+        if (e->rhs->ty->is_unsigned || e->rhs->ty->kind == TY_BOOL)
+            return ty_size(e->rhs->ty) < ty_size(e->ty);
+        return ty_size(e->rhs->ty) <= ty_size(e->ty) && sc_nonneg(e->rhs);
+    case EXPR_NOT:
+        return 1;
+    case EXPR_BINOP:
+        switch (e->op) {
+        case B_EQ: case B_NE: case B_LT: case B_LE: case B_GT: case B_GE:
+        case B_LAND: case B_LOR:
+            return 1;
+        case B_AND:
+            return sc_nonneg(e->lhs) || sc_nonneg(e->rhs);
+        case B_OR: case B_XOR: case B_DIV:
+            return sc_nonneg(e->lhs) && sc_nonneg(e->rhs);
+        case B_SHR: case B_MOD:
+            return sc_nonneg(e->lhs);
+        default:
+            return 0;
+        }
+    case EXPR_COND:
+        return sc_nonneg(e->lhs) && sc_nonneg(e->rhs);
+    case EXPR_COMMA:
+        return sc_nonneg(e->rhs);
+    default:
+        return 0;
+    }
+}
 
 static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        struct expr *e)
@@ -2375,15 +2417,12 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 /* -Wsign-compare: the conversion the standard prescribes
                  * turns the signed side unsigned, so a negative value
                  * compares as a very large one. Only worth saying when the
-                 * signed side really can be negative — a constant that is
-                 * not is converted at compile time and means what it
-                 * says. */
+                 * signed side really can be negative (sc_nonneg). */
                 if (ty_is_integer(lt) && ty_is_integer(rt) &&
                     ty_signed_int(lt) != ty_signed_int(rt) &&
                     !ty_signed_int(ct)) {
                     struct expr *se = ty_signed_int(lt) ? e->lhs : e->rhs;
-                    long v;
-                    if (!(const_fold(se, &v) && v >= 0))
+                    if (!sc_nonneg(se))
                         diag_warn_opt(diag_file(u), e->line, e->col, "sign-compare",
                                       "comparison between %s and %s",
                                       ty_name(lt), ty_name(rt));
