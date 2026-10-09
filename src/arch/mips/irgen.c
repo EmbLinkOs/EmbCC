@@ -218,6 +218,12 @@ static char *mips_subst(const char *file, int line, const char *tmpl,
             continue;
         }
         int k = -1;
+        /* %c0: the constant alone, as gcc prints it */
+        int bare = 0;
+        if (*p == 'c' && (p[1] == '[' || isdigit((unsigned char)p[1]))) {
+            bare = 1;
+            p++;
+        }
         if (*p == '[') {
             const char *e = strchr(p, ']');
             if (!e)
@@ -241,6 +247,10 @@ static char *mips_subst(const char *file, int line, const char *tmpl,
             diag_fatal(file, line, "asm template modifier '%%%c' is not "
                                    "supported for MIPS", *p ? *p : ' ');
         }
+        if (bare && !isimm[k])
+            diag_fatal(file, line, "%%c%d names a register operand; %%c "
+                       "prints a constant, and wants an \"i\" or \"n\" "
+                       "operand", k);
         if (isimm[k])
             len += (size_t)snprintf(out + len, cap - len, "%ld", imms[k]);
         else
@@ -309,11 +319,25 @@ void irg_asm_mips(struct ir_func *fn, struct stmt *s)
     char err[512];
     if (mipsasm_assemble(text, &c, err, sizeof err) != 0)
         diag_fatal(file, s->line, "%s", err);
+    /* Its alignments: to four at most, which every instruction has, so
+     * they pad as at the template's start. A larger one would pad by where
+     * the template lands, which this backend does not do yet. */
+    {
+        int open = code_asm_settle(&c, 4, CODE_FILL_ZERO, err, sizeof err);
+        if (open < 0)
+            diag_fatal(file, s->line, "%s", err);
+        if (open)
+            diag_fatal(file, s->line, "the asm aligns to %d bytes, which "
+                       "MIPS inline asm does not do yet: only alignment to "
+                       "4 bytes, which every instruction has", open);
+    }
     free(text);
 
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->drange = c.drange;
+    ia->ndrange = c.ndrange;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
     for (int i = 0; i < a->nin; i++) {

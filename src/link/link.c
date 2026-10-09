@@ -1295,7 +1295,7 @@ static void add_entry_stub(struct linker *l)
 
 static void fill_entry_stub(struct linker *l, Elf64_Addr entry)
 {
-    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0 };
+    struct code c = { l->stub, 0, (int)l->stub_size, NULL, 0, 0, NULL, 0, 0 };
     struct insec *s = &l->insecs[l->stub_sec];
     int xlen = l->elf32 ? 32 : 64;
     if (l->machine == EM_ARM) {

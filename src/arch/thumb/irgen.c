@@ -180,6 +180,13 @@ static char *t_subst(const char *file, int line, const char *tmpl,
             p++;
             continue;
         }
+        /* %c0: the constant alone, as gcc prints it for an "i" operand --
+         * which is how every immediate is written here anyway */
+        int bare = 0;
+        if (*p == 'c' && (p[1] == '[' || isdigit((unsigned char)p[1]))) {
+            bare = 1;
+            p++;
+        }
         int k = -1;
         if (*p == '[') {
             const char *e = strchr(p, ']');
@@ -204,6 +211,10 @@ static char *t_subst(const char *file, int line, const char *tmpl,
             diag_fatal(file, line, "asm template modifier '%%%c' is not "
                                    "supported for ARMv7-M", *p ? *p : ' ');
         }
+        if (bare && !isimm[k])
+            diag_fatal(file, line, "%%c%d names a register operand; %%c "
+                       "prints a constant, and wants an \"i\" or \"n\" "
+                       "operand", k);
         if (isimm[k])
             len += (size_t)snprintf(out + len, cap - len, "%ld", imms[k]);
         else
@@ -318,6 +329,25 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     if (tasm_open())
         diag_fatal(file, s->line, "the asm ends inside an IT block, which "
                    "would make the compiler's next instructions conditional");
+    /* Its alignments: those no larger than an instruction's settle here;
+     * the ARMv7-M backend pads the rest where the template lands. The
+     * ARMv6-M one (v6m.c) copies the bytes as they are, so there a larger
+     * one is refused rather than padded for the wrong place. */
+    {
+        int v6 = target_thumb_arch() == 6 && !t_isa_a32;
+        int fill = t_isa_a32 ? CODE_FILL_A32
+                 : v6 ? CODE_FILL_THUMB1 : CODE_FILL_THUMB2;
+        int open = code_asm_settle(&c, t_isa_a32 ? 4 : 2, fill, err,
+                                   sizeof err);
+        if (open < 0)
+            diag_fatal(file, s->line, "%s", err);
+        if (open && v6)
+            diag_fatal(file, s->line, "the asm aligns to %d bytes, which "
+                       "%s inline asm does not do yet: only alignment to "
+                       "2 bytes, which every instruction has", open,
+                       target_thumb_v8m_base() ? "ARMv8-M Baseline"
+                                               : "ARMv6-M");
+    }
     int calls = t_template_calls(text);
     free(text);
 
@@ -328,6 +358,8 @@ void irg_asm_thumb(struct ir_func *fn, struct stmt *s)
     ia->codelen = c.len;
     ia->drange = c.drange;
     ia->ndrange = c.ndrange;
+    ia->arange = c.arange;
+    ia->narange = c.narange;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
     for (int i = 0; i < a->nin; i++) {

@@ -4815,8 +4815,9 @@ static void gen_ins(struct a_fn *F, int n)
                 vld(F, o->reg, o->temp, 0, 2);
             }
         }
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
+        /* the bytes, padded at each alignment for where they land */
+        code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
+                     ia->arange, ia->narange, CODE_FILL_ZERO);
         for (int k = 0; k < ia->nout; k++) {
             struct ir_asm_op *o = &ia->out[k];
             /* An "m" output was written BY the template, through the address
@@ -5492,8 +5493,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     for (i = 0; i <= fn->nlabels; i++)
         F.label_off[i] = -1;
 
-    f->code_off = t->len;
     f->code_align = 2;                  /* a word of flash */
+    /* An asm that aligns its own bytes (`.p2align 2`): the function starts
+     * on that, so that in a section of its own the buffer's offsets are
+     * the section's. The padding, nops, is never run. */
+    for (i = 0; i < fn->nins; i++) {
+        const struct ir_asm *ia = fn->ins[i].op == IR_ASM ? fn->ins[i].asm_ir
+                                                          : NULL;
+        int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+        if (m > f->code_align) {
+            code_fill(t, CODE_FILL_ZERO, (m - t->len % m) % m);
+            f->code_align = m;
+        }
+    }
+    f->code_off = t->len;
     if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         free(fn->var_off);             /* this function generated again */
