@@ -1304,6 +1304,131 @@ static void set_cc(struct t_fn *F, int dst, int cond)
     v_wr(F, dst, d);
 }
 
+/* dst = (x <pred> 0) for a register x, without a branch -- clang's forms:
+ *   ==  negs t, x ; adcs t', x      (C after 0 - x is x == 0; x - x + C)
+ *   !=  subs t, x, #1 ; sbcs x', t  (C after x - 1 is x != 0; x - (x-1)
+ *                                    - !C)
+ *   <   lsrs d, x, #31              (the sign)
+ *   >=  mvns d, x ; lsrs d, d, #31
+ * four bytes, or six with a copy, where set_cc's branches are eight. `t`
+ * is the role that is neither x nor the result's register, or x itself
+ * when the caller says x is a scratch of its own (`mine`); 0 (nothing
+ * emitted) when there is none, or for another predicate. */
+static int zero_cc(struct t_fn *F, int dst, int x, enum binop pred, int mine)
+{
+    struct code *t = F->t;
+    int d, tr;
+    if (pred != B_EQ && pred != B_NE && pred != B_LT && pred != B_GE)
+        return 0;
+    d = v_wreg(F, dst, S0);
+    tr = S1 != x && S1 != d ? S1 : S0 != x && S0 != d ? S0 : -1;
+    switch (pred) {
+    case B_EQ:
+        if (d != x) {
+            t1_negs(t, d, x);
+            t1_alu_reg(t, T_OP_ADC, d, x);
+        } else {
+            if (tr < 0)
+                return 0;
+            t1_negs(t, sc(F, tr), x);
+            t1_alu_reg(t, T_OP_ADC, d, tr);
+        }
+        break;
+    case B_NE:
+        if (tr < 0 && mine && d != x) {
+            t1_addsub_imm3(t, T_OP_SUB, d, x, 1);
+            t1_alu_reg(t, T_OP_SBC, x, d);
+            mov(F, d, x);
+            break;
+        }
+        if (tr < 0)
+            return 0;
+        t1_addsub_imm3(t, T_OP_SUB, sc(F, tr), x, 1);
+        mov(F, d, x);                              /* MOV: the carry stays */
+        t1_alu_reg(t, T_OP_SBC, d, tr);
+        break;
+    case B_LT:
+        t1_shift_imm(t, T_SH_LSR, d, x, 31);
+        break;
+    default:
+        t1_mvns(t, d, x);
+        t1_shift_imm(t, T_SH_LSR, d, d, 31);
+        break;
+    }
+    v_wr(F, dst, d);
+    return 1;
+}
+
+/* A 32-bit compare's 0 or 1 without a branch, where one is short: ==
+ * and != as the difference against zero (zero_cc), a signed < or >= 0
+ * from the sign, and an unsigned one from the carry --
+ *   <   cmp a, b ; sbcs d, d ; negs d, d     (-borrow, negated)
+ *   >=  cmp a, b ; sbcs d, d ; adds d, #1
+ * with > and <= as b < a and b >= a, or against k + 1. 0 (nothing
+ * emitted) for the rest, which set_cc makes. */
+static int cmp_set(struct t_fn *F, const struct ir_ins *i)
+{
+    struct code *t = F->t;
+    enum binop pred = i->pred;
+    long k = (long)(int)(unsigned)((unsigned long)i->imm & 0xffffffffUL);
+    if (i->w == 8 || i->flt)
+        return 0;
+    if (pred == B_EQ || pred == B_NE ||
+        (i->sign && i->imm_b && k == 0 && (pred == B_LT || pred == B_GE))) {
+        int ra = v_rdr(F, i->a, S0), x;
+        if (i->imm_b && k == 0)
+            return zero_cc(F, i->dst, ra, pred, 0);
+        x = sc(F, S1);
+        if (!i->imm_b)
+            t1_addsub_reg(t, T_OP_SUB, x, ra, v_rdr(F, i->b, S1));
+        else if (k > 0 && k <= 7)
+            t1_addsub_imm3(t, T_OP_SUB, x, ra, k);
+        else if (k < 0 && k >= -7)
+            t1_addsub_imm3(t, T_OP_ADD, x, ra, -k);
+        else {
+            k32(F, x, (unsigned long)k);
+            t1_addsub_reg(t, T_OP_SUB, x, ra, x);
+        }
+        if (zero_cc(F, i->dst, x, pred, 1))
+            return 1;
+        internal_error("thumb: %s: a compare with no register for its "
+                       "result", F->fn->name);
+        return 0;
+    }
+    if (i->sign || (pred != B_LT && pred != B_GE && pred != B_GT &&
+                    pred != B_LE))
+        return 0;
+    if (pred == B_GT || pred == B_LE) {
+        /* a > k is a >= k + 1, a <= k is a < k + 1; between registers
+         * the operands trade places */
+        if (i->imm_b) {
+            struct ir_ins c = *i;
+            if (((unsigned long)i->imm & 0xffffffffUL) == 0xffffffffUL)
+                return 0;
+            c.imm = (long long)(((unsigned long)i->imm + 1) & 0xffffffffUL);
+            c.pred = pred == B_GT ? B_GE : B_LT;
+            return cmp_set(F, &c);
+        }
+        {
+            int ra = v_rdr(F, i->a, S0);
+            t1_cmp_reg(t, v_rdr(F, i->b, S1), ra);
+        }
+        pred = pred == B_GT ? B_LT : B_GE;
+    } else {
+        cmp32(F, i);
+    }
+    {
+        int d = v_wreg(F, i->dst, S0);
+        t1_alu_reg(t, T_OP_SBC, d, d);
+        if (pred == B_LT)
+            t1_negs(t, d, d);
+        else
+            t1_addsub_imm8(t, T_OP_ADD, d, 1);
+        v_wr(F, i->dst, d);
+    }
+    return 1;
+}
+
 /* ---- 64-bit values ----------------------------------------------------------
  *
  * A 64-bit value is a register pair (r0:r1, r2:r3, r4:r5) or an eight-byte
@@ -2841,15 +2966,19 @@ static void gen_ins(struct t_fn *F, int n)
             dst[0] = 0; dst[1] = ww == 2 ? 2 : 1;
             call_args(F, 2, vr, nw, dst, kv);
             tcg_call_helper(F, tcg_fp_cmp_name(pred, i->w));
-            t1_cmp_imm(t, T_R0, 0);
             if (nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
                 nx->a == i->dst && nx->w != 8 && F->usecnt &&
                 F->usecnt[i->dst] == 1) {
+                t1_cmp_imm(t, T_R0, 0);
                 v6_jump_if(F, nx->op == IR_BRNZ ? cond : (cond ^ 1),
                            nx->label);
                 F->skip_next = 1;
                 return;
             }
+            /* the helper's answer against zero, as the predicate asks */
+            if (zero_cc(F, i->dst, T_R0, pred, 0))
+                return;
+            t1_cmp_imm(t, T_R0, 0);
             set_cc(F, i->dst, cond);
             return;
         }
@@ -3103,6 +3232,8 @@ static void gen_ins(struct t_fn *F, int n)
         int fuse = nx && (nx->op == IR_BRZ || nx->op == IR_BRNZ) &&
                    nx->a == i->dst && nx->w != 8 &&
                    F->usecnt && F->usecnt[i->dst] == 1;
+        if (!fuse && cmp_set(F, i))
+            return;
         if (i->w == 8)
             cond = cmp64(F, i, i->pred, i->sign);
         else

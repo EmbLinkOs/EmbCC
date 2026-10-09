@@ -167,4 +167,31 @@ on=$(ninsn "$out/rm.o" three); off=$(ninsn "$out/rm0.o" three)
 [ "$(grep -c 'ldr[[:space:]]*r1, \[pc' "$out/three.dis")" -eq 4 ] ||
     { cat "$out/three.dis"; fail "three: 1000 is not made at each of its four reads"; }
 
-echo "thumbv6m-size: va_arg is a word load; a slot's value is read from the register that holds it; a constant is made where it is read"
+# ---- a comparison as a value ------------------------------------------------
+# == and != against zero or anything, < and >= 0, the unsigned orders and
+# a float's == and != (the helper's answer against zero) are made without
+# a branch: `negs; adcs`, `subs; sbcs`, the sign, the carry. The values
+# themselves are tests/exec/cmp-value.c's, on the board.
+cat > "$out/cc.c" <<'EOF'
+int eq0(int a) { return a == 0; }
+int ne0(int a) { return a != 0; }
+int eqk(int a) { return a == 45; }
+int ner(int a, int b) { return a != b; }
+int neg(int a) { return a < 0; }
+int nneg(int a) { return a >= 0; }
+int ltu(unsigned a, unsigned b) { return a < b; }
+int geu(unsigned a) { return a >= 10; }
+int gtu(unsigned a, unsigned b) { return a > b; }
+int leu(unsigned a) { return a <= 2; }
+int feq(float x, float y) { return x == y; }
+int dne(double x, double y) { return x != y; }
+EOF
+cc6 "$out/cc.c" "$out/cc.o"
+for f in eq0 ne0 eqk ner neg nneg ltu geu gtu leu feq dne; do
+    dis "$out/cc.o" $f > "$out/$f.dis"
+    if grep -Eq '[[:space:]]b(eq|ne|cs|hs|cc|lo|mi|pl|hi|ls|ge|lt|gt|le)[[:space:]]' "$out/$f.dis"; then
+        cat "$out/$f.dis"; fail "$f: the comparison's value is made with a branch"
+    fi
+done
+
+echo "thumbv6m-size: va_arg is a word load; a slot's value is read from the register that holds it; a constant is made where it is read; a comparison's value has no branch"
