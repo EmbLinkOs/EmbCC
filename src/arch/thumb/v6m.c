@@ -79,9 +79,11 @@
  * epilogue, where nothing but the arguments and the result is live, keep
  * r6 and r7. */
 static int g6_s0 = 6, g6_s1 = 7;
+static int g6_role_n;           /* role registers named this instruction */
 static int v6_role(int k)
 {
     int r = k ? g6_s1 : g6_s0;
+    g6_role_n++;
     if (r < 0) {
         tcg_role_fail();
         return k ? 7 : 6;          /* what it emits is thrown away */
@@ -165,6 +167,237 @@ static void mov(struct t_fn *F, int d, int s)
 {
     if (d != s)
         t_mov_reg(F->t, d, s);
+}
+
+/* ---- the slot cache -------------------------------------------------------
+ *
+ * A value with no register lives in a frame slot and is loaded at every
+ * read: `str r6, [sp, #16]` at the end of one instruction and `ldr r7,
+ * [sp, #16]` at the start of the next, or the same slot loaded again two
+ * instructions on. After a load or a store of a slot's word the register
+ * holds that word, and it still does at a later read if no instruction
+ * since has written the register and no store has written the slot: then
+ * the read takes the register (v_rdr, nothing emitted) or copies it (v_rd,
+ * a MOV for the LDR). Codegen.c's ls_end and reload cache do this for
+ * ARMv7-M; this is the ARMv6-M one, where every scratch is a low register
+ * already and the gain is the load itself.
+ *
+ * What holds is decided from the CODE, not from the lowering's account of
+ * itself: an entry is (register, frame offset, where it began), and a
+ * lookup decodes every instruction emitted since that point (v6_writes) --
+ * a register any of them writes, or a call clobbers, ends the entry. So a
+ * lowering that takes a scratch, a pushed temporary, a parallel move or an
+ * argument register needs no bookkeeping here. The rest is control flow:
+ *   - every label empties the cache: code is entered there from elsewhere;
+ *   - an entry begins only where everything emitted for the instruction
+ *     so far is straight-line, so it dominates what follows (a select's
+ *     arm, or the code after a loop's exit test, never starts one);
+ *   - a pool island, an asm, and a branch taken back (v6_invert_last)
+ *     empty it too, which only costs a load.
+ * And memory: only the slot of a value nothing takes the address of is
+ * cached (v6_rc_ok) -- a store through a pointer, a call or a copy can
+ * then not reach it -- and every store to the frame (fr_st) drops the
+ * entries it overlaps. Temporaries share slots (ra_coalesce_temps), which
+ * is why entries are by offset, not by value. */
+static long g6_rc_off[8];       /* per low register: the word's frame offset,
+                                 * or -1 */
+static int g6_rc_at[8];         /* ...and where in the code it began */
+static int g6_ins_at;           /* where the current instruction began */
+static const char *g6_atk;      /* per vreg: its address is taken */
+static const struct ir_ins *g6_cur;  /* the instruction being lowered */
+
+static void rc_reset(void)
+{
+    for (int r = 0; r < 8; r++)
+        g6_rc_off[r] = -1;
+}
+
+/* EMBCC_V6_NOSLOTCACHE=1: no entry is ever made (tests, bisecting). */
+static int rc_off(void)
+{
+    static int off = -1;
+    if (off < 0)
+        off = getenv("EMBCC_V6_NOSLOTCACHE") != NULL;
+    return off;
+}
+
+/* The far branch BL at `at` (F->far_mode), as opposed to a call. */
+static int v6_far_bl(const struct t_fn *F, int at)
+{
+    if (!F->far_mode)
+        return 0;
+    for (int k = 0; k < F->nfix; k++)
+        if (F->fix[k].at == at)
+            return 1;
+    return 0;
+}
+
+/* The registers (bit r for rr) the instructions in [from, to) write --
+ * a call's r0-r3, r12 and lr included, and all of them for one this does
+ * not know -- and, in *br, whether any of them is a branch. */
+static unsigned v6_writes(const struct t_fn *F, int from, int to, int *br)
+{
+    const struct code *t = F->t;
+    const unsigned call = 0xfu | (1u << 12) | (1u << 14);
+    unsigned m = 0;
+    int at = from, b = 0;
+    if (to > t->len)
+        to = t->len;
+    while (at + 1 < to) {
+        unsigned h = (unsigned)(t->p[at] | t->p[at + 1] << 8);
+        int data = 0;
+        for (int k = 0; k + 1 < t->ndrange; k += 2)
+            if (at >= t->drange[k] && at < t->drange[k + 1]) {
+                at = t->drange[k + 1];
+                data = 1;
+                break;
+            }
+        if (data)
+            continue;
+        if ((h >> 11) >= 0x1d) {
+            unsigned h2 = at + 3 < t->len
+                ? (unsigned)(t->p[at + 2] | t->p[at + 3] << 8) : 0;
+            if ((h & 0xf800u) == 0xf000u && (h2 & 0xd000u) == 0xd000u) {
+                /* BL: a call, or a far branch (which writes nothing --
+                 * every pass must make the same choices here, whatever
+                 * its branches' sizes) */
+                if (v6_far_bl(F, at))
+                    b = 1;
+                else
+                    m |= call;
+            } else if ((h & 0xfffeu) == 0xf3eeu && (h2 & 0xc000u) == 0x8000u) {
+                m |= 1u << (h2 >> 8 & 15);                    /* MRS */
+            } else if ((h & 0xfff0u) == 0xf380u && (h2 & 0xc000u) == 0x8000u) {
+                ;                                             /* MSR */
+            } else if ((h & 0xffd0u) == 0xfb90u && (h2 & 0xf0f0u) == 0xf0f0u) {
+                m |= 1u << (h2 >> 8 & 15);                    /* s/udiv */
+            } else if (h == 0xf3bfu && (h2 & 0xff00u) == 0x8f00u) {
+                ;                                             /* barriers */
+            } else {
+                m = 0xffffu;
+                b = 1;
+            }
+            at += 4;
+            continue;
+        }
+        at += 2;
+        if (h < 0x2000u) {                       /* shifts, add/sub reg/imm3 */
+            m |= 1u << (h & 7);
+        } else if (h < 0x4000u) {                /* movs/cmp/adds/subs imm8 */
+            if ((h >> 11) != 5)
+                m |= 1u << (h >> 8 & 7);
+        } else if ((h & 0xfc00u) == 0x4000u) {   /* data processing */
+            unsigned op = h >> 6 & 15;
+            if (op != 8 && op != 10 && op != 11)          /* tst, cmp, cmn */
+                m |= 1u << (h & 7);
+        } else if ((h & 0xfc00u) == 0x4400u) {   /* hi add/cmp/mov, bx/blx */
+            unsigned op = h >> 8 & 3, rd = (h >> 4 & 8) | (h & 7);
+            if (op == 3) {
+                if (h & 0x80u) m |= call;                     /* BLX */
+                else           b = 1;                         /* BX */
+            } else if (op != 1) {
+                m |= 1u << rd;
+                if (rd == 15)
+                    b = 1;
+            }
+        } else if (h < 0x5000u) {                /* ldr literal */
+            m |= 1u << (h >> 8 & 7);
+        } else if (h < 0x6000u) {                /* ld/st register offset */
+            if ((h >> 9 & 7) >= 3)
+                m |= 1u << (h & 7);
+        } else if (h < 0x9000u) {                /* ld/st immediate */
+            if (h & 0x800u)
+                m |= 1u << (h & 7);
+        } else if (h < 0xa000u) {                /* ld/st sp */
+            if (h & 0x800u)
+                m |= 1u << (h >> 8 & 7);
+        } else if (h < 0xb000u) {                /* adr, add rd, sp */
+            m |= 1u << (h >> 8 & 7);
+        } else if (h < 0xc000u) {                /* miscellaneous */
+            if ((h & 0xff00u) == 0xb000u)
+                m |= 1u << 13;                                /* sp */
+            else if ((h & 0xff00u) == 0xb200u || (h & 0xff00u) == 0xba00u)
+                m |= 1u << (h & 7);                           /* ext, rev */
+            else if ((h & 0xfe00u) == 0xb400u)
+                ;                                             /* push */
+            else if ((h & 0xfe00u) == 0xbc00u) {
+                m |= h & 0xffu;                               /* pop */
+                if (h & 0x100u)
+                    b = 1;
+            } else if ((h & 0xf500u) == 0xb100u)
+                b = 1;                                        /* cbz */
+            else if ((h & 0xff00u) == 0xbf00u || (h & 0xff00u) == 0xbe00u ||
+                     (h & 0xffe8u) == 0xb660u)
+                ;                                     /* hints, bkpt, cps */
+            else {
+                m = 0xffffu;
+                b = 1;
+            }
+        } else if (h < 0xd000u) {                /* stm/ldm */
+            m |= 1u << (h >> 8 & 7);
+            if (h & 0x800u)
+                m |= h & 0xffu;
+        } else {                                 /* b<c>, udf, svc, b */
+            if ((h & 0xff00u) == 0xdf00u)
+                m |= 0xffffu;
+            b = 1;
+        }
+    }
+    if (br)
+        *br = b;
+    return m;
+}
+
+/* May v's slot be cached: a value in memory, its address never taken. */
+static int v6_rc_ok(const struct t_fn *F, int v)
+{
+    long fo;
+    return v >= 0 && !(F->loc && F->loc[v] >= 0) && F->slot[v] >= 0 &&
+           !(g6_atk && g6_atk[v]) && !tcg_faddr(F, v, &fo);
+}
+
+/* A store wrote [off, off + size) of the frame. */
+static void rc_drop(long off, int size)
+{
+    for (int r = 0; r < 8; r++)
+        if (g6_rc_off[r] >= 0 && g6_rc_off[r] < off + size &&
+            off < g6_rc_off[r] + 4)
+            g6_rc_off[r] = -1;
+}
+
+/* r holds the frame word at off from here on -- when everything emitted
+ * for this instruction so far is straight-line. */
+static void rc_note(const struct t_fn *F, int r, long off)
+{
+    int br = 0;
+    if (r < 0 || r > 7)
+        return;
+    g6_rc_off[r] = -1;
+    if (rc_off())
+        return;
+    if (g6_ins_at > F->t->len)
+        g6_ins_at = F->t->len;
+    (void)v6_writes(F, g6_ins_at, F->t->len, &br);
+    if (br)
+        return;
+    g6_rc_off[r] = off;
+    g6_rc_at[r] = F->t->len;
+}
+
+/* A register holding the frame word at off now, or -1. */
+static int rc_find(const struct t_fn *F, long off)
+{
+    for (int r = 0; r < 8; r++) {
+        if (g6_rc_off[r] != off)
+            continue;
+        if (g6_rc_at[r] > F->t->len ||
+            (v6_writes(F, g6_rc_at[r], F->t->len, NULL) >> r & 1)) {
+            g6_rc_off[r] = -1;
+            continue;
+        }
+        return r;
+    }
+    return -1;
 }
 
 /* A temporary low register that nothing this instruction holds is in:
@@ -277,6 +510,7 @@ static void pool_dump(struct t_fn *F, int branch)
     int over = -1, base;
     if (!F->nlsite)
         return;
+    rc_reset();
     if (branch)
         over = t_b16(t);
     note_pad(F, t->len);
@@ -424,6 +658,7 @@ static void fr_st(struct t_fn *F, int rv, long off, int size, unsigned avoid)
 {
     struct code *t = F->t;
     int a;
+    rc_drop(off, size);
     if (F->fb == T_SP) {
         if (size == 4 && t1_ldst_sp(t, rv, off + F->spb, 1))
             return;
@@ -447,6 +682,19 @@ static void fr_st(struct t_fn *F, int rv, long off, int size, unsigned avoid)
 
 /* ---- values ------------------------------------------------------------- */
 
+/* reg = the frame word at off (a slot v6_rc_ok admits): a copy of a
+ * register the slot cache says holds it, or a load. Flag-free. */
+static void slot_rd(struct t_fn *F, int reg, long off)
+{
+    int c = rc_find(F, off);
+    if (c >= 0) {
+        mov(F, reg, c);
+    } else {
+        fr_ld(F, reg, off, 4, 0);
+    }
+    rc_note(F, reg, off);
+}
+
 /* v into exactly `reg` (r0-r7). Flag-free. */
 static void v_rd(struct t_fn *F, int v, int reg)
 {
@@ -459,14 +707,57 @@ static void v_rd(struct t_fn *F, int v, int reg)
         fr_addr(F, reg, fo);
         return;
     }
+    if (v6_rc_ok(F, v)) {
+        slot_rd(F, reg, F->slot[v]);
+        return;
+    }
     fr_ld(F, reg, tcg_slot_of(F, v), 4, 0);
 }
 
-/* Where v is: its register, or `scr` loaded with it. */
+/* May a read hand back c, a register the slot cache found v in, instead
+ * of the scratch it asked for: one the lowering will not write before it
+ * is done reading -- no role (it may write that one; see v_rdr for the
+ * other), not the result's home, nor the frame base. It is then held
+ * (tbusy) so no temporary is taken from it. */
+static int rc_usable(const struct t_fn *F, int c)
+{
+    const struct ir_ins *i = g6_cur;
+    if (c == g6_s0 || c == g6_s1 || (F->fb == FB6 && c == FB6))
+        return 0;
+    if (i && i->dst >= 0 && in_reg6(F, i->dst) &&
+        (c == F->loc[i->dst] || (F->wide[i->dst] && c == F->loc[i->dst] + 1)))
+        return 0;
+    return 1;
+}
+
+/* Where v is: its register, or `scr` loaded with it -- or a register the
+ * slot cache found it in. When that is the OTHER role and no role has
+ * been named yet this instruction but this one (the call's own
+ * argument), the two roles trade places for the rest of the lowering:
+ * they are interchangeable, and the read then lands on what the lowering
+ * asked for. */
 static int v_rdr(struct t_fn *F, int v, int scr)
 {
+    int c = -1;
     if (in_reg6(F, v))
         return F->loc[v];
+    if (v6_rc_ok(F, v))
+        c = rc_find(F, F->slot[v]);
+    if (c >= 0) {
+        if (c == scr)
+            return sc(F, scr);
+        if (g6_role_n == 1 && g6_s0 >= 0 && g6_s1 >= 0 &&
+            ((scr == g6_s0 && c == g6_s1) || (scr == g6_s1 && c == g6_s0))) {
+            int x = g6_s0;
+            g6_s0 = g6_s1;
+            g6_s1 = x;
+            return sc(F, c);
+        }
+        if (rc_usable(F, c)) {
+            F->tbusy |= 1u << c;
+            return c;
+        }
+    }
     v_rd(F, v, sc(F, scr));
     return scr;
 }
@@ -490,6 +781,8 @@ static void v_wr(struct t_fn *F, int v, int reg)
         return;
     (void)tcg_slot_of(F, v);
     fr_st(F, reg, F->slot[v], 4, 0);
+    if (v6_rc_ok(F, v))
+        rc_note(F, reg, F->slot[v]);
 }
 
 /* dl <- sl and dh <- sh as one move; r12 breaks the swap. */
@@ -520,6 +813,11 @@ static void v_rd64(struct t_fn *F, int v, int lo, int hi)
         return;
     }
     (void)tcg_slot_of(F, v);
+    if (v6_rc_ok(F, v)) {
+        slot_rd(F, lo, F->slot[v]);
+        slot_rd(F, hi, F->slot[v] + 4);
+        return;
+    }
     fr_ld(F, lo, F->slot[v], 4, 0);
     fr_ld(F, hi, F->slot[v] + 4, 4, 0);
 }
@@ -537,6 +835,10 @@ static void v_wr64(struct t_fn *F, int v, int lo, int hi)
         return;
     fr_st(F, lo, F->slot[v], 4, 1u << hi);
     fr_st(F, hi, F->slot[v] + 4, 4, 1u << lo);
+    if (v6_rc_ok(F, v)) {
+        rc_note(F, lo, F->slot[v]);
+        rc_note(F, hi, F->slot[v] + 4);
+    }
 }
 
 /* ---- memory through a pointer ------------------------------------------ */
@@ -700,6 +1002,9 @@ static int v6_invert_last(struct t_fn *F, int n, int label)
         return 0;
     cond = F->fix[F->bc_fix].cond ^ 1;
     F->t->len -= F->fix[F->bc_fix].sz;
+    rc_reset();
+    if (g6_ins_at > F->t->len)
+        g6_ins_at = F->t->len;
     F->nfix--;
     k = v6_branch(F, cond, label);
     (void)k;
@@ -2416,6 +2721,9 @@ static void gen_ins(struct t_fn *F, int n)
         int k = (int)i->imm - 32, d = v_wreg(F, i->dst, S0), hi;
         if (in_reg6(F, i->a)) {
             hi = F->loc[i->a] + 1;
+        } else if (v6_rc_ok(F, i->a) &&
+                   rc_find(F, F->slot[i->a] + 4) >= 0) {
+            hi = rc_find(F, F->slot[i->a] + 4);
         } else {
             fr_ld(F, sc(F, S1), tcg_slot_of(F, i->a) + 4, 4, 0);
             hi = S1;
@@ -2463,6 +2771,7 @@ static void gen_ins(struct t_fn *F, int n)
     switch (i->op) {
     case IR_LABEL:
         F->label_off[i->label] = t->len;
+        rc_reset();
         F->bc_end = -1;
         F->fl_end = -1;
         F->barrier = 0;
@@ -2715,6 +3024,15 @@ static void gen_ins(struct t_fn *F, int n)
         if (in_reg6(F, i->a)) {
             if (i->size >= 4) mov(F, d, F->loc[i->a]);
             else t1_ext(t, d, F->loc[i->a], i->size, i->sign);
+        } else if (v6_rc_ok(F, i->a)) {
+            int c = rc_find(F, F->slot[i->a]);
+            if (c >= 0 && i->size < 4) {
+                t1_ext(t, d, c, i->size, i->sign);
+            } else {
+                slot_rd(F, d, F->slot[i->a]);
+                if (i->size < 4)
+                    t1_ext(t, d, d, i->size, i->sign);
+            }
         } else {
             fr_ld(F, d, tcg_slot_of(F, i->a), 4, 0);
             if (i->size < 4)
@@ -2735,6 +3053,8 @@ static void gen_ins(struct t_fn *F, int n)
             int whole = i->dst >= fn->nvars ||
                         i->size >= fn->locals[i->dst].size;
             fr_st(F, src, s, whole ? 4 : i->size, 0);
+            if (whole && v6_rc_ok(F, i->dst))
+                rc_note(F, src, s);
         }
         return;
     }
@@ -2901,6 +3221,7 @@ static void gen_ins(struct t_fn *F, int n)
         return;
     case IR_ASM:
         gen_asm(F, n);
+        rc_reset();
         return;
     case IR_VA_START: {
         int a = v_rdr(F, i->a, S1);
@@ -3365,6 +3686,15 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         tcg_role_fail();           /* nothing is known free */
     F.label_off = xmalloc((size_t)(fn->nlabels + 1) * sizeof *F.label_off);
     F.no_tbh = xcalloc((size_t)fn->nins + 1, 1);
+    {
+        /* the values whose slots the slot cache may not keep */
+        char *atk = xcalloc((size_t)(fn->nvregs ? fn->nvregs : 1), 1);
+        for (i = 0; i < fn->nins; i++)
+            if (fn->ins[i].op == IR_ADDR && fn->ins[i].a >= 0 &&
+                fn->ins[i].a < fn->nvregs)
+                atk[fn->ins[i].a] = 1;
+        g6_atk = atk;
+    }
 
     {
     int len0 = t->len, nl0 = fn->nlines, nd0 = t->ndrange;
@@ -3420,6 +3750,9 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
 
         /* ---- prologue ---- */
         g6_s0 = 6; g6_s1 = 7;              /* the prologue's */
+        rc_reset();
+        g6_ins_at = t->len;
+        g6_cur = NULL;
         if (F.frame > 1016)
             F.scr_save |= 1u << 6;          /* sp_frame's register */
         if (F.far_mode)
@@ -3504,6 +3837,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                     int wid = (long)(q + 1) * 4 > a->size ? (a->size & 3) : 4;
                     if (wid == 3) wid = 4;      /* a three-byte tail: store 4 */
                     fr_st(&F, pl.reg + q, off, wid, 0xfu);
+                    if (wid == 4 && !a->is_struct && v6_rc_ok(&F, i))
+                        rc_note(&F, pl.reg + q, off);
                 }
                 for (int q = 0; q < pl.nstk; q++) {
                     long src = base + pl.stk + (long)q * 4;
@@ -3511,6 +3846,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                     pool_point(&F, 64, 0);
                     fr_ld(&F, sc(&F, 6), src, 4, 0);
                     fr_st(&F, 6, dst, 4, 0xfu | (1u << 6));
+                    if (!a->is_struct && v6_rc_ok(&F, i))
+                        rc_note(&F, 6, dst);
                 }
             }
             if (npmv) {
@@ -3542,6 +3879,13 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                 rpush = v6_roles_push(&F, i);
             }
             F.tbusy = 0;
+            if (!tcg_ext()) {
+                g6_s0 = 6;                 /* (v_rdr may have swapped them) */
+                g6_s1 = 7;
+            }
+            g6_ins_at = t->len;
+            g6_role_n = 0;
+            g6_cur = &fn->ins[i];
             gen_ins(&F, i);
             if (rpush) {
                 t1_pop(t, rpush);
@@ -3559,6 +3903,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
 
         /* ---- epilogue ---- */
         g6_s0 = 6; g6_s1 = 7;
+        g6_cur = NULL;
         F.label_off[fn->nlabels] = t->len;
         F.ins_mask = 0;
         if (fn->has_alloca)
@@ -3748,4 +4093,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     free(F.lsite);
     free(F.lrel);
     free(F.pads);
+    free((char *)g6_atk);
+    g6_atk = NULL;
+    g6_cur = NULL;
 }

@@ -5,6 +5,12 @@
 #   - va_arg reads its word with one LDR: the argument area is aligned,
 #     and an access marked unaligned is a byte at a time on ARMv6-M
 #     (thirteen instructions a word).
+#   - the slot cache (v6m.c): a value in a frame slot, stored and read
+#     again with nothing in between writing the register or the slot, is
+#     read from the register. Checked on functions whose values cross
+#     calls at a pool of two registers (EMBCC_RA_MAXPOOL), against the
+#     same build with EMBCC_V6_NOSLOTCACHE=1, and on strtol's conv, whose
+#     values crossing calls outnumber the callee-saved registers.
 set -u
 echo "TEST-MARKER thumbv6m-size"
 . "$(dirname "$0")/../lib.sh"
@@ -62,4 +68,44 @@ for f in vsum vsum64 vlast; do
     fi
 done
 
-echo "thumbv6m-size: va_arg is a word load"
+# ---- the slot cache --------------------------------------------------------
+cat > "$out/sc.c" <<'EOF'
+extern int g(int);
+int chain(int a, int b, int c, int d)
+{
+    int x = g(a) + b;
+    int y = g(x ^ c);
+    return y + x + d;
+}
+int chain2(int a, int b, int c)
+{
+    int x = g(a) + b;
+    int y = g(x * c);
+    return g(y + c) + x;
+}
+int chain3(int *p, int b)
+{
+    int x = g(*p) + b;
+    p[1] = x;
+    p[2] = g(x);
+    return x;
+}
+EOF
+ninsn() { dis "$1" $2 | grep '^ *[0-9a-f]*:' | grep -vc 'nop'; }
+EMBCC_RA_MAXPOOL=2 "$EMBCC" --target=$T -Os -c "$out/sc.c" -o "$out/sc.o" ||
+    fail "compile sc.c"
+EMBCC_V6_NOSLOTCACHE=1 EMBCC_RA_MAXPOOL=2 "$EMBCC" --target=$T -Os \
+    -c "$out/sc.c" -o "$out/sc0.o" || fail "compile sc.c without the cache"
+for f in chain chain2 chain3; do
+    on=$(ninsn "$out/sc.o" $f); off=$(ninsn "$out/sc0.o" $f)
+    [ "$on" -lt "$off" ] || { dis "$out/sc.o" $f
+        fail "$f: $on instructions with the slot cache, $off without"; }
+done
+"$EMBCC" --target=$T -Os -Ilib/libc/include -c lib/libc/src/stdlib/strtol.c \
+    -o "$out/strtol.o" || fail "compile strtol.c"
+dis "$out/strtol.o" conv > "$out/conv.dis"
+nsp=$(grep -cE '(ldr|str)[a-z]*[[:space:]].*\[sp' "$out/conv.dis") || nsp=0
+[ "$nsp" -le 70 ] ||
+    fail "strtol's conv makes $nsp stack accesses (80 before the slot cache)"
+
+echo "thumbv6m-size: va_arg is a word load; a slot's value is read from the register that holds it"
