@@ -260,6 +260,7 @@ static u64 set_hi(u64 old, u64 v) { return (old & 0xffffffffull) | v << 32; }
 static void csr_wr(u32 csr, u64 v)
 {
     int x32 = rs->xlen == 32;
+    rs->sim->bus.touched = 1;           /* mie, time: the CLINT's next event */
     u64 cyc = rs->cyc_now + rs->mcycle_off;
     u64 ins = rs->insn_now + rs->minstret_off;
     switch (csr) {
@@ -1036,10 +1037,9 @@ static void step(struct cpu *c)
     if (rs->npc == rs->pc && !rs->changed && s->state == RUN) {
         /* a jump to itself that changed nothing: the end, unless an
          * interrupt can come */
-        u32 left;
         int on = rs->priv < PRV_M || (rs->mstatus & MSTATUS_MIE);
         if (!on || !rs->mie ||
-            (!(rs->mie & rv_mip()) && !sim_next_event(s, &left))) {
+            (!(rs->mie & rv_mip()) && !sim_event_coming(s))) {
             sim_end(s, END_IDLE, "a loop at 0x%08llx that nothing can "
                     "interrupt", (unsigned long long)rs->pc);
             return;

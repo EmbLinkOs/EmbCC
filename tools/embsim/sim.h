@@ -115,6 +115,9 @@ struct bus {
     u32 watch_addr;
     int debug;                      /* the access is a debugger's */
     int dev_fault;                  /* the device refused it: bus_fault */
+    /* a device was read or written since sim_event_coming last looked:
+     * when its next interrupt comes may have changed */
+    int touched;
 };
 
 void bus_add_region(struct bus *b, u32 base, u32 size, int kind);
@@ -321,6 +324,9 @@ struct sim {
     int count_skips;
     /* the SVD's register file (svd-map.c), or 0 */
     struct svdmap *svd;
+    /* sim_event_coming's answer, and the cycle its event comes at */
+    int ev_known, ev_any;
+    u64 ev_at;
     /* the analyses watching the run (analysis.h), or 0: when set, the
      * run steps through an_step */
     struct analysis *an;
@@ -358,6 +364,12 @@ void sim_advance(struct sim *s, u32 cycles);
 void sim_clock(struct sim *s, int *running, int on);
 /* 1 and the cycles to the next device interrupt, or 0 when none is due */
 int sim_next_event(struct sim *s, u32 *cycles);
+/* whether a device will raise an interrupt, as sim_next_event says, but
+ * asked again only when it may have changed: a device accessed (by the
+ * core or a debugger: bus->touched), a clock started or stopped, a
+ * reset, a RISC-V CSR written, or the event's time come. For the cores'
+ * test of a loop that branches to itself, which asks it every turn. */
+int sim_event_coming(struct sim *s);
 
 /* ---- the analyses (analysis.c) ---------------------------------------- */
 

@@ -73,9 +73,23 @@ void sim_rx_port(struct sim *s, int (*room)(void *ctx),
 void sim_clock(struct sim *s, int *running, int on)
 {
     on = on != 0;
-    if (*running != on)
+    if (*running != on) {
         s->counting += on ? 1 : -1;
+        s->bus.touched = 1;
+    }
     *running = on;
+}
+
+int sim_event_coming(struct sim *s)
+{
+    if (!s->ev_known || s->bus.touched || (s->ev_any && s->cycles >= s->ev_at)) {
+        u32 left;
+        s->ev_any = sim_next_event(s, &left);
+        s->ev_at = s->cycles + (s->ev_any ? left : 0);
+        s->ev_known = 1;
+        s->bus.touched = 0;
+    }
+    return s->ev_any;
 }
 
 int sim_next_event(struct sim *s, u32 *cycles)
@@ -172,6 +186,7 @@ void sim_reset(struct sim *s, int reload)
             s->bus.dev[i].ops->reset(s->bus.dev[i].ctx);
     s->insns = s->cycles = 0;
     s->counting = 0;
+    s->ev_known = 0;
     s->state = RUN;
     s->exit_status = 0;
     s->end_why[0] = 0;

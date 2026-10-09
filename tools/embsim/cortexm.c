@@ -601,8 +601,7 @@ static void step(struct cpu *c)
          * not one -- a recursive function's last frame returns to the
          * same pop in its caller, with sp moved on -- and nor is any
          * jump to itself that wrote a register. */
-        u32 left;
-        int can = sim_next_event(s, &left);
+        int can = sim_event_coming(s);
         for (int n = 2; n < NEXC && !can; n++)
             if (cs->pend[n])
                 can = 1;

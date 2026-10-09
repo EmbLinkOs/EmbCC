@@ -87,6 +87,22 @@ estimated cost. Devices that keep time are told after each instruction
 ahead to it; when none will, the run is idle. Nothing reads the host's
 clock: a run gives the same counts every time, under a debugger too.
 
+A loop that branches to itself asks the same question on every turn:
+can anything interrupt it, or is the run over? The cores ask
+`sim_event_coming`, which keeps the devices' answer until something can
+change it: a device read or written (`bus->touched`, the core's
+accesses and a debugger's alike), a clock started or stopped
+(`sim_clock`), a RISC-V CSR written (mie, the counters), a reset, or the
+cycle the expected event comes at. A WFI or a SLEEP, which skips ahead
+by the cycles to the event, still asks `sim_next_event` itself. A new
+device whose next event can change any other way -- by a signal from
+outside, by a register the core does not reach through the bus -- must
+set `bus->touched` when it does, or a loop waiting on it will end late.
+(Measured on an idle loop under each core's timer: the STM32F405's TIM2
+9.4 s to 6.2 s for 200M instructions, RV32's CLINT 1.32 to 1.17 s, the
+AVR's Timer/Counter1, whose query steps its counter to the next match,
+2.45 s to 0.05 s; a run without an idle loop is unchanged.)
+
 **The analyses** (`--coverage` and the rest) watch the run through
 `an_step`, which `sim_run` and `sim_step` call instead of the core's
 step when `s->an` is set, so a run without them is the loop it always
@@ -411,6 +427,9 @@ or with its own file for the six functions of `net.h`.
   cause and call chain, on the M3 and RV32.
 - `tests/golden/embsim-replay.sh`: `--input` on every receiver, and runs
   recorded with input from a pipe, SYS_READC and a debugger, replayed.
+- `tests/golden/embsim-idle.sh`: idle loops end at their first turn once
+  nothing can interrupt them, whatever took the interrupt away: the
+  program, a timer stopping itself, or a debugger.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
   the Cortex-M, on RISC-V and on the AVR.
 - `tests/golden/embsim-svd.sh`: the register file over a test SVD,

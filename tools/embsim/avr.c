@@ -648,8 +648,7 @@ static void step(struct cpu *c)
     if (as->npc == as->pc && !as->changed && s->state == RUN &&
         ((w >> 12) == 0xc || (w & 0xfe0e) == 0x940c || (w >> 11) == 0x1e)) {
         /* a jump to itself: the end, unless an interrupt can come */
-        u32 left;
-        if (!(as->sreg & SREG_I) || (!as->pend && !sim_next_event(s, &left))) {
+        if (!(as->sreg & SREG_I) || (!as->pend && !sim_event_coming(s))) {
             as->pc = as->npc;
             sim_end(s, END_IDLE, "a loop at 0x%04x that nothing can interrupt",
                     (unsigned)(as->pc * 2));
