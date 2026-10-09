@@ -5,7 +5,6 @@
 
 #include "../driver/util.h"
 #include "../arch/target.h"
-#include "../arch/backend.h"
 
 /* --- DWARF constants (only the handful this emitter uses) --- */
 #define DW_TAG_compile_unit     0x11
@@ -756,8 +755,7 @@ static void frame_pad(struct dbuf *b, int start)
 static void emit_frame(struct dwarf_out *out, struct dbuf *b,
                        struct ir_unit *iu)
 {
-    const struct backend_desc *bd = backend_get(target_get());
-    if (!bd->frame_ra)
+    if (!out->frame_ra)
         return;
     int cie = b->len;
     db_u32(b, 0);                        /* length, patched */
@@ -766,9 +764,9 @@ static void emit_frame(struct dwarf_out *out, struct dbuf *b,
     db_u8(b, 0);                         /* augmentation "" */
     db_uleb(b, 1);                       /* code_alignment_factor */
     db_sleb(b, -1);                      /* data_alignment_factor */
-    db_u8(b, (unsigned)bd->frame_ra);    /* return_address_register */
+    db_u8(b, (unsigned)out->frame_ra);   /* return_address_register */
     db_u8(b, DW_CFA_def_cfa);            /* at entry: CFA = sp + 0 */
-    db_uleb(b, (unsigned long)bd->frame_sp);
+    db_uleb(b, (unsigned long)out->frame_sp);
     db_uleb(b, 0);
     frame_pad(b, cie);
 
@@ -787,7 +785,7 @@ static void emit_frame(struct dwarf_out *out, struct dbuf *b,
         reloc(out, DWSEC_FRAME, b->len, addr_bytes(), DWTGT_TEXT, lo);
         db_addr(b, 0);                   /* initial_location */
         db_addr(b, (unsigned long)(f->code_len - f->code_entry));
-        long at = 0, cfa_reg = bd->frame_sp, cfa = 0;
+        long at = 0, cfa_reg = out->frame_sp, cfa = 0;
         for (int k = 0; k < fn->ncfi; k++) {
             const struct ir_cfi *c = &fn->cfi[k];
             long to = c->off - f->code_entry, d = to - at;

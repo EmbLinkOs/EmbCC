@@ -2462,8 +2462,10 @@ static int compile_unit(const char *in, const char *out, int pp_only)
 
     /* -g: build the DWARF line sections now (needs each func's code_off/len,
      * set by codegen). Off, dw stays empty and nothing below fires. */
-    struct dwarf_out dw = { { 0 }, { 0 }, 0, 0, 0 };
+    struct dwarf_out dw = { { 0 }, { 0 }, 0, 0, 0, 0, 0 };
     if (want_debug) {
+        dw.frame_sp = backend_get(target_get())->frame_sp;
+        dw.frame_ra = backend_get(target_get())->frame_ra;
         int split = 0;
         for (int i = 0; i < iu->nfuncs && !split; i++)
             split = iu->funcs[i].src && iu->funcs[i].src->section &&

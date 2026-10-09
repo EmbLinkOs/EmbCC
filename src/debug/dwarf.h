@@ -56,6 +56,12 @@ struct dwarf_out {
     int seclen[DWARF_NSEC];
     struct dwarf_reloc *relocs;
     int nrelocs, reloccap;
+    /* Set by the caller before dwarf_emit: the DWARF numbers of the stack
+     * pointer and of the return address's register, for .debug_frame
+     * (the backend registry's frame_sp and frame_ra); frame_ra 0 writes
+     * no .debug_frame. Passed in rather than looked up, so this file
+     * needs no backend linked beside it (embls links it alone). */
+    int frame_sp, frame_ra;
 };
 
 /* Build the debug sections for iu into out (caller zero-inits out). filename
