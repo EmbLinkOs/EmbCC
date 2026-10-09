@@ -115,6 +115,9 @@ struct bus {
     u32 watch_addr;
     int debug;                      /* the access is a debugger's */
     int dev_fault;                  /* the device refused it: bus_fault */
+    /* a device was read or written since sim_event_coming last looked:
+     * when its next interrupt comes may have changed */
+    int touched;
 };
 
 void bus_add_region(struct bus *b, u32 base, u32 size, int kind);
@@ -278,6 +281,15 @@ enum { RUN, END_EXIT, END_LOCKUP, END_IDLE, END_UNTIL, END_BUDGET };
 
 #define SIM_TICKERS 8
 
+/* the console UART's receiver (sim_rx_port): whether it can take a byte
+ * now, and a byte arriving. Connected only for a run with an input
+ * (--input, or --replay of one): s->rx_on. */
+struct rx_port {
+    int (*room)(void *ctx);
+    void (*put)(void *ctx, int c);
+    void *ctx;
+};
+
 struct sim {
     struct bus bus;
     struct cpu *cpu;
@@ -312,6 +324,17 @@ struct sim {
     int count_skips;
     /* the SVD's register file (svd-map.c), or 0 */
     struct svdmap *svd;
+    /* sim_event_coming's answer, and the cycle its event comes at */
+    int ev_known, ev_any;
+    u64 ev_at;
+    /* the analyses watching the run (analysis.h), or 0: when set, the
+     * run steps through an_step */
+    struct analysis *an;
+    /* the UART's receiver, and whether an input is connected to it */
+    struct rx_port rx;
+    int rx_on;
+    /* the record of the run's inputs, or its replay (record.c), or 0 */
+    struct rec *rec;
 };
 
 /* build the board with its core (`model`, or 0 for the board's own),
@@ -341,6 +364,40 @@ void sim_advance(struct sim *s, u32 cycles);
 void sim_clock(struct sim *s, int *running, int on);
 /* 1 and the cycles to the next device interrupt, or 0 when none is due */
 int sim_next_event(struct sim *s, u32 *cycles);
+/* whether a device will raise an interrupt, as sim_next_event says, but
+ * asked again only when it may have changed: a device accessed (by the
+ * core or a debugger: bus->touched), a clock started or stopped, a
+ * reset, a RISC-V CSR written, or the event's time come. For the cores'
+ * test of a loop that branches to itself, which asks it every turn. */
+int sim_event_coming(struct sim *s);
+
+/* ---- the analyses (analysis.c) ---------------------------------------- */
+
+/* one step with the analyses watching, and the budget: sim_step's and
+ * sim_run's when s->an is set */
+void an_step(struct sim *s);
+/* a core, while s->an is set: exception `n` (an ARM exception number, a
+ * RISC-V mcause, an AVR vector) was entered and returns to `ret`; the
+ * handler returned */
+void an_exc_entry(struct sim *s, u32 n, u32 ret);
+void an_exc_return(struct sim *s);
+
+/* ---- the run's inputs (record.c) ------------------------------------ */
+
+/* the board's console UART offers its receiver (the first to call it) */
+void sim_rx_port(struct sim *s, int (*room)(void *ctx),
+                 void (*put)(void *ctx, int c), void *ctx);
+/* semihosting's SYS_READC: a byte of the host's stdin, or EOF;
+ * recorded, or replayed */
+int sim_readc(struct sim *s);
+/* what a debugger did, for --record (each a no-op without it) */
+void rec_reg(struct sim *s, int n, const u8 *b, int len);
+void rec_mem(struct sim *s, u32 a, const u8 *b, int len);
+void rec_wake(struct sim *s);
+void rec_reset(struct sim *s, int reload);
+void rec_kill(struct sim *s);
+/* a byte of the program's output, which the record's end hashes */
+void rec_out(struct sim *s, int c);
 
 /* ---- semihosting (semihost.c) ----------------------------------------- */
 

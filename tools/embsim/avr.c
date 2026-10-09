@@ -164,7 +164,7 @@ static void take_interrupt(void)
 {
     struct sim *s = as->sim;
     int v = as->pend;
-    u32 c = as->sleeping ? 8 : 4;
+    u32 c = as->sleeping ? 8 : 4, ret = as->pc * 2;
     as->sleeping = 0;
     push_pc(as->pc);
     as->sreg &= (u8)~SREG_I;
@@ -177,6 +177,8 @@ static void take_interrupt(void)
     s->cycles += c;
     if (s->counting)
         sim_advance(s, c);
+    if (s->an)
+        an_exc_entry(s, (u32)v, ret);
 }
 
 /* ---- flags ---------------------------------------------------------------- */
@@ -526,6 +528,8 @@ static int exec(u16 w, u16 w2)
                 as->sreg |= SREG_I;
                 as->inhibit = 1;
                 avr_irq_changed(as->sim);
+                if (as->sim->an)
+                    an_exc_return(as->sim);
                 return 1;
             case 0x9588: {                      /* SLEEP */
                 /* with SMCR.SE, until an interrupt is requested: the
@@ -644,8 +648,7 @@ static void step(struct cpu *c)
     if (as->npc == as->pc && !as->changed && s->state == RUN &&
         ((w >> 12) == 0xc || (w & 0xfe0e) == 0x940c || (w >> 11) == 0x1e)) {
         /* a jump to itself: the end, unless an interrupt can come */
-        u32 left;
-        if (!(as->sreg & SREG_I) || (!as->pend && !sim_next_event(s, &left))) {
+        if (!(as->sreg & SREG_I) || (!as->pend && !sim_event_coming(s))) {
             as->pc = as->npc;
             sim_end(s, END_IDLE, "a loop at 0x%04x that nothing can interrupt",
                     (unsigned)(as->pc * 2));

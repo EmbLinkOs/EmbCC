@@ -48,3 +48,9 @@ void net_close(int fd)
 {
     (void)fd;
 }
+
+int net_file_ready(FILE *f)
+{
+    (void)f;
+    return 1;
+}

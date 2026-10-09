@@ -40,6 +40,8 @@ void sim_end(struct sim *s, int state, const char *fmt, ...)
 void sim_out(struct sim *s, int c)
 {
     putchar(c);
+    if (s->rec)
+        rec_out(s, c);
     if (s->until) {
         /* a plain prefix automaton is enough for the sentinels harnesses
          * print: restart the match at this byte when it breaks */
@@ -58,12 +60,36 @@ void sim_advance(struct sim *s, u32 cycles)
         s->tick_fn[i](s->tick_ctx[i], cycles);
 }
 
+void sim_rx_port(struct sim *s, int (*room)(void *ctx),
+                 void (*put)(void *ctx, int c), void *ctx)
+{
+    if (s->rx.room)
+        return;
+    s->rx.room = room;
+    s->rx.put = put;
+    s->rx.ctx = ctx;
+}
+
 void sim_clock(struct sim *s, int *running, int on)
 {
     on = on != 0;
-    if (*running != on)
+    if (*running != on) {
         s->counting += on ? 1 : -1;
+        s->bus.touched = 1;
+    }
     *running = on;
+}
+
+int sim_event_coming(struct sim *s)
+{
+    if (!s->ev_known || s->bus.touched || (s->ev_any && s->cycles >= s->ev_at)) {
+        u32 left;
+        s->ev_any = sim_next_event(s, &left);
+        s->ev_at = s->cycles + (s->ev_any ? left : 0);
+        s->ev_known = 1;
+        s->bus.touched = 0;
+    }
+    return s->ev_any;
 }
 
 int sim_next_event(struct sim *s, u32 *cycles)
@@ -160,6 +186,7 @@ void sim_reset(struct sim *s, int reload)
             s->bus.dev[i].ops->reset(s->bus.dev[i].ctx);
     s->insns = s->cycles = 0;
     s->counting = 0;
+    s->ev_known = 0;
     s->state = RUN;
     s->exit_status = 0;
     s->end_why[0] = 0;
@@ -175,6 +202,10 @@ void sim_reset(struct sim *s, int reload)
  * too */
 void sim_step(struct sim *s)
 {
+    if (s->an) {
+        an_step(s);
+        return;
+    }
     s->cpu->ops->step(s->cpu);
     if (s->max_insns && s->insns >= s->max_insns && s->state == RUN)
         sim_end(s, END_BUDGET, "--max-insns: %llu instructions run",
@@ -185,6 +216,11 @@ void sim_run(struct sim *s)
 {
     struct cpu *c = s->cpu;
     void (*step)(struct cpu *) = c->ops->step;
+    if (s->an) {
+        while (s->state == RUN)
+            an_step(s);
+        return;
+    }
     while (s->state == RUN) {
         step(c);
         if (s->max_insns && s->insns >= s->max_insns && s->state == RUN)

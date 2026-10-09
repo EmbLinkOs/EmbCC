@@ -48,8 +48,8 @@ int semihost(struct sim *s, const struct semi_ops *m, void *ctx, u32 op,
     case 0x06:                          /* SYS_READ: nothing to read */
         *ret = m->ld(ctx, arg + 8, 4);
         return 1;
-    case 0x07:
-        *ret = (u32)getchar();
+    case 0x07:                          /* SYS_READC: recorded, replayed */
+        *ret = (u32)sim_readc(s);
         return 1;
     case 0x0c:
         *ret = 0;

@@ -19,6 +19,12 @@ embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--count FILE] [--trace FILE] [--no-semihosting]
                  [--gdb [HOST:]PORT [--gdb-wait]]
                  [--svd FILE.svd] [--trace-periph[=NAME,...]]
+                 [--coverage FILE [--coverage-format=text|lcov]]
+                 [--profile[=FILE] [--profile-format=report|collapsed|collapsed-insns]]
+                 [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]
+                 [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]
+                 [--fault-report[=FILE]] [--input FILE|-] [--record FILE]
+embsim [IMAGE.elf] --replay FILE [--count FILE] [--stats] [...]
 embsim --svd FILE.svd --svd-map
 ```
 
@@ -243,7 +249,8 @@ Over its registers, four models, found by the SVD's names (`RCC`,
   `0x00c00000`); a write to DR with CR1's UE and TE set sends the byte
   to stdout at once, so TXE stays set and TC sets; TC, RXNE, LBD and CTS
   are cleared by writing 0; the TXE, TC and RXNE interrupts are raised
-  through the NVIC when enabled. Reception is not modelled.
+  through the NVIC when enabled. Reception is not modelled (the board's
+  console for `--input` is the core's boards' UARTs, above).
 - **TIM1-14**, their time base: CNT counts up while CEN is set, one
   count per PSC + 1 clocks of the timer's clock; past ARR it returns to
   0 and that is an update event: UIF, and the interrupt with UIE (the
@@ -392,7 +399,8 @@ words, at the byte address.
 The board's UART writes to stdout. The UART must be enabled as on the
 part: CMSDK's CTRL, the nRF51's ENABLE and STARTTX, the AVR's TXEN0.
 The NS16550A sends what is written to THR, and its LSR always says the
-transmitter is empty.
+transmitter is empty. Its receiver has nothing, unless the run has an
+input (`--input`, [below](#record-and-replay---input---record---replay)).
 
 On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 `--no-semihosting` is given. It handles:
@@ -411,10 +419,376 @@ On the Cortex-M, semihosting (`bkpt 0xab`) is on unless
 | an AVR SLEEP that nothing can wake (the AVR harness ends in such a loop) | 0 |
 | the output contains `--until`'s string | 0 |
 | the core locks up (a RISC-V trap whose vector cannot be fetched; an AVR instruction the part does not have) | 3 |
+| the stack overflows, with `--stack-report` or `--stack-limit` | 3 |
 | `--max-insns` instructions have run | 4 |
+| `--replay`: the run is not the recording's | 5 |
 | the image cannot be loaded, or an option is wrong | 2 |
 
 A run that ends at a lockup or at `--max-insns` says why on stderr.
+
+## Testing and analysis
+
+These are the measurements a firmware's CI wants of a run, and what a
+debugging session wants after one. Each is an option; a run without
+them is exactly the run it always was, and with them the program's
+output, its exit status and its counts do not change.
+
+They read the image's symbol table, and its DWARF when it was built
+with `-g`: the line table for source lines. EmbCC, GCC and clang images
+alike (DWARF 2 to 5).
+
+### Coverage: `--coverage`
+
+`--coverage FILE` counts each instruction the run executes, and at the
+end writes which source lines and functions ran, and how often (`-` for
+stderr):
+
+```sh
+embcc --target=thumbv7m-none-eabi -O0 -g -c main.c
+embsim fw.elf --coverage fw.cov
+embsim fw.elf --coverage fw.info --coverage-format=lcov
+genhtml fw.info -o coverage-html
+```
+
+The report is gcov's layout, file by file: a summary, each function and
+the times it was entered, and the source with each line's count
+(`#####`: code that never ran; `-`: no code).
+
+```text
+tests/golden/embsim-an/cov.c: 14 of 17 lines (82.4%), 2 of 3 functions (66.7%)
+  function never_called (line 17): 0
+  function classify (line 22): 5
+  function main (line 32): 1
+    #####:   17:static int never_called(int x)
+        -:   18:{
+    #####:   19:    return x * 3;
+        -:   20:}
+        -:   21:
+        5:   22:static int classify(int v)
+        -:   23:{
+        5:   24:    int r = 1;
+        5:   25:    if (v < 0)
+        1:   26:        r = -1;
+        4:   27:    else if (v == 0)
+        1:   28:        r = 0;
+        5:   29:    return r;
+...
+        6:   35:    for (int i = 0; i < 5; i++)
+        5:   36:        sum += classify(i - 1);
+        1:   37:    if (sum > 100)
+    #####:   38:        sum = never_called(sum);
+
+total: 14 of 17 lines (82.4%), 5 of 7 functions (71.4%)
+```
+
+- A line has code when the line table gives it addresses in the image's
+  executable segments. Its count is that of its most-executed
+  instruction: the times it ran, for straight-line code. A `for` line
+  counts its test (6 for 5 turns). A line that holds code shared by
+  several statements counts them all: at -O0 a function's epilogue is
+  usually on its last `return`, which then counts every return.
+- A function's count is its first instruction's: the times it was
+  entered. A function inlined everywhere counts 0, and its lines count
+  where they were inlined.
+- The source is read from the path the line table gives (relative to
+  the directory EmbSim runs in); when it cannot be, the lines with code
+  are listed alone.
+- Without `-g` there is no line table: the report has the functions
+  alone, from the symbol table, with a warning.
+- Functions with no line information (a startup file built without
+  `-g`, the C library) are listed apart, and count in the total.
+- `--coverage-format=lcov` writes lcov's tracefile instead (`SF`, `FN`,
+  `FNDA`, `FNF`, `FNH`, `DA`, `LF`, `LH`), which genhtml, Codecov,
+  Coveralls and most CI services read.
+
+### Profiling: `--profile`
+
+`--profile` writes, when the run ends, the instructions and estimated
+cycles each function took, on stderr; `--profile=FILE` to a file.
+
+```text
+embsim profile: fw.elf, 2809 instructions, 4164 cycles (est.)
+  self insns  self cycles   self   incl insns  incl cycles   incl     calls  function
+        1320         1920  46.1%         1338         1941  46.6%        30  spin
+         995         1330  31.9%         2809         4164 100.0%         0  reset
+         224          410   9.8%         1814         2834  68.1%         1  main
+         129          231   5.5%          174          311   7.5%         2  putn
+          29           77   1.8%           29           77   1.8%         5  rec
+          30           42   1.0%           30           42   1.0%         6  leaf
+          18           21   0.5%           18           21   0.5%         3  tick
+...
+        2809         4164 100.0%                                             (total)
+```
+
+- **self** is what ran in the function itself; **incl** adds what its
+  callees ran, and its interrupt handlers' when an interrupt came while
+  it was on the stack. A recursive function's inclusive counts each
+  instruction once. **calls** is how often a call, or an exception's
+  entry, reached it.
+- **The counts add up exactly to `--stats`' totals.** Each step of the
+  run goes to one function, whatever it costs: a taken branch's extra
+  cycles, a WFI's or a SLEEP's wait (to the function that waited), an
+  AVR interrupt's four entry cycles (to the code it interrupted).
+- Code no symbol covers (QEMU's reset ROM on virt) is `[unknown]`.
+
+EmbSim follows the calls and returns as the core executes them, which
+needs no frame pointer and no debug information:
+
+| Core | Calls | Returns |
+|---|---|---|
+| Cortex-M | `bl`, `blx` | `bx`, `pop {..., pc}`, `ldm` with the pc, `ldr pc`, `mov pc` |
+| RISC-V | `jal` and `jalr` that link (`ra` or `t0`), `c.jal`, `c.jalr` | `jalr` and `c.jr` that do not |
+| AVR | `call`, `rcall`, `icall` | `ret` |
+
+A return is one when it lands where a call on the stack returns to:
+that call's frame and the ones above it end, so a tail call (a branch to
+another function, which then returns for both) leaves the stack right,
+and the function it branched to is shown as called from the one that
+branched. An exception's entry is a frame too, and its return (an
+EXC_RETURN, `mret`, `reti`) ends it wherever the handler returns to.
+Where the vector table holds a jump (the AVR's, RISC-V's vectored mode)
+the handler is the jump's target, and the jump counts as the handler's.
+
+`--profile-format=collapsed` writes the call paths instead, one a line
+with its cycles (`collapsed-insns`: its instructions), the format
+flamegraph.pl, speedscope and inferno read:
+
+```text
+reset;main;a 36
+reset;main;a;leaf 21
+reset;main;rec;rec;rec 16
+reset;main;spin 1920
+reset;main;spin;tick 21
+```
+
+```sh
+embsim fw.elf --profile=fw.folded --profile-format=collapsed
+flamegraph.pl fw.folded > fw.svg
+```
+
+### The stacks: `--stack-report` and `--stack-limit`
+
+`--stack-report` writes, when the run ends, how deep each stack went and
+which functions took it there (on stderr; `--stack-report=FILE` to a
+file). Give it the `.su` files `-fstack-usage` wrote (`--stack-su FILE`,
+or simply the files: an argument ending in `.su` is one), and embrt's
+`--json` report (`--stack-embrt FILE`), and their numbers go beside the
+run's:
+
+```sh
+embcc --target=thumbv7m-none-eabi -O1 -fstack-usage -fcallgraph-info=su -c *.c
+embrt *.o --entry main --isr SysTick_Handler --json > bound.json
+embsim fw.elf --stack-report --stack-embrt bound.json *.su
+```
+
+```text
+embsim stack: fw.elf
+main stack (MSP): top 0x20010000, deepest 0x2000ffa0: 96 bytes used of 65216 (down to 0x20000140, _end)
+process stack (PSP): not used
+by function, deepest first (bytes; frame and incl from the function's entry):
+  function                    deepest   depth   frame     .su    incl   embrt
+  writec                   0x2000ffa0      96      16      16      16       -
+  rec                      0x2000ffa8      88       8       8      40       -
+  putn                     0x2000ffb0      80      32      32      48      48
+  tick                     0x2000ffb0      80       0       0       0       0
+  main                     0x2000ffd0      48      24      24      72    none
+the run stayed within the static numbers
+```
+
+- **The stacks.** The main stack's high-water mark, and on a Cortex-M
+  the process stack's (when a thread ran on the PSP; each is read as
+  the core banks it). The top is the stack pointer's highest value (on
+  a Cortex-M, the reset value from the vector table too). The region
+  runs down to the stack's limit: `--stack-limit`, else the link's
+  `__stack_limit` (`__StackLimit`, `_sstack`), else the end of `.data`
+  and `.bss` (`_end`, `__bss_end`, `_ebss`, `end`), else the bottom of
+  the RAM the stack is in.
+- **deepest**, **depth**: the lowest sp while the function was running,
+  and how far that is below the top.
+- **frame**: the most the function moved sp below its entry -- the
+  number `-fstack-usage` gives, beside it as **.su**. On the AVR the
+  call's two-byte return address is the callee's, as avr-gcc's and
+  EmbCC's `.su` count it.
+- **incl**: the most the stack went below the function's entry while it
+  was on the stack, its callees' frames included and the interrupts that
+  came meanwhile not -- the number embrt bounds for an entry point,
+  beside it as **embrt** (`none` where embrt finds no bound, such as
+  recursion).
+- A frame or a depth above its static number is marked `ABOVE THE
+  STATIC BOUND`: the static analysis missed something, and the last line
+  says so.
+- On RISC-V and the AVR there is one stack pointer: a program that
+  switches stacks (an RTOS's tasks) is measured over all of them.
+
+**An overflow ends the run.** With `--stack-report` or `--stack-limit
+ADDR` (or a symbol's name), the main stack going below its limit -- past
+`--stack-limit` or `__stack_limit`, or, with neither, into `.bss` and
+`.data` -- stops the run at the instruction that moved sp there, as a
+part with a stack guard would fault, with status 3:
+
+```text
+embsim: stack overflow: sp 0x2000f7f8 is below the stack limit 0x2000f800 (__stack_limit), at deep (ovf.c:9); 354 instructions, 573 cycles (est.)
+embsim: stack overflow: sp 0x1ffffff0 is below the end of .data and .bss 0x20000004 (_end), at deep+0x2 (ovf.c:9); 10046 instructions, 16432 cycles (est.)
+```
+
+An exception's entry that stacks past the limit is reported as one (`in
+an exception's entry, at` the instruction it interrupted).
+
+### Faults: `--fault-report`
+
+`--fault-report` decodes each fault the moment the core takes it, on
+stderr (`--fault-report=FILE` to a file): a Cortex-M's HardFault,
+MemManage, BusFault and UsageFault, and a RISC-V exception (an ECALL and
+an EBREAK, which a program makes on purpose, are not faults).
+
+```text
+embsim: fault: HardFault (exception 3) at 0x00000160, in crash (fault.c:31)
+  HFSR  0x40000000  FORCED: a configurable fault escalated to HardFault (its handler disabled, or not able to preempt)
+  CFSR  0x00008200
+        PRECISERR: a precise data bus error at 0x30000000
+  BFAR  0x30000000 (BFARVALID)
+  instruction 0x00000160: 6800       ldr r0, [r0, #0]
+  stacked frame at 0x2000ff90 (MSP):
+    r0  0x30000000  r1  0x20000004  r2  0xe000e010  r3   0x00000000
+    r12 0x00000000  lr  0x00000173  pc  0x00000160  xpsr 0x0100000f
+    lr: level2+0xc (fault.c:37)
+  r4  0x00000007  r5  0x00000000  r6  0x00000000  r7   0x00000000
+  r8  0x00000000  r9  0x00000000  r10 0x00000000  r11  0x00000000
+  backtrace (.debug_frame):
+    #0  0x00000160 in crash (fault.c:31)
+    #1  0x00000172 in level2+0xc (fault.c:37)
+    #2  0x000001c4 in tick+0x8 (fault.c:65)
+        <- an exception's entry (EXC_RETURN 0xfffffff9): the code it interrupted
+    #3  0x000001da in spin+0xa (fault.c:71)
+    #4  0x00000234 in main+0x52 (fault.c:110)
+    #5  0x000000a2 in reset+0x92
+        (no call frame information for 0x000000a2: the unwinding stops here)
+  handler: none -- the vector is 0x00000000, without the Thumb bit: the core cannot run it (it will fault again)
+embsim: the core locked up at 0x00000000, in 0x00000000: the fault above had no handler
+```
+
+- **The status registers in words**: each CFSR bit set (MemManage's,
+  BusFault's and UsageFault's), HFSR's FORCED and VECTTBL, and BFAR and
+  MMFAR when their valid bits say they hold the address. On RISC-V,
+  mcause by name, and mtval as what it is for that cause (the address,
+  or the instruction's bits).
+- **The stacked frame** -- r0-r3, r12, lr, pc and xPSR, read from the
+  stack the EXC_RETURN in lr names -- and the other registers; on
+  RISC-V, the 32 registers.
+- **The faulting instruction**, disassembled (Thumb, RISC-V; a form the
+  disassembler does not know is its encoding), with its symbol and line.
+- **The backtrace**, by the image's `.debug_frame` (EmbCC writes it for
+  Thumb and RISC-V with `-g`) from the registers at the fault. On a
+  Cortex-M it goes through an exception's frame, where the CFI's return
+  address is an EXC_RETURN, into the code the exception interrupted.
+  Where no CFI covers the faulting pc, it is the calls EmbSim saw the
+  core make (the call stack `--profile` follows), named by the symbol
+  table.
+- **The handler**: the one the vector table or mtvec gives, or that
+  there is none -- a vector without the Thumb bit or nowhere near a
+  function, an mtvec where nothing can be fetched -- in which case the
+  core locks up next, and the run ends with status 3 and one more line.
+- An AVR has no faults; with `--fault-report` its lockup (an instruction
+  the part does not have) gives the pc and the calls that led there.
+
+It is an option, not the default when a run stops on an unhandled
+fault, for two reasons. A run's stderr without new options is the same
+as before, byte for byte, which scripts and the golden tests read. And
+most firmware does not stop on its faults: its HardFault handler is a
+`b .`, so EmbSim ends the run as an idle loop (status 0), or a handler
+logs and resets. The report is taken at the fault's entry, so it is
+there in both cases, and for every fault a program handles too (a test
+that provokes faults gets one report each), which as a default would be
+noise.
+
+### Record and replay: `--input`, `--record`, `--replay`
+
+`--input FILE` connects FILE (`-`: stdin) to the board's UART receiver:
+the PL011 of the lm3s6965evb, the CMSDK UART of the MPS2 boards, virt's
+NS16550A and the AVR's USART0.
+
+| UART | A byte arriving | Its interrupt |
+|---|---|---|
+| PL011 | waits in DR; FR's RXFE clears; RIS's RXRIS sets | with IMSC's RXIM: IRQ 5; reading DR or ICR clears it |
+| CMSDK | with CTRL's RX enable: waits in DATA; STATE's RX full sets | with CTRL's RX interrupt enable: INTSTATUS bit 1, IRQ 0 |
+| NS16550A | waits in RBR; LSR's DR sets | none (virt's PLIC is not modelled): poll LSR |
+| USART0 | with RXEN0: waits in UDR0; UCSR0A's RXC0 sets | with RXCIE0: vector 18 |
+
+A byte arrives when the host has one: the receiver is offered the next
+every 4096 steps while it is empty, and when the core would sleep with
+nothing else to wake it, the run waits for the host instead of ending.
+Typing into stdin makes an interactive console. Where the host's bytes
+fall in the run depends on the host -- how fast the pipe delivers, when
+a person types -- and a program that counts its own time sees different
+counts each run:
+
+```text
+$ (printf ab; sleep 0.3; printf cd; sleep 0.3; printf q) | embsim rr.elf --input -
+got a at tick 261
+got b at tick 591
+got c at tick 12463
+got d at tick 12785
+got q at tick 24650
+```
+
+That is what `--record FILE` is for. It writes everything that came from
+outside the machine, each with the step it came at, and the run's end:
+
+- the bytes the UART received (`rx`), and the core it woke when it had
+  to wait for one (`wake`);
+- semihosting's SYS_READC, a byte of the host's stdin (`readc`);
+- a debugger's register and memory writes (`reg`, `mem`, gdb's `load`
+  and flash erases among them), its `monitor reset` and `reload`, the
+  core it wakes from a sleep nothing else would end, and its `kill`;
+- every exception and interrupt the core entered, with its step and
+  instruction count (`exc`), which a replay checks: a run of the same one
+  at a constant stride -- a timer's tick waking an idle loop while the
+  run waits for the host -- is one line, so the record grows with what
+  the program does, not with how long a person takes to type;
+- the machine: the image (and a hash of it), the board, the core, the
+  RAM size, the SVD file, semihosting, `--max-insns` and `--until`;
+- the end: the steps, the instructions and cycles, how the run ended
+  and its status, a hash of the registers and memory, and the output's
+  length and hash.
+
+There is no time to record: every counter and timer EmbSim has runs on
+the core's estimated cycles, never on the host's clock. A step is a
+call of the core's step that did something; one a watchpoint stops
+before its access does nothing, and a run without the debugger never
+takes it.
+
+```text
+@1232 1231 exc 15 x 261 +11 +10
+@4096 3835 rx 61
+@4099 3837 exc 21
+@4575 4312 exc 15 x 329 +11 +10
+...
+@1189 1189 mem 20000084 29000000
+@1189 1189 reg 0 64000000
+end 270912 246621 242911779 1 0 669cb360efc5d2fd 34 022fc4ec611bf39b
+```
+
+`--replay FILE` runs the recording again: the same machine (an option
+that shapes it may be given only as the recording has it; the image is
+the recording's unless named, and must hash the same), the recorded
+inputs at the recorded steps, no host input and no debugger. Its output,
+its `--count` and `--stats`, its exit status and its final state are the
+recorded run's; it says so on stderr, or where the two went apart, with
+status 5:
+
+```text
+embsim: replay: the run is the recording's (270912 steps, 246621 instructions, 17 events)
+embsim: replay diverged at step 4097 (3836 instructions): rx: the recording is at 3835 instructions here
+embsim: replay diverged: the run ended at
+  steps, instructions, cycles, state, status, the state's hash, the output's bytes and hash:
+  this run's:      164410 149801 146072424 1 0 c9f06dca0cedf591 99 a408e13e96d3cf61
+  the recording's: 164410 149801 146072424 1 0 c9f06dca0cedf591 99 30e7262b9dcebd41
+```
+
+A recorded debugging session -- breakpoints, `set var`, a register
+changed, a watchpoint -- replays without the debugger, so a run that
+went wrong once under gdb can be run again, and `--trace`d, `--profile`d
+or debugged again, exactly as it went.
 
 ## Debugging: `--gdb`
 
@@ -516,8 +890,9 @@ stops at a named fault rather than computing something wrong.
 
 On the AVR:
 - Timer/Counter0 and 2, SPI, TWI, the ADC, the analog comparator, EEPROM,
-  the watchdog, the external and pin-change interrupts, the USART's
-  receiver, and the power reduction register. Their registers keep what
+  the watchdog, the external and pin-change interrupts, and the power
+  reduction register (the USART's receiver is, with `--input`). Their
+  registers keep what
   is written (on QEMU they read as zero), and their interrupts never
   come.
 - The output-compare pins and input capture from a pin.
@@ -586,6 +961,40 @@ the register, and RM0090's (a record) where it does not or differs.
 `tests/golden/embsim-svd-all.sh` maps every SVD file in `$EMBREF/svd`
 (ST's and Nordic's) and holds each register's address and size to a
 second reading of the file in Python.
+
+**Analysis.** `tests/golden/embsim-coverage.sh` builds
+`tests/golden/embsim-an/cov.c`, whose every line with code is marked
+with the times it runs, at -O0 -g on the M3, RV32 and the AVR, and with
+clang (DWARF 5); the report and the lcov tracefile must give exactly the
+marks, line for line, the run must be the same with and without
+`--coverage`, and an image without `-g` must give its functions.
+`tests/golden/embsim-profile.sh` profiles `embsim-an/prof.c`, whose
+calls are known (a loop's, recursion five deep, a call through a pointer,
+a timer interrupt), on the M3, RV32 with and without compressed
+instructions, and the AVR: the counts must add up to `--stats`' in the
+report and in both collapsed forms, each function's self instructions
+must be what the `--trace` of the run gives it by llvm-nm's symbols, and
+the calls, the paths and the inclusive counts must be prof.c's; and
+`exc.c`'s handlers must be entered as often as it counts.
+`tests/golden/embsim-stack.sh` measures prof.c's stacks: each frame must
+be the `.su` file's, the depth the sum of the deepest path's frames, and
+the inclusive depths of the functions embrt bounds embrt's bounds; and it
+overflows `ovf.c`'s recursion past `__stack_limit`, `--stack-limit` and
+into `.bss`, where the run must stop at the push that crossed.
+`tests/golden/embsim-fault.sh` takes `fault.c`'s faults on the M3 and
+RV32 -- a BusFault handled, a divide by zero forced to a HardFault with
+no handler, a fault in an interrupt handler, a load access fault and an
+illegal instruction -- and holds each report to the fault: the status
+registers' words, the faulting instruction's mnemonic against
+llvm-objdump's, the backtrace against the source lines marked in
+fault.c, the handler; and the run must be the same without the report.
+`tests/golden/embsim-replay.sh` feeds `rr.c` bytes through a pipe with
+pauses, on the PL011 (by interrupt, with SysTick and without), the
+CMSDK UART, the NS16550A and the AVR's USART0, and through SYS_READC;
+records each run, replays it with other bytes on stdin, and requires the
+same output, `--count`, `--stats` and status; replays a gdb session's
+writes and watchpoint without gdb; and refuses a record with a byte
+changed, a byte a step late, another image or another board.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32

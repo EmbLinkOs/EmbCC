@@ -5,6 +5,8 @@
 #ifndef EMBSIM_NET_H
 #define EMBSIM_NET_H
 
+#include <stdio.h>
+
 /* Listen on TCP `port` of `host` (0: this machine's loopback addresses).
  * Returns a listener, or -1 (and says why on stderr). */
 int net_listen(const char *host, int port);
@@ -20,5 +22,8 @@ int net_read(int fd, void *buf, int n);
 /* All n bytes: 0, or -1 when the connection is gone. */
 int net_write(int fd, const void *buf, int n);
 void net_close(int fd);
+/* 1 when the host file `f` (the UART's --input) has a byte to read now,
+ * without waiting; a host that cannot tell says 1, and the read waits */
+int net_file_ready(FILE *f);
 
 #endif

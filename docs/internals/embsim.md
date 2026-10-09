@@ -44,6 +44,14 @@ file but the network one compiles with EmbCC itself. Everything is in
 | `../embsvd/svd.h`, `../embsvd/svd.c` | the CMSIS-SVD reader, embsvd's |
 | `stm32-rcc.c`, `stm32-gpio.c`, `stm32-usart.c`, `stm32-tim.c` | the STM32's peripheral models, over its SVD's registers |
 | `devices.h` | the create functions `boards.c` builds boards from |
+| `image.h`, `image.c` | the image's symbols, code ranges, DWARF line table and `.debug_frame`, for the analyses |
+| `analysis.h`, `analysis.c` | the step the analyses watch, and the shadow stack of the program's calls |
+| `coverage.c` | `--coverage`: the counts per instruction, the report and lcov's tracefile |
+| `profile.c` | `--profile`: the counts per call path, the report and the collapsed stacks |
+| `stack.c` | `--stack-report`, `--stack-limit`: the stacks' high-water marks, frames by function, `.su` and embrt's bounds, the overflow |
+| `fault.c` | `--fault-report`: a fault decoded at its entry, the stacked frame, the backtrace by `.debug_frame` (or the shadow stack) |
+| `disasm.h`, `disasm.c` | one Thumb or RISC-V instruction as text, for the fault report |
+| `record.c` | `--input`, `--record`, `--replay`: the UART's input, the record of a run's inputs, the replay |
 
 The cost of each instruction comes from `tools/bench/cost.h`, the table
 the bench uses in QEMU, so the two estimates cannot drift (`arm_cost`,
@@ -78,6 +86,58 @@ estimated cost. Devices that keep time are told after each instruction
 `sim_next_event` when a device will next raise an interrupt and skips
 ahead to it; when none will, the run is idle. Nothing reads the host's
 clock: a run gives the same counts every time, under a debugger too.
+
+A loop that branches to itself asks the same question on every turn:
+can anything interrupt it, or is the run over? The cores ask
+`sim_event_coming`, which keeps the devices' answer until something can
+change it: a device read or written (`bus->touched`, the core's
+accesses and a debugger's alike), a clock started or stopped
+(`sim_clock`), a RISC-V CSR written (mie, the counters), a reset, or the
+cycle the expected event comes at. A WFI or a SLEEP, which skips ahead
+by the cycles to the event, still asks `sim_next_event` itself. A new
+device whose next event can change any other way -- by a signal from
+outside, by a register the core does not reach through the bus -- must
+set `bus->touched` when it does, or a loop waiting on it will end late.
+(Measured on an idle loop under each core's timer: the STM32F405's TIM2
+9.4 s to 6.2 s for 200M instructions, RV32's CLINT 1.32 to 1.17 s, the
+AVR's Timer/Counter1, whose query steps its counter to the next match,
+2.45 s to 0.05 s; a run without an idle loop is unchanged.)
+
+**The analyses** (`--coverage` and the rest) watch the run through
+`an_step`, which `sim_run` and `sim_step` call instead of the core's
+step when `s->an` is set, so a run without them is the loop it always
+was. `an_step` notes the pc and the counts, steps the core, and gives
+each analysis the instruction that ran (`s->insns` moved) and what it
+cost (the change in `s->cycles`). It follows the program's calls and
+returns on a shadow stack, recognizing them by the instruction as the
+core executes it (`analysis.c` says which), and the cores tell it what
+no instruction shows: `an_exc_entry` when an exception or interrupt is
+entered, `an_exc_return` when the handler returns. Each is one test of
+`s->an` in the core, where it was 0 before.
+
+The shadow stack's frames each name a call path (`struct an_node`): a
+function, reached along its parent's path. Each step's instructions and
+cycles go to the path the pc is on before the step makes its call or
+return -- the top frame's, or a path below it when the pc has left the
+frame's function (a tail call) -- so every count is in exactly one path,
+and the profile's totals are `--stats`' by construction.
+
+**The inputs.** What comes from outside the machine goes through
+`record.c`: the console UART offers its receiver with `sim_rx_port` (a
+model's `room` and `put`, live only while `s->rx_on`), semihosting's
+SYS_READC calls `sim_readc`, the GDB server tells `rec_reg`, `rec_mem`,
+`rec_wake`, `rec_reset` and `rec_kill` what the debugger did, and
+`sim_out` hashes the output. A recording's events are stamped with
+`an_step`'s count of steps that did something; those that happen within
+a step (an exception, a SYS_READC) with the step in progress. A new
+source of input -- another UART, a GPIO pin driven from outside -- must
+come through here, or a replay of a run that used it will not be the
+run.
+
+`image.c` reads the ELF a second time, apart from the loader, for what
+the analyses need: the functions (STT_FUNC, and labels in the code for
+assembly), the line table as address ranges, and the call frame
+information. None of it is read without an analysis.
 
 ## The interfaces
 
@@ -356,6 +416,20 @@ or with its own file for the six functions of `net.h`.
 - `tests/golden/embsim-avr.sh`: the AVR core on uno: some 580 corpus
   programs to the instruction, `avr-isa`'s edges against QEMU,
   `avr-cycles.S`'s cycles against the datasheet, the ends of a run.
+- `tests/golden/embsim-coverage.sh`: `--coverage` against a program
+  whose lines carry the counts they must get, on the three cores and
+  from clang's DWARF 5.
+- `tests/golden/embsim-profile.sh`: `--profile` against a program of
+  known calls, an interrupt among them, and the `--trace` of its run.
+- `tests/golden/embsim-stack.sh`: `--stack-report` against `.su` files
+  and embrt, and overflows past a limit and into `.bss`.
+- `tests/golden/embsim-fault.sh`: `--fault-report` on faults of known
+  cause and call chain, on the M3 and RV32.
+- `tests/golden/embsim-replay.sh`: `--input` on every receiver, and runs
+  recorded with input from a pipe, SYS_READC and a debugger, replayed.
+- `tests/golden/embsim-idle.sh`: idle loops end at their first turn once
+  nothing can interrupt them, whatever took the interrupt away: the
+  program, a timer stopping itself, or a debugger.
 - `tests/golden/embsim-gdb.sh`: the GDB server against QEMU's stub, on
   the Cortex-M, on RISC-V and on the AVR.
 - `tests/golden/embsim-svd.sh`: the register file over a test SVD,

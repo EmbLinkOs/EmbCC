@@ -61,6 +61,9 @@ static void trap_enter(u64 cause, u64 tval, int intr)
     rs->resv = 0;
     u64 base = rs->mtvec & ~(u64)3;
     rs->pc = intr && (rs->mtvec & 1) ? base + 4 * cause : base;
+    if (rs->sim->an)
+        an_exc_entry(rs->sim, (u32)cause | (intr ? 0x80000000u : 0),
+                     (u32)rs->mepc);
 }
 
 /* ---- memory ------------------------------------------------------------- */
@@ -257,6 +260,7 @@ static u64 set_hi(u64 old, u64 v) { return (old & 0xffffffffull) | v << 32; }
 static void csr_wr(u32 csr, u64 v)
 {
     int x32 = rs->xlen == 32;
+    rs->sim->bus.touched = 1;           /* mie, time: the CLINT's next event */
     u64 cyc = rs->cyc_now + rs->mcycle_off;
     u64 ins = rs->insn_now + rs->minstret_off;
     switch (csr) {
@@ -651,6 +655,8 @@ static void sys_insn(u32 i, u32 rd, u32 f3)
         rs->mstatus = st;
         rs->priv = mpp;
         jump(rs->mepc);
+        if (rs->sim->an)
+            an_exc_return(rs->sim);
         return;
     }
     case 0x10500073:                            /* WFI */
@@ -803,7 +809,7 @@ static u32 bit(u32 h, int n)
 
 /* A compressed instruction's 32-bit equivalent, or 0 when it is not one
  * (reserved, or not at this width). */
-static u32 rvc_expand(u32 h, int xlen)
+u32 rvc_expand(u32 h, int xlen)
 {
     u32 f3 = h >> 13, rd = (h >> 7) & 31, rs2 = (h >> 2) & 31;
     u32 rdp = ((h >> 2) & 7) + 8, rs1p = ((h >> 7) & 7) + 8;
@@ -1031,10 +1037,9 @@ static void step(struct cpu *c)
     if (rs->npc == rs->pc && !rs->changed && s->state == RUN) {
         /* a jump to itself that changed nothing: the end, unless an
          * interrupt can come */
-        u32 left;
         int on = rs->priv < PRV_M || (rs->mstatus & MSTATUS_MIE);
         if (!on || !rs->mie ||
-            (!(rs->mie & rv_mip()) && !sim_next_event(s, &left))) {
+            (!(rs->mie & rv_mip()) && !sim_event_coming(s))) {
             sim_end(s, END_IDLE, "a loop at 0x%08llx that nothing can "
                     "interrupt", (unsigned long long)rs->pc);
             return;
