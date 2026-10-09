@@ -65,6 +65,10 @@ int tasm_symform(const char *stmt, struct asm_symform *f);
  * hand the SAME lines to llvm-mc and compare. Generated from the tables
  * themselves: an entry added here cannot escape the referee. */
 void tasm_vocabulary(FILE *f);
+/* ... and its data directives alone (.byte, .short, .word, .quad and the
+ * other spellings), which every level takes: what tests/golden/thumb-asm.sh
+ * also assembles for ARMv6-M and ARMv8-M Baseline */
+void tasm_vocabulary_data(FILE *f);
 /* ARMv8-M's: Mainline's additions to the above (base 0), or every 32-bit
  * instruction ARMv8-M Baseline has (base 1). */
 void tasm_vocabulary_v8m(FILE *f, int base);

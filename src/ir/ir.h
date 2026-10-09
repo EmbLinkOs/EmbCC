@@ -219,6 +219,13 @@ struct ir_asm_op {
 struct ir_asm {
     const unsigned char *code;   /* assembled template bytes */
     int codelen;
+    /* [start, end) pairs of DATA in code -- a template's `.word` and the
+     * like -- as struct code's drange, which a backend that copies the
+     * bytes into its function may carry over (the ARMv6-M one does, so
+     * its scan for Thumb-2 instructions passes over them). NULL, 0 for
+     * none, which is every target but Thumb's. */
+    const int *drange;
+    int ndrange;
     struct ir_asm_op *in;
     int nin;
     struct ir_asm_op *out;

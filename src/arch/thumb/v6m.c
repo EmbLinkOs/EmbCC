@@ -2085,8 +2085,15 @@ static void gen_asm(struct t_fn *F, int n)
                 asm_cur(F, o->reg, o->size, opm);
         }
     }
-    for (int k = 0; k < ia->codelen; k++)
-        code_byte(t, ia->code[k]);
+    {
+        int base = t->len;
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        /* the template's data (`.short`, `.word`...): bytes v6_scan
+         * must not read as instructions, and a disassembler sees as data */
+        for (int k = 0; k + 1 < ia->ndrange; k += 2)
+            code_mark_data(t, base + ia->drange[k], base + ia->drange[k + 1]);
+    }
     /* Out, through an address: the address is live across the asm, out of
      * what it changes (regalloc.c), so a register still holds it. An "m"
      * output was written BY the template through the address its register
