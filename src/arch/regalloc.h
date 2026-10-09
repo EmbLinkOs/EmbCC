@@ -388,6 +388,9 @@ int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
  * liveness is: it has to agree with what the backends actually store,
  * and one copy is how it stays agreed. */
 int ra_ins_def(const struct ir_ins *in);
+/* Loop depth per instruction (xcalloc'd, nins entries; the caller frees):
+ * how many backward branches span it -- what the spill costs weight by. */
+int *ra_loop_depth(const struct ir_func *fn);
 
 /* At -O0, is fn too big to allocate? -O0 is meant to be quick, and once
  * allocated nothing. When liveness was a bit set of every vreg at every

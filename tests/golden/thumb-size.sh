@@ -58,4 +58,16 @@ lit() { grep -c 'ldrd.*\[pc' "$out/$1.dis"; }
 [ "$(lit poly)" -ge 4 ] || { cat "$out/poly.dis"; fail "poly: its doubles are not loaded from the pool"; }
 [ "$(lit mix)" -ge 20 ] || fail "mix: fewer than 20 constants from the pool"
 grep -q 'movt' "$out/mix.dis" || fail "mix: every constant in the pool, though most are out of reach"
-echo "thumb-size: stack arguments, stack parameters and returned composites use low registers"
+# Four 64-bit values in one function (strtol's conv: the accumulator,
+# the cutoff, the base widened, and the -1 they start from) took a
+# register pair each, r4 to r11, from every 32-bit value that crosses its
+# calls -- the string pointer among them, reloaded from the frame on every
+# trip of the digit loop. The pair budget (g_t_pair_cap) tries pairs for
+# only the one or two most used. conv was 450 bytes with 60 stack
+# accesses; with the budget 428 and 35.
+"$EMBCC" --target=thumbv7em-none-eabi -Os -Ilib/libc/include \
+    -c lib/libc/src/stdlib/strtol.c -o "$out/strtol.o" || fail "compile strtol.c"
+dis "$out/strtol.o" conv > "$out/conv.dis"
+nsp=$(grep -cE '(ldr|str)[a-z.]*[[:space:]].*\[sp' "$out/conv.dis") || nsp=0
+[ "$nsp" -le 40 ] || { fail "strtol's conv makes $nsp stack accesses (the pair budget keeps it near 35)"; }
+echo "thumb-size: stack arguments, stack parameters and returned composites use low registers, and a function's 64-bit values leave registers for its other values"

@@ -567,7 +567,7 @@ struct ra_costacc { const int *eof; int *alias; unsigned long *cost;
  * branch, which is what the IR has for one (a switch never closes a
  * loop; a branch to a label at or before itself does). Capped at five
  * levels by the callers that weight by it. */
-static int *ra_loop_depth(const struct ir_func *fn)
+int *ra_loop_depth(const struct ir_func *fn)
 {
     int nins = fn->nins;
     int *depth = xcalloc((size_t)(nins ? nins : 1), sizeof *depth);

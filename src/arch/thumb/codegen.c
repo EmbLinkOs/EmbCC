@@ -5897,6 +5897,20 @@ static void gen_ins(struct t_fn *F, int n)
  * written narrower than itself, or anything pinned for -g. slot_of()
  * refuses a path this misses. */
 static int g_t_pairs = 1;
+/* At most this many 64-bit values get a register pair, the most used
+ * first (0: no limit) -- one of gen_func_best's attempts, for a function
+ * whose pairs would take every callee-saved register from the 32-bit
+ * values that cross its calls. */
+static int g_t_pair_cap;
+
+/* The pair candidates' use weight -- each read and write, by four per
+ * loop level, as the spill costs count them -- for the pair cap. */
+struct t_pw { int *w; int nv, d; };
+static void t_pw_cb(int v, void *ctx)
+{
+    struct t_pw *c = ctx;
+    if (v >= 0 && v < c->nv) c->w[v] += 1 << (2 * c->d);
+}
 /* t_lowregs on or off for this attempt (gen_func_best). */
 static int g_t_lowregs = 1;
 
@@ -6029,6 +6043,32 @@ static int *t_pair_alloc(struct ir_func *fn, const char *wide,
     if (!any) {
         free(x);
         return NULL;
+    }
+    /* The cap: keep only the most used candidates (ties to the lower
+     * vreg, so the choice is deterministic). */
+    if (g_t_pair_cap > 0) {
+        int *dep = ra_loop_depth(fn);
+        struct t_pw c;
+        c.nv = nv;
+        c.w = xcalloc((size_t)(nv ? nv : 1), sizeof *c.w);
+        for (int n = 0; n < fn->nins; n++) {
+            c.d = dep[n] > 5 ? 5 : dep[n];
+            ra_each_use(&fn->ins[n], t_pw_cb, &c);
+            t_pw_cb(ra_ins_def(&fn->ins[n]), &c);
+        }
+        for (int k = 0;; k++) {
+            int best = -1;
+            for (int v = 0; v < nv; v++)
+                if (!x[v] && c.w[v] >= 0 && (best < 0 || c.w[v] > c.w[best]))
+                    best = v;
+            if (best < 0)
+                break;
+            if (k >= g_t_pair_cap)
+                x[best] = 1;            /* past the cap: no pair */
+            c.w[best] = -1;             /* ranked */
+        }
+        free(c.w);
+        free(dep);
     }
     loc = ra_allocate(fn, &THUMB_PAIR_RA, NULL, x, used, nused);
     free(x);
@@ -7326,14 +7366,29 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     /* EMBCC_T_EXT=1: an attempt with r9-r11 wins whenever one succeeds,
      * whatever its size, so tests can drive the path. */
     int ext_pref = ext_ok && ek && *ek && atoi(ek) != 0;
-    /* (pairs, rename, r9-r11) for each attempt */
-    int tp[12], tl[12], te[12], na = 0;
+    /* (pairs, rename, r9-r11, pair cap) for each attempt */
+    int tp[16], tl[16], te[16], tc[16], na = 0;
     if (ext_ok)
         for (int a = 0; a < np; a++) {
-            tp[na] = pv[a]; tl[na] = lv[0]; te[na] = 1; na++;
+            tp[na] = pv[a]; tl[na] = lv[0]; te[na] = 1; tc[na] = 0; na++;
         }
     for (int a = 0; a < np * nl; a++) {
-        tp[na] = pv[a / nl]; tl[na] = lv[a % nl]; te[na] = 0; na++;
+        tp[na] = pv[a / nl]; tl[na] = lv[a % nl]; te[na] = 0; tc[na] = 0;
+        na++;
+    }
+    /* With more than two 64-bit values, pairs for only the one or two
+     * most used: strtol's conv gave four of them a pair each -- r4 to
+     * r11, every callee-saved register -- and kept the string pointer
+     * and its four other values, which cross its calls, in the frame. */
+    if (!fixed_pairs && !getenv("EMBCC_T_NOPAIRCAP")) {
+        char *w64 = wide64_map(fn);
+        int nw = 0;
+        for (int v = 0; w64 && v < fn->nvregs; v++)
+            nw += w64[v] != 0;
+        free(w64);
+        for (int cap = 1; cap <= 2 && nw > 2; cap++) {
+            tp[na] = 1; tl[na] = lv[0]; te[na] = 0; tc[na] = cap; na++;
+        }
     }
     long best_score = 0;
     int best = -1, last = -1;
@@ -7345,6 +7400,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         g_t_pairs = tp[a];
         g_t_lowregs = tl[a];
         g_t_ext = te[a];
+        g_t_pair_cap = tc[a];
         g_t_role_fail = 0;
         g_t_loop_bytes = 0;
         gen(fn, t, st, keep_vars);
@@ -7367,9 +7423,11 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         g_t_pairs = tp[best];
         g_t_lowregs = tl[best];
         g_t_ext = te[best];
+        g_t_pair_cap = tc[best];
         g_t_role_fail = 0;
         gen(fn, t, st, keep_vars);
     }
+    g_t_pair_cap = 0;
     g_t_pairs = 1;
     g_t_lowregs = 1;
     g_t_ext = 0;
