@@ -808,7 +808,7 @@ static u32 bit(u32 h, int n)
 
 /* A compressed instruction's 32-bit equivalent, or 0 when it is not one
  * (reserved, or not at this width). */
-static u32 rvc_expand(u32 h, int xlen)
+u32 rvc_expand(u32 h, int xlen)
 {
     u32 f3 = h >> 13, rd = (h >> 7) & 31, rs2 = (h >> 2) & 31;
     u32 rdp = ((h >> 2) & 7) + 8, rs1p = ((h >> 7) & 7) + 8;

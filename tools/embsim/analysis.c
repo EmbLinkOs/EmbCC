@@ -308,6 +308,8 @@ static void follow(struct analysis *a, int node, u32 pc1, int ran)
 void an_exc_entry(struct sim *s, u32 n, u32 ret)
 {
     struct analysis *a = s->an;
+    if (a->fault)
+        fault_entry(a, n, ret);
     if (a->nev < 4) {
         a->ev[a->nev].what = EV_ENTRY;
         a->ev[a->nev].n = n;
@@ -389,6 +391,8 @@ struct analysis *an_create(struct sim *s, int calls)
 void an_finish(struct sim *s)
 {
     struct analysis *a = s->an;
+    if (a->fault)
+        fault_end(a);
     if (a->cov_path)
         cov_report(a);
     if (a->prof)

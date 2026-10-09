@@ -116,6 +116,10 @@ void rv_store(u64 a, int n, u64 v);
 u64 rv_mtime(void);
 u64 rv_mip(void);
 
+/* a compressed instruction's 32-bit equivalent at width xlen, or 0 when
+ * it is not one (riscv.c; the fault report's disassembler uses it too) */
+u32 rvc_expand(u32 h, int xlen);
+
 /* riscv-fpu.c: an F or D instruction (load, store, arithmetic); 0 when
  * the opcode is not one */
 int rv_fp_exec(u32 i);

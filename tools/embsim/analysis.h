@@ -97,6 +97,11 @@ struct analysis {
     int nsu;
     struct rt { char *name; long bytes; } *rt;
     int nrt;
+
+    /* ---- the fault report (fault.c) ---- */
+    int fault;
+    FILE *fault_out;                /* 0: stderr */
+    int faults;                     /* reported */
 };
 
 /* the analyses on for this run (from main.c's options), after sim_load;
@@ -134,5 +139,9 @@ void stk_entered(struct analysis *a, u32 pc1, int called);
 /* frame i of the shadow stack is over */
 void stk_pop(struct analysis *a, int i);
 void stk_report(struct analysis *a);
+
+/* fault.c: exception n entered (an_exc_entry's), and the run's end */
+void fault_entry(struct analysis *a, u32 n, u32 ret);
+void fault_end(struct analysis *a);
 
 #endif

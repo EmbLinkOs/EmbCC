@@ -382,12 +382,14 @@ EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
                tools/embsim/stm32-usart.c tools/embsim/stm32-tim.c \
                tools/embsim/image.c tools/embsim/analysis.c \
                tools/embsim/coverage.c tools/embsim/profile.c \
-               tools/embsim/stack.c $(EMBSIM_NET)
+               tools/embsim/stack.c tools/embsim/fault.c \
+               tools/embsim/disasm.c $(EMBSIM_NET)
 EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
                tools/embsim/avr.h \
                tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
                tools/embsim/svd-map.h tools/embsvd/svd.h \
-               tools/embsim/image.h tools/embsim/analysis.h
+               tools/embsim/image.h tools/embsim/analysis.h \
+               tools/embsim/disasm.h
 embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS)
 	$(CC) $(CFLAGS) -o $@ $(EMBSIM_SRCS) -lm
 

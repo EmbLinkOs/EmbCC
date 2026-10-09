@@ -23,6 +23,7 @@ embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--profile[=FILE] [--profile-format=report|collapsed|collapsed-insns]]
                  [--stack-report[=FILE]] [--stack-limit ADDR|SYMBOL]
                  [--stack-su FILE.su]... [--stack-embrt FILE.json] [FILE.su...]
+                 [--fault-report[=FILE]]
 embsim --svd FILE.svd --svd-map
 ```
 
@@ -629,6 +630,73 @@ embsim: stack overflow: sp 0x1ffffff0 is below the end of .data and .bss 0x20000
 An exception's entry that stacks past the limit is reported as one (`in
 an exception's entry, at` the instruction it interrupted).
 
+### Faults: `--fault-report`
+
+`--fault-report` decodes each fault the moment the core takes it, on
+stderr (`--fault-report=FILE` to a file): a Cortex-M's HardFault,
+MemManage, BusFault and UsageFault, and a RISC-V exception (an ECALL and
+an EBREAK, which a program makes on purpose, are not faults).
+
+```text
+embsim: fault: HardFault (exception 3) at 0x00000160, in crash (fault.c:31)
+  HFSR  0x40000000  FORCED: a configurable fault escalated to HardFault (its handler disabled, or not able to preempt)
+  CFSR  0x00008200
+        PRECISERR: a precise data bus error at 0x30000000
+  BFAR  0x30000000 (BFARVALID)
+  instruction 0x00000160: 6800       ldr r0, [r0, #0]
+  stacked frame at 0x2000ff90 (MSP):
+    r0  0x30000000  r1  0x20000004  r2  0xe000e010  r3   0x00000000
+    r12 0x00000000  lr  0x00000173  pc  0x00000160  xpsr 0x0100000f
+    lr: level2+0xc (fault.c:37)
+  r4  0x00000007  r5  0x00000000  r6  0x00000000  r7   0x00000000
+  r8  0x00000000  r9  0x00000000  r10 0x00000000  r11  0x00000000
+  backtrace (.debug_frame):
+    #0  0x00000160 in crash (fault.c:31)
+    #1  0x00000172 in level2+0xc (fault.c:37)
+    #2  0x000001c4 in tick+0x8 (fault.c:65)
+        <- an exception's entry (EXC_RETURN 0xfffffff9): the code it interrupted
+    #3  0x000001da in spin+0xa (fault.c:71)
+    #4  0x00000234 in main+0x52 (fault.c:110)
+    #5  0x000000a2 in reset+0x92
+        (no call frame information for 0x000000a2: the unwinding stops here)
+  handler: none -- the vector is 0x00000000, without the Thumb bit: the core cannot run it (it will fault again)
+embsim: the core locked up at 0x00000000, in 0x00000000: the fault above had no handler
+```
+
+- **The status registers in words**: each CFSR bit set (MemManage's,
+  BusFault's and UsageFault's), HFSR's FORCED and VECTTBL, and BFAR and
+  MMFAR when their valid bits say they hold the address. On RISC-V,
+  mcause by name, and mtval as what it is for that cause (the address,
+  or the instruction's bits).
+- **The stacked frame** -- r0-r3, r12, lr, pc and xPSR, read from the
+  stack the EXC_RETURN in lr names -- and the other registers; on
+  RISC-V, the 32 registers.
+- **The faulting instruction**, disassembled (Thumb, RISC-V; a form the
+  disassembler does not know is its encoding), with its symbol and line.
+- **The backtrace**, by the image's `.debug_frame` (EmbCC writes it for
+  Thumb and RISC-V with `-g`) from the registers at the fault. On a
+  Cortex-M it goes through an exception's frame, where the CFI's return
+  address is an EXC_RETURN, into the code the exception interrupted.
+  Where no CFI covers the faulting pc, it is the calls EmbSim saw the
+  core make (the call stack `--profile` follows), named by the symbol
+  table.
+- **The handler**: the one the vector table or mtvec gives, or that
+  there is none -- a vector without the Thumb bit or nowhere near a
+  function, an mtvec where nothing can be fetched -- in which case the
+  core locks up next, and the run ends with status 3 and one more line.
+- An AVR has no faults; with `--fault-report` its lockup (an instruction
+  the part does not have) gives the pc and the calls that led there.
+
+It is an option, not the default when a run stops on an unhandled
+fault, for two reasons. A run's stderr without new options is the same
+as before, byte for byte, which scripts and the golden tests read. And
+most firmware does not stop on its faults: its HardFault handler is a
+`b .`, so EmbSim ends the run as an idle loop (status 0), or a handler
+logs and resets. The report is taken at the fault's entry, so it is
+there in both cases, and for every fault a program handles too (a test
+that provokes faults gets one report each), which as a default would be
+noise.
+
 ## Debugging: `--gdb`
 
 `--gdb PORT` serves the GDB remote protocol on `localhost:PORT` while the
@@ -819,6 +887,13 @@ be the `.su` file's, the depth the sum of the deepest path's frames, and
 the inclusive depths of the functions embrt bounds embrt's bounds; and it
 overflows `ovf.c`'s recursion past `__stack_limit`, `--stack-limit` and
 into `.bss`, where the run must stop at the push that crossed.
+`tests/golden/embsim-fault.sh` takes `fault.c`'s faults on the M3 and
+RV32 -- a BusFault handled, a divide by zero forced to a HardFault with
+no handler, a fault in an interrupt handler, a load access fault and an
+illegal instruction -- and holds each report to the fault: the status
+registers' words, the faulting instruction's mnemonic against
+llvm-objdump's, the backtrace against the source lines marked in
+fault.c, the handler; and the run must be the same without the report.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32
