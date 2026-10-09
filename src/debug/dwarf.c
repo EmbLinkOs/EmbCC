@@ -129,17 +129,21 @@
 #define DW_LNS_copy           0x01
 #define DW_LNS_advance_pc     0x02
 #define DW_LNS_advance_line   0x03
+#define DW_LNS_const_add_pc   0x08
 #define DW_LNS_set_prologue_end 0x0a
 /* Extended opcodes */
 #define DW_LNE_end_sequence   0x01
 #define DW_LNE_set_address    0x02
 
-/* line-program special-opcode parameters (we do NOT use special opcodes —
- * advance_line + advance_pc + copy is enough and always correct — but the
- * header must still declare them consistently for a reader). */
+/* line-program special-opcode parameters: gcc's and clang's. A special
+ * opcode is one byte that advances the address by 0..17 and the line by
+ * -5..+8 and appends a row -- what advance_line, advance_pc and copy say
+ * in five or more (line_row). */
 #define LINE_BASE   (-5)
 #define LINE_RANGE  14
 #define OPCODE_BASE 13
+/* the address advance of opcode 255 with no line advance: const_add_pc's */
+#define MAX_SPECIAL_ADDR ((255 - OPCODE_BASE) / LINE_RANGE)
 
 /* --- a growable byte buffer, one per section --- */
 struct dbuf { unsigned char *p; int len, cap; };
@@ -833,6 +837,46 @@ static void emit_frame(struct dwarf_out *out, struct dbuf *b,
     }
 }
 
+/* A row at (addr, line), from the state machine at (*cur_addr, *cur_line),
+ * as gcc and clang encode one (LLVM's MCDwarfLineAddr::encode): a line
+ * advance outside a special opcode's -5..+8 is an advance_line of its own;
+ * then one special opcode when the address advance fits in it, or
+ * const_add_pc and one when it fits in the two, or advance_pc and one; a
+ * row that moves neither is a copy. prologue_end is set first: the row
+ * the special opcode (or copy) appends carries it, and clears it. */
+static void line_row(struct dbuf *b, long *cur_addr, long *cur_line,
+                     long addr, long line, int prologue_end)
+{
+    long dl = line - *cur_line, da = addr - *cur_addr;
+    if (dl < LINE_BASE || dl >= LINE_BASE + LINE_RANGE) {
+        db_u8(b, DW_LNS_advance_line);
+        db_sleb(b, dl);
+        dl = 0;
+    }
+    if (prologue_end)
+        db_u8(b, DW_LNS_set_prologue_end);
+    *cur_addr = addr;
+    *cur_line = line;
+    if (dl == 0 && da == 0) {
+        db_u8(b, DW_LNS_copy);
+        return;
+    }
+    long op = dl - LINE_BASE + OPCODE_BASE;     /* no address advance */
+    if (da >= 0 && op + da * LINE_RANGE <= 255) {
+        db_u8(b, (int)(op + da * LINE_RANGE));
+        return;
+    }
+    if (da >= MAX_SPECIAL_ADDR &&
+        op + (da - MAX_SPECIAL_ADDR) * LINE_RANGE <= 255) {
+        db_u8(b, DW_LNS_const_add_pc);
+        db_u8(b, (int)(op + (da - MAX_SPECIAL_ADDR) * LINE_RANGE));
+        return;
+    }
+    db_u8(b, DW_LNS_advance_pc);
+    db_uleb(b, (unsigned long)da);
+    db_u8(b, (int)op);
+}
+
 /* One function's rows, bracketed by set_address .. end_sequence. Offsets are
  * .text-relative (row.off and code_off share that space), so pc deltas need
  * no knowledge of the final load address. */
@@ -856,34 +900,17 @@ static void emit_line_func(struct dwarf_out *out, struct dbuf *b,
      * one, at the second row; with the body's first row as the first,
      * gdb scanned the prologue itself and stopped a statement late. */
     int entry_row = fn->line > 0 && (fn->nlines == 0 || fn->lines[0].off > lo);
-    if (entry_row) {
-        if (fn->line != cur_line) {
-            db_u8(b, DW_LNS_advance_line);
-            db_sleb(b, fn->line - cur_line);
-            cur_line = fn->line;
-        }
-        db_u8(b, DW_LNS_copy);
-    }
+    if (entry_row)
+        line_row(b, &cur_addr, &cur_line, lo, fn->line, 0);
     int body = 0;                        /* prologue_end is not yet said */
     for (int r = 0; r < fn->nlines; r++) {
         long off = fn->lines[r].off, line = fn->lines[r].line;
-        if (line != cur_line) {
-            db_u8(b, DW_LNS_advance_line);
-            db_sleb(b, line - cur_line);
-            cur_line = line;
-        }
-        if (off != cur_addr) {
-            db_u8(b, DW_LNS_advance_pc);
-            db_uleb(b, (unsigned long)(off - cur_addr));
-            cur_addr = off;
-        }
         /* the body's first row: past the entry row, or the entry itself
          * when there is no prologue */
-        if (!body && (off > lo || !entry_row)) {
-            db_u8(b, DW_LNS_set_prologue_end);
+        int pe = !body && (off > lo || !entry_row);
+        if (pe)
             body = 1;
-        }
-        db_u8(b, DW_LNS_copy);           /* append a row at (cur_addr,cur_line) */
+        line_row(b, &cur_addr, &cur_line, off, line, pe);
     }
     /* advance to the function end and close the sequence */
     if (hi != cur_addr) {
