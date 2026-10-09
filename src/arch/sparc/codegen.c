@@ -82,7 +82,7 @@ struct sparc_fn {
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
     int skip_next;       /* the instruction after this one is already out */
     int skip_to;         /* or every one before this index (cond_branch) */
-    int want_debug;
+    int keep_vars;
     struct ir_func *fn;
     int *loc;            /* per vreg: its register, -1 in memory; NULL at -O0 */
     int used_callee[RA_MAXPOOL];
@@ -112,7 +112,7 @@ struct sparc_fn {
     int nfix, capfix;
     /* Delay-slot filling (take_slot): the lowest offset an instruction
      * may be taken from, and whether this function fills at all (not
-     * under -g, whose line rows name offsets). */
+     * at -O0 or -Og, keep_vars). */
     int barrier;
     int fill;
 };
@@ -237,7 +237,9 @@ static const struct ra_target SPARC_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg: the casa/swap lowerings read through rdr */
     0,
-    1               /* asm_in_reg: see IR_ASM */
+    1,              /* asm_in_reg: see IR_ASM */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 static int g_sp_regalloc;
@@ -583,14 +585,14 @@ static void layout(struct sparc_fn *F)
         free(loc2);
     }
     {
-        char *lref = ra_locals_referenced(fn, F->want_debug);
+        char *lref = ra_locals_referenced(fn, F->keep_vars);
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size = fn->locals[v].size ? fn->locals[v].size : 4;
                 int align = fn->locals[v].user_align ? fn->locals[v].user_align
                           : fn->locals[v].align ? fn->locals[v].align : 4;
                 if (in_reg(F, v) || !lref[v] ||
-                    ra_slot_dead(fn, F->loc, NULL, v, F->want_debug))
+                    ra_slot_dead(fn, F->loc, NULL, v, F->keep_vars))
                     continue;
                 if ((size > 8) != pass)
                     continue;
@@ -2846,7 +2848,7 @@ static void gen_ins(struct sparc_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
 
-    if (F->want_debug && fn->ins[n].line) {
+    if (target_debug_info() && fn->ins[n].line) {
         long line = fn->ins[n].line;
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
@@ -3844,7 +3846,9 @@ static const struct ra_target SPARC_PAIR_RA = {
     NULL, NULL,
     1,
     0,
-    0
+    0,
+    NULL,
+    NULL
 };
 
 static void sparc_pair_hints(const struct ir_func *fn, int *hint)
@@ -3967,7 +3971,7 @@ static int param_word(struct sparc_fn *F, const struct argplace *pl, int q,
 }
 
 static void gen_func(struct ir_func *fn, struct code *t,
-                     struct sparc_sites *st, int want_debug)
+                     struct sparc_sites *st, int keep_vars)
 {
     struct func *f = fn->src;
     struct sparc_fn F;
@@ -3975,14 +3979,15 @@ static void gen_func(struct ir_func *fn, struct code *t,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.wide = wide_map(fn);
     F.w16 = cg_wide_vregs(fn);
     if (F.w16)
         for (int v = 0; v < fn->nvregs; v++)
             if (F.w16[v]) F.wide[v] = 0;
     F.nshr = ra_narrow_hishift(fn);
-    if (F.w16 && !want_debug && fn->nvregs) {
+    if (F.w16 && !keep_vars && fn->nvregs) {
         int *first = xmalloc((size_t)fn->nvregs * sizeof *first);
         F.last = xmalloc((size_t)fn->nvregs * sizeof *F.last);
         ra_live_ranges(fn, first, F.last);
@@ -3991,7 +3996,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
     if (g_sp_regalloc) {
-        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        char *pin = keep_vars ? ra_debug_pin_vars(fn) : (char *)0;
         char *excl = NULL;
         int *pair;
         if (F.w16) {
@@ -4021,7 +4026,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
             F.usecnt = xmalloc((size_t)fn->nvregs * sizeof *F.usecnt);
             ra_count_vreg_uses(fn, F.usecnt);
         }
-        if (!want_debug && !getenv("EMBCC_SPARC_NO_REMAT"))
+        if (!keep_vars && !getenv("EMBCC_SPARC_NO_REMAT"))
             const_remat(&F);
         {
             const char *lim = getenv("EMBCC_SPARC_RA_MAX");
@@ -4039,12 +4044,12 @@ static void gen_func(struct ir_func *fn, struct code *t,
         F.label_off[i] = -1;
 
     f->code_align = 4;
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = F.slot[v] < 0 ? (int)F.slot[v]
-                                           : (int)fpo(&F, obj_slot(&F, v));
+            fn->var_off[v] = F.slot[v] < 0 ? IR_VAR_NO_LOC
+                           : ra_var_home(fn, v, 1, fpo(&F, obj_slot(&F, v)));
     }
     f->code_off = t->len;
 
@@ -4064,7 +4069,7 @@ static void gen_func(struct ir_func *fn, struct code *t,
         for (int k = 0; k < NARGREG; k++)
             sparc_store(t, in_reg_n(k), SP_FP, HOME + 4 * k, 4);
     F.barrier = t->len;       /* the window: nothing moves above it */
-    F.fill = !want_debug && !getenv("EMBCC_SPARC_NO_FILL");
+    F.fill = !keep_vars && !getenv("EMBCC_SPARC_NO_FILL");
 
     /* The parameters: each register one an edge of a parallel move into
      * wherever the allocator put it (SCR breaks a cycle), each stack one
@@ -4326,34 +4331,34 @@ static int leaf_fix(struct code *t, int from)
 /* With the allocator on, a function is generated with the pair pass and
  * without it, and the shorter is kept (RV32's and MIPS's arrangement). */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct sparc_sites *st, int want_debug)
+                          struct sparc_sites *st, int keep_vars)
 {
     int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
         nf = st->nf, with;
 
-    if (g_sp_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+    if (g_sp_regalloc && !keep_vars && !getenv("EMBCC_NO_MEMOFF")) {
         char *w = wide_map(fn);
         ra_fold_memoff(fn, -4096, 4095 - 16, 4, 4, w, 0, 0);
         free(w);
     }
     g_sp_pairs = 1;
-    if (!g_sp_regalloc || want_debug || getenv("EMBCC_SPARC_PAIRS")) {
+    if (!g_sp_regalloc || keep_vars || getenv("EMBCC_SPARC_PAIRS")) {
         if (getenv("EMBCC_SPARC_PAIRS"))
             g_sp_pairs = atoi(getenv("EMBCC_SPARC_PAIRS"));
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
         g_sp_pairs = 1;
         return;
     }
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     with = t->len - at;
     t->len = at; st->next = next; st->nstr = nstr; st->ng = ng; st->nf = nf;
     g_sp_pairs = 0;
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     if (t->len - at > with) {
         t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
         st->nf = nf;
         g_sp_pairs = 1;
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
     }
     with = t->len - at;
     /* the leaf attempt, kept when it checks out and is shorter: tried
@@ -4369,7 +4374,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
             st->nf = nf;
             g_sp_leaf = 1;
             g_sp_pairs = 1;
-            gen_func(fn, t, st, want_debug);
+            gen_func(fn, t, st, keep_vars);
             g_sp_leaf = 0;
             leaf = leaf_fix(t, fn->src->code_off) && t->len - at < with;
             if (!leaf) {
@@ -4380,7 +4385,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
                 t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
                 st->nf = nf;
                 g_sp_pairs = pairs;
-                gen_func(fn, t, st, want_debug);
+                gen_func(fn, t, st, keep_vars);
                 if (t->len != len || memcmp(t->p + at, keep,
                                             (size_t)(len - at)) ||
                     st->next != knext || st->nstr != knstr ||
@@ -4398,7 +4403,7 @@ void codegen_unit_sparc(struct ir_unit *iu, struct code *text,
                         struct extcall **ext, int *next,
                         struct strsite **strs, int *nstrs,
                         struct gsite **gs, int *ngs,
-                        struct fsite **fs, int *nfs, int want_debug,
+                        struct fsite **fs, int *nfs, int keep_vars,
                         int optimize, int no_sse, int regalloc)
 {
     struct sparc_sites st;
@@ -4407,7 +4412,7 @@ void codegen_unit_sparc(struct ir_unit *iu, struct code *text,
     g_sp_regalloc = regalloc;
     memset(&st, 0, sizeof st);
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
     cg_resolve_strsites(iu, st.str, st.nstr);
     *ext = st.ext;   *next = st.next;
     *strs = st.str;  *nstrs = st.nstr;

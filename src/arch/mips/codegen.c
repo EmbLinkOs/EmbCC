@@ -114,7 +114,7 @@ struct mips_sites {
 struct mips_fn {
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
     int skip_next;       /* the instruction after this one is already out */
-    int want_debug;
+    int keep_vars;
     struct ir_func *fn;
     int *loc;            /* per vreg: its register, -1 in memory; NULL at -O0 */
     int used_callee[RA_MAXPOOL];
@@ -153,7 +153,7 @@ struct mips_fn {
     /* Delay-slot filling (take_slot): the lowest offset an instruction may
      * be moved from -- raised past every label, relocated instruction,
      * transfer, asm block and the prologue -- and whether this function
-     * fills at all (not under -g, whose line rows name offsets). */
+     * fills at all (not at -O0 or -Og, keep_vars). */
     int barrier;
     int fill;
     /* An interrupt handler (mips_isr_grow): struct func's is_isr, 0 for
@@ -303,8 +303,10 @@ static const struct ra_target MIPS_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg: the ll/sc loops read through rdr */
     0,
-    0               /* asm_in_reg: an asm's operands go through memory, as
+    0,              /* asm_in_reg: an asm's operands go through memory, as
                      * on x86-64, AArch64 and AVR (regalloc.h) */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 static int g_mips_regalloc;
@@ -722,14 +724,14 @@ static void layout(struct mips_fn *F)
         free(loc2);
     }
     {
-        char *lref = ra_locals_referenced(fn, F->want_debug);
+        char *lref = ra_locals_referenced(fn, F->keep_vars);
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size = fn->locals[v].size ? fn->locals[v].size : 4;
                 int align = fn->locals[v].user_align ? fn->locals[v].user_align
                           : fn->locals[v].align ? fn->locals[v].align : 4;
                 if (in_reg(F, v) || !lref[v] ||
-                    ra_slot_dead(fn, F->loc, NULL, v, F->want_debug))
+                    ra_slot_dead(fn, F->loc, NULL, v, F->keep_vars))
                     continue;
                 if ((size > 2 * W) != pass)
                     continue;
@@ -3051,7 +3053,7 @@ static void gen_ins(struct mips_fn *F, int n)
     struct code *t = F->t;
 
     /* -g: a line-table row wherever the source line changes. */
-    if (F->want_debug && fn->ins[n].line) {
+    if (target_debug_info() && fn->ins[n].line) {
         long line = fn->ins[n].line;
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
@@ -4188,7 +4190,9 @@ static const struct ra_target MIPS_PAIR_RA = {
     NULL, NULL,
     1,
     0,
-    0               /* asm_in_reg */
+    0,              /* asm_in_reg */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 static void mips_pair_hints(const struct ir_func *fn, int *hint)
@@ -4306,7 +4310,7 @@ static int *pair_alloc(struct ir_func *fn, struct mips_fn *F, const char *pin)
 /* ---- one function --------------------------------------------------------- */
 
 static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
-                     int want_debug)
+                     int keep_vars)
 {
     struct func *f = fn->src;
     struct mips_fn F;
@@ -4314,7 +4318,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.wide = wide_map(fn);
     /* (the high word of a register pair, shifted, is a MIPS32 idea: at
      * MIPS64 a pair value is never in registers) */
@@ -4323,9 +4328,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
         if (F.nshr[v]) F.wide[v] = 0;
     F.fb = MIPS_SP;
     if (g_mips_regalloc) {
-        /* Under -g a source variable stays in its frame slot, so its
+        /* At -O0 and -Og a source variable stays in its frame slot, so its
          * DW_AT_location is true (regalloc.h). */
-        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        char *pin = keep_vars ? ra_debug_pin_vars(fn) : (char *)0;
         int *pair = g_mips_pairs && !g_m64 ? pair_alloc(fn, &F, pin) : NULL;
         F.loc = ra_allocate(fn, &MIPS_RATGT, F.wide, pin, F.used_callee,
                             &F.nsave);
@@ -4364,7 +4369,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     /* an interrupt handler returns with eret: no tail call, whose callee
      * would return with jr ra */
     F.isr = f->is_isr;
-    if (g_mips_regalloc && !want_debug && !F.isr)
+    if (g_mips_regalloc && !keep_vars && !F.isr)
         for (i = 0; i < fn->nins; i++)
             if (mips_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -4385,12 +4390,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
         F.label_off[i] = -1;
 
     f->code_align = 4;
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = F.slot[v] < 0 ? (int)F.slot[v]
-                                           : (int)obj_slot(&F, v);
+            fn->var_off[v] = F.slot[v] < 0 ? IR_VAR_NO_LOC
+                           : ra_var_home(fn, v, 1, obj_slot(&F, v));
     }
     /* BRANCH RELAXATION, the other way round from RISC-V's: every branch
      * is tried in its short form, and one that does not reach is given the
@@ -4416,7 +4421,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
     F.nlongb = nlongb;
     f->code_off = t->len;
     F.barrier = t->len;
-    F.fill = !want_debug && !getenv("EMBCC_MIPS_NO_FILL");
+    F.fill = !keep_vars && !getenv("EMBCC_MIPS_NO_FILL");
 
     /* The prologue. t0 builds a large frame's size: no argument has been
      * touched yet. */
@@ -4663,38 +4668,38 @@ static void gen_func(struct ir_func *fn, struct code *t, struct mips_sites *st,
  * reason: a pair withheld for the whole function can cost more than it
  * saves). A discarded attempt is undone by truncating what it appended. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct mips_sites *st, int want_debug)
+                          struct mips_sites *st, int keep_vars)
 {
     int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
         nf = st->nf, with;
 
     /* A field's constant offset into its load or store, before
      * allocation; room is left for the +3 of an lwl. */
-    if (g_mips_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+    if (g_mips_regalloc && !keep_vars && !getenv("EMBCC_NO_MEMOFF")) {
         char *w = wide_map(fn);
         ra_fold_memoff(fn, -32768, 32767 - 8, 4, 4, w, 0, 0);
         free(w);
     }
     g_mips_pairs = 1;
     /* (MIPS64 has no pair pass: one attempt) */
-    if (!g_mips_regalloc || want_debug || getenv("EMBCC_MIPS_PAIRS") ||
+    if (!g_mips_regalloc || keep_vars || getenv("EMBCC_MIPS_PAIRS") ||
         g_m64) {
         if (getenv("EMBCC_MIPS_PAIRS"))
             g_mips_pairs = atoi(getenv("EMBCC_MIPS_PAIRS"));
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
         g_mips_pairs = 1;
         return;
     }
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     with = t->len - at;
     t->len = at; st->next = next; st->nstr = nstr; st->ng = ng; st->nf = nf;
     g_mips_pairs = 0;
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     if (t->len - at > with) {
         t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
         st->nf = nf;
         g_mips_pairs = 1;
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
     }
     g_mips_pairs = 1;
 }
@@ -4717,7 +4722,7 @@ void codegen_unit_mips(struct ir_unit *iu, struct code *text,
                        struct extcall **ext, int *next,
                        struct strsite **strs, int *nstrs,
                        struct gsite **gs, int *ngs,
-                       struct fsite **fs, int *nfs, int want_debug,
+                       struct fsite **fs, int *nfs, int keep_vars,
                        int optimize, int no_sse, int regalloc)
 {
     struct mips_sites st;
@@ -4730,7 +4735,7 @@ void codegen_unit_mips(struct ir_unit *iu, struct code *text,
     mips_set_64(g_m64);
     memset(&st, 0, sizeof st);
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
     cg_resolve_strsites(iu, st.str, st.nstr);
     *ext = st.ext;   *next = st.next;
     *strs = st.str;  *nstrs = st.nstr;

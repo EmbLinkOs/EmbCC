@@ -1,0 +1,45 @@
+/* MIPS32 and MIPS64: the triples that name them and their data models.
+ * Part of the target database; src/targets/targets.def says how a row
+ * reads. */
+
+/* o32 (clang --target=mipsel-unknown-elf -dM): ILP32, a SIGNED char
+ * -- unlike the ARM and RISC-V targets beside it -- a signed int
+ * wchar_t, long double the same 8-byte double, and no __int128. */
+DATA_MODEL(MIPS32, .ptr = 4, .lng = 4, .it = 4, .dbl = 8, .ldbl = 8,
+           .char_uns = 0, .wchar_uns = 0, .int128 = 0, .maxal = 0)
+
+/* n64 (clang --target=mips64el-none-elf -msoft-float -dM): LP64, a
+ * SIGNED char as on o32, a signed int wchar_t, a binary128 long
+ * double and __int128. */
+DATA_MODEL(MIPS64, .ptr = 8, .lng = 8, .it = 4, .dbl = 8, .ldbl = 16,
+           .char_uns = 0, .wchar_uns = 0, .int128 = 1, .maxal = 0)
+
+/* MIPS32r2, little-endian, o32, soft float: a PIC32's core. Bare metal
+ * only, like every microcontroller here. `-none-elf` is the canonical
+ * spelling; `-unknown-elf` is clang's, and what a project that already
+ * builds with clang will say. */
+TRIPLE("mipsel-none-elf",           MIPS32,      NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("mipsel-unknown-elf",        MIPS32,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("mipsel-elf",                MIPS32,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("mipsel",                    MIPS32,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+
+/* ...and the same core BIG-endian, o32 (mips-none-elf): the byte
+ * order is the only difference, and it is a property of the target
+ * every phase that lays out or reads memory asks about
+ * (target_big_endian; docs/internals/big-endian.md). Canon 2, and a 1
+ * in the sub-architecture column, which on MIPS means big-endian. */
+TRIPLE("mips-none-elf",             MIPS32,      NONE,    ELF,   CANONICAL, BASE,         BE)
+TRIPLE("mips-unknown-elf",          MIPS32,      NONE,    ELF,   ALIAS,     BASE,         BE)
+TRIPLE("mips-elf",                  MIPS32,      NONE,    ELF,   ALIAS,     BASE,         BE)
+TRIPLE("mips",                      MIPS32,      NONE,    ELF,   ALIAS,     BASE,         BE)
+
+/* MIPS64r2, n64, soft float, either byte order: the same columns as
+ * the 32-bit pair, the sub-architecture 1 meaning big-endian. */
+TRIPLE("mips64el-none-elf",         MIPS64,      NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("mips64el-unknown-elf",      MIPS64,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("mips64el-elf",              MIPS64,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("mips64el",                  MIPS64,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("mips64-none-elf",           MIPS64,      NONE,    ELF,   CANONICAL, BASE,         BE)
+TRIPLE("mips64-unknown-elf",        MIPS64,      NONE,    ELF,   ALIAS,     BASE,         BE)
+TRIPLE("mips64-elf",                MIPS64,      NONE,    ELF,   ALIAS,     BASE,         BE)
+TRIPLE("mips64",                    MIPS64,      NONE,    ELF,   ALIAS,     BASE,         BE)

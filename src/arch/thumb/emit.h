@@ -316,6 +316,7 @@ int t_mov_addr(struct code *c, int rd, unsigned long value);
  * `ittt`): 't' runs under cond, 'e' under its inverse. At most three. */
 void t_it(struct code *c, int cond, const char *te);
 void t_setcc_low(struct code *c, int cond, int rd);
+void t_set_ne_low(struct code *c, int rd);
 
 /* The condition that inverts this one. */
 int t_cond_invert(int cond);

@@ -6,6 +6,9 @@ fields and interrupts. From it, it writes the files a bare-metal project
 starts with: the device header, a startup file and a linker script. It
 also answers questions about the registers, and describes the whole
 device as JSON for other tools. This page is the command reference.
+[embsim](embsim.md) reads the same files with the same reader
+(`--svd`), so a firmware built from embsvd's header runs over registers
+placed exactly where the header put them.
 
 ## Synopsis
 

@@ -12,8 +12,10 @@
 #  1. A small leaf emits no frame at all.
 #  2. A function that DOES need one still gets it. Each case here is a
 #     way rbp is still reachable -- an address that escapes, alloca,
-#     varargs, more arguments than fit in registers, and -g (DWARF
-#     describes a local as an offset from the frame base).
+#     varargs, more arguments than fit in registers. -g is NOT one: it
+#     changes no code (g-same-code.sh), so a frameless leaf stays
+#     frameless, and its locals must then not be described from a frame
+#     base it never set up.
 #  3. A function that calls keeps rsp 16-aligned at the call. It no
 #     longer needs rbp for that -- one that keeps nothing in memory is
 #     only its pushes, with a pad when their count is even -- so what is
@@ -126,12 +128,24 @@ awk 'function hex(s,  i, v) { v = 0
            exit bad }' "$out/c.s" || { cat "$out/c.s"; exit 1; }
 echo "a function that calls does so with rsp 16-aligned, frame record or not"
 
-# ---- 3. -g keeps it, because DWARF describes locals from the frame base -
-if ! has_frame "$out/leaf.c" "-g"; then
-    echo "FAIL: -g dropped the frame pointer, so DW_OP_fbreg has no base"
+# ---- 3. -g changes no code, and describes no local from rbp it never set
+if has_frame "$out/leaf.c" "-g"; then
+    echo "FAIL: -g built a frame the same leaf without -g does not have"
     exit 1
 fi
-echo "-g keeps the frame pointer"
+if command -v llvm-dwarfdump > /dev/null 2>&1; then
+    "$EMBCC" --target=x86_64-linux-gnu -O2 -g -c "$out/leaf.c" \
+        -o "$out/leaf.o" 2> "$out/cc.log" || { cat "$out/cc.log"; exit 1; }
+    llvm-dwarfdump --debug-info "$out/leaf.o" > "$out/leaf.dw"
+    if grep -q 'DW_OP_fbreg' "$out/leaf.dw"; then
+        echo "FAIL: a frameless leaf describes a local from the frame base:"
+        grep -B3 'DW_OP_fbreg' "$out/leaf.dw" | head -12
+        exit 1
+    fi
+    echo "-g keeps a leaf frameless, and none of its locals is placed by rbp"
+else
+    echo "-g keeps a leaf frameless (no llvm-dwarfdump for the locations)"
+fi
 
 # ---- 4. the answers are unchanged --------------------------------------
 LIBDIR=$EMBCC_ROOT/build/libc/linux-x86_64

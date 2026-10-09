@@ -63,6 +63,48 @@ endif
 # (selection, the backend contract, the code buffer), then one directory per
 # architecture — everything x86-64-only under x86_64/, aarch64-only under
 # aarch64/ (src/arch/README.md; docs/manual/targets.md for what each supports).
+# The optimizer: the pass manager (opt.c) and one file per pass.
+OPT_SRCS := src/opt/opt.c \
+	src/opt/alias.c \
+	src/opt/attrs.c \
+	src/opt/cfg.c \
+	src/opt/cfgclean.c \
+	src/opt/copyprop.c \
+	src/opt/dce.c \
+	src/opt/divmagic.c \
+	src/opt/dse.c \
+	src/opt/fold.c \
+	src/opt/gcse.c \
+	src/opt/guardjump.c \
+	src/opt/idiom.c \
+	src/opt/ifconv.c \
+	src/opt/immfold.c \
+	src/opt/inline.c \
+	src/opt/ivsr.c \
+	src/opt/joincopies.c \
+	src/opt/latch.c \
+	src/opt/licm.c \
+	src/opt/loadcse.c \
+	src/opt/lvn.c \
+	src/opt/mem2reg.c \
+	src/opt/memfwd.c \
+	src/opt/pre.c \
+	src/opt/rangecheck.c \
+	src/opt/reassoc.c \
+	src/opt/rotate.c \
+	src/opt/sccp.c \
+	src/opt/sink.c \
+	src/opt/splitloops.c \
+	src/opt/sroa.c \
+	src/opt/swthread.c \
+	src/opt/tailmerge.c \
+	src/opt/tailrec.c \
+	src/opt/unroll.c \
+	src/opt/util.c \
+	src/opt/vectorize.c \
+	src/opt/verify.c \
+	src/opt/x86loadop.c
+
 SRCS := \
 	$(PLATFORM_SRCS) \
 	src/driver/main.c \
@@ -105,13 +147,18 @@ SRCS := \
 	src/ir/irgen.c \
 	src/ir/irprint.c \
 	src/ir/irparse.c \
-	src/opt/opt.c \
+	$(OPT_SRCS) \
 	src/debug/dwarf.c \
 	src/debug/eh.c \
 	src/elf/write.c \
 	src/macho/write.c \
 	src/coff/write.c \
-	src/arch/target.c src/arch/regalloc.c \
+	src/arch/target.c src/arch/backends.c src/arch/regalloc.c \
+	src/arch/loongarch/options.c src/arch/xtensa/options.c \
+	src/arch/ppc/options.c src/arch/rx/options.c src/arch/sparc/options.c \
+	src/arch/coldfire/options.c src/arch/mips/options.c \
+	src/arch/tricore/options.c \
+	src/arch/thumb/options.c src/arch/riscv/options.c \
 	src/arch/code.c \
 	src/arch/predef.c \
 	src/arch/x86_64/irgen.c \
@@ -276,8 +323,8 @@ embar: tools/embar/embar.c
 # embsvd -- a device's register database from its CMSIS-SVD file: the
 # device header, a startup file and a linker script (tools/embsvd). ISO C
 # and standalone, like embar.
-embsvd: tools/embsvd/embsvd.c
-	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c
+embsvd: tools/embsvd/embsvd.c tools/embsvd/svd.c tools/embsvd/svd.h
+	$(CC) $(CFLAGS) -o $@ tools/embsvd/embsvd.c tools/embsvd/svd.c
 
 # embmap -- where an image's flash and RAM go: sections, regions, the
 # biggest symbols, the bytes by input file from a map, and the growth
@@ -312,11 +359,47 @@ embtrace: tools/embtrace/embtrace.c
 embrt: tools/embrt/embrt.c
 	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
 
-# embsim -- a Cortex-M simulator: runs an image on a model of the board
+# embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
-# table tools/bench uses (tools/bench/cost.h). ISO C and libm.
-embsim: tools/embsim/embsim.c tools/bench/cost.h
-	$(CC) $(CFLAGS) -o $@ tools/embsim/embsim.c -lm
+# table tools/bench uses (tools/bench/cost.h). ISO C and libm; the
+# modules are tools/embsim/sim.h's (docs/internals/embsim.md). The GDB
+# server's connection is net-posix.c; net-none.c builds it without one.
+EMBSIM_NET ?= tools/embsim/net-posix.c
+EMBSIM_SRCS := tools/embsim/main.c tools/embsim/run.c tools/embsim/bus.c \
+               tools/embsim/boards.c tools/embsim/loader.c \
+               tools/embsim/semihost.c tools/embsim/trace.c \
+               tools/embsim/cortexm.c tools/embsim/cortexm-thumb.c \
+               tools/embsim/cortexm-fpu.c tools/embsim/scs.c \
+               tools/embsim/systick.c tools/embsim/dwt.c \
+               tools/embsim/uart-pl011.c tools/embsim/uart-cmsdk.c \
+               tools/embsim/uart-nrf51.c tools/embsim/riscv.c \
+               tools/embsim/riscv-fpu.c tools/embsim/clint.c \
+               tools/embsim/uart-16550.c tools/embsim/sifive-test.c \
+               tools/embsim/virt-rom.c tools/embsim/avr.c \
+               tools/embsim/avr-io.c tools/embsim/avr-usart.c \
+               tools/embsim/avr-timer16.c tools/embsim/gdb.c \
+               tools/embsim/svd-map.c tools/embsvd/svd.c \
+               tools/embsim/stm32-rcc.c tools/embsim/stm32-gpio.c \
+               tools/embsim/stm32-usart.c tools/embsim/stm32-tim.c \
+               tools/embsim/image.c tools/embsim/analysis.c \
+               tools/embsim/coverage.c tools/embsim/profile.c \
+               tools/embsim/stack.c tools/embsim/fault.c \
+               tools/embsim/disasm.c tools/embsim/record.c $(EMBSIM_NET)
+EMBSIM_HDRS := tools/embsim/sim.h tools/embsim/cortexm.h tools/embsim/riscv.h \
+               tools/embsim/avr.h \
+               tools/embsim/devices.h tools/embsim/net.h tools/bench/cost.h \
+               tools/embsim/svd-map.h tools/embsvd/svd.h \
+               tools/embsim/image.h tools/embsim/analysis.h \
+               tools/embsim/disasm.h
+# Optimized, unlike the other tools: a simulator's speed is the tests'
+# and the user's time, and -O2 runs a busy loop 2.5 (M3) to 3.6 (AVR)
+# times as fast as no -O. -g stays (it is in CFLAGS); `make EMBSIM_OPT=`
+# builds it unoptimized to debug. On the Makefile too, so that a change
+# here (EMBSIM_OPT's default, the list) rebuilds it: without that, an
+# ./embsim built before -O2 was the default stayed unoptimized.
+EMBSIM_OPT ?= -O2
+embsim: $(EMBSIM_SRCS) $(EMBSIM_HDRS) Makefile
+	$(CC) $(CFLAGS) $(EMBSIM_OPT) -o $@ $(EMBSIM_SRCS) -lm
 
 embas: tools/embas/embas.c src/arch/x86_64/as.c src/arch/x86_64/as.h \
        src/elf/write.c src/elf/elf.h src/driver/util.c src/driver/diag.c \
@@ -391,7 +474,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/armv7a/predef.c src/arch/armv7a/predef_cxx.c \
              $(filter src/cxx/%,$(SRCS)) src/sema/sema.c src/ir/irgen.c \
              src/ir/irprint.c src/ir/irparse.c \
-             src/opt/opt.c src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
+             $(OPT_SRCS) src/debug/dwarf.c src/debug/eh.c src/elf/write.c \
              src/arch/code.c src/arch/regalloc.c \
              src/arch/x86_64/irgen.c src/arch/x86_64/codegen.c \
              src/arch/x86_64/emit.c src/arch/x86_64/topasm.c \
@@ -444,6 +527,10 @@ embdbg: tools/embdbg/embdbg.c tools/embdbg/remote.c tools/embdbg/remote.h \
         src/elf/elf.h src/arch/x86_64/disasm.c src/arch/x86_64/disasm.h
 	$(CC) $(CFLAGS) -o $@ tools/embdbg/embdbg.c tools/embdbg/remote.c \
 	    src/arch/x86_64/disasm.c
+
+# The target database is #included by target.c, and nothing else tracks
+# header dependencies, so say this one.
+$(BUILD)/arch/target.o: $(wildcard src/targets/*.def)
 
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)

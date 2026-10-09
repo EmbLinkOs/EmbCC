@@ -20,7 +20,7 @@ CEOF
 # Loops of constant arithmetic, which -O2 unrolls into a chain: the
 # unrolled `b *= k` reuses b's name, so every step has several
 # definitions, and the fold has to follow the block's own constants
-# (opt.c, lk_note) rather than ask for b's one definition.
+# (src/opt/fold.c, lk_note) rather than ask for b's one definition.
 cat > "$out/loop.c" <<'CEOF'
 double d_loop(void) { double b = 1.0; for (int i = 0; i < 4; i++) b *= 2.0; return b; }
 float  f_loop(void) { float b = 1.0f; for (int i = 0; i < 6; i++) b = b * 1.1f + 0.3f; return b; }

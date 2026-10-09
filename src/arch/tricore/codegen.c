@@ -83,7 +83,7 @@ struct tc_sites {
 struct tc_fn {
     int *usecnt;         /* per vreg: how many reads (fusion), or NULL */
     int skip_next;       /* the instruction after this one is already out */
-    int want_debug;
+    int keep_vars;
     struct ir_func *fn;
     int *loc;            /* per vreg: its D register, -1 in memory; NULL at -O0 */
     int used_callee[RA_MAXPOOL];
@@ -198,7 +198,9 @@ static const struct ra_target TC_RATGT = {
     0,              /* atomic_in_reg: the atomics read their operands
                      * through rd/rda, but are left in memory for now */
     0,
-    0               /* asm_in_reg: inline asm is refused */
+    0,              /* asm_in_reg: inline asm is refused */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 static int g_tc_regalloc;
@@ -510,14 +512,14 @@ static void layout(struct tc_fn *F)
         free(loc2);
     }
     {
-        char *lref = ra_locals_referenced(fn, F->want_debug);
+        char *lref = ra_locals_referenced(fn, F->keep_vars);
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size = fn->locals[v].size ? fn->locals[v].size : 4;
                 int align = fn->locals[v].user_align ? fn->locals[v].user_align
                           : fn->locals[v].align ? fn->locals[v].align : 4;
                 if (in_reg(F, v) || !lref[v] ||
-                    ra_slot_dead(fn, F->loc, NULL, v, F->want_debug))
+                    ra_slot_dead(fn, F->loc, NULL, v, F->keep_vars))
                     continue;
                 if ((size > 8) != pass)
                     continue;
@@ -1989,7 +1991,7 @@ static void gen_ins(struct tc_fn *F, int n)
     struct code *t = F->t;
 
     /* -g: a line-table row wherever the source line changes. */
-    if (F->want_debug && fn->ins[n].line) {
+    if (target_debug_info() && fn->ins[n].line) {
         long line = fn->ins[n].line;
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
@@ -2855,7 +2857,9 @@ static const struct ra_target TC_PAIR_RA = {
     NULL, NULL,
     0,
     0,
-    0               /* asm_in_reg */
+    0,              /* asm_in_reg */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 static void tc_pair_hints(const struct ir_func *fn, int *hint)
@@ -3088,7 +3092,7 @@ static void gen_params(struct tc_fn *F)
 /* ---- one function --------------------------------------------------------- */
 
 static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
-                     int want_debug)
+                     int keep_vars)
 {
     struct func *f = fn->src;
     struct tc_fn F;
@@ -3096,16 +3100,17 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.wide = wide_map(fn);
     F.nshr = ra_narrow_hishift(fn);
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
     F.fb = TC_SP;
     if (g_tc_regalloc) {
-        /* Under -g a source variable stays in its frame slot, so its
+        /* At -O0 and -Og a source variable stays in its frame slot, so its
          * DW_AT_location is true (regalloc.h). */
-        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        char *pin = keep_vars ? ra_debug_pin_vars(fn) : (char *)0;
         int *pair = g_tc_pairs ? pair_alloc(fn, &F, pin) : NULL;
         F.loc = ra_allocate(fn, &TC_RATGT, F.wide, pin, F.used_callee,
                             &F.nsave);
@@ -3133,7 +3138,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
         }
     }
     F.tail = NULL;
-    if (g_tc_regalloc && !want_debug)
+    if (g_tc_regalloc && !keep_vars)
         for (i = 0; i < fn->nins; i++)
             if (tc_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -3147,11 +3152,11 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
         F.label_off[i] = -1;
 
     f->code_align = 2;
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = (int)F.slot[v];
+            fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0, F.slot[v]);
     }
     /* BRANCH RELAXATION: every branch is tried in its short form, and one
      * that does not reach is given the long form and the function
@@ -3259,36 +3264,36 @@ static void gen_func(struct ir_func *fn, struct code *t, struct tc_sites *st,
  * reason: a pair withheld for the whole function can cost more than it
  * saves). A discarded attempt is undone by truncating what it appended. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct tc_sites *st, int want_debug)
+                          struct tc_sites *st, int keep_vars)
 {
     int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
         nf = st->nf, with;
 
     /* A field's constant offset into its load or store, before
      * allocation; room is left for the +7 of a byte-wise access. */
-    if (g_tc_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+    if (g_tc_regalloc && !keep_vars && !getenv("EMBCC_NO_MEMOFF")) {
         char *w = wide_map(fn);
         ra_fold_memoff(fn, -32768, 32767 - 8, 4, 4, w, 0, 0);
         free(w);
     }
     g_tc_pairs = 1;
-    if (!g_tc_regalloc || want_debug || getenv("EMBCC_TC_PAIRS")) {
+    if (!g_tc_regalloc || keep_vars || getenv("EMBCC_TC_PAIRS")) {
         if (getenv("EMBCC_TC_PAIRS"))
             g_tc_pairs = atoi(getenv("EMBCC_TC_PAIRS"));
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
         g_tc_pairs = 1;
         return;
     }
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     with = t->len - at;
     t->len = at; st->next = next; st->nstr = nstr; st->ng = ng; st->nf = nf;
     g_tc_pairs = 0;
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     if (t->len - at > with) {
         t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
         st->nf = nf;
         g_tc_pairs = 1;
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
     }
     g_tc_pairs = 1;
 }
@@ -3297,7 +3302,7 @@ void codegen_unit_tricore(struct ir_unit *iu, struct code *text,
                           struct extcall **ext, int *next,
                           struct strsite **strs, int *nstrs,
                           struct gsite **gs, int *ngs,
-                          struct fsite **fs, int *nfs, int want_debug,
+                          struct fsite **fs, int *nfs, int keep_vars,
                           int optimize, int no_sse, int regalloc)
 {
     struct tc_sites st;
@@ -3310,7 +3315,7 @@ void codegen_unit_tricore(struct ir_unit *iu, struct code *text,
      * in the same process when embcc links */
     tc_set_short(!getenv("EMBCC_TC_NOSHORT"));
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
     tc_set_short(0);
     cg_resolve_strsites(iu, st.str, st.nstr);
     *ext = st.ext;   *next = st.next;

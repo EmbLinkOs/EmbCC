@@ -8,7 +8,10 @@
 # loads at -4, -8 and +4, which is what clang emits.
 #
 # It must NOT happen where it does not pay or is not exact: on Thumb,
-# whose loads scale a register themselves; for an `int` index on a 64-bit
+# whose loads scale a register themselves, for a LONE access -- but two or
+# more sharing the new base pay there too (one add and N loads, where each
+# was a subtract and a scaled load), and ARMv6-M, whose loads take no
+# negative displacement, never; for an `int` index on a 64-bit
 # target, where the extension sits between the add and the shift and
 # `(long)(i - 1)` is not `(long)i - 1` once `i - 1` wraps; and when `i - 1`
 # is wanted for something else as well, which keeps the add alive.
@@ -24,6 +27,7 @@ cat > "$out/f.c" <<'EOF'
 int f(int *a, int i) { return a[i - 1] + a[i - 2] * 3 + a[i + 1]; }
 long g(long *a, long i) { return a[i - 1] + a[i + 2]; }
 int h(int *a, int i, int *o) { int j = i - 1; *o = j; return a[j]; }
+int l(int *a, int i) { return a[i - 1]; }
 EOF
 ir() {                          # ir TARGET -> $out/TARGET.txt
     "$EMBCC" inspect ir --target="$1" -O2 -c "$out/f.c" -o /dev/null \
@@ -64,7 +68,19 @@ ir riscv64-unknown-elf
 echo "RV64: a long index is rewritten, an int one -- extended after the add -- is not"
 
 ir thumbv7em-none-eabi
-[ "$(count thumbv7em-none-eabi f 'shl\.')" = 3 ] || {
-    echo "FAIL: Thumb scales the index in the load itself and should be left"
-    echo "      alone:"; cat "$out/thumbv7em-none-eabi.txt"; exit 1; }
-echo "Thumb: left alone, its loads scale a register already"
+[ "$(count thumbv7em-none-eabi f 'shl\.')" = 1 ] &&
+    [ "$(bases thumbv7em-none-eabi)" = 1 ] || {
+    echo "FAIL: on Thumb-2, f's three loads share a base and should be one"
+    echo "      shift and three displacements:"
+    cat "$out/thumbv7em-none-eabi.txt"; exit 1; }
+[ "$(count thumbv7em-none-eabi l 'shl\.')" = 1 ] &&
+    [ "$(count thumbv7em-none-eabi l '#-4	')" = 0 ] || {
+    echo "FAIL: Thumb scales the index in the load itself, so a lone a[i - 1]"
+    echo "      should be left alone:"; cat "$out/thumbv7em-none-eabi.txt"; exit 1; }
+echo "Thumb-2: three loads off one base share it; a lone one is left alone"
+
+ir thumbv6m-none-eabi
+[ "$(count thumbv6m-none-eabi f 'shl\.')" = 3 ] || {
+    echo "FAIL: ARMv6-M's loads take no negative displacement, so f should"
+    echo "      be left alone:"; cat "$out/thumbv6m-none-eabi.txt"; exit 1; }
+echo "ARMv6-M: left alone"

@@ -1362,7 +1362,9 @@ modifier is refused with
 GNU RISC-V syntax. Statements are separated by `;` or newlines; `#` and
 `//` start a comment. Mnemonics are lower case and case-sensitive.
 Registers are the ABI names (`zero`, `ra`, `sp`, `gp`, `tp`, `t0`-`t6`,
-`s0`-`s11`, `a0`-`a7`), `fp` (s0), and `x0` to `x31`. Memory operands are
+`s0`-`s11`, `a0`-`a7`), `fp` (s0), and `x0` to `x31`; the float
+registers are `f0` to `f31` or `ft0`-`ft11`, `fs0`-`fs11`, `fa0`-`fa7`.
+Memory operands are
 `OFF(REG)` or `(REG)` with a 12-bit signed offset. A branch or jump
 target is a byte displacement from the start of the instruction, written
 `.+N`, `.-N` or as a bare number. Labels are not accepted.
@@ -1391,6 +1393,37 @@ target is a byte displacement from the start of the instruction, written
 | `li Rd, IMM` | any constant; expanded to the instruction sequence the code generator uses |
 | `mv`, `not`, `neg`, `seqz`, `snez` `Rd, Rs` | |
 
+With the F extension (`-march=` naming `f`, or `g`), the floating-point
+instructions, in their single (`.s`) form; with D also their double
+(`.d`) form. A rounding mode, where one is shown, is `rne`, `rtz`, `rdn`,
+`rup`, `rmm` or `dyn`, and is `dyn` when left out (`rne` for the
+conversions that are always exact, `fcvt.d.s` and `fcvt.d.w[u]`, as
+llvm-mc writes them).
+
+| Instruction | Operands |
+|---|---|
+| `flw`, `fsw`, `fld`, `fsd` | `Ft, OFF(Rs)` |
+| `fadd`, `fsub`, `fmul`, `fdiv` | `Fd, Fs1, Fs2 [, RM]` |
+| `fsqrt` | `Fd, Fs [, RM]` |
+| `fmadd`, `fmsub`, `fnmsub`, `fnmadd` | `Fd, Fs1, Fs2, Fs3 [, RM]` |
+| `fsgnj`, `fsgnjn`, `fsgnjx`, `fmin`, `fmax` | `Fd, Fs1, Fs2` |
+| `fmv`, `fneg`, `fabs` | `Fd, Fs` |
+| `feq`, `flt`, `fle` | `Rd, Fs1, Fs2` |
+| `fclass` | `Rd, Fs` |
+| `fcvt.w`, `.wu`, `.l`, `.lu` `.s`/`.d` | `Rd, Fs [, RM]` (`l`, `lu` RV64 only) |
+| `fcvt.s`/`.d` `.w`, `.wu`, `.l`, `.lu` | `Fd, Rs [, RM]` |
+| `fcvt.s.d`, `fcvt.d.s` | `Fd, Fs [, RM]` |
+| `fmv.x.w`, `fmv.w.x` (and `fmv.x.s`, `fmv.s.x`); `fmv.x.d`, `fmv.d.x` (RV64) | `Rd, Fs` or `Fd, Rs` |
+| `frcsr`, `frrm`, `frflags` | `Rd` |
+| `fscsr`, `fsrm`, `fsflags` | `[Rd,] Rs` |
+| `fsrmi`, `fsflagsi` | `[Rd,] IMM`, 0 to 31 |
+
+An F instruction on a target without F, or a D one without D, is refused
+with `fsd needs the D extension, which -march= does not name`. The same
+instructions are accepted in `.s` and `.S` files. There is no `"f"`
+constraint yet: name the float register in the template, and pass
+values through memory or with `fmv.w.x`/`fmv.x.w`.
+
 RV64 only: `addw`, `subw`, `addiw`, `sllw`, `srlw`, `sraw`, `slliw`,
 `srliw`, `sraiw`, `mulw`, `divw`, `divuw`, `remw`, `remuw`, `ld`, `sd`,
 `negw`, `sext.w`, `lwu`. At RV32 most of them are refused, for example
@@ -1402,6 +1435,7 @@ not implement, and `lwu` is encoded as `lw`.
 
 | Group | CSRs |
 |---|---|
+| Floating point | `fflags`, `frm`, `fcsr` |
 | Machine information | `mvendorid`, `marchid`, `mimpid`, `mhartid` |
 | Machine trap setup | `mstatus`, `misa`, `medeleg`, `mideleg`, `mie`, `mtvec`, `mcounteren` |
 | Machine trap handling | `mscratch`, `mepc`, `mcause`, `mtval`, `mip` |
@@ -1415,8 +1449,7 @@ and an unknown name or a number out of range with
 `"mfoo" is not a CSR this assembler knows`.
 
 There are no atomic instructions (`lr`, `sc`, `amo*`), no compressed
-instructions written explicitly (`c.*`), no floating-point instructions,
-no `la`, `call` or `tail`, no `rdcycle`/`rdtime`/`rdinstret` (use
+instructions written explicitly (`c.*`), no `la`, `call` or `tail`, no `rdcycle`/`rdtime`/`rdinstret` (use
 `csrr`), and no two-register `bgt`, `ble`, `bgtu` or `bleu`.
 
 ### Callee-saved registers on RISC-V

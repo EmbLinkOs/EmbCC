@@ -431,7 +431,7 @@ void irg_asm_riscv(struct ir_func *fn, struct stmt *s)
 
 /* What the IR_ADD..IR_CMP lowerings in codegen.c take as an immediate
  * without building the constant first -- the optimizer asks before
- * folding one (opt.c's target_imm_foldable). Anything else is folded and
+ * folding one (src/opt/immfold.c's target_imm_foldable). Anything else is folded and
  * then rebuilt at every use, a lui/addi pair inside a loop, where a value
  * left in a register is built once and can be hoisted.
  *

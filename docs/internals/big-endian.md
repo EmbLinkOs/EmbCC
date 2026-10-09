@@ -36,7 +36,7 @@ order.
 
 | Place | What big-endian changes | Caught by |
 | --- | --- | --- |
-| `src/arch/target.c` | the triples; `target_rel_put_addend` stores a REL addend into the field in the target's order | mips-be-data, mips-be-exec |
+| `src/targets/`, `src/arch/target.c` | the triples; `target_rel_put_addend` stores a REL addend into the field in the target's order | mips-be-data, mips-be-exec |
 | `src/arch/predef.c`, `src/arch/mips32eb/` | its own generated table (`tools/gen-predef.sh mips32eb`): `__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__`, `__BIG_ENDIAN__`, `MIPSEB`, `_MIPSEB`, `__MIPSEB`, `__MIPSEB__` | predef |
 | `src/elf/write.c` | `EI_DATA = ELFDATA2MSB`; the header, section headers, symbols and relocation entries are swapped field by field once their 32-bit shapes are final. Section contents are not touched: the code generator and the data writers already wrote them in order. A big-endian ELF64 is refused. | mips-be-data (llvm-readelf-equivalent parse), every board test |
 | `src/sema/sema.c` `lower_static_bytes` | every scalar, pointer-sized integer, float, double, complex part and `__int128` half of a static initializer through `target_put_uint`; long double through `ldf_encode_target` | mips-be-data |
@@ -164,7 +164,9 @@ Each was shown to fail against a mutant of the code it guards.
 PowerPC (powerpc-plan.md) walked this list; what it found is in the table
 above.
 
-1. A triple that sets `g_big_endian` (target.c), and a generated predef
+1. A triple that sets `g_big_endian`: a `BE` triple in the target
+   database (`src/targets/`), or `big_endian = 1` in the data model of an
+   architecture that has one byte order; and a generated predef
    table from the reference compiler.
 2. The backend: its instruction encoder writes words through an order it
    is told; pairs and memory halves as its ABI lays them out (check what

@@ -249,6 +249,7 @@ void target_set_jump_tables(int on);   /* -f[no-]jump-tables */
  * than a tree of compares: 4 where the dispatch is ARMv7-M's cmp, bhs,
  * tbh and two bytes an entry; 6 elsewhere. */
 int target_switch_clusters(void);
+int target_switch_table_min(void);
 int target_switch_table_min_os(void);
 /* Does the current backend lower this op to a CALL of a runtime helper
  * (soft-float arithmetic, a 64-bit divide, an __int128 op)? The
@@ -428,7 +429,7 @@ int target_thumb_hf_name(void);
 
 /* Thumb's answer to "may the optimizer fold this constant into op's
  * immediate operand" (arch/thumb/codegen.c). Asked only by the optimizer
- * (opt.c), which is linked only into embcc: target.c is also linked into
+ * (src/opt), which is linked only into embcc: target.c is also linked into
  * the standalone encoding checkers, which carry no backend, so it must
  * not name one. */
 int thumb_imm_foldable(int op, long imm);
@@ -471,6 +472,17 @@ void target_set(enum target_arch a);
  * backends read opt_level, which -Os leaves an ordinary number. */
 void target_set_opt_size(int on);
 int  target_opt_size(void);
+/* Whether the code keeps every source variable in its frame slot, where
+ * a debugger reads it: at -O0 and -Og. Never because of -g -- debug
+ * information describes the code and does not shape it, so -g changes
+ * no instruction (tests/golden/g-same-code.sh). The backends ask this
+ * where they used to ask whether -g was on. */
+void target_set_keep_vars(int on);
+int  target_keep_vars(void);
+/* -g: the backends record each function's line rows and where each
+ * source variable lives (ir_func.lines, ir_func.var_off). */
+void target_set_debug_info(int on);
+int  target_debug_info(void);
 
 /* The other two dimensions. Both default to the freestanding ELF answer,
  * so a caller that has never heard of them reads the world exactly as it

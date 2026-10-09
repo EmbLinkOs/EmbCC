@@ -42,3 +42,5 @@ ref/
 /embflash
 /embtrace
 /embrt
+# verify/fuzz: the programs that failed
+/verify/fuzz/out/

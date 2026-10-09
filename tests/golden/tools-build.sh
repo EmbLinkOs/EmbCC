@@ -53,5 +53,22 @@ for t in $tools; do
     fi
 done
 
+# embsim is built optimized (EMBSIM_OPT, -O2): a simulator's speed is
+# every test's that runs one, and without -O it ran a busy loop about
+# three times slower. Still with -g, as every tool here is.
+if [ -s "$out/embsim.cmd" ]; then
+    grep -Eq -- ' -O[1-3s]? ' "$out/embsim.cmd" ||
+        { echo "FAIL embsim: its recipe has no -O:"; cut -c1-100 "$out/embsim.cmd"; fail=1; }
+    grep -q -- ' -g ' "$out/embsim.cmd" ||
+        { echo "FAIL embsim: its recipe dropped -g"; fail=1; }
+fi
+# ...and rebuilt when the Makefile changes, or an ./embsim linked before
+# -O2 was the default (or with another EMBSIM_OPT) is kept: the rule's
+# prerequisites, from make's own database (-p), must name the Makefile
+( cd "$EMBCC_ROOT" && make -pn embsim 2> /dev/null ) |
+    awk '/^embsim:/ { for (i = 2; i <= NF; i++) if ($i == "Makefile") ok = 1 }
+         END { exit !ok }' ||
+    { echo "FAIL embsim: its rule does not depend on the Makefile, so EMBSIM_OPT changes leave ./embsim as it was"; fail=1; }
+
 [ "$fail" -eq 0 ] || exit 1
 echo "  every tool in \`make all\` builds ($(echo $tools | wc -w | tr -d ' ') of them)"

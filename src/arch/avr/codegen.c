@@ -234,7 +234,7 @@ struct a_fn {
      * an eight-byte slot and reads four bytes of a neighbouring temporary as
      * its high half. */
     char *wide;
-    int want_debug;
+    int keep_vars;
     /* Per vreg: the low register of the PAIR the allocator gave it (r2,
      * r4, ... r16) -- or of the QUAD, two adjacent pairs (r2, r6, r10,
      * r14), for a four-byte value -- or -1 for its slot. hw[v] is how
@@ -254,6 +254,12 @@ struct a_fn {
     int *usecnt;         /* reads per vreg, for compare/branch fusion */
     int skip_next;
     int use_y;           /* the frame pointer is set up (see the prologue) */       /* the compare emitted the branch that follows */
+    /* The body's TRANSIENT pushes (t_push): a byte or a run of bytes
+     * pushed and popped again inside one instruction's code -- ldi4's
+     * borrowed r31, an atomic's operands. tdepth is how far the current
+     * instruction's are above the frame, tpeak the most any reached:
+     * -fstack-usage adds it, since sp really goes that far below. */
+    int tdepth, tpeak;
 };
 
 /* A value's width in bytes: eight when the map says so, four otherwise. */
@@ -1048,14 +1054,14 @@ static void layout(struct a_fn *F)
     for (int v = 0; v < fn->nvregs; v++)
         obj_of[v] = -1;
 
-    char *lref = ra_locals_referenced(fn, F->want_debug);
+    char *lref = ra_locals_referenced(fn, F->keep_vars);
     for (int v = 0; v < fn->nvars; v++) {
         int size = fn->locals[v].size ? fn->locals[v].size : VW;
         if (in_pair(F, v))
             continue;                  /* in its register pair: no slot */
         /* Nothing names it -- mem2reg promoted every access away, which
          * it now does for this target's two-byte locals -- so it needs no
-         * slot, and a function with none needs no frame at all. Under -g
+         * slot, and a function with none needs no frame at all. At -O0 and -Og
          * every local keeps one (ra_locals_referenced). */
         if (!lref[v] && v >= fn->nparams)
             continue;
@@ -1868,6 +1874,24 @@ static void extend(struct a_fn *F, int r, int from, int sign, int to)
     fill_run(F->t, r + from + 1, to - from - 1, r + from);
 }
 
+/* ---- transient pushes ------------------------------------------------ */
+
+/* A push the body pops again before its instruction's code ends, counted
+ * for -fstack-usage (a_fn.tpeak): the frame's number is what the stack
+ * must hold, and a byte pushed under it is a byte it must hold too. */
+static void t_push(struct a_fn *F, int r)
+{
+    avr_push(F->t, r);
+    if (++F->tdepth > F->tpeak)
+        F->tpeak = F->tdepth;
+}
+
+static void t_pop(struct a_fn *F, int r)
+{
+    avr_pop(F->t, r);
+    F->tdepth--;
+}
+
 /* ---- constants ------------------------------------------------------- */
 
 static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
@@ -1896,7 +1920,7 @@ static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
              * mov leave SREG alone, so this is safe inside a carry chain
              * too, and nothing live in Z is disturbed. */
             if (!borrowed) {
-                avr_push(F->t, 31);
+                t_push(F, 31);
                 borrowed = 1;
             }
             avr_ri(F->t, AVR_LDI, 31, b);
@@ -1904,7 +1928,7 @@ static void ldi4(struct a_fn *F, int r, unsigned long v, int n)
         }
     }
     if (borrowed)
-        avr_pop(F->t, 31);
+        t_pop(F, 31);
 }
 
 /* ---- labels and branches --------------------------------------------- */
@@ -2684,32 +2708,6 @@ static void a_line_row(struct ir_func *fn, long off, int line)
     fn->nlines++;
 }
 
-/* Whether variable v's slot is where its value is, for DW_AT_location.
- *
- * At -O0 every variable is read and written through its slot. Optimized,
- * mem2reg may have turned it into temporaries, and then the slot (the
- * layout still gives one to every variable under -g) is never written:
- * naming it would have a debugger print whatever the frame held before.
- * A local is in its slot exactly when something still loads, stores or
- * takes the address of it. A parameter is stored there by the prologue
- * whatever happens, so its slot holds the value it arrived with -- right
- * unless the body assigned it after mem2reg took it out of memory, which
- * mem2reg records (ir_dbgvar.moved). */
-static int a_var_in_slot(const struct ir_func *fn, int v)
-{
-    for (int k = 0; k < fn->nins; k++) {
-        const struct ir_ins *in = &fn->ins[k];
-        if (((in->op == IR_LDVAR || in->op == IR_ADDR) && in->a == v) ||
-            (in->op == IR_STVAR && in->dst == v))
-            return 1;
-    }
-    if (v >= fn->nparams)
-        return 0;
-    for (int d = 0; d < fn->ndbgvars; d++)
-        if (fn->dbgvars[d].vreg == v && fn->dbgvars[d].moved)
-            return 0;
-    return 1;
-}
 
 /* ---- the instruction dispatch ---------------------------------------- */
 
@@ -2753,9 +2751,9 @@ static void gen_atomic(struct a_fn *F, const struct ir_ins *i)
         a_refuse(F->fn, i, "an atomic of this size");
     /* push_v: v's n bytes, byte 0 first, so they pop high first */
 #define PUSH_V(v, cnt) do { for (int k_ = 0; k_ < (cnt); k_++) { \
-        vld(F, 26, (v), k_, 1); avr_push(t, 26); } } while (0)
+        vld(F, 26, (v), k_, 1); t_push(F, 26); } } while (0)
 #define POP_TO(r, cnt) do { for (int k_ = (cnt) - 1; k_ >= 0; k_--) \
-        avr_pop(t, (r) + k_); } while (0)
+        t_pop(F, (r) + k_); } while (0)
     if (op == IR_CAS) {
         PUSH_V(i->b, n);                    /* expected, stays below */
         PUSH_V(i->a, 2);
@@ -2792,7 +2790,7 @@ static void gen_atomic(struct a_fn *F, const struct ir_ins *i)
              * are read low first through X */
             int k = op == IR_CAS ? n - 1 - j2 : j2;
             if (op == IR_CAS)
-                avr_pop(t, R_ZERO);
+                t_pop(F, R_ZERO);
             else
                 avr_ld(t, R_ZERO, AVR_X, AVR_PTR_POST_INC);
             avr_rr(t, j2 ? AVR_CPC : AVR_CP, RA + k, R_ZERO);
@@ -2865,7 +2863,7 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
     int load = op == IR_ARMW && i->imm == 'L';
     /* v's bytes pushed high first, so they pop low first */
 #define PUSH_HI(v, cnt) do { for (int k_ = (cnt) - 1; k_ >= 0; k_--) { \
-            vld(F, 26, (v), k_, 1); avr_push(t, 26); } } while (0)
+            vld(F, 26, (v), k_, 1); t_push(F, 26); } } while (0)
     if (op == IR_CAS) {
         PUSH_HI(i->c, n);                   /* desired, below */
         PUSH_HI(i->b, n);                   /* expected, on top */
@@ -2877,11 +2875,11 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
     }
     PUSH_HI(i->a, 2);
 #undef PUSH_HI
-    avr_pop(t, AVR_Z);
-    avr_pop(t, AVR_Z + 1);
+    t_pop(F, AVR_Z);
+    t_pop(F, AVR_Z + 1);
     if (op == IR_CMPXCHG) {
-        avr_pop(t, AVR_X);
-        avr_pop(t, AVR_X + 1);
+        t_pop(F, AVR_X);
+        t_pop(F, AVR_X + 1);
     }
     F->zv = -1;
     avr_in(t, R_TMP, IO_SREG);
@@ -2893,14 +2891,14 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
         int e = op == IR_CAS ? 26 : R_ZERO;
         for (int k = 0; k < n; k++) {
             if (op == IR_CAS)
-                avr_pop(t, e);
+                t_pop(F, e);
             else
                 avr_ld(t, e, AVR_X, AVR_PTR_POST_INC);
             avr_rr(t, k ? AVR_CPC : AVR_CP, RA + k, e);
         }
         int br = avr_br(t, AVR_BR_NE, 0);
         for (int k = 0; k < n; k++) {
-            avr_pop(t, e);
+            t_pop(F, e);
             avr_std(t, AVR_Z, k, e);
         }
         if (op == IR_CMPXCHG)
@@ -2908,7 +2906,7 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
         int j = avr_rjmp(t, 0);
         avr_patch_br(t, br, (t->len - (br + 2)) / 2);
         for (int k = 0; k < n; k++)
-            avr_pop(t, AVR_Z + 1);              /* desired, unused */
+            t_pop(F, AVR_Z + 1);              /* desired, unused */
         if (op == IR_CMPXCHG)
             avr_ri(t, AVR_LDI, AVR_Z, 0);
         avr_patch_rjmp(t, j, (t->len - (j + 2)) / 2);
@@ -2917,7 +2915,7 @@ static void gen_atomic8(struct a_fn *F, const struct ir_ins *i)
     } else if (!load) {
         int c = op == IR_ARMW ? (int)i->imm : op == IR_XADD ? '+' : 0;
         for (int k = 0; k < n; k++) {
-            avr_pop(t, 26);
+            t_pop(F, 26);
             if (c) {
                 avr_rr(t, AVR_MOV, 27, RA + k);
                 switch (c) {
@@ -5111,7 +5109,9 @@ static const struct ra_target AVR_RA = {
     a_ext_plain,
     0, /* atomic_in_reg */
     0, /* fp_reads_gpr */
-    0  /* asm_in_reg */
+    0, /* asm_in_reg */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 /* The lowest register any call this function makes -- the IR's, and the
@@ -5308,7 +5308,11 @@ static void avr_ra_pass(struct a_fn *F, int hw, int low, int *taken,
     x = avr_excl(F, hw);
     for (int v = 0; v < nv; v++)
         if (also[v]) x[v] = 1;
-    if (g_a_o0) {
+    /* -O0 and -Og (target_keep_vars): the source variables stay in
+     * their slots, where a debugger reads them; the temporaries are
+     * still allocated, as on the other targets. Turning allocation off
+     * altogether, as -g once did, doubled the code. */
+    if (g_a_o0 || target_keep_vars()) {
         char *pin = ra_debug_pin_vars(fn);
         for (int v = 0; pin && v < nv; v++)
             if (pin[v]) x[v] = 1;
@@ -5419,7 +5423,7 @@ static void avr_regalloc(struct a_fn *F, int mode)
 }
 
 static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
-                     int want_debug, int ra_mode, struct avr_relax *rx)
+                     int keep_vars, int ra_mode, struct avr_relax *rx)
 {
     struct func *f = fn->src;
     struct a_fn F;
@@ -5427,7 +5431,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
     F.rx = rx;
 
     if (fn->neh)
@@ -5490,20 +5494,16 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
 
     f->code_off = t->len;
     f->code_align = 2;                  /* a word of flash */
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         free(fn->var_off);             /* this function generated again */
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = F.slot[v] >= 0 && a_var_in_slot(fn, v)
-                           ? (int)F.slot[v] : IR_VAR_NO_LOC;
-        /* ...and its rows recorded again, the first at its entry with
-         * the line it was declared on, as clang and avr-gcc write it: a
-         * debugger finds the end of the prologue as the SECOND row, and
-         * without this one it scanned the prologue instead -- stopping
-         * before the parameters were stored to the slots it reads. */
+            fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0, F.slot[v]);
+        /* ...and its rows recorded again. The row at the entry, with the
+         * line the function was declared on, is the DWARF writer's to add
+         * (src/debug/dwarf.c, emit_line_func), for every target. */
         fn->nlines = 0;
-        a_line_row(fn, t->len, fn->line);
     }
 
     /* ---- prologue ---- */
@@ -5686,8 +5686,9 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             long at = t->len;
             int first = i;
             F.tail_made = 0;
-            if (want_debug)
+            if (target_debug_info())
                 a_line_row(fn, t->len, fn->ins[i].line);
+            F.tdepth = 0;
             gen_ins(&F, i);
             if (F.skip_next) {          /* the compare emitted its branch */
                 F.skip_next = 0;
@@ -5719,6 +5720,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             add_const16(&F, AVR_Y, F.frame);
         if (F.frame || fn->has_alloca)
             set_sp_from_y(t);
+        /* The pairs the prologue pushed after isr_prologue's registers
+         * (r8-r17 a call's arguments are loaded into): popped first.
+         * Leaving them on the stack popped Y, Z, X and the rest from
+         * the wrong bytes, and reti returned to one of them. */
+        for (i = F.nsave - 1; i >= 0; i--) {
+            avr_pop(t, F.used_callee[i] + 1);
+            avr_pop(t, F.used_callee[i]);
+        }
         isr_epilogue(t);
     } else {
         a_teardown(&F);
@@ -5766,8 +5775,14 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
      * part has 2 KB of SRAM total, every temporary here takes four bytes
      * of it, and a frame that does not fit shows up as a program that
      * produces no output at all. */
-    f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ + 2 /* the return
-                                       * address the call pushed */;
+    /* The frame, the pairs and Y the prologue pushed, the return address
+     * the call (or the interrupt) pushed, and the most the body pushes
+     * on top of all that for a moment (t_push). A handler's prologue also
+     * pushes everything in ISR_SAVE but Y (counted above), and SREG. */
+    f->stack_bytes = (int)F.frame + 2 * F.nsave + 2 * F.use_y /* Y */ +
+                     2 /* the return address */ + F.tpeak;
+    if (f->is_isr)
+        f->stack_bytes += (int)(sizeof ISR_SAVE / sizeof ISR_SAVE[0]) - 2 + 1;
     f->code_len = t->len - f->code_off;
     if (F.rx) {
         struct avr_relax *rx = F.rx;
@@ -5829,7 +5844,7 @@ static void avr_rollback(struct code *t, struct a_sites *st,
 }
 
 static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
-                       int want_debug, int mode, const struct avr_rollback *rb)
+                       int keep_vars, int mode, const struct avr_rollback *rb)
 {
     struct avr_relax rx;
     unsigned char *pin = NULL;
@@ -5840,7 +5855,7 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
         int changed = 0;
         avr_rollback(t, st, rb);
         rx.bad = -1;
-        gen_func(fn, t, st, want_debug, mode, &rx);
+        gen_func(fn, t, st, keep_vars, mode, &rx);
         if (npin < rx.nsite) {
             pin = xrealloc(pin, (size_t)rx.nsite);
             for (; npin < rx.nsite; npin++) pin[npin] = 0;
@@ -5863,7 +5878,7 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
     if (!ok) {
         /* Never left with a thrown-away attempt in `t`: everything long. */
         avr_rollback(t, st, rb);
-        gen_func(fn, t, st, want_debug, mode, NULL);
+        gen_func(fn, t, st, keep_vars, mode, NULL);
     }
     free(rx.hint); free(rx.fits); free(pin);
     return t->len - rb->at;
@@ -5875,7 +5890,7 @@ static int gen_relaxed(struct ir_func *fn, struct code *t, struct a_sites *st,
  * from at least one more class of home, so this ends; the bound is only
  * there to name a loop that did not. */
 static int avr_attempt(struct ir_func *fn, struct code *t, struct a_sites *st,
-                       int want_debug, int mode, const struct avr_rollback *rb)
+                       int keep_vars, int mode, const struct avr_rollback *rb)
 {
     int nv = fn->nvregs;
     for (int tries = 0; ; tries++) {
@@ -5883,7 +5898,7 @@ static int avr_attempt(struct ir_func *fn, struct code *t, struct a_sites *st,
         g_x_hit = g_x_alloc = 0;
         if (nv)
             memset(g_a_pend, 0, (size_t)nv);
-        len = gen_relaxed(fn, t, st, want_debug, mode, rb);
+        len = gen_relaxed(fn, t, st, keep_vars, mode, rb);
         if (g_a_xhome && g_x_hit && g_x_alloc) {
             g_a_xhome = 0;               /* X was scratch after all */
             continue;
@@ -5904,16 +5919,16 @@ static int avr_attempt(struct ir_func *fn, struct code *t, struct a_sites *st,
  * A discarded attempt is undone by truncating what it appended: the code,
  * and the four site lists, which only ever grow. */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct a_sites *st, int want_debug)
+                          struct a_sites *st, int keep_vars)
 {
     struct avr_rollback rb = { t->len, st->next, st->nstr, st->ng, st->nf };
     int best = AVR_RA_NONE, best_len = 0;
     int nv = fn->nvregs;
 
-    if (!g_a_regalloc || want_debug || fn->src->is_isr ||
+    if (!g_a_regalloc || fn->src->is_isr ||
         (avr_knob("EMBCC_AVR_RA_ONLY") &&
          strcmp(avr_knob("EMBCC_AVR_RA_ONLY"), fn->name) != 0)) {
-        gen_relaxed(fn, t, st, want_debug, AVR_RA_NONE, &rb);
+        gen_relaxed(fn, t, st, keep_vars, AVR_RA_NONE, &rb);
         return;
     }
     /* A field's constant offset into its load or store -- `ldd r, Z+q`
@@ -5958,7 +5973,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
             /* each attempt learns its own exclusions */
             memset(g_a_novol, 0, (size_t)(nv ? nv : 1));
             memset(g_a_nohome, 0, (size_t)(nv ? nv : 1));
-            len = avr_attempt(fn, t, st, want_debug, m, &rb);
+            len = avr_attempt(fn, t, st, keep_vars, m, &rb);
             if (avr_knob("EMBCC_AVR_RA"))
                 fprintf(stderr, "%s: mode %d cap %d, %d bytes\n", fn->name,
                         m, g_a_cap, len);
@@ -5983,7 +5998,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
         g_x_hit = g_x_alloc = 0;
         if (nv)
             memset(g_a_pend, 0, (size_t)nv);
-        gen_relaxed(fn, t, st, want_debug, best, &rb);
+        gen_relaxed(fn, t, st, keep_vars, best, &rb);
         if (g_x_hit && g_x_alloc)
             internal_error("avr: %s: X is a home and was used as scratch",
                            fn->name);
@@ -6006,7 +6021,7 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
                       struct extcall **ext, int *next,
                       struct strsite **strs, int *nstrs,
                       struct gsite **gs, int *ngs,
-                      struct fsite **fs, int *nfs, int want_debug,
+                      struct fsite **fs, int *nfs, int keep_vars,
                       int optimize, int no_sse, int regalloc)
 {
     struct a_sites st;
@@ -6019,7 +6034,7 @@ void codegen_unit_avr(struct ir_unit *iu, struct code *text,
         int ra = g_a_regalloc;
         if (g_a_o0 && ra_o0_too_big(&iu->funcs[n]))
             g_a_regalloc = 0;          /* see ra_o0_too_big */
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
         g_a_regalloc = ra;
     }
 

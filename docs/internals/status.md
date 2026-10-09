@@ -648,7 +648,7 @@ source states them:
   function keeps every value in memory; the other backends allocate
   registers in it, the allocator giving `goto *p` an edge to every label
   whose address is taken.
-- **`-O3` is `-O2`.** There is no `-Og`.
+- **`-O3` is `-O2`.** `-Og` is `-O1` with every source variable kept in its stack slot.
 
 ## Milestones
 

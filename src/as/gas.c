@@ -18,6 +18,7 @@
 #include "../arch/thumb/asm.h"
 #include "../arch/thumb/emit.h"
 #include "../arch/thumb/attrs.h"
+#include "../arch/backend.h"
 #include "../arch/aarch64/asm.h"
 #include "../arch/mips/asm.h"
 #include "../arch/loongarch/asm.h"
@@ -3051,6 +3052,17 @@ static int directive(struct gas *g, char *p, int pass)
             if (!bad && pm && width != 2)
                 gerr(g, "\"%s\": a program-memory address is two bytes",
                      one), bad = 1;
+            /* A number too wide for its slot is an error, as llvm-mc and
+             * GNU as make it: `.byte 256` assembled to 0 here, and a table
+             * of them to nothing anyone wrote. Its width's signed or
+             * unsigned range, -128..255 for a byte. */
+            if (!bad && !pm && gv.sec == SEC_ABS && !gv.unknown && width < 8) {
+                long long lo = -(1LL << (8 * width - 1));
+                long long hi = (long long)((1ULL << (8 * width)) - 1);
+                if ((long long)gv.v < lo || (long long)gv.v > hi)
+                    gerr(g, "\"%s\" is %ld, which does not fit in %d byte%s",
+                         one, gv.v, width, width == 1 ? "" : "s"), bad = 1;
+            }
             if (!bad && pm && gv.sec == SEC_ABS) {
                 emit_int(g, gv.v >> 1, width);
             } else if (bad || gv.sec == SEC_ABS || gv.unknown) {
@@ -3641,20 +3653,14 @@ static int write_object(struct gas *g, const char *out_path)
     if (g->tgt->machine == EM_RISCV)
         elfw_set_flags(w, target_elf_flags(target_get()) &
                           EF_RISCV_FLOAT_ABI_MASK);
-    if (g->tgt->machine == EM_MIPS) {
-        unsigned char af[24];
+    if (g->tgt->machine == EM_MIPS)
         elfw_set_flags(w, target_elf_flags(target_get()));
-        mips_build_abiflags(af);
-        elfw_add_section(w, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC,
-                         af, (Elf64_Xword)sizeof af, 8);
-    }
-    if (g->tgt->machine == EM_ARM) {
-        size_t alen = 0;
-        unsigned char *ab = arm_build_attributes(&alen);
-        elfw_add_section(w, ".ARM.attributes", SHT_ARM_ATTRIBUTES, 0, ab,
-                         (Elf64_Xword)alen, 1);
-        free(ab);
-    }
+    /* ...and what the object says about itself, as a compiled one does
+     * (the registry's elf_notes): ARM's build attributes, RISC-V's ISA
+     * string -- without it a disassembler knows only RV32I and C, and
+     * showed a .S's fsd as <unknown> -- and MIPS's ABI flags */
+    if (backend_get(target_get())->elf_notes)
+        backend_get(target_get())->elf_notes(w);
     free(used);
     if (g->errors) { elfw_free(w); free(ndx); return 1; }
     int rc = elfw_write(w, out_path);

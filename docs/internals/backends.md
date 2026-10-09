@@ -15,7 +15,7 @@ changing EmbCC. Register allocation, which all five share, is in
 
 | Path | Contents |
 |---|---|
-| `target.c`, `target.h` | the target model: triples, data model, ABI questions, relocation kinds |
+| `target.c`, `target.h` | the target model: triples and data model (read from the target database, `src/targets/`), ABI questions, relocation kinds |
 | `backend.h` | the contract a backend implements |
 | `code.c`, `code.h` | the machine-code buffer every encoder writes into |
 | `predef.c`, `predef.h` | which predefined-macro table the target uses |
@@ -50,14 +50,15 @@ A target has three independent dimensions: the architecture
 `TARGET_RISCV32`, `TARGET_RISCV64`, `TARGET_AVR`, `TARGET_MIPS32`), the operating system
 (`enum target_os`: none, EmbLinkOS, Linux, Darwin, Windows), and the
 object format (`enum target_fmt`: ELF, Mach-O, COFF). The accepted
-triples are an explicit table, `g_triples[]` in `target.c`, not a cross
+triples are an explicit table, the `TRIPLE` rows of the target database
+(`src/targets/<family>.def`, read into `g_triples[]` in `target.c`), not a cross
 product, so a combination that does not exist cannot be accepted by
 accident. Each row is marked canonical (the spelling `-dumpmachine` and
 diagnostics print) or an alias. A name not in the table is refused.
 
-The Thumb rows also carry the sub-architecture: ARMv7-M, ARMv7E-M
-(`thumb_em`), or ARMv8-M Mainline (`g_thumb_arch` 8), and whether the
-name was an `-eabihf` one. These are a level on one target, not separate
+The ARM rows also carry the sub-architecture (ARMv7-M, ARMv7E-M, ARMv8-M
+Mainline and Baseline, ARMv6-M, ARMv7-A) and whether the name is an
+`-eabihf` one, and a MIPS row its byte order. These are a level on one target, not separate
 targets, because the data model and calling convention are the same.
 
 When no `--target=` is given, `target_apply_default()` applies, in order:
@@ -66,8 +67,8 @@ When no `--target=` is given, `target_apply_default()` applies, in order:
 
 ### The data model
 
-`g_model[]` holds one row per architecture, and each question has a
-function:
+`g_model[]` holds one row per architecture, the `DATA_MODEL` rows of the
+target database, and each question has a function:
 
 | Function | x86-64 | AArch64 | Thumb | RV32 | RV64 | AVR | MIPS32 |
 |---|---|---|---|---|---|---|---|
@@ -137,17 +138,23 @@ way that relocation type's linker reads it back.
 
 ### Adding a target
 
-1. A row in `g_model[]`, an answer in every `switch` in `target.c` (the
-   build fails until each is given), rows in `g_triples[]`, and the
-   relocation mappings.
+1. Its family file in the target database, `src/targets/<family>.def`,
+   with a `DATA_MODEL` row and its `TRIPLE` rows, and the file's line in
+   `src/targets/targets.def`. Then an answer in every `switch` in
+   `target.c` (the build fails until each is given), and the relocation
+   mappings.
 2. A directory with `codegen.c`, `emit.c` and `irgen.c`, and a
-   `codegen_unit_*` entry point the driver calls.
-3. A predefined-macro table from `tools/gen-predef.sh` (below).
-4. An encoding referee for `emit.c` (see [Encoders and their
+   `codegen_unit_*` entry point.
+3. Its row in the backend registry, `src/arch/backends.c` (see [The
+   backend registry](#the-backend-registry)), and its GCC `-m` options in
+   `src/arch/<arch>/options.c`. The driver reads the row; it has no
+   per-target chain to extend.
+4. A predefined-macro table from `tools/gen-predef.sh` (below).
+5. An encoding referee for `emit.c` (see [Encoders and their
    referees](#encoders-and-their-referees)).
-5. A QEMU harness under `tests/harness/<arch>/`, and the target in the
+6. A QEMU harness under `tests/harness/<arch>/`, and the target in the
    test suite. See [Testing](testing.md).
-6. A new source file also has to be added to the build lists, including
+7. A new source file also has to be added to the build lists, including
    `EMBLS_SRCS`; otherwise `make test` fails at its build step.
 
 ## Predefined macros
@@ -203,12 +210,47 @@ generated tables cannot know:
 `tools/gen-predef.sh --reference ARCH` when the reference compiler is
 installed.
 
+## The backend registry
+
+`src/arch/backends.c` has one row per `enum target_arch` (a `struct
+backend_desc`, declared in `backend.h`), holding what the driver needs to
+know about the code generator behind it:
+
+| Field | What it says |
+|---|---|
+| `family` | The family's name in messages (`"RX"`, `"PowerPC"`) |
+| `codegen` | The code generator's entry point (below) |
+| `ra_at_o0` | The register allocator also runs at `-O0`, for each expression's temporaries (`EMBCC_O0_NORA=1` turns it off) |
+| `op_calls_helper` | Whether an IR instruction becomes a runtime-helper call on this target, which the optimizer asks; `NULL` for none |
+| `unwind_unwritten` | The unwind tables the target needs and EmbCC does not write, as a refusal names them (`"RISC-V .eh_frame"`); `NULL` where `eh_emit` writes them |
+| `cxx_exceptions` | Whether a C++ unit may use exceptions: `BACKEND_CXX_EXC_OK`, `_NONE`, or `_BIG_ENDIAN` (MIPS64) |
+| `firmware` | The driver links firmware for it with embld, and its file-scope asm blocks and naked functions are read by the `.s` assembler |
+| `ld_scripts` | embld lays out a GNU linker script for it (`-T`) |
+| `call_insn`, `call_delay_slot` | A naked function's argument-less call, and whether a `nop` fills a delay slot after it (SPARC) |
+| `sym_prefix` | What a C name is called in the object and in assembly (`_` on RX) |
+| `imm_prefixed` | An asm operand that is a constant is written `#5` (RX, ColdFire) |
+| `text_p2align` | The alignment of a naked function's body (AVR: 1) |
+| `no_asm_text` | Why `-S` writes no text for it, as the refusal says; `NULL` when it does |
+| `option` | The target's own command-line options, in `src/arch/<arch>/options.c`: returns 1 when it handled the argument (accepted it, or refused it by name), 0 to let the driver try the rest. Each handler lists its options as an `exact` and a `prefix` table, checked with `option_listed()` |
+
+`backend_get(arch)` returns the row, and stops the compiler if a target
+has none. The driver selects from the row the code generator, the helper predicate,
+the unwind and exception refusals, whether and how it links firmware, how
+a naked function is written out, and whether `-S` has text. Before the registry,
+these were chains of `if (ta == TARGET_...)` in the driver, nine of them
+for the unwind refusals alone, and a new backend had to extend each one.
+More of the driver's per-target knowledge moves into the row as the
+redesign proceeds ([Redesign](redesign.md)).
+
 ## The backend contract
 
 `backend.h` declares one entry point per backend, all with the same
 signature: `codegen_unit` (x86-64), `codegen_unit_arm64`,
 `codegen_unit_thumb`, `codegen_unit_riscv` (both widths),
-`codegen_unit_mips` and `codegen_unit_avr`. Each takes the optimized `struct ir_unit` and
+`codegen_unit_mips` (both widths), `codegen_unit_loongarch`,
+`codegen_unit_tricore`, `codegen_unit_xtensa`, `codegen_unit_ppc`,
+`codegen_unit_rx`, `codegen_unit_sparc`, `codegen_unit_coldfire` and
+`codegen_unit_avr`. Each takes the optimized `struct ir_unit` and
 returns:
 
 - the unit's `.text` in a `struct code`, with each function's
@@ -932,7 +974,7 @@ an aggregate). A variadic call always uses the base convention.
 `pcs("aapcs")` selects the base convention for one function;
 `pcs("aapcs-vfp")` without an FPU is an error.
 
-**Float ABI selection** (`arm_float_resolve` in the driver):
+**Float ABI selection** (`thumb_options_done`, `src/arch/thumb/options.c`):
 `-mfloat-abi=soft` (the default) emits no FPU instructions;
 `softfp` uses the FPU with the base convention; `hard` uses the FPU and
 AAPCS-VFP. `-mfpu=` accepts `fpv4-sp-d16` and `fpv5-d16` (ARMv7E-M; the

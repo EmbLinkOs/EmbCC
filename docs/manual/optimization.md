@@ -142,16 +142,24 @@ Register allocation and tail calls are the same as at `-O2`.
 
 Accepted, and identical to `-Os`.
 
+### `-Og`
+
+Optimize for debugging: `-O1`, with every source variable kept in its
+stack slot, where a debugger reads it. See
+[Debugging](debugging.md#optimized-code).
+
+### `-Ofast`
+
+The same as `-O3`. GCC's `-Ofast` adds `-ffast-math`, which EmbCC does
+not do.
+
 ### Spellings EmbCC does not accept
 
-`-Og`, `-Ofast` and any level above 3 are refused:
+Any level above 3 is refused:
 
 ```text
-embcc: unknown optimization flag '-Og'
+embcc: unknown optimization flag '-O4'
 ```
-
-There is no "optimize for debugging" level. Use `-O0` with `-g`; see
-[Debugging](debugging.md#optimized-code).
 
 ### Combining `-O` options
 
@@ -388,7 +396,7 @@ A loop over arrays reached through a pointer is not vectorized.
 
 Default: on at `-O2` for x86-64. Off at `-Os`.
 
-<!-- BUG, reported to the lead: vec_op_char (opt.c) does not check
+<!-- BUG, reported to the lead: vec_op_char (src/opt/vectorize.c) does not check
      i->flt, so `float a[N], b[N], c[N]; a[i] = b[i] + c[i]` with a
      constant N is vectorized with paddd (integer add) on x86-64 at -O2.
      Seen with embcc inspect ir v.c -O2 / llvm-objdump. The note below
@@ -959,8 +967,8 @@ Write the generated code as an assembly file. See
 
 | GCC or Clang option | EmbCC |
 |---|---|
-| `-Og` | Not accepted. Use `-O0 -g`. |
-| `-Ofast` | Not accepted. |
+| `-Og` | Accepted: `-O1` with every source variable kept in its stack slot. |
+| `-Ofast` | Accepted, same as `-O3`. |
 | `-O3` | Accepted, same as `-O2`. |
 | `-Oz` | Accepted, same as `-Os`. |
 | `-fno-inline`, `-finline` | Same meaning. |

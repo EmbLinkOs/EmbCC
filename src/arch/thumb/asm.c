@@ -1946,6 +1946,76 @@ static int thumb1_bad(const struct code *c, int at)
     return 0;
 }
 
+/* ---- data directives ------------------------------------------------------
+ *
+ * `.short 0xbf30` or `.word 0x...` in a template: an instruction this
+ * vocabulary does not have yet, written as its bytes, or a constant the
+ * code finds beside itself. GNU as's ARM spellings and sizes, which are
+ * llvm-mc's: `.byte` one; `.short`, `.hword`, `.2byte` two; `.word`,
+ * `.long`, `.int`, `.4byte` four; `.quad`, `.8byte` eight -- not RISC-V's
+ * `.half` and `.dword`, which no ARM assembler takes. Little-endian, so a
+ * 32-bit Thumb instruction is two `.short`s, its first halfword first.
+ * Constants only, each in its width's signed or unsigned range, as
+ * llvm-mc refuses the rest; a symbol would need a relocation an inline
+ * asm cannot carry. A .s file's are src/as/gas.c's and never reach this.
+ * 0 when stmt is not one, 1 when emitted, -1 with err set. */
+static const struct { const char *name; int size; } data_dir[] = {
+    { ".byte", 1 },
+    { ".short", 2 }, { ".hword", 2 }, { ".2byte", 2 },
+    { ".word", 4 }, { ".long", 4 }, { ".int", 4 }, { ".4byte", 4 },
+    { ".quad", 8 }, { ".8byte", 8 },
+    { NULL, 0 }
+};
+
+static int data_stmt(const char *stmt, int len, struct code *out,
+                     char *err, int errlen)
+{
+    int i = 0, d, m, size = 0;
+    while (i < len && isspace((unsigned char)stmt[i]))
+        i++;
+    d = i;
+    for (m = i; m < len && !isspace((unsigned char)stmt[m]); m++) {}
+    for (int k = 0; data_dir[k].name; k++)
+        if ((int)strlen(data_dir[k].name) == m - d &&
+            strncmp(stmt + d, data_dir[k].name, (size_t)(m - d)) == 0)
+            size = data_dir[k].size;
+    if (!size)
+        return 0;
+    /* data is not an instruction an IT block's condition can apply to */
+    if (tasm_open())
+        FAIL("%.*s inside an IT block: its slots are for instructions",
+             m - d, stmt + d);
+    int at = out->len;
+    for (i = m; i < len; ) {
+        int s0, e, depth = 0;
+        long long v;
+        while (i < len && isspace((unsigned char)stmt[i]))
+            i++;
+        if (i >= len)
+            break;
+        for (s0 = i; i < len && (depth > 0 || stmt[i] != ','); i++) {
+            if (stmt[i] == '(') depth++;
+            else if (stmt[i] == ')') depth--;
+        }
+        for (e = i; e > s0 && isspace((unsigned char)stmt[e - 1]); e--) {}
+        if (e == s0 || !asm_const_expr(stmt + s0, e - s0, &v))
+            FAIL("\"%.*s\" in %.*s is not a constant: inline asm data takes "
+                 "numbers, and a symbol would need a relocation",
+                 e - s0, stmt + s0, m - d, stmt + d);
+        if (size < 8 && (v < -(1LL << (8 * size - 1)) ||
+                         v > (long long)((1ULL << (8 * size)) - 1)))
+            FAIL("%lld does not fit in %d byte%s", v, size,
+                 size == 1 ? "" : "s");
+        for (int b = 0; b < size; b++)
+            code_byte(out, (int)(((unsigned long long)v >> (8 * b)) & 0xff));
+        if (i < len)
+            i++;                        /* the comma */
+    }
+    /* data, so the ARMv6-M backend's scan passes over it (ir_asm.drange) */
+    code_mark_data(out, at, out->len);
+    return 1;
+}
+
 int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
 {
     const char *p = text;
@@ -1967,19 +2037,30 @@ int tasm_assemble(const char *text, struct code *out, char *err, int errlen)
          * lower case; operands keep theirs (a symbol's case matters). */
         {
             char buf[512];
+            const char *st = start;
             int k = 0, r;
             int at = out->len;
-            if (len >= (int)sizeof buf) {
-                r = one_stmt(start, len, out, err, errlen);
-            } else {
+            if (len < (int)sizeof buf) {
                 memcpy(buf, start, (size_t)len);
                 while (k < len && isspace((unsigned char)buf[k])) k++;
                 while (k < len && !isspace((unsigned char)buf[k])) {
                     buf[k] = (char)tolower((unsigned char)buf[k]);
                     k++;
                 }
-                r = one_stmt(buf, len, out, err, errlen);
+                st = buf;
             }
+            /* data is bytes, not an instruction: it goes in as written,
+             * past thumb1_bad, which would read a `.short` of a Thumb-2
+             * halfword as an instruction ARMv6-M lacks */
+            r = data_stmt(st, len, out, err, errlen);
+            if (r) {
+                if (r < 0)
+                    return -1;
+                if (*p)
+                    p++;
+                continue;
+            }
+            r = one_stmt(st, len, out, err, errlen);
             if (r != 0)
                 return -1;
             if (arch_thumb1() && !t_isa_a32 && thumb1_bad(out, at)) {
@@ -2277,6 +2358,20 @@ void tasm_vocabulary(FILE *f)
                "\tmovle r0, r8\n");
     fprintf(f, "\tit eq\n\tvstmdbeq r0!, {s16-s31}\n");
     fprintf(f, "\tit ne\n\tbxne lr\n");
+    /* The data directives, last: each spelling, both ends of each
+     * width's range and an expression -- 52 bytes, so whatever follows
+     * stays aligned. */
+    tasm_vocabulary_data(f);
+}
+
+/* The data directives alone, which every level takes the same */
+void tasm_vocabulary_data(FILE *f)
+{
+    fprintf(f, "\t.byte 255, -128, 0x7f, 0\n\t.short -32768, 0xffff\n");
+    fprintf(f, "\t.hword 0xe92d, 0x4ff0\n\t.2byte 0x1234, 7\n");
+    fprintf(f, "\t.word 0x12345678, -2147483648\n\t.long 4294967295\n");
+    fprintf(f, "\t.int (1 << 20) | 0x13\n\t.4byte 0xbf30bf20\n");
+    fprintf(f, "\t.quad 0x123456789abcdef0\n\t.8byte -1\n");
 }
 
 /* The DSP extension's vocabulary, ssat/usat and the extends, for

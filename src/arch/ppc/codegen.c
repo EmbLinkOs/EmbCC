@@ -75,7 +75,7 @@ struct ppc_sites {
 struct ppc_fn {
     int *usecnt;
     int skip_next;
-    int want_debug;
+    int keep_vars;
     struct ir_func *fn;
     int *loc;            /* per vreg: its register, -1 in memory; NULL at -O0 */
     int used_callee[RA_MAXPOOL + 2];
@@ -190,7 +190,9 @@ static const struct ra_target PPC_RATGT = {
     NULL, NULL,
     1,              /* atomic_in_reg */
     0,
-    1               /* asm_in_reg: see IR_ASM */
+    1,              /* asm_in_reg: see IR_ASM */
+    NULL, /* remat_ok */
+    NULL  /* call_target_in_reg */
 };
 
 static int g_ppc_regalloc;
@@ -446,14 +448,14 @@ static void layout(struct ppc_fn *F)
         free(loc2);
     }
     {
-        char *lref = ra_locals_referenced(fn, F->want_debug);
+        char *lref = ra_locals_referenced(fn, F->keep_vars);
         for (int pass = 0; pass < 2; pass++)
             for (int v = 0; v < fn->nvars; v++) {
                 int size = fn->locals[v].size ? fn->locals[v].size : 4;
                 int align = fn->locals[v].user_align ? fn->locals[v].user_align
                           : fn->locals[v].align ? fn->locals[v].align : 4;
                 if (in_reg(F, v) || !lref[v] ||
-                    ra_slot_dead(fn, F->loc, NULL, v, F->want_debug))
+                    ra_slot_dead(fn, F->loc, NULL, v, F->keep_vars))
                     continue;
                 if ((size > 8) != pass)
                     continue;
@@ -1853,7 +1855,7 @@ static void gen_ins(struct ppc_fn *F, int n)
     struct ir_ins *i = &fn->ins[n];
     struct code *t = F->t;
 
-    if (F->want_debug && fn->ins[n].line) {
+    if (target_debug_info() && fn->ins[n].line) {
         long line = fn->ins[n].line;
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
@@ -2869,7 +2871,9 @@ static const struct ra_target PPC_PAIR_RA = {
     NULL, NULL,
     1,
     0,
-    0
+    0,
+    NULL,
+    NULL
 };
 
 static void ppc_pair_hints(const struct ir_func *fn, int *hint)
@@ -2990,7 +2994,7 @@ static int *pair_alloc(struct ir_func *fn, struct ppc_fn *F, const char *pin)
 /* ---- one function --------------------------------------------------------- */
 
 static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
-                     int want_debug)
+                     int keep_vars)
 {
     struct func *f = fn->src;
     struct ppc_fn F;
@@ -2998,14 +3002,15 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.wide = wide_map(fn);
     F.nshr = ra_narrow_hishift(fn);
     for (int v = 0; v < fn->nvregs; v++)
         if (F.nshr[v]) F.wide[v] = 0;
     F.fb = PPC_SP;
     if (g_ppc_regalloc) {
-        char *pin = want_debug ? ra_debug_pin_vars(fn) : (char *)0;
+        char *pin = keep_vars ? ra_debug_pin_vars(fn) : (char *)0;
         int *pair;
         g_ppc_taken = 0;
         pair = g_ppc_pairs ? pair_alloc(fn, &F, pin) : NULL;
@@ -3067,7 +3072,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
         }
     }
     F.tail = NULL;
-    if (g_ppc_regalloc && !want_debug)
+    if (g_ppc_regalloc && !keep_vars)
         for (i = 0; i < fn->nins; i++)
             if (ppc_tail_ok(&F, i)) {
                 if (!F.tail)
@@ -3092,12 +3097,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
         F.label_off[i] = -1;
 
     f->code_align = 4;
-    if (want_debug) {
+    if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
         for (int v = 0; v < fn->nvars; v++)
-            fn->var_off[v] = F.slot[v] < 0 ? (int)F.slot[v]
-                                           : (int)obj_slot(&F, v);
+            fn->var_off[v] = F.slot[v] < 0 ? IR_VAR_NO_LOC
+                           : ra_var_home(fn, v, 1, obj_slot(&F, v));
     }
     {
     int len0 = t->len, nl0 = fn->nlines;
@@ -3310,34 +3315,34 @@ static void gen_func(struct ir_func *fn, struct code *t, struct ppc_sites *st,
 /* With the allocator on, a function is generated with the pair pass and
  * without it, and the shorter is kept (MIPS's and RV32's arrangement). */
 static void gen_func_best(struct ir_func *fn, struct code *t,
-                          struct ppc_sites *st, int want_debug)
+                          struct ppc_sites *st, int keep_vars)
 {
     int at = t->len, next = st->next, nstr = st->nstr, ng = st->ng,
         nf = st->nf, with;
 
-    if (g_ppc_regalloc && !want_debug && !getenv("EMBCC_NO_MEMOFF")) {
+    if (g_ppc_regalloc && !keep_vars && !getenv("EMBCC_NO_MEMOFF")) {
         char *w = wide_map(fn);
         ra_fold_memoff(fn, -32768, 32767 - 8, 4, 4, w, 0, 0);
         free(w);
     }
     g_ppc_pairs = 1;
-    if (!g_ppc_regalloc || want_debug || getenv("EMBCC_PPC_PAIRS")) {
+    if (!g_ppc_regalloc || keep_vars || getenv("EMBCC_PPC_PAIRS")) {
         if (getenv("EMBCC_PPC_PAIRS"))
             g_ppc_pairs = atoi(getenv("EMBCC_PPC_PAIRS"));
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
         g_ppc_pairs = 1;
         return;
     }
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     with = t->len - at;
     t->len = at; st->next = next; st->nstr = nstr; st->ng = ng; st->nf = nf;
     g_ppc_pairs = 0;
-    gen_func(fn, t, st, want_debug);
+    gen_func(fn, t, st, keep_vars);
     if (t->len - at > with) {
         t->len = at; st->next = next; st->nstr = nstr; st->ng = ng;
         st->nf = nf;
         g_ppc_pairs = 1;
-        gen_func(fn, t, st, want_debug);
+        gen_func(fn, t, st, keep_vars);
     }
     g_ppc_pairs = 1;
 }
@@ -3346,7 +3351,7 @@ void codegen_unit_ppc(struct ir_unit *iu, struct code *text,
                       struct extcall **ext, int *next,
                       struct strsite **strs, int *nstrs,
                       struct gsite **gs, int *ngs,
-                      struct fsite **fs, int *nfs, int want_debug,
+                      struct fsite **fs, int *nfs, int keep_vars,
                       int optimize, int no_sse, int regalloc)
 {
     struct ppc_sites st;
@@ -3355,7 +3360,7 @@ void codegen_unit_ppc(struct ir_unit *iu, struct code *text,
     g_ppc_regalloc = regalloc;
     memset(&st, 0, sizeof st);
     for (int n = 0; n < iu->nfuncs; n++)
-        gen_func_best(&iu->funcs[n], text, &st, want_debug);
+        gen_func_best(&iu->funcs[n], text, &st, keep_vars);
     cg_resolve_strsites(iu, st.str, st.nstr);
     *ext = st.ext;   *next = st.next;
     *strs = st.str;  *nstrs = st.nstr;

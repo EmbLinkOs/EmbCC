@@ -567,7 +567,7 @@ struct ra_costacc { const int *eof; int *alias; unsigned long *cost;
  * branch, which is what the IR has for one (a switch never closes a
  * loop; a branch to a label at or before itself does). Capped at five
  * levels by the callers that weight by it. */
-static int *ra_loop_depth(const struct ir_func *fn)
+int *ra_loop_depth(const struct ir_func *fn)
 {
     int nins = fn->nins;
     int *depth = xcalloc((size_t)(nins ? nins : 1), sizeof *depth);
@@ -593,6 +593,27 @@ static void ra_depth_cb(int v, void *ctx)
 {
     struct ra_depacc *c = ctx;
     if (v >= 0 && v < c->nvr && c->vdep[v] < c->d) c->vdep[v] = c->d;
+}
+
+char *ra_remat_map(const struct ir_func *fn,
+                   int (*ok)(const struct ir_ins *def))
+{
+    int nv = fn->nvregs;
+    char *m = xcalloc((size_t)(nv ? nv : 1), 1);
+    int *at = xmalloc((size_t)(nv ? nv : 1) * sizeof *at);
+    for (int v = 0; v < nv; v++)
+        at[v] = -1;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *in = &fn->ins[n];
+        int d = in->op == IR_STVAR ? in->dst : ra_ins_def(in);
+        if (d < 0 || d >= nv)
+            continue;
+        at[d] = at[d] == -1 ? n : -2;           /* -2: more than one */
+    }
+    for (int v = 0; v < nv; v++)
+        m[v] = at[v] >= 0 && ok(&fn->ins[at[v]]);
+    free(at);
+    return m;
 }
 
 static void ra_cost_cb(int v, void *ctx)
@@ -1165,8 +1186,12 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
              * calling whatever argument 0 happened to be.
              *
              * Keeping it in memory costs one load at an indirect call
-             * and needs no backend to get an ordering right. */
-            if (in->indirect) OPAQUE(in->a);
+             * and needs no backend to get an ordering right -- unless the
+             * backend says it does (call_target_in_reg): Thumb-2 moves a
+             * target out of r0-r3 into lr before the setup. */
+            if (in->indirect &&
+                !(t->call_target_in_reg && t->call_target_in_reg(in)))
+                OPAQUE(in->a);
             /* A struct or float (SSE) argument loads its slot raw
              * everywhere. A scalar-integer one is moved straight into
              * its argument register only by a backend that knows how. */
@@ -1576,6 +1601,25 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
         }
     }
 
+    /* A node all of whose values are rebuilt where they are read
+     * (remat_ok) spills for a move per read, where any other spills for a
+     * store and a load per read: its cost is a quarter. LICM hoists the
+     * constants of a loop body to its preheader, and each then held a
+     * register across the whole loop or, spilled at full cost, was
+     * stored and reloaded -- `ldr r2, [sp, #36]` for a 1. */
+    if (t->remat_ok && !getenv("EMBCC_RA_NOREMAT")) {
+        char *rm = ra_remat_map(fn, t->remat_ok);
+        char *mixed = xcalloc((size_t)(E ? E : 1), 1);
+        for (int v = 0; v < nvr; v++)
+            if (eof[v] >= 0 && !rm[v])
+                mixed[ra_find(alias, eof[v])] = 1;
+        for (int e = 0; e < E; e++)
+            if (!mixed[e] && cost[e])
+                cost[e] = (cost[e] + 3) / 4;
+        free(mixed);
+        free(rm);
+    }
+
     /* Chaitin-Briggs simplify order. Repeatedly remove a node of degree < NCALLEE
      * (trivially colourable) onto a stack; when none remains, remove the node
      * with the lowest spill cost for its degree as an OPTIMISTIC spill
@@ -1903,11 +1947,11 @@ static int *ra_allocate_class(struct ir_func *fn, const struct ra_target *t,
  * that, because a slot that turns out to be live reads as garbage rather
  * than failing, and the whole point is that nothing quietly reads it. */
 int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
-                 int v, int want_debug)
+                 int v, int keep_vars)
 {
     const struct func *f = fn->src;
     int in_gp = loc && loc[v] >= 0, in_fp = floc && floc[v] >= 0;
-    if ((!in_gp && !in_fp) || f->is_varargs || fn->has_alloca || want_debug)
+    if ((!in_gp && !in_fp) || f->is_varargs || fn->has_alloca || keep_vars)
         return 0;
     const struct type *t = f->var_tys[v];
     if (t->kind == TY_STRUCT || t->kind == TY_ARRAY || ty_size(t) > 8)
@@ -1922,11 +1966,11 @@ int ra_slot_dead(const struct ir_func *fn, const int *loc, const int *floc,
     return 1;
 }
 
-char *ra_locals_referenced(const struct ir_func *fn, int want_debug)
+char *ra_locals_referenced(const struct ir_func *fn, int keep_vars)
 {
     size_t n = (size_t)(fn->nvars > 0 ? fn->nvars : 1);
     char *r = xcalloc(n, 1);
-    if (want_debug || fn->has_alloca || (fn->src && fn->src->is_varargs)) {
+    if (keep_vars || fn->has_alloca || (fn->src && fn->src->is_varargs)) {
         memset(r, 1, n);
         return r;
     }
@@ -1974,7 +2018,7 @@ int *ra_coalesce_temps(struct ir_func *fn, int nvars,
         struct ir_ins *in = &fn->ins[i];
         int vs[4]; int nv = 0;
         vs[nv++] = in->dst; vs[nv++] = in->a; vs[nv++] = in->b;
-        /* `c` names a value only for these (opt.c, each_read): elsewhere
+        /* `c` names a value only for these (src/opt/util.c, each_read): elsewhere
          * it is 0 -- irgen's emit and the optimizer's ins_blank leave it
          * there -- or a vector shift's constant count. Read regardless,
          * it made every instruction a reference to vreg 0, which in a
@@ -2182,10 +2226,41 @@ int ra_parallel_move(const int *dst, const int *src, int n, int scratch,
     return nout;
 }
 
-/* See regalloc.h: under -g the embedded backends keep every source
+/* See regalloc.h: at -O0 and -Og the embedded backends keep every source
  * variable in its frame slot, so the location expression that names
  * the slot is the truth. Temporaries are untouched -- they have no
  * name and no DW_TAG_variable, so nothing describes them. */
+/* Whether variable v's slot is where its value is, for DW_AT_location.
+ *
+ * At -O0 and -Og every variable is read and written through its slot.
+ * Optimized, mem2reg may have turned it into temporaries, and then the
+ * slot is never written: naming it would have a debugger print whatever
+ * the frame held before. A local is in its slot exactly when something
+ * still loads, stores or takes the address of it. A parameter that has a
+ * slot is stored there by the prologue, so its slot holds the value it
+ * arrived with -- right unless the body assigned it after mem2reg took it
+ * out of memory, which mem2reg records (ir_dbgvar.moved). */
+int ra_var_in_slot(const struct ir_func *fn, int v)
+{
+    for (int k = 0; k < fn->nins; k++) {
+        const struct ir_ins *in = &fn->ins[k];
+        if (((in->op == IR_LDVAR || in->op == IR_ADDR) && in->a == v) ||
+            (in->op == IR_STVAR && in->dst == v))
+            return 1;
+    }
+    if (v >= fn->nparams)
+        return 0;
+    for (int d = 0; d < fn->ndbgvars; d++)
+        if (fn->dbgvars[d].vreg == v && fn->dbgvars[d].moved)
+            return 0;
+    return 1;
+}
+
+int ra_var_home(const struct ir_func *fn, int v, int has_slot, long off)
+{
+    return has_slot && ra_var_in_slot(fn, v) ? (int)off : IR_VAR_NO_LOC;
+}
+
 char *ra_debug_pin_vars(const struct ir_func *fn)
 {
     int n = fn->nvregs ? fn->nvregs : 1;

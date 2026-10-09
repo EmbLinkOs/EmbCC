@@ -47,7 +47,7 @@ struct t_fn {
     /* A `tst` already made for the branch at instruction tst_br - 1
      * (0: none), with copies between the two: the branch only jumps. */
     int tst_br;
-    int want_debug;
+    int keep_vars;
     /* Per vreg: 1 when it holds a 64-bit integer, which on a 32-bit
      * machine is an eight-byte slot and a REGISTER PAIR. Built from the
      * width of each value's DEFINING instruction, which is not the same
@@ -96,6 +96,9 @@ struct t_fn {
      * recomputed where it is read and addressed through directly,
      * never stored to a slot and loaded back. */
     int *fvar;
+    /* The local every return gives back, built in the caller's buffer
+     * instead of the frame (t_nrvo_local); -1 for none. */
+    int nrvo;
     long *fscr;
     /* Per vreg: the register the allocator gave it, or -1 for one that
      * stays in memory. NULL when it did not run (-O0/-O1). */
@@ -139,10 +142,14 @@ struct t_fn {
     /* A function that cannot return -- no IR_RET, no tail call: an RTOS
      * task's for (;;), a scheduler's start, a reset handler. No caller
      * is ever resumed, so nothing it would restore is saved: no push, no
-     * vpush, no epilogue -- only the frame. Not under -g, where a
+     * vpush, no epilogue -- only the frame. Not at -O0 or -Og, where a
      * debugger's backtrace reads the saved lr, and not for a variadic
      * function, whose register save area is a push. */
     int noret;
+    /* -g: where each prologue step ends, for the call frame information
+     * (t_record_cfi); -1 when the function has no such step */
+    int cfi_va_end, cfi_push_end, cfi_vsave_end, cfi_frame_end, cfi_fp_end;
+    unsigned cfi_push_mask;     /* ARMv6-M: the registers its push saved */
     /* Per instruction: an IR_CALL made as a TAIL call (t_tail_ok). NULL
      * when there are none. */
     char *tail;
@@ -155,6 +162,29 @@ struct t_fn {
      * live into or out of it, which it is computed from (lo_busy_map). */
     unsigned lofree;
     unsigned *lv_busy;
+    /* RELOAD CACHE (rc_try): per vreg, the low register a value that
+     * lives in memory was loaded into for the reads that follow -- -1 for
+     * none -- and the last instruction that reads it there; rc_v lists
+     * the vregs with one. rc_cur is the instruction being emitted, rc_on
+     * 0 when the function makes none. Per label, the first and last
+     * instruction that jumps to it, rc_lmin -1 when something else can
+     * (a switch, &&label, a landing pad): rc_labels. */
+    int *rc_reg, *rc_end;
+    /* Per vreg: 1 for a constant with no register that is made where it
+     * is read (t_remat_ok), its value in remat_v; NULL for none. Such a
+     * value has no slot, and its IR_CONST emits nothing. */
+    char *remat;
+    long *remat_v;
+    /* Where the code of the instruction being emitted is still nothing
+     * but reads of its operands (rd), so the flags hold nothing it set:
+     * -1 when they may hold something already (tst_br). A constant made
+     * there may be `movs`. */
+    int flags_dead_at;
+    /* ...and an instruction whose whole lowering tests nothing -- a
+     * call, a store, a return -- has dead flags throughout. */
+    int flags_dead_ins;
+    int *rc_lmin, *rc_lmax;
+    int rc_v[8], rc_n, rc_cur, rc_on;
 
     /* ---- the 64-bit constant pool (t_lit64 in codegen.c) --------------- */
     /* Per instruction: 1 for an IR_CONST that loads from the pool, 0 for
@@ -265,7 +295,7 @@ void tcg_cmse_check_call(const struct ir_func *fn, const struct ir_ins *i,
 
 /* One function, ARMv6-M: the counterpart of codegen.c's gen_func. */
 void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
-                 int want_debug);
+                 int keep_vars);
 /* Does this instruction become a call on ARMv6-M where it is not one on
  * ARMv7-M (a divide, a 64-bit multiply, a block copy, an atomic)? */
 int v6_op_calls_helper(const struct ir_ins *i);

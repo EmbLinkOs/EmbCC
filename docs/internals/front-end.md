@@ -527,4 +527,4 @@ errors. `-fmax-errors=N` stops after `N` errors.
 | A new builtin function | The name in `sema_has_builtin`'s list or one of the derived families (`atomic_builtin`, `builtin_bitop`), its typing in `check_expr`, and its lowering in `src/ir/irgen.c`. |
 | A new warning | An entry in `g_warns[]` in `src/driver/diag.c`, and a `diag_warn_opt` call. |
 | A new predefined macro | Regenerate the table with `tools/gen-predef.sh`, or define it in `cpp_process` if it describes EmbCC rather than the target. |
-| A target data-model question | A function in `src/arch/target.c` with a row in `g_model[]`, never a test of the architecture at the use site. |
+| A target data-model question | A function in `src/arch/target.c` reading a column of the `DATA_MODEL` rows (`src/targets/`), never a test of the architecture at the use site. |

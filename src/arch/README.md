@@ -88,7 +88,8 @@ which machine produced the image. `cg_wide_vregs` (the vregs holding a
 
 ## Adding a target
 
-A new directory with the files in the table, a column in `target.c`'s
+A new directory with the files in the table, a family file in the target
+database (`src/targets/<family>.def`: data model and triples), a column in `target.c`'s
 relocation mapping, a predef table from `tools/gen-predef.sh`, a QEMU harness
 under `tests/harness/<arch>/`, and its section in
 docs/manual/targets.md. Then `tests/run.sh --target=<triple>` must pass, with

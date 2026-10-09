@@ -71,6 +71,8 @@ const char *rv_reg_name(int reg)
  * RULE forbids. */
 struct csr { const char *name; unsigned num; int rv32; };
 static const struct csr csrs[] = {
+    /* the floating-point CSRs (the F extension) */
+    { "fflags", 0x001, 0 }, { "frm", 0x002, 0 }, { "fcsr", 0x003, 0 },
     /* machine information */
     { "mvendorid", 0xf11, 0 }, { "marchid", 0xf12, 0 },
     { "mimpid", 0xf13, 0 },    { "mhartid", 0xf14, 0 },
@@ -332,8 +334,415 @@ static const struct csr_ent csr_tab[] = {
     { NULL, 0, 0 }
 };
 
+/* ---- the F and D extensions ---------------------------------------------
+ *
+ * Every form a hand-written FPU routine uses, by the GNU spelling: loads
+ * and stores, the arithmetic with an optional rounding mode, the fused
+ * multiply-adds, min/max and sign injection (and fmv/fneg/fabs, which are
+ * sign injections), compares and fclass, every conversion, the moves
+ * between the register files, and the fcsr/frm/fflags pseudos. Each goes
+ * out through emit.c's OP-FP encoders, as the code generator's do, and
+ * the referee is llvm-mc (rvasm_vocabulary). An F instruction on a target
+ * whose -march= names no F -- or a D one without D -- is refused, as GNU
+ * as refuses it: the part would trap on it. */
+
+/* f0-f31, or the ABI names ft0-ft11, fs0-fs11 and fa0-fa7. */
+int rvasm_fpr(const char *name, int len)
+{
+    int v = 0, i;
+    if (len < 2 || name[0] != 'f')
+        return -1;
+    i = isdigit((unsigned char)name[1]) ? 1 : 2;
+    if (i == 2 && len < 3)
+        return -1;
+    for (int k = i; k < len; k++) {
+        if (!isdigit((unsigned char)name[k]))
+            return -1;
+        v = v * 10 + (name[k] - '0');
+    }
+    if (len - i > 2)
+        return -1;
+    if (i == 1)
+        return v < 32 ? v : -1;
+    switch (name[1]) {
+    case 't': return v < 8 ? v : v < 12 ? 28 + (v - 8) : -1;
+    case 's': return v < 2 ? 8 + v : v < 12 ? 18 + (v - 2) : -1;
+    case 'a': return v < 8 ? 10 + v : -1;
+    default:  return -1;
+    }
+}
+
+static int tok_freg(const struct tok *t) { return rvasm_fpr(t->s, t->len); }
+
+/* A rounding-mode operand: its rm field, or -1 */
+static int tok_rm(const struct tok *t)
+{
+    static const char *const rm[8] = { "rne", "rtz", "rdn", "rup", "rmm",
+                                       NULL, NULL, "dyn" };
+    for (int i = 0; i < 8; i++)
+        if (rm[i] && tok_is(t, rm[i]))
+            return i;
+    return -1;
+}
+
+/* Split a mnemonic at its dots: "fcvt.w.s" -> "fcvt", "w", "s". */
+struct fpname { char base[12], a[4], b[4]; int nparts; };
+
+static int fp_split(const struct tok *t, struct fpname *p)
+{
+    int i = 0, part = 0, k = 0;
+    char *dst = p->base;
+    int cap = (int)sizeof p->base;
+    memset(p, 0, sizeof *p);
+    for (; i < t->len; i++) {
+        char ch = t->s[i];
+        if (ch == '.') {
+            if (++part > 2)
+                return 0;
+            dst = part == 1 ? p->a : p->b;
+            cap = 4;
+            k = 0;
+            continue;
+        }
+        if (k + 1 >= cap)
+            return 0;
+        dst[k++] = ch;
+        dst[k] = 0;
+    }
+    p->nparts = part + 1;
+    return 1;
+}
+
+/* the format suffix: 0 single, 1 double, -1 neither */
+static int fp_fmt(const char *s)
+{
+    return !strcmp(s, "s") ? 0 : !strcmp(s, "d") ? 1 : -1;
+}
+
+/* an integer side of a conversion: RV_CVT_*, or -1 */
+static int fp_ity(const char *s)
+{
+    return !strcmp(s, "w") ? RV_CVT_W : !strcmp(s, "wu") ? RV_CVT_WU
+         : !strcmp(s, "l") ? RV_CVT_L : !strcmp(s, "lu") ? RV_CVT_LU : -1;
+}
+
+#define FFAIL(...) do { snprintf(err, (size_t)errlen, __VA_ARGS__); \
+                        return -1; } while (0)
+
+/* Is a format available? 0 = yes; else the message has been written. */
+static int fp_have(int dbl, const struct tok *m, char *err, int errlen)
+{
+    int flen = target_riscv_flen();
+    if (flen < (dbl ? 64 : 32))
+        FFAIL("%.*s needs the %s extension, which -march= does not name",
+              m->len, m->s, dbl ? "D" : "F");
+    return 0;
+}
+
+/* The F/D statement t[0..n), if it is one: 1 encoded, 0 not an FP
+ * mnemonic at all, -1 an error (in err). */
+static int fp_stmt(const struct tok *t, int n, struct code *out,
+                   char *err, int errlen)
+{
+    struct fpname p;
+    int xlen = target_xlen();
+    const struct tok *m = &t[0];
+    if (m->len < 2 || m->s[0] != 'f' || tok_is(m, "fence") ||
+        tok_is(m, "fence.i") || !fp_split(m, &p))
+        return 0;
+
+    /* the fcsr pseudos: frcsr rd, fscsr [rd,] rs, and the same for frm
+     * and fflags; fsrmi/fsflagsi [rd,] imm */
+    {
+        static const struct { const char *rd_name, *wr_name, *wi_name;
+                              unsigned csr; } ps[3] = {
+            { "frcsr", "fscsr", NULL, 0x003 },
+            { "frrm", "fsrm", "fsrmi", 0x002 },
+            { "frflags", "fsflags", "fsflagsi", 0x001 },
+        };
+        for (int k = 0; k < 3; k++) {
+            if (tok_is(m, ps[k].rd_name)) {
+                int rd = n == 2 ? tok_reg(&t[1]) : -1;
+                if (rd < 0)
+                    FFAIL("%s takes one register", ps[k].rd_name);
+                if (fp_have(0, m, err, errlen)) return -1;
+                emit_csr(out, 2, rd, 0, ps[k].csr);         /* csrrs rd, csr, x0 */
+                return 1;
+            }
+            if (tok_is(m, ps[k].wr_name)) {
+                int rd = 0, rs;
+                if (n == 3) {
+                    if ((rd = tok_reg(&t[1])) < 0)
+                        FFAIL("%s wants registers", ps[k].wr_name);
+                } else if (n != 2) {
+                    FFAIL("%s takes [rd,] rs", ps[k].wr_name);
+                }
+                if ((rs = tok_reg(&t[n - 1])) < 0)
+                    FFAIL("%s wants registers", ps[k].wr_name);
+                if (fp_have(0, m, err, errlen)) return -1;
+                emit_csr(out, 1, rd, rs, ps[k].csr);        /* csrrw rd, csr, rs */
+                return 1;
+            }
+            if (ps[k].wi_name && tok_is(m, ps[k].wi_name)) {
+                int rd = 0;
+                long long v;
+                if (n == 3) {
+                    if ((rd = tok_reg(&t[1])) < 0)
+                        FFAIL("%s wants a register", ps[k].wi_name);
+                } else if (n != 2) {
+                    FFAIL("%s takes [rd,] imm", ps[k].wi_name);
+                }
+                if (!tok_imm(&t[n - 1], &v) || v < 0 || v > 31)
+                    FFAIL("%s's immediate is 0..31", ps[k].wi_name);
+                if (fp_have(0, m, err, errlen)) return -1;
+                emit_csr(out, 5, rd, (int)v, ps[k].csr);    /* csrrwi */
+                return 1;
+            }
+        }
+    }
+
+    /* loads and stores: flw/fld fd, off(rs); fsw/fsd fs, off(rs) */
+    if (p.nparts == 1 && (!strcmp(p.base, "flw") || !strcmp(p.base, "fld") ||
+                          !strcmp(p.base, "fsw") || !strcmp(p.base, "fsd"))) {
+        int dbl = p.base[2] == 'd', store = p.base[1] == 's', fr, base;
+        long long off;
+        if (n != 3) FFAIL("%s takes a register and an address", p.base);
+        if ((fr = tok_freg(&t[1])) < 0)
+            FFAIL("\"%.*s\" is not a float register", t[1].len, t[1].s);
+        if (!tok_mem(&t[2], &base, &off))
+            FFAIL("\"%.*s\" is not an `off(reg)` address", t[2].len, t[2].s);
+        if (!rv_fits(off, 12))
+            FFAIL("%s offset %lld does not fit a 12-bit field", p.base, off);
+        if (fp_have(dbl, m, err, errlen)) return -1;
+        if (store) rv_fstore(out, fr, base, (int)off, dbl);
+        else       rv_fload(out, fr, base, (int)off, dbl);
+        return 1;
+    }
+
+    /* moves between the register files: fmv.x.w/fmv.x.s, fmv.w.x/fmv.s.x,
+     * fmv.x.d, fmv.d.x */
+    if (!strcmp(p.base, "fmv") && p.nparts == 3) {
+        int to_x = !strcmp(p.a, "x"), dbl, fd, rs;
+        const char *f = to_x ? p.b : p.a, *x = to_x ? p.a : p.b;
+        if (strcmp(x, "x") || (strcmp(f, "w") && strcmp(f, "s") && strcmp(f, "d")))
+            FFAIL("asm instruction \"%.*s\" is not in the RISC-V vocabulary",
+                  m->len, m->s);
+        dbl = !strcmp(f, "d");
+        if (n != 3) FFAIL("%.*s takes two registers", m->len, m->s);
+        fd = to_x ? tok_reg(&t[1]) : tok_freg(&t[1]);
+        rs = to_x ? tok_freg(&t[2]) : tok_reg(&t[2]);
+        if (fd < 0 || rs < 0)
+            FFAIL("%.*s wants %s", m->len, m->s,
+                  to_x ? "an integer register then a float one"
+                       : "a float register then an integer one");
+        if (dbl && xlen != 64)
+            FFAIL("%.*s is an RV64 instruction and this is RV32", m->len, m->s);
+        if (fp_have(dbl, m, err, errlen)) return -1;
+        rv_fp_r(out, to_x ? 0x1c : 0x1e, dbl, 0, fd, rs, 0);
+        return 1;
+    }
+
+    /* conversions: fcvt.<int>.<fmt>, fcvt.<fmt>.<int>, fcvt.s.d, fcvt.d.s,
+     * each with an optional rounding mode. Left out, it is dyn -- except
+     * where the result is always exact (fcvt.d.s, fcvt.d.w[u]), which
+     * llvm-mc writes with rne. */
+    if (!strcmp(p.base, "fcvt") && p.nparts == 3) {
+        int ia = fp_ity(p.a), ib = fp_ity(p.b), fa = fp_fmt(p.a), fb = fp_fmt(p.b);
+        int rd, rs, rm, dbl, f5, rs2, ity, exact;
+        if (n != 3 && n != 4) FFAIL("%.*s takes two registers [, rm]", m->len, m->s);
+        if (ia >= 0 && fb >= 0) {           /* to an integer */
+            rd = tok_reg(&t[1]); rs = tok_freg(&t[2]);
+            dbl = fb; f5 = 0x18; rs2 = ia; ity = ia; exact = 0;
+        } else if (fa >= 0 && ib >= 0) {    /* from an integer */
+            rd = tok_freg(&t[1]); rs = tok_reg(&t[2]);
+            dbl = fa; f5 = 0x1a; rs2 = ib; ity = ib;
+            exact = fa == 1 && ib <= RV_CVT_WU;
+        } else if (fa >= 0 && fb >= 0 && fa != fb) {
+            rd = tok_freg(&t[1]); rs = tok_freg(&t[2]);
+            dbl = fa; f5 = 0x08; rs2 = fb; ity = -1; exact = fa == 1;
+        } else {
+            FFAIL("asm instruction \"%.*s\" is not in the RISC-V vocabulary",
+                  m->len, m->s);
+        }
+        if (rd < 0 || rs < 0)
+            FFAIL("%.*s: wrong kind of register", m->len, m->s);
+        if (ity >= RV_CVT_L && xlen != 64)
+            FFAIL("%.*s is an RV64 instruction and this is RV32", m->len, m->s);
+        rm = exact ? 0 : 7;
+        if (n == 4 && (rm = tok_rm(&t[3])) < 0)
+            FFAIL("\"%.*s\" is not a rounding mode", t[3].len, t[3].s);
+        if (fp_have(dbl || (f5 == 0x08), m, err, errlen)) return -1;
+        rv_fp_r(out, f5, dbl, rm, rd, rs, rs2);
+        return 1;
+    }
+
+    {
+        int fmt = p.nparts == 2 ? fp_fmt(p.a) : -1;
+        int r[4], nr = 0;
+        if (fmt < 0)
+            FFAIL("asm instruction \"%.*s\" is not in the RISC-V vocabulary",
+                  m->len, m->s);
+
+        /* compares and fclass: an integer destination */
+        {
+            static const struct { const char *name; int f5, rm, nsrc; } cmp[] = {
+                { "feq", 0x14, 2, 2 }, { "flt", 0x14, 1, 2 },
+                { "fle", 0x14, 0, 2 }, { "fclass", 0x1c, 1, 1 },
+                { NULL, 0, 0, 0 }
+            };
+            for (int k = 0; cmp[k].name; k++) {
+                int rd, a, b = 0;
+                if (strcmp(p.base, cmp[k].name))
+                    continue;
+                if (n != 2 + cmp[k].nsrc)
+                    FFAIL("%.*s takes %d registers", m->len, m->s, 1 + cmp[k].nsrc);
+                rd = tok_reg(&t[1]);
+                a = tok_freg(&t[2]);
+                if (cmp[k].nsrc == 2)
+                    b = tok_freg(&t[3]);
+                if (rd < 0 || a < 0 || b < 0)
+                    FFAIL("%.*s wants an integer register, then float ones",
+                          m->len, m->s);
+                if (fp_have(fmt, m, err, errlen)) return -1;
+                rv_fp_r(out, cmp[k].f5, fmt, cmp[k].rm, rd, a, b);
+                return 1;
+            }
+        }
+
+        /* everything else reads and writes float registers only */
+        for (int k = 1; k < n; k++) {
+            if (k == n - 1 && n > 2 && tok_rm(&t[k]) >= 0)
+                break;
+            if ((r[nr] = tok_freg(&t[k])) < 0)
+                FFAIL("\"%.*s\" is not a float register", t[k].len, t[k].s);
+            if (++nr == 4)
+                break;
+        }
+        {
+            int rm = 7, have_rm = 1 + nr < n;
+            if (have_rm && (rm = tok_rm(&t[n - 1])) < 0)
+                FFAIL("\"%.*s\" is not a rounding mode", t[n - 1].len, t[n - 1].s);
+
+            /* two-operand pseudos and fsqrt */
+            if (!strcmp(p.base, "fmv") || !strcmp(p.base, "fneg") ||
+                !strcmp(p.base, "fabs") || !strcmp(p.base, "fsqrt")) {
+                if (nr != 2 || (have_rm && strcmp(p.base, "fsqrt")))
+                    FFAIL("%.*s takes two float registers", m->len, m->s);
+                if (fp_have(fmt, m, err, errlen)) return -1;
+                if (!strcmp(p.base, "fsqrt"))
+                    rv_fp_r(out, 0x0b, fmt, rm, r[0], r[1], 0);
+                else
+                    rv_fp_r(out, 0x04, fmt, !strcmp(p.base, "fmv") ? 0
+                            : !strcmp(p.base, "fneg") ? 1 : 2, r[0], r[1], r[1]);
+                return 1;
+            }
+            /* three operands: arithmetic (with a rounding mode), sign
+             * injection and min/max (whose rm field is the operation) */
+            {
+                static const struct { const char *name; int f5, rm; } ar[] = {
+                    { "fadd", 0x00, -1 }, { "fsub", 0x01, -1 },
+                    { "fmul", 0x02, -1 }, { "fdiv", 0x03, -1 },
+                    { "fsgnj", 0x04, 0 }, { "fsgnjn", 0x04, 1 },
+                    { "fsgnjx", 0x04, 2 }, { "fmin", 0x05, 0 },
+                    { "fmax", 0x05, 1 }, { NULL, 0, 0 }
+                };
+                for (int k = 0; ar[k].name; k++) {
+                    if (strcmp(p.base, ar[k].name))
+                        continue;
+                    if (nr != 3 || (have_rm && ar[k].rm >= 0))
+                        FFAIL("%.*s takes three float registers%s", m->len, m->s,
+                              ar[k].rm < 0 ? " [, rm]" : "");
+                    if (fp_have(fmt, m, err, errlen)) return -1;
+                    rv_fp_r(out, ar[k].f5, fmt, ar[k].rm >= 0 ? ar[k].rm : rm,
+                            r[0], r[1], r[2]);
+                    return 1;
+                }
+            }
+            /* the fused multiply-adds: four registers */
+            {
+                static const struct { const char *name; int op; } fm[] = {
+                    { "fmadd", 0x43 }, { "fmsub", 0x47 },
+                    { "fnmsub", 0x4b }, { "fnmadd", 0x4f }, { NULL, 0 }
+                };
+                for (int k = 0; fm[k].name; k++) {
+                    if (strcmp(p.base, fm[k].name))
+                        continue;
+                    if (nr != 4)
+                        FFAIL("%.*s takes four float registers [, rm]", m->len, m->s);
+                    if (fp_have(fmt, m, err, errlen)) return -1;
+                    rv_fp_r4(out, fm[k].op, fmt, rm, r[0], r[1], r[2], r[3]);
+                    return 1;
+                }
+            }
+        }
+    }
+    FFAIL("asm instruction \"%.*s\" is not in the RISC-V vocabulary",
+          m->len, m->s);
+}
+
 #define FAIL(...)  do { snprintf(err, (size_t)errlen, __VA_ARGS__); \
                         return -1; } while (0)
+
+/* ---- data directives ------------------------------------------------------
+ *
+ * `.word 0x0000100f` in a template: an instruction this vocabulary does
+ * not have yet, written as its bytes, or a constant a trap handler finds
+ * beside its code. The sizes are GNU as's for RISC-V -- `.half` two,
+ * `.word` four, `.dword` eight -- and the generic spellings with them.
+ * Constants only, each GNU as's range for its width (a signed or an
+ * unsigned value that fits); a symbol would need a relocation, which an
+ * inline asm here has no way to carry. A .s file's are src/as/gas.c's
+ * and never reach this. 0 when stmt is not one, 1 when it was emitted. */
+static const struct { const char *name; int size; } data_dir[] = {
+    { ".byte", 1 },
+    { ".half", 2 }, { ".short", 2 }, { ".hword", 2 }, { ".2byte", 2 },
+    { ".word", 4 }, { ".long", 4 }, { ".int", 4 }, { ".4byte", 4 },
+    { ".dword", 8 }, { ".quad", 8 }, { ".8byte", 8 },
+    { NULL, 0 }
+};
+
+static int data_stmt(const char *stmt, int len, struct code *out,
+                     char *err, int errlen)
+{
+    int i = 0, d, m, size = 0;
+    while (i < len && isspace((unsigned char)stmt[i]))
+        i++;
+    d = i;
+    for (m = i; m < len && !isspace((unsigned char)stmt[m]); m++) {}
+    for (int k = 0; data_dir[k].name; k++)
+        if ((int)strlen(data_dir[k].name) == m - i &&
+            strncmp(stmt + i, data_dir[k].name, (size_t)(m - i)) == 0)
+            size = data_dir[k].size;
+    if (!size)
+        return 0;
+    /* the values, one per comma, each a constant expression */
+    for (i = m; i < len; ) {
+        int s, e, depth = 0;
+        long long v;
+        while (i < len && isspace((unsigned char)stmt[i]))
+            i++;
+        if (i >= len)
+            break;
+        for (s = i; i < len && (depth > 0 || stmt[i] != ','); i++) {
+            if (stmt[i] == '(') depth++;
+            else if (stmt[i] == ')') depth--;
+        }
+        for (e = i; e > s && isspace((unsigned char)stmt[e - 1]); e--) {}
+        if (e == s || !asm_const_expr(stmt + s, e - s, &v))
+            FAIL("\"%.*s\" in %.*s is not a constant: inline asm data takes "
+                 "numbers, and a symbol would need a relocation",
+                 e - s, stmt + s, m - d, stmt + d);
+        if (size < 8 && (v < -(1LL << (8 * size - 1)) ||
+                         v > (long long)((1ULL << (8 * size)) - 1)))
+            FAIL("%lld does not fit in %d byte%s", v, size,
+                 size == 1 ? "" : "s");
+        for (int b = 0; b < size; b++)
+            code_byte(out, (int)(((unsigned long long)v >> (8 * b)) & 0xff));
+        if (i < len)
+            i++;                        /* the comma */
+    }
+    return 1;
+}
 
 static int one_stmt(const char *stmt, int len, struct code *out,
                     char *err, int errlen)
@@ -344,6 +753,17 @@ static int one_stmt(const char *stmt, int len, struct code *out,
 
     if (n == 0)
         return 0;                       /* blank or comment-only */
+    {
+        int r = data_stmt(stmt, len, out, err, errlen);
+        if (r)
+            return r < 0 ? -1 : 0;
+    }
+
+    {
+        int r = fp_stmt(t, n, out, err, errlen);
+        if (r)
+            return r < 0 ? -1 : 0;
+    }
 
     /* ---- no operands ---- */
     if (n == 1) {
@@ -765,6 +1185,15 @@ int rvasm_is_word(const char *stmt, const char *w, int wlen)
     for (mlen = 0; m[mlen] && m[mlen] != ' ' && m[mlen] != '\t'; mlen++) {}
     if (mlen >= 4 && strncmp(m, "csr", 3) == 0 && csr_num(w, wlen) >= 0)
         return 1;
+    /* an F/D statement's float registers and rounding mode */
+    if (mlen >= 2 && m[0] == 'f') {
+        static const char *const rm[6] = { "rne", "rtz", "rdn", "rup", "rmm", "dyn" };
+        if (rvasm_fpr(w, wlen) >= 0)
+            return 1;
+        for (int k = 0; k < 6; k++)
+            if (wlen == 3 && strncmp(w, rm[k], 3) == 0)
+                return 1;
+    }
     if (mlen == 5 && strncmp(m, "fence", 5) == 0) {
         int ok = wlen > 0 && wlen <= 4;
         for (int k = 0; k < wlen; k++)
@@ -853,4 +1282,59 @@ void rvasm_vocabulary(FILE *f)
         if (!strcmp(e->name, "lwu") && target_xlen() != 64) continue;
         fprintf(f, "\t%s a0, -8(t3)\n", e->name);
     }
+    /* The F and D forms, for a target whose -march= has them: each
+     * format, each rounding mode once, registers from all four ABI
+     * groups and both ends of the numbering. */
+    {
+        static const char *const rm[6] = { "rne", "rtz", "rdn", "rup", "rmm", "dyn" };
+        static const char *const ar[4] = { "fadd", "fsub", "fmul", "fdiv" };
+        static const char *const fm[4] = { "fmadd", "fmsub", "fnmsub", "fnmadd" };
+        static const char *const ity[4] = { "w", "wu", "l", "lu" };
+        int flen = target_riscv_flen(), nfmt = flen >= 64 ? 2 : flen >= 32 ? 1 : 0;
+        for (int d = 0; d < nfmt; d++) {
+            const char *F = d ? "d" : "s", *ld = d ? "fld" : "flw", *st = d ? "fsd" : "fsw";
+            fprintf(f, "\t%s fs1, -8(a0)\n\t%s ft11, 2047(sp)\n", ld, st);
+            fprintf(f, "\t%s f0, 0(t6)\n\t%s f31, -2048(s11)\n", ld, st);
+            for (int k = 0; k < 4; k++) {
+                fprintf(f, "\t%s.%s fa0, fa1, fs11\n", ar[k], F);
+                fprintf(f, "\t%s.%s ft0, ft8, fs2, %s\n", ar[k], F, rm[k]);
+                fprintf(f, "\t%s.%s f1, f2, f3, f4\n", fm[k], F);
+                fprintf(f, "\t%s.%s fs3, fa7, ft4, ft5, %s\n", fm[k], F, rm[k + 1]);
+            }
+            fprintf(f, "\tfsqrt.%s fs2, ft3\n\tfsqrt.%s fs2, ft3, %s\n", F, F, rm[4]);
+            fprintf(f, "\tfsgnj.%s fa0, fa1, fa2\n\tfsgnjn.%s ft9, ft10, ft11\n", F, F);
+            fprintf(f, "\tfsgnjx.%s f5, f6, f7\n\tfmin.%s fs4, fs5, fs6\n", F, F);
+            fprintf(f, "\tfmax.%s fs7, fs8, fs9\n\tfmv.%s fs10, fa3\n", F, F);
+            fprintf(f, "\tfneg.%s fa4, fa5\n\tfabs.%s ft6, ft7\n", F, F);
+            fprintf(f, "\tfeq.%s a0, fa0, fa1\n\tflt.%s s2, ft0, fs0\n", F, F);
+            fprintf(f, "\tfle.%s t6, f31, f0\n\tfclass.%s a5, fs11\n", F, F);
+            for (int k = 0; k < (target_xlen() == 64 ? 4 : 2); k++) {
+                fprintf(f, "\tfcvt.%s.%s a0, fa0\n", ity[k], F);
+                fprintf(f, "\tfcvt.%s.%s t1, fs1, %s\n", ity[k], F, rm[k + 1]);
+                fprintf(f, "\tfcvt.%s.%s fa2, a3\n", F, ity[k]);
+                fprintf(f, "\tfcvt.%s.%s ft2, s4, %s\n", F, ity[k], rm[k]);
+            }
+        }
+        if (nfmt == 2)
+            fprintf(f, "\tfcvt.s.d fa0, fa1\n\tfcvt.s.d ft0, fs0, rtz\n"
+                       "\tfcvt.d.s fa2, fa3\n");
+        if (nfmt) {
+            fprintf(f, "\tfmv.x.w a0, fa0\n\tfmv.w.x ft11, s11\n");
+            fprintf(f, "\tfrcsr a0\n\tfscsr a1\n\tfscsr a2, a3\n");
+            fprintf(f, "\tfrrm t0\n\tfsrm t1\n\tfsrm t2, t3\n\tfsrmi 4\n");
+            fprintf(f, "\tfsrmi a4, 1\n\tfrflags s1\n\tfsflags s2\n");
+            fprintf(f, "\tfsflags s3, s4\n\tfsflagsi 31\n\tfsflagsi a5, 0\n");
+        }
+        if (nfmt == 2 && target_xlen() == 64)
+            fprintf(f, "\tfmv.x.d a0, fa0\n\tfmv.d.x ft11, s11\n");
+    }
+    /* The data directives, last: each spelling, both ends of each
+     * width's range and an expression -- 60 bytes, so whatever follows
+     * stays aligned. */
+    fprintf(f, "\t.byte 255, -128, 0x7f, 0\n\t.half -32768, 0xffff\n");
+    fprintf(f, "\t.short 1\n\t.hword -2\n\t.2byte 0x1234, 7\n");
+    fprintf(f, "\t.word 0x12345678, -2147483648\n\t.long 4294967295\n");
+    fprintf(f, "\t.int (1 << 20) | 0x13\n\t.4byte 0x0000100f\n");
+    fprintf(f, "\t.dword 0x123456789abcdef0\n\t.quad -1\n");
+    fprintf(f, "\t.8byte 5\n");
 }

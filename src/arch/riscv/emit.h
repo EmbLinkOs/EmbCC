@@ -269,6 +269,12 @@ void rv_fcvt_fp(struct code *c, int frd, int frs1, int to_dbl);
  * fmv.w.x / fmv.d.x the other way. The .d forms are RV64 only. */
 void rv_fmv_to_x(struct code *c, int rd, int frs1, int dbl);
 void rv_fmv_from_x(struct code *c, int frd, int rs1, int dbl);
+/* Any OP-FP instruction by its funct5 and rounding mode, and the fused
+ * multiply-adds (R4: major opcode 0x43/0x47/0x4b/0x4f): what the inline
+ * assembler encodes through. */
+void rv_fp_r(struct code *c, int f5, int dbl, int rm, int rd, int rs1, int rs2);
+void rv_fp_r4(struct code *c, int op, int dbl, int rm, int rd, int rs1,
+              int rs2, int rs3);
 
 /* ---- traps ------------------------------------------------------------ */
 

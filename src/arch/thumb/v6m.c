@@ -2085,8 +2085,15 @@ static void gen_asm(struct t_fn *F, int n)
                 asm_cur(F, o->reg, o->size, opm);
         }
     }
-    for (int k = 0; k < ia->codelen; k++)
-        code_byte(t, ia->code[k]);
+    {
+        int base = t->len;
+        for (int k = 0; k < ia->codelen; k++)
+            code_byte(t, ia->code[k]);
+        /* the template's data (`.short`, `.word`...): bytes v6_scan
+         * must not read as instructions, and a disassembler sees as data */
+        for (int k = 0; k + 1 < ia->ndrange; k += 2)
+            code_mark_data(t, base + ia->drange[k], base + ia->drange[k + 1]);
+    }
     /* Out, through an address: the address is live across the asm, out of
      * what it changes (regalloc.c), so a register still holds it. An "m"
      * output was written BY the template through the address its register
@@ -2297,7 +2304,7 @@ static void gen_ins(struct t_fn *F, int n)
     struct code *t = F->t;
 
     /* -g: a line-table row wherever the source line changes. */
-    if (F->want_debug && i->line) {
+    if (target_debug_info() && i->line) {
         struct ir_line *last = fn->nlines ? &fn->lines[fn->nlines - 1]
                                           : (struct ir_line *)0;
         if (last && last->off == t->len) {
@@ -3254,8 +3261,39 @@ static unsigned v6_roles_push(struct t_fn *F, int n)
     return pushed;
 }
 
+/* -g: the prologue as call frame information, as t_record_cfi does it
+ * for ARMv7-M: the variadic save area, the push (low registers and lr,
+ * the lowest at the lowest address), the frame's sub sp, and r5 as the
+ * frame base where sp moves. */
+static void v6_record_cfi(struct t_fn *F, long code_off)
+{
+    struct ir_func *fn = F->fn;
+    long cfa = 0;
+    fn->ncfi = 0;
+    if (F->cfi_va_end >= 0) {
+        cfa += 16;
+        ir_cfi_add(fn, (int)(F->cfi_va_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
+    }
+    if (F->cfi_push_end >= 0) {
+        int at = (int)(F->cfi_push_end - code_off), n = 0, k = 0;
+        for (int r = 0; r < 16; r++)
+            n += (F->cfi_push_mask >> r) & 1;
+        cfa += 4L * n;
+        ir_cfi_add(fn, at, IR_CFI_CFA_OFFSET, 0, cfa);
+        for (int r = 0; r < 16; r++)
+            if ((F->cfi_push_mask >> r) & 1)
+                ir_cfi_add(fn, at, IR_CFI_SAVED, r, -cfa + 4L * k++);
+    }
+    if (F->cfi_frame_end >= 0) {
+        cfa += F->frame;
+        ir_cfi_add(fn, (int)(F->cfi_frame_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
+    }
+    if (F->cfi_fp_end >= 0)
+        ir_cfi_add(fn, (int)(F->cfi_fp_end - code_off), IR_CFI_CFA_REG, FB6, cfa);
+}
+
 void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
-                 int want_debug)
+                 int keep_vars)
 {
     struct func *f = fn->src;
     struct t_fn F;
@@ -3265,7 +3303,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
 
     memset(&F, 0, sizeof F);
     F.fn = fn; F.t = t; F.st = st;
-    F.want_debug = want_debug;
+    F.keep_vars = keep_vars;
+    fn->nlines = 0;                 /* -g: this attempt's rows only */
     F.wide = tcg_wide64_map(fn);
     tcg_frame_addr_map(&F);
     F.nshr = ra_narrow_hishift(fn);
@@ -3279,7 +3318,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     if (tcg_regalloc()) {
         /* -g, and -O0: every source variable in its slot (codegen.c's
          * g_t_o0), the temporaries in registers */
-        char *pin = want_debug || tcg_o0() ? ra_debug_pin_vars(fn)
+        char *pin = keep_vars || tcg_o0() ? ra_debug_pin_vars(fn)
                                            : (char *)0;
         int pused[RA_MAXPOOL], npused = 0;
         int *pair = tcg_pair_alloc(fn, F.wide, pin, pused, &npused);
@@ -3360,7 +3399,7 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         F.npoint = 0;
         F.shortb = first ? NULL : cls;
         F.nshortb = first ? 0 : ncls;
-        if (want_debug) {
+        if (target_debug_info()) {
             free(fn->var_off);
             fn->var_off = NULL;
         }
@@ -3370,11 +3409,12 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
         while (t->len & 3)
             t_nop(t);
         f->code_align = 4;
-        if (want_debug) {
+        if (target_debug_info()) {
             int nv = fn->nvars ? fn->nvars : 1;
             fn->var_off = xmalloc((size_t)nv * sizeof *fn->var_off);
             for (int v = 0; v < fn->nvars; v++)
-                fn->var_off[v] = (int)F.slot[v];
+                fn->var_off[v] = ra_var_home(fn, v, F.slot[v] >= 0,
+                                             F.slot[v]);
         }
         f->code_off = t->len;
 
@@ -3386,14 +3426,25 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.leaf = 0;                     /* BL is a branch: lr is spent */
         F.nopush = F.leaf && !F.nsave && !F.frame && !fn->is_varargs &&
                    !fn->has_alloca && !(F.scr_save & SCR_SET);
-        if (fn->is_varargs)
+        F.cfi_va_end = F.cfi_push_end = F.cfi_vsave_end = -1;
+        F.cfi_frame_end = F.cfi_fp_end = -1;
+        if (fn->is_varargs) {
             t1_push(t, 0xfu);
-        if (!F.nopush)
-            t1_push(t, save_mask6(&F, F.scr_save));
-        sp_frame(&F, F.frame, 1);
+            F.cfi_va_end = t->len;
+        }
+        if (!F.nopush) {
+            F.cfi_push_mask = save_mask6(&F, F.scr_save);
+            t1_push(t, F.cfi_push_mask);
+            F.cfi_push_end = t->len;
+        }
+        if (F.frame) {
+            sp_frame(&F, F.frame, 1);
+            F.cfi_frame_end = t->len;
+        }
         if (fn->has_alloca) {
             t_mov_reg(t, FB6, T_SP);
             F.fb = FB6;
+            F.cfi_fp_end = t->len;
         }
         frame_push = F.nopush ? 0 : F.frame + mask_bytes(save_mask6(&F, F.scr_save));
         {
@@ -3673,6 +3724,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     v6_scan(&F, f->code_off);
     f->code_len = t->len - f->code_off;
+    if (target_debug_info())
+        v6_record_cfi(&F, f->code_off);
     /* ...and the variadic register save area pushed before it */
     f->stack_bytes = (F.nopush ? 0 : (int)(F.frame +
                                            mask_bytes(save_mask6(&F, F.scr_save)))) +

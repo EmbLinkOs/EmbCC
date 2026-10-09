@@ -4,7 +4,7 @@
  * renamed the original's too: at -O2 the original call passed the copy's
  * values, on every target. The IR verifier (EMBCC_VERIFY, set by the
  * whole suite) refuses two calls sharing one array, so this fails to
- * compile without the fix (opt.c, ins_own_args) as well as running wrong.
+ * compile without the fix (src/opt/util.c, ins_own_args) as well as running wrong.
  */
 // expect-exit: 42
 typedef signed char i8; typedef unsigned char u8;

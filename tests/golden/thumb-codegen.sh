@@ -310,22 +310,27 @@ grep -q '^<geta>:.*ldrd' "$out/pk.s" && grep -q '^<seta>:.*strd' "$out/pk.s" || 
     cat "$out/pk.s"; exit 1; }
 echo "a 64-bit value moves as one ldrd/strd, never on a packed member"
 
-# Under -g every local is pinned to a slot, which is what makes
-# DW_AT_location naming that slot true. If the skip ever fires here, the
-# debugger is told where a variable is not.
+# -g changes no code (tests/golden/g-same-code.sh), so what pins a local
+# to its slot is -Og, not -g: there each one must have its DW_OP_fbreg
+# location. At -Os a local is in its slot or described as optimized out
+# (an empty location) -- never a slot nothing writes.
 if command -v llvm-dwarfdump > /dev/null 2>&1; then
     printf 'int f(int a, int b){ int s = a + b; return s * 2; }\n' \
         > "$out/g.c"
-    "$EMBCC" --target=$T -Os -g -c "$out/g.c" -o "$out/g.o" || {
-        echo "the -g file does not compile"; exit 1; }
-    llvm-dwarfdump "$out/g.o" > "$out/g.dw" 2>&1
-    for v in a b s; do
-        grep -A3 "DW_AT_name	(\"$v\")" "$out/g.dw" |
-            grep -q 'DW_AT_location.*DW_OP_fbreg' || {
-            echo "-g: '$v' has no frame location, so the skip fired under -g"
-            exit 1; }
+    for o in -Og -Os; do
+        "$EMBCC" --target=$T $o -g -c "$out/g.c" -o "$out/g.o" || {
+            echo "the -g file does not compile at $o"; exit 1; }
+        llvm-dwarfdump "$out/g.o" > "$out/g.dw" 2>&1
+        for v in a b s; do
+            loc=$(grep -A3 "DW_AT_name	(\"$v\")" "$out/g.dw" | grep 'DW_AT_location')
+            case $o,$loc in
+            -Og,*DW_OP_fbreg*) ;;
+            -Os,*DW_OP_fbreg*|-Os,*'<empty>'*) ;;
+            *) echo "-g $o: '$v' has the location '$loc'"; exit 1 ;;
+            esac
+        done
     done
-    echo "-g pins every local to a slot, and each has a DW_OP_fbreg location"
+    echo "-Og keeps every local in its slot (DW_OP_fbreg); -Os says where, or optimized out"
 else
     echo "SKIP the -g half: no llvm-dwarfdump"
 fi

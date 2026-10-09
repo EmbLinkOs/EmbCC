@@ -129,16 +129,21 @@
 #define DW_LNS_copy           0x01
 #define DW_LNS_advance_pc     0x02
 #define DW_LNS_advance_line   0x03
+#define DW_LNS_const_add_pc   0x08
+#define DW_LNS_set_prologue_end 0x0a
 /* Extended opcodes */
 #define DW_LNE_end_sequence   0x01
 #define DW_LNE_set_address    0x02
 
-/* line-program special-opcode parameters (we do NOT use special opcodes —
- * advance_line + advance_pc + copy is enough and always correct — but the
- * header must still declare them consistently for a reader). */
+/* line-program special-opcode parameters: gcc's and clang's. A special
+ * opcode is one byte that advances the address by 0..17 and the line by
+ * -5..+8 and appends a row -- what advance_line, advance_pc and copy say
+ * in five or more (line_row). */
 #define LINE_BASE   (-5)
 #define LINE_RANGE  14
 #define OPCODE_BASE 13
+/* the address advance of opcode 255 with no line advance: const_add_pc's */
+#define MAX_SPECIAL_ADDR ((255 - OPCODE_BASE) / LINE_RANGE)
 
 /* --- a growable byte buffer, one per section --- */
 struct dbuf { unsigned char *p; int len, cap; };
@@ -720,6 +725,158 @@ static void emit_info(struct dwarf_out *out, struct dbuf *b,
     db_patch_u32(b, len_at, ulen);
 }
 
+/* ---- call frame information (.debug_frame) --------------------------
+ *
+ * What lets a debugger unwind: for every function, where the caller's
+ * frame is (the CFA) and where the return address and each saved
+ * register went, from the prologue steps the backend recorded
+ * (ir_cfi_add). Without it gdb guessed by reading the prologue's
+ * instructions, and lost the thread at a Cortex-M4's vpush.
+ *
+ * One CIE: at a function's entry the CFA is the stack pointer and the
+ * return address is still in its register (the backend registry's
+ * frame_sp and frame_ra). Then one FDE per function, advancing to each
+ * recorded step. Version 1 (what gcc and clang write in .debug_frame),
+ * code alignment 1 and data alignment -1, so every offset is in bytes. A
+ * function that recorded nothing -- a leaf that saves nothing -- still has
+ * an FDE: the CIE's rule is right for all of it. */
+#define DW_CFA_advance_loc1     0x02
+#define DW_CFA_advance_loc2     0x03
+#define DW_CFA_advance_loc4     0x04
+#define DW_CFA_offset_extended  0x05
+#define DW_CFA_def_cfa          0x0c
+#define DW_CFA_def_cfa_offset   0x0e
+#define DW_CFA_offset_extended_sf 0x11
+#define DW_CFA_nop              0x00
+
+static void frame_pad(struct dbuf *b, int start)
+{
+    while ((b->len - start) % addr_bytes())
+        db_u8(b, DW_CFA_nop);
+    db_patch_u32(b, start, (unsigned long)(b->len - start - 4));
+}
+
+static void emit_frame(struct dwarf_out *out, struct dbuf *b,
+                       struct ir_unit *iu)
+{
+    if (!out->frame_ra)
+        return;
+    int cie = b->len;
+    db_u32(b, 0);                        /* length, patched */
+    db_u32(b, 0xffffffffUL);             /* CIE_id */
+    db_u8(b, 1);                         /* version */
+    db_u8(b, 0);                         /* augmentation "" */
+    db_uleb(b, 1);                       /* code_alignment_factor */
+    db_sleb(b, -1);                      /* data_alignment_factor */
+    db_u8(b, (unsigned)out->frame_ra);   /* return_address_register */
+    db_u8(b, DW_CFA_def_cfa);            /* at entry: CFA = sp + 0 */
+    db_uleb(b, (unsigned long)out->frame_sp);
+    db_uleb(b, 0);
+    frame_pad(b, cie);
+
+    for (int n = 0; n < iu->nfuncs; n++) {
+        struct ir_func *fn = &iu->funcs[n];
+        struct func *f = fn->src;
+        /* ncfi -1: a function the backend cannot describe (an interrupt
+         * handler's own prologue) -- no FDE, rather than a wrong one */
+        if (!f || f->code_len <= 0 || fn->ncfi < 0)
+            continue;
+        long lo = f->code_off + f->code_entry;
+        int fde = b->len;
+        db_u32(b, 0);                    /* length, patched */
+        reloc(out, DWSEC_FRAME, b->len, 4, DWTGT_FRAME, cie);
+        db_u32(b, 0);                    /* CIE_pointer */
+        reloc(out, DWSEC_FRAME, b->len, addr_bytes(), DWTGT_TEXT, lo);
+        db_addr(b, 0);                   /* initial_location */
+        db_addr(b, (unsigned long)(f->code_len - f->code_entry));
+        long at = 0, cfa_reg = out->frame_sp, cfa = 0;
+        for (int k = 0; k < fn->ncfi; k++) {
+            const struct ir_cfi *c = &fn->cfi[k];
+            long to = c->off - f->code_entry, d = to - at;
+            if (d > 0) {
+                if (d < 64)         db_u8(b, 0x40 | (unsigned)d);
+                else if (d < 256)   { db_u8(b, DW_CFA_advance_loc1); db_u8(b, (unsigned)d); }
+                else if (d < 65536) { db_u8(b, DW_CFA_advance_loc2);
+                                      db_u8(b, (unsigned)(d & 0xff));
+                                      db_u8(b, (unsigned)(d >> 8)); }
+                else                { db_u8(b, DW_CFA_advance_loc4); db_u32(b, (unsigned long)d); }
+                at = to;
+            }
+            switch (c->kind) {
+            case IR_CFI_CFA_OFFSET:
+                cfa = c->val;
+                db_u8(b, DW_CFA_def_cfa_offset);
+                db_uleb(b, (unsigned long)cfa);
+                break;
+            case IR_CFI_CFA_REG:
+                cfa_reg = c->reg;
+                cfa = c->val;
+                db_u8(b, DW_CFA_def_cfa);
+                db_uleb(b, (unsigned long)cfa_reg);
+                db_uleb(b, (unsigned long)cfa);
+                break;
+            case IR_CFI_SAVED:
+                /* data alignment -1: the factored offset is -val */
+                if (c->val <= 0 && c->reg < 64) {
+                    db_u8(b, 0x80 | (unsigned)c->reg);
+                    db_uleb(b, (unsigned long)-c->val);
+                } else if (c->val <= 0) {
+                    db_u8(b, DW_CFA_offset_extended);
+                    db_uleb(b, (unsigned long)c->reg);
+                    db_uleb(b, (unsigned long)-c->val);
+                } else {
+                    db_u8(b, DW_CFA_offset_extended_sf);
+                    db_uleb(b, (unsigned long)c->reg);
+                    db_sleb(b, -c->val);
+                }
+                break;
+            }
+        }
+        (void)cfa_reg;
+        frame_pad(b, fde);
+    }
+}
+
+/* A row at (addr, line), from the state machine at (*cur_addr, *cur_line),
+ * as gcc and clang encode one (LLVM's MCDwarfLineAddr::encode): a line
+ * advance outside a special opcode's -5..+8 is an advance_line of its own;
+ * then one special opcode when the address advance fits in it, or
+ * const_add_pc and one when it fits in the two, or advance_pc and one; a
+ * row that moves neither is a copy. prologue_end is set first: the row
+ * the special opcode (or copy) appends carries it, and clears it. */
+static void line_row(struct dbuf *b, long *cur_addr, long *cur_line,
+                     long addr, long line, int prologue_end)
+{
+    long dl = line - *cur_line, da = addr - *cur_addr;
+    if (dl < LINE_BASE || dl >= LINE_BASE + LINE_RANGE) {
+        db_u8(b, DW_LNS_advance_line);
+        db_sleb(b, dl);
+        dl = 0;
+    }
+    if (prologue_end)
+        db_u8(b, DW_LNS_set_prologue_end);
+    *cur_addr = addr;
+    *cur_line = line;
+    if (dl == 0 && da == 0) {
+        db_u8(b, DW_LNS_copy);
+        return;
+    }
+    long op = dl - LINE_BASE + OPCODE_BASE;     /* no address advance */
+    if (da >= 0 && op + da * LINE_RANGE <= 255) {
+        db_u8(b, (int)(op + da * LINE_RANGE));
+        return;
+    }
+    if (da >= MAX_SPECIAL_ADDR &&
+        op + (da - MAX_SPECIAL_ADDR) * LINE_RANGE <= 255) {
+        db_u8(b, DW_LNS_const_add_pc);
+        db_u8(b, (int)(op + (da - MAX_SPECIAL_ADDR) * LINE_RANGE));
+        return;
+    }
+    db_u8(b, DW_LNS_advance_pc);
+    db_uleb(b, (unsigned long)da);
+    db_u8(b, (int)op);
+}
+
 /* One function's rows, bracketed by set_address .. end_sequence. Offsets are
  * .text-relative (row.off and code_off share that space), so pc deltas need
  * no knowledge of the final load address. */
@@ -736,19 +893,24 @@ static void emit_line_func(struct dwarf_out *out, struct dbuf *b,
     db_addr(b, 0);
 
     long cur_addr = lo, cur_line = 1;
+    /* A row at the entry, with the line the function was declared on, as
+     * gcc and clang write it, and `prologue_end` on the first row of the
+     * body. A debugger sets `break f` past the prologue -- where the
+     * parameters are where the DWARF says -- by that flag, or, an older
+     * one, at the second row; with the body's first row as the first,
+     * gdb scanned the prologue itself and stopped a statement late. */
+    int entry_row = fn->line > 0 && (fn->nlines == 0 || fn->lines[0].off > lo);
+    if (entry_row)
+        line_row(b, &cur_addr, &cur_line, lo, fn->line, 0);
+    int body = 0;                        /* prologue_end is not yet said */
     for (int r = 0; r < fn->nlines; r++) {
         long off = fn->lines[r].off, line = fn->lines[r].line;
-        if (line != cur_line) {
-            db_u8(b, DW_LNS_advance_line);
-            db_sleb(b, line - cur_line);
-            cur_line = line;
-        }
-        if (off != cur_addr) {
-            db_u8(b, DW_LNS_advance_pc);
-            db_uleb(b, (unsigned long)(off - cur_addr));
-            cur_addr = off;
-        }
-        db_u8(b, DW_LNS_copy);           /* append a row at (cur_addr,cur_line) */
+        /* the body's first row: past the entry row, or the entry itself
+         * when there is no prologue */
+        int pe = !body && (off > lo || !entry_row);
+        if (pe)
+            body = 1;
+        line_row(b, &cur_addr, &cur_line, off, line, pe);
     }
     /* advance to the function end and close the sequence */
     if (hi != cur_addr) {
@@ -817,8 +979,9 @@ static void emit_all(struct ir_unit *iu, const char *filename,
     }
 
     struct dbuf ab = { 0, 0, 0 }, in = { 0, 0, 0 }, ln = { 0, 0, 0 },
-                rg = { 0, 0, 0 };
+                rg = { 0, 0, 0 }, fr = { 0, 0, 0 };
     emit_abbrev(&ab);
+    emit_frame(out, &fr, iu);
     emit_info(out, &in, iu, filename, lo, hi, split);
     emit_line(out, &ln, iu, filename);
     if (split) {
@@ -841,6 +1004,20 @@ static void emit_all(struct ir_unit *iu, const char *filename,
     out->sec[DWSEC_INFO]   = in.p; out->seclen[DWSEC_INFO]   = in.len;
     out->sec[DWSEC_LINE]   = ln.p; out->seclen[DWSEC_LINE]   = ln.len;
     out->sec[DWSEC_RANGES] = rg.p; out->seclen[DWSEC_RANGES] = rg.len;
+    out->sec[DWSEC_FRAME]  = fr.p; out->seclen[DWSEC_FRAME]  = fr.len;
+}
+
+void ir_cfi_add(struct ir_func *fn, int off, int kind, int reg, long val)
+{
+    if (fn->ncfi == fn->cficap) {
+        fn->cficap = fn->cficap ? fn->cficap * 2 : 8;
+        fn->cfi = xrealloc(fn->cfi, (size_t)fn->cficap * sizeof *fn->cfi);
+    }
+    struct ir_cfi *c = &fn->cfi[fn->ncfi++];
+    c->off = off;
+    c->kind = kind;
+    c->reg = reg;
+    c->val = val;
 }
 
 void dwarf_emit(struct ir_unit *iu, const char *filename,

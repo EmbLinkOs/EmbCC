@@ -130,6 +130,15 @@ void avr_patch_rjmp(struct code *c, int at, int word_disp);
 void avr_patch_br_at(unsigned char *p, int word_disp);
 void avr_patch_rjmp_at(unsigned char *p, int word_disp);
 void avr_patch_ldi_at(unsigned char *p, int k);
+/* The scattered operand fields (emit.c), and their patches. */
+unsigned avr_q6_field(int q);
+unsigned avr_k6_field(int k);
+unsigned avr_io6_field(int a);
+unsigned avr_io5_field(int a);
+void avr_patch_q6_at(unsigned char *p, int q);
+void avr_patch_k6_at(unsigned char *p, int k);
+void avr_patch_io6_at(unsigned char *p, int a);
+void avr_patch_io5_at(unsigned char *p, int a);
 void avr_patch_call_at(unsigned char *p, long byte_addr);
 /* The 32-bit forms, which reach the whole program space. The operand is
  * a BYTE address and is halved here, because the instruction counts

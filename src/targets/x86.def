@@ -1,0 +1,24 @@
+/* x86-64: the triples that name it and its data model. Part of the
+ * target database; src/targets/targets.def says how a row reads. */
+
+/* x86-64 System V: LP64, signed char, x87 long double in 16 bytes */
+DATA_MODEL(X86_64, .ptr = 8, .lng = 8, .it = 4, .dbl = 8, .ldbl = 16,
+           .char_uns = 0, .wchar_uns = 0, .int128 = 1, .maxal = 0)
+
+/* freestanding: bare metal */
+TRIPLE("x86_64-elf",                X86_64,      NONE,    ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("x86_64",                    X86_64,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("x86_64-none-elf",           X86_64,      NONE,    ELF,   ALIAS,     BASE,         PLAIN)
+
+/* EmbLinkOS: the primary product target (vision §5.2). Its objects
+ * are ELF; `embld --embx` turns them into a native image at LINK
+ * time, which is why the format column says ELF and not EMBX. */
+TRIPLE("x86_64-emblink",            X86_64,      EMBLINK, ELF,   CANONICAL, BASE,         PLAIN)
+
+/* hosted: someone else's libc and linker (D-014) */
+TRIPLE("x86_64-linux-gnu",          X86_64,      LINUX,   ELF,   CANONICAL, BASE,         PLAIN)
+TRIPLE("x86_64-linux",              X86_64,      LINUX,   ELF,   ALIAS,     BASE,         PLAIN)
+TRIPLE("x86_64-apple-darwin",       X86_64,      DARWIN,  MACHO, CANONICAL, BASE,         PLAIN)
+TRIPLE("x86_64-darwin",             X86_64,      DARWIN,  MACHO, ALIAS,     BASE,         PLAIN)
+TRIPLE("x86_64-windows-gnu",        X86_64,      WINDOWS, COFF,  CANONICAL, BASE,         PLAIN)
+TRIPLE("x86_64-w64-mingw32",        X86_64,      WINDOWS, COFF,  ALIAS,     BASE,         PLAIN)

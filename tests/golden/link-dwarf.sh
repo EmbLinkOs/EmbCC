@@ -97,7 +97,7 @@ if command -v gdb > /dev/null 2>&1 && command -v "$QEMU" > /dev/null 2>&1 &&
         -ex "target remote :$port" \
         -ex 'break scale' -ex 'continue' \
         -ex 'info args' -ex 'next' -ex 'next' -ex 'next' \
-        -ex 'info locals' > "$out/gdb.txt" 2>&1
+        -ex 'info locals' -ex 'up' -ex 'info locals' > "$out/gdb.txt" 2>&1
     kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
 
     # A breakpoint placed BY FUNCTION NAME and reported with a source
@@ -109,6 +109,14 @@ if command -v gdb > /dev/null 2>&1 && command -v "$QEMU" > /dev/null 2>&1 &&
     grep -q 'k = 6' "$out/gdb.txt" || {
         echo "FAIL: gdb did not read the arguments (k = 6)"
         grep -A3 'info args' "$out/gdb.txt" | head -4 | sed 's/^/     | /'
+        fail=1; }
+    # `break scale` stops at its first statement, past the prologue
+    # (the entry row and prologue_end), and three `next`s later the
+    # locals hold what the statements computed.
+    grep -q 'prog.c, line 5' "$out/gdb.txt" &&
+        grep -q 'total = 42' "$out/gdb.txt" || {
+        echo "FAIL: break scale did not stop at line 5, or the locals are wrong"
+        grep -E 'line|wide|tall|total' "$out/gdb.txt" | head -5 | sed 's/^/     | /'
         fail=1; }
     # A struct local printed with its members is the strongest single
     # line: type information, location and frame base all at once.
