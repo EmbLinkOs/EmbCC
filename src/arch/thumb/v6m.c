@@ -3254,6 +3254,37 @@ static unsigned v6_roles_push(struct t_fn *F, int n)
     return pushed;
 }
 
+/* -g: the prologue as call frame information, as t_record_cfi does it
+ * for ARMv7-M: the variadic save area, the push (low registers and lr,
+ * the lowest at the lowest address), the frame's sub sp, and r5 as the
+ * frame base where sp moves. */
+static void v6_record_cfi(struct t_fn *F, long code_off)
+{
+    struct ir_func *fn = F->fn;
+    long cfa = 0;
+    fn->ncfi = 0;
+    if (F->cfi_va_end >= 0) {
+        cfa += 16;
+        ir_cfi_add(fn, (int)(F->cfi_va_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
+    }
+    if (F->cfi_push_end >= 0) {
+        int at = (int)(F->cfi_push_end - code_off), n = 0, k = 0;
+        for (int r = 0; r < 16; r++)
+            n += (F->cfi_push_mask >> r) & 1;
+        cfa += 4L * n;
+        ir_cfi_add(fn, at, IR_CFI_CFA_OFFSET, 0, cfa);
+        for (int r = 0; r < 16; r++)
+            if ((F->cfi_push_mask >> r) & 1)
+                ir_cfi_add(fn, at, IR_CFI_SAVED, r, -cfa + 4L * k++);
+    }
+    if (F->cfi_frame_end >= 0) {
+        cfa += F->frame;
+        ir_cfi_add(fn, (int)(F->cfi_frame_end - code_off), IR_CFI_CFA_OFFSET, 0, cfa);
+    }
+    if (F->cfi_fp_end >= 0)
+        ir_cfi_add(fn, (int)(F->cfi_fp_end - code_off), IR_CFI_CFA_REG, FB6, cfa);
+}
+
 void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
                  int keep_vars)
 {
@@ -3388,14 +3419,25 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
             F.leaf = 0;                     /* BL is a branch: lr is spent */
         F.nopush = F.leaf && !F.nsave && !F.frame && !fn->is_varargs &&
                    !fn->has_alloca && !(F.scr_save & SCR_SET);
-        if (fn->is_varargs)
+        F.cfi_va_end = F.cfi_push_end = F.cfi_vsave_end = -1;
+        F.cfi_frame_end = F.cfi_fp_end = -1;
+        if (fn->is_varargs) {
             t1_push(t, 0xfu);
-        if (!F.nopush)
-            t1_push(t, save_mask6(&F, F.scr_save));
-        sp_frame(&F, F.frame, 1);
+            F.cfi_va_end = t->len;
+        }
+        if (!F.nopush) {
+            F.cfi_push_mask = save_mask6(&F, F.scr_save);
+            t1_push(t, F.cfi_push_mask);
+            F.cfi_push_end = t->len;
+        }
+        if (F.frame) {
+            sp_frame(&F, F.frame, 1);
+            F.cfi_frame_end = t->len;
+        }
         if (fn->has_alloca) {
             t_mov_reg(t, FB6, T_SP);
             F.fb = FB6;
+            F.cfi_fp_end = t->len;
         }
         frame_push = F.nopush ? 0 : F.frame + mask_bytes(save_mask6(&F, F.scr_save));
         {
@@ -3675,6 +3717,8 @@ void v6_gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     }
     v6_scan(&F, f->code_off);
     f->code_len = t->len - f->code_off;
+    if (target_debug_info())
+        v6_record_cfi(&F, f->code_off);
     /* ...and the variadic register save area pushed before it */
     f->stack_bytes = (F.nopush ? 0 : (int)(F.frame +
                                            mask_bytes(save_mask6(&F, F.scr_save)))) +

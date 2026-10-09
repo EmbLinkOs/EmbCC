@@ -207,7 +207,7 @@ the target:
   and where the return address and each saved register went, step by
   step through the prologue. On Thumb that is `push`, `vpush`, the
   frame's `sub sp`, and `r7` as the frame base in a function with
-  `alloca` or a variable-length array. On RISC-V it is the `addi sp`, the
+  `alloca` or a variable-length array (`r5` on ARMv6-M). On RISC-V it is the `addi sp`, the
   stores of `ra` and the saved `s` and `fs` registers, and `s0` as the
   frame base. A debugger unwinds by it at every level, through
   floating-point frames too, and reads a caller's saved registers back,

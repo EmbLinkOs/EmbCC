@@ -146,6 +146,7 @@ struct t_fn {
     /* -g: where each prologue step ends, for the call frame information
      * (t_record_cfi); -1 when the function has no such step */
     int cfi_va_end, cfi_push_end, cfi_vsave_end, cfi_frame_end, cfi_fp_end;
+    unsigned cfi_push_mask;     /* ARMv6-M: the registers its push saved */
     /* Per instruction: an IR_CALL made as a TAIL call (t_tail_ok). NULL
      * when there are none. */
     char *tail;

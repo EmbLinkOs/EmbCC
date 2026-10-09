@@ -100,6 +100,8 @@ run m4hf-O0 thumbv7em-none-eabihf "--board mps2-an386" -O0
 run m4hf-O2 thumbv7em-none-eabihf "--board mps2-an386" -O2
 run m4hf-Os thumbv7em-none-eabihf "--board mps2-an386" -Os
 run m3-O2   thumbv7m-none-eabi    "--board lm3s6965evb" -O2
+run m0-O0   thumbv6m-none-eabi    "--board microbit --ram-size 64K" -O0
+run m0-O2   thumbv6m-none-eabi    "--board microbit --ram-size 64K" -O2
 if "$GDB" -nx -batch -ex 'set architecture riscv:rv64' 2>&1 | grep -q 'riscv:rv64'; then
     run rv32-O2 riscv32-unknown-elf "--board virt --ram-size 8M" -O2
     run rv64d-O0 riscv64-unknown-elf "--board virt --ram-size 8M" -O0 "-march=rv64gc -mabi=lp64d"
