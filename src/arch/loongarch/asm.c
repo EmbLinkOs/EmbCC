@@ -89,6 +89,9 @@ static int split(const char *stmt, int len, struct tok *t, int max)
         t[n].len = e - b;
         if (t[n].len > 0)
             n++;
+        else if (i == b && i < len)
+            i++;    /* a comma with no operand before it (`nop ,1`): past
+                     * it, or this loop never moved again */
     }
     return n;
 }
