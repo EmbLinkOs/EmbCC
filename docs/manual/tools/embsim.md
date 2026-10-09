@@ -5,7 +5,9 @@
 (the ATmega328P). It is ISO C with no dependencies, so it builds on any
 machine, including one without QEMU. It counts the instructions it executes and estimates the
 cycles they take, and gdb, lldb or embdbg can debug the image while it
-runs. This page is the command reference; how EmbSim is built inside,
+runs. Given the part's CMSIS-SVD file, it puts every peripheral register
+the file describes on the bus, and traces a driver's accesses to them by
+name. This page is the command reference; how EmbSim is built inside,
 and how to add a core, a peripheral or a board, is
 [EmbSim's internals](../../internals/embsim.md).
 
@@ -16,6 +18,8 @@ embsim IMAGE.elf [--board NAME] [--cpu NAME] [--ram-size SIZE]
                  [--until STRING] [--max-insns N] [--stats]
                  [--count FILE] [--trace FILE] [--no-semihosting]
                  [--gdb [HOST:]PORT [--gdb-wait]]
+                 [--svd FILE.svd] [--trace-periph[=NAME,...]]
+embsim --svd FILE.svd --svd-map
 ```
 
 ```sh
@@ -30,6 +34,12 @@ embsim fw.elf --board virt --stats
 embcc --target=avr -Os -c main.c
 embld -e __vectors -Ttext 0 -Tdata 0x100 boot.o io.o main.o librt.a -o fw.elf
 embsim fw.elf --board uno --stats
+
+embsvd STM32F405.svd --header STM32F405.h --startup startup.c \
+    --ld f405.ld --flash 0x08000000:1M --ram 0x20000000:128K
+embcc --target=thumbv7em-none-eabi -O2 -c startup.c main.c
+embcc --target=thumbv7em-none-eabi -T f405.ld startup.o main.o -o fw.elf
+embsim fw.elf --svd STM32F405.svd --trace-periph=USART2,RCC
 ```
 
 ## The boards
@@ -44,6 +54,7 @@ built for QEMU runs unchanged.
 | `mps2-an386` | Cortex-M4 with FPv4-SP | as `mps2-an385` | CMSDK |
 | `mps2-an500` | Cortex-M7 with FPv5 (double) | as `mps2-an385` | CMSDK |
 | `microbit` | Cortex-M0 | 256 KiB flash at 0, 16 KiB SRAM at `0x20000000` | nRF51 at `0x40002000` |
+| `stm32f405` | Cortex-M4 with FPv4-SP | 1 MiB flash at `0x08000000` (and at 0), 128 KiB SRAM at `0x20000000`, 64 KiB CCM at `0x10000000` | the USARTs of its SVD ([below](#the-stm32f405)) |
 | `virt` | RISC-V, RV32 or RV64 with IMAFDC | 128 MiB RAM at `0x80000000` | NS16550A at `0x10000000` |
 | `uno` | ATmega328P (AVR5) | 32 KiB flash, 2 KiB SRAM at data `0x100` | USART0 at data `0xC0` |
 
@@ -64,8 +75,9 @@ built for QEMU runs unchanged.
   keep what is written.
 - A segment of the image outside the board's memory gets memory of its
   own, so a link script for a similar part still runs.
-- Flash on the lm3s6965 and the micro:bit ignores stores, as flash does.
-  On the MPS2 boards it is SSRAM, which takes them.
+- Flash on the lm3s6965, the micro:bit and the STM32F405 ignores
+  stores, as flash does. On the MPS2 boards it is SSRAM, which takes
+  them.
 
 ## What it models: the Cortex-M
 
@@ -99,7 +111,167 @@ built for QEMU runs unchanged.
 - **Time.** SysTick and DWT's CYCCNT advance by the estimated cycles,
   so a timed run gives the same answer every time.
 - **Other peripherals.** Apart from the UART, the system control space
-  and DWT, the peripheral space reads as zero and ignores writes.
+  and DWT, the peripheral space reads as zero and ignores writes --
+  unless an SVD file describes it (`--svd`, below).
+
+## Peripherals from an SVD file: `--svd`
+
+`--svd FILE.svd` reads the part's CMSIS-SVD file -- the one its vendor
+publishes, and embsvd writes the device header from -- and puts each of
+its peripherals' registers on the bus at the address the file gives.
+A register then behaves as the file says its fields do:
+
+| The file says | A read | A write |
+|---|---|---|
+| `resetValue` | the value until written, and again after a reset | |
+| `read-write` (or nothing) | the value | sets the field |
+| `read-only` | the value | ignored |
+| `write-only` | 0 | sets the field (a model may use it) |
+| `writeOnce` | 0 | the first write after reset sets it; the rest are ignored |
+| `read-writeOnce` | the value | the first write after reset sets it |
+| `modifiedWriteValues` `oneToClear`, `oneToSet`, `oneToToggle` | | each 1 written clears, sets or toggles its bit; a 0 leaves it |
+| `zeroToClear`, `zeroToSet`, `zeroToToggle` | | the same for each 0 written |
+| `clear`, `set` | | any write clears or sets the whole field |
+| `readAction` `clear`, `set` | the value, and then the field is cleared or set | |
+| bits no field covers | their reset value | ignored |
+
+- A byte or halfword access reads or writes those bytes alone; a word
+  access that spans two narrow registers reaches both.
+- Clusters, register arrays (`dim`, `dimIncrement`, `dimIndex`) and
+  `derivedFrom` -- of a register, a cluster, a field or a peripheral --
+  are placed as embsvd places them in its header: EmbSim reads the file
+  with embsvd's reader.
+- **An access where no register is is a bus fault** -- a hole in a
+  peripheral, or the space between two -- and stderr says where, since a
+  HardFault handler rarely does:
+
+  ```text
+  embsim: bus fault: a word read at 0x40004440 (pc 0x08000398): USART2 has no register at +0x040
+  embsim: bus fault: a word write at 0x40008000 (pc 0x080003b2): no peripheral of STM32F405 is there
+  ```
+
+  The space covered is the file's peripherals', from the lowest register
+  to the highest; outside it, the board's map answers as without
+  `--svd`. On the part, a hole inside a peripheral's block usually reads
+  as 0 instead: the fault is EmbSim's rule, to catch a wrong offset.
+- Two registers at one address -- an `alternateRegister`, or Nordic's
+  peripherals that share their space (SPI0, SPIM0, TWI0...) -- are one
+  register, named by the first in the file.
+- The core's own peripherals (NVIC, SCB, SysTick, the MPU: anything at
+  `0xE0000000` and up) are the core's, not the file's.
+- A debugger's reads (`x` in gdb) have no side effect: no `readAction`,
+  no trace.
+- A peripheral with no model is that alone: its registers keep what is
+  written, as the file allows, and nothing else happens. The models of
+  [the STM32F405](#the-stm32f405) are what make a peripheral do
+  something.
+
+`--svd` works on any Cortex-M board: the file's peripherals go before
+the board's space that reads as zero, and the board's own UART still
+answers where it is. A file whose name is a board's (`STM32F405.svd`)
+picks that board unless `--board` says otherwise.
+
+`--svd-map` lists the registers EmbSim made from the file, without
+running anything, one a line: the peripheral, the address, the size in
+bits, the register's name and its path, the reset value and the access;
+and, for a register not on the bus, why (`-- is P.R`: another register
+at its address; `-- the core's`).
+
+### Tracing a driver: `--trace-periph`
+
+`--trace-periph` prints, on stderr, each access to the peripherals' registers by
+the SVD's names; `--trace-periph=NAME,...` only those named, as
+`PERIPHERAL` or `PERIPHERAL.REGISTER`, with `*` for any characters
+(`--trace-periph=USART*,GPIOA.ODR`). Each line has the instruction's
+address and what happened:
+
+```text
+periph 080002fc W USART2.CR1.UE 0->1
+periph 080002fc W USART2.CR1.TE 0->1
+periph 08000276 R USART2.SR 0x000000c0
+periph 08000246 W GPIOA.BSRR.BS5=1
+periph 08000246 H GPIOA.ODR.ODR5 0->1
+periph 08000312 W RCC.CR.HSEON 0->1
+periph 08000312 H RCC.CR.HSERDY 0->1
+periph 00000a1c W UARTE0.ENABLE.ENABLE 0x0->0x8 (Disabled->Enabled)
+periph 08000446 W USART3.BRR 0x00000683 ignored: its clock is off (RCC.APB1ENR.USART3EN)
+```
+
+- `W`: the program wrote; a line for each field that changed, or for a
+  write-only field, what was written to it (`BS5=1`). A write that
+  changed nothing says so (`(no change)`, `ignored: read-only`).
+- `R`: the program read; the register's value.
+- `H`: the hardware changed a field -- a model (a ready bit, ODR from
+  BSRR, a timer's flag), or a `readAction` (`(by the read)`).
+- A field's value is 0 or 1, or hex when it is wider, with its
+  enumerated value's name when the file gives one.
+
+### The STM32F405
+
+The `stm32f405` board is QEMU's netduinoplus2: 1 MiB of flash at
+`0x08000000`, seen at 0 too (where the core reads its vector table),
+128 KiB of SRAM, 64 KiB of CCM RAM, a Cortex-M4 with FPv4-SP and 4 NVIC
+priority bits. Its peripherals are ST's `STM32F405.svd` (in the
+cmsis-svd-data project), which EmbSim finds with `--svd FILE` or in the
+directories of `EMBSIM_SVD_PATH` (separated by `:`):
+
+```sh
+EMBSIM_SVD_PATH=$HOME/svd embsim fw.elf --board stm32f405
+```
+
+Over its registers, four models, found by the SVD's names (`RCC`,
+`GPIO*`, `USART*` and `UART*`, `TIM*`):
+
+- **RCC.** A ready bit follows its enable: HSIRDY, HSERDY, PLLRDY and
+  PLLI2SRDY in CR, LSERDY in BDCR, LSIRDY in CSR are set the moment the
+  oscillator or PLL is turned on, and cleared when it is off. CFGR's SWS
+  follows SW. **The clock gates:** a peripheral whose enable bit
+  (`USART2EN` in `APB1ENR`...) is clear reads as 0 and ignores writes,
+  as the part's do, and the first such access is a warning:
+
+  ```text
+  embsim: warning: a write at pc 0x08000446: USART3.BRR is ignored while its clock is off (RCC.APB1ENR.USART3EN is 0)
+  ```
+
+- **GPIO.** BSRR sets and resets ODR's bits (set wins when both are
+  written). IDR is what each pin reads from its configuration, since
+  nothing outside drives the pins: an output reads what ODR drives (an
+  open-drain one at 1 reads its pull), an input or alternate-function
+  pin reads 1 when pulled up, else 0, an analog pin 0. Out of reset
+  GPIOA's IDR is `0xa000`: PA13 and PA15, the debug port's, pulled up.
+- **USART1-6, UART4-5.** SR resets to `0xc0` (TXE and TC; ST's file says
+  `0x00c00000`); a write to DR with CR1's UE and TE set sends the byte
+  to stdout at once, so TXE stays set and TC sets; TC, RXNE, LBD and CTS
+  are cleared by writing 0; the TXE, TC and RXNE interrupts are raised
+  through the NVIC when enabled. Reception is not modelled.
+- **TIM1-14**, their time base: CNT counts up while CEN is set, one
+  count per PSC + 1 clocks of the timer's clock; past ARR it returns to
+  0 and that is an update event: UIF, and the interrupt with UIE (the
+  file's, `TIM1_UP_TIM10` for TIM1). PSC takes effect at the update
+  event, ARR too with ARPE; EGR.UG reinitializes the counter and makes
+  one (setting UIF unless URS); UDIS and OPM. The timer's clock is the
+  core's, or half of it with APB1 at /4 (the APB prescaler in RCC's
+  CFGR: x2 when it is not 1). A timer whose clock is gated off does
+  not count.
+- SysTick is the core's, as on every Cortex-M board.
+
+QEMU's netduinoplus2 is the referee where QEMU models the peripheral,
+and the reference manual (RM0090) where it does not:
+
+| | QEMU 11.1 | EmbSim, as RM0090 |
+|---|---|---|
+| RCC, GPIO | not modelled: they read 0 | modelled, above |
+| a peripheral whose clock is off | works anyway | reads 0, ignores writes |
+| USART SR written with ones | they are set (`0x3ff`) | rc_w0 flags and read-only ones keep their value |
+| TIM EGR.UG | UIF stays 0 | UIF set (URS 0) |
+| TIM CNT with CEN clear | keeps counting | holds |
+| TIM update interrupt | its alarm is armed by writes to CNT, ARR, PSC or EGR, not CEN; none came in the configurations tried | every update with UIE |
+| a hole in a peripheral's block (USART2 + 0x40) | reads 0 | a bus fault (EmbSim's rule) |
+| USART SR, BRR and CR1, TC cleared, the TXE interrupt; TIM2's CR1, PSC and ARR, UIF cleared, CNT counting; a reserved address's bus fault | as EmbSim | as QEMU |
+
+Out of reset, the timer and the core see the same clock; EmbSim does not
+model the clocks' frequencies themselves -- its time is the core's
+cycles, whatever the PLL is set to.
 
 ## What it models: the RISC-V core
 
@@ -329,7 +501,15 @@ On the Cortex-M:
 - FPv5's VSEL, VMAXNM, VMINNM and VRINT.
 - The half-precision and fixed-point VCVT forms.
 - The ARMv7E-M parallel add and subtract instructions.
-- Peripherals beyond the UART, SysTick, the NVIC and DWT's cycle counter.
+- Peripherals beyond the UART, SysTick, the NVIC and DWT's cycle
+  counter, except as an SVD file's registers (`--svd`) and the
+  STM32F405's models.
+- On the STM32F405: DMA, the ADC, SPI, I2C, EXTI and the rest are their
+  registers alone; RCC's clock frequencies, its interrupts and its reset
+  registers; GPIO's LCKR and pin inputs from outside; the USARTs'
+  receivers and baud-rate timing; the timers' capture/compare,
+  down-counting, center-aligned modes, repetition counter, slave modes
+  and DMA requests.
 
 Each instruction among these is a UsageFault, so a run that needs one
 stops at a named fault rather than computing something wrong.
@@ -394,6 +574,18 @@ counts against a run without a debugger.
 Writing that test found one QEMU bug. On the mps2-an386, QEMU resumes a
 divide that trapped with the instructions before it in its translation
 block undone, so the test does not print that quotient.
+
+**SVD files.** `tests/golden/embsim-svd.sh` runs a program over a test
+SVD with every access type, modifiedWriteValues and readAction, arrays,
+clusters and derivedFrom, and compares each value with the CMSIS-SVD
+specification's, the trace and the map with their records; and an
+STM32F405 firmware, built from embsvd's header, startup and linker
+script, that drives RCC, GPIO, USART1-3 and TIM2, on QEMU's
+netduinoplus2 and on EmbSim: its values must be QEMU's where QEMU models
+the register, and RM0090's (a record) where it does not or differs.
+`tests/golden/embsim-svd-all.sh` maps every SVD file in `$EMBREF/svd`
+(ST's and Nordic's) and holds each register's address and size to a
+second reading of the file in Python.
 
 **RISC-V.** `tests/golden/embsim-riscv.sh` does the same on virt with
 qemu-system-riscv32 and -riscv64: the exec corpus on RV32 with ilp32

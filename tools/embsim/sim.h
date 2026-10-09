@@ -14,6 +14,9 @@
  *     DWT are devices.
  *   - boards as data (boards.c): a core, its options, the memory regions
  *     and the devices at their addresses. A new board is a table entry.
+ *   - an SVD file's peripherals as a register file on the bus, and the
+ *     behavioural models over it by the SVD's names (svd-map.h; the
+ *     STM32's are stm32-*.c).
  *   - the run (run.c): the loop, time, the end-of-run rules and the
  *     console; semihost.c, trace.c (tracing and the counts), loader.c
  *     (the ELF image), gdb.c (the GDB remote server, over net.h's
