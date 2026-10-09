@@ -48,7 +48,7 @@ nopc() { sed 's/^periph [0-9a-f]* //; s/pc 0x[0-9a-f]*/pc/'; }
 "$EMBLD" -e reset -Ttext 0 -Tdata 0x20000000 "$out/regs.o" -o "$out/regs.elf" ||
     fail "regs.c does not build"
 "$EMBSIM" "$out/regs.elf" --board mps2-an386 --svd $d/regs.svd \
-    > "$out/regs.txt" 2> "$out/regs.err"
+    --max-insns 10000000 > "$out/regs.txt" 2> "$out/regs.err"
 st=$?
 [ $st = 0 ] || { cat "$out/regs.txt" "$out/regs.err"; fail "regs.c exits $st"; }
 cmp -s "$out/regs.txt" $d/regs.txt ||
@@ -57,7 +57,7 @@ grep -q 'embsim: bus fault: a word read at 0x4001001c (pc 0x[0-9a-f]*): ACC has 
 grep -q 'embsim: bus fault: a word write at 0x40010200 (pc 0x[0-9a-f]*): no peripheral of EMBSIMTEST is there$' "$out/regs.err" ||
     { cat "$out/regs.err"; fail "a bus fault where no register is does not say where"; }
 "$EMBSIM" "$out/regs.elf" --board mps2-an386 --svd $d/regs.svd \
-    '--trace-periph=MWV,ACC.MIX,ACC.WO,ACC.RO,ACC.B8*' \
+    --max-insns 10000000 '--trace-periph=MWV,ACC.MIX,ACC.WO,ACC.RO,ACC.B8*' \
     > /dev/null 2> "$out/regs-trace.raw"
 nopc < "$out/regs-trace.raw" > "$out/regs-trace.txt"
 cmp -s "$out/regs-trace.txt" $d/regs-trace.txt ||
@@ -98,7 +98,7 @@ T=--target=thumbv7em-none-eabi
     fail "f405.c does not build"
 # the board finds its SVD in EMBSIM_SVD_PATH
 EMBSIM_SVD_PATH=/nonexistent:$ref/svd "$EMBSIM" "$out/f405.elf" --board stm32f405 \
-    > "$out/f405.txt" 2> "$out/f405.err"
+    --max-insns 50000000 > "$out/f405.txt" 2> "$out/f405.err"
 st=$?
 [ $st = 0 ] || { cat "$out/f405.txt" "$out/f405.err"; fail "f405.c exits $st"; }
 cmp -s "$out/f405.txt" $d/f405.txt ||
@@ -110,7 +110,7 @@ for s in 'embsim: warning: a write at pc: USART3.BRR is ignored while its clock 
     grep -qxF "$s" "$out/f405-err.txt" || { cat "$out/f405.err"; fail "stderr has no '$s'"; }
 done
 # --svd FILE picks the board its file is for
-"$EMBSIM" "$out/f405.elf" --svd "$SVD" \
+"$EMBSIM" "$out/f405.elf" --svd "$SVD" --max-insns 50000000 \
     '--trace-periph=RCC.CR,RCC.CFGR,GPIOA.BSRR,GPIOA.ODR,GPIOA.IDR,USART2,USART3,TIM2.SR' \
     > "$out/f405-2.txt" 2> "$out/f405-trace.raw"
 cmp -s "$out/f405-2.txt" $d/f405.txt || fail "--svd STM32F405.svd is not the stm32f405 board"
@@ -132,7 +132,7 @@ if [ -f "$CM/core_cm4.h" ]; then
     "$EMBCC" $T $CF -c tests/golden/svd-stm32f405/main.c -o "$m/main.o" &&
     "$EMBCC" $T -T "$m/f405.ld" "$m/startup.o" "$m/main.o" -o "$m/fw.elf" ||
         fail "svd-stm32f405/main.c does not build"
-    "$EMBSIM" "$m/fw.elf" --svd "$SVD" --until done > "$m/run.txt" 2> "$m/run.err" ||
+    "$EMBSIM" "$m/fw.elf" --svd "$SVD" --until done --max-insns 50000000 > "$m/run.txt" 2> "$m/run.err" ||
         { cat "$m/run.txt" "$m/run.err"; fail "svd-stm32f405/main.c on EmbSim"; }
     printf 'STM32F405 via embsvd\n00005a5a 00000000 00000001 00000c24 00000025 \nticks 00000001 00000001 \ndone' > "$m/want.txt"
     cmp -s "$m/run.txt" "$m/want.txt" ||
