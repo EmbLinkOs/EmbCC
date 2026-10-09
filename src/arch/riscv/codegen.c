@@ -249,6 +249,11 @@ struct rv_fn {
     char *f4;            /* per vreg, RV64: a float whose slot fdone writes
                           * four bytes of (slot_bytes) */
     long *slot;          /* per-vreg byte offset from sp, -1 for none */
+    /* Per vreg: 1 for a constant with no register that is made where it
+     * is read (rv_remat_ok), its value in remat_v; NULL for none. Such a
+     * value has no slot, and its IR_CONST emits nothing. */
+    char *remat;
+    long long *remat_v;
     long frame;          /* total bytes sp moves down by */
     long scratch_at;     /* where fn->scratch_bytes begins */
     long byref_at;       /* where the by-reference argument copies go */
@@ -545,6 +550,27 @@ static int rv_fp_callee_saved(int r)
     return r == 8 || r == 9 || (r >= 18 && r <= 27);
 }
 
+/* REMATERIALIZATION: a constant one `li` makes -- addi or lui, two bytes
+ * compressed -- is made again at each read when it has no register,
+ * rather than stored to a slot and loaded back: no longer than the load,
+ * and no store at its definition. LICM hoists a loop's constants out of
+ * it, and __vformat stored eleven character constants in its prologue
+ * to load each back in the loop. A 32-bit one is the value sign-extended,
+ * as a register holds it at RV64 too. */
+static int g_rv_noremat = -1;
+
+static int rv_remat_ok(const struct ir_ins *i)
+{
+    long long v;
+    if (g_rv_noremat < 0)
+        g_rv_noremat = getenv("EMBCC_RV_NOREMAT") != NULL;
+    if (g_rv_noremat || i->op != IR_CONST || i->flt || i->w > 8)
+        return 0;
+    v = i->w == 4 ? (long long)(int)(unsigned int)(unsigned long)i->imm
+                  : (long long)i->imm;
+    return rv_li_len(v, i->w == 4 ? 32 : 64) <= 4;
+}
+
 static const struct ra_target RISCV_RA = {
     rv_pool_for,
     rv_callee_saved,
@@ -575,7 +601,7 @@ static const struct ra_target RISCV_RA = {
                    * values through rdr and writes through wreg/wr */
     0,            /* fp_reads_gpr: floats are already general (above) */
     1,            /* asm_in_reg: see IR_ASM */
-    NULL  /* remat_ok */
+    rv_remat_ok
 };
 
 /* -O2 and -Os: the allocator is on. */
@@ -1217,7 +1243,8 @@ static void layout(struct rv_fn *F)
         int *loc2 = xmalloc((size_t)(nv ? nv : 1) * sizeof *loc2);
         for (int v = 0; v < nv; v++)
             loc2[v] = in_reg(F, v) || in_freg(F, v) ||
-                      (F->xlen == 32 && F->wide[v]) || is16(F, v) ? 0 : -1;
+                      (F->xlen == 32 && F->wide[v]) || is16(F, v) ||
+                      (F->remat && F->remat[v]) ? 0 : -1;
         for (int n = 0; n < fn->nins; n++)
             if (fn->ins[n].op == IR_IGOTO || fn->ins[n].op == IR_LABELADDR)
                 has_cgoto = 1;
@@ -1578,6 +1605,10 @@ static void rd(struct rv_fn *F, int v, int reg)
             rv_mv(F->t, reg, F->loc[v]);
         return;
     }
+    if (F->remat && F->remat[v]) {
+        rv_li(F->t, reg, F->remat_v[v], F->xlen);
+        return;
+    }
     ld_sp(F, reg, sslot(F, v), slot_bytes(F, v), 1);
 }
 
@@ -1610,6 +1641,11 @@ static void fload_v(struct rv_fn *F, int v, int freg, int dbl)
             f_from_pair(F, freg, F->loc[v], F->loc[v] + 1);
         else
             f_from_x(F, freg, F->loc[v], dbl ? 8 : 4);
+        return;
+    }
+    if (F->remat && F->remat[v] && !(dbl && F->xlen == 32)) {
+        rd(F, v, SCR2);
+        f_from_x(F, freg, SCR2, dbl ? 8 : 4);
         return;
     }
     fld_sp(F, freg, sslot(F, v), dbl);
@@ -2243,6 +2279,8 @@ static void set_args_half(struct rv_fn *F, const int *dstreg,
             } else {
                 rd(F, vreg[k], dstreg[k]);
             }
+        } else if (F->remat && F->remat[vreg[k]] && (!half || !half[k])) {
+            rd(F, vreg[k], dstreg[k]);  /* a constant: made, not loaded */
         } else if (!in_reg(F, vreg[k])) {
             if (half)
                 ld_sp(F, dstreg[k], sslot(F, vreg[k]) + 4L * half[k], 4, 1);
@@ -4796,6 +4834,8 @@ static void gen_ins(struct rv_fn *F, int n)
         jump_to(F, i->label);
         return;
     case IR_CONST: {
+        if (F->remat && i->dst >= 0 && F->remat[i->dst])
+            return;             /* made where it is read (rd) */
         int d = wreg(F, i->dst, ACC);
         rv_li(t, d, imm_val(F, i), F->xlen);
         wrote(F, i->dst, d);
@@ -6629,6 +6669,28 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
         fx_sg0 = F.st->ng, fx_sf0 = F.st->nf;
     F.fx_lazy = rv_needs_fx(fn);
     F.fx_missed = 0;
+    /* The constants with no register that are made where they are read:
+     * temps only, and not at -O0 or -Og, where every value has a slot. */
+    if (F.loc && !F.keep_vars && fn->nvregs) {
+        char *rm = ra_remat_map(fn, rv_remat_ok);
+        for (int v = fn->nvars; v < fn->nvregs; v++) {
+            if (!rm[v] || in_reg(&F, v) || in_freg(&F, v) ||
+                (F.xlen == 32 && F.wide[v]) || is16(&F, v))
+                continue;
+            if (!F.remat) {
+                F.remat = xcalloc((size_t)fn->nvregs, 1);
+                F.remat_v = xcalloc((size_t)fn->nvregs, sizeof *F.remat_v);
+            }
+            F.remat[v] = 1;
+        }
+        for (int n = 0; F.remat && n < fn->nins; n++) {
+            int d = fn->ins[n].dst;
+            if (fn->ins[n].op == IR_CONST && d >= 0 && d < fn->nvregs &&
+                F.remat[d])
+                F.remat_v[d] = imm_val(&F, &fn->ins[n]);
+        }
+        free(rm);
+    }
   fx_again:
     layout(&F);
 
@@ -7144,6 +7206,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct rv_sites *st,
     free(F.usecnt);
     free(F.tail);
     free(F.slot);
+    free(F.remat);
+    free(F.remat_v);
     cg_note_labels(fn, F.label_off);
     free(F.label_off);
     free(F.fix);
