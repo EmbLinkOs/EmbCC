@@ -6,8 +6,11 @@
 #  1. tests/golden/embsim-an/prof.c (calls, recursion, an interrupt) at
 #     -O1 -fstack-usage on the Cortex-M3, RV32 and the AVR, with the
 #     harness's own .su files:
-#       - each function's measured frame is its .su frame, exactly (on
-#         the AVR, prof.c's but its interrupt handler: see below);
+#       - each function's measured frame is its .su frame, exactly --
+#         the harness's too: on the AVR io.c's putn, whose `push r31` /
+#         `pop r31` around an immediate loaded into a low register is a
+#         byte of its frame (on the AVR but the interrupt handler: see
+#         below);
 #       - the stack's depth is the sum of the .su frames along the
 #         deepest path prof.c has, and every function's depth is at most
 #         it;
@@ -26,12 +29,10 @@
 #       - shallow, no overflow: the run ends as it would.
 #  3. tests/golden/embsim/exc.c: a thread on the PSP takes an SVC, whose
 #     eight-word frame is the process stack's 32 bytes.
-# On the AVR, EmbCC's .su files understate two frames, which the report
+# On the AVR, EmbCC's .su file understates a frame, which the report
 # flags above the static bound and this test leaves out of the .su
-# comparison (findings for the compiler): a signal handler's leaves out
-# the registers its prologue saves (r0, SREG, r1, r18-r27, r30, r31),
-# and io.c's putn the `push r31` / `pop r31` around an immediate loaded
-# into a low register.
+# comparison (a finding for the compiler): a signal handler's leaves out
+# the registers its prologue saves (r0, SREG, r1, r18-r27, r30, r31).
 set -u
 echo "TEST-MARKER embsim-stack"
 . "$(dirname "$0")/../lib.sh"
@@ -116,19 +117,21 @@ profile_stack() {
 
     # each function's frame is its .su frame
     su $sus > "$out/$tag.su"
-    cmpsu=$sus
-    [ $tag = avr ] && cmpsu=$h/prof.su
-    su $cmpsu > "$out/$tag.cmpsu"
+    nsu=0
     while read -r fn bytes; do
         set -- $(row "$out/$tag.stack" "$fn")
         [ $# = 6 ] || continue          # never ran
+        nsu=$((nsu + 1))
         if [ "$fn" = "$isr" ] && [ $tag = avr ]; then
             [ "$3" -gt "$bytes" ] || { echo "FAIL avr: $fn's frame $3, not above its .su $bytes (has EmbCC's .su been fixed? update this test)"; fail=1; }
             continue
         fi
         [ "$3" = "$bytes" ] || { echo "FAIL $tag: $fn's frame was $3 bytes, its .su says $bytes"; fail=1; }
-    done < "$out/$tag.cmpsu"
-    for fn in main a b rec leaf; do
+    done < "$out/$tag.su"
+    # every function that ran and has a .su line was compared: prof.c's
+    # six, the handler, and the harness's putn and writec at least
+    [ $nsu -ge 9 ] || { echo "FAIL $tag: only $nsu functions' frames compared"; fail=1; }
+    for fn in main a b rec leaf $isr putn writec; do
         [ -n "$(row "$out/$tag.stack" "$fn")" ] || { echo "FAIL $tag: no row for $fn"; fail=1; }
     done
 
