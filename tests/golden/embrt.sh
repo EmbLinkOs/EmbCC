@@ -114,6 +114,28 @@ grep -q 'grows at run time' "$out/r2.txt" || { cat "$out/r2.txt"; fail "the dyna
 grep -q 'no object defines it' "$out/r3.txt" || { cat "$out/r3.txt"; fail "the missing callee is not named"; }
 "$EMBRT" "$out/r.o" --entry ind > "$out/r4.txt" 2>&1 && fail "an indirect call reaching recursion is bounded"
 grep -q 'recursion' "$out/r4.txt" || { cat "$out/r4.txt"; fail "the indirect call's target is not followed"; }
+
+# a recursive cycle below the entry is printed once, as recursion: the
+# path went round it until 64 lines, `-> rec` 63 times, and the JSON too
+cat > "$out/m.c" <<'EOF'
+int even(int n);
+int odd(int n) { return n == 0 ? 0 : even(n - 1); }
+int even(int n) { return n == 0 ? 1 : odd(n - 1); }
+int rec(int n) { return n ? rec(n - 1) + 1 : 0; }
+int top(int n) { return rec(n) * 2; }
+int mid(int n) { return odd(n) * 3; }
+EOF
+"$EMBCC" --target=$T $F -fno-inline -c "$out/m.c" -o "$out/m.o" || fail m.c
+"$EMBRT" "$out/m.o" --entry top --entry mid > "$out/m.txt" 2>&1 && fail "recursion below an entry is bounded"
+[ "$(grep -c -- '^    -> rec ' "$out/m.txt")" = 1 ] && grep -q '^       unbounded here: recursion (rec calls itself)$' "$out/m.txt" ||
+    { cat "$out/m.txt"; fail "top's path does not show rec once, calling itself"; }
+[ "$(grep -cE -- '^    -> (odd|even) ' "$out/m.txt")" = 2 ] && grep -q '^       unbounded here: recursion (even calls odd: odd -> even -> odd)$' "$out/m.txt" ||
+    { cat "$out/m.txt"; fail "mid's path does not show the cycle odd -> even -> odd once"; }
+[ "$(wc -l < "$out/m.txt")" -le 10 ] || { cat "$out/m.txt"; fail "the report goes round a cycle"; }
+"$EMBRT" "$out/m.o" --entry top --entry mid --json > "$out/m.json" 2> /dev/null
+grep -q '"name": "top", .*"path": \[{"name": "top", "frame": [0-9]*}, {"name": "rec", "frame": [0-9]*}\], "recursion": "rec"}' "$out/m.json" &&
+grep -q '"name": "mid", .*"path": \[{"name": "mid", "frame": [0-9]*}, {"name": "odd", "frame": [0-9]*}, {"name": "even", "frame": [0-9]*}\], "recursion": "odd"}' "$out/m.json" ||
+    { cat "$out/m.json"; fail "--json: a cycle's path is not each function once, with the recursion named"; }
 ok=$("$EMBRT" "$out/r.o" --entry ok --json | sed -n 's/.*"bytes": \([0-9]*\).*/\1/p')
 "$EMBRT" "$out/r.o" --entry ok --max-stack "$ok" >/dev/null 2>&1 || fail "a stack exactly at --max-stack is refused"
 "$EMBRT" "$out/r.o" --entry ok --max-stack $((ok - 1)) >/dev/null 2>&1 && fail "a stack over --max-stack passes"
@@ -151,4 +173,4 @@ fbb=$(bound_of fb "$out/sa.o" "$out/sb.o")
 want=$(awk -F'\t' '/:fb\t|:h\t/ { s += $2 } END { print s }' "$out/sb.su")
 [ "$fbb" = "$want" ] || fail "fb's bound is $fbb; its own file's h makes it $want"
 
-echo "embrt: recursion, dynamic frames, unknown callees and indirect calls named; interrupts; statics per file; --max-stack"
+echo "embrt: recursion (a cycle printed once), dynamic frames, unknown callees and indirect calls named; interrupts; statics per file; --max-stack"

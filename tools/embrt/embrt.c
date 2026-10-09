@@ -475,10 +475,31 @@ static long long worst(int fi)
 
 static int g_json;
 
+/* Where the worst path from fi, followed through `next`, comes back to a
+ * function already on it: that function's place on the path (0 is fi),
+ * or -1. A recursive cycle's `next` links go round it for ever, so this
+ * is where a printed path stops -- it printed `rec` 63 times. *at says
+ * which step closes it: the path's at-th function calls the one returned. */
+static int path_cycle(int fi, int *at)
+{
+    int path[64], n = 0;
+    for (int k = fi; k >= 0 && n < 64; k = g_fn[k].next) {
+        for (int j = 0; j < n; j++)
+            if (path[j] == k) {
+                *at = n - 1;
+                return j;
+            }
+        path[n++] = k;
+    }
+    return -1;
+}
+
 /* The worst path from an entry, one line per function: its frame and
- * what is notable about it; where the bound is lost, why. */
+ * what is notable about it; where the bound is lost, why. A recursive
+ * cycle is printed once, and named as one. */
 static void path_text(int fi)
 {
+    int at = -1, back = path_cycle(fi, &at);
     for (int k = fi, n = 0; k >= 0 && n < 64; n++) {
         const struct fn *f = &g_fn[k];
         char fr[32];
@@ -490,9 +511,24 @@ static void path_text(int fi)
                f->dynamic ? " (dynamic)" : "",
                f->indirect ? " (calls through a pointer)" : "");
         int nx = f->next;
+        /* the cycle closes here: say which call, and the whole cycle */
+        if (back >= 0 && n == at) {
+            int j = fi;
+            printf("       unbounded here: recursion (%s calls %s%s",
+                   f->name, nx == k ? "itself" : g_fn[nx].name,
+                   nx == k ? ")\n" : ": ");
+            if (nx != k) {
+                for (int q = 0; q < back; q++)
+                    j = g_fn[j].next;
+                for (int q = back; q <= at; q++, j = g_fn[j].next)
+                    printf("%s -> ", g_fn[j].name);
+                printf("%s)\n", g_fn[nx].name);
+            }
+            break;
+        }
         /* stop where the bound is lost at this function itself */
         if (f->worst < 0 && (nx < 0 || g_fn[nx].worst >= 0 ||
-                             f->why != g_fn[nx].why || nx == fi)) {
+                             f->why != g_fn[nx].why)) {
             printf("       unbounded here: %s%s%s\n", f->why ? f->why : "?",
                    nx >= 0 && f->why && !strcmp(f->why, "recursion")
                        ? " through " : "",
@@ -610,16 +646,30 @@ int main(int argc, char **argv)
                 printf(", \"unbounded\": ");
                 json_name(g_fn[fi].why);
             }
+            /* each function once: a recursive cycle ends the path where
+             * it closes, and "recursion" names the function it calls
+             * back into */
+            int at = -1, back = path_cycle(fi, &at);
             printf(", \"path\": [");
             for (int k = fi, n = 0; k >= 0 && n < 64; k = g_fn[k].next, n++) {
                 printf("%s{\"name\": ", n ? ", " : "");
                 json_name(g_fn[k].name);
                 printf(", \"frame\": %d}", g_fn[k].frame);
+                if (back >= 0 && n == at)
+                    break;
                 if (g_fn[k].worst < 0 && g_fn[k].next >= 0 &&
                     g_fn[g_fn[k].next].state != 2)
                     break;
             }
-            printf("]}");
+            printf("]");
+            if (back >= 0) {
+                int j = fi;
+                for (int q = 0; q < back; q++)
+                    j = g_fn[j].next;
+                printf(", \"recursion\": ");
+                json_name(g_fn[j].name);
+            }
+            printf("}");
         } else {
             if (w >= 0)
                 printf("%s %s: %lld bytes at most\n",
