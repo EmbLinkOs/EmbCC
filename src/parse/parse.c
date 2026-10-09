@@ -1882,13 +1882,20 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
          * a new TY_ kind through ty_size, ty_align, the usual arithmetic
          * conversions, the IR's three float conversions and all four
          * backends, plus __extendhfsf2/__truncsfhf2 on the soft-float
-         * ones -- not a spelling. Saying so beats storing it as a float
-         * and silently giving 24 bits of mantissa where the program
-         * asked for 11 (THE RULE). */
-        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                   "_Float16/__fp16 is not supported: EmbCC has no 16-bit "
-                   "floating-point type, and widening it to `float` would "
-                   "give 24 bits of mantissa where the program asked for 11");
+         * ones -- not a spelling. Storing it as a float would silently
+         * give 24 bits of mantissa where the program asked for 11 (THE
+         * RULE). So it is an INCOMPLETE type: a declaration may name it
+         * -- macOS's <math.h> declares __fabsf16 and its kin
+         * unconditionally -- and a value of it cannot exist. A call, an
+         * object, a sizeof or a cast is refused as for any incomplete
+         * type, naming _Float16. */
+        if (any > 1)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "_Float16 cannot combine with other specifiers");
+        static struct type *f16;
+        if (!f16)
+            f16 = ty_struct("_Float16", 0);
+        return f16;
     }
     if (nf128) {
         if (any > 1)

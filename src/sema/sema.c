@@ -2898,8 +2898,22 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                        "this call needs %s%d argument%s, got %d",
                        ft->is_varargs ? "at least " : "", ft->nptypes,
                        ft->nptypes == 1 ? "" : "s", e->nargs);
+        /* A call makes a value of the return type and copies each
+         * argument, so all of them must be complete (C11 6.5.2.2p1, p4):
+         * a call through `extern struct S k(struct S);` passed and returned
+         * nothing at all. _Float16 is such a type (parse.c). */
+        if (ft->ret->kind == TY_STRUCT && !ft->ret->complete)
+            sema_error_at(u, e->line, e->col,
+                       "calling %s%s%swith incomplete return type %s",
+                       e->callee ? "'" : "a function ",
+                       e->callee ? e->callee->name : "",
+                       e->callee ? "' " : "", ty_name(ft->ret));
         for (int i = 0; i < e->nargs; i++) {
             check_expr(u, f, sc, e->args[i]);
+            if (e->args[i]->ty->kind == TY_STRUCT && !e->args[i]->ty->complete)
+                sema_error_at(u, e->args[i]->line, e->args[i]->col,
+                           "argument %d has incomplete type %s", i + 1,
+                           ty_name(e->args[i]->ty));
             if (e->args[i]->ty->kind != TY_STRUCT)
                 need_scalar(u, e->args[i], "an argument");
             if (i < ft->nptypes)
