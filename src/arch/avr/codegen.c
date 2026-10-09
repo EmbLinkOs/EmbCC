@@ -5282,7 +5282,11 @@ static void avr_ra_pass(struct a_fn *F, int hw, int low, int *taken,
     x = avr_excl(F, hw);
     for (int v = 0; v < nv; v++)
         if (also[v]) x[v] = 1;
-    if (g_a_o0) {
+    /* -O0 and -Og (target_keep_vars): the source variables stay in
+     * their slots, where a debugger reads them; the temporaries are
+     * still allocated, as on the other targets. Turning allocation off
+     * altogether, as -g once did, doubled the code. */
+    if (g_a_o0 || target_keep_vars()) {
         char *pin = ra_debug_pin_vars(fn);
         for (int v = 0; pin && v < nv; v++)
             if (pin[v]) x[v] = 1;
@@ -5880,7 +5884,7 @@ static void gen_func_best(struct ir_func *fn, struct code *t,
     int best = AVR_RA_NONE, best_len = 0;
     int nv = fn->nvregs;
 
-    if (!g_a_regalloc || keep_vars || fn->src->is_isr ||
+    if (!g_a_regalloc || fn->src->is_isr ||
         (avr_knob("EMBCC_AVR_RA_ONLY") &&
          strcmp(avr_knob("EMBCC_AVR_RA_ONLY"), fn->name) != 0)) {
         gen_relaxed(fn, t, st, keep_vars, AVR_RA_NONE, &rb);
