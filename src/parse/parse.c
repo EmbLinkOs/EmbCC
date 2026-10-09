@@ -5177,6 +5177,36 @@ static void parse_weak(struct parser *ps)
     ps->unit->weaks = w;
 }
 
+/* A function prototype that shares a declaration with other declarators,
+ * after the first: `g(double)` in `extern double f(double), g(double);` or
+ * `f(int)` in `extern int a, f(int);`. ps is at its '('. */
+static struct func *sibling_proto(struct parser *ps, struct type *dty,
+                                  const char *name, int line, int col,
+                                  int seq, int is_static, int is_inline,
+                                  int is_extern)
+{
+    struct type *fty = parse_fn_params(ps, dty);
+    struct func *g = xcalloc(1, sizeof *g);
+    g->is_static = is_static;
+    g->decl_inline = is_inline;
+    g->decl_extern = is_extern;
+    g->ret_ty = fty->ret;
+    g->name = name;
+    g->file = ps->lx.file;
+    g->line = line;
+    g->name_line = line;
+    g->name_col = col;
+    g->seq = seq;
+    g->nparams = fty->nptypes;
+    for (int i = 0; i < fty->nptypes; i++) {
+        g->param_tys[i] = fty->ptypes[i];
+        g->params[i] = NULL;  /* unnamed prototype parameters */
+    }
+    g->is_varargs = fty->is_varargs;
+    g->sret_first = fty->sret_first;
+    return g;
+}
+
 static void parse_top(struct parser *ps, struct unit *u,
                       struct func ***ftail, struct global ***gtail,
                       int seq)
@@ -5392,6 +5422,18 @@ static void parse_top(struct parser *ps, struct unit *u,
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "expected a name before %s",
                            tok_describe(cur(ps)));
+            if (!first && cur(ps)->kind == TOK_LPAREN) {
+                /* a function after an object: `extern int a, f(int);` --
+                 * the declarator above stopped at the name */
+                **ftail = sibling_proto(ps, gt, gname, ps->decl_name_line,
+                                        ps->decl_name_col, seq, is_static,
+                                        is_inline, is_extern);
+                *ftail = &(**ftail)->next;
+                if (cur(ps)->kind != TOK_COMMA)
+                    break;
+                advance(ps);
+                continue;
+            }
             if (gt->kind == TY_FUNC && first) {
                 /* a function whose declarator is parenthesized: it
                  * returns a pointer to a function or to an array
@@ -5675,30 +5717,15 @@ fn_tail:
             advance(ps);
             if (cur(ps)->kind == TOK_LPAREN) {
                 /* a sibling function prototype: `g(double)` */
-                struct type *fty = parse_fn_params(ps, dty);
-                struct func *g = xcalloc(1, sizeof *g);
-                g->is_static = is_static;
-                g->decl_inline = is_inline;
-                g->decl_extern = is_extern;
-                g->ret_ty = fty->ret;
-                g->name = dname;
-                g->file = ps->lx.file;
-                g->line = dline;
-                g->name_line = dline;
-                g->name_col = dcol;
-                g->seq = seq;
-                g->nparams = fty->nptypes;
-                for (int i = 0; i < fty->nptypes; i++) {
-                    g->param_tys[i] = fty->ptypes[i];
-                    g->params[i] = NULL;  /* unnamed prototype parameters */
-                }
-                g->is_varargs = fty->is_varargs;
-                g->sret_first = fty->sret_first;
+                struct func *g = sibling_proto(ps, dty, dname, dline, dcol,
+                                               seq, is_static, is_inline,
+                                               is_extern);
                 **ftail = g;
                 *ftail = &g->next;
             } else {
                 /* a sibling variable: `x`, `*p`, `a[10]`, with optional init */
                 struct type *vty = parse_array_dims(ps, dty);
+                ps->decl_name = dname;
                 parse_attributes(ps, &at);
                 struct global *g = parse_global(ps, vty, dname, dline,
                                                 is_static, is_extern);
