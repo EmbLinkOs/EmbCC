@@ -80,7 +80,10 @@ for spec in \
     "armv7a-none-eabi .text nop 24_8 6_2" \
     "riscv32-unknown-elf .text .2byte_1 24_8 6_2" \
     "riscv64-unknown-elf .text .2byte_1 24_8 6_2" \
-    "avr .text nop 11_1 6_1"
+    "avr .text nop 11_1 6_1" \
+    "mipsel-none-elf .text nop 24_8 6_2" \
+    "mips-none-elf .text nop 24_8 6_2" \
+    "loongarch64-unknown-elf .text nop 24_8 6_2"
 do
     set -- $spec
     t=$1; sec=$2; step=$(echo "$3" | tr _ ' '); wa=$(echo "$4" | tr _ ' ')
@@ -132,14 +135,14 @@ do
     done
     # across the four functions the first probe of a pair lands at more
     # than one phase -- else the test above could not see a template-
-    # relative padding (AArch64 code is all on four: one phase is all)
+    # relative padding (AArch64, A32, MIPS and LoongArch code is all on four: one phase is all)
     case $t in
-    aarch64-elf|arm64-apple-darwin|armv7a-none-eabi) ;;
+    aarch64-elf|arm64-apple-darwin|armv7a-none-eabi|mips*|loongarch*) ;;
     *) [ "$(echo "$firsts" | tr ' ' '\n' | sort -u | grep -c .)" -ge 2 ] || {
            echo "$t: every first probe landed at phase$firsts; the test sees nothing"; exit 1; } ;;
     esac
 done
-echo "the probes say 'a 24 8' and 'b 6 2' ('a 11 1', 'b 6 1' on AVR), a .p2align 2 after one lands on four in the section, in $checked objects: x86-64 ELF, Mach-O and COFF, AArch64 ELF and Mach-O, ARMv7E-M, A32, RV32, RV64 and AVR at -O0, -O2 and -Os"
+echo "the probes say 'a 24 8' and 'b 6 2' ('a 11 1', 'b 6 1' on AVR), a .p2align 2 after one lands on four in the section, in $checked objects: x86-64 ELF, Mach-O and COFF, AArch64 ELF and Mach-O, ARMv7E-M, A32, RV32, RV64, AVR, MIPS32 both ways round and LoongArch64 at -O0, -O2 and -Os"
 
 # A function in a section of its own: there the padding is relative to
 # THAT section, which starts where the function does -- so the function
@@ -177,6 +180,31 @@ for t in thumbv6m thumbv8m.base; do
         echo "$t: the probe is refused without saying why:"; head -3 "$out/err"; exit 1; }
 done
 echo "ARMv6-M and ARMv8-M Baseline refuse the probe's .p2align 2 by name"
+
+# %c0 on the targets whose templates take no strings yet: the constant
+# alone, so an instruction written with it is the one written with the
+# number -- the same object, byte for byte (RX and ColdFire write an
+# immediate operand `#5`; %c0 is `5` there too).
+mkdir -p "$out/pc"
+for spec in "rx-none-elf|mov.l #%c0, r1|mov.l #5, r1" \
+            "m68k-none-elf|moveq #%c0, %%d0|moveq #5, %%d0" \
+            "xtensa-esp32-elf|movi a2, %c0|movi a2, 5" \
+            "tricore-none-elf|mov %%d2, %c0|mov %%d2, 5" \
+            "powerpc-none-eabi|li 3, %c0|li 3, 5" \
+            "sparc-none-elf|mov %c0, %%o1|mov 5, %%o1" \
+            "mipsel-none-elf|addiu \$t0, \$zero, %c0|addiu \$t0, \$zero, 5" \
+            "loongarch64-unknown-elf|addi.d \$t0, \$zero, %c0|addi.d \$t0, \$zero, 5"
+do
+    t=${spec%%|*}; r=${spec#*|}; withc=${r%%|*}; lit=${r#*|}
+    printf 'void f(void){ __asm__ volatile("%s" : : "i"(5)); }\n' "$withc" > "$out/pc/p.c"
+    "$EMBCC" --target=$t -O2 -c "$out/pc/p.c" -o "$out/pc/c.o" 2> "$out/err" || {
+        echo "$t: %c0 in \"$withc\" does not compile:"; head -2 "$out/err"; exit 1; }
+    printf 'void f(void){ __asm__ volatile("%s" : : "i"(5)); }\n' "$lit" > "$out/pc/p.c"
+    "$EMBCC" --target=$t -O2 -c "$out/pc/p.c" -o "$out/pc/l.o" || exit 1
+    cmp -s "$out/pc/c.o" "$out/pc/l.o" || {
+        echo "$t: \"$withc\" with %c0 = 5 is not \"$lit\""; exit 1; }
+done
+echo "%c0 is the constant alone on RX, ColdFire, Xtensa, TriCore, PowerPC, SPARC, MIPS and LoongArch"
 
 # ---- running it ----------------------------------------------------------
 cat > "$out/run.c" <<'CEOF'

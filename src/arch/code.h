@@ -81,7 +81,7 @@ void code_align(struct code *c, int align, int fill);
  * the reason: `.ascii "->SYM %c0"` and `.p2align 2` in a function. */
 struct asm_datadir { const char *name; int size; };
 extern const struct asm_datadir asm_data_x86[], asm_data_a64[],
-                                asm_data_avr[];
+                                asm_data_avr[], asm_data_w32[];
 struct asm_dirs {
     const struct asm_datadir *data;  /* NULL: the target handles its own */
     int align_bytes;                 /* `.align N` is N bytes, not 2^N */

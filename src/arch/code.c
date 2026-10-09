@@ -73,6 +73,13 @@ const struct asm_datadir asm_data_a64[] = {
     { ".4byte", 4 }, { ".quad", 8 }, { ".xword", 8 }, { ".dword", 8 },
     { ".8byte", 8 }, { NULL, 0 }
 };
+const struct asm_datadir asm_data_w32[] = {
+    /* a 32-bit word machine's: MIPS, LoongArch */
+    { ".byte", 1 }, { ".short", 2 }, { ".half", 2 }, { ".hword", 2 },
+    { ".value", 2 }, { ".2byte", 2 }, { ".word", 4 }, { ".long", 4 },
+    { ".int", 4 }, { ".4byte", 4 }, { ".quad", 8 }, { ".dword", 8 },
+    { ".8byte", 8 }, { NULL, 0 }
+};
 const struct asm_datadir asm_data_avr[] = {
     /* the MACHINE's word: two bytes on AVR, as in src/as/gas.c */
     { ".byte", 1 }, { ".short", 2 }, { ".value", 2 }, { ".word", 2 },

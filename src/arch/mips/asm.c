@@ -812,17 +812,18 @@ int mipsasm_encode(const char *text, struct code *out, char *err, int errlen)
     const char *p = text;
     while (*p) {
         const char *start = p;
-        int len;
-        while (*p && *p != ';' && *p != '\n')
-            p++;
-        len = (int)(p - start);
-        for (int i = 0; i < len; i++)
-            if (start[i] == '#' || (start[i] == '/' && i + 1 < len &&
-                                    start[i + 1] == '/')) {
-                len = i;
-                break;
-            }
-        if (one_stmt(start, len, out, err, errlen) != 0)
+        int len, r;
+        /* a `;`, `#` or `//` inside a .ascii string is the string's */
+        p += asm_stmt_len(p, ";");
+        len = asm_cut_comment(start, (int)(p - start), "#", 1);
+        /* .ascii/.asciz/.string, the data directives and the alignments
+         * (code.c), in the target's byte order */
+        {
+            struct asm_dirs dirs = { asm_data_w32, 0, 0 };
+            dirs.big_endian = mips_big_endian();
+            r = code_asm_directive(start, len, out, &dirs, err, errlen);
+        }
+        if (r < 0 || (!r && one_stmt(start, len, out, err, errlen) != 0))
             return -1;
         if (*p)
             p++;
