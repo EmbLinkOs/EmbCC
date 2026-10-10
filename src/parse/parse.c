@@ -978,7 +978,11 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 } else if (cur(ps)->kind == TOK_NUM)
                     arg = cur(ps)->num;
                 else if (cur(ps)->kind == TOK_STR)
-                    sarg = cur(ps)->text;
+                    /* adjacent literals are one string, here as anywhere:
+                     * section(".progmem." "emb_test_table") is how a macro
+                     * builds a section name, and taking the first piece
+                     * put every table in a section called ".progmem." */
+                    sarg = parse_str_literal(ps, "a string");
                 int depth = 1;
                 while (depth > 0 && cur(ps)->kind != TOK_EOF) {
                     if (cur(ps)->kind == TOK_LPAREN) depth++;
