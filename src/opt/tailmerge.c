@@ -16,7 +16,9 @@
  * other definition is the same name. Plain computations, loads, stores
  * and calls with scalar arguments only. The longest such run of at least
  * two instructions goes first, one at a time. Last of the passes, -Os,
- * TARGET_THUMB only. */
+ * on every target: written and measured on ARM, it was gated to it, and
+ * lib/libc at -Os then lost 144 bytes on RV32, 90 on RV64, 460 on AVR,
+ * 60 each on x86-64 and AArch64 with nothing bigger when the gate went. */
 
 #include "opt_int.h"
 

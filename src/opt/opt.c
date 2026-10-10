@@ -462,8 +462,7 @@ static void opt_func(struct ir_func *fn)
      * test instead of through a copy of it (pass_guardjump). */
     /* ...and before that, one copy of each repeated block end
      * (pass_tailmerge) */
-    if (edge_ok && g_opt_size && target_get() == TARGET_THUMB &&
-        !getenv("EMBCC_NO_TAILMERGE")) {
+    if (edge_ok && g_opt_size && !getenv("EMBCC_NO_TAILMERGE")) {
         int guard = 0, any = 0;
         while (guard++ < 256 && pass_tailmerge(fn))
             any = 1;

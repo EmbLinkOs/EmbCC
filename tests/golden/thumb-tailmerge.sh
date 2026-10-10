@@ -163,6 +163,14 @@ L2:
 EOF
 
 copies() { grep -c 'mul.4s %0' "$out/$1.out"; }
+# ...on every target, not ARM alone: the pass was gated to TARGET_THUMB
+for t in riscv32-unknown-elf x86_64-elf avr aarch64-elf; do
+    "$EMBCC" inspect ir -Os --target=$t "$out/pos.ir" > "$out/pos-$t.out" 2>&1 ||
+        { cat "$out/pos-$t.out"; fail "pos on $t: inspect"; }
+    [ "$(grep -c 'mul.4s %0' "$out/pos-$t.out")" = 1 ] ||
+        { cat "$out/pos-$t.out"; fail "pos on $t: the repeated tail was not merged"; }
+done
+echo "the same copy is kept once on RISC-V, x86-64, AVR and AArch64"
 opt pos
 [ "$(copies pos)" = 1 ] || { cat "$out/pos.out"; fail "pos: the run is still there twice"; }
 for c in exit ops local def loop; do
