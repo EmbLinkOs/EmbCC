@@ -65,9 +65,10 @@ struct ls_input {
     int nsec;
     int keep;
     int common;                 /* `*(COMMON)` */
+    int fsort;                  /* SORT(*)(...): files in name order */
 };
 
-enum { LSORT_NAME = 1, LSORT_ALIGN, LSORT_INIT_PRIORITY };
+enum { LSORT_NAME = 1, LSORT_ALIGN, LSORT_INIT_PRIORITY, LSORT_FILE };
 
 struct ls_stmt {
     int kind, line;
@@ -667,6 +668,16 @@ static void lp_section_list(struct lp *p, struct ls_input *in)
 static void lp_input_desc(struct lp *p, struct ls_stmt *s, const char *file)
 {
     s->kind = LS_INPUT;
+    if (!file && (lp_kw(p, "SORT_BY_NAME") || lp_kw(p, "SORT"))) {
+        /* `SORT(*)(.ctors)`, as avr-ld's scripts write it: the matching
+         * files in name order rather than in link order */
+        lp_expect(p, '(');
+        file = lp_pat(p);
+        if (!file)
+            lp_die(p, "SORT needs a file pattern");
+        lp_expect(p, ')');
+        s->in.fsort = 1;
+    }
     if (!file) {
         if (lp_kw(p, "EXCLUDE_FILE"))
             lp_exclude_list(p, &s->in.fexcl, &s->in.nfexcl);

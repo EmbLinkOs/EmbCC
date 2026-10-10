@@ -976,6 +976,45 @@ static int compile_and_link(const char *in, const char *out)
     if (g_entry)
         lo.entry = g_entry;
     lo.script = g_script;
+    /* AVR with -mmcu=: what avr-gcc's driver adds for the part (its device
+     * specs). The part's startup, crt<part>.o (lib/avr/crt.S), first,
+     * unless -nostartfiles or -nostdlib; the part's linker script
+     * (lib/avr/avr5.ld) when the link names none; and SRAM's start as
+     * .data's address (-Tdata 0x800100), which a script written for
+     * several parts -- avr-gcc's default avr5 script and the ones derived
+     * from it -- leaves to the driver. -Ttext, -Tdata and --rom-limit,
+     * given, are applied over the script, as ld applies them. */
+    const struct avr_mcu *mcu = target_avr_mcu();
+    static char avr_script[1024];
+    char avr_crt[1024];
+    int have_avr_crt = 0;
+    if (mcu) {
+        char nm[64];
+        if (!lo.script) {
+            snprintf(nm, sizeof nm, "%s.ld", mcu->name);
+            if (!paths_target_file(lib_triple(), nm, avr_script,
+                                   sizeof avr_script)) {
+                fprintf(stderr, "embcc: error: no %s for avr (-mmcu=%s): "
+                        "the AVR runtime is not built or not installed "
+                        "(make rt-embedded)\n", nm, mcu->name);
+                return 1;
+            }
+            lo.script = avr_script;
+        }
+        if (!lo.data_base)
+            lo.data_base = 0x800100;     /* SRAM's start, every part here */
+        if (!g_nostdlib && !g_nostartfiles) {
+            snprintf(nm, sizeof nm, "crt%s.o", mcu->name);
+            if (!paths_target_file(lib_triple(), nm, avr_crt,
+                                   sizeof avr_crt)) {
+                fprintf(stderr, "embcc: error: no %s for avr (-mmcu=%s): "
+                        "the AVR runtime is not built or not installed "
+                        "(make rt-embedded)\n", nm, mcu->name);
+                return 1;
+            }
+            have_avr_crt = 1;
+        }
+    }
     lo.libdirs = g_libdirs;
     lo.nlibdirs = g_nlibdirs;
     lo.undefs = g_undefs;
@@ -1067,6 +1106,8 @@ static int compile_and_link(const char *in, const char *out)
     }
     if (have_crt1)
         inputs[n++] = crt1;
+    if (have_avr_crt)
+        inputs[n++] = avr_crt;
     if (in)
         inputs[n++] = obj;
     for (int k = 0; k < g_nlink_in; k++) {

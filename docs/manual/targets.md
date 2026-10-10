@@ -2289,7 +2289,10 @@ Integer multiplication and division are helper calls with libgcc's names
 (`__mulsi3`, `__divsi3`, `__umodsi3`, `__muldi3`, `__divdi3`, ...), from
 `lib/rt/avr.c` and `avr64.c`; floating-point arithmetic calls the
 binary32 helpers (`__addsf3`, ...) in `lib/rt/avrfp*.c`. `make
-rt-embedded` builds `librt.a` for `avr`.
+rt-embedded` builds `librt.a` for `avr`, and for each `-mmcu=` part its
+startup `crt<part>.o` and linker script `<part>.ld`, which the driver
+links under `-mmcu=` (see
+[Startup and the interrupt vector table](embedded.md#startup-and-the-interrupt-vector-table)).
 
 ### Debugging
 

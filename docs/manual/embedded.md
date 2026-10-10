@@ -1277,23 +1277,58 @@ how to keep track. `--rom-limit` counts the stored copy of `.data` and
 
 ### Startup and the interrupt vector table
 
-The AVR startup is assembly, because three of its jobs have no C
-spelling: set `SPH`/`SPL` (the stack pointer is zero at reset), clear
-`r1` (every AVR object treats `r1` as zero), and copy the data image with
-`lpm`, which reads program space. EmbCC assembles AVR `.S` files itself.
-`tests/harness/avr/boot.S` is a complete startup:
+With `-mmcu=`, the driver links what avr-gcc's does for the part:
 
-- `__vectors` at address 0 is the 26-entry vector table, one `jmp` per
-  entry. Entry 0 jumps to `reset`; entry *n* jumps to `__vector_n`, each
-  declared `.weak`, so a vector the program does not define resolves to
-  address 0 and restarts the program.
-- `reset` sets the stack pointer to `0x08FF`, clears `r1` and `SREG`,
-  copies `__data_load` to `__data_start`..`__data_end`, zeroes
-  `__bss_start`..`__bss_end`, and calls `main`.
-- It defines `__do_copy_data` and `__do_clear_bss` at those loops.
-  avr-gcc and Clang emit references to both names from any unit with
-  initialised or zeroed data; defining them is what lets objects from
-  those compilers link into the same image.
+```sh
+embcc --target=avr -mmcu=atmega328p -Os main.c -o fw.elf
+```
+
+- **The startup**, `crt<part>.o` (`lib/avr/crt.S`), first, unless
+  `-nostartfiles` or `-nostdlib`. It has avr-libc's and libgcc's names
+  and sections, so a program written for avr-gcc, and its own `.S` files,
+  find what they expect:
+  - `.vectors`: `__vectors` at address 0, the part's 26-entry table, one
+    `jmp` each. Entry 0 jumps to `__init`; entry *n* to `__vector_n`,
+    which is a weak alias of `__bad_interrupt`, so an `ISR()` replaces it
+    and any other vector goes to `__bad_interrupt`. That jumps to
+    `__vector_default`: the program's `ISR(BADISR_vect)`, or else address
+    0, a restart.
+  - `.init0` `__init`; `.init2` clears `r1` and `SREG` and sets the stack
+    pointer to `__stack` (weak, `RAMEND` unless the link defines it);
+    `.init4` `__do_copy_data` (`.data` and `.rodata` from their copy in
+    flash, `__data_load_start` to `__data_start`..`__data_end`) and
+    `__do_clear_bss` (`__bss_start`..`__bss_end`); `.init6`
+    `__do_global_ctors`, each function in `.init_array`
+    (`__attribute__((constructor))`) when the script brackets it with
+    `__init_array_start`/`__init_array_end`; `.init9` calls `main` and
+    then `exit`.
+  - `.fini9` `_exit`, with `exit` a weak name for it, as avr-libc's;
+    `.fini0` disables interrupts and stops in a loop.
+  - A program adds a step to the sequence with code in `.init1`,
+    `.init3`, `.init5`, `.init7`, `.init8` or `.fini8`..`.fini1`, without a
+    `ret`: the sections run into each other. It has to be a `.S` file:
+    EmbCC places a naked C function's body in `.text`, so avr-libc's
+    naked `.init3` function is refused (`naked function ... in section
+    '.init3' is not supported yet`).
+- **The linker script**, when the link names none: `<part>.ld`
+  (`lib/avr/avr5.ld` with the part's memories), avr-ld's layout: flash
+  from 0 with the vectors, `PROGMEM` data, `.init0`..`.init9`, the code
+  and `.fini9`..`.fini0`; the data space from `0x800000` in the linker's
+  view, with `.data`, `.rodata` and `.init_array` stored after the code
+  and copied, then `.bss` and `.noinit`; `.eeprom` from `0x810000`.
+- **`-Tdata 0x800100`**, SRAM's start, unless the link gives `-Tdata`:
+  avr-gcc's device specs pass it beside any script, and the default
+  avr5 script and the scripts derived from it rely on it (their data
+  region starts at `0x800060`, under the ATmega328P's extended I/O).
+
+A script of the program's own works as with avr-gcc
+(`-T arduino_uno.ld`); `-Wl,-Ttext=`, `-Wl,-Tdata=` and
+`-Wl,--rom-limit=` apply over it. `tests/golden/avr-crt.sh` links one
+program by the part's script, by an avr5-style one, and by that with
+the flags, and runs all three on QEMU's ATmega328P.
+
+Without `-mmcu=`, nothing is added: the program brings its startup, as
+`tests/harness/avr/boot.S` is, and its memory map:
 
 ```sh
 embcc --target=avr -c tests/harness/avr/boot.S -o boot.o

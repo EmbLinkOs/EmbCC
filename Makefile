@@ -827,6 +827,8 @@ install-files:
 	        cp $(BUILD)/libcxx/$$dir/libcxx.a $(LIBROOT)/$$triple/libcxx.a; \
 	    case $$triple in *-linux-gnu) \
 	        cp lib/libc/os/linux/link.ld $(LIBROOT)/$$triple/link.ld ;; \
+	    avr) for f in $(BUILD)/libc/avr/crt*.o $(BUILD)/libc/avr/*.ld; do \
+	        [ -f $$f ] && cp $$f $(LIBROOT)/avr/; done ;; \
 	    esac; \
 	    true; \
 	done
