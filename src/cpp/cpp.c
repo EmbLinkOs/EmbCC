@@ -730,6 +730,14 @@ static long eval_primary(struct evalp *e)
             cerr(e->s, "bad character constant in #if", NULL);
             return 0;
         }
+        if (!cpfx && (*q != '\'' || (!c.raw && c.v > 0x7F))) {
+            /* 'ab' in #if has the value it has in the code it guards */
+            long mv = lit_multichar(&q, c, e->s->file, e->s->line, 0);
+            if (*q != '\'')
+                cerr(e->s, "bad character constant in #if", NULL);
+            e->p = q + 1;
+            return mv;
+        }
         if (*q != '\'')
             cerr(e->s, "bad character constant in #if", NULL);
         e->p = q + 1;

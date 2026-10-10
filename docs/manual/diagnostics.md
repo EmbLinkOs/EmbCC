@@ -633,6 +633,7 @@ nothing on.
 | `-Wmaybe-uninitialized` | A local variable read on a path where only some paths wrote it | `-Wall` |
 | `-Wmissing-declarations` | A function with external linkage defined with no declaration before it (when `-Wmissing-prototypes` is off) | none |
 | `-Wmissing-prototypes` | A function with external linkage defined with no prototype before it | none |
+| `-Wmultichar` | A character constant of more than one character, `'ab'` | default |
 | `-Wnested-externs` | An `extern` declaration inside a function body | none |
 | `-Wold-style-declaration` | A storage class or `inline` after the type specifiers: `const static int t[]`, `int static n` | `-Wextra` |
 | `-Woverflow` | An integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;` | default |

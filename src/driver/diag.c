@@ -751,6 +751,9 @@ static struct warn_opt g_warns[] = {
     { "float-conversion",     0,  0,    0 },
     { "arith-conversion",     0,  0,    0 },
     { "overflow",             1,  0,    0 },
+    /* 'ab': an int of implementation-defined value (GCC's and clang's
+     * is computed here), on by default as in GCC */
+    { "multichar",            1,  0,    0 },
 };
 static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
 

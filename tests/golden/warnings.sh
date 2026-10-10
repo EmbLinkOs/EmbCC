@@ -474,4 +474,20 @@ if command -v llvm-nm > /dev/null 2>&1; then
             { llvm-nm "$out/osd.o"; echo "FAIL: '$v' is not a local read-only symbol"; exit 1; }
     done
 fi
-echo "the coding-standard warnings at their lines, -Wformat=2, the gcc-only ones, no stray notes, and -Wold-style-declaration"
+# a multi-character constant: GCC's value, and its -Wmultichar
+printf "int a = 'ab';\nint b = 'abcde';\nint c = 'a';\n#if 'ab' != 0x6162\n#error\n#endif\nint d = '\303\251';\nint e = '\\\\xff\\\\xfe';\n" > "$out/mc.c"
+"$EMBCC" --target=x86_64-elf -c "$out/mc.c" -o "$out/mc.o" 2> "$out/mc.txt" ||
+    { cat "$out/mc.txt"; echo "FAIL: a multi-character constant was refused"; exit 1; }
+[ "$(grep -c 'mc.c:1:.*multi-character character constant \[-Wmultichar\]' "$out/mc.txt")" = 1 ] &&
+    grep -q 'mc.c:2:.*character constant too long for its type' "$out/mc.txt" &&
+    [ "$(grep -c warning "$out/mc.txt")" = 5 ] ||   # the #if's 'ab' too
+    { cat "$out/mc.txt"; echo "FAIL: -Wmultichar"; exit 1; }
+"$EMBCC" --target=x86_64-elf -Wno-multichar -fsyntax-only "$out/mc.c" 2>&1 | grep -q Wmultichar &&
+    { echo "FAIL: -Wno-multichar"; exit 1; }
+if command -v x86_64-elf-gcc > /dev/null 2>&1 && command -v llvm-objdump > /dev/null 2>&1; then
+    x86_64-elf-gcc -c "$out/mc.c" -o "$out/mcg.o" 2> /dev/null
+    mcdata() { llvm-objdump -s -j .data "$1" | grep '^ [0-9a-f][0-9a-f]* '; }
+    [ -n "$(mcdata "$out/mc.o")" ] && [ "$(mcdata "$out/mc.o")" = "$(mcdata "$out/mcg.o")" ] ||
+        { echo "FAIL: multi-character values differ from GCC's"; exit 1; }
+fi
+echo "the coding-standard warnings at their lines, -Wformat=2, the gcc-only ones, no stray notes, -Wold-style-declaration and -Wmultichar"

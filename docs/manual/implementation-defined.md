@@ -227,12 +227,18 @@ to a single-byte execution character (C17 6.4.4.4).*
 A character constant is one byte, read as plain `char`: `'\377'` is −1
 where plain `char` is signed and 255 where it is unsigned.
 
-A constant of more than one character is refused, and so is a single
-character that takes more than one byte in UTF-8:
+A constant of more than one byte has type `int` and GCC's value: the
+bytes in order, the last one lowest, so `'ab'` is `0x6162` and `'RIFF'`
+is `0x52494646`. A character that takes more than one byte in UTF-8
+counts as its bytes: `'é'` is `0xC3A9`. More bytes than an `int` holds
+(four, or two on AVR) keep the last ones. The value is read as a signed
+`int`: `'\xff\xff\xff\xff'` is −1. `#if` computes the same value. Each
+such constant is reported, as GCC reports it, by `-Wmultichar` (on by
+default), or, past the width of an `int`, by a warning no option controls:
 
 ```text
-embcc: f.c:1: error: a character constant holds one character (multi-character constants are not supported)
-embcc: f.c:1: error: character U+00E9 does not fit in one byte; write it as a wide constant (L'...')
+embcc: f.c:1:9: warning: multi-character character constant [-Wmultichar]
+embcc: f.c:2:9: warning: character constant too long for its type
 ```
 
 An octal or hexadecimal escape whose value does not fit in a byte keeps
@@ -252,7 +258,7 @@ a multibyte character or escape sequence not represented in the extended
 execution character set (C17 6.4.4.4).*
 
 A wide character constant with more than one character (`L'ab'`) is
-refused with the multi-character error above. An `L'...'` or `U'...'`
+refused: `a wide character constant holds one character`. An `L'...'` or `U'...'`
 constant has the code point of its character as its value. A `u'...'`
 constant whose character needs a UTF-16 surrogate pair is refused:
 

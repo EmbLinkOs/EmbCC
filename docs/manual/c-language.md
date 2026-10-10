@@ -171,7 +171,7 @@ define `__GNUC__` when compiling C.
 | `goto`, labels, `switch` | Supported | |
 | Adjacent string literal concatenation | Supported | A prefixed and an unprefixed literal concatenate: `L"wi" "de"` is `L"wide"`. |
 | Wide literals `L"..."`, `L'x'` | Supported | |
-| Multi-character constants `'ab'` | Not supported | `a character constant holds one character (multi-character constants are not supported)` |
+| Multi-character constants `'ab'` | Supported | GCC's value, reported by `-Wmultichar` as in GCC. See [Implementation-defined behaviour](implementation-defined.md). A wide one, `L'ab'`, is refused: `a wide character constant holds one character`. |
 | Trigraphs `??=` `??(` ... | Not supported | Not replaced: `"??="` is a three-character string. C23 removed them. |
 
 ### C95 (Amendment 1)
@@ -879,7 +879,7 @@ error: unknown escape '\
 | Directive | Status | Notes |
 |---|---|---|
 | `#include "file"`, `#include <file>` | Supported | The search order is in [Invoking EmbCC](invoking.md#search-order). |
-| `#include` with a macro-expanded name, `#include HEADER` | Not supported | `malformed #include` |
+| `#include` with a macro-expanded name, `#include HEADER` | Supported | The replacement must be one of the two forms, `"name"` or `<name>`: `#include CMSIS_device_header`. |
 | `#define`, `#undef` | Supported | Redefining a macro with a body that differs only in white space is accepted with a warning, `macro 'NAME' redefined`; the standard allows it silently. |
 | `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif` | Partial | See [Conditional expressions](#conditional-expressions). |
 | `#elifdef`, `#elifndef` | Supported | |
@@ -905,7 +905,6 @@ standard:
 | Case | Behavior |
 |---|---|
 | Unsigned arithmetic | Every value is a signed 64-bit integer; a `u` suffix is ignored. `#if -1 < 0u` is true; the standard makes it false. |
-| A multi-character constant | `bad character constant in #if` |
 
 ### Macro expansion
 
