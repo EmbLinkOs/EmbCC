@@ -2351,6 +2351,14 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 Code compiled at `-O0` is large; an ordinary program may not fit the
 part's 32 KB of flash unless built with `-O1` or above.
 
+At `-Os` EmbCC's AVR code is larger than clang's for the same source
+(EmbLinkRTOS's conformance images: 21.8 KB to 44.8 KB, against clang's
+16.3 KB to 33.9 KB), and its stack frames are several times larger
+(`-fstack-usage`, EmbCC against clang: 77 and 6 bytes for a test function
+that only sleeps, 30 and 5 for the kernel's `embk_wait_commit`). Stack
+sizes chosen for avr-gcc can overflow under EmbCC; measure with
+`-fstack-usage`.
+
 <!-- UNVERIFIED: the -O0 size remark comes from a commit message ("-O0 does not fit the part" for one test), not from a measurement made for this page. -->
 
 ## Running programs under QEMU
