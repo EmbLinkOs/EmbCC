@@ -133,6 +133,16 @@ static int sroa_const(struct ir_func *fn, struct defs *d, int v, long *out,
     }
 }
 
+/* An address widened from the target's pointer width with zeros: the same
+ * address. AVR's pointers are two bytes in four-byte values, and a pointer
+ * variable mem2reg has promoted is read as `ext.4:2` of what it held --
+ * which hid `int *p = &x.f` from the second look. */
+static int sroa_addr_ext(const struct ir_ins *i)
+{
+    return i->op == IR_EXT && !i->sign && !i->flt &&
+           i->size == target_ptr_size() && i->w > i->size;
+}
+
 /* A read of a tracked address anywhere this pass cannot account for: the
  * object escapes, so it stays whole. */
 struct sroa_ctx { char *cand; const char **why; const int *abase; int nvr; };
@@ -391,12 +401,15 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
                     continue;
                 }
                 abase[dst] = L; aoff[dst] = 0;
-            } else if (in->op == IR_MOV) {
+            } else if (in->op == IR_MOV || sroa_addr_ext(in)) {
                 if (in->a >= 0 && in->a < nvr && abase[in->a] >= 0 && single) {
                     abase[dst] = abase[in->a];
                     aoff[dst] = aoff[in->a];
                 }
-            } else if (in->op == IR_ADD && in->w == 8) {
+            } else if (in->op == IR_ADD && in->w == target_ptr_size()) {
+                /* an address is the target's pointer width: 4 on the
+                 * 32-bit machines and 2 on AVR, where this was 8 alone
+                 * and no field past the first was ever followed */
                 int bs = -1; long k = 0; int have = 0;
                 if (in->a >= 0 && in->a < nvr && abase[in->a] >= 0) {
                     bs = in->a;
@@ -424,7 +437,7 @@ int pass_sroa(struct ir_func *fn, int report_refusals)
         switch (in->op) {
         case IR_ADDR:
             break;                  /* the root; its `a` is a slot, not a read */
-        case IR_MOV: case IR_ADD:
+        case IR_MOV: case IR_ADD: case IR_EXT:
             /* Accounted for when the result was tracked above. Otherwise
              * the address flowed into arithmetic this pass cannot follow. */
             if (in->dst >= 0 && in->dst < nvr && abase[in->dst] >= 0)
