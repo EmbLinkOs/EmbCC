@@ -5265,6 +5265,10 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-mno-unaligned-access") == 0) {
             diag_fatal(NULL, 0, "%s is an ARM option, and the target "
                        "is %s", argv[i], target_triple_now());
+        } else if (strncmp(argv[i], "-mmcu=", 6) == 0) {
+            /* AVR's own (src/arch/avr/options.c), asked above */
+            diag_fatal(NULL, 0, "%s is an AVR option, and the target is %s "
+                       "(--target=avr)", argv[i], target_triple_now());
         } else if (strncmp(argv[i], "-fsanitize=", 11) == 0 ||
                    strncmp(argv[i], "-fno-sanitize=", 14) == 0 ||
                    strncmp(argv[i], "-fsanitize-trap", 15) == 0 ||

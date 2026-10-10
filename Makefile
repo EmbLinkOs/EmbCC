@@ -159,6 +159,7 @@ SRCS := \
 	src/arch/coldfire/options.c src/arch/mips/options.c \
 	src/arch/tricore/options.c \
 	src/arch/thumb/options.c src/arch/riscv/options.c \
+	src/arch/avr/options.c \
 	src/arch/code.c \
 	src/arch/predef.c \
 	src/arch/x86_64/irgen.c \
@@ -478,6 +479,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/sparc32/predef.c src/arch/sparc32/predef_cxx.c \
              src/arch/coldfire/predef.c src/arch/coldfire/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
+             src/arch/avr/options.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
              src/arch/thumbv8mbase/predef.c src/arch/thumbv8mbase/predef_cxx.c \

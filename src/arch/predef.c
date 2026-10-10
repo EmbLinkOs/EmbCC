@@ -398,6 +398,16 @@ static int thumb_fpu_drops(const char *name)
     return strcmp(name, "__SOFTFP__") == 0 || strcmp(name, "__ARM_FP") == 0;
 }
 
+/* AVR's -mmcu= (src/arch/avr/options.c). The generated table is clang's
+ * for -mmcu=atmega328p; for another part of the same avr5 core clang's
+ * answer differs in one macro, the part's own name (__AVR_ATmega168__),
+ * so that one is replaced and the table is otherwise the part's. */
+static int avr_other_part(void)
+{
+    const struct avr_mcu *m = target_avr_mcu();
+    return m && strcmp(m->macro, "__AVR_ATmega328P__") != 0;
+}
+
 /* __ELF__ lives in the generated architecture tables, because the
  * compilers they were generated from were the *-elf ones. It is a
  * statement about the OBJECT FORMAT, so on a target that is not ELF it
@@ -416,7 +426,8 @@ static int contradicted(const char *name)
            thumb_fpu_drops(name) || riscv_drops(name) ||
            (thumb_dsp() && target_thumb_arch() == 7 &&
             strcmp(name, "__ARM_ARCH_7M__") == 0) ||
-           (target_thumb_cmse() && strcmp(name, "__ARM_FEATURE_CMSE") == 0);
+           (target_thumb_cmse() && strcmp(name, "__ARM_FEATURE_CMSE") == 0) ||
+           (avr_other_part() && strcmp(name, "__AVR_ATmega328P__") == 0);
 }
 
 const struct predef_macro *predef_table(int *count)
@@ -451,7 +462,9 @@ const struct predef_macro *predef_table(int *count)
     int cmse = target_thumb_cmse();
     int rv = riscv_changes();
     int dsp = thumb_dsp();
-    if (!os && !fpu && !cmse && !rv && !dsp && target_fmt_get() == TGT_FMT_ELF) {
+    int avr = avr_other_part();
+    if (!os && !fpu && !cmse && !rv && !dsp && !avr &&
+        target_fmt_get() == TGT_FMT_ELF) {
         *count = narch;
         return arch;
     }
@@ -478,6 +491,10 @@ const struct predef_macro *predef_table(int *count)
                 merged[nmerged++] = thumb_dsp_add[i];
         if (rv)
             nmerged += riscv_adds(merged + nmerged);
+        if (avr) {
+            merged[nmerged].name = target_avr_mcu()->macro;
+            merged[nmerged++].value = "1";
+        }
         if (fpu && target_arm_a32()) {
             int v4 = target_arm_vfp(NULL) == 4;
             const struct predef_macro *add = v4 ? a32_vfp4_add : a32_vfp3_add;

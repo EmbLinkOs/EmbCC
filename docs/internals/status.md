@@ -538,7 +538,7 @@ list, with the options that are accepted and have no effect, is in
 
 These are unknown arguments (`embcc: error: unknown argument '-march=native'`,
 followed by the usage summary): `-march=`, `-mtune=`, `-m32`, `-m64`,
-`-mabi=` on x86-64, AArch64 and AVR, `-mmcu=`, `-mavx2` and the other x86
+`-mabi=` on x86-64, AArch64 and AVR, `-mavx2` and the other x86
 feature flags; `-imacros`, `-iquote`, `-idirafter`, `-undef`; `-ansi`;
 `-ffp-contract=`, `-funroll-loops`, `-ftrapv`, `-fvisibility=`,
 `-fopenmp`; `-v`. The flags GCC builds for Cortex-M pass (`-ffast-math`,

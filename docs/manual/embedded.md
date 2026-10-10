@@ -1239,8 +1239,10 @@ function the program overrides to reach its UART) for `mipsel-none-elf`.
 ### The target and its data model
 
 `--target=avr` generates code for the ATmega328P (`__AVR_ATmega328P__`,
-AVR architecture 5). There is no `-mmcu=` option
-(`embcc: error: unknown argument '-mmcu=atmega328p'`); the part is fixed.
+AVR architecture 5). `-mmcu=atmega328p` names it, and `-mmcu=atmega328`,
+`atmega168p` and `atmega168` the other parts of its family with the same
+core ([Targets](targets.md#avr) lists their memories); any other part is
+refused by name.
 
 | Type | Size |
 |---|---|

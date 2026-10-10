@@ -213,8 +213,8 @@ and AArch64.
 | `-mcmodel=MODEL` | Accepted with any value; no effect. Each target uses the single code model described in its section. |
 
 Any other `-m` option not listed in a target's section is an error:
-`embcc: error: unknown argument '-mfoo'`. In particular `-m32`, `-m64`
-and `-mmcu=` are not accepted, and `-march=` and `-mabi=` only on MIPS
+`embcc: error: unknown argument '-mfoo'`. In particular `-m32` and `-m64`
+are not accepted, `-mmcu=` only on [AVR](#avr), and `-march=` and `-mabi=` only on MIPS
 and LoongArch (see [MIPS32](#mips32) and [LoongArch64](#loongarch64)).
 and (`-mabi=`) Xtensa (see [MIPS32](#mips32) and [Xtensa](#xtensa)).
 
@@ -2177,8 +2177,29 @@ the entry.
 |---|---|
 | `avr` | `avr-none-elf`, `avr-elf`, `avr-unknown-none` |
 
-The part is the ATmega328P (the AVR5 architecture, as on the Arduino
-Uno). There is no option to choose another; `-mmcu=` is not accepted.
+The code is for the ATmega328P's core (the AVR5 architecture, as on
+the Arduino Uno), and without `-mmcu=` the part is the ATmega328P.
+
+### Options
+
+| Option | What it does |
+|---|---|
+| `-mmcu=atmega328p`, `atmega328`, `atmega168p`, `atmega168` | Selects the part: its predefined macro (`__AVR_ATmega168__` and so on) replaces `__AVR_ATmega328P__`. These four are the avr5 parts of the ATmega328P's datasheet family; they differ only in their memories. |
+| `-mmcu=atmega48`, `atmega88` and their `a`, `p`, `pa` forms | Refused: `-mmcu=atmega88 is not supported: the atmega88 is an avr4 part, with no jmp or call instruction, and EmbCC's AVR code calls with `call` ...` |
+| `-mmcu=` any other part | Refused: `-mmcu=atmega2560 is not supported: EmbCC's AVR backend generates code for the ATmega328P's avr5 core, and knows the memories and vectors of atmega328p, atmega328, atmega168p and atmega168 alone` |
+| `-mrelax`, `-mno-relax` | Accepted, and declined: EmbLD does not shorten `call` and `jmp` to `rcall` and `rjmp`, so the image is the same program, larger than avr-gcc's relaxed one. |
+| `-mcall-prologues`, `-mno-call-prologues` | Accepted, and declined: every prologue and epilogue is written in its function rather than shared through `__prologue_saves__`. The calling convention is the same either way. |
+| `-mdouble=32`, `-mlong-double=32` | Accepted: what EmbCC does. |
+| `-mdouble=64`, `-mlong-double=64` | Refused: `-mdouble=64 is not supported: double and long double are binary32 on this target, the same type as float, and a 64-bit double changes the ABI of every one` |
+| `-mint8` | Refused: `-mint8 is not supported: int is 16 bits on this target, ...` |
+
+| Part | Flash | SRAM | EEPROM | Vectors |
+|---|---|---|---|---|
+| ATmega328P, ATmega328 | 32 KB | 2 KB, `0x0100`-`0x08FF` | 1 KB | 26 |
+| ATmega168P, ATmega168 | 16 KB | 1 KB, `0x0100`-`0x04FF` | 512 bytes | 26 |
+
+`-mmcu=` on another target is refused: `-mmcu=atmega328p is an AVR
+option, and the target is x86_64-elf (--target=avr)`.
 
 ### Data model
 
@@ -2232,7 +2253,10 @@ From `clang --target=avr -mmcu=atmega328p`: `__AVR__`, `__AVR`, `AVR`,
 `__AVR_ATmega328P__`, `__AVR_ARCH__` (5), `__AVR_HAVE_MUL__`,
 `__AVR_HAVE_MOVW__`, `__AVR_HAVE_LPMX__`, `__AVR_HAVE_JMP_CALL__`,
 `__AVR_2_BYTE_PC__`, `__SIZEOF_INT__` (2), `__SIZEOF_POINTER__` (2),
-`__SIZEOF_DOUBLE__` (4).
+`__SIZEOF_DOUBLE__` (4). With `-mmcu=` for another part, the part's
+macro (`__AVR_ATmega328__`, `__AVR_ATmega168P__`, `__AVR_ATmega168__`)
+stands in place of `__AVR_ATmega328P__`, as clang's table for that part
+does; nothing else in the table changes.
 
 The table also defines `__flash`, as
 `__attribute__((__address_space__(1)))`, which EmbCC implements: `const`
