@@ -1517,7 +1517,9 @@ EmbCC does not use the part's `mul` instruction, and the part has no
 divide, so every integer multiply, divide and remainder is a call: `__mulsi3`, `__divsi3`,
 `__udivsi3`, `__modsi3`, `__umodsi3` for 8-, 16- and 32-bit operands, and
 `__muldi3`, `__divdi3`, `__udivdi3`, `__moddi3`, `__umoddi3` for 64-bit.
-A quotient and a remainder of the same operands are two calls. Every
+A quotient and a remainder of the same operands are two calls. The 64-bit
+`__udivdi3` and `__umoddi3` are assembly, about 2500 cycles a division
+(the signed ones call them). Every
 floating-point operation is a call into the binary32 routines (`__addsf3`,
 `__mulsf3`, `__divsf3`, `__ltsf2`, `__fixsfsi`, ...). EmbCC does not call
 avr-gcc's `__divmodsi4` family, and its `librt.a` does not define it.
