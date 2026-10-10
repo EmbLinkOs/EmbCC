@@ -169,6 +169,38 @@ done
       cat "$out/cppwarns"; exit 1; }
 echo "C++ calls are checked too, through the lowering, with the indices moved"
 
+# ---- by each target's sizes ----------------------------------------------
+# int is 2 bytes on AVR and long 4 on the 32-bit targets: the right calls
+# are quiet there and the wrong ones are reported in that target's sizes
+# (the check once judged every target by LP64's, and every `%d` on AVR and
+# `%ld` on Cortex-M was "reads 4"/"reads 8"). Lines 6-8 are right on every
+# target; 10 is wrong on every one, and 9 where int and long differ in
+# size (a same-size mismatch is not reported, by design).
+cat > "$out/sizes.c" << 'EOF'
+int printf(const char *f, ...) __attribute__((format(printf, 1, 2)));
+int sscanf(const char *s, const char *f, ...) __attribute__((format(scanf, 2, 3)));
+typedef __SIZE_TYPE__ size_t;
+void f(int i, long l, long long q, short h, size_t z, float *pf, short *ps)
+{
+    printf("%d %u %x %c %hd", i, (unsigned)i, (unsigned)i, i, h);
+    printf("%ld %lu %lld %zu", l, (unsigned long)l, q, z);
+    sscanf("", "%f %hd %d %ld", pf, ps, &i, &l);
+    printf("%ld\n", i);
+    printf("%d\n", q);
+}
+EOF
+for tw in avr:"9 10 " thumbv7m-none-eabi:"10 " riscv32-unknown-elf:"10 " x86_64-elf:"9 10 "; do
+    t=${tw%%:*} w=${tw#*:}
+    "$EMBCC" --target=$t -Wall -c "$out/sizes.c" -o "$out/sizes.o" 2>&1 |
+        sed -n 's|.*sizes.c:\([0-9]*\):.*\[-Wformat\].*|\1|p' | sort -un | tr '\n' ' ' > "$out/sizes-$t"
+    [ "$(cat "$out/sizes-$t")" = "$w" ] ||
+        { echo "FAIL: $t reported lines '$(cat "$out/sizes-$t")', not '$w'"; exit 1; }
+done
+"$EMBCC" --target=avr -Wall -c "$out/sizes.c" -o "$out/sizes.o" 2> "$out/sizes.err" || true
+grep -q 'reads 4 bytes, but this argument is int, which is 2' "$out/sizes.err" ||
+    { cat "$out/sizes.err"; echo "FAIL: AVR's %ld is not 4 bytes against a 2-byte int"; exit 1; }
+echo "each target is judged by its own sizes: AVR's 2-byte int, the 32-bit targets' 4-byte long"
+
 echo "a format that disagrees with its arguments is caught where the call
 is written, and which functions to check comes from the declaration
 rather than from a list of names inside the compiler"

@@ -850,7 +850,9 @@ nothing is promoted through the pointer: `%f` writes a `float` and `%lf`
 a `double`. It reports:
 
 - an integer conversion whose argument has a different size
-  (`%d reads 4 bytes, but this argument is long, which is 8`);
+  (`%d reads 4 bytes, but this argument is long, which is 8`), by the
+  target's sizes: `%ld` reads 8 bytes on x86-64 and AArch64, 4 on the
+  32-bit targets and AVR, where `%d` reads 2;
 - an integer conversion given a pointer or a non-integer, a floating
   conversion given a non-floating argument, `%Lf`-style mismatches
   between `double` and `long double`;

@@ -976,6 +976,45 @@ static int compile_and_link(const char *in, const char *out)
     if (g_entry)
         lo.entry = g_entry;
     lo.script = g_script;
+    /* AVR with -mmcu=: what avr-gcc's driver adds for the part (its device
+     * specs). The part's startup, crt<part>.o (lib/avr/crt.S), first,
+     * unless -nostartfiles or -nostdlib; the part's linker script
+     * (lib/avr/avr5.ld) when the link names none; and SRAM's start as
+     * .data's address (-Tdata 0x800100), which a script written for
+     * several parts -- avr-gcc's default avr5 script and the ones derived
+     * from it -- leaves to the driver. -Ttext, -Tdata and --rom-limit,
+     * given, are applied over the script, as ld applies them. */
+    const struct avr_mcu *mcu = target_avr_mcu();
+    static char avr_script[1024];
+    char avr_crt[1024];
+    int have_avr_crt = 0;
+    if (mcu) {
+        char nm[64];
+        if (!lo.script) {
+            snprintf(nm, sizeof nm, "%s.ld", mcu->name);
+            if (!paths_target_file(lib_triple(), nm, avr_script,
+                                   sizeof avr_script)) {
+                fprintf(stderr, "embcc: error: no %s for avr (-mmcu=%s): "
+                        "the AVR runtime is not built or not installed "
+                        "(make rt-embedded)\n", nm, mcu->name);
+                return 1;
+            }
+            lo.script = avr_script;
+        }
+        if (!lo.data_base)
+            lo.data_base = 0x800100;     /* SRAM's start, every part here */
+        if (!g_nostdlib && !g_nostartfiles) {
+            snprintf(nm, sizeof nm, "crt%s.o", mcu->name);
+            if (!paths_target_file(lib_triple(), nm, avr_crt,
+                                   sizeof avr_crt)) {
+                fprintf(stderr, "embcc: error: no %s for avr (-mmcu=%s): "
+                        "the AVR runtime is not built or not installed "
+                        "(make rt-embedded)\n", nm, mcu->name);
+                return 1;
+            }
+            have_avr_crt = 1;
+        }
+    }
     lo.libdirs = g_libdirs;
     lo.nlibdirs = g_nlibdirs;
     lo.undefs = g_undefs;
@@ -1067,6 +1106,8 @@ static int compile_and_link(const char *in, const char *out)
     }
     if (have_crt1)
         inputs[n++] = crt1;
+    if (have_avr_crt)
+        inputs[n++] = avr_crt;
     if (in)
         inputs[n++] = obj;
     for (int k = 0; k < g_nlink_in; k++) {
@@ -1801,6 +1842,16 @@ static void incdirs_with_defaults(void)
     } else if (!no_stdinc) {
         int ndef = 0;
         const char *const *def = paths_default_includes(&ndef);
+        /* AVR: the avr-libc-compatible headers (<avr/io.h>,
+         * <avr/pgmspace.h>, <util/delay.h>...), in include/avr, first:
+         * found for this target and no other */
+        static char avrinc[1024];
+        if (target_get() == TARGET_AVR && ndef > 0 &&
+            nincdirs < MAX_INCDIRS) {
+            snprintf(avrinc, sizeof avrinc, "%s/avr", def[ndef - 1]);
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = avrinc;
+        }
         for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = def[k];
@@ -1816,9 +1867,18 @@ static void incdirs_with_defaults(void)
 static int assemble_file(const char *in, const char *out)
 {
     int kind = has_gas_suffix(in);
-    if (kind == 2)
+    /* __ASSEMBLER__, as GCC defines it for a preprocessed assembly file:
+     * a header shared with C (avr-libc's <avr/io.h>, CMSIS's) keeps its C
+     * out of the assembler's way with it. Only for this file -- a C file
+     * after it on the same command line does not see it. */
+    if (kind == 2) {
         incdirs_with_defaults();
-    return gas_assemble(in, out, kind == 2, incdirs, nincdirs);
+        cpp_cmdline_define("__ASSEMBLER__=1", 0);
+    }
+    int rc = gas_assemble(in, out, kind == 2, incdirs, nincdirs);
+    if (kind == 2)
+        cpp_cmdline_define("__ASSEMBLER__", 1);
+    return rc;
 }
 
 /* The embedded targets whose C++ is compiled without exceptions only:
@@ -5284,6 +5344,10 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-mno-unaligned-access") == 0) {
             diag_fatal(NULL, 0, "%s is an ARM option, and the target "
                        "is %s", argv[i], target_triple_now());
+        } else if (strncmp(argv[i], "-mmcu=", 6) == 0) {
+            /* AVR's own (src/arch/avr/options.c), asked above */
+            diag_fatal(NULL, 0, "%s is an AVR option, and the target is %s "
+                       "(--target=avr)", argv[i], target_triple_now());
         } else if (strncmp(argv[i], "-fsanitize=", 11) == 0 ||
                    strncmp(argv[i], "-fno-sanitize=", 14) == 0 ||
                    strncmp(argv[i], "-fsanitize-trap", 15) == 0 ||

@@ -87,7 +87,7 @@ The driver decides what to do with the input file from its suffix, unless
 | `.c` | C source |
 | `.cc` `.cpp` `.cxx` `.C` `.c++` `.cp` `.CPP` `.ii` | C++ source (lowered to C internally; see [C++](cxx.md)) |
 | `.s` | GNU-syntax assembly, assembled for the selected target without preprocessing |
-| `.S` | GNU-syntax assembly, preprocessed first |
+| `.S` | GNU-syntax assembly, preprocessed first, with `__ASSEMBLER__` defined |
 | `.asm` | NASM/Intel-syntax x86-64 assembly (the [`embas`](tools/embas.md) assembler) |
 | `.ir` | EmbIR text; meaningful only to [`embcc inspect ir`](#embcc-inspect-stage-file-option) |
 | `.o` `.obj` `.a` | an object or an archive, handed to the link as it is |
@@ -1889,13 +1889,14 @@ Accepted: every target EmbCC emits for is little-endian.
 
 ### Machine options that are not accepted
 
-`-mtune=`, `-mmcu=`, `-masm=`, `-m32` and `-m64` are unknown
-arguments, and so are `-march=`, `-msoft-float` and `-mhard-float` on
+`-mtune=`, `-masm=`, `-m32` and `-m64` are unknown
+arguments, `-mmcu=` is refused on every target but AVR, and so are `-march=`, `-msoft-float` and `-mhard-float` on
 every target but MIPS, and `-mabi=` on x86-64, AArch64 and AVR. The architecture, ABI and part are selected by the
 [target triple](#target-selection) (and on ARM by `-mcpu=`, `-mfpu=` and
 `-mfloat-abi=`). The RISC-V targets generate the C (compressed) extension
 and the integer multiply/divide instructions; the AVR target generates
-code for the avr5 architecture of the ATmega328P. See
+code for the avr5 architecture of the ATmega328P, and `-mmcu=` names the
+part (atmega328p, atmega328, atmega168p or atmega168). See
 [Targets](targets.md).
 
 ## Target selection

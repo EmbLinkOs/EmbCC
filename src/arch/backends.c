@@ -125,7 +125,8 @@ static const struct backend_desc g_backends[] = {
         .firmware = 1, .ld_scripts = 1,
         .call_insn = "call", .call_delay_slot = 0, .sym_prefix = "",
         .imm_prefixed = 0, .text_p2align = 1,
-        .no_asm_text = NULL },
+        .no_asm_text = NULL,
+        .option = avr_target_option },
     [TARGET_MIPS32] = {
         .family = "MIPS", .codegen = codegen_unit_mips, .ra_at_o0 = 0,
         .op_calls_helper = mips_op_calls_helper,

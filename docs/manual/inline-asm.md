@@ -2523,9 +2523,13 @@ Mnemonics are case-insensitive.
 
 Registers are `r0` to `r31`, `XL`, `XH`, `YL`, `YH`, `ZL`, `ZH`, the
 pointer pairs `X`, `Y`, `Z` (with `+`, `-` and `Y+q`/`Z+q` forms), and
-`__tmp_reg__` (r0) and `__zero_reg__` (r1). `__SREG__`, `__SP_L__` and
-the other avr-libc I/O names are not known; write the I/O address
-(`0x3f` for SREG).
+`__tmp_reg__` (r0) and `__zero_reg__` (r1). `__SREG__`, `__SP_H__` and
+`__SP_L__` are the I/O addresses `0x3f`, `0x3e` and `0x3d`, as avr-gcc
+defines them at the top of every assembly file it writes, in inline asm,
+in the body of a naked function, in a file-scope `__asm__` block and in a
+`.S` file. avr-libc's register names (`PORTB`, `UDR0`) are C macros: in
+C, pass them as `"I"(_SFR_IO_ADDR(PORTB))` operands
+([`<avr/io.h>`](embedded.md#avr-libc-compatible-headers)).
 
 Operands may be constant expressions with `+ - * / % & | ^ ~ ! << >>`,
 parentheses, character constants, and `lo8()`, `hi8()`, `hlo8()`,

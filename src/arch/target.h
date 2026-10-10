@@ -860,4 +860,17 @@ int target_elf_uses_rel(enum target_arch a);
 int target_rel_put_addend(enum target_arch a, int type, unsigned char *field,
                           long addend);
 
+/* AVR's part, from -mmcu= (src/arch/avr/options.c): the name as -mmcu=
+ * spells it, its predefined macro, and the datasheet's memories -- flash
+ * in bytes, the last SRAM address (RAMEND; SRAM starts at 0x100 on every
+ * part here), EEPROM in bytes -- and the interrupt vectors, reset among
+ * them. NULL without -mmcu= (the ATmega328P, with no startup linked) and
+ * for any other target. */
+struct avr_mcu {
+    const char *name, *macro;
+    unsigned flash, ramend, eeprom;
+    int vectors;
+};
+const struct avr_mcu *target_avr_mcu(void);
+
 #endif

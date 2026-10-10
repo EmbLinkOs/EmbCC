@@ -159,6 +159,7 @@ SRCS := \
 	src/arch/coldfire/options.c src/arch/mips/options.c \
 	src/arch/tricore/options.c \
 	src/arch/thumb/options.c src/arch/riscv/options.c \
+	src/arch/avr/options.c \
 	src/arch/code.c \
 	src/arch/predef.c \
 	src/arch/x86_64/irgen.c \
@@ -478,6 +479,7 @@ EMBLS_SRCS = tools/embls/embls.c $(PLATFORM_SRCS) src/cpp/cpp.c src/lex/lex.c \
              src/arch/sparc32/predef.c src/arch/sparc32/predef_cxx.c \
              src/arch/coldfire/predef.c src/arch/coldfire/predef_cxx.c \
              src/arch/avr/predef.c src/arch/avr/predef_cxx.c \
+             src/arch/avr/options.c \
              src/arch/thumbv8m/predef.c src/arch/thumbv8m/predef_cxx.c \
              src/arch/thumbv6m/predef.c src/arch/thumbv6m/predef_cxx.c \
              src/arch/thumbv8mbase/predef.c src/arch/thumbv8mbase/predef_cxx.c \
@@ -739,8 +741,10 @@ rt-embedded: embcc embar
 # lib/libc for the embedded targets, on the bare-metal backend
 # (lib/libc/os/baremetal), beside each one's librt.a. tools/build-libc.sh is
 # the recipe, and tests/golden/libc-embedded.sh runs what it builds on the
-# boards. Not avr: a two-byte atomic is two accesses there, and the library's
-# locks are refused for it.
+# boards. Not avr: lib/libc's formatter and stream buffers alone are more
+# than an ATmega328P's flash and SRAM. AVR's library is lib/avr's (the string
+# and _P functions, sprintf and its _P forms, the EEPROM), which rt-embedded
+# builds into build/libc/avr/libc.a beside the startup.
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \
@@ -825,6 +829,8 @@ install-files:
 	        cp $(BUILD)/libcxx/$$dir/libcxx.a $(LIBROOT)/$$triple/libcxx.a; \
 	    case $$triple in *-linux-gnu) \
 	        cp lib/libc/os/linux/link.ld $(LIBROOT)/$$triple/link.ld ;; \
+	    avr) for f in $(BUILD)/libc/avr/crt*.o $(BUILD)/libc/avr/*.ld; do \
+	        [ -f $$f ] && cp $$f $(LIBROOT)/avr/; done ;; \
 	    esac; \
 	    true; \
 	done

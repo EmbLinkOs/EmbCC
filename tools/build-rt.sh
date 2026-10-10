@@ -55,3 +55,45 @@ for f in "$here"/lib/rt/*.c; do
 done
 rm -f "$out/librt.a"
 "$AR" rcs "$out/librt.a" "$out"/rt/*.o
+
+# AVR: the startup and the linker script of each part -mmcu= takes
+# (src/arch/avr/options.c), which the driver links when -mmcu= names it:
+# crt<part>.o from lib/avr/crt.S, and <part>.ld from lib/avr/avr5.ld with
+# the part's memories, read from <avr/io.h> for that part.
+if [ "$triple" = avr ]; then
+    for part in atmega328p atmega328 atmega168p atmega168; do
+        "$EMBCC" --target=avr -mmcu=$part -c "$here/lib/avr/crt.S" \
+            -o "$out/crt$part.o" || {
+            echo "build-rt: lib/avr/crt.S does not assemble for $part" >&2
+            exit 1; }
+        echo '#include <avr/io.h>' > "$out/rt/io-$part.c"
+        "$EMBCC" --target=avr -mmcu=$part -E -dM "$out/rt/io-$part.c" \
+            > "$out/rt/io-$part.h" || exit 1
+        val() { awk -v n="$1" '$1 == "#define" && $2 == n { print $3 }' "$out/rt/io-$part.h"; }
+        fe=$(val FLASHEND) rs=$(val RAMSTART) re=$(val RAMEND) ee=$(val E2END)
+        [ -n "$fe" ] && [ -n "$rs" ] && [ -n "$re" ] && [ -n "$ee" ] || {
+            echo "build-rt: <avr/io.h> has no memories for $part" >&2; exit 1; }
+        sed -e "s/@FLASH@/$((fe + 1))/" -e "s/@RAMSTART@/$((rs))/" \
+            -e "s/@RAM@/$((re + 1 - rs))/" -e "s/@EEPROM@/$((ee + 1))/" \
+            "$here/lib/avr/avr5.ld" > "$out/$part.ld"
+        rm -f "$out/rt/io-$part.c" "$out/rt/io-$part.h"
+    done
+    # ...and the AVR library, libc.a: lib/avr's avr-libc functions (the
+    # string and _P functions, sprintf and its _P forms, the EEPROM), one
+    # object per function -- each source compiled once per EMB_AVR_ name
+    # it guards -- so that an image carries only what it calls. The same
+    # registers on every part, so built once.
+    rm -rf "$out/c"
+    mkdir -p "$out/c"
+    for f in "$here"/lib/avr/*.c; do
+        b=$(basename "$f" .c)
+        for n in $(sed -n 's/^#ifdef \(EMB_AVR_[A-Z0-9_]*\).*/\1/p' "$f"); do
+            "$EMBCC" --target=avr -mmcu=atmega328p -Os -Wall -Wextra -Werror \
+                -D$n -c "$f" -o "$out/c/$b-$n.o" || {
+                echo "build-rt: lib/avr/$b.c ($n) does not compile" >&2
+                exit 1; }
+        done
+    done
+    rm -f "$out/libc.a"
+    "$AR" rcs "$out/libc.a" "$out"/c/*.o
+fi

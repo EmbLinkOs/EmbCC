@@ -459,8 +459,21 @@ static int ty_in_flash(const struct type *t)
  * per thread is not something flash can hold. */
 static void flash_object(struct unit *u, struct global *g)
 {
-    if (!ty_in_flash(g->ty))
+    /* avr-libc's PROGMEM (__attribute__((progmem)), which the parser
+     * turns into this section) or a section of the same family named
+     * outright: in flash as well, so const for the same reason -- a store
+     * to it would compile to an `st` into whatever SRAM has that address.
+     * avr-gcc says the same of progmem. */
+    if (!ty_in_flash(g->ty)) {
+        if (target_get() == TARGET_AVR && g->section && !g->is_const &&
+            !g->is_extern && strncmp(g->section, ".progmem", 8) == 0)
+            sema_error_line(u, g->line, "'%s' is in program memory "
+                            "(progmem, section %s) and must be const: "
+                            "program memory is written when the part is "
+                            "flashed, not by the program", g->name,
+                            g->section);
         return;
+    }
     if (!g->is_const && !g->is_extern)
         sema_error_line(u, g->line, "'%s' is __flash and must be const: "
                         "program memory is written when the part is "
@@ -6128,7 +6141,6 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 g->ty = s->dty;
                 g->is_static = 1;
                 g->is_const = s->obj_const;   /* a lookup table: .rodata */
-                flash_object(u, g);
                 /* `static __thread` inside a function is still one
                  * object per thread -- the scope decides who can NAME
                  * it, not how many there are. */
@@ -6143,6 +6155,11 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                  * said so. */
                 g->user_align = s->user_align;
                 g->section = s->section;      /* .noinit, .ccmram... */
+                /* after the section: a __flash one's is .progmem.data,
+                 * and setting it first lost it to the line above, which
+                 * put a static local __flash table in .rodata -- in RAM,
+                 * read with lpm from flash at the same number */
+                flash_object(u, g);
                 g->defined = 1;
                 g->used = 1;
                 /* Aggregates arrive pre-flattened in s->inits; a scalar's
