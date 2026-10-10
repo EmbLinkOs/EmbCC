@@ -556,8 +556,8 @@ signedness of plain `char` on the target. For example, after
 Every integer type: plain, signed and unsigned `char`, `short`, `long`,
 `long long`, `__int128` where it exists, and enumerated types. A
 bit-field of enumerated type has the signedness of the enumerated type
-(see below); an enumeration whose values all fit `int` is `int`, so its
-bit-fields are signed. The width may not exceed the width of the
+(see below); an enumeration with no negative value is `unsigned int`, so
+its bit-fields are unsigned, and one with a negative value is `int`. The width may not exceed the width of the
 declared type, which on AVR is 16 for `int`:
 
 ```text
@@ -632,17 +632,22 @@ every target:
 
 | Type | Chosen when |
 |---|---|
-| `int` | every value fits `int` |
 | `unsigned int` | no value is negative, and every value fits `unsigned int` |
+| `int` | every value fits `int` |
 | `unsigned long` | no value is negative, and every value fits `unsigned long` |
 | `unsigned long long` | no value is negative |
 | `long` | every value fits `long` |
 | `long long` | otherwise |
 
-The enumeration constants have the enumerated type, as in C23. An
-enumeration whose values all fit `int` is `int` even when no value is
-negative, where GCC and Clang choose `unsigned int`; so
-`(enum e)-1 < 0` is true under EmbCC. A wider enumeration has the type
+This is GCC's rule ("Normally, the type is unsigned int if there are no
+negative values in the enumeration, otherwise int") and Clang's: with
+`enum e { A, B }`, `(enum e)-1 > 0` is true. An enumeration constant
+whose value fits `int` has type `int`, whatever the enumeration's type
+(C17 6.4.4.3, C23 6.7.2.2), so `A - 1 < 0` is true; a constant that does
+not fit has the enumerated type. With `-fshort-enums` or
+`__attribute__((packed))` the type is the smallest integer type that
+holds every value ([Invoking](invoking.md#-fshort-enums--fno-short-enums)).
+A wider enumeration has the type
 GCC and Clang give it: one with no negative value that needs more than
 32 bits is `unsigned long` on x86-64, Apple arm64, AArch64 and RV64, and
 `unsigned long long` on Cortex-M and RV32. On AVR, one with no negative

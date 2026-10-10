@@ -3050,7 +3050,13 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
             parse_error_line(ps, cur(ps)->line, "the enumeration's values "
                              "run from %ld to %lu, which no integer type "
                              "holds", lo, hi);
-        if (lo >= imin && hi <= (unsigned long)imax)
+        /* GCC's choice, and clang's: unsigned int when no value is
+         * negative, else int ("Normally, the type is unsigned int if
+         * there are no negative values in the enumeration, otherwise
+         * int"). The CONSTANTS stay int, as C says, below. */
+        if (!anyneg && !anybig && hi <= (unsigned long)imax)
+            t = ty_base(TY_INT, 1);
+        else if (lo >= imin && hi <= (unsigned long)imax)
             t = ty_base(TY_INT, 0);
         /* No negative value: the unsigned types, as GCC and clang choose
          * -- 2^31..2^32-1 is an unsigned long on AVR, four bytes, not a
@@ -3070,8 +3076,11 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
     ps->last_enum_hi = anybig ? ~0UL : hi;
     ps->last_enum_neg = anyneg;
     ps->last_enum_first = first;
+    /* An enumeration constant is int when its value fits (C11 6.4.4.3),
+     * whatever the enum's own type -- `A - 1 < 0` is int arithmetic */
     for (struct econst *ec = *first; ec; ec = ec->next)
-        ec->ty = t;
+        ec->ty = !fixed && !packed && ec->val >= imin && ec->val <= imax &&
+                 t->kind == TY_INT ? ty_base(TY_INT, 0) : t;
     return t;
 }
 
