@@ -490,4 +490,12 @@ if command -v x86_64-elf-gcc > /dev/null 2>&1 && command -v llvm-objdump > /dev/
     [ -n "$(mcdata "$out/mc.o")" ] && [ "$(mcdata "$out/mc.o")" = "$(mcdata "$out/mcg.o")" ] ||
         { echo "FAIL: multi-character values differ from GCC's"; exit 1; }
 fi
-echo "the coding-standard warnings at their lines, -Wformat=2, the gcc-only ones, no stray notes, -Wold-style-declaration and -Wmultichar"
+# an unnamed parameter (C23) has nothing to use, and no name to show
+"$EMBCC" --target=x86_64-elf -Wall -Wextra -g -c tests/exec/unnamed-params.c -o "$out/up.o" 2> "$out/up.txt" ||
+    { cat "$out/up.txt"; echo "FAIL: an unnamed parameter was refused"; exit 1; }
+grep -q warning "$out/up.txt" && { cat "$out/up.txt"; echo "FAIL: an unnamed parameter was warned about"; exit 1; }
+if command -v llvm-dwarfdump > /dev/null 2>&1; then
+    llvm-dwarfdump --debug-info "$out/up.o" | grep -q '"<' &&
+        { echo "FAIL: an unnamed parameter's made-up name reached the debug information"; exit 1; }
+fi
+echo "the coding-standard warnings at their lines, -Wformat=2, the gcc-only ones, no stray notes, -Wold-style-declaration, -Wmultichar, unnamed parameters"

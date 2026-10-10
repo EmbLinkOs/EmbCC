@@ -4815,6 +4815,8 @@ static void add_dbgvar(struct ir_func *fn, const char *name, int vreg,
                        int is_param, struct type *ty, int line, int col)
 {
     if (!name) return;
+    if (is_param && name[0] == '<')
+        return;         /* an unnamed parameter: nothing to show by name */
     if (fn->ndbgvars == fn->dbgvarcap) {
         fn->dbgvarcap = fn->dbgvarcap ? fn->dbgvarcap * 2 : 8;
         fn->dbgvars = xrealloc(fn->dbgvars,

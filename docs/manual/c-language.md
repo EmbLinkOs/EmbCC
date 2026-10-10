@@ -272,7 +272,7 @@ C17's value, `201710L`.
 | Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
 | Empty initializer `= {}` | Partial | Zero-initializes any object except a VLA, which is refused: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |
 | Labels before declarations and at the end of a compound statement | Supported | |
-| Unnamed parameters in a function definition | Not supported | `parameter 1 of 'f' needs a name in a definition` |
+| Unnamed parameters in a function definition | Supported | `void on_tick(void *) { ... }`. The parameter takes its argument's place and has no name in the debug information; `-Wunused-parameter` does not report it. |
 | Redefinition of a tag with the same content | Not supported | `redefinition of 'P'` |
 | Storage-class specifiers in compound literals, `(static int[]){ 1 }` | Not supported | `expected an expression, got 'static'` |
 | `()` means `(void)`; K&R definitions removed | Supported | See [Empty parameter lists](#empty-parameter-lists). |

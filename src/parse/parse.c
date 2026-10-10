@@ -6135,11 +6135,18 @@ fn_tail:
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected '{' or ';' before %s",
                        tok_describe(cur(ps)));
+        /* C23 lets a definition leave a parameter unnamed -- `void
+         * on_tick(void *) { ... }` for a callback that ignores its
+         * argument, which GCC 15 and clang accept by default. It still
+         * takes its argument's place; a name no source can spell keeps
+         * it apart from every other, and -Wunused-parameter passes over
+         * such names, as GCC does: there is nothing to use. */
         for (int i = 0; i < f->nparams; i++)
-            if (!f->params[i])
-                parse_error_line(ps, f->line,
-                           "parameter %d of '%s' needs a name in a "
-                           "definition", i + 1, f->name);
+            if (!f->params[i]) {
+                char nm[32];
+                snprintf(nm, sizeof nm, "<parameter %d>", i + 1);
+                f->params[i] = xstrndup(nm, strlen(nm));
+            }
         /* The parameters join the fold table before the body is read.
          *
          * That table is what `typeof(x)` and `sizeof(x)` resolve names

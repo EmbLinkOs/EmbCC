@@ -277,10 +277,6 @@ check nonstatic-then-static \
 static int f(void) { return 1; }
 int main(void) { return f(); }' \
     "static declaration of 'f' follows non-static"
-check unnamed-param-in-definition \
-    'int f(int) { return 1; }
-int main(void) { return f(1); }' \
-    "needs a name in a definition"
 # main alone may reach its closing brace (it returns 0, C99 5.1.2.2.3)
 check fallthrough \
     'static int f(void) { int x = 1; }
