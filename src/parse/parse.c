@@ -118,6 +118,10 @@ struct parser {
     int alignas_out;      /* alignment from a `_Alignas(...)` on the current
                            * declaration specifiers; read + reset where the
                            * declaration applies its alignment (like `aligned`) */
+    /* A parameter's declarator is being read: its first `[` may hold
+     * `static` and qualifiers (C99 6.7.6.3p7), which param_arr_q
+     * collects for the pointer the parameter becomes. */
+    int in_param, param_arr_q, param_q_out;
     int vla_ok;           /* inside a function (its parameters or body) and
                            * not in a struct body: a non-constant array size
                            * makes a VLA rather than an error */
@@ -450,6 +454,26 @@ static int late_storage_kw(struct parser *ps)
                   "'%s' is not at beginning of declaration", spell);
     advance(ps);
     return b;
+}
+
+/* `void f(register int x)`: the one storage class C lets a parameter
+ * have (C17 6.7.6.3p2), and a hint EmbCC's allocator does not need */
+static void skip_param_register(struct parser *ps)
+{
+    while (cur(ps)->kind == TOK_IDENT && !strcmp(cur(ps)->text, "register"))
+        advance(ps);
+}
+
+/* Any other storage class among a parameter's specifiers is an error,
+ * as GCC makes it */
+static void param_storage(struct parser *ps)
+{
+    int sc = ps->spec_sc_out & ~SC_REGISTER;
+    ps->spec_sc_out = 0;
+    if (sc)
+        parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "a parameter can have no storage class but "
+                       "'register'");
 }
 
 static int skip_quals(struct parser *ps)
@@ -1430,6 +1454,37 @@ static struct type *parse_declarator(struct parser *ps, struct type *base,
     return declarator(ps, base, name_out, 0, 0, NULL);
 }
 
+/* A parameter's declarator: its outermost `[...]` may hold `static` and
+ * qualifiers, which param_adjust applies (and the parameters of a
+ * function-pointer parameter are their own). */
+static struct type *param_declarator(struct parser *ps, struct type *base,
+                                     const char **name_out)
+{
+    int was = ps->in_param, wasq = ps->param_arr_q;
+    ps->in_param = 1;
+    ps->param_arr_q = 0;
+    struct type *t = parse_declarator(ps, base, name_out);
+    ps->param_q_out = ps->param_arr_q;
+    ps->in_param = was;
+    ps->param_arr_q = wasq;
+    return t;
+}
+
+/* An array parameter is a pointer to its element (C17 6.7.6.3p7),
+ * qualified by what its first `[...]` said: `int a[const 4]` is
+ * `int *const a`. */
+static struct type *param_adjust(struct parser *ps, struct type *t)
+{
+    int q = ps->param_q_out;
+    ps->param_q_out = 0;
+    t = ty_ptr(t->pointee);
+    if (q & Q_VOL)
+        t = ty_volatile(t);
+    if (q & Q_CONST)
+        t = ty_const(t);
+    return t;
+}
+
 /* parse_declarator for a declaration whose object may be read-only:
  * spec_const is its specifiers' const (ps->spec_const, saved right after
  * parse_type_spec), *obj_const receives whether the object is const. */
@@ -1533,6 +1588,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
              * The last was a syntax error, and `unused` was dropped from
              * all three, so -Wunused-parameter still fired. */
             ps->stars_unused = 0;
+            skip_param_register(ps);
             while (cur(ps)->kind == TOK_KW_ATTRIBUTE && addr_space_qual(ps))
                 ps->lead_flash = 1;    /* `__flash char *p` */
             if (at_attribute(ps)) {
@@ -1543,6 +1599,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
             }
             struct attrs sat = { 0 };
             struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            param_storage(ps);
             pcs_not_here(ps, &sat, "a parameter");
             unused |= sat.unused;
             if (!spec)
@@ -1550,7 +1607,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                            "expected a parameter type before %s",
                            tok_describe(cur(ps)));
             const char *pname;
-            struct type *t = parse_declarator(ps, spec, &pname);
+            struct type *t = param_declarator(ps, spec, &pname);
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
@@ -1568,7 +1625,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                 }
             }
             if (t->kind == TY_ARRAY)
-                t = ty_ptr(t->pointee); /* C's adjustment */
+                t = param_adjust(ps, t);    /* C's adjustment */
             if (t->kind == TY_FUNC)
                 t = ty_ptr(t);
             if (t->kind == TY_VOID)
@@ -2784,6 +2841,22 @@ static struct type *parse_array_dims(struct parser *ps, struct type *t)
     int ndims = 0;
     while (cur(ps)->kind == TOK_LBRACKET) {
         advance(ps);
+        /* `int a[static 16]`, `char s[const restrict]`: a parameter's
+         * outermost bound may say the argument is never null and holds
+         * at least that many elements (static, which changes nothing
+         * here), and qualify the pointer it is adjusted to */
+        if (ps->in_param && ndims == 0) {
+            for (;;) {
+                if (cur(ps)->kind == TOK_KW_STATIC) {
+                    advance(ps);
+                    continue;
+                }
+                int q = skip_quals(ps);
+                if (!q && cur(ps)->kind != TOK_KW_RESTRICT)
+                    break;
+                ps->param_arr_q |= q;
+            }
+        }
         int dim = 0; /* [] : legal for params (adjusts to a pointer);
                         elsewhere caught as an incomplete type */
         struct expr *de = NULL;
@@ -5904,6 +5977,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             int unused = 0;
             if (param_sret_attr(ps, f->nparams, &unused))
                 f->sret_first = 1;
+            skip_param_register(ps);
             if (cur(ps)->kind == TOK_IDENT)
                 reject_reserved(ps, cur(ps)->text, cur(ps)->line, cur(ps)->col);
             /* Attributes before the type, between it and the name, and
@@ -5919,6 +5993,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             }
             struct attrs sat = { 0 };
             struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+            param_storage(ps);
             pcs_not_here(ps, &sat, "a parameter");
             unused |= sat.unused;
             if (!spec)
@@ -5926,7 +6001,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                            "expected a parameter type before %s",
                            tok_describe(cur(ps)));
             const char *pname;
-            struct type *pt = parse_declarator(ps, spec, &pname);
+            struct type *pt = param_declarator(ps, spec, &pname);
             if (at_attribute(ps)) {
                 struct attrs pat = { 0 };
                 parse_attributes(ps, &pat);
@@ -5937,7 +6012,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             ps->stars_unused = 0;
             f->param_unused[f->nparams] = unused;
             if (pt->kind == TY_ARRAY)
-                pt = ty_ptr(pt->pointee); /* C's adjustment */
+                pt = param_adjust(ps, pt);  /* C's adjustment */
             if (pt->kind == TY_FUNC)
                 pt = ty_ptr(pt);
             if (pt->kind == TY_VOID)

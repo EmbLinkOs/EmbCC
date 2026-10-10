@@ -668,6 +668,15 @@ check const-increment 'void f(void) { const int x = 1; x++; }' "increment of rea
 check const-compound 'void f(void) { const int x = 1; x += 2; }' "read-only 'x'"
 check const-asm-output \
     'void f(void) { const int x = 1; __asm__("" : "=r"(x)); }' "an asm output of read-only"
+# a parameter `int a[const 4]` is `int *const a`
+check const-array-parameter \
+    'int g(int a[const 4]) { a = 0; return 0; }' "read-only 'a'"
+# the storage classes a parameter cannot have, and a bound's `static`
+# where it is not a parameter's
+check parameter-storage-class 'int f(static int x);' "no storage class but 'register'"
+check parameter-storage-class-late 'int f(int extern x);' "no storage class but 'register'"
+check array-static-not-parameter \
+    'void f(void) { int a[static 3]; (void)a; }' "expected an expression, got 'static'"
 
 # The COFF writer has no named data sections. A variable with one was
 # put at offset 0 of .data, on top of the first variable there.

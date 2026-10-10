@@ -160,7 +160,7 @@ define `__GNUC__` when compiling C.
 | Reaching the `}` of a non-`void` function | Not supported | An error even when the value is never used, except in `main`: `control may reach the end of 'f' — every path must end in a return statement [E0008]`. See [Functions that can reach their closing brace](#functions-that-can-reach-their-closing-brace). |
 | `return;` in a non-`void` function | Not supported | `'g' returns int; 'return' needs a value`. A constraint violation since C99. |
 | `auto` storage class | Supported | `auto int x;` |
-| `register` storage class | Partial | Accepted on block-scope objects. On a parameter or at file scope: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. |
+| `register` storage class | Partial | Accepted on block-scope objects and on parameters, where it is a hint the allocator does not need. At file scope, which C does not allow: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. Any other storage class on a parameter: `a parameter can have no storage class but 'register'`. |
 | Storage class after the type, `const static int t[]`, `int static n`, `long typedef L` | Partial | Obsolescent (C17 6.11.5), and `-Wold-style-declaration` (`-Wextra`) reports it, as in GCC. At block scope `extern` and `typedef` must come first: `at block scope, write 'extern' first in the declaration`. |
 | `const` | Supported | See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
@@ -194,7 +194,7 @@ define `__GNUC__` when compiling C.
 | `restrict` | Supported | Accepted. EmbCC does not use it for optimization. |
 | Variable length arrays | Partial | See [Variable length arrays](#variable-length-arrays). Not available on AVR. |
 | Variably modified types: pointers to VLAs, VLA parameters `int a[n][m]`, `[*]` | Supported | |
-| `static` and qualifiers in array parameters, `int a[static 4]` | Not supported | `expected an expression, got 'static'` (likewise `got 'const'`, `got 'restrict'`). |
+| `static` and qualifiers in array parameters, `int a[static 4]` | Supported | The qualifiers apply to the pointer the parameter becomes: `int a[const 4]` is `int *const a`. `static` promises at least that many elements and changes no code. Outside a parameter: `expected an expression, got 'static'`. |
 | Flexible array members | Supported | An initializer for the flexible member is accepted only on a static object, which is a GNU extension. On an automatic object: `'l' is not static, so its flexible array member 'd' cannot be initialized: the object has no room for the elements`. |
 | Designated initializers | Supported | |
 | Compound literals | Partial | At file scope, an array compound literal that converts to a pointer is refused: `int *p = (int[]){ 1, 2, 3 };` gives `a scalar takes exactly one initializer`. `&(int){ 3 }` at file scope, structure compound literals and array compound literals in a block work. Storage-class specifiers in a compound literal are C23; see the [C23](#c23) table. |
