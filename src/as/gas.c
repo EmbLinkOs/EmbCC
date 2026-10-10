@@ -3771,7 +3771,7 @@ static const struct gas_target AVR_GAS = {
     R_AVR_32, 0,
     R_AVR_16, 2, avrasm_symform,
     ';',         /* AVR's line comment, as GNU as sets it for this port */
-    0, NULL, NULL, NULL, NULL,
+    0, avrasm_is_word, NULL, NULL, NULL,
     0, NULL, NULL, NULL, NULL, NULL
 };
 
