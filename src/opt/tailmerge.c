@@ -150,6 +150,15 @@ static int tm_opnd_w(const struct ir_ins *i, int q, int *flt)
     }
 }
 
+/* Does any instruction of [s, e) define v? */
+static int tm_def_in(const struct ir_func *fn, int v, int s, int e)
+{
+    for (int n = s; n < e; n++)
+        if (def_target(&fn->ins[n]) == v)
+            return 1;
+    return 0;
+}
+
 /* Do the runs [ks, ke) and [ds, de) compute the same, and their block
  * ends (ke, de: a JMP, a RET, or the label fallen into) agree? With pr,
  * an operand the runs read differently (two values from before the run,
@@ -180,9 +189,13 @@ static int tm_match(struct ir_func *fn, const struct defs *d,
             if (x == y)
                 continue;
             int flt, w = pr ? tm_opnd_w(a, q, &flt) : 0;
+            /* a value either run defines is not one from before it,
+             * whatever else defines it: the move that would carry it in
+             * runs before the run (fuzz seed 13408: `%v = const 0` was in
+             * the dropped run, and the move read %v's other definition) */
             if (!w || x < 0 || y < 0 || x >= fn->nvregs || y >= fn->nvregs ||
-                x != rb[q] || tm_local(fn, d, maxr, y, ks, ke) ||
-                tm_local(fn, d, maxr, x, ds, de)) {
+                x != rb[q] || tm_def_in(fn, y, ks, ke) ||
+                tm_def_in(fn, x, ds, de)) {
                 ok = 0;
                 break;
             }

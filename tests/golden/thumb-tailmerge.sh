@@ -220,6 +220,34 @@ L2:
 }
 EOF
 
+# indef: the second run's differing value, %9, is defined INSIDE the five
+# instructions that would be dropped (and before the branch too, so
+# nothing calls it the run's own): the move carrying it in would run
+# before that definition and read the first one (fuzz seed 13408 found
+# it). The four after the load share, each run keeping its load and
+# moving its value in.
+cat > "$out/indef.ir" <<'EOF'
+; EmbIR
+func @indef nparams=3 nvars=3 vregs=16 labels=3 {
+  %9 = load.4:4s [%1]
+  brz.4s %9 -> L0
+  %9 = load.4:4s [%0]
+  %4 = mul.4s %0, #3
+  %5 = sub.4s %4, %1
+  %10 = mul.4s %5, #5
+  store:4s [%2], %10
+  jmp L2
+L0:
+  %9 = load.4:4s [%0]
+  %6 = mul.4s %0, #3
+  %7 = sub.4s %6, %9
+  %11 = mul.4s %7, #5
+  store:4s [%2], %11
+L2:
+  ret %0
+}
+EOF
+
 copies() { grep -c 'mul.4s %0' "$out/$1.out"; }
 # ...on every target, not ARM alone: the pass was gated to TARGET_THUMB
 for t in riscv32-unknown-elf x86_64-elf avr aarch64-elf; do
@@ -241,7 +269,12 @@ done
 opt pre
 [ "$(grep -c 'add.4s' "$out/pre.out")" = 2 ] ||
     { cat "$out/pre.out"; fail "pre: merged into a label whose other path does not set the value"; }
-echo "IR: one copy where the runs are the same or differ in a value, two in six shapes where they are not"
+opt indef
+[ "$(grep -c 'load.4' "$out/indef.out")" = 3 ] ||
+    { cat "$out/indef.out"; fail "indef: a value the dropped run defines was carried in from before it"; }
+[ "$(copies indef)" = 1 ] ||
+    { cat "$out/indef.out"; fail "indef: the four instructions after the load are not shared"; }
+echo "IR: one copy where the runs are the same or differ in a value, two in seven shapes where they are not"
 
 # C: a strftime-like switch in a loop; the cases differ in an argument
 # (a field, a product, a parameter) and share one call through a merge
