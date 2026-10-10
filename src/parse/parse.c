@@ -146,6 +146,11 @@ struct parser {
      * that would change layout or linkage. */
     struct attrs spec_slot, spec_seed, spec_out;
     int spec_on, spec_want;
+    /* Storage classes written among a declaration's type specifiers --
+     * `const static int t[]`, `int static n` -- as SC_* bits: C allows
+     * them anywhere among the specifiers (obsolescent, C11 6.11.5). Kept
+     * per parse_type_spec level, as spec_slot is; read from spec_sc_out. */
+    int spec_sc, spec_sc_out;
     /* Where the last declarator's name token was, so a parameter can be
      * pointed AT rather than at the function's line -- an editor renaming
      * one has to edit the name, not the first column of the signature. */
@@ -402,11 +407,63 @@ static int addr_space_qual(struct parser *ps)
     return 0;
 }
 
+enum { SC_STATIC = 1, SC_EXTERN = 2, SC_THREAD = 4, SC_INLINE = 8,
+       SC_NORETURN = 16, SC_TYPEDEF = 32, SC_REGISTER = 64 };
+
+/* The storage-class or function specifier at the current token, if any
+ * (`register` is a name to the lexer, and a hint to EmbCC) */
+static int storage_bit(struct parser *ps, const char **spell)
+{
+    struct token *t = cur(ps);
+    static const struct { enum tok_kind k; int b; const char *s; } kw[] = {
+        { TOK_KW_STATIC, SC_STATIC, "static" },
+        { TOK_KW_EXTERN, SC_EXTERN, "extern" },
+        { TOK_KW_THREAD, SC_THREAD, "_Thread_local" },
+        { TOK_KW_INLINE, SC_INLINE, "inline" },
+        { TOK_KW_NORETURN, SC_NORETURN, "_Noreturn" },
+        { TOK_KW_TYPEDEF, SC_TYPEDEF, "typedef" },
+    };
+    for (size_t i = 0; i < sizeof kw / sizeof kw[0]; i++)
+        if (t->kind == kw[i].k) {
+            if (spell)
+                *spell = kw[i].s;
+            return kw[i].b;
+        }
+    if (t->kind == TOK_IDENT && !strcmp(t->text, "register")) {
+        if (spell)
+            *spell = "register";
+        return SC_REGISTER;
+    }
+    return 0;
+}
+
+/* A storage-class or function specifier where only a qualifier or a type
+ * was expected: recorded, with GCC's -Wold-style-declaration (-Wextra). */
+static int late_storage_kw(struct parser *ps)
+{
+    const char *spell = NULL;
+    struct token *t = cur(ps);
+    int b = storage_bit(ps, &spell);
+    if (!b)
+        return 0;
+    diag_warn_opt(ps->lx.file, t->line, t->col, "old-style-declaration",
+                  "'%s' is not at beginning of declaration", spell);
+    advance(ps);
+    return b;
+}
+
 static int skip_quals(struct parser *ps)
 {
     int vol = 0;
     for (;;) {
         enum tok_kind k = cur(ps)->kind;
+        if (ps->spec_on) {
+            int b = late_storage_kw(ps);
+            if (b) {
+                ps->spec_sc |= b;
+                continue;
+            }
+        }
         if (k == TOK_KW_ATTRIBUTE) {
             int q = addr_space_qual(ps);
             if (!q)
@@ -1710,12 +1767,15 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
         ps->lead_flash = 0;
         q |= Q_FLASH;
     }
-    int q2 = 0;
+    int q2 = 0, outer_sc = ps->spec_sc;
+    ps->spec_sc = 0;
     struct type *t = parse_type_spec_inner(ps, allow_body, &q2);
     q |= q2;
     ps->spec_out = ps->spec_slot;
     ps->spec_slot = outer;
     ps->spec_on = outer_on;
+    ps->spec_sc_out = ps->spec_sc;
+    ps->spec_sc = outer_sc;
     /* set AFTER the inner parse, which may hold types of its own (a
      * struct body, typeof): these are this declaration's specifiers */
     ps->spec_const = ps->q_top = (q & Q_CONST) != 0;
@@ -1726,6 +1786,50 @@ static struct type *parse_type_spec(struct parser *ps, int allow_body)
     if (t && (q & Q_ATOMIC))
         return ty_atomic(t);
     return (t && (q & Q_VOL)) ? ty_volatile(t) : t;   /* volatile reaches the type */
+}
+
+/* After a declaration's type specifiers: the storage classes written
+ * among them, and those after them -- `int static n;`, `int const
+ * static n;`, where a qualifier before the storage class applies to the
+ * type as it would before the first declarator. */
+static int late_storage(struct parser *ps, struct type **base,
+                        int *spec_const)
+{
+    int sc = ps->spec_sc_out;
+    ps->spec_sc_out = 0;
+    if (!*base)
+        return sc;
+    for (;;) {
+        int b = late_storage_kw(ps);
+        if (b) {
+            sc |= b;
+            continue;
+        }
+        /* a qualifier, but only when a storage class follows it */
+        enum tok_kind k = cur(ps)->kind;
+        if (k != TOK_KW_CONST && k != TOK_KW_VOLATILE)
+            break;
+        struct lexer save = ps->lx;
+        advance(ps);
+        while (cur(ps)->kind == TOK_KW_CONST ||
+               cur(ps)->kind == TOK_KW_VOLATILE)
+            advance(ps);
+        int more = storage_bit(ps, NULL);
+        ps->lx = save;
+        if (!more)
+            break;
+        while (cur(ps)->kind == TOK_KW_CONST ||
+               cur(ps)->kind == TOK_KW_VOLATILE) {
+            if (cur(ps)->kind == TOK_KW_CONST) {
+                *base = ty_const(*base);
+                *spec_const = 1;
+            } else {
+                *base = ty_volatile(*base);
+            }
+            advance(ps);
+        }
+    }
+    return sc;
 }
 
 /* parse_type_spec for a declaration, whose attributes *a gains the ones
@@ -1917,6 +2021,10 @@ static struct type *parse_type_spec_inner(struct parser *ps, int allow_body,
             advance(ps); continue;
         }
         else if (k == TOK_KW_ALIGNAS) { consume_alignas(ps); continue; }
+        else if (ps->spec_on && storage_bit(ps, NULL)) {
+            ps->spec_sc |= late_storage_kw(ps);   /* `unsigned static int` */
+            continue;
+        }
         else if (k == TOK_KW_ATTRIBUTE) {   /* __flash after a type spec */
             int q = addr_space_qual(ps);
             if (!q)
@@ -4676,6 +4784,21 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
          * documented limitation, not a miscompile. */
         struct type *base = parse_type_spec_attrs(ps, 1, &lead);
         int spec_const = ps->spec_const;
+        /* `int static n;`, `const static char t[]` */
+        int late = late_storage(ps, &base, &spec_const);
+        if (late & SC_STATIC)
+            local_static = 1;
+        if (late & SC_THREAD)
+            local_tls = 1;
+        if (late & (SC_EXTERN | SC_TYPEDEF))
+            parse_error_at(ps, t->line, t->col,
+                       "at block scope, write '%s' first in the declaration",
+                       late & SC_TYPEDEF ? "typedef" : "extern");
+        if (local_tls && !local_static)
+            parse_error_at(ps, t->line, t->col,
+                       "a block-scope __thread object must also be "
+                       "static: an automatic one is already private to "
+                       "the call");
         /* every declarator takes the declaration's _Alignas, not only
          * the first */
         int decl_alignas = ps->alignas_out;
@@ -5354,6 +5477,60 @@ static struct func *sibling_proto(struct parser *ps, struct type *dty,
     return g;
 }
 
+/* The declarators of a file-scope typedef, through its ';' */
+static void typedef_declarators(struct parser *ps, struct type *tbase,
+                                int spec_const, struct attrs tdat)
+{
+    for (;;) {
+        const char *tname;
+        int tconst;
+        struct type *tt = parse_declarator_c(ps, tbase, &tname,
+                                             spec_const, &tconst);
+        /* `typedef int fn(int);`: a FUNCTION type's name. The
+         * declarator reads `(params)` after a name only inside
+         * parentheses; here, as for a function declaration, the
+         * caller does. CMSE's `typedef void
+         * __attribute__((cmse_nonsecure_call)) ns_fn(void);` is this
+         * shape, and it was a syntax error. */
+        if (tname && cur(ps)->kind == TOK_LPAREN)
+            tt = parse_fn_params(ps, tt);
+        if (!tname)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "typedef needs a name, got %s",
+                       tok_describe(cur(ps)));
+        struct attrs tdone = tdat;
+        if (at_attribute(ps))
+            parse_attributes(ps, &tdone);
+        pcs_not_here(ps, &tdone, "a typedef");
+        /* An alignment on the NAME is the type's, larger or smaller
+         * than its own, with its size unchanged -- GCC's and clang's
+         * rule: `typedef uint8_t buf_t[64] __attribute__((aligned(4)))`
+         * for a DMA buffer, `typedef int una __attribute__((aligned(1)))`
+         * for an unaligned access (irgen's lv_natural). A struct or
+         * union that carries its own aligned/packed is unaffected --
+         * that is applied where the struct is defined. */
+        if (tdone.aligned)
+            tt = ty_aligned(tt, tdone.aligned);
+        struct type *prev = find_typedef(ps, tname);
+        if (prev && !ty_equal(prev, tt))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "redefinition of typedef '%s'", tname);
+        /* identical redefinition: headers do it; harmless */
+        struct typedefent *te = xcalloc(1, sizeof *te);
+        te->name = tname;
+        te->ty = tt;
+        te->is_const = tconst;
+        te->next = ps->typedefs;
+        ps->typedefs = te;
+        if (cur(ps)->kind == TOK_COMMA) {
+            advance(ps);
+            continue;
+        }
+        break;
+    }
+    expect(ps, TOK_SEMI, "';'");
+}
+
 static void parse_top(struct parser *ps, struct unit *u,
                       struct func ***ftail, struct global ***gtail,
                       int seq)
@@ -5460,54 +5637,10 @@ static void parse_top(struct parser *ps, struct unit *u,
         if (!tbase)
             parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                        "expected a type after 'typedef'");
-        for (;;) {
-            const char *tname;
-            int tconst;
-            struct type *tt = parse_declarator_c(ps, tbase, &tname,
-                                                 spec_const, &tconst);
-            /* `typedef int fn(int);`: a FUNCTION type's name. The
-             * declarator reads `(params)` after a name only inside
-             * parentheses; here, as for a function declaration, the
-             * caller does. CMSE's `typedef void
-             * __attribute__((cmse_nonsecure_call)) ns_fn(void);` is this
-             * shape, and it was a syntax error. */
-            if (tname && cur(ps)->kind == TOK_LPAREN)
-                tt = parse_fn_params(ps, tt);
-            if (!tname)
-                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                           "typedef needs a name, got %s",
-                           tok_describe(cur(ps)));
-            struct attrs tdone = tdat;
-            if (at_attribute(ps))
-                parse_attributes(ps, &tdone);
-            pcs_not_here(ps, &tdone, "a typedef");
-            /* An alignment on the NAME is the type's, larger or smaller
-             * than its own, with its size unchanged -- GCC's and clang's
-             * rule: `typedef uint8_t buf_t[64] __attribute__((aligned(4)))`
-             * for a DMA buffer, `typedef int una __attribute__((aligned(1)))`
-             * for an unaligned access (irgen's lv_natural). A struct or
-             * union that carries its own aligned/packed is unaffected --
-             * that is applied where the struct is defined. */
-            if (tdone.aligned)
-                tt = ty_aligned(tt, tdone.aligned);
-            struct type *prev = find_typedef(ps, tname);
-            if (prev && !ty_equal(prev, tt))
-                parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                           "redefinition of typedef '%s'", tname);
-            /* identical redefinition: headers do it; harmless */
-            struct typedefent *te = xcalloc(1, sizeof *te);
-            te->name = tname;
-            te->ty = tt;
-            te->is_const = tconst;
-            te->next = ps->typedefs;
-            ps->typedefs = te;
-            if (cur(ps)->kind == TOK_COMMA) {
-                advance(ps);
-                continue;
-            }
-            break;
-        }
-        expect(ps, TOK_SEMI, "';'");
+        if (late_storage(ps, &tbase, &spec_const) & (SC_STATIC | SC_EXTERN))
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "typedef cannot be static or extern");
+        typedef_declarators(ps, tbase, spec_const, tdat);
         return;
     }
     if (cur(ps)->kind == TOK_IDENT)
@@ -5517,6 +5650,22 @@ static void parse_top(struct parser *ps, struct unit *u,
     if (!base)
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                    "expected a type before %s", tok_describe(cur(ps)));
+    /* `const static int t[] = ...`: the storage class among or after
+     * the type specifiers, as C allows */
+    int late = late_storage(ps, &base, &spec_const);
+    is_static |= (late & SC_STATIC) != 0;
+    is_extern |= (late & SC_EXTERN) != 0;
+    is_tls |= (late & SC_THREAD) != 0;
+    is_inline |= (late & SC_INLINE) != 0;
+    if (late & SC_NORETURN)
+        at.noreturn = 1;
+    if (late & SC_TYPEDEF) {
+        if (is_static || is_extern)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                       "typedef cannot be static or extern");
+        typedef_declarators(ps, base, spec_const, at);
+        return;
+    }
     /* An _Alignas among the specifiers applies to every declarator of
      * the declaration. It was dropped here, before anything read it, so
      * `_Alignas(64) int buf[16];` at file scope was laid out at its

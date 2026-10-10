@@ -506,8 +506,8 @@ Enable `-Waddress`, `-Wformat`, `-Wmaybe-uninitialized`, `-Wparentheses`,
 
 #### `-Wextra`, `-W`
 
-Enable `-Wimplicit-fallthrough`, `-Wlogical-op`, `-Wsign-compare`,
-`-Wtype-limits` and `-Wunused-parameter`. `-Wextra` does not imply `-Wall`. `-W` is an older
+Enable `-Wimplicit-fallthrough`, `-Wlogical-op`, `-Wold-style-declaration`,
+`-Wsign-compare`, `-Wtype-limits` and `-Wunused-parameter`. `-Wextra` does not imply `-Wall`. `-W` is an older
 spelling of `-Wextra`.
 
 #### `-WNAME`
@@ -634,6 +634,7 @@ nothing on.
 | `-Wmissing-declarations` | A function with external linkage defined with no declaration before it (when `-Wmissing-prototypes` is off) | none |
 | `-Wmissing-prototypes` | A function with external linkage defined with no prototype before it | none |
 | `-Wnested-externs` | An `extern` declaration inside a function body | none |
+| `-Wold-style-declaration` | A storage class or `inline` after the type specifiers: `const static int t[]`, `int static n` | `-Wextra` |
 | `-Woverflow` | An integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;` | default |
 | `-Wparentheses` | A comparison as an unparenthesized operand of `&`, `\|` or `^` | `-Wall` |
 | `-Wprio-ctor-dtor` | A `constructor` or `destructor` priority from 0 to 100, which the implementation reserves | default |

@@ -161,6 +161,7 @@ define `__GNUC__` when compiling C.
 | `return;` in a non-`void` function | Not supported | `'g' returns int; 'return' needs a value`. A constraint violation since C99. |
 | `auto` storage class | Supported | `auto int x;` |
 | `register` storage class | Partial | Accepted on block-scope objects. On a parameter or at file scope: `'register' is not supported yet (see docs/manual/c-language.md)`. Taking the address of a `register` object is not diagnosed. |
+| Storage class after the type, `const static int t[]`, `int static n`, `long typedef L` | Partial | Obsolescent (C17 6.11.5), and `-Wold-style-declaration` (`-Wextra`) reports it, as in GCC. At block scope `extern` and `typedef` must come first: `at block scope, write 'extern' first in the declaration`. |
 | `const` | Supported | See [Const qualification](#const-qualification). |
 | `volatile` | Supported | |
 | Scopes | Partial | Objects, functions and labels follow the standard's rules. Tags, typedef names and enumeration constants do not. See [Scope of tags, typedefs and enumeration constants](#scope-of-tags-typedefs-and-enumeration-constants). |

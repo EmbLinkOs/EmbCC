@@ -457,4 +457,21 @@ printf 'int g1;\n#pragma GCC diagnostic ignored "-Wshadow"\nint t(void) { int un
 if grep -q 'the one it hides' "$out/note.txt"; then
     cat "$out/note.txt"; echo "FAIL: a silenced -Wshadow left its note behind"; exit 1
 fi
-echo "the coding-standard warnings at their lines, -Wformat=2, the gcc-only ones, and no stray notes"
+# a storage class after the type: accepted, as C allows, and reported
+# in -Wextra as GCC reports it (-Wold-style-declaration)
+printf 'const static int a = 1;\nint static b;\nunsigned extern int c;\nlong typedef L;\nstatic inline int f(void) { int register r = a; return r + b; }\nL lg;\nint const static k2 = 4;\ntypedef int T;\nT const static k3 = 5;\n' > "$out/osd.c"
+"$EMBCC" --target="$TARGET" -Wextra -fsyntax-only "$out/osd.c" 2> "$out/osd.txt" ||
+    { cat "$out/osd.txt"; echo "FAIL: a storage class after the type was refused"; exit 1; }
+got=$(grep -o "osd.c:[0-9]*:.*\[-Wold-style-declaration\]" "$out/osd.txt" | cut -d: -f2 | tr '\n' ' ')
+[ "$got" = "1 2 3 4 5 7 9 " ] || { cat "$out/osd.txt"; echo "FAIL: -Wold-style-declaration at '$got'"; exit 1; }
+"$EMBCC" --target="$TARGET" -fsyntax-only "$out/osd.c" 2>&1 | grep -q old-style &&
+    { echo "FAIL: -Wold-style-declaration without -Wextra"; exit 1; }
+# and the storage class is the one written: `const static` is internal
+if command -v llvm-nm > /dev/null 2>&1; then
+    "$EMBCC" --target="$TARGET" -c "$out/osd.c" -o "$out/osd.o" 2> /dev/null
+    for v in a k2 k3; do
+        llvm-nm "$out/osd.o" | grep -q " r $v\$" ||
+            { llvm-nm "$out/osd.o"; echo "FAIL: '$v' is not a local read-only symbol"; exit 1; }
+    done
+fi
+echo "the coding-standard warnings at their lines, -Wformat=2, the gcc-only ones, no stray notes, and -Wold-style-declaration"

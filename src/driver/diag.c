@@ -734,6 +734,9 @@ static struct warn_opt g_warns[] = {
     /* a case that runs into the next with no break, and no
      * __attribute__((fallthrough)) saying it is meant */
     { "implicit-fallthrough", 0,  0,    1 },
+    /* `const static int t[]`: a storage class after the type, which C
+     * calls obsolescent and GCC reports in -Wextra */
+    { "old-style-declaration", 0, 0,    1 },
 
     /* ---- conversions that may change a value (sema, cvt_check) ----
      *
