@@ -571,11 +571,11 @@ The full rules are in
 embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
 ```
 
-Any `-W` name that is not one of EmbCC's eighteen warnings
+Any `-W` name that is not one of EmbCC's warnings
 (`--help-warnings` lists them) is accepted with:
 
 ```text
-embcc: warning: -Wconversion is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)
+embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)
 ```
 
 `-std=` selects no dialect. `-std=c89` and `-std=c99` are accepted with

@@ -472,6 +472,603 @@ static void flash_object(struct unit *u, struct global *g)
         g->section = ".progmem.data";
 }
 
+/* ---- -Wconversion, -Wsign-conversion, -Wfloat-conversion, -Woverflow ----
+ *
+ * An implicit conversion that may change the value: GCC's rules, which
+ * coding standards for embedded C are written against (MISRA's
+ * essential-type rules ask the same question), ported from c-warn.cc
+ * (conversion_warning, warnings_for_convert_and_check) and c-common.cc
+ * (unsafe_conversion_p). The points GCC checks are the points checked
+ * here: assignment, initialization, an argument, a return, the operands
+ * of an arithmetic or bitwise operator made common, and the arms of ?:.
+ *
+ * What makes the rules usable is what they do NOT say. An arithmetic
+ * result is suspect only when an operand already is -- `u8 x = b + 1`
+ * is silent, `u8 x = i + 1` is not (GCC 10's change; -Warith-conversion
+ * restores the old noise). A widening cast is looked through, so
+ * `(int)b` is still eight bits. `x & 0x7f` fits whatever x is.
+ * Comparisons give 0 or 1. And an enumerated type, _Bool and a pointer
+ * are never the subject: GCC asks only about integer and real types.
+ *
+ * -Woverflow is GCC's too, and on by default: a constant that the
+ * target type cannot hold at all, as `u8 x = 300`. */
+enum { CV_SAFE, CV_OTHER, CV_SIGN, CV_REAL };
+
+/* A type as these rules see it: an integer of `prec` bits, a real of
+ * `prec` bits (its size, which is what GCC compares), or neither. A
+ * bit-field is an integer as wide as the field. */
+struct cvt {
+    int cls;            /* 1 integer, 2 real, 0 neither */
+    int prec, uns;
+    const struct type *t;
+    int bits;           /* a bit-field's width, else 0 */
+};
+
+static int fold_is_exact(const struct expr *e);
+static int const_fold(const struct expr *e, long *out);
+static int const_fold_f(const struct expr *e, double *out);
+static long cast_fold_value(const struct type *t, long v);
+
+static struct cvt cvt_type(const struct type *t, int bits, int enum_ok)
+{
+    struct cvt c = { 0, 0, 0, t, bits };
+    if (!t)
+        return c;
+    if (ty_is_float(t)) {
+        c.cls = 2;
+        c.prec = ty_size(t) * 8;
+    } else if (ty_is_integer(t) && t->kind != TY_BOOL &&
+               (!t->is_enum || enum_ok)) {
+        c.cls = 1;
+        c.prec = bits ? bits : ty_size(t) * 8;
+        c.uns = t->is_unsigned;
+    }
+    return c;
+}
+
+static int cvt_bits(const struct expr *e)
+{
+    return e->kind == EXPR_MEMBER && e->memb && e->memb->is_bitfield
+           ? e->memb->bit_width : 0;
+}
+
+static struct cvt cvt_expr(const struct expr *e, int enum_ok)
+{
+    return cvt_type(e->ty, cvt_bits(e), enum_ok);
+}
+
+/* `unsigned int:3` for a bit-field, as GCC names one */
+static const char *cvt_name(struct cvt c)
+{
+    static char buf[2][80];
+    static int which;
+    if (!c.bits)
+        return ty_name(c.t);
+    which ^= 1;
+    snprintf(buf[which], sizeof buf[0], "%s:%d", ty_name(c.t), c.bits);
+    return buf[which];
+}
+
+/* An integer constant expression, and its value; a 64-bit unsigned one
+ * is held in the bits of the long. */
+static int cvt_int_const(const struct expr *e, long *v)
+{
+    return e->ty && ty_is_integer(e->ty) && ty_size(e->ty) <= 8 &&
+           fold_is_exact(e) && const_fold(e, v);
+}
+
+static int cvt_real_const(const struct expr *e, double *d)
+{
+    return e->ty && ty_is_float(e->ty) && const_fold_f(e, d);
+}
+
+/* Does v (unsigned when vuns) fit an integer of prec bits? */
+static int cvt_fits(long v, int vuns, int prec, int tuns)
+{
+    int neg = !vuns && v < 0, huge = vuns && v < 0;  /* >= 2^63 */
+    if (tuns) {
+        if (neg)
+            return 0;
+        return prec >= 64 || (unsigned long)v <= (~0UL >> (64 - prec));
+    }
+    if (huge)
+        return prec > 64;
+    if (prec >= 64)
+        return 1;
+    long max = (long)(~0UL >> (65 - prec));
+    return v >= -max - 1 && v <= max;
+}
+
+/* v converted to an integer of prec bits */
+static long cvt_wrap(long v, int prec, int tuns)
+{
+    if (prec >= 64)
+        return v;
+    unsigned long m = ~0UL >> (64 - prec), x = (unsigned long)v & m;
+    if (!tuns && (x >> (prec - 1)) & 1)
+        x |= ~m;
+    return (long)x;
+}
+
+/* The significand of a real type, in bits */
+static int cvt_mant(struct cvt t)
+{
+    if (t.prec <= 16)
+        return 11;
+    if (t.prec <= 32)
+        return 24;
+    if (t.prec <= 64)
+        return 53;
+    return target_get() == TARGET_X86_64 ? 64 : 113;
+}
+
+/* Is the integer v exactly a value of a real type with m significand bits? */
+static int cvt_int_exact(long v, int vuns, int m)
+{
+    unsigned long a = vuns || v >= 0 ? (unsigned long)v
+                                     : 0UL - (unsigned long)v;
+    while (a && !(a & 1))
+        a >>= 1;
+    int n = 0;
+    while (a) {
+        n++;
+        a >>= 1;
+    }
+    return n <= m;
+}
+
+static int cvt_real_is_int(double d)
+{
+    if (d != d)
+        return 0;
+    if (d >= 4503599627370496.0 || d <= -4503599627370496.0)
+        return 1;           /* 2^52 and above: no fraction bits left */
+    return (double)(long)d == d;
+}
+
+/* GCC's get_unwidened: under the conversions that only widen, the
+ * narrower value -- `(int)b` is b's eight bits. */
+static const struct expr *cvt_unwiden(const struct expr *e)
+{
+    const struct expr *win = e;
+    int final = cvt_expr(e, 1).prec, uns = 0;
+    while (e->kind == EXPR_CAST && e->rhs && e->rhs->ty &&
+           ty_is_integer(e->ty) && ty_is_integer(e->rhs->ty)) {
+        int outer = cvt_type(e->ty, 0, 1).prec;
+        int change = outer - cvt_expr(e->rhs, 1).prec;
+        if (change < 0)
+            break;
+        e = e->rhs;
+        if (change > 0) {
+            if (!uns || final <= cvt_expr(e, 1).prec)
+                win = e;
+            if ((uns || e->kind == EXPR_CAST) && e->ty->is_unsigned) {
+                uns = 1;
+                win = e;
+            }
+        }
+    }
+    return win;
+}
+
+/* `x & C` fits the target when the constant does, whatever x is: as
+ * both a signed and an unsigned value of the target's width, or as an
+ * unsigned value of the target type itself. */
+static int cvt_mask_fits(struct cvt to, const struct expr *e)
+{
+    for (int i = 0; i < 2; i++) {
+        const struct expr *op = i ? e->rhs : e->lhs;
+        long c;
+        if (!cvt_int_const(op, &c))
+            continue;
+        int cu = op->ty->is_unsigned && ty_size(op->ty) >= 8;
+        if (cvt_fits(c, cu, to.prec, 0) && cvt_fits(c, cu, to.prec, 1))
+            return 1;
+        if (op->ty->is_unsigned && cvt_fits(c, cu, to.prec, to.uns))
+            return 1;
+    }
+    return 0;
+}
+
+/* `u % 2^k` is less than 2^k, as `u & (2^k - 1)` -- which GCC folds it
+ * to before it asks -- says: the mask, when it fits the target. */
+static int cvt_umod_fits(struct cvt to, const struct expr *e)
+{
+    long c;
+    if (to.cls != 1 || e->kind != EXPR_BINOP || e->op != B_MOD ||
+        !e->ty || !e->ty->is_unsigned || !cvt_int_const(e->rhs, &c) ||
+        c <= 0 || (c & (c - 1)))
+        return 0;
+    return cvt_fits(c - 1, 0, to.prec, to.uns);
+}
+
+/* The values e can take when it is built of constants and ?: choices
+ * between them -- `0x70 + (alloca ? 13 : 31)`, which GCC folds into a
+ * ?: of two constants before it asks. At most CVT_NVALS of them. */
+#define CVT_NVALS 16
+static int cvt_values(const struct expr *e, long *out)
+{
+    long c, a[CVT_NVALS], b[CVT_NVALS];
+    if (!e->ty || !ty_is_integer(e->ty) || ty_size(e->ty) > 8)
+        return 0;
+    if (cvt_int_const(e, &c)) {
+        out[0] = c;
+        return 1;
+    }
+    int n = 0, na = 0, nb = 0;
+    switch (e->kind) {
+    case EXPR_COND:
+        na = cvt_values(e->lhs, a);
+        nb = na ? cvt_values(e->rhs, b) : 0;
+        if (!nb || na + nb > CVT_NVALS)
+            return 0;
+        for (int i = 0; i < na; i++)
+            out[n++] = cast_fold_value(e->ty, a[i]);
+        for (int i = 0; i < nb; i++)
+            out[n++] = cast_fold_value(e->ty, b[i]);
+        return n;
+    case EXPR_CAST:
+        if (!e->rhs || !e->rhs->ty || !ty_is_integer(e->rhs->ty))
+            return 0;
+        na = cvt_values(e->rhs, a);
+        if (!na)
+            return 0;
+        for (int i = 0; i < na; i++)
+            out[i] = cast_fold_value(e->ty, a[i]);
+        return na;
+    case EXPR_BINOP:
+        if (e->op != B_ADD && e->op != B_SUB && e->op != B_MUL &&
+            e->op != B_AND && e->op != B_OR && e->op != B_XOR &&
+            e->op != B_SHL)
+            return 0;
+        na = cvt_values(e->lhs, a);
+        nb = na ? cvt_values(e->rhs, b) : 0;
+        if (!nb || na * nb > CVT_NVALS)
+            return 0;
+        for (int i = 0; i < na; i++)
+            for (int j = 0; j < nb; j++) {
+                unsigned long x = (unsigned long)a[i], y = (unsigned long)b[j];
+                unsigned long r = e->op == B_ADD ? x + y : e->op == B_SUB ? x - y
+                                : e->op == B_MUL ? x * y : e->op == B_AND ? x & y
+                                : e->op == B_OR ? x | y : e->op == B_XOR ? x ^ y
+                                : y < 64 ? x << y : 0;
+                out[n++] = cast_fold_value(e->ty, (long)r);
+            }
+        return n;
+    default:
+        return 0;
+    }
+}
+
+/* Every value e can take fits `to`: a ?: of constants, or a cast of a
+ * mask -- `(unsigned)(imm & 0xff)`, which GCC makes `(unsigned)imm &
+ * 0xffu` first. */
+static int cvt_values_fit(struct cvt to, const struct expr *e)
+{
+    long v[CVT_NVALS];
+    if (to.cls != 1)
+        return 0;
+    if (e->kind == EXPR_CAST && e->rhs && e->rhs->ty &&
+        ty_is_integer(e->ty) && ty_is_integer(e->rhs->ty) &&
+        e->rhs->kind == EXPR_BINOP && e->rhs->op == B_AND) {
+        for (int i = 0; i < 2; i++) {
+            const struct expr *op = i ? e->rhs->rhs : e->rhs->lhs;
+            long c;
+            if (!cvt_int_const(op, &c))
+                continue;
+            c = cast_fold_value(e->ty, c);
+            int cu = e->ty->is_unsigned && ty_size(e->ty) >= 8;
+            if ((cvt_fits(c, cu, to.prec, 0) && cvt_fits(c, cu, to.prec, 1)) ||
+                (e->ty->is_unsigned && cvt_fits(c, cu, to.prec, to.uns)))
+                return 1;
+        }
+    }
+    int n = cvt_values(e, v);
+    if (!n)
+        return 0;
+    int vu = e->ty->is_unsigned && ty_size(e->ty) >= 8;
+    for (int i = 0; i < n; i++)
+        if (!cvt_fits(v[i], vu, to.prec, to.uns))
+            return 0;
+    return 1;
+}
+
+/* GCC's unsafe_conversion_p: can converting e to `to` change its value,
+ * and how. enum_ok: e is an operand inside an arithmetic expression,
+ * where GCC sees an enum through its conversion to int. */
+static int cvt_unsafe(struct cvt to, const struct expr *e, int enum_ok)
+{
+    struct cvt from = cvt_expr(e, enum_ok);
+    long v;
+    double d;
+    if (!to.cls || !from.cls)
+        return CV_SAFE;
+    if (from.cls == 1 && cvt_int_const(e, &v)) {
+        if (to.cls == 2)
+            return cvt_int_exact(v, from.uns, cvt_mant(to)) ? CV_SAFE
+                                                            : CV_REAL;
+        if (cvt_fits(v, from.uns, to.prec, to.uns))
+            return CV_SAFE;
+        if ((to.uns && !from.uns && v < 0) || (!to.uns && from.uns))
+            return CV_SIGN;
+        return CV_OTHER;
+    }
+    if (from.cls == 2 && cvt_real_const(e, &d)) {
+        if (to.cls == 1)
+            return cvt_real_is_int(d) ? CV_SAFE : CV_REAL;
+        if (to.prec < from.prec && to.prec <= 32 && (double)(float)d != d)
+            return CV_REAL;
+        return CV_SAFE;
+    }
+    if (from.cls == 2)
+        return to.cls == 1 || to.prec < from.prec ? CV_REAL : CV_SAFE;
+    if (cvt_values_fit(to, e))
+        return CV_SAFE;
+    e = cvt_unwiden(e);
+    from = cvt_expr(e, 1);
+    if (!from.cls || cvt_umod_fits(to, e))
+        return CV_SAFE;     /* widened from a _Bool; a power-of-two remainder */
+    if (to.cls == 2) {
+        /* safe when the type's least and greatest values are exact */
+        return (from.uns ? from.prec : from.prec - 1) <= cvt_mant(to)
+               ? CV_SAFE : CV_OTHER;
+    }
+    if (e->kind == EXPR_BINOP &&
+        (e->op == B_AND || e->op == B_OR || e->op == B_XOR)) {
+        /* both operands narrower and alike: the operation is too */
+        const struct expr *ae = cvt_unwiden(e->lhs), *be = cvt_unwiden(e->rhs);
+        struct cvt a = cvt_expr(ae, 1), b = cvt_expr(be, 1);
+        long c;
+        if (a.cls && b.cls && a.prec < from.prec && a.prec == b.prec &&
+            a.uns == b.uns && (a.uns || !from.uns)) {
+            from.prec = a.prec;
+            from.uns = a.uns;
+        } else if (a.cls && a.prec < from.prec && (a.uns || !from.uns) &&
+                   cvt_int_const(e->rhs, &c) &&
+                   cvt_fits(c, b.uns && b.prec >= 64, a.prec, a.uns)) {
+            from.prec = a.prec;     /* `(long)i & ~15L` is an int's */
+            from.uns = a.uns;
+        } else if (b.cls && b.prec < from.prec && (b.uns || !from.uns) &&
+                   cvt_int_const(e->lhs, &c) &&
+                   cvt_fits(c, a.uns && a.prec >= 64, b.prec, b.uns)) {
+            from.prec = b.prec;
+            from.uns = b.uns;
+        }
+        if (e->op == B_AND && cvt_mask_fits(to, e))
+            return CV_SAFE;
+    }
+    if (to.prec < from.prec)
+        return CV_OTHER;
+    if ((to.prec == from.prec && to.uns != from.uns) ||
+        (to.uns && !from.uns))
+        return CV_SIGN;
+    return CV_SAFE;
+}
+
+static int g_cv_conv, g_cv_sign, g_cv_float, g_cv_arith, g_cv_overflow;
+
+static int cvt_report(struct unit *u, int kind, struct cvt to,
+                      struct cvt from, int line, int col, const char *arith)
+{
+    const char *opt = arith ? arith
+                    : kind == CV_REAL ? "float-conversion"
+                    : kind == CV_SIGN ? "sign-conversion" : "conversion";
+    if (kind == CV_SIGN)
+        return diag_warn_opt(diag_file(u), line, col, opt,
+                             "conversion to '%s' from '%s' may change the "
+                             "sign of the result", cvt_name(to),
+                             cvt_name(from));
+    return diag_warn_opt(diag_file(u), line, col, opt,
+                         "conversion from '%s' to '%s' may change value",
+                         cvt_name(from), cvt_name(to));
+}
+
+/* A constant's conversion, with both values in the message */
+static int cvt_report_const(struct unit *u, int kind, struct cvt to,
+                            const struct expr *e, int line, int col)
+{
+    struct cvt from = cvt_expr(e, 1);
+    const char *opt = kind == CV_REAL ? "float-conversion"
+                    : kind == CV_SIGN ? "sign-conversion" : "conversion";
+    char was[48], now[48];
+    long v;
+    double d;
+    if (cvt_int_const(e, &v)) {
+        snprintf(was, sizeof was, from.uns ? "%lu" : "%ld", v);
+        if (to.cls == 2 && to.prec <= 32)
+            snprintf(now, sizeof now, "%.9g", (double)(float)v);
+        else if (to.cls == 2)
+            snprintf(now, sizeof now, "%.17g", (double)v);
+        else
+            snprintf(now, sizeof now, to.uns ? "%lu" : "%ld",
+                     cvt_wrap(v, to.prec, to.uns));
+    } else if (cvt_real_const(e, &d)) {
+        snprintf(was, sizeof was, "%.17g", d);
+        if (to.cls == 1)
+            snprintf(now, sizeof now, "%ld", (long)d);
+        else
+            snprintf(now, sizeof now, "%.9g", (double)(float)d);
+    } else {
+        return 0;
+    }
+    return diag_warn_opt(diag_file(u), line, col, opt,
+                         "%sconversion from '%s' to '%s' changes value "
+                         "from '%s' to '%s'",
+                         kind == CV_SIGN ? (to.uns ? "unsigned " : "signed ")
+                                         : "",
+                         cvt_name(from), cvt_name(to), was, now);
+}
+
+/* GCC's conversion_warning: 1 when it warned */
+static int cvt_warn(struct unit *u, struct cvt to, const struct expr *e,
+                    int line, int col)
+{
+    long v;
+    double d;
+    int arith = 0;
+    if (!to.cls || !e->ty)
+        return 0;
+    if (cvt_int_const(e, &v) || cvt_real_const(e, &d)) {
+        int kind = cvt_unsafe(to, e, 0);
+        return kind ? cvt_report_const(u, kind, to, e, line, col) : 0;
+    }
+    switch (e->kind) {
+    case EXPR_NOT:
+        return 0;           /* 0 or 1 */
+    case EXPR_COND:
+        /* not the ?: as a whole, each arm */
+        return cvt_warn(u, to, e->lhs, line, col) ||
+               cvt_warn(u, to, e->rhs, line, col);
+    case EXPR_BINOP:
+        switch (e->op) {
+        case B_EQ: case B_NE: case B_LT: case B_LE: case B_GT: case B_GE:
+        case B_LAND: case B_LOR:
+            return 0;
+        case B_AND:
+            if (to.cls == 1 && cvt_mask_fits(to, e))
+                return 0;
+            /* fall through */
+        case B_OR:
+        case B_XOR:
+            return cvt_warn(u, to, e->lhs, line, col) ||
+                   cvt_warn(u, to, e->rhs, line, col);
+        case B_SHL:
+        case B_SHR:
+            arith = 1;
+            break;
+        default:
+            if (cvt_umod_fits(to, e))
+                return 0;
+            arith = 2;
+            break;
+        }
+        break;
+    case EXPR_NEG:
+    case EXPR_BNOT:
+    case EXPR_INCDEC:
+        arith = 1;
+        break;
+    case EXPR_CAST:
+        /* a float made an integer: GCC's FIX_TRUNC_EXPR, one operand */
+        if (e->rhs && e->rhs->ty && ty_is_float(e->rhs->ty) &&
+            ty_is_integer(e->ty))
+            arith = 1;
+        break;
+    default:
+        break;
+    }
+    int kind = cvt_unsafe(to, e, 0);
+    if (!kind)
+        return 0;
+    if (!(kind == CV_REAL ? g_cv_float : kind == CV_SIGN ? g_cv_sign
+                                                          : g_cv_conv))
+        return 0;
+    if (arith) {
+        /* the operation is suspect only if an operand already is */
+        for (int i = 0; i < arith; i++) {
+            const struct expr *op =
+                e->kind == EXPR_BINOP ? (i ? e->rhs : e->lhs)
+                : e->kind == EXPR_INCDEC ? e->lhs : e->rhs;
+            if (!op || !op->ty)
+                continue;
+            /* (unsigned)(x + -1) is x - 1 */
+            if (e->kind == EXPR_BINOP && e->op == B_ADD && i == 1 &&
+                to.cls == 1 && to.uns && cvt_int_const(op, &v) && v < 0 &&
+                !op->ty->is_unsigned) {
+                if (!cvt_fits(-v, 0, to.prec, 1))
+                    goto unsafe;
+                continue;
+            }
+            if (cvt_unsafe(to, op, 1))
+                goto unsafe;
+        }
+        if (!g_cv_arith)
+            return 0;
+        return cvt_report(u, kind, to, cvt_expr(e, 1), line, col,
+                          "arith-conversion");
+    }
+unsafe:
+    return cvt_report(u, kind, to, cvt_expr(e, 1), line, col, NULL);
+}
+
+/* GCC's warnings_for_convert_and_check: e is about to become `to` (a
+ * bit-field of `bits` when nonzero). */
+static void cvt_check(struct unit *u, const struct expr *e,
+                      const struct type *to, int bits, int line, int col)
+{
+    if (!e->ty || !(g_cv_conv || g_cv_sign || g_cv_float || g_cv_overflow))
+        return;
+    /* the same type is no conversion: `(size_t)n` passed as a size_t
+     * was checked, if at all, where it was cast */
+    if (!bits && !cvt_bits(e) && ty_equal(e->ty, to))
+        return;
+    struct cvt t = cvt_type(to, bits, 0);
+    if (!t.cls)
+        return;
+    long v;
+    struct cvt f = cvt_expr(e, 1);
+    if (t.cls == 1 && f.cls == 1 && cvt_int_const(e, &v) &&
+        !cvt_fits(v, f.uns, t.prec, t.uns)) {
+        /* past the target's width even read the other way: -129 or
+         * 256 into an unsigned char, 300 into a signed one */
+        const char *how = NULL;
+        if (t.uns && !cvt_fits(v, f.uns, t.prec, 0))
+            how = f.uns ? "" : "unsigned ";
+        else if (!t.uns && !cvt_fits(v, f.uns, t.prec, 1))
+            how = "overflow in ";
+        if (how) {
+            char was[32], now[32];
+            snprintf(was, sizeof was, f.uns ? "%lu" : "%ld", v);
+            snprintf(now, sizeof now, t.uns ? "%lu" : "%ld",
+                     cvt_wrap(v, t.prec, t.uns));
+            diag_warn_opt(diag_file(u), line, col, "overflow",
+                          "%sconversion from '%s' to '%s' changes value "
+                          "from '%s' to '%s'", how, cvt_name(f),
+                          cvt_name(t), was, now);
+            return;
+        }
+    }
+    if (g_cv_conv || g_cv_sign || g_cv_float)
+        cvt_warn(u, t, e, line, col);
+}
+
+/* `x op= y`: the operands made common, as for `x op y`, and then the
+ * result stored back -- which is where `u8 x; x += i;` loses bits and
+ * `x += 1` does not. */
+static void cvt_compound(struct unit *u, struct expr *e)
+{
+    if (!(g_cv_conv || g_cv_sign || g_cv_float || g_cv_overflow))
+        return;
+    struct type *ct = e->cast_ty;
+    cvt_check(u, e->lhs, ct, 0, e->line, e->col);
+    cvt_check(u, e->rhs, ct, 0, e->line, e->col);
+    struct expr cl = { 0 }, cr = { 0 }, op = { 0 };
+    struct expr *l = e->lhs, *r = e->rhs;
+    if (!ty_equal(l->ty, ct)) {
+        cl.kind = EXPR_CAST;
+        cl.ty = cl.cast_ty = ct;
+        cl.rhs = l;
+        l = &cl;
+    }
+    if (!ty_equal(r->ty, ct)) {
+        cr.kind = EXPR_CAST;
+        cr.ty = cr.cast_ty = ct;
+        cr.rhs = r;
+        r = &cr;
+    }
+    op.kind = EXPR_BINOP;
+    op.op = e->op;
+    op.ty = ct;
+    op.lhs = l;
+    op.rhs = r;
+    cvt_check(u, &op, e->lhs->ty, cvt_bits(e->lhs), e->rhs->line,
+              e->rhs->col);
+}
+
+/* The bit-field an assignment or initializer is about to store to, for
+ * convert_assign's check; 0 when the target is not one. */
+static int g_cvt_bits;
+
 static struct expr *convert_assign(struct unit *u, struct expr *rhs,
                                    struct type *to, const char *ctx)
 {
@@ -497,8 +1094,10 @@ static struct expr *convert_assign(struct unit *u, struct expr *rhs,
      * to an integer type. */
     if (to->kind == TY_BOOL && ty_is_scalar(rhs->ty))
         return mk_cast(rhs, to);
-    if (ty_is_arith(to) && ty_is_arith(rhs->ty))
+    if (ty_is_arith(to) && ty_is_arith(rhs->ty)) {
+        cvt_check(u, rhs, to, g_cvt_bits, rhs->line, rhs->col);
         return mk_cast(rhs, to);
+    }
     if (to->kind == TY_PTR) {
         /* AVR: a __flash pointer is a program-memory address, which a
          * generic pointer's loads would read from RAM -- the bytes at the
@@ -1739,7 +2338,9 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                            ty_name(e->rhs->ty), ty_name(e->lhs->ty));
         } else {
             need_scalar(u, e->rhs, "assignment");
+            g_cvt_bits = cvt_bits(e->lhs);
             e->rhs = convert_assign(u, e->rhs, e->lhs->ty, "assignment");
+            g_cvt_bits = 0;
         }
         /* The lvalue's own type, qualifiers and all: irgen takes the
          * store's volatility from it, and an unqualified type here let
@@ -2069,6 +2670,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             e->rhs = cx_cast(e->rhs, e->ty);
         } else if (ty_is_arith(a) && ty_is_arith(b)) {
             e->ty = arith_common(a, b);
+            cvt_check(u, e->lhs, e->ty, 0, e->line, e->col);
+            cvt_check(u, e->rhs, e->ty, 0, e->line, e->col);
             e->lhs = mk_cast(e->lhs, e->ty);
             e->rhs = mk_cast(e->rhs, e->ty);
         } else if (a->kind == TY_PTR && b->kind == TY_PTR) {
@@ -2151,6 +2754,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             need_integer(u, e->rhs, "this operator");
         }
         e->cast_ty = arith_common(e->lhs->ty, e->rhs->ty);
+        cvt_compound(u, e);
         e->rhs = mk_cast(e->rhs, e->cast_ty);
         e->ty = e->lhs->ty;
         break;
@@ -2409,6 +3013,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                 need_arith(u, e->lhs, "arithmetic");
                 need_arith(u, e->rhs, "arithmetic");
                 e->ty = arith_common(lt, rt);
+                cvt_check(u, e->lhs, e->ty, 0, e->line, e->col);
+                cvt_check(u, e->rhs, e->ty, 0, e->line, e->col);
                 e->lhs = mk_cast(e->lhs, e->ty);
                 e->rhs = mk_cast(e->rhs, e->ty);
             }
@@ -2474,6 +3080,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             need_arith(u, e->lhs, "arithmetic");
             need_arith(u, e->rhs, "arithmetic");
             e->ty = arith_common(lt, rt);
+            cvt_check(u, e->lhs, e->ty, 0, e->line, e->col);
+            cvt_check(u, e->rhs, e->ty, 0, e->line, e->col);
             e->lhs = mk_cast(e->lhs, e->ty);
             e->rhs = mk_cast(e->rhs, e->ty);
             break;
@@ -2481,6 +3089,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             need_integer(u, e->lhs, "this operator");
             need_integer(u, e->rhs, "this operator");
             e->ty = arith_common(lt, rt);
+            cvt_check(u, e->lhs, e->ty, 0, e->line, e->col);
+            cvt_check(u, e->rhs, e->ty, 0, e->line, e->col);
             e->lhs = mk_cast(e->lhs, e->ty);
             e->rhs = mk_cast(e->rhs, e->ty);
             break;
@@ -3760,8 +4370,10 @@ static void flatten_agg(struct unit *u, struct func *f, struct scope *sc,
             if (bv != g_init_checked)
                 check_expr(u, f, sc, bv);
             need_scalar(u, bv, "a bitfield initializer");
+            g_cvt_bits = m->bit_width;
             struct expr *cv = convert_assign(u, bv, m->ty,
                                              "initialization");
+            g_cvt_bits = 0;
             init_push_bf(out, off + m->off, m->ty, cv,
                          m->bit_off, m->bit_width, m->bf_bytes);
             c->pos++;
@@ -6441,6 +7053,14 @@ static void apply_pragma_weak(struct unit *u)
 void sema_check(struct unit *u)
 {
     g_cast_unit = u;
+    /* -Wconversion takes -Wsign-conversion with it in C, not in C++
+     * (GCC's grouping); a warning named on its own is on in both */
+    g_cv_conv = diag_warning_enabled("conversion");
+    g_cv_float = diag_warning_enabled("float-conversion");
+    g_cv_sign = diag_warning_enabled("sign-conversion") &&
+                !(predef_is_cxx() && diag_warning_implied("sign-conversion"));
+    g_cv_arith = diag_warning_enabled("arith-conversion");
+    g_cv_overflow = diag_warning_enabled("overflow");
     apply_pragma_weak(u);
     merge_decls(u);
     decide_inline_only(u);

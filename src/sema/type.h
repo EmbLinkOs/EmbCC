@@ -85,6 +85,11 @@ struct type {
                              * copy, like const; an array's elements carry it
                              * too. Ignored by ty_equal; sema keeps pointers to
                              * the two spaces apart. */
+    int is_enum;            /* an enumerated type: its underlying integer
+                             * type in every other respect (ty_equal and
+                             * the lowerings do not look), but GCC's
+                             * -Wconversion treats a conversion to or from
+                             * one as deliberate (ty_enum) */
     int align_ovr;          /* a typedef's __attribute__((aligned(N))): the
                              * type's alignment is N, larger or smaller than
                              * its own, and its size is unchanged (GCC's and
@@ -190,6 +195,7 @@ struct type *ty_const(struct type *t);
 /* A copy of t whose alignment is `align` (a typedef's aligned attribute). */
 struct type *ty_aligned(struct type *t, int align);
 struct type *ty_flash(struct type *t);   /* AVR __flash: program memory */
+struct type *ty_enum(struct type *t);    /* an enumerated type over t */
 /* `t` without its own qualifiers (const, volatile, _Atomic): the
  * original a qualified copy points at. A pointee's stay. */
 struct type *ty_unqual(struct type *t);

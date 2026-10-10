@@ -734,6 +734,20 @@ static struct warn_opt g_warns[] = {
     /* a case that runs into the next with no break, and no
      * __attribute__((fallthrough)) saying it is meant */
     { "implicit-fallthrough", 0,  0,    1 },
+
+    /* ---- conversions that may change a value (sema, cvt_check) ----
+     *
+     * GCC's -Wconversion, and the two it turns on: an integer narrowed
+     * (or an integer made a float that cannot hold it), a value that
+     * may change sign, and a float narrowed or made an integer. Then
+     * the strict form, which also suspects arithmetic whose operands
+     * are fine; and -Woverflow, on by default: a constant the target
+     * type cannot hold at all. */
+    { "conversion",           0,  0,    0 },
+    { "sign-conversion",      0,  0,    0 },
+    { "float-conversion",     0,  0,    0 },
+    { "arith-conversion",     0,  0,    0 },
+    { "overflow",             1,  0,    0 },
 };
 static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
 
@@ -900,12 +914,46 @@ int diag_warning_enabled(const char *name)
  * reports a miss: every -W... used to be accepted in silence, which
  * made a typo invisible and made "-Wall -Wextra -Werror passes" mean
  * far less than it looks. */
+/* A warning another turns on unless it is named itself, whichever comes
+ * first on the command line: -Wconversion -Wno-sign-conversion and
+ * -Wno-sign-conversion -Wconversion both leave it off, as GCC has it. */
+static const struct { const char *child, *parent; } g_implied[] = {
+    { "sign-conversion",  "conversion" },
+    { "float-conversion", "conversion" },
+};
+static unsigned char g_named[sizeof g_warns / sizeof g_warns[0]];
+static unsigned char g_by_parent[sizeof g_warns / sizeof g_warns[0]];
+
+static void warn_imply(const char *parent, int on)
+{
+    for (size_t i = 0; i < sizeof g_implied / sizeof g_implied[0]; i++) {
+        if (strcmp(g_implied[i].parent, parent))
+            continue;
+        struct warn_opt *c = warn_find(g_implied[i].child);
+        if (!c || g_named[c - g_warns])
+            continue;
+        c->on = on;
+        g_by_parent[c - g_warns] = (unsigned char)on;
+    }
+}
+
+/* On only because its parent is: -Wsign-conversion under -Wconversion,
+ * which GCC's C++ does not take */
+int diag_warning_implied(const char *name)
+{
+    struct warn_opt *w = warn_find(name);
+    return w && g_by_parent[w - g_warns];
+}
+
 int diag_enable_warning(const char *name, int on)
 {
     struct warn_opt *w = warn_find(name);
     if (!w)
         return 0;
     w->on = on;
+    g_named[w - g_warns] = 1;
+    g_by_parent[w - g_warns] = 0;
+    warn_imply(name, on);
     return 1;
 }
 
@@ -923,8 +971,10 @@ int diag_set_werror_for(const char *name, int on)
     if (!w)
         return 0;
     g_werror_for[w - g_warns] = (signed char)(on ? 1 : -1);
-    if (on)
+    if (on) {
         w->on = 1;
+        warn_imply(name, 1);
+    }
     return 1;
 }
 

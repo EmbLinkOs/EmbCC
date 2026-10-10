@@ -1650,14 +1650,14 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
                     for (struct econst *ec = *ps->last_enum_first; ec;
                          ec = ec->next)
                         ec->ty = et;
+                    et = ty_enum(et);
                 } else {
                     ps->lx = save;
                 }
             }
-            /* `enum G x;` later: the same type -- unsigned int too, which
-             * is TY_INT and was taken for plain int, so a variable of
-             * the enum read 0xffffffff as -1 */
-            if (etd && et != ty_base(TY_INT, 0))
+            /* `enum G x;` later: the same type (an enumerated type is
+             * never the plain int it is laid out as: ty_enum) */
+            if (etd)
                 etd->ty = et;
             return et;
         }
@@ -3081,7 +3081,7 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
     for (struct econst *ec = *first; ec; ec = ec->next)
         ec->ty = !fixed && !packed && ec->val >= imin && ec->val <= imax &&
                  t->kind == TY_INT ? ty_base(TY_INT, 0) : t;
-    return t;
+    return fixed ? t : ty_enum(t);
 }
 
 /* ---- expressions ---- */

@@ -197,6 +197,19 @@ struct type *ty_aligned(struct type *t, int align)
     return c;
 }
 
+/* An enumerated type: a copy of its underlying integer type with
+ * is_enum set, and an original rather than a qualified copy (no canon),
+ * so that ty_unqual of a `const enum e` gives the enum back. */
+struct type *ty_enum(struct type *t)
+{
+    struct type *c = xcalloc(1, sizeof *c);
+    *c = *t;
+    c->is_enum = 1;
+    c->canon = NULL;
+    c->qcopies = c->qnext = NULL;
+    return c;
+}
+
 struct type *ty_unqual(struct type *t)
 {
     if (t && t->canon &&
@@ -1019,6 +1032,9 @@ struct type *ty_promote(struct type *t)
     if (t->kind == TY_CHAR || t->kind == TY_SHORT)
         return ty_base(TY_INT, t->is_unsigned &&
                                ty_size(t) >= ty_size(ty_base(TY_INT, 0)));
+    if (t->is_enum)     /* the value of `e + 0` is an int, not an enum */
+        return t->is_llong ? ty_llong(t->is_unsigned)
+                           : ty_base(t->kind, t->is_unsigned);
     return t;
 }
 
