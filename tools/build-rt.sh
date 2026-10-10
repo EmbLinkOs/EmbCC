@@ -49,7 +49,7 @@ mkdir -p "$out/rt"
 for f in "$here"/lib/rt/*.c; do
     b=$(basename "$f" .c)
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags -Os -c "$f" -o "$out/rt/$b.o" || {
+    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os -c "$f" -o "$out/rt/$b.o" || {
         echo "build-rt: lib/rt/$b.c does not compile for $triple" >&2
         exit 1; }
 done

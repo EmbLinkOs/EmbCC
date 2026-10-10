@@ -328,7 +328,7 @@ implement, so they are errors:
 | `target` | `__attribute__((target)) is not supported: EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
 | `weakref` | `__attribute__((weakref)) is not supported: the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
 | `ifunc` | `__attribute__((ifunc)) is not supported: the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `packed` or `aligned` on an enum | `a packed or aligned enum is not supported (EmbCC's enums are always int-sized)` |
+| `aligned` on an enum | `an aligned enum is not supported (an enum here is int, or the type its values need)` |
 | `alias` on a variable | `alias attribute on variable 'b' is not supported (functions take it)` |
 | `section` on an automatic variable | `section attribute on 'x', which is on the stack: only a static local can be placed in a section` (GCC refuses it too) |
 
@@ -502,8 +502,10 @@ headers, such as `printf`, link and run.
 - Cortex-M objects carry `.ARM.attributes`, and `embld` refuses to link
   objects whose float ABI (`Tag_ABI_VFP_args`) or enumeration size
   (`Tag_ABI_enum_size`) disagree. An enumeration is `int`-sized unless
-  one of its values does not fit in `int`, as with Clang;
-  `-fshort-enums` is refused.
+  one of its values does not fit in `int`, as with Clang, or the
+  smallest type that holds its values under `-fshort-enums` or
+  `__attribute__((packed))`. EmbCC's libc and librt say nothing about
+  enum size (`-fenum-size-neutral`) and link with both.
 - On AVR, structures are passed and returned by avr-gcc's documented
   rules. Clang's AVR target passes structure arguments differently.
 - MIPS32 objects carry `.MIPS.abiflags` (soft float), and `embld` refuses
@@ -525,7 +527,7 @@ list, with the options that are accepted and have no effect, is in
 
 | Option | Diagnostic |
 |---|---|
-| `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-flto`, `-fshort-enums`, `-fprofile-*`, `--coverage`, `-pg`, `-fstack-clash-protection`, `-fcf-protection` | `embcc: error: -fPIC is not supported; EmbCC would emit ordinary code and the flag's promise would not hold` (naming the option) |
+| `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-flto`, `-fprofile-*`, `--coverage`, `-pg`, `-fstack-clash-protection`, `-fcf-protection` | `embcc: error: -fPIC is not supported; EmbCC would emit ordinary code and the flag's promise would not hold` (naming the option) |
 | `-shared`, `-static-pie` | `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
 | `-fsanitize=` with a check other than `undefined`, `signed-integer-overflow`, `integer-divide-by-zero`, `shift`, `shift-exponent` | `-fsanitize=address is not supported: EmbCC's sanitizer inserts checks that TRAP, and this one needs a runtime library to report through. The ones it has are undefined, signed-integer-overflow, integer-divide-by-zero and shift` |
 | `-fstack-protector`, `-fstack-protector-strong`, ... | `embcc: '-fstack-protector' is not supported (EmbCC emits no stack protection); -fno-stack-protector is` |

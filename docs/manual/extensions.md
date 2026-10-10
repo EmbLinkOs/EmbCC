@@ -469,7 +469,8 @@ not supported (functions take it)`.
 | `aligned(N)` | `struct`, `union` | The type's alignment is raised to at least `N`, and its size is rounded up to a multiple of it |
 | `aligned(N)` | a member | The member's alignment is raised to at least `N`, which raises the structure's |
 | `aligned(N)` | `typedef` | The type's alignment becomes `N`, larger or smaller than its own; its size does not change. See below |
-| `packed`, `aligned` | `enum` | Refused: `a packed or aligned enum is not supported (EmbCC's enums are always int-sized)` |
+| `packed` | `enum` | Supported: the smallest integer type that holds every value, before the body or right after it |
+| `aligned` | `enum` | Refused: `an aligned enum is not supported (an enum here is int, or the type its values need)` |
 | `deprecated` | a type | Accepted; using the type does not warn |
 | `may_alias` | a type | Accepted with no effect; EmbCC performs no type-based alias analysis |
 

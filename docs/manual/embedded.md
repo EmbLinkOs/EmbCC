@@ -383,8 +383,9 @@ build is `-mcmse` ([Targets](targets.md#trustzone-m-cmse)). `-mthumb` is
 accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
-`enum` is `int`-sized unless its values need a wider type
-(`-fshort-enums` is refused). The rest of the
+`enum` is `int`-sized unless its values need a wider type, or the
+smallest type that holds them under `-fshort-enums` (arm-none-eabi-gcc's
+default) or `__attribute__((packed))`. The rest of the
 data model is in [Targets](targets.md).
 
 ### Vector table and reset handler

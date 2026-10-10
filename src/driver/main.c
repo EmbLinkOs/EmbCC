@@ -4284,6 +4284,7 @@ int main(int argc, char **argv)
     unsigned san_mask = 0;
     int want_instr = 0;              /* -finstrument-functions */
     int short_wchar = 0;             /* -fshort-wchar, the last one wins */
+    int short_enums = 0;             /* -fshort-enums, likewise */
     const char *instr_funcs = NULL, *instr_files = NULL;
     int san_trap_asked = 0;
     (void)san_trap_asked;
@@ -4957,6 +4958,18 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-fshort-wchar") == 0 ||
                    strcmp(argv[i], "-fno-short-wchar") == 0) {
             short_wchar = argv[i][2] == 's';
+        } else if (strcmp(argv[i], "-fenum-size-neutral") == 0) {
+            /* EmbCC's: this object makes no claim about the size of an
+             * enum (Tag_ABI_enum_size 0), for a library whose interface
+             * passes no enum type -- EmbCC's libc and librt -- so it links
+             * with code built either way */
+            target_set_enum_neutral(1);
+        } else if (strcmp(argv[i], "-fshort-enums") == 0 ||
+                   strcmp(argv[i], "-fno-short-enums") == 0) {
+            /* every enum the smallest integer type its values fit, as
+             * arm-none-eabi-gcc builds them (clang does not): an ABI
+             * choice, since a struct holding an enum changes layout */
+            short_enums = argv[i][2] == 's';
         } else if (strcmp(argv[i], "-finstrument-functions") == 0) {
             want_instr = 1;
         } else if (strcmp(argv[i], "-fno-instrument-functions") == 0) {
@@ -5049,7 +5062,6 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-finline-small-functions") == 0 ||
                    strcmp(argv[i], "-fno-inline-small-functions") == 0 ||
                    strncmp(argv[i], "-finline-limit=", 15) == 0 ||
-                   strcmp(argv[i], "-fno-short-enums") == 0 ||
                    strcmp(argv[i], "-fno-math-errno") == 0 ||
                    strcmp(argv[i], "-ffast-math") == 0 ||
                    strcmp(argv[i], "-funsafe-math-optimizations") == 0 ||
@@ -5333,7 +5345,6 @@ int main(int argc, char **argv)
                    strcmp(argv[i], "-fpic") == 0 ||
                    strcmp(argv[i], "-fPIE") == 0 ||
                    strcmp(argv[i], "-fpie") == 0 ||
-                   strcmp(argv[i], "-fshort-enums") == 0 ||
                    strcmp(argv[i], "-fstack-clash-protection") == 0 ||
                    strncmp(argv[i], "-fcf-protection", 15) == 0) {
             /* Refused BY NAME, every one. These do not describe a
@@ -5348,11 +5359,6 @@ int main(int argc, char **argv)
              *                plain one and the sizes mislead
              *   -fPIC/-fpie  the code is position DEPENDENT; a shared
              *                object built from it would relocate wrong
-             *   -fshort-enums  enums are `int` here, so a struct
-             *                holding one is laid out differently --
-             *                which is an ABI difference, not a size
-             *                preference. (Note clang does NOT default
-             *                to this on ARM; arm-none-eabi-gcc does.)
              *   -fstack-clash-protection, -fcf-protection  no probes,
              *                no landing pads
              */
@@ -5638,6 +5644,20 @@ int main(int argc, char **argv)
         cpp_cmdline_define("__SIZEOF_WCHAR_T__=2", 0);
         if (target_get() == TARGET_THUMB)
             cpp_cmdline_define("__ARM_SIZEOF_WCHAR_T=2", 0);
+    }
+    if (short_enums) {
+        /* the C parser sizes each enum (parse.c enum_pack); an ARM object
+         * says so in Tag_ABI_enum_size (1), and ACLE's macro moves too */
+        if (lang >= 0 ? lang : has_cxx_suffix(input)) {
+            fprintf(stderr, "embcc: error: -fshort-enums is supported for "
+                            "C, not C++: the C++ front end sizes its own "
+                            "enums, and a struct both see would differ\n");
+            return 1;
+        }
+        target_set_short_enums(1);
+        parse_set_short_enums(1);
+        if (target_get() == TARGET_THUMB)
+            cpp_cmdline_define("__ARM_SIZEOF_MINIMAL_ENUM=1", 0);
     }
     lang_cxx = lang >= 0 ? lang : has_cxx_suffix(input);
     /* The C parser types the constants (parse.c); the C++ front end

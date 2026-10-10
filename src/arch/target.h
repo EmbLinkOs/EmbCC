@@ -224,6 +224,11 @@ int target_wchar_unsigned(void);  /* wchar_t's signedness */
 /* wchar_t's width: int's, except on Xtensa, where GCC's xtensa-elf makes
  * it a 16-bit unsigned short (gcc/config/xtensa/elf.h). */
 int target_wchar_size(void);
+/* -fshort-enums: every enum is the smallest type its values fit */
+void target_set_enum_neutral(int on);   /* -fenum-size-neutral */
+int target_enum_neutral(void);
+void target_set_short_enums(int on);
+int target_short_enums(void);
 /* -fshort-wchar: wchar_t is unsigned short on every target, as GCC's and
  * clang's flag makes it (UEFI, and some ARM code built for Windows-style
  * UTF-16 strings). */

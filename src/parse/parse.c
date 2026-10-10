@@ -72,6 +72,11 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
 };
 
 struct parser {
+    /* the enumerator range parse_enum_body saw last (enum_pack) */
+    long last_enum_lo;
+    unsigned long last_enum_hi;
+    int last_enum_neg;
+    struct econst **last_enum_first;
     /* const at the top level of the type built so far: set from the
      * declaration specifiers (spec_const) by parse_type_spec, raised by
      * a const after a `*` and dropped by the `*` itself (parse_stars).
@@ -1535,7 +1540,13 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
 
 static struct type *parse_struct_body(struct parser *ps, struct type *t,
                                       const struct attrs *lead);
-static struct type *parse_enum_body(struct parser *ps, struct type *fixed);
+static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
+                                     int packed);
+static struct type *enum_pack(struct type *t, long lo, unsigned long hi,
+                              int anyneg);
+/* -fshort-enums: every enum is packed, as arm-none-eabi-gcc makes them */
+static int g_short_enums;
+void parse_set_short_enums(int on) { g_short_enums = on; }
 
 /* struct/union/enum specifier, after the keyword was consumed. */
 static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
@@ -1553,9 +1564,9 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
         tag = cur(ps)->text;
         advance(ps);
     }
-    if (kind == TAG_ENUM && (lead.packed || lead.aligned))
+    if (kind == TAG_ENUM && lead.aligned)
         parse_error_at(ps, cur(ps)->line, cur(ps)->col,
-                "a packed or aligned enum is not supported (an enum here is "
+                "an aligned enum is not supported (an enum here is "
                 "int, or the type its values need)");
 
     /* C23 `enum e : type` -- a FIXED underlying type, which is the
@@ -1575,7 +1586,7 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             if (!allow_body)
                 parse_error_at(ps, cur(ps)->line, cur(ps)->col,
                            "define enums at file scope");
-            parse_enum_body(ps, under);
+            parse_enum_body(ps, under, 0);
         }
         if (tag && !find_tag(ps, tag))
             push_tag(ps, tag, kind, under);
@@ -1623,7 +1634,26 @@ static struct type *parse_tagged(struct parser *ps, enum tag_kind kind,
             t = ty_struct(NULL, kind == TAG_UNION);
         }
         if (kind == TAG_ENUM) {
-            struct type *et = parse_enum_body(ps, NULL);
+            /* packed before the body, or right after it -- `typedef enum
+             * { ... } __attribute__((packed)) state_t;` -- as GCC reads
+             * both; a trailing set that is not packed is the declarator's,
+             * so it is put back */
+            int packed = lead.packed || g_short_enums;
+            struct type *et = parse_enum_body(ps, NULL, packed);
+            if (!packed && at_attribute(ps)) {
+                struct lexer save = ps->lx;
+                struct attrs trail = { 0 };
+                parse_attributes(ps, &trail);
+                if (trail.packed) {
+                    et = enum_pack(et, ps->last_enum_lo, ps->last_enum_hi,
+                                   ps->last_enum_neg);
+                    for (struct econst *ec = *ps->last_enum_first; ec;
+                         ec = ec->next)
+                        ec->ty = et;
+                } else {
+                    ps->lx = save;
+                }
+            }
             /* `enum G x;` later: the same type -- unsigned int too, which
              * is TY_INT and was taken for plain int, so a variable of
              * the enum read 0xffffffff as -1 */
@@ -2871,7 +2901,26 @@ static void econst_shadow_check(struct parser *ps, const char *name, int line)
  * which the enumerators then have too (C23 6.7.2.2). They were all int
  * whatever their value, so `enum { G = 0x100000005 }` was truncated in
  * every expression and sizeof the enum was 4 against their 8. */
-static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
+/* A packed enum (or every enum, under -fshort-enums): the smallest
+ * integer type that holds every value -- unsigned when none is negative
+ * -- as GCC picks it: unsigned char, signed char, unsigned short, short,
+ * or the type the values already need. */
+static struct type *enum_pack(struct type *t, long lo, unsigned long hi,
+                              int anyneg)
+{
+    if (!anyneg && hi <= 0xff)
+        return ty_base(TY_CHAR, 1);
+    if (anyneg && lo >= -128 && hi <= 127)
+        return ty_base(TY_CHAR, 0);
+    if (!anyneg && hi <= 0xffff && target_int_size() > 2)
+        return ty_base(TY_SHORT, 1);
+    if (anyneg && lo >= -32768 && hi <= 32767 && target_int_size() > 2)
+        return ty_base(TY_SHORT, 0);
+    return t;
+}
+
+static struct type *parse_enum_body(struct parser *ps, struct type *fixed,
+                                    int packed)
 {
     expect(ps, TOK_LBRACE, "'{'");
     int ib = target_int_size() * 8, lb = target_long_size() * 8;
@@ -3014,6 +3063,13 @@ static struct type *parse_enum_body(struct parser *ps, struct type *fixed)
             t = lo >= lmin && hi <= (unsigned long)lmax ? ty_base(TY_LONG, 0)
               : s64;
     }
+    if (!fixed && packed && !anybig)
+        t = enum_pack(t, lo, hi, anyneg);
+    /* what a trailing `__attribute__((packed))` needs to repack it */
+    ps->last_enum_lo = lo;
+    ps->last_enum_hi = anybig ? ~0UL : hi;
+    ps->last_enum_neg = anyneg;
+    ps->last_enum_first = first;
     for (struct econst *ec = *first; ec; ec = ec->next)
         ec->ty = t;
     return t;

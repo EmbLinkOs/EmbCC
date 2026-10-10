@@ -457,7 +457,10 @@ static void arm_attrs_scan(struct object *o,
                 }
                 unsigned long v = arm_uleb(&b, bend);
                 if (t == ARM_TAG_VFP_ARGS)  { o->arm_vfp = (int)v + 1; }
-                if (t == ARM_TAG_ENUM_SIZE) { o->arm_enum = (int)v + 1; }
+                /* 0 claims nothing about an enum's size: an object that
+                 * uses none, or a library whose interface passes none
+                 * (EmbCC's, -fenum-size-neutral) -- it links with both */
+                if (t == ARM_TAG_ENUM_SIZE) { o->arm_enum = v ? (int)v + 1 : 0; }
                 if (t == ARM_TAG_CPU_ARCH)  { o->arm_arch = (int)v + 1; }
             }
         }
@@ -474,23 +477,30 @@ static void arm_attrs_scan(struct object *o,
  * must not be treated as claiming the base standard. */
 static void arm_attrs_check(struct linker *l)
 {
-    struct object *ref = NULL;
+    /* a reference per attribute: the first object that states each, so
+     * one that states only the other is not the yardstick */
+    struct object *ref = NULL, *refe = NULL;
     for (int i = 0; i < l->nobj; i++) {
         struct object *o = l->objs[i];
-        if (!o->arm_vfp && !o->arm_enum)
+        if (o->arm_enum) {
+            if (!refe)
+                refe = o;
+            else if (refe->arm_enum != o->arm_enum)
+                die("'%s' and '%s' disagree about the size of an enum, "
+                    "which changes the layout of every struct that holds "
+                    "one", refe->name ? refe->name : "?",
+                    o->name ? o->name : "?");
+        }
+        if (!o->arm_vfp)
             continue;
         if (!ref) { ref = o; continue; }
-        if (ref->arm_vfp && o->arm_vfp && ref->arm_vfp != o->arm_vfp)
+        if (ref->arm_vfp != o->arm_vfp)
             die("'%s' and '%s' disagree about where floating-point "
                 "arguments go: one passes them in the core registers "
                 "(-mfloat-abi=soft) and the other in s0-s15 "
                 "(-mfloat-abi=hard). Linking them would leave every "
                 "float argument read from a register the caller never "
                 "wrote",
-                ref->name ? ref->name : "?", o->name ? o->name : "?");
-        if (ref->arm_enum && o->arm_enum && ref->arm_enum != o->arm_enum)
-            die("'%s' and '%s' disagree about the size of an enum, which "
-                "changes the layout of every struct that holds one",
                 ref->name ? ref->name : "?", o->name ? o->name : "?");
     }
 }

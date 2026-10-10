@@ -54,7 +54,7 @@ alias for the base profile:"; cat "$out/b.txt"; exit 1; }
     grep -q 'TagName: ABI_VFP_args' "$out/a.txt" || {
         echo "Tag_ABI_VFP_args is missing, so nothing downstream can tell
 this object apart from a hard-float one"; exit 1; }
-    # Enums are int here and -fshort-enums is refused, so the tag says 2.
+    # Enums are int by default (-fshort-enums makes them small), so the tag says 2.
     grep -A3 'TagName: ABI_enum_size' "$out/a.txt" | grep -qi 'int' || {
         echo "Tag_ABI_enum_size does not say int:"; cat "$out/a.txt"; exit 1; }
     echo "they decode, and report v7 / v7E-M, the soft-float ABI and int enums"
