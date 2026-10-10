@@ -59,6 +59,12 @@ struct expr {
     const char *name;     /* EXPR_VAR, EXPR_CALL, EXPR_INCDEC target;
                            * EXPR_STR: the bytes */
     int var_index;        /* EXPR_VAR/EXPR_INCDEC: slot; set by sema */
+    int res_local;        /* EXPR_CALL returning a struct the ABI returns as
+                           * the integer it holds (ty_scalar_struct_ret):
+                           * 1 + the local its value is stored in, so the
+                           * value can leave memory (sema); 0 otherwise */
+    unsigned long scalar_args; /* EXPR_CALL: bit k -- argument k is such a
+                                * struct, passed as the integer (sema) */
     struct global *gref;  /* EXPR_VAR/EXPR_INCDEC: the global, when the
                            * name is not a local (sema) */
     /* Written inside parentheses. Only -Wparentheses reads it, and it
@@ -442,12 +448,18 @@ struct func {
     int sret_first;       /* param 0 is the indirect-result pointer
                            * (embcc_sret; type.h) */
     struct type *ret_ty;
+    int ret_scalar;         /* returns a struct the ABI returns as the
+                             * integer it holds: by value (sema) */
     int nparams;
     const char *params[MAX_PARAMS]; /* names; NULL in unnamed prototypes */
     /* where each name was written -- a tool that renames a parameter has
      * to edit the name, not the function's first column */
     int param_lines[MAX_PARAMS], param_cols[MAX_PARAMS];
     int param_unused[MAX_PARAMS];   /* __attribute__((unused)) on it */
+    /* A parameter of a struct the ABI passes as the integer it holds
+     * (ty_scalar_struct_ret): 1 + the local the body uses in its place,
+     * which irgen fills from the parameter at entry (sema); 0 otherwise */
+    int param_scalar[MAX_PARAMS];
     struct type *param_tys[MAX_PARAMS];
     struct type **var_tys;          /* sema: type of every var slot */
     int *var_aligns;                /* sema: __attribute__((aligned(N))) per

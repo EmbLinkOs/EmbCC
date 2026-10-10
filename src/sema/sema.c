@@ -46,6 +46,8 @@ struct vardef {
     int unused_ok;      /* __attribute__((unused)): do not report it */
     struct func *fdecl; /* a block-scope function declaration: the name
                          * denotes this function here, not a variable */
+    int alias;          /* 1 + the slot a use of this name means instead:
+                         * a handle-like parameter's copy (param_scalar) */
 };
 
 /* Block scoping without giving up unique frame slots: entries are never
@@ -177,6 +179,7 @@ static int scope_add(struct scope *sc, const char *name, struct type *ty,
     sc->vars[sc->n].user_align = 0;
     sc->vars[sc->n].unused_ok = 0;
     sc->vars[sc->n].fdecl = NULL;
+    sc->vars[sc->n].alias = 0;
     return sc->n++;
 }
 
@@ -2182,8 +2185,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         struct func *blkfn = i >= 0 ? sc->vars[i].fdecl : NULL;
         if (i >= 0 && !blkfn) {
             sc->vars[i].used = 1;     /* -Wunused-variable: it was read */
-            e->var_index = i;
-            e->ty = sc->vars[i].ty;
+            e->var_index = sc->vars[i].alias ? sc->vars[i].alias - 1 : i;
+            e->ty = sc->vars[e->var_index].ty;
             e->gref = sc->vars[i].g; /* set for a static local */
             e->asm_reg = sc->vars[i].asm_reg; /* register-asm binding */
         } else {
@@ -3620,6 +3623,21 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
         if (e->callee)
             format_check(diag_file(u), e, e->callee);
         e->ty = ft->ret;
+        /* a handle-like struct result: its own local, which irgen stores
+         * the returned integer into and SROA can then take out of
+         * memory (ty_scalar_struct_ret) */
+        if (e->ty && e->ty->kind == TY_STRUCT && sc && !e->res_local &&
+            !predef_is_cxx() && ty_scalar_struct_ret(e->ty))
+            e->res_local = 1 + scope_add(sc, "<struct result>", e->ty, NULL);
+        /* and an argument of one, in a prototyped position, travels as
+         * the integer too */
+        e->scalar_args = 0;
+        for (int k = 0; k < e->nargs && k < ft->nptypes &&
+                        k < (int)(8 * sizeof e->scalar_args); k++)
+            if (!predef_is_cxx() && e->args[k]->ty &&
+                e->args[k]->ty->kind == TY_STRUCT &&
+                ty_scalar_struct_ret(e->args[k]->ty))
+                e->scalar_args |= 1UL << k;
         break;
     }
     }
@@ -6492,6 +6510,8 @@ static int list_returns(struct stmt *s)
 
 static void check_func(struct unit *u, struct func *f)
 {
+    f->ret_scalar = f->ret_ty && f->ret_ty->kind == TY_STRUCT &&
+                    !predef_is_cxx() && ty_scalar_struct_ret(f->ret_ty);
     g_nundeclared = 0;           /* a fresh function: report its names again */
     const char *savefile = g_file;
     g_file = f->file ? f->file : u->file;
@@ -6543,6 +6563,24 @@ static void check_func(struct unit *u, struct func *f)
             sc.vars[pi].line = f->line;
             sc.vars[pi].unused_ok = f->param_unused[i];
         }
+    }
+    /* A handle-like struct parameter arrives as the integer it holds; the
+     * body reads and writes a local copy of it, which can then leave
+     * memory as a local can (SROA), where the parameter's own slot is
+     * written by the prologue, outside the IR. Not in a naked function,
+     * whose body is the asm alone. */
+    for (int i = 0; i < f->nparams && i < MAX_PARAMS; i++) {
+        f->param_scalar[i] = 0;
+        if (f->is_naked || predef_is_cxx() || !f->params[i] ||
+            !f->param_tys[i] || f->param_tys[i]->kind != TY_STRUCT ||
+            !ty_scalar_struct_ret(f->param_tys[i]))
+            continue;
+        int c = scope_add(&sc, "<param copy>", f->param_tys[i], NULL);
+        sc.vars[i].alias = c + 1;
+        /* the slot holds the integer and nothing else reads it, so it is
+         * that integer's: mem2reg then takes it as the register it came in */
+        sc.vars[i].ty = ty_scalar_struct_ret(f->param_tys[i]);
+        f->param_scalar[i] = c + 1;
     }
     /* `int a[n][m]` arrives as int (*)[m]: its row size is computed at
      * entry from the parameters before it */

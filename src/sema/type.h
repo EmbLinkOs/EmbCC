@@ -196,6 +196,10 @@ struct type *ty_const(struct type *t);
 struct type *ty_aligned(struct type *t, int align);
 struct type *ty_flash(struct type *t);   /* AVR __flash: program memory */
 struct type *ty_enum(struct type *t);    /* an enumerated type over t */
+/* A struct that is one integer or pointer filling it, at a size this
+ * target returns it in a register exactly as that integer: the integer's
+ * type, else NULL. */
+struct type *ty_scalar_struct_ret(struct type *t);
 /* `t` without its own qualifiers (const, volatile, _Atomic): the
  * original a qualified copy points at. A pointee's stay. */
 struct type *ty_unqual(struct type *t);

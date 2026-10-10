@@ -2904,6 +2904,10 @@ int gen_expr(struct ir_func *fn, struct expr *e)
 static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
                      int fptemp)
 {
+    /* A handle-like struct comes back as the integer it holds, into its
+     * own local (sema's res_local; ty_scalar_struct_ret) */
+    struct type *leaf = e->res_local ? ty_scalar_struct_ret(e->ty) : NULL;
+    struct type *rty = leaf ? leaf : e->ty;
     struct ir_ins *i = emit(fn);
     i->op = IR_CALL;
     i->callee = e->callee;
@@ -2938,14 +2942,16 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
     int ireg = 0, freg = 0;
     /* a hidden return pointer consumes rdi before anything else —
      * unless the struct comes back in x87 registers instead */
-    if (e->ty->kind == TY_STRUCT) {
+    if (rty->kind == TY_STRUCT) {
         enum arg_class rc[2];
-        if (ty_classify(e->ty, rc) == 0 &&
-            (target_get() == TARGET_AARCH64 || !ty_x87_ret(e->ty)))
+        if (ty_classify(rty, rc) == 0 &&
+            (target_get() == TARGET_AARCH64 || !ty_x87_ret(rty)))
             ireg = 1;
     }
     for (int k = 0; k < e->nargs; k++) {
         struct type *at = e->args[k]->ty;
+        if (k < 64 && (e->scalar_args >> k & 1))
+            at = ty_scalar_struct_ret(at);
         struct ir_arg *ar = &i->argv[k];
         ar->vreg = args[k];
         ar->ty = at;
@@ -3081,43 +3087,52 @@ static int emit_call(struct ir_func *fn, struct expr *e, const int *args,
     if (stk > fn->outgoing_bytes)
         fn->outgoing_bytes = stk;
 
-    if (e->ty->kind == TY_STRUCT) {
+    if (rty->kind == TY_STRUCT) {
         i->ret_x87 = target_get() == TARGET_AARCH64 ? 0
-                                                    : ty_x87_ret(e->ty);
-        i->retsize = ty_size(e->ty);
-        i->rety = e->ty;
+                                                    : ty_x87_ret(rty);
+        i->retsize = ty_size(rty);
+        i->rety = rty;
         i->ret_hfa_size = 0;
-        i->ret_hfa_n = ty_hfa(e->ty, &i->ret_hfa_size);
-        i->ret_byref = ty_aapcs64_byref(e->ty);
-        i->retnclass = ty_classify(e->ty, i->retcls);
+        i->ret_hfa_n = ty_hfa(rty, &i->ret_hfa_size);
+        i->ret_byref = ty_aapcs64_byref(rty);
+        i->retnclass = ty_classify(rty, i->retcls);
         fn->scratch_bytes = (fn->scratch_bytes + 7) & ~7;
         i->scratch = fn->scratch_bytes;
         fn->scratch_bytes += (i->retsize + 7) & ~7;
     }
-    i->flt = ty_is_float(e->ty);
+    i->flt = ty_is_float(rty);
     /* The return TYPE's own width and signedness, which `w` below is
      * explicitly not: see ret_tybytes in ir.h for why a machine whose
      * return value is a run of byte registers needs both. */
-    if (e->ty->kind != TY_VOID && e->ty->kind != TY_STRUCT) {
-        i->ret_tybytes = ty_size(e->ty);
-        i->ret_tysign = ty_is_integer(e->ty) && !e->ty->is_unsigned;
+    if (rty->kind != TY_VOID && rty->kind != TY_STRUCT) {
+        i->ret_tybytes = ty_size(rty);
+        i->ret_tysign = ty_is_integer(rty) && !rty->is_unsigned;
     }
     /* TriCore returns a pointer in A2 and anything else in D2, so its
      * caller must know which (ir_ins.ret_ptr). Set there alone: no
      * other target reads it, and no other IR prints it. */
     if (target_get() == TARGET_TRICORE)
-        i->ret_ptr = e->ty->kind == TY_PTR;
+        i->ret_ptr = rty->kind == TY_PTR;
     /* An integer result comes back in the whole RETURN REGISTER, so
      * the width here is the register's and not the type's: an `int`
      * returned on x86-64 arrives in rax and codegen reads all of
      * it. That register is four bytes on ILP32, where saying 8
      * would ask a 32-bit machine for a value it has nowhere to
      * put; a type that genuinely needs eight still gets it. */
-    i->w = i->flt ? ty_size(e->ty)
-         : e->ty->kind == TY_INT128 ? 16
-         : ty_w(e->ty) > target_ptr_size() ? ty_w(e->ty)
+    i->w = i->flt ? ty_size(rty)
+         : rty->kind == TY_INT128 ? 16
+         : ty_w(rty) > target_ptr_size() ? ty_w(rty)
          : target_ptr_size();
     i->dst = new_temp(fn);
+    if (leaf) {
+        struct ir_ins *ad = emit(fn);
+        int val = i->dst;
+        ad->op = IR_ADDR;
+        ad->a = e->res_local - 1;
+        ad->dst = new_temp(fn);
+        emit_store(fn, ad->dst, val, leaf);
+        return ad->dst;
+    }
     return i->dst;
 }
 
@@ -3889,8 +3904,12 @@ static int gen_expr_inner(struct ir_func *fn, struct expr *e)
         int fptemp = -1;
         if (!e->callee) /* through a pointer: evaluate the callee */
             fptemp = gen_expr(fn, e->lhs);
-        for (int k = 0; k < e->nargs; k++)
+        for (int k = 0; k < e->nargs; k++) {
             args[k] = gen_expr(fn, e->args[k]);
+            if (k < 64 && (e->scalar_args >> k & 1))  /* the integer it holds */
+                args[k] = emit_load(fn, args[k],
+                                    ty_scalar_struct_ret(e->args[k]->ty));
+        }
         return emit_call(fn, e, args, fptemp);
     }
     }
@@ -4545,13 +4564,17 @@ static void gen_stmt(struct ir_func *fn, struct stmt *s,
             if (g_instr_this)           /* after the value, before leaving */
                 emit_instr_call(fn, g_instr_fn, "__cyg_profile_func_exit",
                                 s->line);
+            if (s->expr && s->expr->ty->kind == TY_STRUCT && fn->src &&
+                fn->src->ret_scalar)
+                v = emit_load(fn, v, ty_scalar_struct_ret(s->expr->ty));
             i = emit(fn);
             i->op = IR_RET;
             i->a = v;
             if (s->expr && ty_is_float(s->expr->ty)) {
                 i->flt = 1; /* the value goes home in xmm0, not rax */
                 i->w = ty_size(s->expr->ty);
-            } else if (s->expr && s->expr->ty->kind == TY_STRUCT) {
+            } else if (s->expr && s->expr->ty->kind == TY_STRUCT &&
+                       !(fn->src && fn->src->ret_scalar)) {
                 /* `a` is the ADDRESS of the value; how it travels home
                  * is the callee's classification, computed in codegen
                  * from the function's own return type. */
@@ -4888,6 +4911,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
     ir_locals_fill(fn, f, f->nvars);
     {
         struct type *rt = f->ret_ty;
+        if (f->ret_scalar)          /* returned as the integer it holds */
+            rt = ty_scalar_struct_ret(rt);
         fn->ret_abi.size = rt ? ty_size(rt) : 0;
         fn->ret_abi.align = rt ? ty_align(rt) : 1;
         fn->ret_abi.is_struct = rt && rt->kind == TY_STRUCT;
@@ -4934,6 +4959,8 @@ static void gen_func(struct ir_func *fn, struct func *f)
         fn->param_abi = xcalloc((size_t)f->nparams, sizeof *fn->param_abi);
         for (int k = 0; k < f->nparams; k++) {
             struct type *pt = f->param_tys[k];
+            if (k < MAX_PARAMS && f->param_scalar[k])  /* as the integer */
+                pt = ty_scalar_struct_ret(pt);
             struct ir_arg *a = &fn->param_abi[k];
             a->vreg = k;
             a->size = pt ? ty_size(pt) : 0;
@@ -4999,6 +5026,25 @@ static void gen_func(struct ir_func *fn, struct func *f)
         label_data_marks(fn, f);
     g_instr_this = instr_wanted(f, fn->file);
     g_instr_fn = f;
+    /* a handle-like parameter, arrived as its integer: into the copy the
+     * body uses (sema's param_scalar) */
+    for (int k = 0; k < f->nparams && k < MAX_PARAMS; k++)
+        if (f->param_scalar[k]) {
+            struct type *lt = ty_scalar_struct_ret(f->param_tys[k]);
+            struct ir_ins *ld = emit(fn), *ad;
+            ld->op = IR_LDVAR;
+            ld->a = k;
+            ld->size = ty_size(lt);
+            ld->sign = ty_signed_int(lt);
+            ld->w = ty_w(lt);
+            ld->dst = new_temp(fn);
+            int v = ld->dst;
+            ad = emit(fn);
+            ad->op = IR_ADDR;
+            ad->a = f->param_scalar[k] - 1;
+            ad->dst = new_temp(fn);
+            emit_store(fn, ad->dst, v, lt);
+        }
     if (g_instr_this)
         emit_instr_call(fn, f, "__cyg_profile_func_enter", f->line);
     gen_stmt(fn, f->body, NULL);

@@ -210,6 +210,56 @@ struct type *ty_enum(struct type *t)
     return c;
 }
 
+/* `typedef struct { uint32_t raw; } handle_t;` -- the typed handle of
+ * every RTOS API -- is returned in the register its member would be, bit
+ * for bit, on these ABIs: so a call's result and a return can travel as
+ * that integer, and the struct need never be in memory. Only where that
+ * is exact: a size the return register holds with nothing undefined
+ * above it (AAPCS and the RISC-V psABI leave a smaller aggregate's upper
+ * bits unspecified, and RV64 sign-extends a 32-bit int but not a 32-bit
+ * struct), and a member with no float in it (hard-float ABIs return a
+ * float member in a float register). tests/golden/struct-handle-abi.sh
+ * mixes EmbCC's objects with clang's to prove the bits the same. */
+struct type *ty_scalar_struct_ret(struct type *t)
+{
+    struct type *leaf = NULL;
+    for (int hop = 0; hop < 8 && t; hop++) {
+        if (t->kind != TY_STRUCT) {
+            if ((ty_is_integer(t) || t->kind == TY_PTR) && !t->is_volatile &&
+                t->kind != TY_INT128)
+                leaf = t;
+            break;
+        }
+        if (t->is_complex || !t->complete || t->is_volatile)
+            return NULL;
+        struct member *only = NULL;
+        for (int k = 0; k < t->nmembers; k++) {
+            struct member *m = &t->members[k];
+            if (m->is_bitfield || !m->ty || only)
+                return NULL;
+            only = m;
+        }
+        if (!only || only->off != 0 || ty_size(only->ty) != ty_size(t))
+            return NULL;
+        t = only->ty;
+    }
+    if (!leaf)
+        return NULL;
+    int n = ty_size(leaf);
+    switch (target_get()) {
+    case TARGET_AVR:
+        return n == 1 || n == 2 || n == 4 ? leaf : NULL;
+    case TARGET_THUMB: case TARGET_RISCV32:
+        return n == 4 ? leaf : NULL;
+    case TARGET_RISCV64:
+        return n == 8 ? leaf : NULL;
+    default:
+        /* x86-64 and AArch64 return the same bits, but their backends
+         * lower a return from the function's C type, not ret_abi */
+        return NULL;
+    }
+}
+
 struct type *ty_unqual(struct type *t)
 {
     if (t && t->canon &&

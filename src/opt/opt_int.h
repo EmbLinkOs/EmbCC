@@ -379,6 +379,7 @@ void inline_unit(struct ir_unit *iu);
 
 /* sroa.c */
 int pass_cxlocal(struct ir_func *fn);
+int pass_aggcopy(struct ir_func *fn);
 int pass_sroa(struct ir_func *fn, int report_refusals);
 
 /* verify.c */

@@ -330,6 +330,222 @@ int pass_cxlocal(struct ir_func *fn)
     return 1;
 }
 
+/* ---- a small struct copied whole: copied field by field ----------------
+ *
+ * `h = get();`, `*out = h;`, `k = h;` -- a struct assignment is one
+ * memcpy of the whole object, and a memcpy is an address use SROA cannot
+ * account for, so the struct stayed in memory however private it was.
+ * The typed handles of an RTOS API are exactly this: a one-field struct
+ * returned, assigned and returned again, never touched by field.
+ *
+ * When a local's address is used only by loads, stores, constant offsets
+ * and whole-object copies, each copy that touches it becomes one load and
+ * one store per field, at the field's own offset and width. That is what
+ * SROA can split, and what mem2reg then promotes. The fields are the
+ * struct type's own: integers and pointers only (a float field would be
+ * copied through an integer register, which the float pieces SROA names
+ * would not match), no bit-field (whose unit is shared), no union (whose
+ * members overlap), at most four, each aligned in an aligned struct --
+ * so a packed one, whose fields may straddle, is left to memcpy. */
+#define AGG_MAX_LEAVES 4
+struct agg_leaf { int off, size, sign, align; };
+
+static int agg_leaves(const struct type *t, int base, struct agg_leaf *out,
+                      int n)
+{
+    if (!t || t->is_volatile)
+        return -1;
+    if (ty_is_integer(t) || t->kind == TY_PTR) {
+        if (t->kind == TY_INT128 || n >= AGG_MAX_LEAVES)
+            return -1;
+        out[n].off = base;
+        out[n].size = ty_size(t);
+        out[n].sign = ty_signed_int(t);
+        out[n].align = ty_align(t);
+        return n + 1;
+    }
+    if (t->kind == TY_ARRAY) {
+        if (t->count <= 0 || t->vla_len)
+            return -1;
+        for (int k = 0; k < t->count && n >= 0; k++)
+            n = agg_leaves(t->pointee, base + k * ty_size(t->pointee), out, n);
+        return n;
+    }
+    if (t->kind != TY_STRUCT || t->is_union || t->is_complex || !t->complete)
+        return -1;
+    for (int k = 0; k < t->nmembers && n >= 0; k++) {
+        const struct member *m = &t->members[k];
+        if (m->is_bitfield || !m->ty)
+            return -1;
+        n = agg_leaves(m->ty, base + m->off, out, n);
+    }
+    return n;
+}
+
+struct agg_ctx { struct ir_ins *i; const int *of; const long *off;
+                 const struct ir_func *fn; signed char *st; int nv; };
+static void agg_read_cb(int *p, void *ctx)
+{
+    struct agg_ctx *c = ctx;
+    const struct ir_ins *i = c->i;
+    int v = *p, L;
+    if (v < 0 || v >= c->nv || (L = c->of[v]) < 0)
+        return;
+    if ((i->op == IR_LOAD && p == &i->a) ||
+        (i->op == IR_STORE && p == &i->a) ||
+        (i->op == IR_ADD && p == &i->a && c->of[i->dst] == L) ||
+        ((i->op == IR_MOV || sroa_addr_ext(i)) && c->of[i->dst] == L) ||
+        (i->op == IR_MEMCPY && (p == &i->a || p == &i->b) &&
+         c->off[v] == 0 && i->size == c->fn->locals[L].size &&
+         i->a != i->b))
+        return;
+    c->st[L] = -1;
+}
+
+int pass_aggcopy(struct ir_func *fn)
+{
+    int nvars = fn->nvars, nparams = fn->nparams, nv = fn->nvregs;
+    int aw = target_ptr_size();
+    if (nvars <= nparams || fn->nins == 0 || !fn->src || !fn->src->var_tys)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int *of = xmalloc((size_t)(nv ? nv : 1) * sizeof *of);
+    long *off = xmalloc((size_t)(nv ? nv : 1) * sizeof *off);
+    for (int v = 0; v < nv; v++) { of[v] = -1; off[v] = 0; }
+    for (int round = 0; round < 2; round++)
+        for (int n = 0; n < fn->nins; n++) {
+            const struct ir_ins *i = &fn->ins[n];
+            int dst = def_target(i);
+            if (dst < 0 || dst >= nv || d.cnt[dst] != 1)
+                continue;
+            if (i->op == IR_ADDR && i->a >= nparams && i->a < nvars) {
+                of[dst] = i->a;
+                off[dst] = 0;
+            } else if ((i->op == IR_MOV || sroa_addr_ext(i)) && i->a >= 0 &&
+                       i->a < nv && of[i->a] >= 0) {
+                of[dst] = of[i->a];
+                off[dst] = off[i->a];
+            } else if (i->op == IR_ADD && i->w == aw && i->a >= 0 &&
+                       i->a < nv && of[i->a] >= 0) {
+                long k;
+                if (i->imm_b)
+                    k = i->imm;
+                else if (!sroa_const(fn, &d, i->b, &k, 0))
+                    continue;
+                of[dst] = of[i->a];
+                off[dst] = off[i->a] + k;
+            }
+        }
+    /* per local: 0 no whole copy, 1 a candidate, -1 refused */
+    signed char *st = xcalloc((size_t)nvars, 1);
+    struct agg_leaf *lv = xcalloc((size_t)nvars * AGG_MAX_LEAVES, sizeof *lv);
+    int *nl = xcalloc((size_t)nvars, sizeof *nl);
+    int any = 0;
+    for (int n = 0; n < fn->nins; n++) {
+        const struct ir_ins *i = &fn->ins[n];
+        if (i->op != IR_MEMCPY || i->vol)
+            continue;
+        for (int k = 0; k < 2; k++) {
+            int v = k ? i->b : i->a;
+            if (v >= 0 && v < nv && of[v] >= 0 && off[v] == 0 &&
+                st[of[v]] == 0 && i->size == fn->locals[of[v]].size)
+                st[of[v]] = 1;
+        }
+    }
+    for (int L = nparams; L < nvars; L++) {
+        if (st[L] != 1)
+            continue;
+        const struct ir_local *Li = &fn->locals[L];
+        const struct type *t = fn->src->var_tys[L];
+        int k = Li->is_volatile || Li->size > 16 || !t ? -1
+              : agg_leaves(t, 0, &lv[L * AGG_MAX_LEAVES], 0);
+        for (int j = 0; j < k; j++) {
+            const struct agg_leaf *f = &lv[L * AGG_MAX_LEAVES + j];
+            if (f->off % f->align || ty_align(t) < f->align)
+                k = -1;                    /* packed: may straddle */
+        }
+        if (k <= 0)
+            st[L] = -1;
+        else
+            nl[L] = k;
+    }
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins *i = &fn->ins[n];
+        struct agg_ctx c = { i, of, off, fn, st, nv };
+        if (i->op == IR_ADDR)
+            continue;
+        each_read(i, agg_read_cb, &c);
+    }
+    for (int L = nparams; L < nvars; L++)
+        if (st[L] == 1)
+            any = 1;
+    if (!any) {
+        free(of); free(off); free(st); free(lv); free(nl); free_defs(&d);
+        return 0;
+    }
+
+    struct ibuf nb = { 0, 0, 0 };
+    int *newpos = fn->var_scope_lo
+        ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+    for (int n = 0; n < fn->nins; n++) {
+        struct ir_ins o = fn->ins[n];
+        if (newpos) newpos[n] = nb.n;
+        int La = o.op == IR_MEMCPY && o.a >= 0 && o.a < nv ? of[o.a] : -1;
+        int Lb = o.op == IR_MEMCPY && o.b >= 0 && o.b < nv ? of[o.b] : -1;
+        int L = La >= 0 && st[La] == 1 ? La : Lb >= 0 && st[Lb] == 1 ? Lb : -1;
+        if (L < 0 || o.vol) {
+            *ib_push(&nb) = o;
+            continue;
+        }
+        for (int j = 0; j < nl[L]; j++) {
+            const struct agg_leaf *f = &lv[L * AGG_MAX_LEAVES + j];
+            int sa = o.b, da = o.a, t;
+            struct ir_ins *p;
+            if (f->off) {
+                /* as irgen forms a member's address: a constant and an
+                 * add of it -- an immediate form is the backends' (immfold
+                 * makes it last), and value numbering keys an add by its
+                 * operands, so two `add #k` of one base would be one */
+                int k = fn->nvregs++;
+                p = ib_push(&nb);
+                p->op = IR_CONST; p->imm = f->off; p->w = aw; p->dst = k;
+                p->line = o.line; p->col = o.col; p->synth = o.synth;
+                sa = fn->nvregs++;
+                p = ib_push(&nb);
+                p->op = IR_ADD; p->a = o.b; p->b = k; p->w = aw; p->dst = sa;
+                p->line = o.line; p->col = o.col; p->synth = o.synth;
+                da = fn->nvregs++;
+                p = ib_push(&nb);
+                p->op = IR_ADD; p->a = o.a; p->b = k; p->w = aw; p->dst = da;
+                p->line = o.line; p->col = o.col; p->synth = o.synth;
+            }
+            t = fn->nvregs++;
+            p = ib_push(&nb);
+            p->op = IR_LOAD; p->a = sa; p->dst = t; p->size = f->size;
+            p->sign = f->sign; p->w = f->size == 8 ? 8 : 4; p->natural = 1;
+            p->line = o.line; p->col = o.col; p->synth = o.synth;
+            p = ib_push(&nb);
+            p->op = IR_STORE; p->a = da; p->b = t; p->size = f->size;
+            p->natural = 1;
+            p->line = o.line; p->col = o.col; p->synth = o.synth;
+        }
+    }
+    if (newpos) {
+        newpos[fn->nins] = nb.n;
+        for (int v = 0; v < nvars; v++) {
+            int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+            if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+            if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+        }
+        free(newpos);
+    }
+    free(fn->ins);
+    fn->ins = nb.p; fn->nins = nb.n; fn->cap = nb.cap;
+    free(of); free(off); free(st); free(lv); free(nl); free_defs(&d);
+    return 1;
+}
+
 int pass_sroa(struct ir_func *fn, int report_refusals)
 {
     int nvars = fn->nvars, nparams = fn->nparams, nvr = fn->nvregs;

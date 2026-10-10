@@ -234,8 +234,10 @@ static void opt_func(struct ir_func *fn)
     int sroa_twice = g_sroa && g_mem2reg && cfg_ok && !has_igoto;
     if (g_mem2reg && cfg_ok && !has_igoto)
         pass_cxlocal(fn);         /* a private `expected`: by value */
-    if (g_sroa)
+    if (g_sroa) {
+        pass_aggcopy(fn);         /* a small struct copied whole: by field */
         pass_sroa(fn, !sroa_twice);
+    }
     if (g_mem2reg && cfg_ok && !has_igoto) {
         drop_unreachable(fn);     /* or mem2reg refuses the function */
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
