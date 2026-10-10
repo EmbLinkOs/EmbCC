@@ -768,8 +768,11 @@ it, `__attribute__((__address_space__(1)))`, and EmbCC takes that
 attribute as a qualifier wherever `const` may stand. See
 [Data in program memory](embedded.md#data-in-program-memory) for the
 rules. Another address space, or address space 1 on another target, is
-refused by name. `__memx` is not defined. `__attribute__((progmem))` is
-ignored with a `-Wattributes` warning.
+refused by name. `__memx` is not defined. `__attribute__((progmem))`
+(avr-libc's `PROGMEM`) places a `const` static object in `.progmem.data`
+on AVR, without changing its type; it is read with `pgm_read_byte()` and
+the rest of `<avr/pgmspace.h>`. On other targets it is ignored with a
+`-Wattributes` warning.
 
 The predefined macros `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`,
 `__BUILTIN_AVR_NOP`, `__BUILTIN_AVR_SLEEP`, `__BUILTIN_AVR_SWAP` and

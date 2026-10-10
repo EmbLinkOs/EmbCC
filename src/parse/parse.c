@@ -68,6 +68,10 @@ struct attrs { int packed; int aligned; int weak; int noreturn;
                /* cmse_nonsecure_entry (-mcmse): see struct func. Last, for
                 * the reason isr gives. */
                int cmse_entry;
+               /* progmem (AVR): the object is in program memory, section
+                * .progmem.data, whatever section() says -- avr-gcc's rule.
+                * Last, for the reason isr gives. */
+               int progmem;
 };
 
 struct parser {
@@ -542,6 +546,10 @@ static const struct attr_entry attr_table[] = {
     { "used",          ATTR_HONOURED, NULL },
     { "unused",        ATTR_HONOURED, NULL },
     { "visibility",    ATTR_HONOURED, NULL },
+    /* AVR only, where the object goes to .progmem.data, in flash with the
+     * code, and is read with lpm (avr-libc's PROGMEM and pgm_read_*).
+     * Elsewhere it is unknown, as GCC says of it there. */
+    { "progmem",       ATTR_HONOURED, NULL },
     /* Honoured where the inliner runs, which is -O2: always_inline
      * overrides the SIZE budget and nothing else, because every other
      * reason the inliner declines is a thing it cannot do rather than
@@ -976,6 +984,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             }
             if (name) {
                 const struct attr_entry *ae = attr_lookup(name);
+                if (ae && attr_is(name, "progmem") && target_get() != TARGET_AVR)
+                    ae = NULL;
                 if (!ae)
                     diag_warn_opt(ps->lx.file, aline, 0, "attributes",
                         "attribute '%s' is not one EmbCC knows, and is "
@@ -1054,6 +1064,8 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "weak")) out->weak = 1;
                 else if (attr_is(name, "signal")) out->isr = 1;
                 else if (attr_is(name, "naked")) out->naked = 1;
+                else if (attr_is(name, "progmem") && target_get() == TARGET_AVR)
+                    out->progmem = 1;
                 else if (attr_is(name, "interrupt")) {
                     int k = isr_kind(ps, aline, sarg);
                     if (ISR_KIND(out->isr) && ISR_KIND(out->isr) != k)
@@ -2022,6 +2034,7 @@ static void take_carried(struct parser *ps, struct attrs *a)
         a->aligned = ps->attr_slot.aligned;
     if (ps->attr_slot.section && !a->section)
         a->section = ps->attr_slot.section;
+    if (ps->attr_slot.progmem)  a->progmem = 1;
     if (ps->attr_slot.pcs) {
         a->pcs = ps->attr_slot.pcs;
         a->pcs_line = ps->attr_slot.pcs_line;
@@ -2080,6 +2093,7 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
                     ps->attr_slot.aligned = a.aligned;
                 if (a.section && !ps->attr_slot.section)
                     ps->attr_slot.section = a.section;
+                if (a.progmem)  ps->attr_slot.progmem = 1;
                 if (a.pcs) {
                     ps->attr_slot.pcs = a.pcs;
                     ps->attr_slot.pcs_line = a.pcs_line;
@@ -2091,13 +2105,14 @@ static struct type *parse_stars(struct parser *ps, struct type *t)
                         "pcs is only supported on a function declaration, "
                         "not on a pointer to one: a call through the "
                         "pointer would use the default convention");
-            if (a.packed || a.aligned || a.weak || a.noreturn)
+            if (a.packed || a.aligned || a.weak || a.noreturn || a.progmem)
                 parse_error_at(ps, at_tok->line, at_tok->col,
                         "__attribute__((%s)) is not supported in this position "
                         "(after a declarator it is; on a struct or union, put "
                         "it right after the keyword or after the closing '}')",
                         a.packed ? "packed" : a.aligned ? "aligned"
-                        : a.weak ? "weak" : "noreturn");
+                        : a.weak ? "weak" : a.noreturn ? "noreturn"
+                        : "progmem");
             continue;
         }
         if (cur(ps)->kind != TOK_STAR)
@@ -4613,6 +4628,7 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
         for (;;) {
             s = new_stmt(STMT_DECL, t->line, t->col);
             const char *dname;
+            ps->attr_slot.progmem = 0;   /* this declarator's own, below */
             s->dty = parse_declarator_c(ps, base, &dname, spec_const,
                                         &s->obj_const);
             /* `int f(int);` in a block declares a function, exactly as
@@ -4671,6 +4687,18 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
                  * it, and so does this. */
                 {
                     const char *sec = lat.section ? lat.section : lead.section;
+                    /* progmem after a `*` (`const char *const PROGMEM t[]`)
+                     * arrives through the slot parse_stars fills */
+                    if (ps->attr_slot.progmem)
+                        lat.progmem = 1;
+                    ps->attr_slot.progmem = 0;
+                    if ((lat.progmem || lead.progmem) && !local_static)
+                        parse_error_line(ps, s->line,
+                                   "progmem on '%s', which is on the stack: "
+                                   "only a static object can be in program "
+                                   "memory", dname);
+                    if (lat.progmem || lead.progmem)
+                        sec = ".progmem.data";
                     if (sec && !local_static)
                         parse_error_line(ps, s->line,
                                    "section attribute on '%s', which is on "
@@ -5590,7 +5618,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             g->vis = at.vis;
             g->is_tls = is_tls;
             g->is_const = gconst;
-            g->section = at.section;
+            g->section = at.progmem ? ".progmem.data" : at.section;
             if (at.alias)
                 parse_error_line(ps, gline, "alias attribute on variable '%s' "
                            "is not supported (functions take it)", gname);
@@ -5803,7 +5831,7 @@ fn_tail:
                                 ? at.aligned : decl_alignas;
                 g->vis = at.vis;
                 g->is_tls = is_tls;
-                g->section = at.section;
+                g->section = at.progmem ? ".progmem.data" : at.section;
                 if (at.alias)
                     parse_error_line(ps, dline, "alias attribute on variable "
                                "'%s' is not supported (functions take it)",

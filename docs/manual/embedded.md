@@ -1366,9 +1366,20 @@ The rules are GCC's, and each is refused by name:
 
 `__flash` may stand wherever `const` can, before or after the type, and
 after a `*` for a pointer that is itself in flash
-(`const __flash char *const __flash names[]`). `__memx` and avr-libc's
-`PROGMEM` attribute are not supported. `__attribute__((progmem))` is
-ignored with a `-Wattributes` warning, and the data goes to SRAM.
+(`const __flash char *const __flash names[]`). `__memx` is not
+supported.
+
+`__attribute__((progmem))`, avr-libc's `PROGMEM`, also puts an object in
+`.progmem.data`, but leaves its type alone: the object is an ordinary
+`const` one to the compiler, and the program reads it with
+`pgm_read_byte()` and the other [`<avr/pgmspace.h>`](#avr-libc-compatible-headers)
+functions, which use `lpm`. A plain `*p` of such an object reads SRAM at
+the same number, as with avr-gcc. As avr-gcc does, `progmem` wins over a
+`section()` on the same declaration, and the object must be `const` and
+static (`'x' is in program memory (progmem, section .progmem.data) and
+must be const ...`, `progmem on 'x', which is on the stack ...`). On
+other targets `progmem` is an unknown attribute, ignored with a
+`-Wattributes` warning, as GCC does there.
 
 ### The calling convention
 
