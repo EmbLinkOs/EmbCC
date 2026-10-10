@@ -2638,7 +2638,7 @@ static int cmpmem_defer(struct ir_func *fn, int ln, const int *usecnt,
     if (!usecnt || ln + 1 >= fn->nins)
         return 0;
     U = &fn->ins[ln + 1];
-    if (L->op != IR_LOAD || L->vol || L->flt || L->memoff ||
+    if (L->op != IR_LOAD || L->vol || L->flt ||
         L->size != L->w || (L->size != 4 && L->size != 8) ||
         L->dst < 0 || usecnt[L->dst] != 1 || U->op != IR_CMP || U->flt ||
         U->w != L->size || U->a == U->b || base == REG_RAX ||
@@ -2686,7 +2686,7 @@ static int loadop_fuse(struct code *text, struct ir_func *fn, int ln,
         ln + 1 == g_rmwf_op)
         return 0;
     U = &fn->ins[ln + 1];
-    if (L->op != IR_LOAD || L->vol || L->flt || L->memoff ||
+    if (L->op != IR_LOAD || L->vol || L->flt ||
         L->size != L->w || (L->size != 4 && L->size != 8) ||
         L->dst < 0 || usecnt[L->dst] != 1 || U->imm_b || U->flt ||
         U->b != L->dst || U->a == L->dst || U->w != L->size)
@@ -2928,7 +2928,8 @@ static int rmw_addr_load(struct ir_func *fn, int n, const int *usecnt,
             return ld;
         }
         if (ld < 0 && o->op == IR_LOAD && o->a == i->dst) {
-            if (!addr_fold_ok(o) || (op = x86_rmw_find(fn, k, usecnt)) < 0)
+            if (o->memoff || !addr_fold_ok(o) ||
+                (op = x86_rmw_find(fn, k, usecnt)) < 0)
                 return -1;
             ld = k;
             continue;
@@ -2958,7 +2959,7 @@ static int x86_rmw_find(struct ir_func *fn, int n, const int *usecnt)
 {
     const struct ir_ins *ld = &fn->ins[n];
     int t = ld->dst, A = ld->a;
-    if (ld->op != IR_LOAD || ld->vol || ld->memoff || ld->flt ||
+    if (ld->op != IR_LOAD || ld->vol || ld->flt ||
         (ld->size != 4 && ld->size != 8) || ld->w != ld->size ||
         t < fn->nvars || t >= fn->nvregs || usecnt[t] != 1 || is_flt(t) ||
         A < 0 || A >= fn->nvregs || (!in_reg(A) && !afolded(A)))
@@ -3000,8 +3001,8 @@ static int x86_rmw_find(struct ir_func *fn, int n, const int *usecnt)
             return -1;
         const struct ir_ins *st = &fn->ins[k + 1];
         if (st->op != IR_STORE || st->a != A || st->b != u || st->vol ||
-            st->memoff || st->size != ld->size)
-            return -1;
+            st->memoff != ld->memoff || st->size != ld->size)
+            return -1;      /* the same field: the same folded offset */
         return k;
     }
     return -1;
@@ -3785,7 +3786,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if (n == rmw_op) {
             const struct ir_ins *ld = &fn->ins[rmw_ld];
             int base = afolded(ld->a) ? REG_RBP : g_loc[ld->a];
-            int disp = afolded(ld->a) ? g_afold.disp[ld->a] : 0;
+            int disp = (afolded(ld->a) ? g_afold.disp[ld->a] : 0) + ld->memoff;
             int aop = i->op == IR_ADD ? '+' : i->op == IR_SUB ? '-' :
                       i->op == IR_AND ? '&' : i->op == IR_OR ? '|' : '^';
             int v = i->a == ld->dst ? (i->imm_b ? -1 : i->b) : i->a;
@@ -4166,14 +4167,16 @@ static void gen_func(struct ir_func *fn, struct code *text,
                 } else if (nx->op == IR_LOAD && nx->a == i->dst &&
                            cmpmem_defer(fn, n + 1, usecnt, base,
                                         i->imm_b ? -1 : index, scale,
-                                        i->imm_b ? (int)i->imm : 0)) {
+                                        (i->imm_b ? (int)i->imm : 0) +
+                                            nx->memoff)) {
                     n++;              /* the add and the load: the compare
                                        * next reads the memory itself */
                     break;
                 } else if (nx->op == IR_LOAD && nx->a == i->dst &&
                            loadop_fuse(text, fn, n + 1, usecnt, base,
                                        i->imm_b ? -1 : index, scale,
-                                       i->imm_b ? (int)i->imm : 0, rmw_op)) {
+                                       (i->imm_b ? (int)i->imm : 0) +
+                                           nx->memoff, rmw_op)) {
                     n += 2;           /* the add, the load and their user */
                     break;
                 } else if (nx->op == IR_LOAD && nx->a == i->dst) {
@@ -4722,10 +4725,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (is_flt(i->dst)) {
                 int d = x86_fwr(i->dst, X86_FSCR);
                 if (afolded(i->a))
-                    x86_movs_load(text, d, g_afold.disp[i->a], i->size);
+                    x86_movs_load(text, d, g_afold.disp[i->a] + i->memoff,
+                                  i->size);
                 else
-                    x86_movs_load_base(text, d, addr_reg(text, sd, i->a), 0,
-                                       i->size);
+                    x86_movs_load_base(text, d, addr_reg(text, sd, i->a),
+                                       i->memoff, i->size);
                 x86_fwrote(text, sd, i->dst, d, i->size);
                 break;
             }
@@ -4738,44 +4742,56 @@ static void gen_func(struct ir_func *fn, struct code *text,
              * (pass_x86_loadop): one instruction for the two. */
             if (afolded(i->a)
                     ? loadop_fuse(text, fn, n, usecnt, REG_RBP, -1, 1,
-                                  g_afold.disp[i->a], rmw_op)
+                                  g_afold.disp[i->a] + i->memoff, rmw_op)
                     : in_reg(i->a) &&
                       loadop_fuse(text, fn, n, usecnt, g_loc[i->a], -1, 1,
-                                  0, rmw_op)) {
+                                  i->memoff, rmw_op)) {
                 n++;
                 break;
             }
             if (afolded(i->a)
                     ? cmpmem_defer(fn, n, usecnt, REG_RBP, -1, 1,
-                                   g_afold.disp[i->a])
+                                   g_afold.disp[i->a] + i->memoff)
                     : in_reg(i->a) &&
-                      cmpmem_defer(fn, n, usecnt, g_loc[i->a], -1, 1, 0))
+                      cmpmem_defer(fn, n, usecnt, g_loc[i->a], -1, 1,
+                                   i->memoff))
                 break;                     /* the compare reads it */
             /* The address folded into rbp+disp: no base register at all. */
             if (afolded(i->a)) {
                 int D = in_reg(i->dst) ? g_loc[i->dst] : REG_RAX;
-                x86_load_reg_basedisp(text, D, REG_RBP, g_afold.disp[i->a],
+                x86_load_reg_basedisp(text, D, REG_RBP,
+                                      g_afold.disp[i->a] + i->memoff,
                                       i->size, i->sign, i->w);
                 if (D == REG_RAX) cg_store(text, sd, i->dst, i->w);
                 else              cg_reset();
                 break;
             }
             if (in_reg(i->dst)) {
-                if (in_reg(i->a)) {
-                    x86_load_base_reg(text, g_loc[i->dst], g_loc[i->a],
+                int B = in_reg(i->a) ? g_loc[i->a] : REG_RAX;
+                if (!in_reg(i->a))
+                    cg_load(text, sd, i->a, 8, 0, 8);   /* the address -> rax */
+                if (i->memoff)
+                    x86_load_reg_basedisp(text, g_loc[i->dst], B, i->memoff,
+                                          i->size, i->sign, i->w);
+                else
+                    x86_load_base_reg(text, g_loc[i->dst], B,
                                       i->size, i->sign, i->w);
-                    break;
-                }
-                cg_load(text, sd, i->a, 8, 0, 8);       /* the address -> rax */
-                x86_load_base_reg(text, g_loc[i->dst], REG_RAX,
-                                  i->size, i->sign, i->w);
                 break;
             }
             /* Address already in a register: load straight from [reg], skipping
              * the `mov reg,rax`. dst is a temp (cacheable), so cg_store below
              * fixes the residency cache. */
-            if (in_reg(i->a)) {
+            if (in_reg(i->a) && !i->memoff) {
                 x86_load_base_rax(text, g_loc[i->a], i->size, i->sign, i->w);
+                cg_store(text, sd, i->dst, i->w);
+                break;
+            }
+            if (i->memoff) {
+                int B = in_reg(i->a) ? g_loc[i->a] : REG_RAX;
+                if (!in_reg(i->a))
+                    cg_load(text, sd, i->a, 8, 0, 8);   /* the address */
+                x86_load_reg_basedisp(text, REG_RAX, B, i->memoff,
+                                      i->size, i->sign, i->w);
                 cg_store(text, sd, i->dst, i->w);
                 break;
             }
@@ -4787,10 +4803,11 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (is_flt(i->b)) {
                 int v = x86_frd(text, sd, i->b, X86_FSCR, i->size);
                 if (afolded(i->a))
-                    x86_movs_store(text, v, g_afold.disp[i->a], i->size);
+                    x86_movs_store(text, v, g_afold.disp[i->a] + i->memoff,
+                                   i->size);
                 else
-                    x86_movs_store_base(text, addr_reg(text, sd, i->a), 0, v,
-                                        i->size);
+                    x86_movs_store_base(text, addr_reg(text, sd, i->a),
+                                        i->memoff, v, i->size);
                 break;
             }
             /* Address already in a register (mirrors IR_LOAD): store straight to
@@ -4808,23 +4825,27 @@ static void gen_func(struct ir_func *fn, struct code *text,
             if (afolded(i->a)) {
                 if (vreg == REG_RAX)
                     cg_load(text, sd, i->b, 8, 0, 8);
-                x86_store_mem_reg(text, REG_RBP, g_afold.disp[i->a], vreg,
+                x86_store_mem_reg(text, REG_RBP,
+                                  g_afold.disp[i->a] + i->memoff, vreg,
                                   i->size);
                 break;
             }
             if (in_reg(i->a)) {
                 if (vreg == REG_RAX)
                     cg_load(text, sd, i->b, 8, 0, 8);       /* the value -> rax */
-                x86_store_mem_reg(text, g_loc[i->a], 0, vreg, i->size);
+                x86_store_mem_reg(text, g_loc[i->a], i->memoff, vreg, i->size);
                 break;
             }
             x86_mov_rcx_slot(text, sd[i->a]);       /* the address -> rcx */
             if (vreg == REG_RAX) {
                 cg_load(text, sd, i->b, 8, 0, 8);   /* the value -> rax */
-                x86_store_mem_rcx(text, i->size);
+                if (i->memoff)
+                    x86_store_mem_reg(text, REG_RCX, i->memoff, REG_RAX, i->size);
+                else
+                    x86_store_mem_rcx(text, i->size);
                 break;
             }
-            x86_store_mem_reg(text, REG_RCX, 0, vreg, i->size);
+            x86_store_mem_reg(text, REG_RCX, i->memoff, vreg, i->size);
             break;
         }
         case IR_EXT:
@@ -6028,6 +6049,17 @@ void codegen_unit(struct ir_unit *iu, struct code *text,
         int text0 = text->len;
         int ncall0 = st.ncall, next0 = st.next, nstr0 = st.nstr;
         int ng0 = st.ng, nf0 = st.nf;
+        /* `%p = add %s, #k; load [%p]` becomes `mov k(%s)`: a field's
+         * constant offset into the access, as every other backend folds
+         * it (ra_fold_memoff) and as the addressing mode has always
+         * allowed. Before anything is sized by nins -- the fold drops
+         * the add -- and before allocation, so %p needs no register:
+         * 171 such adds in lib/libc, each a register or a slot. */
+        if (regalloc && !keep_vars && !getenv("EMBCC_NO_MEMOFF")) {
+            char *w = cg_wide_vregs(fn);
+            ra_fold_memoff(fn, -2147483648L, 2147483647L, 8, 8, w, 0, 0);
+            free(w);
+        }
         g_nshort = fn->nins + 1;
         g_short = xmalloc((size_t)g_nshort);
         memset(g_short, 1, (size_t)g_nshort);
