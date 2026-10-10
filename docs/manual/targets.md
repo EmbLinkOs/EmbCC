@@ -2267,10 +2267,19 @@ defines `__BUILTIN_AVR_CLI`, `__BUILTIN_AVR_SEI`, `__BUILTIN_AVR_NOP`,
 the `__builtin_avr_*` functions are undeclared. Use inline assembly
 (`cli`, `sei`, `sleep`, `wdr`, `swap`) instead.
 
+### Headers
+
+`<avr/io.h>`, `<avr/interrupt.h>`, `<avr/pgmspace.h>`, `<avr/wdt.h>`,
+`<avr/sleep.h>`, `<avr/eeprom.h>`, `<avr/cpufunc.h>`, `<avr/common.h>`,
+`<avr/sfr_defs.h>` and `<util/delay.h>`, with avr-libc's interface, are
+on the include path for this target alone; see
+[avr-libc-compatible headers](embedded.md#avr-libc-compatible-headers).
+
 ### Interrupt handlers
 
 `__attribute__((signal))` and `__attribute__((interrupt))` make a
-function an interrupt handler: it saves `SREG`, `r0`, `r1` and every
+function an interrupt handler (both together are `interrupt`, as with
+avr-gcc: avr-libc's `ISR_NOBLOCK` writes them so); it saves `SREG`, `r0`, `r1` and every
 register the backend uses, clears `r1`, and returns with `reti`. See
 [Embedded programming](embedded.md).
 

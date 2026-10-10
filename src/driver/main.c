@@ -1801,6 +1801,16 @@ static void incdirs_with_defaults(void)
     } else if (!no_stdinc) {
         int ndef = 0;
         const char *const *def = paths_default_includes(&ndef);
+        /* AVR: the avr-libc-compatible headers (<avr/io.h>,
+         * <avr/pgmspace.h>, <util/delay.h>...), in include/avr, first:
+         * found for this target and no other */
+        static char avrinc[1024];
+        if (target_get() == TARGET_AVR && ndef > 0 &&
+            nincdirs < MAX_INCDIRS) {
+            snprintf(avrinc, sizeof avrinc, "%s/avr", def[ndef - 1]);
+            incdir_sys[nincdirs] = 1;
+            incdirs[nincdirs++] = avrinc;
+        }
         for (int k = 0; k < ndef && nincdirs < MAX_INCDIRS; k++) {
             incdir_sys[nincdirs] = 1;
             incdirs[nincdirs++] = def[k];
@@ -1816,9 +1826,18 @@ static void incdirs_with_defaults(void)
 static int assemble_file(const char *in, const char *out)
 {
     int kind = has_gas_suffix(in);
-    if (kind == 2)
+    /* __ASSEMBLER__, as GCC defines it for a preprocessed assembly file:
+     * a header shared with C (avr-libc's <avr/io.h>, CMSIS's) keeps its C
+     * out of the assembler's way with it. Only for this file -- a C file
+     * after it on the same command line does not see it. */
+    if (kind == 2) {
         incdirs_with_defaults();
-    return gas_assemble(in, out, kind == 2, incdirs, nincdirs);
+        cpp_cmdline_define("__ASSEMBLER__=1", 0);
+    }
+    int rc = gas_assemble(in, out, kind == 2, incdirs, nincdirs);
+    if (kind == 2)
+        cpp_cmdline_define("__ASSEMBLER__", 1);
+    return rc;
 }
 
 /* The embedded targets whose C++ is compiled without exceptions only:

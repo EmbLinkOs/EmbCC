@@ -704,6 +704,10 @@ static const struct attr_entry attr_table[] = {
       "as error: the diagnostic would have to wait until after "
       "optimisation, so the warning it asks for will not appear" },
     { "noclone",     ATTR_NOOP, "EmbCC never clones a function" },
+    { "externally_visible", ATTR_NOOP,
+      "it keeps a symbol visible under whole-program optimisation, and "
+      "EmbCC has none: every non-static definition is in the object's "
+      "symbol table already" },
     { "noipa",       ATTR_NOOP,
       "EmbCC's only interprocedural pass is the inliner, which "
       "always_inline and noinline already control" },
@@ -1062,13 +1066,22 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
             if (name && out) {
                 if (attr_is(name, "packed")) out->packed = 1;
                 else if (attr_is(name, "weak")) out->weak = 1;
-                else if (attr_is(name, "signal")) out->isr = 1;
+                else if (attr_is(name, "signal")) {
+                    /* signal and interrupt together are interrupt on AVR,
+                     * as avr-gcc has it: avr-libc's ISR(v, ISR_NOBLOCK)
+                     * writes both, in that order */
+                    if (!(target_get() == TARGET_AVR &&
+                          ISR_KIND(out->isr) == ISR_INTERRUPT))
+                        out->isr = 1;
+                }
                 else if (attr_is(name, "naked")) out->naked = 1;
                 else if (attr_is(name, "progmem") && target_get() == TARGET_AVR)
                     out->progmem = 1;
                 else if (attr_is(name, "interrupt")) {
                     int k = isr_kind(ps, aline, sarg);
-                    if (ISR_KIND(out->isr) && ISR_KIND(out->isr) != k)
+                    if (ISR_KIND(out->isr) && ISR_KIND(out->isr) != k &&
+                        !(target_get() == TARGET_AVR &&
+                          ISR_KIND(out->isr) == ISR_SIGNAL))
                         parse_error_line(ps, aline,
                             "two different interrupt attributes on one "
                             "declaration");

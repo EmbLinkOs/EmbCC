@@ -618,6 +618,7 @@ records for each.
 | `const`, `pure` | EmbCC does not eliminate repeated calls; it infers whether a function reads or writes memory by itself |
 | `copy` | The attributes worth copying are recorded on the declaration itself |
 | `designated_init` | It asks for a warning; the layout is unaffected |
+| `externally_visible` | It keeps a symbol visible under whole-program optimisation, and EmbCC has none: every non-static definition is in the object's symbol table already |
 | `fallthrough` | EmbCC does not warn about a `case` falling through |
 | `flatten` | EmbCC's inliner works from the call site |
 | `leaf` | Nothing in EmbCC reasons across a call this way |
@@ -1188,9 +1189,10 @@ generator refuses still answers 1.
 `no_sanitize_address`, `nodiscard`, `noinline`, `noipa`, `nonnull`,
 `noreturn`, `nothrow`, `packed`, `pure`, `returns_nonnull`, `section`,
 `sentinel`, `unused`, `used`, `visibility`, `warn_unused_result` and
-`weak`. It is also 1 for `abi_tag`, `externally_visible`, `format_arg`,
-`likely`, `unavailable` and `unlikely`, which C does not recognize (each
-draws the unknown attribute warning).
+`weak`. It is also 1 for `abi_tag`, `format_arg`, `likely`,
+`unavailable` and `unlikely`, which C does not recognize (each draws the
+unknown attribute warning), and for `externally_visible`, which C takes
+with no effect.
 
 It is 0 for every other name, including attributes EmbCC implements:
 `alias`, `constructor`, `destructor`, `embcc_sret`, `interrupt`, `pcs`

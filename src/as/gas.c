@@ -3679,9 +3679,11 @@ static int write_object(struct gas *g, const char *out_path)
      * across the objects it links */
     /* LoongArch: the soft-float LP64S, object ABI v1 flags of a compiled
      * object, which EmbLD checks */
+    /* AVR: the architecture, avr5, as a compiled object has it; with 0 a
+     * disassembler took a .S object for avr0, which has no lds or sts */
     if (g->tgt->machine == EM_LOONGARCH || g->tgt->machine == EM_XTENSA ||
         g->tgt->machine == EM_TRICORE || g->tgt->machine == EM_RX ||
-        g->tgt->machine == EM_68K)
+        g->tgt->machine == EM_68K || g->tgt->machine == EM_AVR)
         elfw_set_flags(w, target_elf_flags(target_get()));
     /* RISC-V: the float ABI -mabi= names, as GNU as records it. Without
      * it a .S built for ilp32f/lp64d was a soft-float object, and EmbLD

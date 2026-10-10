@@ -1328,6 +1328,53 @@ can be interrupted. Interrupts are enabled globally with
 `__builtin_avr_*` functions are not implemented, although their
 `__BUILTIN_AVR_*` macros are predefined.
 
+### avr-libc-compatible headers
+
+EmbCC has its own headers with avr-libc's interface, so code written for
+avr-gcc and avr-libc compiles unchanged. They are in `include/avr` and on
+the include path for `--target=avr` alone (installed under
+`freestanding/avr`); another target does not find `<avr/io.h>`.
+
+| Header | What it has |
+|---|---|
+| `<avr/io.h>` | The part's registers, bits, vectors and memories, by the datasheet's names: every register and bit of the ATmega328P datasheet's register summary (`PORTB`, `UCSR0B`, `TCNT1`, `WDTCSR`...), `PB5` and the other pin names, the vector names (`TIMER1_COMPA_vect` is `__vector_11`) with `*_vect_num`, `FLASHEND`, `RAMSTART`, `RAMEND`, `E2END`, `SPM_PAGESIZE`, `SIGNATURE_0`..`2`. The part is the one `-mmcu=` names. |
+| `<avr/sfr_defs.h>` | `_SFR_IO8`, `_SFR_MEM8`, `_SFR_MEM16`, `_SFR_IO_ADDR`, `_SFR_MEM_ADDR`, `_BV`, `bit_is_set`, `bit_is_clear`, `loop_until_bit_is_set`, `loop_until_bit_is_clear`, `_VECTOR(N)` |
+| `<avr/common.h>` | `SP`, `SPL`, `SPH`, `SREG` and `SREG_C`..`SREG_I` |
+| `<avr/interrupt.h>` | `ISR(vector, ...)` with `ISR_BLOCK`, `ISR_NOBLOCK`, `ISR_NAKED`, `ISR_ALIASOF(v)`; `ISR_ALIAS`, `EMPTY_INTERRUPT`, `SIGNAL`, `BADISR_vect`; `sei()`, `cli()`, `reti()` |
+| `<avr/pgmspace.h>` | `PROGMEM`, `PGM_P`, `PGM_VOID_P`, `PSTR`, `pgm_read_byte`/`word`/`dword`/`qword`/`float`/`ptr` and their `_near` forms, `__LPM`; the `_P` string functions (`memcpy_P`, `memcmp_P`, `memchr_P`, `strlen_P`, `strnlen_P`, `strcmp_P`, `strncmp_P`, `strcasecmp_P`, `strncasecmp_P`, `strcpy_P`, `strncpy_P`, `strcat_P`, `strncat_P`, `strchr_P`, `strrchr_P`, `strstr_P`) |
+| `<avr/wdt.h>` | `wdt_enable(WDTO_*)`, `wdt_disable()`, `wdt_reset()`, `WDTO_15MS`..`WDTO_8S` |
+| `<avr/sleep.h>` | `set_sleep_mode`, `sleep_enable`, `sleep_disable`, `sleep_cpu`, `sleep_mode`, `SLEEP_MODE_*`, and on the picoPower parts `sleep_bod_disable` |
+| `<avr/eeprom.h>` | `EEMEM`, `eeprom_read_*`, `eeprom_write_*`, `eeprom_update_*` (`byte`, `word`, `dword`, `float`, `block`), `eeprom_is_ready`, `eeprom_busy_wait` |
+| `<avr/cpufunc.h>` | `_NOP()`, `_MemoryBarrier()` |
+| `<util/delay.h>`, `<util/delay_basic.h>` | `_delay_ms`, `_delay_us` from `F_CPU`; `_delay_loop_1`, `_delay_loop_2` |
+
+The text is EmbCC's own; the names and the addresses are the part's.
+`tests/golden/avr-io.sh` checks every register address and bit number
+against a table taken from the datasheet, for each of the four parts.
+
+Where they differ from avr-libc's:
+
+- `_SFR_MEM_ADDR(PORTB)` and `_SFR_IO_ADDR(PORTB)` are constants where
+  the code needs one -- an `asm` `"I"` or `"n"` operand, a static
+  initializer -- but not in an integer constant expression: a `case`
+  label or a `_Static_assert` refuses them.
+- The timed sequences (`wdt_enable`, `wdt_disable`, `sleep_bod_disable`)
+  are single `asm` statements, so they hold at every optimisation level.
+- `_delay_ms` and `_delay_us` count loops of four cycles
+  (`_delay_loop_2`) and wait at least the time asked. With a constant
+  argument the count is worked out at compile time from `-O1` up; at
+  `-O0` it is computed at run time in software floating point, which
+  makes the delay longer. avr-libc's use `__builtin_avr_delay_cycles`,
+  which EmbCC does not have.
+- `<avr/io.h>` in a `.S` file gives each register as its data-space
+  address (`sts UDR0, r24`, `out _SFR_IO_ADDR(PORTB), r24`), as avr-libc's
+  does; EmbCC defines `__ASSEMBLER__` for a `.S` file as GCC does.
+- Not there: the `_far` reads (no part here has more than 64 KiB of
+  flash), `<util/atomic.h>` (its `ATOMIC_BLOCK` needs the `cleanup`
+  attribute, which EmbCC refuses), `<avr/boot.h>`, `<avr/power.h>`,
+  `<util/setbaud.h>`, `<util/crc16.h>`, `<util/twi.h>`, `<avr/fuse.h>`,
+  `<avr/lock.h>`.
+
 ### Data in program memory
 
 `__flash` keeps `const` data in program memory instead of copying it to

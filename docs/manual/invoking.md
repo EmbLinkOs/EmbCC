@@ -87,7 +87,7 @@ The driver decides what to do with the input file from its suffix, unless
 | `.c` | C source |
 | `.cc` `.cpp` `.cxx` `.C` `.c++` `.cp` `.CPP` `.ii` | C++ source (lowered to C internally; see [C++](cxx.md)) |
 | `.s` | GNU-syntax assembly, assembled for the selected target without preprocessing |
-| `.S` | GNU-syntax assembly, preprocessed first |
+| `.S` | GNU-syntax assembly, preprocessed first, with `__ASSEMBLER__` defined |
 | `.asm` | NASM/Intel-syntax x86-64 assembly (the [`embas`](tools/embas.md) assembler) |
 | `.ir` | EmbIR text; meaningful only to [`embcc inspect ir`](#embcc-inspect-stage-file-option) |
 | `.o` `.obj` `.a` | an object or an archive, handed to the link as it is |
