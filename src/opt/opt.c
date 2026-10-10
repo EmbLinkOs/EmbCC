@@ -472,8 +472,7 @@ static void opt_func(struct ir_func *fn)
         if (any)
             tm_sweep(fn);
     }
-    if (g_licm && edge_ok && g_opt_size && target_get() == TARGET_THUMB &&
-        !getenv("EMBCC_NO_GUARDJUMP")) {
+    if (g_licm && edge_ok && g_opt_size && !getenv("EMBCC_NO_GUARDJUMP")) {
         int guard = 0;
         while (guard++ < 256 && pass_guardjump(fn))
             ;
