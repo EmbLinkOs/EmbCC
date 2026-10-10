@@ -2066,7 +2066,13 @@ int irg_va_ptr_read(struct ir_func *fn, struct expr *lv,
         return emit_ldvar(fn, lv->var_index, ptr);
     }
     *slot = gen_addr(fn, lv);
-    return emit_load(fn, *slot, ptr);
+    int v = emit_load(fn, *slot, ptr);
+    /* aligned as the list's own lvalue is (`*ap` through a `va_list *`
+     * is; a packed member's would not be), as a plain read of it would
+     * be marked: unmarked, ARMv6-M read and wrote scanf's list a byte at
+     * a time, store_int 214 bytes for Cortex-M4's 98 */
+    mark_natural(fn, lv);
+    return v;
 }
 
 void irg_va_ptr_write(struct ir_func *fn, struct expr *lv, int slot,
@@ -2074,8 +2080,10 @@ void irg_va_ptr_write(struct ir_func *fn, struct expr *lv, int slot,
 {
     if (slot < 0)
         emit_stvar(fn, lv->var_index, val, ptr);
-    else
+    else {
         emit_store(fn, slot, val, ptr);
+        mark_natural(fn, lv);
+    }
 }
 
 int irg_asm_val_ok(const struct expr *lv, int maxsize)

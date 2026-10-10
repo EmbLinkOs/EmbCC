@@ -60,13 +60,20 @@ double vlast(int n, ...)
     __builtin_va_end(ap);
     return d;
 }
+/* the list through a pointer, as scanf's store_int takes it: the list's
+ * own read and write are word accesses too (they were a byte at a time:
+ * store_int 214 bytes for Cortex-M4's 98) */
+void vstore(__builtin_va_list *ap, int v)
+{
+    *__builtin_va_arg(*ap, int *) = v;
+}
 EOF
 cc6 "$out/va.c" "$out/va.o"
-for f in vsum vsum64 vlast; do
+for f in vsum vsum64 vlast vstore; do
     dis "$out/va.o" $f > "$out/$f.dis"
     grep -q 'ldr[[:space:]]' "$out/$f.dis" || { cat "$out/$f.dis"; fail "$f: no word load"; }
-    if grep -q 'ldrb' "$out/$f.dis"; then
-        cat "$out/$f.dis"; fail "$f: va_arg reads its argument a byte at a time"
+    if grep -q 'ldrb\|strb' "$out/$f.dis"; then
+        cat "$out/$f.dis"; fail "$f: va_arg reads its argument, or its list, a byte at a time"
     fi
 done
 
