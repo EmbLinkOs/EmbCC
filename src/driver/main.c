@@ -4880,6 +4880,13 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "-Wextra") == 0 ||
                    strcmp(argv[i], "-W") == 0) {
             diag_enable_group(0, 1);
+        } else if (strncmp(argv[i], "-Wformat=", 9) == 0) {
+            /* gcc's levels: 0 off, 1 -Wformat, 2 that and the checks of
+             * a format that is not a literal */
+            int lv = atoi(argv[i] + 9);
+            diag_enable_warning("format", lv >= 1);
+            diag_enable_warning("format-nonliteral", lv >= 2);
+            diag_enable_warning("format-security", lv >= 2);
         } else if (strncmp(argv[i], "-Wno-", 5) == 0) {
             diag_enable_warning(argv[i] + 5, 0);
         } else if (argv[i][0] == '-' && argv[i][1] == 'W') {

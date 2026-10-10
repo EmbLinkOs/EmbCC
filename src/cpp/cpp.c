@@ -669,6 +669,9 @@ static void expand_text(struct src *s, const char *text, struct tbuf *out)
 struct evalp {
     struct src *s;
     const char *p;
+    int skip;      /* inside an operand && || ?: will not evaluate: what
+                    * it would say (a division by zero, -Wundef) is not
+                    * said, as gcc does not say it */
 };
 
 static long eval_or(struct evalp *e);
@@ -763,6 +766,12 @@ static long eval_primary(struct evalp *e)
          * (a unit that #defines it has had it replaced already) */
         if (e->p - id == 4 && !memcmp(id, "true", 4))
             return 1;
+        /* -Wundef: a name no macro defines, in an operand that is
+         * evaluated -- usually a misspelt CONFIG_ option */
+        if (!e->skip && !(e->p - id == 5 && !memcmp(id, "false", 5)))
+            diag_warn_opt(e->s->file, e->s->line, 0, "undef",
+                          "'%.*s' is not defined, evaluates to 0",
+                          (int)(e->p - id), id);
         return 0;
     }
     cerr(e->s, "cannot parse #if expression", NULL);
@@ -783,11 +792,11 @@ static long eval_primary(struct evalp *e)
 EVAL_LEVEL(eval_mul, eval_primary, {
     if (*e->p == '*') { e->p++; a *= eval_primary(e); continue; }
     if (*e->p == '/' ) { e->p++; long b = eval_primary(e);
-        if (!b) cerr(e->s, "division by zero in #if", NULL);
-        a /= b; continue; }
+        if (!b && !e->skip) cerr(e->s, "division by zero in #if", NULL);
+        a = b ? a / b : 0; continue; }
     if (*e->p == '%') { e->p++; long b = eval_primary(e);
-        if (!b) cerr(e->s, "division by zero in #if", NULL);
-        a %= b; continue; }
+        if (!b && !e->skip) cerr(e->s, "division by zero in #if", NULL);
+        a = b ? a % b : 0; continue; }
 })
 EVAL_LEVEL(eval_add, eval_mul, {
     if (*e->p == '+') { e->p++; a += eval_mul(e); continue; }
@@ -828,14 +837,37 @@ EVAL_LEVEL(eval_bor, eval_bxor, {
 })
 EVAL_LEVEL(eval_and, eval_bor, {
     if (e->p[0] == '&' && e->p[1] == '&') { e->p += 2;
-        long b = eval_bor(e); a = a && b; continue; }
+        int sv = e->skip; e->skip += !a;
+        long b = eval_bor(e); e->skip = sv; a = a && b; continue; }
 })
 EVAL_LEVEL(eval_or_, eval_and, {
     if (e->p[0] == '|' && e->p[1] == '|') { e->p += 2;
-        long b = eval_and(e); a = a || b; continue; }
+        int sv = e->skip; e->skip += !!a;
+        long b = eval_and(e); e->skip = sv; a = a || b; continue; }
 })
 
-static long eval_or(struct evalp *e) { return eval_or_(e); }
+/* c ? a : b, which C11 6.10.1 admits in #if as in any constant
+ * expression; only the chosen arm is evaluated. */
+static long eval_or(struct evalp *e)
+{
+    long c = eval_or_(e);
+    eskip(e);
+    if (*e->p != '?')
+        return c;
+    e->p++;
+    int sv = e->skip;
+    e->skip += !c;
+    long a = eval_or(e);
+    e->skip = sv;
+    eskip(e);
+    if (*e->p != ':')
+        cerr(e->s, "expected ':' in #if's ?: expression", NULL);
+    e->p++;
+    e->skip += !!c;
+    long b = eval_or(e);
+    e->skip = sv;
+    return c ? a : b;
+}
 
 static char *read_file_or_null(const char *path, long *len);
 
@@ -1285,6 +1317,7 @@ static long eval_if(struct src *s, const char *line)
     struct evalp e;
     e.s = s;
     e.p = ex.p ? ex.p : "";
+    e.skip = 0;
     long v = eval_or(&e);
     eskip(&e);
     if (*e.p)
@@ -1422,6 +1455,47 @@ static void read_raw_string(struct src *s, struct tbuf *out, int *nl)
     s->p = p;
 }
 
+/* Is this comment's text one of the fall-through markers gcc accepts at
+ * -Wimplicit-fallthrough=3 (the -Wextra level)? `fall through`, `falls
+ * through`, `fall-through`, `fallthru`, with an optional `intentional(ly)`
+ * or `else,` before and `- why` after, any case, punctuation and space at
+ * either end; and `-fallthrough`, `@fallthrough@`, `lint -fallthrough`.
+ * EmbCC's own source marks its fall-throughs so, and much C does. */
+static int ci_eat(const char **p, const char *e, const char *w)
+{
+    const char *q = *p;
+    for (; *w; w++, q++)
+        if (q >= e || (*q | 0x20) != *w)
+            return 0;
+    *p = q;
+    return 1;
+}
+
+static int fallthrough_comment(const char *b, const char *e)
+{
+    while (b < e && strchr(" \t.!*", *b)) b++;
+    while (e > b && strchr(" \t.!*\n\r", e[-1])) e--;
+    if (e - b == 12 && !memcmp(b, "-fallthrough", 12)) return 1;
+    if (e - b == 13 && !memcmp(b, "@fallthrough@", 13)) return 1;
+    if (e - b >= 16 && !memcmp(b, "lint -fallthrough", 16)) return 1;
+    const char *p = b;
+    if (ci_eat(&p, e, "intentionally ") || ci_eat(&p, e, "intentional ") ||
+        ci_eat(&p, e, "else, ") || ci_eat(&p, e, "else "))
+        ;
+    if (!ci_eat(&p, e, "fall"))
+        return 0;
+    if (p < e && (*p | 0x20) == 's' && p + 1 < e && p[1] == ' ')
+        p += 2;
+    else if (p < e && (*p == ' ' || *p == '-'))
+        p++;
+    if (!ci_eat(&p, e, "thr"))
+        return 0;
+    if (!ci_eat(&p, e, "ough") && !ci_eat(&p, e, "u"))
+        return 0;
+    while (p < e && strchr(" \t.!", *p)) p++;
+    return p == e || *p == '-';
+}
+
 /* Reads one logical line (backslash-newline spliced, comments
  * stripped) from s into out. Returns 0 at EOF. Leaves s->line at the
  * FIRST line of the logical line; *nl gets the newline count. */
@@ -1445,12 +1519,16 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
             continue;
         }
         if (c == '/' && s->p[1] == '/') {
+            const char *cb = s->p + 2;
             while (*s->p && *s->p != '\n')
                 s->p++;
+            if (fallthrough_comment(cb, s->p))
+                diag_fallthrough_comment(s->file, s->line + *nl);
             continue;
         }
         if (c == '/' && s->p[1] == '*') {
             s->p += 2;
+            const char *cb = s->p;
             while (*s->p && !(s->p[0] == '*' && s->p[1] == '/')) {
                 if (*s->p == '\n')
                     (*nl)++;
@@ -1458,6 +1536,8 @@ static int read_logical_line(struct src *s, struct tbuf *out, int *nl)
             }
             if (!*s->p)
                 cerr(s, "unterminated comment", NULL);
+            if (fallthrough_comment(cb, s->p))
+                diag_fallthrough_comment(s->file, s->line + *nl);
             s->p += 2;
             tb_putc(out, ' ');
             continue;

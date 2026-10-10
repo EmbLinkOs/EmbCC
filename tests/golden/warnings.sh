@@ -365,3 +365,96 @@ if command -v clang > /dev/null 2>&1; then
 else
     echo "-Wsign-compare: lines 8 10 11 15 16 only (no clang to referee)"
 fi
+
+# 9. What a coding standard turns on. EmbLinkRTOS builds -Werror with
+#    gcc's set, and 11 of these were names EmbCC did not have: they
+#    turned nothing on and said so. Each is now a check, reported at the
+#    lines clang reports it (when clang has it, and is here), or at the
+#    lines gcc's documentation says (missing-declarations, redundant-decls,
+#    nested-externs, format-nonliteral, which clang lacks in C).
+cat > "$out/cs.c" << 'EOF2'
+#include <stdarg.h>
+#if FOO_UNDEFINED || 0 && BAR_SKIPPED
+#endif
+#if 1 ? 1 : (1 / 0)
+#endif
+int printf(const char *, ...) __attribute__((format(printf, 1, 2)));
+int vprintf(const char *, va_list) __attribute__((format(printf, 1, 0)));
+double sq(double);
+int f();
+int g(void);
+int h(int x) { return x; }
+const int ci = 1;
+int *pc = (int *)&ci;
+float fl = 1.5f;
+double dp(void) { return fl * 2.0; }
+void vl(int n) { int a[n]; (void)a; }
+int sw(int x) {
+    int r = 0;
+    switch (x) {
+    case 1: r++;
+    case 2: r++; __attribute__((fallthrough));
+    case 3: r++; break;
+    case 4: r--;
+    }
+    return r;
+}
+void fmt(const char *m) { printf(m); }
+void fmt2(const char *m, int v) { printf(m, v); }
+EOF2
+code_lines() {      # code_lines FILE OPTION: the lines of FILE's -WOPTION
+    grep -o "cs.c:[0-9]*:.*\[-W$2\]" "$1" | cut -d: -f2 | sort -n | tr '\n' ' '
+}
+for spec in "undef:2" "strict-prototypes:9" "missing-prototypes:11 15 16 17 27 28" \
+            "cast-qual:13" "double-promotion:15" "vla:16" "switch-default:19" \
+            "implicit-fallthrough:20" "format-security:27" "format-nonliteral:28"; do
+    w=${spec%%:*}; want="${spec#*:} "
+    "$EMBCC" --target="$TARGET" -W$w -fsyntax-only "$out/cs.c" 2> "$out/cs-$w.txt" || true
+    got=$(code_lines "$out/cs-$w.txt" "$w")
+    [ "$got" = "$want" ] || { sed "s|$out/||" "$out/cs-$w.txt"
+        echo "FAIL: -W$w at lines '$got', expected '$want'"; exit 1; }
+done
+"$EMBCC" --target="$TARGET" -Wformat=2 -fsyntax-only "$out/cs.c" 2> "$out/cs-f2.txt" || true
+[ "$(code_lines "$out/cs-f2.txt" 'format-[a-z]*')" = "27 28 " ] || {
+    cat "$out/cs-f2.txt"; echo "FAIL: -Wformat=2 is not -Wformat-security and -nonliteral"; exit 1; }
+grep -q 'cs.c:21:.*here' "$out/cs-implicit-fallthrough.txt" || {
+    cat "$out/cs-implicit-fallthrough.txt"; echo "FAIL: the fall-through note is not at the next label"; exit 1; }
+# the referee, for those clang has in C: the same lines
+if command -v clang > /dev/null 2>&1; then
+    for w in undef strict-prototypes missing-prototypes cast-qual double-promotion \
+             vla switch-default implicit-fallthrough format-security; do
+        clang --target=x86_64-elf -W$w -fsyntax-only -isystem "$X86_NEWLIB/include" \
+            "$out/cs.c" 2> "$out/cl-$w.txt" || true
+        cl=$(grep "warning:.*\[-W$w" "$out/cl-$w.txt" | grep -o 'cs.c:[0-9]*' | cut -d: -f2 | sort -nu | tr '\n' ' ')
+        mine=$(code_lines "$out/cs-$w.txt" "$w")
+        # clang reports a fall-through at the label, gcc and EmbCC at the
+        # statement with a note at the label: compare the labels
+        [ $w = implicit-fallthrough ] &&
+            mine=$(grep -o 'cs.c:[0-9]*:[0-9]*: note: here' "$out/cs-$w.txt" | cut -d: -f2 | tr '\n' ' ')
+        [ "$cl" = "$mine" ] || { echo "FAIL: -W$w: clang at '$cl', EmbCC at '$mine'"; exit 1; }
+    done
+    echo "the coding-standard warnings: clang's lines for the nine it has in C"
+fi
+# the gcc-only ones, at gcc's lines
+cat > "$out/gc.c" << 'EOF2'
+extern int x;
+extern int x;
+int p(int);
+int p(int);
+int q(void) { return 1; }
+int main(void) { extern int y; int k(int); return p(x) + y + k(1) + q(); }
+EOF2
+for spec in "redundant-decls:2 4" "missing-declarations:5" "nested-externs:6 6"; do
+    w=${spec%%:*}; want="${spec#*:} "
+    "$EMBCC" --target="$TARGET" -W$w -fsyntax-only "$out/gc.c" 2> "$out/gc-$w.txt" || true
+    got=$(grep -o "gc.c:[0-9]*:.*\[-W$w\]" "$out/gc-$w.txt" | cut -d: -f2 | sort -n | tr '\n' ' ')
+    [ "$got" = "$want" ] || { cat "$out/gc-$w.txt"; echo "FAIL: -W$w at '$got', expected '$want'"; exit 1; }
+done
+# a note follows only its own warning: -Wshadow silenced by a pragma left
+# its "the one it hides" note on whatever was reported before it
+printf 'int g1;\n#pragma GCC diagnostic ignored "-Wshadow"\nint t(void) { int unused_v; int g1 = 2; return g1; }\n' > "$out/note.c"
+"$EMBCC" --target="$TARGET" -Wall -Wshadow -fsyntax-only "$out/note.c" 2> "$out/note.txt" || true
+if grep -q 'the one it hides' "$out/note.txt"; then
+    cat "$out/note.txt"; echo "FAIL: a silenced -Wshadow left its note behind"; exit 1
+fi
+echo "the coding-standard warnings at their lines, -Wformat=2, the gcc-only ones, and no stray notes"

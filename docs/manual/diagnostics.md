@@ -501,8 +501,8 @@ Enable `-Waddress`, `-Wformat`, `-Wmaybe-uninitialized`, `-Wparentheses`,
 
 #### `-Wextra`, `-W`
 
-Enable `-Wlogical-op`, `-Wsign-compare`, `-Wtype-limits` and
-`-Wunused-parameter`. `-Wextra` does not imply `-Wall`. `-W` is an older
+Enable `-Wimplicit-fallthrough`, `-Wlogical-op`, `-Wsign-compare`,
+`-Wtype-limits` and `-Wunused-parameter`. `-Wextra` does not imply `-Wall`. `-W` is an older
 spelling of `-Wextra`.
 
 #### `-WNAME`
@@ -612,23 +612,36 @@ nothing on.
 |---|---|---|
 | `-Waddress` | A function name tested in an `if` condition, or compared with a null pointer constant | `-Wall` |
 | `-Wattributes` | An attribute EmbCC does not know, or one it accepts but does not implement | default |
+| `-Wcast-qual` | A cast that removes `const` or `volatile` from the type a pointer points to | none |
 | `-Wdeprecated-declarations` | A use of a function or variable declared `deprecated` | default |
 | `-Wdiscarded-qualifiers` | A pointer conversion that drops the pointed-to type's `const` | default |
 | `-Wdiv-by-zero` | Integer division or remainder by a constant zero | default |
+| `-Wdouble-promotion` | A `float` implicitly converted to `double`: an operand, a `double` parameter, a variadic argument | none |
 | `-Wformat` | A `printf`- or `scanf`-style format that disagrees with its arguments | `-Wall` |
+| `-Wformat-nonliteral` | A format that is not a string literal, with arguments after it (not for a `va_list` function such as `vprintf`) | `-Wformat=2` |
+| `-Wformat-security` | A format that is not a string literal, with no arguments after it | `-Wformat=2` |
+| `-Wimplicit-fallthrough` | A `case` whose statements can run into the next label with no `__attribute__((fallthrough));`, `[[fallthrough]];` or fall-through comment | `-Wextra` |
 | `-Wlogical-op` | `a && a` or `a \|\| a` with identical operands | `-Wextra` |
 | `-Wmaybe-uninitialized` | A local variable read on a path where only some paths wrote it | `-Wall` |
+| `-Wmissing-declarations` | A function with external linkage defined with no declaration before it (when `-Wmissing-prototypes` is off) | none |
+| `-Wmissing-prototypes` | A function with external linkage defined with no prototype before it | none |
+| `-Wnested-externs` | An `extern` declaration inside a function body | none |
 | `-Wparentheses` | A comparison as an unparenthesized operand of `&`, `\|` or `^` | `-Wall` |
 | `-Wprio-ctor-dtor` | A `constructor` or `destructor` priority from 0 to 100, which the implementation reserves | default |
+| `-Wredundant-decls` | A second declaration of a function or `extern` object in the same scope | none |
 | `-Wshadow` | A local declaration that hides a local variable, a parameter or a file-scope variable | none |
 | `-Wshift-count-overflow` | A constant shift count that is negative or not less than the operand width | `-Wall` |
 | `-Wsign-compare` | A comparison that converts a possibly negative signed operand to unsigned | `-Wextra` |
+| `-Wstrict-prototypes` | A function declarator with `()` instead of `(void)` | none |
+| `-Wswitch-default` | A `switch` with no `default` label | none |
 | `-Wtype-limits` | An unsigned value compared `< 0` or `>= 0` | `-Wextra` |
+| `-Wundef` | An identifier in `#if` that no macro defines (evaluated as 0), outside an operand `&&`, `\|\|` or `?:` skips | none |
 | `-Wuninitialized` | A local variable read before any path wrote it | `-Wall` |
 | `-Wunused-function` | A `static` function that is defined and never used | `-Wall` |
 | `-Wunused-parameter` | A function parameter the body never uses | `-Wextra` |
 | `-Wunused-result` | A discarded result of a function declared `warn_unused_result` or `[[nodiscard]]` | default |
 | `-Wunused-variable` | A local variable that is never used | `-Wall` |
+| `-Wvla` | A variable length array, or a `typedef` of one | none |
 | `-Wwindows-abi` | A compile for a Windows target, whose ABI EmbCC does not yet fully implement | default |
 
 "default" means the warning is on unless `-Wno-NAME` or `-w` is given.

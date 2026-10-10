@@ -903,9 +903,7 @@ standard:
 
 | Case | Behavior |
 |---|---|
-| The conditional operator, `#if A ? B : C` | Not supported: `trailing junk in #if expression` |
 | Unsigned arithmetic | Every value is a signed 64-bit integer; a `u` suffix is ignored. `#if -1 < 0u` is true; the standard makes it false. |
-| Division or remainder by zero | An error even in an operand that `&&`, `\|\|` does not evaluate: `#if 0 && (1/0)` gives `division by zero in #if`. |
 | A multi-character constant | `bad character constant in #if` |
 
 ### Macro expansion

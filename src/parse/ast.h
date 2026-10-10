@@ -247,6 +247,9 @@ struct stmt {
     int is_tls;           /* STMT_DECL: `static __thread` -> a TLS global */
     int attr_unused;      /* STMT_DECL: __attribute__((unused)) on it */
     int is_extern;        /* STMT_DECL: block-scope extern -> a unit global/func */
+    int fallthrough;      /* STMT_BLOCK, empty: `__attribute__((fallthrough));`
+                           * or `[[fallthrough]];` -- a case means to run
+                           * into the next (-Wimplicit-fallthrough) */
     struct initelem *inits; /* STMT_DECL: flattened aggregate init */
     int ninits;
     int is_vm_typedef;    /* STMT_DECL: no variable -- a block-scope typedef

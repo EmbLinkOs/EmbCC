@@ -19,6 +19,7 @@
  * tool that answers questions about a unit needs to walk them.) */
 
 struct attrs { int packed; int aligned; int weak; int noreturn;
+               int fallthrough;       /* a statement attribute */
                const char *section;
                const char *asm_name; /* a renaming asm label (asm_label) */
                int sret; /* embcc_sret on a parameter (type.h sret_first) */
@@ -548,6 +549,7 @@ static const struct attr_entry attr_table[] = {
      * a thing it chose against. `-fremarks` names whichever applied. */
     { "always_inline", ATTR_HONOURED, NULL },
     { "noinline",      ATTR_HONOURED, NULL },
+    { "fallthrough",   ATTR_HONOURED, NULL },
     { "gnu_inline",    ATTR_HONOURED, NULL },
     { "deprecated",    ATTR_HONOURED, NULL },
     { "warn_unused_result", ATTR_HONOURED, NULL },
@@ -642,8 +644,6 @@ static const struct attr_entry attr_table[] = {
     { "alloc_size", ATTR_NOOP, "EmbCC has no object-size checking" },
     { "alloc_align", ATTR_NOOP, "EmbCC has no object-size checking" },
     { "sentinel",  ATTR_NOOP, "EmbCC does not check variadic terminators" },
-    { "fallthrough", ATTR_NOOP,
-      "EmbCC does not warn about a case falling through" },
     { "optimize",  ATTR_NOOP,
       "EmbCC's optimisation level is per compilation, not per function" },
     /* ---- the ones that were parsed and DROPPED ----
@@ -1071,6 +1071,7 @@ static void parse_attributes(struct parser *ps, struct attrs *out)
                 else if (attr_is(name, "unused")) out->unused = 1;
                 else if (attr_is(name, "always_inline")) out->always_inline = 1;
                 else if (attr_is(name, "noinline")) out->noinline = 1;
+                else if (attr_is(name, "fallthrough")) out->fallthrough = 1;
                 else if (attr_is(name, "no_instrument_function"))
                     out->no_instrument = 1;
                 else if (attr_is(name, "gnu_inline")) out->gnu_inline = 1;
@@ -1416,6 +1417,16 @@ static struct type *parse_fn_params(struct parser *ps, struct type *ret)
 }
 
 /* ... and the parameters' names into names[] (NULL where unnamed) */
+/* -Wstrict-prototypes: `int f()`. EmbCC reads it as `(void)`, as C23
+ * does; before C23 it is not a prototype, and another compiler checks no
+ * argument of a call against it. ps is at the ')'. */
+static void warn_no_prototype(struct parser *ps)
+{
+    diag_warn_opt(ps->lx.file, cur(ps)->line, cur(ps)->col,
+                  "strict-prototypes",
+                  "function declaration isn't a prototype: say (void)");
+}
+
 static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
                                           const char **names)
 {
@@ -1433,6 +1444,8 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     struct type *pt[MAX_PARAMS];
     int n = 0, varargs = 0, sret = 0;
 
+    if (cur(ps)->kind == TOK_RPAREN)
+        warn_no_prototype(ps);
     if (cur(ps)->kind == TOK_KW_VOID) {
         struct lexer save = ps->lx;
         advance(ps);
@@ -4427,6 +4440,14 @@ static struct stmt *parse_stmt(struct parser *ps, int allow_decl)
     if (at_attribute(ps)) {
         parse_attributes(ps, &lead);
         t = cur(ps);
+        /* `__attribute__((fallthrough));`: the empty statement that says a
+         * case runs into the next on purpose */
+        if (lead.fallthrough && t->kind == TOK_SEMI) {
+            advance(ps);
+            s = new_stmt(STMT_BLOCK, t->line, t->col);   /* does nothing */
+            s->fallthrough = 1;
+            return s;
+        }
     }
 
     /* `register` is otherwise an ignored storage hint, but it carries the
@@ -5646,6 +5667,8 @@ static void parse_top(struct parser *ps, struct unit *u,
     saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* parameters and body: VLAs allowed */
 
+    if (cur(ps)->kind == TOK_RPAREN)
+        warn_no_prototype(ps);
     if (cur(ps)->kind == TOK_KW_VOID) {
         /* "(void)" means no parameters; "(void *x)" is a parameter */
         struct lexer save = ps->lx;

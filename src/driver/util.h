@@ -55,9 +55,15 @@ void diag_warn_at(const char *file, int line, int col, const char *fmt, ...);
 
 /* A warning that a -W option controls: silent unless that option is on,
  * and printed with "[-Wname]". */
-void diag_warn_opt(const char *file, int line, int col, const char *name,
+/* Returns 1 when the warning was reported (on, not in a system header,
+ * not silenced by a pragma): a note that belongs to it follows only then. */
+int diag_warn_opt(const char *file, int line, int col, const char *name,
                    const char *fmt, ...);
 int diag_warning_enabled(const char *name);
+/* A comment the preprocessor saw that marks a fall-through on purpose
+ * (one saying `fall through`), and whether one is on lines lo..hi of file. */
+void diag_fallthrough_comment(const char *file, int line);
+int diag_has_fallthrough_comment(const char *file, int lo, int hi);
 /* #pragma GCC diagnostic, from the preprocessor. `pos` is a position in
  * its output (bytes written so far), the same scale for both calls:
  * diag_pragma_line says where a source line starts, diag_pragma_event

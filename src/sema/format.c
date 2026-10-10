@@ -195,13 +195,27 @@ void format_check(const char *file, struct expr *call, const struct func *fn)
     if (fi >= call->nargs)
         return;
 
-    /* Only a literal can be read. A format built at run time is not a
-     * defect and not checkable, so nothing is said about it. */
+    /* Only a literal can be read. A format built at run time is not
+     * checkable, and by default nothing is said about it; -Wformat=2
+     * says two things, as gcc does. With nothing after it, a format from
+     * outside is a hole -- printf(msg) prints msg's %n too
+     * (-Wformat-security). With arguments, they go unchecked
+     * (-Wformat-nonliteral) -- but not where the callee takes a va_list
+     * (vprintf), which is how a printf-like wrapper hands its format on. */
     struct expr *fmt = call->args[fi];
     while (fmt && fmt->kind == EXPR_CAST)
         fmt = fmt->rhs;
-    if (!fmt || fmt->kind != EXPR_STR || fmt->str_width != 1 || !fmt->name)
+    if (!fmt || fmt->kind != EXPR_STR || fmt->str_width != 1 || !fmt->name) {
+        if (fn->fmt_first > 0 && call->nargs <= fn->fmt_first - 1)
+            diag_warn_opt(file, call->line, call->col, "format-security",
+                          "format not a string literal and no format "
+                          "arguments");
+        else if (fn->fmt_first > 0)
+            diag_warn_opt(file, call->line, call->col, "format-nonliteral",
+                          "format not a string literal, argument types not "
+                          "checked");
         return;
+    }
 
     /* `num` counts the NUL; the bytes may contain their own. */
     const char *s = fmt->name;

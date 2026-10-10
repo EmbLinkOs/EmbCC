@@ -4374,7 +4374,7 @@ static void gen_func(struct ir_func *fn, struct code *text,
                     break;              /* emitted as nothing */
                 }
             }
-            /* fall through to the ordinary shift */
+            /* fall through - to the ordinary shift */
         case IR_SHR: {
             int skind = i->op == IR_SHL ? '<' : i->sign ? '>' : 'u';
             /* Constant shift count folded to an immediate: `shift $k, dst` with

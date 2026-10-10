@@ -295,6 +295,7 @@ struct linker {
     int gc_nundefs;
 };
 
+EMBCC_NORETURN static void die(const char *fmt, ...);
 static void die(const char *fmt, ...)
 {
     va_list ap;

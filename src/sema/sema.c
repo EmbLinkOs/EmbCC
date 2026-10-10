@@ -25,6 +25,7 @@
 #include "../arch/thumb/asm.h"
 #include "../driver/util.h"
 #include "../arch/target.h"
+#include "../arch/predef.h"
 #include "ldfloat.h"
 #include "type.h"
 #include "format.h"
@@ -192,10 +193,10 @@ static void warn_shadow_global(struct unit *u, const char *name, int line,
     for (struct global *g = u->globals; g; g = g->next)
         if (!g->absorbed && g->seq >= 0 && g->seq < cur_body_seq &&
             g->name && strcmp(g->name, name) == 0) {
-            diag_warn_opt(diag_file(u), line, col, "shadow",
-                          "declaration of '%s' shadows a global declaration",
-                          name);
-            diag_note_at(g->file ? g->file : u->file,
+            if (diag_warn_opt(diag_file(u), line, col, "shadow",
+                              "declaration of '%s' shadows a global declaration",
+                              name))
+                diag_note_at(g->file ? g->file : u->file,
                          g->name_col ? g->name_line : g->line, g->name_col,
                          "the one it hides is here");
             return;
@@ -213,11 +214,11 @@ static void warn_shadow(struct unit *u, struct scope *sc, const char *name,
     for (int i = sc->n - 1; i >= 0; i--)
         if (sc->vars[i].active && sc->vars[i].name &&
             strcmp(sc->vars[i].name, name) == 0) {
-            diag_warn_opt(diag_file(u), line, col, "shadow",
-                          "declaration of '%s' shadows %s", name,
-                          sc->vars[i].is_param ? "a parameter"
-                                               : "an earlier one");
-            if (sc->vars[i].line)
+            if (diag_warn_opt(diag_file(u), line, col, "shadow",
+                              "declaration of '%s' shadows %s", name,
+                              sc->vars[i].is_param ? "a parameter"
+                                                   : "an earlier one") &&
+                sc->vars[i].line)
                 diag_note_at(diag_file(u), sc->vars[i].line, sc->vars[i].col,
                              "the one it hides is here");
             return;
@@ -357,11 +358,24 @@ static double ieee_nan(void)
     return v.d;
 }
 
+/* The unit being checked, for the one diagnostic an implicit conversion
+ * itself can raise (-Wdouble-promotion); set by sema_check. */
+static struct unit *g_cast_unit;
+
 /* Wrap in an implicit cast node unless already exactly that type. */
 static struct expr *mk_cast(struct expr *inner, struct type *to)
 {
     if (ty_equal(inner->ty, to))
         return inner;
+    /* -Wdouble-promotion: a float quietly made double -- a mixed
+     * expression, a double parameter, a variadic argument. On a
+     * single-precision FPU (Cortex-M4F) that is a soft-float call. */
+    if (g_cast_unit && inner->ty && inner->ty->kind == TY_FLOAT &&
+        (to->kind == TY_DOUBLE || to->kind == TY_LDOUBLE) && !predef_is_cxx())
+        diag_warn_opt(diag_file(g_cast_unit), inner->line, inner->col,
+                      "double-promotion",
+                      "implicit conversion from 'float' to '%s'",
+                      ty_name(to));
     struct expr *c = xcalloc(1, sizeof *c);
     c->kind = EXPR_CAST;
     c->line = inner->line;
@@ -2017,6 +2031,20 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             sema_error_at(u, e->line, e->col,
                        "cannot convert between %s and %s",
                        ty_name(e->rhs->ty), ty_name(e->cast_ty));
+        /* -Wcast-qual: the cast makes writable what the pointer said was
+         * read-only, or ordinary what it said was volatile */
+        if (e->cast_ty->kind == TY_PTR && e->rhs->ty->kind == TY_PTR &&
+            e->cast_ty->pointee && e->rhs->ty->pointee) {
+            const struct type *fp = e->rhs->ty->pointee,
+                              *tp = e->cast_ty->pointee;
+            const char *q = fp->is_const && !tp->is_const ? "const"
+                          : fp->is_volatile && !tp->is_volatile ? "volatile"
+                          : NULL;
+            if (q)
+                diag_warn_opt(diag_file(u), e->line, e->col, "cast-qual",
+                              "cast discards '%s' qualifier from pointer "
+                              "target type", q);
+        }
         e->ty = e->cast_ty;
         break;
     case EXPR_COMMA:
@@ -3368,6 +3396,91 @@ static struct ldf *const_fold_ld(const struct expr *e)
 
 /* The statement list a switch dispatches over: its body, unwrapped when
  * it is the usual brace block. */
+/* -Wimplicit-fallthrough: can control leave this statement at its end?
+ * Not after a break, continue, return or goto, a call of a noreturn
+ * function, an `if` both of whose arms cannot, a block whose last
+ * statement cannot, an endless loop with no break of its own, or the
+ * fallthrough attribute (which says it can, on purpose). */
+static int has_own_break(struct stmt *s);   /* below, list_returns' */
+
+static int endless(const struct expr *c)
+{
+    while (c && c->kind == EXPR_CAST)
+        c = c->rhs;
+    return !c || (c->kind == EXPR_NUM && c->num != 0);
+}
+
+static int can_fall_out(const struct stmt *s)
+{
+    if (!s)
+        return 1;
+    switch (s->kind) {
+    case STMT_BREAK: case STMT_CONTINUE: case STMT_RETURN: case STMT_GOTO:
+        return 0;
+    case STMT_EXPR: {
+        const struct expr *e = s->expr;
+        while (e && e->kind == EXPR_CAST)
+            e = e->rhs;
+        if (e && e->kind == EXPR_CALL &&
+            ((e->callee && e->callee->is_noreturn) ||
+             (e->lhs && e->lhs->kind == EXPR_VAR && e->lhs->name &&
+              (!strcmp(e->lhs->name, "__builtin_unreachable") ||
+               !strcmp(e->lhs->name, "__builtin_trap")))))
+            return 0;
+        return 1;
+    }
+    case STMT_BLOCK: {
+        if (s->fallthrough)
+            return 0;
+        const struct stmt *last = NULL;
+        for (const struct stmt *b = s->body; b; b = b->next)
+            last = b;
+        return last ? can_fall_out(last) : 1;
+    }
+    case STMT_IF:
+        return !s->els || can_fall_out(s->thn) || can_fall_out(s->els);
+    case STMT_WHILE: case STMT_FOR: case STMT_DO:
+        return !endless(s->cond) || has_own_break(s->body);   /* (no write) */
+    case STMT_LABEL:
+        return can_fall_out(s->body);
+    case STMT_SWITCH: {
+        /* it can leave by a break of its own, by a value no label names
+         * (no default), or by its last statement falling out */
+        int dflt = 0;
+        const struct stmt *last = NULL;
+        for (const struct stmt *b = switch_stmts(s->body); b; b = b->next) {
+            dflt |= b->kind == STMT_DEFAULT;
+            if (b->kind != STMT_CASE && b->kind != STMT_DEFAULT)
+                last = b;
+        }
+        return !dflt || has_own_break(switch_stmts(s->body)) ||
+               can_fall_out(last);
+    }
+    default:
+        return 1;
+    }
+}
+
+static void warn_fallthrough(struct unit *u, struct stmt *list)
+{
+    struct stmt *last = NULL;
+    for (struct stmt *s = list; s; s = s->next) {
+        if (s->kind == STMT_CASE || s->kind == STMT_DEFAULT) {
+            /* (a comment saying so, from the statement to the label, is
+             * gcc's other way to mark it: its own lines, any file) */
+            if (last && can_fall_out(last) &&
+                !diag_has_fallthrough_comment(NULL, last->line, s->line) &&
+                diag_warn_opt(diag_file(u), last->line, last->col,
+                              "implicit-fallthrough",
+                              "this statement may fall through"))
+                diag_note_at(diag_file(u), s->line, s->col, "here");
+            last = NULL;
+            continue;
+        }
+        last = s;
+    }
+}
+
 struct stmt *switch_stmts(struct stmt *body)
 {
     if (body && body->kind == STMT_BLOCK)
@@ -5119,6 +5232,8 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             need_integer(u, s->cond, "'switch'");
             struct stmt *list = switch_stmts(s->body);
             check_stmt(u, f, sc, list, in_loop, 1);
+            if (!predef_is_cxx())
+                warn_fallthrough(u, list);
             /* duplicate labels and a second default are parse-time
              * errors, not a runtime coin flip about which one wins.
              * Whether there is any duplicate is asked of the sorted
@@ -5142,6 +5257,12 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     dup = cv[k] == cv[k - 1];
                 free(cv);
             }
+            for (int i = 0; i < nlab; i++)
+                ndefault += lab[i]->kind == STMT_DEFAULT;
+            if (!ndefault && !predef_is_cxx())
+                diag_warn_opt(diag_file(u), s->line, s->col, "switch-default",
+                              "switch missing default case");
+            ndefault = 0;
             for (int i = 0; i < nlab; i++) {
                 struct stmt *a = lab[i];
                 if (a->kind == STMT_DEFAULT && ++ndefault > 1)
@@ -5167,6 +5288,9 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
             break;
         case STMT_DECL:
             if (s->is_vm_typedef) {
+                if (!predef_is_cxx())
+                    diag_warn_opt(diag_file(u), s->line, s->col, "vla",
+                                  "variable length array type is used");
                 vla_prepare(u, f, sc, s->dty);   /* its size slots */
                 break;
             }
@@ -5177,6 +5301,9 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                 sema_error_line(u, s->line, "'%s' is __flash and must be "
                                 "static: an automatic object is on the stack, "
                                 "in RAM", s->name);
+            if (s->is_extern && !predef_is_cxx())
+                diag_warn_opt(diag_file(u), s->line, s->col, "nested-externs",
+                              "nested extern declaration of '%s'", s->name);
             if (s->is_extern) {
                 /* block-scope extern: no storage here, external linkage. Register
                  * the unit global/function (safe now -- parsing is done, so the
@@ -5256,6 +5383,13 @@ static void check_stmt(struct unit *u, struct func *f, struct scope *sc,
                     sema_error_at(u, s->line, s->col,
                             "static '%s' cannot have a variably modified "
                             "type (%s)", s->name, ty_name(s->dty));
+                /* (an object of a VLA typedef forms no new VLA: the
+                 * typedef was warned about, as gcc and clang do) */
+                if (ty_is_vla(s->dty) && !s->dty->vla_at_typedef &&
+                    !predef_is_cxx())
+                    diag_warn_opt(diag_file(u), s->line, s->col, "vla",
+                                  "variable length array '%s' is used",
+                                  s->name);
                 if (ty_is_vla(s->dty) && s->expr)
                     sema_error_at(u, s->line, s->col,
                             "variable length array '%s' cannot be "
@@ -5951,6 +6085,26 @@ static void decide_inline_only(struct unit *u)
 /* Merge every later declaration of a name into its first (canonical)
  * node. C's static rule kept exactly: static-then-non-static keeps
  * internal linkage, non-static-then-static is an error (gcc agrees). */
+/* -Wmissing-prototypes / -Wmissing-declarations: a function with
+ * external linkage defined with no declaration before it. Nothing outside
+ * this file can have been compiled against the same signature. main, a
+ * static function and a C99 inline definition (which defines nothing for
+ * other files) are not asked about, as gcc does not ask. C only: a C++
+ * unit's methods and templates reach here through its translation. */
+static void warn_missing_decl(const struct func *f)
+{
+    if (predef_is_cxx() || f->is_static || !strcmp(f->name, "main") ||
+        (f->decl_inline && !f->decl_extern))
+        return;
+    int line = f->name_line ? f->name_line : f->line;
+    if (diag_warning_enabled("missing-prototypes"))
+        diag_warn_opt(f->file, line, f->name_col, "missing-prototypes",
+                      "no previous prototype for '%s'", f->name);
+    else
+        diag_warn_opt(f->file, line, f->name_col, "missing-declarations",
+                      "no previous declaration for '%s'", f->name);
+}
+
 static void merge_decls(struct unit *u)
 {
     for (struct func *f = u->funcs; f; f = f->next) {
@@ -5960,8 +6114,18 @@ static void merge_decls(struct unit *u)
         if (canon == f) {
             f->has_defn = f->defined;
             note_inline_decl(f, f);
+            if (f->defined)
+                warn_missing_decl(f);
             continue;
         }
+        /* -Wredundant-decls: a second declaration that is not the
+         * definition says nothing the first did not */
+        if (!f->defined && !predef_is_cxx() &&
+            diag_warn_opt(f->file, f->name_line ? f->name_line : f->line,
+                          f->name_col, "redundant-decls",
+                          "redundant redeclaration of '%s'", f->name))
+            diag_note_at(canon->file, canon->line, 0,
+                         "previous declaration of '%s' here", f->name);
         note_inline_decl(canon, f);
         int match = canon->nparams == f->nparams &&
                     canon->is_varargs == f->is_varargs &&
@@ -6077,6 +6241,12 @@ static void merge_globals(struct unit *u)
             g->defined = !g->is_extern;
             continue;
         }
+        if (g->is_extern && !predef_is_cxx() &&
+            diag_warn_opt(g->file, g->name_line ? g->name_line : g->line,
+                          g->name_col, "redundant-decls",
+                          "redundant redeclaration of '%s'", g->name))
+            diag_note_at(canon->file, canon->line, 0,
+                         "previous declaration of '%s' here", g->name);
         /* Two declarations of an array are compatible when their element
          * types match and at most one gives a size — `extern T x[];`
          * completed by `T x[N] = …`. The canonical node adopts the
@@ -6270,6 +6440,7 @@ static void apply_pragma_weak(struct unit *u)
 
 void sema_check(struct unit *u)
 {
+    g_cast_unit = u;
     apply_pragma_weak(u);
     merge_decls(u);
     decide_inline_only(u);
