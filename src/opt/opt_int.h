@@ -207,6 +207,11 @@ void defs_lists(struct ir_func *fn, struct defs *d);
 int const_b(struct ir_func *fn, struct defs *d, struct ir_ins *i,
             long *out);
 int get_const(struct ir_func *fn, struct defs *d, int v, long *out);
+/* The value an instruction makes, as a copy of it must carry it: its `w`
+ * and `flt`, except a comparison's, whose `w` and `flt` describe its
+ * OPERANDS -- a compare of two doubles makes a four-byte integer 0 or 1. */
+int ir_result_w(const struct ir_ins *i);
+int ir_result_flt(const struct ir_ins *i);
 void ins_blank(struct ir_ins *i);
 struct ir_ins *ib_push(struct ibuf *b);
 

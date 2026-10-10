@@ -19,6 +19,10 @@ void to_const(struct ir_ins *i, long val)
 
 void to_mov(struct ir_ins *i, int src)
 {
+    /* the move carries the VALUE's width and class, which for a compare
+     * are not its own w and flt (ir_result_w) */
+    i->w = ir_result_w(i);
+    i->flt = ir_result_flt(i);
     i->op = IR_MOV;
     i->a = src;
     i->b = -1;
