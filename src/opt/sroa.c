@@ -298,7 +298,7 @@ int pass_cxlocal(struct ir_func *fn)
         p->line = o.line; p->col = o.col; p->synth = o.synth;
         p = ib_push(&nb);
         p->op = IR_CAS; p->a = o.a; p->b = e; p->c = o.c; p->dst = sv;
-        p->size = o.size; p->sign = o.sign; p->w = o.w;
+        p->size = o.size; p->sign = o.sign; p->w = o.w; p->mo = o.mo;
         p->line = o.line; p->col = o.col; p->synth = o.synth;
         if (o.size < 4) {
             x = fn->nvregs++;

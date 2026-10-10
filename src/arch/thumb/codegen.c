@@ -4060,12 +4060,20 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
  *      dmb
  *
  * which is what GCC and clang emit for a sequentially consistent one on a
- * Cortex-M. The barriers are always full: the IR does not carry the memory
- * order, and the strongest one is right for every weaker request.
+ * Cortex-M. The barriers follow the memory order the IR carries (ir_ins.mo),
+ * as GCC's do: a release or stronger order has the one before, an acquire
+ * or stronger the one after, a relaxed one neither -- the fence-based
+ * mapping irgen's atomic loads and stores use, so the two agree. An RTOS
+ * takes a lock with an acquire exchange and releases it with a release
+ * store, and every lock paid two barriers for one.
  *
  * Five values are live in the loop -- address, operand, old, new and the
- * store's status -- and the backend's scratch set is four, so the status
- * goes in lr: every prologue saves it, and nothing in the loop calls.
+ * store's status. The status takes a low register free across the
+ * instruction when there is one (lo_free_at: `cmp r1, #0` is two bytes,
+ * `cmp.w lr, #0` four, and a leaf then keeps lr out of its prologue),
+ * else lr, which every other prologue saves. The old value lands in the
+ * result's own register when that is low and not an operand's, which
+ * saves the move out of r12 after the loop.
  *
  * The byte and halfword forms zero-extend, so a compare-and-swap compares
  * against its expected value zero-extended to the same width, and a signed
@@ -4074,6 +4082,29 @@ static int fp_vfp_arith(struct t_fn *F, const struct ir_ins *i)
 static void set_cc(struct t_fn *F, int dst, int cond);
 static void cmse_entry_return(struct t_fn *F);
 static void cmse_call(struct t_fn *F, int ncrn);
+
+static int t_is_atomic(const struct ir_ins *i)
+{
+    return i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW ||
+           i->op == IR_CAS || i->op == IR_CMPXCHG;
+}
+
+/* The low register the atomic at instruction n keeps its store status
+ * in: one free across it that holds none of its operands or its result,
+ * else -1 for lr. The leaf test asks the same question. */
+static int t_atomic_status_reg(const struct t_fn *F, int n)
+{
+    const struct ir_ins *i = &F->fn->ins[n];
+    unsigned lo = lo_free_at(F, n);
+    int v[4] = { i->a, i->b, i->c, i->dst };
+    for (int k = 0; k < 4; k++)
+        if (v[k] >= 0 && F->loc && in_reg(F, v[k]) && F->loc[v[k]] < 8)
+            lo &= ~(1u << F->loc[v[k]]);
+    for (int k = 0; k < 8; k++)
+        if (lo >> k & 1)
+            return k;
+    return -1;
+}
 
 static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
 {
@@ -4087,26 +4118,37 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
                    "doubleword exclusive; GCC calls libatomic for these)");
 #define LDX(rt) (sz == 4 ? t_ldrex(t, (rt), addr, 0) \
                          : t_ldrexbh(t, (rt), addr, sz))
-#define STX(rt) (sz == 4 ? t_strex(t, T_LR, (rt), addr, 0) \
-                         : t_strexbh(t, T_LR, (rt), addr, sz))
+#define STX(rt) (sz == 4 ? t_strex(t, st, (rt), addr, 0) \
+                         : t_strexbh(t, st, (rt), addr, sz))
+    int n = (int)(i - F->fn->ins);
+    int before = i->mo != IR_MO_RELAXED && i->mo != IR_MO_ACQUIRE;
+    int after = i->mo != IR_MO_RELAXED && i->mo != IR_MO_RELEASE;
+    int st = n >= 0 && n < F->fn->nins ? t_atomic_status_reg(F, n) : -1;
+    int old = T_ACC;
+    if (st < 0)
+        st = T_LR;
     addr = rdr(F, i->a, T_ADDR);
-    t_barrier(t, T_BAR_DMB);
+    if (before)
+        t_barrier(t, T_BAR_DMB);
     if (i->op == IR_XCHG || i->op == IR_XADD || i->op == IR_ARMW) {
         int val = rdr(F, i->b, T_TMP), nw;
+        if (i->dst >= 0 && in_reg(F, i->dst) && F->loc[i->dst] < 8 &&
+            F->loc[i->dst] != addr && F->loc[i->dst] != val)
+            old = F->loc[i->dst];
         top = t->len;
-        LDX(T_ACC);
+        LDX(old);
         if (i->op == IR_XCHG) {
             nw = val;
         } else {
             nw = T_SCR;
             if (i->op == IR_XADD)
-                t_alu_reg(t, T_OP_ADD, nw, T_ACC, val, 0);
+                t_alu_reg(t, T_OP_ADD, nw, old, val, 0);
             else if (i->imm == '&' || i->imm == 'n')
-                t_alu_reg(t, T_OP_AND, nw, T_ACC, val, 0);
+                t_alu_reg(t, T_OP_AND, nw, old, val, 0);
             else if (i->imm == '|')
-                t_alu_reg(t, T_OP_ORR, nw, T_ACC, val, 0);
+                t_alu_reg(t, T_OP_ORR, nw, old, val, 0);
             else if (i->imm == '^')
-                t_alu_reg(t, T_OP_EOR, nw, T_ACC, val, 0);
+                t_alu_reg(t, T_OP_EOR, nw, old, val, 0);
             else
                 t_refuse(F->fn, i, "an atomic read-modify-write of this "
                                    "operation");
@@ -4114,7 +4156,7 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
                 t_mvn_reg(t, nw, nw, 0);
         }
         STX(nw);
-        t_cmp_imm(t, T_LR, 0);
+        t_cmp_imm(t, st, 0);
         br = t_bcond16(t, T_NE);
         if (!t_patch_bcond16(t, br, top))
             internal_error("thumb: an atomic's retry loop is out of reach");
@@ -4131,12 +4173,16 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
             ldst_must(t, T_TMP, p, 0, sz, 0, 0);    /* zero-extended */
         }
         des = rdr(F, i->c, T_SCR);
+        if (i->op == IR_CAS && i->dst >= 0 && in_reg(F, i->dst) &&
+            F->loc[i->dst] < 8 && F->loc[i->dst] != addr &&
+            F->loc[i->dst] != exp && F->loc[i->dst] != des)
+            old = F->loc[i->dst];
         top = t->len;
-        LDX(T_ACC);
-        t_cmp_reg(t, T_ACC, exp);
+        LDX(old);
+        t_cmp_reg(t, old, exp);
         fail = t_bcond16(t, T_NE);
         STX(des);
-        t_cmp_imm(t, T_LR, 0);
+        t_cmp_imm(t, st, 0);
         br = t_bcond16(t, T_NE);
         done = t_b16(t);
         if (!t_patch_bcond16(t, br, top) ||
@@ -4149,18 +4195,20 @@ static void thumb_atomic(struct t_fn *F, const struct ir_ins *i)
             /* *b = the value seen; the result is whether it matched --
              * set_cc's IT block when it has a low register. */
             int p = rdr(F, i->b, T_SCR);
-            ldst_must(t, T_ACC, p, 0, sz, 0, 1);
-            t_barrier(t, T_BAR_DMB);
-            t_cmp_reg(t, T_ACC, exp);
+            ldst_must(t, old, p, 0, sz, 0, 1);
+            if (after)
+                t_barrier(t, T_BAR_DMB);
+            t_cmp_reg(t, old, exp);
             set_cc(F, i->dst, T_EQ);
             return;
         }
     }
-    t_barrier(t, T_BAR_DMB);
+    if (after)
+        t_barrier(t, T_BAR_DMB);
     if (i->dst >= 0) {
         if (sz < 4 && i->sign)
-            t_ext(t, T_ACC, T_ACC, sz, 1);
-        wr(F, i->dst, T_ACC);
+            t_ext(t, old, old, sz, 1);
+        wr(F, i->dst, old);
     }
 #undef LDX
 #undef STX
@@ -7056,10 +7104,7 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
              !fn->ins[i].asm_ir->cont &&
              (!fn->ins[i].asm_ir->clob ||
               (fn->ins[i].asm_ir->clob >> 14 & 1))) ||
-            t_op_calls_helper(&fn->ins[i]) ||
-            fn->ins[i].op == IR_XCHG || fn->ins[i].op == IR_XADD ||
-            fn->ins[i].op == IR_ARMW || fn->ins[i].op == IR_CAS ||
-            fn->ins[i].op == IR_CMPXCHG)
+            t_op_calls_helper(&fn->ins[i]))
             F.leaf = 0;
     /* The constants with no register that are made where they are read:
      * temps only, and not at -O0 or -Og, where every value has a slot. */
@@ -7092,6 +7137,12 @@ static void gen_func(struct ir_func *fn, struct code *t, struct t_sites *st,
     layout(&F);
     if (F.loc && fn->nins && fn->nvregs && !getenv("EMBCC_T_NOLO"))
         F.lv_busy = lo_busy_map(&F);
+    /* An atomic's store status is a low register free across it when
+     * there is one (thumb_atomic), else lr -- and only lr makes the
+     * function no leaf. Decided here, where the busy map exists. */
+    for (i = 0; i < fn->nins; i++)
+        if (t_is_atomic(&fn->ins[i]) && t_atomic_status_reg(&F, i) < 0)
+            F.leaf = 0;
     /* Not at -O0 or -Og, where a debugger may write a variable's slot
      * between two reads. */
     if (F.lv_busy && !F.keep_vars && !getenv("EMBCC_T_NORC")) {
