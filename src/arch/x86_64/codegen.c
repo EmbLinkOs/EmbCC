@@ -4017,13 +4017,18 @@ static void gen_func(struct ir_func *fn, struct code *text,
                      (sz == 8 && i->w == 8 && i->imm >= -2147483647L - 1 &&
                       i->imm <= 2147483647L)) &&
                     (fbase >= 0 || afolded(st->a) || in_reg(st->a))) {
+                    /* (the store's own folded field offset, memoff, on
+                     * every form: `p[1] = 2` once stored at (%rdi)) */
                     if (fbase >= 0)
-                        x86_store_mem_imm(text, fbase, fdisp, i->imm, sz);
+                        x86_store_mem_imm(text, fbase, fdisp + st->memoff,
+                                          i->imm, sz);
                     else if (afolded(st->a))
-                        x86_store_mem_imm(text, REG_RBP, g_afold.disp[st->a],
+                        x86_store_mem_imm(text, REG_RBP,
+                                          g_afold.disp[st->a] + st->memoff,
                                           i->imm, sz);
                     else
-                        x86_store_mem_imm(text, g_loc[st->a], 0, i->imm, sz);
+                        x86_store_mem_imm(text, g_loc[st->a], st->memoff,
+                                          i->imm, sz);
                     n = m;                      /* consume the store */
                     break;
                 }
