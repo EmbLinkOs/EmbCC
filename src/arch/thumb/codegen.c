@@ -556,11 +556,50 @@ int t_op_calls_helper(const struct ir_ins *i)
  * Empty without an FPU: then a float is bits in a core register. */
 static const int T_FPOOL[16] = { 16, 17, 18, 19, 20, 21, 22, 23,
                                  24, 25, 26, 27, 28, 29, 30, 31 };
+
+/* ...except in a LEAF -- no call, no runtime helper, no asm -- where
+ * nothing can change s4-s15 behind the code's back, so a float can live
+ * there with no vpush/vpop: `a * b + c` is three instructions, not ten.
+ * The incoming arguments are below: the first register after them, and
+ * never below s4, which keeps s0-s3 (d0/d1, the scratch pairs) out too.
+ * The parameters are counted by size, every one, which covers a struct of
+ * floats AAPCS-VFP passes in s registers. Returns the first free S
+ * register, or 16 when the function is no leaf. */
+static int t_fp_leaf_start(const struct ir_func *fn)
+{
+    for (int k = 0; k < fn->nins; k++) {
+        const struct ir_ins *i = &fn->ins[k];
+        if (i->op == IR_CALL || i->op == IR_ASM || t_op_calls_helper(i))
+            return 16;
+    }
+    int words = 0;
+    const struct func *f = fn->src;
+    for (int k = 0; f && k < f->nparams; k++) {
+        int sz = f->param_tys[k] ? ty_size(f->param_tys[k]) : 8;
+        words += sz > 0 ? (sz + 3) / 4 : 2;
+    }
+    if (!f)
+        words = 16;
+    words = (words + 1) & ~1;            /* a double's pair stays aligned */
+    return words < 4 ? 4 : words > 16 ? 16 : words;
+}
+
 static const int *t_fp_pool_for(const struct ir_func *fn, int *n)
 {
-    (void)fn;
-    *n = target_thumb_fpu() ? 16 : 0;
-    return T_FPOOL;
+    static int pool[32];
+    int k = 0;
+    if (!target_thumb_fpu()) {
+        *n = 0;
+        return T_FPOOL;
+    }
+    for (int r = t_fp_leaf_start(fn); r < 16; r++)
+        pool[k++] = r;
+    /* the allocator takes RA_MAXPOOL at most: a leaf's callee-saved tail
+     * is cut there, which still leaves it more registers than before */
+    for (int r = 0; r < 16 && k < RA_MAXPOOL; r++)
+        pool[k++] = T_FPOOL[r];
+    *n = k;
+    return pool;
 }
 static int t_fp_callee_saved(int reg) { return reg >= 16; }
 
@@ -581,9 +620,19 @@ static int t_fp_callee_saved(int reg) { return reg >= 16; }
 static const int T_DPOOL[8] = { 16, 18, 20, 22, 24, 26, 28, 30 };
 static const int *t_dp_pool_for(const struct ir_func *fn, int *n)
 {
-    (void)fn;
-    *n = target_thumb_fpu_dp() ? 8 : 0;
-    return T_DPOOL;
+    /* in a leaf, d2-d7 first, as the singles' s4-s15 (t_fp_leaf_start) */
+    static int pool[16];
+    int k = 0;
+    if (!target_thumb_fpu_dp()) {
+        *n = 0;
+        return T_DPOOL;
+    }
+    for (int r = t_fp_leaf_start(fn); r < 16; r += 2)
+        pool[k++] = r;
+    for (int r = 0; r < 8; r++)
+        pool[k++] = T_DPOOL[r];
+    *n = k;
+    return pool;
 }
 /* A copy of a double local into a temporary is a plain move in the D
  * class: both are the whole eight bytes. */
