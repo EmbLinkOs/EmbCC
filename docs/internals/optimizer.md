@@ -46,7 +46,7 @@ What the files share is declared in `src/opt/opt_int.h`, which only
 | `licm.c` | Loop-invariant code motion, memory promotion in loops |
 | `rotate.c` | Loop rotation |
 | `guardjump.c` | -Os, every target: entering a rotated loop at its test |
-| `tailmerge.c` | -Os, every target: one copy of identical block tails |
+| `tailmerge.c` | -Os, every target: one copy of block tails alike but for values a merge temp carries in |
 | `vectorize.c` | Automatic vectorization |
 | `idiom.c` | Copy and clear loops, recognised as `memcpy` and `memzero` |
 | `ivsr.c` | Induction-variable strength reduction |
