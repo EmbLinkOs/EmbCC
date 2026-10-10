@@ -2467,59 +2467,58 @@ static void shift64_imm(struct rv_fn *F, int op, int sign, long n)
     }
 }
 
-/* A shift by a VARIABLE amount, in B_LO. Branching, in three arms.
+/* A shift of the pair al:ah by a VARIABLE count b (0..63) into dl:dh, in
+ * two arms: n >= 32, where one word moves into the other, and n < 32.
  *
- * The branchless form every RISC-V compiler emits needs the complementary
- * shift `x << (32 - n)` to produce ZERO when n is 0. It does not: RISC-V
- * takes the low five bits of the count, so a shift by 32 is a shift by 0
- * and the two halves mix. ARM's register shifts DO produce zero at 32,
- * which is why the Thumb backend could write this in two arms and this
- * cannot. The third arm is n == 0, and leaving it out is a miscompile
- * that only shows up for a shift whose count happens to be zero. */
-static void shift64_var(struct rv_fn *F, int op, int sign)
+ * The bits that cross from one word into the other in the second arm are
+ * `x << (32 - n)` (or >>), which at n == 0 is a shift by 32 -- and RISC-V
+ * takes the low five bits of a count, so that is a shift by 0 and the two
+ * words mix. This was a third arm, for n == 0, with its jump. `(x << 1)
+ * << (31 - n)` is zero at n == 0 by construction, 31 - n is ~n in the low
+ * five bits, and it is what GCC and clang emit; so is computing in the
+ * operand's registers rather than copying through A and B.
+ *
+ * dl:dh is the operand's own pair or a pair of its own -- pairs never
+ * partly overlap -- and b is in neither; each arm reads a word before it
+ * writes the half that may share its register. A count of 64 or more is
+ * undefined, and is not masked: the Thumb shift gives zero there, so no
+ * target's code can depend on a mask. */
+static void shift64_var_to(struct rv_fn *F, int op, int sign, int al, int ah,
+                           int b, int dl, int dh)
 {
     struct code *t = F->t;
-    int big, zero, done1, done2;
-
-    rv_alu_imm(t, RV_AND, B_LO, B_LO, 63, 0);
-    rv_li(t, SCR2, 32, 32);
-    big = rv_b_placeholder(t, RV_BGEU, B_LO, SCR2);   /* count >= 32 */
-    zero = rv_b_placeholder(t, RV_BEQ, B_LO, RV_ZERO);
-    {
-        /* 0 < count < 32 */
-        rv_alu(t, RV_SUB, B_HI, SCR2, B_LO, 0);       /* 32 - count */
-        if (op == RV_SLL) {
-            rv_alu(t, RV_SLL, A_HI, A_HI, B_LO, 0);
-            rv_alu(t, RV_SRL, SCR, A_LO, B_HI, 0);
-            rv_alu(t, RV_OR, A_HI, A_HI, SCR, 0);
-            rv_alu(t, RV_SLL, A_LO, A_LO, B_LO, 0);
-        } else {
-            rv_alu(t, RV_SRL, A_LO, A_LO, B_LO, 0);
-            rv_alu(t, RV_SLL, SCR, A_HI, B_HI, 0);
-            rv_alu(t, RV_OR, A_LO, A_LO, SCR, 0);
-            rv_alu(t, sign ? RV_SRA : RV_SRL, A_HI, A_HI, B_LO, 0);
-        }
+    int small, done;
+    rv_alu_imm(t, RV_AND, SCR2, b, 32, 0);
+    small = rv_b_placeholder(t, RV_BEQ, SCR2, RV_ZERO);
+    /* n >= 32: shifted by n - 32, which is the count's low five bits */
+    if (op == RV_SLL) {
+        rv_alu(t, RV_SLL, dh, al, b, 0);
+        rv_mv(t, dl, RV_ZERO);
+    } else {
+        rv_alu(t, sign ? RV_SRA : RV_SRL, dl, ah, b, 0);
+        if (sign)
+            rv_shift_imm(t, RV_SRA, dh, ah, 31, 0, 32);
+        else
+            rv_mv(t, dh, RV_ZERO);
     }
-    done1 = rv_j_placeholder(t, RV_ZERO);
-    rv_patch_b(t, big, t->len);
-    {
-        /* count >= 32: the halves move wholesale */
-        rv_alu_imm(t, RV_ADD, B_HI, B_LO, -32, 0);
-        if (op == RV_SLL) {
-            rv_alu(t, RV_SLL, A_HI, A_LO, B_HI, 0);
-            rv_mv(t, A_LO, RV_ZERO);
-        } else if (sign) {
-            rv_alu(t, RV_SRA, A_LO, A_HI, B_HI, 0);
-            rv_shift_imm(t, RV_SRA, A_HI, A_HI, 31, 0, 32);
-        } else {
-            rv_alu(t, RV_SRL, A_LO, A_HI, B_HI, 0);
-            rv_mv(t, A_HI, RV_ZERO);
-        }
+    done = rv_j_placeholder(t, RV_ZERO);
+    rv_patch_b(t, small, t->len);
+    rv_alu_imm(t, RV_XOR, SCR2, b, -1, 0);           /* 31 - n */
+    if (op == RV_SLL) {
+        rv_shift_imm(t, RV_SRL, SCR, al, 1, 0, 32);
+        rv_alu(t, RV_SRL, SCR, SCR, SCR2, 0);        /* the bits that cross */
+        rv_alu(t, RV_SLL, dh, ah, b, 0);
+        rv_alu(t, RV_OR, dh, dh, SCR, 0);
+        rv_alu(t, RV_SLL, dl, al, b, 0);
+    } else {
+        rv_shift_imm(t, RV_SLL, SCR, ah, 1, 0, 32);
+        rv_alu(t, RV_SLL, SCR, SCR, SCR2, 0);
+        /* the LOW word shifts logically whatever the shift is */
+        rv_alu(t, RV_SRL, dl, al, b, 0);
+        rv_alu(t, RV_OR, dl, dl, SCR, 0);
+        rv_alu(t, sign ? RV_SRA : RV_SRL, dh, ah, b, 0);
     }
-    done2 = rv_j_placeholder(t, RV_ZERO);
-    rv_patch_b(t, zero, t->len);          /* count == 0: nothing to do */
-    rv_patch_j(t, done1, t->len);
-    rv_patch_j(t, done2, t->len);
+    rv_patch_j(t, done, t->len);
 }
 
 /* A 64-bit comparison at RV32, into ACC as a 0 or a 1. The high words
@@ -2855,13 +2854,21 @@ static int gen_ins64(struct rv_fn *F, int n)
             wr64(F, i->dst, dl, dh);
             return 1;
         }
-        rd64(F, i->a, A_LO, A_HI);
-        if (i->imm_b) {
-            shift64_imm(F, op, sign, (long)i->imm);
-        } else {
-            rd(F, i->b, B_LO);
-            shift64_var(F, op, sign);
+        if (!i->imm_b) {
+            int al, ah, dl, dh, cb;
+            src64(F, i->a, A_LO, A_HI, &al, &ah);
+            dst64(F, i->dst, &dl, &dh);
+            cb = rdr(F, i->b, B_LO);
+            if (cb == dl || cb == dh) {      /* the count dies here */
+                rv_mv(t, B_LO, cb);
+                cb = B_LO;
+            }
+            shift64_var_to(F, op, sign, al, ah, cb, dl, dh);
+            wr64(F, i->dst, dl, dh);
+            return 1;
         }
+        rd64(F, i->a, A_LO, A_HI);
+        shift64_imm(F, op, sign, (long)i->imm);
         wr64(F, i->dst, A_LO, A_HI);
         return 1;
     }
