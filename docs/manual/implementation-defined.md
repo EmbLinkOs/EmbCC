@@ -227,12 +227,18 @@ to a single-byte execution character (C17 6.4.4.4).*
 A character constant is one byte, read as plain `char`: `'\377'` is −1
 where plain `char` is signed and 255 where it is unsigned.
 
-A constant of more than one character is refused, and so is a single
-character that takes more than one byte in UTF-8:
+A constant of more than one byte has type `int` and GCC's value: the
+bytes in order, the last one lowest, so `'ab'` is `0x6162` and `'RIFF'`
+is `0x52494646`. A character that takes more than one byte in UTF-8
+counts as its bytes: `'é'` is `0xC3A9`. More bytes than an `int` holds
+(four, or two on AVR) keep the last ones. The value is read as a signed
+`int`: `'\xff\xff\xff\xff'` is −1. `#if` computes the same value. Each
+such constant is reported, as GCC reports it, by `-Wmultichar` (on by
+default), or, past the width of an `int`, by a warning no option controls:
 
 ```text
-embcc: f.c:1: error: a character constant holds one character (multi-character constants are not supported)
-embcc: f.c:1: error: character U+00E9 does not fit in one byte; write it as a wide constant (L'...')
+embcc: f.c:1:9: warning: multi-character character constant [-Wmultichar]
+embcc: f.c:2:9: warning: character constant too long for its type
 ```
 
 An octal or hexadecimal escape whose value does not fit in a byte keeps
@@ -252,7 +258,7 @@ a multibyte character or escape sequence not represented in the extended
 execution character set (C17 6.4.4.4).*
 
 A wide character constant with more than one character (`L'ab'`) is
-refused with the multi-character error above. An `L'...'` or `U'...'`
+refused: `a wide character constant holds one character`. An `L'...'` or `U'...'`
 constant has the code point of its character as its value. A `u'...'`
 constant whose character needs a UTF-16 surrogate pair is refused:
 
@@ -556,8 +562,8 @@ signedness of plain `char` on the target. For example, after
 Every integer type: plain, signed and unsigned `char`, `short`, `long`,
 `long long`, `__int128` where it exists, and enumerated types. A
 bit-field of enumerated type has the signedness of the enumerated type
-(see below); an enumeration whose values all fit `int` is `int`, so its
-bit-fields are signed. The width may not exceed the width of the
+(see below); an enumeration with no negative value is `unsigned int`, so
+its bit-fields are unsigned, and one with a negative value is `int`. The width may not exceed the width of the
 declared type, which on AVR is 16 for `int`:
 
 ```text
@@ -632,17 +638,22 @@ every target:
 
 | Type | Chosen when |
 |---|---|
-| `int` | every value fits `int` |
 | `unsigned int` | no value is negative, and every value fits `unsigned int` |
+| `int` | every value fits `int` |
 | `unsigned long` | no value is negative, and every value fits `unsigned long` |
 | `unsigned long long` | no value is negative |
 | `long` | every value fits `long` |
 | `long long` | otherwise |
 
-The enumeration constants have the enumerated type, as in C23. An
-enumeration whose values all fit `int` is `int` even when no value is
-negative, where GCC and Clang choose `unsigned int`; so
-`(enum e)-1 < 0` is true under EmbCC. A wider enumeration has the type
+This is GCC's rule ("Normally, the type is unsigned int if there are no
+negative values in the enumeration, otherwise int") and Clang's: with
+`enum e { A, B }`, `(enum e)-1 > 0` is true. An enumeration constant
+whose value fits `int` has type `int`, whatever the enumeration's type
+(C17 6.4.4.3, C23 6.7.2.2), so `A - 1 < 0` is true; a constant that does
+not fit has the enumerated type. With `-fshort-enums` or
+`__attribute__((packed))` the type is the smallest integer type that
+holds every value ([Invoking](invoking.md#-fshort-enums--fno-short-enums)).
+A wider enumeration has the type
 GCC and Clang give it: one with no negative value that needs more than
 32 bits is `unsigned long` on x86-64, Apple arm64, AArch64 and RV64, and
 `unsigned long long` on Cortex-M and RV32. On AVR, one with no negative

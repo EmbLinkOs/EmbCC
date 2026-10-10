@@ -1033,6 +1033,24 @@ static int g_a_regalloc;           /* -O1 and up, and -O0 (defined below) */
  * call and no folded offset -- as thumb's g_t_o0. */
 static int g_a_o0;
 
+/* A parameter nothing reads, writes or takes the address of, in a
+ * function whose frame is laid out by need (not -O0, not a variadic one
+ * or one with alloca, whose parameters are reached through the frame) */
+static int a_param_unused(const struct a_fn *F, int v)
+{
+    const struct ir_func *fn = F->fn;
+    if (g_a_o0 || F->keep_vars || !F->usecnt || F->usecnt[v] ||
+        fn->has_alloca || (fn->src && fn->src->is_varargs))
+        return 0;
+    for (int i = 0; i < fn->nins; i++) {
+        const struct ir_ins *in = &fn->ins[i];
+        if (((in->op == IR_ADDR || in->op == IR_LDVAR) && in->a == v) ||
+            (in->op == IR_STVAR && in->dst == v))
+            return 0;
+    }
+    return 1;
+}
+
 static void layout(struct a_fn *F)
 {
     struct ir_func *fn = F->fn;
@@ -1064,6 +1082,11 @@ static void layout(struct a_fn *F)
          * slot, and a function with none needs no frame at all. At -O0 and -Og
          * every local keeps one (ra_locals_referenced). */
         if (!lref[v] && v >= fn->nparams)
+            continue;
+        /* nor a parameter nothing uses at all, whose value the prologue
+         * no longer stores (see there) -- ra_locals_referenced counts
+         * every parameter, so the slot's names are looked for here */
+        if (v < fn->nparams && a_param_unused(F, v))
             continue;
         if (F->wide[v] && size < 8)
             size = 8;
@@ -4815,8 +4838,9 @@ static void gen_ins(struct a_fn *F, int n)
                 vld(F, o->reg, o->temp, 0, 2);
             }
         }
-        for (int k = 0; k < ia->codelen; k++)
-            code_byte(t, ia->code[k]);
+        /* the bytes, padded at each alignment for where they land */
+        code_put_asm(t, ia->code, ia->codelen, ia->drange, ia->ndrange,
+                     ia->arange, ia->narange, CODE_FILL_ZERO);
         for (int k = 0; k < ia->nout; k++) {
             struct ir_asm_op *o = &ia->out[k];
             /* An "m" output was written BY the template, through the address
@@ -5492,8 +5516,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
     for (i = 0; i <= fn->nlabels; i++)
         F.label_off[i] = -1;
 
-    f->code_off = t->len;
     f->code_align = 2;                  /* a word of flash */
+    /* An asm that aligns its own bytes (`.p2align 2`): the function starts
+     * on that, so that in a section of its own the buffer's offsets are
+     * the section's. The padding, nops, is never run. */
+    for (i = 0; i < fn->nins; i++) {
+        const struct ir_asm *ia = fn->ins[i].op == IR_ASM ? fn->ins[i].asm_ir
+                                                          : NULL;
+        int m = ia ? code_asm_align_max(ia->arange, ia->narange) : 0;
+        if (m > f->code_align) {
+            code_fill(t, CODE_FILL_ZERO, (m - t->len % m) % m);
+            f->code_align = m;
+        }
+    }
+    f->code_off = t->len;
     if (target_debug_info()) {
         int nv = fn->nvars ? fn->nvars : 1;
         free(fn->var_off);             /* this function generated again */
@@ -5613,15 +5649,20 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
                 place_arg(a->size, &c2, &s2, &pl);
                 if (!pl.nreg)
                     continue;
+                /* A parameter nothing reads -- not its value, not its
+                 * address (ra_each_use counts both) -- needs neither a
+                 * home nor its slot: a callback's unused context pointer
+                 * cost a frame and a store. At -O0 it is kept, for a
+                 * debugger to show. A home, besides, may be a live one's:
+                 * moving it there would clobber that, and two moves into
+                 * one register are no parallel move. */
+                if (in_pair(&F, a->vreg) ? F.usecnt && !F.usecnt[a->vreg]
+                                         : a_param_unused(&F, a->vreg))
+                    continue;
                 if (!in_pair(&F, a->vreg)) {
                     vst(&F, a->vreg, 0, pl.reg, pl.nreg);
                     continue;
                 }
-                /* A parameter nothing reads is live nowhere, so its home
-                 * may be a live one's: moving it there would clobber that,
-                 * and two moves into one register are no parallel move. */
-                if (F.usecnt && !F.usecnt[a->vreg])
-                    continue;
                 for (int b = 0; b < pl.nreg && b < F.hw[a->vreg]; b++) {
                     md[nm] = F.loc[a->vreg] + b;
                     ms[nm] = pl.reg + b;
@@ -5640,6 +5681,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a_sites *st,
             place_arg(a->size, &cursor, &stk, &pl);
             if (pl.nreg) {
                 continue;                           /* placed above */
+            } else if (!in_pair(&F, a->vreg) && a_param_unused(&F, a->vreg)) {
+                continue;                           /* unused: no slot */
             } else if (pl.nstk <= VW) {
                 ld_slot(&F, RA, F.frame + F.in_at + pl.stk, pl.nstk);
                 vst(&F, a->vreg, 0, RA, pl.nstk);

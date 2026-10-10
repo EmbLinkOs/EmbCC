@@ -383,8 +383,9 @@ build is `-mcmse` ([Targets](targets.md#trustzone-m-cmse)). `-mthumb` is
 accepted and has no effect; `-marm` is
 refused (`-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`). Plain `char` is unsigned, `long double` is 8 bytes, and an
-`enum` is `int`-sized unless its values need a wider type
-(`-fshort-enums` is refused). The rest of the
+`enum` is `int`-sized unless its values need a wider type, or the
+smallest type that holds them under `-fshort-enums` (arm-none-eabi-gcc's
+default) or `__attribute__((packed))`. The rest of the
 data model is in [Targets](targets.md).
 
 ### Vector table and reset handler
@@ -1239,8 +1240,10 @@ function the program overrides to reach its UART) for `mipsel-none-elf`.
 ### The target and its data model
 
 `--target=avr` generates code for the ATmega328P (`__AVR_ATmega328P__`,
-AVR architecture 5). There is no `-mmcu=` option
-(`embcc: error: unknown argument '-mmcu=atmega328p'`); the part is fixed.
+AVR architecture 5). `-mmcu=atmega328p` names it, and `-mmcu=atmega328`,
+`atmega168p` and `atmega168` the other parts of its family with the same
+core ([Targets](targets.md#avr) lists their memories); any other part is
+refused by name.
 
 | Type | Size |
 |---|---|
@@ -1275,23 +1278,58 @@ how to keep track. `--rom-limit` counts the stored copy of `.data` and
 
 ### Startup and the interrupt vector table
 
-The AVR startup is assembly, because three of its jobs have no C
-spelling: set `SPH`/`SPL` (the stack pointer is zero at reset), clear
-`r1` (every AVR object treats `r1` as zero), and copy the data image with
-`lpm`, which reads program space. EmbCC assembles AVR `.S` files itself.
-`tests/harness/avr/boot.S` is a complete startup:
+With `-mmcu=`, the driver links what avr-gcc's does for the part:
 
-- `__vectors` at address 0 is the 26-entry vector table, one `jmp` per
-  entry. Entry 0 jumps to `reset`; entry *n* jumps to `__vector_n`, each
-  declared `.weak`, so a vector the program does not define resolves to
-  address 0 and restarts the program.
-- `reset` sets the stack pointer to `0x08FF`, clears `r1` and `SREG`,
-  copies `__data_load` to `__data_start`..`__data_end`, zeroes
-  `__bss_start`..`__bss_end`, and calls `main`.
-- It defines `__do_copy_data` and `__do_clear_bss` at those loops.
-  avr-gcc and Clang emit references to both names from any unit with
-  initialised or zeroed data; defining them is what lets objects from
-  those compilers link into the same image.
+```sh
+embcc --target=avr -mmcu=atmega328p -Os main.c -o fw.elf
+```
+
+- **The startup**, `crt<part>.o` (`lib/avr/crt.S`), first, unless
+  `-nostartfiles` or `-nostdlib`. It has avr-libc's and libgcc's names
+  and sections, so a program written for avr-gcc, and its own `.S` files,
+  find what they expect:
+  - `.vectors`: `__vectors` at address 0, the part's 26-entry table, one
+    `jmp` each. Entry 0 jumps to `__init`; entry *n* to `__vector_n`,
+    which is a weak alias of `__bad_interrupt`, so an `ISR()` replaces it
+    and any other vector goes to `__bad_interrupt`. That jumps to
+    `__vector_default`: the program's `ISR(BADISR_vect)`, or else address
+    0, a restart.
+  - `.init0` `__init`; `.init2` clears `r1` and `SREG` and sets the stack
+    pointer to `__stack` (weak, `RAMEND` unless the link defines it);
+    `.init4` `__do_copy_data` (`.data` and `.rodata` from their copy in
+    flash, `__data_load_start` to `__data_start`..`__data_end`) and
+    `__do_clear_bss` (`__bss_start`..`__bss_end`); `.init6`
+    `__do_global_ctors`, each function in `.init_array`
+    (`__attribute__((constructor))`) when the script brackets it with
+    `__init_array_start`/`__init_array_end`; `.init9` calls `main` and
+    then `exit`.
+  - `.fini9` `_exit`, with `exit` a weak name for it, as avr-libc's;
+    `.fini0` disables interrupts and stops in a loop.
+  - A program adds a step to the sequence with code in `.init1`,
+    `.init3`, `.init5`, `.init7`, `.init8` or `.fini8`..`.fini1`, without a
+    `ret`: the sections run into each other. It has to be a `.S` file:
+    EmbCC places a naked C function's body in `.text`, so avr-libc's
+    naked `.init3` function is refused (`naked function ... in section
+    '.init3' is not supported yet`).
+- **The linker script**, when the link names none: `<part>.ld`
+  (`lib/avr/avr5.ld` with the part's memories), avr-ld's layout: flash
+  from 0 with the vectors, `PROGMEM` data, `.init0`..`.init9`, the code
+  and `.fini9`..`.fini0`; the data space from `0x800000` in the linker's
+  view, with `.data`, `.rodata` and `.init_array` stored after the code
+  and copied, then `.bss` and `.noinit`; `.eeprom` from `0x810000`.
+- **`-Tdata 0x800100`**, SRAM's start, unless the link gives `-Tdata`:
+  avr-gcc's device specs pass it beside any script, and the default
+  avr5 script and the scripts derived from it rely on it (their data
+  region starts at `0x800060`, under the ATmega328P's extended I/O).
+
+A script of the program's own works as with avr-gcc
+(`-T arduino_uno.ld`); `-Wl,-Ttext=`, `-Wl,-Tdata=` and
+`-Wl,--rom-limit=` apply over it. `tests/golden/avr-crt.sh` links one
+program by the part's script, by an avr5-style one, and by that with
+the flags, and runs all three on QEMU's ATmega328P.
+
+Without `-mmcu=`, nothing is added: the program brings its startup, as
+`tests/harness/avr/boot.S` is, and its memory map:
 
 ```sh
 embcc --target=avr -c tests/harness/avr/boot.S -o boot.o
@@ -1325,6 +1363,53 @@ can be interrupted. Interrupts are enabled globally with
 "memory")`. `__builtin_avr_sei`, `__builtin_avr_cli` and the other
 `__builtin_avr_*` functions are not implemented, although their
 `__BUILTIN_AVR_*` macros are predefined.
+
+### avr-libc-compatible headers
+
+EmbCC has its own headers with avr-libc's interface, so code written for
+avr-gcc and avr-libc compiles unchanged. They are in `include/avr` and on
+the include path for `--target=avr` alone (installed under
+`freestanding/avr`); another target does not find `<avr/io.h>`.
+
+| Header | What it has |
+|---|---|
+| `<avr/io.h>` | The part's registers, bits, vectors and memories, by the datasheet's names: every register and bit of the ATmega328P datasheet's register summary (`PORTB`, `UCSR0B`, `TCNT1`, `WDTCSR`...), `PB5` and the other pin names, the vector names (`TIMER1_COMPA_vect` is `__vector_11`) with `*_vect_num`, `FLASHEND`, `RAMSTART`, `RAMEND`, `E2END`, `SPM_PAGESIZE`, `SIGNATURE_0`..`2`. The part is the one `-mmcu=` names. |
+| `<avr/sfr_defs.h>` | `_SFR_IO8`, `_SFR_MEM8`, `_SFR_MEM16`, `_SFR_IO_ADDR`, `_SFR_MEM_ADDR`, `_BV`, `bit_is_set`, `bit_is_clear`, `loop_until_bit_is_set`, `loop_until_bit_is_clear`, `_VECTOR(N)` |
+| `<avr/common.h>` | `SP`, `SPL`, `SPH`, `SREG` and `SREG_C`..`SREG_I` |
+| `<avr/interrupt.h>` | `ISR(vector, ...)` with `ISR_BLOCK`, `ISR_NOBLOCK`, `ISR_NAKED`, `ISR_ALIASOF(v)`; `ISR_ALIAS`, `EMPTY_INTERRUPT`, `SIGNAL`, `BADISR_vect`; `sei()`, `cli()`, `reti()` |
+| `<avr/pgmspace.h>` | `PROGMEM`, `PGM_P`, `PGM_VOID_P`, `PSTR`, `pgm_read_byte`/`word`/`dword`/`qword`/`float`/`ptr` and their `_near` forms, `__LPM`; the `_P` string functions (`memcpy_P`, `memcmp_P`, `memchr_P`, `strlen_P`, `strnlen_P`, `strcmp_P`, `strncmp_P`, `strcasecmp_P`, `strncasecmp_P`, `strcpy_P`, `strncpy_P`, `strcat_P`, `strncat_P`, `strchr_P`, `strrchr_P`, `strstr_P`) |
+| `<avr/wdt.h>` | `wdt_enable(WDTO_*)`, `wdt_disable()`, `wdt_reset()`, `WDTO_15MS`..`WDTO_8S` |
+| `<avr/sleep.h>` | `set_sleep_mode`, `sleep_enable`, `sleep_disable`, `sleep_cpu`, `sleep_mode`, `SLEEP_MODE_*`, and on the picoPower parts `sleep_bod_disable` |
+| `<avr/eeprom.h>` | `EEMEM`, `eeprom_read_*`, `eeprom_write_*`, `eeprom_update_*` (`byte`, `word`, `dword`, `float`, `block`), `eeprom_is_ready`, `eeprom_busy_wait` |
+| `<avr/cpufunc.h>` | `_NOP()`, `_MemoryBarrier()` |
+| `<util/delay.h>`, `<util/delay_basic.h>` | `_delay_ms`, `_delay_us` from `F_CPU`; `_delay_loop_1`, `_delay_loop_2` |
+
+The text is EmbCC's own; the names and the addresses are the part's.
+`tests/golden/avr-io.sh` checks every register address and bit number
+against a table taken from the datasheet, for each of the four parts.
+
+Where they differ from avr-libc's:
+
+- `_SFR_MEM_ADDR(PORTB)` and `_SFR_IO_ADDR(PORTB)` are constants where
+  the code needs one -- an `asm` `"I"` or `"n"` operand, a static
+  initializer -- but not in an integer constant expression: a `case`
+  label or a `_Static_assert` refuses them.
+- The timed sequences (`wdt_enable`, `wdt_disable`, `sleep_bod_disable`)
+  are single `asm` statements, so they hold at every optimisation level.
+- `_delay_ms` and `_delay_us` count loops of four cycles
+  (`_delay_loop_2`) and wait at least the time asked. With a constant
+  argument the count is worked out at compile time from `-O1` up; at
+  `-O0` it is computed at run time in software floating point, which
+  makes the delay longer. avr-libc's use `__builtin_avr_delay_cycles`,
+  which EmbCC does not have.
+- `<avr/io.h>` in a `.S` file gives each register as its data-space
+  address (`sts UDR0, r24`, `out _SFR_IO_ADDR(PORTB), r24`), as avr-libc's
+  does; EmbCC defines `__ASSEMBLER__` for a `.S` file as GCC does.
+- Not there: the `_far` reads (no part here has more than 64 KiB of
+  flash), `<util/atomic.h>` (its `ATOMIC_BLOCK` needs the `cleanup`
+  attribute, which EmbCC refuses), `<avr/boot.h>`, `<avr/power.h>`,
+  `<util/setbaud.h>`, `<util/crc16.h>`, `<util/twi.h>`, `<avr/fuse.h>`,
+  `<avr/lock.h>`.
 
 ### Data in program memory
 
@@ -1364,9 +1449,20 @@ The rules are GCC's, and each is refused by name:
 
 `__flash` may stand wherever `const` can, before or after the type, and
 after a `*` for a pointer that is itself in flash
-(`const __flash char *const __flash names[]`). `__memx` and avr-libc's
-`PROGMEM` attribute are not supported. `__attribute__((progmem))` is
-ignored with a `-Wattributes` warning, and the data goes to SRAM.
+(`const __flash char *const __flash names[]`). `__memx` is not
+supported.
+
+`__attribute__((progmem))`, avr-libc's `PROGMEM`, also puts an object in
+`.progmem.data`, but leaves its type alone: the object is an ordinary
+`const` one to the compiler, and the program reads it with
+`pgm_read_byte()` and the other [`<avr/pgmspace.h>`](#avr-libc-compatible-headers)
+functions, which use `lpm`. A plain `*p` of such an object reads SRAM at
+the same number, as with avr-gcc. As avr-gcc does, `progmem` wins over a
+`section()` on the same declaration, and the object must be `const` and
+static (`'x' is in program memory (progmem, section .progmem.data) and
+must be const ...`, `progmem on 'x', which is on the stack ...`). On
+other targets `progmem` is an unknown attribute, ignored with a
+`-Wattributes` warning, as GCC does there.
 
 ### The calling convention
 
@@ -1385,13 +1481,46 @@ each other:
   `r28`-`r29` are preserved by the callee, and `r18`-`r27`, `r30`-`r31`
   are not.
 
+### The AVR library
+
+`make rt-embedded` builds `build/libc/avr/libc.a` from `lib/avr`, and the
+driver links it for `--target=avr` as it links `libc.a` elsewhere. It is
+not `lib/libc`: that library's formatter prints every double exactly, in
+17 KB of AVR code, and its streams keep 8 KB of buffers. What it has,
+each function an archive member of its own, so an image carries only
+what it calls:
+
+- `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`,
+  `strnlen`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strcmp`,
+  `strncmp`, `strchr`, `strrchr`, `strstr`, `strspn`, `strcspn`,
+  `strpbrk`;
+- the `_P` functions `<avr/pgmspace.h>` declares;
+- `sprintf`, `snprintf`, `vsprintf`, `vsnprintf` and avr-libc's
+  `sprintf_P`, `snprintf_P`, `vsprintf_P`, `vsnprintf_P`, whose format is
+  in flash (`snprintf_P(buf, n, PSTR("%u"), x)`; `<stdio.h>` declares
+  them for AVR). The conversions are avr-libc's default ones: flags,
+  width, precision, `hh h l ll z t j`, `d i u o x X c s p n %` and `%S`, a
+  string in flash. A floating-point conversion prints `?`, as avr-libc's
+  does without `-lprintf_flt`; EmbCC has no `printf_flt`;
+- the `<avr/eeprom.h>` functions.
+
+Not there: streams (`printf`, `puts`, `FILE`, `fdevopen`), `malloc`,
+`<stdlib.h>`'s conversions and `<ctype.h>`'s functions. Their
+declarations come from the C library's headers, and a program that calls
+one gets an undefined symbol at the link.
+
+`-Wformat` compares a `printf` argument with the conversion by the
+target's own sizes: on AVR `%d` reads 2 bytes and `%ld` 4.
+
 ### Runtime helpers
 
 EmbCC does not use the part's `mul` instruction, and the part has no
 divide, so every integer multiply, divide and remainder is a call: `__mulsi3`, `__divsi3`,
 `__udivsi3`, `__modsi3`, `__umodsi3` for 8-, 16- and 32-bit operands, and
 `__muldi3`, `__divdi3`, `__udivdi3`, `__moddi3`, `__umoddi3` for 64-bit.
-A quotient and a remainder of the same operands are two calls. Every
+A quotient and a remainder of the same operands are two calls. The 64-bit
+`__udivdi3` and `__umoddi3` are assembly, about 2500 cycles a division
+(the signed ones call them). Every
 floating-point operation is a call into the binary32 routines (`__addsf3`,
 `__mulsf3`, `__divsf3`, `__ltsf2`, `__fixsfsi`, ...). EmbCC does not call
 avr-gcc's `__divmodsi4` family, and its `librt.a` does not define it.

@@ -256,7 +256,7 @@ supported. This section lists what is not.
 
 | Construct | Diagnostic |
 |---|---|
-| `_Float16`, `__fp16` | ``_Float16/__fp16 is not supported: EmbCC has no 16-bit floating-point type, and widening it to `float` would give 24 bits of mantissa where the program asked for 11`` |
+| An object, `sizeof`, cast or call of `_Float16`, `__fp16` (a declaration may name it) | `'h' has incomplete type _Float16`, `sizeof of incomplete _Float16`, `cannot cast to _Float16`, `calling 'g' with incomplete return type _Float16` |
 | `_Float128`, `__float128` on x86-64 | ``_Float128 is not supported on x86-64: `long double` here is x87's 80-bit extended format, not IEEE binary128, so it is not the same type`` |
 | `_Float128` on Cortex-M, AVR and Apple arm64 | `_Float128 is not supported on this target: it has no 128-bit floating-point type` |
 | `_BitInt(N)` | `expected a type before '_BitInt'` |
@@ -277,7 +277,6 @@ RISC-V).
 | `asm goto` | `` `asm goto` is not supported: its template branches to a label, which needs a patchable placeholder in each backend's inline assembler and CFG edges the optimizer honours. Use a normal asm that sets a value and branch on that `` |
 | Nested function definitions | A syntax error: `expected ';' before '{'` |
 | K&R (old-style) function definitions | A syntax error: `expected a parameter type before 'a'` |
-| Multi-character constants (`'ab'`) | `a character constant holds one character (multi-character constants are not supported)` |
 | `$` in identifiers | `character '$' is not supported yet` |
 | C23 `u8` character constants (`u8'a'`) | A syntax error |
 | C23 storage-class specifiers in a compound literal (`(static int[]){1, 2}`) | `expected an expression, got 'static'` |
@@ -328,7 +327,7 @@ implement, so they are errors:
 | `target` | `__attribute__((target)) is not supported: EmbCC selects its instruction set per compilation; a function asking for another would be compiled for the wrong one` |
 | `weakref` | `__attribute__((weakref)) is not supported: the symbol would be emitted as an ordinary reference, so a missing target would fail to link instead of being null` |
 | `ifunc` | `__attribute__((ifunc)) is not supported: the resolver would never run and calls would go to it rather than to the implementation it picks` |
-| `packed` or `aligned` on an enum | `a packed or aligned enum is not supported (EmbCC's enums are always int-sized)` |
+| `aligned` on an enum | `an aligned enum is not supported (an enum here is int, or the type its values need)` |
 | `alias` on a variable | `alias attribute on variable 'b' is not supported (functions take it)` |
 | `section` on an automatic variable | `section attribute on 'x', which is on the stack: only a static local can be placed in a section` (GCC refuses it too) |
 
@@ -481,7 +480,7 @@ and `x86_64-apple-darwin` follows System V; see
 
 | Construct | Diagnostic |
 |---|---|
-| `-g` | `-g is not supported for a Darwin target yet: its DWARF goes in a __DWARF segment this does not write, and emitting the ELF layout under a Mach-O name would be worse than refusing` |
+| `-g` | Warning, and the object is compiled without debug information: `-g: no debug information for aarch64-apple-darwin yet; d.c is compiled without it` |
 | `__thread` | `__thread is not supported for a Darwin target yet: Mach-O addresses a thread-local through a __thread_vars descriptor, which this writer does not emit` |
 | `constructor`, `destructor` | `__attribute__((constructor)) is not supported for a Darwin target yet: it needs a __DATA,__mod_init_func section this Mach-O writer does not emit` |
 | File-scope `asm` with labels or symbol references | `a file-scope asm block with labels or symbol references is not supported for a Darwin target yet: its bytes would be emitted but its symbols and relocations dropped` |
@@ -502,8 +501,10 @@ headers, such as `printf`, link and run.
 - Cortex-M objects carry `.ARM.attributes`, and `embld` refuses to link
   objects whose float ABI (`Tag_ABI_VFP_args`) or enumeration size
   (`Tag_ABI_enum_size`) disagree. An enumeration is `int`-sized unless
-  one of its values does not fit in `int`, as with Clang;
-  `-fshort-enums` is refused.
+  one of its values does not fit in `int`, as with Clang, or the
+  smallest type that holds its values under `-fshort-enums` or
+  `__attribute__((packed))`. EmbCC's libc and librt say nothing about
+  enum size (`-fenum-size-neutral`) and link with both.
 - On AVR, structures are passed and returned by avr-gcc's documented
   rules. Clang's AVR target passes structure arguments differently.
 - MIPS32 objects carry `.MIPS.abiflags` (soft float), and `embld` refuses
@@ -525,7 +526,7 @@ list, with the options that are accepted and have no effect, is in
 
 | Option | Diagnostic |
 |---|---|
-| `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-flto`, `-fshort-enums`, `-fprofile-*`, `--coverage`, `-pg`, `-fstack-clash-protection`, `-fcf-protection` | `embcc: error: -fPIC is not supported; EmbCC would emit ordinary code and the flag's promise would not hold` (naming the option) |
+| `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-flto`, `-fprofile-*`, `--coverage`, `-pg`, `-fstack-clash-protection`, `-fcf-protection` | `embcc: error: -fPIC is not supported; EmbCC would emit ordinary code and the flag's promise would not hold` (naming the option) |
 | `-shared`, `-static-pie` | `embcc: error: -shared needs position-independent code, which EmbCC does not emit` |
 | `-fsanitize=` with a check other than `undefined`, `signed-integer-overflow`, `integer-divide-by-zero`, `shift`, `shift-exponent` | `-fsanitize=address is not supported: EmbCC's sanitizer inserts checks that TRAP, and this one needs a runtime library to report through. The ones it has are undefined, signed-integer-overflow, integer-divide-by-zero and shift` |
 | `-fstack-protector`, `-fstack-protector-strong`, ... | `embcc: '-fstack-protector' is not supported (EmbCC emits no stack protection); -fno-stack-protector is` |
@@ -538,7 +539,7 @@ list, with the options that are accepted and have no effect, is in
 
 These are unknown arguments (`embcc: error: unknown argument '-march=native'`,
 followed by the usage summary): `-march=`, `-mtune=`, `-m32`, `-m64`,
-`-mabi=` on x86-64, AArch64 and AVR, `-mmcu=`, `-mavx2` and the other x86
+`-mabi=` on x86-64, AArch64 and AVR, `-mavx2` and the other x86
 feature flags; `-imacros`, `-iquote`, `-idirafter`, `-undef`; `-ansi`;
 `-ffp-contract=`, `-funroll-loops`, `-ftrapv`, `-fvisibility=`,
 `-fopenmp`; `-v`. The flags GCC builds for Cortex-M pass (`-ffast-math`,
@@ -569,11 +570,11 @@ The full rules are in
 embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
 ```
 
-Any `-W` name that is not one of EmbCC's eighteen warnings
+Any `-W` name that is not one of EmbCC's warnings
 (`--help-warnings` lists them) is accepted with:
 
 ```text
-embcc: warning: -Wconversion is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)
+embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)
 ```
 
 `-std=` selects no dialect. `-std=c89` and `-std=c99` are accepted with

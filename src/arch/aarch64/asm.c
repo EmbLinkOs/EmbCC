@@ -585,42 +585,44 @@ int a64asm_assemble(const char *text, struct code *out, char *err, int errlen)
     if (errlen > 0)
         err[0] = '\0';
 
-    size_t len = strlen(text);
-    char *buf = malloc(len + 1);
-    if (!buf) {
-        snprintf(err, (size_t)errlen, "out of memory");
-        return -1;
-    }
-    memcpy(buf, text, len + 1);
-
-    /* Strip `//` comments to end of line before splitting statements. */
-    for (char *p = buf; *p; p++)
-        if (p[0] == '/' && p[1] == '/')
-            while (*p && *p != '\n')
-                *p++ = ' ';
-
-    char *st = buf;
-    for (char *p = buf;; p++) {
-        if (*p == ';' || *p == '\n' || *p == '\0') {
-            int end = *p == '\0';
-            *p = '\0';
-            while (isspace((unsigned char)*st))
-                st++;
-            char *e = st + strlen(st);
-            while (e > st && isspace((unsigned char)e[-1]))
-                *--e = '\0';
-            if (*st) {
-                a.stmt = st;
-                assemble_stmt(&a, st);
-                if (a.failed)
-                    break;
-            }
-            if (end)
-                break;
-            st = p + 1;
+    /* One statement at a time, up to a `;` or a newline, less a `//`
+     * comment -- neither of which counts inside a .ascii string. */
+    for (const char *p = text; *p; ) {
+        int n = asm_stmt_len(p, ";");
+        int len = asm_cut_comment(p, n, "", 1);
+        char *st = malloc((size_t)len + 1);
+        if (!st) {
+            snprintf(err, (size_t)errlen, "out of memory");
+            return -1;
         }
+        memcpy(st, p, (size_t)len);
+        st[len] = '\0';
+        p += n;
+        if (*p)
+            p++;
+        char *b = st, *e = st + len;
+        while (isspace((unsigned char)*b))
+            b++;
+        while (e > b && isspace((unsigned char)e[-1]))
+            *--e = '\0';
+        if (*b) {
+            /* .ascii/.asciz/.string, the data directives and the
+             * alignments, whose padding the backend decides where the
+             * bytes land; `.inst` is an instruction, below */
+            static const struct asm_dirs dirs = { asm_data_a64, 0, 0 };
+            int r = code_asm_directive(b, (int)(e - b), out, &dirs, err,
+                                       errlen);
+            if (r < 0)
+                a.failed = 1;
+            else if (!r) {
+                a.stmt = b;
+                assemble_stmt(&a, b);
+            }
+        }
+        free(st);
+        if (a.failed)
+            break;
     }
-    free(buf);
     return a.failed ? -1 : 0;
 }
 

@@ -234,8 +234,10 @@ static void opt_func(struct ir_func *fn)
     int sroa_twice = g_sroa && g_mem2reg && cfg_ok && !has_igoto;
     if (g_mem2reg && cfg_ok && !has_igoto)
         pass_cxlocal(fn);         /* a private `expected`: by value */
-    if (g_sroa)
+    if (g_sroa) {
+        pass_aggcopy(fn);         /* a small struct copied whole: by field */
         pass_sroa(fn, !sroa_twice);
+    }
     if (g_mem2reg && cfg_ok && !has_igoto) {
         drop_unreachable(fn);     /* or mem2reg refuses the function */
         pass_mem2reg(fn);         /* global mem2reg (subsumes store-forwarding) */
@@ -305,6 +307,8 @@ static void opt_func(struct ir_func *fn)
             if (g_cfgclean) {
                 changed |= pass_thread(fn);
                 changed |= pass_cfgclean(fn);
+                if (cfg_ok)
+                    changed |= pass_brdom(fn);
             }
             if (g_dse && cfg_ok)
                 changed |= pass_dse(fn);
@@ -460,8 +464,7 @@ static void opt_func(struct ir_func *fn)
      * test instead of through a copy of it (pass_guardjump). */
     /* ...and before that, one copy of each repeated block end
      * (pass_tailmerge) */
-    if (edge_ok && g_opt_size && target_get() == TARGET_THUMB &&
-        !getenv("EMBCC_NO_TAILMERGE")) {
+    if (edge_ok && g_opt_size && !getenv("EMBCC_NO_TAILMERGE")) {
         int guard = 0, any = 0;
         while (guard++ < 256 && pass_tailmerge(fn))
             any = 1;
@@ -471,8 +474,7 @@ static void opt_func(struct ir_func *fn)
         if (any)
             tm_sweep(fn);
     }
-    if (g_licm && edge_ok && g_opt_size && target_get() == TARGET_THUMB &&
-        !getenv("EMBCC_NO_GUARDJUMP")) {
+    if (g_licm && edge_ok && g_opt_size && !getenv("EMBCC_NO_GUARDJUMP")) {
         int guard = 0;
         while (guard++ < 256 && pass_guardjump(fn))
             ;

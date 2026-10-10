@@ -82,8 +82,9 @@ int pass_splitloops(struct ir_func *fn)
         const struct ir_ins *i = &fn->ins[n];
         int t = i->op == IR_STVAR ? -1 : def_target(i);
         if (t < 0 || t >= nv || vw[t]) continue;
-        vw[t] = i->op == IR_CALL ? (i->w ? i->w : 8) : i->w;
-        vflt[t] = (char)i->flt;
+        /* (a compare's w and flt are its operands': ir_result_w) */
+        vw[t] = i->op == IR_CALL ? (i->w ? i->w : 8) : ir_result_w(i);
+        vflt[t] = (char)ir_result_flt(i);
     }
 
     /* Block liveness. */

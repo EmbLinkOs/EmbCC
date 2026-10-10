@@ -697,6 +697,63 @@ static struct warn_opt g_warns[] = {
     /* `if (f)` where f is a function: always true, because the name
      * decays to its address. Almost always a missing call. */
     { "address",              0,  1,    0 },
+
+    /* ---- what a coding standard turns on ----
+     *
+     * None of these is in -Wall or -Wextra in gcc, apart from
+     * -Wimplicit-fallthrough (-Wextra); a project that wants them names
+     * each, as MISRA-minded ones do. Each is a question about the text. */
+    /* #if on a name no macro defines: 0, silently -- usually a
+     * misspelt CONFIG_ option (cpp.c, only in an evaluated operand) */
+    { "undef",                0,  0,    0 },
+    /* a variable length array: a stack size the code does not bound */
+    { "vla",                  0,  0,    0 },
+    /* `int f();` -- in C before C23 that is not a prototype, and the
+     * arguments go unchecked under other compilers */
+    { "strict-prototypes",    0,  0,    0 },
+    /* a global function defined with no declaration before it: nothing
+     * outside this file can have been checked against it */
+    { "missing-prototypes",   0,  0,    0 },
+    { "missing-declarations", 0,  0,    0 },
+    /* the same declaration twice in one scope */
+    { "redundant-decls",      0,  0,    0 },
+    /* `extern` inside a function body */
+    { "nested-externs",       0,  0,    0 },
+    /* a switch with no default: a value no case names does nothing */
+    { "switch-default",       0,  0,    0 },
+    /* a cast that drops const or volatile from what a pointer points at */
+    { "cast-qual",            0,  0,    0 },
+    /* a float quietly widened to double: on a single-precision FPU
+     * (Cortex-M4F) that is a call to a soft-float helper */
+    { "double-promotion",     0,  0,    0 },
+    /* -Wformat=2's: a format that is not a string literal cannot be
+     * checked, and one with no arguments after it is a format-string
+     * hole if it comes from outside */
+    { "format-nonliteral",    0,  0,    0 },
+    { "format-security",      0,  0,    0 },
+    /* a case that runs into the next with no break, and no
+     * __attribute__((fallthrough)) saying it is meant */
+    { "implicit-fallthrough", 0,  0,    1 },
+    /* `const static int t[]`: a storage class after the type, which C
+     * calls obsolescent and GCC reports in -Wextra */
+    { "old-style-declaration", 0, 0,    1 },
+
+    /* ---- conversions that may change a value (sema, cvt_check) ----
+     *
+     * GCC's -Wconversion, and the two it turns on: an integer narrowed
+     * (or an integer made a float that cannot hold it), a value that
+     * may change sign, and a float narrowed or made an integer. Then
+     * the strict form, which also suspects arithmetic whose operands
+     * are fine; and -Woverflow, on by default: a constant the target
+     * type cannot hold at all. */
+    { "conversion",           0,  0,    0 },
+    { "sign-conversion",      0,  0,    0 },
+    { "float-conversion",     0,  0,    0 },
+    { "arith-conversion",     0,  0,    0 },
+    { "overflow",             1,  0,    0 },
+    /* 'ab': an int of implementation-defined value (GCC's and clang's
+     * is computed here), on by default as in GCC */
+    { "multichar",            1,  0,    0 },
 };
 static const int g_nwarns = (int)(sizeof g_warns / sizeof g_warns[0]);
 
@@ -706,6 +763,38 @@ static struct warn_opt *warn_find(const char *name)
         if (!strcmp(g_warns[i].name, name))
             return &g_warns[i];
     return NULL;
+}
+
+/* ---- fall-through comments -----------------------------------------------
+ *
+ * The preprocessor strips comments, and -Wimplicit-fallthrough has to know
+ * where a comment saying `fall through` was: each such one's file and line,
+ * which the switch check asks about the lines from a case's last statement
+ * to the next label. */
+struct ftc { const char *file; int line; };
+static struct ftc *g_ftc;
+static int g_nftc, g_capftc;
+
+void diag_fallthrough_comment(const char *file, int line)
+{
+    if (!file)
+        return;
+    if (g_nftc == g_capftc) {
+        g_capftc = g_capftc ? g_capftc * 2 : 64;
+        g_ftc = xrealloc(g_ftc, (size_t)g_capftc * sizeof *g_ftc);
+    }
+    g_ftc[g_nftc].file = file;
+    g_ftc[g_nftc].line = line;
+    g_nftc++;
+}
+
+int diag_has_fallthrough_comment(const char *file, int lo, int hi)
+{
+    for (int i = 0; i < g_nftc; i++)
+        if (g_ftc[i].line >= lo && g_ftc[i].line <= hi &&
+            (!file || g_ftc[i].file == file || !strcmp(g_ftc[i].file, file)))
+            return 1;
+    return 0;
 }
 
 /* ---- #pragma GCC diagnostic ---------------------------------------------
@@ -831,12 +920,46 @@ int diag_warning_enabled(const char *name)
  * reports a miss: every -W... used to be accepted in silence, which
  * made a typo invisible and made "-Wall -Wextra -Werror passes" mean
  * far less than it looks. */
+/* A warning another turns on unless it is named itself, whichever comes
+ * first on the command line: -Wconversion -Wno-sign-conversion and
+ * -Wno-sign-conversion -Wconversion both leave it off, as GCC has it. */
+static const struct { const char *child, *parent; } g_implied[] = {
+    { "sign-conversion",  "conversion" },
+    { "float-conversion", "conversion" },
+};
+static unsigned char g_named[sizeof g_warns / sizeof g_warns[0]];
+static unsigned char g_by_parent[sizeof g_warns / sizeof g_warns[0]];
+
+static void warn_imply(const char *parent, int on)
+{
+    for (size_t i = 0; i < sizeof g_implied / sizeof g_implied[0]; i++) {
+        if (strcmp(g_implied[i].parent, parent))
+            continue;
+        struct warn_opt *c = warn_find(g_implied[i].child);
+        if (!c || g_named[c - g_warns])
+            continue;
+        c->on = on;
+        g_by_parent[c - g_warns] = (unsigned char)on;
+    }
+}
+
+/* On only because its parent is: -Wsign-conversion under -Wconversion,
+ * which GCC's C++ does not take */
+int diag_warning_implied(const char *name)
+{
+    struct warn_opt *w = warn_find(name);
+    return w && g_by_parent[w - g_warns];
+}
+
 int diag_enable_warning(const char *name, int on)
 {
     struct warn_opt *w = warn_find(name);
     if (!w)
         return 0;
     w->on = on;
+    g_named[w - g_warns] = 1;
+    g_by_parent[w - g_warns] = 0;
+    warn_imply(name, on);
     return 1;
 }
 
@@ -854,8 +977,10 @@ int diag_set_werror_for(const char *name, int on)
     if (!w)
         return 0;
     g_werror_for[w - g_warns] = (signed char)(on ? 1 : -1);
-    if (on)
+    if (on) {
         w->on = 1;
+        warn_imply(name, 1);
+    }
     return 1;
 }
 
@@ -1045,15 +1170,15 @@ void diag_warn_at(const char *file, int line, int col, const char *fmt, ...)
 
 /* A warning the option `name` controls: silent unless it is on, and
  * printed with "[-Wname]" so the reader knows which it is. */
-void diag_warn_opt(const char *file, int line, int col, const char *name,
-                   const char *fmt, ...)
+int diag_warn_opt(const char *file, int line, int col, const char *name,
+                  const char *fmt, ...)
 {
     install_flush();
     struct warn_opt *wo = warn_find(name);
     int st = wo ? pragma_state(file, line, (int)(wo - g_warns)) : -1;
     if (g_no_warnings || in_system_header(file) || st == 2 ||
         (st < 0 && !(wo && wo->on)))
-        return;
+        return 0;
     va_list ap;
     va_start(ap, fmt);
     char *msg = vfmt(fmt, ap);
@@ -1069,6 +1194,7 @@ void diag_warn_opt(const char *file, int line, int col, const char *name,
     d->option = opt;
     if (err)
         check_max_errors();
+    return 1;
 }
 
 EMBCC_NORETURN void fatal_unwind(void)

@@ -99,6 +99,7 @@ void cx_skip_balanced(void)
             break;
         case TOK_EOF:
             cx_error(open, "unbalanced %s", tok_describe(&open->t));
+            break;
         default:
             break;
         }

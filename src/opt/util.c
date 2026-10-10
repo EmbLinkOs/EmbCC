@@ -432,3 +432,13 @@ struct ir_ins *ib_push(struct ibuf *b)
     ins_blank(i);
     return i;
 }
+
+int ir_result_w(const struct ir_ins *i)
+{
+    return i->op == IR_CMP ? 4 : i->w;
+}
+
+int ir_result_flt(const struct ir_ins *i)
+{
+    return i->op == IR_CMP ? 0 : i->flt;
+}

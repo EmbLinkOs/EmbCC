@@ -493,6 +493,11 @@ because `-Wall` comes later; write `-Wall -Wno-unused-variable`. (GCC
 gives a specific option precedence over a group regardless of order;
 EmbCC does not.)
 
+The exception is `-Wconversion`, which turns on `-Wsign-conversion` and
+`-Wfloat-conversion` unless either is named on the command line, before
+or after it, as in GCC: `-Wno-sign-conversion -Wconversion` and
+`-Wconversion -Wno-sign-conversion` both leave `-Wsign-conversion` off.
+
 #### `-Wall`
 
 Enable `-Waddress`, `-Wformat`, `-Wmaybe-uninitialized`, `-Wparentheses`,
@@ -501,8 +506,8 @@ Enable `-Waddress`, `-Wformat`, `-Wmaybe-uninitialized`, `-Wparentheses`,
 
 #### `-Wextra`, `-W`
 
-Enable `-Wlogical-op`, `-Wsign-compare`, `-Wtype-limits` and
-`-Wunused-parameter`. `-Wextra` does not imply `-Wall`. `-W` is an older
+Enable `-Wimplicit-fallthrough`, `-Wlogical-op`, `-Wold-style-declaration`,
+`-Wsign-compare`, `-Wtype-limits` and `-Wunused-parameter`. `-Wextra` does not imply `-Wall`. `-W` is an older
 spelling of `-Wextra`.
 
 #### `-WNAME`
@@ -611,24 +616,44 @@ nothing on.
 | Option | Diagnoses | Enabled by |
 |---|---|---|
 | `-Waddress` | A function name tested in an `if` condition, or compared with a null pointer constant | `-Wall` |
+| `-Warith-conversion` | As `-Wconversion`, also for arithmetic whose operands each fit the target type | none |
 | `-Wattributes` | An attribute EmbCC does not know, or one it accepts but does not implement | default |
+| `-Wcast-qual` | A cast that removes `const` or `volatile` from the type a pointer points to | none |
+| `-Wconversion` | An implicit conversion that may change an integer's value, or an integer converted to a floating type that cannot hold all its values | none |
 | `-Wdeprecated-declarations` | A use of a function or variable declared `deprecated` | default |
 | `-Wdiscarded-qualifiers` | A pointer conversion that drops the pointed-to type's `const` | default |
 | `-Wdiv-by-zero` | Integer division or remainder by a constant zero | default |
+| `-Wdouble-promotion` | A `float` implicitly converted to `double`: an operand, a `double` parameter, a variadic argument | none |
+| `-Wfloat-conversion` | An implicit conversion from a floating type to an integer or to a narrower floating type that may change the value | `-Wconversion` |
 | `-Wformat` | A `printf`- or `scanf`-style format that disagrees with its arguments | `-Wall` |
+| `-Wformat-nonliteral` | A format that is not a string literal, with arguments after it (not for a `va_list` function such as `vprintf`) | `-Wformat=2` |
+| `-Wformat-security` | A format that is not a string literal, with no arguments after it | `-Wformat=2` |
+| `-Wimplicit-fallthrough` | A `case` whose statements can run into the next label with no `__attribute__((fallthrough));`, `[[fallthrough]];` or fall-through comment | `-Wextra` |
 | `-Wlogical-op` | `a && a` or `a \|\| a` with identical operands | `-Wextra` |
 | `-Wmaybe-uninitialized` | A local variable read on a path where only some paths wrote it | `-Wall` |
+| `-Wmissing-declarations` | A function with external linkage defined with no declaration before it (when `-Wmissing-prototypes` is off) | none |
+| `-Wmissing-prototypes` | A function with external linkage defined with no prototype before it | none |
+| `-Wmultichar` | A character constant of more than one character, `'ab'` | default |
+| `-Wnested-externs` | An `extern` declaration inside a function body | none |
+| `-Wold-style-declaration` | A storage class or `inline` after the type specifiers: `const static int t[]`, `int static n` | `-Wextra` |
+| `-Woverflow` | An integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;` | default |
 | `-Wparentheses` | A comparison as an unparenthesized operand of `&`, `\|` or `^` | `-Wall` |
 | `-Wprio-ctor-dtor` | A `constructor` or `destructor` priority from 0 to 100, which the implementation reserves | default |
+| `-Wredundant-decls` | A second declaration of a function or `extern` object in the same scope | none |
 | `-Wshadow` | A local declaration that hides a local variable, a parameter or a file-scope variable | none |
 | `-Wshift-count-overflow` | A constant shift count that is negative or not less than the operand width | `-Wall` |
 | `-Wsign-compare` | A comparison that converts a possibly negative signed operand to unsigned | `-Wextra` |
+| `-Wsign-conversion` | An implicit conversion between signed and unsigned integer types that may change the sign of the value | `-Wconversion` |
+| `-Wstrict-prototypes` | A function declarator with `()` instead of `(void)` | none |
+| `-Wswitch-default` | A `switch` with no `default` label | none |
 | `-Wtype-limits` | An unsigned value compared `< 0` or `>= 0` | `-Wextra` |
+| `-Wundef` | An identifier in `#if` that no macro defines (evaluated as 0), outside an operand `&&`, `\|\|` or `?:` skips | none |
 | `-Wuninitialized` | A local variable read before any path wrote it | `-Wall` |
 | `-Wunused-function` | A `static` function that is defined and never used | `-Wall` |
 | `-Wunused-parameter` | A function parameter the body never uses | `-Wextra` |
 | `-Wunused-result` | A discarded result of a function declared `warn_unused_result` or `[[nodiscard]]` | default |
 | `-Wunused-variable` | A local variable that is never used | `-Wall` |
+| `-Wvla` | A variable length array, or a `typedef` of one | none |
 | `-Wwindows-abi` | A compile for a Windows target, whose ABI EmbCC does not yet fully implement | default |
 
 "default" means the warning is on unless `-Wno-NAME` or `-w` is given.
@@ -679,6 +704,84 @@ int odd(void) __attribute__((frobnicate));
 ```text
 embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [-Wattributes]
   int odd(void) __attribute__((frobnicate));
+```
+
+#### `-Wconversion`
+
+Warn about an implicit conversion that may change a value. The checked
+conversions are assignment, initialization, argument passing, `return`,
+the conversion of the operands of an arithmetic or bitwise operator to
+their common type, and the conversion of the second and third operands
+of `?:`. The rules are GCC's, so a program that compiles without these
+warnings under GCC compiles without them under EmbCC:
+
+- An integer converted to a narrower integer type, a bit-field included,
+  or to a floating type that cannot represent every value of its type
+  (`int` to `float`, `long long` to `double`).
+- An arithmetic result is reported only when one of its operands would
+  be reported converted on its own. `unsigned char x = b + 1;` with `b` an
+  `unsigned char` is not reported; `x = i + 1;` with `i` an `int` is.
+  `-Warith-conversion` reports both.
+- A conversion that only widens is looked through: `(int)b` has the
+  values of `b`.
+- `x & C`, `u % 2^k` and an expression built from constants and `?:`
+  are not reported when every value they can have fits the target type.
+- A comparison, `!`, `&&` and `||` give 0 or 1 and are not reported.
+- A conversion to or from an enumerated type, or to `_Bool`, is not
+  reported.
+- A constant is reported only when its value changes, and the message
+  gives both values.
+
+`-Wconversion` also enables `-Wsign-conversion` and `-Wfloat-conversion`
+unless either is named on the command line.
+
+```c
+unsigned char f(int i, unsigned char b) { b += 1; return i & 0xff; }
+```
+
+```text
+embcc: conv.c:1:58: warning: conversion from 'int' to 'unsigned char' may change value [-Wconversion]
+  unsigned char f(int i, unsigned char b) { b += 1; return i & 0xff; }
+                                                           ^
+```
+
+`0xff` does not fit a `signed char`, so the mask does not decide the
+result's sign; `i & 0x7f` is not reported.
+
+EmbCC checks only C. With `-x c++` these options report nothing.
+
+#### `-Wsign-conversion`
+
+Warn about an implicit conversion between a signed and an unsigned
+integer type that may change the sign of the value: a signed value that
+may be negative converted to an unsigned type, or an unsigned value
+converted to a signed type of the same width. This includes the
+operands that an arithmetic operator converts: in `i + u`, `i` is
+converted to `unsigned int`. A negative constant is reported with its
+converted value (`unsigned conversion from 'int' to 'unsigned int' changes
+value from '-1' to '4294967295'`). Comparisons are `-Wsign-compare`'s.
+Enabled by `-Wconversion`.
+
+#### `-Wfloat-conversion`
+
+Warn about an implicit conversion from a floating type to an integer
+type, or to a narrower floating type, that may change the value:
+`int k = d;`, `float f = d;`, and `float f = 0.1;`. A floating constant
+that converts exactly (`int k = 3.0;`, `float f = 1.5;`) is not
+reported, and neither is an integer constant a floating type holds
+exactly (`float f = 16777216;`; `16777217` is reported). Enabled by
+`-Wconversion`.
+
+#### `-Woverflow`
+
+Warn when an integer constant is converted to an integer type that
+cannot hold it either as a signed or as an unsigned value of that width:
+`unsigned char c = 300;` or a 3-bit field assigned 9. `unsigned char c =
+-1;` is not reported here, since `-1` fits as a signed value; it is a
+`-Wsign-conversion`. On by default, as in GCC.
+
+```text
+embcc: o.c:1:19: warning: unsigned conversion from 'int' to 'unsigned char' changes value from '300' to '44' [-Woverflow]
 ```
 
 #### `-Wdeprecated-declarations`
@@ -747,7 +850,9 @@ nothing is promoted through the pointer: `%f` writes a `float` and `%lf`
 a `double`. It reports:
 
 - an integer conversion whose argument has a different size
-  (`%d reads 4 bytes, but this argument is long, which is 8`);
+  (`%d reads 4 bytes, but this argument is long, which is 8`), by the
+  target's sizes: `%ld` reads 8 bytes on x86-64 and AArch64, 4 on the
+  32-bit targets and AVR, where `%d` reads 2;
 - an integer conversion given a pointer or a non-integer, a floating
   conversion given a non-floating argument, `%Lf`-style mismatches
   between `double` and `long double`;
@@ -1093,7 +1198,8 @@ EmbCC lowers C++ to. For a C++ compile:
 - The other warnings report what survives lowering in a recognizable
   form. `-Wformat`, `-Wuninitialized`, `-Wmaybe-uninitialized`,
   `-Wdiv-by-zero`, `-Wshift-count-overflow` and `-Wtype-limits` report on
-  C++ source. The C++ front end handles attributes itself, so
+  C++ source. `-Wconversion`, `-Wsign-conversion`, `-Wfloat-conversion`,
+  `-Warith-conversion` and `-Woverflow` do not report for C++. The C++ front end handles attributes itself, so
   `-Wattributes`, `-Wdeprecated-declarations` and `-Wunused-result` do not
   report for C++ declarations; `-Wparentheses`, `-Waddress` and
   `-Wlogical-op` do not report either.
@@ -1129,7 +1235,7 @@ rules above, with these consequences:
 
 | Option | What EmbCC does |
 |---|---|
-| `-WNAME` for a name not in the [summary](#summary-of-warnings) (`-Wconversion`, `-Wcast-align`, `-Wpedantic`, `-Wunused`, `-Weverything`, `-Wfatal-errors`, ...) | Accepted; prints `embcc: warning: -WNAME is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)`; no effect. |
+| `-WNAME` for a name not in the [summary](#summary-of-warnings) (`-Wcast-align`, `-Wnull-dereference`, `-Wpedantic`, `-Wunused`, `-Weverything`, `-Wfatal-errors`, ...) | Accepted; prints `embcc: warning: -WNAME is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)`; no effect. |
 | `-Wno-NAME` for a name not in the summary (`-Wno-unused`, `-Wno-system-headers`, ...) | Accepted silently; no effect. `-Wno-unused` does **not** turn off the `-Wunused-*` warnings. |
 | `-Werror=NAME`, `-Wno-error=NAME` for a name not in the summary | Accepted; prints `embcc: warning: -Werror=NAME names no warning EmbCC has (--help-warnings lists them)`; no effect. |
 | `-Wp,ARGS` | Not passed to the preprocessor. Treated as an unknown warning name: the `is not a warning EmbCC has` message is printed and the arguments are ignored. |

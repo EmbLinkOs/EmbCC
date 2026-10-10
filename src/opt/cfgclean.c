@@ -527,3 +527,97 @@ int pass_cfgclean(struct ir_func *fn)
     free(dead); free(reached); free(at); free(fwd);
     return changed;
 }
+
+/* ---- a branch a dominating branch has already decided ------------------
+ *
+ * `if (!f || !(f->flags & W)) { if (f) f->flags |= ERR; return EOF; }`:
+ * the inner test of f is on a path where the outer one found it null or
+ * found it not, and either way it has an answer. The block-local version
+ * above (last_cond) catches the two in one block; across blocks it takes
+ * dominators. A branch on value v in block B is decided when some
+ * dominator D of B ends in a branch on the same v and one of D's two
+ * successors S both dominates B and is entered from D alone: every path
+ * to B then takes the edge D -> S, so at B's branch v is what D's branch
+ * left it. (S dominating B is not enough by itself: S may be the join
+ * the other arm reaches too -- the `if (f)` inside `if (!f || ...)`.)
+ *
+ * That holds for a single-definition v even inside a loop: the one
+ * definition dominates D (D reads it), and a path from D back round to B
+ * that executed it again would pass D again -- every path to B passes D
+ * -- where the branch tests the new value. A merge temporary (a `?:`,
+ * an `&&`) has several definitions and is left alone. */
+int pass_brdom(struct ir_func *fn)
+{
+    if (fn->nins == 0)
+        return 0;
+    struct defs d;
+    compute_defs(fn, &d);
+    int nbb, *l2b;
+    struct bb *bb = build_cfg(fn, &nbb, &l2b);
+    int *order = xmalloc((size_t)(nbb ? nbb : 1) * sizeof *order), norder;
+    compute_rpo(bb, nbb, order, &norder);
+    if (norder != nbb) {              /* unreachable blocks: SCCP's first */
+        free(order); free(l2b); free_cfg(bb, nbb); free_defs(&d);
+        return 0;
+    }
+    compute_idom(bb, order, norder);
+    char *dead = xcalloc((size_t)fn->nins, 1);
+    int changed = 0;
+    for (int b = 0; b < nbb; b++) {
+        int e = bb[b].end - 1;
+        if (e < bb[b].start)
+            continue;
+        struct ir_ins *i = &fn->ins[e];
+        if ((i->op != IR_BRZ && i->op != IR_BRNZ) || i->a < 0 ||
+            i->a >= fn->nvregs || d.cnt[i->a] != 1)
+            continue;
+        int v = i->a;
+        for (int D = bb[b].idom; D >= 0 && D != b; D = bb[D].idom) {
+            int ed = bb[D].end - 1;
+            const struct ir_ins *j = ed >= bb[D].start ? &fn->ins[ed] : NULL;
+            if (j && (j->op == IR_BRZ || j->op == IR_BRNZ) && j->a == v &&
+                j->label >= 0 && l2b[j->label] >= 0) {
+                int T = l2b[j->label], F = D + 1 < nbb ? D + 1 : -1;
+                int dt = bb[T].npred == 1 && bb_dominates(bb, T, b);
+                int df = F >= 0 && bb[F].npred == 1 && bb_dominates(bb, F, b);
+                int known = -1;           /* v at B: 1 nonzero, 0 zero */
+                if (T != F && dt && !df)
+                    known = j->op == IR_BRZ ? 0 : 1;
+                else if (T != F && df && !dt)
+                    known = j->op == IR_BRZ ? 1 : 0;
+                if (known >= 0) {
+                    int fires = i->op == IR_BRZ ? known == 0 : known != 0;
+                    if (fires) { i->op = IR_JMP; i->a = -1; }   /* always */
+                    else       dead[e] = 1;                     /* never */
+                    changed = 1;
+                    break;
+                }
+            }
+            if (D == 0)
+                break;
+        }
+    }
+    if (changed) {
+        int *newpos = fn->var_scope_lo
+            ? xmalloc((size_t)(fn->nins + 1) * sizeof *newpos) : NULL;
+        int j = 0;
+        for (int n = 0; n < fn->nins; n++) {
+            if (newpos) newpos[n] = j;
+            if (dead[n]) continue;
+            if (j != n) fn->ins[j] = fn->ins[n];
+            j++;
+        }
+        if (newpos) {
+            newpos[fn->nins] = j;
+            for (int v = 0; v < fn->nvars; v++) {
+                int lo = fn->var_scope_lo[v], hi = fn->var_scope_hi[v];
+                if (lo >= 0 && lo <= fn->nins) fn->var_scope_lo[v] = newpos[lo];
+                if (hi >= 0 && hi <= fn->nins) fn->var_scope_hi[v] = newpos[hi];
+            }
+            free(newpos);
+        }
+        fn->nins = j;
+    }
+    free(dead); free(order); free(l2b); free_cfg(bb, nbb); free_defs(&d);
+    return changed;
+}

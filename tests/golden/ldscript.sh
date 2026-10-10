@@ -197,3 +197,40 @@ EOF
 "$RE" -S "$out/sec.o" | grep -qE '\] rw_tab +PROGBITS .* WA +0' ||
     { "$RE" -S "$out/sec.o"; fail "a named section with a writable object should be writable"; }
 echo "a const-only named section is read-only, as gcc makes it"
+
+# ---- `end` and `_end`, and -TFILE in one word ----------------------------
+# A C library's sbrk starts the heap at the end of the image: newlib's reads
+# `end`, EmbCC's own `_end`. A script names the one its libc wanted, often
+# only that one -- EmbLinkRTOS's MPS2 script defines `end` -- and EmbCC's
+# printf then failed to link with "undefined symbol '_end'". Each now stands
+# in for the other; a script naming neither gets the end of its last
+# writable section; one naming both keeps both. The script is given as
+# `-TFILE`, one word, as gcc takes it and CMake writes it.
+printf 'extern char _end[], end[];\nchar buf[100];\nint x = 5;\nlong get(void) { return (long)_end + (long)end + buf[0] + x; }\n' \
+    > "$out/end.c"
+"$EMBCC" --target=thumbv7em-none-eabi -c "$out/end.c" -o "$out/end.o" || fail "end.c"
+for v in "end = .;" "_end = .;" "" "end = .; _end = 0x20001000;"; do
+    cat > "$out/end.ld" << EOF2
+ENTRY(get)
+MEMORY { FLASH (rx) : ORIGIN = 0, LENGTH = 64K
+         RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 16K }
+SECTIONS {
+  .text : { *(.text*) *(.rodata*) } > FLASH
+  .data : { *(.data*) } > RAM AT > FLASH
+  .bss : { *(.bss*) *(COMMON) } > RAM
+  $v
+}
+EOF2
+    "$EMBCC" --target=thumbv7em-none-eabi -nostdlib "-T$out/end.ld" "$out/end.o" \
+        -o "$out/end.elf" > "$out/end.txt" 2>&1 || { cat "$out/end.txt"; fail "linking with '$v'"; }
+    e1=$(sym "$out/end.elf" end); e2=$(sym "$out/end.elf" _end)
+    bss=$("$RE" -S "$out/end.elf" | sed 's/^ *\[ *[0-9]*\]//' | awk '$1 == ".bss" { print $3, $5 }')
+    bend=$(printf '%08x' $(( 0x${bss% *} + 0x${bss#* } )))
+    case $v in
+    *0x20001000*) [ "$e1" = "$bend" ] && [ "$e2" = 20001000 ] ||
+                      fail "both named: end=$e1 _end=$e2, want $bend and 20001000" ;;
+    *) [ "$e1" = "$bend" ] && [ "$e2" = "$bend" ] ||
+           fail "'$v': end=$e1 _end=$e2, want both $bend (the end of .bss)" ;;
+    esac
+done
+echo "end and _end: each stands in for the other, neither means the end of .bss, both are kept; -TFILE is one word"

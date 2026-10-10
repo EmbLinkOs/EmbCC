@@ -168,9 +168,14 @@ static char *avr_subst(const char *file, int line, const char *tmpl,
          * is its lowest byte, %B0 the next, and so on. They are the normal
          * way a template handles a 16-bit value on an 8-bit machine, so
          * they are here rather than refused. */
-        int half = -1, as_ptr = 0;
+        int half = -1, as_ptr = 0, bare = 0;
         if (*p >= 'A' && *p <= 'D' && (p[1] == '[' || isdigit((unsigned char)p[1]))) {
             half = *p - 'A';
+            p++;
+        } else if (*p == 'c' && (p[1] == '[' || isdigit((unsigned char)p[1]))) {
+            /* %c0: the constant alone, as gcc prints it -- how every
+             * immediate is written here anyway */
+            bare = 1;
             p++;
         } else if (*p == 'a' && (p[1] == '[' || isdigit((unsigned char)p[1]))) {
             /* %a names the operand as a POINTER: X, Y or Z rather than the
@@ -207,6 +212,10 @@ static char *avr_subst(const char *file, int line, const char *tmpl,
                                    "bytes of a wider operand)",
                        *p ? *p : ' ');
         }
+        if (bare && !isimm[k])
+            diag_fatal(file, line, "%%c%d names a register operand; %%c "
+                       "prints a constant, and wants an \"i\" or \"n\" "
+                       "operand", k);
         if (isimm[k]) {
             long v = imms[k];
             if (half > 0)
@@ -371,7 +380,8 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
                            names, nops);
     struct code c = { 0 };
     char err[512];
-    if (avrasm_assemble(text, &c, err, sizeof err) != 0)
+    if (avrasm_assemble(text, &c, err, sizeof err) != 0 ||
+        code_asm_settle(&c, 2, CODE_FILL_ZERO, err, sizeof err) < 0)
         diag_fatal(file, s->line, "%s (assembling \"%s\")", err, text);
     free(text);
 
@@ -380,6 +390,10 @@ void irg_asm_avr(struct ir_func *fn, struct stmt *s)
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->drange = c.drange;
+    ia->ndrange = c.ndrange;
+    ia->arange = c.arange;
+    ia->narange = c.narange;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
     for (int i = 0; i < a->nin; i++) {

@@ -522,7 +522,7 @@ static int pre_one(struct ir_func *fn)
             struct ir_ins *m = ib_push(&nb);                               \
             memset(m, 0, sizeof *m);                                       \
             m->op = IR_MOV; m->dst = t; m->a = psrc[pb]; m->b = -1;        \
-            m->w = proto.w; m->line = line; m->col = col;                  \
+            m->w = ir_result_w(&proto); m->line = line; m->col = col;      \
             m->synth = line ? 0 : 1;                                       \
         } else {                                                           \
             struct ir_ins e = proto;                                       \
@@ -562,6 +562,10 @@ static int pre_one(struct ir_func *fn)
         struct ir_ins *out;
         if (n == cand) {
             out = ib_push(&nb); *out = fn->ins[n]; to_mov(out, t);
+            /* a copy of the value: a compare's operands' width and class
+             * are not its result's (ir_result_w) */
+            out->w = ir_result_w(&fn->ins[n]);
+            out->flt = ir_result_flt(&fn->ins[n]);
         } else {
             out = ib_push(&nb); *out = fn->ins[n];
         }

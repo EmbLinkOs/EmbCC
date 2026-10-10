@@ -207,6 +207,11 @@ void defs_lists(struct ir_func *fn, struct defs *d);
 int const_b(struct ir_func *fn, struct defs *d, struct ir_ins *i,
             long *out);
 int get_const(struct ir_func *fn, struct defs *d, int v, long *out);
+/* The value an instruction makes, as a copy of it must carry it: its `w`
+ * and `flt`, except a comparison's, whose `w` and `flt` describe its
+ * OPERANDS -- a compare of two doubles makes a four-byte integer 0 or 1. */
+int ir_result_w(const struct ir_ins *i);
+int ir_result_flt(const struct ir_ins *i);
 void ins_blank(struct ir_ins *i);
 struct ir_ins *ib_push(struct ibuf *b);
 
@@ -298,6 +303,7 @@ int pass_ifconv(struct ir_func *fn);
 void remap_scopes(struct ir_func *fn, const int *newpos, int oldn);
 int pass_thread(struct ir_func *fn);
 int pass_cfgclean(struct ir_func *fn);
+int pass_brdom(struct ir_func *fn);    /* a branch a dominating one decided */
 
 /* tailrec.c */
 int pass_tailrec(struct ir_func *fn);
@@ -374,6 +380,7 @@ void inline_unit(struct ir_unit *iu);
 
 /* sroa.c */
 int pass_cxlocal(struct ir_func *fn);
+int pass_aggcopy(struct ir_func *fn);
 int pass_sroa(struct ir_func *fn, int report_refusals);
 
 /* verify.c */

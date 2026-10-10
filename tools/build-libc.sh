@@ -45,7 +45,7 @@ for f in "$here"/lib/libc/src/*/*.c "$here"/lib/libc/src/math/fdlibm/*.c \
          "$here"/lib/libc/os/baremetal/backend.c; do
     o=$(echo "${f#$here/}" | tr / _ | sed 's/\.c$/.o/')
     # shellcheck disable=SC2086
-    "$EMBCC" --target="$triple" $flags -Os -I"$here/lib/libc/include" \
+    "$EMBCC" --target="$triple" $flags -fenum-size-neutral -Os -I"$here/lib/libc/include" \
         -I"$here/lib/libc/src/math" -c "$f" -o "$out/c/$o" || {
         echo "build-libc: ${f#$here/} does not compile for $triple" >&2
         exit 1; }

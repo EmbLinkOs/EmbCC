@@ -163,6 +163,33 @@ struct expr_ctx {
 
 static long expr_or(const char **p, struct expr_ctx *x);
 
+/* The I/O addresses avr-gcc writes at the top of every assembly file it
+ * generates (`__SREG__ = 0x3f` and the rest), so that inline asm and the
+ * body of a naked function may name them: `in r0, __SREG__` is how an RTOS
+ * port for this core saves the status register. The ATmega328P's: SREG at
+ * I/O address 0x3f, SPH at 0x3e, SPL at 0x3d. -1 for any other name. */
+static long io_name(const char *s, int len)
+{
+    static const struct { const char *n; long v; } io[] = {
+        { "__SREG__", 0x3f }, { "__SP_H__", 0x3e }, { "__SP_L__", 0x3d }
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof io / sizeof io[0]); i++)
+        if ((int)strlen(io[i].n) == len && strncmp(s, io[i].n, (size_t)len) == 0)
+            return io[i].v;
+    return -1;
+}
+
+/* src/as/gas.c takes every identifier in an operand for a symbol unless
+ * the target says otherwise; these names are numbers (io_name), so the
+ * body of a naked function or a file-scope asm block may use them as an
+ * inline asm statement does. */
+int avrasm_is_word(const char *stmt, const char *w, int len)
+{
+    (void)stmt;
+    return io_name(w, len) >= 0;
+}
+
 static long expr_prim(const char **p, struct expr_ctx *x)
 {
     const char *s = skipws(*p);
@@ -262,6 +289,16 @@ static long expr_prim(const char **p, struct expr_ctx *x)
         v = strtol(s, &end, 0);
         *p = end;
         return v;
+    }
+    if (sym_start((unsigned char)*s)) {
+        int n = 0;
+        while (idc((unsigned char)s[n]))
+            n++;
+        v = io_name(s, n);
+        if (v >= 0) {
+            *p = s + n;
+            return v;
+        }
     }
     aerr(x->a, "'%.16s' is not a number, a register or an expression this "
                "assembler knows", s);
@@ -983,24 +1020,32 @@ int avrasm_assemble(const char *text, struct code *out, char *err, int errlen)
                 p++;
             continue;
         }
-        while (*p && *p != '\n' && *p != '\r') {
-            if (*p == ';') break;
-            if (p[0] == '/' && p[1] == '/')
-                break;
-            if (n < (int)sizeof buf - 1)
-                buf[n++] = *p;
-            p++;
+        {
+            /* the statement, less its comment -- neither of which ends
+             * inside a .ascii string */
+            int sl = asm_stmt_len(p, "\r");
+            int len = asm_cut_comment(p, sl, ";", 1);
+            static const struct asm_dirs dirs = { asm_data_avr, 0, 0 };
+            int r;
+            while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t'))
+                len--;
+            /* .ascii/.asciz/.string, the data directives (.word is two
+             * bytes here) and the alignments, whose padding the backend
+             * decides where the bytes land */
+            r = code_asm_directive(p, len, out, &dirs, err, errlen);
+            if (r < 0)
+                return -1;
+            if (!r) {
+                n = len < (int)sizeof buf - 1 ? len : (int)sizeof buf - 1;
+                memcpy(buf, p, (size_t)n);
+                buf[n] = '\0';
+                if (n)
+                    one(&a, buf);
+                if (a.failed)
+                    return -1;
+            }
+            p += sl;
         }
-        while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\t'))
-            n--;
-        buf[n] = '\0';
-        if (n)
-            one(&a, buf);
-        if (a.failed)
-            return -1;
-        if (*p == ';' || (p[0] == '/' && p[1] == '/'))
-            while (*p && *p != '\n')
-                p++;
     }
     return 0;
 }

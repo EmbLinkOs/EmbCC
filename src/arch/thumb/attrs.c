@@ -147,10 +147,12 @@ unsigned char *arm_build_attributes(size_t *len)
     btag(&attrs, Tag_ABI_FP_number_model, 3);    /* full IEEE 754 */
     btag(&attrs, Tag_ABI_align_needed, 1);       /* 8-byte */
     btag(&attrs, Tag_ABI_align_preserved, 1);
-    /* An enum is `int` here and -fshort-enums is refused, so this says
-     * 2. An object built the other way disagrees on every struct that
-     * holds an enum, and this tag is what makes the linker say so. */
-    btag(&attrs, Tag_ABI_enum_size, 2);
+    /* An enum is `int` here (2), or the smallest type its values fit
+     * under -fshort-enums (1), as arm-none-eabi-gcc's objects say. An
+     * object built the other way disagrees on every struct that holds an
+     * enum, and this tag is what makes the linker say so. */
+    btag(&attrs, Tag_ABI_enum_size, target_enum_neutral() ? 0
+                                    : target_short_enums() ? 1 : 2);
     /* Single precision only on the two -SP- units: a double still goes
      * through __adddf3, and this is what says so. On FPv5-D16 the code uses
      * both precisions, which is the tag's default -- "as Tag_FP_arch

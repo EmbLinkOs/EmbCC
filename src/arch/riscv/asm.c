@@ -715,6 +715,7 @@ static int data_stmt(const char *stmt, int len, struct code *out,
             size = data_dir[k].size;
     if (!size)
         return 0;
+    int at = out->len;
     /* the values, one per comma, each a constant expression */
     for (i = m; i < len; ) {
         int s, e, depth = 0;
@@ -741,6 +742,8 @@ static int data_stmt(const char *stmt, int len, struct code *out,
         if (i < len)
             i++;                        /* the comma */
     }
+    /* data: what a disassembler and -S show as data */
+    code_mark_data(out, at, out->len);
     return 1;
 }
 
@@ -1025,13 +1028,14 @@ static int one_stmt(const char *stmt, int len, struct code *out,
      * -- a template cannot see the surrounding function's labels.
      */
     {
-        static const struct { const char *name; int f3; } br[] = {
-            { "beq", 0 }, { "bne", 1 }, { "blt", 4 }, { "bge", 5 },
-            { "bltu", 6 }, { "bgeu", 7 }
+        /* `bgt`/`ble` and their unsigned forms are blt/bge with the
+         * operands swapped, which is how the ISA spells them at all */
+        static const struct { const char *name; int f3; int swap; } br[] = {
+            { "beq", 0, 0 }, { "bne", 1, 0 }, { "blt", 4, 0 }, { "bge", 5, 0 },
+            { "bltu", 6, 0 }, { "bgeu", 7, 0 },
+            { "bgt", 4, 1 }, { "ble", 5, 1 }, { "bgtu", 6, 1 }, { "bleu", 7, 1 }
         };
-        /* The zero-comparison pseudos, each one of the above against x0.
-         * `bgt`/`ble` and their unsigned forms swap the operands, which
-         * is how the ISA spells them at all. */
+        /* The zero-comparison pseudos, each one of the above against x0. */
         static const struct { const char *name; int f3; int zfirst; } brz[] = {
             { "beqz", 0, 0 }, { "bnez", 1, 0 }, { "bltz", 4, 0 },
             { "bgez", 5, 0 }, { "blez", 5, 1 }, { "bgtz", 4, 1 }
@@ -1048,7 +1052,8 @@ static int one_stmt(const char *stmt, int len, struct code *out,
                 if (!tok_imm(&t[3], &v)) FAIL("%s wants an offset", br[k].name);
                 if ((v & 1) || !rv_fits(v, 13))
                     FAIL("%s offset %lld is odd or out of range", br[k].name, v);
-                rv_w(out, rv_enc_b(OP_BRANCH, br[k].f3, r1, r2, (int)v));
+                rv_w(out, rv_enc_b(OP_BRANCH, br[k].f3, br[k].swap ? r2 : r1,
+                                   br[k].swap ? r1 : r2, (int)v));
                 return 0;
             }
         for (unsigned k = 0; k < sizeof brz / sizeof brz[0]; k++)
@@ -1209,18 +1214,18 @@ int rvasm_assemble(const char *text, struct code *out, char *err, int errlen)
     err[0] = 0;
     while (*p) {
         const char *start = p;
-        int len;
-        while (*p && *p != ';' && *p != '\n')
-            p++;
-        len = (int)(p - start);
-        /* Strip a comment: '#' anywhere, or "//". */
-        for (int i = 0; i < len; i++)
-            if (start[i] == '#' || (start[i] == '/' && i + 1 < len &&
-                                    start[i + 1] == '/')) {
-                len = i;
-                break;
-            }
-        if (one_stmt(start, len, out, err, errlen) != 0)
+        int len, r;
+        /* Strip a comment: '#' anywhere, or "//" -- but not inside a
+         * .ascii string, nor a `;` there */
+        p += asm_stmt_len(p, ";");
+        len = asm_cut_comment(start, (int)(p - start), "#", 1);
+        /* .ascii/.asciz/.string, and the alignments, whose padding the
+         * backend decides where the bytes land */
+        {
+            static const struct asm_dirs dirs = { NULL, 0, 0 };
+            r = code_asm_directive(start, len, out, &dirs, err, errlen);
+        }
+        if (r < 0 || (!r && one_stmt(start, len, out, err, errlen) != 0))
             return -1;
         if (*p)
             p++;

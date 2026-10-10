@@ -294,7 +294,10 @@ static char *a64_subst(const char *file, int line, const char *tmpl,
             continue;
         }
         char mod = 0;
-        if (*p == 'w' || *p == 'x') {
+        /* %c0: the constant alone, as gcc prints it -- how an immediate
+         * is written here anyway (no '#') */
+        if ((*p == 'w' || *p == 'x' || *p == 'c') &&
+            (p[1] == '[' || isdigit((unsigned char)p[1]))) {
             mod = *p;
             p++;
         }
@@ -322,8 +325,12 @@ static char *a64_subst(const char *file, int line, const char *tmpl,
             diag_fatal(file, line, "asm template modifier '%%%c' is not "
                                    "supported for aarch64", *p ? *p : ' ');
         }
+        if (mod == 'c' && !isimm[k])
+            diag_fatal(file, line, "%%c%d names a register operand; %%c "
+                       "prints a constant, and wants an \"i\" or \"n\" "
+                       "operand", k);
         if (isimm[k]) {
-            if (mod)
+            if (mod && mod != 'c')
                 diag_fatal(file, line, "a %%%c modifier on an immediate asm "
                                        "operand makes no sense", mod);
             len += (size_t)snprintf(out + len, cap - len, "%ld", imms[k]);
@@ -392,7 +399,8 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
                            names, nops);
     struct code c = { 0 };
     char err[512];
-    if (a64asm_assemble(text, &c, err, sizeof err) != 0)
+    if (a64asm_assemble(text, &c, err, sizeof err) != 0 ||
+        code_asm_settle(&c, 4, CODE_FILL_A64, err, sizeof err) < 0)
         diag_fatal(file, s->line, "%s", err);
     free(text);
 
@@ -401,6 +409,10 @@ void irg_asm_arm64(struct ir_func *fn, struct stmt *s)
     struct ir_asm *ia = xcalloc(1, sizeof *ia);
     ia->code = c.p;
     ia->codelen = c.len;
+    ia->drange = c.drange;
+    ia->ndrange = c.ndrange;
+    ia->arange = c.arange;
+    ia->narange = c.narange;
     ia->out = xcalloc((size_t)(a->nout ? a->nout : 1), sizeof *ia->out);
     ia->in = xcalloc((size_t)(a->nin ? a->nin : 1), sizeof *ia->in);
     for (int i = 0; i < a->nin; i++) {
