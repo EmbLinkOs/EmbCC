@@ -1480,6 +1480,37 @@ each other:
   `r28`-`r29` are preserved by the callee, and `r18`-`r27`, `r30`-`r31`
   are not.
 
+### The AVR library
+
+`make rt-embedded` builds `build/libc/avr/libc.a` from `lib/avr`, and the
+driver links it for `--target=avr` as it links `libc.a` elsewhere. It is
+not `lib/libc`: that library's formatter prints every double exactly, in
+17 KB of AVR code, and its streams keep 8 KB of buffers. What it has,
+each function an archive member of its own, so an image carries only
+what it calls:
+
+- `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`,
+  `strnlen`, `strcpy`, `strncpy`, `strcat`, `strncat`, `strcmp`,
+  `strncmp`, `strchr`, `strrchr`, `strstr`, `strspn`, `strcspn`,
+  `strpbrk`;
+- the `_P` functions `<avr/pgmspace.h>` declares;
+- `sprintf`, `snprintf`, `vsprintf`, `vsnprintf` and avr-libc's
+  `sprintf_P`, `snprintf_P`, `vsprintf_P`, `vsnprintf_P`, whose format is
+  in flash (`snprintf_P(buf, n, PSTR("%u"), x)`; `<stdio.h>` declares
+  them for AVR). The conversions are avr-libc's default ones: flags,
+  width, precision, `hh h l ll z t j`, `d i u o x X c s p n %` and `%S`, a
+  string in flash. A floating-point conversion prints `?`, as avr-libc's
+  does without `-lprintf_flt`; EmbCC has no `printf_flt`;
+- the `<avr/eeprom.h>` functions.
+
+Not there: streams (`printf`, `puts`, `FILE`, `fdevopen`), `malloc`,
+`<stdlib.h>`'s conversions and `<ctype.h>`'s functions. Their
+declarations come from the C library's headers, and a program that calls
+one gets an undefined symbol at the link.
+
+`-Wformat` compares a `printf` argument with the conversion by the
+target's own sizes: on AVR `%d` reads 2 bytes and `%ld` 4.
+
 ### Runtime helpers
 
 EmbCC does not use the part's `mul` instruction, and the part has no

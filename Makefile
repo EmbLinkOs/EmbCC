@@ -741,8 +741,10 @@ rt-embedded: embcc embar
 # lib/libc for the embedded targets, on the bare-metal backend
 # (lib/libc/os/baremetal), beside each one's librt.a. tools/build-libc.sh is
 # the recipe, and tests/golden/libc-embedded.sh runs what it builds on the
-# boards. Not avr: a two-byte atomic is two accesses there, and the library's
-# locks are refused for it.
+# boards. Not avr: lib/libc's formatter and stream buffers alone are more
+# than an ATmega328P's flash and SRAM. AVR's library is lib/avr's (the string
+# and _P functions, sprintf and its _P forms, the EEPROM), which rt-embedded
+# builds into build/libc/avr/libc.a beside the startup.
 LIBC_EMBEDDED := thumbv6m-none-eabi thumbv8m.base-none-eabi thumbv7m-none-eabi thumbv7em-none-eabi \
                  thumbv7em-none-eabihf thumbv8m.main-none-eabi \
                  thumbv8m.main-none-eabihf armv7a-none-eabi armv7a-none-eabihf \

@@ -2291,7 +2291,8 @@ Integer multiplication and division are helper calls with libgcc's names
 binary32 helpers (`__addsf3`, ...) in `lib/rt/avrfp*.c`. `make
 rt-embedded` builds `librt.a` for `avr`, and for each `-mmcu=` part its
 startup `crt<part>.o` and linker script `<part>.ld`, which the driver
-links under `-mmcu=` (see
+links under `-mmcu=`, and the AVR library, `libc.a` from `lib/avr`
+([The AVR library](embedded.md#the-avr-library)) (see
 [Startup and the interrupt vector table](embedded.md#startup-and-the-interrupt-vector-table)).
 
 ### Debugging

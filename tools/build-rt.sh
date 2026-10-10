@@ -78,4 +78,22 @@ if [ "$triple" = avr ]; then
             "$here/lib/avr/avr5.ld" > "$out/$part.ld"
         rm -f "$out/rt/io-$part.c" "$out/rt/io-$part.h"
     done
+    # ...and the AVR library, libc.a: lib/avr's avr-libc functions (the
+    # string and _P functions, sprintf and its _P forms, the EEPROM), one
+    # object per function -- each source compiled once per EMB_AVR_ name
+    # it guards -- so that an image carries only what it calls. The same
+    # registers on every part, so built once.
+    rm -rf "$out/c"
+    mkdir -p "$out/c"
+    for f in "$here"/lib/avr/*.c; do
+        b=$(basename "$f" .c)
+        for n in $(sed -n 's/^#ifdef \(EMB_AVR_[A-Z0-9_]*\).*/\1/p' "$f"); do
+            "$EMBCC" --target=avr -mmcu=atmega328p -Os -Wall -Wextra -Werror \
+                -D$n -c "$f" -o "$out/c/$b-$n.o" || {
+                echo "build-rt: lib/avr/$b.c ($n) does not compile" >&2
+                exit 1; }
+        done
+    done
+    rm -f "$out/libc.a"
+    "$AR" rcs "$out/libc.a" "$out"/c/*.o
 fi
