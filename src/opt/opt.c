@@ -307,6 +307,8 @@ static void opt_func(struct ir_func *fn)
             if (g_cfgclean) {
                 changed |= pass_thread(fn);
                 changed |= pass_cfgclean(fn);
+                if (cfg_ok)
+                    changed |= pass_brdom(fn);
             }
             if (g_dse && cfg_ok)
                 changed |= pass_dse(fn);

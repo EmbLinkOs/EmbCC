@@ -37,6 +37,7 @@ What the files share is declared in `src/opt/opt_int.h`, which only
 | `divmagic.c` | Division by a constant, the widening multiply, divisibility tests, a remainder from its quotient |
 | `ifconv.c` | If-conversion to selects |
 | `cfgclean.c` | Jump threading and block merging |
+| `cfgclean.c` (`pass_brdom`) | a branch on a value a dominating branch decided, where its edge is the only way in |
 | `tailrec.c` | Tail recursion into a loop |
 | `attrs.c` | Inferring which functions are `pure` or `const`, so a call to one stops being a barrier |
 | `dse.c` | Dead-store elimination |

@@ -303,6 +303,7 @@ int pass_ifconv(struct ir_func *fn);
 void remap_scopes(struct ir_func *fn, const int *newpos, int oldn);
 int pass_thread(struct ir_func *fn);
 int pass_cfgclean(struct ir_func *fn);
+int pass_brdom(struct ir_func *fn);    /* a branch a dominating one decided */
 
 /* tailrec.c */
 int pass_tailrec(struct ir_func *fn);
