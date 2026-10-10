@@ -1479,6 +1479,13 @@ static int cmp_set(struct t_fn *F, const struct ir_ins *i)
         }
         if (zero_cc(F, i->dst, x, pred, 1))
             return 1;
+        /* With a role that could not be had, both operands came back in
+         * the one register v6_role stands in with, and nothing is left
+         * for the result -- but this attempt is being thrown away and
+         * the function lowered again with other roles (g_t_role_fail).
+         * Only a whole attempt that still cannot is a bug. */
+        if (tcg_role_failed())
+            return 1;
         internal_error("thumb: %s: a compare with no register for its "
                        "result", F->fn->name);
         return 0;
@@ -2508,7 +2515,7 @@ static void v8b_atomic(struct t_fn *F, int n)
         exp = tmp_get(F, av);
         av |= rbit(exp);
         if (i->op == IR_CMPXCHG) {
-            if (p == exp)
+            if (p == exp && !tcg_role_failed())   /* see cmp_set */
                 internal_error("thumb: %s: a compare-and-swap's registers",
                                fn->name);
             t1_ldst_imm(t, exp, p, 0, sz, 0);        /* zero-extended */

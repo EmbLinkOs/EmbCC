@@ -8212,6 +8212,7 @@ const struct ra_target *tcg_ra(void) { return &THUMB_RA; }
 int tcg_regalloc(void) { return g_t_regalloc; }
 int tcg_ext(void) { return g_t_ext; }
 void tcg_role_fail(void) { g_t_role_fail = 1; }
+int tcg_role_failed(void) { return g_t_role_fail; }
 unsigned *tcg_lo_busy_map(const struct t_fn *F) { return lo_busy_map(F); }
 unsigned tcg_busy(const struct t_fn *F, int n, int span) { return t_busy(F, n, span); }
 int tcg_lo_op_ok(const struct t_fn *F, const struct ir_ins *i) { return lo_op_ok(F, i); }
