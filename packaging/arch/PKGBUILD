@@ -1,0 +1,42 @@
+# Arch Linux package of EmbCC, built from the tagged source tarball.
+#
+#   cd packaging/arch && makepkg -si
+#
+# packaging/README.md describes the rest, and packaging/set-version.sh sets
+# the version and checksum for a new release.
+
+# The release tag. pkgver cannot hold a '-'; a pre-release suffix is written
+# without a separator, which pacman sorts before the release itself
+# (1.1.0-rc1 is 1.1.0rc1).
+_tag=v1.0.0-m2.complete
+pkgname=embcc
+pkgver=1.0.0m2.complete
+pkgrel=1
+pkgdesc='C and C++ compiler and toolchain for embedded systems'
+arch=('x86_64' 'aarch64')
+url='https://github.com/EmbLinkOs/EmbCC'
+# The repository has no LICENSE file yet; set this to its SPDX identifier
+# when it has one.
+license=('unknown')
+depends=('glibc')
+makedepends=('gcc' 'make')
+# The libraries under lib/embcc are for the targets EmbCC compiles for, not
+# for this machine: strip cannot read them. They are static archives, and
+# kept as such.
+options=('!strip' '!debug' 'staticlibs')
+source=("$pkgname-${_tag#v}.tar.gz::$url/archive/refs/tags/$_tag.tar.gz")
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+build() {
+    cd "EmbCC-${_tag#v}"
+    # makepkg's flags, with the C standard the sources are written to. The
+    # libraries are built by `make install`, with the compiler this makes.
+    make CFLAGS="-std=c99 $CFLAGS" all embdbg
+}
+
+package() {
+    cd "EmbCC-${_tag#v}"
+    # One job: install's prerequisites are not ordered before its copying
+    # step, so with -j it can copy before the libraries exist.
+    make -j1 CFLAGS="-std=c99 $CFLAGS" DESTDIR="$pkgdir" PREFIX=/usr install
+}
