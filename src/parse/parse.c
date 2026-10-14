@@ -185,6 +185,10 @@ struct parser {
      * (fn_suffix), and a declaration that ends with it still pending put
      * it where there is no function type to carry it. */
     int cmse_call_pending, cmse_call_line;
+    /* a K&R definition's promoted parameters, converted to their declared
+     * types at the top of its body (knr_declarations) */
+    struct { const char *name, *hidden; struct type *ty; } knr_conv[MAX_PARAMS];
+    int knr_nconv;
     const char *fn_pnames[MAX_PARAMS]; /* the parameter names of the last
                            * function declarator inside parentheses
                            * (`(*f(int a))[3]`) */
@@ -1612,6 +1616,7 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     ps->vla_ok = 1;   /* prototype scope: `int a[n]`, `int a[*]` */
     struct type *pt[MAX_PARAMS];
     int n = 0, varargs = 0, sret = 0;
+    int empty_parens = cur(ps)->kind == TOK_RPAREN;
 
     if (cur(ps)->kind == TOK_RPAREN)
         warn_no_prototype(ps);
@@ -1701,6 +1706,8 @@ static struct type *parse_fn_params_named(struct parser *ps, struct type *ret,
     struct type *ft = ty_func(ret, pt, n, varargs);
     ft->sret_first = sret;
     ft->cmse_ns_call = cmse_call;
+    /* `int (*fp)()` before C23: no prototype, as `int f()` (parse_top) */
+    ft->noproto = n == 0 && !varargs && empty_parens && lex_c_year() < 2023;
     return ft;
 }
 
@@ -5756,6 +5763,140 @@ static void typedef_declarators(struct parser *ps, struct type *tbase,
     expect(ps, TOK_SEMI, "';'");
 }
 
+/* ---- K&R definitions: `int add(a, b) int a; int b; { ... }` ----------
+ *
+ * The parameters are named in the parentheses and given types by the
+ * declarations before the body. The function has no prototype (a call
+ * is not checked against it), so its caller passes each argument as the
+ * default promotions leave it: a `float` parameter arrives a double and
+ * a `char` an int. Such a parameter is received at the promoted type
+ * under a name no source can spell, and the body begins by converting
+ * it to the declared one -- `float x = (float)<x>;` -- as GCC does.
+ * C23 removed these definitions; GCC still takes them, and so does
+ * EmbCC, in every standard. */
+
+/* An identifier list `(a, b)`: the names into f, and 1. A type name
+ * first, or no name followed by `,` or `)`, is a prototype's list: 0. */
+static int knr_names(struct parser *ps, struct func *f)
+{
+    if (cur(ps)->kind != TOK_IDENT || find_typedef(ps, cur(ps)->text) ||
+        at_type_start(ps))
+        return 0;
+    struct lexer save = ps->lx;
+    advance(ps);
+    enum tok_kind next = cur(ps)->kind;
+    ps->lx = save;
+    if (next != TOK_COMMA && next != TOK_RPAREN)
+        return 0;
+    for (;;) {
+        if (cur(ps)->kind != TOK_IDENT)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "expected a parameter name in the identifier "
+                           "list, got %s", tok_describe(cur(ps)));
+        if (f->nparams >= MAX_PARAMS)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "more than %d parameters", MAX_PARAMS);
+        f->params[f->nparams] = cur(ps)->text;
+        f->param_lines[f->nparams] = cur(ps)->line;
+        f->param_cols[f->nparams] = cur(ps)->col;
+        f->param_tys[f->nparams] = NULL;          /* until declared */
+        f->nparams++;
+        advance(ps);
+        if (cur(ps)->kind != TOK_COMMA)
+            break;
+        advance(ps);
+    }
+    f->noproto = 1;
+    return 1;
+}
+
+/* What a parameter of type t arrives as without a prototype. */
+static struct type *knr_promoted(struct type *t)
+{
+    if (t->kind == TY_FLOAT)
+        return ty_base(TY_DOUBLE, 0);
+    if (ty_is_integer(t) && ty_size(t) < ty_size(ty_base(TY_INT, 0)))
+        return ty_base(TY_INT, 0);
+    return t;
+}
+
+/* The declarations between `)` and `{`: each name declared must be one of
+ * the list's; one not declared is an int, as C89 has it. */
+static void knr_declarations(struct parser *ps, struct func *f)
+{
+    ps->knr_nconv = 0;
+    while (cur(ps)->kind != TOK_LBRACE && cur(ps)->kind != TOK_EOF &&
+           cur(ps)->kind != TOK_SEMI) {
+        skip_param_register(ps);
+        struct attrs sat = { 0 };
+        struct type *spec = parse_type_spec_attrs(ps, 0, &sat);
+        param_storage(ps);
+        if (!spec)
+            parse_error_at(ps, cur(ps)->line, cur(ps)->col,
+                           "expected a declaration of a parameter before %s",
+                           tok_describe(cur(ps)));
+        for (;;) {
+            const char *pname;
+            int pline = cur(ps)->line, pcol = cur(ps)->col;
+            struct type *pt = param_declarator(ps, spec, &pname);
+            int k = 0;
+            while (k < f->nparams && (!pname || strcmp(f->params[k], pname)))
+                k++;
+            if (k == f->nparams)
+                parse_error_at(ps, pline, pcol,
+                               "'%s' is declared here but is not one of the "
+                               "parameters", pname ? pname : "?");
+            if (f->param_tys[k])
+                parse_error_at(ps, pline, pcol,
+                               "parameter '%s' is declared twice", pname);
+            if (pt->kind == TY_ARRAY)
+                pt = param_adjust(ps, pt);
+            if (pt->kind == TY_FUNC)
+                pt = ty_ptr(pt);
+            f->param_tys[k] = pt;
+            if (cur(ps)->kind != TOK_COMMA)
+                break;
+            advance(ps);
+        }
+        expect(ps, TOK_SEMI, "';' after a parameter's declaration");
+    }
+    for (int k = 0; k < f->nparams; k++) {
+        struct type *dt = f->param_tys[k] ? f->param_tys[k]
+                                          : ty_base(TY_INT, 0);
+        struct type *pt = knr_promoted(dt);
+        f->param_tys[k] = pt;
+        if (pt == dt)
+            continue;
+        /* received promoted under another name; the body converts it */
+        char *hidden = xmalloc(strlen(f->params[k]) + 8);
+        sprintf(hidden, "<knr %s>", f->params[k]);
+        if (ps->knr_nconv < MAX_PARAMS) {
+            ps->knr_conv[ps->knr_nconv].name = f->params[k];
+            ps->knr_conv[ps->knr_nconv].ty = dt;
+            ps->knr_conv[ps->knr_nconv].hidden = hidden;
+            ps->knr_nconv++;
+        }
+        f->params[k] = hidden;
+    }
+}
+
+/* The body's first statements: each promoted parameter converted to its
+ * declared type, under its own name. */
+static void knr_conversions(struct parser *ps, struct func *f)
+{
+    for (int i = ps->knr_nconv - 1; i >= 0; i--) {
+        struct stmt *d = new_stmt(STMT_DECL, f->line, 0);
+        struct expr *v = new_expr(EXPR_VAR, f->line, 0);
+        v->name = ps->knr_conv[i].hidden;
+        d->dty = ps->knr_conv[i].ty;
+        d->name = ps->knr_conv[i].name;
+        d->expr = v;
+        d->next = f->body;
+        f->body = d;
+    }
+    ps->knr_nconv = 0;
+}
+
 static void parse_top(struct parser *ps, struct unit *u,
                       struct func ***ftail, struct global ***gtail,
                       int seq)
@@ -6022,6 +6163,7 @@ static void parse_top(struct parser *ps, struct unit *u,
                     f->param_unused[i] = ps->fn_punused[i];
                 }
                 f->is_varargs = gt->is_varargs;
+                f->noproto = gt->noproto;
                 f->sret_first = gt->sret_first;
                 saved_vla_ok = ps->vla_ok;
                 ps->vla_ok = 1;
@@ -6106,7 +6248,12 @@ static void parse_top(struct parser *ps, struct unit *u,
     saved_vla_ok = ps->vla_ok;
     ps->vla_ok = 1;   /* parameters and body: VLAs allowed */
 
-    if (cur(ps)->kind == TOK_RPAREN)
+    /* `int f()` before C23 is no prototype: its calls are not checked
+     * against it. C23 made it `(void)`. */
+    if (cur(ps)->kind == TOK_RPAREN && lex_c_year() < 2023)
+        f->noproto = 1;
+    int knr = knr_names(ps, f);
+    if (cur(ps)->kind == TOK_RPAREN && !knr)
         warn_no_prototype(ps);
     if (cur(ps)->kind == TOK_KW_VOID) {
         /* "(void)" means no parameters; "(void *x)" is a parameter */
@@ -6118,7 +6265,7 @@ static void parse_top(struct parser *ps, struct unit *u,
             ps->lx = save;
         }
     }
-    if (cur(ps)->kind != TOK_RPAREN) {
+    if (cur(ps)->kind != TOK_RPAREN && !knr) {
         for (;;) {
             if (cur(ps)->kind == TOK_ELLIPSIS) {
                 /* (C23, and C++'s f(...): no named parameter before) */
@@ -6184,6 +6331,8 @@ static void parse_top(struct parser *ps, struct unit *u,
         }
     }
     expect(ps, TOK_RPAREN, "')'");
+    if (knr)
+        knr_declarations(ps, f);
 
 fn_tail:
     /* trailing attributes: void f(void) __attribute__((noreturn/weak)) */
@@ -6315,8 +6464,11 @@ fn_tail:
          * declaration, so these are scoped to this function. */
         for (int i = 0; i < f->nparams; i++)
             fold_local_add(f->params[i], f->param_tys[i]);
+        for (int i = 0; i < ps->knr_nconv; i++)
+            fold_local_add(ps->knr_conv[i].name, ps->knr_conv[i].ty);
         struct stmt *blk = parse_block(ps);
         f->body = blk->body;
+        knr_conversions(ps, f);
         f->defined = 1;
     }
     ps->vla_ok = saved_vla_ok;

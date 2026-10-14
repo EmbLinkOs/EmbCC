@@ -3578,6 +3578,7 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
             ft = ty_func(callee->ret_ty, callee->param_tys,
                          callee->nparams, callee->is_varargs);
             ft->sret_first = callee->sret_first;
+            ft->noproto = callee->noproto;
         } else {
             check_expr(u, f, sc, e->lhs);
             if (e->lhs->ty->kind != TY_PTR ||
@@ -3587,8 +3588,8 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                            ty_name(e->lhs->ty));
             ft = e->lhs->ty->pointee;
         }
-        if (ft->is_varargs ? e->nargs < ft->nptypes
-                           : e->nargs != ft->nptypes)
+        if (!ft->noproto && (ft->is_varargs ? e->nargs < ft->nptypes
+                                            : e->nargs != ft->nptypes))
             sema_error_at(u, e->line, e->col,
                        "this call needs %s%d argument%s, got %d",
                        ft->is_varargs ? "at least " : "", ft->nptypes,
@@ -3611,10 +3612,10 @@ static void check_expr(struct unit *u, struct func *f, struct scope *sc,
                            ty_name(e->args[i]->ty));
             if (e->args[i]->ty->kind != TY_STRUCT)
                 need_scalar(u, e->args[i], "an argument");
-            if (i < ft->nptypes)
+            if (i < ft->nptypes && !ft->noproto)
                 e->args[i] = convert_assign(u, e->args[i],
                                             ft->ptypes[i], "argument");
-            else /* variadic tail: default argument promotions */
+            else /* variadic tail, or no prototype: the promotions */
                 e->args[i] = mk_cast(e->args[i],
                                      default_arg_promote(e->args[i]->ty));
         }
@@ -6808,6 +6809,27 @@ static void merge_decls(struct unit *u)
         for (int i = 0; match && i < f->nparams; i++)
             if (!ty_equal(canon->param_tys[i], f->param_tys[i]))
                 match = 0;
+        /* No prototype on one side (`int f();` before C23, or a K&R
+         * definition): the same return type is enough, and a prototype
+         * that comes later is the one calls are checked against from
+         * then on. A K&R definition of a function prototyped before must
+         * agree with the prototype once its parameters are promoted. */
+        if (!match && (canon->noproto || f->noproto) &&
+            ty_equal(canon->ret_ty, f->ret_ty)) {
+            match = 1;
+            if (canon->noproto && (!f->noproto || f->defined)) {
+                canon->nparams = f->nparams;
+                for (int i = 0; i < f->nparams; i++)
+                    canon->param_tys[i] = f->param_tys[i];
+                canon->is_varargs = f->is_varargs;
+                canon->noproto = f->noproto;
+            } else if (!canon->noproto && f->defined && f->nparams) {
+                match = canon->nparams == f->nparams && !canon->is_varargs;
+                for (int i = 0; match && i < f->nparams; i++)
+                    if (!ty_equal(canon->param_tys[i], f->param_tys[i]))
+                        match = 0;
+            }
+        }
         if (!match) {
             diag_error_at(f->file, f->line, 0,
                           "conflicting declaration of '%s'", f->name);

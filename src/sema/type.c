@@ -727,6 +727,9 @@ int ty_equal(const struct type *a, const struct type *b)
     if (a->kind == TY_FUNC) {
         /* a cmse_nonsecure_call is a different way to call: a pointer to
          * one is not a pointer to the other (as clang has it) */
+        /* one with no prototype goes with any of the same return */
+        if ((a->noproto || b->noproto) && a->cmse_ns_call == b->cmse_ns_call)
+            return ty_equal(a->ret, b->ret);
         if (a->nptypes != b->nptypes || a->is_varargs != b->is_varargs ||
             a->sret_first != b->sret_first ||
             a->cmse_ns_call != b->cmse_ns_call || !ty_equal(a->ret, b->ret))

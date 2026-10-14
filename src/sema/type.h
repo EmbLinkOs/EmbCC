@@ -140,6 +140,11 @@ struct type {
     struct type *ptypes[MAX_PARAMS];
     int nptypes;
     int is_varargs;
+    /* TY_FUNC declared with no prototype: `int f()` before C23, or a K&R
+     * definition `int f(a) int a; {...}`. A call is not checked against
+     * it, and its arguments take the default promotions; it is
+     * compatible with any function type of the same return type. */
+    int noproto;
     int cmse_ns_call;       /* __attribute__((cmse_nonsecure_call)) under
                              * -mcmse: a call through a pointer to this
                              * type enters the Non-secure state (BLXNS),
