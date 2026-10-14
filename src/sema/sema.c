@@ -4433,7 +4433,13 @@ static void flatten_init(struct unit *u, struct func *f, struct scope *sc,
      * `expr` initializer keeps EXPR_COMPLIT); `&(T){...}` stays an
      * EXPR_ADDR and is lowered through the anonymous-object path instead. */
     if (init->kind == EXPR_COMPLIT) {
-        if (init->lhs && init->lhs->kind == EXPR_INITLIST) {
+        /* ...unless it is an array that decays: `int *p = (int[]){1, 2};`
+         * points at the literal, an object of its own (which the check
+         * below makes, anonymous and static); flattened, its two values
+         * were refused as the pointer's */
+        int decays = ty->kind == TY_PTR && init->cast_ty &&
+                     init->cast_ty->kind == TY_ARRAY;
+        if (init->lhs && init->lhs->kind == EXPR_INITLIST && !decays) {
             flatten_init(u, f, sc, init->lhs, ty, off, out);
             return;
         }
