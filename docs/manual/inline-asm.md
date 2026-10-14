@@ -65,8 +65,8 @@ asm ( "TEMPLATE" ) ;
 ```
 
 The keyword is spelled `asm`, `__asm__` or `__asm`. All three are
-keywords in every `-std=` mode, so `asm` cannot be used as an identifier
-even with `-std=c11`. Adjacent string literals in the template are
+keywords in every `--std=` mode, so `asm` cannot be used as an identifier
+even with `--std=c11`. Adjacent string literals in the template are
 concatenated.
 
 Inside a function, EmbCC treats basic asm exactly as an extended asm
@@ -279,7 +279,7 @@ target's nop, as llvm-mc pads code (x86-64's long nops, AArch64's `nop`
 after zero bytes up to a word, Thumb's `nop`, RISC-V's `c.nop` and
 `nop`, zero bytes on AVR). A function holding such a template starts on
 that alignment, so the padding is also right when the function is in a
-section of its own (`-ffunction-sections`). The largest alignment is 16
+section of its own (`--sections=functions`). The largest alignment is 16
 bytes, the alignment of `.text`.
 
 Data that would leave the next instruction off an instruction boundary,
@@ -369,7 +369,7 @@ Each target handles a template that would change one as follows:
 
 | Target | Callee-saved register named in the template or the clobbers | Operand placed in a callee-saved register |
 |---|---|---|
-| x86-64 | accepted; not saved | saved by the prologue at `-O2` and `-Os` only |
+| x86-64 | accepted; not saved | saved by the prologue at `--opt=speed` and `--opt=size` only |
 | AArch64 | refused (x19 to x30) | cannot happen: neither the allocator nor a register variable uses one |
 | ARM Cortex-M | refused (r4 to r11) | never chosen by the allocator; possible through the letters `S` and `D` (see [ARM Cortex-M](#arm-cortex-m)), and then saved by the prologue and given no other value in that function |
 | RISC-V | refused (s0 to s11) | never chosen by the allocator; see [Register variables](#register-variables) |
@@ -866,10 +866,10 @@ static inline long syscall6(long n, long a1, long a2, long a3,
 
 ### Callee-saved registers on x86-64
 
-From `-O1` the prologue saves `rbx` and `r12` to `r15` when an
+From `--opt=basic` the prologue saves `rbx` and `r12` to `r15` when an
 operand is placed in one of them, whether by a constraint (`"=b"` for
 `cpuid`), a register variable, or the allocator (the fourth `r` operand
-gets `rbx` when `rax`, `rcx` and `rdx` are taken). At `-O0` nothing is
+gets `rbx` when `rax`, `rcx` and `rdx` are taken). At `--opt=none` nothing is
 saved.
 
 A callee-saved register that the template writes by name or that the
@@ -1199,9 +1199,9 @@ acquire/release family, `tt`/`ttt`/`tta`/`ttat` and `sg`, and the 16-bit
 
 ### The DSP extension
 
-ARMv7E-M (`thumbv7em-none-eabi[hf]`, `-mcpu=cortex-m4` or `cortex-m7`) and
-ARMv8-M Mainline with the extension (`-mcpu=cortex-m33`,
-`-march=armv8-m.main+dsp`) have the DSP instructions, and so does EmbCC's
+ARMv7E-M (`thumbv7em-none-eabi[hf]`, `--cpu=cortex-m4` or `cortex-m7`) and
+ARMv8-M Mainline with the extension (`--cpu=cortex-m33`,
+`--isa=armv8-m.main+dsp`) have the DSP instructions, and so does EmbCC's
 assembler for them, in inline asm and in `.s` files. They are what
 CMSIS's `cmsis_gcc.h` (`__SADD16` ... `__SMLALD`, selected by
 `__ARM_FEATURE_DSP`) and EmbCC's `<arm_acle.h>` (`__sadd16`, `__smlad`,
@@ -1453,7 +1453,7 @@ target is a byte displacement from the start of the instruction, written
 | `li Rd, IMM` | any constant; expanded to the instruction sequence the code generator uses |
 | `mv`, `not`, `neg`, `seqz`, `snez` `Rd, Rs` | |
 
-With the F extension (`-march=` naming `f`, or `g`), the floating-point
+With the F extension (`--isa=` naming `f`, or `g`), the floating-point
 instructions, in their single (`.s`) form; with D also their double
 (`.d`) form. A rounding mode, where one is shown, is `rne`, `rtz`, `rdn`,
 `rup`, `rmm` or `dyn`, and is `dyn` when left out (`rne` for the
@@ -1479,7 +1479,7 @@ llvm-mc writes them).
 | `fsrmi`, `fsflagsi` | `[Rd,] IMM`, 0 to 31 |
 
 An F instruction on a target without F, or a D one without D, is refused
-with `fsd needs the D extension, which -march= does not name`. The same
+with `fsd needs the D extension, which --isa= does not name`. The same
 instructions are accepted in `.s` and `.S` files. There is no `"f"`
 constraint yet: name the float register in the template, and pass
 values through memory or with `fmv.w.x`/`fmv.x.w`.
@@ -2653,7 +2653,7 @@ In summary, compared with GCC:
   four instructions on x86-64 only. Every block is in `.text`, so other
   sections are refused.
 - On x86-64, a callee-saved register that a template changes is saved
-  only when it holds an operand and the optimization level is `-O2` or
-  `-Os`.
+  only when it holds an operand and the optimization level is `--opt=speed` or
+  `--opt=size`.
 - Every `asm` statement is volatile, a memory barrier, and prevents
   inlining of its function.

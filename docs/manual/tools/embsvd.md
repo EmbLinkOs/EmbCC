@@ -30,7 +30,7 @@ embsvd STM32F405.svd --nvic-prio-bits 4 --fpu-present 1 \
        --ld STM32F405.ld --flash 0x08000000:1M --ram 0x20000000:128K
 CF="--target=thumbv7em-none-eabi -O2 -ICMSIS/Core/Include -fgnuc-version=4.2.1"
 embcc $CF -c startup.c && embcc $CF -c main.c
-embcc --target=thumbv7em-none-eabi -T STM32F405.ld startup.o main.o -o fw.elf
+embcc --target=thumbv7em-none-eabi --link-script=STM32F405.ld startup.o main.o -o fw.elf
 ```
 
 `main.c` includes `STM32F405.h` and drives the device through it:

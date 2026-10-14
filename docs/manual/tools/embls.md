@@ -566,7 +566,7 @@ In the project root, `compile_flags.txt` holds:
 
 Have the editor start `embls` with the project root as its working
 directory, so that `include` is resolved against it. The diagnostics are then those of
-`embcc --target=thumbv7m-none-eabi -Iinclude -Wall`. The index still uses
+`embcc --target=thumbv7m-none-eabi -Iinclude --warn=all`. The index still uses
 the x86-64 predefined macros, as described under
 [The index](#the-index).
 

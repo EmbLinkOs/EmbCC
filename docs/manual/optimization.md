@@ -4,7 +4,7 @@ This page describes the options that control optimization: the `-O`
 levels EmbCC accepts and exactly what each one turns on, the `-fNAME` and
 `-fno-NAME` options that switch one optimizer pass on or off, the
 assumptions the optimizer makes about a program (signed overflow,
-aliasing, floating point, `volatile`), the `-fsanitize=` checks, and the
+aliasing, floating point, `volatile`), the `--sanitize=` checks, and the
 ways to see what the optimizer did. It is written for people who compile
 code with EmbCC and want to know what an optimization level costs and
 what it promises.
@@ -22,28 +22,30 @@ Optimization happens in two places.
   frameless functions and function alignment are decided there. These
   have no individual switches.
 
-The default is `-O0`: no IR optimization, and every source variable in
+The default is `--opt=none`: no IR optimization, and every source variable in
 its stack slot.
 
 ## Optimization levels
 
 | Option | Effect |
 |---|---|
-| `-O0` | No optimization. The default. |
-| `-O`, `-O1` | Register allocation, and the passes that only remove work: promotion of locals to registers, constant propagation, dead stores, redundant loads, loop invariants, if-conversion, division by constants. |
-| `-O2` | Everything in `-O1`, plus inlining, global CSE, partial redundancy elimination, unrolling, vectorizing, and the other passes that trade size or compile time for speed. |
-| `-O3` | Identical to `-O2`. |
-| `-Os` | `-O2` without the passes that trade size for speed, a smaller inlining budget, denser jump tables, and no function alignment padding. |
-| `-Oz` | Identical to `-Os`. |
+| `--opt=none` | No optimization. The default. |
+| `-O`, `--opt=basic` | Register allocation, and the passes that only remove work: promotion of locals to registers, constant propagation, dead stores, redundant loads, loop invariants, if-conversion, division by constants. |
+| `--opt=speed` | Everything in `--opt=basic`, plus inlining, global CSE, partial redundancy elimination, unrolling, vectorizing, and the other passes that trade size or compile time for speed. |
+| `--opt=max` | Identical to `--opt=speed`. |
+| `--opt=size` | `--opt=speed` without the passes that trade size for speed, a smaller inlining budget, denser jump tables, and no function alignment padding. |
+| `--opt=min-size` | Identical to `--opt=size`. |
 
-### `-O0`
+### `--opt=none`
+
+GCC: `-O0`.
 
 Do not optimize. This is the default.
 
 The IR optimizer does not run, so `-f` pass options have no effect at
 this level. The one exception is the inliner, which copies in each call to
 an `always_inline` function and nothing else, as GCC and Clang do at
-`-O0`. Every source variable -- every local and parameter --
+`--opt=none`. Every source variable -- every local and parameter --
 lives in its stack slot and is stored there by every assignment, so it
 is in memory at all times, which is what a debugger wants (see
 [Debugging](debugging.md)).
@@ -53,10 +55,10 @@ targets differ. On ARM Cortex-M, RISC-V and AVR the register allocator
 runs for them, as GCC's and Clang's `-O0` keep them in registers:
 `a + b * c` loads `a`, `b` and `c` and computes in registers. On x86-64
 and AArch64 every temporary has a stack slot too, and every C operation
-is a separate load, operation and store. (FreeRTOS's kernel at `-O0` on a
+is a separate load, operation and store. (FreeRTOS's kernel at `--opt=none` on a
 Cortex-M3: 106678 bytes of code before, 25670 now; Clang's `-O0` is
 18870; lib/libc's string, stdlib and ctype on AVR, 68428 bytes before
-and 33330 now.) `EMBCC_O0_NORA=1` gives the old `-O0` on these targets,
+and 33330 now.) `EMBCC_O0_NORA=1` gives the old `--opt=none` on these targets,
 for bisecting a difference. On AVR, `-g` still turns the allocator off.
 A very big function is compiled the old way as well: one of more than
 100000 IR instructions, some 12000 statements of straight-line code on
@@ -66,7 +68,7 @@ function; AVR, which generates each function several times to keep the
 shortest, takes about a second for 6000 statements, where Cortex-M
 takes a tenth of one.
 
-Some decisions are made at every level, `-O0` included, because they are
+Some decisions are made at every level, `--opt=none` included, because they are
 taken when the IR is first generated or when code is emitted:
 
 - `switch` statements are lowered to a jump table or a tree of compares
@@ -78,7 +80,9 @@ taken when the IR is first generated or when code is emitted:
   slots within a basic block.
 - Branches are shortened to their smallest encoding.
 
-### `-O`, `-O1`
+### `-O`, `--opt=basic`
+
+GCC: `-O1`.
 
 Optimize without making the code larger. This is the level of GCC's and
 Clang's `-O1`. `-O` is the same as `-O1`.
@@ -90,12 +94,12 @@ only remove work run: the local passes listed in
 `dse`, `load-cse`, `licm`, `if-convert` and `div-magic`, with attribute
 inference and constant propagation from read-only `static` variables.
 
-Inlining at `-O1` is limited to what makes code smaller or was asked
+Inlining at `--opt=basic` is limited to what makes code smaller or was asked
 for: a `static` function with a single caller (whose original is then
 deleted) and an `always_inline` function. The other passes that trade
-size or compile time for speed wait for `-O2`: `gcse`, `pre`, `unroll`,
+size or compile time for speed wait for `--opt=speed`: `gcse`, `pre`, `unroll`,
 `vectorize`, `switch-thread`, `tail-recursion` and `idiom`. Code at
-`-O1` is usually a little smaller than at `-O2`.
+`--opt=basic` is usually a little smaller than at `--opt=speed`.
 
 After optimization, a `static` function that no longer has a reachable
 caller is not emitted. This is decided by reachability from the
@@ -103,32 +107,38 @@ functions visible outside the unit, constructors, destructors and
 functions marked `__attribute__((used))`, so a `static` function called
 only from another dead `static` function is dropped as well.
 
-The code generators do at `-O1` everything they do at `-O2`; see
+The code generators do at `--opt=basic` everything they do at `--opt=speed`; see
 [Code generation by level](#code-generation-by-level).
 
-### `-O2`
+### `--opt=speed`
 
-Optimize for speed. Enables everything in `-O1`, and:
+GCC: `-O2`.
+
+Optimize for speed. Enables everything in `--opt=basic`, and:
 
 - every other pass in the [pass table](#controlling-individual-passes),
   except `vectorize` on targets other than x86-64;
 - function inlining, with the budgets in [Inlining](#inlining).
 
-### `-O3`
+### `--opt=max`
 
-Accepted, and identical to `-O2`. No pass or code-generation decision in
-EmbCC tests for a level above 2, and objects built with `-O3` are byte
-for byte those built with `-O2`.
+GCC: `-O3`.
 
-### `-Os`
+Accepted, and identical to `--opt=speed`. No pass or code-generation decision in
+EmbCC tests for a level above 2, and objects built with `--opt=max` are byte
+for byte those built with `--opt=speed`.
 
-Optimize for size. Enables everything in `-O2` except:
+### `--opt=size`
+
+GCC: `-Os`.
+
+Optimize for size. Enables everything in `--opt=speed` except:
 
 - `vectorize`, `unroll` and `switch-thread` are off, and so is live-range
   splitting around loops. Each of these adds code.
 - The inlining budget for a callee that is copied is 6 IR instructions
   instead of 24, and a `static` function with two callers gets no larger
-  budget (200 at `-O2`). A `static` function with a single caller is
+  budget (200 at `--opt=speed`). A `static` function with a single caller is
   still inlined up to 2000 IR instructions, because moving it deletes
   the original (see [Inlining](#inlining)).
 - A `switch` needs at least six cases and a value range of at most twice
@@ -136,15 +146,19 @@ Optimize for size. Enables everything in `-O2` except:
   [Switch lowering](#switch-lowering)).
 - Functions are not padded to 16 bytes on x86-64 or AArch64.
 
-Register allocation and tail calls are the same as at `-O2`.
+Register allocation and tail calls are the same as at `--opt=speed`.
 
-### `-Oz`
+### `--opt=min-size`
 
-Accepted, and identical to `-Os`.
+GCC: `-Oz`.
 
-### `-Og`
+Accepted, and identical to `--opt=size`.
 
-Optimize for debugging: `-O1`, with every source variable kept in its
+### `--opt=debug`
+
+GCC: `-Og`.
+
+Optimize for debugging: `--opt=basic`, with every source variable kept in its
 stack slot, where a debugger reads it. See
 [Debugging](debugging.md#optimized-code).
 
@@ -164,10 +178,11 @@ embcc: unknown optimization flag '-O4'
 ### Combining `-O` options
 
 When more than one `-O` option is given, the last one sets the level,
-with one exception: once `-Os` or `-Oz` has appeared, a later `-O0`,
-`-O1`, `-O2` or `-O3` does not cancel the size request. `-Os -O2`
-compiles as `-Os`, and `-Os -O0` runs the IR optimizer at its `-Os`
-setting while the code generator works at level 0.
+with one exception: once `--opt=size` or `--opt=min-size` has appeared, a later `--opt=none`,
+`--opt=basic`, `--opt=speed` or `--opt=max` does not cancel the size
+request. `--opt=size --opt=speed` compiles as `--opt=size`, and
+`--opt=size --opt=none` runs the IR optimizer at its `--opt=size` setting
+while the code generator works at level 0.
 <!-- The driver sets opt_for_size and never clears it (main.c, the -O
      branch). This is probably a bug; reported to the lead. -->
 
@@ -176,7 +191,7 @@ the command line: `-fno-sccp -O2` and `-O2 -fno-sccp` are the same.
 
 ## What each level enables
 
-| | `-O0` | `-O1` | `-O2` | `-Os` |
+| | `--opt=none` | `--opt=basic` | `--opt=speed` | `--opt=size` |
 |---|---|---|---|---|
 | Local passes ([no switch](#passes-with-no-switch)) | | yes | yes | yes |
 | `cfg-clean` | | yes | yes | yes |
@@ -195,7 +210,9 @@ the command line: `-fno-sccp -O2` and `-O2 -fno-sccp` are the same.
 
 ## Controlling individual passes
 
-### `-fNAME`, `-fno-NAME`
+### `--pass=NAME`, `--no-pass=NAME`
+
+GCC: `-fNAME`, `-fno-NAME`.
 
 Turn the optimizer pass `NAME` on or off. `NAME` is one of the
 eighteen names below. The level sets each pass's default, and an
@@ -203,27 +220,25 @@ explicit option overrides the level wherever it appears on the command
 line.
 
 ```sh
-embcc -O2 -fno-inline -c foo.c        # -O2 without inlining
-embcc -O1 -fgcse -c foo.c             # -O1 plus one -O2 pass
+embcc --opt=speed --no-pass=inline -c foo.c   # --opt=speed without inlining
+embcc --opt=basic --pass=gcse -c foo.c         # --opt=basic and one --opt=speed pass
 ```
 
 A pass option takes effect only when the IR optimizer runs, which is at
-`-O1` and above. At `-O0` it is accepted and does nothing.
+`--opt=basic` and above. At `--opt=none` it is accepted and does nothing.
 
-`-fNAME` at `-O1` runs that pass at `-O1`. Nothing else changes: the
-inlining budgets stay `-O1`'s.
+`--pass=NAME` at `--opt=basic` runs that pass at `--opt=basic`. Nothing
+else changes: the inlining budgets stay `--opt=basic`'s.
 
-A name that is not a pass, and not another option EmbCC knows, is
-refused:
+A name that is not a pass is refused, with the list:
 
 ```text
-embcc: error: unknown argument '-fno-unroll-loops'
+embcc: error: --pass=bogus: no optimizer pass has that name; the passes are mem2reg, gcse, load-cse, sccp, licm, vectorize, inline, dse, div-magic, if-convert, cfg-clean, tail-recursion, idiom, sroa, unroll, pre, switch-thread and licm-mem
 ```
 
-followed by the usage summary. In particular, GCC's names for these
-passes (`-funroll-loops`, `-fno-tree-vectorize`, `-finline-functions`)
-are not EmbCC's; see
-[GCC option names](#gcc-option-names).
+GCC's own names for some of these passes
+are read too, and some are not (`-ftree-vectorize`); see
+[GCC's optimization options](#gccs-optimization-options).
 
 Turning passes off one at a time is the quickest way to find which one
 changes the behavior of a program:
@@ -238,24 +253,24 @@ The table lists every pass. The entries that follow describe each one.
 
 | Pass | Default | What it does |
 |---|---|---|
-| `mem2reg` | `-O1`, `-O2`, `-Os` | Promote scalar locals out of memory |
-| `gcse` | `-O2`, `-Os` | Common subexpressions across blocks |
-| `load-cse` | `-O1`, `-O2`, `-Os` | Redundant loads across blocks |
-| `sccp` | `-O1`, `-O2`, `-Os` | Constant branches and unreachable blocks |
-| `licm` | `-O1`, `-O2`, `-Os` | Loop rotation, invariant motion, induction-variable strength reduction |
-| `vectorize` | `-O2`, x86-64 only | Lane-wise loops (SSE2) |
-| `inline` | `-O1` (limited), `-O2`, `-Os` | Function inlining |
-| `dse` | `-O1`, `-O2`, `-Os` | Stores overwritten before they are read |
-| `div-magic` | `-O1`, `-O2`, `-Os` | Division by a constant without a divide |
-| `if-convert` | `-O1`, `-O2`, `-Os` | A two-way choice without a branch |
-| `cfg-clean` | `-O1`, `-O2`, `-Os` | Jump threading and dead jumps |
-| `tail-recursion` | `-O2`, `-Os` | A self tail call becomes a loop |
-| `idiom` | `-O2`, `-Os` | Copy and clear loops become block operations |
-| `sroa` | `-O1`, `-O2`, `-Os` | Split a local aggregate into scalars |
-| `unroll` | `-O2` | Loop unrolling |
-| `pre` | `-O2`, `-Os` | Partial redundancy elimination |
-| `switch-thread` | `-O2` | State machines jump straight to the next case |
-| `licm-mem` | `-O1`, `-O2`, `-Os` | Loads out of loops; a variable in memory kept in a register across one |
+| `mem2reg` | `--opt=basic`, `--opt=speed`, `--opt=size` | Promote scalar locals out of memory |
+| `gcse` | `--opt=speed`, `--opt=size` | Common subexpressions across blocks |
+| `load-cse` | `--opt=basic`, `--opt=speed`, `--opt=size` | Redundant loads across blocks |
+| `sccp` | `--opt=basic`, `--opt=speed`, `--opt=size` | Constant branches and unreachable blocks |
+| `licm` | `--opt=basic`, `--opt=speed`, `--opt=size` | Loop rotation, invariant motion, induction-variable strength reduction |
+| `vectorize` | `--opt=speed`, x86-64 only | Lane-wise loops (SSE2) |
+| `inline` | `--opt=basic` (limited), `--opt=speed`, `--opt=size` | Function inlining |
+| `dse` | `--opt=basic`, `--opt=speed`, `--opt=size` | Stores overwritten before they are read |
+| `div-magic` | `--opt=basic`, `--opt=speed`, `--opt=size` | Division by a constant without a divide |
+| `if-convert` | `--opt=basic`, `--opt=speed`, `--opt=size` | A two-way choice without a branch |
+| `cfg-clean` | `--opt=basic`, `--opt=speed`, `--opt=size` | Jump threading and dead jumps |
+| `tail-recursion` | `--opt=speed`, `--opt=size` | A self tail call becomes a loop |
+| `idiom` | `--opt=speed`, `--opt=size` | Copy and clear loops become block operations |
+| `sroa` | `--opt=basic`, `--opt=speed`, `--opt=size` | Split a local aggregate into scalars |
+| `unroll` | `--opt=speed` | Loop unrolling |
+| `pre` | `--opt=speed`, `--opt=size` | Partial redundancy elimination |
+| `switch-thread` | `--opt=speed` | State machines jump straight to the next case |
+| `licm-mem` | `--opt=basic`, `--opt=speed`, `--opt=size` | Loads out of loops; a variable in memory kept in a register across one |
 
 Two kinds of function get less than the full pipeline at any level:
 
@@ -270,7 +285,9 @@ Two kinds of function get less than the full pipeline at any level:
   can throw, the region is removed and the function is optimized
   normally.
 
-### `-fmem2reg`, `-fno-mem2reg`
+### `--pass=mem2reg`, `--no-pass=mem2reg`
+
+GCC: `-fmem2reg`, `-fno-mem2reg`.
 
 Promote every scalar local variable whose address is never taken out of
 its stack slot and into SSA values, which the later passes and the
@@ -287,11 +304,13 @@ A `volatile` local is never promoted. A local whose address is taken
 stays in memory, unless `sroa` first shows that the address is used only
 for loads and stores at constant offsets.
 
-This pass is what makes most of the optimizer effective. With `-fno-mem2reg`,
+This pass is what makes most of the optimizer effective. With `--no-pass=mem2reg`,
 locals stay in memory and the other global passes see little. Default:
-on at `-O1`, `-O2` and `-Os`.
+on at `--opt=basic`, `--opt=speed` and `--opt=size`.
 
-### `-fgcse`, `-fno-gcse`
+### `--pass=gcse`, `--no-pass=gcse`
+
+GCC: `-fgcse`, `-fno-gcse`.
 
 Global common-subexpression elimination. An integer computation already
 made in a block that dominates the current one is reused instead of
@@ -302,9 +321,11 @@ keeping it live costs more than rebuilding it). A constant or a local's
 address is cheaper to recompute than to keep live, and memory reads are
 left to `load-cse`. Floating-point operations are never reused.
 `EMBCC_NO_GCSE_ADDR=1` stops the reuse of addresses. Default: on at
-`-O2` and `-Os`.
+`--opt=speed` and `--opt=size`.
 
-### `-fload-cse`, `-fno-load-cse`
+### `--pass=load-cse`, `--no-pass=load-cse`
+
+GCC: `-fload-cse`, `-fno-load-cse`.
 
 Remove a load that repeats an earlier load of the same address on
 every path to it, with no store, call, atomic operation, fence or inline
@@ -320,16 +341,20 @@ return n + q->len;
 ```
 
 `volatile` loads are never removed, and a `volatile` store still counts
-for anything in the same object. Default: on at `-O1`, `-O2` and `-Os`.
+for anything in the same object. Default: on at `--opt=basic`, `--opt=speed` and `--opt=size`.
 
-### `-fsccp`, `-fno-sccp`
+### `--pass=sccp`, `--no-pass=sccp`
+
+GCC: `-fsccp`, `-fno-sccp`.
 
 Resolve a conditional branch whose condition is a known constant into a
 jump, and delete every block that is then unreachable. The constants
 typically come from inlining a call with a constant argument, or from a
-configuration macro. Default: on at `-O1`, `-O2` and `-Os`.
+configuration macro. Default: on at `--opt=basic`, `--opt=speed` and `--opt=size`.
 
-### `-flicm`, `-fno-licm`
+### `--pass=licm`, `--no-pass=licm`
+
+GCC: `-flicm`, `-fno-licm`.
 
 The loop passes:
 
@@ -343,7 +368,7 @@ The loop passes:
   cannot fault are moved, so a load through a pointer, a division and a
   remainder stay in the loop. A read of a local variable is moved only
   when nothing in the loop writes it and its address is never taken.
-- **Memory in loops** (`-fno-licm-mem` turns off just this). A load
+- **Memory in loops** (`--no-pass=licm-mem` turns off just this). A load
   whose address does not change is moved in front of the loop when
   nothing in the loop can write those bytes -- no store that may reach
   them, no call that may write memory, and no inline asm, atomic or
@@ -358,19 +383,21 @@ The loop passes:
 - **Induction-variable strength reduction.** An array access `a[i]` in a
   loop is turned into a pointer that advances by the element size each
   iteration.
-- **Live-range splitting** (not at `-Os`). A value that is live across a
+- **Live-range splitting** (not at `--opt=size`). A value that is live across a
   call outside a loop, but not across any call inside it, gets a second
   name inside the loop, so the loop does not keep it in a callee-saved
   register.
 
-Default: on at `-O1`, `-O2` and `-Os` (live-range splitting at `-O1` and `-O2` only).
+Default: on at `--opt=basic`, `--opt=speed` and `--opt=size` (live-range splitting at `--opt=basic` and `--opt=speed` only).
 
-### `-fvectorize`, `-fno-vectorize`
+### `--pass=vectorize`, `--no-pass=vectorize`
+
+GCC: `-fvectorize`, `-fno-vectorize`.
 
 Rewrite a loop to process 16 bytes per iteration with SSE2 vector
 instructions. Only the x86-64 code generator has vector instructions, so
-the default is on at `-O2` for x86-64 and off everywhere else. Forcing it
-on for another target with `-fvectorize` stops the compilation as soon as
+the default is on at `--opt=speed` for x86-64 and off everywhere else. Forcing it
+on for another target with `--pass=vectorize` stops the compilation as soon as
 a loop is vectorized, with an error such as:
 
 ```text
@@ -394,28 +421,24 @@ A loop is vectorized when all of the following hold:
 
 A loop over arrays reached through a pointer is not vectorized.
 
-Default: on at `-O2` for x86-64. Off at `-Os`.
+Default: on at `--opt=speed` for x86-64. Off at `--opt=size`.
 
-<!-- BUG, reported to the lead: vec_op_char (src/opt/vectorize.c) does not check
-     i->flt, so `float a[N], b[N], c[N]; a[i] = b[i] + c[i]` with a
-     constant N is vectorized with paddd (integer add) on x86-64 at -O2.
-     Seen with embcc inspect ir v.c -O2 / llvm-objdump. The note below
-     should be removed when that is fixed. -->
+A loop over `float` or `double` arrays is not vectorized. `--remarks`
+reports each loop that is.
 
-**Known problem:** on x86-64 at `-O2`, a loop of this shape over `float`
-or `double` arrays is vectorized with integer lane operations and
-computes wrong results. Compile such code with `-fno-vectorize` until
-this is fixed. `-fremarks` reports each loop it vectorizes.
+### `--pass=inline`, `--no-pass=inline`
 
-### `-finline`, `-fno-inline`
+GCC: `-finline`, `-fno-inline`.
 
 Replace a call to a small function defined in the same translation unit
 with the function's body. See [Inlining](#inlining) for the budgets and
-for what is never inlined. Default: on at `-O2` and `-Os`, with a smaller
-budget at `-Os`; at `-O1`, only for a `static` function with a single
+for what is never inlined. Default: on at `--opt=speed` and `--opt=size`, with a smaller
+budget at `--opt=size`; at `--opt=basic`, only for a `static` function with a single
 caller and for an `always_inline` function.
 
-### `-fdse`, `-fno-dse`
+### `--pass=dse`, `--no-pass=dse`
+
+GCC: `-fdse`, `-fno-dse`.
 
 Dead-store elimination. Within a basic block, a store is removed when a
 later store writes the same address at the same width and nothing in
@@ -432,18 +455,22 @@ same pointer value: the same field, or a wider store over a narrower one
 keeps the earlier store unless it reads other bytes of the same pointer
 or a different object. A `volatile` store is never removed. (A store to a
 local that is never read at all is removed by dead-code elimination at
-`-O1`.) Default: on at `-O1`, `-O2` and `-Os`.
+`--opt=basic`.) Default: on at `--opt=basic`, `--opt=speed` and `--opt=size`.
 
-### `-fdiv-magic`, `-fno-div-magic`
+### `--pass=div-magic`, `--no-pass=div-magic`
+
+GCC: `-fdiv-magic`, `-fno-div-magic`.
 
 Replace a 32-bit division or remainder by a constant with a
 multiplication by a "magic" constant and shifts, signed or unsigned.
 64-bit divisions are left alone, because the 128-bit product they would
 need is a library call on most targets. Unsigned division by a power of
-two is already a shift at `-O1`. Default: on at `-O1`, `-O2` and `-Os`, because
+two is already a shift at `--opt=basic`. Default: on at `--opt=basic`, `--opt=speed` and `--opt=size`, because
 the multiply sequence is also smaller than a divide on these targets.
 
-### `-fif-convert`, `-fno-if-convert`
+### `--pass=if-convert`, `--no-pass=if-convert`
+
+GCC: `-fif-convert`, `-fno-if-convert`.
 
 Turn a branch whose two arms each only copy an already computed value
 into a select:
@@ -455,10 +482,12 @@ x = c ? a : b;      /* no branch */
 A select evaluates both arms, so only arms that are plain values are
 converted; an arm with a load, a call or anything that can fault keeps
 its branch. On x86-64 a select is a `cmov`, on AArch64 a `csel`; the other
-code generators lower it in their own way. Default: on at `-O1`, `-O2`
-and `-Os`.
+code generators lower it in their own way. Default: on at `--opt=basic`, `--opt=speed`
+and `--opt=size`.
 
-### `-fcfg-clean`, `-fno-cfg-clean`
+### `--pass=cfg-clean`, `--no-pass=cfg-clean`
+
+GCC: `-fcfg-clean`, `-fno-cfg-clean`.
 
 Simplify the control-flow graph:
 
@@ -469,9 +498,11 @@ Simplify the control-flow graph:
   merged and tested again; each arm jumps to where it is going;
 - unreachable code is removed.
 
-Default: on at `-O1`, `-O2` and `-Os`.
+Default: on at `--opt=basic`, `--opt=speed` and `--opt=size`.
 
-### `-ftail-recursion`, `-fno-tail-recursion`
+### `--pass=tail-recursion`, `--no-pass=tail-recursion`
+
+GCC: `-ftail-recursion`, `-fno-tail-recursion`.
 
 Turn `return f(...)`, where `f` is the function itself, into an
 assignment of the new arguments and a jump to the top of the function.
@@ -479,9 +510,11 @@ The recursion becomes a loop that uses no stack and that the loop
 passes can optimize. It is not done when the address of a parameter is
 taken. Calls to other functions in tail position are handled by the code
 generator (see [Code generation by level](#code-generation-by-level)).
-Default: on at `-O2` and `-Os`.
+Default: on at `--opt=speed` and `--opt=size`.
 
-### `-fidiom`, `-fno-idiom`
+### `--pass=idiom`, `--no-pass=idiom`
+
+GCC: `-fidiom`, `-fno-idiom`.
 
 Recognize a loop with a constant trip count that does nothing but clear
 an array or copy one array to another, and replace it with a single
@@ -495,9 +528,11 @@ for (i = 0; i < 64; i++) a[i] = b[i];   /* one 256-byte copy */
 For a copy, both arrays must be distinct global objects. The block
 operation is expanded inline by every code generator; no call to
 `memset` or `memcpy` is introduced (x86-64 uses `rep movsq` and
-`rep stosq` for blocks over 256 bytes). Default: on at `-O2` and `-Os`.
+`rep stosq` for blocks over 256 bytes). Default: on at `--opt=speed` and `--opt=size`.
 
-### `-fsroa`, `-fno-sroa`
+### `--pass=sroa`, `--no-pass=sroa`
+
+GCC: `-fsroa`, `-fno-sroa`.
 
 Scalar replacement of aggregates. A local `struct`, `union` or array
 whose address is used only for loads and stores at constant offsets is
@@ -508,9 +543,11 @@ split into at most 16 pieces.
 It is not split when it is `volatile`, when any access is `volatile`,
 when it is indexed by a variable, when its address is passed to a
 function or stored, or when two accesses overlap with different widths
-(a union used to reinterpret bytes). Default: on at `-O1`, `-O2` and `-Os`.
+(a union used to reinterpret bytes). Default: on at `--opt=basic`, `--opt=speed` and `--opt=size`.
 
-### `-funroll`, `-fno-unroll`
+### `--pass=unroll`, `--no-pass=unroll`
+
+GCC: `-funroll`, `-fno-unroll`.
 
 Copy the body of a counted loop several times with one test between
 groups of copies. A loop is unrolled when it is bottom-tested (after
@@ -526,7 +563,7 @@ rotation), steps its induction variable by 1, compares it with a signed
 
 The number of copies is the largest power of two, up to 8, for which
 copies times body is at most 96. The original loop is kept unchanged after the unrolled one and runs the
-remaining iterations. Default: on at `-O2`; off at `-Os`.
+remaining iterations. Default: on at `--opt=speed`; off at `--opt=size`.
 
 A loop whose trip count is a constant is copied whole instead, and no
 loop is left, when the count is at most 32 and the copies come to at
@@ -536,7 +573,9 @@ from one constant offset of a base to another. A body that calls a
 runtime helper (soft-float arithmetic, for example) is not copied
 whole.
 
-### `-fpre`, `-fno-pre`
+### `--pass=pre`, `--no-pass=pre`
+
+GCC: `-fpre`, `-fno-pre`.
 
 Partial redundancy elimination. When an expression is computed on some
 paths to a point and computed again at that point, it is computed on the
@@ -548,9 +587,11 @@ return a * b;          /* a * b is computed once on each path */
 ```
 
 The insertion never makes any path compute the expression more often
-than before. Default: on at `-O2` and `-Os`.
+than before. Default: on at `--opt=speed` and `--opt=size`.
 
-### `-fswitch-thread`, `-fno-switch-thread`
+### `--pass=switch-thread`, `--no-pass=switch-thread`
+
+GCC: `-fswitch-thread`, `-fno-switch-thread`.
 
 In a loop around a `switch` on a state variable, where an arm sets the
 state to a constant, jump from the end of that arm straight to the case
@@ -559,11 +600,11 @@ The code between the arm and the switch (the loop's increment and exit
 tests) is copied once for each such case. This is the shape of a lexer,
 a protocol parser or a hand-written state machine. At most 48 blocks are
 copied per switch and 400 IR instructions added per function. Default:
-on at `-O2`; off at `-Os`.
+on at `--opt=speed`; off at `--opt=size`.
 
 ## Passes with no switch
 
-These run whenever the IR optimizer runs (`-O1` and above), and cannot
+These run whenever the IR optimizer runs (`--opt=basic` and above), and cannot
 be turned off individually:
 
 - **Constant folding** of integer operations at their width and
@@ -589,7 +630,7 @@ be turned off individually:
   variable whose value is unused is removed, unless the variable is
   `volatile`. Loads through a pointer, divisions (which can trap), stores
   and branches are never treated as dead code, and neither are calls,
-  except that at `-O2` an unused call to a function found to touch no
+  except that at `--opt=speed` an unused call to a function found to touch no
   memory and not to throw is removed.
 - **Store-to-load forwarding** for local variables that are not
   `volatile` and whose address is not taken, within a basic block, and
@@ -599,7 +640,7 @@ be turned off individually:
 - Instruction-selection preparation: constants become immediate
   operands, and constants and addresses are placed next to their use.
 
-At `-O2` and `-Os` these also run:
+At `--opt=speed` and `--opt=size` these also run:
 
 - **Attribute inference.** Each function is analyzed for whether it
   writes memory its caller can see, or reads any. A call to a function
@@ -615,20 +656,20 @@ At `-O2` and `-Os` these also run:
 
 ## Inlining
 
-The inliner runs at `-O1` and above, before the per-function passes. At
-`-O0` it runs too, for `always_inline` functions only (the reason code
+The inliner runs at `--opt=basic` and above, before the per-function passes. At
+`--opt=none` it runs too, for `always_inline` functions only (the reason code
 for any other call is `not-always_inline-at-O0`). At
-`-O1` it inlines only a `static` function with a single caller and an
+`--opt=basic` it inlines only a `static` function with a single caller and an
 `always_inline` function (the reason code for any other call is
 `not-a-sole-callee-at-O1`). Sizes are counted in EmbIR instructions, as
 `embcc inspect ir` prints them, before the callee is optimized.
 
 | Limit | Value |
 |---|---|
-| Largest callee copied into a caller, `-O2` | 24 IR instructions |
-| Largest callee copied into a caller, `-Os` | 6 IR instructions |
+| Largest callee copied into a caller, `--opt=speed` | 24 IR instructions |
+| Largest callee copied into a caller, `--opt=size` | 6 IR instructions |
 | Largest `static` callee with exactly one call site and its address never taken (it is moved, not copied) | 2000 IR instructions, at every level that inlines |
-| Largest `static` callee with exactly two call sites and its address never taken, `-O2` | 200 IR instructions |
+| Largest `static` callee with exactly two call sites and its address never taken, `--opt=speed` | 200 IR instructions |
 | A caller stops growing at | 800 IR instructions |
 | Inlined calls per caller, at most | 64 |
 
@@ -653,7 +694,7 @@ A call is never inlined when:
   computed `goto`, or a call to a function that returns a structure;
 - the caller has a C++ exception region or uses `__int128`.
 
-`-fremarks` reports every decision with its reason, for example:
+`--remarks` reports every decision with its reason, for example:
 
 ```text
 big.c:2: remark: not-inlined 'helper': 45 instructions, budget 24 [inline/callee-too-large]
@@ -667,10 +708,10 @@ function. See [Optimization remarks](diagnostics.md#optimization-remarks).
 ## Switch lowering
 
 A `switch` is lowered when the IR is generated, so the rule applies at
-every level, `-O0` included. A jump table is used when all of these
+every level, `--opt=none` included. A jump table is used when all of these
 hold:
 
-| Condition | `-O0` to `-O3` | `-Os`, `-Oz` |
+| Condition | `--opt=none` to `--opt=max` | `--opt=size`, `--opt=min-size` |
 |---|---|---|
 | Number of cases | at least 4 | at least 6 |
 | Span from lowest to highest case value | at most 4 × cases + 4 | at most 2 × cases |
@@ -683,10 +724,10 @@ on the case values, ending in a chain of up to four equality tests.
 ## Code generation by level
 
 The code generators read one fact: whether the level is at least 1.
-`-O1` to `-O3`, `-Os` and `-Oz` generate code the same way; only function
-alignment checks for `-Os`.
+`--opt=basic` to `--opt=max`, `--opt=size` and `--opt=min-size` generate code the same way; only function
+alignment checks for `--opt=size`.
 
-At `-O1` and above, every code generator:
+At `--opt=basic` and above, every code generator:
 
 - **allocates registers** to values, including callee-saved registers,
   which are then saved and restored. On x86-64 and AArch64, a function
@@ -697,7 +738,7 @@ At `-O1` and above, every code generator:
 - **makes tail calls**: a call immediately followed by a return of its
   value becomes a jump, under the conditions in the table below.
 
-| Target | Specifics at `-O1` and above | Tail calls (`-O1` and above) |
+| Target | Specifics at `--opt=basic` and above | Tail calls (`--opt=basic` and above) |
 |---|---|---|
 | x86-64 | A leaf function with no stack frame omits `push rbp`; an ELF function that only saves registers uses pushes and no frame pointer; a shared epilogue for functions with several returns. Frameless and push-only functions are not made with `-g`. | Direct calls; no structure return; caller not variadic, no `alloca`, no computed `goto`, no exception region, no address of a local taken; all arguments in registers; not for the Windows convention. |
 | AArch64 | A leaf function with no stack frame omits the `x29`/`x30` frame record (not with `-g`). | Direct, non-variadic calls; result at most 8 bytes, not a structure or floating point; function has a single return; no `alloca`, no exception region, no address of a local taken; all arguments in registers. Not with `-g`. |
@@ -705,13 +746,13 @@ At `-O1` and above, every code generator:
 | RISC-V | RV32: each function is generated with and without register pairs and the shorter is kept; compressed branches and jumps. | As AArch64, result at most XLEN. Not with `-g`. |
 | AVR | Nine allocation strategies are tried and the shortest code is kept. Not with `-g`, and not in an interrupt handler. | Not in an interrupt handler, not with `-g`; result at most 8 bytes; no argument in a register the epilogue restores. |
 
-On AVR, `-g` at `-O1` and above turns register allocation off entirely. See
+On AVR, `-g` at `--opt=basic` and above turns register allocation off entirely. See
 [Debugging](debugging.md#-g-does-not-change-the-generated-code) for every way
 `-g` changes code.
 
 ### Function alignment
 
-| Target | `-O0` to `-O3` | `-Os`, `-Oz` |
+| Target | `--opt=none` to `--opt=max` | `--opt=size`, `--opt=min-size` |
 |---|---|---|
 | x86-64 | 16 bytes, padded with `nop` | none |
 | AArch64 | 16 bytes, padded with `nop` | 4 bytes (instruction size) |
@@ -721,13 +762,13 @@ On AVR, `-g` at `-O1` and above turns register allocation off entirely. See
 
 ### Frame pointer
 
-`-fomit-frame-pointer` and `-fno-omit-frame-pointer` are accepted and
+`--no-frame-pointer` and `--frame-pointer` are accepted and
 have no effect. What each target does:
 
 | Target | Frame pointer |
 |---|---|
-| x86-64 | `rbp` at `-O0`. From `-O1`, omitted in frameless leaf functions and push-only frames, unless `-g`. |
-| AArch64 | `x29` frame record at `-O0`. From `-O1`, omitted in frameless leaf functions, unless `-g`. |
+| x86-64 | `rbp` at `--opt=none`. From `--opt=basic`, omitted in frameless leaf functions and push-only frames, unless `-g`. |
+| AArch64 | `x29` frame record at `--opt=none`. From `--opt=basic`, omitted in frameless leaf functions, unless `-g`. |
 | Thumb | None. `r7` is set up only in a function with a variable-length array or `alloca`. |
 | RISC-V | None. `s0` is set up only in a function with a variable-length array or `alloca`. |
 | AVR | `Y` (`r28:r29`), only when the function has a stack frame, stack arguments, variable arguments, a structure return, or is an interrupt handler. |
@@ -737,14 +778,14 @@ have no effect. What each target does:
 ### Signed integer overflow
 
 Signed integer arithmetic wraps in two's complement, at every level.
-EmbCC behaves as if `-fwrapv` were always given: no optimization assumes
+EmbCC behaves as if `--wrap-overflow` were always given: no optimization assumes
 that signed overflow cannot happen. For example, `x + 1 > x` is not
 folded to 1, and `(x * 2) / 2` is not folded to `x`.
 
-`-fwrapv` is accepted and changes nothing. `-fno-wrapv`, `-ftrapv`,
+`--wrap-overflow` is accepted and changes nothing. `-fno-wrapv`, `-ftrapv`,
 `-fstrict-overflow` and `-fno-strict-overflow` are not accepted
 (`unknown argument`). To find signed overflow at run time, use
-[`-fsanitize=signed-integer-overflow`](#-fsanitizechecks).
+[`--sanitize=signed-integer-overflow`](#--sanitizechecks).
 
 Unsigned arithmetic wraps, as C requires. Out-of-range conversions from
 floating point to integer are not folded at compile time.
@@ -759,7 +800,7 @@ operation reads it: `long f(int x) { return x + 1; }` returns -32768 for
 
 EmbCC does no type-based alias analysis. A store through an `int *` is
 assumed to be able to change a `float` that is later read, exactly as
-with `-fno-strict-aliasing`.
+with `--no-strict-aliasing`.
 
 It does rely on C's object model: a pointer computed from one object
 (`&a[i]`, `p->field`, `base + offset`) is assumed to point into that
@@ -778,12 +819,12 @@ overlapping, whatever their types.
 
 `restrict` is accepted and not used by the optimizer.
 `__attribute__((may_alias))` is accepted and has no effect, because
-nothing it would disable is done. `-fstrict-aliasing` and
-`-fno-strict-aliasing` are accepted and have no effect.
+nothing it would disable is done. `--strict-aliasing` and
+`--no-strict-aliasing` are accepted and have no effect.
 
 ### Floating point
 
-From `-O1` up, the optimizer evaluates `float` and `double` arithmetic
+From `--opt=basic` up, the optimizer evaluates `float` and `double` arithmetic
 whose operands are constants, and otherwise leaves a floating-point
 computation as written:
 
@@ -814,8 +855,9 @@ The evaluation assumes the default rounding mode and floating-point
 environment, so a program that changes the rounding mode with `fesetround`
 does not see it applied to arithmetic on constants.
 
-`-ffast-math`, `-fno-fast-math` and `-ffp-contract=STYLE` are not
-accepted (`unknown argument`). `#pragma STDC FP_CONTRACT` and
+`--fast-math` and `--fp-contract=STYLE` are accepted and change nothing:
+EmbCC never relaxes IEEE arithmetic and never fuses a multiply and an add
+([Invoking](invoking.md#--fast-math---no-math-errno)). `#pragma STDC FP_CONTRACT` and
 `#pragma STDC FENV_ACCESS` are accepted without a diagnostic and have no
 effect.
 
@@ -843,14 +885,14 @@ variable:
 
 The optimizer does not introduce calls to library functions. Block
 copies and clears (from structure assignment or from the
-[`idiom`](#-fidiom--fno-idiom) pass) are expanded inline. EmbCC
-recognizes no library function name as a builtin, so `-fno-builtin` and
-`-ffreestanding` are accepted and change nothing here. The code
+[`idiom`](#--passidiom---no-passidiom) pass) are expanded inline. EmbCC
+recognizes no library function name as a builtin, so `--no-builtins` and
+`--freestanding` are accepted and change nothing here. The code
 generators do call the compiler runtime for operations the target lacks
 (for example software floating point, or 64-bit division on 32-bit and
 8-bit targets); see [Libraries](libraries.md).
 
-## Run-time checks: `-fsanitize`
+## Run-time checks: `--sanitize`
 
 EmbCC's sanitizer inserts checks that **trap**: a failed check executes
 the target's trap instruction, with no runtime library and no message.
@@ -865,7 +907,9 @@ it stops instead of continuing with a wrong value.
 | RISC-V | `unimp` |
 | AVR | a branch to itself (AVR has no trapping instruction) |
 
-### `-fsanitize=CHECKS`
+### `--sanitize=CHECKS`
+
+GCC: `-fsanitize=CHECKS`.
 
 Enable the checks named in the comma-separated list `CHECKS`. Off by
 default.
@@ -883,15 +927,17 @@ Any other name is refused, by name:
 embcc: error: -fsanitize=address is not supported: EmbCC's sanitizer inserts checks that TRAP, and this one needs a runtime library to report through. The ones it has are undefined, signed-integer-overflow, integer-divide-by-zero and shift
 ```
 
-This includes `-fsanitize=all`, `null`, `alignment`, `bounds`,
+This includes `--sanitize=all`, `null`, `alignment`, `bounds`,
 `shift-base` and `float-divide-by-zero`.
 
 The checks are ordinary IR, so the optimizer removes the ones it can
-prove never fail: at `-O2` a division by a non-zero constant carries no
-check, and a shift by a constant in range carries none. At `-O0` and
-`-O1` every check stays.
+prove never fail: at `--opt=speed` a division by a non-zero constant carries no
+check, and a shift by a constant in range carries none. At `--opt=none` and
+`--opt=basic` every check stays.
 
-### `-fno-sanitize=CHECKS`
+### `--no-sanitize=CHECKS`
+
+GCC: `-fno-sanitize=CHECKS`.
 
 Remove the named checks from the set enabled so far. The same names are
 accepted.
@@ -901,7 +947,7 @@ accepted.
 Accepted for compatibility; trapping is the only mode. Note that
 `-fsanitize-trap=CHECKS` also **enables** the named checks, unlike in
 GCC and Clang, where it only selects how checks enabled by
-`-fsanitize=` report. `-fsanitize-trap` and
+`--sanitize=` report. `-fsanitize-trap` and
 `-fsanitize-undefined-trap-on-error` without a list enable nothing.
 
 Other options that start with `-fsanitize`, such as
@@ -916,12 +962,12 @@ embcc: error: -fsanitize-recover=all is not supported; EmbCC would emit ordinary
 ### `embcc inspect ir FILE [OPTIONS]`
 
 Print the EmbIR of every function as it stands after optimization at the
-level given in `OPTIONS`. At `-O0` this is the IR before any pass, so
+level given in `OPTIONS`. At `--opt=none` this is the IR before any pass, so
 comparing the two shows exactly what the optimizer changed:
 
 ```sh
-embcc inspect ir prog.c -O0 > before.ir
-embcc inspect ir prog.c -O2 > after.ir
+embcc inspect ir prog.c --opt=none > before.ir
+embcc inspect ir prog.c --opt=speed > after.ir
 diff before.ir after.ir
 ```
 
@@ -948,10 +994,12 @@ predecessors and successors, immediate dominators, and back edges
 
 ### `embcc inspect callgraph FILE [OPTIONS]`
 
-Print which function calls which, after optimization. At `-O2` a callee
+Print which function calls which, after optimization. At `--opt=speed` a callee
 that was inlined everywhere no longer appears.
 
-### `-fremarks`, `-fremarks=json`, `embcc why`
+### `--remarks`, `--remarks=json`, `embcc why`
+
+GCC: `-fremarks`, `-fremarks=json`.
 
 Report each optimization decision (inlined or not and why, variables
 promoted to registers, loops rotated, hoisted, vectorized, unrolled,
@@ -963,24 +1011,27 @@ functions dropped) on standard error. See
 Write the generated code as an assembly file. See
 [Invoking EmbCC](invoking.md).
 
-## GCC option names
+## GCC's optimization options
+
+A build written for GCC passes GCC's spellings; this is what EmbCC does
+with each. [Migrating from GCC](migrating-from-gcc.md) covers the rest of
+the command line.
 
 | GCC or Clang option | EmbCC |
 |---|---|
-| `-Og` | Accepted: `-O1` with every source variable kept in its stack slot. |
-| `-Ofast` | Accepted, same as `-O3`. |
-| `-O3` | Accepted, same as `-O2`. |
-| `-Oz` | Accepted, same as `-Os`. |
-| `-fno-inline`, `-finline` | Same meaning. |
-| `-finline-functions`, `-fno-inline-functions` | Not accepted. Use `-finline` / `-fno-inline`. |
-| `-funroll-loops`, `-fno-unroll-loops` | Not accepted. Use `-funroll` / `-fno-unroll`. |
-| `-ftree-vectorize`, `-fno-tree-vectorize` | Not accepted. Use `-fvectorize` / `-fno-vectorize`. |
-| `-fgcse`, `-fno-gcse` | Same spelling, EmbCC's pass. |
-| `-fwrapv` | Accepted; always the behavior. |
+| `-O0`, `-O1`, `-O2`, `-Os` | `--opt=none`, `--opt=basic`, `--opt=speed`, `--opt=size` |
+| `-Og` | `--opt=debug`: `--opt=basic` with every source variable kept in its stack slot. |
+| `-O3`, `-Ofast` | Accepted, the same as `--opt=speed`. |
+| `-Oz` | `--opt=min-size`, the same as `--opt=size`. |
+| `-fNAME`, `-fno-NAME` for a pass `NAME` | `--pass=NAME`, `--no-pass=NAME`; `-finline`, `-fgcse` and the rest name EmbCC's passes. |
+| `-finline-functions`, `-fno-inline-functions` | `--inline=auto`, `--inline=declared`. |
+| `-funroll-loops`, `-fno-unroll-loops` | `--unroll`, `--no-unroll`. |
+| `-ftree-vectorize`, `-fno-tree-vectorize` | Not accepted. Use `--pass=vectorize` / `--no-pass=vectorize`. |
+| `-fwrapv` | `--wrap-overflow`: accepted; always the behavior. |
 | `-fno-wrapv`, `-ftrapv` | Not accepted. |
 | `-fstrict-aliasing`, `-fno-strict-aliasing` | Accepted, no effect; there is no type-based aliasing. |
 | `-fomit-frame-pointer`, `-fno-omit-frame-pointer` | Accepted, no effect. See [Frame pointer](#frame-pointer). |
-| `-ffunction-sections`, `-fdata-sections` | Same: a section per function and per object, for the linker's `--gc-sections`. See [Invoking](invoking.md#--sectionsfunctions---sectionsdata). |
-| `-ffast-math`, `-ffp-contract=...` | Not accepted. |
+| `-ffunction-sections`, `-fdata-sections` | `--sections=functions`, `--sections=data`: a section per function and per object, for the linker's `--gc-sections`. See [Invoking](invoking.md#--sectionsfunctions---sectionsdata). |
+| `-ffast-math`, `-ffp-contract=...` | `--fast-math`, `--fp-contract=...`: accepted, no effect. `-fno-fast-math` is not accepted. |
 | `-flto` | Refused: `embcc: error: -flto is not supported; EmbCC would emit ordinary code and the flag's promise would not hold` |
 | `__attribute__((optimize(...)))`, `hot`, `cold`, `flatten` | Accepted, no effect. The level applies to the whole compilation. |

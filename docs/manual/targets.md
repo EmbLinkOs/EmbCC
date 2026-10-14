@@ -26,7 +26,7 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 | [Apple arm64](#apple-arm64) | `aarch64-apple-darwin` | Mach-O | Apple arm64 | the system linker |
 | [ARM Cortex-M](#arm-cortex-m) | `thumbv6m-none-eabi`, `thumbv8m.base-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi`, `thumbv7em-none-eabihf`, `thumbv8m.main-none-eabi`, `thumbv8m.main-none-eabihf` | ELF32 | AAPCS32, AAPCS-VFP | `embld` |
 | [ARMv7-A](#armv7-a) | `armv7a-none-eabi`, `armv7a-none-eabihf` | ELF32 | AAPCS, AAPCS-VFP | `embld` |
-| [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32`/`lp64` and the F and D conventions (`-mabi=`) | `embld` |
+| [RISC-V](#risc-v) | `riscv32-unknown-elf`, `riscv64-unknown-elf` | ELF32, ELF64 | RISC-V psABI, `ilp32`/`lp64` and the F and D conventions (`--abi=`) | `embld` |
 | [AVR](#avr) | `avr` | ELF32 | avr-gcc | `embld` |
 | [MIPS32](#mips32) | `mipsel-none-elf` | ELF32 | o32, soft float | `embld` |
 | [MIPS64](#mips64) | `mips64el-none-elf`, `mips64-none-elf` | ELF64 | n64, soft float | `embld` |
@@ -63,9 +63,9 @@ little-endian but the big-endian MIPS ones, `mips-none-elf` and
 "One shared instance" means the object is placed in `.tbss` but
 addressed as an ordinary static object: there is one copy, not one per
 thread. "Refused" under C++ means a C++ unit is not compiled for that
-target (`-fsyntax-only` still checks it); the diagnostic is in the
+target (`--syntax-only` still checks it); the diagnostic is in the
 target's Limitations. "Without exceptions" means C++ is compiled with
-`-fno-exceptions`; see [C++](cxx.md#targets). With exceptions on, the
+`--no-exceptions`; see [C++](cxx.md#targets). With exceptions on, the
 32-bit embedded targets and big-endian MIPS64 refuse the unit by name;
 on RV64, LoongArch and little-endian MIPS64 code that needs a landing
 pad (a `try` block, or a destructor that must run during unwinding) does
@@ -76,7 +76,7 @@ not compile.
 ### `--target=TRIPLE`
 
 Compile for `TRIPLE`. The option may appear anywhere on the command line;
-it is applied before every other option, so `--version`, `-dumpmachine`
+it is applied before every other option, so `--version`, `--print-target`
 and `--dump-predef` describe the target that was asked for.
 
 Each triple accepted, and the canonical name it is reported as, is listed
@@ -106,21 +106,23 @@ embcc: error: the default target 'bogus' is not one EmbCC knows
 embcc: it came from EMBCC_DEFAULT_TARGET in the environment
 ```
 
-### `-dumpmachine`
+### `--print-target`
+
+GCC: `-dumpmachine`.
 
 Print the canonical triple of the selected target and exit. It is
 answered after all other options are applied, so the ARM float options
 are reflected in it:
 
 ```sh
-embcc --target=thumbv7em-none-eabi -mfpu=fpv4-sp-d16 -mfloat-abi=hard -dumpmachine
+embcc --target=thumbv7em-none-eabi --fpu=fpv4-sp-d16 --float-abi=hard --print-target
 # thumbv7em-none-eabihf
 ```
 
 ### `--dump-predef`
 
 Print the target's predefined macros, one `#define` per line, and exit.
-The list reflects `--target=`, `-mcpu=`, `-mfpu=` and `-mfloat-abi=`. It
+The list reflects `--target=`, `--cpu=`, `--fpu=` and `--float-abi=`. It
 does not include the macros the preprocessor defines for every target
 (`__EMBCC__`, `__STDC__`, `__STDC_VERSION__`, `__STDC_HOSTED__`). EmbCC
 does not define `__GNUC__` on any target.
@@ -166,10 +168,10 @@ Notes on the table:
   Clang's is `unsigned long`, and one whose largest value lies between
   2^31 and 2^32 - 1 is an 8-byte `unsigned long long` where Clang's is a
   4-byte `unsigned long`. A fixed underlying type
-  (`enum e : unsigned char`) is used as written. `-fshort-enums` is
+  (`enum e : unsigned char`) is used as written. `--enums=short` is
   refused.
-- Plain `char`'s signedness can be changed with `-fsigned-char` and
-  `-funsigned-char` (see [Invoking EmbCC](invoking.md)); the
+- Plain `char`'s signedness can be changed with `--char=signed` and
+  `--char=unsigned` (see [Invoking EmbCC](invoking.md)); the
   `__CHAR_UNSIGNED__` macro follows the option.
 - "—" means the type does not exist on that target. Using it is an
   error: `__int128 does not exist on this target (it needs 64-bit
@@ -186,7 +188,7 @@ Notes on the table:
   `long double` are binary32 (GCC's `-m32bit-doubles`), and `size_t`,
   `ptrdiff_t` and `wchar_t` are `long` types. SPARC's binary128
   `long double` is 8-aligned. Xtensa's `wchar_t` is a 16-bit
-  `unsigned short`. On every target, `-fshort-wchar` makes `wchar_t` an
+  `unsigned short`. On every target, `--wchar=short` makes `wchar_t` an
   `unsigned short` (see [Invoking](invoking.md#--wcharshort---wcharint)).
 - MIPS64 has LP64's sizes in the RV64 column: `long` and pointers 8/8,
   `long double` 16/16 binary128, `__int128` 16/16, a signed plain `char`
@@ -207,16 +209,17 @@ and AArch64.
 
 | Option | Effect |
 |---|---|
-| `-mno-sse`, `-mno-sse2`, `-mgeneral-regs-only` | On x86-64: never use an SSE register. On AArch64: never use an FP/SIMD register. On every other target: no effect. See the x86-64 and AArch64 sections. |
-| `-mno-mmx`, `-mno-80387` | Accepted; no effect. EmbCC emits no MMX code, and these do not imply `-mno-sse`. |
-| `-mno-red-zone` | Accepted; no effect. EmbCC does not place data below the stack pointer. |
-| `-mcmodel=MODEL` | Accepted with any value; no effect. Each target uses the single code model described in its section. |
+| `--no-sse`, `-mno-sse2`, `--general-regs-only` | On x86-64: never use an SSE register. On AArch64: never use an FP/SIMD register. On every other target: no effect. See the x86-64 and AArch64 sections. |
+| `-mno-mmx`, `-mno-80387` | Accepted; no effect. EmbCC emits no MMX code, and these do not imply `--no-sse`. |
+| `--no-red-zone` | Accepted; no effect. EmbCC does not place data below the stack pointer. |
+| `--code-model=MODEL` | Accepted with any value; no effect. Each target uses the single code model described in its section. |
 
 Any other `-m` option not listed in a target's section is an error:
 `embcc: error: unknown argument '-mfoo'`. In particular `-m32` and `-m64`
-are not accepted, `-mmcu=` only on [AVR](#avr), and `-march=` and `-mabi=` only on MIPS
-and LoongArch (see [MIPS32](#mips32) and [LoongArch64](#loongarch64)).
-and (`-mabi=`) Xtensa (see [MIPS32](#mips32) and [Xtensa](#xtensa)).
+are not accepted, and `--mcu=` is refused on every target but
+[AVR](#avr). `--cpu=`, `--isa=` and `--abi=` take the values each target's
+section lists, and are refused on a target whose section does not list
+them.
 
 ## x86-64
 
@@ -232,7 +235,9 @@ and (`-mabi=`) Xtensa (see [MIPS32](#mips32) and [Xtensa](#xtensa)).
 
 ### Options
 
-#### `-mno-sse`, `-mno-sse2`, `-mgeneral-regs-only`
+#### `--no-sse`, `--general-regs-only`
+
+GCC: `-mno-sse`, `-mno-sse2`, `-mgeneral-regs-only`.
 
 Generate no SSE instructions: no XMM register is saved by a variadic
 prologue, and block copies and structure moves use general registers.
@@ -246,12 +251,14 @@ embcc: f.c:3: error: floating point needs SSE, which -mno-sse forbids
 The option does not change the predefined macros: `__SSE__` and
 `__SSE2__` remain defined.
 
-#### `-mcmodel=MODEL`, `-mno-red-zone`, `-mno-mmx`, `-mno-80387`
+#### `--code-model=MODEL`, `--no-red-zone`
+
+GCC: `-mcmodel=MODEL`, `-mno-red-zone`, `-mno-mmx`, `-mno-80387`.
 
 Accepted and ignored. The generated code is position-dependent and
 addresses data and calls RIP-relatively (calls carry
 `R_X86_64_PLT32`, data references `R_X86_64_PC32`), which also suits a
-kernel linked in the top 2 GiB (`-mcmodel=kernel`). The red zone is never
+kernel linked in the top 2 GiB (`--code-model=kernel`). The red zone is never
 used. Position-independent code is not available: `-fPIC`, `-fpic`,
 `-fPIE` and `-fpie` are refused with `embcc: error: -fPIC is not
 supported; EmbCC would emit ordinary code and the flag's promise would
@@ -332,7 +339,7 @@ Darwin triples, each with its own diagnostic:
 `x86_64-windows-gnu` produces AMD64 COFF objects. No program built this
 way has been run on Windows, and EmbCC provides no C library for it.
 Every compile prints a warning, which is on by default and can be
-silenced with `-Wno-windows-abi`:
+silenced with `--no-warn=windows-abi`:
 
 ```text
 embcc: f.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [--warn=windows-abi]
@@ -365,7 +372,7 @@ refused:
 | file-scope `__asm__` with labels or symbols | `a file-scope asm block with labels or symbol references is not supported for a Windows target yet` |
 | any C++ translation unit | `C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written` |
 
-C++ is refused even with `-fno-exceptions`, because C++ always gets
+C++ is refused even with `--no-exceptions`, because C++ always gets
 unwind tables.
 
 ### Predefined macros
@@ -401,7 +408,7 @@ libc-linux-x86_64` and linked automatically. On `x86_64-elf`, link
 ### Limitations
 
 - `embcc` without `-c` links the ELF x86-64 triples, and the ARM, RISC-V
-  and AVR firmware targets given a memory map (`-T` or
+  and AVR firmware targets given a memory map (`--link-script` or
   `-Wl,-Ttext`/`-Tdata`). For AArch64 ELF, macOS and Windows it stops with
   `embcc: error: cannot link for TRIPLE`; compile with `-c` and link
   separately. See [Linking](invoking.md#linking).
@@ -427,7 +434,9 @@ use an AArch64 ELF linker, or the system linker on macOS.
 
 ### Options
 
-#### `-mgeneral-regs-only`, `-mno-sse`, `-mno-sse2`
+#### `--general-regs-only`, `--no-sse`
+
+GCC: `-mgeneral-regs-only`, `-mno-sse`, `-mno-sse2`.
 
 Never touch a floating-point or SIMD register, as a kernel must before
 `CPACR_EL1.FPEN` enables them. A variadic prologue then saves no `q`
@@ -520,7 +529,7 @@ As for x86-64, plus the binary128 `long double` routines (`softtf.c`).
 The ARMv6-M profile in Thumb-1, ARMv8-M Baseline in Thumb-1 with the
 32-bit instructions Baseline adds, and the ARMv7-M, ARMv7E-M and ARMv8-M
 Mainline profiles in Thumb-2. Both ARMv8-M profiles support the Secure
-side of TrustZone-M ([`-mcmse`](#trustzone-m-cmse)). Every Cortex-M
+side of TrustZone-M ([`--cmse`](#trustzone-m-cmse)). Every Cortex-M
 target is freestanding.
 
 ### Triples
@@ -531,7 +540,7 @@ target is freestanding.
 | `thumbv8m.base-none-eabi` | `thumbv8m.base`, `armv8m.base-none-eabi` | ARMv8-M Baseline | soft | Cortex-M23 |
 | `thumbv7m-none-eabi` | `thumbv7m`, `armv7m-none-eabi`, `arm-none-eabi` | ARMv7-M | soft | Cortex-M3 |
 | `thumbv7em-none-eabi` | `thumbv7em`, `armv7em-none-eabi` | ARMv7E-M | soft | Cortex-M4, M7 |
-| `thumbv7em-none-eabihf` | | ARMv7E-M | hard, FPv4-SP-D16; FPv5-D16 with `-mcpu=cortex-m7` | Cortex-M4F; Cortex-M7 |
+| `thumbv7em-none-eabihf` | | ARMv7E-M | hard, FPv4-SP-D16; FPv5-D16 with `--cpu=cortex-m7` | Cortex-M4F; Cortex-M7 |
 | `thumbv8m.main-none-eabi` | `thumbv8m.main`, `thumbv8m-none-eabi`, `armv8m.main-none-eabi` | ARMv8-M Mainline | soft | Cortex-M33 |
 | `thumbv8m.main-none-eabihf` | | ARMv8-M Mainline | hard, FPv5-SP-D16 | Cortex-M33 with FPU |
 
@@ -539,10 +548,10 @@ target is freestanding.
 or for the ARM instruction set.
 
 The architecture changes the object's build attributes, the predefined
-macros and `-dumpmachine`. The instructions generated for ARMv7-M and
+macros and `--print-target`. The instructions generated for ARMv7-M and
 ARMv7E-M are the same: the code generator does not use the DSP extension.
 Where the part has it -- ARMv7E-M, and ARMv8-M Mainline with
-`-mcpu=cortex-m33` or `-march=armv8-m.main+dsp` -- its instructions are
+`--cpu=cortex-m33` or `--isa=armv8-m.main+dsp` -- its instructions are
 accepted in inline asm and `.s` files and its macros are defined, which is
 what CMSIS's `cmsis_gcc.h` and CMSIS-DSP select their SIMD code on
 ([Inline assembly](inline-asm.md#the-dsp-extension), `<arm_acle.h>`).
@@ -550,16 +559,22 @@ what CMSIS's `cmsis_gcc.h` and CMSIS-DSP select their SIMD code on
 
 ### Options
 
-#### `-mthumb`
+#### `--isa=thumb`
+
+GCC: `-mthumb`.
 
 Accepted; no effect. Thumb is the only instruction set.
 
-#### `-marm`
+#### `--isa=arm`
+
+GCC: `-marm`.
 
 Refused: `-marm is not supported: a Cortex-M has no ARM instruction set,
 only Thumb`.
 
-#### `-mcpu=CPU`
+#### `--cpu=CPU`
+
+GCC: `-mcpu=CPU`.
 
 Select the architecture variant by core. `cortex-m0`, `cortex-m0plus`
 and `cortex-m1` select ARMv6-M on any ARM triple, as
@@ -575,36 +590,40 @@ ARMv8-M part raises the level. Any other value is an error:
 embcc: error: -mcpu=cortex-m55 is not a part EmbCC knows: it emits ARMv6-M (cortex-m0, m0plus, m1), ARMv8-M Baseline (cortex-m23), ARMv7-M and ARMv7E-M (cortex-m3, m4, m7) and ARMv8-M Mainline (cortex-m33)
 ```
 
-#### `-mfpu=FPU`
+#### `--fpu=FPU`
+
+GCC: `-mfpu=FPU`.
 
 Name the floating-point unit. EmbCC knows three: `fpv4-sp-d16`, the
 Cortex-M4F's unit, which requires ARMv7E-M (a `thumbv7em` triple, or
-`-mcpu=cortex-m4`, `m7` or `m33`); `fpv5-d16`, the Cortex-M7's
-double-precision unit, which requires ARMv7E-M and, when `-mcpu=` is
-given, `-mcpu=cortex-m7`; and `fpv5-sp-d16`, the Cortex-M33's, which
+`--cpu=cortex-m4`, `m7` or `m33`); `fpv5-d16`, the Cortex-M7's
+double-precision unit, which requires ARMv7E-M and, when `--cpu=` is
+given, `--cpu=cortex-m7`; and `fpv5-sp-d16`, the Cortex-M33's, which
 requires a `thumbv8m.main` triple. `none`, `soft` and `auto` name no
-unit. The FPU only takes effect with `-mfloat-abi=softfp` or `hard`.
-`-mcpu=cortex-m7` with `thumbv7em-none-eabihf` and no `-mfpu=` means
+unit. The FPU only takes effect with `--float-abi=softfp` or `hard`.
+`--cpu=cortex-m7` with `thumbv7em-none-eabihf` and no `--fpu=` means
 `fpv5-d16`.
 
 | Mistake | Diagnostic |
 |---|---|
-| any other unit | `-mfpu=fpv5-sp-d16 is not supported on thumbv7em-none-eabi: EmbCC emits VFP for the Cortex-M4F's unit (-mfpu=fpv4-sp-d16) and the Cortex-M7's (-mfpu=fpv5-d16) and nothing else: another unit's instruction set and attributes are unchecked here` |
-| `fpv5-d16` on ARMv8-M | `-mfpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (-mfpu=fpv5-sp-d16) and nothing else: another unit's instruction set and attributes are unchecked here` |
-| `fpv4-sp-d16` or `fpv5-d16` on ARMv7-M | `-mfpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=cortex-m4` |
-| `fpv5-d16` on another part | `-mfpu=fpv5-d16 is the Cortex-M7's double-precision unit, and -mcpu=cortex-m4 does not have it; the Cortex-M4F's is -mfpu=fpv4-sp-d16` |
-| any unit, or `softfp` or `hard`, on ARMv6-M | `-mfpu=fpv5-d16 on thumbv6m-none-eabi: an ARMv6-M core (Cortex-M0, M0+, M1) has no FPU, so floating point is soft and travels in the core registers` |
-| the same on ARMv8-M Baseline | `-mfpu=fpv5-sp-d16 on thumbv8m.base-none-eabi: an ARMv8-M Baseline core (Cortex-M23) has no FPU, so floating point is soft and travels in the core registers` |
+| any other unit | `--fpu=fpv5-sp-d16 is not supported on thumbv7em-none-eabi: EmbCC emits VFP for the Cortex-M4F's unit (--fpu=fpv4-sp-d16) and the Cortex-M7's (--fpu=fpv5-d16) and nothing else: another unit's instruction set and attributes are unchecked here` |
+| `fpv5-d16` on ARMv8-M | `--fpu=fpv5-d16 is not supported on thumbv8m.main-none-eabi: EmbCC emits VFP for the Cortex-M33's unit (--fpu=fpv5-sp-d16) and nothing else: another unit's instruction set and attributes are unchecked here` |
+| `fpv4-sp-d16` or `fpv5-d16` on ARMv7-M | `--fpu=fpv4-sp-d16 is an ARMv7E-M unit, and the part is ARMv7-M (a Cortex-M3 has no FPU); add --cpu=cortex-m4` |
+| `fpv5-d16` on another part | `--fpu=fpv5-d16 is the Cortex-M7's double-precision unit, and --cpu=cortex-m4 does not have it; the Cortex-M4F's is --fpu=fpv4-sp-d16` |
+| any unit, or `softfp` or `hard`, on ARMv6-M | `--fpu=fpv5-d16 on thumbv6m-none-eabi: an ARMv6-M core (Cortex-M0, M0+, M1) has no FPU, so floating point is soft and travels in the core registers` |
+| the same on ARMv8-M Baseline | `--fpu=fpv5-sp-d16 on thumbv8m.base-none-eabi: an ARMv8-M Baseline core (Cortex-M23) has no FPU, so floating point is soft and travels in the core registers` |
 
-#### `-mfloat-abi=ABI`
+#### `--float-abi=ABI`
+
+GCC: `-mfloat-abi=ABI`.
 
 `soft`, `softfp` or `hard`. The default is `soft`, or `hard` for an
 `-eabihf` triple, which also implies that architecture's FPU.
-`-mfpu=` and `-mfloat-abi=` are combined after all options are read, so
+`--fpu=` and `--float-abi=` are combined after all options are read, so
 their order does not matter, and an explicit value overrides what an
 `-eabihf` triple implies.
 
-| `-mfloat-abi=` | Arithmetic | Floating-point arguments and results | `-dumpmachine` |
+| `--float-abi=` | Arithmetic | Floating-point arguments and results | `--print-target` |
 |---|---|---|---|
 | `soft` | Library calls, even if an FPU is named | Core registers | `-eabi` |
 | `softfp` | `float` on the FPU; `double` on the FPU with `fpv5-d16`, else by library call | Core registers; links with `soft` objects | `-eabi` |
@@ -624,7 +643,7 @@ ABI. `fpv5-d16` computes in double precision as well:
   `__floatdidf`, `__floatundidf` and the four `float` ones): VFP has no
   instruction for a 64-bit integer. Built for this unit,
   `lib/rt/softfp.c` contains those eight routines only.
-- With the register allocator on (`-O1` and up), a double gets one of
+- With the register allocator on (`--opt=basic` and up), a double gets one of
   `d8`-`d15`, the callee-saved half of the file, which a function saves
   with `vpush {d8-...}`. `d0` and `d1` are scratch, and `d0`-`d7` carry
   the hard-float arguments and results. A double the allocator cannot
@@ -638,18 +657,20 @@ ABI. `fpv5-d16` computes in double precision as well:
 
 | Mistake | Diagnostic |
 |---|---|
-| an unknown value | `-mfloat-abi=foo is not an ARM float ABI: it is one of soft, softfp and hard` |
-| `softfp` or `hard` with no FPU | `-mfloat-abi=hard needs an FPU to use: add -mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 (Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)` |
-| any ARM option on another target | `-mcpu=cortex-m3 is an ARM option, and the target is riscv32-unknown-elf` |
+| an unknown value | `--float-abi=foo is not an ARM float ABI: it is one of soft, softfp and hard` |
+| `softfp` or `hard` with no FPU | `--float-abi=hard needs an FPU to use: add --fpu=fpv4-sp-d16 (Cortex-M4F), --fpu=fpv5-d16 (Cortex-M7) or --fpu=fpv5-sp-d16 (Cortex-M33)` |
+| any ARM option on another target | `--cpu=cortex-m3 is an ARM option, and the target is riscv32-unknown-elf` |
 
-#### `-mcmse`
+#### `--cmse`
+
+GCC: `-mcmse`.
 
 Compile for the Secure state of an ARMv8-M part with the security
 extension: see [TrustZone-M](#trustzone-m-cmse).
 
 ### ARMv8-M Baseline
 
-`thumbv8m.base-none-eabi` (or `-mcpu=cortex-m23`) is the ARMv6-M code
+`thumbv8m.base-none-eabi` (or `--cpu=cortex-m23`) is the ARMv6-M code
 generator with what ARMv8-M Baseline adds where it replaces a call:
 
 - a 32-bit `/` is `sdiv` or `udiv`, and `%` is the quotient multiplied
@@ -684,7 +705,7 @@ accept exactly these at this level
 ([Inline assembly](inline-asm.md#armv8-m-security-and-acquirerelease-instructions)).
 `tests/golden/thumbv8mbase-encoding.sh` checks every one against llvm-mc
 and the refusals line for line, and `tests/golden/thumbv8mbase-exec.sh`
-runs the exec corpus at `-O0` to `-Os`, with `lib/libc` and `lib/rt`
+runs the exec corpus at `--opt=none` to `--opt=size`, with `lib/libc` and `lib/rt`
 built for the triple, and scans every object it builds.
 
 QEMU has no Cortex-M23, so that suite runs Baseline code on the
@@ -698,7 +719,7 @@ Baseline), `Tag_THUMB_ISA_use` 3, `Tag_CPU_unaligned_access` 0.
 
 ### TrustZone-M (CMSE)
 
-`-mcmse` compiles for the Secure state of an ARMv8-M part with the
+`--cmse` compiles for the Secure state of an ARMv8-M part with the
 security extension (ACLE's CMSE), on `thumbv8m.main-none-eabi` and
 `thumbv8m.base-none-eabi`. `__ARM_FEATURE_CMSE` is 3 with it, and 1 (the
 `tt` instruction) on every ARMv8-M target without it.
@@ -755,8 +776,8 @@ and GCC do: `__attribute__((cmse_nonsecure_entry)) is ignored without
 
 | Construct | Diagnostic |
 |---|---|
-| `-mcmse` below ARMv8-M | `-mcmse is the Secure side of ARMv8-M's security extension, and thumbv7m-none-eabi is not ARMv8-M: use thumbv8m.main-none-eabi or thumbv8m.base-none-eabi` |
-| `-mcmse` with an FPU | `-mcmse with an FPU (-mfpu=, -mfloat-abi=softfp or hard, or an -eabihf triple) is not supported: EmbCC does not clear the floating-point registers a cmse_nonsecure_entry function must clear; build the Secure side with -mfloat-abi=soft` |
+| `--cmse` below ARMv8-M | `--cmse is the Secure side of ARMv8-M's security extension, and thumbv7m-none-eabi is not ARMv8-M: use thumbv8m.main-none-eabi or thumbv8m.base-none-eabi` |
+| `--cmse` with an FPU | `--cmse with an FPU (--fpu=, --float-abi=softfp or hard, or an -eabihf triple) is not supported: EmbCC does not clear the floating-point registers a cmse_nonsecure_entry function must clear; build the Secure side with --float-abi=soft` |
 | an entry function with stack arguments | `cmse_nonsecure_entry function 'f' requires arguments on the stack, which is the Non-secure caller's (CMSE allows r0-r3 only)` |
 | an entry function returning through memory | `cmse_nonsecure_entry function 'f' would return its value through memory the Non-secure caller owns (CMSE allows a result in r0-r3 only)` |
 | a static entry function | `cmse_nonsecure_entry function 'f' has internal linkage: the Non-secure state enters it through a veneer the linker makes from its global symbol` |
@@ -776,7 +797,7 @@ script.
 
 ### Calling convention: AAPCS32
 
-The base standard applies with `-mfloat-abi=soft` and `softfp`:
+The base standard applies with `--float-abi=soft` and `softfp`:
 
 - Arguments fill `r0`–`r3`, then the stack. An argument with 8-byte
   alignment (`long long`, `double`, or a composite whose natural
@@ -797,7 +818,7 @@ The base standard applies with `-mfloat-abi=soft` and `softfp`:
 - The stack is 8-byte aligned at every public interface. An unnamed
   bit-field affects a structure's alignment.
 
-With `-mfloat-abi=hard` (AAPCS-VFP), floating-point arguments travel in
+With `--float-abi=hard` (AAPCS-VFP), floating-point arguments travel in
 the VFP registers instead:
 
 - A `float`, a `double`, or a homogeneous aggregate of one to four
@@ -821,7 +842,7 @@ function:
 |---|---|
 | on a non-ARM target | `__attribute__((pcs)) names an ARM calling convention, and this is not an ARM target` |
 | another value | `pcs wants "aapcs" or "aapcs-vfp"` |
-| `aapcs-vfp` without an FPU | `pcs("aapcs-vfp") passes floating point in VFP registers, and this part has no FPU: add -mfpu=` |
+| `aapcs-vfp` without an FPU | `pcs("aapcs-vfp") passes floating point in VFP registers, and this part has no FPU: add --fpu=` |
 | on something other than a function | `pcs is only supported on a function declaration` |
 | two different values | `two different pcs attributes on one declaration` |
 
@@ -846,20 +867,20 @@ The tables are those of `clang -target thumbv7m-none-eabi` and
 | `__arm__`, `__thumb__`, `__thumb2__`, `__ARM_EABI__`, `__ARMEL__` | 1 | 1 |
 | `__ARM_ARCH` | 7 | 8 |
 | `__ARM_ARCH_7M__` / `__ARM_ARCH_7EM__` / `__ARM_ARCH_8M_MAIN__` | `__ARM_ARCH_7M__`; `__ARM_ARCH_7EM__` on ARMv7E-M | `__ARM_ARCH_8M_MAIN__` |
-| `__ARM_FEATURE_DSP`, `__ARM_FEATURE_SIMD32` | ARMv7E-M only | with the DSP extension (`-mcpu=cortex-m33`, `+dsp`) |
+| `__ARM_FEATURE_DSP`, `__ARM_FEATURE_SIMD32` | ARMv7E-M only | with the DSP extension (`--cpu=cortex-m33`, `+dsp`) |
 | `__ARM_FEATURE_SAT`, `__ARM_FEATURE_QBIT` | yes | yes |
 | `__ARM_ARCH_PROFILE` | `'M'` | `'M'` |
 | `__ARM_FEATURE_IDIV`, `__ARM_FEATURE_CLZ`, `__ARM_FEATURE_LDREX` (0x7) | yes | yes |
 | `__CHAR_UNSIGNED__`, `__WCHAR_UNSIGNED__` | 1 | 1 |
 | `__BIGGEST_ALIGNMENT__` | 8 | 8 |
 
-ARMv7E-M (`thumbv7em-*`, `-mcpu=cortex-m4` or `cortex-m7`,
-`-march=armv7e-m`) defines `__ARM_ARCH_7EM__` in place of
+ARMv7E-M (`thumbv7em-*`, `--cpu=cortex-m4` or `cortex-m7`,
+`--isa=armv7e-m`) defines `__ARM_ARCH_7EM__` in place of
 `__ARM_ARCH_7M__`, and `__ARM_FEATURE_DSP` and `__ARM_FEATURE_SIMD32`, as
 clang does; ARMv8-M Mainline adds the last two with the DSP extension.
-`-mcpu=` names the part, and the part has one architecture whatever the
-triple said: `-mcpu=cortex-m33` on a `thumbv7em` triple is ARMv8-M
-Mainline, `-mcpu=cortex-m4` on `thumbv8m.main` ARMv7E-M.
+`--cpu=` names the part, and the part has one architecture whatever the
+triple said: `--cpu=cortex-m33` on a `thumbv7em` triple is ARMv8-M
+Mainline, `--cpu=cortex-m4` on `thumbv8m.main` ARMv7E-M.
 `tests/golden/predef.sh` compares every `__ARM_ARCH*` and
 `__ARM_FEATURE_*` macro with clang's for each part and `-march=`. clang's
 `__ARM_FEATURE_FMA` is left out (below).
@@ -873,7 +894,7 @@ ARMv8-M Baseline's is that of `clang -target thumbv8m.base-none-eabi
 `__ARM_FEATURE_DIRECTED_ROUNDING` there, which name instructions a
 Cortex-M23 does not have (GCC defines none of them for
 `armv8-m.base`); EmbCC leaves them out (`tools/gen-predef.sh`).
-`__ARM_FEATURE_CMSE` is 1 on both ARMv8-M tables and 3 with `-mcmse`.
+`__ARM_FEATURE_CMSE` is 1 on both ARMv8-M tables and 3 with `--cmse`.
 
 ARMv6-M's table is that of `clang -target thumbv6m-none-eabi`:
 `__ARM_ARCH` is 6, `__ARM_ARCH_6M__` and `__ARM_ARCH_ISA_THUMB` 1 are
@@ -938,7 +959,7 @@ part with another bus master, defines its own.
 |---|---|
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | on ARMv6-M, an inline asm template that uses a Thumb-2 instruction | `the ARMv6-M backend cannot lower an instruction ARMv6-M does not have (a 32-bit Thumb-2 encoding, from inline asm or the backend) yet (function f)` |
-| C++ with exceptions (on by default), or unwind tables (`-funwind-tables`, `-fasynchronous-unwind-tables`) | `C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions`, and `unwind tables are not supported for thumbv7m-none-eabi yet (...)`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
+| C++ with exceptions (on by default), or unwind tables (`--unwind-tables`, `-fasynchronous-unwind-tables`) | `C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with --no-exceptions`, and `unwind tables are not supported for thumbv7m-none-eabi yet (...)`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 
 An array or structure local aligned beyond 8 bytes is supported: its
 storage is carved from the stack at function entry and rounded up.
@@ -963,20 +984,20 @@ writing A32 encodings; the design notes are in
 
 | Option | Accepted values | Refused with |
 |---|---|---|
-| `-marm` | (no value) | `-mthumb is not supported on armv7a-none-eabi: EmbCC emits ARM (A32) code for a Cortex-A` |
-| `-mcpu=CPU` | `cortex-a5`, `cortex-a7`, `cortex-a8`, `cortex-a9`, `cortex-a12`, `cortex-a15`, `cortex-a17`, `generic` | `-mcpu=cortex-r5 is not supported on armv7a-none-eabi` (a Cortex-M or Cortex-R core) |
-| `-mfloat-abi=ABI` | `soft`, `softfp`, `hard` (the last two with an `-mfpu=`) | `-mfloat-abi=hard needs an FPU to use: add -mfpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)` |
-| `-mfpu=FPU` | `vfpv3-d16`, `vfpv3`, `vfpv4-d16`, `vfpv4`, `none` | `-mfpu=neon is not supported on armv7a-none-eabi: EmbCC emits VFPv3 or VFPv4 ... and no NEON (Advanced SIMD) instruction` |
-| `-mabi=ABI` | `aapcs`, `aapcs-linux` | as for Cortex-M |
-| `-munaligned-access`, `-mthumb-interwork` | (no value) | `-mno-unaligned-access is not supported` |
+| `--isa=arm` | (no value) | `--isa=thumb is not supported on armv7a-none-eabi: EmbCC emits ARM (A32) code for a Cortex-A` |
+| `--cpu=CPU` | `cortex-a5`, `cortex-a7`, `cortex-a8`, `cortex-a9`, `cortex-a12`, `cortex-a15`, `cortex-a17`, `generic` | `--cpu=cortex-r5 is not supported on armv7a-none-eabi` (a Cortex-M or Cortex-R core) |
+| `--float-abi=ABI` | `soft`, `softfp`, `hard` (the last two with an `--fpu=`) | `--float-abi=hard needs an FPU to use: add --fpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)` |
+| `--fpu=FPU` | `vfpv3-d16`, `vfpv3`, `vfpv4-d16`, `vfpv4`, `none` | `--fpu=neon is not supported on armv7a-none-eabi: EmbCC emits VFPv3 or VFPv4 ... and no NEON (Advanced SIMD) instruction` |
+| `--abi=ABI` | `aapcs`, `aapcs-linux` | as for Cortex-M |
+| `--unaligned-access`, `-mthumb-interwork` | (no value) | `--no-unaligned-access is not supported` |
 
 No divide instruction is used, so the code runs on every ARMv7-A core:
 `/` and `%` call `__aeabi_idiv`, `__aeabi_uidiv`, `__aeabi_idivmod` and
 `__aeabi_uidivmod`, which `lib/rt` provides. `armv7a-none-eabihf` is
-`-mfpu=vfpv3-d16 -mfloat-abi=hard`; with `softfp` the FPU computes and
+`--fpu=vfpv3-d16 --float-abi=hard`; with `softfp` the FPU computes and
 floating point travels in the core registers, as with `soft`. Either way
 the code is the Cortex-M7's single- and double-precision VFP on `d0`–`d15`
-(`s16`–`s31`/`d8`–`d15` preserved); with `-mfloat-abi=soft` no VFP
+(`s16`–`s31`/`d8`–`d15` preserved); with `--float-abi=soft` no VFP
 instruction is emitted even with an `-mfpu=`, as GCC reads it. No NEON
 instruction is ever emitted.
 
@@ -1039,11 +1060,11 @@ semihosting exit.
 
 ### Limitations
 
-Refused by name: NEON (`-mfpu=neon`), the Cortex-M FPUs, Thumb state (`-mthumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
+Refused by name: NEON (`--fpu=neon`), the Cortex-M FPUs, Thumb state (`--isa=thumb`, `.thumb` and `.thumb_func`), `__builtin_frame_address` and
 `__builtin_return_address` above level 0, `__attribute__((interrupt))` (an A-profile
 handler returns with `subs pc, lr, #4`), a scalar local aligned past 8,
 and C++ exceptions and unwind tables (C++ compiles with
-`-fno-exceptions`). Inline assembly and `.s` files take the Cortex-M
+`--no-exceptions`). Inline assembly and `.s` files take the Cortex-M
 vocabulary in ARM state -- the DSP extension's instructions (which every
 ARMv7-A part has) included, with `<arm_acle.h>` -- with a condition on any
 instruction, and add `mrs`/`msr` of `cpsr`, `mrc`/`mcr`, `ldrexd`/`strexd`
@@ -1061,7 +1082,7 @@ registers, `cbz`, `tbb` and `tbh` are refused
 | `riscv64-unknown-elf` | `riscv64`, `riscv64-elf`, `rv64` | RV64IMAC | `lp64` |
 
 Both are freestanding. One code generator serves both widths. The ISA
-and ABI columns are the defaults; `-march=` and `-mabi=`
+and ABI columns are the defaults; `--isa=` and `--abi=`
 ([invoking](invoking.md#risc-v-options)) select the F and D extensions
 and their calling conventions.
 
@@ -1072,9 +1093,9 @@ and their calling conventions.
 | I | The base integer instruction set. |
 | M | Multiply and divide. At RV32, 64-bit division is a call (`__divdi3` and family). Required. |
 | A | Atomic read-modify-write: `amoadd`, `amoor` and the other AMOs, and `lr`/`sc` loops for compare-and-swap, on 4-byte (and at RV64, 8-byte) objects; a 1- or 2-byte object is an AMO or an `lr.w`/`sc.w` loop on the aligned word around it. The memory order sets `.aq` and `.rl` as clang's does (seq_cst by default). Memory barriers are `fence rw, rw`. Required. |
-| F | With `-march=...f...`: `float` add, subtract, multiply, divide, square root, comparisons and conversions to and from the integers a register holds are instructions (`fadd.s`, `feq.s`, `fcvt.w.s` ... ); a float lives in an f register (`ft3`-`ft11`, and `fs0`-`fs11` where the ABI preserves them). |
-| D | With `-march=...d...` (or `g`): the same for `double`, and the conversions between the two. At RV32 a double crosses to an integer register pair through eight bytes of frame. |
-| C | Compressed instructions, emitted wherever an encoding allows (unless `-march=` leaves out `c`). The object's `e_flags` has `EF_RISCV_RVC` set. |
+| F | With `--isa=...f...`: `float` add, subtract, multiply, divide, square root, comparisons and conversions to and from the integers a register holds are instructions (`fadd.s`, `feq.s`, `fcvt.w.s` ... ); a float lives in an f register (`ft3`-`ft11`, and `fs0`-`fs11` where the ABI preserves them). |
+| D | With `--isa=...d...` (or `g`): the same for `double`, and the conversions between the two. At RV32 a double crosses to an integer register pair through eight bytes of frame. |
+| C | Compressed instructions, emitted wherever an encoding allows (unless `--isa=` leaves out `c`). The object's `e_flags` has `EF_RISCV_RVC` set. |
 
 Without F a floating-point operation is a call to a soft-float helper
 (`__addsf3`, `__adddf3`, ...); with F alone so is every `double` one; and
@@ -1086,7 +1107,7 @@ equivalent, stack alignment 16), and `e_flags` the float ABI.
 
 ### Calling convention: the hardware-float ABIs
 
-`-mabi=ilp32f`/`lp64f` and `ilp32d`/`lp64d` follow the psABI's hardware
+`--abi=ilp32f`/`lp64f` and `ilp32d`/`lp64d` follow the psABI's hardware
 floating-point convention, with ABI_FLEN 32 or 64, checked against clang
 across the call (`tests/golden/riscv-hf-abi.sh`):
 
@@ -1120,7 +1141,7 @@ take and return their floating-point values the same way.
   larger one is passed by reference to a copy.
 - `float` and `double` are passed and returned in integer registers, as
   the `ilp32` and `lp64` soft-float ABIs require -- with an FPU too
-  (`-march=rv32imafc -mabi=ilp32`), whose f registers are then all
+  (`--isa=rv32imafc --abi=ilp32`), whose f registers are then all
   caller-saved.
 - At RV64, a 32-bit integer in a register is kept sign-extended to 64
   bits, `unsigned int` included, as the psABI requires: arguments and
@@ -1172,7 +1193,7 @@ individually.
 | Construct | Diagnostic (RV32 shown; RV64 names itself) |
 |---|---|
 | `__int128` at RV32 | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| C++ with exceptions (on by default), or unwind tables (`-funwind-tables`, `-fasynchronous-unwind-tables`) | RV32: `C++ exceptions are not supported for riscv32-unknown-elf yet: EmbCC writes no RISC-V .eh_frame; compile with -fno-exceptions`. RV64: `unwind tables are not supported for riscv64-unknown-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no RISC-V .eh_frame`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
+| C++ with exceptions (on by default), or unwind tables (`--unwind-tables`, `-fasynchronous-unwind-tables`) | RV32: `C++ exceptions are not supported for riscv32-unknown-elf yet: EmbCC writes no RISC-V .eh_frame; compile with --no-exceptions`. RV64: `unwind tables are not supported for riscv64-unknown-elf yet (--unwind-tables, -fasynchronous-unwind-tables, --exceptions): EmbCC writes no RISC-V .eh_frame`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 | `__attribute__((interrupt("user")))` | `__attribute__((interrupt("user"))) is not supported: user-mode interrupts (the N extension and its uret) were never ratified and are gone from the privileged spec, and GCC and clang no longer accept them` |
 | an interrupt handler with parameters, or with a result | `interrupt handler 'h' takes parameters: ...`, `interrupt handler 'h' returns a value: ...` |
 | `__attribute__((interrupt))` in C++ | `__attribute__((interrupt)) is not supported in C++ yet: ...` (write the handler in C) |
@@ -1197,13 +1218,13 @@ and what is refused are in [the RX plan](../internals/rx-plan.md).
 |---|---|
 | `rx-none-elf` | `rx-elf`, `rx-unknown-elf`, `rx` |
 
-Accepted options: `-mcpu=rx600|rx610|rx200|rx100`, `-m32bit-doubles`,
+Accepted options: `--cpu=rx600|rx610|rx200|rx100`, `-m32bit-doubles`,
 `-nofpu`, `-mlittle-endian-data`, `-mrx-abi`, `-msmall-data-limit=0`,
 `-mno-pid`, `-mint-register=0`, `-mallow-string-insns`, `-mrelax`.
 Refused by name: `-m64bit-doubles`, `-fpu`, `-mbig-endian-data`,
 `-mgcc-abi`, a nonzero `-msmall-data-limit`, `-mpid`, a nonzero
 `-mint-register`, `-mno-allow-string-insns`, `-mas100-syntax`, unwind
-tables, `-S`, and C++ exceptions (C++ compiles with `-fno-exceptions`; see
+tables, `-S`, and C++ exceptions (C++ compiles with `--no-exceptions`; see
 [C++](cxx.md#targets)).
 
 EmbCC assembles RX itself, in GNU syntax: inline `__asm__` with GCC's
@@ -1241,8 +1262,8 @@ otherwise.
 
 | Option | Accepted values | Refused with |
 |---|---|---|
-| `-mcpu=CPU`, `-march=CPU` | `mips32r2`, `m4k`, `m14k`, `m14kc`, `24kc`, `24kf`, `24kec`, `24kef`, `34kc`, `74kc` | `-mcpu=mips32r6 is not a MIPS32 Release 2 core: EmbCC emits MIPS32r2 (mips32r2, m4k, m14k, m14kc, 24kc, 24kf, 24kec, 24kef, 34kc, 74kc)` |
-| `-mabi=ABI` | `32` | `-mabi=n32 is not supported: EmbCC emits the o32 ABI (-mabi=32) only` |
+| `--cpu=CPU`, `--isa=CPU` | `mips32r2`, `m4k`, `m14k`, `m14kc`, `24kc`, `24kf`, `24kec`, `24kef`, `34kc`, `74kc` | `--cpu=mips32r6 is not a MIPS32 Release 2 core: EmbCC emits MIPS32r2 (mips32r2, m4k, m14k, m14kc, 24kc, 24kf, 24kec, 24kef, 34kc, 74kc)` |
+| `--abi=ABI` | `32` | `--abi=n32 is not supported: EmbCC emits the o32 ABI (--abi=32) only` |
 | `-msoft-float` | (no value) | `-mhard-float is not supported: EmbCC emits soft-float o32, which passes floating point in the integer registers` |
 | `-EL` | (no value) | `-EB is not supported: the MIPS target is little-endian (mipsel) only` |
 | `-mno-abicalls` | (no value) | `-mabicalls is not supported: EmbCC's MIPS code takes addresses absolutely (lui/addiu) and keeps no $gp; it is -mno-abicalls code` |
@@ -1369,8 +1390,8 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2` and `_4` are defined.
 | `__attribute__((interrupt, use_shadow_register_set))` | `__attribute__((use_shadow_register_set)) is not supported: EmbCC does not switch register sets: ...` |
 | `__attribute__((interrupt, use_debug_exception_return))` | `__attribute__((use_debug_exception_return)) is not supported: the handler would return with eret where the debug exception needs deret, and save DEPC as EPC` |
 | an interrupt handler with parameters, or with a result | `interrupt handler 'h' takes parameters: ...`, `interrupt handler 'h' returns a value: ...` |
-| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mipsel-none-elf yet (-funwind-tables, -fasynchronous-unwind-tables, -fexceptions): EmbCC writes no MIPS .eh_frame` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for mipsel-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for mipsel-none-elf yet (--unwind-tables, -fasynchronous-unwind-tables, --exceptions): EmbCC writes no MIPS .eh_frame` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for mipsel-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 
 ## MIPS64
 
@@ -1394,8 +1415,8 @@ refused by name otherwise.
 
 | Option | Accepted values | Refused with |
 |---|---|---|
-| `-mcpu=CPU`, `-march=CPU` | `mips64r2`, `5kc`, `5kf`, `5kec`, `5kef`, `octeon` | `-mcpu=mips64r6 is not a MIPS64 Release 2 core: EmbCC emits MIPS64r2 (mips64r2, 5kc, 5kf, 5kec, 5kef, octeon)` |
-| `-mabi=ABI` | `64` | `-mabi=n32 is not supported: EmbCC emits the n64 ABI (-mabi=64) only` |
+| `--cpu=CPU`, `--isa=CPU` | `mips64r2`, `5kc`, `5kf`, `5kec`, `5kef`, `octeon` | `--cpu=mips64r6 is not a MIPS64 Release 2 core: EmbCC emits MIPS64r2 (mips64r2, 5kc, 5kf, 5kec, 5kef, octeon)` |
+| `--abi=ABI` | `64` | `--abi=n32 is not supported: EmbCC emits the n64 ABI (--abi=64) only` |
 | `-msoft-float` | (no value) | `-mhard-float is not supported: EmbCC emits soft-float n64, which passes floating point in the integer registers` |
 | `-EL` (`mips64el`), `-EB` (`mips64`) | (no value) | `-EB contradicts --target=mips64el-none-elf, which is little-endian: big-endian MIPS64 is --target=mips64-none-elf` |
 | `-mno-abicalls` | (no value) | `-mabicalls is not supported: EmbCC's MIPS64 code takes addresses absolutely (%highest..%lo) and keeps no $gp; it is -mno-abicalls code` |
@@ -1470,7 +1491,7 @@ refuses a composite relocation (PIC and gp-relative code) by name.
 ### Predefined macros
 
 From `clang --target=mips64el-unknown-elf` (and `mips64-unknown-elf`)
-`-mcpu=mips64r2 -msoft-float -mno-abicalls`: `__mips__`, `__mips` (64),
+`--cpu=mips64r2 -msoft-float -mno-abicalls`: `__mips__`, `__mips` (64),
 `__mips64`, `__mips_n64`, `_ABI64`, `_MIPS_SIM`, `_MIPS_SZLONG` and
 `_MIPS_SZPTR` (64), `__mips_isa_rev` (2), `__mips_soft_float`, `__LP64__`,
 `__SIZEOF_INT128__`, and `__MIPSEL__` or `__MIPSEB__` by the byte order.
@@ -1504,8 +1525,8 @@ the word. `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1`, `_2`, `_4` and `_8` are defined.
 | a doubleword instruction in inline assembly (`daddu`, `ld`, ...) | `asm instruction "daddu $a4, $a5, $a5" is not in the MIPS vocabulary` |
 | `la` in a `.s` file or file-scope `asm` | `la loads a 32-bit address, and a MIPS64 address is 64 bits (nor are %highest and %higher assembled here): load it from a .dword holding the symbol` |
 | reading a packed bit-field over more than 8 bytes, big-endian | `a packed bit-field 'v' across 9 bytes is not supported on a big-endian target (mips64-none-elf)` |
-| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for mips64el-none-elf yet (...): EmbCC writes no MIPS .eh_frame` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for mips64-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for mips64el-none-elf yet (...): EmbCC writes no MIPS .eh_frame` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for mips64-none-elf yet: EmbCC writes no MIPS .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 
 ## LoongArch64
 
@@ -1528,7 +1549,7 @@ checked against QEMU's TriCore translator, and every test runs on QEMU's
 
 Motorola/NXP ColdFire, ISA_A with the hardware divide (an MCF5208 and
 every later core), big-endian, soft float: GCC's `m68k-elf` with
-`-mcpu=5208`. Freestanding only. The design notes, and which facts are
+`--cpu=5208`. Freestanding only. The design notes, and which facts are
 not yet checked against a real m68k compiler, are in
 [the ColdFire plan](../internals/coldfire-plan.md).
 
@@ -1561,12 +1582,12 @@ name otherwise.
 
 | Option | Accepted values | Refused with |
 |---|---|---|
-| `-march=ARCH` | `loongarch64`, `la64v1.0`, `la64v1.1`, `la464`, `la664` | `-march=la32v1.0 is not an LA64 architecture: EmbCC emits the LA64 base integer ISA (loongarch64, la64v1.0, la64v1.1, la464, la664)` |
-| `-mtune=CPU` | any | -- |
-| `-mabi=ABI` | `lp64s` | `-mabi=lp64d is not supported: EmbCC emits the soft-float LP64S convention (-mabi=lp64s), which passes floating point in the integer registers` |
-| `-mfpu=FPU` | `none`, `0` | `-mfpu=64 is not supported: EmbCC's LoongArch code uses no FPU (-mfpu=none)` |
+| `--isa=ARCH` | `loongarch64`, `la64v1.0`, `la64v1.1`, `la464`, `la664` | `--isa=la32v1.0 is not an LA64 architecture: EmbCC emits the LA64 base integer ISA (loongarch64, la64v1.0, la64v1.1, la464, la664)` |
+| `--tune=CPU` | any | -- |
+| `--abi=ABI` | `lp64s` | `--abi=lp64d is not supported: EmbCC emits the soft-float LP64S convention (--abi=lp64s), which passes floating point in the integer registers` |
+| `--fpu=FPU` | `none`, `0` | `--fpu=64 is not supported: EmbCC's LoongArch code uses no FPU (--fpu=none)` |
 | `-msoft-float` | (no value) | `-mdouble-float` / `-msingle-float is not supported: EmbCC emits soft-float LP64S code (-msoft-float)` |
-| `-mcmodel=MODEL` | `normal`, `medium` | `-mcmodel=extreme is not supported: EmbCC emits the normal code model (bl, pcalau12i + addi.d)` |
+| `--code-model=MODEL` | `normal`, `medium` | `--code-model=extreme is not supported: EmbCC emits the normal code model (bl, pcalau12i + addi.d)` |
 | `-mrelax`, `-mno-relax` | (no value) | -- |
 | `-mno-strict-align` | (no value) | `-mstrict-align is not supported: EmbCC's LoongArch code may access a packed member unaligned, as LA64 permits` |
 | `-mno-lsx`, `-mno-lasx` | (no value) | `-mlsx is not supported: EmbCC emits no LSX or LASX vector instructions` |
@@ -1678,11 +1699,11 @@ GCC's own placement and costs, are accepted; the rest are refused by name.
 
 | Option | Accepted | Refused with |
 |---|---|---|
-| `--abi=` (`-mabi=`) | `windowed` | `--abi=call0 is not supported: EmbCC emits the windowed ABI (call8/entry/retw), which ESP-IDF uses` |
+| `--abi=` | `windowed` | `--abi=call0 is not supported: EmbCC emits the windowed ABI (call8/entry/retw), which ESP-IDF uses` |
 | `-mlongcalls`, `-mno-longcalls` | both: calls are direct; `embld` refuses one beyond `call8`'s 512 KiB | |
 | `-mtext-section-literals`, `-mauto-litpools` (and `-mno-`) | yes | |
 | `-mserialize-volatile`, `-mno-serialize-volatile` | yes; `memw` is emitted either way | |
-| `--endian=little` (`-mlittle-endian`) | yes | `--endian=big is not supported for xtensa-none-elf, which is little-endian` |
+| `--endian=little` | yes | `--endian=big is not supported for xtensa-none-elf, which is little-endian` |
 | `-mdynconfig=` | `xtensa_esp32.so`, `xtensa_esp32s3.so` | `-mdynconfig=xtensa_esp32s2.so is not supported for xtensa-none-elf: ...` |
 | `-mtarget-align`, `-mforce-no-pic`, `-mstrict-align`, `-mextra-l32r-costs=`, `-mno-const16` | yes | |
 | `-mconst16`, `-mforce-l32`, `-mfix-esp32-psram-cache-issue` | | refused by name |
@@ -1843,9 +1864,9 @@ say so are accepted; the rest are refused by name.
 
 | Option | Accepted | Refused, for example |
 |---|---|---|
-| `-mcpu=CPU`, `-march=CPU`, `-mtune=CPU` | `leon3`, `leon4`, `v8`, `gr712rc`, `gr740`, `ut699` | `-mcpu=v9 is not a SPARC V8 core with hardware multiply and divide: EmbCC emits LEON3 code (...)` |
+| `--cpu=CPU`, `--isa=CPU`, `--tune=CPU` | `leon3`, `leon4`, `v8`, `gr712rc`, `gr740`, `ut699` | `--cpu=v9 is not a SPARC V8 core with hardware multiply and divide: EmbCC emits LEON3 code (...)` |
 | `-msoft-float`, `-mno-fpu` | (no value) | `-mhard-float is not supported: EmbCC emits soft-float SPARC code, which passes floating point in the integer registers` |
-| `-mno-flat`, `-mapp-regs`, `-mv8`, `-m32`, `-mcmodel=medlow`, `-mbig-endian` | (no value) | `-mflat is not supported: EmbCC's SPARC code uses register windows (save and restore)`; `-mno-app-regs`, `-m64`, `-mcmodel=medany`, `-mfix-*` (no errata workarounds), `-mlittle-endian` likewise |
+| `-mno-flat`, `-mapp-regs`, `-mv8`, `-m32`, `--code-model=medlow`, `--endian=big` | (no value) | `-mflat is not supported: EmbCC's SPARC code uses register windows (save and restore)`; `-mno-app-regs`, `-m64`, `--code-model=medany`, `-mfix-*` (no errata workarounds), `--endian=little` likewise |
 
 ### Calling convention
 
@@ -1892,7 +1913,7 @@ compare-and-swap compares only its lane. The lane of offset `a & 3` is
 counted from the top of the word (big-endian). Test-and-set stores 1, as
 `__GCC_ATOMIC_TEST_AND_SET_TRUEVAL` says, not `ldstub`'s 0xff. No
 `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_N` is defined: the table is clang's for
-`-mcpu=leon3`, which defines none.
+`--cpu=leon3`, which defines none.
 
 ### Assembly
 
@@ -1959,8 +1980,8 @@ GED's sleep register powers the board off at the end.
 
 | Option | Accepted values | Refused with |
 |---|---|---|
-| `-mcpu=CPU`, `-march=CPU`, `-mCPU` | `tc16`, `tc161`, `tc162`, `tc1.6`, `tc1.6.1`, `tc1.6.2`, `tc16x`, `tc2xx`, `tc22xx`, `tc23xx`, `tc26xx`, `tc27xx`, `tc29xx`, `tc3xx`, `tc33xx`, `tc36xx`, `tc37xx`, `tc38xx`, `tc39xx` | `-mcpu=tc1797 is not a TriCore 1.6 core: EmbCC emits TriCore 1.6.1 code, for the AURIX TC2xx and TC3xx (...)` |
-| `-msoft-float`, `-mlittle-endian` | (no value) | `-mhard-float is not supported: EmbCC emits soft float for TriCore (the TC3xx FPU is not used yet)` |
+| `--cpu=CPU`, `--isa=CPU`, `-mCPU` | `tc16`, `tc161`, `tc162`, `tc1.6`, `tc1.6.1`, `tc1.6.2`, `tc16x`, `tc2xx`, `tc22xx`, `tc23xx`, `tc26xx`, `tc27xx`, `tc29xx`, `tc3xx`, `tc33xx`, `tc36xx`, `tc37xx`, `tc38xx`, `tc39xx` | `--cpu=tc1797 is not a TriCore 1.6 core: EmbCC emits TriCore 1.6.1 code, for the AURIX TC2xx and TC3xx (...)` |
+| `-msoft-float`, `--endian=little` | (no value) | `-mhard-float is not supported: EmbCC emits soft float for TriCore (the TC3xx FPU is not used yet)` |
 
 ### Calling convention (TriCore EABI, unverified)
 
@@ -2087,9 +2108,9 @@ The 68000 family proper (68000-68060, CPU32) is not a target.
 
 | Option | Accepted values | Refused |
 |---|---|---|
-| `-mcpu=CPU`, `-mtune=CPU`, `-mCPU` | `5208`, `5207`, `5206e`, `5211`-`5216`, `5235`, `5249`, `5271`-`5282`, `5307`, `5329`, `5373`, `5407`, `54455` and their kin | a 68000-family CPU; `5206`, `5202`, `5204` (no divider); `547x`/`548x` (an FPU) |
-| `-march=ISA` | `isaa`, `isaaplus`, `isab`, `isac` | anything else |
-| `-msoft-float`, `-mdiv`, `-mno-align-int`, `-mno-short`, `-mno-rtd`, `-m[no-]strict-align`, `-mbig-endian` | (no value) | `-mhard-float`, `-mno-div`, `-malign-int`, `-mshort`, `-mrtd`, `-mpcrel`, `-mid-shared-library`, `-msep-data`, `-mxgot`, `-mlittle-endian` |
+| `--cpu=CPU`, `--tune=CPU`, `-mCPU` | `5208`, `5207`, `5206e`, `5211`-`5216`, `5235`, `5249`, `5271`-`5282`, `5307`, `5329`, `5373`, `5407`, `54455` and their kin | a 68000-family CPU; `5206`, `5202`, `5204` (no divider); `547x`/`548x` (an FPU) |
+| `--isa=ISA` | `isaa`, `isaaplus`, `isab`, `isac` | anything else |
+| `-msoft-float`, `-mdiv`, `-mno-align-int`, `-mno-short`, `-mno-rtd`, `-m[no-]strict-align`, `--endian=big` | (no value) | `-mhard-float`, `-mno-div`, `-malign-int`, `-mshort`, `-mrtd`, `-mpcrel`, `-mid-shared-library`, `-msep-data`, `-mxgot`, `--endian=little` |
 
 ### Calling convention
 
@@ -2139,13 +2160,13 @@ the entry.
 | a 16-byte atomic | `the LoongArch64 backend cannot lower a sixteen-byte atomic (the LA64 base ISA has no 128-bit ll/sc or am* instruction) yet (function f) [cas16 w=16 size=16]` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on loongarch64-unknown-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` (write the exception entry in a `.S` file or a naked function) |
-| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions`, C++ without `-fno-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions`, C++ without `--no-exceptions` | `unwind tables are not supported for loongarch64-unknown-elf yet (...): EmbCC writes no LoongArch .eh_frame` |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on tricore-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target ...` |
 | `__attribute__((interrupt))` | `__attribute__((...)) is not supported: ...` |
 | a conditional branch or `loop` to a symbol defined elsewhere (`.s`, `.S`, file-scope `asm`) | `a conditional branch or loop reaches only a label of its own section: its 15-bit displacement (R_TRICORE_15REL) is not one embld applies; branch over a j` |
-| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for tricore-none-elf yet ...` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for tricore-none-elf yet: EmbCC writes no TriCore .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on xtensa-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `call0` or `callx0` in inline asm | `call0 in Xtensa asm writes a0, which holds this function's return address under the windowed ABI: call a windowed function with call8/callx8` |
 | a density (`.n`) instruction | `ret.n is a 16-bit instruction of the density option, which this assembler does not emit: write ret, its 24-bit form` |
@@ -2153,21 +2174,21 @@ the entry.
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | `-S` | `-S is not supported for xtensa-none-elf yet: compile with -c (there is no Xtensa assembler here to check the text against)` |
-| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for xtensa-none-elf yet: EmbCC writes no Xtensa .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for xtensa-none-elf yet (...): EmbCC writes no Xtensa .eh_frame` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for xtensa-none-elf yet: EmbCC writes no Xtensa .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 | `__builtin_frame_address(N)` or `__builtin_return_address(N)` with N above 0 (level 0 is supported; see [Extensions](extensions.md)) | `__builtin_return_address(1) is not supported on sparc-none-elf: code for this target keeps no frame-pointer chain, so only level 0 (this function's own frame) can be found` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
 | `__attribute__((interrupt))` | `__attribute__((interrupt)) is not supported: ...` |
 | a floating-point, coprocessor or V9 instruction in asm | `asm instruction "faddd" is a floating-point instruction: EmbCC compiles soft float, and this assembler has no floating-point vocabulary` / `asm instruction "ldx" is SPARC V9's, and the LEON3 is a V8` |
 | `%sp`, `%fp` or `%i7` in an asm's clobber list | `SPARC asm clobbers '%sp', which holds this function's stack pointer; EmbCC does not save it around an asm` |
 | a V9 relocation operator (`%hh`, `%lm`, `%gdop_*`...) | `this relocation operator is SPARC V9's or position-independent code's; EmbLD applies %hi/%lo (R_SPARC_HI22/LO10), call and branch displacements and data words` |
-| `-funwind-tables`, `-fasynchronous-unwind-tables`, `-fexceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
+| `--unwind-tables`, `-fasynchronous-unwind-tables`, `--exceptions` | `unwind tables are not supported for sparc-none-elf yet (...): EmbCC writes no SPARC .eh_frame` |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for sparc-none-elf yet: EmbCC writes no SPARC .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 | a rotate, `dbcc`, `exg`, `cas`, BCD and the FPU's instructions in asm | `rol.l: ColdFire has no rotate` (and so on, by name) |
 | ISA_B's `mvs`, `mvz`, `mov3q`, `sats`, and a 32-bit branch (`bra.l`) | `mvs.b is an ISA_B instruction, which the MCF5208 (ISA_A+) does not have: it traps as illegal there` |
 | a frame beyond 32 KiB | `a stack frame larger than 32 KiB` |
 | unwind tables | `unwind tables are not supported for m68k-none-elf yet` |
-| C++ with exceptions (on by default) | `C++ exceptions are not supported for m68k-none-elf yet: EmbCC writes no ColdFire .eh_frame; compile with -fno-exceptions`. C++ itself compiles with `-fno-exceptions`; see [C++](cxx.md#targets) |
+| C++ with exceptions (on by default) | `C++ exceptions are not supported for m68k-none-elf yet: EmbCC writes no ColdFire .eh_frame; compile with --no-exceptions`. C++ itself compiles with `--no-exceptions`; see [C++](cxx.md#targets) |
 
 ## AVR
 
@@ -2178,15 +2199,15 @@ the entry.
 | `avr` | `avr-none-elf`, `avr-elf`, `avr-unknown-none` |
 
 The code is for the ATmega328P's core (the AVR5 architecture, as on
-the Arduino Uno), and without `-mmcu=` the part is the ATmega328P.
+the Arduino Uno), and without `--mcu=` the part is the ATmega328P.
 
 ### Options
 
 | Option | What it does |
 |---|---|
-| `-mmcu=atmega328p`, `atmega328`, `atmega168p`, `atmega168` | Selects the part: its predefined macro (`__AVR_ATmega168__` and so on) replaces `__AVR_ATmega328P__`. These four are the avr5 parts of the ATmega328P's datasheet family; they differ only in their memories. |
-| `-mmcu=atmega48`, `atmega88` and their `a`, `p`, `pa` forms | Refused: `-mmcu=atmega88 is not supported: the atmega88 is an avr4 part, with no jmp or call instruction, and EmbCC's AVR code calls with `call` ...` |
-| `-mmcu=` any other part | Refused: `-mmcu=atmega2560 is not supported: EmbCC's AVR backend generates code for the ATmega328P's avr5 core, and knows the memories and vectors of atmega328p, atmega328, atmega168p and atmega168 alone` |
+| `--mcu=atmega328p`, `atmega328`, `atmega168p`, `atmega168` | Selects the part: its predefined macro (`__AVR_ATmega168__` and so on) replaces `__AVR_ATmega328P__`. These four are the avr5 parts of the ATmega328P's datasheet family; they differ only in their memories. |
+| `--mcu=atmega48`, `atmega88` and their `a`, `p`, `pa` forms | Refused: `--mcu=atmega88 is not supported: the atmega88 is an avr4 part, with no jmp or call instruction, and EmbCC's AVR code calls with `call` ...` |
+| `--mcu=` any other part | Refused: `--mcu=atmega2560 is not supported: EmbCC's AVR backend generates code for the ATmega328P's avr5 core, and knows the memories and vectors of atmega328p, atmega328, atmega168p and atmega168 alone` |
 | `-mrelax`, `-mno-relax` | Accepted, and declined: EmbLD does not shorten `call` and `jmp` to `rcall` and `rjmp`, so the image is the same program, larger than avr-gcc's relaxed one. |
 | `-mcall-prologues`, `-mno-call-prologues` | Accepted, and declined: every prologue and epilogue is written in its function rather than shared through `__prologue_saves__`. The calling convention is the same either way. |
 | `-mdouble=32`, `-mlong-double=32` | Accepted: what EmbCC does. |
@@ -2198,7 +2219,7 @@ the Arduino Uno), and without `-mmcu=` the part is the ATmega328P.
 | ATmega328P, ATmega328 | 32 KB | 2 KB, `0x0100`-`0x08FF` | 1 KB | 26 |
 | ATmega168P, ATmega168 | 16 KB | 1 KB, `0x0100`-`0x04FF` | 512 bytes | 26 |
 
-`-mmcu=` on another target is refused: `-mmcu=atmega328p is an AVR
+`--mcu=` on another target is refused: `-mmcu=atmega328p is an AVR
 option, and the target is x86_64-elf (--target=avr)`.
 
 ### Data model
@@ -2253,7 +2274,7 @@ From `clang --target=avr -mmcu=atmega328p`: `__AVR__`, `__AVR`, `AVR`,
 `__AVR_ATmega328P__`, `__AVR_ARCH__` (5), `__AVR_HAVE_MUL__`,
 `__AVR_HAVE_MOVW__`, `__AVR_HAVE_LPMX__`, `__AVR_HAVE_JMP_CALL__`,
 `__AVR_2_BYTE_PC__`, `__SIZEOF_INT__` (2), `__SIZEOF_POINTER__` (2),
-`__SIZEOF_DOUBLE__` (4). With `-mmcu=` for another part, the part's
+`__SIZEOF_DOUBLE__` (4). With `--mcu=` for another part, the part's
 macro (`__AVR_ATmega328__`, `__AVR_ATmega168P__`, `__AVR_ATmega168__`)
 stands in place of `__AVR_ATmega328P__`, as clang's table for that part
 does; nothing else in the table changes.
@@ -2291,14 +2312,14 @@ Integer multiplication and division are helper calls with libgcc's names
 binary32 helpers (`__addsf3`, ...) in `lib/rt/avrfp*.c`. `make
 rt-embedded` builds `librt.a` for `avr`, and for each `-mmcu=` part its
 startup `crt<part>.o` and linker script `<part>.ld`, which the driver
-links under `-mmcu=`, and the AVR library, `libc.a` from `lib/avr`
+links under `--mcu=`, and the AVR library, `libc.a` from `lib/avr`
 ([The AVR library](embedded.md#the-avr-library)) (see
 [Startup and the interrupt vector table](embedded.md#startup-and-the-interrupt-vector-table)).
 
 ### Debugging
 
 `-g` writes DWARF 4 that `llvm-dwarfdump --verify` accepts and that gdb
-(`set architecture avr`) and [EmbDBG](tools/embdbg.md) read, at `-O0`
+(`set architecture avr`) and [EmbDBG](tools/embdbg.md) read, at `--opt=none`
 and above:
 
 - **Addresses are 4 bytes**, as avr-gcc writes them, although a pointer
@@ -2317,16 +2338,16 @@ and above:
 - **Line table.** Each function's first row is its entry, on the line
   the function is declared; the body's rows follow wherever the source
   line changes.
-- **Optimized code.** At `-O1` and above, a variable the optimizer took
+- **Optimized code.** At `--opt=basic` and above, a variable the optimizer took
   out of memory has an empty location, which a debugger shows as
   `<optimized out>`; so does a parameter that is assigned after it was
   taken out of memory. A parameter that is never assigned keeps its
   slot, which the prologue writes.
 - **Globals** the unit defines are described with their type.
 
-`-g` turns off this backend's register allocation at `-O1` and above, so
-that every variable stays in its slot; `-O2 -g` code can be about twice
-the size of `-O2` code. There is no `.debug_frame`: gdb finds a caller by
+`-g` turns off this backend's register allocation at `--opt=basic` and above, so
+that every variable stays in its slot; `--opt=speed -g` code can be about twice
+the size of `--opt=speed` code. There is no `.debug_frame`: gdb finds a caller by
 analyzing the prologue, and EmbDBG's backtrace stops at frame `#0`.
 
 QEMU's arduino-uno has a gdb stub:
@@ -2346,10 +2367,10 @@ The stub's register layout, which EmbDBG uses: `r0`–`r31` one byte each,
 | an interrupt handler with parameters | `the AVR backend cannot lower an interrupt handler with parameters: the hardware calls it, so there is no caller to pass them and they would be read out of whatever the interrupted code left in those registers yet (function __vector_3)` |
 | an interrupt handler that returns a value | ``the AVR backend cannot lower an interrupt handler that returns a value: `reti` goes back to the interrupted instruction, and nothing is there to receive it yet (function __vector_3)`` |
 | `__int128` | `__int128 does not exist on this target (it needs 64-bit registers; use long long)` |
-| any C++ translation unit, except with `-fsyntax-only`, `-E`, `-M` or `-MM` | `C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits` |
+| any C++ translation unit, except with `--syntax-only`, `-E`, `-M` or `--deps-only` | `C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits` |
 
-Code compiled at `-O0` is large; an ordinary program may not fit the
-part's 32 KB of flash unless built with `-O1` or above.
+Code compiled at `--opt=none` is large; an ordinary program may not fit the
+part's 32 KB of flash unless built with `--opt=basic` or above.
 
 At `-Os` EmbCC's AVR code is larger than clang's for the same source
 (EmbLinkRTOS's conformance images: 21.8 KB to 44.8 KB, against clang's
@@ -2357,7 +2378,7 @@ At `-Os` EmbCC's AVR code is larger than clang's for the same source
 (`-fstack-usage`, EmbCC against clang: 77 and 6 bytes for a test function
 that only sleeps, 30 and 5 for the kernel's `embk_wait_commit`). Stack
 sizes chosen for avr-gcc can overflow under EmbCC; measure with
-`-fstack-usage`.
+`--stack-usage`.
 
 <!-- UNVERIFIED: the -O0 size remark comes from a commit message ("-O0 does not fit the part" for one test), not from a measurement made for this page. -->
 

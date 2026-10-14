@@ -19,7 +19,7 @@ embrt OBJ.o... [--entry NAME]... [--isr NAME]... [--isr-frame BYTES]
 Compile every file with three extra flags:
 
 ```sh
-embcc --target=thumbv7em-none-eabi -O2 \
+embcc --target=thumbv7em-none-eabi --opt=speed \
       -ffunction-sections -fstack-usage -fcallgraph-info=su -c main.c
 ```
 
@@ -34,7 +34,7 @@ For each object `OBJ.o`, `embrt` reads:
 The relocations matter. Every call to a function in another section is
 one, including the calls a backend makes to a run-time helper: a
 soft-float add, a 64-bit divide, an `__aeabi_*` routine. No call graph
-built from the source can show those calls. `-ffunction-sections` puts
+built from the source can show those calls. `--sections=functions` puts
 each function in its own section, so even a call within one file leaves a
 relocation.
 
@@ -81,8 +81,8 @@ worst case with interrupts: 352 bytes (280 for the entries, 72 for the handlers,
 | Reason | Cause |
 |---|---|
 | `recursion` | a cycle in the calls, named by the function it closes through |
-| `its frame grows at run time` | a variable-length array or `alloca`, which `-fstack-usage` marks `dynamic` |
-| `no object defines it` | a callee in no object given, such as a library compiled without `-fstack-usage` |
+| `its frame grows at run time` | a variable-length array or `alloca`, which `--stack-usage` marks `dynamic` |
+| `no object defines it` | a callee in no object given, such as a library compiled without `--stack-usage` |
 | `no frame size` | an object without its `.su` file |
 
 `--max-stack SIZE` makes the exit status 1 when the total (with
@@ -108,11 +108,11 @@ QEMU's lm3s6965evb under a startup that fills the free stack with a
 pattern, then reports how much of it `main` overwrote. Every measured
 use must be at or under EmbRT's bound: 168 programs pass, some exactly
 at their bound. The first version of this test found that EmbCC's
-`-fstack-usage` left a variadic function's 16-byte register save area out
+`--stack-usage` left a variadic function's 16-byte register save area out
 of its frame, which made a bound 16 bytes short. That is fixed, on both
 ARMv7-M and ARMv6-M.
 
-**The compiler's files.** It checks `-fcallgraph-info`'s nodes and edges,
+**The compiler's files.** It checks `--call-graph`'s nodes and edges,
 including indirect calls and a call left behind by inlining, and the
 `dynamic` qualifier on a VLA function's frame.
 

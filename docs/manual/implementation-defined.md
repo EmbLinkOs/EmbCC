@@ -196,7 +196,7 @@ representation, and behavior as "plain" `char` (C17 6.2.5, 6.3.1.1).*
 |---|---|---|---|---|---|---|
 | `signed char` | `signed char` | `unsigned char` | `unsigned char` | `unsigned char` | `unsigned char` | `signed char` |
 
-`-funsigned-char` and `-fsigned-char` override the default for the whole
+`--char=unsigned` and `--char=signed` override the default for the whole
 translation unit, and `__CHAR_UNSIGNED__` is defined exactly when plain
 `char` is unsigned (see
 [Invoking EmbCC](invoking.md#--charsigned---charunsigned)). The choice
@@ -366,9 +366,9 @@ every target and in constant expressions.
 
 Shifts by a negative count or by the width of the type or more, and left
 shifts of negative values, are undefined behavior, not
-implementation-defined. `-fsanitize=shift` traps on a count that is out
+implementation-defined. `--sanitize=shift` traps on a count that is out
 of range; a left shift of a negative value is not checked (see
-[Run-time checks](optimization.md#run-time-checks--fsanitize)).
+[Run-time checks](optimization.md#run-time-checks---sanitize)).
 
 ### Signed integer overflow
 
@@ -382,9 +382,9 @@ int inc(int x) { return x + 1; }        /* inc(INT_MAX) == INT_MIN */
 int gt(int x)  { return x + 1 > x; }    /* gt(INT_MAX) == 0; not folded to 1 */
 ```
 
-`-fwrapv` is accepted and changes nothing. `-fno-wrapv`, `-ftrapv`,
+`--wrap-overflow` is accepted and changes nothing. `-fno-wrapv`, `-ftrapv`,
 `-fstrict-overflow` and `-fno-strict-overflow` are not accepted. To find
-overflow at run time, use `-fsanitize=signed-integer-overflow`. See
+overflow at run time, use `--sanitize=signed-integer-overflow`. See
 [Optimization](optimization.md#signed-integer-overflow).
 
 Wrapping applies on every target at the width of the type. On AVR,
@@ -405,7 +405,7 @@ EmbCC's floating types use the IEEE 754 binary formats:
 | `float` | binary32 | binary32 | binary32 | binary32 | binary32 | binary32 | binary32 |
 | `double` | binary64 | binary64 | binary64 | binary64 | binary64 | binary64 | binary32 |
 | `long double` | x87 80-bit extended | binary64 | binary128 | binary64 | binary128 | binary128 | binary32 |
-| Arithmetic | SSE2; x87 for `long double` | FP/SIMD | FP/SIMD; `long double` in software | software; single-precision VFP with `-mfpu=fpv4-sp-d16` or `fpv5-sp-d16`; single- and double-precision VFP with `-mfpu=fpv5-d16` | software | software | software |
+| Arithmetic | SSE2; x87 for `long double` | FP/SIMD | FP/SIMD; `long double` in software | software; single-precision VFP with `--fpu=fpv4-sp-d16` or `fpv5-sp-d16`; single- and double-precision VFP with `--fpu=fpv5-d16` | software | software | software |
 
 On RV32 and RV64, `long double` has the binary128 size and format, and
 constant expressions of that type are evaluated during translation, but
@@ -479,7 +479,7 @@ instruction. `#pragma STDC FP_CONTRACT` is accepted and has no effect.
 
 `#pragma STDC FENV_ACCESS` and `#pragma STDC CX_LIMITED_RANGE` are
 accepted and have no effect; EmbCC compiles every program as if
-`FENV_ACCESS` were off. At `-O1` and above, the optimizer evaluates `+`,
+`FENV_ACCESS` were off. At `--opt=basic` and above, the optimizer evaluates `+`,
 `-`, `*`, `/`, negation and the comparisons on `float` and `double`
 constants during translation, rounding to nearest, ties to even, so a
 rounding mode set with `fesetround` does not apply to them. It leaves an
@@ -539,7 +539,7 @@ embcc: f.c:1:7: error: 'register' is not supported yet (see docs/manual/c-langua
 specifier are effective (C17 6.7.4).*
 
 None. Inlining is decided by the optimizer from the size of the callee,
-at `-O2` and `-Os`; the `inline` keyword has no influence. Use
+at `--opt=speed` and `--opt=size`; the `inline` keyword has no influence. Use
 `__attribute__((always_inline))` or `__attribute__((noinline))` to
 direct it (see [Optimization](optimization.md#inlining)).
 
@@ -650,7 +650,7 @@ negative values in the enumeration, otherwise int") and Clang's: with
 `enum e { A, B }`, `(enum e)-1 > 0` is true. An enumeration constant
 whose value fits `int` has type `int`, whatever the enumeration's type
 (C17 6.4.4.3, C23 6.7.2.2), so `A - 1 < 0` is true; a constant that does
-not fit has the enumerated type. With `-fshort-enums` or
+not fit has the enumerated type. With `--enums=short` or
 `__attribute__((packed))` the type is the smallest integer type that
 holds every value ([Invoking](invoking.md#--enumsshort---enumsint)).
 A wider enumeration has the type
@@ -680,7 +680,7 @@ type. A value the type cannot represent is refused:
 embcc: f.c:1: error: enumerator 'B' is 256, which the underlying type unsigned char cannot represent
 ```
 
-`-fshort-enums` is refused, and so is a `packed` or `aligned` attribute on
+`--enums=short` is refused, and so is a `packed` or `aligned` attribute on
 an enumeration:
 
 ```text
@@ -752,10 +752,10 @@ named source file is searched for in an included `" "` delimited header
 
 For `#include "file"`, the directory of the file containing the
 directive is searched first. Then, for both forms, the `-I` and
-`-isystem` directories are searched in command-line order, followed by
+`--system-include` directories are searched in command-line order, followed by
 EmbCC's own header directories. `#include_next` continues the search
 after the directory in which the current file was found. The exact list,
-`-nostdinc`, and the 16-directory limit are described in
+`--no-std-include`, and the 16-directory limit are described in
 [Search order](invoking.md#search-order); `--print-search-dirs` shows
 EmbCC's own directories.
 
@@ -788,7 +788,7 @@ negative value (C17 6.10.1).*
 
 It matches, and it may be negative: a character constant in `#if` has the
 value it has in the program, so `#if '\377' < 0` is true on x86-64, Apple
-arm64 and AVR (and with `-fsigned-char`) and false on the other targets.
+arm64 and AVR (and with `--char=signed`) and false on the other targets.
 
 *Whether the `#` operator inserts a `\` character before the `\`
 character that begins a universal character name in a character
@@ -835,7 +835,7 @@ a diagnostic. This includes:
 - `#pragma STDC FP_CONTRACT`, `FENV_ACCESS` and `CX_LIMITED_RANGE`, which
   have no effect (see [Floating point](#floating-point)).
 
-There is no warning for an ignored pragma; `-Wunknown-pragmas` is not a
+There is no warning for an ignored pragma; `--warn=unknown-pragmas` is not a
 warning EmbCC has.
 
 *The definitions for `__DATE__` and `__TIME__` when respectively, the
@@ -862,7 +862,7 @@ that a build can be reproduced. `__TIMESTAMP__` is not defined.
 |---|---|
 | `__STDC__` | `1` |
 | `__STDC_VERSION__` | `201710L` (C only) |
-| `__STDC_HOSTED__` | `1`, on every target, with or without `-ffreestanding` |
+| `__STDC_HOSTED__` | `1`, on every target, with or without `--freestanding` |
 | `__EMBCC__` | `1` |
 | `__GNUC__`, `__clang__` | not defined |
 | `__STDC_IEC_559__`, `__STDC_IEC_559_COMPLEX__` | not defined |

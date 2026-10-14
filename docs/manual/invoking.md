@@ -79,8 +79,8 @@ The driver decides what to do with the input file from its suffix, unless
 ### Several source files
 
 ```sh
-embcc -O2 main.c uart.c timer.c -lm -o prog      # compile all three, link
-embcc -O2 -j4 -c *.c                             # main.o uart.o timer.o ...
+embcc --opt=speed main.c uart.c timer.c -lm -o prog      # compile all three, link
+embcc --opt=speed -j4 -c *.c                             # main.o uart.o timer.o ...
 ```
 
 Each source is compiled by a run of `embcc` of its own, with the same
@@ -266,9 +266,9 @@ them:
 
 | Command | Files kept |
 |---|---|
-| `embcc -save-temps -c x.c -o build/x.o` | `build/x.i`, `build/x.s` |
-| `embcc -save-temps -c x.c` | `x.i`, `x.s` |
-| `embcc -save-temps -S x.c -o build/y.s` | `build/y.i` (the `.s` is the output) |
+| `embcc --keep-temps -c x.c -o build/x.o` | `build/x.i`, `build/x.s` |
+| `embcc --keep-temps -c x.c` | `x.i`, `x.s` |
+| `embcc --keep-temps -S x.c -o build/y.s` | `build/y.i` (the `.s` is the output) |
 | `embcc --keep-temps x.c y.c -o fw.elf` | `fw-x.i`, `fw-x.s`, `fw-y.i`, `fw-y.s` |
 
 `--keep-temps=obj` is the same as `--keep-temps`. `--keep-temps=cwd` puts
@@ -550,7 +550,7 @@ Read `FILE` as if `#include "FILE"` were the first line of the source
 file. `FILE` is looked for in the working directory first, as GCC does,
 then on the include path. Several are read in the order given. A file
 that cannot be found is refused:
-`cannot find -include file "FILE"`.
+`cannot find "FILE", which --include names to read before the source`.
 
 ### `-I DIR`
 
@@ -684,7 +684,7 @@ name is what `--print-target`, `--version` and diagnostics print.
 The ARM sub-architecture also follows from `--cpu=` and the float ABI, so
 `--target=thumbv7m-none-eabi --cpu=cortex-m4` reports itself as
 `thumbv7em-none-eabi`. Every compile for `x86_64-windows-gnu` prints the
-`-Wwindows-abi` warning, because the Windows calling convention is not yet
+`--warn=windows-abi` warning, because the Windows calling convention is not yet
 complete. What each target supports is in [Targets](targets.md).
 
 ### The default target
@@ -975,13 +975,15 @@ Accepted; each names what EmbCC does anyway. Their opposites are refused:
 
 ### Machine options that are not accepted
 
-`-mtune=`, `-masm=`, `-m32` and `-m64` are unknown
-arguments, `-mmcu=` is refused on every target but AVR, and so are `-march=`, `-msoft-float` and `-mhard-float` on
-every target but MIPS, and `-mabi=` on x86-64, AArch64 and AVR. The architecture, ABI and part are selected by the
+`-masm=`, `-m32` and `-m64` are unknown arguments. `--mcu=` is refused
+on every target but AVR, and `--cpu=`, `--isa=`, `--tune=` and `--abi=`
+on a target whose section here and in [Targets](targets.md) does not list
+them: `embcc: error: --isa=x86-64 is not an option for x86_64-elf`. The
+architecture, ABI and part are selected by the
 [target triple](#the-target) (and on ARM by `--cpu=`, `--fpu=` and
 `--float-abi=`). The RISC-V targets generate the C (compressed) extension
 and the integer multiply/divide instructions; the AVR target generates
-code for the avr5 architecture of the ATmega328P, and `-mmcu=` names the
+code for the avr5 architecture of the ATmega328P, and `--mcu=` names the
 part (atmega328p, atmega328, atmega168p or atmega168). See
 [Targets](targets.md).
 
@@ -996,7 +998,7 @@ No optimization. This is the default. The optimizer does not run, so the
 [per-pass options](#--passname---no-passname) have no effect at `--opt=none`. Every
 source variable stays in its stack slot; on ARM Cortex-M and RISC-V the
 temporaries of expressions get registers (see
-[Optimization](optimization.md#-o0)).
+[Optimization](optimization.md#--optnone)).
 
 ### `--opt=basic`, `-O1`, `-O`
 
@@ -1042,24 +1044,24 @@ on its own. The pass names are:
 
 | Pass | Default at | What it does |
 |---|---|---|
-| `mem2reg` | `-O1` | promotes local variables to SSA values |
+| `mem2reg` | `--opt=basic` | promotes local variables to SSA values |
 | `gcse` | `--opt=speed` | dominator-scoped global common-subexpression elimination |
-| `load-cse` | `-O1` | global redundant-load elimination |
-| `sccp` | `-O1` | resolves constant branches and drops dead blocks |
-| `licm` | `-O1` | loop-invariant code motion, loop rotation and strength reduction |
+| `load-cse` | `--opt=basic` | global redundant-load elimination |
+| `sccp` | `--opt=basic` | resolves constant branches and drops dead blocks |
+| `licm` | `--opt=basic` | loop-invariant code motion, loop rotation and strength reduction |
 | `vectorize` | `--opt=speed`, x86-64 only, not `--opt=size` | lane-wise loops |
 | `inline` | `--opt=basic` (a single caller or `always_inline` only), `--opt=speed` | inlines small callees into their callers |
-| `dse` | `-O1` | removes a store a later store overwrites |
-| `div-magic` | `-O1` | divides by a constant without a divide instruction |
-| `if-convert` | `-O1` | replaces a two-way branch with a select |
-| `cfg-clean` | `-O1` | threads jumps and removes unreachable code |
+| `dse` | `--opt=basic` | removes a store a later store overwrites |
+| `div-magic` | `--opt=basic` | divides by a constant without a divide instruction |
+| `if-convert` | `--opt=basic` | replaces a two-way branch with a select |
+| `cfg-clean` | `--opt=basic` | threads jumps and removes unreachable code |
 | `tail-recursion` | `--opt=speed` | turns a self tail call into a loop |
 | `idiom` | `--opt=speed` | turns a copy or clear loop into `memcpy`/memory clear |
-| `sroa` | `-O1` | splits a private aggregate into scalars |
+| `sroa` | `--opt=basic` | splits a private aggregate into scalars |
 | `unroll` | `--opt=speed`, not `--opt=size` | unrolls counted loops |
 | `pre` | `--opt=speed` | partial-redundancy elimination |
 | `switch-thread` | `--opt=speed`, not `--opt=size` | jumps from a known state straight to its `switch` case |
-| `licm-mem` | `-O1` | moves loads out of loops and keeps a loop's variable in a register |
+| `licm-mem` | `--opt=basic` | moves loads out of loops and keeps a loop's variable in a register |
 
 A `--pass=`, `--no-pass=`, `-f` or `-fno-` option that is not a pass name and not listed elsewhere
 on this page is an unknown argument. GCC's pass options are accepted only
@@ -1140,8 +1142,8 @@ in `.data.NAME`, `.rodata.NAME` or `.bss.NAME`, as GCC names them, so that
 the linker's `--gc-sections` can drop whatever the program never reaches:
 
 ```sh
-embcc --target=thumbv7em-none-eabi -O2 -ffunction-sections -fdata-sections -c main.c
-embcc --target=thumbv7em-none-eabi -T board.ld -Wl,--gc-sections startup.o main.o -o fw.elf
+embcc --target=thumbv7em-none-eabi --opt=speed --sections=functions --sections=data -c main.c
+embcc --target=thumbv7em-none-eabi --link-script=board.ld -Wl,--gc-sections startup.o main.o -o fw.elf
 ```
 
 A function or object that names its own section keeps it, and so does a
@@ -1179,8 +1181,8 @@ enabled, tables are emitted regardless.
 
 GCC: `-fomit-frame-pointer`, `-fno-omit-frame-pointer`.
 
-Accepted and without effect. The x86-64 and AArch64 backends always keep
-a frame pointer; the ARM, RISC-V, MIPS and AVR backends never use one.
+Accepted and without effect: each backend decides where a function keeps
+a frame pointer ([Frame pointer](optimization.md#frame-pointer)).
 
 ### `--no-jump-tables`, `--jump-tables`
 
@@ -1285,7 +1287,7 @@ The warnings that no option controls (see
 GCC: `-Wsystem-headers`.
 
 Report warnings in system headers. By default a warning whose location is
-in a header found through `-isystem` or through EmbCC's own include
+in a header found through `--system-include` or through EmbCC's own include
 directories is not reported.
 
 ### `--pedantic`, `--pedantic-errors`
@@ -1682,8 +1684,8 @@ embcc: error: linking a thumbv7em-none-eabi image needs its memory map: a linker
 ```
 
 ```sh
-embcc --target=thumbv7em-none-eabi -Os -c main.c -o main.o
-embcc --target=thumbv7em-none-eabi -T STM32F407VGTx_FLASH.ld \
+embcc --target=thumbv7em-none-eabi --opt=size -c main.c -o main.o
+embcc --target=thumbv7em-none-eabi --link-script=STM32F407VGTx_FLASH.ld \
       startup.o main.o -o fw.elf
 ```
 
@@ -1828,8 +1830,8 @@ reflects `--target=`, the configured default, and the ARM options that
 change the sub-architecture or the float ABI:
 
 ```sh
-embcc --target=arm-none-eabi -dumpmachine                  # thumbv7m-none-eabi
-embcc --target=thumbv7m-none-eabi -mcpu=cortex-m4 \
+embcc --target=arm-none-eabi --print-target                  # thumbv7m-none-eabi
+embcc --target=thumbv7m-none-eabi --cpu=cortex-m4 \
       -mfpu=fpv4-sp-d16 -mfloat-abi=hard -dumpmachine     # thumbv7em-none-eabihf
 ```
 
@@ -1906,7 +1908,7 @@ when it does not start with `-` and contains no `.`; otherwise the word
 is taken as the file.
 
 ```sh
-$ embcc why inlined w.c -O2
+$ embcc why inlined w.c --opt=speed
 sq (w.c:3): inlined
   because small-enough — 4 instructions into f, budget 24
   decided by the inline pass
@@ -1960,8 +1962,8 @@ With `--std=c89`, `c90`, `iso9899:1990`, `gnu89` or `gnu90`, GNU89
 semantics apply and `-fno-gnu89-inline` does not change them, as with
 Clang.
 
-Any other name is refused: `embcc: error: unknown standard '-std=NAME'`,
-or `embcc: error: unknown C++ standard '-std=NAME'` for a malformed
+Any other name is refused: `embcc: error: unknown standard '--std=NAME'`,
+or `embcc: error: unknown C++ standard '--std=NAME'` for a malformed
 `c++`/`gnu++` name.
 
 `-ansi` is not accepted (unknown argument). `--pedantic` and
@@ -1993,11 +1995,11 @@ m.o: m.c \
   /opt/embcc/lib/embcc/1.0.0-m2.complete/freestanding/stddef.h \
   /opt/embcc/lib/embcc/1.0.0-m2.complete/freestanding/stdarg.h \
   loc.h
-$ embcc -MM -c m.c
+$ embcc --deps-only -c m.c
 m.o: m.c loc.h
 ```
 
-The rule's target is the `-MT` value if one is given. Otherwise, with
+The rule's target is the `--deps-target` value if one is given. Otherwise, with
 `-c`, it is the object's name (the `-o` name or the default object name),
 and with `-E` it is the input's file name with its suffix replaced by
 `.o`. Long rules are wrapped at about 72 columns with a backslash.
@@ -2045,7 +2047,7 @@ across units, and EmbCC does not.
 Accepted and without effect. EmbCC turns no null dereference into a
 trap, and has no passes under the other three names; `-fno-lto` is the
 default (`-flto` is [refused](#refused-options)). EmbCC's loop-invariant
-motion is the `licm` pass, turned off with `-fno-licm`.
+motion is the `licm` pass, turned off with `--no-pass=licm`.
 
 ### `-fsanitize-trap`, `-fsanitize-trap=LIST`, `-fsanitize-undefined-trap-on-error`
 
@@ -2161,7 +2163,7 @@ what EmbCC's spellings get.
 | `--endian=big` or `--endian=little` against the target's byte order | `embcc: error: --endian=big is not supported for x86_64-elf, which is little-endian` |
 | `-fdump-rtl-*`, `-fdump-tree-*` and every other `-fdump-`; `-fcallgraph-info=` with anything but `su` | `embcc: error: -fdump-rtl-expand is not supported: it dumps GCC's internal representation, which EmbCC does not have; ...` |
 | `--common` for a Mach-O or COFF target | `embcc: error: --common is not supported for x86_64-apple-darwin: ...` |
-| `-fsingle-precision-constant` for C++ | `embcc: error: -fsingle-precision-constant is supported for C, not C++: ...` |
+| `--float-constants=single` for C++ | `embcc: error: --float-constants=single is supported for C, not C++: ...` |
 | `-O4` and other `-O` forms not listed | `embcc: unknown optimization flag '-O4'` |
 | `-Wl,OPTION` or `-Xlinker OPTION`, for a linker option not listed under [`--linker-arg`](#--linker-argarg) | `embcc: error: linker option 'OPTION' is not one EmbLD has (it takes -e, -Ttext, -Tdata, -Tstack, --rom-limit and --lma-offset); dropping it could build a different image from the one asked for` |
 | `-Wa,OPTION`, for an option not listed under [`--assembler-arg`](#--assembler-argarg) | `embcc: error: assembler option 'OPTION' is not one the integrated assembler has` |
