@@ -11,6 +11,8 @@
 #   options   its tables are well formed (options-table.sh checks its
 #             content);
 #
+# that the pages committed in docs/manual/ are what the compiler prints
+# (`make reference` regenerates them),
 # and every Markdown table on the three pages has as many cells in each
 # row as in its header, so a description with a stray '|' cannot shift
 # a column.
@@ -27,6 +29,16 @@ for p in options warnings targets; do
         { cat "$out/$p.err"; fail "--reference=$p"; }
     [ -s "$out/$p.md" ] || fail "--reference=$p printed nothing"
 done
+
+# ---- the committed pages are what the compiler prints ---------------------
+# (docs/manual/: options.md, warnings.md, target-list.md; `make reference`
+# regenerates them)
+for pair in options:options warnings:warnings targets:target-list; do
+    p=${pair%%:*} f=docs/manual/${pair#*:}.md
+    cmp -s "$out/$p.md" "$f" || { diff "$f" "$out/$p.md" | head -8
+        fail "$f is not what --reference=$p prints: run make reference"; }
+done
+echo "reference-pages: the committed pages are what the compiler prints"
 
 # ---- warnings ---------------------------------------------------------------
 "$EMBCC" --help-warnings | sed -n 's/^  --warn=\([a-z0-9-]*\) .*/\1/p' > "$out/w.names"

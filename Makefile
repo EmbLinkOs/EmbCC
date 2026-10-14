@@ -387,6 +387,17 @@ embdoc: $(EMBDOC_SRCS) tools/embdoc/embdoc.h
 site: embdoc
 	./embdoc site --out $(BUILD)/site
 
+# The manual's reference pages, printed by the compiler from the tables they
+# describe (src/driver/options.def, diag.c's warnings, src/targets/). They are
+# committed, so they read on GitHub too; tests/golden/reference-pages.sh fails
+# when one no longer matches what the compiler prints. `make reference`
+# brings them up to date.
+reference: embcc
+	./embcc --reference=options > docs/manual/options.md
+	./embcc --reference=warnings > docs/manual/warnings.md
+	./embcc --reference=targets > docs/manual/target-list.md
+.PHONY: reference
+
 # embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
 # table tools/bench uses (tools/bench/cost.h). ISO C and libm; the
