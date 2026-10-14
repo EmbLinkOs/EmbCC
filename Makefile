@@ -286,6 +286,7 @@ all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt em
 # is objcopy for the image formats, embmap is size and nm. Each tool
 # chooses its behaviour by the name it was called by.
 BINUTILS_NAMES := ar:embar ranlib:embar objcopy:embpack size:embmap nm:embmap
+.PHONY: binutils-names          # links, not a file of this name
 binutils-names: embar embpack embmap
 	@for p in $(BINUTILS_NAMES); do \
 	    ln -sf $${p#*:} embcc-$${p%%:*}; \
