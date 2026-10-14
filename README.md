@@ -67,6 +67,19 @@ ABI, options and limitations are in [Targets](docs/manual/targets.md).
 
 ## Building and installing
 
+A release installs on Linux and macOS, x86-64 and arm64, with
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh | sh
+```
+
+into `~/.local` (`/usr/local` as root), after checking the download's
+SHA-256. Homebrew (`brew install EmbLinkOs/embcc/embcc`), the `.deb`
+packages and the script's options are described in
+[Installing](docs/manual/getting-started.md#installing).
+
+From a source checkout:
+
 ```sh
 make all       # the compiler and every tool but the debugger
 make embdbg    # the debugger

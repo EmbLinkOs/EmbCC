@@ -4,7 +4,8 @@ This page takes you from a source checkout to running programs: building
 EmbCC and its libraries, checking the build, installing it, compiling a
 first program for the host, and cross-compiling for each supported board
 and running the result under QEMU. It is for people who are new to EmbCC.
-The command-line reference is [Invoking EmbCC](invoking.md).
+The command-line reference is [Invoking EmbCC](invoking.md). A release
+installs without a source checkout; see [Installing](#installing).
 
 All commands on this page are run from the top of the EmbCC source tree
 unless they say otherwise.
@@ -144,17 +145,99 @@ suite is described in [Testing](../internals/testing.md).
 
 ## Installing
 
+EmbCC installs from a release, with the install script, Homebrew or a
+`.deb` package, or from a source checkout with `make install`. Each puts
+the same files into a prefix, as described in
+[The installed layout](#the-installed-layout). Releases are built for
+Linux and macOS, on x86-64 and arm64.
+
+### With the install script
+
 ```sh
+curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh | sh
+```
+
+The script downloads the latest release for the machine's OS and
+processor from GitHub Releases, checks it against its SHA-256 file, and
+copies it into `$HOME/.local`, or into `/usr/local` when it runs as root.
+It never runs `sudo`. When the prefix's `bin` directory is not on `PATH`,
+it prints the line to add to the shell's startup file. It needs `curl` or
+`wget`, `tar`, and `sha256sum` or `shasum`, and runs under any POSIX
+shell.
+
+Options follow `sh -s --`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/EmbLinkOs/EmbCC/main/install.sh |
+    sh -s -- --prefix /opt/embcc --version v1.0.0
+```
+
+| Option | Meaning |
+|---|---|
+| `--prefix DIR` | install into `DIR/bin`, `DIR/lib/embcc` and `DIR/share` |
+| `--version TAG` | install the release `TAG` rather than the latest one |
+| `--from-source` | download the release's source and build it with `cc` and GNU `make`; with it, `--version main` builds the `main` branch |
+| `--help` | list the options |
+
+A tarball that does not match its checksum stops the script before
+anything is written. Where no release is built for the machine, or the
+one there is does not run (the Linux programs are built against Ubuntu
+22.04's glibc, and do not run with an older one or with musl), the script
+says so and builds from source instead, which takes a few minutes.
+Installing a version again replaces it.
+
+### With Homebrew
+
+```sh
+brew install EmbLinkOs/embcc/embcc
+```
+
+Homebrew builds EmbCC from the release's source, which takes a minute or
+two, and links `embcc` and the other tools into its `bin` directory.
+`brew install --HEAD EmbLinkOs/embcc/embcc` builds the `main` branch.
+
+### From a .deb package
+
+Each release has a `.deb` for Debian and Ubuntu on x86-64 (`amd64`) and
+arm64. It installs into `/usr`:
+
+```sh
+sudo apt install ./embcc_VERSION_amd64.deb
+```
+
+### From a tarball
+
+Each release has a tarball for each OS and processor,
+`embcc-VERSION-OS-ARCH.tar.gz` (`OS` is `linux` or `macos`, `ARCH` is
+`x86_64` or `aarch64`), and its SHA-256 file. It unpacks into one
+directory, which works wherever it is put:
+
+```sh
+shasum -a 256 -c embcc-VERSION-macos-aarch64.tar.gz.sha256
+tar -xzf embcc-VERSION-macos-aarch64.tar.gz
+embcc-VERSION-macos-aarch64/bin/embcc --version
+```
+
+On Linux, `sha256sum -c` checks the file.
+
+### From source
+
+```sh
+make -j8 all embdbg
 make install PREFIX=/opt/embcc
 ```
 
 `PREFIX` defaults to `/usr/local`. `make install` builds `all`, the C and
 C++ libraries for the `-elf` and `-linux-gnu` targets and the embedded
-runtimes, so the `ar` tools listed under
-[Host requirements](#host-requirements) must be present. It then copies
-`embcc`, `embld`, `embas`, `embread`, `embdbg`, `embls` and `embidx` into
-`PREFIX/bin`. `embdbg` is not part of `all`; run `make embdbg` before
-installing if you want it installed.
+runtimes and C libraries, with EmbCC itself and its archiver, `embar`, so
+it needs nothing but the C compiler and GNU `make` that built `embcc`. It
+then copies `embcc`, the other tools and their `embcc-ar`-style links into
+`PREFIX/bin`. `embdbg` is not part of `all`; build it first, as above, to
+have it installed.
+
+Run `make install` without `-j`. Its prerequisites, which build the
+libraries, are not ordered before its copying step, so `make -j install`
+can copy before the libraries exist.
 
 `DESTDIR` stages the installation under another root, as package builds
 do: `make install DESTDIR=/tmp/stage PREFIX=/usr` writes
@@ -162,10 +245,12 @@ do: `make install DESTDIR=/tmp/stage PREFIX=/usr` writes
 without building anything. `make uninstall PREFIX=...` removes the
 binaries and the versioned library directory.
 
-The installed layout is:
+### The installed layout
+
+Every installation has this layout:
 
 ```text
-PREFIX/bin/embcc  (and embld, embas, embread, embdbg, embls, embidx)
+PREFIX/bin/embcc  (and embld, embas, embar, embdbg, embsim, ... the other tools)
 PREFIX/lib/embcc/VERSION/
     include/            C library headers
     include/c++/        C++ library headers
@@ -175,6 +260,8 @@ PREFIX/lib/embcc/VERSION/
     x86_64-linux-gnu/   crt1.o, libc.a, librt.a, libcxx.a, link.ld
     aarch64-linux-gnu/  crt1.o, libc.a, librt.a, libcxx.a, link.ld
     TRIPLE/             librt.a, and libc.a where libc-embedded builds one
+PREFIX/share/man/man1/embcc.1
+PREFIX/share/embcc/cmake/embcc.cmake
 ```
 
 `VERSION` is the version `embcc --version` prints (`1.0.0-m2.complete`).
