@@ -388,8 +388,11 @@ static void agg_read_cb(int *p, void *ctx)
 {
     struct agg_ctx *c = ctx;
     const struct ir_ins *i = c->i;
-    int v = *p, L;
-    if (v < 0 || v >= c->nv || (L = c->of[v]) < 0)
+    int v = *p;
+    if (v < 0 || v >= c->nv)
+        return;
+    int L = c->of[v];
+    if (L < 0)
         return;
     if ((i->op == IR_LOAD && p == &i->a) ||
         (i->op == IR_STORE && p == &i->a) ||
