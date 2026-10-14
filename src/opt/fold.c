@@ -990,7 +990,7 @@ int pass_fold(struct ir_func *fn)
              i->op == IR_XOR || i->op == IR_SHL || i->op == IR_SHR) &&
             !i->imm_b && (i->w == 4 || i->w == 8) &&
             !(ka && kb) && !getenv("EMBCC_NO_LKCONST")) {
-            long la, lb;
+            long la = 0, lb = 0;
             int ja = ka || lk_get(&lk, i->a, i->w, &la);
             int jb = kb || lk_get(&lk, i->b, i->w, &lb);
             if (ja && jb) {

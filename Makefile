@@ -279,6 +279,19 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
+# What a plain `make` builds: every tool and every target's runtime, so
+# that what was built links. Without the runtimes, `embcc hello.c -o
+# hello` on a Linux host found no crt1.o for x86_64-linux-gnu -- the first
+# thing CMake's compiler check does -- and a firmware link found no
+# librt.a. (The first rule used to be build/embdbg_core.o's, so `make`
+# alone built that one object.) `make all` builds the tools alone.
+.DEFAULT_GOAL := toolchain
+RUNTIMES := libc libcxx libc-linux libcxx-linux-x86_64 libcxx-linux-aarch64 \
+            rt-embedded libc-embedded libcxx-embedded
+.PHONY: toolchain runtimes
+toolchain: all embdbg runtimes
+runtimes: $(RUNTIMES)
+
 all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim \
      embflash embtrace embdoc binutils-names
 
@@ -818,16 +831,18 @@ LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
 # tests/golden/install.sh uses -- a test that ran the first would be a
 # test that rebuilds the compiler while the rest of the suite is using
 # it, which is the one thing the suite must never do to itself.
-install: all libc libcxx libc-linux libcxx-linux-x86_64 \
-         libcxx-linux-aarch64 rt-embedded libc-embedded libcxx-embedded \
-         install-files
+# Everything is built first, and only then copied: as two prerequisites of
+# one rule, `make -j install` copied while the libraries were still being
+# built, and installed a tree with some missing, exiting 0.
+install: toolchain
+	@$(MAKE) --no-print-directory install-files
 
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
 	@mkdir -p $(DESTDIR)$(PREFIX)/bin
 	@for t in embcc embld embas embread embdbg embls embidx embar; do \
-	    cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \
-	    chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t; \
+	    cp $$t $(DESTDIR)$(PREFIX)/bin/$$t || exit 1; \
+	    chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t || exit 1; \
 	done
 	@for t in $(EXTRA_TOOLS); do \
 	    if [ -f $$t ]; then cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \
@@ -838,8 +853,9 @@ install-files:
 	        ln -sf $${p#*:} $(DESTDIR)$(PREFIX)/bin/embcc-$${p%%:*}; \
 	    true; \
 	done
-	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler
 	@cp cmake/embcc.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
+	@cp cmake/Compiler/*.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/man/man1
 	@SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct 2>/dev/null || date +%s) \
 	    ./embcc --reference=man > $(DESTDIR)$(PREFIX)/share/man/man1/embcc.1
@@ -901,6 +917,7 @@ uninstall:
 	    rm -f $(DESTDIR)$(PREFIX)/bin/embcc-$${p%%:*}; \
 	done
 	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
+	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/EmbCC*.cmake
 	@rm -rf $(LIBROOT)
 	@echo "removed EmbCC $(VERSION) from $(DESTDIR)$(PREFIX)"
 

@@ -35,18 +35,19 @@ is never counted as a pass.
 
 ## Building from source
 
-Build the compiler with:
+Build the toolchain with:
 
 ```sh
-make embcc
+make
 ```
 
-This compiles the sources into `build/` and links `./embcc` at the top of
-the tree. Use `make embcc` (or `make all`), not plain `make`: the first
-rule in the Makefile builds only `build/embdbg_core.o`, so a plain `make`
-leaves `./embcc` as it was.
+This compiles the sources into `build/`, links `./embcc` and the other
+tools at the top of the tree, and builds every target's runtime and C
+library, so that a program links for the host (`x86_64-linux-gnu` on a
+Linux PC, which is the first thing CMake's compiler check does) and
+firmware links for every board. `make -j8` runs it in parallel.
 
-The other tools are separate targets:
+Each piece is also a target of its own:
 
 | Target | Builds |
 |---|---|
@@ -57,7 +58,8 @@ The other tools are separate targets:
 | `make embls` | the language server, [`embls`](tools/embls.md) |
 | `make embidx` | the cross-unit index, [`embidx`](tools/embidx.md) |
 | `make embdbg` | the debugger, [`embdbg`](tools/embdbg.md) |
-| `make all` | `embcc`, `embread`, `embld`, `embas`, `embls` and `embidx` (not `embdbg`) |
+| `make all` | every tool, and no runtime |
+| `make runtimes` | every target's runtime and C library (`make libc-linux-x86_64` and the others, one target each) |
 | `make clean` | removes `build/` and the tool binaries other than `embidx` |
 
 The build can be adjusted with these `make` variables:
@@ -227,17 +229,12 @@ make -j8 all embdbg
 make install PREFIX=/opt/embcc
 ```
 
-`PREFIX` defaults to `/usr/local`. `make install` builds `all`, the C and
-C++ libraries for the `-elf` and `-linux-gnu` targets and the embedded
-runtimes and C libraries, with EmbCC itself and its archiver, `embar`, so
-it needs nothing but the C compiler and GNU `make` that built `embcc`. It
-then copies `embcc`, the other tools and their `embcc-ar`-style links into
-`PREFIX/bin`. `embdbg` is not part of `all`; build it first, as above, to
-have it installed.
-
-Run `make install` without `-j`. Its prerequisites, which build the
-libraries, are not ordered before its copying step, so `make -j install`
-can copy before the libraries exist.
+`PREFIX` defaults to `/usr/local`. `make install` builds the toolchain,
+as a plain `make` does: every tool, `embdbg` included, and every target's
+runtime and C library, archived with EmbCC's own `embar`. Only once all
+of it is built does it copy `embcc`, `embld`, `embas`, `embread`,
+`embdbg`, `embls` and `embidx` into `PREFIX/bin`, so `make -j8 install`
+is safe. A tool that is missing stops the install with an error.
 
 `DESTDIR` stages the installation under another root, as package builds
 do: `make install DESTDIR=/tmp/stage PREFIX=/usr` writes

@@ -1717,9 +1717,11 @@ The link line, in order:
 
 For `x86_64-linux-gnu` the result is a static executable with no
 dependence on another C library. A missing `crt1.o` or `libc.a` for that
-target is reported by name (`embcc: error: no crt1.o for
-x86_64-linux-gnu -- the target's library is not built or not installed`),
-as is a missing `libcxx.a` for a C++ program. For the freestanding x86-64
+target is reported by name, with what builds it: in a build tree the
+`make` target (``embcc: error: no crt1.o for x86_64-linux-gnu: its C
+library is not built; `make libc-linux-x86_64` in TREE builds it``), and
+for an installed compiler `make install`. A missing `libcxx.a` for a C++
+program is reported the same way. For the freestanding x86-64
 targets nothing supplies the entry point: the program must define
 `_start`, or be linked with `embld` and a start file.
 

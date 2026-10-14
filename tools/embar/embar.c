@@ -192,9 +192,15 @@ static void index_member(int mi)
 
 static void put_hdr(FILE *f, const char *name, long size)
 {
-    char h[61];
-    snprintf(h, sizeof h, "%-16s%-12s%-6s%-6s%-8s%-10ld`\n", name, "0", "0",
-             "0", "644", size);
+    /* The size field is ten characters: a member that does not fit would
+     * push the header's closing "`\n" out of place, and every member
+     * after it would be read from the wrong offset. */
+    char h[61], sz[16];
+    if (size < 0 || snprintf(sz, sizeof sz, "%ld", size) > 10)
+        die("%s is larger than an archive member can be (9999999999 bytes)",
+            name);
+    snprintf(h, sizeof h, "%-16.16s%-12s%-6s%-6s%-8s%-10.10s`\n", name, "0",
+             "0", "0", "644", sz);
     fwrite(h, 1, 60, f);
 }
 

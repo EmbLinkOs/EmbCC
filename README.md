@@ -81,14 +81,14 @@ packages and the script's options are described in
 From a source checkout:
 
 ```sh
-make all       # the compiler and every tool but the debugger
+make           # the compiler, every tool and every target's runtime
 make embdbg    # the debugger
 make check     # compile and run every program in tests/exec and tests/cxx
 make install   # into PREFIX (default /usr/local)
 ```
 
-`make` alone builds a single object; name a target. The runtime and C
-library for each board, and the test suites, are described in
+`make all` builds the tools alone. The runtime and C library for each
+board, and the test suites, are described in
 [Getting started](docs/manual/getting-started.md).
 
 ## A first firmware, without a board

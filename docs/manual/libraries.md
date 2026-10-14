@@ -58,13 +58,13 @@ A missing library is reported by name rather than as a list of undefined
 symbols:
 
 ```text
-embcc: error: no crt1.o for x86_64-linux-gnu -- the target's library is not built or not installed
+embcc: error: no crt1.o for x86_64-linux-gnu: its C library is not built; `make libc-linux-x86_64` in /path/to/EmbCC builds it
 embcc: --print-search-dirs says where it looked
 ```
 
-A C++ program on a target with no `libcxx.a` fails the same way
-(`embcc: error: no libcxx.a for TRIPLE -- a C++ program needs the C++
-runtime, and this target's is not built or not installed`). On a hosted
+An installed compiler names `make install` instead of a make target. A
+C++ program on a target with no `libcxx.a` fails the same way, naming
+the C++ runtime's make target. On a hosted
 (Linux) target a missing `crt1.o` or `libc.a` is an error; on a
 freestanding target the driver links what it finds, and the program must
 define `_start`.

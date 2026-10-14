@@ -4504,7 +4504,7 @@ static void gen_ins(struct a_fn *F, int n)
         return;
 
     case IR_CALL: {
-        struct argplace pl, hid;
+        struct argplace pl, hid = { 0 };
         int cursor = i->call_varargs ? -1 : ARG_TOP;
         long stk = 0;
         int k;
