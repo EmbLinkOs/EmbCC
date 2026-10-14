@@ -288,7 +288,7 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 RUNTIMES := libc libcxx libc-linux libcxx-linux-x86_64 libcxx-linux-aarch64 \
             rt-embedded libc-embedded libcxx-embedded
 .PHONY: toolchain runtimes
-toolchain: all runtimes
+toolchain: all embdbg runtimes
 runtimes: $(RUNTIMES)
 
 all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim \
@@ -802,14 +802,18 @@ LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
 # tests/golden/install.sh uses -- a test that ran the first would be a
 # test that rebuilds the compiler while the rest of the suite is using
 # it, which is the one thing the suite must never do to itself.
-install: toolchain install-files
+# Everything is built first, and only then copied: as two prerequisites of
+# one rule, `make -j install` copied while the libraries were still being
+# built, and installed a tree with some missing, exiting 0.
+install: toolchain
+	@$(MAKE) --no-print-directory install-files
 
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"
 	@mkdir -p $(DESTDIR)$(PREFIX)/bin
 	@for t in embcc embld embas embread embdbg embls embidx embar; do \
-	    cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \
-	    chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t; \
+	    cp $$t $(DESTDIR)$(PREFIX)/bin/$$t || exit 1; \
+	    chmod 755 $(DESTDIR)$(PREFIX)/bin/$$t || exit 1; \
 	done
 	@for t in $(EXTRA_TOOLS); do \
 	    if [ -f $$t ]; then cp $$t $(DESTDIR)$(PREFIX)/bin/$$t; \

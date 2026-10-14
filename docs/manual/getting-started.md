@@ -150,13 +150,12 @@ suite is described in [Testing](../internals/testing.md).
 make install PREFIX=/opt/embcc
 ```
 
-`PREFIX` defaults to `/usr/local`. `make install` builds `all`, the C and
-C++ libraries for the `-elf` and `-linux-gnu` targets and the embedded
-runtimes, so the `ar` tools listed under
-[Host requirements](#host-requirements) must be present. It then copies
-`embcc`, `embld`, `embas`, `embread`, `embdbg`, `embls` and `embidx` into
-`PREFIX/bin`. `embdbg` is not part of `all`; run `make embdbg` before
-installing if you want it installed.
+`PREFIX` defaults to `/usr/local`. `make install` builds the toolchain,
+as a plain `make` does: every tool, `embdbg` included, and every target's
+runtime and C library, archived with EmbCC's own `embar`. Only once all
+of it is built does it copy `embcc`, `embld`, `embas`, `embread`,
+`embdbg`, `embls` and `embidx` into `PREFIX/bin`, so `make -j8 install`
+is safe. A tool that is missing stops the install with an error.
 
 `DESTDIR` stages the installation under another root, as package builds
 do: `make install DESTDIR=/tmp/stage PREFIX=/usr` writes
