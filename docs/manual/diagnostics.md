@@ -235,7 +235,7 @@ Stop after N errors. When the limit is reached EmbCC prints the errors so
 far and
 
 ```text
-embcc: compilation terminated due to -fmax-errors=N
+embcc: compilation terminated due to --max-errors=N
 ```
 
 and exits with status 1. Warnings turned into errors by `--warnings-are-errors` or
@@ -1365,7 +1365,7 @@ that remarks explain; see [Invoking EmbCC](invoking.md).
 
 `embls` is EmbCC's language server: it speaks the Language Server
 Protocol over standard input and output. For diagnostics it runs
-`embcc -fsyntax-only -fdiagnostics-format=json` over the editor's buffer
+`embcc --syntax-only --diagnostics=json` over the editor's buffer
 and publishes each error and warning, with its notes appended to the
 message, so the editor shows what the build will report. It does not
 offer the fix-its as code actions. It also answers completion, hover,

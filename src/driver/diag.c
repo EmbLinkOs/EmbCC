@@ -1245,13 +1245,16 @@ EMBCC_NORETURN static void leave(void)
     exit(1);
 }
 
-/* -fmax-errors=N: stop once N errors are out, as GCC does. */
+/* --max-errors=N: stop once N errors are out, as GCC does. The option
+ * is named as the user typed it. */
 static void check_max_errors(void)
 {
     if (g_max_errors && g_errors >= g_max_errors) {
+        char n[24];
         diag_flush();
-        fprintf(stderr, "embcc: compilation terminated due to -fmax-errors=%d\n",
-                g_max_errors);
+        snprintf(n, sizeof n, "%d", g_max_errors);
+        fprintf(stderr, "embcc: compilation terminated due to %s\n",
+                opt_said("-fmax-errors=", n));
         leave();
     }
 }

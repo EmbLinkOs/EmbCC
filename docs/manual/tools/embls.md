@@ -105,7 +105,7 @@ only the include directories: `-IDIR`, `-isystemDIR`, and `-I` or
 For the diagnostics, `embls` runs this command through `/bin/sh`:
 
 ```text
-EMBCC -fsyntax-only -fdiagnostics-format=json -I 'DIR' 'FLAG'... -c 'TEMP' 2>&1
+EMBCC --syntax-only --diagnostics=json -I 'DIR' 'FLAG'... -c 'TEMP' 2>&1
 ```
 
 - `EMBCC` is the value of `EMBLS_EMBCC`. When that variable is unset or

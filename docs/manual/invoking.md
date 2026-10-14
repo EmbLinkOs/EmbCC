@@ -1339,7 +1339,7 @@ selects the default: color when standard error is a terminal. Clang's
 GCC: `-fmax-errors=N`.
 
 Stop after `N` errors with `embcc: compilation terminated due to
--fmax-errors=N`. `0`, the default, means no limit. Clang's
+--max-errors=N`. `0`, the default, means no limit. Clang's
 `-ferror-limit=` is not accepted.
 
 ### `--explain=ID`

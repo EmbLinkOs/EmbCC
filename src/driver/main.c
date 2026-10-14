@@ -5597,8 +5597,7 @@ int main(int argc, char **argv)
             /* One of EmbCC's own options that this target has no use
              * for (--isa= on x86-64) is not unknown: say which. */
             if (strcmp(ty, argv[i]) != 0) {
-                fprintf(stderr, "embcc: error: %s is not an option for %s "
-                        "(embcc --help lists each option's targets)\n",
+                fprintf(stderr, "embcc: error: %s is not an option for %s\n",
                         ty, target_triple_now());
                 return 1;
             }
