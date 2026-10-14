@@ -75,8 +75,10 @@ echo "options-table: all $n spellings the driver tests are in the table"
 printf 'int x;\n' > "$out/t.c"
 : > "$out/unknown.txt"
 "$EMBCC" --help=markdown > "$out/ref.md" || fail "--help=markdown"
+# (in $out: --deps=1 writes a dependency file named 1)
+E=$EMBCC; case $E in /*) ;; *) E=$PWD/$E ;; esac
 awk '$1 == "ours" { o = $2; getline; if ($1 == "alias") print o }' "$out/table.txt" |
-while read -r s; do
+(cd "$out" && while read -r s; do
     a=$s
     case $s in                  # a value each accepts
     --keep-temps=) a="${s}obj" ;;
@@ -84,9 +86,9 @@ while read -r s; do
     --fp-contract=) a="${s}off" ;;
     *=) a="${s}1" ;;
     esac
-    "$EMBCC" --target=x86_64-elf --syntax-only "$a" "$out/t.c" > "$out/one.txt" 2>&1
-    grep -q "unknown argument" "$out/one.txt" && echo "$a" >> "$out/unknown.txt"
-done
+    "$E" --target=x86_64-elf --syntax-only "$a" t.c > one.txt 2>&1
+    grep -q "unknown argument" one.txt && echo "$a" >> unknown.txt
+done)
 [ ! -s "$out/unknown.txt" ] ||
     { cat "$out/unknown.txt"; fail "EmbCC spellings the driver does not accept"; }
 echo "options-table: every EmbCC spelling that stands for another is accepted"
