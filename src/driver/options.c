@@ -114,6 +114,23 @@ static const struct opt *lookup(const char *arg, const char **val, int *sep)
     return NULL;
 }
 
+/* What the user typed for a rewritten option, for messages (opt_typed,
+ * util.c): "--cpu cortex-m4" for "-mcpu=cortex-m4". */
+static void remember(const char *internal, const char *spelling,
+                     const char *val, int sep)
+{
+    size_t n = strlen(spelling) + (val ? strlen(val) : 0) + 2;
+    char *t = xmalloc(n);
+    if (!val || !*val)
+        snprintf(t, n, "%s", spelling);
+    else if (sep)
+        snprintf(t, n, "%.*s %s", (int)strlen(spelling) - 1, spelling, val);
+    else
+        snprintf(t, n, "%s%s", spelling, val);
+    opt_remember_typed(internal, t);
+    free(t);
+}
+
 int opts_normalize(int *argc, char ***argv)
 {
     struct strvec out = { 0, 0, 0 };
@@ -136,7 +153,9 @@ int opts_normalize(int *argc, char ***argv)
             }
             val = (*argv)[++i];
         }
+        int first = out.n;
         expand(&out, o->gcc, val ? val : "");
+        remember(out.v[first], o->spelling, val, sep);
         changed = 1;
     }
     if (!changed) {

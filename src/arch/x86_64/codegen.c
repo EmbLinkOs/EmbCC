@@ -3730,7 +3730,8 @@ static void gen_func(struct ir_func *fn, struct code *text,
         if (g_no_sse && (i->flt || i->op == IR_I2F || i->op == IR_F2I ||
                          i->op == IR_F2F))
             diag_fatal(fn->file, i->line,
-                       "floating point needs SSE, which -mno-sse forbids");
+                       "floating point needs SSE, which %s forbids",
+                       opt_typed("-mno-sse"));
         /* Pure address arithmetic on a local, folded into every access
          * that uses it: emit nothing at all. This has to happen BEFORE
          * the switch, because the ALU case would otherwise reach the

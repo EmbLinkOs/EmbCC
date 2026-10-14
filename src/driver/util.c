@@ -96,3 +96,37 @@ void ob_free(struct outbuf *b)
     b->p = NULL;
     b->n = b->cap = 0;
 }
+
+/* ---- the options as the user typed them ----------------------------------
+ *
+ * The driver rewrites EmbCC's option spellings into the ones its argument
+ * loop reads (src/driver/options.c). A message about an option quotes
+ * what the user typed: opt_typed("-fshort-enums") is "--enums=short" when
+ * that is how it came, and "-fshort-enums" when that is. Here rather than
+ * in options.c so that every part of the compiler, and every tool that
+ * links a part of it, can ask. */
+static struct { char *internal, *typed; } *g_opt_typed;
+static int g_nopt_typed, g_capopt_typed;
+
+void opt_remember_typed(const char *internal, const char *typed)
+{
+    if (g_nopt_typed == g_capopt_typed) {
+        g_capopt_typed = g_capopt_typed ? 2 * g_capopt_typed : 8;
+        g_opt_typed = xrealloc(g_opt_typed,
+                               (size_t)g_capopt_typed * sizeof *g_opt_typed);
+    }
+    char *in = xmalloc(strlen(internal) + 1), *ty = xmalloc(strlen(typed) + 1);
+    strcpy(in, internal);
+    strcpy(ty, typed);
+    g_opt_typed[g_nopt_typed].internal = in;
+    g_opt_typed[g_nopt_typed].typed = ty;
+    g_nopt_typed++;
+}
+
+const char *opt_typed(const char *internal)
+{
+    for (int k = 0; k < g_nopt_typed; k++)
+        if (strcmp(g_opt_typed[k].internal, internal) == 0)
+            return g_opt_typed[k].typed;
+    return internal;
+}

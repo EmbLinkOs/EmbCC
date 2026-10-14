@@ -11,6 +11,7 @@
 #include "../target.h"
 #include "../../driver/util.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -46,15 +47,25 @@ static const char *g_arm_march_fpu;
  *
  * The object says which it was built for (Tag_FP_arch, Tag_ABI_HardFP_use,
  * Tag_ABI_VFP_args) and the predefined macros say so to the program
- * (__ARM_FP, __ARM_VFPV4__, __SOFTFP__); both follow from what is set here. */
+ * (__ARM_FP, __ARM_VFPV4__, __SOFTFP__); both follow from what is set here.
+ *
+ * A message quotes an option as the user typed it (ty: "--fpu=fpv5-d16"
+ * or "-mfpu=fpv5-d16") and suggests one in EmbCC's spelling. */
+static const char *ty(int slot, const char *gcc_prefix, const char *v)
+{
+    static char buf[3][96];
+    snprintf(buf[slot], sizeof buf[slot], "%s%s", gcc_prefix, v ? v : "");
+    return opt_typed(buf[slot]);
+}
+
 void thumb_options_done(void)
 {
     /* -mcmse needs the security extension, which only ARMv8-M has. */
     if (g_arm_cmse && !target_thumb_v8m())
-        diag_fatal(NULL, 0, "-mcmse is the Secure side of ARMv8-M's "
+        diag_fatal(NULL, 0, "%s is the Secure side of ARMv8-M's "
                    "security extension, and %s is not ARMv8-M: use "
                    "thumbv8m.main-none-eabi or thumbv8m.base-none-eabi",
-                   target_triple_now());
+                   opt_typed("-mcmse"), target_triple_now());
     /* ARMv7-A: VFPv3 or VFPv4, D16 or D32 -- every Cortex-A's unit but
      * NEON's SIMD, which nothing here emits and so nothing may claim. The
      * code is the Cortex-M7's (single and double precision on d0-d15),
@@ -73,21 +84,23 @@ void thumb_options_done(void)
         int named = u && strcmp(u, "none") && strcmp(u, "soft") &&
                     strcmp(u, "auto");
         if (strcmp(a, "soft") && strcmp(a, "softfp") && strcmp(a, "hard"))
-            diag_fatal(NULL, 0, "-mfloat-abi=%s is not an ARM float ABI: it "
-                       "is one of soft, softfp and hard", a);
+            diag_fatal(NULL, 0, "%s is not an ARM float ABI: it "
+                       "is one of soft, softfp and hard",
+                       ty(0, "-mfloat-abi=", a));
         for (int k = 0; named && units[k].name; k++)
             if (!strcmp(u, units[k].name))
                 unit = k;
         if (named && unit < 0)
-            diag_fatal(NULL, 0, "-mfpu=%s is not supported on %s: EmbCC "
-                       "emits VFPv3 or VFPv4 (-mfpu=vfpv3-d16, vfpv3, "
+            diag_fatal(NULL, 0, "%s is not supported on %s: EmbCC "
+                       "emits VFPv3 or VFPv4 (--fpu=vfpv3-d16, vfpv3, "
                        "vfpv4-d16, vfpv4) there, and no NEON (Advanced SIMD) "
-                       "instruction", u, target_triple_now());
+                       "instruction", ty(0, "-mfpu=", u), target_triple_now());
         if (!strcmp(a, "soft"))
             return;                    /* no FPU instructions, as GCC reads it */
         if (!named)
-            diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
-                       "-mfpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)", a);
+            diag_fatal(NULL, 0, "%s needs an FPU to use: add "
+                       "--fpu=vfpv3-d16 (or vfpv3, vfpv4-d16, vfpv4)",
+                       ty(0, "-mfloat-abi=", a));
         target_set_thumb_hard_abi(!strcmp(a, "hard"));
         target_set_thumb_fpu(1);
         target_set_thumb_fpu_dp(1);
@@ -129,31 +142,33 @@ void thumb_options_done(void)
          * FPv5, and its attributes and tables are the only ones checked. */
         if (v8 ? strcmp(g_arm_fpu, "fpv5-sp-d16") != 0
                : strcmp(g_arm_fpu, "fpv4-sp-d16") != 0 && !dp)
-            diag_fatal(NULL, 0, "-mfpu=%s is not supported on %s: EmbCC "
+            diag_fatal(NULL, 0, "%s is not supported on %s: EmbCC "
                        "emits VFP for %s and nothing else: another unit's "
                        "instruction set and attributes are unchecked here",
-                       g_arm_fpu, target_triple_now(),
-                       v8 ? "the Cortex-M33's unit (-mfpu=fpv5-sp-d16)"
-                          : "the Cortex-M4F's unit (-mfpu=fpv4-sp-d16) and "
-                            "the Cortex-M7's (-mfpu=fpv5-d16)");
+                       ty(0, "-mfpu=", g_arm_fpu), target_triple_now(),
+                       v8 ? "the Cortex-M33's unit (--fpu=fpv5-sp-d16)"
+                          : "the Cortex-M4F's unit (--fpu=fpv4-sp-d16) and "
+                            "the Cortex-M7's (--fpu=fpv5-d16)");
         if (!v8 && !target_thumb_em())
-            diag_fatal(NULL, 0, "-mfpu=%s is an ARMv7E-M unit, and the part "
-                       "is ARMv7-M (a Cortex-M3 has no FPU); add -mcpu=%s",
-                       g_arm_fpu, dp ? "cortex-m7" : "cortex-m4");
+            diag_fatal(NULL, 0, "%s is an ARMv7E-M unit, and the part "
+                       "is ARMv7-M (a Cortex-M3 has no FPU); add --cpu=%s",
+                       ty(0, "-mfpu=", g_arm_fpu), dp ? "cortex-m7" : "cortex-m4");
         /* The double-precision unit is the M7's and no other part's: an
          * M4 told it has one would run .f64 instructions it does not
          * implement, which is a UsageFault at the first double. */
         if (dp && g_arm_cpu && !m7)
-            diag_fatal(NULL, 0, "-mfpu=fpv5-d16 is the Cortex-M7's "
-                       "double-precision unit, and -mcpu=%s does not have "
-                       "it; the Cortex-M4F's is -mfpu=fpv4-sp-d16", g_arm_cpu);
+            diag_fatal(NULL, 0, "%s is the Cortex-M7's "
+                       "double-precision unit, and %s does not have "
+                       "it; the Cortex-M4F's is --fpu=fpv4-sp-d16",
+                       ty(0, "-mfpu=", "fpv5-d16"), ty(1, "-mcpu=", g_arm_cpu));
     }
     if (!strcmp(abi, "soft"))
         return;                        /* no FPU instructions, as GCC reads it */
     if (!fpu_named)
-        diag_fatal(NULL, 0, "-mfloat-abi=%s needs an FPU to use: add "
-                   "-mfpu=fpv4-sp-d16 (Cortex-M4F), -mfpu=fpv5-d16 "
-                   "(Cortex-M7) or -mfpu=fpv5-sp-d16 (Cortex-M33)", abi);
+        diag_fatal(NULL, 0, "%s needs an FPU to use: add "
+                   "--fpu=fpv4-sp-d16 (Cortex-M4F), --fpu=fpv5-d16 "
+                   "(Cortex-M7) or --fpu=fpv5-sp-d16 (Cortex-M33)",
+                   ty(0, "-mfloat-abi=", abi));
     /* hard: the FPU's arithmetic, and floating point passed and
      * returned in s0-s15 / d0-d7 (AAPCS-VFP). The runtime helpers keep the
      * base convention either way, as the RTABI requires. The convention
@@ -169,11 +184,11 @@ void thumb_options_done(void)
      * Neither is emitted, so the combination is refused rather than
      * leaking a Secure float into the Non-secure state. */
     if (g_arm_cmse && target_thumb_fpu())
-        diag_fatal(NULL, 0, "-mcmse with an FPU (-mfpu=, -mfloat-abi=softfp "
-                   "or hard, or an -eabihf triple) is not supported: EmbCC "
+        diag_fatal(NULL, 0, "%s with an FPU (--fpu=, --float-abi=softfp "
+                   "or hard, or an -eabihf target) is not supported: EmbCC "
                    "does not clear the floating-point registers a "
                    "cmse_nonsecure_entry function must clear; build the "
-                   "Secure side with -mfloat-abi=soft");
+                   "Secure side with --float-abi=soft", opt_typed("-mcmse"));
 }
 
 int thumb_target_option(const char *arg)

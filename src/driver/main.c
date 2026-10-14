@@ -908,9 +908,11 @@ static int compile_and_link(const char *in, const char *out)
             snprintf(nm, sizeof nm, "%s.ld", mcu->name);
             if (!paths_target_file(lib_triple(), nm, avr_script,
                                    sizeof avr_script)) {
-                fprintf(stderr, "embcc: error: no %s for avr (-mmcu=%s): "
+                char mm[96];
+                snprintf(mm, sizeof mm, "-mmcu=%s", mcu->name);
+                fprintf(stderr, "embcc: error: no %s for avr (%s): "
                         "the AVR runtime is not built or not installed "
-                        "(make rt-embedded)\n", nm, mcu->name);
+                        "(make rt-embedded)\n", nm, opt_typed(mm));
                 return 1;
             }
             lo.script = avr_script;
@@ -921,9 +923,11 @@ static int compile_and_link(const char *in, const char *out)
             snprintf(nm, sizeof nm, "crt%s.o", mcu->name);
             if (!paths_target_file(lib_triple(), nm, avr_crt,
                                    sizeof avr_crt)) {
-                fprintf(stderr, "embcc: error: no %s for avr (-mmcu=%s): "
+                char mm[96];
+                snprintf(mm, sizeof mm, "-mmcu=%s", mcu->name);
+                fprintf(stderr, "embcc: error: no %s for avr (%s): "
                         "the AVR runtime is not built or not installed "
-                        "(make rt-embedded)\n", nm, mcu->name);
+                        "(make rt-embedded)\n", nm, opt_typed(mm));
                 return 1;
             }
             have_avr_crt = 1;
@@ -939,8 +943,9 @@ static int compile_and_link(const char *in, const char *out)
         int scripts = backend_get(target_get())->ld_scripts;
         fprintf(stderr,
                 "embcc: error: linking a %s image needs its memory map: %s"
-                "-Wl,-Ttext=FLASH and -Wl,-Tdata=RAM\n", target_triple_now(),
-                scripts ? "a linker script (-T FILE.ld), or " : "");
+                "--linker-arg=-Ttext=FLASH and --linker-arg=-Tdata=RAM\n",
+                target_triple_now(),
+                scripts ? "a linker script (--link-script=FILE.ld), or " : "");
         return 1;
     }
     if (!fw && lo.script) {
@@ -1868,7 +1873,7 @@ static int compile_unit(const char *in, const char *out, int pp_only)
          * into landing pads nothing would reach. */
         fprintf(stderr,
                 "embcc: error: C++ exceptions are not supported for %s yet: "
-                "EmbCC writes no %s; compile with -fno-exceptions\n",
+                "EmbCC writes no %s; compile with --no-exceptions\n",
                 target_triple_now(), cxx_unwind_tables_name());
         return 1;
     }
@@ -2727,12 +2732,11 @@ static int compile_unit(const char *in, const char *out, int pp_only)
      * row). eh_emit would write an x86-64 CIE into the object. */
     if (unwind && unwritten)
         diag_fatal(NULL, 0, "unwind tables are not supported for "
-                            "%s yet (-funwind-tables, "
-                            "-fasynchronous-unwind-tables, -fexceptions%s): "
+                            "%s yet (--unwind-tables, --exceptions%s): "
                             "EmbCC writes no %s",
                    target_triple_now(),
                    lang_cxx && want_exceptions
-                       ? ", and C++ without -fno-exceptions" : "",
+                       ? ", and C++ without --no-exceptions" : "",
                    unwritten);
     if (unwind)
         eh_emit(iu, ta == TARGET_AARCH64, &eh);
@@ -5189,7 +5193,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "embcc: error: %s is not supported: it dumps "
                             "GCC's internal representation, which EmbCC "
                             "does not have; `embcc inspect ir|cfg|callgraph` "
-                            "shows EmbCC's, and -fstack-usage its frames\n",
+                            "shows EmbCC's, and --stack-usage its frames\n",
                     argv[i]);
             return 1;
         } else if (strcmp(argv[i], "-mbig-endian") == 0 ||
@@ -5587,9 +5591,10 @@ int main(int argc, char **argv)
      * build that needs two of them merged would be told so only by its
      * linker. */
     if (g_fcommon && target_fmt_get() != TGT_FMT_ELF) {
-        fprintf(stderr, "embcc: error: -fcommon is not supported for %s: "
+        fprintf(stderr, "embcc: error: %s is not supported for %s: "
                         "EmbCC writes COMMON symbols into ELF objects only, "
-                        "and this target's are %s\n", target_triple_now(),
+                        "and this target's are %s\n", opt_typed("-fcommon"),
+                target_triple_now(),
                 target_fmt_name(target_fmt_get()));
         return 1;
     }
@@ -5653,9 +5658,10 @@ int main(int argc, char **argv)
         /* the C parser sizes each enum (parse.c enum_pack); an ARM object
          * says so in Tag_ABI_enum_size (1), and ACLE's macro moves too */
         if (lang >= 0 ? lang : has_cxx_suffix(input)) {
-            fprintf(stderr, "embcc: error: -fshort-enums is supported for "
+            fprintf(stderr, "embcc: error: %s is supported for "
                             "C, not C++: the C++ front end sizes its own "
-                            "enums, and a struct both see would differ\n");
+                            "enums, and a struct both see would differ\n",
+                    opt_typed("-fshort-enums"));
             return 1;
         }
         target_set_short_enums(1);
@@ -5669,9 +5675,10 @@ int main(int argc, char **argv)
      * C, so the flag would reach one and not the other. */
     if (g_single_prec) {
         if (lang_cxx) {
-            fprintf(stderr, "embcc: error: -fsingle-precision-constant is "
+            fprintf(stderr, "embcc: error: %s is "
                             "supported for C, not C++: the C++ front end "
-                            "would still type 1.0 as double\n");
+                            "would still type 1.0 as double\n",
+                    opt_typed("-fsingle-precision-constant"));
             return 1;
         }
         parse_set_single_precision_constant(1);
