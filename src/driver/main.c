@@ -32,6 +32,7 @@
 #include <setjmp.h>
 
 #include "asmout.h"
+#include "options.h"
 #include "iface.h"
 #include "inspect.h"
 #include "remark.h"
@@ -72,100 +73,12 @@ static void print_version(void)
 static void print_usage(FILE *out)
 {
     fprintf(out,
-            "usage: embcc [-c|-S|-E] FILE.c|FILE.cc|FILE.s|FILE.S|FILE.asm..."
-            " [-o FILE] [-j N]\n"
-            "             [--target=TRIPLE] [-x c|c++]\n"
-            "             [-std=...] [--emit-c]\n"
-            "             [-I DIR]... [-isystem DIR]... [-nostdinc] [-g]\n"
-            "             [-O0|-O1|-O2|-O3|-Os]\n"
-            "             [-mcpu=CPU] [-mno-sse] [-mno-red-zone] ...\n"
-            "       embcc [FILE] OBJ.o|LIB.a|-lLIB... [-L DIR] [-T SCRIPT.ld]\n"
-            "             [-nostdlib|-nodefaultlibs|-nostartfiles] -o OUT"
-            "   (link)\n"
-            "       embcc --version | --dump-predef"
-            " | --emit-empty-object FILE\n");
-}
-
-/* What --help prints under the usage line: the options EmbCC takes, in the
- * spellings GCC and Clang use, so a build system's flags land as expected. */
-static void print_options(FILE *out)
-{
-    fputs(
-      "\nwhat to do\n"
-      "  -c                     compile to an object\n"
-      "  -E                     preprocess only\n"
-      "  -S                     write assembly (NAME.s) instead of an object\n"
-      "  -fsyntax-only          check, write nothing\n"
-      "  -j N, -jN, -j          several sources: compile N at once (-j: one\n"
-      "                         per processor); one at a time by default\n"
-      "  --emit-c               print the C a C++ unit lowers to\n"
-      "  -o FILE                where to write it\n"
-      "\nthe language\n"
-      "  -x c|c++               treat the input as this language\n"
-      "  -std=...               accepted; EmbCC has one dialect per language\n"
-      "  -I DIR, -isystem DIR   header search paths\n"
-      "  -nostdinc              do not search EmbCC's own headers\n"
-      "  --print-search-dirs    where EmbCC found its own files\n"
-      "  -D NAME[=VALUE], -U NAME  define and undefine macros\n"
-      "  -include FILE          include it before the file\n"
-      "  -Wp,-D...,-U...,-I...  the same, for the preprocessor\n"
-      "  -O0/-O1/-O2/-O3/-Os          optimization level (-Os: no size growth)\n"
-      "  -f<pass>, -fno-<pass>        turn one optimizer pass on or off\n"
-      "  -fstack-usage                write FILE.su: each function's frame\n"
-      "  -fno-exceptions, -fno-rtti   C++ without them\n"
-      "  -fno-access-control          do not enforce private/protected\n"
-      "  -fno-jump-tables             no switch through a table of addresses\n"
-      "  -fno-inline-functions        inline only what is declared inline\n"
-      "  -fcommon                     tentative definitions are COMMON (C, ELF)\n"
-      "  -fsingle-precision-constant  1.0 is a float (C)\n"
-      "  -save-temps[=cwd|obj]        keep the .i and the .s\n"
-      "\nthe target\n"
-      "  --target=TRIPLE        x86_64-elf, aarch64-elf, thumbv7m-none-eabi,\n"
-      "                         thumbv7em-none-eabi[hf], thumbv8m.main-none-eabi[hf],\n"
-      "                         armv7a-none-eabi, riscv32/riscv64-unknown-elf, avr,\n",
-      out);
-    /* (two literals: one string this long passes the IR's text form's
-     * limit, and tests/golden/ir-roundtrip.sh prints main.c's) */
-    fputs(
-      "                         thumbv6m-none-eabi, thumbv8m.base-none-eabi,\n"
-      "                         mipsel-none-elf, mips-none-elf,\n"
-      "                         loongarch64-unknown-elf, xtensa-none-elf,\n"
-      "                         powerpc-none-eabi, rx-none-elf, sparc-none-elf,\n"
-      "                         m68k-none-elf,\n"
-      "                         and the\n"
-      "                         -emblink, -linux-gnu, -apple-darwin and\n"
-      "                         -windows-gnu spellings; an unknown one lists\n"
-      "                         them all\n",
-      out);
-    fprintf(out,
-      "                         with none, this compiler emits for %s\n",
-      target_default_name() ? target_default_name() : "x86_64-elf");
-    fputs(
-      "  -dumpmachine           print that target\n"
-      "  -g                     debug information (DWARF)\n"
-      "  -mcpu=CPU -mfpu=FPU -mfloat-abi=ABI   Cortex-M part and float ABI\n"
-      "  -mno-sse -mno-red-zone -mcmodel=kernel -mgeneral-regs-only\n"
-      "\ndiagnostics (docs/manual/diagnostics.md)\n"
-      "  -fdiagnostics-format=text|json   caret output, or GCC's JSON\n"
-      "  -fdiagnostics-color=auto|always|never\n"
-      "  -fmax-errors=N         stop after N\n"
-      "  -w                     no warnings;  -Werror  warnings are errors\n"
-      "  -Wall, -Wextra, -Wname, -Wno-name (see --help-warnings)\n"
-      "\nthe link (docs/manual/invoking.md#linking)\n"
-      "  OBJ.o, LIB.a           linked as they are, with the sources if any\n"
-      "  -lNAME, -L DIR         libNAME.a from the -L directories\n"
-      "  -T SCRIPT.ld           GNU ld linker script (ARM and RISC-V firmware)\n"
-      "  -nostdlib, -nodefaultlibs, -nostartfiles   leave out crt1/libc/librt\n"
-      "  -e SYM, -u SYM         entry symbol; a symbol to pull from archives\n"
-      "  -Wl,ARGS, -Xlinker ARG options for EmbLD (-Ttext, -Tdata, ...)\n"
-      "\ndependencies\n"
-      "  -M, -MM                write the make rule instead of compiling\n"
-      "  -MD, -MMD              write it beside the object\n"
-      "  -MF FILE, -MT TARGET, -MP\n"
-      "\nreporting\n"
-      "  --version, --help, --dump-predef\n"
-      "  --explain ID           what a diagnostic means, and the fix\n"
-      "  --fix                  apply the fix-its it proposes\n", out);
+            "usage: embcc [-c|-S|-E] SOURCE... [-o FILE] [-j N]"
+            " [--target=TARGET] [--opt=GOAL] [OPTION]...\n"
+            "       embcc OBJECT.o|LIBRARY.a|-lNAME... [-L DIR]"
+            " [--link-script=FILE] -o IMAGE   (link)\n"
+            "       embcc inspect STAGE SOURCE        (what each stage made)\n"
+            "       embcc --version | --help[=gcc|markdown] | --explain=ID\n");
 }
 
 /* Where this target's runtime and C library live, under the library
@@ -4336,6 +4249,10 @@ int main(int argc, char **argv)
     plat_set_argv0(argc > 0 ? argv[0] : NULL);   /* where this program is */
     if (expand_wp(&argc, &argv))
         return 1;
+    /* EmbCC's own spellings into the ones the loops below read
+     * (options.def): before anything looks at an argument */
+    if (opts_normalize(&argc, &argv))
+        return 1;
     g_child_skip = xcalloc((size_t)(argc > 0 ? argc : 1), 1);
 
     /* -fsanitize state: which checks, and whether trap mode was
@@ -4581,7 +4498,21 @@ int main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(stdout);
-            print_options(stdout);
+            opts_print_help(stdout);
+            return 0;
+        }
+        /* the same table: GCC's spellings, the reference the manual
+         * includes, and every spelling for tests/golden/options-table.sh */
+        if (strcmp(argv[i], "--help=gcc") == 0) {
+            opts_print_gcc(stdout);
+            return 0;
+        }
+        if (strcmp(argv[i], "--help=markdown") == 0) {
+            opts_print_markdown(stdout);
+            return 0;
+        }
+        if (strcmp(argv[i], "--help=spellings") == 0) {
+            opts_print_spellings(stdout);
             return 0;
         }
         if (strcmp(argv[i], "--help-warnings") == 0) {

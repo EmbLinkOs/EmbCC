@@ -115,6 +115,7 @@ SRCS := \
 	src/driver/asmout.c \
 	src/driver/iface.c \
 	src/driver/explain.c \
+	src/driver/options.c \
 	src/driver/paths.c \
 	src/link/link.c \
 	src/as/gas.c \
@@ -544,6 +545,8 @@ embdbg: tools/embdbg/embdbg.c tools/embdbg/remote.c tools/embdbg/remote.h \
 # The target database is #included by target.c, and nothing else tracks
 # header dependencies, so say this one.
 $(BUILD)/arch/target.o: $(wildcard src/targets/*.def)
+# ...and the option table, by options.c
+$(BUILD)/driver/options.o: src/driver/options.def
 
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
