@@ -1560,6 +1560,47 @@ static void vld(struct a_fn *F, int r, int v, long off, int n)
     }
 }
 
+/* Register bytes src[k] into dst[k], all at once: a move goes when no
+ * move still to come reads its destination, and a cycle (two operands
+ * each in the other's argument registers) parks one byte in R_TMP. At
+ * most 16 moves; mov sets no flags. */
+static void avr_pmove(struct a_fn *F, const int *dst, const int *src_in, int n)
+{
+    int src[16], done[16];
+    for (int k = 0; k < n; k++) {
+        src[k] = src_in[k];
+        done[k] = dst[k] == src[k];
+    }
+    for (;;) {
+        int left = 0, progress = 0;
+        for (int k = 0; k < n; k++) {
+            if (done[k])
+                continue;
+            left = 1;
+            int blocked = 0;
+            for (int j = 0; j < n && !blocked; j++)
+                blocked = !done[j] && j != k && src[j] == dst[k];
+            if (blocked)
+                continue;
+            avr_rr(F->t, AVR_MOV, dst[k], src[k]);
+            done[k] = 1;
+            progress = 1;
+        }
+        if (!left)
+            return;
+        if (!progress)
+            for (int k = 0; k < n; k++)
+                if (!done[k]) {
+                    int s = src[k];
+                    avr_rr(F->t, AVR_MOV, R_TMP, s);
+                    for (int j = 0; j < n; j++)
+                        if (!done[j] && src[j] == s)
+                            src[j] = R_TMP;
+                    break;
+                }
+    }
+}
+
 static void vld_raw(struct a_fn *F, int r, int v, long off, int n)
 {
     if (is_remat(F, v)) {
@@ -3972,12 +4013,38 @@ static void gen_ins(struct a_fn *F, int n)
         place_arg(VW, &cursor, &stk, &pl); a_reg = pl.reg;
         place_arg(VW, &cursor, &stk, &pl); b_reg = pl.reg;
 
-        /* b FIRST: a's registers r22-r25 may be b's home. */
-        if (i->imm_b)
-            ldi4(F, b_reg, (unsigned long)i->imm, VW);
-        else
-            vld(F, b_reg, i->b, 0, VW);
-        vld(F, a_reg, i->a, 0, VW);
+        /* Each load may overwrite the other operand's home: a's
+         * registers r22-r25 may be b's, and b's r18-r21 may be a's -- the
+         * low half of a 64-bit argument still in r18-r25, read as a word
+         * by `(uint32_t)x * m`. Loading b first there multiplied m by
+         * itself. So the load that overwrites nothing still unread goes
+         * first, and when each would overwrite the other, both move at
+         * once (avr_pmove). */
+        int ah = !is_remat(F, i->a) && in_pair(F, i->a) ? F->loc[i->a] : -1;
+        int an = ah < 0 ? 0 : F->hw[i->a] < VW ? F->hw[i->a] : VW;
+        int bh = !i->imm_b && !is_remat(F, i->b) && in_pair(F, i->b)
+                 ? F->loc[i->b] : -1;
+        int bn = bh < 0 ? 0 : F->hw[i->b] < VW ? F->hw[i->b] : VW;
+        int clob_a = ah >= 0 && ah < b_reg + VW && b_reg < ah + an;
+        int clob_b = bh >= 0 && bh < a_reg + VW && a_reg < bh + bn;
+        if (clob_a && clob_b) {
+            int dst[16], src[16], n = 0;
+            for (int k = 0; k < an; k++) { dst[n] = a_reg + k; src[n++] = ah + k; }
+            for (int k = 0; k < bn; k++) { dst[n] = b_reg + k; src[n++] = bh + k; }
+            avr_pmove(F, dst, src, n);
+        } else if (clob_a) {
+            vld(F, a_reg, i->a, 0, VW);
+            if (i->imm_b)
+                ldi4(F, b_reg, (unsigned long)i->imm, VW);
+            else
+                vld(F, b_reg, i->b, 0, VW);
+        } else {
+            if (i->imm_b)
+                ldi4(F, b_reg, (unsigned long)i->imm, VW);
+            else
+                vld(F, b_reg, i->b, 0, VW);
+            vld(F, a_reg, i->a, 0, VW);
+        }
         call_helper(F, name);
         copy_run(t, RA, a_reg, VW);
         wr4(F, i->dst, RA);
