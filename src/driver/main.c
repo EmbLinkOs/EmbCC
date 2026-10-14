@@ -78,7 +78,8 @@ static void print_usage(FILE *out)
             "       embcc OBJECT.o|LIBRARY.a|-lNAME... [-L DIR]"
             " [--link-script=FILE] -o IMAGE   (link)\n"
             "       embcc inspect STAGE SOURCE        (what each stage made)\n"
-            "       embcc --version | --help[=gcc|markdown] | --explain=ID\n");
+            "       embcc --version | --help[=gcc] | --explain=ID"
+            " | --reference=options|warnings|targets\n");
 }
 
 /* Where this target's runtime and C library live, under the library
@@ -4507,10 +4508,16 @@ int main(int argc, char **argv)
             opts_print_gcc(stdout);
             return 0;
         }
-        if (strcmp(argv[i], "--help=markdown") == 0) {
+        /* the reference pages the documentation includes, each from
+         * the table it describes */
+        if (strcmp(argv[i], "--reference=options") == 0) {
             opts_print_markdown(stdout);
             return 0;
         }
+        if (strcmp(argv[i], "--reference=warnings") == 0)
+            return diag_print_reference(stdout);
+        if (strcmp(argv[i], "--reference=targets") == 0)
+            return target_print_reference(stdout);
         if (strcmp(argv[i], "--help=spellings") == 0) {
             opts_print_spellings(stdout);
             return 0;

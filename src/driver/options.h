@@ -11,7 +11,7 @@ int opts_normalize(int *argc, char ***argv);
 
 void opts_print_help(FILE *out);      /* --help */
 void opts_print_gcc(FILE *out);       /* --help=gcc */
-void opts_print_markdown(FILE *out);  /* --help=markdown: the reference */
+void opts_print_markdown(FILE *out);  /* --reference=options: the reference */
 void opts_print_spellings(FILE *out); /* --help=spellings: for the tests */
 
 #endif

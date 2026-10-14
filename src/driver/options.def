@@ -3,7 +3,7 @@
  * This table is the one place an option is described. `embcc --help`
  * prints it, `embcc --help=gcc` prints the GCC spellings, the option
  * reference in the documentation is generated from it (`embcc
- * --help=markdown`), and tests/golden/options-table.sh fails when the
+ * --reference=options`), and tests/golden/options-table.sh fails when the
  * driver accepts a spelling this table does not name.
  *
  * EmbCC's own vocabulary leads (docs/internals/identity.md): POSIX's c99
@@ -184,7 +184,7 @@ OPT(LINK, "--assembler-arg=", "ARG", "-Wa,%", "pass ARG to the assembler")
 /* ---- asking EmbCC ---------------------------------------------------- */
 OPT(INFO, "--help",         NULL,   NULL,   "this list")
 OPT(INFO, "--help=gcc",     NULL,   NULL,   "the other spellings EmbCC accepts: GCC's, and EmbCC's for each")
-OPT(INFO, "--help=markdown", NULL,  NULL,   "the option reference, in Markdown (the manual includes it)")
+OPT(INFO, "--reference=",   "PAGE", NULL,   "a reference page in Markdown: options, warnings or targets")
 OPT(INFO, "--help=spellings", NULL, NULL,   "every spelling, one per line (for tests and tools)")
 OPT(INFO, "--help-warnings", NULL,  NULL,   "every warning, and the sets")
 OPT(INFO, "--version",      NULL,   NULL,   "the version and the default target")

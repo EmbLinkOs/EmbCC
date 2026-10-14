@@ -28,7 +28,7 @@ Every option is a row in [`src/driver/options.def`](../../src/driver/options.def
 EmbCC's spelling, its value's name, the other spelling it stands for (GCC's,
 or EmbCC's own older GCC-style one), a group, and a line of help. `embcc
 --help` prints EmbCC's spellings, `embcc --help=gcc` the other ones, and
-`embcc --help=markdown` the option reference that the manual includes.
+`embcc --reference=options` the option reference that the manual includes.
 
 The rules for EmbCC's spellings:
 
@@ -72,9 +72,9 @@ dependencies). Its sources:
 - the handbook in `docs/`, written by hand;
 - the pages generated from the tables in the source, so they cannot
   drift from the compiler:
-  - the option reference (`embcc --help=markdown`);
-  - the warnings (`--help-warnings`);
-  - the targets (`src/targets/*.def`);
+  - the option reference (`embcc --reference=options`);
+  - the warnings (`embcc --reference=warnings`);
+  - the targets (`embcc --reference=targets`, from `src/targets/*.def`);
   - and, next, the attributes and builtins.
 
 `embdoc` renders all of it into a static website and checks every link

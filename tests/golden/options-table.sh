@@ -16,7 +16,7 @@
 #      enums, warnings and a dependency file -- the objects, the .d files
 #      and the diagnostics are identical, and so with the value given as
 #      the next argument (--cpu cortex-m4);
-#   4. the reference (--help=markdown) has a row for every EmbCC spelling.
+#   4. the reference (--reference=options) has a row for every EmbCC spelling.
 set -u
 echo "TEST-MARKER options-table"
 . "$(dirname "$0")/../lib.sh"
@@ -74,7 +74,7 @@ echo "options-table: all $n spellings the driver tests are in the table"
 # ---- 2. every rewritten EmbCC spelling is accepted ------------------------
 printf 'int x;\n' > "$out/t.c"
 : > "$out/unknown.txt"
-"$EMBCC" --help=markdown > "$out/ref.md" || fail "--help=markdown"
+"$EMBCC" --reference=options > "$out/ref.md" || fail "--reference=options"
 # (in $out: --deps=1 writes a dependency file named 1)
 E=$EMBCC; case $E in /*) ;; *) E=$PWD/$E ;; esac
 awk '$1 == "ours" { o = $2; getline; if ($1 == "alias") print o }' "$out/table.txt" |
@@ -121,5 +121,5 @@ awk '$1 == "ours" { print $2 }' "$out/table.txt" | while read -r s; do
     grep -qF "| \`$s" "$out/ref.md" || echo "$s"
 done > "$out/unlisted.txt"
 [ ! -s "$out/unlisted.txt" ] ||
-    { cat "$out/unlisted.txt"; fail "spellings missing from --help=markdown"; }
+    { cat "$out/unlisted.txt"; fail "spellings missing from --reference=options"; }
 echo "options-table: the reference lists every EmbCC spelling"

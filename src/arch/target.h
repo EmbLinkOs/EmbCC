@@ -11,6 +11,8 @@
 #ifndef EMBCC_TARGET_TARGET_H
 #define EMBCC_TARGET_TARGET_H
 
+#include <stdio.h>
+
 enum target_arch {
     TARGET_X86_64 = 0,
     TARGET_AARCH64 = 1,
@@ -578,6 +580,8 @@ int target_from_triple(const char *triple, enum target_arch *out,
 /* The canonical triple for a combination, for --version and diagnostics.
  * Returns NULL for one that has no canonical name. */
 const char *target_triple_of(enum target_arch a, enum target_os o);
+/* `embcc --reference=targets`: the target database as Markdown. */
+int target_print_reference(FILE *out);
 
 /* The canonical triple of what is currently selected. */
 const char *target_triple_now(void);

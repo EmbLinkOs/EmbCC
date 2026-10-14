@@ -235,7 +235,7 @@ void opts_print_markdown(FILE *out)
     fprintf(out,
         "# Option reference\n\n"
         "Every option `embcc` takes, generated from the driver's own table "
-        "(`src/driver/options.def`) by `embcc --help=markdown`, so it "
+        "(`src/driver/options.def`) by `embcc --reference=options`, so it "
         "lists exactly what the driver accepts.\n\n"
         "EmbCC's own spellings come first. Where GCC spells the same "
         "thing differently, its spelling is accepted too and is shown "
