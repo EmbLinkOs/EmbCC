@@ -69,6 +69,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--isa=thumb` | Thumb instructions (ARM) | `-mthumb` |
 | `--isa=arm` | ARM (A32) instructions | `-marm` |
 | `--isa=ISA` | the instruction set: rv32imac, rv64gc, armv7-a, mips32r2, isaa ... | `-march=ISA` |
+| `--tune=CPU` | the core to schedule for (ARM): accepted, EmbCC does not schedule | `-mtune=CPU` |
 | `--abi=ABI` | the calling convention: ilp32, ilp32f, lp64d, 32 ... | `-mabi=ABI` |
 | `--cmse` | Armv8-M Security Extension entry points | `-mcmse` |
 | `--endian=little` | little-endian | `-mlittle-endian` |
@@ -86,10 +87,11 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 
 | Option | What it does | Also accepted |
 |---|---|---|
-| `-O LEVEL` | 0, 1, 2, 3, s, z or g, as --opt says |  |
+| `-O LEVEL` | 0, 1, 2, 3, s, z or g: none, basic, speed, max, size, min-size or debug |  |
 | `--opt=none` | no optimization: each statement as written | `-O0` |
-| `--opt=debug` | --opt=1, with every variable kept where a debugger reads it | `-Og` |
-| `--opt=speed` | fast code (--opt=2) | `-O2` |
+| `--opt=basic` | the passes that only remove work: never larger code | `-O1` |
+| `--opt=debug` | --opt=basic, with every variable kept where a debugger reads it | `-Og` |
+| `--opt=speed` | fast code: --opt=basic and the passes that trade size for speed | `-O2` |
 | `--opt=max` | the same as --opt=speed | `-O3` |
 | `--opt=size` | small code: no transform that grows it | `-Os` |
 | `--opt=min-size` | the same as --opt=size | `-Oz` |

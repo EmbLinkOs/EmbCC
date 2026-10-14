@@ -5563,7 +5563,7 @@ int main(int argc, char **argv)
                 input = argv[i];
         } else {
             fprintf(stderr, "embcc: error: unknown argument '%s'\n",
-                    argv[i]);
+                    opt_typed(argv[i]));
             print_usage(stderr);
             return 1;
         }

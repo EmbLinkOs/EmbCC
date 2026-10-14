@@ -86,6 +86,7 @@ awk '$1 == "ours" { o = $2; getline; if ($1 == "alias") print o }' "$out/table.t
     --fp-contract=) a="${s}off" ;;
     --isa=) a="${s}rv32imac" t=riscv32-unknown-elf ;;
     --abi=) a="${s}ilp32" t=riscv32-unknown-elf ;;
+    --tune=) a="${s}cortex-m4" t=thumbv7em-none-eabi ;;
     *=) a="${s}1" ;;
     esac
     "$E" --target=$t --syntax-only "$a" t.c > one.txt 2>&1
@@ -99,10 +100,10 @@ echo "options-table: every EmbCC spelling that stands for another is accepted"
 cd "$out" || fail "cd"
 printf '#include "h.h"\nenum e { A, B };\nint f(enum e x) { return x == A ? (int)sizeof(enum e) : g(); }\nint k;\nint u(int y) { int z; if (y) z = 1; return z; }\n' > s.c
 printf 'int g(void);\n' > h.h
-"$EMBCC" --target=thumbv6m-none-eabi -Os -fshort-enums -ffunction-sections \
+"$E" --target=thumbv6m-none-eabi -Os -fshort-enums -ffunction-sections \
     -fdata-sections -Wall -fno-common -MMD -MF g.d -c s.c -o g.o 2> g.err ||
     fail "the GCC spellings do not build"
-"$EMBCC" --target=thumbv6m-none-eabi --opt=size --enums=short \
+"$E" --target=thumbv6m-none-eabi --opt=size --enums=short \
     --sections=functions,data --warn=all --no-common --deps=n.d -c s.c -o n.o 2> n.err ||
     fail "EmbCC's spellings do not build"
 cmp -s g.o n.o || fail "--opt=size --enums=short --sections=functions,data --no-common build another object than GCC's spellings"
@@ -110,9 +111,9 @@ sed 's/g\.o/X/' g.d > g2.d; sed 's/n\.o/X/' n.d > n2.d
 cmp -s g2.d n2.d || fail "--deps=FILE writes another rule than -MMD -MF FILE"
 [ -s n.err ] || fail "--warn=all gave no warning for the uninitialized z"
 cmp -s g.err n.err || fail "--warn=all warns differently from -Wall"
-"$EMBCC" --target=thumbv7em-none-eabihf --cpu cortex-m4 --fpu=fpv4-sp-d16 \
+"$E" --target=thumbv7em-none-eabihf --cpu cortex-m4 --fpu=fpv4-sp-d16 \
     --float-abi=hard --opt=speed -c s.c -o n2.o 2>/dev/null &&
-"$EMBCC" --target=thumbv7em-none-eabihf -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 \
+"$E" --target=thumbv7em-none-eabihf -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 \
     -mfloat-abi=hard -O2 -c s.c -o g2.o 2>/dev/null || fail "the Cortex-M4F builds"
 cmp -s g2.o n2.o || fail "--cpu cortex-m4 --fpu= --float-abi= --opt=speed build another object"
 cd - > /dev/null || fail "cd back"
