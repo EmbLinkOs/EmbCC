@@ -148,7 +148,7 @@ grep -q "warning:" "$out/cxx.log" && {
 echo "C++ does not warn about the C it lowers to"
 
 # 9. --help-warnings lists them with their groups.
-"$EMBCC" --help-warnings | grep -q -- "-Wsign-compare" || {
+"$EMBCC" --help-warnings | grep -q -- "--warn=sign-compare" || {
     echo "--help-warnings omits one"; exit 1; }
 echo "--help-warnings lists them"
 

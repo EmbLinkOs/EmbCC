@@ -4516,14 +4516,16 @@ int main(int argc, char **argv)
             return 0;
         }
         if (strcmp(argv[i], "--help-warnings") == 0) {
-            printf("the warnings EmbCC has, and the group each is in:\n\n");
+            printf("the warnings EmbCC has, and the set each is in:\n\n");
             for (int k = 0; k < diag_warning_count(); k++) {
                 int g = diag_warning_group(k);
-                printf("  -W%-22s %s\n", diag_warning_name(k),
-                       g == 1 ? "(-Wall)" : g == 2 ? "(-Wextra)" : "");
+                printf("  --warn=%-22s %s\n", diag_warning_name(k),
+                       g == 1 ? "(--warn=all)" : g == 2 ? "(--warn=extra)" : "");
             }
-            printf("\nEach can be turned off with -Wno-NAME, and every one\n"
-                   "prints its name, so a diagnostic says what controls it.\n");
+            printf("\nEach is turned off with --no-warn=NAME and made an error\n"
+                   "with --error=NAME, and every one prints its name, so a\n"
+                   "diagnostic says what controls it. (GCC's -WNAME and\n"
+                   "-Wno-NAME work too.)\n");
             return 0;
         }
         if (strcmp(argv[i], "--explain") == 0)
