@@ -489,13 +489,13 @@ belongs to.
 
 ### Controlling warnings
 
-Options are processed from left to right. Each one sets the state of
-the warnings it names, and a later option overrides an earlier one. In
-particular, `--no-warn=unused-variable --warn=all` leaves `unused-variable`
-on, because `--warn=all` comes later; write
-`--warn=all --no-warn=unused-variable`. (GCC
-gives a specific option precedence over a group regardless of order;
-EmbCC does not.)
+Options are processed from left to right, and a later option overrides
+an earlier one about the same warning. A warning named on its own wins
+over a set, before it or after it, as in GCC:
+`--no-warn=unused-variable --warn=all` and
+`--warn=all --no-warn=unused-variable` both leave `unused-variable` off,
+so a Makefile that puts its exceptions before its warning set builds as
+it does with GCC.
 
 The exception is `--warn=conversion`, which turns on `--warn=sign-conversion` and
 `--warn=float-conversion` unless either is named on the command line, before

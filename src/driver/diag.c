@@ -1001,11 +1001,16 @@ static int warn_is_error(const char *name)
     return f ? f > 0 : g_werror;
 }
 
-/* -Wall / -Wextra: the groups, as GCC draws them. */
+/* -Wall / -Wextra: the groups, as GCC draws them. A warning named on its
+ * own (-Wno-unused-variable, or -Wunused-variable) keeps that setting
+ * whether it came before the group or after, as in GCC: a Makefile's
+ * `-Wno-unused-parameter $(WARNINGS)` must not turn it back on, which
+ * under -Werror broke a build GCC accepts. */
 void diag_enable_group(int wall, int wextra)
 {
     for (int i = 0; i < g_nwarns; i++)
-        if ((wall && g_warns[i].in_wall) || (wextra && g_warns[i].in_wextra))
+        if (((wall && g_warns[i].in_wall) || (wextra && g_warns[i].in_wextra)) &&
+            !g_named[i])
             g_warns[i].on = 1;
 }
 

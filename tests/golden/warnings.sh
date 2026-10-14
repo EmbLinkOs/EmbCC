@@ -58,6 +58,19 @@ echo "$w" | grep -qx "unused-variable" && { echo "-Wno-unused-variable ignored";
 echo "$w" | grep -qx "shadow" || { echo "-Wno- turned off the wrong one"; exit 1; }
 echo "-Wname turns one on; -Wno-name turns one off"
 
+# 3b. A warning named on its own wins over a group in either order, as in
+#     gcc: `-Wno-unused-parameter $(WARNINGS)` with -Wextra in WARNINGS
+#     must not turn it back on (under -Werror that broke gcc's builds).
+w=$(warns -Wno-unused-variable -Wall)
+echo "$w" | grep -qx "unused-variable" && { echo "-Wall after -Wno-unused-variable turned it back on"; exit 1; }
+echo "$w" | grep -qx "unused-function" || { echo "-Wall after -Wno-unused-variable lost the rest of the group"; exit 1; }
+w=$(warns --no-warn=unused-parameter --warn=extra)
+echo "$w" | grep -qx "unused-parameter" && { echo "--warn=extra after --no-warn=unused-parameter turned it back on"; exit 1; }
+echo "$w" | grep -qx "sign-compare" || { echo "--warn=extra after --no-warn=unused-parameter lost the rest"; exit 1; }
+w=$(warns -Wunused-parameter -Wall)
+echo "$w" | grep -qx "unused-parameter" || { echo "-Wunused-parameter before -Wall was lost"; exit 1; }
+echo "a warning named on its own wins over its group, before or after it"
+
 # 4. The name is in the message, and -Werror makes it fatal.
 "$EMBCC" --target="$TARGET" -Wall -c "$out/w.c" -o "$out/w.o" 2>&1 |
     grep -q "unused variable 'unused_one' \[--warn=unused-variable\]" || {
