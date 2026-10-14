@@ -306,7 +306,7 @@ without `-c` links the program with the integrated linker, adding
 If they are not built (`make libc-linux-x86_64`):
 
 ```text
-embcc: error: no crt1.o for x86_64-linux-gnu -- the target's library is not built or not installed
+embcc: error: no crt1.o for x86_64-linux-gnu: its C library is not built; `make libc-linux-x86_64` in /path/to/EmbCC builds it
 embcc: --print-search-dirs says where it looked
 ```
 

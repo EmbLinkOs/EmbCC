@@ -278,6 +278,19 @@ $(EMBDBG_CORE): tools/embdbg/embdbg.c tools/embdbg/embdbg_core.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(TOOLCORE_CFLAGS) -c -o $@ $<
 
+# What a plain `make` builds: every tool and every target's runtime, so
+# that what was built links. Without the runtimes, `embcc hello.c -o
+# hello` on a Linux host found no crt1.o for x86_64-linux-gnu -- the first
+# thing CMake's compiler check does -- and a firmware link found no
+# librt.a. (The first rule used to be build/embdbg_core.o's, so `make`
+# alone built that one object.) `make all` builds the tools alone.
+.DEFAULT_GOAL := toolchain
+RUNTIMES := libc libcxx libc-linux libcxx-linux-x86_64 libcxx-linux-aarch64 \
+            rt-embedded libc-embedded libcxx-embedded
+.PHONY: toolchain runtimes
+toolchain: all runtimes
+runtimes: $(RUNTIMES)
+
 all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim \
      embflash embtrace binutils-names
 
@@ -789,9 +802,7 @@ LIBROOT  = $(DESTDIR)$(PREFIX)/lib/embcc/$(VERSION)
 # tests/golden/install.sh uses -- a test that ran the first would be a
 # test that rebuilds the compiler while the rest of the suite is using
 # it, which is the one thing the suite must never do to itself.
-install: all libc libcxx libc-linux libcxx-linux-x86_64 \
-         libcxx-linux-aarch64 rt-embedded libc-embedded libcxx-embedded \
-         install-files
+install: toolchain install-files
 
 install-files:
 	@echo "installing EmbCC $(VERSION) into $(DESTDIR)$(PREFIX)"

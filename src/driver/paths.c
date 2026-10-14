@@ -129,6 +129,12 @@ const char *paths_lib_dir(void)
     return g_lib[0] ? g_lib : NULL;
 }
 
+int paths_is_build_tree(void)
+{
+    resolve();
+    return g_lib[0] && g_kind == 2;
+}
+
 const char *const *paths_default_includes(int *n)
 {
     static char inc[3][MAXP];

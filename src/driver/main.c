@@ -944,6 +944,32 @@ static int firmware_target(void)
  * librt, -nodefaultlibs too, and -nostartfiles crt1. */
 static int darwin_link(const char *in, const char *exe);
 
+/* A hosted target's library is missing: which file, and what to do -- in
+ * a build tree, the make target that builds it (a plain `make` builds
+ * every one); installed, the install that puts it beside the compiler. */
+static void missing_runtime(const char *file, const char *triple, int cxx)
+{
+    int lin64 = !strncmp(triple, "x86_64-linux", 12);
+    int lina64 = !strncmp(triple, "aarch64-linux", 13);
+    const char *mk =
+        lin64 ? (cxx ? "libcxx-linux-x86_64" : "libc-linux-x86_64")
+        : lina64 ? (cxx ? "libcxx-linux-aarch64" : "libc-linux-aarch64")
+        : !strncmp(triple, "x86_64", 6) ? (cxx ? "libcxx-x86_64" : "libc-x86_64")
+        : !strncmp(triple, "aarch64-elf", 11) ? (cxx ? "libcxx-aarch64"
+                                                      : "libc-aarch64")
+        : cxx ? "libcxx-embedded" : NULL;
+    const char *lib = cxx ? "C++ runtime" : "C library";
+    if (paths_is_build_tree())
+        fprintf(stderr, "embcc: error: no %s for %s: its %s is not built; "
+                "`make%s%s` in %s builds it\n", file, triple, lib,
+                mk ? " " : "", mk ? mk : "", paths_lib_dir());
+    else
+        fprintf(stderr, "embcc: error: no %s for %s: its %s is not "
+                "installed; `make install` from EmbCC's source installs "
+                "every target's\n", file, triple, lib);
+    fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
+}
+
 /* embld inside a boundary: its refusals unwind to here (util.h), where
  * with none they ended the process and left OUT.embcc-tmp.o behind for
  * every undefined symbol or --rom-limit overflow. A function of its own,
@@ -1092,11 +1118,7 @@ static int compile_and_link(const char *in, const char *out)
                    paths_target_file(triple, "libcxx.a", libcxx,
                                      sizeof libcxx);
     if (cxx && std && !have_cxx) {
-        fprintf(stderr,
-                "embcc: error: no libcxx.a for %s -- a C++ program needs "
-                "the C++ runtime, and this target's is not built or not "
-                "installed\n", triple);
-        fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
+        missing_runtime("libcxx.a", triple, 1);
         if (in)
             remove(obj);
         return 1;
@@ -1112,11 +1134,7 @@ static int compile_and_link(const char *in, const char *out)
      * fixable message and fifty undefined symbols. */
     if (!fw && std && target_is_hosted() && (!have_crt1 || !have_libc) &&
         !g_nostartfiles) {
-        fprintf(stderr,
-                "embcc: error: no %s for %s -- the target's library is "
-                "not built or not installed\n",
-                !have_crt1 ? "crt1.o" : "libc.a", triple);
-        fprintf(stderr, "embcc: --print-search-dirs says where it looked\n");
+        missing_runtime(!have_crt1 ? "crt1.o" : "libc.a", triple, 0);
         if (in)
             remove(obj);
         return 1;
