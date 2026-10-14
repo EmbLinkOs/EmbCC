@@ -23,7 +23,7 @@ also ships its own C++ runtime and standard library (`lib/libcxx`).
 
 On the Darwin and Windows targets C++ works with restrictions. On the
 32-bit ARM targets (Cortex-M and ARM state) and on `riscv32-unknown-elf`
-C++ is supported without exceptions (`-fno-exceptions`), with or without
+C++ is supported without exceptions (`--no-exceptions`), with or without
 RTTI, following the ARM C++ ABI and the Itanium ABI's 32-bit form;
 objects link with clang++'s. The same holds on MIPS32 (both byte
 orders), big-endian MIPS64, PowerPC, SPARC, ColdFire, Xtensa, TriCore and
@@ -31,7 +31,7 @@ RX, with the generic Itanium ABI laid out by each target's data model and
 byte order; on MIPS, SPARC and PowerPC objects link with clang++'s, and on
 Xtensa with g++'s. On `riscv64-unknown-elf`, `mips64el-none-elf` and
 `loongarch64-unknown-elf` C++ is not supported: a unit compiles when
-exceptions are turned off (`-fno-exceptions`), and is not tested. With
+exceptions are turned off (`--no-exceptions`), and is not tested. With
 exceptions on it is refused, since EmbCC writes no unwind tables for these
 machines. On AVR EmbCC refuses to generate code for C++. See
 [Targets](#targets).
@@ -54,26 +54,28 @@ A file is compiled as C++ when its name ends in one of these suffixes:
 The suffix test is case-sensitive: `.C` and `.CPP` are C++, `.c` is C. A
 `.ii` file is preprocessed again like any other C++ source.
 
-### `-x c++`
+### `--lang=c++`
 
-`-x c++` (or `-xc++`) compiles the input as C++ whatever its suffix.
-`-x c++-cpp-output` is accepted as a synonym. `-x c` and `-x cpp-output`
-select C, and `-x none` returns to choosing by suffix. Any other language
+GCC: `-x c++`, `-xc++`.
+
+`--lang=c++` compiles the input as C++ whatever its suffix.
+`--lang=c++-cpp-output` is accepted as a synonym. `--lang=c` and `--lang=cpp-output`
+select C, and `--lang=none` returns to choosing by suffix. Any other language
 name is refused:
 
 ```text
 embcc: error: unknown language 'LANGUAGE' for -x (c or c++)
 ```
 
-### Language level: `-std=STANDARD`
+### Language level: `--std=STANDARD`
 
-Without `-std=`, a C++ unit is compiled as `-std=gnu++20`. EmbCC always
-parses C++20 (with the C++23 additions listed below); `-std=` selects the
+Without `--std=`, a C++ unit is compiled as `--std=gnu++20`. EmbCC always
+parses C++20 (with the C++23 additions listed below); `--std=` selects the
 value of `__cplusplus`, the feature-test macros, and whether
 `__STRICT_ANSI__` is defined. It does not make EmbCC reject a newer
 construct.
 
-| `-std=` | `__cplusplus` |
+| `--std=` | `__cplusplus` |
 |---|---|
 | `c++98`, `c++03`, `gnu++98`, `gnu++03` | `199711L` |
 | `c++11`, `c++0x`, `gnu++11`, `gnu++0x` | `201103L` |
@@ -86,7 +88,7 @@ construct.
 - The `c++NN` spellings define `__STRICT_ANSI__`. They also leave
   `__GLIBCXX_TYPE_INT_N_0` and `__GLIBCXX_BITSIZE_INT_N_0` undefined, so
   libstdc++ does not treat `__int128` as an integer type.
-- `-std=c++20` and the earlier strict spellings do not recognize
+- `--std=c++20` and the earlier strict spellings do not recognize
   `#elifdef` and `#elifndef`. Every other mode does.
 - A standard earlier than C++20 draws a warning, because it is not
   enforced:
@@ -95,18 +97,20 @@ construct.
   embcc: warning: -std=c++17 sets the standard macros but is not enforced; EmbCC parses C++20 and will accept newer constructs
   ```
 
-- `-std=c++23` and `-std=c++26` change only `__cplusplus`; the
+- `--std=c++23` and `--std=c++26` change only `__cplusplus`; the
   feature-test macros are those of C++20.
 - An unknown C++ standard is an error:
-  `embcc: error: unknown C++ standard '-std=c++29'`.
-- A C standard name (`-std=c11`, ...) given for a C++ unit is handled as
+  `embcc: error: unknown C++ standard '--std=c++29'`.
+- A C standard name (`--std=c11`, ...) given for a C++ unit is handled as
   for C and leaves the C++ mode at its default.
 
 ### C++ options
 
-#### `-fno-exceptions`, `-fexceptions`
+#### `--no-exceptions`, `--exceptions`
 
-Exceptions are on by default. `-fno-exceptions` turns them off:
+GCC: `-fno-exceptions`, `-fexceptions`.
+
+Exceptions are on by default. `--no-exceptions` turns them off:
 `__cpp_exceptions` and `__EXCEPTIONS` are not defined, no landing pads
 are generated, and `throw` and `try` are errors:
 
@@ -115,11 +119,13 @@ error: 'throw' with exceptions disabled (-fno-exceptions)
 error: 'try' with exceptions disabled (-fno-exceptions)
 ```
 
-`-fexceptions` turns exceptions back on and also requests unwind tables.
+`--exceptions` turns exceptions back on and also requests unwind tables.
 
-#### `-fno-rtti`, `-frtti`
+#### `--no-rtti`, `--rtti`
 
-RTTI is on by default. Under `-fno-rtti` no `type_info` objects are
+GCC: `-fno-rtti`, `-frtti`.
+
+RTTI is on by default. Under `--no-rtti` no `type_info` objects are
 written, the type-information slot of each vtable is null, and `typeid`
 and `dynamic_cast` are errors (an upcast with `dynamic_cast` included):
 
@@ -128,23 +134,29 @@ error: typeid with -fno-rtti
 error: dynamic_cast with -fno-rtti
 ```
 
-`__cpp_rtti` and `__GXX_RTTI` remain defined under `-fno-rtti`.
+`__cpp_rtti` and `__GXX_RTTI` remain defined under `--no-rtti`.
 
-#### `-fno-access-control`, `-faccess-control`
+#### `--no-access-control`, `--access-control`
 
-`-fno-access-control` stops enforcing `private` and `protected`, as the
+GCC: `-fno-access-control`, `-faccess-control`.
+
+`--no-access-control` stops enforcing `private` and `protected`, as the
 GCC option does. `-faccess-control` restores the default. See
 [Access control](#access-control).
 
-#### `-fchar8_t`
+#### `--char8`
+
+GCC: `-fchar8_t`.
 
 Defines `__cpp_char8_t` in modes before C++20. `char8_t` is a keyword in
 every mode. `-fno-char8_t` is not accepted.
 
-#### `-funwind-tables`, `-fno-unwind-tables`
+#### `--unwind-tables`, `--no-unwind-tables`
+
+GCC: `-funwind-tables`, `-fno-unwind-tables`.
 
 A C++ unit gets unwind tables (`.eh_frame`) unless both
-`-fno-exceptions` and `-fno-unwind-tables` are given.
+`--no-exceptions` and `--no-unwind-tables` are given.
 
 #### `--emit-c`
 
@@ -212,10 +224,10 @@ this:
 | `arm64-apple-darwin` | Supported | Supported | the system's C++ runtime |
 | `x86_64-apple-darwin` | Supported | Objects do not link | the system's C++ runtime |
 | `x86_64-windows-gnu` | Restricted | Not supported | none |
-| `riscv64-unknown-elf`, `mips64el-none-elf`, `loongarch64-unknown-elf` | Not supported; compiles with `-fno-exceptions`, untested | Refused | none |
-| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `riscv32-unknown-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
-| `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Supported with `-fno-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `riscv64-unknown-elf`, `mips64el-none-elf`, `loongarch64-unknown-elf` | Not supported; compiles with `--no-exceptions`, untested | Refused | none |
+| 32-bit ARM: Cortex-M (`thumbv6m-none-eabi`, `thumbv7m-none-eabi`, `thumbv7em-none-eabi[hf]`, `thumbv8m.main-none-eabi[hf]`) and `armv7a-none-eabi[hf]` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `riscv32-unknown-elf` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
+| `mipsel-none-elf`, `mips-none-elf`, `mips64-none-elf`, `powerpc-none-eabi`, `sparc-none-elf`, `m68k-none-elf`, `xtensa-none-elf`, `tricore-none-elf`, `rx-none-elf` | Supported with `--no-exceptions` | Refused | the embedded `libcxx.a` (`make libcxx-embedded`) |
 | `avr` | Refused | Not supported | none |
 
 **x86-64 and AArch64 ELF.** These are the C++ targets. `libcxx.a` is
@@ -242,10 +254,10 @@ that calls the exception runtime (any unit with landing pads or a
 ld: fixup error (kind=x86_64_rip) at '__ZN1BD2Ev'+0x99 from nox.o, target '___cxa_call_terminate' does not have address
 ```
 
-Compile for `x86_64-apple-darwin` with `-fno-exceptions`.
+Compile for `x86_64-apple-darwin` with `--no-exceptions`.
 
-**Windows.** A C++ unit compiles only with both `-fno-exceptions` and
-`-fno-unwind-tables`. Without them every C++ unit is refused:
+**Windows.** A C++ unit compiles only with both `--no-exceptions` and
+`--no-unwind-tables`. Without them every C++ unit is refused:
 
 ```text
 error: C++ exceptions are not supported for a Windows target yet: the unwind tables go in .pdata and .xdata and neither is written
@@ -305,16 +317,16 @@ Static destructors run only if the program calls `exit`.
 
 Exceptions are refused, because EmbCC writes no ARM EHABI unwind tables
 (`.ARM.exidx`) and no RISC-V `.eh_frame`. Exceptions are on by default,
-so a C++ unit compiled without `-fno-exceptions` stops with:
+so a C++ unit compiled without `--no-exceptions` stops with:
 
 ```text
 embcc: error: C++ exceptions are not supported for thumbv7m-none-eabi yet: EmbCC writes no ARM EHABI unwind tables (.ARM.exidx); compile with -fno-exceptions
 ```
 
-An explicit `-funwind-tables` or `-fasynchronous-unwind-tables` is
+An explicit `--unwind-tables` or `-fasynchronous-unwind-tables` is
 refused the same way (`unwind tables are not supported for TRIPLE yet
 ... EmbCC writes no ARM EHABI unwind tables (.ARM.exidx)`), and without it a
-C++ unit writes no `.eh_frame`. RTTI is on by default; `-fno-rtti`
+C++ unit writes no `.eh_frame`. RTTI is on by default; `--no-rtti`
 leaves out the type-information objects and the code that reads them.
 
 **MIPS, PowerPC, SPARC, ColdFire, Xtensa, TriCore and RX.** C++ is
@@ -365,7 +377,7 @@ does.
 `tests/golden/cxx-embedded.sh` runs every `tests/cxx-embedded` program on
 each of these boards under QEMU (Malta for MIPS, `ppce500`, LEON3,
 `mcf5208evb`, the Xtensa `sim` board, the TriCore test board and RX's
-`gdbsim`) at `-O0`, `-O1`, `-O2` and `-Os`, and each prints what the host's
+`gdbsim`) at `--opt=none`, `--opt=basic`, `--opt=speed` and `--opt=size`, and each prints what the host's
 clang++ build prints. The run-time library is the embedded `libcxx.a`, as
 above (without `__aeabi_atexit`'s caller, which is ARM's). Exceptions are
 refused by name, as on ARM, because EmbCC writes no unwind tables for
@@ -386,7 +398,7 @@ is built.
 embcc: error: C++ is not yet supported for avr: the C++ lowering assumes a 32-bit int and 4-byte pointers (integral promotions, member pointers, RTTI), and this target's are 16 bits
 ```
 
-`-fsyntax-only`, which writes nothing, is accepted.
+`--syntax-only`, which writes nothing, is accepted.
 
 **`riscv64-unknown-elf`.** The front end's data model is the target's,
 and a C++ unit compiles, but C++ is not supported there:
@@ -401,10 +413,10 @@ and a C++ unit compiles, but C++ is not supported there:
   ```
 
 - The `.eh_frame` section a C++ unit gets cannot be used by an unwinder;
-  `-fno-unwind-tables` removes it.
+  `--no-unwind-tables` removes it.
 
-A unit compiled with `-fno-exceptions -fno-unwind-tables` (and
-`-fno-rtti`, there being no runtime to supply `type_info`) produces an
+A unit compiled with `--no-exceptions --no-unwind-tables` (and
+`--no-rtti`, there being no runtime to supply `type_info`) produces an
 object, but EmbCC does not test C++ on this target.
 
 ## Language features
@@ -439,7 +451,7 @@ refuses it, with the diagnostic shown. Diagnostics are quoted without the
 | Two-phase name lookup | Not supported | Names in a template are looked up when it is instantiated; see [Name lookup in templates](#name-lookup-in-templates). |
 | `export` templates | Not supported | `modules are not supported` |
 | `throw`, `try`, `catch`, function-try-blocks, `throw()` | Supported | On the targets in [Targets](#targets). |
-| `typeid`, `dynamic_cast`, `std::type_info` | Supported | Errors under `-fno-rtti`. |
+| `typeid`, `dynamic_cast`, `std::type_info` | Supported | Errors under `--no-rtti`. |
 | `static_cast`, `const_cast`, `reinterpret_cast` | Supported | |
 | Pointers to members | Supported | |
 | `bool`, `wchar_t` | Supported | |
@@ -650,7 +662,7 @@ Where EmbCC cannot decide, it grants access. These checks are not made:
 - Friendship granted to a function template or a specialization
   befriends every function.
 
-`-fno-access-control` turns the checks off.
+`--no-access-control` turns the checks off.
 
 ### Checks EmbCC does not make
 
@@ -711,7 +723,7 @@ their GCC paths. C units do not define these.
 | `__SIZEOF_INT128__` | `16` |
 | `__GLIBCXX_TYPE_INT_N_0`, `__GLIBCXX_BITSIZE_INT_N_0` | `__int128`, `128` (not in the strict `c++NN` modes) |
 | `__STDCPP_DEFAULT_NEW_ALIGNMENT__` | `16` (C++17 and later) |
-| `__EXCEPTIONS` | `1` (not under `-fno-exceptions`) |
+| `__EXCEPTIONS` | `1` (not under `--no-exceptions`) |
 | `__STRICT_ANSI__` | `1` (the `c++NN` modes) |
 | `__EMBCC__` | `1` |
 
@@ -732,7 +744,7 @@ selected standard. The values in the default mode (C++20):
 | `__cpp_attributes` | `200809L` | C++11 |
 | `__cpp_binary_literals` | `201304L` | C++98 |
 | `__cpp_capture_star_this` | `201603L` | C++17 |
-| `__cpp_char8_t` | `202207L` | C++20 (earlier with `-fchar8_t`) |
+| `__cpp_char8_t` | `202207L` | C++20 (earlier with `--char8`) |
 | `__cpp_concepts` | `201907L` | C++20 |
 | `__cpp_conditional_explicit` | `201806L` | C++20 |
 | `__cpp_constexpr` | `201603L` | C++11 (`200704L`), C++14 (`201304L`) |
@@ -742,7 +754,7 @@ selected standard. The values in the default mode (C++20):
 | `__cpp_deduction_guides` | `201703L` | C++17 |
 | `__cpp_delegating_constructors` | `200604L` | C++11 |
 | `__cpp_enumerator_attributes` | `201411L` | C++17 |
-| `__cpp_exceptions` | `199711L` | C++98 (not under `-fno-exceptions`) |
+| `__cpp_exceptions` | `199711L` | C++98 (not under `--no-exceptions`) |
 | `__cpp_fold_expressions` | `201603L` | C++17 |
 | `__cpp_generic_lambdas` | `201304L` | C++14 |
 | `__cpp_guaranteed_copy_elision` | `201606L` | C++17 |
@@ -760,7 +772,7 @@ selected standard. The values in the default mode (C++20):
 | `__cpp_range_based_for` | `201603L` | C++11 (`200907L`) |
 | `__cpp_ref_qualifiers` | `200710L` | C++11 |
 | `__cpp_return_type_deduction` | `201304L` | C++14 |
-| `__cpp_rtti` | `199711L` | C++98 (also under `-fno-rtti`) |
+| `__cpp_rtti` | `199711L` | C++98 (also under `--no-rtti`) |
 | `__cpp_rvalue_references` | `200610L` | C++11 |
 | `__cpp_sized_deallocation` | `201309L` | C++14 |
 | `__cpp_static_assert` | `201411L` | C++11 (`200410L`) |
@@ -920,7 +932,7 @@ start-up code must:
   `throw`, by calling `__register_frame_info` with the start of
   `.eh_frame` (EmbCC supplies no `crtbegin.o` that would do it).
 
-A program built with `-fno-exceptions -fno-rtti` needs no C++ runtime
+A program built with `--no-exceptions --no-rtti` needs no C++ runtime
 beyond the symbols in the table above that its code refers to. See
 [Embedded programming](embedded.md).
 

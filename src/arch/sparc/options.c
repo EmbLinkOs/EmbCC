@@ -47,12 +47,12 @@ int sparc_target_option(const char *arg)
             diag_fatal(NULL, 0, "%s is not a SPARC V8 core with "
                        "hardware multiply and divide: EmbCC emits "
                        "LEON3 code (leon3, leon4, v8, gr712rc, "
-                       "gr740, ut699)", arg);
+                       "gr740, ut699)", opt_typed(arg));
     } else if (strcmp(arg, "-mhard-float") == 0 ||
                strcmp(arg, "-mfpu") == 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
                    "soft-float SPARC code, which passes floating "
-                   "point in the integer registers", arg);
+                   "point in the integer registers", opt_typed(arg));
     } else if (strcmp(arg, "-mflat") == 0) {
         diag_fatal(NULL, 0, "-mflat is not supported: EmbCC's "
                    "SPARC code uses register windows (save and "
@@ -66,10 +66,10 @@ int sparc_target_option(const char *arg)
                 strcmp(v, "medlow") != 0)) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC emits "
                    "32-bit SPARC V8 with absolute addresses "
-                   "(sethi/or)", arg);
+                   "(sethi/or)", opt_typed(arg));
     } else if (strncmp(arg, "-mfix-", 6) == 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC applies "
-                   "no LEON errata workarounds", arg);
+                   "no LEON errata workarounds", opt_typed(arg));
     }
     return 1;
 }

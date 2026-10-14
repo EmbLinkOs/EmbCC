@@ -18,14 +18,18 @@ Start with the [overview](manual/overview.md) and
 | --- | --- |
 | [Overview](manual/overview.md) | What EmbCC is, its components, the targets at a glance |
 | [Getting started](manual/getting-started.md) | Building and installing, first programs, cross builds |
-| [Invoking EmbCC](manual/invoking.md) | Every command-line option |
+| [Invoking EmbCC](manual/invoking.md) | How the command line works, and each option in detail |
+| [Option reference](manual/options.md) | Every option, EmbCC's spelling and GCC's (generated) |
+| [Migrating from GCC](manual/migrating-from-gcc.md) | Switching a GCC build to EmbCC, and what differs |
 | [Targets](manual/targets.md) | Triples, `-m` options, data models, ABIs, predefined macros, object formats |
+| [Target list](manual/target-list.md) | Every `--target`, what it runs on, and its data model (generated) |
 | [C language support](manual/c-language.md) | `-std=`, and the status of each C89–C23 feature |
 | [Implementation-defined behavior](manual/implementation-defined.md) | EmbCC's choices, in C17 Annex J.3 order |
 | [Language extensions](manual/extensions.md) | GNU and Clang extensions, attributes, builtins, pragmas |
 | [Inline assembly](manual/inline-asm.md) | Extended asm, and the constraints and modifiers of each target |
 | [C++ support](manual/cxx.md) | What the C++ front end accepts |
 | [Diagnostics](manual/diagnostics.md) | The diagnostic format, warnings, `--explain`, JSON output |
+| [Warning reference](manual/warnings.md) | Every warning, what it diagnoses, what turns it on (generated) |
 | [Optimization](manual/optimization.md) | `-O` levels and `-f` options |
 | [Debugging](manual/debugging.md) | `-g`, DWARF, and debugging programs |
 | [Bare-metal programming](manual/embedded.md) | Freestanding programs on the boards |

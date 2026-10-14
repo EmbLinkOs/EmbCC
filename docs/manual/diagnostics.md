@@ -13,7 +13,7 @@ EmbCC or integrates it into an editor or build system.
 > [error recovery](#t2), T3 is [fix-its](#t3), T4 is
 > [the warning options](#t4), T5 is [the language server](#t5), and T6 is
 > [`--explain`](#t6) together with [`embld --doctor`](#embld-doctor).
-> Dependency generation (`-M`, `-MD`, ...) and `-fsyntax-only`, which the
+> Dependency generation (`-M`, `-MD`, ...) and `--syntax-only`, which the
 > old T4 also covered, are described in [Invoking EmbCC](invoking.md).
 
 <a id="t1"></a>
@@ -49,10 +49,10 @@ The parts are, in order:
 | Part | Meaning |
 |---|---|
 | `embcc:` | Every diagnostic line starts with the program name. |
-| `area.c:4:16:` | File, line and column. Columns count bytes from 1. The column is omitted when it is not known (some diagnostics are tied to a whole line); the line is omitted when the diagnostic is about the file as a whole. A diagnostic with no file names `<embcc>`. |
+| `area.c:4:16:` | File, line and column. Columns count bytes from 1. The column is omitted when it is not known (some diagnostics are tied to a whole line); the line is omitted when the diagnostic is about the file as a whole. A diagnostic about the command line has no location: `embcc: error: ...`. |
 | `error:` | The severity: `error`, `warning` or `note`. |
 | message | What is wrong. |
-| `[-Wname]` | Printed after a diagnostic that a `-W` option controls (a warning, or an error under `-Werror` or `-Werror=name`). `-Wno-name` turns it off. |
+| `[--warn=name]` | Printed after a diagnostic that a warning option controls (a warning, or an error under `--warnings-are-errors` or `--error=name`): the option that turns it on, so `--no-warn=name` turns it off. JSON output names it as GCC does (`"option": "-Wname"`), for the tools that read GCC's format. |
 | `[E0001]` | Printed after a diagnostic that has an [explanation](#t6): `embcc --explain E0001` prints it. |
 
 When the source text of the file is available, the diagnostic is
@@ -71,7 +71,7 @@ further line, under the place it goes.
 | Severity | Meaning |
 |---|---|
 | `error` | The program is not valid, or EmbCC cannot compile it. The compile fails and the exit status is 1. |
-| `warning` | The program is valid but probably wrong. The compile continues. Most warnings are controlled by a [`-W` option](#t4); `-w` drops them and `-Werror` turns them into errors. |
+| `warning` | The program is valid but probably wrong. The compile continues. Most warnings are controlled by a [`--warn=` option](#t4); `--no-warnings` drops them and `--warnings-are-errors` turns them into errors. |
 | `note` | Extra information about the error or warning printed immediately before it: where an earlier declaration is, a suggested spelling, the header that declares a name, the macro an expansion came from, or the template instantiation being processed. A note does not affect the exit status. |
 
 Optimization **remarks** are not diagnostics. They are off by default and
@@ -85,8 +85,8 @@ are described in [Optimization remarks](#remarks).
 | `'NAME' is declared in <HEADER>` | An undeclared identifier that is a C library name EmbCC knows (see [Which diagnostics carry fix-its](#fixit-producers)). Carries a fix-it that inserts the `#include` at line 1. |
 | `insert ';' here` | A missing semicolon. Points at the end of the previous token and carries a fix-it. |
 | `use '.' here`, `use '->' here` | `->` applied to a structure value, or `.` applied to a pointer to a structure. Carries a fix-it. |
-| `the one it hides is here` | A `-Wshadow` warning. |
-| `'NAME' is declared here, with no initializer` | A `-Wuninitialized` or `-Wmaybe-uninitialized` warning. |
+| `the one it hides is here` | A `--warn=shadow` warning. |
+| `'NAME' is declared here, with no initializer` | A `--warn=uninitialized` or `--warn=maybe-uninitialized` warning. |
 | `expanded from macro 'NAME'` | Any error or warning whose column falls on the name of a macro invoked on that line, or, when the column is unknown, whose line invokes a macro. Printed as a heading only, without a source line. |
 | `in the instantiation of ...` | A C++ error inside a template being instantiated. Up to 12 such notes are printed, innermost first. |
 | `this is a bug in EmbCC, not in the program being compiled` | An `internal error:`. |
@@ -101,22 +101,25 @@ A small number of messages bypass this mechanism and are printed
 immediately as plain text:
 
 - driver messages about the command line itself, such as an unknown `-W`
-  or `-Werror=` name, `-pedantic`, or a `-std=` value that is accepted but
+  or `--error=` name, `--pedantic`, or a `--std=` value that is accepted but
   not enforced;
 - `escape sequence out of range ...; truncated, as gcc does`, from the
   lexer;
 - `the optimizer stopped after N rounds on 'F' without converging`, from
   the optimizer.
 
-These carry no `[-W...]` tag, are not affected by `-w` or `-Werror`, and
+These carry no `[--warn=...]` tag, are not affected by `--no-warnings` or `--warnings-are-errors`, and
 do not appear in [JSON output](#json).
 
 ### Color
 
-#### `-fdiagnostics-color[=WHEN]`
+#### `--color=WHEN`
+
+GCC: `-fdiagnostics-color[=WHEN]`, `-fno-diagnostics-color`.
 
 Color the text output with ANSI escape sequences. `WHEN` is `auto`,
-`always` or `never`; `-fdiagnostics-color` with no value means `always`.
+`always` or `never`; GCC's `-fdiagnostics-color` with no value means
+`always`, and `-fno-diagnostics-color` means `never`.
 Any other value is treated as `auto`. The default is `auto`: color is
 used when standard error is a terminal.
 
@@ -124,16 +127,12 @@ With color, the location and the message are bold, `error:` is bold red,
 `warning:` bold magenta, `note:` bold cyan, and the caret line and fix-it
 text bold green. EmbCC does not read `GCC_COLORS` or `NO_COLOR`.
 
-#### `-fno-diagnostics-color`
-
-The same as `-fdiagnostics-color=never`.
-
 ### Exit status
 
 | Status | Meaning |
 |---|---|
 | 0 | No errors. Warnings do not change the status. |
-| 1 | At least one error, including a warning turned into an error by `-Werror` or `-Werror=NAME`. No output file is left (see [`-Werror`](#-werror)). |
+| 1 | At least one error, including a warning turned into an error by `--warnings-are-errors` or `--error=NAME`. No output file is left (see [`--warnings-are-errors`](#--warnings-are-errors)). |
 
 With `--fix`, the status is 0 whenever at least one fix-it was applied
 (see [`--fix`](#fix)).
@@ -143,8 +142,8 @@ With `--fix`, the status is 0 whenever at least one fix-it was applied
 An inconsistency inside the compiler is reported as
 
 ```text
-embcc: <embcc>: error: internal error: ...
-embcc: <embcc>: note: this is a bug in EmbCC, not in the program being compiled
+embcc: error: internal error: ...
+embcc: note: this is a bug in EmbCC, not in the program being compiled
 ```
 
 with no source location, because the problem is in EmbCC's state rather
@@ -228,17 +227,19 @@ embcc: semi.c:7:22: error: expected an expression, got ')'
 embcc: compilation terminated: 3 errors
 ```
 
-### `-fmax-errors=N`
+### `--max-errors=N`
+
+GCC: `-fmax-errors=N`.
 
 Stop after N errors. When the limit is reached EmbCC prints the errors so
 far and
 
 ```text
-embcc: compilation terminated due to -fmax-errors=N
+embcc: compilation terminated due to --max-errors=N
 ```
 
-and exits with status 1. Warnings turned into errors by `-Werror` or
-`-Werror=NAME` count toward the limit. `0` means no limit, which is the
+and exits with status 1. Warnings turned into errors by `--warnings-are-errors` or
+`--error=NAME` count toward the limit. `0` means no limit, which is the
 default. The value is read with `atoi`, so a value that is not a number
 also means no limit.
 
@@ -250,7 +251,9 @@ warning name).
 
 ## Machine-readable output
 
-### `-fdiagnostics-format=FORMAT`
+### `--diagnostics=FORMAT`
+
+GCC: `-fdiagnostics-format=FORMAT`.
 
 Select the output format. `FORMAT` is `text` (the default) or `json`.
 Any other value is refused:
@@ -262,10 +265,10 @@ embcc: unknown diagnostic format 'xml' (text, json)
 `json` writes GCC's JSON diagnostic format to standard error: one JSON
 array holding every diagnostic of the run, with notes nested under the
 diagnostic they belong to. A tool that reads GCC's
-`-fdiagnostics-format=json` reads EmbCC's.
+`--diagnostics=json` reads EmbCC's.
 
 ```sh
-embcc -fsyntax-only -fdiagnostics-format=json area.c
+embcc --syntax-only --diagnostics=json area.c
 ```
 
 ```text
@@ -280,9 +283,9 @@ Each element of the array is an object with these members:
 
 | Member | Present | Value |
 |---|---|---|
-| `kind` | always | `"error"`, `"warning"` or `"note"`. A warning turned into an error by `-Werror` or `-Werror=NAME` has kind `"error"`. |
+| `kind` | always | `"error"`, `"warning"` or `"note"`. A warning turned into an error by `--warnings-are-errors` or `--error=NAME` has kind `"error"`. |
 | `message` | always | The message text, without the `[-W...]` and `[E....]` tags. |
-| `option` | warnings a `-W` option controls | The option, for example `"-Wunused-variable"`. Kept when `-Werror` makes the diagnostic an error. |
+| `option` | warnings a `-W` option controls | The option, for example `"-Wunused-variable"`. Kept when `--warnings-are-errors` makes the diagnostic an error. |
 | `id` | diagnostics with an explanation | The [explain id](#t6), for example `"E0001"`. EmbCC's own member; GCC has no equivalent. |
 | `column-origin` | always | `1`: columns count from 1. |
 | `locations` | always | An array with one object. Its `caret` is the point the diagnostic is about. Its `finish` is the last column of the marked range (inclusive) and is present only when the column is known. |
@@ -313,10 +316,10 @@ The usual way for an editor to get diagnostics is to run a syntax-only
 compile of the buffer with the project's flags and parse the array:
 
 ```sh
-embcc -fsyntax-only -fdiagnostics-format=json -I include -DCONFIG=1 file.c
+embcc --syntax-only --diagnostics=json -I include -DCONFIG=1 file.c
 ```
 
-`-fsyntax-only` runs the preprocessor, the parser and semantic analysis
+`--syntax-only` runs the preprocessor, the parser and semantic analysis
 and writes no output file. The editor maps each element to its own
 diagnostic: `kind` to a severity, `caret` and `finish` to a range
 (converting the 1-based columns to whatever the editor counts from), and
@@ -395,7 +398,7 @@ literal newline rather than escaped.
 ### `--fix`
 
 Apply the fix-its to the source files instead of only printing them.
-`--fix` implies `-fsyntax-only`: no object file is written. The
+`--fix` implies `--syntax-only`: no object file is written. The
 diagnostics are printed as usual, then each file named by a fix-it is
 rewritten in place:
 
@@ -486,31 +489,40 @@ belongs to.
 
 ### Controlling warnings
 
-Options are processed from left to right. Each one sets the state of
-the warnings it names, and a later option overrides an earlier one. In
-particular, `-Wno-unused-variable -Wall` leaves `-Wunused-variable` on,
-because `-Wall` comes later; write `-Wall -Wno-unused-variable`. (GCC
-gives a specific option precedence over a group regardless of order;
-EmbCC does not.)
+Options are processed from left to right, and a later option overrides
+an earlier one about the same warning. A warning named on its own wins
+over a set, before it or after it, as in GCC:
+`--no-warn=unused-variable --warn=all` and
+`--warn=all --no-warn=unused-variable` both leave `unused-variable` off,
+so a Makefile that puts its exceptions before its warning set builds as
+it does with GCC.
 
-The exception is `-Wconversion`, which turns on `-Wsign-conversion` and
-`-Wfloat-conversion` unless either is named on the command line, before
-or after it, as in GCC: `-Wno-sign-conversion -Wconversion` and
-`-Wconversion -Wno-sign-conversion` both leave `-Wsign-conversion` off.
+The exception is `--warn=conversion`, which turns on `--warn=sign-conversion` and
+`--warn=float-conversion` unless either is named on the command line, before
+or after it, as in GCC: `--no-warn=sign-conversion --warn=conversion` and
+`--warn=conversion --no-warn=sign-conversion` both leave `sign-conversion`
+off.
 
-#### `-Wall`
+#### `--warn=all`
 
-Enable `-Waddress`, `-Wformat`, `-Wmaybe-uninitialized`, `-Wparentheses`,
-`-Wshift-count-overflow`, `-Wuninitialized`, `-Wunused-function` and
-`-Wunused-variable`.
+GCC: `-Wall`.
 
-#### `-Wextra`, `-W`
+Enable `--warn=address`, `--warn=format`, `--warn=maybe-uninitialized`, `--warn=parentheses`,
+`--warn=shift-count-overflow`, `--warn=uninitialized`, `--warn=unused-function` and
+`--warn=unused-variable`.
 
-Enable `-Wimplicit-fallthrough`, `-Wlogical-op`, `-Wold-style-declaration`,
-`-Wsign-compare`, `-Wtype-limits` and `-Wunused-parameter`. `-Wextra` does not imply `-Wall`. `-W` is an older
-spelling of `-Wextra`.
+#### `--warn=extra`
 
-#### `-WNAME`
+GCC: `-Wextra`, `-W`.
+
+Enable `--warn=implicit-fallthrough`, `--warn=logical-op`, `--warn=old-style-declaration`,
+`--warn=sign-compare`, `--warn=type-limits` and `--warn=unused-parameter`.
+`--warn=extra` does not imply `--warn=all`. `-W` is GCC's older spelling
+of `-Wextra`.
+
+#### `--warn=NAME`
+
+GCC: `-WNAME`.
 
 Enable the warning `NAME`. If EmbCC has no warning of that name, the
 option is accepted, has no effect, and the driver prints
@@ -519,8 +531,8 @@ option is accepted, has no effect, and the driver prints
 embcc: warning: -Wcast-align is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)
 ```
 
-This message is printed immediately, as plain text; `-w` does not
-suppress it and `-Werror` does not make it an error.
+This message is printed immediately, as plain text; `--no-warnings` does not
+suppress it and `--warnings-are-errors` does not make it an error.
 
 #### `#pragma GCC diagnostic`
 
@@ -530,15 +542,19 @@ form); see [`#pragma GCC diagnostic`](extensions.md#pragma-gcc-diagnostic).
 A pragma overrides the command line for the warnings it names, from its
 position on.
 
-#### `-Wno-NAME`
+#### `--no-warn=NAME`
+
+GCC: `-Wno-NAME`.
 
 Disable the warning `NAME`. A name EmbCC does not have is accepted
 silently and has no effect.
 
-#### `-Werror`
+#### `--warnings-are-errors`
+
+GCC: `-Werror`.
 
 Turn every warning into an error. The diagnostic is printed with
-`error:` instead of `warning:` and keeps its `[-Wname]` tag, and the
+`error:` instead of `warning:` and keeps its `[--warn=name]` tag, and the
 exit status becomes 1. Warnings that no option controls (a macro
 redefinition, `#warning`) are turned into errors too.
 
@@ -547,29 +563,33 @@ diagnostics are still reported. The compile has failed, though, and it
 leaves no output file: the object, assembly file or executable it was
 writing is removed, together with any file of that name an earlier
 compile left, so `make` builds it again on the next run. A dependency
-file from `-MD` or `-MMD` and a `.su` file from `-fstack-usage` are still
+file from `--deps` or `--deps-all` and a `.su` file from `--stack-usage` are still
 written. A warning that is not an error still lets the object be
 written.
 
-#### `-Wno-error`
+#### `--no-warnings-are-errors`
 
-Undo an earlier `-Werror`.
+GCC: `-Wno-error`.
 
-#### `-Werror=NAME`, `-Wno-error=NAME`
+Undo an earlier `--warnings-are-errors`.
 
-`-Werror=NAME` turns the warning `NAME` on and reports it as an error,
-whether or not `-Werror` is given. `-Wno-error=NAME` keeps `NAME` a
-warning when `-Werror` is given; it does not turn the warning on. For
-the warning it names, either option overrides `-Werror` and `-Wno-error`
+#### `--error=NAME`, `--no-error=NAME`
+
+GCC: `-Werror=NAME`, `-Wno-error=NAME`.
+
+`--error=NAME` turns the warning `NAME` on and reports it as an error,
+whether or not `--warnings-are-errors` is given. `--no-error=NAME` keeps `NAME` a
+warning when `--warnings-are-errors` is given; it does not turn the warning on. For
+the warning it names, either option overrides `--warnings-are-errors` and `--no-warnings-are-errors`
 wherever they appear on the command line:
 
 ```sh
-embcc -Wall -Werror -Wno-error=unused-variable -c f.c   # -Wunused-variable stays a warning
-embcc -Werror=format -c f.c                            # -Wformat on, and an error
+embcc --warn=all --warnings-are-errors --no-error=unused-variable -c f.c   # --warn=unused-variable stays a warning
+embcc --error=format -c f.c                            # --warn=format on, and an error
 ```
 
-`-Wno-NAME` after `-Werror=NAME` turns the warning off again, and `-w`
-suppresses it. The warnings no option controls follow `-Werror` alone. A
+`--no-warn=NAME` after `--error=NAME` turns the warning off again, and `--no-warnings`
+suppresses it. The warnings no option controls follow `--warnings-are-errors` alone. A
 `NAME` that is not a warning EmbCC has is reported and ignored:
 
 ```text
@@ -579,96 +599,65 @@ embcc: warning: -Werror=cast-align names no warning EmbCC has (--help-warnings l
 Like the unknown-warning message, it is printed immediately as plain
 text.
 
-#### `-w`
+#### `--no-warnings`
+
+GCC: `-w`.
 
 Suppress all warnings that go through the diagnostic engine, including
-those `-Werror` would have turned into errors. `-w` takes effect wherever
+those `--warnings-are-errors` would have turned into errors. `--no-warnings` takes effect wherever
 it appears on the command line. See [Limitations](#warning-limitations)
-for the notes `-w` does not suppress.
+for the notes `--no-warnings` does not suppress.
 
-#### `-Wsystem-headers`
+#### `--warn-in-system-headers`
+
+GCC: `-Wsystem-headers`.
 
 Report warnings in system headers. By default a warning whose location
 is in a system header is dropped, because the header is not the
 project's to fix. Errors are never dropped. A header is a system header
-when it was found through an `-isystem` directory or one of EmbCC's own
+when it was found through an `--system-include` directory or one of EmbCC's own
 include directories, or was included by another system header.
-`-Wno-system-headers` is accepted and has no effect.
+`--no-warn=system-headers` is accepted and has no effect.
 
-#### `-pedantic`, `-pedantic-errors`, `-Wpedantic`
+#### `--pedantic`, `--pedantic-errors`
+
+GCC: `-pedantic`, `-pedantic-errors`; GCC's `-Wpedantic` is not one (below).
 
 EmbCC compiles one C dialect, C11 with the GNU extensions, and has no
 diagnostics for extensions to ISO C; see
-[C language support](c-language.md). `-pedantic` and `-pedantic-errors`
+[C language support](c-language.md). `--pedantic` and `--pedantic-errors`
 are accepted with a warning that they turn nothing on:
 
 ```text
 embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on
 ```
 
-The message is printed immediately as plain text; `-w` does not suppress
-it and `-Werror` does not make it an error. `-pedantic-errors` makes no
+The message is printed immediately as plain text; `--no-warnings` does not suppress
+it and `--warnings-are-errors` does not make it an error. `--pedantic-errors` makes no
 diagnostic an error. `-Wpedantic` is an unknown warning name and turns
 nothing on.
 
 ### Summary of warnings
 
-| Option | Diagnoses | Enabled by |
-|---|---|---|
-| `-Waddress` | A function name tested in an `if` condition, or compared with a null pointer constant | `-Wall` |
-| `-Warith-conversion` | As `-Wconversion`, also for arithmetic whose operands each fit the target type | none |
-| `-Wattributes` | An attribute EmbCC does not know, or one it accepts but does not implement | default |
-| `-Wcast-qual` | A cast that removes `const` or `volatile` from the type a pointer points to | none |
-| `-Wconversion` | An implicit conversion that may change an integer's value, or an integer converted to a floating type that cannot hold all its values | none |
-| `-Wdeprecated-declarations` | A use of a function or variable declared `deprecated` | default |
-| `-Wdiscarded-qualifiers` | A pointer conversion that drops the pointed-to type's `const` | default |
-| `-Wdiv-by-zero` | Integer division or remainder by a constant zero | default |
-| `-Wdouble-promotion` | A `float` implicitly converted to `double`: an operand, a `double` parameter, a variadic argument | none |
-| `-Wfloat-conversion` | An implicit conversion from a floating type to an integer or to a narrower floating type that may change the value | `-Wconversion` |
-| `-Wformat` | A `printf`- or `scanf`-style format that disagrees with its arguments | `-Wall` |
-| `-Wformat-nonliteral` | A format that is not a string literal, with arguments after it (not for a `va_list` function such as `vprintf`) | `-Wformat=2` |
-| `-Wformat-security` | A format that is not a string literal, with no arguments after it | `-Wformat=2` |
-| `-Wimplicit-fallthrough` | A `case` whose statements can run into the next label with no `__attribute__((fallthrough));`, `[[fallthrough]];` or fall-through comment | `-Wextra` |
-| `-Wlogical-op` | `a && a` or `a \|\| a` with identical operands | `-Wextra` |
-| `-Wmaybe-uninitialized` | A local variable read on a path where only some paths wrote it | `-Wall` |
-| `-Wmissing-declarations` | A function with external linkage defined with no declaration before it (when `-Wmissing-prototypes` is off) | none |
-| `-Wmissing-prototypes` | A function with external linkage defined with no prototype before it | none |
-| `-Wmultichar` | A character constant of more than one character, `'ab'` | default |
-| `-Wnested-externs` | An `extern` declaration inside a function body | none |
-| `-Wold-style-declaration` | A storage class or `inline` after the type specifiers: `const static int t[]`, `int static n` | `-Wextra` |
-| `-Woverflow` | An integer constant converted to a type that cannot hold it as a signed or as an unsigned value: `unsigned char c = 300;` | default |
-| `-Wparentheses` | A comparison as an unparenthesized operand of `&`, `\|` or `^` | `-Wall` |
-| `-Wprio-ctor-dtor` | A `constructor` or `destructor` priority from 0 to 100, which the implementation reserves | default |
-| `-Wredundant-decls` | A second declaration of a function or `extern` object in the same scope | none |
-| `-Wshadow` | A local declaration that hides a local variable, a parameter or a file-scope variable | none |
-| `-Wshift-count-overflow` | A constant shift count that is negative or not less than the operand width | `-Wall` |
-| `-Wsign-compare` | A comparison that converts a possibly negative signed operand to unsigned | `-Wextra` |
-| `-Wsign-conversion` | An implicit conversion between signed and unsigned integer types that may change the sign of the value | `-Wconversion` |
-| `-Wstrict-prototypes` | A function declarator with `()` instead of `(void)` | none |
-| `-Wswitch-default` | A `switch` with no `default` label | none |
-| `-Wtype-limits` | An unsigned value compared `< 0` or `>= 0` | `-Wextra` |
-| `-Wundef` | An identifier in `#if` that no macro defines (evaluated as 0), outside an operand `&&`, `\|\|` or `?:` skips | none |
-| `-Wuninitialized` | A local variable read before any path wrote it | `-Wall` |
-| `-Wunused-function` | A `static` function that is defined and never used | `-Wall` |
-| `-Wunused-parameter` | A function parameter the body never uses | `-Wextra` |
-| `-Wunused-result` | A discarded result of a function declared `warn_unused_result` or `[[nodiscard]]` | default |
-| `-Wunused-variable` | A local variable that is never used | `-Wall` |
-| `-Wvla` | A variable length array, or a `typedef` of one | none |
-| `-Wwindows-abi` | A compile for a Windows target, whose ABI EmbCC does not yet fully implement | default |
-
-"default" means the warning is on unless `-Wno-NAME` or `-w` is given.
-"none" means only `-WNAME` enables it.
+The [warning reference](warnings.md) lists every warning, what it
+diagnoses and the set that turns it on, printed by the compiler from its
+own table (`embcc --reference=warnings`). A warning that is **on by
+default** is on unless `--no-warn=NAME` or `--no-warnings` is given; one
+in **neither set** is on only when `--warn=NAME` names it.
 
 ### Warning reference
 
-#### `-Waddress`
+Each warning below is turned on by `--warn=NAME`, which GCC spells
+`-WNAME`, and off by `--no-warn=NAME` (`-Wno-NAME`).
+
+#### `--warn=address`
 
 Warn when the name of a function is used where its address is always
 non-null: as the condition of an `if`, or compared with a null pointer
 constant using `==` or `!=`. This is almost always a missing call. A
 function declared `__attribute__((weak))` is exempt, because its address
 can be null. A function pointer variable is never reported. Enabled by
-`-Wall`.
+`--warn=all`.
 
 ```c
 void tick(void);
@@ -676,7 +665,7 @@ int f(void) { return tick == 0; }
 ```
 
 ```text
-embcc: addr.c:2:22: warning: the address of 'tick' is never null, so this is always false -- a call may be missing [-Waddress]
+embcc: addr.c:2:22: warning: the address of 'tick' is never null, so this is always false -- a call may be missing [--warn=address]
   int f(void) { return tick == 0; }
                        ^~~~
 ```
@@ -684,7 +673,7 @@ embcc: addr.c:2:22: warning: the address of 'tick' is never null, so this is alw
 In an `if`, the message is `... so this branch is always taken -- a call
 may be missing`.
 
-#### `-Wattributes`
+#### `--warn=attributes`
 
 Warn about an `__attribute__` that has no effect. Two cases are reported:
 
@@ -702,11 +691,11 @@ int odd(void) __attribute__((frobnicate));
 ```
 
 ```text
-embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [-Wattributes]
+embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [--warn=attributes]
   int odd(void) __attribute__((frobnicate));
 ```
 
-#### `-Wconversion`
+#### `--warn=conversion`
 
 Warn about an implicit conversion that may change a value. The checked
 conversions are assignment, initialization, argument passing, `return`,
@@ -721,7 +710,7 @@ warnings under GCC compiles without them under EmbCC:
 - An arithmetic result is reported only when one of its operands would
   be reported converted on its own. `unsigned char x = b + 1;` with `b` an
   `unsigned char` is not reported; `x = i + 1;` with `i` an `int` is.
-  `-Warith-conversion` reports both.
+  `--warn=arith-conversion` reports both.
 - A conversion that only widens is looked through: `(int)b` has the
   values of `b`.
 - `x & C`, `u % 2^k` and an expression built from constants and `?:`
@@ -732,7 +721,7 @@ warnings under GCC compiles without them under EmbCC:
 - A constant is reported only when its value changes, and the message
   gives both values.
 
-`-Wconversion` also enables `-Wsign-conversion` and `-Wfloat-conversion`
+`--warn=conversion` also enables `--warn=sign-conversion` and `--warn=float-conversion`
 unless either is named on the command line.
 
 ```c
@@ -740,7 +729,7 @@ unsigned char f(int i, unsigned char b) { b += 1; return i & 0xff; }
 ```
 
 ```text
-embcc: conv.c:1:58: warning: conversion from 'int' to 'unsigned char' may change value [-Wconversion]
+embcc: conv.c:1:58: warning: conversion from 'int' to 'unsigned char' may change value [--warn=conversion]
   unsigned char f(int i, unsigned char b) { b += 1; return i & 0xff; }
                                                            ^
 ```
@@ -750,7 +739,7 @@ result's sign; `i & 0x7f` is not reported.
 
 EmbCC checks only C. With `-x c++` these options report nothing.
 
-#### `-Wsign-conversion`
+#### `--warn=sign-conversion`
 
 Warn about an implicit conversion between a signed and an unsigned
 integer type that may change the sign of the value: a signed value that
@@ -760,9 +749,9 @@ operands that an arithmetic operator converts: in `i + u`, `i` is
 converted to `unsigned int`. A negative constant is reported with its
 converted value (`unsigned conversion from 'int' to 'unsigned int' changes
 value from '-1' to '4294967295'`). Comparisons are `-Wsign-compare`'s.
-Enabled by `-Wconversion`.
+Enabled by `--warn=conversion`.
 
-#### `-Wfloat-conversion`
+#### `--warn=float-conversion`
 
 Warn about an implicit conversion from a floating type to an integer
 type, or to a narrower floating type, that may change the value:
@@ -770,9 +759,9 @@ type, or to a narrower floating type, that may change the value:
 that converts exactly (`int k = 3.0;`, `float f = 1.5;`) is not
 reported, and neither is an integer constant a floating type holds
 exactly (`float f = 16777216;`; `16777217` is reported). Enabled by
-`-Wconversion`.
+`--warn=conversion`.
 
-#### `-Woverflow`
+#### `--warn=overflow`
 
 Warn when an integer constant is converted to an integer type that
 cannot hold it either as a signed or as an unsigned value of that width:
@@ -781,10 +770,10 @@ cannot hold it either as a signed or as an unsigned value of that width:
 `-Wsign-conversion`. On by default, as in GCC.
 
 ```text
-embcc: o.c:1:19: warning: unsigned conversion from 'int' to 'unsigned char' changes value from '300' to '44' [-Woverflow]
+embcc: o.c:1:19: warning: unsigned conversion from 'int' to 'unsigned char' changes value from '300' to '44' [--warn=overflow]
 ```
 
-#### `-Wdeprecated-declarations`
+#### `--warn=deprecated-declarations`
 
 Warn when a function or variable declared with
 `__attribute__((deprecated))` or `[[deprecated]]` is called, read, or
@@ -797,12 +786,12 @@ int f(void) { return old(); }
 ```
 
 ```text
-embcc: dep.c:2:22: warning: 'old' is deprecated [-Wdeprecated-declarations]
+embcc: dep.c:2:22: warning: 'old' is deprecated [--warn=deprecated-declarations]
   int f(void) { return old(); }
                        ^~~
 ```
 
-#### `-Wdiscarded-qualifiers`
+#### `--warn=discarded-qualifiers`
 
 Warn when a pointer to a `const`-qualified type is converted, without a
 cast, to a pointer whose pointed-to type is not `const`: in an
@@ -815,12 +804,12 @@ void f(const char *s) { take(s); }
 ```
 
 ```text
-embcc: q.c:2:30: warning: argument discards the 'const' qualifier of const char * [-Wdiscarded-qualifiers]
+embcc: q.c:2:30: warning: argument discards the 'const' qualifier of const char * [--warn=discarded-qualifiers]
   void f(const char *s) { take(s); }
                                ^
 ```
 
-#### `-Wdiv-by-zero`
+#### `--warn=div-by-zero`
 
 Warn about an integer division or remainder whose right operand is a
 constant expression equal to zero: `division by zero`. On by default.
@@ -830,18 +819,18 @@ int f(int x) { return x / 0; }
 ```
 
 ```text
-embcc: div.c:1:23: warning: division by zero [-Wdiv-by-zero]
+embcc: div.c:1:23: warning: division by zero [--warn=div-by-zero]
   int f(int x) { return x / 0; }
                         ^
 ```
 
-#### `-Wformat`
+#### `--warn=format`
 
 Check direct calls to functions declared with
 `__attribute__((format(printf, N, M)))` or
 `__attribute__((format(scanf, N, M)))` whose format argument is a string
 literal. The declarations in EmbCC's `<stdio.h>` carry the attribute, and
-a program's own functions can use it. Enabled by `-Wall`.
+a program's own functions can use it. Enabled by `--warn=all`.
 
 The check compares each conversion with the argument it consumes, after
 the default argument promotions, so `printf("%f", 1.0f)` and
@@ -875,34 +864,34 @@ void f(long n) { printf("%d\n", n); }
 ```
 
 ```text
-embcc: fmt.c:2:33: warning: %d reads 4 bytes, but this argument is long, which is 8 [-Wformat]
+embcc: fmt.c:2:33: warning: %d reads 4 bytes, but this argument is long, which is 8 [--warn=format]
   void f(long n) { printf("%d\n", n); }
                                   ^
 ```
 
-#### `-Wlogical-op`
+#### `--warn=logical-op`
 
 Warn when both operands of `&&` or `||` are the same expression: the
 same variable, the same chain of member accesses, or the same number,
-with no side effects. Enabled by `-Wextra`.
+with no side effects. Enabled by `--warn=extra`.
 
 ```c
 int f(int x) { return x || x; }
 ```
 
 ```text
-embcc: logic.c:1:23: warning: both operands of '||' are the same expression [-Wlogical-op]
+embcc: logic.c:1:23: warning: both operands of '||' are the same expression [--warn=logical-op]
   int f(int x) { return x || x; }
                         ^
 ```
 
-#### `-Wmaybe-uninitialized`
+#### `--warn=maybe-uninitialized`
 
 Warn when a local variable is read at a point that some, but not all,
 paths reach with a value written: a write inside an `if` with no `else`,
 a loop that may run zero times, a `switch` with no `default`. Each
 variable is reported once, with a note at its declaration. Enabled by
-`-Wall`. See `-Wuninitialized` for what the analysis covers.
+`--warn=all`. See `--warn=uninitialized` for what the analysis covers.
 
 ```c
 int g(int c)
@@ -915,7 +904,7 @@ int g(int c)
 ```
 
 ```text
-embcc: maybe.c:6:12: warning: 'y' may be used uninitialized [-Wmaybe-uninitialized]
+embcc: maybe.c:6:12: warning: 'y' may be used uninitialized [--warn=maybe-uninitialized]
       return y;
              ^
 embcc: maybe.c:3:9: note: 'y' is declared here, with no initializer
@@ -928,13 +917,13 @@ earlier in it on the next iteration) is not reported when the read is
 under a test inside that loop, because such a test is usually the guard
 that makes the read safe.
 
-#### `-Wparentheses`
+#### `--warn=parentheses`
 
 Warn when a comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`) is an operand
 of a bitwise `&`, `|` or `^` without parentheses around it. Because
 comparisons bind more tightly, `reg & MASK == 0` means
 `reg & (MASK == 0)`. Enabled by `-Wall`. Other cases GCC's
-`-Wparentheses` covers, such as an assignment used as a condition, are
+`--warn=parentheses` covers, such as an assignment used as a condition, are
 not reported.
 
 ```c
@@ -942,14 +931,14 @@ int f(unsigned reg) { return reg & 0x4 == 0; }
 ```
 
 ```text
-embcc: paren.c:1:30: warning: comparison binds tighter than '&' here: this is 'a & (b == c)', not '(a & b) == c' [-Wparentheses]
+embcc: paren.c:1:30: warning: comparison binds tighter than '&' here: this is 'a & (b == c)', not '(a & b) == c' [--warn=parentheses]
   int f(unsigned reg) { return reg & 0x4 == 0; }
                                ^~~
 ```
 
 The message always shows `==`, whichever comparison operator was used.
 
-#### `-Wshadow`
+#### `--warn=shadow`
 
 Warn when a declaration in a block hides a local variable or parameter
 that is still in scope, or when a local variable or a parameter hides a
@@ -972,7 +961,7 @@ int f(int n)
 ```
 
 ```text
-embcc: shadow.c:5:13: warning: declaration of 'total' shadows an earlier one [-Wshadow]
+embcc: shadow.c:5:13: warning: declaration of 'total' shadows an earlier one [--warn=shadow]
           int total = i;
               ^~~~~
 embcc: shadow.c:3:9: note: the one it hides is here
@@ -983,47 +972,47 @@ embcc: shadow.c:3:9: note: the one it hides is here
 When the hidden name is a parameter the message is `... shadows a
 parameter`.
 
-#### `-Wshift-count-overflow`
+#### `--warn=shift-count-overflow`
 
 Warn when the right operand of `<<` or `>>` is a constant that is
 negative or not less than the width in bits of the promoted left
 operand. Such a shift is undefined, and the hardware typically masks the
-count rather than producing zero. Enabled by `-Wall`.
+count rather than producing zero. Enabled by `--warn=all`.
 
 ```c
 int f(int x) { return x << 32; }
 ```
 
 ```text
-embcc: shift.c:1:23: warning: shift count 32 is not less than the width of int (32 bits) [-Wshift-count-overflow]
+embcc: shift.c:1:23: warning: shift count 32 is not less than the width of int (32 bits) [--warn=shift-count-overflow]
   int f(int x) { return x << 32; }
                         ^
 ```
 
 A negative count gives `shift count -1 is negative`.
 
-#### `-Wsign-compare`
+#### `--warn=sign-compare`
 
 Warn when a comparison between a signed and an unsigned integer is
 performed in an unsigned type, so that a negative value compares as a
 large one. A signed operand that is a non-negative constant is not
-reported. Enabled by `-Wextra`.
+reported. Enabled by `--warn=extra`.
 
 ```c
 int f(int i, unsigned n) { return i < n; }
 ```
 
 ```text
-embcc: sign.c:1:35: warning: comparison between int and unsigned int [-Wsign-compare]
+embcc: sign.c:1:35: warning: comparison between int and unsigned int [--warn=sign-compare]
   int f(int i, unsigned n) { return i < n; }
                                     ^
 ```
 
-#### `-Wtype-limits`
+#### `--warn=type-limits`
 
 Warn when a value of unsigned type is compared with the constant 0 in a
 way whose result the type already decides: `u < 0` (always false) and
-`u >= 0` (always true), in either operand order. Enabled by `-Wextra`.
+`u >= 0` (always true), in either operand order. Enabled by `--warn=extra`.
 Other range comparisons, such as a `char` compared with 300, are not
 reported.
 
@@ -1032,16 +1021,16 @@ int f(unsigned u) { return u < 0; }
 ```
 
 ```text
-embcc: limits.c:1:28: warning: comparison of unsigned int with 0 is always false: it has no negative values [-Wtype-limits]
+embcc: limits.c:1:28: warning: comparison of unsigned int with 0 is always false: it has no negative values [--warn=type-limits]
   int f(unsigned u) { return u < 0; }
                              ^
 ```
 
-#### `-Wuninitialized`
+#### `--warn=uninitialized`
 
 Warn when a local variable is read at a point that no path reaches with
 a value written. Each variable is reported once, with a note at its
-declaration. Enabled by `-Wall`.
+declaration. Enabled by `--warn=all`.
 
 The analysis follows the control flow of the function body: `if`,
 loops, `break` and `continue`, `switch` and `case` labels, `&&`, `||` and
@@ -1065,7 +1054,7 @@ int f(int c)
 ```
 
 ```text
-embcc: uninit.c:4:12: warning: 'x' is used uninitialized [-Wuninitialized]
+embcc: uninit.c:4:12: warning: 'x' is used uninitialized [--warn=uninitialized]
       return x + c;
              ^
 embcc: uninit.c:3:9: note: 'x' is declared here, with no initializer
@@ -1078,28 +1067,28 @@ embcc: uninit.c:3:9: note: 'x' is declared here, with no initializer
      -Wuninitialized. GCC and Clang do not warn on (void)x. Reported to
      the lead. -->
 
-#### `-Wunused-function`
+#### `--warn=unused-function`
 
 Warn about a `static` function that is defined and never called or
 referred to. A non-`static` function is never reported, because another
 translation unit may call it, and neither is `main`. A function declared
 `__attribute__((unused))` or `__attribute__((used))` is exempt, and so is
 a `static inline` function defined in a header, as with Clang. Enabled by
-`-Wall`. The location has a line but no column.
+`--warn=all`. The location has a line but no column.
 
 ```c
 static int helper(int x) { return x; }
 ```
 
 ```text
-embcc: func.c:1: warning: unused function 'helper' [-Wunused-function]
+embcc: func.c:1: warning: unused function 'helper' [--warn=unused-function]
   static int helper(int x) { return x; }
 ```
 
-#### `-Wunused-parameter`
+#### `--warn=unused-parameter`
 
 Warn about a named parameter that the function body never uses. Enabled
-by `-Wextra`. The location has a line but no column. Writing `(void)name;`
+by `--warn=extra`. The location has a line but no column. Writing `(void)name;`
 in the body marks the parameter as used, and so does
 `__attribute__((unused))` or `[[maybe_unused]]` on it, written before its
 type, between the type and the name, or after the name
@@ -1110,11 +1099,11 @@ int f(int a, int b) { return a; }
 ```
 
 ```text
-embcc: param.c:1: warning: unused parameter 'b' [-Wunused-parameter]
+embcc: param.c:1: warning: unused parameter 'b' [--warn=unused-parameter]
   int f(int a, int b) { return a; }
 ```
 
-#### `-Wunused-result`
+#### `--warn=unused-result`
 
 Warn when a call to a function declared `__attribute__((warn_unused_result))`
 or `[[nodiscard]]` is an expression statement on its own, so its value is
@@ -1127,17 +1116,17 @@ void f(void) { must(); }
 ```
 
 ```text
-embcc: result.c:2:16: warning: result of 'must' is discarded, and it is declared warn_unused_result [-Wunused-result]
+embcc: result.c:2:16: warning: result of 'must' is discarded, and it is declared warn_unused_result [--warn=unused-result]
   void f(void) { must(); }
                  ^~~~
 ```
 
-#### `-Wunused-variable`
+#### `--warn=unused-variable`
 
 Warn about a local variable that is declared and never referred to.
 A variable that is assigned but never read counts as used. A variable
 declared `__attribute__((unused))` is exempt, as are names the compiler
-introduces for its own purposes. Enabled by `-Wall`.
+introduces for its own purposes. Enabled by `--warn=all`.
 
 ```c
 int f(int a)
@@ -1148,12 +1137,12 @@ int f(int a)
 ```
 
 ```text
-embcc: var.c:3:9: warning: unused variable 'unused' [-Wunused-variable]
+embcc: var.c:3:9: warning: unused variable 'unused' [--warn=unused-variable]
       int unused;
           ^~~~~~
 ```
 
-#### `-Wwindows-abi`
+#### `--warn=windows-abi`
 
 Issued once for every object file written for a Windows target
 (`--target=x86_64-windows-gnu` or `x86_64-w64-mingw32`): the code EmbCC
@@ -1162,17 +1151,17 @@ generates for Windows is not yet fully the Microsoft x64 ABI. `long` is
 and `xmm7` are not preserved across calls, so objects EmbCC compiles
 agree with each other but not with code built by other compilers. On by
 default. The warning carries a file name but no line, and is not issued
-for `-fsyntax-only`, `-E` or `-S`. See [Targets](targets.md) for the
+for `--syntax-only`, `-E` or `-S`. See [Targets](targets.md) for the
 state of the Windows target.
 
 ```text
-embcc: win.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [-Wwindows-abi]
+embcc: win.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [--warn=windows-abi]
 ```
 
 ### Warnings no option controls
 
-These warnings have no `-W` option and no `[-W...]` tag. `-w` suppresses
-them and `-Werror` turns them into errors; `-Wno-...` cannot turn them
+These warnings have no `--warn=` option and no `[--warn=...]` tag. `--no-warnings` suppresses
+them and `--warnings-are-errors` turns them into errors; `--warn=no-...` cannot turn them
 off individually.
 
 | Message | Cause |
@@ -1183,7 +1172,7 @@ off individually.
 
 The lexer's `escape sequence out of range` warnings and the optimizer's
 non-convergence warning are printed outside the diagnostic engine (see
-[When diagnostics are printed](#t1)); no option, including `-w`, affects
+[When diagnostics are printed](#t1)); no option, including `--no-warnings`, affects
 them.
 
 ### Warnings in C++
@@ -1191,18 +1180,18 @@ them.
 The analyses behind the warnings run in the C front end, over the C that
 EmbCC lowers C++ to. For a C++ compile:
 
-- `-Wunused-variable`, `-Wunused-parameter`, `-Wunused-function`,
-  `-Wshadow` and `-Wsign-compare` are switched off, whatever the command
+- `--warn=unused-variable`, `--warn=unused-parameter`, `--warn=unused-function`,
+  `--warn=shadow` and `--warn=sign-compare` are switched off, whatever the command
   line says, because the lowered code contains names and conversions the
   programmer did not write.
 - The other warnings report what survives lowering in a recognizable
-  form. `-Wformat`, `-Wuninitialized`, `-Wmaybe-uninitialized`,
-  `-Wdiv-by-zero`, `-Wshift-count-overflow` and `-Wtype-limits` report on
-  C++ source. `-Wconversion`, `-Wsign-conversion`, `-Wfloat-conversion`,
-  `-Warith-conversion` and `-Woverflow` do not report for C++. The C++ front end handles attributes itself, so
-  `-Wattributes`, `-Wdeprecated-declarations` and `-Wunused-result` do not
-  report for C++ declarations; `-Wparentheses`, `-Waddress` and
-  `-Wlogical-op` do not report either.
+  form. `--warn=format`, `--warn=uninitialized`, `--warn=maybe-uninitialized`,
+  `--warn=div-by-zero`, `--warn=shift-count-overflow` and `--warn=type-limits` report on
+  C++ source. `--warn=conversion`, `--warn=sign-conversion`, `--warn=float-conversion`,
+  `--warn=arith-conversion` and `--warn=overflow` do not report for C++. The C++ front end handles attributes itself, so
+  `--warn=attributes`, `--warn=deprecated-declarations` and `--warn=unused-result` do not
+  report for C++ declarations; `--warn=parentheses`, `--warn=address` and
+  `--warn=logical-op` do not report either.
 - The line and column of a warning can be wrong, because they come from
   the lowered code.
 <!-- The C++ coverage list above is from compiling sample programs at this
@@ -1216,8 +1205,8 @@ See [C++ support](cxx.md).
 ### Limitations
 
 - A note that belongs to a warning that is not printed (because its
-  option is off, because of `-w`, or because it is in a system header) is
-  still printed. With `-Wuninitialized` on and `-Wmaybe-uninitialized`
+  option is off, because of `--no-warnings`, or because it is in a system header) is
+  still printed. With `--warn=uninitialized` on and `--warn=maybe-uninitialized`
   off, for example, the `'y' is declared here, with no initializer` note of
   the suppressed warning appears on its own. In JSON it is attached to
   whichever diagnostic came before it.
@@ -1235,12 +1224,12 @@ rules above, with these consequences:
 
 | Option | What EmbCC does |
 |---|---|
-| `-WNAME` for a name not in the [summary](#summary-of-warnings) (`-Wcast-align`, `-Wnull-dereference`, `-Wpedantic`, `-Wunused`, `-Weverything`, `-Wfatal-errors`, ...) | Accepted; prints `embcc: warning: -WNAME is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)`; no effect. |
-| `-Wno-NAME` for a name not in the summary (`-Wno-unused`, `-Wno-system-headers`, ...) | Accepted silently; no effect. `-Wno-unused` does **not** turn off the `-Wunused-*` warnings. |
-| `-Werror=NAME`, `-Wno-error=NAME` for a name not in the summary | Accepted; prints `embcc: warning: -Werror=NAME names no warning EmbCC has (--help-warnings lists them)`; no effect. |
+| `--warn=NAME` for a name not in the [warning reference](warnings.md) (`--warn=cast-align`, `--warn=null-dereference`, `--warn=pedantic`, `--warn=unused`, `--warn=everything`, `--warn=fatal-errors`, ...) | Accepted; prints `embcc: warning: -WNAME is not a warning EmbCC has, so it turns nothing on (--help-warnings lists them)`; no effect. |
+| `--no-warn=NAME` for a name not in the summary (`--no-warn=unused`, `--no-warn=system-headers`, ...) | Accepted silently; no effect. `--no-warn=unused` does **not** turn off the `-Wunused-*` warnings. |
+| `--error=NAME`, `--no-error=NAME` for a name not in the summary | Accepted; prints `embcc: warning: -Werror=NAME names no warning EmbCC has (--help-warnings lists them)`; no effect. |
 | `-Wp,ARGS` | Not passed to the preprocessor. Treated as an unknown warning name: the `is not a warning EmbCC has` message is printed and the arguments are ignored. |
-| `-Wl,ARGS`, `-Wa,ARGS` | Options for the link and the assembler, not warnings; see [Invoking EmbCC](invoking.md#assembler-and-linker-options). |
-| `-pedantic`, `-pedantic-errors` | Accepted; prints `embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on`; no effect. |
+| `-Wl,ARGS`, `--assembler-arg=ARGS` | Options for the link and the assembler, not warnings; see [Invoking EmbCC](invoking.md#assembling-and-linking). |
+| `--pedantic`, `--pedantic-errors` | Accepted; prints `embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so this turns nothing on`; no effect. |
 
 <a id="remarks"></a>
 
@@ -1252,9 +1241,11 @@ asked for, because building them costs time on every compile.
 
 EmbCC does not implement Clang's `-Rpass=`, `-Rpass-missed=` and
 `-Rpass-analysis=` options or `-fsave-optimization-record`; they are
-unknown arguments. Use `-fremarks` and `embcc why`.
+unknown arguments. Use `--remarks` and `embcc why`.
 
-### `-fremarks`
+### `--remarks`
+
+GCC: `-fremarks`.
 
 Collect remarks during the compile and print them to standard error when
 it ends, one per line, in the order the passes made them:
@@ -1263,7 +1254,7 @@ it ends, one per line, in the order the passes made them:
 FILE:LINE: remark: DECISION 'SUBJECT': DETAIL [PASS/REASON]
 ```
 
-For example, at `-O2`:
+For example, at `--opt=speed`:
 
 ```text
 rem.c:11: remark: inlined 'add': 4 instructions into sum, budget 24 [inline/small-enough]
@@ -1277,9 +1268,11 @@ rem.c:11: remark: unrolled 'sum': 8 copies of a 8-instruction body, the original
 `REASON` is a stable code meant to be matched by tools and searched for.
 `DETAIL` is free text giving the facts that settled the decision, and may
 change between releases. Most remarks come from passes that run only
-when optimizing; at `-O0` there are few or none.
+when optimizing; at `--opt=none` there are few or none.
 
-### `-fremarks=json`
+### `--remarks=json`
+
+GCC: `-fremarks=json`.
 
 The same remarks as a JSON array on standard error. Each element has
 `pass`, `decision`, `subject` and `reason`; `detail` when there is one;
@@ -1295,7 +1288,7 @@ location.
 ```
 
 The remark array is separate from the diagnostic array of
-`-fdiagnostics-format=json`; when both are requested, standard error
+`--diagnostics=json`; when both are requested, standard error
 holds both.
 
 ### Remark producers
@@ -1326,7 +1319,7 @@ redundancy elimination) made.
 ### `embcc why DECISION [SUBJECT] FILE [OPTIONS]`
 
 Compile `FILE` with `OPTIONS` (any ordinary compile options, such as
-`-O2`, `-I` or `--target=`), collect the remarks, and print to standard
+`--opt=speed`, `-I` or `--target=`), collect the remarks, and print to standard
 output the ones whose decision is `DECISION` and, when `SUBJECT` is
 given, whose subject is `SUBJECT`. No output file is written. `why` must
 be the first argument. The word after `DECISION` is taken as `SUBJECT`
@@ -1334,7 +1327,7 @@ when it neither starts with `-` nor contains a `.` and at least one more
 argument follows it.
 
 ```sh
-embcc why kept-in-memory vol rem.c -O2
+embcc why kept-in-memory vol rem.c --opt=speed
 ```
 
 ```text
@@ -1352,7 +1345,7 @@ decision needs -O2)
 ```
 
 The exit status is 0 whether or not anything matched, and 1 for a usage
-error. The `dropped` decision is recorded only under `-fremarks`, so
+error. The `dropped` decision is recorded only under `--remarks`, so
 `embcc why dropped` does not find it.
 <!-- main.c records opt/dropped only when want_remarks is set, not for
      `why`. Reported to the lead. -->
@@ -1372,7 +1365,7 @@ that remarks explain; see [Invoking EmbCC](invoking.md).
 
 `embls` is EmbCC's language server: it speaks the Language Server
 Protocol over standard input and output. For diagnostics it runs
-`embcc -fsyntax-only -fdiagnostics-format=json` over the editor's buffer
+`embcc --syntax-only --diagnostics=json` over the editor's buffer
 and publishes each error and warning, with its notes appended to the
 message, so the editor shows what the build will report. It does not
 offer the fix-its as code actions. It also answers completion, hover,

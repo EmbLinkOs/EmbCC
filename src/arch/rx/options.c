@@ -41,7 +41,7 @@ int rx_target_option(const char *arg)
             strcmp(v, "RX200") && strcmp(v, "RX100"))
             diag_fatal(NULL, 0, "%s is not an RXv1 core: EmbCC "
                        "emits the RXv1 instruction set (rx600, "
-                       "rx610, rx200, rx100)", a);
+                       "rx610, rx200, rx100)", opt_typed(a));
     } else if (!strcmp(a, "-m64bit-doubles")) {
         diag_fatal(NULL, 0, "-m64bit-doubles is not supported: EmbCC "
                    "emits GCC's rx-elf default, -m32bit-doubles "
@@ -62,7 +62,7 @@ int rx_target_option(const char *arg)
                strcmp(a + 19, "0") != 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC puts no data "
                    "in a small-data area addressed from a base "
-                   "register", a);
+                   "register", opt_typed(a));
     } else if (!strcmp(a, "-mpid")) {
         diag_fatal(NULL, 0, "-mpid is not supported: EmbCC's RX code "
                    "addresses data absolutely, not position-"
@@ -70,7 +70,7 @@ int rx_target_option(const char *arg)
     } else if (strncmp(a, "-mint-register=", 15) == 0 &&
                strcmp(a + 15, "0") != 0) {
         diag_fatal(NULL, 0, "%s is not supported: EmbCC reserves no "
-                   "registers for interrupt handlers", a);
+                   "registers for interrupt handlers", opt_typed(a));
     } else if (!strcmp(a, "-mno-allow-string-insns")) {
         diag_fatal(NULL, 0, "-mno-allow-string-insns is not "
                    "supported: EmbCC copies large blocks with smovf "

@@ -115,6 +115,7 @@ SRCS := \
 	src/driver/asmout.c \
 	src/driver/iface.c \
 	src/driver/explain.c \
+	src/driver/options.c \
 	src/driver/paths.c \
 	src/link/link.c \
 	src/as/gas.c \
@@ -292,7 +293,7 @@ toolchain: all embdbg runtimes
 runtimes: $(RUNTIMES)
 
 all: embcc embread embld embas embls embidx embar embsvd embmap embpack embrt embsim \
-     embflash embtrace binutils-names
+     embflash embtrace embdoc binutils-names
 
 # The binutils a build names, answered by EmbCC's own tools under the
 # names CMake and a Makefile call them by: embar is ar and ranlib, embpack
@@ -383,6 +384,32 @@ embtrace: tools/embtrace/embtrace.c
 # ISO C and standalone, like embar.
 embrt: tools/embrt/embrt.c
 	$(CC) $(CFLAGS) -o $@ tools/embrt/embrt.c
+
+# embdoc -- the documentation as a website: README.md, docs/ and each
+# tools/X/README.md rendered from their Markdown as GitHub renders it,
+# with the navigation, an "On this page" list and a search index, and
+# every relative link and #anchor checked (tools/embdoc). ISO C but for
+# host.c, which lists and makes directories with POSIX's calls.
+EMBDOC_SRCS := tools/embdoc/embdoc.c tools/embdoc/md.c tools/embdoc/assets.c \
+               tools/embdoc/host.c
+embdoc: $(EMBDOC_SRCS) tools/embdoc/embdoc.h
+	$(CC) $(CFLAGS) -o $@ $(EMBDOC_SRCS)
+
+# The site itself, in build/site: never committed (.github/workflows/
+# site.yml publishes it from main). `./embdoc check` lists broken links.
+site: embdoc
+	./embdoc site --out $(BUILD)/site
+
+# The manual's reference pages, printed by the compiler from the tables they
+# describe (src/driver/options.def, diag.c's warnings, src/targets/). They are
+# committed, so they read on GitHub too; tests/golden/reference-pages.sh fails
+# when one no longer matches what the compiler prints. `make reference`
+# brings them up to date.
+reference: embcc
+	./embcc --reference=options > docs/manual/options.md
+	./embcc --reference=warnings > docs/manual/warnings.md
+	./embcc --reference=targets > docs/manual/target-list.md
+.PHONY: reference
 
 # embsim -- a simulator (Cortex-M, RISC-V, AVR): runs an image on a model of the board
 # QEMU models, counting instructions and estimating cycles with the
@@ -557,6 +584,8 @@ embdbg: tools/embdbg/embdbg.c tools/embdbg/remote.c tools/embdbg/remote.h \
 # The target database is #included by target.c, and nothing else tracks
 # header dependencies, so say this one.
 $(BUILD)/arch/target.o: $(wildcard src/targets/*.def)
+# ...and the option table, by options.c
+$(BUILD)/driver/options.o: src/driver/options.def
 
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
@@ -591,7 +620,7 @@ check: embcc libc-x86_64 libcxx-x86_64
 # without it in this list the suite passes from a dirty tree and fails
 # from a clean one -- which is the wrong way round.
 test: embcc embread embld embdbg embls embas embar embsvd embmap embpack \
-      embrt embsim embflash embtrace libc-x86_64 \
+      embrt embsim embflash embtrace embdoc libc-x86_64 \
       libcxx-x86_64 libc-linux-x86_64 libcxx-linux-x86_64
 	tests/run.sh
 
@@ -827,6 +856,9 @@ install-files:
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler
 	@cp cmake/embcc.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
 	@cp cmake/Compiler/*.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/man/man1
+	@SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct 2>/dev/null || date +%s) \
+	    ./embcc --reference=man > $(DESTDIR)$(PREFIX)/share/man/man1/embcc.1
 	@mkdir -p $(LIBROOT)/include $(LIBROOT)/include/c++ \
 	          $(LIBROOT)/freestanding
 	@cp -R lib/libc/include/. $(LIBROOT)/include/
@@ -852,6 +884,7 @@ install-files:
 	    true; \
 	done
 	@echo "installed: $(DESTDIR)$(PREFIX)/bin/embcc"
+	@echo "           $(DESTDIR)$(PREFIX)/share/man/man1/embcc.1"
 	@echo "           $(LIBROOT)/"
 	@echo "check it with: $(DESTDIR)$(PREFIX)/bin/embcc --print-search-dirs"
 
@@ -969,9 +1002,9 @@ libcxx-embedded: embcc embar
 	done
 
 clean:
-	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar embsvd
+	rm -rf $(BUILD) embcc embread embld embdbg embas embls embidx embar embsvd embdoc
 
-.PHONY: all check test test-arm64 test-libstdcxx libc libc-x86_64 libc-aarch64 \
+.PHONY: all check test test-arm64 test-libstdcxx site libc libc-x86_64 libc-aarch64 \
         libc-emblinkos libc-linux libc-linux-x86_64 libc-linux-aarch64 \
         libcxx libcxx-x86_64 libcxx-aarch64 \
         libcxx-linux-x86_64 libcxx-linux-aarch64 libcxx-embedded \

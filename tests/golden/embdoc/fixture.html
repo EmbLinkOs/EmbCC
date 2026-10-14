@@ -1,0 +1,132 @@
+<h1 id="embdoc--the-fixture-every-construct-the-docs-use">embdoc — the fixture: every construct the docs use<a class="hl" href="#embdoc--the-fixture-every-construct-the-docs-use" aria-label="Link to this section">#</a></h1>
+<p>A paragraph with a soft
+line break, <em>emphasis</em>, <em>emphasis</em>, <strong>strong</strong>, <em><strong>both</strong></em>, and
+<code>inline &lt;code&gt; &amp; &quot;quotes&quot;</code>. Not emphasis: snake_case_name, foo_bar_, 2 * 3 * 4,
+a_b_c and *escaped*. A backslash at the end is a hard break<br />
+and so are two spaces<br />
+at the end of a line.</p>
+<p>Prose that mentions &lt;stdio.h&gt;, &lt;arch&gt; and &lt;b&gt;bold&lt;/b&gt; shows the angle
+brackets; &lt;script&gt;alert(1)&lt;/script&gt; is text, never a script, and so is
+&lt;img src=x onerror=alert(1)&gt;. AT&amp;T keeps its ampersand; &copy; and &#169;
+are entities. A comment is not shown:  here.</p>
+<a id="explicit"></a>
+<h2 id="hello-world-t1_-encoders">Hello, World! (<code>t1_*</code> encoders)<a class="hl" href="#hello-world-t1_-encoders" aria-label="Link to this section">#</a></h2>
+<h3 id="-fdiagnostics-colorwhen--fno-diagnostics-color"><code>-fdiagnostics-color[=WHEN]</code>, <code>-fno-diagnostics-color</code><a class="hl" href="#-fdiagnostics-colorwhen--fno-diagnostics-color" aria-label="Link to this section">#</a></h3>
+<h3 id="the-calling-convention-gcc-unverified">The calling convention <em>(GCC, unverified)</em><a class="hl" href="#the-calling-convention-gcc-unverified" aria-label="Link to this section">#</a></h3>
+<h3 id="c89c23--stdioh-whats-left">C89–C23 &amp; &lt;stdio.h&gt;: what's left<a class="hl" href="#c89c23--stdioh-whats-left" aria-label="Link to this section">#</a></h3>
+<h3 id="d-001-snake_case-and-25-points">D-001: Snake_Case and 2.5 points<a class="hl" href="#d-001-snake_case-and-25-points" aria-label="Link to this section">#</a></h3>
+<h2 id="usage">Usage<a class="hl" href="#usage" aria-label="Link to this section">#</a></h2>
+<h2 id="usage-1">Usage<a class="hl" href="#usage-1" aria-label="Link to this section">#</a></h2>
+<h2 id="usage-1-1">Usage-1<a class="hl" href="#usage-1-1" aria-label="Link to this section">#</a></h2>
+<h2 id="closing-hashes">Closing hashes<a class="hl" href="#closing-hashes" aria-label="Link to this section">#</a></h2>
+<h2 id="links">Links<a class="hl" href="#links" aria-label="Link to this section">#</a></h2>
+<ul>
+<li><a href="#hello-world-t1_-encoders">Same page</a>, <a href="#explicit">an explicit anchor</a>
+and <a href="#usage-1">a duplicate heading</a>.</li>
+<li><a href="../../../docs/manual/targets.html#predefined-macros">Another document</a>
+and <a href="../../../docs/manual/invoking.html">its top</a>.</li>
+<li><a href="../../../docs/index.html">The contents</a>, whose page is an index.html.</li>
+<li><a href="https://github.com/EmbLinkOs/EmbCC/blob/main/src/driver/main.c">A source file</a>,
+<a href="https://github.com/EmbLinkOs/EmbCC/blob/main/tests/run.sh">a test script</a>, <a href="https://github.com/EmbLinkOs/EmbCC/blob/main/Makefile">the Makefile</a> and
+<a href="https://github.com/EmbLinkOs/EmbCC/tree/main/src/opt">a directory</a>.</li>
+<li><a href="https://example.com/a_b?x=1&amp;y=2" title="A title">An external page</a> and a bare
+URL, <a href="https://example.com/path_(x)">https://example.com/path_(x)</a>, in a sentence.</li>
+<li><a href="../../../docs/manual/optimization.html#-o-levels">Code in a link: <code>x &lt; y</code></a>.</li>
+</ul>
+<h2 id="lists">Lists<a class="hl" href="#lists" aria-label="Link to this section">#</a></h2>
+<ol>
+<li><p>First, with a continuation
+line indented to the content.</p>
+</li>
+<li><p>Second, with a nested list:</p>
+<ul>
+<li>a bullet
+<ul>
+<li>a deeper bullet</li>
+</ul>
+</li>
+<li>another bullet</li>
+</ul>
+</li>
+<li><p>Third, with a code block inside:</p>
+<div class="codeblock" data-lang="c"><pre><code class="language-c">int x = a &lt; b &amp;&amp; c &gt; d;
+</code></pre></div>
+</li>
+</ol>
+<ol start="7">
+<li>A new list: a different delimiter, starting at 7.</li>
+<li>Eight.</li>
+</ol>
+<ul>
+<li><p>Loose item one.</p>
+</li>
+<li><p>Loose item two,
+lazily continued.</p>
+</li>
+</ul>
+<ul>
+<li>A star list after a dash list is a new list.</li>
+</ul>
+<h2 id="tables">Tables<a class="hl" href="#tables" aria-label="Link to this section">#</a></h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th style="text-align:left">Left</th>
+<th style="text-align:center">Centre</th>
+<th style="text-align:right">Right</th>
+<th>None</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>a | b</code></td>
+<td style="text-align:center"><strong>bold</strong></td>
+<td style="text-align:right">1.0</td>
+<td><a href="#tables">link</a></td>
+</tr>
+<tr>
+<td style="text-align:left">&lt;x&gt;</td>
+<td style="text-align:center"><em>em</em></td>
+<td style="text-align:right">22</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>no outer pipes</td>
+<td>still a table</td>
+</tr>
+</tbody>
+</table></div>
+<h2 id="code">Code<a class="hl" href="#code" aria-label="Link to this section">#</a></h2>
+<div class="codeblock" data-lang="sh"><pre><code class="language-sh">echo &quot;&lt;html&gt;&quot; &amp;&amp; cat a.txt | grep '&amp;amp;'
+</code></pre></div>
+<div class="codeblock" data-lang="text"><pre><code class="language-text">a tilde fence, with ``` inside
+</code></pre></div>
+<div class="codeblock"><pre><code>a four-backtick fence holding
+```c
+a three-backtick one
+```
+</code></pre></div>
+<div class="codeblock"><pre><code>an indented code block &lt;here&gt;
+over two lines
+</code></pre></div>
+<h2 id="quotes-and-breaks">Quotes and breaks<a class="hl" href="#quotes-and-breaks" aria-label="Link to this section">#</a></h2>
+<blockquote>
+<p>A quote with <strong>strong</strong> text
+and a list:</p>
+<ul>
+<li>one</li>
+<li>two</li>
+</ul>
+</blockquote>
+<hr />
+<p>The end.</p>

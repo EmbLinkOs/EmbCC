@@ -2428,7 +2428,8 @@ static void define_function(struct cfunc *f, struct cty *ft)
     int fn_try = cx_accept(TOK_CX_TRY) ||
                  (cx_pos > 0 && cx_toks[cx_pos - 1].t.kind == TOK_CX_TRY);
     if (fn_try && !cx_exceptions)
-        cx_error(cx_cur(), "'try' with exceptions disabled (-fno-exceptions)");
+        cx_error(cx_cur(), "'try' with exceptions disabled (%s)",
+                 opt_typed("-fno-exceptions"));
     const struct ctok *at = cx_cur();
     if (f->defined)
         cx_error(at, "redefinition of '%s'", f->name);
@@ -5495,7 +5496,8 @@ static struct cstmt *handler_param(struct cty *t, const char *name,
 static struct cstmt *parse_try(const struct ctok *at)
 {
     if (!cx_exceptions)
-        cx_error(at, "'try' with exceptions disabled (-fno-exceptions)");
+        cx_error(at, "'try' with exceptions disabled (%s)",
+                 opt_typed("-fno-exceptions"));
     cx_advance();
     struct cstmt *body = parse_compound();
     struct cstmt *s = parse_handlers(at);

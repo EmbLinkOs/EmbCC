@@ -10,6 +10,8 @@
 #ifndef EMBCC_DRIVER_UTIL_H
 #define EMBCC_DRIVER_UTIL_H
 
+#include <stdio.h>
+
 /* The calls below that never come back say so, so that a caller's control
  * flow analysis -- ours and the host compiler's -- knows a switch arm that
  * ends in one needs no return. EmbCC understands the attribute too, which
@@ -85,6 +87,16 @@ int diag_warning_count(void);                         /* for --help */
 int diag_warnings_reported(void);
 const char *diag_warning_name(int i);
 int diag_warning_group(int i);                        /* 0 none, 1 all, 2 extra */
+int diag_warning_default_on(int i);                   /* 1 when on unasked */
+int diag_print_reference(FILE *out);                  /* --reference=warnings */
+
+/* An option as the user typed it, for messages (util.c): what the driver
+ * rewrote into `internal`, or `internal` when that is what was typed. */
+void opt_remember_typed(const char *internal, const char *typed);
+const char *opt_typed(const char *internal);
+/* The option PREFIX VALUE as the user typed it: "--fpu=fpv5-d16" for
+ * "-mfpu=" "fpv5-d16" when that is what came. Lasts 16 more calls. */
+const char *opt_said(const char *prefix, const char *value);
 /* A GCC warning name whose diagnostic is always an ERROR here (an
  * implicit function declaration): -WNAME and -Werror=NAME ask for what
  * EmbCC already does. 1 = such a name. */

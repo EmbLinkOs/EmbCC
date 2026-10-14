@@ -1,7 +1,7 @@
 # embtrace — function-level tracing on the target
 
 EmbTrace records every function entry and exit of a program built with
-`-finstrument-functions`, on the target, in a ring in RAM. The program
+`--instrument-functions`, on the target, in a ring in RAM. The program
 writes the ring out as text through a console or a UART, and `embtrace`
 on the host turns it into call counts, times, a call tree and a
 Chrome/Perfetto trace. This page is the reference for both halves.
@@ -18,7 +18,7 @@ embtrace IMAGE.elf LOG [--tree] [--depth N] [--chrome OUT.json]
 
 ## On the target
 
-Build the code to trace with `-finstrument-functions`. The two hooks it
+Build the code to trace with `--instrument-functions`. The two hooks it
 calls are defined weak in `lib/rt` (`lib/rt/embtrace.c`), so the
 program links with no more work. Then:
 1. say where the dump goes;
@@ -40,7 +40,7 @@ int main(void)
 ```
 
 ```sh
-embcc --target=thumbv7em-none-eabi -O2 -finstrument-functions -c main.c
+embcc --target=thumbv7em-none-eabi --opt=speed --instrument-functions -c main.c
 ```
 
 `embtrace_dump()` can be called again at any point. `embtrace_reset()`
@@ -58,7 +58,7 @@ that defines one replaces it:
 | `embtrace_events[N]` and `const unsigned embtrace_capacity = N` | 128 events (32 on AVR) | A ring of another size, or one in a section that survives a reset. Define both together |
 
 **Not instrumented.** The replacements must not be instrumented: compile
-them without `-finstrument-functions`, or mark them `EMBTRACE_NOI`
+them without `--instrument-functions`, or mark them `EMBTRACE_NOI`
 (`no_instrument_function`). The attribute counts on any declaration.
 
 **Event size.** Each event is the function's address, its call site (the

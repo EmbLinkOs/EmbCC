@@ -2618,7 +2618,8 @@ char *cpp_process(const char *path, const char *src,
             idx = d;
         }
         if (!text)
-            diag_fatal(NULL, 0, "cannot find -include file \"%s\"", f);
+            diag_fatal(NULL, 0, "cannot find \"%s\", which --include "
+                       "names to read before the source", f);
         diag_register_source(ipath, text);
         record_dep(ipath, idx);
         cpp.depth++;

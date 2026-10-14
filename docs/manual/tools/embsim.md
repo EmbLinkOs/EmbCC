@@ -29,22 +29,22 @@ embsim --svd FILE.svd --svd-map
 ```
 
 ```sh
-embcc --target=thumbv7em-none-eabihf -O2 -c main.c
+embcc --target=thumbv7em-none-eabihf --opt=speed -c main.c
 embld -e reset -Ttext 0 -Tdata 0x20000000 boot.o main.o -o fw.elf
 embsim fw.elf --board mps2-an386 --stats
 
-embcc --target=riscv64-unknown-elf -march=rv64gc -mabi=lp64d -O2 -c main.c
+embcc --target=riscv64-unknown-elf --isa=rv64gc --abi=lp64d --opt=speed -c main.c
 embld -e _start -Ttext 0x80000000 -Tstack 0x80800000 boot.o io.o main.o -o fw.elf
 embsim fw.elf --board virt --stats
 
-embcc --target=avr -Os -c main.c
+embcc --target=avr --opt=size -c main.c
 embld -e __vectors -Ttext 0 -Tdata 0x100 boot.o io.o main.o librt.a -o fw.elf
 embsim fw.elf --board uno --stats
 
 embsvd STM32F405.svd --header STM32F405.h --startup startup.c \
     --ld f405.ld --flash 0x08000000:1M --ram 0x20000000:128K
-embcc --target=thumbv7em-none-eabi -O2 -c startup.c main.c
-embcc --target=thumbv7em-none-eabi -T f405.ld startup.o main.o -o fw.elf
+embcc --target=thumbv7em-none-eabi --opt=speed -c startup.c main.c
+embcc --target=thumbv7em-none-eabi --link-script=f405.ld startup.o main.o -o fw.elf
 embsim fw.elf --svd STM32F405.svd --trace-periph=USART2,RCC
 ```
 
@@ -444,7 +444,7 @@ end writes which source lines and functions ran, and how often (`-` for
 stderr):
 
 ```sh
-embcc --target=thumbv7m-none-eabi -O0 -g -c main.c
+embcc --target=thumbv7m-none-eabi --opt=none -g -c main.c
 embsim fw.elf --coverage fw.cov
 embsim fw.elf --coverage fw.info --coverage-format=lcov
 genhtml fw.info -o coverage-html
@@ -570,13 +570,13 @@ flamegraph.pl fw.folded > fw.svg
 
 `--stack-report` writes, when the run ends, how deep each stack went and
 which functions took it there (on stderr; `--stack-report=FILE` to a
-file). Give it the `.su` files `-fstack-usage` wrote (`--stack-su FILE`,
+file). Give it the `.su` files `--stack-usage` wrote (`--stack-su FILE`,
 or simply the files: an argument ending in `.su` is one), and embrt's
 `--json` report (`--stack-embrt FILE`), and their numbers go beside the
 run's:
 
 ```sh
-embcc --target=thumbv7m-none-eabi -O1 -fstack-usage -fcallgraph-info=su -c *.c
+embcc --target=thumbv7m-none-eabi --opt=basic --stack-usage --call-graph=su -c *.c
 embrt *.o --entry main --isr SysTick_Handler --json > bound.json
 embsim fw.elf --stack-report --stack-embrt bound.json *.su
 ```
@@ -606,7 +606,7 @@ the run stayed within the static numbers
 - **deepest**, **depth**: the lowest sp while the function was running,
   and how far that is below the top.
 - **frame**: the most the function moved sp below its entry -- the
-  number `-fstack-usage` gives, beside it as **.su**. On the AVR the
+  number `--stack-usage` gives, beside it as **.su**. On the AVR the
   call's two-byte return address is the callee's, as avr-gcc's and
   EmbCC's `.su` count it.
 - **incl**: the most the stack went below the function's entry while it

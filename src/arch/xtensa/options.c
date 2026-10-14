@@ -65,23 +65,24 @@ int xtensa_target_option(const char *arg)
         if (!strncmp(arg, "-mabi=", 6) &&
             strcmp(arg, "-mabi=call0"))
             diag_fatal(NULL, 0, "%s is not an Xtensa ABI: EmbCC "
-                       "emits the windowed ABI (-mabi=windowed)",
-                       arg);
+                       "emits the windowed ABI (--abi=windowed)",
+                       opt_typed(arg));
         if (!strcmp(arg, "-mabi=call0"))
-            diag_fatal(NULL, 0, "-mabi=call0 is not supported: EmbCC "
+            diag_fatal(NULL, 0, "%s is not supported: EmbCC "
                        "emits the windowed ABI (call8/entry/retw), "
-                       "which ESP-IDF uses");
+                       "which ESP-IDF uses", opt_typed("-mabi=call0"));
         if (!strcmp(arg, "-mbig-endian"))
-            diag_fatal(NULL, 0, "-mbig-endian is not supported: the "
-                       "Xtensa target is little-endian only");
+            diag_fatal(NULL, 0, "%s is not supported: the "
+                       "Xtensa target is little-endian only",
+                       opt_typed("-mbig-endian"));
         if (!strncmp(arg, "-mfix-esp32-psram-cache-issue", 29))
             diag_fatal(NULL, 0, "%s is not supported: EmbCC does not "
                        "insert the ESP32 rev. 1 PSRAM workaround",
-                       arg);
+                       opt_typed(arg));
         diag_fatal(NULL, 0, "%s is not supported for xtensa-none-elf: "
                    "EmbCC emits the windowed ABI for the ESP32 "
                    "(LX6) and ESP32-S3 (LX7), little-endian, with "
-                   "literals before each function", arg);
+                   "literals before each function", opt_typed(arg));
     }
     return 1;
 }

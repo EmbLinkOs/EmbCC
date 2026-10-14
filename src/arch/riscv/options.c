@@ -44,26 +44,29 @@ void riscv_options_done(void)
     int f = 0, d = 0, c = 1, m = 1, a = 1, zifencei = 0, abi;
     if (!rv64 && target_get() != TARGET_RISCV32)
         return;
+    /* the options as the user typed them, for the messages below */
+    const char *isa_said = g_rv_march ? opt_said("-march=", g_rv_march) : NULL;
+    const char *abi_said = g_rv_mabi ? opt_said("-mabi=", g_rv_mabi) : NULL;
     if (g_rv_march) {
         const char *p = g_rv_march, *want = rv64 ? "rv64" : "rv32";
         if (strncmp(p, "rv32", 4) != 0 && strncmp(p, "rv64", 4) != 0)
-            diag_fatal(NULL, 0, "-march=%s is not a RISC-V ISA string: it "
-                       "starts with rv32 or rv64, then i or g", g_rv_march);
+            diag_fatal(NULL, 0, "%s is not a RISC-V ISA string: it "
+                       "starts with rv32 or rv64, then i or g", isa_said);
         if (strncmp(p, want, 4) != 0)
-            diag_fatal(NULL, 0, "-march=%s is a %.4s ISA, and %s is %s: use "
-                       "--target=riscv%.2s-unknown-elf", g_rv_march, p,
+            diag_fatal(NULL, 0, "%s is a %.4s ISA, and %s is %s: use "
+                       "--target=riscv%.2s-unknown-elf", isa_said, p,
                        target_triple_now(), want, p + 2);
         p += 4;
         c = m = a = 0;
         if (*p == 'g') {
             f = d = m = a = zifencei = 1;
         } else if (*p == 'e') {
-            diag_fatal(NULL, 0, "-march=%s: the E base (16 registers, "
+            diag_fatal(NULL, 0, "%s: the E base (16 registers, "
                        "ilp32e) is not supported; EmbCC emits the I base",
-                       g_rv_march);
+                       isa_said);
         } else if (*p != 'i') {
-            diag_fatal(NULL, 0, "-march=%s: the base ISA after %s is i or g",
-                       g_rv_march, want);
+            diag_fatal(NULL, 0, "%s: the base ISA after %s is i or g",
+                       isa_said, want);
         }
         for (p++; *p && *p != '_'; p++) {
             switch (*p) {
@@ -73,9 +76,9 @@ void riscv_options_done(void)
             case 'd': d = 1; break;
             case 'c': c = 1; break;
             default:
-                diag_fatal(NULL, 0, "-march=%s: the '%c' extension is not "
+                diag_fatal(NULL, 0, "%s: the '%c' extension is not "
                            "supported: EmbCC emits I, M, A, F, D and C "
-                           "(and no version numbers)", g_rv_march, *p);
+                           "(and no version numbers)", isa_said, *p);
             }
         }
         while (*p == '_') {
@@ -90,23 +93,23 @@ void riscv_options_done(void)
                 zifencei = 1;
                 continue;
             }
-            diag_fatal(NULL, 0, "-march=%s: the '%.*s' extension is not "
+            diag_fatal(NULL, 0, "%s: the '%.*s' extension is not "
                        "supported: EmbCC accepts zicsr and zifencei after "
-                       "the single-letter ones", g_rv_march, (int)n, e);
+                       "the single-letter ones", isa_said, (int)n, e);
         }
         if (d && !f)
-            diag_fatal(NULL, 0, "-march=%s: the D extension needs F (double "
+            diag_fatal(NULL, 0, "%s: the D extension needs F (double "
                        "precision is built on the single-precision "
-                       "registers): add f", g_rv_march);
+                       "registers): add f", isa_said);
         if (!m)
-            diag_fatal(NULL, 0, "-march=%s: EmbCC needs the M extension -- "
+            diag_fatal(NULL, 0, "%s: EmbCC needs the M extension -- "
                        "its code multiplies and divides with mul and div, "
-                       "and has no __mulsi3 path: add m", g_rv_march);
+                       "and has no __mulsi3 path: add m", isa_said);
         if (!a)
-            diag_fatal(NULL, 0, "-march=%s: EmbCC needs the A extension -- "
+            diag_fatal(NULL, 0, "%s: EmbCC needs the A extension -- "
                        "its atomics are lr/sc and the amo instructions, and "
                        "it has no __atomic_* library path: add a",
-                       g_rv_march);
+                       isa_said);
     }
     abi = d ? 64 : f ? 32 : 0;
     if (g_rv_mabi) {
@@ -114,23 +117,25 @@ void riscv_options_done(void)
         size_t bn = strlen(base);
         if ((rv64 && !strncmp(v, "ilp32", 5)) ||
             (!rv64 && !strncmp(v, "lp64", 4)))
-            diag_fatal(NULL, 0, "-mabi=%s is a %s ABI, and %s is %s", v,
+            diag_fatal(NULL, 0, "%s is a %s ABI, and %s is %s", abi_said,
                        rv64 ? "32-bit" : "64-bit", target_triple_now(),
                        rv64 ? "RV64 (lp64, lp64f, lp64d)"
                             : "RV32 (ilp32, ilp32f, ilp32d)");
         if (strncmp(v, base, bn) != 0 ||
             (v[bn] && (v[bn + 1] || (v[bn] != 'f' && v[bn] != 'd'))))
-            diag_fatal(NULL, 0, "-mabi=%s is not supported for %s: EmbCC "
-                       "emits %s, %sf and %sd%s", v, target_triple_now(),
+            diag_fatal(NULL, 0, "%s is not supported for %s: EmbCC "
+                       "emits %s, %sf and %sd%s", abi_said, target_triple_now(),
                        base, base, base,
                        v[bn] == 'e' ? " (not the E base's)" : "");
         abi = v[bn] == 'd' ? 64 : v[bn] == 'f' ? 32 : 0;
         if (abi > (d ? 64 : f ? 32 : 0))
-            diag_fatal(NULL, 0, "-mabi=%s passes %s in floating-point "
-                       "registers, and -march=%s has no %s extension: use "
-                       "-march=%s%s", v, abi == 64 ? "doubles" : "floats",
-                       g_rv_march ? g_rv_march : rv64 ? "rv64imac"
-                                                      : "rv32imac",
+            diag_fatal(NULL, 0, "%s passes %s in floating-point "
+                       "registers, and %s has no %s extension: use "
+                       "--isa=%s%s", abi_said, abi == 64 ? "doubles" : "floats",
+                       g_rv_march ? isa_said
+                       : strncmp(abi_said, "--", 2) == 0
+                           ? (rv64 ? "--isa=rv64imac" : "--isa=rv32imac")
+                           : (rv64 ? "-march=rv64imac" : "-march=rv32imac"),
                        abi == 64 ? "D" : "F", rv64 ? "rv64" : "rv32",
                        abi == 64 ? "imafdc" : "imafc");
     }

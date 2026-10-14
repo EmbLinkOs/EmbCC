@@ -103,7 +103,7 @@ int main(void)
 T=--target=thumbv7m-none-eabi
 ./embcc $T -c tests/harness/thumb/boot.c -o boot.o
 ./embcc $T -c tests/harness/thumb/io.c   -o io.o
-./embcc $T -O2 -c hello.c                -o hello.o
+./embcc $T --opt=speed -c hello.c                -o hello.o
 ./embld -e reset -Ttext 0x0 -Tdata 0x20000000 boot.o io.o hello.o -o hello.elf
 ./embsim hello.elf --stats
 ```
@@ -129,7 +129,7 @@ links a static executable. On macOS, EmbCC writes Mach-O objects for the
 system linker:
 
 ```sh
-./embcc --target=aarch64-apple-darwin -O2 -c hello.c -o hello.o
+./embcc --target=aarch64-apple-darwin --opt=speed -c hello.c -o hello.o
 cc hello.o -o hello
 ```
 

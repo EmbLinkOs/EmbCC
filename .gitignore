@@ -1,5 +1,7 @@
 # build output
 /build/
+# the documentation site when built where the Pages workflow builds it
+/_site/
 *.o
 *.a
 *.elf
@@ -20,6 +22,7 @@
 /embflash
 /embtrace
 /embrt
+/embdoc
 /embcc-ar
 /embcc-ranlib
 /embcc-objcopy

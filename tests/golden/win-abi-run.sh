@@ -134,7 +134,7 @@ for opt in -O0 -O1 -O2; do
     "$EMBCC" --target=x86_64-windows-gnu $opt -c "$out/callee.c" \
         -o "$b/c.obj" 2> "$b/cc.log" || {
         echo "FAIL $opt: embcc could not compile the callee:"
-        grep -v 'Wwindows-abi' "$b/cc.log"; exit 1; }
+        grep -v 'warn=windows-abi' "$b/cc.log"; exit 1; }
     if llvm-objdump -r "$b/c.obj" | grep -q IMAGE_REL; then
         echo "FAIL $opt: the callee has relocations; its bytes cannot be"
         echo "      moved into the test image as they are"; exit 1

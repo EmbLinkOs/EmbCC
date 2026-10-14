@@ -85,7 +85,7 @@ when no `--target=` is given:
 ```sh
 make clean
 make DEFAULT_TARGET=riscv32-unknown-elf embcc
-./embcc -dumpmachine                     # riscv32-unknown-elf
+./embcc --print-target                     # riscv32-unknown-elf
 ./embcc -c main.c -o main.o              # compiled for RV32
 ```
 
@@ -213,7 +213,7 @@ int main(void)
 
 ```sh
 make embcc libc-linux-x86_64
-./embcc --target=x86_64-linux-gnu -O2 hello.c -o hello
+./embcc --target=x86_64-linux-gnu --opt=speed hello.c -o hello
 chmod +x hello
 ./hello
 ```
@@ -237,7 +237,7 @@ linker (`/usr/bin/ld`, from the Command Line Tools), as clang does. On
 Apple silicon:
 
 ```sh
-./embcc --target=aarch64-apple-darwin -O2 hello.c -o hello
+./embcc --target=aarch64-apple-darwin --opt=speed hello.c -o hello
 ./hello
 ```
 
@@ -332,7 +332,7 @@ T=--target=thumbv7m-none-eabi
 mkdir -p out/m3
 ./embcc $T -c tests/harness/thumb/boot.c -o out/m3/boot.o
 ./embcc $T -c tests/harness/thumb/io.c   -o out/m3/io.o
-./embcc $T -O2 -c hello.c                -o out/m3/hello.o
+./embcc $T --opt=speed -c hello.c                -o out/m3/hello.o
 ./embld -e reset -Ttext 0x0 -Tdata 0x20000000 \
     out/m3/boot.o out/m3/io.o out/m3/hello.o -o out/m3/hello.elf
 sh tests/harness/thumb/run.sh out/m3/hello.elf
@@ -370,7 +370,7 @@ T=--target=thumbv7em-none-eabihf
 H=tests/harness/thumb-m4f
 ./embcc $T -c $H/boot.c -o out/m4f/boot.o
 ./embcc $T -c $H/io.c   -o out/m4f/io.o
-./embcc $T -O2 -c hello.c -o out/m4f/hello.o
+./embcc $T --opt=speed -c hello.c -o out/m4f/hello.o
 ./embld -e reset -Ttext 0x0 -Tdata 0x20000000 \
     out/m4f/boot.o out/m4f/io.o out/m4f/hello.o -o out/m4f/hello.elf
 sh $H/run.sh out/m4f/hello.elf
@@ -380,7 +380,7 @@ T=--target=thumbv8m.main-none-eabi
 H=tests/harness/thumb-m33
 ./embcc $T -c $H/boot.c -o out/m33/boot.o
 ./embcc $T -c $H/io.c   -o out/m33/io.o
-./embcc $T -O2 -c hello.c -o out/m33/hello.o
+./embcc $T --opt=speed -c hello.c -o out/m33/hello.o
 ./embld -e reset -Ttext 0x10000000 -Tdata 0x10100000 \
     out/m33/boot.o out/m33/io.o out/m33/hello.o -o out/m33/hello.elf
 EMBCC_QEMU_UNTIL=DONE sh $H/run.sh out/m33/hello.elf
@@ -393,8 +393,8 @@ default 10 seconds). The Cortex-M33 `run.sh` also accepts
 `EMBCC_QEMU_UNTIL=TEXT`, which ends the run as soon as the program prints
 `TEXT`.
 
-The ARM processor and floating-point options (`-mcpu=`, `-mfpu=`,
-`-mfloat-abi=`) are described in
+The ARM processor and floating-point options (`--cpu=`, `--fpu=`,
+`--float-abi=`) are described in
 [Invoking EmbCC](invoking.md#arm-options).
 
 ### RISC-V
@@ -405,7 +405,7 @@ H=tests/harness/riscv
 mkdir -p out/rv32
 ./embcc $T -c $H/boot.c -o out/rv32/boot.o
 ./embcc $T -c $H/io.c   -o out/rv32/io.o
-./embcc $T -O2 -c hello.c -o out/rv32/hello.o
+./embcc $T --opt=speed -c hello.c -o out/rv32/hello.o
 ./embld -e _start -Ttext 0x80000000 -Tstack 0x80800000 \
     out/rv32/boot.o out/rv32/io.o out/rv32/hello.o -o out/rv32/hello.elf
 sh $H/run.sh out/rv32/hello.elf 32
@@ -428,9 +428,9 @@ T=--target=avr
 H=tests/harness/avr
 mkdir -p out/avr
 ./embcc $T -c $H/boot.S -o out/avr/boot.o
-./embcc $T -Os -c $H/io.c -o out/avr/io.o
-./embcc $T -Os -c lib/rt/avr.c -o out/avr/rt.o
-./embcc $T -Os -c hello.c -o out/avr/hello.o
+./embcc $T --opt=size -c $H/io.c -o out/avr/io.o
+./embcc $T --opt=size -c lib/rt/avr.c -o out/avr/rt.o
+./embcc $T --opt=size -c hello.c -o out/avr/hello.o
 ./embld -e __vectors -Ttext 0x0 -Tdata 0x100 --rom-limit 32768 \
     out/avr/boot.o out/avr/io.o out/avr/rt.o out/avr/hello.o -o out/avr/hello.elf
 EMBCC_QEMU_UNTIL=DONE sh $H/run.sh out/avr/hello.elf
@@ -523,12 +523,12 @@ cross GNU toolchain doing the link. They need the tools listed under
 mkdir -p out/x64 out/a64
 
 # x86-64: a Multiboot image booted by qemu-system-x86_64
-./embcc --target=x86_64-elf -O2 -c hello.c -o out/x64/hello.o
+./embcc --target=x86_64-elf --opt=speed -c hello.c -o out/x64/hello.o
 sh tests/harness/x86_64/link.sh -o out/x64/hello.elf out/x64/hello.o
 sh tests/harness/x86_64/run.sh out/x64/hello.elf
 
 # AArch64: QEMU's virt board, output through ARM semihosting
-./embcc --target=aarch64-elf -O2 -c hello.c -o out/a64/hello.o
+./embcc --target=aarch64-elf --opt=speed -c hello.c -o out/a64/hello.o
 sh tests/harness/aarch64/link.sh -o out/a64/hello.elf out/a64/hello.o
 sh tests/harness/aarch64/run.sh out/a64/hello.elf
 ```

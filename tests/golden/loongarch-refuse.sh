@@ -135,7 +135,7 @@ printf 'struct A { int v; int get() const { return v * 2; } };\nint f(A a) { ret
 if "$EMBCC" --target=$T -c "$out/c.cc" -o /dev/null 2> "$out/cxx.err"; then
     echo "C++ with exceptions was accepted"; exit 1
 fi
-grep -q "C++ without -fno-exceptions" "$out/cxx.err" || {
+grep -q "C++ without --no-exceptions" "$out/cxx.err" || {
     echo "C++ with exceptions was refused, but not by name:"
     cat "$out/cxx.err"; exit 1; }
 echo "sixteen-byte atomics, the frame and return"

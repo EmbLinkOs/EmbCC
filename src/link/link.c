@@ -5764,7 +5764,7 @@ static void ls_layout(struct linker *l, struct ls_script *sc, int orphan_mode)
             ncommon += l->syms[i].common;
         if (ncommon && !sc->has_common)
             die("%d COMMON symbol%s (tentative definitions from an object "
-                "built with -fcommon) and the linker script places no "
+                "built with --common) and the linker script places no "
                 "*(COMMON): add it to the .bss output section, where the "
                 "startup code zeroes it", ncommon, ncommon == 1 ? "" : "s");
     }

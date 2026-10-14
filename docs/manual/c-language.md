@@ -1,6 +1,6 @@
 # C Language Support
 
-This page describes the C language EmbCC accepts: the `-std=` values and
+This page describes the C language EmbCC accepts: the `--std=` values and
 what they change, the predefined macros that describe the language, and
 each feature of C89, C99, C11, C17 and C23 with its status. For every
 feature that is partial or refused it quotes the diagnostic EmbCC prints,
@@ -20,7 +20,7 @@ EmbCC compiles one C dialect:
 - the subset of C23 listed under [C23](#c23);
 - the GNU extensions described in [Extensions](extensions.md).
 
-`-std=` does not select a different dialect, and `__STDC_VERSION__` is
+`--std=` does not select a different dialect, and `__STDC_VERSION__` is
 `201710L` whatever it names.
 
 As a rule, a construct EmbCC does not implement is refused with an error
@@ -55,12 +55,14 @@ prefix. The format is described in [Diagnostics](diagnostics.md).
 
 ## Selecting a standard
 
-### `-std=STANDARD`
+### `--std=STANDARD`
+
+GCC: `-std=STANDARD`.
 
 Name a C standard. The option is accepted so that existing build systems
 work; it does not change what EmbCC accepts or the macros it defines.
 
-| `-std=` value | Standard | Result |
+| `--std=` value | Standard | Result |
 |---|---|---|
 | `c89`, `c90`, `iso9899:1990`, `gnu89`, `gnu90` | C89/C90 | Accepted with a warning |
 | `c99`, `c9x`, `iso9899:1999`, `gnu99`, `gnu9x` | C99 | Accepted with a warning |
@@ -75,17 +77,17 @@ A standard older than C11 prints:
 embcc: warning: -std=c99 is accepted but not enforced; EmbCC has one C dialect, C11 with the GNU extensions, and will compile newer constructs anyway
 ```
 
-Any other value is an error, for example `-std=c2y`, `-std=gnu2y`,
-`-std=iso9899:199409` and `-std=iso9899:2018`:
+Any other value is an error, for example `--std=c2y`, `--std=gnu2y`,
+`--std=iso9899:199409` and `--std=iso9899:2018`:
 
 ```text
 embcc: error: unknown standard '-std=c2y'
 ```
 
 Whatever the value, `__STDC_VERSION__` is `201710L` and `__STRICT_ANSI__`
-is not defined. With no `-std=` option the dialect is the same. EmbCC has
+is not defined. With no `--std=` option the dialect is the same. EmbCC has
 no mode that diagnoses extensions. `-ansi` is refused as an unknown
-argument. `-pedantic` and `-pedantic-errors` are accepted, turn nothing
+argument. `--pedantic` and `--pedantic-errors` are accepted, turn nothing
 on, and print a warning that says so:
 
 ```text
@@ -95,7 +97,7 @@ embcc: warning: -pedantic: EmbCC has no diagnostics for extensions to ISO C, so 
 See [Diagnostics](diagnostics.md).
 
 The C++ values (`c++20`, `gnu++17`, ...) are described in
-[Invoking EmbCC](invoking.md#-stdstandard) and [C++ support](cxx.md).
+[Invoking EmbCC](invoking.md#--stdstandard) and [C++ support](cxx.md).
 
 ### Keywords
 
@@ -138,8 +140,8 @@ define `__GNUC__` when compiling C.
 | Macro | Value |
 |---|---|
 | `__STDC__` | `1` |
-| `__STDC_VERSION__` | `201710L`, for every `-std=` value |
-| `__STDC_HOSTED__` | `1`, also with `-ffreestanding` |
+| `__STDC_VERSION__` | `201710L`, for every `--std=` value |
+| `__STDC_HOSTED__` | `1`, also with `--freestanding` |
 | `__FILE__`, `__LINE__` | Supported; `#line` changes both |
 | `__DATE__`, `__TIME__` | Supported; `SOURCE_DATE_EPOCH` sets them, as in GCC. See [Implementation-defined behavior](implementation-defined.md#preprocessing-directives). |
 | `__STDC_IEC_559__`, `__STDC_IEC_559_COMPLEX__` | Not defined |
@@ -249,12 +251,12 @@ C17's value, `201710L`.
 | `auto` type inference | Partial | At block scope only. See [Type inference](#type-inference). |
 | `typeof`, `typeof_unqual` | Partial | Not every expression form. See [Type inference](#type-inference). |
 | Attributes `[[...]]` | Partial | Not in every position. See [Attributes](#attributes). |
-| `[[deprecated]]` | Supported | A use warns: `'g' is deprecated [-Wdeprecated-declarations]`. A message argument is accepted and not printed. |
+| `[[deprecated]]` | Supported | A use warns: `'g' is deprecated [--warn=deprecated-declarations]`. A message argument is accepted and not printed. |
 | `[[fallthrough]]` | Supported | Accepted. EmbCC does not warn about fall-through. |
-| `[[maybe_unused]]` | Supported | Suppresses `-Wunused-variable`, `-Wunused-function` and, on a parameter, `-Wunused-parameter` for the declaration. |
-| `[[nodiscard]]` | Supported | Discarding the result warns: `result of 'f' is discarded, and it is declared warn_unused_result [-Wunused-result]`. A message argument is accepted and not printed. |
+| `[[maybe_unused]]` | Supported | Suppresses `--warn=unused-variable`, `--warn=unused-function` and, on a parameter, `--warn=unused-parameter` for the declaration. |
+| `[[nodiscard]]` | Supported | Discarding the result warns: `result of 'f' is discarded, and it is declared warn_unused_result [--warn=unused-result]`. A message argument is accepted and not printed. |
 | `[[noreturn]]`, `[[_Noreturn]]` | Supported | |
-| `[[unsequenced]]`, `[[reproducible]]` | Not supported | Ignored with a warning: `attribute 'unsequenced' is not one EmbCC knows, and is ignored [-Wattributes]`. |
+| `[[unsequenced]]`, `[[reproducible]]` | Not supported | Ignored with a warning: `attribute 'unsequenced' is not one EmbCC knows, and is ignored [--warn=attributes]`. |
 | `__has_c_attribute` | Partial | Defined, and evaluates to 0 for every attribute. |
 | `__has_include` | Supported | |
 | `#elifdef`, `#elifndef` | Supported | |
@@ -272,7 +274,7 @@ C17's value, `201710L`.
 | Enumeration constants outside the range of `int` | Partial | The enumeration and its constants take a type that can represent every value. A value of 2^63 or more is read as negative. See [Enumeration constants](#enumeration-constants). |
 | Empty initializer `= {}` | Partial | Zero-initializes any object except a VLA, which is refused: `variable length array 'a' cannot be initialized`. See [Initializers](#initializers). |
 | Labels before declarations and at the end of a compound statement | Supported | |
-| Unnamed parameters in a function definition | Supported | `void on_tick(void *) { ... }`. The parameter takes its argument's place and has no name in the debug information; `-Wunused-parameter` does not report it. |
+| Unnamed parameters in a function definition | Supported | `void on_tick(void *) { ... }`. The parameter takes its argument's place and has no name in the debug information; `--warn=unused-parameter` does not report it. |
 | Redefinition of a tag with the same content | Not supported | `redefinition of 'P'` |
 | Storage-class specifiers in compound literals, `(static int[]){ 1 }` | Not supported | `expected an expression, got 'static'` |
 | `()` means `(void)`; K&R definitions removed | Supported | See [Empty parameter lists](#empty-parameter-lists). |
@@ -308,7 +310,7 @@ The language features whose availability depends on the target. The
 targets are described in [Targets](targets.md): "x86-64" covers the ELF,
 EmbLinkOS and Linux triples, "AArch64" covers the ELF, EmbLinkOS and
 Linux triples, and "Cortex-M" covers every `thumb*` triple. Every compile
-for the Windows target also prints the `-Wwindows-abi` warning described
+for the Windows target also prints the `--warn=windows-abi` warning described
 there.
 
 | Feature | x86-64 | x86-64 macOS | x86-64 Windows | AArch64 | Apple arm64 | Cortex-M | RV32 | RV64 | AVR |
@@ -379,7 +381,7 @@ around it is an error (`'case' outside of a switch`).
 ### Empty parameter lists
 
 A function declarator with an empty parameter list, `int f();`, declares
-a function with no parameters, as in C23, whatever `-std=` says. Code
+a function with no parameters, as in C23, whatever `--std=` says. Code
 that relies on the older meaning, "parameters not specified", is refused:
 
 | Code | Diagnostic |
@@ -482,7 +484,7 @@ pointed-to type is not `const`, without a cast, is diagnosed with the
 warning `-Wdiscarded-qualifiers`, which is on by default as in GCC:
 
 ```text
-warning: initialization discards the 'const' qualifier of const char * [-Wdiscarded-qualifiers]
+warning: initialization discards the 'const' qualifier of const char * [--warn=discarded-qualifiers]
 ```
 
 A cast removes `const` without a diagnostic. A `const` object with
@@ -518,7 +520,7 @@ long long f(void) { return HUGE; }    /* returns 0x100000005 */
 
 Where this choice differs from GCC's and Clang's is described in
 [Implementation-defined behavior](implementation-defined.md#structures-unions-enumerations-and-bit-fields).
-`-fshort-enums` is refused (see [Targets](targets.md#data-models)).
+`--enums=short` is refused (see [Targets](targets.md#data-models)).
 
 A value of 2^63 or more, from an `unsigned long long` initializer, is
 that value: `enum { X = 0xffffffffffffffff }` is an `unsigned long`
@@ -543,7 +545,7 @@ none says `extern`, its definition there is an *inline definition*:
 - It provides no external definition. No symbol is defined for it in
   the object.
 - The optimizer may inline its calls. A call that is not inlined, every
-  call at `-O0`, and any use of its address refer to the external
+  call at `--opt=none`, and any use of its address refer to the external
   definition, which is an undefined symbol in this object.
 - Exactly one translation unit of the program must provide the external
   definition. The usual way is a declaration with `extern`, or without
@@ -563,12 +565,12 @@ each unit that uses it has its own copy. A function that is `main`, a
 constructor or destructor, `__attribute__((used))`, or the target of an
 `alias` is always emitted.
 
-GNU89 semantics apply instead with `-fgnu89-inline`, with `-std=c89`,
-`-std=c90`, `-std=iso9899:1990`, `-std=gnu89` or `-std=gnu90`, and for
+GNU89 semantics apply instead with `-fgnu89-inline`, with `--std=c89`,
+`--std=c90`, `--std=iso9899:1990`, `--std=gnu89` or `--std=gnu90`, and for
 a function with `__attribute__((gnu_inline))`. Under them a definition
 that says `inline` alone is an external definition, and one that says
 `extern inline` is used only for inlining and never emitted. See
-[`-fgnu89-inline`](invoking.md#-fgnu89-inline).
+[`-fgnu89-inline`](invoking.md#-fgnu89-inline--fno-gnu89-inline).
 
 Whether a call is inlined is decided by the optimizer; see
 [Optimization](optimization.md).
@@ -803,7 +805,7 @@ declaration that declares no object or function,
 `[[gnu::packed]] struct S { ... };`, applies to nothing and is ignored
 without a diagnostic; put a type attribute after the `struct` keyword.
 
-An attribute EmbCC does not know is ignored with a `-Wattributes`
+An attribute EmbCC does not know is ignored with a `--warn=attributes`
 warning, as for the GNU syntax.
 
 ### Embedding binary data
@@ -849,9 +851,9 @@ language-related declarations they do not provide:
 ## Preprocessor
 
 The preprocessor is integrated in `embcc`; `-E` writes its output. The
-command-line options that control it (`-D`, `-U`, `-I`, `-isystem`, the
+command-line options that control it (`-D`, `-U`, `-I`, `--system-include`, the
 dependency options) are in
-[Invoking EmbCC](invoking.md#preprocessor-options). The GNU directives and
+[Invoking EmbCC](invoking.md#headers-and-macros). The GNU directives and
 operators (`#include_next`, `__has_include_next`, `__has_builtin`,
 `__has_attribute`, `#pragma pack`, ...) are in [Extensions](extensions.md).
 

@@ -877,7 +877,7 @@ static void publish_diagnostics(struct doc *d)
 
     struct sb cmd = { 0, 0, 0 };
     const char *cc = getenv("EMBLS_EMBCC");
-    sb_fmt(&cmd, "%s -fsyntax-only -fdiagnostics-format=json",
+    sb_fmt(&cmd, "%s --syntax-only --diagnostics=json",
            cc && *cc ? cc : "embcc");
     char selfdir[4096] = ".";
     char *slash = strrchr(d->path, '/');

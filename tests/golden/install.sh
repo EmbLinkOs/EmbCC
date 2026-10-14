@@ -78,6 +78,25 @@ for f in embcc.cmake Compiler/EmbCC.cmake Compiler/EmbCC-C.cmake \
         { echo "FAIL: make install left out share/embcc/cmake/$f"; exit 1; }
 done
 
+#    `man embcc`: the page is printed from the option table, so it lists
+#    every EmbCC spelling, and mandoc (where there is one) finds nothing
+#    wrong with the roff.
+man=$stage/usr/local/share/man/man1/embcc.1
+[ -s "$man" ] || { echo "FAIL: no man page at $man"; exit 1; }
+grep -q '^\.TH EMBCC 1 "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"' "$man" || {
+    echo "FAIL: the man page has no dated .TH line:"; head -4 "$man"; exit 1; }
+"$IE" --help=spellings | awk '$1 == "ours" { print $2 }' | while read -r sp; do
+    r=$(printf '%s' "$sp" | sed 's/-/\\-/g')
+    grep -qF "\\fB$r" "$man" || echo "$sp"
+done > "$out/man-missing.txt"
+[ ! -s "$out/man-missing.txt" ] || {
+    echo "FAIL: the man page leaves out:"; cat "$out/man-missing.txt"; exit 1; }
+if command -v mandoc > /dev/null 2>&1; then
+    mandoc -T lint "$man" > "$out/man-lint.txt" 2>&1 || {
+        echo "FAIL: mandoc -T lint:"; cat "$out/man-lint.txt"; exit 1; }
+fi
+echo "make install writes embcc(1), with every option, and it lints clean"
+
 #    The version in the PATH and the version the compiler prints have to
 #    be the same string, or an upgrade silently reads the old version's
 #    headers. src/driver/version.h is the one definition; this is the

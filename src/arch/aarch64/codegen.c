@@ -2341,8 +2341,8 @@ static void gen_func(struct ir_func *fn, struct code *t, struct a64_sites *st,
         if (g_no_fp && (i->flt || i->op == IR_I2F || i->op == IR_F2I ||
                         i->op == IR_F2F))
             diag_fatal(f->file, i->line ? i->line : f->line,
-                       "floating point used under -mgeneral-regs-only "
-                       "(in '%s')", f->name);
+                       "floating point used under %s (in '%s')",
+                       opt_typed("-mgeneral-regs-only"), f->name);
 
         if (a64_i128_ins(i)) {        /* __int128 (before: I2F, F2I) */
             gen_a64_i128(t, sd, i, st);
