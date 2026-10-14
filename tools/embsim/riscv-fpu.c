@@ -26,7 +26,9 @@ static int bias(int d) { return d ? 1023 : 127; }
 static u64 emask(int d) { return d ? 0x7ff : 0xff; }
 static u64 mmask(int d) { return (1ull << mbits(d)) - 1; }
 static int sgn(int d, u64 a) { return (int)(a >> (d ? 63 : 31)) & 1; }
-static u64 expf(int d, u64 a) { return (a >> mbits(d)) & emask(d); }
+/* not `expf`, which is <math.h>'s, and GCC holds a static of that name to
+ * the builtin's type */
+static u64 exp_field(int d, u64 a) { return (a >> mbits(d)) & emask(d); }
 
 static u64 pack(int d, int s, u64 e, u64 m)
 {
@@ -45,7 +47,7 @@ static u64 inf(int d, int s)
 
 static int isnan_(int d, u64 a)
 {
-    return expf(d, a) == emask(d) && (a & mmask(d));
+    return exp_field(d, a) == emask(d) && (a & mmask(d));
 }
 
 static int issnan(int d, u64 a)
@@ -55,7 +57,7 @@ static int issnan(int d, u64 a)
 
 static int isinf_(int d, u64 a)
 {
-    return expf(d, a) == emask(d) && !(a & mmask(d));
+    return exp_field(d, a) == emask(d) && !(a & mmask(d));
 }
 
 static int iszero(int d, u64 a)
@@ -236,7 +238,7 @@ static u64 round128(int d, int s, struct u128 v, int e2, int rm, u32 *fl)
  * value = m * 2^e */
 static void unpack(int d, u64 a, u64 *m, int *e)
 {
-    u64 x = expf(d, a);
+    u64 x = exp_field(d, a);
     *m = a & mmask(d);
     if (x) {
         *m |= 1ull << mbits(d);
@@ -627,7 +629,7 @@ static u64 f_class(int d, u64 a)
         return issnan(d, a) ? 1u << 8 : 1u << 9;
     if (iszero(d, a))
         return s ? 1u << 3 : 1u << 4;
-    if (!expf(d, a))
+    if (!exp_field(d, a))
         return s ? 1u << 2 : 1u << 5;
     return s ? 1u << 1 : 1u << 6;
 }

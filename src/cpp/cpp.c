@@ -1487,9 +1487,9 @@ static int fallthrough_comment(const char *b, const char *e)
     if (e - b == 13 && !memcmp(b, "@fallthrough@", 13)) return 1;
     if (e - b >= 16 && !memcmp(b, "lint -fallthrough", 16)) return 1;
     const char *p = b;
-    if (ci_eat(&p, e, "intentionally ") || ci_eat(&p, e, "intentional ") ||
-        ci_eat(&p, e, "else, ") || ci_eat(&p, e, "else "))
-        ;
+    /* an optional leading word, eaten if there */
+    (void)(ci_eat(&p, e, "intentionally ") || ci_eat(&p, e, "intentional ") ||
+           ci_eat(&p, e, "else, ") || ci_eat(&p, e, "else "));
     if (!ci_eat(&p, e, "fall"))
         return 0;
     if (p < e && (*p | 0x20) == 's' && p + 1 < e && p[1] == ' ')

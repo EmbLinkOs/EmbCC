@@ -23,6 +23,14 @@
 #include "../../elf/write.h"
 #include "../../elf/elf.h"
 
+/* A name into a fixed buffer: cut at cap-1 like every name in this file
+ * (a label is read at most 127 characters long), and always terminated --
+ * strncpy left the last byte as it found it. */
+static void name_cpy(char *dst, size_t cap, const char *src){
+    size_t n=strlen(src); if (n>=cap) n=cap-1;
+    memcpy(dst,src,n); dst[n]=0;
+}
+
 static char *xstrdup(const char *s){ return xstrndup(s, strlen(s)); }
 
 /* c99-clean tokenizer (strtok_r is POSIX): return the next token up to `d`,
@@ -146,14 +154,14 @@ static int parse_oper(struct as *a, int ln, char *t, struct oper *o) {
     }
     if (t[0]=='[') {
         o->kind = OP_MEM;
-        char in[128]; strncpy(in, t+1, sizeof in-1); in[sizeof in-1]=0;
+        char in[128]; name_cpy(in, sizeof in, t+1);
         char *e = strchr(in, ']'); if (e) *e=0;
         char *p = in; while (*p==' ') p++;
         /* RIP-relative: [rel sym] */
         if (!strncmp(p,"rel",3) && (p[3]==' '||p[3]=='\t')) {
             p += 3; while (*p==' '||*p=='\t') p++;
             o->base = RIPREL;
-            strncpy(o->label, p, sizeof o->label - 1);
+            name_cpy(o->label, sizeof o->label, p);
             char *q = o->label + strlen(o->label);
             while (q > o->label && (q[-1]==' '||q[-1]=='\t')) *--q = 0;
             return 0;
@@ -179,7 +187,7 @@ static int parse_oper(struct as *a, int ln, char *t, struct oper *o) {
     int w, r = regnum(t,(int)strlen(t),&w);
     if (r>=0){ o->kind=OP_REG; o->reg=r; o->w=w; return 0; }
     if (t[0]=='-'||t[0]=='+'||t[0]=='~'||isdigit((unsigned char)t[0])){ o->kind=OP_IMM; o->imm=parse_int(t); return 0; }
-    o->kind=OP_LABEL; strncpy(o->label,t,sizeof o->label-1); return 0;
+    o->kind=OP_LABEL; name_cpy(o->label,sizeof o->label,t); return 0;
 }
 
 /* ---- encoding into an item's byte buffer ---- */
@@ -209,7 +217,7 @@ static void imm8(struct item *it,long v){ eb(it,(unsigned)(v&0xff)); }
 /* Record an in-item fixup at the current write position (rel32/abs), then leave
  * `bytes` placeholder zero bytes for the field. */
 static void fixup(struct item *it,const char *sym,int kind,long add,int bytes){
-    it->has_fix=1; it->fix_at=it->n; strncpy(it->fix_sym,sym,sizeof it->fix_sym-1);
+    it->has_fix=1; it->fix_at=it->n; name_cpy(it->fix_sym,sizeof it->fix_sym,sym);
     it->fix_kind=kind; it->fix_add=add;
     for (int i=0;i<bytes;i++) eb(it,0);
 }
@@ -338,7 +346,7 @@ static void encode(struct as *a,int ln,const char *m,struct oper *ops,int no){
     if (!strcmp(m,"jmp")){
         if (no==1 && ops[0].kind==OP_REG){ rex(it,0,0,0,ops[0].reg); eb(it,0xff); modrr(it,4,ops[0].reg); }
         else if (no==1 && ops[0].kind==OP_LABEL){
-            it->kind=IT_JMP; strncpy(it->jsym,ops[0].label,sizeof it->jsym-1);
+            it->kind=IT_JMP; name_cpy(it->jsym,sizeof it->jsym,ops[0].label);
             it->op8=0xeb; it->op32a=0xe9; it->op32b=0;
         } else aerr(a,ln,"bad jmp",NULL);
         return;
@@ -352,7 +360,7 @@ static void encode(struct as *a,int ln,const char *m,struct oper *ops,int no){
     };
     for (unsigned i=0;i<sizeof JCC/sizeof JCC[0];i++) if(!strcmp(m,JCC[i].m)){
         if (no==1 && ops[0].kind==OP_LABEL){
-            it->kind=IT_JMP; strncpy(it->jsym,ops[0].label,sizeof it->jsym-1);
+            it->kind=IT_JMP; name_cpy(it->jsym,sizeof it->jsym,ops[0].label);
             it->op8=JCC[i].s; it->op32a=0x0f; it->op32b=JCC[i].n;
         } else aerr(a,ln,"bad jcc",m);
         return;
@@ -377,7 +385,7 @@ static struct sym *sym_find(struct as *a, const char *nm){
 /* Mangle a `.local` label against the last global (nasm's local-label scope). */
 static void mangle(struct as *a, const char *in, char *out, int cap){ /* fwd-declared */
     if (in[0]=='.' && a->last_global[0]) snprintf(out,cap,"%s%s",a->last_global,in);
-    else { strncpy(out,in,cap-1); out[cap-1]=0; }
+    else name_cpy(out,(size_t)cap,in);
 }
 
 /* A data directive: db/dw/dd/dq with constants or a label (label -> fixup). */
@@ -415,9 +423,9 @@ static void process_line(struct as *a, int ln, char *line){
             char name[128]; int len=(int)(c-line); if(len>127)len=127;
             memcpy(name,line,len); name[len]=0;
             char mg[128]; mangle(a,name,mg,sizeof mg);
-            if (name[0]!='.') { strncpy(a->last_global,name,sizeof a->last_global-1); }
+            if (name[0]!='.') name_cpy(a->last_global,sizeof a->last_global,name);
             struct item *it=new_item(a); it->kind=IT_LABEL;
-            strncpy(it->jsym,mg,sizeof it->jsym-1);
+            name_cpy(it->jsym,sizeof it->jsym,mg);
             struct sym*s=sym_get(a,mg);            /* defined at placement */
             if (s->seq<0) s->seq=a->seqctr++;      /* symtab order = definition point */
             line=sk+1; while(*line==' '||*line=='\t') line++;
@@ -573,7 +581,7 @@ static char **preprocess(struct as *a, const char *text, int *nout){
     struct macro *defining=NULL;
     char *copy=xstrdup(text), *save=copy, *ln;
     while ((ln=split(&save,'\n'))){
-        char buf[512]; strncpy(buf,ln,sizeof buf-1); buf[sizeof buf-1]=0;
+        char buf[512]; name_cpy(buf,sizeof buf,ln);
         strip_comment(buf);
         char *t=buf; while(*t==' '||*t=='\t') t++;
         if (!*t) continue;

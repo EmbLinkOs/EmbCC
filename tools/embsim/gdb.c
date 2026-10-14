@@ -540,7 +540,8 @@ static void monitor(struct gdb *g, const char *hex)
         mon_out(g, line);
     } else {
         snprintf(line, sizeof line,
-                 "embsim: unknown monitor command '%s' (monitor help)\n", cmd);
+                 "embsim: unknown monitor command '%.180s' (monitor help)\n",
+                 cmd);
         mon_out(g, line);
     }
     send(g, "OK");

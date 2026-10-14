@@ -2742,7 +2742,8 @@ static void ctad_from_ctors(struct ctemplate *tm, struct ctad_cand **list)
     struct cty **agg = NULL;
     int nagg = 0, capagg = 0;
     while (cx_kind() != TOK_RBRACE && cx_kind() != TOK_EOF) {
-        int start = cx_pos;
+        /* read again after a longjmp to the setjmp below */
+        volatile int start = cx_pos;
         enum tok_kind k = cx_kind();
         if ((k == TOK_CX_PUBLIC || k == TOK_CX_PRIVATE ||
              k == TOK_CX_PROTECTED) && cx_kind_at(1) == TOK_COLON) {
@@ -8825,6 +8826,55 @@ static void member_template_from_outdef(struct cfunc *f)
     parse_restore(st);
 }
 
+/* One out-of-class definition replayed for f, with the template's
+ * parameters bound to args (member_from_outdef). A partial
+ * specialization's definition that fails its qualifier unwinds to the
+ * setjmp here. A function of its own, so that no local of the caller's
+ * loop lives across the setjmp; st and saved_sf, read after it, are
+ * volatile. */
+static void outdef_replay(struct cfunc *f, struct cclass *inst,
+                          struct ctemplate *t, struct coutdef *o,
+                          struct ctarg *args, int na)
+{
+    struct parse_state *volatile st = parse_save();
+    jmp_buf jb;
+    void *volatile saved_sf = cx_sfinae;
+    if (inst->inst_partial) {
+        if (setjmp(jb)) {
+            parse_restore(st);
+            cx_sfinae = saved_sf;
+            outdef_want = NULL;
+            return;
+        }
+        cx_sfinae = &jb;
+    }
+    cx_scope = tparam_scope(o->params, o->nparams, args, na, t->scope);
+    cx_pos = o->tok;
+    cx_half_gt = 0;
+    cx_pattern = 0;
+    cx_in_targs = 0;
+    cx_curfn = NULL;
+    cx_curblk = NULL;
+    cx_extern_c = 0;
+    if (cx_kind() == TOK_CX_TEMPLATE) {
+        /* a member template's: for one of its specializations, with
+         * the template's own parameters bound to its arguments */
+        if (f->spec_of)
+            member_template_from_outdef(f);
+        /* jb is gone when this returns: it must not stay the boundary
+         * (it did, and a later refusal would have unwound into a frame
+         * that no longer existed) */
+        cx_sfinae = saved_sf;
+        parse_restore(st);
+        return;
+    }
+    outdef_want = f;
+    parse_declaration(1, NULL);
+    outdef_want = NULL;
+    cx_sfinae = saved_sf;
+    parse_restore(st);
+}
+
 /* A class template instance's member that has no definition yet: its
  * out-of-class definition, if the template has one, replayed with the
  * instance's arguments (the qualified declarator then finds the member). */
@@ -8866,39 +8916,7 @@ int member_from_outdef(struct cfunc *f)
             args = inst->inst_bound;
             na = inst->inst_partial->nparams;
         }
-        struct parse_state *st = parse_save();
-        jmp_buf jb;
-        void *saved_sf = cx_sfinae;
-        if (inst->inst_partial) {
-            if (setjmp(jb)) {
-                parse_restore(st);
-                cx_sfinae = saved_sf;
-                outdef_want = NULL;
-                continue;
-            }
-            cx_sfinae = &jb;
-        }
-        cx_scope = tparam_scope(o->params, o->nparams, args, na, t->scope);
-        cx_pos = o->tok;
-        cx_half_gt = 0;
-        cx_pattern = 0;
-        cx_in_targs = 0;
-        cx_curfn = NULL;
-        cx_curblk = NULL;
-        cx_extern_c = 0;
-        if (cx_kind() == TOK_CX_TEMPLATE) {
-            /* a member template's: for one of its specializations, with
-             * the template's own parameters bound to its arguments */
-            if (f->spec_of)
-                member_template_from_outdef(f);
-            parse_restore(st);
-            continue;
-        }
-        outdef_want = f;
-        parse_declaration(1, NULL);
-        outdef_want = NULL;
-        cx_sfinae = saved_sf;
-        parse_restore(st);
+        outdef_replay(f, inst, t, o, args, na);
     }
     if (f->defined)
         f->is_inline = 1;   /* each unit's instance: one function (weak) */

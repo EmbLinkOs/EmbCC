@@ -944,6 +944,23 @@ static int firmware_target(void)
  * librt, -nodefaultlibs too, and -nostartfiles crt1. */
 static int darwin_link(const char *in, const char *exe);
 
+/* embld inside a boundary: its refusals unwind to here (util.h), where
+ * with none they ended the process and left OUT.embcc-tmp.o behind for
+ * every undefined symbol or --rom-limit overflow. A function of its own,
+ * so that no local of the caller lives across the setjmp. */
+static int link_bounded(const char **inputs, int n, const char *exe,
+                        struct link_opts *lo)
+{
+    jmp_buf lb;
+    volatile int lrc = 1;
+    if (setjmp(lb) == 0) {
+        fatal_set_boundary(&lb);
+        lrc = embld_link(inputs, n, exe, lo);
+    }
+    fatal_set_boundary(NULL);
+    return lrc;
+}
+
 static int compile_and_link(const char *in, const char *out)
 {
     if (target_os_get() == TGT_OS_DARWIN)
@@ -1147,19 +1164,7 @@ static int compile_and_link(const char *in, const char *out)
         return 1;
     }
 
-    /* Inside a boundary: embld's refusals unwind to here (util.h), where
-     * with none they ended the process and left OUT.embcc-tmp.o behind
-     * for every undefined symbol or --rom-limit overflow. */
-    {
-        jmp_buf lb;
-        volatile int lrc = 1;
-        if (setjmp(lb) == 0) {
-            fatal_set_boundary(&lb);
-            lrc = embld_link(inputs, n, exe, &lo);
-        }
-        fatal_set_boundary(NULL);
-        rc = lrc;
-    }
+    rc = link_bounded(inputs, n, exe, &lo);
     if (in)
         remove(obj);
     for (int k = 0; k < nfound; k++)
