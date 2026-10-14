@@ -706,7 +706,7 @@ At `-O1` and above, every code generator:
 | AVR | Nine allocation strategies are tried and the shortest code is kept. Not with `-g`, and not in an interrupt handler. | Not in an interrupt handler, not with `-g`; result at most 8 bytes; no argument in a register the epilogue restores. |
 
 On AVR, `-g` at `-O1` and above turns register allocation off entirely. See
-[Debugging](debugging.md#how--g-changes-the-generated-code) for every way
+[Debugging](debugging.md#-g-does-not-change-the-generated-code) for every way
 `-g` changes code.
 
 ### Function alignment

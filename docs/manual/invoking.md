@@ -454,7 +454,7 @@ The default for C++ is equivalent to `-std=gnu++20`.
 
 One C standard changes code generation: `c89`, `c90`, `iso9899:1990`,
 `gnu89` and `gnu90` select GNU89 `inline` semantics, as
-[`-fgnu89-inline`](#-fgnu89-inline) does.
+[`-fgnu89-inline`](#-fgnu89-inline--fno-gnu89-inline) does.
 
 ### `-fgnu89-inline`, `-fno-gnu89-inline`
 
