@@ -59,10 +59,23 @@ build gets byte-identical output whichever spelling it uses.
    `src/driver/compat_gcc.c` should translate GCC's spellings in. That
    includes each target's `-m` lists (`src/arch/*/options.c`).
 
-Done since: a warning ends with the EmbCC option that controls it,
-`[--warn=conversion]` (it was GCC's `[-Wconversion]`). JSON output keeps
-GCC's `"option": "-Wconversion"`, because tools read that format. And
-`--help-warnings` lists `--warn=NAME`.
+Done since:
+- A warning ends with the EmbCC option that controls it,
+  `[--warn=conversion]` (it was GCC's `[-Wconversion]`). JSON output keeps
+  GCC's `"option": "-Wconversion"`, because tools read that format.
+  `--help-warnings` lists `--warn=NAME`.
+- Every message about an option quotes it as the user typed it
+  (`opt_typed` and `opt_said` in `src/driver/util.c`), in the driver and
+  in each target's option file, and suggests EmbCC's spelling. An EmbCC
+  option a target has no use for says so instead of "unknown argument".
+- `-O1` is `--opt=basic`, `-mtune=` is `--tune=`.
+- A warning named on its own wins over `--warn=all` and `--warn=extra`
+  in either order, as in GCC.
+- `embcc --reference=man` prints `embcc(1)` from the table, and
+  `make install` installs it.
+- The manual uses EmbCC's spellings throughout; GCC's appear under each
+  heading, on the Migrating from GCC page, and in what other programs
+  read (embld's own options, the host compiler's flags).
 
 ## The documentation
 
@@ -78,7 +91,8 @@ dependencies). Its sources:
   - and, next, the attributes and builtins.
 
 `embdoc` renders all of it into a static website and checks every link
-and anchor across it; the same tables give `--help` and the man pages.
+and anchor across it; the same tables give `--help` and the man page
+(`embcc --reference=man`).
 
 The manual's structure is EmbCC's: what a firmware engineer does
 (starting, building for a part, fitting in flash, debugging,
@@ -90,5 +104,6 @@ simulating), then the references. The GCC comparisons move to
 
 GitHub Pages for this repository (`emblinkos.github.io/EmbCC`). A
 GitHub Actions workflow builds `embdoc`, checks the links, renders the
-site and deploys it on every push to `main`. The generated pages are
-never committed.
+site and deploys it on every push to `main`. The site is never committed. The
+generated reference pages are: `make reference` writes them, and
+`tests/golden/reference-pages.sh` fails when one is stale.

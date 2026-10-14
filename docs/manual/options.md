@@ -188,7 +188,7 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 |---|---|---|
 | `--help` | this list |  |
 | `--help=gcc` | the other spellings EmbCC accepts: GCC's, and EmbCC's for each |  |
-| `--reference=PAGE` | a reference page in Markdown: options, warnings or targets |  |
+| `--reference=PAGE` | a reference page: options, warnings or targets in Markdown, or the man page |  |
 | `--help=spellings` | every spelling, one per line (for tests and tools) |  |
 | `--help-warnings` | every warning, and the sets |  |
 | `--version` | the version and the default target |  |

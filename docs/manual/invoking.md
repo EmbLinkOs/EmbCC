@@ -41,7 +41,7 @@ embcc why DECISION [SUBJECT] FILE [OPTION...]
                                            explain an optimizer decision
 embcc --version | --help[=gcc] | --help-warnings | --print-target
 embcc --dump-predef | --print-search-dirs | --explain=ID
-embcc --reference=options|warnings|targets
+embcc --reference=options|warnings|targets|man
 embcc --emit-empty-object FILE
 ```
 
@@ -1802,9 +1802,19 @@ this compiler emits for when no `--target=` is given.
 
 ### `--help-warnings`
 
-Print every warning option EmbCC has and the group (`--warn=all` or `--warn=extra`)
-each belongs to, then exit with status 0. The list is reproduced under
-[Warnings and diagnostics](#warnings-and-diagnostics).
+Print every warning option EmbCC has and the set (`--warn=all` or
+`--warn=extra`) each belongs to, then exit with status 0. The
+[warning reference](warnings.md) says what each one diagnoses.
+
+### `--reference=PAGE`
+
+Print a reference page made from the compiler's own tables, then exit.
+`options`, `warnings` and `targets` print the Markdown pages this manual
+includes: the [option reference](options.md), the
+[warning reference](warnings.md) and the [target list](target-list.md).
+`make reference` writes them into `docs/manual/`. `man` prints `embcc(1)`
+in roff, which `make install` installs in `share/man/man1`; it is dated
+by `SOURCE_DATE_EPOCH` when that is set, as reproducible builds ask.
 
 ### `--version`
 

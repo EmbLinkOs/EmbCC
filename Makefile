@@ -840,6 +840,9 @@ install-files:
 	done
 	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake
 	@cp cmake/embcc.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/man/man1
+	@SOURCE_DATE_EPOCH=$$(git log -1 --format=%ct 2>/dev/null || date +%s) \
+	    ./embcc --reference=man > $(DESTDIR)$(PREFIX)/share/man/man1/embcc.1
 	@mkdir -p $(LIBROOT)/include $(LIBROOT)/include/c++ \
 	          $(LIBROOT)/freestanding
 	@cp -R lib/libc/include/. $(LIBROOT)/include/
@@ -865,6 +868,7 @@ install-files:
 	    true; \
 	done
 	@echo "installed: $(DESTDIR)$(PREFIX)/bin/embcc"
+	@echo "           $(DESTDIR)$(PREFIX)/share/man/man1/embcc.1"
 	@echo "           $(LIBROOT)/"
 	@echo "check it with: $(DESTDIR)$(PREFIX)/bin/embcc --print-search-dirs"
 

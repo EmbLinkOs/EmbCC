@@ -79,7 +79,7 @@ static void print_usage(FILE *out)
             " [--link-script=FILE] -o IMAGE   (link)\n"
             "       embcc inspect STAGE SOURCE        (what each stage made)\n"
             "       embcc --version | --help[=gcc] | --explain=ID"
-            " | --reference=options|warnings|targets\n");
+            " | --reference=options|warnings|targets|man\n");
 }
 
 /* Where this target's runtime and C library live, under the library
@@ -4523,6 +4523,17 @@ int main(int argc, char **argv)
             return diag_print_reference(stdout);
         if (strcmp(argv[i], "--reference=targets") == 0)
             return target_print_reference(stdout);
+        if (strcmp(argv[i], "--reference=man") == 0) {
+            /* dated as reproducible builds ask: SOURCE_DATE_EPOCH when
+             * the build sets it (make install does, from git), else now */
+            const char *e = getenv("SOURCE_DATE_EPOCH");
+            time_t when = e && *e ? (time_t)strtoll(e, NULL, 10) : time(NULL);
+            char date[16];
+            if (!strftime(date, sizeof date, "%Y-%m-%d", gmtime(&when)))
+                strcpy(date, "1970-01-01");
+            opts_print_man(stdout, EMBCC_VERSION, date);
+            return 0;
+        }
         if (strcmp(argv[i], "--help=spellings") == 0) {
             opts_print_spellings(stdout);
             return 0;

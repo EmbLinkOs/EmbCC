@@ -13,5 +13,7 @@ void opts_print_help(FILE *out);      /* --help */
 void opts_print_gcc(FILE *out);       /* --help=gcc */
 void opts_print_markdown(FILE *out);  /* --reference=options: the reference */
 void opts_print_spellings(FILE *out); /* --help=spellings: for the tests */
+/* --reference=man: embcc(1), in roff, for `make install` */
+void opts_print_man(FILE *out, const char *version, const char *date);
 
 #endif

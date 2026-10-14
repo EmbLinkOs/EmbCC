@@ -190,7 +190,7 @@ OPT(LINK, "--assembler-arg=", "ARG", "-Wa,%", "pass ARG to the assembler")
 /* ---- asking EmbCC ---------------------------------------------------- */
 OPT(INFO, "--help",         NULL,   NULL,   "this list")
 OPT(INFO, "--help=gcc",     NULL,   NULL,   "the other spellings EmbCC accepts: GCC's, and EmbCC's for each")
-OPT(INFO, "--reference=",   "PAGE", NULL,   "a reference page in Markdown: options, warnings or targets")
+OPT(INFO, "--reference=",   "PAGE", NULL,   "a reference page: options, warnings or targets in Markdown, or the man page")
 OPT(INFO, "--help=spellings", NULL, NULL,   "every spelling, one per line (for tests and tools)")
 OPT(INFO, "--help-warnings", NULL,  NULL,   "every warning, and the sets")
 OPT(INFO, "--version",      NULL,   NULL,   "the version and the default target")
