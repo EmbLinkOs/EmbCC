@@ -34,7 +34,7 @@ EOF
 
 warns() { # flags... -> the warning names raised
     "$EMBCC" --target="$TARGET" "$@" -c "$out/w.c" -o "$out/w.o" 2>&1 |
-        sed -n 's/.*\[-W\([a-z-]*\)\].*/\1/p' | sort -u
+        sed -n 's/.*\[--warn=\([a-z-]*\)\].*/\1/p' | sort -u
 }
 
 # 1. Silent by default: a warning nobody asked for is noise.
@@ -60,7 +60,7 @@ echo "-Wname turns one on; -Wno-name turns one off"
 
 # 4. The name is in the message, and -Werror makes it fatal.
 "$EMBCC" --target="$TARGET" -Wall -c "$out/w.c" -o "$out/w.o" 2>&1 |
-    grep -q "unused variable 'unused_one' \[-Wunused-variable\]" || {
+    grep -q "unused variable 'unused_one' \[--warn=unused-variable\]" || {
     echo "the option is not named in the message"; exit 1; }
 if "$EMBCC" --target="$TARGET" -Wall -Werror -c "$out/w.c" -o "$out/w.o" \
         > "$out/werror.log" 2>&1; then
@@ -186,16 +186,16 @@ EOF
 "$EMBCC" -Wall -Wextra -fsyntax-only "$out/sd.c" > "$out/sd.log" 2>&1
 for w in parentheses shift-count-overflow div-by-zero logical-op type-limits \
          address; do
-    grep -q -- "-W$w" "$out/sd.log" || {
+    grep -q -- "--warn=$w\]" "$out/sd.log" || {
         echo "FAIL: -W$w did not fire on code that needs it:"
         cat "$out/sd.log"; exit 1; }
 done
 # Two of each of the two-sided ones, so a check that only looks at the
 # left operand cannot pass.
-n=$(grep -c -- '-Wparentheses' "$out/sd.log" || true)
+n=$(grep -c -- '--warn=parentheses' "$out/sd.log" || true)
 [ "$n" = 2 ] || { echo "FAIL: -Wparentheses fired $n times, wanted 2 (one
 per operand side)"; cat "$out/sd.log"; exit 1; }
-n=$(grep -c -- '-Wtype-limits' "$out/sd.log" || true)
+n=$(grep -c -- '--warn=type-limits' "$out/sd.log" || true)
 [ "$n" = 2 ] || { echo "FAIL: -Wtype-limits fired $n times, wanted 2"
                   cat "$out/sd.log"; exit 1; }
 echo "six statically-decidable warnings each fire on the code that needs
@@ -403,7 +403,7 @@ void fmt(const char *m) { printf(m); }
 void fmt2(const char *m, int v) { printf(m, v); }
 EOF2
 code_lines() {      # code_lines FILE OPTION: the lines of FILE's -WOPTION
-    grep -o "cs.c:[0-9]*:.*\[-W$2\]" "$1" | cut -d: -f2 | sort -n | tr '\n' ' '
+    grep -o "cs.c:[0-9]*:.*\[--warn=$2\]" "$1" | cut -d: -f2 | sort -n | tr '\n' ' '
 }
 for spec in "undef:2" "strict-prototypes:9" "missing-prototypes:11 15 16 17 27 28" \
             "cast-qual:13" "double-promotion:15" "vla:16" "switch-default:19" \
@@ -447,7 +447,7 @@ EOF2
 for spec in "redundant-decls:2 4" "missing-declarations:5" "nested-externs:6 6"; do
     w=${spec%%:*}; want="${spec#*:} "
     "$EMBCC" --target="$TARGET" -W$w -fsyntax-only "$out/gc.c" 2> "$out/gc-$w.txt" || true
-    got=$(grep -o "gc.c:[0-9]*:.*\[-W$w\]" "$out/gc-$w.txt" | cut -d: -f2 | sort -n | tr '\n' ' ')
+    got=$(grep -o "gc.c:[0-9]*:.*\[--warn=$w\]" "$out/gc-$w.txt" | cut -d: -f2 | sort -n | tr '\n' ' ')
     [ "$got" = "$want" ] || { cat "$out/gc-$w.txt"; echo "FAIL: -W$w at '$got', expected '$want'"; exit 1; }
 done
 # a note follows only its own warning: -Wshadow silenced by a pragma left
@@ -462,7 +462,7 @@ fi
 printf 'const static int a = 1;\nint static b;\nunsigned extern int c;\nlong typedef L;\nstatic inline int f(void) { int register r = a; return r + b; }\nL lg;\nint const static k2 = 4;\ntypedef int T;\nT const static k3 = 5;\n' > "$out/osd.c"
 "$EMBCC" --target="$TARGET" -Wextra -fsyntax-only "$out/osd.c" 2> "$out/osd.txt" ||
     { cat "$out/osd.txt"; echo "FAIL: a storage class after the type was refused"; exit 1; }
-got=$(grep -o "osd.c:[0-9]*:.*\[-Wold-style-declaration\]" "$out/osd.txt" | cut -d: -f2 | tr '\n' ' ')
+got=$(grep -o "osd.c:[0-9]*:.*\[--warn=old-style-declaration\]" "$out/osd.txt" | cut -d: -f2 | tr '\n' ' ')
 [ "$got" = "1 2 3 4 5 7 9 " ] || { cat "$out/osd.txt"; echo "FAIL: -Wold-style-declaration at '$got'"; exit 1; }
 "$EMBCC" --target="$TARGET" -fsyntax-only "$out/osd.c" 2>&1 | grep -q old-style &&
     { echo "FAIL: -Wold-style-declaration without -Wextra"; exit 1; }
@@ -478,11 +478,11 @@ fi
 printf "int a = 'ab';\nint b = 'abcde';\nint c = 'a';\n#if 'ab' != 0x6162\n#error\n#endif\nint d = '\303\251';\nint e = '\\\\xff\\\\xfe';\n" > "$out/mc.c"
 "$EMBCC" --target=x86_64-elf -c "$out/mc.c" -o "$out/mc.o" 2> "$out/mc.txt" ||
     { cat "$out/mc.txt"; echo "FAIL: a multi-character constant was refused"; exit 1; }
-[ "$(grep -c 'mc.c:1:.*multi-character character constant \[-Wmultichar\]' "$out/mc.txt")" = 1 ] &&
+[ "$(grep -c 'mc.c:1:.*multi-character character constant \[--warn=multichar\]' "$out/mc.txt")" = 1 ] &&
     grep -q 'mc.c:2:.*character constant too long for its type' "$out/mc.txt" &&
     [ "$(grep -c warning "$out/mc.txt")" = 5 ] ||   # the #if's 'ab' too
     { cat "$out/mc.txt"; echo "FAIL: -Wmultichar"; exit 1; }
-"$EMBCC" --target=x86_64-elf -Wno-multichar -fsyntax-only "$out/mc.c" 2>&1 | grep -q Wmultichar &&
+"$EMBCC" --target=x86_64-elf -Wno-multichar -fsyntax-only "$out/mc.c" 2>&1 | grep -q multichar &&
     { echo "FAIL: -Wno-multichar"; exit 1; }
 if command -v x86_64-elf-gcc > /dev/null 2>&1 && command -v llvm-objdump > /dev/null 2>&1; then
     x86_64-elf-gcc -c "$out/mc.c" -o "$out/mcg.o" 2> /dev/null

@@ -237,7 +237,7 @@ such constant is reported, as GCC reports it, by `-Wmultichar` (on by
 default), or, past the width of an `int`, by a warning no option controls:
 
 ```text
-embcc: f.c:1:9: warning: multi-character character constant [-Wmultichar]
+embcc: f.c:1:9: warning: multi-character character constant [--warn=multichar]
 embcc: f.c:2:9: warning: character constant too long for its type
 ```
 

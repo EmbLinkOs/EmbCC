@@ -335,13 +335,13 @@ implement, so they are errors:
 request will not happen:
 
 ```text
-warning: __attribute__((error)) is accepted but does nothing here: it makes a CALL to this function a compile error unless the optimizer removes the call, so the diagnostic has to wait until after optimisation and EmbCC issues its own before then; a build-time assertion written with it will not fire [-Wattributes]
+warning: __attribute__((error)) is accepted but does nothing here: it makes a CALL to this function a compile error unless the optimizer removes the call, so the diagnostic has to wait until after optimisation and EmbCC issues its own before then; a build-time assertion written with it will not fire [--warn=attributes]
 ```
 
 An attribute EmbCC does not know is ignored with a warning:
 
 ```text
-warning: attribute 'no_such_attribute' is not one EmbCC knows, and is ignored [-Wattributes]
+warning: attribute 'no_such_attribute' is not one EmbCC knows, and is ignored [--warn=attributes]
 ```
 
 A further set of attributes (`hot`, `cold`, `pure`, `const`, `nonnull`,
@@ -448,7 +448,7 @@ Every compile for `x86_64-windows-gnu` (or its alias
 `-Wno-windows-abi` silences it:
 
 ```text
-embcc: f.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [-Wwindows-abi]
+embcc: f.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [--warn=windows-abi]
 ```
 
 Argument registers, shadow space, by-reference passing of aggregates and

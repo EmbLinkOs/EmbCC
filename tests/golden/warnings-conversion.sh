@@ -17,10 +17,11 @@ out=tests/golden/out/warnings-conversion
 rm -rf "$out"; mkdir -p "$out"
 fail() { echo "FAIL: $*"; exit 1; }
 
-# "LINE OPTION" for every warning of the family, sorted
+# "LINE OPTION" for every warning of the family, sorted -- from EmbCC's
+# output ([--warn=NAME]) and GCC's ([-WNAME]) alike
 pick() {
-    grep 'warning:' | grep -E '\[-W(sign-|float-|arith-)?conversion\]|\[-Woverflow\]' |
-        sed -E 's/^(embcc: )?[^:]*:([0-9]+):[0-9]+: warning: .*\[-W([a-z-]+)\]$/\2 \3/' | sort
+    grep 'warning:' | grep -E '\[(-W|--warn=)((sign-|float-|arith-)?conversion|overflow)\]' |
+        sed -E 's/^(embcc: )?[^:]*:([0-9]+):[0-9]+: warning: .*\[(-W|--warn=)([a-z-]+)\]$/\2 \4/' | sort
 }
 # what the W: annotations promise, filtered to the options given
 want() {
@@ -62,7 +63,7 @@ printf 'typedef unsigned char u8;\nu8 f(u8 b) { return b + b; }\nu8 g(u8 b) { re
 "$EMBCC" --target=x86_64-elf -fsyntax-only -Wconversion "$out/arith.c" 2>&1 | grep -q warning &&
     fail "u8 + u8 into a u8 warned without -Warith-conversion"
 "$EMBCC" --target=x86_64-elf -fsyntax-only -Wconversion -Warith-conversion "$out/arith.c" 2>&1 |
-    grep -q ':2:.*\[-Warith-conversion\]' || fail "-Warith-conversion said nothing about b + b"
+    grep -q ':2:.*\[--warn=arith-conversion\]' || fail "-Warith-conversion said nothing about b + b"
 
 # the widths are the target's: a long is an int on ILP32
 printf 'int f(long l) { return l; }\nint g(long long q) { return q; }\n' > "$out/w.c"

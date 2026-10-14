@@ -249,12 +249,12 @@ C17's value, `201710L`.
 | `auto` type inference | Partial | At block scope only. See [Type inference](#type-inference). |
 | `typeof`, `typeof_unqual` | Partial | Not every expression form. See [Type inference](#type-inference). |
 | Attributes `[[...]]` | Partial | Not in every position. See [Attributes](#attributes). |
-| `[[deprecated]]` | Supported | A use warns: `'g' is deprecated [-Wdeprecated-declarations]`. A message argument is accepted and not printed. |
+| `[[deprecated]]` | Supported | A use warns: `'g' is deprecated [--warn=deprecated-declarations]`. A message argument is accepted and not printed. |
 | `[[fallthrough]]` | Supported | Accepted. EmbCC does not warn about fall-through. |
 | `[[maybe_unused]]` | Supported | Suppresses `-Wunused-variable`, `-Wunused-function` and, on a parameter, `-Wunused-parameter` for the declaration. |
-| `[[nodiscard]]` | Supported | Discarding the result warns: `result of 'f' is discarded, and it is declared warn_unused_result [-Wunused-result]`. A message argument is accepted and not printed. |
+| `[[nodiscard]]` | Supported | Discarding the result warns: `result of 'f' is discarded, and it is declared warn_unused_result [--warn=unused-result]`. A message argument is accepted and not printed. |
 | `[[noreturn]]`, `[[_Noreturn]]` | Supported | |
-| `[[unsequenced]]`, `[[reproducible]]` | Not supported | Ignored with a warning: `attribute 'unsequenced' is not one EmbCC knows, and is ignored [-Wattributes]`. |
+| `[[unsequenced]]`, `[[reproducible]]` | Not supported | Ignored with a warning: `attribute 'unsequenced' is not one EmbCC knows, and is ignored [--warn=attributes]`. |
 | `__has_c_attribute` | Partial | Defined, and evaluates to 0 for every attribute. |
 | `__has_include` | Supported | |
 | `#elifdef`, `#elifndef` | Supported | |
@@ -482,7 +482,7 @@ pointed-to type is not `const`, without a cast, is diagnosed with the
 warning `-Wdiscarded-qualifiers`, which is on by default as in GCC:
 
 ```text
-warning: initialization discards the 'const' qualifier of const char * [-Wdiscarded-qualifiers]
+warning: initialization discards the 'const' qualifier of const char * [--warn=discarded-qualifiers]
 ```
 
 A cast removes `const` without a diagnostic. A `const` object with

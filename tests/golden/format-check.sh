@@ -82,7 +82,7 @@ EOF
 
 lines() {  # lines() <file> -> the line numbers warned about
     "$EMBCC" --target="$TARGET" -Wall -c "$out/$1" -o "$out/t.o" 2>&1 |
-        sed -n "s|.*$1:\([0-9]*\):.*\[-Wformat\].*|\1|p" | sort -un
+        sed -n "s|.*$1:\([0-9]*\):.*\[--warn=format\].*|\1|p" | sort -un
 }
 
 # 1. Silent unless asked: a warning nobody asked for is noise.
@@ -159,7 +159,7 @@ int main()
 }
 EOF
 "$EMBCC" --target="$TARGET" -Wall -x c++ -c "$out/cpp.cc" -o "$out/t.o" 2>&1 |
-    sed -n 's|.*cpp.cc:\([0-9]*\):.*\[-Wformat\].*|\1|p' | sort -un > "$out/cppwarns"
+    sed -n 's|.*cpp.cc:\([0-9]*\):.*\[--warn=format\].*|\1|p' | sort -un > "$out/cppwarns"
 for want in 11 12 13; do
     grep -qx "$want" "$out/cppwarns" ||
         { echo "FAIL: cpp.cc line $want was not reported"; exit 1; }
@@ -192,7 +192,7 @@ EOF
 for tw in avr:"9 10 " thumbv7m-none-eabi:"10 " riscv32-unknown-elf:"10 " x86_64-elf:"9 10 "; do
     t=${tw%%:*} w=${tw#*:}
     "$EMBCC" --target=$t -Wall -c "$out/sizes.c" -o "$out/sizes.o" 2>&1 |
-        sed -n 's|.*sizes.c:\([0-9]*\):.*\[-Wformat\].*|\1|p' | sort -un | tr '\n' ' ' > "$out/sizes-$t"
+        sed -n 's|.*sizes.c:\([0-9]*\):.*\[--warn=format\].*|\1|p' | sort -un | tr '\n' ' ' > "$out/sizes-$t"
     [ "$(cat "$out/sizes-$t")" = "$w" ] ||
         { echo "FAIL: $t reported lines '$(cat "$out/sizes-$t")', not '$w'"; exit 1; }
 done

@@ -19,7 +19,7 @@ SRC
 "$EMBCC" -c "$out/drop.c" -o "$out/drop.o" 2> "$out/drop.err" || {
     echo "FAIL: dropping const is a warning, not an error:"; cat "$out/drop.err"; exit 1; }
 for ctx in initialization argument return; do
-    grep -q "$ctx discards the 'const' qualifier of const char \* \[-Wdiscarded-qualifiers\]" \
+    grep -q "$ctx discards the 'const' qualifier of const char \* \[--warn=discarded-qualifiers\]" \
         "$out/drop.err" || {
         echo "FAIL: no warning for the $ctx:"; cat "$out/drop.err"; exit 1; }
 done

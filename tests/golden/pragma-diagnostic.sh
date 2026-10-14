@@ -50,7 +50,7 @@ CEOF
 "$EMBCC" -Wall -Wextra -c "$out/p.c" -o "$out/p.o" > "$out/p.txt" 2>&1
 rc=$?
 grep -E 'warning:|error:' "$out/p.txt" |
-    sed -En 's|.*/([a-z.]+):([0-9]+)(:[0-9]+)?: ([a-z]+):.*\[-W([a-z-]+)\]|\1:\2 \4 \5|p' \
+    sed -En 's|.*/([a-z.]+):([0-9]+)(:[0-9]+)?: ([a-z]+):.*\[--warn=([a-z-]+)\]|\1:\2 \4 \5|p' \
     > "$out/got.txt"
 cat > "$out/want.txt" <<'TXT'
 p.c:2 warning unused-parameter

@@ -398,7 +398,7 @@ An attribute EmbCC does not know is ignored with a warning, which
 `-Wno-attributes` silences:
 
 ```text
-embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [-Wattributes]
+embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [--warn=attributes]
 ```
 
 ### Function attributes
@@ -648,7 +648,7 @@ because GCC reports a call to such a function only after optimization,
 and EmbCC does not:
 
 ```text
-embcc: e.c:1: warning: __attribute__((error)) is accepted but does nothing here: it makes a CALL to this function a compile error unless the optimizer removes the call, so the diagnostic has to wait until after optimisation and EmbCC issues its own before then; a build-time assertion written with it will not fire [-Wattributes]
+embcc: e.c:1: warning: __attribute__((error)) is accepted but does nothing here: it makes a CALL to this function a compile error unless the optimizer removes the call, so the diagnostic has to wait until after optimisation and EmbCC issues its own before then; a build-time assertion written with it will not fire [--warn=attributes]
 ```
 
 A build-time assertion written with `error` therefore does not fail the

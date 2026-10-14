@@ -52,7 +52,7 @@ The parts are, in order:
 | `area.c:4:16:` | File, line and column. Columns count bytes from 1. The column is omitted when it is not known (some diagnostics are tied to a whole line); the line is omitted when the diagnostic is about the file as a whole. A diagnostic with no file names `<embcc>`. |
 | `error:` | The severity: `error`, `warning` or `note`. |
 | message | What is wrong. |
-| `[-Wname]` | Printed after a diagnostic that a `-W` option controls (a warning, or an error under `-Werror` or `-Werror=name`). `-Wno-name` turns it off. |
+| `[--warn=name]` | Printed after a diagnostic that a warning option controls (a warning, or an error under `--warnings-are-errors` or `--error=name`): the option that turns it on, so `--no-warn=name` turns it off. JSON output names it as GCC does (`"option": "-Wname"`), for the tools that read GCC's format. |
 | `[E0001]` | Printed after a diagnostic that has an [explanation](#t6): `embcc --explain E0001` prints it. |
 
 When the source text of the file is available, the diagnostic is
@@ -538,7 +538,7 @@ silently and has no effect.
 #### `-Werror`
 
 Turn every warning into an error. The diagnostic is printed with
-`error:` instead of `warning:` and keeps its `[-Wname]` tag, and the
+`error:` instead of `warning:` and keeps its `[--warn=name]` tag, and the
 exit status becomes 1. Warnings that no option controls (a macro
 redefinition, `#warning`) are turned into errors too.
 
@@ -676,7 +676,7 @@ int f(void) { return tick == 0; }
 ```
 
 ```text
-embcc: addr.c:2:22: warning: the address of 'tick' is never null, so this is always false -- a call may be missing [-Waddress]
+embcc: addr.c:2:22: warning: the address of 'tick' is never null, so this is always false -- a call may be missing [--warn=address]
   int f(void) { return tick == 0; }
                        ^~~~
 ```
@@ -702,7 +702,7 @@ int odd(void) __attribute__((frobnicate));
 ```
 
 ```text
-embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [-Wattributes]
+embcc: attr.c:1: warning: attribute 'frobnicate' is not one EmbCC knows, and is ignored [--warn=attributes]
   int odd(void) __attribute__((frobnicate));
 ```
 
@@ -740,7 +740,7 @@ unsigned char f(int i, unsigned char b) { b += 1; return i & 0xff; }
 ```
 
 ```text
-embcc: conv.c:1:58: warning: conversion from 'int' to 'unsigned char' may change value [-Wconversion]
+embcc: conv.c:1:58: warning: conversion from 'int' to 'unsigned char' may change value [--warn=conversion]
   unsigned char f(int i, unsigned char b) { b += 1; return i & 0xff; }
                                                            ^
 ```
@@ -781,7 +781,7 @@ cannot hold it either as a signed or as an unsigned value of that width:
 `-Wsign-conversion`. On by default, as in GCC.
 
 ```text
-embcc: o.c:1:19: warning: unsigned conversion from 'int' to 'unsigned char' changes value from '300' to '44' [-Woverflow]
+embcc: o.c:1:19: warning: unsigned conversion from 'int' to 'unsigned char' changes value from '300' to '44' [--warn=overflow]
 ```
 
 #### `-Wdeprecated-declarations`
@@ -797,7 +797,7 @@ int f(void) { return old(); }
 ```
 
 ```text
-embcc: dep.c:2:22: warning: 'old' is deprecated [-Wdeprecated-declarations]
+embcc: dep.c:2:22: warning: 'old' is deprecated [--warn=deprecated-declarations]
   int f(void) { return old(); }
                        ^~~
 ```
@@ -815,7 +815,7 @@ void f(const char *s) { take(s); }
 ```
 
 ```text
-embcc: q.c:2:30: warning: argument discards the 'const' qualifier of const char * [-Wdiscarded-qualifiers]
+embcc: q.c:2:30: warning: argument discards the 'const' qualifier of const char * [--warn=discarded-qualifiers]
   void f(const char *s) { take(s); }
                                ^
 ```
@@ -830,7 +830,7 @@ int f(int x) { return x / 0; }
 ```
 
 ```text
-embcc: div.c:1:23: warning: division by zero [-Wdiv-by-zero]
+embcc: div.c:1:23: warning: division by zero [--warn=div-by-zero]
   int f(int x) { return x / 0; }
                         ^
 ```
@@ -875,7 +875,7 @@ void f(long n) { printf("%d\n", n); }
 ```
 
 ```text
-embcc: fmt.c:2:33: warning: %d reads 4 bytes, but this argument is long, which is 8 [-Wformat]
+embcc: fmt.c:2:33: warning: %d reads 4 bytes, but this argument is long, which is 8 [--warn=format]
   void f(long n) { printf("%d\n", n); }
                                   ^
 ```
@@ -891,7 +891,7 @@ int f(int x) { return x || x; }
 ```
 
 ```text
-embcc: logic.c:1:23: warning: both operands of '||' are the same expression [-Wlogical-op]
+embcc: logic.c:1:23: warning: both operands of '||' are the same expression [--warn=logical-op]
   int f(int x) { return x || x; }
                         ^
 ```
@@ -915,7 +915,7 @@ int g(int c)
 ```
 
 ```text
-embcc: maybe.c:6:12: warning: 'y' may be used uninitialized [-Wmaybe-uninitialized]
+embcc: maybe.c:6:12: warning: 'y' may be used uninitialized [--warn=maybe-uninitialized]
       return y;
              ^
 embcc: maybe.c:3:9: note: 'y' is declared here, with no initializer
@@ -942,7 +942,7 @@ int f(unsigned reg) { return reg & 0x4 == 0; }
 ```
 
 ```text
-embcc: paren.c:1:30: warning: comparison binds tighter than '&' here: this is 'a & (b == c)', not '(a & b) == c' [-Wparentheses]
+embcc: paren.c:1:30: warning: comparison binds tighter than '&' here: this is 'a & (b == c)', not '(a & b) == c' [--warn=parentheses]
   int f(unsigned reg) { return reg & 0x4 == 0; }
                                ^~~
 ```
@@ -972,7 +972,7 @@ int f(int n)
 ```
 
 ```text
-embcc: shadow.c:5:13: warning: declaration of 'total' shadows an earlier one [-Wshadow]
+embcc: shadow.c:5:13: warning: declaration of 'total' shadows an earlier one [--warn=shadow]
           int total = i;
               ^~~~~
 embcc: shadow.c:3:9: note: the one it hides is here
@@ -995,7 +995,7 @@ int f(int x) { return x << 32; }
 ```
 
 ```text
-embcc: shift.c:1:23: warning: shift count 32 is not less than the width of int (32 bits) [-Wshift-count-overflow]
+embcc: shift.c:1:23: warning: shift count 32 is not less than the width of int (32 bits) [--warn=shift-count-overflow]
   int f(int x) { return x << 32; }
                         ^
 ```
@@ -1014,7 +1014,7 @@ int f(int i, unsigned n) { return i < n; }
 ```
 
 ```text
-embcc: sign.c:1:35: warning: comparison between int and unsigned int [-Wsign-compare]
+embcc: sign.c:1:35: warning: comparison between int and unsigned int [--warn=sign-compare]
   int f(int i, unsigned n) { return i < n; }
                                     ^
 ```
@@ -1032,7 +1032,7 @@ int f(unsigned u) { return u < 0; }
 ```
 
 ```text
-embcc: limits.c:1:28: warning: comparison of unsigned int with 0 is always false: it has no negative values [-Wtype-limits]
+embcc: limits.c:1:28: warning: comparison of unsigned int with 0 is always false: it has no negative values [--warn=type-limits]
   int f(unsigned u) { return u < 0; }
                              ^
 ```
@@ -1065,7 +1065,7 @@ int f(int c)
 ```
 
 ```text
-embcc: uninit.c:4:12: warning: 'x' is used uninitialized [-Wuninitialized]
+embcc: uninit.c:4:12: warning: 'x' is used uninitialized [--warn=uninitialized]
       return x + c;
              ^
 embcc: uninit.c:3:9: note: 'x' is declared here, with no initializer
@@ -1092,7 +1092,7 @@ static int helper(int x) { return x; }
 ```
 
 ```text
-embcc: func.c:1: warning: unused function 'helper' [-Wunused-function]
+embcc: func.c:1: warning: unused function 'helper' [--warn=unused-function]
   static int helper(int x) { return x; }
 ```
 
@@ -1110,7 +1110,7 @@ int f(int a, int b) { return a; }
 ```
 
 ```text
-embcc: param.c:1: warning: unused parameter 'b' [-Wunused-parameter]
+embcc: param.c:1: warning: unused parameter 'b' [--warn=unused-parameter]
   int f(int a, int b) { return a; }
 ```
 
@@ -1127,7 +1127,7 @@ void f(void) { must(); }
 ```
 
 ```text
-embcc: result.c:2:16: warning: result of 'must' is discarded, and it is declared warn_unused_result [-Wunused-result]
+embcc: result.c:2:16: warning: result of 'must' is discarded, and it is declared warn_unused_result [--warn=unused-result]
   void f(void) { must(); }
                  ^~~~
 ```
@@ -1148,7 +1148,7 @@ int f(int a)
 ```
 
 ```text
-embcc: var.c:3:9: warning: unused variable 'unused' [-Wunused-variable]
+embcc: var.c:3:9: warning: unused variable 'unused' [--warn=unused-variable]
       int unused;
           ^~~~~~
 ```
@@ -1166,7 +1166,7 @@ for `-fsyntax-only`, `-E` or `-S`. See [Targets](targets.md) for the
 state of the Windows target.
 
 ```text
-embcc: win.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [-Wwindows-abi]
+embcc: win.c: warning: x86_64-windows-gnu is not yet the Microsoft x64 ABI: `long` is 8 bytes and wchar_t 4 (Windows has 4 and 2), and rsi, rdi, xmm6 and xmm7 are not preserved across a call: objects EmbCC compiles agree with each other and with nothing else [--warn=windows-abi]
 ```
 
 ### Warnings no option controls

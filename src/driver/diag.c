@@ -329,8 +329,9 @@ static void render_text(const struct diag *d)
     if (d->col > 0)  fprintf(stderr, ":%d", d->col);
     fprintf(stderr, ":%s %s%s:%s %s%s", cc("\033[0m"), cc(level_sgr(d->level)),
             level_name(d->level), cc("\033[0m"), cc("\033[1m"), d->msg);
+    /* the warning, as EmbCC's option that controls it */
     if (d->option)
-        fprintf(stderr, " [%s]", d->option);
+        fprintf(stderr, " [--warn=%s]", d->option);
     if (d->id)
         fprintf(stderr, " [%s]", d->id);
     fprintf(stderr, "%s\n", cc("\033[0m"));
@@ -403,9 +404,14 @@ static void render_json(FILE *f, const struct diag *d, int indent)
     json_str(f, level_name(d->level));
     fprintf(f, ", \"message\": ");
     json_str(f, d->msg);
+    /* GCC's JSON format, which tools read: its "option" is GCC's
+     * spelling (docs/internals/identity.md: a contract) */
     if (d->option) {
+        char *g = xmalloc(strlen(d->option) + 3);
+        sprintf(g, "-W%s", d->option);
         fprintf(f, ", \"option\": ");
-        json_str(f, d->option);
+        json_str(f, g);
+        free(g);
     }
     if (d->id) {
         fprintf(f, ", \"id\": ");
@@ -1169,7 +1175,8 @@ void diag_warn_at(const char *file, int line, int col, const char *fmt, ...)
 }
 
 /* A warning the option `name` controls: silent unless it is on, and
- * printed with "[-Wname]" so the reader knows which it is. */
+ * printed with "[--warn=name]" so the reader knows which it is and what
+ * turns it off. */
 int diag_warn_opt(const char *file, int line, int col, const char *name,
                   const char *fmt, ...)
 {
@@ -1188,9 +1195,9 @@ int diag_warn_opt(const char *file, int line, int col, const char *name,
     int err = st == 4 ? 1 : st == 3 ? 0 : warn_is_error(name);
     struct diag *d = new_diag(err ? DIAG_ERROR : DIAG_WARNING, file,
                               line, col, msg);
-    /* the option as the reader would type it */
-    char *opt = xmalloc(strlen(name) + 4);
-    sprintf(opt, "-W%s", name);
+    /* the bare name; each printer spells it */
+    char *opt = xmalloc(strlen(name) + 1);
+    strcpy(opt, name);
     d->option = opt;
     if (err)
         check_max_errors();

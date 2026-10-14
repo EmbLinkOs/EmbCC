@@ -58,12 +58,11 @@ build gets byte-identical output whichever spelling it uses.
    them. The loop should read EmbCC's options by id, and
    `src/driver/compat_gcc.c` should translate GCC's spellings in. That
    includes each target's `-m` lists (`src/arch/*/options.c`).
-2. **Diagnostics name EmbCC's options.** A warning ends with
-   `[-Wconversion]`, GCC's form. It should name what turns it off in
-   EmbCC's words. The GCC-referee goldens compare warnings line for line
-   and need to learn the mapping first.
-3. **`--help-warnings`** lists warnings as `-WNAME`; it should use
-   `--warn=NAME`.
+
+Done since: a warning ends with the EmbCC option that controls it,
+`[--warn=conversion]` (it was GCC's `[-Wconversion]`). JSON output keeps
+GCC's `"option": "-Wconversion"`, because tools read that format. And
+`--help-warnings` lists `--warn=NAME`.
 
 ## The documentation
 
