@@ -820,8 +820,9 @@ install-files:
 	        ln -sf $${p#*:} $(DESTDIR)$(PREFIX)/bin/embcc-$${p%%:*}; \
 	    true; \
 	done
-	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake
+	@mkdir -p $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler
 	@cp cmake/embcc.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
+	@cp cmake/Compiler/*.cmake $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/
 	@mkdir -p $(LIBROOT)/include $(LIBROOT)/include/c++ \
 	          $(LIBROOT)/freestanding
 	@cp -R lib/libc/include/. $(LIBROOT)/include/
@@ -879,6 +880,7 @@ uninstall:
 	    rm -f $(DESTDIR)$(PREFIX)/bin/embcc-$${p%%:*}; \
 	done
 	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/embcc.cmake
+	@rm -f $(DESTDIR)$(PREFIX)/share/embcc/cmake/Compiler/EmbCC*.cmake
 	@rm -rf $(LIBROOT)
 	@echo "removed EmbCC $(VERSION) from $(DESTDIR)$(PREFIX)"
 

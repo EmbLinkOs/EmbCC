@@ -188,6 +188,7 @@ printf 'int util(int);\nvolatile int sink;\nvoid _start(void) { for (;;) sink = 
 gen=; command -v ninja > /dev/null 2>&1 && gen="-G Ninja"
 # a source-tree layout, as cmake/embcc.cmake expects to find its tools
 cp "$ROOT/cmake/embcc.cmake" "$out/tree/cmake/"
+cp -R "$ROOT/cmake/Compiler" "$out/tree/cmake/"
 for t in embcc embar embpack embmap; do ln -s "$ROOT/$t" "$out/tree/$t"; done
 ln -s embar "$out/tree/embcc-ranlib"; ln -s embpack "$out/tree/embcc-objcopy"
 ln -s embmap "$out/tree/embcc-size"; ln -s embmap "$out/tree/embcc-nm"
@@ -195,6 +196,14 @@ cmake -S "$P" -B "$out/b1" $gen -DCMAKE_TOOLCHAIN_FILE="$out/tree/cmake/embcc.cm
     -DEMBCC_TARGET=thumbv7em-none-eabi "-DEMBCC_FLAGS=-mcpu=cortex-m4 -Os" \
     > "$out/b1.cfg" 2>&1 || { tail -20 "$out/b1.cfg"; fail "configure with cmake/embcc.cmake"; }
 cmake --build "$out/b1" > "$out/b1.log" 2>&1 || { tail -20 "$out/b1.log"; fail "build with cmake/embcc.cmake"; }
+# CMake knows the compiler: it said "identification is unknown" and used
+# no rules for it (cmake/Compiler/EmbCC-*.cmake)
+for lang in C ASM; do
+    grep -q "The $lang compiler identification is EmbCC [0-9]" "$out/b1.cfg" ||
+        { cat "$out/b1.cfg"; fail "CMake does not identify the $lang compiler as EmbCC"; }
+done
+grep -q 'CMAKE_C_COMPILER_ID:INTERNAL=EmbCC\|CMAKE_C_COMPILER_ID .*EmbCC' "$out/b1/CMakeCache.txt" "$out"/b1/CMakeFiles/*/CMakeCCompiler.cmake 2>/dev/null ||
+    fail "CMAKE_C_COMPILER_ID is not EmbCC"
 [ -s "$out/b1/app.hex" ] || fail "no app.hex from the post-build objcopy"
 grep -q 'text.*data.*bss' "$out/b1.log" || fail "no size table from the post-build size"
 [ "$(machine "$out/b1/app")" = ARM ] || fail "the CMake build made $(machine "$out/b1/app")"

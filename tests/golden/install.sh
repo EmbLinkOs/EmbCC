@@ -71,6 +71,12 @@ stage=$out/stage
     echo "FAIL: make install:"; tail -20 "$out/install.log"; exit 1; }
 IE=$stage/usr/local/bin/embcc
 [ -x "$IE" ] || { echo "FAIL: no installed embcc at $IE"; exit 1; }
+# the CMake toolchain file, and the rules it names the compiler by
+for f in embcc.cmake Compiler/EmbCC.cmake Compiler/EmbCC-C.cmake \
+         Compiler/EmbCC-CXX.cmake Compiler/EmbCC-ASM.cmake; do
+    [ -f "$stage/usr/local/share/embcc/cmake/$f" ] ||
+        { echo "FAIL: make install left out share/embcc/cmake/$f"; exit 1; }
+done
 
 #    The version in the PATH and the version the compiler prints have to
 #    be the same string, or an upgrade silently reads the old version's

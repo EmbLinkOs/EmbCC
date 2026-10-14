@@ -28,7 +28,17 @@ cmake --build build
 
 The file sets:
 
-- the C, C++ and assembler compilers to `embcc`;
+- the C, C++ and assembler compilers to `embcc`, identified to CMake as
+  EmbCC (`The C compiler identification is EmbCC 1.0.0`,
+  `CMAKE_C_COMPILER_ID` is `EmbCC`), with EmbCC's rules beside it in
+  `Compiler/EmbCC-*.cmake`: the flags for each build type (`MinSizeRel`
+  is `-Os`), each `C_STANDARD` and `CXX_STANDARD` (C17 and C++20 when none
+  is set), header dependencies and the archiver. CMake identifies a
+  compiler by building a test file against the compilers it knows, and
+  EmbCC is not one of them, so without this file it says "identification
+  is unknown" and applies no rules for it. `POSITION_INDEPENDENT_CODE` and
+  shared libraries reach EmbCC's refusal (`-fPIC is not supported`)
+  rather than building ordinary code;
 - `CMAKE_SYSTEM_NAME` from the triple: `Generic` for a bare-metal triple
   (CMake's compiler checks then build a static library, not a program),
   `Linux`, `Darwin` or `Windows` otherwise;
@@ -38,6 +48,8 @@ The file sets:
   `embcc-size` and `embcc-nm`;
 - header dependencies: every compile writes a `-MD` dependency file, so
   editing a header rebuilds the sources that include it.
+
+Checked with CMake 3.25, 3.31 and 4.4.
 
 It finds the tools next to itself: in an installation it is in
 `share/embcc/cmake/` and they are in `bin/`; in a source tree it is in
@@ -77,10 +89,11 @@ embcc: error: called as 'bogus-thing-gcc', and 'bogus-thing' is not a target Emb
 multilib toolchain of that name does. The other way round is refused: a
 `riscv32` triple is RV32 only, and so is a hosted one of either width.
 
-One thing a CMake toolchain file must say: the archiver. CMake derives
-`<prefix>-ar` and `<prefix>-ranlib` from the compiler's name only for a
-compiler it identifies as GCC or Clang, and it does not identify EmbCC
-(which does not define `__GNUC__`). It then uses the system `ar`, which on
+One thing a CMake toolchain file written for GCC must say: the archiver.
+CMake derives `<prefix>-ar` and `<prefix>-ranlib` from the compiler's
+name only for a compiler it identifies as GCC or Clang, and through the
+GCC names it does not identify EmbCC (which does not define `__GNUC__`;
+EmbCC's own toolchain file names it instead). It then uses the system `ar`, which on
 Linux handles ELF archives, and on macOS does not: Apple's `ranlib` drops
 the ELF members. So name them, as many arm-none-eabi toolchain files
 already do:

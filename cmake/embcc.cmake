@@ -5,11 +5,12 @@
 #
 # EMBCC_TARGET is any triple `embcc --target=` takes; without it the build
 # is for the compiler's default target. EMBCC_FLAGS are added to every
-# compile and link (a CPU, an FPU, -Os). Everything else a build asks of a
-# toolchain comes from EmbCC too: the archiver (embar, which writes its own
-# symbol index, so there is no ranlib step), objcopy, size and nm (embpack
-# and embmap under binutils' names), and header dependencies (-MD), so
-# that editing a header rebuilds what includes it.
+# compile and link (a CPU, an FPU, -Os). Everything else a build
+# asks of a toolchain comes from EmbCC too: the archiver (embar, which
+# writes its own symbol index, so there is no ranlib step), objcopy, size
+# and nm (embpack and embmap under binutils' names), and header
+# dependencies, so that editing a header rebuilds what includes it. CMake
+# reports the compiler as EmbCC (Compiler/EmbCC-*.cmake).
 #
 # Found next to itself: installed, this file is in share/embcc/cmake and
 # the tools in bin; in a source tree it is in cmake/ and the tools at the
@@ -32,6 +33,22 @@ endif()
 set(CMAKE_C_COMPILER "${_embcc_bin}/embcc")
 set(CMAKE_CXX_COMPILER "${_embcc_bin}/embcc")
 set(CMAKE_ASM_COMPILER "${_embcc_bin}/embcc")
+
+# Which compiler this is. CMake identifies a compiler by building a test
+# file against the compilers it knows, which do not include EmbCC: it said
+# "The C compiler identification is unknown" and used no rules at all for
+# it (and took the C++ side for GCC). EmbCC names itself, and its rules --
+# its flags for each build type and standard, header dependencies, the
+# archiver -- are Compiler/EmbCC-*.cmake beside this file.
+execute_process(COMMAND "${CMAKE_C_COMPILER}" --version
+                OUTPUT_VARIABLE _embcc_version_text ERROR_QUIET)
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" _embcc_version "${_embcc_version_text}")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+foreach(_lang C CXX ASM)
+  set(CMAKE_${_lang}_COMPILER_ID EmbCC)
+  set(CMAKE_${_lang}_COMPILER_ID_RUN TRUE)
+  set(CMAKE_${_lang}_COMPILER_VERSION "${_embcc_version}")
+endforeach()
 
 # The system CMake should think it is building for, from the triple.
 set(_embcc_t "${EMBCC_TARGET}")
@@ -58,14 +75,6 @@ if(EMBCC_TARGET)
 endif()
 foreach(_lang C CXX ASM)
   set(CMAKE_${_lang}_FLAGS_INIT "${_embcc_flags}")
-  # header dependencies, in the form gcc writes them
-  set(CMAKE_DEPFILE_FLAGS_${_lang} "-MD -MT <DEP_TARGET> -MF <DEP_FILE>")
-  set(CMAKE_${_lang}_DEPFILE_FORMAT gcc)
-  set(CMAKE_${_lang}_DEPENDS_USE_COMPILER TRUE)
-  # embar writes the symbol index as it writes the archive
-  set(CMAKE_${_lang}_ARCHIVE_CREATE "<CMAKE_AR> qcs <TARGET> <LINK_FLAGS> <OBJECTS>")
-  set(CMAKE_${_lang}_ARCHIVE_APPEND "<CMAKE_AR> qs <TARGET> <LINK_FLAGS> <OBJECTS>")
-  set(CMAKE_${_lang}_ARCHIVE_FINISH "")
 endforeach()
 set(CMAKE_EXE_LINKER_FLAGS_INIT "${_embcc_flags}")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "${_embcc_flags}")
