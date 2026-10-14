@@ -11,7 +11,9 @@
 # computes. For those the reference is rxref() below: the status each
 # exits with when compiled by rx-elf-gcc 16.2.0 -nofpu -O1, linked with
 # the SAME lib/libc and harness and run on the same board, recorded on
-# 2026-10-07 (there is no RX compiler here to ask each time). That keeps
+# 2026-10-07 (cmp-copy-width, a fuzz program whose checksum mixes doubles,
+# on 2026-10-14, with its own libgcc for the helpers GCC names with a
+# leading underscore; there is no RX compiler here to ask each time). That keeps
 # them in the test, checking something real, rather than skipped.
 #
 # What cannot run here, and why, is listed in na(). Every other program
@@ -72,7 +74,7 @@ na() {
 # the status rx-elf-gcc 16.2.0 -nofpu's code exits with on this board.
 rxref() {
     case $1 in
-    attr-layout|c-extras2|complex|fp-bits|long-double|stdc-version|structs|union-pun-params)
+    attr-layout|c-extras2|cmp-copy-width|complex|fp-bits|long-double|stdc-version|structs|union-pun-params)
         echo 1 ;;
     frontend-gaps|gnu-attr-positions) echo 2 ;;
     float-truth|static-local-init|u64-float) echo 3 ;;
