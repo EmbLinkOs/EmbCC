@@ -88,6 +88,8 @@ OPT(TARGET, "--float-abi=", "ABI",  "-mfloat-abi=%", "soft, softfp or hard")
 OPT(TARGET, "--mcu=",       "PART", "-mmcu=%", "the AVR part: atmega328p, ...")
 OPT(TARGET, "--isa=thumb",  NULL,   "-mthumb", "Thumb instructions (ARM)")
 OPT(TARGET, "--isa=arm",    NULL,   "-marm", "ARM (A32) instructions")
+OPT(TARGET, "--isa=",       "ISA",  "-march=%", "the instruction set: rv32imac, rv64gc, armv7-a, mips32r2, isaa ...")
+OPT(TARGET, "--abi=",       "ABI",  "-mabi=%", "the calling convention: ilp32, ilp32f, lp64d, 32 ...")
 OPT(TARGET, "--cmse",       NULL,   "-mcmse", "Armv8-M Security Extension entry points")
 OPT(TARGET, "--endian=little", NULL, "-mlittle-endian", "little-endian")
 OPT(TARGET, "--endian=big", NULL,   "-mbig-endian", "big-endian")
@@ -160,6 +162,8 @@ OPT(DEBUG, "--stack-usage", NULL,   "-fstack-usage", "write FILE.su: each functi
 OPT(DEBUG, "--call-graph",  NULL,   "-fcallgraph-info", "write FILE.ci: the call graph")
 OPT(DEBUG, "--call-graph=su", NULL, "-fcallgraph-info=su", "...with each function's stack")
 OPT(DEBUG, "--time-report", NULL,   "-ftime-report", "how long each phase took")
+OPT(DEBUG, "--sanitize=",   "LIST", "-fsanitize=%", "checks that trap on undefined behaviour: undefined, ...")
+OPT(DEBUG, "--no-sanitize=", "LIST", "-fno-sanitize=%", "not these checks")
 
 /* ---- dependencies ---------------------------------------------------- */
 OPT(DEPS, "--deps=",        "FILE", "-MMD -MF %", "write the make rule for the user headers to FILE, and compile")

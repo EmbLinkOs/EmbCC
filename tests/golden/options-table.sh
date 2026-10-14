@@ -79,14 +79,16 @@ printf 'int x;\n' > "$out/t.c"
 E=$EMBCC; case $E in /*) ;; *) E=$PWD/$E ;; esac
 awk '$1 == "ours" { o = $2; getline; if ($1 == "alias") print o }' "$out/table.txt" |
 (cd "$out" && while read -r s; do
-    a=$s
-    case $s in                  # a value each accepts
+    a=$s t=x86_64-elf
+    case $s in                  # a value each accepts, and a target
     --keep-temps=) a="${s}obj" ;;
     --pass=|--no-pass=) a="${s}licm" ;;
     --fp-contract=) a="${s}off" ;;
+    --isa=) a="${s}rv32imac" t=riscv32-unknown-elf ;;
+    --abi=) a="${s}ilp32" t=riscv32-unknown-elf ;;
     *=) a="${s}1" ;;
     esac
-    "$E" --target=x86_64-elf --syntax-only "$a" t.c > one.txt 2>&1
+    "$E" --target=$t --syntax-only "$a" t.c > one.txt 2>&1
     grep -q "unknown argument" one.txt && echo "$a" >> unknown.txt
 done)
 [ ! -s "$out/unknown.txt" ] ||

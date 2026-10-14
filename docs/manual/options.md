@@ -68,6 +68,8 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--mcu=PART` | the AVR part: atmega328p, ... | `-mmcu=PART` |
 | `--isa=thumb` | Thumb instructions (ARM) | `-mthumb` |
 | `--isa=arm` | ARM (A32) instructions | `-marm` |
+| `--isa=ISA` | the instruction set: rv32imac, rv64gc, armv7-a, mips32r2, isaa ... | `-march=ISA` |
+| `--abi=ABI` | the calling convention: ilp32, ilp32f, lp64d, 32 ... | `-mabi=ABI` |
 | `--cmse` | Armv8-M Security Extension entry points | `-mcmse` |
 | `--endian=little` | little-endian | `-mlittle-endian` |
 | `--endian=big` | big-endian | `-mbig-endian` |
@@ -149,6 +151,8 @@ EmbCC's own spellings come first. Where GCC spells the same thing differently, i
 | `--call-graph` | write FILE.ci: the call graph | `-fcallgraph-info` |
 | `--call-graph=su` | ...with each function's stack | `-fcallgraph-info=su` |
 | `--time-report` | how long each phase took | `-ftime-report` |
+| `--sanitize=LIST` | checks that trap on undefined behaviour: undefined, ... | `-fsanitize=LIST` |
+| `--no-sanitize=LIST` | not these checks | `-fno-sanitize=LIST` |
 
 ## Dependencies
 
